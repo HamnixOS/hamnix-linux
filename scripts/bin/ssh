@@ -30,7 +30,14 @@ if not net.can_reach(hostname):
 # Write SSH request to special file for play.py to handle
 # Format: username|hostname
 ssh_request = f"{username}|{hostname}\n"
-vfs.write_bytes('/tmp/.ssh_request', ssh_request.encode())
+
+# Create or overwrite the SSH request file
+try:
+    # Try to write to existing file
+    vfs.write_bytes('/tmp/.ssh_request', ssh_request.encode())
+except:
+    # File doesn't exist, create it
+    vfs.create('/tmp/.ssh_request', 0o644, ssh_request)
 
 print(f"Connecting to {hostname}...")
 # Exit with special code 255 to signal SSH request to shell
