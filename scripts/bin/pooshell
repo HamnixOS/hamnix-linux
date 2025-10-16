@@ -181,7 +181,12 @@ while True:
         command_line = input(prompt)
 
         # Execute the command
-        execute_command(command_line)
+        exit_code = execute_command(command_line)
+
+        # Check for special exit code 255 (SSH request)
+        if exit_code == 255:
+            # Exit shell with 255 to signal SSH request to parent
+            exit(255)
 
     except SystemExit:
         # exit() was called
