@@ -1,0 +1,5 @@
+#!/usr/bin/virtualscript
+# pwd - print working directory
+
+print(vfs.getcwd())
+exit(0)

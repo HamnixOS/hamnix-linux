@@ -1,0 +1,35 @@
+#!/usr/bin/virtualscript
+# chmod - change file permissions
+
+if len(args) < 2:
+    error("chmod: missing operand")
+    exit(1)
+
+mode_str = args[0]
+paths = args[1:]
+
+# Parse octal mode (e.g., 755, 644, 4755 for SUID)
+try:
+    new_mode = int(mode_str, 8)
+    if new_mode > 0o7777:
+        error(f"chmod: invalid mode: {mode_str}")
+        exit(1)
+
+    for path in paths:
+        try:
+            # Only root or owner can chmod
+            info = vfs.stat(path)
+            if process.uid != 0 and process.uid != info['uid']:
+                error(f"chmod: {path}: Permission denied")
+                exit(1)
+
+            vfs.chmod(path, new_mode)
+        except:
+            error(f"chmod: {path}: No such file or directory")
+            exit(1)
+
+except ValueError:
+    error(f"chmod: invalid mode: {mode_str}")
+    exit(1)
+
+exit(0)

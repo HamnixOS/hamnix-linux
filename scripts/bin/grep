@@ -1,0 +1,28 @@
+#!/usr/bin/virtualscript
+# grep - search for patterns in text
+
+if len(args) == 0:
+    error("grep: missing pattern")
+    exit(1)
+
+pattern = args[0]
+case_insensitive = '-i' in args
+
+# Read from stdin
+lines = stdin.splitlines()
+matches = []
+
+for line in lines:
+    if case_insensitive:
+        if pattern.lower() in line.lower():
+            matches.append(line)
+    else:
+        if pattern in line:
+            matches.append(line)
+
+if len(matches) > 0:
+    for match in matches:
+        print(match)
+    exit(0)
+else:
+    exit(1)  # No matches

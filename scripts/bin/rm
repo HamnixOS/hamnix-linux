@@ -1,0 +1,20 @@
+#!/usr/bin/virtualscript
+# rm - remove files or directories
+
+if len(args) == 0:
+    error("rm: missing operand")
+    exit(1)
+
+# Parse options
+force = '-f' in args
+paths = [arg for arg in args if not arg.startswith('-')]
+
+for path in paths:
+    try:
+        vfs.unlink(path)
+    except RuntimeError as e:
+        if not force:
+            error(f"rm: cannot remove '{path}'")
+            exit(1)
+
+exit(0)

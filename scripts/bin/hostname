@@ -1,0 +1,11 @@
+#!/usr/bin/virtualscript
+# hostname - print system hostname
+
+# Read from /etc/hostname
+try:
+    hostname = vfs.read('/etc/hostname').strip()
+    print(hostname)
+except:
+    print('localhost')
+
+exit(0)

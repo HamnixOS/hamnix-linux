@@ -1,0 +1,17 @@
+#!/usr/bin/virtualscript
+# cat - concatenate and display files
+
+if len(args) == 0:
+    # No arguments, print stdin
+    print(stdin, end='')
+else:
+    # Read and print each file
+    for filepath in args:
+        try:
+            content = vfs.read(filepath)
+            print(content, end='')
+        except RuntimeError as e:
+            error(f"cat: {filepath}: No such file or directory")
+            exit(1)
+
+exit(0)

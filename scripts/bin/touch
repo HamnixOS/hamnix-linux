@@ -1,0 +1,21 @@
+#!/usr/bin/virtualscript
+# touch - create empty files or update timestamps
+
+if len(args) == 0:
+    error("touch: missing operand")
+    exit(1)
+
+for path in args:
+    try:
+        if vfs.exists(path):
+            # File exists - would update timestamp, but VFS doesn't expose that easily
+            # For now, just succeed
+            pass
+        else:
+            # Create new empty file
+            vfs.create(path, 0o644, "")
+    except RuntimeError as e:
+        error(f"touch: cannot touch '{path}'")
+        exit(1)
+
+exit(0)

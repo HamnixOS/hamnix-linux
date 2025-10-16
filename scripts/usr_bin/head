@@ -1,0 +1,37 @@
+#!/usr/bin/virtualscript
+# head - output the first part of files
+
+# Parse options
+num_lines = 10
+files = []
+i = 0
+while i < len(args):
+    if args[i] == '-n' and i + 1 < len(args):
+        num_lines = int(args[i + 1])
+        i += 2
+    elif not args[i].startswith('-'):
+        files.append(args[i])
+        i += 1
+    else:
+        i += 1
+
+if len(files) == 0:
+    # Read from stdin
+    lines = stdin.splitlines()
+    for line in lines[:num_lines]:
+        print(line)
+else:
+    # Read from files
+    for filepath in files:
+        try:
+            content = vfs.read(filepath)
+            lines = content.splitlines()
+            if len(files) > 1:
+                print(f"==> {filepath} <==")
+            for line in lines[:num_lines]:
+                print(line)
+        except:
+            error(f"head: {filepath}: No such file or directory")
+            exit(1)
+
+exit(0)

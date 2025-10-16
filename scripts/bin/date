@@ -1,0 +1,6 @@
+#!/usr/bin/virtualscript
+# date - print current date and time
+
+current_time = format_time(time(), '%a %b %d %H:%M:%S %Z %Y')
+print(current_time)
+exit(0)

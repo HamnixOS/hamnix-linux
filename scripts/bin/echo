@@ -1,0 +1,5 @@
+#!/usr/bin/virtualscript
+# echo - print arguments
+
+print(' '.join(args))
+exit(0)
