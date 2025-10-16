@@ -188,9 +188,9 @@ while True:
             # Exit shell with 255 to signal SSH request to parent
             exit(255)
 
-    except SystemExit:
-        # exit() was called
-        break
+    except SystemExit as e:
+        # exit() was called - re-raise to preserve exit code
+        raise
     except KeyboardInterrupt:
         # Ctrl+C pressed
         print()
