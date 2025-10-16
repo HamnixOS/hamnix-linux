@@ -282,7 +282,8 @@ routes = load_routing_table()
 print(f"[netd] Loaded {len(routes)} routes")
 
 # Main packet processing loop
-print("[netd] Entering main loop...")
+print("[netd] Entering packet processing loop...")
+print("[netd] Press Ctrl+C to stop (not recommended - routing will stop!)")
 packet_count = 0
 
 while True:
@@ -299,11 +300,17 @@ while True:
                 packet_count += 1
                 route_packet(packet, iface_name)
 
+                # Log every 100 packets
+                if packet_count % 100 == 0:
+                    print(f"[netd] Processed {packet_count} packets")
+
         except Exception as e:
-            # Error reading from interface
-            pass
+            # Error reading from interface - log but continue
+            if packet_count % 1000 == 0:  # Don't spam errors
+                print(f"[netd] Error on {iface_name}: {e}")
 
     # Small delay to avoid burning CPU
+    # In a real system, this would use select() or epoll()
     time_sleep(0.01)
 
-# This daemon runs forever
+# This daemon runs forever - should never reach here
