@@ -1,0 +1,57 @@
+#!/usr/bin/pooscript
+# ping - send ICMP ECHO_REQUEST to network hosts
+
+if len(args) == 0:
+    error("ping: usage: ping [-c count] destination")
+    exit(1)
+
+# Parse options
+count = 4  # default count
+target = None
+i = 0
+while i < len(args):
+    arg = args[i]
+    if arg == '-c' and i + 1 < len(args):
+        count = int(args[i + 1])
+        i += 2
+    else:
+        target = arg
+        i += 1
+
+if not target:
+    error("ping: usage: ping [-c count] destination")
+    exit(1)
+
+# Get network interface
+net = process.get_network()
+if not net:
+    error(f"ping: connect: Network is unreachable")
+    exit(1)
+
+# Get our IP
+local_ip = net.get_local_ip()
+
+print(f"PING {target} 56(84) bytes of data.")
+
+# Simulate ping
+success_count = 0
+for i in range(count):
+    # Check if we can reach the target
+    reachable = net.can_reach(target)
+
+    if reachable:
+        # Simulate ping time (varies based on sequence number for pseudo-randomness)
+        ping_time = 0.5 + ((i * 137) % 100) / 100.0
+        print(f"64 bytes from {target}: icmp_seq={i+1} ttl=64 time={ping_time:.1f} ms")
+        success_count += 1
+        time_sleep(1)
+    else:
+        print(f"From {local_ip} icmp_seq={i+1} Destination Host Unreachable")
+        time_sleep(1)
+
+# Print statistics
+print(f"\n--- {target} ping statistics ---")
+packet_loss = 0 if count == 0 else int(100 * (count - success_count) / count)
+print(f"{count} packets transmitted, {success_count} received, {packet_loss}% packet loss")
+
+exit(0 if success_count > 0 else 1)

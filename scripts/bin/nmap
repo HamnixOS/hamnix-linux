@@ -1,0 +1,71 @@
+#!/usr/bin/pooscript
+# nmap - Network exploration tool and security scanner
+
+if len(args) == 0:
+    error("nmap: No targets specified")
+    exit(1)
+
+# Get network interface
+net = process.get_network()
+if not net:
+    error("nmap: Network is unreachable")
+    exit(1)
+
+target = args[0]
+
+# Check if target is a subnet scan
+if target.endswith('/24'):
+    # Subnet scan
+    print(f"Starting Nmap scan on {target}")
+    print()
+
+    hosts = net.scan_network(target)
+    if len(hosts) == 0:
+        print("Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn")
+        exit(0)
+
+    print(f"Nmap scan report - {len(hosts)} hosts up")
+    print()
+    for host in hosts:
+        print(f"Host: {host}")
+
+else:
+    # Single host port scan
+    print(f"Starting Nmap 7.01 ( https://nmap.org )")
+    print(f"Nmap scan report for {target}")
+
+    # Check if host is reachable
+    if not net.can_reach(target):
+        print("Host seems down. If it is really up, but blocking our ping probes, try -Pn")
+        print("Nmap done: 1 IP address (0 hosts up) scanned")
+        exit(0)
+
+    print(f"Host is up (0.00052s latency).")
+    print()
+
+    # Scan ports
+    ports = net.port_scan(target)
+
+    if len(ports) == 0:
+        print("All 1000 scanned ports on {target} are filtered")
+    else:
+        print("PORT     STATE SERVICE")
+        port_map = {
+            22: 'ssh',
+            80: 'http',
+            443: 'https',
+            3306: 'mysql',
+            5432: 'postgresql',
+            6379: 'redis',
+            8080: 'http-proxy',
+            27017: 'mongodb'
+        }
+
+        for port in sorted(ports)[:20]:  # Limit to 20 for display
+            service = port_map.get(port, 'unknown')
+            print(f"{port}/tcp  open  {service}")
+
+    print()
+    print(f"Nmap done: 1 IP address (1 host up) scanned")
+
+exit(0)
