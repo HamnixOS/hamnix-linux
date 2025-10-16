@@ -1,24 +1,11 @@
 #!/usr/bin/pooscript
 # lynx - text-based web browser for BBS systems
 
+# If no arguments, show default page
 if len(args) == 0:
-    print("Lynx - Text-based Web Browser")
-    print("")
-    print("Usage: lynx <hostname or url>")
-    print("")
-    print("Available BBS Systems:")
-    print("  bbs.cyberspace.net    - CyberSpace BBS")
-    print("  underground.bbs       - The Underground")
-    print("  megacorp.bbs          - MegaCorp Internal BBS")
-    print("  vax.university.edu    - University VAX")
-    print("  nexus.unknown         - The Nexus")
-    print("")
-    print("Examples:")
-    print("  lynx bbs.cyberspace.net")
-    print("  lynx news.poo")
-    exit(0)
-
-url = args[0]
+    url = "default"
+else:
+    url = args[0]
 
 # Map hostnames to website files
 hostname_map = {

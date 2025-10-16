@@ -1,0 +1,128 @@
+╔═══════════════════════════════════════════════════════════════════╗
+║                 MISSION 06: THE CREDIT HEIST                      ║
+║                      Difficulty: MEDIUM                           ║
+║                   [CORPORATE ESPIONAGE]                           ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+BRIEFING:
+────────
+CyberMart is the Internet's biggest online shopping site. Thousands
+of customers trust them with their credit card information daily.
+
+Your mission: Infiltrate their systems and extract customer credit
+card data. A contact on the dark net is willing to pay big money
+for fresh CC numbers.
+
+But be careful - this crosses a line. You're not just exploring now.
+You're stealing. And if caught, the consequences are real.
+
+OBJECTIVES:
+──────────
+1. Locate CyberMart's server (scan 192.168.5.0/24)
+2. Gain access to shopserv.cybermart.com
+3. Find the customer database
+4. Extract credit card numbers
+5. (Optional) Cover your tracks in the logs
+
+TARGET INFORMATION:
+──────────────────
+Company: CyberMart Online Shopping
+Website: cybermart.com (browse with lynx)
+Server: shopserv.cybermart.com (find the IP with nmap)
+Database: Customer payment information
+Security: Moderate (they think 40-bit encryption is "secure")
+
+INTEL:
+─────
+• CyberMart has been careless with security
+• Admin credentials may be weak/default
+• Customer database likely in /shop/customers/
+• Payment records in /shop/payments/
+• 12 active customers shopping right now
+• Credit cards stored in plaintext (security through obscurity)
+• Admin notes visible on the public site (sloppy!)
+
+RECONNAISSANCE:
+──────────────
+Start by browsing their site:
+  lynx cybermart.com
+
+Look for:
+  • Admin notes
+  • System information
+  • Database locations
+  • Default credentials
+  • IP addresses
+
+KNOWN VULNERABILITIES:
+─────────────────────
+• Default admin password not changed
+• Sensitive data in world-readable files
+• Customer CC data stored unencrypted
+• Admin credentials visible on public site
+• No proper access logging
+
+APPROACH:
+────────
+1. Browse cybermart.com with lynx (recon)
+2. Note any admin credentials or system info
+3. Scan network to find their server IP
+4. SSH into the server with found credentials
+5. Navigate to /shop/customers/
+6. Read database files
+7. Extract CC numbers
+8. (Optional) Edit /var/log/auth.log to remove traces
+
+SAMPLE TARGET DATA:
+──────────────────
+Customer: Jennifer Martinez
+Card: Visa **** **** **** 4532
+Full: 4532 8891 2234 4532
+Exp: 08/92
+CVV: 847
+
+Customer: Robert Kim
+Card: MasterCard **** **** **** 9012
+Full: 5412 3456 7890 9012
+Exp: 03/93
+CVV: 332
+
+...and dozens more in the database.
+
+MORAL DILEMMA:
+─────────────
+This mission involves stealing real credit card numbers.
+These are regular people - Jenny shopping for Christmas,
+Robert buying textbooks, Lisa getting gifts.
+
+You could:
+  A) Complete the mission (steal the data)
+  B) Report the vulnerability to CyberMart
+  C) Do nothing and move on
+
+The choice is yours. But remember: The Nexus is watching.
+And so is the government.
+
+REWARD:
+──────
+• Access to underground payment networks
+• Reputation in hacker community
+• Money (if you sell the data)
+• Or... a clean conscience (if you don't)
+
+LEGAL WARNING:
+─────────────
+⚠️  This is ILLEGAL. Computer Fraud and Abuse Act applies.
+⚠️  Credit card theft is a FEDERAL CRIME.
+⚠️  You WILL be prosecuted if caught.
+⚠️  Law enforcement monitors these activities.
+
+In the game, this is educational. In real life, this is prison.
+
+────────────────────────────────────────────────────────────────────
+
+"With great power comes great responsibility... and temptation."
+
+Will you cross the line? Or walk away?
+
+The network remembers every choice.
