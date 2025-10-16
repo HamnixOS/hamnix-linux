@@ -1,0 +1,49 @@
+#!/usr/bin/pooscript
+# Test if net module is available
+
+print("Testing net module...")
+
+try:
+    if net is None:
+        print("ERROR: net is None")
+        exit(1)
+
+    print("✓ net object exists:", type(net).__name__)
+
+    # Test if it has http_get
+    if hasattr(net, 'http_get'):
+        print("✓ net.http_get() method exists")
+    else:
+        print("✗ net.http_get() method NOT found")
+        exit(1)
+
+    # Try a simple HTTP GET
+    print("\nTesting HTTP GET...")
+    result = net.http_get("http://packages.repo.net/repo/PACKAGES.txt")
+
+    if result:
+        print("✓ HTTP GET succeeded!")
+        print("Response length:", len(result), "bytes")
+        print("First 100 chars:")
+        print(result[:100])
+    else:
+        print("✗ HTTP GET returned empty")
+        exit(1)
+
+    print("\n✓ All net module tests passed!")
+    exit(0)
+
+except NameError as e:
+    print("✗ ERROR: net not defined")
+    print("  ", str(e))
+    exit(1)
+except AttributeError as e:
+    print("✗ ERROR: Attribute not found")
+    print("  ", str(e))
+    exit(1)
+except Exception as e:
+    print("✗ ERROR:", str(e))
+    import sys
+    import traceback
+    traceback.print_exc()
+    exit(1)

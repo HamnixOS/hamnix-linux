@@ -1,0 +1,65 @@
+#!/usr/bin/pooscript
+# Simple test of pooget basics
+
+print("Testing basic pooget functionality...")
+
+# Test 1: Can we access args?
+print("\nTest 1: args")
+print("  args =", args)
+print("  len(args) =", len(args))
+
+# Test 2: Can we access vfs?
+print("\nTest 2: vfs")
+try:
+    if vfs.exists("/bin/pooget"):
+        print("  ✓ /bin/pooget exists")
+    else:
+        print("  ✗ /bin/pooget not found")
+except Exception as e:
+    print("  ✗ Error:", e)
+
+# Test 3: Can we access net?
+print("\nTest 3: net module")
+try:
+    print("  net =", net)
+    if net is None:
+        print("  ✗ net is None!")
+    else:
+        print("  ✓ net exists")
+        print("  ✓ type:", type(net).__name__)
+except NameError:
+    print("  ✗ net not defined!")
+except Exception as e:
+    print("  ✗ Error:", e)
+
+# Test 4: Try to create directory
+print("\nTest 4: Create /var/lib/pooget")
+try:
+    if not vfs.exists("/var/lib"):
+        vfs.mkdir("/var/lib", 0o755)
+        print("  Created /var/lib")
+
+    if not vfs.exists("/var/lib/pooget"):
+        vfs.mkdir("/var/lib/pooget", 0o755)
+        print("  ✓ Created /var/lib/pooget")
+    else:
+        print("  ✓ /var/lib/pooget already exists")
+except Exception as e:
+    print("  ✗ Error:", e)
+
+# Test 5: Try to print help
+print("\nTest 5: Print help text")
+try:
+    print("""Usage: pooget <command> [options]
+
+Commands:
+  install <package>   - Install a package
+  remove <package>    - Remove a package
+  update              - Update package list
+""")
+    print("  ✓ Help text printed")
+except Exception as e:
+    print("  ✗ Error:", e)
+
+print("\n✓ Basic tests complete")
+exit(0)
