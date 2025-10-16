@@ -1,71 +1,197 @@
 #!/usr/bin/pooscript
-# sh - simple shell
-# Processes one command at a time, maintaining state in the process
+# pooshell - The Poodillion Interactive Shell
+# A real shell with REPL, history, tab completion, and state management
 
-# Get the command line to execute
-if len(args) == 0 or args[0] != '-c':
-    error("sh: Usage: sh -c 'command'")
-    exit(1)
+# Command history
+history = []
 
-if len(args) < 2:
-    error("sh: -c requires an argument")
-    exit(1)
+# Get username and hostname for prompt
+username = 'unknown'
+try:
+    # Try to read from environment or use UID
+    username = env.get('USER', 'user')
+    if username == 'user' and process.uid == 0:
+        username = 'root'
+except:
+    pass
 
-# The command to execute
-command_line = args[1]
+hostname = env.get('HOSTNAME', 'poodillion')
 
-# Trim whitespace
-command_line = command_line.strip()
+def get_prompt():
+    """Generate the shell prompt"""
+    # Get current working directory
+    cwd = process.getcwd_path()
 
-# Empty command
-if not command_line:
-    exit(0)
+    # Replace home directory with ~
+    home = env.get('HOME', '/root')
+    if cwd.startswith(home):
+        cwd = '~' + cwd[len(home):]
 
-# Parse command into parts
-parts = command_line.split()
-if not parts:
-    exit(0)
+    # Use # for root, $ for others
+    prompt_char = '#' if process.uid == 0 else '$'
 
-cmd = parts[0]
-cmd_args = parts[1:] if len(parts) > 1 else []
+    return f"{username}@{hostname}:{cwd}{prompt_char} "
 
-# Handle built-in commands
-if cmd == 'cd':
-    # Change directory
-    if len(cmd_args) == 0:
-        # cd with no args goes to HOME
-        target = env.get('HOME', '/')
-    else:
-        target = cmd_args[0]
+def tab_complete(partial_cmd):
+    """Simple tab completion for commands and paths"""
+    # Split into tokens
+    tokens = partial_cmd.split()
 
-    try:
-        process.chdir(target)
-        exit(0)
-    except RuntimeError as e:
-        error(f"cd: {target}: No such file or directory")
-        exit(1)
+    if len(tokens) == 0:
+        return []
 
-elif cmd == 'exit':
-    # Exit shell
-    code = 0
-    if len(cmd_args) > 0:
+    # If first token (command name), complete from /bin
+    if len(tokens) == 1:
+        prefix = tokens[0]
+        completions = []
+
+        # Search /bin for matching commands
         try:
-            code = int(cmd_args[0])
+            bins = vfs.list('/bin')
+            for cmd in bins:
+                if cmd.startswith(prefix):
+                    completions.append(cmd)
         except:
-            code = 1
-    exit(code)
+            pass
 
-elif cmd == 'export':
-    # Set environment variable (simplified)
-    if len(cmd_args) > 0 and '=' in cmd_args[0]:
-        var, value = cmd_args[0].split('=', 1)
-        env[var] = value
-    exit(0)
+        return completions
+    else:
+        # File/path completion
+        partial_path = tokens[-1]
 
-else:
-    # Execute external command
-    exit_code, stdout_str, stderr_str = process.execute(command_line)
-    print(stdout_str, end='')
-    if stderr_str:
-        error(stderr_str, end='')
-    exit(exit_code)
+        # Determine directory to search
+        if '/' in partial_path:
+            dir_part = dirname(partial_path)
+            file_part = basename(partial_path)
+        else:
+            dir_part = '.'
+            file_part = partial_path
+
+        completions = []
+        try:
+            entries = vfs.list(dir_part)
+            for entry in entries:
+                if entry.startswith(file_part):
+                    if dir_part == '.':
+                        completions.append(entry)
+                    else:
+                        completions.append(join_path(dir_part, entry))
+        except:
+            pass
+
+        return completions
+
+def execute_command(command_line):
+    """Execute a single command"""
+    # Trim whitespace
+    command_line = command_line.strip()
+
+    # Empty command
+    if not command_line:
+        return 0
+
+    # Add to history
+    history.append(command_line)
+
+    # Parse command into parts (simple parsing for now)
+    parts = command_line.split()
+    if not parts:
+        return 0
+
+    cmd = parts[0]
+    cmd_args = parts[1:] if len(parts) > 1 else []
+
+    # Handle built-in commands
+    if cmd == 'exit':
+        # Exit shell
+        code = 0
+        if len(cmd_args) > 0:
+            try:
+                code = int(cmd_args[0])
+            except:
+                code = 1
+        exit(code)
+
+    elif cmd == 'cd':
+        # Change directory
+        if len(cmd_args) == 0:
+            # cd with no args goes to HOME
+            target = env.get('HOME', '/')
+        else:
+            target = cmd_args[0]
+
+        try:
+            process.chdir(target)
+            return 0
+        except RuntimeError as e:
+            error(f"cd: {target}: No such file or directory")
+            return 1
+
+    elif cmd == 'export':
+        # Set environment variable
+        if len(cmd_args) > 0 and '=' in cmd_args[0]:
+            var, value = cmd_args[0].split('=', 1)
+            env[var] = value
+        return 0
+
+    elif cmd == 'history':
+        # Show command history
+        for i, hist_cmd in enumerate(history, 1):
+            print(f"{i:5}  {hist_cmd}")
+        return 0
+
+    elif cmd == 'help':
+        # Show help
+        print("""
+pooshell - The Poodillion Interactive Shell
+
+Built-in commands:
+  cd [dir]       Change directory
+  exit [code]    Exit the shell
+  export VAR=val Set environment variable
+  history        Show command history
+  help           Show this help message
+
+All other commands are executed from $PATH.
+Try 'ls /bin' to see available commands.
+
+This shell and all commands are written in PooScript!
+Use 'cat /bin/pooshell' to see this shell's source code.
+""")
+        return 0
+
+    else:
+        # Execute external command
+        try:
+            exit_code, stdout_str, stderr_str = process.execute(command_line)
+            print(stdout_str, end='')
+            if stderr_str:
+                error(stderr_str, end='')
+            return exit_code
+        except RuntimeError as e:
+            error(f"{cmd}: {e}")
+            return 127
+
+# Main interactive loop
+print("Type 'help' for available commands, 'exit' to quit")
+print()
+
+while True:
+    try:
+        # Display prompt and read command
+        prompt = get_prompt()
+        command_line = input(prompt)
+
+        # Execute the command
+        execute_command(command_line)
+
+    except SystemExit:
+        # exit() was called
+        break
+    except KeyboardInterrupt:
+        # Ctrl+C pressed
+        print()
+        continue
+    except Exception as e:
+        error(f"pooshell: {e}")
+        continue
