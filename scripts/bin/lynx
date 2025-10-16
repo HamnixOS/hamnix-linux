@@ -19,21 +19,6 @@ else:
         hostname = url
         url_path = '/'
 
-# Map common hostnames to IPs (like DNS)
-dns_map = {
-    'bbs.cyberspace.net': '192.168.1.10',
-    'underground.bbs': '192.168.1.11',
-    'megacorp.bbs': '192.168.2.50',
-    'vax.university.edu': '192.168.3.100',
-    'nexus.unknown': '192.168.99.1',
-    'research.facility.gov': '192.168.4.66',
-    'cybermart.com': '192.168.5.100',
-    'shopserv.cybermart.com': '192.168.5.100',
-}
-
-# Resolve hostname to IP
-target_ip = dns_map.get(hostname, hostname)
-
 # Get network interface
 net = process.get_network()
 if not net:
@@ -43,115 +28,43 @@ if not net:
     print("Make sure you're connected to the network.")
     exit(1)
 
-# Check if we can reach the target
-if not net.can_reach(target_ip):
-    error(f"lynx: Unable to connect to {hostname}")
-    print("")
-    print(f"Host {hostname} ({target_ip}) is not reachable.")
-    print("")
-    print("Try:")
-    print("  nmap <subnet>     - Scan for available hosts")
-    print("  ping <host>       - Check if host is alive")
-    exit(1)
+# Build full URL for http_get
+full_url = f"http://{hostname}{url_path}"
 
-# ============================================================================
-# CONNECT TO REMOTE WEB SERVER
-# ============================================================================
-
-print(f"Connecting to {hostname} ({target_ip})...")
+print(f"Connecting to {hostname}...")
 print(f"Requesting: {url_path}")
 print("")
 
-# Use SSH to connect to remote server and run http-get
-# This simulates HTTP protocol over the network
+# Use network HTTP GET
 try:
-    # Create SSH-like request to execute http-get on remote system
-    # In the game, we simulate this by writing to a temp file that play.py reads
+    content = net.http_get(full_url)
 
-    # For now, use a simpler approach: just read from local /www/
-    # TODO: Later, implement actual remote execution via SSH mechanism
-
-    # Check if URL resolves to a local file (fallback for localhost)
-    local_ip = net.get_local_ip()
-
-    if target_ip == local_ip or target_ip == '127.0.0.1':
-        # Local request - just read from local /www/
-        hostname_map = {
-            'bbs.cyberspace.net': 'bbs_main',
-            'underground.bbs': 'bbs_underground',
-            'megacorp.bbs': 'bbs_corp',
-            'vax.university.edu': 'bbs_university',
-            'nexus.unknown': 'bbs_nexus',
-            'research.facility.gov': 'bbs_research',
-        }
-
-        # Check if it's a BBS hostname
-        if hostname in hostname_map:
-            www_file = f"/www/{hostname_map[hostname]}.bbs"
-        else:
-            # Try as path
-            if url_path.startswith('/'):
-                www_file = f"/www{url_path}"
-            else:
-                www_file = f"/www/{url_path}"
-
-        # Try to read the file
-        content = None
-        if vfs.exists(www_file):
-            try:
-                content = vfs.read(www_file)
-            except RuntimeError:
-                pass
-
-        # Try with extensions
-        if not content:
-            for ext in ['.bbs', '.poo', '.html']:
-                if not www_file.endswith(ext):
-                    test_path = f"{www_file}{ext}"
-                    if vfs.exists(test_path):
-                        try:
-                            content = vfs.read(test_path)
-                            break
-                        except RuntimeError:
-                            pass
-
-        if content:
-            # Display local content
-            print("═" * 70)
-            print(f"LYNX - {hostname}{url_path}")
-            print("(local filesystem)")
-            print("═" * 70)
-            print("")
-            print(content)
-            print("")
-            print("═" * 70)
-            print("[Q] Back | [H] Help")
-            print("═" * 70)
-            exit(0)
-        else:
-            error(f"lynx: File not found: {url_path}")
-            exit(1)
-    else:
-        # Remote request - need to SSH and run http-get
-        # For now, show that we would connect remotely
-        print("═" * 70)
-        print(f"LYNX - HTTP/1.0 {hostname}{url_path}")
-        print(f"Connecting to remote server...")
-        print("═" * 70)
+    if not content:
+        error(f"lynx: Unable to retrieve {hostname}{url_path}")
         print("")
-        print(f"[Remote Web Server: {hostname} ({target_ip})]")
+        print(f"Failed to fetch content from {hostname}")
         print("")
-        print("To access remote web servers, you need to:")
-        print(f"  1. ssh {target_ip}")
-        print(f"  2. Run: http-get {url_path}")
+        print("Possible reasons:")
+        print("  - Host is unreachable")
+        print("  - File does not exist")
+        print("  - No HTTP server running")
         print("")
-        print("Remote HTTP support coming soon!")
-        print("For now, web servers must be accessed locally.")
-        print("")
-        print("═" * 70)
-        print("[Q] Back")
-        print("═" * 70)
-        exit(0)
+        print("Try:")
+        print("  nmap <subnet>     - Scan for available hosts")
+        print("  nmap <host>       - Check open ports")
+        print("  ping <host>       - Check if host is alive")
+        exit(1)
+
+    # Display content
+    print("═" * 70)
+    print(f"LYNX - {hostname}{url_path}")
+    print("═" * 70)
+    print("")
+    print(content)
+    print("")
+    print("═" * 70)
+    print("[Q] Back | [H] Help")
+    print("═" * 70)
 
 except Exception as e:
     error(f"lynx: Connection failed: {e}")
