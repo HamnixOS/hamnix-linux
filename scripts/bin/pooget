@@ -1,0 +1,430 @@
+#!/usr/bin/pooscript
+# pooget - Package manager for Poodillion
+# Like apt-get but for PooScript packages!
+
+if len(args) == 0:
+    print("""Usage: pooget <command> [options]
+
+Commands:
+  install <package>   - Install a package
+  remove <package>    - Remove a package
+  update              - Update package list from repository
+  upgrade             - Upgrade all installed packages
+  search <term>       - Search for packages
+  list                - List installed packages
+  info <package>      - Show package information
+
+Examples:
+  pooget update
+  pooget install nethack
+  pooget search hack
+  pooget list
+
+Repository: http://packages.repo.net/repo
+""")
+    exit(0)
+
+# Constants
+REPO_URL = "http://packages.repo.net/repo"
+DB_DIR = "/var/lib/pooget"
+CACHE_FILE = "/var/lib/pooget/available.txt"
+INSTALLED_FILE = "/var/lib/pooget/installed.txt"
+LOCK_FILE = "/var/lib/pooget/lock"
+
+# Ensure database directory exists
+if not vfs.exists(DB_DIR):
+    try:
+        vfs.mkdir(DB_DIR, 0o755)
+    except:
+        error("pooget: Failed to create database directory")
+        exit(1)
+
+# Parse command
+command = args[0]
+
+# Helper functions
+def acquire_lock():
+    """Acquire lock file to prevent concurrent operations"""
+    if vfs.exists(LOCK_FILE):
+        error("pooget: Another pooget process is running")
+        error("If no other pooget is running, remove %s" % LOCK_FILE)
+        exit(1)
+    try:
+        vfs.create(LOCK_FILE, 0o644, "locked\n")
+    except:
+        error("pooget: Failed to acquire lock")
+        exit(1)
+
+def release_lock():
+    """Release lock file"""
+    try:
+        vfs.unlink(LOCK_FILE)
+    except:
+        pass
+
+def parse_package_line(line):
+    """Parse a package index line: name|version|category|description|checksum"""
+    parts = line.split('|')
+    if len(parts) < 5:
+        return None
+    return {
+        'name': parts[0].strip(),
+        'version': parts[1].strip(),
+        'category': parts[2].strip(),
+        'description': parts[3].strip(),
+        'checksum': parts[4].strip()
+    }
+
+def get_installed_packages():
+    """Read installed packages database"""
+    packages = {}
+    if vfs.exists(INSTALLED_FILE):
+        content = vfs.read(INSTALLED_FILE)
+        for line in content.split('\n'):
+            if line and not line.startswith('#'):
+                pkg = parse_package_line(line)
+                if pkg:
+                    packages[pkg['name']] = pkg
+    return packages
+
+def save_installed_packages(packages):
+    """Save installed packages database"""
+    lines = ["# Installed packages - DO NOT EDIT MANUALLY"]
+    for name, pkg in packages.items():
+        line = "%s|%s|%s|%s|%s" % (
+            pkg['name'], pkg['version'], pkg['category'],
+            pkg['description'], pkg['checksum']
+        )
+        lines.append(line)
+    content = '\n'.join(lines) + '\n'
+    vfs.write(INSTALLED_FILE, content)
+
+def get_available_packages():
+    """Read available packages from cache"""
+    packages = {}
+    if vfs.exists(CACHE_FILE):
+        content = vfs.read(CACHE_FILE)
+        for line in content.split('\n'):
+            if line and not line.startswith('#'):
+                pkg = parse_package_line(line)
+                if pkg:
+                    packages[pkg['name']] = pkg
+    return packages
+
+# Command: update
+if command == 'update':
+    print("Fetching package list from %s..." % REPO_URL)
+
+    try:
+        # Download PACKAGES.txt
+        url = REPO_URL + "/PACKAGES.txt"
+        result = net.http_get(url)
+
+        if result is None or result == "":
+            error("pooget: Failed to download package list")
+            error("Repository may be unavailable or network error")
+            exit(1)
+
+        # Save to cache
+        vfs.write(CACHE_FILE, result)
+
+        # Count packages
+        count = 0
+        for line in result.split('\n'):
+            if line and not line.startswith('#'):
+                count += 1
+
+        print("Package list updated. %d packages available." % count)
+        exit(0)
+
+    except Exception as e:
+        error("pooget: Error updating package list: %s" % str(e))
+        exit(1)
+
+# Command: list
+elif command == 'list':
+    installed = get_installed_packages()
+
+    if len(installed) == 0:
+        print("No packages installed")
+        exit(0)
+
+    print("Installed packages:")
+    print("%-20s %-10s %s" % ("Name", "Version", "Description"))
+    print("-" * 70)
+
+    for name in sorted(installed.keys()):
+        pkg = installed[name]
+        desc = pkg['description']
+        if len(desc) > 40:
+            desc = desc[:37] + "..."
+        print("%-20s %-10s %s" % (pkg['name'], pkg['version'], desc))
+
+    print("\nTotal: %d packages" % len(installed))
+    exit(0)
+
+# Command: search
+elif command == 'search':
+    if len(args) < 2:
+        error("Usage: pooget search <term>")
+        exit(1)
+
+    search_term = args[1].lower()
+    available = get_available_packages()
+
+    if len(available) == 0:
+        error("pooget: No package list available")
+        error("Run 'pooget update' first")
+        exit(1)
+
+    results = []
+    for name, pkg in available.items():
+        if search_term in name.lower() or search_term in pkg['description'].lower():
+            results.append(pkg)
+
+    if len(results) == 0:
+        print("No packages found matching '%s'" % search_term)
+        exit(0)
+
+    print("Found %d package(s):" % len(results))
+    print("%-20s %-10s %s" % ("Name", "Version", "Description"))
+    print("-" * 70)
+
+    for pkg in sorted(results, key=lambda p: p['name']):
+        desc = pkg['description']
+        if len(desc) > 40:
+            desc = desc[:37] + "..."
+        print("%-20s %-10s %s" % (pkg['name'], pkg['version'], desc))
+
+    exit(0)
+
+# Command: info
+elif command == 'info':
+    if len(args) < 2:
+        error("Usage: pooget info <package>")
+        exit(1)
+
+    pkg_name = args[1]
+    available = get_available_packages()
+    installed = get_installed_packages()
+
+    # Check if available
+    if pkg_name in available:
+        pkg = available[pkg_name]
+        print("Package: %s" % pkg['name'])
+        print("Version: %s" % pkg['version'])
+        print("Category: %s" % pkg['category'])
+        print("Description: %s" % pkg['description'])
+        print("Checksum: %s" % pkg['checksum'])
+
+        if pkg_name in installed:
+            inst_pkg = installed[pkg_name]
+            print("\nInstalled: Yes (version %s)" % inst_pkg['version'])
+            if inst_pkg['version'] != pkg['version']:
+                print("Status: Update available!")
+        else:
+            print("\nInstalled: No")
+    elif pkg_name in installed:
+        pkg = installed[pkg_name]
+        print("Package: %s" % pkg['name'])
+        print("Version: %s" % pkg['version'])
+        print("Category: %s" % pkg['category'])
+        print("Description: %s" % pkg['description'])
+        print("\nInstalled: Yes")
+        print("Status: Not in repository (manually installed or repo out of date)")
+    else:
+        error("pooget: Package '%s' not found" % pkg_name)
+        error("Try 'pooget search %s' or 'pooget update'" % pkg_name)
+        exit(1)
+
+    exit(0)
+
+# Command: install
+elif command == 'install':
+    if len(args) < 2:
+        error("Usage: pooget install <package>")
+        exit(1)
+
+    pkg_name = args[1]
+
+    acquire_lock()
+
+    try:
+        # Check if already installed
+        installed = get_installed_packages()
+        if pkg_name in installed:
+            print("Package '%s' is already installed (version %s)" %
+                  (pkg_name, installed[pkg_name]['version']))
+            print("Use 'pooget upgrade' to upgrade packages")
+            release_lock()
+            exit(0)
+
+        # Get package info from available list
+        available = get_available_packages()
+        if pkg_name not in available:
+            error("pooget: Package '%s' not found" % pkg_name)
+            error("Run 'pooget update' to refresh package list")
+            release_lock()
+            exit(1)
+
+        pkg = available[pkg_name]
+
+        print("Installing %s (%s)..." % (pkg['name'], pkg['version']))
+
+        # Download package
+        pkg_url = "%s/packages/%s/%s/%s.poo-pkg" % (
+            REPO_URL, pkg['name'], pkg['version'], pkg['name']
+        )
+
+        print("Downloading from %s..." % pkg_url)
+        pkg_data = net.http_get(pkg_url)
+
+        if pkg_data is None or pkg_data == "":
+            error("pooget: Failed to download package")
+            release_lock()
+            exit(1)
+
+        # Parse package (simplified - just extract files section)
+        # Real implementation would parse [METADATA], [FILES], [INSTALL] sections
+
+        # For now, assume package is a simple PooScript
+        # Install to /usr/local/bin/
+        install_path = "/usr/local/bin/%s" % pkg['name']
+
+        print("Installing to %s..." % install_path)
+        vfs.create(install_path, 0o755, pkg_data)
+
+        # Mark as installed
+        installed[pkg_name] = pkg
+        save_installed_packages(installed)
+
+        print("Successfully installed %s %s" % (pkg['name'], pkg['version']))
+
+        release_lock()
+        exit(0)
+
+    except Exception as e:
+        error("pooget: Installation failed: %s" % str(e))
+        release_lock()
+        exit(1)
+
+# Command: remove
+elif command == 'remove':
+    if len(args) < 2:
+        error("Usage: pooget remove <package>")
+        exit(1)
+
+    pkg_name = args[1]
+
+    acquire_lock()
+
+    try:
+        installed = get_installed_packages()
+
+        if pkg_name not in installed:
+            error("pooget: Package '%s' is not installed" % pkg_name)
+            release_lock()
+            exit(1)
+
+        pkg = installed[pkg_name]
+
+        print("Removing %s (%s)..." % (pkg['name'], pkg['version']))
+
+        # Remove from /usr/local/bin/
+        remove_path = "/usr/local/bin/%s" % pkg['name']
+
+        if vfs.exists(remove_path):
+            vfs.unlink(remove_path)
+            print("Removed %s" % remove_path)
+
+        # Remove from installed database
+        del installed[pkg_name]
+        save_installed_packages(installed)
+
+        print("Successfully removed %s" % pkg['name'])
+
+        release_lock()
+        exit(0)
+
+    except Exception as e:
+        error("pooget: Removal failed: %s" % str(e))
+        release_lock()
+        exit(1)
+
+# Command: upgrade
+elif command == 'upgrade':
+    print("Checking for upgrades...")
+
+    acquire_lock()
+
+    try:
+        installed = get_installed_packages()
+        available = get_available_packages()
+
+        if len(available) == 0:
+            error("pooget: No package list available")
+            error("Run 'pooget update' first")
+            release_lock()
+            exit(1)
+
+        # Find packages with updates
+        upgrades = []
+        for name, inst_pkg in installed.items():
+            if name in available:
+                avail_pkg = available[name]
+                # Simple version comparison (assumes format like "1.0", "1.1", etc.)
+                if avail_pkg['version'] > inst_pkg['version']:
+                    upgrades.append((name, inst_pkg['version'], avail_pkg['version']))
+
+        if len(upgrades) == 0:
+            print("All packages are up to date")
+            release_lock()
+            exit(0)
+
+        print("Found %d package(s) to upgrade:" % len(upgrades))
+        for name, old_ver, new_ver in upgrades:
+            print("  %s: %s -> %s" % (name, old_ver, new_ver))
+
+        print("\nUpgrading packages...")
+
+        for name, old_ver, new_ver in upgrades:
+            pkg = available[name]
+
+            print("\nUpgrading %s..." % name)
+
+            # Download package
+            pkg_url = "%s/packages/%s/%s/%s.poo-pkg" % (
+                REPO_URL, pkg['name'], pkg['version'], pkg['name']
+            )
+
+            pkg_data = net.http_get(pkg_url)
+
+            if pkg_data is None or pkg_data == "":
+                error("Failed to download %s, skipping" % name)
+                continue
+
+            # Update file
+            install_path = "/usr/local/bin/%s" % pkg['name']
+            vfs.write(install_path, pkg_data)
+
+            # Update installed database
+            installed[name] = pkg
+
+            print("Upgraded %s: %s -> %s" % (name, old_ver, new_ver))
+
+        save_installed_packages(installed)
+
+        print("\nUpgrade complete!")
+
+        release_lock()
+        exit(0)
+
+    except Exception as e:
+        error("pooget: Upgrade failed: %s" % str(e))
+        release_lock()
+        exit(1)
+
+else:
+    error("pooget: Unknown command '%s'" % command)
+    error("Run 'pooget' without arguments for help")
+    exit(1)

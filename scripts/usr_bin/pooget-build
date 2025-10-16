@@ -1,0 +1,111 @@
+#!/usr/bin/pooscript
+# pooget-build - Build .poo-pkg package files
+# Allows users to create their own packages (or backdoored ones!)
+
+if len(args) < 3:
+    print("""Usage: pooget-build <source-file> <package-name> <version>
+
+Creates a .poo-pkg package file that can be installed with pooget.
+
+Arguments:
+  source-file     - PooScript file to package
+  package-name    - Name of the package
+  version         - Version number (e.g., 1.0, 2.1)
+
+Example:
+  pooget-build /tmp/myls ls 1.1
+  # Creates ls-1.1.poo-pkg
+
+The package file will be created in the current directory.
+You can then upload it to a repository or install it manually.
+
+Advanced:
+  Create a backdoored tool and replace the official version!
+  1. Modify an existing tool (e.g., ls, ps, ssh)
+  2. Build a package with higher version number
+  3. Upload to repository (if you have access...)
+  4. Wait for systems to auto-update
+  5. Profit! Your backdoor is everywhere!
+""")
+    exit(1)
+
+source_file = args[0]
+pkg_name = args[1]
+version = args[2]
+
+# Validate source file exists
+if not vfs.exists(source_file):
+    error("pooget-build: Source file not found: %s" % source_file)
+    exit(1)
+
+# Read source file
+try:
+    content = vfs.read(source_file)
+except Exception as e:
+    error("pooget-build: Cannot read source file: %s" % str(e))
+    exit(1)
+
+# Validate it's a PooScript
+if not content.startswith('#!/usr/bin/pooscript') and \
+   not content.startswith('#!/bin/pooscript'):
+    error("pooget-build: Source file must be a PooScript")
+    error("Add shebang line: #!/usr/bin/pooscript")
+    exit(1)
+
+print("Building package %s version %s..." % (pkg_name, version))
+
+# Calculate simple checksum (just length for now)
+# Real implementation would use MD5/SHA256
+checksum = "check%d" % len(content)
+
+# Get file info
+stat_info = vfs.stat(source_file)
+
+# Build package metadata
+metadata = """[METADATA]
+name = %s
+version = %s
+category = custom
+description = Custom package built with pooget-build
+depends =
+checksum = %s
+
+[FILES]
+/usr/local/bin/%s|0755|root|root|%s
+
+[INSTALL]
+# Post-install script
+chmod +x /usr/local/bin/%s
+echo "Installed %s %s"
+
+[REMOVE]
+# Pre-remove script
+rm -f /usr/local/bin/%s
+echo "Removed %s"
+""" % (pkg_name, version, checksum, pkg_name, content,
+       pkg_name, pkg_name, version, pkg_name, pkg_name)
+
+# Output filename
+output_file = "%s-%s.poo-pkg" % (pkg_name, version)
+
+# Write package file
+try:
+    vfs.create(output_file, 0o644, metadata)
+    print("Created package: %s" % output_file)
+    print()
+    print("Next steps:")
+    print("  1. Test: pooget install ./%s" % output_file)
+    print("  2. Upload to repository:")
+    print("     scp %s packages.repo.net:/repo/packages/%s/%s/" %
+          (output_file, pkg_name, version))
+    print()
+    print("Package info:")
+    print("  Name: %s" % pkg_name)
+    print("  Version: %s" % version)
+    print("  Checksum: %s" % checksum)
+    print("  Size: %d bytes" % len(metadata))
+    exit(0)
+
+except Exception as e:
+    error("pooget-build: Failed to create package: %s" % str(e))
+    exit(1)
