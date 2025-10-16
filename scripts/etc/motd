@@ -1,0 +1,49 @@
+╔══════════════════════════════════════════════════════╗
+║     Welcome to POODILLION OS v2.0                    ║
+║     "Where Unix Meets Whimsy"                        ║
+╚══════════════════════════════════════════════════════╝
+
+ ____                 _ _ _ _ _
+|  _ \ ___   ___   __| (_) | (_) ___  _ __
+| |_) / _ \ / _ \ / _` | | | | |/ _ \| '_ \
+|  __/ (_) | (_) | (_| | | | | | (_) | | | |
+|_|   \___/ \___/ \__,_|_|_|_|_|\___/|_| |_|
+
+Today's Fortune:
+"In Poodillion, the file system is both your playground
+and your puzzle. Explore. Break things. Learn. Have fun!"
+
+════════════════════════════════════════════════════════
+
+Fun Commands to Try:
+  fortune     - Get a random fortune
+  cowsay      - ASCII cow says things
+  sl          - Steam locomotive (typo trainer)
+  matrix      - Enter the matrix
+  hack        - "Hacking" simulator
+  cake        - The cake is... ?
+  curl        - Browse virtual websites
+
+Hacking Commands:
+  nmap        - Scan networks
+  ssh         - Connect to systems
+  exploit     - Attack vulnerable processes
+
+Easter Eggs:
+  This system is full of secrets! Try:
+  - Using 'ls -a' to find hidden files
+  - Reading .bash_history files
+  - Exploring /var/log/
+  - Checking /www/ for website content
+  - Being curious!
+
+════════════════════════════════════════════════════════
+
+System Status: [ONLINE]
+Security Level: [PLEASE]
+Firewall: [MAYBE]
+Encryption: [LOL]
+
+Last login: Never (this is a fresh install)
+
+Ready to explore? Type 'fortune' for wisdom!

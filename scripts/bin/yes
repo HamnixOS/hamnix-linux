@@ -1,0 +1,12 @@
+#!/usr/bin/pooscript
+# yes - output a string repeatedly until killed
+
+# Get the message to repeat
+if len(args) > 0:
+    message = ' '.join(args)
+else:
+    message = "y"
+
+# Print it a LOT (but not infinite to avoid hanging)
+for i in range(1000):
+    print(message)

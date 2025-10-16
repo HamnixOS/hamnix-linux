@@ -1,0 +1,29 @@
+╔══════════════════════════════════════════════════════╗
+║   FIRST BANK OF POODILLION                           ║
+║   "Your Money is Safe (Probably)"                    ║
+╚══════════════════════════════════════════════════════╝
+
+[LOGIN]
+
+Username: ________________
+Password: ________________
+
+[ Submit ]
+
+─────────────────────────────────────────────────────
+
+Recent Security Notice:
+  - Our database was NOT compromised last week
+  - The rumors are completely false
+  - Your passwords are stored securely (in plaintext)
+  - We definitely use HTTPS (in production)
+  - Please do not try to 'exploit' our login system
+
+─────────────────────────────────────────────────────
+
+<!-- Test credentials for developers -->
+<!-- Username: admin -->
+<!-- Password: admin123 -->
+<!-- TODO: Remove before deployment! -->
+
+Powered by SQLite v0.1 (beta)

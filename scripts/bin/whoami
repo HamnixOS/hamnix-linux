@@ -1,0 +1,15 @@
+#!/usr/bin/pooscript
+# whoami - print effective user name
+
+# Get user ID
+uid = process.uid
+
+# Map UID to username (simple mapping)
+if uid == 0:
+    username = "root"
+elif uid == 1000:
+    username = "user"
+else:
+    username = f"user{uid}"
+
+print(username)

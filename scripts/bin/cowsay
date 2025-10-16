@@ -1,0 +1,56 @@
+#!/usr/bin/pooscript
+# cowsay - have a cow say something
+
+# Get the message
+if len(args) > 0:
+    message = ' '.join(args)
+elif stdin:
+    message = stdin.strip()
+else:
+    message = "Moo!"
+
+# Word wrap at 40 characters
+lines = []
+words = message.split()
+current_line = ""
+for word in words:
+    if len(current_line) + len(word) + 1 <= 40:
+        if current_line:
+            current_line += " " + word
+        else:
+            current_line = word
+    else:
+        if current_line:
+            lines.append(current_line)
+        current_line = word
+
+if current_line:
+    lines.append(current_line)
+
+if len(lines) == 0:
+    lines = ["Moo!"]
+
+# Find the longest line
+max_len = max(len(line) for line in lines)
+
+# Draw the bubble
+print(" " + "_" * (max_len + 2))
+if len(lines) == 1:
+    print("< " + lines[0] + " " * (max_len - len(lines[0])) + " >")
+else:
+    for i, line in enumerate(lines):
+        padding = " " * (max_len - len(line))
+        if i == 0:
+            print("/ " + line + padding + " \\")
+        elif i == len(lines) - 1:
+            print("\\ " + line + padding + " /")
+        else:
+            print("| " + line + padding + " |")
+print(" " + "-" * (max_len + 2))
+
+# Draw the cow
+print("        \\   ^__^")
+print("         \\  (oo)\\_______")
+print("            (__)\\       )\\/\\")
+print("                ||----w |")
+print("                ||     ||")
