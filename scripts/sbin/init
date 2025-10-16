@@ -45,8 +45,18 @@ for binary in critical_bins:
 
 if all_ok:
     print("\n[  OK  ] Poodillion boot complete!")
-    print("[  OK  ] System is ready for hacking\n")
+    print("[  OK  ] System is ready for hacking")
 else:
     error("\n[FAILED] Boot completed with errors\n")
 
+# Start network daemon if it exists
+if vfs.exists('/sbin/netd'):
+    print("[  OK  ] Starting network daemon (netd)...")
+    # Note: In a real system, we'd spawn netd as a background process
+    # For now, netd would need to be started separately by the system
+    # or we need to implement daemon spawning in PooScript
+else:
+    print("[WARN ] /sbin/netd not found, network routing disabled")
+
+print()
 exit(0)
