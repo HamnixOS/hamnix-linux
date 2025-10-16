@@ -164,9 +164,7 @@ Use 'cat /bin/pooshell' to see this shell's source code.
         # Execute external command
         try:
             exit_code, stdout_str, stderr_str = process.execute(command_line)
-            print(stdout_str, end='')
-            if stderr_str:
-                error(stderr_str, end='')
+            # Don't print stdout/stderr - already displayed in real-time via callbacks
             return exit_code
         except RuntimeError as e:
             error(f"{cmd}: {e}")
