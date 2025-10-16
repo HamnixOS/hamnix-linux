@@ -1,0 +1,71 @@
+#!/usr/bin/pooscript
+# tcpdump - Packet capture and analysis tool
+# Displays network packets flowing through the system
+
+# Parse arguments
+verbose = False
+count = 0  # 0 = unlimited
+interface = 'any'
+filter_host = None
+filter_port = None
+
+i = 0
+while i < len(args):
+    arg = args[i]
+    if arg == '-v':
+        verbose = True
+    elif arg == '-c' and i + 1 < len(args):
+        count = int(args[i + 1])
+        i += 1
+    elif arg == '-i' and i + 1 < len(args):
+        interface = args[i + 1]
+        i += 1
+    elif arg == 'host' and i + 1 < len(args):
+        filter_host = args[i + 1]
+        i += 1
+    elif arg == 'port' and i + 1 < len(args):
+        filter_port = int(args[i + 1])
+        i += 1
+    i += 1
+
+# Get system interface to access packet queue
+sys_iface = process.get_system()
+if not sys_iface:
+    error("tcpdump: cannot access system interface")
+    exit(1)
+
+print(f"tcpdump: listening on {interface}, capture size 65535 bytes")
+print("Press Ctrl+C to stop")
+print()
+
+# Import packet parsing from the system
+# For now, we'll read from /dev/net/packet device
+# which should provide access to captured packets
+
+# Since we can't directly access Python packet_queue from PooScript,
+# we'll implement a simple packet display from captured buffer
+# The packet_queue needs to expose captured packets via a device file
+
+# For demonstration, show how tcpdump would work:
+# It would read from the system's packet capture buffer and display:
+# - Timestamp
+# - Source IP:Port -> Dest IP:Port
+# - Protocol (TCP/UDP/ICMP)
+# - Packet size
+# - TCP flags (if TCP)
+# - Payload preview
+
+print("NOTE: Full packet capture requires reading from /dev/net/packet")
+print("This is a placeholder showing tcpdump output format:\n")
+
+# Example output format
+print("12:34:56.789012 IP 192.168.1.10.22 > 192.168.1.1.54321: Flags [S], seq 1234567890, win 65535, length 0")
+print("12:34:56.790123 IP 192.168.1.1.54321 > 192.168.1.10.22: Flags [S.], seq 9876543210, ack 1234567891, win 65535, length 0")
+print("12:34:56.790234 IP 192.168.1.10.22 > 192.168.1.1.54321: Flags [.], ack 9876543211, win 65535, length 0")
+print("12:34:56.791345 ICMP echo request, id 1234, seq 1, length 64")
+print("12:34:56.791456 ICMP echo reply, id 1234, seq 1, length 64")
+
+print("\nTo enable full packet capture, the system needs to expose")
+print("packet_queue.captured_packets through /dev/net/packet")
+
+exit(0)
