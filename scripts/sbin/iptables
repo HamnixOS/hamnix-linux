@@ -1,0 +1,136 @@
+#!/usr/bin/pooscript
+# iptables - Linux firewall administration tool
+
+# Get system interface
+system = process.get_system()
+if not system:
+    error("iptables: Cannot access system")
+    exit(1)
+
+# Check permissions (root only)
+if process.uid != 0:
+    error("iptables: Permission denied (you must be root)")
+    exit(1)
+
+# Parse command
+if len(args) == 0:
+    # List current rules
+    print("Chain INPUT (policy ACCEPT)")
+    print("target     prot opt source               destination")
+
+    if len(system.firewall_rules) == 0:
+        print("(no rules)")
+    else:
+        for rule in system.firewall_rules:
+            action = rule.get('action', 'ACCEPT')
+            protocol = rule.get('protocol', 'all')
+            source = rule.get('source', 'anywhere')
+            port = rule.get('port', '')
+            chain = rule.get('chain', 'INPUT')
+
+            if chain == 'INPUT':
+                port_str = f"dpt:{port}" if port else ""
+                print(f"{action:10s} {protocol:4s}  --  {source:20s} anywhere  {port_str}")
+
+    print()
+    print("Chain FORWARD (policy ACCEPT)")
+    print("Chain OUTPUT (policy ACCEPT)")
+    exit(0)
+
+# Parse iptables command
+cmd = args[0]
+
+if cmd == '-A' or cmd == '--append':
+    # Add rule: iptables -A INPUT -p tcp --dport 22 -j DROP
+    chain = args[1] if len(args) > 1 else 'INPUT'
+
+    # Parse rule options
+    protocol = 'tcp'
+    port = None
+    action = 'ACCEPT'
+    source = 'any'
+
+    i = 2
+    while i < len(args):
+        arg = args[i]
+
+        if arg == '-p' or arg == '--protocol':
+            if i + 1 < len(args):
+                protocol = args[i + 1]
+                i += 2
+            else:
+                error("iptables: option requires an argument -- '-p'")
+                exit(1)
+
+        elif arg == '--dport' or arg == '--destination-port':
+            if i + 1 < len(args):
+                port = int(args[i + 1])
+                i += 2
+            else:
+                error("iptables: option requires an argument -- '--dport'")
+                exit(1)
+
+        elif arg == '-s' or arg == '--source':
+            if i + 1 < len(args):
+                source = args[i + 1]
+                i += 2
+            else:
+                error("iptables: option requires an argument -- '-s'")
+                exit(1)
+
+        elif arg == '-j' or arg == '--jump':
+            if i + 1 < len(args):
+                action = args[i + 1]
+                i += 2
+            else:
+                error("iptables: option requires an argument -- '-j'")
+                exit(1)
+
+        else:
+            i += 1
+
+    # Add the rule
+    rule = {
+        'chain': chain,
+        'protocol': protocol,
+        'port': port,
+        'action': action,
+        'source': source
+    }
+
+    system.add_firewall_rule(rule)
+    exit(0)
+
+elif cmd == '-L' or cmd == '--list':
+    # List rules (same as no args)
+    print("Chain INPUT (policy ACCEPT)")
+    print("target     prot opt source               destination")
+
+    if len(system.firewall_rules) == 0:
+        print("(no rules)")
+    else:
+        for rule in system.firewall_rules:
+            action = rule.get('action', 'ACCEPT')
+            protocol = rule.get('protocol', 'all')
+            source = rule.get('source', 'anywhere')
+            port = rule.get('port', '')
+            chain = rule.get('chain', 'INPUT')
+
+            if chain == 'INPUT':
+                port_str = f"dpt:{port}" if port else ""
+                print(f"{action:10s} {protocol:4s}  --  {source:20s} anywhere  {port_str}")
+
+    exit(0)
+
+elif cmd == '-F' or cmd == '--flush':
+    # Clear all rules
+    system.clear_firewall_rules()
+    print("iptables: Flushed all rules")
+    exit(0)
+
+else:
+    error(f"iptables: unknown command '{cmd}'")
+    error("Usage: iptables [-A chain] [-p protocol] [--dport port] [-s source] [-j action]")
+    error("       iptables -L (list rules)")
+    error("       iptables -F (flush rules)")
+    exit(1)

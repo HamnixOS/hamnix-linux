@@ -1,29 +1,33 @@
 #!/usr/bin/pooscript
 # ifconfig - configure network interface
 
-# Get network interface
-net = process.get_network()
-if not net:
-    # No network configured, show loopback only
-    print("lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536")
-    print("        inet 127.0.0.1  netmask 255.0.0.0")
-    print("        loop  txqueuelen 1000  (Local Loopback)")
-    print()
-    exit(0)
+# Get system interface
+system = process.get_system()
+if not system:
+    error("ifconfig: Cannot access system")
+    exit(1)
 
-# Get our IP
-local_ip = net.get_local_ip()
+# Show all network interfaces
+interfaces = system.interfaces
 
-# Show eth0
-print("eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500")
-print(f"        inet {local_ip}  netmask 255.255.255.0  broadcast {local_ip.rsplit('.', 1)[0]}.255")
-print("        ether 08:00:27:12:34:56  txqueuelen 1000  (Ethernet)")
-print()
+for iface_name in sorted(interfaces.keys()):
+    ip_addr = interfaces[iface_name]
 
-# Show loopback
-print("lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536")
-print("        inet 127.0.0.1  netmask 255.0.0.0")
-print("        loop  txqueuelen 1000  (Local Loopback)")
-print()
+    if iface_name == 'lo':
+        # Loopback interface
+        print(f"{iface_name}: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536")
+        print(f"        inet {ip_addr}  netmask 255.0.0.0")
+        print("        loop  txqueuelen 1000  (Local Loopback)")
+        print()
+    else:
+        # Ethernet interface
+        print(f"{iface_name}: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500")
+
+        # Calculate broadcast address (x.x.x.255)
+        broadcast = ip_addr.rsplit('.', 1)[0] + '.255'
+
+        print(f"        inet {ip_addr}  netmask 255.255.255.0  broadcast {broadcast}")
+        print("        ether 08:00:27:12:34:56  txqueuelen 1000  (Ethernet)")
+        print()
 
 exit(0)
