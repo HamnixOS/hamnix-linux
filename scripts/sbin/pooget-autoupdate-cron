@@ -1,0 +1,109 @@
+#!/usr/bin/pooscript
+# pooget-autoupdate-cron - Cron job for automatic updates
+# Called by cron every N minutes to check and install updates
+
+CONFIG_FILE = "/etc/pooget/autoupdate.conf"
+LOG_FILE = "/var/log/pooget-autoupdate.log"
+
+def log(message):
+    """Log message with timestamp"""
+    import time
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    entry = "[%s] %s\n" % (timestamp, message)
+
+    # Append to log file
+    try:
+        if vfs.exists(LOG_FILE):
+            content = vfs.read(LOG_FILE)
+            vfs.write(LOG_FILE, content + entry)
+        else:
+            vfs.create(LOG_FILE, 0o644, entry)
+    except:
+        pass  # Silently fail if can't write log
+
+def parse_config():
+    """Parse configuration file"""
+    config = {
+        'enabled': True,
+        'repo_url': 'http://packages.repo.net/repo',
+        'install_all': True
+    }
+
+    if not vfs.exists(CONFIG_FILE):
+        return config
+
+    try:
+        content = vfs.read(CONFIG_FILE)
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            if '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+
+                # Remove comments from value
+                if '#' in value:
+                    value = value.split('#')[0].strip()
+
+                # Parse value
+                if key == 'enabled':
+                    config['enabled'] = value.lower() in ['true', 'yes', '1']
+                elif key == 'repo_url':
+                    config['repo_url'] = value
+                elif key == 'install_all':
+                    config['install_all'] = value.lower() in ['true', 'yes', '1']
+
+    except Exception as e:
+        log("WARNING: Failed to parse config: %s" % str(e))
+
+    return config
+
+# Parse config
+config = parse_config()
+
+if not config['enabled']:
+    # Auto-update disabled, exit silently
+    exit(0)
+
+log("pooget-autoupdate: Starting update check")
+
+try:
+    # Update package list
+    log("Updating package list from %s..." % config['repo_url'])
+    exit_code, stdout, stderr = shell.execute("pooget update 2>&1")
+
+    if exit_code != 0:
+        log("ERROR: Failed to update package list")
+        log("Output: %s" % stdout)
+        exit(1)
+
+    # Check for and install upgrades
+    log("Checking for package upgrades...")
+    exit_code, stdout, stderr = shell.execute("pooget upgrade 2>&1")
+
+    if exit_code != 0:
+        log("ERROR: Failed to upgrade packages")
+        log("Output: %s" % stdout)
+        exit(1)
+
+    # Parse output to see what happened
+    if "Upgrade complete" in stdout:
+        # Extract upgrade info
+        lines = stdout.split('\n')
+        for line in lines:
+            if "Upgraded" in line or "upgraded" in line:
+                log(line)
+        log("Update check completed successfully")
+    elif "up to date" in stdout or "up-to-date" in stdout:
+        log("All packages are up to date")
+    else:
+        log("Update check completed")
+
+    exit(0)
+
+except Exception as e:
+    log("ERROR: Update check failed: %s" % str(e))
+    exit(1)
