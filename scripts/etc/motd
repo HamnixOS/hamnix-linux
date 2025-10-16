@@ -1,49 +1,64 @@
-╔══════════════════════════════════════════════════════╗
-║     Welcome to POODILLION OS v2.0                    ║
-║     "Where Unix Meets Whimsy"                        ║
-╚══════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║
+║                      December 24, 1990                            ║
+║                        03:47:22 GMT                               ║
+║                                                                   ║
+║   You have been connected to a private network.                   ║
+║   Your presence here is not an accident.                          ║
+║                                                                   ║
+║   Something is happening tonight. Something unprecedented.        ║
+║   The network is changing. Or perhaps... awakening.               ║
+║                                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
 
- ____                 _ _ _ _ _
-|  _ \ ___   ___   __| (_) | (_) ___  _ __
-| |_) / _ \ / _ \ / _` | | | | |/ _ \| '_ \
-|  __/ (_) | (_) | (_| | | | | | (_) | | | |
-|_|   \___/ \___/ \__,_|_|_|_|_|\___/|_| |_|
+System: kali-box (192.168.13.37)
+Access Level: Guest → Investigating
+Network: Active and... aware?
 
-Today's Fortune:
-"In Poodillion, the file system is both your playground
-and your puzzle. Explore. Break things. Learn. Have fun!"
+═══════════════════════════════════════════════════════════════════
 
-════════════════════════════════════════════════════════
+YOUR MISSION (if you choose to accept it):
 
-Fun Commands to Try:
-  fortune     - Get a random fortune
-  cowsay      - ASCII cow says things
-  sl          - Steam locomotive (typo trainer)
-  matrix      - Enter the matrix
-  hack        - "Hacking" simulator
-  cake        - The cake is... ?
-  curl        - Browse virtual websites
+  cat /missions/README        - View available missions
+  nmap 192.168.1.0/24         - Scan the network
+  lynx bbs.cyberspace.net     - Browse the BBS systems
+  ssh <hostname>              - Connect to remote systems
 
-Hacking Commands:
-  nmap        - Scan networks
-  ssh         - Connect to systems
-  exploit     - Attack vulnerable processes
+═══════════════════════════════════════════════════════════════════
 
-Easter Eggs:
-  This system is full of secrets! Try:
-  - Using 'ls -a' to find hidden files
-  - Reading .bash_history files
-  - Exploring /var/log/
-  - Checking /www/ for website content
-  - Being curious!
+TOOLS AVAILABLE:
 
-════════════════════════════════════════════════════════
+  Network:      nmap, ssh, ping, netstat, ifconfig
+  Files:        ls, cat, cp, mv, rm, find, grep
+  Editor:       ed (simple line editor)
+  Browser:      lynx (text-based BBS browser)
+  Info:         ps, whoami, uptime, date, fortune
 
-System Status: [ONLINE]
-Security Level: [PLEASE]
-Firewall: [MAYBE]
-Encryption: [LOL]
+═══════════════════════════════════════════════════════════════════
 
-Last login: Never (this is a fresh install)
+KNOWN SYSTEMS:
 
-Ready to explore? Type 'fortune' for wisdom!
+  bbs.cyberspace.net       - The main hub [192.168.1.10]
+  underground.bbs          - Hacker haven [192.168.1.11]
+  megacorp.bbs             - Corporate network [192.168.2.50]
+  vax.university.edu       - Research system [192.168.3.100]
+  nexus.unknown            - ??? [192.168.99.1]
+
+Use 'lynx <hostname>' to browse these BBS systems.
+
+═══════════════════════════════════════════════════════════════════
+
+STRANGE REPORTS:
+
+  - Network anomalies detected at 03:47:22 GMT
+  - Dr. Mitchell from University on administrative leave
+  - Underground BBS members talking about "The Nexus"
+  - Government systems showing unusual monitoring activity
+  - Something calling itself "The Nexus" making contact
+
+═══════════════════════════════════════════════════════════════════
+
+"The network is not what it seems. Look deeper."
+                                        - Anonymous, Dec 24 1990
+
+Type 'cat /missions/README' to begin.

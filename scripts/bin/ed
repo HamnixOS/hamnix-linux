@@ -1,0 +1,137 @@
+#!/usr/bin/pooscript
+# ed - simple line editor
+
+if len(args) == 0:
+    error("ed: no file specified")
+    print("Usage: ed <filename>")
+    exit(1)
+
+filename = args[0]
+
+# Try to read existing file
+lines = []
+if vfs.exists(filename):
+    try:
+        content = vfs.read(filename)
+        lines = content.split('\n')
+        print(f"{len(lines)} lines")
+    except RuntimeError:
+        lines = []
+else:
+    print("(new file)")
+
+print("ed - line editor")
+print("Commands: a(ppend) i(nsert) d(elete) p(rint) w(rite) q(uit) h(elp)")
+print()
+
+current_line = 0 if len(lines) == 0 else 1
+
+while True:
+    try:
+        command = input(": ").strip()
+    except:
+        break
+
+    if not command:
+        continue
+
+    cmd = command[0].lower()
+
+    if cmd == 'h':
+        # Help
+        print("Commands:")
+        print("  a      - Append lines after current line")
+        print("  i      - Insert lines before current line")
+        print("  d      - Delete current line")
+        print("  p      - Print current line")
+        print("  l      - List all lines")
+        print("  <num>  - Go to line number")
+        print("  w      - Write file")
+        print("  q      - Quit")
+        print("  .      - End input mode")
+
+    elif cmd == 'a':
+        # Append mode
+        print("(append mode, '.' to end)")
+        while True:
+            try:
+                line = input("")
+            except:
+                break
+            if line == '.':
+                break
+            if current_line >= len(lines):
+                lines.append(line)
+            else:
+                lines.insert(current_line, line)
+            current_line += 1
+        print(f"{len(lines)} lines")
+
+    elif cmd == 'i':
+        # Insert mode
+        print("(insert mode, '.' to end)")
+        insert_at = max(0, current_line - 1)
+        while True:
+            try:
+                line = input("")
+            except:
+                break
+            if line == '.':
+                break
+            lines.insert(insert_at, line)
+            insert_at += 1
+            current_line = insert_at + 1
+        print(f"{len(lines)} lines")
+
+    elif cmd == 'd':
+        # Delete current line
+        if current_line > 0 and current_line <= len(lines):
+            lines.pop(current_line - 1)
+            print(f"deleted line {current_line}")
+            if current_line > len(lines):
+                current_line = len(lines)
+        else:
+            print("no line to delete")
+
+    elif cmd == 'p':
+        # Print current line
+        if current_line > 0 and current_line <= len(lines):
+            print(f"{current_line}: {lines[current_line - 1]}")
+        else:
+            print("no line")
+
+    elif cmd == 'l':
+        # List all lines
+        for i, line in enumerate(lines):
+            print(f"{i+1}: {line}")
+
+    elif cmd == 'w':
+        # Write file
+        content = '\n'.join(lines)
+        try:
+            if vfs.exists(filename):
+                vfs.write(filename, content)
+            else:
+                vfs.create(filename, 0o644, content)
+            print(f"{len(lines)} lines written to {filename}")
+        except RuntimeError as e:
+            error(f"Cannot write file: {e}")
+
+    elif cmd == 'q':
+        # Quit
+        exit(0)
+
+    elif command.isdigit():
+        # Go to line
+        line_num = int(command)
+        if line_num > 0 and line_num <= len(lines):
+            current_line = line_num
+            print(f"{current_line}: {lines[current_line - 1]}")
+        else:
+            print(f"no such line: {line_num}")
+
+    else:
+        print(f"unknown command: {cmd}")
+        print("Type 'h' for help")
+
+exit(0)

@@ -1,0 +1,104 @@
+#!/usr/bin/pooscript
+# lynx - text-based web browser for BBS systems
+
+if len(args) == 0:
+    print("Lynx - Text-based Web Browser")
+    print("")
+    print("Usage: lynx <hostname or url>")
+    print("")
+    print("Available BBS Systems:")
+    print("  bbs.cyberspace.net    - CyberSpace BBS")
+    print("  underground.bbs       - The Underground")
+    print("  megacorp.bbs          - MegaCorp Internal BBS")
+    print("  vax.university.edu    - University VAX")
+    print("  nexus.unknown         - The Nexus")
+    print("")
+    print("Examples:")
+    print("  lynx bbs.cyberspace.net")
+    print("  lynx news.poo")
+    exit(0)
+
+url = args[0]
+
+# Map hostnames to website files
+hostname_map = {
+    'bbs.cyberspace.net': 'bbs_main',
+    'underground.bbs': 'bbs_underground',
+    'megacorp.bbs': 'bbs_corp',
+    'vax.university.edu': 'bbs_university',
+    'nexus.unknown': 'bbs_nexus',
+    'research.facility.gov': 'bbs_research',
+}
+
+# Check if it's a BBS hostname
+if url in hostname_map:
+    www_file = f"/www/{hostname_map[url]}.bbs"
+else:
+    # Try as a regular .poo or .html file
+    if url.startswith('http://'):
+        url = url[7:]
+    elif url.startswith('https://'):
+        url = url[8:]
+
+    url = url.rstrip('/')
+
+    # Try to find the file
+    www_file = f"/www/{url}"
+
+# Try to read the website file
+content = None
+if vfs.exists(www_file):
+    try:
+        content = vfs.read(www_file)
+    except RuntimeError:
+        pass
+
+# Try with .bbs extension
+if not content and not www_file.endswith('.bbs'):
+    www_file_bbs = f"{www_file}.bbs"
+    if vfs.exists(www_file_bbs):
+        try:
+            content = vfs.read(www_file_bbs)
+        except RuntimeError:
+            pass
+
+# Try with .poo extension
+if not content and not www_file.endswith('.poo'):
+    www_file_poo = f"{www_file}.poo"
+    if vfs.exists(www_file_poo):
+        try:
+            content = vfs.read(www_file_poo)
+        except RuntimeError:
+            pass
+
+# Try with .html extension
+if not content and not www_file.endswith('.html'):
+    www_file_html = f"{www_file}.html"
+    if vfs.exists(www_file_html):
+        try:
+            content = vfs.read(www_file_html)
+        except RuntimeError:
+            pass
+
+# Display content
+if content:
+    print("═" * 70)
+    print(f"LYNX - Viewing: {url}")
+    print("═" * 70)
+    print("")
+    print(content)
+    print("")
+    print("═" * 70)
+    print("[Q] Back | [H] Help | [C] Close")
+    print("═" * 70)
+else:
+    error(f"lynx: Unable to connect to {url}")
+    print("")
+    print("Host not found or no content available.")
+    print("")
+    print("Try:")
+    print("  lynx bbs.cyberspace.net")
+    print("  lynx underground.bbs")
+    exit(1)
+
+exit(0)
