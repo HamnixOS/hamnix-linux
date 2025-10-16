@@ -34,9 +34,12 @@ LOCK_FILE = "/var/lib/pooget/lock"
 # Ensure database directory exists
 if not vfs.exists(DB_DIR):
     try:
+        # Create parent directory first if needed
+        if not vfs.exists("/var/lib"):
+            vfs.mkdir("/var/lib", 0o755)
         vfs.mkdir(DB_DIR, 0o755)
-    except:
-        error("pooget: Failed to create database directory")
+    except Exception as e:
+        print("pooget: Failed to create database directory:", str(e))
         exit(1)
 
 # Parse command
@@ -46,13 +49,13 @@ command = args[0]
 def acquire_lock():
     """Acquire lock file to prevent concurrent operations"""
     if vfs.exists(LOCK_FILE):
-        error("pooget: Another pooget process is running")
-        error("If no other pooget is running, remove %s" % LOCK_FILE)
+        print("pooget: Another pooget process is running")
+        print("If no other pooget is running, remove %s" % LOCK_FILE)
         exit(1)
     try:
         vfs.create(LOCK_FILE, 0o644, "locked\n")
     except:
-        error("pooget: Failed to acquire lock")
+        print("pooget: Failed to acquire lock")
         exit(1)
 
 def release_lock():
@@ -121,8 +124,8 @@ if command == 'update':
         result = net.http_get(url)
 
         if result is None or result == "":
-            error("pooget: Failed to download package list")
-            error("Repository may be unavailable or network error")
+            print("pooget: Failed to download package list")
+            print("Repository may be unavailable or network error")
             exit(1)
 
         # Save to cache
@@ -138,7 +141,7 @@ if command == 'update':
         exit(0)
 
     except Exception as e:
-        error("pooget: Error updating package list: %s" % str(e))
+        print("pooget: Error updating package list: %s" % str(e))
         exit(1)
 
 # Command: list
@@ -166,15 +169,15 @@ elif command == 'list':
 # Command: search
 elif command == 'search':
     if len(args) < 2:
-        error("Usage: pooget search <term>")
+        print("Usage: pooget search <term>")
         exit(1)
 
     search_term = args[1].lower()
     available = get_available_packages()
 
     if len(available) == 0:
-        error("pooget: No package list available")
-        error("Run 'pooget update' first")
+        print("pooget: No package list available")
+        print("Run 'pooget update' first")
         exit(1)
 
     results = []
@@ -201,7 +204,7 @@ elif command == 'search':
 # Command: info
 elif command == 'info':
     if len(args) < 2:
-        error("Usage: pooget info <package>")
+        print("Usage: pooget info <package>")
         exit(1)
 
     pkg_name = args[1]
@@ -233,8 +236,8 @@ elif command == 'info':
         print("\nInstalled: Yes")
         print("Status: Not in repository (manually installed or repo out of date)")
     else:
-        error("pooget: Package '%s' not found" % pkg_name)
-        error("Try 'pooget search %s' or 'pooget update'" % pkg_name)
+        print("pooget: Package '%s' not found" % pkg_name)
+        print("Try 'pooget search %s' or 'pooget update'" % pkg_name)
         exit(1)
 
     exit(0)
@@ -242,7 +245,7 @@ elif command == 'info':
 # Command: install
 elif command == 'install':
     if len(args) < 2:
-        error("Usage: pooget install <package>")
+        print("Usage: pooget install <package>")
         exit(1)
 
     pkg_name = args[1]
@@ -262,8 +265,8 @@ elif command == 'install':
         # Get package info from available list
         available = get_available_packages()
         if pkg_name not in available:
-            error("pooget: Package '%s' not found" % pkg_name)
-            error("Run 'pooget update' to refresh package list")
+            print("pooget: Package '%s' not found" % pkg_name)
+            print("Run 'pooget update' to refresh package list")
             release_lock()
             exit(1)
 
@@ -280,7 +283,7 @@ elif command == 'install':
         pkg_data = net.http_get(pkg_url)
 
         if pkg_data is None or pkg_data == "":
-            error("pooget: Failed to download package")
+            print("pooget: Failed to download package")
             release_lock()
             exit(1)
 
@@ -304,14 +307,14 @@ elif command == 'install':
         exit(0)
 
     except Exception as e:
-        error("pooget: Installation failed: %s" % str(e))
+        print("pooget: Installation failed: %s" % str(e))
         release_lock()
         exit(1)
 
 # Command: remove
 elif command == 'remove':
     if len(args) < 2:
-        error("Usage: pooget remove <package>")
+        print("Usage: pooget remove <package>")
         exit(1)
 
     pkg_name = args[1]
@@ -322,7 +325,7 @@ elif command == 'remove':
         installed = get_installed_packages()
 
         if pkg_name not in installed:
-            error("pooget: Package '%s' is not installed" % pkg_name)
+            print("pooget: Package '%s' is not installed" % pkg_name)
             release_lock()
             exit(1)
 
@@ -347,7 +350,7 @@ elif command == 'remove':
         exit(0)
 
     except Exception as e:
-        error("pooget: Removal failed: %s" % str(e))
+        print("pooget: Removal failed: %s" % str(e))
         release_lock()
         exit(1)
 
@@ -362,8 +365,8 @@ elif command == 'upgrade':
         available = get_available_packages()
 
         if len(available) == 0:
-            error("pooget: No package list available")
-            error("Run 'pooget update' first")
+            print("pooget: No package list available")
+            print("Run 'pooget update' first")
             release_lock()
             exit(1)
 
@@ -400,7 +403,7 @@ elif command == 'upgrade':
             pkg_data = net.http_get(pkg_url)
 
             if pkg_data is None or pkg_data == "":
-                error("Failed to download %s, skipping" % name)
+                print("Failed to download %s, skipping" % name)
                 continue
 
             # Update file
@@ -420,11 +423,11 @@ elif command == 'upgrade':
         exit(0)
 
     except Exception as e:
-        error("pooget: Upgrade failed: %s" % str(e))
+        print("pooget: Upgrade failed: %s" % str(e))
         release_lock()
         exit(1)
 
 else:
-    error("pooget: Unknown command '%s'" % command)
-    error("Run 'pooget' without arguments for help")
+    print("pooget: Unknown command '%s'" % command)
+    print("Run 'pooget' without arguments for help")
     exit(1)
