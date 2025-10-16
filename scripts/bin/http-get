@@ -1,0 +1,98 @@
+#!/usr/bin/pooscript
+# http-get - HTTP GET request handler
+# Fetches content from local httpd server
+# This runs ON the web server to fetch content (called by remote lynx)
+
+if len(args) == 0:
+    error("http-get: no path specified")
+    print("Usage: http-get <url-path>")
+    exit(1)
+
+url_path = args[0]
+
+# Check if httpd is running on this system
+if not vfs.exists('/var/run/httpd.pid'):
+    error("http-get: httpd not running on this system")
+    print("No web server available")
+    exit(1)
+
+# ============================================================================
+# HTTP SERVER FUNCTIONS (copied from httpd for client use)
+# ============================================================================
+
+config = {
+    'document_root': '/www',
+    'default_document': 'default.bbs',
+}
+
+def execute_dynamic_script(script_path):
+    """Execute a .poo script and capture its output"""
+    try:
+        exit_code, stdout, stderr = process.execute(script_path, "")
+        if exit_code != 0:
+            return None, f"Script error: {stderr}"
+        return stdout, None
+    except Exception as e:
+        return None, f"Execution error: {str(e)}"
+
+
+def serve_file(url_path):
+    """Serve a file - static or dynamic"""
+    # Normalize path
+    if url_path == '' or url_path == '/':
+        url_path = config['default_document']
+
+    # Remove leading slash
+    if url_path.startswith('/'):
+        url_path = url_path[1:]
+
+    # Build full path
+    full_path = f"{config['document_root']}/{url_path}"
+
+    # Security: prevent directory traversal
+    if '..' in url_path:
+        return None, "403 Forbidden"
+
+    # Try to find the file
+    file_path = None
+
+    if vfs.exists(full_path):
+        file_path = full_path
+    elif vfs.exists(f"{full_path}.bbs"):
+        file_path = f"{full_path}.bbs"
+    elif vfs.exists(f"{full_path}.poo"):
+        file_path = f"{full_path}.poo"
+    elif vfs.exists(f"{full_path}.html"):
+        file_path = f"{full_path}.html"
+    else:
+        return None, f"404 Not Found"
+
+    # Check if it's a dynamic .poo script
+    if file_path.endswith('.poo'):
+        content, error = execute_dynamic_script(file_path)
+        if error:
+            return None, f"500 Internal Server Error: {error}"
+        return content, None
+    else:
+        # Static file
+        try:
+            content = vfs.read(file_path)
+            return content, None
+        except RuntimeError:
+            return None, "500 Internal Server Error"
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+# Serve the requested file
+content, error = serve_file(url_path)
+
+if error:
+    error(f"http-get: {error}")
+    exit(1)
+
+# Output the content
+print(content)
+exit(0)

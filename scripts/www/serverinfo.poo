@@ -1,0 +1,93 @@
+#!/usr/bin/pooscript
+# serverinfo.poo - Dynamic server info page (like PHP info)
+# This demonstrates server-side script execution in httpd
+
+# This script executes ON THE SERVER and generates HTML dynamically
+# Like PHP, ASP, or CGI scripts
+
+print("╔═══════════════════════════════════════════════════════════════╗")
+print("║                                                               ║")
+print("║                   SERVER INFORMATION PAGE                     ║")
+print("║                  (Dynamic Content Demo)                       ║")
+print("║                                                               ║")
+print("╚═══════════════════════════════════════════════════════════════╝")
+print("")
+print("This page is generated dynamically by a .poo script running on")
+print("the web server. Like PHP or CGI, it executes server-side!")
+print("")
+print("════════════════════════════════════════════════════════════════")
+print("")
+
+# Get system information
+sys = process.get_system()
+
+if sys:
+    print("SYSTEM INFORMATION:")
+    print("──────────────────")
+    print(f"  Hostname: {sys.hostname}")
+    print(f"  Primary IP: {sys.local_ip}")
+    print("")
+    print("NETWORK INTERFACES:")
+    print("──────────────────")
+    for iface, ip in sys.interfaces.items():
+        print(f"  {iface}: {ip}")
+    print("")
+    print("CONFIGURATION:")
+    print("─────────────")
+    print(f"  IP Forwarding: {'enabled' if sys.ip_forward else 'disabled'}")
+    print(f"  Firewall Rules: {len(sys.firewall_rules)}")
+    print(f"  Routing Entries: {len(sys.routing_table)}")
+else:
+    print("SYSTEM INFORMATION: Not available")
+
+print("")
+print("════════════════════════════════════════════════════════════════")
+print("")
+
+# Get process information
+pid = process.getpid()
+print("SCRIPT PROCESS:")
+print("───────────────")
+print(f"  PID: {pid}")
+print(f"  UID: {process.uid}")
+print(f"  GID: {process.gid}")
+print("")
+
+# List some processes
+print("RUNNING PROCESSES (sample):")
+print("───────────────────────────")
+all_procs = process.list_all()
+count = 0
+for p in all_procs:
+    if count < 10:  # Show first 10
+        print(f"  PID {p['pid']:4d}: {p['command']}")
+        count += 1
+print(f"  ... ({len(all_procs)} total processes)")
+print("")
+
+print("════════════════════════════════════════════════════════════════")
+print("")
+
+# Check for httpd
+print("WEB SERVER STATUS:")
+print("──────────────────")
+if vfs.exists('/var/run/httpd.pid'):
+    try:
+        httpd_pid = vfs.read('/var/run/httpd.pid').strip()
+        print(f"  httpd: RUNNING (PID {httpd_pid})")
+    except:
+        print("  httpd: PID file exists but unreadable")
+else:
+    print("  httpd: NOT RUNNING")
+
+print("")
+print("════════════════════════════════════════════════════════════════")
+print("")
+print("🔹 This is a DYNAMIC page generated at request time")
+print("🔹 Each refresh would show current system state")
+print("🔹 .poo scripts can access vfs, process, network APIs")
+print("🔹 Use this for dynamic BBS content, user dashboards, etc.")
+print("")
+print("════════════════════════════════════════════════════════════════")
+
+exit(0)

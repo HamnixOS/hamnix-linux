@@ -111,10 +111,15 @@
 
   lynx <site>           - Visit a site
   lynx                  - Show this directory (default)
+  lynx <site>/path      - Access specific pages
   nmap <ip>             - Scan network for systems
   ssh <host>            - Connect to remote system
 
   Type 'help' for full command list
+
+  🔥 NEW: Dynamic Web Pages!
+  Try: lynx bbs.cyberspace.net/serverinfo.poo
+       lynx bbs.cyberspace.net/time.poo
 
 ════════════════════════════════════════════════════════════════════
 

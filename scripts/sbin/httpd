@@ -1,0 +1,208 @@
+#!/usr/bin/pooscript
+# httpd - HTTP daemon for serving dynamic web content
+# Serves static files and executes .poo scripts from /www/
+# Port 80 (virtual)
+
+print("[httpd] HTTP daemon starting...")
+print("[httpd] Document root: /www/")
+print("[httpd] Port: 80 (HTTP)")
+
+# Check if document root exists
+if not vfs.exists('/www'):
+    error("[httpd] ERROR: Document root /www/ does not exist!")
+    exit(1)
+
+# Create PID file to indicate we're running
+pid = process.getpid()
+
+# Ensure /var/run directory exists
+if not vfs.exists('/var/run'):
+    try:
+        vfs.mkdir('/var/run', 0o755)
+    except:
+        pass
+
+try:
+    vfs.write('/var/run/httpd.pid', str(pid))
+except:
+    # Try to create it if it doesn't exist
+    try:
+        vfs.create('/var/run/httpd.pid', 0o644, str(pid))
+    except:
+        print("[httpd] WARNING: Could not create PID file")
+
+print(f"[httpd] Started with PID {pid}")
+
+# Service configuration
+config = {
+    'port': 80,
+    'document_root': '/www',
+    'server_name': 'httpd/1.0 (Poodillion)',
+    'default_document': 'default.bbs',
+}
+
+print(f"[httpd] Server: {config['server_name']}")
+
+# ============================================================================
+# DYNAMIC CONTENT EXECUTION (Like CGI/PHP)
+# ============================================================================
+
+def execute_dynamic_script(script_path):
+    """
+    Execute a .poo script and capture its output
+    This is like PHP or CGI - the script generates HTML dynamically
+    """
+    try:
+        # Execute the script and capture output
+        exit_code, stdout, stderr = process.execute(script_path, "")
+
+        if exit_code != 0:
+            return None, f"Script error: {stderr}"
+
+        return stdout, None
+
+    except Exception as e:
+        return None, f"Execution error: {str(e)}"
+
+
+def serve_file(url_path):
+    """
+    Serve a file from document root
+    Handles both static files and dynamic .poo scripts
+
+    Returns: (content, error)
+    """
+    # Normalize path
+    if url_path == '' or url_path == '/':
+        url_path = config['default_document']
+
+    # Remove leading slash
+    if url_path.startswith('/'):
+        url_path = url_path[1:]
+
+    # Build full path
+    full_path = f"{config['document_root']}/{url_path}"
+
+    # Security: prevent directory traversal
+    if '..' in url_path:
+        return None, "403 Forbidden: Directory traversal not allowed"
+
+    # Try to find the file
+    content = None
+    file_path = None
+
+    # Try exact path first
+    if vfs.exists(full_path):
+        file_path = full_path
+    # Try with .bbs extension
+    elif vfs.exists(f"{full_path}.bbs"):
+        file_path = f"{full_path}.bbs"
+    # Try with .poo extension
+    elif vfs.exists(f"{full_path}.poo"):
+        file_path = f"{full_path}.poo"
+    # Try with .html extension
+    elif vfs.exists(f"{full_path}.html"):
+        file_path = f"{full_path}.html"
+    else:
+        return None, f"404 Not Found: {url_path}"
+
+    # Check if it's a dynamic .poo script
+    if file_path.endswith('.poo'):
+        print(f"[httpd] Executing dynamic script: {file_path}")
+        content, error = execute_dynamic_script(file_path)
+        if error:
+            return None, f"500 Internal Server Error: {error}"
+        return content, None
+    else:
+        # Static file - just read and return
+        try:
+            content = vfs.read(file_path)
+            return content, None
+        except RuntimeError as e:
+            return None, f"500 Internal Server Error: Cannot read file"
+
+
+# ============================================================================
+# REQUEST QUEUE HANDLER
+# ============================================================================
+
+def process_http_request(request_file):
+    """
+    Process an HTTP request from the request queue
+    Request format: Simple text file with:
+      Line 1: GET /path/to/file
+      Line 2+: Headers (optional)
+    """
+    try:
+        request_data = vfs.read(request_file)
+        lines = request_data.split('\n')
+
+        if len(lines) == 0:
+            return None, "400 Bad Request: Empty request"
+
+        # Parse request line: "GET /path HTTP/1.0"
+        request_line = lines[0].strip()
+        parts = request_line.split()
+
+        if len(parts) < 2:
+            return None, "400 Bad Request: Invalid request line"
+
+        method = parts[0]
+        url_path = parts[1]
+
+        if method != 'GET':
+            return None, "405 Method Not Allowed: Only GET supported"
+
+        # Serve the requested file
+        content, error = serve_file(url_path)
+
+        if error:
+            return None, error
+
+        return content, None
+
+    except Exception as e:
+        return None, f"500 Internal Server Error: {str(e)}"
+
+
+# ============================================================================
+# MAIN SERVER LOOP
+# ============================================================================
+
+print("[httpd] Server is ready to serve requests")
+print("")
+print("[httpd] Dynamic content support:")
+print("[httpd]   - .poo scripts executed server-side (like PHP/CGI)")
+print("[httpd]   - Static files (.bbs, .html) served directly")
+print("")
+print("[httpd] Request queue: /var/www/httpd-requests/")
+print("[httpd] Response queue: /var/www/httpd-responses/")
+print("")
+
+# Create request/response directories if they don't exist
+if not vfs.exists('/var/www'):
+    try:
+        vfs.mkdir('/var/www', 0o755)
+    except:
+        pass
+
+if not vfs.exists('/var/www/httpd-requests'):
+    try:
+        vfs.mkdir('/var/www/httpd-requests', 0o777)  # World writable for client access
+    except:
+        pass
+
+if not vfs.exists('/var/www/httpd-responses'):
+    try:
+        vfs.mkdir('/var/www/httpd-responses', 0o777)  # World readable for client access
+    except:
+        pass
+
+print("[httpd] Ready to serve HTTP requests")
+print("[httpd] Daemon running")
+
+# In a real daemon this would loop forever processing requests
+# For this virtual world, the process just needs to exist with 'service' tag
+# The actual request handling happens when lynx connects
+
+exit(0)
