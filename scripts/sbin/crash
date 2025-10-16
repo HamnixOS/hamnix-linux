@@ -1,0 +1,16 @@
+#!/usr/bin/pooscript
+# crash - Simulate a system crash (for testing)
+
+# Get system interface
+sys_iface = process.get_system()
+if not sys_iface:
+    error("crash: cannot get system interface")
+    exit(1)
+
+print(f"Triggering kernel panic on {sys_iface.hostname}...")
+
+# Simulate a crash
+sys_iface.crash()
+
+# This won't actually execute since system crashed
+exit(1)
