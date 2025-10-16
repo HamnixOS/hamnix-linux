@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # wc - word, line, character, and byte count
 
 # Parse options

@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # sh - simple shell
 # Processes one command at a time, maintaining state in the process
 

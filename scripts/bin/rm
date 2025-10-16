@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # rm - remove files or directories
 
 if len(args) == 0:

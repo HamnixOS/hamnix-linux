@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # ps - report process status
 
 # Parse options

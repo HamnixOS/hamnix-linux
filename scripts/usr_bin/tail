@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # tail - output the last part of files
 
 # Parse options

@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # whoami - print effective user name
 
 # For now, just print the UID since we don't have user lookup

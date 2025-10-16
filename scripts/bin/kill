@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # kill - send signals to processes
 
 if len(args) == 0:

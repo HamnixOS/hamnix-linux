@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # chmod - change file permissions
 
 if len(args) < 2:

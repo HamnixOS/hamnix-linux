@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # mkdir - create directories
 
 if len(args) == 0:

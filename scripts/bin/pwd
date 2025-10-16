@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # pwd - print working directory
 
 print(vfs.getcwd())

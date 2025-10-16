@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # date - print current date and time
 
 current_time = format_time(time(), '%a %b %d %H:%M:%S %Z %Y')

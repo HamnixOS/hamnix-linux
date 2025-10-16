@@ -1,4 +1,4 @@
-#!/usr/bin/virtualscript
+#!/usr/bin/pooscript
 # hostname - print system hostname
 
 # Read from /etc/hostname
