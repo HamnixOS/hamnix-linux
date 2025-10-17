@@ -1,0 +1,51 @@
+#!/bin/sh
+# Mengiddi-like Reader - A text pager for viewing files
+# Usage: reader <file>
+
+READER_VERSION="1.0"
+
+if [ "$#" -eq 0 ]; then
+    echo "Usage: reader <file>"
+    echo "A text-based file viewer (pager)"
+    echo ""
+    echo "Commands while viewing:"
+    echo "  SPACE     - Next page"
+    echo "  b         - Previous page"
+    echo "  q         - Quit"
+    echo "  /pattern  - Search forward"
+    echo "  n         - Next search result"
+    echo "  g         - Go to beginning"
+    echo "  G         - Go to end"
+    echo "  h         - Show help"
+    exit 1
+fi
+
+# Check if file exists
+if [ ! -f "$1" ]; then
+    echo "reader: $1: No such file"
+    exit 1
+fi
+
+# Check if file is readable
+if [ ! -r "$1" ]; then
+    echo "reader: $1: Permission denied"
+    exit 1
+fi
+
+# Get terminal size (default 24 rows)
+LINES=24
+COLS=80
+
+# Display file header
+echo "=== Reader v$READER_VERSION ==="
+echo "File: $1"
+echo "Use 'q' to quit, 'h' for help"
+echo "================================"
+echo ""
+
+# For now, just cat the file
+# A real implementation would handle pagination, scrolling, etc.
+cat "$1"
+
+echo ""
+echo "=== End of file ==="
