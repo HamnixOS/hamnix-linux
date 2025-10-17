@@ -22,6 +22,68 @@ if not target:
     error("ping: usage: ping [-c count] destination")
     exit(1)
 
+# DNS Resolution: check if target is a hostname
+target_hostname = target
+target_ip = target
+
+# Check if target is not an IP address (simple check)
+parts = target.split('.')
+is_ip = True
+if len(parts) == 4:
+    for part in parts:
+        try:
+            num = int(part)
+            if num < 0 or num > 255:
+                is_ip = False
+                break
+        except:
+            is_ip = False
+            break
+else:
+    is_ip = False
+
+# If not an IP, try to resolve via DNS
+if not is_ip:
+    # Try DNS resolution from /var/run/named.db
+    try:
+        dns_db = vfs.read('/var/run/named.db')
+        if dns_db:
+            for line in dns_db.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == target:
+                    target_ip = parts[1]
+                    break
+    except:
+        pass
+
+    # Also try /etc/hosts
+    if target_ip == target:  # Still not resolved
+        try:
+            hosts = vfs.read('/etc/hosts')
+            if hosts:
+                for line in hosts.split('\n'):
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        for hostname in parts[1:]:
+                            if hostname == target:
+                                target_ip = parts[0]
+                                break
+                        if target_ip != target:
+                            break
+        except:
+            pass
+
+    # Check if we successfully resolved
+    if target_ip == target:
+        error(f"ping: {target}: Name or service not known")
+        exit(1)
+
 # Get system info
 system_iface = process.get_system()
 if not system_iface:
@@ -32,7 +94,11 @@ if not system_iface:
 local_ip = system_iface.local_ip
 pid = process.getpid()
 
-print(f"PING {target} 56(84) bytes of data.")
+# Show what we're pinging
+if target_hostname != target_ip:
+    print(f"PING {target_hostname} ({target_ip}) 56(84) bytes of data.")
+else:
+    print(f"PING {target} 56(84) bytes of data.")
 
 
 # Helper functions for packet building
@@ -158,7 +224,7 @@ for i in range(count):
     icmp_packet = build_icmp_packet(8, 0, pid, sequence, icmp_data)  # Type 8 = Echo Request
 
     # Build IP packet
-    ip_packet = build_ip_packet(local_ip, target, 1, icmp_packet)  # Protocol 1 = ICMP
+    ip_packet = build_ip_packet(local_ip, target_ip, 1, icmp_packet)  # Protocol 1 = ICMP
 
     try:
         # Send packet
@@ -183,7 +249,10 @@ for i in range(count):
                     if icmp_reply['id'] == pid and icmp_reply['sequence'] == sequence:
                         # Success!
                         ping_time = 0.5 + ((i * 137) % 100) / 100.0
-                        print(f"64 bytes from {target}: icmp_seq={sequence} ttl=64 time={ping_time:.1f} ms")
+                        if target_hostname != target_ip:
+                            print(f"64 bytes from {target_hostname} ({target_ip}): icmp_seq={sequence} ttl=64 time={ping_time:.1f} ms")
+                        else:
+                            print(f"64 bytes from {target_ip}: icmp_seq={sequence} ttl=64 time={ping_time:.1f} ms")
                         success_count += 1
                     else:
                         print(f"From {local_ip} icmp_seq={sequence} Destination Host Unreachable")
@@ -202,7 +271,7 @@ for i in range(count):
         time_sleep(0.9)
 
 # Print statistics
-print(f"\n--- {target} ping statistics ---")
+print(f"\n--- {target_hostname} ping statistics ---")
 packet_loss = 0 if count == 0 else int(100 * (count - success_count) / count)
 print(f"{count} packets transmitted, {success_count} received, {packet_loss}% packet loss")
 

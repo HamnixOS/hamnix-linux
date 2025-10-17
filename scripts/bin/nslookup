@@ -1,0 +1,83 @@
+#!/usr/bin/pooscript
+# nslookup - query DNS servers for domain name resolution
+
+if len(args) == 0:
+    error("Usage: nslookup <hostname>")
+    exit(1)
+
+hostname = args[0]
+
+# Function to resolve hostname to IP
+def resolve_dns(name):
+    """Resolve hostname using DNS server"""
+
+    # Check if it's already an IP address
+    parts = name.split('.')
+    if len(parts) == 4:
+        all_numeric = True
+        for part in parts:
+            try:
+                num = int(part)
+                if num < 0 or num > 255:
+                    all_numeric = False
+                    break
+            except:
+                all_numeric = False
+                break
+
+        if all_numeric:
+            # It's already an IP
+            return name
+
+    # Read DNS database
+    try:
+        dns_db = vfs.read('/var/run/named.db')
+        if dns_db:
+            for line in dns_db.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = line.split()
+                if len(parts) >= 2:
+                    db_hostname = parts[0]
+                    db_ip = parts[1]
+
+                    if db_hostname == name:
+                        return db_ip
+    except:
+        pass
+
+    # Also check /etc/hosts
+    try:
+        hosts = vfs.read('/etc/hosts')
+        if hosts:
+            for line in hosts.split('\n'):
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip = parts[0]
+                    for hostname in parts[1:]:
+                        if hostname == name:
+                            return ip
+    except:
+        pass
+
+    return None
+
+# Resolve the hostname
+ip = resolve_dns(hostname)
+
+if ip:
+    print(f"Server:\t\t127.0.0.1")
+    print(f"Address:\t127.0.0.1#53")
+    print("")
+    print(f"Name:\t{hostname}")
+    print(f"Address: {ip}")
+    exit(0)
+else:
+    error(f"** server can't find {hostname}: NXDOMAIN")
+    exit(1)
