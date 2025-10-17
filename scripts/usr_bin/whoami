@@ -1,7 +1,0 @@
-#!/usr/bin/pooscript
-# whoami - print effective user name
-
-# For now, just print the UID since we don't have user lookup
-# In a real system, we'd look up the username
-print(str(process.uid))
-exit(0)

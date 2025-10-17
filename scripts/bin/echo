@@ -1,5 +1,0 @@
-#!/usr/bin/pooscript
-# echo - print arguments
-
-print(' '.join(args))
-exit(0)

@@ -1,6 +1,0 @@
-#!/bin/pooscript
-# Simple hello world in PooScript
-
-echo "Hello from PooScript!"
-echo "This will be compiled to native code"
-pwd
