@@ -125,11 +125,28 @@ const S_IXOTH: int32 = 1     # 0001 - others x
 const EXIT_SUCCESS: int32 = 0
 const EXIT_FAILURE: int32 = 1
 
+# Additional syscalls
+const SYS_getdents: int32 = 141
+const SYS_nanosleep: int32 = 162
+const SYS_getcwd: int32 = 183
+
+# Seek modes for lseek
+const SEEK_SET: int32 = 0
+const SEEK_CUR: int32 = 1
+const SEEK_END: int32 = 2
+
+# Signal numbers
+const SIGTERM: int32 = 15
+const SIGKILL: int32 = 9
+const SIGINT: int32 = 2
+const SIGHUP: int32 = 1
+
 # Syscall wrappers (implemented in assembly)
 extern proc syscall1(num: int32, arg1: int32): int32
 extern proc syscall2(num: int32, arg1: int32, arg2: int32): int32
 extern proc syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32): int32
 extern proc syscall4(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32): int32
+extern proc syscall5(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32): int32
 
 # High-level wrappers
 proc exit(code: int32) =
@@ -194,3 +211,199 @@ proc perror(msg: ptr uint8) =
   var len: int32 = strlen(msg)
   discard write(STDERR, msg, len)
   discard write(STDERR, cast[ptr uint8]("\n"), 1)
+
+# Additional file operations
+proc lseek(fd: int32, offset: int32, whence: int32): int32 =
+  return syscall3(SYS_lseek, fd, offset, whence)
+
+proc unlink(path: ptr uint8): int32 =
+  return syscall1(SYS_unlink, cast[int32](path))
+
+proc mkdir_syscall(path: ptr uint8, mode: int32): int32 =
+  return syscall2(SYS_mkdir, cast[int32](path), mode)
+
+proc rmdir_syscall(path: ptr uint8): int32 =
+  return syscall1(SYS_rmdir, cast[int32](path))
+
+proc rename(oldpath: ptr uint8, newpath: ptr uint8): int32 =
+  return syscall2(SYS_rename, cast[int32](oldpath), cast[int32](newpath))
+
+proc chdir(path: ptr uint8): int32 =
+  return syscall1(SYS_chdir, cast[int32](path))
+
+proc getcwd(buf: ptr uint8, size: int32): int32 =
+  return syscall2(SYS_getcwd, cast[int32](buf), size)
+
+proc kill_proc(pid: int32, sig: int32): int32 =
+  return syscall2(SYS_kill, pid, sig)
+
+proc getppid(): int32 =
+  return syscall1(SYS_getppid, 0)
+
+proc getgid(): int32 =
+  return syscall1(SYS_getgid, 0)
+
+proc geteuid(): int32 =
+  return syscall1(SYS_geteuid, 0)
+
+proc getegid(): int32 =
+  return syscall1(SYS_getegid, 0)
+
+proc fork_proc(): int32 =
+  return syscall1(SYS_fork, 0)
+
+proc dup2(oldfd: int32, newfd: int32): int32 =
+  return syscall2(SYS_dup2, oldfd, newfd)
+
+proc pipe(pipefd: ptr int32): int32 =
+  return syscall1(SYS_pipe, cast[int32](pipefd))
+
+proc execve(filename: ptr uint8, argv: ptr int32, envp: ptr int32): int32 =
+  return syscall3(SYS_execve, cast[int32](filename), cast[int32](argv), cast[int32](envp))
+
+proc waitpid(pid: int32, status: ptr int32, options: int32): int32 =
+  return syscall3(SYS_waitpid, pid, cast[int32](status), options)
+
+# Number to string conversion (decimal)
+proc itoa(num: int32, buf: ptr uint8): int32 =
+  var n: int32 = num
+  var i: int32 = 0
+  var negative: int32 = 0
+
+  if n < 0:
+    negative = 1
+    n = 0 - n
+
+  if n == 0:
+    buf[0] = cast[uint8](48)
+    buf[1] = cast[uint8](0)
+    return 1
+
+  # Build number in reverse
+  var temp: int32 = 0
+  temp = 0
+  while n > 0:
+    temp = temp * 10 + (n % 10)
+    n = n / 10
+    i = i + 1
+
+  # Write digits
+  var pos: int32 = 0
+  if negative == 1:
+    buf[0] = cast[uint8](45)
+    pos = 1
+
+  while temp > 0 or i > 0:
+    buf[pos] = cast[uint8](48 + (temp % 10))
+    temp = temp / 10
+    pos = pos + 1
+    i = i - 1
+
+  buf[pos] = cast[uint8](0)
+  return pos
+
+# String to number conversion
+proc atoi(s: ptr uint8): int32 =
+  var result: int32 = 0
+  var i: int32 = 0
+  var negative: int32 = 0
+
+  # Skip whitespace
+  while s[i] == cast[uint8](32) or s[i] == cast[uint8](9):
+    i = i + 1
+
+  # Check for sign
+  if s[i] == cast[uint8](45):
+    negative = 1
+    i = i + 1
+  elif s[i] == cast[uint8](43):
+    i = i + 1
+
+  # Convert digits
+  while s[i] >= cast[uint8](48) and s[i] <= cast[uint8](57):
+    result = result * 10 + (cast[int32](s[i]) - 48)
+    i = i + 1
+
+  if negative == 1:
+    return 0 - result
+  return result
+
+# Print integer to stdout
+proc print_int(n: int32) =
+  var buf: int32 = 0
+  var temp: int32 = 0
+  temp = 0
+  var digits: int32 = 0
+  var num: int32 = n
+
+  if num < 0:
+    discard write(STDOUT, cast[ptr uint8]("-"), 1)
+    num = 0 - num
+
+  if num == 0:
+    discard write(STDOUT, cast[ptr uint8]("0"), 1)
+    return
+
+  # Count digits and reverse
+  while num > 0:
+    temp = temp * 10 + (num % 10)
+    num = num / 10
+    digits = digits + 1
+
+  # Print digits
+  while digits > 0:
+    var d: uint8 = cast[uint8](48 + (temp % 10))
+    discard syscall3(SYS_write, STDOUT, cast[int32](addr(d)), 1)
+    temp = temp / 10
+    digits = digits - 1
+
+# Memory copy
+proc memcpy(dest: ptr uint8, src: ptr uint8, n: int32) =
+  var i: int32 = 0
+  while i < n:
+    dest[i] = src[i]
+    i = i + 1
+
+# Memory set
+proc memset(dest: ptr uint8, val: uint8, n: int32) =
+  var i: int32 = 0
+  while i < n:
+    dest[i] = val
+    i = i + 1
+
+# String concatenation (dest must have enough space)
+proc strcat(dest: ptr uint8, src: ptr uint8) =
+  var d: int32 = strlen(dest)
+  var i: int32 = 0
+  while src[i] != cast[uint8](0):
+    dest[d] = src[i]
+    d = d + 1
+    i = i + 1
+  dest[d] = cast[uint8](0)
+
+# Compare n bytes of memory
+proc memcmp(s1: ptr uint8, s2: ptr uint8, n: int32): int32 =
+  var i: int32 = 0
+  while i < n:
+    if s1[i] != s2[i]:
+      if s1[i] < s2[i]:
+        return -1
+      return 1
+    i = i + 1
+  return 0
+
+# Check if character is a digit
+proc isdigit(c: uint8): int32 =
+  if c >= cast[uint8](48) and c <= cast[uint8](57):
+    return 1
+  return 0
+
+# Check if character is whitespace
+proc isspace(c: uint8): int32 =
+  if c == cast[uint8](32) or c == cast[uint8](9) or c == cast[uint8](10) or c == cast[uint8](13):
+    return 1
+  return 0
+
+# Print newline
+proc newline() =
+  discard write(STDOUT, cast[ptr uint8]("\n"), 1)
