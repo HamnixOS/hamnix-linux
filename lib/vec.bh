@@ -1,0 +1,399 @@
+# Dynamic Array (Vector) Module for Brainhair
+#
+# Provides a dynamically-resizing array with O(1) amortized push.
+# Uses generics for type-safe element access.
+#
+# Vec structure (12 bytes):
+#   data: ptr T       - Pointer to element data (offset 0)
+#   len: int32        - Number of elements (offset 4)
+#   cap: int32        - Capacity in elements (offset 8)
+
+const VEC_DATA_OFFSET: int32 = 0
+const VEC_LEN_OFFSET: int32 = 4
+const VEC_CAP_OFFSET: int32 = 8
+const VEC_STRUCT_SIZE: int32 = 12
+
+# Default initial capacity
+const VEC_DEFAULT_CAP: int32 = 8
+
+# Memory allocation (inline to avoid circular deps)
+const SYS_mmap: int32 = 90
+const SYS_munmap: int32 = 91
+const PROT_READ: int32 = 1
+const PROT_WRITE: int32 = 2
+const MAP_PRIVATE: int32 = 2
+const MAP_ANONYMOUS: int32 = 32
+
+extern proc syscall6(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32, arg6: int32): int32
+
+proc vec_mmap(size: int32): ptr uint8 =
+    var mem: int32 = syscall6(SYS_mmap, 0, size,
+                              PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+    if mem < 0:
+        return cast[ptr uint8](0)
+    return cast[ptr uint8](mem)
+
+proc vec_munmap(ptr: ptr uint8, size: int32) =
+    if cast[int32](ptr) != 0:
+        discard syscall6(SYS_munmap, cast[int32](ptr), size, 0, 0, 0, 0)
+
+# ============================================================================
+# Generic Vec operations using int32 as generic element type
+# For other sizes, users should adapt these or use type-specific versions
+# ============================================================================
+
+# Initialize an empty vector for 4-byte elements (int32, ptr)
+proc vec_init(v: ptr uint8, initial_cap: int32) =
+    var cap: int32 = initial_cap
+    if cap < VEC_DEFAULT_CAP:
+        cap = VEC_DEFAULT_CAP
+
+    # Allocate data for cap elements (4 bytes each)
+    var data_size: int32 = cap * 4
+    var data: ptr uint8 = vec_mmap(data_size)
+
+    var v32: ptr int32 = cast[ptr int32](v)
+    v32[0] = cast[int32](data)  # data pointer
+    v32[1] = 0                   # len = 0
+    v32[2] = cap                 # capacity
+
+# Free vector memory
+proc vec_free(v: ptr uint8) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: int32 = v32[0]
+    var cap: int32 = v32[2]
+
+    if data != 0:
+        vec_munmap(cast[ptr uint8](data), cap * 4)
+
+    v32[0] = 0
+    v32[1] = 0
+    v32[2] = 0
+
+# Get vector length
+proc vec_len(v: ptr uint8): int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    return v32[1]
+
+# Get vector capacity
+proc vec_cap(v: ptr uint8): int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    return v32[2]
+
+# Check if vector is empty
+proc vec_is_empty(v: ptr uint8): bool =
+    return vec_len(v) == 0
+
+# Grow vector capacity (double it)
+proc vec_grow(v: ptr uint8) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var old_data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+    var old_cap: int32 = v32[2]
+
+    var new_cap: int32 = old_cap * 2
+    if new_cap < VEC_DEFAULT_CAP:
+        new_cap = VEC_DEFAULT_CAP
+
+    # Allocate new buffer
+    var new_data: ptr uint8 = vec_mmap(new_cap * 4)
+    if cast[int32](new_data) == 0:
+        return  # Allocation failed
+
+    # Copy existing elements
+    var new_data32: ptr int32 = cast[ptr int32](new_data)
+    var i: int32 = 0
+    while i < len:
+        new_data32[i] = old_data[i]
+        i = i + 1
+
+    # Free old buffer
+    vec_munmap(cast[ptr uint8](old_data), old_cap * 4)
+
+    # Update vector
+    v32[0] = cast[int32](new_data)
+    v32[2] = new_cap
+
+# Reserve capacity
+proc vec_reserve(v: ptr uint8, min_cap: int32) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var cap: int32 = v32[2]
+
+    if min_cap <= cap:
+        return
+
+    var old_data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+
+    # Calculate new capacity
+    var new_cap: int32 = cap
+    while new_cap < min_cap:
+        new_cap = new_cap * 2
+
+    # Allocate and copy
+    var new_data: ptr uint8 = vec_mmap(new_cap * 4)
+    if cast[int32](new_data) == 0:
+        return
+
+    var new_data32: ptr int32 = cast[ptr int32](new_data)
+    var i: int32 = 0
+    while i < len:
+        new_data32[i] = old_data[i]
+        i = i + 1
+
+    vec_munmap(cast[ptr uint8](old_data), cap * 4)
+    v32[0] = cast[int32](new_data)
+    v32[2] = new_cap
+
+# Push element (int32)
+proc vec_push_i32(v: ptr uint8, value: int32) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+    var cap: int32 = v32[2]
+
+    if len >= cap:
+        vec_grow(v)
+        data = cast[ptr int32](v32[0])
+
+    data[len] = value
+    v32[1] = len + 1
+
+# Get element (int32)
+proc vec_get_i32(v: ptr uint8, index: int32): int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    return data[index]
+
+# Set element (int32)
+proc vec_set_i32(v: ptr uint8, index: int32, value: int32) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    data[index] = value
+
+# Pop last element
+proc vec_pop_i32(v: ptr uint8): int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+
+    if len == 0:
+        return 0  # Empty vector
+
+    var value: int32 = data[len - 1]
+    v32[1] = len - 1
+    return value
+
+# Get last element without removing
+proc vec_last_i32(v: ptr uint8): int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+
+    if len == 0:
+        return 0
+    return data[len - 1]
+
+# Get first element
+proc vec_first_i32(v: ptr uint8): int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+
+    if len == 0:
+        return 0
+    return data[0]
+
+# Clear vector (keep capacity)
+proc vec_clear(v: ptr uint8) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    v32[1] = 0
+
+# Get raw data pointer
+proc vec_data(v: ptr uint8): ptr int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    return cast[ptr int32](v32[0])
+
+# Insert element at index (shifts elements right)
+proc vec_insert_i32(v: ptr uint8, index: int32, value: int32) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+    var cap: int32 = v32[2]
+
+    if len >= cap:
+        vec_grow(v)
+        data = cast[ptr int32](v32[0])
+
+    # Shift elements right
+    var i: int32 = len
+    while i > index:
+        data[i] = data[i - 1]
+        i = i - 1
+
+    data[index] = value
+    v32[1] = len + 1
+
+# Remove element at index (shifts elements left)
+proc vec_remove_i32(v: ptr uint8, index: int32): int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+
+    var value: int32 = data[index]
+
+    # Shift elements left
+    var i: int32 = index
+    while i < len - 1:
+        data[i] = data[i + 1]
+        i = i + 1
+
+    v32[1] = len - 1
+    return value
+
+# Swap remove (O(1) - swaps with last element)
+proc vec_swap_remove_i32(v: ptr uint8, index: int32): int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+
+    var value: int32 = data[index]
+    data[index] = data[len - 1]
+    v32[1] = len - 1
+    return value
+
+# Find index of value (returns -1 if not found)
+proc vec_find_i32(v: ptr uint8, value: int32): int32 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+
+    var i: int32 = 0
+    while i < len:
+        if data[i] == value:
+            return i
+        i = i + 1
+    return -1
+
+# Check if vector contains value
+proc vec_contains_i32(v: ptr uint8, value: int32): bool =
+    return vec_find_i32(v, value) >= 0
+
+# Reverse vector in place
+proc vec_reverse(v: ptr uint8) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr int32 = cast[ptr int32](v32[0])
+    var len: int32 = v32[1]
+
+    var left: int32 = 0
+    var right: int32 = len - 1
+    while left < right:
+        var tmp: int32 = data[left]
+        data[left] = data[right]
+        data[right] = tmp
+        left = left + 1
+        right = right - 1
+
+# ============================================================================
+# Byte vector operations (for uint8 arrays)
+# ============================================================================
+
+# Initialize byte vector
+proc vec_init_u8(v: ptr uint8, initial_cap: int32) =
+    var cap: int32 = initial_cap
+    if cap < VEC_DEFAULT_CAP:
+        cap = VEC_DEFAULT_CAP
+
+    var data: ptr uint8 = vec_mmap(cap)
+
+    var v32: ptr int32 = cast[ptr int32](v)
+    v32[0] = cast[int32](data)
+    v32[1] = 0
+    v32[2] = cap
+
+# Free byte vector
+proc vec_free_u8(v: ptr uint8) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: int32 = v32[0]
+    var cap: int32 = v32[2]
+
+    if data != 0:
+        vec_munmap(cast[ptr uint8](data), cap)
+
+    v32[0] = 0
+    v32[1] = 0
+    v32[2] = 0
+
+# Grow byte vector
+proc vec_grow_u8(v: ptr uint8) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var old_data: ptr uint8 = cast[ptr uint8](v32[0])
+    var len: int32 = v32[1]
+    var old_cap: int32 = v32[2]
+
+    var new_cap: int32 = old_cap * 2
+
+    var new_data: ptr uint8 = vec_mmap(new_cap)
+    if cast[int32](new_data) == 0:
+        return
+
+    var i: int32 = 0
+    while i < len:
+        new_data[i] = old_data[i]
+        i = i + 1
+
+    vec_munmap(old_data, old_cap)
+    v32[0] = cast[int32](new_data)
+    v32[2] = new_cap
+
+# Push byte
+proc vec_push_u8(v: ptr uint8, value: uint8) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr uint8 = cast[ptr uint8](v32[0])
+    var len: int32 = v32[1]
+    var cap: int32 = v32[2]
+
+    if len >= cap:
+        vec_grow_u8(v)
+        data = cast[ptr uint8](v32[0])
+
+    data[len] = value
+    v32[1] = len + 1
+
+# Get byte
+proc vec_get_u8(v: ptr uint8, index: int32): uint8 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr uint8 = cast[ptr uint8](v32[0])
+    return data[index]
+
+# Set byte
+proc vec_set_u8(v: ptr uint8, index: int32, value: uint8) =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr uint8 = cast[ptr uint8](v32[0])
+    data[index] = value
+
+# Pop byte
+proc vec_pop_u8(v: ptr uint8): uint8 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    var data: ptr uint8 = cast[ptr uint8](v32[0])
+    var len: int32 = v32[1]
+
+    if len == 0:
+        return 0
+
+    var value: uint8 = data[len - 1]
+    v32[1] = len - 1
+    return value
+
+# Get byte data pointer
+proc vec_data_u8(v: ptr uint8): ptr uint8 =
+    var v32: ptr int32 = cast[ptr int32](v)
+    return cast[ptr uint8](v32[0])
+
+# Extend byte vector with another byte array
+proc vec_extend_u8(v: ptr uint8, src: ptr uint8, count: int32) =
+    var i: int32 = 0
+    while i < count:
+        vec_push_u8(v, src[i])
+        i = i + 1

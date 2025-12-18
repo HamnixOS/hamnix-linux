@@ -1,0 +1,527 @@
+# File I/O Module for Brainhair
+#
+# Provides buffered file reading and writing operations.
+# Builds on syscalls.bh for low-level system calls.
+
+# Linux syscall numbers
+const SYS_read: int32 = 3
+const SYS_write: int32 = 4
+const SYS_open: int32 = 5
+const SYS_close: int32 = 6
+const SYS_lseek: int32 = 19
+const SYS_stat: int32 = 18
+const SYS_fstat: int32 = 28
+
+# File open flags
+const O_RDONLY: int32 = 0
+const O_WRONLY: int32 = 1
+const O_RDWR: int32 = 2
+const O_CREAT: int32 = 64
+const O_TRUNC: int32 = 512
+const O_APPEND: int32 = 1024
+const O_EXCL: int32 = 128
+
+# Seek modes
+const SEEK_SET: int32 = 0
+const SEEK_CUR: int32 = 1
+const SEEK_END: int32 = 2
+
+# Standard file descriptors
+const STDIN_FD: int32 = 0
+const STDOUT_FD: int32 = 1
+const STDERR_FD: int32 = 2
+
+# Default permissions for created files (0644)
+const FILE_MODE_DEFAULT: int32 = 420
+
+# Buffer size for buffered I/O
+const IO_BUFFER_SIZE: int32 = 4096
+
+# Memory allocation
+const SYS_mmap: int32 = 90
+const SYS_munmap: int32 = 91
+const PROT_READ: int32 = 1
+const PROT_WRITE: int32 = 2
+const MAP_PRIVATE: int32 = 2
+const MAP_ANONYMOUS: int32 = 32
+
+extern proc syscall1(num: int32, arg1: int32): int32
+extern proc syscall2(num: int32, arg1: int32, arg2: int32): int32
+extern proc syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32): int32
+extern proc syscall6(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32, arg6: int32): int32
+
+# Helper allocation
+proc io_alloc(size: int32): ptr uint8 =
+    var mem: int32 = syscall6(SYS_mmap, 0, size,
+                              PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+    if mem < 0:
+        return cast[ptr uint8](0)
+    return cast[ptr uint8](mem)
+
+proc io_free(ptr: ptr uint8, size: int32) =
+    if cast[int32](ptr) != 0:
+        discard syscall6(SYS_munmap, cast[int32](ptr), size, 0, 0, 0, 0)
+
+# ============================================================================
+# File structure (buffered file handle)
+# Fields:
+#   fd: int32           - File descriptor (offset 0)
+#   flags: int32        - Open flags (offset 4)
+#   buffer: ptr uint8   - I/O buffer (offset 8)
+#   buf_pos: int32      - Current position in buffer (offset 12)
+#   buf_len: int32      - Valid bytes in buffer (offset 16)
+#   buf_cap: int32      - Buffer capacity (offset 20)
+#   error: int32        - Error code (0 = no error) (offset 24)
+# Total: 28 bytes
+# ============================================================================
+
+const FILE_FD_OFFSET: int32 = 0
+const FILE_FLAGS_OFFSET: int32 = 4
+const FILE_BUFFER_OFFSET: int32 = 8
+const FILE_BUF_POS_OFFSET: int32 = 12
+const FILE_BUF_LEN_OFFSET: int32 = 16
+const FILE_BUF_CAP_OFFSET: int32 = 20
+const FILE_ERROR_OFFSET: int32 = 24
+const FILE_STRUCT_SIZE: int32 = 28
+
+# File mode flags
+const FILE_MODE_READ: int32 = 1
+const FILE_MODE_WRITE: int32 = 2
+
+# ============================================================================
+# Basic file operations (unbuffered)
+# ============================================================================
+
+# Open a file (returns fd, or negative on error)
+proc file_open_raw(path: ptr uint8, flags: int32, mode: int32): int32 =
+    return syscall3(SYS_open, cast[int32](path), flags, mode)
+
+# Close a file
+proc file_close_raw(fd: int32): int32 =
+    return syscall1(SYS_close, fd)
+
+# Read from file
+proc file_read_raw(fd: int32, buf: ptr uint8, count: int32): int32 =
+    return syscall3(SYS_read, fd, cast[int32](buf), count)
+
+# Write to file
+proc file_write_raw(fd: int32, buf: ptr uint8, count: int32): int32 =
+    return syscall3(SYS_write, fd, cast[int32](buf), count)
+
+# Seek in file
+proc file_seek_raw(fd: int32, offset: int32, whence: int32): int32 =
+    return syscall3(SYS_lseek, fd, offset, whence)
+
+# ============================================================================
+# Buffered file operations
+# ============================================================================
+
+# Initialize file structure for reading
+proc file_open_read(f: ptr uint8, path: ptr uint8): int32 =
+    var fd: int32 = file_open_raw(path, O_RDONLY, 0)
+    if fd < 0:
+        return fd
+
+    # Allocate buffer
+    var buffer: ptr uint8 = io_alloc(IO_BUFFER_SIZE)
+    if cast[int32](buffer) == 0:
+        discard file_close_raw(fd)
+        return -1
+
+    var f32: ptr int32 = cast[ptr int32](f)
+    f32[0] = fd               # fd
+    f32[1] = FILE_MODE_READ   # flags
+    f32[2] = cast[int32](buffer)  # buffer
+    f32[3] = 0                # buf_pos
+    f32[4] = 0                # buf_len
+    f32[5] = IO_BUFFER_SIZE   # buf_cap
+    f32[6] = 0                # error
+
+    return fd
+
+# Initialize file structure for writing
+proc file_open_write(f: ptr uint8, path: ptr uint8): int32 =
+    var fd: int32 = file_open_raw(path, O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE_DEFAULT)
+    if fd < 0:
+        return fd
+
+    # Allocate buffer
+    var buffer: ptr uint8 = io_alloc(IO_BUFFER_SIZE)
+    if cast[int32](buffer) == 0:
+        discard file_close_raw(fd)
+        return -1
+
+    var f32: ptr int32 = cast[ptr int32](f)
+    f32[0] = fd               # fd
+    f32[1] = FILE_MODE_WRITE  # flags
+    f32[2] = cast[int32](buffer)  # buffer
+    f32[3] = 0                # buf_pos
+    f32[4] = 0                # buf_len (unused for write)
+    f32[5] = IO_BUFFER_SIZE   # buf_cap
+    f32[6] = 0                # error
+
+    return fd
+
+# Initialize file structure for appending
+proc file_open_append(f: ptr uint8, path: ptr uint8): int32 =
+    var fd: int32 = file_open_raw(path, O_WRONLY | O_CREAT | O_APPEND, FILE_MODE_DEFAULT)
+    if fd < 0:
+        return fd
+
+    # Allocate buffer
+    var buffer: ptr uint8 = io_alloc(IO_BUFFER_SIZE)
+    if cast[int32](buffer) == 0:
+        discard file_close_raw(fd)
+        return -1
+
+    var f32: ptr int32 = cast[ptr int32](f)
+    f32[0] = fd               # fd
+    f32[1] = FILE_MODE_WRITE  # flags
+    f32[2] = cast[int32](buffer)  # buffer
+    f32[3] = 0                # buf_pos
+    f32[4] = 0                # buf_len
+    f32[5] = IO_BUFFER_SIZE   # buf_cap
+    f32[6] = 0                # error
+
+    return fd
+
+# Flush write buffer to file
+proc file_flush(f: ptr uint8): int32 =
+    var f32: ptr int32 = cast[ptr int32](f)
+    var fd: int32 = f32[0]
+    var flags: int32 = f32[1]
+    var buffer: ptr uint8 = cast[ptr uint8](f32[2])
+    var buf_pos: int32 = f32[3]
+
+    if (flags & FILE_MODE_WRITE) == 0:
+        return 0  # Not a write file
+
+    if buf_pos == 0:
+        return 0  # Nothing to flush
+
+    # Write buffer to file
+    var written: int32 = file_write_raw(fd, buffer, buf_pos)
+    if written < 0:
+        f32[6] = written
+        return written
+
+    f32[3] = 0  # Reset buffer position
+    return written
+
+# Close file (flushes if needed)
+proc file_close(f: ptr uint8): int32 =
+    var f32: ptr int32 = cast[ptr int32](f)
+    var fd: int32 = f32[0]
+    var flags: int32 = f32[1]
+    var buffer: ptr uint8 = cast[ptr uint8](f32[2])
+    var buf_cap: int32 = f32[5]
+
+    # Flush if writing
+    if (flags & FILE_MODE_WRITE) != 0:
+        discard file_flush(f)
+
+    # Free buffer
+    if cast[int32](buffer) != 0:
+        io_free(buffer, buf_cap)
+
+    # Close fd
+    var result: int32 = file_close_raw(fd)
+
+    # Clear structure
+    f32[0] = -1
+    f32[1] = 0
+    f32[2] = 0
+    f32[3] = 0
+    f32[4] = 0
+    f32[5] = 0
+    f32[6] = 0
+
+    return result
+
+# Fill read buffer from file
+proc file_fill_buffer(f: ptr uint8): int32 =
+    var f32: ptr int32 = cast[ptr int32](f)
+    var fd: int32 = f32[0]
+    var buffer: ptr uint8 = cast[ptr uint8](f32[2])
+    var buf_cap: int32 = f32[5]
+
+    var bytes_read: int32 = file_read_raw(fd, buffer, buf_cap)
+    if bytes_read < 0:
+        f32[6] = bytes_read
+        return bytes_read
+
+    f32[3] = 0             # Reset position
+    f32[4] = bytes_read    # Set valid length
+    return bytes_read
+
+# Read a single byte (returns -1 on EOF or error)
+proc file_read_byte(f: ptr uint8): int32 =
+    var f32: ptr int32 = cast[ptr int32](f)
+    var buffer: ptr uint8 = cast[ptr uint8](f32[2])
+    var buf_pos: int32 = f32[3]
+    var buf_len: int32 = f32[4]
+
+    # Refill buffer if empty
+    if buf_pos >= buf_len:
+        var filled: int32 = file_fill_buffer(f)
+        if filled <= 0:
+            return -1  # EOF or error
+        buf_pos = 0
+        buf_len = filled
+
+    var byte_val: uint8 = buffer[buf_pos]
+    f32[3] = buf_pos + 1
+    return cast[int32](byte_val)
+
+# Read bytes into buffer (returns bytes read)
+proc file_read(f: ptr uint8, dest: ptr uint8, count: int32): int32 =
+    var total: int32 = 0
+
+    while total < count:
+        var byte_val: int32 = file_read_byte(f)
+        if byte_val < 0:
+            break
+        dest[total] = cast[uint8](byte_val)
+        total = total + 1
+
+    return total
+
+# Read a line (up to newline, not including newline)
+# Returns number of characters read, or -1 on EOF
+proc file_read_line(f: ptr uint8, dest: ptr uint8, max_len: int32): int32 =
+    var count: int32 = 0
+
+    while count < max_len - 1:
+        var byte_val: int32 = file_read_byte(f)
+        if byte_val < 0:
+            # EOF
+            if count == 0:
+                return -1
+            break
+        if byte_val == 10:
+            # Newline
+            break
+        dest[count] = cast[uint8](byte_val)
+        count = count + 1
+
+    dest[count] = 0  # Null terminate
+    return count
+
+# Write a single byte
+proc file_write_byte(f: ptr uint8, byte_val: uint8): int32 =
+    var f32: ptr int32 = cast[ptr int32](f)
+    var buffer: ptr uint8 = cast[ptr uint8](f32[2])
+    var buf_pos: int32 = f32[3]
+    var buf_cap: int32 = f32[5]
+
+    # Flush if buffer full
+    if buf_pos >= buf_cap:
+        var flushed: int32 = file_flush(f)
+        if flushed < 0:
+            return flushed
+        buf_pos = 0
+
+    buffer[buf_pos] = byte_val
+    f32[3] = buf_pos + 1
+    return 1
+
+# Write bytes from buffer
+proc file_write(f: ptr uint8, src: ptr uint8, count: int32): int32 =
+    var i: int32 = 0
+    while i < count:
+        var result: int32 = file_write_byte(f, src[i])
+        if result < 0:
+            return result
+        i = i + 1
+    return count
+
+# Write null-terminated string
+proc file_write_str(f: ptr uint8, str: ptr uint8): int32 =
+    var count: int32 = 0
+    while str[count] != 0:
+        var result: int32 = file_write_byte(f, str[count])
+        if result < 0:
+            return result
+        count = count + 1
+    return count
+
+# Write string followed by newline
+proc file_write_line(f: ptr uint8, str: ptr uint8): int32 =
+    var count: int32 = file_write_str(f, str)
+    if count < 0:
+        return count
+    var result: int32 = file_write_byte(f, 10)
+    if result < 0:
+        return result
+    return count + 1
+
+# Check for EOF
+proc file_eof(f: ptr uint8): bool =
+    var f32: ptr int32 = cast[ptr int32](f)
+    var buf_pos: int32 = f32[3]
+    var buf_len: int32 = f32[4]
+
+    if buf_pos < buf_len:
+        return false
+
+    # Try to fill buffer
+    var filled: int32 = file_fill_buffer(f)
+    return filled <= 0
+
+# Check for error
+proc file_error(f: ptr uint8): int32 =
+    var f32: ptr int32 = cast[ptr int32](f)
+    return f32[6]
+
+# Get file descriptor
+proc file_fd(f: ptr uint8): int32 =
+    var f32: ptr int32 = cast[ptr int32](f)
+    return f32[0]
+
+# ============================================================================
+# Standard I/O convenience functions
+# ============================================================================
+
+# Print to stdout
+proc print_str(s: ptr uint8) =
+    var i: int32 = 0
+    while s[i] != 0:
+        i = i + 1
+    discard file_write_raw(STDOUT_FD, s, i)
+
+# Print line to stdout
+proc print_line(s: ptr uint8) =
+    print_str(s)
+    var newline: uint8 = 10
+    discard file_write_raw(STDOUT_FD, addr(newline), 1)
+
+# Print integer to stdout
+proc print_int(n: int32) =
+    var num: int32 = n
+    var negative: int32 = 0
+
+    if num < 0:
+        negative = 1
+        num = 0 - num
+        var minus: uint8 = 45
+        discard file_write_raw(STDOUT_FD, addr(minus), 1)
+
+    if num == 0:
+        var zero: uint8 = 48
+        discard file_write_raw(STDOUT_FD, addr(zero), 1)
+        return
+
+    # Reverse digits
+    var reversed: int32 = 0
+    var digits: int32 = 0
+    while num > 0:
+        reversed = reversed * 10 + (num % 10)
+        num = num / 10
+        digits = digits + 1
+
+    # Print digits
+    while digits > 0:
+        var d: uint8 = cast[uint8](48 + (reversed % 10))
+        discard file_write_raw(STDOUT_FD, addr(d), 1)
+        reversed = reversed / 10
+        digits = digits - 1
+
+# Print to stderr
+proc eprint_str(s: ptr uint8) =
+    var i: int32 = 0
+    while s[i] != 0:
+        i = i + 1
+    discard file_write_raw(STDERR_FD, s, i)
+
+# Print line to stderr
+proc eprint_line(s: ptr uint8) =
+    eprint_str(s)
+    var newline: uint8 = 10
+    discard file_write_raw(STDERR_FD, addr(newline), 1)
+
+# Read line from stdin (returns bytes read, -1 on EOF)
+proc input_line(buf: ptr uint8, max_len: int32): int32 =
+    var count: int32 = 0
+    while count < max_len - 1:
+        var byte_val: int32 = 0
+        var result: int32 = file_read_raw(STDIN_FD, cast[ptr uint8](addr(byte_val)), 1)
+        if result <= 0:
+            if count == 0:
+                return -1
+            break
+        if byte_val == 10:
+            break
+        buf[count] = cast[uint8](byte_val)
+        count = count + 1
+    buf[count] = 0
+    return count
+
+# ============================================================================
+# File utilities
+# ============================================================================
+
+# Read entire file into buffer (caller must free)
+# Returns bytes read, or negative on error
+proc read_file(path: ptr uint8, out_buf: ptr int32, out_size: ptr int32): int32 =
+    # Open file
+    var fd: int32 = file_open_raw(path, O_RDONLY, 0)
+    if fd < 0:
+        return fd
+
+    # Get file size by seeking to end
+    var size: int32 = file_seek_raw(fd, 0, SEEK_END)
+    if size < 0:
+        discard file_close_raw(fd)
+        return size
+
+    # Seek back to start
+    discard file_seek_raw(fd, 0, SEEK_SET)
+
+    # Allocate buffer
+    var buffer: ptr uint8 = io_alloc(size + 1)
+    if cast[int32](buffer) == 0:
+        discard file_close_raw(fd)
+        return -1
+
+    # Read file
+    var total: int32 = 0
+    while total < size:
+        var chunk: int32 = file_read_raw(fd, cast[ptr uint8](cast[int32](buffer) + total), size - total)
+        if chunk <= 0:
+            break
+        total = total + chunk
+
+    # Null terminate
+    buffer[total] = 0
+
+    discard file_close_raw(fd)
+
+    out_buf[0] = cast[int32](buffer)
+    out_size[0] = total
+    return total
+
+# Write buffer to file
+proc write_file(path: ptr uint8, data: ptr uint8, size: int32): int32 =
+    var fd: int32 = file_open_raw(path, O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE_DEFAULT)
+    if fd < 0:
+        return fd
+
+    var total: int32 = 0
+    while total < size:
+        var written: int32 = file_write_raw(fd, cast[ptr uint8](cast[int32](data) + total), size - total)
+        if written <= 0:
+            discard file_close_raw(fd)
+            return written
+        total = total + written
+
+    discard file_close_raw(fd)
+    return total
+
+# Check if file exists
+proc file_exists(path: ptr uint8): bool =
+    var fd: int32 = file_open_raw(path, O_RDONLY, 0)
+    if fd < 0:
+        return false
+    discard file_close_raw(fd)
+    return true
