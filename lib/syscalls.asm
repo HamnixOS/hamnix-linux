@@ -9,6 +9,7 @@ global syscall3
 global syscall4
 global syscall5
 global syscall6
+global fast_memcpy
 
 section .text
 
@@ -145,5 +146,28 @@ syscall6:
     pop edx
     pop ecx
     pop ebx
+    pop ebp
+    ret
+
+; fast_memcpy(dst, src, count_bytes)
+; Uses rep movsd for fast 32-bit aligned copies
+fast_memcpy:
+    push ebp
+    mov ebp, esp
+    push edi
+    push esi
+    push ecx
+
+    mov edi, [ebp+8]   ; dst
+    mov esi, [ebp+12]  ; src
+    mov ecx, [ebp+16]  ; count in bytes
+    shr ecx, 2         ; convert to dwords (divide by 4)
+
+    cld                ; clear direction flag (forward copy)
+    rep movsd          ; copy ecx dwords from [esi] to [edi]
+
+    pop ecx
+    pop esi
+    pop edi
     pop ebp
     ret
