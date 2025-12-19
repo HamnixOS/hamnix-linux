@@ -1,4 +1,4 @@
-# PoodillionOS Documentation
+# BrainhairOS Documentation
 
 ## Getting Started
 
@@ -21,5 +21,5 @@
 
 ## Game
 
-The original Poodillion 2 hacking game is archived in `game/` directory.
+The original Brainhair 2 hacking game is archived in `game/` directory.
 See `game/README.md` for how to play the simulation.

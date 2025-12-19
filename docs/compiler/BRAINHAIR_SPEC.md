@@ -1,7 +1,7 @@
-# Mini-Nim Language Specification
+# Brainhair Language Specification
 ## A Nim-like language that compiles directly to x86 machine code
 
-**Goal:** Build PoodillionOS entirely in Mini-Nim, no C, no assembly (except bootloader)
+**Goal:** Build BrainhairOS entirely in Brainhair, no C, no assembly (except bootloader)
 
 ---
 
@@ -123,17 +123,17 @@ C7 45 FC 2A 00 00 00
 ## Bootstrapping Strategy
 
 **Stage 0:** Write compiler in Python
-- Input: Mini-Nim source
+- Input: Brainhair source
 - Output: x86 machine code
 
-**Stage 1:** Rewrite compiler in Mini-Nim
+**Stage 1:** Rewrite compiler in Brainhair
 - Compile using Stage 0 compiler
 - Now have self-hosting compiler!
 
 **Stage 2:** Build OS
-- Kernel in Mini-Nim
-- Drivers in Mini-Nim
-- Shell in Mini-Nim
+- Kernel in Brainhair
+- Drivers in Brainhair
+- Shell in Brainhair
 - All compiled with our compiler!
 
 ---
@@ -157,7 +157,7 @@ C7 45 FC 2A 00 00 00
 - [ ] Inline assembly
 
 ### Week 4: Self-Hosting
-- [ ] Rewrite compiler in Mini-Nim
+- [ ] Rewrite compiler in Brainhair
 - [ ] Bootstrap!
 
 ### Week 5+: OS Development
@@ -176,7 +176,7 @@ const VGA_BUFFER = 0xB8000'u32
 var vga = cast[ptr UncheckedArray[uint16]](VGA_BUFFER)
 
 proc main() =
-  let msg = "Hello from Mini-Nim!"
+  let msg = "Hello from Brainhair!"
   var i = 0
 
   while msg[i] != '\0':
@@ -210,7 +210,7 @@ _start:
     hlt
 
 section .rodata
-msg: db "Hello from Mini-Nim!", 0
+msg: db "Hello from Brainhair!", 0
 ```
 
 ---
@@ -227,7 +227,7 @@ msg: db "Hello from Mini-Nim!", 0
 
 ## Next Steps
 
-1. Write lexer (tokenize Mini-Nim code)
+1. Write lexer (tokenize Brainhair code)
 2. Write parser (build AST)
 3. Generate x86 machine code
 4. Compile "Hello World" kernel

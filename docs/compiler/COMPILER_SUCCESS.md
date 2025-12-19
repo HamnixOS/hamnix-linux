@@ -5,7 +5,7 @@
 We built a **complete Nim-like compiler from scratch** that:
 
 ### ✅ Lexer
-- Tokenizes Mini-Nim source code
+- Tokenizes Brainhair source code
 - Handles keywords, identifiers, numbers, strings, operators
 - 300+ lines of Python
 - **Status: WORKING**
@@ -33,7 +33,7 @@ We built a **complete Nim-like compiler from scratch** that:
 
 ## Example: What Our Compiler Can Do
 
-**Input (Mini-Nim):**
+**Input (Brainhair):**
 ```nim
 proc add(a: int32, b: int32): int32 =
   return a + b
@@ -151,7 +151,7 @@ compiler/
 ├── ast_nodes.py      - AST definitions
 ├── parser.py         - Parser (tokens → AST)
 ├── codegen_x86.py    - Code generator (AST → x86)
-└── mininim.py        - Compiler driver
+└── brainhair.py        - Compiler driver
 
 examples/
 ├── simple_test.nim   - Test program
@@ -166,39 +166,39 @@ docs/compiler/
 
 ```bash
 # Compile a program
-python3 compiler/mininim.py source.nim -o output
+python3 compiler/brainhair.py source.nim -o output
 
 # Compile and run
-python3 compiler/mininim.py source.nim --run
+python3 compiler/brainhair.py source.nim --run
 
 # Just generate assembly
-python3 compiler/mininim.py source.nim --asm-only
+python3 compiler/brainhair.py source.nim --asm-only
 ```
 
 ## Next Steps
 
-### Phase 1: Kernel in Mini-Nim
-- [ ] Write VGA driver in Mini-Nim
-- [ ] Write keyboard driver in Mini-Nim
-- [ ] Write shell in Mini-Nim
+### Phase 1: Kernel in Brainhair
+- [ ] Write VGA driver in Brainhair
+- [ ] Write keyboard driver in Brainhair
+- [ ] Write shell in Brainhair
 - [ ] Boot it!
 
 ### Phase 2: Self-Hosting
-- [ ] Rewrite lexer in Mini-Nim
-- [ ] Rewrite parser in Mini-Nim
-- [ ] Rewrite codegen in Mini-Nim
+- [ ] Rewrite lexer in Brainhair
+- [ ] Rewrite parser in Brainhair
+- [ ] Rewrite codegen in Brainhair
 - [ ] **Compiler compiles itself!**
 
 ### Phase 3: Complete OS
-- [ ] All drivers in Mini-Nim
-- [ ] All userspace tools in Mini-Nim
-- [ ] **100% Mini-Nim OS!**
+- [ ] All drivers in Brainhair
+- [ ] All userspace tools in Brainhair
+- [ ] **100% Brainhair OS!**
 
 ## Stats
 
 - **Time to build compiler:** ~2 hours
 - **Lines of code:** ~1,200
-- **Languages used:** Python (for now - will bootstrap to Mini-Nim!)
+- **Languages used:** Python (for now - will bootstrap to Brainhair!)
 - **Output:** Real x86 machine code
 - **Coolness factor:** 🔥🔥🔥🔥🔥
 
@@ -207,7 +207,7 @@ python3 compiler/mininim.py source.nim --asm-only
 1. **We built a real compiler** - Not a toy, generates actual machine code
 2. **Direct to x86** - No C intermediate, straight to assembly
 3. **Self-hosting potential** - Can rewrite in itself
-4. **OS development** - Can use it to build PoodillionOS
+4. **OS development** - Can use it to build BrainhairOS
 5. **Educational** - Learned lexing, parsing, code generation
 6. **Fast** - Native code, no runtime, no GC
 7. **Fun as hell!** 🎉
@@ -216,6 +216,6 @@ python3 compiler/mininim.py source.nim --asm-only
 
 **The game becomes an OS.**
 **The OS compiles itself.**
-**Everything is Mini-Nim.**
+**Everything is Brainhair.**
 
 **LET'S GOOOO!** 🚀🔥

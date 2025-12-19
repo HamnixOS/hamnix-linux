@@ -1,7 +1,7 @@
 GNU GENERAL PUBLIC LICENSE
 Version 3, 29 June 2007
 
-Copyright (C) 2024 PoodillionOS Contributors
+Copyright (C) 2024 BrainhairOS Contributors
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -20,12 +20,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 Full GPL3 License Text: https://www.gnu.org/licenses/gpl-3.0.txt
 
-PoodillionOS - A Unix-like Operating System
+BrainhairOS - A Unix-like Operating System
 ===========================================
 
 This project includes:
 - PooScript compiler (poocc) - Compiles PooScript to C
-- PoodillionOS kernel and userspace components
-- Poodillion 2 game (archived in game/ directory)
+- BrainhairOS kernel and userspace components
+- Brainhair 2 game (archived in game/ directory)
 
 All code is licensed under GPL3 unless otherwise noted.
