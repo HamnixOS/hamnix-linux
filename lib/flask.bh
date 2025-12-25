@@ -81,6 +81,12 @@ proc route_method(path: ptr uint8, method: int32, handler: ptr uint8): int32 =
   route_handlers[route_count] = cast[int32](handler)
   route_methods[route_count] = method
 
+  print(cast[ptr uint8]("[Flask] route "))
+  print(path)
+  print(cast[ptr uint8](" -> "))
+  print_int(cast[int32](handler))
+  println(cast[ptr uint8](""))
+
   route_count = route_count + 1
   return 0
 
@@ -143,7 +149,9 @@ proc redirect(sock: int32, url: ptr uint8) =
 # =============================================================================
 
 proc send_response(sock: int32, status: int32, content_type: ptr uint8, body: ptr uint8) =
+  println(cast[ptr uint8]("[Flask] send_response enter"))
   # Status line
+  println(cast[ptr uint8]("[Flask] sending status line"))
   discard net_send_str(sock, cast[ptr uint8]("HTTP/1.0 "))
   var status_buf: array[16, uint8]
   discard itoa(status, addr(status_buf[0]))
@@ -263,8 +271,12 @@ proc run(port: int32): int32 =
     net_poll()
 
     if net_accept_ready(sock) == 1:
+      println(cast[ptr uint8]("[Flask] accept ready"))
       # Read request
       var n: int32 = net_recv_blocking(sock, addr(request_buf[0]), 2047, 2000)
+      print(cast[ptr uint8]("[Flask] recv n="))
+      print_int(n)
+      println(cast[ptr uint8](""))
 
       if n > 0:
         request_buf[n] = 0
@@ -272,17 +284,29 @@ proc run(port: int32): int32 =
         # Parse request
         var method: int32 = parse_method(addr(request_buf[0]))
         discard parse_path(addr(request_buf[0]), addr(path_buf[0]), 128)
+        print(cast[ptr uint8]("[Flask] method="))
+        print_int(method)
+        print(cast[ptr uint8](" path="))
+        println(addr(path_buf[0]))
 
         # Find matching route
         var route_idx: int32 = find_route(addr(path_buf[0]), method)
+        print(cast[ptr uint8]("[Flask] route_idx="))
+        print_int(route_idx)
+        println(cast[ptr uint8](""))
 
         if route_idx >= 0:
           # Call handler: handler(sock, request_buf, path_buf)
           var handler: ptr uint8 = cast[ptr uint8](route_handlers[route_idx])
+          print(cast[ptr uint8]("[Flask] handler addr="))
+          print_int(cast[int32](handler))
+          println(cast[ptr uint8](""))
           # Use inline assembly or function pointer call
           call_handler(handler, sock, addr(request_buf[0]), addr(path_buf[0]))
+          println(cast[ptr uint8]("[Flask] handler returned"))
         else:
           # No route found - 404
+          println(cast[ptr uint8]("[Flask] 404"))
           not_found(sock)
 
       # Close and re-listen
