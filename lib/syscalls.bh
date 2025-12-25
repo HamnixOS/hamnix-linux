@@ -121,14 +121,37 @@ const S_IROTH: int32 = 4     # 0004 - others r
 const S_IWOTH: int32 = 2     # 0002 - others w
 const S_IXOTH: int32 = 1     # 0001 - others x
 
+# File type bits
+const S_IFMT: int32 = 61440   # 0170000 - file type mask
+const S_IFREG: int32 = 32768  # 0100000 - regular file
+const S_IFDIR: int32 = 16384  # 0040000 - directory
+const S_IFLNK: int32 = 40960  # 0120000 - symbolic link
+const S_IFCHR: int32 = 8192   # 0020000 - character device
+const S_IFBLK: int32 = 24576  # 0060000 - block device
+const S_IFIFO: int32 = 4096   # 0010000 - FIFO
+const S_IFSOCK: int32 = 49152 # 0140000 - socket
+
 # Exit codes
 const EXIT_SUCCESS: int32 = 0
 const EXIT_FAILURE: int32 = 1
 
 # Additional syscalls
+const SYS_nice: int32 = 34
+const SYS_chown: int32 = 182
+const SYS_lstat: int32 = 107
+const SYS_lstat64: int32 = 196
 const SYS_getdents: int32 = 141
 const SYS_nanosleep: int32 = 162
 const SYS_getcwd: int32 = 183
+const SYS_mmap2: int32 = 192
+const SYS_getdents64: int32 = 220
+const SYS_init_module: int32 = 128
+const SYS_delete_module: int32 = 129
+const SYS_wait4: int32 = 114
+const SYS_clock_gettime: int32 = 265
+
+# Directory open flag
+const O_DIRECTORY: int32 = 65536
 
 # Seek modes for lseek
 const SEEK_SET: int32 = 0
@@ -147,6 +170,7 @@ extern syscall2(num: int32, arg1: int32, arg2: int32): int32
 extern syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32): int32
 extern syscall4(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32): int32
 extern syscall5(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32): int32
+extern syscall6(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32, arg6: int32): int32
 
 # High-level wrappers
 proc exit(code: int32) =
