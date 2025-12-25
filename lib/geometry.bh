@@ -1,0 +1,5 @@
+# Geometry library - imports math
+import "lib/math"
+
+proc distance_squared(x: int32, y: int32): int32 =
+    return add(square(x), square(y))

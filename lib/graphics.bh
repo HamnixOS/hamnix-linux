@@ -1,0 +1,961 @@
+# graphics.bh - Shared Graphics Library for Brainhair
+# Provides font data, drawing primitives, and color constants
+# for graphical applications like bds.bh, term.bh, fm.bh
+
+# ============ Color Constants ============
+
+const COLOR_BLACK: int32 = 0x000000
+const COLOR_WHITE: int32 = 0xFFFFFF
+const COLOR_RED: int32 = 0xFF0000
+const COLOR_GREEN: int32 = 0x00FF00
+const COLOR_BLUE: int32 = 0x0000FF
+const COLOR_YELLOW: int32 = 0xFFFF00
+const COLOR_CYAN: int32 = 0x00FFFF
+const COLOR_MAGENTA: int32 = 0xFF00FF
+
+const COLOR_DARK_GRAY: int32 = 0x404040
+const COLOR_GRAY: int32 = 0x808080
+const COLOR_LIGHT_GRAY: int32 = 0xC0C0C0
+const COLOR_VERY_LIGHT_GRAY: int32 = 0xE0E0E0
+
+const COLOR_DARK_RED: int32 = 0x800000
+const COLOR_DARK_GREEN: int32 = 0x008000
+const COLOR_DARK_BLUE: int32 = 0x000080
+
+const COLOR_ORANGE: int32 = 0xFF8800
+const COLOR_PURPLE: int32 = 0x8800FF
+const COLOR_BROWN: int32 = 0x804000
+
+# ============ Font Data (8x8 bitmap) ============
+# Returns 8 bits for each row (0-7) of a character
+
+proc get_font_row(c: int32, row: int32): int32 =
+  # Space
+  if c == 32: return 0
+
+  # Numbers 0-9 (48-57)
+  if c == 48:  # 0
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x6E
+    if row == 3: return 0x76
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 49:  # 1
+    if row == 0: return 0x18
+    if row == 1: return 0x38
+    if row == 2: return 0x18
+    if row == 3: return 0x18
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x7E
+    return 0
+
+  if c == 50:  # 2
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x06
+    if row == 3: return 0x0C
+    if row == 4: return 0x18
+    if row == 5: return 0x30
+    if row == 6: return 0x7E
+    return 0
+
+  if c == 51:  # 3
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x06
+    if row == 3: return 0x1C
+    if row == 4: return 0x06
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 52:  # 4
+    if row == 0: return 0x0C
+    if row == 1: return 0x1C
+    if row == 2: return 0x3C
+    if row == 3: return 0x6C
+    if row == 4: return 0x7E
+    if row == 5: return 0x0C
+    if row == 6: return 0x0C
+    return 0
+
+  if c == 53:  # 5
+    if row == 0: return 0x7E
+    if row == 1: return 0x60
+    if row == 2: return 0x7C
+    if row == 3: return 0x06
+    if row == 4: return 0x06
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 54:  # 6
+    if row == 0: return 0x1C
+    if row == 1: return 0x30
+    if row == 2: return 0x60
+    if row == 3: return 0x7C
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 55:  # 7
+    if row == 0: return 0x7E
+    if row == 1: return 0x06
+    if row == 2: return 0x0C
+    if row == 3: return 0x18
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x18
+    return 0
+
+  if c == 56:  # 8
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x3C
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 57:  # 9
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x3E
+    if row == 4: return 0x06
+    if row == 5: return 0x0C
+    if row == 6: return 0x38
+    return 0
+
+  # Uppercase letters A-Z (65-90)
+  if c == 65:  # A
+    if row == 0: return 0x18
+    if row == 1: return 0x3C
+    if row == 2: return 0x66
+    if row == 3: return 0x66
+    if row == 4: return 0x7E
+    if row == 5: return 0x66
+    if row == 6: return 0x66
+    return 0
+
+  if c == 66:  # B
+    if row == 0: return 0x7C
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x7C
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x7C
+    return 0
+
+  if c == 67:  # C
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x60
+    if row == 3: return 0x60
+    if row == 4: return 0x60
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 68:  # D
+    if row == 0: return 0x78
+    if row == 1: return 0x6C
+    if row == 2: return 0x66
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x6C
+    if row == 6: return 0x78
+    return 0
+
+  if c == 69:  # E
+    if row == 0: return 0x7E
+    if row == 1: return 0x60
+    if row == 2: return 0x60
+    if row == 3: return 0x7C
+    if row == 4: return 0x60
+    if row == 5: return 0x60
+    if row == 6: return 0x7E
+    return 0
+
+  if c == 70:  # F
+    if row == 0: return 0x7E
+    if row == 1: return 0x60
+    if row == 2: return 0x60
+    if row == 3: return 0x7C
+    if row == 4: return 0x60
+    if row == 5: return 0x60
+    if row == 6: return 0x60
+    return 0
+
+  if c == 71:  # G
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x60
+    if row == 3: return 0x6E
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 72:  # H
+    if row == 0: return 0x66
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x7E
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x66
+    return 0
+
+  if c == 73:  # I
+    if row == 0: return 0x3C
+    if row == 1: return 0x18
+    if row == 2: return 0x18
+    if row == 3: return 0x18
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 74:  # J
+    if row == 0: return 0x1E
+    if row == 1: return 0x0C
+    if row == 2: return 0x0C
+    if row == 3: return 0x0C
+    if row == 4: return 0x0C
+    if row == 5: return 0x6C
+    if row == 6: return 0x38
+    return 0
+
+  if c == 75:  # K
+    if row == 0: return 0x66
+    if row == 1: return 0x6C
+    if row == 2: return 0x78
+    if row == 3: return 0x70
+    if row == 4: return 0x78
+    if row == 5: return 0x6C
+    if row == 6: return 0x66
+    return 0
+
+  if c == 76:  # L
+    if row == 0: return 0x60
+    if row == 1: return 0x60
+    if row == 2: return 0x60
+    if row == 3: return 0x60
+    if row == 4: return 0x60
+    if row == 5: return 0x60
+    if row == 6: return 0x7E
+    return 0
+
+  if c == 77:  # M
+    if row == 0: return 0x63
+    if row == 1: return 0x77
+    if row == 2: return 0x7F
+    if row == 3: return 0x6B
+    if row == 4: return 0x63
+    if row == 5: return 0x63
+    if row == 6: return 0x63
+    return 0
+
+  if c == 78:  # N
+    if row == 0: return 0x66
+    if row == 1: return 0x76
+    if row == 2: return 0x7E
+    if row == 3: return 0x7E
+    if row == 4: return 0x6E
+    if row == 5: return 0x66
+    if row == 6: return 0x66
+    return 0
+
+  if c == 79:  # O
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 80:  # P
+    if row == 0: return 0x7C
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x7C
+    if row == 4: return 0x60
+    if row == 5: return 0x60
+    if row == 6: return 0x60
+    return 0
+
+  if c == 81:  # Q
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x66
+    if row == 4: return 0x6A
+    if row == 5: return 0x6C
+    if row == 6: return 0x36
+    return 0
+
+  if c == 82:  # R
+    if row == 0: return 0x7C
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x7C
+    if row == 4: return 0x6C
+    if row == 5: return 0x66
+    if row == 6: return 0x66
+    return 0
+
+  if c == 83:  # S
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x60
+    if row == 3: return 0x3C
+    if row == 4: return 0x06
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 84:  # T
+    if row == 0: return 0x7E
+    if row == 1: return 0x18
+    if row == 2: return 0x18
+    if row == 3: return 0x18
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x18
+    return 0
+
+  if c == 85:  # U
+    if row == 0: return 0x66
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 86:  # V
+    if row == 0: return 0x66
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x3C
+    if row == 6: return 0x18
+    return 0
+
+  if c == 87:  # W
+    if row == 0: return 0x63
+    if row == 1: return 0x63
+    if row == 2: return 0x63
+    if row == 3: return 0x6B
+    if row == 4: return 0x7F
+    if row == 5: return 0x77
+    if row == 6: return 0x63
+    return 0
+
+  if c == 88:  # X
+    if row == 0: return 0x66
+    if row == 1: return 0x66
+    if row == 2: return 0x3C
+    if row == 3: return 0x18
+    if row == 4: return 0x3C
+    if row == 5: return 0x66
+    if row == 6: return 0x66
+    return 0
+
+  if c == 89:  # Y
+    if row == 0: return 0x66
+    if row == 1: return 0x66
+    if row == 2: return 0x66
+    if row == 3: return 0x3C
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x18
+    return 0
+
+  if c == 90:  # Z
+    if row == 0: return 0x7E
+    if row == 1: return 0x06
+    if row == 2: return 0x0C
+    if row == 3: return 0x18
+    if row == 4: return 0x30
+    if row == 5: return 0x60
+    if row == 6: return 0x7E
+    return 0
+
+  # Lowercase letters a-z (97-122)
+  if c == 97:  # a
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x3C
+    if row == 3: return 0x06
+    if row == 4: return 0x3E
+    if row == 5: return 0x66
+    if row == 6: return 0x3E
+    return 0
+
+  if c == 98:  # b
+    if row == 0: return 0x60
+    if row == 1: return 0x60
+    if row == 2: return 0x7C
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x7C
+    return 0
+
+  if c == 99:  # c
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x3C
+    if row == 3: return 0x60
+    if row == 4: return 0x60
+    if row == 5: return 0x60
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 100:  # d
+    if row == 0: return 0x06
+    if row == 1: return 0x06
+    if row == 2: return 0x3E
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x3E
+    return 0
+
+  if c == 101:  # e
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x3C
+    if row == 3: return 0x66
+    if row == 4: return 0x7E
+    if row == 5: return 0x60
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 102:  # f
+    if row == 0: return 0x1C
+    if row == 1: return 0x30
+    if row == 2: return 0x7C
+    if row == 3: return 0x30
+    if row == 4: return 0x30
+    if row == 5: return 0x30
+    if row == 6: return 0x30
+    return 0
+
+  if c == 103:  # g
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x3E
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x3E
+    if row == 6: return 0x06
+    if row == 7: return 0x3C
+    return 0
+
+  if c == 104:  # h
+    if row == 0: return 0x60
+    if row == 1: return 0x60
+    if row == 2: return 0x7C
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x66
+    return 0
+
+  if c == 105:  # i
+    if row == 0: return 0x18
+    if row == 1: return 0x00
+    if row == 2: return 0x38
+    if row == 3: return 0x18
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 106:  # j
+    if row == 0: return 0x0C
+    if row == 1: return 0x00
+    if row == 2: return 0x1C
+    if row == 3: return 0x0C
+    if row == 4: return 0x0C
+    if row == 5: return 0x0C
+    if row == 6: return 0x6C
+    if row == 7: return 0x38
+    return 0
+
+  if c == 107:  # k
+    if row == 0: return 0x60
+    if row == 1: return 0x60
+    if row == 2: return 0x66
+    if row == 3: return 0x6C
+    if row == 4: return 0x78
+    if row == 5: return 0x6C
+    if row == 6: return 0x66
+    return 0
+
+  if c == 108:  # l
+    if row == 0: return 0x38
+    if row == 1: return 0x18
+    if row == 2: return 0x18
+    if row == 3: return 0x18
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 109:  # m
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x76
+    if row == 3: return 0x7F
+    if row == 4: return 0x6B
+    if row == 5: return 0x63
+    if row == 6: return 0x63
+    return 0
+
+  if c == 110:  # n
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x7C
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x66
+    return 0
+
+  if c == 111:  # o
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x3C
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 112:  # p
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x7C
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x7C
+    if row == 6: return 0x60
+    if row == 7: return 0x60
+    return 0
+
+  if c == 113:  # q
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x3E
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x3E
+    if row == 6: return 0x06
+    if row == 7: return 0x06
+    return 0
+
+  if c == 114:  # r
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x6C
+    if row == 3: return 0x76
+    if row == 4: return 0x60
+    if row == 5: return 0x60
+    if row == 6: return 0x60
+    return 0
+
+  if c == 115:  # s
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x3E
+    if row == 3: return 0x60
+    if row == 4: return 0x3C
+    if row == 5: return 0x06
+    if row == 6: return 0x7C
+    return 0
+
+  if c == 116:  # t
+    if row == 0: return 0x30
+    if row == 1: return 0x30
+    if row == 2: return 0x7C
+    if row == 3: return 0x30
+    if row == 4: return 0x30
+    if row == 5: return 0x30
+    if row == 6: return 0x1C
+    return 0
+
+  if c == 117:  # u
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x66
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x66
+    if row == 6: return 0x3E
+    return 0
+
+  if c == 118:  # v
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x66
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x3C
+    if row == 6: return 0x18
+    return 0
+
+  if c == 119:  # w
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x63
+    if row == 3: return 0x6B
+    if row == 4: return 0x6B
+    if row == 5: return 0x7F
+    if row == 6: return 0x36
+    return 0
+
+  if c == 120:  # x
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x66
+    if row == 3: return 0x3C
+    if row == 4: return 0x18
+    if row == 5: return 0x3C
+    if row == 6: return 0x66
+    return 0
+
+  if c == 121:  # y
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x66
+    if row == 3: return 0x66
+    if row == 4: return 0x66
+    if row == 5: return 0x3E
+    if row == 6: return 0x06
+    if row == 7: return 0x3C
+    return 0
+
+  if c == 122:  # z
+    if row == 0: return 0x00
+    if row == 1: return 0x00
+    if row == 2: return 0x7E
+    if row == 3: return 0x0C
+    if row == 4: return 0x18
+    if row == 5: return 0x30
+    if row == 6: return 0x7E
+    return 0
+
+  # Punctuation and symbols
+  if c == 33:  # !
+    if row == 0: return 0x18
+    if row == 1: return 0x18
+    if row == 2: return 0x18
+    if row == 3: return 0x18
+    if row == 4: return 0x18
+    if row == 5: return 0x00
+    if row == 6: return 0x18
+    return 0
+
+  if c == 34:  # "
+    if row == 0: return 0x6C
+    if row == 1: return 0x6C
+    if row == 2: return 0x24
+    return 0
+
+  if c == 35:  # #
+    if row == 0: return 0x24
+    if row == 1: return 0x7E
+    if row == 2: return 0x24
+    if row == 3: return 0x24
+    if row == 4: return 0x7E
+    if row == 5: return 0x24
+    return 0
+
+  if c == 36:  # $
+    if row == 0: return 0x18
+    if row == 1: return 0x3E
+    if row == 2: return 0x60
+    if row == 3: return 0x3C
+    if row == 4: return 0x06
+    if row == 5: return 0x7C
+    if row == 6: return 0x18
+    return 0
+
+  if c == 37:  # %
+    if row == 0: return 0x62
+    if row == 1: return 0x64
+    if row == 2: return 0x08
+    if row == 3: return 0x10
+    if row == 4: return 0x26
+    if row == 5: return 0x46
+    return 0
+
+  if c == 38:  # &
+    if row == 0: return 0x38
+    if row == 1: return 0x6C
+    if row == 2: return 0x68
+    if row == 3: return 0x76
+    if row == 4: return 0xDC
+    if row == 5: return 0xCC
+    if row == 6: return 0x76
+    return 0
+
+  if c == 39:  # '
+    if row == 0: return 0x18
+    if row == 1: return 0x18
+    if row == 2: return 0x10
+    return 0
+
+  if c == 40:  # (
+    if row == 0: return 0x0C
+    if row == 1: return 0x18
+    if row == 2: return 0x30
+    if row == 3: return 0x30
+    if row == 4: return 0x30
+    if row == 5: return 0x18
+    if row == 6: return 0x0C
+    return 0
+
+  if c == 41:  # )
+    if row == 0: return 0x30
+    if row == 1: return 0x18
+    if row == 2: return 0x0C
+    if row == 3: return 0x0C
+    if row == 4: return 0x0C
+    if row == 5: return 0x18
+    if row == 6: return 0x30
+    return 0
+
+  if c == 42:  # *
+    if row == 1: return 0x66
+    if row == 2: return 0x3C
+    if row == 3: return 0xFF
+    if row == 4: return 0x3C
+    if row == 5: return 0x66
+    return 0
+
+  if c == 43:  # +
+    if row == 2: return 0x18
+    if row == 3: return 0x18
+    if row == 4: return 0x7E
+    if row == 5: return 0x18
+    if row == 6: return 0x18
+    return 0
+
+  if c == 44:  # ,
+    if row == 5: return 0x18
+    if row == 6: return 0x18
+    if row == 7: return 0x30
+    return 0
+
+  if c == 45:  # -
+    if row == 3: return 0x7E
+    return 0
+
+  if c == 46:  # .
+    if row == 6: return 0x18
+    return 0
+
+  if c == 47:  # /
+    if row == 0: return 0x02
+    if row == 1: return 0x04
+    if row == 2: return 0x08
+    if row == 3: return 0x10
+    if row == 4: return 0x20
+    if row == 5: return 0x40
+    return 0
+
+  if c == 58:  # :
+    if row == 2: return 0x18
+    if row == 5: return 0x18
+    return 0
+
+  if c == 59:  # ;
+    if row == 2: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x30
+    return 0
+
+  if c == 60:  # <
+    if row == 1: return 0x06
+    if row == 2: return 0x18
+    if row == 3: return 0x60
+    if row == 4: return 0x18
+    if row == 5: return 0x06
+    return 0
+
+  if c == 61:  # =
+    if row == 2: return 0x7E
+    if row == 4: return 0x7E
+    return 0
+
+  if c == 62:  # >
+    if row == 1: return 0x60
+    if row == 2: return 0x18
+    if row == 3: return 0x06
+    if row == 4: return 0x18
+    if row == 5: return 0x60
+    return 0
+
+  if c == 63:  # ?
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x0C
+    if row == 3: return 0x18
+    if row == 4: return 0x18
+    if row == 5: return 0x00
+    if row == 6: return 0x18
+    return 0
+
+  if c == 64:  # @
+    if row == 0: return 0x3C
+    if row == 1: return 0x66
+    if row == 2: return 0x6E
+    if row == 3: return 0x6A
+    if row == 4: return 0x6E
+    if row == 5: return 0x60
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 91:  # [
+    if row == 0: return 0x3C
+    if row == 1: return 0x30
+    if row == 2: return 0x30
+    if row == 3: return 0x30
+    if row == 4: return 0x30
+    if row == 5: return 0x30
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 92:  # \
+    if row == 0: return 0x40
+    if row == 1: return 0x20
+    if row == 2: return 0x10
+    if row == 3: return 0x08
+    if row == 4: return 0x04
+    if row == 5: return 0x02
+    return 0
+
+  if c == 93:  # ]
+    if row == 0: return 0x3C
+    if row == 1: return 0x0C
+    if row == 2: return 0x0C
+    if row == 3: return 0x0C
+    if row == 4: return 0x0C
+    if row == 5: return 0x0C
+    if row == 6: return 0x3C
+    return 0
+
+  if c == 94:  # ^
+    if row == 0: return 0x18
+    if row == 1: return 0x3C
+    if row == 2: return 0x66
+    return 0
+
+  if c == 95:  # _
+    if row == 7: return 0x7E
+    return 0
+
+  if c == 96:  # `
+    if row == 0: return 0x30
+    if row == 1: return 0x18
+    if row == 2: return 0x08
+    return 0
+
+  if c == 123:  # {
+    if row == 0: return 0x0E
+    if row == 1: return 0x18
+    if row == 2: return 0x18
+    if row == 3: return 0x70
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x0E
+    return 0
+
+  if c == 124:  # |
+    if row == 0: return 0x18
+    if row == 1: return 0x18
+    if row == 2: return 0x18
+    if row == 3: return 0x18
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x18
+    if row == 7: return 0x18
+    return 0
+
+  if c == 125:  # }
+    if row == 0: return 0x70
+    if row == 1: return 0x18
+    if row == 2: return 0x18
+    if row == 3: return 0x0E
+    if row == 4: return 0x18
+    if row == 5: return 0x18
+    if row == 6: return 0x70
+    return 0
+
+  if c == 126:  # ~
+    if row == 2: return 0x32
+    if row == 3: return 0x4C
+    return 0
+
+  # Default: return 0 for unknown characters
+  return 0
+
+# ============ Drawing Primitives ============
+
+# Draw a single pixel to a framebuffer (bounds checked)
+proc buf_pixel(buf: ptr uint32, x: int32, y: int32, color: int32, xres: int32, yres: int32) =
+  if x >= 0 and x < xres and y >= 0 and y < yres:
+    buf[y * xres + x] = cast[uint32](color)
+
+# Fill a rectangle in a framebuffer
+proc fill_rect(buf: ptr uint32, x: int32, y: int32, w: int32, h: int32, color: int32, xres: int32, yres: int32) =
+  var cy: int32 = y
+  while cy < y + h:
+    if cy >= 0 and cy < yres:
+      var sx: int32 = x
+      var ex: int32 = x + w
+      if sx < 0: sx = 0
+      if ex > xres: ex = xres
+      var cx: int32 = sx
+      while cx < ex:
+        buf[cy * xres + cx] = cast[uint32](color)
+        cx = cx + 1
+    cy = cy + 1
+
+# Draw a single character to a framebuffer
+proc draw_char(buf: ptr uint32, x: int32, y: int32, c: int32, fg: int32, bg: int32, xres: int32, yres: int32) =
+  var row: int32 = 0
+  while row < 8:
+    var bitmap: int32 = get_font_row(c, row)
+    var col: int32 = 0
+    while col < 8:
+      var bit: int32 = (bitmap >> (7 - col)) & 1
+      var color: int32 = bg
+      if bit != 0: color = fg
+      buf_pixel(buf, x + col, y + row, color, xres, yres)
+      col = col + 1
+    row = row + 1
+
+# Draw a text string to a framebuffer
+proc draw_text(buf: ptr uint32, x: int32, y: int32, s: ptr uint8, fg: int32, bg: int32, xres: int32, yres: int32, max_chars: int32) =
+  var i: int32 = 0
+  while s[i] != cast[uint8](0) and i < max_chars:
+    draw_char(buf, x + i * 8, y, cast[int32](s[i]), fg, bg, xres, yres)
+    i = i + 1

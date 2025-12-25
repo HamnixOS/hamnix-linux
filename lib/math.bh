@@ -1,0 +1,10 @@
+# Simple math library for testing imports
+
+proc add(a: int32, b: int32): int32 =
+    return a + b
+
+proc multiply(a: int32, b: int32): int32 =
+    return a * b
+
+proc square(x: int32): int32 =
+    return x * x

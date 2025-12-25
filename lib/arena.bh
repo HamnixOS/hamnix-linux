@@ -1,0 +1,164 @@
+# Arena Allocator for Brainhair
+#
+# An arena (or region-based memory allocator) provides fast allocation
+# with bulk deallocation. All memory allocated from an arena is freed
+# at once when the arena is destroyed.
+#
+# Benefits:
+# - O(1) allocation (just bump a pointer)
+# - No individual free() calls needed
+# - No fragmentation within the arena
+# - Cache-friendly linear allocation
+# - Deterministic cleanup (no GC)
+#
+# Usage:
+#   var arena: Arena = arena_new(64 * 1024)  # 64KB arena
+#   var data: ptr MyStruct = arena_alloc(addr(arena), 16)
+#   # ... use data ...
+#   arena_destroy(addr(arena))  # Free everything at once
+
+const SYS_brk: int32 = 45
+const SYS_mmap: int32 = 90
+const SYS_munmap: int32 = 91
+
+const PROT_READ: int32 = 1
+const PROT_WRITE: int32 = 2
+const MAP_PRIVATE: int32 = 2
+const MAP_ANONYMOUS: int32 = 32
+
+extern proc syscall1(num: int32, arg1: int32): int32
+extern proc syscall6(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32, arg6: int32): int32
+
+# Arena structure
+# Fields:
+#   base: ptr uint8    - Base address of arena memory (offset 0)
+#   size: int32        - Total size of arena (offset 4)
+#   used: int32        - Bytes currently allocated (offset 8)
+#   next: ptr Arena    - Next arena in chain (for overflow) (offset 12)
+# Total size: 16 bytes
+
+const ARENA_BASE_OFFSET: int32 = 0
+const ARENA_SIZE_OFFSET: int32 = 4
+const ARENA_USED_OFFSET: int32 = 8
+const ARENA_NEXT_OFFSET: int32 = 12
+const ARENA_STRUCT_SIZE: int32 = 16
+
+# Create a new arena with the given size
+# Returns arena initialized at the provided pointer
+proc arena_init(arena: ptr uint8, size: int32) =
+    # Allocate memory using mmap
+    var mem: int32 = syscall6(SYS_mmap, 0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+
+    if mem < 0:
+        # Allocation failed, set base to 0
+        var base_ptr: ptr int32 = cast[ptr int32](arena)
+        base_ptr[0] = 0
+        return
+
+    # Initialize arena structure
+    var arena32: ptr int32 = cast[ptr int32](arena)
+    arena32[0] = mem           # base
+    arena32[1] = size          # size
+    arena32[2] = 0             # used
+    arena32[3] = 0             # next (no overflow arena yet)
+
+# Allocate memory from arena
+# Returns pointer to allocated memory, or 0 if arena is full
+proc arena_alloc(arena: ptr uint8, alloc_size: int32): ptr uint8 =
+    var arena32: ptr int32 = cast[ptr int32](arena)
+
+    var base: int32 = arena32[0]
+    var size: int32 = arena32[1]
+    var used: int32 = arena32[2]
+
+    # Check if arena is valid
+    if base == 0:
+        return cast[ptr uint8](0)
+
+    # Align allocation to 4 bytes
+    var aligned_size: int32 = (alloc_size + 3) & -4
+
+    # Check if we have space
+    if used + aligned_size > size:
+        # TODO: Could chain to overflow arena
+        return cast[ptr uint8](0)
+
+    # Bump allocate
+    var result: int32 = base + used
+    arena32[2] = used + aligned_size
+
+    return cast[ptr uint8](result)
+
+# Allocate and zero memory from arena
+proc arena_alloc_zero(arena: ptr uint8, alloc_size: int32): ptr uint8 =
+    var ptr: ptr uint8 = arena_alloc(arena, alloc_size)
+
+    if cast[int32](ptr) == 0:
+        return ptr
+
+    # Zero the memory
+    var i: int32 = 0
+    while i < alloc_size:
+        ptr[i] = 0
+        i = i + 1
+
+    return ptr
+
+# Reset arena (free all allocations but keep the memory)
+proc arena_reset(arena: ptr uint8) =
+    var arena32: ptr int32 = cast[ptr int32](arena)
+    arena32[2] = 0  # Reset used to 0
+
+    # Reset any chained arenas too
+    var next: int32 = arena32[3]
+    if next != 0:
+        arena_reset(cast[ptr uint8](next))
+
+# Destroy arena (release all memory back to OS)
+proc arena_destroy(arena: ptr uint8) =
+    var arena32: ptr int32 = cast[ptr int32](arena)
+
+    var base: int32 = arena32[0]
+    var size: int32 = arena32[1]
+    var next: int32 = arena32[3]
+
+    # Destroy chained arenas first
+    if next != 0:
+        arena_destroy(cast[ptr uint8](next))
+
+    # Release memory
+    if base != 0:
+        discard syscall6(SYS_munmap, base, size, 0, 0, 0, 0)
+
+    # Clear the arena structure
+    arena32[0] = 0
+    arena32[1] = 0
+    arena32[2] = 0
+    arena32[3] = 0
+
+# Get remaining space in arena
+proc arena_remaining(arena: ptr uint8): int32 =
+    var arena32: ptr int32 = cast[ptr int32](arena)
+    var size: int32 = arena32[1]
+    var used: int32 = arena32[2]
+    return size - used
+
+# Get total allocated bytes
+proc arena_used(arena: ptr uint8): int32 =
+    var arena32: ptr int32 = cast[ptr int32](arena)
+    return arena32[2]
+
+# Check if arena is valid (has memory)
+proc arena_is_valid(arena: ptr uint8): bool =
+    var arena32: ptr int32 = cast[ptr int32](arena)
+    return arena32[0] != 0
+
+# Save current allocation point (for temporary allocations)
+proc arena_save(arena: ptr uint8): int32 =
+    var arena32: ptr int32 = cast[ptr int32](arena)
+    return arena32[2]
+
+# Restore to saved allocation point (free temporary allocations)
+proc arena_restore(arena: ptr uint8, saved: int32) =
+    var arena32: ptr int32 = cast[ptr int32](arena)
+    arena32[2] = saved
