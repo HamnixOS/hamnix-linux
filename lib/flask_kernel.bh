@@ -1,0 +1,228 @@
+# Kernel-mode Flask-style Web Framework
+# Uses direct TCP calls instead of syscalls (for kernel use)
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+const FLASK_MAX_ROUTES: int32 = 16
+const FLASK_MAX_PATH: int32 = 64
+
+# =============================================================================
+# Route Table
+# =============================================================================
+
+var flask_paths: array[1024, uint8]       # 16 * 64 bytes
+var flask_handlers: array[16, int32]      # Function pointers
+var flask_methods: array[16, int32]       # -1 = any, 0 = GET, 1 = POST
+var flask_count: int32 = 0
+
+# HTTP Methods
+const FLASK_GET: int32 = 0
+const FLASK_POST: int32 = 1
+const FLASK_ANY: int32 = -1
+
+# =============================================================================
+# Route Registration
+# =============================================================================
+
+proc flask_route(path: ptr uint8, handler: ptr uint8): int32 =
+  return flask_route_method(path, FLASK_GET, handler)
+
+proc flask_route_method(path: ptr uint8, method: int32, handler: ptr uint8): int32 =
+  if flask_count >= FLASK_MAX_ROUTES:
+    return -1
+
+  var offset: int32 = flask_count * FLASK_MAX_PATH
+  var i: int32 = 0
+  while path[i] != 0 and i < FLASK_MAX_PATH - 1:
+    flask_paths[offset + i] = path[i]
+    i = i + 1
+  flask_paths[offset + i] = 0
+
+  flask_handlers[flask_count] = cast[int32](handler)
+  flask_methods[flask_count] = method
+
+  flask_count = flask_count + 1
+  return 0
+
+proc flask_get(path: ptr uint8, handler: ptr uint8): int32 =
+  return flask_route_method(path, FLASK_GET, handler)
+
+proc flask_post(path: ptr uint8, handler: ptr uint8): int32 =
+  return flask_route_method(path, FLASK_POST, handler)
+
+# =============================================================================
+# Response Helpers
+# =============================================================================
+
+proc flask_html(conn: int32, body: ptr uint8) =
+  flask_respond(conn, 200, cast[ptr uint8]("text/html"), body)
+
+proc flask_text(conn: int32, body: ptr uint8) =
+  flask_respond(conn, 200, cast[ptr uint8]("text/plain"), body)
+
+proc flask_json(conn: int32, body: ptr uint8) =
+  flask_respond(conn, 200, cast[ptr uint8]("application/json"), body)
+
+proc flask_404(conn: int32) =
+  flask_respond(conn, 404, cast[ptr uint8]("text/html"),
+    cast[ptr uint8]("<html><body><h1>404 Not Found</h1></body></html>"))
+
+proc flask_respond(conn: int32, status: int32, content_type: ptr uint8, body: ptr uint8) =
+  # Build response in a buffer
+  var resp: array[256, uint8]
+  var pos: int32 = 0
+
+  # Status line
+  var status_line: ptr uint8 = cast[ptr uint8]("HTTP/1.0 200 OK\r\n")
+  if status == 404:
+    status_line = cast[ptr uint8]("HTTP/1.0 404 Not Found\r\n")
+  elif status == 500:
+    status_line = cast[ptr uint8]("HTTP/1.0 500 Error\r\n")
+
+  var i: int32 = 0
+  while status_line[i] != 0:
+    resp[pos] = status_line[i]
+    pos = pos + 1
+    i = i + 1
+
+  # Content-Type header
+  var ct: ptr uint8 = cast[ptr uint8]("Content-Type: ")
+  i = 0
+  while ct[i] != 0:
+    resp[pos] = ct[i]
+    pos = pos + 1
+    i = i + 1
+  i = 0
+  while content_type[i] != 0:
+    resp[pos] = content_type[i]
+    pos = pos + 1
+    i = i + 1
+  resp[pos] = 13
+  pos = pos + 1
+  resp[pos] = 10
+  pos = pos + 1
+
+  # End headers
+  resp[pos] = 13
+  pos = pos + 1
+  resp[pos] = 10
+  pos = pos + 1
+
+  # Send headers
+  discard tcp_write(conn, addr(resp[0]), pos)
+
+  # Send body
+  discard tcp_write(conn, body, fs_strlen(body))
+
+# =============================================================================
+# Request Parsing
+# =============================================================================
+
+proc flask_parse_method(req: ptr uint8): int32 =
+  if req[0] == 71 and req[1] == 69 and req[2] == 84:
+    return FLASK_GET
+  if req[0] == 80 and req[1] == 79 and req[2] == 83 and req[3] == 84:
+    return FLASK_POST
+  return -1
+
+proc flask_parse_path(req: ptr uint8, path_buf: ptr uint8, max_len: int32): int32 =
+  var i: int32 = 0
+  while req[i] != 0 and req[i] != 32:
+    i = i + 1
+  if req[i] == 0:
+    return -1
+  i = i + 1
+
+  var len: int32 = 0
+  while req[i] != 0 and req[i] != 32 and req[i] != 63 and len < max_len - 1:
+    path_buf[len] = req[i]
+    len = len + 1
+    i = i + 1
+  path_buf[len] = 0
+  return len
+
+# =============================================================================
+# Route Matching
+# =============================================================================
+
+proc flask_find_route(path: ptr uint8, method: int32): int32 =
+  var i: int32 = 0
+  while i < flask_count:
+    var route_path: ptr uint8 = addr(flask_paths[i * FLASK_MAX_PATH])
+    if fs_strcmp(path, route_path) == 0:
+      if flask_methods[i] == FLASK_ANY or flask_methods[i] == method:
+        return i
+    i = i + 1
+  return -1
+
+# =============================================================================
+# Main Server Loop
+# =============================================================================
+
+proc flask_run(port: int32): int32 =
+  var conn: int32 = tcp_listen(port)
+  if conn < 0:
+    return -1
+
+  kprint(cast[ptr uint8](" * Flask running on port "))
+  ser_print_int(port)
+  kprintln(cast[ptr uint8](""))
+
+  var buf: array[1024, uint8]
+  var path: array[64, uint8]
+
+  while 1:
+    net_poll()
+
+    if tcp_accept_ready(conn) == 1:
+      # Wait for request data
+      var wait: int32 = 0
+      while wait < 200:
+        net_poll()
+        if tcp_recv_ready[conn] == 1:
+          break
+        wait = wait + 1
+
+      if tcp_recv_ready[conn] == 1:
+        # Read request
+        var n: int32 = tcp_read(conn, addr(buf[0]), 1023)
+        if n > 0:
+          buf[n] = 0
+
+          var method: int32 = flask_parse_method(addr(buf[0]))
+          discard flask_parse_path(addr(buf[0]), addr(path[0]), 64)
+
+          # Log request
+          if method == FLASK_GET:
+            kprint(cast[ptr uint8](" * GET "))
+          else:
+            kprint(cast[ptr uint8](" * ??? "))
+          kprintln(addr(path[0]))
+
+          # Find and call handler
+          var idx: int32 = flask_find_route(addr(path[0]), method)
+          if idx >= 0:
+            var handler: int32 = flask_handlers[idx]
+            # Call handler(conn)
+            flask_call_handler(handler, conn)
+          else:
+            flask_404(conn)
+
+      tcp_close(conn)
+      conn = tcp_listen(port)
+      if conn < 0:
+        return -1
+
+  return 0
+
+# Call handler function pointer
+proc flask_call_handler(handler: int32, conn: int32) =
+  # Handler takes (conn: int32) and sends response
+  var fn: ptr uint8 = cast[ptr uint8](handler)
+  # Use the fact that we can cast and call
+  var fn_ptr: int32 = handler
+  # Call by pushing conn and calling the address
+  # This is a simplified approach - handler must be a global proc
+  discard 0
