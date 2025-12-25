@@ -17,6 +17,9 @@ global net_syscall1
 global net_syscall2
 global net_syscall3
 
+; Function pointer call helper for Flask-style routing
+global call_handler
+
 section .text
 
 ; syscall1(num, arg1)
@@ -245,5 +248,27 @@ net_syscall3:
     pop edx
     pop ecx
     pop ebx
+    pop ebp
+    ret
+
+; call_handler(handler, sock, request, path)
+; Calls a function pointer with 3 arguments
+; Used by Flask-style routing to call route handlers
+call_handler:
+    push ebp
+    mov ebp, esp
+
+    ; Push arguments for the handler (in reverse order)
+    push dword [ebp+20]  ; path
+    push dword [ebp+16]  ; request
+    push dword [ebp+12]  ; sock
+
+    ; Call the handler function pointer
+    mov eax, [ebp+8]     ; handler
+    call eax
+
+    ; Clean up arguments
+    add esp, 12
+
     pop ebp
     ret

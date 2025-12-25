@@ -293,12 +293,9 @@ proc run(port: int32): int32 =
 
   return 0
 
-# Call a handler function pointer
+# Call a handler function pointer (implemented in lib/syscalls.asm)
 # Handler signature: proc(sock: int32, request: ptr uint8, path: ptr uint8)
-proc call_handler(handler: ptr uint8, sock: int32, request: ptr uint8, path: ptr uint8) =
-  # Cast and call the function pointer
-  var fn: proc(s: int32, r: ptr uint8, p: ptr uint8) = cast[proc(s: int32, r: ptr uint8, p: ptr uint8)](handler)
-  fn(sock, request, path)
+extern call_handler(handler: ptr uint8, sock: int32, request: ptr uint8, path: ptr uint8)
 
 # =============================================================================
 # Debug/Development Helpers
