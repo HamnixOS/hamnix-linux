@@ -11,6 +11,12 @@ global syscall5
 global syscall6
 global fast_memcpy
 
+; Kernel syscalls (int 0x42) for networking
+global net_syscall0
+global net_syscall1
+global net_syscall2
+global net_syscall3
+
 section .text
 
 ; syscall1(num, arg1)
@@ -169,5 +175,75 @@ fast_memcpy:
     pop ecx
     pop esi
     pop edi
+    pop ebp
+    ret
+
+; ============= Kernel syscalls (int 0x42) for networking =============
+
+; net_syscall0(num) - no arguments
+net_syscall0:
+    push ebp
+    mov ebp, esp
+    push ebx
+
+    mov eax, [ebp+8]   ; syscall number
+
+    int 0x42           ; kernel syscall
+
+    pop ebx
+    pop ebp
+    ret
+
+; net_syscall1(num, arg1)
+net_syscall1:
+    push ebp
+    mov ebp, esp
+    push ebx
+
+    mov eax, [ebp+8]   ; syscall number
+    mov ebx, [ebp+12]  ; arg1
+
+    int 0x42           ; kernel syscall
+
+    pop ebx
+    pop ebp
+    ret
+
+; net_syscall2(num, arg1, arg2)
+net_syscall2:
+    push ebp
+    mov ebp, esp
+    push ebx
+    push ecx
+
+    mov eax, [ebp+8]   ; syscall number
+    mov ebx, [ebp+12]  ; arg1
+    mov ecx, [ebp+16]  ; arg2
+
+    int 0x42           ; kernel syscall
+
+    pop ecx
+    pop ebx
+    pop ebp
+    ret
+
+; net_syscall3(num, arg1, arg2, arg3)
+net_syscall3:
+    push ebp
+    mov ebp, esp
+    push ebx
+    push ecx
+    push edx
+
+    mov eax, [ebp+8]   ; syscall number
+    mov ebx, [ebp+12]  ; arg1
+    mov ecx, [ebp+16]  ; arg2
+    mov edx, [ebp+20]  ; arg3
+
+    int 0x42           ; kernel syscall
+
+    pop edx
+    pop ecx
+    pop ebx
     pop ebp
     ret

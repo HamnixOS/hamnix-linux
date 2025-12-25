@@ -1,0 +1,215 @@
+# PoodillionOS HTTP Library
+# Provides simple HTTP client and server functionality
+
+import "lib/net"
+import "lib/syscalls"
+
+# HTTP status codes
+const HTTP_OK: int32 = 200
+const HTTP_NOT_FOUND: int32 = 404
+const HTTP_SERVER_ERROR: int32 = 500
+
+# Buffer sizes
+const HTTP_BUF_SIZE: int32 = 4096
+
+# =============================================================================
+# HTTP Client Functions
+# =============================================================================
+
+# Perform a simple HTTP GET request
+# host_ip: pointer to 4-byte IPv4 address
+# port: server port (usually 80)
+# path: URL path (e.g., "/index.html")
+# response_buf: buffer to store response body
+# max_len: maximum response length
+# Returns: number of bytes in response body, or -1 on error
+proc http_get(host_ip: ptr uint8, port: int32, path: ptr uint8,
+              response_buf: ptr uint8, max_len: int32): int32 =
+  # Connect to server
+  var sock: int32 = net_connect(host_ip, port)
+  if sock < 0:
+    return -1
+
+  # Wait for connection
+  if net_wait_connected(sock, 5000) == 0:
+    net_close(sock)
+    return -1
+
+  # Build and send HTTP request
+  discard net_send_str(sock, cast[ptr uint8]("GET "))
+  discard net_send_str(sock, path)
+  discard net_send_str(sock, cast[ptr uint8](" HTTP/1.0\r\n"))
+  discard net_send_str(sock, cast[ptr uint8]("Host: "))
+  var ip_buf: array[16, uint8]
+  discard format_ipv4(host_ip, addr(ip_buf[0]))
+  discard net_send_str(sock, addr(ip_buf[0]))
+  discard net_send_str(sock, cast[ptr uint8]("\r\n"))
+  discard net_send_str(sock, cast[ptr uint8]("Connection: close\r\n"))
+  discard net_send_str(sock, cast[ptr uint8]("\r\n"))
+
+  # Read response
+  var total: int32 = 0
+  var headers_done: int32 = 0
+
+  while total < max_len:
+    var n: int32 = net_recv_blocking(sock, addr(response_buf[total]), max_len - total, 5000)
+    if n <= 0:
+      break
+    total = total + n
+
+  net_close(sock)
+
+  # Find end of headers (\r\n\r\n) and return just body
+  var i: int32 = 0
+  while i < total - 3:
+    if response_buf[i] == 13 and response_buf[i + 1] == 10 and
+       response_buf[i + 2] == 13 and response_buf[i + 3] == 10:
+      # Found header end - copy body to start of buffer
+      var body_start: int32 = i + 4
+      var body_len: int32 = total - body_start
+      var j: int32 = 0
+      while j < body_len:
+        response_buf[j] = response_buf[body_start + j]
+        j = j + 1
+      response_buf[body_len] = 0  # Null terminate
+      return body_len
+    i = i + 1
+
+  # No headers found, return as-is
+  response_buf[total] = 0
+  return total
+
+# =============================================================================
+# HTTP Server Functions
+# =============================================================================
+
+# Send an HTTP response
+# sock: connected socket
+# status: HTTP status code (e.g., 200, 404)
+# content_type: MIME type (e.g., "text/html")
+# body: response body
+# body_len: length of body (or -1 to use strlen)
+proc http_send_response(sock: int32, status: int32, content_type: ptr uint8,
+                        body: ptr uint8, body_len: int32) =
+  # Status line
+  discard net_send_str(sock, cast[ptr uint8]("HTTP/1.0 "))
+  var status_str: array[16, uint8]
+  discard itoa(status, addr(status_str[0]))
+  discard net_send_str(sock, addr(status_str[0]))
+
+  if status == 200:
+    discard net_send_str(sock, cast[ptr uint8](" OK\r\n"))
+  elif status == 404:
+    discard net_send_str(sock, cast[ptr uint8](" Not Found\r\n"))
+  else:
+    discard net_send_str(sock, cast[ptr uint8](" Error\r\n"))
+
+  # Content-Type header
+  discard net_send_str(sock, cast[ptr uint8]("Content-Type: "))
+  discard net_send_str(sock, content_type)
+  discard net_send_str(sock, cast[ptr uint8]("\r\n"))
+
+  # Content-Length header
+  var len: int32 = body_len
+  if len < 0:
+    len = strlen(body)
+  discard net_send_str(sock, cast[ptr uint8]("Content-Length: "))
+  var len_str: array[16, uint8]
+  discard itoa(len, addr(len_str[0]))
+  discard net_send_str(sock, addr(len_str[0]))
+  discard net_send_str(sock, cast[ptr uint8]("\r\n"))
+
+  # End of headers
+  discard net_send_str(sock, cast[ptr uint8]("\r\n"))
+
+  # Body
+  if len > 0:
+    discard net_send(sock, body, len)
+
+# Send a simple HTML response
+proc http_send_html(sock: int32, status: int32, html: ptr uint8) =
+  http_send_response(sock, status, cast[ptr uint8]("text/html"), html, -1)
+
+# Send a plain text response
+proc http_send_text(sock: int32, status: int32, text: ptr uint8) =
+  http_send_response(sock, status, cast[ptr uint8]("text/plain"), text, -1)
+
+# Send a 404 Not Found response
+proc http_send_404(sock: int32) =
+  http_send_html(sock, 404, cast[ptr uint8]("<html><body><h1>404 Not Found</h1></body></html>"))
+
+# =============================================================================
+# HTTP Request Parsing
+# =============================================================================
+
+# Extract the request path from an HTTP request
+# request: the raw HTTP request buffer
+# path_buf: buffer to store the extracted path
+# max_len: maximum path length
+# Returns: length of path, or -1 on error
+proc http_get_path(request: ptr uint8, path_buf: ptr uint8, max_len: int32): int32 =
+  # Find start of path (after "GET " or "POST " etc.)
+  var i: int32 = 0
+
+  # Skip method
+  while request[i] != 0 and request[i] != 32:  # space
+    i = i + 1
+
+  if request[i] == 0:
+    return -1
+
+  # Skip space
+  i = i + 1
+
+  # Copy path until space or end
+  var path_len: int32 = 0
+  while request[i] != 0 and request[i] != 32 and path_len < max_len - 1:
+    path_buf[path_len] = request[i]
+    path_len = path_len + 1
+    i = i + 1
+
+  path_buf[path_len] = 0
+  return path_len
+
+# Check if request is a GET request
+proc http_is_get(request: ptr uint8): int32 =
+  if request[0] == 71 and request[1] == 69 and request[2] == 84 and request[3] == 32:
+    return 1  # "GET "
+  return 0
+
+# Check if request is a POST request
+proc http_is_post(request: ptr uint8): int32 =
+  if request[0] == 80 and request[1] == 79 and request[2] == 83 and request[3] == 84 and request[4] == 32:
+    return 1  # "POST "
+  return 0
+
+# =============================================================================
+# Simple HTTP Server
+# =============================================================================
+
+# Run a simple HTTP server that serves a single static page
+# port: port to listen on
+# html: HTML content to serve
+# Note: This function runs forever until the process is killed
+proc http_serve_static(port: int32, html: ptr uint8) =
+  var sock: int32 = net_listen(port)
+  if sock < 0:
+    return
+
+  while 1:
+    net_poll()
+
+    if net_accept_ready(sock) == 1:
+      # Connection established - read request
+      var buf: array[1024, uint8]
+      var n: int32 = net_recv_blocking(sock, addr(buf[0]), 1023, 2000)
+
+      if n > 0:
+        buf[n] = 0  # Null terminate
+
+        # Send response
+        http_send_html(sock, 200, html)
+
+      # Close and re-listen
+      net_close(sock)
+      sock = net_listen(port)
