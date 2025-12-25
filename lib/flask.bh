@@ -150,43 +150,113 @@ proc redirect(sock: int32, url: ptr uint8) =
 
 proc send_response(sock: int32, status: int32, content_type: ptr uint8, body: ptr uint8) =
   println(cast[ptr uint8]("[Flask] send_response enter"))
-  # Status line
-  println(cast[ptr uint8]("[Flask] sending status line"))
-  discard net_send_str(sock, cast[ptr uint8]("HTTP/1.0 "))
+
+  # Build entire response in a buffer
+  var response: array[4096, uint8]
+  var pos: int32 = 0
+
+  # Helper to copy string to buffer
+  var src: ptr uint8
+
+  # Status line: "HTTP/1.0 "
+  src = cast[ptr uint8]("HTTP/1.0 ")
+  var i: int32 = 0
+  while src[i] != 0:
+    response[pos] = src[i]
+    pos = pos + 1
+    i = i + 1
+
+  # Status code
   var status_buf: array[16, uint8]
   discard itoa(status, addr(status_buf[0]))
-  discard net_send_str(sock, addr(status_buf[0]))
+  i = 0
+  while status_buf[i] != 0:
+    response[pos] = status_buf[i]
+    pos = pos + 1
+    i = i + 1
 
+  # Status text
   if status == 200:
-    discard net_send_str(sock, cast[ptr uint8](" OK\r\n"))
+    src = cast[ptr uint8](" OK\r\n")
   elif status == 302:
-    discard net_send_str(sock, cast[ptr uint8](" Found\r\n"))
-  elif status == 400:
-    discard net_send_str(sock, cast[ptr uint8](" Bad Request\r\n"))
+    src = cast[ptr uint8](" Found\r\n")
   elif status == 404:
-    discard net_send_str(sock, cast[ptr uint8](" Not Found\r\n"))
+    src = cast[ptr uint8](" Not Found\r\n")
   elif status == 500:
-    discard net_send_str(sock, cast[ptr uint8](" Internal Server Error\r\n"))
+    src = cast[ptr uint8](" Internal Server Error\r\n")
   else:
-    discard net_send_str(sock, cast[ptr uint8](" Unknown\r\n"))
+    src = cast[ptr uint8](" Unknown\r\n")
+  i = 0
+  while src[i] != 0:
+    response[pos] = src[i]
+    pos = pos + 1
+    i = i + 1
 
-  # Headers
-  discard net_send_str(sock, cast[ptr uint8]("Content-Type: "))
-  discard net_send_str(sock, content_type)
-  discard net_send_str(sock, cast[ptr uint8]("\r\n"))
+  # Content-Type header
+  src = cast[ptr uint8]("Content-Type: ")
+  i = 0
+  while src[i] != 0:
+    response[pos] = src[i]
+    pos = pos + 1
+    i = i + 1
+  i = 0
+  while content_type[i] != 0:
+    response[pos] = content_type[i]
+    pos = pos + 1
+    i = i + 1
+  response[pos] = 13  # CR
+  pos = pos + 1
+  response[pos] = 10  # LF
+  pos = pos + 1
 
+  # Content-Length header
   var body_len: int32 = strlen(body)
-  discard net_send_str(sock, cast[ptr uint8]("Content-Length: "))
+  src = cast[ptr uint8]("Content-Length: ")
+  i = 0
+  while src[i] != 0:
+    response[pos] = src[i]
+    pos = pos + 1
+    i = i + 1
   var len_buf: array[16, uint8]
   discard itoa(body_len, addr(len_buf[0]))
-  discard net_send_str(sock, addr(len_buf[0]))
-  discard net_send_str(sock, cast[ptr uint8]("\r\n"))
+  i = 0
+  while len_buf[i] != 0:
+    response[pos] = len_buf[i]
+    pos = pos + 1
+    i = i + 1
+  response[pos] = 13  # CR
+  pos = pos + 1
+  response[pos] = 10  # LF
+  pos = pos + 1
 
-  discard net_send_str(sock, cast[ptr uint8]("Connection: close\r\n"))
-  discard net_send_str(sock, cast[ptr uint8]("\r\n"))
+  # Connection header
+  src = cast[ptr uint8]("Connection: close\r\n")
+  i = 0
+  while src[i] != 0:
+    response[pos] = src[i]
+    pos = pos + 1
+    i = i + 1
+
+  # Empty line
+  response[pos] = 13  # CR
+  pos = pos + 1
+  response[pos] = 10  # LF
+  pos = pos + 1
 
   # Body
-  discard net_send(sock, body, body_len)
+  i = 0
+  while i < body_len:
+    response[pos] = body[i]
+    pos = pos + 1
+    i = i + 1
+
+  # Send entire response as one packet
+  println(cast[ptr uint8]("[Flask] sending response"))
+  print(cast[ptr uint8]("[Flask] response size="))
+  print_int(pos)
+  println(cast[ptr uint8](""))
+  discard net_send(sock, addr(response[0]), pos)
+  println(cast[ptr uint8]("[Flask] send done"))
 
 # =============================================================================
 # Request Parsing
