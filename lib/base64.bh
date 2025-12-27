@@ -199,7 +199,6 @@ proc base64url_encode(input: ptr uint8, input_len: int32, output: ptr uint8): in
       output[i] = 45     # '-'
     elif output[i] == 47:  # '/'
       output[i] = 95       # '_'
-    end
     i = i + 1
 
   return len
@@ -234,8 +233,7 @@ const PEM_LINE_LENGTH: int32 = 64
 # input_len: data length
 # output: PEM output buffer
 # Returns: total output length
-proc pem_encode(type_name: ptr uint8, input: ptr uint8, input_len: int32,
-                output: ptr uint8): int32 =
+proc pem_encode(type_name: ptr uint8, input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
   var out_idx: int32 = 0
 
   # Write header: "-----BEGIN TYPE-----\n"
@@ -312,9 +310,7 @@ proc pem_decode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
   var found_header: int32 = 0
 
   while in_idx < input_len - 6:
-    if input[in_idx] == 45 and input[in_idx + 1] == 45 and
-       input[in_idx + 2] == 45 and input[in_idx + 3] == 45 and
-       input[in_idx + 4] == 45:
+    if input[in_idx] == 45 and input[in_idx + 1] == 45 and input[in_idx + 2] == 45 and input[in_idx + 3] == 45 and input[in_idx + 4] == 45:
       # Found "-----", skip to newline
       in_idx = in_idx + 5
       while in_idx < input_len and input[in_idx] != 10:
@@ -342,7 +338,6 @@ proc pem_decode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
     if c != 10 and c != 13 and c != 32 and c != 9:
       b64_buf[b64_len] = c
       b64_len = b64_len + 1
-    end
 
     in_idx = in_idx + 1
 
@@ -392,7 +387,6 @@ proc hex_decode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
       high = c - 87
     else:
       return -1
-    end
 
     # Decode low nibble
     c = cast[int32](input[i + 1])
@@ -404,7 +398,6 @@ proc hex_decode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
       low = c - 87
     else:
       return -1
-    end
 
     output[out_idx] = cast[uint8]((high * 16) + low)
     out_idx = out_idx + 1
