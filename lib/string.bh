@@ -432,3 +432,480 @@ proc string_rtrim(s: ptr uint8) =
 proc string_trim(s: ptr uint8) =
     string_rtrim(s)
     string_ltrim(s)
+
+# ============================================================================
+# C-Style String Utilities
+# ============================================================================
+
+# Copy null-terminated string
+proc strcpy(dest: ptr uint8, src: ptr uint8): ptr uint8 =
+    var i: int32 = 0
+    while src[i] != 0:
+        dest[i] = src[i]
+        i = i + 1
+    dest[i] = 0
+    return dest
+
+# Copy at most n characters
+proc strncpy(dest: ptr uint8, src: ptr uint8, n: int32): ptr uint8 =
+    var i: int32 = 0
+    while i < n and src[i] != 0:
+        dest[i] = src[i]
+        i = i + 1
+    while i < n:
+        dest[i] = 0
+        i = i + 1
+    return dest
+
+# Concatenate strings
+proc strcat(dest: ptr uint8, src: ptr uint8): ptr uint8 =
+    var dest_len: int32 = cstr_len(dest)
+    var i: int32 = 0
+    while src[i] != 0:
+        dest[dest_len + i] = src[i]
+        i = i + 1
+    dest[dest_len + i] = 0
+    return dest
+
+# Concatenate at most n characters
+proc strncat(dest: ptr uint8, src: ptr uint8, n: int32): ptr uint8 =
+    var dest_len: int32 = cstr_len(dest)
+    var i: int32 = 0
+    while i < n and src[i] != 0:
+        dest[dest_len + i] = src[i]
+        i = i + 1
+    dest[dest_len + i] = 0
+    return dest
+
+# Compare strings
+proc strcmp(s1: ptr uint8, s2: ptr uint8): int32 =
+    var i: int32 = 0
+    while s1[i] != 0 and s2[i] != 0:
+        if s1[i] != s2[i]:
+            return cast[int32](s1[i]) - cast[int32](s2[i])
+        i = i + 1
+    return cast[int32](s1[i]) - cast[int32](s2[i])
+
+# Compare first n characters
+proc strncmp(s1: ptr uint8, s2: ptr uint8, n: int32): int32 =
+    var i: int32 = 0
+    while i < n and s1[i] != 0 and s2[i] != 0:
+        if s1[i] != s2[i]:
+            return cast[int32](s1[i]) - cast[int32](s2[i])
+        i = i + 1
+    if i == n:
+        return 0
+    return cast[int32](s1[i]) - cast[int32](s2[i])
+
+# Case-insensitive comparison
+proc strcasecmp(s1: ptr uint8, s2: ptr uint8): int32 =
+    var i: int32 = 0
+    while s1[i] != 0 and s2[i] != 0:
+        var c1: uint8 = s1[i]
+        var c2: uint8 = s2[i]
+        if c1 >= 65 and c1 <= 90:
+            c1 = c1 + 32
+        if c2 >= 65 and c2 <= 90:
+            c2 = c2 + 32
+        if c1 != c2:
+            return cast[int32](c1) - cast[int32](c2)
+        i = i + 1
+    return cast[int32](s1[i]) - cast[int32](s2[i])
+
+# Find first occurrence of character
+proc strchr(s: ptr uint8, c: int32): ptr uint8 =
+    var i: int32 = 0
+    while s[i] != 0:
+        if cast[int32](s[i]) == c:
+            return cast[ptr uint8](cast[int32](s) + i)
+        i = i + 1
+    if c == 0:
+        return cast[ptr uint8](cast[int32](s) + i)
+    return cast[ptr uint8](0)
+
+# Find last occurrence of character
+proc strrchr(s: ptr uint8, c: int32): ptr uint8 =
+    var len: int32 = cstr_len(s)
+    var i: int32 = len
+    if c == 0:
+        return cast[ptr uint8](cast[int32](s) + len)
+    while i >= 0:
+        if cast[int32](s[i]) == c:
+            return cast[ptr uint8](cast[int32](s) + i)
+        i = i - 1
+    return cast[ptr uint8](0)
+
+# Find substring
+proc strstr(haystack: ptr uint8, needle: ptr uint8): ptr uint8 =
+    if needle[0] == 0:
+        return haystack
+    var i: int32 = 0
+    while haystack[i] != 0:
+        var j: int32 = 0
+        while needle[j] != 0 and haystack[i + j] == needle[j]:
+            j = j + 1
+        if needle[j] == 0:
+            return cast[ptr uint8](cast[int32](haystack) + i)
+        i = i + 1
+    return cast[ptr uint8](0)
+
+# Check if string starts with prefix
+proc cstr_starts_with(s: ptr uint8, prefix: ptr uint8): int32 =
+    var i: int32 = 0
+    while prefix[i] != 0:
+        if s[i] == 0 or s[i] != prefix[i]:
+            return 0
+        i = i + 1
+    return 1
+
+# Check if string ends with suffix
+proc cstr_ends_with(s: ptr uint8, suffix: ptr uint8): int32 =
+    var s_len: int32 = cstr_len(s)
+    var suffix_len: int32 = cstr_len(suffix)
+    if suffix_len > s_len:
+        return 0
+    var i: int32 = 0
+    while i < suffix_len:
+        if s[s_len - suffix_len + i] != suffix[i]:
+            return 0
+        i = i + 1
+    return 1
+
+# ============================================================================
+# Character Classification
+# ============================================================================
+
+proc isdigit(c: int32): int32 =
+    return c >= 48 and c <= 57
+
+proc isalpha(c: int32): int32 =
+    return (c >= 65 and c <= 90) or (c >= 97 and c <= 122)
+
+proc isalnum(c: int32): int32 =
+    return isdigit(c) or isalpha(c)
+
+proc isspace(c: int32): int32 =
+    return c == 32 or c == 9 or c == 10 or c == 13 or c == 11 or c == 12
+
+proc isupper(c: int32): int32 =
+    return c >= 65 and c <= 90
+
+proc islower(c: int32): int32 =
+    return c >= 97 and c <= 122
+
+proc isxdigit(c: int32): int32 =
+    return isdigit(c) or (c >= 65 and c <= 70) or (c >= 97 and c <= 102)
+
+proc isprint(c: int32): int32 =
+    return c >= 32 and c <= 126
+
+proc toupper(c: int32): int32 =
+    if islower(c) != 0:
+        return c - 32
+    return c
+
+proc tolower(c: int32): int32 =
+    if isupper(c) != 0:
+        return c + 32
+    return c
+
+# ============================================================================
+# String Conversion
+# ============================================================================
+
+# Convert string to integer
+proc atoi(s: ptr uint8): int32 =
+    var result: int32 = 0
+    var sign: int32 = 1
+    var i: int32 = 0
+
+    while isspace(cast[int32](s[i])) != 0:
+        i = i + 1
+
+    if s[i] == 45:
+        sign = -1
+        i = i + 1
+    elif s[i] == 43:
+        i = i + 1
+
+    while isdigit(cast[int32](s[i])) != 0:
+        result = result * 10 + (cast[int32](s[i]) - 48)
+        i = i + 1
+
+    return result * sign
+
+# Convert integer to string
+proc itoa(value: int32, buf: ptr uint8): ptr uint8 =
+    var i: int32 = 0
+    var negative: int32 = 0
+    var v: int32 = value
+
+    if v == 0:
+        buf[0] = 48
+        buf[1] = 0
+        return buf
+
+    if v < 0:
+        negative = 1
+        v = -v
+
+    while v > 0:
+        buf[i] = cast[uint8](48 + (v % 10))
+        v = v / 10
+        i = i + 1
+
+    if negative != 0:
+        buf[i] = 45
+        i = i + 1
+
+    buf[i] = 0
+
+    var j: int32 = 0
+    var k: int32 = i - 1
+    while j < k:
+        var tmp: uint8 = buf[j]
+        buf[j] = buf[k]
+        buf[k] = tmp
+        j = j + 1
+        k = k - 1
+
+    return buf
+
+# Convert integer to string with base
+proc itoa_base(value: int32, buf: ptr uint8, base: int32): ptr uint8 =
+    if base < 2 or base > 36:
+        buf[0] = 0
+        return buf
+
+    var digits: ptr uint8 = cast[ptr uint8]("0123456789abcdefghijklmnopqrstuvwxyz")
+    var i: int32 = 0
+    var negative: int32 = 0
+    var v: int32 = value
+
+    if v == 0:
+        buf[0] = 48
+        buf[1] = 0
+        return buf
+
+    if v < 0 and base == 10:
+        negative = 1
+        v = -v
+
+    while v > 0:
+        buf[i] = digits[v % base]
+        v = v / base
+        i = i + 1
+
+    if negative != 0:
+        buf[i] = 45
+        i = i + 1
+
+    buf[i] = 0
+
+    var j: int32 = 0
+    var k: int32 = i - 1
+    while j < k:
+        var tmp: uint8 = buf[j]
+        buf[j] = buf[k]
+        buf[k] = tmp
+        j = j + 1
+        k = k - 1
+
+    return buf
+
+# ============================================================================
+# Memory Operations
+# ============================================================================
+
+# Fill memory with value
+proc memset(dest: ptr uint8, c: int32, n: int32): ptr uint8 =
+    var i: int32 = 0
+    while i < n:
+        dest[i] = cast[uint8](c)
+        i = i + 1
+    return dest
+
+# Copy memory
+proc memcpy(dest: ptr uint8, src: ptr uint8, n: int32): ptr uint8 =
+    var i: int32 = 0
+    while i < n:
+        dest[i] = src[i]
+        i = i + 1
+    return dest
+
+# Move memory (handles overlap)
+proc memmove(dest: ptr uint8, src: ptr uint8, n: int32): ptr uint8 =
+    if cast[int32](dest) < cast[int32](src):
+        var i: int32 = 0
+        while i < n:
+            dest[i] = src[i]
+            i = i + 1
+    else:
+        var i: int32 = n - 1
+        while i >= 0:
+            dest[i] = src[i]
+            i = i - 1
+    return dest
+
+# Compare memory
+proc memcmp(s1: ptr uint8, s2: ptr uint8, n: int32): int32 =
+    var i: int32 = 0
+    while i < n:
+        if s1[i] != s2[i]:
+            return cast[int32](s1[i]) - cast[int32](s2[i])
+        i = i + 1
+    return 0
+
+# Find byte in memory
+proc memchr(s: ptr uint8, c: int32, n: int32): ptr uint8 =
+    var i: int32 = 0
+    while i < n:
+        if cast[int32](s[i]) == c:
+            return cast[ptr uint8](cast[int32](s) + i)
+        i = i + 1
+    return cast[ptr uint8](0)
+
+# ============================================================================
+# Hex Encoding
+# ============================================================================
+
+# Encode bytes to hex string
+proc bytes_to_hex(input: ptr uint8, len: int32, output: ptr uint8): int32 =
+    var hex: ptr uint8 = cast[ptr uint8]("0123456789abcdef")
+    var i: int32 = 0
+    while i < len:
+        var b: uint8 = input[i]
+        output[i * 2] = hex[cast[int32](b) / 16]
+        output[i * 2 + 1] = hex[cast[int32](b) % 16]
+        i = i + 1
+    output[len * 2] = 0
+    return len * 2
+
+# Decode hex string to bytes
+proc hex_to_bytes(input: ptr uint8, output: ptr uint8): int32 =
+    var len: int32 = cstr_len(input)
+    if len % 2 != 0:
+        return -1
+
+    var i: int32 = 0
+    while i < len:
+        var hi: int32 = 0
+        var lo: int32 = 0
+        var c1: int32 = cast[int32](input[i])
+        var c2: int32 = cast[int32](input[i + 1])
+
+        if c1 >= 48 and c1 <= 57:
+            hi = c1 - 48
+        elif c1 >= 65 and c1 <= 70:
+            hi = c1 - 55
+        elif c1 >= 97 and c1 <= 102:
+            hi = c1 - 87
+        else:
+            return -1
+
+        if c2 >= 48 and c2 <= 57:
+            lo = c2 - 48
+        elif c2 >= 65 and c2 <= 70:
+            lo = c2 - 55
+        elif c2 >= 97 and c2 <= 102:
+            lo = c2 - 87
+        else:
+            return -1
+
+        output[i / 2] = cast[uint8](hi * 16 + lo)
+        i = i + 2
+
+    return len / 2
+
+# ============================================================================
+# String Formatting Helpers
+# ============================================================================
+
+# Convert string to uppercase in-place
+proc cstr_toupper(s: ptr uint8): ptr uint8 =
+    var i: int32 = 0
+    while s[i] != 0:
+        if s[i] >= 97 and s[i] <= 122:
+            s[i] = s[i] - 32
+        i = i + 1
+    return s
+
+# Convert string to lowercase in-place
+proc cstr_tolower(s: ptr uint8): ptr uint8 =
+    var i: int32 = 0
+    while s[i] != 0:
+        if s[i] >= 65 and s[i] <= 90:
+            s[i] = s[i] + 32
+        i = i + 1
+    return s
+
+# Reverse string in-place
+proc cstr_reverse(s: ptr uint8): ptr uint8 =
+    var len: int32 = cstr_len(s)
+    var i: int32 = 0
+    var j: int32 = len - 1
+    while i < j:
+        var tmp: uint8 = s[i]
+        s[i] = s[j]
+        s[j] = tmp
+        i = i + 1
+        j = j - 1
+    return s
+
+# Trim leading whitespace
+proc cstr_ltrim(s: ptr uint8): ptr uint8 =
+    while s[0] != 0 and isspace(cast[int32](s[0])) != 0:
+        s = cast[ptr uint8](cast[int32](s) + 1)
+    return s
+
+# Trim trailing whitespace
+proc cstr_rtrim(s: ptr uint8): ptr uint8 =
+    var len: int32 = cstr_len(s)
+    while len > 0 and isspace(cast[int32](s[len - 1])) != 0:
+        len = len - 1
+        s[len] = 0
+    return s
+
+# Count substring occurrences
+proc cstr_count(s: ptr uint8, substr: ptr uint8): int32 =
+    var count: int32 = 0
+    var pos: ptr uint8 = s
+
+    while pos[0] != 0:
+        var found: ptr uint8 = strstr(pos, substr)
+        if found == cast[ptr uint8](0):
+            return count
+        count = count + 1
+        pos = cast[ptr uint8](cast[int32](found) + 1)
+
+    return count
+
+# Pad string left
+proc cstr_pad_left(s: ptr uint8, target_len: int32, pad: uint8, buf: ptr uint8, buf_size: int32): int32 =
+    var s_len: int32 = cstr_len(s)
+    if target_len <= s_len:
+        strcpy(buf, s)
+        return s_len
+
+    var pad_len: int32 = target_len - s_len
+    if target_len + 1 > buf_size:
+        return -1
+
+    memset(buf, cast[int32](pad), pad_len)
+    strcpy(cast[ptr uint8](cast[int32](buf) + pad_len), s)
+    return target_len
+
+# Pad string right
+proc cstr_pad_right(s: ptr uint8, target_len: int32, pad: uint8, buf: ptr uint8, buf_size: int32): int32 =
+    var s_len: int32 = cstr_len(s)
+    if target_len <= s_len:
+        strcpy(buf, s)
+        return s_len
+
+    if target_len + 1 > buf_size:
+        return -1
+
+    strcpy(buf, s)
+    memset(cast[ptr uint8](cast[int32](buf) + s_len), cast[int32](pad), target_len - s_len)
+    buf[target_len] = 0
+    return target_len

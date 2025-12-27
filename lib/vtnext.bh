@@ -1,0 +1,675 @@
+# vtnext.bh - VTNext Client Library for Userland Programs
+# Provides easy-to-use functions for VTNext graphics output
+#
+# Usage:
+#   import "lib/vtnext"
+#   vtn_init_raw()  # Enable raw input mode
+#   vtn_clear_color(20, 30, 40, 255)
+#   vtn_text("Hello", 100, 100, 1.0, 255, 255, 255, 255)
+#   vtn_rect(50, 50, 200, 100, 0, 255, 0, 0, 128, 1)
+#   vtn_flush()
+
+import "lib/syscalls"
+
+# ============ Output Buffer ============
+
+# Buffer for building VTNext commands
+const VTN_BUF_SIZE: int32 = 8192
+var vtn_buffer: array[8192, uint8]
+var vtn_buf_pos: int32 = 0
+
+# Flush buffer to stdout
+proc vtn_flush() =
+  if vtn_buf_pos > 0:
+    discard write(STDOUT, cast[ptr uint8](addr(vtn_buffer)), vtn_buf_pos)
+    vtn_buf_pos = 0
+
+# Write byte to buffer
+proc vtn_write_byte(b: int32) =
+  if vtn_buf_pos >= VTN_BUF_SIZE - 1:
+    vtn_flush()
+  vtn_buffer[vtn_buf_pos] = cast[uint8](b)
+  vtn_buf_pos = vtn_buf_pos + 1
+
+# Write string to buffer
+proc vtn_write_str(s: ptr uint8) =
+  var i: int32 = 0
+  while s[i] != cast[uint8](0):
+    vtn_write_byte(cast[int32](s[i]))
+    i = i + 1
+
+# Write integer to buffer as decimal string
+proc vtn_write_int(n: int32) =
+  var num: int32 = n
+  if num < 0:
+    vtn_write_byte(45)  # '-'
+    num = 0 - num
+
+  if num == 0:
+    vtn_write_byte(48)  # '0'
+    return
+
+  # Build digits in reverse
+  var temp: int32 = 0
+  var count: int32 = 0
+  while num > 0:
+    temp = temp * 10 + (num % 10)
+    num = num / 10
+    count = count + 1
+
+  # Write digits
+  while temp > 0 or count > 0:
+    vtn_write_byte(48 + (temp % 10))
+    temp = temp / 10
+    count = count - 1
+
+# Write float (as integer.fraction)
+proc vtn_write_float(f: int32) =
+  # For now, just write as integer
+  # Later we could support fixed-point
+  vtn_write_int(f)
+  vtn_write_byte(46)  # '.'
+  vtn_write_byte(48)  # '0'
+
+# ============ Command Building ============
+
+# Begin a VTNext command
+# ESC ] vtn ; <command> ;
+proc vtn_begin_cmd(cmd: ptr uint8) =
+  vtn_write_byte(0x1B)     # ESC
+  vtn_write_byte(0x5D)     # ]
+  vtn_write_str(cast[ptr uint8]("vtn;"))
+  vtn_write_str(cmd)
+  vtn_write_byte(0x3B)     # ;
+
+# End a VTNext command
+proc vtn_end_cmd() =
+  vtn_write_byte(0x07)     # BEL
+
+# Write parameter separator
+proc vtn_sep() =
+  vtn_write_byte(0x3B)     # ;
+
+# ============ Session Control ============
+
+# Enable raw input mode (game-engine style events)
+proc vtn_init_raw() =
+  vtn_begin_cmd(cast[ptr uint8]("input"))
+  vtn_write_str(cast[ptr uint8]("raw"))
+  vtn_end_cmd()
+  vtn_flush()
+
+# Enable normal input mode
+proc vtn_init_normal() =
+  vtn_begin_cmd(cast[ptr uint8]("input"))
+  vtn_write_str(cast[ptr uint8]("normal"))
+  vtn_end_cmd()
+  vtn_flush()
+
+# Hide cursor
+proc vtn_cursor_hide() =
+  vtn_begin_cmd(cast[ptr uint8]("cursor"))
+  vtn_write_str(cast[ptr uint8]("hide"))
+  vtn_end_cmd()
+
+# Show cursor
+proc vtn_cursor_show() =
+  vtn_begin_cmd(cast[ptr uint8]("cursor"))
+  vtn_write_str(cast[ptr uint8]("show"))
+  vtn_end_cmd()
+
+# Set viewport size
+proc vtn_viewport(w: int32, h: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("viewport"))
+  vtn_write_int(w)
+  vtn_sep()
+  vtn_write_int(h)
+  vtn_end_cmd()
+
+# ============ Clear ============
+
+# Clear entire screen with color
+proc vtn_clear_color(r: int32, g: int32, b: int32, a: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("clear"))
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_end_cmd()
+
+# Clear region with color
+proc vtn_clear_region(x: int32, y: int32, w: int32, h: int32, r: int32, g: int32, b: int32, a: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("clear"))
+  vtn_write_int(x)
+  vtn_sep()
+  vtn_write_int(y)
+  vtn_sep()
+  vtn_write_int(w)
+  vtn_sep()
+  vtn_write_int(h)
+  vtn_sep()
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_end_cmd()
+
+# ============ Text ============
+
+# Draw text at position
+# x, y: position (pixels)
+# z: depth (0 = back, higher = front)
+# rot: rotation in degrees
+# scale: scale factor (1.0 = normal)
+# r, g, b, a: color
+# text: string to draw
+proc vtn_text(text: ptr uint8, x: int32, y: int32, z: int32, rot: int32, scale: int32, r: int32, g: int32, b: int32, a: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("text"))
+  vtn_write_int(x)
+  vtn_sep()
+  vtn_write_int(y)
+  vtn_sep()
+  vtn_write_int(z)
+  vtn_sep()
+  vtn_write_int(rot)
+  vtn_sep()
+  vtn_write_float(scale)
+  vtn_sep()
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_sep()
+  vtn_write_byte(34)  # "
+  vtn_write_str(text)
+  vtn_write_byte(34)  # "
+  vtn_end_cmd()
+
+# Simplified text (no rotation, scale 1.0, z=1)
+proc vtn_text_simple(text: ptr uint8, x: int32, y: int32, r: int32, g: int32, b: int32) =
+  vtn_text(text, x, y, 1, 0, 1, r, g, b, 255)
+
+# ============ Rectangle ============
+
+# Draw rectangle
+# x, y, w, h: position and size
+# z: depth, rot: rotation
+# r, g, b, a: color
+# filled: 0 = outline, 1 = filled
+proc vtn_rect(x: int32, y: int32, w: int32, h: int32, z: int32, rot: int32, r: int32, g: int32, b: int32, a: int32, filled: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("rect"))
+  vtn_write_int(x)
+  vtn_sep()
+  vtn_write_int(y)
+  vtn_sep()
+  vtn_write_int(z)
+  vtn_sep()
+  vtn_write_int(w)
+  vtn_sep()
+  vtn_write_int(h)
+  vtn_sep()
+  vtn_write_int(rot)
+  vtn_sep()
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_sep()
+  vtn_write_int(filled)
+  vtn_end_cmd()
+
+# Simplified filled rectangle
+proc vtn_fill_rect(x: int32, y: int32, w: int32, h: int32, r: int32, g: int32, b: int32, a: int32) =
+  vtn_rect(x, y, w, h, 1, 0, r, g, b, a, 1)
+
+# Simplified outlined rectangle
+proc vtn_outline_rect(x: int32, y: int32, w: int32, h: int32, r: int32, g: int32, b: int32) =
+  vtn_rect(x, y, w, h, 1, 0, r, g, b, 255, 0)
+
+# ============ Rounded Rectangle ============
+
+# Draw rounded rectangle
+proc vtn_rrect(x: int32, y: int32, w: int32, h: int32, radius: int32, z: int32, r: int32, g: int32, b: int32, a: int32, filled: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("rrect"))
+  vtn_write_int(x)
+  vtn_sep()
+  vtn_write_int(y)
+  vtn_sep()
+  vtn_write_int(z)
+  vtn_sep()
+  vtn_write_int(w)
+  vtn_sep()
+  vtn_write_int(h)
+  vtn_sep()
+  vtn_write_int(radius)
+  vtn_sep()
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_sep()
+  vtn_write_int(filled)
+  vtn_end_cmd()
+
+# ============ Line ============
+
+# Draw line
+proc vtn_line(x1: int32, y1: int32, x2: int32, y2: int32, z: int32, thickness: int32, r: int32, g: int32, b: int32, a: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("line"))
+  vtn_write_int(x1)
+  vtn_sep()
+  vtn_write_int(y1)
+  vtn_sep()
+  vtn_write_int(x2)
+  vtn_sep()
+  vtn_write_int(y2)
+  vtn_sep()
+  vtn_write_int(z)
+  vtn_sep()
+  vtn_write_int(thickness)
+  vtn_sep()
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_end_cmd()
+
+# Simplified line
+proc vtn_line_simple(x1: int32, y1: int32, x2: int32, y2: int32, r: int32, g: int32, b: int32) =
+  vtn_line(x1, y1, x2, y2, 1, 1, r, g, b, 255)
+
+# ============ Circle ============
+
+# Draw circle
+proc vtn_circle(cx: int32, cy: int32, radius: int32, z: int32, r: int32, g: int32, b: int32, a: int32, filled: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("circle"))
+  vtn_write_int(cx)
+  vtn_sep()
+  vtn_write_int(cy)
+  vtn_sep()
+  vtn_write_int(z)
+  vtn_sep()
+  vtn_write_int(radius)
+  vtn_sep()
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_sep()
+  vtn_write_int(filled)
+  vtn_end_cmd()
+
+# Simplified filled circle
+proc vtn_fill_circle(cx: int32, cy: int32, radius: int32, r: int32, g: int32, b: int32, a: int32) =
+  vtn_circle(cx, cy, radius, 1, r, g, b, a, 1)
+
+# ============ Ellipse ============
+
+# Draw ellipse
+proc vtn_ellipse(cx: int32, cy: int32, rx: int32, ry: int32, rot: int32, z: int32, r: int32, g: int32, b: int32, a: int32, filled: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("ellipse"))
+  vtn_write_int(cx)
+  vtn_sep()
+  vtn_write_int(cy)
+  vtn_sep()
+  vtn_write_int(z)
+  vtn_sep()
+  vtn_write_int(rx)
+  vtn_sep()
+  vtn_write_int(ry)
+  vtn_sep()
+  vtn_write_int(rot)
+  vtn_sep()
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_sep()
+  vtn_write_int(filled)
+  vtn_end_cmd()
+
+# ============ Arc ============
+
+# Draw arc
+proc vtn_arc(cx: int32, cy: int32, radius: int32, start_deg: int32, end_deg: int32, z: int32, thickness: int32, r: int32, g: int32, b: int32, a: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("arc"))
+  vtn_write_int(cx)
+  vtn_sep()
+  vtn_write_int(cy)
+  vtn_sep()
+  vtn_write_int(z)
+  vtn_sep()
+  vtn_write_int(radius)
+  vtn_sep()
+  vtn_write_int(start_deg)
+  vtn_sep()
+  vtn_write_int(end_deg)
+  vtn_sep()
+  vtn_write_int(thickness)
+  vtn_sep()
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_end_cmd()
+
+# ============ Polygon ============
+
+# Draw polygon with array of points
+proc vtn_polygon(points_x: ptr int32, points_y: ptr int32, n: int32, z: int32, r: int32, g: int32, b: int32, a: int32, filled: int32) =
+  vtn_begin_cmd(cast[ptr uint8]("poly"))
+  vtn_write_int(z)
+  vtn_sep()
+  vtn_write_int(r)
+  vtn_sep()
+  vtn_write_int(g)
+  vtn_sep()
+  vtn_write_int(b)
+  vtn_sep()
+  vtn_write_int(a)
+  vtn_sep()
+  vtn_write_int(filled)
+  vtn_sep()
+  vtn_write_int(n)
+
+  var i: int32 = 0
+  while i < n:
+    vtn_sep()
+    vtn_write_int(points_x[i])
+    vtn_sep()
+    vtn_write_int(points_y[i])
+    i = i + 1
+
+  vtn_end_cmd()
+
+# ============ Input Event Parsing ============
+
+# Event types
+const VTN_EVT_NONE: int32 = 0
+const VTN_EVT_KEY_DOWN: int32 = 1
+const VTN_EVT_KEY_UP: int32 = 2
+const VTN_EVT_KEY_REPEAT: int32 = 3
+const VTN_EVT_KEY_CHAR: int32 = 4
+const VTN_EVT_MOUSE_DOWN: int32 = 5
+const VTN_EVT_MOUSE_UP: int32 = 6
+const VTN_EVT_MOUSE_MOVE: int32 = 7
+const VTN_EVT_MOUSE_WHEEL: int32 = 8
+const VTN_EVT_FOCUS: int32 = 9
+const VTN_EVT_RESIZE: int32 = 10
+
+# Event data structure
+var vtn_evt_type: int32 = 0
+var vtn_evt_keycode: int32 = 0
+var vtn_evt_scancode: int32 = 0
+var vtn_evt_modifiers: int32 = 0
+var vtn_evt_timestamp: int32 = 0
+var vtn_evt_button: int32 = 0
+var vtn_evt_x: int32 = 0
+var vtn_evt_y: int32 = 0
+var vtn_evt_dx: int32 = 0
+var vtn_evt_dy: int32 = 0
+
+# Parser state for input events
+const VTN_IN_STATE_NORMAL: int32 = 0
+const VTN_IN_STATE_ESC: int32 = 1
+const VTN_IN_STATE_OSC: int32 = 2
+const VTN_IN_STATE_VTN_V: int32 = 3
+const VTN_IN_STATE_VTN_T: int32 = 4
+const VTN_IN_STATE_VTN_N: int32 = 5
+const VTN_IN_STATE_VTN_I: int32 = 6
+const VTN_IN_STATE_EVENT: int32 = 7
+const VTN_IN_STATE_PARAMS: int32 = 8
+
+var vtn_in_state: int32 = 0
+var vtn_in_evt_buf: array[64, uint8]
+var vtn_in_evt_pos: int32 = 0
+var vtn_in_param_buf: array[256, uint8]
+var vtn_in_param_pos: int32 = 0
+
+# Parse integer from input param buffer
+proc vtn_in_parse_int(buf: ptr uint8, pos: ptr int32): int32 =
+  var result: int32 = 0
+  var i: int32 = pos[0]
+
+  while buf[i] == cast[uint8](59):
+    i = i + 1
+
+  while buf[i] >= cast[uint8](48) and buf[i] <= cast[uint8](57):
+    result = result * 10 + (cast[int32](buf[i]) - 48)
+    i = i + 1
+
+  if buf[i] == cast[uint8](59):
+    i = i + 1
+
+  pos[0] = i
+  return result
+
+# Process completed input event
+proc vtn_process_input_event() =
+  var pos: int32 = 0
+
+  # Determine event type from vtn_in_evt_buf
+  if vtn_in_evt_buf[0] == cast[uint8](107):  # 'k'
+    if vtn_in_evt_buf[1] == cast[uint8](100):  # 'd' - key down
+      vtn_evt_type = VTN_EVT_KEY_DOWN
+    elif vtn_in_evt_buf[1] == cast[uint8](117):  # 'u' - key up
+      vtn_evt_type = VTN_EVT_KEY_UP
+    elif vtn_in_evt_buf[1] == cast[uint8](114):  # 'r' - key repeat
+      vtn_evt_type = VTN_EVT_KEY_REPEAT
+    elif vtn_in_evt_buf[1] == cast[uint8](99):  # 'c' - key char
+      vtn_evt_type = VTN_EVT_KEY_CHAR
+
+    vtn_evt_keycode = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+    vtn_evt_scancode = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+    vtn_evt_modifiers = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+    vtn_evt_timestamp = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+
+  elif vtn_in_evt_buf[0] == cast[uint8](109):  # 'm' - mouse
+    if vtn_in_evt_buf[1] == cast[uint8](100):  # 'd' - mouse down
+      vtn_evt_type = VTN_EVT_MOUSE_DOWN
+      vtn_evt_button = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_x = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_y = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_modifiers = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_timestamp = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+    elif vtn_in_evt_buf[1] == cast[uint8](117):  # 'u' - mouse up
+      vtn_evt_type = VTN_EVT_MOUSE_UP
+      vtn_evt_button = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_x = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_y = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_modifiers = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_timestamp = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+    elif vtn_in_evt_buf[1] == cast[uint8](109):  # 'm' - mouse move
+      vtn_evt_type = VTN_EVT_MOUSE_MOVE
+      vtn_evt_x = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_y = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_dx = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_dy = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_modifiers = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_timestamp = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+    elif vtn_in_evt_buf[1] == cast[uint8](119):  # 'w' - mouse wheel
+      vtn_evt_type = VTN_EVT_MOUSE_WHEEL
+      vtn_evt_dx = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_dy = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_x = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_y = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_modifiers = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+      vtn_evt_timestamp = vtn_in_parse_int(cast[ptr uint8](addr(vtn_in_param_buf)), cast[ptr int32](addr(pos)))
+
+# Feed a byte to the input event parser
+# Returns: event type if complete, 0 otherwise
+proc vtn_feed_input(c: int32): int32 =
+  vtn_evt_type = VTN_EVT_NONE
+
+  if vtn_in_state == VTN_IN_STATE_NORMAL:
+    if c == 0x1B:
+      vtn_in_state = VTN_IN_STATE_ESC
+    return 0
+
+  elif vtn_in_state == VTN_IN_STATE_ESC:
+    if c == 0x5D:  # ]
+      vtn_in_state = VTN_IN_STATE_OSC
+    else:
+      vtn_in_state = VTN_IN_STATE_NORMAL
+    return 0
+
+  elif vtn_in_state == VTN_IN_STATE_OSC:
+    if c == cast[int32](cast[uint8]('v')):
+      vtn_in_state = VTN_IN_STATE_VTN_V
+    else:
+      vtn_in_state = VTN_IN_STATE_NORMAL
+    return 0
+
+  elif vtn_in_state == VTN_IN_STATE_VTN_V:
+    if c == cast[int32](cast[uint8]('t')):
+      vtn_in_state = VTN_IN_STATE_VTN_T
+    else:
+      vtn_in_state = VTN_IN_STATE_NORMAL
+    return 0
+
+  elif vtn_in_state == VTN_IN_STATE_VTN_T:
+    if c == cast[int32](cast[uint8]('n')):
+      vtn_in_state = VTN_IN_STATE_VTN_N
+    else:
+      vtn_in_state = VTN_IN_STATE_NORMAL
+    return 0
+
+  elif vtn_in_state == VTN_IN_STATE_VTN_N:
+    if c == cast[int32](cast[uint8]('i')):
+      vtn_in_state = VTN_IN_STATE_VTN_I
+    else:
+      vtn_in_state = VTN_IN_STATE_NORMAL
+    return 0
+
+  elif vtn_in_state == VTN_IN_STATE_VTN_I:
+    if c == 0x3B:  # ;
+      vtn_in_state = VTN_IN_STATE_EVENT
+      vtn_in_evt_pos = 0
+    else:
+      vtn_in_state = VTN_IN_STATE_NORMAL
+    return 0
+
+  elif vtn_in_state == VTN_IN_STATE_EVENT:
+    if c == 0x3B:  # ;
+      vtn_in_evt_buf[vtn_in_evt_pos] = cast[uint8](0)
+      vtn_in_state = VTN_IN_STATE_PARAMS
+      vtn_in_param_pos = 0
+    elif vtn_in_evt_pos < 63:
+      vtn_in_evt_buf[vtn_in_evt_pos] = cast[uint8](c)
+      vtn_in_evt_pos = vtn_in_evt_pos + 1
+    return 0
+
+  elif vtn_in_state == VTN_IN_STATE_PARAMS:
+    if c == 0x07:  # BEL - end of event
+      vtn_in_param_buf[vtn_in_param_pos] = cast[uint8](0)
+      vtn_process_input_event()
+      vtn_in_state = VTN_IN_STATE_NORMAL
+      return vtn_evt_type
+    elif vtn_in_param_pos < 255:
+      vtn_in_param_buf[vtn_in_param_pos] = cast[uint8](c)
+      vtn_in_param_pos = vtn_in_param_pos + 1
+    return 0
+
+  return 0
+
+# Get last parsed event data
+proc vtn_get_keycode(): int32 = return vtn_evt_keycode
+proc vtn_get_scancode(): int32 = return vtn_evt_scancode
+proc vtn_get_modifiers(): int32 = return vtn_evt_modifiers
+proc vtn_get_timestamp(): int32 = return vtn_evt_timestamp
+proc vtn_get_button(): int32 = return vtn_evt_button
+proc vtn_get_x(): int32 = return vtn_evt_x
+proc vtn_get_y(): int32 = return vtn_evt_y
+proc vtn_get_dx(): int32 = return vtn_evt_dx
+proc vtn_get_dy(): int32 = return vtn_evt_dy
+
+# ============ Modifier Key Constants ============
+
+const VTN_MOD_SHIFT_L: int32 = 0x0001
+const VTN_MOD_SHIFT_R: int32 = 0x0002
+const VTN_MOD_SHIFT: int32 = 0x0003
+const VTN_MOD_CTRL_L: int32 = 0x0004
+const VTN_MOD_CTRL_R: int32 = 0x0008
+const VTN_MOD_CTRL: int32 = 0x000C
+const VTN_MOD_ALT_L: int32 = 0x0010
+const VTN_MOD_ALT_R: int32 = 0x0020
+const VTN_MOD_ALT: int32 = 0x0030
+const VTN_MOD_META_L: int32 = 0x0040
+const VTN_MOD_META_R: int32 = 0x0080
+const VTN_MOD_CAPS_LOCK: int32 = 0x0100
+const VTN_MOD_NUM_LOCK: int32 = 0x0200
+
+# ============ Key Constants (USB HID) ============
+
+const VTN_KEY_A: int32 = 0x04
+const VTN_KEY_B: int32 = 0x05
+const VTN_KEY_C: int32 = 0x06
+const VTN_KEY_D: int32 = 0x07
+const VTN_KEY_E: int32 = 0x08
+const VTN_KEY_F: int32 = 0x09
+const VTN_KEY_G: int32 = 0x0A
+const VTN_KEY_H: int32 = 0x0B
+const VTN_KEY_I: int32 = 0x0C
+const VTN_KEY_J: int32 = 0x0D
+const VTN_KEY_K: int32 = 0x0E
+const VTN_KEY_L: int32 = 0x0F
+const VTN_KEY_M: int32 = 0x10
+const VTN_KEY_N: int32 = 0x11
+const VTN_KEY_O: int32 = 0x12
+const VTN_KEY_P: int32 = 0x13
+const VTN_KEY_Q: int32 = 0x14
+const VTN_KEY_R: int32 = 0x15
+const VTN_KEY_S: int32 = 0x16
+const VTN_KEY_T: int32 = 0x17
+const VTN_KEY_U: int32 = 0x18
+const VTN_KEY_V: int32 = 0x19
+const VTN_KEY_W: int32 = 0x1A
+const VTN_KEY_X: int32 = 0x1B
+const VTN_KEY_Y: int32 = 0x1C
+const VTN_KEY_Z: int32 = 0x1D
+const VTN_KEY_1: int32 = 0x1E
+const VTN_KEY_2: int32 = 0x1F
+const VTN_KEY_3: int32 = 0x20
+const VTN_KEY_4: int32 = 0x21
+const VTN_KEY_5: int32 = 0x22
+const VTN_KEY_6: int32 = 0x23
+const VTN_KEY_7: int32 = 0x24
+const VTN_KEY_8: int32 = 0x25
+const VTN_KEY_9: int32 = 0x26
+const VTN_KEY_0: int32 = 0x27
+const VTN_KEY_ENTER: int32 = 0x28
+const VTN_KEY_ESCAPE: int32 = 0x29
+const VTN_KEY_BACKSPACE: int32 = 0x2A
+const VTN_KEY_TAB: int32 = 0x2B
+const VTN_KEY_SPACE: int32 = 0x2C
+const VTN_KEY_UP: int32 = 0x52
+const VTN_KEY_DOWN: int32 = 0x51
+const VTN_KEY_LEFT: int32 = 0x50
+const VTN_KEY_RIGHT: int32 = 0x4F
