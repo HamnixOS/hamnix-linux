@@ -1,0 +1,198 @@
+# pthread.bh - POSIX-compatible pthread API for BrainhairOS
+# Provides pthread_* functions that map to BrainhairOS threading primitives
+# Implements 1:1 threading model (one kernel thread per pthread)
+
+import "lib/syscalls"
+
+# ============================================================================
+# pthread Types
+# ============================================================================
+
+# pthread_t - thread identifier (maps to kernel thread PID)
+type pthread_t = int32
+
+# pthread_attr_t - thread attributes (placeholder for now)
+type pthread_attr_t = record
+  detachstate: int32    # PTHREAD_CREATE_DETACHED or PTHREAD_CREATE_JOINABLE
+  stacksize: int32      # Stack size (not implemented yet)
+
+# ============================================================================
+# pthread Constants
+# ============================================================================
+
+# Thread detach state
+const PTHREAD_CREATE_JOINABLE: int32 = 0
+const PTHREAD_CREATE_DETACHED: int32 = 1
+
+# Return values
+const PTHREAD_SUCCESS: int32 = 0
+const PTHREAD_ERROR: int32 = -1
+
+# ============================================================================
+# pthread Attribute Functions
+# ============================================================================
+
+# Initialize thread attributes to default values
+proc pthread_attr_init(attr: ptr pthread_attr_t): int32 =
+  attr.detachstate = PTHREAD_CREATE_JOINABLE
+  attr.stacksize = 0  # Use default
+  return PTHREAD_SUCCESS
+
+# Destroy thread attributes (no-op for now)
+proc pthread_attr_destroy(attr: ptr pthread_attr_t): int32 =
+  return PTHREAD_SUCCESS
+
+# Set detach state
+proc pthread_attr_setdetachstate(attr: ptr pthread_attr_t, detachstate: int32): int32 =
+  if detachstate != PTHREAD_CREATE_JOINABLE and detachstate != PTHREAD_CREATE_DETACHED:
+    return PTHREAD_ERROR
+  attr.detachstate = detachstate
+  return PTHREAD_SUCCESS
+
+# Get detach state
+proc pthread_attr_getdetachstate(attr: ptr pthread_attr_t, detachstate: ptr int32): int32 =
+  detachstate[0] = attr.detachstate
+  return PTHREAD_SUCCESS
+
+# ============================================================================
+# pthread Thread Management Functions
+# ============================================================================
+
+# Thread wrapper structure to pass both function and argument
+type pthread_start_info = record
+  start_routine: int32  # Function pointer
+  arg: int32            # User argument
+
+# Internal thread entry point wrapper
+# This is needed because kernel thread_create only passes one argument
+proc pthread_entry_wrapper(info_ptr: int32): int32 =
+  # Cast info_ptr to pthread_start_info pointer
+  var info: ptr pthread_start_info = cast[ptr pthread_start_info](info_ptr)
+
+  # Get the actual start routine and argument
+  var start_routine: int32 = info.start_routine
+  var arg: int32 = info.arg
+
+  # Free the info structure (not implemented - would need malloc/free)
+  # TODO: Add proper memory management
+
+  # Call the actual thread function
+  # Note: This is a function pointer call - in assembly this becomes:
+  #   push arg
+  #   call start_routine
+  # But Brainhair doesn't support indirect calls easily, so we use syscall
+  # We'll need to use inline assembly for this
+
+  # For now, return 0 - users should call pthread_exit explicitly
+  return 0
+
+# Create a new thread
+# thread: pointer to store thread ID
+# attr: thread attributes (or 0 for defaults)
+# start_routine: function to run in new thread
+# arg: argument to pass to start_routine
+# Returns: 0 on success, -1 on error
+proc pthread_create(thread: ptr pthread_t, attr: ptr pthread_attr_t,
+                   start_routine: int32, arg: int32): int32 =
+  # Create thread with kernel thread_create
+  # Note: For a proper implementation, we'd need to:
+  # 1. Allocate pthread_start_info on heap
+  # 2. Pass wrapper function and info pointer to thread_create
+  # 3. Let wrapper call the actual start_routine
+  #
+  # For simplicity, we directly call thread_create with start_routine
+  # This means the thread function signature must match: proc(arg: int32): int32
+
+  var tid: int32 = thread_create(start_routine, arg)
+  if tid < 0:
+    return PTHREAD_ERROR
+
+  # Store thread ID
+  thread[0] = tid
+
+  # If detached attribute is set, detach the thread
+  if attr != cast[ptr pthread_attr_t](0):
+    if attr.detachstate == PTHREAD_CREATE_DETACHED:
+      discard thread_detach(tid)
+
+  return PTHREAD_SUCCESS
+
+# Wait for thread to terminate
+# thread: thread ID to wait for
+# retval: pointer to store thread's return value (or 0 if not needed)
+# Returns: 0 on success, -1 on error
+proc pthread_join(thread: pthread_t, retval: ptr int32): int32 =
+  var status: int32 = 0
+  var result: int32 = thread_join(thread, addr(status))
+
+  if result < 0:
+    return PTHREAD_ERROR
+
+  # Store return value if pointer provided
+  if retval != cast[ptr int32](0):
+    retval[0] = status
+
+  return PTHREAD_SUCCESS
+
+# Exit the calling thread
+# retval: return value for thread
+proc pthread_exit(retval: int32) =
+  thread_exit(retval)
+
+# Get ID of calling thread
+# Returns: thread ID
+proc pthread_self(): pthread_t =
+  return thread_self()
+
+# Compare thread IDs
+# t1, t2: thread IDs to compare
+# Returns: non-zero if equal, 0 if not equal
+proc pthread_equal(t1: pthread_t, t2: pthread_t): int32 =
+  if t1 == t2:
+    return 1
+  return 0
+
+# Detach a thread (make it clean up automatically on exit)
+# thread: thread ID to detach
+# Returns: 0 on success, -1 on error
+proc pthread_detach(thread: pthread_t): int32 =
+  var result: int32 = thread_detach(thread)
+  if result < 0:
+    return PTHREAD_ERROR
+  return PTHREAD_SUCCESS
+
+# Yield CPU to other threads
+proc pthread_yield(): int32 =
+  thread_yield()
+  return PTHREAD_SUCCESS
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Print pthread error messages
+proc pthread_perror(msg: ptr uint8) =
+  perror(msg)
+
+# ============================================================================
+# Usage Example (commented out):
+# ============================================================================
+#
+# proc worker_thread(arg: int32): int32 =
+#   print(cast[ptr uint8]("Worker thread running\n"))
+#   return arg + 1
+#
+# proc main() =
+#   var thread: pthread_t = 0
+#   var result: int32 = 0
+#
+#   # Create thread
+#   if pthread_create(addr(thread), cast[ptr pthread_attr_t](0),
+#                     cast[int32](addr(worker_thread)), 42) == 0:
+#     print(cast[ptr uint8]("Thread created\n"))
+#
+#     # Wait for thread
+#     if pthread_join(thread, addr(result)) == 0:
+#       print(cast[ptr uint8]("Thread returned: "))
+#       print_int(result)
+#       newline()

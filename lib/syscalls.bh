@@ -149,6 +149,29 @@ const SYS_init_module: int32 = 128
 const SYS_delete_module: int32 = 129
 const SYS_wait4: int32 = 114
 const SYS_clock_gettime: int32 = 265
+const SYS_uptime: int32 = 999
+
+# Thread syscalls (200-206)
+const SYS_thread_create: int32 = 200
+const SYS_thread_exit: int32 = 201
+const SYS_thread_yield: int32 = 202
+const SYS_get_thread_id: int32 = 203
+const SYS_is_thread: int32 = 204
+const SYS_thread_join: int32 = 205
+const SYS_thread_detach: int32 = 206
+
+# Unix domain socket syscalls (210-216)
+const SYS_unix_listen: int32 = 210
+const SYS_unix_connect: int32 = 211
+const SYS_unix_accept: int32 = 212
+const SYS_unix_send: int32 = 213
+const SYS_unix_recv: int32 = 214
+const SYS_unix_close: int32 = 215
+const SYS_unix_has_data: int32 = 216
+
+# Thread-local storage syscalls (220-221)
+const SYS_set_tls: int32 = 220
+const SYS_get_tls: int32 = 221
 
 # Directory open flag
 const O_DIRECTORY: int32 = 65536
@@ -431,3 +454,98 @@ proc isspace(c: uint8): int32 =
 # Print newline
 proc newline() =
   discard write(STDOUT, cast[ptr uint8]("\n"), 1)
+
+# ============================================================================
+# Thread API
+# ============================================================================
+
+# Create a new kernel thread
+# entry: function pointer to thread entry point
+# arg: user argument passed to thread
+# Returns: thread PID on success, -1 on failure
+proc thread_create(entry: int32, arg: int32): int32 =
+  return syscall2(SYS_thread_create, entry, arg)
+
+# Exit current thread
+# code: exit code
+proc thread_exit(code: int32) =
+  discard syscall1(SYS_thread_exit, code)
+
+# Yield CPU to another thread/process
+proc thread_yield() =
+  discard syscall1(SYS_thread_yield, 0)
+
+# Get current thread ID (0 for main process)
+proc get_thread_id(): int32 =
+  return syscall1(SYS_get_thread_id, 0)
+
+# Check if running in thread context
+# Returns: 1 if thread, 0 if main process
+proc is_thread(): int32 =
+  return syscall1(SYS_is_thread, 0)
+
+# Wait for a thread to exit and get its exit status
+# tid: thread PID to wait for
+# status_ptr: pointer to store exit status (or 0 if not needed)
+# Returns: 0 on success, -1 on error
+proc thread_join(tid: int32, status_ptr: ptr int32): int32 =
+  return syscall2(SYS_thread_join, tid, cast[int32](status_ptr))
+
+# Mark a thread as detached (auto-cleanup on exit)
+# tid: thread PID to detach
+# Returns: 0 on success, -1 on error
+proc thread_detach(tid: int32): int32 =
+  return syscall1(SYS_thread_detach, tid)
+
+# Convenience: Get current thread ID (same as get_thread_id, pthread-like name)
+proc thread_self(): int32 =
+  return get_thread_id()
+
+# ============================================================================
+# Unix Domain Socket API
+# ============================================================================
+
+# Create a listening Unix socket at path
+# path: socket path (e.g., "/tmp/mysocket")
+# Returns: socket ID on success, -1 on failure
+proc unix_listen(path: ptr uint8): int32 =
+  return syscall1(SYS_unix_listen, cast[int32](path))
+
+# Connect to a Unix socket at path
+# path: socket path to connect to
+# Returns: socket ID on success, -1 on failure
+proc unix_connect(path: ptr uint8): int32 =
+  return syscall1(SYS_unix_connect, cast[int32](path))
+
+# Accept a connection on a listening socket
+# listen_id: listening socket ID
+# Returns: new connected socket ID on success, -1 on failure
+proc unix_accept(listen_id: int32): int32 =
+  return syscall1(SYS_unix_accept, listen_id)
+
+# Send data on a Unix socket
+# socket_id: connected socket ID
+# data: pointer to data to send
+# length: number of bytes to send
+# Returns: bytes sent on success, -1 on error
+proc unix_send(socket_id: int32, data: ptr uint8, length: int32): int32 =
+  return syscall3(SYS_unix_send, socket_id, cast[int32](data), length)
+
+# Receive data from a Unix socket
+# socket_id: connected socket ID
+# buf: buffer to receive data into
+# max_len: maximum bytes to receive
+# Returns: bytes received on success, -1 on error
+proc unix_recv(socket_id: int32, buf: ptr uint8, max_len: int32): int32 =
+  return syscall3(SYS_unix_recv, socket_id, cast[int32](buf), max_len)
+
+# Close a Unix socket
+# socket_id: socket ID to close
+proc unix_close(socket_id: int32) =
+  discard syscall1(SYS_unix_close, socket_id)
+
+# Check if socket has data available
+# socket_id: socket ID to check
+# Returns: 1 if data available, 0 if not
+proc unix_has_data(socket_id: int32): int32 =
+  return syscall1(SYS_unix_has_data, socket_id)

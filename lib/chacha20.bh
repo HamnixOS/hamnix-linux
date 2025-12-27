@@ -1,0 +1,80 @@
+# ChaCha20 Stream Cipher Library for BrainhairOS
+# Provides ChaCha20 encryption/decryption
+
+# ChaCha20 key size (256 bits = 32 bytes)
+const CHACHA20_KEY_SIZE: int32 = 32
+
+# ChaCha20 nonce size (96 bits = 12 bytes)
+const CHACHA20_NONCE_SIZE: int32 = 12
+
+# ChaCha20 block size (64 bytes)
+const CHACHA20_BLOCK_SIZE: int32 = 64
+
+# External kernel functions
+extern chacha20_init(key: ptr uint8, nonce: ptr uint8, counter: int32)
+extern chacha20_block()
+extern chacha20_encrypt(input: ptr uint8, output: ptr uint8, length: int32, key: ptr uint8, nonce: ptr uint8, counter: int32)
+extern chacha20_get_block(): ptr uint8
+
+# ChaCha20 context structure
+# Stores key and nonce for multiple operations
+type ChaCha20Context = struct
+  key: array[32, uint8]     # 256-bit key
+  nonce: array[12, uint8]   # 96-bit nonce
+  counter: int32            # Block counter
+end
+
+# Initialize ChaCha20 context with key and nonce
+proc chacha20_ctx_init(ctx: ptr ChaCha20Context, key: ptr uint8, nonce: ptr uint8) =
+  # Copy key
+  var i: int32 = 0
+  while i < CHACHA20_KEY_SIZE:
+    ctx.key[i] = key[i]
+    i = i + 1
+  # Copy nonce
+  i = 0
+  while i < CHACHA20_NONCE_SIZE:
+    ctx.nonce[i] = nonce[i]
+    i = i + 1
+  # Initialize counter
+  ctx.counter = 0
+
+# Encrypt data using ChaCha20 context
+proc chacha20_ctx_encrypt(ctx: ptr ChaCha20Context, input: ptr uint8, output: ptr uint8, length: int32) =
+  chacha20_encrypt(input, output, length, addr(ctx.key[0]), addr(ctx.nonce[0]), ctx.counter)
+  # Update counter based on blocks used
+  var blocks: int32 = (length + CHACHA20_BLOCK_SIZE - 1) / CHACHA20_BLOCK_SIZE
+  ctx.counter = ctx.counter + blocks
+
+# Decrypt data using ChaCha20 context (same as encrypt for stream cipher)
+proc chacha20_ctx_decrypt(ctx: ptr ChaCha20Context, input: ptr uint8, output: ptr uint8, length: int32) =
+  chacha20_ctx_encrypt(ctx, input, output, length)
+
+# Reset context counter
+proc chacha20_ctx_reset(ctx: ptr ChaCha20Context) =
+  ctx.counter = 0
+
+# Set context counter
+proc chacha20_ctx_set_counter(ctx: ptr ChaCha20Context, counter: int32) =
+  ctx.counter = counter
+
+# One-shot encrypt (convenience function)
+proc chacha20_encrypt_simple(input: ptr uint8, output: ptr uint8, length: int32, key: ptr uint8, nonce: ptr uint8) =
+  chacha20_encrypt(input, output, length, key, nonce, 0)
+
+# One-shot decrypt (same as encrypt)
+proc chacha20_decrypt_simple(input: ptr uint8, output: ptr uint8, length: int32, key: ptr uint8, nonce: ptr uint8) =
+  chacha20_encrypt(input, output, length, key, nonce, 0)
+
+# Generate random key using kernel RNG
+proc chacha20_generate_key(key: ptr uint8): int32 =
+  # Use SYS_GETRANDOM (syscall 80) to generate random bytes
+  extern syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32): int32
+  const SYS_GETRANDOM: int32 = 80
+  return syscall3(SYS_GETRANDOM, cast[int32](key), CHACHA20_KEY_SIZE, 0)
+
+# Generate random nonce using kernel RNG
+proc chacha20_generate_nonce(nonce: ptr uint8): int32 =
+  extern syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32): int32
+  const SYS_GETRANDOM: int32 = 80
+  return syscall3(SYS_GETRANDOM, cast[int32](nonce), CHACHA20_NONCE_SIZE, 0)

@@ -1,0 +1,329 @@
+# time.bh - Time and date library for BrainhairOS
+# Provides time conversion and formatting functions
+
+import "lib/syscalls"
+
+# Time structure (matches kernel RTC structure)
+type TimeStruct = object
+  second: uint8    # 0-59
+  minute: uint8    # 0-59
+  hour: uint8      # 0-23
+  day: uint8       # 1-31
+  month: uint8     # 1-12
+  year: uint8      # 0-99 (add 2000 for full year)
+
+# Days in each month lookup (inline function to avoid linker issues)
+proc get_days_for_month(m: int32): int32 =
+  if m == 1: return 31
+  if m == 2: return 28
+  if m == 3: return 31
+  if m == 4: return 30
+  if m == 5: return 31
+  if m == 6: return 30
+  if m == 7: return 31
+  if m == 8: return 31
+  if m == 9: return 30
+  if m == 10: return 31
+  if m == 11: return 30
+  if m == 12: return 31
+  return 30
+
+# Day of week abbreviation lookup
+proc get_day_abbr(dow: int32): ptr uint8 =
+  if dow == 0: return cast[ptr uint8]("Sun")
+  if dow == 1: return cast[ptr uint8]("Mon")
+  if dow == 2: return cast[ptr uint8]("Tue")
+  if dow == 3: return cast[ptr uint8]("Wed")
+  if dow == 4: return cast[ptr uint8]("Thu")
+  if dow == 5: return cast[ptr uint8]("Fri")
+  if dow == 6: return cast[ptr uint8]("Sat")
+  return cast[ptr uint8]("???")
+
+# Month abbreviation lookup
+proc get_month_abbr(m: int32): ptr uint8 =
+  if m == 0: return cast[ptr uint8]("Jan")
+  if m == 1: return cast[ptr uint8]("Feb")
+  if m == 2: return cast[ptr uint8]("Mar")
+  if m == 3: return cast[ptr uint8]("Apr")
+  if m == 4: return cast[ptr uint8]("May")
+  if m == 5: return cast[ptr uint8]("Jun")
+  if m == 6: return cast[ptr uint8]("Jul")
+  if m == 7: return cast[ptr uint8]("Aug")
+  if m == 8: return cast[ptr uint8]("Sep")
+  if m == 9: return cast[ptr uint8]("Oct")
+  if m == 10: return cast[ptr uint8]("Nov")
+  if m == 11: return cast[ptr uint8]("Dec")
+  return cast[ptr uint8]("???")
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+# Check if year is leap year
+proc is_leap_year(year: int32): int32 =
+  if (year % 4) != 0:
+    return 0
+  if (year % 100) != 0:
+    return 1
+  if (year % 400) != 0:
+    return 0
+  return 1
+
+# Get days in a specific month
+proc get_days_in_month(month: int32, year: int32): int32 =
+  if month < 1 or month > 12:
+    return 30
+
+  var days: int32 = get_days_for_month(month)
+
+  # February in leap year
+  if month == 2:
+    if is_leap_year(year) == 1:
+      days = 29
+
+  return days
+
+# ============================================================================
+# Time retrieval
+# ============================================================================
+
+# Get current time from RTC
+# Returns 0 on success, -1 on error
+proc get_time(time: ptr TimeStruct): int32 =
+  # Use SYS_time syscall (13) with pointer to time structure
+  # For now, we'll use a custom syscall 80 for RTC access
+  return syscall1(80, cast[int32](time))
+
+# ============================================================================
+# Unix timestamp conversion
+# ============================================================================
+
+# Convert time structure to Unix timestamp
+# Unix epoch: Jan 1, 1970 00:00:00 UTC
+proc time_to_unix(time: ptr TimeStruct): int32 =
+  # Calculate full year
+  var year: int32 = cast[int32](time.year) + 2000
+
+  # Calculate days since epoch
+  var days: int32 = 0
+
+  # Add days for each year since 1970
+  var y: int32 = 1970
+  while y < year:
+    days = days + 365
+    if is_leap_year(y) == 1:
+      days = days + 1
+    y = y + 1
+
+  # Add days for each month in current year
+  var m: int32 = 1
+  while m < cast[int32](time.month):
+    days = days + get_days_in_month(m, year)
+    m = m + 1
+
+  # Add remaining days
+  days = days + cast[int32](time.day) - 1
+
+  # Convert to seconds
+  var timestamp: int32 = days * 86400
+  timestamp = timestamp + (cast[int32](time.hour) * 3600)
+  timestamp = timestamp + (cast[int32](time.minute) * 60)
+  timestamp = timestamp + cast[int32](time.second)
+
+  return timestamp
+
+# Convert Unix timestamp to time structure
+proc unix_to_time(timestamp: int32, time: ptr TimeStruct) =
+  # Extract time components
+  var remaining: int32 = timestamp
+
+  # Seconds
+  time.second = cast[uint8](remaining % 60)
+  remaining = remaining / 60
+
+  # Minutes
+  time.minute = cast[uint8](remaining % 60)
+  remaining = remaining / 60
+
+  # Hours
+  time.hour = cast[uint8](remaining % 24)
+  var total_days: int32 = remaining / 24
+
+  # Calculate year
+  var year: int32 = 1970
+  var days_in_year: int32 = 365
+
+  while total_days >= days_in_year:
+    total_days = total_days - days_in_year
+    year = year + 1
+
+    if is_leap_year(year) == 1:
+      days_in_year = 366
+    else:
+      days_in_year = 365
+
+  # Calculate month and day
+  var month: int32 = 1
+  var dim: int32 = get_days_in_month(month, year)
+
+  while total_days >= dim:
+    total_days = total_days - dim
+    month = month + 1
+    dim = get_days_in_month(month, year)
+
+  time.month = cast[uint8](month)
+  time.day = cast[uint8](total_days + 1)
+  time.year = cast[uint8](year - 2000)
+
+# ============================================================================
+# Day of week calculation
+# ============================================================================
+
+# Calculate day of week (0=Sunday, 1=Monday, ..., 6=Saturday)
+# Using Zeller's congruence algorithm
+proc get_day_of_week(day: int32, month: int32, year: int32): int32 =
+  var y: int32 = year
+  var m: int32 = month
+
+  # Adjust for Zeller's algorithm (March = 3, ..., Feb = 14)
+  if m < 3:
+    m = m + 12
+    y = y - 1
+
+  # Zeller's congruence
+  var q: int32 = day
+  var k: int32 = y % 100
+  var j: int32 = y / 100
+
+  var h: int32 = (q + ((13 * (m + 1)) / 5) + k + (k / 4) + (j / 4) - (2 * j)) % 7
+
+  # Convert to Sunday=0 format
+  var dow: int32 = ((h + 6) % 7)
+
+  return dow
+
+# Get day of week from time structure
+proc time_get_day_of_week(time: ptr TimeStruct): int32 =
+  var year: int32 = cast[int32](time.year) + 2000
+  return get_day_of_week(cast[int32](time.day), cast[int32](time.month), year)
+
+# ============================================================================
+# Formatting functions
+# ============================================================================
+
+# Print integer with leading zero padding to 2 digits
+proc print_int_pad2(n: int32) =
+  if n < 10:
+    print("0")
+  print_int(n)
+
+# Print integer with leading zero padding to 4 digits
+proc print_int_pad4(n: int32) =
+  if n < 10:
+    print("000")
+  elif n < 100:
+    print("00")
+  elif n < 1000:
+    print("0")
+  print_int(n)
+
+# Format time as ISO 8601 string: "2025-12-27 14:30:00"
+proc format_time_iso(time: ptr TimeStruct): ptr uint8 =
+  # Note: This is a simple implementation that returns a static buffer
+  # Not thread-safe, but suitable for single-threaded userland
+  var buffer: array[20, uint8]
+  var year: int32 = cast[int32](time.year) + 2000
+
+  # Format: YYYY-MM-DD HH:MM:SS
+  # This is a simplified version - a real implementation would use sprintf
+  # For now, we'll just use the print functions
+  return cast[ptr uint8](0)  # TODO: Implement proper string formatting
+
+# Print time in ISO 8601 format: "2025-12-27 14:30:00"
+proc print_time_iso(time: ptr TimeStruct) =
+  var year: int32 = cast[int32](time.year) + 2000
+
+  print_int(year)
+  print("-")
+  print_int_pad2(cast[int32](time.month))
+  print("-")
+  print_int_pad2(cast[int32](time.day))
+  print(" ")
+  print_int_pad2(cast[int32](time.hour))
+  print(":")
+  print_int_pad2(cast[int32](time.minute))
+  print(":")
+  print_int_pad2(cast[int32](time.second))
+
+# Print time in Unix date format: "Wed Dec 27 14:30:00 2025"
+proc print_time_unix(time: ptr TimeStruct) =
+  var year: int32 = cast[int32](time.year) + 2000
+  var dow: int32 = time_get_day_of_week(time)
+
+  # Day of week
+  print(get_day_abbr(dow))
+  print(" ")
+
+  # Month
+  var m: int32 = cast[int32](time.month) - 1
+  if m >= 0 and m < 12:
+    print(get_month_abbr(m))
+  print(" ")
+
+  # Day
+  if cast[int32](time.day) < 10:
+    print(" ")
+  print_int(cast[int32](time.day))
+  print(" ")
+
+  # Time
+  print_int_pad2(cast[int32](time.hour))
+  print(":")
+  print_int_pad2(cast[int32](time.minute))
+  print(":")
+  print_int_pad2(cast[int32](time.second))
+  print(" ")
+
+  # Year
+  print_int(year)
+
+# Print time in compact format: "12/27/2025 14:30:00"
+proc print_time_compact(time: ptr TimeStruct) =
+  var year: int32 = cast[int32](time.year) + 2000
+
+  print_int_pad2(cast[int32](time.month))
+  print("/")
+  print_int_pad2(cast[int32](time.day))
+  print("/")
+  print_int(year)
+  print(" ")
+  print_int_pad2(cast[int32](time.hour))
+  print(":")
+  print_int_pad2(cast[int32](time.minute))
+  print(":")
+  print_int_pad2(cast[int32](time.second))
+
+# ============================================================================
+# High-level convenience functions
+# ============================================================================
+
+# Get current Unix timestamp
+proc get_unix_time(): int32 =
+  var time: TimeStruct
+  var result: int32 = get_time(addr(time))
+
+  if result < 0:
+    return -1
+
+  return time_to_unix(addr(time))
+
+# Print current time in Unix format
+proc print_current_time() =
+  var time: TimeStruct
+  var result: int32 = get_time(addr(time))
+
+  if result < 0:
+    print("Error: Cannot read time")
+    return
+
+  print_time_unix(addr(time))

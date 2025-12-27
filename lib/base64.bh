@@ -1,0 +1,413 @@
+# base64.bh - Base64 Encoding/Decoding for BrainhairOS
+# RFC 4648 compliant Base64 implementation
+#
+# Provides:
+# - Standard Base64 encoding/decoding
+# - URL-safe Base64 variant
+# - PEM format helpers
+
+import "lib/syscalls"
+
+# ===========================================================================
+# Base64 Encoding Tables
+# ===========================================================================
+
+# Standard Base64 alphabet (RFC 4648)
+var base64_encode_table: array[64, uint8]
+var base64_decode_table: array[256, uint8]
+var base64_initialized: int32 = 0
+
+# Initialize encoding/decoding tables
+proc base64_init() =
+  if base64_initialized == 1:
+    return
+
+  # Encoding table: A-Z, a-z, 0-9, +, /
+  var i: int32 = 0
+
+  # A-Z (0-25)
+  while i < 26:
+    base64_encode_table[i] = cast[uint8](65 + i)  # 'A' = 65
+    i = i + 1
+
+  # a-z (26-51)
+  while i < 52:
+    base64_encode_table[i] = cast[uint8](97 + i - 26)  # 'a' = 97
+    i = i + 1
+
+  # 0-9 (52-61)
+  while i < 62:
+    base64_encode_table[i] = cast[uint8](48 + i - 52)  # '0' = 48
+    i = i + 1
+
+  # + (62)
+  base64_encode_table[62] = 43  # '+'
+
+  # / (63)
+  base64_encode_table[63] = 47  # '/'
+
+  # Initialize decode table with invalid marker
+  i = 0
+  while i < 256:
+    base64_decode_table[i] = 255  # Invalid
+    i = i + 1
+
+  # Fill in valid mappings
+  i = 0
+  while i < 64:
+    base64_decode_table[cast[int32](base64_encode_table[i])] = cast[uint8](i)
+    i = i + 1
+
+  # '=' is padding
+  base64_decode_table[61] = 254  # '=' marker
+
+  base64_initialized = 1
+
+# ===========================================================================
+# Base64 Encoding
+# ===========================================================================
+
+# Calculate encoded length for given input length
+proc base64_encode_len(input_len: int32): int32 =
+  # Each 3 bytes becomes 4 characters, rounded up
+  return ((input_len + 2) / 3) * 4
+
+# Encode data to Base64
+# input: input bytes
+# input_len: number of bytes to encode
+# output: output buffer (must be at least base64_encode_len(input_len) bytes)
+# Returns: number of characters written
+proc base64_encode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
+  base64_init()
+
+  var in_idx: int32 = 0
+  var out_idx: int32 = 0
+
+  # Process 3 bytes at a time
+  while in_idx + 3 <= input_len:
+    var b0: int32 = cast[int32](input[in_idx])
+    var b1: int32 = cast[int32](input[in_idx + 1])
+    var b2: int32 = cast[int32](input[in_idx + 2])
+
+    output[out_idx] = base64_encode_table[(b0 / 4) and 0x3F]
+    output[out_idx + 1] = base64_encode_table[((b0 * 16) and 0x30) or ((b1 / 16) and 0x0F)]
+    output[out_idx + 2] = base64_encode_table[((b1 * 4) and 0x3C) or ((b2 / 64) and 0x03)]
+    output[out_idx + 3] = base64_encode_table[b2 and 0x3F]
+
+    in_idx = in_idx + 3
+    out_idx = out_idx + 4
+
+  # Handle remaining bytes
+  var remaining: int32 = input_len - in_idx
+
+  if remaining == 1:
+    var b0: int32 = cast[int32](input[in_idx])
+
+    output[out_idx] = base64_encode_table[(b0 / 4) and 0x3F]
+    output[out_idx + 1] = base64_encode_table[(b0 * 16) and 0x30]
+    output[out_idx + 2] = 61  # '='
+    output[out_idx + 3] = 61  # '='
+    out_idx = out_idx + 4
+
+  elif remaining == 2:
+    var b0: int32 = cast[int32](input[in_idx])
+    var b1: int32 = cast[int32](input[in_idx + 1])
+
+    output[out_idx] = base64_encode_table[(b0 / 4) and 0x3F]
+    output[out_idx + 1] = base64_encode_table[((b0 * 16) and 0x30) or ((b1 / 16) and 0x0F)]
+    output[out_idx + 2] = base64_encode_table[(b1 * 4) and 0x3C]
+    output[out_idx + 3] = 61  # '='
+    out_idx = out_idx + 4
+
+  return out_idx
+
+# ===========================================================================
+# Base64 Decoding
+# ===========================================================================
+
+# Calculate maximum decoded length for given encoded length
+proc base64_decode_len(encoded_len: int32): int32 =
+  # Each 4 characters becomes at most 3 bytes
+  return (encoded_len / 4) * 3
+
+# Decode Base64 to bytes
+# input: Base64 encoded string
+# input_len: length of encoded string
+# output: output buffer
+# Returns: number of bytes written, or -1 on error
+proc base64_decode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
+  base64_init()
+
+  # Input must be multiple of 4
+  if (input_len and 3) != 0:
+    return -1
+
+  var in_idx: int32 = 0
+  var out_idx: int32 = 0
+
+  while in_idx < input_len:
+    var c0: int32 = cast[int32](base64_decode_table[cast[int32](input[in_idx])])
+    var c1: int32 = cast[int32](base64_decode_table[cast[int32](input[in_idx + 1])])
+    var c2: int32 = cast[int32](base64_decode_table[cast[int32](input[in_idx + 2])])
+    var c3: int32 = cast[int32](base64_decode_table[cast[int32](input[in_idx + 3])])
+
+    # Check for invalid characters
+    if c0 == 255 or c1 == 255:
+      return -1
+
+    # First byte
+    output[out_idx] = cast[uint8]((c0 * 4) or (c1 / 16))
+    out_idx = out_idx + 1
+
+    # Check for padding
+    if c2 == 254:  # '='
+      break
+
+    if c2 == 255:
+      return -1
+
+    # Second byte
+    output[out_idx] = cast[uint8](((c1 and 0x0F) * 16) or (c2 / 4))
+    out_idx = out_idx + 1
+
+    if c3 == 254:  # '='
+      break
+
+    if c3 == 255:
+      return -1
+
+    # Third byte
+    output[out_idx] = cast[uint8](((c2 and 0x03) * 64) or c3)
+    out_idx = out_idx + 1
+
+    in_idx = in_idx + 4
+
+  return out_idx
+
+# ===========================================================================
+# URL-Safe Base64 Variant
+# ===========================================================================
+
+# Encode to URL-safe Base64 (uses - and _ instead of + and /)
+proc base64url_encode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
+  var len: int32 = base64_encode(input, input_len, output)
+
+  # Replace + with - and / with _
+  var i: int32 = 0
+  while i < len:
+    if output[i] == 43:  # '+'
+      output[i] = 45     # '-'
+    elif output[i] == 47:  # '/'
+      output[i] = 95       # '_'
+    end
+    i = i + 1
+
+  return len
+
+# Decode URL-safe Base64
+proc base64url_decode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
+  # Convert URL-safe to standard Base64 first
+  var temp: array[4096, uint8]
+  var i: int32 = 0
+
+  while i < input_len and i < 4096:
+    var c: uint8 = input[i]
+    if c == 45:  # '-'
+      temp[i] = 43  # '+'
+    elif c == 95:  # '_'
+      temp[i] = 47  # '/'
+    else:
+      temp[i] = c
+    i = i + 1
+
+  return base64_decode(addr(temp[0]), input_len, output)
+
+# ===========================================================================
+# PEM Format Helpers
+# ===========================================================================
+
+const PEM_LINE_LENGTH: int32 = 64
+
+# Encode to PEM format with header/footer
+# type_name: e.g., "CERTIFICATE", "PRIVATE KEY"
+# input: binary data
+# input_len: data length
+# output: PEM output buffer
+# Returns: total output length
+proc pem_encode(type_name: ptr uint8, input: ptr uint8, input_len: int32,
+                output: ptr uint8): int32 =
+  var out_idx: int32 = 0
+
+  # Write header: "-----BEGIN TYPE-----\n"
+  var header: ptr uint8 = cast[ptr uint8]("-----BEGIN ")
+  var i: int32 = 0
+  while header[i] != 0:
+    output[out_idx] = header[i]
+    out_idx = out_idx + 1
+    i = i + 1
+
+  i = 0
+  while type_name[i] != 0:
+    output[out_idx] = type_name[i]
+    out_idx = out_idx + 1
+    i = i + 1
+
+  var dashes: ptr uint8 = cast[ptr uint8]("-----\n")
+  i = 0
+  while dashes[i] != 0:
+    output[out_idx] = dashes[i]
+    out_idx = out_idx + 1
+    i = i + 1
+
+  # Encode data as Base64
+  var b64_buf: array[8192, uint8]
+  var b64_len: int32 = base64_encode(input, input_len, addr(b64_buf[0]))
+
+  # Write Base64 data with line breaks every 64 characters
+  i = 0
+  while i < b64_len:
+    output[out_idx] = b64_buf[i]
+    out_idx = out_idx + 1
+    i = i + 1
+
+    if (i and 63) == 0:  # Every 64 characters
+      output[out_idx] = 10  # '\n'
+      out_idx = out_idx + 1
+
+  # Add final newline if needed
+  if (b64_len and 63) != 0:
+    output[out_idx] = 10
+    out_idx = out_idx + 1
+
+  # Write footer: "-----END TYPE-----\n"
+  var footer: ptr uint8 = cast[ptr uint8]("-----END ")
+  i = 0
+  while footer[i] != 0:
+    output[out_idx] = footer[i]
+    out_idx = out_idx + 1
+    i = i + 1
+
+  i = 0
+  while type_name[i] != 0:
+    output[out_idx] = type_name[i]
+    out_idx = out_idx + 1
+    i = i + 1
+
+  i = 0
+  while dashes[i] != 0:
+    output[out_idx] = dashes[i]
+    out_idx = out_idx + 1
+    i = i + 1
+
+  output[out_idx] = 0  # Null terminate
+  return out_idx
+
+# Decode PEM format
+# input: PEM data
+# output: binary output buffer
+# Returns: decoded data length, or -1 on error
+proc pem_decode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
+  # Find start of Base64 data (after first "-----\n")
+  var in_idx: int32 = 0
+  var found_header: int32 = 0
+
+  while in_idx < input_len - 6:
+    if input[in_idx] == 45 and input[in_idx + 1] == 45 and
+       input[in_idx + 2] == 45 and input[in_idx + 3] == 45 and
+       input[in_idx + 4] == 45:
+      # Found "-----", skip to newline
+      in_idx = in_idx + 5
+      while in_idx < input_len and input[in_idx] != 10:
+        in_idx = in_idx + 1
+      in_idx = in_idx + 1  # Skip newline
+      found_header = 1
+      break
+    in_idx = in_idx + 1
+
+  if found_header != 1:
+    return -1
+
+  # Copy Base64 data, skipping whitespace, until footer
+  var b64_buf: array[8192, uint8]
+  var b64_len: int32 = 0
+
+  while in_idx < input_len:
+    var c: uint8 = input[in_idx]
+
+    # Stop at footer
+    if c == 45:  # '-'
+      break
+
+    # Skip whitespace
+    if c != 10 and c != 13 and c != 32 and c != 9:
+      b64_buf[b64_len] = c
+      b64_len = b64_len + 1
+    end
+
+    in_idx = in_idx + 1
+
+  # Decode Base64
+  return base64_decode(addr(b64_buf[0]), b64_len, output)
+
+# ===========================================================================
+# Hex Encoding (useful utility)
+# ===========================================================================
+
+var hex_chars: ptr uint8 = cast[ptr uint8]("0123456789abcdef")
+
+# Encode bytes to hex string
+proc hex_encode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
+  var i: int32 = 0
+  var out_idx: int32 = 0
+
+  while i < input_len:
+    var b: int32 = cast[int32](input[i])
+    output[out_idx] = hex_chars[(b / 16) and 0x0F]
+    output[out_idx + 1] = hex_chars[b and 0x0F]
+    out_idx = out_idx + 2
+    i = i + 1
+
+  output[out_idx] = 0  # Null terminate
+  return out_idx
+
+# Decode hex string to bytes
+proc hex_decode(input: ptr uint8, input_len: int32, output: ptr uint8): int32 =
+  if (input_len and 1) != 0:
+    return -1  # Must be even
+
+  var i: int32 = 0
+  var out_idx: int32 = 0
+
+  while i < input_len:
+    var high: int32 = 0
+    var low: int32 = 0
+
+    # Decode high nibble
+    var c: int32 = cast[int32](input[i])
+    if c >= 48 and c <= 57:     # 0-9
+      high = c - 48
+    elif c >= 65 and c <= 70:   # A-F
+      high = c - 55
+    elif c >= 97 and c <= 102:  # a-f
+      high = c - 87
+    else:
+      return -1
+    end
+
+    # Decode low nibble
+    c = cast[int32](input[i + 1])
+    if c >= 48 and c <= 57:
+      low = c - 48
+    elif c >= 65 and c <= 70:
+      low = c - 55
+    elif c >= 97 and c <= 102:
+      low = c - 87
+    else:
+      return -1
+    end
+
+    output[out_idx] = cast[uint8]((high * 16) + low)
+    out_idx = out_idx + 1
+    i = i + 2
+
+  return out_idx

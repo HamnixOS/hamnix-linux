@@ -1,0 +1,284 @@
+# random.bh - Random Number Generator Library for BrainhairOS
+# Provides secure random number generation for userland programs
+# Part of Phase 8 cryptography foundation
+
+# Syscall numbers for RNG
+const SYS_GETRANDOM: int32 = 80  # getrandom(buf, len, flags)
+
+# External assembly syscall wrapper
+extern syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32): int32
+
+# RNG state for userland PRNG fallback
+var rng_state: int32 = 12345
+var rng_initialized: int32 = 0
+
+# ============================================================================
+# random_init - Initialize the random number generator
+# Seeds the PRNG with kernel entropy if syscall is available
+# ============================================================================
+proc random_init() =
+  var seed: int32 = 0
+
+  # Try to get seed from kernel
+  var result: int32 = syscall3(SYS_GETRANDOM, cast[int32](addr(seed)), 4, 0)
+
+  if result > 0:
+    # Got seed from kernel
+    rng_state = seed
+  else:
+    # Fallback: use a simple seed (in real use, this would be from timer/etc)
+    rng_state = 12345
+
+  rng_initialized = 1
+
+# ============================================================================
+# random_bytes - Fill buffer with random bytes from kernel
+# buf: pointer to buffer
+# len: number of bytes to generate
+# Returns: number of bytes generated, or -1 on error
+# ============================================================================
+proc random_bytes(buf: ptr uint8, len: int32): int32 =
+  if buf == cast[ptr uint8](0):
+    return -1
+
+  if len <= 0:
+    return 0
+
+  # Try kernel syscall first
+  var result: int32 = syscall3(SYS_GETRANDOM, cast[int32](buf), len, 0)
+
+  if result > 0:
+    return result
+
+  # Fallback: use userland PRNG (less secure but functional)
+  if rng_initialized == 0:
+    random_init()
+
+  var i: int32 = 0
+  while i < len:
+    # Simple LCG: state = (a * state + c) mod m
+    # Using a=1103515245, c=12345, m=2^31
+    rng_state = (1103515245 * rng_state + 12345) & 2147483647
+    buf[i] = cast[uint8](rng_state & 255)
+    i = i + 1
+
+  return len
+
+# ============================================================================
+# random_int - Get a random 32-bit integer
+# Returns: random int32
+# ============================================================================
+proc random_int(): int32 =
+  var result: int32 = 0
+  var bytes_read: int32 = random_bytes(cast[ptr uint8](addr(result)), 4)
+
+  if bytes_read == 4:
+    return result
+
+  # Fallback PRNG
+  if rng_initialized == 0:
+    random_init()
+
+  rng_state = (1103515245 * rng_state + 12345) & 2147483647
+  return rng_state
+
+# ============================================================================
+# random_range - Get a random integer in range [min, max)
+# min: minimum value (inclusive)
+# max: maximum value (exclusive)
+# Returns: random value in [min, max)
+# ============================================================================
+proc random_range(min: int32, max: int32): int32 =
+  if min >= max:
+    return min
+
+  var range: int32 = max - min
+  var rand: int32 = random_int()
+
+  # Ensure positive value
+  if rand < 0:
+    rand = 0 - rand
+
+  # Map to range
+  return min + (rand % range)
+
+# ============================================================================
+# random_uint - Get a random unsigned 32-bit integer
+# Returns: random uint32 (as int32, interpret as unsigned)
+# ============================================================================
+proc random_uint(): int32 =
+  return random_int()
+
+# ============================================================================
+# random_float - Get a random float in range [0.0, 1.0)
+# Note: BrainhairOS doesn't have native float support yet,
+# so this returns a fixed-point value (int32 / 2^31)
+# Returns: value 0 to 2147483647 representing 0.0 to ~1.0
+# ============================================================================
+proc random_float(): int32 =
+  var r: int32 = random_int()
+  if r < 0:
+    r = 0 - r
+  return r
+
+# ============================================================================
+# random_bool - Get a random boolean value
+# Returns: 0 or 1
+# ============================================================================
+proc random_bool(): int32 =
+  return random_int() & 1
+
+# ============================================================================
+# random_shuffle - Shuffle an array of int32 using Fisher-Yates algorithm
+# arr: pointer to array
+# len: length of array
+# ============================================================================
+proc random_shuffle(arr: ptr int32, len: int32) =
+  if arr == cast[ptr int32](0):
+    return
+
+  if len <= 1:
+    return
+
+  var i: int32 = len - 1
+  while i > 0:
+    var j: int32 = random_range(0, i + 1)
+
+    # Swap arr[i] and arr[j]
+    var temp: int32 = arr[i]
+    arr[i] = arr[j]
+    arr[j] = temp
+
+    i = i - 1
+
+# ============================================================================
+# random_sample - Get a random sample from array without replacement
+# arr: source array
+# arr_len: length of source array
+# output: output array for sample
+# sample_size: number of elements to sample
+# ============================================================================
+proc random_sample(arr: ptr int32, arr_len: int32, output: ptr int32, sample_size: int32) =
+  if arr == cast[ptr int32](0) or output == cast[ptr int32](0):
+    return
+
+  if sample_size > arr_len:
+    return
+
+  # Create indices array (simplified - assumes we have space)
+  var i: int32 = 0
+  var taken: int32 = 0
+
+  while taken < sample_size:
+    var idx: int32 = random_range(0, arr_len)
+
+    # Simple check if already taken (not optimal but functional)
+    var already_taken: int32 = 0
+    var j: int32 = 0
+    while j < taken:
+      if output[j] == arr[idx]:
+        already_taken = 1
+
+    if already_taken == 0:
+      output[taken] = arr[idx]
+      taken = taken + 1
+
+# ============================================================================
+# random_choice - Pick a random element from array
+# arr: array to choose from
+# len: length of array
+# Returns: random element from array
+# ============================================================================
+proc random_choice(arr: ptr int32, len: int32): int32 =
+  if arr == cast[ptr int32](0) or len <= 0:
+    return 0
+
+  var idx: int32 = random_range(0, len)
+  return arr[idx]
+
+# ============================================================================
+# random_string - Generate random alphanumeric string
+# buf: output buffer
+# len: desired string length (not including null terminator)
+# ============================================================================
+proc random_string(buf: ptr uint8, len: int32) =
+  if buf == cast[ptr uint8](0) or len <= 0:
+    return
+
+  # Character set: a-z, A-Z, 0-9 (62 characters)
+  var charset: ptr uint8 = cast[ptr uint8]("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+  var charset_len: int32 = 62
+
+  var i: int32 = 0
+  while i < len:
+    var idx: int32 = random_range(0, charset_len)
+    buf[i] = charset[idx]
+    i = i + 1
+
+  buf[len] = cast[uint8](0)  # Null terminator
+
+# ============================================================================
+# random_hex_string - Generate random hexadecimal string
+# buf: output buffer
+# len: desired string length (not including null terminator)
+# ============================================================================
+proc random_hex_string(buf: ptr uint8, len: int32) =
+  if buf == cast[ptr uint8](0) or len <= 0:
+    return
+
+  var hexchars: ptr uint8 = cast[ptr uint8]("0123456789abcdef")
+
+  var i: int32 = 0
+  while i < len:
+    var idx: int32 = random_range(0, 16)
+    buf[i] = hexchars[idx]
+    i = i + 1
+
+  buf[len] = cast[uint8](0)  # Null terminator
+
+# ============================================================================
+# random_uuid - Generate a random UUID (version 4)
+# buf: output buffer (must be at least 37 bytes for UUID + null)
+# Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+# ============================================================================
+proc random_uuid(buf: ptr uint8) =
+  if buf == cast[ptr uint8](0):
+    return
+
+  # Generate 16 random bytes
+  var bytes: int32 = 0
+  var i: int32 = 0
+  var pos: int32 = 0
+
+  i = 0
+  while i < 36:
+    if i == 8 or i == 13 or i == 18 or i == 23:
+      # Add hyphens
+      buf[pos] = cast[uint8](45)  # '-'
+      pos = pos + 1
+      i = i + 1
+    elif i == 14:
+      # Version 4
+      buf[pos] = cast[uint8](52)  # '4'
+      pos = pos + 1
+      i = i + 1
+    elif i == 19:
+      # Variant bits (10xx)
+      var r: int32 = random_range(8, 12)
+      if r < 10:
+        buf[pos] = cast[uint8](48 + r)
+      else:
+        buf[pos] = cast[uint8](97 + r - 10)
+      pos = pos + 1
+      i = i + 1
+    else:
+      # Random hex digit
+      var r: int32 = random_range(0, 16)
+      if r < 10:
+        buf[pos] = cast[uint8](48 + r)
+      else:
+        buf[pos] = cast[uint8](97 + r - 10)
+      pos = pos + 1
+      i = i + 1
+
+  buf[36] = cast[uint8](0)  # Null terminator

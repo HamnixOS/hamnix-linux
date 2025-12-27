@@ -1,0 +1,314 @@
+# DNS Resolver Library for BrainhairOS
+# Provides DNS name resolution functionality for userland programs
+
+import "lib/syscalls"
+import "lib/net"
+
+# UDP syscalls for DNS (must match kernel)
+const SYS_UDP_SEND: int32 = 58
+const SYS_UDP_RECV: int32 = 59
+
+# DNS constants
+const DNS_PORT: int32 = 53
+const DNS_QUERY_TIMEOUT_MS: int32 = 5000
+const DNS_MAX_RETRIES: int32 = 3
+const DNS_PACKET_MAX: int32 = 512
+
+# DNS record types
+const DNS_TYPE_A: int32 = 1      # IPv4 address
+const DNS_TYPE_NS: int32 = 2     # Name server
+const DNS_TYPE_CNAME: int32 = 5  # Canonical name
+const DNS_TYPE_MX: int32 = 15    # Mail exchange
+const DNS_TYPE_AAAA: int32 = 28  # IPv6 address
+
+# DNS classes
+const DNS_CLASS_IN: int32 = 1    # Internet
+
+# Default DNS server (Google Public DNS: 8.8.8.8)
+var dns_default_server: array[4, uint8]
+var dns_server_initialized: int32 = 0
+
+# Transaction ID counter
+var dns_txid_counter: int32 = 0
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+# Get next transaction ID
+proc dns_get_txid(): int32 =
+  dns_txid_counter = dns_txid_counter + 1
+  if dns_txid_counter > 65535:
+    dns_txid_counter = 1
+  return dns_txid_counter
+
+# Initialize DNS library
+proc dns_init() =
+  if dns_server_initialized == 1:
+    return
+
+  # Set default DNS server to 8.8.8.8
+  dns_default_server[0] = cast[uint8](8)
+  dns_default_server[1] = cast[uint8](8)
+  dns_default_server[2] = cast[uint8](8)
+  dns_default_server[3] = cast[uint8](8)
+
+  dns_server_initialized = 1
+
+# Set custom DNS server
+proc dns_set_server(ip: ptr uint8) =
+  dns_init()
+  dns_default_server[0] = ip[0]
+  dns_default_server[1] = ip[1]
+  dns_default_server[2] = ip[2]
+  dns_default_server[3] = ip[3]
+
+# =============================================================================
+# DNS Packet Building
+# =============================================================================
+
+# Build DNS query packet for A record lookup
+# hostname: null-terminated hostname string
+# query_buf: buffer to store query packet (must be at least 512 bytes)
+# Returns: length of query packet
+proc dns_build_query(hostname: ptr uint8, query_buf: ptr uint8, txid: int32): int32 =
+  var qlen: int32 = 0
+
+  # Header: Transaction ID (2 bytes)
+  query_buf[0] = cast[uint8]((txid >> 8) & 0xFF)
+  query_buf[1] = cast[uint8](txid & 0xFF)
+
+  # Flags (2 bytes): Standard query with recursion desired
+  # QR=0 (query), Opcode=0 (standard), RD=1 (recursion desired)
+  query_buf[2] = cast[uint8](0x01)  # Flags high byte (RD=1)
+  query_buf[3] = cast[uint8](0x00)  # Flags low byte
+
+  # Question count: 1
+  query_buf[4] = cast[uint8](0x00)
+  query_buf[5] = cast[uint8](0x01)
+
+  # Answer RRs: 0
+  query_buf[6] = cast[uint8](0x00)
+  query_buf[7] = cast[uint8](0x00)
+
+  # Authority RRs: 0
+  query_buf[8] = cast[uint8](0x00)
+  query_buf[9] = cast[uint8](0x00)
+
+  # Additional RRs: 0
+  query_buf[10] = cast[uint8](0x00)
+  query_buf[11] = cast[uint8](0x00)
+
+  qlen = 12
+
+  # Question section: encode hostname as DNS labels
+  # e.g., "www.google.com" becomes length-prefixed labels: 3www6google3com0
+  var i: int32 = 0
+  var label_start: int32 = qlen
+  qlen = qlen + 1  # Reserve space for length byte
+
+  while hostname[i] != cast[uint8](0):
+    if hostname[i] == cast[uint8](46):  # '.' separator
+      # Write label length
+      query_buf[label_start] = cast[uint8](qlen - label_start - 1)
+      label_start = qlen
+      qlen = qlen + 1  # Reserve space for next length byte
+    else:
+      query_buf[qlen] = hostname[i]
+      qlen = qlen + 1
+    i = i + 1
+
+  # Write last label length
+  query_buf[label_start] = cast[uint8](qlen - label_start - 1)
+
+  # Null terminator for labels
+  query_buf[qlen] = cast[uint8](0)
+  qlen = qlen + 1
+
+  # QTYPE: A record (1)
+  query_buf[qlen] = cast[uint8](0x00)
+  query_buf[qlen + 1] = cast[uint8](0x01)
+  qlen = qlen + 2
+
+  # QCLASS: IN (1)
+  query_buf[qlen] = cast[uint8](0x00)
+  query_buf[qlen + 1] = cast[uint8](0x01)
+  qlen = qlen + 2
+
+  return qlen
+
+# =============================================================================
+# DNS Packet Parsing
+# =============================================================================
+
+# Skip DNS name in packet (handles compression pointers)
+# Returns: new offset after skipping name
+proc dns_skip_name(packet: ptr uint8, offset: int32, packet_len: int32): int32 =
+  var pos: int32 = offset
+
+  while pos < packet_len:
+    var len: int32 = cast[int32](packet[pos])
+
+    # Check for compression pointer (top 2 bits set)
+    if (len & 0xC0) == 0xC0:
+      return pos + 2  # Pointer is 2 bytes
+
+    # Check for end of name
+    if len == 0:
+      return pos + 1
+
+    # Skip label
+    pos = pos + len + 1
+
+  return pos
+
+# Parse DNS response packet
+# response: DNS response packet
+# resp_len: length of response packet
+# txid: expected transaction ID
+# result_ip: buffer to store resolved IPv4 address (4 bytes)
+# Returns: 1 on success, 0 on failure
+proc dns_parse_response(response: ptr uint8, resp_len: int32, txid: int32, result_ip: ptr uint8): int32 =
+  # Minimum DNS response: 12 byte header
+  if resp_len < 12:
+    return 0
+
+  # Verify transaction ID
+  var resp_txid: int32 = (cast[int32](response[0]) << 8) | cast[int32](response[1])
+  if resp_txid != txid:
+    return 0
+
+  # Check if response (QR bit should be 1)
+  var flags_high: int32 = cast[int32](response[2])
+  if (flags_high & 0x80) == 0:
+    return 0  # Not a response
+
+  # Check response code (RCODE in low 4 bits of flags low byte)
+  var flags_low: int32 = cast[int32](response[3])
+  var rcode: int32 = flags_low & 0x0F
+  if rcode != 0:
+    return 0  # Error response (1=format error, 2=server failure, 3=name error, etc.)
+
+  # Get answer count
+  var answer_count: int32 = (cast[int32](response[6]) << 8) | cast[int32](response[7])
+  if answer_count == 0:
+    return 0  # No answers
+
+  # Skip question section
+  var offset: int32 = 12
+  var question_count: int32 = (cast[int32](response[4]) << 8) | cast[int32](response[5])
+
+  var q: int32 = 0
+  while q < question_count:
+    # Skip QNAME
+    offset = dns_skip_name(response, offset, resp_len)
+    # Skip QTYPE (2) and QCLASS (2)
+    offset = offset + 4
+    q = q + 1
+
+  # Parse answer section
+  var a: int32 = 0
+  while a < answer_count:
+    if offset >= resp_len:
+      return 0
+
+    # Skip NAME
+    var name_start: int32 = offset
+    offset = dns_skip_name(response, offset, resp_len)
+
+    # Read TYPE (2 bytes)
+    if offset + 10 > resp_len:
+      return 0
+
+    var ans_type: int32 = (cast[int32](response[offset]) << 8) | cast[int32](response[offset + 1])
+    var ans_class: int32 = (cast[int32](response[offset + 2]) << 8) | cast[int32](response[offset + 3])
+    # Skip TTL (4 bytes)
+    var rdlength: int32 = (cast[int32](response[offset + 8]) << 8) | cast[int32](response[offset + 9])
+    offset = offset + 10
+
+    # Check if this is an A record
+    if ans_type == DNS_TYPE_A and ans_class == DNS_CLASS_IN:
+      if rdlength == 4 and offset + 4 <= resp_len:
+        # Found IPv4 address!
+        result_ip[0] = response[offset]
+        result_ip[1] = response[offset + 1]
+        result_ip[2] = response[offset + 2]
+        result_ip[3] = response[offset + 3]
+        return 1
+
+    # Skip RDATA
+    offset = offset + rdlength
+    a = a + 1
+
+  return 0
+
+# =============================================================================
+# DNS Resolution
+# =============================================================================
+
+# UDP send wrapper
+proc dns_udp_send(dest_ip: ptr uint8, src_port: int32, dest_port: int32, data: ptr uint8, length: int32): int32 =
+  return syscall5(SYS_UDP_SEND, cast[int32](dest_ip), src_port, dest_port, cast[int32](data), length)
+
+# UDP receive wrapper
+proc dns_udp_recv(buf: ptr uint8, max_len: int32, timeout_ms: int32): int32 =
+  return syscall3(SYS_UDP_RECV, cast[int32](buf), max_len, timeout_ms)
+
+# Resolve hostname to IPv4 address
+# hostname: null-terminated hostname string (e.g., "www.google.com")
+# result_ip: pointer to 4-byte buffer to store IP address
+# Returns: 1 on success, 0 on failure
+proc dns_resolve(hostname: ptr uint8, result_ip: ptr uint8): int32 =
+  dns_init()
+
+  # Allocate buffers
+  var query: array[512, uint8]
+  var response: array[512, uint8]
+
+  # Try up to DNS_MAX_RETRIES times
+  var retry: int32 = 0
+  while retry < DNS_MAX_RETRIES:
+    # Get transaction ID
+    var txid: int32 = dns_get_txid()
+
+    # Build DNS query
+    var qlen: int32 = dns_build_query(hostname, addr(query[0]), txid)
+
+    # Use ephemeral source port based on txid
+    var src_port: int32 = 50000 + (txid % 10000)
+
+    # Send DNS query
+    var sent: int32 = dns_udp_send(addr(dns_default_server[0]), src_port, DNS_PORT, addr(query[0]), qlen)
+    if sent < 0:
+      retry = retry + 1
+      continue
+
+    # Wait for response with timeout
+    var resp_len: int32 = dns_udp_recv(addr(response[0]), 512, DNS_QUERY_TIMEOUT_MS)
+
+    if resp_len > 0:
+      # Parse response
+      if dns_parse_response(addr(response[0]), resp_len, txid, result_ip) == 1:
+        return 1
+
+    retry = retry + 1
+
+  return 0
+
+# =============================================================================
+# Convenience Functions
+# =============================================================================
+
+# Resolve hostname and format as string
+# hostname: null-terminated hostname string
+# result_str: pointer to buffer (at least 16 bytes) to store IP as string
+# Returns: 1 on success, 0 on failure
+proc dns_resolve_str(hostname: ptr uint8, result_str: ptr uint8): int32 =
+  var ip: array[4, uint8]
+
+  if dns_resolve(hostname, addr(ip[0])) == 0:
+    return 0
+
+  # Format IP as dotted decimal string
+  discard format_ipv4(addr(ip[0]), result_str)
+  return 1

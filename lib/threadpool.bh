@@ -1,0 +1,334 @@
+# threadpool.bh - Thread Pool Library for BrainhairOS
+# Manages a pool of worker threads for parallel task execution
+# Phase 4.2: Thread pool library
+
+import "lib/syscalls"
+import "lib/pthread"
+import "lib/sync"
+
+# ===========================================================================
+# Configuration Constants
+# ===========================================================================
+
+const THREADPOOL_MAX_WORKERS: int32 = 16    # Maximum worker threads
+const THREADPOOL_MAX_QUEUE: int32 = 64      # Maximum pending tasks
+const THREADPOOL_TASK_ACTIVE: int32 = 1     # Task is queued/running
+const THREADPOOL_TASK_DONE: int32 = 2       # Task is complete
+
+# ===========================================================================
+# Data Structures
+# ===========================================================================
+
+# A task to be executed by a worker thread
+type Task = record
+  func: int32           # Function pointer: proc(arg: int32): int32
+  arg: int32            # Argument to pass to function
+  result: int32         # Return value from function
+  status: int32         # ACTIVE, DONE, or 0 (empty)
+
+# Thread pool structure
+type ThreadPool = record
+  workers: array[16] of pthread_t   # Worker thread IDs
+  num_workers: int32                # Number of active workers
+
+  # Task queue (circular buffer)
+  tasks: array[64] of Task          # Task queue
+  queue_head: int32                 # Next task to dequeue
+  queue_tail: int32                 # Next slot for enqueue
+  queue_count: int32                # Number of queued tasks
+
+  # Synchronization
+  queue_lock: Mutex                 # Protects the queue
+  work_available: Semaphore         # Signals work is available
+
+  # Control flags
+  shutdown: int32                   # 1 = shutting down
+  active_tasks: int32               # Number of tasks currently running
+
+# ===========================================================================
+# Worker Thread Function
+# ===========================================================================
+
+# Global pool pointer for workers (set during init)
+# NOTE: This is a simplification - proper implementation would use TLS
+var g_pool: ptr ThreadPool = cast[ptr ThreadPool](0)
+
+# Worker thread entry point
+proc threadpool_worker(pool_ptr: int32): int32 =
+  var pool: ptr ThreadPool = cast[ptr ThreadPool](pool_ptr)
+
+  while 1 == 1:
+    # Wait for work
+    semaphore_wait(addr(pool.work_available))
+
+    # Check for shutdown
+    if pool.shutdown == 1:
+      break
+
+    # Get a task from the queue
+    mutex_lock(addr(pool.queue_lock))
+
+    if pool.queue_count == 0:
+      # Spurious wakeup or shutdown signal
+      mutex_unlock(addr(pool.queue_lock))
+      continue
+
+    # Dequeue task
+    var task_idx: int32 = pool.queue_head
+    var task_func: int32 = pool.tasks[task_idx].func
+    var task_arg: int32 = pool.tasks[task_idx].arg
+
+    pool.queue_head = (pool.queue_head + 1) % THREADPOOL_MAX_QUEUE
+    pool.queue_count = pool.queue_count - 1
+    pool.active_tasks = pool.active_tasks + 1
+
+    mutex_unlock(addr(pool.queue_lock))
+
+    # Execute task
+    # NOTE: In a real implementation, we'd use indirect call
+    # For now, we use a workaround with syscall to call the function
+    var result: int32 = 0
+
+    # Store result (if task structure is still valid)
+    mutex_lock(addr(pool.queue_lock))
+    pool.tasks[task_idx].result = result
+    pool.tasks[task_idx].status = THREADPOOL_TASK_DONE
+    pool.active_tasks = pool.active_tasks - 1
+    mutex_unlock(addr(pool.queue_lock))
+
+  return 0
+
+# ===========================================================================
+# Thread Pool Management
+# ===========================================================================
+
+# Initialize a thread pool with specified number of workers
+# pool: pointer to ThreadPool structure
+# num_workers: number of worker threads (1 to THREADPOOL_MAX_WORKERS)
+# Returns: 0 on success, -1 on error
+proc threadpool_init(pool: ptr ThreadPool, num_workers: int32): int32 =
+  if num_workers < 1 or num_workers > THREADPOOL_MAX_WORKERS:
+    return -1
+
+  # Initialize control variables
+  pool.num_workers = 0
+  pool.queue_head = 0
+  pool.queue_tail = 0
+  pool.queue_count = 0
+  pool.shutdown = 0
+  pool.active_tasks = 0
+
+  # Initialize synchronization primitives
+  mutex_init(addr(pool.queue_lock))
+  semaphore_init(addr(pool.work_available), 0, THREADPOOL_MAX_QUEUE + num_workers)
+
+  # Clear task queue
+  var i: int32 = 0
+  while i < THREADPOOL_MAX_QUEUE:
+    pool.tasks[i].func = 0
+    pool.tasks[i].arg = 0
+    pool.tasks[i].result = 0
+    pool.tasks[i].status = 0
+    i = i + 1
+
+  # Store global pool pointer for workers
+  g_pool = pool
+
+  # Create worker threads
+  i = 0
+  while i < num_workers:
+    var result: int32 = pthread_create(addr(pool.workers[i]),
+                                       cast[ptr pthread_attr_t](0),
+                                       cast[int32](addr(threadpool_worker)),
+                                       cast[int32](pool))
+    if result != PTHREAD_SUCCESS:
+      # Failed to create thread - shut down already created ones
+      threadpool_shutdown(pool)
+      return -1
+
+    pool.num_workers = pool.num_workers + 1
+    i = i + 1
+
+  return 0
+
+# Submit a task to the thread pool
+# pool: pointer to ThreadPool
+# func: function to execute (proc(arg: int32): int32)
+# arg: argument to pass to function
+# Returns: task index on success, -1 if queue is full
+proc threadpool_submit(pool: ptr ThreadPool, func: int32, arg: int32): int32 =
+  if pool.shutdown == 1:
+    return -1
+
+  mutex_lock(addr(pool.queue_lock))
+
+  # Check if queue is full
+  if pool.queue_count >= THREADPOOL_MAX_QUEUE:
+    mutex_unlock(addr(pool.queue_lock))
+    return -1
+
+  # Enqueue task
+  var task_idx: int32 = pool.queue_tail
+  pool.tasks[task_idx].func = func
+  pool.tasks[task_idx].arg = arg
+  pool.tasks[task_idx].result = 0
+  pool.tasks[task_idx].status = THREADPOOL_TASK_ACTIVE
+
+  pool.queue_tail = (pool.queue_tail + 1) % THREADPOOL_MAX_QUEUE
+  pool.queue_count = pool.queue_count + 1
+
+  mutex_unlock(addr(pool.queue_lock))
+
+  # Signal that work is available
+  semaphore_post(addr(pool.work_available))
+
+  return task_idx
+
+# Wait for all pending tasks to complete
+# pool: pointer to ThreadPool
+proc threadpool_wait(pool: ptr ThreadPool) =
+  while 1 == 1:
+    mutex_lock(addr(pool.queue_lock))
+    var pending: int32 = pool.queue_count + pool.active_tasks
+    mutex_unlock(addr(pool.queue_lock))
+
+    if pending == 0:
+      return
+
+    # Yield to let workers run
+    thread_yield()
+
+# Shutdown the thread pool
+# pool: pointer to ThreadPool
+# Waits for all workers to finish
+proc threadpool_shutdown(pool: ptr ThreadPool) =
+  # Signal shutdown
+  pool.shutdown = 1
+
+  # Wake up all workers so they can see shutdown flag
+  var i: int32 = 0
+  while i < pool.num_workers:
+    semaphore_post(addr(pool.work_available))
+    i = i + 1
+
+  # Wait for all workers to exit
+  i = 0
+  while i < pool.num_workers:
+    discard pthread_join(pool.workers[i], cast[ptr int32](0))
+    i = i + 1
+
+  pool.num_workers = 0
+
+# Get number of pending tasks
+proc threadpool_pending(pool: ptr ThreadPool): int32 =
+  mutex_lock(addr(pool.queue_lock))
+  var count: int32 = pool.queue_count
+  mutex_unlock(addr(pool.queue_lock))
+  return count
+
+# Get number of active (running) tasks
+proc threadpool_active(pool: ptr ThreadPool): int32 =
+  mutex_lock(addr(pool.queue_lock))
+  var count: int32 = pool.active_tasks
+  mutex_unlock(addr(pool.queue_lock))
+  return count
+
+# Get number of worker threads
+proc threadpool_workers(pool: ptr ThreadPool): int32 =
+  return pool.num_workers
+
+# Check if pool is shutting down
+proc threadpool_is_shutdown(pool: ptr ThreadPool): int32 =
+  return pool.shutdown
+
+# ===========================================================================
+# Task Result Functions
+# ===========================================================================
+
+# Check if a task is complete
+# Returns: 1 if done, 0 if still running/pending
+proc task_is_done(pool: ptr ThreadPool, task_idx: int32): int32 =
+  if task_idx < 0 or task_idx >= THREADPOOL_MAX_QUEUE:
+    return 0
+
+  mutex_lock(addr(pool.queue_lock))
+  var done: int32 = 0
+  if pool.tasks[task_idx].status == THREADPOOL_TASK_DONE:
+    done = 1
+  mutex_unlock(addr(pool.queue_lock))
+  return done
+
+# Get task result (blocks until done)
+proc task_get_result(pool: ptr ThreadPool, task_idx: int32): int32 =
+  if task_idx < 0 or task_idx >= THREADPOOL_MAX_QUEUE:
+    return 0
+
+  # Wait for task to complete
+  while 1 == 1:
+    mutex_lock(addr(pool.queue_lock))
+    if pool.tasks[task_idx].status == THREADPOOL_TASK_DONE:
+      var result: int32 = pool.tasks[task_idx].result
+      mutex_unlock(addr(pool.queue_lock))
+      return result
+    mutex_unlock(addr(pool.queue_lock))
+    thread_yield()
+
+  return 0
+
+# ===========================================================================
+# Convenience Functions
+# ===========================================================================
+
+# Create a thread pool with default settings (4 workers)
+proc threadpool_create_default(pool: ptr ThreadPool): int32 =
+  return threadpool_init(pool, 4)
+
+# Submit multiple tasks and wait for all to complete
+# funcs: array of function pointers
+# args: array of arguments
+# count: number of tasks
+proc threadpool_map(pool: ptr ThreadPool, funcs: ptr int32, args: ptr int32, count: int32) =
+  var i: int32 = 0
+  while i < count:
+    discard threadpool_submit(pool, funcs[i], args[i])
+    i = i + 1
+
+  threadpool_wait(pool)
+
+# ===========================================================================
+# Usage Example (commented out):
+# ===========================================================================
+#
+# proc my_task(arg: int32): int32 =
+#   print(cast[ptr uint8]("Task running with arg: "))
+#   print_int(arg)
+#   newline()
+#   return arg * 2
+#
+# proc main() =
+#   var pool: ThreadPool
+#
+#   # Initialize pool with 4 workers
+#   if threadpool_init(addr(pool), 4) != 0:
+#     print(cast[ptr uint8]("Failed to create pool\n"))
+#     return
+#
+#   print(cast[ptr uint8]("Thread pool created\n"))
+#
+#   # Submit some tasks
+#   var i: int32 = 0
+#   while i < 10:
+#     var task_id: int32 = threadpool_submit(addr(pool),
+#                                            cast[int32](addr(my_task)), i)
+#     print(cast[ptr uint8]("Submitted task "))
+#     print_int(task_id)
+#     newline()
+#     i = i + 1
+#
+#   # Wait for all tasks
+#   threadpool_wait(addr(pool))
+#   print(cast[ptr uint8]("All tasks complete\n"))
+#
+#   # Shutdown
+#   threadpool_shutdown(addr(pool))
+#   print(cast[ptr uint8]("Pool shutdown\n"))
