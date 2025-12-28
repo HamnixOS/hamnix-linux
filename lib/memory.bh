@@ -7,45 +7,45 @@
 # Memory layout uses a simple free-list allocator with headers.
 
 # Import syscalls
-const SYS_brk: int32 = 45
-const SYS_mmap: int32 = 90
-const SYS_munmap: int32 = 91
+SYS_brk: Final[int32] = 45
+SYS_mmap: Final[int32] = 90
+SYS_munmap: Final[int32] = 91
 
-const PROT_READ: int32 = 1
-const PROT_WRITE: int32 = 2
-const MAP_PRIVATE: int32 = 2
-const MAP_ANONYMOUS: int32 = 32
+PROT_READ: Final[int32] = 1
+PROT_WRITE: Final[int32] = 2
+MAP_PRIVATE: Final[int32] = 2
+MAP_ANONYMOUS: Final[int32] = 32
 
-extern proc syscall1(num: int32, arg1: int32): int32
-extern proc syscall6(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32, arg6: int32): int32
+extern def syscall1(num: int32, arg1: int32) -> int32
+extern def syscall6(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32, arg6: int32) -> int32
 
 # Allocation header structure
 # Fields:
 #   size: int32        - Size of allocation (including header)
 #   flags: int32       - Flags (1 = in use, 0 = free)
 # Total: 8 bytes
-const ALLOC_HEADER_SIZE: int32 = 8
-const ALLOC_FLAG_USED: int32 = 1
-const ALLOC_FLAG_FREE: int32 = 0
+ALLOC_HEADER_SIZE: Final[int32] = 8
+ALLOC_FLAG_USED: Final[int32] = 1
+ALLOC_FLAG_FREE: Final[int32] = 0
 
 # Global heap state
 # We use a simple bump allocator backed by mmap
 # For a real implementation, we'd have a proper free list
-var heap_base: int32 = 0
-var heap_size: int32 = 0
-var heap_used: int32 = 0
+heap_base: int32 = 0
+heap_size: int32 = 0
+heap_used: int32 = 0
 
-const DEFAULT_HEAP_SIZE: int32 = 1048576  # 1 MB default heap
+DEFAULT_HEAP_SIZE: Final[int32] = 1048576  # 1 MB default heap
 
 # Initialize the heap
-proc heap_init(): int32 =
+def heap_init() -> int32:
     if heap_base != 0:
         return 1  # Already initialized
 
     # Allocate heap using mmap
-    var mem: int32 = syscall6(SYS_mmap, 0, DEFAULT_HEAP_SIZE,
-                              PROT_READ | PROT_WRITE,
-                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+    mem: int32 = syscall6(SYS_mmap, 0, DEFAULT_HEAP_SIZE,
+                          PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
 
     if mem < 0:
         return 0  # Failed
@@ -57,140 +57,140 @@ proc heap_init(): int32 =
 
 # Allocate memory from the heap
 # Returns pointer to usable memory (after header)
-proc alloc(size: int32): ptr uint8 =
+def alloc(size: int32) -> Ptr[uint8]:
     # Initialize heap on first use
     if heap_base == 0:
         if heap_init() == 0:
-            return cast[ptr uint8](0)
+            return Ptr[uint8](0)
 
     # Align size to 4 bytes
-    var aligned_size: int32 = (size + 3) & -4
-    var total_size: int32 = aligned_size + ALLOC_HEADER_SIZE
+    aligned_size: int32 = (size + 3) & -4
+    total_size: int32 = aligned_size + ALLOC_HEADER_SIZE
 
     # Check if we have space
     if heap_used + total_size > heap_size:
-        return cast[ptr uint8](0)  # Out of memory
+        return Ptr[uint8](0)  # Out of memory
 
     # Get header location
-    var header_ptr: ptr int32 = cast[ptr int32](heap_base + heap_used)
+    header_ptr: Ptr[int32] = Ptr[int32](heap_base + heap_used)
 
     # Write header
     header_ptr[0] = total_size      # size
     header_ptr[1] = ALLOC_FLAG_USED # flags
 
     # Calculate data pointer (after header)
-    var data_ptr: int32 = heap_base + heap_used + ALLOC_HEADER_SIZE
+    data_ptr: int32 = heap_base + heap_used + ALLOC_HEADER_SIZE
 
     # Update used
     heap_used = heap_used + total_size
 
-    return cast[ptr uint8](data_ptr)
+    return Ptr[uint8](data_ptr)
 
 # Allocate and zero memory
-proc alloc_zero(size: int32): ptr uint8 =
-    var ptr: ptr uint8 = alloc(size)
-    if cast[int32](ptr) == 0:
-        return ptr
+def alloc_zero(size: int32) -> Ptr[uint8]:
+    p: Ptr[uint8] = alloc(size)
+    if cast[int32](p) == 0:
+        return p
 
     # Zero the memory
-    var i: int32 = 0
+    i: int32 = 0
     while i < size:
-        ptr[i] = 0
+        p[i] = 0
         i = i + 1
 
-    return ptr
+    return p
 
 # Free memory (marks as free for potential reuse)
 # Note: In this simple allocator, memory is not actually reused
 # A full implementation would maintain a free list
-proc free(ptr: ptr uint8) =
-    if cast[int32](ptr) == 0:
+def free(p: Ptr[uint8]):
+    if cast[int32](p) == 0:
         return
 
     # Get header (8 bytes before data)
-    var header_ptr: ptr int32 = cast[ptr int32](cast[int32](ptr) - ALLOC_HEADER_SIZE)
+    header_ptr: Ptr[int32] = Ptr[int32](cast[int32](p) - ALLOC_HEADER_SIZE)
 
     # Mark as free
     header_ptr[1] = ALLOC_FLAG_FREE
 
 # Reallocate memory to a new size
-proc realloc(ptr: ptr uint8, old_size: int32, new_size: int32): ptr uint8 =
-    if cast[int32](ptr) == 0:
+def realloc(p: Ptr[uint8], old_size: int32, new_size: int32) -> Ptr[uint8]:
+    if cast[int32](p) == 0:
         return alloc(new_size)
 
     if new_size == 0:
-        free(ptr)
-        return cast[ptr uint8](0)
+        free(p)
+        return Ptr[uint8](0)
 
     # Allocate new block
-    var new_ptr: ptr uint8 = alloc(new_size)
+    new_ptr: Ptr[uint8] = alloc(new_size)
     if cast[int32](new_ptr) == 0:
-        return cast[ptr uint8](0)
+        return Ptr[uint8](0)
 
     # Copy data (minimum of old and new size)
-    var copy_size: int32 = old_size
+    copy_size: int32 = old_size
     if new_size < old_size:
         copy_size = new_size
 
-    var i: int32 = 0
+    i: int32 = 0
     while i < copy_size:
-        new_ptr[i] = ptr[i]
+        new_ptr[i] = p[i]
         i = i + 1
 
     # Free old block
-    free(ptr)
+    free(p)
 
     return new_ptr
 
 # Get the size of an allocation
-proc alloc_size(ptr: ptr uint8): int32 =
-    if cast[int32](ptr) == 0:
+def alloc_size(p: Ptr[uint8]) -> int32:
+    if cast[int32](p) == 0:
         return 0
 
     # Get header
-    var header_ptr: ptr int32 = cast[ptr int32](cast[int32](ptr) - ALLOC_HEADER_SIZE)
+    header_ptr: Ptr[int32] = Ptr[int32](cast[int32](p) - ALLOC_HEADER_SIZE)
 
     # Return usable size (total size minus header)
     return header_ptr[0] - ALLOC_HEADER_SIZE
 
 # Get total heap usage
-proc heap_usage(): int32 =
+def heap_usage() -> int32:
     return heap_used
 
 # Get remaining heap space
-proc heap_remaining(): int32 =
+def heap_remaining() -> int32:
     return heap_size - heap_used
 
 # Reset heap (free all allocations)
 # WARNING: Invalidates all pointers!
-proc heap_reset() =
+def heap_reset():
     heap_used = 0
 
 # Destroy heap (release memory back to OS)
-proc heap_destroy() =
+def heap_destroy():
     if heap_base != 0:
-        discard syscall6(SYS_munmap, heap_base, heap_size, 0, 0, 0, 0)
+        syscall6(SYS_munmap, heap_base, heap_size, 0, 0, 0, 0)
         heap_base = 0
         heap_size = 0
         heap_used = 0
 
 # Memory copy
-proc mem_copy(dest: ptr uint8, src: ptr uint8, n: int32) =
-    var i: int32 = 0
+def mem_copy(dest: Ptr[uint8], src: Ptr[uint8], n: int32):
+    i: int32 = 0
     while i < n:
         dest[i] = src[i]
         i = i + 1
 
 # Memory set
-proc mem_set(dest: ptr uint8, val: uint8, n: int32) =
-    var i: int32 = 0
+def mem_set(dest: Ptr[uint8], val: uint8, n: int32):
+    i: int32 = 0
     while i < n:
         dest[i] = val
         i = i + 1
 
 # Memory compare
-proc mem_cmp(s1: ptr uint8, s2: ptr uint8, n: int32): int32 =
-    var i: int32 = 0
+def mem_cmp(s1: Ptr[uint8], s2: Ptr[uint8], n: int32) -> int32:
+    i: int32 = 0
     while i < n:
         if s1[i] != s2[i]:
             if s1[i] < s2[i]:
@@ -200,27 +200,27 @@ proc mem_cmp(s1: ptr uint8, s2: ptr uint8, n: int32): int32 =
     return 0
 
 # Memory move (handles overlapping regions)
-proc mem_move(dest: ptr uint8, src: ptr uint8, n: int32) =
+def mem_move(dest: Ptr[uint8], src: Ptr[uint8], n: int32):
     if cast[int32](dest) < cast[int32](src):
         # Copy forward
-        var i: int32 = 0
+        i: int32 = 0
         while i < n:
             dest[i] = src[i]
             i = i + 1
     else:
         # Copy backward
-        var i: int32 = n - 1
+        i: int32 = n - 1
         while i >= 0:
             dest[i] = src[i]
             i = i - 1
 
 # Zero memory
-proc mem_zero(dest: ptr uint8, n: int32) =
+def mem_zero(dest: Ptr[uint8], n: int32):
     mem_set(dest, 0, n)
 
 # Duplicate memory (allocate and copy)
-proc mem_dup(src: ptr uint8, n: int32): ptr uint8 =
-    var dest: ptr uint8 = alloc(n)
+def mem_dup(src: Ptr[uint8], n: int32) -> Ptr[uint8]:
+    dest: Ptr[uint8] = alloc(n)
     if cast[int32](dest) != 0:
         mem_copy(dest, src, n)
     return dest

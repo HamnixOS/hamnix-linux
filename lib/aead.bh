@@ -5,459 +5,291 @@
 # ChaCha20-Poly1305 combines:
 #   - ChaCha20 stream cipher for confidentiality
 #   - Poly1305 MAC for authenticity and integrity
-#
-# AEAD provides:
-#   - Encryption of plaintext
-#   - Authentication of ciphertext + additional authenticated data (AAD)
-#   - Protection against tampering and forgery
-
-# Import ChaCha20 and Poly1305 libraries
-# (In a real implementation these would be proper imports)
 
 # Constants
-const CHACHA20_POLY1305_KEY_SIZE: int32 = 32    # 256-bit key
-const CHACHA20_POLY1305_NONCE_SIZE: int32 = 12  # 96-bit nonce
-const CHACHA20_POLY1305_TAG_SIZE: int32 = 16    # 128-bit authentication tag
+CHACHA20_POLY1305_KEY_SIZE: Final[int32] = 32    # 256-bit key
+CHACHA20_POLY1305_NONCE_SIZE: Final[int32] = 12  # 96-bit nonce
+CHACHA20_POLY1305_TAG_SIZE: Final[int32] = 16    # 128-bit authentication tag
 
 # External functions from ChaCha20
-extern chacha20_init(key: ptr uint8, nonce: ptr uint8, counter: int32)
-extern chacha20_block()
-extern chacha20_get_block(): ptr uint8
-extern chacha20_encrypt(input: ptr uint8, output: ptr uint8, length: int32, key: ptr uint8, nonce: ptr uint8, counter: int32)
+extern def chacha20_init(key: Ptr[uint8], nonce: Ptr[uint8], counter: int32)
+extern def chacha20_block()
+extern def chacha20_get_block() -> Ptr[uint8]
+extern def chacha20_encrypt(input: Ptr[uint8], output: Ptr[uint8], length: int32, key: Ptr[uint8], nonce: Ptr[uint8], counter: int32)
 
 # External functions from Poly1305
-extern poly1305_init(key: ptr uint8): int32
-extern poly1305_update(msg: ptr uint8, len: int32)
-extern poly1305_final(tag: ptr uint8): int32
+extern def poly1305_init(key: Ptr[uint8]) -> int32
+extern def poly1305_update(msg: Ptr[uint8], length: int32)
+extern def poly1305_final(tag: Ptr[uint8]) -> int32
 
 # ============================================================================
 # Helper: poly1305_key_gen_internal
 # Generate Poly1305 key from ChaCha20 (first block with counter=0)
 # ============================================================================
-proc poly1305_key_gen_internal(chacha_key: ptr uint8, nonce: ptr uint8, poly_key: ptr uint8): int32 =
-  if chacha_key == cast[ptr uint8](0) or nonce == cast[ptr uint8](0) or poly_key == cast[ptr uint8](0):
-    return -1
+def poly1305_key_gen_internal(chacha_key: Ptr[uint8], nonce: Ptr[uint8], poly_key: Ptr[uint8]) -> int32:
+    if chacha_key == cast[Ptr[uint8]](0) or nonce == cast[Ptr[uint8]](0) or poly_key == cast[Ptr[uint8]](0):
+        return -1
 
-  # Initialize ChaCha20 with counter=0
-  chacha20_init(chacha_key, nonce, 0)
+    # Initialize ChaCha20 with counter=0
+    chacha20_init(chacha_key, nonce, 0)
 
-  # Generate first block
-  chacha20_block()
-  var keystream: ptr uint8 = chacha20_get_block()
+    # Generate first block
+    chacha20_block()
+    keystream: Ptr[uint8] = chacha20_get_block()
 
-  # Copy first 32 bytes as Poly1305 key
-  var i: int32 = 0
-  while i < 32:
-    poly_key[i] = keystream[i]
-    i = i + 1
+    # Copy first 32 bytes as Poly1305 key
+    i: int32 = 0
+    while i < 32:
+        poly_key[i] = keystream[i]
+        i = i + 1
 
-  return 0
+    return 0
 
 # ============================================================================
 # Helper: pad_to_16
 # Pad data to 16-byte boundary for Poly1305 (returns padding needed)
 # ============================================================================
-proc pad_to_16(len: int32): int32 =
-  var remainder: int32 = len & 15  # len % 16
-  if remainder == 0:
-    return 0
-  else:
-    return 16 - remainder
+def pad_to_16(length: int32) -> int32:
+    remainder: int32 = length & 15  # len % 16
+    if remainder == 0:
+        return 0
+    else:
+        return 16 - remainder
 
 # ============================================================================
 # Helper: write_le64
 # Write 64-bit little-endian integer to buffer
 # ============================================================================
-proc write_le64(buffer: ptr uint8, value: int32) =
-  # Note: BrainhairOS is 32-bit, so we only write the low 32 bits
-  # and zero the high 32 bits
-  buffer[0] = cast[uint8](value & 0xff)
-  buffer[1] = cast[uint8]((value >> 8) & 0xff)
-  buffer[2] = cast[uint8]((value >> 16) & 0xff)
-  buffer[3] = cast[uint8]((value >> 24) & 0xff)
-  buffer[4] = cast[uint8](0)
-  buffer[5] = cast[uint8](0)
-  buffer[6] = cast[uint8](0)
-  buffer[7] = cast[uint8](0)
+def write_le64(buffer: Ptr[uint8], value: int32):
+    # Note: BrainhairOS is 32-bit, so we only write the low 32 bits
+    # and zero the high 32 bits
+    buffer[0] = cast[uint8](value & 0xff)
+    buffer[1] = cast[uint8]((value >> 8) & 0xff)
+    buffer[2] = cast[uint8]((value >> 16) & 0xff)
+    buffer[3] = cast[uint8]((value >> 24) & 0xff)
+    buffer[4] = cast[uint8](0)
+    buffer[5] = cast[uint8](0)
+    buffer[6] = cast[uint8](0)
+    buffer[7] = cast[uint8](0)
 
 # ============================================================================
 # aead_chacha20_poly1305_encrypt - Encrypt with authentication
-#
-# Inputs:
-#   plaintext: pointer to plaintext data
-#   plaintext_len: length of plaintext
-#   aad: pointer to additional authenticated data (can be NULL)
-#   aad_len: length of AAD
-#   key: pointer to 32-byte key
-#   nonce: pointer to 12-byte nonce
-#   ciphertext: pointer to output buffer (must be >= plaintext_len)
-#   tag: pointer to 16-byte tag output buffer
-#
-# Returns: 0 on success, -1 on error
-#
-# The ciphertext buffer must be allocated by caller with size >= plaintext_len
-# The tag is written separately to the tag buffer (16 bytes)
-#
-# RFC 8439 Construction:
-#   1. Generate Poly1305 key from ChaCha20(key, nonce, counter=0)
-#   2. Encrypt plaintext with ChaCha20(key, nonce, counter=1)
-#   3. Compute Poly1305 MAC over: AAD || pad || Ciphertext || pad || len(AAD) || len(Ciphertext)
 # ============================================================================
-proc aead_chacha20_poly1305_encrypt(
-  plaintext: ptr uint8,
-  plaintext_len: int32,
-  aad: ptr uint8,
-  aad_len: int32,
-  key: ptr uint8,
-  nonce: ptr uint8,
-  ciphertext: ptr uint8,
-  tag: ptr uint8
-): int32 =
+def aead_chacha20_poly1305_encrypt(
+    plaintext: Ptr[uint8],
+    plaintext_len: int32,
+    aad: Ptr[uint8],
+    aad_len: int32,
+    key: Ptr[uint8],
+    nonce: Ptr[uint8],
+    ciphertext: Ptr[uint8],
+    tag: Ptr[uint8]
+) -> int32:
 
-  if key == cast[ptr uint8](0) or nonce == cast[ptr uint8](0) or tag == cast[ptr uint8](0):
-    return -1
+    if key == cast[Ptr[uint8]](0) or nonce == cast[Ptr[uint8]](0) or tag == cast[Ptr[uint8]](0):
+        return -1
 
-  if plaintext_len > 0 and (plaintext == cast[ptr uint8](0) or ciphertext == cast[ptr uint8](0)):
-    return -1
+    if plaintext_len > 0 and (plaintext == cast[Ptr[uint8]](0) or ciphertext == cast[Ptr[uint8]](0)):
+        return -1
 
-  if aad_len > 0 and aad == cast[ptr uint8](0):
-    return -1
+    if aad_len > 0 and aad == cast[Ptr[uint8]](0):
+        return -1
 
-  # Step 1: Generate Poly1305 key using ChaCha20 with counter=0
-  var poly_key: array[32, uint8]
-  var result: int32 = poly1305_key_gen_internal(key, nonce, addr(poly_key[0]))
-  if result != 0:
-    return -1
+    # Step 1: Generate Poly1305 key using ChaCha20 with counter=0
+    poly_key: Array[32, uint8]
+    result: int32 = poly1305_key_gen_internal(key, nonce, addr(poly_key[0]))
+    if result != 0:
+        return -1
 
-  # Step 2: Encrypt plaintext using ChaCha20 with counter=1
-  if plaintext_len > 0:
-    chacha20_encrypt(plaintext, ciphertext, plaintext_len, key, nonce, 1)
+    # Step 2: Encrypt plaintext using ChaCha20 with counter=1
+    if plaintext_len > 0:
+        chacha20_encrypt(plaintext, ciphertext, plaintext_len, key, nonce, 1)
 
-  # Step 3: Compute Poly1305 MAC
-  # MAC is computed over: AAD || pad16(AAD) || Ciphertext || pad16(Ciphertext) || len(AAD) || len(Ciphertext)
+    # Step 3: Compute Poly1305 MAC
+    result = poly1305_init(addr(poly_key[0]))
+    if result != 0:
+        return -1
 
-  result = poly1305_init(addr(poly_key[0]))
-  if result != 0:
-    return -1
+    # Authenticate AAD
+    if aad_len > 0:
+        poly1305_update(aad, aad_len)
 
-  # Authenticate AAD
-  if aad_len > 0:
-    poly1305_update(aad, aad_len)
+    # Pad AAD to 16-byte boundary
+    padding_needed: int32 = pad_to_16(aad_len)
+    if padding_needed > 0:
+        padding: Array[16, uint8]
+        i: int32 = 0
+        while i < 16:
+            padding[i] = cast[uint8](0)
+            i = i + 1
+        poly1305_update(addr(padding[0]), padding_needed)
 
-  # Pad AAD to 16-byte boundary
-  var padding_needed: int32 = pad_to_16(aad_len)
-  if padding_needed > 0:
-    var padding: array[16, uint8]
-    var i: int32 = 0
-    while i < 16:
-      padding[i] = cast[uint8](0)
-      i = i + 1
-    poly1305_update(addr(padding[0]), padding_needed)
+    # Authenticate ciphertext
+    if plaintext_len > 0:
+        poly1305_update(ciphertext, plaintext_len)
 
-  # Authenticate ciphertext
-  if plaintext_len > 0:
-    poly1305_update(ciphertext, plaintext_len)
+    # Pad ciphertext to 16-byte boundary
+    padding_needed = pad_to_16(plaintext_len)
+    if padding_needed > 0:
+        padding: Array[16, uint8]
+        i: int32 = 0
+        while i < 16:
+            padding[i] = cast[uint8](0)
+            i = i + 1
+        poly1305_update(addr(padding[0]), padding_needed)
 
-  # Pad ciphertext to 16-byte boundary
-  padding_needed = pad_to_16(plaintext_len)
-  if padding_needed > 0:
-    var padding: array[16, uint8]
-    var i: int32 = 0
-    while i < 16:
-      padding[i] = cast[uint8](0)
-      i = i + 1
-    poly1305_update(addr(padding[0]), padding_needed)
+    # Authenticate lengths (as 64-bit little-endian)
+    lengths: Array[16, uint8]
+    write_le64(addr(lengths[0]), aad_len)
+    write_le64(addr(lengths[8]), plaintext_len)
+    poly1305_update(addr(lengths[0]), 16)
 
-  # Authenticate lengths (as 64-bit little-endian)
-  var lengths: array[16, uint8]
-  write_le64(addr(lengths[0]), aad_len)
-  write_le64(addr(lengths[8]), plaintext_len)
-  poly1305_update(addr(lengths[0]), 16)
+    # Finalize and get tag
+    result = poly1305_final(tag)
+    if result != 0:
+        return -1
 
-  # Finalize and get tag
-  result = poly1305_final(tag)
-  if result != 0:
-    return -1
-
-  return 0
+    return 0
 
 # ============================================================================
 # aead_chacha20_poly1305_decrypt - Decrypt and verify authentication
-#
-# Inputs:
-#   ciphertext: pointer to ciphertext data
-#   ciphertext_len: length of ciphertext
-#   aad: pointer to additional authenticated data (can be NULL)
-#   aad_len: length of AAD
-#   tag: pointer to 16-byte authentication tag
-#   key: pointer to 32-byte key
-#   nonce: pointer to 12-byte nonce
-#   plaintext: pointer to output buffer (must be >= ciphertext_len)
-#
-# Returns:
-#   0 on success (authentication passed, plaintext decrypted)
-#   -1 on error
-#   -2 on authentication failure (tag mismatch - DO NOT use plaintext!)
-#
-# The plaintext buffer must be allocated by caller with size >= ciphertext_len
-# If authentication fails, the plaintext buffer contents are INVALID and must not be used
-#
-# RFC 8439 Construction:
-#   1. Generate Poly1305 key from ChaCha20(key, nonce, counter=0)
-#   2. Compute expected MAC over: AAD || pad || Ciphertext || pad || len(AAD) || len(Ciphertext)
-#   3. Verify tag matches expected MAC (constant-time comparison)
-#   4. If verified, decrypt ciphertext with ChaCha20(key, nonce, counter=1)
 # ============================================================================
-proc aead_chacha20_poly1305_decrypt(
-  ciphertext: ptr uint8,
-  ciphertext_len: int32,
-  aad: ptr uint8,
-  aad_len: int32,
-  tag: ptr uint8,
-  key: ptr uint8,
-  nonce: ptr uint8,
-  plaintext: ptr uint8
-): int32 =
+def aead_chacha20_poly1305_decrypt(
+    ciphertext: Ptr[uint8],
+    ciphertext_len: int32,
+    aad: Ptr[uint8],
+    aad_len: int32,
+    tag: Ptr[uint8],
+    key: Ptr[uint8],
+    nonce: Ptr[uint8],
+    plaintext: Ptr[uint8]
+) -> int32:
 
-  if key == cast[ptr uint8](0) or nonce == cast[ptr uint8](0) or tag == cast[ptr uint8](0):
-    return -1
+    if key == cast[Ptr[uint8]](0) or nonce == cast[Ptr[uint8]](0) or tag == cast[Ptr[uint8]](0):
+        return -1
 
-  if ciphertext_len > 0 and (ciphertext == cast[ptr uint8](0) or plaintext == cast[ptr uint8](0)):
-    return -1
+    if ciphertext_len > 0 and (ciphertext == cast[Ptr[uint8]](0) or plaintext == cast[Ptr[uint8]](0)):
+        return -1
 
-  if aad_len > 0 and aad == cast[ptr uint8](0):
-    return -1
+    if aad_len > 0 and aad == cast[Ptr[uint8]](0):
+        return -1
 
-  # Step 1: Generate Poly1305 key using ChaCha20 with counter=0
-  var poly_key: array[32, uint8]
-  var result: int32 = poly1305_key_gen_internal(key, nonce, addr(poly_key[0]))
-  if result != 0:
-    return -1
+    # Step 1: Generate Poly1305 key using ChaCha20 with counter=0
+    poly_key: Array[32, uint8]
+    result: int32 = poly1305_key_gen_internal(key, nonce, addr(poly_key[0]))
+    if result != 0:
+        return -1
 
-  # Step 2: Compute expected MAC (same as encryption)
-  result = poly1305_init(addr(poly_key[0]))
-  if result != 0:
-    return -1
+    # Step 2: Compute expected MAC (same as encryption)
+    result = poly1305_init(addr(poly_key[0]))
+    if result != 0:
+        return -1
 
-  # Authenticate AAD
-  if aad_len > 0:
-    poly1305_update(aad, aad_len)
+    # Authenticate AAD
+    if aad_len > 0:
+        poly1305_update(aad, aad_len)
 
-  # Pad AAD to 16-byte boundary
-  var padding_needed: int32 = pad_to_16(aad_len)
-  if padding_needed > 0:
-    var padding: array[16, uint8]
-    var i: int32 = 0
+    # Pad AAD to 16-byte boundary
+    padding_needed: int32 = pad_to_16(aad_len)
+    if padding_needed > 0:
+        padding: Array[16, uint8]
+        i: int32 = 0
+        while i < 16:
+            padding[i] = cast[uint8](0)
+            i = i + 1
+        poly1305_update(addr(padding[0]), padding_needed)
+
+    # Authenticate ciphertext
+    if ciphertext_len > 0:
+        poly1305_update(ciphertext, ciphertext_len)
+
+    # Pad ciphertext to 16-byte boundary
+    padding_needed = pad_to_16(ciphertext_len)
+    if padding_needed > 0:
+        padding: Array[16, uint8]
+        i: int32 = 0
+        while i < 16:
+            padding[i] = cast[uint8](0)
+            i = i + 1
+        poly1305_update(addr(padding[0]), padding_needed)
+
+    # Authenticate lengths
+    lengths: Array[16, uint8]
+    write_le64(addr(lengths[0]), aad_len)
+    write_le64(addr(lengths[8]), ciphertext_len)
+    poly1305_update(addr(lengths[0]), 16)
+
+    # Compute expected tag
+    expected_tag: Array[16, uint8]
+    result = poly1305_final(addr(expected_tag[0]))
+    if result != 0:
+        return -1
+
+    # Step 3: Verify tag (constant-time comparison)
+    diff: int32 = 0
+    i: int32 = 0
     while i < 16:
-      padding[i] = cast[uint8](0)
-      i = i + 1
-    poly1305_update(addr(padding[0]), padding_needed)
+        diff = diff | (cast[int32](expected_tag[i]) ^ cast[int32](tag[i]))
+        i = i + 1
 
-  # Authenticate ciphertext
-  if ciphertext_len > 0:
-    poly1305_update(ciphertext, ciphertext_len)
+    if diff != 0:
+        # Authentication failed - DO NOT decrypt
+        return -2
 
-  # Pad ciphertext to 16-byte boundary
-  padding_needed = pad_to_16(ciphertext_len)
-  if padding_needed > 0:
-    var padding: array[16, uint8]
-    var i: int32 = 0
-    while i < 16:
-      padding[i] = cast[uint8](0)
-      i = i + 1
-    poly1305_update(addr(padding[0]), padding_needed)
+    # Step 4: Tag verified - decrypt ciphertext
+    if ciphertext_len > 0:
+        chacha20_encrypt(ciphertext, plaintext, ciphertext_len, key, nonce, 1)
 
-  # Authenticate lengths
-  var lengths: array[16, uint8]
-  write_le64(addr(lengths[0]), aad_len)
-  write_le64(addr(lengths[8]), ciphertext_len)
-  poly1305_update(addr(lengths[0]), 16)
-
-  # Compute expected tag
-  var expected_tag: array[16, uint8]
-  result = poly1305_final(addr(expected_tag[0]))
-  if result != 0:
-    return -1
-
-  # Step 3: Verify tag (constant-time comparison)
-  var diff: int32 = 0
-  var i: int32 = 0
-  while i < 16:
-    diff = diff | (cast[int32](expected_tag[i]) ^ cast[int32](tag[i]))
-    i = i + 1
-
-  if diff != 0:
-    # Authentication failed - DO NOT decrypt
-    return -2
-
-  # Step 4: Tag verified - decrypt ciphertext
-  if ciphertext_len > 0:
-    chacha20_encrypt(ciphertext, plaintext, ciphertext_len, key, nonce, 1)
-
-  return 0
+    return 0
 
 # ============================================================================
 # AEAD Context for incremental operations
 # ============================================================================
-type AEADContext = object
-  key: array[32, uint8]
-  nonce: array[12, uint8]
-  poly_key: array[32, uint8]
-  aad_len: int32
-  data_len: int32
-  initialized: int32
+class AEADContext:
+    key: Array[32, uint8]
+    nonce: Array[12, uint8]
+    poly_key: Array[32, uint8]
+    aad_len: int32
+    data_len: int32
+    initialized: int32
 
 # ============================================================================
 # aead_init - Initialize AEAD context for incremental operations
 # ============================================================================
-proc aead_init(ctx: ptr AEADContext, key: ptr uint8, nonce: ptr uint8): int32 =
-  if ctx == cast[ptr AEADContext](0) or key == cast[ptr uint8](0) or nonce == cast[ptr uint8](0):
-    return -1
+def aead_init(ctx: Ptr[AEADContext], key: Ptr[uint8], nonce: Ptr[uint8]) -> int32:
+    if ctx == cast[Ptr[AEADContext]](0) or key == cast[Ptr[uint8]](0) or nonce == cast[Ptr[uint8]](0):
+        return -1
 
-  # Copy key and nonce
-  var i: int32 = 0
-  while i < 32:
-    ctx.key[i] = key[i]
-    i = i + 1
+    # Copy key and nonce
+    i: int32 = 0
+    while i < 32:
+        ctx.key[i] = key[i]
+        i = i + 1
 
-  i = 0
-  while i < 12:
-    ctx.nonce[i] = nonce[i]
-    i = i + 1
+    i = 0
+    while i < 12:
+        ctx.nonce[i] = nonce[i]
+        i = i + 1
 
-  # Generate Poly1305 key
-  var result: int32 = poly1305_key_gen_internal(key, nonce, addr(ctx.poly_key[0]))
-  if result != 0:
-    return -1
+    # Generate Poly1305 key
+    result: int32 = poly1305_key_gen_internal(key, nonce, addr(ctx.poly_key[0]))
+    if result != 0:
+        return -1
 
-  ctx.aad_len = 0
-  ctx.data_len = 0
-  ctx.initialized = 1
+    ctx.aad_len = 0
+    ctx.data_len = 0
+    ctx.initialized = 1
 
-  return 0
+    return 0
 
 # ============================================================================
 # aead_reset - Reset context for reuse with same key/nonce
 # ============================================================================
-proc aead_reset(ctx: ptr AEADContext): int32 =
-  if ctx == cast[ptr AEADContext](0):
-    return -1
+def aead_reset(ctx: Ptr[AEADContext]) -> int32:
+    if ctx == cast[Ptr[AEADContext]](0):
+        return -1
 
-  ctx.aad_len = 0
-  ctx.data_len = 0
+    ctx.aad_len = 0
+    ctx.data_len = 0
 
-  return 0
-
-# ============================================================================
-# Convenience wrapper for single-call encryption
-# Allocates output buffer and returns pointer (caller must free)
-# Returns NULL on error
-# ============================================================================
-# Note: Memory allocation would require malloc/free which may not be available
-# This is a placeholder for future implementation
-
-# ============================================================================
-# Test Vectors from RFC 8439
-# ============================================================================
-
-# Test Vector 1 (Section 2.8.2):
-# Plaintext: "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
-# AAD: 0x50515253c0c1c2c3c4c5c6c7
-# Key: 0x808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f
-# Nonce: 0x070000004041424344454647
-# Expected Ciphertext + Tag at end
-
-# ============================================================================
-# Usage Examples
-# ============================================================================
-
-# Example 1: Simple encryption with no AAD
-# var plaintext: ptr uint8 = cast[ptr uint8]("Hello, World!")
-# var key: array[32, uint8]
-# var nonce: array[12, uint8]
-# var ciphertext: array[64, uint8]
-# var tag: array[16, uint8]
-# # ... initialize key and nonce with random data ...
-# aead_chacha20_poly1305_encrypt(
-#   plaintext, 13,
-#   cast[ptr uint8](0), 0,  # No AAD
-#   addr(key[0]), addr(nonce[0]),
-#   addr(ciphertext[0]), addr(tag[0])
-# )
-# # Send ciphertext and tag to recipient
-
-# Example 2: Encryption with AAD (e.g., packet header)
-# var plaintext: ptr uint8 = cast[ptr uint8]("Secret message")
-# var aad: ptr uint8 = cast[ptr uint8]("Header data")
-# var key: array[32, uint8]
-# var nonce: array[12, uint8]
-# var ciphertext: array[64, uint8]
-# var tag: array[16, uint8]
-# # ... initialize key and nonce ...
-# aead_chacha20_poly1305_encrypt(
-#   plaintext, 14,
-#   aad, 11,
-#   addr(key[0]), addr(nonce[0]),
-#   addr(ciphertext[0]), addr(tag[0])
-# )
-
-# Example 3: Decryption and verification
-# var ciphertext: array[64, uint8]
-# var tag: array[16, uint8]
-# var key: array[32, uint8]
-# var nonce: array[12, uint8]
-# var plaintext: array[64, uint8]
-# # ... receive ciphertext, tag, and have shared key/nonce ...
-# var result: int32 = aead_chacha20_poly1305_decrypt(
-#   addr(ciphertext[0]), 14,
-#   cast[ptr uint8](0), 0,  # No AAD
-#   addr(tag[0]),
-#   addr(key[0]), addr(nonce[0]),
-#   addr(plaintext[0])
-# )
-# if result == 0:
-#   # Authentication passed, plaintext is valid
-# elif result == -2:
-#   # Authentication failed - message was tampered with!
-# else:
-#   # Other error
-
-# Example 4: Using context for multiple operations
-# var ctx: AEADContext
-# var key: array[32, uint8]
-# var nonce: array[12, uint8]
-# # ... initialize key and nonce ...
-# aead_init(addr(ctx), addr(key[0]), addr(nonce[0]))
-# # Now can use the context for operations...
-# # (Would need additional API for incremental operations)
-
-# ============================================================================
-# Security Notes
-# ============================================================================
-
-# CRITICAL SECURITY REQUIREMENTS:
-#
-# 1. NEVER reuse a (key, nonce) pair for encryption!
-#    - Each message must use a unique nonce with the same key
-#    - Nonce reuse completely breaks the security of ChaCha20-Poly1305
-#    - Use a counter, random value, or timestamp for nonce
-#
-# 2. Always verify authentication before processing plaintext
-#    - The decrypt function does this automatically
-#    - If verification fails (return -2), DO NOT use the plaintext!
-#
-# 3. Use constant-time comparison for tags
-#    - Already implemented in the decrypt function
-#    - Prevents timing attacks
-#
-# 4. Protect the key
-#    - Store securely, never transmit unencrypted
-#    - Use key derivation (e.g., PBKDF2, Argon2) for passwords
-#
-# 5. AAD is authenticated but not encrypted
-#    - Use for headers, metadata, protocol information
-#    - Never put sensitive data in AAD if confidentiality is needed
-#
-# 6. Maximum message size
-#    - ChaCha20 can encrypt up to ~256GB per (key, nonce) pair
-#    - Practical limit depends on available memory
+    return 0

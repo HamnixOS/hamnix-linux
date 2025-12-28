@@ -1,452 +1,306 @@
-# PoodillionOS Flask-like Web Framework
-# Simple routing and request/response handling
-
-import "lib/net"
-import "lib/syscalls"
-
-# =============================================================================
-# Configuration
-# =============================================================================
-
-const MAX_ROUTES: int32 = 32
-const MAX_PATH_LEN: int32 = 128
-const REQUEST_BUF_SIZE: int32 = 2048
-const RESPONSE_BUF_SIZE: int32 = 4096
-
-# =============================================================================
-# Request/Response Types
-# =============================================================================
-
-# Request structure (offsets for manual access)
-# 0-3:   method (0=GET, 1=POST, 2=PUT, 3=DELETE)
-# 4-131: path (128 bytes)
-# 132-135: content_length
-# 136+:  body pointer
-const REQ_METHOD: int32 = 0
-const REQ_PATH: int32 = 4
-const REQ_CONTENT_LEN: int32 = 132
-const REQ_BODY: int32 = 136
-const REQ_SIZE: int32 = 140
-
-# HTTP Methods
-const METHOD_GET: int32 = 0
-const METHOD_POST: int32 = 1
-const METHOD_PUT: int32 = 2
-const METHOD_DELETE: int32 = 3
-
-# Response structure
-# 0-3:   status code
-# 4-67:  content_type (64 bytes)
-# 68-71: body_len
-# 72+:   body pointer
-const RES_STATUS: int32 = 0
-const RES_CONTENT_TYPE: int32 = 4
-const RES_BODY_LEN: int32 = 68
-const RES_BODY: int32 = 72
-const RES_SIZE: int32 = 76
-
-# =============================================================================
-# Route Table
-# =============================================================================
-
-# Route storage
-var route_paths: array[4096, uint8]      # MAX_ROUTES * MAX_PATH_LEN
-var route_handlers: array[32, int32]      # Function pointers
-var route_methods: array[32, int32]       # Expected method (-1 = any)
-var route_count: int32 = 0
-
-# =============================================================================
-# Route Registration (Flask-style)
-# =============================================================================
-
-# Register a route handler for GET requests
-# Usage: route("/", my_handler)
-proc route(path: ptr uint8, handler: ptr uint8): int32 =
-  return route_method(path, METHOD_GET, handler)
-
-# Register a route with specific method
-proc route_method(path: ptr uint8, method: int32, handler: ptr uint8): int32 =
-  if route_count >= MAX_ROUTES:
-    return -1
-
-  # Copy path to route table
-  var path_offset: int32 = route_count * MAX_PATH_LEN
-  var i: int32 = 0
-  while path[i] != 0 and i < MAX_PATH_LEN - 1:
-    route_paths[path_offset + i] = path[i]
-    i = i + 1
-  route_paths[path_offset + i] = 0
-
-  # Store handler and method
-  route_handlers[route_count] = cast[int32](handler)
-  route_methods[route_count] = method
-
-  print(cast[ptr uint8]("[Flask] route "))
-  print(path)
-  print(cast[ptr uint8](" -> "))
-  print_int(cast[int32](handler))
-  println(cast[ptr uint8](""))
-
-  route_count = route_count + 1
-  return 0
-
-# Convenience functions for different HTTP methods
-proc get(path: ptr uint8, handler: ptr uint8): int32 =
-  return route_method(path, METHOD_GET, handler)
-
-proc post(path: ptr uint8, handler: ptr uint8): int32 =
-  return route_method(path, METHOD_POST, handler)
-
-proc put(path: ptr uint8, handler: ptr uint8): int32 =
-  return route_method(path, METHOD_PUT, handler)
-
-proc delete(path: ptr uint8, handler: ptr uint8): int32 =
-  return route_method(path, METHOD_DELETE, handler)
-
-# Register handler for any method
-proc any(path: ptr uint8, handler: ptr uint8): int32 =
-  return route_method(path, -1, handler)
-
-# =============================================================================
-# Response Helpers (Flask-style)
-# =============================================================================
-
-# Send HTML response
-proc html(sock: int32, content: ptr uint8) =
-  send_response(sock, 200, cast[ptr uint8]("text/html"), content)
-
-# Send plain text response
-proc text(sock: int32, content: ptr uint8) =
-  send_response(sock, 200, cast[ptr uint8]("text/plain"), content)
-
-# Send JSON response
-proc json(sock: int32, content: ptr uint8) =
-  send_response(sock, 200, cast[ptr uint8]("application/json"), content)
-
-# Send response with custom status
-proc respond(sock: int32, status: int32, content: ptr uint8) =
-  send_response(sock, status, cast[ptr uint8]("text/html"), content)
-
-# Send 404 Not Found
-proc not_found(sock: int32) =
-  send_response(sock, 404, cast[ptr uint8]("text/html"),
-    cast[ptr uint8]("<html><body><h1>404 Not Found</h1></body></html>"))
-
-# Send 500 Internal Server Error
-proc server_error(sock: int32) =
-  send_response(sock, 500, cast[ptr uint8]("text/html"),
-    cast[ptr uint8]("<html><body><h1>500 Internal Server Error</h1></body></html>"))
-
-# Send redirect
-proc redirect(sock: int32, url: ptr uint8) =
-  discard net_send_str(sock, cast[ptr uint8]("HTTP/1.0 302 Found\r\n"))
-  discard net_send_str(sock, cast[ptr uint8]("Location: "))
-  discard net_send_str(sock, url)
-  discard net_send_str(sock, cast[ptr uint8]("\r\n\r\n"))
-
-# =============================================================================
-# Internal Response Sending
-# =============================================================================
-
-proc send_response(sock: int32, status: int32, content_type: ptr uint8, body: ptr uint8) =
-  println(cast[ptr uint8]("[Flask] send_response enter"))
-
-  # Build entire response in a buffer
-  var response: array[4096, uint8]
-  var pos: int32 = 0
-
-  # Helper to copy string to buffer
-  var src: ptr uint8
-
-  # Status line: "HTTP/1.0 "
-  src = cast[ptr uint8]("HTTP/1.0 ")
-  var i: int32 = 0
-  while src[i] != 0:
-    response[pos] = src[i]
-    pos = pos + 1
-    i = i + 1
-
-  # Status code
-  var status_buf: array[16, uint8]
-  discard itoa(status, addr(status_buf[0]))
-  i = 0
-  while status_buf[i] != 0:
-    response[pos] = status_buf[i]
-    pos = pos + 1
-    i = i + 1
-
-  # Status text
-  if status == 200:
-    src = cast[ptr uint8](" OK\r\n")
-  elif status == 302:
-    src = cast[ptr uint8](" Found\r\n")
-  elif status == 404:
-    src = cast[ptr uint8](" Not Found\r\n")
-  elif status == 500:
-    src = cast[ptr uint8](" Internal Server Error\r\n")
-  else:
-    src = cast[ptr uint8](" Unknown\r\n")
-  i = 0
-  while src[i] != 0:
-    response[pos] = src[i]
-    pos = pos + 1
-    i = i + 1
-
-  # Content-Type header
-  src = cast[ptr uint8]("Content-Type: ")
-  i = 0
-  while src[i] != 0:
-    response[pos] = src[i]
-    pos = pos + 1
-    i = i + 1
-  i = 0
-  while content_type[i] != 0:
-    response[pos] = content_type[i]
-    pos = pos + 1
-    i = i + 1
-  response[pos] = 13  # CR
-  pos = pos + 1
-  response[pos] = 10  # LF
-  pos = pos + 1
-
-  # Content-Length header
-  var body_len: int32 = strlen(body)
-  src = cast[ptr uint8]("Content-Length: ")
-  i = 0
-  while src[i] != 0:
-    response[pos] = src[i]
-    pos = pos + 1
-    i = i + 1
-  var len_buf: array[16, uint8]
-  discard itoa(body_len, addr(len_buf[0]))
-  i = 0
-  while len_buf[i] != 0:
-    response[pos] = len_buf[i]
-    pos = pos + 1
-    i = i + 1
-  response[pos] = 13  # CR
-  pos = pos + 1
-  response[pos] = 10  # LF
-  pos = pos + 1
-
-  # Connection header
-  src = cast[ptr uint8]("Connection: close\r\n")
-  i = 0
-  while src[i] != 0:
-    response[pos] = src[i]
-    pos = pos + 1
-    i = i + 1
-
-  # Empty line
-  response[pos] = 13  # CR
-  pos = pos + 1
-  response[pos] = 10  # LF
-  pos = pos + 1
-
-  # Body
-  i = 0
-  while i < body_len:
-    response[pos] = body[i]
-    pos = pos + 1
-    i = i + 1
-
-  # Send entire response as one packet
-  println(cast[ptr uint8]("[Flask] sending response"))
-  print(cast[ptr uint8]("[Flask] response size="))
-  print_int(pos)
-  println(cast[ptr uint8](""))
-  discard net_send(sock, addr(response[0]), pos)
-  println(cast[ptr uint8]("[Flask] send done"))
-
-# =============================================================================
-# Request Parsing
-# =============================================================================
-
-# Parse HTTP method from request
-proc parse_method(request: ptr uint8): int32 =
-  if request[0] == 71 and request[1] == 69 and request[2] == 84:
-    return METHOD_GET      # GET
-  if request[0] == 80 and request[1] == 79 and request[2] == 83 and request[3] == 84:
-    return METHOD_POST     # POST
-  if request[0] == 80 and request[1] == 85 and request[2] == 84:
-    return METHOD_PUT      # PUT
-  if request[0] == 68 and request[1] == 69 and request[2] == 76:
-    return METHOD_DELETE   # DELETE
-  return -1
-
-# Parse path from HTTP request into buffer
-proc parse_path(request: ptr uint8, path_buf: ptr uint8, max_len: int32): int32 =
-  var i: int32 = 0
-
-  # Skip method (until space)
-  while request[i] != 0 and request[i] != 32:
-    i = i + 1
-  if request[i] == 0:
-    return -1
-
-  # Skip space
-  i = i + 1
-
-  # Copy path until space or query string
-  var path_len: int32 = 0
-  while request[i] != 0 and request[i] != 32 and request[i] != 63 and path_len < max_len - 1:
-    path_buf[path_len] = request[i]
-    path_len = path_len + 1
-    i = i + 1
-
-  path_buf[path_len] = 0
-  return path_len
-
-# =============================================================================
-# Route Matching
-# =============================================================================
-
-# Find matching route for path and method
-# Returns route index or -1 if not found
-proc find_route(path: ptr uint8, method: int32): int32 =
-  var i: int32 = 0
-  while i < route_count:
-    var route_path: ptr uint8 = addr(route_paths[i * MAX_PATH_LEN])
-
-    # Check if path matches
-    if strcmp(path, route_path) == 0:
-      # Check if method matches (or route accepts any method)
-      if route_methods[i] == -1 or route_methods[i] == method:
-        return i
-    i = i + 1
-
-  return -1
-
-# =============================================================================
-# Main Application Runner (Flask-style app.run())
-# =============================================================================
-
-# Run the web application
-# port: port to listen on
-# Returns: 0 on clean shutdown, -1 on error
-proc run(port: int32): int32 =
-  var sock: int32 = net_listen(port)
-  if sock < 0:
-    return -1
-
-  # Print startup message
-  print(cast[ptr uint8](" * Running on http://0.0.0.0:"))
-  print_int(port)
-  println(cast[ptr uint8]("/"))
-
-  var request_buf: array[2048, uint8]
-  var path_buf: array[128, uint8]
-
-  while 1:
-    net_poll()
-
-    if net_accept_ready(sock) == 1:
-      println(cast[ptr uint8]("[Flask] accept ready"))
-      # Read request
-      var n: int32 = net_recv_blocking(sock, addr(request_buf[0]), 2047, 2000)
-      print(cast[ptr uint8]("[Flask] recv n="))
-      print_int(n)
-      println(cast[ptr uint8](""))
-
-      if n > 0:
-        request_buf[n] = 0
-
-        # Parse request
-        var method: int32 = parse_method(addr(request_buf[0]))
-        discard parse_path(addr(request_buf[0]), addr(path_buf[0]), 128)
-        print(cast[ptr uint8]("[Flask] method="))
-        print_int(method)
-        print(cast[ptr uint8](" path="))
-        println(addr(path_buf[0]))
-
-        # Find matching route
-        var route_idx: int32 = find_route(addr(path_buf[0]), method)
-        print(cast[ptr uint8]("[Flask] route_idx="))
-        print_int(route_idx)
-        println(cast[ptr uint8](""))
-
-        if route_idx >= 0:
-          # Call handler: handler(sock, request_buf, path_buf)
-          var handler: ptr uint8 = cast[ptr uint8](route_handlers[route_idx])
-          print(cast[ptr uint8]("[Flask] handler addr="))
-          print_int(cast[int32](handler))
-          println(cast[ptr uint8](""))
-          # Use inline assembly or function pointer call
-          call_handler(handler, sock, addr(request_buf[0]), addr(path_buf[0]))
-          println(cast[ptr uint8]("[Flask] handler returned"))
-        else:
-          # No route found - 404
-          println(cast[ptr uint8]("[Flask] 404"))
-          not_found(sock)
-
-      # Close and re-listen
-      net_close(sock)
-      sock = net_listen(port)
-      if sock < 0:
+from lib.net import *
+from lib.syscalls import *
+
+MAX_ROUTES: Final[int32] = 32
+MAX_PATH_LEN: Final[int32] = 128
+REQUEST_BUF_SIZE: Final[int32] = 2048
+RESPONSE_BUF_SIZE: Final[int32] = 4096
+REQ_METHOD: Final[int32] = 0
+REQ_PATH: Final[int32] = 4
+REQ_CONTENT_LEN: Final[int32] = 132
+REQ_BODY: Final[int32] = 136
+REQ_SIZE: Final[int32] = 140
+METHOD_GET: Final[int32] = 0
+METHOD_POST: Final[int32] = 1
+METHOD_PUT: Final[int32] = 2
+METHOD_DELETE: Final[int32] = 3
+RES_STATUS: Final[int32] = 0
+RES_CONTENT_TYPE: Final[int32] = 4
+RES_BODY_LEN: Final[int32] = 68
+RES_BODY: Final[int32] = 72
+RES_SIZE: Final[int32] = 76
+
+route_paths: Array[4096, uint8]
+
+route_handlers: Array[32, int32]
+
+route_methods: Array[32, int32]
+
+route_count: int32 = 0
+
+def route(path: Ptr[uint8], handler: Ptr[uint8]) -> int32:
+    return route_method(path, METHOD_GET, handler)
+
+def route_method(path: Ptr[uint8], method: int32, handler: Ptr[uint8]) -> int32:
+    if (route_count >= MAX_ROUTES):
         return -1
+    path_offset: int32 = (route_count * MAX_PATH_LEN)
+    i: int32 = 0
+    while ((path[i] != 0) and (i < (MAX_PATH_LEN - 1))):
+        route_paths[(path_offset + i)] = path[i]
+        i = (i + 1)
+    route_paths[(path_offset + i)] = 0
+    route_handlers[route_count] = cast[int32](handler)
+    route_methods[route_count] = method
+    print(Ptr[uint8]("[Flask] route "))
+    print(path)
+    print(Ptr[uint8](" -> "))
+    print_int(cast[int32](handler))
+    println(Ptr[uint8](""))
+    route_count = (route_count + 1)
+    return 0
 
-  return 0
+def get(path: Ptr[uint8], handler: Ptr[uint8]) -> int32:
+    return route_method(path, METHOD_GET, handler)
 
-# Call a handler function pointer (implemented in lib/syscalls.asm)
-# Handler signature: proc(sock: int32, request: ptr uint8, path: ptr uint8)
-extern call_handler(handler: ptr uint8, sock: int32, request: ptr uint8, path: ptr uint8)
+def post(path: Ptr[uint8], handler: Ptr[uint8]) -> int32:
+    return route_method(path, METHOD_POST, handler)
 
-# =============================================================================
-# Debug/Development Helpers
-# =============================================================================
+def put(path: Ptr[uint8], handler: Ptr[uint8]) -> int32:
+    return route_method(path, METHOD_PUT, handler)
 
-# Run with debug output
-proc run_debug(port: int32): int32 =
-  var sock: int32 = net_listen(port)
-  if sock < 0:
-    println(cast[ptr uint8](" * ERROR: Failed to bind to port"))
+def delete(path: Ptr[uint8], handler: Ptr[uint8]) -> int32:
+    return route_method(path, METHOD_DELETE, handler)
+
+def any(path: Ptr[uint8], handler: Ptr[uint8]) -> int32:
+    return route_method(path, -1, handler)
+
+def html(sock: int32, content: Ptr[uint8]):
+    send_response(sock, 200, Ptr[uint8]("text/html"), content)
+
+def text(sock: int32, content: Ptr[uint8]):
+    send_response(sock, 200, Ptr[uint8]("text/plain"), content)
+
+def json(sock: int32, content: Ptr[uint8]):
+    send_response(sock, 200, Ptr[uint8]("application/json"), content)
+
+def respond(sock: int32, status: int32, content: Ptr[uint8]):
+    send_response(sock, status, Ptr[uint8]("text/html"), content)
+
+def not_found(sock: int32):
+    send_response(sock, 404, Ptr[uint8]("text/html"), Ptr[uint8]("<html><body><h1>404 Not Found</h1></body></html>"))
+
+def server_error(sock: int32):
+    send_response(sock, 500, Ptr[uint8]("text/html"), Ptr[uint8]("<html><body><h1>500 Internal Server Error</h1></body></html>"))
+
+def redirect(sock: int32, url: Ptr[uint8]):
+    net_send_str(sock, Ptr[uint8]("HTTP/1.0 302 Found\n"))
+    net_send_str(sock, Ptr[uint8]("Location: "))
+    net_send_str(sock, url)
+    net_send_str(sock, Ptr[uint8]("\n\n"))
+
+def send_response(sock: int32, status: int32, content_type: Ptr[uint8], body: Ptr[uint8]):
+    println(Ptr[uint8]("[Flask] send_response enter"))
+    response: Array[4096, uint8]
+    pos: int32 = 0
+    src: Ptr[uint8]
+    src = Ptr[uint8]("HTTP/1.0 ")
+    i: int32 = 0
+    while (src[i] != 0):
+        response[pos] = src[i]
+        pos = (pos + 1)
+        i = (i + 1)
+    status_buf: Array[16, uint8]
+    itoa(status, addr(status_buf[0]))
+    i = 0
+    while (status_buf[i] != 0):
+        response[pos] = status_buf[i]
+        pos = (pos + 1)
+        i = (i + 1)
+    if (status == 200):
+        src = Ptr[uint8](" OK\n")
+    elif (status == 302):
+        src = Ptr[uint8](" Found\n")
+    elif (status == 404):
+        src = Ptr[uint8](" Not Found\n")
+    elif (status == 500):
+        src = Ptr[uint8](" Internal Server Error\n")
+    else:
+        src = Ptr[uint8](" Unknown\n")
+    i = 0
+    while (src[i] != 0):
+        response[pos] = src[i]
+        pos = (pos + 1)
+        i = (i + 1)
+    src = Ptr[uint8]("Content-Type: ")
+    i = 0
+    while (src[i] != 0):
+        response[pos] = src[i]
+        pos = (pos + 1)
+        i = (i + 1)
+    i = 0
+    while (content_type[i] != 0):
+        response[pos] = content_type[i]
+        pos = (pos + 1)
+        i = (i + 1)
+    response[pos] = 13
+    pos = (pos + 1)
+    response[pos] = 10
+    pos = (pos + 1)
+    body_len: int32 = strlen(body)
+    src = Ptr[uint8]("Content-Length: ")
+    i = 0
+    while (src[i] != 0):
+        response[pos] = src[i]
+        pos = (pos + 1)
+        i = (i + 1)
+    len_buf: Array[16, uint8]
+    itoa(body_len, addr(len_buf[0]))
+    i = 0
+    while (len_buf[i] != 0):
+        response[pos] = len_buf[i]
+        pos = (pos + 1)
+        i = (i + 1)
+    response[pos] = 13
+    pos = (pos + 1)
+    response[pos] = 10
+    pos = (pos + 1)
+    src = Ptr[uint8]("Connection: close\n")
+    i = 0
+    while (src[i] != 0):
+        response[pos] = src[i]
+        pos = (pos + 1)
+        i = (i + 1)
+    response[pos] = 13
+    pos = (pos + 1)
+    response[pos] = 10
+    pos = (pos + 1)
+    i = 0
+    while (i < body_len):
+        response[pos] = body[i]
+        pos = (pos + 1)
+        i = (i + 1)
+    println(Ptr[uint8]("[Flask] sending response"))
+    print(Ptr[uint8]("[Flask] response size="))
+    print_int(pos)
+    println(Ptr[uint8](""))
+    net_send(sock, addr(response[0]), pos)
+    println(Ptr[uint8]("[Flask] send done"))
+
+def parse_method(request: Ptr[uint8]) -> int32:
+    if (((request[0] == 71) and (request[1] == 69)) and (request[2] == 84)):
+        return METHOD_GET
+    if ((((request[0] == 80) and (request[1] == 79)) and (request[2] == 83)) and (request[3] == 84)):
+        return METHOD_POST
+    if (((request[0] == 80) and (request[1] == 85)) and (request[2] == 84)):
+        return METHOD_PUT
+    if (((request[0] == 68) and (request[1] == 69)) and (request[2] == 76)):
+        return METHOD_DELETE
     return -1
 
-  print(cast[ptr uint8](" * Debug mode: on"))
-  println(cast[ptr uint8](""))
-  print(cast[ptr uint8](" * Running on http://0.0.0.0:"))
-  print_int(port)
-  println(cast[ptr uint8]("/"))
-  print(cast[ptr uint8](" * Registered "))
-  print_int(route_count)
-  println(cast[ptr uint8](" routes"))
-
-  var request_buf: array[2048, uint8]
-  var path_buf: array[128, uint8]
-
-  while 1:
-    net_poll()
-
-    if net_accept_ready(sock) == 1:
-      var n: int32 = net_recv_blocking(sock, addr(request_buf[0]), 2047, 2000)
-
-      if n > 0:
-        request_buf[n] = 0
-
-        var method: int32 = parse_method(addr(request_buf[0]))
-        discard parse_path(addr(request_buf[0]), addr(path_buf[0]), 128)
-
-        # Debug output
-        if method == METHOD_GET:
-          print(cast[ptr uint8](" * GET "))
-        elif method == METHOD_POST:
-          print(cast[ptr uint8](" * POST "))
-        else:
-          print(cast[ptr uint8](" * ??? "))
-        println(addr(path_buf[0]))
-
-        var route_idx: int32 = find_route(addr(path_buf[0]), method)
-
-        if route_idx >= 0:
-          var handler: ptr uint8 = cast[ptr uint8](route_handlers[route_idx])
-          call_handler(handler, sock, addr(request_buf[0]), addr(path_buf[0]))
-        else:
-          println(cast[ptr uint8]("   -> 404 Not Found"))
-          not_found(sock)
-
-      net_close(sock)
-      sock = net_listen(port)
-      if sock < 0:
+def parse_path(request: Ptr[uint8], path_buf: Ptr[uint8], max_len: int32) -> int32:
+    i: int32 = 0
+    while ((request[i] != 0) and (request[i] != 32)):
+        i = (i + 1)
+    if (request[i] == 0):
         return -1
+    i = (i + 1)
+    path_len: int32 = 0
+    while ((((request[i] != 0) and (request[i] != 32)) and (request[i] != 63)) and (path_len < (max_len - 1))):
+        path_buf[path_len] = request[i]
+        path_len = (path_len + 1)
+        i = (i + 1)
+    path_buf[path_len] = 0
+    return path_len
 
-  return 0
+def find_route(path: Ptr[uint8], method: int32) -> int32:
+    i: int32 = 0
+    while (i < route_count):
+        route_path: Ptr[uint8] = addr(route_paths[(i * MAX_PATH_LEN)])
+        if (strcmp(path, route_path) == 0):
+            if ((route_methods[i] == -1) or (route_methods[i] == method)):
+                return i
+        i = (i + 1)
+    return -1
+
+def run(port: int32) -> int32:
+    sock: int32 = net_listen(port)
+    if (sock < 0):
+        return -1
+    print(Ptr[uint8](" * Running on http://0.0.0.0:"))
+    print_int(port)
+    println(Ptr[uint8]("/"))
+    request_buf: Array[2048, uint8]
+    path_buf: Array[128, uint8]
+    while 1:
+        net_poll()
+        if (net_accept_ready(sock) == 1):
+            println(Ptr[uint8]("[Flask] accept ready"))
+            n: int32 = net_recv_blocking(sock, addr(request_buf[0]), 2047, 2000)
+            print(Ptr[uint8]("[Flask] recv n="))
+            print_int(n)
+            println(Ptr[uint8](""))
+            if (n > 0):
+                request_buf[n] = 0
+                method: int32 = parse_method(addr(request_buf[0]))
+
+                parse_path(addr(request_buf[0]), addr(path_buf[0]), 128)
+                print(Ptr[uint8]("[Flask] method="))
+                print_int(method)
+                print(Ptr[uint8](" path="))
+                println(addr(path_buf[0]))
+                route_idx: int32 = find_route(addr(path_buf[0]), method)
+                print(Ptr[uint8]("[Flask] route_idx="))
+                print_int(route_idx)
+                println(Ptr[uint8](""))
+                if (route_idx >= 0):
+                    handler: Ptr[uint8] = Ptr[uint8](route_handlers[route_idx])
+                    print(Ptr[uint8]("[Flask] handler addr="))
+                    print_int(cast[int32](handler))
+                    println(Ptr[uint8](""))
+                    call_handler(handler, sock, addr(request_buf[0]), addr(path_buf[0]))
+                    println(Ptr[uint8]("[Flask] handler returned"))
+                else:
+                    println(Ptr[uint8]("[Flask] 404"))
+                    not_found(sock)
+            net_close(sock)
+            sock = net_listen(port)
+            if (sock < 0):
+                return -1
+    return 0
+
+extern def call_handler(handler: Ptr[uint8], sock: int32, request: Ptr[uint8], path: Ptr[uint8])
+
+def run_debug(port: int32) -> int32:
+    sock: int32 = net_listen(port)
+    if (sock < 0):
+        println(Ptr[uint8](" * ERROR: Failed to bind to port"))
+        return -1
+    print(Ptr[uint8](" * Debug mode: on"))
+    println(Ptr[uint8](""))
+    print(Ptr[uint8](" * Running on http://0.0.0.0:"))
+    print_int(port)
+    println(Ptr[uint8]("/"))
+    print(Ptr[uint8](" * Registered "))
+    print_int(route_count)
+    println(Ptr[uint8](" routes"))
+    request_buf: Array[2048, uint8]
+    path_buf: Array[128, uint8]
+    while 1:
+        net_poll()
+        if (net_accept_ready(sock) == 1):
+            n: int32 = net_recv_blocking(sock, addr(request_buf[0]), 2047, 2000)
+            if (n > 0):
+                request_buf[n] = 0
+                method: int32 = parse_method(addr(request_buf[0]))
+
+                parse_path(addr(request_buf[0]), addr(path_buf[0]), 128)
+                if (method == METHOD_GET):
+                    print(Ptr[uint8](" * GET "))
+                elif (method == METHOD_POST):
+                    print(Ptr[uint8](" * POST "))
+                else:
+                    print(Ptr[uint8](" * ??? "))
+                println(addr(path_buf[0]))
+                route_idx: int32 = find_route(addr(path_buf[0]), method)
+                if (route_idx >= 0):
+                    handler: Ptr[uint8] = Ptr[uint8](route_handlers[route_idx])
+                    call_handler(handler, sock, addr(request_buf[0]), addr(path_buf[0]))
+                else:
+                    println(Ptr[uint8]("   -> 404 Not Found"))
+                    not_found(sock)
+            net_close(sock)
+            sock = net_listen(port)
+            if (sock < 0):
+                return -1
+    return 0

@@ -1,341 +1,141 @@
-# sha256.bh - SHA-256 Hash Library for BrainhairOS
-# Userland wrapper for SHA-256 cryptographic hash function
-# Implements FIPS 180-4 specification
-# Part of Phase 8 cryptography foundation
+SHA256_DIGEST_SIZE: Final[int32] = 32
+SHA256_BLOCK_SIZE: Final[int32] = 64
+SHA256_CTX_SIZE: Final[int32] = 108
 
-# SHA-256 produces a 32-byte (256-bit) hash
-const SHA256_DIGEST_SIZE: int32 = 32
-const SHA256_BLOCK_SIZE: int32 = 64
+extern def sha256_init(ctx: Ptr[uint8]) -> int32
 
-# SHA-256 context structure size (must match kernel implementation)
-# Layout:
-#   +0:  h[8] - hash state (32 bytes)
-#   +32: data[64] - message block buffer (64 bytes)
-#   +96: datalen - current data length in buffer (4 bytes)
-#   +100: bitlen_lo - total message length in bits, low 32 bits (4 bytes)
-#   +104: bitlen_hi - total message length in bits, high 32 bits (4 bytes)
-# Total: 108 bytes
-const SHA256_CTX_SIZE: int32 = 108
+extern def sha256_update(ctx: Ptr[uint8], data: Ptr[uint8], len: int32) -> int32
 
-# External assembly functions from kernel/sha256.asm
-extern sha256_init(ctx: ptr uint8): int32
-extern sha256_update(ctx: ptr uint8, data: ptr uint8, len: int32): int32
-extern sha256_final(ctx: ptr uint8, output: ptr uint8): int32
-extern sha256_hash(data: ptr uint8, len: int32, output: ptr uint8): int32
+extern def sha256_final(ctx: Ptr[uint8], output: Ptr[uint8]) -> int32
 
-# ============================================================================
-# SHA256 - High-level SHA-256 context type
-# ============================================================================
-type SHA256 = object
-  ctx: array[108, uint8]  # Context data
+extern def sha256_hash(data: Ptr[uint8], len: int32, output: Ptr[uint8]) -> int32
 
-# ============================================================================
-# sha256_new - Create and initialize a new SHA-256 context
-# Returns: pointer to SHA256 object (caller must manage memory)
-# ============================================================================
-proc sha256_new(): ptr SHA256 =
-  # Allocate context (in real use, would use malloc/GC)
-  # For now, caller should allocate on stack or static memory
-  return cast[ptr SHA256](0)
+class SHA256:
+    ctx: Array[108, uint8]
 
-# ============================================================================
-# sha256_init_ctx - Initialize a SHA-256 context
-# ctx: pointer to SHA256 context
-# Returns: 0 on success, -1 on error
-# ============================================================================
-proc sha256_init_ctx(ctx: ptr SHA256): int32 =
-  if ctx == cast[ptr SHA256](0):
-    return -1
+def sha256_new() -> Ptr[SHA256]:
+    return Ptr[SHA256](0)
 
-  return sha256_init(addr(ctx.ctx[0]))
+def sha256_init_ctx(ctx: Ptr[SHA256]) -> int32:
+    if (ctx == Ptr[SHA256](0)):
+        return -1
+    return sha256_init(addr(ctx.ctx[0]))
 
-# ============================================================================
-# sha256_update_ctx - Add data to SHA-256 context
-# ctx: pointer to SHA256 context
-# data: pointer to data to hash
-# len: length of data in bytes
-# Returns: 0 on success, -1 on error
-# ============================================================================
-proc sha256_update_ctx(ctx: ptr SHA256, data: ptr uint8, len: int32): int32 =
-  if ctx == cast[ptr SHA256](0):
-    return -1
+def sha256_update_ctx(ctx: Ptr[SHA256], data: Ptr[uint8], len: int32) -> int32:
+    if (ctx == Ptr[SHA256](0)):
+        return -1
+    return sha256_update(addr(ctx.ctx[0]), data, len)
 
-  return sha256_update(addr(ctx.ctx[0]), data, len)
+def sha256_final_ctx(ctx: Ptr[SHA256], output: Ptr[uint8]) -> int32:
+    if (ctx == Ptr[SHA256](0)):
+        return -1
+    return sha256_final(addr(ctx.ctx[0]), output)
 
-# ============================================================================
-# sha256_final_ctx - Finalize hash and get digest
-# ctx: pointer to SHA256 context
-# output: pointer to 32-byte output buffer
-# Returns: 0 on success, -1 on error
-# ============================================================================
-proc sha256_final_ctx(ctx: ptr SHA256, output: ptr uint8): int32 =
-  if ctx == cast[ptr SHA256](0):
-    return -1
+def sha256_hash_bytes(data: Ptr[uint8], len: int32, output: Ptr[uint8]) -> int32:
+    return sha256_hash(data, len, output)
 
-  return sha256_final(addr(ctx.ctx[0]), output)
+def sha256_hash_string(s: Ptr[uint8], output: Ptr[uint8]) -> int32:
+    if (s == Ptr[uint8](0)):
+        return -1
+    len: int32 = 0
+    while (s[len] != cast[uint8](0)):
+        len = (len + 1)
+    return sha256_hash(s, len, output)
 
-# ============================================================================
-# sha256_hash_bytes - One-shot hash of byte array
-# data: pointer to data to hash
-# len: length of data in bytes
-# output: pointer to 32-byte output buffer
-# Returns: 0 on success, -1 on error
-#
-# Example:
-#   var data: ptr uint8 = cast[ptr uint8]("Hello, World!")
-#   var hash: array[32, uint8]
-#   sha256_hash_bytes(data, 13, addr(hash[0]))
-# ============================================================================
-proc sha256_hash_bytes(data: ptr uint8, len: int32, output: ptr uint8): int32 =
-  return sha256_hash(data, len, output)
+def sha256_to_hex(hash: Ptr[uint8], output: Ptr[uint8]):
+    if ((hash == Ptr[uint8](0)) or (output == Ptr[uint8](0))):
+        return
+    hexchars: Ptr[uint8] = Ptr[uint8]("0123456789abcdef")
+    i: int32 = 0
+    pos: int32 = 0
+    while (i < 32):
+        byte: int32 = cast[int32](hash[i])
+        output[pos] = hexchars[((byte >> 4) & 15)]
+        pos = (pos + 1)
+        output[pos] = hexchars[(byte & 15)]
+        pos = (pos + 1)
+        i = (i + 1)
+    output[64] = cast[uint8](0)
 
-# ============================================================================
-# sha256_hash_string - Hash a null-terminated string
-# str: pointer to null-terminated string
-# output: pointer to 32-byte output buffer
-# Returns: 0 on success, -1 on error
-#
-# Example:
-#   var msg: ptr uint8 = cast[ptr uint8]("Hello, World!")
-#   var hash: array[32, uint8]
-#   sha256_hash_string(msg, addr(hash[0]))
-# ============================================================================
-proc sha256_hash_string(str: ptr uint8, output: ptr uint8): int32 =
-  if str == cast[ptr uint8](0):
-    return -1
+def sha256_compare(hash1: Ptr[uint8], hash2: Ptr[uint8]) -> int32:
+    if ((hash1 == Ptr[uint8](0)) or (hash2 == Ptr[uint8](0))):
+        return 0
+    i: int32 = 0
+    while (i < 32):
+        if (hash1[i] != hash2[i]):
+            return 0
+        i = (i + 1)
+    return 1
 
-  # Calculate string length
-  var len: int32 = 0
-  while str[len] != cast[uint8](0):
-    len = len + 1
-
-  return sha256_hash(str, len, output)
-
-# ============================================================================
-# sha256_to_hex - Convert SHA-256 hash to hexadecimal string
-# hash: pointer to 32-byte hash
-# output: pointer to 65-byte output buffer (64 hex chars + null terminator)
-#
-# Example:
-#   var hash: array[32, uint8]
-#   var hex: array[65, uint8]
-#   sha256_hash_string(cast[ptr uint8]("test"), addr(hash[0]))
-#   sha256_to_hex(addr(hash[0]), addr(hex[0]))
-#   # hex now contains "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\0"
-# ============================================================================
-proc sha256_to_hex(hash: ptr uint8, output: ptr uint8) =
-  if hash == cast[ptr uint8](0) or output == cast[ptr uint8](0):
-    return
-
-  var hexchars: ptr uint8 = cast[ptr uint8]("0123456789abcdef")
-  var i: int32 = 0
-  var pos: int32 = 0
-
-  while i < 32:
-    var byte: int32 = cast[int32](hash[i])
-    output[pos] = hexchars[(byte >> 4) & 15]
-    pos = pos + 1
-    output[pos] = hexchars[byte & 15]
-    pos = pos + 1
-    i = i + 1
-
-  output[64] = cast[uint8](0)  # Null terminator
-
-# ============================================================================
-# sha256_compare - Compare two SHA-256 hashes for equality
-# hash1: pointer to first 32-byte hash
-# hash2: pointer to second 32-byte hash
-# Returns: 1 if equal, 0 if not equal
-#
-# Example:
-#   var hash1: array[32, uint8]
-#   var hash2: array[32, uint8]
-#   sha256_hash_string(cast[ptr uint8]("test"), addr(hash1[0]))
-#   sha256_hash_string(cast[ptr uint8]("test"), addr(hash2[0]))
-#   if sha256_compare(addr(hash1[0]), addr(hash2[0])) == 1:
-#     # Hashes match
-# ============================================================================
-proc sha256_compare(hash1: ptr uint8, hash2: ptr uint8): int32 =
-  if hash1 == cast[ptr uint8](0) or hash2 == cast[ptr uint8](0):
+def sha256_hmac(key: Ptr[uint8], key_len: int32, data: Ptr[uint8], data_len: int32, output: Ptr[uint8]) -> int32:
+    if (((key == Ptr[uint8](0)) or (data == Ptr[uint8](0))) or (output == Ptr[uint8](0))):
+        return -1
+    ipad: Array[64, uint8]
+    opad: Array[64, uint8]
+    key_block: Array[64, uint8]
+    i: int32 = 0
+    if (key_len > 64):
+        sha256_hash(key, key_len, addr(key_block[0]))
+        i = 32
+        while (i < 64):
+            key_block[i] = cast[uint8](0)
+            i = (i + 1)
+    else:
+        i = 0
+        while (i < key_len):
+            key_block[i] = key[i]
+            i = (i + 1)
+        while (i < 64):
+            key_block[i] = cast[uint8](0)
+            i = (i + 1)
+    i = 0
+    while (i < 64):
+        ipad[i] = cast[uint8]((cast[int32](key_block[i]) ^ 54))
+        opad[i] = cast[uint8]((cast[int32](key_block[i]) ^ 92))
+        i = (i + 1)
+    ctx: SHA256
+    sha256_init_ctx(addr(ctx))
+    sha256_update_ctx(addr(ctx), addr(ipad[0]), 64)
+    sha256_update_ctx(addr(ctx), data, data_len)
+    inner_hash: Array[32, uint8]
+    sha256_final_ctx(addr(ctx), addr(inner_hash[0]))
+    sha256_init_ctx(addr(ctx))
+    sha256_update_ctx(addr(ctx), addr(opad[0]), 64)
+    sha256_update_ctx(addr(ctx), addr(inner_hash[0]), 32)
+    sha256_final_ctx(addr(ctx), output)
     return 0
 
-  var i: int32 = 0
-  while i < 32:
-    if hash1[i] != hash2[i]:
-      return 0
-    i = i + 1
-
-  return 1
-
-# ============================================================================
-# sha256_hmac - HMAC-SHA256 (simplified version)
-# key: pointer to key bytes
-# key_len: length of key
-# data: pointer to data to authenticate
-# data_len: length of data
-# output: pointer to 32-byte output buffer
-# Returns: 0 on success, -1 on error
-#
-# Implements HMAC as defined in RFC 2104
-# HMAC(K, m) = H((K' ⊕ opad) || H((K' ⊕ ipad) || m))
-# ============================================================================
-proc sha256_hmac(key: ptr uint8, key_len: int32, data: ptr uint8, data_len: int32, output: ptr uint8): int32 =
-  if key == cast[ptr uint8](0) or data == cast[ptr uint8](0) or output == cast[ptr uint8](0):
-    return -1
-
-  var ipad: array[64, uint8]
-  var opad: array[64, uint8]
-  var key_block: array[64, uint8]
-  var i: int32 = 0
-
-  # Prepare key block
-  if key_len > 64:
-    # Hash the key if it's longer than block size
-    sha256_hash(key, key_len, addr(key_block[0]))
-    i = 32
-    while i < 64:
-      key_block[i] = cast[uint8](0)
-      i = i + 1
-  else:
-    # Copy key and pad with zeros
+def sha256_pbkdf2(password: Ptr[uint8], pass_len: int32, salt: Ptr[uint8], salt_len: int32, iterations: int32, output: Ptr[uint8], output_len: int32) -> int32:
+    if (((password == Ptr[uint8](0)) or (salt == Ptr[uint8](0))) or (output == Ptr[uint8](0))):
+        return -1
+    if (((iterations <= 0) or (output_len <= 0)) or (output_len > 32)):
+        return -1
+    salt_block: Array[128, uint8]
+    i: int32 = 0
+    while ((i < salt_len) and (i < 124)):
+        salt_block[i] = salt[i]
+        i = (i + 1)
+    salt_block[i] = cast[uint8](0)
+    salt_block[(i + 1)] = cast[uint8](0)
+    salt_block[(i + 2)] = cast[uint8](0)
+    salt_block[(i + 3)] = cast[uint8](1)
+    u: Array[32, uint8]
+    result: Array[32, uint8]
+    sha256_hmac(password, pass_len, addr(salt_block[0]), (salt_len + 4), addr(u[0]))
     i = 0
-    while i < key_len:
-      key_block[i] = key[i]
-      i = i + 1
-    while i < 64:
-      key_block[i] = cast[uint8](0)
-      i = i + 1
-
-  # Create ipad and opad
-  i = 0
-  while i < 64:
-    ipad[i] = cast[uint8](cast[int32](key_block[i]) ^ 0x36)
-    opad[i] = cast[uint8](cast[int32](key_block[i]) ^ 0x5c)
-    i = i + 1
-
-  # Inner hash: H((K' ⊕ ipad) || m)
-  var ctx: SHA256
-  sha256_init_ctx(addr(ctx))
-  sha256_update_ctx(addr(ctx), addr(ipad[0]), 64)
-  sha256_update_ctx(addr(ctx), data, data_len)
-  var inner_hash: array[32, uint8]
-  sha256_final_ctx(addr(ctx), addr(inner_hash[0]))
-
-  # Outer hash: H((K' ⊕ opad) || inner_hash)
-  sha256_init_ctx(addr(ctx))
-  sha256_update_ctx(addr(ctx), addr(opad[0]), 64)
-  sha256_update_ctx(addr(ctx), addr(inner_hash[0]), 32)
-  sha256_final_ctx(addr(ctx), output)
-
-  return 0
-
-# ============================================================================
-# sha256_pbkdf2 - Password-Based Key Derivation Function 2 (simplified)
-# password: pointer to password bytes
-# pass_len: length of password
-# salt: pointer to salt bytes
-# salt_len: length of salt
-# iterations: number of iterations (recommended: >= 10000)
-# output: pointer to output buffer (must be at least 32 bytes)
-# output_len: desired output length (limited to 32 bytes in this implementation)
-# Returns: 0 on success, -1 on error
-#
-# Simplified PBKDF2 with HMAC-SHA256, single block output only
-# For production use, implement full PBKDF2 with multiple blocks
-# ============================================================================
-proc sha256_pbkdf2(password: ptr uint8, pass_len: int32, salt: ptr uint8, salt_len: int32, iterations: int32, output: ptr uint8, output_len: int32): int32 =
-  if password == cast[ptr uint8](0) or salt == cast[ptr uint8](0) or output == cast[ptr uint8](0):
-    return -1
-
-  if iterations <= 0 or output_len <= 0 or output_len > 32:
-    return -1
-
-  # First iteration: U1 = HMAC(password, salt || 0x00000001)
-  var salt_block: array[128, uint8]
-  var i: int32 = 0
-  while i < salt_len and i < 124:
-    salt_block[i] = salt[i]
-    i = i + 1
-  # Append block counter (1 as big-endian uint32)
-  salt_block[i] = cast[uint8](0)
-  salt_block[i + 1] = cast[uint8](0)
-  salt_block[i + 2] = cast[uint8](0)
-  salt_block[i + 3] = cast[uint8](1)
-
-  var u: array[32, uint8]
-  var result: array[32, uint8]
-
-  sha256_hmac(password, pass_len, addr(salt_block[0]), salt_len + 4, addr(u[0]))
-
-  # Copy U1 to result
-  i = 0
-  while i < 32:
-    result[i] = u[i]
-    i = i + 1
-
-  # Iterate: U_i = HMAC(password, U_(i-1))
-  var iter: int32 = 1
-  while iter < iterations:
-    sha256_hmac(password, pass_len, addr(u[0]), 32, addr(u[0]))
-    # XOR into result
+    while (i < 32):
+        result[i] = u[i]
+        i = (i + 1)
+    iter: int32 = 1
+    while (iter < iterations):
+        sha256_hmac(password, pass_len, addr(u[0]), 32, addr(u[0]))
+        i = 0
+        while (i < 32):
+            result[i] = cast[uint8]((cast[int32](result[i]) ^ cast[int32](u[i])))
+            i = (i + 1)
+        iter = (iter + 1)
     i = 0
-    while i < 32:
-      result[i] = cast[uint8](cast[int32](result[i]) ^ cast[int32](u[i]))
-      i = i + 1
-    iter = iter + 1
-
-  # Copy requested bytes to output
-  i = 0
-  while i < output_len:
-    output[i] = result[i]
-    i = i + 1
-
-  return 0
-
-# ============================================================================
-# Test vectors for SHA-256 (for verification)
-# ============================================================================
-
-# Test: SHA-256("")
-# Expected: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-
-# Test: SHA-256("abc")
-# Expected: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-
-# Test: SHA-256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
-# Expected: 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
-
-# ============================================================================
-# Usage Examples
-# ============================================================================
-
-# Example 1: One-shot hash
-# var data: ptr uint8 = cast[ptr uint8]("Hello, World!")
-# var hash: array[32, uint8]
-# sha256_hash_bytes(data, 13, addr(hash[0]))
-
-# Example 2: Incremental hash
-# var ctx: SHA256
-# sha256_init_ctx(addr(ctx))
-# sha256_update_ctx(addr(ctx), cast[ptr uint8]("Hello, "), 7)
-# sha256_update_ctx(addr(ctx), cast[ptr uint8]("World!"), 6)
-# var hash: array[32, uint8]
-# sha256_final_ctx(addr(ctx), addr(hash[0]))
-
-# Example 3: Convert to hex string
-# var hash: array[32, uint8]
-# var hex: array[65, uint8]
-# sha256_hash_string(cast[ptr uint8]("test"), addr(hash[0]))
-# sha256_to_hex(addr(hash[0]), addr(hex[0]))
-
-# Example 4: HMAC
-# var key: ptr uint8 = cast[ptr uint8]("secret")
-# var data: ptr uint8 = cast[ptr uint8]("message")
-# var hmac: array[32, uint8]
-# sha256_hmac(key, 6, data, 7, addr(hmac[0]))
-
-# Example 5: PBKDF2
-# var password: ptr uint8 = cast[ptr uint8]("mypassword")
-# var salt: ptr uint8 = cast[ptr uint8]("saltvalue")
-# var key: array[32, uint8]
-# sha256_pbkdf2(password, 10, salt, 9, 10000, addr(key[0]), 32)
+    while (i < output_len):
+        output[i] = result[i]
+        i = (i + 1)
+    return 0

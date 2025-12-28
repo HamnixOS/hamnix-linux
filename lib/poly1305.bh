@@ -4,23 +4,28 @@
 # Part of ChaCha20-Poly1305 AEAD cipher suite
 
 # Poly1305 constants
-const POLY1305_KEY_SIZE: int32 = 32   # 256-bit key (r||s)
-const POLY1305_TAG_SIZE: int32 = 16   # 128-bit tag
-const POLY1305_BLOCK_SIZE: int32 = 16 # 16-byte blocks
+POLY1305_KEY_SIZE: Final[int32] = 32   # 256-bit key (r||s)
+POLY1305_TAG_SIZE: Final[int32] = 16   # 128-bit tag
+POLY1305_BLOCK_SIZE: Final[int32] = 16 # 16-byte blocks
 
 # External kernel functions from kernel/poly1305.asm
-extern poly1305_init(key: ptr uint8): int32
-extern poly1305_update(msg: ptr uint8, len: int32)
-extern poly1305_final(tag: ptr uint8): int32
-extern poly1305_auth(tag: ptr uint8, msg: ptr uint8, len: int32, key: ptr uint8): int32
+extern def poly1305_init(key: Ptr[uint8]) -> int32
+extern def poly1305_update(msg: Ptr[uint8], length: int32)
+extern def poly1305_final(tag: Ptr[uint8]) -> int32
+extern def poly1305_auth(tag: Ptr[uint8], msg: Ptr[uint8], length: int32, key: Ptr[uint8]) -> int32
+
+# External ChaCha20 functions for key generation
+extern def chacha20_init(key: Ptr[uint8], nonce: Ptr[uint8], counter: int32)
+extern def chacha20_block()
+extern def chacha20_get_block() -> Ptr[uint8]
 
 # ============================================================================
 # Poly1305 Context Structure
 # This is managed by the kernel, so we just need a placeholder
 # The actual state is maintained in kernel BSS
 # ============================================================================
-type Poly1305Context = object
-  initialized: int32      # Flag to track if context is initialized
+class Poly1305Context:
+    initialized: int32      # Flag to track if context is initialized
 
 # ============================================================================
 # poly1305_init_ctx - Initialize a Poly1305 context with key
@@ -32,43 +37,43 @@ type Poly1305Context = object
 #   Bytes 0-15:  r (multiplicand, will be clamped automatically)
 #   Bytes 16-31: s (addend/nonce)
 # ============================================================================
-proc poly1305_init_ctx(ctx: ptr Poly1305Context, key: ptr uint8): int32 =
-  if ctx == cast[ptr Poly1305Context](0):
-    return -1
+def poly1305_init_ctx(ctx: Ptr[Poly1305Context], key: Ptr[uint8]) -> int32:
+    if ctx == cast[Ptr[Poly1305Context]](0):
+        return -1
 
-  if key == cast[ptr uint8](0):
-    return -1
+    if key == cast[Ptr[uint8]](0):
+        return -1
 
-  var result: int32 = poly1305_init(key)
-  if result == 0:
-    ctx.initialized = 1
+    result: int32 = poly1305_init(key)
+    if result == 0:
+        ctx.initialized = 1
 
-  return result
+    return result
 
 # ============================================================================
 # poly1305_update_ctx - Add message data to context
 # ctx: pointer to Poly1305 context
 # msg: pointer to message data
-# len: length of message data
+# length: length of message data
 # Returns: 0 on success, -1 on error
 #
 # Can be called multiple times to process message in chunks
 # ============================================================================
-proc poly1305_update_ctx(ctx: ptr Poly1305Context, msg: ptr uint8, len: int32): int32 =
-  if ctx == cast[ptr Poly1305Context](0):
-    return -1
+def poly1305_update_ctx(ctx: Ptr[Poly1305Context], msg: Ptr[uint8], length: int32) -> int32:
+    if ctx == cast[Ptr[Poly1305Context]](0):
+        return -1
 
-  if ctx.initialized != 1:
-    return -1
+    if ctx.initialized != 1:
+        return -1
 
-  if msg == cast[ptr uint8](0) and len > 0:
-    return -1
+    if msg == cast[Ptr[uint8]](0) and length > 0:
+        return -1
 
-  if len <= 0:
+    if length <= 0:
+        return 0
+
+    poly1305_update(msg, length)
     return 0
-
-  poly1305_update(msg, len)
-  return 0
 
 # ============================================================================
 # poly1305_final_ctx - Finalize computation and output tag
@@ -78,70 +83,70 @@ proc poly1305_update_ctx(ctx: ptr Poly1305Context, msg: ptr uint8, len: int32): 
 #
 # After calling this, the context is invalidated
 # ============================================================================
-proc poly1305_final_ctx(ctx: ptr Poly1305Context, tag: ptr uint8): int32 =
-  if ctx == cast[ptr Poly1305Context](0):
-    return -1
+def poly1305_final_ctx(ctx: Ptr[Poly1305Context], tag: Ptr[uint8]) -> int32:
+    if ctx == cast[Ptr[Poly1305Context]](0):
+        return -1
 
-  if ctx.initialized != 1:
-    return -1
+    if ctx.initialized != 1:
+        return -1
 
-  if tag == cast[ptr uint8](0):
-    return -1
+    if tag == cast[Ptr[uint8]](0):
+        return -1
 
-  var result: int32 = poly1305_final(tag)
-  ctx.initialized = 0
-  return result
+    result: int32 = poly1305_final(tag)
+    ctx.initialized = 0
+    return result
 
 # ============================================================================
 # poly1305_mac - One-shot MAC computation (convenience function)
 # msg: pointer to message to authenticate
-# len: length of message
+# length: length of message
 # key: pointer to 32-byte key
 # tag: pointer to 16-byte output buffer for tag
 # Returns: 0 on success, -1 on error
 #
 # Example:
-#   var msg: ptr uint8 = cast[ptr uint8]("Hello, World!")
-#   var key: array[32, uint8]
-#   var tag: array[16, uint8]
+#   msg: Ptr[uint8] = cast[Ptr[uint8]]("Hello, World!")
+#   key: Array[32, uint8]
+#   tag: Array[16, uint8]
 #   # ... initialize key ...
 #   poly1305_mac(msg, 13, addr(key[0]), addr(tag[0]))
 # ============================================================================
-proc poly1305_mac(msg: ptr uint8, len: int32, key: ptr uint8, tag: ptr uint8): int32 =
-  return poly1305_auth(tag, msg, len, key)
+def poly1305_mac(msg: Ptr[uint8], length: int32, key: Ptr[uint8], tag: Ptr[uint8]) -> int32:
+    return poly1305_auth(tag, msg, length, key)
 
 # ============================================================================
 # poly1305_verify - Verify a Poly1305 MAC tag
 # msg: pointer to message
-# len: length of message
+# length: length of message
 # key: pointer to 32-byte key
 # tag: pointer to 16-byte tag to verify
 # Returns: 1 if tag is valid, 0 if invalid, -1 on error
 #
 # Uses constant-time comparison to prevent timing attacks
 # ============================================================================
-proc poly1305_verify(msg: ptr uint8, len: int32, key: ptr uint8, tag: ptr uint8): int32 =
-  if msg == cast[ptr uint8](0) or key == cast[ptr uint8](0) or tag == cast[ptr uint8](0):
-    return -1
+def poly1305_verify(msg: Ptr[uint8], length: int32, key: Ptr[uint8], tag: Ptr[uint8]) -> int32:
+    if msg == cast[Ptr[uint8]](0) or key == cast[Ptr[uint8]](0) or tag == cast[Ptr[uint8]](0):
+        return -1
 
-  # Compute expected tag
-  var computed_tag: array[16, uint8]
-  var result: int32 = poly1305_auth(addr(computed_tag[0]), msg, len, key)
-  if result != 0:
-    return -1
+    # Compute expected tag
+    computed_tag: Array[16, uint8]
+    result: int32 = poly1305_auth(addr(computed_tag[0]), msg, length, key)
+    if result != 0:
+        return -1
 
-  # Constant-time comparison
-  var diff: int32 = 0
-  var i: int32 = 0
-  while i < POLY1305_TAG_SIZE:
-    diff = diff | (cast[int32](computed_tag[i]) ^ cast[int32](tag[i]))
-    i = i + 1
+    # Constant-time comparison
+    diff: int32 = 0
+    i: int32 = 0
+    while i < POLY1305_TAG_SIZE:
+        diff = diff | (cast[int32](computed_tag[i]) ^ cast[int32](tag[i]))
+        i = i + 1
 
-  # Return 1 if tags match (diff == 0), 0 otherwise
-  if diff == 0:
-    return 1
-  else:
-    return 0
+    # Return 1 if tags match (diff == 0), 0 otherwise
+    if diff == 0:
+        return 1
+    else:
+        return 0
 
 # ============================================================================
 # poly1305_key_gen - Generate Poly1305 key from ChaCha20
@@ -154,29 +159,24 @@ proc poly1305_verify(msg: ptr uint8, len: int32, key: ptr uint8, tag: ptr uint8)
 # in RFC 8439 for the AEAD construction
 # Uses ChaCha20 with counter=0 to generate the Poly1305 key
 # ============================================================================
-proc poly1305_key_gen(chacha_key: ptr uint8, nonce: ptr uint8, poly_key: ptr uint8): int32 =
-  if chacha_key == cast[ptr uint8](0) or nonce == cast[ptr uint8](0) or poly_key == cast[ptr uint8](0):
-    return -1
+def poly1305_key_gen(chacha_key: Ptr[uint8], nonce: Ptr[uint8], poly_key: Ptr[uint8]) -> int32:
+    if chacha_key == cast[Ptr[uint8]](0) or nonce == cast[Ptr[uint8]](0) or poly_key == cast[Ptr[uint8]](0):
+        return -1
 
-  # External ChaCha20 functions
-  extern chacha20_init(key: ptr uint8, nonce: ptr uint8, counter: int32)
-  extern chacha20_block()
-  extern chacha20_get_block(): ptr uint8
+    # Initialize ChaCha20 with counter=0
+    chacha20_init(chacha_key, nonce, 0)
 
-  # Initialize ChaCha20 with counter=0
-  chacha20_init(chacha_key, nonce, 0)
+    # Generate one block (64 bytes) and take first 32 bytes as Poly1305 key
+    chacha20_block()
+    keystream: Ptr[uint8] = chacha20_get_block()
 
-  # Generate one block (64 bytes) and take first 32 bytes as Poly1305 key
-  chacha20_block()
-  var keystream: ptr uint8 = chacha20_get_block()
+    # Copy first 32 bytes to output
+    i: int32 = 0
+    while i < POLY1305_KEY_SIZE:
+        poly_key[i] = keystream[i]
+        i = i + 1
 
-  # Copy first 32 bytes to output
-  var i: int32 = 0
-  while i < POLY1305_KEY_SIZE:
-    poly_key[i] = keystream[i]
-    i = i + 1
-
-  return 0
+    return 0
 
 # ============================================================================
 # poly1305_tag_to_hex - Convert Poly1305 tag to hexadecimal string
@@ -184,27 +184,27 @@ proc poly1305_key_gen(chacha_key: ptr uint8, nonce: ptr uint8, poly_key: ptr uin
 # output: pointer to 33-byte output buffer (32 hex chars + null terminator)
 #
 # Example:
-#   var tag: array[16, uint8]
-#   var hex: array[33, uint8]
+#   tag: Array[16, uint8]
+#   hex: Array[33, uint8]
 #   poly1305_tag_to_hex(addr(tag[0]), addr(hex[0]))
 # ============================================================================
-proc poly1305_tag_to_hex(tag: ptr uint8, output: ptr uint8) =
-  if tag == cast[ptr uint8](0) or output == cast[ptr uint8](0):
-    return
+def poly1305_tag_to_hex(tag: Ptr[uint8], output: Ptr[uint8]):
+    if tag == cast[Ptr[uint8]](0) or output == cast[Ptr[uint8]](0):
+        return
 
-  var hexchars: ptr uint8 = cast[ptr uint8]("0123456789abcdef")
-  var i: int32 = 0
-  var pos: int32 = 0
+    hexchars: Ptr[uint8] = cast[Ptr[uint8]]("0123456789abcdef")
+    i: int32 = 0
+    pos: int32 = 0
 
-  while i < POLY1305_TAG_SIZE:
-    var byte: int32 = cast[int32](tag[i])
-    output[pos] = hexchars[(byte >> 4) & 15]
-    pos = pos + 1
-    output[pos] = hexchars[byte & 15]
-    pos = pos + 1
-    i = i + 1
+    while i < POLY1305_TAG_SIZE:
+        byte: int32 = cast[int32](tag[i])
+        output[pos] = hexchars[(byte >> 4) & 15]
+        pos = pos + 1
+        output[pos] = hexchars[byte & 15]
+        pos = pos + 1
+        i = i + 1
 
-  output[32] = cast[uint8](0)  # Null terminator
+    output[32] = cast[uint8](0)  # Null terminator
 
 # ============================================================================
 # poly1305_compare_tags - Compare two Poly1305 tags for equality
@@ -214,74 +214,17 @@ proc poly1305_tag_to_hex(tag: ptr uint8, output: ptr uint8) =
 #
 # Uses constant-time comparison to prevent timing attacks
 # ============================================================================
-proc poly1305_compare_tags(tag1: ptr uint8, tag2: ptr uint8): int32 =
-  if tag1 == cast[ptr uint8](0) or tag2 == cast[ptr uint8](0):
-    return 0
+def poly1305_compare_tags(tag1: Ptr[uint8], tag2: Ptr[uint8]) -> int32:
+    if tag1 == cast[Ptr[uint8]](0) or tag2 == cast[Ptr[uint8]](0):
+        return 0
 
-  var diff: int32 = 0
-  var i: int32 = 0
-  while i < POLY1305_TAG_SIZE:
-    diff = diff | (cast[int32](tag1[i]) ^ cast[int32](tag2[i]))
-    i = i + 1
+    diff: int32 = 0
+    i: int32 = 0
+    while i < POLY1305_TAG_SIZE:
+        diff = diff | (cast[int32](tag1[i]) ^ cast[int32](tag2[i]))
+        i = i + 1
 
-  if diff == 0:
-    return 1
-  else:
-    return 0
-
-# ============================================================================
-# Test Vectors for Poly1305 (RFC 8439)
-# ============================================================================
-
-# Test Vector 1: RFC 8439 Section 2.5.2
-# Key: 0x85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b
-# Message: "Cryptographic Forum Research Group"
-# Expected tag: a8061dc1305136c6c22b8baf0c0127a9
-
-# Test Vector 2: RFC 7539 Appendix A.3
-# Key: all zeros (0x00 * 32)
-# Message: all zeros (0x00 * 64)
-# Expected tag: 0x00000000000000000000000000000000
-
-# ============================================================================
-# Usage Examples
-# ============================================================================
-
-# Example 1: One-shot MAC
-# var msg: ptr uint8 = cast[ptr uint8]("Hello, World!")
-# var key: array[32, uint8]
-# var tag: array[16, uint8]
-# # ... initialize key with random data ...
-# poly1305_mac(msg, 13, addr(key[0]), addr(tag[0]))
-
-# Example 2: Verify MAC
-# var msg: ptr uint8 = cast[ptr uint8]("Hello, World!")
-# var key: array[32, uint8]
-# var tag: array[16, uint8]
-# # ... key and tag from sender ...
-# var valid: int32 = poly1305_verify(msg, 13, addr(key[0]), addr(tag[0]))
-# if valid == 1:
-#   # Message is authentic
-
-# Example 3: Incremental MAC
-# var ctx: Poly1305Context
-# var key: array[32, uint8]
-# var tag: array[16, uint8]
-# # ... initialize key ...
-# poly1305_init_ctx(addr(ctx), addr(key[0]))
-# poly1305_update_ctx(addr(ctx), cast[ptr uint8]("Hello, "), 7)
-# poly1305_update_ctx(addr(ctx), cast[ptr uint8]("World!"), 6)
-# poly1305_final_ctx(addr(ctx), addr(tag[0]))
-
-# Example 4: Generate Poly1305 key from ChaCha20 (for AEAD)
-# var chacha_key: array[32, uint8]
-# var nonce: array[12, uint8]
-# var poly_key: array[32, uint8]
-# # ... initialize chacha_key and nonce ...
-# poly1305_key_gen(addr(chacha_key[0]), addr(nonce[0]), addr(poly_key[0]))
-
-# Example 5: Convert tag to hex for display
-# var tag: array[16, uint8]
-# var hex: array[33, uint8]
-# poly1305_tag_to_hex(addr(tag[0]), addr(hex[0]))
-# # hex now contains the tag as a hexadecimal string
+    if diff == 0:
+        return 1
+    else:
+        return 0

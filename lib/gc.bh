@@ -1,115 +1,92 @@
-# Brainhair Garbage Collection Library
-#
-# Implements a simple mark-sweep garbage collector for automatic
-# memory management. Objects allocated with gc_alloc() are automatically
-# freed when no longer reachable.
-#
-# Usage:
-#   gc_init()                       # Initialize GC (call once at start)
-#   var obj: ptr MyType = gc_alloc(sizeof(MyType))
-#   gc_collect()                    # Optional: force collection
-#
-# Object Header Layout (16 bytes):
-#   [0-3]   mark_and_type: u32      # Bit 0 = mark, Bits 1-31 = type ID
-#   [4-7]   size: u32               # Size including header
-#   [8-11]  next: ptr               # Next object in heap list
-#   [12-15] prev: ptr               # Previous object in heap list
-#
-# The GC maintains a linked list of all allocated objects for easy traversal
-# during the sweep phase.
+SYS_mmap2: Final[int32] = 192
+SYS_munmap: Final[int32] = 91
+SYS_brk: Final[int32] = 45
+PROT_READ: Final[int32] = 1
+PROT_WRITE: Final[int32] = 2
+MAP_PRIVATE: Final[int32] = 2
+MAP_ANONYMOUS: Final[int32] = 32
 
-# Syscalls for memory allocation
-const SYS_mmap2: int32 = 192
-const SYS_munmap: int32 = 91
-const SYS_brk: int32 = 45
+extern def syscall1(num: int32, arg1: int32) -> int32
 
-const PROT_READ: int32 = 1
-const PROT_WRITE: int32 = 2
-const MAP_PRIVATE: int32 = 2
-const MAP_ANONYMOUS: int32 = 32
+extern def syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32) -> int32
 
-extern syscall1(num: int32, arg1: int32): int32
-extern syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32): int32
-extern syscall6(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32, arg6: int32): int32
+extern def syscall6(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32, arg6: int32) -> int32
+SYS_write: Final[int32] = 4
 
-const SYS_write: int32 = 4
+extern def gc_get_stack_pointer() -> int32
 
-# Assembly primitives
-extern gc_get_stack_pointer(): int32
-extern gc_get_stack_bottom(): int32
-extern gc_set_stack_bottom(address: int32)
-extern gc_scan_stack(callback: int32, context: int32): int32
-extern gc_memory_barrier()
-extern gc_atomic_set(ptr_addr: ptr int32, value: int32)
-extern gc_atomic_get(ptr_addr: ptr int32): int32
-extern gc_atomic_cas(ptr_addr: ptr int32, expected: int32, new_val: int32): int32
+extern def gc_get_stack_bottom() -> int32
 
-# GC Object Header
-const GC_HEADER_SIZE: int32 = 16
-const GC_MARK_BIT: int32 = 1
-const GC_TYPE_MASK: int32 = -2  # All bits except bit 0
+extern def gc_set_stack_bottom(address: int32)
 
-# GC Heap configuration
-const GC_DEFAULT_HEAP_SIZE: int32 = 4194304   # 4MB default heap
-const GC_MIN_COLLECT_SIZE: int32 = 262144     # Collect when 256KB allocated
-const GC_MAX_ROOTS: int32 = 256               # Max number of root pointers
+extern def gc_scan_stack(callback: int32, context: int32) -> int32
 
-# GC State
-var gc_heap_base: int32 = 0
-var gc_heap_size: int32 = 0
-var gc_heap_used: int32 = 0
-var gc_object_list: int32 = 0                  # Head of object linked list
-var gc_object_count: int32 = 0
-var gc_bytes_since_collect: int32 = 0
-var gc_enabled: int32 = 1
-var gc_initialized: int32 = 0
+extern def gc_memory_barrier()
 
-# Statistics
-var gc_total_allocations: int32 = 0
-var gc_total_collections: int32 = 0
-var gc_total_freed: int32 = 0
+extern def gc_atomic_set(ptr_addr: Ptr[int32], value: int32)
 
-# Root table - global pointers that should be scanned
-var gc_root_addrs: array[256, int32]
-var gc_root_count: int32 = 0
+extern def gc_atomic_get(ptr_addr: Ptr[int32]) -> int32
 
-# Free list for reusing freed objects
-var gc_free_list: int32 = 0
+extern def gc_atomic_cas(ptr_addr: Ptr[int32], expected: int32, new_val: int32) -> int32
+GC_HEADER_SIZE: Final[int32] = 16
+GC_MARK_BIT: Final[int32] = 1
+GC_TYPE_MASK: Final[int32] = -2
+GC_DEFAULT_HEAP_SIZE: Final[int32] = 4194304
+GC_MIN_COLLECT_SIZE: Final[int32] = 262144
+GC_MAX_ROOTS: Final[int32] = 256
 
-# Padding to maintain memory layout (workaround for linker/compiler issues)
-var gc_padding1: array[16, uint8]
-var gc_padding2: int32 = 0
+gc_heap_base: int32 = 0
 
-# Stub debug functions (needed for code layout compatibility)
-proc gc_debug_write(msg: ptr uint8, len: int32) =
-    discard syscall3(SYS_write, 1, cast[int32](msg), len)
+gc_heap_size: int32 = 0
 
-proc gc_debug_hex(n: int32) =
+gc_heap_used: int32 = 0
+
+gc_object_list: int32 = 0
+
+gc_object_count: int32 = 0
+
+gc_bytes_since_collect: int32 = 0
+
+gc_enabled: int32 = 1
+
+gc_initialized: int32 = 0
+
+gc_total_allocations: int32 = 0
+
+gc_total_collections: int32 = 0
+
+gc_total_freed: int32 = 0
+
+gc_root_addrs: Array[256, int32]
+
+gc_root_count: int32 = 0
+
+gc_free_list: int32 = 0
+
+gc_padding1: Array[16, uint8]
+
+gc_padding2: int32 = 0
+
+def gc_debug_write(msg: Ptr[uint8], len: int32):
+    syscall3(SYS_write, 1, cast[int32](msg), len)
+
+def gc_debug_hex(n: int32):
     gc_padding1[0] = 48
     gc_padding1[1] = 120
-    var i: int32 = 0
-    while i < 8:
-        var nibble: int32 = (n >> (28 - i * 4)) & 15
-        if nibble < 10:
-            gc_padding1[i + 2] = cast[uint8](48 + nibble)
+    i: int32 = 0
+    while (i < 8):
+        nibble: int32 = ((n >> (28 - (i * 4))) & 15)
+        if (nibble < 10):
+            gc_padding1[(i + 2)] = cast[uint8]((48 + nibble))
         else:
-            gc_padding1[i + 2] = cast[uint8](97 + nibble - 10)
-        i = i + 1
-    discard syscall3(SYS_write, 1, cast[int32](addr(gc_padding1)), 10)
+            gc_padding1[(i + 2)] = cast[uint8](((97 + nibble) - 10))
+        i = (i + 1)
+    syscall3(SYS_write, 1, cast[int32](addr(gc_padding1)), 10)
 
-# Initialize the garbage collector
-# Must be called before any gc_alloc calls
-proc gc_init(): int32 =
-    if gc_initialized != 0:
-        return 1  # Already initialized
-
-    # Allocate heap using mmap - assign directly to global
-    gc_heap_base = syscall6(SYS_mmap2, 0, GC_DEFAULT_HEAP_SIZE,
-                            PROT_READ | PROT_WRITE,
-                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
-
-    # Note: mmap error checking is skipped due to compiler comparison bugs
-    # mmap returns address on success (can be 0), or negative errno on failure
+def gc_init() -> int32:
+    if (gc_initialized != 0):
+        return 1
+    gc_heap_base = syscall6(SYS_mmap2, 0, GC_DEFAULT_HEAP_SIZE, (PROT_READ | PROT_WRITE), (MAP_PRIVATE | MAP_ANONYMOUS), -1, 0)
     gc_heap_size = GC_DEFAULT_HEAP_SIZE
     gc_heap_used = 0
     gc_object_list = 0
@@ -117,310 +94,215 @@ proc gc_init(): int32 =
     gc_bytes_since_collect = 0
     gc_free_list = 0
     gc_root_count = 0
-
-    # Record stack bottom for stack scanning (currently not used)
-    gc_set_stack_bottom(gc_get_stack_pointer() + 65536)
-
+    gc_set_stack_bottom((gc_get_stack_pointer() + 65536))
     gc_initialized = 1
     return 1
 
-# Allocate GC-managed memory
-# Returns pointer to usable memory (after header)
-proc gc_alloc(size: int32): ptr uint8 =
-    # Auto-initialize on first use
-    if gc_initialized == 0:
-        if gc_init() == 0:
-            return cast[ptr uint8](0)
-
-    # Align size to 4 bytes
-    var aligned_size: int32 = (size + 3) & -4
-    var total_size: int32 = aligned_size + GC_HEADER_SIZE
-
-    # NOTE: Auto-collection disabled due to compiler comparison bugs
-    # Try to find a suitable block in free list
-    var prev_ptr: int32 = 0
-    var curr: int32 = gc_free_list
-    while curr != 0:
-        var header: ptr int32 = cast[ptr int32](curr)
-        var block_size: int32 = header[1]
-
-        if block_size >= total_size:
-            # Found a suitable block, remove from free list
-            var next_free: int32 = header[2]
-            if prev_ptr == 0:
+def gc_alloc(size: int32) -> Ptr[uint8]:
+    if (gc_initialized == 0):
+        if (gc_init() == 0):
+            return Ptr[uint8](0)
+    aligned_size: int32 = ((size + 3) & -4)
+    total_size: int32 = (aligned_size + GC_HEADER_SIZE)
+    prev_ptr: int32 = 0
+    curr: int32 = gc_free_list
+    while (curr != 0):
+        header: Ptr[int32] = Ptr[int32](curr)
+        block_size: int32 = header[1]
+        if (block_size >= total_size):
+            next_free: int32 = header[2]
+            if (prev_ptr == 0):
                 gc_free_list = next_free
             else:
-                var prev_header: ptr int32 = cast[ptr int32](prev_ptr)
+                prev_header: Ptr[int32] = Ptr[int32](prev_ptr)
                 prev_header[2] = next_free
-
-            # Reinitialize header
-            header[0] = 0  # Clear mark bit
-            # Size stays the same
-            header[2] = gc_object_list  # next
-            header[3] = 0               # prev
-
-            # Update object list head
-            if gc_object_list != 0:
-                var old_head: ptr int32 = cast[ptr int32](gc_object_list)
+            header[0] = 0
+            header[2] = gc_object_list
+            header[3] = 0
+            if (gc_object_list != 0):
+                old_head: Ptr[int32] = Ptr[int32](gc_object_list)
                 old_head[3] = curr
             gc_object_list = curr
-            gc_object_count = gc_object_count + 1
-            gc_total_allocations = gc_total_allocations + 1
-
-            # Zero the user data portion
-            var data_ptr: ptr uint8 = cast[ptr uint8](curr + GC_HEADER_SIZE)
-            var i: int32 = 0
-            while i < aligned_size:
+            gc_object_count = (gc_object_count + 1)
+            gc_total_allocations = (gc_total_allocations + 1)
+            data_ptr: Ptr[uint8] = Ptr[uint8]((curr + GC_HEADER_SIZE))
+            i: int32 = 0
+            while (i < aligned_size):
                 data_ptr[i] = 0
-                i = i + 1
-
+                i = (i + 1)
             return data_ptr
-
         prev_ptr = curr
         curr = header[2]
-
-    # NOTE: OOM check disabled due to compiler comparison bugs
-
-    # Allocate from heap
-    var obj_addr: int32 = gc_heap_base + gc_heap_used
-    var header: ptr int32 = cast[ptr int32](obj_addr)
-
-    # Initialize header
-    header[0] = 0              # mark_and_type (unmarked, type 0)
-    header[1] = total_size     # size
-    header[2] = gc_object_list # next (old head)
-    header[3] = 0              # prev (we're new head)
-
-    # Update old head's prev pointer
-    if gc_object_list != 0:
-        var old_head: ptr int32 = cast[ptr int32](gc_object_list)
+    obj_addr: int32 = (gc_heap_base + gc_heap_used)
+    header: Ptr[int32] = Ptr[int32](obj_addr)
+    header[0] = 0
+    header[1] = total_size
+    header[2] = gc_object_list
+    header[3] = 0
+    if (gc_object_list != 0):
+        old_head: Ptr[int32] = Ptr[int32](gc_object_list)
         old_head[3] = obj_addr
-
-    # Update list head
     gc_object_list = obj_addr
-    gc_object_count = gc_object_count + 1
-    gc_heap_used = gc_heap_used + total_size
-    gc_bytes_since_collect = gc_bytes_since_collect + total_size
-    gc_total_allocations = gc_total_allocations + 1
-
-    # Return pointer to user data (after header)
-    var data_ptr: int32 = obj_addr + GC_HEADER_SIZE
-
-    # Zero the memory
-    var data: ptr uint8 = cast[ptr uint8](data_ptr)
-    var i: int32 = 0
-    while i < aligned_size:
+    gc_object_count = (gc_object_count + 1)
+    gc_heap_used = (gc_heap_used + total_size)
+    gc_bytes_since_collect = (gc_bytes_since_collect + total_size)
+    gc_total_allocations = (gc_total_allocations + 1)
+    data_ptr: int32 = (obj_addr + GC_HEADER_SIZE)
+    data: Ptr[uint8] = Ptr[uint8](data_ptr)
+    i: int32 = 0
+    while (i < aligned_size):
         data[i] = 0
-        i = i + 1
+        i = (i + 1)
+    return Ptr[uint8](data_ptr)
 
-    return cast[ptr uint8](data_ptr)
-
-# Allocate and set type ID (for type-aware GC)
-proc gc_alloc_typed(size: int32, type_id: int32): ptr uint8 =
-    var result: ptr uint8 = gc_alloc(size)
-    if cast[int32](result) == 0:
+def gc_alloc_typed(size: int32, type_id: int32) -> Ptr[uint8]:
+    result: Ptr[uint8] = gc_alloc(size)
+    if (cast[int32](result) == 0):
         return result
-
-    # Set type ID in header
-    var header_addr: int32 = cast[int32](result) - GC_HEADER_SIZE
-    var header: ptr int32 = cast[ptr int32](header_addr)
-    header[0] = (type_id << 1) & -2
-
+    header_addr: int32 = (cast[int32](result) - GC_HEADER_SIZE)
+    header: Ptr[int32] = Ptr[int32](header_addr)
+    header[0] = ((type_id << 1) & -2)
     return result
 
-# Register a global root for GC scanning
-# Call this for any global pointer that might reference GC objects
-proc gc_register_root(root_addr: ptr int32): int32 =
-    if gc_root_count >= GC_MAX_ROOTS:
-        return 0  # Too many roots
-
+def gc_register_root(root_addr: Ptr[int32]) -> int32:
+    if (gc_root_count >= GC_MAX_ROOTS):
+        return 0
     gc_root_addrs[gc_root_count] = cast[int32](root_addr)
-    gc_root_count = gc_root_count + 1
+    gc_root_count = (gc_root_count + 1)
     return 1
 
-# Unregister a global root
-proc gc_unregister_root(root_addr: ptr int32): int32 =
-    var i: int32 = 0
-    while i < gc_root_count:
-        if gc_root_addrs[i] == cast[int32](root_addr):
-            # Shift remaining roots down
-            var j: int32 = i
-            while j < gc_root_count - 1:
-                gc_root_addrs[j] = gc_root_addrs[j + 1]
-                j = j + 1
-            gc_root_count = gc_root_count - 1
+def gc_unregister_root(root_addr: Ptr[int32]) -> int32:
+    i: int32 = 0
+    while (i < gc_root_count):
+        if (gc_root_addrs[i] == cast[int32](root_addr)):
+            j: int32 = i
+            while (j < (gc_root_count - 1)):
+                gc_root_addrs[j] = gc_root_addrs[(j + 1)]
+                j = (j + 1)
+            gc_root_count = (gc_root_count - 1)
             return 1
-        i = i + 1
+        i = (i + 1)
     return 0
 
-# Check if an address points to a valid GC object
-proc gc_is_valid_pointer(address: int32): int32 =
-    # Safety: if heap not initialized, nothing is valid
-    if gc_heap_base == 0:
+def gc_is_valid_pointer(address: int32) -> int32:
+    if (gc_heap_base == 0):
         return 0
-    if gc_heap_used == 0:
+    if (gc_heap_used == 0):
         return 0
-    if address < gc_heap_base:
+    if (address < gc_heap_base):
         return 0
-    if address >= gc_heap_base + gc_heap_used:
+    if (address >= (gc_heap_base + gc_heap_used)):
         return 0
-
-    # Walk object list to verify it's a valid object
-    var curr: int32 = gc_object_list
-    while curr != 0:
-        var data_addr: int32 = curr + GC_HEADER_SIZE
-        var header: ptr int32 = cast[ptr int32](curr)
-        var obj_size: int32 = header[1] - GC_HEADER_SIZE
-
-        # Check if address falls within this object's data region
-        if address >= data_addr:
-            if address < data_addr + obj_size:
-                return curr  # Return header address
-
+    curr: int32 = gc_object_list
+    while (curr != 0):
+        data_addr: int32 = (curr + GC_HEADER_SIZE)
+        header: Ptr[int32] = Ptr[int32](curr)
+        obj_size: int32 = (header[1] - GC_HEADER_SIZE)
+        if (address >= data_addr):
+            if (address < (data_addr + obj_size)):
+                return curr
         curr = header[2]
-
     return 0
 
-# Mark an object and recursively mark referenced objects
-proc gc_mark_object(header_addr: int32) =
-    if header_addr == 0:
+def gc_mark_object(header_addr: int32):
+    if (header_addr == 0):
         return
-
-    var header: ptr int32 = cast[ptr int32](header_addr)
-
-    # Already marked?
-    if (header[0] & GC_MARK_BIT) != 0:
+    header: Ptr[int32] = Ptr[int32](header_addr)
+    if ((header[0] & GC_MARK_BIT) != 0):
         return
-
-    # Set mark bit
-    header[0] = header[0] | GC_MARK_BIT
-
-    # Scan object's data for pointers
-    var data_addr: int32 = header_addr + GC_HEADER_SIZE
-    var data_size: int32 = header[1] - GC_HEADER_SIZE
-    var data: ptr int32 = cast[ptr int32](data_addr)
-    var word_count: int32 = data_size / 4
-
-    var i: int32 = 0
-    while i < word_count:
-        var potential_ptr: int32 = data[i]
-        var ref_header: int32 = gc_is_valid_pointer(potential_ptr)
-        if ref_header != 0:
+    header[0] = (header[0] | GC_MARK_BIT)
+    data_addr: int32 = (header_addr + GC_HEADER_SIZE)
+    data_size: int32 = (header[1] - GC_HEADER_SIZE)
+    data: Ptr[int32] = Ptr[int32](data_addr)
+    word_count: int32 = (data_size / 4)
+    i: int32 = 0
+    while (i < word_count):
+        potential_ptr: int32 = data[i]
+        ref_header: int32 = gc_is_valid_pointer(potential_ptr)
+        if (ref_header != 0):
             gc_mark_object(ref_header)
-        i = i + 1
+        i = (i + 1)
 
-# Mark all reachable objects from a single root value
-proc gc_mark_root(root_value: int32) =
-    var header: int32 = gc_is_valid_pointer(root_value)
-    if header != 0:
+def gc_mark_root(root_value: int32):
+    header: int32 = gc_is_valid_pointer(root_value)
+    if (header != 0):
         gc_mark_object(header)
 
-# Mark phase - mark all reachable objects
-proc gc_mark() =
-    # Mark from registered roots (global pointers)
-    var i: int32 = 0
-    while i < gc_root_count:
-        var root_addr: ptr int32 = cast[ptr int32](gc_root_addrs[i])
-        var root_value: int32 = root_addr[0]
+def gc_mark():
+    i: int32 = 0
+    while (i < gc_root_count):
+        root_addr: Ptr[int32] = Ptr[int32](gc_root_addrs[i])
+        root_value: int32 = root_addr[0]
         gc_mark_root(root_value)
-        i = i + 1
+        i = (i + 1)
+    0
 
-    # Note: Stack scanning is currently disabled due to stack boundary issues.
-    # GC relies on explicit root registration via gc_register_root().
-    # TODO: Implement proper stack bounds detection for conservative scanning.
-    discard 0
-
-# Sweep phase - free all unmarked objects
-proc gc_sweep(): int32 =
-    var freed: int32 = 0
-    var curr: int32 = gc_object_list
-
-    while curr != 0:
-        var header: ptr int32 = cast[ptr int32](curr)
-        var next: int32 = header[2]
-
-        if (header[0] & GC_MARK_BIT) != 0:
-            # Object is marked - clear mark for next collection
-            header[0] = header[0] & -2
+def gc_sweep() -> int32:
+    freed: int32 = 0
+    curr: int32 = gc_object_list
+    while (curr != 0):
+        header: Ptr[int32] = Ptr[int32](curr)
+        next: int32 = header[2]
+        if ((header[0] & GC_MARK_BIT) != 0):
+            header[0] = (header[0] & -2)
         else:
-            # Object is unmarked - free it
-            var prev: int32 = header[3]
-            var obj_size: int32 = header[1]
-
-            # Remove from object list
-            if prev != 0:
-                var prev_header: ptr int32 = cast[ptr int32](prev)
+            prev: int32 = header[3]
+            obj_size: int32 = header[1]
+            if (prev != 0):
+                prev_header: Ptr[int32] = Ptr[int32](prev)
                 prev_header[2] = next
             else:
                 gc_object_list = next
-
-            if next != 0:
-                var next_header: ptr int32 = cast[ptr int32](next)
+            if (next != 0):
+                next_header: Ptr[int32] = Ptr[int32](next)
                 next_header[3] = prev
-
-            # Add to free list
             header[2] = gc_free_list
             gc_free_list = curr
-
-            gc_object_count = gc_object_count - 1
-            freed = freed + obj_size
-            gc_total_freed = gc_total_freed + obj_size
-
+            gc_object_count = (gc_object_count - 1)
+            freed = (freed + obj_size)
+            gc_total_freed = (gc_total_freed + obj_size)
         curr = next
-
     return freed
 
-# Run garbage collection
-proc gc_collect(): int32 =
-    if gc_initialized == 0:
+def gc_collect() -> int32:
+    if (gc_initialized == 0):
         return 0
-
     gc_memory_barrier()
-
-    # Mark phase
     gc_mark()
-
-    # Sweep phase
-    var freed: int32 = gc_sweep()
-
+    freed: int32 = gc_sweep()
     gc_bytes_since_collect = 0
-    gc_total_collections = gc_total_collections + 1
-
+    gc_total_collections = (gc_total_collections + 1)
     gc_memory_barrier()
-
     return freed
 
-# Enable garbage collection
-proc gc_enable() =
+def gc_enable():
     gc_enabled = 1
 
-# Disable garbage collection (for performance-critical sections)
-proc gc_disable() =
+def gc_disable():
     gc_enabled = 0
 
-# Get GC statistics
-proc gc_get_heap_used(): int32 =
+def gc_get_heap_used() -> int32:
     return gc_heap_used
 
-proc gc_get_heap_size(): int32 =
+def gc_get_heap_size() -> int32:
     return gc_heap_size
 
-proc gc_get_object_count(): int32 =
+def gc_get_object_count() -> int32:
     return gc_object_count
 
-proc gc_get_total_allocations(): int32 =
+def gc_get_total_allocations() -> int32:
     return gc_total_allocations
 
-proc gc_get_total_collections(): int32 =
+def gc_get_total_collections() -> int32:
     return gc_total_collections
 
-proc gc_get_total_freed(): int32 =
+def gc_get_total_freed() -> int32:
     return gc_total_freed
 
-# Destroy the GC and release all memory
-proc gc_destroy() =
-    if gc_initialized != 0:
-        discard syscall6(SYS_munmap, gc_heap_base, gc_heap_size, 0, 0, 0, 0)
+def gc_destroy():
+    if (gc_initialized != 0):
+
+        syscall6(SYS_munmap, gc_heap_base, gc_heap_size, 0, 0, 0, 0)
         gc_heap_base = 0
         gc_heap_size = 0
         gc_heap_used = 0

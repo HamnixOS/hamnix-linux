@@ -1,216 +1,130 @@
-# Thread-Local Storage (TLS) Library for BrainhairOS
-# Provides per-thread storage with a key-value API similar to pthread_key_t
+SYS_set_tls: Final[int32] = 220
+SYS_get_tls: Final[int32] = 221
+TLS_MAX_KEYS: Final[int32] = 32
+TLS_BLOCK_SIZE: Final[int32] = 256
+TLS_MAGIC: Final[int32] = 1414288128
+TLS_OFFSET_MAGIC: Final[int32] = 0
+TLS_OFFSET_TID: Final[int32] = 4
+TLS_OFFSET_BITMAP: Final[int32] = 8
+TLS_OFFSET_VALUES: Final[int32] = 16
 
-# TLS syscalls
-const SYS_set_tls: int32 = 220
-const SYS_get_tls: int32 = 221
+extern def syscall1(num: int32, arg1: int32) -> int32
 
-# TLS constants
-const TLS_MAX_KEYS: int32 = 32      # Maximum number of TLS keys
-const TLS_BLOCK_SIZE: int32 = 256   # Size of TLS block per thread (32 keys * 4 bytes + metadata)
+extern def syscall2(num: int32, arg1: int32, arg2: int32) -> int32
 
-# TLS block layout (per-thread):
-# Offset 0-3:   Magic number (0x544C5300 = "TLS\0")
-# Offset 4-7:   Thread ID
-# Offset 8-11:  Key bitmap (which keys are in use)
-# Offset 12-15: Reserved
-# Offset 16+:   Key values (32 * 4 = 128 bytes)
+tls_key_bitmap: int32 = 0
 
-const TLS_MAGIC: int32 = 0x544C5300
-const TLS_OFFSET_MAGIC: int32 = 0
-const TLS_OFFSET_TID: int32 = 4
-const TLS_OFFSET_BITMAP: int32 = 8
-const TLS_OFFSET_VALUES: int32 = 16
+def tls_set_base(base: Ptr[uint8]) -> int32:
+    return syscall1(SYS_set_tls, cast[int32](base))
 
-# Syscall wrappers
-extern syscall1(num: int32, arg1: int32): int32
-extern syscall2(num: int32, arg1: int32, arg2: int32): int32
+def tls_get_base() -> Ptr[uint8]:
+    return Ptr[uint8](syscall1(SYS_get_tls, 0))
 
-# Global key allocation bitmap (shared across all threads)
-# Each bit represents whether a key ID is allocated
-var tls_key_bitmap: int32 = 0
-
-# ============================================================================
-# Low-level TLS syscall wrappers
-# ============================================================================
-
-# Set the TLS base address for the current thread
-proc tls_set_base(base: ptr uint8): int32 =
-  return syscall1(SYS_set_tls, cast[int32](base))
-
-# Get the TLS base address for the current thread
-proc tls_get_base(): ptr uint8 =
-  return cast[ptr uint8](syscall1(SYS_get_tls, 0))
-
-# ============================================================================
-# TLS Key Management
-# ============================================================================
-
-# Allocate a new TLS key
-# Returns: key ID (0-31) on success, -1 if no keys available
-proc tls_key_create(): int32 =
-  var i: int32 = 0
-  while i < TLS_MAX_KEYS:
-    var mask: int32 = 1
-    var shift: int32 = i
-    while shift > 0:
-      mask = mask * 2
-      shift = shift - 1
-
-    if (tls_key_bitmap & mask) == 0:
-      # Key is free, allocate it
-      tls_key_bitmap = tls_key_bitmap | mask
-      return i
-    i = i + 1
-  return -1
-
-# Free a TLS key
-proc tls_key_delete(key: int32) =
-  if key < 0 or key >= TLS_MAX_KEYS:
-    return
-
-  var mask: int32 = 1
-  var shift: int32 = key
-  while shift > 0:
-    mask = mask * 2
-    shift = shift - 1
-
-  tls_key_bitmap = tls_key_bitmap & (0 - 1 - mask)
-
-# ============================================================================
-# TLS Block Initialization
-# ============================================================================
-
-# Initialize TLS block for a thread
-# Must be called once per thread before using TLS
-# block: pointer to TLS_BLOCK_SIZE bytes of memory
-# tid: thread ID
-proc tls_init_block(block: ptr uint8, tid: int32) =
-  # Set up the block
-  var p32: ptr int32 = cast[ptr int32](block)
-  p32[0] = TLS_MAGIC
-  p32[1] = tid
-  p32[2] = 0  # No keys in use yet
-  p32[3] = 0  # Reserved
-
-  # Clear all key values
-  var i: int32 = 0
-  while i < TLS_MAX_KEYS:
-    p32[4 + i] = 0
-    i = i + 1
-
-  # Register with kernel
-  discard tls_set_base(block)
-
-# Check if TLS is initialized for current thread
-proc tls_is_initialized(): int32 =
-  var base: ptr uint8 = tls_get_base()
-  if cast[int32](base) == 0:
-    return 0
-  var p32: ptr int32 = cast[ptr int32](base)
-  if p32[0] == TLS_MAGIC:
-    return 1
-  return 0
-
-# ============================================================================
-# TLS Value Get/Set
-# ============================================================================
-
-# Set a TLS value for a key
-# Returns: 0 on success, -1 on error
-proc tls_set(key: int32, value: int32): int32 =
-  if key < 0 or key >= TLS_MAX_KEYS:
+def tls_key_create() -> int32:
+    i: int32 = 0
+    while (i < TLS_MAX_KEYS):
+        mask: int32 = 1
+        shift: int32 = i
+        while (shift > 0):
+            mask = (mask * 2)
+            shift = (shift - 1)
+        if ((tls_key_bitmap & mask) == 0):
+            tls_key_bitmap = (tls_key_bitmap | mask)
+            return i
+        i = (i + 1)
     return -1
 
-  var base: ptr uint8 = tls_get_base()
-  if cast[int32](base) == 0:
-    return -1
+def tls_key_delete(key: int32):
+    if ((key < 0) or (key >= TLS_MAX_KEYS)):
+        return
+    mask: int32 = 1
+    shift: int32 = key
+    while (shift > 0):
+        mask = (mask * 2)
+        shift = (shift - 1)
+    tls_key_bitmap = (tls_key_bitmap & ((0 - 1) - mask))
 
-  var p32: ptr int32 = cast[ptr int32](base)
+def tls_init_block(block: Ptr[uint8], tid: int32):
+    p32: Ptr[int32] = Ptr[int32](block)
+    p32[0] = TLS_MAGIC
+    p32[1] = tid
+    p32[2] = 0
+    p32[3] = 0
+    i: int32 = 0
+    while (i < TLS_MAX_KEYS):
+        p32[(4 + i)] = 0
+        i = (i + 1)
+    tls_set_base(block)
 
-  # Verify magic
-  if p32[0] != TLS_MAGIC:
-    return -1
-
-  # Set the value (offset 16 + key * 4)
-  p32[4 + key] = value
-
-  # Mark key as in use in local bitmap
-  var mask: int32 = 1
-  var shift: int32 = key
-  while shift > 0:
-    mask = mask * 2
-    shift = shift - 1
-  p32[2] = p32[2] | mask
-
-  return 0
-
-# Get a TLS value for a key
-# Returns: the value, or 0 if not set or error
-proc tls_get(key: int32): int32 =
-  if key < 0 or key >= TLS_MAX_KEYS:
+def tls_is_initialized() -> int32:
+    base: Ptr[uint8] = tls_get_base()
+    if (cast[int32](base) == 0):
+        return 0
+    p32: Ptr[int32] = Ptr[int32](base)
+    if (p32[0] == TLS_MAGIC):
+        return 1
     return 0
 
-  var base: ptr uint8 = tls_get_base()
-  if cast[int32](base) == 0:
+def tls_set(key: int32, value: int32) -> int32:
+    if ((key < 0) or (key >= TLS_MAX_KEYS)):
+        return -1
+    base: Ptr[uint8] = tls_get_base()
+    if (cast[int32](base) == 0):
+        return -1
+    p32: Ptr[int32] = Ptr[int32](base)
+    if (p32[0] != TLS_MAGIC):
+        return -1
+    p32[(4 + key)] = value
+    mask: int32 = 1
+    shift: int32 = key
+    while (shift > 0):
+        mask = (mask * 2)
+        shift = (shift - 1)
+    p32[2] = (p32[2] | mask)
     return 0
 
-  var p32: ptr int32 = cast[ptr int32](base)
+def tls_get(key: int32) -> int32:
+    if ((key < 0) or (key >= TLS_MAX_KEYS)):
+        return 0
+    base: Ptr[uint8] = tls_get_base()
+    if (cast[int32](base) == 0):
+        return 0
+    p32: Ptr[int32] = Ptr[int32](base)
+    if (p32[0] != TLS_MAGIC):
+        return 0
+    return p32[(4 + key)]
 
-  # Verify magic
-  if p32[0] != TLS_MAGIC:
+def tls_get_ptr(key: int32) -> Ptr[uint8]:
+    return Ptr[uint8](tls_get(key))
+
+def tls_set_ptr(key: int32, value: Ptr[uint8]) -> int32:
+    return tls_set(key, cast[int32](value))
+
+tls_blocks: Array[4096, uint8]
+
+def tls_get_block(thread_idx: int32) -> Ptr[uint8]:
+    if ((thread_idx < 0) or (thread_idx >= 16)):
+        return Ptr[uint8](0)
+    offset: int32 = (thread_idx * TLS_BLOCK_SIZE)
+    return addr(tls_blocks[offset])
+
+def tls_init_static(thread_idx: int32, tid: int32) -> int32:
+    block: Ptr[uint8] = tls_get_block(thread_idx)
+    if (cast[int32](block) == 0):
+        return -1
+    tls_init_block(block, tid)
     return 0
 
-  return p32[4 + key]
+tls_errno_key: int32 = -1
 
-# Get a TLS pointer value for a key
-proc tls_get_ptr(key: int32): ptr uint8 =
-  return cast[ptr uint8](tls_get(key))
+def tls_get_errno() -> int32:
+    if (tls_errno_key < 0):
+        return 0
+    return tls_get(tls_errno_key)
 
-# Set a TLS pointer value for a key
-proc tls_set_ptr(key: int32, value: ptr uint8): int32 =
-  return tls_set(key, cast[int32](value))
+def tls_set_errno(val: int32):
+    if (tls_errno_key < 0):
+        tls_errno_key = tls_key_create()
+    if (tls_errno_key >= 0):
 
-# ============================================================================
-# Convenience: Static TLS allocation
-# ============================================================================
-
-# Pre-allocated TLS blocks for up to 16 threads
-# Each block is TLS_BLOCK_SIZE bytes
-var tls_blocks: array[4096, uint8]  # 16 * 256 = 4096 bytes
-
-# Get TLS block for a thread index
-proc tls_get_block(thread_idx: int32): ptr uint8 =
-  if thread_idx < 0 or thread_idx >= 16:
-    return cast[ptr uint8](0)
-  var offset: int32 = thread_idx * TLS_BLOCK_SIZE
-  return addr(tls_blocks[offset])
-
-# Initialize TLS for current thread using static allocation
-# thread_idx: 0-15, must be unique per thread
-proc tls_init_static(thread_idx: int32, tid: int32): int32 =
-  var block: ptr uint8 = tls_get_block(thread_idx)
-  if cast[int32](block) == 0:
-    return -1
-  tls_init_block(block, tid)
-  return 0
-
-# ============================================================================
-# errno-style TLS example
-# ============================================================================
-
-# Key for errno (allocated on first use)
-var tls_errno_key: int32 = -1
-
-# Get errno for current thread
-proc tls_get_errno(): int32 =
-  if tls_errno_key < 0:
-    return 0
-  return tls_get(tls_errno_key)
-
-# Set errno for current thread
-proc tls_set_errno(val: int32) =
-  if tls_errno_key < 0:
-    tls_errno_key = tls_key_create()
-  if tls_errno_key >= 0:
-    discard tls_set(tls_errno_key, val)
+        tls_set(tls_errno_key, val)

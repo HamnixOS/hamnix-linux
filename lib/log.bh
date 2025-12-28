@@ -1,318 +1,239 @@
-# PoodillionOS Logging Framework
-# Simple logging with levels and serial output
+from lib.syscalls import *
 
-import "lib/syscalls"
+LOG_DEBUG: Final[int32] = 0
+LOG_INFO: Final[int32] = 1
+LOG_WARN: Final[int32] = 2
+LOG_ERROR: Final[int32] = 3
+LOG_NONE: Final[int32] = 4
 
-# =============================================================================
-# Log Levels
-# =============================================================================
+log_level: int32 = LOG_INFO
 
-const LOG_DEBUG: int32 = 0
-const LOG_INFO: int32 = 1
-const LOG_WARN: int32 = 2
-const LOG_ERROR: int32 = 3
-const LOG_NONE: int32 = 4
+def log_set_level(level: int32):
+    if ((level >= LOG_DEBUG) and (level <= LOG_NONE)):
+        log_level = level
 
-# Current log level (messages below this level are ignored)
-var log_level: int32 = LOG_INFO
+def log_get_level() -> int32:
+    return log_level
 
-# =============================================================================
-# Configuration
-# =============================================================================
+def log_prefix(level: int32):
+    if (level == LOG_DEBUG):
+        print(Ptr[uint8]("[DEBUG] "))
+    elif (level == LOG_INFO):
+        print(Ptr[uint8]("[INFO]  "))
+    elif (level == LOG_WARN):
+        print(Ptr[uint8]("[WARN]  "))
+    elif (level == LOG_ERROR):
+        print(Ptr[uint8]("[ERROR] "))
 
-# Set minimum log level
-proc log_set_level(level: int32) =
-  if level >= LOG_DEBUG and level <= LOG_NONE:
-    log_level = level
+def log_msg(level: int32, msg: Ptr[uint8]):
+    if (level >= log_level):
+        log_prefix(level)
+        println(msg)
 
-# Get current log level
-proc log_get_level(): int32 =
-  return log_level
+def log_msg2(level: int32, prefix: Ptr[uint8], msg: Ptr[uint8]):
+    if (level >= log_level):
+        log_prefix(level)
+        print(prefix)
+        println(msg)
 
-# =============================================================================
-# Level Prefixes
-# =============================================================================
+def log_int(level: int32, prefix: Ptr[uint8], val: int32, suffix: Ptr[uint8]):
+    if (level >= log_level):
+        log_prefix(level)
+        print(prefix)
+        print_int(val)
+        println(suffix)
 
-proc log_prefix(level: int32) =
-  if level == LOG_DEBUG:
-    print(cast[ptr uint8]("[DEBUG] "))
-  elif level == LOG_INFO:
-    print(cast[ptr uint8]("[INFO]  "))
-  elif level == LOG_WARN:
-    print(cast[ptr uint8]("[WARN]  "))
-  elif level == LOG_ERROR:
-    print(cast[ptr uint8]("[ERROR] "))
+def log_kv(level: int32, key: Ptr[uint8], val: Ptr[uint8]):
+    if (level >= log_level):
+        log_prefix(level)
+        print(key)
+        print(Ptr[uint8]("="))
+        println(val)
 
-# =============================================================================
-# Basic Logging Functions
-# =============================================================================
+def log_kv_int(level: int32, key: Ptr[uint8], val: int32):
+    if (level >= log_level):
+        log_prefix(level)
+        print(key)
+        print(Ptr[uint8]("="))
+        print_int(val)
+        println(Ptr[uint8](""))
 
-# Log a message at specified level
-proc log_msg(level: int32, msg: ptr uint8) =
-  if level >= log_level:
-    log_prefix(level)
-    println(msg)
+def log_debug(msg: Ptr[uint8]):
+    log_msg(LOG_DEBUG, msg)
 
-# Log with format: prefix + message
-proc log_msg2(level: int32, prefix: ptr uint8, msg: ptr uint8) =
-  if level >= log_level:
-    log_prefix(level)
-    print(prefix)
-    println(msg)
+def log_debug2(prefix: Ptr[uint8], msg: Ptr[uint8]):
+    log_msg2(LOG_DEBUG, prefix, msg)
 
-# Log with format: prefix + integer + suffix
-proc log_int(level: int32, prefix: ptr uint8, val: int32, suffix: ptr uint8) =
-  if level >= log_level:
-    log_prefix(level)
-    print(prefix)
-    print_int(val)
-    println(suffix)
+def log_debug_int(prefix: Ptr[uint8], val: int32):
+    log_int(LOG_DEBUG, prefix, val, Ptr[uint8](""))
 
-# Log with format: key=value
-proc log_kv(level: int32, key: ptr uint8, val: ptr uint8) =
-  if level >= log_level:
-    log_prefix(level)
+def log_info(msg: Ptr[uint8]):
+    log_msg(LOG_INFO, msg)
+
+def log_info2(prefix: Ptr[uint8], msg: Ptr[uint8]):
+    log_msg2(LOG_INFO, prefix, msg)
+
+def log_info_int(prefix: Ptr[uint8], val: int32):
+    log_int(LOG_INFO, prefix, val, Ptr[uint8](""))
+
+def log_warn(msg: Ptr[uint8]):
+    log_msg(LOG_WARN, msg)
+
+def log_warn2(prefix: Ptr[uint8], msg: Ptr[uint8]):
+    log_msg2(LOG_WARN, prefix, msg)
+
+def log_warn_int(prefix: Ptr[uint8], val: int32):
+    log_int(LOG_WARN, prefix, val, Ptr[uint8](""))
+
+def log_error(msg: Ptr[uint8]):
+    log_msg(LOG_ERROR, msg)
+
+def log_error2(prefix: Ptr[uint8], msg: Ptr[uint8]):
+    log_msg2(LOG_ERROR, prefix, msg)
+
+def log_error_int(prefix: Ptr[uint8], val: int32):
+    log_int(LOG_ERROR, prefix, val, Ptr[uint8](""))
+
+def log_request(method: Ptr[uint8], path: Ptr[uint8], status: int32):
+    if (LOG_INFO >= log_level):
+        print(Ptr[uint8]("[HTTP]  "))
+        print(method)
+        print(Ptr[uint8](" "))
+        print(path)
+        print(Ptr[uint8](" -> "))
+        print_int(status)
+        println(Ptr[uint8](""))
+
+def log_request_full(method: Ptr[uint8], path: Ptr[uint8], status: int32, nbytes: int32, client_ip: Ptr[uint8]):
+    if (LOG_INFO >= log_level):
+        print(Ptr[uint8]("[HTTP]  "))
+        print(method)
+        print(Ptr[uint8](" "))
+        print(path)
+        print(Ptr[uint8](" ["))
+        print(client_ip)
+        print(Ptr[uint8]("] "))
+        print_int(status)
+        print(Ptr[uint8](" ("))
+        print_int(nbytes)
+        println(Ptr[uint8](" nbytes)"))
+
+log_buf: Array[512, uint8]
+
+log_buf_pos: int32 = 0
+
+def log_start(level: int32):
+    if (level >= log_level):
+        log_buf_pos = 0
+        log_prefix(level)
+
+def log_field(key: Ptr[uint8], val: Ptr[uint8]):
+    if (log_buf_pos > 0):
+        print(Ptr[uint8](" "))
     print(key)
-    print(cast[ptr uint8]("="))
-    println(val)
+    print(Ptr[uint8]("=\""))
+    print(val)
+    print(Ptr[uint8]("\""))
+    log_buf_pos = 1
 
-# Log with format: key=int_value
-proc log_kv_int(level: int32, key: ptr uint8, val: int32) =
-  if level >= log_level:
-    log_prefix(level)
+def log_field_int(key: Ptr[uint8], val: int32):
+    if (log_buf_pos > 0):
+        print(Ptr[uint8](" "))
     print(key)
-    print(cast[ptr uint8]("="))
+    print(Ptr[uint8]("="))
     print_int(val)
-    println(cast[ptr uint8](""))
+    log_buf_pos = 1
 
-# =============================================================================
-# Level-Specific Convenience Functions
-# =============================================================================
+def log_field_bool(key: Ptr[uint8], val: int32):
+    if (log_buf_pos > 0):
+        print(Ptr[uint8](" "))
+    print(key)
+    print(Ptr[uint8]("="))
+    if (val != 0):
+        print(Ptr[uint8]("true"))
+    else:
+        print(Ptr[uint8]("false"))
+    log_buf_pos = 1
 
-# Debug level logging
-proc log_debug(msg: ptr uint8) =
-  log_msg(LOG_DEBUG, msg)
-
-proc log_debug2(prefix: ptr uint8, msg: ptr uint8) =
-  log_msg2(LOG_DEBUG, prefix, msg)
-
-proc log_debug_int(prefix: ptr uint8, val: int32) =
-  log_int(LOG_DEBUG, prefix, val, cast[ptr uint8](""))
-
-# Info level logging
-proc log_info(msg: ptr uint8) =
-  log_msg(LOG_INFO, msg)
-
-proc log_info2(prefix: ptr uint8, msg: ptr uint8) =
-  log_msg2(LOG_INFO, prefix, msg)
-
-proc log_info_int(prefix: ptr uint8, val: int32) =
-  log_int(LOG_INFO, prefix, val, cast[ptr uint8](""))
-
-# Warning level logging
-proc log_warn(msg: ptr uint8) =
-  log_msg(LOG_WARN, msg)
-
-proc log_warn2(prefix: ptr uint8, msg: ptr uint8) =
-  log_msg2(LOG_WARN, prefix, msg)
-
-proc log_warn_int(prefix: ptr uint8, val: int32) =
-  log_int(LOG_WARN, prefix, val, cast[ptr uint8](""))
-
-# Error level logging
-proc log_error(msg: ptr uint8) =
-  log_msg(LOG_ERROR, msg)
-
-proc log_error2(prefix: ptr uint8, msg: ptr uint8) =
-  log_msg2(LOG_ERROR, prefix, msg)
-
-proc log_error_int(prefix: ptr uint8, val: int32) =
-  log_int(LOG_ERROR, prefix, val, cast[ptr uint8](""))
-
-# =============================================================================
-# HTTP Request Logging
-# =============================================================================
-
-# Log an HTTP request (for web server)
-proc log_request(method: ptr uint8, path: ptr uint8, status: int32) =
-  if LOG_INFO >= log_level:
-    print(cast[ptr uint8]("[HTTP]  "))
-    print(method)
-    print(cast[ptr uint8](" "))
-    print(path)
-    print(cast[ptr uint8](" -> "))
-    print_int(status)
-    println(cast[ptr uint8](""))
-
-# Log an HTTP request with additional info
-proc log_request_full(method: ptr uint8, path: ptr uint8, status: int32, bytes: int32, client_ip: ptr uint8) =
-  if LOG_INFO >= log_level:
-    print(cast[ptr uint8]("[HTTP]  "))
-    print(method)
-    print(cast[ptr uint8](" "))
-    print(path)
-    print(cast[ptr uint8](" ["))
-    print(client_ip)
-    print(cast[ptr uint8]("] "))
-    print_int(status)
-    print(cast[ptr uint8](" ("))
-    print_int(bytes)
-    println(cast[ptr uint8](" bytes)"))
-
-# =============================================================================
-# Structured Logging (Key-Value Pairs)
-# =============================================================================
-
-# Log buffer for building structured log lines
-var log_buf: array[512, uint8]
-var log_buf_pos: int32 = 0
-
-# Start a new structured log line
-proc log_start(level: int32) =
-  if level >= log_level:
+def log_end():
+    println(Ptr[uint8](""))
     log_buf_pos = 0
-    log_prefix(level)
 
-# Add a string field
-proc log_field(key: ptr uint8, val: ptr uint8) =
-  if log_buf_pos > 0:
-    print(cast[ptr uint8](" "))
-  print(key)
-  print(cast[ptr uint8]("=\""))
-  print(val)
-  print(cast[ptr uint8]("\""))
-  log_buf_pos = 1  # Mark that we've added content
+def log_hex_byte(b: int32):
+    hex: Array[3, uint8]
+    hi: int32 = ((b >> 4) & 15)
+    lo: int32 = (b & 15)
+    if (hi < 10):
+        hex[0] = cast[uint8]((48 + hi))
+    else:
+        hex[0] = cast[uint8]((55 + hi))
+    if (lo < 10):
+        hex[1] = cast[uint8]((48 + lo))
+    else:
+        hex[1] = cast[uint8]((55 + lo))
+    hex[2] = cast[uint8](0)
+    print(addr(hex[0]))
 
-# Add an integer field
-proc log_field_int(key: ptr uint8, val: int32) =
-  if log_buf_pos > 0:
-    print(cast[ptr uint8](" "))
-  print(key)
-  print(cast[ptr uint8]("="))
-  print_int(val)
-  log_buf_pos = 1
+def log_hex_dump(level: int32, data: Ptr[uint8], length: int32):
+    if (level < log_level):
+        return
+    i: int32 = 0
+    while (i < length):
+        log_prefix(level)
+        log_hex_byte(((i >> 8) & 255))
+        log_hex_byte((i & 255))
+        print(Ptr[uint8](": "))
+        j: int32 = 0
+        while ((j < 16) and ((i + j) < length)):
+            log_hex_byte(cast[int32](data[(i + j)]))
+            print(Ptr[uint8](" "))
+            j = (j + 1)
+        while (j < 16):
+            print(Ptr[uint8]("   "))
+            j = (j + 1)
+        print(Ptr[uint8](" |"))
+        j = 0
+        while ((j < 16) and ((i + j) < length)):
+            c: int32 = cast[int32](data[(i + j)])
+            if ((c >= 32) and (c < 127)):
+                ch: Array[2, uint8]
+                ch[0] = cast[uint8](c)
+                ch[1] = cast[uint8](0)
+                print(addr(ch[0]))
+            else:
+                print(Ptr[uint8]("."))
+            j = (j + 1)
+        println(Ptr[uint8]("|"))
+        i = (i + 16)
 
-# Add a boolean field
-proc log_field_bool(key: ptr uint8, val: int32) =
-  if log_buf_pos > 0:
-    print(cast[ptr uint8](" "))
-  print(key)
-  print(cast[ptr uint8]("="))
-  if val != 0:
-    print(cast[ptr uint8]("true"))
-  else:
-    print(cast[ptr uint8]("false"))
-  log_buf_pos = 1
+def log_assert(condition: int32, msg: Ptr[uint8]):
+    if (condition == 0):
+        log_error2(Ptr[uint8]("ASSERTION FAILED: "), msg)
 
-# End the structured log line
-proc log_end() =
-  println(cast[ptr uint8](""))
-  log_buf_pos = 0
+def log_assert_expr(condition: int32, expr: Ptr[uint8], file: Ptr[uint8], line: int32):
+    if (condition == 0):
+        print(Ptr[uint8]("[ERROR] ASSERTION FAILED: "))
+        print(expr)
+        print(Ptr[uint8](" at "))
+        print(file)
+        print(Ptr[uint8](":"))
+        print_int(line)
+        println(Ptr[uint8](""))
 
-# =============================================================================
-# Hex Dump Logging (for debugging)
-# =============================================================================
+def log_timing(label: Ptr[uint8], ms: int32):
+    if (LOG_DEBUG >= log_level):
+        log_prefix(LOG_DEBUG)
+        print(label)
+        print(Ptr[uint8](": "))
+        print_int(ms)
+        println(Ptr[uint8]("ms"))
 
-# Print a byte as hex
-proc log_hex_byte(b: int32) =
-  var hex: array[3, uint8]
-  var hi: int32 = (b >> 4) & 15
-  var lo: int32 = b & 15
-  if hi < 10:
-    hex[0] = cast[uint8](48 + hi)  # '0' + hi
-  else:
-    hex[0] = cast[uint8](55 + hi)  # 'A' - 10 + hi
-  if lo < 10:
-    hex[1] = cast[uint8](48 + lo)
-  else:
-    hex[1] = cast[uint8](55 + lo)
-  hex[2] = cast[uint8](0)
-  print(addr(hex[0]))
-
-# Hex dump of data (up to 16 bytes per line)
-proc log_hex_dump(level: int32, data: ptr uint8, length: int32) =
-  if level < log_level:
-    return
-
-  var i: int32 = 0
-  while i < length:
-    # Print offset
-    log_prefix(level)
-    log_hex_byte((i >> 8) & 255)
-    log_hex_byte(i & 255)
-    print(cast[ptr uint8](": "))
-
-    # Print hex bytes
-    var j: int32 = 0
-    while j < 16 and i + j < length:
-      log_hex_byte(cast[int32](data[i + j]))
-      print(cast[ptr uint8](" "))
-      j = j + 1
-
-    # Pad if less than 16 bytes
-    while j < 16:
-      print(cast[ptr uint8]("   "))
-      j = j + 1
-
-    # Print ASCII representation
-    print(cast[ptr uint8](" |"))
-    j = 0
-    while j < 16 and i + j < length:
-      var c: int32 = cast[int32](data[i + j])
-      if c >= 32 and c < 127:
-        var ch: array[2, uint8]
-        ch[0] = cast[uint8](c)
-        ch[1] = cast[uint8](0)
-        print(addr(ch[0]))
-      else:
-        print(cast[ptr uint8]("."))
-      j = j + 1
-
-    println(cast[ptr uint8]("|"))
-    i = i + 16
-
-# =============================================================================
-# Assertion Logging
-# =============================================================================
-
-# Log an assertion failure and halt
-proc log_assert(condition: int32, msg: ptr uint8) =
-  if condition == 0:
-    log_error2(cast[ptr uint8]("ASSERTION FAILED: "), msg)
-    # In a real OS, we might halt here
-    # For now, just log the error
-
-# Log assertion with expression
-proc log_assert_expr(condition: int32, expr: ptr uint8, file: ptr uint8, line: int32) =
-  if condition == 0:
-    print(cast[ptr uint8]("[ERROR] ASSERTION FAILED: "))
-    print(expr)
-    print(cast[ptr uint8](" at "))
-    print(file)
-    print(cast[ptr uint8](":"))
-    print_int(line)
-    println(cast[ptr uint8](""))
-
-# =============================================================================
-# Performance Logging
-# =============================================================================
-
-# Log timing information
-proc log_timing(label: ptr uint8, ms: int32) =
-  if LOG_DEBUG >= log_level:
-    log_prefix(LOG_DEBUG)
-    print(label)
-    print(cast[ptr uint8](": "))
-    print_int(ms)
-    println(cast[ptr uint8]("ms"))
-
-# Log memory usage
-proc log_memory(label: ptr uint8, used: int32, total: int32) =
-  if LOG_DEBUG >= log_level:
-    log_prefix(LOG_DEBUG)
-    print(label)
-    print(cast[ptr uint8](": "))
-    print_int(used)
-    print(cast[ptr uint8]("/"))
-    print_int(total)
-    println(cast[ptr uint8](" bytes"))
+def log_memory(label: Ptr[uint8], used: int32, total: int32):
+    if (LOG_DEBUG >= log_level):
+        log_prefix(LOG_DEBUG)
+        print(label)
+        print(Ptr[uint8](": "))
+        print_int(used)
+        print(Ptr[uint8]("/"))
+        print_int(total)
+        println(Ptr[uint8](" bytes"))

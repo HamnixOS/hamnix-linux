@@ -2,77 +2,75 @@
 # Provides high-level synchronization primitives using kernel spinlocks
 # Foundation for multi-threaded userland applications (Phase 3.2)
 
-import "lib/syscalls"
+from lib.syscalls import *
 
 # ===========================================================================
 # Syscall Numbers for Synchronization
 # ===========================================================================
 
 # Spinlock syscalls (to be implemented in kernel)
-const SYS_spinlock_init: int32 = 210
-const SYS_spinlock_lock: int32 = 211
-const SYS_spinlock_unlock: int32 = 212
-const SYS_spinlock_trylock: int32 = 213
-const SYS_atomic_add: int32 = 214
-const SYS_atomic_cmpxchg: int32 = 215
-const SYS_atomic_load: int32 = 216
-const SYS_atomic_store: int32 = 217
+SYS_spinlock_init: Final[int32] = 210
+SYS_spinlock_lock: Final[int32] = 211
+SYS_spinlock_unlock: Final[int32] = 212
+SYS_spinlock_trylock: Final[int32] = 213
+SYS_atomic_add: Final[int32] = 214
+SYS_atomic_cmpxchg: Final[int32] = 215
+SYS_atomic_load: Final[int32] = 216
+SYS_atomic_store: Final[int32] = 217
 
 # ===========================================================================
 # Low-Level Atomic Operations
 # ===========================================================================
 
 # Atomically load a 32-bit value
-proc atomic_load(ptr: ptr int32): int32 =
-  return syscall1(SYS_atomic_load, cast[int32](ptr))
+def atomic_load(p: Ptr[int32]) -> int32:
+    return syscall1(SYS_atomic_load, cast[int32](p))
 
 # Atomically store a 32-bit value
-proc atomic_store(ptr: ptr int32, value: int32) =
-  discard syscall2(SYS_atomic_store, cast[int32](ptr), value)
+def atomic_store(p: Ptr[int32], value: int32):
+    syscall2(SYS_atomic_store, cast[int32](p), value)
 
 # Atomically add to a value and return the old value
-proc atomic_add(ptr: ptr int32, value: int32): int32 =
-  return syscall2(SYS_atomic_add, cast[int32](ptr), value)
+def atomic_add(p: Ptr[int32], value: int32) -> int32:
+    return syscall2(SYS_atomic_add, cast[int32](p), value)
 
 # Atomically increment and return the old value
-proc atomic_inc(ptr: ptr int32): int32 =
-  return atomic_add(ptr, 1)
+def atomic_inc(p: Ptr[int32]) -> int32:
+    return atomic_add(p, 1)
 
 # Atomically decrement and return the old value
-proc atomic_dec(ptr: ptr int32): int32 =
-  return atomic_add(ptr, -1)
+def atomic_dec(p: Ptr[int32]) -> int32:
+    return atomic_add(p, -1)
 
 # Atomic compare-and-swap
 # If *ptr == expected, then *ptr = new_value and return 1
 # Otherwise, return 0
-proc atomic_cmpxchg(ptr: ptr int32, expected: int32, new_value: int32): int32 =
-  return syscall3(SYS_atomic_cmpxchg, cast[int32](ptr), expected, new_value)
+def atomic_cmpxchg(p: Ptr[int32], expected: int32, new_value: int32) -> int32:
+    return syscall3(SYS_atomic_cmpxchg, cast[int32](p), expected, new_value)
 
 # ===========================================================================
 # Spinlock Implementation
 # ===========================================================================
 
-# Spinlock structure (just a 32-bit integer)
-# 0 = unlocked, 1 = locked
-type Spinlock = int32
+# Spinlock is just a 32-bit integer: 0 = unlocked, 1 = locked
 
 # Initialize a spinlock (must be called before use)
-proc spinlock_init(lock: ptr Spinlock) =
-  discard syscall1(SYS_spinlock_init, cast[int32](lock))
+def spinlock_init(lock: Ptr[int32]):
+    syscall1(SYS_spinlock_init, cast[int32](lock))
 
 # Acquire a spinlock (blocking)
 # Spins until the lock is acquired
-proc spinlock_lock(lock: ptr Spinlock) =
-  discard syscall1(SYS_spinlock_lock, cast[int32](lock))
+def spinlock_lock(lock: Ptr[int32]):
+    syscall1(SYS_spinlock_lock, cast[int32](lock))
 
 # Release a spinlock
-proc spinlock_unlock(lock: ptr Spinlock) =
-  discard syscall1(SYS_spinlock_unlock, cast[int32](lock))
+def spinlock_unlock(lock: Ptr[int32]):
+    syscall1(SYS_spinlock_unlock, cast[int32](lock))
 
 # Try to acquire a spinlock (non-blocking)
 # Returns 1 if lock acquired, 0 if already held
-proc spinlock_trylock(lock: ptr Spinlock): int32 =
-  return syscall1(SYS_spinlock_trylock, cast[int32](lock))
+def spinlock_trylock(lock: Ptr[int32]) -> int32:
+    return syscall1(SYS_spinlock_trylock, cast[int32](lock))
 
 # ===========================================================================
 # Mutex Implementation (using spinlocks for now)
@@ -81,39 +79,39 @@ proc spinlock_trylock(lock: ptr Spinlock): int32 =
 # Mutex structure
 # For now, this is just a spinlock. In the future, we can implement
 # proper sleeping mutexes using futex-style syscalls.
-type Mutex = record
-  lock: Spinlock
-  owner: int32      # Thread ID of owner (0 if unlocked)
-  count: int32      # Recursion count for recursive mutexes
+class Mutex:
+    lock: int32
+    owner: int32      # Thread ID of owner (0 if unlocked)
+    count: int32      # Recursion count for recursive mutexes
 
 # Initialize a mutex
-proc mutex_init(mtx: ptr Mutex) =
-  spinlock_init(addr(mtx.lock))
-  mtx.owner = 0
-  mtx.count = 0
+def mutex_init(mtx: Ptr[Mutex]):
+    spinlock_init(addr(mtx.lock))
+    mtx.owner = 0
+    mtx.count = 0
 
 # Lock a mutex
 # For now, this is a spinlock. TODO: Implement sleeping locks.
-proc mutex_lock(mtx: ptr Mutex) =
-  spinlock_lock(addr(mtx.lock))
-  # TODO: Set owner to current thread ID when we have thread syscalls
-  mtx.owner = 1
-  mtx.count = 1
+def mutex_lock(mtx: Ptr[Mutex]):
+    spinlock_lock(addr(mtx.lock))
+    # TODO: Set owner to current thread ID when we have thread syscalls
+    mtx.owner = 1
+    mtx.count = 1
 
 # Unlock a mutex
-proc mutex_unlock(mtx: ptr Mutex) =
-  mtx.owner = 0
-  mtx.count = 0
-  spinlock_unlock(addr(mtx.lock))
+def mutex_unlock(mtx: Ptr[Mutex]):
+    mtx.owner = 0
+    mtx.count = 0
+    spinlock_unlock(addr(mtx.lock))
 
 # Try to lock a mutex (non-blocking)
 # Returns 1 if lock acquired, 0 if already held
-proc mutex_trylock(mtx: ptr Mutex): int32 =
-  var result: int32 = spinlock_trylock(addr(mtx.lock))
-  if result == 1:
-    mtx.owner = 1
-    mtx.count = 1
-  return result
+def mutex_trylock(mtx: Ptr[Mutex]) -> int32:
+    result: int32 = spinlock_trylock(addr(mtx.lock))
+    if result == 1:
+        mtx.owner = 1
+        mtx.count = 1
+    return result
 
 # ===========================================================================
 # Read-Write Lock (simplified implementation)
@@ -121,263 +119,257 @@ proc mutex_trylock(mtx: ptr Mutex): int32 =
 
 # Read-write lock structure
 # Allows multiple readers OR one writer
-type RWLock = record
-  lock: Spinlock        # Protects the state
-  readers: int32        # Number of active readers
-  writer: int32         # 1 if writer is active, 0 otherwise
-  waiting_writers: int32 # Number of waiting writers
+class RWLock:
+    lock: int32           # Protects the state
+    readers: int32        # Number of active readers
+    writer: int32         # 1 if writer is active, 0 otherwise
+    waiting_writers: int32 # Number of waiting writers
 
 # Initialize a read-write lock
-proc rwlock_init(rwl: ptr RWLock) =
-  spinlock_init(addr(rwl.lock))
-  rwl.readers = 0
-  rwl.writer = 0
-  rwl.waiting_writers = 0
+def rwlock_init(rwl: Ptr[RWLock]):
+    spinlock_init(addr(rwl.lock))
+    rwl.readers = 0
+    rwl.writer = 0
+    rwl.waiting_writers = 0
 
 # Acquire read lock
-proc rwlock_read_lock(rwl: ptr RWLock) =
-  while 1 == 1:
-    spinlock_lock(addr(rwl.lock))
+def rwlock_read_lock(rwl: Ptr[RWLock]):
+    while 1 == 1:
+        spinlock_lock(addr(rwl.lock))
 
-    # Can acquire read lock if no writer and no waiting writers
-    if rwl.writer == 0 and rwl.waiting_writers == 0:
-      rwl.readers = rwl.readers + 1
-      spinlock_unlock(addr(rwl.lock))
-      return
+        # Can acquire read lock if no writer and no waiting writers
+        if rwl.writer == 0 and rwl.waiting_writers == 0:
+            rwl.readers = rwl.readers + 1
+            spinlock_unlock(addr(rwl.lock))
+            return
 
-    spinlock_unlock(addr(rwl.lock))
-    # TODO: Sleep instead of spinning
-    # For now, yield or just spin
+        spinlock_unlock(addr(rwl.lock))
+        # TODO: Sleep instead of spinning
+        # For now, yield or just spin
 
 # Release read lock
-proc rwlock_read_unlock(rwl: ptr RWLock) =
-  spinlock_lock(addr(rwl.lock))
-  rwl.readers = rwl.readers - 1
-  spinlock_unlock(addr(rwl.lock))
+def rwlock_read_unlock(rwl: Ptr[RWLock]):
+    spinlock_lock(addr(rwl.lock))
+    rwl.readers = rwl.readers - 1
+    spinlock_unlock(addr(rwl.lock))
 
 # Acquire write lock
-proc rwlock_write_lock(rwl: ptr RWLock) =
-  spinlock_lock(addr(rwl.lock))
-  rwl.waiting_writers = rwl.waiting_writers + 1
-  spinlock_unlock(addr(rwl.lock))
-
-  while 1 == 1:
+def rwlock_write_lock(rwl: Ptr[RWLock]):
     spinlock_lock(addr(rwl.lock))
-
-    # Can acquire write lock if no readers and no writer
-    if rwl.readers == 0 and rwl.writer == 0:
-      rwl.writer = 1
-      rwl.waiting_writers = rwl.waiting_writers - 1
-      spinlock_unlock(addr(rwl.lock))
-      return
-
+    rwl.waiting_writers = rwl.waiting_writers + 1
     spinlock_unlock(addr(rwl.lock))
-    # TODO: Sleep instead of spinning
+
+    while 1 == 1:
+        spinlock_lock(addr(rwl.lock))
+
+        # Can acquire write lock if no readers and no writer
+        if rwl.readers == 0 and rwl.writer == 0:
+            rwl.writer = 1
+            rwl.waiting_writers = rwl.waiting_writers - 1
+            spinlock_unlock(addr(rwl.lock))
+            return
+
+        spinlock_unlock(addr(rwl.lock))
+        # TODO: Sleep instead of spinning
 
 # Release write lock
-proc rwlock_write_unlock(rwl: ptr RWLock) =
-  spinlock_lock(addr(rwl.lock))
-  rwl.writer = 0
-  spinlock_unlock(addr(rwl.lock))
+def rwlock_write_unlock(rwl: Ptr[RWLock]):
+    spinlock_lock(addr(rwl.lock))
+    rwl.writer = 0
+    spinlock_unlock(addr(rwl.lock))
 
 # ===========================================================================
 # Semaphore Implementation (counting semaphore)
 # ===========================================================================
 
 # Semaphore structure
-type Semaphore = record
-  lock: Spinlock
-  count: int32      # Available resources
-  max: int32        # Maximum count (for bounded semaphores)
+class Semaphore:
+    lock: int32
+    count: int32      # Available resources
+    max_count: int32  # Maximum count (for bounded semaphores)
 
 # Initialize a semaphore with initial count
-proc semaphore_init(sem: ptr Semaphore, initial: int32, max_count: int32) =
-  spinlock_init(addr(sem.lock))
-  sem.count = initial
-  sem.max = max_count
+def semaphore_init(sem: Ptr[Semaphore], initial: int32, max_count: int32):
+    spinlock_init(addr(sem.lock))
+    sem.count = initial
+    sem.max_count = max_count
 
 # Wait on semaphore (decrement, blocking if count == 0)
-proc semaphore_wait(sem: ptr Semaphore) =
-  while 1 == 1:
-    spinlock_lock(addr(sem.lock))
+def semaphore_wait(sem: Ptr[Semaphore]):
+    while 1 == 1:
+        spinlock_lock(addr(sem.lock))
 
-    if sem.count > 0:
-      sem.count = sem.count - 1
-      spinlock_unlock(addr(sem.lock))
-      return
+        if sem.count > 0:
+            sem.count = sem.count - 1
+            spinlock_unlock(addr(sem.lock))
+            return
 
-    spinlock_unlock(addr(sem.lock))
-    # TODO: Sleep instead of spinning
+        spinlock_unlock(addr(sem.lock))
+        # TODO: Sleep instead of spinning
 
 # Try to wait on semaphore (non-blocking)
 # Returns 1 if acquired, 0 if count was 0
-proc semaphore_trywait(sem: ptr Semaphore): int32 =
-  spinlock_lock(addr(sem.lock))
+def semaphore_trywait(sem: Ptr[Semaphore]) -> int32:
+    spinlock_lock(addr(sem.lock))
 
-  if sem.count > 0:
-    sem.count = sem.count - 1
+    if sem.count > 0:
+        sem.count = sem.count - 1
+        spinlock_unlock(addr(sem.lock))
+        return 1
+
     spinlock_unlock(addr(sem.lock))
-    return 1
-
-  spinlock_unlock(addr(sem.lock))
-  return 0
+    return 0
 
 # Post to semaphore (increment)
-proc semaphore_post(sem: ptr Semaphore) =
-  spinlock_lock(addr(sem.lock))
+def semaphore_post(sem: Ptr[Semaphore]):
+    spinlock_lock(addr(sem.lock))
 
-  if sem.count < sem.max:
-    sem.count = sem.count + 1
+    if sem.count < sem.max_count:
+        sem.count = sem.count + 1
 
-  spinlock_unlock(addr(sem.lock))
+    spinlock_unlock(addr(sem.lock))
 
 # Get current semaphore count
-proc semaphore_getvalue(sem: ptr Semaphore): int32 =
-  spinlock_lock(addr(sem.lock))
-  var value: int32 = sem.count
-  spinlock_unlock(addr(sem.lock))
-  return value
+def semaphore_getvalue(sem: Ptr[Semaphore]) -> int32:
+    spinlock_lock(addr(sem.lock))
+    value: int32 = sem.count
+    spinlock_unlock(addr(sem.lock))
+    return value
 
 # ===========================================================================
 # Condition Variable (simplified, requires mutex)
 # ===========================================================================
 
 # Condition variable structure
-type CondVar = record
-  lock: Spinlock
-  waiters: int32    # Number of waiting threads
+class CondVar:
+    lock: int32
+    waiters: int32    # Number of waiting threads
 
 # Initialize a condition variable
-proc condvar_init(cond: ptr CondVar) =
-  spinlock_init(addr(cond.lock))
-  cond.waiters = 0
+def condvar_init(cond: Ptr[CondVar]):
+    spinlock_init(addr(cond.lock))
+    cond.waiters = 0
 
 # Wait on condition variable
 # NOTE: This is a simplified implementation. A proper implementation
 # would atomically release the mutex and wait.
-proc condvar_wait(cond: ptr CondVar, mtx: ptr Mutex) =
-  spinlock_lock(addr(cond.lock))
-  cond.waiters = cond.waiters + 1
-  spinlock_unlock(addr(cond.lock))
-
-  # Release mutex
-  mutex_unlock(mtx)
-
-  # TODO: Actual blocking wait (futex-style)
-  # For now, just spin-wait (very inefficient!)
-  while 1 == 1:
+def condvar_wait(cond: Ptr[CondVar], mtx: Ptr[Mutex]):
     spinlock_lock(addr(cond.lock))
-    if cond.waiters == 0:
-      spinlock_unlock(addr(cond.lock))
-      break
+    cond.waiters = cond.waiters + 1
     spinlock_unlock(addr(cond.lock))
 
-  # Re-acquire mutex
-  mutex_lock(mtx)
+    # Release mutex
+    mutex_unlock(mtx)
+
+    # TODO: Actual blocking wait (futex-style)
+    # For now, just spin-wait (very inefficient!)
+    while 1 == 1:
+        spinlock_lock(addr(cond.lock))
+        if cond.waiters == 0:
+            spinlock_unlock(addr(cond.lock))
+            break
+        spinlock_unlock(addr(cond.lock))
+
+    # Re-acquire mutex
+    mutex_lock(mtx)
 
 # Signal one waiting thread
-proc condvar_signal(cond: ptr CondVar) =
-  spinlock_lock(addr(cond.lock))
-  if cond.waiters > 0:
-    cond.waiters = cond.waiters - 1
-  spinlock_unlock(addr(cond.lock))
+def condvar_signal(cond: Ptr[CondVar]):
+    spinlock_lock(addr(cond.lock))
+    if cond.waiters > 0:
+        cond.waiters = cond.waiters - 1
+    spinlock_unlock(addr(cond.lock))
 
 # Broadcast to all waiting threads
-proc condvar_broadcast(cond: ptr CondVar) =
-  spinlock_lock(addr(cond.lock))
-  cond.waiters = 0
-  spinlock_unlock(addr(cond.lock))
+def condvar_broadcast(cond: Ptr[CondVar]):
+    spinlock_lock(addr(cond.lock))
+    cond.waiters = 0
+    spinlock_unlock(addr(cond.lock))
 
 # ===========================================================================
 # Barrier (thread synchronization point)
 # ===========================================================================
 
 # Barrier structure
-type Barrier = record
-  lock: Spinlock
-  threshold: int32  # Number of threads that must wait
-  count: int32      # Current number of waiting threads
-  generation: int32 # Generation number (to handle reuse)
+class Barrier:
+    lock: int32
+    threshold: int32  # Number of threads that must wait
+    count: int32      # Current number of waiting threads
+    generation: int32 # Generation number (to handle reuse)
 
 # Initialize a barrier
-proc barrier_init(bar: ptr Barrier, thread_count: int32) =
-  spinlock_init(addr(bar.lock))
-  bar.threshold = thread_count
-  bar.count = 0
-  bar.generation = 0
+def barrier_init(bar: Ptr[Barrier], thread_count: int32):
+    spinlock_init(addr(bar.lock))
+    bar.threshold = thread_count
+    bar.count = 0
+    bar.generation = 0
 
 # Wait at barrier
 # All threads block until threshold threads arrive
-proc barrier_wait(bar: ptr Barrier) =
-  spinlock_lock(addr(bar.lock))
-
-  var current_gen: int32 = bar.generation
-  bar.count = bar.count + 1
-
-  if bar.count >= bar.threshold:
-    # Last thread to arrive - reset and wake all
-    bar.count = 0
-    bar.generation = bar.generation + 1
-    spinlock_unlock(addr(bar.lock))
-    return
-
-  spinlock_unlock(addr(bar.lock))
-
-  # Wait for generation to change
-  while 1 == 1:
+def barrier_wait(bar: Ptr[Barrier]):
     spinlock_lock(addr(bar.lock))
-    if bar.generation != current_gen:
-      spinlock_unlock(addr(bar.lock))
-      return
+
+    current_gen: int32 = bar.generation
+    bar.count = bar.count + 1
+
+    if bar.count >= bar.threshold:
+        # Last thread to arrive - reset and wake all
+        bar.count = 0
+        bar.generation = bar.generation + 1
+        spinlock_unlock(addr(bar.lock))
+        return
+
     spinlock_unlock(addr(bar.lock))
-    # TODO: Sleep instead of spinning
+
+    # Wait for generation to change
+    while 1 == 1:
+        spinlock_lock(addr(bar.lock))
+        if bar.generation != current_gen:
+            spinlock_unlock(addr(bar.lock))
+            return
+        spinlock_unlock(addr(bar.lock))
+        # TODO: Sleep instead of spinning
 
 # ===========================================================================
 # Atomic Flag (simple lock-free flag)
 # ===========================================================================
 
-# Atomic flag structure (just a boolean)
-type AtomicFlag = int32
-
 # Initialize atomic flag to false
-proc atomic_flag_clear(flag: ptr AtomicFlag) =
-  atomic_store(flag, 0)
+def atomic_flag_clear(flag: Ptr[int32]):
+    atomic_store(flag, 0)
 
 # Test and set atomic flag
 # Returns 1 if flag was already set, 0 if it was clear (and now set)
-proc atomic_flag_test_and_set(flag: ptr AtomicFlag): int32 =
-  return atomic_cmpxchg(flag, 0, 1)
+def atomic_flag_test_and_set(flag: Ptr[int32]) -> int32:
+    return atomic_cmpxchg(flag, 0, 1)
 
 # ===========================================================================
 # Lock-Free Counter (using atomic operations)
 # ===========================================================================
 
-# Counter structure (just an int32)
-type AtomicCounter = int32
-
 # Initialize counter
-proc atomic_counter_init(counter: ptr AtomicCounter, initial: int32) =
-  atomic_store(counter, initial)
+def atomic_counter_init(counter: Ptr[int32], initial: int32):
+    atomic_store(counter, initial)
 
 # Increment counter and return new value
-proc atomic_counter_inc(counter: ptr AtomicCounter): int32 =
-  return atomic_add(counter, 1) + 1
+def atomic_counter_inc(counter: Ptr[int32]) -> int32:
+    return atomic_add(counter, 1) + 1
 
 # Decrement counter and return new value
-proc atomic_counter_dec(counter: ptr AtomicCounter): int32 =
-  return atomic_add(counter, -1) - 1
+def atomic_counter_dec(counter: Ptr[int32]) -> int32:
+    return atomic_add(counter, -1) - 1
 
 # Get current counter value
-proc atomic_counter_get(counter: ptr AtomicCounter): int32 =
-  return atomic_load(counter)
+def atomic_counter_get(counter: Ptr[int32]) -> int32:
+    return atomic_load(counter)
 
 # Set counter value
-proc atomic_counter_set(counter: ptr AtomicCounter, value: int32) =
-  atomic_store(counter, value)
+def atomic_counter_set(counter: Ptr[int32], value: int32):
+    atomic_store(counter, value)
 
 # Add to counter and return new value
-proc atomic_counter_add(counter: ptr AtomicCounter, value: int32): int32 =
-  return atomic_add(counter, value) + value
+def atomic_counter_add(counter: Ptr[int32], value: int32) -> int32:
+    return atomic_add(counter, value) + value
 
 # ===========================================================================
 # Helper Functions
@@ -385,24 +377,24 @@ proc atomic_counter_add(counter: ptr AtomicCounter, value: int32): int32 =
 
 # Yield CPU (for spin loops)
 # TODO: Implement proper yield syscall
-proc sync_yield() =
-  # For now, just a no-op
-  # In the future, call thread_yield() syscall
-  discard 0
+def sync_yield():
+    # For now, just a no-op
+    # In the future, call thread_yield() syscall
+    pass
 
 # Memory barrier (ensure all memory operations complete)
 # On x86, this is often implicit, but we can add explicit barriers
-proc sync_memory_barrier() =
-  # TODO: Implement memory_barrier syscall or inline assembly
-  discard 0
+def sync_memory_barrier():
+    # TODO: Implement memory_barrier syscall or inline assembly
+    pass
 
 # ===========================================================================
 # Futex Syscall Numbers
 # ===========================================================================
 
-const SYS_FUTEX_WAIT: int32 = 250
-const SYS_FUTEX_WAKE: int32 = 251
-const SYS_FUTEX_REQUEUE: int32 = 252
+SYS_FUTEX_WAIT: Final[int32] = 250
+SYS_FUTEX_WAKE: Final[int32] = 251
+SYS_FUTEX_REQUEUE: Final[int32] = 252
 
 # ===========================================================================
 # Low-Level Futex Operations
@@ -410,194 +402,194 @@ const SYS_FUTEX_REQUEUE: int32 = 252
 
 # Wait on a futex address if value matches expected
 # Returns: 0 on success, -1 if value changed, -2 on error
-proc futex_wait(addr: ptr int32, expected: int32, timeout: int32): int32 =
-  return syscall3(SYS_FUTEX_WAIT, cast[int32](addr), expected, timeout)
+def futex_wait(address: Ptr[int32], expected: int32, timeout: int32) -> int32:
+    return syscall3(SYS_FUTEX_WAIT, cast[int32](address), expected, timeout)
 
 # Wake up waiters on a futex address
 # count: number to wake (0 = all)
 # Returns: number of waiters woken
-proc futex_wake(addr: ptr int32, count: int32): int32 =
-  return syscall2(SYS_FUTEX_WAKE, cast[int32](addr), count)
+def futex_wake(address: Ptr[int32], count: int32) -> int32:
+    return syscall2(SYS_FUTEX_WAKE, cast[int32](address), count)
 
 # Move waiters from one address to another
-proc futex_requeue(src: ptr int32, dst: ptr int32,
-                   wake_count: int32, requeue_count: int32): int32 =
-  return syscall4(SYS_FUTEX_REQUEUE, cast[int32](src), cast[int32](dst),
-                  wake_count, requeue_count)
+def futex_requeue(src: Ptr[int32], dst: Ptr[int32],
+                  wake_count: int32, requeue_count: int32) -> int32:
+    return syscall4(SYS_FUTEX_REQUEUE, cast[int32](src), cast[int32](dst),
+                    wake_count, requeue_count)
 
 # ===========================================================================
 # Sleeping Mutex (Futex-based)
 # ===========================================================================
 
 # Sleeping mutex state values
-const FUTEX_MUTEX_UNLOCKED: int32 = 0    # Not locked
-const FUTEX_MUTEX_LOCKED: int32 = 1      # Locked, no waiters
-const FUTEX_MUTEX_CONTENDED: int32 = 2   # Locked with waiters
+FUTEX_MUTEX_UNLOCKED: Final[int32] = 0    # Not locked
+FUTEX_MUTEX_LOCKED: Final[int32] = 1      # Locked, no waiters
+FUTEX_MUTEX_CONTENDED: Final[int32] = 2   # Locked with waiters
 
 # Futex-based mutex structure
 # This mutex sleeps instead of spinning, saving CPU
-type FutexMutex = record
-  state: int32          # UNLOCKED, LOCKED, or CONTENDED
+class FutexMutex:
+    state: int32          # UNLOCKED, LOCKED, or CONTENDED
 
 # Initialize a futex mutex
-proc futex_mutex_init(mtx: ptr FutexMutex) =
-  mtx.state = FUTEX_MUTEX_UNLOCKED
+def futex_mutex_init(mtx: Ptr[FutexMutex]):
+    mtx.state = FUTEX_MUTEX_UNLOCKED
 
 # Lock a futex mutex (blocks efficiently)
-proc futex_mutex_lock(mtx: ptr FutexMutex) =
-  # Fast path: try to acquire unlocked mutex
-  if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_UNLOCKED,
-                    FUTEX_MUTEX_LOCKED) == 1:
-    return
-
-  # Slow path: mutex was locked, set contended and wait
-  while 1 == 1:
-    # Set state to contended (if not already)
-    var old: int32 = atomic_load(addr(mtx.state))
-    if old == FUTEX_MUTEX_UNLOCKED:
-      # Became unlocked - try to acquire
-      if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_UNLOCKED,
-                        FUTEX_MUTEX_CONTENDED) == 1:
+def futex_mutex_lock(mtx: Ptr[FutexMutex]):
+    # Fast path: try to acquire unlocked mutex
+    if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_UNLOCKED,
+                      FUTEX_MUTEX_LOCKED) == 1:
         return
 
-    # Mark as contended and wait
-    if old != FUTEX_MUTEX_CONTENDED:
-      discard atomic_cmpxchg(addr(mtx.state), old, FUTEX_MUTEX_CONTENDED)
+    # Slow path: mutex was locked, set contended and wait
+    while 1 == 1:
+        # Set state to contended (if not already)
+        old: int32 = atomic_load(addr(mtx.state))
+        if old == FUTEX_MUTEX_UNLOCKED:
+            # Became unlocked - try to acquire
+            if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_UNLOCKED,
+                              FUTEX_MUTEX_CONTENDED) == 1:
+                return
 
-    # Sleep until woken (state should be CONTENDED)
-    discard futex_wait(addr(mtx.state), FUTEX_MUTEX_CONTENDED, 0)
+        # Mark as contended and wait
+        if old != FUTEX_MUTEX_CONTENDED:
+            atomic_cmpxchg(addr(mtx.state), old, FUTEX_MUTEX_CONTENDED)
 
-    # Woke up - try to acquire
-    if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_UNLOCKED,
-                      FUTEX_MUTEX_CONTENDED) == 1:
-      return
+        # Sleep until woken (state should be CONTENDED)
+        futex_wait(addr(mtx.state), FUTEX_MUTEX_CONTENDED, 0)
+
+        # Woke up - try to acquire
+        if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_UNLOCKED,
+                          FUTEX_MUTEX_CONTENDED) == 1:
+            return
 
 # Unlock a futex mutex
-proc futex_mutex_unlock(mtx: ptr FutexMutex) =
-  # Fast path: no waiters, just unlock
-  if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_LOCKED,
-                    FUTEX_MUTEX_UNLOCKED) == 1:
-    return
+def futex_mutex_unlock(mtx: Ptr[FutexMutex]):
+    # Fast path: no waiters, just unlock
+    if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_LOCKED,
+                      FUTEX_MUTEX_UNLOCKED) == 1:
+        return
 
-  # Slow path: there were waiters, wake one
-  atomic_store(addr(mtx.state), FUTEX_MUTEX_UNLOCKED)
-  discard futex_wake(addr(mtx.state), 1)
+    # Slow path: there were waiters, wake one
+    atomic_store(addr(mtx.state), FUTEX_MUTEX_UNLOCKED)
+    futex_wake(addr(mtx.state), 1)
 
 # Try to lock a futex mutex (non-blocking)
-proc futex_mutex_trylock(mtx: ptr FutexMutex): int32 =
-  if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_UNLOCKED,
-                    FUTEX_MUTEX_LOCKED) == 1:
-    return 1
-  return 0
+def futex_mutex_trylock(mtx: Ptr[FutexMutex]) -> int32:
+    if atomic_cmpxchg(addr(mtx.state), FUTEX_MUTEX_UNLOCKED,
+                      FUTEX_MUTEX_LOCKED) == 1:
+        return 1
+    return 0
 
 # ===========================================================================
 # Sleeping Semaphore (Futex-based)
 # ===========================================================================
 
 # Futex-based semaphore structure
-type FutexSemaphore = record
-  count: int32          # Available resources
-  max_count: int32      # Maximum count
+class FutexSemaphore:
+    count: int32          # Available resources
+    max_count: int32      # Maximum count
 
 # Initialize a futex semaphore
-proc futex_semaphore_init(sem: ptr FutexSemaphore, initial: int32, max: int32) =
-  sem.count = initial
-  sem.max_count = max
+def futex_semaphore_init(sem: Ptr[FutexSemaphore], initial: int32, max_val: int32):
+    sem.count = initial
+    sem.max_count = max_val
 
 # Wait on semaphore (decrement, blocking if count == 0)
-proc futex_semaphore_wait(sem: ptr FutexSemaphore) =
-  while 1 == 1:
-    var c: int32 = atomic_load(addr(sem.count))
-    if c > 0:
-      if atomic_cmpxchg(addr(sem.count), c, c - 1) == 1:
-        return
-    else:
-      # Count is 0 - sleep until signaled
-      discard futex_wait(addr(sem.count), 0, 0)
+def futex_semaphore_wait(sem: Ptr[FutexSemaphore]):
+    while 1 == 1:
+        c: int32 = atomic_load(addr(sem.count))
+        if c > 0:
+            if atomic_cmpxchg(addr(sem.count), c, c - 1) == 1:
+                return
+        else:
+            # Count is 0 - sleep until signaled
+            futex_wait(addr(sem.count), 0, 0)
 
 # Post to semaphore (increment)
-proc futex_semaphore_post(sem: ptr FutexSemaphore) =
-  while 1 == 1:
-    var c: int32 = atomic_load(addr(sem.count))
-    if c >= sem.max_count:
-      return  # Already at max
+def futex_semaphore_post(sem: Ptr[FutexSemaphore]):
+    while 1 == 1:
+        c: int32 = atomic_load(addr(sem.count))
+        if c >= sem.max_count:
+            return  # Already at max
 
-    if atomic_cmpxchg(addr(sem.count), c, c + 1) == 1:
-      # Successfully incremented - wake a waiter
-      discard futex_wake(addr(sem.count), 1)
-      return
+        if atomic_cmpxchg(addr(sem.count), c, c + 1) == 1:
+            # Successfully incremented - wake a waiter
+            futex_wake(addr(sem.count), 1)
+            return
 
 # ===========================================================================
 # Sleeping Condition Variable (Futex-based)
 # ===========================================================================
 
 # Futex-based condition variable
-type FutexCondVar = record
-  seq: int32            # Sequence number for spurious wakeup detection
+class FutexCondVar:
+    seq: int32            # Sequence number for spurious wakeup detection
 
 # Initialize a condition variable
-proc futex_condvar_init(cond: ptr FutexCondVar) =
-  cond.seq = 0
+def futex_condvar_init(cond: Ptr[FutexCondVar]):
+    cond.seq = 0
 
 # Wait on condition variable (with futex mutex)
-proc futex_condvar_wait(cond: ptr FutexCondVar, mtx: ptr FutexMutex) =
-  var seq: int32 = cond.seq
+def futex_condvar_wait(cond: Ptr[FutexCondVar], mtx: Ptr[FutexMutex]):
+    seq: int32 = cond.seq
 
-  # Release mutex
-  futex_mutex_unlock(mtx)
+    # Release mutex
+    futex_mutex_unlock(mtx)
 
-  # Wait for signal (seq will change)
-  discard futex_wait(addr(cond.seq), seq, 0)
+    # Wait for signal (seq will change)
+    futex_wait(addr(cond.seq), seq, 0)
 
-  # Re-acquire mutex
-  futex_mutex_lock(mtx)
+    # Re-acquire mutex
+    futex_mutex_lock(mtx)
 
 # Signal one waiter
-proc futex_condvar_signal(cond: ptr FutexCondVar) =
-  # Increment sequence to wake waiter
-  discard atomic_add(addr(cond.seq), 1)
-  discard futex_wake(addr(cond.seq), 1)
+def futex_condvar_signal(cond: Ptr[FutexCondVar]):
+    # Increment sequence to wake waiter
+    atomic_add(addr(cond.seq), 1)
+    futex_wake(addr(cond.seq), 1)
 
 # Broadcast to all waiters
-proc futex_condvar_broadcast(cond: ptr FutexCondVar) =
-  # Increment sequence and wake all
-  discard atomic_add(addr(cond.seq), 1)
-  discard futex_wake(addr(cond.seq), 0)  # 0 = wake all
+def futex_condvar_broadcast(cond: Ptr[FutexCondVar]):
+    # Increment sequence and wake all
+    atomic_add(addr(cond.seq), 1)
+    futex_wake(addr(cond.seq), 0)  # 0 = wake all
 
 # ===========================================================================
 # Once (Run Initialization Once)
 # ===========================================================================
 
-const ONCE_INIT: int32 = 0
-const ONCE_RUNNING: int32 = 1
-const ONCE_DONE: int32 = 2
+ONCE_INIT: Final[int32] = 0
+ONCE_RUNNING: Final[int32] = 1
+ONCE_DONE: Final[int32] = 2
 
 # Once control structure
-type Once = record
-  state: int32
+class Once:
+    state: int32
 
 # Initialize once control
-proc once_init(once: ptr Once) =
-  once.state = ONCE_INIT
+def once_init(once: Ptr[Once]):
+    once.state = ONCE_INIT
 
 # Call init_func exactly once, even with concurrent callers
 # Returns: 1 if this call ran the function, 0 if already done
-proc call_once(once: ptr Once, init_func: int32): int32 =
-  # Fast path: already done
-  if atomic_load(addr(once.state)) == ONCE_DONE:
+def call_once(once: Ptr[Once], init_func: int32) -> int32:
+    # Fast path: already done
+    if atomic_load(addr(once.state)) == ONCE_DONE:
+        return 0
+
+    # Try to become the one that runs initialization
+    if atomic_cmpxchg(addr(once.state), ONCE_INIT, ONCE_RUNNING) == 1:
+        # We are the initializer - run the function
+        # NOTE: Would need indirect call support
+        # For now, just mark as done
+        atomic_store(addr(once.state), ONCE_DONE)
+        futex_wake(addr(once.state), 0)  # Wake all waiters
+        return 1
+
+    # Someone else is running initialization - wait
+    while atomic_load(addr(once.state)) != ONCE_DONE:
+        futex_wait(addr(once.state), ONCE_RUNNING, 0)
+
     return 0
-
-  # Try to become the one that runs initialization
-  if atomic_cmpxchg(addr(once.state), ONCE_INIT, ONCE_RUNNING) == 1:
-    # We are the initializer - run the function
-    # NOTE: Would need indirect call support
-    # For now, just mark as done
-    atomic_store(addr(once.state), ONCE_DONE)
-    discard futex_wake(addr(once.state), 0)  # Wake all waiters
-    return 1
-
-  # Someone else is running initialization - wait
-  while atomic_load(addr(once.state)) != ONCE_DONE:
-    discard futex_wait(addr(once.state), ONCE_RUNNING, 0)
-
-  return 0

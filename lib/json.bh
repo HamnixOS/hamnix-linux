@@ -1,680 +1,519 @@
-# PoodillionOS JSON Library
-# Simple JSON parsing and building for Brainhair
+from lib.syscalls import *
 
-import "lib/syscalls"
+JSON_MAX_DEPTH: Final[int32] = 16
+JSON_MAX_STRING_LEN: Final[int32] = 256
+JSON_MAX_TOKENS: Final[int32] = 64
+JSON_BUILD_BUF_SIZE: Final[int32] = 4096
+JSON_NULL: Final[int32] = 0
+JSON_BOOL: Final[int32] = 1
+JSON_NUMBER: Final[int32] = 2
+JSON_STRING: Final[int32] = 3
+JSON_ARRAY: Final[int32] = 4
+JSON_OBJECT: Final[int32] = 5
+JSON_ERROR: Final[int32] = -1
 
-# =============================================================================
-# Configuration
-# =============================================================================
+token_types: Array[64, int32]
 
-const JSON_MAX_DEPTH: int32 = 16
-const JSON_MAX_STRING_LEN: int32 = 256
-const JSON_MAX_TOKENS: int32 = 64
-const JSON_BUILD_BUF_SIZE: int32 = 4096
+token_starts: Array[64, int32]
 
-# =============================================================================
-# JSON Types
-# =============================================================================
+token_lengths: Array[64, int32]
 
-const JSON_NULL: int32 = 0
-const JSON_BOOL: int32 = 1
-const JSON_NUMBER: int32 = 2
-const JSON_STRING: int32 = 3
-const JSON_ARRAY: int32 = 4
-const JSON_OBJECT: int32 = 5
-const JSON_ERROR: int32 = -1
+token_parents: Array[64, int32]
 
-# =============================================================================
-# Token Storage
-# =============================================================================
+token_count: int32 = 0
 
-# Token structure (stored as arrays for simplicity)
-# Each token has: type, start offset, length, parent index
-var token_types: array[64, int32]
-var token_starts: array[64, int32]
-var token_lengths: array[64, int32]
-var token_parents: array[64, int32]
-var token_count: int32 = 0
+parse_pos: int32 = 0
 
-# Parse state
-var parse_pos: int32 = 0
-var parse_input: ptr uint8 = cast[ptr uint8](0)
-var parse_len: int32 = 0
-var parse_error: int32 = 0
+parse_input: Ptr[uint8] = Ptr[uint8](0)
 
-# =============================================================================
-# JSON Building
-# =============================================================================
+parse_len: int32 = 0
 
-var json_build_buf: array[4096, uint8]
-var json_build_pos: int32 = 0
+parse_error: int32 = 0
 
-# Clear build buffer
-proc json_clear() =
-  json_build_pos = 0
-  json_build_buf[0] = cast[uint8](0)
+json_build_buf: Array[4096, uint8]
 
-# Append string to build buffer
-proc json_append(s: ptr uint8): int32 =
-  var i: int32 = 0
-  while cast[int32](s[i]) != 0 and json_build_pos < JSON_BUILD_BUF_SIZE - 1:
-    json_build_buf[json_build_pos] = s[i]
-    json_build_pos = json_build_pos + 1
-    i = i + 1
-  json_build_buf[json_build_pos] = cast[uint8](0)
-  return json_build_pos
+json_build_pos: int32 = 0
 
-# Append single character
-proc json_append_char(c: int32): int32 =
-  if json_build_pos < JSON_BUILD_BUF_SIZE - 1:
-    json_build_buf[json_build_pos] = cast[uint8](c)
-    json_build_pos = json_build_pos + 1
+def json_clear():
+    json_build_pos = 0
+    json_build_buf[0] = cast[uint8](0)
+
+def json_append(s: Ptr[uint8]) -> int32:
+    i: int32 = 0
+    while ((cast[int32](s[i]) != 0) and (json_build_pos < (JSON_BUILD_BUF_SIZE - 1))):
+        json_build_buf[json_build_pos] = s[i]
+        json_build_pos = (json_build_pos + 1)
+        i = (i + 1)
     json_build_buf[json_build_pos] = cast[uint8](0)
-  return json_build_pos
+    return json_build_pos
 
-# Append integer
-proc json_append_int(n: int32): int32 =
-  var buf: array[16, uint8]
-  discard itoa(n, addr(buf[0]))
-  return json_append(addr(buf[0]))
+def json_append_char(c: int32) -> int32:
+    if (json_build_pos < (JSON_BUILD_BUF_SIZE - 1)):
+        json_build_buf[json_build_pos] = cast[uint8](c)
+        json_build_pos = (json_build_pos + 1)
+        json_build_buf[json_build_pos] = cast[uint8](0)
+    return json_build_pos
 
-# Get current build buffer
-proc json_get(): ptr uint8 =
-  return addr(json_build_buf[0])
+def json_append_int(n: int32) -> int32:
+    buf: Array[16, uint8]
+    itoa(n, addr(buf[0]))
+    return json_append(addr(buf[0]))
 
-# Get build buffer length
-proc json_len(): int32 =
-  return json_build_pos
+def json_get() -> Ptr[uint8]:
+    return addr(json_build_buf[0])
 
-# =============================================================================
-# JSON Object/Array Builders
-# =============================================================================
+def json_len() -> int32:
+    return json_build_pos
 
-# Start building an object
-proc json_object_start(): int32 =
-  return json_append_char(123)  # '{'
+def json_object_start() -> int32:
+    return json_append_char(123)
 
-# End building an object
-proc json_object_end(): int32 =
-  # Remove trailing comma if present
-  if json_build_pos > 0 and cast[int32](json_build_buf[json_build_pos - 1]) == 44:
-    json_build_pos = json_build_pos - 1
-  return json_append_char(125)  # '}'
+def json_object_end() -> int32:
+    if ((json_build_pos > 0) and (cast[int32](json_build_buf[(json_build_pos - 1)]) == 44)):
+        json_build_pos = (json_build_pos - 1)
+    return json_append_char(125)
 
-# Start building an array
-proc json_array_start(): int32 =
-  return json_append_char(91)  # '['
+def json_array_start() -> int32:
+    return json_append_char(91)
 
-# End building an array
-proc json_array_end(): int32 =
-  # Remove trailing comma if present
-  if json_build_pos > 0 and cast[int32](json_build_buf[json_build_pos - 1]) == 44:
-    json_build_pos = json_build_pos - 1
-  return json_append_char(93)  # ']'
+def json_array_end() -> int32:
+    if ((json_build_pos > 0) and (cast[int32](json_build_buf[(json_build_pos - 1)]) == 44)):
+        json_build_pos = (json_build_pos - 1)
+    return json_append_char(93)
 
-# Add a key (for object)
-proc json_key(key: ptr uint8): int32 =
-  discard json_append_char(34)  # '"'
-  discard json_append(key)
-  discard json_append_char(34)  # '"'
-  return json_append_char(58)   # ':'
+def json_key(key: Ptr[uint8]) -> int32:
+    json_append_char(34)
+    json_append(key)
+    json_append_char(34)
+    return json_append_char(58)
 
-# Add string value
-proc json_string(val: ptr uint8): int32 =
-  discard json_append_char(34)  # '"'
-  # Escape special characters
-  var i: int32 = 0
-  while cast[int32](val[i]) != 0 and json_build_pos < JSON_BUILD_BUF_SIZE - 3:
-    var c: int32 = cast[int32](val[i])
-    if c == 34:  # '"'
-      discard json_append_char(92)  # '\'
-      discard json_append_char(34)
-    elif c == 92:  # '\'
-      discard json_append_char(92)
-      discard json_append_char(92)
-    elif c == 10:  # '\n'
-      discard json_append_char(92)
-      discard json_append_char(110)  # 'n'
-    elif c == 13:  # '\r'
-      discard json_append_char(92)
-      discard json_append_char(114)  # 'r'
-    elif c == 9:   # '\t'
-      discard json_append_char(92)
-      discard json_append_char(116)  # 't'
+def json_string(val: Ptr[uint8]) -> int32:
+    json_append_char(34)
+    i: int32 = 0
+    while ((cast[int32](val[i]) != 0) and (json_build_pos < (JSON_BUILD_BUF_SIZE - 3))):
+        c: int32 = cast[int32](val[i])
+        if (c == 34):
+
+            json_append_char(92)
+
+            json_append_char(34)
+        elif (c == 92):
+
+            json_append_char(92)
+
+            json_append_char(92)
+        elif (c == 10):
+
+            json_append_char(92)
+
+            json_append_char(110)
+        elif (c == 13):
+
+            json_append_char(92)
+
+            json_append_char(114)
+        elif (c == 9):
+
+            json_append_char(92)
+
+            json_append_char(116)
+        else:
+
+            json_append_char(c)
+        i = (i + 1)
+    json_append_char(34)
+    return json_append_char(44)
+
+def json_int(val: int32) -> int32:
+    json_append_int(val)
+    return json_append_char(44)
+
+def json_bool(val: int32) -> int32:
+    if (val != 0):
+
+        json_append(Ptr[uint8]("true"))
     else:
-      discard json_append_char(c)
-    i = i + 1
-  discard json_append_char(34)  # '"'
-  return json_append_char(44)   # ','
 
-# Add integer value
-proc json_int(val: int32): int32 =
-  discard json_append_int(val)
-  return json_append_char(44)  # ','
-
-# Add boolean value
-proc json_bool(val: int32): int32 =
-  if val != 0:
-    discard json_append(cast[ptr uint8]("true"))
-  else:
-    discard json_append(cast[ptr uint8]("false"))
-  return json_append_char(44)  # ','
-
-# Add null value
-proc json_null(): int32 =
-  discard json_append(cast[ptr uint8]("null"))
-  return json_append_char(44)  # ','
-
-# Add raw JSON (no escaping)
-proc json_raw(val: ptr uint8): int32 =
-  discard json_append(val)
-  return json_append_char(44)  # ','
-
-# =============================================================================
-# Convenience: key-value pairs
-# =============================================================================
-
-# Add string key-value pair
-proc json_kv_string(key: ptr uint8, val: ptr uint8): int32 =
-  discard json_key(key)
-  return json_string(val)
-
-# Add integer key-value pair
-proc json_kv_int(key: ptr uint8, val: int32): int32 =
-  discard json_key(key)
-  return json_int(val)
-
-# Add boolean key-value pair
-proc json_kv_bool(key: ptr uint8, val: int32): int32 =
-  discard json_key(key)
-  return json_bool(val)
-
-# Add null key-value pair
-proc json_kv_null(key: ptr uint8): int32 =
-  discard json_key(key)
-  return json_null()
-
-# =============================================================================
-# JSON Parsing - Helpers
-# =============================================================================
-
-# Skip whitespace
-proc json_skip_ws() =
-  while parse_pos < parse_len:
-    var c: int32 = cast[int32](parse_input[parse_pos])
-    if c == 32 or c == 9 or c == 10 or c == 13:
-      parse_pos = parse_pos + 1
-    else:
-      return
-
-# Check current character (returns int32 for easier comparison)
-proc json_peek(): int32 =
-  if parse_pos < parse_len:
-    return cast[int32](parse_input[parse_pos])
-  return 0
-
-# Advance position (returns int32 for easier comparison)
-proc json_advance(): int32 =
-  if parse_pos < parse_len:
-    var c: int32 = cast[int32](parse_input[parse_pos])
-    parse_pos = parse_pos + 1
-    return c
-  return 0
-
-# Match exact string
-proc json_match(s: ptr uint8): int32 =
-  var i: int32 = 0
-  while cast[int32](s[i]) != 0:
-    if parse_pos + i >= parse_len:
-      return 0
-    if cast[int32](parse_input[parse_pos + i]) != cast[int32](s[i]):
-      return 0
-    i = i + 1
-  parse_pos = parse_pos + i
-  return 1
-
-# =============================================================================
-# JSON Parsing - Token Creation
-# =============================================================================
-
-# Create a new token
-proc json_new_token(type_val: int32, start: int32, length: int32, parent: int32): int32 =
-  if token_count >= JSON_MAX_TOKENS:
-    parse_error = 1
-    return -1
-  var idx: int32 = token_count
-  token_types[idx] = type_val
-  token_starts[idx] = start
-  token_lengths[idx] = length
-  token_parents[idx] = parent
-  token_count = token_count + 1
-  return idx
-
-# =============================================================================
-# JSON Parsing - Value Parsers
-# =============================================================================
-
-# Note: json_parse_value is defined at the end of this section
-# to handle mutual recursion (Brainhair resolves all symbols before codegen)
-
-# Parse a string
-proc json_parse_string(parent: int32): int32 =
-  if json_peek() != 34:  # '"'
-    return -1
-  discard json_advance()
-  var start: int32 = parse_pos
-
-  while parse_pos < parse_len:
-    var c: int32 = cast[int32](parse_input[parse_pos])
-    if c == 34:  # '"'
-      var length: int32 = parse_pos - start
-      discard json_advance()
-      return json_new_token(JSON_STRING, start, length, parent)
-    if c == 92:  # '\' - escape sequence
-      parse_pos = parse_pos + 2
-    else:
-      parse_pos = parse_pos + 1
-
-  parse_error = 1
-  return -1
-
-# Parse a number
-proc json_parse_number(parent: int32): int32 =
-  var start: int32 = parse_pos
-
-  # Handle negative
-  if json_peek() == 45:  # '-'
-    discard json_advance()
-
-  # Parse digits
-  while parse_pos < parse_len:
-    var c: int32 = cast[int32](parse_input[parse_pos])
-    if c >= 48 and c <= 57:  # '0'-'9'
-      parse_pos = parse_pos + 1
-    elif c == 46:  # '.'
-      parse_pos = parse_pos + 1
-    elif c == 101 or c == 69:  # 'e' or 'E'
-      parse_pos = parse_pos + 1
-      if json_peek() == 43 or json_peek() == 45:  # '+' or '-'
-        parse_pos = parse_pos + 1
-    else:
-      break
-
-  var length: int32 = parse_pos - start
-  if length == 0:
-    parse_error = 1
-    return -1
-
-  return json_new_token(JSON_NUMBER, start, length, parent)
-
-# Parse an array
-proc json_parse_array(parent: int32): int32 =
-  if json_peek() != 91:  # '['
-    return -1
-  discard json_advance()
-
-  var start: int32 = parse_pos - 1
-  var arr_token: int32 = json_new_token(JSON_ARRAY, start, 0, parent)
-  if arr_token < 0:
-    return -1
-
-  json_skip_ws()
-
-  # Empty array
-  if json_peek() == 93:  # ']'
-    discard json_advance()
-    token_lengths[arr_token] = parse_pos - start
-    return arr_token
-
-  # Parse elements
-  while 1:
-    var elem: int32 = json_parse_value(arr_token)
-    if elem < 0:
-      return -1
-
-    json_skip_ws()
-    var c: int32 = json_peek()
-
-    if c == 93:  # ']'
-      discard json_advance()
-      token_lengths[arr_token] = parse_pos - start
-      return arr_token
-
-    if c == 44:  # ','
-      discard json_advance()
-      json_skip_ws()
-    else:
-      parse_error = 1
-      return -1
-
-  return -1
-
-# Parse an object
-proc json_parse_object(parent: int32): int32 =
-  if json_peek() != 123:  # '{'
-    return -1
-  discard json_advance()
-
-  var start: int32 = parse_pos - 1
-  var obj_token: int32 = json_new_token(JSON_OBJECT, start, 0, parent)
-  if obj_token < 0:
-    return -1
-
-  json_skip_ws()
-
-  # Empty object
-  if json_peek() == 125:  # '}'
-    discard json_advance()
-    token_lengths[obj_token] = parse_pos - start
-    return obj_token
-
-  # Parse key-value pairs
-  while 1:
-    # Parse key (must be string)
-    json_skip_ws()
-    var key: int32 = json_parse_string(obj_token)
-    if key < 0:
-      return -1
-
-    # Expect colon
-    json_skip_ws()
-    if json_peek() != 58:  # ':'
-      parse_error = 1
-      return -1
-    discard json_advance()
-
-    # Parse value
-    json_skip_ws()
-    var val: int32 = json_parse_value(obj_token)
-    if val < 0:
-      return -1
-
-    json_skip_ws()
-    var c: int32 = json_peek()
-
-    if c == 125:  # '}'
-      discard json_advance()
-      token_lengths[obj_token] = parse_pos - start
-      return obj_token
-
-    if c == 44:  # ','
-      discard json_advance()
-    else:
-      parse_error = 1
-      return -1
-
-  return -1
-
-# Parse any value
-proc json_parse_value(parent: int32): int32 =
-  json_skip_ws()
-  var c: int32 = json_peek()
-
-  if c == 34:  # '"' - string
-    return json_parse_string(parent)
-
-  if c == 123:  # '{' - object
-    return json_parse_object(parent)
-
-  if c == 91:  # '[' - array
-    return json_parse_array(parent)
-
-  if c == 116:  # 't' - true
-    if json_match(cast[ptr uint8]("true")) == 1:
-      return json_new_token(JSON_BOOL, parse_pos - 4, 4, parent)
-    parse_error = 1
-    return -1
-
-  if c == 102:  # 'f' - false
-    if json_match(cast[ptr uint8]("false")) == 1:
-      return json_new_token(JSON_BOOL, parse_pos - 5, 5, parent)
-    parse_error = 1
-    return -1
-
-  if c == 110:  # 'n' - null
-    if json_match(cast[ptr uint8]("null")) == 1:
-      return json_new_token(JSON_NULL, parse_pos - 4, 4, parent)
-    parse_error = 1
-    return -1
-
-  if c == 45 or (c >= 48 and c <= 57):  # '-' or digit - number
-    return json_parse_number(parent)
-
-  parse_error = 1
-  return -1
-
-# =============================================================================
-# JSON Parsing - Main Entry Point
-# =============================================================================
-
-# Parse a JSON string
-# Returns: number of tokens parsed, or -1 on error
-proc json_parse(input: ptr uint8, length: int32): int32 =
-  # Reset state
-  token_count = 0
-  parse_pos = 0
-  parse_input = input
-  parse_len = length
-  parse_error = 0
-
-  if length <= 0:
-    return -1
-
-  var result: int32 = json_parse_value(-1)
-
-  if result < 0 or parse_error != 0:
-    return -1
-
-  return token_count
-
-# Parse null-terminated JSON string
-proc json_parse_str(input: ptr uint8): int32 =
-  var len: int32 = strlen(input)
-  return json_parse(input, len)
-
-# =============================================================================
-# Token Access
-# =============================================================================
-
-# Get token count
-proc json_token_count(): int32 =
-  return token_count
-
-# Get token type
-proc json_token_type(idx: int32): int32 =
-  if idx < 0 or idx >= token_count:
-    return -1  # JSON_ERROR
-  return token_types[idx]
-
-# Get token start offset
-proc json_token_start(idx: int32): int32 =
-  if idx < 0 or idx >= token_count:
-    return -1
-  return token_starts[idx]
-
-# Get token length
-proc json_token_length(idx: int32): int32 =
-  if idx < 0 or idx >= token_count:
-    return 0
-  return token_lengths[idx]
-
-# Get token parent
-proc json_token_parent(idx: int32): int32 =
-  if idx < 0 or idx >= token_count:
-    return -1
-  return token_parents[idx]
-
-# Copy token value to buffer
-proc json_token_value(idx: int32, buf: ptr uint8, max_len: int32): int32 =
-  if idx < 0 or idx >= token_count:
-    buf[0] = cast[uint8](0)
+        json_append(Ptr[uint8]("false"))
+    return json_append_char(44)
+
+def json_null() -> int32:
+    json_append(Ptr[uint8]("null"))
+    return json_append_char(44)
+
+def json_raw(val: Ptr[uint8]) -> int32:
+    json_append(val)
+    return json_append_char(44)
+
+def json_kv_string(key: Ptr[uint8], val: Ptr[uint8]) -> int32:
+    json_key(key)
+    return json_string(val)
+
+def json_kv_int(key: Ptr[uint8], val: int32) -> int32:
+    json_key(key)
+    return json_int(val)
+
+def json_kv_bool(key: Ptr[uint8], val: int32) -> int32:
+    json_key(key)
+    return json_bool(val)
+
+def json_kv_null(key: Ptr[uint8]) -> int32:
+    json_key(key)
+    return json_null()
+
+def json_skip_ws():
+    while (parse_pos < parse_len):
+        c: int32 = cast[int32](parse_input[parse_pos])
+        if ((((c == 32) or (c == 9)) or (c == 10)) or (c == 13)):
+            parse_pos = (parse_pos + 1)
+        else:
+            return
+
+def json_peek() -> int32:
+    if (parse_pos < parse_len):
+        return cast[int32](parse_input[parse_pos])
     return 0
 
-  var start: int32 = token_starts[idx]
-  var length: int32 = token_lengths[idx]
-
-  if length > max_len - 1:
-    length = max_len - 1
-
-  var i: int32 = 0
-  while i < length:
-    buf[i] = parse_input[start + i]
-    i = i + 1
-  buf[length] = cast[uint8](0)
-
-  return length
-
-# Compare token value with string
-proc json_token_eq(idx: int32, s: ptr uint8): int32 =
-  if idx < 0 or idx >= token_count:
+def json_advance() -> int32:
+    if (parse_pos < parse_len):
+        c: int32 = cast[int32](parse_input[parse_pos])
+        parse_pos = (parse_pos + 1)
+        return c
     return 0
 
-  var start: int32 = token_starts[idx]
-  var length: int32 = token_lengths[idx]
-
-  var i: int32 = 0
-  while i < length and cast[int32](s[i]) != 0:
-    if cast[int32](parse_input[start + i]) != cast[int32](s[i]):
-      return 0
-    i = i + 1
-
-  if i < length or cast[int32](s[i]) != 0:
-    return 0
-
-  return 1
-
-# Get token as integer (for number tokens)
-proc json_token_int(idx: int32): int32 =
-  if idx < 0 or idx >= token_count:
-    return 0
-  if token_types[idx] != JSON_NUMBER:
-    return 0
-
-  var buf: array[32, uint8]
-  discard json_token_value(idx, addr(buf[0]), 32)
-  return atoi(addr(buf[0]))
-
-# Get token as boolean
-proc json_token_bool(idx: int32): int32 =
-  if idx < 0 or idx >= token_count:
-    return 0
-  if token_types[idx] != JSON_BOOL:
-    return 0
-
-  # Check if "true"
-  var start: int32 = token_starts[idx]
-  if parse_input[start] == 116:  # 't'
+def json_match(s: Ptr[uint8]) -> int32:
+    i: int32 = 0
+    while (cast[int32](s[i]) != 0):
+        if ((parse_pos + i) >= parse_len):
+            return 0
+        if (cast[int32](parse_input[(parse_pos + i)]) != cast[int32](s[i])):
+            return 0
+        i = (i + 1)
+    parse_pos = (parse_pos + i)
     return 1
-  return 0
 
-# =============================================================================
-# Object Key Lookup
-# =============================================================================
+def json_new_token(type_val: int32, start: int32, length: int32, parent: int32) -> int32:
+    if (token_count >= JSON_MAX_TOKENS):
+        parse_error = 1
+        return -1
+    idx: int32 = token_count
+    token_types[idx] = type_val
+    token_starts[idx] = start
+    token_lengths[idx] = length
+    token_parents[idx] = parent
+    token_count = (token_count + 1)
+    return idx
 
-# Find key in object, return value token index
-# obj_idx: index of the object token
-# key: key to find
-# Returns: index of value token, or -1 if not found
-proc json_get_key(obj_idx: int32, key: ptr uint8): int32 =
-  if obj_idx < 0 or obj_idx >= token_count:
-    return -1
-  if token_types[obj_idx] != JSON_OBJECT:
-    return -1
+def json_parse_string(parent: int32) -> int32:
+    if (json_peek() != 34):
+        return -1
+    json_advance()
+    start: int32 = parse_pos
+    while (parse_pos < parse_len):
+        c: int32 = cast[int32](parse_input[parse_pos])
+        if (c == 34):
+            length: int32 = (parse_pos - start)
 
-  # Iterate through tokens with this object as parent
-  var i: int32 = obj_idx + 1
-  var found_key: int32 = 0
-
-  while i < token_count:
-    # Check if this token has obj_idx as parent
-    if token_parents[i] == obj_idx:
-      if token_types[i] == JSON_STRING and found_key == 0:
-        # This is a key
-        if json_token_eq(i, key) == 1:
-          found_key = 1
-        i = i + 1
-        continue
-      elif found_key == 1:
-        # This is the value we're looking for
-        return i
-      else:
-        # This is a value, skip to next key-value pair
-        found_key = 0
-    elif token_parents[i] < obj_idx:
-      # We've moved past this object
-      break
-    i = i + 1
-
-  return -1
-
-# Get string value from object key
-proc json_get_string(obj_idx: int32, key: ptr uint8, buf: ptr uint8, max_len: int32): int32 =
-  var val_idx: int32 = json_get_key(obj_idx, key)
-  if val_idx < 0:
-    buf[0] = cast[uint8](0)
-    return 0
-  if token_types[val_idx] != JSON_STRING:
-    buf[0] = cast[uint8](0)
-    return 0
-  return json_token_value(val_idx, buf, max_len)
-
-# Get integer value from object key
-proc json_get_int(obj_idx: int32, key: ptr uint8): int32 =
-  var val_idx: int32 = json_get_key(obj_idx, key)
-  if val_idx < 0:
-    return 0
-  return json_token_int(val_idx)
-
-# Get boolean value from object key
-proc json_get_bool(obj_idx: int32, key: ptr uint8): int32 =
-  var val_idx: int32 = json_get_key(obj_idx, key)
-  if val_idx < 0:
-    return 0
-  return json_token_bool(val_idx)
-
-# =============================================================================
-# Array Access
-# =============================================================================
-
-# Get array element by index
-# arr_idx: index of the array token
-# elem_idx: index of element (0-based)
-# Returns: token index of element, or -1 if not found
-proc json_array_get(arr_idx: int32, elem_idx: int32): int32 =
-  if arr_idx < 0 or arr_idx >= token_count:
-    return -1
-  if token_types[arr_idx] != JSON_ARRAY:
+            json_advance()
+            return json_new_token(JSON_STRING, start, length, parent)
+        if (c == 92):
+            parse_pos = (parse_pos + 2)
+        else:
+            parse_pos = (parse_pos + 1)
+    parse_error = 1
     return -1
 
-  var i: int32 = arr_idx + 1
-  var count: int32 = 0
+def json_parse_number(parent: int32) -> int32:
+    start: int32 = parse_pos
+    if (json_peek() == 45):
 
-  while i < token_count:
-    if token_parents[i] == arr_idx:
-      if count == elem_idx:
-        return i
-      count = count + 1
-    elif token_parents[i] < arr_idx:
-      break
-    i = i + 1
+        json_advance()
+    while (parse_pos < parse_len):
+        c: int32 = cast[int32](parse_input[parse_pos])
+        if ((c >= 48) and (c <= 57)):
+            parse_pos = (parse_pos + 1)
+        elif (c == 46):
+            parse_pos = (parse_pos + 1)
+        elif ((c == 101) or (c == 69)):
+            parse_pos = (parse_pos + 1)
+            if ((json_peek() == 43) or (json_peek() == 45)):
+                parse_pos = (parse_pos + 1)
+        else:
+            break
+    length: int32 = (parse_pos - start)
+    if (length == 0):
+        parse_error = 1
+        return -1
+    return json_new_token(JSON_NUMBER, start, length, parent)
 
-  return -1
+def json_parse_array(parent: int32) -> int32:
+    if (json_peek() != 91):
+        return -1
+    json_advance()
+    start: int32 = (parse_pos - 1)
+    arr_token: int32 = json_new_token(JSON_ARRAY, start, 0, parent)
+    if (arr_token < 0):
+        return -1
+    json_skip_ws()
+    if (json_peek() == 93):
 
-# Count elements in array
-proc json_array_length(arr_idx: int32): int32 =
-  if arr_idx < 0 or arr_idx >= token_count:
+        json_advance()
+        token_lengths[arr_token] = (parse_pos - start)
+        return arr_token
+    while 1:
+        elem: int32 = json_parse_value(arr_token)
+        if (elem < 0):
+            return -1
+        json_skip_ws()
+        c: int32 = json_peek()
+        if (c == 93):
+
+            json_advance()
+            token_lengths[arr_token] = (parse_pos - start)
+            return arr_token
+        if (c == 44):
+
+            json_advance()
+            json_skip_ws()
+        else:
+            parse_error = 1
+            return -1
+    return -1
+
+def json_parse_object(parent: int32) -> int32:
+    if (json_peek() != 123):
+        return -1
+    json_advance()
+    start: int32 = (parse_pos - 1)
+    obj_token: int32 = json_new_token(JSON_OBJECT, start, 0, parent)
+    if (obj_token < 0):
+        return -1
+    json_skip_ws()
+    if (json_peek() == 125):
+
+        json_advance()
+        token_lengths[obj_token] = (parse_pos - start)
+        return obj_token
+    while 1:
+        json_skip_ws()
+        key: int32 = json_parse_string(obj_token)
+        if (key < 0):
+            return -1
+        json_skip_ws()
+        if (json_peek() != 58):
+            parse_error = 1
+            return -1
+
+        json_advance()
+        json_skip_ws()
+        val: int32 = json_parse_value(obj_token)
+        if (val < 0):
+            return -1
+        json_skip_ws()
+        c: int32 = json_peek()
+        if (c == 125):
+
+            json_advance()
+            token_lengths[obj_token] = (parse_pos - start)
+            return obj_token
+        if (c == 44):
+
+            json_advance()
+        else:
+            parse_error = 1
+            return -1
+    return -1
+
+def json_parse_value(parent: int32) -> int32:
+    json_skip_ws()
+    c: int32 = json_peek()
+    if (c == 34):
+        return json_parse_string(parent)
+    if (c == 123):
+        return json_parse_object(parent)
+    if (c == 91):
+        return json_parse_array(parent)
+    if (c == 116):
+        if (json_match(Ptr[uint8]("true")) == 1):
+            return json_new_token(JSON_BOOL, (parse_pos - 4), 4, parent)
+        parse_error = 1
+        return -1
+    if (c == 102):
+        if (json_match(Ptr[uint8]("false")) == 1):
+            return json_new_token(JSON_BOOL, (parse_pos - 5), 5, parent)
+        parse_error = 1
+        return -1
+    if (c == 110):
+        if (json_match(Ptr[uint8]("null")) == 1):
+            return json_new_token(JSON_NULL, (parse_pos - 4), 4, parent)
+        parse_error = 1
+        return -1
+    if ((c == 45) or ((c >= 48) and (c <= 57))):
+        return json_parse_number(parent)
+    parse_error = 1
+    return -1
+
+def json_parse(input: Ptr[uint8], length: int32) -> int32:
+    token_count = 0
+    parse_pos = 0
+    parse_input = input
+    parse_len = length
+    parse_error = 0
+    if (length <= 0):
+        return -1
+    result: int32 = json_parse_value(-1)
+    if ((result < 0) or (parse_error != 0)):
+        return -1
+    return token_count
+
+def json_parse_str(input: Ptr[uint8]) -> int32:
+    len: int32 = strlen(input)
+    return json_parse(input, len)
+
+def json_token_count() -> int32:
+    return token_count
+
+def json_token_type(idx: int32) -> int32:
+    if ((idx < 0) or (idx >= token_count)):
+        return -1
+    return token_types[idx]
+
+def json_token_start(idx: int32) -> int32:
+    if ((idx < 0) or (idx >= token_count)):
+        return -1
+    return token_starts[idx]
+
+def json_token_length(idx: int32) -> int32:
+    if ((idx < 0) or (idx >= token_count)):
+        return 0
+    return token_lengths[idx]
+
+def json_token_parent(idx: int32) -> int32:
+    if ((idx < 0) or (idx >= token_count)):
+        return -1
+    return token_parents[idx]
+
+def json_token_value(idx: int32, buf: Ptr[uint8], max_len: int32) -> int32:
+    if ((idx < 0) or (idx >= token_count)):
+        buf[0] = cast[uint8](0)
+        return 0
+    start: int32 = token_starts[idx]
+    length: int32 = token_lengths[idx]
+    if (length > (max_len - 1)):
+        length = (max_len - 1)
+    i: int32 = 0
+    while (i < length):
+        buf[i] = parse_input[(start + i)]
+        i = (i + 1)
+    buf[length] = cast[uint8](0)
+    return length
+
+def json_token_eq(idx: int32, s: Ptr[uint8]) -> int32:
+    if ((idx < 0) or (idx >= token_count)):
+        return 0
+    start: int32 = token_starts[idx]
+    length: int32 = token_lengths[idx]
+    i: int32 = 0
+    while ((i < length) and (cast[int32](s[i]) != 0)):
+        if (cast[int32](parse_input[(start + i)]) != cast[int32](s[i])):
+            return 0
+        i = (i + 1)
+    if ((i < length) or (cast[int32](s[i]) != 0)):
+        return 0
+    return 1
+
+def json_token_int(idx: int32) -> int32:
+    if ((idx < 0) or (idx >= token_count)):
+        return 0
+    if (token_types[idx] != JSON_NUMBER):
+        return 0
+    buf: Array[32, uint8]
+    json_token_value(idx, addr(buf[0]), 32)
+    return atoi(addr(buf[0]))
+
+def json_token_bool(idx: int32) -> int32:
+    if ((idx < 0) or (idx >= token_count)):
+        return 0
+    if (token_types[idx] != JSON_BOOL):
+        return 0
+    start: int32 = token_starts[idx]
+    if (parse_input[start] == 116):
+        return 1
     return 0
-  if token_types[arr_idx] != JSON_ARRAY:
-    return 0
 
-  var i: int32 = arr_idx + 1
-  var count: int32 = 0
+def json_get_key(obj_idx: int32, key: Ptr[uint8]) -> int32:
+    if ((obj_idx < 0) or (obj_idx >= token_count)):
+        return -1
+    if (token_types[obj_idx] != JSON_OBJECT):
+        return -1
+    i: int32 = (obj_idx + 1)
+    found_key: int32 = 0
+    while (i < token_count):
+        if (token_parents[i] == obj_idx):
+            if ((token_types[i] == JSON_STRING) and (found_key == 0)):
+                if (json_token_eq(i, key) == 1):
+                    found_key = 1
+                i = (i + 1)
+                continue
+            elif (found_key == 1):
+                return i
+            else:
+                found_key = 0
+        elif (token_parents[i] < obj_idx):
+            break
+        i = (i + 1)
+    return -1
 
-  while i < token_count:
-    if token_parents[i] == arr_idx:
-      count = count + 1
-    elif token_parents[i] < arr_idx:
-      break
-    i = i + 1
+def json_get_string(obj_idx: int32, key: Ptr[uint8], buf: Ptr[uint8], max_len: int32) -> int32:
+    val_idx: int32 = json_get_key(obj_idx, key)
+    if (val_idx < 0):
+        buf[0] = cast[uint8](0)
+        return 0
+    if (token_types[val_idx] != JSON_STRING):
+        buf[0] = cast[uint8](0)
+        return 0
+    return json_token_value(val_idx, buf, max_len)
 
-  return count
+def json_get_int(obj_idx: int32, key: Ptr[uint8]) -> int32:
+    val_idx: int32 = json_get_key(obj_idx, key)
+    if (val_idx < 0):
+        return 0
+    return json_token_int(val_idx)
+
+def json_get_bool(obj_idx: int32, key: Ptr[uint8]) -> int32:
+    val_idx: int32 = json_get_key(obj_idx, key)
+    if (val_idx < 0):
+        return 0
+    return json_token_bool(val_idx)
+
+def json_array_get(arr_idx: int32, elem_idx: int32) -> int32:
+    if ((arr_idx < 0) or (arr_idx >= token_count)):
+        return -1
+    if (token_types[arr_idx] != JSON_ARRAY):
+        return -1
+    i: int32 = (arr_idx + 1)
+    count: int32 = 0
+    while (i < token_count):
+        if (token_parents[i] == arr_idx):
+            if (count == elem_idx):
+                return i
+            count = (count + 1)
+        elif (token_parents[i] < arr_idx):
+            break
+        i = (i + 1)
+    return -1
+
+def json_array_length(arr_idx: int32) -> int32:
+    if ((arr_idx < 0) or (arr_idx >= token_count)):
+        return 0
+    if (token_types[arr_idx] != JSON_ARRAY):
+        return 0
+    i: int32 = (arr_idx + 1)
+    count: int32 = 0
+    while (i < token_count):
+        if (token_parents[i] == arr_idx):
+            count = (count + 1)
+        elif (token_parents[i] < arr_idx):
+            break
+        i = (i + 1)
+    return count
