@@ -1,6 +1,6 @@
-SYS_GETRANDOM: Final[int32] = 80
+from lib.syscalls import syscall3
 
-extern def syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32) -> int32
+SYS_GETRANDOM: Final[int32] = 80
 
 rng_state: int32 = 12345
 

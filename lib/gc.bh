@@ -1,33 +1,46 @@
-SYS_mmap2: Final[int32] = 192
-SYS_munmap: Final[int32] = 91
-SYS_brk: Final[int32] = 45
-PROT_READ: Final[int32] = 1
-PROT_WRITE: Final[int32] = 2
-MAP_PRIVATE: Final[int32] = 2
-MAP_ANONYMOUS: Final[int32] = 32
+from lib.syscalls import syscall1, syscall3, syscall6, SYS_mmap2, SYS_munmap, SYS_brk, SYS_write
+from lib.syscalls import PROT_READ, PROT_WRITE, MAP_PRIVATE, MAP_ANONYMOUS
 
-extern def syscall1(num: int32, arg1: int32) -> int32
+# Stack pointer global
+gc_stack_bottom_value: int32 = 0
+gc_stack_approx: int32 = 0
 
-extern def syscall3(num: int32, arg1: int32, arg2: int32, arg3: int32) -> int32
+# Get current stack pointer (approximation using local variable address)
+def gc_get_stack_pointer() -> int32:
+    local_var: int32 = 0
+    return cast[int32](addr(local_var))
 
-extern def syscall6(num: int32, arg1: int32, arg2: int32, arg3: int32, arg4: int32, arg5: int32, arg6: int32) -> int32
-SYS_write: Final[int32] = 4
+# Get stack bottom (stored global)
+def gc_get_stack_bottom() -> int32:
+    return gc_stack_bottom_value
 
-extern def gc_get_stack_pointer() -> int32
+# Set stack bottom
+def gc_set_stack_bottom(address: int32):
+    gc_stack_bottom_value = address
 
-extern def gc_get_stack_bottom() -> int32
+# Scan stack for pointers (simplified - just return 0)
+def gc_scan_stack(callback: int32, context: int32) -> int32:
+    return 0
 
-extern def gc_set_stack_bottom(address: int32)
+# Memory barrier (no-op for single-threaded userspace)
+def gc_memory_barrier():
+    gc_stack_approx = gc_stack_approx
 
-extern def gc_scan_stack(callback: int32, context: int32) -> int32
+# Atomic set (non-atomic version for single-threaded)
+def gc_atomic_set(ptr_addr: Ptr[int32], value: int32):
+    ptr_addr[0] = value
 
-extern def gc_memory_barrier()
+# Atomic get (non-atomic version for single-threaded)
+def gc_atomic_get(ptr_addr: Ptr[int32]) -> int32:
+    return ptr_addr[0]
 
-extern def gc_atomic_set(ptr_addr: Ptr[int32], value: int32)
-
-extern def gc_atomic_get(ptr_addr: Ptr[int32]) -> int32
-
-extern def gc_atomic_cas(ptr_addr: Ptr[int32], expected: int32, new_val: int32) -> int32
+# Atomic compare-and-swap (non-atomic version for single-threaded)
+def gc_atomic_cas(ptr_addr: Ptr[int32], expected: int32, new_val: int32) -> int32:
+    old: int32 = ptr_addr[0]
+    if old == expected:
+        ptr_addr[0] = new_val
+        return 1
+    return 0
 GC_HEADER_SIZE: Final[int32] = 16
 GC_MARK_BIT: Final[int32] = 1
 GC_TYPE_MASK: Final[int32] = -2

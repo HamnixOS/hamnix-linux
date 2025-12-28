@@ -128,6 +128,16 @@ SYS_getdents: Final[int32] = 141
 SYS_nanosleep: Final[int32] = 162
 SYS_getcwd: Final[int32] = 183
 SYS_mmap2: Final[int32] = 192
+# mmap protection flags
+PROT_NONE: Final[int32] = 0
+PROT_READ: Final[int32] = 1
+PROT_WRITE: Final[int32] = 2
+PROT_EXEC: Final[int32] = 4
+# mmap flags
+MAP_SHARED: Final[int32] = 1
+MAP_PRIVATE: Final[int32] = 2
+MAP_ANONYMOUS: Final[int32] = 32
+MAP_FIXED: Final[int32] = 16
 SYS_getdents64: Final[int32] = 220
 SYS_init_module: Final[int32] = 128
 SYS_delete_module: Final[int32] = 129
