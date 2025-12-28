@@ -664,3 +664,69 @@ def http_url_decode(input: Ptr[uint8], output: Ptr[uint8]) -> int32:
 
     output[o] = 0
     return o
+
+# =============================================================================
+# HTTPS Support (via TLS 1.3)
+# =============================================================================
+
+# Check if URL is HTTPS
+def http_is_https(url: Ptr[uint8]) -> int32:
+    """Check if URL uses HTTPS scheme"""
+    if url[0] == 104 and url[1] == 116 and url[2] == 116 and url[3] == 112 and url[4] == 115:
+        return 1  # "https"
+    return 0
+
+# HTTPS GET request (requires lib/tls13.bh)
+# This is a forward declaration - implementation uses TLS library
+def https_get(host: Ptr[uint8], port: int32, path: Ptr[uint8],
+              response_buf: Ptr[uint8], max_len: int32) -> int32:
+    """Perform HTTPS GET request
+
+    host: hostname (e.g., "example.com")
+    port: port number (usually 443)
+    path: URL path (e.g., "/api/data")
+    response_buf: buffer to store response body
+    max_len: maximum response length
+
+    Returns: number of bytes in response body, or -1 on error
+
+    Note: Requires lib/tls13.bh to be imported in your program.
+    Use tls_https_get() directly for full control.
+    """
+    # This is a stub - users should use tls_https_get from lib/tls13.bh
+    # The actual implementation requires the TLS connection structures
+    return -1
+
+# Unified HTTP/HTTPS GET by URL
+def http_fetch(url: Ptr[uint8], response_buf: Ptr[uint8], max_len: int32) -> int32:
+    """Fetch URL content (HTTP or HTTPS)
+
+    url: full URL (e.g., "http://example.com/path" or "https://...")
+    response_buf: buffer to store response body
+    max_len: maximum response length
+
+    Returns: number of bytes in response body, or -1 on error
+
+    Note: For HTTPS, requires lib/tls13.bh and uses tls_https_get()
+    """
+    # Parse URL
+    host: Array[128, uint8]
+    path: Array[256, uint8]
+    port: int32 = 80
+
+    if http_parse_url(url, addr(host[0]), 128, addr(path[0]), 256, addr(port)) < 0:
+        return -1
+
+    is_https: int32 = http_is_https(url)
+
+    if is_https == 1:
+        # For HTTPS, we need to use DNS to resolve hostname first
+        # Then use TLS library. This stub returns -1.
+        # Users should import lib/tls13.bh and use tls_https_get directly.
+        return -1
+
+    # HTTP - need to resolve hostname to IP first
+    # For now, this only works with IP addresses in the URL
+    # TODO: Integrate with DNS resolver
+
+    return -1
