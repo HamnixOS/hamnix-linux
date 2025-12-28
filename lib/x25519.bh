@@ -143,6 +143,10 @@ def x25519_compare_keys(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
         return 1  # Equal
     return 0    # Not equal
 
+# Print a single character
+def print_char(c: Ptr[uint8]):
+    write(STDOUT, c, 1)
+
 # Print key as hex (for debugging)
 def x25519_print_key(key: Ptr[uint8]):
     hex: Ptr[uint8] = cast[Ptr[uint8]]("0123456789abcdef")
@@ -151,8 +155,8 @@ def x25519_print_key(key: Ptr[uint8]):
         b: int32 = cast[int32](key[i])
         hi: int32 = (b / 16) & 0x0F
         lo: int32 = b & 0x0F
-        print_char(hex[hi])
-        print_char(hex[lo])
+        print_char(addr(hex[hi]))
+        print_char(addr(hex[lo]))
         i = i + 1
 
 # Zero out a key (for security)

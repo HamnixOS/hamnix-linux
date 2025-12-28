@@ -11,6 +11,7 @@
 
 from lib.syscalls import *
 from lib.sha256 import *
+from lib.hmac import *
 from lib.x25519 import *
 from lib.chacha20 import *
 from lib.poly1305 import *

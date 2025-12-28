@@ -62,6 +62,27 @@ def net_is_connected(sock: int32) -> int32:
 def net_has_data(sock: int32) -> int32:
     return net_is_connected(sock)
 
+# TCP compatibility wrappers for TLS library
+# These map the tcp_* names used by TLS to net_* functions
+
+def tcp_connect(host: Ptr[uint8], port: int32) -> int32:
+    # For userland, we need to use net_connect which takes an IP
+    # The TLS library passes hostname, but net_connect needs IP
+    # For now, just call net_connect assuming host is already an IP
+    return net_connect(host, port)
+
+def tcp_send(sock: int32, data: Ptr[uint8], len: int32) -> int32:
+    return net_send(sock, data, len)
+
+def tcp_recv(sock: int32, buf: Ptr[uint8], max_len: int32) -> int32:
+    return net_recv(sock, buf, max_len)
+
+def tcp_close(sock: int32):
+    net_close(sock)
+
+def tcp_state(sock: int32) -> int32:
+    return net_state(sock)
+
 def parse_ipv4(s: Ptr[uint8], out_ip: Ptr[uint8]) -> int32:
     i: int32 = 0
     octet: int32 = 0
