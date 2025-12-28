@@ -224,3 +224,27 @@ def mem_dup(src: Ptr[uint8], n: int32) -> Ptr[uint8]:
     if cast[int32](dest) != 0:
         mem_copy(dest, src, n)
     return dest
+
+# C-compatible aliases
+def malloc(size: int32) -> *uint8:
+    return alloc(size)
+
+def memcpy(dest: *uint8, src: *uint8, n: int32):
+    mem_copy(dest, src, n)
+
+def strlen(s: *uint8) -> int32:
+    len: int32 = 0
+    while *(s + len) != 0:
+        len = len + 1
+    return len
+
+def strcpy(dest: *uint8, src: *uint8):
+    i: int32 = 0
+    while *(src + i) != 0:
+        *(dest + i) = *(src + i)
+        i = i + 1
+    *(dest + i) = 0
+
+def strcat(dest: *uint8, src: *uint8):
+    dest_len: int32 = strlen(dest)
+    strcpy(dest + dest_len, src)

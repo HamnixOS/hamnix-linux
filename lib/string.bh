@@ -909,3 +909,40 @@ def cstr_pad_right(s: Ptr[uint8], target_len: int32, pad: uint8, buf: Ptr[uint8]
     memset(cast[Ptr[uint8]](cast[int32](buf) + s_len), cast[int32](pad), target_len - s_len)
     buf[target_len] = 0
     return target_len
+
+# ============================================================================
+# Python-compatible string methods (for compiler self-hosting)
+# ============================================================================
+
+# Convert string to lowercase (in-place)
+def str_lower(s: Ptr[uint8]) -> Ptr[uint8]:
+    i: int32 = 0
+    while s[i] != 0:
+        c: int32 = cast[int32](s[i])
+        if c >= 65 and c <= 90:
+            s[i] = cast[uint8](c + 32)
+        i = i + 1
+    return s
+
+# Check if string ends with suffix
+def str_endswith(s: Ptr[uint8], suffix: Ptr[uint8]) -> bool:
+    s_len: int32 = cstr_len(s)
+    suffix_len: int32 = cstr_len(suffix)
+    if suffix_len > s_len:
+        return False
+    i: int32 = 0
+    start: int32 = s_len - suffix_len
+    while i < suffix_len:
+        if s[start + i] != suffix[i]:
+            return False
+        i = i + 1
+    return True
+
+# Check if string starts with prefix
+def str_startswith(s: Ptr[uint8], prefix: Ptr[uint8]) -> bool:
+    i: int32 = 0
+    while prefix[i] != 0:
+        if s[i] != prefix[i]:
+            return False
+        i = i + 1
+    return True
