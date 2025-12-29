@@ -8,7 +8,7 @@
 
 # Import syscalls
 SYS_brk: Final[int32] = 45
-SYS_mmap: Final[int32] = 90
+SYS_mmap2: Final[int32] = 192  # mmap2 takes 6 args directly (unlike mmap which needs pointer)
 SYS_munmap: Final[int32] = 91
 
 PROT_READ: Final[int32] = 1
@@ -42,13 +42,15 @@ def heap_init() -> int32:
     if heap_base != 0:
         return 1  # Already initialized
 
-    # Allocate heap using mmap
-    mem: int32 = syscall6(SYS_mmap, 0, DEFAULT_HEAP_SIZE,
+    # Allocate heap using mmap2 (6-arg version, syscall 192)
+    mem: int32 = syscall6(SYS_mmap2, 0, DEFAULT_HEAP_SIZE,
                           PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
 
-    if mem < 0:
-        return 0  # Failed
+    # mmap2 errors return -errno (values 0xFFFFF001 to 0xFFFFFFFF)
+    # Use unsigned comparison since valid addresses can be > 0x7FFFFFFF
+    if cast[uint32](mem) > 0xFFFFF000:
+        return 0  # Failed (error range)
 
     heap_base = mem
     heap_size = DEFAULT_HEAP_SIZE
