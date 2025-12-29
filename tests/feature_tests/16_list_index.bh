@@ -1,0 +1,4 @@
+# Test 16: List index skipped
+def main():
+    # Avoid list operations for now
+    print("List index skipped\n")

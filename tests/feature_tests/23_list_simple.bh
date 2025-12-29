@@ -1,0 +1,4 @@
+# Test 23: Simple list without class
+def main():
+    items = []
+    print("List created\n")

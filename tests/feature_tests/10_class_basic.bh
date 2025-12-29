@@ -1,0 +1,8 @@
+# Test 10: Basic class instantiation
+class Simple:
+    def __init__(self):
+        self.value = 42
+
+def main():
+    s = Simple()
+    print("Class init works\n")
