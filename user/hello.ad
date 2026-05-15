@@ -1,23 +1,23 @@
 # user/hello.py
 #
-# First Pynux-language user program. Compiled to a CPL-3 ELF that the
+# First Hamnix-language user program. Compiled to a CPL-3 ELF that the
 # kernel's fs/elf.py loader picks up out of the cpio initramfs and
 # runs in user mode. The runtime (user/runtime.S) provides _start +
-# syscall wrappers; everything below is plain Pynux that talks to the
+# syscall wrappers; everything below is plain Hamnix that talks to the
 # kernel exclusively through those wrappers.
 #
 # Build:
-#   python3 -m compiler.pynux compile --target=x86_64-pynux-user \
+#   python3 -m compiler.adder compile --target=x86_64-adder-user \
 #       user/hello.py -o build/user/pyhello.elf
 #
 # Run (drops into /init):
-#   INIT_ELF=build/user/pyhello.elf bash scripts/test_pynux_user.sh
+#   INIT_ELF=build/user/pyhello.elf bash scripts/test_hamnix_user.sh
 #
 # Output name `pyhello` is deliberately distinct from the asm
 # user/hello.S → build/user/hello.elf binary (which /init execs via
 # SYS_EXECVE); they're independent user binaries living in the cpio.
 #
-# Pynux can't initialise a global byte-array with a string literal yet
+# Hamnix can't initialise a global byte-array with a string literal yet
 # (M16-era backend), but it CAN pass a string-literal expression to a
 # function call — codegen interns it into .rodata and hands the
 # wrapper a RIP-relative pointer. That's how we feed sys_write below.
@@ -45,13 +45,13 @@ def write_str(fd: int32, s: Ptr[uint8]):
 
 
 def main() -> int32:
-    # Banner — proves the Pynux→user-mode pipeline end to end.
-    write_str(1, "[hello.py] Pynux user-mode banner from ")
-    write_str(1, "Pynux-compiled code!\n")
+    # Banner — proves the Hamnix→user-mode pipeline end to end.
+    write_str(1, "[hello.py] Hamnix user-mode banner from ")
+    write_str(1, "Hamnix-compiled code!\n")
 
     # Also exercise SYS_OPEN/READ/CLOSE against the cpio's /version
     # file, matching what user/init.S does. If this works, we've
-    # proved the VFS path is reachable from Pynux too.
+    # proved the VFS path is reachable from Hamnix too.
     fd: int32 = sys_open("/version")
     if fd >= 0:
         # Fixed-size on-stack buffer; reading up to 128 bytes is plenty
