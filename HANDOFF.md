@@ -1,0 +1,472 @@
+# HANDOFF — porting the Hamnix userland to the Linux kernel
+
+You are starting with no context. Read this first, then `README.md`.
+
+---
+
+## 1. What Hamnix is, and why this repo exists
+
+Hamnix 1.0 is a from-scratch x86_64 operating system written entirely in
+**Adder**, a Python-shaped systems language with a hand-written x86_64 backend
+and a self-hosted compiler. There are **zero lines of C in the kernel**. Its
+syscall layer is Plan 9-shaped rather than POSIX-shaped: resources are file
+trees, not syscall families. Networking is `/net`, windows are `/dev/wsys`,
+processes assemble their own private namespaces with `bind`. A Linux ABI shim
+lets real Debian binaries run in a Linux namespace alongside it. It is released,
+tagged `v1.0`, and published at 255.one.
+
+The purity is the point, and it is also the ceiling: Hamnix must write every
+driver itself. No Wi-Fi, no GPU, no modern browser, not for years.
+
+This repository is the second line. Same Adder userland, running on the **Linux
+kernel with glibc**, so that drivers, Wi-Fi, GPU and a real browser come for
+free. Hamnix 1.0 keeps its version number and its purity claim; this is a
+sibling, not a successor — Debian GNU/Hurd to Debian, not Debian 12 to Debian 11.
+
+**Your job is the port. Nothing here compiles yet, by design.** The code was
+copied across unchanged so the port stays a reviewable diff.
+
+---
+
+## 2. What was copied, and what was left behind
+
+Copied from `HamnixOS/Hamnix` with `git-filter-repo`, full history preserved
+(3,789 commits), original paths kept verbatim so patches cherry-pick cleanly
+between the two repos:
+
+| Path | Contents |
+|--|--|
+| `user/` | 277 applications (~180k lines) incl. `hamsh.ad` (17.6k lines), `hamUId.ad` (31.2k, the compositor), `hpm.ad` (8.2k, package manager); plus `linux-runtime.S`, `runtime.S`, `syscall_nums.h`, `*.lds` |
+| `lib/` | 167 modules (~162k lines): `hamui.ad` toolkit, `web/` (42 files — a from-scratch HTML/CSS/JS engine), `vk/` (Vulkan), codecs, crypto |
+| `scripts/` | 1,811 files of build and test glue |
+| `tests/` | 162 entries of fixtures and gates |
+| `docs/` | 188 design documents |
+| `etc/`, `fonts/`, `Sounds/`, `examples/` | userland data |
+
+**Deliberately left behind** (they are Hamnix 1.0's, and are what Linux
+replaces):
+
+`kernel/`, `arch/`, `mm/`, `fs/`, `drivers/`, `sys/` (the Plan 9 device
+drivers — `sys/src/9/port/dev*.ad`), `linux_abi/`, `net/`, `init/`, `mod/`,
+`kernel-modules/`, and the built `.img` artifacts.
+
+Two of those you will need to *read* constantly, from the Hamnix repo, because
+they are the specification for the file servers you must reimplement:
+
+- **`drivers/net/devnet.ad`** — the `/net` file tree.
+- **`sys/src/9/port/devwsys.ad`** — the `/dev/wsys` window file server.
+
+The Adder compiler is **not** copied; it is a submodule at `adder/`
+(see README).
+
+### Already true, and better than you would expect
+
+Three things are already done, and they change the shape of the job:
+
+1. **`--target=x86_64-linux` is a working compiler target.** It emits a static,
+   no-libc Linux ELF. It is used every day for host-side testing.
+2. **`user/linux-runtime.S`** (543 lines) is a Linux link runtime mapping
+   `sys_*` onto real Linux syscalls. About 31 entry points are genuinely
+   implemented.
+3. **84 `*_host.ad` harnesses already run parts of this userland on Linux**, and
+   `scripts/net9_host_shim.c` (13.5 KB) is a **working `/net` file-server shim
+   backed by real Linux sockets and OpenSSL**. `user/net9_host.ad` fetches a
+   live HTTPS page through completely unmodified `http9.ad` + `net9.ad`. The
+   central architectural question of this port already has a working prototype
+   in-tree. See §3.
+
+---
+
+## 3. The `/net` problem
+
+Hamnix has **no BSD socket syscalls at all**. `SYS_SOCKET`, `CONNECT`,
+`BIND_SOCK`, `LISTEN_SOCK`, `ACCEPT_SOCK` and `SYS_TLS_CONNECT` were all
+retired. TCP, UDP, ICMP and TLS are a **file tree**. On Linux that tree has to
+become a userspace file server — 9p, FUSE, or a shim library that intercepts the
+`sys_open`/`sys_read`/`sys_write` entry points. This section is the inventory
+that lets you choose; it does not choose for you.
+
+### 3.1 The good news: it funnels through one file
+
+`user/net9.ad` (~450 lines) is the sole client-side implementation of the `/net`
+dance. Almost every network consumer goes through it, and treats the result as
+an ordinary stream fd.
+
+```
+user/net9.ad
+  ├── user/http9.ad   (HTTP/1.1 + chunked + TLS over net9)
+  │     ├── user/curl.ad, user/wget.ad, user/hpm.ad
+  │     ├── user/hambrowse.ad + hambrowse_{host,probe_host,sdl_host}.ad
+  │     ├── lib/htmlengine.ad, lib/httpchunk.ad
+  │     └── lib/web/{css/cascade,dom/canvas,js/api,js/state,js/consts}.ad
+  │         lib/web/js/builtins/{fetch,xhr}.ad
+  ├── user/sshd.ad, user/ssh.ad
+  ├── user/httpd.ad, user/httpd_worker.ad, user/u_server.ad
+  ├── user/ping.ad, user/u_tlstest.ad
+  └── user/x11/{x11srv,xclient_demo,xfill}.ad
+```
+
+`user/ntpd.ad` is the **one bypass**: it opens `/net/udp/...` directly and does
+not use `net9.ad`.
+
+### 3.2 Every `/net` path literal in the copied tree
+
+Exhaustive. There are eleven.
+
+| File:line | Literal | Purpose |
+|--|--|--|
+| `user/net9.ad:151` | `/net/tcp/clone` | `net_dial` |
+| `user/net9.ad:220` | `/net/tcp/clone` | `net_dial_tls` |
+| `user/net9.ad:291` | `/net/tcp/clone` | `net_announce` (listen) |
+| `user/net9.ad:79` | `/net/tcp/` prefix | builds `/net/tcp/<N>/<leaf>` |
+| `user/net9.ad:442` | `/net/icmp/clone` | `ping` |
+| `user/net9.ad:102` | `/net/icmp/` prefix | builds `/net/icmp/<N>/<leaf>` |
+| `user/ntpd.ad:216` | `/net/udp/clone` | NTP, bypasses net9 |
+| `user/ntpd.ad:101` | `/net/udp/` prefix | builds `/net/udp/<N>/<leaf>` |
+| `user/hampanel.ad:429` | `/net/ipifc/ctl` | panel link-status read |
+| `user/haminstallui.ad:382` | `/net/ipifc/ctl` | installer link-status read |
+| `user/hamUId.ad:21967` | `/net/addr` | compositor reads the host address |
+
+### 3.3 Every operation performed on the tree
+
+**Connection lifecycle (TCP).** `net_dial` at `user/net9.ad:139`:
+
+1. `sys_open("/net/tcp/clone")` → read back an ASCII decimal connection number
+   `N` (parser at `user/net9.ad:118`).
+2. `sys_open_write("/net/tcp/<N>/ctl")` → write `connect <a.b.c.d>!<port>`.
+3. `sys_open_write("/net/tcp/<N>/data")` → this fd **is** the stream.
+4. Close `clone` and `ctl`. The `data` fd alone holds the connection open;
+   `sys_close` on it sends FIN.
+
+**TLS.** `net_dial_tls` at `user/net9.ad:200` does the same, then additionally
+writes `tls <hostname>` to `ctl`. That runs a **TLS 1.3 handshake inside the
+kernel**; afterwards the `data` fd is transparently encrypted/decrypted by the
+kernel record layer. There is no userspace TLS state machine to reuse — on Linux
+this must become OpenSSL/rustls somewhere, and the `ctl` verb has to drive it.
+The 253-byte SNI hostname is why `net9.ad`'s command buffer is 320 bytes.
+
+**Listening.** `net_announce` at `user/net9.ad:285` writes `announce <port>` to
+`ctl`. `net_accept` (`:329`) and `net_accept_conn` (`:367`) write `accept` and
+read a new connection number. `net_open_conn_data` (`:407`) opens
+`/net/tcp/<conn>/data` for a connection accepted by another process — this is
+how `user/httpd.ad` hands work to `user/httpd_worker.ad`, and it means **a
+connection must be addressable across process boundaries by integer**. A shim
+library holding per-process socket state cannot express this; a real file server
+can. This is the single sharpest constraint on your design choice.
+
+**ICMP.** `user/net9.ad:417` onward. `/net/icmp/clone`, then
+`connect <a.b.c.d>` or `connect <a.b.c.d>!<id>` (RFC 792 identifier, *not* a
+port), then a `data` fd plus a separately-reopened `status` fd read once per
+ping for a fresh snapshot.
+
+**UDP.** `user/ntpd.ad:210`. `/net/udp/clone` → `connect <a.b.c.d>!123` →
+`data`, write 48-byte NTPv3 request, read reply.
+
+**Observed ctl verbs, complete:** `connect <ip>!<port>`, `connect <ip>`,
+`connect <ip>!<id>`, `announce <port>`, `accept`, `tls <host>`, `hangup`.
+
+**Interface configuration** is *not* on the file tree — it is a syscall,
+`sys_netcfg(op, a1, a2)`, with ops 0=read config, 1=set addr/mask, 2=set
+gateway, 3=set DNS, 5=enumerate routes. Callers: `user/ifconfig.ad:145,284,297,310`,
+`user/route.ad:130,191,195,246`, `user/hamctl.ad`.
+
+**DNS** is also a syscall, not a file: `sys_resolve(hostname, len) -> int64`
+returning a packed big-endian IPv4. Callers: `user/http9.ad:306`,
+`user/ntpd.ad:182`, `user/ping.ad:181`, `user/host.ad:140`. Plus
+`sys_resolve_ptr` (reverse) used once.
+
+### 3.4 The prototype that already exists
+
+`scripts/net9_host_shim.c` implements exactly this contract on Linux today. It
+interposes `sys_open` / `sys_open_write` / `sys_read` / `sys_write` /
+`sys_close`, hands back synthetic fds above a fixed base for `/net/*` paths,
+passes everything else through to the real Linux calls, parses the `ctl` verbs
+(`ctl_command`, `:199`), and backs them with real sockets and OpenSSL. It also
+implements `sys_resolve` over `getaddrinfo` (`:339`).
+
+It is a **shim library**, which is the third of your three options — and it is
+already known to work for the client path end-to-end against live HTTPS sites.
+What it does *not* do is `announce`/`accept` across process boundaries
+(§3.3), which is the case that argues for a real file server. Read it before
+you decide; do not assume it settles the question.
+
+---
+
+## 4. Every other native-only surface
+
+### 4.1 The syscall gap, exactly
+
+`user/linux-runtime.S` is the Linux link runtime. Userland declares **71**
+distinct `sys_*` entry points; the runtime defines **49**. Three classes:
+
+**(a) Genuinely implemented (~31).** `sys_read`, `sys_write`, `sys_open`,
+`sys_open3`, `sys_open_write`, `sys_close`, `sys_lseek`, `sys_mkdir`,
+`sys_unlink`, `sys_dup`, `sys_dup2`, `sys_getcwd`, `sys_chdir`, `sys_getuid`,
+`sys_yield`, `sys_setpgid`, `sys_mmap`, `sys_munmap`, `sys_read_nb`,
+`sys_exit`, `sys_errstr`, `sys_get_jiffies`, `sys_rfork`, `sys_execve_env`,
+`sys_fdbind`, `sys_chan_dir_mode`, `sys_listdir_records`, `sys_stat_p9`,
+`sys_resolve`, `sys_fdslot_kind`, `sys_nsid`.
+
+**(b) Present but fail-closed — `return -1` (18).** These are the Plan 9
+surface, and they are the port. `user/linux-runtime.S:484` onward:
+
+> `sys_bind`, `sys_mount`, `sys_unmount`, `sys_nslabel`, `sys_srv_open`,
+> `sys_openchan`, `sys_pipechan`, `sys_fdslot_arg`, `sys_svc_publish`,
+> `sys_svc_ctl`, `sys_setuid`, `sys_setuid_auth`, `sys_pgrp_kill`,
+> `sys_tcsetpgrp`, `sys_waitpid`, `sys_waitpid_jc`, `sys_waitpid_nb_raw`,
+> `sys_waitfds`
+
+Note `sys_waitpid` and `sys_tcsetpgrp` in that list: **`hamsh` cannot reap a
+child or run job control on Linux today.** Those two are cheap (`wait4`,
+`tcsetpgrp`) and unblock the shell. Do them first.
+
+**(c) Declared by userland, absent from the runtime entirely — these are link
+errors, not stubs (23).**
+
+> `sys_execve`, `sys_pipe`, `sys_getpid`, `sys_getgid`, `sys_link`,
+> `sys_symlink`, `sys_clock_gettime`, `sys_socketpair`, `sys_netcfg`,
+> `sys_resolve_ptr`, `sys_rfork_thread`, `sys_semacquire`, `sys_semrelease`,
+> `sys_setexitsem`, `sys_set_realtime`, `sys_srv_post`, `sys_useradd_root`,
+> `sys_wsys_alloc`, `sys_wsys_free`, `sys_vk_window_frame`,
+> `sys_umdf_mmio_map`, `sys_umdf_irq_open`, `sys_umdf_dma_alloc`
+
+Most of class (c) is trivially POSIX (`execve`, `pipe2`, `getpid`, `getgid`,
+`link`, `symlink`, `clock_gettime`, `socketpair`). The `sys_umdf_*` three are
+userspace-driver MMIO/IRQ/DMA and should simply be **deleted** on this line —
+Linux owns the hardware. `sys_wsys_*` and `sys_vk_window_frame` belong to §4.4.
+
+### 4.2 `bind` — much smaller than it looks
+
+`sys_bind` appears in 49 files, which reads alarming. It is not. Of the 49
+call sites, **45 are the identical single line**:
+
+```python
+sys_bind(cast[Ptr[char]]("/dev"), cast[Ptr[char]]("#c"), 0)
+```
+
+— a fixed startup incantation binding the console device (`#c`) into the
+process namespace at `/dev`. The other **3** are `sys_bind("/fd", "#d", 0)`.
+There is no general namespace algebra in the applications: they each perform one
+canned mount at `main()` and never touch it again. Representative:
+`user/hamdesktop.ad:2479`.
+
+**Implication:** a `bind` that understands exactly `#c → /dev` and `#d → /fd`
+satisfies 48 of 49 sites. This is a stub-and-move-on, not a subsystem.
+
+The one genuine namespace user is `user/nsrun.ad`, plus `user/distrofs.ad` and
+`user/p9srv_demo.ad`. Per-process namespaces do have a real Linux answer
+(`unshare(CLONE_NEWNS)` + `mount --bind` in a mount namespace), but you almost
+certainly do not need it to get the desktop up.
+
+### 4.3 `/dev/*` file servers
+
+Distinct `/dev` paths opened by the copied userland, by weight:
+
+| Surface | Hits | Notes |
+|--|--|--|
+| `/dev/wsys/**` | **~300** | the window system — see §4.4. Dominant by an order of magnitude. |
+| `/dev/fb`, `/dev/fbctl`, `/dev/fbpix` | 20 | the framebuffer — see §4.4 |
+| `/dev/blk/**` | 25 | block devices → Linux `/dev/sd*`, `/sys/block` |
+| `/dev/audio`, `/dev/audioctl`, `/dev/snd/ctl` | 30 | → ALSA or PipeWire |
+| `/dev/snarf` | 17 | the clipboard → Wayland/X selection |
+| `/dev/cons` | 11 | console → `/dev/tty` |
+| `/dev/reboot`, `/dev/stat`, `/dev/auth`, `/dev/time`, `/dev/random`, `/dev/keymap`, `/dev/kbmap`, `/dev/version`, `/dev/hostname`, `/dev/meminfo`, `/dev/loadavg`, `/dev/vt/*`, `/dev/mouse`, `/dev/loop/ctl`, `/dev/firewall`, `/dev/sync`, `/dev/win` | 1–7 each | mostly direct Linux equivalents (`/proc/meminfo`, `/proc/loadavg`, `/dev/urandom`, `reboot(2)`, …) |
+
+`/proc/*` reads (`uptime`, `meminfo`, `loadavg`, `cpuinfo`, `version`, `mounts`,
+`modules`, `kmsg`, `net/dev`) are mostly **format-compatible with Linux already**
+and may need only field-offset fixes. `/proc/tasks`, `/proc/toptable`,
+`/proc/svc/*`, `/proc/self/ctl` and `/proc/realtime` are Hamnix inventions and
+need real work (`user/top.ad`, `user/ps.ad`, `user/service.ad`).
+
+### 4.4 The compositor and who owns the framebuffer
+
+**Read `docs/de_scene_file_arch.md` before touching anything here.** It changes
+the difficulty estimate substantially, in both directions.
+
+The desktop is **not** a pixel-passing compositor. Each window is a directory in
+the `wsys` file server; a window's content is a `scene` file — a *line-oriented,
+human-readable text display list* in window-local coordinates. Clients (via
+`lib/hamui.ad`) rewrite their whole `scene` and poke `ctl` to publish a frame.
+The compositor (`user/hamUId.ad`) diffs scenes to compute damage, rasterizes
+only the damaged rectangle into a per-window pixel cache, and blits the caches
+z-ordered to `/dev/fb`. **The kernel owns no per-window pixel buffers.**
+
+Consequences for the port:
+
+- **Good:** the client-side protocol is text file I/O. `wsys` can become a FUSE
+  or 9p userspace server, or a Unix-socket shim, without any client changing.
+  There is no shared-memory buffer handoff, no DMA-BUF, no format negotiation.
+  This is far more tractable than porting a pixel compositor.
+- **Bad, and this is the real problem:** on Hamnix, `/dev/fb` is a file that
+  *any* process may open. **Nine programs open it directly** —
+  `user/hamUId.ad` (the compositor, legitimately), plus `user/hamdesktop.ad`,
+  `user/hamlock.ad`, `user/hamshotui.ad`, `user/hamshot.ad`, `user/hamtoast.ad`,
+  `user/hampanelscene.ad`, `user/hamctl.ad`, `user/hambrowse.ad`. On Linux, DRM
+  master is **exclusive to one process**, and fbdev is deprecated. Eight of those
+  nine must be rewritten to go through `wsys` instead of the framebuffer, or the
+  desktop cannot start. `user/hamshot.ad` also reads `/dev/fbpix` for
+  screenshots, which needs a compositor-side capture path instead.
+
+`sys_wsys_alloc` / `sys_wsys_free` (window-buffer allocation) and
+`sys_vk_window_frame` are absent from the Linux runtime entirely (§4.1c).
+
+---
+
+## 5. Applications ranked by expected porting difficulty
+
+All 277 apps classified by which native surfaces they touch. Counts are exact.
+
+### Tier 1 — 151 apps: POSIX-only, expected to port for free
+
+They touch nothing but `open`/`read`/`write`/`close`/`exit`. This is the entire
+coreutils-shaped set: `cat`, `ls`, `cp`, `mv`, `grep`, `sed`, `awk`, `sort`,
+`diff`, `tar`, `bc`, `cal`, `base64`, `cksum`, `column`, `comm`, `csplit`,
+`cut`, and ~130 more. **Most of the userland is in this tier.** Expect them to
+build and run once class (c) of §4.1 is filled in. They are also your smoke
+test: get `cat` running before anything else.
+
+### Tier 2 — 27 apps: read Hamnix-format `/proc` and `/dev/blk`
+
+`ps`, `top`, `free`, `df`, `uptime`, `dmesg`, `lsblk`, `lsmod`, `losetup`,
+`crond`, `date`, `service`, `initctl`, `pgrep`, `nproc`, `hammon`, `hlog`,
+`oopsread`, `memhog`, `sysirqprobe`, `dd_blk`, `sqfs_to_blk`, `haminstall`,
+`hamnix_partition`, `live_distro_up`, `nice_hi`, `nice_lo`.
+
+Difficulty is *parsing*, not architecture. Several `/proc` files are already
+Linux-format. `ps`/`top` need `/proc/tasks` and `/proc/toptable` replaced with
+a `/proc/[pid]` walk.
+
+### Tier 3 — 18 apps: networking
+
+`curl`, `wget`, `ssh`, `sshd`, `httpd`, `httpd_worker`, `ping`, `ntpd`, `host`,
+`ifconfig`, `route`, `hfw`, `hpm`, `u_server`, `u_tlstest`, `net9`, `http9`,
+`modprobe`.
+
+**They all block on one decision (§3), and then unblock together** — 15 of the
+18 only ever call into `net9.ad`/`http9.ad`. `ntpd` needs UDP separately;
+`ifconfig`/`route` need `sys_netcfg` (rtnetlink) and are independent of the
+`/net` decision; `hfw` needs `/dev/firewall` (nftables) and could be dropped.
+
+### Tier 4 — 71 apps: GUI clients on `/dev/wsys`
+
+Everything `ham*scene`, plus `hamcalc`, `hamedit`, `hamfiles`, `hamnotes`,
+`hamsheet`, `hamslides`, `hamwrite`, `hamsettings`, `hamsoftware`, `haminbox`,
+the games, and so on. They talk the scene-file protocol through `lib/hamui.ad`
+and bind `#c → /dev` at startup.
+
+They are **uniform** — they nearly all go through `lib/hamui.ad`. Port `hamui`
+and the `wsys` server, and this tier moves as one block. Individually they are
+easy; collectively they are gated on §4.4.
+
+### Tier 5 — the hard ones
+
+| App | Why |
+|--|--|
+| **`hamUId.ad`** (31.2k lines) | the compositor. Owns `/dev/fb`, `/dev/wsys`, input, audio mixing, `/net/addr`. Everything in Tier 4 waits on it. **The critical path.** |
+| **`hamsh.ad`** (17.6k lines) | needs `sys_waitpid`, `sys_tcsetpgrp`, `sys_pipechan`, `sys_srv_post`, `sys_rfork` job control. Cheap-ish on Linux but touches the most stub classes. Needed early — it is how you drive everything else. |
+| **`hambrowse.ad` + `lib/web/`** (42 files) | a from-scratch HTML/CSS/JS engine. Needs `/net` *and* `/dev/fb` *and* `wsys`. Substantial but self-contained; the engine itself is portable. |
+| **`hamdesktop.ad`, `hampanelscene.ad`, `hamlock.ad`, `hamtoast.ad`, `hamshot.ad`, `hamshotui.ad`** | the eight direct-`/dev/fb` violators of §4.4 |
+| **`hpm.ad`** (8.2k) | package manager: `/net` + namespaces + block devices |
+| **`user/x11/`** (6 files) | an X11 *server* over `net9`. On Linux this is redundant — delete it. |
+| **`sshd.ad`, `distrofs.ad`, `nsrun.ad`, `p9srv_demo.ad`** | the genuine namespace/9p users |
+
+---
+
+## 6. Desktop stack: keep vs replace
+
+**Keep.**
+
+- **The scene-file protocol and `lib/hamui.ad`.** It is the distinctive thing
+  here, it is text over files, and it ports cleanly. Discarding it for GTK would
+  mean rewriting all 71 Tier-4 apps.
+- **`lib/web/`.** A from-scratch engine is the project's point; it has no Linux
+  dependency beyond `/net`.
+- **The rasterizer inside `hamUId.ad`.** It is the part that already works and
+  is independent of who owns the display.
+
+**Replace.**
+
+- **`/dev/fb` scanout** → a single DRM/KMS backend, or (much easier to start) a
+  Wayland or SDL surface. Do *not* try to keep multi-process framebuffer access.
+- **`user/x11/`** → delete. Linux has X and Wayland.
+- **`/dev/audio` + `lib/hammixer.ad` software mixing** → PipeWire. Software
+  mixing exists only because Hamnix had no audio server.
+- **`/dev/snarf`** → the Wayland/X selection protocol.
+- **`lib/vk/`** (`vk_gpu`, `vk_venus`, `vk_hostgpu`) → the real Vulkan loader
+  and Mesa. Getting a genuine GPU stack is a large part of why this line exists.
+- **`lib/font_ttf.ad` / `font_bdf.ad`** → probably FreeType + fontconfig, though
+  keeping them costs little and preserves rendering fidelity. Judgement call.
+
+**Open:** whether `hamUId` should remain a compositor at all, or become a
+Wayland *client* that hosts the scene-file protocol inside one surface. The
+latter is dramatically less work and gets you a desktop on day one; the former
+preserves the architecture. This is the biggest design decision in the port and
+it is not mine to make.
+
+---
+
+## 7. Open questions I could not resolve
+
+1. **Shim library vs. real file server for `/net`.** `scripts/net9_host_shim.c`
+   proves the shim works for clients. It does **not** handle
+   `net_open_conn_data` — a connection accepted in `httpd.ad` and opened by
+   integer in a *different* process (`httpd_worker.ad`, §3.3). Whether to extend
+   the shim with an fd-passing side channel, or move to FUSE/9p where cross-
+   process addressing is native, I could not settle without knowing whether the
+   multi-process server model is something you want to keep.
+
+2. **In-kernel TLS.** `tls <host>` on a `ctl` file currently runs a TLS 1.3
+   handshake in the Hamnix kernel and the `data` fd is transparently encrypted
+   after it. Where does that live on Linux — inside the `/net` server (keeps
+   clients unchanged, but the server now holds all private keys for all
+   processes), or does `net9.ad` grow a userspace TLS path (breaks the "no
+   sockets, no TLS in userland" invariant that the architecture doc treats as
+   load-bearing)?
+
+3. **Does the no-sockets invariant still bind on this line?** Hamnix's
+   architecture forbids BSD sockets in Adder code. On the Linux line that
+   prohibition may be philosophy rather than architecture, and dropping it would
+   erase most of §3. I did not have the standing to decide this, and it is worth
+   deciding *before* anyone writes a file server.
+
+4. **glibc or stay static-nolibc?** `--target=x86_64-linux` currently emits
+   static no-libc ELFs, and `linux-runtime.S` issues raw `syscall`. The stated
+   goal mentions glibc, which would be needed to link OpenSSL, Mesa, PipeWire or
+   FreeType. Nobody has built an Adder→glibc link path; I did not verify one is
+   straightforward. **This is a prerequisite for most of §6's "replace" column
+   and should be settled early.**
+
+5. **`hamsh`'s job-control model vs. Linux process groups.** `hamsh` uses
+   `sys_rfork`, `sys_pgrp_kill`, `sys_setexitsem` and `sys_waitpid_jc`. Whether
+   Plan 9 rfork semantics can be expressed adequately in `clone(2)` flags for
+   *this specific shell* I did not trace through 17.6k lines.
+
+6. **Is `hamsh`'s alias/def/scope ceiling real?** Hamnix has unverified reports
+   of caps at 65 aliases, 33 defs, 128 scopes. If those are real and are
+   compiler limits rather than shell limits, they will follow the code here.
+   Unverified either way.
+
+7. **The 84 `*_host.ad` harnesses.** They are the most Linux-ready code in the
+   tree and probably the right scaffold to build the port on — but they were
+   written as *test* harnesses, not as a runtime. Whether to promote them into
+   the real Linux path or treat them as reference, I could not judge.
+
+---
+
+## 8. Suggested first moves
+
+Not prescriptive — but this ordering follows from the inventory above.
+
+1. Fill in §4.1 class (c): the ~8 trivially-POSIX symbols. Get `cat`, `ls`,
+   `echo` building and running. Proves the toolchain and the runtime.
+2. Add `sys_waitpid` (`wait4`) and `sys_tcsetpgrp`. Get `hamsh` running. Now you
+   have a shell to drive everything else.
+3. Stub `sys_bind` to understand `#c → /dev` and `#d → /fd` (§4.2). 48 of 49
+   sites satisfied.
+4. Sweep Tier 1 (151 apps). Expect a high pass rate; each failure is a real bug
+   worth a fix, not a port decision.
+5. Decide §7.1/§7.3, then do `/net`. Tier 3 unblocks as a block.
+6. Decide §6's open question, then `wsys` + `hamui`. Tier 4 unblocks as a block.
+
+Tiers 1–3 are ~196 of the 277 applications and require no architectural
+decisions beyond `/net`. The desktop is the long pole; it is also separable.
