@@ -913,39 +913,120 @@ def pump_keyboard():
         i = i + 1
 
 
+# --- the cursor -----------------------------------------------------
+# THE AUTHENTIC left_ptr, built the way devwsys.ad builds it.
+#
+# This is the third shape in this file and the first correct one, so it is
+# worth recording how the wrong ones happened. First I invented an arrow.
+# Then I found _kcursor_init_sprite() in the frozen kernel's fb_cdev.ad -- a
+# 12x12 triangle, no tail -- and matched it exactly. But that sprite is the
+# KERNEL OVERLAY's FALLBACK, used when the compositor is too old for the CURS
+# command. What the desktop actually draws is _wsys_cursor_set_scene() in
+# devwsys.ad, and its own comment calls it "an authentic left_ptr arrow ...
+# sharp point top-left, solid head, pointed foot, and a tail trailing off the
+# lower-RIGHT shoulder". A user coming from the Adder kernel sees THAT.
+#
+# It is generated rather than transcribed, from the same two span tables, so
+# it is the same shape by construction instead of by my eye:
+#
+#   SPAN A -- the head and the left foot, always at col 0.
+#     rows 0..10 : run = row + 1      the arrowhead triangle, 1..11 wide
+#     rows 11,12,13 : 3, 2, 1         the foot, narrowing to a point
+#     rows 14,15 : nothing            tail only
+#   SPAN B -- the tail shaft, rows 11..15 only.
+#     runs    3, 3, 3, 2, 2
+#     offsets 5, 5, 6, 6, 7           slanting down-RIGHT at ~0.5px per row
+#
+# The offsets are deliberately gentle. devwsys records why: a full 1px-per-row
+# step ran the tail nearly parallel to the head's hypotenuse, "so it read as a
+# continuation of the triangle rather than a distinct stem". The NOTCH of
+# background between the col-0 foot and the tail is what makes them read as
+# two limbs.
+#
+# Every span is OUTLINED: a dark silhouette on its row and the row below, one
+# column wider on the right, then the white body inset 1px from the left --
+# so head, foot and tail each carry a border on all sides and stay readable on
+# any backdrop. Row 0 is the exception and must be: the tip is not inset, so
+# its single white pixel lands exactly on the hotspot, which is also the point
+# the router hit-tests.
 CURSOR_W: int32 = 12
-CURSOR_H: int32 = 12
-# 1 = white, 2 = black, 0 = transparent. Drawn by the compositor over
-# everything, as devwsys.ad's save-under path does.
-cursor_bits: Array[144, uint8]
+CURSOR_H: int32 = 17
+cursor_bits: Array[204, uint8]          # CURSOR_W * CURSOR_H
+
+CUR_WHITE: uint32 = 15790320            # 0xf0f0f0
+CUR_DARK:  uint32 = 2105376             # 0x202020
+
+
+def cur_a_run(row: int32) -> int32:
+    if row <= 10:
+        return row + 1
+    if row == 11:
+        return 3
+    if row == 12:
+        return 2
+    if row == 13:
+        return 1
+    return 0
+
+
+def cur_b_run(row: int32) -> int32:
+    if row == 11 or row == 12 or row == 13:
+        return 3
+    if row == 14 or row == 15:
+        return 2
+    return 0
+
+
+def cur_b_off(row: int32) -> int32:
+    if row == 11 or row == 12:
+        return 5
+    if row == 13 or row == 14:
+        return 6
+    if row == 15:
+        return 7
+    return 0
+
+
+def cur_put(x: int32, y: int32, v: uint8):
+    if x < 0 or y < 0 or x >= CURSOR_W or y >= CURSOR_H:
+        return
+    cursor_bits[cast[uint64](y * CURSOR_W + x)] = v
+
+
+# One outlined span: the dark silhouette on this row and the next, run+1 wide,
+# then the white body. `is_tip` suppresses the left inset so row 0's white
+# pixel sits on the hotspot.
+def cur_span(off: int32, run: int32, row: int32, is_tip: int32):
+    if run <= 0:
+        return
+    i: int32 = 0
+    while i < run + 1:
+        cur_put(off + i, row, 2)
+        cur_put(off + i, row + 1, 2)
+        i = i + 1
+    wstart: int32 = off
+    wlen: int32 = run
+    if is_tip == 0:
+        wstart = wstart + 1
+        wlen = wlen - 1
+    i = 0
+    while i < wlen:
+        cur_put(wstart + i, row, 1)
+        i = i + 1
+
 
 def cursor_init():
-    # THE shape, not a lookalike: the native system's arrow is the 12x12
-    # triangle mask dx <= dy, white at dx == dy, dy == 11 and dx == 0, black
-    # inside. It is the sprite _kcursor_init_sprite() bakes into the frozen
-    # kernel (drivers/video/fb_cdev.ad) and the same one hamUId.ad's
-    # cursor_pixel_over overlays when the kernel is too old for CURS, so it
-    # is what a user coming from the Adder kernel actually sees.
-    #
-    # What was here before was a hand-rolled arrow: an 8-wide head clipped by
-    # `c < 8` / `c < 9` (so the head's right side was sheared off partway
-    # down instead of running out to the hypotenuse) with a separate 4px tail
-    # hung off rows 12..16 starting at c == r - 12, which put the tail against
-    # the head's LEFT edge rather than through its middle. Here the tail is
-    # not a separate limb at all -- the triangle's own body carries down to
-    # the dy == 11 base, so nothing can be misaligned against anything.
+    i: uint64 = 0
+    while i < 204:
+        cursor_bits[i] = 0
+        i = i + 1
     r: int32 = 0
-    while r < CURSOR_H:
-        c: int32 = 0
-        while c < CURSOR_W:
-            v: uint8 = 0
-            if c <= r:
-                if c == r or r == 11 or c == 0:
-                    v = 1
-                else:
-                    v = 2
-            cursor_bits[cast[uint64](r * CURSOR_W + c)] = v
-            c = c + 1
+    while r < 16:
+        tip: int32 = 0
+        if r == 0:
+            tip = 1
+        cur_span(0, cur_a_run(r), r, tip)
+        cur_span(cur_b_off(r), cur_b_run(r), r, 0)
         r = r + 1
 
 
@@ -956,9 +1037,9 @@ def paint_cursor():
         while c < CURSOR_W:
             v: uint8 = cursor_bits[cast[uint64](r * CURSOR_W + c)]
             if v == 1:
-                put_px(ptr_x + c, ptr_y + r, 16777215)   # white
+                put_px(ptr_x + c, ptr_y + r, CUR_WHITE)
             elif v == 2:
-                put_px(ptr_x + c, ptr_y + r, 0)          # black
+                put_px(ptr_x + c, ptr_y + r, CUR_DARK)
             c = c + 1
         r = r + 1
 
