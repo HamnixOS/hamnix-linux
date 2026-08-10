@@ -1,24 +1,56 @@
 # user/ps.ad
 #
-# Minimal Hamnix `ps`: dumps the three /proc snapshots the M16.36
-# kernel exposes (version, uptime, tasks) onto stdout. Equivalent in
-# spirit to `cat /proc/version /proc/uptime /proc/tasks` on Linux,
-# bundled into one binary so hamsh can demo it without per-file
-# coreutils.
+# `ps` — list the processes that exist.
 #
-# Reads each /proc file by re-opening it, draining via 128-byte
-# SYS_READ calls, and writing to stdout. Re-opens (rather than one
-# big buffer) so the kernel's snapshot semantics are honest — uptime
-# read AFTER tasks reflects the moment we opened it, which matches
-# what users expect from /proc.
+# WHAT THIS USED TO BE, and why it had to change. The old version dumped
+# three files: /proc/version, /proc/uptime and /proc/tasks. On Hamnix's own
+# kernel /proc/tasks IS the process list, so that was a real (if terse) ps.
+# On Linux there is no such file. So `ps` printed a kernel banner, an uptime,
+# then "[ps] open failed: /proc/tasks" on stderr — AND EXITED 0. A user piping
+# it, or a script checking $?, was told the process listing succeeded and got
+# a kernel version string. That is this project's recurring failure exactly:
+# an answer shaped like success where the truth was "I cannot do this here".
+#
+# Linux keeps the same information in a different shape: one directory per
+# pid under /proc, with the details in <pid>/stat. That is not a smaller fact
+# than /proc/tasks, so `ps` is now a real ps rather than a cat with a banner.
+#
+# HOW IT READS A DIRECTORY. sys_open on a directory plus sys_read gives back
+# a "NAME\n"-packed stream — user/linux-syscalls.c synthesises the Plan 9
+# shape from readdir(3) so the 180k lines of userland that assume it keep
+# working. See the DIRECTORIES note at the top of that file.
+#
+# FIELDS. PID, USER, S (the single-letter state), TIME (utime+stime as
+# MM:SS), and CMD. The uid comes from <pid>/status and is resolved through
+# /etc/passwd; an unresolvable uid prints as the number, which is honest and
+# is what every other ps does.
+#
+# WHAT IT DOES NOT DO: no -e/-f/-a flags (it always lists every process it
+# can see), no threads, no wchan, no tty column. Those are real omissions
+# rather than hidden ones — a namespace-scoped `ps` that lists what /proc
+# shows is the useful 90%, and /proc is already namespace-scoped for us
+# because rfork(RFNAMEG) unshares the mount namespace.
+
+from lib.passwd.passwd import passwd_parse, passwd_lookup_by_uid, \
+    passwd_entry_name
 
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 
+# Adder wants buffers as top-level BSS arrays, not frame locals.
+dirbuf:   Array[65536, uint8]     # the "NAME\n" stream of /proc
+statbuf:  Array[4096, uint8]      # one <pid>/stat
+stsbuf:   Array[4096, uint8]      # one <pid>/status
+pwbuf:    Array[16384, uint8]     # /etc/passwd
+pathbuf:  Array[128, uint8]
+outbuf:   Array[256, uint8]
+comm:     Array[64, uint8]
+numtmp:   Array[24, uint8]
 
-CHUNK: uint64 = 128
+pw_ok: int32 = 0
+hz: uint64 = 100                  # USER_HZ; 100 on every Linux we target
 
 
 def strlen_u8(s: Ptr[uint8]) -> uint64:
@@ -32,31 +64,258 @@ def write_str(fd: int32, s: Ptr[uint8]):
     sys_write(fd, s, strlen_u8(s))
 
 
-def cat_proc(path: Ptr[char]) -> int32:
-    # Open + drain + close. Errors come out as a single line on stderr
-    # so the rest of the run still produces useful output if one of
-    # the entries goes missing in a future kernel.
+def read_whole(path: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64:
     fd: int32 = sys_open(path)
     if fd < 0:
-        write_str(2, "[ps] open failed: ")
-        write_str(2, cast[Ptr[uint8]](path))
-        write_str(2, "\n")
         return -1
-    buf: Array[128, uint8]
-    while True:
-        n: int64 = sys_read(fd, &buf[0], CHUNK)
+    total: uint64 = 0
+    while total < cap - 1:
+        n: int64 = sys_read(fd, &buf[total], cap - 1 - total)
         if n <= 0:
             break
-        sys_write(1, &buf[0], cast[uint64](n))
+        total = total + cast[uint64](n)
     sys_close(fd)
+    buf[total] = 0
+    return cast[int64](total)
+
+
+# --- tiny formatting helpers ----------------------------------------
+def put_u64(dst: Ptr[uint8], at: uint64, v: uint64) -> uint64:
+    if v == 0:
+        dst[at] = 48
+        return at + 1
+    n: uint64 = 0
+    t: uint64 = v
+    while t > 0:
+        numtmp[n] = 48 + cast[uint8](t % 10)
+        t = t / 10
+        n = n + 1
+    p: uint64 = at
+    while n > 0:
+        n = n - 1
+        dst[p] = numtmp[n]
+        p = p + 1
+    return p
+
+
+def pad_to(dst: Ptr[uint8], at: uint64, col: uint64) -> uint64:
+    p: uint64 = at
+    while p < col:
+        dst[p] = 32
+        p = p + 1
+    dst[p] = 32
+    return p + 1
+
+
+def put_str(dst: Ptr[uint8], at: uint64, s: Ptr[uint8]) -> uint64:
+    p: uint64 = at
+    k: uint64 = 0
+    while s[k] != 0:
+        dst[p] = s[k]
+        p = p + 1
+        k = k + 1
+    return p
+
+
+# --- /proc/<pid>/stat -----------------------------------------------
+# Format: "pid (comm) S ppid ..." — comm is in parentheses and MAY CONTAIN
+# SPACES AND PARENTHESES, which is why this scans for the LAST ')' rather
+# than the first. A process named "(evil) x" breaks every naive parser, and
+# a ps that mis-parses one line silently shifts every column after it.
+def parse_stat(state: Ptr[uint8], ticks: Ptr[uint64]) -> int32:
+    n: uint64 = strlen_u8(&statbuf[0])
+    if n == 0:
+        return 0
+    close: uint64 = 0
+    i: uint64 = 0
+    while i < n:
+        if statbuf[i] == 41:                      # ')'
+            close = i
+        i = i + 1
+    if close == 0:
+        return 0
+    # comm sits between the first '(' and that last ')'.
+    op: uint64 = 0
+    while op < n and statbuf[op] != 40:           # '('
+        op = op + 1
+    if op >= close:
+        return 0
+    c: uint64 = 0
+    k: uint64 = op + 1
+    while k < close and c < 63:
+        comm[c] = statbuf[k]
+        c = c + 1
+        k = k + 1
+    comm[c] = 0
+    # field 3 (state) is the first token after ") ".
+    p: uint64 = close + 1
+    while p < n and statbuf[p] == 32:
+        p = p + 1
+    if p >= n:
+        return 0
+    state[0] = statbuf[p]
+    # Fields 14 (utime) and 15 (stime) are the 11th and 12th tokens after
+    # the state field, counting the state as field 3.
+    f: int32 = 3
+    tot: uint64 = 0
+    while p < n and f < 15:
+        while p < n and statbuf[p] != 32:
+            p = p + 1
+        while p < n and statbuf[p] == 32:
+            p = p + 1
+        f = f + 1
+        if f == 14 or f == 15:
+            v: uint64 = 0
+            q: uint64 = p
+            while q < n and statbuf[q] >= 48 and statbuf[q] <= 57:
+                v = v * 10 + cast[uint64](statbuf[q]) - 48
+                q = q + 1
+            tot = tot + v
+    ticks[0] = tot
+    return 1
+
+
+# --- /proc/<pid>/status ---------------------------------------------
+# The "Uid:" line is "Uid:\treal\teffective\tsaved\tfs". We want the REAL
+# uid, the first of the four -- that is the identity the process was started
+# with, which is what a person reading ps is asking about.
+def parse_uid(out: Ptr[uint64]) -> int32:
+    n: uint64 = strlen_u8(&stsbuf[0])
+    i: uint64 = 0
+    while i + 4 < n:
+        if stsbuf[i] == 85 and stsbuf[i+1] == 105 and stsbuf[i+2] == 100 \
+                and stsbuf[i+3] == 58:            # "Uid:"
+            p: uint64 = i + 4
+            while p < n and (stsbuf[p] == 32 or stsbuf[p] == 9):
+                p = p + 1
+            v: uint64 = 0
+            got: int32 = 0
+            while p < n and stsbuf[p] >= 48 and stsbuf[p] <= 57:
+                v = v * 10 + cast[uint64](stsbuf[p]) - 48
+                p = p + 1
+                got = 1
+            if got == 1:
+                out[0] = v
+                return 1
+            return 0
+        while i < n and stsbuf[i] != 10:
+            i = i + 1
+        i = i + 1
     return 0
 
 
+def build_path(pid: Ptr[uint8], leaf: Ptr[uint8]):
+    p: uint64 = 0
+    pathbuf[p] = 47                                # '/'
+    p = p + 1
+    p = put_str(&pathbuf[0], p, cast[Ptr[uint8]]("proc/"))
+    p = put_str(&pathbuf[0], p, pid)
+    pathbuf[p] = 47
+    p = p + 1
+    p = put_str(&pathbuf[0], p, leaf)
+    pathbuf[p] = 0
+
+
+def emit_row(pid: Ptr[uint8]):
+    build_path(pid, cast[Ptr[uint8]]("stat"))
+    if read_whole(cast[Ptr[char]](&pathbuf[0]), &statbuf[0], 4096) < 0:
+        return                                     # exited between readdir and now
+    st: Array[1, uint8]
+    st[0] = 63                                     # '?'
+    tk: Array[1, uint64]
+    tk[0] = 0
+    if parse_stat(&st[0], &tk[0]) == 0:
+        return
+    uid: Array[1, uint64]
+    uid[0] = 0
+    have_uid: int32 = 0
+    build_path(pid, cast[Ptr[uint8]]("status"))
+    if read_whole(cast[Ptr[char]](&pathbuf[0]), &stsbuf[0], 4096) >= 0:
+        have_uid = parse_uid(&uid[0])
+
+    p: uint64 = 0
+    p = put_str(&outbuf[0], p, pid)
+    p = pad_to(&outbuf[0], p, 7)
+    slot: int32 = -1
+    if have_uid == 1 and pw_ok > 0:
+        slot = passwd_lookup_by_uid(cast[uint32](uid[0]))
+    if slot >= 0:
+        p = put_str(&outbuf[0], p, passwd_entry_name(slot))
+    elif have_uid == 1:
+        p = put_u64(&outbuf[0], p, uid[0])
+    else:
+        outbuf[p] = 63
+        p = p + 1
+    p = pad_to(&outbuf[0], p, 20)
+    outbuf[p] = st[0]
+    p = p + 1
+    p = pad_to(&outbuf[0], p, 23)
+    secs: uint64 = tk[0] / hz
+    mins: uint64 = secs / 60
+    p = put_u64(&outbuf[0], p, mins)
+    outbuf[p] = 58                                 # ':'
+    p = p + 1
+    r: uint64 = secs % 60
+    if r < 10:
+        outbuf[p] = 48
+        p = p + 1
+    p = put_u64(&outbuf[0], p, r)
+    p = pad_to(&outbuf[0], p, 32)
+    p = put_str(&outbuf[0], p, &comm[0])
+    outbuf[p] = 10
+    p = p + 1
+    sys_write(1, &outbuf[0], p)
+
+
 def main() -> int32:
-    write_str(1, "--- /proc/version ---\n")
-    cat_proc("/proc/version")
-    write_str(1, "--- /proc/uptime ---\n")
-    cat_proc("/proc/uptime")
-    write_str(1, "--- /proc/tasks ---\n")
-    cat_proc("/proc/tasks")
+    # /etc/passwd is optional: without it the USER column shows numbers,
+    # which is a lesser answer but still a true one.
+    pwn: int64 = read_whole("/etc/passwd", &pwbuf[0], 16384)
+    if pwn > 0:
+        pw_ok = passwd_parse(&pwbuf[0], cast[uint64](pwn))
+
+    fd: int32 = sys_open("/proc")
+    if fd < 0:
+        write_str(2, "ps: cannot open /proc -- is it bound? (bind '#p' /proc)\n")
+        return 1
+    total: uint64 = 0
+    while total < 65535:
+        n: int64 = sys_read(fd, &dirbuf[total], 65535 - total)
+        if n <= 0:
+            break
+        total = total + cast[uint64](n)
+    sys_close(fd)
+    dirbuf[total] = 0
+    if total == 0:
+        write_str(2, "ps: /proc is empty -- nothing to list\n")
+        return 1
+
+    write_str(1, "PID    USER         S  TIME    CMD\n")
+    listed: int32 = 0
+    i: uint64 = 0
+    while i < total:
+        s: uint64 = i
+        while i < total and dirbuf[i] != 10:
+            i = i + 1
+        dirbuf[i] = 0
+        # Only the all-digit entries are pids; /proc also holds cpuinfo,
+        # meminfo, self, and every other non-process name.
+        allnum: int32 = 1
+        k: uint64 = s
+        if k == i:
+            allnum = 0
+        while k < i:
+            if dirbuf[k] < 48 or dirbuf[k] > 57:
+                allnum = 0
+            k = k + 1
+        if allnum == 1:
+            emit_row(&dirbuf[s])
+            listed = listed + 1
+        i = i + 1
+
+    # A ps that lists nothing has not succeeded. Say so and exit non-zero --
+    # the old version's silent exit 0 is the whole reason this file changed.
+    if listed == 0:
+        write_str(2, "ps: no processes found in /proc\n")
+        return 1
     return 0
