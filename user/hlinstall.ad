@@ -81,9 +81,11 @@ upass_buf:    Array[128, uint8]
 rpass_buf:    Array[128, uint8]
 hash_buf:     Array[256, uint8]
 line_buf:     Array[512, uint8]
+repo_buf:     Array[256, uint8]
 esp_mb:  int32 = 512
 have_host: int32 = 0
 have_user: int32 = 0
+have_repo: int32 = 0
 envbuf:  Array[4, uint64]
 p1:      Array[64, uint8]        # <disk>1
 p2:      Array[64, uint8]        # <disk>2
@@ -369,6 +371,63 @@ def write_file(path: Ptr[char], text: Ptr[uint8]) -> int32:
     return 0
 
 
+def has_prefix(s: Ptr[uint8], p: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while p[i] != 0:
+        if s[i] != p[i]:
+            return 0
+        i = i + 1
+    return 1
+
+
+# A repo URL the installed system cannot fetch from is worse than no flag at
+# all: hpm would fall through to its built-in default and the operator would
+# never learn their choice was discarded. So the shape is checked HERE, before
+# the disk is touched -- refusing costs nothing, and refusing after mkfs costs
+# the disk.
+def repo_url_ok(u: Ptr[uint8]) -> int32:
+    if has_prefix(u, cast[Ptr[uint8]]("http://")) != 0:
+        return 1
+    if has_prefix(u, cast[Ptr[uint8]]("https://")) != 0:
+        return 1
+    # file:// with the empty authority spelled out. `file://packages/` looks
+    # like a path and is really a HOST named `packages`, so the third slash is
+    # required rather than forgiven.
+    if has_prefix(u, cast[Ptr[uint8]]("file:///")) != 0:
+        return 1
+    return 0
+
+
+# Point the installed system's package manager at the repo the operator chose.
+#
+# /etc/hpm/repo is the file hpm already reads, and it sits at the TOP of hpm's
+# base-URL precedence (user/hpm.ad::_set_repo_default), above the on-image
+# file:// mirror and above the hosted default. So one line here is the whole
+# job: `hpm refresh` on the installed machine goes where it was told, without
+# being told again.
+#
+# Written AFTER the copy, because the copy brings /etc across from the live
+# system and would otherwise put the live image's answer back on top.
+def install_repo_config() -> int32:
+    if have_repo == 0:
+        return 0
+    # The live /etc/hpm came across with the copy, but an image that never
+    # staged it would leave nowhere to write.
+    sys_mkdir(cast[Ptr[char]]("/n/target/etc/hpm"))
+    i: uint64 = copy_str(&line_buf[0], &repo_buf[0])
+    line_buf[i] = 10                                  # trailing newline
+    line_buf[i + 1] = 0
+    if write_file(cast[Ptr[char]]("/n/target/etc/hpm/repo"),
+                  &line_buf[0]) != 0:
+        puts(2, "hlinstall: could not write the target's /etc/hpm/repo; the "
+                "installed system will use hpm's default repo.\n")
+        return -1
+    puts(1, "  package repo ")
+    puts(1, &repo_buf[0])
+    puts(1, "\n")
+    return 0
+
+
 # The target's identity: its name, and the person who will use it.
 def configure_target() -> int32:
     if have_host != 0:
@@ -460,13 +519,29 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 esp_mb = 64
             ai = ai + 2
             continue
-        # --repo and --part-mode are accepted and not yet acted on. Saying so
-        # beats appearing to honour them: a repo the installed system does not
-        # actually use would be a lie the operator only finds later.
         if streq(f, cast[Ptr[uint8]]("--repo")) != 0 and ai + 1 < argc:
-            puts(1, "note: --repo is recorded but not yet applied\n")
+            ru: Ptr[uint8] = cast[Ptr[uint8]](argv[cast[uint64](ai) + 1])
+            if repo_url_ok(ru) == 0:
+                puts(2, "hlinstall: --repo must start with http://, https:// "
+                        "or file:/// -- got: ")
+                puts(2, ru)
+                puts(2, "\n")
+                return 1
+            # copy_str stops at 120 bytes. A URL trimmed to a prefix is still a
+            # valid-looking URL, so it would be written out and fail only on
+            # the installed machine's first refresh; say so now instead.
+            if slen(ru) > 120:
+                puts(2, "hlinstall: --repo is longer than 120 bytes, which is "
+                        "more than this installer can carry without "
+                        "truncating it.\n")
+                return 1
+            copy_str(&repo_buf[0], ru)
+            have_repo = 1
             ai = ai + 2
             continue
+        # --part-mode is accepted and not yet acted on. Saying nothing beats
+        # appearing to honour it: a layout the installer does not actually
+        # produce would be a lie the operator only finds later.
         if streq(f, cast[Ptr[uint8]]("--part-mode")) != 0 and ai + 1 < argc:
             ai = ai + 2
             continue
@@ -495,6 +570,9 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     puts(1, &p1[0])
     puts(1, "\n  root: ")
     puts(1, &p2[0])
+    if have_repo != 0:
+        puts(1, "\n  repo: ")
+        puts(1, &repo_buf[0])
     puts(1, "\nthis ERASES the disk.\n")
 
     step(cast[Ptr[uint8]]("1/5  partitioning"))
@@ -614,6 +692,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
     step(cast[Ptr[uint8]]("6/6  identity"))
     configure_target()
+    install_repo_config()
 
     puts(1, "\ninstalled. remove the installation media and reboot.\n")
     return 0
