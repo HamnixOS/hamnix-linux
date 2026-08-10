@@ -584,6 +584,23 @@ int32_t sys_open_write(const char *path)
         return rc32(note_open(npid));
     if (dev_path(path))
         return rc32(devtab_open(path, 1));
+
+    /* A DEVICE PATH WITH NO SERVER MUST FAIL, NOT BE CREATED.
+     *
+     * This call is open(O_WRONLY|O_CREAT|O_TRUNC), and dev_path() only claims
+     * the device paths that actually have a server behind them.  So a client
+     * writing to a device this line does not serve got a brand-new ORDINARY
+     * FILE at that path and no indication of anything wrong: user/playtone.ad
+     * wrote 24000 frames into a regular file called /dev/audio, reported
+     * "played 1000 Hz square wave, 24000 frames", and exited 0.  Six audio
+     * programs did the same thing, and every write-first client of any device
+     * added later would have inherited it.
+     *
+     * Device nodes are made by the kernel or by a server, never by a client
+     * opening one for writing -- so under /dev the create flag is simply
+     * wrong, and its absence turns a silent success into ENOENT. */
+    if (!strncmp(path, "/dev/", 5))
+        return rc32(open(path, O_WRONLY | O_TRUNC));
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0 && errno == ETXTBSY) {
         /* The file is a RUNNING executable. Linux refuses to truncate one,
@@ -715,6 +732,23 @@ int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
     errno = e;
     if (n < 0 && (e == EAGAIN || e == EWOULDBLOCK))
         return 0;
+    if (n == 0) {
+        /* TRUE END OF INPUT, and it must not be reported as 0.
+         *
+         * The contract this call has -- stated at the freestanding definition
+         * in linux-runtime.S -- is "0 == no byte ready yet, a negative ==
+         * true EOF/error".  read(2) uses 0 for EOF, so returning it verbatim
+         * collided the two states, and every caller that polls read the end
+         * of its input as "nothing yet, try again".
+         *
+         * hamsh's ed_readline is the one that matters: `if n < 0: return -1`
+         * / `if n == 0: continue`.  So `hamsh < script` ran the script and
+         * then polled for ever instead of exiting -- measured, along with vi,
+         * hamfm, hdu, hlog and keydemo hanging the same way.  A shell that
+         * never returns from a script is not a small bug. */
+        errno = 0;
+        return -1;
+    }
     return rc64(n);
 }
 
@@ -2022,6 +2056,18 @@ int32_t sys_pipechan(void)
  * sweep found). Rather than fix inline asm that should not be inline asm, this
  * is a normal entry point.
  * ------------------------------------------------------------------ */
+
+/* extern def sys_delete_module(name: Ptr[char], flags: int32) -> int32
+ *
+ * Unload a module BY NAME.  user/rmmod.ad had kept the native backend's inline
+ * assembly -- reloading arguments from -8(%rbp) and issuing a raw syscall --
+ * which under the LLVM lane reads a frame that does not exist, so `rmmod`
+ * segfaulted on every valid argument.  insmod and modprobe had the same
+ * assembly removed; rmmod was missed. */
+int32_t sys_delete_module(const char *name, int32_t flags)
+{
+    return rc32((int)syscall(SYS_delete_module, name, (int)flags));
+}
 
 /* extern def sys_init_module(path: Ptr[char], params: Ptr[char]) -> int32
  *

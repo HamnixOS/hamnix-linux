@@ -1,0 +1,390 @@
+# tests/linux/runsweep_recipes.tsv — how to smoke test each user/*.ad, and what
+# each one CLAIMS to do. Read by scripts/hamlinux_runsweep.sh.
+#
+# Columns, tab separated:
+#   name    the program, i.e. user/<name>.ad
+#   class   filter  reads stdin, writes stdout
+#           cmd     an ordinary command; argv and/or the filesystem
+#           gui     needs /dev/wsys — a scene client or the toolkit
+#           daemon  runs for ever by design; "still up at the timeout" is a PASS
+#           hosttest a *_host.ad harness whose job is to self-test
+#           filter/cmd/gui/daemon/hosttest are RUN. The rest are not:
+#           lib     no main
+#           disk    wants a block device, a partition table or an image
+#           net     wants a host on the outside; the sweep stays offline
+#           payload runs as /init or as a bare-metal EL0 image, not as a program
+#           unsafe  would reboot, halt or replace PID 1
+#   argv    argv to run it with. %F %F2 are scratch text files, %D a scratch
+#           directory, %NEW a path that does NOT exist.
+#   stdin   `-` for immediate EOF, `%F` for the scratch file, else a literal
+#   claim   what the program says IT does, in its own header — including where
+#           it deliberately differs from POSIX. THIS IS THE ORACLE. `wc` and
+#           `head` here are stdin-only and ignore file operands; judging them
+#           against GNU manufactures failures out of correct programs
+#           (HANDOFF.md §5).
+ac	cmd	%F	-	compile foo.ad on-device via host_ac + Debian-namespace clang bridge into a binary
+aplay	cmd	%F	-	Plan-9 client: write rate/channels to /dev/audioctl then PCM bytes to /dev/audio, no ioctls
+appmenuscene_host	hosttest	%NEW %NEW %NEW	-	renders shipping app-menu FULL/FILTERED/flyout scenes to PPM + dumps display list, dev-host TEST shim
+arch	cmd		-	print constant "x86_64" machine hardware name, no real detection needed
+arm64_a10_el0	payload		-	AArch64 EL0 kernel-loaded test payload proving control flow/recursion; not runnable directly on this x86_64 host
+arm64_a11_echo	payload		-	AArch64 EL0 read(2)/echo test payload with checksum; kernel-loaded, not a standalone host program
+arm64_a11_sum	payload		-	AArch64 EL0 archive-by-name test payload (distinct checksum/output); kernel-loaded, not standalone
+arm64_a13_demand	payload		-	AArch64 EL0 demand-paging fault test payload; kernel-loaded, requires the ARM64 kernel's fault handler
+arm64_a13_segv	payload		-	AArch64 EL0 test that deliberately stores to a forbidden VA and must be SIGSEGV-killed; kernel-loaded only
+ascii	cmd		-	prints printable ASCII table codes 32..126 as "<dec> 0x<hex> <char>", no arguments
+audiolife	payload		-	run as /init under a QEMU wav-capture harness to reproduce 3 audio buffer-lifetime bugs; not a standalone host program
+audio_pointer_host	hosttest		-	self-tests audio Play button: pointer parse must take first 3 of 4 ints, ignore trailing dz
+awk	filter	{print}	hello world	lexer->tree-walk AWK interpreter, byte-identical to GNU awk on implemented subset
+banner	cmd	HI	-	renders each argv letter into a 7-row x 5-col '#' grid; unsupported chars are blank gaps
+base64	filter		%F	RFC 4648 base64 encode stdin to stdout by default; -d decodes, wraps at 76 cols
+basename	cmd	/a/b/c.txt	-	prints final path component of argv[1] only; no -a, no suffix-strip variant
+bc	filter		2 + 3 * 4	infix integer POSIX-subset calculator; reads expressions from stdin or FILE operands
+bench_de_host	hosttest		-	times CPU scene rasterizer (hamui_host_rasterize) per primitive class, dev-host only, no QEMU
+browserhist_host	hosttest		-	drives back/forward session-history model directly and prints a trace for gate assertions
+cal	cmd		-	prints a fixed hard-coded May 2026 month grid; no real date math (no RTC yet)
+cat	cmd	%F	-	streams each argv path to stdout; no stdin-when-no-args fallback, minimal scope
+cgi_echo	cmd	REQUEST_METHOD=GET	hello body	echoes CGI argv NAME=VALUE pairs + stdin request body back as an HTML page
+chvt	cmd	1	-	writes VT number digit to /dev/vt/ctl to switch the active virtual terminal
+cksum	filter		%F	POSIX CRC-32 checksum + byte count of stdin ONLY, matches GNU coreutils cksum output
+clear	cmd		-	writes ANSI clear-screen + cursor-home escape sequences, no input read
+cmp	cmd	%F %F2	-	byte-compares two files (8 KiB bound); silent on match, prints byte/line on mismatch
+column	filter		%F	formats stdin/file into multi-column fill layout by default, or -t table mode
+comm	cmd	%F %F2	-	3-column compare of two SORTED files line by line; does not sort inputs itself
+cp	cmd	%F %NEW	-	single-file copy by default; -r for recursive directory copy, streams via fixed buffer
+crond	daemon		-	native cron daemon; reads /var/cron/crontab each scan and runs jobs forever
+crontab	cmd	-l	-	manage /var/cron/crontab: FILE installs, -l lists, -r removes; no -e editor support
+csplit	cmd	%F 2	-	splits FILE into PREFIX+NN sections at line numbers or /REGEX/ patterns like GNU csplit
+ctxmenuscene_host	hosttest	%NEW %NEW %NEW %NEW %NEW	-	renders shipping context-menu scenes (panel/applet/chooser) to PPM + dumps display list
+curl	net	http://example.com/	-	native HTTP client over /net file tree (no BSD sockets); needs real network
+cut	filter	-f 1	%F	selects fields (-f, default TAB) or char/byte positions (-c/-b) from stdin lines
+date	cmd		-	reads /proc/realtime and prints ISO-8601 wall clock; exits 1 with diagnostic if RTC unavailable
+dd_blk	disk	/dev/blk/vdap2 /dev/blk/vdbp1	-	raw sector copy between two /dev/blk block devices, sector-aligned; needs real block devices
+deflate_host	hosttest	%F %NEW	-	gzip-compresses INFILE to OUTFILE.gz via native deflate encoder, dev-host only, no QEMU
+df	cmd		-	reads /proc/mounts and echoes the mount table; no block-usage size columns (df -P shape)
+dhcpc	net		-	DHCP client broadcasting discover over /net/udp to acquire a real IP address
+diff	cmd	%F %F2	-	LCS line-alignment diff of two files; normal script by default, -u for unified diff
+dircolors	cmd		-	emits a shell command setting LS_COLORS from the built-in (or FILE) color database
+dirname	cmd	/a/b/c.txt	-	prints everything before the final '/' in argv[1]; no trailing-slash stripping unlike coreutils
+distrofs	daemon		-	userland 9P2000 file-server daemon serving a RAM-backed distro-shaped filesystem tree, runs forever
+dmesg	cmd		-	opens /proc/kmsg and streams the kernel printk ring-buffer snapshot to stdout, no follow mode
+du	cmd	%D	-	directory size summary; sums file sizes only, does NOT recurse into subdirectories
+dup_demo	cmd		-	demonstrates sys_dup2 by redirecting stdout to /tmp/dup within a single process
+echo	cmd	hello world	-	writes argv[1..] joined by spaces + trailing newline; no -n/-e flags
+ed25519_selftest	hosttest		-	runs built-in RFC 8032 self-test vectors for the ed25519 verifier hpm trusts
+env_show	cmd		-	companion to hamsh's builtin env; standalone binary only sees the forwarded environ snapshot, not live shell state
+expand	filter		a\tb	converts stdin TABs to spaces at tabstop (default 8), no backspace decrement handling
+expr	cmd	2 + 3	-	tiny coreutils-style integer evaluator, ops + - * / only; exits 2 on syntax error
+factor	cmd	12	-	prints prime factorization "N: f1 f2 ..."; reads argv or whitespace-separated stdin tokens if none given
+false	cmd		-	exits 1 (failure) with no output
+filepick_host	hosttest	%NEW %NEW	-	drives the shipping Save/Open file-picker dialog through a full browse+click session to PPM, dev-host only
+find	cmd	%D	-	walks start paths, prints entries matching AND-ed predicates (-name/-type/-size/etc)
+fmt	filter		%F	reflows whitespace-separated words to goal width (default 75), preserves blank-line paragraph breaks
+fold	filter		%F	wraps each input line at WIDTH bytes (default 80), byte granularity, resets column at existing newlines
+font_ttf_probe	hosttest		-	rasterizes bundled dejavu-sans TTF glyphs at several sizes, dumps geometry/coverage + ASCII art, dev-host
+free	cmd		-	reads /proc/meminfo MemTotal/MemFree and reformats as a coreutils-free-style 2-column table
+gamekey_host	hosttest		-	self-tests key press/release decoder against a literal press/release/partial-line byte stream
+getty	daemon	1	-	VT-aware getty; opens /dev/vt/N, execs /bin/login for a real session; write never returns
+gif_probe	hosttest	%GIF 0 0	-	host shim: decodes GIF, prints RC/DIM/PIX for argv (x,y) pairs; needs real GIF not text
+grep	filter	e	%F	Native regex line filter (BRE default, -E ERE, -F fixed); reads FILE operands or stdin
+gunzip	cmd	-c %GZ	-	gzip decompressor; FILE.gz->FILE (rm .gz) or -c stdout, -k keeps; needs real gzip data
+gzip	cmd	-c %F	-	gzip compressor/decompressor(-d); FILE->FILE.gz (rm FILE) or -c stdout; real DEFLATE
+halt	unsafe		-	halts the CPU by design — Opens /dev/reboot, writes "halt"; kernel halts CPU forever on success - unsafe to invoke
+ham2048	gui		-	2048 sliding-tile game on hamui widget toolkit; forever pull-based event loop, WASD/click
+ham2048scene	gui		-	2048 scene-DE client; opens wsys window, commits scene, blocks on /keys+/event forever
+ham2048scene_host	hosttest	%NEW %NEW	-	Host PPM render + scripted-input regression gate for ham2048 core; writes BEFORE/AFTER ppm
+hamabout	gui		-	About-This-System scene dialog; dismisses on Escape, outside click, or Close button
+hamangrybirds	gui		-	Angry-Birds-style physics game scene client; opens wsys window, ticks physics forever
+hamangrybirds_host	hosttest	%NEW %NEW	-	Host gate: scripted launch/physics through pure core, asserts pig clear/win, renders ppm
+hamappmenu	gui		-	DE Applications menu client; search + recent + category groups, spawned on demand
+hamaudiobook	gui		-	Audiobook player scene client; streams decoded PCM to HDA, persists resume offset; repo-only
+hamaudiobook_host	hosttest	%NEW %NEW	-	Host gate: resume save/lookup round trip, sleep-timer math, transport render to ppm
+hamaudioscene	gui		-	Audio player scene client; defaults to a bundled demo track, streams PCM to HDA via files
+hamaudioscene_host	hosttest	%WAV %NEW %NEW	-	Host gate: decodes a real .wav vs python wave module, renders player UI to ppm; %F not a real wav
+hamaudioscene_mp3_host	hosttest	%MP3 %NEW %NEW	-	Host gate: decodes a real .mp3 via mp3decode, renders progress+level meter to ppm; %F not real mp3
+hamaudioselftest	payload		-	Self-test: decodes fixed /usr/share/sounds/test.wav, streams PCM to HDA sink, waits drain
+hambottom	gui		-	DE bottom panel (taskbar/window-list + workspace switcher); hamui v2 client, self-discovers wid
+hambrowse	gui		-	HTML browser scene client; no-arg/--demo renders the built-in demo page with NO network
+hambrowse_chrome_test_host	hosttest		-	Pure-logic test: ad-block filter + search-engine registry; prints deterministic lines, no net
+hambrowse_gfx_window	hosttest	%F %NEW	-	Renders full browser window (chrome+viewport) for FILE.html to ppm; %F not real HTML
+hambrowse_host	hosttest	%F	-	Host shim: parses+lays out FILE.html with real engine, dumps LAYOUT/FLOW to stdout, no net
+hambrowse_host_gfx	hosttest	%F %NEW	-	Renders FILE.html with proportional-font paint engine to PPM; dumps deterministic geometry
+hambrowse_probe_host	hosttest	%F	-	Like hambrowse_host but also prints JS engine error message (JSERR) on script failure
+hambrowse_sdl_host	other		-	Host SDL2 browser child process speaking a pipe protocol to a C bridge; hangs without the bridge
+hambrowse_tabs	lib		-	Tab-session model (URL/title/scroll/history per tab) for hambrowse; no main(), a library module
+hambrowse_tabs_host	hosttest		-	Regression test: tab open/switch/close + history + strip hit test; prints stdout only, no args
+hamcalc	gui		-	Integer calculator on hamui widget toolkit; immediate-execution semantics, forever event loop
+hamcalcscene	gui		-	Calculator scene-DE client; keypad UI, blocks on wsys /keys+/event forever
+hamcalcscene_host	hosttest	%NEW %NEW	-	Host gate: renders keypad, feeds scripted keys+pointer press, asserts arithmetic to ppm
+hamcalpop	gui		-	Panel clock's drop-down month-calendar popup DE client; self-discovers wid via /dev/wsys/self
+hamcalscene	gui		-	Month-calendar scene client; derives "today" from the real clock, pointer-driven, opens wsys window
+hamcalscene_host	hosttest	%NEW %NEW	-	Host gate: deterministic fixed "today", renders month grid + scripted prev-month click to ppm
+hamchessscene	gui		-	Hot-seat chess scene client; 8x8 board, click-select + legal-move dots, opens wsys window
+hamchessscene_host	hosttest	%NEW %NEW	-	Host gate: plays scripted moves incl. Fool's Mate through rules engine, renders start/mate ppm
+hamclock	gui		-	Clock/calendar/timer desktop utility; reads real wall clock via /proc/realtime, repaints hourly-1s
+hamclock_host	hosttest	%NEW %NEW %NEW	-	Host gate: injected fixed epoch drives digital/analog/calendar/stopwatch math, 3 ppm views
+hamcomplete_host	hosttest		-	Tab-completion engine self-test: prefix filter/LCP/dedup cases, prints PASS/FAIL + RESULT
+hamconvert	gui		-	Unit-converter desktop utility; keyboard digit entry + category paging, hamui window
+hamconvert_host	hosttest	%NEW %NEW %NEW	-	Host gate: exact-epsilon unit conversions across 8 categories, renders 3 views to ppm
+hamctl	gui	--wall 0	-	Control Center hub; headless "--wall N" applies a built-in wallpaper ppm + persists it, no GUI
+hamctl_host	hosttest	%NEW %NEW %NEW	-	Host gate: deterministic capplet pages rendered + scripted clicks asserted, no sockets
+hamctl_resize_host	hosttest	%D	-	Host gate: renders control-center at several sizes, probes gutter pixel bug-vs-fix, writes ppms
+hamctl_wall_host	hosttest	%NEW %NEW %NEW	-	Host gate: renders procedural wallpaper mosaics, asserts non-uniform image vs a flat swatch
+hamctxmenu	gui		-	DE right-click context menu, a v2 client extracted from the compositor's daemon_pixel cascade
+hamcycler	gui		-	Alt-Tab window-switcher overlay DE client; self-discovers wid via /dev/wsys/self
+hamde	gui		-	Hamnix Desktop top panel built entirely on hamui widgets; menubar+clock+taskbar, forever loop
+hamdesktop	gui	--scene-dump %NEW	-	Scene-file desktop backdrop + launcher icons; headless "--scene-dump FILE" dumps display list, no wsys
+hamecho	gui		-	Minimal proof-of-spine DE app; own process/window, keyboard routed via /dev/wsys/<wid>/keys
+hamedit	gui	%F	-	GUI text editor on hamui toolkit; argv[1] preloads a file, toolbar Open/Save do real file I/O
+hameditscene	gui		-	Scene-file text editor; renders buffer + block cursor, Ctrl-S saves, polls /keys+/event forever
+hameditscene_host	hosttest	%NEW	-	Host gate: renders sample source lines through the real syntax-highlight core to ppm
+hamfiles	gui		-	GUI file browser on hamui toolkit; treeview of cwd, toolbar Up/Open/Refresh/Quit, real dir reads
+hamfm	other	%D	-	Full-screen TUI file manager (raw console, no echo); LIST/VIEW modes, blocks on keystrokes forever
+hamfmscene	gui	--opentest	-	Scene-file GUI file manager; headless "--opentest" self-check hook avoids needing a compositor
+hamfmscene_host	hosttest	%NEW %NEW %D	-	Host gate: renders empty-space context menu before/after, drives a real New-File creation
+hamgamedemo	gui		-	hamGame demo "Coin Dash"; wires the shared game to the device backend via the public API, loops
+hamgamedemo_host	hosttest	%NEW %NEW	-	Host gate: same game via the host hamGame backend, scripted input+clock, asserts to ppm
+hamgame_mixer_demo	cmd		-	hamGame mixer demo; mixes two synth tones once to keep the native mixer path compiling for CI
+hamgame_mixer_host	hosttest	%WAV	-	self-test: synthesizes/mixes PCM tones from a WAV fixture, asserts rate/amplitude/clamp/mixing math
+hamgamesnake	gui	-	-	on-device Snake driver: wires hamGame API to device backend, no own game logic or transport
+hamgamesnake_host	hosttest	%NEW %NEW	-	host-only: drives same game via HOST backend, scripted moves, dumps state to BEFORE/AFTER PPMs
+hamimgscene	gui	-	-	proves REAL raster image upload+render into scene via hamscene_image and compositor scaler/alpha-blend
+hamimgscene_host	hosttest	%PNG %NEW	-	host proof: decode a real PNG, register as named image, rasterize scene to OUT.ppm
+haminbox	gui	-	-	notification history inbox scene client; reads /tmp/hamnix-notif.log, lists entries newest-first
+haminput	gui	-	-	live input-event diagnostic window; shows key/mouse events and PRIMARY-paste snarf preview on MIDDLE click
+haminstall	disk	vdb	-	on-target installer: partitions GPT, mkfs ESP+root, copies running rootfs onto a blank target disk
+haminstallui	gui	-	-	scene-DE multi-page wizard front-end that shells out to /bin/install --auto; no partitioning logic itself
+hamlock	gui	-	-	self-contained scene screen-lock client; owns curtain+password field, authenticates against /dev/auth itself
+hamlogscene	gui	-	-	kernel log viewer scene client; reads /proc/kmsg (same source as dmesg/hlog), supports FOLLOW mode
+hamlogscene_host	hosttest	%NEW %NEW	-	host proof: seeds deterministic log lines, renders TOP/TAIL PPMs, scripted page-down+tail clicks
+hammark	gui	%F	-	Markdown viewer scene client; renders the .md file named on argv (or a bundled sample if none)
+hammark_host	hosttest	%NEW %NEW	-	host proof: injects known markdown string, asserts block parse + render, writes VIEW/SCROLLED PPMs
+hammath	gui	-	-	expression-calculator scene client; keypad state machine over /keys+/event, evaluator in shared core
+hammath_host	hosttest	%NEW %NEW	-	host proof: renders keypad, evaluates expression battery, drives keypad to BEFORE/AFTER PPMs
+hamminescene	gui	-	-	Minesweeper scene client; 9x9 field, keyboard+pointer input, commits scene via hamscene_commit
+hamminescene_host	hosttest	%NEW %NEW	-	host proof: deterministic mine field, reveal/flag/flood-fill/win/lose rules, BEFORE/AFTER PPMs
+hammon	gui	-	-	live GUI system monitor (hamui widget toolkit); real /proc data, no faked numbers, event loop forever
+hammon_resize_host	hosttest	%D	-	host proof: renders monitor at several sizes, probes gutter pixel to catch pre-resize black-gutter bug
+hammonscene	gui	-	-	scene-DE system monitor; uptime/memory/process-list from /proc, read-only, resamples on slow cadence
+hamnix_partition	disk	vdb	-	lays down GPT with ESP+ext4 root partitions on /dev/blk/<dev>; writes gpt_init/gpt_mkpart/rescan
+hamnotes_click_host	hosttest	%NEW %NEW	-	host proof: asserts click/drag hit-testing lands caret on clicked glyph, not pinned to buffer end
+hamnotesscene	gui	-	-	Notes scene client; per-note files under /home/live/Notes/, explicit Save/New plus autosave
+hamnotesscene_host	hosttest	%D %NEW %NEW %NEW %NEW	-	host proof: types note, saves, news, reloads off real host filesystem, four PPMs written
+hamnotif	gui	1	-	transient toast banner scene client; reads compositor-published notif model off /dev/wsys/notif
+hamnotify	gui	hello world	-	libnotify-shape CLI: writes "<title>\t<body>\t<icon>" record to /dev/wsys/post inbox ring
+hamosd	gui	1	-	workspace-switch/volume/brightness OSD popup v2 client extracted from compositor daemon_pixel
+hampaint	gui	-	-	MS-Paint-equivalent raster drawing app; private RGBA canvas, per-damage re-blit, Save-as-PNG
+hampaint_host	hosttest	%NEW %NEW	-	host proof: simulates line/rect/flood-fill strokes, saves PNG, reloads it, asserts byte round-trip
+hampanel	gui	1	-	DE taskbar panel v2 client; binds wid from argv[1]/compositor, window-list + clock + launcher
+hampanelscene	gui	-	-	scene-DE panels, config-driven multi-panel top/bottom/left/right, reproduces MATE default layout
+hampkgscene	gui	-	-	"Software" package manager scene client; shells to /bin/hpm, parses its plain-text output, no own pkg logic
+hampkgscene_host	hosttest	%NEW %NEW %NEW	-	host proof: fixture hpm output feeds core, renders LIST/SEARCH/DETAIL PPMs, asserts list/search/detail
+hamrband	gui	1	-	rubber-band drag-to-create overlay v2 client; rasterizes dashed outline from compositor-published model
+hamresize	gui	1	-	live resize-frame + keyboard-move/resize accent overlay v2 client extracted from daemon_pixel
+hamrun	gui	1	-	Alt-F2 "Run Application" modal text-entry dialog v2 client, mirrors compositor-published run model
+hamscreensaver	daemon	60	-	idle-timeout daemon: after fixed idle window spawns /bin/hamlock and waits, repeats forever
+hamsdl_audio_demo	cmd	-	-	on-device hamSDL audio API smoke demo: load+play a SFX, loop music, pump; keeps device seam compiling
+hamsdl_audio_host	hosttest	%WAV %F2	-	host proof: decodes wav/mp3 via host backend, asserts format/play/volume-clamp/loop-latch fields
+hamsdl_font_host	hosttest	%NEW	-	host proof: rasterizes text strings to Surface, blits, asserts fg/transparency/offset/colour in OUT.ppm
+hamsdl_image_host	hosttest	%F %F2 %NEW	-	host proof: loads BMP sprite(s), blits, asserts channel-order/row-order/alpha-blend correctness
+hamsdl_jpeg_host	hosttest	%JPG %NEW	-	host proof: decodes baseline JPEG via format-sniff dispatch, asserts colour within tolerance at position
+hamsession	gui	save %NEW	-	saves/restores open-window session; reads/writes /dev/wsys/session snapshot text (wid pid app rect)
+hamsessui	gui	-	-	"End Session" modal scene client; renders own window, reads own /event+/keys, Escape dismisses
+hamsettings	gui	-	-	scene-DE Settings app; wallpaper swatches write /tmp/hamnix-wallpaper.ppm, panel position/monitor toggles
+hamsh	filter	-	echo hi	Hamnix shell: own Python-flavored tree-walking evaluator, NOT Adder syntax; runs stdin commands to EOF
+hamsheet	gui	-	-	spreadsheet app; grid of cells with formulas (SUM/AVG/MIN/MAX/COUNT), HAMSHEET1 round-trip file format
+hamsheet_host	hosttest	%D %NEW %NEW	-	host proof: types formulas, asserts computed results, saves+reopens HAMSHEET1, exercises SaveAs dialog
+hamshot	cmd	--crop 0 0 4 4 %NEW	-	CLI-only screenshot: grabs live framebuffer pixels, writes PNG; --crop limits to given rectangle
+hamshotui	gui	-	-	"Take Screenshot" chooser scene client; Whole Desktop/Select Area/App Window modes spawn /bin/hamshot
+hamslides	gui	-	-	presentation app (deck of title+bullets+notes+layout slides), HAMSLIDES2 round-trip file format
+hamslides_host	hosttest	%NEW %NEW %NEW %NEW %NEW %NEW	-	host proof: types deck via keys, edits/layouts/themes, saves+reopens, presents, loads legacy v1 file
+hamsnake	gui	-	-	playable animated Snake game on hamui widget toolkit; 16x12 button grid board, frame-counter pacing
+hamsnakescene	gui	-	-	scene-DE Snake; core in lib/hamsnakecore.ad, jiffy-paced auto-advance tick, WASD/arrows steer
+hamsnakescene_host	hosttest	%NEW %NEW	-	host proof: scripted key/tick input, asserts move/grow/score/game-over/restart, BEFORE/AFTER PPMs
+hamsnap	gui	1	-	live snap-zone preview overlay v2 client (edge/corner tiling hint during window move-drag)
+hamsoftware	gui	-	-	Synaptic-style package manager GUI; adds category sidebar over shared hampkgcore, shells to /bin/hpm
+hamsoftware_host	hosttest	%NEW %NEW %NEW	-	host proof: fixture hpm output with category sidebar ON, renders LIST/CAT/DETAIL PPMs
+hamsysmon	gui	1	-	desktop system-monitor applet (CPU+MEM bars) v2 client extracted from daemon_pixel dpix_root_dmon
+hamsysmon_host	hosttest	%D	-	host proof: feeds synthetic CPU/mem samples into shipped cores, rasterizes app+applet PPMs to OUTDIR
+hamterm	gui		-	Separate-process GUI terminal spawned by the compositor; needs /dev/wsys, not stdin-runnable
+hamtermscene	gui		-	Scene-mode GUI terminal spawning /bin/hamsh; renders shell output as a glyph grid via wsys
+hamtetrisscene	gui		-	On-device Tetris scene client; needs a wsys window, /keys and /event to run
+hamtetrisscene_host	hosttest		-	Host-target self-test of hamtetriscore: scripted input drives game state, asserts moves/clears/gameover
+hamtextbox_host	hosttest		-	Host self-test proving click hit-test is the exact inverse of caret-x rendering, pure logic
+hamtoast	gui	hello world	-	Scene-mode transient notification toast; argv is title+body, needs a compositor window
+hamtray	gui		-	DE message-tray history panel scene client; reads /dev/wsys/tray, needs a compositor
+hamUI	gui	list	-	CLI for the multi-window file tree; list/new/close operate on live /dev/wsys windows
+hamUId	daemon		-	Userland wsys compositor renderer; bare invocation with no subcommand defaults to daemon mode
+hamui_demo	gui	render	-	Demo app for the hamui toolkit; "render" mode does one render pass to a wsys window then exits
+hamurl_host	hosttest		-	Host test proving the browser address-bar caret hit-test is the exact inverse of its pixel draw
+hamvideoscene	gui		-	On-device Motion-JPEG player scene client; opens a wsys window, defaults to a built-in sample clip
+hamvideoscene_host	hosttest		-	Host-target self-test: demuxes+decodes a real .hmjv file and rasterizes the player scene to PPM
+hamvideoselftest	payload		-	Runs as /init only (headless decode+wsys-blit proof), not a normal invokable userland command
+hamview	gui		-	Separate-process image viewer built on hamui; opens a file (argv[1]) or a built-in sample image
+hamview_zoom_host	hosttest		-	Host test asserting hamview's zoom/scale math against a real decoded PNG, writes PPMs to look at
+hamwd	daemon		-	Hamnix Window Daemon skeleton; opens a renderer wire and serves /srv/hamwd forever by design
+hamwrite	gui		-	Native word-processor GUI; creates a wsys window and opens/saves documents under /home/live/Documents
+hamwrite_host	hosttest		-	Host self-test driving the word-processor core: type/format/save/reload round-trip, dumps PPMs
+hdu	cmd	%D	-	ncdu-style interactive disk-usage browser of DIR; owns the raw console, in-process (never spawns)
+head	filter	-3	%F	Reads stdin only, writes first N lines (default 10) to stdout; composes with pipes
+hello	cmd		-	First Hamnix-language user program; prints a banner and reads /version to prove the VFS path
+help	cmd		-	Discovery half of man+help; with no args prints a topical index of /usr/share/man pages
+hfw	cmd		-	Native firewall control tool; with no args cats /dev/firewall to list policy+rules (read-only)
+hlinstall	disk		-	Disk installer counterpart to hamlinux_disk.sh; with no args just lists disks and stops
+hlog	cmd		-	Full-screen TUI kernel-log viewer/follower of /proc/kmsg; owns the raw console, tails+follows
+host	net	255.one	-	DNS resolver tool driving the in-kernel resolver over UDP/53; forward/reverse lookups need network
+hostname	cmd		-	Prints the hostname from /etc/hostname, falling back to a baked-in default "hamnix" if absent
+hpm	cmd	list	-	Package manager; "list" prints installed packages from local /var/lib/hpm/installed.json, no network
+htb_evt_paste_host	hosttest		-	Host test feeding raw pointer wire lines through the textbox event path; asserts select/paste
+htermsel_evt_host	hosttest		-	Host test feeding raw "m x y buttons dz" wire bytes through the terminal's own event handler
+htermsel_host	hosttest		-	Host test of the terminal grid-selection model; pure logic, no DE/compositor/mouse involved
+http9	lib		-	Shared HTTP/1.0 client module (URL parse, dial, GET/POST) consumed by hpm/curl/wget; no main()
+httpchunk_host	hosttest		-	Host test exercising http9's chunked-transfer decoder bounds behaviour (oversized chunk clamping)
+httpd	daemon		-	Master process of the native web server; runs the accept loop and spawns a worker per connection forever
+httpdconf	lib		-	Config-file parser module for /etc/httpd.conf (listen/cgi_dir/vhost blocks); no main(), library only
+httpd_worker	other	1	-	Expects a real already-accepted /net/tcp connection NUMBER from the master; meaningless standalone
+hxd	cmd	%F	-	Interactive full-screen hex+ASCII viewer of a file; owns the raw console, scrolls a row/page at a time
+id	cmd		-	Prints uid/gid/groups identity triplet resolved against /etc/passwd and /etc/group; no uid 0 model
+ifconfig	cmd		-	Network info/config tool; with no args prints the live IPv4 config (addr/netmask/gw/DNS), no contact out
+inflate_host	hosttest		-	Host test streaming a real .gz file through the shared inflate_feed decoder, byte-compares vs gunzip
+init	unsafe		-	is PID 1; replaces the boot sequence — Userspace PID 1 shim; execs /bin/hamsh pointed at /etc/rc.boot, not meaningfully runnable standalone
+initctl	cmd	3	-	Requests a runlevel transition by writing /proc/svc/ctl; 3 (multi-user, non-destructive) avoids halt/reboot
+insmod	cmd	%F	-	Loads a kernel module: opens PATH.ko, slurps it, hands buffer+size to SYS_INIT_MODULE; %F is not a real .ko
+install	disk		-	System installer; bare invocation only enumerates disks and prompts, destructive step needs confirmation
+install_file_to_slot	disk	/dev/blk/vdbp2 %F /tmp/from_a.txt	-	Pushes a local file onto a NOT-mounted ext4 partition via the install_file ctl verb; needs real block device
+install_rootfs_from_manifest	disk	%F	-	Drives install_file_to_slot in a loop from a (source,target) manifest file; needs real block device+manifest
+join	cmd	%F %F2	-	Relational join of two SORTED files on a common field (GNU-compatible subset); operands, not stdin
+jpeg_probe	hosttest	%JPG 0 0	-	Host test shim: decodes a JPEG file and prints RC/DIM/PIX for each x,y pair in argv, for a gate to assert
+js	cmd		-	Native JS engine tool; with no args runs a built-in self-test snippet exercising loops/arrays/JSON/Math
+js_host	hosttest	%F	-	Host-target driver: evaluates a local .js file through the same engine, prints console.log output
+js_strptr_probe	hosttest		-	Regression driver proving js_str_ptr() pointers from distinct strings don't clobber each other; prints OK/BAD
+keydemo	other		-	Decodes GUI-terminal press/release key-event stream; loops forever reading stdin, only 'q' keypress exits
+kill	cmd	99999	-	Plan-9 note send: opens /proc/PID/note and writes a note message; PID chosen so target is not found (safe)
+less	filter		%F	Verbatim alias for /bin/more, a 24-line stdin pager; reads stdin only, writes paged output to stdout
+link	cmd	%F %NEW	-	Creates a hard link named FILE2 to existing FILE1; exactly two operands required, no -f/-s options
+linuxinit	unsafe		-	is the Adder PID 1; builds the boot namespace — Linux-host boot shim posting device servers (#c/#p/#s) then execing hamsh; not meaningfully runnable standalone
+live_distro_up	disk		-	Live-medium Debian-namespace bringup: loop-attaches a squashfs and mounts a decompressed RAM block device
+ln	cmd	%F %NEW	-	Creates a hardlink (or -s symlink) at NEWPATH pointing to OLDPATH; -EXDEV across file-server boundaries
+loadkeys	cmd		-	Selects the keyboard layout via /dev/keymap; with no args prints the currently active layout name
+login	other		-	Interactive prompt-and-exec loop reading a raw-byte, no-echo password against /dev/auth; needs a real tty session
+losetup	disk	-a	-	Plan-9 loop attach/detach via /dev/loop/ctl verb lines; -a lists attached loop devices
+ls	cmd	%D	-	fast-path listing via p9_listdir NAME stream; -l switches to Dir-record per-entry stat mode
+lsblk	cmd	-	-	enumerate /dev/blk block devices and print capacity from each node's size file; no flags
+lsmod	cmd	-	-	stub: prints Linux-shaped header plus one hard-coded demo module row, not real /proc/modules
+man	cmd	man	-	reads /usr/share/man/<topic>.<N>.md and writes it to stdout; renderer is a plain file copy
+md5sum	filter	-	%F	stdin only; emits fixed marker hex string for stdin, NOT a real MD5 digest
+memhog	cmd	16	-	allocate N MiB, touch every page for residency, hold, release, report actual vs requested
+mkdir	cmd	%NEW	-	calls sys_mkdir for each argv path; only /tmp/* paths succeed, others return -EROFS
+mkdir_at_slot	disk	/dev/blk/vdbp2 usr/share/foo	-	mkdir -p on a NOT-mounted ext4 partition via /dev/blk/<dev>/ctl mkdir verb
+mkfs_ext4	disk	/dev/blk/vdb	-	format a block device/partition via ext4_mkfs over the /dev/blk/<dev>/ctl channel
+mkfs_fat	disk	/dev/blk/vdbp1 32	-	format device as FAT via ctl channel; kernel-side fat_mkfs is currently a stub returning -1
+mktemp	cmd	-	-	create a uniquely-named temp file under /tmp, print its path, exit 0; mirrors coreutils mktemp
+modprobe	cmd	nonexistentmod	-	resolve a module's dependency chain from modules.dep and load it via SYS_INIT_MODULE
+more	filter	-	%F	drain stdin into a 32 KiB buffer then page it 24 lines at a time, pausing for input each page
+motd	cmd	-	-	stream /etc/motd to stdout; exit 1 if the file is missing
+mp3decode_host	hosttest	%MP3	-	host-only harness decoding an mp3 via lib/mp3decode.ad and dumping PCM/format/checksum info
+multiwintest	gui	-	-	opens two /dev/wsys windows from one pid and proves independent render + input routing
+mv	cmd	%F %NEW	-	copy SRC to DST then unlink SRC; simplest rename semantics, unbounded file size via buffered copy
+net9	lib	-	-	no main(); Plan-9 /net dial helper library wrapping tcp/udp/tls connect for other programs
+net9_host	hosttest	-	-	host harness proving unchanged http9/net9 code fetches a live web page via a host socket shim
+nice_demo	daemon	-	-	spawns nice_hi/nice_lo CPU-bound siblings and never waitpids them; runs as a scheduler-fairness demo
+nice_hi	cmd	-	-	re-nices itself to -20 then runs a fixed wall-clock CPU counting loop and prints iteration count
+nice_lo	cmd	-	-	re-nices itself to +19 then runs the same fixed wall-clock CPU counting loop and prints iterations
+nl	filter	-	%F	number non-empty lines of stdin (GNU -b t default), right-justified 6-wide field plus TAB
+nproc	cmd	-	-	print the number of online CPUs, read from /proc/cpuinfo cpus_online field; falls back to 1
+nsbindprobe	cmd	-	-	binds /extbind_probe over /tmp in its own private namespace copy, prints a marker, exits
+nsrun	cmd	echo hi	-	runs a program in a fresh namespace backed by per-subtree 9P distrofs servers, then execs it
+ntpd	net	pool.ntp.org	-	native NTP client dialing /net/udp to a real NTP server; needs outside network access
+numfmt	filter	--to=iec	1000000	convert numbers to/from human-readable scaled forms; numbers from argv or one-per-line stdin
+od	filter	-	%F	hex dump of stdin, 16 bytes/line, lowercase, space-separated, no address column; no flags used
+oopsread	cmd	-	-	opens /proc/oops and renders the structured kernel panic record from the last boot
+p9srv_demo	hosttest	-	-	minimal userspace 9P2000 server fixture speaking T/R-messages over stdin/stdout, not rio
+panelclock_host	hosttest	OUT.ppm 0	-	host-only clock applet renderer; writes a fixed-epoch clock scene as a PPM, no sockets/Plan9
+passwd	cmd	-	newpass123\nnewpass123	changes current user's password via /dev/auth setpass verb; prompts twice with no local echo
+paste	cmd	%F %F2	-	column-merge corresponding lines of FILE args joined by TAB delimiter; not a stdin filter
+patch	cmd	--dry-run %F	-	apply a unified/normal diff to a target file; --dry-run verifies only, changes nothing
+pathchk	cmd	%F	-	check PATH operands are valid usable file names (length/empty checks); exit 1 if any fails
+pgrep	cmd	sh	-	reads /proc/tasks and prints the PID of every task whose comm substring-matches NAME
+ping	net	127.0.0.1 -c 1	-	ICMP echo client dialing /net/icmp to a real host; -c 1 sends one request then stops
+playtone	other	-	-	synthesizes and plays a square-wave tone via /dev/audioctl+/dev/audio HDA device, no input file needed
+poweroff	unsafe		-	would ask the kernel to power the machine off — writes poweroff verb to /dev/reboot; on success the machine powers off and never returns - refuse to run
+pr	filter	-	%F	paginate stdin into fixed-length pages (default 66 lines) with header/trailer; -t omits them
+preempt_demo	cmd	-	-	spawns a syscall-free CPU-hog sibling then runs its own bounded CPU loop to prove preemption works
+preempt_hog	cmd	-	-	spins forever in a syscall-free tight loop as a preemption-test CPU hog fixture; never returns
+primary_paste_chain_host	hosttest	-	-	host gate joining terminal selection extraction to a real PRIMARY snarf buffer and paste wire line
+printenv	cmd	FOO=bar FOO	-	prints own argv NAME=VALUE tokens as its environment (no real environ[]); queries print matching VALUE
+printf	cmd	%s\n hi	-	minimal coreutils-style printf: %s/%d plus \n \t \\ \0 escapes; unknown conversions emitted literally
+ps	cmd	-	-	dumps /proc/version, /proc/uptime, /proc/tasks snapshots to stdout by re-opening each in turn
+pwd	cmd	-	-	prints the calling task's current working directory via SYS_GETCWD
+realpath	cmd	%F	-	print absolute canonicalised form of each argument path; lexical only, no symlink dereference
+reboot	unsafe		-	would ask the kernel to reboot the machine — writes reboot verb to /dev/reboot; on success the machine resets and never returns - refuse to run
+rev	filter	-	%F	reverse the byte order of each stdin line; newlines preserved as line boundaries, not reversed
+rm	cmd	%NEW	-	unlink each argv path via sys_unlink; only /tmp/* is writable, other paths surface -EROFS
+rmmod	cmd	1	-	unload a module by numeric slot id or name (atoi-decoded); mirrors busybox rmmod minimally
+route	cmd	-	-	show/configure kernel IPv4 routing table via SYS_NETCFG; bare form lists the table, no real net needed
+scene_raster_host	hosttest	in.dl out.ppm	-	loads a scene-dump display list and rasterizes it to a PPM via the host hamui raster path
+scenetest	gui	-	-	opens two overlapping /dev/wsys windows plus a cursor scene and commits them, printing sync markers
+sdlpong	gui	-	-	drives the shared lib/sdlpong.ad game through the native hamSDL device backend; needs real display
+sdlpong_host	hosttest	BEFORE.ppm AFTER.ppm	-	host gate driving the same sdlpong game via the host hamSDL backend, rendering PPM frames + scripted input
+sed	filter	s/l/L/	hello	stream editor: FILE operands or stdin, addressed commands, auto-print unless -n; RE subset only
+seq	cmd	3	-	print integers 1..N (or M..N) one per line; no increment flag, matches coreutils default
+service	cmd	status	-	list/control services via kernel PID-1 supervisor mailbox; status lists all live services
+sha1sum	filter	%F	-	print SHA-1 digest of FILE or stdin; output matches coreutils exactly (hex + name)
+sha256sum	filter	%F	-	print SHA-256 digest of FILE or stdin; output matches coreutils exactly (hex + name)
+shotoverlay_host	hosttest	/tmp/black.ppm /tmp/desktop.ppm	-	host regression shim: writes BLACK.ppm and DESKTOP.ppm proving scrim overlay dims not blacks the desktop
+shuf	filter		%F	write a random permutation of stdin lines (or FILE); PRNG seeded from jiffies xor pid
+sleep	cmd	1	-	busy-waits N seconds against the 100Hz jiffies counter; no nanosleep, spins in user mode
+snarf_primary_host	hosttest		-	host shim proving PRIMARY selection is a second clipboard buffer independent of CLIPBOARD
+sort	filter		%F	sort stdin/FILE lines with a stable insertion sort, coreutils-compatible flag set (-n -r -u -f -k -t)
+spawnfdprobe	hosttest		-	self-test proving spawn() closes launcher-private fds (3/4/5) in the child, leaving 0/1/2 open
+split	cmd	%F %NEW	-	break FILE into PREFIX-named pieces (default 1000 lines each); empty input makes no output files
+sqfs_to_blk	disk	%F %F2 %NEW	-	stream a file out of an in-RAM squashfs onto a block device entirely in-kernel; needs a real blockdev target
+ssh	net		-	SSH-2.0 client; with no host argument runs SELF-TEST: spawns local sshd and loops back over 127.0.0.1
+sshd	daemon		-	from-scratch SSH-2.0 server; listens forever on TCP port 22 for interactive/exec sessions
+stat	cmd	%F	-	display file/inode status (type, size) reconstructed from listdir/open/lseek primitives, no real stat(2)
+strings	cmd	%F	-	print printable byte runs of length >= 4 from FILE (mirrors `strings -n 4`); requires a FILE operand
+su	other	-	-	switches identity via /dev/auth password proof and execs a login shell; needs interactive password entry, unsafe to script
+sum	filter		%F	checksum + block count of FILE or stdin; BSD 16-bit rotate by default, -s for System V additive
+svg_probe	hosttest	%F 0 0	-	host test shim: decodes an SVG file and prints RC/DIM/per-pixel PIX lines for the given (x,y) coords
+sysirqprobe	hosttest		-	kernel sysirq instrument reproducer for mouse-stutter interrupt-latency bug; two-arm measurement, no argv
+tac	filter		%F	write stdin to stdout last line first; bounded by an 8 KiB buffer / 512 tracked lines
+tail	filter		%F	print the last N lines of stdin (default 10); bounded by an 8 KiB buffer, no -f, no -c
+tar	cmd	-cf %NEW %F	-	POSIX ustar archiver (create/extract/list, optional gzip via -z); separate from any Linux-namespace tar
+tee	filter	%NEW	%F	stream stdin to both stdout and PATH; writes route through tmpfs only (not /ext) as of M16.37
+termcomplete_host	hosttest		-	host shim driving the Tab-completion token analysis/apply-policy battery, prints PASS/FAIL + RESULT markers
+test	cmd	-n foo	-	minimal POSIX test/[ supporting -z/-n string predicates and =/!= compares; exit 0 true, 1 false, 2 bad usage
+top	cmd	-bn1	-	Linux-style process monitor; -b/-bn1 is a one-shot labelled /proc snapshot dump (bare `top` is an infinite interactive TUI)
+toprender_host	hosttest		-	host shim feeding synthetic /proc/toptable snapshots to assert parse, %CPU delta, sort and rendered frame
+touch	cmd	%NEW	-	ensure each path exists by open-for-write + close (creates empty tmpfs file); no timestamps/-c/-a/-m flags
+tr	filter	a-z A-Z	%F	translate SET1 bytes to SET2 (or -d delete / -s squeeze); matches GNU tr for the everyday option set
+tree	cmd	%D	-	recursive directory lister with box-drawing connectors, sorted entries and a directory/file count footer
+true	cmd		-	success exit, no output; pairs with `false` for shell control flow
+truncate	cmd	-s 10 %F	-	set FILE's size to exactly SIZE bytes; grows zero-filled, shrinks discarded, SIZE takes K/M suffix
+tsort	filter		a b b c	topological sort of whitespace tokens taken in pairs (edges); odd token count or a cycle is an error, matches GNU tsort
+tty	cmd		-	print the terminal name bound at stdin (/dev/cons) mirroring POSIX tty(1); exit 0 if a tty, 1 otherwise
+umdf_host	cmd	%F	-	loads a stock Linux ET_REL .ko module in a normal user process outside the kernel fault domain; needs a real .ko file
+uname	cmd		-	writes "<sysname> <machine> <release>\n"; sysname is fixed "Hamnix", release is queried live from the Linux kernel
+unexpand	filter		%F	convert runs of spaces to TABs; GNU default touches only leading blanks, -a converts every blank run, -t sets tabstop
+uniq	filter		%F	collapse adjacent duplicate lines from stdin (expects pre-sorted input, like coreutils); -c/-d/-u flags supported
+unlink	cmd	%F2	-	call the unlink primitive on exactly one operand; no globbing/recursion/prompting, thin front end to unlink(2)
+uptime	cmd		-	reads /proc/uptime and emits "up N seconds\n"; discriminates the Linux-shaped vs legacy-centisecond renderer
+urlparse_host	hosttest		-	host shim asserting the URL parser accepts curl/wget/hpm forms, incl. scheme-less bare host defaulting to http://
+useradd	cmd	smoketestuser 1500	-	create a regular user (passwd/shadow/home-file-server entries); hostowner-only, gated on uid==1 in the kernel
+u_server	daemon		-	minimal native TCP server: announces port 7000 on /net, accepts ONE connection, echoes a fixed response, then exits
+u_tlstest	net		-	minimal native HTTPS/TLS 1.3 client dialing a fixed test host (10.0.2.200:443) over the /net file tree; needs real network
+vi	other	%F	-	modal full-screen vi-shape editor; owns the raw console and reads keystrokes one at a time, unsafe for scripted/non-interactive smoke test
+video_pointer_host	hosttest		-	host shim proving the video player's mouse-transport parse (ignores trailing dz) and EOF-replay/rewind behaviour
+vk2d_host	hosttest	%NEW	-	host shim drawing every vk2d primitive into a 64x64 RGBA image, dumps a PPM and prints sampled pixel colours
+wakelat	hosttest		-	wakeup-latency reproducer; spawns wakelat_echo + wakelat_hog copies, measures preempt vs handoff wakeup distributions
+wakelat_echo	hosttest		-	responder half of the wakeup-latency reproducer; times its own service latency from a woken pipe read, no argv
+wakelat_hog	cmd		-	CPU hog with a throughput meter: fixed wall-clock window, syscall-free counting loop, prints "[wakelat] hog iters=N"
+watch	cmd	-n 1 /uptime	-	runs CMD twice with an N-second gap between runs; no -c colors, no -d diff, no terminal redraw loop
+wc	filter		%F	reports "<lines> <words> <bytes>\n" for stdin; -l/-w/-c/-m select columns; reads stdin only, no file operands
+wget	net	http://example.com/	-	native HTTP client over the /net file tree; saves the body to the URL basename or -O FILE; needs real network
+whatis	cmd	ls	-	one-line description for a hardcoded set of common binary names; unknown names get coreutils' "nothing appropriate"
+which	cmd	ls	-	walks the hardcoded PATH (/bin /sbin /usr/bin) probing via sys_open; prints first match, exits 1 if none found
+whoami	cmd		-	print the current user's name resolved from SYS_GETUID against /etc/passwd; falls back to numeric uid if unmatched
+wsysd	daemon		-	userland window compositor/rasterizer for the Linux target; owns the window table's rasterization, runs forever
+wsyswl	daemon		-	minimal Wayland server bridging wl_* clients to wsysd windows (one wsys window per xdg_toplevel); runs forever
+xargs	cmd	echo	%F	read stdin items, append to a template command, spawn+wait a real child per GNU xargs semantics (-0 -n -I supported)
+xbridge	gui		-	bridges an Xvfb-rendered X11 app (fbdir framebuffer file) into one wsys window; needs a running Xvfb + compositor
+yes	daemon		-	emits "y\n" (or argv[1]) forever in 64-line chunks; loops until SIGINT, not a bounded command

@@ -180,6 +180,15 @@ done
 # The Linux line subscribes to the `linux` channel, not `main`: `main` holds
 # native Hamnix binaries, which install here perfectly and then segfault.
 install -m644 etc/hpm/channels.linux "$ROOT/etc/hpm/channels"
+# The manual pages. etc/man/ has 19 of them and nothing was staging them, so
+# on the shipped image `help` reported its own index missing and `man
+# <anything>` failed -- both exiting 0 about it.
+if [ -d etc/man ]; then
+    mkdir -p "$ROOT/usr/share/man"
+    install -m644 etc/man/*.md "$ROOT/usr/share/man/" 2>/dev/null || true
+    echo "[image] staged $(ls -1 etc/man/*.md 2>/dev/null | wc -l) manual pages"
+fi
+
 # The graphical runlevel. Kept separate from Hamnix's etc/rc.d/rc.5, which
 # brings the DE up through the declarative service supervisor and the kernel
 # scene compositor -- neither of which exists on this line yet.
