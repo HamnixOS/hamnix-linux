@@ -272,6 +272,114 @@ else
     echo "[image] no modprobe or /lib/modules/$KVER — image will have no drivers" >&2
 fi
 
+# --- the Vulkan userspace -------------------------------------------------
+# The kernel modules above give the machine a DRM device and a framebuffer.
+# They do not give it anything that can DRAW. That is the ICD -- a userspace
+# driver reached through libvulkan.so.1 -- and it belongs in the HAMNIX root,
+# not in the Debian namespace, because the whole point of this line is that the
+# Adder userland talks to the GPU itself. tests/linux/vkprobe.ad proved an
+# Adder binary on this lane can dlopen the loader and enumerate a real device.
+#
+# Everything is taken from the BUILD HOST, for the same reason ld-linux and
+# libc are taken from the build host a few lines up: one ABI. The Debian
+# namespace is a different release with a different glibc, and an ICD built
+# against one libc loaded by another is the classic way to get a driver that
+# initialises and then finds no devices.
+#
+# Libraries install under their DT_SONAME as REGULAR FILES, never symlinks:
+# ld.so matches the string, and a dangling link is a failure that reads like a
+# missing driver.
+#
+#   HAMLINUX_VULKAN=none      no Vulkan at all
+#   HAMLINUX_VULKAN=venus     (default) loader + venus. ~7 MiB. venus is the
+#                             virtio-gpu driver -- the one that makes a VM
+#                             genuinely GPU-accelerated (hamlinux_vm.sh venus).
+#   HAMLINUX_VULKAN=lavapipe  loader + venus + lavapipe, the CPU rasteriser.
+#                             +165 MiB, nearly all libLLVM, and the only ICD
+#                             that enumerates a device on a plain virtio-gpu --
+#                             which is what makes an unaccelerated VM able to
+#                             test the Vulkan path at all.
+#   HAMLINUX_VULKAN=all       every ICD this host has: also ANV, NVK, RADV.
+#
+# On an INSTALLED machine the same files arrive as hpm packages
+# (scripts/hamlinux_packages.py: hamnix-vulkan, hamnix-vulkan-<icd>). This
+# staging is for the developer boot, where there is no network and no repo.
+VK_LIBDIR=/usr/lib/x86_64-linux-gnu
+VK_MODE="${HAMLINUX_VULKAN:-venus}"
+
+vk_stage_so() {
+    # Install one library under the name ld.so will look for.
+    local lib="$1" name
+    name="$(readelf -d "$lib" 2>/dev/null \
+            | sed -n 's/.*SONAME.*\[\(.*\)\]/\1/p' | head -1)"
+    [ -n "$name" ] || name="$(basename "$lib")"
+    mkdir -p "$ROOT$VK_LIBDIR"
+    [ -f "$ROOT$VK_LIBDIR/$name" ] || cp -L "$lib" "$ROOT$VK_LIBDIR/$name"
+}
+
+vk_stage_closure() {
+    # A library and everything it needs. ldd is already transitive, so one
+    # call is the whole closure -- and it reports what the LOADER would pick,
+    # which is the question. libc and ld.so are already staged above.
+    local lib="$1" dep
+    [ -f "$lib" ] || return 0
+    vk_stage_so "$lib"
+    { ldd "$lib" 2>/dev/null || true; } | awk '/=> \//{print $3}' | sort -u \
+    | while read -r dep; do
+        case "$(basename "$dep")" in
+            libc.so.6|ld-linux-x86-64.so.2) continue ;;
+        esac
+        [ -f "$dep" ] && vk_stage_so "$dep"
+    done
+}
+
+if [ "$VK_MODE" != none ] && [ -f "$VK_LIBDIR/libvulkan.so.1" ]; then
+    case "$VK_MODE" in
+        venus)    VK_ICDS="virtio" ;;
+        lavapipe) VK_ICDS="virtio lvp" ;;
+        all)      VK_ICDS="virtio lvp intel nouveau radeon" ;;
+        *)        VK_ICDS="$VK_MODE" ;;
+    esac
+    vk_stage_closure "$VK_LIBDIR/libvulkan.so.1"
+    mkdir -p "$ROOT/usr/share/vulkan/icd.d"
+    VK_STAGED=""
+    for icd in $VK_ICDS; do
+        json="/usr/share/vulkan/icd.d/${icd}_icd.json"
+        [ -f "$json" ] || json="/usr/share/vulkan/icd.d/${icd}_icd.x86_64.json"
+        [ -f "$json" ] || continue
+        lib="$VK_LIBDIR/$(sed -n 's/.*"library_path"[^"]*"\([^"]*\)".*/\1/p' "$json")"
+        [ -f "$lib" ] || continue
+        vk_stage_closure "$lib"
+        install -m644 "$json" "$ROOT/usr/share/vulkan/icd.d/$(basename "$json")"
+        VK_STAGED="$VK_STAGED $icd"
+    done
+    # `if`, not `[ ... ] && { ... }`: under `set -e` a false test at the end of
+    # an && list is the script's exit status, and an image build that stopped
+    # here on a host without libdrm's PCI-id table would be a mystery.
+    if [ -f /usr/share/libdrm/amdgpu.ids ]; then
+        mkdir -p "$ROOT/usr/share/libdrm"
+        install -m644 /usr/share/libdrm/amdgpu.ids \
+            "$ROOT/usr/share/libdrm/amdgpu.ids"
+    fi
+    echo "[image] staged the Vulkan loader + ICDs:$VK_STAGED ($(du -sh "$ROOT$VK_LIBDIR" | cut -f1) of libraries)"
+else
+    echo "[image] no Vulkan userspace staged (HAMLINUX_VULKAN=$VK_MODE)"
+fi
+
+# vkprobe: the one program that answers "is the GPU stack real?" without
+# guessing. It dlopens the loader, creates an instance and prints every
+# physical device an ICD enumerates -- so a device NAME on the console is
+# proof, and no output is proof of the opposite. Built specially because it is
+# an Adder program plus a C shim plus -ldl, which the plain app loop above does
+# not do.
+if scripts/hamlinux_build.sh tests/linux/vkprobe.ad "$OUT/obj/vkprobe.elf" \
+        tests/linux/vkprobe.c -ldl >/dev/null 2>&1; then
+    install -m755 "$OUT/obj/vkprobe.elf" "$ROOT/bin/vkprobe"
+    echo "[image] staged /bin/vkprobe"
+else
+    echo "[image] NOTE: vkprobe did not build" >&2
+fi
+
 # --- the installer's boot files -------------------------------------------
 # HAMLINUX_INSTALLER=1 stages the kernel, the initramfs and the unified kernel
 # image into /boot, so user/hlinstall.ad has something to write onto the ESP of
