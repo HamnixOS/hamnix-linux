@@ -4,6 +4,95 @@ You are starting with no context. Read this first, then `README.md`.
 
 ---
 
+## 0. Where this stands
+
+> This section is the current state. Sections 1–8 below are the ORIGINAL
+> handoff, written from static analysis before any of it was run; several of
+> their claims have since been measured, corrected or answered outright, and
+> where that has happened it is marked in place. Read this first and treat the
+> rest as history plus reference.
+
+**hamnix-linux boots to a desktop, installs itself, and updates from
+255.one.** Concretely, all of the following are measured rather than argued:
+
+| | |
+|--|--|
+| Boot | Linux kernel → `user/linuxinit.ad` (the Adder PID 1) → namespace via `sys_bind` → `hamsh` → the rc scripts |
+| Installed boot | UEFI → a unified kernel image on an ESP → PID 1 → `bind '#sysroot' /` → the real ext4 root. Files written on one boot are there on the next. |
+| Display | `/dev/fb` on fbdev, `wsysd` compositing at 1280×800, verified by QEMU screendump of the SCANNED-OUT surface |
+| Windows | `/dev/wsys`, the port of `devwsys.ad`, in shared memory. Both protocols: the v1 scene display list and the v2 blit surface. |
+| Input | every `/dev/input/event*`, decoded in the compositor, routed to the focused window in window-local coordinates |
+| Desktop | `hamdesktop` + `hampanelscene`, unmodified. Launch a terminal from the menu, type in it, get output. |
+| Networking | `/net` as a file tree, TCP/UDP/ICMP, TLS, and `announce`/`accept` across process boundaries |
+| Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1 |
+| Debian | a namespace on its own filesystem; Firefox runs in it and is composited onto the Hamnix desktop through the blit protocol |
+| Build | 350 of 361 `user/*.ad` build through the LLVM lane |
+
+### What answered the original open questions
+
+* **§3, the `/net` design.** Answered: a file tree, in shared memory. §3.3
+  identified the constraint correctly — a connection must be addressable by
+  integer across process boundaries — and that is exactly why a shim was the
+  wrong answer. The connection TABLE is shared, so the NUMBER means the same
+  thing everywhere; the socket rides across `fork`, which covers
+  `httpd` → `httpd_worker`. `user/linux-net.c`.
+* **§7.1, cross-process fd addressing.** Answered the same way, and it is the
+  same problem: a pipe slot is a FIFO, the bindings are shared, and `/fd/<n>`
+  resolves per-process. `user/linux-fdns.c`.
+* **§4.4, the compositor.** Answered: `/dev/wsys` is shared memory (a faithful
+  port of a KERNEL device, which is what `devwsys.ad` is), and the RASTERIZER
+  moved to userland as an ordinary Adder program, `user/wsysd.ad`. It reuses
+  `lib/hamui_host.ad` unchanged — that module was written as a host-test sink
+  and turns out to be a compositor. §4.4's "DRM master is exclusive" blocker
+  dissolved when fbdev turned out to be both the right analogue and not
+  master-exclusive.
+
+### The one thing to carry forward
+
+Every serious bug on this line has had the same shape: **a gap that answers
+something success-shaped instead of the truth.** Not a crash, not an error — a
+plausible wrong answer. The list, because the pattern is more useful than any
+single entry:
+
+* `sys_chan_dir_mode` stubbed → `cp -r` created a file containing a directory
+  listing and exited 0.
+* `sys_get_jiffies` returning 0 → `sleep 1` hung for ever.
+* `#d` bound to a real `/proc/self/fd` → every spawned program's output went to
+  a read-only stdout and vanished; the program ran and exited 0.
+* `dup2` of a synthetic device fd → `echo x > /dev/wsys/appmenu/launch`
+  reported success and the queue stayed empty.
+* `sys_openchan` fail-closed → EVERY shell redirect created its file, wrote
+  nothing to it, and printed to the console.
+* `sys_waitpid_nb_raw` returning waitpid(2)'s 0 for a live child → the DE
+  terminal decided its shell had died the instant it started.
+* `sys_read_nb` leaving `O_NONBLOCK` set → the next blocking read returned
+  EAGAIN, which `hamsh` read as end-of-input and exited.
+
+None of these failed loudly. Three were found only by tracing, one only by
+running `strace` **as PID 1**, and one only after publishing the compositor's
+own state as a file (`/dev/wsys/wsysd/state`) so it could be `cat`-ed from
+inside a misbehaving desktop. When something here does not work, assume a call
+is lying before you assume it is broken.
+
+### Running it
+
+```
+scripts/hamlinux_image.sh          # initramfs + kernel
+scripts/hamlinux_vm.sh gpu         # boot it with a display
+scripts/hamlinux_disk.sh           # an INSTALLED disk (GPT + ESP + ext4)
+scripts/hamlinux_vm.sh disk-gpu    # boot the installed disk through UEFI
+scripts/hamlinux_distro.sh         # the Debian namespace (Firefox lives here)
+scripts/hamlinux_packages.py       # build the `linux` hpm channel
+scripts/hamlinux_shot.sh out.png   # boot and screendump in one command
+tests/linux/*.sh, tests/linux/*_probe.ad
+```
+
+Host packages this needs, beyond the original list: `mmdebstrap`,
+`dosfstools`, `e2fsprogs`, `gdisk`, `parted`, `mtools`, `systemd-boot-efi`,
+`ovmf`, `socat`.
+
+---
+
 ## 1. What Hamnix is, and why this repo exists
 
 Hamnix 1.0 is a from-scratch x86_64 operating system written entirely in
@@ -78,6 +167,14 @@ Three things are already done, and they change the shape of the job:
 ---
 
 ## 3. The `/net` problem
+
+> **ANSWERED 2026-08-09 — see §0.** `/net` is a file tree served out of shared
+> memory (`user/linux-net.c`). §3.3's constraint is exactly why: a connection
+> number has to mean the same thing in two processes, so the TABLE is shared
+> and the number is what crosses. TCP, UDP, ICMP, `announce`/`accept`, and TLS
+> via the `tls <host>` ctl verb. Measured: `curl https://255.one/` and `hpm`
+> installing 61 packages, both unmodified.
+
 
 Hamnix has **no BSD socket syscalls at all**. `SYS_SOCKET`, `CONNECT`,
 `BIND_SOCK`, `LISTEN_SOCK`, `ACCEPT_SOCK` and `SYS_TLS_CONNECT` were all
@@ -662,6 +759,14 @@ easy; collectively they are gated on §4.4.
 
 ## 6. Desktop stack: keep vs replace
 
+> **DECIDED: keep.** Nothing in the DE was replaced. `hamdesktop`,
+> `hampanelscene`, `hamtermscene` and the rest run unmodified against
+> `/dev/wsys`; the compositor is a new Adder program (`user/wsysd.ad`) that
+> reuses `lib/hamui_host.ad`'s rasterizer as-is. A foreign toolkit reaches the
+> screen through the v2 blit protocol that `devwsys.ad` already specified, and
+> `user/xbridge.ad` is the first client of it.
+
+
 **Keep.**
 
 - **The scene-file protocol and `lib/hamui.ad`.** It is the distinctive thing
@@ -694,6 +799,12 @@ it is not mine to make.
 ---
 
 ## 7. Open questions I could not resolve
+
+> **§7.1 ANSWERED** (descriptors as names — `user/linux-fdns.c`; a pipe slot is
+> a FIFO, the bind table is shared, `/fd/<n>` resolves per-process).
+> **§7.4 RESOLVED** earlier (glibc, deliberately).
+> The rest still stand. See §0.
+
 
 1. **Shim library vs. real file server for `/net`.** `scripts/net9_host_shim.c`
    proves the shim works for clients. It does **not** handle
