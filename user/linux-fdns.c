@@ -66,8 +66,15 @@
 #define MAX_BINDS    512
 #define PATH_CAP     256
 
+/* A slot is either a PIPE (a fifo) or a REDIRECT TARGET (an ordinary file).
+ * Both are addressed the same way -- by number -- because that is what crosses
+ * a process boundary. */
+enum { SLOT_FIFO = 0, SLOT_FILE = 1 };
+
 struct slotrec {
     uint32_t used;
+    int32_t  kind;                    /* SLOT_FIFO | SLOT_FILE */
+    int32_t  mode;                    /* SLOT_FILE: OPENCHAN_* */
     int32_t  owner;                   /* the pid that called pipechan */
     char     path[PATH_CAP];
 };
@@ -180,6 +187,43 @@ static struct slotrec *slot_find(int32_t slot)
     return NULL;
 }
 
+/* THE SPAWN GATE.
+ *
+ * The Plan 9 contract is: parent forks, parent binds the child's /fd names,
+ * child runs.  On Linux the child is runnable the instant fork(2) returns, so
+ * it can reach open("/fd/1") before the bind lands -- and then it silently
+ * uses its inherited stdout.  That is not a corner case: it is EVERY shell
+ * redirect.  `ls > file` created the file, ran, exited 0, and printed to the
+ * console, with no diagnostic anywhere.
+ *
+ * Waiting a fixed time in the child would tax every spawn that has no
+ * redirect, so instead the fork itself opens a GATE, and the child waits on
+ * it.  The parent closes the gate when it forks and opens it at its next
+ * runtime call that is NOT a bind -- because that is precisely the moment it
+ * has finished binding.  No timer, no guess: the ordering the cooperative
+ * scheduler used to provide is reconstructed from what the parent does.
+ *
+ * The timeout is a backstop for a parent that never calls anything again.
+ */
+#define GATE_FD (-1)          /* a bindrec with this fdnum is a gate */
+
+static int32_t pending_child;
+
+void fdns_after_fork_parent(int32_t child)
+{
+    if (attach() < 0) return;
+    fdns_fdbind(child, GATE_FD, FDNS_NONE, 0);   /* closed */
+    pending_child = child;
+}
+
+void fdns_gate_release(void)
+{
+    if (!pending_child || !shm) return;
+    struct bindrec *g = bind_find(pending_child, GATE_FD);
+    if (g) g->kind = FDNS_CONS;                  /* any non-NONE = open */
+    pending_child = 0;
+}
+
 /* THE RACE THE COOPERATIVE SCHEDULER USED TO HIDE.
  *
  * The Plan 9 contract is: parent forks, parent binds the child's /fd names,
@@ -196,7 +240,7 @@ static struct slotrec *slot_find(int32_t slot)
  * therefore mid-spawn.  A child of a launcher that never made a pipe (the
  * panel's spawn_detached, which is every menu launch) sees no wait at all.
  */
-#define BIND_WAIT_MS 400
+#define BIND_WAIT_MS 150
 
 static int parent_owns_slots(void)
 {
@@ -209,15 +253,37 @@ static int parent_owns_slots(void)
 
 static struct bindrec *await_bind(int32_t pid, int32_t fdnum)
 {
-    if (!parent_owns_slots())
+    struct bindrec *gate = bind_find(pid, GATE_FD);
+    int watch = (gate != NULL) || parent_owns_slots();
+    if (!watch)
         return NULL;
     for (int ms = 0; ms < BIND_WAIT_MS; ms++) {
         struct bindrec *b = bind_find(pid, fdnum);
         if (b && b->kind != FDNS_NONE)
             return b;
+        /* The parent has moved past its binds: whatever is here now is all
+         * there is ever going to be. */
+        if (gate && gate->kind != FDNS_NONE)
+            return bind_find(pid, fdnum);
         usleep(1000);
     }
-    return NULL;
+    return bind_find(pid, fdnum);
+}
+
+/* HAMFDNS_DEBUG=1 traces every /fd resolution to stderr. The failure mode
+ * this exists for is silence: an unbound name falls back to the inherited
+ * descriptor and the program works, just not where the caller meant. */
+static void fdns_trace(const char *path, struct bindrec *b, int r)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("HAMFDNS_DEBUG"); on = (e && *e) ? 1 : 0; }
+    if (!on) return;
+    char m[192];
+    int n = snprintf(m, sizeof m, "[fdns] pid=%d %s -> kind=%d slot=%d fd=%d\n",
+                     (int)getpid(), path, b ? b->kind : -1,
+                     b ? b->slot : -1, r);
+    ssize_t ignored = write(2, m, (size_t)(n < 0 ? 0 : n));
+    (void)ignored;
 }
 
 int fdns_open(const char *path, int for_write)
@@ -239,6 +305,41 @@ int fdns_open(const char *path, int for_write)
          * it preserves the access mode, which /proc/self/fd cannot. */
         int r = dup(fdnum);
         if (r < 0) errno = EBADF;
+        fdns_trace(path, b, r);
+        return r;
+    }
+    if (b->kind == FDNS_DUP) {
+        /* `2>&1`: bind whatever is at /fd/<slot>. Resolved by NAME, once,
+         * rather than copied -- which is what makes it follow a later rebind
+         * of the target the way the Plan 9 model says it should. */
+        char alias[32];
+        snprintf(alias, sizeof alias, "/fd/%d", (int)b->slot);
+        return fdns_open(alias, for_write);
+    }
+    if (b->kind == FDNS_FILE || b->kind == FDNS_CHAN
+        || b->kind == FDNS_APPEND) {
+        /* A REDIRECT. The slot names a FILE, and the child opens it itself.
+         *
+         * It has to be a name. The first version passed the shell's own
+         * descriptor number and let the child inherit it -- which is wrong in
+         * a way that took a trace to see: hamsh opens the redirect target
+         * AFTER the fork, so the number is valid only in the parent. The
+         * child's dup() returned EBADF, the routing helper gave up quietly,
+         * and every `cmd > file` ran with its inherited stdout. The file was
+         * created and left empty; the output went to the console. Silent, and
+         * success-shaped, which is this port's recurring failure.
+         *
+         * O_TRUNC is deliberately NOT repeated here: the shell already
+         * truncated when it opened the target, and truncating again would
+         * discard what an earlier stage of the same pipeline wrote. */
+        struct slotrec *fs = slot_find(b->slot);
+        if (!fs || fs->kind != SLOT_FILE) { errno = EBADF; fdns_trace(path, b, -1); return -1; }
+        int flags = (fs->mode == 1) ? O_WRONLY | O_CREAT
+                  : (fs->mode == 2) ? O_WRONLY | O_CREAT | O_APPEND
+                                    : O_RDONLY;
+        int r = open(fs->path, flags, 0666);
+        fdns_trace(path, b, r);
+        if (r < 0) { errno = EBADF; return -1; }
         return r;
     }
     if (b->kind == FDNS_CONS) {
@@ -253,6 +354,33 @@ int fdns_open(const char *path, int for_write)
      * the binder is the one that decided which end of the pipe this name is. */
     int flags = (b->kind == FDNS_PIPE_W) ? O_WRONLY : O_RDONLY;
     return open(s->path, flags);
+}
+
+/* Record a redirect target as a SLOT. The path, not a descriptor: see the
+ * note in fdns_open. The shell also opens it itself, so a target it cannot
+ * create is an error at the redirect rather than a mystery in the child. */
+int32_t fdns_openchan(const char *path, int32_t mode)
+{
+    if (attach() < 0) return -1;
+    int flags = (mode == 1) ? O_WRONLY | O_CREAT | O_TRUNC
+              : (mode == 2) ? O_WRONLY | O_CREAT | O_APPEND
+                            : O_RDONLY;
+    int probe = open(path, flags, 0666);
+    if (probe < 0) return -1;
+    close(probe);
+
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        if (shm->slot[i].used) continue;
+        int pn = snprintf(shm->slot[i].path, PATH_CAP, "%s", path);
+        if (pn < 0 || pn >= PATH_CAP) { errno = ENAMETOOLONG; return -1; }
+        shm->slot[i].used  = 1;
+        shm->slot[i].kind  = SLOT_FILE;
+        shm->slot[i].mode  = mode;
+        shm->slot[i].owner = (int32_t)getpid();
+        return (int32_t)(i + 1);
+    }
+    errno = ENOSPC;
+    return -1;
 }
 
 int32_t fdns_pipechan(void)
@@ -271,6 +399,7 @@ int32_t fdns_pipechan(void)
             return -1;
         }
         shm->slot[i].owner = (int32_t)getpid();
+        shm->slot[i].kind  = SLOT_FIFO;
         unlink(shm->slot[i].path);
         if (mkfifo(shm->slot[i].path, 0666) < 0 && errno != EEXIST)
             return -1;
@@ -279,6 +408,7 @@ int32_t fdns_pipechan(void)
         int k = open(shm->slot[i].path, O_RDWR | O_CLOEXEC);
         if (k < 0) {
             shm->slot[i].owner = (int32_t)getpid();
+        shm->slot[i].kind  = SLOT_FIFO;
         unlink(shm->slot[i].path);
             return -1;
         }

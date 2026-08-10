@@ -39,7 +39,7 @@ RFPROC: int32 = 1
 
 # argv/envp vectors for the exec, and a scratch buffer for messages.
 init_argv: Array[4, uint64]
-init_envp: Array[4, uint64]
+init_envp: Array[8, uint64]
 errbuf:    Array[128, uint8]
 modlist:   Array[8192, uint8]
 modpath:   Array[512, uint8]

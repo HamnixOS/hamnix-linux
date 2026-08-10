@@ -415,6 +415,7 @@ static int64_t note_write(int pid, const uint8_t *buf, uint64_t count)
  * ONE argument, opened for reading — see the long note at the .S definition. */
 int32_t sys_open(const char *path)
 {
+    fdns_gate_release();
     /* /fd/<n> is a NAME for a descriptor, possibly one another process bound
      * for us. It resolves to a real fd, so it never enters the device table. */
     if (fdns_is_path(path))
@@ -444,6 +445,7 @@ int32_t sys_open3(const char *path, int32_t flags, uint32_t mode)
  * Open-or-create for writing, truncating an existing file. */
 int32_t sys_open_write(const char *path)
 {
+    fdns_gate_release();
     if (fdns_is_path(path))
         return rc32(fdns_open(path, 1));
     int npid = note_path_pid(path);
@@ -478,6 +480,7 @@ int32_t sys_open_write(const char *path)
  * On a directory fd, serve the synthesised "NAME\n" stream. */
 int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
 {
+    fdns_gate_release();
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         int64_t n;
@@ -557,6 +560,7 @@ int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
 /* extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64 */
 int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 {
+    fdns_gate_release();
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         if (v->note_pid > 0)
@@ -577,6 +581,7 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 /* extern def sys_close(fd: int32) -> int32 */
 int32_t sys_close(int32_t fd)
 {
+    fdns_gate_release();
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         if (v->isw)   hamwsys_close(&v->w);
@@ -864,6 +869,12 @@ int32_t sys_rfork(int32_t flags)
         } else {
             _exit(127);
         }
+    }
+    if (pid > 0) {
+        /* Close the spawn gate: until the parent finishes binding, a child
+         * that opens /fd/N must wait rather than fall back to what it
+         * inherited. See user/linux-fdns.c. */
+        fdns_after_fork_parent((int32_t)pid);
     }
     if (pid == 0) {
         /* The child inherits the parent's fifo KEEPER descriptors (see
@@ -1293,6 +1304,7 @@ int32_t sys_set_realtime(uint64_t epoch)
  * EINTR is retried: a SIGCHLD or window-resize must not look like an exit. */
 int64_t sys_waitpid(int32_t pid)
 {
+    fdns_gate_release();
     int status;
     pid_t r;
     do {
@@ -1375,6 +1387,7 @@ int64_t sys_waitpid_jc(int32_t pid, int64_t *status)
  * Returns the reaped pid, -EAGAIN if the child is alive, -errno on error. */
 int64_t sys_waitpid_nb_raw(int32_t pid, int64_t flags)
 {
+    fdns_gate_release();
     int st;
     int wflags = (flags & 1) ? WNOHANG : 0;
     pid_t r;
@@ -1440,6 +1453,7 @@ int32_t sys_setuid(uint32_t uid)
 #define WAITFDS_MAX 64
 int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
 {
+    fdns_gate_release();
     struct pollfd pfd[WAITFDS_MAX];
     if (nfds > WAITFDS_MAX) {
         errno = EINVAL;
@@ -1455,6 +1469,33 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
         r = poll(pfd, (nfds_t)nfds, (int)timeout_ms);
     } while (r < 0 && errno == EINTR);
     return r < 0 ? -1 : (int64_t)r;
+}
+
+/* extern def sys_openchan(path: Ptr[char], write: int32) -> int32
+ *
+ * Open a redirect target and return a HANDLE the shell can bind at a child's
+ * /fd/N.  On Linux the handle is simply the descriptor: RFFDG copies the fd
+ * table across the fork, so the number means the same thing in the child.
+ *
+ * THIS IS WHY EVERY REDIRECT SILENTLY DID NOTHING.  hamsh's _wire_redirects
+ * calls sys_openchan and then `if fslot >= 0:` before binding -- so a
+ * fail-closed -1 skipped the bind with no diagnostic anywhere, and
+ * `ls > file` ran, exited 0, created nothing and printed to the console.  The
+ * DE session's `wsysd > /var/log/wsysd.log &` was the visible symptom: a debug
+ * beacon burying every other message on the serial line while the log file it
+ * was supposedly going to sat empty.
+ *
+ * Modes are OPENCHAN_READ 0 / OPENCHAN_TRUNC 1 / OPENCHAN_APPEND 2.  The
+ * CHAN_INLINE_TAG bit is deliberately NOT set: it distinguishes a device chan
+ * from a tmpfs slot in the Hamnix kernel, and here both are just descriptors,
+ * so the plain DEVFD_FILE bind is the right one for either. */
+int32_t sys_openchan(const char *path, int32_t mode)
+{
+    /* Everything goes through the slot table, devices included: a device
+     * target (`cmd > /dev/wsys/<wid>/keys`) is served by the synthetic-device
+     * table and those descriptors are per-process, so the NAME is the only
+     * thing that can cross to the child either way. */
+    return rc32(fdns_openchan(path, mode));
 }
 
 /* extern def sys_pipechan() -> int32
@@ -1639,25 +1680,44 @@ static const char *sysroot_device(void)
 /* Make `mnt` the process's root. chroot alone leaves the old root reachable
  * through the cwd, so chdir first — that is the difference between confinement
  * and a suggestion. */
-static int32_t enter_root(const char *mnt)
+/* `is_sysroot` distinguishes the two things that both spell `bind X /`.
+ *
+ * THE ROOT SWITCH (#sysroot).  Everything before it ran out of the initramfs,
+ * where /proc, /dev, /sys, /srv and /tmp were bound by the Adder PID 1;
+ * chrooting without them would leave the new root with no console, no
+ * /dev/fb and no shared segments -- the desktop would come up mute and blind.
+ * MS_MOVE relocates the existing mounts rather than mounting them again, so
+ * there is exactly one devtmpfs and the /srv segments are the SAME objects the
+ * running processes already have mapped.
+ *
+ * ENTERING A SUBTREE (#distro).  A Debian program still needs /dev and /proc,
+ * but /tmp must be the SUBTREE's own.  Carrying the Hamnix tmpfs across cost
+ * an evening: Xvfb inside the Debian namespace wrote its framebuffer to
+ * /tmp/xfb, that landed in a tmpfs that only the child could see, and
+ * user/xbridge.ad on the Hamnix side found nothing at /n/distro/tmp/xfb.  The
+ * X server was running perfectly and its output was in a private universe.
+ * And BIND, not MOVE: a child must not take the parent's mounts away. */
+static int32_t enter_root(const char *mnt, int is_sysroot)
 {
-    /* Carry the device trees across.  Everything above this point ran out of
-     * the initramfs, where /proc, /dev, /sys, /srv and /tmp were bound by the
-     * Adder PID 1; chrooting without them would leave the new root with no
-     * console, no /dev/fb, no shared-memory segments -- the desktop would come
-     * up mute and blind.  MS_MOVE relocates the existing mounts rather than
-     * mounting them a second time, so there is exactly one devtmpfs and the
-     * shared segments under /srv are the SAME objects the running processes
-     * already have mapped. */
-    static const char *carry[] = { "/dev", "/proc", "/sys", "/srv", "/tmp" };
+    static const char *always[] = { "/dev", "/proc", "/sys" };
+    static const char *sysroot_only[] = { "/srv", "/tmp" };
     char dest[256];
-    for (size_t i = 0; i < sizeof carry / sizeof carry[0]; i++) {
-        snprintf(dest, sizeof dest, "%s%s", mnt, carry[i]);
+    for (size_t i = 0; i < sizeof always / sizeof always[0]; i++) {
+        snprintf(dest, sizeof dest, "%s%s", mnt, always[i]);
         mkdir(dest, 0755);
-        if (mount(carry[i], dest, NULL, MS_MOVE, NULL) < 0)
-            /* Not fatal on its own: a target that already has it mounted, or
-             * a tree the initramfs never bound, is a normal state. */
-            mount(carry[i], dest, NULL, MS_BIND | MS_REC, NULL);
+        if (is_sysroot) {
+            if (mount(always[i], dest, NULL, MS_MOVE, NULL) == 0)
+                continue;
+        }
+        mount(always[i], dest, NULL, MS_BIND | MS_REC, NULL);
+    }
+    if (is_sysroot) {
+        for (size_t i = 0; i < sizeof sysroot_only / sizeof sysroot_only[0]; i++) {
+            snprintf(dest, sizeof dest, "%s%s", mnt, sysroot_only[i]);
+            mkdir(dest, 0755);
+            if (mount(sysroot_only[i], dest, NULL, MS_MOVE, NULL) < 0)
+                mount(sysroot_only[i], dest, NULL, MS_BIND | MS_REC, NULL);
+        }
     }
     if (chdir(mnt) < 0)
         return -(int32_t)errno;
@@ -1785,6 +1845,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
      * '#distro' at /, exec. The Hamnix filesystem is then not even reachable,
      * which is a stronger guarantee than "we agreed not to write to it". */
     int to_root = (dst[0] == '/' && dst[1] == '\0');
+    int is_sysroot = !strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r");
     const char *mnt = dst;
     if (to_root) {
         mnt = "/n/.root";
@@ -1799,7 +1860,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
         int last = ENODEV;
         for (size_t i = 0; i < sizeof fstypes / sizeof fstypes[0]; i++) {
             if (mount(srcpath, mnt, fstypes[i], 0, NULL) == 0)
-                return to_root ? enter_root(mnt) : 0;
+                return to_root ? enter_root(mnt, is_sysroot) : 0;
             last = errno;
             /* EBUSY means something is already mounted there; trying more
              * filesystem types will not help. */
@@ -1812,7 +1873,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
 
     if (mount(srcpath, mnt, NULL, MS_BIND | MS_REC, NULL) < 0)
         return -(int32_t)errno;
-    return to_root ? enter_root(mnt) : 0;
+    return to_root ? enter_root(mnt, is_sysroot) : 0;
 }
 
 /* extern def sys_unmount(new: Ptr[char], old: Ptr[char]) -> int32

@@ -33,7 +33,7 @@ if [ -w /dev/kvm ]; then ACCEL=(-enable-kvm -cpu host); else
 fi
 
 COMMON=(
-    -m 2048
+    -m 4096
     -smp 2
     "${ACCEL[@]}"
     -kernel "$IMG/vmlinuz"

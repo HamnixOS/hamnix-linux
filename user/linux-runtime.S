@@ -598,9 +598,13 @@ sys_nslabel:
     .globl sys_srv_open
     .type sys_srv_open, @function
 sys_srv_open:
+#ifndef ADDER_HOSTED   /* hosted: user/linux-syscalls.c opens the real file */
     .globl sys_openchan
     .type sys_openchan, @function
 sys_openchan:
+    movq    $-1, %rax
+    ret
+#endif
     .globl sys_fdslot_arg
     .type sys_fdslot_arg, @function
 sys_fdslot_arg:

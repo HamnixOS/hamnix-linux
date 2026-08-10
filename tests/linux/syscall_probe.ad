@@ -252,8 +252,15 @@ def check_bind() -> int32:
     if sys_bind("/fd", "#d", 0) != 0:
         return 0
 
+    # `#I` -> /net is a no-op for the same reason `#d` is: the tree is served
+    # in the runtime (user/linux-net.c), so there is nothing to mount. It used
+    # to be required to FAIL here, and that assertion was right until /net was
+    # written.
+    if sys_bind("/net", "#I", 0) != 0:
+        return 0
+
     # A device server with no implementation must fail, not pretend.
-    if sys_bind("/net", "#I", 0) == 0:
+    if sys_bind("/dev/blk", "#b", 0) == 0:
         return 0
     # An unknown server letter likewise.
     if sys_bind("/zz", "#Q", 0) == 0:
