@@ -1,0 +1,288 @@
+# tests/linux/fdns_probe.ad — /fd, the Plan 9 file-descriptor name space.
+#
+# HANDOFF.md §7.1 named this the sharpest constraint on the whole port: in
+# Plan 9 a descriptor is reachable BY NAME from another process, and on Linux
+# an fd is a per-process integer. This drives the exact sequence
+# user/hamtermscene.ad's _start_shell performs, which is the sequence that was
+# making every DE terminal say "(shell failed to start)":
+#
+#   1. sys_pipechan() twice          -- two pipe SLOTS, not fds
+#   2. sys_fdbind(0, 10, PIPE_W, in) -- name our own write end
+#      sys_fdbind(0, 11, PIPE_R, out)
+#   3. open /fd/10 and /fd/11        -- MUST NOT BLOCK, though no peer exists
+#   4. rfork; in the parent, sys_fdbind(child, 0/1/2, ...) so the CHILD's
+#      stdio are the other ends -- the child never cooperated
+#   5. child execs; parent writes to /fd/10 and the child reads it on stdin,
+#      child writes stdout and the parent reads it on /fd/11.
+#
+# Step 3 is where a naive fifo implementation deadlocks, and step 4 is the
+# thing Linux has no equivalent for. Both are asserted here.
+#
+# The exit code is the failure count.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_pipechan() -> int32
+extern def sys_fdbind(pid: int32, fdnum: int32, kind: int32,
+                      slot: int32) -> int32
+extern def sys_fdslot_kind(pid: int32, fdnum: int32) -> int32
+extern def sys_rfork(flags: int32) -> int32
+extern def sys_execve_env(path: Ptr[char], argv: Ptr[uint64],
+                          envp: Ptr[uint64]) -> int32
+extern def sys_dup2(old: int32, new_: int32) -> int32
+extern def sys_waitpid(pid: int32) -> int64
+extern def sys_exit(code: uint64)
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+extern def sys_get_jiffies() -> uint64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+RFPROC:  int32 = 0x001
+RFFDG:   int32 = 0x004
+RFNAMEG: int32 = 0x008
+
+DEVFD_PIPE_R: int32 = 2
+DEVFD_PIPE_W: int32 = 3
+
+buf:     Array[512, uint8]
+errbuf:  Array[128, uint8]
+numbuf:  Array[24, uint8]
+cargv:   Array[4, uint64]
+cenvp:   Array[2, uint64]
+waitset: Array[4, int32]
+notepath: Array[64, uint8]
+
+failures: int32 = 0
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: int32):
+    if v < 0:
+        puts(fd, "-")
+        putd(fd, 0 - v)
+        return
+    n: uint64 = 0
+    x: int32 = v
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def report(name: Ptr[uint8], good: int32):
+    if good != 0:
+        puts(1, "ok   ")
+    else:
+        puts(1, "FAIL ")
+        failures = failures + 1
+    puts(1, name)
+    puts(1, "\n")
+
+
+def why(what: Ptr[uint8]):
+    puts(1, "       ")
+    puts(1, what)
+    puts(1, ": ")
+    n: int32 = sys_errstr(&errbuf[0], 128)
+    if n > 0:
+        puts(1, &errbuf[0])
+    puts(1, "\n")
+
+
+def contains(hay: Ptr[uint8], needle: Ptr[uint8]) -> int32:
+    hn: uint64 = slen(hay)
+    nn: uint64 = slen(needle)
+    if nn == 0 or nn > hn:
+        return 0
+    i: uint64 = 0
+    while i + nn <= hn:
+        j: uint64 = 0
+        while j < nn and hay[i + j] == needle[j]:
+            j = j + 1
+        if j == nn:
+            return 1
+        i = i + 1
+    return 0
+
+
+# The program path arrives as a PARAMETER, never as a literal assigned into a
+# global. Storing a string literal into a NUL-initialised global array is one
+# of the Adder quirks this tree records, and it bites exactly here: argv[0]
+# came out NULL, execve never ran, and the child exited 127 -- which reads
+# identically to "command not found".
+def run_child(prog: Ptr[char]):
+    cargv[0] = cast[uint64](prog)
+    cargv[1] = 0
+    cenvp[0] = 0
+    sys_execve_env(prog, cast[Ptr[uint64]](&cargv[0]),
+                   cast[Ptr[uint64]](&cenvp[0]))
+
+
+# lib/p9.ad's p9_note: a signal is delivered by WRITING A NAME to
+# /proc/<pid>/note. Spelled out here so the probe does not pull in lib/p9.
+def note_pid(pid: int32):
+    i: uint64 = 0
+    p: Ptr[uint8] = "/proc/"
+    k: uint64 = 0
+    while p[k] != 0:
+        notepath[i] = p[k]
+        i = i + 1
+        k = k + 1
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = pid
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        notepath[i] = d[n]
+        i = i + 1
+    q: Ptr[uint8] = "/note"
+    k = 0
+    while q[k] != 0:
+        notepath[i] = q[k]
+        i = i + 1
+        k = k + 1
+    notepath[i] = 0
+    fd: int32 = sys_open_write(cast[Ptr[char]](&notepath[0]))
+    if fd < 0:
+        return
+    sys_write(fd, cast[Ptr[uint8]]("terminate"), 9)
+    sys_close(fd)
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    puts(1, "fdns_probe: /fd, descriptors as names\n")
+
+    in_slot: int32 = sys_pipechan()
+    out_slot: int32 = sys_pipechan()
+    if in_slot <= 0 or out_slot <= 0:
+        why(cast[Ptr[uint8]]("pipechan"))
+        report("sys_pipechan mints a slot", 0)
+        puts(1, "SOME FAILED\n")
+        return failures
+    report("sys_pipechan mints a slot", 1)
+
+    # Name our own ends. pid 0 means "me".
+    if sys_fdbind(0, 10, DEVFD_PIPE_W, in_slot) != 0:
+        why(cast[Ptr[uint8]]("fdbind 10"))
+    if sys_fdbind(0, 11, DEVFD_PIPE_R, out_slot) != 0:
+        why(cast[Ptr[uint8]]("fdbind 11"))
+    report("a bound name reports its kind",
+           sys_fdslot_kind(0, 10) == DEVFD_PIPE_W)
+
+    # THE DEADLOCK TEST. Nothing is on the far end of either pipe yet -- the
+    # shell has not been spawned. A plain fifo open would block here for ever.
+    t0: uint64 = sys_get_jiffies()
+    wfd: int32 = sys_open(cast[Ptr[char]]("/fd/10"))
+    rfd: int32 = sys_open(cast[Ptr[char]]("/fd/11"))
+    t1: uint64 = sys_get_jiffies()
+    if wfd < 0 or rfd < 0:
+        why(cast[Ptr[uint8]]("open /fd/10 or /fd/11"))
+        report("opening both ends before any peer exists", 0)
+        puts(1, "SOME FAILED\n")
+        return failures
+    # Jiffies are centiseconds; anything under half a second is "did not block".
+    report("opening both ends before any peer exists", 1)
+    report("and it did not block", t1 - t0 < 50)
+
+    # An UNBOUND name is just our own fd of that number: /fd/1 is stdout.
+    ufd: int32 = sys_open(cast[Ptr[char]]("/fd/1"))
+    if ufd < 0:
+        report("an unbound /fd/N is this task's own fd N", 0)
+    else:
+        n: int64 = sys_write(ufd, cast[Ptr[uint8]](""), 0)
+        sys_close(ufd)
+        report("an unbound /fd/N is this task's own fd N", n >= 0)
+
+    # Now the part Linux has no equivalent for: give a CHILD its stdio by
+    # name, from here, before it runs. The child is /bin/cat with no idea any
+    # of this happened.
+    pid: int32 = sys_rfork(RFPROC | RFFDG | RFNAMEG)
+    if pid < 0:
+        why(cast[Ptr[uint8]]("rfork"))
+        report("a child's stdio can be named from the parent", 0)
+        puts(1, "SOME FAILED\n")
+        return failures
+    if pid == 0:
+        # Child: route integer stdio through the /fd names, exactly as
+        # lib/p9.ad's _p9_route_stdio_through_fdname does for SPAWN_STDIO_NS.
+        c0: int32 = sys_open(cast[Ptr[char]]("/fd/0"))
+        if c0 >= 0 and c0 != 0:
+            sys_dup2(c0, 0)
+            sys_close(c0)
+        c1: int32 = sys_open(cast[Ptr[char]]("/fd/1"))
+        if c1 >= 0 and c1 != 1:
+            sys_dup2(c1, 1)
+            sys_close(c1)
+        run_child(cast[Ptr[char]]("/bin/cat"))
+        sys_exit(127)
+
+    # Parent: name the CHILD's fd 0 and 1. The child never asked for this.
+    sys_fdbind(pid, 0, DEVFD_PIPE_R, in_slot)
+    sys_fdbind(pid, 1, DEVFD_PIPE_W, out_slot)
+
+    sys_write(wfd, cast[Ptr[uint8]]("through the name\n"), 17)
+    sys_close(wfd)
+
+    # Drain what came back. cat echoes it. WAIT for it rather than spinning:
+    # a tight non-blocking loop finishes in under a millisecond, long before
+    # the child has even finished exec'ing, and then reports "nothing came
+    # back" -- which is a statement about the test, not about the system.
+    total: uint64 = 0
+    tries: int32 = 0
+    while total < 400 and tries < 20:
+        waitset[0] = rfd
+        sys_waitfds(&waitset[0], 1, 200)
+        k: int64 = sys_read_nb(rfd, &buf[total], 400 - total)
+        if k > 0:
+            total = total + cast[uint64](k)
+            if total >= 17:
+                break
+        tries = tries + 1
+    buf[total] = 0
+    sys_close(rfd)
+    # Post the Plan 9 "terminate" note rather than waiting: the child is a
+    # `cat` on a pipe whose write end this process still keeps alive through
+    # the fifo keeper, so it will never see EOF and a waitpid would hang for
+    # ever. That lifetime is deliberate -- it is what keeps a DE terminal's
+    # shell alive -- so the test ends the child the way the DE does.
+    note_pid(pid)
+    sys_waitpid(pid)
+
+    if total == 0:
+        report("a child's stdio can be named from the parent", 0)
+        puts(1, "       nothing came back\n")
+    else:
+        puts(1, "       child echoed: ")
+        puts(1, &buf[0])
+        report("a child's stdio can be named from the parent",
+               contains(&buf[0], cast[Ptr[uint8]]("through the name")))
+
+    if failures == 0:
+        puts(1, "ALL PASS\n")
+    else:
+        puts(1, "SOME FAILED\n")
+    return failures

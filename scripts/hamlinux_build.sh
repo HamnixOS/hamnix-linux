@@ -70,7 +70,8 @@ fi
 SC_OBJ="$OUT_DIR/.linux-syscalls.o"
 if [ ! -f "$SC_OBJ" ] || [ user/linux-syscalls.c -nt "$SC_OBJ" ] \
         || [ user/linux-fb.h -nt "$SC_OBJ" ] \
-        || [ user/linux-wsys.h -nt "$SC_OBJ" ]; then
+        || [ user/linux-wsys.h -nt "$SC_OBJ" ] \
+        || [ user/linux-fdns.h -nt "$SC_OBJ" ]; then
     "$CLANG" -O2 -Iuser -c user/linux-syscalls.c -o "$SC_OBJ" || {
         echo "[hamlinux] ERROR: could not compile user/linux-syscalls.c" >&2
         exit 1
@@ -96,6 +97,16 @@ if [ ! -f "$WS_OBJ" ] || [ user/linux-wsys.c -nt "$WS_OBJ" ] \
     }
 fi
 
+# /fd, the Plan 9 file-descriptor name space (HANDOFF §7.1).
+FD_OBJ="$OUT_DIR/.linux-fdns.o"
+if [ ! -f "$FD_OBJ" ] || [ user/linux-fdns.c -nt "$FD_OBJ" ] \
+        || [ user/linux-fdns.h -nt "$FD_OBJ" ]; then
+    "$CLANG" -O2 -Iuser -c user/linux-fdns.c -o "$FD_OBJ" || {
+        echo "[hamlinux] ERROR: could not compile user/linux-fdns.c" >&2
+        exit 1
+    }
+fi
+
 LL="${OUT_ELF%.elf}.ll"
 [ "$LL" = "$OUT_ELF" ] && LL="$OUT_ELF.ll"
 
@@ -110,7 +121,7 @@ if ! grep -q "^define i64 @main(" "$LL"; then
     exit 11
 fi
 
-if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" \
+if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" \
         "$@" -o "$OUT_ELF" 2>"$LL.link.log"; then
     sed 's/^/[link] /' "$LL.link.log" >&2
     exit 12

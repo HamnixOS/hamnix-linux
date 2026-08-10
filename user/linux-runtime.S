@@ -490,7 +490,11 @@ sys_read_nb:
     /* sys_fdslot_kind(pid, fdnum) -> int32 : the shell probes fd 0's kind
      * to decide whether to run its console getty-flush. Report fd 0 as a
      * pipe read-end (DEVFD_PIPE_R = 2) so the flush is skipped and piped
-     * script bytes survive; every other fd has no host slot (-1). */
+     * script bytes survive; every other fd has no host slot (-1).
+     *
+     * Under ADDER_HOSTED this answers the real /fd bind table
+     * (user/linux-fdns.c) instead of guessing. */
+#ifndef ADDER_HOSTED
     .globl sys_fdslot_kind
     .type sys_fdslot_kind, @function
 sys_fdslot_kind:
@@ -502,6 +506,7 @@ sys_fdslot_kind:
     movq    $-1, %rax
     ret
     .size sys_fdslot_kind, .-sys_fdslot_kind
+#endif /* !ADDER_HOSTED */
 
     /* sys_errstr(buf, nbuf) -> int32 : no Plan 9 error string on host.
      * NUL-terminate the caller buffer (if any) and report empty.

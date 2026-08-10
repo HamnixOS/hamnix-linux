@@ -52,6 +52,7 @@
 
 #include "linux-fb.h"
 #include "linux-wsys.h"
+#include "linux-fdns.h"
 
 /* ------------------------------------------------------------------ *
  * Return convention
@@ -283,6 +284,7 @@ struct devfile {
     uint64_t cursor;    /* byte offset into the surface */
     int      isw;       /* 1 => a /dev/wsys file; `w` is live */
     struct hamwsys_file w;
+    int      note_pid;  /* >0 => this is /proc/<pid>/note */
 };
 static struct devfile devtab[DEVTAB_MAX];
 
@@ -340,10 +342,68 @@ static int dev_path(const char *path)
     return hamfb_kind(path) != HAMFB_NONE || hamwsys_kind(path) != HAMWSYS_NONE;
 }
 
+/* /proc/<pid>/note — Plan 9 delivers a SIGNAL by writing a NAME to a file, and
+ * lib/p9.ad's p9_note is how the whole tree does it: closing a window posts
+ * "terminate" to the window's owner, a shell posts "interrupt" on ^C.  Linux
+ * /proc has no such file, so the path is intercepted here and the note is
+ * translated to kill(2).  Without this, closing a DE window did nothing at all
+ * and every terminal leaked its shell.
+ *
+ * Returns the pid, or 0 if the path is not a note file. */
+static int note_path_pid(const char *path)
+{
+    if (strncmp(path, "/proc/", 6) != 0)
+        return 0;
+    const char *p = path + 6;
+    int pid = 0;
+    if (*p < '1' || *p > '9')
+        return 0;
+    while (*p >= '0' && *p <= '9') { pid = pid * 10 + (*p - '0'); p++; }
+    if (strcmp(p, "/note") != 0)
+        return 0;
+    return pid;
+}
+
+static int note_open(int pid)
+{
+    struct devfile *slot = NULL;
+    for (int i = 0; i < DEVTAB_MAX; i++)
+        if (!devtab[i].used) { slot = &devtab[i]; break; }
+    if (!slot) { errno = EMFILE; return -1; }
+    /* Fail here rather than at the write, so a note to a dead process is an
+     * open error the caller already checks for. */
+    if (kill((pid_t)pid, 0) < 0)
+        return -1;
+    int fd = open("/dev/null", O_WRONLY);
+    if (fd < 0) return -1;
+    memset(slot, 0, sizeof *slot);
+    slot->used = 1; slot->fd = fd; slot->kind = HAMFB_NONE;
+    slot->write = 1; slot->note_pid = pid;
+    return fd;
+}
+
+static int64_t note_write(int pid, const uint8_t *buf, uint64_t count)
+{
+    /* The note NAME, matched on its prefix so a trailing newline or argument
+     * does not change the meaning. */
+    int sig = SIGTERM;
+    if      (count >= 9 && !memcmp(buf, "interrupt", 9)) sig = SIGINT;
+    else if (count >= 6 && !memcmp(buf, "hangup",    6)) sig = SIGHUP;
+    else if (count >= 4 && !memcmp(buf, "kill",      4)) sig = SIGKILL;
+    else if (count >= 5 && !memcmp(buf, "alarm",     5)) sig = SIGALRM;
+    if (kill((pid_t)pid, sig) < 0)
+        return rc64(-1);
+    return (int64_t)count;
+}
+
 /* extern def sys_open(path: Ptr[char]) -> int32
  * ONE argument, opened for reading — see the long note at the .S definition. */
 int32_t sys_open(const char *path)
 {
+    /* /fd/<n> is a NAME for a descriptor, possibly one another process bound
+     * for us. It resolves to a real fd, so it never enters the device table. */
+    if (fdns_is_path(path))
+        return rc32(fdns_open(path, 0));
     if (dev_path(path))
         return rc32(devtab_open(path, 0));
     int fd = open(path, O_RDONLY);
@@ -369,6 +429,11 @@ int32_t sys_open3(const char *path, int32_t flags, uint32_t mode)
  * Open-or-create for writing, truncating an existing file. */
 int32_t sys_open_write(const char *path)
 {
+    if (fdns_is_path(path))
+        return rc32(fdns_open(path, 1));
+    int npid = note_path_pid(path);
+    if (npid > 0)
+        return rc32(note_open(npid));
     if (dev_path(path))
         return rc32(devtab_open(path, 1));
     return rc32(open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666));
@@ -441,6 +506,8 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 {
     struct devfile *v = devtab_find((int)fd);
     if (v) {
+        if (v->note_pid > 0)
+            return note_write(v->note_pid, buf, count);
         if (v->isw)
             return hamwsys_write(&v->w, buf, count);
         if (v->kind == HAMFB_FBCTL)
@@ -703,12 +770,44 @@ int32_t sys_rfork(int32_t flags)
     if (pid == 0 && (flags & (RFNAMEG | RFCNAMEG))) {
         /* The CHILD gets the private namespace. Doing it here rather than
          * before the fork is what makes the parent's namespace survive. */
-        if (unshare(CLONE_NEWNS) < 0)
+        if (unshare(CLONE_NEWNS) == 0) {
+            /* Plan 9's namespace copy is private by construction; Linux mount
+             * propagation defaults to shared, which would leak our mounts back
+             * to the parent and defeat the point. */
+            mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+        } else if (errno == EPERM || errno == EINVAL) {
+            /* No CAP_SYS_ADMIN. This used to _exit(127), which killed the
+             * child outright -- so on an unprivileged account EVERY spawn
+             * died, and the caller saw an exit status indistinguishable from
+             * "command not found". Since RFNAMEG accompanies RFPROC|RFFDG on
+             * essentially every spawn in this tree (lib/p9.ad's _spawn_flags
+             * always sets all three), that made the whole userland
+             * unrunnable outside root.
+             *
+             * Carry on WITHOUT the private namespace, and say so once. The
+             * child is still a real child with a private fd table; what it
+             * loses is mount isolation, which only matters to a program that
+             * goes on to bind something. Degrading silently would be the
+             * worse of the two, so it is on stderr. */
+            static int said;
+            if (!said) {
+                said = 1;
+                const char *m = "rfork: no private namespace "
+                                "(needs CAP_SYS_ADMIN); continuing shared\n";
+                ssize_t ignored = write(2, m, strlen(m));
+                (void)ignored;
+            }
+        } else {
             _exit(127);
-        /* Plan 9's namespace copy is private by construction; Linux mount
-         * propagation defaults to shared, which would leak our mounts back to
-         * the parent and defeat the point. */
-        mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+        }
+    }
+    if (pid == 0) {
+        /* The child inherits the parent's fifo KEEPER descriptors (see
+         * user/linux-fdns.c). Holding them would keep every pipe slot alive
+         * for as long as the child lives, so a child that is about to become
+         * an independent process drops them. Its own opens are unaffected:
+         * the PARENT's keeper is what stops them blocking. */
+        fdns_after_fork_child();
     }
     return (int32_t)pid;
 }
@@ -889,13 +988,20 @@ int64_t sys_listdir_records(const char *path, uint8_t *buf, uint64_t count)
 
 /* extern def sys_fdbind(pid, fdnum, kind, slot) -> int32
  *
- * The fd-slot model: rewriting a CHILD's fd table from the parent, by name,
- * before the child runs. It is how hamsh wires pipes and redirects
- * (docs/native-api.md), and it has no Linux equivalent — on Linux the child
- * does its own dup2 after fork. Reworking hamsh's spawn path to that shape is
- * real work and is part of HANDOFF §7.5. */
+ * The fd-slot model: naming a CHILD's fd from the parent, before the child
+ * runs. HANDOFF §7.1 called this the sharpest constraint on the whole port,
+ * and it is — but it is not unanswerable. A pipe slot is a FIFO, which is the
+ * one Linux object that IS a pipe reachable by name, and the binding itself
+ * lives in shared memory. See user/linux-fdns.c for why the keeper descriptor
+ * is not optional. */
 int32_t sys_fdbind(int32_t pid, int32_t fdnum, int32_t kind, int32_t slot)
-{ (void)pid; (void)fdnum; (void)kind; (void)slot; errno = ENOSYS; return -1; }
+{ return rc32(fdns_fdbind(pid, fdnum, kind, slot)); }
+
+/* extern def sys_fdslot_kind(pid: int32, fdnum: int32) -> int32
+ * What is bound at that name, if anything. hamsh probes fd 0 with this to
+ * decide whether to run its console getty-flush. */
+int32_t sys_fdslot_kind(int32_t pid, int32_t fdnum)
+{ return fdns_slot_kind(pid, fdnum); }
 
 /* extern def sys_chan_dir_mode(fd: int32, mode: int32,
  *                              path: Ptr[char]) -> int32
@@ -1277,15 +1383,13 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
 
 /* extern def sys_pipechan() -> int32
  *
- * Plan 9 pipe-as-a-channel: one fd naming a bidirectional pipe, rather than
- * the two unidirectional ends sys_pipe hands back. A Unix-domain socketpair
- * is the closest Linux object, but a single fd cannot name both ends, so this
- * cannot be expressed without the #d / fd-slot machinery that is still
- * fail-closed. Left unimplemented deliberately — see HANDOFF.md §4.1b. */
+ * A pipe addressed by a SLOT id rather than by two fds, so the ends can be
+ * handed to another process by name. mkfifo(3) is exactly that object, which
+ * is why this stopped being unanswerable — see user/linux-fdns.c. The slot,
+ * not an fd, is what crosses the process boundary. */
 int32_t sys_pipechan(void)
 {
-    errno = ENOSYS;
-    return -1;
+    return rc32(fdns_pipechan());
 }
 
 /* ------------------------------------------------------------------ *
