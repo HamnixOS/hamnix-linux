@@ -25,7 +25,7 @@ cd "$PROJ_ROOT"
 OUT="${1:-build/image}"
 ROOT="$OUT/root"
 rm -rf "$ROOT"
-mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,home,mnt,boot,lib,lib64,var/log,var/lib/hpm,usr/bin}
+mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,home,mnt,boot,lib,lib64,var/log,var/lib/hpm,var/cache,usr/bin,usr/share/adder}
 
 # The applications that go in /bin. Kept to things that build AND run today
 # (measured -- see HANDOFF.md §5); the point of the image is to boot, not to be
@@ -53,13 +53,14 @@ APPS=(
     # shape buys: the password checker lives behind a device and the programs
     # that use it never see a hash.
     login su passwd
+    ac
     ps kill
     tar gzip base64 cksum md5sum
     more less
     bc cal
     ifconfig route ping host curl wget hpm
     insmod modprobe lsmod rmmod
-    xbridge nsrun dhcpc ntpd
+    xbridge wsyswl nsrun dhcpc ntpd
     hlinstall reboot haminstallui
 )
 
@@ -85,6 +86,39 @@ for app in "${APPS[@]}"; do
         MISSING+=("$app")
     fi
 done
+
+# --- the Adder compiler, on the box ---------------------------------------
+# `ac foo.ad` builds a running binary without a development host.  Two halves,
+# and the split is a measurement rather than a preference:
+#
+#   host_ac  is ALREADY a static Linux ELF, so it is just another /bin binary.
+#            It is shipped rather than built here because host_ac cannot emit a
+#            host-Linux binary at all -- the adder submodule documents this at
+#            15301ae, and `--target=x86_64-linux` writes a 152-byte ELF that
+#            segfaults.  So the compiler is a first-class FILE on the box, not
+#            a first-class build product of it.
+#   clang    stays in the Debian namespace.  A minimal closure is 250-300 MB
+#            and libLLVM is nearly all of it; copying that into /bin would be
+#            copying a Debian binary and calling it native.  user/ac.ad reaches
+#            for it exactly as user/hlinstall.ad reaches for mkfs.ext4.
+#
+# The runtime sources go with it, because linking needs them: ac-link.sh
+# DISCOVERS the object list from what is present rather than carrying a copy
+# of the build script's, so a new user/linux-*.c is picked up instead of
+# turning into an undefined symbol.
+if [ -f build/cutover/host_ac.elf ]; then
+    install -m755 build/cutover/host_ac.elf "$ROOT/bin/host_ac"
+    install -m644 user/linux-runtime.S user/linux-*.c user/linux-*.h \
+        user/syscall_nums.h scripts/adder_llvm_runtime.c \
+        "$ROOT/usr/share/adder/"
+    install -m644 scripts/ac-link.sh "$ROOT/usr/share/adder/ac-link.sh"
+    # A source to try it on, so the first thing a curious operator types
+    # works: `ac /usr/share/adder/hello.ad -o /tmp/hello`.
+    [ -f tests/linux/hello.ad ] && install -m644 tests/linux/hello.ad "$ROOT/usr/share/adder/hello.ad"
+    echo "[image] staged the Adder compiler (ac + host_ac + runtime sources)"
+else
+    echo "[image] NOTE: no build/cutover/host_ac.elf -- /bin/ac will have no compiler" >&2
+fi
 
 # /bin/install is the SAME program as /bin/hlinstall. user/haminstallui.ad --
 # the DE's install wizard -- spawns "/bin/install --auto <disk> ..." and was

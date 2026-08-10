@@ -41,6 +41,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/utsname.h>
+#include <sys/un.h>
 #include <pwd.h>
 #include <grp.h>
 #include <sys/mman.h>
@@ -1682,6 +1683,244 @@ int32_t sys_setuid(uint32_t uid)
             return rc32(-1);
     }
     return setuid((uid_t)uid) < 0 ? rc32(-1) : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * The Wayland surface: AF_UNIX listen/accept, SCM_RIGHTS, and mmap of a
+ * received descriptor.
+ *
+ * A Wayland compositor needs three things nothing else here needed: a
+ * LISTENING AF_UNIX socket (sys_pipe and sys_socketpair are already-connected
+ * pairs), fd passing in an ancillary message -- a client hands over its pixel
+ * memory as a DESCRIPTOR and there is no other way to receive a wl_shm pool --
+ * and mmap of what arrives.
+ *
+ * docs/wayland_passthrough_design.md calls exactly this trio the gating risk
+ * for the whole Wayland plan, because on the NATIVE line sendmsg/recvmsg are
+ * not even dispatched and there is no SCM_RIGHTS path anywhere: "Phase 1 is
+ * blocked until we add SCM_RIGHTS fd passing".  On this line all three are
+ * ordinary libc.  The thing that gates the native kernel is, here, forty
+ * lines -- which is the single clearest case for the port paying its way.
+ * ------------------------------------------------------------------ */
+
+/* extern def sys_unix_listen(path: Ptr[char], backlog: int32) -> int32
+ *
+ * A bound, listening AF_UNIX stream socket at `path`. A stale socket file from
+ * a compositor that did not exit cleanly is UNLINKED first: bind(2) fails with
+ * EADDRINUSE on a leftover inode even when nothing is listening on it, and a
+ * display server that refuses to start after a crash is worse than one that
+ * takes the name back.
+ *
+ * SIGPIPE is disarmed here because this is the first call the server makes: a
+ * Wayland client that exits while the server is mid-write is NORMAL (it is how
+ * every client quits), and the default disposition kills the compositor. */
+int32_t sys_unix_listen(const char *path, int32_t backlog)
+{
+    struct sockaddr_un sa;
+    if (!path || strlen(path) >= sizeof sa.sun_path) {
+        errno = EINVAL;
+        return -1;
+    }
+    signal(SIGPIPE, SIG_IGN);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0)
+        return -1;
+    memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX;
+    strcpy(sa.sun_path, path);
+    unlink(path);
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
+        int e = errno; close(fd); errno = e; return -1;
+    }
+    if (listen(fd, backlog > 0 ? backlog : 8) < 0) {
+        int e = errno; close(fd); errno = e; return -1;
+    }
+    return (int32_t)fd;
+}
+
+/* extern def sys_unix_accept(lfd: int32) -> int32
+ *
+ * Non-blocking accept: -1 when nobody is waiting, which the caller treats as
+ * "no new client this tick" rather than an error. */
+int32_t sys_unix_accept(int32_t lfd)
+{
+    int fd = accept4((int)lfd, NULL, NULL, SOCK_CLOEXEC);
+    return fd < 0 ? -1 : (int32_t)fd;
+}
+
+/* extern def sys_scm_recv(fd: int32, buf: Ptr[uint8], cap: uint64,
+ *                         fds: Ptr[int32], maxfds: int32,
+ *                         nfds: Ptr[int32]) -> int64
+ *
+ * One non-blocking recvmsg. Returns the byte count, 0 for "nothing right now",
+ * or -1 when the peer has hung up (which is how the caller learns a client
+ * exited). Any SCM_RIGHTS descriptors in the ancillary buffer are handed back
+ * through `fds`, with the count in nfds[0].
+ *
+ * THE FDS AND THE BYTES MUST BE TAKEN TOGETHER. A Wayland client sends
+ * wl_shm.create_pool and the pool's memfd in ONE sendmsg, and the kernel
+ * delivers ancillary data with the first byte of the message it accompanied.
+ * A reader that took bytes with read(2) and then went looking for the fd would
+ * find it already discarded — so every read on a client socket goes through
+ * here, whether or not an fd is expected. */
+int64_t sys_scm_recv(int32_t fd, uint8_t *buf, uint64_t cap,
+                     int32_t *fds, int32_t maxfds, int32_t *nfds)
+{
+    char cbuf[CMSG_SPACE(sizeof(int) * 16)];
+    struct iovec iov;
+    struct msghdr msg;
+
+    if (nfds) *nfds = 0;
+    if (maxfds > 16) maxfds = 16;
+
+    iov.iov_base = buf;
+    iov.iov_len  = (size_t)cap;
+    memset(&msg, 0, sizeof msg);
+    msg.msg_iov        = &iov;
+    msg.msg_iovlen     = 1;
+    msg.msg_control    = cbuf;
+    msg.msg_controllen = sizeof cbuf;
+
+    ssize_t n;
+    do {
+        n = recvmsg((int)fd, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0)
+        return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+    if (n == 0)
+        return -1;                            /* orderly shutdown by the peer */
+
+    int got = 0;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS)
+            continue;
+        int k = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+        for (int i = 0; i < k; i++) {
+            int rfd;
+            memcpy(&rfd, CMSG_DATA(c) + i * sizeof(int), sizeof rfd);
+            if (fds && got < maxfds)
+                fds[got++] = (int32_t)rfd;
+            else
+                close(rfd);                   /* never leak an unclaimed fd */
+        }
+    }
+    if (nfds) *nfds = (int32_t)got;
+    return (int64_t)n;
+}
+
+/* extern def sys_scm_send(fd: int32, buf: Ptr[uint8], n: uint64,
+ *                         passfd: int32) -> int64
+ *
+ * Blocking sendmsg, optionally carrying one descriptor (passfd < 0 sends
+ * none). Blocking is deliberate: the alternative is a short write that
+ * truncates an event mid-message, and half a Wayland event on the wire
+ * desynchronises the client's parser permanently. */
+int64_t sys_scm_send(int32_t fd, const uint8_t *buf, uint64_t n, int32_t passfd)
+{
+    char cbuf[CMSG_SPACE(sizeof(int))];
+    struct iovec iov;
+    struct msghdr msg;
+    uint64_t done = 0;
+
+    while (done < n) {
+        iov.iov_base = (void *)(buf + done);
+        iov.iov_len  = (size_t)(n - done);
+        memset(&msg, 0, sizeof msg);
+        msg.msg_iov    = &iov;
+        msg.msg_iovlen = 1;
+        if (passfd >= 0 && done == 0) {
+            memset(cbuf, 0, sizeof cbuf);
+            msg.msg_control    = cbuf;
+            msg.msg_controllen = sizeof cbuf;
+            struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+            c->cmsg_level = SOL_SOCKET;
+            c->cmsg_type  = SCM_RIGHTS;
+            c->cmsg_len   = CMSG_LEN(sizeof(int));
+            int v = (int)passfd;
+            memcpy(CMSG_DATA(c), &v, sizeof v);
+        }
+        ssize_t k = sendmsg((int)fd, &msg, MSG_NOSIGNAL);
+        if (k < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        done += (uint64_t)k;
+    }
+    return (int64_t)done;
+}
+
+/* extern def sys_mmap_shared(fd: int32, len: uint64) -> uint64
+ *
+ * MAP_SHARED read-only mapping of a client's shm pool, as an integer address
+ * the Adder side casts to Ptr[uint8]. 0 on failure.
+ *
+ * READ-ONLY on purpose. A compositor never writes a client's buffer, and a
+ * client is entitled to seal its pool against writes — asking for PROT_WRITE
+ * on a sealed memfd fails the mmap outright and would lose the pixels for a
+ * hardening measure that is none of our business. */
+uint64_t sys_mmap_shared(int32_t fd, uint64_t len)
+{
+    if (len == 0)
+        return 0;
+    void *p = mmap(NULL, (size_t)len, PROT_READ, MAP_SHARED, (int)fd, 0);
+    return p == MAP_FAILED ? 0 : (uint64_t)(uintptr_t)p;
+}
+
+/* extern def sys_munmap_at(addr: uint64, len: uint64) -> int32 */
+int32_t sys_munmap_at(uint64_t addr, uint64_t len)
+{
+    if (!addr || !len)
+        return 0;
+    return munmap((void *)(uintptr_t)addr, (size_t)len) < 0 ? -1 : 0;
+}
+
+/* extern def sys_fd_size(fd: int32) -> int64
+ *
+ * The size of a passed shm pool. A client's create_pool carries a size, but a
+ * later wl_shm_pool.resize does not re-send the fd, so the descriptor itself
+ * is the authority on how much is safe to map. */
+int64_t sys_fd_size(int32_t fd)
+{
+    struct stat st;
+    if (fstat((int)fd, &st) < 0)
+        return -1;
+    return (int64_t)st.st_size;
+}
+
+/* extern def sys_memfd(name: Ptr[char], len: uint64) -> int32
+ *
+ * An anonymous shared file of `len` bytes, for the one thing the compositor
+ * has to hand a client as a descriptor: the XKB keymap behind
+ * wl_keyboard.keymap. */
+int32_t sys_memfd(const char *name, uint64_t len)
+{
+    int fd = memfd_create(name ? name : "hamnix", MFD_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    if (len && ftruncate(fd, (off_t)len) < 0) {
+        int e = errno; close(fd); errno = e; return -1;
+    }
+    return (int32_t)fd;
+}
+
+/* extern def sys_getenv(name: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64
+ *
+ * The length written, or -1 when the variable is unset — which the caller
+ * must be able to tell apart from a variable set to the empty string. */
+int64_t sys_getenv(const char *name, uint8_t *buf, uint64_t cap)
+{
+    const char *v = getenv(name);
+    if (!v)
+        return -1;
+    uint64_t n = (uint64_t)strlen(v);
+    if (cap == 0)
+        return (int64_t)n;
+    if (n > cap - 1)
+        n = cap - 1;
+    memcpy(buf, v, (size_t)n);
+    buf[n] = 0;
+    return (int64_t)n;
 }
 
 /* extern def sys_setuid_auth(authfd: int32) -> int32

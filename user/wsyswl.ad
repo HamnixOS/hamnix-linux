@@ -1,0 +1,1879 @@
+# user/wsyswl.ad — a Wayland server for the Hamnix desktop.
+#
+# WHY THIS AND NOT AN X BRIDGE
+# ============================
+# user/xbridge.ad puts an X application on this desktop by running Xvfb with
+# its framebuffer in a file and blitting that file into ONE window. It works,
+# and it is a dead end: a framebuffer file holds the COMPOSITED screen, so
+# every dialog, popup and second toplevel the application owns arrives fused
+# into a single rectangle with no way to separate them. You cannot recover a
+# window layout from a picture of a screen.
+#
+# docs/wayland_passthrough_design.md (in the Hamnix tree) settles the question:
+# implement ONE protocol -- a minimal Wayland server -- and you get Wayland
+# clients directly AND X11 clients for free through XWayland, which is an X
+# server that is itself a Wayland client. A Wayland client does not hand us a
+# screen; it hands us one SURFACE per window, with a role, a size and a title.
+# One xdg_toplevel becomes one wsys window, which is the thing the bridge could
+# never do.
+#
+# WHAT THE DESIGN CALLS THE GATING RISK IS NOT A RISK HERE
+# --------------------------------------------------------
+# That document is written against the native kernel, where it concludes
+# "Phase 1 is blocked until we add SCM_RIGHTS fd passing": a Wayland client
+# gives the compositor its pixels by passing a memfd over the socket in an
+# ancillary message, and the native kernel dispatches neither sendmsg nor
+# recvmsg. On the Linux line AF_UNIX, SCM_RIGHTS, memfd_create and MAP_SHARED
+# are all real and already work. The single hardest thing about this port on
+# the other line is, here, a recvmsg call. See user/wsyswl-sys.c, which is
+# where that call and its four siblings live until they can move into
+# user/linux-syscalls.c.
+#
+# THE SHAPE
+# ---------
+#   client (libwayland, in the Debian namespace)
+#       |  wire protocol: object id, opcode, args -- over $WAYLAND_DISPLAY
+#       |  pixels: a memfd passed with SCM_RIGHTS, mapped MAP_SHARED
+#       v
+#   wsyswl  -- this program. One wsys window per xdg_toplevel.
+#       |  'B' blit + 'D' publish on /dev/wsys/<wid>/draw/ctl
+#       |  /dev/wsys/<wid>/keys + /pointer read back for input
+#       v
+#   wsysd   -- the compositor, which knows nothing about Wayland
+#
+# The pixel path is the v2 blit protocol, the same one xbridge uses, for the
+# same reason: the v1 scene display list can express a widget tree and cannot
+# express a photograph. A wl_shm buffer is ARGB8888, which is B,G,R,A in
+# memory, which is FMT_BGRA8888 -- so the format conversion is free and the
+# only per-pixel work is forcing alpha opaque.
+#
+# WHAT IS HERE AND WHAT IS NOT
+# ----------------------------
+# Here: wl_display, wl_registry, wl_compositor, wl_surface, wl_shm +
+# wl_shm_pool + wl_buffer, xdg_wm_base + xdg_surface + xdg_toplevel, wl_seat +
+# wl_pointer + wl_keyboard with a real XKB keymap over a memfd, wl_output, and
+# wl_data_device_manager and wl_subcompositor as far as their object graphs
+# (GTK will not create a seat without the first; Firefox aborts without the
+# second).
+#
+# Not here, and each one is a decision rather than an oversight:
+#   * DAMAGE IS IGNORED. Every commit blits the whole surface. Honouring
+#     wl_surface.damage would be a straightforward win and the place to start
+#     when this is too slow.
+#   * SUBSURFACES ARE FLATTENED into the parent toplevel's window, at the
+#     parent's origin -- set_position is recorded and not used. A client that
+#     puts its content in a subsurface (Firefox does) draws correctly only
+#     because the child covers the parent.
+#   * POPUPS (xdg_popup) get a configure and no window, so a menu does not
+#     appear. Giving popups their own undecorated wsys window is the natural
+#     next step and needs positioner arithmetic this does not do.
+#   * ONE OUTPUT, one seat, no clipboard, no drag and drop, no dmabuf. A
+#     client that insists on GPU buffers gets nothing; software rendering is
+#     the only path.
+#   * A RESIZE keeps the backbuffer it started with. user/linux-wsys.c fixes a
+#     window's blit stride at its first blit and offers no way to change it, so
+#     a client that grows its surface is clipped to the size it opened at.
+#
+# HOW FAR THIS HAS BEEN TESTED: weston-simple-shm, weston-flower and
+# weston-terminal each get their own decorated Hamnix window and render, and a
+# client that exits gives its backbuffer slot back to the next one. The INPUT
+# path below is written and its keymap is proven (libxkbcommon compiles it --
+# weston-terminal accepts the keymap fd without complaint), but no keystroke
+# has been driven through it end to end: the offscreen test harness has no
+# input device for wsysd to route from. Treat it as unproven code.
+#
+# Usage: wsyswl [<socket-path>]
+#   default: $XDG_RUNTIME_DIR/wayland-0, or /tmp/wayland-0 if that is unset.
+#   Point a client at it with WAYLAND_DISPLAY=<basename> XDG_RUNTIME_DIR=<dir>.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_wsys_free(wid: int32) -> int32
+extern def sys_exit(code: uint64)
+
+# user/wsyswl-sys.c — the five entry points the runtime does not have yet.
+extern def sys_unix_listen(path: Ptr[char], backlog: int32) -> int32
+extern def sys_unix_accept(lfd: int32) -> int32
+extern def sys_scm_recv(fd: int32, buf: Ptr[uint8], cap: uint64,
+                        fds: Ptr[int32], maxfds: int32,
+                        nfds: Ptr[int32]) -> int64
+extern def sys_scm_send(fd: int32, buf: Ptr[uint8], n: uint64,
+                        passfd: int32) -> int64
+extern def sys_mmap_shared(fd: int32, len: uint64) -> uint64
+extern def sys_munmap_at(addr: uint64, len: uint64) -> int32
+extern def sys_fd_size(fd: int32) -> int64
+extern def sys_memfd(name: Ptr[char], len: uint64) -> int32
+extern def sys_getenv(name: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64
+
+
+# --- protocol constants ---------------------------------------------
+
+MAXCONN: uint64 = 4
+MAXOBJ:  uint64 = 256                  # client ids stay dense and low
+ACC:     uint64 = 8192                 # per-connection reassembly buffer
+
+T_NONE: int32 = 0
+T_DISPLAY: int32 = 1
+T_REGISTRY: int32 = 2
+T_CALLBACK: int32 = 3
+T_COMPOSITOR: int32 = 4
+T_SHM: int32 = 5
+T_SHM_POOL: int32 = 6
+T_BUFFER: int32 = 7
+T_SURFACE: int32 = 8
+T_REGION: int32 = 9
+T_XDG_WM: int32 = 10
+T_XDG_SURF: int32 = 11
+T_XDG_TOP: int32 = 12
+T_SEAT: int32 = 13
+T_POINTER: int32 = 14
+T_KEYBOARD: int32 = 15
+T_OUTPUT: int32 = 16
+T_DDM: int32 = 17
+T_DATA_DEVICE: int32 = 18
+T_DATA_SOURCE: int32 = 19
+T_SUBCOMPOSITOR: int32 = 20
+T_SUBSURFACE: int32 = 21
+
+G_COMPOSITOR: uint32 = 1
+G_SHM: uint32 = 2
+G_XDG: uint32 = 3
+G_SEAT: uint32 = 4
+G_OUTPUT: uint32 = 5
+G_DDM: uint32 = 6
+G_SUBCOMPOSITOR: uint32 = 7
+
+DISPLAY_ID: uint32 = 1
+
+SEAT_VERSION: uint32 = 5
+OUTPUT_VERSION: uint32 = 3
+SEAT_CAP_POINTER: uint32 = 1
+SEAT_CAP_KEYBOARD: uint32 = 2
+
+SHM_ARGB8888: uint32 = 0
+SHM_XRGB8888: uint32 = 1
+
+STATE_RELEASED: uint32 = 0
+STATE_PRESSED: uint32 = 1
+TOP_STATE_ACTIVATED: uint32 = 4
+
+BTN_LEFT: uint32 = 272
+BTN_MIDDLE: uint32 = 274
+BTN_RIGHT: uint32 = 273
+
+MOD_SHIFT: uint32 = 1
+
+# The blit protocol's FMT_BGRA8888. wl_shm ARGB8888 is byte-for-byte this.
+FMT_BGRA8888: uint8 = 2
+
+
+# --- state ------------------------------------------------------------
+
+listen_fd: int32 = -1
+serial: uint32 = 0
+scr_w: int32 = 1280
+scr_h: int32 = 800
+
+conn_inuse: Array[4, int32]
+conn_fd:    Array[4, int32]
+conn_reg:   Array[4, int32]
+conn_acc:   Array[32768, uint8]        # 4 * 8192
+conn_acclen: Array[4, uint64]
+conn_seat:  Array[4, int32]
+conn_pointer: Array[4, int32]
+conn_keyboard: Array[4, int32]
+conn_xdg_wm: Array[4, int32]
+
+TITLE_CAP: uint64 = 48
+conn_title: Array[192, uint8]          # 4 * 48
+conn_title_len: Array[4, uint64]
+
+# Per object, indexed conn * MAXOBJ + id.
+obj_type: Array[1024, int32]
+obj_a: Array[1024, int32]
+obj_b: Array[1024, int32]
+obj_c: Array[1024, int32]
+obj_d: Array[1024, int32]
+obj_e: Array[1024, int32]
+obj_f: Array[1024, int32]
+obj_g: Array[1024, int32]
+surf_parent: Array[1024, int32]
+
+# SHM MAPPINGS ARE OWNED BY THE CONNECTION, NOT BY THE POOL OBJECT.
+#
+# A client is entitled to destroy a wl_shm_pool the instant it has carved its
+# wl_buffers out of it -- "the mapping will be released when all the buffers
+# have been destroyed" -- and weston-simple-shm does exactly that, three
+# requests after create_pool and long before it attaches anything. Unmapping
+# on pool destroy therefore threw away the pixels of every buffer the client
+# was about to draw with, and the first commit found nothing to blit. So a
+# mapping lives in this per-connection table, both the pool and its buffers
+# hold an INDEX into it, and it is unmapped when the client goes.
+MAXMAP: uint64 = 8
+map_addr: Array[32, uint64]            # 4 conns * 8
+map_len:  Array[32, uint64]
+map_used: Array[32, int32]
+
+# RECEIVED DESCRIPTORS ARE A QUEUE, NOT A PROPERTY OF THE MESSAGE.
+#
+# The kernel hands ancillary data to the recvmsg that read the FIRST BYTE of
+# the sendmsg it accompanied -- not to the message inside that stream which
+# actually wants it. A client flushes create_pool together with create_buffer
+# and destroy, so pairing "the fd from this read" with "the first request in
+# this read" attached the memfd to whatever happened to be at the front, and
+# create_pool saw nothing. libwayland's own connection code does the only
+# thing that works: push received fds onto a FIFO and let each request with an
+# fd argument pop one, in order. This is that FIFO.
+FDQ: uint64 = 8
+fdq:     Array[32, int32]              # 4 conns * 8
+fdq_head: Array[4, uint64]
+fdq_tail: Array[4, uint64]
+
+out:     Array[8192, uint8]
+out_pos: uint64 = 0
+out_fd:  int32 = -1                    # fd to pass with the next flush, or -1
+
+rowbuf:  Array[8192, uint8]
+blithdr: Array[32, uint8]
+pathbuf: Array[256, uint8]
+ctlbuf:  Array[256, uint8]
+rbuf:    Array[256, uint8]
+numbuf:  Array[24, uint8]
+waitset: Array[16, int32]
+recvfds: Array[8, int32]
+recvn:   Array[2, int32]
+sockpath: Array[256, uint8]
+envbuf:  Array[256, uint8]
+
+# wid -> the fds we hold open on that window. Small and linear: a session has
+# a handful of windows and the lookup is off the hot path.
+MAXWIN: uint64 = 12
+w_wid:  Array[12, int32]
+w_draw: Array[12, int32]
+w_keys: Array[12, int32]
+w_ptr:  Array[12, int32]
+w_conn: Array[12, int32]
+w_surf: Array[12, int32]
+w_btn:  Array[12, int32]               # last pointer button mask seen
+w_in:   Array[12, int32]               # pointer has entered this surface
+w_focus: Array[12, int32]              # keyboard focus is on this surface
+n_win:  uint64 = 0
+cascade: int32 = 0
+
+# One line of a /keys or /pointer ring, reassembled across reads.
+inbuf:  Array[1024, uint8]
+carry:  Array[1024, uint8]             # 12 windows would need 12 of these; the
+carrylen: uint64 = 0                   # rings are line-atomic in practice, so
+                                       # one shared carry is honest enough --
+                                       # see drain_window.
+
+keymap_fd: int32 = -1
+keymap_len: uint64 = 0
+kmbuf: Array[8192, uint8]
+kmlen: uint64 = 0
+
+evt_time: uint32 = 0
+verbose: int32 = 0
+
+
+# --- small helpers ----------------------------------------------------
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: int32):
+    n: uint64 = 0
+    x: int32 = v
+    if x < 0:
+        sys_write(fd, cast[Ptr[uint8]]("-"), 1)
+        x = 0 - x
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = v
+    i: uint64 = at
+    if x < 0:
+        buf[i] = 45
+        i = i + 1
+        x = 0 - x
+    if x == 0:
+        d[0] = 48
+        n = 1
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = d[n]
+        i = i + 1
+    return i
+
+
+def put_le32(buf: Ptr[uint8], at: uint64, v: int32):
+    u: uint32 = cast[uint32](v)
+    buf[at]     = cast[uint8](u & 255)
+    buf[at + 1] = cast[uint8]((u >> 8) & 255)
+    buf[at + 2] = cast[uint8]((u >> 16) & 255)
+    buf[at + 3] = cast[uint8]((u >> 24) & 255)
+
+
+def ru32(p: Ptr[uint8], off: uint64) -> uint32:
+    return cast[uint32](p[off]) \
+         | (cast[uint32](p[off + 1]) << 8) \
+         | (cast[uint32](p[off + 2]) << 16) \
+         | (cast[uint32](p[off + 3]) << 24)
+
+
+def str_copy(dst: Ptr[uint8], s: Ptr[uint8], cap: uint64) -> uint64:
+    i: uint64 = 0
+    while s[i] != 0 and i + 1 < cap:
+        dst[i] = s[i]
+        i = i + 1
+    dst[i] = 0
+    return i
+
+
+# --- wire output ------------------------------------------------------
+
+def o_u32(v: uint32):
+    if out_pos + 4 > 8192:
+        return
+    put_le32(&out[0], out_pos, cast[int32](v))
+    out_pos = out_pos + 4
+
+
+def o_cstr(s: Ptr[uint8]):
+    # A Wayland string arg: u32 length INCLUDING the NUL, the bytes, the NUL,
+    # then zero padding to a 32-bit boundary.
+    n: uint64 = slen(s)
+    o_u32(cast[uint32](n + 1))
+    i: uint64 = 0
+    while i < n and out_pos < 8192:
+        out[out_pos] = s[i]
+        out_pos = out_pos + 1
+        i = i + 1
+    out[out_pos] = 0
+    out_pos = out_pos + 1
+    while (out_pos & 3) != 0:
+        out[out_pos] = 0
+        out_pos = out_pos + 1
+
+
+def emit_begin(obj: uint32) -> uint64:
+    start: uint64 = out_pos
+    o_u32(obj)
+    o_u32(0)                                    # size<<16 | opcode, patched
+    return start
+
+
+def emit_end(start: uint64, opcode: uint32):
+    size: uint64 = out_pos - start
+    put_le32(&out[0], start + 4,
+             cast[int32]((cast[uint32](size) << 16) | (opcode & 0xffff)))
+
+
+# Everything staged since the last flush goes out in ONE sendmsg. Wayland is a
+# stream and a client parses it incrementally, so a short write would leave
+# half an event on the wire and desynchronise its parser for good; sys_scm_send
+# blocks until the whole burst is gone, which is the only safe choice.
+def flush(fd: int32):
+    if out_pos == 0 and out_fd < 0:
+        return
+    sys_scm_send(fd, &out[0], out_pos, out_fd)
+    if out_fd >= 0:
+        sys_close(out_fd)
+        out_fd = -1
+    out_pos = 0
+
+
+# --- object table -----------------------------------------------------
+
+def oidx(c: uint64, id: uint32) -> uint64:
+    return c * MAXOBJ + cast[uint64](id)
+
+
+def valid_id(id: uint32) -> int32:
+    if id == 0:
+        return 0
+    if cast[uint64](id) >= MAXOBJ:
+        return 0
+    return 1
+
+
+def new_obj(c: uint64, id: uint32, otype: int32):
+    if valid_id(id) == 0:
+        return
+    oi: uint64 = oidx(c, id)
+    obj_type[oi] = otype
+    obj_a[oi] = 0
+    obj_b[oi] = 0
+    obj_c[oi] = 0
+    obj_d[oi] = 0
+    obj_e[oi] = 0
+    obj_f[oi] = 0
+    obj_g[oi] = -1
+    surf_parent[oi] = 0
+
+
+def fdq_push(c: uint64, fd: int32):
+    if fdq_tail[c] - fdq_head[c] >= FDQ:
+        sys_close(fd)                       # a client sending fds we never
+        return                              # consume is a client bug, not a leak
+    fdq[c * FDQ + fdq_tail[c] % FDQ] = fd
+    fdq_tail[c] = fdq_tail[c] + 1
+
+
+def fdq_pop(c: uint64) -> int32:
+    if fdq_head[c] == fdq_tail[c]:
+        return -1
+    fd: int32 = fdq[c * FDQ + fdq_head[c] % FDQ]
+    fdq_head[c] = fdq_head[c] + 1
+    return fd
+
+
+def map_alloc(c: uint64) -> int32:
+    i: uint64 = 0
+    while i < MAXMAP:
+        if map_used[c * MAXMAP + i] == 0:
+            map_used[c * MAXMAP + i] = 1
+            map_addr[c * MAXMAP + i] = 0
+            map_len[c * MAXMAP + i] = 0
+            return cast[int32](i)
+        i = i + 1
+    return -1
+
+
+def obj_get_type(c: uint64, id: uint32) -> int32:
+    if valid_id(id) == 0:
+        return T_NONE
+    return obj_type[oidx(c, id)]
+
+
+def free_obj(c: uint64, id: uint32):
+    if valid_id(id) == 0:
+        return
+    obj_type[oidx(c, id)] = T_NONE
+
+
+# --- events -----------------------------------------------------------
+
+def send_delete_id(id: uint32):
+    s: uint64 = emit_begin(DISPLAY_ID)
+    o_u32(id)
+    emit_end(s, 1)
+
+
+def send_callback_done(cb: uint32, data: uint32):
+    s: uint64 = emit_begin(cb)
+    o_u32(data)
+    emit_end(s, 0)
+
+
+def send_global(reg: uint32, name: uint32, iface: Ptr[uint8], version: uint32):
+    s: uint64 = emit_begin(reg)
+    o_u32(name)
+    o_cstr(iface)
+    o_u32(version)
+    emit_end(s, 0)
+
+
+def send_shm_format(shm: uint32, fmt: uint32):
+    s: uint64 = emit_begin(shm)
+    o_u32(fmt)
+    emit_end(s, 0)
+
+
+def send_buffer_release(buf: uint32):
+    s: uint64 = emit_begin(buf)
+    emit_end(s, 0)
+
+
+def send_xdg_configure(xs: uint32, ser: uint32):
+    s: uint64 = emit_begin(xs)
+    o_u32(ser)
+    emit_end(s, 0)
+
+
+def send_toplevel_configure(top: uint32, w: uint32, h: uint32):
+    # (0,0) means "you choose your own size", which is what the initial
+    # configure must say. ACTIVATED goes on every configure so a client draws
+    # its focused decorations -- there is one window manager here and it is
+    # wsysd, so a Wayland client is never told it is inactive.
+    s: uint64 = emit_begin(top)
+    o_u32(w)
+    o_u32(h)
+    o_u32(4)
+    o_u32(TOP_STATE_ACTIVATED)
+    emit_end(s, 0)
+
+
+def send_toplevel_close(top: uint32):
+    s: uint64 = emit_begin(top)
+    emit_end(s, 1)
+
+
+def send_seat_caps(seat: uint32, caps: uint32):
+    s: uint64 = emit_begin(seat)
+    o_u32(caps)
+    emit_end(s, 0)
+
+
+def send_seat_name(seat: uint32, name: Ptr[uint8]):
+    s: uint64 = emit_begin(seat)
+    o_cstr(name)
+    emit_end(s, 1)
+
+
+def send_output_all(output: uint32):
+    # geometry(x, y, phys_w, phys_h, subpixel, make, model, transform)
+    s: uint64 = emit_begin(output)
+    o_u32(0)
+    o_u32(0)
+    o_u32(cast[uint32](scr_w))
+    o_u32(cast[uint32](scr_h))
+    o_u32(0)
+    o_cstr("Hamnix")
+    o_cstr("wsys")
+    o_u32(0)
+    emit_end(s, 0)
+    # mode(flags = current|preferred, w, h, refresh mHz)
+    s = emit_begin(output)
+    o_u32(3)
+    o_u32(cast[uint32](scr_w))
+    o_u32(cast[uint32](scr_h))
+    o_u32(60000)
+    emit_end(s, 1)
+    # scale(1)
+    s = emit_begin(output)
+    o_u32(1)
+    emit_end(s, 3)
+    # done()
+    s = emit_begin(output)
+    emit_end(s, 2)
+
+
+def fixed(v: int32) -> uint32:
+    # wl_fixed_t is signed 24.8.
+    return cast[uint32](v << 8)
+
+
+def send_kbd_keymap(kbd: uint32, size: uint32):
+    s: uint64 = emit_begin(kbd)
+    o_u32(1)                                    # XKB_V1
+    o_u32(size)
+    emit_end(s, 0)
+
+
+def send_kbd_enter(kbd: uint32, ser: uint32, surface: uint32):
+    s: uint64 = emit_begin(kbd)
+    o_u32(ser)
+    o_u32(surface)
+    o_u32(0)                                    # keys[] : empty array
+    emit_end(s, 1)
+
+
+def send_kbd_leave(kbd: uint32, ser: uint32, surface: uint32):
+    s: uint64 = emit_begin(kbd)
+    o_u32(ser)
+    o_u32(surface)
+    emit_end(s, 2)
+
+
+def send_kbd_key(kbd: uint32, ser: uint32, t: uint32, key: uint32,
+                 state: uint32):
+    s: uint64 = emit_begin(kbd)
+    o_u32(ser)
+    o_u32(t)
+    o_u32(key)
+    o_u32(state)
+    emit_end(s, 3)
+
+
+def send_kbd_modifiers(kbd: uint32, ser: uint32, dep: uint32):
+    s: uint64 = emit_begin(kbd)
+    o_u32(ser)
+    o_u32(dep)
+    o_u32(0)
+    o_u32(0)
+    o_u32(0)
+    emit_end(s, 4)
+
+
+def send_kbd_repeat_info(kbd: uint32, rate: uint32, delay: uint32):
+    s: uint64 = emit_begin(kbd)
+    o_u32(rate)
+    o_u32(delay)
+    emit_end(s, 5)
+
+
+def send_ptr_enter(ptr: uint32, ser: uint32, surface: uint32,
+                   sx: int32, sy: int32):
+    s: uint64 = emit_begin(ptr)
+    o_u32(ser)
+    o_u32(surface)
+    o_u32(fixed(sx))
+    o_u32(fixed(sy))
+    emit_end(s, 0)
+
+
+def send_ptr_leave(ptr: uint32, ser: uint32, surface: uint32):
+    s: uint64 = emit_begin(ptr)
+    o_u32(ser)
+    o_u32(surface)
+    emit_end(s, 1)
+
+
+def send_ptr_motion(ptr: uint32, t: uint32, sx: int32, sy: int32):
+    s: uint64 = emit_begin(ptr)
+    o_u32(t)
+    o_u32(fixed(sx))
+    o_u32(fixed(sy))
+    emit_end(s, 2)
+
+
+def send_ptr_button(ptr: uint32, ser: uint32, t: uint32, btn: uint32,
+                    state: uint32):
+    s: uint64 = emit_begin(ptr)
+    o_u32(ser)
+    o_u32(t)
+    o_u32(btn)
+    o_u32(state)
+    emit_end(s, 3)
+
+
+def send_ptr_frame(ptr: uint32):
+    s: uint64 = emit_begin(ptr)
+    emit_end(s, 5)
+
+
+# --- the XKB keymap ---------------------------------------------------
+#
+# wl_keyboard.keymap hands the client an fd holding an XKB keymap, and the
+# client compiles it with libxkbcommon before it will interpret a single key.
+# This one is SELF-CONTAINED -- it includes no XKB data files, because the
+# client resolves includes on ITS side and the Debian namespace's xkb data may
+# not be where a client expects. It covers the ASCII the Hamnix keyboard
+# produces, with a Shift level so uppercase resolves. It is the reference
+# implementation's keymap (Hamnix linux_abi/wayland.ad), transcribed.
+
+def km(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0 and kmlen < 8190:
+        kmbuf[kmlen] = s[i]
+        kmlen = kmlen + 1
+        i = i + 1
+
+
+def km_key(name: Ptr[uint8], syms: Ptr[uint8]):
+    km("key <")
+    km(name)
+    km("> {type[Group1]=\"TWO_LEVEL\",[")
+    km(syms)
+    km("]};\n")
+
+
+def build_keymap():
+    if keymap_fd >= 0:
+        return
+    kmlen = 0
+    km("xkb_keymap {\n")
+    km("xkb_keycodes \"hm\" {\n")
+    km("minimum = 8;\nmaximum = 255;\n")
+    # A keycode is the evdev code plus 8 -- the client adds 8 to whatever the
+    # server sends in wl_keyboard.key, so the names below must land on that.
+    km("<A9> = 23; <A22> = 22; <A28> = 36; <A57> = 65;\n")
+    km("<K02>=10;<K03>=11;<K04>=12;<K05>=13;<K06>=14;\n")
+    km("<K07>=15;<K08>=16;<K09>=17;<K10>=18;<K11>=19;\n")
+    km("<K12>=20;<K13>=21;<K16>=24;<K17>=25;\n")
+    km("<K18>=26;<K19>=27;<K20>=28;<K21>=29;<K22>=30;\n")
+    km("<K23>=31;<K24>=32;<K25>=33;<K26>=34;<K27>=35;\n")
+    km("<K30>=38;<K31>=39;<K32>=40;<K33>=41;<K34>=42;\n")
+    km("<K35>=43;<K36>=44;<K37>=45;<K38>=46;<K39>=47;\n")
+    km("<K40>=48;<K41>=49;<K42>=50;<K43>=51;<K44>=52;\n")
+    km("<K45>=53;<K46>=54;<K47>=55;<K48>=56;<K49>=57;\n")
+    km("<K50>=58;<K51>=59;<K52>=60;<K53>=61;\n")
+    km("<LFSH>=50;<RTSH>=62;\n")
+    km("};\n")
+    km("xkb_types \"hm\" {\n")
+    km("virtual_modifiers NumLock;\n")
+    km("type \"ONE_LEVEL\" { modifiers=none; level_name[Level1]=\"Any\"; };\n")
+    km("type \"TWO_LEVEL\" { modifiers=Shift; map[Shift]=Level2; ")
+    km("level_name[Level1]=\"Base\"; level_name[Level2]=\"Shift\"; };\n")
+    km("};\n")
+    km("xkb_compatibility \"hm\" { };\n")
+    km("xkb_symbols \"hm\" {\n")
+    km("key <LFSH> {[Shift_L]};\nkey <RTSH> {[Shift_R]};\n")
+    km("key <A9> {[Tab]};\nkey <A22> {[BackSpace]};\n")
+    km("key <A28> {[Return]};\nkey <A57> {[space]};\n")
+    km_key("K02", "1,exclam")
+    km_key("K03", "2,at")
+    km_key("K04", "3,numbersign")
+    km_key("K05", "4,dollar")
+    km_key("K06", "5,percent")
+    km_key("K07", "6,asciicircum")
+    km_key("K08", "7,ampersand")
+    km_key("K09", "8,asterisk")
+    km_key("K10", "9,parenleft")
+    km_key("K11", "0,parenright")
+    km_key("K12", "minus,underscore")
+    km_key("K13", "equal,plus")
+    km_key("K16", "q,Q")
+    km_key("K17", "w,W")
+    km_key("K18", "e,E")
+    km_key("K19", "r,R")
+    km_key("K20", "t,T")
+    km_key("K21", "y,Y")
+    km_key("K22", "u,U")
+    km_key("K23", "i,I")
+    km_key("K24", "o,O")
+    km_key("K25", "p,P")
+    km_key("K26", "bracketleft,braceleft")
+    km_key("K27", "bracketright,braceright")
+    km_key("K30", "a,A")
+    km_key("K31", "s,S")
+    km_key("K32", "d,D")
+    km_key("K33", "f,F")
+    km_key("K34", "g,G")
+    km_key("K35", "h,H")
+    km_key("K36", "j,J")
+    km_key("K37", "k,K")
+    km_key("K38", "l,L")
+    km_key("K39", "semicolon,colon")
+    km_key("K40", "apostrophe,quotedbl")
+    km_key("K41", "grave,asciitilde")
+    km_key("K43", "backslash,bar")
+    km_key("K44", "z,Z")
+    km_key("K45", "x,X")
+    km_key("K46", "c,C")
+    km_key("K47", "v,V")
+    km_key("K48", "b,B")
+    km_key("K49", "n,N")
+    km_key("K50", "m,M")
+    km_key("K51", "comma,less")
+    km_key("K52", "period,greater")
+    km_key("K53", "slash,question")
+    km("modifier_map Shift {<LFSH>,<RTSH>};\n")
+    km("};\n")
+    km("};\n")
+    kmbuf[kmlen] = 0
+    keymap_len = kmlen + 1                      # the client mmaps the NUL too
+    fd: int32 = sys_memfd(cast[Ptr[char]]("wl-xkb-keymap"), keymap_len)
+    if fd < 0:
+        return
+    sys_write(fd, &kmbuf[0], keymap_len)
+    keymap_fd = fd
+
+
+# --- windows ----------------------------------------------------------
+
+def winpath(wid: int32, leaf: Ptr[uint8]):
+    i: uint64 = 0
+    p: Ptr[uint8] = "/dev/wsys/"
+    k: uint64 = 0
+    while p[k] != 0:
+        pathbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&pathbuf[0], i, wid)
+    pathbuf[i] = 47
+    i = i + 1
+    k = 0
+    while leaf[k] != 0:
+        pathbuf[i] = leaf[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+
+def write_path(path: Ptr[char], data: Ptr[uint8]) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    sys_write(fd, data, slen(data))
+    sys_close(fd)
+    return 0
+
+
+def win_ctl(wid: int32, verb: Ptr[uint8]):
+    winpath(wid, "ctl")
+    write_path(cast[Ptr[char]](&pathbuf[0]), verb)
+
+
+def newwindow() -> int32:
+    if write_path(cast[Ptr[char]]("/dev/wsys/ctl"),
+                  cast[Ptr[uint8]]("newwindow\n")) != 0:
+        return -1
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if fd < 0:
+        return -1
+    n: int64 = sys_read(fd, &rbuf[0], 32)
+    sys_close(fd)
+    if n <= 0:
+        return -1
+    v: int32 = 0
+    i: uint64 = 0
+    while i < cast[uint64](n) and rbuf[i] >= 48 and rbuf[i] <= 57:
+        v = v * 10 + cast[int32](rbuf[i]) - 48
+        i = i + 1
+    if v < 2:
+        return -1
+    return v
+
+
+def send_title(wid: int32, c: uint64):
+    i: uint64 = 0
+    p: Ptr[uint8] = "title "
+    k: uint64 = 0
+    while p[k] != 0:
+        ctlbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    k = 0
+    while k < conn_title_len[c] and k < TITLE_CAP:
+        ctlbuf[i] = conn_title[c * TITLE_CAP + k]
+        i = i + 1
+        k = k + 1
+    if k == 0:
+        ctlbuf[i] = 87                                   # "Wayland"
+        ctlbuf[i + 1] = 97
+        ctlbuf[i + 2] = 121
+        ctlbuf[i + 3] = 108
+        ctlbuf[i + 4] = 97
+        ctlbuf[i + 5] = 110
+        ctlbuf[i + 6] = 100
+        i = i + 7
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    win_ctl(wid, &ctlbuf[0])
+
+
+def send_geometry(wid: int32, x: int32, y: int32, w: int32, h: int32):
+    i: uint64 = 0
+    p: Ptr[uint8] = "geometry "
+    k: uint64 = 0
+    while p[k] != 0:
+        ctlbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, x)
+    ctlbuf[i] = 32
+    i = emit_int(&ctlbuf[0], i + 1, y)
+    ctlbuf[i] = 32
+    i = emit_int(&ctlbuf[0], i + 1, w)
+    ctlbuf[i] = 32
+    i = emit_int(&ctlbuf[0], i + 1, h)
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    win_ctl(wid, &ctlbuf[0])
+
+
+def win_slot(wid: int32) -> int32:
+    i: uint64 = 0
+    while i < n_win:
+        if w_wid[i] == wid:
+            return cast[int32](i)
+        i = i + 1
+    return -1
+
+
+# Give a surface a real Hamnix window. GEOMETRY GOES FIRST because
+# user/linux-wsys.c's bb_for() sizes the v2 backbuffer from the window's w/h
+# the first time a blit arrives and never resizes it -- a window that is still
+# its default 640x480 when the first blit lands is stuck at that stride.
+def win_open(c: uint64, surf: uint32, w: int32, h: int32) -> int32:
+    if n_win >= MAXWIN:
+        return -1
+    wid: int32 = newwindow()
+    if wid < 2:
+        return -1
+    # Cascade far enough that two windows do not sit on top of each other.
+    # There is no placement policy here worth the name -- wsysd owns stacking
+    # and the user can move things -- but a new toplevel landing 28 pixels
+    # from the last one reads as a rendering bug rather than as two windows.
+    x: int32 = 60 + cascade % 3 * 340
+    y: int32 = 60 + cascade / 3 % 2 * 340
+    if x + w > scr_w:
+        x = scr_w - w - 20
+    if y + h > scr_h:
+        y = scr_h - h - 20
+    if x < 0:
+        x = 0
+    if y < 0:
+        y = 0
+    cascade = cascade + 1
+    send_geometry(wid, x, y, w, h)
+    win_ctl(wid, cast[Ptr[uint8]]("decorate 1\n"))
+    win_ctl(wid, cast[Ptr[uint8]]("z 7\n"))
+    send_title(wid, c)
+    win_ctl(wid, cast[Ptr[uint8]]("version 2\n"))
+    winpath(wid, "draw/ctl")
+    dfd: int32 = sys_open_write(cast[Ptr[char]](&pathbuf[0]))
+    if dfd < 0:
+        return -1
+    winpath(wid, "keys")
+    kfd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
+    winpath(wid, "pointer")
+    pfd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
+    w_wid[n_win] = wid
+    w_draw[n_win] = dfd
+    w_keys[n_win] = kfd
+    w_ptr[n_win] = pfd
+    w_conn[n_win] = cast[int32](c)
+    w_surf[n_win] = cast[int32](surf)
+    w_btn[n_win] = 0
+    w_in[n_win] = 0
+    w_focus[n_win] = 0
+    n_win = n_win + 1
+    puts(1, "wsyswl: toplevel -> wid ")
+    putd(1, wid)
+    puts(1, "\n")
+    return wid
+
+
+def win_close(wid: int32):
+    s: int32 = win_slot(wid)
+    if s < 0:
+        return
+    i: uint64 = cast[uint64](s)
+    if w_draw[i] >= 0:
+        sys_close(w_draw[i])
+    if w_keys[i] >= 0:
+        sys_close(w_keys[i])
+    if w_ptr[i] >= 0:
+        sys_close(w_ptr[i])
+    # sys_wsys_free, not a `close <wid>` on the global ctl. Only the syscall
+    # releases the window's v2 backbuffer slot, and user/linux-wsys.c has
+    # THREE of them for the whole system -- a leaked slot is a window that can
+    # never be drawn into again, which shows up much later as a client that
+    # renders nothing for no visible reason.
+    sys_wsys_free(wid)
+    k: uint64 = i
+    while k + 1 < n_win:
+        w_wid[k] = w_wid[k + 1]
+        w_draw[k] = w_draw[k + 1]
+        w_keys[k] = w_keys[k + 1]
+        w_ptr[k] = w_ptr[k + 1]
+        w_conn[k] = w_conn[k + 1]
+        w_surf[k] = w_surf[k + 1]
+        w_btn[k] = w_btn[k + 1]
+        w_in[k] = w_in[k + 1]
+        w_focus[k] = w_focus[k + 1]
+        k = k + 1
+    n_win = n_win - 1
+
+
+# --- shm buffer -> the window's backbuffer ----------------------------
+
+def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
+    if obj_get_type(c, buf_id) != T_BUFFER:
+        return
+    bi: uint64 = oidx(c, buf_id)
+    mi:     int32 = obj_g[bi]
+    offset: int32 = obj_b[bi]
+    width:  int32 = obj_c[bi]
+    height: int32 = obj_d[bi]
+    stride: int32 = obj_e[bi]
+    if verbose != 0:
+        puts(1, "wsyswl: commit_buffer map ")
+        putd(1, mi)
+        puts(1, " ")
+        putd(1, width)
+        puts(1, "x")
+        putd(1, height)
+        puts(1, "\n")
+    if width < 1 or height < 1 or mi < 0:
+        return
+    base: uint64 = map_addr[c * MAXMAP + cast[uint64](mi)]
+    maplen: uint64 = map_len[c * MAXMAP + cast[uint64](mi)]
+    if base == 0:
+        return
+
+    # A wl_subsurface's pixels belong to the toplevel that owns the window --
+    # the child never gets a window of its own. Walk up so a client that draws
+    # its content into a subsurface (Firefox does) still lands somewhere.
+    eff: uint32 = surface_id
+    guard: int32 = 0
+    while guard < 4:
+        p: int32 = surf_parent[oidx(c, eff)]
+        if p == 0 or obj_get_type(c, cast[uint32](p)) != T_SURFACE:
+            guard = 4
+        else:
+            eff = cast[uint32](p)
+            guard = guard + 1
+    si: uint64 = oidx(c, eff)
+    wid: int32 = obj_a[si]
+    if wid <= 0:
+        wid = win_open(c, eff, width, height)
+        if wid < 0:
+            return
+        obj_a[si] = wid
+    elif obj_c[si] != width or obj_d[si] != height:
+        # A resize needs a new backbuffer and there is no way to ask for one:
+        # linux-wsys.c fixes the slot's stride at the first blit. Re-announce
+        # the geometry so the frame and the taskbar are right; the pixels are
+        # clipped to the original stride until the window is recreated. See
+        # the report -- this wants a `bb_resize` on the wsys side.
+        send_geometry(wid, 60, 60, width, height)
+    obj_c[si] = width
+    obj_d[si] = height
+
+    slot: int32 = win_slot(wid)
+    if slot < 0:
+        return
+    dfd: int32 = w_draw[cast[uint64](slot)]
+
+    rowbytes: uint64 = cast[uint64](width) * 4
+    if rowbytes > 8192:
+        rowbytes = 8192
+    cols: int32 = cast[int32](rowbytes / 4)
+    src: Ptr[uint8] = cast[Ptr[uint8]](base)
+    y: int32 = 0
+    while y < height:
+        pos: uint64 = cast[uint64](offset) \
+                    + cast[uint64](y) * cast[uint64](stride)
+        if pos + rowbytes > maplen:
+            y = height
+        else:
+            i: uint64 = 0
+            while i < rowbytes:
+                rowbuf[i] = src[pos + i]
+                i = i + 1
+            # ALPHA IS FORCED OPAQUE, for both formats. XRGB8888's fourth byte
+            # is undefined and would show as transparent; ARGB8888's is real,
+            # but a client's translucency is measured against ITS idea of what
+            # is behind the window, and here that is the Hamnix desktop, which
+            # it has never seen. An opaque window is the honest rendering of a
+            # surface whose background we cannot reproduce.
+            k: int32 = 0
+            while k < cols:
+                rowbuf[cast[uint64](k) * 4 + 3] = 255
+                k = k + 1
+            blithdr[0] = 66                              # 'B'
+            put_le32(&blithdr[0], 1, 0)
+            put_le32(&blithdr[0], 5, y)
+            put_le32(&blithdr[0], 9, cols)
+            put_le32(&blithdr[0], 13, y + 1)
+            blithdr[17] = FMT_BGRA8888
+            sys_write(dfd, &blithdr[0], 18)
+            sys_write(dfd, &rowbuf[0], rowbytes)
+            y = y + 1
+    blithdr[0] = 68                                      # 'D', publish
+    put_le32(&blithdr[0], 1, 0)
+    put_le32(&blithdr[0], 5, 0)
+    put_le32(&blithdr[0], 9, cols)
+    put_le32(&blithdr[0], 13, height)
+    sys_write(dfd, &blithdr[0], 17)
+    if verbose != 0:
+        puts(1, "wsyswl: commit ")
+        putd(1, width)
+        puts(1, "x")
+        putd(1, height)
+        puts(1, " -> wid ")
+        putd(1, wid)
+        puts(1, "\n")
+
+
+# --- request dispatch, one function per interface ---------------------
+
+def do_display(c: uint64, opcode: uint32, args: Ptr[uint8], arglen: uint64):
+    if opcode == 0:
+        # sync(callback): answer immediately. Everything this server does is
+        # synchronous inside one pump, so a roundtrip has nothing to wait for.
+        if arglen >= 4:
+            cb: uint32 = ru32(args, 0)
+            new_obj(c, cb, T_CALLBACK)
+            serial = serial + 1
+            send_callback_done(cb, serial)
+            send_delete_id(cb)
+            free_obj(c, cb)
+    elif opcode == 1:
+        if arglen >= 4:
+            reg: uint32 = ru32(args, 0)
+            new_obj(c, reg, T_REGISTRY)
+            conn_reg[c] = cast[int32](reg)
+            send_global(reg, G_COMPOSITOR, "wl_compositor", 4)
+            send_global(reg, G_SHM, "wl_shm", 1)
+            send_global(reg, G_XDG, "xdg_wm_base", 1)
+            send_global(reg, G_SEAT, "wl_seat", SEAT_VERSION)
+            send_global(reg, G_OUTPUT, "wl_output", OUTPUT_VERSION)
+            send_global(reg, G_DDM, "wl_data_device_manager", 3)
+            send_global(reg, G_SUBCOMPOSITOR, "wl_subcompositor", 1)
+
+
+def do_registry(c: uint64, args: Ptr[uint8], arglen: uint64):
+    # bind(name, interface(string), version, new_id)
+    if arglen < 12:
+        return
+    name: uint32 = ru32(args, 0)
+    ilen: uint32 = ru32(args, 4)
+    pad: uint64 = (cast[uint64](ilen) + 3) / 4 * 4
+    after: uint64 = 8 + pad
+    if arglen < after + 8:
+        return
+    bver:  uint32 = ru32(args, after)
+    newid: uint32 = ru32(args, after + 4)
+    if name == G_COMPOSITOR:
+        new_obj(c, newid, T_COMPOSITOR)
+    elif name == G_SHM:
+        new_obj(c, newid, T_SHM)
+        send_shm_format(newid, SHM_ARGB8888)
+        send_shm_format(newid, SHM_XRGB8888)
+    elif name == G_XDG:
+        new_obj(c, newid, T_XDG_WM)
+        conn_xdg_wm[c] = cast[int32](newid)
+    elif name == G_SEAT:
+        new_obj(c, newid, T_SEAT)
+        conn_seat[c] = cast[int32](newid)
+        obj_a[oidx(c, newid)] = cast[int32](bver)
+        send_seat_caps(newid, SEAT_CAP_POINTER | SEAT_CAP_KEYBOARD)
+        # wl_seat.name is a v2 event. A client that bound at v1 has no
+        # listener slot for it and libwayland ABORTS on an event it cannot
+        # dispatch, so this is gated rather than always sent.
+        if bver >= 2:
+            send_seat_name(newid, "seat0")
+    elif name == G_OUTPUT:
+        new_obj(c, newid, T_OUTPUT)
+        send_output_all(newid)
+    elif name == G_DDM:
+        new_obj(c, newid, T_DDM)
+    elif name == G_SUBCOMPOSITOR:
+        new_obj(c, newid, T_SUBCOMPOSITOR)
+
+
+def do_seat(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
+            arglen: uint64):
+    if opcode == 0:
+        if arglen >= 4:
+            p: uint32 = ru32(args, 0)
+            new_obj(c, p, T_POINTER)
+            conn_pointer[c] = cast[int32](p)
+    elif opcode == 1:
+        if arglen >= 4:
+            k: uint32 = ru32(args, 0)
+            new_obj(c, k, T_KEYBOARD)
+            conn_keyboard[c] = cast[int32](k)
+            build_keymap()
+            if keymap_fd >= 0:
+                # The fd rides out with the keymap event itself: the client's
+                # recvmsg has to see them together or it has a size and no
+                # descriptor. out_fd is consumed by the next flush.
+                out_fd = keymap_fd
+                keymap_fd = -1
+                send_kbd_keymap(k, cast[uint32](keymap_len))
+                build_keymap()                  # rebuild for the next client
+            sver: int32 = obj_a[oidx(c, obj)]
+            if sver >= 4:
+                send_kbd_repeat_info(k, 25, 600)
+
+
+def do_shm(c: uint64, opcode: uint32, args: Ptr[uint8], arglen: uint64):
+    if opcode != 0:
+        return
+    # create_pool(id, fd, size). The fd argument is not in `args` -- it came
+    # over the socket as ancillary data and is waiting at the head of this
+    # connection's descriptor queue.
+    if arglen < 8:
+        return
+    nfd: int32 = fdq_pop(c)
+    poolid: uint32 = ru32(args, 0)
+    size:   uint32 = ru32(args, 4)
+    new_obj(c, poolid, T_SHM_POOL)
+    if valid_id(poolid) == 0:
+        return
+    pi: uint64 = oidx(c, poolid)
+    obj_a[pi] = nfd
+    if verbose != 0:
+        puts(1, "wsyswl: create_pool fd ")
+        putd(1, nfd)
+        puts(1, "\n")
+    if nfd < 0:
+        return
+    mi: int32 = map_alloc(c)
+    if mi < 0:
+        sys_close(nfd)
+        obj_a[pi] = -1
+        return
+    # The DESCRIPTOR is the authority on how much is safe to map, not the size
+    # in the request: a later wl_shm_pool.resize grows the pool without
+    # re-sending the fd, and mapping past the end of the memfd is a SIGBUS on
+    # the first touched page.
+    fsz: int64 = sys_fd_size(nfd)
+    want: uint64 = cast[uint64](size)
+    if fsz > 0 and cast[uint64](fsz) > want:
+        want = cast[uint64](fsz)
+    m: uint64 = c * MAXMAP + cast[uint64](mi)
+    map_addr[m] = sys_mmap_shared(nfd, want)
+    map_len[m] = want
+    obj_g[pi] = mi
+    obj_b[pi] = cast[int32](size)
+
+
+def do_shm_pool(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
+                arglen: uint64):
+    pi: uint64 = oidx(c, obj)
+    if opcode == 0:
+        # create_buffer(id, offset, width, height, stride, format)
+        if arglen >= 24:
+            bufid: uint32 = ru32(args, 0)
+            new_obj(c, bufid, T_BUFFER)
+            if valid_id(bufid) != 0:
+                bi: uint64 = oidx(c, bufid)
+                obj_a[bi] = cast[int32](obj)             # the pool it came from
+                obj_b[bi] = cast[int32](ru32(args, 4))
+                obj_c[bi] = cast[int32](ru32(args, 8))
+                obj_d[bi] = cast[int32](ru32(args, 12))
+                obj_e[bi] = cast[int32](ru32(args, 16))
+                obj_f[bi] = cast[int32](ru32(args, 20))
+                obj_g[bi] = obj_g[pi]                    # share the mapping
+    elif opcode == 1:
+        # destroy: the pool object goes, the MAPPING stays -- the buffers cut
+        # from it are still live and are the whole reason it was created.
+        if obj_a[pi] >= 0:
+            sys_close(obj_a[pi])
+            obj_a[pi] = -1
+        free_obj(c, obj)
+    elif opcode == 2:
+        # resize(size): remap, because the pages past the old end are not in
+        # our mapping at all. Buffers carved before the resize keep working:
+        # they hold the same map index, which now points at the new address.
+        if arglen >= 4:
+            mi: int32 = obj_g[pi]
+            ns: uint64 = cast[uint64](ru32(args, 0))
+            if mi >= 0 and obj_a[pi] >= 0:
+                m: uint64 = c * MAXMAP + cast[uint64](mi)
+                if ns > map_len[m]:
+                    if map_addr[m] != 0:
+                        sys_munmap_at(map_addr[m], map_len[m])
+                    map_addr[m] = sys_mmap_shared(obj_a[pi], ns)
+                    map_len[m] = ns
+            obj_b[pi] = cast[int32](ns)
+
+
+def do_surface(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
+               arglen: uint64):
+    si: uint64 = oidx(c, obj)
+    if opcode == 1:
+        # attach(buffer, x, y)
+        if arglen >= 4:
+            obj_b[si] = cast[int32](ru32(args, 0))
+    elif opcode == 3:
+        # frame(callback)
+        if arglen >= 4:
+            fcb: uint32 = ru32(args, 0)
+            new_obj(c, fcb, T_CALLBACK)
+            obj_e[si] = cast[int32](fcb)
+    elif opcode == 6:
+        # commit. An xdg_surface's buffer only maps AFTER the client has acked
+        # a configure, and the spec is strict about when that configure may be
+        # sent: only IN RESPONSE TO the client's first, bufferless commit. GTK
+        # (so Firefox, so XWayland) ignores a configure that arrives before it
+        # and then waits forever for the one that never comes -- which looks
+        # exactly like a client that failed to start.
+        xrole: int32 = obj_f[si]
+        configured: int32 = 1
+        if xrole != 0 and obj_get_type(c, cast[uint32](xrole)) == T_XDG_SURF:
+            xi: uint64 = oidx(c, cast[uint32](xrole))
+            configured = obj_c[xi]
+            if configured == 0 and obj_b[xi] == 0:
+                tid: int32 = obj_d[xi]
+                if tid != 0:
+                    send_toplevel_configure(cast[uint32](tid), 0, 0)
+                serial = serial + 1
+                send_xdg_configure(cast[uint32](xrole), serial)
+                obj_b[xi] = cast[int32](serial)
+        pend: int32 = obj_b[si]
+        if pend != 0:
+            if configured != 0:
+                commit_buffer(c, obj, cast[uint32](pend))
+            send_buffer_release(cast[uint32](pend))
+            obj_b[si] = 0
+        fcb2: int32 = obj_e[si]
+        if fcb2 != 0:
+            # The frame callback is answered at once rather than at a vblank.
+            # There is no vblank to wait for here, and a client that throttles
+            # on it would otherwise never draw a second frame.
+            evt_time = evt_time + 16
+            send_callback_done(cast[uint32](fcb2), evt_time)
+            send_delete_id(cast[uint32](fcb2))
+            free_obj(c, cast[uint32](fcb2))
+            obj_e[si] = 0
+    elif opcode == 0:
+        if obj_a[si] > 0:
+            win_close(obj_a[si])
+            obj_a[si] = 0
+        free_obj(c, obj)
+
+
+def do_xdg_wm(c: uint64, opcode: uint32, args: Ptr[uint8], arglen: uint64):
+    if opcode == 2:
+        # get_xdg_surface(id, surface): link both ways so commit can find the
+        # role and the role can find the window.
+        if arglen >= 8:
+            xid: uint32 = ru32(args, 0)
+            surf: uint32 = ru32(args, 4)
+            new_obj(c, xid, T_XDG_SURF)
+            if valid_id(xid) != 0:
+                obj_a[oidx(c, xid)] = cast[int32](surf)
+            if obj_get_type(c, surf) == T_SURFACE:
+                obj_f[oidx(c, surf)] = cast[int32](xid)
+    elif opcode == 1:
+        # create_positioner(id): inert, because popups are not placed.
+        if arglen >= 4:
+            new_obj(c, ru32(args, 0), T_REGION)
+
+
+def do_xdg_surf(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
+                arglen: uint64):
+    xi: uint64 = oidx(c, obj)
+    if opcode == 1:
+        # get_toplevel(id). No configure here -- see the commit handler.
+        if arglen >= 4:
+            tid: uint32 = ru32(args, 0)
+            new_obj(c, tid, T_XDG_TOP)
+            if valid_id(tid) != 0:
+                obj_a[oidx(c, tid)] = cast[int32](obj)
+            obj_d[xi] = cast[int32](tid)
+    elif opcode == 2:
+        # get_popup(id, parent, positioner): configure it so the client is not
+        # left waiting, but give it no window. A menu therefore does not
+        # appear; see the header.
+        if arglen >= 4:
+            pid: uint32 = ru32(args, 0)
+            new_obj(c, pid, T_XDG_SURF)
+            serial = serial + 1
+            send_xdg_configure(pid, serial)
+    elif opcode == 4:
+        # ack_configure(serial)
+        obj_c[xi] = 1
+        obj_b[xi] = 0
+
+
+def do_xdg_top(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
+               arglen: uint64):
+    ti: uint64 = oidx(c, obj)
+    xsid: int32 = obj_a[ti]
+    if opcode == 2:
+        # set_title(title). It usually arrives before the window exists, so it
+        # is stashed on the connection and applied at window-open time; if the
+        # window is already up, push it now.
+        if arglen >= 4:
+            tlen: uint32 = ru32(args, 0)
+            n: uint64 = 0
+            while n + 1 < TITLE_CAP and n + 4 < arglen \
+                  and cast[uint32](n) < tlen and args[4 + n] != 0:
+                conn_title[c * TITLE_CAP + n] = args[4 + n]
+                n = n + 1
+            conn_title_len[c] = n
+            if obj_get_type(c, cast[uint32](xsid)) == T_XDG_SURF:
+                surf: int32 = obj_a[oidx(c, cast[uint32](xsid))]
+                if surf != 0 and obj_get_type(c, cast[uint32](surf)) == T_SURFACE:
+                    wid: int32 = obj_a[oidx(c, cast[uint32](surf))]
+                    if wid > 0:
+                        send_title(wid, c)
+    elif opcode == 0:
+        # destroy: the window goes with the role.
+        if obj_get_type(c, cast[uint32](xsid)) == T_XDG_SURF:
+            surf2: int32 = obj_a[oidx(c, cast[uint32](xsid))]
+            if surf2 != 0 and obj_get_type(c, cast[uint32](surf2)) == T_SURFACE:
+                wid2: int32 = obj_a[oidx(c, cast[uint32](surf2))]
+                if wid2 > 0:
+                    win_close(wid2)
+                    obj_a[oidx(c, cast[uint32](surf2))] = 0
+        free_obj(c, obj)
+
+
+def do_subcompositor(c: uint64, opcode: uint32, args: Ptr[uint8],
+                     arglen: uint64):
+    if opcode == 1:
+        # get_subsurface(id, surface, parent)
+        if arglen >= 12:
+            subid: uint32 = ru32(args, 0)
+            ch: uint32 = ru32(args, 4)
+            pa: uint32 = ru32(args, 8)
+            new_obj(c, subid, T_SUBSURFACE)
+            if valid_id(subid) != 0:
+                si: uint64 = oidx(c, subid)
+                obj_a[si] = cast[int32](ch)
+                obj_b[si] = cast[int32](pa)
+            if obj_get_type(c, ch) == T_SURFACE \
+                    and obj_get_type(c, pa) == T_SURFACE:
+                surf_parent[oidx(c, ch)] = cast[int32](pa)
+
+
+def dispatch(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
+             arglen: uint64):
+    otype: int32 = obj_get_type(c, obj)
+    fd: int32 = conn_fd[c]
+    if obj == DISPLAY_ID:
+        do_display(c, opcode, args, arglen)
+    elif otype == T_REGISTRY:
+        if opcode == 0:
+            do_registry(c, args, arglen)
+    elif otype == T_COMPOSITOR:
+        if opcode == 0:
+            if arglen >= 4:
+                new_obj(c, ru32(args, 0), T_SURFACE)
+        elif opcode == 1:
+            if arglen >= 4:
+                new_obj(c, ru32(args, 0), T_REGION)
+    elif otype == T_SHM:
+        do_shm(c, opcode, args, arglen)
+    elif otype == T_SHM_POOL:
+        do_shm_pool(c, obj, opcode, args, arglen)
+    elif otype == T_SURFACE:
+        do_surface(c, obj, opcode, args, arglen)
+    elif otype == T_XDG_WM:
+        if opcode == 2 or opcode == 1:
+            do_xdg_wm(c, opcode, args, arglen)
+    elif otype == T_XDG_SURF:
+        do_xdg_surf(c, obj, opcode, args, arglen)
+    elif otype == T_XDG_TOP:
+        do_xdg_top(c, obj, opcode, args, arglen)
+    elif otype == T_SEAT:
+        do_seat(c, obj, opcode, args, arglen)
+    elif otype == T_SUBCOMPOSITOR:
+        do_subcompositor(c, opcode, args, arglen)
+    elif otype == T_DDM:
+        if opcode == 0:
+            if arglen >= 4:
+                new_obj(c, ru32(args, 0), T_DATA_SOURCE)
+        elif opcode == 1:
+            if arglen >= 4:
+                new_obj(c, ru32(args, 0), T_DATA_DEVICE)
+    elif otype == T_BUFFER:
+        if opcode == 0:
+            free_obj(c, obj)
+            send_delete_id(obj)
+    elif otype == T_OUTPUT:
+        if opcode == 0:
+            free_obj(c, obj)
+    # Anything else -- region, callback, data device, an opcode from a newer
+    # protocol version -- is consumed silently. A server that killed the
+    # connection over an unknown request would break on every toolkit update.
+    flush(fd)
+
+
+# --- connections ------------------------------------------------------
+
+def conn_reset(c: uint64):
+    conn_acclen[c] = 0
+    conn_reg[c] = 0
+    conn_seat[c] = 0
+    conn_pointer[c] = 0
+    conn_keyboard[c] = 0
+    conn_xdg_wm[c] = 0
+    conn_title_len[c] = 0
+    fdq_head[c] = 0
+    fdq_tail[c] = 0
+    i: uint64 = 0
+    while i < MAXOBJ:
+        obj_type[c * MAXOBJ + i] = T_NONE
+        surf_parent[c * MAXOBJ + i] = 0
+        obj_g[c * MAXOBJ + i] = -1
+        i = i + 1
+    i = 0
+    while i < MAXMAP:
+        map_used[c * MAXMAP + i] = 0
+        map_addr[c * MAXMAP + i] = 0
+        map_len[c * MAXMAP + i] = 0
+        i = i + 1
+    obj_type[c * MAXOBJ + 1] = T_DISPLAY        # wl_display is always id 1
+
+
+def conn_free(c: uint64):
+    if conn_inuse[c] == 0:
+        return
+    i: uint64 = 0
+    while i < MAXOBJ:
+        oi: uint64 = c * MAXOBJ + i
+        if obj_type[oi] == T_SHM_POOL:
+            if obj_a[oi] >= 0:
+                sys_close(obj_a[oi])
+                obj_a[oi] = -1
+        elif obj_type[oi] == T_SURFACE:
+            if obj_a[oi] > 0:
+                win_close(obj_a[oi])
+        obj_type[oi] = T_NONE
+        i = i + 1
+    while fdq_head[c] != fdq_tail[c]:
+        sys_close(fdq_pop(c))
+    i = 0
+    while i < MAXMAP:
+        m: uint64 = c * MAXMAP + i
+        if map_addr[m] != 0:
+            sys_munmap_at(map_addr[m], map_len[m])
+            map_addr[m] = 0
+        map_used[m] = 0
+        i = i + 1
+    sys_close(conn_fd[c])
+    conn_inuse[c] = 0
+    conn_fd[c] = -1
+    puts(1, "wsyswl: client gone\n")
+
+
+def conn_accept():
+    while 1 == 1:
+        fd: int32 = sys_unix_accept(listen_fd)
+        if fd < 0:
+            return
+        c: uint64 = 0
+        placed: int32 = 0
+        while c < MAXCONN and placed == 0:
+            if conn_inuse[c] == 0:
+                conn_inuse[c] = 1
+                conn_fd[c] = fd
+                conn_reset(c)
+                placed = 1
+                puts(1, "wsyswl: client connected\n")
+            c = c + 1
+        if placed == 0:
+            sys_close(fd)
+            puts(2, "wsyswl: too many clients\n")
+
+
+# Drain one client's socket and run every complete message in it.
+#
+# THE FD AND THE BYTES ARRIVE TOGETHER and must be kept together: the kernel
+# attaches a client's shm memfd to the first byte of the sendmsg that carried
+# wl_shm.create_pool, so a reader that took bytes with read(2) and went looking
+# for the descriptor afterwards would find it gone. Every read here is a
+# recvmsg, whether or not a descriptor is expected, and the descriptor is held
+# until the create_pool in the same buffer consumes it.
+def conn_pump(c: uint64) -> int32:
+    fd: int32 = conn_fd[c]
+    base: uint64 = c * ACC
+    acclen: uint64 = conn_acclen[c]
+    if acclen < ACC:
+        recvn[0] = 0
+        got: int64 = sys_scm_recv(fd, &conn_acc[base + acclen], ACC - acclen,
+                                  &recvfds[0], 4, &recvn[0])
+        if got < 0:
+            return -1
+        k: int32 = 0
+        while k < recvn[0]:
+            fdq_push(c, recvfds[k])
+            k = k + 1
+        acclen = acclen + cast[uint64](got)
+    pos: uint64 = 0
+    while acclen - pos >= 8:
+        obj: uint32 = ru32(&conn_acc[base], pos)
+        w2:  uint32 = ru32(&conn_acc[base], pos + 4)
+        size: uint64 = cast[uint64](w2 >> 16)
+        opcode: uint32 = w2 & 0xffff
+        if size < 8:
+            # A corrupt header cannot be resynchronised by scanning -- any
+            # four bytes look like an object id. Drop the connection instead
+            # of inventing a message boundary.
+            conn_acclen[c] = 0
+            return -1
+        if acclen - pos < size:
+            acclen = acclen                              # incomplete; wait
+            pos = pos
+            break
+        dispatch(c, obj, opcode, &conn_acc[base + pos + 8], size - 8)
+        pos = pos + size
+    if pos > 0:
+        rem: uint64 = acclen - pos
+        k2: uint64 = 0
+        while k2 < rem:
+            conn_acc[base + k2] = conn_acc[base + pos + k2]
+            k2 = k2 + 1
+        acclen = rem
+    conn_acclen[c] = acclen
+    return 0
+
+
+# --- input: the window's rings -> wl_pointer / wl_keyboard ------------
+#
+# wsysd routes input to a window by WRITING its /keys and /pointer rings --
+# "d <code>\n" and "<kind> <x> <y> <buttons> <dz>\n" -- exactly as it does for
+# a scene app. Nothing about Wayland reaches wsysd; this end reads the same two
+# files any hamui client reads and turns the lines into protocol events. That
+# is the whole reason a Wayland client can share a desktop with hamterm.
+
+def parse_int_at(buf: Ptr[uint8], p: uint64, end: uint64) -> int32:
+    i: uint64 = p
+    neg: int32 = 0
+    if i < end and buf[i] == 45:
+        neg = 1
+        i = i + 1
+    v: int32 = 0
+    while i < end and buf[i] >= 48 and buf[i] <= 57:
+        v = v * 10 + cast[int32](buf[i]) - 48
+        i = i + 1
+    if neg != 0:
+        return 0 - v
+    return v
+
+
+def skip_field(buf: Ptr[uint8], p: uint64, end: uint64) -> uint64:
+    i: uint64 = p
+    while i < end and buf[i] != 32:
+        i = i + 1
+    while i < end and buf[i] == 32:
+        i = i + 1
+    return i
+
+
+# An ASCII byte from the cooked keyboard, as an evdev keycode plus whether it
+# needs Shift. Returns code, or 0 for a byte with no key on a us layout.
+def ascii_evdev(a: int32) -> int32:
+    if a >= 97 and a <= 122:
+        a = a - 32                                       # fold to uppercase
+    if a >= 65 and a <= 90:
+        # QWERTYUIOP ASDFGHJKL ZXCVBNM in evdev order.
+        row: Ptr[uint8] = "QWERTYUIOP"
+        i: int32 = 0
+        while i < 10:
+            if cast[int32](row[i]) == a:
+                return 16 + i
+            i = i + 1
+        row = "ASDFGHJKL"
+        i = 0
+        while i < 9:
+            if cast[int32](row[i]) == a:
+                return 30 + i
+            i = i + 1
+        row = "ZXCVBNM"
+        i = 0
+        while i < 7:
+            if cast[int32](row[i]) == a:
+                return 44 + i
+            i = i + 1
+        return 0
+    if a >= 49 and a <= 57:
+        return 2 + (a - 49)                              # 1..9
+    if a == 48:
+        return 11                                        # 0
+    if a == 32:
+        return 57
+    if a == 10 or a == 13:
+        return 28                                        # Return
+    if a == 8 or a == 127:
+        return 14                                        # BackSpace
+    if a == 9:
+        return 15                                        # Tab
+    if a == 45:
+        return 12
+    if a == 61:
+        return 13
+    if a == 59:
+        return 39
+    if a == 39:
+        return 40
+    if a == 44:
+        return 51
+    if a == 46:
+        return 52
+    if a == 47:
+        return 53
+    return 0
+
+
+def needs_shift(a: int32) -> int32:
+    if a >= 65 and a <= 90:
+        return 1
+    return 0
+
+
+def key_tap(c: uint64, code: int32, shift: int32):
+    kbd: int32 = conn_keyboard[c]
+    if kbd == 0 or code == 0:
+        return
+    evt_time = evt_time + 8
+    if shift != 0:
+        serial = serial + 1
+        send_kbd_modifiers(cast[uint32](kbd), serial, MOD_SHIFT)
+    serial = serial + 1
+    send_kbd_key(cast[uint32](kbd), serial, evt_time, cast[uint32](code),
+                 STATE_PRESSED)
+    evt_time = evt_time + 8
+    serial = serial + 1
+    send_kbd_key(cast[uint32](kbd), serial, evt_time, cast[uint32](code),
+                 STATE_RELEASED)
+    if shift != 0:
+        serial = serial + 1
+        send_kbd_modifiers(cast[uint32](kbd), serial, 0)
+
+
+def btn_edges(c: uint64, i: uint64, surf: uint32, mask: int32):
+    ptr: int32 = conn_pointer[c]
+    if ptr == 0:
+        return
+    old: int32 = w_btn[i]
+    b: int32 = 0
+    while b < 3:
+        bit: int32 = 1
+        if b == 1:
+            bit = 2
+        elif b == 2:
+            bit = 4
+        code: uint32 = BTN_LEFT
+        if b == 1:
+            code = BTN_MIDDLE
+        elif b == 2:
+            code = BTN_RIGHT
+        was: int32 = old & bit
+        now: int32 = mask & bit
+        if was != now:
+            st: uint32 = STATE_RELEASED
+            if now != 0:
+                st = STATE_PRESSED
+            serial = serial + 1
+            evt_time = evt_time + 4
+            send_ptr_button(cast[uint32](ptr), serial, evt_time, code, st)
+        b = b + 1
+    w_btn[i] = mask
+
+
+def handle_ptr_line(c: uint64, i: uint64, surf: uint32, n: uint64):
+    ptr: int32 = conn_pointer[c]
+    if ptr == 0:
+        return
+    # "<kind> <x> <y> <buttons> <dz>"
+    p: uint64 = skip_field(&inbuf[0], 0, n)
+    x: int32 = parse_int_at(&inbuf[0], p, n)
+    p = skip_field(&inbuf[0], p, n)
+    y: int32 = parse_int_at(&inbuf[0], p, n)
+    p = skip_field(&inbuf[0], p, n)
+    btn: int32 = parse_int_at(&inbuf[0], p, n)
+    if w_in[i] == 0:
+        serial = serial + 1
+        send_ptr_enter(cast[uint32](ptr), serial, surf, x, y)
+        w_in[i] = 1
+    evt_time = evt_time + 4
+    send_ptr_motion(cast[uint32](ptr), evt_time, x, y)
+    btn_edges(c, i, surf, btn)
+    send_ptr_frame(cast[uint32](ptr))
+
+
+# Read whatever is in one window's rings and translate it. The rings are
+# written a whole line at a time by wsysd, so a read almost never splits one;
+# a split line is DROPPED rather than carried, because the alternative is a
+# per-window carry buffer for an event that is one lost mouse position.
+def drain_window(i: uint64):
+    c: uint64 = cast[uint64](w_conn[i])
+    if conn_inuse[c] == 0:
+        return
+    surf: uint32 = cast[uint32](w_surf[i])
+    fd: int32 = w_ptr[i]
+    if fd >= 0:
+        got: int64 = sys_read_nb(fd, &inbuf[0], 1000)
+        s: uint64 = 0
+        k: uint64 = 0
+        while k < cast[uint64](got):
+            if inbuf[k] == 10:
+                if k > s:
+                    handle_ptr_line(c, i, surf, k)
+                s = k + 1
+            k = k + 1
+    fd = w_keys[i]
+    if fd >= 0:
+        got = sys_read_nb(fd, &inbuf[0], 1000)
+        if got > 0 and w_focus[i] == 0:
+            kbd: int32 = conn_keyboard[c]
+            if kbd != 0:
+                serial = serial + 1
+                send_kbd_enter(cast[uint32](kbd), serial, surf)
+                w_focus[i] = 1
+        s = 0
+        k = 0
+        while k < cast[uint64](got):
+            if inbuf[k] == 10:
+                # "d <code>": a press of a cooked ASCII byte. wsysd has no
+                # release edge to give us, so each byte is delivered as a
+                # press immediately followed by a release.
+                if k > s + 1:
+                    p: uint64 = skip_field(&inbuf[0], s, k)
+                    a: int32 = parse_int_at(&inbuf[0], p, k)
+                    key_tap(c, ascii_evdev(a), needs_shift(a))
+                s = k + 1
+            k = k + 1
+    if out_pos > 0:
+        flush(conn_fd[c])
+
+
+# --- main -------------------------------------------------------------
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    n: int64 = sys_getenv(cast[Ptr[char]]("XDG_RUNTIME_DIR"), &envbuf[0], 256)
+    if n > 0:
+        k: uint64 = str_copy(&sockpath[0], &envbuf[0], 256)
+        str_copy(&sockpath[k], "/wayland-0", 256 - k)
+    else:
+        str_copy(&sockpath[0], "/tmp/wayland-0", 256)
+    if argc > 1:
+        str_copy(&sockpath[0], cast[Ptr[uint8]](argv[1]), 256)
+    if sys_getenv(cast[Ptr[char]]("WSYSWL_VERBOSE"), &envbuf[0], 256) >= 0:
+        verbose = 1
+
+    i: uint64 = 0
+    while i < MAXCONN:
+        conn_inuse[i] = 0
+        conn_fd[i] = -1
+        i = i + 1
+
+    listen_fd = sys_unix_listen(cast[Ptr[char]](&sockpath[0]), 8)
+    if listen_fd < 0:
+        puts(2, "wsyswl: cannot listen on ")
+        puts(2, &sockpath[0])
+        puts(2, "\n")
+        return 1
+    puts(1, "wsyswl: listening on ")
+    puts(1, &sockpath[0])
+    puts(1, "\n")
+    puts(1, "wsyswl: point a client at it with WAYLAND_DISPLAY=wayland-0\n")
+
+    while 1 == 1:
+        nfd: uint64 = 0
+        waitset[0] = listen_fd
+        nfd = 1
+        i = 0
+        while i < MAXCONN:
+            if conn_inuse[i] != 0:
+                waitset[nfd] = conn_fd[i]
+                nfd = nfd + 1
+            i = i + 1
+        # A short timeout rather than a pure wait: the input rings are files,
+        # not descriptors that poll can speak for, so they have to be looked
+        # at on a clock. 16 ms is one frame.
+        sys_waitfds(&waitset[0], nfd, 16)
+        conn_accept()
+        i = 0
+        while i < MAXCONN:
+            if conn_inuse[i] != 0:
+                if conn_pump(i) < 0:
+                    conn_free(i)
+            i = i + 1
+        i = 0
+        while i < n_win:
+            drain_window(i)
+            i = i + 1
+    return 0

@@ -33,6 +33,17 @@
 # crude, and honest about being crude: a real bridge speaks the X protocol
 # directly and this one shells out.
 #
+# WHAT THIS CANNOT DO, AND WHAT DOES IT INSTEAD
+# --------------------------------------------
+# One window, always. An application's dialogs, menus and second toplevels are
+# already composited into the framebuffer file by the time we see it, so there
+# is no way to give them separate Hamnix windows from here -- a picture of a
+# screen does not carry a window layout, at any price. user/wsyswl.ad is the
+# answer to that: a Wayland server gets one SURFACE per window instead of one
+# screen, so every toplevel becomes its own decorated window, and XWayland
+# brings X11 clients along the same road. This file remains the way to put an
+# X application up with no Wayland in the picture.
+#
 # Usage: xbridge [<fbfile>] [<width> <height>]
 #   defaults: /tmp/xfb/Xvfb_screen0, 1024x768
 

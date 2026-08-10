@@ -142,7 +142,15 @@ static struct wshm *shm;
  * a gigabyte of shared memory for windows that mostly do not use it. Four
  * slots are claimed on demand.
  * ------------------------------------------------------------------ */
-#define BB_SLOTS   3
+/* Eight, not three.  Three was chosen when the only v2 client was the X
+ * bridge and one window was the whole session; with a Wayland compositor
+ * every toplevel is a v2 window, so three is "your fourth window is blank".
+ * And it was blank SILENTLY: bb_for returned -1, the window still existed
+ * with a taskbar entry and correct geometry, and nothing composited into it.
+ *
+ * The buffers are allocated lazily -- a slot costs nothing until something
+ * blits -- so the cost of eight is address space in a mapping, not memory. */
+#define BB_SLOTS   8
 #define BB_W       1920
 #define BB_H       1080
 #define BB_BYTES   ((size_t)BB_W * BB_H * 4)
@@ -233,6 +241,32 @@ static int bb_for(int wid, int create, int w, int h)
     }
     errno = ENOSPC;
     return -1;
+}
+
+/* Re-fit a slot to a window's current size.
+ *
+ * bb_for fixes w/h at the FIRST blit and nothing could change them, so a
+ * client that resized its surface stayed clipped to whatever size it opened
+ * at -- which for a Wayland client is its initial configure, i.e. every
+ * window that was ever resized was wrong.  The published page is cleared
+ * rather than scaled: a resize means the client is about to redraw, and a
+ * stretched copy of the old frame in the meantime is a worse answer than a
+ * blank one it immediately overwrites. */
+static void bb_resize(int wid, int w, int h)
+{
+    if (!bb || w <= 0 || h <= 0 || w > BB_W || h > BB_H) return;
+    for (int i = 0; i < BB_SLOTS; i++) {
+        struct bbhdr *hh = &bb->slot[i];
+        if (!hh->used || hh->wid != wid) continue;
+        if (hh->w == w && hh->h == h) return;
+        hh->w = w;
+        hh->h = h;
+        hh->started = 0;
+        memset(bb->px[i][0], 0, BB_BYTES);
+        memset(bb->px[i][1], 0, BB_BYTES);
+        hh->gen++;
+        return;
+    }
 }
 
 static void bb_release(int wid)
@@ -867,7 +901,15 @@ static void ctl_global(const char *s, size_t n)
         p = 5;
         int32_t wid = take_int(s, &p, n);
         struct wwin *v = win_find(wid);
-        if (v) { v->used = 0; shm->gen++; }
+        if (v) {
+            /* Release the backbuffer too.  sys_wsys_free does; this verb did
+             * not, so closing a window through ctl leaked a v2 slot for the
+             * rest of the session -- and with slots scarce that showed up
+             * later as some unrelated window compositing blank. */
+            bb_release(wid);
+            v->used = 0;
+            shm->gen++;
+        }
         return;
     }
     /* Everything else (ws, wallpaper, rband, lock, run, sessui, …) is a
@@ -898,7 +940,14 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
         p = 8;
         int32_t x = take_int(s, &p, n), y = take_int(s, &p, n);
         int32_t w = take_int(s, &p, n), h = take_int(s, &p, n);
-        if (w > 0 && h > 0) { v->x = x; v->y = y; v->w = w; v->h = h; shm->gen++; }
+        if (w > 0 && h > 0) {
+            v->x = x; v->y = y; v->w = w; v->h = h;
+            /* A v2 window's backbuffer has to follow its geometry, or the
+             * client draws at the new size into a surface still cut to the
+             * old one. */
+            bb_resize(v->wid, w, h);
+            shm->gen++;
+        }
         return;
     }
     if (n >= 8 && !strncmp(s, "decorate", 8)) {
