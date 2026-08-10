@@ -914,25 +914,36 @@ def pump_keyboard():
 
 
 CURSOR_W: int32 = 12
-CURSOR_H: int32 = 19
-# A plain arrow: 1 = white fill, 2 = black outline, 0 = transparent. Drawn by
-# the compositor over everything, as devwsys.ad's save-under path does.
-cursor_bits: Array[228, uint8]
+CURSOR_H: int32 = 12
+# 1 = white, 2 = black, 0 = transparent. Drawn by the compositor over
+# everything, as devwsys.ad's save-under path does.
+cursor_bits: Array[144, uint8]
 
 def cursor_init():
+    # THE shape, not a lookalike: the native system's arrow is the 12x12
+    # triangle mask dx <= dy, white at dx == dy, dy == 11 and dx == 0, black
+    # inside. It is the sprite _kcursor_init_sprite() bakes into the frozen
+    # kernel (drivers/video/fb_cdev.ad) and the same one hamUId.ad's
+    # cursor_pixel_over overlays when the kernel is too old for CURS, so it
+    # is what a user coming from the Adder kernel actually sees.
+    #
+    # What was here before was a hand-rolled arrow: an 8-wide head clipped by
+    # `c < 8` / `c < 9` (so the head's right side was sheared off partway
+    # down instead of running out to the hypotenuse) with a separate 4px tail
+    # hung off rows 12..16 starting at c == r - 12, which put the tail against
+    # the head's LEFT edge rather than through its middle. Here the tail is
+    # not a separate limb at all -- the triangle's own body carries down to
+    # the dy == 11 base, so nothing can be misaligned against anything.
     r: int32 = 0
     while r < CURSOR_H:
         c: int32 = 0
         while c < CURSOR_W:
             v: uint8 = 0
-            if c == 0 and r < 17:
-                v = 2
-            elif c < r and c < 8 and r < 12:
-                v = 1
-            elif r < 12 and c <= r and c < 9:
-                v = 2
-            elif r >= 12 and r < 17 and c >= r - 12 and c < r - 8:
-                v = 1
+            if c <= r:
+                if c == r or r == 11 or c == 0:
+                    v = 1
+                else:
+                    v = 2
             cursor_bits[cast[uint64](r * CURSOR_W + c)] = v
             c = c + 1
         r = r + 1
