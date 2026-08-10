@@ -1,0 +1,10 @@
+# /etc/hpm/channels — the channel this machine subscribes to.
+#
+# `linux`, not `main`. The canonical repository serves both: `main` holds
+# Hamnix NATIVE binaries and `linux` holds the same userland built against the
+# Linux kernel. They share package names on purpose -- `hamnix-cat` means the
+# same program either way -- so subscribing to the wrong one installs binaries
+# that cannot run. A machine subscribes to the channel that matches its kernel.
+#
+# Add channels with `hpm enable <name>`, remove them with `hpm disable`.
+linux

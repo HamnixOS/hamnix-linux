@@ -110,9 +110,12 @@ for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
 done
 # The package manager's channel list and trust roots.
 mkdir -p "$ROOT/etc/hpm" "$ROOT/var/lib/hpm"
-for f in channels trusted.pub local-trusted.pub; do
+for f in trusted.pub local-trusted.pub; do
     [ -f "etc/hpm/$f" ] && install -m644 "etc/hpm/$f" "$ROOT/etc/hpm/$f"
 done
+# The Linux line subscribes to the `linux` channel, not `main`: `main` holds
+# native Hamnix binaries, which install here perfectly and then segfault.
+install -m644 etc/hpm/channels.linux "$ROOT/etc/hpm/channels"
 # The graphical runlevel. Kept separate from Hamnix's etc/rc.d/rc.5, which
 # brings the DE up through the declarative service supervisor and the kernel
 # scene compositor -- neither of which exists on this line yet.

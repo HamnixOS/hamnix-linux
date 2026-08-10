@@ -451,7 +451,27 @@ int32_t sys_open_write(const char *path)
         return rc32(note_open(npid));
     if (dev_path(path))
         return rc32(devtab_open(path, 1));
-    return rc32(open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666));
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0 && errno == ETXTBSY) {
+        /* The file is a RUNNING executable. Linux refuses to truncate one,
+         * which is right -- rewriting the pages under a live process would be
+         * a disaster -- but it also means a package manager cannot replace a
+         * binary that is in use, and the first such binary is /bin/hamsh,
+         * which is PID 1. `hpm install hamnix-base` got exactly this far and
+         * stopped: "cannot create /bin/hamsh".
+         *
+         * unlink-then-create is the standard answer and the one dpkg uses:
+         * the running process keeps the inode it already has open, the name
+         * is rebound to a NEW inode, and the old one goes away when the last
+         * user exits. So a self-update works and nothing running is disturbed
+         * -- which is the property "update without breaking the system"
+         * actually rests on. */
+        if (unlink(path) == 0)
+            fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        else
+            errno = ETXTBSY;
+    }
+    return rc32(fd);
 }
 
 /* extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
