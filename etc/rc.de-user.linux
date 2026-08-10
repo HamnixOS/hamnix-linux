@@ -105,8 +105,10 @@ echo 'rc.de-user: namespace ready'
 #     privileged act of handing a session to a user. On Hamnix the chrome's
 #     authority is a uid gate in devwsys.ad; making it unprivileged there
 #     needs a real trusted-compositor capability rather than a setuid line
-#     (see the closing note in etc/rc.de-user). On THIS line the gate is not
-#     ported at all — see the honest limit below.
+#     (see the closing note in etc/rc.de-user). On THIS line that gate is
+#     now ported — see THE UID GATE below for what it does and does not
+#     cover. Staying root is what makes them the host owner, so it is load-
+#     bearing rather than incidental.
 # What that leaves unprivileged is exactly the right thing: the shell the
 # person types into, and every program they start from it. `hpm install`
 # from a desktop terminal now fails to write /bin, which is the point.
@@ -119,14 +121,31 @@ echo 'rc.de-user: namespace ready'
 # silently fall through to a private /tmp segment and draw into a screen
 # nobody composites.
 #
-# HONEST LIMIT, worth writing down because the drop is what makes it matter:
-# Hamnix's devwsys.ad rejects the system-chrome ctl verbs (appmenu, setapp,
-# run, lock, notif, ...) from any uid but the owner's. user/linux-wsys.c has
-# NO uid check at all -- the file mode IS the whole access control here. So
-# `live` can drive chrome verbs it should not be able to drive. That was
-# true before this line existed (everything was one uid, so it was moot) and
-# it is not something a setuid in an rc can fix; it needs the uid gate ported
-# into the wsys server. Named here so it is not mistaken for solved.
+# THE UID GATE IS NOW PORTED, and this is what it does to the paragraph
+# above. Hamnix's devwsys.ad rejects the system-chrome ctl verbs (appmenu,
+# setapp, run, lock, notif, ...) from any uid but the owner's; until
+# recently user/linux-wsys.c had NO uid check at all and the file mode was
+# the whole access control, so `live` could drive chrome verbs it should not
+# be able to drive. That gap is closed: see THE UID GATE in
+# user/linux-wsys.c, and tests/linux/wsys_uidgate.sh, which drives every one
+# of those verbs from an unprivileged uid and requires a refusal, while
+# requiring that the same uid can still map and draw its OWN window.
+#
+# The host owner is the uid that OWNS THE SEGMENT, which is why the chrome
+# above still works: rc.5 starts wsysd before anything drops, so /srv/wsys
+# belongs to root, and hamdesktop/hampanelscene are root too. It also means
+# a single-uid run (the offscreen harness, a host test) refuses nothing,
+# because there the one uid is the owner.
+#
+# WHAT IS STILL TRUE, and is now the honest limit: this is a check inside a
+# LIBRARY, not a kernel privilege boundary. /dev/wsys is a 0666 shared
+# segment mapped into every client, so a program that bypasses the file
+# protocol -- opens /srv/wsys and mmaps it itself -- can still write the
+# window table, and no check in linux-wsys.c can stop it. Closing THAT means
+# the chrome state stops living in a world-writable mapping (a second
+# segment owned by the host owner and mode 0644, which non-owners map
+# read-only, or an RPC to wsysd). Named here so it is not mistaken for
+# solved.
 echo 'rc.de-user: dropping the session to regular user live (uid 1001)'
 setuid 1001
 

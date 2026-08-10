@@ -6,6 +6,15 @@
  * rings live in kernel memory, and both the clients and the compositor poke
  * the same storage through /dev/wsys.  The faithful port of shared kernel
  * memory is shared memory — not an RPC server — so that is what this is.
+ *
+ * PERMISSION.  devwsys's uid gate is ported too; see THE UID GATE in
+ * user/linux-wsys.c.  Reads are never refused.  A write is refused with
+ * EPERM — from hamwsys_open when opening for writing already mutates, and
+ * again from hamwsys_write — when the caller is neither the host owner (the
+ * uid that owns the segment, root on a real boot) nor the owner of the
+ * window being addressed.  Ordinary client operations, `newwindow` and
+ * everything under the caller's own wid, are open to every uid: that is what
+ * the segment's 0666 mode is for.
  */
 #ifndef HAMNIX_LINUX_WSYS_H
 #define HAMNIX_LINUX_WSYS_H

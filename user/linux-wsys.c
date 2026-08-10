@@ -195,9 +195,17 @@ static int bb_attach(void)
     cands[nc++] = "/srv/wsys.bb";
     cands[nc++] = "/dev/shm/hamnix-wsys-bb";
     cands[nc++] = "/tmp/hamnix-wsys-bb";
+    /* Attach before create, per candidate -- see the long note in
+     * shm_attach() below.  O_CREAT on a file another uid owns inside a
+     * sticky world-writable directory is refused by fs.protected_regular,
+     * and a v2 client that fell through to its own private backbuffer
+     * segment would blit into pixels no compositor ever scans out. */
     int fd = -1;
-    for (int i = 0; i < nc && fd < 0; i++)
-        fd = open(cands[i], O_RDWR | O_CREAT, 0666);
+    for (int i = 0; i < nc && fd < 0; i++) {
+        fd = open(cands[i], O_RDWR);
+        if (fd < 0)
+            fd = open(cands[i], O_RDWR | O_CREAT, 0666);
+    }
     if (fd < 0) return -1;
     /* See shm_attach() below: the 0666 above is masked to 0644 by the umask
      * the kernel gives PID 1, which locks every non-root client out of the
@@ -333,6 +341,10 @@ static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
  * so it must survive a close — but only within this process. */
 static int32_t last_new = -1;
 
+/* Set from fstat(2) on the segment at attach; see THE UID GATE below. */
+static uid_t seg_owner = (uid_t)-1;
+static int   seg_owner_known = 0;
+
 static const char *shm_path(void)
 {
     const char *p = getenv("HAMWSYS");
@@ -353,9 +365,33 @@ static int shm_attach(void)
     cands[nc++] = "/dev/shm/hamnix-wsys";
     cands[nc++] = "/tmp/hamnix-wsys";
 
+    /* ATTACH BEFORE CREATE, on every candidate.
+     *
+     * This used to be one open(O_RDWR|O_CREAT) per candidate, and O_CREAT on
+     * an EXISTING file is the trap: fs.protected_regular (=2 on Debian and on
+     * most current distributions) refuses O_CREAT opens of a file you do not
+     * own inside a world-writable STICKY directory -- which is exactly what
+     * /srv is (linuxinit mounts it 1777) and exactly the shape of a live
+     * session: the segment belongs to root because wsysd made it, and the
+     * client is `live`.  The open returned EACCES, and because a failure here
+     * just moves to the next candidate, the client CREATED ITS OWN segment in
+     * /dev/shm, initialised it, allocated window ids nobody composites and
+     * drew into a screen that does not exist -- with no error anywhere.  That
+     * is the same blind-session failure the 0666 chmod above was written to
+     * prevent, arriving through a different door, and it is what this loop's
+     * measured behaviour was when the uid gate's test first ran two uids
+     * against one segment.  Opening without O_CREAT first means a segment
+     * that is ALREADY THERE is joined, never re-created.
+     *
+     * Candidate ORDER is unchanged -- each candidate is tried both ways
+     * before the next is considered -- so a stale /dev/shm segment still
+     * cannot pre-empt the one this process was told to use. */
     int fd = -1;
-    for (int i = 0; i < nc && fd < 0; i++)
-        fd = open(cands[i], O_RDWR | O_CREAT, 0666);
+    for (int i = 0; i < nc && fd < 0; i++) {
+        fd = open(cands[i], O_RDWR);
+        if (fd < 0)
+            fd = open(cands[i], O_RDWR | O_CREAT, 0666);
+    }
     if (fd < 0)
         return -1;
     /* THE WINDOW SYSTEM IS THIS FILE.  Every client -- compositor, panel,
@@ -373,11 +409,16 @@ static int shm_attach(void)
      * one that can.  The segment is a shared IPC rendezvous in a 1777 tmpfs --
      * 0666 is its correct mode, the same as /dev/shm.  Per-window authority is
      * NOT a file-mode question: devwsys gates the system-chrome ctl verbs on
-     * uid separately (see etc/rc.de-user's closing note). */
+     * uid separately, and THE UID GATE section below is that gate, ported. */
     if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
 
     struct stat st;
     if (fstat(fd, &st) < 0) { int e = errno; close(fd); errno = e; return -1; }
+    /* WHO THE HOST OWNER IS, decided once, from the kernel, at attach.  See
+     * the UID GATE block below for why it is the segment's owner and not a
+     * hardcoded 0. */
+    seg_owner = st.st_uid;
+    seg_owner_known = 1;
     if ((uint64_t)st.st_size < sizeof(struct wshm)) {
         if (ftruncate(fd, (off_t)sizeof(struct wshm)) < 0) {
             int e = errno; close(fd); errno = e; return -1;
@@ -455,6 +496,219 @@ static struct wwin *win_alloc(int32_t pid)
     }
     errno = ENOSPC;
     return NULL;
+}
+
+/* ================================================================== *
+ * THE UID GATE — the port of devwsys.ad's current_task_is_hostowner()
+ * ==================================================================
+ *
+ * WHAT IS BEING PORTED.  devwsys.ad has exactly three permission shapes and
+ * this block reproduces all three:
+ *
+ *   1. devwsys_ctl_write (devwsys.ad:3625)
+ *          if current_task_is_hostowner() == 0:
+ *              set_current_errstr("/dev/wsys/ctl: permission denied ...")
+ *      i.e. the system-wide ctl is HOSTOWNER-ONLY -- but only AFTER a
+ *      deliberate list of verbs parsed BEFORE the gate, which any uid may
+ *      write.  Those verbs, and devwsys's stated reason for each, are:
+ *        newwindow  a client must be able to create its OWN window; the DE
+ *                   runs as a non-owner uid ("so a NOBODY-uid app can
+ *                   self-serve a window")
+ *        desktop    the rl5 flip is "the DE claiming its own screen"
+ *        wallpaper  "Choosing your own desktop picture is not a host-owner
+ *                   privilege; it changes no other process's view of
+ *                   anything."
+ *        perf ptrlat sysirq wklat m2p ptrsvc
+ *                   instruments -- "a diagnostic you cannot turn on from the
+ *                   session you are diagnosing is not a diagnostic"
+ *      EVERY other ctl verb (appmenu, setapp, run, lock, notif, cycler,
+ *      calpop, rband, sessui, sysmon, ctxmenu, snap, resize, osd, tray, ws,
+ *      kbd, alloc, free, frame) is behind the gate.  That list is not
+ *      invented here; it is the set of verbs devwsys parses after line 3625.
+ *
+ *   2. hostowner OR THE WINDOW'S OWNER, for everything addressed to one
+ *      window: /dev/wsys/wctl (6617), <wid>/scene (8255), <wid>/event
+ *      (8337), <wid>/ctl (8445), the draw path (2334).  devwsys decides
+ *      "owner" with _wsys_caller_owns_wid, which walks the caller's
+ *      parent-pid chain looking for the wid's stamped owner pid.
+ *
+ *   3. NO GATE AT ALL, deliberately, on the client->compositor request
+ *      channels: devwsys_appmenu_launch_write ("Anybody (not just
+ *      hostowner) may queue a launch: hamappmenu runs as a regular
+ *      DE-spawned client, NOT uid 1"), devwsys_post_write and
+ *      devwsys_lock_verify_write.  Reads are ungated everywhere.
+ *
+ * WHO THE HOST OWNER IS ON THIS LINE.  Hamnix's hostowner is the uid that
+ * owns the machine.  Translating that to "uid 0" alone would be wrong twice:
+ * it is false in the offscreen harness (where wsysd and its clients are one
+ * ordinary user and there is no root anywhere), and it hardcodes a policy the
+ * kernel already records.  The honest answer is THE UID THAT OWNS THE
+ * SEGMENT: /dev/wsys IS the file /srv/wsys, and whoever created it is whoever
+ * brought this window system up.  On a real boot that is wsysd, started by
+ * /etc/rc.d/rc.5 before anything drops privilege, so it is root; in the
+ * offscreen harness it is the invoking user, and every process there is that
+ * user, so nothing is refused.  root is always the host owner as well, since
+ * root can chmod/chown the segment at will and pretending otherwise would be
+ * theatre.  st_uid comes from fstat(2) on the mapping's own fd -- the kernel's
+ * answer, not a claim by any caller.
+ *
+ * HOW THE CALLER'S UID IS ESTABLISHED, and why it is honest.  Unlike devwsys
+ * this is not a kernel device with a per-open process context: /dev/wsys is a
+ * shared segment and this code RUNS INSIDE THE CALLING PROCESS, reached
+ * through the syscall runtime's devtab.  So the uid asking is geteuid() --
+ * the writer's own credentials, which it cannot lie about to itself, and
+ * which the `setuid 1001` at the end of /etc/rc.de-user has really moved
+ * (sys_setuid is a real setuid(2); see user/linux-syscalls.c).  There is no
+ * spoofable "which uid is asking" field anywhere in this path.
+ *
+ * WHAT THIS GATE IS NOT, said plainly.  Because the segment is 0666 and
+ * mapped MAP_SHARED into every client, a program that DOES NOT GO THROUGH
+ * THIS FILE -- one that opens /srv/wsys and mmaps it itself -- can still
+ * write any byte of the window table, and no check here can stop it.  This
+ * gate binds every caller of the /dev/wsys file protocol, which is every
+ * program in the tree and every program the DE will spawn; it is not a
+ * kernel privilege boundary the way devwsys's check is.  Making it one means
+ * the chrome state stops living in a world-writable mapping: either a second
+ * segment, mode 0644 and owned by the host owner, that non-owners map
+ * PROT_READ (the file mode then IS the gate, enforced by the kernel), or
+ * moving the chrome verbs to an RPC to wsysd.  Both are larger changes than
+ * a permission check and the second needs user/wsysd.ad, which this task does
+ * not own.  Named here so it is not mistaken for solved -- the same reason
+ * the limit it replaces was named in etc/rc.de-user.
+ *
+ * FAIL CLOSED.  If the segment owner could not be established (no fstat, no
+ * attach) hostowner() answers 0, which refuses chrome verbs rather than
+ * waving them through.  Likewise owns_wid(): an unstamped window (pid 0) and
+ * a parent chain that cannot be walked both answer "not the owner".
+ */
+static int32_t take_int(const char *s, size_t *p, size_t n);      /* below */
+static int     sink_is_launch_queue(const char *name);            /* below */
+
+static int hostowner(void)
+{
+    uid_t me = geteuid();
+    if (me == 0) return 1;                     /* root owns the box */
+    if (!seg_owner_known) return 0;            /* FAIL CLOSED */
+    return me == seg_owner;
+}
+
+/* ppid of `pid`, or -1.  getppid(2) for ourselves; /proc otherwise.  A
+ * /proc that is not Linux's (the DE namespace binds '#p' over /proc) simply
+ * fails to parse, which ends the walk -- it can only ever REFUSE, never
+ * grant. */
+static pid_t proc_ppid(pid_t pid)
+{
+    if (pid == getpid()) return getppid();
+    char path[64], buf[512];
+    snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+    /* "<pid> (<comm>) <state> <ppid> ..." -- comm can contain spaces and
+     * parens, so scan to the LAST ')'. */
+    char *p = strrchr(buf, ')');
+    if (!p) return -1;
+    p++;
+    while (*p == ' ') p++;
+    while (*p && *p != ' ') p++;               /* the state letter */
+    while (*p == ' ') p++;
+    if (*p < '0' || *p > '9') return -1;
+    return (pid_t)strtol(p, NULL, 10);
+}
+
+/* devwsys's _wsys_caller_owns_wid: does the caller's parent-pid chain reach
+ * the wid's stamped owner?  Depth-bounded exactly as devwsys bounds it. */
+static int owns_wid(int wid)
+{
+    struct wwin *v = win_find(wid);
+    if (!v || v->pid == 0) return 0;
+    pid_t p = getpid();
+    for (int depth = 0; depth < 8; depth++) {
+        if ((int32_t)p == v->pid) return 1;
+        pid_t q = proc_ppid(p);
+        if (q <= 0 || q == p) break;
+        p = q;
+    }
+    return 0;
+}
+
+static int deny(void)
+{
+    errno = EPERM;
+    return -1;
+}
+
+/* The verbs devwsys parses BEFORE its hostowner gate.  `s`/`n` is one ctl
+ * line; only the leading token is compared. */
+static int ctl_verb_is_ungated(const char *s, size_t n)
+{
+    static const char *open_verbs[] = {
+        "newwindow", "desktop", "wallpaper",
+        "perf", "ptrlat", "sysirq", "wklat", "m2p", "ptrsvc",
+    };
+    size_t vn = 0;
+    while (vn < n && s[vn] != ' ' && s[vn] != '\t' && s[vn] != '\n') vn++;
+    for (size_t i = 0; i < sizeof open_verbs / sizeof *open_verbs; i++)
+        if (strlen(open_verbs[i]) == vn && !strncmp(s, open_verbs[i], vn))
+            return 1;
+    return 0;
+}
+
+/* raise/focus/close name ONE window, so they take shape 2 (owner-or-host)
+ * rather than shape 1.  devwsys has no global raise/focus -- they are this
+ * line's spelling of what devwsys does through <wid>/ctl and wctl, whose
+ * rule is exactly owner-or-hostowner, so that is the rule applied.  Returns
+ * the target wid, or 0 if this is not one of those verbs. */
+static int ctl_verb_window_target(const char *s, size_t n)
+{
+    static const char *win_verbs[] = { "raise", "focus", "close" };
+    size_t vn = 0;
+    while (vn < n && s[vn] != ' ' && s[vn] != '\t' && s[vn] != '\n') vn++;
+    for (size_t i = 0; i < sizeof win_verbs / sizeof *win_verbs; i++) {
+        if (strlen(win_verbs[i]) != vn || strncmp(s, win_verbs[i], vn))
+            continue;
+        size_t p = vn;
+        int32_t wid = take_int(s, &p, n);
+        return wid > 0 ? wid : -1;             /* -1: named verb, no wid */
+    }
+    return 0;
+}
+
+/* May this uid write the sink called `name`?
+ *
+ * A sink is this line's catch-all: ctl_global() routes every verb it does not
+ * implement into a sink NAMED FOR THE VERB, and the DE components read them
+ * back there.  That makes `echo "1 0" > /dev/wsys/lock` and `echo "lock 1 0" >
+ * /dev/wsys/ctl` the same act, so they must carry the same permission -- a
+ * gate on only one of the two spellings is not a gate.  Hence: sinks are
+ * host-owner-only to write, except the three request channels devwsys
+ * deliberately leaves open to any uid, and except the per-window sinks
+ * (`<wid>/wctl` and friends), which take the window-owner rule.
+ *
+ * Reads are never gated, here or in devwsys: a client must be able to read
+ * the model it renders (hamcycler, hamnotif, hamlock, hamrun all do exactly
+ * that, as uid 1001).
+ *
+ * Unknown names fail closed.  devwsys enumerates every file it serves and a
+ * path it does not name does not exist; the catch-all is a convenience of
+ * this port, and a convenience must not become the way a future chrome file
+ * arrives world-writable. */
+static int sink_write_allowed(const char *name)
+{
+    if (name[0] >= '0' && name[0] <= '9') {    /* "<wid>/<leaf>" */
+        int wid = 0;
+        const char *p = name;
+        while (*p >= '0' && *p <= '9') { wid = wid * 10 + (*p - '0'); p++; }
+        if (*p == '/')
+            return hostowner() || owns_wid(wid);
+    }
+    if (sink_is_launch_queue(name)) return 1;  /* devwsys_appmenu_launch_write */
+    if (!strcmp(name, "post")) return 1;       /* devwsys_post_write          */
+    if (!strcmp(name, "lock/verify")) return 1;/* devwsys_lock_verify_write   */
+    return hostowner();
 }
 
 static void ring_write(struct wring *q, const uint8_t *b, uint64_t n)
@@ -789,6 +1043,30 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     f->write = for_write;
     f->off = 0;
 
+    /* THE GATE, AT OPEN.  It has to be here and not only in hamwsys_write
+     * because opening for writing already MUTATES: a sink is truncated, a
+     * scene's staging buffer is reset, and the draw ctl flips the window to
+     * protocol 2 and allocates a backbuffer.  A refusal that still let those
+     * happen would be the success-shaped kind of wrong -- the caller gets
+     * EPERM and the window it was not allowed to touch is blank anyway.
+     * hamwsys_write checks again: a descriptor can outlive the privilege
+     * that opened it (an fd inherited across /etc/rc.de-user's setuid). */
+    if (for_write) {
+        switch (f->leaf) {
+        case HAMWSYS_WIN_CTL: case HAMWSYS_WIN_SCENE: case HAMWSYS_WIN_KEYS:
+        case HAMWSYS_WIN_POINTER: case HAMWSYS_WIN_EVENT: case HAMWSYS_WIN_TEXT:
+        case HAMWSYS_WIN_CMD: case HAMWSYS_DRAWCTL: case HAMWSYS_BACKBUF:
+            if (!win_find(f->wid)) { errno = ENOENT; return -1; }
+            if (!hostowner() && !owns_wid(f->wid)) return deny();
+            break;
+        case HAMWSYS_SINK:
+            if (!sink_write_allowed(f->name)) return deny();
+            break;
+        default:
+            break;                             /* ctl is gated per verb */
+        }
+    }
+
     switch (f->leaf) {
     case HAMWSYS_BACKBUF: {
         struct wwin *v = win_find(f->wid);
@@ -1045,7 +1323,21 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
         while (i < n) {
             uint64_t e = i;
             while (e < n && buf[e] != '\n') e++;
-            if (e > i) ctl_global((const char *)buf + i, (size_t)(e - i));
+            if (e > i) {
+                const char *s = (const char *)buf + i;
+                size_t ln = (size_t)(e - i);
+                /* devwsys_ctl_write's gate, verb by verb.  A refused verb
+                 * stops the write there and reports EPERM rather than being
+                 * skipped silently -- devwsys returns -1 with an errstr and
+                 * the caller must be able to tell "refused" from "done". */
+                if (!ctl_verb_is_ungated(s, ln)) {
+                    int tw = ctl_verb_window_target(s, ln);
+                    int ok = tw > 0 ? (hostowner() || owns_wid(tw))
+                                    : hostowner();
+                    if (!ok) { errno = EPERM; return -EPERM; }
+                }
+                ctl_global(s, ln);
+            }
             i = (e < n) ? e + 1 : e;
         }
         return (int64_t)n;
@@ -1053,6 +1345,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
     case HAMWSYS_WIN_CTL: {
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -ENOENT; }
+        if (!hostowner() && !owns_wid(f->wid)) { errno = EPERM; return -EPERM; }
         uint64_t i = 0;
         while (i < n) {
             uint64_t e = i;
@@ -1065,6 +1358,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
     case HAMWSYS_WIN_SCENE: {
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -ENOENT; }
+        if (!hostowner() && !owns_wid(f->wid)) { errno = EPERM; return -EPERM; }
         uint64_t room = WSYS_SCENE_CAP - v->stage_len;
         uint64_t k = n < room ? n : room;
         if (k == 0 && n > 0) { errno = ENOSPC; return -ENOSPC; }
@@ -1076,6 +1370,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
     case HAMWSYS_WIN_TEXT: case HAMWSYS_WIN_CMD: {
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -ENOENT; }
+        if (!hostowner() && !owns_wid(f->wid)) { errno = EPERM; return -EPERM; }
         struct wring *q = f->leaf == HAMWSYS_WIN_KEYS    ? &v->keys
                         : f->leaf == HAMWSYS_WIN_POINTER ? &v->pointer
                         : f->leaf == HAMWSYS_WIN_EVENT   ? &v->event
@@ -1087,6 +1382,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
     case HAMWSYS_DRAWCTL: {
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -ENOENT; }
+        if (!hostowner() && !owns_wid(f->wid)) { errno = EPERM; return -EPERM; }
         /* A client may split a record across write(2) calls, so an incomplete
          * one is CARRIED rather than dropped -- a torn blit would be a band of
          * garbage across the window, which is exactly the kind of failure that
@@ -1150,6 +1446,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
         return (int64_t)n;
     }
     case HAMWSYS_SINK: {
+        if (!sink_write_allowed(f->name)) { errno = EPERM; return -EPERM; }
         struct wsink *s = sink_find(f->name, 1);
         if (!s) { errno = ENOSPC; return -ENOSPC; }
         uint64_t room = WSYS_SINK_CAP - s->len;
@@ -1187,6 +1484,13 @@ void hamwsys_close(struct hamwsys_file *f)
 int32_t hamwsys_alloc(uint64_t pid)
 {
     if (shm_attach() < 0) return -1;
+    /* This is devwsys's `alloc <pid>` -- "the legacy hostowner-on-behalf
+     * path, read by the trusted DE" -- and it sits BEHIND devwsys's gate,
+     * unlike `newwindow`.  The difference is the argument: newwindow stamps
+     * the CALLER, this stamps whoever the caller names, which is the
+     * privileged act of handing a window to another process.  A client that
+     * wants its own window writes `newwindow`, which no uid is refused. */
+    if (!hostowner()) { errno = EPERM; return -1; }
     struct wwin *v = win_alloc((int32_t)pid);
     if (!v) return -1;
     return v->wid;
@@ -1197,6 +1501,11 @@ int32_t hamwsys_free(int32_t wid)
     if (shm_attach() < 0) return -1;
     struct wwin *v = win_find(wid);
     if (!v) { errno = ENOENT; return -1; }
+    /* devwsys's `free <wid>` is hostowner-only, but <wid>/ctl also carries an
+     * owner-initiated teardown of the caller's OWN window, so owner-or-host
+     * is the union of the two and refuses exactly what both refuse: tearing
+     * down somebody else's window. */
+    if (!hostowner() && !owns_wid(wid)) { errno = EPERM; return -1; }
     bb_release(wid);
     v->used = 0;
     if (shm->focus_wid == wid) shm->focus_wid = 0;

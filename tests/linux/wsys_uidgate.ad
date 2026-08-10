@@ -1,0 +1,234 @@
+# tests/linux/wsys_uidgate.ad — the probe behind tests/linux/wsys_uidgate.sh.
+#
+# It answers two questions about /dev/wsys and reports the SYSCALL RETURN for
+# each, which is the whole point: the hole this probe exists to measure was
+# invisible precisely because a refused chrome write and an accepted one both
+# looked like "nothing printed, exit 0".  Every line here ends in a number
+# that came back from the kernel.
+#
+#   wsys_uidgate chrome <path> <text>
+#       open <path> for writing and write "<text>\n".  Prints
+#           chrome open=<fd> write=<rc>
+#       rc < 0 is the refusal (-1 in the Adder ABI, EPERM underneath).
+#
+#   wsys_uidgate client
+#       do what an ORDINARY unprivileged client does and nothing more:
+#       self-serve a window with `newwindow`, read the wid back, then title
+#       it, write a one-line scene and commit it.  Prints
+#           client newwindow=<rc> wid=<n> title=<rc> scene=<rc> commit=<rc>
+#       This is the half that must KEEP working after the gate lands -- an
+#       unprivileged session that cannot map and draw its own window is a
+#       blind session, which is worse than the hole.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+
+wbuf: Array[1024, uint8]        # the bytes handed to sys_write
+rbuf: Array[256, uint8]         # the ctl read-back
+pbuf: Array[128, uint8]         # a built "/dev/wsys/<wid>/<leaf>" path
+dbuf: Array[32, uint8]          # decimal scratch
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(s: Ptr[uint8]):
+    sys_write(1, s, slen(s))
+
+
+def puti(v: int64):
+    neg: int32 = 0
+    x: uint64 = 0
+    if v < 0:
+        neg = 1
+        x = cast[uint64](0 - v)
+    else:
+        x = cast[uint64](v)
+    n: uint64 = 0
+    if x == 0:
+        dbuf[0] = 48
+        n = 1
+    else:
+        while x > 0:
+            dbuf[n] = cast[uint8](48 + (x % 10))
+            n = n + 1
+            x = x / 10
+        # reverse in place
+        i: uint64 = 0
+        j: uint64 = n - 1
+        while i < j:
+            t: uint8 = dbuf[i]
+            dbuf[i] = dbuf[j]
+            dbuf[j] = t
+            i = i + 1
+            j = j - 1
+    if neg != 0:
+        m: uint64 = 45
+        sys_write(1, cast[Ptr[uint8]]("-"), 1)
+    sys_write(1, &dbuf[0], n)
+
+
+def streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while True:
+        if a[i] != b[i]:
+            return 0
+        if a[i] == 0:
+            return 1
+        i = i + 1
+    return 0
+
+
+# Copy s into wbuf, append '\n', return the total length.
+def stage(s: Ptr[uint8]) -> uint64:
+    n: uint64 = slen(s)
+    if n > 1022:
+        n = 1022
+    i: uint64 = 0
+    while i < n:
+        wbuf[i] = s[i]
+        i = i + 1
+    wbuf[n] = 10
+    return n + 1
+
+
+# Write "<text>\n" to <path>.  Returns the write's rc, or the open's rc when
+# the open itself was refused (both are negative, and the caller prints both).
+def poke(path: Ptr[char], text: Ptr[uint8]) -> int64:
+    fd: int32 = sys_open_write(path)
+    puts(" open=")
+    puti(cast[int64](fd))
+    if fd < 0:
+        return cast[int64](fd)
+    n: uint64 = stage(text)
+    rc: int64 = sys_write(fd, &wbuf[0], n)
+    sys_close(fd)
+    return rc
+
+
+# Build "/dev/wsys/<wid>/<leaf>" into pbuf.
+def winpath(wid: int64, leaf: Ptr[uint8]):
+    pre: Ptr[uint8] = "/dev/wsys/"
+    n: uint64 = 0
+    i: uint64 = 0
+    pl: uint64 = slen(pre)
+    while i < pl:
+        pbuf[n] = pre[i]
+        n = n + 1
+        i = i + 1
+    x: uint64 = cast[uint64](wid)
+    d: Array[16, uint8]
+    k: uint64 = 0
+    if x == 0:
+        d[0] = 48
+        k = 1
+    while x > 0:
+        d[k] = cast[uint8](48 + (x % 10))
+        k = k + 1
+        x = x / 10
+    while k > 0:
+        k = k - 1
+        pbuf[n] = d[k]
+        n = n + 1
+    pbuf[n] = 47
+    n = n + 1
+    j: uint64 = 0
+    ll: uint64 = slen(leaf)
+    while j < ll:
+        pbuf[n] = leaf[j]
+        n = n + 1
+        j = j + 1
+    pbuf[n] = 0
+
+
+def do_client() -> int32:
+    ctl: Ptr[char] = "/dev/wsys/ctl"
+    puts("client")
+    nw: Ptr[uint8] = "newwindow"
+    rc: int64 = poke(ctl, nw)
+    puts(" newwindow=")
+    puti(rc)
+
+    # Read the assigned wid back, exactly as lib/hamui.ad does (a SECOND open).
+    wid: int64 = -1
+    rfd: int32 = sys_open(ctl)
+    if rfd >= 0:
+        k: int64 = sys_read(rfd, &rbuf[0], 255)
+        sys_close(rfd)
+        if k > 0:
+            v: int64 = 0
+            seen: int32 = 0
+            i: uint64 = 0
+            while i < cast[uint64](k):
+                c: uint8 = rbuf[i]
+                if c >= 48 and c <= 57:
+                    v = v * 10 + cast[int64](c - 48)
+                    seen = 1
+                else:
+                    if seen != 0:
+                        break
+                i = i + 1
+            if seen != 0:
+                wid = v
+    puts(" wid=")
+    puti(wid)
+    if wid < 2:
+        puts("\n")
+        return 1
+
+    t: Ptr[uint8] = "title uidgate probe"
+    winpath(wid, cast[Ptr[uint8]]("ctl"))
+    puts(" title")
+    r1: int64 = poke(cast[Ptr[char]](&pbuf[0]), t)
+    puts("=")
+    puti(r1)
+
+    sc: Ptr[uint8] = "rect 0 0 40 20 0x334455"
+    winpath(wid, cast[Ptr[uint8]]("scene"))
+    puts(" scene")
+    r2: int64 = poke(cast[Ptr[char]](&pbuf[0]), sc)
+    puts("=")
+    puti(r2)
+
+    cm: Ptr[uint8] = "commit"
+    winpath(wid, cast[Ptr[uint8]]("ctl"))
+    puts(" commit")
+    r3: int64 = poke(cast[Ptr[char]](&pbuf[0]), cm)
+    puts("=")
+    puti(r3)
+    puts("\n")
+    if r1 < 0 or r2 < 0 or r3 < 0:
+        return 1
+    return 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        puts("usage: wsys_uidgate chrome <path> <text> | wsys_uidgate client\n")
+        return 2
+    cmd: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
+    cl: Ptr[uint8] = "client"
+    ch: Ptr[uint8] = "chrome"
+    if streq(cmd, cl) == 1:
+        return do_client()
+    if streq(cmd, ch) == 1:
+        if argc < 4:
+            puts("usage: wsys_uidgate chrome <path> <text>\n")
+            return 2
+        puts("chrome")
+        rc: int64 = poke(cast[Ptr[char]](argv[2]), cast[Ptr[uint8]](argv[3]))
+        puts(" write=")
+        puti(rc)
+        puts("\n")
+        if rc < 0:
+            return 1
+        return 0
+    puts("wsys_uidgate: unknown command\n")
+    return 2
