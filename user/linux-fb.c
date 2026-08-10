@@ -43,8 +43,25 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#include <drm/drm.h>
-#include <drm/drm_mode.h>
+/* The DRM uapi headers sit in two different places depending on the Debian
+ * release, and this file is compiled in both: on trixie linux-libc-dev ships
+ * them at <drm/...>, on bookworm they arrive with libdrm-dev at <libdrm/...>.
+ * The on-box compiler (user/ac.ad) builds this runtime INSIDE the Debian
+ * namespace, which is bookworm, while the development host is trixie -- so a
+ * single spelling is wrong on one of the two, and it failed as a fatal
+ * "file not found" the first time anything was compiled on the box. */
+#if defined(__has_include)
+#  if __has_include(<drm/drm.h>)
+#    include <drm/drm.h>
+#    include <drm/drm_mode.h>
+#  else
+#    include <libdrm/drm.h>
+#    include <libdrm/drm_mode.h>
+#  endif
+#else
+#  include <drm/drm.h>
+#  include <drm/drm_mode.h>
+#endif
 
 #include "linux-fb.h"
 
