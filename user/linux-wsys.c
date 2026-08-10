@@ -98,6 +98,7 @@ struct wwin {
 struct wsink {
     uint32_t used;
     uint32_t len;
+    uint32_t serial;      /* ++ per write; see the launch-queue note below */
     char     name[WSYS_SINK_NAME];
     uint8_t  b[WSYS_SINK_CAP];
 };
@@ -357,6 +358,23 @@ static int classify(const char *path, struct hamwsys_file *f)
     return leaf;
 }
 
+/* A LAUNCH QUEUE: /dev/wsys/run/launch, /dev/wsys/appmenu/launch.
+ *
+ * These are not plain buffers.  A client writes a bare "<prog>\n" and the
+ * DEVICE stamps a monotone serial, so a reader sees "<serial> <prog>\n" and
+ * can tell a NEW request from the one it already ran.  user/hamappmenu.ad
+ * writes only the path (it never renders a serial) and both readers --
+ * hampanelscene's _drain_one_launch_queue and hamUId's run_drain_launch --
+ * parse a leading decimal first.  Without the stamp every reader sees serial
+ * 0, treats it as "empty", and nothing ever launches.
+ *
+ * Serial 0 means "nothing yet", which is why the counter starts at 1. */
+static int sink_is_launch_queue(const char *name)
+{
+    size_t n = strlen(name);
+    return n >= 6 && !strcmp(name + n - 6, "launch");
+}
+
 int hamwsys_kind(const char *path)
 {
     if (!path) return HAMWSYS_NONE;
@@ -526,6 +544,16 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
             return 0;
         }
         if (!s) return snap_set(f, NULL, 0);   /* never written: empty, not ENOENT */
+        if (sink_is_launch_queue(f->name)) {
+            uint8_t t[WSYS_SINK_CAP + 16];
+            uint64_t n = put_int(t, 0, (int32_t)s->serial);
+            t[n++] = ' ';
+            uint32_t k = s->len;
+            if (k > WSYS_SINK_CAP) k = WSYS_SINK_CAP;
+            memcpy(t + n, s->b, k);
+            n += k;
+            return snap_set(f, t, n);
+        }
         return snap_set(f, s->b, s->len);
     }
     default: errno = ENODEV; return -1;
@@ -736,6 +764,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
         uint64_t k = n < room ? n : room;
         memcpy(s->b + s->len, buf, (size_t)k);
         s->len += (uint32_t)k;
+        s->serial++;                           /* 0 means "nothing yet" */
         shm->gen++;
         return (int64_t)n;                     /* short writes are not the
                                                   caller's problem here */

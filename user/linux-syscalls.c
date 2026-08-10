@@ -533,12 +533,63 @@ int32_t sys_unlink(const char *path)
 }
 
 /* extern def sys_dup(fd: int32) -> int32 */
-int32_t sys_dup(int32_t fd) { return rc32(dup((int)fd)); }
+/* Make `newfd` a second view of the synthetic device `oldfd` names.
+ *
+ * WHY THIS EXISTS.  A synthetic device is a devtab entry keyed by an fd, with
+ * a real descriptor on /dev/null standing in so the slot is genuine.  dup2(2)
+ * duplicates the /dev/null descriptor and NOTHING ELSE -- so after
+ *
+ *     fd = open("/dev/wsys/appmenu/launch"); dup2(fd, 1); write(1, ...)
+ *
+ * the write went to /dev/null and vanished.  That is exactly what a shell
+ * redirection does, and it is how `echo /bin/x > /dev/wsys/appmenu/launch`
+ * came to report success while the launch queue stayed empty.  Silent, and
+ * success-shaped -- the same failure class as every other stub on this line.
+ *
+ * The snapshot is deep-copied so the two fds can be closed independently. */
+static void devtab_clone(struct devfile *src, int newfd)
+{
+    struct devfile *slot = NULL;
+    for (int i = 0; i < DEVTAB_MAX; i++)
+        if (!devtab[i].used) { slot = &devtab[i]; break; }
+    if (!slot)
+        return;                     /* table full: newfd stays a plain fd */
+    *slot = *src;
+    slot->fd = newfd;
+    if (slot->isw && slot->w.snap) {
+        slot->w.snap = malloc((size_t)slot->w.snaplen);
+        if (slot->w.snap)
+            memcpy(slot->w.snap, src->w.snap, (size_t)slot->w.snaplen);
+        else
+            slot->w.snaplen = 0;
+    }
+}
+
+/* extern def sys_dup(fd: int32) -> int32 */
+int32_t sys_dup(int32_t fd)
+{
+    int r = dup((int)fd);
+    if (r < 0) return rc32(r);
+    struct devfile *v = devtab_find((int)fd);
+    if (v) devtab_clone(v, r);
+    return (int32_t)r;
+}
 
 /* extern def sys_dup2(old: int32, new_: int32) -> int32 */
 int32_t sys_dup2(int32_t oldfd, int32_t newfd)
 {
-    return rc32(dup2((int)oldfd, (int)newfd));
+    /* If newfd was itself a device view, it is about to be replaced. */
+    struct devfile *old_view = devtab_find((int)newfd);
+    if (old_view) {
+        if (old_view->isw) hamwsys_close(&old_view->w);
+        old_view->used = 0;
+        old_view->isw = 0;
+    }
+    int r = dup2((int)oldfd, (int)newfd);
+    if (r < 0) return rc32(r);
+    struct devfile *v = devtab_find((int)oldfd);
+    if (v) devtab_clone(v, (int)newfd);
+    return (int32_t)r;
 }
 
 /* extern def sys_getcwd(buf: Ptr[uint8], count: uint64) -> int64

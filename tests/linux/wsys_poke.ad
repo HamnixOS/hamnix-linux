@@ -1,0 +1,65 @@
+# tests/linux/wsys_poke.ad — write one line to a /dev/wsys file, or read one.
+#
+#   wsys_poke <path> <text>    write "<text>\n"
+#   wsys_poke <path>           read it and print what came back
+#
+# Small on purpose: it is the thing that lets a shell script drive the window
+# system the way a DE component would, so a test can say "a launch request was
+# made" without standing up a panel and clicking a menu.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+
+buf: Array[2048, uint8]
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        puts(2, "usage: wsys_poke <path> [text]\n")
+        return 2
+    path: Ptr[char] = cast[Ptr[char]](argv[1])
+    if argc >= 3:
+        s: Ptr[uint8] = cast[Ptr[uint8]](argv[2])
+        fd: int32 = sys_open_write(path)
+        if fd < 0:
+            puts(2, "wsys_poke: cannot open for writing\n")
+            return 1
+        n: uint64 = slen(s)
+        i: uint64 = 0
+        while i < n and i < 2047:
+            buf[i] = s[i]
+            i = i + 1
+        buf[i] = 10
+        sys_write(fd, &buf[0], i + 1)
+        sys_close(fd)
+        return 0
+    fd2: int32 = sys_open(path)
+    if fd2 < 0:
+        puts(2, "wsys_poke: cannot open for reading\n")
+        return 1
+    total: uint64 = 0
+    while total < 2047:
+        k: int64 = sys_read(fd2, &buf[total], 2047 - total)
+        if k <= 0:
+            break
+        total = total + cast[uint64](k)
+    sys_close(fd2)
+    buf[total] = 0
+    puts(1, &buf[0])
+    if total == 0 or buf[total - 1] != 10:
+        puts(1, "\n")
+    return 0
