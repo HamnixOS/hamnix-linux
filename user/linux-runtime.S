@@ -614,11 +614,13 @@ sys_svc_publish:
     .globl sys_svc_ctl
     .type sys_svc_ctl, @function
 sys_svc_ctl:
+#ifndef ADDER_HOSTED   /* hosted: user/linux-auth.c serves /dev/auth */
     .globl sys_setuid_auth
     .type sys_setuid_auth, @function
 sys_setuid_auth:
     movq    $-1, %rax
     ret
+#endif
 
     /* Non-executable stack marker (suppress ld's executable-stack warn). */
     .section .note.GNU-stack, "", @progbits

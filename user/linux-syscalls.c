@@ -41,6 +41,8 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/utsname.h>
+#include <pwd.h>
+#include <grp.h>
 #include <sys/mman.h>
 #include <stdint.h>
 #include <string.h>
@@ -56,6 +58,7 @@
 #include "linux-wsys.h"
 #include "linux-fdns.h"
 #include "linux-net.h"
+#include "linux-auth.h"
 
 /* ------------------------------------------------------------------ *
  * Return convention
@@ -290,6 +293,8 @@ struct devfile {
     int      note_pid;  /* >0 => this is /proc/<pid>/note */
     int      isnet;     /* 1 => a /net file; `nf` is live */
     struct hamnet_file nf;
+    int      isauth;    /* 1 => /dev/auth; `af` is live */
+    struct hamauth_file af;
 };
 static struct devfile devtab[DEVTAB_MAX];
 
@@ -310,7 +315,9 @@ static int devtab_open(const char *path, int for_write)
     int wkind = (kind == HAMFB_NONE) ? hamwsys_kind(path) : HAMWSYS_NONE;
     int nkind = (kind == HAMFB_NONE && wkind == HAMWSYS_NONE)
                 ? hamnet_kind(path) : HAMNET_NONE;
-    if (kind == HAMFB_NONE && wkind == HAMWSYS_NONE && nkind == HAMNET_NONE) {
+    int akind = hamauth_is_path(path);
+    if (kind == HAMFB_NONE && wkind == HAMWSYS_NONE && nkind == HAMNET_NONE
+        && !akind) {
         errno = ENODEV;
         return -1;
     }
@@ -323,6 +330,9 @@ static int devtab_open(const char *path, int for_write)
     if (kind != HAMFB_NONE) {
         if (hamfb_open(kind, for_write) < 0)
             return -1;
+    } else if (akind) {
+        hamauth_open(&slot->af);
+        slot->isauth = 1;
     } else if (wkind != HAMWSYS_NONE) {
         if (hamwsys_open(path, for_write, &slot->w) < 0)
             return -1;
@@ -336,7 +346,9 @@ static int devtab_open(const char *path, int for_write)
     /* A /net data file is opened for WRITING by net_dial and then READ from
      * as well (user/net9.ad), so the standing descriptor must be read/write
      * whichever way the caller asked. */
-    int fd = open("/dev/null", (slot->isnet || !for_write) ? O_RDWR : O_WRONLY);
+    int fd = open("/dev/null",
+                  (slot->isnet || slot->isauth || !for_write) ? O_RDWR
+                                                              : O_WRONLY);
     if (fd < 0) {
         int e = errno;
         if (slot->isw)   hamwsys_close(&slot->w);
@@ -356,7 +368,8 @@ static int dev_path(const char *path)
 {
     return hamfb_kind(path) != HAMFB_NONE
         || hamwsys_kind(path) != HAMWSYS_NONE
-        || hamnet_kind(path) != HAMNET_NONE;
+        || hamnet_kind(path) != HAMNET_NONE
+        || hamauth_is_path(path);
 }
 
 /* /proc/<pid>/note — Plan 9 delivers a SIGNAL by writing a NAME to a file, and
@@ -601,6 +614,8 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         int64_t n;
+        if (v->isauth)
+            return hamauth_read(&v->af, buf, count);
         if (v->isnet)
             return hamnet_read(&v->nf, buf, count);
         if (v->isw)
@@ -710,6 +725,8 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
     if (v) {
         if (v->note_pid > 0)
             return note_write(v->note_pid, buf, count);
+        if (v->isauth)
+            return hamauth_write(&v->af, buf, count);
         if (v->isnet)
             return hamnet_write(&v->nf, buf, count);
         if (v->isw)
@@ -731,7 +748,8 @@ int32_t sys_close(int32_t fd)
     if (v) {
         if (v->isw)   hamwsys_close(&v->w);
         if (v->isnet) hamnet_close(&v->nf);
-        v->used = 0; v->isw = 0; v->isnet = 0;
+        if (v->isauth) explicit_bzero(&v->af, sizeof v->af);
+        v->used = 0; v->isw = 0; v->isnet = 0; v->isauth = 0;
         return rc32(close((int)fd));
     }
     struct dirstream *d = dirtab_find((int)fd);
@@ -1634,7 +1652,55 @@ int32_t sys_pgrp_kill(uint32_t pgid, int32_t sig)
 /* extern def sys_setuid(uid: uint32) -> int32 */
 int32_t sys_setuid(uint32_t uid)
 {
-    return setuid((uid_t)uid) < 0 ? -1 : 0;
+    /* BECOME that user, not merely take their uid.
+     *
+     * setuid(2) alone leaves the group and the supplementary groups where
+     * they were, so `setuid 1001` in an rc produced a session that reported
+     * uid=1001(live) gid=0 -- root's group, and every root-group file still
+     * writable. Measured, and it reads as a successful drop.
+     *
+     * In an rc script "setuid <n>" means "run as that person", so the whole
+     * identity moves. Order is not optional: supplementary groups first, then
+     * the gid, then the uid, because after the uid goes there is no privilege
+     * left to change either of the others.
+     *
+     * The gid comes from the account database rather than being assumed equal
+     * to the uid: they usually match on this system and a system where they
+     * did not would silently put the session in the wrong group. */
+    gid_t gid = (gid_t)uid;
+    struct passwd *pw = getpwuid((uid_t)uid);
+    if (pw) gid = pw->pw_gid;
+
+    if (geteuid() == 0) {
+        /* Drop what a privileged process can drop. A failure here is not
+         * fatal on its own -- an unprivileged caller cannot do any of it and
+         * setuid(2) below will refuse for the same reason -- but a partial
+         * drop must never be reported as a whole one. */
+        if (setgroups(0, NULL) < 0 && errno != EPERM)
+            return rc32(-1);
+        if (setgid(gid) < 0 && errno != EPERM)
+            return rc32(-1);
+    }
+    return setuid((uid_t)uid) < 0 ? rc32(-1) : 0;
+}
+
+/* extern def sys_setuid_auth(authfd: int32) -> int32
+ *
+ * Become the user a VERIFIED /dev/auth fd names. The fd is the capability --
+ * user/login.ad, user/su.ad and hamsh's `newshell hostowner` all write a
+ * credential to it, read "ok", and then hand it here. None of them ever sees
+ * a password hash, which is the point of putting the checker behind a device.
+ *
+ * This was a flat `return -1`, so all three programs built and could not
+ * work: login could only ever answer "Login incorrect". */
+int32_t sys_setuid_auth(int32_t authfd)
+{
+    struct devfile *v = devtab_find((int)authfd);
+    if (!v || !v->isauth) {
+        errno = EBADF;
+        return -1;
+    }
+    return rc32(hamauth_become(&v->af));
 }
 
 /* extern def sys_waitfds(fds: Ptr[int32], nfds: uint64,

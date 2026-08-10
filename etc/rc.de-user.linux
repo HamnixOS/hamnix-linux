@@ -12,11 +12,12 @@
 #   * `bind '#w' /dev/win` — the per-window file server. On this line a client
 #     finds its window through /dev/wsys/self, which the compositor already
 #     answers, so there is nothing to bind.
-#   * `setuid 1001` — there is no provisioned `live` user in the image yet,
-#     and dropping to a uid with no passwd entry would give the terminal a
-#     shell with no home and no name. Restoring this is part of the install
-#     work, and it MATTERS: Hamnix's comment is explicit that an interactive
-#     session must not run as the host owner.
+# `setuid 1001` USED TO BE on that list — "there is no provisioned `live` user
+# in the image yet". There is now: scripts/hamlinux_image.sh stages
+# /etc/passwd + /etc/group + /etc/shadow and creates /home/live owned by
+# uid 1001 in the initramfs, so the account genuinely exists and the drop at
+# the bottom of this file is real. See the long note down there for why the
+# drop is at that exact point and not earlier.
 #
 # What IS kept is the shape: the terminal's shell gets its capabilities by
 # having things bound into its namespace, and the `linux` / `debian` templates
@@ -52,6 +53,87 @@ debian = ns clean {
 }
 
 echo 'rc.de-user: namespace ready'
+
+# --- DROP PRIVILEGE: the session is not the machine's owner ----------
+# Everything above this line needed privilege and everything below it must
+# not have it. That is the whole reason the drop is HERE and not two lines
+# earlier or later:
+#
+#   * ABOVE: `bind` on this line performs a REAL Linux mount(2) (see the
+#     device-server table in user/linux-syscalls.c) and mount(2) needs
+#     CAP_SYS_ADMIN. Dropping first would make every bind above fail with
+#     EPERM and hand the terminal a shell with no /dev, no /proc and no
+#     `linux` template — the exact empty-namespace bug etc/rc.de-user was
+#     written to fix, just with a different cause.
+#   * BELOW: the interactive REPL, and any program hamUId asked us to run.
+#     Those are the user's, and they must be the user's identity.
+#
+# WHO WE DROP TO. uid 1001 is `live`, the live image's default regular
+# account, provisioned in /etc/passwd + /etc/group + /etc/shadow with home
+# /home/live (staged into the initramfs, owned by 1001). It is the same
+# shape as Ubuntu's `ubuntu` live user and the same uid Hamnix's rc.boot
+# live branch drops to, so a desktop terminal reports `live` from `whoami`
+# on either kernel. docs/security.md F10-3 is the rule being obeyed: an
+# interactive session must NEVER run as the host owner.
+#
+# WHY THIS IS SAFE AND ONE-WAY. setuid is a privilege-DROP primitive. On
+# this line PID 1 is uid 0 because the Linux kernel gives us no choice
+# about that, so the chain is 0 -> 1001 and the kernel drops the real,
+# effective and saved uids together: nothing below can climb back.
+#
+# WHAT STAYS PRIVILEGED, deliberately:
+#   * PID 1 (the hamsh that ran /etc/rc.boot, and the console shell it
+#     falls into). It mounts, loads modules, configures the interface and
+#     runs the installer. rc.boot.linux says so where it decides not to
+#     drop.
+#   * wsysd, the compositor. It opens /dev/fb (DRM master), reads the evdev
+#     input devices and owns the VT. Those are root-only on Linux and the
+#     screen goes black without them. It is the trusted part of the DE, the
+#     way an X server or a Wayland compositor on a seat is.
+#   * hamdesktop / hampanelscene, started from rc.5 alongside the
+#     compositor. They are system chrome, not the person's programs: the
+#     panel spawns the terminals and the launchers, which is precisely the
+#     privileged act of handing a session to a user. On Hamnix the chrome's
+#     authority is a uid gate in devwsys.ad; making it unprivileged there
+#     needs a real trusted-compositor capability rather than a setuid line
+#     (see the closing note in etc/rc.de-user). On THIS line the gate is not
+#     ported at all — see the honest limit below.
+# What that leaves unprivileged is exactly the right thing: the shell the
+# person types into, and every program they start from it. `hpm install`
+# from a desktop terminal now fails to write /bin, which is the point.
+#
+# The user's programs can still DRAW after the drop, which is the point that
+# had to be got right: /dev/wsys is a shared segment in the 1777 tmpfs on
+# /srv, and user/linux-wsys.c chmods it 0666 when it is created, so a client
+# of any uid can attach and map its window. Without that chmod the drop would
+# have produced a session that is unprivileged and BLIND -- the client would
+# silently fall through to a private /tmp segment and draw into a screen
+# nobody composites.
+#
+# HONEST LIMIT, worth writing down because the drop is what makes it matter:
+# Hamnix's devwsys.ad rejects the system-chrome ctl verbs (appmenu, setapp,
+# run, lock, notif, ...) from any uid but the owner's. user/linux-wsys.c has
+# NO uid check at all -- the file mode IS the whole access control here. So
+# `live` can drive chrome verbs it should not be able to drive. That was
+# true before this line existed (everything was one uid, so it was moot) and
+# it is not something a setuid in an rc can fix; it needs the uid gate ported
+# into the wsys server. Named here so it is not mistaken for solved.
+echo 'rc.de-user: dropping the session to regular user live (uid 1001)'
+setuid 1001
+
+# $HOME follows the identity. For the interactive-REPL case hamsh main()
+# would work this out for itself (_set_home_from_passwd resolves uid 1001 ->
+# /home/live out of /etc/passwd), but the HAMNIX_DE_PROG branch below exits
+# before main() ever reaches that hook, so an exec'd DE program would get
+# the placeholder "/" and write its dotfiles into the filesystem root.
+#
+# Two statements, not one: `export NAME=VALUE` is not hamsh — the tokenizer
+# splits on '=' and the stray '=' is a parse error that would abort the rest
+# of this rc, so the DE program below would never be started at all. The
+# value MUST be quoted too: an assignment RHS is parsed as an expression, so
+# a bare /home/live is read as arithmetic ('/' = divide) and yields empty.
+HOME='/home/live'
+export HOME
 
 # hamUId / hamtermscene plant HAMNIX_DE_PROG before exec'ing us. Set means
 # "run that program in this window"; unset means "be an interactive shell",

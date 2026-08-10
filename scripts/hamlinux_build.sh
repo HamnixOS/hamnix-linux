@@ -72,7 +72,8 @@ if [ ! -f "$SC_OBJ" ] || [ user/linux-syscalls.c -nt "$SC_OBJ" ] \
         || [ user/linux-fb.h -nt "$SC_OBJ" ] \
         || [ user/linux-wsys.h -nt "$SC_OBJ" ] \
         || [ user/linux-fdns.h -nt "$SC_OBJ" ] \
-        || [ user/linux-net.h -nt "$SC_OBJ" ]; then
+        || [ user/linux-net.h -nt "$SC_OBJ" ] \
+        || [ user/linux-auth.h -nt "$SC_OBJ" ]; then
     "$CLANG" -O2 -Iuser -c user/linux-syscalls.c -o "$SC_OBJ" || {
         echo "[hamlinux] ERROR: could not compile user/linux-syscalls.c" >&2
         exit 1
@@ -126,6 +127,16 @@ if [ ! -f "$NET_OBJ" ] || [ user/linux-net.c -nt "$NET_OBJ" ] \
     }
 fi
 
+# /dev/auth, the credential device. -lcrypt for the SHA-512 verify.
+AU_OBJ="$OUT_DIR/.linux-auth.o"
+if [ ! -f "$AU_OBJ" ] || [ user/linux-auth.c -nt "$AU_OBJ" ] \
+        || [ user/linux-auth.h -nt "$AU_OBJ" ]; then
+    "$CLANG" -O2 -Iuser -c user/linux-auth.c -o "$AU_OBJ" || {
+        echo "[hamlinux] ERROR: could not compile user/linux-auth.c" >&2
+        exit 1
+    }
+fi
+
 LL="${OUT_ELF%.elf}.ll"
 [ "$LL" = "$OUT_ELF" ] && LL="$OUT_ELF.ll"
 
@@ -140,7 +151,8 @@ if ! grep -q "^define i64 @main(" "$LL"; then
     exit 11
 fi
 
-if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" "$NET_OBJ" $TLSLIBS \
+if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" "$NET_OBJ" "$AU_OBJ" \
+        $TLSLIBS -lcrypt \
         "$@" -o "$OUT_ELF" 2>"$LL.link.log"; then
     sed 's/^/[link] /' "$LL.link.log" >&2
     exit 12

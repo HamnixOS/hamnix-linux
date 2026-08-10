@@ -36,7 +36,23 @@ APPS=(
     grep sed sort uniq head tail wc cut tr
     find du df stat tree file
     date sleep true false yes seq basename dirname
-    env_show printenv id hostname uname
+    # `id` and `whoami` earn their place twice over now that the DE session
+    # runs as a different uid from the console: they are how a person checks
+    # WHICH identity a given window actually got.
+    env_show printenv id whoami hostname uname
+    #
+    # login, su and passwd. They were kept out until now for a good reason,
+    # recorded here because the reason is instructive: they build cleanly and
+    # parse /etc/passwd correctly, but every credential path bottomed out in
+    # sys_setuid_auth(), which was a flat -1 -- so `login` could only ever
+    # answer "Login incorrect" and `su` could only ever refuse. Shipping them
+    # then would have been a worse lie than their absence.
+    #
+    # user/linux-auth.c now serves /dev/auth against the real /etc/shadow, so
+    # they work, and nothing in them had to change -- which is what the Plan 9
+    # shape buys: the password checker lives behind a device and the programs
+    # that use it never see a hash.
+    login su passwd
     ps kill
     tar gzip base64 cksum md5sum
     more less
@@ -134,6 +150,39 @@ install -m644 etc/rc.d/rc.5.linux "$ROOT/etc/rc.d/rc.5"
 # the Linux-line variant, and its header says what it leaves out and why.
 install -m644 etc/rc.de-user.linux "$ROOT/etc/rc.de-user"
 
+# --- the accounts ---------------------------------------------------------
+# The image is multi-user now: /etc/rc.de-user ends with `setuid 1001`, so a
+# desktop terminal and everything launched from it run as the regular user
+# `live` rather than as the machine's owner. For that to be an ACCOUNT rather
+# than a bare number, three things have to be true in the image, and all three
+# are done here.
+#
+# (1) The database. passwd + group are staged above; shadow is staged here
+#     because it needs mode 0600 and the loop above installs 0644. The hashes
+#     in it are honest $6$-crypt of `hamnix` and are what /dev/auth will read
+#     when it exists -- on this line sys_setuid_auth is still a -1 stub
+#     (user/linux-runtime.S) and there is no /dev/auth cdev, so nothing
+#     consults the file yet. It ships anyway: an account database with the
+#     credentials missing is a half-provisioned account, and the file's mode
+#     is the thing that has to be right from the start.
+install -m600 etc/shadow "$ROOT/etc/shadow"
+# (2) The per-user namespace recipe. hamsh sources /etc/users/<user>.ns for
+#     any regular-user shell and falls back to default.ns; live.ns.linux
+#     exists to stop that fallback, for reasons its own header gives.
+mkdir -p "$ROOT/etc/users"
+install -m644 etc/users/default.ns "$ROOT/etc/users/default.ns"
+install -m644 etc/users/live.ns.linux "$ROOT/etc/users/live.ns"
+# (3) The home directory, with the skeleton in it. A session whose $HOME does
+#     not exist cannot save a file, and hamsh's _chdir_home would leave it in
+#     the filesystem root. /etc/skel is the same skeleton the installer copies
+#     for a real account (Desktop/Documents/Downloads/Pictures, plus the
+#     .desktop launchers hamdesktop draws).
+#     /home/hostowner exists too, empty: it is the home /etc/passwd promises
+#     uid 1, and `newshell hostowner` chdir's into it.
+cp -a etc/skel "$ROOT/etc/skel"
+mkdir -p "$ROOT/home/live" "$ROOT/home/hostowner"
+cp -a etc/skel/. "$ROOT/home/live/"
+
 # --- kernel modules -------------------------------------------------------
 # The north star is real hardware, and on a Debian kernel nearly every driver
 # is a module -- even in QEMU, /dev/dri/card0 does not exist until virtio-gpu
@@ -194,8 +243,46 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
     echo "[image] staged the installer's boot files into /boot"
 fi
 
+# --- packing, and who owns what ------------------------------------------
+# The cpio records the uid/gid of every file and the kernel's initramfs
+# unpacker honours them, so THIS is where the image's ownership is decided --
+# there is no chown on this line to fix it up afterwards, and no writable
+# root filesystem to fix it up in.
+#
+# It used to be decided by accident: the archive was written from the
+# developer's checkout, so /bin, /etc and everything else came out owned by
+# whatever uid built it (1000 on a typical box -- which is `dave` in
+# /etc/passwd). Harmless while every process was root, and wrong the instant
+# the DE session drops to uid 1001: the ownership of the system would be an
+# artefact of the build machine.
+#
+# GNU cpio's -R sets one owner for a whole archive, and we need three. The
+# kernel unpacker loops over CONCATENATED cpio archives (it eats the padding
+# after each TRAILER!!! and reads the next header), which is the documented
+# way to do exactly this, so we write one archive per owner and cat them:
+#
+#   0:0        everything else. uid 0 is the seat PID 1 actually runs in --
+#              the Linux kernel starts /init as root and offers no choice --
+#              so the system's files belong to the identity that maintains
+#              them. /etc/shadow's 0600 becomes meaningful here: root-only.
+#   1001:1001  /home/live. The session runs as 1001; a home owned by anyone
+#              else is a home the user cannot write.
+#   1:1        /home/hostowner, the home /etc/passwd gives uid 1.
+#
+# Directory ENTRIES for ./home come from the first archive (0:0, 0755): the
+# parent of the homes is the system's, only the homes themselves are the
+# users'.
 echo "[image] packing initramfs"
-( cd "$ROOT" && find . -print0 | cpio --null -o -H newc --quiet ) | gzip -9 > "$OUT/initramfs.cpio.gz"
+CPIO="$OUT/initramfs.cpio"
+: > "$CPIO"
+( cd "$ROOT" && find . -path './home/*' -prune -o -print0 \
+    | cpio --null -o -H newc --quiet -R 0:0 ) >> "$CPIO"
+( cd "$ROOT" && find ./home/live -print0 \
+    | cpio --null -o -H newc --quiet -R 1001:1001 ) >> "$CPIO"
+( cd "$ROOT" && find ./home/hostowner -print0 \
+    | cpio --null -o -H newc --quiet -R 1:1 ) >> "$CPIO"
+gzip -9 < "$CPIO" > "$OUT/initramfs.cpio.gz"
+rm -f "$CPIO"
 
 # Use the host's newest Debian kernel. Building a kernel is not the interesting
 # part of this port and can come later, when the install target is real

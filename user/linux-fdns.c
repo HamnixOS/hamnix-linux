@@ -133,6 +133,15 @@ static int attach(void)
     for (int i = 0; i < nc && fd < 0; i++)
         fd = open(cands[i], O_RDWR | O_CREAT, 0666);
     if (fd < 0) return -1;
+    /* Same umask story as the fifos below, with a worse failure mode. The
+     * segment is created by whoever attaches FIRST -- PID 1, uid 0 -- so it
+     * lands 0644; a process running as the logged-in user then fails the
+     * O_RDWR open and FALLS THROUGH to the /tmp candidate, quietly getting a
+     * PRIVATE, EMPTY /fd registry instead of the system one. Not an error
+     * anywhere: just a task whose pipes nobody else can see. fchmod is
+     * unconditional and its failure ignored -- a non-creator is not the owner
+     * and does not need to succeed. */
+    if (fchmod(fd, 0666) < 0) { /* not the creator; the mode is already set */ }
 
     struct stat st;
     if (fstat(fd, &st) < 0) { close(fd); return -1; }
@@ -448,6 +457,19 @@ int32_t fdns_pipechan(void)
         unlink(shm->slot[i].path);
         if (mkfifo(shm->slot[i].path, 0666) < 0 && errno != EEXIST)
             return -1;
+        /* mkfifo's mode argument is masked by the process umask, which the
+         * kernel hands PID 1 as 022 -- so the fifo lands 0644 no matter what
+         * is written above. That was invisible while EVERYTHING ran as one
+         * uid. It stops being invisible the moment a session drops privilege
+         * (etc/rc.de-user's `setuid 1001`): hamtermscene runs as the DE's uid
+         * and creates the pipe pair, its inner shell runs as the LOGGED-IN
+         * user and opens the write end of stdout -- 0644 denies that, and the
+         * terminal comes up with a live shell whose every byte of output is
+         * thrown away. An explicit chmod is the only way to get the mode the
+         * call already asks for. These fifos are ephemeral per-pipe objects in
+         * a 1777 tmpfs, exactly like /tmp: 0666 is their correct mode, not a
+         * relaxation. */
+        chmod(shm->slot[i].path, 0666);
         /* The keeper. Without it the first open of either end deadlocks --
          * see the header comment; this is not a convenience. */
         int k = open(shm->slot[i].path, O_RDWR | O_CLOEXEC);

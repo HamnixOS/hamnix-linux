@@ -1,0 +1,33 @@
+# /etc/users/live.ns — the per-user namespace recipe for `live`, Linux line.
+#
+# Staged into the image as /etc/users/live.ns. hamsh main() sources
+# /etc/users/<user>.ns for any shell whose uid resolves to a regular user
+# (>= 1000) and falls back to /etc/users/default.ns when there is no per-user
+# file. This file exists PRECISELY to stop that fallback, and the reason is
+# specific to this kernel.
+#
+# default.ns is Hamnix's restricted recipe: it `unmount`s /var/lib/hpm,
+# '#by-id' and /dev/blk out of the inherited namespace. On Hamnix that is a
+# per-process namespace edit — the shell rfork'd RFNAMEG, so it is unmounting
+# things out of its OWN copy and nobody else is affected. On this line the
+# same recipe is wrong twice over:
+#
+#   1. It cannot work. `unmount` is umount2(2) here, which needs CAP_SYS_ADMIN,
+#      and this shell has just dropped to uid 1001 in /etc/rc.de-user. Every
+#      line would fail EPERM and print an error into the user's terminal on
+#      every login.
+#   2. It must not work. sys_rfork degrades to a SHARED mount namespace when
+#      it cannot get CAP_SYS_ADMIN (user/linux-syscalls.c says so in as many
+#      words), so a session that DID have the privilege would be unmounting
+#      /dev/blk system-wide, out from under the compositor and PID 1 — a
+#      regular user's login tearing down the machine's mounts.
+#
+# The protection default.ns is reaching for is real, but on this line it is
+# delivered by file permissions and by uid checks in the servers rather than
+# by namespace surgery: /var/lib/hpm and /bin are root-owned and mode 0755, so
+# `live` can read them and cannot write them, and there is no /dev/blk server
+# on this line at all yet. When #b lands, its uid gate is where this belongs.
+#
+# So: no strips. hamsh still does the useful half of the per-user path after
+# sourcing us — _chdir_home() puts the session in /home/live.
+echo 'ns-recipe: live (linux line) — no namespace strips; see the comment'

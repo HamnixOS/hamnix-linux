@@ -191,6 +191,10 @@ static int bb_attach(void)
     for (int i = 0; i < nc && fd < 0; i++)
         fd = open(cands[i], O_RDWR | O_CREAT, 0666);
     if (fd < 0) return -1;
+    /* See shm_attach() below: the 0666 above is masked to 0644 by the umask
+     * the kernel gives PID 1, which locks every non-root client out of the
+     * backing store once the DE session drops to the logged-in user. */
+    if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
     struct stat st;
     if (fstat(fd, &st) < 0) { close(fd); return -1; }
     if ((uint64_t)st.st_size < sizeof(struct bbshm)
@@ -320,6 +324,23 @@ static int shm_attach(void)
         fd = open(cands[i], O_RDWR | O_CREAT, 0666);
     if (fd < 0)
         return -1;
+    /* THE WINDOW SYSTEM IS THIS FILE.  Every client -- compositor, panel,
+     * terminal, app -- talks to /dev/wsys by mmap'ing it MAP_SHARED, so read
+     * AND write access to it is the whole capability.  wsysd creates it first,
+     * as uid 0, and open(2)'s mode argument is masked by the umask (022), so
+     * it lands 0644.  A client running as the logged-in user (etc/rc.de-user
+     * now ends with `setuid 1001`) then fails the O_RDWR open and falls
+     * through to the /dev/shm and /tmp candidates -- where it happily creates
+     * its OWN empty segment, initialises it with the default 1280x800
+     * geometry, allocates window ids nobody is compositing, and draws into a
+     * screen that does not exist.  No error is printed anywhere; the app just
+     * never appears.  That is why this chmod is here rather than a note in the
+     * rc: an unprivileged session that cannot draw is worse than a privileged
+     * one that can.  The segment is a shared IPC rendezvous in a 1777 tmpfs --
+     * 0666 is its correct mode, the same as /dev/shm.  Per-window authority is
+     * NOT a file-mode question: devwsys gates the system-chrome ctl verbs on
+     * uid separately (see etc/rc.de-user's closing note). */
+    if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
 
     struct stat st;
     if (fstat(fd, &st) < 0) { int e = errno; close(fd); errno = e; return -1; }

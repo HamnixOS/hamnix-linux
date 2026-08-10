@@ -42,6 +42,29 @@ echo 'rc.boot: kernel is Linux; userland is Adder'
 
 echo 'rc.boot: handing off to an interactive shell'
 
+# --- WHY THIS SHELL DOES *NOT* DROP PRIVILEGE ------------------------
+# Hamnix's own etc/rc.boot ends its live branch with `setuid 1001`, so the
+# console you are handed on a live image is the regular user `live`. This one
+# deliberately does not, and the difference is forced by the kernel underneath:
+#
+#   * We ARE PID 1. Linux starts /init as uid 0 and gives us no way to be
+#     anything else; more to the point, PID 1 here is also the machine's only
+#     administrative shell. It still has to mount (rc.5 and the installer both
+#     bind, and mount(2) needs CAP_SYS_ADMIN), load modules, configure eth0,
+#     write /bin through hpm, and run hlinstall against a real disk. A setuid
+#     is one-way: dropping here would take all of that away permanently, and
+#     with /dev/auth unimplemented on this line (user/linux-runtime.S stubs
+#     sys_setuid_auth to -1) there would be no way to get it back.
+#   * The privilege drop that MATTERS happens where the person actually
+#     types: /etc/rc.de-user ends with `setuid 1001`, so every desktop
+#     terminal and every program launched from one runs as `live`. That is
+#     the session, and it is unprivileged. This console is the operator's
+#     seat, not a session.
+#
+# When a real display manager or a getty/login pair authenticates a named user
+# on this line, THAT is what should drop, per-session, to the authenticated
+# uid — not this shell. See the report in etc/rc.de-user's closing note.
+
 # --- networking -----------------------------------------------------
 # /net is a file tree (user/linux-net.c), but the INTERFACE is configured
 # through sys_netcfg -- deliberately not on the tree, in Hamnix as here
