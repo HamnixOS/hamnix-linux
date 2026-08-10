@@ -80,6 +80,10 @@ struct connrec {
     int32_t  owner;       /* pid that created it */
     int32_t  listening;
     int32_t  tls;
+    /* UDP/ICMP keep the destination rather than connect(2)-ing to it. */
+    int32_t  dgram;
+    uint32_t daddr;
+    uint16_t dport;
     char     local[64];
     char     remote[64];
     char     state[16];
@@ -87,10 +91,19 @@ struct connrec {
 
 struct netshm {
     uint32_t magic;
+    /* How the interface was configured: 0 unknown, 1 DHCP, 2 static. SHARED,
+     * because the process that configures the interface (dhcpc) is not the
+     * process that reports it (ifconfig) -- keeping it in a static made
+     * `ifconfig` say "(none)" about a lease it had just been handed. */
+    uint32_t cfg_source;
     struct connrec conn[MAX_CONN];
 };
 
 static struct netshm *shm;
+
+/* Defined with the interface-configuration code near the bottom; needed up
+ * here so a broadcast can name the interface it goes out of. */
+static const char *default_iface(void);
 
 #ifdef HAMNIX_TLS
 /* Per-process: an SSL object cannot be shared through a mapping. A connection
@@ -357,8 +370,40 @@ static int64_t ctl_verb(int n, struct connrec *c, const char *s, size_t len)
         if (inet_pton(AF_INET, host, &a.sin_addr) != 1) {
             errno = EINVAL; return -EINVAL;
         }
-        if (connect(c->fd, (struct sockaddr *)&a, sizeof a) < 0)
-            return -(int64_t)errno;
+        if (c->proto == P_TCP) {
+            if (connect(c->fd, (struct sockaddr *)&a, sizeof a) < 0)
+                return -(int64_t)errno;
+        } else {
+            /* A DATAGRAM conversation remembers where it is talking to
+             * instead of connect(2)-ing.
+             *
+             * connect(2) on a UDP socket filters incoming packets by peer,
+             * and that is wrong for the two things this tree actually does
+             * with UDP. A DHCP client sends to 255.255.255.255 and the server
+             * answers from its OWN address, which a connected socket
+             * discards -- the request goes out, the lease comes back, and the
+             * machine sits there with no network and no error. Plan 9's UDP
+             * data file is datagram-oriented too, so this is also the more
+             * faithful shape.
+             *
+             * Broadcast needs saying out loud, because the kernel will not
+             * send to the all-ones address without it. */
+            c->dgram = 1;
+            c->daddr = a.sin_addr.s_addr;
+            c->dport = a.sin_port;
+            if (ntohl(a.sin_addr.s_addr) == 0xFFFFFFFFu) {
+                int one = 1;
+                setsockopt(c->fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
+                /* And name the interface. A broadcast to the all-ones address
+                 * has no route to choose from on a machine with no address
+                 * yet, so without this the send fails with ENETUNREACH --
+                 * which, from the client's side, looks exactly like silence
+                 * from the network. */
+                const char *ifn = default_iface();
+                setsockopt(c->fd, SOL_SOCKET, SO_BINDTODEVICE,
+                           ifn, (socklen_t)strlen(ifn) + 1);
+            }
+        }
         record_ends(c);
         snprintf(c->state, sizeof c->state, "Established");
         return (int64_t)len;
@@ -379,6 +424,8 @@ static int64_t ctl_verb(int n, struct connrec *c, const char *s, size_t len)
         }
         int one = 1;
         setsockopt(c->fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        if (type == SOCK_DGRAM)
+            setsockopt(c->fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
         struct sockaddr_in a;
         memset(&a, 0, sizeof a);
         a.sin_family      = AF_INET;
@@ -538,7 +585,13 @@ int64_t hamnet_read(struct hamnet_file *f, uint8_t *buf, uint64_t cap)
             return r;
         }
 #endif
-        ssize_t r = read(c->fd, buf, (size_t)cap);
+        ssize_t r;
+        if (c->dgram) {
+            /* Accept from anybody: see the note at `connect`. */
+            r = recvfrom(c->fd, buf, (size_t)cap, 0, NULL, NULL);
+        } else {
+            r = read(c->fd, buf, (size_t)cap);
+        }
         return r < 0 ? -(int64_t)errno : (int64_t)r;
     }
     if (f->leaf == HAMNET_LISTEN) {
@@ -591,7 +644,18 @@ int64_t hamnet_write(struct hamnet_file *f, const uint8_t *buf, uint64_t n)
             return w;
         }
 #endif
-        ssize_t w = write(c->fd, buf, (size_t)n);
+        ssize_t w;
+        if (c->dgram) {
+            struct sockaddr_in to;
+            memset(&to, 0, sizeof to);
+            to.sin_family = AF_INET;
+            to.sin_addr.s_addr = c->daddr;
+            to.sin_port = c->dport;
+            w = sendto(c->fd, buf, (size_t)n, 0,
+                       (struct sockaddr *)&to, sizeof to);
+        } else {
+            w = write(c->fd, buf, (size_t)n);
+        }
         return w < 0 ? -(int64_t)errno : (int64_t)w;
     }
     errno = EPERM;
@@ -671,6 +735,8 @@ int64_t hamnet_cfg(uint64_t op, uint64_t a1, uint64_t a2)
             return -(int64_t)errno;
         if (iface_up() < 0)
             return -(int64_t)errno;
+        if (attach() == 0 && !shm->cfg_source)
+            shm->cfg_source = 2;              /* static unless told otherwise */
         return 0;
     }
     case 2: {                       /* default gateway */
@@ -706,12 +772,105 @@ int64_t hamnet_cfg(uint64_t op, uint64_t a1, uint64_t a2)
         fclose(fp);
         return 0;
     }
-    case 0: case 5:
-        /* Reading the configuration back is not synthesised yet; the callers
-         * (ifconfig/route with no arguments) print an empty report rather
-         * than a wrong one. */
+    case 0: {
+        /* READ the live configuration into the 24-byte block user/ifconfig.ad
+         * renders: addr[4] mask[4] gw[4] dns[4], then have_addr, have_mask,
+         * have_gw, have_dns, cfg_src (1 dhcp / 2 static), dns_src.
+         *
+         * Every field is read from the KERNEL or from the file that actually
+         * decides it, never from something this process remembers -- so
+         * `ifconfig` reports what the machine is doing, including a change
+         * some other program made. */
+        uint8_t *out = (uint8_t *)(uintptr_t)a1;
+        if (!out) { errno = EFAULT; return -EFAULT; }
+        memset(out, 0, 24);
+
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s >= 0) {
+            struct ifreq ifr;
+            memset(&ifr, 0, sizeof ifr);
+            snprintf(ifr.ifr_name, IFNAMSIZ, "%s", default_iface());
+            if (ioctl(s, SIOCGIFADDR, &ifr) == 0) {
+                uint32_t v = ntohl(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr);
+                out[0] = v >> 24; out[1] = v >> 16; out[2] = v >> 8; out[3] = v;
+                out[16] = 1;
+            }
+            memset(&ifr, 0, sizeof ifr);
+            snprintf(ifr.ifr_name, IFNAMSIZ, "%s", default_iface());
+            if (ioctl(s, SIOCGIFNETMASK, &ifr) == 0) {
+                uint32_t v = ntohl(((struct sockaddr_in *)&ifr.ifr_netmask)->sin_addr.s_addr);
+                out[4] = v >> 24; out[5] = v >> 16; out[6] = v >> 8; out[7] = v;
+                out[17] = 1;
+            }
+            close(s);
+        }
+
+        /* The default gateway, from the routing table itself. */
+        FILE *rt = fopen("/proc/net/route", "r");
+        if (rt) {
+            char line[256];
+            (void)!fgets(line, sizeof line, rt);        /* header */
+            while (fgets(line, sizeof line, rt)) {
+                char dev[32];
+                unsigned dest, gw, flags;
+                if (sscanf(line, "%31s %x %x %x", dev, &dest, &gw, &flags) == 4
+                    && dest == 0 && gw != 0) {
+                    uint32_t v = ntohl(gw);             /* stored little-endian */
+                    out[8] = v >> 24; out[9] = v >> 16;
+                    out[10] = v >> 8; out[11] = v;
+                    out[18] = 1;
+                    break;
+                }
+            }
+            fclose(rt);
+        }
+
+        /* And the resolver, from the file getaddrinfo actually reads. */
+        FILE *rc = fopen("/etc/resolv.conf", "r");
+        if (rc) {
+            char line[256];
+            while (fgets(line, sizeof line, rc)) {
+                struct in_addr in;
+                char ip[64];
+                if (sscanf(line, "nameserver %63s", ip) == 1
+                    && inet_pton(AF_INET, ip, &in) == 1) {
+                    uint32_t v = ntohl(in.s_addr);
+                    out[12] = v >> 24; out[13] = v >> 16;
+                    out[14] = v >> 8; out[15] = v;
+                    out[19] = 1;
+                    break;
+                }
+            }
+            fclose(rc);
+        }
+
+        out[20] = (uint8_t)(attach() == 0 ? shm->cfg_source : 0);
+        out[21] = 0;
+        return 0;
+    }
+    case 5:
+        /* Route enumeration is not synthesised yet; `route` with no arguments
+         * prints an empty table rather than a wrong one. */
         errno = ENOSYS;
         return -ENOSYS;
+    case 6:
+        /* "the address I am about to set came from DHCP" -- so `ifconfig` can
+         * report the source honestly instead of calling every lease static. */
+        if (attach() < 0) return -(int64_t)errno;
+        shm->cfg_source = 1;
+        return 0;
+    case 7:
+        /* BRING THE LINK UP, with no address.
+         *
+         * A DHCP client has to transmit before it has an address, and a DOWN
+         * interface transmits nothing: the DISCOVER went nowhere and the only
+         * evidence was "no offer", which reads like "no server". Setting an
+         * address is what used to bring the link up as a side effect, and a
+         * client that has to set an address before it can ask for one is a
+         * circle. */
+        if (iface_up() < 0)
+            return -(int64_t)errno;
+        return 0;
     default:
         errno = EINVAL;
         return -EINVAL;

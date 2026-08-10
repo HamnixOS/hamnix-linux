@@ -1,0 +1,524 @@
+# user/dhcpc.ad — the DHCP client.
+#
+# WHY THIS IS THE THING THAT WAS MOST IN THE WAY
+# ==============================================
+# /etc/rc.boot configured a static 10.0.2.15, because that is what QEMU's
+# user-mode network hands out. A real machine does not know its address; it
+# asks. Until something asks, hamnix-linux can boot on hardware and be deaf.
+#
+# HOW IT ASKS, in the tree's own terms
+# ------------------------------------
+# DHCP is UDP, and UDP here is the /net file tree (user/linux-net.c):
+#
+#   /net/udp/clone            -> a connection number
+#   /net/udp/<n>/ctl          announce 68        (bind the client port)
+#                             connect 255.255.255.255!67
+#   /net/udp/<n>/data         write the request, read the reply
+#
+# Nothing about this is Linux-shaped. The same source would run against the
+# Hamnix kernel's /net, which is the point of the port.
+#
+# The four-message exchange (RFC 2131 §4.4):
+#   DISCOVER -> OFFER -> REQUEST -> ACK
+# and then the lease is applied through sys_netcfg, which is where interface
+# configuration lives on both lines (HANDOFF §3.3) -- deliberately NOT on the
+# file tree.
+#
+# THE HARDWARE ADDRESS comes from /sys/class/net/<iface>/address, because a
+# DHCP server identifies a client by its MAC and a made-up one gets a lease
+# that belongs to somebody else. If that file cannot be read we refuse rather
+# than invent one.
+#
+# Usage: dhcpc [iface]     (default eth0)
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_netcfg(op: uint64, a1: uint64, a2: uint64) -> int64
+extern def sys_get_jiffies() -> uint64
+extern def sys_getpid() -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+
+# --- buffers (top-level BSS: the compiler quirk this tree records) ----
+pkt:     Array[600, uint8]
+rpkt:    Array[1024, uint8]
+pathbuf: Array[128, uint8]
+macbuf:  Array[64, uint8]
+cmdbuf:  Array[128, uint8]
+numbuf:  Array[24, uint8]
+errbuf:  Array[128, uint8]
+waitset: Array[4, int32]
+ifname:  Array[32, uint8]
+
+mac:     Array[6, uint8]
+xid:     Array[4, uint8]
+
+# What the server told us.
+lease_ip:   Array[4, uint8]
+lease_mask: Array[4, uint8]
+lease_gw:   Array[4, uint8]
+lease_dns:  Array[4, uint8]
+server_id:  Array[4, uint8]
+have_mask: int32 = 0
+have_gw:   int32 = 0
+have_dns:  int32 = 0
+
+conn: int32 = -1
+data_fd: int32 = -1
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: int32):
+    n: uint64 = 0
+    x: int32 = v
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def put_ip(fd: int32, a: Ptr[uint8]):
+    putd(fd, cast[int32](a[0]))
+    puts(fd, ".")
+    putd(fd, cast[int32](a[1]))
+    puts(fd, ".")
+    putd(fd, cast[int32](a[2]))
+    puts(fd, ".")
+    putd(fd, cast[int32](a[3]))
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = v
+    i: uint64 = at
+    if x == 0:
+        d[0] = 48
+        n = 1
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = d[n]
+        i = i + 1
+    return i
+
+
+def pack_ip(a: Ptr[uint8]) -> uint64:
+    # Octet 0 in the high byte — what sys_netcfg's SET ops expect
+    # (user/ifconfig.ad:pack_ip says the same thing).
+    return (cast[uint64](a[0]) << 24) | (cast[uint64](a[1]) << 16) \
+         | (cast[uint64](a[2]) << 8) | cast[uint64](a[3])
+
+
+# --- the hardware address -------------------------------------------
+def hexval(c: uint8) -> int32:
+    if c >= 48 and c <= 57:
+        return cast[int32](c) - 48
+    if c >= 97 and c <= 102:
+        return cast[int32](c) - 87
+    if c >= 65 and c <= 70:
+        return cast[int32](c) - 55
+    return -1
+
+
+def read_mac() -> int32:
+    # /sys/class/net/<iface>/address is "aa:bb:cc:dd:ee:ff\n".
+    i: uint64 = 0
+    p: Ptr[uint8] = "/sys/class/net/"
+    k: uint64 = 0
+    while p[k] != 0:
+        pathbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    k = 0
+    while ifname[k] != 0:
+        pathbuf[i] = ifname[k]
+        i = i + 1
+        k = k + 1
+    q: Ptr[uint8] = "/address"
+    k = 0
+    while q[k] != 0:
+        pathbuf[i] = q[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+    fd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
+    if fd < 0:
+        return -1
+    n: int64 = sys_read(fd, &macbuf[0], 63)
+    sys_close(fd)
+    if n < 17:
+        return -1
+    j: uint64 = 0
+    b: uint64 = 0
+    while b < 6:
+        hi: int32 = hexval(macbuf[j])
+        lo: int32 = hexval(macbuf[j + 1])
+        if hi < 0 or lo < 0:
+            return -1
+        mac[b] = cast[uint8](hi * 16 + lo)
+        j = j + 3                                # skip the ':'
+        b = b + 1
+    return 0
+
+
+# --- the /net dance --------------------------------------------------
+def read_num(fd: int32) -> int32:
+    n: int64 = sys_read(fd, &rpkt[0], 32)
+    if n <= 0:
+        return -1
+    v: int32 = 0
+    got: int32 = 0
+    i: uint64 = 0
+    while i < cast[uint64](n) and rpkt[i] >= 48 and rpkt[i] <= 57:
+        v = v * 10 + cast[int32](rpkt[i]) - 48
+        got = 1
+        i = i + 1
+    if got == 0:
+        return -1
+    return v
+
+
+def connpath(c: int32, leaf: Ptr[uint8]):
+    i: uint64 = 0
+    p: Ptr[uint8] = "/net/udp/"
+    k: uint64 = 0
+    while p[k] != 0:
+        pathbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&pathbuf[0], i, c)
+    pathbuf[i] = 47
+    i = i + 1
+    k = 0
+    while leaf[k] != 0:
+        pathbuf[i] = leaf[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+
+def ctl(c: int32, cmd: Ptr[uint8]) -> int32:
+    connpath(c, "ctl")
+    fd: int32 = sys_open_write(cast[Ptr[char]](&pathbuf[0]))
+    if fd < 0:
+        return -1
+    n: int64 = sys_write(fd, cmd, slen(cmd))
+    sys_close(fd)
+    if n < 0:
+        return -1
+    return 0
+
+
+def open_socket() -> int32:
+    # The link has to be UP before we can transmit, and we have no address to
+    # bring it up with -- that is the circle a DHCP client sits in. netcfg op
+    # 7 is "up, with no address".
+    if sys_netcfg(7, 0, 0) != 0:
+        puts(2, "dhcpc: cannot bring the link up\n")
+        return -1
+    cfd: int32 = sys_open("/net/udp/clone")
+    if cfd < 0:
+        puts(2, "dhcpc: cannot open /net/udp/clone\n")
+        return -1
+    conn = read_num(cfd)
+    sys_close(cfd)
+    if conn < 0:
+        return -1
+    # Bind the client port, then aim at the all-ones broadcast: an
+    # unconfigured interface has no address, so the server has to be reached
+    # the only way there is.
+    if ctl(conn, "announce 68") != 0:
+        puts(2, "dhcpc: cannot bind port 68 (already running?)\n")
+        return -1
+    if ctl(conn, "connect 255.255.255.255!67") != 0:
+        puts(2, "dhcpc: cannot reach the broadcast address\n")
+        return -1
+    connpath(conn, "data")
+    data_fd = sys_open_write(cast[Ptr[char]](&pathbuf[0]))
+    if data_fd < 0:
+        puts(2, "dhcpc: cannot open the connection's data file\n")
+        return -1
+    return 0
+
+
+# --- the packet ------------------------------------------------------
+def build_request(msgtype: uint8, with_server: int32) -> uint64:
+    i: uint64 = 0
+    while i < 600:
+        pkt[i] = 0
+        i = i + 1
+    pkt[0] = 1                                   # BOOTREQUEST
+    pkt[1] = 1                                   # ethernet
+    pkt[2] = 6                                   # hlen
+    pkt[3] = 0                                   # hops
+    pkt[4] = xid[0]
+    pkt[5] = xid[1]
+    pkt[6] = xid[2]
+    pkt[7] = xid[3]
+    # flags: ask the server to BROADCAST its reply. We have no address yet,
+    # so a unicast answer would be sent to an address the stack cannot
+    # receive on.
+    pkt[10] = 128
+    i = 0
+    while i < 6:
+        pkt[28 + i] = mac[i]
+        i = i + 1
+    # The magic cookie that starts the option area.
+    pkt[236] = 99
+    pkt[237] = 130
+    pkt[238] = 83
+    pkt[239] = 99
+
+    o: uint64 = 240
+    pkt[o] = 53                                  # message type
+    pkt[o + 1] = 1
+    pkt[o + 2] = msgtype
+    o = o + 3
+
+    pkt[o] = 61                                  # client identifier
+    pkt[o + 1] = 7
+    pkt[o + 2] = 1                               # hardware type: ethernet
+    i = 0
+    while i < 6:
+        pkt[o + 3 + i] = mac[i]
+        i = i + 1
+    o = o + 9
+
+    if with_server != 0:
+        pkt[o] = 50                              # requested address
+        pkt[o + 1] = 4
+        i = 0
+        while i < 4:
+            pkt[o + 2 + i] = lease_ip[i]
+            i = i + 1
+        o = o + 6
+        pkt[o] = 54                              # server identifier
+        pkt[o + 1] = 4
+        i = 0
+        while i < 4:
+            pkt[o + 2 + i] = server_id[i]
+            i = i + 1
+        o = o + 6
+
+    pkt[o] = 55                                  # parameter request list
+    pkt[o + 1] = 3
+    pkt[o + 2] = 1                               # subnet mask
+    pkt[o + 3] = 3                               # router
+    pkt[o + 4] = 6                               # DNS
+    o = o + 5
+
+    pkt[o] = 255                                 # end
+    o = o + 1
+    # BOOTP's minimum is 300 bytes of payload; some servers drop shorter.
+    while o < 300:
+        pkt[o] = 0
+        o = o + 1
+    return o
+
+
+def parse_reply(n: uint64, want: uint8) -> int32:
+    # Returns 1 if this is a reply of the wanted type FOR US.
+    if n < 240:
+        return 0
+    if rpkt[0] != 2:                             # BOOTREPLY
+        return 0
+    if rpkt[4] != xid[0] or rpkt[5] != xid[1] \
+            or rpkt[6] != xid[2] or rpkt[7] != xid[3]:
+        return 0
+    if rpkt[236] != 99 or rpkt[237] != 130 or rpkt[238] != 83 \
+            or rpkt[239] != 99:
+        return 0
+
+    got_type: uint8 = 0
+    have_mask = 0
+    have_gw = 0
+    have_dns = 0
+    i: uint64 = 240
+    while i < n:
+        code: uint8 = rpkt[i]
+        if code == 255:
+            break
+        if code == 0:
+            i = i + 1
+            continue
+        if i + 1 >= n:
+            break
+        olen: uint64 = cast[uint64](rpkt[i + 1])
+        if i + 2 + olen > n:
+            break
+        if code == 53 and olen == 1:
+            got_type = rpkt[i + 2]
+        elif code == 1 and olen == 4:
+            k: uint64 = 0
+            while k < 4:
+                lease_mask[k] = rpkt[i + 2 + k]
+                k = k + 1
+            have_mask = 1
+        elif code == 3 and olen >= 4:
+            k: uint64 = 0
+            while k < 4:
+                lease_gw[k] = rpkt[i + 2 + k]
+                k = k + 1
+            have_gw = 1
+        elif code == 6 and olen >= 4:
+            k: uint64 = 0
+            while k < 4:
+                lease_dns[k] = rpkt[i + 2 + k]
+                k = k + 1
+            have_dns = 1
+        elif code == 54 and olen == 4:
+            k: uint64 = 0
+            while k < 4:
+                server_id[k] = rpkt[i + 2 + k]
+                k = k + 1
+        i = i + 2 + olen
+
+    if got_type != want:
+        return 0
+    # yiaddr — the address the server is offering us.
+    k2: uint64 = 0
+    while k2 < 4:
+        lease_ip[k2] = rpkt[16 + k2]
+        k2 = k2 + 1
+    return 1
+
+
+def exchange(send_type: uint8, want_type: uint8, with_server: int32) -> int32:
+    n: uint64 = build_request(send_type, with_server)
+    # Three tries. A dropped broadcast is normal on a link that has just come
+    # up, and giving up after one is how a machine ends up with no network for
+    # no reason.
+    tries: int32 = 0
+    while tries < 3:
+        if sys_write(data_fd, &pkt[0], n) < 0:
+            return -1
+        polls: int32 = 0
+        while polls < 30:
+            waitset[0] = data_fd
+            sys_waitfds(&waitset[0], 1, 100)
+            r: int64 = sys_read_nb(data_fd, &rpkt[0], 1024)
+            if r > 0:
+                if parse_reply(cast[uint64](r), want_type) != 0:
+                    return 0
+            polls = polls + 1
+        tries = tries + 1
+    return -1
+
+
+def apply_lease() -> int32:
+    if have_mask == 0:
+        # A class-C guess would be a lie dressed as a default; say so and use
+        # it, so a wrong netmask is at least visible in the log.
+        lease_mask[0] = 255
+        lease_mask[1] = 255
+        lease_mask[2] = 255
+        lease_mask[3] = 0
+        puts(1, "dhcpc: no netmask offered; assuming 255.255.255.0\n")
+    sys_netcfg(6, 0, 0)                          # the lease came from DHCP
+    if sys_netcfg(1, pack_ip(&lease_ip[0]), pack_ip(&lease_mask[0])) != 0:
+        puts(2, "dhcpc: cannot set the address\n")
+        return -1
+    if have_gw != 0:
+        sys_netcfg(2, pack_ip(&lease_gw[0]), 0)
+    if have_dns != 0:
+        sys_netcfg(3, pack_ip(&lease_dns[0]), 0)
+    return 0
+
+
+def set_iface(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0 and i < 31:
+        ifname[i] = s[i]
+        i = i + 1
+    ifname[i] = 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    set_iface(cast[Ptr[uint8]]("eth0"))
+    if argc > 1:
+        set_iface(cast[Ptr[uint8]](argv[1]))
+
+    if read_mac() != 0:
+        puts(2, "dhcpc: cannot read the hardware address of ")
+        puts(2, &ifname[0])
+        puts(2, "\n")
+        # Refusing beats inventing: a made-up MAC gets a lease that belongs
+        # to somebody else, and the collision shows up as somebody else's
+        # machine losing its network.
+        return 1
+
+    # A transaction id that is not shared with the last boot. jiffies plus the
+    # pid is not cryptographic and does not need to be — it needs to differ.
+    j: uint64 = sys_get_jiffies()
+    p: uint64 = cast[uint64](sys_getpid())
+    xid[0] = cast[uint8]((j >> 8) & 255)
+    xid[1] = cast[uint8](j & 255)
+    xid[2] = cast[uint8]((p >> 8) & 255)
+    xid[3] = cast[uint8](p & 255)
+
+    if open_socket() != 0:
+        return 1
+
+    puts(1, "dhcpc: discovering on ")
+    puts(1, &ifname[0])
+    puts(1, "\n")
+    if exchange(1, 2, 0) != 0:                   # DISCOVER -> OFFER
+        puts(2, "dhcpc: no offer\n")
+        sys_close(data_fd)
+        return 1
+    puts(1, "dhcpc: offered ")
+    put_ip(1, &lease_ip[0])
+    puts(1, "\n")
+
+    if exchange(3, 5, 1) != 0:                   # REQUEST -> ACK
+        puts(2, "dhcpc: request not acknowledged\n")
+        sys_close(data_fd)
+        return 1
+
+    if apply_lease() != 0:
+        sys_close(data_fd)
+        return 1
+
+    puts(1, "dhcpc: ")
+    put_ip(1, &lease_ip[0])
+    puts(1, " netmask ")
+    put_ip(1, &lease_mask[0])
+    if have_gw != 0:
+        puts(1, " gateway ")
+        put_ip(1, &lease_gw[0])
+    if have_dns != 0:
+        puts(1, " dns ")
+        put_ip(1, &lease_dns[0])
+    puts(1, "\n")
+
+    # The connection's data fd is the only reference; closing it releases the
+    # socket. The LEASE is in the kernel's interface configuration now, not
+    # here, so nothing is lost by exiting.
+    sys_close(data_fd)
+    return 0
