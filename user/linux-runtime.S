@@ -521,13 +521,19 @@ sys_nsid:
     ret
     .size sys_nsid, .-sys_nsid
 
-    /* sys_get_jiffies() -> uint64 : no kernel tick; report 0. */
+    /* sys_get_jiffies() -> uint64 : no kernel tick; report 0.
+     * Hosted: user/linux-syscalls.c derives a real 100 Hz tick from
+     * CLOCK_MONOTONIC. Reporting a frozen 0 here is why every jiffies
+     * deadline loop in the tree (sleep, watch, memhog, nice_*) spins
+     * forever. */
+#ifndef ADDER_HOSTED
     .globl sys_get_jiffies
     .type sys_get_jiffies, @function
 sys_get_jiffies:
     xorq    %rax, %rax
     ret
     .size sys_get_jiffies, .-sys_get_jiffies
+#endif /* !ADDER_HOSTED */
 
     /* The remaining ops share one fail-closed body: return -1.
      *

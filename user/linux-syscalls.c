@@ -340,10 +340,16 @@ int64_t sys_lseek(int32_t fd, int64_t off, int32_t whence)
     return rc64(lseek((int)fd, (off_t)off, (int)whence));
 }
 
-/* extern def sys_mkdir(path: Ptr[char], mode: uint32) -> int32 */
-int32_t sys_mkdir(const char *path, uint32_t mode)
+/* extern def sys_mkdir(path: Ptr[char]) -> int32
+ *
+ * ONE argument. The native primitive fixes the mode on-device, so the host
+ * thunk supplies 0755 itself — exactly as the .S version does. Taking a `mode`
+ * parameter here instead would read whatever the caller happened to leave in
+ * %rsi: it produced directories with mode 0440, and `cp -r` then could not
+ * write into the tree it had just created. */
+int32_t sys_mkdir(const char *path)
 {
-    return rc32(mkdir(path, (mode_t)mode));
+    return rc32(mkdir(path, 0755));
 }
 
 /* extern def sys_unlink(path: Ptr[char]) -> int32
@@ -638,7 +644,6 @@ int64_t sys_listdir_records(const char *path, uint8_t *buf, uint64_t count)
 { (void)path; (void)buf; (void)count; errno = ENOSYS; return -1; }
 
 /* extern def sys_fdbind(pid, fdnum, kind, slot) -> int32
- * extern def sys_chan_dir_mode(fd, mode, path) -> int32
  *
  * The fd-slot model: rewriting a CHILD's fd table from the parent, by name,
  * before the child runs. It is how hamsh wires pipes and redirects
@@ -647,8 +652,148 @@ int64_t sys_listdir_records(const char *path, uint8_t *buf, uint64_t count)
  * real work and is part of HANDOFF §7.5. */
 int32_t sys_fdbind(int32_t pid, int32_t fdnum, int32_t kind, int32_t slot)
 { (void)pid; (void)fdnum; (void)kind; (void)slot; errno = ENOSYS; return -1; }
+
+/* extern def sys_chan_dir_mode(fd: int32, mode: int32,
+ *                              path: Ptr[char]) -> int32
+ *
+ * Flip an already-open directory fd into Dir-record mode: subsequent reads
+ * return the COMPACT Dir-record stream rather than "NAME\n" lines. Returns 0
+ * on success and -1 for any non-directory backing.
+ *
+ * WHY THIS IS NOT OPTIONAL, and why leaving it fail-closed was actively
+ * dangerous. That 0/-1 answer is the tree's idiomatic "is this a directory?"
+ * test — user/cp.ad:163 and user/tar.ad's path_is_dir are literally
+ * `open(p); p9_chan_dir_mode(fd,1,p) == 0`. While this returned -1, every
+ * directory looked like a regular file, and `cp -r src dst` did not fail: it
+ * created `dst` as a PLAIN FILE containing the bytes of src's listing, and
+ * exited 0. Measured, not hypothesised. Silent data loss with a success exit
+ * status is the worst failure mode available, and it was made reachable by
+ * the directory-read synthesis above — before that, cp failed loudly at the
+ * read instead.
+ *
+ * So this both answers the predicate AND actually re-renders the stream, since
+ * returning 0 without switching formats would just move the silent-wrong-answer
+ * to `ls -l`, which reads Dir records straight after the flip.
+ *
+ * WIRE FORMAT — the compact Dir record documented at the top of lib/p9.ad.
+ * This is a DIFFERENT layout from sys_stat_p9's 9P2000 record (lib/p9.ad:1095
+ * warns about exactly this); here qid.type is at offset 2, not 8.
+ *
+ *   off  size  field                     off  size  field
+ *     0    2   reclen (incl. prefix)      19    4   atime
+ *     2    1   qid_type                   23    4   mtime
+ *     3    4   qid_version                27    8   length
+ *     7    8   qid_path                   35   2+n  name
+ *    15    4   mode                      ...   2+n  uid, gid, muid
+ */
+#define P9_DIR_FIXED_HDR 35
+#define P9_DIR_MIN_REC   43
+
+/* Encode one entry into buf[cap]; returns bytes written, or 0 if it will not
+ * fit (the caller then stops emitting, as the Hamnix encoder does). */
+static size_t p9_dir_encode(uint8_t *buf, size_t cap, const char *name,
+                            const struct stat *st)
+{
+    char uidbuf[24], gidbuf[24];
+    snprintf(uidbuf, sizeof uidbuf, "%u", (unsigned)st->st_uid);
+    snprintf(gidbuf, sizeof gidbuf, "%u", (unsigned)st->st_gid);
+
+    size_t nlen = strlen(name), ulen = strlen(uidbuf), glen = strlen(gidbuf);
+    size_t need = P9_DIR_FIXED_HDR + 2 + nlen + 2 + ulen + 2 + glen + 2 + ulen;
+    if (need > cap || need > 0xFFFF)
+        return 0;
+
+    int isdir = S_ISDIR(st->st_mode);
+    memset(buf, 0, P9_DIR_FIXED_HDR);
+    p9_put16(buf, (uint16_t)need);
+    buf[2] = isdir ? (uint8_t)P9_QTDIR : 0u;
+    p9_put32(buf + 3,  (uint32_t)st->st_mtime);           /* qid_version */
+    p9_put64(buf + 7,  (uint64_t)st->st_ino);             /* qid_path */
+    p9_put32(buf + 15, (uint32_t)(st->st_mode & 0777u)
+                       | (isdir ? P9_DMDIR : 0u));
+    p9_put32(buf + 19, (uint32_t)st->st_atime);
+    p9_put32(buf + 23, (uint32_t)st->st_mtime);
+    p9_put64(buf + 27, (uint64_t)st->st_size);
+
+    size_t off = P9_DIR_FIXED_HDR;
+    off = p9_put_str(buf, off, cap, name);
+    off = p9_put_str(buf, off, cap, uidbuf);
+    off = p9_put_str(buf, off, cap, gidbuf);
+    off = p9_put_str(buf, off, cap, uidbuf);              /* muid */
+    return off;
+}
+
 int32_t sys_chan_dir_mode(int32_t fd, int32_t mode, const char *path)
-{ (void)fd; (void)mode; (void)path; errno = ENOSYS; return -1; }
+{
+    struct stat st;
+    if (fstat((int)fd, &st) < 0)
+        return -1;
+    if (!S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return -1;                      /* the "not a directory" answer */
+    }
+    if (mode == 0)
+        return 0;                       /* already the default "NAME\n" mode */
+
+    struct dirstream *d = dirtab_find((int)fd);
+    if (!d) {                           /* opened by some path other than
+                                         * sys_open; adopt it now */
+        if (dirtab_fill((int)fd) < 0)
+            return -1;
+        d = dirtab_find((int)fd);
+        if (!d)
+            return -1;
+    }
+
+    /* Re-render the already-captured names as Dir records. Each entry is
+     * stat'd relative to `path`, which is what the caller passes precisely so
+     * the per-entry stat can be done (see p9_chan_dir_mode's comment). */
+    size_t cap = 4096, len = 0;
+    uint8_t *rec = malloc(cap);
+    if (!rec) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    const char *base = (path && *path) ? path : ".";
+    for (size_t i = 0; i < d->len; ) {
+        size_t j = i;
+        while (j < d->len && d->text[j] != '\n')
+            j++;
+        size_t nlen = j - i;
+        if (nlen == 0 || nlen > 255) { i = j + 1; continue; }
+
+        char name[256];
+        memcpy(name, d->text + i, nlen);
+        name[nlen] = '\0';
+
+        char full[4096];
+        if ((size_t)snprintf(full, sizeof full, "%s/%s", base, name) >= sizeof full) {
+            i = j + 1;
+            continue;
+        }
+        struct stat es;
+        if (lstat(full, &es) < 0) { i = j + 1; continue; }
+
+        if (len + P9_DIR_MIN_REC + 512 > cap) {
+            uint8_t *nb = realloc(rec, cap * 2);
+            if (!nb) { free(rec); errno = ENOMEM; return -1; }
+            rec = nb;
+            cap *= 2;
+        }
+        size_t n = p9_dir_encode(rec + len, cap - len, name, &es);
+        if (n == 0)
+            break;                      /* would not fit; stop emitting */
+        len += n;
+        i = j + 1;
+    }
+
+    free(d->text);
+    d->text = (char *)rec;
+    d->len = len;
+    d->off = 0;
+    return 0;
+}
 
 /* ------------------------------------------------------------------ *
  * Filesystem  (§4.1c — were link errors)
@@ -685,6 +830,27 @@ int64_t sys_clock_gettime(int32_t clockid, uint64_t *tp)
     tp[0] = (uint64_t)ts.tv_sec;
     tp[1] = (uint64_t)ts.tv_nsec;
     return 0;
+}
+
+/* extern def sys_get_jiffies() -> uint64
+ *
+ * The 100 Hz scheduler tick. The freestanding runtime reports a frozen 0
+ * ("no kernel tick"), which links and appears to succeed — and is why every
+ * jiffies-deadline loop in the tree spins forever. user/sleep.ad is the clearest
+ * case: `while sys_get_jiffies() - start < target` can never advance, so
+ * `sleep 1` hangs until it is killed. The same shape hangs watch, memhog,
+ * nice_hi/nice_lo, wakelat and hamscreensaver.
+ *
+ * CLOCK_MONOTONIC in centiseconds reproduces the contract: monotonic, 100 per
+ * second, unaffected by wall-clock changes. Callers compare deltas (sleep.ad's
+ * comment says so explicitly, for overflow robustness), so the epoch is
+ * irrelevant — only the rate matters. */
+int64_t sys_get_jiffies(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+        return 0;
+    return (int64_t)ts.tv_sec * 100 + ts.tv_nsec / 10000000;
 }
 
 /* extern def sys_set_realtime(epoch: uint64) -> int32

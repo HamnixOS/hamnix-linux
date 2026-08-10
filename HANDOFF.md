@@ -282,7 +282,8 @@ Implemented and demonstrated by **running programs**, not by linking:
 | namespace | `sys_bind` — accepts `#c → /dev` and `#d → /fd`, fails the rest (§4.2) |
 | event loop | `sys_waitfds` (poll(2)) |
 | diagnostics | `sys_errstr` — now `strerror_r` on `errno` |
-| stat | `sys_stat_p9` — full 9P2000 stat record |
+| stat | `sys_stat_p9` (full 9P2000 record), `sys_chan_dir_mode` (compact Dir records) |
+| time | `sys_get_jiffies` — CLOCK_MONOTONIC at 100 Hz |
 
 Two things only *running* the code revealed:
 
@@ -307,8 +308,43 @@ substitute. Note the trap: it is the **full 9P2000 stat record**, *not* the
 compact Dir record `lib/p9.ad`'s own header documents. `lib/p9.ad:1095` flags
 the difference; consumers pin `qid.type` at byte 8 and `length` at byte 33.
 
+### The stub policy is the biggest risk this port has
+
+Bigger than `/net`, and it is not the risk §7 names. **A fail-closed stub that
+returns a success-shaped wrong answer is worse than no implementation at all**,
+and this tree has already produced silent data loss from one.
+
+`sys_chan_dir_mode` is the case study. `user/cp.ad:163` and `user/tar.ad`
+implement "is this a directory?" as `open(p); p9_chan_dir_mode(fd,1,p) == 0`.
+While that returned −1, every directory looked like a regular file — and
+`cp -r src dst` **did not fail**. It created `dst` as a plain file containing
+the bytes of `src`'s listing and **exited 0**. Nothing in the exit status,
+stderr, or an `strace` flagged it; only diffing the output caught it. Six apps
+were quietly wrong the same way (`cp`, `tar`, `tree`, `stat`, `hdu`, `hamfm`).
+
+Two compounding lessons:
+
+- **Making a read succeed can make a failure silent.** The directory-read
+  synthesis (§4.1d) fixed `ls` — and simultaneously converted `cp -r` from a
+  loud read error into silent destruction. A fix that unblocks one caller can
+  arm another. The pair had to land together.
+- **`sys_get_jiffies` returning a frozen 0 is the same design error with a
+  kinder symptom.** Nine apps hung instead of corrupting anything, which is how
+  it got noticed. That is luck, not design.
+
+Both are now implemented — `sys_chan_dir_mode` answers the predicate *and*
+re-renders the stream as compact Dir records so `ls -l` is right too, and
+`sys_get_jiffies` is `CLOCK_MONOTONIC` in centiseconds. `cp -r` copies real
+trees; `sleep 1` takes one second.
+
+**The rule for whoever adds the next stub:** it must fail in a way the caller
+cannot mistake for a valid answer. Prefer a hard error to a plausible constant,
+and before stubbing anything, grep for callers that treat its return as a
+*predicate* rather than a status — those are the ones that turn a stub into
+data loss.
+
 Still fail-closed, each with a stated reason in the source: the fd-slot model
-(`sys_fdbind`, `sys_chan_dir_mode`, `sys_fdslot_*`, `sys_pipechan`), the
+(`sys_fdbind`, `sys_fdslot_*`, `sys_pipechan`), the
 `#s`/`#svc` registries, `sys_netcfg`, the `wsys`/`vk` surface, the `umdf` driver
 ops, and the threading model (`sys_rfork_thread`, the semaphores).
 
@@ -416,6 +452,45 @@ coreutils-shaped set: `cat`, `ls`, `cp`, `mv`, `grep`, `sed`, `awk`, `sort`,
 `cut`, and ~130 more. **Most of the userland is in this tier.** Expect them to
 build and run once class (c) of §4.1 is filled in. They are also your smoke
 test: get `cat` running before anything else.
+
+> **MEASURED 2026-08-09.** Both halves of this were checked by building and
+> running, not by reading.
+>
+> **Building — effectively total.** `scripts/hamlinux_sweep.sh` builds all 359
+> `user/*.ad` through the glibc lane: **351 build, 0 real failures.** The 8
+> non-zero exits are not app failures — 4 (`net9`, `http9`, `httpdconf`,
+> `hambrowse_tabs`) are *modules with no `main`*, and 4 are `*_host.ad`
+> harnesses wanting `devsnarf_*` from a C shim, not `sys_*` at all. Nothing in
+> `user/` fails to compile or codegen. "Nothing here builds yet" is no longer
+> true, and it was never a compiler problem — only a missing link runtime.
+>
+> **Running — the number that matters.** 181 Tier-1 apps were run and checked
+> against *their own header contracts* (see the warning below): **120 PASS,
+> 25 FAIL, 36 SKIP**. Excluding SKIPs — apps needing a device this host has no
+> answer for (audio, `/dev/blk`, `/dev/wsys`, a tty, root) — that is an **83%
+> pass rate**.
+>
+> **Failures concentrated in two stubs, both now fixed:** `sys_chan_dir_mode`
+> (6 apps) and `sys_get_jiffies` (9 apps) accounted for 15 of the 25. See the
+> warning below and §4.1d. Remaining known-real failures: 3 apps
+> (`insmod`/`modprobe`/`rmmod`) whose hand-written `asm_volatile` wrappers
+> encode the *old* backend's `%rbp` frame layout and break under LLVM; 2
+> (`ifconfig`, `route`) on `sys_netcfg`; 2 (`nsrun`, `nsbindprobe`) on real
+> namespaces; 1 (`tty`) on `sys_fdslot_kind`; and 1 (`hxd`) that looks like a
+> genuine **wrong-code bug in the LLVM backend** — a loop induction variable
+> never compared or incremented. That last one is worth someone's attention on
+> its own.
+>
+> ⚠️ **Do not verify these against GNU coreutils.** They are deliberately
+> narrower reimplementations and the GNU comparison manufactures false
+> failures. `user/wc.ad` *ignores filename operands and reads only stdin*;
+> `user/head.ad` likewise. Both are correct, and both look broken next to GNU.
+> The header comment is the contract.
+>
+> ⚠️ **The tier boundaries themselves are soft.** A direct re-derivation put
+> 181 apps in Tier 1 against this section's 151, and 13 in Tier 2 against 27.
+> The classification here was static and transitive imports blur it; treat the
+> tier as a planning aid, not an inventory.
 
 ### Tier 2 — 27 apps: read Hamnix-format `/proc` and `/dev/blk`
 
