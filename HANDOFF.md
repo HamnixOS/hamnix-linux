@@ -406,6 +406,59 @@ and may need only field-offset fixes. `/proc/tasks`, `/proc/toptable`,
 `/proc/svc/*`, `/proc/self/ctl` and `/proc/realtime` are Hamnix inventions and
 need real work (`user/top.ad`, `user/ps.ad`, `user/service.ad`).
 
+### 4.3b The boot, and the Debian namespace — both working
+
+**hamnix-linux boots.** `scripts/hamlinux_image.sh` stages an image;
+`scripts/hamlinux_vm.sh` runs it under QEMU/KVM. The shape is deliberately the
+same as Hamnix's, because `etc/inittab` already said `/bin/hamsh`:
+
+```
+Linux kernel -> /init  (user/linuxinit.ad, the Adder PID 1)
+                  -> bind '#p' /proc, '#c' /dev, '#sys' /sys, '#s' /srv, ...
+                  -> load /etc/modules
+                  -> exec /bin/hamsh /etc/rc.boot
+                       -> the rc scripts, then an interactive shell
+```
+
+On Hamnix the *kernel* posts those file servers before ELF-loading `/init`;
+Linux hands us an empty namespace, so `linuxinit` does it. **`sys_bind`
+performs real Linux mounts** — `bind '#p' /proc` still says what it means. New
+letters on this line: `#sys` (sysfs; Hamnix has no `/sys`) and `#pts`.
+
+**Kernel modules.** `sys_init_module` is new and unavoidable: on a Debian
+kernel essentially every driver is a module, and `/dev/dri/card0` does not
+exist until virtio-gpu and its four dependencies load. `user/insmod.ad` cannot
+do this — it issues `SYS_INIT_MODULE` through an `asm_volatile` block encoding
+the *old* backend's frame layout, and miscompiles under LLVM. The image
+resolves dependency **order** at build time (where a real `modprobe` exists)
+and writes `/etc/modules`; PID 1 just walks the list.
+
+**The Debian namespace works, and the isolation is structural.** Verified in
+the VM: Debian's own `dpkg` runs inside it, the parent's namespace still has
+`/bin/hamsh`, and Debian's `ls` inside the namespace **cannot find
+`/bin/hamsh` at all**. Nothing `apt` installs can reach the Hamnix filesystem.
+
+It is Hamnix's own idiom mapped one-for-one, not a Linux invention:
+
+| Hamnix | Linux |
+|--|--|
+| `rfork(RFNAMEG)` without `RFPROC` | `unshare(CLONE_NEWNS)` |
+| `rfork(RFPROC\|RFNAMEG)` | `fork`, child unshares |
+| `bind '#distro' /n/distro` | mount the subtree's filesystem |
+| `bind '#distro' /` | `chdir` + `chroot` into it |
+
+`user/nsrun.ad:72` states the invariant this rests on — **rfork BEFORE mount** —
+and every namespace user follows it. Two traps: `sys_rfork` previously refused
+any flag combination without `RFPROC`, which made the invariant
+*unexpressible*; and **Linux mount propagation defaults to SHARED**, which
+leaks the child's bind straight back to the parent and silently defeats the
+isolation. The child marks `/` `MS_REC|MS_PRIVATE`. Plan 9's namespace copy is
+private by construction, so nothing in the userland asks for this.
+
+The distro image is built by `mmdebstrap --mode=unshare --format=ext4` — no
+root, no loop mount, nothing on the host touched — and attached as a separate
+virtio disk, so the separation is physical as well as logical.
+
 ### 4.4 The compositor and who owns the framebuffer
 
 **Read `docs/de_scene_file_arch.md` before touching anything here.** It changes
@@ -437,6 +490,74 @@ Consequences for the port:
 
 `sys_wsys_alloc` / `sys_wsys_free` (window-buffer allocation) and
 `sys_vk_window_frame` are absent from the Linux runtime entirely (§4.1c).
+
+> **MEASURED — the framebuffer works, and this section's premise was wrong.**
+> The Adder userland paints the VM's screen today: 1024000 of 1024000 pixels
+> match what `tests/linux/fb_probe.ad` wrote, using the same banded-write
+> pattern `hamUId` uses to present a frame. `user/linux-fb.c` backs `/dev/fb`,
+> `/dev/fbctl` and `/dev/fbpix`, so those nine programs need no I/O changes.
+>
+> **fbdev, not DRM/KMS.** This section assumed fbdev being deprecated ruled it
+> out. The opposite held up:
+>
+> - A hand-rolled legacy `SETCRTC` on virtio-gpu left the host surface **black**
+>   even though every ioctl returned 0, `DIRTYFB` reported success, and a
+>   readback of our own mapping showed the right pixels. Booting the same guest
+>   with `console=tty0` painted the display correctly — through DRM's *fbdev
+>   emulation*. Whatever that layer does about deferred I/O and damage, it does
+>   correctly and a hand-rolled path does not.
+> - `/dev/fb0` **is** `drm_kms_helper` on any modern driver. This is not legacy
+>   hardware support.
+> - It is the exact analogue of what Hamnix's `/dev/fb` already is: a linear
+>   CPU-writable surface with a geometry query. No modeset, no connector/CRTC
+>   pairing, no dumb-buffer lifetime.
+> - **DRM master is exclusive to one process; fbdev is not.** This section calls
+>   that exclusivity the reason eight programs must be rewritten to go through
+>   `wsys`. It does not remove the need for `wsys`, but **it stops it being a
+>   hard blocker** — the eight can keep opening `/dev/fb` while `wsys` is built.
+>
+> Raw DRM/KMS is kept as a fallback for a device with no fbdev emulation.
+>
+> Two things only running it revealed. **The text console keeps drawing into
+> the framebuffer** — exactly one 8×14 character cell at (0,0) went black under
+> a full-screen paint, the fbcon cursor. Hamnix already has the verb for it
+> ("suspend the text console"); on Linux it is `KDSETMODE KD_GRAPHICS` on
+> `/dev/tty0`, and opening `/dev/fb` for writing now does it automatically. And
+> **`resume` must not be issued while still presenting**: it returns the VT to
+> text mode and the console redraws over you, taking a fully painted screen down
+> to 16 non-black pixels.
+
+### 4.4b The `wsys` protocol, from the client side
+
+The server has not been written yet, but the contract it must satisfy is fixed
+by `lib/hamui.ad` and is small. Every path, by weight:
+
+| Path | Hits | Meaning |
+|--|--|--|
+| `/dev/wsys/ctl` | 115 | the server control file |
+| `/dev/wsys/<wid>/…` | 60 | per-window directory |
+| `/dev/wsys/self` | 17 | read → the wid the compositor allocated to *this* process |
+| `/dev/wsys/post`, `run/launch`, `appmenu/launch` | 15 | launcher plumbing |
+| `/dev/wsys/cursor/scene`, `wallpaper`, `tray`, `session`, `workspace`, `windows` | 1–4 each | shell surfaces |
+
+**Window creation** (`lib/hamui.ad:2280`) is the load-bearing sequence:
+
+1. read `/dev/wsys/self` → if it parses to a wid ≥ 2, the compositor already
+   allocated one and it is *owned* by this process; use it.
+2. otherwise write `newwindow\n` to `/dev/wsys/ctl`, then **read
+   `/dev/wsys/ctl` back** for the new wid as ASCII decimal.
+
+Note wid 0 and 1 are reserved — `hamui` rejects anything `< 2`, and wid 1 is
+the foreground console window that a normal user does not own.
+
+**Per-window `ctl` verbs**, written to `/dev/wsys/<wid>/ctl` as newline-
+terminated text (`_h_win_setup`): `geometry <x> <y> <w> <h>`, `decorate 1`,
+`z <n>`, `title <text>`. Per-window leaves: `scene` (the display list),
+`event`, `pointer`, `keys`.
+
+Because it is all text file I/O, `wsys` can be a FUSE or 9p userspace server or
+a Unix-socket shim without any of the ~75 Tier-4 clients changing — the good
+news §4.4 already identified, now with the exact surface to implement.
 
 ---
 
