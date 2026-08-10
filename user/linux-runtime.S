@@ -75,7 +75,15 @@ __stack_chk_fail:
      * `call main` pushes the 8-byte return address, leaving %rsp 16-byte
      * aligned + 8 inside main's prologue, exactly as a normal call site —
      * so any SSE spill in generated code stays correctly aligned.
+     *
+     * HOSTED LANE: when this runtime is linked by clang against glibc (the
+     * LLVM lane, scripts/adder_cc_llvm.sh), crt1.o already supplies `_start`
+     * and calls main(argc, argv, envp) for us — and it is the only symbol in
+     * this file that collides. Build with -DADDER_HOSTED to drop it and let
+     * the C runtime do process start-up (which also runs glibc's initialisers,
+     * required before any libc-dependent library can be called).
      */
+#ifndef ADDER_HOSTED
     .globl _start
     .type _start, @function
 _start:
@@ -89,6 +97,7 @@ _start:
 .L_start_hang:                       /* SYS_exit never returns; spin defensively */
     jmp     .L_start_hang
     .size _start, .-_start
+#endif /* !ADDER_HOSTED */
 
 
     /* --- sys_read(fd, buf, count) -> int64 -------------------------- */
