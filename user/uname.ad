@@ -1,14 +1,28 @@
 # user/uname.ad
 #
-# Hamnix `uname`: writes a fixed "<sysname> <machine> <release>\n"
-# line. No flags (-a / -r / -m) yet — the kernel doesn't expose a
-# utsname-like struct, so there's nothing variable to query. Hard-
-# coded string keeps the binary self-contained while still giving
-# scripts something to grep for.
+# Hamnix `uname`: writes "<sysname> <machine> <release>\n".
+#
+# It used to write a FIXED "Hamnix x86_64 1.0", and the header explained why:
+# "the kernel doesn't expose a utsname-like struct, so there's nothing
+# variable to query". On the Linux line the kernel does, and the fixed string
+# is a false answer -- it names a kernel that is not running. So this asks.
+#
+# The sysname stays "Hamnix" on purpose. That is the truth about the machine:
+# the userland, the namespaces, the file servers and the boot process are
+# Hamnix; the kernel underneath is whatever `release` says.
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_uname(buf: Ptr[uint8], cap: uint64) -> int64
+
+ubuf: Array[256, uint8]
 
 
 def main() -> int32:
-    sys_write(1, "Hamnix x86_64 1.0\n", 18)
+    n: int64 = sys_uname(&ubuf[0], 256)
+    if n > 0:
+        sys_write(1, &ubuf[0], cast[uint64](n))
+        return 0
+    # No utsname to ask: say the one thing that is certainly true rather than
+    # inventing a version.
+    sys_write(1, "Hamnix\n", 7)
     return 0

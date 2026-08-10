@@ -212,6 +212,22 @@ static int32_t pending_child;
 void fdns_after_fork_parent(int32_t child)
 {
     if (attach() < 0) return;
+
+    /* CLEAR THE CHILD'S OLD NAMES FIRST.  The table is keyed by pid and Linux
+     * reuses pids, so a fresh process could inherit a /fd/1 bound to some file
+     * a long-dead command was redirected into.  Measured: after `hpm update`
+     * spawned a few dozen children, the next `uname` ran, exited 0, and
+     * printed nothing -- its stdout was a stale binding pointing into a
+     * package's extraction path.  A new process starts with a clean fd table
+     * or the model is not the model.
+     *
+     * The clear happens BEFORE the gate is created, and the child waits for
+     * the gate to EXIST, so "the child can see a gate" implies "the clear has
+     * already happened".  That is what makes this ordered rather than racy. */
+    for (int i = 0; i < MAX_BINDS; i++)
+        if (shm->bind[i].used && shm->bind[i].pid == child)
+            shm->bind[i].used = 0;
+
     fdns_fdbind(child, GATE_FD, FDNS_NONE, 0);   /* closed */
     pending_child = child;
 }
@@ -251,9 +267,33 @@ static int parent_owns_slots(void)
     return 0;
 }
 
+/* Is this process one that was SPAWNED by a namespace-aware parent?
+ *
+ * Decided once, on the first /fd resolution, by waiting briefly for a gate to
+ * appear.  It matters because the two cases want opposite things:
+ *
+ *   a spawned child  -- must wait, and must NOT trust a record it finds
+ *                       before the gate exists, because the parent has not
+ *                       cleared this pid's stale bindings yet;
+ *   everyone else    -- binds its OWN names and expects them back
+ *                       immediately (a terminal naming its end of a pipe).
+ */
+static int spawned_known, spawned;
+
+static int is_spawned(int32_t pid)
+{
+    if (spawned_known) return spawned;
+    for (int ms = 0; ms < 25; ms++) {
+        if (bind_find(pid, GATE_FD)) { spawned = 1; break; }
+        usleep(1000);
+    }
+    spawned_known = 1;
+    return spawned;
+}
+
 static struct bindrec *await_bind(int32_t pid, int32_t fdnum)
 {
-    struct bindrec *gate = bind_find(pid, GATE_FD);
+    struct bindrec *gate = is_spawned(pid) ? bind_find(pid, GATE_FD) : NULL;
     int watch = (gate != NULL) || parent_owns_slots();
     if (!watch)
         return NULL;
@@ -297,7 +337,12 @@ int fdns_open(const char *path, int for_write)
     int fdnum = atoi(path + 4);
     int32_t me = (int32_t)getpid();
 
-    struct bindrec *b = bind_find(me, fdnum);
+    /* A record found immediately is trustworthy ONLY if this process is not a
+     * freshly spawned child -- for one of those, the parent may not have
+     * cleared the previous occupant of this pid yet. */
+    struct bindrec *b = NULL;
+    if (!is_spawned(me))
+        b = bind_find(me, fdnum);
     if (!b || b->kind == FDNS_NONE)
         b = await_bind(me, fdnum);
     if (!b || b->kind == FDNS_NONE) {

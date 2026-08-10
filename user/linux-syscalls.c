@@ -40,6 +40,7 @@
 #include <netdb.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/utsname.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -744,6 +745,41 @@ int32_t sys_chdir(const char *path) { return rc32(chdir(path)); }
 /* ------------------------------------------------------------------ *
  * Process identity and creation  (§4.1c — were link errors)
  * ------------------------------------------------------------------ */
+
+/* extern def sys_uname(buf: Ptr[uint8], cap: uint64) -> int64
+ *
+ * "<sysname> <machine> <release>\n" into `buf`, returning the length.
+ *
+ * user/uname.ad used to write a fixed "Hamnix x86_64 1.0" because, as its
+ * header says, "the kernel doesn't expose a utsname-like struct, so there's
+ * nothing variable to query".  On this line the kernel does, and the fixed
+ * string is a false answer: it names a kernel that is not running.  Reporting
+ * "Hamnix x86_64 6.12.85+deb13-amd64" is the truth about this machine -- the
+ * userland IS Hamnix and the kernel underneath is that Linux. */
+int64_t sys_uname(uint8_t *buf, uint64_t cap)
+{
+    struct utsname u;
+    if (uname(&u) < 0)
+        return rc64(-1);
+    int n = snprintf((char *)buf, (size_t)cap, "Hamnix %s %s\n",
+                     u.machine, u.release);
+    if (n < 0) { errno = EIO; return -EIO; }
+    if ((uint64_t)n >= cap) n = (int)cap - 1;
+    return (int64_t)n;
+}
+
+/* extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
+ *
+ * Needed because a package's files carry MODES and Linux enforces them.  On
+ * Hamnix the omission never showed; here a freshly installed binary came out
+ * 0644, execve refused it, the child exited 127 without a word, and the
+ * command silently did nothing.  It was invisible for a while because a
+ * package that OVERWRITES an existing binary inherits the old file's mode --
+ * so upgrading `ls` worked and installing anything new did not. */
+int32_t sys_chmod(const char *path, uint32_t mode)
+{
+    return rc32(chmod(path, (mode_t)mode));
+}
 
 /* extern def sys_getpid() -> int32 */
 int32_t sys_getpid(void) { return (int32_t)getpid(); }

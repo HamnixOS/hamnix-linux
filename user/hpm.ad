@@ -62,6 +62,7 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_mkdir(path: Ptr[char]) -> int32
+extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
 extern def sys_unlink(path: Ptr[char]) -> int32
 # U-resolve: native-ABI hostname -> IPv4 via the in-kernel DNS resolver
 # (drivers/net/dns.ad, syscall 269). Returns the IPv4 packed big-endian
@@ -4575,6 +4576,21 @@ def _stage_extract_files(tar_len: uint64, target_prefix: Ptr[uint8]) -> int32:
                     sys_close(fd)
                     return -1
             sys_close(fd)
+
+            # HONOUR THE MODE THE ARCHIVE RECORDS. tar keeps it at offset 100
+            # as an octal string, and it is not decoration: Linux refuses to
+            # execve a file without an exec bit, so a freshly installed binary
+            # written 0644 runs as nothing at all -- the child exits 127
+            # without a word and the command appears to do nothing.
+            #
+            # This hid for a while because a package that OVERWRITES an
+            # existing binary inherits that file's mode. Upgrading a command
+            # that shipped in the base image worked; installing a NEW one
+            # never did.
+            fmode: uint64 = _tar_parse_octal(&hdr[100], 8)
+            if fmode != 0:
+                sys_chmod(cast[Ptr[char]](&extract_path_buf[0]),
+                          cast[uint32](fmode & 4095))
 
         # Record the relative path (under files/) for installed.json.
         if _new_files_record(&warn_buf[rel_start], rel_len) != 0:
