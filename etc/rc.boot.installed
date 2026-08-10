@@ -1,0 +1,48 @@
+# /etc/rc.boot.installed — the boot rc for an INSTALLED hamnix-linux system.
+#
+# Staged onto the root partition as /etc/rc.boot by scripts/hamlinux_disk.sh.
+# It differs from etc/rc.boot.linux (the initramfs one) in exactly one way,
+# and it is the way Hamnix's own etc/rc.boot differs too: it brings the real
+# root online first.
+#
+#   bind '#sysroot' /
+#
+# On Hamnix that rebinds the process's root to the rootfs partition's file
+# server, which the kernel posted at boot from the partition's `.hamnix-roots`
+# sentinel. On this line sys_bind performs the mount itself -- same verb, same
+# meaning, one less layer -- and HAMNIX_ROOT names the device. The verb is the
+# tree's own, so this file says what it means whichever kernel is underneath.
+#
+# What has already happened, in user/linuxinit.ad (the Adder PID 1):
+#   bind '#p' /proc   bind '#c' /dev   bind '#s' /srv
+#   bind '#sys' /sys  bind '#pts' /dev/pts  bind '#/' /n  bind '#t' /tmp
+# and the kernel modules from /etc/modules are loaded.
+
+echo 'rc.boot: hamnix-linux (installed)'
+
+# /dev/cons is Hamnix's console device, and the tree writes diagnostics to it
+# by name. devtmpfs has no such node.
+ln -s /dev/console /dev/cons
+
+# --- the real root ---------------------------------------------------
+# ALREADY DONE, by user/linuxinit.ad, before this shell was even exec'd: the
+# switch has to happen before /bin/hamsh is loaded, or the shell running this
+# script would be the initramfs copy and every command would come from RAM
+# rather than from the disk the operator installed. So `bind '#sysroot' /`
+# lives in PID 1 here, not in the rc -- the one place this line's boot differs
+# in SHAPE from Hamnix's, and it differs because the initramfs exists at all.
+
+# --- networking ------------------------------------------------------
+# Static, and named here rather than hidden: the kernel's own ip=dhcp runs
+# before the initramfs has loaded virtio_net, and a DHCP client is a program
+# this line does not have yet. On a real machine these are the three lines to
+# change.
+ifconfig eth0 10.0.2.15 netmask 255.255.255.0
+ifconfig gw 10.0.2.2
+ifconfig dns 10.0.2.3
+echo 'rc.boot: network configured'
+
+# --- the desktop -----------------------------------------------------
+source '/etc/rc.d/rc.5'
+
+echo 'rc.boot: up'

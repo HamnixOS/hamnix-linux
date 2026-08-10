@@ -92,6 +92,39 @@ case "$MODE" in
         -serial mon:stdio \
         -append "$APPEND" "$@"
     ;;
+  disk|disk-gpu)
+    # Boot the INSTALLED disk, not the initramfs: no -kernel, no -initrd, the
+    # firmware finds /EFI/BOOT/BOOTX64.EFI on the ESP exactly as it would on a
+    # real machine. That is the point of this mode -- it exercises the boot
+    # path a physical install uses, rather than QEMU's kernel loader.
+    IMGFILE="$IMG/hamnix-linux.img"
+    [ -f "$IMGFILE" ] || { echo "no disk; run scripts/hamlinux_disk.sh" >&2; exit 1; }
+    OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+    OVMF_VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd
+    [ -f "$OVMF_CODE" ] || { echo "no OVMF firmware (apt install ovmf)" >&2; exit 1; }
+    VARS="$IMG/OVMF_VARS.fd"
+    [ -f "$VARS" ] || cp "$OVMF_VARS_SRC" "$VARS"
+    DISK=(
+        -m 2048 -smp 2
+        -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
+        -drive "if=pflash,format=raw,unit=1,file=$VARS"
+        -drive "file=$IMGFILE,if=virtio,format=raw"
+        -no-reboot
+        -vga none -device virtio-gpu-pci
+        -device virtio-keyboard-pci -device virtio-tablet-pci
+        -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+    )
+    if [ -w /dev/kvm ]; then DISK+=(-enable-kvm -cpu host); else DISK+=(-cpu max); fi
+    if [ -f "$IMG/distro.ext4" ]; then
+        DISK+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe")
+    fi
+    if [ "$MODE" = disk-gpu ]; then
+        exec qemu-system-x86_64 "${DISK[@]}" -display gtk -serial mon:stdio "$@"
+    fi
+    CMD=(qemu-system-x86_64 "${DISK[@]}" -display none -serial stdio
+         -monitor "unix:$IMG/mon.sock,server,nowait" "$@")
+    if [ -n "$TIMEOUT" ]; then exec timeout "$TIMEOUT" "${CMD[@]}"; else exec "${CMD[@]}"; fi
+    ;;
   *)
-    echo "usage: hamlinux_vm.sh [serial|gpu|script]" >&2; exit 2 ;;
+    echo "usage: hamlinux_vm.sh [serial|gpu|script|disk|disk-gpu]" >&2; exit 2 ;;
 esac

@@ -131,6 +131,36 @@ def put_dec(v: uint64):
     sys_write(1, &d[k], 24 - k)
 
 
+cmdline_buf: Array[2048, uint8]
+
+def cmdline_has_root() -> int32:
+    # 1 if the kernel command line carries `root=/dev/...`. Only an explicit
+    # device counts: LABEL= and UUID= need a device enumerator this line does
+    # not have, and guessing would mount the wrong filesystem rather than fail.
+    fd: int32 = sys_open(cast[Ptr[char]]("/proc/cmdline"))
+    if fd < 0:
+        return 0
+    n: int64 = sys_read(fd, &cmdline_buf[0], 2047)
+    sys_close(fd)
+    if n <= 0:
+        return 0
+    cmdline_buf[n] = 0
+    i: uint64 = 0
+    cap: uint64 = cast[uint64](n)
+    while i + 10 < cap:
+        if cmdline_buf[i] == 114 and cmdline_buf[i+1] == 111 \
+                and cmdline_buf[i+2] == 111 and cmdline_buf[i+3] == 116 \
+                and cmdline_buf[i+4] == 61:                  # "root="
+            if i == 0 or cmdline_buf[i-1] == 32:
+                if cmdline_buf[i+5] == 47 and cmdline_buf[i+6] == 100 \
+                        and cmdline_buf[i+7] == 101 \
+                        and cmdline_buf[i+8] == 118 \
+                        and cmdline_buf[i+9] == 47:          # "/dev/"
+                    return 1
+        i = i + 1
+    return 0
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     say("Hamnix on Linux — bringing up the namespace")
 
@@ -147,6 +177,30 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # Drivers come after /sys and /dev exist: the module init paths want both,
     # and devtmpfs is what materialises /dev/dri/card0 once virtio-gpu attaches.
     load_modules()
+
+    # THE ROOT SWITCH.
+    #
+    # Everything above ran out of the initramfs, which is RAM and gone at
+    # reboot. If the kernel was told which disk holds the real root, this is
+    # where we move onto it -- the same job every Linux initramfs does, said
+    # in the tree's own words:
+    #
+    #     bind '#sysroot' /
+    #
+    # which is exactly what Hamnix's etc/rc.boot does on the native line. The
+    # device comes from the kernel's own command line (sys_bind resolves it),
+    # so one image boots any machine. The mounts already made are MOVED across
+    # rather than remade, so the running processes' /srv segments and the one
+    # devtmpfs survive the switch.
+    #
+    # No root= means an initramfs-only boot, which is a legitimate way to run
+    # this and what every developer boot does; there is nothing to switch to.
+    if cmdline_has_root() != 0:
+        if sys_bind(cast[Ptr[char]]("/"), cast[Ptr[char]]("#sysroot"), 0) != 0:
+            warn(cast[Ptr[uint8]]("bind '#sysroot' /"))
+            say("continuing on the initramfs root")
+        else:
+            say("root filesystem online")
 
     say("namespace ready — exec /bin/hamsh /etc/rc.boot")
 

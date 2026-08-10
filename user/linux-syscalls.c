@@ -1594,11 +1594,71 @@ static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
     return NULL;
 }
 
+/* Which device holds the real root.
+ *
+ * HAMNIX_ROOT if the operator set it; otherwise the kernel already told us on
+ * its own command line, and taking the answer from there is what makes the
+ * same image boot on a machine whose disk is not called what this one's is.
+ * Only an explicit /dev path is accepted: LABEL= and UUID= need a device
+ * enumerator this line does not have, and guessing would mount the wrong
+ * filesystem rather than fail. */
+static const char *sysroot_device(void)
+{
+    static char dev[128];
+    const char *e = getenv("HAMNIX_ROOT");
+    if (e && *e) return e;
+    if (dev[0]) return dev;
+
+    int fd = open("/proc/cmdline", O_RDONLY);
+    if (fd >= 0) {
+        char line[1024];
+        ssize_t n = read(fd, line, sizeof line - 1);
+        close(fd);
+        if (n > 0) {
+            line[n] = '\0';
+            char *p = strstr(line, "root=");
+            if (p && (p == line || p[-1] == ' ')) {
+                p += 5;
+                size_t k = 0;
+                while (p[k] && p[k] != ' ' && p[k] != '\n'
+                       && k < sizeof dev - 1) {
+                    dev[k] = p[k];
+                    k++;
+                }
+                dev[k] = '\0';
+                if (strncmp(dev, "/dev/", 5) != 0)
+                    dev[0] = '\0';      /* LABEL=/UUID= -- see above */
+            }
+        }
+    }
+    if (!dev[0])
+        snprintf(dev, sizeof dev, "/");
+    return dev;
+}
+
 /* Make `mnt` the process's root. chroot alone leaves the old root reachable
  * through the cwd, so chdir first — that is the difference between confinement
  * and a suggestion. */
 static int32_t enter_root(const char *mnt)
 {
+    /* Carry the device trees across.  Everything above this point ran out of
+     * the initramfs, where /proc, /dev, /sys, /srv and /tmp were bound by the
+     * Adder PID 1; chrooting without them would leave the new root with no
+     * console, no /dev/fb, no shared-memory segments -- the desktop would come
+     * up mute and blind.  MS_MOVE relocates the existing mounts rather than
+     * mounting them a second time, so there is exactly one devtmpfs and the
+     * shared segments under /srv are the SAME objects the running processes
+     * already have mapped. */
+    static const char *carry[] = { "/dev", "/proc", "/sys", "/srv", "/tmp" };
+    char dest[256];
+    for (size_t i = 0; i < sizeof carry / sizeof carry[0]; i++) {
+        snprintf(dest, sizeof dest, "%s%s", mnt, carry[i]);
+        mkdir(dest, 0755);
+        if (mount(carry[i], dest, NULL, MS_MOVE, NULL) < 0)
+            /* Not fatal on its own: a target that already has it mounted, or
+             * a tree the initramfs never bound, is a normal state. */
+            mount(carry[i], dest, NULL, MS_BIND | MS_REC, NULL);
+    }
     if (chdir(mnt) < 0)
         return -(int32_t)errno;
     if (chroot(".") < 0)
@@ -1692,7 +1752,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
     if (!strcmp(d->letter, "#distro"))
         root = envdef("HAMNIX_DISTRO", "/dev/vda");
     else if (!strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r"))
-        root = envdef("HAMNIX_ROOT", "/");
+        root = sysroot_device();
     else
         root = d->source;
 
