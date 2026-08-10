@@ -90,3 +90,31 @@ source '/etc/rc.d/rc.5'
 # here). Debian's tree is bound at /n/distro and NOTHING it installs is written
 # into the Hamnix filesystem -- that separation is the whole reason for it.
 bind '#distro' /n/distro
+
+# `enter debian { sh }` from the CONSOLE shell too, not just from a desktop
+# terminal. etc/rc.de-user captures these templates for the DE-spawned shell,
+# but PID 1 -- the shell you land in on a serial boot, on a headless install,
+# and every time the DE is not running -- had no template at all, so the one
+# command this subsystem exists to offer did not exist there. Capturing a
+# template grants nothing: `ns clean { }` is a description, and what an
+# `enter` switches to is the Debian root, never the native one.
+#
+# `debian` is the name to teach; `linux` is the alias that keeps working
+# because etc/install.hamsh and several tests spell it that way. See the note
+# in etc/rc.de-user.linux for why `linux` was the wrong name: the kernel under
+# BOTH namespaces is Linux, so it distinguishes nothing, and someone typing it
+# wants apt and Firefox, not a kernel.
+debian = ns clean {
+    bind '#distro' /
+    bind '#c' /dev
+    bind '#p' /proc
+    bind '#s' /srv
+    bind '#/' /n
+}
+linux = ns clean {
+    bind '#distro' /
+    bind '#c' /dev
+    bind '#p' /proc
+    bind '#s' /srv
+    bind '#/' /n
+}

@@ -20,9 +20,17 @@
 # drop is at that exact point and not earlier.
 #
 # What IS kept is the shape: the terminal's shell gets its capabilities by
-# having things bound into its namespace, and the `linux` / `debian` templates
-# are captured but not entered, so the user can `enter linux { ... }` on
-# demand and reach the Debian subsystem.
+# having things bound into its namespace, and the templates are captured but
+# not entered, so the user can reach the Debian subsystem on demand.
+#
+# `debian` IS THE NAME. The command is `enter debian { sh }`. That is what the
+# namespace actually is -- a Debian bookworm root, built by mmdebstrap in
+# scripts/hamlinux_distro.sh -- and naming it `linux` was a category error
+# twice over: the kernel underneath BOTH namespaces is Linux, so `linux` does
+# not distinguish anything, and a user typing it is not asking for a kernel,
+# they are asking for apt and Firefox. `linux` stays as an alias because
+# etc/install.hamsh.linux and several tests spell it that way, and because a
+# name that used to work should keep working; it is not the one to teach.
 #
 # Syntax: hamsh, not bash. '#' starts a comment; device-letter names like '#c'
 # MUST be single-quoted. `bind SRC DST` is source-first.
@@ -37,14 +45,15 @@ bind '#/' /n
 # The Debian namespace, captured as a template and entered on demand. Nothing
 # is granted by capturing it: `ns clean { }` is a description, and what an
 # `enter` switches to is the Debian root, never the native one.
-linux = ns clean {
+debian = ns clean {
     bind '#distro' /
     bind '#c' /dev
     bind '#p' /proc
     bind '#s' /srv
     bind '#/' /n
 }
-debian = ns clean {
+# The alias, kept working, deliberately second.
+linux = ns clean {
     bind '#distro' /
     bind '#c' /dev
     bind '#p' /proc
