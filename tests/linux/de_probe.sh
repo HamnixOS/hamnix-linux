@@ -88,7 +88,12 @@ wait 2>/dev/null
 FAIL=0
 say() { if [ "$2" = 1 ]; then echo "ok   $1"; else echo "FAIL $1"; FAIL=$((FAIL+1)); fi; }
 
-grep -q "\[panel\] launched /bin/hamtermscene" "$WORK/boot.log" && L=1 || L=0
+# The PANEL's own log now goes to /var/log (rc.5 redirects it, and that
+# redirect works), so "[panel] launched ..." is deliberately not on the
+# console any more. Assert on the terminal's own /dev/cons line instead --
+# which is the stronger signal anyway: the panel saying it launched something
+# is a claim, and hamtermscene saying its window is ready is the fact.
+grep -q "\[hamterm\] scene window ready" "$WORK/boot.log" && L=1 || L=0
 say "a terminal opens from the DE launch queue" $L
 
 grep -q "shell failed to start" "$WORK/boot.log" && S=0 || S=1
