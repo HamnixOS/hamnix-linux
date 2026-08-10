@@ -5959,20 +5959,39 @@ res_count: uint64 = 0
 res_pkg_idx:   Array[256, uint64]    # repo index into pkg_*[i]
 res_topo_rank: Array[256, uint64]    # 0 = deepest dep, last = the root
 
+# Per-resolved-package "this one was a @-pinned root on the command
+# line". Before `hpm install` took several operands the installer could
+# infer this positionally — the single root was the LAST entry in topo
+# order — but with N roots there are N entries scattered through the
+# topo order, and only the ones the user actually wrote `@<ver>` on may
+# be pinned. So the pin flag is carried per resolved package instead of
+# re-derived from position.
+res_pin:       Array[256, int32]
+
 # BFS queue of pending requirements. Each entry: (name_off into idx_buf
 # or scratch, name_len, op, ver_off, ver_len). For requirements that
 # came from the user CLI (the root), name lives in res_root_name_buf.
-# Sized 512: every dep term passes through the queue, and the
-# coreutils metapackage alone enqueues 83 leaves (each of which then
-# re-enqueues its hamnix-init dep), so the worst-case enqueue count
-# for the hamnix-base closure is a few hundred.
-QUEUE_MAX: uint64 = 512
-q_name_ptr:   Array[512, uint64]      # Ptr[uint8] to the name (or 0)
-q_name_len:   Array[512, uint64]
-q_op:         Array[512, int32]
-q_ver_ptr:    Array[512, uint64]
-q_ver_len:    Array[512, uint64]
-q_parent:     Array[512, uint64]      # res index of the package that
+#
+# Sizing: every dep term passes through the queue, and the coreutils
+# metapackage alone enqueues 83 leaves (each of which then re-enqueues
+# its hamnix-init dep), so the worst-case enqueue count for the
+# hamnix-base closure is a few hundred. The queue is NOT a ring —
+# q_head only ever advances and slots are never reused — so QUEUE_MAX
+# bounds the TOTAL number of pushes in one solve, not the number of
+# requirements pending at any instant. That makes it the tightest cap
+# in the solver: 512 left the hamnix-base closure with only ~100 pushes
+# of slack, and now that `hpm install` seeds the queue with SEVERAL
+# roots and resolves their union as one closure, the union's dep-term
+# count (plus one push per root) can exceed what 512 held. 1024 keeps
+# roughly a 2x margin over the whole-OS closure; RES_MAX (256) still
+# bounds how many of those pushes can become resolved packages.
+QUEUE_MAX: uint64 = 1024
+q_name_ptr:   Array[1024, uint64]     # Ptr[uint8] to the name (or 0)
+q_name_len:   Array[1024, uint64]
+q_op:         Array[1024, int32]
+q_ver_ptr:    Array[1024, uint64]
+q_ver_len:    Array[1024, uint64]
+q_parent:     Array[1024, uint64]     # res index of the package that
                                        # enqueued this req (used for
                                        # topo edges); 0xffff = root
 q_head:       uint64 = 0
@@ -6328,7 +6347,7 @@ def _find_in_installed(cand_name: Ptr[uint8], cand_name_len: uint64) -> int64:
 def _queue_push(name_ptr: Ptr[uint8], name_len: uint64,
                 op: int32, ver_ptr: Ptr[uint8], ver_len: uint64,
                 parent: uint64) -> int32:
-    if q_tail >= 512:
+    if q_tail >= 1024:
         write_str(2, "hpm: solve queue overflow\n")
         return -1
     q_name_ptr[q_tail] = cast[uint64](name_ptr)
@@ -6382,10 +6401,26 @@ def _topo_sort():
     # topo_order is now [deps..., root] which is the install order.
 
 
-# Solve: build res_* by BFS from the user's root spec. Returns 0 on
+# Solve: build res_* by BFS from the user's root spec(s). Returns 0 on
 # success, -1 on failure.
+#
+# The solve is split into reset / add-root / run rather than being one
+# function, because `hpm install` accepts SEVERAL package names on one
+# command line and they have to become ONE closure, not N closures.
+# Resolving each root in its own solve would re-resolve — and, worse,
+# re-download and re-extract — every dependency the roots share, which
+# for this userland is nearly all of them (`hamnix-ls hamnix-cat` both
+# pull hamnix-init). Seeding the queue with every root BEFORE draining
+# it hands that de-duplication to the machinery that already does it:
+# the _find_in_resolved / _find_in_installed checks at the top of the
+# BFS loop see the second root's copy of a shared dep as
+# already-resolved and record a topo edge instead of a second install.
+# It also means a bad name among the roots fails the whole solve — so
+# `hpm install good-pkg no-such-pkg` reports the bad one BY NAME (from
+# the "no candidate for" arm below) and installs nothing, instead of
+# installing the good half and leaving the user to notice the rest.
 
-def _solve(root_spec: Ptr[uint8]) -> int32:
+def _solve_reset():
     res_count = 0
     q_head = 0
     q_tail = 0
@@ -6394,8 +6429,21 @@ def _solve(root_spec: Ptr[uint8]) -> int32:
     az: uint64 = 0
     while az < 256:
         adj_count[az] = 0
+        res_pin[az] = 0
         az = az + 1
+    # q_scratch_strs is a bump allocator for the queue's name/version
+    # strings and is only live for the duration of one solve. cmd_update
+    # and cmd_rollback drive several solves per process, so it has to
+    # rewind here with the queue it backs — otherwise a long update run
+    # walks it to the "dep scratch overflow" wall for no reason.
+    q_scratch_n = 0
 
+
+# Queue one user-supplied root spec ("<name>", "<name>@<ver>", or a
+# "<name><op><ver>" constraint). Must be called after _solve_reset and
+# before _solve_run. Returns 0 on success, -1 on a malformed spec.
+
+def _solve_add_root(root_spec: Ptr[uint8]) -> int32:
     # Parse the root spec into name/op/ver.
     spec_len: uint64 = strlen_u8(root_spec)
     # Pre-process: spec is either "<name>" or "<name>@<ver>" (CLI),
@@ -6427,12 +6475,22 @@ def _solve(root_spec: Ptr[uint8]) -> int32:
         write_str(2, "hpm: malformed package spec\n")
         return -1
 
-    rn_len: uint64 = strlen_u8(&root_name_buf[0])
-    rv_len: uint64 = strlen_u8(&root_ver_buf[0])
-    if _queue_push(&root_name_buf[0], rn_len, root_op,
-                   &root_ver_buf[0], rv_len, 0xffff) != 0:
+    # Push through the per-entry scratch rather than pointing the queue
+    # at root_name_buf/root_ver_buf: those are single shared buffers, so
+    # with more than one root the second _solve_add_root would overwrite
+    # the name the first root's still-pending queue entry points at.
+    # _push_dep_with_scratch copies, which is exactly what deps already
+    # rely on for the same reason.
+    if _push_dep_with_scratch(&root_name_buf[0], &root_ver_buf[0],
+                              root_op, 0xffff) != 0:
         return -1
+    return 0
 
+
+# Drain the queue: greedy BFS over the seeded roots, then topo-sort the
+# resolved set into install order. Returns 0 on success, -1 on failure.
+
+def _solve_run() -> int32:
     while q_head < q_tail:
         # Pop one req.
         np: Ptr[uint8] = cast[Ptr[uint8]](q_name_ptr[q_head])
@@ -6536,6 +6594,27 @@ def _solve(root_spec: Ptr[uint8]) -> int32:
 
     _topo_sort()
     return 0
+
+
+# Single-root solve — the shape every caller outside `hpm install` uses
+# (update, pin, rollback all drive exactly one package at a time).
+def _solve(root_spec: Ptr[uint8]) -> int32:
+    _solve_reset()
+    if _solve_add_root(root_spec) != 0:
+        return -1
+    return _solve_run()
+
+
+# Multi-root solve: `specs` is an array of `n` Ptr[uint8] (argv slots),
+# all seeded into one queue so the closure is their union.
+def _solve_multi(specs: Ptr[uint64], n: uint64) -> int32:
+    _solve_reset()
+    i: uint64 = 0
+    while i < n:
+        if _solve_add_root(cast[Ptr[uint8]](specs[i])) != 0:
+            return -1
+        i = i + 1
+    return _solve_run()
 
 
 # Per-queue scratch backing for dep names + versions. Each pushed
@@ -7244,7 +7323,22 @@ def _install_one_by_repo_idx(pi: uint64, pinned: int32) -> int32:
 
 # Solver-driven install: resolve the whole closure, then install in
 # topological order.
-def cmd_install_solved(spec: Ptr[uint8]) -> int32:
+#
+# `hpm install` takes one or more package names, so the operands come
+# in as an argv slice. cmd_install_solved (below) is the single-package
+# wrapper the internal callers — update, pin, rollback — still use.
+#
+# INSTALL_ROOTS_MAX is a sanity bound on one command line, not a real
+# resource limit: the roots are argv pointers (stable for the life of
+# the process, so they are stored rather than copied) and each costs
+# one queue slot. 64 is far more than anyone types and leaves QUEUE_MAX
+# entirely to the dependency terms.
+INSTALL_ROOTS_MAX: uint64 = 64
+install_root_ptr: Array[64, uint64]
+install_root_n:   uint64 = 0
+
+
+def cmd_install_solved_multi(specs: Ptr[uint64], n: uint64) -> int32:
     if _load_index_cache() != 0:
         write_str(2, "hpm: no cached index; run `hpm refresh` first\n")
         return 1
@@ -7252,8 +7346,34 @@ def cmd_install_solved(spec: Ptr[uint8]) -> int32:
     if lrc < 0:
         return 1
 
-    if _solve(spec) != 0:
+    # One solve over all the roots — see the _solve_reset comment for
+    # why this is not a loop over single-root solves. It also means the
+    # failure arms inside the solver (unknown name, version conflict)
+    # abort BEFORE the first package is unpacked, whichever root is at
+    # fault.
+    if _solve_multi(specs, n) != 0:
         return 1
+
+    # Mark the @-pinned roots. `@<ver>` pins only the package the user
+    # named, never its deps, so this looks each root's name up in the
+    # resolved set rather than assuming a position in topo order. A root
+    # that resolved to nothing (already installed at a satisfying
+    # version) simply has no entry to mark.
+    ri_i: uint64 = 0
+    while ri_i < n:
+        sp: Ptr[uint8] = cast[Ptr[uint8]](specs[ri_i])
+        nlen: uint64 = 0
+        pinned: int32 = 0
+        while sp[nlen] != 0:
+            if sp[nlen] == 64:                       # '@'
+                pinned = 1
+                break
+            nlen = nlen + 1
+        if pinned != 0:
+            found: int64 = _find_in_resolved(sp, nlen)
+            if found >= 0:
+                res_pin[cast[uint64](found)] = 1
+        ri_i = ri_i + 1
 
     write_str(1, "hpm: resolved ")
     write_dec_u64(1, res_count)
@@ -7269,34 +7389,28 @@ def cmd_install_solved(spec: Ptr[uint8]) -> int32:
         write_str(1, "\n")
         ti = ti + 1
 
-    # Determine if the root was @-pinned.
-    pinned_root: int32 = 0
-    si: uint64 = 0
-    while spec[si] != 0:
-        if spec[si] == 64:
-            pinned_root = 1
-            break
-        si = si + 1
-
-    # Install in topological order. Root is the LAST entry. Pinning
-    # only applies to the root (per spec — `@<ver>` on root pins root).
+    # Install in topological order — every package's deps precede it,
+    # which holds for a multi-root closure exactly as it did for one
+    # root. Pinning comes from res_pin, set above.
     ii: uint64 = 0
     while ii < topo_n:
         ri: uint64 = topo_order[ii]
         pi: uint64 = res_pkg_idx[ri]
-        is_root: int32 = 0
-        if ii + 1 == topo_n:
-            is_root = 1
-        pin_v: int32 = 0
-        if is_root != 0 and pinned_root != 0:
-            pin_v = 1
-        if _install_one_by_repo_idx(pi, pin_v) != 0:
+        if _install_one_by_repo_idx(pi, res_pin[ri]) != 0:
             write_str(2, "hpm: install of ")
             sys_write(2, &idx_buf[pkg_name_off[pi]], pkg_name_len[pi])
             write_str(2, " failed; closure aborted (previously installed packages remain)\n")
             return 1
         ii = ii + 1
     return 0
+
+
+# Single-package install — kept for the internal callers (update, pin,
+# rollback) that drive one package at a time.
+def cmd_install_solved(spec: Ptr[uint8]) -> int32:
+    one_root: Array[1, uint64]
+    one_root[0] = cast[uint64](spec)
+    return cmd_install_solved_multi(&one_root[0], 1)
 
 
 # =====================================================================
@@ -8167,7 +8281,21 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         if ai >= argc:
             write_str(2, "hpm: install requires a package name\n")
             return 1
-        return cmd_install_solved(cast[Ptr[uint8]](argv[cast[uint64](ai)]))
+        # `install` takes SEVERAL package names — collect every
+        # remaining operand, not just argv[ai]. Reading only the first
+        # one silently dropped the rest: `hpm install a b` installed a
+        # and never mentioned b. They are resolved as a single closure
+        # so shared dependencies are fetched once (see _solve_multi).
+        install_root_n = 0
+        while ai < argc:
+            if install_root_n >= 64:
+                write_str(2, "hpm: too many packages in one install (max 64)\n")
+                return 1
+            install_root_ptr[install_root_n] = argv[cast[uint64](ai)]
+            install_root_n = install_root_n + 1
+            ai = ai + 1
+        return cmd_install_solved_multi(&install_root_ptr[0],
+                                        install_root_n)
     if _streq(cmd, cast[Ptr[uint8]]("remove")) != 0:
         if _not_hostowner() != 0:
             write_str(2, "hpm: package removal requires hostowner. Try `newshell hostowner`.\n")
