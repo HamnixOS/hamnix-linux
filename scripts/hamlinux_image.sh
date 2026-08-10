@@ -41,6 +41,7 @@ APPS=(
     tar gzip base64 cksum md5sum
     more less
     bc cal
+    ifconfig route ping host curl wget hpm
 )
 
 # The desktop. wsysd is the compositor (user/wsysd.ad — the userland half of
@@ -103,8 +104,14 @@ fi
 # for stdin, which is not reproducible.
 install -m644 "${HAMLINUX_RC:-etc/rc.boot.linux}" "$ROOT/etc/rc.boot"
 for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
-         hamde os-release lsb-release debian_version profile; do
+         hamde os-release lsb-release debian_version profile resolv.conf \
+         services protocols networks host.conf; do
     [ -f "etc/$f" ] && install -m644 "etc/$f" "$ROOT/etc/$f"
+done
+# The package manager's channel list and trust roots.
+mkdir -p "$ROOT/etc/hpm" "$ROOT/var/lib/hpm"
+for f in channels trusted.pub local-trusted.pub; do
+    [ -f "etc/hpm/$f" ] && install -m644 "etc/hpm/$f" "$ROOT/etc/hpm/$f"
 done
 # The graphical runlevel. Kept separate from Hamnix's etc/rc.d/rc.5, which
 # brings the DE up through the declarative service supervisor and the kernel
@@ -126,7 +133,7 @@ KVER="$(basename "${KERNEL:-}" 2>/dev/null | sed 's/^vmlinuz-//')"
 KERNEL="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
 KVER="$(basename "$KERNEL" | sed 's/^vmlinuz-//')"
 MODPROBE=/usr/sbin/modprobe
-WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk ext4 overlay}"
+WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk ext4 overlay squashfs loop}"
 : > "$ROOT/etc/modules"
 if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
     mkdir -p "$ROOT/lib/modules/$KVER"

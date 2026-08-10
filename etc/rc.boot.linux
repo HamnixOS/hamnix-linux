@@ -42,6 +42,21 @@ echo 'rc.boot: kernel is Linux; userland is Adder'
 
 echo 'rc.boot: handing off to an interactive shell'
 
+# --- networking -----------------------------------------------------
+# /net is a file tree (user/linux-net.c), but the INTERFACE is configured
+# through sys_netcfg -- deliberately not on the tree, in Hamnix as here
+# (HANDOFF §3.3). These are the addresses QEMU's user-mode network hands out;
+# a real machine gets its own, and the three lines do not change.
+#
+# STATIC, not DHCP: the kernel's own ip=dhcp runs before the initramfs has
+# loaded virtio_net, so it configures nothing, and a DHCP client is a program
+# this line does not have yet. Named here rather than hidden, because on real
+# hardware this is the line that will need replacing.
+ifconfig eth0 10.0.2.15 netmask 255.255.255.0
+ifconfig gw 10.0.2.2
+ifconfig dns 10.0.2.3
+echo 'rc.boot: network configured'
+
 # --- the graphical runlevel -----------------------------------------
 # Starts the scene compositor and the desktop session. Comment this line out
 # for a text-only boot; nothing below the compositor depends on it.

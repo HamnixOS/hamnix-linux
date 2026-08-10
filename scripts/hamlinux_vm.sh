@@ -50,6 +50,12 @@ COMMON=(
     # (EV_ABS and EV_REL), so a real machine's relative mouse works too.
     -device virtio-keyboard-pci
     -device virtio-tablet-pci
+    # Networking. QEMU's user-mode stack needs no host privilege and puts the
+    # guest on 10.0.2.0/24 with the gateway at .2 and a DNS forwarder at .3 --
+    # which is why etc/rc.boot.linux configures exactly those addresses. On
+    # real hardware the same three ifconfig lines take the machine's own.
+    -netdev user,id=n0
+    -device virtio-net-pci,netdev=n0
 )
 
 # The Debian namespace lives on its own filesystem image, attached as a plain
