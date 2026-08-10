@@ -116,6 +116,158 @@ struct wshm {
 
 static struct wshm *shm;
 
+/* ------------------------------------------------------------------ *
+ * WINDOW BACKBUFFERS — the v2 blit protocol
+ *
+ * devwsys.ad's #442 reshape: "kill the whole-window text/markup draw path and
+ * move rasterization client-side. devwsys becomes a BLITTER: clients render
+ * into a private backbuffer and submit (rect, src_image) blits + dirty-rect
+ * invalidations. The compositor never sees a widget tree."  The wire format,
+ * written to /dev/wsys/<wid>/draw/ctl, is quoted there and implemented here:
+ *
+ *   'B' x0 y0 x1 y1 fmt <pixels>   opaque blit into the backbuffer
+ *   'D' x0 y0 x1 y1                dirty-rect invalidation
+ *   'C' hot_x hot_y w h fmt <px>   cursor sprite (not yet composited)
+ *
+ * Integers are little-endian int32. A client opts in with `version 2` on its
+ * window ctl; the compositor walks the v1 scene path or this one per window.
+ *
+ * THIS IS WHAT LETS A FOREIGN TOOLKIT ONTO THE SCREEN. The v1 scene is a text
+ * display list capped at 16 KiB -- it can express a widget tree and cannot
+ * express a photograph, so a browser or anything else that renders its own
+ * pixels has no way in without this.
+ *
+ * The buffers live in their OWN mapping, not in the window table: a
+ * screen-sized surface is 8 MiB and thirty-two of them would be a quarter of
+ * a gigabyte of shared memory for windows that mostly do not use it. Four
+ * slots are claimed on demand.
+ * ------------------------------------------------------------------ */
+#define BB_SLOTS   4
+#define BB_W       1920
+#define BB_H       1080
+#define BB_BYTES   ((size_t)BB_W * BB_H * 4)
+
+struct bbhdr {
+    uint32_t used;
+    int32_t  wid;
+    int32_t  w, h;
+    uint32_t gen;          /* ++ on every dirty-rect submission */
+};
+
+struct bbshm {
+    uint32_t magic;
+    struct bbhdr slot[BB_SLOTS];
+    uint8_t  px[BB_SLOTS][BB_W * BB_H * 4];
+};
+
+static struct bbshm *bb;
+
+static int bb_attach(void)
+{
+    if (bb) return 0;
+    const char *p = getenv("HAMWSYS_BB");
+    const char *cands[4];
+    int nc = 0;
+    if (p && *p) cands[nc++] = p;
+    cands[nc++] = "/srv/wsys.bb";
+    cands[nc++] = "/dev/shm/hamnix-wsys-bb";
+    cands[nc++] = "/tmp/hamnix-wsys-bb";
+    int fd = -1;
+    for (int i = 0; i < nc && fd < 0; i++)
+        fd = open(cands[i], O_RDWR | O_CREAT, 0666);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) < 0) { close(fd); return -1; }
+    if ((uint64_t)st.st_size < sizeof(struct bbshm)
+        && ftruncate(fd, (off_t)sizeof(struct bbshm)) < 0) {
+        close(fd); return -1;
+    }
+    void *m = mmap(NULL, sizeof(struct bbshm), PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    int e = errno;
+    close(fd);
+    if (m == MAP_FAILED) { errno = e; return -1; }
+    bb = (struct bbshm *)m;
+    if (bb->magic != 0x42425746u) {
+        memset(bb, 0, sizeof *bb);
+        bb->magic = 0x42425746u;
+    }
+    return 0;
+}
+
+static int bb_for(int wid, int create, int w, int h)
+{
+    if (bb_attach() < 0) return -1;
+    for (int i = 0; i < BB_SLOTS; i++)
+        if (bb->slot[i].used && bb->slot[i].wid == wid)
+            return i;
+    if (!create) return -1;
+    for (int i = 0; i < BB_SLOTS; i++) {
+        if (bb->slot[i].used) continue;
+        memset(&bb->slot[i], 0, sizeof bb->slot[i]);
+        memset(bb->px[i], 0, BB_BYTES);
+        bb->slot[i].used = 1;
+        bb->slot[i].wid  = wid;
+        bb->slot[i].w    = w > 0 && w <= BB_W ? w : BB_W;
+        bb->slot[i].h    = h > 0 && h <= BB_H ? h : BB_H;
+        return i;
+    }
+    errno = ENOSPC;
+    return -1;
+}
+
+static void bb_release(int wid)
+{
+    if (!bb) return;
+    for (int i = 0; i < BB_SLOTS; i++)
+        if (bb->slot[i].used && bb->slot[i].wid == wid)
+            bb->slot[i].used = 0;
+}
+
+static int32_t le32(const uint8_t *p)
+{
+    return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8)
+                   | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
+}
+
+/* One 'B' blit. `n` is what is available; returns the bytes consumed, or 0 if
+ * the record is incomplete (the caller carries the remainder to the next
+ * write -- a client is free to split a blit across write(2) calls). */
+static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
+{
+    if (n < 18) return 0;
+    int32_t x0 = le32(b + 1), y0 = le32(b + 5);
+    int32_t x1 = le32(b + 9), y1 = le32(b + 13);
+    uint8_t fmt = b[17];
+    if (x1 <= x0 || y1 <= y0) return 18;
+    int bpp = (fmt == 3) ? 1 : 4;                /* FMT_A8 is one byte */
+    uint64_t need = (uint64_t)(x1 - x0) * (y1 - y0) * bpp;
+    if (n < 18 + need) return 0;
+
+    int slot = bb_for(v->wid, 1, v->w, v->h);
+    if (slot < 0) return 18 + need;
+    struct bbhdr *h = &bb->slot[slot];
+    const uint8_t *src = b + 18;
+    for (int32_t y = y0; y < y1; y++) {
+        if (y < 0 || y >= h->h) continue;
+        for (int32_t x = x0; x < x1; x++) {
+            if (x < 0 || x >= h->w) continue;
+            const uint8_t *s = src + ((uint64_t)(y - y0) * (x1 - x0)
+                                      + (x - x0)) * bpp;
+            uint8_t *d = &bb->px[slot][((uint64_t)y * h->w + x) * 4];
+            if (fmt == 2) {                       /* FMT_BGRA8888 */
+                d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+            } else if (fmt == 3) {                /* FMT_A8 */
+                d[0] = d[1] = d[2] = s[0]; d[3] = 255;
+            } else {                              /* FMT_RGBA8888 */
+                d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+            }
+        }
+    }
+    h->gen++;
+    return 18 + need;
+}
+
 /* The wid this process got from its last `newwindow`.  Deliberately NOT in
  * the shared segment: two processes allocating at once would each read the
  * other's answer back.  lib/hamui.ad writes and reads in two separate opens,
@@ -327,7 +479,9 @@ static int classify(const char *path, struct hamwsys_file *f)
             else if (!strcmp(l, "event"))   leaf = HAMWSYS_WIN_EVENT;
             else if (!strcmp(l, "text"))    leaf = HAMWSYS_WIN_TEXT;
             else if (!strcmp(l, "cmd"))     leaf = HAMWSYS_WIN_CMD;
-            else                            leaf = HAMWSYS_SINK;  /* wctl, draw/… */
+            else if (!strcmp(l, "draw/ctl")) leaf = HAMWSYS_DRAWCTL;
+            else if (!strcmp(l, "backbuffer")) leaf = HAMWSYS_BACKBUF;
+            else                            leaf = HAMWSYS_SINK;  /* wctl, … */
         } else {
             return HAMWSYS_NONE;
         }
@@ -457,16 +611,21 @@ static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v)
      * This is how the compositor learns a window's geometry and z — it has no
      * private syscall, only the files every client has.
      *
-     *   "<wid> <x> <y> <w> <h> <z> <decorate> <visible> <proto> <scene_gen>\n"
+     *   "<wid> <x> <y> <w> <h> <z> <decorate> <visible> <proto> <scene_gen>
+     *    <backbuffer_gen>\n"
      *
-     * scene_gen is the frame counter: it changes only on `commit`, so a
-     * compositor that remembers it repaints exactly the windows that moved. */
+     * The two generation counters are the frame counters: scene_gen changes
+     * only on `commit`, backbuffer_gen only on a v2 dirty-rect, so a
+     * compositor that remembers them repaints exactly the windows that
+     * changed and rasterizes nothing else. */
     uint8_t b[128];
     uint64_t n = 0;
-    int32_t fields[10] = { v->wid, v->x, v->y, v->w, v->h, v->z,
+    int bslot = bb_for(v->wid, 0, 0, 0);
+    int32_t fields[11] = { v->wid, v->x, v->y, v->w, v->h, v->z,
                            v->decorate, v->visible, v->proto,
-                           (int32_t)v->scene_gen };
-    for (int i = 0; i < 10; i++) {
+                           (int32_t)v->scene_gen,
+                           bslot >= 0 ? (int32_t)bb->slot[bslot].gen : 0 };
+    for (int i = 0; i < 11; i++) {
         if (i) b[n++] = ' ';
         n = put_int(b, n, fields[i]);
     }
@@ -517,6 +676,25 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     f->off = 0;
 
     switch (f->leaf) {
+    case HAMWSYS_BACKBUF: {
+        struct wwin *v = win_find(f->wid);
+        if (!v) { errno = ENOENT; return -1; }
+        if (bb_for(v->wid, 0, 0, 0) < 0 && !for_write) { errno = ENOENT; return -1; }
+        return 0;
+    }
+    case HAMWSYS_DRAWCTL: {
+        struct wwin *v = win_find(f->wid);
+        if (!v) { errno = ENOENT; return -1; }
+        if (for_write) {
+            /* Opening the draw sink IS the v2 opt-in as far as the compositor
+             * is concerned: a client that blits pixels is not going to send a
+             * scene, and treating it as v1 would show an empty window. */
+            v->proto = 2;
+            bb_for(v->wid, 1, v->w, v->h);
+            shm->gen++;
+        }
+        return 0;
+    }
     case HAMWSYS_WIN_CTL: case HAMWSYS_WIN_SCENE: case HAMWSYS_WIN_KEYS:
     case HAMWSYS_WIN_POINTER: case HAMWSYS_WIN_EVENT: case HAMWSYS_WIN_TEXT:
     case HAMWSYS_WIN_CMD: {
@@ -580,6 +758,20 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
     if (q)
         return (int64_t)ring_read(q, buf, cap);
 
+    if (f->leaf == HAMWSYS_BACKBUF) {
+        /* The v2 pixels, straight out of the shared surface. RGBA8888, row
+         * major, the window's own width -- the compositor seeks and reads it
+         * exactly like any other file. */
+        int slot = bb_for(f->wid, 0, 0, 0);
+        if (slot < 0) return 0;
+        uint64_t size = (uint64_t)bb->slot[slot].w * bb->slot[slot].h * 4;
+        if (f->off >= size) return 0;
+        uint64_t k = size - f->off;
+        if (k > cap) k = cap;
+        memcpy(buf, bb->px[slot] + f->off, (size_t)k);
+        f->off += k;
+        return (int64_t)k;
+    }
     if (!f->snap || f->off >= f->snaplen)
         return 0;
     uint64_t n = f->snaplen - f->off;
@@ -757,6 +949,61 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
         ring_write(q, buf, n);
         return (int64_t)n;
     }
+    case HAMWSYS_DRAWCTL: {
+        struct wwin *v = win_find(f->wid);
+        if (!v) { errno = ENOENT; return -ENOENT; }
+        /* A client may split a record across write(2) calls, so an incomplete
+         * one is CARRIED rather than dropped -- a torn blit would be a band of
+         * garbage across the window, which is exactly the kind of failure that
+         * looks like a driver bug and is not. */
+        static uint8_t carry[1 << 20];
+        static uint64_t carried;
+        uint64_t total = carried + n;
+        if (total > sizeof carry) {
+            carried = 0;
+            errno = EMSGSIZE;
+            return -EMSGSIZE;
+        }
+        memcpy(carry + carried, buf, (size_t)n);
+        carried = total;
+
+        uint64_t i = 0;
+        while (i < carried) {
+            uint8_t verb = carry[i];
+            uint64_t used = 0;
+            if (verb == 'B') {
+                used = bb_blit(v, carry + i, carried - i);
+            } else if (verb == 'D') {
+                if (carried - i < 17) break;
+                int slot = bb_for(v->wid, 1, v->w, v->h);
+                if (slot >= 0) bb->slot[slot].gen++;
+                shm->gen++;
+                used = 17;
+            } else if (verb == 'C') {
+                if (carried - i < 18) break;
+                int32_t cw = le32(carry + i + 9), ch = le32(carry + i + 13);
+                uint8_t fmt = carry[i + 17];
+                int bpp = (fmt == 3) ? 1 : 4;
+                uint64_t need = (uint64_t)cw * ch * bpp;
+                if (carried - i < 18 + need) break;
+                used = 18 + need;      /* accepted; the compositor draws its
+                                          own cursor for now */
+            } else {
+                /* Not a verb we know. Resynchronising by scanning would invent
+                 * a frame out of noise, so drop what is buffered and say so. */
+                carried = 0;
+                errno = EINVAL;
+                return -EINVAL;
+            }
+            if (used == 0) break;      /* incomplete: wait for more */
+            i += used;
+        }
+        if (i > 0) {
+            memmove(carry, carry + i, (size_t)(carried - i));
+            carried -= i;
+        }
+        return (int64_t)n;
+    }
     case HAMWSYS_SINK: {
         struct wsink *s = sink_find(f->name, 1);
         if (!s) { errno = ENOSPC; return -ENOSPC; }
@@ -805,6 +1052,7 @@ int32_t hamwsys_free(int32_t wid)
     if (shm_attach() < 0) return -1;
     struct wwin *v = win_find(wid);
     if (!v) { errno = ENOENT; return -1; }
+    bb_release(wid);
     v->used = 0;
     if (shm->focus_wid == wid) shm->focus_wid = 0;
     shm->gen++;

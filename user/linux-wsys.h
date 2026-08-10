@@ -26,6 +26,8 @@ enum {
     HAMWSYS_WIN_EVENT,    /* /dev/wsys/<wid>/event                           */
     HAMWSYS_WIN_TEXT,     /* /dev/wsys/<wid>/text                            */
     HAMWSYS_WIN_CMD,      /* /dev/wsys/<wid>/cmd                             */
+    HAMWSYS_DRAWCTL,      /* /dev/wsys/<wid>/draw/ctl — the v2 blit protocol */
+    HAMWSYS_BACKBUF,      /* /dev/wsys/<wid>/backbuffer — the v2 pixels       */
     HAMWSYS_SINK,         /* every other /dev/wsys/... path — a named buffer */
 };
 

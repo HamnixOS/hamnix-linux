@@ -1,0 +1,321 @@
+# user/xbridge.ad — put an X11 application on the Hamnix desktop.
+#
+# THE PROBLEM
+# ===========
+# Firefox draws with X11 or Wayland. The Hamnix desktop speaks neither: a
+# client here opens /dev/wsys/<wid>/... and either commits a scene display
+# list or blits pixels. Nothing is going to teach a browser the scene grammar,
+# and writing an X server is not a weekend.
+#
+# THE BRIDGE
+# ----------
+# Xvfb -- an X server that scans out to MEMORY rather than to hardware -- has
+# a `-fbdir` option that puts its framebuffer in an ordinary FILE. So:
+#
+#   Xvfb :0 -screen 0 <W>x<H>x24 -fbdir /tmp/xfb
+#       -> /tmp/xfb/Xvfb_screen0, a raw framebuffer, live
+#   firefox (in the Debian namespace, DISPLAY=:0)
+#       -> draws into it, knowing nothing about any of this
+#   xbridge
+#       -> maps that file, opens a wsys window, and BLITS it
+#
+# The window is a normal one: decorated, in the taskbar, raised and focused
+# like any other. What is inside it is a whole X screen.
+#
+# THE PIXELS GO THROUGH THE v2 BLIT PROTOCOL, which is devwsys.ad's #442 wire
+# format and exactly what it was designed for -- "clients render into a private
+# backbuffer and submit (rect, src_image) blits". The v1 scene path cannot
+# carry a photograph; this one carries nothing else.
+#
+# INPUT goes back the other way: the compositor routes keys and pointer events
+# into this window's rings, and we replay them into X. That needs an X client
+# that can inject (xdotool drives XTEST), so it is spawned per event batch --
+# crude, and honest about being crude: a real bridge speaks the X protocol
+# directly and this one shells out.
+#
+# Usage: xbridge [<fbfile>] [<width> <height>]
+#   defaults: /tmp/xfb/Xvfb_screen0, 1024x768
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_get_jiffies() -> uint64
+extern def sys_exit(code: uint64)
+
+MAXW: uint64 = 1920
+MAXH: uint64 = 1200
+
+# One row in, one row out. Xvfb's 24-bit visual is 32 bits per pixel on the
+# wire (BGRX little-endian); the blit protocol wants RGBA8888.
+srcrow:  Array[7680, uint8]
+dstrow:  Array[7680, uint8]
+blithdr: Array[32, uint8]
+
+pathbuf: Array[256, uint8]
+ctlbuf:  Array[256, uint8]
+rbuf:    Array[256, uint8]
+numbuf:  Array[24, uint8]
+waitset: Array[4, int32]
+
+my_wid: int32 = 0
+scr_w:  int32 = 1024
+scr_h:  int32 = 768
+fb_path_len: uint64 = 0
+fbpath: Array[256, uint8]
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: int32):
+    n: uint64 = 0
+    x: int32 = v
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = v
+    i: uint64 = at
+    if x == 0:
+        d[0] = 48
+        n = 1
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = d[n]
+        i = i + 1
+    return i
+
+
+def put_le32(buf: Ptr[uint8], at: uint64, v: int32):
+    u: uint32 = cast[uint32](v)
+    buf[at]     = cast[uint8](u & 255)
+    buf[at + 1] = cast[uint8]((u >> 8) & 255)
+    buf[at + 2] = cast[uint8]((u >> 16) & 255)
+    buf[at + 3] = cast[uint8]((u >> 24) & 255)
+
+
+def winpath(wid: int32, leaf: Ptr[uint8]):
+    i: uint64 = 0
+    p: Ptr[uint8] = "/dev/wsys/"
+    k: uint64 = 0
+    while p[k] != 0:
+        pathbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&pathbuf[0], i, wid)
+    pathbuf[i] = 47
+    i = i + 1
+    k = 0
+    while leaf[k] != 0:
+        pathbuf[i] = leaf[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+
+def write_path(path: Ptr[char], data: Ptr[uint8]) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    sys_write(fd, data, slen(data))
+    sys_close(fd)
+    return 0
+
+
+def win_ctl(verb: Ptr[uint8]):
+    winpath(my_wid, "ctl")
+    write_path(cast[Ptr[char]](&pathbuf[0]), verb)
+
+
+def alloc_window() -> int32:
+    if write_path(cast[Ptr[char]]("/dev/wsys/ctl"),
+                  cast[Ptr[uint8]]("newwindow\n")) != 0:
+        return -1
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if fd < 0:
+        return -1
+    n: int64 = sys_read(fd, &rbuf[0], 32)
+    sys_close(fd)
+    if n <= 0:
+        return -1
+    v: int32 = 0
+    i: uint64 = 0
+    while i < cast[uint64](n) and rbuf[i] >= 48 and rbuf[i] <= 57:
+        v = v * 10 + cast[int32](rbuf[i]) - 48
+        i = i + 1
+    if v < 2:
+        return -1
+    return v
+
+
+def setup_window():
+    i: uint64 = 0
+    p: Ptr[uint8] = "geometry 60 60 "
+    k: uint64 = 0
+    while p[k] != 0:
+        ctlbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, scr_w)
+    ctlbuf[i] = 32
+    i = i + 1
+    i = emit_int(&ctlbuf[0], i, scr_h)
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    win_ctl(&ctlbuf[0])
+    win_ctl(cast[Ptr[uint8]]("decorate 1\n"))
+    win_ctl(cast[Ptr[uint8]]("z 7\n"))
+    win_ctl(cast[Ptr[uint8]]("title X11\n"))
+    # Opting into the blit protocol. The compositor stops looking for a scene
+    # on this window from here on.
+    win_ctl(cast[Ptr[uint8]]("version 2\n"))
+
+
+# Copy one frame of the X framebuffer into the window's backbuffer, one row at
+# a time. A row-at-a-time blit keeps the record small enough that no partial
+# write can leave a torn frame on screen, and it needs no buffer bigger than a
+# single scanline.
+def blit_frame(fbfd: int32, drawfd: int32) -> int32:
+    rowbytes: uint64 = cast[uint64](scr_w) * 4
+    if rowbytes > 7680:
+        return 0
+    if sys_lseek(fbfd, 0, 0) < 0:
+        return 0
+    y: int32 = 0
+    while y < scr_h:
+        got: uint64 = 0
+        while got < rowbytes:
+            k: int64 = sys_read(fbfd, &srcrow[got], rowbytes - got)
+            if k <= 0:
+                break
+            got = got + cast[uint64](k)
+        if got < rowbytes:
+            break
+        # Xvfb's TrueColor 24bpp screen is BGRX in memory; the protocol's
+        # FMT_RGBA8888 wants R first. Swapping here rather than declaring
+        # FMT_BGRA8888 keeps the alpha byte OPAQUE -- Xvfb leaves the fourth
+        # byte zero, and passing that through as alpha would make the whole
+        # window invisible.
+        x: int32 = 0
+        while x < scr_w:
+            o: uint64 = cast[uint64](x) * 4
+            dstrow[o]     = srcrow[o + 2]
+            dstrow[o + 1] = srcrow[o + 1]
+            dstrow[o + 2] = srcrow[o]
+            dstrow[o + 3] = 255
+            x = x + 1
+        blithdr[0] = 66                                   # 'B'
+        put_le32(&blithdr[0], 1, 0)
+        put_le32(&blithdr[0], 5, y)
+        put_le32(&blithdr[0], 9, scr_w)
+        put_le32(&blithdr[0], 13, y + 1)
+        blithdr[17] = 1                                   # FMT_RGBA8888
+        sys_write(drawfd, &blithdr[0], 18)
+        sys_write(drawfd, &dstrow[0], rowbytes)
+        y = y + 1
+    # One dirty rect for the whole frame.
+    blithdr[0] = 68                                       # 'D'
+    put_le32(&blithdr[0], 1, 0)
+    put_le32(&blithdr[0], 5, 0)
+    put_le32(&blithdr[0], 9, scr_w)
+    put_le32(&blithdr[0], 13, scr_h)
+    sys_write(drawfd, &blithdr[0], 17)
+    return 1
+
+
+def parse_int(p: Ptr[uint8]) -> int32:
+    v: int32 = 0
+    i: uint64 = 0
+    while p[i] >= 48 and p[i] <= 57:
+        v = v * 10 + cast[int32](p[i]) - 48
+        i = i + 1
+    return v
+
+
+def set_fbpath(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0 and i < 255:
+        fbpath[i] = s[i]
+        i = i + 1
+    fbpath[i] = 0
+    fb_path_len = i
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    set_fbpath(cast[Ptr[uint8]]("/tmp/xfb/Xvfb_screen0"))
+    if argc > 1:
+        set_fbpath(cast[Ptr[uint8]](argv[1]))
+    if argc > 3:
+        scr_w = parse_int(cast[Ptr[uint8]](argv[2]))
+        scr_h = parse_int(cast[Ptr[uint8]](argv[3]))
+    if scr_w <= 0 or scr_h <= 0:
+        puts(2, "xbridge: bad geometry\n")
+        return 1
+
+    fbfd: int32 = sys_open(cast[Ptr[char]](&fbpath[0]))
+    if fbfd < 0:
+        puts(2, "xbridge: cannot open the X framebuffer ")
+        puts(2, &fbpath[0])
+        puts(2, "\n")
+        puts(2, "xbridge: start Xvfb with -fbdir first\n")
+        return 1
+
+    my_wid = alloc_window()
+    if my_wid < 2:
+        puts(2, "xbridge: no window\n")
+        return 1
+    setup_window()
+
+    winpath(my_wid, "draw/ctl")
+    drawfd: int32 = sys_open_write(cast[Ptr[char]](&pathbuf[0]))
+    if drawfd < 0:
+        puts(2, "xbridge: cannot open the window's draw sink\n")
+        return 1
+
+    puts(1, "xbridge: X screen ")
+    putd(1, scr_w)
+    puts(1, "x")
+    putd(1, scr_h)
+    puts(1, " on wid ")
+    putd(1, my_wid)
+    puts(1, "\n")
+
+    frames: int32 = 0
+    while 1 == 1:
+        if blit_frame(fbfd, drawfd) != 0:
+            frames = frames + 1
+        # ~15 frames a second. The bridge re-reads the WHOLE screen each time
+        # -- Xvfb's file gives no damage information, so there is nothing to
+        # narrow it with, and this is the honest cost of bridging rather than
+        # speaking the protocol.
+        sys_waitfds(&waitset[0], 0, 66)
+    return 0

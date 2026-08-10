@@ -73,6 +73,8 @@ win_z:   Array[32, int32]
 win_dec: Array[32, int32]
 win_vis: Array[32, int32]
 win_gen: Array[32, int32]
+win_bbgen: Array[32, int32]
+win_proto: Array[32, int32]
 n_win:   uint64 = 0
 
 # --- scratch ----------------------------------------------------------
@@ -312,8 +314,9 @@ def load_window(wid: int32) -> int32:
     win_z[i]   = take_int(&ctlbuf[0], &pos[0], cap)
     win_dec[i] = take_int(&ctlbuf[0], &pos[0], cap)
     win_vis[i] = take_int(&ctlbuf[0], &pos[0], cap)
-    take_int(&ctlbuf[0], &pos[0], cap)                 # proto, unused here
-    win_gen[i] = take_int(&ctlbuf[0], &pos[0], cap)
+    win_proto[i] = take_int(&ctlbuf[0], &pos[0], cap)
+    win_gen[i]   = take_int(&ctlbuf[0], &pos[0], cap)
+    win_bbgen[i] = take_int(&ctlbuf[0], &pos[0], cap)
     n_win = n_win + 1
     return 1
 
@@ -372,6 +375,12 @@ def scan_windows():
             t = win_gen[b - 1]
             win_gen[b - 1] = win_gen[b]
             win_gen[b] = t
+            t = win_bbgen[b - 1]
+            win_bbgen[b - 1] = win_bbgen[b]
+            win_bbgen[b] = t
+            t = win_proto[b - 1]
+            win_proto[b - 1] = win_proto[b]
+            win_proto[b] = t
             b = b - 1
         a = a + 1
 
@@ -384,7 +393,7 @@ def frame_signature() -> uint64:
     h: uint64 = 14695981039346656037
     i: uint64 = 0
     while i < n_win:
-        vals: Array[9, int32]
+        vals: Array[10, int32]
         vals[0] = win_id[i]
         vals[1] = win_x[i]
         vals[2] = win_y[i]
@@ -394,8 +403,9 @@ def frame_signature() -> uint64:
         vals[6] = win_dec[i]
         vals[7] = win_vis[i]
         vals[8] = win_gen[i]
+        vals[9] = win_bbgen[i]
         k: uint64 = 0
-        while k < 9:
+        while k < 10:
             h = h ^ cast[uint64](cast[uint32](vals[k]))
             h = h * 1099511628211
             k = k + 1
@@ -444,6 +454,49 @@ def clear_desktop():
 TITLEBAR_H: int32 = 22
 
 
+# One row of a window's v2 backbuffer, read straight out of the shared surface
+# as RGBA8888.
+BBROW_CAP: uint64 = 7680                # 1920 * 4
+bbrow: Array[7680, uint8]
+
+def paint_backbuffer(i: uint64) -> int32:
+    wid: int32 = win_id[i]
+    w: int32 = win_w[i]
+    h: int32 = win_h[i]
+    winpath(wid, "backbuffer")
+    fd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
+    if fd < 0:
+        return 0
+    ox: int32 = win_x[i]
+    oy: int32 = win_y[i]
+    y: int32 = 0
+    rowbytes: uint64 = cast[uint64](w) * 4
+    if rowbytes > BBROW_CAP:
+        rowbytes = BBROW_CAP
+    while y < h:
+        got: uint64 = 0
+        while got < rowbytes:
+            k: int64 = sys_read(fd, &bbrow[got], rowbytes - got)
+            if k <= 0:
+                break
+            got = got + cast[uint64](k)
+        if got < rowbytes:
+            break
+        x: int32 = 0
+        while x < w:
+            o: uint64 = cast[uint64](x) * 4
+            r: uint32 = cast[uint32](bbrow[o])
+            g: uint32 = cast[uint32](bbrow[o + 1])
+            b: uint32 = cast[uint32](bbrow[o + 2])
+            put_px(ox + x, oy + y, (r << 16) | (g << 8) | b)
+            x = x + 1
+        y = y + 1
+    sys_close(fd)
+    if y == 0:
+        return 0
+    return 1
+
+
 def paint_window(i: uint64) -> int32:
     wid: int32 = win_id[i]
     if win_vis[i] == 0:
@@ -471,6 +524,16 @@ def paint_window(i: uint64) -> int32:
         fill_rect(ox - 1, oy, 1, h, top)
         fill_rect(ox + w, oy, 1, h, top)
         fill_rect(ox - 1, oy + h, w + 2, 1, top)
+
+    # A v2 window renders its OWN pixels and submits them as blits. The scene
+    # grammar is a text display list capped at 16 KiB: it can express a widget
+    # tree and cannot express a photograph, so anything that is not a hamui
+    # app -- a browser, a video, an X server bridged in -- arrives this way.
+    # Nothing to rasterize; blit the backbuffer. The decoration above is
+    # already drawn, so a v2 window is framed and raised like any other.
+    if win_proto[i] == 2:
+        if paint_backbuffer(i) != 0:
+            return 1
 
     if n == 0:
         # A mapped window that has not committed a frame yet: paint the client
