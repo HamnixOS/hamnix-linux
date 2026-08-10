@@ -23,6 +23,12 @@
 #                  the bridge's window, and this is what replays them into X.
 #   x11-apps       xclock/xeyes, so the bridge can be proven without waiting
 #                  for a browser to start.
+#   xwayland       X11 apps as Wayland clients.  The design's phase 4: one
+#                  protocol implemented, and X11 comes free -- XWayland is an
+#                  X server that is itself a Wayland client.  Needs -shm (the
+#                  pure-pixman screen; the default glamor path wants GL) and
+#                  -noreset (or the server resets when its last client exits
+#                  and tears the Wayland surface down with it).
 #   matchbox-window-manager
 #                  a WINDOW MANAGER. Without one, X places windows wherever
 #                  they ask and never resizes them, so Firefox's main window
@@ -74,7 +80,7 @@ command -v mmdebstrap >/dev/null || {
     echo "[distro] need mmdebstrap (apt install mmdebstrap)" >&2; exit 1; }
 
 PKGS="xvfb,x11-apps,xdotool,x11-utils,matchbox-window-manager,\
-firefox-esr,ca-certificates,dbus,fonts-dejavu-core,fonts-liberation,\
+firefox-esr,xwayland,ca-certificates,dbus,fonts-dejavu-core,fonts-liberation,\
 libgl1,libgtk-3-0,procps,coreutils,bash,less,nano,\
 gdisk,dosfstools,e2fsprogs,rsync,mtools,\
 clang,libssl-dev,libdrm-dev,libcrypt-dev"

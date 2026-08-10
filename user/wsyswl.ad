@@ -50,37 +50,50 @@
 # WHAT IS HERE AND WHAT IS NOT
 # ----------------------------
 # Here: wl_display, wl_registry, wl_compositor, wl_surface, wl_shm +
-# wl_shm_pool + wl_buffer, xdg_wm_base + xdg_surface + xdg_toplevel, wl_seat +
-# wl_pointer + wl_keyboard with a real XKB keymap over a memfd, wl_output, and
-# wl_data_device_manager and wl_subcompositor as far as their object graphs
-# (GTK will not create a seat without the first; Firefox aborts without the
-# second).
+# wl_shm_pool + wl_buffer, xdg_wm_base + xdg_surface + xdg_toplevel +
+# xdg_positioner + xdg_popup, wl_seat + wl_pointer + wl_keyboard with a real
+# XKB keymap over a memfd, wl_output + zxdg_output_manager_v1, wp_viewporter,
+# and wl_data_device_manager and wl_subcompositor as far as their object
+# graphs (GTK will not create a seat without the first; Firefox aborts without
+# the second).
+#
+# The last three exist because Firefox asks for them and stops if they are
+# missing; each one is commented where it is implemented. The rule this file
+# learned the hard way is that a Wayland client does not report a compositor
+# gap, it just goes quiet -- see the frame-callback table and
+# send_toplevel_configure for two separate ways that happened.
 #
 # Not here, and each one is a decision rather than an oversight:
 #   * DAMAGE IS IGNORED. Every commit blits the whole surface. Honouring
 #     wl_surface.damage would be a straightforward win and the place to start
-#     when this is too slow.
+#     when this is too slow -- and with a browser on the screen it IS slow.
 #   * SUBSURFACES ARE FLATTENED into the parent toplevel's window, at the
 #     parent's origin -- set_position is recorded and not used. A client that
 #     puts its content in a subsurface (Firefox does) draws correctly only
 #     because the child covers the parent.
-#   * POPUPS (xdg_popup) get a configure and no window, so a menu does not
-#     appear. Giving popups their own undecorated wsys window is the natural
-#     next step and needs positioner arithmetic this does not do.
+#   * A POPUP GETS ITS OWN undecorated window, placed from its positioner's
+#     anchor and gravity. The constraint-adjustment rules (flip/slide/resize
+#     when a menu would run off the screen) are not implemented; a popup is
+#     clamped onto the screen instead, without telling the client.
 #   * ONE OUTPUT, one seat, no clipboard, no drag and drop, no dmabuf. A
 #     client that insists on GPU buffers gets nothing; software rendering is
 #     the only path.
-#   * A RESIZE keeps the backbuffer it started with. user/linux-wsys.c fixes a
-#     window's blit stride at its first blit and offers no way to change it, so
-#     a client that grows its surface is clipped to the size it opened at.
+#   * A RESIZE IS NEVER INITIATED BY US. A client can change its own size and
+#     the backbuffer follows it (linux-wsys.c's `geometry` verb calls
+#     bb_resize), but wsysd has no way to tell this server that the user
+#     dragged a window edge, so a Wayland window cannot be resized by the
+#     desktop. A maximised client is therefore told a size up front --
+#     MAX_W/MAX_H -- rather than being offered the whole output.
 #
 # HOW FAR THIS HAS BEEN TESTED: weston-simple-shm, weston-flower and
 # weston-terminal each get their own decorated Hamnix window and render, and a
-# client that exits gives its backbuffer slot back to the next one. The INPUT
-# path below is written and its keymap is proven (libxkbcommon compiles it --
-# weston-terminal accepts the keymap fd without complaint), but no keystroke
-# has been driven through it end to end: the offscreen test harness has no
-# input device for wsysd to route from. Treat it as unproven code.
+# client that exits gives its backbuffer slot back to the next one. XWayland
+# runs against it (`Xwayland -shm -noreset`, software pixman, no GL) and X11
+# clients -- xeyes, xclock, xsetroot -- render inside its window. Firefox runs
+# as a NATIVE Wayland client with MOZ_ENABLE_WAYLAND=1 and paints its full
+# chrome. INPUT has now been driven end to end by writing the /keys and
+# /pointer rings directly (see tests/linux/wsys_poke.ad): a client receives
+# wl_pointer enter/motion/button and wl_keyboard enter/key.
 #
 # Usage: wsyswl [<socket-path>]
 #   default: $XDG_RUNTIME_DIR/wayland-0, or /tmp/wayland-0 if that is unset.
@@ -139,6 +152,12 @@ T_DATA_DEVICE: int32 = 18
 T_DATA_SOURCE: int32 = 19
 T_SUBCOMPOSITOR: int32 = 20
 T_SUBSURFACE: int32 = 21
+T_VIEWPORTER: int32 = 22
+T_VIEWPORT: int32 = 23
+T_XDG_OUT_MGR: int32 = 24
+T_XDG_OUT: int32 = 25
+T_POSITIONER: int32 = 26
+T_XDG_POPUP: int32 = 27
 
 G_COMPOSITOR: uint32 = 1
 G_SHM: uint32 = 2
@@ -147,6 +166,8 @@ G_SEAT: uint32 = 4
 G_OUTPUT: uint32 = 5
 G_DDM: uint32 = 6
 G_SUBCOMPOSITOR: uint32 = 7
+G_VIEWPORTER: uint32 = 8
+G_XDG_OUTPUT: uint32 = 9
 
 DISPLAY_ID: uint32 = 1
 
@@ -160,7 +181,15 @@ SHM_XRGB8888: uint32 = 1
 
 STATE_RELEASED: uint32 = 0
 STATE_PRESSED: uint32 = 1
+TOP_STATE_MAXIMIZED: uint32 = 1
 TOP_STATE_ACTIVATED: uint32 = 4
+
+# What a maximised toplevel is told it may have. wsysd draws a title bar and a
+# frame around every window, so "maximised" here cannot mean the whole output:
+# a client handed the full 1280x800 would have its chrome pushed off the
+# bottom of the screen by the decoration it cannot see.
+MAX_W: int32 = 1160
+MAX_H: int32 = 700
 
 BTN_LEFT: uint32 = 272
 BTN_MIDDLE: uint32 = 274
@@ -188,6 +217,7 @@ conn_seat:  Array[4, int32]
 conn_pointer: Array[4, int32]
 conn_keyboard: Array[4, int32]
 conn_xdg_wm: Array[4, int32]
+conn_output: Array[4, int32]           # the client's wl_output object, for enter
 
 TITLE_CAP: uint64 = 48
 conn_title: Array[192, uint8]          # 4 * 48
@@ -202,6 +232,11 @@ obj_d: Array[1024, int32]
 obj_e: Array[1024, int32]
 obj_f: Array[1024, int32]
 obj_g: Array[1024, int32]
+# Two more per-object words, added for xdg_positioner: placing a menu needs a
+# size, an anchor rect, an anchor, a gravity and an offset, which is ten
+# numbers, and obj_a..obj_g are seven.
+obj_h: Array[1024, int32]
+obj_i: Array[1024, int32]
 surf_parent: Array[1024, int32]
 
 # SHM MAPPINGS ARE OWNED BY THE CONNECTION, NOT BY THE POOL OBJECT.
@@ -214,10 +249,22 @@ surf_parent: Array[1024, int32]
 # was about to draw with, and the first commit found nothing to blit. So a
 # mapping lives in this per-connection table, both the pool and its buffers
 # hold an INDEX into it, and it is unmapped when the client goes.
-MAXMAP: uint64 = 8
-map_addr: Array[32, uint64]            # 4 conns * 8
-map_len:  Array[32, uint64]
-map_used: Array[32, int32]
+#
+# ...AND IT IS REFERENCE COUNTED, or a browser runs out of them. The pool
+# holds one reference and every wl_buffer cut from it holds another; the
+# mapping is unmapped when the last of them goes. Waiting for the connection
+# to close instead is fine for a client with one pool and fatal for Firefox,
+# which creates a fresh pool for every new buffer size and destroys the old
+# one immediately: the slots filled up, map_alloc started returning -1, and
+# from that moment every commit was dropped. What that looked like was a
+# browser whose window painted and whose MENUS were invisible -- the menu was
+# simply the first surface unlucky enough to be created after the table was
+# full.
+MAXMAP: uint64 = 16
+map_addr: Array[64, uint64]            # 4 conns * 16
+map_len:  Array[64, uint64]
+map_used: Array[64, int32]
+map_ref:  Array[64, int32]
 
 # RECEIVED DESCRIPTORS ARE A QUEUE, NOT A PROPERTY OF THE MESSAGE.
 #
@@ -233,6 +280,23 @@ FDQ: uint64 = 8
 fdq:     Array[32, int32]              # 4 conns * 8
 fdq_head: Array[4, uint64]
 fdq_tail: Array[4, uint64]
+
+# FRAME CALLBACKS ARE A LIST PER SURFACE, NOT ONE SLOT.
+#
+# wl_surface.frame may be called any number of times before the commit that
+# arms them; the spec says the callbacks are queued and all of them fire on the
+# next frame. Keeping only the newest looks harmless and is not: Firefox asks
+# for its INITIAL-DRAW callback on the toplevel surface while it is still
+# building the window, commits only the subsurface for a while, and asks for a
+# second one on the toplevel when it finally attaches a buffer. With one slot
+# the first request is overwritten and never answered -- and that first one is
+# the one Firefox waits on to decide the window is ready to draw. The window
+# comes up, renders one empty frame, and stops forever, with nothing in any log
+# to say why. This table is the fix.
+FCMAX: uint64 = 64
+fc_conn: Array[64, int32]              # -1 when the slot is free
+fc_surf: Array[64, int32]
+fc_cb:   Array[64, int32]
 
 out:     Array[8192, uint8]
 out_pos: uint64 = 0
@@ -262,6 +326,8 @@ w_surf: Array[12, int32]
 w_btn:  Array[12, int32]               # last pointer button mask seen
 w_in:   Array[12, int32]               # pointer has entered this surface
 w_focus: Array[12, int32]              # keyboard focus is on this surface
+w_x:    Array[12, int32]               # where this window was placed, so a
+w_y:    Array[12, int32]               # popup can be placed against it
 n_win:  uint64 = 0
 cascade: int32 = 0
 
@@ -439,6 +505,8 @@ def new_obj(c: uint64, id: uint32, otype: int32):
     obj_e[oi] = 0
     obj_f[oi] = 0
     obj_g[oi] = -1
+    obj_h[oi] = 0
+    obj_i[oi] = 0
     surf_parent[oi] = 0
 
 
@@ -458,6 +526,34 @@ def fdq_pop(c: uint64) -> int32:
     return fd
 
 
+def fc_add(c: uint64, surf: uint32, cb: uint32) -> int32:
+    i: uint64 = 0
+    while i < FCMAX:
+        if fc_conn[i] < 0:
+            fc_conn[i] = cast[int32](c)
+            fc_surf[i] = cast[int32](surf)
+            fc_cb[i] = cast[int32](cb)
+            return 1
+        i = i + 1
+    return 0
+
+
+def fc_drop_surf(c: uint64, surf: uint32):
+    i: uint64 = 0
+    while i < FCMAX:
+        if fc_conn[i] == cast[int32](c) and fc_surf[i] == cast[int32](surf):
+            fc_conn[i] = -1
+        i = i + 1
+
+
+def fc_drop_conn(c: uint64):
+    i: uint64 = 0
+    while i < FCMAX:
+        if fc_conn[i] == cast[int32](c):
+            fc_conn[i] = -1
+        i = i + 1
+
+
 def map_alloc(c: uint64) -> int32:
     i: uint64 = 0
     while i < MAXMAP:
@@ -465,9 +561,34 @@ def map_alloc(c: uint64) -> int32:
             map_used[c * MAXMAP + i] = 1
             map_addr[c * MAXMAP + i] = 0
             map_len[c * MAXMAP + i] = 0
+            map_ref[c * MAXMAP + i] = 1         # the pool's own reference
             return cast[int32](i)
         i = i + 1
     return -1
+
+
+def map_ref_up(c: uint64, mi: int32):
+    if mi < 0:
+        return
+    m: uint64 = c * MAXMAP + cast[uint64](mi)
+    if map_used[m] != 0:
+        map_ref[m] = map_ref[m] + 1
+
+
+def map_unref(c: uint64, mi: int32):
+    if mi < 0:
+        return
+    m: uint64 = c * MAXMAP + cast[uint64](mi)
+    if map_used[m] == 0:
+        return
+    map_ref[m] = map_ref[m] - 1
+    if map_ref[m] > 0:
+        return
+    if map_addr[m] != 0:
+        sys_munmap_at(map_addr[m], map_len[m])
+    map_addr[m] = 0
+    map_len[m] = 0
+    map_used[m] = 0
 
 
 def obj_get_type(c: uint64, id: uint32) -> int32:
@@ -510,6 +631,21 @@ def send_shm_format(shm: uint32, fmt: uint32):
     emit_end(s, 0)
 
 
+# wl_surface.enter(output) -- "this surface is now on that monitor".
+#
+# It reads like a hint and it is not. A toolkit learns the scale, the refresh
+# and the colour of a surface from the output it is ON, and until it has been
+# told it is on one it has no output at all: GTK's wl_surface has an empty
+# output list, so Firefox's compositor thread has nothing to schedule frames
+# against and never produces a second frame. Weston sends this the moment a
+# surface is mapped; not sending it is why Firefox drew one empty window and
+# then sat still.
+def send_surface_enter(surface: uint32, output: uint32):
+    s: uint64 = emit_begin(surface)
+    o_u32(output)
+    emit_end(s, 0)
+
+
 def send_buffer_release(buf: uint32):
     s: uint64 = emit_begin(buf)
     emit_end(s, 0)
@@ -521,16 +657,30 @@ def send_xdg_configure(xs: uint32, ser: uint32):
     emit_end(s, 0)
 
 
-def send_toplevel_configure(top: uint32, w: uint32, h: uint32):
+def send_toplevel_configure(top: uint32, w: uint32, h: uint32, maxed: int32):
     # (0,0) means "you choose your own size", which is what the initial
-    # configure must say. ACTIVATED goes on every configure so a client draws
-    # its focused decorations -- there is one window manager here and it is
-    # wsysd, so a Wayland client is never told it is inactive.
+    # configure must say for a client that has not asked for anything. ACTIVATED
+    # goes on every configure so a client draws its focused decorations -- there
+    # is one window manager here and it is wsysd, so a Wayland client is never
+    # told it is inactive.
+    #
+    # MAXIMIZED IS NOT COSMETIC. A client that sent set_maximized has made a
+    # request the compositor is required to answer, and it answers with the
+    # state in a configure -- there is no other channel. Firefox maximises its
+    # first window, and until the configure comes back carrying MAXIMIZED *and*
+    # a concrete size it renders exactly one frame (an empty client-side-
+    # decorated frame with a shadow) and then stops dead, waiting for a size it
+    # was promised. That looks identical to a client that crashed on startup.
     s: uint64 = emit_begin(top)
     o_u32(w)
     o_u32(h)
-    o_u32(4)
-    o_u32(TOP_STATE_ACTIVATED)
+    if maxed != 0:
+        o_u32(8)                                # array: two u32 states
+        o_u32(TOP_STATE_MAXIMIZED)
+        o_u32(TOP_STATE_ACTIVATED)
+    else:
+        o_u32(4)
+        o_u32(TOP_STATE_ACTIVATED)
     emit_end(s, 0)
 
 
@@ -576,6 +726,34 @@ def send_output_all(output: uint32):
     emit_end(s, 3)
     # done()
     s = emit_begin(output)
+    emit_end(s, 2)
+
+
+# zxdg_output_v1: where the monitor is, in the coordinate space a client
+# actually thinks in.
+#
+# wl_output.geometry reports PHYSICAL millimetres and wl_output.mode reports
+# the mode in device pixels; neither answers "how big is this screen in the
+# units my windows are measured in", which is what a toolkit enumerating
+# monitors wants. xdg-output does, and Firefox binds it before it lays
+# anything out. A Firefox that cannot enumerate a single monitor brings its
+# window up and then has nowhere to render it.
+def send_xdg_output_all(xo: uint32):
+    s: uint64 = emit_begin(xo)                  # logical_position
+    o_u32(0)
+    o_u32(0)
+    emit_end(s, 0)
+    s = emit_begin(xo)                          # logical_size
+    o_u32(cast[uint32](scr_w))
+    o_u32(cast[uint32](scr_h))
+    emit_end(s, 1)
+    s = emit_begin(xo)                          # name (v2)
+    o_cstr("HAM-0")
+    emit_end(s, 3)
+    s = emit_begin(xo)                          # description (v2)
+    o_cstr("Hamnix wsys display")
+    emit_end(s, 4)
+    s = emit_begin(xo)                          # done
     emit_end(s, 2)
 
 
@@ -907,7 +1085,11 @@ def win_slot(wid: int32) -> int32:
 # user/linux-wsys.c's bb_for() sizes the v2 backbuffer from the window's w/h
 # the first time a blit arrives and never resizes it -- a window that is still
 # its default 640x480 when the first blit lands is stuck at that stride.
-def win_open(c: uint64, surf: uint32, w: int32, h: int32) -> int32:
+# px/py < 0 means "you place it": a toplevel gets the cascade. A popup arrives
+# with a position already worked out from its positioner and must land exactly
+# there, undecorated -- a menu with a title bar is not a menu.
+def win_open(c: uint64, surf: uint32, w: int32, h: int32,
+             px: int32, py: int32, decor: int32) -> int32:
     if n_win >= MAXWIN:
         return -1
     wid: int32 = newwindow()
@@ -917,8 +1099,12 @@ def win_open(c: uint64, surf: uint32, w: int32, h: int32) -> int32:
     # There is no placement policy here worth the name -- wsysd owns stacking
     # and the user can move things -- but a new toplevel landing 28 pixels
     # from the last one reads as a rendering bug rather than as two windows.
-    x: int32 = 60 + cascade % 3 * 340
-    y: int32 = 60 + cascade / 3 % 2 * 340
+    x: int32 = px
+    y: int32 = py
+    if px < 0 or py < 0:
+        x = 60 + cascade % 3 * 340
+        y = 60 + cascade / 3 % 2 * 340
+        cascade = cascade + 1
     if x + w > scr_w:
         x = scr_w - w - 20
     if y + h > scr_h:
@@ -927,10 +1113,18 @@ def win_open(c: uint64, surf: uint32, w: int32, h: int32) -> int32:
         x = 0
     if y < 0:
         y = 0
-    cascade = cascade + 1
     send_geometry(wid, x, y, w, h)
-    win_ctl(wid, cast[Ptr[uint8]]("decorate 1\n"))
-    win_ctl(wid, cast[Ptr[uint8]]("z 7\n"))
+    if decor != 0:
+        win_ctl(wid, cast[Ptr[uint8]]("decorate 1\n"))
+    else:
+        win_ctl(wid, cast[Ptr[uint8]]("decorate 0\n"))
+    # A popup is BY DEFINITION on top of the window it came from, so it goes
+    # one z-band higher; a menu that opens behind its own menu bar is worse
+    # than no menu at all.
+    if decor != 0:
+        win_ctl(wid, cast[Ptr[uint8]]("z 7\n"))
+    else:
+        win_ctl(wid, cast[Ptr[uint8]]("z 8\n"))
     send_title(wid, c)
     win_ctl(wid, cast[Ptr[uint8]]("version 2\n"))
     winpath(wid, "draw/ctl")
@@ -950,8 +1144,10 @@ def win_open(c: uint64, surf: uint32, w: int32, h: int32) -> int32:
     w_btn[n_win] = 0
     w_in[n_win] = 0
     w_focus[n_win] = 0
+    w_x[n_win] = x
+    w_y[n_win] = y
     n_win = n_win + 1
-    puts(1, "wsyswl: toplevel -> wid ")
+    puts(1, "wsyswl: surface -> wid ")
     putd(1, wid)
     puts(1, "\n")
     return wid
@@ -985,6 +1181,8 @@ def win_close(wid: int32):
         w_btn[k] = w_btn[k + 1]
         w_in[k] = w_in[k + 1]
         w_focus[k] = w_focus[k + 1]
+        w_x[k] = w_x[k + 1]
+        w_y[k] = w_y[k + 1]
         k = k + 1
     n_win = n_win - 1
 
@@ -1030,17 +1228,40 @@ def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
     si: uint64 = oidx(c, eff)
     wid: int32 = obj_a[si]
     if wid <= 0:
-        wid = win_open(c, eff, width, height)
+        # A popup already knows where it goes -- its xdg_surface carries the
+        # screen position worked out from the positioner at get_popup time --
+        # and it goes there bare. Everything else is a toplevel and cascades.
+        px: int32 = -1
+        py: int32 = -1
+        decor: int32 = 1
+        role: int32 = obj_f[si]
+        if role == 0 or obj_get_type(c, cast[uint32](role)) != T_XDG_SURF:
+            # A SURFACE WITHOUT A ROLE IS NOT A WINDOW. wl_pointer.set_cursor
+            # takes an ordinary wl_surface and the client then attaches a
+            # cursor image to it and commits, which is indistinguishable from
+            # a window's first frame except for this: it never got an
+            # xdg_surface. Before this check, moving the mouse over a client
+            # opened a second 24x24 Hamnix window containing an arrow.
+            return
+        ri: uint64 = oidx(c, cast[uint32](role))
+        if obj_e[ri] == 1:
+            px = obj_h[ri]
+            py = obj_i[ri]
+            decor = 0
+        wid = win_open(c, eff, width, height, px, py, decor)
         if wid < 0:
             return
         obj_a[si] = wid
     elif obj_c[si] != width or obj_d[si] != height:
-        # A resize needs a new backbuffer and there is no way to ask for one:
-        # linux-wsys.c fixes the slot's stride at the first blit. Re-announce
-        # the geometry so the frame and the taskbar are right; the pixels are
-        # clipped to the original stride until the window is recreated. See
-        # the report -- this wants a `bb_resize` on the wsys side.
-        send_geometry(wid, 60, 60, width, height)
+        # A resize is a geometry announcement and nothing else: linux-wsys.c's
+        # `geometry` verb calls bb_resize, which re-fits the v2 backbuffer to
+        # the new size, so the stride follows the client. The window keeps the
+        # corner it was placed at -- re-announcing (60,60) would walk a popup
+        # away from the menu item that opened it.
+        rs: int32 = win_slot(wid)
+        if rs >= 0:
+            send_geometry(wid, w_x[cast[uint64](rs)], w_y[cast[uint64](rs)],
+                          width, height)
     obj_c[si] = width
     obj_d[si] = height
 
@@ -1125,6 +1346,12 @@ def do_display(c: uint64, opcode: uint32, args: Ptr[uint8], arglen: uint64):
             send_global(reg, G_OUTPUT, "wl_output", OUTPUT_VERSION)
             send_global(reg, G_DDM, "wl_data_device_manager", 3)
             send_global(reg, G_SUBCOMPOSITOR, "wl_subcompositor", 1)
+            send_global(reg, G_VIEWPORTER, "wp_viewporter", 1)
+            # v2 and not v3: at v3 the xdg_output events are latched by
+            # wl_output.done rather than by zxdg_output_v1.done, and this
+            # server sends the whole output description once and never
+            # changes it, so the older latch is the one it can honour.
+            send_global(reg, G_XDG_OUTPUT, "zxdg_output_manager_v1", 2)
 
 
 def do_registry(c: uint64, args: Ptr[uint8], arglen: uint64):
@@ -1160,11 +1387,16 @@ def do_registry(c: uint64, args: Ptr[uint8], arglen: uint64):
             send_seat_name(newid, "seat0")
     elif name == G_OUTPUT:
         new_obj(c, newid, T_OUTPUT)
+        conn_output[c] = cast[int32](newid)
         send_output_all(newid)
     elif name == G_DDM:
         new_obj(c, newid, T_DDM)
     elif name == G_SUBCOMPOSITOR:
         new_obj(c, newid, T_SUBCOMPOSITOR)
+    elif name == G_VIEWPORTER:
+        new_obj(c, newid, T_VIEWPORTER)
+    elif name == G_XDG_OUTPUT:
+        new_obj(c, newid, T_XDG_OUT_MGR)
 
 
 def do_seat(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
@@ -1173,12 +1405,21 @@ def do_seat(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
         if arglen >= 4:
             p: uint32 = ru32(args, 0)
             new_obj(c, p, T_POINTER)
-            conn_pointer[c] = cast[int32](p)
+            # THE FIRST ONE WINS. A client may bind wl_seat more than once --
+            # Firefox binds it through two registries -- and only put a
+            # listener on the first. libwayland silently DISCARDS an event
+            # addressed to a proxy with no listener, so aiming at the newest
+            # wl_pointer produced a browser that rendered perfectly and could
+            # not be clicked, with nothing logged anywhere. The first seat a
+            # toolkit binds is the one it is actually using.
+            if conn_pointer[c] == 0:
+                conn_pointer[c] = cast[int32](p)
     elif opcode == 1:
         if arglen >= 4:
             k: uint32 = ru32(args, 0)
             new_obj(c, k, T_KEYBOARD)
-            conn_keyboard[c] = cast[int32](k)
+            if conn_keyboard[c] == 0:            # the first one wins; see above
+                conn_keyboard[c] = cast[int32](k)
             build_keymap()
             if keymap_fd >= 0:
                 # The fd rides out with the keymap event itself: the client's
@@ -1191,6 +1432,25 @@ def do_seat(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
             sver: int32 = obj_a[oidx(c, obj)]
             if sver >= 4:
                 send_kbd_repeat_info(k, 25, 600)
+
+
+# After a wl_pointer or wl_keyboard goes away, find another one on the same
+# connection, or give up.
+#
+# THIS IS NOT HOUSEKEEPING. A wl_pointer.release frees the object id, and the
+# client immediately RE-USES that number for the next thing it makes -- in
+# Firefox's case a wl_region. Keeping the released id in conn_pointer meant
+# every subsequent motion and click was addressed to a region, which libwayland
+# silently drops: the browser rendered perfectly and could not be clicked, with
+# no error anywhere. Firefox releases a pointer because it binds wl_seat twice,
+# through two registries, and tidies the second one up.
+def rebind_input(c: uint64, want: int32) -> int32:
+    i: uint64 = MAXOBJ
+    while i > 0:
+        i = i - 1
+        if obj_type[c * MAXOBJ + i] == want:
+            return cast[int32](i)
+    return 0
 
 
 def do_shm(c: uint64, opcode: uint32, args: Ptr[uint8], arglen: uint64):
@@ -1252,12 +1512,15 @@ def do_shm_pool(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
                 obj_e[bi] = cast[int32](ru32(args, 16))
                 obj_f[bi] = cast[int32](ru32(args, 20))
                 obj_g[bi] = obj_g[pi]                    # share the mapping
+                map_ref_up(c, obj_g[pi])                 # and hold it open
     elif opcode == 1:
         # destroy: the pool object goes, the MAPPING stays -- the buffers cut
         # from it are still live and are the whole reason it was created.
         if obj_a[pi] >= 0:
             sys_close(obj_a[pi])
             obj_a[pi] = -1
+        map_unref(c, obj_g[pi])                  # drop the pool's reference
+        obj_g[pi] = -1
         free_obj(c, obj)
     elif opcode == 2:
         # resize(size): remap, because the pages past the old end are not in
@@ -1284,11 +1547,21 @@ def do_surface(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
         if arglen >= 4:
             obj_b[si] = cast[int32](ru32(args, 0))
     elif opcode == 3:
-        # frame(callback)
+        # frame(callback): queue it against this surface; it is armed by the
+        # next commit of this surface and answered then, together with every
+        # other callback queued on it.
         if arglen >= 4:
             fcb: uint32 = ru32(args, 0)
             new_obj(c, fcb, T_CALLBACK)
-            obj_e[si] = cast[int32](fcb)
+            if fc_add(c, obj, fcb) == 0:
+                # The table is full, which means a client is asking for frames
+                # faster than it commits. Answering now is wrong by a frame and
+                # right by everything else -- a dropped callback stalls a
+                # client permanently.
+                evt_time = evt_time + 16
+                send_callback_done(fcb, evt_time)
+                send_delete_id(fcb)
+                free_obj(c, fcb)
     elif opcode == 6:
         # commit. An xdg_surface's buffer only maps AFTER the client has acked
         # a configure, and the spec is strict about when that configure may be
@@ -1296,15 +1569,38 @@ def do_surface(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
         # (so Firefox, so XWayland) ignores a configure that arrives before it
         # and then waits forever for the one that never comes -- which looks
         # exactly like a client that failed to start.
+        if obj_g[si] < 0:
+            # First commit on this surface: it is now on the one output there
+            # is. obj_g doubles as the "already told" flag -- enter must not
+            # repeat, a client keeps a list and would end up on the same
+            # monitor twice.
+            outp: int32 = conn_output[c]
+            if outp != 0 and obj_get_type(c, cast[uint32](outp)) == T_OUTPUT:
+                send_surface_enter(obj, cast[uint32](outp))
+            obj_g[si] = 1
         xrole: int32 = obj_f[si]
         configured: int32 = 1
         if xrole != 0 and obj_get_type(c, cast[uint32](xrole)) == T_XDG_SURF:
             xi: uint64 = oidx(c, cast[uint32](xrole))
             configured = obj_c[xi]
             if configured == 0 and obj_b[xi] == 0:
+                popid: int32 = obj_g[xi]
+                if obj_e[xi] == 1 and popid > 0 \
+                        and obj_get_type(c, cast[uint32](popid)) == T_XDG_POPUP:
+                    pp: uint64 = oidx(c, cast[uint32](popid))
+                    send_popup_configure(cast[uint32](popid), obj_d[pp],
+                                         obj_e[pp], obj_b[pp], obj_c[pp])
                 tid: int32 = obj_d[xi]
                 if tid != 0:
-                    send_toplevel_configure(cast[uint32](tid), 0, 0)
+                    cw: int32 = 0
+                    ch: int32 = 0
+                    maxed: int32 = obj_b[oidx(c, cast[uint32](tid))]
+                    if maxed != 0:
+                        cw = MAX_W
+                        ch = MAX_H
+                    send_toplevel_configure(cast[uint32](tid),
+                                            cast[uint32](cw), cast[uint32](ch),
+                                            maxed)
                 serial = serial + 1
                 send_xdg_configure(cast[uint32](xrole), serial)
                 obj_b[xi] = cast[int32](serial)
@@ -1314,20 +1610,27 @@ def do_surface(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
                 commit_buffer(c, obj, cast[uint32](pend))
             send_buffer_release(cast[uint32](pend))
             obj_b[si] = 0
-        fcb2: int32 = obj_e[si]
-        if fcb2 != 0:
-            # The frame callback is answered at once rather than at a vblank.
-            # There is no vblank to wait for here, and a client that throttles
-            # on it would otherwise never draw a second frame.
-            evt_time = evt_time + 16
-            send_callback_done(cast[uint32](fcb2), evt_time)
-            send_delete_id(cast[uint32](fcb2))
-            free_obj(c, cast[uint32](fcb2))
-            obj_e[si] = 0
+        # Every frame callback queued on this surface is answered at once
+        # rather than at a vblank. There is no vblank to wait for here, and a
+        # client that throttles on it would otherwise never draw a second
+        # frame. They all get the SAME timestamp, because they are all the
+        # same frame -- a client that sees two times for one frame can compute
+        # a nonsense refresh rate from the difference.
+        evt_time = evt_time + 16
+        fi: uint64 = 0
+        while fi < FCMAX:
+            if fc_conn[fi] == cast[int32](c) and fc_surf[fi] == cast[int32](obj):
+                fcb2: uint32 = cast[uint32](fc_cb[fi])
+                fc_conn[fi] = -1
+                send_callback_done(fcb2, evt_time)
+                send_delete_id(fcb2)
+                free_obj(c, fcb2)
+            fi = fi + 1
     elif opcode == 0:
         if obj_a[si] > 0:
             win_close(obj_a[si])
             obj_a[si] = 0
+        fc_drop_surf(c, obj)
         free_obj(c, obj)
 
 
@@ -1344,9 +1647,112 @@ def do_xdg_wm(c: uint64, opcode: uint32, args: Ptr[uint8], arglen: uint64):
             if obj_get_type(c, surf) == T_SURFACE:
                 obj_f[oidx(c, surf)] = cast[int32](xid)
     elif opcode == 1:
-        # create_positioner(id): inert, because popups are not placed.
+        # create_positioner(id)
         if arglen >= 4:
-            new_obj(c, ru32(args, 0), T_REGION)
+            pid: uint32 = ru32(args, 0)
+            new_obj(c, pid, T_POSITIONER)
+            if valid_id(pid) != 0:
+                obj_g[oidx(c, pid)] = 0     # anchor and gravity, both "none"
+
+
+def do_positioner(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
+                  arglen: uint64):
+    pi: uint64 = oidx(c, obj)
+    if opcode == 1 and arglen >= 8:              # set_size(w, h)
+        obj_a[pi] = cast[int32](ru32(args, 0))
+        obj_b[pi] = cast[int32](ru32(args, 4))
+    elif opcode == 2 and arglen >= 16:           # set_anchor_rect(x, y, w, h)
+        obj_c[pi] = cast[int32](ru32(args, 0))
+        obj_d[pi] = cast[int32](ru32(args, 4))
+        obj_e[pi] = cast[int32](ru32(args, 8))
+        obj_f[pi] = cast[int32](ru32(args, 12))
+    elif opcode == 3 and arglen >= 4:            # set_anchor(anchor)
+        obj_g[pi] = (obj_g[pi] & 0xff00) | (cast[int32](ru32(args, 0)) & 255)
+    elif opcode == 4 and arglen >= 4:            # set_gravity(gravity)
+        obj_g[pi] = (obj_g[pi] & 255) \
+                  | ((cast[int32](ru32(args, 0)) & 255) << 8)
+    elif opcode == 6 and arglen >= 8:            # set_offset(x, y)
+        obj_h[pi] = cast[int32](ru32(args, 0))
+        obj_i[pi] = cast[int32](ru32(args, 4))
+
+
+# Where a popup goes, in the coordinates of its parent xdg_surface's window
+# geometry. This is the whole of xdg_positioner that a menu actually uses:
+# take a point on the anchor rectangle chosen by ANCHOR, then hang the popup
+# off that point in the direction given by GRAVITY, then add the offset.
+#
+# The constraint-adjustment rules (flip, slide, resize when the popup would
+# leave the screen) are NOT implemented -- win_open clamps the popup onto the
+# screen instead, which slides it without telling the client. A menu near the
+# right edge therefore overlaps its parent item rather than flipping to its
+# left.
+#
+# The anchor/gravity enumerations are the same eight values in the same order:
+# 1 top, 2 bottom, 3 left, 4 right, 5 top_left, 6 bottom_left, 7 top_right,
+# 8 bottom_right; 0 is "centre", and so is anything unrecognised.
+def anchor_is_left(a: int32) -> int32:
+    if a == 3 or a == 5 or a == 6:
+        return 1
+    return 0
+
+
+def anchor_is_right(a: int32) -> int32:
+    if a == 4 or a == 7 or a == 8:
+        return 1
+    return 0
+
+
+def anchor_is_top(a: int32) -> int32:
+    if a == 1 or a == 5 or a == 7:
+        return 1
+    return 0
+
+
+def anchor_is_bottom(a: int32) -> int32:
+    if a == 2 or a == 6 or a == 8:
+        return 1
+    return 0
+
+
+def popup_x(c: uint64, pos: uint32) -> int32:
+    pi: uint64 = oidx(c, pos)
+    a: int32 = obj_g[pi] & 255
+    g: int32 = (obj_g[pi] >> 8) & 255
+    x: int32 = obj_c[pi] + obj_e[pi] / 2
+    if anchor_is_left(a) != 0:
+        x = obj_c[pi]
+    elif anchor_is_right(a) != 0:
+        x = obj_c[pi] + obj_e[pi]
+    if anchor_is_left(g) != 0:
+        x = x - obj_a[pi]
+    elif anchor_is_right(g) == 0:
+        x = x - obj_a[pi] / 2
+    return x + obj_h[pi]
+
+
+def popup_y(c: uint64, pos: uint32) -> int32:
+    pi: uint64 = oidx(c, pos)
+    a: int32 = obj_g[pi] & 255
+    g: int32 = (obj_g[pi] >> 8) & 255
+    y: int32 = obj_d[pi] + obj_f[pi] / 2
+    if anchor_is_top(a) != 0:
+        y = obj_d[pi]
+    elif anchor_is_bottom(a) != 0:
+        y = obj_d[pi] + obj_f[pi]
+    if anchor_is_top(g) != 0:
+        y = y - obj_b[pi]
+    elif anchor_is_bottom(g) == 0:
+        y = y - obj_b[pi] / 2
+    return y + obj_i[pi]
+
+
+def send_popup_configure(pop: uint32, x: int32, y: int32, w: int32, h: int32):
+    s: uint64 = emit_begin(pop)
+    o_u32(cast[uint32](x))
+    o_u32(cast[uint32](y))
+    o_u32(cast[uint32](w))
+    o_u32(cast[uint32](h))
+    emit_end(s, 0)
 
 
 def do_xdg_surf(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
@@ -1361,18 +1767,82 @@ def do_xdg_surf(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
                 obj_a[oidx(c, tid)] = cast[int32](obj)
             obj_d[xi] = cast[int32](tid)
     elif opcode == 2:
-        # get_popup(id, parent, positioner): configure it so the client is not
-        # left waiting, but give it no window. A menu therefore does not
-        # appear; see the header.
-        if arglen >= 4:
-            pid: uint32 = ru32(args, 0)
-            new_obj(c, pid, T_XDG_SURF)
-            serial = serial + 1
-            send_xdg_configure(pid, serial)
+        # get_popup(id, parent, positioner). THIS xdg_surface takes the popup
+        # role; `id` is the xdg_popup handle for it. The position is worked out
+        # once, here, and stashed on the xdg_surface, because by the time a
+        # buffer arrives the positioner may already have been destroyed -- a
+        # client is free to destroy it as soon as the popup exists.
+        if arglen >= 12:
+            popid: uint32 = ru32(args, 0)
+            parent: uint32 = ru32(args, 4)
+            pos:    uint32 = ru32(args, 8)
+            new_obj(c, popid, T_XDG_POPUP)
+            if valid_id(popid) != 0:
+                obj_a[oidx(c, popid)] = cast[int32](obj)
+            obj_e[xi] = 1                            # this surface is a popup
+            obj_f[xi] = cast[int32](parent)
+            obj_g[xi] = cast[int32](popid)
+            lx: int32 = 0
+            ly: int32 = 0
+            pw: int32 = 0
+            ph: int32 = 0
+            if obj_get_type(c, pos) == T_POSITIONER:
+                lx = popup_x(c, pos)
+                ly = popup_y(c, pos)
+                pw = obj_a[oidx(c, pos)]
+                ph = obj_b[oidx(c, pos)]
+            # The client is told the position in ITS parent's coordinates; the
+            # window is placed in screen coordinates. They differ by wherever
+            # wsysd put the parent, which is why win_open records that.
+            obj_h[xi] = lx
+            obj_i[xi] = ly
+            if obj_get_type(c, parent) == T_XDG_SURF:
+                psurf: int32 = obj_a[oidx(c, parent)]
+                if psurf != 0 and obj_get_type(c, cast[uint32](psurf)) == T_SURFACE:
+                    pwid: int32 = obj_a[oidx(c, cast[uint32](psurf))]
+                    ps: int32 = win_slot(pwid)
+                    if ps >= 0:
+                        obj_h[xi] = w_x[cast[uint64](ps)] + lx
+                        obj_i[xi] = w_y[cast[uint64](ps)] + ly
+            # No configure here, for the same reason a toplevel gets none
+            # here: xdg-shell says the compositor answers the client's first,
+            # bufferless commit, and a toolkit that is handed a configure
+            # before it has asked drops it and waits for one that never comes.
+            if valid_id(popid) != 0:
+                popi: uint64 = oidx(c, popid)
+                obj_b[popi] = pw
+                obj_c[popi] = ph
+                obj_d[popi] = lx
+                obj_e[popi] = ly
     elif opcode == 4:
         # ack_configure(serial)
         obj_c[xi] = 1
         obj_b[xi] = 0
+
+
+# Re-answer a toplevel whose state changed after it was already mapped.
+#
+# Deliberately silent before the first ack: the initial configure may only be
+# sent in response to the client's first bufferless commit (see do_surface), so
+# a set_maximized that arrives during window construction -- which is when
+# Firefox sends it -- must be left for that path to pick up. Sending one here
+# too would give the client two configures with two serials and it would ack
+# the wrong one.
+def reconfigure(c: uint64, top: uint32, xsid: uint32):
+    if obj_get_type(c, xsid) != T_XDG_SURF:
+        return
+    xi: uint64 = oidx(c, xsid)
+    if obj_c[xi] == 0:
+        return
+    maxed: int32 = obj_b[oidx(c, top)]
+    cw: int32 = 0
+    ch: int32 = 0
+    if maxed != 0:
+        cw = MAX_W
+        ch = MAX_H
+    send_toplevel_configure(top, cast[uint32](cw), cast[uint32](ch), maxed)
+    serial = serial + 1
+    send_xdg_configure(xsid, serial)
 
 
 def do_xdg_top(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
@@ -1397,6 +1867,17 @@ def do_xdg_top(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
                     wid: int32 = obj_a[oidx(c, cast[uint32](surf))]
                     if wid > 0:
                         send_title(wid, c)
+    elif opcode == 9 or opcode == 11:
+        # set_maximized / set_fullscreen. Both are answered the same way: this
+        # desktop has one size for a big window and no fullscreen mode of its
+        # own. What matters is that the answer ARRIVES -- see
+        # send_toplevel_configure.
+        obj_b[ti] = 1
+        reconfigure(c, obj, cast[uint32](xsid))
+    elif opcode == 10 or opcode == 12:
+        # unset_maximized / unset_fullscreen: give the size back to the client.
+        obj_b[ti] = 0
+        reconfigure(c, obj, cast[uint32](xsid))
     elif opcode == 0:
         # destroy: the window goes with the role.
         if obj_get_type(c, cast[uint32](xsid)) == T_XDG_SURF:
@@ -1425,6 +1906,28 @@ def do_subcompositor(c: uint64, opcode: uint32, args: Ptr[uint8],
             if obj_get_type(c, ch) == T_SURFACE \
                     and obj_get_type(c, pa) == T_SURFACE:
                 surf_parent[oidx(c, ch)] = cast[int32](pa)
+
+
+# wp_viewporter: the object graph, and nothing behind it.
+#
+# A viewport crops (set_source) and scales (set_destination) a surface's buffer
+# on its way to the screen. Neither is needed here -- everything runs at scale
+# 1 and a client's destination is its buffer size -- but the GLOBAL has to
+# EXIST, because a toolkit that means to scale through a viewport and cannot
+# find one does not fall back, it stops. Firefox creates a viewport for its
+# content subsurface as part of bringing the window up.
+#
+# If a client ever asks for a destination that is not its buffer size, this
+# silently draws the buffer instead. Scaling in the blit path is the fix, and
+# is a real piece of work, not a line.
+def do_viewporter(c: uint64, opcode: uint32, args: Ptr[uint8], arglen: uint64):
+    if opcode == 1:
+        # get_viewport(id, surface)
+        if arglen >= 8:
+            vid: uint32 = ru32(args, 0)
+            new_obj(c, vid, T_VIEWPORT)
+            if valid_id(vid) != 0:
+                obj_a[oidx(c, vid)] = cast[int32](ru32(args, 4))
 
 
 def dispatch(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
@@ -1456,10 +1959,50 @@ def dispatch(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
         do_xdg_surf(c, obj, opcode, args, arglen)
     elif otype == T_XDG_TOP:
         do_xdg_top(c, obj, opcode, args, arglen)
+    elif otype == T_POSITIONER:
+        do_positioner(c, obj, opcode, args, arglen)
+    elif otype == T_XDG_POPUP:
+        if opcode == 0:
+            # destroy: take the menu off the screen with it. Nothing else
+            # closes an undecorated window -- there is no frame to click.
+            xs: int32 = obj_a[oidx(c, obj)]
+            if obj_get_type(c, cast[uint32](xs)) == T_XDG_SURF:
+                ps2: int32 = obj_a[oidx(c, cast[uint32](xs))]
+                if ps2 != 0 and obj_get_type(c, cast[uint32](ps2)) == T_SURFACE:
+                    pw2: int32 = obj_a[oidx(c, cast[uint32](ps2))]
+                    if pw2 > 0:
+                        win_close(pw2)
+                        obj_a[oidx(c, cast[uint32](ps2))] = 0
+            free_obj(c, obj)
     elif otype == T_SEAT:
         do_seat(c, obj, opcode, args, arglen)
+    elif otype == T_POINTER:
+        if opcode == 1:                              # release
+            free_obj(c, obj)
+            if conn_pointer[c] == cast[int32](obj):
+                conn_pointer[c] = rebind_input(c, T_POINTER)
+    elif otype == T_KEYBOARD:
+        if opcode == 0:                              # release
+            free_obj(c, obj)
+            if conn_keyboard[c] == cast[int32](obj):
+                conn_keyboard[c] = rebind_input(c, T_KEYBOARD)
     elif otype == T_SUBCOMPOSITOR:
         do_subcompositor(c, opcode, args, arglen)
+    elif otype == T_VIEWPORTER:
+        do_viewporter(c, opcode, args, arglen)
+    elif otype == T_VIEWPORT:
+        if opcode == 0:
+            free_obj(c, obj)
+    elif otype == T_XDG_OUT_MGR:
+        if opcode == 1:
+            # get_xdg_output(id, output)
+            if arglen >= 8:
+                xo: uint32 = ru32(args, 0)
+                new_obj(c, xo, T_XDG_OUT)
+                send_xdg_output_all(xo)
+    elif otype == T_XDG_OUT:
+        if opcode == 0:
+            free_obj(c, obj)
     elif otype == T_DDM:
         if opcode == 0:
             if arglen >= 4:
@@ -1469,6 +2012,8 @@ def dispatch(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
                 new_obj(c, ru32(args, 0), T_DATA_DEVICE)
     elif otype == T_BUFFER:
         if opcode == 0:
+            map_unref(c, obj_g[oidx(c, obj)])
+            obj_g[oidx(c, obj)] = -1
             free_obj(c, obj)
             send_delete_id(obj)
     elif otype == T_OUTPUT:
@@ -1489,7 +2034,9 @@ def conn_reset(c: uint64):
     conn_pointer[c] = 0
     conn_keyboard[c] = 0
     conn_xdg_wm[c] = 0
+    conn_output[c] = 0
     conn_title_len[c] = 0
+    fc_drop_conn(c)
     fdq_head[c] = 0
     fdq_tail[c] = 0
     i: uint64 = 0
@@ -1503,6 +2050,7 @@ def conn_reset(c: uint64):
         map_used[c * MAXMAP + i] = 0
         map_addr[c * MAXMAP + i] = 0
         map_len[c * MAXMAP + i] = 0
+        map_ref[c * MAXMAP + i] = 0
         i = i + 1
     obj_type[c * MAXOBJ + 1] = T_DISPLAY        # wl_display is always id 1
 
@@ -1522,6 +2070,7 @@ def conn_free(c: uint64):
                 win_close(obj_a[oi])
         obj_type[oi] = T_NONE
         i = i + 1
+    fc_drop_conn(c)
     while fdq_head[c] != fdq_tail[c]:
         sys_close(fdq_pop(c))
     i = 0
@@ -1531,6 +2080,7 @@ def conn_free(c: uint64):
             sys_munmap_at(map_addr[m], map_len[m])
             map_addr[m] = 0
         map_used[m] = 0
+        map_ref[m] = 0
         i = i + 1
     sys_close(conn_fd[c])
     conn_inuse[c] = 0
@@ -1753,12 +2303,17 @@ def btn_edges(c: uint64, i: uint64, surf: uint32, mask: int32):
     w_btn[i] = mask
 
 
-def handle_ptr_line(c: uint64, i: uint64, surf: uint32, n: uint64):
+# `at` is where this line STARTS, and it matters: wsysd writes a burst of
+# pointer lines and one read picks up several, so a handler that always parsed
+# from offset 0 re-read the first line for every line in the buffer. The
+# visible symptom was that button presses never arrived -- a move and a click
+# land in the same read, and the click was read as a second copy of the move.
+def handle_ptr_line(c: uint64, i: uint64, surf: uint32, at: uint64, n: uint64):
     ptr: int32 = conn_pointer[c]
     if ptr == 0:
         return
     # "<kind> <x> <y> <buttons> <dz>"
-    p: uint64 = skip_field(&inbuf[0], 0, n)
+    p: uint64 = skip_field(&inbuf[0], at, n)
     x: int32 = parse_int_at(&inbuf[0], p, n)
     p = skip_field(&inbuf[0], p, n)
     y: int32 = parse_int_at(&inbuf[0], p, n)
@@ -1791,7 +2346,7 @@ def drain_window(i: uint64):
         while k < cast[uint64](got):
             if inbuf[k] == 10:
                 if k > s:
-                    handle_ptr_line(c, i, surf, k)
+                    handle_ptr_line(c, i, surf, s, k)
                 s = k + 1
             k = k + 1
     fd = w_keys[i]
@@ -1838,6 +2393,10 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     while i < MAXCONN:
         conn_inuse[i] = 0
         conn_fd[i] = -1
+        i = i + 1
+    i = 0
+    while i < FCMAX:
+        fc_conn[i] = -1                 # 0 is a real connection number
         i = i + 1
 
     listen_fd = sys_unix_listen(cast[Ptr[char]](&sockpath[0]), 8)
