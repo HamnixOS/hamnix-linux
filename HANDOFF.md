@@ -26,7 +26,14 @@ You are starting with no context. Read this first, then `README.md`.
 | Networking | `/net` as a file tree, TCP/UDP/ICMP, TLS, and `announce`/`accept` across process boundaries |
 | Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1 |
 | Debian | a namespace on its own filesystem; Firefox runs in it and is composited onto the Hamnix desktop through the blit protocol |
-| Build | 350 of 361 `user/*.ad` build through the LLVM lane |
+| Build | **354 of 362** `user/*.ad` build through the LLVM lane |
+
+The eight that do not, grouped by cause rather than listed: four are
+`*_host.ad` TEST HARNESSES that import kernel source (`sys.src.port9.port.devsnarf`,
+the clipboard device) which is not in this repository; three are LIBRARIES
+with no `main` (`http9`, `net9`, `httpdconf`), where the sweep's "no @main" is
+the correct answer; one genuinely bails the backend's SSA subset
+(`hambrowse_tabs`).
 
 ### What answered the original open questions
 
