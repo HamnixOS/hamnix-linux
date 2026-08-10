@@ -37,12 +37,72 @@
 # compose off-screen and write the screen once per frame, which is both
 # atomic to the eye and one flush.
 #
+# ====================================================================
+# WHERE A FRAME ACTUALLY GOES — AND WHY THAT DECIDED THE GPU QUESTION
+# ====================================================================
+# `wsysd -bench N` (below) measures it. Offscreen at 1280x800, HAMFB_FILE,
+# with a full-screen backdrop plus one 320x200 decorated app — the shape of a
+# real session — the frame used to break down like this, in microseconds:
+#
+#     total 5503 | clear 1049 | scene 15 | rast 618 | copy 3444 | present 358
+#
+# Read that again before designing anything with the word "Vulkan" in it. The
+# vk2d RASTERIZATION — every fill, blit, glyph and rounded rect in the whole
+# desktop, the only thing a GPU rasterizer would replace — is 618 us, ELEVEN
+# PERCENT of the frame. The two dumbest lines in this file, a full-screen fill
+# done one bounds-checked pixel at a time and a window copy-out done one
+# function call at a time, were 4493 us, EIGHTY-TWO PERCENT. A GPU that made
+# rasterization instantaneous would have taken the frame from 5.5 ms to 4.9 ms.
+#
+# So the honest first step was not a GPU. It was:
+#   * fill_rect: clip once, store words                       (1049 -> 0 us,
+#     and 0 rather than ~250 because a full-screen backdrop makes the desktop
+#     clear pure waste — screen_is_covered() skips it)
+#   * the copy-out: render in the screen's byte order (vk2d already had
+#     vk2d_set_bgra, for the virtio-gpu scanout) and copy rows as words
+#                                                             (3444 -> 545 us)
+#   * a full-screen window rasterizes STRAIGHT INTO the composite, so there is
+#     no copy and no separate clear at all         (545 -> 33 us, rast absorbs
+#     the clear it was doing anyway)
+#   * the cursor gets a save-under, so a mouse move touches two 12x17 rects
+#     instead of re-rasterizing the desktop        (6543 -> 8 us, ~800x)
+#
+# Measured after, same fixture, pixel-for-pixel identical output (0 differing
+# RGB pixels over 60 full frames and 60 cursor moves):
+#
+#     total  730 | clear 0 | scene 9 | rast 496 | copy 32 | present 186
+#     cursor-only frame: 8 us
+#
+# 7.5x on a repaint, ~800x on a pointer move. Rasterization is now 68% of what
+# is left, which is the point at which a GPU rasterizer would be worth having —
+# it was not before.
+#
+# WHAT A GPU WOULD STILL NEED HERE (honest, and none of it is done)
+# ----------------------------------------------------------------
+# Mesa's Vulkan ICDs are not in this image at all: scripts/hamlinux_packages.py
+# ships GPU KERNEL MODULES (i915, nouveau, the DRM core) and firmware, and
+# nothing else. The Vulkan userspace lives in the Debian namespace, which is
+# entered by chroot — so wsysd, which runs OUTSIDE it, cannot load an ICD even
+# though this build lane links glibc dynamically and could dlopen in principle:
+# the driver's own DT_NEEDED closure would resolve against the wrong root. A
+# real Vulkan compositor is therefore a SECOND PROCESS living inside the
+# namespace and presenting through the v2 blit protocol, not a library call
+# from here. That is a design decision this file cannot make on its own.
+#
+# The nearer, self-contained GPU win is not Vulkan at all: /dev/fb's DRM path
+# (user/linux-fb.c) creates ONE dumb buffer and legacy-SETCRTCs it, so present
+# writes into the buffer being scanned out — every frame can tear. Two dumb
+# buffers plus DRM_IOCTL_MODE_PAGE_FLIP would give tear-free, vsynced present
+# with no Vulkan, no Mesa and no namespace question. That is a change to
+# user/linux-fb.c, which this file does not own.
+#
 # ADDER QUIRKS HONOURED: big buffers are top-level BSS arrays, no adjacent
 # string-literal concatenation, string literals are passed at the call site.
 
 from lib.hamscene import hamscene_load
-from lib.hamui_host import hamui_host_begin, hamui_host_rasterize, \
-    hamui_host_pixel
+from lib.hamui_host import hamui_host_begin, hamui_host_begin_into, \
+    hamui_host_rasterize, hamui_host_set_bgra, \
+    hamui_host_row_base, hamui_host_width, hamui_host_height
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
@@ -53,7 +113,36 @@ extern def sys_close(fd: int32) -> int32
 extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_get_jiffies() -> uint64
+extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
 extern def sys_exit(code: uint64)
+
+# ====================================================================
+# BENCH INSTRUMENTATION
+# ====================================================================
+# `wsysd -bench N` paints N frames back to back with the window set that is
+# up, and reports where the wall clock went. It exists because every choice
+# about GPU acceleration here is a claim about a cost, and a claim about a
+# cost that has not been measured is a guess. It runs offscreen against
+# HAMFB_FILE, so it needs neither a display nor a GPU.
+CLOCK_MONOTONIC: int32 = 1
+ts_scratch: Array[2, uint64]
+bench_on: int32 = 0
+# Accumulated microseconds, per phase of a frame.
+t_clear:  uint64 = 0                  # desktop background fill
+t_scene:  uint64 = 0                  # read /dev/wsys/<wid>/scene
+t_rast:   uint64 = 0                  # hamui_host rasterize (the vk2d path)
+t_copy:   uint64 = 0                  # window image -> screen composite
+t_bb:     uint64 = 0                  # v2 backbuffer read + copy
+t_cur:    uint64 = 0                  # cursor
+t_pres:   uint64 = 0                  # write the composite to /dev/fb
+
+
+def now_us() -> uint64:
+    ts_scratch[0] = 0
+    ts_scratch[1] = 0
+    if sys_clock_gettime(CLOCK_MONOTONIC, &ts_scratch[0]) != 0:
+        return 0
+    return ts_scratch[0] * 1000000 + ts_scratch[1] / 1000
 
 # --- screen -----------------------------------------------------------
 MAX_PIXELS: uint64 = 2073600           # 1920x1080
@@ -89,6 +178,8 @@ waitset:  Array[4, int32]
 fb_fd: int32 = -1
 focus_wid: int32 = 0
 last_sig: uint64 = 0                   # change signature of the last frame
+last_csig: uint64 = 0                  # ... of the cursor position alone
+n_curframes: int32 = 0                 # frames served by the cursor-only path
 highest_wid: int32 = 0                 # the newest window we have seen
 n_frames: int32 = 0
 n_keys:   int32 = 0
@@ -412,7 +503,21 @@ def frame_signature() -> uint64:
         i = i + 1
     h = h ^ cast[uint64](n_win)
     h = h * 1099511628211
-    # The cursor is composited, so moving it IS a change to the screen.
+    # The focus ring is drawn in the decoration colour, so a focus change is a
+    # change to the screen even when no window moved.
+    h = h ^ cast[uint64](cast[uint32](focus_wid))
+    h = h * 1099511628211
+    return h
+
+
+# The cursor is composited, so moving it IS a change to the screen -- but it is
+# a change nothing else in the frame depends on, and it is by far the most
+# frequent one. It is hashed SEPARATELY from the window set so the main loop
+# can tell "only the pointer moved" (the cheap incremental path) from "a window
+# changed" (the full repaint). Folding the two together, as this used to, is
+# what made a one-pixel mouse move cost a whole frame.
+def cursor_signature() -> uint64:
+    h: uint64 = 14695981039346656037
     h = h ^ cast[uint64](cast[uint32](ptr_x))
     h = h * 1099511628211
     h = h ^ cast[uint64](cast[uint32](ptr_y))
@@ -435,19 +540,70 @@ def put_px(x: int32, y: int32, rgb: uint32):
     composite[o + 3] = 0
 
 
+# The composite as 32-bit words. /dev/fb is XRGB8888 little-endian, so ONE
+# word store lays down the same four bytes B,G,R,X that four byte stores did --
+# and the compiler cannot prove that for itself through the uint8 array, which
+# is why the fills below reach for the word view explicitly.
+def comp_words() -> Ptr[uint32]:
+    return cast[Ptr[uint32]](&composite[0])
+
+
 def fill_rect(x: int32, y: int32, w: int32, h: int32, rgb: uint32):
-    j: int32 = 0
-    while j < h:
-        i: int32 = 0
-        while i < w:
-            put_px(x + i, y + j, rgb)
+    # Clip the WHOLE rectangle once, then run a word-store span per row. The
+    # old shape called put_px per pixel, which re-clipped and did four byte
+    # stores every time: at full screen that is 1.02 ms of a 5.3 ms frame
+    # spent proving 1,024,000 times that the screen is still the same size.
+    x0: int32 = x
+    y0: int32 = y
+    x1: int32 = x + w
+    y1: int32 = y + h
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > scr_w:
+        x1 = scr_w
+    if y1 > scr_h:
+        y1 = scr_h
+    if x1 <= x0 or y1 <= y0:
+        return
+    # The X byte is 0, exactly as put_px wrote it.
+    word: uint32 = rgb & 16777215
+    dst: Ptr[uint32] = comp_words()
+    j: int32 = y0
+    while j < y1:
+        wo: uint64 = cast[uint64](j) * cast[uint64](scr_w) + cast[uint64](x0)
+        i: int32 = x0
+        while i < x1:
+            dst[wo] = word
+            wo = wo + 1
             i = i + 1
         j = j + 1
+
+
+# Is the whole screen already covered by an OPAQUE window? Then clearing it
+# first is pure waste -- and it is not a corner case: a session's backdrop
+# (hamdesktop) is exactly a visible, undecorated, full-screen window at z 0,
+# so on a real desktop the clear is ALWAYS waste. Only scene windows count:
+# hamui_host_begin() opens every rasterize with an opaque full-image fill, so
+# a scene window's image has no holes. A v2 window's backbuffer can be short
+# (a client that has not blitted every row yet), so those do not qualify.
+def screen_is_covered() -> int32:
+    i: uint64 = 0
+    while i < n_win:
+        if win_vis[i] != 0 and win_proto[i] != 2:
+            if win_x[i] <= 0 and win_y[i] <= 0:
+                if win_x[i] + win_w[i] >= scr_w and win_y[i] + win_h[i] >= scr_h:
+                    return 1
+        i = i + 1
+    return 0
 
 
 def clear_desktop():
     # A flat slate blue, so an empty desktop is obviously the compositor's and
     # not a stale text console.
+    if screen_is_covered() != 0:
+        return
     fill_rect(0, 0, scr_w, scr_h, 2110280)              # 0x203348
 
 
@@ -497,6 +653,73 @@ def paint_backbuffer(i: uint64) -> int32:
     return 1
 
 
+# Lift the just-rasterized window image out of hamui_host and into the screen
+# composite at (ox,oy).
+#
+# THIS IS THE FRAME'S BIGGEST LINE ITEM and it was, until now, the single most
+# expensive thing the compositor did: 3.2 ms of a measured 5.3 ms frame at
+# 1280x800, five times the cost of the vk2d rasterization that produced the
+# pixels. The old shape was
+#
+#     put_px(ox + k, oy + j, hamui_host_pixel(k, j))
+#
+# per pixel -- a call to read one pixel and re-pack it as 0x00RRGGBB, a call to
+# write it that re-clipped against the screen, and four byte stores. Now:
+#
+#   * the destination rectangle is clipped ONCE, before the loop;
+#   * hamui_host renders in BGRA byte order (vk2d_set_bgra -- the same order
+#     the virtio-gpu scanout path already asked for), which is /dev/fb's
+#     XRGB8888 byte layout, so no channel shuffle is left to do;
+#   * the row is copied as 32-bit words, source word straight to destination
+#     word, which is what a memcpy would have been if Adder had one.
+#
+# The pixels are identical. The alpha/X byte differs -- vk2d leaves 0xFF where
+# put_px wrote 0x00 -- and that is deliberately fine: /dev/fb's format is
+# X RGB8888, the top byte is ignored by scanout, and linux-fb.c memcpys it
+# through untouched. (If a future scanout ever samples it, 0xFF-opaque is the
+# more correct value of the two.)
+def blit_window_image(ox: int32, oy: int32, w: int32, h: int32):
+    sx0: int32 = 0
+    sy0: int32 = 0
+    sw: int32 = w
+    sh: int32 = h
+    if hamui_host_width() < sw:
+        sw = hamui_host_width()
+    if hamui_host_height() < sh:
+        sh = hamui_host_height()
+    # Clip the destination to the screen, carrying the source origin with it.
+    if ox < 0:
+        sx0 = 0 - ox
+        sw = sw - sx0
+    if oy < 0:
+        sy0 = 0 - oy
+        sh = sh - sy0
+    dx: int32 = ox + sx0
+    dy: int32 = oy + sy0
+    if dx + sw > scr_w:
+        sw = scr_w - dx
+    if dy + sh > scr_h:
+        sh = scr_h - dy
+    if sw <= 0 or sh <= 0:
+        return
+    dst: Ptr[uint32] = comp_words()
+    j: int32 = 0
+    while j < sh:
+        sbase: uint64 = hamui_host_row_base(sy0 + j)
+        if sbase == 0:
+            return
+        src: Ptr[uint32] = cast[Ptr[uint32]](sbase)
+        sofs: uint64 = cast[uint64](sx0)
+        dofs: uint64 = cast[uint64](dy + j) * cast[uint64](scr_w) + cast[uint64](dx)
+        k: int32 = 0
+        while k < sw:
+            dst[dofs] = src[sofs]
+            sofs = sofs + 1
+            dofs = dofs + 1
+            k = k + 1
+        j = j + 1
+
+
 def paint_window(i: uint64) -> int32:
     wid: int32 = win_id[i]
     if win_vis[i] == 0:
@@ -507,7 +730,12 @@ def paint_window(i: uint64) -> int32:
         return 0
 
     winpath(wid, "scene")
+    ts0: uint64 = 0
+    if bench_on != 0:
+        ts0 = now_us()
     n: int64 = slurp(cast[Ptr[char]](&pathbuf[0]), &scenebuf[0], 16384)
+    if bench_on != 0:
+        t_scene = t_scene + (now_us() - ts0)
     if n < 0:
         return 0
 
@@ -532,7 +760,13 @@ def paint_window(i: uint64) -> int32:
     # Nothing to rasterize; blit the backbuffer. The decoration above is
     # already drawn, so a v2 window is framed and raised like any other.
     if win_proto[i] == 2:
-        if paint_backbuffer(i) != 0:
+        tb0: uint64 = 0
+        if bench_on != 0:
+            tb0 = now_us()
+        ok2: int32 = paint_backbuffer(i)
+        if bench_on != 0:
+            t_bb = t_bb + (now_us() - tb0)
+        if ok2 != 0:
             return 1
 
     if n == 0:
@@ -541,27 +775,63 @@ def paint_window(i: uint64) -> int32:
         fill_rect(ox, oy, w, h, 1842204)                 # 0x1C1C1C
         return 1
 
+    tr0: uint64 = 0
+    if bench_on != 0:
+        tr0 = now_us()
     hamscene_load(&scenebuf[0], cast[uint64](n))
-    hamui_host_begin(w, h)
+    # A window that IS the screen -- the session backdrop -- gets rasterized
+    # straight into the composite. Nothing is copied afterwards, and the opaque
+    # clear that opens every rasterize doubles as the desktop clear. The guard
+    # is exact and deliberately narrow: vk2d has no pitch, so the window's rows
+    # must be the screen's rows (see hamui_host's host_ext_base note).
+    direct: int32 = 0
+    if ox == 0 and oy == 0 and w == scr_w and h == scr_h and win_dec[i] == 0:
+        direct = hamui_host_begin_into(cast[uint64](&composite[0]), w, h)
+    if direct == 0:
+        hamui_host_begin(w, h)
     hamui_host_rasterize()
+    if bench_on != 0:
+        t_rast = t_rast + (now_us() - tr0)
 
-    j: int32 = 0
-    while j < h:
-        k: int32 = 0
-        while k < w:
-            put_px(ox + k, oy + j, hamui_host_pixel(k, j))
-            k = k + 1
-        j = j + 1
+    if direct != 0:
+        return 1
+    tc0: uint64 = 0
+    if bench_on != 0:
+        tc0 = now_us()
+    blit_window_image(ox, oy, w, h)
+    if bench_on != 0:
+        t_copy = t_copy + (now_us() - tc0)
     return 1
 
 
-def present():
+# Push composite rows [y0,y1) to /dev/fb.
+#
+# The whole screen is 4 MiB; on this host that memcpy into the scanout mapping
+# measures ~0.26 ms, which is 20% of a frame once the rasterizer and the
+# copy-out have been dealt with. Rows are what /dev/fb's dirty-rect derivation
+# works in (user/linux-fb.c turns a byte range into an exact row range), so a
+# partial present is both cheaper HERE and a smaller flush THERE.
+def present_rows(y0: int32, y1: int32):
+    a: int32 = y0
+    b: int32 = y1
+    if a < 0:
+        a = 0
+    if b > scr_h:
+        b = scr_h
+    if b <= a:
+        return
     fd: int32 = sys_open_write(cast[Ptr[char]]("/dev/fb"))
     if fd < 0:
         puts(2, "wsysd: cannot open /dev/fb for writing\n")
         return
-    total: uint64 = cast[uint64](scr_w) * cast[uint64](scr_h) * 4
-    off: uint64 = 0
+    rowbytes: uint64 = cast[uint64](scr_w) * 4
+    off: uint64 = cast[uint64](a) * rowbytes
+    total: uint64 = cast[uint64](b) * rowbytes
+    if off != 0:
+        if sys_lseek(fd, cast[int64](off), 0) < 0:
+            # No seek on this /dev/fb: fall back to the whole screen rather
+            # than write the rows to the wrong place.
+            off = 0
     while off < total:
         k: int64 = sys_write(fd, &composite[off], total - off)
         if k <= 0:
@@ -570,14 +840,118 @@ def present():
     sys_close(fd)
 
 
+def present():
+    present_rows(0, scr_h)
+
+
+# ====================================================================
+# THE CURSOR, AND WHY IT GETS ITS OWN PATH
+# ====================================================================
+# The cursor is composited, so moving the mouse one pixel changes the screen
+# and the frame gate fires. Before this, that meant the FULL frame: clear the
+# desktop, re-read and re-rasterize every window's scene, copy every window
+# into the composite, write 4 MiB to /dev/fb. Measured, that is the whole
+# per-frame cost -- paid for a 12x17 sprite moving one pixel, and paid on
+# every single mouse event, which is the most frequent thing a desktop does.
+#
+# So the cursor keeps a SAVE-UNDER: the 12x17 patch of composite it covered
+# before it was stamped. When nothing but the pointer moved, restoring that
+# patch returns the composite to exactly the state the last full repaint left
+# it in -- no window has to be touched -- and only the two small rectangles
+# (old position, new position) need to reach the screen.
+#
+# The correctness condition is that the composite must be otherwise unchanged
+# between unstamp and stamp, which is why the window-set signature is checked
+# SEPARATELY from the pointer position: any change to a window forces the full
+# path and re-establishes the save-under from scratch.
+cur_save: Array[204, uint32]            # CURSOR_W * CURSOR_H
+cur_saved: int32 = 0                    # is cur_save valid?
+cur_save_x: int32 = 0
+cur_save_y: int32 = 0
+
+
+def cursor_save_under(x: int32, y: int32):
+    src: Ptr[uint32] = comp_words()
+    r: int32 = 0
+    while r < CURSOR_H:
+        sy: int32 = y + r
+        c: int32 = 0
+        while c < CURSOR_W:
+            sx: int32 = x + c
+            v: uint32 = 0
+            if sx >= 0 and sy >= 0 and sx < scr_w and sy < scr_h:
+                v = src[cast[uint64](sy) * cast[uint64](scr_w)
+                        + cast[uint64](sx)]
+            cur_save[cast[uint64](r * CURSOR_W + c)] = v
+            c = c + 1
+        r = r + 1
+    cur_save_x = x
+    cur_save_y = y
+    cur_saved = 1
+
+
+def cursor_restore_under():
+    if cur_saved == 0:
+        return
+    dst: Ptr[uint32] = comp_words()
+    r: int32 = 0
+    while r < CURSOR_H:
+        sy: int32 = cur_save_y + r
+        c: int32 = 0
+        while c < CURSOR_W:
+            sx: int32 = cur_save_x + c
+            if sx >= 0 and sy >= 0 and sx < scr_w and sy < scr_h:
+                dst[cast[uint64](sy) * cast[uint64](scr_w)
+                    + cast[uint64](sx)] = \
+                    cur_save[cast[uint64](r * CURSOR_W + c)]
+            c = c + 1
+        r = r + 1
+    cur_saved = 0
+
+
+# Move the cursor without repainting anything else. Presents only the rows the
+# two sprite positions touch. Returns the number of rows presented.
+def cursor_only_frame() -> int32:
+    oldy: int32 = cur_save_y
+    if cur_saved == 0:
+        oldy = ptr_y
+    cursor_restore_under()
+    cursor_save_under(ptr_x, ptr_y)
+    paint_cursor()
+    y0: int32 = oldy
+    y1: int32 = oldy + CURSOR_H
+    if ptr_y < y0:
+        y0 = ptr_y
+    if ptr_y + CURSOR_H > y1:
+        y1 = ptr_y + CURSOR_H
+    present_rows(y0, y1)
+    return y1 - y0
+
+
 def paint_frame():
+    t0: uint64 = 0
+    if bench_on != 0:
+        t0 = now_us()
     clear_desktop()
+    if bench_on != 0:
+        t_clear = t_clear + (now_us() - t0)
     i: uint64 = 0
     while i < n_win:
         paint_window(i)
         i = i + 1
+    if bench_on != 0:
+        t0 = now_us()
+    # The save-under is taken from the freshly composed, cursor-free screen --
+    # that is what makes the incremental path above sound.
+    cur_saved = 0
+    cursor_save_under(ptr_x, ptr_y)
     paint_cursor()
+    if bench_on != 0:
+        t_cur = t_cur + (now_us() - t0)
+        t0 = now_us()
     present()
+    if bench_on != 0:
+        t_pres = t_pres + (now_us() - t0)
 
 
 # ====================================================================
@@ -860,6 +1234,12 @@ def pump_input():
     d: uint64 = 0
     while d < n_input:
         n: int64 = sys_read_nb(in_fd[d], &evbuf[0], 2400)
+        # Same unsigned-compare trap as pump_keyboard: a negative n must never
+        # reach the cast. An evdev node with no event pending returns EAGAIN
+        # on every single poll, so this is the common case, not the rare one.
+        if n <= 0:
+            d = d + 1
+            continue
         i: uint64 = 0
         while i + 24 <= cast[uint64](n):
             # struct input_event: 16 bytes of timeval, then type, code, value.
@@ -907,6 +1287,14 @@ def pump_keyboard():
     # Keys can also arrive on stdin -- a serial console has no evdev node at
     # all, and that is the only keyboard a headless boot has.
     n: int64 = sys_read_nb(0, &inbuf[0], 256)
+    # A NEGATIVE return is an error (EAGAIN on a non-blocking tty with nothing
+    # typed, EIO on a hung-up console), and it MUST be filtered before the
+    # unsigned compare below: cast[uint64](-1) is 18446744073709551615, so the
+    # loop then walked the whole address space one byte at a time and the
+    # compositor died with SIGSEGV the moment stdin had no byte ready. This is
+    # how wsysd crashed on every host run that did not redirect stdin.
+    if n <= 0:
+        return
     i: uint64 = 0
     while i < cast[uint64](n):
         route_key(cast[int32](inbuf[i]))
@@ -1107,6 +1495,17 @@ def publish_state():
         i = i + 1
         k = k + 1
     i = emit_int(&ctlbuf[0], i, n_frames)
+    # How many of those frames were served by the cheap cursor-only path. On a
+    # session where someone is using the mouse this should be the large
+    # majority; if it is 0 while the pointer is moving, the save-under is being
+    # invalidated by something and every mouse move is costing a full repaint.
+    w2: Ptr[uint8] = " curframes "
+    k = 0
+    while w2[k] != 0:
+        ctlbuf[i] = w2[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, n_curframes)
     ctlbuf[i] = 10
     ctlbuf[i + 1] = 0
     write_path(cast[Ptr[char]]("/dev/wsys/wsysd/state"), &ctlbuf[0])
@@ -1143,6 +1542,99 @@ def pick_focus():
 
 
 # ====================================================================
+# `wsysd -bench N` — paint N frames back to back and print the breakdown.
+#
+# It deliberately bypasses the frame_signature gate: the gate is what makes an
+# IDLE desktop cheap, and what we need to know is what a frame costs when the
+# desktop is NOT idle (dragging a window, a terminal echoing keys, a video).
+# Times are microseconds per frame, averaged over N.
+def run_bench(n: int32):
+    bench_on = 1
+    scan_windows()
+    pick_focus()
+    # One warm frame first: the first rasterize pays for font loading and for
+    # first-touch of the demand-zero BSS images, neither of which recurs.
+    paint_frame()
+    t_clear = 0
+    t_scene = 0
+    t_rast = 0
+    t_copy = 0
+    t_bb = 0
+    t_cur = 0
+    t_pres = 0
+    t0: uint64 = now_us()
+    f: int32 = 0
+    while f < n:
+        paint_frame()
+        f = f + 1
+    total: uint64 = now_us() - t0
+    d: uint64 = cast[uint64](n)
+    puts(1, "bench: frames ")
+    putd(1, n)
+    puts(1, " windows ")
+    putd(1, cast[int32](n_win))
+    puts(1, " screen ")
+    putd(1, scr_w)
+    puts(1, "x")
+    putd(1, scr_h)
+    puts(1, "\n")
+    puts(1, "bench: us/frame total ")
+    putd(1, cast[int32](total / d))
+    puts(1, " clear ")
+    putd(1, cast[int32](t_clear / d))
+    puts(1, " scene ")
+    putd(1, cast[int32](t_scene / d))
+    puts(1, " rast ")
+    putd(1, cast[int32](t_rast / d))
+    puts(1, " copy ")
+    putd(1, cast[int32](t_copy / d))
+    puts(1, " backbuf ")
+    putd(1, cast[int32](t_bb / d))
+    puts(1, " cursor ")
+    putd(1, cast[int32](t_cur / d))
+    puts(1, " present ")
+    putd(1, cast[int32](t_pres / d))
+    puts(1, "\n")
+    puts(1, "bench: fps ")
+    if total > 0:
+        putd(1, cast[int32](d * 1000000 / total))
+    puts(1, "\n")
+
+    # The second arm: what a MOUSE MOVE costs. This is the frame a desktop
+    # serves most often, and before the save-under it was the same full frame
+    # as above.
+    tc: uint64 = now_us()
+    f = 0
+    while f < n:
+        ptr_x = ptr_x + 1
+        if ptr_x > scr_w - 20:
+            ptr_x = 4
+        ptr_y = ptr_y + 1
+        if ptr_y > scr_h - 20:
+            ptr_y = 4
+        cursor_only_frame()
+        f = f + 1
+    ctot: uint64 = now_us() - tc
+    puts(1, "bench: cursor-only us/frame ")
+    putd(1, cast[int32](ctot / d))
+    puts(1, " fps ")
+    if ctot > 0:
+        putd(1, cast[int32](d * 1000000 / ctot))
+    puts(1, "\n")
+
+
+def is_bench_flag(s: Ptr[uint8]) -> int32:
+    f: Ptr[uint8] = "-bench"
+    k: uint64 = 0
+    while f[k] != 0:
+        if s[k] != f[k]:
+            return 0
+        k = k + 1
+    if s[k] != 0:
+        return 0
+    return 1
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     puts(1, "wsysd: scene compositor starting\n")
     if read_screen() != 0:
@@ -1159,12 +1651,31 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # kernel console redraws over the composited screen.
     write_path(cast[Ptr[char]]("/dev/fbctl"), cast[Ptr[uint8]]("suspend\n"))
 
+    # Rasterize in the screen's byte order. /dev/fb is XRGB8888 little-endian
+    # (bytes B,G,R,X) and vk2d already knows how to store BGRA -- so the window
+    # image comes out of the rasterizer in the composite's own format and the
+    # copy-out is a straight word copy with no channel shuffle. This has to be
+    # set before the first hamui_host_begin().
+    hamui_host_set_bgra(1)
+
     keymap_init()
     cursor_init()
     # Named input sources override the scan. That is how the input decode is
     # tested (a file of evdev records is byte-identical to what the device
     # delivers), and it is also what a machine with an odd device layout
     # needs -- `wsysd /dev/input/by-path/...` is a legitimate way to run it.
+    if argc > 1 and is_bench_flag(cast[Ptr[uint8]](argv[1])) != 0:
+        nb: int32 = 30
+        if argc > 2:
+            bp: uint64 = 0
+            v: int32 = take_int(cast[Ptr[uint8]](argv[2]), &bp, 12)
+            if v > 0:
+                nb = v
+        ptr_x = scr_w / 2
+        ptr_y = scr_h / 2
+        run_bench(nb)
+        return 0
+
     if argc > 1:
         a: int32 = 1
         while a < argc:
@@ -1191,10 +1702,21 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         pump_keyboard()
         deliver_pointer()
         sig: uint64 = frame_signature()
+        csig: uint64 = cursor_signature()
         if sig != last_sig:
             last_sig = sig
+            last_csig = csig
             paint_frame()
             n_frames = n_frames + 1
+            idle = 0
+        elif csig != last_csig:
+            # Only the pointer moved: restore what the cursor covered, stamp it
+            # at the new place, and push just those rows. No window is read,
+            # rasterized or copied.
+            last_csig = csig
+            cursor_only_frame()
+            n_frames = n_frames + 1
+            n_curframes = n_curframes + 1
             idle = 0
         else:
             idle = idle + 1
