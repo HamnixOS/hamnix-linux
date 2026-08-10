@@ -25,7 +25,7 @@ cd "$PROJ_ROOT"
 OUT="${1:-build/image}"
 ROOT="$OUT/root"
 rm -rf "$ROOT"
-mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,lib,lib64,var,usr/bin}
+mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,lib,lib64,var/log,usr/bin}
 
 # The applications that go in /bin. Kept to things that build AND run today
 # (measured -- see HANDOFF.md §5); the point of the image is to boot, not to be
@@ -111,6 +111,9 @@ done
 # scene compositor -- neither of which exists on this line yet.
 mkdir -p "$ROOT/etc/rc.d"
 install -m644 etc/rc.d/rc.5.linux "$ROOT/etc/rc.d/rc.5"
+# The namespace a DE-spawned shell gets. Same reasoning as rc.5 above: this is
+# the Linux-line variant, and its header says what it leaves out and why.
+install -m644 etc/rc.de-user.linux "$ROOT/etc/rc.de-user"
 
 # --- kernel modules -------------------------------------------------------
 # The north star is real hardware, and on a Debian kernel nearly every driver

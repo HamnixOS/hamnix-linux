@@ -87,6 +87,10 @@ waitset:  Array[4, int32]
 fb_fd: int32 = -1
 focus_wid: int32 = 0
 last_sig: uint64 = 0                   # change signature of the last frame
+highest_wid: int32 = 0                 # the newest window we have seen
+n_frames: int32 = 0
+n_keys:   int32 = 0
+n_ptr:    int32 = 0
 verbose: int32 = 0
 
 # --- input ------------------------------------------------------------
@@ -626,6 +630,7 @@ def deliver_pointer():
     elif ptr_dz != 0:
         kind = 115                                       # 's' scroll
     route_pointer(wid, kind, lx, ly, ptr_btn, ptr_dz)
+    n_ptr = n_ptr + 1
     ptr_moved = 0
     ptr_edge = 0
     ptr_dz = 0
@@ -722,6 +727,7 @@ def handle_key(code: int32, value: int32):
         ch = kshift[code]
     if ch == 0:
         return
+    n_keys = n_keys + 1
     if ctrl_down != 0 and ch >= 97 and ch <= 122:
         ch = ch - 96                                     # ^A .. ^Z
     route_key(cast[int32](ch))
@@ -883,11 +889,75 @@ def paint_cursor():
         r = r + 1
 
 
+# Publish what the compositor thinks is going on, as a file. A desktop that
+# is not behaving has to be diagnosable from inside the running system, and
+# `cat /dev/wsys/wsysd/state` is how -- the same way every other thing here is
+# a file. It also survives a session whose stdout went somewhere unhelpful.
+def publish_state():
+    i: uint64 = 0
+    p: Ptr[uint8] = "focus "
+    k: uint64 = 0
+    while p[k] != 0:
+        ctlbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, focus_wid)
+    q: Ptr[uint8] = " windows "
+    k = 0
+    while q[k] != 0:
+        ctlbuf[i] = q[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, cast[int32](n_win))
+    r: Ptr[uint8] = " inputs "
+    k = 0
+    while r[k] != 0:
+        ctlbuf[i] = r[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, cast[int32](n_input))
+    t: Ptr[uint8] = " keys "
+    k = 0
+    while t[k] != 0:
+        ctlbuf[i] = t[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, n_keys)
+    u: Ptr[uint8] = " pointer "
+    k = 0
+    while u[k] != 0:
+        ctlbuf[i] = u[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, n_ptr)
+    v: Ptr[uint8] = " frames "
+    k = 0
+    while v[k] != 0:
+        ctlbuf[i] = v[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, n_frames)
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    write_path(cast[Ptr[char]]("/dev/wsys/wsysd/state"), &ctlbuf[0])
+
+
 def pick_focus():
-    # Focus is CLICK-driven (deliver_pointer sets it), so this only has to
-    # cover the case where the focused window went away -- or where nothing
-    # has been clicked yet. Falling back to the topmost decorated window is
-    # what makes a freshly-launched app typeable without a click first.
+    # A NEWLY MAPPED window takes focus. Without this the desktop backdrop --
+    # the first decorated window to exist -- kept focus for the whole session,
+    # so a terminal launched from the menu received nothing the user typed:
+    # not even the local echo appeared, which made it look like the keyboard
+    # was dead rather than like focus was wrong.
+    i: uint64 = 0
+    while i < n_win:
+        if win_id[i] > highest_wid:
+            highest_wid = win_id[i]
+            if win_vis[i] != 0 and win_dec[i] != 0 and win_z[i] < 100:
+                focus_wid = win_id[i]
+        i = i + 1
+
+    # Otherwise focus is CLICK-driven (deliver_pointer sets it), so all that
+    # is left is the case where the focused window went away.
     if focus_wid >= 2 and win_index(focus_wid) >= 0:
         return
     best: int32 = 0
@@ -938,7 +1008,6 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     ptr_x = scr_w / 2
     ptr_y = scr_h / 2
 
-    frames: uint64 = 0
     idle: uint64 = 0
     while 1 == 1:
         # The window set is refreshed BEFORE input is drained, not after. It
@@ -955,10 +1024,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         if sig != last_sig:
             last_sig = sig
             paint_frame()
-            frames = frames + 1
+            n_frames = n_frames + 1
             idle = 0
         else:
             idle = idle + 1
+        publish_state()
         # Sleep to the next frame. nfds=0 makes this a plain timed wait --
         # the compositor must not spin, or an idle desktop costs a core.
         sys_waitfds(&waitset[0], 0, 16)

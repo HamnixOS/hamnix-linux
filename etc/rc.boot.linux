@@ -29,6 +29,12 @@
 # single-quoted; `bind SRC DST` is source-first.
 
 echo 'rc.boot: hamnix-linux starting'
+
+# /dev/cons is Hamnix's console device and the tree writes diagnostics to it
+# by name -- lib and the DE apps all do, through their _cons_say helpers.
+# devtmpfs has no such node, so the messages went nowhere: a GUI app could be
+# reporting a fault every frame and the operator would see silence.
+ln -s /dev/console /dev/cons
 echo 'rc.boot: kernel is Linux; userland is Adder'
 
 # Nothing else to bring up yet. When /net and wsys land this is where they get

@@ -492,11 +492,27 @@ int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
                       : sys_read(fd, buf, count);
     if (dirtab_find((int)fd))
         return sys_read(fd, buf, count);
+    /* Non-blocking for THIS read only. Leaving O_NONBLOCK set -- which the
+     * freestanding version in linux-runtime.S does -- makes the mode STICKY:
+     * every later blocking sys_read on the same descriptor returns -EAGAIN
+     * instead of waiting, and a caller that reads that as end-of-input just
+     * stops. That is what killed the DE terminal's shell: hamsh polls its
+     * stdin with read_nb, then blocks on it, got -EAGAIN, concluded EOF and
+     * exited -- and hamtermscene dutifully closed the window. On Hamnix
+     * read_nb is a separate kernel path that leaves the channel alone, so
+     * restoring the flags is what makes this the same call. */
     int fl = fcntl((int)fd, F_GETFL, 0);
-    if (fl >= 0 && !(fl & O_NONBLOCK))
-        fcntl((int)fd, F_SETFL, fl | O_NONBLOCK);
+    int flipped = 0;
+    if (fl >= 0 && !(fl & O_NONBLOCK)) {
+        if (fcntl((int)fd, F_SETFL, fl | O_NONBLOCK) == 0)
+            flipped = 1;
+    }
     ssize_t n = read((int)fd, buf, (size_t)count);
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    int e = errno;
+    if (flipped)
+        fcntl((int)fd, F_SETFL, fl);
+    errno = e;
+    if (n < 0 && (e == EAGAIN || e == EWOULDBLOCK))
         return 0;
     return rc64(n);
 }
@@ -1297,10 +1313,18 @@ int64_t sys_waitpid_jc(int32_t pid, int64_t *status)
 
 /* extern def sys_waitpid_nb_raw(pid: int32, flags: int64) -> int64
  *
- * The raw form: `flags` is the Hamnix flag word whose only defined bit is
- * WNOHANG = 1 (user/hamsh.ad's comment at the decl). Returns the reaped pid,
- * 0 if nothing is ready, -1 on error. Deliberately does NOT decode the status:
- * that is what the _jc form is for. */
+ * `flags` is the Hamnix flag word whose only defined bit is WNOHANG = 1.
+ *
+ * "STILL RUNNING" IS -EAGAIN, NOT 0. user/hamsh.ad:14349 states the contract
+ * outright -- "the kernel returns -EAGAIN (-11) instead of yielding" -- and
+ * every caller tests for exactly -11: hamtermscene's _reap_shell says
+ * `if wr != -11: sh_alive = 0`. waitpid(2) reports a live child as 0, so
+ * returning that verbatim told the terminal its shell had died the instant it
+ * started. It closed the window, stopped pumping, and the keys the compositor
+ * was correctly delivering went into a ring nobody read -- which looked for
+ * all the world like broken input.
+ *
+ * Returns the reaped pid, -EAGAIN if the child is alive, -errno on error. */
 int64_t sys_waitpid_nb_raw(int32_t pid, int64_t flags)
 {
     int st;
@@ -1309,7 +1333,11 @@ int64_t sys_waitpid_nb_raw(int32_t pid, int64_t flags)
     do {
         r = waitpid((pid_t)pid, &st, wflags);
     } while (r < 0 && errno == EINTR);
-    return r < 0 ? -1 : (int64_t)r;
+    if (r < 0)
+        return -(int64_t)errno;
+    if (r == 0)
+        return -EAGAIN;                 /* alive, nothing to reap */
+    return (int64_t)r;
 }
 
 /* extern def sys_tcsetpgrp(pgid: int32) -> int32
@@ -1492,8 +1520,7 @@ static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
         { "#sys",     "sysfs",    NULL, 0, NULL },
         { "#pts",     "devpts",   NULL, 0, NULL },
         { "#/",       NULL,       "/",  0, NULL },   /* conventional /n parent */
-        /* #d -> /fd is a DELIBERATE NO-OP on this line. See devsrv_bind_noop
-         * below; materialising /fd actively breaks every spawned child. */
+        /* #d -> /fd needs no mount: user/linux-fdns.c serves the names. */
         { "#d",       NULL,       NULL, 0, NULL },
         { "#r",       NULL,       NULL, 1, NULL },   /* root partition subtree */
         { "#sysroot", NULL,       NULL, 0, NULL },
@@ -1560,8 +1587,12 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
         return -1;
     }
 
-    /* `bind '#d' /fd` — succeed, and do NOTHING. This is not laziness; it is
-     * the correct answer, and getting it wrong cost a long debugging session.
+    /* `bind '#d' /fd` — succeed, and do NOTHING.
+     *
+     * NOT because /fd is unimplemented: user/linux-fdns.c serves it, and
+     * sys_open intercepts the path before the filesystem is ever consulted.
+     * There is simply nothing to mount. The history below is kept because the
+     * WRONG answer here was expensive and is easy to reach for again.
      *
      * Hamnix passes a child's standard streams as NAMES rather than inherited
      * integer fds (SPAWN_STDIO_NS, user/hamsh.ad:185): the shell sys_fdbind's
@@ -1583,18 +1614,28 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
      * captures the BINDING process's fd table rather than resolving per-process,
      * so the child would inherit the shell's fds even if the flags were right.
      *
-     * With /fd absent the child's open fails, it skips the dup2, and it keeps
-     * the fds it inherited across fork — which is what the fd-slot model exists
-     * to emulate in the first place, and what Linux gives us for free. Redirects
-     * and pipes still need real work (sys_fdbind, HANDOFF §7.5); this only makes
-     * the common case correct instead of silently broken. */
+     * /fd is now served in the runtime instead, per-process and with the
+     * access mode the BINDER chose — which is what the fd-slot model always
+     * meant. A mount could never have expressed that. */
     if (!strcmp(d->letter, "#d"))
         return 0;
 
     mkdir(dst, 0755);
 
-    if (d->fstype)
-        return rc32(mount(d->fstype, dst, d->fstype, 0, NULL));
+    if (d->fstype) {
+        if (mount(d->fstype, dst, d->fstype, 0, NULL) == 0)
+            return 0;
+        /* EBUSY means it is ALREADY mounted there, and that is a success, not
+         * a failure. The rc scripts bind these repeatedly on purpose --
+         * etc/rc.de-user's header says "idempotent on top of the COW-inherited
+         * ones" -- because in Plan 9 a namespace copy carries the parent's
+         * binds and re-binding the same server over the same point is a no-op.
+         * Returning an error made every DE-spawned shell print
+         * "bind: Device or resource busy" for a namespace it already had. */
+        if (errno == EBUSY)
+            return 0;
+        return rc32(-1);
+    }
 
     /* Bind-mount forms. Resolve the source root. */
     char srcpath[4096];

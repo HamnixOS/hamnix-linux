@@ -25,7 +25,13 @@
 echo '[rc.5] hamnix-linux graphical runlevel'
 
 # The compositor. Everything else is a client of it.
-/bin/wsysd &
+#
+# Session output goes to /var/log, not to the console. That is not tidiness:
+# hampanelscene emits a [panelbeacon] line several times a second, which on a
+# shared console buries every other message -- including the ones you need to
+# see when an app misbehaves. A desktop session must not compete with the
+# system console for a serial line.
+/bin/wsysd > /var/log/wsysd.log &
 echo '[rc.5] compositor started'
 
 # Give it a moment to read /dev/fb and publish the screen geometry before the
@@ -33,10 +39,10 @@ echo '[rc.5] compositor started'
 # itself to the default until the next frame.
 sleep 1
 
-/bin/hamdesktop &
+/bin/hamdesktop > /var/log/hamdesktop.log &
 echo '[rc.5] desktop backdrop started'
 
-/bin/hampanelscene &
+/bin/hampanelscene > /var/log/panel.log &
 echo '[rc.5] panel started'
 
 echo '[rc.5] desktop up'

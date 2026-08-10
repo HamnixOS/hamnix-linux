@@ -1,0 +1,64 @@
+# /etc/rc.de-user.linux — the DE-spawned shell's namespace, on the Linux line.
+#
+# Staged into the image as /etc/rc.de-user. It is NOT etc/rc.de-user, Hamnix's
+# own, and the differences are all things that do not exist here YET rather
+# than things this line does differently:
+#
+#   * `bind '#I' /net` — the /net file server is not written (HANDOFF §3).
+#     Hamnix's version binds it here, and its comment is right that a terminal
+#     without /net cannot ssh out. That comes with the /net work.
+#   * `bind '#r/home' /home` — #r is the boot file server; on this line the
+#     initramfs IS the root, so /home is already there.
+#   * `bind '#w' /dev/win` — the per-window file server. On this line a client
+#     finds its window through /dev/wsys/self, which the compositor already
+#     answers, so there is nothing to bind.
+#   * `setuid 1001` — there is no provisioned `live` user in the image yet,
+#     and dropping to a uid with no passwd entry would give the terminal a
+#     shell with no home and no name. Restoring this is part of the install
+#     work, and it MATTERS: Hamnix's comment is explicit that an interactive
+#     session must not run as the host owner.
+#
+# What IS kept is the shape: the terminal's shell gets its capabilities by
+# having things bound into its namespace, and the `linux` / `debian` templates
+# are captured but not entered, so the user can `enter linux { ... }` on
+# demand and reach the Debian subsystem.
+#
+# Syntax: hamsh, not bash. '#' starts a comment; device-letter names like '#c'
+# MUST be single-quoted. `bind SRC DST` is source-first.
+
+echo 'rc.de-user: planting the shell namespace'
+
+bind '#c' /dev
+bind '#p' /proc
+bind '#s' /srv
+bind '#/' /n
+
+# The Debian namespace, captured as a template and entered on demand. Nothing
+# is granted by capturing it: `ns clean { }` is a description, and what an
+# `enter` switches to is the Debian root, never the native one.
+linux = ns clean {
+    bind '#distro' /
+    bind '#c' /dev
+    bind '#p' /proc
+    bind '#s' /srv
+    bind '#/' /n
+}
+debian = ns clean {
+    bind '#distro' /
+    bind '#c' /dev
+    bind '#p' /proc
+    bind '#s' /srv
+    bind '#/' /n
+}
+
+echo 'rc.de-user: namespace ready'
+
+# hamUId / hamtermscene plant HAMNIX_DE_PROG before exec'ing us. Set means
+# "run that program in this window"; unset means "be an interactive shell",
+# which is what a terminal wants.
+if $HAMNIX_DE_PROG:
+    if $HAMNIX_DE_PROG_ARG1:
+        $HAMNIX_DE_PROG $HAMNIX_DE_PROG_ARG1
+    else:
+        $HAMNIX_DE_PROG
+    exit $status
