@@ -41,6 +41,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <poll.h>
 #include <unistd.h>
 
 /* The DRM uapi headers sit in two different places depending on the Debian
@@ -80,11 +81,83 @@ static struct {
     int      needs_dirty;  /* virtio-gpu and other transfer-based drivers */
     int      is_fbdev;     /* 1 = /dev/fbN via fbdev, 0 = raw DRM/KMS */
     int      offscreen;    /* 1 = a plain file (HAMFB_FILE), no display */
+
+    /* --- double buffering (raw DRM/KMS only) ------------------------- *
+     * Two dumb buffers of identical geometry. `front` is the one the CRTC
+     * is scanning out; the other is the back buffer. `have_two` says both
+     * were allocated; `dbl` says we are actually USING the second one,
+     * which only ever becomes true after the compositor asks for it with
+     * the /dev/fbctl `flip` verb. Until then every field above means
+     * exactly what it meant before double buffering existed and the code
+     * paths are the single-buffer ones, byte for byte. */
+    uint32_t bhandle[2], bfb_id[2];
+    uint8_t *bmap[2];
+    int      have_two;
+    int      dbl;
+    int      front;            /* index being scanned out */
+    int      flip_pending;     /* a PAGE_FLIP whose event we have not read */
+    uint64_t dirty_lo, dirty_hi;  /* bytes written into the back buffer */
 } fb;
 
 /* PIXFMT as the userland understands it. 0 = XRGB8888 little-endian, which is
  * DRM_FORMAT_XRGB8888 and what every dumb buffer gives us. */
 #define HAMFB_PIXFMT_XRGB8888 0
+
+/* Create one dumb buffer of (w,h), give it an fb_id and map it. All three
+ * steps or none: a half-made buffer is worse than no second buffer at all,
+ * because the caller's fallback is simply to carry on with one. */
+static int drm_make_buf(int fd, uint32_t w, uint32_t h,
+                        uint32_t *handle, uint32_t *fb_id, uint8_t **map,
+                        uint32_t *pitch, uint32_t *size)
+{
+    struct drm_mode_create_dumb cd;
+    memset(&cd, 0, sizeof cd);
+    cd.width = w; cd.height = h; cd.bpp = 32;
+    if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd) < 0)
+        return -1;
+
+    struct drm_mode_fb_cmd fbc;
+    memset(&fbc, 0, sizeof fbc);
+    fbc.width = cd.width; fbc.height = cd.height;
+    fbc.pitch = cd.pitch; fbc.bpp = 32; fbc.depth = 24;
+    fbc.handle = cd.handle;
+    if (ioctl(fd, DRM_IOCTL_MODE_ADDFB, &fbc) < 0)
+        goto undo_dumb;
+
+    struct drm_mode_map_dumb md;
+    memset(&md, 0, sizeof md);
+    md.handle = cd.handle;
+    if (ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &md) < 0)
+        goto undo_fb;
+    void *m = mmap(NULL, (size_t)cd.size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                   fd, (off_t)md.offset);
+    if (m == MAP_FAILED)
+        goto undo_fb;
+    memset(m, 0, (size_t)cd.size);
+
+    *handle = cd.handle;
+    *fb_id  = fbc.fb_id;
+    *map    = (uint8_t *)m;
+    *pitch  = cd.pitch;
+    *size   = (uint32_t)cd.size;
+    return 0;
+
+undo_fb: {
+        int e = errno;
+        uint32_t id = fbc.fb_id;
+        ioctl(fd, DRM_IOCTL_MODE_RMFB, &id);
+        errno = e;
+    }
+undo_dumb: {
+        int e = errno;
+        struct drm_mode_destroy_dumb dd;
+        memset(&dd, 0, sizeof dd);
+        dd.handle = cd.handle;
+        ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dd);
+        errno = e;
+        return -1;
+    }
+}
 
 static int drm_try_card(const char *path)
 {
@@ -154,40 +227,45 @@ static int drm_try_card(const char *path)
     free(conns); free(crtcs);
 
     /* A dumb buffer is a plain linear CPU-writable surface — exactly the shape
-     * of the Hamnix framebuffer, which is why no format negotiation is needed. */
-    struct drm_mode_create_dumb cd;
-    memset(&cd, 0, sizeof cd);
-    cd.width  = fb.mode.hdisplay;
-    cd.height = fb.mode.vdisplay;
-    cd.bpp    = 32;
-    if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd) < 0)
+     * of the Hamnix framebuffer, which is why no format negotiation is needed.
+     *
+     * TWO of them, so a frame can be built off-screen and put up whole at a
+     * vblank instead of being written into the surface the scanout engine is
+     * reading. The SECOND one is a pure bonus: if it cannot be had (memory,
+     * an old driver, anything) we carry on with one buffer and the code below
+     * is exactly what it was before. */
+    uint32_t w = fb.mode.hdisplay, h = fb.mode.vdisplay;
+    if (drm_make_buf(fd, w, h, &fb.bhandle[0], &fb.bfb_id[0], &fb.bmap[0],
+                     &fb.pitch, &fb.size) < 0)
         goto fail;
-    fb.handle = cd.handle;
-    fb.pitch  = cd.pitch;
-    fb.size   = (uint32_t)cd.size;
-    fb.width  = cd.width;
-    fb.height = cd.height;
+    fb.width  = w;
+    fb.height = h;
+    fb.handle = fb.bhandle[0];
+    fb.fb_id  = fb.bfb_id[0];
+    fb.map    = fb.bmap[0];
+    fb.front  = 0;
 
-    struct drm_mode_fb_cmd fbc;
-    memset(&fbc, 0, sizeof fbc);
-    fbc.width = cd.width; fbc.height = cd.height;
-    fbc.pitch = cd.pitch; fbc.bpp = 32; fbc.depth = 24;
-    fbc.handle = cd.handle;
-    if (ioctl(fd, DRM_IOCTL_MODE_ADDFB, &fbc) < 0)
-        goto fail;
-    fb.fb_id = fbc.fb_id;
-
-    struct drm_mode_map_dumb md;
-    memset(&md, 0, sizeof md);
-    md.handle = cd.handle;
-    if (ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &md) < 0)
-        goto fail;
-    void *m = mmap(NULL, fb.size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                   fd, (off_t)md.offset);
-    if (m == MAP_FAILED)
-        goto fail;
-    fb.map = m;
-    memset(fb.map, 0, fb.size);
+    uint32_t p2 = 0, s2 = 0;
+    if (drm_make_buf(fd, w, h, &fb.bhandle[1], &fb.bfb_id[1], &fb.bmap[1],
+                     &p2, &s2) == 0) {
+        /* Identical geometry is the whole premise of the swap. A driver that
+         * handed back a different pitch for the same request would make the
+         * two buffers non-interchangeable, so refuse rather than flip between
+         * mismatched surfaces. */
+        if (p2 == fb.pitch && s2 == fb.size)
+            fb.have_two = 1;
+        else {
+            munmap(fb.bmap[1], s2);
+            fb.bmap[1] = NULL;
+            uint32_t id = fb.bfb_id[1];
+            ioctl(fd, DRM_IOCTL_MODE_RMFB, &id);
+            struct drm_mode_destroy_dumb dd;
+            memset(&dd, 0, sizeof dd);
+            dd.handle = fb.bhandle[1];
+            ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dd);
+            fb.bfb_id[1] = fb.bhandle[1] = 0;
+        }
+    }
 
     struct drm_mode_crtc sc;
     memset(&sc, 0, sizeof sc);
@@ -219,9 +297,10 @@ static int drm_try_card(const char *path)
      * userland otherwise. */
     if (getenv("HAMFB_QUIET") == NULL)
         fprintf(stderr,
-                "hamfb: %s %ux%u pitch=%u conn=%u crtc=%u dirtyfb=%s\n",
+                "hamfb: %s %ux%u pitch=%u conn=%u crtc=%u dirtyfb=%s bufs=%d\n",
                 path, fb.width, fb.height, fb.pitch, fb.conn_id, fb.crtc_id,
-                fb.needs_dirty ? "yes" : (dirty_rc < 0 ? "unsupported" : "no"));
+                fb.needs_dirty ? "yes" : (dirty_rc < 0 ? "unsupported" : "no"),
+                fb.have_two ? 2 : 1);
 
     fb.drm_fd = fd;
     fb.ready = 1;
@@ -229,7 +308,9 @@ static int drm_try_card(const char *path)
 
 fail: {
         int e = errno;
-        if (fb.map) { munmap(fb.map, fb.size); fb.map = NULL; }
+        for (int b = 0; b < 2; b++)
+            if (fb.bmap[b]) { munmap(fb.bmap[b], fb.size); fb.bmap[b] = NULL; }
+        fb.map = NULL;
         close(fd);
         memset(&fb, 0, sizeof fb);
         errno = e;
@@ -380,7 +461,14 @@ static int fb_init(void)
         return 0;
 
     char path[64];
-    /* fbdev first — see the note above. */
+    /* fbdev first — see the note above.
+     *
+     * HAMFB_DRM=1 skips it, which is the ONLY way to exercise the raw DRM/KMS
+     * path (and with it the page flip) on a machine whose driver provides
+     * fbdev emulation — which is every modern one, virtio-gpu included. Use it
+     * in a VM. */
+    const char *want_drm = getenv("HAMFB_DRM");
+    if (!(want_drm && *want_drm && *want_drm != '0'))
     for (int i = 0; i < 4; i++) {
         snprintf(path, sizeof path, "/dev/fb%d", i);
         if (fbdev_try(path) == 0)
@@ -420,6 +508,10 @@ static void fb_flush_rows(uint32_t y0, uint32_t y1)
         }
         return;
     }
+    if (fb.dbl)
+        return;   /* the write landed in the back buffer, which no CRTC is
+                     reading. The page flip is what publishes it, and dirtying
+                     a surface nobody scans out would only cost a transfer. */
     struct drm_mode_fb_dirty_cmd dc;
     memset(&dc, 0, sizeof dc);
     dc.fb_id = fb.fb_id;
@@ -432,6 +524,135 @@ static void fb_flush_rows(uint32_t y0, uint32_t y1)
         fprintf(stderr, "hamfb: first flush rows %u..%u rc=%d errno=%d\n",
                 y0, y1, rc, rc < 0 ? errno : 0);
     }
+}
+
+/* ------------------------------------------------------------------ *
+ * Double buffering and the page flip
+ *
+ * THE INVARIANT, which is the whole design: between flips, the back buffer
+ * holds EXACTLY what is on screen. That is what makes a PARTIAL write safe —
+ * wsysd's cursor-only frames write two small bands of rows and nothing else,
+ * and a flip to a buffer that is otherwise the displayed frame is correct.
+ *
+ * It is maintained by copying, after each flip, only the bytes that were
+ * written since the previous one: those are precisely the bytes by which the
+ * two buffers now differ. A cursor-only frame therefore copies ~34 rows, not
+ * a screen. A full frame copies a screen, which is the honest price of
+ * tear-free presentation and is paid once per full repaint.
+ *
+ * Nothing here engages until someone writes `flip` to /dev/fbctl. A program
+ * that never does — hamUId, the eight direct /dev/fb writers, every test —
+ * gets the single-buffer path unchanged.
+ * ------------------------------------------------------------------ */
+
+/* Read (and discard) one page-flip completion event. 1 if one was consumed. */
+static int fb_drain_flip_event(int timeout_ms)
+{
+    if (!fb.flip_pending)
+        return 1;
+    struct pollfd pfd;
+    pfd.fd = fb.drm_fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int pr = poll(&pfd, 1, timeout_ms);
+    if (pr <= 0)
+        return 0;                    /* timed out, or poll itself failed */
+    /* drm_event_vblank is the largest event this fd produces for us. */
+    char ev[sizeof(struct drm_event_vblank) * 4];
+    ssize_t n = read(fb.drm_fd, ev, sizeof ev);
+    if (n <= 0)
+        return 0;
+    fb.flip_pending = 0;
+    return 1;
+}
+
+/* Give up on double buffering for good and get the pixels onto the screen the
+ * old way. Called whenever the kernel refuses something; the caller's contract
+ * is that after this, writes go to the scanned-out buffer exactly as they did
+ * before this feature existed. */
+static void fb_disable_double(const char *why)
+{
+    if (fb.dbl) {
+        /* Whatever is in the back buffer is the newest frame. Move it to the
+         * front so the failure does not eat a frame. */
+        uint64_t lo = fb.dirty_lo, hi = fb.dirty_hi;
+        if (hi > lo && hi <= fb.size)
+            memcpy(fb.bmap[fb.front] + lo, fb.map + lo, (size_t)(hi - lo));
+    }
+    fb.dbl = 0;
+    fb.have_two = 0;
+    fb.map = fb.bmap[fb.front];
+    fb.fb_id = fb.bfb_id[fb.front];
+    fb.dirty_lo = fb.dirty_hi = 0;
+    if (getenv("HAMFB_QUIET") == NULL)
+        fprintf(stderr, "hamfb: double buffering off (%s, errno=%d)\n",
+                why, errno);
+    fb_flush_rows(0, fb.height);
+}
+
+/* The `flip` verb. Returns 1 if the frame was published by a page flip, 0 if
+ * this framebuffer does not (or no longer) does that — in which case the
+ * caller has already been served by the single-buffer path and there is
+ * nothing to do. */
+static int fb_flip(void)
+{
+    if (!fb.ready || fb.offscreen || fb.is_fbdev || !fb.have_two)
+        return 0;
+
+    if (!fb.dbl) {
+        /* First `flip`: arm it. The frame that was just written went to the
+         * front buffer and is already on screen, so there is nothing to flip
+         * — all this does is establish the invariant and point writes at the
+         * back buffer from now on. */
+        memcpy(fb.bmap[1 - fb.front], fb.bmap[fb.front], fb.size);
+        fb.dbl = 1;
+        fb.map = fb.bmap[1 - fb.front];
+        fb.dirty_lo = fb.dirty_hi = 0;
+        if (getenv("HAMFB_QUIET") == NULL)
+            fprintf(stderr, "hamfb: double buffering on (fb %u/%u)\n",
+                    fb.bfb_id[0], fb.bfb_id[1]);
+        return 1;
+    }
+
+    if (fb.dirty_hi <= fb.dirty_lo)
+        return 1;                       /* nothing written since the last flip */
+
+    /* Only one flip may be outstanding per CRTC; a second one returns EBUSY.
+     * If the previous event has still not arrived, keep the frame in the back
+     * buffer and present it on the next call rather than losing it. */
+    if (!fb_drain_flip_event(100))
+        return 1;
+
+    int back = 1 - fb.front;
+    struct drm_mode_crtc_page_flip pf;
+    memset(&pf, 0, sizeof pf);
+    pf.crtc_id = fb.crtc_id;
+    pf.fb_id   = fb.bfb_id[back];
+    pf.flags   = DRM_MODE_PAGE_FLIP_EVENT;
+    pf.user_data = 0;
+    if (ioctl(fb.drm_fd, DRM_IOCTL_MODE_PAGE_FLIP, &pf) < 0) {
+        fb_disable_double("PAGE_FLIP rejected");
+        return 0;
+    }
+    fb.flip_pending = 1;
+
+    /* Wait for the vblank, but never for ever: a driver that accepts the flip
+     * and never sends the event would otherwise hang the compositor. On a
+     * timeout the flip is still coming, so the swap below is still right; we
+     * simply carry the outstanding event to the next frame. */
+    fb_drain_flip_event(100);
+
+    uint64_t lo = fb.dirty_lo, hi = fb.dirty_hi;
+    fb.front = back;
+    fb.fb_id = fb.bfb_id[back];
+    fb.map   = fb.bmap[1 - back];
+    fb.dirty_lo = fb.dirty_hi = 0;
+    /* Restore the invariant: the new back differs from the new front exactly
+     * in the range we just wrote. */
+    if (hi > fb.size) hi = fb.size;
+    if (hi > lo)
+        memcpy(fb.map + lo, fb.bmap[back] + lo, (size_t)(hi - lo));
+    return 1;
 }
 
 /* ------------------------------------------------------------------ *
@@ -522,6 +743,13 @@ int64_t hamfb_write(uint64_t offset, const uint8_t *buf, uint64_t count)
     if (offset + n > fb.size)
         n = fb.size - offset;
     memcpy(fb.map + offset, buf, (size_t)n);
+    if (fb.dbl) {
+        if (fb.dirty_hi <= fb.dirty_lo) { fb.dirty_lo = offset; fb.dirty_hi = offset + n; }
+        else {
+            if (offset < fb.dirty_lo)      fb.dirty_lo = offset;
+            if (offset + n > fb.dirty_hi)  fb.dirty_hi = offset + n;
+        }
+    }
 
     /* The compositor writes whole bands of complete rows, so deriving the
      * dirty row range from the byte range is exact rather than conservative. */
@@ -557,6 +785,14 @@ int64_t hamfb_ctl(const uint8_t *buf, uint64_t count)
     if (!fb.ready) {
         errno = ENODEV;
         return -1;
+    }
+    /* `flip` — publish the frame just written, tear-free, at the next vblank.
+     * On anything that is not a raw DRM/KMS surface with two buffers this is a
+     * no-op that reports success: the write already reached the screen by the
+     * single-buffer path, which is the truth the caller needs. */
+    if (count >= 4 && !memcmp(buf, "flip", 4)) {
+        fb_flip();
+        return (int64_t)count;
     }
     if (count >= 7 && !memcmp(buf, "suspend", 7)) {
         console_graphics(1);

@@ -176,6 +176,8 @@ inbuf:    Array[256, uint8]
 waitset:  Array[4, int32]
 
 fb_fd: int32 = -1
+fbctl_fd: int32 = -1                   # persistent write fd to /dev/fbctl
+fbctl_tried: int32 = 0                 # ... opened once, failure is permanent
 focus_wid: int32 = 0
 last_sig: uint64 = 0                   # change signature of the last frame
 last_csig: uint64 = 0                  # ... of the cursor position alone
@@ -838,6 +840,36 @@ def present_rows(y0: int32, y1: int32):
             break
         off = off + cast[uint64](k)
     sys_close(fd)
+    fb_flip()
+
+
+# Publish the rows just written, tear-free.
+#
+# WHY EVERY PRESENT AND NOT ONLY THE FULL ONES. A page flip shows the whole
+# back buffer, so flipping after a PARTIAL write would be wrong if the back
+# buffer's other rows were stale. user/linux-fb.c makes sure they are not: it
+# keeps the back buffer equal to what is on screen by copying back, after each
+# flip, exactly the bytes that flip published. A cursor-only frame therefore
+# writes its two bands into a buffer that is otherwise the displayed frame,
+# and flipping it is correct.
+#
+# The alternative -- flip only on full frames, write cursor motion straight
+# into the scanned-out buffer -- was rejected because it leaves the single
+# most frequent update a desktop does (the pointer, on every mouse event) as
+# the one thing that still tears, which is most of what one would notice.
+#
+# On fbdev, on the offscreen HAMFB_FILE framebuffer, and on any DRM device
+# that would not give us a second buffer, `flip` is a no-op: the write already
+# reached the screen on the way in.
+def fb_flip():
+    if fbctl_fd < 0:
+        if fbctl_tried != 0:
+            return
+        fbctl_tried = 1
+        fbctl_fd = sys_open_write(cast[Ptr[char]]("/dev/fbctl"))
+        if fbctl_fd < 0:
+            return
+    sys_write(fbctl_fd, cast[Ptr[uint8]]("flip\n"), 5)
 
 
 def present():
