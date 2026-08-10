@@ -44,6 +44,21 @@
 #                  That is the boundary docs/packages.md draws anyway -- hpm
 #                  does not try to be apt, and Hamnix does not try to
 #                  reimplement e2fsprogs.
+#   clang, libssl-dev
+#                  THE COMPILER'S SECOND HALF, and the reason hamnix-linux can
+#                  compile Adder on itself.  `ac foo.ad` (user/ac.ad) runs
+#                  host_ac natively to emit LLVM IR and then runs clang IN HERE
+#                  to optimise, codegen and link it -- the same split, and the
+#                  same boundary, as mkfs.ext4 above.  clang is a Debian binary
+#                  whichever directory it is copied into, so it lives with the
+#                  other Debian binaries rather than being renamed native.
+#                  It costs about 300 MB on THIS volume (clang + libclang-cpp +
+#                  libllvm + libc6-dev + binutils), and it is baked in rather
+#                  than left to `apt install` because a machine that needs a
+#                  network and a mirror before it can build a program is not
+#                  self-hosting.  libssl-dev is what makes /net's `tls` verb
+#                  compile into what the user builds; without it a program that
+#                  asks for TLS gets an ERROR rather than a plaintext socket.
 #
 # Usage: scripts/hamlinux_distro.sh [out.ext4] [size] [suite]
 set -euo pipefail
@@ -61,7 +76,8 @@ command -v mmdebstrap >/dev/null || {
 PKGS="xvfb,x11-apps,xdotool,x11-utils,matchbox-window-manager,\
 firefox-esr,ca-certificates,dbus,fonts-dejavu-core,fonts-liberation,\
 libgl1,libgtk-3-0,procps,coreutils,bash,less,nano,\
-gdisk,dosfstools,e2fsprogs,rsync,mtools"
+gdisk,dosfstools,e2fsprogs,rsync,mtools,\
+clang,libssl-dev,libdrm-dev,libcrypt-dev"
 
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"

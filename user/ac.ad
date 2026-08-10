@@ -1,0 +1,391 @@
+# user/ac.ad — compile an Adder program ON hamnix-linux.
+#
+#   ac hello.ad              -> ./hello
+#   ac hello.ad -o /bin/foo  -> /bin/foo
+#   ac -v hello.ad           -> the same, saying what it runs
+#   ac -O0 hello.ad          -> pass a different optimisation level to clang
+#   ac -k hello.ad           -> keep the scratch directory (the .ll to read)
+#
+# This is scripts/hamlinux_build.sh, moved onto the machine.  A development
+# host is no longer part of the loop: write foo.ad on the box, run ac, run the
+# binary.
+#
+# THE TWO HALVES, AND WHY THEY LIVE ON OPPOSITE SIDES OF A WALL
+# =============================================================
+# Compiling Adder is two steps, and exactly one of them is a Linux-ecosystem
+# job:
+#
+#   1. foo.ad -> foo.ll     the Adder compiler, `host_ac --backend=llvm`.
+#                           Native.  host_ac.elf is a static Linux ELF built by
+#                           the Python seed; it runs here as ordinary /bin/host_ac.
+#   2. foo.ll -> foo        optimise, codegen, link against glibc and the six
+#                           runtime objects.  That is clang, and clang is a
+#                           Debian binary.
+#
+# Step 2 runs INSIDE the Debian namespace, which is the boundary
+# docs/packages.md already draws and the one user/hlinstall.ad already crosses
+# for sgdisk and mkfs.ext4: hpm does not try to be apt, and Hamnix does not
+# reimplement LLVM.  Shipping clang into /bin would be shipping a Debian binary
+# and calling it native -- it is ~250 MB of Debian package, it drags libc6-dev
+# and binutils behind it, and it would be the same binary either way.  So it
+# stays where the Debian binaries live, and `ac` reaches for it the way
+# hlinstall reaches for mkfs.ext4.
+#
+# THE CATCH, AND THE WAY THROUGH
+# ------------------------------
+# A process that has entered the Debian root cannot see the Hamnix root -- that
+# is the isolation working, and hlinstall's header says so.  hlinstall's answer
+# was "do the one job that needs both sides from OUT here"; that does not work
+# for a compiler, because the compiler IS the job that needs both sides.
+#
+# The way through is a detail of enter_root() in user/linux-syscalls.c: entering
+# a subtree carries /dev, /proc, /sys **and /n** across, MS_BIND|MS_REC.  So a
+# child can publish what the far side needs by binding it under /n BEFORE it
+# enters, and the recursive bind of /n carries those mounts in with it:
+#
+#   rfork(RFPROC|RFFDG|RFNAMEG)   private namespace first -- the Plan 9 invariant
+#   bind /tmp/ac.<pid>  /n/ac     the scratch dir: the .ll goes in, the ELF comes out
+#   bind /usr/share/adder /n/adder   the runtime sources + the link recipe
+#   bind /var/cache/adder /n/acrt    the object cache, so the 2nd compile is fast
+#   bind '#distro' /              enter Debian
+#   exec /bin/sh /n/adder/ac-link.sh
+#
+# Three named directories, and nothing else of this filesystem, are visible to
+# clang.  Not the home directory, not /etc.  The scratch directory is why the
+# input is not bound in either: host_ac has already read foo.ad out here and
+# written the IR into the scratch dir, so the far side never needs the source.
+#
+# The recipe itself is scripts/ac-link.sh, installed as
+# /usr/share/adder/ac-link.sh.  See its header for the object list and the
+# cache rule.
+#
+# WHAT THIS NEEDS ON THE BOX
+#   /bin/host_ac                  the Adder compiler (1.3 MB, static)
+#   /usr/share/adder/             the runtime sources + ac-link.sh (~250 KB)
+#   the Debian namespace, with clang installed:
+#       enter debian { apt-get install -y clang libssl-dev libdrm-dev libcrypt-dev }
+# `hpm install hamnix-ac` carries the first two.  The third is ~250 MB on the
+# Debian volume and is said plainly rather than hidden: this is the price of
+# not writing an x86_64 backend and a linker twice.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_mkdir(path: Ptr[char]) -> int32
+extern def sys_unlink(path: Ptr[char]) -> int32
+extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
+extern def sys_getpid() -> int32
+extern def sys_rfork(flags: int32) -> int32
+extern def sys_bind(newp: Ptr[char], oldp: Ptr[char], flag: int32) -> int32
+extern def sys_execve_env(path: Ptr[char], argv: Ptr[uint64],
+                          envp: Ptr[uint64]) -> int32
+extern def sys_waitpid(pid: int32) -> int64
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+extern def sys_exit(code: uint64)
+
+RFPROC:  int32 = 0x001
+RFFDG:   int32 = 0x004
+RFNAMEG: int32 = 0x008
+
+in_path:  Array[512, uint8]
+out_path: Array[512, uint8]
+work:     Array[64, uint8]
+ll_path:  Array[96, uint8]
+elf_path: Array[96, uint8]
+e_opt:    Array[32, uint8]
+e_verb:   Array[32, uint8]
+errbuf:   Array[192, uint8]
+copybuf:  Array[65536, uint8]
+argbuf:   Array[12, uint64]
+envbuf:   Array[16, uint64]
+
+have_in:   int32 = 0
+have_out:  int32 = 0
+verbose:   int32 = 0
+keep:      int32 = 0
+in_distro: int32 = 0
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def copy_str(dst: Ptr[uint8], src: Ptr[uint8]) -> uint64:
+    i: uint64 = 0
+    while src[i] != 0:
+        dst[i] = src[i]
+        i = i + 1
+    dst[i] = 0
+    return i
+
+
+def streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    if a[i] == b[i]:
+        return 1
+    return 0
+
+
+def why(what: Ptr[uint8]):
+    puts(2, "ac: ")
+    puts(2, what)
+    puts(2, ": ")
+    n: int32 = sys_errstr(&errbuf[0], 190)
+    if n > 0:
+        puts(2, &errbuf[0])
+    puts(2, "\n")
+
+
+# Decimal, appended at `at`. Returns the new end offset.
+def put_dec(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = v
+    i: uint64 = at
+    if x <= 0:
+        d[0] = 48
+        n = 1
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = d[n]
+        i = i + 1
+    buf[i] = 0
+    return i
+
+
+# Run whatever argbuf/envbuf currently hold, and wait. `ns` non-zero means the
+# child privatises its namespace, publishes the three directories under /n and
+# enters the Debian root before exec'ing -- see the header.
+def spawn_wait(prog: Ptr[char], ns: int32) -> int32:
+    pid: int32 = sys_rfork(RFPROC | RFFDG | ns)
+    if pid < 0:
+        why("rfork")
+        return -1
+    if pid == 0:
+        if ns != 0:
+            # The Plan 9 invariant: the namespace is private BEFORE anything is
+            # bound into it, so none of this is visible to anyone else.
+            if sys_bind(cast[Ptr[char]]("/n/ac"),
+                        cast[Ptr[char]](&work[0]), 0) != 0:
+                puts(2, "ac: cannot publish the scratch directory at /n/ac\n")
+                sys_exit(126)
+            if sys_bind(cast[Ptr[char]]("/n/adder"),
+                        cast[Ptr[char]]("/usr/share/adder"), 0) != 0:
+                puts(2, "ac: cannot publish /usr/share/adder at /n/adder\n")
+                sys_exit(126)
+            if sys_bind(cast[Ptr[char]]("/n/acrt"),
+                        cast[Ptr[char]]("/var/cache/adder"), 0) != 0:
+                puts(2, "ac: cannot publish the object cache at /n/acrt\n")
+                sys_exit(126)
+            if sys_bind(cast[Ptr[char]]("/"),
+                        cast[Ptr[char]]("#distro"), 0) != 0:
+                puts(2, "ac: cannot enter the Debian namespace.\n")
+                puts(2, "    clang lives there, and the link step needs it.\n")
+                puts(2, "    hpm install linux-debian-12\n")
+                sys_exit(126)
+        sys_execve_env(prog, cast[Ptr[uint64]](&argbuf[0]),
+                       cast[Ptr[uint64]](&envbuf[0]))
+        puts(2, "ac: cannot run ")
+        puts(2, cast[Ptr[uint8]](prog))
+        puts(2, "\n")
+        sys_exit(127)
+    st: int64 = sys_waitpid(pid)
+    return cast[int32](st)
+
+
+# Copy the built ELF out of the scratch directory onto the Hamnix side, with
+# the mode a program needs. Done here rather than by binding the destination in
+# because the destination is the user's directory and clang has no business
+# seeing it.
+def copy_out(src: Ptr[char], dst: Ptr[char]) -> int32:
+    fd: int32 = sys_open(src)
+    if fd < 0:
+        why("the compile produced no binary")
+        return -1
+    ofd: int32 = sys_open_write(dst)
+    if ofd < 0:
+        why(cast[Ptr[uint8]](dst))
+        sys_close(fd)
+        return -1
+    while 1 == 1:
+        k: int64 = sys_read(fd, &copybuf[0], 65536)
+        if k <= 0:
+            break
+        w: int64 = sys_write(ofd, &copybuf[0], cast[uint64](k))
+        if w != k:
+            why("short write")
+            sys_close(fd)
+            sys_close(ofd)
+            return -1
+    sys_close(fd)
+    sys_close(ofd)
+    if sys_chmod(dst, 0o755) != 0:
+        why("chmod")
+        return -1
+    return 0
+
+
+def usage():
+    puts(2, "usage: ac <file.ad> [-o out] [-O<n>] [-v] [-k]\n")
+    puts(2, "  compile an Adder program on this machine.\n")
+
+
+# out_path defaults to the input with a trailing `.ad` removed, so `ac foo.ad`
+# writes `foo` next to it. An input with no `.ad` gets `.out` appended rather
+# than overwriting itself.
+def default_out():
+    n: uint64 = copy_str(&out_path[0], &in_path[0])
+    if n > 3:
+        if out_path[n - 3] == 46 and out_path[n - 2] == 97 \
+                and out_path[n - 1] == 100:
+            out_path[n - 3] = 0
+            return
+    copy_str(&out_path[n], ".out")
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    copy_str(&e_opt[0], "AC_OPT=-O2")
+    copy_str(&e_verb[0], "AC_VERBOSE=0")
+
+    ai: int32 = 1
+    while ai < argc:
+        f: Ptr[uint8] = cast[Ptr[uint8]](argv[cast[uint64](ai)])
+        if streq(f, "-o") != 0 and ai + 1 < argc:
+            copy_str(&out_path[0], cast[Ptr[uint8]](argv[cast[uint64](ai) + 1]))
+            have_out = 1
+            ai = ai + 2
+            continue
+        if streq(f, "-v") != 0:
+            verbose = 1
+            copy_str(&e_verb[0], "AC_VERBOSE=1")
+            ai = ai + 1
+            continue
+        if streq(f, "-k") != 0:
+            keep = 1
+            ai = ai + 1
+            continue
+        if streq(f, "-h") != 0 or streq(f, "--help") != 0:
+            usage()
+            return 0
+        if f[0] == 45 and f[1] == 79:            # -O<n>, passed to clang
+            i: uint64 = copy_str(&e_opt[0], "AC_OPT=")
+            copy_str(&e_opt[i], f)
+            ai = ai + 1
+            continue
+        if f[0] == 45:
+            puts(2, "ac: unknown option ")
+            puts(2, f)
+            puts(2, "\n")
+            usage()
+            return 2
+        copy_str(&in_path[0], f)
+        have_in = 1
+        ai = ai + 1
+
+    if have_in == 0:
+        usage()
+        return 2
+    if have_out == 0:
+        default_out()
+
+    # The scratch directory. /n and the cache are made here, in the Hamnix
+    # namespace, because the child that binds them has no chance to.
+    sys_mkdir(cast[Ptr[char]]("/n"))
+    sys_mkdir(cast[Ptr[char]]("/var"))
+    sys_mkdir(cast[Ptr[char]]("/var/cache"))
+    sys_mkdir(cast[Ptr[char]]("/var/cache/adder"))
+    sys_mkdir(cast[Ptr[char]]("/tmp"))
+    w: uint64 = copy_str(&work[0], "/tmp/ac.")
+    put_dec(&work[0], w, sys_getpid())
+    if sys_mkdir(cast[Ptr[char]](&work[0])) != 0:
+        why(&work[0])
+        return 1
+    i2: uint64 = copy_str(&ll_path[0], &work[0])
+    copy_str(&ll_path[i2], "/out.ll")
+    i2 = copy_str(&elf_path[0], &work[0])
+    copy_str(&elf_path[i2], "/out.elf")
+
+    # --- step 1: the Adder compiler, natively -------------------------------
+    if verbose != 0:
+        puts(2, "[ac] host_ac --backend=llvm ")
+        puts(2, &in_path[0])
+        puts(2, "\n")
+    argbuf[0] = cast[uint64](cast[Ptr[char]]("/bin/host_ac"))
+    argbuf[1] = cast[uint64](cast[Ptr[char]]("--backend=llvm"))
+    argbuf[2] = cast[uint64](&in_path[0])
+    argbuf[3] = cast[uint64](&ll_path[0])
+    argbuf[4] = 0
+    envbuf[0] = cast[uint64](cast[Ptr[char]]("PATH=/bin"))
+    envbuf[1] = 0
+    st: int32 = spawn_wait(cast[Ptr[char]]("/bin/host_ac"), 0)
+    if st != 0:
+        puts(2, "ac: ")
+        puts(2, &in_path[0])
+        puts(2, ": the Adder compiler could not translate this program\n")
+        return 10
+
+    # --- step 2: clang, in the Debian namespace -----------------------------
+    if verbose != 0:
+        puts(2, "[ac] clang, inside the Debian namespace\n")
+    argbuf[0] = cast[uint64](cast[Ptr[char]]("/bin/sh"))
+    argbuf[1] = cast[uint64](cast[Ptr[char]]("/n/adder/ac-link.sh"))
+    argbuf[2] = 0
+    envbuf[0] = cast[uint64](cast[Ptr[char]](
+        "PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
+    envbuf[1] = cast[uint64](cast[Ptr[char]]("AC_WORK=/n/ac"))
+    envbuf[2] = cast[uint64](cast[Ptr[char]]("AC_SRC=/n/adder"))
+    envbuf[3] = cast[uint64](cast[Ptr[char]]("AC_CACHE=/n/acrt"))
+    envbuf[4] = cast[uint64](cast[Ptr[char]]("AC_LL=/n/ac/out.ll"))
+    envbuf[5] = cast[uint64](cast[Ptr[char]]("AC_OUT=/n/ac/out.elf"))
+    envbuf[6] = cast[uint64](&e_opt[0])
+    envbuf[7] = cast[uint64](&e_verb[0])
+    # clang writes its temporaries through TMPDIR, and whatever this side's
+    # TMPDIR names does not exist over there. /tmp inside the Debian root is
+    # the Debian root's own: enter_root() deliberately does not carry ours in.
+    envbuf[8] = cast[uint64](cast[Ptr[char]]("TMPDIR=/tmp"))
+    envbuf[9] = 0
+    st = spawn_wait(cast[Ptr[char]]("/bin/sh"), RFNAMEG)
+    if st != 0:
+        if st == 12:
+            puts(2, "ac: the link failed.\n")
+            puts(2, "    An undefined reference to `main' means the program\n")
+            puts(2, "    bailed the compiler's SSA subset rather than failing\n")
+            puts(2, "    to parse; -k keeps the .ll so you can look.\n")
+        return st
+
+    # --- step 3: the binary, on this side -----------------------------------
+    if copy_out(cast[Ptr[char]](&elf_path[0]),
+                cast[Ptr[char]](&out_path[0])) != 0:
+        return 1
+
+    if keep == 0:
+        sys_unlink(cast[Ptr[char]](&ll_path[0]))
+        sys_unlink(cast[Ptr[char]](&elf_path[0]))
+        sys_unlink(cast[Ptr[char]](&work[0]))
+    else:
+        puts(2, "[ac] kept ")
+        puts(2, &work[0])
+        puts(2, "\n")
+
+    if verbose != 0:
+        puts(2, "[ac] wrote ")
+        puts(2, &out_path[0])
+        puts(2, "\n")
+    return 0

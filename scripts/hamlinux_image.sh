@@ -140,7 +140,12 @@ echo "[image] built $BUILT/${#APPS[@]} apps"
 echo "[image] copying the dynamic loader and libc"
 copy_libs() {
     local bin="$1"
-    ldd "$bin" 2>/dev/null | awk '/=> \//{print $3} /^\t\//{print $1}' | sort -u | while read -r lib; do
+    # `|| true` because ldd EXITS NON-ZERO on a static binary, and with
+    # `set -euo pipefail` that aborted the whole image build. It never fired
+    # while every binary was dynamic; /bin/host_ac is the first static one,
+    # and it took the build down at the copy step with no message about why.
+    { ldd "$bin" 2>/dev/null || true; } \
+        | awk '/=> \//{print $3} /^\t\//{print $1}' | sort -u | while read -r lib; do
         [ -f "$lib" ] || continue
         local dest="$ROOT$lib"
         mkdir -p "$(dirname "$dest")"
