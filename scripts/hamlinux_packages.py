@@ -67,8 +67,8 @@ COREUTILS = """
 
 NET_CMDS = "ifconfig route ping host curl wget".split()
 
-DESKTOP_CMDS = ("wsysd hamdesktop hampanelscene hamtermscene hameditscene "
-                "hamsettings hamfm hamUI hamUId").split()
+DESKTOP_CMDS = ("wsysd wsyswl xbridge hamdesktop hampanelscene hamtermscene "
+                "hameditscene hamsettings hamfm hamUI hamUId").split()
 
 # Component packages: name -> (description, [binaries], [extra files as
 # (source-path-in-repo, install-path)], [depends])
