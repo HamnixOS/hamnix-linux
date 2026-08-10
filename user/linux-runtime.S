@@ -589,37 +589,86 @@ sys_pipechan:
     .type sys_unmount, @function
 sys_unmount:
 #endif /* !ADDER_HOSTED */
+    /* These six share the "not available here, report failure" body. They
+     * MUST have their own `movq $-1; ret` and not fall through into the
+     * next #ifdef'd block, because that block is compiled OUT in the hosted
+     * lane -- which is this whole line.
+     *
+     * That is exactly what used to happen. sys_mount, sys_nslabel and
+     * sys_srv_open fell through to the `#ifndef ADDER_HOSTED` sys_openchan
+     * body; with ADDER_HOSTED defined that body does not exist, so control
+     * ran on through sys_fdslot_arg, sys_svc_publish, sys_svc_ctl, past the
+     * likewise-absent sys_setuid_auth body, and off the end of .text into
+     * whatever the linker put next. Calling ANY of these six executed
+     * garbage.
+     *
+     * `nsrun` is where it showed: it printed "private namespace cloned" and
+     * then SIGSEGV'd, and the crash looked like it was in the namespace
+     * code. It was not -- rfork worked; the next line called sys_mount and
+     * jumped into hyperspace. A stub that returns -1 makes nsrun do the
+     * right thing instead: report that distrofs cannot be mounted here and
+     * exit non-zero.
+     *
+     * The lesson is the file's own: a label with no body is not a stub, it
+     * is a fall-through, and the #ifdef that ends it may not be there. */
     .globl sys_mount
     .type sys_mount, @function
 sys_mount:
+    movq    $-1, %rax
+    ret
+    .size sys_mount, .-sys_mount
+
     .globl sys_nslabel
     .type sys_nslabel, @function
 sys_nslabel:
+    movq    $-1, %rax
+    ret
+    .size sys_nslabel, .-sys_nslabel
+
     .globl sys_srv_open
     .type sys_srv_open, @function
 sys_srv_open:
+    movq    $-1, %rax
+    ret
+    .size sys_srv_open, .-sys_srv_open
+
 #ifndef ADDER_HOSTED   /* hosted: user/linux-syscalls.c opens the real file */
     .globl sys_openchan
     .type sys_openchan, @function
 sys_openchan:
     movq    $-1, %rax
     ret
+    .size sys_openchan, .-sys_openchan
 #endif
+
     .globl sys_fdslot_arg
     .type sys_fdslot_arg, @function
 sys_fdslot_arg:
+    movq    $-1, %rax
+    ret
+    .size sys_fdslot_arg, .-sys_fdslot_arg
+
     .globl sys_svc_publish
     .type sys_svc_publish, @function
 sys_svc_publish:
+    movq    $-1, %rax
+    ret
+    .size sys_svc_publish, .-sys_svc_publish
+
     .globl sys_svc_ctl
     .type sys_svc_ctl, @function
 sys_svc_ctl:
+    movq    $-1, %rax
+    ret
+    .size sys_svc_ctl, .-sys_svc_ctl
+
 #ifndef ADDER_HOSTED   /* hosted: user/linux-auth.c serves /dev/auth */
     .globl sys_setuid_auth
     .type sys_setuid_auth, @function
 sys_setuid_auth:
     movq    $-1, %rax
     ret
+    .size sys_setuid_auth, .-sys_setuid_auth
 #endif
 
     /* Non-executable stack marker (suppress ld's executable-stack warn). */
