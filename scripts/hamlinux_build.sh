@@ -69,7 +69,8 @@ if [ ! -f "$RT_OBJ" ] || [ user/linux-runtime.S -nt "$RT_OBJ" ]; then
 fi
 SC_OBJ="$OUT_DIR/.linux-syscalls.o"
 if [ ! -f "$SC_OBJ" ] || [ user/linux-syscalls.c -nt "$SC_OBJ" ] \
-        || [ user/linux-fb.h -nt "$SC_OBJ" ]; then
+        || [ user/linux-fb.h -nt "$SC_OBJ" ] \
+        || [ user/linux-wsys.h -nt "$SC_OBJ" ]; then
     "$CLANG" -O2 -Iuser -c user/linux-syscalls.c -o "$SC_OBJ" || {
         echo "[hamlinux] ERROR: could not compile user/linux-syscalls.c" >&2
         exit 1
@@ -81,6 +82,16 @@ if [ ! -f "$FB_OBJ" ] || [ user/linux-fb.c -nt "$FB_OBJ" ] \
         || [ user/linux-fb.h -nt "$FB_OBJ" ]; then
     "$CLANG" -O2 -Iuser -c user/linux-fb.c -o "$FB_OBJ" || {
         echo "[hamlinux] ERROR: could not compile user/linux-fb.c" >&2
+        exit 1
+    }
+fi
+
+# /dev/wsys, the window system device (the port of devwsys.ad).
+WS_OBJ="$OUT_DIR/.linux-wsys.o"
+if [ ! -f "$WS_OBJ" ] || [ user/linux-wsys.c -nt "$WS_OBJ" ] \
+        || [ user/linux-wsys.h -nt "$WS_OBJ" ]; then
+    "$CLANG" -O2 -Iuser -c user/linux-wsys.c -o "$WS_OBJ" || {
+        echo "[hamlinux] ERROR: could not compile user/linux-wsys.c" >&2
         exit 1
     }
 fi
@@ -99,7 +110,7 @@ if ! grep -q "^define i64 @main(" "$LL"; then
     exit 11
 fi
 
-if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" \
+if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" \
         "$@" -o "$OUT_ELF" 2>"$LL.link.log"; then
     sed 's/^/[link] /' "$LL.link.log" >&2
     exit 12

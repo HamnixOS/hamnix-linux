@@ -51,6 +51,7 @@
 #include <unistd.h>
 
 #include "linux-fb.h"
+#include "linux-wsys.h"
 
 /* ------------------------------------------------------------------ *
  * Return convention
@@ -273,13 +274,15 @@ static int adopt_if_directory(int fd)
  * a genuine slot, survives fork, and cannot collide with an ordinary open.
  * Only read/write/lseek/close consult the table.
  * ------------------------------------------------------------------ */
-#define DEVTAB_MAX 16
+#define DEVTAB_MAX 64
 struct devfile {
     int      used;
     int      fd;
-    int      kind;      /* HAMFB_* */
+    int      kind;      /* HAMFB_*, or HAMFB_NONE when this is a wsys file */
     int      write;
     uint64_t cursor;    /* byte offset into the surface */
+    int      isw;       /* 1 => a /dev/wsys file; `w` is live */
+    struct hamwsys_file w;
 };
 static struct devfile devtab[DEVTAB_MAX];
 
@@ -297,7 +300,8 @@ static struct devfile *devtab_find(int fd)
 static int devtab_open(const char *path, int for_write)
 {
     int kind = hamfb_kind(path);
-    if (kind == HAMFB_NONE) {
+    int wkind = (kind == HAMFB_NONE) ? hamwsys_kind(path) : HAMWSYS_NONE;
+    if (kind == HAMFB_NONE && wkind == HAMWSYS_NONE) {
         errno = ENODEV;
         return -1;
     }
@@ -306,22 +310,41 @@ static int devtab_open(const char *path, int for_write)
         if (!devtab[i].used) { slot = &devtab[i]; break; }
     if (!slot) { errno = EMFILE; return -1; }
 
-    if (hamfb_open(kind, for_write) < 0)
-        return -1;
+    memset(slot, 0, sizeof *slot);
+    if (kind != HAMFB_NONE) {
+        if (hamfb_open(kind, for_write) < 0)
+            return -1;
+    } else {
+        if (hamwsys_open(path, for_write, &slot->w) < 0)
+            return -1;
+        slot->isw = 1;
+    }
 
     int fd = open("/dev/null", for_write ? O_WRONLY : O_RDONLY);
-    if (fd < 0)
+    if (fd < 0) {
+        int e = errno;
+        if (slot->isw) hamwsys_close(&slot->w);
+        slot->isw = 0;
+        errno = e;
         return -1;
+    }
     slot->used = 1; slot->fd = fd; slot->kind = kind;
     slot->write = for_write; slot->cursor = 0;
     return fd;
+}
+
+/* 1 if `path` is served from the synthetic-device table rather than the
+ * filesystem.  Both device families answer here. */
+static int dev_path(const char *path)
+{
+    return hamfb_kind(path) != HAMFB_NONE || hamwsys_kind(path) != HAMWSYS_NONE;
 }
 
 /* extern def sys_open(path: Ptr[char]) -> int32
  * ONE argument, opened for reading — see the long note at the .S definition. */
 int32_t sys_open(const char *path)
 {
-    if (hamfb_kind(path) != HAMFB_NONE)
+    if (dev_path(path))
         return rc32(devtab_open(path, 0));
     int fd = open(path, O_RDONLY);
     if (fd < 0)
@@ -346,7 +369,7 @@ int32_t sys_open3(const char *path, int32_t flags, uint32_t mode)
  * Open-or-create for writing, truncating an existing file. */
 int32_t sys_open_write(const char *path)
 {
-    if (hamfb_kind(path) != HAMFB_NONE)
+    if (dev_path(path))
         return rc32(devtab_open(path, 1));
     return rc32(open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666));
 }
@@ -358,6 +381,8 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         int64_t n;
+        if (v->isw)
+            return hamwsys_read(&v->w, buf, count);
         if (v->kind == HAMFB_FB) {
             /* Reading /dev/fb answers the geometry line, once. */
             if (v->cursor) return 0;
@@ -385,11 +410,39 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
     return rc64(read((int)fd, buf, (size_t)count));
 }
 
+/* extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+ *
+ * Non-blocking read. 0 means "nothing ready yet", never EOF-forever — that is
+ * the contract hamui's input poll depends on (lib/hamui.ad:_h_poll_pointer).
+ *
+ * This MUST go through the device table. hamui polls /dev/wsys/<wid>/keys and
+ * /dev/wsys/<wid>/pointer with exactly this call; the freestanding version in
+ * linux-runtime.S is a raw read(2) on the /dev/null descriptor standing in for
+ * the device, so it would return 0 for ever and no GUI app would see input. */
+int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
+{
+    struct devfile *v = devtab_find((int)fd);
+    if (v)
+        return v->isw ? hamwsys_read(&v->w, buf, count)
+                      : sys_read(fd, buf, count);
+    if (dirtab_find((int)fd))
+        return sys_read(fd, buf, count);
+    int fl = fcntl((int)fd, F_GETFL, 0);
+    if (fl >= 0 && !(fl & O_NONBLOCK))
+        fcntl((int)fd, F_SETFL, fl | O_NONBLOCK);
+    ssize_t n = read((int)fd, buf, (size_t)count);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        return 0;
+    return rc64(n);
+}
+
 /* extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64 */
 int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 {
     struct devfile *v = devtab_find((int)fd);
     if (v) {
+        if (v->isw)
+            return hamwsys_write(&v->w, buf, count);
         if (v->kind == HAMFB_FBCTL)
             return hamfb_ctl(buf, count);
         int64_t n = hamfb_write(v->cursor, buf, count);
@@ -403,7 +456,11 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 int32_t sys_close(int32_t fd)
 {
     struct devfile *v = devtab_find((int)fd);
-    if (v) { v->used = 0; return rc32(close((int)fd)); }
+    if (v) {
+        if (v->isw) hamwsys_close(&v->w);
+        v->used = 0; v->isw = 0;
+        return rc32(close((int)fd));
+    }
     struct dirstream *d = dirtab_find((int)fd);
     if (d)
         dirtab_release(d);
@@ -417,6 +474,15 @@ int64_t sys_lseek(int32_t fd, int64_t off, int32_t whence)
 {
     struct devfile *v = devtab_find((int)fd);
     if (v) {
+        if (v->isw) {
+            /* A wsys read is a snapshot; seeking to 0 re-reads it. */
+            int64_t base = (whence == SEEK_CUR) ? (int64_t)v->w.off
+                         : (whence == SEEK_END) ? (int64_t)v->w.snaplen : 0;
+            int64_t want = base + off;
+            if (want < 0) { errno = EINVAL; return -EINVAL; }
+            v->w.off = (uint64_t)want;
+            return want;
+        }
         /* Seeking the framebuffer moves the pixel cursor -- hamUId seeks to
          * place a band rather than always streaming from 0. */
         int64_t base = (whence == SEEK_CUR) ? (int64_t)v->cursor
@@ -1522,14 +1588,20 @@ int64_t sys_umdf_dma_alloc(uint64_t len, uint64_t *out_phys)
 { (void)len; (void)out_phys; errno = ENOSYS; return -1; }
 
 /* Window system and Vulkan presentation — HANDOFF.md §4.4. Blocked on the
- * compositor design decision (§6), which is explicitly not this change's to
- * make.
+ * compositor design (§6) is now made: the window table is shared memory, the
+ * same way devwsys.ad's is kernel memory, and user/linux-wsys.c serves
+ * /dev/wsys out of it.  These two stamp a spawned task's pid against a wid,
+ * which is what /dev/wsys/self answers.
  *   extern def sys_wsys_alloc(pid: uint64) -> int32
- *   extern def sys_wsys_free(wid: int32) -> int32
+ *   extern def sys_wsys_free(wid: int32) -> int32 */
+int32_t sys_wsys_alloc(uint64_t pid) { return rc32(hamwsys_alloc(pid)); }
+int32_t sys_wsys_free(int32_t wid)   { return rc32(hamwsys_free(wid)); }
+
+/* GPU presentation of a window frame. Unimplemented on purpose: the scene
+ * compositor rasterizes in software (lib/hamui_host.ad's vk2d raster ops), so
+ * nothing on this line needs a device-side frame yet.
  *   extern def sys_vk_window_frame(wid: int32, reserved: int32,
  *                                  frame: int64) -> int64 */
-int32_t sys_wsys_alloc(uint64_t pid) { (void)pid; errno = ENOSYS; return -1; }
-int32_t sys_wsys_free(int32_t wid)   { (void)wid; errno = ENOSYS; return -1; }
 int64_t sys_vk_window_frame(int32_t wid, int32_t reserved, int64_t frame)
 { (void)wid; (void)reserved; (void)frame; errno = ENOSYS; return -1; }
 

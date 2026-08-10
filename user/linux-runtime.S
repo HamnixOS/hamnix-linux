@@ -455,7 +455,13 @@ sys_munmap:
      * ready yet" (editor idles + yields), a negative == true EOF/error.
      * This is what lets the hamsh line editor consume a piped host script
      * over fd 0 (scripts/test_hamsh_lang_host.sh). F_SETFL cannot alter
-     * the access mode, so a read fd stays readable. */
+     * the access mode, so a read fd stays readable.
+     *
+     * Under ADDER_HOSTED this is in user/linux-syscalls.c instead, because a
+     * raw read here would bypass the synthetic-device table -- and hamui
+     * polls /dev/wsys/<wid>/{keys,pointer} with EXACTLY this call, so a raw
+     * read would return 0 for ever and no GUI app would see input. */
+#ifndef ADDER_HOSTED
     .globl sys_read_nb
     .type sys_read_nb, @function
 sys_read_nb:
@@ -477,6 +483,7 @@ sys_read_nb:
 .L_read_nb_done:
     ret
     .size sys_read_nb, .-sys_read_nb
+#endif /* !ADDER_HOSTED */
 
     /* --- (2) Plan 9 / namespace / chan / spawn — fail-closed stubs --- */
 

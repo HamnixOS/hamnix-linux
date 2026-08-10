@@ -62,6 +62,7 @@ static struct {
     struct drm_mode_modeinfo mode;
     int      needs_dirty;  /* virtio-gpu and other transfer-based drivers */
     int      is_fbdev;     /* 1 = /dev/fbN via fbdev, 0 = raw DRM/KMS */
+    int      offscreen;    /* 1 = a plain file (HAMFB_FILE), no display */
 } fb;
 
 /* PIXFMT as the userland understands it. 0 = XRGB8888 little-endian, which is
@@ -309,6 +310,47 @@ fail: {
     }
 }
 
+/* An OFFSCREEN framebuffer: a plain file, mapped and scanned out by nobody.
+ *
+ * HAMFB_FILE=<path> [HAMFB_GEOM=WxH] makes /dev/fb a file instead of a
+ * display. This is not a toy: it is the only way to exercise the compositor on
+ * the development host, where taking /dev/dri/card0 would seize the machine's
+ * real screen out from under the user. The pixels are identical to the ones a
+ * display would receive, so a test can assert on them.
+ */
+static int fbfile_try(void)
+{
+    const char *path = getenv("HAMFB_FILE");
+    if (!path || !*path)
+        return -1;
+
+    unsigned w = 1024, h = 768;
+    const char *g = getenv("HAMFB_GEOM");
+    if (g && *g) {
+        unsigned gw = 0, gh = 0;
+        if (sscanf(g, "%ux%u", &gw, &gh) == 2 && gw && gh) { w = gw; h = gh; }
+    }
+
+    int fd = open(path, O_RDWR | O_CREAT, 0666);
+    if (fd < 0)
+        return -1;
+    size_t size = (size_t)w * h * 4;
+    if (ftruncate(fd, (off_t)size) < 0) { close(fd); return -1; }
+    void *m = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { close(fd); return -1; }
+
+    fb.drm_fd   = fd;
+    fb.map      = (uint8_t *)m;
+    fb.size     = size;
+    fb.width    = w;
+    fb.height   = h;
+    fb.pitch    = w * 4;
+    fb.is_fbdev = 1;              /* no modeset, no master — same as fbdev */
+    fb.offscreen = 1;
+    fb.ready    = 1;
+    return 0;
+}
+
 static int fb_init(void)
 {
     if (fb.ready)
@@ -316,6 +358,9 @@ static int fb_init(void)
     if (fb.tried)
         return -1;
     fb.tried = 1;
+
+    if (fbfile_try() == 0)
+        return 0;
 
     char path[64];
     /* fbdev first — see the note above. */
@@ -341,6 +386,9 @@ static void fb_flush_rows(uint32_t y0, uint32_t y1)
         return;
     if (y1 > fb.height) y1 = fb.height;
     if (y0 >= y1) return;
+    if (fb.offscreen)
+        return;                     /* the mapping IS the surface; nothing to
+                                       tell a driver about */
     struct drm_clip_rect r;
     r.x1 = 0; r.y1 = (uint16_t)y0;
     r.x2 = (uint16_t)fb.width; r.y2 = (uint16_t)y1;
@@ -392,6 +440,11 @@ int hamfb_kind(const char *path)
 static void console_graphics(int on)
 {
     static int vt_fd = -1;
+    /* An offscreen framebuffer owns no display, so it must never touch the
+     * VT. On the development host that would blank the user's real screen —
+     * a test rendering to a file has no business doing that. */
+    if (fb.offscreen)
+        return;
     if (vt_fd < 0) {
         vt_fd = open("/dev/tty0", O_RDWR | O_CLOEXEC);
         if (vt_fd < 0)

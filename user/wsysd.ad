@@ -1,0 +1,563 @@
+# user/wsysd.ad — the hamnix-linux scene compositor.
+#
+# WHAT THIS IS
+# ============
+# In Hamnix the compositor is IN THE KERNEL: sys/src/9/port/devwsys.ad both
+# holds the window table and z-blits every window's rasterized scene to the
+# framebuffer. On Linux the window table stays "kernel-side" (shared memory
+# behind /dev/wsys — user/linux-wsys.c) but the RASTERIZER moves out here,
+# into an ordinary Adder program. That is the shape the north star asks for:
+# the boot process and the userland are Adder; the Linux kernel is only the
+# thing underneath.
+#
+# It needs no private syscall. Everything it does, any program could do:
+#
+#   read  /dev/fb              -> "W H PITCH BPP PIXFMT\n", the screen
+#   write /dev/wsys/ctl        -> "screen W H", so clients can size themselves
+#   read  /dev/wsys            -> the wid set (a directory listing)
+#   read  /dev/wsys/<wid>/ctl  -> "<wid> <x> <y> <w> <h> <z> <dec> <vis>
+#                                  <proto> <gen>", the window's state
+#   read  /dev/wsys/<wid>/scene-> the display list, published whole by `commit`
+#   write /dev/wsys/<wid>/keys -> route a key to the focused window
+#   write /dev/fb              -> present
+#
+# THE RASTERIZER IS NOT NEW CODE
+# ------------------------------
+# lib/hamui_host.ad already parses the lib/hamscene.ad display-list grammar
+# and draws it with the vk 2D primitive ops — it was written as the HOST sink
+# so a GUI app's render could be looked at without booting. It is pure Adder
+# with no syscalls, so it links here unchanged. The compositor asks it to
+# rasterize each window into its RGBA image, then blits that image into the
+# screen composite at the window's position, in z order.
+#
+# WHY A COMPOSITE BUFFER AND NOT DIRECT-TO-FB
+# -------------------------------------------
+# Windows overlap. Painting them straight to /dev/fb in z order would show
+# each one being drawn (and would flush the display once per window). We
+# compose off-screen and write the screen once per frame, which is both
+# atomic to the eye and one flush.
+#
+# ADDER QUIRKS HONOURED: big buffers are top-level BSS arrays, no adjacent
+# string-literal concatenation, string literals are passed at the call site.
+
+from lib.hamscene import hamscene_load
+from lib.hamui_host import hamui_host_begin, hamui_host_rasterize, \
+    hamui_host_pixel
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_get_jiffies() -> uint64
+extern def sys_exit(code: uint64)
+
+# --- screen -----------------------------------------------------------
+MAX_PIXELS: uint64 = 2073600           # 1920x1080
+composite:  Array[8294400, uint8]      # MAX_PIXELS * 4, BGRX as /dev/fb wants
+scr_w: int32 = 0
+scr_h: int32 = 0
+scr_pitch: int32 = 0
+
+# --- the window set ---------------------------------------------------
+MAX_WIN: uint64 = 32
+win_id:  Array[32, int32]
+win_x:   Array[32, int32]
+win_y:   Array[32, int32]
+win_w:   Array[32, int32]
+win_h:   Array[32, int32]
+win_z:   Array[32, int32]
+win_dec: Array[32, int32]
+win_vis: Array[32, int32]
+win_gen: Array[32, int32]
+n_win:   uint64 = 0
+
+# --- scratch ----------------------------------------------------------
+pathbuf:  Array[128, uint8]
+dirbuf:   Array[1024, uint8]
+ctlbuf:   Array[256, uint8]
+scenebuf: Array[16384, uint8]
+numbuf:   Array[24, uint8]
+inbuf:    Array[256, uint8]
+waitset:  Array[4, int32]
+
+fb_fd: int32 = -1
+focus_wid: int32 = 0
+last_sig: uint64 = 0                   # change signature of the last frame
+verbose: int32 = 0
+
+
+# ====================================================================
+# tiny helpers
+# ====================================================================
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: int32):
+    if v < 0:
+        puts(fd, "-")
+        putd(fd, 0 - v)
+        return
+    n: uint64 = 0
+    x: int32 = v
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    i: uint64 = at
+    if v < 0:
+        buf[i] = 45
+        i = i + 1
+        return emit_int(buf, i, 0 - v)
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = v
+    if x == 0:
+        d[0] = 48
+        n = 1
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = d[n]
+        i = i + 1
+    return i
+
+
+# Parse the next signed decimal from buf[*p..n); returns -2147483647 when
+# there is no number left (a value no field here ever takes).
+NOVAL: int32 = -2147483647
+
+def take_int(buf: Ptr[uint8], p: Ptr[uint64], n: uint64) -> int32:
+    i: uint64 = p[0]
+    while i < n and (buf[i] == 32 or buf[i] == 9):
+        i = i + 1
+    neg: int32 = 0
+    if i < n and buf[i] == 45:
+        neg = 1
+        i = i + 1
+    if i >= n or buf[i] < 48 or buf[i] > 57:
+        p[0] = i
+        return NOVAL
+    v: int32 = 0
+    while i < n and buf[i] >= 48 and buf[i] <= 57:
+        v = v * 10 + cast[int32](buf[i]) - 48
+        i = i + 1
+    p[0] = i
+    if neg != 0:
+        return 0 - v
+    return v
+
+
+def winpath(wid: int32, leaf: Ptr[uint8]):
+    i: uint64 = 0
+    p: Ptr[uint8] = "/dev/wsys/"
+    k: uint64 = 0
+    while p[k] != 0:
+        pathbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&pathbuf[0], i, wid)
+    pathbuf[i] = 47
+    i = i + 1
+    k = 0
+    while leaf[k] != 0:
+        pathbuf[i] = leaf[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+
+def slurp(path: Ptr[char], out: Ptr[uint8], cap: uint64) -> int64:
+    fd: int32 = sys_open(path)
+    if fd < 0:
+        return -1
+    total: uint64 = 0
+    while total < cap - 1:
+        k: int64 = sys_read(fd, &out[total], cap - 1 - total)
+        if k <= 0:
+            break
+        total = total + cast[uint64](k)
+    sys_close(fd)
+    out[total] = 0
+    return cast[int64](total)
+
+
+def write_path(path: Ptr[char], data: Ptr[uint8]) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    sys_write(fd, data, slen(data))
+    sys_close(fd)
+    return 0
+
+
+# ====================================================================
+# the screen
+# ====================================================================
+def read_screen() -> int32:
+    # "/dev/fb" answers "W H PITCH BPP PIXFMT\n" to a read. Opening it FOR
+    # WRITING is what suspends the text console (user/linux-fb.c), so the
+    # geometry read is a separate, read-only open — exactly as hamUId does it.
+    n: int64 = slurp(cast[Ptr[char]]("/dev/fb"), &ctlbuf[0], 256)
+    if n <= 0:
+        puts(2, "wsysd: cannot read /dev/fb geometry\n")
+        return -1
+    pos: Array[1, uint64]
+    pos[0] = 0
+    scr_w = take_int(&ctlbuf[0], &pos[0], cast[uint64](n))
+    scr_h = take_int(&ctlbuf[0], &pos[0], cast[uint64](n))
+    scr_pitch = take_int(&ctlbuf[0], &pos[0], cast[uint64](n))
+    if scr_w <= 0 or scr_h <= 0:
+        puts(2, "wsysd: /dev/fb geometry is not sane\n")
+        return -1
+    if cast[uint64](scr_w) * cast[uint64](scr_h) > MAX_PIXELS:
+        puts(2, "wsysd: screen larger than the composite buffer\n")
+        return -1
+    return 0
+
+
+def announce_screen():
+    i: uint64 = 0
+    p: Ptr[uint8] = "screen "
+    k: uint64 = 0
+    while p[k] != 0:
+        ctlbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, scr_w)
+    ctlbuf[i] = 32
+    i = i + 1
+    i = emit_int(&ctlbuf[0], i, scr_h)
+    ctlbuf[i] = 10
+    i = i + 1
+    ctlbuf[i] = 0
+    write_path(cast[Ptr[char]]("/dev/wsys/ctl"), &ctlbuf[0])
+
+
+# ====================================================================
+# the window set
+# ====================================================================
+def load_window(wid: int32) -> int32:
+    winpath(wid, "ctl")
+    n: int64 = slurp(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0], 256)
+    if n <= 0:
+        return 0
+    pos: Array[1, uint64]
+    pos[0] = 0
+    cap: uint64 = cast[uint64](n)
+    id: int32 = take_int(&ctlbuf[0], &pos[0], cap)
+    if id != wid:
+        return 0
+    i: uint64 = n_win
+    win_id[i]  = id
+    win_x[i]   = take_int(&ctlbuf[0], &pos[0], cap)
+    win_y[i]   = take_int(&ctlbuf[0], &pos[0], cap)
+    win_w[i]   = take_int(&ctlbuf[0], &pos[0], cap)
+    win_h[i]   = take_int(&ctlbuf[0], &pos[0], cap)
+    win_z[i]   = take_int(&ctlbuf[0], &pos[0], cap)
+    win_dec[i] = take_int(&ctlbuf[0], &pos[0], cap)
+    win_vis[i] = take_int(&ctlbuf[0], &pos[0], cap)
+    take_int(&ctlbuf[0], &pos[0], cap)                 # proto, unused here
+    win_gen[i] = take_int(&ctlbuf[0], &pos[0], cap)
+    n_win = n_win + 1
+    return 1
+
+
+def scan_windows():
+    # /dev/wsys is a directory: a packed "NAME\n" stream of the fixed leaves
+    # plus one line per live wid. The numeric lines are the windows.
+    n_win = 0
+    n: int64 = slurp(cast[Ptr[char]]("/dev/wsys"), &dirbuf[0], 1024)
+    if n <= 0:
+        return
+    i: uint64 = 0
+    cap: uint64 = cast[uint64](n)
+    while i < cap and n_win < MAX_WIN:
+        if dirbuf[i] >= 48 and dirbuf[i] <= 57:
+            pos: Array[1, uint64]
+            pos[0] = i
+            wid: int32 = take_int(&dirbuf[0], &pos[0], cap)
+            i = pos[0]
+            if wid > 0:
+                load_window(wid)
+        while i < cap and dirbuf[i] != 10:
+            i = i + 1
+        if i < cap:
+            i = i + 1
+    # z-order ascending (insertion sort; 32 windows at most, and the set
+    # changes rarely).
+    a: uint64 = 1
+    while a < n_win:
+        b: uint64 = a
+        while b > 0 and win_z[b - 1] > win_z[b]:
+            t: int32 = win_z[b - 1]
+            win_z[b - 1] = win_z[b]
+            win_z[b] = t
+            t = win_id[b - 1]
+            win_id[b - 1] = win_id[b]
+            win_id[b] = t
+            t = win_x[b - 1]
+            win_x[b - 1] = win_x[b]
+            win_x[b] = t
+            t = win_y[b - 1]
+            win_y[b - 1] = win_y[b]
+            win_y[b] = t
+            t = win_w[b - 1]
+            win_w[b - 1] = win_w[b]
+            win_w[b] = t
+            t = win_h[b - 1]
+            win_h[b - 1] = win_h[b]
+            win_h[b] = t
+            t = win_dec[b - 1]
+            win_dec[b - 1] = win_dec[b]
+            win_dec[b] = t
+            t = win_vis[b - 1]
+            win_vis[b - 1] = win_vis[b]
+            win_vis[b] = t
+            t = win_gen[b - 1]
+            win_gen[b - 1] = win_gen[b]
+            win_gen[b] = t
+            b = b - 1
+        a = a + 1
+
+
+def frame_signature() -> uint64:
+    # FNV-1a over everything that can change what the screen looks like. The
+    # scene GENERATION is in here, so a window that repainted without moving
+    # still forces a frame -- and a desktop where nothing happened costs one
+    # directory read, not a rasterization.
+    h: uint64 = 14695981039346656037
+    i: uint64 = 0
+    while i < n_win:
+        vals: Array[9, int32]
+        vals[0] = win_id[i]
+        vals[1] = win_x[i]
+        vals[2] = win_y[i]
+        vals[3] = win_w[i]
+        vals[4] = win_h[i]
+        vals[5] = win_z[i]
+        vals[6] = win_dec[i]
+        vals[7] = win_vis[i]
+        vals[8] = win_gen[i]
+        k: uint64 = 0
+        while k < 9:
+            h = h ^ cast[uint64](cast[uint32](vals[k]))
+            h = h * 1099511628211
+            k = k + 1
+        i = i + 1
+    h = h ^ cast[uint64](n_win)
+    h = h * 1099511628211
+    return h
+
+
+# ====================================================================
+# painting
+# ====================================================================
+def put_px(x: int32, y: int32, rgb: uint32):
+    if x < 0 or y < 0 or x >= scr_w or y >= scr_h:
+        return
+    o: uint64 = (cast[uint64](y) * cast[uint64](scr_w)
+                 + cast[uint64](x)) * 4
+    # /dev/fb is XRGB8888 little-endian: the bytes in memory are B, G, R, X.
+    composite[o]     = cast[uint8](rgb & 255)
+    composite[o + 1] = cast[uint8]((rgb >> 8) & 255)
+    composite[o + 2] = cast[uint8]((rgb >> 16) & 255)
+    composite[o + 3] = 0
+
+
+def fill_rect(x: int32, y: int32, w: int32, h: int32, rgb: uint32):
+    j: int32 = 0
+    while j < h:
+        i: int32 = 0
+        while i < w:
+            put_px(x + i, y + j, rgb)
+            i = i + 1
+        j = j + 1
+
+
+def clear_desktop():
+    # A flat slate blue, so an empty desktop is obviously the compositor's and
+    # not a stale text console.
+    fill_rect(0, 0, scr_w, scr_h, 2110280)              # 0x203348
+
+
+TITLEBAR_H: int32 = 22
+
+
+def paint_window(i: uint64) -> int32:
+    wid: int32 = win_id[i]
+    if win_vis[i] == 0:
+        return 0
+    w: int32 = win_w[i]
+    h: int32 = win_h[i]
+    if w <= 0 or h <= 0:
+        return 0
+
+    winpath(wid, "scene")
+    n: int64 = slurp(cast[Ptr[char]](&pathbuf[0]), &scenebuf[0], 16384)
+    if n < 0:
+        return 0
+
+    ox: int32 = win_x[i]
+    oy: int32 = win_y[i]
+    if win_dec[i] != 0:
+        # Server-side decoration: a title bar above the client area. The
+        # window's own coordinates address the CLIENT area, so the frame is
+        # drawn above it -- a client never has to know it is decorated.
+        top: uint32 = 4210752                            # 0x404040
+        if wid == focus_wid:
+            top = 5601245                                # 0x5577DD
+        fill_rect(ox - 1, oy - TITLEBAR_H, w + 2, TITLEBAR_H, top)
+        fill_rect(ox - 1, oy, 1, h, top)
+        fill_rect(ox + w, oy, 1, h, top)
+        fill_rect(ox - 1, oy + h, w + 2, 1, top)
+
+    if n == 0:
+        # A mapped window that has not committed a frame yet: paint the client
+        # area so the decoration does not frame the desktop.
+        fill_rect(ox, oy, w, h, 1842204)                 # 0x1C1C1C
+        return 1
+
+    hamscene_load(&scenebuf[0], cast[uint64](n))
+    hamui_host_begin(w, h)
+    hamui_host_rasterize()
+
+    j: int32 = 0
+    while j < h:
+        k: int32 = 0
+        while k < w:
+            put_px(ox + k, oy + j, hamui_host_pixel(k, j))
+            k = k + 1
+        j = j + 1
+    return 1
+
+
+def present():
+    fd: int32 = sys_open_write(cast[Ptr[char]]("/dev/fb"))
+    if fd < 0:
+        puts(2, "wsysd: cannot open /dev/fb for writing\n")
+        return
+    total: uint64 = cast[uint64](scr_w) * cast[uint64](scr_h) * 4
+    off: uint64 = 0
+    while off < total:
+        k: int64 = sys_write(fd, &composite[off], total - off)
+        if k <= 0:
+            break
+        off = off + cast[uint64](k)
+    sys_close(fd)
+
+
+def paint_frame():
+    clear_desktop()
+    i: uint64 = 0
+    while i < n_win:
+        paint_window(i)
+        i = i + 1
+    present()
+
+
+# ====================================================================
+# input
+# ====================================================================
+def route_key(code: int32):
+    # The compositor gates the keyboard: only the FOCUSED window's ring gets
+    # the byte. That is devwsys.ad's wsys_route_key_byte, and it is why an
+    # unfocused app cannot read what the user types.
+    if focus_wid < 2:
+        return
+    winpath(focus_wid, "keys")
+    i: uint64 = 0
+    ctlbuf[0] = 100                                      # 'd', a press
+    ctlbuf[1] = 32
+    i = emit_int(&ctlbuf[0], 2, code)
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    write_path(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0])
+
+
+def pump_keyboard():
+    # Physical keys arrive on this process's stdin, which is the console. The
+    # DE reads them here and routes them; nothing else on the system has the
+    # console open once the compositor owns the screen.
+    n: int64 = sys_read_nb(0, &inbuf[0], 256)
+    i: uint64 = 0
+    while i < cast[uint64](n):
+        route_key(cast[int32](inbuf[i]))
+        i = i + 1
+
+
+def pick_focus():
+    # Focus follows the topmost decorated, visible window. A panel (z >= 100,
+    # undecorated) must never take focus away from an app.
+    best: int32 = 0
+    bestz: int32 = -1
+    i: uint64 = 0
+    while i < n_win:
+        if win_vis[i] != 0 and win_dec[i] != 0 and win_z[i] < 100:
+            if win_z[i] >= bestz:
+                bestz = win_z[i]
+                best = win_id[i]
+        i = i + 1
+    if best != 0:
+        focus_wid = best
+
+
+# ====================================================================
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    puts(1, "wsysd: scene compositor starting\n")
+    if read_screen() != 0:
+        return 1
+    puts(1, "wsysd: screen ")
+    putd(1, scr_w)
+    puts(1, "x")
+    putd(1, scr_h)
+    puts(1, "\n")
+    announce_screen()
+
+    # Take the text console. /dev/fbctl `suspend` is Hamnix's verb for it; on
+    # Linux it is KDSETMODE KD_GRAPHICS (user/linux-fb.c). Without it the
+    # kernel console redraws over the composited screen.
+    write_path(cast[Ptr[char]]("/dev/fbctl"), cast[Ptr[uint8]]("suspend\n"))
+
+    frames: uint64 = 0
+    idle: uint64 = 0
+    while 1 == 1:
+        pump_keyboard()
+        scan_windows()
+        pick_focus()
+        sig: uint64 = frame_signature()
+        if sig != last_sig:
+            last_sig = sig
+            paint_frame()
+            frames = frames + 1
+            idle = 0
+        else:
+            idle = idle + 1
+        # Sleep to the next frame. nfds=0 makes this a plain timed wait --
+        # the compositor must not spin, or an idle desktop costs a core.
+        sys_waitfds(&waitset[0], 0, 16)
+    return 0

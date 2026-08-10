@@ -1,0 +1,343 @@
+# tests/linux/wsys_probe.ad — the /dev/wsys window device.
+#
+# This drives the SAME surface lib/hamui.ad drives, in the same order, so a
+# pass here means a hamUI app can map a window:
+#
+#   1. read  /dev/wsys/self          -> empty (nothing spawned us into a wid)
+#   2. write "newwindow\n" to /dev/wsys/ctl, then READ IT BACK for the wid.
+#      Two separate opens — that is what lib/hamui.ad:2298 does, and it is
+#      why the answer is remembered per PROCESS rather than in the window
+#      table (two clients allocating at once would read each other's).
+#   3. write geometry/decorate/z/title to /dev/wsys/<wid>/ctl
+#   4. check /dev/wsys/windows now enumerates "<wid> <title>" — the exact
+#      line user/hampanelscene.ad's taskbar parses.
+#   5. write a scene, poke `commit`, read the scene back. A read BEFORE the
+#      commit must not see the new bytes: the compositor is promised whole
+#      frames, never torn ones.
+#   6. write an event line to /dev/wsys/<wid>/keys (which is how the
+#      compositor routes input — it has no private syscall) and read it back
+#      NON-BLOCKING, which is how hamui polls.
+#
+# The exit code is the failure count, so a stub cannot pass by resolving.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+
+pathbuf: Array[128, uint8]
+rbuf:    Array[2048, uint8]
+sbuf:    Array[512, uint8]
+errbuf:  Array[128, uint8]
+numbuf:  Array[24, uint8]
+
+failures: int32 = 0
+the_wid:  int32 = 0
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: int32):
+    if v < 0:
+        puts(fd, "-")
+        putd(fd, 0 - v)
+        return
+    n: uint64 = 0
+    x: int32 = v
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def report(name: Ptr[uint8], good: int32):
+    if good != 0:
+        puts(1, "ok   ")
+    else:
+        puts(1, "FAIL ")
+        failures = failures + 1
+    puts(1, name)
+    puts(1, "\n")
+
+
+def why(what: Ptr[uint8]):
+    puts(1, "       ")
+    puts(1, what)
+    puts(1, ": ")
+    n: int32 = sys_errstr(&errbuf[0], 128)
+    if n > 0:
+        puts(1, &errbuf[0])
+    puts(1, "\n")
+
+
+# Build "/dev/wsys/<wid>/<leaf>" into pathbuf.
+def winpath(wid: int32, leaf: Ptr[uint8]):
+    i: uint64 = 0
+    p: Ptr[uint8] = "/dev/wsys/"
+    k: uint64 = 0
+    while p[k] != 0:
+        pathbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = wid
+    if x == 0:
+        d[0] = 48
+        n = 1
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        pathbuf[i] = d[n]
+        i = i + 1
+    pathbuf[i] = 47
+    i = i + 1
+    k = 0
+    while leaf[k] != 0:
+        pathbuf[i] = leaf[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+
+def write_path(path: Ptr[char], data: Ptr[uint8]) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    n: int64 = sys_write(fd, data, slen(data))
+    sys_close(fd)
+    if n < 0:
+        return -1
+    return 0
+
+
+def read_path(path: Ptr[char]) -> int64:
+    # Drains into rbuf, NUL-terminates, returns the byte count or -1.
+    fd: int32 = sys_open(path)
+    if fd < 0:
+        return -1
+    total: uint64 = 0
+    while total < 2047:
+        k: int64 = sys_read(fd, &rbuf[total], 2047 - total)
+        if k <= 0:
+            break
+        total = total + cast[uint64](k)
+    sys_close(fd)
+    rbuf[total] = 0
+    return cast[int64](total)
+
+
+def parse_dec(b: Ptr[uint8], n: uint64) -> int32:
+    v: int32 = 0
+    i: uint64 = 0
+    got: int32 = 0
+    while i < n and b[i] >= 48 and b[i] <= 57:
+        v = v * 10 + cast[int32](b[i]) - 48
+        got = 1
+        i = i + 1
+    if got == 0:
+        return -1
+    return v
+
+
+# 1 if `hay` (nul-terminated) contains `needle` (nul-terminated).
+def contains(hay: Ptr[uint8], needle: Ptr[uint8]) -> int32:
+    hn: uint64 = slen(hay)
+    nn: uint64 = slen(needle)
+    if nn == 0 or nn > hn:
+        return 0
+    i: uint64 = 0
+    while i + nn <= hn:
+        j: uint64 = 0
+        while j < nn and hay[i + j] == needle[j]:
+            j = j + 1
+        if j == nn:
+            return 1
+        i = i + 1
+    return 0
+
+
+def check_self_empty() -> int32:
+    # Nothing spawned this process into a window, so /dev/wsys/self must be
+    # empty. hamui only accepts a value >= 2 here; wid 1 is the foreground
+    # console window an app must never take over.
+    n: int64 = read_path(cast[Ptr[char]]("/dev/wsys/self"))
+    if n < 0:
+        why(cast[Ptr[uint8]]("open /dev/wsys/self"))
+        return 0
+    if n != 0:
+        puts(1, "       self said: ")
+        puts(1, &rbuf[0])
+        puts(1, "\n")
+        return 0
+    return 1
+
+
+def check_newwindow() -> int32:
+    if write_path(cast[Ptr[char]]("/dev/wsys/ctl"),
+                  cast[Ptr[uint8]]("newwindow\n")) != 0:
+        why(cast[Ptr[uint8]]("write newwindow"))
+        return 0
+    n: int64 = read_path(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if n <= 0:
+        why(cast[Ptr[uint8]]("read back ctl"))
+        return 0
+    w: int32 = parse_dec(&rbuf[0], cast[uint64](n))
+    if w < 2:
+        puts(1, "       ctl read back: ")
+        puts(1, &rbuf[0])
+        return 0
+    the_wid = w
+    puts(1, "       wid=")
+    putd(1, w)
+    puts(1, "\n")
+    return 1
+
+
+def check_win_ctl() -> int32:
+    winpath(the_wid, "ctl")
+    if write_path(cast[Ptr[char]](&pathbuf[0]),
+                  cast[Ptr[uint8]]("geometry 40 60 320 200\n")) != 0:
+        why(cast[Ptr[uint8]]("geometry"))
+        return 0
+    winpath(the_wid, "ctl")
+    write_path(cast[Ptr[char]](&pathbuf[0]), cast[Ptr[uint8]]("decorate 1\n"))
+    winpath(the_wid, "ctl")
+    write_path(cast[Ptr[char]](&pathbuf[0]), cast[Ptr[uint8]]("z 6\n"))
+    winpath(the_wid, "ctl")
+    write_path(cast[Ptr[char]](&pathbuf[0]), cast[Ptr[uint8]]("title probewin\n"))
+    return 1
+
+
+def check_windows_list() -> int32:
+    # "<wid> <title>\n" — the exact line the panel taskbar parses.
+    n: int64 = read_path(cast[Ptr[char]]("/dev/wsys/windows"))
+    if n <= 0:
+        why(cast[Ptr[uint8]]("read /dev/wsys/windows"))
+        return 0
+    if contains(&rbuf[0], cast[Ptr[uint8]]("probewin")) == 0:
+        puts(1, "       windows said: ")
+        puts(1, &rbuf[0])
+        return 0
+    return 1
+
+
+def check_scene_atomic() -> int32:
+    # Write a display list but do NOT commit; a read must still show the old
+    # (empty) scene. Then commit, and the read must show the new one.
+    winpath(the_wid, "scene")
+    if write_path(cast[Ptr[char]](&pathbuf[0]),
+                  cast[Ptr[uint8]]("# scene v1 hamui\nfill 0 0 320 200 #204060\n")) != 0:
+        why(cast[Ptr[uint8]]("write scene"))
+        return 0
+    winpath(the_wid, "scene")
+    n: int64 = read_path(cast[Ptr[char]](&pathbuf[0]))
+    if n != 0:
+        puts(1, "       scene visible BEFORE commit -- torn frame\n")
+        return 0
+    winpath(the_wid, "ctl")
+    write_path(cast[Ptr[char]](&pathbuf[0]), cast[Ptr[uint8]]("commit\n"))
+    winpath(the_wid, "scene")
+    n = read_path(cast[Ptr[char]](&pathbuf[0]))
+    if n <= 0:
+        why(cast[Ptr[uint8]]("read scene after commit"))
+        return 0
+    if contains(&rbuf[0], cast[Ptr[uint8]]("fill 0 0 320 200")) == 0:
+        puts(1, "       scene after commit: ")
+        puts(1, &rbuf[0])
+        return 0
+    return 1
+
+
+def check_event_ring() -> int32:
+    # The compositor routes input by WRITING the window's event file — it has
+    # no private syscall. The client reads it NON-BLOCKING, which is what
+    # lib/hamui.ad's _h_poll_keys does.
+    winpath(the_wid, "keys")
+    if write_path(cast[Ptr[char]](&pathbuf[0]), cast[Ptr[uint8]]("d 97\n")) != 0:
+        why(cast[Ptr[uint8]]("write keys"))
+        return 0
+    winpath(the_wid, "keys")
+    fd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
+    if fd < 0:
+        why(cast[Ptr[uint8]]("open keys"))
+        return 0
+    n: int64 = sys_read_nb(fd, &sbuf[0], 64)
+    if n <= 0:
+        sys_close(fd)
+        puts(1, "       keys read_nb returned ")
+        putd(1, cast[int32](n))
+        puts(1, "\n")
+        return 0
+    sbuf[n] = 0
+    if sbuf[0] != 100 or sbuf[2] != 57:
+        sys_close(fd)
+        puts(1, "       keys said: ")
+        puts(1, &sbuf[0])
+        return 0
+    # And a second poll with nothing queued must return 0 -- "nothing yet",
+    # not EOF-forever. hamui polls in a loop; an EOF here would spin.
+    n = sys_read_nb(fd, &sbuf[0], 64)
+    sys_close(fd)
+    if n != 0:
+        puts(1, "       drained ring did not return 0\n")
+        return 0
+    return 1
+
+
+def check_pointer_ring() -> int32:
+    winpath(the_wid, "pointer")
+    if write_path(cast[Ptr[char]](&pathbuf[0]),
+                  cast[Ptr[uint8]]("d 12 34 1 0\n")) != 0:
+        return 0
+    winpath(the_wid, "pointer")
+    fd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
+    if fd < 0:
+        return 0
+    n: int64 = sys_read_nb(fd, &sbuf[0], 64)
+    sys_close(fd)
+    if n <= 0:
+        return 0
+    sbuf[n] = 0
+    return contains(&sbuf[0], cast[Ptr[uint8]]("12 34 1 0"))
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    puts(1, "wsys_probe: /dev/wsys, the window device\n")
+    report("self is empty for an unbound task", check_self_empty())
+    report("newwindow allocates and reads back", check_newwindow())
+    if the_wid < 2:
+        puts(1, "SOME FAILED\n")
+        return failures
+    report("per-window ctl verbs accepted", check_win_ctl())
+    report("windows enumerates the new window", check_windows_list())
+    report("scene publishes only on commit", check_scene_atomic())
+    report("keys ring routes and drains", check_event_ring())
+    report("pointer ring routes and drains", check_pointer_ring())
+    if failures == 0:
+        puts(1, "ALL PASS\n")
+    else:
+        puts(1, "SOME FAILED\n")
+    return failures
