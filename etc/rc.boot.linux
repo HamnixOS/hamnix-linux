@@ -36,6 +36,11 @@ echo 'rc.boot: kernel is Linux; userland is Adder'
 
 echo 'rc.boot: handing off to an interactive shell'
 
+# --- the graphical runlevel -----------------------------------------
+# Starts the scene compositor and the desktop session. Comment this line out
+# for a text-only boot; nothing below the compositor depends on it.
+source '/etc/rc.d/rc.5'
+
 # --- the Debian namespace -------------------------------------------
 # `#distro` is a subtree server backed by its own filesystem (a virtio disk
 # here). Debian's tree is bound at /n/distro and NOTHING it installs is written

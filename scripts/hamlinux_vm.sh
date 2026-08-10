@@ -44,6 +44,12 @@ COMMON=(
     # display is separate -- serial/script modes just never open a window.
     -vga none
     -device virtio-gpu-pci
+    # A keyboard and an ABSOLUTE pointer. The tablet is deliberate: it reports
+    # a position rather than a delta, so the guest cursor tracks the host
+    # cursor exactly and there is no pointer to grab. wsysd decodes both
+    # (EV_ABS and EV_REL), so a real machine's relative mouse works too.
+    -device virtio-keyboard-pci
+    -device virtio-tablet-pci
 )
 
 # The Debian namespace lives on its own filesystem image, attached as a plain

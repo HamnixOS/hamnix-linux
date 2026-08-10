@@ -1,0 +1,42 @@
+# /etc/rc.d/rc.5.linux — runlevel 5 (graphical) for the Linux line.
+#
+# Staged into the image as /etc/rc.d/rc.5. It is NOT etc/rc.d/rc.5, Hamnix's
+# own, and the difference is worth stating: that one brings the DE up through
+# the declarative service supervisor (/etc/services.d/hamuid.svc) and hands
+# /dev/fb to the KERNEL scene compositor with `echo desktop > /dev/wsys/ctl`.
+# On this line the compositor is a userland program — user/wsysd.ad — so it is
+# started here like any other, and the supervisor is not up yet.
+#
+# What each piece is:
+#
+#   wsysd            the scene compositor. Reads every window's display list
+#                    from /dev/wsys/<wid>/scene, rasterizes it (lib/hamui_host)
+#                    and z-blits the screen to /dev/fb. It must be first: it is
+#                    what publishes the screen size on /dev/wsys/ctl, which is
+#                    how a client knows how big to be.
+#   hamdesktop       the wallpaper and the desktop launcher icons. Started
+#                    EARLY and deliberately: its full-screen window takes the
+#                    LOWEST z, so every later client stacks above it.
+#   hampanelscene    the top panel — Applications menu, taskbar, tray, clock.
+#
+# No app window is auto-opened. A fresh boot is a clean desktop, the same
+# decision Hamnix's rc.5 records: a terminal is one double-click away.
+
+echo '[rc.5] hamnix-linux graphical runlevel'
+
+# The compositor. Everything else is a client of it.
+/bin/wsysd &
+echo '[rc.5] compositor started'
+
+# Give it a moment to read /dev/fb and publish the screen geometry before the
+# clients ask for it. A client that starts first still works — it just sizes
+# itself to the default until the next frame.
+sleep 1
+
+/bin/hamdesktop &
+echo '[rc.5] desktop backdrop started'
+
+/bin/hampanelscene &
+echo '[rc.5] panel started'
+
+echo '[rc.5] desktop up'

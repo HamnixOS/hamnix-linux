@@ -43,6 +43,16 @@ APPS=(
     bc cal
 )
 
+# The desktop. wsysd is the compositor (user/wsysd.ad — the userland half of
+# the devwsys.ad port); the rest are ordinary scene clients that talk to it
+# through /dev/wsys and know nothing about which kernel is underneath.
+GUI_APPS=(
+    wsysd
+    hamdesktop hampanelscene hamtermscene hameditscene hamsettings hamfm
+    hamUI hamUId
+)
+APPS+=("${GUI_APPS[@]}")
+
 echo "[image] building $(( ${#APPS[@]} )) applications + the Adder PID 1"
 BUILT=0; MISSING=()
 for app in "${APPS[@]}"; do
@@ -92,9 +102,15 @@ fi
 # drives the guest by putting commands IN the rc rather than racing the BIOS
 # for stdin, which is not reproducible.
 install -m644 "${HAMLINUX_RC:-etc/rc.boot.linux}" "$ROOT/etc/rc.boot"
-for f in hostname hosts passwd group issue motd; do
+for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
+         hamde os-release lsb-release debian_version profile; do
     [ -f "etc/$f" ] && install -m644 "etc/$f" "$ROOT/etc/$f"
 done
+# The graphical runlevel. Kept separate from Hamnix's etc/rc.d/rc.5, which
+# brings the DE up through the declarative service supervisor and the kernel
+# scene compositor -- neither of which exists on this line yet.
+mkdir -p "$ROOT/etc/rc.d"
+install -m644 etc/rc.d/rc.5.linux "$ROOT/etc/rc.d/rc.5"
 
 # --- kernel modules -------------------------------------------------------
 # The north star is real hardware, and on a Debian kernel nearly every driver

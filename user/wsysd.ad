@@ -89,6 +89,33 @@ focus_wid: int32 = 0
 last_sig: uint64 = 0                   # change signature of the last frame
 verbose: int32 = 0
 
+# --- input ------------------------------------------------------------
+# One fd per /dev/input/eventN we could open. evdev hands us 24-byte records
+# (struct input_event: 16 bytes of timeval, then u16 type, u16 code, s32
+# value) and we decode them here rather than teaching the userland about
+# Linux input -- exactly the split devwsys.ad has, where the kernel turns
+# scancodes into the bytes a window's /keys ring carries.
+MAX_INPUT: uint64 = 12
+in_fd:   Array[12, int32]
+n_input: uint64 = 0
+evbuf:   Array[2400, uint8]            # 100 events per read
+
+ptr_x: int32 = 0
+ptr_y: int32 = 0
+ptr_btn: int32 = 0
+ptr_dz: int32 = 0
+ptr_moved: int32 = 0
+ptr_edge: int32 = 0                    # a button changed state this poll
+cursor_dirty: int32 = 1
+
+# Keycode -> ASCII, unshifted and shifted. Indexed by the evdev KEY_* code.
+# This is the table atkbd_process_byte owns in the Hamnix kernel; on Linux the
+# kernel stops at the keycode, so the translation lives here.
+kmap:   Array[128, uint8]
+kshift: Array[128, uint8]
+shift_down: int32 = 0
+ctrl_down:  int32 = 0
+
 
 # ====================================================================
 # tiny helpers
@@ -371,6 +398,11 @@ def frame_signature() -> uint64:
         i = i + 1
     h = h ^ cast[uint64](n_win)
     h = h * 1099511628211
+    # The cursor is composited, so moving it IS a change to the screen.
+    h = h ^ cast[uint64](cast[uint32](ptr_x))
+    h = h * 1099511628211
+    h = h ^ cast[uint64](cast[uint32](ptr_y))
+    h = h * 1099511628211
     return h
 
 
@@ -477,6 +509,7 @@ def paint_frame():
     while i < n_win:
         paint_window(i)
         i = i + 1
+    paint_cursor()
     present()
 
 
@@ -499,10 +532,311 @@ def route_key(code: int32):
     write_path(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0])
 
 
+def route_pointer(wid: int32, kind: uint8, lx: int32, ly: int32,
+                  btn: int32, dz: int32):
+    # "<type> <x> <y> <buttons> <dz>\n" with x,y already mapped to WINDOW-LOCAL
+    # pixels. lib/hamui.ad sets its cursor straight from these, with no delta
+    # accumulation and no clamp, precisely because the compositor did the
+    # routing -- so getting the mapping right here is the whole contract.
+    if wid < 2:
+        return
+    winpath(wid, "pointer")
+    ctlbuf[0] = kind
+    ctlbuf[1] = 32
+    i: uint64 = emit_int(&ctlbuf[0], 2, lx)
+    ctlbuf[i] = 32
+    i = emit_int(&ctlbuf[0], i + 1, ly)
+    ctlbuf[i] = 32
+    i = emit_int(&ctlbuf[0], i + 1, btn)
+    ctlbuf[i] = 32
+    i = emit_int(&ctlbuf[0], i + 1, dz)
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    write_path(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0])
+
+
+# The topmost visible window under (x, y), or 0. Walks the z-sorted list
+# backwards, so the window the user sees on top is the one that gets the click.
+def window_at(x: int32, y: int32) -> int32:
+    i: uint64 = n_win
+    while i > 0:
+        i = i - 1
+        if win_vis[i] == 0:
+            continue
+        top: int32 = win_y[i]
+        if win_dec[i] != 0:
+            top = top - TITLEBAR_H
+        if x >= win_x[i] and x < win_x[i] + win_w[i]:
+            if y >= top and y < win_y[i] + win_h[i]:
+                return win_id[i]
+    return 0
+
+
+def win_index(wid: int32) -> int64:
+    i: uint64 = 0
+    while i < n_win:
+        if win_id[i] == wid:
+            return cast[int64](i)
+        i = i + 1
+    return -1
+
+
+def raise_window(wid: int32):
+    i: uint64 = 0
+    p: Ptr[uint8] = "raise "
+    k: uint64 = 0
+    while p[k] != 0:
+        ctlbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, wid)
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    write_path(cast[Ptr[char]]("/dev/wsys/ctl"), &ctlbuf[0])
+
+
+def deliver_pointer():
+    # Route the current pointer state to whichever window is under it. Motion
+    # goes out only when something actually changed, so a still mouse costs
+    # nothing.
+    if ptr_moved == 0 and ptr_edge == 0 and ptr_dz == 0:
+        return
+    wid: int32 = window_at(ptr_x, ptr_y)
+    if wid < 2:
+        ptr_moved = 0
+        ptr_edge = 0
+        ptr_dz = 0
+        return
+    idx: int64 = win_index(wid)
+    if idx < 0:
+        return
+    i: uint64 = cast[uint64](idx)
+    lx: int32 = ptr_x - win_x[i]
+    ly: int32 = ptr_y - win_y[i]
+    kind: uint8 = 109                                    # 'm' motion
+    if ptr_edge > 0:
+        kind = 100                                       # 'd' button down
+        # A press is also what raises and focuses a window -- click-to-focus,
+        # the behaviour every one of these apps was written against.
+        if wid != focus_wid:
+            raise_window(wid)
+            focus_wid = wid
+    elif ptr_edge < 0:
+        kind = 117                                       # 'u' button up
+    elif ptr_dz != 0:
+        kind = 115                                       # 's' scroll
+    route_pointer(wid, kind, lx, ly, ptr_btn, ptr_dz)
+    ptr_moved = 0
+    ptr_edge = 0
+    ptr_dz = 0
+
+
+# --- the evdev keymap -------------------------------------------------
+def kset(code: uint64, plain: uint8, shifted: uint8):
+    kmap[code] = plain
+    kshift[code] = shifted
+
+
+def keymap_init():
+    # Row by row, the way a US keyboard is laid out. Codes are Linux KEY_*.
+    kset(1, 27, 27)                                      # ESC
+    row: Ptr[uint8] = "1234567890-="
+    srow: Ptr[uint8] = "!@#$%^&*()_+"
+    i: uint64 = 0
+    while i < 12:
+        kset(2 + i, row[i], srow[i])
+        i = i + 1
+    kset(14, 8, 8)                                       # BACKSPACE
+    kset(15, 9, 9)                                       # TAB
+    q: Ptr[uint8] = "qwertyuiop[]"
+    qs: Ptr[uint8] = "QWERTYUIOP{}"
+    i = 0
+    while i < 12:
+        kset(16 + i, q[i], qs[i])
+        i = i + 1
+    kset(28, 10, 10)                                     # ENTER
+    a: Ptr[uint8] = "asdfghjkl"
+    au: Ptr[uint8] = "ASDFGHJKL"
+    i = 0
+    while i < 9:
+        kset(30 + i, a[i], au[i])
+        i = i + 1
+    # The three that follow are spelled out rather than put in a literal: the
+    # shifted row would need an escaped double quote, and Adder string literals
+    # do not carry one.
+    kset(39, 59, 58)                                     # ;  :
+    kset(40, 39, 34)                                     # '  "
+    kset(41, 96, 126)                                    # `  ~
+    kset(43, 92, 124)                                    # \ |
+    z: Ptr[uint8] = "zxcvbnm,./"
+    zs: Ptr[uint8] = "ZXCVBNM<>?"
+    i = 0
+    while i < 10:
+        kset(44 + i, z[i], zs[i])
+        i = i + 1
+    kset(57, 32, 32)                                     # SPACE
+    kset(111, 127, 127)                                  # DELETE
+
+
+def route_arrow(final: uint8):
+    # hamui's key dispatch reads arrows as the three bytes of an ESC sequence,
+    # because that is what they were when input came off a serial console.
+    # Nothing downstream had to change when the compositor took over routing.
+    route_key(27)
+    route_key(91)
+    route_key(cast[int32](final))
+
+
+def handle_key(code: int32, value: int32):
+    # value: 0 = release, 1 = press, 2 = autorepeat.
+    if code == 42 or code == 54:
+        if value == 0:
+            shift_down = 0
+        else:
+            shift_down = 1
+        return
+    if code == 29 or code == 97:
+        if value == 0:
+            ctrl_down = 0
+        else:
+            ctrl_down = 1
+        return
+    if value == 0:
+        return
+    if code == 103:
+        route_arrow(65)                                  # up    -> ESC [ A
+        return
+    if code == 108:
+        route_arrow(66)                                  # down
+        return
+    if code == 106:
+        route_arrow(67)                                  # right
+        return
+    if code == 105:
+        route_arrow(68)                                  # left
+        return
+    if code < 0 or code >= 128:
+        return
+    ch: uint8 = kmap[code]
+    if shift_down != 0:
+        ch = kshift[code]
+    if ch == 0:
+        return
+    if ctrl_down != 0 and ch >= 97 and ch <= 122:
+        ch = ch - 96                                     # ^A .. ^Z
+    route_key(cast[int32](ch))
+
+
+def handle_button(code: int32, value: int32):
+    bit: int32 = 0
+    if code == 272:
+        bit = 1                                          # BTN_LEFT
+    elif code == 273:
+        bit = 2                                          # BTN_RIGHT
+    elif code == 274:
+        bit = 4                                          # BTN_MIDDLE
+    if bit == 0:
+        return
+    if value != 0:
+        ptr_btn = ptr_btn | bit
+        ptr_edge = 1
+    else:
+        ptr_btn = ptr_btn & (0 - 1 - bit)
+        ptr_edge = -1
+
+
+def open_input_path(path: Ptr[char]) -> int32:
+    if n_input >= MAX_INPUT:
+        return -1
+    fd: int32 = sys_open(path)
+    if fd < 0:
+        return -1
+    in_fd[n_input] = fd
+    n_input = n_input + 1
+    return fd
+
+
+def open_inputs():
+    # Every evdev node, because which one is the mouse and which the keyboard
+    # depends on enumeration order and on whether the machine is a VM. Reading
+    # them all and dispatching on the event TYPE is both simpler and right.
+    i: int32 = 0
+    while i < 16 and n_input < MAX_INPUT:
+        j: uint64 = 0
+        p: Ptr[uint8] = "/dev/input/event"
+        k: uint64 = 0
+        while p[k] != 0:
+            pathbuf[j] = p[k]
+            j = j + 1
+            k = k + 1
+        j = emit_int(&pathbuf[0], j, i)
+        pathbuf[j] = 0
+        open_input_path(cast[Ptr[char]](&pathbuf[0]))
+        i = i + 1
+    puts(1, "wsysd: ")
+    putd(1, cast[int32](n_input))
+    puts(1, " input devices\n")
+
+
+def le16(b: Ptr[uint8], at: uint64) -> int32:
+    return cast[int32](b[at]) | (cast[int32](b[at + 1]) << 8)
+
+
+def le32(b: Ptr[uint8], at: uint64) -> int32:
+    return cast[int32](b[at]) | (cast[int32](b[at + 1]) << 8) \
+         | (cast[int32](b[at + 2]) << 16) | (cast[int32](b[at + 3]) << 24)
+
+
+def pump_input():
+    d: uint64 = 0
+    while d < n_input:
+        n: int64 = sys_read_nb(in_fd[d], &evbuf[0], 2400)
+        i: uint64 = 0
+        while i + 24 <= cast[uint64](n):
+            # struct input_event: 16 bytes of timeval, then type, code, value.
+            etype: int32 = le16(&evbuf[0], i + 16)
+            ecode: int32 = le16(&evbuf[0], i + 18)
+            eval_: int32 = le32(&evbuf[0], i + 20)
+            if etype == 1:                               # EV_KEY
+                if ecode >= 272 and ecode <= 274:
+                    handle_button(ecode, eval_)
+                else:
+                    handle_key(ecode, eval_)
+            elif etype == 2:                             # EV_REL
+                if ecode == 0:
+                    ptr_x = ptr_x + eval_
+                    ptr_moved = 1
+                elif ecode == 1:
+                    ptr_y = ptr_y + eval_
+                    ptr_moved = 1
+                elif ecode == 8:                         # REL_WHEEL
+                    ptr_dz = ptr_dz + eval_
+            elif etype == 3:                             # EV_ABS (tablet)
+                # virtio-tablet and usb-tablet report 0..32767 across the
+                # screen, which is the range QEMU advertises for both.
+                if ecode == 0:
+                    ptr_x = cast[int32]((cast[int64](eval_)
+                                         * cast[int64](scr_w)) / 32768)
+                    ptr_moved = 1
+                elif ecode == 1:
+                    ptr_y = cast[int32]((cast[int64](eval_)
+                                         * cast[int64](scr_h)) / 32768)
+                    ptr_moved = 1
+            i = i + 24
+        d = d + 1
+    if ptr_x < 0:
+        ptr_x = 0
+    if ptr_y < 0:
+        ptr_y = 0
+    if ptr_x >= scr_w:
+        ptr_x = scr_w - 1
+    if ptr_y >= scr_h:
+        ptr_y = scr_h - 1
+
+
 def pump_keyboard():
-    # Physical keys arrive on this process's stdin, which is the console. The
-    # DE reads them here and routes them; nothing else on the system has the
-    # console open once the compositor owns the screen.
+    # Keys can also arrive on stdin -- a serial console has no evdev node at
+    # all, and that is the only keyboard a headless boot has.
     n: int64 = sys_read_nb(0, &inbuf[0], 256)
     i: uint64 = 0
     while i < cast[uint64](n):
@@ -510,9 +844,52 @@ def pump_keyboard():
         i = i + 1
 
 
+CURSOR_W: int32 = 12
+CURSOR_H: int32 = 19
+# A plain arrow: 1 = white fill, 2 = black outline, 0 = transparent. Drawn by
+# the compositor over everything, as devwsys.ad's save-under path does.
+cursor_bits: Array[228, uint8]
+
+def cursor_init():
+    r: int32 = 0
+    while r < CURSOR_H:
+        c: int32 = 0
+        while c < CURSOR_W:
+            v: uint8 = 0
+            if c == 0 and r < 17:
+                v = 2
+            elif c < r and c < 8 and r < 12:
+                v = 1
+            elif r < 12 and c <= r and c < 9:
+                v = 2
+            elif r >= 12 and r < 17 and c >= r - 12 and c < r - 8:
+                v = 1
+            cursor_bits[cast[uint64](r * CURSOR_W + c)] = v
+            c = c + 1
+        r = r + 1
+
+
+def paint_cursor():
+    r: int32 = 0
+    while r < CURSOR_H:
+        c: int32 = 0
+        while c < CURSOR_W:
+            v: uint8 = cursor_bits[cast[uint64](r * CURSOR_W + c)]
+            if v == 1:
+                put_px(ptr_x + c, ptr_y + r, 16777215)   # white
+            elif v == 2:
+                put_px(ptr_x + c, ptr_y + r, 0)          # black
+            c = c + 1
+        r = r + 1
+
+
 def pick_focus():
-    # Focus follows the topmost decorated, visible window. A panel (z >= 100,
-    # undecorated) must never take focus away from an app.
+    # Focus is CLICK-driven (deliver_pointer sets it), so this only has to
+    # cover the case where the focused window went away -- or where nothing
+    # has been clicked yet. Falling back to the topmost decorated window is
+    # what makes a freshly-launched app typeable without a click first.
+    if focus_wid >= 2 and win_index(focus_wid) >= 0:
+        return
     best: int32 = 0
     bestz: int32 = -1
     i: uint64 = 0
@@ -522,8 +899,7 @@ def pick_focus():
                 bestz = win_z[i]
                 best = win_id[i]
         i = i + 1
-    if best != 0:
-        focus_wid = best
+    focus_wid = best
 
 
 # ====================================================================
@@ -543,12 +919,38 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # kernel console redraws over the composited screen.
     write_path(cast[Ptr[char]]("/dev/fbctl"), cast[Ptr[uint8]]("suspend\n"))
 
+    keymap_init()
+    cursor_init()
+    # Named input sources override the scan. That is how the input decode is
+    # tested (a file of evdev records is byte-identical to what the device
+    # delivers), and it is also what a machine with an odd device layout
+    # needs -- `wsysd /dev/input/by-path/...` is a legitimate way to run it.
+    if argc > 1:
+        a: int32 = 1
+        while a < argc:
+            open_input_path(cast[Ptr[char]](argv[cast[uint64](a)]))
+            a = a + 1
+        puts(1, "wsysd: ")
+        putd(1, cast[int32](n_input))
+        puts(1, " input devices (named)\n")
+    else:
+        open_inputs()
+    ptr_x = scr_w / 2
+    ptr_y = scr_h / 2
+
     frames: uint64 = 0
     idle: uint64 = 0
     while 1 == 1:
-        pump_keyboard()
+        # The window set is refreshed BEFORE input is drained, not after. It
+        # has to be: routing a key needs to know which window has focus, and
+        # routing a click needs the geometry to hit-test against. Draining
+        # first meant the very first keystroke after launch was delivered
+        # against an empty window table and silently dropped.
         scan_windows()
         pick_focus()
+        pump_input()
+        pump_keyboard()
+        deliver_pointer()
         sig: uint64 = frame_signature()
         if sig != last_sig:
             last_sig = sig

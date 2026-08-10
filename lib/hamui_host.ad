@@ -63,10 +63,16 @@ from lib.vk.vk_2d import (
 # Sized to a generous window; the active WxH is set by hamui_host_begin(). A
 # separate RGB present buffer holds the flattened frame for the PPM writer.
 # ====================================================================
-HOST_MAX_W: uint64 = 1024
-HOST_MAX_H: uint64 = 768
-hostfb: Array[3145728, uint8]        # 1024*768*4 RGBA vk colour image
-hostrgb: Array[2359296, uint8]       # 1024*768*3 RGB present buffer
+# 1920x1080. This used to be 1024x768, which was fine while the only client
+# was a host PPM dump -- but the compositor (user/wsysd.ad) asks this module to
+# rasterize a FULL-SCREEN window, and hamdesktop's backdrop on a 1280x800
+# display came back silently CLAMPED: a 256px black band down the right and a
+# 32px one along the bottom, with every ioctl and every return code fine. The
+# ceiling has to be at least the largest screen we intend to drive.
+HOST_MAX_W: uint64 = 1920
+HOST_MAX_H: uint64 = 1080
+hostfb: Array[8294400, uint8]        # 1920*1080*4 RGBA vk colour image
+hostrgb: Array[6220800, uint8]       # 1920*1080*3 RGB present buffer
 host_w: int32 = 0
 host_h: int32 = 0
 
