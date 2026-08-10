@@ -113,6 +113,13 @@ not use `net9.ad`.
 
 Exhaustive. There are eleven.
 
+> **VERIFIED — accurate, every entry, including the line numbers.** A sweep for
+> `"/net/...` string literals across `user/` and `lib/` returns exactly these
+> eleven paths at exactly these lines. The only additional hits are
+> documentation strings inside comments (`"/net/tcp/<N>/<leaf>"` and friends at
+> `net9.ad:40,78,96,159` and `ntpd.ad:55,100`), which are format templates, not
+> paths. Nothing here needs correcting.
+
 | File:line | Literal | Purpose |
 |--|--|--|
 | `user/net9.ad:151` | `/net/tcp/clone` | `net_dial` |
@@ -196,16 +203,39 @@ you decide; do not assume it settles the question.
 
 ### 4.1 The syscall gap, exactly
 
-`user/linux-runtime.S` is the Linux link runtime. Userland declares **71**
-distinct `sys_*` entry points; the runtime defines **49**. Three classes:
+> **VERIFIED 2026-08-09, with one class substantially wrong.** The headline
+> counts hold exactly: userland declares **71** distinct `sys_*` entry points
+> (`extern def` across `user/` and `lib/`), `user/linux-runtime.S` defines
+> **49**, **23** are missing, and **18** share the fail-closed body. Class (a)
+> below did not survive contact: it claimed ~31 genuinely implemented, and only
+> **20** actually issue a syscall. Corrected in place.
+>
+> Much of this section has since been *closed* rather than merely corrected —
+> see §4.1d.
 
-**(a) Genuinely implemented (~31).** `sys_read`, `sys_write`, `sys_open`,
-`sys_open3`, `sys_open_write`, `sys_close`, `sys_lseek`, `sys_mkdir`,
-`sys_unlink`, `sys_dup`, `sys_dup2`, `sys_getcwd`, `sys_chdir`, `sys_getuid`,
-`sys_yield`, `sys_setpgid`, `sys_mmap`, `sys_munmap`, `sys_read_nb`,
-`sys_exit`, `sys_errstr`, `sys_get_jiffies`, `sys_rfork`, `sys_execve_env`,
-`sys_fdbind`, `sys_chan_dir_mode`, `sys_listdir_records`, `sys_stat_p9`,
-`sys_resolve`, `sys_fdslot_kind`, `sys_nsid`.
+`user/linux-runtime.S` is the Linux link runtime. Userland declares **71**
+distinct `sys_*` entry points; the runtime defines **49**. Classifying every
+definition body in that file:
+
+**(a) Genuinely implemented — 20, not 31.** `sys_read`, `sys_write`,
+`sys_open`, `sys_open3`, `sys_open_write`, `sys_close`, `sys_lseek`,
+`sys_mkdir`, `sys_unlink`, `sys_dup`, `sys_dup2`, `sys_getcwd`, `sys_chdir`,
+`sys_getuid`, `sys_yield`, `sys_setpgid`, `sys_mmap`, `sys_munmap`,
+`sys_read_nb`, `sys_exit`.
+
+**(a2) Return a constant, doing nothing — 3.** `sys_errstr` (always writes the
+empty string), `sys_nsid` (0), `sys_get_jiffies` (0). These link and "succeed",
+which is worse than failing: `sys_errstr` is why every diagnostic in the tree
+printed `cannot open X: ` with nothing after the colon.
+
+**(a3) Listed above as implemented, but actually `return -1` — 8.** `sys_rfork`,
+`sys_execve_env`, `sys_fdbind`, `sys_chan_dir_mode`, `sys_listdir_records`,
+`sys_stat_p9`, `sys_resolve`, `sys_fdslot_kind`.
+
+**`sys_rfork` is the one that matters.** §8's step 2 — "add `sys_waitpid` and
+`sys_tcsetpgrp`, get `hamsh` running" — could not have worked as written:
+reaping a child is useless while the call that *creates* the child fails. The
+real fail-closed count was 26 (18 + these 8), not 18.
 
 **(b) Present but fail-closed — `return -1` (18).** These are the Plan 9
 surface, and they are the port. `user/linux-runtime.S:484` onward:
@@ -235,9 +265,68 @@ Most of class (c) is trivially POSIX (`execve`, `pipe2`, `getpid`, `getgid`,
 userspace-driver MMIO/IRQ/DMA and should simply be **deleted** on this line —
 Linux owns the hardware. `sys_wsys_*` and `sys_vk_window_frame` belong to §4.4.
 
+### 4.1d What is now implemented — `user/linux-syscalls.c`
+
+The gap above is largely **closed**. `user/linux-syscalls.c` is the *hosted*
+half of the Linux link runtime: compiled only into the glibc lane, with the
+overlapping `.S` definitions guarded out by `-DADDER_HOSTED`. The freestanding
+lane is untouched and still assembles.
+
+Implemented and demonstrated by **running programs**, not by linking:
+
+| Group | Entry points |
+|--|--|
+| fork / exec / reap | `sys_rfork` (fork(2)), `sys_execve`, `sys_execve_env`, `sys_waitpid`, `sys_waitpid_jc`, `sys_waitpid_nb_raw`, `sys_tcsetpgrp`, `sys_pgrp_kill`, `sys_setuid` |
+| POSIX gap (§4.1c) | `sys_getpid`, `sys_getgid`, `sys_pipe`, `sys_socketpair`, `sys_link`, `sys_symlink`, `sys_clock_gettime`, `sys_set_realtime` |
+| resolver | `sys_resolve` (getaddrinfo), `sys_resolve_ptr` (getnameinfo) |
+| namespace | `sys_bind` — accepts `#c → /dev` and `#d → /fd`, fails the rest (§4.2) |
+| event loop | `sys_waitfds` (poll(2)) |
+| diagnostics | `sys_errstr` — now `strerror_r` on `errno` |
+| stat | `sys_stat_p9` — full 9P2000 stat record |
+
+Two things only *running* the code revealed:
+
+1. **The `.S` wrappers return `-errno`, and never set `errno`.** Measured:
+   `sys_open("/no/such")` returns `-2`, `sys_open("/etc/shadow")` returns `-13`.
+   So `sys_errstr` had nothing to report. The hosted file/fd definitions
+   reproduce the `-errno` return *exactly* — anything decoding it is unaffected
+   — and additionally set `errno`.
+
+2. **`ls` built, linked, ran, and failed.** `lib/p9.ad`'s `p9_listdir` `read(2)`s
+   a directory fd expecting Hamnix's `"NAME\n"` stream; Linux answers `EISDIR`.
+   `sys_open` now notices a directory and `sys_read` synthesises that stream from
+   `readdir`, so no userland changes. `ls` output is byte-identical to `ls -A`.
+   **`.` and `..` are deliberately omitted**: `du`, `find`, `cp` and the other
+   `p9_listdir` recursors have no self/parent guard anywhere in the tree and
+   would loop forever otherwise. That absence is also the evidence that the
+   Hamnix backing does not emit them.
+
+`sys_stat_p9` is the **only reliable file-vs-directory test in the tree** —
+`user/find.ad`'s header explains why (bug #146) a `p9_listdir` success cannot
+substitute. Note the trap: it is the **full 9P2000 stat record**, *not* the
+compact Dir record `lib/p9.ad`'s own header documents. `lib/p9.ad:1095` flags
+the difference; consumers pin `qid.type` at byte 8 and `length` at byte 33.
+
+Still fail-closed, each with a stated reason in the source: the fd-slot model
+(`sys_fdbind`, `sys_chan_dir_mode`, `sys_fdslot_*`, `sys_pipechan`), the
+`#s`/`#svc` registries, `sys_netcfg`, the `wsys`/`vk` surface, the `umdf` driver
+ops, and the threading model (`sys_rfork_thread`, the semaphores).
+
+Proof, not assertion: `tests/linux/syscall_probe.ad` and
+`tests/linux/spawn_probe.ad` call each addition and check its *observable
+effect*, returning the failure count as the process exit code — a stub cannot
+pass by resolving. Both report `ALL PASS`.
+
 ### 4.2 `bind` — much smaller than it looks
 
-`sys_bind` appears in 49 files, which reads alarming. It is not. Of the 49
+> **VERIFIED, counts slightly off, conclusion intact.** The real figure is
+> **52 call sites across 50 files**, not 49 — and the original arithmetic did
+> not close (45 + 3 ≠ 49). Correct breakdown: **45** identical `#c → /dev`,
+> **3** `#d → /fd`, and **4** genuine namespace uses, not 1. The claim that
+> matters — that this is a stub-and-move-on, not a subsystem — holds, and the
+> stub is now implemented (§4.1d).
+
+`sys_bind` appears in 50 files, which reads alarming. It is not. Of the 52
 call sites, **45 are the identical single line**:
 
 ```python
@@ -245,16 +334,19 @@ sys_bind(cast[Ptr[char]]("/dev"), cast[Ptr[char]]("#c"), 0)
 ```
 
 — a fixed startup incantation binding the console device (`#c`) into the
-process namespace at `/dev`. The other **3** are `sys_bind("/fd", "#d", 0)`.
+process namespace at `/dev`. Another **3** are `sys_bind("/fd", "#d", ...)`.
 There is no general namespace algebra in the applications: they each perform one
 canned mount at `main()` and never touch it again. Representative:
 `user/hamdesktop.ad:2479`.
 
 **Implication:** a `bind` that understands exactly `#c → /dev` and `#d → /fd`
-satisfies 48 of 49 sites. This is a stub-and-move-on, not a subsystem.
+satisfies **48 of 52** sites. This is a stub-and-move-on, not a subsystem, and
+it is done — see §4.1d. Both incantations ask for something Linux already
+provides at those exact paths, so accepting them and doing nothing is honest;
+everything else fails loudly rather than pretending a mount happened.
 
-The one genuine namespace user is `user/nsrun.ad`, plus `user/distrofs.ad` and
-`user/p9srv_demo.ad`. Per-process namespaces do have a real Linux answer
+The **4** genuine namespace uses are in `user/distrofs.ad` (`/n/distros`),
+`user/nsrun.ad`, `user/p9srv_demo.ad`, and an `/extbind_probe` site. Per-process namespaces do have a real Linux answer
 (`unshare(CLONE_NEWNS)` + `mount --bind` in a mount namespace), but you almost
 certainly do not need it to get the desktop up.
 
@@ -429,12 +521,27 @@ it is not mine to make.
    erase most of §3. I did not have the standing to decide this, and it is worth
    deciding *before* anyone writes a file server.
 
-4. **glibc or stay static-nolibc?** `--target=x86_64-linux` currently emits
-   static no-libc ELFs, and `linux-runtime.S` issues raw `syscall`. The stated
-   goal mentions glibc, which would be needed to link OpenSSL, Mesa, PipeWire or
-   FreeType. Nobody has built an Adder→glibc link path; I did not verify one is
-   straightforward. **This is a prerequisite for most of §6's "replace" column
-   and should be settled early.**
+4. ~~**glibc or stay static-nolibc?**~~ **RESOLVED — it already works, and it
+   was never a question in the LLVM lane.** `scripts/adder_cc_llvm.sh` has
+   clang perform the link, and clang links glibc by default: the very first
+   binary built through it is a `dynamically linked ... interpreter
+   /lib64/ld-linux-x86-64.so.2` PIE against `libc.so.6`. No new backend work
+   was needed and none is needed for OpenSSL, Mesa, PipeWire or FreeType —
+   each is an ordinary `clang` link flag.
+
+   Exactly **one** symbol collided between `user/linux-runtime.S` and glibc:
+   `_start`, which `crt1.o` also defines. It is now guarded by `ADDER_HOSTED`,
+   so one runtime serves both lanes and glibc's initialisers actually run
+   (required before any libc-dependent library can be called). The
+   static-nolibc question survives only for the *freestanding* lane, which is
+   not the shipping path.
+
+   **`scripts/hamlinux_build.sh` is the resulting per-app build lane.** It
+   differs from `adder_cc_llvm.sh` only in linking the real syscall runtime
+   rather than the SSA-prelude stub — which is what anything in `user/`
+   actually needs — and reports its three failure modes as distinct exit codes
+   (10 emit, 11 SSA bail, 12 link) so a sweep can group failures without
+   parsing logs.
 
 5. **`hamsh`'s job-control model vs. Linux process groups.** `hamsh` uses
    `sys_rfork`, `sys_pgrp_kill`, `sys_setexitsem` and `sys_waitpid_jc`. Whether
