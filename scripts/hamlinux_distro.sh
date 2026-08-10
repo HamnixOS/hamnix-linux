@@ -23,6 +23,15 @@
 #                  the bridge's window, and this is what replays them into X.
 #   x11-apps       xclock/xeyes, so the bridge can be proven without waiting
 #                  for a browser to start.
+#   matchbox-window-manager
+#                  a WINDOW MANAGER. Without one, X places windows wherever
+#                  they ask and never resizes them, so Firefox's main window
+#                  and its session-restore window landed side by side, each
+#                  clipped -- which looks exactly like a compositor bug and is
+#                  not one. matchbox fullscreens whatever is on top, which is
+#                  right here: the Hamnix compositor is already doing the
+#                  window management, and the X session inside the bridge is
+#                  one application's screen.
 #   fonts, ca-certificates, dbus  what a browser refuses to be useful without.
 #
 # Usage: scripts/hamlinux_distro.sh [out.ext4] [size] [suite]
@@ -38,9 +47,9 @@ MIRROR="${HAMLINUX_MIRROR:-http://deb.debian.org/debian}"
 command -v mmdebstrap >/dev/null || {
     echo "[distro] need mmdebstrap (apt install mmdebstrap)" >&2; exit 1; }
 
-PKGS="xvfb,x11-apps,xdotool,x11-utils,firefox-esr,ca-certificates,dbus,\
-fonts-dejavu-core,fonts-liberation,libgl1,libgtk-3-0,procps,coreutils,\
-bash,less,nano"
+PKGS="xvfb,x11-apps,xdotool,x11-utils,matchbox-window-manager,\
+firefox-esr,ca-certificates,dbus,fonts-dejavu-core,fonts-liberation,\
+libgl1,libgtk-3-0,procps,coreutils,bash,less,nano"
 
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
@@ -76,6 +85,8 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
     [ -e /tmp/xfb/Xvfb_screen0 ] && break
     sleep 0.5
 done
+DISPLAY=:0 matchbox-window-manager -use_titlebar no &
+sleep 1
 DISPLAY=:0 exec \"\\\$@\"
 EOS
         chmod 755 /usr/local/bin/hamnix-x

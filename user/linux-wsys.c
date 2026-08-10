@@ -142,22 +142,37 @@ static struct wshm *shm;
  * a gigabyte of shared memory for windows that mostly do not use it. Four
  * slots are claimed on demand.
  * ------------------------------------------------------------------ */
-#define BB_SLOTS   4
+#define BB_SLOTS   3
 #define BB_W       1920
 #define BB_H       1080
 #define BB_BYTES   ((size_t)BB_W * BB_H * 4)
 
+/* DOUBLE BUFFERED, and it has to be.
+ *
+ * With one page the compositor reads the surface while the client is writing
+ * it, and a screendump of Firefox caught exactly that: the top of the window
+ * from one frame and the rest from the next, offset, looking for all the world
+ * like a driver bug.  'D' is the publish signal -- the blit protocol's
+ * equivalent of the scene path's `commit` -- so it is what flips the page.
+ * The compositor only ever reads a WHOLE frame, which is the same promise
+ * scene clients already get.
+ *
+ * A client may blit only a dirty rect and expect the rest to persist, so the
+ * new back page starts as a copy of the front -- taken lazily, on the first
+ * blit after a flip, so a window that is not being drawn costs nothing. */
 struct bbhdr {
     uint32_t used;
     int32_t  wid;
     int32_t  w, h;
-    uint32_t gen;          /* ++ on every dirty-rect submission */
+    uint32_t gen;          /* ++ on every flip */
+    uint32_t front;        /* which page the compositor reads */
+    uint32_t started;      /* a frame is in progress on the back page */
 };
 
 struct bbshm {
     uint32_t magic;
     struct bbhdr slot[BB_SLOTS];
-    uint8_t  px[BB_SLOTS][BB_W * BB_H * 4];
+    uint8_t  px[BB_SLOTS][2][BB_W * BB_H * 4];
 };
 
 static struct bbshm *bb;
@@ -205,7 +220,7 @@ static int bb_for(int wid, int create, int w, int h)
     for (int i = 0; i < BB_SLOTS; i++) {
         if (bb->slot[i].used) continue;
         memset(&bb->slot[i], 0, sizeof bb->slot[i]);
-        memset(bb->px[i], 0, BB_BYTES);
+        memset(bb->px[i], 0, BB_BYTES * 2);
         bb->slot[i].used = 1;
         bb->slot[i].wid  = wid;
         bb->slot[i].w    = w > 0 && w <= BB_W ? w : BB_W;
@@ -247,6 +262,13 @@ static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
     int slot = bb_for(v->wid, 1, v->w, v->h);
     if (slot < 0) return 18 + need;
     struct bbhdr *h = &bb->slot[slot];
+    uint32_t back = h->front ^ 1u;
+    if (!h->started) {
+        /* Carry the last published frame forward: a client that blits only
+         * what changed must not find the rest of its window blank. */
+        memcpy(bb->px[slot][back], bb->px[slot][h->front], BB_BYTES);
+        h->started = 1;
+    }
     const uint8_t *src = b + 18;
     for (int32_t y = y0; y < y1; y++) {
         if (y < 0 || y >= h->h) continue;
@@ -254,7 +276,7 @@ static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
             if (x < 0 || x >= h->w) continue;
             const uint8_t *s = src + ((uint64_t)(y - y0) * (x1 - x0)
                                       + (x - x0)) * bpp;
-            uint8_t *d = &bb->px[slot][((uint64_t)y * h->w + x) * 4];
+            uint8_t *d = &bb->px[slot][back][((uint64_t)y * h->w + x) * 4];
             if (fmt == 2) {                       /* FMT_BGRA8888 */
                 d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
             } else if (fmt == 3) {                /* FMT_A8 */
@@ -264,7 +286,6 @@ static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
             }
         }
     }
-    h->gen++;
     return 18 + need;
 }
 
@@ -768,7 +789,7 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
         if (f->off >= size) return 0;
         uint64_t k = size - f->off;
         if (k > cap) k = cap;
-        memcpy(buf, bb->px[slot] + f->off, (size_t)k);
+        memcpy(buf, bb->px[slot][bb->slot[slot].front] + f->off, (size_t)k);
         f->off += k;
         return (int64_t)k;
     }
@@ -976,7 +997,17 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
             } else if (verb == 'D') {
                 if (carried - i < 17) break;
                 int slot = bb_for(v->wid, 1, v->w, v->h);
-                if (slot >= 0) bb->slot[slot].gen++;
+                if (slot >= 0) {
+                    /* PUBLISH. Flip only if something was actually drawn --
+                     * a bare 'D' on an untouched surface is a no-op, not a
+                     * flip back to a stale page. */
+                    struct bbhdr *h = &bb->slot[slot];
+                    if (h->started) {
+                        h->front ^= 1u;
+                        h->started = 0;
+                    }
+                    h->gen++;
+                }
                 shm->gen++;
                 used = 17;
             } else if (verb == 'C') {
