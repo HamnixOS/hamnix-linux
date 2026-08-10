@@ -49,6 +49,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "linux-fb.h"
+
 /* ------------------------------------------------------------------ *
  * Return convention
  *
@@ -258,10 +260,68 @@ static int adopt_if_directory(int fd)
     return dirtab_fill(fd);
 }
 
+/* ------------------------------------------------------------------ *
+ * Synthetic device files
+ *
+ * Some Hamnix devices are files with behaviour that no Linux file has —
+ * /dev/fb answers a geometry STRING to a read and takes pixels on a write.
+ * Rather than teach the userland about DRM, those paths are intercepted here
+ * and served from user/linux-fb.c.
+ *
+ * The fd handed back is a real one (a descriptor on /dev/null), so it occupies
+ * a genuine slot, survives fork, and cannot collide with an ordinary open.
+ * Only read/write/lseek/close consult the table.
+ * ------------------------------------------------------------------ */
+#define DEVTAB_MAX 16
+struct devfile {
+    int      used;
+    int      fd;
+    int      kind;      /* HAMFB_* */
+    int      write;
+    uint64_t cursor;    /* byte offset into the surface */
+};
+static struct devfile devtab[DEVTAB_MAX];
+
+static struct devfile *devtab_find(int fd)
+{
+    if (fd < 0) return NULL;
+    for (int i = 0; i < DEVTAB_MAX; i++)
+        if (devtab[i].used && devtab[i].fd == fd)
+            return &devtab[i];
+    return NULL;
+}
+
+/* Returns the new fd, or -1 with errno if `path` is not a synthetic device or
+ * the device could not be opened. */
+static int devtab_open(const char *path, int for_write)
+{
+    int kind = hamfb_kind(path);
+    if (kind == HAMFB_NONE) {
+        errno = ENODEV;
+        return -1;
+    }
+    struct devfile *slot = NULL;
+    for (int i = 0; i < DEVTAB_MAX; i++)
+        if (!devtab[i].used) { slot = &devtab[i]; break; }
+    if (!slot) { errno = EMFILE; return -1; }
+
+    if (hamfb_open(kind, for_write) < 0)
+        return -1;
+
+    int fd = open("/dev/null", for_write ? O_WRONLY : O_RDONLY);
+    if (fd < 0)
+        return -1;
+    slot->used = 1; slot->fd = fd; slot->kind = kind;
+    slot->write = for_write; slot->cursor = 0;
+    return fd;
+}
+
 /* extern def sys_open(path: Ptr[char]) -> int32
  * ONE argument, opened for reading — see the long note at the .S definition. */
 int32_t sys_open(const char *path)
 {
+    if (hamfb_kind(path) != HAMFB_NONE)
+        return rc32(devtab_open(path, 0));
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return rc32(fd);
@@ -285,6 +345,8 @@ int32_t sys_open3(const char *path, int32_t flags, uint32_t mode)
  * Open-or-create for writing, truncating an existing file. */
 int32_t sys_open_write(const char *path)
 {
+    if (hamfb_kind(path) != HAMFB_NONE)
+        return rc32(devtab_open(path, 1));
     return rc32(open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666));
 }
 
@@ -292,6 +354,23 @@ int32_t sys_open_write(const char *path)
  * On a directory fd, serve the synthesised "NAME\n" stream. */
 int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
 {
+    struct devfile *v = devtab_find((int)fd);
+    if (v) {
+        int64_t n;
+        if (v->kind == HAMFB_FB) {
+            /* Reading /dev/fb answers the geometry line, once. */
+            if (v->cursor) return 0;
+            n = hamfb_geometry(buf, count);
+            if (n > 0) v->cursor += (uint64_t)n;
+            return n;
+        }
+        if (v->kind == HAMFB_FBPIX) {
+            n = hamfb_read_pixels(v->cursor, buf, count);
+            if (n > 0) v->cursor += (uint64_t)n;
+            return n;
+        }
+        return 0;                       /* fbctl is write-only */
+    }
     struct dirstream *d = dirtab_find((int)fd);
     if (d) {
         size_t avail = d->len - d->off;
@@ -308,12 +387,22 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
 /* extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64 */
 int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 {
+    struct devfile *v = devtab_find((int)fd);
+    if (v) {
+        if (v->kind == HAMFB_FBCTL)
+            return hamfb_ctl(buf, count);
+        int64_t n = hamfb_write(v->cursor, buf, count);
+        if (n > 0) v->cursor += (uint64_t)n;
+        return n;
+    }
     return rc64(write((int)fd, buf, (size_t)count));
 }
 
 /* extern def sys_close(fd: int32) -> int32 */
 int32_t sys_close(int32_t fd)
 {
+    struct devfile *v = devtab_find((int)fd);
+    if (v) { v->used = 0; return rc32(close((int)fd)); }
     struct dirstream *d = dirtab_find((int)fd);
     if (d)
         dirtab_release(d);
@@ -325,6 +414,17 @@ int32_t sys_close(int32_t fd)
  * caller that seeks to 0 to re-read a listing means. */
 int64_t sys_lseek(int32_t fd, int64_t off, int32_t whence)
 {
+    struct devfile *v = devtab_find((int)fd);
+    if (v) {
+        /* Seeking the framebuffer moves the pixel cursor -- hamUId seeks to
+         * place a band rather than always streaming from 0. */
+        int64_t base = (whence == SEEK_CUR) ? (int64_t)v->cursor
+                     : (whence == SEEK_END) ? (int64_t)hamfb_size() : 0;
+        int64_t want = base + off;
+        if (want < 0) { errno = EINVAL; return -EINVAL; }
+        v->cursor = (uint64_t)want;
+        return want;
+    }
     struct dirstream *d = dirtab_find((int)fd);
     if (d) {
         int64_t base = (whence == SEEK_CUR) ? (int64_t)d->off
@@ -1043,6 +1143,44 @@ int32_t sys_pipechan(void)
 {
     errno = ENOSYS;
     return -1;
+}
+
+/* ------------------------------------------------------------------ *
+ * Kernel modules
+ *
+ * NEW ON THIS LINE, and unavoidable for the north star: on real hardware the
+ * whole point of running on Linux is that drivers exist, and on a Debian kernel
+ * essentially every driver is a module. Even in QEMU, /dev/dri/card0 does not
+ * appear until virtio-gpu and its four dependencies are loaded — so nothing can
+ * scan out until something can insmod.
+ *
+ * user/insmod.ad exists but cannot be used: it issues SYS_INIT_MODULE through a
+ * hand-written asm_volatile block that encodes the OLD backend's %rbp frame
+ * layout, and miscompiles under LLVM (one of the three such apps the Tier-1
+ * sweep found). Rather than fix inline asm that should not be inline asm, this
+ * is a normal entry point.
+ * ------------------------------------------------------------------ */
+
+/* extern def sys_init_module(path: Ptr[char], params: Ptr[char]) -> int32
+ *
+ * Load one already-decompressed .ko by path. finit_module reads the module
+ * from the fd itself, so nothing has to be slurped into userland memory.
+ * Returns 0, or -errno. EEXIST is reported as success: a module that is
+ * already loaded is the state the caller wanted. */
+int32_t sys_init_module(const char *path, const char *params)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -(int32_t)errno;
+    long r = syscall(SYS_finit_module, fd, params ? params : "", 0);
+    int e = errno;
+    close(fd);
+    if (r == 0)
+        return 0;
+    if (e == EEXIST)
+        return 0;
+    errno = e;
+    return -(int32_t)e;
 }
 
 /* ------------------------------------------------------------------ *

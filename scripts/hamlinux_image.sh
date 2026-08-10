@@ -96,6 +96,44 @@ for f in hostname hosts passwd group issue motd; do
     [ -f "etc/$f" ] && install -m644 "etc/$f" "$ROOT/etc/$f"
 done
 
+# --- kernel modules -------------------------------------------------------
+# The north star is real hardware, and on a Debian kernel nearly every driver
+# is a module -- even in QEMU, /dev/dri/card0 does not exist until virtio-gpu
+# and its dependencies are loaded. Resolve the load ORDER here, where a real
+# modprobe is available, and write it to /etc/modules as absolute paths; the
+# Adder PID 1 just walks that list. Modules are decompressed because the guest
+# kernel's in-kernel decompressor is not guaranteed to be built in.
+KVER="$(basename "${KERNEL:-}" 2>/dev/null | sed 's/^vmlinuz-//')"
+KERNEL="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
+KVER="$(basename "$KERNEL" | sed 's/^vmlinuz-//')"
+MODPROBE=/usr/sbin/modprobe
+WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk}"
+: > "$ROOT/etc/modules"
+if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
+    mkdir -p "$ROOT/lib/modules/$KVER"
+    for m in $WANT_MODULES; do
+        "$MODPROBE" --dry-run --show-depends -S "$KVER" "$m" 2>/dev/null \
+        | awk '/^insmod /{print $2}' | while read -r ko; do
+            [ -f "$ko" ] || continue
+            rel="${ko#/lib/modules/$KVER/}"
+            out="$ROOT/lib/modules/$KVER/${rel%.xz}"
+            mkdir -p "$(dirname "$out")"
+            if [ ! -f "$out" ]; then
+                case "$ko" in
+                    *.xz) xz -dc "$ko" > "$out" ;;
+                    *)    cp -L "$ko" "$out" ;;
+                esac
+                # Append in dependency order, skipping ones already listed.
+                grep -qxF "/lib/modules/$KVER/${rel%.xz}" "$ROOT/etc/modules" \
+                    || echo "/lib/modules/$KVER/${rel%.xz}" >> "$ROOT/etc/modules"
+            fi
+        done
+    done
+    echo "[image] staged $(grep -c . "$ROOT/etc/modules" 2>/dev/null || echo 0) kernel modules for $KVER"
+else
+    echo "[image] no modprobe or /lib/modules/$KVER — image will have no drivers" >&2
+fi
+
 echo "[image] packing initramfs"
 ( cd "$ROOT" && find . -print0 | cpio --null -o -H newc --quiet ) | gzip -9 > "$OUT/initramfs.cpio.gz"
 

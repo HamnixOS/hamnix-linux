@@ -39,6 +39,11 @@ COMMON=(
     -kernel "$IMG/vmlinuz"
     -initrd "$IMG/initramfs.cpio.gz"
     -no-reboot
+    # virtio-gpu is always present, even headless: it is what gives the guest a
+    # DRM/KMS device (/dev/dri/card0) for user/linux-fb.c to scan out on. The
+    # display is separate -- serial/script modes just never open a window.
+    -vga none
+    -device virtio-gpu-pci
 )
 
 # panic=-1 with -no-reboot makes a PID-1 death terminate QEMU instead of
@@ -48,19 +53,21 @@ APPEND="console=ttyS0,115200 panic=-1 loglevel=4"
 
 case "$MODE" in
   serial)
-    exec qemu-system-x86_64 "${COMMON[@]}" -nographic -append "$APPEND" "$@"
+    exec qemu-system-x86_64 "${COMMON[@]}" -display none -serial mon:stdio \
+        -append "$APPEND" "$@"
     ;;
   script)
     # Non-interactive: the guest shell reads stdin, so a heredoc on our stdin
     # drives it. timeout keeps a hung boot from wedging CI.
-    CMD=(qemu-system-x86_64 "${COMMON[@]}" -nographic -append "$APPEND" "$@")
+    CMD=(qemu-system-x86_64 "${COMMON[@]}" -vnc 127.0.0.1:9 -serial stdio
+         -monitor unix:build/image/mon.sock,server,nowait
+         -append "$APPEND" "$@")
     if [ -n "$TIMEOUT" ]; then exec timeout "$TIMEOUT" "${CMD[@]}"; else exec "${CMD[@]}"; fi
     ;;
   gpu)
     # virtio-gpu-pci gives the guest a real DRM device. Serial stays on stdio so
     # the shell is still reachable while the display window is up.
     exec qemu-system-x86_64 "${COMMON[@]}" \
-        -device virtio-gpu-pci \
         -display gtk \
         -serial mon:stdio \
         -append "$APPEND" "$@"

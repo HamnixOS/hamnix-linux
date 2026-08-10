@@ -1,0 +1,218 @@
+# tests/linux/fb_probe.ad — proof that /dev/fb is a real scanout surface.
+#
+# Exercises the framebuffer exactly the way user/hamUId.ad does (HANDOFF §4.4):
+# read the geometry line from /dev/fb, open it for writing, stream bands of
+# 32-bpp pixels at it. Then read the pixels BACK through /dev/fbpix and check
+# they are what we wrote — which is the part a stub cannot fake, and which
+# proves the bytes reached the DRM dumb buffer rather than /dev/null.
+#
+# Run inside the VM: it needs a DRM device, and it takes DRM master.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+extern def sys_get_jiffies() -> uint64
+
+# Buffers must be top-level BSS arrays.
+geo:     Array[128, uint8]
+row:     Array[16384, uint8]        # one screen row, up to 4096px at 4 bytes
+back:    Array[16384, uint8]
+errbuf:  Array[128, uint8]
+pos:     Array[1, uint64]
+
+FB_W: uint64 = 0
+FB_H: uint64 = 0
+FB_PITCH: uint64 = 0
+FB_BPP: uint64 = 0
+FB_FMT: uint64 = 0
+
+failures: int32 = 0
+
+
+def write_cstr(fd: int32, s: Ptr[uint8]):
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    sys_write(fd, s, n)
+
+
+def put_u64(v: uint64):
+    # No printf in this runtime; render the decimal by hand.
+    d: Array[24, uint8]
+    i: uint64 = 24
+    if v == 0:
+        write_cstr(1, "0")
+        return
+    while v > 0:
+        i = i - 1
+        d[i] = cast[uint8](48 + cast[uint32](v % 10))
+        v = v / 10
+    sys_write(1, &d[i], 24 - i)
+
+
+def report(name: Ptr[uint8], good: int32):
+    if good != 0:
+        write_cstr(1, "ok   ")
+    else:
+        write_cstr(1, "FAIL ")
+        failures = failures + 1
+    write_cstr(1, name)
+    write_cstr(1, "\n")
+
+
+def why():
+    n: int32 = sys_errstr(&errbuf[0], 128)
+    if n > 0:
+        write_cstr(1, "       reason: ")
+        write_cstr(1, &errbuf[0])
+        write_cstr(1, "\n")
+
+
+def next_dec(buf: Ptr[uint8], p: Ptr[uint64], total: uint64) -> uint64:
+    i: uint64 = p[0]
+    while i < total and (buf[i] < 48 or buf[i] > 57):
+        i = i + 1
+    v: uint64 = 0
+    while i < total and buf[i] >= 48 and buf[i] <= 57:
+        v = v * 10 + cast[uint64](cast[uint32](buf[i]) - 48)
+        i = i + 1
+    p[0] = i
+    return v
+
+
+def check_geometry() -> int32:
+    # "WIDTH HEIGHT PITCH BPP PIXFMT\n" — the same parse hamUId does at
+    # user/hamUId.ad:2100.
+    fd: int32 = sys_open("/dev/fb")
+    if fd < 0:
+        why()
+        return 0
+    n: int64 = sys_read(fd, &geo[0], 128)
+    sys_close(fd)
+    if n <= 0:
+        return 0
+    pos[0] = 0
+    FB_W     = next_dec(&geo[0], &pos[0], cast[uint64](n))
+    FB_H     = next_dec(&geo[0], &pos[0], cast[uint64](n))
+    FB_PITCH = next_dec(&geo[0], &pos[0], cast[uint64](n))
+    FB_BPP   = next_dec(&geo[0], &pos[0], cast[uint64](n))
+    FB_FMT   = next_dec(&geo[0], &pos[0], cast[uint64](n))
+
+    write_cstr(1, "       mode: ")
+    put_u64(FB_W)
+    write_cstr(1, "x")
+    put_u64(FB_H)
+    write_cstr(1, " pitch=")
+    put_u64(FB_PITCH)
+    write_cstr(1, " bpp=")
+    put_u64(FB_BPP)
+    write_cstr(1, "\n")
+
+    if FB_W == 0 or FB_H == 0:
+        return 0
+    if FB_BPP != 32:
+        return 0
+    # The pitch must cover a whole row of 4-byte pixels.
+    if FB_PITCH < FB_W * 4:
+        return 0
+    return 1
+
+
+def check_paint() -> int32:
+    # Paint the whole screen: a vertical colour ramp, one sys_write per row,
+    # which is the same access pattern as hamUId's banded present.
+    if FB_PITCH > 16384:
+        write_cstr(1, "       row wider than the probe buffer; skipping\n")
+        return 0
+    fd: int32 = sys_open_write("/dev/fb")
+    if fd < 0:
+        why()
+        return 0
+    y: uint64 = 0
+    while y < FB_H:
+        # XRGB8888 little-endian: byte 0 B, 1 G, 2 R, 3 X.
+        lvl: uint8 = cast[uint8](cast[uint32]((y * 255) / FB_H))
+        x: uint64 = 0
+        while x < FB_W:
+            b: uint64 = x * 4
+            row[b + 0] = lvl                     # blue ramps down the screen
+            row[b + 1] = cast[uint8](cast[uint32](x % 256))
+            row[b + 2] = 128
+            row[b + 3] = 255
+            x = x + 1
+        # Pad to the full pitch so the write cursor stays row-aligned.
+        pb: uint64 = FB_W * 4
+        while pb < FB_PITCH:
+            row[pb] = 0
+            pb = pb + 1
+        if sys_write(fd, &row[0], FB_PITCH) != cast[int64](FB_PITCH):
+            sys_close(fd)
+            why()
+            return 0
+        y = y + 1
+    sys_close(fd)
+    return 1
+
+
+def check_readback() -> int32:
+    # Read row 0 back through /dev/fbpix. If the pixels match what check_paint
+    # wrote, the bytes genuinely landed in the scanout buffer.
+    fd: int32 = sys_open("/dev/fbpix")
+    if fd < 0:
+        why()
+        return 0
+    n: int64 = sys_read(fd, &back[0], FB_PITCH)
+    sys_close(fd)
+    if n != cast[int64](FB_PITCH):
+        return 0
+    # Row 0 was painted with lvl 0, x%256, 128, 255.
+    x: uint64 = 0
+    while x < FB_W and x < 64:
+        b: uint64 = x * 4
+        if back[b + 0] != 0:
+            return 0
+        if back[b + 1] != cast[uint8](cast[uint32](x % 256)):
+            return 0
+        if back[b + 2] != 128:
+            return 0
+        x = x + 1
+    return 1
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    write_cstr(1, "fb_probe: /dev/fb on DRM/KMS\n")
+    g: int32 = check_geometry()
+    report("geometry", g)
+    if g == 0:
+        write_cstr(1, "SOME FAILED\n")
+        return 1
+    p: int32 = check_paint()
+    report("paint whole screen", p)
+    report("read back through /dev/fbpix", check_readback())
+
+    # NOTE: deliberately no `resume` here. That verb returns the VT to text
+    # mode, and the console immediately redraws itself over the framebuffer --
+    # measured, it took a fully painted 1280x800 screen down to 16 non-black
+    # pixels. Only release the console when genuinely giving up the display.
+    if failures == 0:
+        write_cstr(1, "ALL PASS\n")
+    else:
+        write_cstr(1, "SOME FAILED\n")
+
+    # With any argument, HOLD the display instead of exiting. Exiting closes the
+    # DRM fd, which drops master and frees the dumb buffer -- the screen goes
+    # black immediately, so a screenshot taken after the process ends captures
+    # nothing. The compositor never exits, so this is only a test-harness need.
+    if argc > 1:
+        # Hold on a SYSCALL, not on an arithmetic spin: an empty loop has no
+        # side effects and LLVM deletes it outright at -O2, so the process
+        # exited instantly and the screen went black before a screenshot could
+        # be taken. sys_get_jiffies is a real call the optimiser must keep.
+        write_cstr(1, "fb_probe: holding the display\n")
+        t0: uint64 = sys_get_jiffies()
+        while sys_get_jiffies() - t0 < 3000:      # 100 Hz jiffies -> 30 s
+            pass
+    return failures
