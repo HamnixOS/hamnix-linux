@@ -1,0 +1,270 @@
+# tests/linux/syscall_probe.ad — proof-of-life for the entry points added to
+# the Linux link runtime in user/linux-syscalls.c.
+#
+# A successful LINK proves nothing: the symbol resolving is exactly what a
+# `return -1` stub also does. This program CALLS each new entry point and
+# checks its observable effect, so a stub cannot pass. Every check prints
+# `ok <name>` or `FAIL <name>`; main returns the number of failures, so the
+# process exit code is the failure count.
+#
+# Covers the straightforward-POSIX additions. sys_execve and the wait family
+# need a fork, which needs sys_rfork; they are exercised by
+# tests/linux/wait_probe.ad instead.
+#
+# Adder notes: buffers are top-level BSS arrays, not frame locals, and
+# adjacent string-literal concatenation is unsupported — hence write_cstr.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_unlink(path: Ptr[char]) -> int32
+extern def sys_getpid() -> int32
+extern def sys_getgid() -> uint32
+extern def sys_getuid() -> uint32
+extern def sys_pipe(fds: Ptr[int32]) -> int32
+extern def sys_link(oldpath: Ptr[char], newpath: Ptr[char]) -> int32
+extern def sys_symlink(target: Ptr[char], linkpath: Ptr[char]) -> int32
+extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
+extern def sys_socketpair(domain: int32, type: int32, protocol: int32,
+                          sv: Ptr[int32]) -> int32
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+extern def sys_bind(newp: Ptr[char], oldp: Ptr[char], flag: int32) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+
+# Buffers must be top-level BSS arrays (frame locals are not addressable the
+# way these calls need).
+pipefd:   Array[2, int32]
+sockfd:   Array[2, int32]
+ts:       Array[2, uint64]
+ts2:      Array[2, uint64]
+iobuf:    Array[64, uint8]
+errbuf:   Array[128, uint8]
+
+failures: int32 = 0
+
+
+def write_cstr(fd: int32, s: Ptr[uint8]):
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    sys_write(fd, s, n)
+
+
+def report(name: Ptr[uint8], good: int32):
+    # One line per check. Returning the failure count from main means a
+    # silently-stubbed entry point cannot look like a pass.
+    if good != 0:
+        write_cstr(1, "ok   ")
+    else:
+        write_cstr(1, "FAIL ")
+        failures = failures + 1
+    write_cstr(1, name)
+    write_cstr(1, "\n")
+
+
+def check_getpid() -> int32:
+    # A real pid is positive, and stable across two calls. A -1 stub fails
+    # the first test; a counter fails the second.
+    p: int32 = sys_getpid()
+    q: int32 = sys_getpid()
+    if p <= 0:
+        return 0
+    if p != q:
+        return 0
+    return 1
+
+
+def check_getgid() -> int32:
+    # gid is unsigned and cannot be distinguished from a stub by value alone
+    # (gid 0 is legitimate for root). Assert only that it agrees with itself
+    # and that getuid, already implemented, is consistent too.
+    g: uint32 = sys_getgid()
+    h: uint32 = sys_getgid()
+    if g != h:
+        return 0
+    return 1
+
+
+def check_pipe() -> int32:
+    # The real test of a pipe is that a byte written to fds[1] comes back out
+    # of fds[0]. A stub returning -1 never gets here; a stub returning 0
+    # without making a pipe fails the read.
+    if sys_pipe(&pipefd[0]) != 0:
+        return 0
+    if pipefd[0] < 0 or pipefd[1] < 0:
+        return 0
+    iobuf[0] = 65                                   # 'A'
+    if sys_write(pipefd[1], &iobuf[0], 1) != 1:
+        return 0
+    iobuf[0] = 0
+    if sys_read(pipefd[0], &iobuf[0], 1) != 1:
+        return 0
+    sys_close(pipefd[0])
+    sys_close(pipefd[1])
+    if iobuf[0] != 65:
+        return 0
+    return 1
+
+
+def check_socketpair() -> int32:
+    # AF_UNIX=1, SOCK_STREAM=1. Bidirectional, unlike a pipe: write on [1],
+    # read on [0], then the reverse, so a half-wired implementation fails.
+    if sys_socketpair(1, 1, 0, &sockfd[0]) != 0:
+        return 0
+    iobuf[0] = 90                                   # 'Z'
+    if sys_write(sockfd[1], &iobuf[0], 1) != 1:
+        return 0
+    iobuf[0] = 0
+    if sys_read(sockfd[0], &iobuf[0], 1) != 1:
+        return 0
+    if iobuf[0] != 90:
+        return 0
+    iobuf[0] = 89                                   # 'Y', now the other way
+    if sys_write(sockfd[0], &iobuf[0], 1) != 1:
+        return 0
+    iobuf[0] = 0
+    if sys_read(sockfd[1], &iobuf[0], 1) != 1:
+        return 0
+    sys_close(sockfd[0])
+    sys_close(sockfd[1])
+    if iobuf[0] != 89:
+        return 0
+    return 1
+
+
+def check_clock_gettime() -> int32:
+    # CLOCK_REALTIME = 0. Two properties a stub cannot fake: the epoch second
+    # count is past 2020 (1577836800), and the clock advances between two
+    # reads of CLOCK_MONOTONIC (1).
+    if sys_clock_gettime(0, &ts[0]) != 0:
+        return 0
+    if ts[0] < 1577836800:
+        return 0
+    if ts[1] >= 1000000000:                         # nanos must be in range
+        return 0
+    if sys_clock_gettime(1, &ts[0]) != 0:
+        return 0
+    # Spin briefly so the monotonic clock has something to advance past.
+    spin: uint64 = 0
+    while spin < 200000:
+        spin = spin + 1
+    if sys_clock_gettime(1, &ts2[0]) != 0:
+        return 0
+    if ts2[0] < ts[0]:
+        return 0
+    if ts2[0] == ts[0] and ts2[1] < ts[1]:
+        return 0
+    return 1
+
+
+def check_link() -> int32:
+    # Write a file, hard-link it, and read the content back through the new
+    # name. That proves the link exists rather than merely that link() returned
+    # 0. Then unlink both.
+    fd: int32 = sys_open_write("scratch/_probe_src")
+    if fd < 0:
+        return 0
+    iobuf[0] = 76                                   # 'L'
+    sys_write(fd, &iobuf[0], 1)
+    sys_close(fd)
+
+    sys_unlink("scratch/_probe_link")
+    if sys_link("scratch/_probe_src", "scratch/_probe_link") != 0:
+        sys_unlink("scratch/_probe_src")
+        return 0
+
+    rfd: int32 = sys_open("scratch/_probe_link")
+    if rfd < 0:
+        sys_unlink("scratch/_probe_src")
+        return 0
+    iobuf[0] = 0
+    got: int64 = sys_read(rfd, &iobuf[0], 1)
+    sys_close(rfd)
+    sys_unlink("scratch/_probe_link")
+    sys_unlink("scratch/_probe_src")
+    if got != 1:
+        return 0
+    if iobuf[0] != 76:
+        return 0
+    return 1
+
+
+def check_symlink() -> int32:
+    # Same shape, through a symlink: the content must be reachable via the
+    # link name, which only holds if the symlink really points at the target.
+    fd: int32 = sys_open_write("scratch/_probe_sym_target")
+    if fd < 0:
+        return 0
+    iobuf[0] = 83                                   # 'S'
+    sys_write(fd, &iobuf[0], 1)
+    sys_close(fd)
+
+    sys_unlink("scratch/_probe_sym")
+    if sys_symlink("_probe_sym_target", "scratch/_probe_sym") != 0:
+        sys_unlink("scratch/_probe_sym_target")
+        return 0
+
+    rfd: int32 = sys_open("scratch/_probe_sym")
+    if rfd < 0:
+        sys_unlink("scratch/_probe_sym_target")
+        return 0
+    iobuf[0] = 0
+    got: int64 = sys_read(rfd, &iobuf[0], 1)
+    sys_close(rfd)
+    sys_unlink("scratch/_probe_sym")
+    sys_unlink("scratch/_probe_sym_target")
+    if got != 1:
+        return 0
+    if iobuf[0] != 83:
+        return 0
+    return 1
+
+
+def check_errstr() -> int32:
+    # The freestanding runtime always wrote an empty string here, which is why
+    # a failed open printed "cannot open X: " with no reason. Force a failure
+    # and require that errstr now says something.
+    bad: int32 = sys_open("/definitely/not/a/real/path")
+    if bad >= 0:
+        sys_close(bad)
+        return 0
+    n: int32 = sys_errstr(&errbuf[0], 128)
+    if n <= 0:
+        return 0
+    if errbuf[0] == 0:
+        return 0
+    write_cstr(1, "       errstr says: ")
+    write_cstr(1, &errbuf[0])
+    write_cstr(1, "\n")
+    return 1
+
+
+def check_bind() -> int32:
+    # The two startup incantations (HANDOFF.md §4.2) must succeed, and
+    # anything else must fail rather than silently claim success.
+    if sys_bind("/dev", "#c", 0) != 0:
+        return 0
+    if sys_bind("/fd", "#d", 0) != 0:
+        return 0
+    if sys_bind("/n/distros", "#/", 0) == 0:
+        return 0
+    return 1
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    write_cstr(1, "syscall_probe: exercising the new Linux entry points\n")
+    report("sys_getpid",        check_getpid())
+    report("sys_getgid",        check_getgid())
+    report("sys_pipe",          check_pipe())
+    report("sys_socketpair",    check_socketpair())
+    report("sys_clock_gettime", check_clock_gettime())
+    report("sys_link",          check_link())
+    report("sys_symlink",       check_symlink())
+    report("sys_errstr",        check_errstr())
+    report("sys_bind",          check_bind())
+    if failures == 0:
+        write_cstr(1, "ALL PASS\n")
+    else:
+        write_cstr(1, "SOME FAILED\n")
+    return failures

@@ -51,13 +51,26 @@ OPTLVL="${HAMLINUX_OPT:--O2}"
 OUT_DIR="$(dirname "$OUT_ELF")"
 mkdir -p "$OUT_DIR"
 
-# The Linux link runtime, assembled once and cached. -DADDER_HOSTED suppresses
-# the freestanding _start (see the comment at that site in linux-runtime.S).
+# The Linux link runtime is two objects, assembled/compiled once and cached:
+#
+#   user/linux-runtime.S   the freestanding half — the entry points that are a
+#                          single raw `syscall`. -DADDER_HOSTED suppresses its
+#                          _start (crt1.o owns that here) and the definitions
+#                          the hosted half overrides.
+#   user/linux-syscalls.c  the hosted half — everything needing errno, wait4,
+#                          poll or the resolver. See its header comment.
 RT_OBJ="$OUT_DIR/.linux-runtime.o"
 if [ ! -f "$RT_OBJ" ] || [ user/linux-runtime.S -nt "$RT_OBJ" ]; then
     "$CLANG" -c -x assembler-with-cpp -DADDER_HOSTED -Iuser \
         user/linux-runtime.S -o "$RT_OBJ" || {
         echo "[hamlinux] ERROR: could not assemble user/linux-runtime.S" >&2
+        exit 1
+    }
+fi
+SC_OBJ="$OUT_DIR/.linux-syscalls.o"
+if [ ! -f "$SC_OBJ" ] || [ user/linux-syscalls.c -nt "$SC_OBJ" ]; then
+    "$CLANG" -O2 -c user/linux-syscalls.c -o "$SC_OBJ" || {
+        echo "[hamlinux] ERROR: could not compile user/linux-syscalls.c" >&2
         exit 1
     }
 fi
@@ -76,8 +89,8 @@ if ! grep -q "^define i64 @main(" "$LL"; then
     exit 11
 fi
 
-if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$@" \
-        -o "$OUT_ELF" 2>"$LL.link.log"; then
+if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" \
+        "$@" -o "$OUT_ELF" 2>"$LL.link.log"; then
     sed 's/^/[link] /' "$LL.link.log" >&2
     exit 12
 fi

@@ -100,6 +100,25 @@ _start:
 #endif /* !ADDER_HOSTED */
 
 
+/* ====================================================================
+ * POSIX file / fd surface.
+ *
+ * Under ADDER_HOSTED these are defined in user/linux-syscalls.c instead, for
+ * two reasons that only showed up when the lane was actually run:
+ *
+ *  1. errno. These raw wrappers return -errno in %rax and never touch glibc's
+ *     errno, so sys_errstr had nothing to report and every diagnostic in the
+ *     tree printed "cannot open X: " with an empty reason.
+ *  2. Directories. lib/p9.ad's p9_listdir reads a directory fd expecting a
+ *     "NAME\n" stream (that is what the Hamnix DEV_DIR_FILE backing emits).
+ *     Linux read(2) answers EISDIR, so `ls` links, runs, and fails. The C
+ *     version synthesises the stream from readdir.
+ *
+ * The hosted definitions keep the -errno return convention exactly, so callers
+ * that decode it are unaffected; they additionally set errno.
+ * ==================================================================== */
+#ifndef ADDER_HOSTED
+
     /* --- sys_read(fd, buf, count) -> int64 -------------------------- */
     .globl sys_read
     .type sys_read, @function
@@ -230,15 +249,28 @@ sys_dup2:
     syscall
     ret
     .size sys_dup2, .-sys_dup2
+#endif /* !ADDER_HOSTED — POSIX file/fd surface */
 
 
     /* --- Plan 9 / process-spawn primitives with NO host equivalent ---
-     * lib/p9.ad (transitively imported by lib/hamfmcore.ad) references
-     * these Hamnix-only syscalls. A host binary that only exercises the
-     * browse core's FILE ops (mkdir/touch/unlink/rename via the wrappers
-     * above) never CALLS them, but they must RESOLVE for the link to
-     * succeed. Provide stubs that fail closed (return -1); if a host path
-     * ever reaches one it errors cleanly rather than corrupting state. */
+     *
+     * CORRECTION (measured, not assumed): this comment's claim that these
+     * "have NO host equivalent" is only true of some of them. sys_rfork,
+     * sys_execve_env and sys_resolve are fork(2), execve(2) and getaddrinfo(3)
+     * — they were stubbed here because the harnesses that first used this
+     * runtime never spawned a process, not because Linux cannot express them.
+     * HANDOFF.md §4.1 listed all three under "genuinely implemented", which
+     * was wrong; they are `return -1` below. Under ADDER_HOSTED the ones that
+     * do have an equivalent are implemented in user/linux-syscalls.c.
+     *
+     * lib/p9.ad (transitively imported by lib/hamfmcore.ad) references these
+     * syscalls. A host binary that only exercises the browse core's FILE ops
+     * (mkdir/touch/unlink/rename via the wrappers above) never CALLS them, but
+     * they must RESOLVE for the link to succeed. In the freestanding lane they
+     * stay fail-closed (return -1); if a host path ever reaches one it errors
+     * cleanly rather than corrupting state.
+     * ---------------------------------------------------------------- */
+#ifndef ADDER_HOSTED
     .globl sys_rfork
     .type sys_rfork, @function
 sys_rfork:
@@ -293,6 +325,7 @@ sys_resolve:
     movq    $-1, %rax
     ret
     .size sys_resolve, .-sys_resolve
+#endif /* !ADDER_HOSTED — Plan 9 / spawn primitives */
 
 
     /* --- sys_exit(code) — never returns ----------------------------- */
@@ -338,6 +371,7 @@ sys_exit:
 
     /* --- (1) real host syscalls ------------------------------------- */
 
+#ifndef ADDER_HOSTED   /* hosted: user/linux-syscalls.c — see the note above */
     /* sys_getcwd(buf, count) -> int64  (rdi=buf, rsi=count already aligned) */
     .globl sys_getcwd
     .type sys_getcwd, @function
@@ -364,6 +398,7 @@ sys_dup:
     syscall
     ret
     .size sys_dup, .-sys_dup
+#endif /* !ADDER_HOSTED */
 
     /* sys_getuid() -> uint32 */
     .globl sys_getuid
@@ -462,7 +497,10 @@ sys_fdslot_kind:
     .size sys_fdslot_kind, .-sys_fdslot_kind
 
     /* sys_errstr(buf, nbuf) -> int32 : no Plan 9 error string on host.
-     * NUL-terminate the caller buffer (if any) and report empty. */
+     * NUL-terminate the caller buffer (if any) and report empty.
+     * Under ADDER_HOSTED user/linux-syscalls.c backs this with strerror_r on
+     * errno, which is why error messages carry a reason in the glibc lane. */
+#ifndef ADDER_HOSTED
     .globl sys_errstr
     .type sys_errstr, @function
 sys_errstr:
@@ -473,6 +511,7 @@ sys_errstr:
     xorq    %rax, %rax
     ret
     .size sys_errstr, .-sys_errstr
+#endif /* !ADDER_HOSTED */
 
     /* sys_nsid() -> uint64 : no namespace id on host. */
     .globl sys_nsid
@@ -490,43 +529,23 @@ sys_get_jiffies:
     ret
     .size sys_get_jiffies, .-sys_get_jiffies
 
-    /* The remaining ops share one fail-closed body: return -1. */
+    /* The remaining ops share one fail-closed body: return -1.
+     *
+     * Under ADDER_HOSTED (the glibc LLVM lane) the ones that DO have a real
+     * Linux answer are defined instead by user/linux-syscalls.c, which can
+     * reach wait4/tcsetpgrp/kill/setuid and errno. They are guarded out here
+     * so the two runtimes do not both define them. What is left in every lane
+     * is the genuinely Plan 9-only surface: mount/unmount/nslabel, the #s srv
+     * and #svc service registries, and the fdslot/openchan channel ops. Those
+     * have no POSIX equivalent and stay fail-closed until §3/§4 of HANDOFF.md
+     * is decided. */
+#ifndef ADDER_HOSTED
     .globl sys_bind
     .type sys_bind, @function
 sys_bind:
-    .globl sys_unmount
-    .type sys_unmount, @function
-sys_unmount:
-    .globl sys_mount
-    .type sys_mount, @function
-sys_mount:
-    .globl sys_nslabel
-    .type sys_nslabel, @function
-sys_nslabel:
-    .globl sys_srv_open
-    .type sys_srv_open, @function
-sys_srv_open:
-    .globl sys_openchan
-    .type sys_openchan, @function
-sys_openchan:
-    .globl sys_pipechan
-    .type sys_pipechan, @function
-sys_pipechan:
-    .globl sys_fdslot_arg
-    .type sys_fdslot_arg, @function
-sys_fdslot_arg:
-    .globl sys_svc_publish
-    .type sys_svc_publish, @function
-sys_svc_publish:
-    .globl sys_svc_ctl
-    .type sys_svc_ctl, @function
-sys_svc_ctl:
     .globl sys_setuid
     .type sys_setuid, @function
 sys_setuid:
-    .globl sys_setuid_auth
-    .type sys_setuid_auth, @function
-sys_setuid_auth:
     .globl sys_pgrp_kill
     .type sys_pgrp_kill, @function
 sys_pgrp_kill:
@@ -545,6 +564,37 @@ sys_waitpid_nb_raw:
     .globl sys_waitfds
     .type sys_waitfds, @function
 sys_waitfds:
+    .globl sys_pipechan
+    .type sys_pipechan, @function
+sys_pipechan:
+#endif /* !ADDER_HOSTED */
+    .globl sys_unmount
+    .type sys_unmount, @function
+sys_unmount:
+    .globl sys_mount
+    .type sys_mount, @function
+sys_mount:
+    .globl sys_nslabel
+    .type sys_nslabel, @function
+sys_nslabel:
+    .globl sys_srv_open
+    .type sys_srv_open, @function
+sys_srv_open:
+    .globl sys_openchan
+    .type sys_openchan, @function
+sys_openchan:
+    .globl sys_fdslot_arg
+    .type sys_fdslot_arg, @function
+sys_fdslot_arg:
+    .globl sys_svc_publish
+    .type sys_svc_publish, @function
+sys_svc_publish:
+    .globl sys_svc_ctl
+    .type sys_svc_ctl, @function
+sys_svc_ctl:
+    .globl sys_setuid_auth
+    .type sys_setuid_auth, @function
+sys_setuid_auth:
     movq    $-1, %rax
     ret
 
