@@ -51,8 +51,13 @@ else
 fi
 
 # --- 1b. The panel places the window at the chosen edge ---------------
+# `_screen_height` was the old spelling: a private /dev/fb geometry read with
+# a literal 600 in its failure branch. It is now `_screen_dims`, which asks
+# the COMPOSITOR through /dev/wsys/screen (lib/hamscreen.ad) and fails loudly
+# rather than defaulting. Either spelling satisfies what this is actually
+# asserting -- that the panel places itself against the real screen height.
 if grep -q '_apply_panel_geometry' "$PANEL" \
-        && grep -q '_screen_height' "$PANEL"; then
+        && grep -qE '_screen_height|_screen_dims' "$PANEL"; then
     passed "hampanelscene positions the panel window per edge (uses screen height)"
 else
     failed "hampanelscene missing edge-aware geometry placement"

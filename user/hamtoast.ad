@@ -34,6 +34,7 @@ extern def sys_exit(code: uint64)
 from lib.hamui import hamscene_begin, hamscene_fill, hamscene_rect, \
     hamscene_glyphs, hamscene_glyphs_bold, hamscene_stroke, hamscene_commit
 from lib.hamscene import hamscene_roundrect, hamscene_roundrect_c
+from lib.hamscreen import hamscreen_dims_or_fail
 
 
 def _slen(s: Ptr[uint8]) -> uint64:
@@ -107,24 +108,16 @@ def _winpath(out: Ptr[uint8], wid: int32, leaf: Ptr[uint8]):
     out[p] = 0
 
 
-# Read the framebuffer width from /dev/fb's "W H PITCH BPP FMT\n" header.
-def _screen_width() -> int64:
-    fd: int32 = sys_open(cast[Ptr[char]]("/dev/fb"))
-    if fd < 0:
-        return 800
-    hdr: Array[64, uint8]
-    r: int64 = sys_read(fd, &hdr[0], 63)
-    sys_close(fd)
-    if r <= 0:
-        return 800
-    w: int64 = 0
-    i: uint64 = 0
-    while i < cast[uint64](r) and hdr[i] >= 48 and hdr[i] <= 57:
-        w = w * 10 + cast[int64](hdr[i]) - 48
-        i = i + 1
-    if w <= 0:
-        return 800
-    return w
+# The screen size comes from the COMPOSITOR, not from /dev/fb.
+#
+# A toast is placed relative to the RIGHT edge, so a wrong width does not
+# merely mis-size it -- it puts the notification in the middle of the screen.
+# This used to read /dev/fb's header directly and default to 800, which on the
+# raw DRM/KMS path is what always happened, because wsysd holds DRM master and
+# the device is exclusive. lib/hamscreen.ad has the story. Returns 1 on
+# success, 0 after it has already said why.
+def _screen_dims(wp: Ptr[int64], hp: Ptr[int64]) -> int32:
+    return hamscreen_dims_or_fail(wp, hp, cast[Ptr[uint8]]("[hamtoast]"))
 
 
 # Parse "m <x> <y> <buttons> ..." → 1 + fills bbtn; else 0.
@@ -214,7 +207,10 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     else:
         body_buf[0] = 0
 
-    sw: int64 = _screen_width()
+    sw: int64 = 0
+    sh: int64 = 0
+    if _screen_dims(&sw, &sh) == 0:
+        return 1
     wid: int32 = _newwindow()
     if wid < 0:
         _writeall(1, cast[Ptr[uint8]]("[hamtoast] FAIL newwindow\n"))

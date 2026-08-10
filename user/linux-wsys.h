@@ -18,6 +18,7 @@ enum {
     HAMWSYS_CTL,          /* /dev/wsys/ctl        — global verbs + newwindow */
     HAMWSYS_SELF,         /* /dev/wsys/self       — this task's wid, if any  */
     HAMWSYS_WINDOWS,      /* /dev/wsys/windows    — "<wid> <title>\n" each   */
+    HAMWSYS_SCREEN,       /* /dev/wsys/screen     — "<w> <h>\n", read-only   */
     HAMWSYS_DIR,          /* /dev/wsys, /dev/wsys/<wid> — directory listing  */
     HAMWSYS_WIN_CTL,      /* /dev/wsys/<wid>/ctl                             */
     HAMWSYS_WIN_SCENE,    /* /dev/wsys/<wid>/scene                           */

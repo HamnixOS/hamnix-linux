@@ -1,0 +1,138 @@
+# lib/hamscreen.ad
+#
+# SHARED "how big is the screen?" resolver, and the ONE place a DE client is
+# allowed to ask.
+#
+# WHY THIS EXISTS. Every scene client that lays itself out against the screen
+# (hamdesktop's full-screen backdrop, hampanelscene's top/bottom bars,
+# hamtoast's corner placement) used to answer the question privately, by
+# reading the "W H PITCH BPP PIXFMT\n" header out of /dev/fb, with a literal
+# 800x600 written into the failure branch. On the fbdev path that read
+# succeeds and nobody noticed. On the RAW DRM/KMS path it cannot succeed:
+# user/linux-fb.c's fb_init() has to open /dev/dri/cardN and pair a
+# connector with a CRTC, DRM master is exclusive to ONE process, and the
+# compositor (wsysd) already holds it. So every one of those clients opened
+# /dev/fb, got -1, took the 800x600 branch, and laid out a desktop for a
+# screen that does not exist -- on a 1280x800 display, silently, with no
+# error anywhere. That is exactly the failure shape HANDOFF.md section 0 is
+# about: not a crash, a PLAUSIBLE WRONG ANSWER.
+#
+# THE FIX IS NOT A BETTER DEFAULT. There isn't one. The screen size is a fact
+# the compositor already knows and already publishes: wsysd's read_screen()
+# reads /dev/fb once (it is the process that legitimately owns the device)
+# and its announce_screen() writes "screen W H" to /dev/wsys/ctl before it
+# serves a single frame. user/linux-wsys.c records that in the shared
+# segment's screen_w/screen_h and, since this change, answers a READ of
+# /dev/wsys/screen with "W H\n". A client therefore learns the geometry
+# WITHOUT opening the DRM device and WITHOUT being privileged -- /dev/wsys is
+# the 0666 shared segment the session already maps to draw at all (see the
+# chmod note in user/linux-wsys.c and the privilege drop in
+# etc/rc.de-user.linux). One source of truth, and it is the process that
+# actually set the mode.
+#
+# THERE IS NO FALLBACK, DELIBERATELY. Not to /dev/fb, not to a default. If
+# the compositor has not published a geometry then this client does not know
+# how big the screen is, and the honest thing -- the thing the whole
+# section-0 list is a monument to -- is to say so and stop, not to draw a
+# 800x600 desktop onto a 1280x800 display and exit 0. Callers are expected to
+# print who they are and fail.
+#
+# THE RETRY IS NOT A FALLBACK. /etc/rc.d/rc.5.linux starts wsysd, sleeps, and
+# then starts the clients; the sleep is a guess and a slow boot can outrun
+# it. So the resolver WAITS for the announcement -- a readiness handshake,
+# the same shape as hamdesktop's _newwindow retry -- and only fails after the
+# compositor has had a real chance to appear. Waiting for a fact is not the
+# same as inventing one.
+
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+# Top-level BSS, not frame locals: an Adder frame local array is not a place
+# to put a buffer on this line.
+hs_buf: Array[64, uint8]
+hs_wait: Array[4, int32]
+
+# 100 tries x 100 ms = ten seconds of grace for the compositor to come up.
+# Long enough that a cold VM boot never trips it, short enough that a session
+# with no compositor at all reports the truth while someone is still looking
+# at the console.
+HS_TRIES: int32 = 100
+HS_WAIT_MS: int64 = 100
+
+
+# ONE attempt: read /dev/wsys/screen and parse "W H\n".
+#
+# The device answers ENXIO to the open (not a short read, not zeros) until
+# wsysd has announced, so "the file would not open" and "the compositor has
+# not decided yet" are the same answer here, which is what we want.
+def _hs_try(wp: Ptr[int64], hp: Ptr[int64]) -> int32:
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/screen"))
+    if fd < 0:
+        return 0
+    r: int64 = sys_read(fd, &hs_buf[0], 63)
+    sys_close(fd)
+    if r <= 0:
+        return 0
+    n: uint64 = cast[uint64](r)
+    i: uint64 = 0
+    w: int64 = 0
+    while i < n and hs_buf[i] >= 48 and hs_buf[i] <= 57:
+        w = w * 10 + cast[int64](hs_buf[i]) - 48
+        i = i + 1
+    while i < n and hs_buf[i] == 32:
+        i = i + 1
+    h: int64 = 0
+    while i < n and hs_buf[i] >= 48 and hs_buf[i] <= 57:
+        h = h * 10 + cast[int64](hs_buf[i]) - 48
+        i = i + 1
+    # Both or neither. A half-parsed line is a malformed publication, and
+    # taking the width from it while defaulting the height would be the same
+    # bug in a smaller costume.
+    if w <= 0 or h <= 0:
+        return 0
+    wp[0] = w
+    hp[0] = h
+    return 1
+
+
+# Learn the screen size. Returns 1 and fills *wp/*hp, or returns 0 and
+# touches NEITHER -- so a caller cannot accidentally use a half-answer.
+#
+# Blocks for up to HS_TRIES * HS_WAIT_MS while the compositor starts.
+def hamscreen_dims(wp: Ptr[int64], hp: Ptr[int64]) -> int32:
+    t: int32 = 0
+    while t < HS_TRIES:
+        if _hs_try(wp, hp) != 0:
+            return 1
+        # nfds=0 is a plain timed wait, the way wsysd's frame loop sleeps.
+        # Not a spin: the thing we are waiting for is another process.
+        sys_waitfds(&hs_wait[0], 0, HS_WAIT_MS)
+        t = t + 1
+    return 0
+
+
+# The whole failure protocol in one call, so no client has to reinvent it and
+# none of them can quietly get it wrong.
+#
+# On success returns 1 with *wp/*hp filled. On failure writes a diagnostic
+# naming the caller to fd 2 and returns 0; the caller's only correct response
+# is to stop. `who` MUST be passed as a literal at the call site -- a string
+# literal assigned into a global comes out NULL on this compiler.
+def hamscreen_dims_or_fail(wp: Ptr[int64], hp: Ptr[int64],
+                           who: Ptr[uint8]) -> int32:
+    if hamscreen_dims(wp, hp) != 0:
+        return 1
+    k: uint64 = 0
+    while who[k] != 0:
+        k = k + 1
+    sys_write(2, who, k)
+    m: Ptr[uint8] = cast[Ptr[uint8]](
+        ": FATAL: no screen geometry. /dev/wsys/screen never answered, so the compositor has not published one. Refusing to guess a size -- start wsysd first.\n")
+    j: uint64 = 0
+    while m[j] != 0:
+        j = j + 1
+    sys_write(2, m, j)
+    return 0

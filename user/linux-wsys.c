@@ -397,8 +397,17 @@ static int shm_attach(void)
         shm->magic    = WSYS_MAGIC;
         shm->version  = WSYS_VERSION;
         shm->next_wid = 2;                     /* 0 invalid, 1 = foreground */
-        shm->screen_w = 1280;
-        shm->screen_h = 800;
+        /* ZERO MEANS "NOBODY HAS SAID YET", and it has to.  This used to be
+         * 1280x800 — the development VM's mode, written in as a default — and
+         * a default here is indistinguishable from an answer: /dev/wsys/screen
+         * would confidently report a geometry that no compositor had ever
+         * measured, on a machine that might be 1920x1080.  The only process
+         * entitled to fill these in is the one that set the mode, via the
+         * `screen W H` ctl verb (wsysd's announce_screen).  Until it does,
+         * reads of /dev/wsys/screen fail with ENXIO and the caller knows it
+         * does not know.  Nothing else in this file reads these fields. */
+        shm->screen_w = 0;
+        shm->screen_h = 0;
         shm->focus_wid = 0;
     }
     return 0;
@@ -567,6 +576,8 @@ static int classify(const char *path, struct hamwsys_file *f)
         leaf = HAMWSYS_SELF;
     } else if (!strcmp(p, "windows")) {
         leaf = HAMWSYS_WINDOWS;
+    } else if (!strcmp(p, "screen")) {
+        leaf = HAMWSYS_SCREEN;
     } else {
         leaf = HAMWSYS_SINK;
     }
@@ -669,6 +680,33 @@ static int snap_self(struct hamwsys_file *f)
     return snap_set(f, buf, n);
 }
 
+/* /dev/wsys/screen — "<w> <h>\n", the READ side of the `screen W H` ctl verb.
+ *
+ * The write side has existed since this file did: wsysd learns the mode from
+ * /dev/fb (it is the process that legitimately owns the device) and announces
+ * it here before it serves a frame.  Nothing could READ it back, so every DE
+ * client that needed the screen size went to /dev/fb itself — which works on
+ * fbdev and CANNOT work on raw DRM/KMS, where master is exclusive and the
+ * compositor holds it.  Those clients each had a literal 800x600 in the
+ * failure branch, so the whole desktop laid itself out for a screen that did
+ * not exist and exited 0.  lib/hamscreen.ad is the client end of this file.
+ *
+ * ENXIO WHEN UNANNOUNCED, and that is the point.  A zero here means the
+ * compositor has not published a geometry yet; answering "0 0", or an empty
+ * read, or a plausible default, would hand the caller something it could
+ * mistake for an answer.  The open fails instead, loudly, and the client
+ * waits for the compositor or says why it is stopping. */
+static int snap_screen(struct hamwsys_file *f)
+{
+    if (shm->screen_w <= 0 || shm->screen_h <= 0) { errno = ENXIO; return -1; }
+    uint8_t b[32];
+    uint64_t n = put_int(b, 0, shm->screen_w);
+    b[n++] = ' ';
+    n = put_int(b, n, shm->screen_h);
+    b[n++] = '\n';
+    return snap_set(f, b, n);
+}
+
 static int snap_ctl(struct hamwsys_file *f)
 {
     /* Reading the global ctl answers the wid this process most recently
@@ -718,7 +756,7 @@ static int snap_dir(struct hamwsys_file *f)
     uint8_t buf[1024];
     uint64_t n = 0;
     if (f->wid == 0) {
-        const char *fixed[] = { "ctl", "self", "windows" };
+        const char *fixed[] = { "ctl", "self", "windows", "screen" };
         for (unsigned i = 0; i < sizeof fixed / sizeof fixed[0]; i++) {
             for (const char *c = fixed[i]; *c; c++) buf[n++] = (uint8_t)*c;
             buf[n++] = '\n';
@@ -786,6 +824,12 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
             return snap_win_ctl(f, v);
         return 0;
     }
+    case HAMWSYS_SCREEN:
+        /* Read-only.  The way to SET the screen size is `screen W H` on the
+         * global ctl, which is the compositor's to write; a second writable
+         * spelling of the same state is how two sources of truth start. */
+        if (for_write) { errno = EACCES; return -1; }
+        return snap_screen(f);
     case HAMWSYS_WINDOWS: return for_write ? 0 : snap_windows(f);
     case HAMWSYS_SELF:    return for_write ? 0 : snap_self(f);
     case HAMWSYS_CTL:     return for_write ? 0 : snap_ctl(f);

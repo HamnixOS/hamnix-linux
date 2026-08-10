@@ -88,6 +88,7 @@ from lib.desktopentry import desktop_parse, desktop_name_ptr, \
 from lib.homedir import hd_env_home, hd_home_from_passwd, hd_regular_home, \
     hd_fallback_home, hd_resolve_home
 from lib.hamscene import hamscene_length, hamscene_bufptr, hamscene_image
+from lib.hamscreen import hamscreen_dims_or_fail
 
 
 # --- host test hook: dump the desktop display list without any /dev/wsys I/O.
@@ -236,33 +237,18 @@ def _winpath(out: Ptr[uint8], wid: int32, leaf: Ptr[uint8]):
     out[p] = 0
 
 
-# Read the framebuffer "W H PITCH BPP FMT\n" header for the screen size.
-def _screen_dims(wp: Ptr[int64], hp: Ptr[int64]):
-    wp[0] = 800
-    hp[0] = 600
-    fd: int32 = sys_open(cast[Ptr[char]]("/dev/fb"))
-    if fd < 0:
-        return
-    hdr: Array[64, uint8]
-    r: int64 = sys_read(fd, &hdr[0], 63)
-    sys_close(fd)
-    if r <= 0:
-        return
-    i: uint64 = 0
-    w: int64 = 0
-    while i < cast[uint64](r) and hdr[i] >= 48 and hdr[i] <= 57:
-        w = w * 10 + cast[int64](hdr[i]) - 48
-        i = i + 1
-    while i < cast[uint64](r) and hdr[i] == 32:
-        i = i + 1
-    h: int64 = 0
-    while i < cast[uint64](r) and hdr[i] >= 48 and hdr[i] <= 57:
-        h = h * 10 + cast[int64](hdr[i]) - 48
-        i = i + 1
-    if w > 0:
-        wp[0] = w
-    if h > 0:
-        hp[0] = h
+# The screen size comes from the COMPOSITOR, not from /dev/fb.
+#
+# This function used to read /dev/fb's "W H PITCH BPP FMT\n" header itself and
+# default to 800x600 when it could not. On the raw DRM/KMS path it can never
+# succeed -- wsysd holds DRM master and the device is exclusive -- so the
+# backdrop sized itself 800x600 on a 1280x800 screen, silently, and as a
+# side effect stopped being full-screen, which dropped the compositor off its
+# screen_is_covered() fast path as well. lib/hamscreen.ad has the full story
+# and is now the single place that answers this; there is no default left to
+# be wrong. Returns 1 on success, 0 after it has already said why.
+def _screen_dims(wp: Ptr[int64], hp: Ptr[int64]) -> int32:
+    return hamscreen_dims_or_fail(wp, hp, cast[Ptr[uint8]]("[hamdesktop]"))
 
 
 # --- image wallpaper backdrop ----------------------------------------
@@ -2478,9 +2464,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             demo_mode = 1
     sys_bind(cast[Ptr[char]]("/dev"), cast[Ptr[char]]("#c"), 0)
 
-    sw: int64 = 800
-    sh: int64 = 600
-    _screen_dims(&sw, &sh)
+    # No initial value that could survive a failed resolve: _screen_dims
+    # writes both or neither, and a desktop that does not know how big the
+    # screen is has nothing useful to draw. Stop instead of covering 800x600
+    # of it.
+    sw: int64 = 0
+    sh: int64 = 0
+    if _screen_dims(&sw, &sh) == 0:
+        return 1
     scr_w = sw
     scr_h = sh
 
