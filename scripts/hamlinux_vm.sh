@@ -133,6 +133,33 @@ case "$MODE" in
     # reports zero Vulkan devices means venus did not come up; check the guest
     # for /dev/dri/card0 first (the virtio-gpu module still has to load) and
     # then the QEMU stderr, which names the missing host capability.
+    #
+    # RUN ON THIS DEV BOX 2026-08-10, headless, with the machine owner's
+    # explicit go-ahead. It got a long way and then stopped at a HOST driver
+    # limit, so the result is written down here rather than rediscovered:
+    #
+    #   HAMLINUX_DISPLAY=egl-headless,rendernode=/dev/dri/renderD128
+    #       -> guest gets /dev/dri/card0 AND renderD128; virtio_gpu binds;
+    #          QEMU's virglrenderer processes guest commands. So the whole
+    #          transport works.
+    #       -> host: "nv_gbm.c:288 GBM-DRV error (nv_gbm_create_device_native)"
+    #          -> every venus context create comes back 0x1200 / 0x1203
+    #          -> vkCreateInstance returns -1 in the guest.
+    #
+    # The NVIDIA driver's GBM backend cannot create a device here. That is
+    # the usual symptom of nvidia-drm.modeset=0; confirming it needs root
+    # (/sys/module/nvidia_drm/parameters/modeset is 0400) and fixing it needs
+    # a driver reload, which takes the display down -- i.e. exactly what
+    # "headless" was chosen to avoid. NOT a fault in the guest stack.
+    #
+    #   HAMLINUX_DISPLAY=none  -> QEMU refuses outright: "The display backend
+    #                             does not have OpenGL support enabled".
+    #                             venus needs a GL-capable display backend
+    #                             even though venus itself is Vulkan-only.
+    #
+    # So on an AMD or Intel host, or an NVIDIA host with modeset=1, the
+    # egl-headless line above is the one to run. Everything below it is
+    # verified; the host EGL/GBM device is the single missing link.
     VENUS=(
         -m 4096 -smp 2
         -kernel "$IMG/vmlinuz" -initrd "$IMG/initramfs.cpio.gz" -no-reboot
