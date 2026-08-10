@@ -528,9 +528,37 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
 int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
 {
     struct devfile *v = devtab_find((int)fd);
-    if (v)
-        return v->isw ? hamwsys_read(&v->w, buf, count)
-                      : sys_read(fd, buf, count);
+    if (v) {
+        if (v->isw)
+            return hamwsys_read(&v->w, buf, count);
+        if (v->isnet) {
+            /* A /net data file is a real socket, and reading it blocks. This
+             * used to fall through to sys_read, so a caller that asked for a
+             * non-blocking read got a blocking one -- user/dhcpc.ad polling
+             * for an OFFER simply stopped, and the boot stopped with it. The
+             * flag is restored afterwards for the same reason it is on a
+             * plain fd: leaving it set would turn every later blocking read
+             * into an EAGAIN a caller reads as end-of-input. */
+            int sfd = hamnet_sockfd(&v->nf);
+            if (sfd < 0)
+                return hamnet_read(&v->nf, buf, count);
+            int fl = fcntl(sfd, F_GETFL, 0);
+            int flipped = 0;
+            if (fl >= 0 && !(fl & O_NONBLOCK)) {
+                if (fcntl(sfd, F_SETFL, fl | O_NONBLOCK) == 0)
+                    flipped = 1;
+            }
+            int64_t r = hamnet_read(&v->nf, buf, count);
+            int e = errno;
+            if (flipped)
+                fcntl(sfd, F_SETFL, fl);
+            errno = e;
+            if (r < 0 && (e == EAGAIN || e == EWOULDBLOCK))
+                return 0;
+            return r;
+        }
+        return sys_read(fd, buf, count);
+    }
     if (dirtab_find((int)fd))
         return sys_read(fd, buf, count);
     /* Non-blocking for THIS read only. Leaving O_NONBLOCK set -- which the
@@ -766,6 +794,19 @@ int64_t sys_uname(uint8_t *buf, uint64_t cap)
     if (n < 0) { errno = EIO; return -EIO; }
     if ((uint64_t)n >= cap) n = (int)cap - 1;
     return (int64_t)n;
+}
+
+/* extern def sys_stat_mode(path: Ptr[char]) -> int32
+ *
+ * The file's mode bits, or -errno. The counterpart to sys_chmod, and needed
+ * for the same reason: a copy that does not carry the mode across produces a
+ * file that is not what it copied. */
+int32_t sys_stat_mode(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) < 0)
+        return rc32(-1);
+    return (int32_t)(st.st_mode & 07777);
 }
 
 /* extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
@@ -1735,7 +1776,9 @@ static const char *sysroot_device(void)
  * And BIND, not MOVE: a child must not take the parent's mounts away. */
 static int32_t enter_root(const char *mnt, int is_sysroot)
 {
-    static const char *always[] = { "/dev", "/proc", "/sys" };
+    /* /n comes across too: it is the conventional mount-point parent, and a
+     * tool running inside a subtree still needs to see what is mounted there. */
+    static const char *always[] = { "/dev", "/proc", "/sys", "/n" };
     static const char *sysroot_only[] = { "/srv", "/tmp" };
     char dest[256];
     for (size_t i = 0; i < sizeof always / sizeof always[0]; i++) {
@@ -1778,6 +1821,30 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
      * actually want. */
     if (src[0] != '#') {
         mkdir(dst, 0755);
+        /* A BLOCK DEVICE source means "mount this filesystem here", not "bind
+         * this directory here".  `bind /dev/vdb2 /n/target` in the installer
+         * has to make the new root's filesystem visible, and a bind mount of
+         * a device NODE would make the node visible instead -- succeeding,
+         * and putting a character-special file where a filesystem should be.
+         *
+         * The device-server branch below already reasons this way for
+         * `#distro` and `#sysroot`; a plain path deserves the same answer,
+         * because the verb means the same thing. */
+        struct stat sb;
+        if (stat(src, &sb) == 0 && S_ISBLK(sb.st_mode)) {
+            static const char *fstypes[] = { "ext4", "ext3", "ext2", "vfat",
+                                             "squashfs", "btrfs", "xfs" };
+            int last = ENODEV;
+            for (size_t i = 0; i < sizeof fstypes / sizeof fstypes[0]; i++) {
+                if (mount(src, dst, fstypes[i], 0, NULL) == 0)
+                    return 0;
+                last = errno;
+                if (last == EBUSY)
+                    break;
+            }
+            errno = last;
+            return -(int32_t)last;
+        }
         return rc32(mount(src, dst, NULL, MS_BIND | MS_REC, NULL));
     }
 

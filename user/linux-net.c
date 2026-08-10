@@ -567,6 +567,13 @@ int hamnet_open(const char *path, int for_write, struct hamnet_file *f)
     }
 }
 
+int hamnet_sockfd(struct hamnet_file *f)
+{
+    if (f->leaf != HAMNET_DATA) return -1;
+    struct connrec *c = conn_at(f->conn);
+    return c ? c->fd : -1;
+}
+
 int64_t hamnet_read(struct hamnet_file *f, uint8_t *buf, uint64_t cap)
 {
     if (f->leaf == HAMNET_DATA) {

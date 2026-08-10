@@ -1,0 +1,109 @@
+# /etc/install.hamsh — install hamnix-linux onto a disk.
+#
+# Run this from the live system, on the machine you want to install on. It is
+# the counterpart to scripts/hamlinux_disk.sh, which builds the same disk on a
+# development host; this one runs where the disk is.
+#
+#   install /dev/vdb          install onto that disk, ERASING it
+#   install                   list the disks and stop
+#
+# WHAT IT MAKES, and why that shape:
+#
+#   GPT
+#   ├─ p1  ESP, FAT32, 512M   /EFI/BOOT/BOOTX64.EFI + the kernel + initramfs
+#   └─ p2  ext4, the rest     the Hamnix root
+#
+# BOOTX64.EFI is the removable-media path, which firmware executes without an
+# NVRAM entry. That is deliberate: an installer that writes a boot variable
+# has to know about efibootmgr, secure boot and a dozen firmware bugs, and a
+# disk that boots by being plugged in works on all of them.
+#
+# WHERE THE TOOLS COME FROM
+# -------------------------
+# sgdisk, mkfs.vfat and mkfs.ext4 run INSIDE the Debian namespace. Partitioning
+# a disk and making an ext4 filesystem are Linux-ecosystem jobs; the tree's own
+# user/mkfs_ext4.ad is a thin wrapper around the HAMNIX kernel's /dev/blk ctl
+# grammar and has no kernel to talk to here. So the installer reaches for them
+# the way it reaches for a driver -- `enter linux { ... }` -- which is the
+# boundary docs/packages.md already draws: hpm does not try to be apt, and
+# Hamnix does not reimplement e2fsprogs.
+#
+# The DEVICE NODES are shared with the namespace because `bind '#distro' /`
+# carries /dev across (user/linux-syscalls.c:enter_root), so a tool inside it
+# operates on the same disk this shell is looking at.
+#
+# Syntax: hamsh, not bash. '#' starts a comment; device-letter names like '#c'
+# MUST be single-quoted. `bind SRC DST` is source-first.
+
+echo 'hamnix-linux installer'
+echo ''
+
+# --- the namespace the Debian tools live in --------------------------
+linux = ns clean {
+    bind '#distro' /
+    bind '#c' /dev
+    bind '#p' /proc
+    bind '#s' /srv
+    bind '#/' /n
+}
+
+# --- which disk? -----------------------------------------------------
+if $1:
+    echo 'target disk:'
+    echo $1
+else:
+    echo 'disks on this machine (/sys/block):'
+    ls /sys/block
+    echo ''
+    echo 'usage: install /dev/<disk>   -- ERASES that disk'
+    exit 1
+
+echo ''
+echo '=== 1/5  partitioning (this ERASES the disk) ==='
+enter linux {
+    sgdisk --zap-all $1
+    sgdisk --new=1:2048:+512M --typecode=1:ef00 --change-name=1:HAMBOOT $1
+    sgdisk --new=2:0:0        --typecode=2:8300 --change-name=2:hamnix $1
+    sgdisk --print $1
+}
+
+echo ''
+echo '=== 2/5  filesystems ==='
+enter linux {
+    mkfs.vfat -F 32 -n HAMBOOT ${1}1
+    mkfs.ext4 -F -L hamnix ${1}2
+}
+
+echo ''
+echo '=== 3/5  copying the system ==='
+# Mount the new root the Plan 9 way: a plain-path bind IS a mount here, and
+# /n is the conventional place to put one (rc.boot bound '#/' there).
+mkdir /n/target
+bind ${1}2 /n/target
+enter linux {
+    mkdir -p /n/target
+    rsync -aHAX --numeric-ids \
+        --exclude=/proc/* --exclude=/sys/* --exclude=/dev/* \
+        --exclude=/tmp/* --exclude=/srv/* --exclude=/n/* \
+        / /n/target/
+}
+
+echo ''
+echo '=== 4/5  the boot partition ==='
+mkdir /n/esp
+bind ${1}1 /n/esp
+mkdir /n/esp/EFI
+mkdir /n/esp/EFI/BOOT
+cp /boot/BOOTX64.EFI /n/esp/EFI/BOOT/BOOTX64.EFI
+cp /boot/vmlinuz /n/esp/vmlinuz
+cp /boot/initramfs.cpio.gz /n/esp/initramfs.cpio.gz
+
+echo ''
+echo '=== 5/5  the installed system s boot rc ==='
+# The installed root brings itself online; the live one does not. The
+# difference is one line, and it lives in PID 1 rather than here -- see
+# etc/rc.boot.installed.
+cp /etc/rc.boot.installed /n/target/etc/rc.boot
+
+echo ''
+echo 'installed. remove the installation media and reboot.'

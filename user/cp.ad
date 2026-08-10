@@ -31,6 +31,13 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_mkdir(path: Ptr[char]) -> int32
+# A copy that does not carry the MODE across is not a copy. On Hamnix the
+# omission never showed; here Linux enforces the execute bit, so `cp -r` of a
+# system produced a root whose /bin/hamsh could not be exec'd -- the installed
+# disk booted, PID 1 tried to start the shell, and the kernel panicked with
+# "Attempted to kill init". The file was there, the right size, and unusable.
+extern def sys_stat_mode(path: Ptr[char]) -> int32
+extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
 from lib.p9 import p9_listdir, p9_chan_dir_mode
 
 
@@ -145,6 +152,13 @@ def copy_file(src: Ptr[char], dst: Ptr[char]) -> int32:
             wrote = wrote + cast[uint64](wr)
     sys_close(in_fd)
     sys_close(out_fd)
+    # CARRY THE MODE. Without this the copy is not a copy: on a system that
+    # enforces the execute bit, `cp -r` of a root produced a /bin/hamsh that
+    # could not be exec'd, and the installed disk panicked with "Attempted to
+    # kill init" -- the file present, the right size, and unusable.
+    m: int32 = sys_stat_mode(src)
+    if m >= 0:
+        sys_chmod(dst, cast[uint32](m))
     return 0
 
 

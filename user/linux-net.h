@@ -35,4 +35,8 @@ void    hamnet_close(struct hamnet_file *f);
 
 int64_t hamnet_cfg(uint64_t op, uint64_t a1, uint64_t a2);
 
+/* The underlying socket, so the runtime's non-blocking read can flip
+ * O_NONBLOCK around a call. -1 when this file has no socket. */
+int     hamnet_sockfd(struct hamnet_file *f);
+
 #endif

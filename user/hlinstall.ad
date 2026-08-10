@@ -1,0 +1,373 @@
+# user/hlinstall.ad — install hamnix-linux onto a disk, from the live system.
+#
+# The counterpart to scripts/hamlinux_disk.sh, which builds the same disk on a
+# development host. This one runs on the machine you are installing.
+#
+#   hlinstall                 list the disks and stop
+#   hlinstall /dev/vdb        install onto that disk, ERASING it
+#
+# WHAT IT MAKES
+#   GPT
+#   ├─ p1  ESP, FAT32, 512M   /EFI/BOOT/BOOTX64.EFI + kernel + initramfs
+#   └─ p2  ext4, the rest     the Hamnix root
+#
+# BOOTX64.EFI is the removable-media path, which firmware runs without an NVRAM
+# entry. Deliberate: an installer that writes a boot variable has to know about
+# efibootmgr, secure boot and a decade of firmware bugs, and a disk that boots
+# because it is plugged in works on all of them.
+#
+# WHERE THE TOOLS COME FROM
+# -------------------------
+# sgdisk, mkfs.vfat and mkfs.ext4 run INSIDE the Debian namespace.
+# Partitioning a disk and making an ext4 filesystem are Linux-ecosystem jobs;
+# the tree's own user/mkfs_ext4.ad is a thin wrapper around the HAMNIX kernel's
+# /dev/blk ctl grammar and has no kernel to talk to here. So this reaches for
+# them the way it reaches for a driver, and the boundary is the one
+# docs/packages.md already draws: hpm does not try to be apt, and Hamnix does
+# not reimplement e2fsprogs.
+#
+# Each tool runs as a CHILD that does the Plan 9 dance itself:
+#
+#   rfork(RFPROC|RFNAMEG)     a private namespace, so nothing leaks back
+#   bind '#distro' /          enter the Debian root
+#   exec the tool             it never learns any of this happened
+#
+# which is user/nsrun.ad's invariant -- rfork BEFORE mount -- and exactly what
+# tests/linux/distro_probe.ad proves.
+#
+# The DEVICE NODES are shared with the namespace: `bind '#distro' /` carries
+# /dev across (user/linux-syscalls.c:enter_root), so a tool inside it operates
+# on the same disk this process is looking at.
+#
+# THE COPY IS THE EXCEPTION, and it has to be. A tool that has entered the
+# Debian root cannot see the Hamnix root at all -- that is the isolation
+# working -- so the one job that must see BOTH sides is done from out here,
+# with the tree's own cp.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_mkdir(path: Ptr[char]) -> int32
+extern def sys_rfork(flags: int32) -> int32
+extern def sys_bind(newp: Ptr[char], oldp: Ptr[char], flag: int32) -> int32
+extern def sys_execve_env(path: Ptr[char], argv: Ptr[uint64],
+                          envp: Ptr[uint64]) -> int32
+extern def sys_waitpid(pid: int32) -> int64
+extern def sys_exit(code: uint64)
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+
+RFPROC:  int32 = 0x001
+RFFDG:   int32 = 0x004
+RFNAMEG: int32 = 0x008
+
+argbuf:  Array[8, uint64]
+envbuf:  Array[4, uint64]
+p1:      Array[64, uint8]        # <disk>1
+p2:      Array[64, uint8]        # <disk>2
+disk:    Array[64, uint8]
+a1:      Array[128, uint8]
+a2:      Array[128, uint8]
+a3:      Array[128, uint8]
+a4:      Array[128, uint8]
+listbuf: Array[2048, uint8]
+errbuf:  Array[128, uint8]
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def copy_str(dst: Ptr[uint8], src: Ptr[uint8]) -> uint64:
+    i: uint64 = 0
+    while src[i] != 0 and i < 120:
+        dst[i] = src[i]
+        i = i + 1
+    dst[i] = 0
+    return i
+
+
+def why(what: Ptr[uint8]):
+    puts(2, what)
+    puts(2, ": ")
+    n: int32 = sys_errstr(&errbuf[0], 128)
+    if n > 0:
+        puts(2, &errbuf[0])
+    puts(2, "\n")
+
+
+# Run a program in THIS namespace -- no distro, no chroot. Used for the copy,
+# because the copy has to see both roots at once.
+def run_local(prog: Ptr[char], n_args: int32) -> int32:
+    pid: int32 = sys_rfork(RFPROC | RFFDG)
+    if pid < 0:
+        why(cast[Ptr[uint8]]("rfork"))
+        return -1
+    if pid == 0:
+        argbuf[0] = cast[uint64](prog)
+        if n_args > 0:
+            argbuf[1] = cast[uint64](&a1[0])
+        if n_args > 1:
+            argbuf[2] = cast[uint64](&a2[0])
+        if n_args > 2:
+            argbuf[3] = cast[uint64](&a3[0])
+        if n_args > 3:
+            argbuf[4] = cast[uint64](&a4[0])
+        argbuf[cast[uint64](n_args) + 1] = 0
+        envbuf[0] = cast[uint64](cast[Ptr[char]]("PATH=/bin"))
+        envbuf[1] = 0
+        sys_execve_env(prog, cast[Ptr[uint64]](&argbuf[0]),
+                       cast[Ptr[uint64]](&envbuf[0]))
+        sys_exit(127)
+    st: int64 = sys_waitpid(pid)
+    return cast[int32](st)
+
+
+# Copy one top-level directory of the live root into the target.
+def copy_top(name: Ptr[uint8]) -> int32:
+    copy_str(&a1[0], cast[Ptr[uint8]]("-r"))
+    a2[0] = 47                                    # "/<name>"
+    copy_str(&a2[1], name)
+    copy_str(&a3[0], cast[Ptr[uint8]]("/n/target/"))
+    puts(1, "  ")
+    puts(1, name)
+    puts(1, "\n")
+    return run_local(cast[Ptr[char]]("/bin/cp"), 3)
+
+
+# Run one Debian tool inside the distro namespace. Up to four arguments; a
+# NULL-terminated argv is built from them. Returns the child's exit status.
+def run_in_distro(prog: Ptr[char], n_args: int32) -> int32:
+    pid: int32 = sys_rfork(RFPROC | RFFDG | RFNAMEG)
+    if pid < 0:
+        why(cast[Ptr[uint8]]("rfork"))
+        return -1
+    if pid == 0:
+        # The Plan 9 invariant: the namespace is private BEFORE anything is
+        # bound into it, so this mount cannot be seen by anyone else.
+        if sys_bind(cast[Ptr[char]]("/"), cast[Ptr[char]]("#distro"), 0) != 0:
+            puts(2, "hlinstall: cannot enter the Debian namespace\n")
+            sys_exit(126)
+        argbuf[0] = cast[uint64](prog)
+        if n_args > 0:
+            argbuf[1] = cast[uint64](&a1[0])
+        if n_args > 1:
+            argbuf[2] = cast[uint64](&a2[0])
+        if n_args > 2:
+            argbuf[3] = cast[uint64](&a3[0])
+        if n_args > 3:
+            argbuf[4] = cast[uint64](&a4[0])
+        argbuf[cast[uint64](n_args) + 1] = 0
+        envbuf[0] = cast[uint64](cast[Ptr[char]]("PATH=/usr/sbin:/usr/bin:/sbin:/bin"))
+        envbuf[1] = 0
+        sys_execve_env(prog, cast[Ptr[uint64]](&argbuf[0]),
+                       cast[Ptr[uint64]](&envbuf[0]))
+        puts(2, "hlinstall: cannot run the tool\n")
+        sys_exit(127)
+    st: int64 = sys_waitpid(pid)
+    return cast[int32](st)
+
+
+def step(msg: Ptr[uint8]):
+    puts(1, "\n=== ")
+    puts(1, msg)
+    puts(1, " ===\n")
+
+
+def list_disks():
+    puts(1, "disks on this machine (/sys/block):\n")
+    fd: int32 = sys_open(cast[Ptr[char]]("/sys/block"))
+    if fd < 0:
+        why(cast[Ptr[uint8]]("open /sys/block"))
+        return
+    total: uint64 = 0
+    while total < 2047:
+        k: int64 = sys_read(fd, &listbuf[total], 2047 - total)
+        if k <= 0:
+            break
+        total = total + cast[uint64](k)
+    sys_close(fd)
+    listbuf[total] = 0
+    sys_write(1, &listbuf[0], total)
+    puts(1, "\nusage: hlinstall /dev/<disk>   -- ERASES that disk\n")
+
+
+# Copy one file with plain reads and writes. Used for the three boot files,
+# which is a small enough job not to want rsync for.
+def copy_file(src: Ptr[char], dst: Ptr[char]) -> int32:
+    sfd: int32 = sys_open(src)
+    if sfd < 0:
+        return -1
+    dfd: int32 = sys_open_write(dst)
+    if dfd < 0:
+        sys_close(sfd)
+        return -1
+    rc: int32 = 0
+    while 1 == 1:
+        n: int64 = sys_read(sfd, &listbuf[0], 2048)
+        if n < 0:
+            rc = -1
+            break
+        if n == 0:
+            break
+        if sys_write(dfd, &listbuf[0], cast[uint64](n)) != n:
+            rc = -1
+            break
+    sys_close(sfd)
+    sys_close(dfd)
+    return rc
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    puts(1, "hamnix-linux installer\n\n")
+    if argc < 2:
+        list_disks()
+        return 1
+
+    dn: uint64 = copy_str(&disk[0], cast[Ptr[uint8]](argv[1]))
+    # <disk>1 and <disk>2. NVMe and mmc name their partitions <disk>p1, and a
+    # wrong guess would format somebody's other partition, so refuse rather
+    # than assume: those disks want an explicit naming rule this does not have
+    # yet, and saying so is better than being confidently wrong.
+    if disk[dn - 1] >= 48 and disk[dn - 1] <= 57:
+        puts(2, "hlinstall: this disk names its partitions <disk>pN "
+                "(nvme/mmc); that is not handled yet, and guessing would "
+                "format the wrong thing.\n")
+        return 1
+    copy_str(&p1[0], &disk[0])
+    p1[dn] = 49                                   # '1'
+    p1[dn + 1] = 0
+    copy_str(&p2[0], &disk[0])
+    p2[dn] = 50                                   # '2'
+    p2[dn + 1] = 0
+
+    puts(1, "target disk: ")
+    puts(1, &disk[0])
+    puts(1, "\n  boot: ")
+    puts(1, &p1[0])
+    puts(1, "\n  root: ")
+    puts(1, &p2[0])
+    puts(1, "\nthis ERASES the disk.\n")
+
+    step(cast[Ptr[uint8]]("1/5  partitioning"))
+    copy_str(&a1[0], cast[Ptr[uint8]]("--zap-all"))
+    copy_str(&a2[0], &disk[0])
+    if run_in_distro(cast[Ptr[char]]("/usr/sbin/sgdisk"), 2) != 0:
+        puts(2, "hlinstall: sgdisk --zap-all failed\n")
+        return 1
+    copy_str(&a1[0], cast[Ptr[uint8]]("--new=1:2048:+512M"))
+    copy_str(&a2[0], cast[Ptr[uint8]]("--typecode=1:ef00"))
+    copy_str(&a3[0], cast[Ptr[uint8]]("--change-name=1:HAMBOOT"))
+    copy_str(&a4[0], &disk[0])
+    if run_in_distro(cast[Ptr[char]]("/usr/sbin/sgdisk"), 4) != 0:
+        puts(2, "hlinstall: creating the ESP failed\n")
+        return 1
+    copy_str(&a1[0], cast[Ptr[uint8]]("--new=2:0:0"))
+    copy_str(&a2[0], cast[Ptr[uint8]]("--typecode=2:8300"))
+    copy_str(&a3[0], cast[Ptr[uint8]]("--change-name=2:hamnix"))
+    copy_str(&a4[0], &disk[0])
+    if run_in_distro(cast[Ptr[char]]("/usr/sbin/sgdisk"), 4) != 0:
+        puts(2, "hlinstall: creating the root partition failed\n")
+        return 1
+
+    step(cast[Ptr[uint8]]("2/5  filesystems"))
+    copy_str(&a1[0], cast[Ptr[uint8]]("-F"))
+    copy_str(&a2[0], cast[Ptr[uint8]]("32"))
+    copy_str(&a3[0], cast[Ptr[uint8]]("-n"))
+    copy_str(&a4[0], cast[Ptr[uint8]]("HAMBOOT"))
+    # mkfs.vfat wants the device last; a5 would be a fifth argument, so pass
+    # the device through a4 and drop the label instead. A labelled ESP is a
+    # convenience, and the install must not fail for one.
+    copy_str(&a3[0], &p1[0])
+    if run_in_distro(cast[Ptr[char]]("/usr/sbin/mkfs.vfat"), 3) != 0:
+        puts(2, "hlinstall: mkfs.vfat failed\n")
+        return 1
+    copy_str(&a1[0], cast[Ptr[uint8]]("-F"))
+    copy_str(&a2[0], cast[Ptr[uint8]]("-L"))
+    copy_str(&a3[0], cast[Ptr[uint8]]("hamnix"))
+    copy_str(&a4[0], &p2[0])
+    if run_in_distro(cast[Ptr[char]]("/usr/sbin/mkfs.ext4"), 4) != 0:
+        puts(2, "hlinstall: mkfs.ext4 failed\n")
+        return 1
+
+    step(cast[Ptr[uint8]]("3/5  copying the system"))
+    sys_mkdir(cast[Ptr[char]]("/n/target"))
+    # A plain-path bind of a BLOCK DEVICE mounts its filesystem -- the same
+    # verb the rc scripts use for a device server, meaning the same thing.
+    if sys_bind(cast[Ptr[char]]("/n/target"), cast[Ptr[char]](&p2[0]), 0) != 0:
+        why(cast[Ptr[uint8]]("bind the new root at /n/target"))
+        return 1
+
+    # THE COPY RUNS IN THIS NAMESPACE, with the tree's own cp -- not rsync
+    # inside the distro. A tool that has entered the Debian root cannot see
+    # the Hamnix root at all; that is the whole point of the isolation, and it
+    # means the one job that must see BOTH sides cannot be done from in there.
+    # (The first attempt did exactly that and rsync reported "/n/target: No
+    # such file or directory", which is the isolation working.)
+    #
+    # A named list, not `/`: copying the root wholesale would descend into
+    # /n/target and copy the target into itself.
+    copy_top(cast[Ptr[uint8]]("bin"))
+    copy_top(cast[Ptr[uint8]]("etc"))
+    copy_top(cast[Ptr[uint8]]("lib"))
+    copy_top(cast[Ptr[uint8]]("lib64"))
+    copy_top(cast[Ptr[uint8]]("usr"))
+    copy_top(cast[Ptr[uint8]]("var"))
+    copy_top(cast[Ptr[uint8]]("root"))
+    copy_top(cast[Ptr[uint8]]("home"))
+    copy_top(cast[Ptr[uint8]]("boot"))
+
+    # /init is a file, not a directory, and it is what the kernel executes.
+    if copy_file(cast[Ptr[char]]("/init"),
+                 cast[Ptr[char]]("/n/target/init")) != 0:
+        puts(2, "hlinstall: could not copy /init\n")
+        return 1
+
+    # The mount points. They are empty on purpose: what goes in them is bound
+    # at boot by the Adder PID 1, not stored on the disk.
+    sys_mkdir(cast[Ptr[char]]("/n/target/proc"))
+    sys_mkdir(cast[Ptr[char]]("/n/target/sys"))
+    sys_mkdir(cast[Ptr[char]]("/n/target/dev"))
+    sys_mkdir(cast[Ptr[char]]("/n/target/tmp"))
+    sys_mkdir(cast[Ptr[char]]("/n/target/srv"))
+    sys_mkdir(cast[Ptr[char]]("/n/target/n"))
+    sys_mkdir(cast[Ptr[char]]("/n/target/n/distro"))
+    sys_mkdir(cast[Ptr[char]]("/n/target/mnt"))
+
+    step(cast[Ptr[uint8]]("4/5  the boot partition"))
+    sys_mkdir(cast[Ptr[char]]("/n/esp"))
+    if sys_bind(cast[Ptr[char]]("/n/esp"), cast[Ptr[char]](&p1[0]), 0) != 0:
+        why(cast[Ptr[uint8]]("bind the ESP at /n/esp"))
+        return 1
+    sys_mkdir(cast[Ptr[char]]("/n/esp/EFI"))
+    sys_mkdir(cast[Ptr[char]]("/n/esp/EFI/BOOT"))
+    if copy_file(cast[Ptr[char]]("/boot/BOOTX64.EFI"),
+                 cast[Ptr[char]]("/n/esp/EFI/BOOT/BOOTX64.EFI")) != 0:
+        puts(2, "hlinstall: no /boot/BOOTX64.EFI to install.\n")
+        puts(2, "hlinstall: this live image was not built with the boot "
+                "files (HAMLINUX_INSTALLER=1).\n")
+        return 1
+    copy_file(cast[Ptr[char]]("/boot/vmlinuz"),
+              cast[Ptr[char]]("/n/esp/vmlinuz"))
+    copy_file(cast[Ptr[char]]("/boot/initramfs.cpio.gz"),
+              cast[Ptr[char]]("/n/esp/initramfs.cpio.gz"))
+
+    step(cast[Ptr[uint8]]("5/5  the installed system's boot rc"))
+    # The installed root brings itself online; the live one has nothing to
+    # bring online. The difference is one line, and it lives in PID 1 rather
+    # than in the rc -- see etc/rc.boot.installed.
+    if copy_file(cast[Ptr[char]]("/etc/rc.boot.installed"),
+                 cast[Ptr[char]]("/n/target/etc/rc.boot")) != 0:
+        puts(2, "hlinstall: could not write the installed boot rc\n")
+        return 1
+
+    puts(1, "\ninstalled. remove the installation media and reboot.\n")
+    return 0

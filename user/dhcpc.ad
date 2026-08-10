@@ -242,6 +242,11 @@ def open_socket() -> int32:
     if sys_netcfg(7, 0, 0) != 0:
         puts(2, "dhcpc: cannot bring the link up\n")
         return -1
+    # A link that has just come up is not ready to carry a frame: the driver
+    # is still negotiating and a DISCOVER sent into that window is simply
+    # lost. Waiting a moment here is the difference between "no offer" and a
+    # lease, and it costs nothing on a link that was already up.
+    sys_waitfds(&waitset[0], 0, 1000)
     cfd: int32 = sys_open("/net/udp/clone")
     if cfd < 0:
         puts(2, "dhcpc: cannot open /net/udp/clone\n")
@@ -415,7 +420,7 @@ def exchange(send_type: uint8, want_type: uint8, with_server: int32) -> int32:
     # up, and giving up after one is how a machine ends up with no network for
     # no reason.
     tries: int32 = 0
-    while tries < 3:
+    while tries < 5:
         if sys_write(data_fd, &pkt[0], n) < 0:
             return -1
         polls: int32 = 0

@@ -33,6 +33,17 @@
 #                  window management, and the X session inside the bridge is
 #                  one application's screen.
 #   fonts, ca-certificates, dbus  what a browser refuses to be useful without.
+#   gdisk, dosfstools, e2fsprogs, rsync, mtools
+#                  THE INSTALLER'S TOOLS. Partitioning a disk and making an
+#                  ext4 or a FAT filesystem are Linux-ecosystem jobs, and the
+#                  Debian namespace is where Linux-ecosystem tools live -- the
+#                  tree's own user/mkfs_ext4.ad is a thin wrapper around the
+#                  HAMNIX kernel's /dev/blk ctl grammar and has no kernel to
+#                  talk to here. So etc/install.hamsh reaches for them the way
+#                  it would reach for a driver: `enter linux { mkfs.ext4 ... }`.
+#                  That is the boundary docs/packages.md draws anyway -- hpm
+#                  does not try to be apt, and Hamnix does not try to
+#                  reimplement e2fsprogs.
 #
 # Usage: scripts/hamlinux_distro.sh [out.ext4] [size] [suite]
 set -euo pipefail
@@ -49,7 +60,8 @@ command -v mmdebstrap >/dev/null || {
 
 PKGS="xvfb,x11-apps,xdotool,x11-utils,matchbox-window-manager,\
 firefox-esr,ca-certificates,dbus,fonts-dejavu-core,fonts-liberation,\
-libgl1,libgtk-3-0,procps,coreutils,bash,less,nano"
+libgl1,libgtk-3-0,procps,coreutils,bash,less,nano,\
+gdisk,dosfstools,e2fsprogs,rsync,mtools"
 
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"

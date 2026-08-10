@@ -66,6 +66,14 @@ if [ -f "$IMG/distro.ext4" ]; then
     COMMON+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe")
 fi
 
+# A blank disk to INSTALL onto, when one has been made. This is what turns the
+# live boot into an installer test: user/hlinstall.ad partitions it, makes the
+# filesystems and copies the system, and then `scripts/hamlinux_vm.sh disk`
+# boots the result.
+if [ -f "$IMG/target.img" ]; then
+    COMMON+=(-drive "file=$IMG/target.img,if=virtio,format=raw,cache=unsafe")
+fi
+
 # panic=-1 with -no-reboot makes a PID-1 death terminate QEMU instead of
 # hanging, which matters because an init that exits is exactly the failure this
 # is most likely to hit.
@@ -97,7 +105,10 @@ case "$MODE" in
     # firmware finds /EFI/BOOT/BOOTX64.EFI on the ESP exactly as it would on a
     # real machine. That is the point of this mode -- it exercises the boot
     # path a physical install uses, rather than QEMU's kernel loader.
-    IMGFILE="$IMG/hamnix-linux.img"
+    # HAMLINUX_DISK boots a different disk -- the one the in-system installer
+    # just wrote, for instance, which is the only way to prove it wrote a
+    # bootable one.
+    IMGFILE="${HAMLINUX_DISK:-$IMG/hamnix-linux.img}"
     [ -f "$IMGFILE" ] || { echo "no disk; run scripts/hamlinux_disk.sh" >&2; exit 1; }
     OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
     OVMF_VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd

@@ -25,7 +25,7 @@ cd "$PROJ_ROOT"
 OUT="${1:-build/image}"
 ROOT="$OUT/root"
 rm -rf "$ROOT"
-mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,lib,lib64,var/log,usr/bin}
+mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,home,mnt,boot,lib,lib64,var/log,var/lib/hpm,usr/bin}
 
 # The applications that go in /bin. Kept to things that build AND run today
 # (measured -- see HANDOFF.md §5); the point of the image is to boot, not to be
@@ -44,6 +44,7 @@ APPS=(
     ifconfig route ping host curl wget hpm
     insmod modprobe lsmod rmmod
     xbridge nsrun dhcpc ntpd
+    hlinstall reboot
 )
 
 # The desktop. wsysd is the compositor (user/wsysd.ad — the userland half of
@@ -138,7 +139,10 @@ KVER="$(basename "${KERNEL:-}" 2>/dev/null | sed 's/^vmlinuz-//')"
 KERNEL="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
 KVER="$(basename "$KERNEL" | sed 's/^vmlinuz-//')"
 MODPROBE=/usr/sbin/modprobe
-WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk ext4 overlay squashfs loop}"
+# vfat is here because the INSTALLER needs it: an ESP is FAT32, and without
+# the driver `bind /dev/sdb1 /n/esp` fails with ENODEV -- which reads like a
+# broken partition rather than a missing module.
+WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk ext4 vfat nls_ascii nls_cp437 overlay squashfs loop}"
 : > "$ROOT/etc/modules"
 if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
     mkdir -p "$ROOT/lib/modules/$KVER"
@@ -163,6 +167,25 @@ if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
     echo "[image] staged $(grep -c . "$ROOT/etc/modules" 2>/dev/null || echo 0) kernel modules for $KVER"
 else
     echo "[image] no modprobe or /lib/modules/$KVER — image will have no drivers" >&2
+fi
+
+# --- the installer's boot files -------------------------------------------
+# HAMLINUX_INSTALLER=1 stages the kernel, the initramfs and the unified kernel
+# image into /boot, so user/hlinstall.ad has something to write onto the ESP of
+# the machine it is installing.  Off by default: it roughly triples the image,
+# and a developer boot has no use for a copy of itself.
+if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
+    mkdir -p "$ROOT/boot"
+    [ -f build/image/disk/BOOTX64.EFI ] \
+        && cp build/image/disk/BOOTX64.EFI "$ROOT/boot/BOOTX64.EFI"
+    cp -L "$(ls -1 /boot/vmlinuz-* | sort -V | tail -1)" "$ROOT/boot/vmlinuz"
+    # The initramfs cannot contain the copy of itself we are about to build,
+    # so the PREVIOUS one is staged.  Building twice is what makes the staged
+    # copy current: the second build packs the first build's output.
+    [ -f "$OUT/initramfs.cpio.gz" ] \
+        && cp "$OUT/initramfs.cpio.gz" "$ROOT/boot/initramfs.cpio.gz"
+    install -m644 etc/rc.boot.installed "$ROOT/etc/rc.boot.installed"
+    echo "[image] staged the installer's boot files into /boot"
 fi
 
 echo "[image] packing initramfs"
