@@ -41,6 +41,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/utsname.h>
+#include <sys/mman.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -412,10 +413,125 @@ static int64_t note_write(int pid, const uint8_t *buf, uint64_t count)
     return (int64_t)count;
 }
 
+/* Hamnix console/kernel files that Linux already publishes, or can.
+ *
+ * The DE reads the wall clock as `btime` from /dev/stat plus the uptime in
+ * NANOSECONDS from /dev/time (user/hampanelscene.ad:_read_btime,
+ * _read_uptime_ns). Neither existed here, both reads failed, and the panel
+ * clock sat at "Thu Jan 01 00:00" -- a date, confidently rendered, computed
+ * from two zeroes.
+ *
+ * /dev/stat needs no synthesis at all: lib/cpustat.ad's header says outright
+ * that it is "the Linux /proc/stat shape", and /proc/stat carries both the
+ * `cpu` aggregate row and the `btime` line. So it is the same file under the
+ * name this tree uses for it.
+ *
+ * /dev/time does need synthesis, and gets a memfd holding the value at OPEN
+ * time. That is the right semantics rather than a shortcut: these files are
+ * snapshots in Plan 9, the panel re-opens on every poll, and a reader that
+ * seeks back gets a consistent number rather than a moving one.
+ *
+ * Returns a real fd, or -1 with errno untouched if this is not one of them. */
+static int devfile_open(const char *path)
+{
+    if (!strcmp(path, "/dev/stat")) {
+        /* /proc/stat, REORDERED so the two lines the DE needs come first.
+         *
+         * The panel reads this file into a 2048-byte buffer and scans it for
+         * `btime` (user/hampanelscene.ad:_read_btime); lib/cpustat.ad scans
+         * the same window for the `cpu ` aggregate.  Linux puts btime AFTER
+         * one cpuN line per core -- on this build host that is byte 5246, far
+         * outside the window, so on any machine with a lot of cores the panel
+         * would silently read btime = 0 and render 1970 with total
+         * confidence.  It works in a 2-CPU VM and fails on a workstation,
+         * which is the worst shape a bug can have.
+         *
+         * Emitting the aggregate and btime first is a reordering, not an
+         * invention: every line is /proc/stat's own, and a reader that wants
+         * the per-core rows still finds them. */
+        FILE *in = fopen("/proc/stat", "r");
+        if (!in) return -1;
+        char line[512], first[1024], rest[16384];
+        size_t fl = 0, rl = 0;
+        while (fgets(line, sizeof line, in)) {
+            size_t n = strlen(line);
+            int head = (!strncmp(line, "cpu ", 4) || !strncmp(line, "btime ", 6));
+            if (head && fl + n < sizeof first) { memcpy(first + fl, line, n); fl += n; }
+            else if (rl + n < sizeof rest)     { memcpy(rest + rl, line, n);  rl += n; }
+        }
+        fclose(in);
+        int fd = memfd_create("hamnix-stat", 0);
+        if (fd < 0) return -1;
+        if ((fl && write(fd, first, fl) != (ssize_t)fl)
+            || (rl && write(fd, rest, rl) != (ssize_t)rl)
+            || lseek(fd, 0, SEEK_SET) < 0) {
+            int e = errno; close(fd); errno = e; return -1;
+        }
+        return fd;
+    }
+
+    if (!strcmp(path, "/proc/realtime")) {
+        /* Hamnix's procfs renders the wall clock here and user/date.ad reads
+         * exactly this line; Linux's procfs has no such file, so `date`
+         * reported "/proc/realtime unavailable" on a machine that knows the
+         * time perfectly well.
+         *
+         * The layout is byte-exact and date.ad asserts on it -- ISO-8601 UTC,
+         * then a space, then the epoch:
+         *
+         *     YYYY-MM-DDTHH:MM:SSZ <epoch>\n
+         *
+         * so it is reproduced rather than approximated. date.ad checks for
+         * 'T' at offset 10 on purpose, "so a future format change surfaces as
+         * a test failure instead of a silent garbled print" -- worth keeping
+         * true. */
+        time_t now = time(NULL);
+        struct tm tmv;
+        if (!gmtime_r(&now, &tmv)) return -1;
+        char buf[96];
+        int n = snprintf(buf, sizeof buf,
+                         "%04d-%02d-%02dT%02d:%02d:%02dZ %lld\n",
+                         tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                         tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                         (long long)now);
+        int fd = memfd_create("hamnix-realtime", 0);
+        if (fd < 0) return -1;
+        if (write(fd, buf, (size_t)n) != n || lseek(fd, 0, SEEK_SET) < 0) {
+            int e = errno; close(fd); errno = e; return -1;
+        }
+        return fd;
+    }
+
+    if (!strcmp(path, "/dev/time")) {
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+            return -1;
+        char buf[32];
+        int n = snprintf(buf, sizeof buf, "%llu",
+                         (unsigned long long)ts.tv_sec * 1000000000ull
+                         + (unsigned long long)ts.tv_nsec);
+        int fd = memfd_create("hamnix-time", 0);
+        if (fd < 0) return -1;
+        if (write(fd, buf, (size_t)n) != n || lseek(fd, 0, SEEK_SET) < 0) {
+            int e = errno;
+            close(fd);
+            errno = e;
+            return -1;
+        }
+        return fd;
+    }
+    return -1;
+}
+
 /* extern def sys_open(path: Ptr[char]) -> int32
  * ONE argument, opened for reading — see the long note at the .S definition. */
 int32_t sys_open(const char *path)
 {
+    if (path && path[0] == '/'
+        && (path[1] == 'd' || path[1] == 'p')) {
+        int d = devfile_open(path);
+        if (d >= 0) return (int32_t)d;
+    }
     fdns_gate_release();
     /* /fd/<n> is a NAME for a descriptor, possibly one another process bound
      * for us. It resolves to a real fd, so it never enters the device table. */
