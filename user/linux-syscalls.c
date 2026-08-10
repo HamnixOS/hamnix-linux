@@ -53,6 +53,7 @@
 #include "linux-fb.h"
 #include "linux-wsys.h"
 #include "linux-fdns.h"
+#include "linux-net.h"
 
 /* ------------------------------------------------------------------ *
  * Return convention
@@ -285,6 +286,8 @@ struct devfile {
     int      isw;       /* 1 => a /dev/wsys file; `w` is live */
     struct hamwsys_file w;
     int      note_pid;  /* >0 => this is /proc/<pid>/note */
+    int      isnet;     /* 1 => a /net file; `nf` is live */
+    struct hamnet_file nf;
 };
 static struct devfile devtab[DEVTAB_MAX];
 
@@ -301,9 +304,11 @@ static struct devfile *devtab_find(int fd)
  * the device could not be opened. */
 static int devtab_open(const char *path, int for_write)
 {
-    int kind = hamfb_kind(path);
+    int kind  = hamfb_kind(path);
     int wkind = (kind == HAMFB_NONE) ? hamwsys_kind(path) : HAMWSYS_NONE;
-    if (kind == HAMFB_NONE && wkind == HAMWSYS_NONE) {
+    int nkind = (kind == HAMFB_NONE && wkind == HAMWSYS_NONE)
+                ? hamnet_kind(path) : HAMNET_NONE;
+    if (kind == HAMFB_NONE && wkind == HAMWSYS_NONE && nkind == HAMNET_NONE) {
         errno = ENODEV;
         return -1;
     }
@@ -316,17 +321,25 @@ static int devtab_open(const char *path, int for_write)
     if (kind != HAMFB_NONE) {
         if (hamfb_open(kind, for_write) < 0)
             return -1;
-    } else {
+    } else if (wkind != HAMWSYS_NONE) {
         if (hamwsys_open(path, for_write, &slot->w) < 0)
             return -1;
         slot->isw = 1;
+    } else {
+        if (hamnet_open(path, for_write, &slot->nf) < 0)
+            return -1;
+        slot->isnet = 1;
     }
 
-    int fd = open("/dev/null", for_write ? O_WRONLY : O_RDONLY);
+    /* A /net data file is opened for WRITING by net_dial and then READ from
+     * as well (user/net9.ad), so the standing descriptor must be read/write
+     * whichever way the caller asked. */
+    int fd = open("/dev/null", (slot->isnet || !for_write) ? O_RDWR : O_WRONLY);
     if (fd < 0) {
         int e = errno;
-        if (slot->isw) hamwsys_close(&slot->w);
-        slot->isw = 0;
+        if (slot->isw)   hamwsys_close(&slot->w);
+        if (slot->isnet) hamnet_close(&slot->nf);
+        slot->isw = 0; slot->isnet = 0;
         errno = e;
         return -1;
     }
@@ -339,7 +352,9 @@ static int devtab_open(const char *path, int for_write)
  * filesystem.  Both device families answer here. */
 static int dev_path(const char *path)
 {
-    return hamfb_kind(path) != HAMFB_NONE || hamwsys_kind(path) != HAMWSYS_NONE;
+    return hamfb_kind(path) != HAMFB_NONE
+        || hamwsys_kind(path) != HAMWSYS_NONE
+        || hamnet_kind(path) != HAMNET_NONE;
 }
 
 /* /proc/<pid>/note — Plan 9 delivers a SIGNAL by writing a NAME to a file, and
@@ -446,6 +461,8 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         int64_t n;
+        if (v->isnet)
+            return hamnet_read(&v->nf, buf, count);
         if (v->isw)
             return hamwsys_read(&v->w, buf, count);
         if (v->kind == HAMFB_FB) {
@@ -524,6 +541,8 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
     if (v) {
         if (v->note_pid > 0)
             return note_write(v->note_pid, buf, count);
+        if (v->isnet)
+            return hamnet_write(&v->nf, buf, count);
         if (v->isw)
             return hamwsys_write(&v->w, buf, count);
         if (v->kind == HAMFB_FBCTL)
@@ -540,8 +559,9 @@ int32_t sys_close(int32_t fd)
 {
     struct devfile *v = devtab_find((int)fd);
     if (v) {
-        if (v->isw) hamwsys_close(&v->w);
-        v->used = 0; v->isw = 0;
+        if (v->isw)   hamwsys_close(&v->w);
+        if (v->isnet) hamnet_close(&v->nf);
+        v->used = 0; v->isw = 0; v->isnet = 0;
         return rc32(close((int)fd));
     }
     struct dirstream *d = dirtab_find((int)fd);
@@ -557,6 +577,14 @@ int64_t sys_lseek(int32_t fd, int64_t off, int32_t whence)
 {
     struct devfile *v = devtab_find((int)fd);
     if (v) {
+        if (v->isnet) {
+            int64_t base = (whence == SEEK_CUR) ? (int64_t)v->nf.off
+                         : (whence == SEEK_END) ? (int64_t)v->nf.snaplen : 0;
+            int64_t want = base + off;
+            if (want < 0) { errno = EINVAL; return -EINVAL; }
+            v->nf.off = (uint64_t)want;
+            return want;
+        }
         if (v->isw) {
             /* A wsys read is a snapshot; seeking to 0 re-reads it. */
             int64_t base = (whence == SEEK_CUR) ? (int64_t)v->w.off
@@ -1525,7 +1553,8 @@ static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
         { "#r",       NULL,       NULL, 1, NULL },   /* root partition subtree */
         { "#sysroot", NULL,       NULL, 0, NULL },
         { "#distro",  NULL,       NULL, 0, NULL },   /* the Debian namespace */
-        { "#I",       NULL, NULL, 0, "the /net file server is not written yet (HANDOFF §3)" },
+        /* #I -> /net needs no mount: user/linux-net.c serves the tree. */
+        { "#I",       NULL,       NULL, 0, NULL },
         { "#b",       NULL, NULL, 0, "the /dev/blk file server is not written yet" },
         { "#w",       NULL, NULL, 0, "the /dev/win server is part of wsys (HANDOFF §4.4)" },
     };
@@ -1617,7 +1646,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
      * /fd is now served in the runtime instead, per-process and with the
      * access mode the BINDER chose — which is what the fd-slot model always
      * meant. A mount could never have expressed that. */
-    if (!strcmp(d->letter, "#d"))
+    if (!strcmp(d->letter, "#d") || !strcmp(d->letter, "#I"))
         return 0;
 
     mkdir(dst, 0755);
@@ -1806,7 +1835,7 @@ int64_t sys_vk_window_frame(int32_t wid, int32_t reserved, int64_t frame)
  * rather than an entry point and belongs with Tier 3.
  *   extern def sys_netcfg(op: uint64, a1: uint64, a2: uint64) -> int64 */
 int64_t sys_netcfg(uint64_t op, uint64_t a1, uint64_t a2)
-{ (void)op; (void)a1; (void)a2; errno = ENOSYS; return -1; }
+{ return hamnet_cfg(op, a1, a2); }
 
 /* The #s service registry: post an open fd under a name other processes can
  * open. This is the same cross-process fd-addressing problem HANDOFF §7.1
