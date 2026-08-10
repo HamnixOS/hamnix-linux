@@ -1,0 +1,249 @@
+# lib/vk/vk_linux.ad
+#
+# LINUX-VULKAN backend for the vk graphics spine — the third backend, and the
+# first one on any Hamnix line that talks to a real Vulkan implementation.
+#
+# ARCHITECTURE
+# ============
+#   * Same seam shape as lib/vk/vk_gpu.ad: a thin, dependency-light wrapper so
+#     lib/vk/vk_core.ad can select the backend WITHOUT importing the driver.
+#     vk_core -> vk_linux -> user/linux-vk.c; no cycle, and the C shim knows
+#     nothing about vk.
+#   * Where vk_gpu.ad's driver is a NATIVE virtio-gpu driver poking PCI, this
+#     backend's "driver" is the HOST'S OWN Vulkan ICD, reached by dlopen from
+#     the C shim. That is the dividend of running on the Linux kernel: the
+#     kernel driver AND the userspace ICD already exist, for every GPU family,
+#     and neither of them has to be written here or borrowed from Debian.
+#
+# WHAT ACTUALLY RUNS ON THE DEVICE (honest scope, this round)
+# ==========================================================
+#   fill_rect, fill_rect_alpha, roundrect (AA corners), line (thick Bresenham),
+#   blit (nearest, scaled, source-over), glyph coverage mask.
+#   That is the WHOLE of lib/vk/vk_2d.ad's raster vocabulary, dispatched as
+#   scripts/shaders/vk2d_raster.comp — a compute shader that reproduces vk_2d's
+#   integer pixel math exactly, so the result is byte-identical to the software
+#   rasterizer rather than merely similar.
+#
+# WHAT DOES *NOT* RUN ON THE DEVICE
+#   * PRESENT. Scanout on this line is /dev/fb (user/linux-fb.c); this backend
+#     does not own a swapchain and does not claim to accelerate the flush. The
+#     frame-to-framebuffer copy stays exactly where it was.
+#   * The 3D path (VK_OP_DRAW / vk_raster_draw_triangle_list) stays on the CPU.
+#   * Any op vk_core cannot encode is composited by the SOFTWARE rasterizer
+#     into the SAME buffer, after vk_linux_frame_sync() orders it. That is
+#     cheap here precisely because the frame is host-mapped (see below), so a
+#     mixed frame does not force the whole frame back to the CPU.
+#
+# THE ZERO-COPY POINT
+# ===================
+# vk_linux_frame_create() returns the MAPPED address of the GPU-resident frame
+# buffer. If the vk color image (or the compositor's shadow) is bound to that
+# address, a GPU frame costs NO upload and NO readback — unlike the virtio-gpu
+# and venus paths, which pay a full-frame transfer each way. At 1280x800 a
+# readback alone is 4 MiB per frame, which is more than the whole software
+# rasterization budget the DE bench measured, so a copying design could not
+# have won. vk_linux_frame_device_local() reports whether that mapped memory
+# is ALSO device-local (resizable BAR / integrated / software ICD). When it is
+# 0 the shader reaches the frame across the host bus and GPU raster may lose to
+# the CPU: the flag exists so that judgement is made on measurement, not hope.
+#
+# REFUSE, NEVER PRETEND
+# =====================
+# vk_linux_backend_available() is 1 only when the loader opened, a physical
+# device was selected, a logical device and compute queue came up AND the
+# compute pipeline built. Anything short of that is 0, vk_core stays on the
+# software rasterizer, and vk_linux_status() carries the reason as text.
+
+extern def hvk_available() -> int32
+extern def hvk_device_name(buf: Ptr[uint8], cap: int32) -> int32
+extern def hvk_device_type() -> int32
+extern def hvk_frame_is_device_local() -> int32
+extern def hvk_frame_create(w: int32, h: int32, bgra: int32) -> uint64
+extern def hvk_frame_base() -> uint64
+extern def hvk_frame_width() -> int32
+extern def hvk_frame_height() -> int32
+extern def hvk_frame_begin() -> int32
+extern def hvk_fill_rect(op: int32, x: int32, y: int32, w: int32, h: int32,
+                         rgba: uint32) -> int32
+extern def hvk_roundrect(x: int32, y: int32, w: int32, h: int32,
+                         rad: int32, corners: int32, rgba: uint32) -> int32
+extern def hvk_line(x1: int32, y1: int32, x2: int32, y2: int32,
+                    thick: int32, rgba: uint32) -> int32
+extern def hvk_blit(src_base: uint64, src_w: int32, src_h: int32,
+                    dx: int32, dy: int32, dw: int32, dh: int32,
+                    sx: int32, sy: int32, sw: int32, sh: int32) -> int32
+extern def hvk_glyph(cov_base: uint64, cov_w: int32, cov_h: int32,
+                     dx: int32, dy: int32, rgba: uint32) -> int32
+extern def hvk_frame_sync() -> int32
+extern def hvk_frame_end() -> int32
+extern def hvk_stat_frames() -> uint64
+extern def hvk_stat_ops() -> uint64
+extern def hvk_stat_dispatches() -> uint64
+extern def hvk_stat_submits() -> uint64
+extern def hvk_stat_last_us() -> uint64
+extern def hvk_stat_arena_bytes() -> uint64
+extern def hvk_stat_barriers() -> int32
+extern def hvk_stat_batched() -> uint64
+extern def hvk_pending_ops() -> int32
+
+
+# Op selectors for vk_linux_fill_rect — the same two rect fills vk_2d has.
+VK_LINUX_FILL:       int32 = 0      # opaque store  (vk2d_raster_fill_rect)
+VK_LINUX_FILL_ALPHA: int32 = 1      # source-over   (vk2d_raster_fill_rect_alpha)
+
+# VkPhysicalDeviceType, reported verbatim so nothing is hidden.
+VK_LINUX_DEV_OTHER:      int32 = 0
+VK_LINUX_DEV_INTEGRATED: int32 = 1
+VK_LINUX_DEV_DISCRETE:   int32 = 2
+VK_LINUX_DEV_VIRTUAL:    int32 = 3
+VK_LINUX_DEV_CPU:        int32 = 4   # a software ICD (lavapipe): real Vulkan,
+                                     # real conformance, no silicon.
+
+
+def vk_linux_backend_available() -> int32:
+    # 1 iff a real ICD, a real device and the compute pipeline all came up.
+    # Lazily brings the device up on the first call and caches the verdict.
+    return hvk_available()
+
+
+def vk_linux_device_name(buf: Ptr[uint8], cap: int32) -> int32:
+    # NUL-terminates into the caller's buffer. When the backend is NOT
+    # available this yields the REASON it is not, not an empty string.
+    return hvk_device_name(buf, cap)
+
+
+def vk_linux_device_type() -> int32:
+    return hvk_device_type()
+
+
+def vk_linux_device_is_silicon() -> int32:
+    # 1 iff the selected device is not a CPU/software ICD. Callers that want
+    # to A/B "did this actually touch a GPU" ask this; nothing in the backend
+    # refuses a software ICD, because lavapipe is a legitimate, conformant
+    # Vulkan implementation and is what the host gate runs against.
+    if hvk_available() == 0:
+        return 0
+    if hvk_device_type() == VK_LINUX_DEV_CPU:
+        return 0
+    return 1
+
+
+def vk_linux_frame_device_local() -> int32:
+    # 1 iff the mapped frame is ALSO device-local memory. 0 means the shader
+    # writes it across the host bus; see the header.
+    return hvk_frame_is_device_local()
+
+
+def vk_linux_frame_create(w: int32, h: int32, bgra: int32) -> uint64:
+    # Create/resize the GPU-resident frame; returns its mapped address, or 0.
+    # Bind a vk color image (or the compositor shadow) to this address and the
+    # whole render path is copy-free. `bgra` = 1 selects B8G8R8A8 store order,
+    # matching vk2d_set_bgra on the software side.
+    return hvk_frame_create(w, h, bgra)
+
+
+def vk_linux_frame_base() -> uint64:
+    return hvk_frame_base()
+
+
+def vk_linux_frame_width() -> int32:
+    return hvk_frame_width()
+
+
+def vk_linux_frame_height() -> int32:
+    return hvk_frame_height()
+
+
+def vk_linux_frame_begin() -> int32:
+    # Open a frame's op list. Ops accumulate and are submitted as ONE command
+    # buffer by vk_linux_frame_end (or an intervening vk_linux_frame_sync).
+    return hvk_frame_begin()
+
+
+def vk_linux_fill_rect(op: int32, x: int32, y: int32, w: int32, h: int32,
+                       rgba: uint32) -> int32:
+    return hvk_fill_rect(op, x, y, w, h, rgba)
+
+
+def vk_linux_roundrect(x: int32, y: int32, w: int32, h: int32,
+                       rad: int32, corners: int32, rgba: uint32) -> int32:
+    # AA rounded rect. corners is the vk_2d bitmask: 1=TL 2=TR 4=BL 8=BR.
+    return hvk_roundrect(x, y, w, h, rad, corners, rgba)
+
+
+def vk_linux_line(x1: int32, y1: int32, x2: int32, y2: int32,
+                  thick: int32, rgba: uint32) -> int32:
+    return hvk_line(x1, y1, x2, y2, thick, rgba)
+
+
+def vk_linux_blit(src_base: uint64, src_w: int32, src_h: int32,
+                  dx: int32, dy: int32, dw: int32, dh: int32,
+                  sx: int32, sy: int32, sw: int32, sh: int32) -> int32:
+    # Nearest-neighbour, source-over, optionally scaled blit of an RGBA8888
+    # HOST image. dw/dh <= 0 means natural size; sw/sh <= 0 means the whole
+    # source. The sampled rows are staged into the device source arena, so a
+    # frame may carry many different source images.
+    return hvk_blit(src_base, src_w, src_h, dx, dy, dw, dh, sx, sy, sw, sh)
+
+
+def vk_linux_glyph(cov_base: uint64, cov_w: int32, cov_h: int32,
+                   dx: int32, dy: int32, rgba: uint32) -> int32:
+    # Anti-aliased ink: cov_w*cov_h BYTES of 0..255 coverage, one ink colour.
+    return hvk_glyph(cov_base, cov_w, cov_h, dx, dy, rgba)
+
+
+def vk_linux_frame_sync() -> int32:
+    # Submit everything pending and WAIT. On return the pixels are final in
+    # the mapped frame — which is what makes it safe to run the SOFTWARE
+    # rasterizer over the same buffer for an op the device does not encode.
+    return hvk_frame_sync()
+
+
+def vk_linux_frame_end() -> int32:
+    # Close the frame. 0 = every op executed on the device; -1 = something
+    # failed and the caller must re-render this frame in software.
+    return hvk_frame_end()
+
+
+def vk_linux_frames() -> uint64:
+    return hvk_stat_frames()
+
+
+def vk_linux_ops() -> uint64:
+    return hvk_stat_ops()
+
+
+def vk_linux_dispatches() -> uint64:
+    return hvk_stat_dispatches()
+
+
+def vk_linux_submits() -> uint64:
+    return hvk_stat_submits()
+
+
+def vk_linux_last_submit_us() -> uint64:
+    # Wall time of the last record+submit+fence-wait, in microseconds. This is
+    # the number to compare against the software rasterizer's frame time.
+    return hvk_stat_last_us()
+
+
+def vk_linux_arena_bytes() -> uint64:
+    return hvk_stat_arena_bytes()
+
+
+def vk_linux_barriers() -> int32:
+    # Barriers the last frame needed. dispatches - barriers is the measure of
+    # how much of the frame the device was free to run in parallel.
+    return hvk_stat_barriers()
+
+
+def vk_linux_batched_ops() -> uint64:
+    # Ops folded into a multi-entry batched dispatch instead of costing a
+    # device round of their own. A page of text is the whole reason this
+    # number exists: one dispatch per glyph is what a naive port does, and it
+    # is 10x SLOWER than the CPU (measured, lavapipe, 1280x800).
+    return hvk_stat_batched()
+
+
+def vk_linux_pending_ops() -> int32:
+    return hvk_pending_ops()

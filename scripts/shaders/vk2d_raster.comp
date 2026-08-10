@@ -103,77 +103,138 @@ int rr_cov(int cpx, int cpy, int ccx2, int ccy2, int r2) {
     return (r2 + 1 - dh) * 255 / 2;
 }
 
-void main() {
-    /* The LINE op is inherently sequential (Bresenham walk); run the whole
-     * walk on a single invocation. Every other op is per-pixel parallel. */
-    if (pc.op == OP_LINE) {
-        if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u) return;
-        uint r = (pc.rgba >> 24) & 0xFFu;
-        uint g = (pc.rgba >> 16) & 0xFFu;
-        uint b = (pc.rgba >> 8)  & 0xFFu;
-        int x1 = pc.px, y1 = pc.py, x2 = pc.pw, y2 = pc.ph;
-        int ddx = abs(x2 - x1);
-        int ddy = abs(y2 - y1);
-        int sx = (x1 > x2) ? -1 : 1;
-        int sy = (y1 > y2) ? -1 : 1;
-        int err = ddx - ddy;
-        int cx = x1, cy = y1;
-        int t = (pc.rad < 1) ? 1 : pc.rad;
-        int guard = 0;
-        while (guard < 100000) {
-            for (int by = 0; by < t; by++) {
-                for (int bxx = 0; bxx < t; bxx++) {
-                    int X = cx + bxx, Y = cy + by;
-                    if (X >= 0 && Y >= 0 && X < pc.img_w && Y < pc.img_h)
-                        dst[uint(Y * pc.img_w + X)] = pack(r, g, b, 255u);
-                }
-            }
-            if (cx == x2 && cy == y2) return;
-            int e2 = err * 2;
-            if (e2 > -ddy) { err -= ddy; cx += sx; }
-            if (e2 <  ddx) { err += ddx; cy += sy; }
-            guard++;
-        }
-        return;
-    }
+/* ---------------------------------------------------------------------------
+ * BATCHING (OP_BATCH)
+ * -------------------
+ * One dispatch per 2D op is fine when a frame has forty of them and fatal when
+ * it has two thousand: a page of text is one op per GLYPH, and per-dispatch
+ * overhead then dwarfs the pixels. Measured on lavapipe at 1280x800, a DE-
+ * shaped frame of 1723 one-op dispatches cost 50 ms against 4.8 ms for the
+ * software rasterizer — dropping the barriers between them changed nothing,
+ * because the cost was the dispatches themselves.
+ *
+ * So ops whose destination rects are pairwise DISJOINT (a text run, a row of
+ * icons) are packed by the host into a table in src[] and executed by ONE
+ * dispatch: gl_WorkGroupID.z selects the entry. Disjointness is what makes it
+ * exact — the device may run them in any order and no pixel can differ from
+ * the serialized result.
+ *
+ * Entry layout: 24 uints, mirroring the push-constant block field for field.
+ * pc.mask_off = table base (in uints), pc.rad = entry count. img_w/img_h stay
+ * in the push constants because they are frame-global.
+ * ------------------------------------------------------------------------ */
+const int OP_BATCH      = 6;
+const int BATCH_STRIDE  = 24;
 
-    uint gx = gl_GlobalInvocationID.x;
-    uint gy = gl_GlobalInvocationID.y;
-    if (gx >= uint(pc.dispw) || gy >= uint(pc.disph)) return;
-    int X = pc.bx + int(gx);
-    int Y = pc.by + int(gy);
+/* The op currently being executed. Only the fields EVERY op needs are loaded
+ * eagerly; the rest are fetched through fld(), which reads the batch table
+ * entry or falls back to the push constants. A batch of glyphs launches many
+ * more invocations than it has ink pixels (the workgroup is 8x8 and the cell
+ * is not), so loading all 23 fields per invocation cost more than the pixels
+ * did — that was worth two milliseconds a frame on lavapipe. */
+int  ob = -1;          /* batch-table base in src[], or -1 for push constants */
+int  o_op, o_bx, o_by, o_dispw, o_disph;
+uint o_rgba;
+
+int fld(int i, int pushval) { return ob < 0 ? pushval : int(src[ob + i]); }
+
+void load_push() {
+    ob = -1;
+    o_op = pc.op; o_bx = pc.bx; o_by = pc.by;
+    o_dispw = pc.dispw; o_disph = pc.disph; o_rgba = pc.rgba;
+}
+
+void load_entry(int base) {
+    ob = base;
+    o_op = int(src[base + 0]); o_bx = int(src[base + 1]); o_by = int(src[base + 2]);
+    o_dispw = int(src[base + 3]); o_disph = int(src[base + 4]);
+    o_rgba = src[base + 5];
+}
+
+/* The LINE op is inherently sequential (a Bresenham walk with a square brush),
+ * so one invocation runs the whole walk. */
+void exec_line() {
+    uint r = (o_rgba >> 24) & 0xFFu;
+    uint g = (o_rgba >> 16) & 0xFFu;
+    uint b = (o_rgba >> 8)  & 0xFFu;
+    int x1 = fld(6, pc.px), y1 = fld(7, pc.py);
+    int x2 = fld(8, pc.pw), y2 = fld(9, pc.ph);
+    int ddx = abs(x2 - x1);
+    int ddy = abs(y2 - y1);
+    int sx = (x1 > x2) ? -1 : 1;
+    int sy = (y1 > y2) ? -1 : 1;
+    int err = ddx - ddy;
+    int cx = x1, cy = y1;
+    int t = fld(10, pc.rad); if (t < 1) t = 1;
+    int guard = 0;
+    while (guard < 100000) {
+        for (int by = 0; by < t; by++) {
+            for (int bxx = 0; bxx < t; bxx++) {
+                int X = cx + bxx, Y = cy + by;
+                if (X >= 0 && Y >= 0 && X < pc.img_w && Y < pc.img_h)
+                    dst[uint(Y * pc.img_w + X)] = pack(r, g, b, 255u);
+            }
+        }
+        if (cx == x2 && cy == y2) return;
+        int e2 = err * 2;
+        if (e2 > -ddy) { err -= ddy; cx += sx; }
+        if (e2 <  ddx) { err += ddx; cy += sy; }
+        guard++;
+    }
+}
+
+/* Every other op is per-pixel parallel: one invocation, one destination px. */
+void exec_pixel(int X, int Y) {
     uint idx = uint(Y * pc.img_w + X);
 
-    uint r = (pc.rgba >> 24) & 0xFFu;
-    uint g = (pc.rgba >> 16) & 0xFFu;
-    uint b = (pc.rgba >> 8)  & 0xFFu;
-    uint a =  pc.rgba        & 0xFFu;
+    uint r = (o_rgba >> 24) & 0xFFu;
+    uint g = (o_rgba >> 16) & 0xFFu;
+    uint b = (o_rgba >> 8)  & 0xFFu;
+    uint a =  o_rgba        & 0xFFu;
 
-    if (pc.op == OP_FILL) {
+    if (o_op == OP_FILL) {
         dst[idx] = pack(r, g, b, 255u);
         return;
     }
-    if (pc.op == OP_FILL_ALPHA) {
+    if (o_op == OP_FILL_ALPHA) {
         blend_at(idx, r, g, b, a);
         return;
     }
-    if (pc.op == OP_BLIT) {
-        int xx = X - pc.dx;
-        int yy = Y - pc.dy;
-        int syi = pc.rsy + (yy * pc.rsh / pc.th);
-        if (syi >= pc.src_h) syi = pc.src_h - 1;
-        int sxi = pc.rsx + (xx * pc.rsw / pc.tw);
-        if (sxi >= pc.src_w) sxi = pc.src_w - 1;
-        uint s  = src[uint(syi * pc.src_w + sxi)];
+    if (o_op == OP_BLIT) {
+        int bdx = fld(12, pc.dx), bdy = fld(13, pc.dy);
+        int rsx = fld(14, pc.rsx), rsy = fld(15, pc.rsy);
+        int rsw = fld(16, pc.rsw), rsh = fld(17, pc.rsh);
+        int tw  = fld(18, pc.tw),  th  = fld(19, pc.th);
+        int sw  = fld(20, pc.src_w), sh = fld(21, pc.src_h);
+        int xx = X - bdx;
+        int yy = Y - bdy;
+        int syi = rsy + (yy * rsh / th);
+        if (syi >= sh) syi = sh - 1;
+        int sxi = rsx + (xx * rsw / tw);
+        if (sxi >= sw) sxi = sw - 1;
+        /* mask_off doubles as the BLIT source base (in uints) so a frame can
+         * carry MANY different source images in one shared src[] arena. Every
+         * pre-existing caller leaves it 0 (PushC pc={0}), which is exactly the
+         * old "source starts at src[0]" behaviour — bit-for-bit unchanged. */
+        uint s  = src[uint(fld(22, pc.mask_off) + syi * sw + sxi)];
         uint sr = s & 0xFFu;
         uint sg = (s >> 8)  & 0xFFu;
         uint sb = (s >> 16) & 0xFFu;
         uint sa = (s >> 24) & 0xFFu;
+        /* `corners` doubles as the BLIT source R/B swap flag. vk_2d.ad's blit
+         * keeps its SOURCE in RGBA order even when the DESTINATION image is
+         * B8G8R8A8 (vk2d_set_bgra), and flips R/B per pixel on the way in; a
+         * BGRA frame on the GPU must do the same flip or every blitted icon
+         * comes out with red and blue exchanged. Pre-existing callers pass
+         * corners == 0 for OP_BLIT (PushC pc={0}), i.e. no flip: unchanged. */
+        if (fld(11, pc.corners) != 0) { uint t = sr; sr = sb; sb = t; }
         blend_at(idx, sr, sg, sb, sa);
         return;
     }
-    if (pc.op == OP_ROUNDRECT) {
-        int x = pc.px, y = pc.py, w = pc.pw, h = pc.ph, rr = pc.rad;
+    if (o_op == OP_ROUNDRECT) {
+        int x = fld(6, pc.px), y = fld(7, pc.py);
+        int w = fld(8, pc.pw), h = fld(9, pc.ph);
+        int rr = fld(10, pc.rad), corners = fld(11, pc.corners);
         int r2   = 2 * rr;
         int tlx2 = 2 * (x + rr),     tly2 = 2 * (y + rr);
         int trx2 = 2 * (x + w - rr), try2 = tly2;
@@ -184,25 +245,54 @@ void main() {
         bool in_bot   = Y >= y + h - rr;
         bool in_left  = X <  x + rr;
         bool in_right = X >= x + w - rr;
-        if      (in_top && in_left  && (pc.corners & 1) != 0) cov = rr_cov(X, Y, tlx2, tly2, r2);
-        else if (in_top && in_right && (pc.corners & 2) != 0) cov = rr_cov(X, Y, trx2, try2, r2);
-        else if (in_bot && in_left  && (pc.corners & 4) != 0) cov = rr_cov(X, Y, blx2, bly2, r2);
-        else if (in_bot && in_right && (pc.corners & 8) != 0) cov = rr_cov(X, Y, brx2, bry2, r2);
+        if      (in_top && in_left  && (corners & 1) != 0) cov = rr_cov(X, Y, tlx2, tly2, r2);
+        else if (in_top && in_right && (corners & 2) != 0) cov = rr_cov(X, Y, trx2, try2, r2);
+        else if (in_bot && in_left  && (corners & 4) != 0) cov = rr_cov(X, Y, blx2, bly2, r2);
+        else if (in_bot && in_right && (corners & 8) != 0) cov = rr_cov(X, Y, brx2, bry2, r2);
         if (cov > 0) {
             uint ae = a * uint(cov) / 255u;
             blend_at(idx, r, g, b, ae);
         }
         return;
     }
-    if (pc.op == OP_COVMASK) {
+    if (o_op == OP_COVMASK) {
         /* AA glyph coverage: one 8-bit coverage per pixel packed one-per-uint
          * in src[], row-major over the run's [px,py,pw,ph] ink bbox. Blend the
          * run colour by (coverage/255)*a — the same math the CPU oracle uses. */
-        int mx = X - pc.px;
-        int my = Y - pc.py;
-        uint cov = src[uint(pc.mask_off + my * pc.pw + mx)] & 0xFFu;
+        int mx = X - fld(6, pc.px);
+        int my = Y - fld(7, pc.py);
+        uint cov = src[uint(fld(22, pc.mask_off) + my * fld(8, pc.pw) + mx)] & 0xFFu;
         uint ae = a * cov / 255u;
         blend_at(idx, r, g, b, ae);
         return;
     }
+}
+
+void main() {
+    if (pc.op == OP_BATCH) {
+        int k = int(gl_GlobalInvocationID.z);
+        if (k >= pc.rad) return;
+        load_entry(pc.mask_off + k * BATCH_STRIDE);
+        if (o_op == OP_LINE) {
+            if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u) return;
+            exec_line();
+            return;
+        }
+        uint bgx = gl_GlobalInvocationID.x;
+        uint bgy = gl_GlobalInvocationID.y;
+        if (bgx >= uint(o_dispw) || bgy >= uint(o_disph)) return;
+        exec_pixel(o_bx + int(bgx), o_by + int(bgy));
+        return;
+    }
+
+    load_push();
+    if (o_op == OP_LINE) {
+        if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u) return;
+        exec_line();
+        return;
+    }
+    uint gx = gl_GlobalInvocationID.x;
+    uint gy = gl_GlobalInvocationID.y;
+    if (gx >= uint(o_dispw) || gy >= uint(o_disph)) return;
+    exec_pixel(o_bx + int(gx), o_by + int(gy));
 }

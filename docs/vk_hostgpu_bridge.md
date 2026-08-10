@@ -34,7 +34,17 @@ The Adder `x86_64-linux` host target links a **static, no-libc, no-PIE** ELF
 with raw `syscall` wrappers (see `compiler/adder.py`). It has no dynamic loader
 and no libc, so an Adder host binary **cannot dlopen/link `libvulkan.so.1`**.
 
-So the real GPU lives behind a tiny C-ABI bridge:
+> **CORRECTION (hamnix-linux).** Every word of that is true of the NATIVE
+> target and **none of it is true on the Linux line.** `scripts/hamlinux_build.sh`
+> emits LLVM IR and clang links it against glibc dynamically, so the loader is
+> right there. `tests/linux/vkprobe.{c,ad}` (commit 1703d382) does the dlopen
+> and reaches a real ICD from Adder; `user/linux-vk.c` + `lib/vk/vk_linux.ad`
+> then make `vk_core` a real Vulkan client with no file seam and no separate
+> bridge process. See `docs/vk_linux_backend.md`. The bridge below remains the
+> right tool for host verification of the NATIVE spine, and is still the
+> reference implementation this backend was cribbed from.
+
+So on the native line the real GPU lives behind a tiny C-ABI bridge:
 
 ```
  lib/vk/vk_2d.ad  (native rasterizer, kernel + host dual-target)

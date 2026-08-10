@@ -1,0 +1,471 @@
+# tests/linux/vk_linux_test.ad — the gate for the Linux-Vulkan vk backend.
+#
+# The ONLY standard that matters for a new rasterization backend is PIXEL
+# IDENTITY against the software rasterizer: lib/vk/vk_raster.ad + vk_2d.ad are
+# the oracle, and a GPU frame that is merely "close" is a wrong answer wearing
+# a success shape. So this harness composes the SAME scene twice — once with
+# vk2d_raster_* into a plain host image, once with vk_linux_* onto a real
+# VkDevice — and compares every byte.
+#
+# It runs the comparison in BOTH store orders (RGBA8888 and B8G8R8A8), because
+# the DE renders BGRA and the R/B handling differs per op: vk_2d swaps the OP
+# COLOUR for fills/lines/roundrects/ink but swaps the SOURCE PIXEL for blits.
+# A backend that got only one of those right would still pass an RGBA-only
+# gate and then paint the desktop with blue faces.
+#
+# Then it benchmarks a DE-shaped frame at a real resolution against the
+# software rasterizer on the same machine, and prints both numbers.
+#
+# BUILD:
+#   scripts/hamlinux_build.sh tests/linux/vk_linux_test.ad build/host/vk_linux_test \
+#       user/linux-vk.c -ldl
+# RUN (host rule: NEVER the real /dev/dri — force the software ICD):
+#   VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json build/host/vk_linux_test
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
+
+from lib.vk.vk_2d import (
+    vk2d_raster_fill_rect, vk2d_raster_fill_rect_alpha,
+    vk2d_raster_blit, vk2d_raster_draw_line,
+    vk2d_raster_fill_roundrect, vk2d_raster_cov_mask,
+    vk2d_set_bgra,
+)
+from lib.vk.vk_linux import (
+    VK_LINUX_FILL, VK_LINUX_FILL_ALPHA,
+    vk_linux_backend_available, vk_linux_device_name, vk_linux_device_type,
+    vk_linux_device_is_silicon, vk_linux_frame_device_local,
+    vk_linux_frame_create, vk_linux_frame_begin, vk_linux_frame_end,
+    vk_linux_fill_rect, vk_linux_roundrect, vk_linux_line,
+    vk_linux_blit, vk_linux_glyph,
+    vk_linux_last_submit_us, vk_linux_dispatches, vk_linux_barriers,
+    vk_linux_batched_ops,
+)
+
+SCENE_W: uint64 = 96
+SCENE_H: uint64 = 64
+BENCH_W: uint64 = 1280
+BENCH_H: uint64 = 800
+
+# Software-reference image, big enough for the bench frame (1280*800*4).
+ref_img: Array[4096000, uint8]
+# A 4x4 RGBA sprite (icon / window-surface stand-in) and a 12x16 coverage cell.
+src_img: Array[64, uint8]
+cov_img: Array[192, uint8]
+
+obuf: Array[1024, uint8]
+obuf_n: uint64 = 0
+namebuf: Array[288, uint8]
+
+fails: int32 = 0
+
+
+def _o_ch(c: uint8):
+    if obuf_n < 1023:
+        obuf[obuf_n] = c
+        obuf_n = obuf_n + 1
+
+
+def _o_str(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0:
+        _o_ch(s[i])
+        i = i + 1
+
+
+def _o_dec(v: uint64):
+    digs: Array[24, uint8]
+    n: uint64 = 0
+    x: uint64 = v
+    if x == 0:
+        _o_ch(48)
+        return
+    while x > 0:
+        digs[n] = cast[uint8](x % 10) + 48
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        _o_ch(digs[n])
+
+
+def _o_flush():
+    if obuf_n > 0:
+        sys_write(1, &obuf[0], obuf_n)
+        obuf_n = 0
+
+
+def _now_us() -> uint64:
+    ts: Array[2, uint64]
+    sys_clock_gettime(1, &ts[0])          # CLOCK_MONOTONIC
+    return ts[0] * 1000000 + ts[1] / 1000
+
+
+def _refbase() -> uint64:
+    return cast[uint64](&ref_img[0])
+
+
+def _srcbase() -> uint64:
+    return cast[uint64](&src_img[0])
+
+
+def _covbase() -> uint64:
+    return cast[uint64](&cov_img[0])
+
+
+def _src_put(x: uint64, y: uint64, r: uint8, g: uint8, b: uint8, a: uint8):
+    o: uint64 = _srcbase() + (y * 4 + x) * 4
+    cast[Ptr[uint8]](o)[0] = r
+    cast[Ptr[uint8]](o + 1)[0] = g
+    cast[Ptr[uint8]](o + 2)[0] = b
+    cast[Ptr[uint8]](o + 3)[0] = a
+
+
+def _build_assets():
+    # Sprite: green body, one blue corner pixel, one translucent pixel so the
+    # blit exercises source-over and not just an opaque copy.
+    sy: uint64 = 0
+    while sy < 4:
+        sx: uint64 = 0
+        while sx < 4:
+            _src_put(sx, sy, 0, 255, 0, 255)
+            sx = sx + 1
+        sy = sy + 1
+    _src_put(3, 3, 0, 0, 255, 255)
+    _src_put(0, 0, 255, 0, 0, 128)
+    # Coverage cell: a 12x16 ramp, so every AA blend value 0..255 is touched.
+    cy: uint64 = 0
+    while cy < 16:
+        cx: uint64 = 0
+        while cx < 12:
+            cov_img[cy * 12 + cx] = cast[uint8]((cy * 12 + cx) * 255 / 191)
+            cx = cx + 1
+        cy = cy + 1
+
+
+# ---- the scene, authored ONCE and emitted to either backend ---------------
+#
+# Every op in vk_2d's raster vocabulary appears at least once, including the
+# clipped/negative-origin cases where the two clip hoists could disagree.
+EMIT_SW:  int32 = 0
+EMIT_GPU: int32 = 1
+emit_mode: int32 = 0
+emit_base: uint64 = 0
+emit_w: uint64 = 0
+emit_h: uint64 = 0
+
+
+def _e_fill(x: int32, y: int32, w: int32, h: int32, rgba: uint32):
+    if emit_mode == EMIT_GPU:
+        vk_linux_fill_rect(VK_LINUX_FILL, x, y, w, h, rgba)
+    else:
+        vk2d_raster_fill_rect(emit_base, emit_w, emit_h, cast[int64](x),
+                              cast[int64](y), cast[int64](w), cast[int64](h),
+                              rgba)
+
+
+def _e_fill_a(x: int32, y: int32, w: int32, h: int32, rgba: uint32):
+    if emit_mode == EMIT_GPU:
+        vk_linux_fill_rect(VK_LINUX_FILL_ALPHA, x, y, w, h, rgba)
+    else:
+        vk2d_raster_fill_rect_alpha(emit_base, emit_w, emit_h, cast[int64](x),
+                                    cast[int64](y), cast[int64](w),
+                                    cast[int64](h), rgba)
+
+
+def _e_blit(dx: int32, dy: int32, dw: int32, dh: int32):
+    if emit_mode == EMIT_GPU:
+        vk_linux_blit(_srcbase(), 4, 4, dx, dy, dw, dh, 0, 0, 0, 0)
+    else:
+        vk2d_raster_blit(emit_base, emit_w, emit_h, _srcbase(), 4, 4,
+                         cast[int64](dx), cast[int64](dy), cast[int64](dw),
+                         cast[int64](dh), 0, 0, 0, 0)
+
+
+def _e_line(x1: int32, y1: int32, x2: int32, y2: int32, t: int32,
+            rgba: uint32):
+    if emit_mode == EMIT_GPU:
+        vk_linux_line(x1, y1, x2, y2, t, rgba)
+    else:
+        vk2d_raster_draw_line(emit_base, emit_w, emit_h, cast[int64](x1),
+                              cast[int64](y1), cast[int64](x2),
+                              cast[int64](y2), cast[int64](t), rgba)
+
+
+def _e_rr(x: int32, y: int32, w: int32, h: int32, rad: int32, corners: int32,
+          rgba: uint32):
+    if emit_mode == EMIT_GPU:
+        vk_linux_roundrect(x, y, w, h, rad, corners, rgba)
+    else:
+        vk2d_raster_fill_roundrect(emit_base, emit_w, emit_h, cast[int64](x),
+                                   cast[int64](y), cast[int64](w),
+                                   cast[int64](h), cast[int64](rad), corners,
+                                   rgba)
+
+
+def _e_glyph(dx: int32, dy: int32, rgba: uint32):
+    if emit_mode == EMIT_GPU:
+        vk_linux_glyph(_covbase(), 12, 16, dx, dy, rgba)
+    else:
+        vk2d_raster_cov_mask(emit_base, emit_w, emit_h, _covbase(), 12, 16,
+                             cast[int64](dx), cast[int64](dy), rgba)
+
+
+def _scene():
+    # (0) page background, then chrome bar, then a white card.
+    _e_fill(0, 0, cast[int32](emit_w), cast[int32](emit_h), 0x0D1220FF)
+    _e_fill(0, 0, cast[int32](emit_w), 10, 0x2B3350FF)
+    _e_fill(8, 16, 60, 40, 0xFFFFFFFF)
+    # (1) translucent overlay over the card (source-over).
+    _e_fill_a(20, 24, 24, 16, 0x00CCFF80)
+    # (2) a fill clipped off the left/top edge — the negative-origin case.
+    _e_fill_a(-6, -4, 20, 12, 0xFF880060)
+    # (3) 2x-scaled sprite blit, plus one clipped against the right edge.
+    _e_blit(74, 20, 8, 8)
+    _e_blit(cast[int32](emit_w) - 3, 34, 8, 8)
+    # (4) separator line, thickness 2, and a diagonal.
+    _e_line(8, 58, 88, 58, 2, 0xFFFF00FF)
+    _e_line(4, 4, 40, 30, 1, 0x22FF88FF)
+    # (5) rounded button, all four corners, and one with two corners only.
+    _e_rr(68, 44, 20, 12, 4, 15, 0xFF33CCFF)
+    _e_rr(10, 40, 26, 14, 6, 9, 0x3366FFC0)
+    # (6) anti-aliased ink: opaque and translucent, one clipped at the edge.
+    _e_glyph(30, 6, 0xFFFFFFFF)
+    _e_glyph(50, 40, 0x00000080)
+    _e_glyph(cast[int32](emit_w) - 5, 20, 0xFF0000FF)
+
+
+# A DE-shaped frame for the benchmark: a desktop background, a panel, a stack
+# of windows with rounded corners and translucent chrome, a scattering of
+# blitted icons and a page of text-shaped glyph runs. Ops in the proportion the
+# compositor actually emits, so the measured number means something.
+def _bench_scene():
+    w: int32 = cast[int32](emit_w)
+    h: int32 = cast[int32](emit_h)
+    _e_fill(0, 0, w, h, 0x101828FF)
+    _e_fill(0, 0, w, 34, 0x1E2637FF)
+    _e_fill_a(0, 34, w, 6, 0x00000040)
+    win: int32 = 0
+    while win < 4:
+        wx: int32 = 40 + win * 60
+        wy: int32 = 60 + win * 40
+        ww: int32 = 520
+        wh: int32 = 380
+        _e_rr(wx, wy, ww, wh, 10, 15, 0xF4F6FAFF)
+        _e_fill(wx, wy, ww, 28, 0x2B3350FF)
+        _e_fill_a(wx, wy + 28, ww, 200, 0x00CCFF20)
+        _e_line(wx, wy + 28, wx + ww, wy + 28, 1, 0x8899AAFF)
+        icon: int32 = 0
+        while icon < 6:
+            _e_blit(wx + 12 + icon * 22, wy + 6, 16, 16)
+            icon = icon + 1
+        row: int32 = 0
+        while row < 14:
+            col: int32 = 0
+            while col < 30:
+                _e_glyph(wx + 16 + col * 13, wy + 44 + row * 22, 0x1A1A20FF)
+                col = col + 1
+            row = row + 1
+        win = win + 1
+    _e_fill_a(0, h - 40, w, 40, 0x000000A0)
+
+
+# The same DE frame with the TEXT REMOVED. The two benches together are the
+# real finding: what a frame is made of decides whether the device wins, and
+# reporting only the average of the two would hide that.
+def _bench_scene_notext():
+    w: int32 = cast[int32](emit_w)
+    h: int32 = cast[int32](emit_h)
+    _e_fill(0, 0, w, h, 0x101828FF)
+    _e_fill(0, 0, w, 34, 0x1E2637FF)
+    _e_fill_a(0, 34, w, 6, 0x00000040)
+    win: int32 = 0
+    while win < 4:
+        wx: int32 = 40 + win * 60
+        wy: int32 = 60 + win * 40
+        ww: int32 = 520
+        wh: int32 = 380
+        _e_rr(wx, wy, ww, wh, 10, 15, 0xF4F6FAFF)
+        _e_fill(wx, wy, ww, 28, 0x2B3350FF)
+        _e_fill_a(wx, wy + 28, ww, 200, 0x00CCFF20)
+        _e_line(wx, wy + 28, wx + ww, wy + 28, 1, 0x8899AAFF)
+        icon: int32 = 0
+        while icon < 6:
+            _e_blit(wx + 12 + icon * 22, wy + 6, 16, 16)
+            icon = icon + 1
+        win = win + 1
+    _e_fill_a(0, h - 40, w, 40, 0x000000A0)
+
+
+def _compare(gpu_base: uint64, w: uint64, h: uint64, label: Ptr[uint8]) -> int32:
+    n: uint64 = w * h * 4
+    i: uint64 = 0
+    bad: uint64 = 0
+    first: int64 = -1
+    while i < n:
+        if cast[Ptr[uint8]](gpu_base + i)[0] != ref_img[i]:
+            if first < 0:
+                first = cast[int64](i)
+            bad = bad + 1
+        i = i + 1
+    _o_str(label)
+    _o_ch(32)
+    if bad == 0:
+        _o_str(cast[Ptr[uint8]]("PASS byte-identical "))
+        _o_dec(n)
+        _o_str(cast[Ptr[uint8]](" bytes\n"))
+        _o_flush()
+        return 0
+    _o_str(cast[Ptr[uint8]]("FAIL mismatched_bytes="))
+    _o_dec(bad)
+    _o_str(cast[Ptr[uint8]](" first_byte="))
+    _o_dec(cast[uint64](first))
+    _o_str(cast[Ptr[uint8]](" first_px="))
+    _o_dec(cast[uint64](first) / 4 % w)
+    _o_ch(44)
+    _o_dec(cast[uint64](first) / 4 / w)
+    _o_ch(10)
+    _o_flush()
+    fails = fails + 1
+    return -1
+
+
+# GPU pass, then software pass, then every byte. Both benches share this so a
+# timing number is never printed for a frame whose pixels were not verified.
+def _bench_pair(with_text: int32, gbase: uint64, label: Ptr[uint8]) -> int32:
+    emit_mode = EMIT_GPU
+    emit_base = gbase
+    gpu_best: uint64 = 0xFFFFFFFFFFFFFFFF
+    it: int32 = 0
+    while it < 20:
+        t0: uint64 = _now_us()
+        vk_linux_frame_begin()
+        if with_text != 0:
+            _bench_scene()
+        else:
+            _bench_scene_notext()
+        rc: int32 = vk_linux_frame_end()
+        dt: uint64 = _now_us() - t0
+        if rc != 0:
+            _o_str(cast[Ptr[uint8]]("FAIL bench device failure\n"))
+            _o_flush()
+            fails = fails + 1
+            return -1
+        if dt < gpu_best:
+            gpu_best = dt
+        it = it + 1
+    nbatched: uint64 = vk_linux_batched_ops()
+    nbar: int32 = vk_linux_barriers()
+
+    vk2d_set_bgra(1)
+    emit_mode = EMIT_SW
+    emit_base = _refbase()
+    sw_best: uint64 = 0xFFFFFFFFFFFFFFFF
+    it = 0
+    while it < 20:
+        t0: uint64 = _now_us()
+        if with_text != 0:
+            _bench_scene()
+        else:
+            _bench_scene_notext()
+        dt: uint64 = _now_us() - t0
+        if dt < sw_best:
+            sw_best = dt
+        it = it + 1
+    vk2d_set_bgra(0)
+
+    _compare(gbase, BENCH_W, BENCH_H, label)
+    _o_str(label)
+    _o_str(cast[Ptr[uint8]](" GPU_US "))
+    _o_dec(gpu_best)
+    _o_str(cast[Ptr[uint8]](" SW_US "))
+    _o_dec(sw_best)
+    _o_str(cast[Ptr[uint8]](" GPU_PCT_OF_SW "))
+    _o_dec(gpu_best * 100 / sw_best)
+    _o_str(cast[Ptr[uint8]](" batched_ops "))
+    _o_dec(nbatched)
+    _o_str(cast[Ptr[uint8]](" barriers "))
+    _o_dec(cast[uint64](nbar))
+    _o_ch(10)
+    _o_flush()
+    return 0
+
+
+def _identity_case(bgra: int32, label: Ptr[uint8]) -> int32:
+    gbase: uint64 = vk_linux_frame_create(cast[int32](SCENE_W),
+                                          cast[int32](SCENE_H), bgra)
+    if gbase == 0:
+        _o_str(cast[Ptr[uint8]]("FAIL frame_create returned 0\n"))
+        _o_flush()
+        fails = fails + 1
+        return -1
+    emit_mode = EMIT_GPU
+    emit_w = SCENE_W
+    emit_h = SCENE_H
+    emit_base = gbase
+    vk_linux_frame_begin()
+    _scene()
+    if vk_linux_frame_end() != 0:
+        _o_str(cast[Ptr[uint8]]("FAIL frame_end reported a device failure\n"))
+        _o_flush()
+        fails = fails + 1
+        return -1
+    vk2d_set_bgra(bgra)
+    emit_mode = EMIT_SW
+    emit_base = _refbase()
+    _scene()
+    vk2d_set_bgra(0)
+    return _compare(gbase, SCENE_W, SCENE_H, label)
+
+
+def main() -> int32:
+    _build_assets()
+
+    if vk_linux_backend_available() == 0:
+        vk_linux_device_name(&namebuf[0], 288)
+        _o_str(cast[Ptr[uint8]]("SKIP no usable Vulkan backend: "))
+        _o_str(&namebuf[0])
+        _o_ch(10)
+        _o_flush()
+        # Not a failure of the backend: refusing is the CORRECT behaviour when
+        # there is no ICD or no device. vk_core stays software.
+        return 0
+
+    vk_linux_device_name(&namebuf[0], 288)
+    _o_str(cast[Ptr[uint8]]("VK_DEVICE "))
+    _o_str(&namebuf[0])
+    _o_str(cast[Ptr[uint8]]("\nVK_DEVICE_TYPE "))
+    _o_dec(cast[uint64](vk_linux_device_type()))
+    _o_str(cast[Ptr[uint8]]("\nVK_DEVICE_IS_SILICON "))
+    _o_dec(cast[uint64](vk_linux_device_is_silicon()))
+    _o_ch(10)
+    _o_flush()
+
+    _identity_case(0, cast[Ptr[uint8]]("IDENTITY_RGBA"))
+    _identity_case(1, cast[Ptr[uint8]]("IDENTITY_BGRA"))
+
+    _o_str(cast[Ptr[uint8]]("FRAME_DEVICE_LOCAL "))
+    _o_dec(cast[uint64](vk_linux_frame_device_local()))
+    _o_ch(10)
+    _o_flush()
+
+    # ---- the DE-shaped frame, with and without its text ------------------
+    gbase: uint64 = vk_linux_frame_create(cast[int32](BENCH_W),
+                                          cast[int32](BENCH_H), 1)
+    if gbase == 0:
+        _o_str(cast[Ptr[uint8]]("FAIL bench frame_create returned 0\n"))
+        _o_flush()
+        return 1
+    emit_w = BENCH_W
+    emit_h = BENCH_H
+    _bench_pair(0, gbase, cast[Ptr[uint8]]("BENCH_FILLS_1280x800"))
+    _bench_pair(1, gbase, cast[Ptr[uint8]]("BENCH_DE_TEXT_1280x800"))
+
+    if fails == 0:
+        _o_str(cast[Ptr[uint8]]("VK_LINUX_GATE PASS\n"))
+    else:
+        _o_str(cast[Ptr[uint8]]("VK_LINUX_GATE FAIL\n"))
+    _o_flush()
+    if fails != 0:
+        return 1
+    return 0

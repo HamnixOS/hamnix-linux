@@ -1,0 +1,1223 @@
+/* user/linux-vk.c — a REAL Vulkan client behind the vk spine, on Linux.
+ *
+ * WHAT THIS IS
+ * ============
+ * Hamnix's graphics spine is lib/vk/ — a Vulkan-SHAPED API written in Adder
+ * whose only two backends until now were `vk_raster` (pure CPU) and `vk_gpu`
+ * (native virtio-gpu, which pokes PCI directly and is meaningless here because
+ * the Linux kernel owns the device). This file is the third backend's engine
+ * room: it opens the host's REAL Vulkan loader and runs the DE's 2D primitives
+ * as a genuine compute pipeline on a genuine VkDevice.
+ *
+ * Same shape as user/linux-fb.c and user/linux-wsys.c: a small C ABI the Adder
+ * side declares with `extern def`, no Adder-visible structs, all state static.
+ * lib/vk/vk_linux.ad wraps these entry points; lib/vk/vk_core.ad selects them
+ * through its existing backend seam.
+ *
+ * WHY THIS IS POSSIBLE HERE AND NOT IN HAMNIX 1.0
+ * ===============================================
+ * docs/vk_hostgpu_bridge.md says an Adder binary cannot dlopen libvulkan
+ * because the host target is a static no-libc ELF. That is true of the NATIVE
+ * target and false on THIS line: hamlinux_build.sh emits LLVM IR and clang
+ * links it against glibc dynamically, so the loader is right there. Commit
+ * 1703d382 (tests/linux/vkprobe.{c,ad}) proved it end to end.
+ *
+ * There are NO Vulkan headers on this host, only libvulkan.so.1, so the
+ * ABI-stable subset we need is hand-declared below and resolved with dlsym.
+ * scripts/vk_hostgpu_bridge.c does the same and is the reference this cribs
+ * from. One trap worth repeating because it cost a run: vkGetPhysicalDevice-
+ * Properties writes the FULL VkPhysicalDeviceProperties (limits and sparse
+ * properties, ~824 bytes), so every hand-declared OUT struct here is padded
+ * for the WHOLE thing, not truncated after the field we read.
+ *
+ * WHAT RUNS ON THE DEVICE
+ * =======================
+ * scripts/shaders/vk2d_raster.comp — a compute shader that reproduces
+ * lib/vk/vk_2d.ad's integer pixel math EXACTLY (same /255 source-over, same
+ * Bresenham brush, same isqrt corner coverage), so a GPU frame is byte-
+ * identical to the software rasterizer's rather than merely similar. Its
+ * SPIR-V is EMBEDDED (user/linux-vk-spv.h) because the Hamnix root has no
+ * scripts/ tree; HAMNIX_VK_SPV=<path> overrides it for shader development.
+ *
+ * Ops with a device path:  fill_rect, fill_rect_alpha, roundrect (AA corners),
+ * line (thick Bresenham), blit (nearest, scaled, source-over), glyph coverage
+ * mask. That is the whole of vk_2d's raster vocabulary — the 68% of the DE
+ * frame the bench attributes to rasterization.
+ *
+ * THE MEMORY MODEL, and why it is the interesting part
+ * ===================================================
+ * The frame is a HOST-VISIBLE, HOST-COHERENT storage buffer that we map ONCE
+ * and never unmap. Two consequences, both load-bearing:
+ *
+ *   1. There is no upload and no readback. The compositor's shadow can BE this
+ *      pointer (hvk_frame_create returns it; vk_linux_frame_base() hands it to
+ *      the DE), so a GPU frame costs zero copies — unlike the virtio-gpu/venus
+ *      path, which pays a full-frame transfer each way.
+ *   2. An op the GPU cannot encode does NOT force the whole frame back to the
+ *      CPU. The caller just runs the software rasterizer on the same pointer
+ *      after hvk_frame_sync(); the mixed frame stays correct and in order.
+ *
+ * We prefer a memory type that is DEVICE_LOCAL *and* host-visible (resizable
+ * BAR / integrated / lavapipe) and fall back to plain host-visible. On a
+ * discrete GPU without ReBAR that fallback means the shader writes across PCIe
+ * — hvk_frame_is_device_local() reports which one you got, so the caller can
+ * decide, and lib/vk/vk_linux.ad passes that judgement up rather than hiding
+ * it. Nothing here pretends: if the ICD is missing, if there is no device, if
+ * the pipeline will not build, every entry point returns a hard failure and
+ * the Adder side stays on the software rasterizer.
+ *
+ * BUILD:  scripts/hamlinux_build.sh foo.ad out.elf user/linux-vk.c -ldl
+ */
+
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "linux-vk-spv.h"
+
+/* ===================== hand-declared Vulkan ABI subset ==================== */
+typedef uint32_t VkFlags;
+typedef uint32_t VkBool32;
+typedef uint64_t VkDeviceSize;
+typedef int32_t  VkResult;
+
+typedef void*    VkInstance;
+typedef void*    VkPhysicalDevice;
+typedef void*    VkDevice;
+typedef void*    VkQueue;
+typedef void*    VkCommandBuffer;
+typedef void*    VkDescriptorSet;
+typedef uint64_t VkDeviceMemory;
+typedef uint64_t VkBuffer;
+typedef uint64_t VkCommandPool;
+typedef uint64_t VkFence;
+typedef uint64_t VkShaderModule;
+typedef uint64_t VkDescriptorSetLayout;
+typedef uint64_t VkPipelineLayout;
+typedef uint64_t VkPipeline;
+typedef uint64_t VkPipelineCache;
+typedef uint64_t VkDescriptorPool;
+
+#define VK_SUCCESS 0
+#define VK_TRUE    1
+
+#define ST_APPLICATION_INFO                    0
+#define ST_INSTANCE_CREATE_INFO                1
+#define ST_DEVICE_QUEUE_CREATE_INFO            2
+#define ST_DEVICE_CREATE_INFO                  3
+#define ST_SUBMIT_INFO                         4
+#define ST_MEMORY_ALLOCATE_INFO                5
+#define ST_FENCE_CREATE_INFO                   8
+#define ST_BUFFER_CREATE_INFO                  12
+#define ST_COMMAND_POOL_CREATE_INFO            39
+#define ST_COMMAND_BUFFER_ALLOCATE_INFO        40
+#define ST_COMMAND_BUFFER_BEGIN_INFO           42
+#define ST_SHADER_MODULE_CREATE_INFO           16
+#define ST_PIPELINE_SHADER_STAGE_CREATE_INFO   18
+#define ST_COMPUTE_PIPELINE_CREATE_INFO        29
+#define ST_PIPELINE_LAYOUT_CREATE_INFO         30
+#define ST_DESCRIPTOR_SET_LAYOUT_CREATE_INFO   32
+#define ST_DESCRIPTOR_POOL_CREATE_INFO         33
+#define ST_DESCRIPTOR_SET_ALLOCATE_INFO        34
+#define ST_WRITE_DESCRIPTOR_SET                35
+#define ST_MEMORY_BARRIER                      46
+
+#define VK_SHARING_MODE_EXCLUSIVE            0
+#define VK_COMMAND_BUFFER_LEVEL_PRIMARY      0
+#define VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT 0x1
+#define VK_QUEUE_GRAPHICS_BIT 0x1
+#define VK_QUEUE_COMPUTE_BIT  0x2
+
+#define VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT  0x1
+#define VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT  0x2
+#define VK_MEMORY_PROPERTY_HOST_COHERENT_BIT 0x4
+
+#define VK_BUFFER_USAGE_TRANSFER_SRC_BIT   0x1
+#define VK_BUFFER_USAGE_TRANSFER_DST_BIT   0x2
+#define VK_BUFFER_USAGE_STORAGE_BUFFER_BIT 0x20
+
+#define VK_SHADER_STAGE_COMPUTE_BIT          0x20
+#define VK_DESCRIPTOR_TYPE_STORAGE_BUFFER    7
+#define VK_PIPELINE_BIND_POINT_COMPUTE       1
+#define VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT 0x800
+#define VK_ACCESS_SHADER_READ_BIT            0x20
+#define VK_ACCESS_SHADER_WRITE_BIT           0x40
+
+#define VK_PHYSICAL_DEVICE_TYPE_OTHER          0
+#define VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU 1
+#define VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU   2
+#define VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU    3
+#define VK_PHYSICAL_DEVICE_TYPE_CPU            4
+
+typedef struct { uint32_t x, y, z; } VkExtent3D;
+
+typedef struct {
+    uint32_t sType; const void* pNext;
+    const char* pApplicationName; uint32_t applicationVersion;
+    const char* pEngineName; uint32_t engineVersion; uint32_t apiVersion;
+} VkApplicationInfo;
+
+typedef struct {
+    uint32_t sType; const void* pNext; VkFlags flags;
+    const VkApplicationInfo* pApplicationInfo;
+    uint32_t enabledLayerCount; const char* const* ppEnabledLayerNames;
+    uint32_t enabledExtensionCount; const char* const* ppEnabledExtensionNames;
+} VkInstanceCreateInfo;
+
+/* Only the head is read by us. The driver writes limits + sparseProperties on
+ * past deviceName (real size ~824 bytes), so the tail padding is MANDATORY —
+ * without it vkGetPhysicalDeviceProperties smashes the caller's stack. */
+typedef struct {
+    uint32_t apiVersion, driverVersion, vendorID, deviceID;
+    uint32_t deviceType;
+    char     deviceName[256];
+    uint8_t  pipelineCacheUUID[16];
+    uint8_t  _pad[1024];
+} VkPhysicalDeviceProperties;
+
+typedef struct {
+    VkFlags queueFlags; uint32_t queueCount; uint32_t timestampValidBits;
+    VkExtent3D minImageTransferGranularity;
+} VkQueueFamilyProperties;
+
+typedef struct {
+    uint32_t sType; const void* pNext; VkFlags flags;
+    uint32_t queueFamilyIndex; uint32_t queueCount; const float* pQueuePriorities;
+} VkDeviceQueueCreateInfo;
+
+typedef struct {
+    uint32_t sType; const void* pNext; VkFlags flags;
+    uint32_t queueCreateInfoCount; const VkDeviceQueueCreateInfo* pQueueCreateInfos;
+    uint32_t enabledLayerCount; const char* const* ppEnabledLayerNames;
+    uint32_t enabledExtensionCount; const char* const* ppEnabledExtensionNames;
+    const void* pEnabledFeatures;
+} VkDeviceCreateInfo;
+
+typedef struct { VkDeviceSize size, alignment; uint32_t memoryTypeBits; } VkMemoryRequirements;
+typedef struct { uint32_t sType; const void* pNext; VkDeviceSize allocationSize;
+                 uint32_t memoryTypeIndex; } VkMemoryAllocateInfo;
+typedef struct { VkFlags propertyFlags; uint32_t heapIndex; } VkMemoryType;
+typedef struct { VkDeviceSize size; VkFlags flags; } VkMemoryHeap;
+typedef struct {
+    uint32_t memoryTypeCount; VkMemoryType memoryTypes[32];
+    uint32_t memoryHeapCount; VkMemoryHeap memoryHeaps[16];
+} VkPhysicalDeviceMemoryProperties;
+
+typedef struct {
+    uint32_t sType; const void* pNext; VkFlags flags;
+    VkDeviceSize size; VkFlags usage; uint32_t sharingMode;
+    uint32_t queueFamilyIndexCount; const uint32_t* pQueueFamilyIndices;
+} VkBufferCreateInfo;
+
+typedef struct { uint32_t sType; const void* pNext; VkFlags flags;
+                 uint32_t queueFamilyIndex; } VkCommandPoolCreateInfo;
+typedef struct { uint32_t sType; const void* pNext; VkCommandPool commandPool;
+                 uint32_t level; uint32_t commandBufferCount; } VkCommandBufferAllocateInfo;
+typedef struct { uint32_t sType; const void* pNext; VkFlags flags;
+                 const void* pInheritanceInfo; } VkCommandBufferBeginInfo;
+typedef struct {
+    uint32_t sType; const void* pNext;
+    uint32_t waitSemaphoreCount; const void* pWaitSemaphores; const VkFlags* pWaitDstStageMask;
+    uint32_t commandBufferCount; const VkCommandBuffer* pCommandBuffers;
+    uint32_t signalSemaphoreCount; const void* pSignalSemaphores;
+} VkSubmitInfo;
+typedef struct { uint32_t sType; const void* pNext; VkFlags flags; } VkFenceCreateInfo;
+
+typedef struct { uint32_t sType; const void* pNext; VkFlags flags;
+                 size_t codeSize; const uint32_t* pCode; } VkShaderModuleCreateInfo;
+typedef struct { uint32_t binding, descriptorType, descriptorCount;
+                 VkFlags stageFlags; const void* pImmutableSamplers; } VkDescriptorSetLayoutBinding;
+typedef struct { uint32_t sType; const void* pNext; VkFlags flags;
+                 uint32_t bindingCount; const VkDescriptorSetLayoutBinding* pBindings;
+               } VkDescriptorSetLayoutCreateInfo;
+typedef struct { VkFlags stageFlags; uint32_t offset, size; } VkPushConstantRange;
+typedef struct { uint32_t sType; const void* pNext; VkFlags flags;
+                 uint32_t setLayoutCount; const VkDescriptorSetLayout* pSetLayouts;
+                 uint32_t pushConstantRangeCount; const VkPushConstantRange* pPushConstantRanges;
+               } VkPipelineLayoutCreateInfo;
+typedef struct { uint32_t sType; const void* pNext; VkFlags flags;
+                 VkFlags stage; VkShaderModule module; const char* pName;
+                 const void* pSpecializationInfo; } VkPipelineShaderStageCreateInfo;
+typedef struct { uint32_t sType; const void* pNext; VkFlags flags;
+                 VkPipelineShaderStageCreateInfo stage; VkPipelineLayout layout;
+                 VkPipeline basePipelineHandle; int32_t basePipelineIndex;
+               } VkComputePipelineCreateInfo;
+typedef struct { uint32_t type, descriptorCount; } VkDescriptorPoolSize;
+typedef struct { uint32_t sType; const void* pNext; VkFlags flags;
+                 uint32_t maxSets, poolSizeCount; const VkDescriptorPoolSize* pPoolSizes;
+               } VkDescriptorPoolCreateInfo;
+typedef struct { uint32_t sType; const void* pNext; VkDescriptorPool descriptorPool;
+                 uint32_t descriptorSetCount; const VkDescriptorSetLayout* pSetLayouts;
+               } VkDescriptorSetAllocateInfo;
+typedef struct { VkBuffer buffer; VkDeviceSize offset, range; } VkDescriptorBufferInfo;
+typedef struct { uint32_t sType; const void* pNext; VkDescriptorSet dstSet;
+                 uint32_t dstBinding, dstArrayElement, descriptorCount, descriptorType;
+                 const void* pImageInfo; const VkDescriptorBufferInfo* pBufferInfo;
+                 const void* pTexelBufferView; } VkWriteDescriptorSet;
+typedef struct { uint32_t sType; const void* pNext;
+                 VkFlags srcAccessMask, dstAccessMask; } VkMemoryBarrier;
+
+/* ---- dlsym'd entry points (no link-time dependency on libvulkan) --------- */
+#define VKFN(ret, name, args) static ret (*p_##name) args
+VKFN(VkResult, vkCreateInstance, (const VkInstanceCreateInfo*, const void*, VkInstance*));
+VKFN(void,     vkDestroyInstance, (VkInstance, const void*));
+VKFN(VkResult, vkEnumeratePhysicalDevices, (VkInstance, uint32_t*, VkPhysicalDevice*));
+VKFN(void,     vkGetPhysicalDeviceProperties, (VkPhysicalDevice, VkPhysicalDeviceProperties*));
+VKFN(void,     vkGetPhysicalDeviceQueueFamilyProperties, (VkPhysicalDevice, uint32_t*, VkQueueFamilyProperties*));
+VKFN(void,     vkGetPhysicalDeviceMemoryProperties, (VkPhysicalDevice, VkPhysicalDeviceMemoryProperties*));
+VKFN(VkResult, vkCreateDevice, (VkPhysicalDevice, const VkDeviceCreateInfo*, const void*, VkDevice*));
+VKFN(void,     vkDestroyDevice, (VkDevice, const void*));
+VKFN(void,     vkGetDeviceQueue, (VkDevice, uint32_t, uint32_t, VkQueue*));
+VKFN(VkResult, vkCreateBuffer, (VkDevice, const VkBufferCreateInfo*, const void*, VkBuffer*));
+VKFN(void,     vkDestroyBuffer, (VkDevice, VkBuffer, const void*));
+VKFN(void,     vkGetBufferMemoryRequirements, (VkDevice, VkBuffer, VkMemoryRequirements*));
+VKFN(VkResult, vkAllocateMemory, (VkDevice, const VkMemoryAllocateInfo*, const void*, VkDeviceMemory*));
+VKFN(void,     vkFreeMemory, (VkDevice, VkDeviceMemory, const void*));
+VKFN(VkResult, vkBindBufferMemory, (VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize));
+VKFN(VkResult, vkMapMemory, (VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSize, VkFlags, void**));
+VKFN(void,     vkUnmapMemory, (VkDevice, VkDeviceMemory));
+VKFN(VkResult, vkCreateCommandPool, (VkDevice, const VkCommandPoolCreateInfo*, const void*, VkCommandPool*));
+VKFN(void,     vkDestroyCommandPool, (VkDevice, VkCommandPool, const void*));
+VKFN(VkResult, vkAllocateCommandBuffers, (VkDevice, const VkCommandBufferAllocateInfo*, VkCommandBuffer*));
+VKFN(void,     vkFreeCommandBuffers, (VkDevice, VkCommandPool, uint32_t, const VkCommandBuffer*));
+VKFN(VkResult, vkResetCommandPool, (VkDevice, VkCommandPool, VkFlags));
+VKFN(VkResult, vkBeginCommandBuffer, (VkCommandBuffer, const VkCommandBufferBeginInfo*));
+VKFN(VkResult, vkEndCommandBuffer, (VkCommandBuffer));
+VKFN(void,     vkCmdPipelineBarrier, (VkCommandBuffer, VkFlags, VkFlags, VkFlags,
+                                      uint32_t, const VkMemoryBarrier*, uint32_t, const void*,
+                                      uint32_t, const void*));
+VKFN(VkResult, vkCreateFence, (VkDevice, const VkFenceCreateInfo*, const void*, VkFence*));
+VKFN(void,     vkDestroyFence, (VkDevice, VkFence, const void*));
+VKFN(VkResult, vkResetFences, (VkDevice, uint32_t, const VkFence*));
+VKFN(VkResult, vkQueueSubmit, (VkQueue, uint32_t, const VkSubmitInfo*, VkFence));
+VKFN(VkResult, vkWaitForFences, (VkDevice, uint32_t, const VkFence*, VkBool32, uint64_t));
+VKFN(VkResult, vkDeviceWaitIdle, (VkDevice));
+VKFN(VkResult, vkCreateShaderModule, (VkDevice, const VkShaderModuleCreateInfo*, const void*, VkShaderModule*));
+VKFN(void,     vkDestroyShaderModule, (VkDevice, VkShaderModule, const void*));
+VKFN(VkResult, vkCreateDescriptorSetLayout, (VkDevice, const VkDescriptorSetLayoutCreateInfo*, const void*, VkDescriptorSetLayout*));
+VKFN(VkResult, vkCreatePipelineLayout, (VkDevice, const VkPipelineLayoutCreateInfo*, const void*, VkPipelineLayout*));
+VKFN(VkResult, vkCreateComputePipelines, (VkDevice, VkPipelineCache, uint32_t, const VkComputePipelineCreateInfo*, const void*, VkPipeline*));
+VKFN(VkResult, vkCreateDescriptorPool, (VkDevice, const VkDescriptorPoolCreateInfo*, const void*, VkDescriptorPool*));
+VKFN(VkResult, vkAllocateDescriptorSets, (VkDevice, const VkDescriptorSetAllocateInfo*, VkDescriptorSet*));
+VKFN(void,     vkUpdateDescriptorSets, (VkDevice, uint32_t, const VkWriteDescriptorSet*, uint32_t, const void*));
+VKFN(void,     vkCmdBindPipeline, (VkCommandBuffer, uint32_t, VkPipeline));
+VKFN(void,     vkCmdBindDescriptorSets, (VkCommandBuffer, uint32_t, VkPipelineLayout, uint32_t, uint32_t, const VkDescriptorSet*, uint32_t, const uint32_t*));
+VKFN(void,     vkCmdPushConstants, (VkCommandBuffer, VkPipelineLayout, VkFlags, uint32_t, uint32_t, const void*));
+VKFN(void,     vkCmdDispatch, (VkCommandBuffer, uint32_t, uint32_t, uint32_t));
+#undef VKFN
+
+/* ============================ module state =============================== */
+
+/* PushC MUST match scripts/shaders/vk2d_raster.comp's push_constant block. */
+typedef struct {
+    int32_t  op, bx, by, dispw, disph, img_w, img_h;
+    uint32_t rgba;
+    int32_t  px, py, pw, ph, rad, corners;
+    int32_t  dx, dy, rsx, rsy, rsw, rsh, tw, th, src_w, src_h;
+    int32_t  mask_off;   /* base index (in uints) into src[] for COVMASK/BLIT */
+} PushC;
+enum { OP_FILL = 0, OP_FILL_ALPHA = 1, OP_BLIT = 2, OP_ROUNDRECT = 3,
+       OP_LINE = 4, OP_COVMASK = 5, OP_BATCH = 6 };
+#define HVK_BATCH_STRIDE 24u    /* uints per OP_BATCH table entry */
+#define HVK_BATCH_MAX    1024   /* entries per batched dispatch */
+
+#define HVK_MAXOPS   16384
+#define HVK_ARENA_MIN (4u << 20)      /* 4 MiB of blit/coverage source space */
+
+static void*            g_lib;
+static int              g_state;      /* 0 untried, 1 ready, -1 unusable */
+static VkInstance       g_inst;
+static VkPhysicalDevice g_phys;
+static VkDevice         g_dev;
+static VkQueue          g_queue;
+static uint32_t         g_qfam;
+static VkCommandPool    g_pool;
+static VkFence          g_fence;
+static char             g_devname[288] = "none";
+static uint32_t         g_devtype = VK_PHYSICAL_DEVICE_TYPE_OTHER;
+static VkPhysicalDeviceMemoryProperties g_memprops;
+static char             g_err[192] = "not initialised";
+
+static VkShaderModule        g_module;
+static VkDescriptorSetLayout g_dsl;
+static VkPipelineLayout      g_playout;
+static VkPipeline            g_pipe;
+static VkDescriptorPool      g_dpool;
+static VkDescriptorSet       g_dset;
+
+/* the frame (binding 0): host-visible, coherent, mapped for its whole life */
+static VkBuffer      g_fbuf;
+static VkDeviceMemory g_fmem;
+static uint8_t*      g_fmap;
+static int32_t       g_fw, g_fh;
+static int32_t       g_fbgra;
+static int           g_fdevlocal;
+
+/* the source arena (binding 1): blit pixels + glyph coverage, grows on demand */
+static VkBuffer       g_abuf;
+static VkDeviceMemory g_amem;
+static uint32_t*      g_amap;
+static VkDeviceSize   g_acap;
+static uint32_t       g_ause;         /* uints consumed this frame */
+
+static PushC    g_ops[HVK_MAXOPS];
+static uint32_t g_grp[HVK_MAXOPS][2];
+/* Per-op destination rect (x0,y0,x1,y1) and whether a barrier must precede it.
+ * 2D painting is ordered, but only where the paint LANDS: a run of glyphs or a
+ * row of icons write disjoint rects, so they may all run at once. Serializing
+ * them anyway is what made the first version of this backend 10x slower than
+ * the CPU — see the bbox tracking in push_op. */
+static int32_t  g_rect[HVK_MAXOPS][4];
+static uint8_t  g_bar[HVK_MAXOPS];
+static int32_t  g_nops;
+static int32_t  g_bbx0, g_bby0, g_bbx1, g_bby1;   /* union since last barrier */
+static int32_t  g_barriers;
+static int32_t  g_frame_err;
+static int      g_in_frame;
+
+/* counters the Adder side publishes so a frame's mix is inspectable */
+static uint64_t g_stat_frames, g_stat_ops, g_stat_dispatches, g_stat_submits;
+static uint64_t g_stat_last_us, g_stat_arena_bytes, g_stat_batched;
+
+static int hvk_fail(const char* why)
+{
+    snprintf(g_err, sizeof g_err, "%s", why);
+    g_state = -1;
+    return -1;
+}
+
+#define VKCK(expr) do { VkResult _r = (expr); if (_r != VK_SUCCESS) { \
+    snprintf(g_err, sizeof g_err, "%s -> VkResult %d", #expr, (int)_r); \
+    g_state = -1; return -1; } } while (0)
+
+static uint64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+static int rank_devtype(uint32_t t)
+{
+    switch (t) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return 4;
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 3;
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return 2;
+    case VK_PHYSICAL_DEVICE_TYPE_OTHER:          return 1;
+    default:                                     return 0;  /* CPU ICD last */
+    }
+}
+
+static int find_mem(uint32_t typeBits, VkFlags want)
+{
+    for (uint32_t i = 0; i < g_memprops.memoryTypeCount; i++)
+        if ((typeBits & (1u << i)) &&
+            (g_memprops.memoryTypes[i].propertyFlags & want) == want)
+            return (int)i;
+    return -1;
+}
+
+static int load_loader(void)
+{
+    const char* off = getenv("HAMNIX_VK_DISABLE");
+    if (off && off[0] && off[0] != '0')
+        return hvk_fail("disabled by HAMNIX_VK_DISABLE");
+    g_lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!g_lib) g_lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!g_lib) {
+        const char* e = dlerror();
+        snprintf(g_err, sizeof g_err, "no libvulkan: %s", e ? e : "?");
+        g_state = -1;
+        return -1;
+    }
+#define BIND(name) do { \
+        *(void**)(&p_##name) = dlsym(g_lib, #name); \
+        if (!p_##name) return hvk_fail("libvulkan lacks " #name); } while (0)
+    BIND(vkCreateInstance); BIND(vkDestroyInstance);
+    BIND(vkEnumeratePhysicalDevices); BIND(vkGetPhysicalDeviceProperties);
+    BIND(vkGetPhysicalDeviceQueueFamilyProperties);
+    BIND(vkGetPhysicalDeviceMemoryProperties);
+    BIND(vkCreateDevice); BIND(vkDestroyDevice); BIND(vkGetDeviceQueue);
+    BIND(vkCreateBuffer); BIND(vkDestroyBuffer); BIND(vkGetBufferMemoryRequirements);
+    BIND(vkAllocateMemory); BIND(vkFreeMemory); BIND(vkBindBufferMemory);
+    BIND(vkMapMemory); BIND(vkUnmapMemory);
+    BIND(vkCreateCommandPool); BIND(vkDestroyCommandPool);
+    BIND(vkAllocateCommandBuffers); BIND(vkFreeCommandBuffers);
+    BIND(vkResetCommandPool);
+    BIND(vkBeginCommandBuffer); BIND(vkEndCommandBuffer);
+    BIND(vkCmdPipelineBarrier);
+    BIND(vkCreateFence); BIND(vkDestroyFence); BIND(vkResetFences);
+    BIND(vkQueueSubmit); BIND(vkWaitForFences); BIND(vkDeviceWaitIdle);
+    BIND(vkCreateShaderModule); BIND(vkDestroyShaderModule);
+    BIND(vkCreateDescriptorSetLayout); BIND(vkCreatePipelineLayout);
+    BIND(vkCreateComputePipelines); BIND(vkCreateDescriptorPool);
+    BIND(vkAllocateDescriptorSets); BIND(vkUpdateDescriptorSets);
+    BIND(vkCmdBindPipeline); BIND(vkCmdBindDescriptorSets);
+    BIND(vkCmdPushConstants); BIND(vkCmdDispatch);
+#undef BIND
+    return 0;
+}
+
+/* Load the compute rasterizer's SPIR-V: HAMNIX_VK_SPV=<path> if set (shader
+ * development), otherwise the copy embedded in user/linux-vk-spv.h. */
+static const uint32_t* load_spv(size_t* nbytes, uint32_t** owned)
+{
+    const char* path = getenv("HAMNIX_VK_SPV");
+    *owned = 0;
+    if (path && path[0]) {
+        FILE* f = fopen(path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (n > 0 && (n % 4) == 0) {
+                uint32_t* buf = (uint32_t*)malloc((size_t)n);
+                if (buf && fread(buf, 1, (size_t)n, f) == (size_t)n) {
+                    fclose(f);
+                    *owned = buf;
+                    *nbytes = (size_t)n;
+                    return buf;
+                }
+                free(buf);
+            }
+            fclose(f);
+        }
+        /* A named-but-unreadable shader is a caller error, not a silent
+         * downgrade: say so, then use the embedded one. */
+        fprintf(stderr, "[linux-vk] HAMNIX_VK_SPV=%s unusable; using built-in\n", path);
+    }
+    *nbytes = HVK_SPV_VK2D_RASTER_BYTES;
+    return hvk_spv_vk2d_raster;
+}
+
+static int make_storage_buffer(VkDeviceSize sz, int prefer_device_local,
+                               VkBuffer* buf, VkDeviceMemory* mem,
+                               void** map, int* got_device_local)
+{
+    VkBufferCreateInfo bc;
+    memset(&bc, 0, sizeof bc);
+    bc.sType = ST_BUFFER_CREATE_INFO;
+    bc.size = sz;
+    bc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+             | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bc.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VKCK(p_vkCreateBuffer(g_dev, &bc, 0, buf));
+    VkMemoryRequirements mr;
+    memset(&mr, 0, sizeof mr);
+    p_vkGetBufferMemoryRequirements(g_dev, *buf, &mr);
+    int mt = -1;
+    if (got_device_local) *got_device_local = 0;
+    if (prefer_device_local) {
+        /* Resizable-BAR / integrated / software ICDs give us memory that is
+         * BOTH device-local and host-mappable: the shader writes at full
+         * device speed AND the compositor reads the frame with no copy. */
+        mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                      | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (mt >= 0 && got_device_local) *got_device_local = 1;
+    }
+    if (mt < 0)
+        mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mt < 0) return hvk_fail("no host-visible coherent memory type");
+    VkMemoryAllocateInfo ai;
+    memset(&ai, 0, sizeof ai);
+    ai.sType = ST_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = (uint32_t)mt;
+    VKCK(p_vkAllocateMemory(g_dev, &ai, 0, mem));
+    VKCK(p_vkBindBufferMemory(g_dev, *buf, *mem, 0));
+    VKCK(p_vkMapMemory(g_dev, *mem, 0, sz, 0, map));
+    return 0;
+}
+
+static int build_pipeline(void)
+{
+    size_t spvsz;
+    uint32_t* owned;
+    const uint32_t* spv = load_spv(&spvsz, &owned);
+    VkShaderModuleCreateInfo smi;
+    memset(&smi, 0, sizeof smi);
+    smi.sType = ST_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize = spvsz;
+    smi.pCode = spv;
+    VkResult r = p_vkCreateShaderModule(g_dev, &smi, 0, &g_module);
+    free(owned);
+    if (r != VK_SUCCESS) return hvk_fail("vkCreateShaderModule failed");
+
+    VkDescriptorSetLayoutBinding binds[2];
+    memset(binds, 0, sizeof binds);
+    for (int i = 0; i < 2; i++) {
+        binds[i].binding = (uint32_t)i;
+        binds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        binds[i].descriptorCount = 1;
+        binds[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo dli;
+    memset(&dli, 0, sizeof dli);
+    dli.sType = ST_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dli.bindingCount = 2;
+    dli.pBindings = binds;
+    VKCK(p_vkCreateDescriptorSetLayout(g_dev, &dli, 0, &g_dsl));
+
+    VkPushConstantRange pcr;
+    pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcr.offset = 0;
+    pcr.size = (uint32_t)sizeof(PushC);
+    VkPipelineLayoutCreateInfo pli;
+    memset(&pli, 0, sizeof pli);
+    pli.sType = ST_PIPELINE_LAYOUT_CREATE_INFO;
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &g_dsl;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &pcr;
+    VKCK(p_vkCreatePipelineLayout(g_dev, &pli, 0, &g_playout));
+
+    VkComputePipelineCreateInfo cpi;
+    memset(&cpi, 0, sizeof cpi);
+    cpi.sType = ST_COMPUTE_PIPELINE_CREATE_INFO;
+    cpi.stage.sType = ST_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = g_module;
+    cpi.stage.pName = "main";
+    cpi.layout = g_playout;
+    VKCK(p_vkCreateComputePipelines(g_dev, 0, 1, &cpi, 0, &g_pipe));
+
+    VkDescriptorPoolSize psz;
+    psz.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    psz.descriptorCount = 2;
+    VkDescriptorPoolCreateInfo dpi;
+    memset(&dpi, 0, sizeof dpi);
+    dpi.sType = ST_DESCRIPTOR_POOL_CREATE_INFO;
+    dpi.maxSets = 1;
+    dpi.poolSizeCount = 1;
+    dpi.pPoolSizes = &psz;
+    VKCK(p_vkCreateDescriptorPool(g_dev, &dpi, 0, &g_dpool));
+    VkDescriptorSetAllocateInfo dsai;
+    memset(&dsai, 0, sizeof dsai);
+    dsai.sType = ST_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsai.descriptorPool = g_dpool;
+    dsai.descriptorSetCount = 1;
+    dsai.pSetLayouts = &g_dsl;
+    VKCK(p_vkAllocateDescriptorSets(g_dev, &dsai, &g_dset));
+    return 0;
+}
+
+static int rebind_descriptors(void)
+{
+    /* Both buffers are written in one vkUpdateDescriptorSets, so this is a
+     * no-op until both exist (the arena is created during bring-up, the frame
+     * on the first hvk_frame_create). Not an error — just nothing to bind
+     * yet; whichever call completes the pair does the real update. */
+    if (!g_fbuf || !g_abuf) return 0;
+    VkDescriptorBufferInfo dbi, sbi;
+    dbi.buffer = g_fbuf; dbi.offset = 0;
+    dbi.range = (VkDeviceSize)g_fw * (VkDeviceSize)g_fh * 4u;
+    sbi.buffer = g_abuf; sbi.offset = 0; sbi.range = g_acap;
+    VkWriteDescriptorSet wr[2];
+    memset(wr, 0, sizeof wr);
+    for (int i = 0; i < 2; i++) {
+        wr[i].sType = ST_WRITE_DESCRIPTOR_SET;
+        wr[i].dstSet = g_dset;
+        wr[i].dstBinding = (uint32_t)i;
+        wr[i].descriptorCount = 1;
+        wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    }
+    wr[0].pBufferInfo = &dbi;
+    wr[1].pBufferInfo = &sbi;
+    p_vkUpdateDescriptorSets(g_dev, 2, wr, 0, 0);
+    return 0;
+}
+
+static int ensure_arena(VkDeviceSize want)
+{
+    if (want <= g_acap) return 0;
+    VkDeviceSize sz = g_acap ? g_acap : HVK_ARENA_MIN;
+    while (sz < want) sz *= 2;
+    p_vkDeviceWaitIdle(g_dev);
+    /* Ops already recorded THIS frame index into the arena, so a grow must
+     * carry their staged bytes across — dropping them would leave a blit
+     * sampling whatever the new allocation happened to contain, which is
+     * precisely the plausible-wrong-answer failure this codebase keeps
+     * getting bitten by. */
+    uint32_t keep = g_ause;
+    void* saved = 0;
+    if (keep && g_amap) {
+        saved = malloc((size_t)keep * 4u);
+        if (!saved) return hvk_fail("out of memory growing the source arena");
+        memcpy(saved, g_amap, (size_t)keep * 4u);
+    }
+    if (g_amap) { p_vkUnmapMemory(g_dev, g_amem); g_amap = 0; }
+    if (g_abuf) { p_vkDestroyBuffer(g_dev, g_abuf, 0); g_abuf = 0; }
+    if (g_amem) { p_vkFreeMemory(g_dev, g_amem, 0); g_amem = 0; }
+    void* m = 0;
+    if (make_storage_buffer(sz, 0, &g_abuf, &g_amem, &m, 0)) { free(saved); return -1; }
+    g_amap = (uint32_t*)m;
+    if (saved) { memcpy(g_amap, saved, (size_t)keep * 4u); free(saved); }
+    g_acap = sz;
+    g_stat_arena_bytes = (uint64_t)sz;
+    return rebind_descriptors();
+}
+
+static int hvk_bringup(void)
+{
+    if (load_loader()) return -1;
+
+    VkApplicationInfo app;
+    memset(&app, 0, sizeof app);
+    app.sType = ST_APPLICATION_INFO;
+    app.pApplicationName = "hamnix-vk";
+    app.apiVersion = (1u << 22);              /* 1.0 — everything we use is core */
+    VkInstanceCreateInfo ici;
+    memset(&ici, 0, sizeof ici);
+    ici.sType = ST_INSTANCE_CREATE_INFO;
+    ici.pApplicationInfo = &app;
+    VKCK(p_vkCreateInstance(&ici, 0, &g_inst));
+
+    uint32_t n = 0;
+    VKCK(p_vkEnumeratePhysicalDevices(g_inst, &n, 0));
+    if (n == 0) return hvk_fail("Vulkan loader found no physical device");
+    if (n > 16) n = 16;
+    VkPhysicalDevice devs[16];
+    VKCK(p_vkEnumeratePhysicalDevices(g_inst, &n, devs));
+
+    int best = -1, bestrank = -1;
+    for (uint32_t i = 0; i < n; i++) {
+        VkPhysicalDeviceProperties pr;
+        memset(&pr, 0, sizeof pr);
+        p_vkGetPhysicalDeviceProperties(devs[i], &pr);
+        int r = rank_devtype(pr.deviceType);
+        if (r > bestrank) { bestrank = r; best = (int)i; }
+    }
+    g_phys = devs[best];
+    {
+        VkPhysicalDeviceProperties pr;
+        memset(&pr, 0, sizeof pr);
+        p_vkGetPhysicalDeviceProperties(g_phys, &pr);
+        snprintf(g_devname, sizeof g_devname, "%s", pr.deviceName);
+        g_devtype = pr.deviceType;
+    }
+
+    uint32_t qn = 0;
+    p_vkGetPhysicalDeviceQueueFamilyProperties(g_phys, &qn, 0);
+    if (qn > 32) qn = 32;
+    VkQueueFamilyProperties qf[32];
+    memset(qf, 0, sizeof qf);
+    p_vkGetPhysicalDeviceQueueFamilyProperties(g_phys, &qn, qf);
+    int qfam = -1;
+    for (uint32_t i = 0; i < qn; i++)
+        if (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { qfam = (int)i; break; }
+    if (qfam < 0) return hvk_fail("no compute-capable queue family");
+    g_qfam = (uint32_t)qfam;
+
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci;
+    memset(&qci, 0, sizeof qci);
+    qci.sType = ST_DEVICE_QUEUE_CREATE_INFO;
+    qci.queueFamilyIndex = g_qfam;
+    qci.queueCount = 1;
+    qci.pQueuePriorities = &prio;
+    VkDeviceCreateInfo dci;
+    memset(&dci, 0, sizeof dci);
+    dci.sType = ST_DEVICE_CREATE_INFO;
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos = &qci;
+    VKCK(p_vkCreateDevice(g_phys, &dci, 0, &g_dev));
+    p_vkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
+    memset(&g_memprops, 0, sizeof g_memprops);
+    p_vkGetPhysicalDeviceMemoryProperties(g_phys, &g_memprops);
+
+    VkCommandPoolCreateInfo pci;
+    memset(&pci, 0, sizeof pci);
+    pci.sType = ST_COMMAND_POOL_CREATE_INFO;
+    pci.queueFamilyIndex = g_qfam;
+    VKCK(p_vkCreateCommandPool(g_dev, &pci, 0, &g_pool));
+    VkFenceCreateInfo fci;
+    memset(&fci, 0, sizeof fci);
+    fci.sType = ST_FENCE_CREATE_INFO;
+    VKCK(p_vkCreateFence(g_dev, &fci, 0, &g_fence));
+
+    if (build_pipeline()) return -1;
+    if (ensure_arena(HVK_ARENA_MIN)) return -1;
+    g_err[0] = 0;
+    g_state = 1;
+    return 0;
+}
+
+/* ============================== public C ABI ============================== */
+
+/* 1 iff a real ICD, a real device and the compute pipeline all came up. Every
+ * other entry point is a no-op returning failure when this is 0, so the Adder
+ * side has exactly one thing to check and no way to half-succeed. */
+int32_t hvk_available(void)
+{
+    if (g_state == 0) hvk_bringup();
+    return g_state == 1 ? 1 : 0;
+}
+
+/* NUL-terminated device name (or the reason there is none) into caller BSS. */
+int32_t hvk_device_name(uint8_t* buf, int32_t cap)
+{
+    if (!buf || cap <= 0) return 0;
+    const char* s = (g_state == 1) ? g_devname : g_err;
+    int32_t i = 0;
+    while (s[i] && i < cap - 1) { buf[i] = (uint8_t)s[i]; i++; }
+    buf[i] = 0;
+    return i;
+}
+
+/* VkPhysicalDeviceType: 1 integrated, 2 discrete, 3 virtual, 4 CPU (a software
+ * ICD such as lavapipe). Reported rather than hidden — a caller that only
+ * wants real silicon can refuse type 4 itself. */
+int32_t hvk_device_type(void) { return (int32_t)g_devtype; }
+
+/* 1 iff the frame buffer landed in memory that is device-local AND mappable.
+ * 0 means the shader reaches the frame across the host bus (a discrete GPU
+ * with no resizable BAR), which is exactly when GPU raster may LOSE to the
+ * CPU. Callers should treat 0 as "measure before trusting". */
+int32_t hvk_frame_is_device_local(void) { return g_fdevlocal ? 1 : 0; }
+
+/* Create (or resize) the GPU-resident frame and return its mapped address, or
+ * 0. The pointer is stable until the next size change: hand it to the vk color
+ * image / compositor shadow and the whole path is copy-free. `bgra` selects
+ * B8G8R8A8 store order, matching vk2d_set_bgra on the software side. */
+uint64_t hvk_frame_create(int32_t w, int32_t h, int32_t bgra)
+{
+    if (!hvk_available()) return 0;
+    if (w <= 0 || h <= 0) return 0;
+    g_fbgra = bgra ? 1 : 0;
+    if (g_fmap && w == g_fw && h == g_fh) return (uint64_t)(uintptr_t)g_fmap;
+    p_vkDeviceWaitIdle(g_dev);
+    if (g_fmap) { p_vkUnmapMemory(g_dev, g_fmem); g_fmap = 0; }
+    if (g_fbuf) { p_vkDestroyBuffer(g_dev, g_fbuf, 0); g_fbuf = 0; }
+    if (g_fmem) { p_vkFreeMemory(g_dev, g_fmem, 0); g_fmem = 0; }
+    void* m = 0;
+    VkDeviceSize sz = (VkDeviceSize)w * (VkDeviceSize)h * 4u;
+    if (make_storage_buffer(sz, 1, &g_fbuf, &g_fmem, &m, &g_fdevlocal)) {
+        g_fw = g_fh = 0;
+        return 0;
+    }
+    g_fmap = (uint8_t*)m;
+    g_fw = w;
+    g_fh = h;
+    if (rebind_descriptors()) return 0;
+    return (uint64_t)(uintptr_t)g_fmap;
+}
+
+uint64_t hvk_frame_base(void) { return (uint64_t)(uintptr_t)g_fmap; }
+int32_t  hvk_frame_width(void)  { return g_fw; }
+int32_t  hvk_frame_height(void) { return g_fh; }
+
+/* Start recording a frame's op list. Ops accumulate until hvk_frame_end (or an
+ * intervening hvk_frame_sync) submits them. */
+int32_t hvk_frame_begin(void)
+{
+    if (!hvk_available() || !g_fmap) return -1;
+    g_nops = 0;
+    g_ause = 0;
+    g_frame_err = 0;
+    g_barriers = 0;
+    g_in_frame = 1;
+    return 0;
+}
+
+/* Record one dispatch. (rx0,ry0,rx1,ry1) is the half-open rect of destination
+ * pixels the op can WRITE — normally the dispatch extent, but a line's brush
+ * lands outside its 1x1 dispatch, so it is passed explicitly.
+ *
+ * A barrier is inserted only when this op's rect touches the union of the
+ * rects written since the last barrier. Disjoint from the union implies
+ * disjoint from every op in it, so the order the device runs them in cannot
+ * change a single pixel — while a text run of 400 glyphs collapses from 400
+ * serialized dispatches to one parallel batch. */
+static void push_op_rect(PushC pc, int32_t dispw, int32_t disph,
+                         int32_t rx0, int32_t ry0, int32_t rx1, int32_t ry1)
+{
+    if (dispw <= 0 || disph <= 0) return;
+    if (g_nops >= HVK_MAXOPS) { g_frame_err = -1; return; }
+    pc.img_w = g_fw;
+    pc.img_h = g_fh;
+    pc.dispw = dispw;
+    pc.disph = disph;
+    if (rx0 < 0) rx0 = 0;
+    if (ry0 < 0) ry0 = 0;
+    if (rx1 > g_fw) rx1 = g_fw;
+    if (ry1 > g_fh) ry1 = g_fh;
+
+    int need_barrier = 0;
+    if (g_nops == 0) {
+        g_bbx0 = g_bby0 = 0x7FFFFFFF;
+        g_bbx1 = g_bby1 = -0x7FFFFFFF;
+    } else if (rx0 < g_bbx1 && g_bbx0 < rx1 && ry0 < g_bby1 && g_bby0 < ry1) {
+        need_barrier = 1;
+    }
+    if (need_barrier) {
+        g_bbx0 = rx0; g_bby0 = ry0; g_bbx1 = rx1; g_bby1 = ry1;
+        g_barriers++;
+    } else {
+        if (rx0 < g_bbx0) g_bbx0 = rx0;
+        if (ry0 < g_bby0) g_bby0 = ry0;
+        if (rx1 > g_bbx1) g_bbx1 = rx1;
+        if (ry1 > g_bby1) g_bby1 = ry1;
+    }
+    g_bar[g_nops] = (uint8_t)need_barrier;
+    g_rect[g_nops][0] = rx0; g_rect[g_nops][1] = ry0;
+    g_rect[g_nops][2] = rx1; g_rect[g_nops][3] = ry1;
+    g_ops[g_nops] = pc;
+    g_grp[g_nops][0] = (uint32_t)((dispw + 7) / 8);
+    g_grp[g_nops][1] = (uint32_t)((disph + 7) / 8);
+    g_nops++;
+    g_stat_ops++;
+}
+
+static void push_op(PushC pc, int32_t dispw, int32_t disph)
+{
+    push_op_rect(pc, dispw, disph, pc.bx, pc.by, pc.bx + dispw, pc.by + disph);
+}
+
+/* vk_2d.ad flips R and B of the OP COLOUR when the destination image is BGRA
+ * (see vk2d_set_bgra); the shader has no notion of store order, so the swap
+ * happens here, once, on the way in. */
+static uint32_t frame_color(uint32_t rgba)
+{
+    if (!g_fbgra) return rgba;
+    uint32_t r = (rgba >> 24) & 0xFF, g = (rgba >> 16) & 0xFF;
+    uint32_t b = (rgba >> 8) & 0xFF,  a = rgba & 0xFF;
+    return (b << 24) | (g << 16) | (r << 8) | a;
+}
+
+/* op: 0 = opaque fill (vk2d_raster_fill_rect), 1 = source-over
+ * (vk2d_raster_fill_rect_alpha). Clipping mirrors vk_2d exactly. */
+int32_t hvk_fill_rect(int32_t op, int32_t x, int32_t y, int32_t w, int32_t h,
+                      uint32_t rgba)
+{
+    if (!g_in_frame) return -1;
+    if (w <= 0 || h <= 0) return 0;
+    if (op == OP_FILL_ALPHA && (rgba & 0xFF) == 0) return 0;
+    if (op == OP_FILL_ALPHA && (rgba & 0xFF) == 0xFF) op = OP_FILL;
+    int32_t x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int32_t x1 = x + w > g_fw ? g_fw : x + w;
+    int32_t y1 = y + h > g_fh ? g_fh : y + h;
+    if (x0 >= x1 || y0 >= y1) return 0;
+    PushC pc;
+    memset(&pc, 0, sizeof pc);
+    pc.op = op;
+    pc.rgba = frame_color(rgba);
+    pc.bx = x0;
+    pc.by = y0;
+    push_op(pc, x1 - x0, y1 - y0);
+    return 0;
+}
+
+int32_t hvk_roundrect(int32_t x, int32_t y, int32_t w, int32_t h,
+                      int32_t rad, int32_t corners, uint32_t rgba)
+{
+    if (!g_in_frame) return -1;
+    if (w <= 0 || h <= 0 || (rgba & 0xFF) == 0) return 0;
+    int32_t rr = rad;
+    if (rr < 0) rr = 0;
+    if (rr > w / 2) rr = w / 2;
+    if (rr > h / 2) rr = h / 2;
+    if (rr <= 0) return hvk_fill_rect(OP_FILL_ALPHA, x, y, w, h, rgba);
+    int32_t x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int32_t x1 = x + w > g_fw ? g_fw : x + w;
+    int32_t y1 = y + h > g_fh ? g_fh : y + h;
+    if (x0 >= x1 || y0 >= y1) return 0;
+    PushC pc;
+    memset(&pc, 0, sizeof pc);
+    pc.op = OP_ROUNDRECT;
+    pc.rgba = frame_color(rgba);
+    pc.bx = x0; pc.by = y0;
+    pc.px = x;  pc.py = y;
+    pc.pw = w;  pc.ph = h;
+    pc.rad = rr;
+    pc.corners = corners;
+    push_op(pc, x1 - x0, y1 - y0);
+    return 0;
+}
+
+/* Thick Bresenham line. The walk is inherently sequential, so the shader runs
+ * it on ONE invocation — correct and pixel-identical, but no faster than the
+ * CPU. Lines are a handful of ops per DE frame; keeping them on the device
+ * costs one dispatch and avoids a mid-frame CPU/GPU ordering flush, which is
+ * the reason this is here at all. */
+int32_t hvk_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2,
+                 int32_t thick, uint32_t rgba)
+{
+    if (!g_in_frame) return -1;
+    PushC pc;
+    memset(&pc, 0, sizeof pc);
+    pc.op = OP_LINE;
+    pc.rgba = frame_color(rgba);
+    pc.px = x1; pc.py = y1;
+    pc.pw = x2; pc.ph = y2;
+    pc.rad = thick;
+    /* The Bresenham brush writes over the line's whole bounding box, not the
+     * 1x1 grid it dispatches on, so the rect the overlap test needs is that
+     * box grown by the brush size. */
+    int32_t t = thick < 1 ? 1 : thick;
+    int32_t lx0 = x1 < x2 ? x1 : x2, lx1 = (x1 > x2 ? x1 : x2) + t;
+    int32_t ly0 = y1 < y2 ? y1 : y2, ly1 = (y1 > y2 ? y1 : y2) + t;
+    push_op_rect(pc, 1, 1, lx0, ly0, lx1, ly1);
+    return 0;
+}
+
+/* Copy `words` uint32s into the source arena, returning the base index, or -1.
+ * Every blit/glyph source is staged here because the shader reads ONE storage
+ * buffer for all of them; mask_off makes them share it. */
+static int32_t arena_put(const void* src, uint32_t words)
+{
+    if (ensure_arena((VkDeviceSize)(g_ause + words) * 4u)) { g_frame_err = -1; return -1; }
+    uint32_t off = g_ause;
+    memcpy(g_amap + off, src, (size_t)words * 4u);
+    g_ause += words;
+    return (int32_t)off;
+}
+
+/* Nearest-neighbour, source-over, optionally scaled blit — vk2d_raster_blit's
+ * op. dw/dh <= 0 means "natural size"; sw/sh <= 0 means "the whole source".
+ * The source image is RGBA8888 in HOST memory (a window surface, an icon, a
+ * glyph atlas), so it is staged into the arena; a BGRA frame gets the same
+ * per-pixel R/B flip vk_2d applies, done in the shader via `corners`. */
+int32_t hvk_blit(uint64_t src_base, int32_t src_w, int32_t src_h,
+                 int32_t dx, int32_t dy, int32_t dw, int32_t dh,
+                 int32_t sx, int32_t sy, int32_t sw, int32_t sh)
+{
+    if (!g_in_frame) return -1;
+    if (!src_base || src_w <= 0 || src_h <= 0) return 0;
+    int32_t rsx = sx, rsy = sy, rsw = sw, rsh = sh;
+    if (rsw <= 0) rsw = src_w;
+    if (rsh <= 0) rsh = src_h;
+    if (rsx < 0) rsx = 0;
+    if (rsy < 0) rsy = 0;
+    if (rsx + rsw > src_w) rsw = src_w - rsx;
+    if (rsy + rsh > src_h) rsh = src_h - rsy;
+    if (rsw <= 0 || rsh <= 0) return 0;
+    int32_t tw = dw > 0 ? dw : rsw;
+    int32_t th = dh > 0 ? dh : rsh;
+    int32_t yy0 = dy < 0 ? -dy : 0;
+    int32_t yy1 = dy + th > g_fh ? g_fh - dy : th;
+    int32_t xx0 = dx < 0 ? -dx : 0;
+    int32_t xx1 = dx + tw > g_fw ? g_fw - dx : tw;
+    if (xx0 >= xx1 || yy0 >= yy1) return 0;
+
+    /* Stage only the rows the op can actually sample, not the whole image. */
+    int32_t row0 = rsy, row1 = rsy + rsh;
+    uint32_t words = (uint32_t)src_w * (uint32_t)(row1 - row0);
+    int32_t off = arena_put((const uint8_t*)(uintptr_t)src_base
+                            + (size_t)row0 * (size_t)src_w * 4u, words);
+    if (off < 0) return -1;
+
+    PushC pc;
+    memset(&pc, 0, sizeof pc);
+    pc.op = OP_BLIT;
+    pc.bx = dx + xx0;
+    pc.by = dy + yy0;
+    pc.dx = dx; pc.dy = dy;
+    pc.rsx = rsx; pc.rsy = 0;            /* rows rebased to the staged slice */
+    pc.rsw = rsw; pc.rsh = rsh;
+    pc.tw = tw;   pc.th = th;
+    pc.src_w = src_w;
+    pc.src_h = row1 - row0;
+    pc.mask_off = off;
+    pc.corners = g_fbgra;                /* shader-side source R/B flip */
+    push_op(pc, xx1 - xx0, yy1 - yy0);
+    return 0;
+}
+
+/* Anti-aliased glyph / ink coverage mask — vk2d_raster_cov_mask's op. cov_base
+ * is cov_w*cov_h BYTES of coverage; the shader indexes one coverage value per
+ * uint, so the expansion happens here on the way into the arena. */
+int32_t hvk_glyph(uint64_t cov_base, int32_t cov_w, int32_t cov_h,
+                  int32_t dx, int32_t dy, uint32_t rgba)
+{
+    if (!g_in_frame) return -1;
+    if (!cov_base || cov_w <= 0 || cov_h <= 0 || (rgba & 0xFF) == 0) return 0;
+    int32_t x0 = dx < 0 ? 0 : dx, y0 = dy < 0 ? 0 : dy;
+    int32_t x1 = dx + cov_w > g_fw ? g_fw : dx + cov_w;
+    int32_t y1 = dy + cov_h > g_fh ? g_fh : dy + cov_h;
+    if (x0 >= x1 || y0 >= y1) return 0;
+    uint32_t words = (uint32_t)cov_w * (uint32_t)cov_h;
+    if (ensure_arena((VkDeviceSize)(g_ause + words) * 4u)) { g_frame_err = -1; return -1; }
+    const uint8_t* cov = (const uint8_t*)(uintptr_t)cov_base;
+    uint32_t off = g_ause;
+    for (uint32_t i = 0; i < words; i++) g_amap[off + i] = cov[i];
+    g_ause += words;
+
+    PushC pc;
+    memset(&pc, 0, sizeof pc);
+    pc.op = OP_COVMASK;
+    pc.rgba = frame_color(rgba);
+    pc.bx = x0; pc.by = y0;
+    pc.px = dx; pc.py = dy;
+    pc.pw = cov_w; pc.ph = cov_h;
+    pc.mask_off = (int32_t)off;
+    push_op(pc, x1 - x0, y1 - y0);
+    return 0;
+}
+
+/* Stage `cnt` recorded ops as an OP_BATCH table (24 uints each, mirroring the
+ * push-constant block field for field — see scripts/shaders/vk2d_raster.comp).
+ * Returns the table's base index in src[], or -1. */
+static int32_t batch_table(int32_t first, int32_t cnt)
+{
+    uint32_t words = (uint32_t)cnt * HVK_BATCH_STRIDE;
+    if (ensure_arena((VkDeviceSize)(g_ause + words) * 4u)) return -1;
+    uint32_t off = g_ause;
+    for (int32_t n = 0; n < cnt; n++) {
+        const PushC* o = &g_ops[first + n];
+        uint32_t* e = g_amap + off + (uint32_t)n * HVK_BATCH_STRIDE;
+        e[0]  = (uint32_t)o->op;    e[1]  = (uint32_t)o->bx;
+        e[2]  = (uint32_t)o->by;    e[3]  = (uint32_t)o->dispw;
+        e[4]  = (uint32_t)o->disph; e[5]  = o->rgba;
+        e[6]  = (uint32_t)o->px;    e[7]  = (uint32_t)o->py;
+        e[8]  = (uint32_t)o->pw;    e[9]  = (uint32_t)o->ph;
+        e[10] = (uint32_t)o->rad;   e[11] = (uint32_t)o->corners;
+        e[12] = (uint32_t)o->dx;    e[13] = (uint32_t)o->dy;
+        e[14] = (uint32_t)o->rsx;   e[15] = (uint32_t)o->rsy;
+        e[16] = (uint32_t)o->rsw;   e[17] = (uint32_t)o->rsh;
+        e[18] = (uint32_t)o->tw;    e[19] = (uint32_t)o->th;
+        e[20] = (uint32_t)o->src_w; e[21] = (uint32_t)o->src_h;
+        e[22] = (uint32_t)o->mask_off;
+        e[23] = 0;
+    }
+    g_ause += words;
+    return (int32_t)off;
+}
+
+/* Record + submit every pending op and WAIT. On return the frame's pixels are
+ * final and visible through the mapped pointer, so the caller may read them,
+ * present them, or run the software rasterizer over them for an op the device
+ * does not encode — the ordering guarantee that makes mixed frames correct. */
+int32_t hvk_frame_sync(void)
+{
+    if (!hvk_available() || !g_fmap) return -1;
+    if (g_nops == 0) return g_frame_err;
+    uint64_t t0 = now_us();
+
+    VkCommandBufferAllocateInfo cai;
+    memset(&cai, 0, sizeof cai);
+    cai.sType = ST_COMMAND_BUFFER_ALLOCATE_INFO;
+    cai.commandPool = g_pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    VkCommandBuffer cb;
+    VKCK(p_vkAllocateCommandBuffers(g_dev, &cai, &cb));
+    VkCommandBufferBeginInfo bi;
+    memset(&bi, 0, sizeof bi);
+    bi.sType = ST_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VKCK(p_vkBeginCommandBuffer(cb, &bi));
+
+    p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_pipe);
+    p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_playout,
+                              0, 1, &g_dset, 0, 0);
+    /* 2D painting is ORDERED: op n+1 may blend over op n's pixels, so a
+     * shader-write -> shader-read barrier separates every dispatch. */
+    VkMemoryBarrier mb;
+    memset(&mb, 0, sizeof mb);
+    mb.sType = ST_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    int32_t i = 0;
+    while (i < g_nops) {
+        if (g_bar[i])
+            p_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                   0, 1, &mb, 0, 0, 0, 0);
+        /* [i, gend) is a maximal run of ops that are pairwise disjoint (each
+         * was checked against the union of the ones before it), so they may
+         * execute in ANY order — including all at once. */
+        int32_t gend = i + 1;
+        while (gend < g_nops && !g_bar[gend]) gend++;
+
+        int32_t j = i;
+        while (j < gend) {
+            int32_t k = j;
+            uint32_t mgx = g_grp[j][0], mgy = g_grp[j][1];
+            uint64_t sum = (uint64_t)mgx * mgy;
+            int32_t cnt = 1;
+            /* A batch dispatches maxgx*maxgy workgroups for EVERY entry, so
+             * mixing a full-screen fill with a glyph would launch millions of
+             * workgroups that immediately return. Grow the batch only while
+             * the padded launch stays within 2x the work the separate
+             * dispatches would have done. */
+            while (k + 1 < gend && cnt < HVK_BATCH_MAX) {
+                uint32_t nx = g_grp[k + 1][0] > mgx ? g_grp[k + 1][0] : mgx;
+                uint32_t ny = g_grp[k + 1][1] > mgy ? g_grp[k + 1][1] : mgy;
+                uint64_t nsum = sum + (uint64_t)g_grp[k + 1][0] * g_grp[k + 1][1];
+                if ((uint64_t)nx * ny * (uint64_t)(cnt + 1) > 2 * nsum) break;
+                mgx = nx; mgy = ny; sum = nsum; cnt++; k++;
+            }
+            if (cnt == 1) {
+                p_vkCmdPushConstants(cb, g_playout, VK_SHADER_STAGE_COMPUTE_BIT,
+                                     0, (uint32_t)sizeof(PushC), &g_ops[j]);
+                p_vkCmdDispatch(cb, g_grp[j][0], g_grp[j][1], 1);
+            } else {
+                int32_t off = batch_table(j, cnt);
+                if (off < 0) { g_frame_err = -1; break; }
+                PushC bpc;
+                memset(&bpc, 0, sizeof bpc);
+                bpc.op = OP_BATCH;
+                bpc.img_w = g_fw;
+                bpc.img_h = g_fh;
+                bpc.rad = cnt;              /* entry count   */
+                bpc.mask_off = off;         /* table base    */
+                p_vkCmdPushConstants(cb, g_playout, VK_SHADER_STAGE_COMPUTE_BIT,
+                                     0, (uint32_t)sizeof(PushC), &bpc);
+                p_vkCmdDispatch(cb, mgx, mgy, (uint32_t)cnt);
+                g_stat_batched += (uint64_t)cnt;
+            }
+            g_stat_dispatches++;
+            j = k + 1;
+        }
+        i = gend;
+    }
+    VKCK(p_vkEndCommandBuffer(cb));
+
+    VkSubmitInfo si;
+    memset(&si, 0, sizeof si);
+    si.sType = ST_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    VKCK(p_vkResetFences(g_dev, 1, &g_fence));
+    VKCK(p_vkQueueSubmit(g_queue, 1, &si, g_fence));
+    VKCK(p_vkWaitForFences(g_dev, 1, &g_fence, VK_TRUE, ~0ull));
+    p_vkFreeCommandBuffers(g_dev, g_pool, 1, &cb);
+
+    g_stat_submits++;
+    g_stat_last_us = now_us() - t0;
+    g_nops = 0;
+    g_ause = 0;               /* staged sources are consumed by the submit */
+    return g_frame_err;
+}
+
+/* Finish the frame: submit anything outstanding and close recording.
+ * 0 = every op of this frame was executed on the device; -1 = something
+ * failed and the caller must re-render the frame in software. */
+int32_t hvk_frame_end(void)
+{
+    int32_t r = hvk_frame_sync();
+    g_in_frame = 0;
+    if (r == 0) g_stat_frames++;
+    return r;
+}
+
+uint64_t hvk_stat_frames(void)      { return g_stat_frames; }
+uint64_t hvk_stat_ops(void)         { return g_stat_ops; }
+uint64_t hvk_stat_dispatches(void)  { return g_stat_dispatches; }
+uint64_t hvk_stat_submits(void)     { return g_stat_submits; }
+/* Barriers the last frame needed. dispatches - barriers is how much of the
+ * frame the device was allowed to run in parallel. */
+int32_t  hvk_stat_barriers(void)    { return g_barriers; }
+/* Ops folded into a multi-entry OP_BATCH dispatch rather than getting a
+ * dispatch of their own. This is where a page of text stops costing one
+ * device round of overhead per glyph. */
+uint64_t hvk_stat_batched(void)     { return g_stat_batched; }
+uint64_t hvk_stat_last_us(void)     { return g_stat_last_us; }
+uint64_t hvk_stat_arena_bytes(void) { return g_stat_arena_bytes; }
+int32_t  hvk_pending_ops(void)      { return g_nops; }

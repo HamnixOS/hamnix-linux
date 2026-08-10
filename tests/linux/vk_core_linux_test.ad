@@ -1,0 +1,275 @@
+# tests/linux/vk_core_linux_test.ad — the vk_core seam gate for VK_BACKEND_LINUX.
+#
+# tests/linux/vk_linux_test.ad proves the BACKEND is byte-identical to vk_2d.
+# This proves the SEAM: that vk_core's own recorded command list, submitted
+# through vkQueueSubmit, produces the same pixels whether it is replayed by the
+# software rasterizer or routed to the real Vulkan device — including the ops
+# the device cannot encode (a self-blit) which must be CPU-composited into the
+# device frame in draw order.
+#
+# It also runs lib/vk/vk_selftest.ad's software conformance suite, because the
+# router edits live inside vkQueueSubmit and the first thing to prove is that
+# the software path they sit next to is untouched.
+#
+# BUILD:
+#   scripts/hamlinux_build.sh tests/linux/vk_core_linux_test.ad \
+#       build/host/vk_core_linux_test user/linux-vk.c -ldl
+# RUN:
+#   VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+#       build/host/vk_core_linux_test
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+
+from lib.vk.vk_core import (
+    VK_SUCCESS, VK_BACKEND_SW, VK_BACKEND_LINUX,
+    VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_COLOR,
+    vkCreateInstance, vkEnumeratePhysicalDevices, vkCreateDevice,
+    vkGetDeviceQueue, vkAllocateMemory, vkCreateImage, vkBindImageMemory,
+    vkCreateCommandPool, vkAllocateCommandBuffers,
+    vkBeginCommandBuffer, vkEndCommandBuffer, vkQueueSubmit,
+    vkCmdBeginRenderPass, vkCmdEndRenderPass,
+    vkCmd2DFillRect, vkCmd2DFillRectAlpha, vkCmd2DBlit,
+    vkCmd2DDrawLine, vkCmd2DFillRoundRect, vkCmd2DGlyph,
+    vk_set_backend, vk_get_backend, vk_linux_raster_enabled,
+    vk_image_mem_base,
+    vk_linux_frames_rendered, vk_linux_last_frame_gpu_ops,
+    vk_linux_last_frame_sw_ops, vk_linux_frame_zero_copy,
+)
+from lib.vk.vk_selftest import vk_software_raster_selftest
+
+IMG_W: uint64 = 160
+IMG_H: uint64 = 96
+
+sprite: Array[1024, uint8]          # 16x16 RGBA source image
+cov: Array[192, uint8]              # 12x16 coverage cell
+ref_copy: Array[61440, uint8]       # 160*96*4 software reference
+
+obuf: Array[512, uint8]
+obuf_n: uint64 = 0
+fails: int32 = 0
+
+
+def _o_ch(c: uint8):
+    if obuf_n < 511:
+        obuf[obuf_n] = c
+        obuf_n = obuf_n + 1
+
+
+def _o_str(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0:
+        _o_ch(s[i])
+        i = i + 1
+
+
+def _o_dec(v: uint64):
+    digs: Array[24, uint8]
+    n: uint64 = 0
+    x: uint64 = v
+    if x == 0:
+        _o_ch(48)
+        return
+    while x > 0:
+        digs[n] = cast[uint8](x % 10) + 48
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        _o_ch(digs[n])
+
+
+def _o_flush():
+    if obuf_n > 0:
+        sys_write(1, &obuf[0], obuf_n)
+        obuf_n = 0
+
+
+def _build_assets():
+    y: uint64 = 0
+    while y < 16:
+        x: uint64 = 0
+        while x < 16:
+            o: uint64 = cast[uint64](&sprite[0]) + (y * 16 + x) * 4
+            cast[Ptr[uint8]](o)[0] = cast[uint8](x * 16)
+            cast[Ptr[uint8]](o + 1)[0] = cast[uint8](y * 16)
+            cast[Ptr[uint8]](o + 2)[0] = 200
+            cast[Ptr[uint8]](o + 3)[0] = cast[uint8](128 + x * 8)
+            x = x + 1
+        y = y + 1
+    cy: uint64 = 0
+    while cy < 16:
+        cx: uint64 = 0
+        while cx < 12:
+            cov[cy * 12 + cx] = cast[uint8]((cy * 12 + cx) * 255 / 191)
+            cx = cx + 1
+        cy = cy + 1
+
+
+# The recorded frame. Deliberately contains a SELF-BLIT (source == the frame
+# image), which the Linux backend cannot encode: it must be CPU-composited
+# into the device frame in draw order, and the result must still be identical.
+def _record(cb: uint64, img: uint64, src_img: uint64):
+    vkCmdBeginRenderPass(cb, img, 0, 1, 0x101828FF, 0)
+    vkCmd2DFillRect(cb, 0, 0, cast[int32](IMG_W), 24, 0x2B3350FF)
+    vkCmd2DFillRectAlpha(cb, 10, 30, 80, 40, 0x00CCFF80)
+    vkCmd2DFillRoundRect(cb, 100, 30, 50, 40, 8, 15, 0xFF33CCFF)
+    vkCmd2DDrawLine(cb, 4, 90, 150, 70, 2, 0xFFFF00FF)
+    vkCmd2DBlit(cb, src_img, 20, 8, 32, 32, 0, 0, 16, 16)
+    vkCmd2DGlyph(cb, 60, 60, 12, 16, cast[uint64](&cov[0]), 0xFFFFFFFF)
+    vkCmd2DGlyph(cb, 74, 60, 12, 16, cast[uint64](&cov[0]), 0x00000090)
+    # The op with no device path: a scroll of the frame onto itself.
+    vkCmd2DBlit(cb, img, 0, 76, 60, 16, 20, 8, 60, 16)
+    vkCmd2DFillRect(cb, 120, 80, 30, 12, 0x22FF88FF)
+    vkCmdEndRenderPass(cb)
+
+
+def _make_image(dev: uint64, w: uint64, h: uint64, out: Ptr[uint64]) -> int32:
+    mem: Array[1, uint64]
+    if vkCreateImage(dev, w, h, VK_FORMAT_B8G8R8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR, out) != VK_SUCCESS:
+        return -1
+    if vkAllocateMemory(dev, w * h * 4, &mem[0]) != VK_SUCCESS:
+        return -1
+    if vkBindImageMemory(out[0], mem[0], 0) != VK_SUCCESS:
+        return -1
+    return 0
+
+
+def main() -> int32:
+    _build_assets()
+
+    # vk_selftest returns 1 = PASS, 0 = FAIL (not an errno).
+    if vk_software_raster_selftest() != 1:
+        _o_str(cast[Ptr[uint8]]("SW_SELFTEST FAIL\n"))
+        _o_flush()
+        return 1
+    _o_str(cast[Ptr[uint8]]("SW_SELFTEST PASS\n"))
+    _o_flush()
+
+    inst: Array[1, uint64]
+    phys: Array[1, uint64]
+    dev: Array[1, uint64]
+    queue: Array[1, uint64]
+    pool: Array[1, uint64]
+    cb: Array[1, uint64]
+    img: Array[1, uint64]
+    simg: Array[1, uint64]
+    smem: Array[1, uint64]
+
+    if vkCreateInstance(&inst[0]) != VK_SUCCESS:
+        return 1
+    if vkEnumeratePhysicalDevices(inst[0], &phys[0]) != VK_SUCCESS:
+        return 1
+    if vkCreateDevice(phys[0], &dev[0]) != VK_SUCCESS:
+        return 1
+    if vkGetDeviceQueue(dev[0], &queue[0]) != VK_SUCCESS:
+        return 1
+    if vkCreateCommandPool(dev[0], &pool[0]) != VK_SUCCESS:
+        return 1
+    if vkAllocateCommandBuffers(pool[0], &cb[0]) != VK_SUCCESS:
+        return 1
+    if _make_image(dev[0], IMG_W, IMG_H, &img[0]) != 0:
+        return 1
+    # The blit source: a 16x16 image whose backing we fill by hand.
+    if vkCreateImage(dev[0], 16, 16, VK_FORMAT_B8G8R8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR, &simg[0]) != VK_SUCCESS:
+        return 1
+    if vkAllocateMemory(dev[0], 1024, &smem[0]) != VK_SUCCESS:
+        return 1
+    if vkBindImageMemory(simg[0], smem[0], 0) != VK_SUCCESS:
+        return 1
+    sbase: uint64 = vk_image_mem_base(simg[0])
+    i: uint64 = 0
+    while i < 1024:
+        cast[Ptr[uint8]](sbase + i)[0] = sprite[i]
+        i = i + 1
+
+    ibase: uint64 = vk_image_mem_base(img[0])
+    nbytes: uint64 = IMG_W * IMG_H * 4
+
+    # --- software replay: the oracle ---------------------------------------
+    vk_set_backend(VK_BACKEND_SW)
+    vkBeginCommandBuffer(cb[0])
+    _record(cb[0], img[0], simg[0])
+    vkEndCommandBuffer(cb[0])
+    if vkQueueSubmit(queue[0], cb[0]) != VK_SUCCESS:
+        return 1
+    i = 0
+    while i < nbytes:
+        ref_copy[i] = cast[Ptr[uint8]](ibase + i)[0]
+        i = i + 1
+
+    # --- the same frame, routed to the real Vulkan device ------------------
+    if vk_set_backend(VK_BACKEND_LINUX) != VK_SUCCESS:
+        _o_str(cast[Ptr[uint8]]("SKIP vk_set_backend(LINUX) refused; "))
+        _o_str(cast[Ptr[uint8]]("backend stayed "))
+        _o_dec(cast[uint64](vk_get_backend()))
+        _o_ch(10)
+        _o_flush()
+        # Refusing when there is no usable device is the CORRECT behaviour.
+        return 0
+    if vk_linux_raster_enabled() == 0:
+        _o_str(cast[Ptr[uint8]]("FAIL backend selected but raster not armed\n"))
+        _o_flush()
+        return 1
+    # Scribble the image so a router that silently did nothing cannot pass.
+    i = 0
+    while i < nbytes:
+        cast[Ptr[uint8]](ibase + i)[0] = 0xA5
+        i = i + 1
+    vkBeginCommandBuffer(cb[0])
+    _record(cb[0], img[0], simg[0])
+    vkEndCommandBuffer(cb[0])
+    if vkQueueSubmit(queue[0], cb[0]) != VK_SUCCESS:
+        return 1
+
+    if vk_linux_frames_rendered() == 0:
+        _o_str(cast[Ptr[uint8]]("FAIL frame was not routed to the device\n"))
+        _o_flush()
+        return 1
+
+    bad: uint64 = 0
+    first: int64 = -1
+    i = 0
+    while i < nbytes:
+        if cast[Ptr[uint8]](ibase + i)[0] != ref_copy[i]:
+            if first < 0:
+                first = cast[int64](i)
+            bad = bad + 1
+        i = i + 1
+
+    _o_str(cast[Ptr[uint8]]("ROUTER gpu_ops="))
+    _o_dec(vk_linux_last_frame_gpu_ops())
+    _o_str(cast[Ptr[uint8]](" sw_ops="))
+    _o_dec(vk_linux_last_frame_sw_ops())
+    _o_str(cast[Ptr[uint8]](" zero_copy="))
+    _o_dec(cast[uint64](vk_linux_frame_zero_copy()))
+    _o_ch(10)
+    if bad == 0:
+        _o_str(cast[Ptr[uint8]]("ROUTER_IDENTITY PASS byte-identical "))
+        _o_dec(nbytes)
+        _o_str(cast[Ptr[uint8]](" bytes\n"))
+    else:
+        fails = fails + 1
+        _o_str(cast[Ptr[uint8]]("ROUTER_IDENTITY FAIL mismatched="))
+        _o_dec(bad)
+        _o_str(cast[Ptr[uint8]](" first_px="))
+        _o_dec(cast[uint64](first) / 4 % IMG_W)
+        _o_ch(44)
+        _o_dec(cast[uint64](first) / 4 / IMG_W)
+        _o_ch(10)
+
+    # Selecting SW again must disarm the router.
+    vk_set_backend(VK_BACKEND_SW)
+    if vk_linux_raster_enabled() != 0:
+        fails = fails + 1
+        _o_str(cast[Ptr[uint8]]("FAIL backend SW left the router armed\n"))
+
+    if fails == 0:
+        _o_str(cast[Ptr[uint8]]("VK_CORE_LINUX_GATE PASS\n"))
+    else:
+        _o_str(cast[Ptr[uint8]]("VK_CORE_LINUX_GATE FAIL\n"))
+    _o_flush()
+    if fails != 0:
+        return 1
+    return 0
