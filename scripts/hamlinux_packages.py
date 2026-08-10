@@ -1008,6 +1008,17 @@ def describe(cmd):
     return "hamnix-linux %s command" % cmd
 
 
+# Per-application additions to hamlinux_build.sh's default object list.
+# wsysd selects the real-Vulkan rasterization backend, so it needs the C shim
+# that dlopens the ICD (user/linux-vk.c), the glibc floor that lets
+# lib/vk/vk_core.ad link outside the Hamnix kernel (user/linux-vkhost.c) and
+# -ldl. Everything else builds against the defaults; a GPU bring-up and a
+# libdl dependency are not something every coreutil should carry.
+EXTRA_OBJS = {
+    "wsysd": ["user/linux-vk.c", "user/linux-vkhost.c", "-ldl"],
+}
+
+
 def build_one(cmd, objdir):
     """Build user/<cmd>.ad through the Linux lane. Returns the ELF path or
     None. Reuses an existing artefact so a rebuild of the channel is cheap."""
@@ -1018,7 +1029,8 @@ def build_one(cmd, objdir):
     if os.path.exists(out) and os.path.getmtime(out) > os.path.getmtime(src):
         return out
     rc = subprocess.call(
-        [os.path.join(ROOT, "scripts/hamlinux_build.sh"), src, out],
+        [os.path.join(ROOT, "scripts/hamlinux_build.sh"), src, out]
+        + EXTRA_OBJS.get(cmd, []),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT)
     return out if rc == 0 else None
 

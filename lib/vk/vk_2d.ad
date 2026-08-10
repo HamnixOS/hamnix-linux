@@ -123,6 +123,96 @@ def vk2d_get_bgra() -> int32:
     return _vk2d_bgra
 
 
+# ====================================================================
+# THE DEVICE ROUTER — one optional seam, and why it lives HERE
+# ====================================================================
+# lib/vk/vk_linux.ad can run this module's whole op vocabulary on a real
+# Vulkan device, byte-identically (scripts/test_vk_linux.sh asserts exactly
+# that). The compositor (user/wsysd.ad) does not build vk_core command
+# buffers, though: it rasterizes through lib/hamui_host.ad, which calls the
+# six vk2d_raster_* entry points below DIRECTLY. So there was no seam at
+# which the frame could be handed to the device.
+#
+# This is that seam, and its shape is deliberate:
+#
+#   * It is a set of FUNCTION POINTERS, not an import. vk_2d must not gain a
+#     dependency on vk_linux: 66 files in this tree reach this module through
+#     hamui_host, and every one of them would then have to link libdl and a
+#     Vulkan device bring-up to draw a rectangle.
+#   * It is armed for exactly ONE surface — (base, img_w, img_h). A routed op
+#     is one whose destination IS the GPU-resident frame; anything drawn into
+#     another image (hamui_host's own hostfb, a window cache, a test target)
+#     takes the CPU path with no test beyond three integer compares. The
+#     device has one frame buffer, so routing an op aimed anywhere else would
+#     paint the wrong surface — a success-shaped wrong answer, which is the
+#     failure mode this tree keeps being bitten by.
+#   * A hook returns 0 when the device took the op and NON-ZERO when it did
+#     not, and a non-zero answer falls through to the CPU code below it. The
+#     hook is responsible for ordering (vk_linux_frame_sync) before it
+#     refuses, because the CPU then writes the same memory.
+#   * The hooks receive the op's colour EXACTLY as the caller passed it,
+#     BEFORE the _vk2d_bgra R/B swap, because the backend applies its own
+#     equivalent swap (linux-vk.c frame_color / the shader's source flip).
+#     Handing it a pre-swapped colour would double-swap fills and paint the
+#     desktop with blue faces.
+#
+# Default: OFF, no pointers, not one extra branch taken in any existing
+# caller beyond a single module-level integer test.
+_vk2d_rt_on:   int32  = 0
+_vk2d_rt_base: uint64 = 0
+_vk2d_rt_w:    uint64 = 0
+_vk2d_rt_h:    uint64 = 0
+_vk2d_rt_fill: uint64 = 0
+_vk2d_rt_rr:   uint64 = 0
+_vk2d_rt_line: uint64 = 0
+_vk2d_rt_blit: uint64 = 0
+_vk2d_rt_cov:  uint64 = 0
+
+
+def vk2d_set_router(base: uint64, img_w: uint64, img_h: uint64,
+                    fill: uint64, roundrect: uint64, line: uint64,
+                    blit: uint64, cov: uint64) -> int32:
+    # Arm the device router for the single surface (base, img_w, img_h).
+    # Every argument is the address of a function (cast[uint64](f) at the call
+    # site); a missing one disarms rather than half-arms, because a frame in
+    # which some ops reached the device and one silently did nothing is worse
+    # than a frame that never left the CPU.
+    if base == 0 or img_w == 0 or img_h == 0:
+        return -1
+    if fill == 0 or roundrect == 0 or line == 0 or blit == 0 or cov == 0:
+        return -1
+    _vk2d_rt_base = base
+    _vk2d_rt_w = img_w
+    _vk2d_rt_h = img_h
+    _vk2d_rt_fill = fill
+    _vk2d_rt_rr = roundrect
+    _vk2d_rt_line = line
+    _vk2d_rt_blit = blit
+    _vk2d_rt_cov = cov
+    _vk2d_rt_on = 1
+    return 0
+
+
+def vk2d_clear_router():
+    _vk2d_rt_on = 0
+
+
+def vk2d_router_armed() -> int32:
+    return _vk2d_rt_on
+
+
+def _vk2d_routed(color_base: uint64, img_w: uint64, img_h: uint64) -> int32:
+    if _vk2d_rt_on == 0:
+        return 0
+    if color_base != _vk2d_rt_base:
+        return 0
+    if img_w != _vk2d_rt_w:
+        return 0
+    if img_h != _vk2d_rt_h:
+        return 0
+    return 1
+
+
 def _vk2d_pack_opaque(r: uint8, g: uint8, b: uint8) -> uint32:
     # Packed little-endian RGBA8888 word with alpha forced opaque (0xFF):
     # in memory this is bytes [r, g, b, 255] — identical to four byte
@@ -194,6 +284,12 @@ def vk2d_raster_fill_rect(color_base: uint64, img_w: uint64, img_h: uint64,
     # sdl_fill_rect (whose `fill` verb is opaque).
     if color_base == 0 or w <= 0 or h <= 0:
         return
+    if _vk2d_routed(color_base, img_w, img_h) != 0:
+        rf: Fn[int32, int32, int64, int64, int64, int64, uint32] = \
+            cast[Fn[int32, int32, int64, int64, int64, int64,
+                    uint32]](_vk2d_rt_fill)
+        if rf(0, x, y, w, h, rgba) == 0:
+            return
     r: uint8 = cast[uint8]((rgba >> 24) & 0xFF)
     g: uint8 = cast[uint8]((rgba >> 16) & 0xFF)
     b: uint8 = cast[uint8]((rgba >> 8) & 0xFF)
@@ -248,6 +344,12 @@ def vk2d_raster_fill_rect_alpha(color_base: uint64, img_w: uint64,
     a: uint8 = cast[uint8](rgba & 0xFF)
     if a == 0:
         return
+    if _vk2d_routed(color_base, img_w, img_h) != 0:
+        rf: Fn[int32, int32, int64, int64, int64, int64, uint32] = \
+            cast[Fn[int32, int32, int64, int64, int64, int64,
+                    uint32]](_vk2d_rt_fill)
+        if rf(1, x, y, w, h, rgba) == 0:
+            return
     if _vk2d_bgra != 0:
         rb_t: uint8 = r
         r = b
@@ -322,6 +424,13 @@ def vk2d_raster_blit(color_base: uint64, img_w: uint64, img_h: uint64,
     # is the target for hamSDL sdl_blit).
     if color_base == 0 or src_base == 0:
         return
+    if _vk2d_routed(color_base, img_w, img_h) != 0:
+        rb: Fn[int32, uint64, uint64, uint64, int64, int64, int64, int64,
+               int64, int64, int64, int64] = \
+            cast[Fn[int32, uint64, uint64, uint64, int64, int64, int64, int64,
+                    int64, int64, int64, int64]](_vk2d_rt_blit)
+        if rb(src_base, src_w, src_h, dx, dy, dw, dh, sx, sy, sw, sh) == 0:
+            return
     # Default the source rect to the whole source image.
     rsx: int64 = sx
     rsy: int64 = sy
@@ -424,6 +533,12 @@ def vk2d_raster_cov_mask(color_base: uint64, img_w: uint64, img_h: uint64,
     ca: uint32 = rgba & 0xFF
     if ca == 0:
         return
+    if _vk2d_routed(color_base, img_w, img_h) != 0:
+        rc: Fn[int32, uint64, int64, int64, int64, int64, uint32] = \
+            cast[Fn[int32, uint64, int64, int64, int64, int64,
+                    uint32]](_vk2d_rt_cov)
+        if rc(cov_base, cov_w, cov_h, dx, dy, rgba) == 0:
+            return
     if _vk2d_bgra != 0:
         rb_t: uint8 = r
         r = b
@@ -549,6 +664,12 @@ def vk2d_raster_fill_roundrect(color_base: uint64, img_w: uint64,
     a: uint32 = rgba & 0xFF
     if a == 0:
         return
+    if _vk2d_routed(color_base, img_w, img_h) != 0:
+        rq: Fn[int32, int64, int64, int64, int64, int64, int32, uint32] = \
+            cast[Fn[int32, int64, int64, int64, int64, int64, int32,
+                    uint32]](_vk2d_rt_rr)
+        if rq(x, y, w, h, rad, corners, rgba) == 0:
+            return
     rr: int64 = rad
     if rr < 0:
         rr = 0
@@ -641,6 +762,12 @@ def vk2d_raster_draw_line(color_base: uint64, img_w: uint64, img_h: uint64,
     # hamSDL sdl_draw_line_t.
     if color_base == 0:
         return
+    if _vk2d_routed(color_base, img_w, img_h) != 0:
+        rl: Fn[int32, int64, int64, int64, int64, int64, uint32] = \
+            cast[Fn[int32, int64, int64, int64, int64, int64,
+                    uint32]](_vk2d_rt_line)
+        if rl(x1, y1, x2, y2, thick, rgba) == 0:
+            return
     r: uint8 = cast[uint8]((rgba >> 24) & 0xFF)
     g: uint8 = cast[uint8]((rgba >> 16) & 0xFF)
     b: uint8 = cast[uint8]((rgba >> 8) & 0xFF)

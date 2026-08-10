@@ -74,12 +74,29 @@ GUI_APPS=(
 )
 APPS+=("${GUI_APPS[@]}")
 
+# Applications that need more than the default object list. wsysd selects the
+# Vulkan rasterization backend (lib/vk/vk_linux.ad), so it carries the C shim
+# that dlopens the ICD, the glibc floor vk_core.ad needs in order to link at
+# all, and -ldl. These are deliberately NOT in hamlinux_build.sh's defaults:
+# only a program that actually wants a GPU should pay a libdl dependency and a
+# Vulkan device bring-up. Getting this wrong is not subtle — wsysd would
+# simply fail to link and drop out of the image — but it is silent in the
+# build log, which is why it is named here rather than assumed.
+app_extra_objs() {
+    case "$1" in
+    wsysd) echo "user/linux-vk.c user/linux-vkhost.c -ldl" ;;
+    *)     echo "" ;;
+    esac
+}
+
 echo "[image] building $(( ${#APPS[@]} )) applications + the Adder PID 1"
 BUILT=0; MISSING=()
 for app in "${APPS[@]}"; do
     src="user/$app.ad"
     if [ ! -f "$src" ]; then MISSING+=("$app(no source)"); continue; fi
-    if scripts/hamlinux_build.sh "$src" "$OUT/obj/$app.elf" >/dev/null 2>&1; then
+    # shellcheck disable=SC2046  # word splitting is what we want here
+    if scripts/hamlinux_build.sh "$src" "$OUT/obj/$app.elf" \
+            $(app_extra_objs "$app") >/dev/null 2>&1; then
         install -m755 "$OUT/obj/$app.elf" "$ROOT/bin/$app"
         BUILT=$((BUILT+1))
     else

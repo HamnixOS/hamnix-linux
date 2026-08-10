@@ -39,7 +39,8 @@ from lib.vk.vk_linux import (
     vk_linux_fill_rect, vk_linux_roundrect, vk_linux_line,
     vk_linux_blit, vk_linux_glyph,
     vk_linux_last_submit_us, vk_linux_dispatches, vk_linux_barriers,
-    vk_linux_batched_ops,
+    vk_linux_batched_ops, vk_linux_ops, vk_linux_staged_words,
+    vk_linux_cov_reuse,
 )
 
 SCENE_W: uint64 = 96
@@ -336,6 +337,16 @@ def _bench_pair(with_text: int32, gbase: uint64, label: Ptr[uint8]) -> int32:
     emit_mode = EMIT_GPU
     emit_base = gbase
     gpu_best: uint64 = 0xFFFFFFFFFFFFFFFF
+    # Snapshot the running counters so what gets printed is PER FRAME. These
+    # are the only numbers in this gate that mean the same thing on llvmpipe
+    # and on silicon -- an op is an op and a dispatch is a dispatch -- so they
+    # are what an optimisation is measured against. The microseconds below are
+    # llvmpipe's, and llvmpipe is not a GPU.
+    ops0: uint64 = vk_linux_ops()
+    disp0: uint64 = vk_linux_dispatches()
+    bat0: uint64 = vk_linux_batched_ops()
+    stg0: uint64 = vk_linux_staged_words()
+    reu0: uint64 = vk_linux_cov_reuse()
     it: int32 = 0
     while it < 20:
         t0: uint64 = _now_us()
@@ -354,7 +365,11 @@ def _bench_pair(with_text: int32, gbase: uint64, label: Ptr[uint8]) -> int32:
         if dt < gpu_best:
             gpu_best = dt
         it = it + 1
-    nbatched: uint64 = vk_linux_batched_ops()
+    nops: uint64 = (vk_linux_ops() - ops0) / 20
+    ndisp: uint64 = (vk_linux_dispatches() - disp0) / 20
+    nbatched: uint64 = (vk_linux_batched_ops() - bat0) / 20
+    nstaged: uint64 = (vk_linux_staged_words() - stg0) / 20
+    nreuse: uint64 = (vk_linux_cov_reuse() - reu0) / 20
     nbar: int32 = vk_linux_barriers()
 
     vk2d_set_bgra(1)
@@ -382,10 +397,18 @@ def _bench_pair(with_text: int32, gbase: uint64, label: Ptr[uint8]) -> int32:
     _o_dec(sw_best)
     _o_str(cast[Ptr[uint8]](" GPU_PCT_OF_SW "))
     _o_dec(gpu_best * 100 / sw_best)
+    _o_str(cast[Ptr[uint8]](" ops "))
+    _o_dec(nops)
+    _o_str(cast[Ptr[uint8]](" dispatches "))
+    _o_dec(ndisp)
     _o_str(cast[Ptr[uint8]](" batched_ops "))
     _o_dec(nbatched)
     _o_str(cast[Ptr[uint8]](" barriers "))
     _o_dec(cast[uint64](nbar))
+    _o_str(cast[Ptr[uint8]](" staged_words "))
+    _o_dec(nstaged)
+    _o_str(cast[Ptr[uint8]](" cov_reuse "))
+    _o_dec(nreuse)
     _o_ch(10)
     _o_flush()
     return 0

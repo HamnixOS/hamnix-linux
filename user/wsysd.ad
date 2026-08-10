@@ -77,24 +77,41 @@
 # is left, which is the point at which a GPU rasterizer would be worth having —
 # it was not before.
 #
-# WHAT A GPU WOULD STILL NEED HERE (honest, and none of it is done)
-# ----------------------------------------------------------------
-# Mesa's Vulkan ICDs are not in this image at all: scripts/hamlinux_packages.py
-# ships GPU KERNEL MODULES (i915, nouveau, the DRM core) and firmware, and
-# nothing else. The Vulkan userspace lives in the Debian namespace, which is
-# entered by chroot — so wsysd, which runs OUTSIDE it, cannot load an ICD even
-# though this build lane links glibc dynamically and could dlopen in principle:
-# the driver's own DT_NEEDED closure would resolve against the wrong root. A
-# real Vulkan compositor is therefore a SECOND PROCESS living inside the
-# namespace and presenting through the v2 blit protocol, not a library call
-# from here. That is a design decision this file cannot make on its own.
+# THE GPU, NOW THAT THERE IS ONE — AND THE GATE THAT DECIDES
+# ----------------------------------------------------------
+# The two obstacles this comment used to list are both gone. Commit 8c402a9d
+# installs the Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe ICDs +
+# libdrm) into the HAMNIX root through hpm, so there is an ICD to dlopen from
+# OUT here and no Debian namespace in the picture; and commit c86af3ab is a
+# real Vulkan backend for the vk spine (lib/vk/vk_linux.ad + user/linux-vk.c),
+# byte-identical to lib/vk/vk_2d.ad and gated as such.
 #
-# The nearer, self-contained GPU win is not Vulkan at all: /dev/fb's DRM path
-# (user/linux-fb.c) creates ONE dumb buffer and legacy-SETCRTCs it, so present
-# writes into the buffer being scanned out — every frame can tear. Two dumb
-# buffers plus DRM_IOCTL_MODE_PAGE_FLIP would give tear-free, vsynced present
-# with no Vulkan, no Mesa and no namespace question. That is a change to
-# user/linux-fb.c, which this file does not own.
+# So this file now selects it — and the interesting part is that it must NOT
+# select it unconditionally:
+#
+#   MEASURED, lavapipe (the CPU software ICD), 1280x800: the GPU path is 2.3x
+#   SLOWER on fills and 2.9x slower with glyph runs. That is not a defect. On
+#   a CPU ICD the same CPU runs the same integer math through JIT'd generic
+#   SPIR-V, against vk_2d's hand-tuned packed-word loops. Arming it there
+#   would make the FALLBACK configuration — the one a machine with no GPU
+#   runs — three times slower, which is the exact shape of failure this tree
+#   keeps hitting: something that answers success-shaped instead of true.
+#
+# The gate is therefore: arm on real SILICON (VkPhysicalDeviceType != 4),
+# stay software on a CPU-type device, and say WHICH and WHY in one line at
+# startup. HAMNIX_WSYSD_VK=1 forces it on (that is how the GPU path is
+# exercised on a host that has no GPU to give); HAMNIX_WSYSD_VK=0 forces it
+# off (that is how a machine with a GPU that turns out to be slower, or a
+# driver that misbehaves, is recovered without a rebuild).
+#
+# ZERO COPY. vk_linux_frame_alloc() returns the mapped address of the
+# GPU-resident frame, and THE COMPOSITE IS BOUND TO IT (comp_base, below).
+# So a routed frame costs no upload and no readback: the shader writes the
+# same bytes present() then hands to /dev/fb. The router in lib/vk/vk_2d.ad
+# is armed only for that one surface, which is why the full-screen backdrop
+# (the window that rasterizes STRAIGHT into the composite, and the bulk of
+# the pixels in a real session) is what reaches the device, while a small
+# window's private image stays on the CPU where it already was.
 #
 # ADDER QUIRKS HONOURED: big buffers are top-level BSS arrays, no adjacent
 # string-literal concatenation, string literals are passed at the call site.
@@ -103,6 +120,16 @@ from lib.hamscene import hamscene_load
 from lib.hamui_host import hamui_host_begin, hamui_host_begin_into, \
     hamui_host_rasterize, hamui_host_set_bgra, \
     hamui_host_row_base, hamui_host_width, hamui_host_height
+from lib.vk.vk_2d import vk2d_set_router, vk2d_clear_router
+from lib.vk.vk_core import vk_set_backend, vk_linux_frame_alloc, \
+    VK_BACKEND_LINUX, VK_BACKEND_SW, VK_SUCCESS
+from lib.vk.vk_linux import vk_linux_device_name, vk_linux_device_type, \
+    vk_linux_device_is_silicon, vk_linux_frame_device_local, \
+    vk_linux_frame_begin, vk_linux_frame_end, vk_linux_frame_sync, \
+    vk_linux_fill_rect, vk_linux_roundrect, vk_linux_line, \
+    vk_linux_blit, vk_linux_glyph, \
+    vk_linux_ops, vk_linux_dispatches, vk_linux_batched_ops, \
+    vk_linux_barriers, vk_linux_last_submit_us
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
@@ -115,6 +142,10 @@ extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int6
 extern def sys_get_jiffies() -> uint64
 extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
 extern def sys_exit(code: uint64)
+# glibc's own getenv. This lane links glibc dynamically (HANDOFF §7.4), so the
+# environment is right there and needs no syscall of its own; the only two
+# variables read here are the backend overrides.
+extern def getenv(name: Ptr[char]) -> Ptr[uint8]
 
 # ====================================================================
 # BENCH INSTRUMENTATION
@@ -147,6 +178,14 @@ def now_us() -> uint64:
 # --- screen -----------------------------------------------------------
 MAX_PIXELS: uint64 = 2073600           # 1920x1080
 composite:  Array[8294400, uint8]      # MAX_PIXELS * 4, BGRX as /dev/fb wants
+# EVERY read and write of the screen composite goes through this address, and
+# it is the whole of the zero-copy story: it is `composite` normally, and it
+# is the GPU-resident frame returned by vk_linux_frame_alloc() when the vk
+# backend is armed. Nothing else in the file changes between the two cases --
+# the rasterizer, the cursor save-under and present() all just address the
+# buffer the device is also writing, so a routed frame costs no upload and no
+# readback. Set once, in vk_arm(), before the first frame.
+comp_base:  uint64 = 0
 scr_w: int32 = 0
 scr_h: int32 = 0
 scr_pitch: int32 = 0
@@ -533,13 +572,13 @@ def cursor_signature() -> uint64:
 def put_px(x: int32, y: int32, rgb: uint32):
     if x < 0 or y < 0 or x >= scr_w or y >= scr_h:
         return
-    o: uint64 = (cast[uint64](y) * cast[uint64](scr_w)
-                 + cast[uint64](x)) * 4
+    o: uint64 = comp_base + (cast[uint64](y) * cast[uint64](scr_w)
+                             + cast[uint64](x)) * 4
     # /dev/fb is XRGB8888 little-endian: the bytes in memory are B, G, R, X.
-    composite[o]     = cast[uint8](rgb & 255)
-    composite[o + 1] = cast[uint8]((rgb >> 8) & 255)
-    composite[o + 2] = cast[uint8]((rgb >> 16) & 255)
-    composite[o + 3] = 0
+    cast[Ptr[uint8]](o)[0] = cast[uint8](rgb & 255)
+    cast[Ptr[uint8]](o + 1)[0] = cast[uint8]((rgb >> 8) & 255)
+    cast[Ptr[uint8]](o + 2)[0] = cast[uint8]((rgb >> 16) & 255)
+    cast[Ptr[uint8]](o + 3)[0] = 0
 
 
 # The composite as 32-bit words. /dev/fb is XRGB8888 little-endian, so ONE
@@ -547,7 +586,7 @@ def put_px(x: int32, y: int32, rgb: uint32):
 # and the compiler cannot prove that for itself through the uint8 array, which
 # is why the fills below reach for the word view explicitly.
 def comp_words() -> Ptr[uint32]:
-    return cast[Ptr[uint32]](&composite[0])
+    return cast[Ptr[uint32]](comp_base)
 
 
 def fill_rect(x: int32, y: int32, w: int32, h: int32, rgb: uint32):
@@ -607,6 +646,204 @@ def clear_desktop():
     if screen_is_covered() != 0:
         return
     fill_rect(0, 0, scr_w, scr_h, 2110280)              # 0x203348
+
+
+# ====================================================================
+# THE VULKAN BACKEND: the gate, the zero-copy binding, and the op router
+# ====================================================================
+# See the header. Three things live here and nothing else in the file knows
+# about any of them:
+#
+#   vk_arm()      decides ON or OFF, once, at startup, and says why.
+#   comp_base     is the GPU frame when it decided ON (the zero-copy binding).
+#   _rt_*         are the five op hooks lib/vk/vk_2d.ad calls instead of its
+#                 CPU inner loops while the router is armed.
+#
+# A hook returns 0 when the device took the op and non-zero when it did not;
+# vk_2d then runs its own CPU path over the SAME memory, which is only sound
+# because the hook syncs the device first. That ordering rule is the reason
+# these are five three-line functions and not a table.
+vk_armed:      int32 = 0        # the device is up AND we chose to use it
+vk_forced:     int32 = 0        # 1 = armed by override, -1 = refused by override
+vk_zero_copy:  int32 = 0        # the composite IS the GPU frame
+vk_devlocal:   int32 = 0        # ... and that frame is device-local memory
+vk_frames_gpu: int32 = 0        # frames the device actually rasterized
+vkname:        Array[256, uint8]
+
+
+# -1 = unset, 0 = off, 1 = on. Accepts 0/1, on/off, yes/no, true/false; an
+# unparseable value is ON, because someone who sets the variable at all wants
+# the non-default and a silent "I ignored you" is the worst answer available.
+def env_flag(name: Ptr[char]) -> int32:
+    v: Ptr[uint8] = getenv(name)
+    if cast[uint64](v) == 0:
+        return -1
+    if v[0] == 0:
+        return -1
+    c: uint8 = v[0]
+    if c == 48 or c == 110 or c == 78 or c == 102 or c == 70:   # 0 n N f F
+        return 0
+    if c == 111 or c == 79:                                     # o O
+        if v[1] == 102 or v[1] == 70:                           # "off"
+            return 0
+        return 1
+    return 1
+
+
+def vk_say_sw(why: Ptr[uint8]):
+    puts(1, "wsysd: vk backend SOFTWARE -- ")
+    puts(1, why)
+    puts(1, "\n")
+
+
+# Decide, bind and log. Called once, after read_screen(), before any frame.
+def vk_arm():
+    comp_base = cast[uint64](&composite[0])
+    ov: int32 = env_flag(cast[Ptr[char]]("HAMNIX_WSYSD_VK"))
+    if ov == 0:
+        vk_forced = -1
+        vk_say_sw("forced off by HAMNIX_WSYSD_VK")
+        return
+    # vk_set_backend(LINUX) is what brings the ICD, the device and the compute
+    # pipeline up, and it REFUSES rather than half-succeeds. Nothing above has
+    # touched Vulkan, so an override of 0 costs no device bring-up at all.
+    if vk_set_backend(VK_BACKEND_LINUX) != VK_SUCCESS:
+        vk_linux_device_name(&vkname[0], 256)
+        puts(1, "wsysd: vk backend SOFTWARE -- no usable Vulkan device (")
+        puts(1, &vkname[0])
+        puts(1, ")\n")
+        return
+    vk_linux_device_name(&vkname[0], 256)
+    sil: int32 = vk_linux_device_is_silicon()
+    if sil == 0 and ov != 1:
+        # THE GATE. A conformant software ICD is a real Vulkan device and this
+        # backend runs on it correctly -- it is simply slower than vk_2d, by a
+        # measured 2.3x on fills and 2.9x with glyphs, because it is the same
+        # CPU doing the same arithmetic with a JIT and a thread pool in the
+        # way. Defaulting on here would penalise exactly the machines that
+        # have no GPU. Disarm and say so, naming the device.
+        vk_set_backend(VK_BACKEND_SW)
+        puts(1, "wsysd: vk backend SOFTWARE -- device is a CPU ICD (")
+        puts(1, &vkname[0])
+        puts(1, ", VkPhysicalDeviceType 4); vk_2d is 2.3-2.9x faster there")
+        puts(1, "\n")
+        return
+    fb: uint64 = vk_linux_frame_alloc(cast[uint64](scr_w),
+                                      cast[uint64](scr_h), 1)
+    if fb == 0:
+        vk_set_backend(VK_BACKEND_SW)
+        vk_say_sw("the GPU frame could not be allocated")
+        return
+    # THE ZERO-COPY BINDING. From here the composite IS device memory.
+    comp_base = fb
+    vk_zero_copy = 1
+    vk_devlocal = vk_linux_frame_device_local()
+    vk_armed = 1
+    if sil == 0:
+        vk_forced = 1
+    puts(1, "wsysd: vk backend GPU -- ")
+    puts(1, &vkname[0])
+    puts(1, " (VkPhysicalDeviceType ")
+    putd(1, vk_linux_device_type())
+    puts(1, ", silicon ")
+    putd(1, sil)
+    puts(1, ", zero-copy 1, device-local ")
+    putd(1, vk_devlocal)
+    puts(1, ")")
+    if vk_forced == 1:
+        puts(1, " [forced on by HAMNIX_WSYSD_VK; NOT the default here]")
+    puts(1, "\n")
+    if vk_devlocal == 0:
+        # docs/hambrowse_gpu_render.md: on a discrete GPU with no resizable
+        # BAR the shader reaches this frame over PCIe and a 17x win collapses
+        # to ~1.1x. Say it rather than let a later measurement be a surprise.
+        puts(1, "wsysd: vk WARNING the GPU frame is NOT device-local")
+        puts(1, " -- the shader reaches it across the host bus\n")
+
+
+# ---- the five op hooks lib/vk/vk_2d.ad calls ------------------------------
+# Each returns 0 if the device recorded the op. A non-zero return means vk_2d
+# must run its own CPU loop over the same pixels, so the device is synced
+# first: the frame is host-mapped, so that costs one fence and no transfer.
+def _rt_fill(op: int32, x: int64, y: int64, w: int64, h: int64,
+             rgba: uint32) -> int32:
+    if vk_linux_fill_rect(op, cast[int32](x), cast[int32](y),
+                          cast[int32](w), cast[int32](h), rgba) != 0:
+        vk_linux_frame_sync()
+        return -1
+    return 0
+
+
+def _rt_roundrect(x: int64, y: int64, w: int64, h: int64, rad: int64,
+                  corners: int32, rgba: uint32) -> int32:
+    if vk_linux_roundrect(cast[int32](x), cast[int32](y), cast[int32](w),
+                          cast[int32](h), cast[int32](rad), corners,
+                          rgba) != 0:
+        vk_linux_frame_sync()
+        return -1
+    return 0
+
+
+def _rt_line(x1: int64, y1: int64, x2: int64, y2: int64, thick: int64,
+             rgba: uint32) -> int32:
+    if vk_linux_line(cast[int32](x1), cast[int32](y1), cast[int32](x2),
+                     cast[int32](y2), cast[int32](thick), rgba) != 0:
+        vk_linux_frame_sync()
+        return -1
+    return 0
+
+
+def _rt_blit(src_base: uint64, src_w: uint64, src_h: uint64,
+             dx: int64, dy: int64, dw: int64, dh: int64,
+             sx: int64, sy: int64, sw: int64, sh: int64) -> int32:
+    if vk_linux_blit(src_base, cast[int32](src_w), cast[int32](src_h),
+                     cast[int32](dx), cast[int32](dy), cast[int32](dw),
+                     cast[int32](dh), cast[int32](sx), cast[int32](sy),
+                     cast[int32](sw), cast[int32](sh)) != 0:
+        vk_linux_frame_sync()
+        return -1
+    return 0
+
+
+def _rt_cov(cov_base: uint64, cov_w: int64, cov_h: int64,
+            dx: int64, dy: int64, rgba: uint32) -> int32:
+    if vk_linux_glyph(cov_base, cast[int32](cov_w), cast[int32](cov_h),
+                      cast[int32](dx), cast[int32](dy), rgba) != 0:
+        vk_linux_frame_sync()
+        return -1
+    return 0
+
+
+# Open the device frame and point vk_2d at it. Returns 1 if the following
+# rasterize will run on the device. w/h MUST be the surface bound at
+# comp_base, which is the screen -- that exactness is what makes the router's
+# "is this op aimed at the GPU frame?" test a three-integer compare.
+def vk_route_begin(w: int32, h: int32) -> int32:
+    if vk_armed == 0:
+        return 0
+    if vk_linux_frame_begin() != 0:
+        return 0
+    if vk2d_set_router(comp_base, cast[uint64](w), cast[uint64](h),
+                       cast[uint64](_rt_fill), cast[uint64](_rt_roundrect),
+                       cast[uint64](_rt_line), cast[uint64](_rt_blit),
+                       cast[uint64](_rt_cov)) != 0:
+        vk_linux_frame_end()
+        return 0
+    return 1
+
+
+# Close it. Returns 0 if every op of the frame executed on the device; on -1
+# the caller must re-render this frame in software, and the backend disarms
+# itself for good rather than produce a second half-drawn frame.
+def vk_route_end() -> int32:
+    vk2d_clear_router()
+    if vk_linux_frame_end() != 0:
+        vk_armed = 0
+        vk_set_backend(VK_BACKEND_SW)
+        puts(2, "wsysd: vk backend FAILED mid-frame; back to software\n")
+        return -1
+    vk_frames_gpu = vk_frames_gpu + 1
+    return 0
 
 
 TITLEBAR_H: int32 = 22
@@ -787,11 +1024,26 @@ def paint_window(i: uint64) -> int32:
     # is exact and deliberately narrow: vk2d has no pitch, so the window's rows
     # must be the screen's rows (see hamui_host's host_ext_base note).
     direct: int32 = 0
+    gpu: int32 = 0
     if ox == 0 and oy == 0 and w == scr_w and h == scr_h and win_dec[i] == 0:
-        direct = hamui_host_begin_into(cast[uint64](&composite[0]), w, h)
+        # Arm the device BEFORE begin_into: _host_begin_common's opening
+        # full-image clear is itself a vk2d fill, and it is the single
+        # largest op in the frame, so leaving it on the CPU would hand the
+        # device the cheap half of the work.
+        gpu = vk_route_begin(w, h)
+        direct = hamui_host_begin_into(comp_base, w, h)
+        if direct == 0 and gpu != 0:
+            vk_route_end()
+            gpu = 0
     if direct == 0:
         hamui_host_begin(w, h)
     hamui_host_rasterize()
+    if gpu != 0:
+        if vk_route_end() != 0:
+            # The device dropped the frame. It has disarmed itself; redo this
+            # window in software so the screen is never half-painted.
+            hamui_host_begin_into(comp_base, w, h)
+            hamui_host_rasterize()
     if bench_on != 0:
         t_rast = t_rast + (now_us() - tr0)
 
@@ -835,7 +1087,7 @@ def present_rows(y0: int32, y1: int32):
             # than write the rows to the wrong place.
             off = 0
     while off < total:
-        k: int64 = sys_write(fd, &composite[off], total - off)
+        k: int64 = sys_write(fd, cast[Ptr[uint8]](comp_base + off), total - off)
         if k <= 0:
             break
         off = off + cast[uint64](k)
@@ -1632,6 +1884,34 @@ def run_bench(n: int32):
         putd(1, cast[int32](d * 1000000 / total))
     puts(1, "\n")
 
+    # What the device actually did, per frame. These are the numbers to
+    # optimise against, because they are DEVICE-INDEPENDENT: an op is an op
+    # and a dispatch is a dispatch whether the ICD is llvmpipe or an RTX.
+    # `ops` is every 2D primitive handed to the backend; `dispatch` is how
+    # many times the queue was told to go; `batched` is how many of those ops
+    # rode inside a multi-entry OP_BATCH instead of costing a round of their
+    # own. ops/dispatch is the whole game.
+    puts(1, "bench: vk gpu_frames ")
+    putd(1, vk_frames_gpu)
+    puts(1, " zero_copy ")
+    putd(1, vk_zero_copy)
+    puts(1, " device_local ")
+    putd(1, vk_devlocal)
+    puts(1, "\n")
+    if vk_frames_gpu > 0:
+        g: uint64 = cast[uint64](vk_frames_gpu)
+        puts(1, "bench: vk ops/frame ")
+        putd(1, cast[int32](vk_linux_ops() / g))
+        puts(1, " dispatch/frame ")
+        putd(1, cast[int32](vk_linux_dispatches() / g))
+        puts(1, " batched/frame ")
+        putd(1, cast[int32](vk_linux_batched_ops() / g))
+        puts(1, " barriers/frame ")
+        putd(1, vk_linux_barriers())
+        puts(1, " submit_us ")
+        putd(1, cast[int32](vk_linux_last_submit_us()))
+        puts(1, "\n")
+
     # The second arm: what a MOUSE MOVE costs. This is the frame a desktop
     # serves most often, and before the save-under it was the same full frame
     # as above.
@@ -1689,6 +1969,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # copy-out is a straight word copy with no channel shuffle. This has to be
     # set before the first hamui_host_begin().
     hamui_host_set_bgra(1)
+
+    # Choose the rasterization backend and, if it is the GPU, bind the
+    # composite to the GPU frame. After this line comp_base is the only thing
+    # that differs between the two configurations.
+    vk_arm()
 
     keymap_init()
     cursor_init()

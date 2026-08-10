@@ -28,8 +28,77 @@ to Debian.
 | `user/linux-vkhost.c` | the kernel-side symbols `vk_core.ad` needs in order to LINK at all on this line — see "vk_core did not link" below. |
 | `lib/vk/vk_linux.ad` | the Adder seam, same shape as `lib/vk/vk_gpu.ad`: `vk_core → vk_linux → the C shim`, no import cycle, the shim knows nothing about vk. |
 | `lib/vk/vk_core.ad` | `VK_BACKEND_LINUX`, `vk_set_backend`, and the frame router inside `vkQueueSubmit`. |
+| `lib/vk/vk_2d.ad` | the **op router** — five optional function-pointer hooks, armed for exactly one surface, that hand each 2D primitive to the device instead of running the CPU loop. |
+| `user/wsysd.ad` | the compositor: the silicon gate, the zero-copy binding, and the five hooks. |
 | `scripts/shaders/vk2d_raster.comp` | the compute rasterizer (pre-existing; extended here — see "shader changes"). |
 | `tests/linux/vk_linux_test.ad`, `tests/linux/vk_core_linux_test.ad`, `scripts/test_vk_linux.sh` | the gates. |
+
+## The compositor selects it — and the gate is the interesting part
+
+`user/wsysd.ad` calls `vk_set_backend(VK_BACKEND_LINUX)` at startup and then
+decides, on the device it got, whether to keep it:
+
+| device | default | why |
+|--|--|--|
+| `VkPhysicalDeviceType` 1/2/3 (integrated, discrete, virtual) | **GPU** | real silicon; this is the case the backend exists for |
+| `VkPhysicalDeviceType` 4 (CPU — lavapipe et al.) | **software** | measured 2.3x slower on fills, 2.9x with glyphs; see below |
+| no ICD / no device / no pipeline | **software** | `vk_set_backend` refuses rather than pretends |
+
+Defaulting on unconditionally would have made the FALLBACK configuration —
+the one a machine with no GPU runs — three times slower. That is the whole
+reason the gate is on device type and not on "did Vulkan come up".
+
+`HAMNIX_WSYSD_VK=1` forces it on (this is how the GPU path is exercised at all
+on a host whose real GPU is off limits); `HAMNIX_WSYSD_VK=0` forces it off
+without a rebuild. Either way the compositor prints ONE line naming the
+device, its type, whether it is silicon, whether the frame is zero-copy and
+whether that frame is device-local — because a compositor that silently picks
+a slow path is exactly the failure this tree keeps hitting:
+
+```
+wsysd: vk backend SOFTWARE -- device is a CPU ICD (llvmpipe (LLVM 19.1.7, 256 bits),
+       VkPhysicalDeviceType 4); vk_2d is 2.3-2.9x faster there
+wsysd: vk backend GPU -- llvmpipe (...) (VkPhysicalDeviceType 4, silicon 0,
+       zero-copy 1, device-local 1) [forced on by HAMNIX_WSYSD_VK; NOT the default here]
+```
+
+### How a compositor frame reaches the device at all
+
+`wsysd` does not build `vk_core` command buffers — it rasterizes through
+`lib/hamui_host.ad`, which calls `vk2d_raster_*` **directly**. So there was no
+seam. The seam added here is a set of five function-pointer hooks in
+`lib/vk/vk_2d.ad`, armed for exactly one `(base, img_w, img_h)` surface:
+
+* **function pointers, not an import** — 66 files reach `vk_2d` through
+  `hamui_host`, and none of them should acquire a `libdl` dependency and a
+  Vulkan bring-up in order to draw a rectangle;
+* **one surface** — the device has one frame buffer, so an op aimed anywhere
+  else (a small window's private image, a test target) takes the CPU path
+  after a three-integer compare. Routing it would paint the wrong surface;
+* **a hook returns non-zero to decline**, and `vk_2d` then runs its own loop
+  over the same memory — which is only sound because the hook calls
+  `vk_linux_frame_sync()` first;
+* the hooks see the op colour **before** `_vk2d_bgra`'s R/B swap, because the
+  backend applies its own. A pre-swapped colour would double-swap.
+
+The armed surface is the screen composite, and `wsysd` arms it around the
+**full-screen backdrop's** rasterize — the window that already rendered
+straight into the composite, and the bulk of a real session's pixels.
+
+### Zero copy, measured
+
+`wsysd`'s `comp_base` — the address every read and write of the screen
+composite goes through — is set to `vk_linux_frame_alloc()`'s return value.
+The composite IS the GPU frame. Measured on lavapipe: `zero_copy 1`,
+`device_local 1`, and the resulting framebuffer is **byte-identical** to the
+software compositor's, md5 for md5, across the whole offscreen fixture.
+
+`device_local 1` is lavapipe's answer, and it is the answer any integrated GPU
+or resizable-BAR discrete card will give. A discrete card without ReBAR will
+answer 0, and `wsysd` prints a warning when it does, because
+`docs/hambrowse_gpu_render.md` measured that case collapsing a 17x win to
+~1.1x. **This has not been measured on real silicon and cannot be on this
+host** (see "Performance" below).
 
 ## Entry points
 
@@ -169,11 +238,14 @@ GPU without resizable BAR, a host-visible frame is reached over PCIe and the
 win shrinks to ~1.1×. This is precisely what `vk_linux_frame_device_local()`
 exists to report.
 
-**So: do not enable this by default on the strength of the host gate.** The
-host gate proves it is *correct*. Whether it is *faster* is a per-device
-question, it must be answered in the VM or on the target with these two
-benches, and the backend is built to be flipped off in one call when the answer
-is no.
+**So the default is the device-type gate above, not "on".** The host gate
+proves the backend is *correct*. Whether it is *faster* is a per-device
+question that must be answered in the VM or on the target with these two
+benches, and the gate is what keeps a wrong answer from being the shipped
+default. Nothing in this document claims a GPU measurement: this host's real
+GPU is off limits by policy, and venus in the VM does not come up (the host
+NVIDIA driver's GBM backend cannot create a device — see the comment in
+`scripts/hamlinux_vm.sh`).
 
 ### What made the difference between "10× slower" and "3× slower"
 
@@ -197,6 +269,44 @@ genuinely ran on the device and was ten times slower than doing nothing:
    the pixels.** Only the fields every op needs are loaded eagerly; the rest go
    through `fld()`, which reads the batch entry or falls back to the push
    constants. 24 ms → 14 ms.
+5. **The overlap test was a bounding-box union, and a union is a lie.** An op
+   needed a barrier if it touched the UNION of everything written since the
+   last one. A row of glyphs unions into a band; the next UI element lands
+   inside that band without touching a single glyph, and got a full pipeline
+   barrier for it. The union is now only the O(1) *reject* — when it says
+   "maybe", the individual rects it is a union of are consulted, and only a
+   real overlap serializes. Measured on the DE-with-text frame, per frame:
+   **barriers 72 → 12, dispatches 75 → 15**. That is the largest single
+   change since the batching itself, and it is the one that matters most on
+   real silicon, where a compute barrier is a pipeline flush and 60 of those
+   were being bought for nothing.
+6. **A page of text is a few hundred SHAPES drawn thousands of times.** Every
+   glyph re-expanded its coverage mask into the source arena — 1680 glyphs of
+   12x16 is 1.3 MiB of staging per frame. A per-frame cache keyed on a hash of
+   the coverage bytes (the caller reuses one scratch buffer, so the pointer
+   says nothing) and **confirmed byte for byte before it is trusted** — a hash
+   collision would paint one letter with another's shape — cuts the DE-with-
+   text frame's staging from **363,792 to 41,808 uint32s**. Honest caveat: in
+   that fixture every glyph is the same cell, so 1679 of 1680 hit; a real page
+   has ~100 distinct shapes and would see roughly 10-20x, not 1680x.
+7. **One command buffer, recycled.** It was allocated and freed every submit
+   for a recording that is a different list but always the same shape.
+
+### Per-frame counters, and why they are the thing to optimise
+
+`tests/linux/vk_linux_test.ad` prints `ops`, `dispatches`, `batched_ops`,
+`barriers`, `staged_words` and `cov_reuse` **per frame**. These are
+device-independent — an op is an op and a dispatch is a dispatch on llvmpipe
+and on an RTX — which is exactly why they, and not the microseconds beside
+them, are what the optimisations above were measured against. Current:
+
+| frame | ops | dispatches | barriers | staged_words |
+|--|--|--|--|--|
+| DE fills only | 44 | 19 → **15** | 13 → **9** | 1,296 |
+| DE + 1680 glyphs | 1,724 | 75 → **15** | 72 → **12** | 363,792 → **41,808** |
+
+`wsysd -bench N` prints the same counters for a real compositor frame
+(`ops/frame`, `dispatch/frame`, `batched/frame`, `barriers/frame`).
 
 ## Shader changes (backwards compatible, and verified so)
 
@@ -249,6 +359,7 @@ Environment:
 
 | | |
 |--|--|
-| `HAMNIX_VK_DISABLE=1` | force the backend off (the refusal path the gate asserts) |
+| `HAMNIX_WSYSD_VK=1` / `=0` | the compositor's override, both directions: arm on a CPU ICD / never arm at all |
+| `HAMNIX_VK_DISABLE=1` | force the backend off at the shim (the refusal path the gate asserts) |
 | `HAMNIX_VK_SPV=<path>` | use a `.spv` from disk instead of the embedded one, for shader work. A named-but-unreadable file says so on stderr and falls back — it does not silently downgrade. |
 | `VK_ICD_FILENAMES` | standard Vulkan ICD selection; the gate forces lavapipe |

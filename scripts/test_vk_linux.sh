@@ -65,6 +65,26 @@ if echo "$BACKEND_OUT" | grep -q "VK_DEVICE "; then
     done
 fi
 
+# ---- 1b. the dispatch budget --------------------------------------------
+# ops, dispatches and barriers are DEVICE-INDEPENDENT: an op is an op and a
+# dispatch is a dispatch on llvmpipe and on silicon, which is why they and not
+# the microseconds are what this backend is optimised against. Assert a
+# CEILING rather than an exact number -- the point is that a change which
+# quietly reintroduces one-dispatch-per-op, or the bounding-box union that
+# bought 60 pipeline barriers a frame for nothing, fails here instead of
+# showing up as a slow desktop on hardware nobody here can measure.
+if echo "$BACKEND_OUT" | grep -q "^BENCH_DE_TEXT_1280x800 GPU_US"; then
+    DISP=$(echo "$BACKEND_OUT" | sed -n 's/.*BENCH_DE_TEXT_1280x800 .* dispatches \([0-9]*\) .*/\1/p')
+    BARS=$(echo "$BACKEND_OUT" | sed -n 's/.*BENCH_DE_TEXT_1280x800 .* barriers \([0-9]*\) .*/\1/p')
+    note "DE+text frame: ${DISP} dispatches, ${BARS} barriers (1724 ops)"
+    [ -n "$DISP" ] && [ "$DISP" -le 30 ] || {
+        echo "FAIL: DE+text frame took $DISP dispatches (budget 30; measured 15)"
+        fail=1; }
+    [ -n "$BARS" ] && [ "$BARS" -le 24 ] || {
+        echo "FAIL: DE+text frame needed $BARS barriers (budget 24; measured 12)"
+        fail=1; }
+fi
+
 # ---- 2. the vk_core seam gate -------------------------------------------
 note "building tests/linux/vk_core_linux_test.ad"
 ./scripts/hamlinux_build.sh tests/linux/vk_core_linux_test.ad "$OUT/vk_core_linux_test" \

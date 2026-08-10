@@ -84,6 +84,8 @@ extern def hvk_stat_last_us() -> uint64
 extern def hvk_stat_arena_bytes() -> uint64
 extern def hvk_stat_barriers() -> int32
 extern def hvk_stat_batched() -> uint64
+extern def hvk_stat_staged() -> uint64
+extern def hvk_stat_cov_reuse() -> uint64
 extern def hvk_pending_ops() -> int32
 
 
@@ -243,6 +245,22 @@ def vk_linux_batched_ops() -> uint64:
     # number exists: one dispatch per glyph is what a naive port does, and it
     # is 10x SLOWER than the CPU (measured, lavapipe, 1280x800).
     return hvk_stat_batched()
+
+
+def vk_linux_staged_words() -> uint64:
+    # uint32s written into the device source arena. This is the frame's
+    # STAGING cost -- glyph coverage and blit source rows -- and it is a
+    # memory-residency number, which is the second of the two proven levers
+    # (the first being dispatch count). It is device-independent: the same
+    # bytes cross on llvmpipe and on silicon.
+    return hvk_stat_staged()
+
+
+def vk_linux_cov_reuse() -> uint64:
+    # Glyph masks answered from the per-frame coverage cache instead of being
+    # expanded into the arena again. A page of text is a few hundred distinct
+    # SHAPES drawn thousands of times.
+    return hvk_stat_cov_reuse()
 
 
 def vk_linux_pending_ops() -> int32:

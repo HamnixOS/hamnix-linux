@@ -375,13 +375,46 @@ static int32_t  g_rect[HVK_MAXOPS][4];
 static uint8_t  g_bar[HVK_MAXOPS];
 static int32_t  g_nops;
 static int32_t  g_bbx0, g_bby0, g_bbx1, g_bby1;   /* union since last barrier */
+/* ...and the INDIVIDUAL rects that union covers. The union is a strict
+ * over-approximation: a row of glyphs unions into a band, and an op that lands
+ * inside that band without touching a single glyph is provably independent of
+ * every op in it. Testing against the union alone reports a conflict there and
+ * buys a pipeline barrier that nothing needed. The union stays as the O(1)
+ * reject; the list is consulted only when the union says "maybe", so the scan
+ * runs a few dozen times a frame rather than once per op. */
+#define HVK_TRACK_MAX 512
+static int32_t  g_cur[HVK_TRACK_MAX][4];
+static int32_t  g_ncur;         /* -1 = overflowed, be conservative */
 static int32_t  g_barriers;
+static uint64_t g_stat_falsecon;  /* barriers the union would have inserted
+                                   * and the exact test did not */
 static int32_t  g_frame_err;
 static int      g_in_frame;
+
+/* The command buffer is allocated ONCE and reset per submit. Allocating and
+ * freeing one every frame is two driver round trips and a pool churn for a
+ * recording that has exactly the same shape every time. */
+static VkCommandBuffer g_cb;
+
+/* Glyph coverage dedup, per frame. A page of text is a few hundred DISTINCT
+ * glyph shapes drawn thousands of times, and every one of them used to be
+ * expanded into the source arena again: 1680 glyphs of 12x16 is 1.3 MiB of
+ * staging per frame for maybe 40 KiB of actual coverage. The key is a hash of
+ * the coverage BYTES (the caller re-uses one scratch buffer, so the pointer
+ * says nothing), and a hit is CONFIRMED byte for byte against what is already
+ * in the arena before it is trusted -- a hash collision here would paint one
+ * letter with another letter's shape, which is precisely the plausible wrong
+ * answer this codebase keeps being bitten by. */
+#define HVK_COV_CACHE 512
+struct covent { uint32_t hash; int32_t w, h, off; };
+static struct covent g_cov[HVK_COV_CACHE];
+static int32_t  g_ncov;
 
 /* counters the Adder side publishes so a frame's mix is inspectable */
 static uint64_t g_stat_frames, g_stat_ops, g_stat_dispatches, g_stat_submits;
 static uint64_t g_stat_last_us, g_stat_arena_bytes, g_stat_batched;
+static uint64_t g_stat_staged;      /* uints written into the source arena */
+static uint64_t g_stat_covreuse;    /* glyphs that reused a staged mask */
 
 static int hvk_fail(const char* why)
 {
@@ -819,6 +852,7 @@ int32_t hvk_frame_begin(void)
     if (!hvk_available() || !g_fmap) return -1;
     g_nops = 0;
     g_ause = 0;
+    g_ncov = 0;
     g_frame_err = 0;
     g_barriers = 0;
     g_in_frame = 1;
@@ -852,17 +886,39 @@ static void push_op_rect(PushC pc, int32_t dispw, int32_t disph,
     if (g_nops == 0) {
         g_bbx0 = g_bby0 = 0x7FFFFFFF;
         g_bbx1 = g_bby1 = -0x7FFFFFFF;
+        g_ncur = 0;
     } else if (rx0 < g_bbx1 && g_bbx0 < rx1 && ry0 < g_bby1 && g_bby0 < ry1) {
-        need_barrier = 1;
+        /* The union says MAYBE. Ask the rects it is a union OF. */
+        if (g_ncur < 0) {
+            need_barrier = 1;              /* list overflowed: stay correct */
+        } else {
+            for (int32_t k = 0; k < g_ncur; k++)
+                if (rx0 < g_cur[k][2] && g_cur[k][0] < rx1 &&
+                    ry0 < g_cur[k][3] && g_cur[k][1] < ry1) {
+                    need_barrier = 1;
+                    break;
+                }
+            if (!need_barrier) g_stat_falsecon++;
+        }
     }
     if (need_barrier) {
         g_bbx0 = rx0; g_bby0 = ry0; g_bbx1 = rx1; g_bby1 = ry1;
+        g_ncur = 0;
         g_barriers++;
     } else {
         if (rx0 < g_bbx0) g_bbx0 = rx0;
         if (ry0 < g_bby0) g_bby0 = ry0;
         if (rx1 > g_bbx1) g_bbx1 = rx1;
         if (ry1 > g_bby1) g_bby1 = ry1;
+    }
+    if (g_ncur >= 0) {
+        if (g_ncur < HVK_TRACK_MAX) {
+            g_cur[g_ncur][0] = rx0; g_cur[g_ncur][1] = ry0;
+            g_cur[g_ncur][2] = rx1; g_cur[g_ncur][3] = ry1;
+            g_ncur++;
+        } else {
+            g_ncur = -1;
+        }
     }
     g_bar[g_nops] = (uint8_t)need_barrier;
     g_rect[g_nops][0] = rx0; g_rect[g_nops][1] = ry0;
@@ -975,6 +1031,7 @@ static int32_t arena_put(const void* src, uint32_t words)
     uint32_t off = g_ause;
     memcpy(g_amap + off, src, (size_t)words * 4u);
     g_ause += words;
+    g_stat_staged += words;
     return (int32_t)off;
 }
 
@@ -1042,11 +1099,38 @@ int32_t hvk_glyph(uint64_t cov_base, int32_t cov_w, int32_t cov_h,
     int32_t y1 = dy + cov_h > g_fh ? g_fh : dy + cov_h;
     if (x0 >= x1 || y0 >= y1) return 0;
     uint32_t words = (uint32_t)cov_w * (uint32_t)cov_h;
-    if (ensure_arena((VkDeviceSize)(g_ause + words) * 4u)) { g_frame_err = -1; return -1; }
     const uint8_t* cov = (const uint8_t*)(uintptr_t)cov_base;
-    uint32_t off = g_ause;
-    for (uint32_t i = 0; i < words; i++) g_amap[off + i] = cov[i];
-    g_ause += words;
+
+    /* Have we already staged exactly these bytes this frame? */
+    uint32_t hsh = 2166136261u;
+    for (uint32_t i = 0; i < words; i++)
+        hsh = (hsh ^ cov[i]) * 16777619u;
+    int32_t off = -1;
+    for (int32_t k = 0; k < g_ncov; k++) {
+        if (g_cov[k].hash != hsh || g_cov[k].w != cov_w || g_cov[k].h != cov_h)
+            continue;
+        const uint32_t* have = g_amap + g_cov[k].off;
+        uint32_t i = 0;
+        while (i < words && have[i] == (uint32_t)cov[i]) i++;
+        if (i == words) { off = g_cov[k].off; g_stat_covreuse++; break; }
+    }
+    if (off < 0) {
+        if (ensure_arena((VkDeviceSize)(g_ause + words) * 4u)) {
+            g_frame_err = -1;
+            return -1;
+        }
+        off = (int32_t)g_ause;
+        for (uint32_t i = 0; i < words; i++) g_amap[off + i] = cov[i];
+        g_ause += words;
+        g_stat_staged += words;
+        if (g_ncov < HVK_COV_CACHE) {
+            g_cov[g_ncov].hash = hsh;
+            g_cov[g_ncov].w = cov_w;
+            g_cov[g_ncov].h = cov_h;
+            g_cov[g_ncov].off = off;
+            g_ncov++;
+        }
+    }
 
     PushC pc;
     memset(&pc, 0, sizeof pc);
@@ -1086,6 +1170,7 @@ static int32_t batch_table(int32_t first, int32_t cnt)
         e[23] = 0;
     }
     g_ause += words;
+    g_stat_staged += words;
     return (int32_t)off;
 }
 
@@ -1099,14 +1184,22 @@ int32_t hvk_frame_sync(void)
     if (g_nops == 0) return g_frame_err;
     uint64_t t0 = now_us();
 
-    VkCommandBufferAllocateInfo cai;
-    memset(&cai, 0, sizeof cai);
-    cai.sType = ST_COMMAND_BUFFER_ALLOCATE_INFO;
-    cai.commandPool = g_pool;
-    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
-    VkCommandBuffer cb;
-    VKCK(p_vkAllocateCommandBuffers(g_dev, &cai, &cb));
+    /* One command buffer for the life of the process, recycled through the
+     * pool. The recording is a different LIST every frame but always the same
+     * SHAPE, so allocating and freeing one per submit was two driver round
+     * trips a frame bought for nothing. */
+    if (!g_cb) {
+        VkCommandBufferAllocateInfo cai;
+        memset(&cai, 0, sizeof cai);
+        cai.sType = ST_COMMAND_BUFFER_ALLOCATE_INFO;
+        cai.commandPool = g_pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        VKCK(p_vkAllocateCommandBuffers(g_dev, &cai, &g_cb));
+    } else {
+        VKCK(p_vkResetCommandPool(g_dev, g_pool, 0));
+    }
+    VkCommandBuffer cb = g_cb;
     VkCommandBufferBeginInfo bi;
     memset(&bi, 0, sizeof bi);
     bi.sType = ST_COMMAND_BUFFER_BEGIN_INFO;
@@ -1187,12 +1280,12 @@ int32_t hvk_frame_sync(void)
     VKCK(p_vkResetFences(g_dev, 1, &g_fence));
     VKCK(p_vkQueueSubmit(g_queue, 1, &si, g_fence));
     VKCK(p_vkWaitForFences(g_dev, 1, &g_fence, VK_TRUE, ~0ull));
-    p_vkFreeCommandBuffers(g_dev, g_pool, 1, &cb);
 
     g_stat_submits++;
     g_stat_last_us = now_us() - t0;
     g_nops = 0;
     g_ause = 0;               /* staged sources are consumed by the submit */
+    g_ncov = 0;               /* ...and so are the coverage masks in them */
     return g_frame_err;
 }
 
@@ -1220,4 +1313,8 @@ int32_t  hvk_stat_barriers(void)    { return g_barriers; }
 uint64_t hvk_stat_batched(void)     { return g_stat_batched; }
 uint64_t hvk_stat_last_us(void)     { return g_stat_last_us; }
 uint64_t hvk_stat_arena_bytes(void) { return g_stat_arena_bytes; }
+/* uint32s actually written into the source arena — the frame's staging cost,
+ * and the one number that says whether the glyph cache is doing anything. */
+uint64_t hvk_stat_staged(void)      { return g_stat_staged; }
+uint64_t hvk_stat_cov_reuse(void)   { return g_stat_covreuse; }
 int32_t  hvk_pending_ops(void)      { return g_nops; }
