@@ -34,6 +34,7 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <netdb.h>
 #include <poll.h>
@@ -1064,19 +1065,169 @@ int32_t sys_pipechan(void)
  * and the extbind probe) want real per-process namespaces — unshare(2) plus
  * bind mounts — and are out of scope here. Failing loudly is better than
  * silently returning 0 and letting them believe a mount happened. */
+/* The `#X` device-server letters, from etc/rc.boot and the rc.d scripts. On
+ * Hamnix the kernel posts each of these as a file server and `bind` splices it
+ * into the process namespace. On Linux the ones that name a real kernel
+ * filesystem become an actual mount(2); the ones that name a Hamnix file
+ * server we have not written yet fail, loudly, by name.
+ *
+ * Keeping this mapping — rather than making bind a no-op — is what preserves
+ * the Plan 9 shape of the boot: /etc/rc.boot still says `bind '#p' /proc` and
+ * still means it.
+ *
+ * `#distro` is the Debian namespace. It is a bind mount of the Debian tree,
+ * which is why Debian packages never touch the Hamnix filesystem. */
+struct devsrv {
+    const char *letter;   /* the #X name, matched exactly or as a prefix */
+    const char *fstype;   /* kernel filesystem to mount, or NULL for a bind */
+    const char *source;   /* bind source root, when fstype is NULL */
+    int         prefixed; /* 1 if the form is #X/subpath */
+    const char *unimpl;   /* non-NULL: not yet written; the reason */
+};
+
+/* HAMNIX_ROOT / HAMNIX_DISTRO let the subtree servers be relocated without a
+ * rebuild; they default to the conventional install layout. */
+static const char *envdef(const char *k, const char *d)
+{
+    const char *v = getenv(k);
+    return (v && *v) ? v : d;
+}
+
+static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
+{
+    static struct devsrv tab[] = {
+        { "#c",       "devtmpfs", NULL, 0, NULL },
+        { "#p",       "proc",     NULL, 0, NULL },
+        { "#t",       "tmpfs",    NULL, 1, NULL },
+        { "#s",       "tmpfs",    NULL, 0, NULL },   /* the #s srv registry dir */
+        /* NEW ON THIS LINE. Hamnix has no /sys — its kernel exposes hardware
+         * through #b and friends. The Linux line needs sysfs for DRM/KMS, block
+         * device enumeration and the input layer, so it gets a letter of its
+         * own rather than being smuggled in behind #c. */
+        { "#sys",     "sysfs",    NULL, 0, NULL },
+        { "#pts",     "devpts",   NULL, 0, NULL },
+        { "#/",       NULL,       "/",  0, NULL },   /* conventional /n parent */
+        /* #d -> /fd is a DELIBERATE NO-OP on this line. See devsrv_bind_noop
+         * below; materialising /fd actively breaks every spawned child. */
+        { "#d",       NULL,       NULL, 0, NULL },
+        { "#r",       NULL,       NULL, 1, NULL },   /* root partition subtree */
+        { "#sysroot", NULL,       NULL, 0, NULL },
+        { "#distro",  NULL,       NULL, 0, NULL },   /* the Debian namespace */
+        { "#I",       NULL, NULL, 0, "the /net file server is not written yet (HANDOFF §3)" },
+        { "#b",       NULL, NULL, 0, "the /dev/blk file server is not written yet" },
+        { "#w",       NULL, NULL, 0, "the /dev/win server is part of wsys (HANDOFF §4.4)" },
+    };
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+        size_t n = strlen(tab[i].letter);
+        if (tab[i].prefixed) {
+            if (!strncmp(src, tab[i].letter, n) &&
+                (src[n] == '\0' || src[n] == '/')) {
+                *subpath = src[n] == '/' ? src + n : "";
+                return &tab[i];
+            }
+        } else if (!strcmp(src, tab[i].letter)) {
+            *subpath = "";
+            return &tab[i];
+        }
+    }
+    return NULL;
+}
+
 int32_t sys_bind(const char *dst, const char *src, int32_t flag)
 {
-    (void)flag;
+    (void)flag;                 /* MREPL/MBEFORE/MAFTER ordering: Linux mounts
+                                 * already stack last-wins, which is MREPL. */
     if (!dst || !src) {
         errno = EFAULT;
         return -1;
     }
-    if (!strcmp(src, "#c") && !strcmp(dst, "/dev"))
+
+    /* A plain path source is an ordinary bind mount — this is the general
+     * namespace algebra, and it is what user/nsrun.ad and user/distrofs.ad
+     * actually want. */
+    if (src[0] != '#') {
+        mkdir(dst, 0755);
+        return rc32(mount(src, dst, NULL, MS_BIND | MS_REC, NULL));
+    }
+
+    const char *sub = "";
+    const struct devsrv *d = devsrv_lookup(src, &sub);
+    if (!d) {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (d->unimpl) {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    /* `bind '#d' /fd` — succeed, and do NOTHING. This is not laziness; it is
+     * the correct answer, and getting it wrong cost a long debugging session.
+     *
+     * Hamnix passes a child's standard streams as NAMES rather than inherited
+     * integer fds (SPAWN_STDIO_NS, user/hamsh.ad:185): the shell sys_fdbind's
+     * channels at the child's /fd/0,1,2, and the child opens those names and
+     * dup2s them onto 0,1,2. Traced from inside the VM, a spawned child does
+     * exactly:
+     *
+     *     openat("/fd/1", O_RDONLY) = 3
+     *     dup2(3, 1) = 1
+     *     execve("/bin/echo", ...)
+     *     write(1, "TRACED-CHILD", 12) = -1 EBADF
+     *
+     * Note O_RDONLY: sys_open takes no flags and always opens for reading, so
+     * a materialised /fd/1 can only ever produce a READ-ONLY stdout. The child
+     * then runs perfectly and exits 0 with every byte it wrote thrown away —
+     * a success-shaped wrong answer of exactly the kind §4.1d warns about.
+     *
+     * Making this a real bind mount of /proc/self/fd is doubly wrong: it also
+     * captures the BINDING process's fd table rather than resolving per-process,
+     * so the child would inherit the shell's fds even if the flags were right.
+     *
+     * With /fd absent the child's open fails, it skips the dup2, and it keeps
+     * the fds it inherited across fork — which is what the fd-slot model exists
+     * to emulate in the first place, and what Linux gives us for free. Redirects
+     * and pipes still need real work (sys_fdbind, HANDOFF §7.5); this only makes
+     * the common case correct instead of silently broken. */
+    if (!strcmp(d->letter, "#d"))
         return 0;
-    if (!strcmp(src, "#d") && !strcmp(dst, "/fd"))
-        return 0;
-    errno = ENOSYS;
-    return -1;
+
+    mkdir(dst, 0755);
+
+    if (d->fstype)
+        return rc32(mount(d->fstype, dst, d->fstype, 0, NULL));
+
+    /* Bind-mount forms. Resolve the source root. */
+    char srcpath[4096];
+    const char *root;
+    if (!strcmp(d->letter, "#distro"))
+        root = envdef("HAMNIX_DISTRO", "/n/distro");
+    else if (!strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r"))
+        root = envdef("HAMNIX_ROOT", "/");
+    else
+        root = d->source;
+
+    if ((size_t)snprintf(srcpath, sizeof srcpath, "%s%s", root, sub)
+            >= sizeof srcpath) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return rc32(mount(srcpath, dst, NULL, MS_BIND | MS_REC, NULL));
+}
+
+/* extern def sys_unmount(new: Ptr[char], old: Ptr[char]) -> int32
+ *
+ * Plan 9 unmount takes the thing being removed and the name it sits under;
+ * with `new` NULL it removes everything bound at `old`. Linux only names the
+ * mountpoint, so `old` is what matters. */
+int32_t sys_unmount(const char *new_, const char *old)
+{
+    (void)new_;
+    if (!old) {
+        errno = EFAULT;
+        return -1;
+    }
+    return rc32(umount2(old, 0));
 }
 
 /* ------------------------------------------------------------------ *

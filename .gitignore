@@ -1,10 +1,9 @@
-__pycache__/
-*.pyc
-*.pyo
-*.s
-*.o
+build/
 *.elf
 *.ll
-build/
+*.o
+*.pyc
+__pycache__/
+*.pyo
+*.s
 scratch/
-build/

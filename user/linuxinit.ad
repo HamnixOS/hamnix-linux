@@ -1,0 +1,111 @@
+# user/linuxinit.ad — PID 1 for the Linux line.
+#
+# Hamnix's init/main.ad is the KERNEL's start_kernel(), not a userspace init,
+# and it stays behind with Hamnix 1.0 — the Linux kernel does that job here.
+# What that leaves missing is the small piece between "the kernel has mounted
+# nothing" and "hamsh can run /etc/rc.boot": on Hamnix the kernel itself posts
+# the #c / #p / #s file servers before ELF-loading /init, so the very first
+# shell already has a namespace. Linux hands us an empty one.
+#
+# So this is deliberately thin. It brings up exactly the device servers
+# /etc/rc.boot assumes are already there, then execs the real init — which is
+# hamsh, exactly as on Hamnix (etc/inittab's last line is `/bin/hamsh`). Every
+# policy decision stays in the rc scripts where it is readable and editable.
+#
+# Note it mounts through sys_bind with the SAME `#X` letters the rc scripts
+# use, not through a Linux-specific mount call. That is the point: the Plan 9
+# namespace vocabulary is the interface, and on this line `bind '#p' /proc`
+# performs a real mount(2). Keeping that seam is what lets the boot scripts
+# port unchanged.
+#
+# Adder notes: buffers must be top-level BSS arrays rather than frame locals,
+# and adjacent string-literal concatenation is unsupported.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_bind(newp: Ptr[char], oldp: Ptr[char], flag: int32) -> int32
+extern def sys_mkdir(path: Ptr[char]) -> int32
+extern def sys_execve_env(path: Ptr[char], argv: Ptr[uint64],
+                          envp: Ptr[uint64]) -> int32
+extern def sys_waitpid_nb_raw(pid: int32, flags: int64) -> int64
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+extern def sys_rfork(flags: int32) -> int32
+extern def sys_exit(code: uint64)
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+
+RFPROC: int32 = 1
+
+# argv/envp vectors for the exec, and a scratch buffer for messages.
+init_argv: Array[4, uint64]
+init_envp: Array[4, uint64]
+errbuf:    Array[128, uint8]
+
+
+def write_cstr(fd: int32, s: Ptr[uint8]):
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    sys_write(fd, s, n)
+
+
+def say(msg: Ptr[uint8]):
+    write_cstr(1, "linuxinit: ")
+    write_cstr(1, msg)
+    write_cstr(1, "\n")
+
+
+def warn(what: Ptr[uint8]):
+    # A failed bind is not fatal on its own — a developer boot may already have
+    # /proc mounted by the initramfs, and /tmp is a convenience. Report the
+    # reason and carry on; the rc scripts fail loudly if something they need is
+    # genuinely absent.
+    write_cstr(2, "linuxinit: warning: ")
+    write_cstr(2, what)
+    write_cstr(2, ": ")
+    n: int32 = sys_errstr(&errbuf[0], 128)
+    if n > 0:
+        write_cstr(2, &errbuf[0])
+    write_cstr(2, "\n")
+
+
+def bind_or_warn(dst: Ptr[char], src: Ptr[char]):
+    sys_mkdir(dst)
+    if sys_bind(dst, src, 0) != 0:
+        warn(cast[Ptr[uint8]](dst))
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    say("Hamnix on Linux — bringing up the namespace")
+
+    # The device servers /etc/rc.boot expects to inherit. Order matters only in
+    # that /dev must exist before /dev/pts.
+    bind_or_warn(cast[Ptr[char]]("/proc"),    cast[Ptr[char]]("#p"))
+    bind_or_warn(cast[Ptr[char]]("/sys"),     cast[Ptr[char]]("#sys"))
+    bind_or_warn(cast[Ptr[char]]("/dev"),     cast[Ptr[char]]("#c"))
+    bind_or_warn(cast[Ptr[char]]("/dev/pts"), cast[Ptr[char]]("#pts"))
+    bind_or_warn(cast[Ptr[char]]("/srv"),     cast[Ptr[char]]("#s"))
+    bind_or_warn(cast[Ptr[char]]("/n"),       cast[Ptr[char]]("#/"))
+    bind_or_warn(cast[Ptr[char]]("/tmp"),     cast[Ptr[char]]("#t"))
+
+    say("namespace ready — exec /bin/hamsh /etc/rc.boot")
+
+    # Hand off to hamsh, exactly as etc/inittab does on Hamnix. hamsh becomes
+    # PID 1 itself via exec, so it inherits the reaping duty that comes with
+    # it — which it can now discharge, since sys_waitpid is implemented.
+    init_argv[0] = cast[uint64](cast[Ptr[char]]("/bin/hamsh"))
+    init_argv[1] = cast[uint64](cast[Ptr[char]]("/etc/rc.boot"))
+    init_argv[2] = 0
+    init_envp[0] = cast[uint64](cast[Ptr[char]]("PATH=/bin"))
+    init_envp[1] = cast[uint64](cast[Ptr[char]]("HOME=/root"))
+    init_envp[2] = cast[uint64](cast[Ptr[char]]("TERM=linux"))
+    init_envp[3] = 0
+
+    sys_execve_env(cast[Ptr[char]]("/bin/hamsh"),
+                   cast[Ptr[uint64]](&init_argv[0]),
+                   cast[Ptr[uint64]](&init_envp[0]))
+
+    # Only reached if the exec failed. PID 1 exiting panics the kernel, which
+    # is a worse diagnostic than saying why, so report and then stop.
+    warn(cast[Ptr[uint8]]("exec /bin/hamsh"))
+    say("PID 1 cannot continue")
+    return 1

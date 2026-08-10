@@ -1,0 +1,37 @@
+# /etc/rc.boot.linux — the bootstrap rc for the Linux line, interpreted by
+# hamsh running as PID 1.
+#
+# Staged into the image as /etc/rc.boot. It replaces etc/rc.boot (Hamnix's),
+# which cannot run here: that one's whole job is to bring a rootfs partition
+# online via `bind '#sysroot' /`, and the #sysroot file server is posted by the
+# Hamnix kernel. In an initramfs-only developer boot there is no partition and
+# no such server.
+#
+# What has ALREADY happened by the time this runs, in user/linuxinit.ad (the
+# Adder PID 1):
+#
+#   bind '#p'   /proc      bind '#c'   /dev      bind '#s'  /srv
+#   bind '#sys' /sys       bind '#pts' /dev/pts  bind '#/'  /n
+#   bind '#t'   /tmp
+#
+# On this line those binds perform real Linux mounts — see the device-server
+# table in user/linux-syscalls.c. The Plan 9 vocabulary is kept on purpose: the
+# rc scripts say what they mean and do not need to know which kernel is under
+# them.
+#
+# NOT yet bound, because their file servers are not written:
+#   '#I' /net       — HANDOFF §3, the /net file tree
+#   '#b' /dev/blk   — block devices
+#   '#w' /dev/win   — part of wsys, HANDOFF §4.4
+#   '#distro' /     — the Debian namespace
+#
+# Syntax: '#' starts a comment; device-letter names like '#s' MUST be
+# single-quoted; `bind SRC DST` is source-first.
+
+echo 'rc.boot: hamnix-linux starting'
+echo 'rc.boot: kernel is Linux; userland is Adder'
+
+# Nothing else to bring up yet. When /net and wsys land this is where they get
+# started, and where rc.d/rc.5 takes over to bring up the desktop.
+
+echo 'rc.boot: handing off to an interactive shell'

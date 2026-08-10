@@ -573,10 +573,10 @@ sys_waitfds:
     .globl sys_pipechan
     .type sys_pipechan, @function
 sys_pipechan:
-#endif /* !ADDER_HOSTED */
     .globl sys_unmount
     .type sys_unmount, @function
 sys_unmount:
+#endif /* !ADDER_HOSTED */
     .globl sys_mount
     .type sys_mount, @function
 sys_mount:

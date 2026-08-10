@@ -1,0 +1,52 @@
+# tests/linux/strace_init.ad — a debugging PID 1 that runs hamsh under strace.
+#
+# Not part of the boot path. It exists because the child processes hamsh spawns
+# inside the VM run correctly and exit with the right status, yet nothing they
+# write reaches any fd -- and strace run as hamsh's child would have its own
+# output swallowed by the same fault. Running strace AS pid 1, with its log
+# written straight to /dev/console, is the only vantage point that survives.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_bind(newp: Ptr[char], oldp: Ptr[char], flag: int32) -> int32
+extern def sys_mkdir(path: Ptr[char]) -> int32
+extern def sys_execve_env(path: Ptr[char], argv: Ptr[uint64],
+                          envp: Ptr[uint64]) -> int32
+
+sargv: Array[10, uint64]
+senvp: Array[3, uint64]
+
+
+def write_cstr(fd: int32, s: Ptr[uint8]):
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    sys_write(fd, s, n)
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    sys_mkdir(cast[Ptr[char]]("/proc"))
+    sys_bind(cast[Ptr[char]]("/proc"), cast[Ptr[char]]("#p"), 0)
+    sys_mkdir(cast[Ptr[char]]("/dev"))
+    sys_bind(cast[Ptr[char]]("/dev"), cast[Ptr[char]]("#c"), 0)
+    sys_mkdir(cast[Ptr[char]]("/tmp"))
+    sys_bind(cast[Ptr[char]]("/tmp"), cast[Ptr[char]]("#t"), 0)
+
+    write_cstr(1, "strace_init: tracing hamsh\n")
+
+    sargv[0] = cast[uint64](cast[Ptr[char]]("/bin/strace"))
+    sargv[1] = cast[uint64](cast[Ptr[char]]("-f"))
+    sargv[2] = cast[uint64](cast[Ptr[char]]("-e"))
+    sargv[3] = cast[uint64](cast[Ptr[char]]("trace=write,dup2,dup3,close,openat,execve,clone,fork"))
+    sargv[4] = cast[uint64](cast[Ptr[char]]("-o"))
+    sargv[5] = cast[uint64](cast[Ptr[char]]("/dev/console"))
+    sargv[6] = cast[uint64](cast[Ptr[char]]("/bin/hamsh"))
+    sargv[7] = cast[uint64](cast[Ptr[char]]("/etc/rc.boot"))
+    sargv[8] = 0
+    senvp[0] = cast[uint64](cast[Ptr[char]]("PATH=/bin"))
+    senvp[1] = 0
+
+    sys_execve_env(cast[Ptr[char]]("/bin/strace"),
+                   cast[Ptr[uint64]](&sargv[0]),
+                   cast[Ptr[uint64]](&senvp[0]))
+    write_cstr(1, "strace_init: exec failed\n")
+    return 1

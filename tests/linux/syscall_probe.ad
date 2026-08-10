@@ -162,27 +162,27 @@ def check_link() -> int32:
     # Write a file, hard-link it, and read the content back through the new
     # name. That proves the link exists rather than merely that link() returned
     # 0. Then unlink both.
-    fd: int32 = sys_open_write("scratch/_probe_src")
+    fd: int32 = sys_open_write("/tmp/_hamnix_probe_src")
     if fd < 0:
         return 0
     iobuf[0] = 76                                   # 'L'
     sys_write(fd, &iobuf[0], 1)
     sys_close(fd)
 
-    sys_unlink("scratch/_probe_link")
-    if sys_link("scratch/_probe_src", "scratch/_probe_link") != 0:
-        sys_unlink("scratch/_probe_src")
+    sys_unlink("/tmp/_hamnix_probe_link")
+    if sys_link("/tmp/_hamnix_probe_src", "/tmp/_hamnix_probe_link") != 0:
+        sys_unlink("/tmp/_hamnix_probe_src")
         return 0
 
-    rfd: int32 = sys_open("scratch/_probe_link")
+    rfd: int32 = sys_open("/tmp/_hamnix_probe_link")
     if rfd < 0:
-        sys_unlink("scratch/_probe_src")
+        sys_unlink("/tmp/_hamnix_probe_src")
         return 0
     iobuf[0] = 0
     got: int64 = sys_read(rfd, &iobuf[0], 1)
     sys_close(rfd)
-    sys_unlink("scratch/_probe_link")
-    sys_unlink("scratch/_probe_src")
+    sys_unlink("/tmp/_hamnix_probe_link")
+    sys_unlink("/tmp/_hamnix_probe_src")
     if got != 1:
         return 0
     if iobuf[0] != 76:
@@ -193,27 +193,27 @@ def check_link() -> int32:
 def check_symlink() -> int32:
     # Same shape, through a symlink: the content must be reachable via the
     # link name, which only holds if the symlink really points at the target.
-    fd: int32 = sys_open_write("scratch/_probe_sym_target")
+    fd: int32 = sys_open_write("/tmp/_hamnix_probe_sym_target")
     if fd < 0:
         return 0
     iobuf[0] = 83                                   # 'S'
     sys_write(fd, &iobuf[0], 1)
     sys_close(fd)
 
-    sys_unlink("scratch/_probe_sym")
-    if sys_symlink("_probe_sym_target", "scratch/_probe_sym") != 0:
-        sys_unlink("scratch/_probe_sym_target")
+    sys_unlink("/tmp/_hamnix_probe_sym")
+    if sys_symlink("_hamnix_probe_sym_target", "/tmp/_hamnix_probe_sym") != 0:
+        sys_unlink("/tmp/_hamnix_probe_sym_target")
         return 0
 
-    rfd: int32 = sys_open("scratch/_probe_sym")
+    rfd: int32 = sys_open("/tmp/_hamnix_probe_sym")
     if rfd < 0:
-        sys_unlink("scratch/_probe_sym_target")
+        sys_unlink("/tmp/_hamnix_probe_sym_target")
         return 0
     iobuf[0] = 0
     got: int64 = sys_read(rfd, &iobuf[0], 1)
     sys_close(rfd)
-    sys_unlink("scratch/_probe_sym")
-    sys_unlink("scratch/_probe_sym_target")
+    sys_unlink("/tmp/_hamnix_probe_sym")
+    sys_unlink("/tmp/_hamnix_probe_sym_target")
     if got != 1:
         return 0
     if iobuf[0] != 83:
@@ -241,14 +241,34 @@ def check_errstr() -> int32:
 
 
 def check_bind() -> int32:
-    # The two startup incantations (HANDOFF.md §4.2) must succeed, and
-    # anything else must fail rather than silently claim success.
-    if sys_bind("/dev", "#c", 0) != 0:
-        return 0
+    # sys_bind performs REAL Linux mounts for the `#X` device servers, so what
+    # it returns depends on privilege — and asserting "returns 0" here would
+    # only be testable as root, i.e. only inside the VM. Assert the parts that
+    # hold everywhere instead.
+
+    # `#d` -> /fd is a no-op that always succeeds. It must NOT materialise
+    # /fd: a real /fd gives every spawned child a read-only stdout and throws
+    # its output away. See the long note at the implementation.
     if sys_bind("/fd", "#d", 0) != 0:
         return 0
-    if sys_bind("/n/distros", "#/", 0) == 0:
+
+    # A device server with no implementation must fail, not pretend.
+    if sys_bind("/net", "#I", 0) == 0:
         return 0
+    # An unknown server letter likewise.
+    if sys_bind("/zz", "#Q", 0) == 0:
+        return 0
+
+    # A real device-server bind succeeds as root and fails with EPERM
+    # otherwise; both are correct, silently succeeding without mounting is not.
+    r: int32 = sys_bind("/tmp", "#t", 0)
+    uid: uint32 = sys_getuid()
+    if uid == 0:
+        if r != 0:
+            return 0
+    else:
+        if r == 0:
+            return 0                          # claimed success without CAP_SYS_ADMIN
     return 1
 
 
