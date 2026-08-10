@@ -1,0 +1,7 @@
+extern def vkprobe() -> int32
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+def main() -> int32:
+    n: int32 = vkprobe()
+    if n > 0:
+        sys_write(1, "vkprobe: adder reached real Vulkan\n", 35)
+    return 0
