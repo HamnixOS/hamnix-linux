@@ -34,6 +34,7 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sched.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <netdb.h>
@@ -552,22 +553,47 @@ int32_t sys_socketpair(int32_t domain, int32_t type, int32_t protocol,
  *
  * RFMEM (share the address space) is the one flag fork cannot express; it
  * belongs with sys_rfork_thread, which stays fail-closed. */
-#define RFPROC  0x0001   /* create a process */
-#define RFMEM   0x0002   /* share the address space */
+#define RFPROC   0x0001   /* create a process */
+#define RFMEM    0x0002   /* share the address space */
+#define RFFDG    0x0004   /* copy the fd group */
+#define RFNAMEG  0x0008   /* copy (privatise) the namespace */
+#define RFCNAMEG 0x0080   /* start with an EMPTY namespace */
+
 int32_t sys_rfork(int32_t flags)
 {
     if (flags & RFMEM) {
         errno = ENOSYS;     /* that is sys_rfork_thread's job — HANDOFF §7.5 */
         return -ENOSYS;
     }
-    if (flags != 0 && !(flags & RFPROC)) {
-        /* A namespace-only rfork (RFNAMEG without RFPROC) asks for a private
-         * namespace in THIS process — unshare(CLONE_NEWNS) territory, and part
-         * of the §4.2 work that is deliberately out of scope. */
-        errno = ENOSYS;
-        return -ENOSYS;
+
+    /* RFNAMEG WITHOUT RFPROC privatises THIS task's namespace and does not
+     * fork. user/nsrun.ad:72 calls it the Plan 9 invariant — "rfork BEFORE
+     * mount" — and every namespace user in the tree follows it, so this is the
+     * shape the port has to support rather than a corner case.
+     *
+     * unshare(CLONE_NEWNS) is the exact equivalent: subsequent mounts are
+     * visible only to this process and its children. It needs CAP_SYS_ADMIN,
+     * which PID 1 and its descendants have inside the VM. */
+    if (!(flags & RFPROC)) {
+        if (flags & (RFNAMEG | RFCNAMEG))
+            return rc32(unshare(CLONE_NEWNS));
+        return 0;                       /* nothing asked for */
     }
-    return rc32(fork());
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return rc32(-1);
+    if (pid == 0 && (flags & (RFNAMEG | RFCNAMEG))) {
+        /* The CHILD gets the private namespace. Doing it here rather than
+         * before the fork is what makes the parent's namespace survive. */
+        if (unshare(CLONE_NEWNS) < 0)
+            _exit(127);
+        /* Plan 9's namespace copy is private by construction; Linux mount
+         * propagation defaults to shared, which would leak our mounts back to
+         * the parent and defeat the point. */
+        mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+    }
+    return (int32_t)pid;
 }
 
 /* extern def sys_execve_env(path: Ptr[char], argv: Ptr[uint64],
@@ -1271,6 +1297,20 @@ static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
     return NULL;
 }
 
+/* Make `mnt` the process's root. chroot alone leaves the old root reachable
+ * through the cwd, so chdir first — that is the difference between confinement
+ * and a suggestion. */
+static int32_t enter_root(const char *mnt)
+{
+    if (chdir(mnt) < 0)
+        return -(int32_t)errno;
+    if (chroot(".") < 0)
+        return -(int32_t)errno;
+    if (chdir("/") < 0)
+        return -(int32_t)errno;
+    return 0;
+}
+
 int32_t sys_bind(const char *dst, const char *src, int32_t flag)
 {
     (void)flag;                 /* MREPL/MBEFORE/MAFTER ordering: Linux mounts
@@ -1339,7 +1379,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
     char srcpath[4096];
     const char *root;
     if (!strcmp(d->letter, "#distro"))
-        root = envdef("HAMNIX_DISTRO", "/n/distro");
+        root = envdef("HAMNIX_DISTRO", "/dev/vda");
     else if (!strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r"))
         root = envdef("HAMNIX_ROOT", "/");
     else
@@ -1350,7 +1390,58 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
         errno = ENAMETOOLONG;
         return -1;
     }
-    return rc32(mount(srcpath, dst, NULL, MS_BIND | MS_REC, NULL));
+
+    /* A subtree server may be backed by a BLOCK DEVICE rather than a directory,
+     * and that is the normal case for `#distro` and `#sysroot`.
+     *
+     * This mirrors Hamnix exactly rather than inventing something. There, the
+     * kernel parses the rootfs partition's `.hamnix-roots` sentinel at boot and
+     * posts each named subtree as a file server, so `bind '#distro' /n/distro`
+     * splices in a subtree that lives on a partition. Here there is no kernel
+     * doing that, so bind performs the mount itself — same verb, same meaning,
+     * one less layer.
+     *
+     * The Debian namespace is this: HAMNIX_DISTRO names a filesystem holding a
+     * Debian tree, bound at /n/distro, and nothing Debian installs is ever
+     * written into the Hamnix filesystem. */
+    /* `bind '#distro' /` — the idiom the rc.de-* scripts use to ENTER a
+     * subtree, as opposed to merely making it visible. On Hamnix that rebinds
+     * the process's root to the subtree server; on Linux it is a chroot, and it
+     * is only safe because the caller has already done rfork(RFNAMEG) per the
+     * Plan 9 invariant, so the mount cannot escape into anyone else's view.
+     *
+     * This is how a Debian application is run: privatise the namespace, bind
+     * '#distro' at /, exec. The Hamnix filesystem is then not even reachable,
+     * which is a stronger guarantee than "we agreed not to write to it". */
+    int to_root = (dst[0] == '/' && dst[1] == '\0');
+    const char *mnt = dst;
+    if (to_root) {
+        mnt = "/n/.root";
+        mkdir("/n", 0755);
+        mkdir(mnt, 0755);
+    }
+
+    struct stat sb;
+    if (stat(srcpath, &sb) == 0 && S_ISBLK(sb.st_mode)) {
+        static const char *fstypes[] = { "ext4", "ext3", "ext2", "squashfs",
+                                         "vfat", "btrfs", "xfs" };
+        int last = ENODEV;
+        for (size_t i = 0; i < sizeof fstypes / sizeof fstypes[0]; i++) {
+            if (mount(srcpath, mnt, fstypes[i], 0, NULL) == 0)
+                return to_root ? enter_root(mnt) : 0;
+            last = errno;
+            /* EBUSY means something is already mounted there; trying more
+             * filesystem types will not help. */
+            if (last == EBUSY)
+                break;
+        }
+        errno = last;
+        return -(int32_t)last;
+    }
+
+    if (mount(srcpath, mnt, NULL, MS_BIND | MS_REC, NULL) < 0)
+        return -(int32_t)errno;
+    return to_root ? enter_root(mnt) : 0;
 }
 
 /* extern def sys_unmount(new: Ptr[char], old: Ptr[char]) -> int32

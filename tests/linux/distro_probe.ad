@@ -1,0 +1,168 @@
+# tests/linux/distro_probe.ad — run a native Debian binary inside the Debian
+# namespace, without the Hamnix filesystem being reachable from it.
+#
+# This is the shape the whole Debian story rests on, and it is Hamnix's own
+# idiom, not something invented for Linux:
+#
+#   1. sys_rfork(RFPROC|RFNAMEG)   — child gets a PRIVATE namespace
+#   2. bind '#distro' /            — in the child, enter the Debian subtree
+#   3. exec a Debian binary        — /bin/uname etc. are Debian's, not ours
+#
+# user/nsrun.ad:72 calls step 1 before step 2 the Plan 9 invariant: rfork
+# BEFORE mount, so the mount cannot be seen by anyone else. That is what keeps
+# Debian packages from ever touching the Hamnix filesystem — the parent's view
+# is untouched, and the child cannot even name /bin/hamsh.
+#
+# The parent proves both halves: the child produced Debian's output, AND the
+# parent's own namespace still has the Hamnix tree.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_pipe(fds: Ptr[int32]) -> int32
+extern def sys_dup2(old: int32, new_: int32) -> int32
+extern def sys_rfork(flags: int32) -> int32
+extern def sys_bind(newp: Ptr[char], oldp: Ptr[char], flag: int32) -> int32
+extern def sys_execve_env(path: Ptr[char], argv: Ptr[uint64],
+                          envp: Ptr[uint64]) -> int32
+extern def sys_waitpid(pid: int32) -> int64
+extern def sys_exit(code: uint64)
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+
+RFPROC:  int32 = 0x001
+RFNAMEG: int32 = 0x008
+
+dargv:  Array[6, uint64]
+denvp:  Array[3, uint64]
+pfd:    Array[2, int32]
+outbuf: Array[512, uint8]
+errbuf: Array[128, uint8]
+
+failures: int32 = 0
+
+
+def write_cstr(fd: int32, s: Ptr[uint8]):
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    sys_write(fd, s, n)
+
+
+def report(name: Ptr[uint8], good: int32):
+    if good != 0:
+        write_cstr(1, "ok   ")
+    else:
+        write_cstr(1, "FAIL ")
+        failures = failures + 1
+    write_cstr(1, name)
+    write_cstr(1, "\n")
+
+
+def why(what: Ptr[uint8]):
+    write_cstr(1, "       ")
+    write_cstr(1, what)
+    write_cstr(1, ": ")
+    n: int32 = sys_errstr(&errbuf[0], 128)
+    if n > 0:
+        write_cstr(1, &errbuf[0])
+    write_cstr(1, "\n")
+
+
+def run_in_distro(prog: Ptr[char], a1: Ptr[char]) -> int32:
+    # Returns the number of bytes the child produced on stdout, or -1.
+    if sys_pipe(&pfd[0]) != 0:
+        return -1
+    pid: int32 = sys_rfork(RFPROC | RFNAMEG)
+    if pid < 0:
+        why(cast[Ptr[uint8]]("rfork"))
+        return -1
+    if pid == 0:
+        sys_close(pfd[0])
+        sys_dup2(pfd[1], 1)
+        sys_dup2(pfd[1], 2)
+        sys_close(pfd[1])
+        # Enter the Debian subtree. After this the Hamnix filesystem is not
+        # reachable from this process at all.
+        if sys_bind(cast[Ptr[char]]("/"), cast[Ptr[char]]("#distro"), 0) != 0:
+            write_cstr(1, "child: bind '#distro' / failed\n")
+            sys_exit(126)
+        dargv[0] = cast[uint64](prog)
+        dargv[1] = cast[uint64](a1)
+        dargv[2] = 0
+        denvp[0] = cast[uint64](cast[Ptr[char]]("PATH=/usr/bin:/bin"))
+        denvp[1] = 0
+        sys_execve_env(prog, cast[Ptr[uint64]](&dargv[0]),
+                       cast[Ptr[uint64]](&denvp[0]))
+        sys_exit(127)
+    sys_close(pfd[1])
+    # DRAIN the pipe. A single read returns whatever one write delivered --
+    # Debian's ls emits "ls: " and the rest of its diagnostic separately, so
+    # one read saw only the prefix and the isolation check read as a failure.
+    total: uint64 = 0
+    while total < 511:
+        k: int64 = sys_read(pfd[0], &outbuf[total], 511 - total)
+        if k <= 0:
+            break
+        total = total + cast[uint64](k)
+    sys_close(pfd[0])
+    sys_waitpid(pid)
+    outbuf[total] = 0
+    return cast[int32](total)
+
+
+def check_debian_binary() -> int32:
+    # dpkg is unmistakably Debian's and does not exist in the Hamnix tree, so
+    # output from it proves we are running Debian's userland.
+    n: int32 = run_in_distro(cast[Ptr[char]]("/usr/bin/dpkg"),
+                             cast[Ptr[char]]("--version"))
+    if n <= 0:
+        return 0
+    write_cstr(1, "       child said: ")
+    write_cstr(1, &outbuf[0])
+    if outbuf[0] != 68:                    # 'D' of "Debian"
+        return 0
+    return 1
+
+
+def check_parent_namespace_intact() -> int32:
+    # The parent must STILL see the Hamnix tree. If the child's bind had leaked
+    # (Linux mount propagation defaults to shared), /bin/hamsh would be gone.
+    fd: int32 = sys_open(cast[Ptr[char]]("/bin/hamsh"))
+    if fd < 0:
+        why(cast[Ptr[uint8]]("open /bin/hamsh"))
+        return 0
+    sys_close(fd)
+    return 1
+
+
+def check_distro_isolated() -> int32:
+    # And the child must NOT be able to see the Hamnix tree. Ask Debian's own
+    # `ls` for /bin/hamsh inside the namespace; it must fail.
+    n: int32 = run_in_distro(cast[Ptr[char]]("/bin/ls"),
+                             cast[Ptr[char]]("/bin/hamsh"))
+    if n < 0:
+        return 0
+    # Debian's ls prints an error to stderr, which we merged into the pipe.
+    # Any output naming hamsh as FOUND would be a leak; an error is a pass.
+    i: uint64 = 0
+    while i + 2 < cast[uint64](n):
+        if outbuf[i] == 78 and outbuf[i+1] == 111:      # "No such file"
+            return 1
+        i = i + 1
+    write_cstr(1, "       child saw: ")
+    write_cstr(1, &outbuf[0])
+    write_cstr(1, "\n")
+    return 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    write_cstr(1, "distro_probe: the Debian namespace\n")
+    report("run a Debian binary in the namespace", check_debian_binary())
+    report("parent namespace intact", check_parent_namespace_intact())
+    report("Hamnix tree unreachable from Debian", check_distro_isolated())
+    if failures == 0:
+        write_cstr(1, "ALL PASS\n")
+    else:
+        write_cstr(1, "SOME FAILED\n")
+    return failures

@@ -1,4 +1,5 @@
 build/
+build/distro/
 *.elf
 *.ll
 *.o

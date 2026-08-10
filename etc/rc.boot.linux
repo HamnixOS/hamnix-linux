@@ -35,3 +35,9 @@ echo 'rc.boot: kernel is Linux; userland is Adder'
 # started, and where rc.d/rc.5 takes over to bring up the desktop.
 
 echo 'rc.boot: handing off to an interactive shell'
+
+# --- the Debian namespace -------------------------------------------
+# `#distro` is a subtree server backed by its own filesystem (a virtio disk
+# here). Debian's tree is bound at /n/distro and NOTHING it installs is written
+# into the Hamnix filesystem -- that separation is the whole reason for it.
+bind '#distro' /n/distro

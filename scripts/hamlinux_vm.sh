@@ -46,6 +46,14 @@ COMMON=(
     -device virtio-gpu-pci
 )
 
+# The Debian namespace lives on its own filesystem image, attached as a plain
+# virtio-blk disk and mounted by `bind '#distro' /n/distro`. Keeping it on a
+# SEPARATE volume is the point: nothing Debian installs can reach the Hamnix
+# filesystem.
+if [ -f "$IMG/distro.ext4" ]; then
+    COMMON+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe")
+fi
+
 # panic=-1 with -no-reboot makes a PID-1 death terminate QEMU instead of
 # hanging, which matters because an init that exits is exactly the failure this
 # is most likely to hit.

@@ -107,7 +107,7 @@ KVER="$(basename "${KERNEL:-}" 2>/dev/null | sed 's/^vmlinuz-//')"
 KERNEL="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
 KVER="$(basename "$KERNEL" | sed 's/^vmlinuz-//')"
 MODPROBE=/usr/sbin/modprobe
-WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk}"
+WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk ext4 overlay}"
 : > "$ROOT/etc/modules"
 if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
     mkdir -p "$ROOT/lib/modules/$KVER"
