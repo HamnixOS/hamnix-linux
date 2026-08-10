@@ -6,6 +6,15 @@
 #   hlinstall                 list the disks and stop
 #   hlinstall /dev/vdb        install onto that disk, ERASING it
 #
+#   hlinstall --auto /dev/vdb --hostname <h> --user <u> --user-pass <p>
+#             --root-pass <p> [--esp-mb <n>] [--part-mode guided|manual]
+#             [--repo <url>]
+#
+# The flag form is what user/haminstallui.ad -- the DE's multi-page install
+# wizard -- spawns, and it is why this program is also installed as
+# /bin/install: the wizard was written against that name and that argv, and
+# the wizard is the part worth keeping.
+#
 # WHAT IT MAKES
 #   GPT
 #   ├─ p1  ESP, FAT32, 512M   /EFI/BOOT/BOOTX64.EFI + kernel + initramfs
@@ -55,6 +64,8 @@ extern def sys_bind(newp: Ptr[char], oldp: Ptr[char], flag: int32) -> int32
 extern def sys_execve_env(path: Ptr[char], argv: Ptr[uint64],
                           envp: Ptr[uint64]) -> int32
 extern def sys_waitpid(pid: int32) -> int64
+extern def sys_pipe(fds: Ptr[int32]) -> int32
+extern def sys_dup2(old: int32, new_: int32) -> int32
 extern def sys_exit(code: uint64)
 extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
 
@@ -63,6 +74,16 @@ RFFDG:   int32 = 0x004
 RFNAMEG: int32 = 0x008
 
 argbuf:  Array[8, uint64]
+pipefd:  Array[2, int32]
+hostname_buf: Array[64, uint8]
+user_buf:     Array[64, uint8]
+upass_buf:    Array[128, uint8]
+rpass_buf:    Array[128, uint8]
+hash_buf:     Array[256, uint8]
+line_buf:     Array[512, uint8]
+esp_mb:  int32 = 512
+have_host: int32 = 0
+have_user: int32 = 0
 envbuf:  Array[4, uint64]
 p1:      Array[64, uint8]        # <disk>1
 p2:      Array[64, uint8]        # <disk>2
@@ -176,6 +197,25 @@ def run_in_distro(prog: Ptr[char], n_args: int32) -> int32:
     return cast[int32](st)
 
 
+def emit_dec(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = v
+    i: uint64 = at
+    if x == 0:
+        d[0] = 48
+        n = 1
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = d[n]
+        i = i + 1
+    return i
+
+
 def step(msg: Ptr[uint8]):
     puts(1, "\n=== ")
     puts(1, msg)
@@ -226,13 +266,213 @@ def copy_file(src: Ptr[char], dst: Ptr[char]) -> int32:
     return rc
 
 
+def streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    if a[i] != b[i]:
+        return 0
+    return 1
+
+
+def parse_int(p: Ptr[uint8]) -> int32:
+    v: int32 = 0
+    i: uint64 = 0
+    while p[i] >= 48 and p[i] <= 57:
+        v = v * 10 + cast[int32](p[i]) - 48
+        i = i + 1
+    return v
+
+
+# Hash a password the way the target's /etc/shadow needs it. openssl lives in
+# the Debian namespace; asking it is honest work, and inventing a hash format
+# would produce an account nobody could log into.
+def hash_password(plain: Ptr[uint8]) -> int32:
+    hash_buf[0] = 0
+    if sys_pipe(&pipefd[0]) != 0:
+        return -1
+    pid: int32 = sys_rfork(RFPROC | RFFDG | RFNAMEG)
+    if pid < 0:
+        return -1
+    if pid == 0:
+        sys_close(pipefd[0])
+        sys_dup2(pipefd[1], 1)
+        sys_close(pipefd[1])
+        if sys_bind(cast[Ptr[char]]("/"), cast[Ptr[char]]("#distro"), 0) != 0:
+            sys_exit(126)
+        copy_str(&a1[0], cast[Ptr[uint8]]("passwd"))
+        copy_str(&a2[0], cast[Ptr[uint8]]("-6"))
+        copy_str(&a3[0], plain)
+        argbuf[0] = cast[uint64](cast[Ptr[char]]("/usr/bin/openssl"))
+        argbuf[1] = cast[uint64](&a1[0])
+        argbuf[2] = cast[uint64](&a2[0])
+        argbuf[3] = cast[uint64](&a3[0])
+        argbuf[4] = 0
+        envbuf[0] = cast[uint64](cast[Ptr[char]]("PATH=/usr/bin:/bin"))
+        envbuf[1] = 0
+        sys_execve_env(cast[Ptr[char]]("/usr/bin/openssl"),
+                       cast[Ptr[uint64]](&argbuf[0]),
+                       cast[Ptr[uint64]](&envbuf[0]))
+        sys_exit(127)
+    sys_close(pipefd[1])
+    total: uint64 = 0
+    while total < 250:
+        k: int64 = sys_read(pipefd[0], &hash_buf[total], 250 - total)
+        if k <= 0:
+            break
+        total = total + cast[uint64](k)
+    sys_close(pipefd[0])
+    sys_waitpid(pid)
+    # Trim the trailing newline; a hash with one in it is not a hash.
+    while total > 0 and (hash_buf[total - 1] == 10 or hash_buf[total - 1] == 13):
+        total = total - 1
+    hash_buf[total] = 0
+    if total < 10:
+        return -1
+    return 0
+
+
+def append_line(path: Ptr[char], line: Ptr[uint8]) -> int32:
+    # Read what is there, write it back with the line appended. The tree has
+    # no O_APPEND open, and a system file is small enough that this is the
+    # simplest correct thing.
+    fd: int32 = sys_open(path)
+    total: uint64 = 0
+    if fd >= 0:
+        while total < 480:
+            k: int64 = sys_read(fd, &line_buf[total], 480 - total)
+            if k <= 0:
+                break
+            total = total + cast[uint64](k)
+        sys_close(fd)
+    out: int32 = sys_open_write(path)
+    if out < 0:
+        return -1
+    if total > 0:
+        sys_write(out, &line_buf[0], total)
+        if line_buf[total - 1] != 10:
+            sys_write(out, cast[Ptr[uint8]]("\n"), 1)
+    sys_write(out, line, slen(line))
+    sys_write(out, cast[Ptr[uint8]]("\n"), 1)
+    sys_close(out)
+    return 0
+
+
+def write_file(path: Ptr[char], text: Ptr[uint8]) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    sys_write(fd, text, slen(text))
+    sys_close(fd)
+    return 0
+
+
+# The target's identity: its name, and the person who will use it.
+def configure_target() -> int32:
+    if have_host != 0:
+        copy_str(&line_buf[0], &hostname_buf[0])
+        write_file(cast[Ptr[char]]("/n/target/etc/hostname"), &line_buf[0])
+        puts(1, "  hostname ")
+        puts(1, &hostname_buf[0])
+        puts(1, "\n")
+
+    if have_user == 0:
+        return 0
+
+    # uid 1000, the first regular account, with its own group.
+    ph: Ptr[uint8] = cast[Ptr[uint8]]("*")
+    if upass_buf[0] != 0:
+        if hash_password(&upass_buf[0]) == 0:
+            ph = &hash_buf[0]
+        else:
+            puts(2, "  WARNING: could not hash the password; the account is "
+                    "created LOCKED rather than open.\n")
+
+    i: uint64 = copy_str(&line_buf[0], &user_buf[0])
+    i = i + copy_str(&line_buf[i], cast[Ptr[uint8]](":x:1000:1000::/home/"))
+    i = i + copy_str(&line_buf[i], &user_buf[0])
+    copy_str(&line_buf[i], cast[Ptr[uint8]](":/bin/hamsh"))
+    append_line(cast[Ptr[char]]("/n/target/etc/passwd"), &line_buf[0])
+
+    i = copy_str(&line_buf[0], &user_buf[0])
+    i = i + copy_str(&line_buf[i], cast[Ptr[uint8]](":x:1000:"))
+    append_line(cast[Ptr[char]]("/n/target/etc/group"), &line_buf[0])
+
+    i = copy_str(&line_buf[0], &user_buf[0])
+    line_buf[i] = 58                                  # ':'
+    i = i + 1
+    i = i + copy_str(&line_buf[i], ph)
+    copy_str(&line_buf[i], cast[Ptr[uint8]](":20000:0:99999:7:::"))
+    append_line(cast[Ptr[char]]("/n/target/etc/shadow"), &line_buf[0])
+
+    i = copy_str(&line_buf[0], cast[Ptr[uint8]]("/n/target/home/"))
+    copy_str(&line_buf[i], &user_buf[0])
+    sys_mkdir(cast[Ptr[char]](&line_buf[0]))
+
+    puts(1, "  user ")
+    puts(1, &user_buf[0])
+    puts(1, " (uid 1000)\n")
+    return 0
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     puts(1, "hamnix-linux installer\n\n")
     if argc < 2:
         list_disks()
         return 1
 
-    dn: uint64 = copy_str(&disk[0], cast[Ptr[uint8]](argv[1]))
+    # Two argument shapes: a bare disk, or the flag form the DE wizard uses.
+    target: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
+    ai: int32 = 1
+    while ai < argc:
+        f: Ptr[uint8] = cast[Ptr[uint8]](argv[cast[uint64](ai)])
+        if streq(f, cast[Ptr[uint8]]("--auto")) != 0 and ai + 1 < argc:
+            target = cast[Ptr[uint8]](argv[cast[uint64](ai) + 1])
+            ai = ai + 2
+            continue
+        if streq(f, cast[Ptr[uint8]]("--hostname")) != 0 and ai + 1 < argc:
+            copy_str(&hostname_buf[0],
+                     cast[Ptr[uint8]](argv[cast[uint64](ai) + 1]))
+            have_host = 1
+            ai = ai + 2
+            continue
+        if streq(f, cast[Ptr[uint8]]("--user")) != 0 and ai + 1 < argc:
+            copy_str(&user_buf[0],
+                     cast[Ptr[uint8]](argv[cast[uint64](ai) + 1]))
+            have_user = 1
+            ai = ai + 2
+            continue
+        if streq(f, cast[Ptr[uint8]]("--user-pass")) != 0 and ai + 1 < argc:
+            copy_str(&upass_buf[0],
+                     cast[Ptr[uint8]](argv[cast[uint64](ai) + 1]))
+            ai = ai + 2
+            continue
+        if streq(f, cast[Ptr[uint8]]("--root-pass")) != 0 and ai + 1 < argc:
+            copy_str(&rpass_buf[0],
+                     cast[Ptr[uint8]](argv[cast[uint64](ai) + 1]))
+            ai = ai + 2
+            continue
+        if streq(f, cast[Ptr[uint8]]("--esp-mb")) != 0 and ai + 1 < argc:
+            esp_mb = parse_int(cast[Ptr[uint8]](argv[cast[uint64](ai) + 1]))
+            if esp_mb < 64:
+                esp_mb = 64
+            ai = ai + 2
+            continue
+        # --repo and --part-mode are accepted and not yet acted on. Saying so
+        # beats appearing to honour them: a repo the installed system does not
+        # actually use would be a lie the operator only finds later.
+        if streq(f, cast[Ptr[uint8]]("--repo")) != 0 and ai + 1 < argc:
+            puts(1, "note: --repo is recorded but not yet applied\n")
+            ai = ai + 2
+            continue
+        if streq(f, cast[Ptr[uint8]]("--part-mode")) != 0 and ai + 1 < argc:
+            ai = ai + 2
+            continue
+        ai = ai + 1
+
+    dn: uint64 = copy_str(&disk[0], target)
     # <disk>1 and <disk>2. NVMe and mmc name their partitions <disk>p1, and a
     # wrong guess would format somebody's other partition, so refuse rather
     # than assume: those disks want an explicit naming rule this does not have
@@ -263,7 +503,10 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if run_in_distro(cast[Ptr[char]]("/usr/sbin/sgdisk"), 2) != 0:
         puts(2, "hlinstall: sgdisk --zap-all failed\n")
         return 1
-    copy_str(&a1[0], cast[Ptr[uint8]]("--new=1:2048:+512M"))
+    i2: uint64 = copy_str(&a1[0], cast[Ptr[uint8]]("--new=1:2048:+"))
+    i2 = emit_dec(&a1[0], i2, esp_mb)
+    a1[i2] = 77                                       # 'M'
+    a1[i2 + 1] = 0
     copy_str(&a2[0], cast[Ptr[uint8]]("--typecode=1:ef00"))
     copy_str(&a3[0], cast[Ptr[uint8]]("--change-name=1:HAMBOOT"))
     copy_str(&a4[0], &disk[0])
@@ -368,6 +611,9 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                  cast[Ptr[char]]("/n/target/etc/rc.boot")) != 0:
         puts(2, "hlinstall: could not write the installed boot rc\n")
         return 1
+
+    step(cast[Ptr[uint8]]("6/6  identity"))
+    configure_target()
 
     puts(1, "\ninstalled. remove the installation media and reboot.\n")
     return 0

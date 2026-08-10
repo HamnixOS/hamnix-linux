@@ -44,7 +44,7 @@ APPS=(
     ifconfig route ping host curl wget hpm
     insmod modprobe lsmod rmmod
     xbridge nsrun dhcpc ntpd
-    hlinstall reboot
+    hlinstall reboot haminstallui
 )
 
 # The desktop. wsysd is the compositor (user/wsysd.ad — the userland half of
@@ -69,6 +69,12 @@ for app in "${APPS[@]}"; do
         MISSING+=("$app")
     fi
 done
+
+# /bin/install is the SAME program as /bin/hlinstall. user/haminstallui.ad --
+# the DE's install wizard -- spawns "/bin/install --auto <disk> ..." and was
+# written against that name and that argv; the wizard is the part worth
+# keeping, so the name follows it rather than the other way round.
+[ -f "$ROOT/bin/hlinstall" ] && install -m755 "$ROOT/bin/hlinstall" "$ROOT/bin/install"
 
 # /init is the Adder PID 1. The kernel execs it directly out of the initramfs.
 scripts/hamlinux_build.sh user/linuxinit.ad "$OUT/obj/linuxinit.elf" >/dev/null
