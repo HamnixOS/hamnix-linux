@@ -109,6 +109,7 @@ from lib.svg import svg_decode, svg_width, svg_height, svg_rgba_ptr, svg_sniff
 from lib.htmlimg import htmlimg_reset, htmlimg_add, htmlimg_count, \
     htmlimg_dropped, htmlimg_drop_message, htmlimg_drop_message_len
 from lib.browserfonts import browserfonts_load
+from lib.hamscreen import hamscreen_dims
 from lib.font_ttf import font_ttf_loaded, FACE_TT_SANS, FACE_TT_SANS_BOLD, \
     FACE_TT_SERIF, FACE_TT_MONO
 
@@ -1639,7 +1640,22 @@ geom_line: Array[64, uint8]
 geom_diag: Array[128, uint8]
 
 
+# Ask the compositor, not /dev/fb.
+#
+# The /dev/fb parse below FAILS on the raw DRM path (a read-only open still
+# runs drm_try_card(), and DRM master belongs to wsysd), so on a DRM boot
+# this always returned 0 and the caller kept its 880x600 default. That is
+# harmless on a big screen and wrong on a small one: 880 wide does not fit
+# an 800x600 display, and the window opened off the right edge.
+#
+# Unlike hamlock and hamdesktop this does NOT fail hard when the geometry is
+# unknown. A browser is a WINDOW, not a full-screen element -- it is not
+# claiming to cover anything, so a sane default is a legitimate answer and
+# refusing to open would be worse than opening at 880x600. The caller's
+# plausibility check (>= 640x480) still applies.
 def _read_screen_dims(out: Ptr[int64]) -> int32:
+    if hamscreen_dims(&out[0], &out[1]) != 0:
+        return 1
     fd: int32 = sys_open(cast[Ptr[char]]("/dev/fb"))
     if fd < 0:
         return 0

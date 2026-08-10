@@ -43,6 +43,7 @@ from lib.hamctlcore import hamctl_init, hamctl_build_scene, hamctl_click, \
     hamctl_set_net, hamctl_net_dns_pref, ACT_SOUND, ACT_LOCK, ACT_LOGOUT, \
     ACT_SHUTDOWN, ACT_REBOOT, ACT_NET
 from lib.panelclock import panelclock_format
+from lib.hamscreen import hamscreen_dims
 
 
 def _writeall(fd: int32, s: Ptr[uint8]):
@@ -455,17 +456,37 @@ def _refresh_about():
         hamctl_about_add(cast[Ptr[uint8]]("Processes"), &tmpv[0])
 
 
+# The compositor's answer: width and height only. pitch/bpp are reported 0,
+# which is honest -- /dev/wsys/screen does not carry them and inventing
+# 4*width would be a guess dressed as a measurement.
+def _display_from_wsys():
+    wd: Array[1, int64]
+    hd: Array[1, int64]
+    if hamscreen_dims(&wd[0], &hd[0]) == 0:
+        return
+    hamctl_set_display(cast[int32](wd[0]), cast[int32](hd[0]), 0, 0)
+
+
 # ---- display read-out ----------------------------------------------------
 # /dev/fb emits one whitespace line "W H PITCH BPP PIXFMT" (see devfb_read /
 # user/hamshot.ad). Parse the first four fields into the core read-out.
+# The /dev/fb read works on fbdev and FAILS on the raw DRM path -- a
+# read-only open still runs drm_try_card(), and DRM master belongs to wsysd.
+# It is still tried first because it is the only source of pitch, bpp and
+# pixel format. When it fails we fall back to /dev/wsys/screen for the two
+# fields the compositor does publish, and report the rest as 0 rather than
+# leaving the whole read-out blank -- a settings panel that shows nothing
+# where the display should be reads as "no display".
 def _read_display():
     fd: int32 = sys_open(cast[Ptr[char]]("/dev/fb"))
     if fd < 0:
+        _display_from_wsys()
         return
     buf: Array[64, uint8]
     r: int64 = sys_read(fd, &buf[0], 63)
     sys_close(fd)
     if r <= 0:
+        _display_from_wsys()
         return
     n: uint64 = cast[uint64](r)
     vals: Array[4, int32]

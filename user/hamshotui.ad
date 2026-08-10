@@ -47,6 +47,7 @@ from lib.hamsceneloop import hamscene_park, HAMSCENE_IDLE_MS
 from lib.hamui import hamscene_begin, hamscene_fill, hamscene_rect, \
     hamscene_glyphs, hamscene_stroke, hamscene_panel_button, hamscene_commit
 from lib.shotoverlay import shot_overlay_build
+from lib.hamscreen import hamscreen_dims_or_fail
 from lib.p9 import spawn_detached, P9_SPAWN_STDIO_NS
 
 
@@ -211,22 +212,22 @@ BTN_GAP: int32 = 12
 GLYPH_W: int32 = 8
 
 
-def _read_screen_dims():
-    gfd: int32 = sys_open(cast[Ptr[char]]("/dev/fb"))
-    if gfd < 0:
-        return
-    geo: Array[64, uint8]
-    gn: int64 = sys_read(gfd, &geo[0], 63)
-    sys_close(gfd)
-    if gn <= 0:
-        return
-    glen: uint64 = cast[uint64](gn)
-    gpos: uint64 = 0
-    w: uint64 = _parse_u64(&geo[0], &gpos, glen)
-    h: uint64 = _parse_u64(&geo[0], &gpos, glen)
-    if w > 0 and h > 0:
-        SCR_W = cast[int64](w)
-        SCR_H = cast[int64](h)
+# The screen size comes from the compositor, via lib/hamscreen.ad.
+#
+# This used to parse /dev/fb's geometry header and, on any failure, leave the
+# SCR_W/SCR_H initialisers at 1024x768. On the raw DRM path that read always
+# fails -- a read-only open still runs drm_try_card() and DRM master belongs
+# to wsysd -- so the initialisers were the answer, not a fallback. A
+# screenshot UI that believes the screen is 1024x768 places its own chrome
+# off-screen and mis-frames every region selection the user drags.
+def _read_screen_dims() -> int32:
+    wd: Array[1, int64]
+    hd: Array[1, int64]
+    if hamscreen_dims_or_fail(&wd[0], &hd[0], cast[Ptr[uint8]]("[hamshotui]")) == 0:
+        return 0
+    SCR_W = wd[0]
+    SCR_H = hd[0]
+    return 1
 
 
 # ====================================================================
@@ -487,7 +488,8 @@ def _handle_pointer(bx: int64, by: int64, bbtn: int64):
 
 def main() -> int32:
     sys_bind(cast[Ptr[char]]("/dev"), cast[Ptr[char]]("#c"), 0)
-    _read_screen_dims()
+    if _read_screen_dims() == 0:
+        return 1
 
     g_wid = _newwindow()
     if g_wid < 0:

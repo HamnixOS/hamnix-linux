@@ -49,6 +49,7 @@ extern def sys_exit(code: uint64)
 
 from lib.hamui import hamscene_begin, hamscene_fill, hamscene_glyphs, \
     hamscene_stroke, hamscene_commit
+from lib.hamscreen import hamscreen_dims_or_fail
 from lib.passwd.passwd import passwd_parse, passwd_lookup_by_uid, \
     passwd_entry_name
 
@@ -125,33 +126,22 @@ def _winpath(out: Ptr[uint8], wid: int32, leaf: Ptr[uint8]):
     out[p] = 0
 
 
-# Read the framebuffer "W H PITCH BPP FMT\n" header (mirrors hamdesktop).
-def _screen_dims(wp: Ptr[int64], hp: Ptr[int64]):
-    wp[0] = 1024
-    hp[0] = 768
-    fd: int32 = sys_open(cast[Ptr[char]]("/dev/fb"))
-    if fd < 0:
-        return
-    hdr: Array[64, uint8]
-    r: int64 = sys_read(fd, &hdr[0], 63)
-    sys_close(fd)
-    if r <= 0:
-        return
-    i: uint64 = 0
-    w: int64 = 0
-    while i < cast[uint64](r) and hdr[i] >= 48 and hdr[i] <= 57:
-        w = w * 10 + cast[int64](hdr[i]) - 48
-        i = i + 1
-    while i < cast[uint64](r) and hdr[i] == 32:
-        i = i + 1
-    h: int64 = 0
-    while i < cast[uint64](r) and hdr[i] >= 48 and hdr[i] <= 57:
-        h = h * 10 + cast[int64](hdr[i]) - 48
-        i = i + 1
-    if w > 0:
-        wp[0] = w
-    if h > 0:
-        hp[0] = h
+# The screen size comes from the compositor, via lib/hamscreen.ad.
+#
+# This USED TO parse /dev/fb's "W H PITCH BPP FMT" header with a private
+# copy of hamdesktop's parser, and default to 1024x768 when the read failed.
+# On the raw DRM path that read ALWAYS fails -- a read-only open still runs
+# drm_try_card() and DRM master belongs to wsysd -- so the default was not a
+# rare fallback, it was the answer.
+#
+# For a lock screen that is a security bug, not a cosmetic one. hamlock draws
+# a full-screen window and reads the password; sized 1024x768 on a 1920x1080
+# display it covers 53% of the screen and leaves the session's windows
+# exposed and, at the edges, reachable. A lock screen that does not cover the
+# display has not locked anything. So this refuses to guess: no geometry, no
+# lock, and a named error saying why.
+def _screen_dims(wp: Ptr[int64], hp: Ptr[int64]) -> int32:
+    return hamscreen_dims_or_fail(wp, hp, cast[Ptr[uint8]]("[hamlock]"))
 
 
 # --- model ----------------------------------------------------------
@@ -308,7 +298,11 @@ def main() -> int32:
 
     wdim: Array[1, int64]
     hdim: Array[1, int64]
-    _screen_dims(&wdim[0], &hdim[0])
+    # Refusing to lock is the safe direction to fail in: the user sees an
+    # unlocked session and a named reason, rather than believing a
+    # part-screen panel has locked the machine.
+    if _screen_dims(&wdim[0], &hdim[0]) == 0:
+        return 1
     SCR_W = wdim[0]
     SCR_H = hdim[0]
     _resolve_user()
