@@ -969,21 +969,32 @@ def cur_a_run(row: int32) -> int32:
     return 0
 
 
+# THREE DEVIATIONS FROM devwsys's TABLES, all from looking at the rendered
+# result rather than at the source. They are listed here so nobody
+# "corrects" them back by diffing against the frozen tree:
+#
+#   1. the tail sits one column further LEFT (offsets 4,4,5,5,6 rather than
+#      5,5,6,6,7), so it tucks closer under the head's shoulder;
+#   2. the tail's lowest white pixel moves UP a row. Row 15 now carries only
+#      the dark outline (run 1 leaves no white body) and row 14 carries a
+#      2px white tip instead of 1 -- the old shape ended in a lone white
+#      pixel hanging one row below the rest of the stem;
+#   3. row 0's white tip pixel is gone -- see cursor_init.
 def cur_b_run(row: int32) -> int32:
-    if row == 11 or row == 12 or row == 13:
+    if row == 11 or row == 12 or row == 13 or row == 14:
         return 3
-    if row == 14 or row == 15:
-        return 2
+    if row == 15:
+        return 1                        # outline only: no white body
     return 0
 
 
 def cur_b_off(row: int32) -> int32:
     if row == 11 or row == 12:
-        return 5
+        return 4
     if row == 13 or row == 14:
-        return 6
+        return 5
     if row == 15:
-        return 7
+        return 6
     return 0
 
 
@@ -1022,10 +1033,14 @@ def cursor_init():
         i = i + 1
     r: int32 = 0
     while r < 16:
-        tip: int32 = 0
-        if r == 0:
-            tip = 1
-        cur_span(0, cur_a_run(r), r, tip)
+        # Deviation 3: row 0 is drawn INSET like every other row, so the very
+        # top-left pixel is the dark outline rather than a lone white one.
+        # devwsys leaves it white on purpose -- "so its 1px white point lands
+        # exactly on the (sx,sy) hotspot" -- and the hotspot is unaffected
+        # either way, since the hotspot is a COORDINATE and the tip pixel is
+        # still at it. What changes is only that the point reads as a point
+        # rather than as a white speck.
+        cur_span(0, cur_a_run(r), r, 0)
         cur_span(cur_b_off(r), cur_b_run(r), r, 0)
         r = r + 1
 
