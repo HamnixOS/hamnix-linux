@@ -46,6 +46,14 @@
 # user/insmod.ad) rather than going through user/runtime.S, which is
 # shared with every other user binary.
 
+# The module loader entry point comes from the runtime.
+#
+# This file used to define its own with inline assembly that reloaded the
+# arguments from -8(%rbp)/-16(%rbp)/-24(%rbp) -- the native backend's frame
+# layout, which does not exist on the LLVM lane, so the asm would have handed
+# the kernel three garbage arguments. Linux's finit_module(2) loads from a
+# PATH's descriptor, so there is no image buffer and no size cap.
+extern def sys_init_module(path: Ptr[char], params: Ptr[char]) -> int32
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
@@ -125,32 +133,6 @@ def write_errno(fd: int32, rc: int32):
         write_dec(fd, cast[uint64](rc))
 
 
-def sys_init_module(image: Ptr[uint8], size: uint64,
-                    params: Ptr[char]) -> int32:
-    # SYS_INIT_MODULE = 175. The codegen spills our three params into
-    # -8(%rbp), -16(%rbp), -24(%rbp); reload them into the syscall
-    # arg regs (rdi/rsi/rdx — same positions as SysV, so no shuffle
-    # needed beyond loading from the stack). %rax = 175, syscall.
-    # rax then holds the return value, and the function's implicit
-    # epilogue (leave/ret) preserves it.
-    asm_volatile("""
-        movq -8(%rbp), %rdi
-        movq -16(%rbp), %rsi
-        movq -24(%rbp), %rdx
-        movq $175, %rax
-        syscall
-    """)
-    # Deliberately no `return` statement — the codegen's implicit
-    # epilogue (leave; ret) preserves %rax, which holds the syscall
-    # return value. An explicit `return 0` would clobber it.
-
-
-# --- basename / loaded-set helpers -----------------------------------
-
-# Copy the basename of a slice [s, s+n) — everything after the last
-# '/', and with a trailing ".ko" stripped — into `out` (NUL-terminated,
-# capped at NAME_CAP-1). Returns the basename length. e.g.
-# "kernel/net/mac80211/mac80211.ko" -> "mac80211".
 def slice_basename(s: Ptr[uint8], n: uint64, out: Ptr[uint8]) -> uint64:
     start: uint64 = 0
     i: uint64 = 0
@@ -340,33 +322,18 @@ def load_one(rel: Ptr[uint8], rel_len: uint64, verbose: int32) -> int32:
         write_str(2, "\n")
         return -1
 
-    total: uint64 = 0
-    while total < KO_CAP:
-        room: uint64 = KO_CAP - total
-        n: int64 = sys_read(fd,
-            cast[Ptr[uint8]](cast[uint64](&ko_data[0]) + total), room)
-        if n <= 0:
-            break
-        total = total + cast[uint64](n)
+    # finit_module(2) loads from the DESCRIPTOR, so there is no image buffer
+    # to fill and no size cap to trip over -- the old KO_CAP checks are gone
+    # because the limit is.
     sys_close(fd)
-
-    if total == 0:
-        write_str(2, "modprobe: empty .ko ")
-        write_str(2, &open_path[0])
-        write_str(2, "\n")
-        return -1
-    if total >= KO_CAP:
-        write_str(2, "modprobe: .ko exceeds buffer: ")
-        write_str(2, &open_path[0])
-        write_str(2, "\n")
-        return -1
 
     if verbose != 0:
         write_str(1, "modprobe: loading ")
         write_str(1, &bn[0])
         write_str(1, "\n")
 
-    rc: int32 = sys_init_module(&ko_data[0], total, "")
+    rc: int32 = sys_init_module(cast[Ptr[char]](&open_path[0]),
+                                cast[Ptr[char]](""))
     if rc < 0:
         # EEXIST (-17): the kernel already has this module loaded from a
         # previous command. Benign — note and continue (mark loaded so

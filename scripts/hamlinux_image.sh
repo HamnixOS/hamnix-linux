@@ -42,6 +42,7 @@ APPS=(
     more less
     bc cal
     ifconfig route ping host curl wget hpm
+    insmod modprobe lsmod rmmod
 )
 
 # The desktop. wsysd is the compositor (user/wsysd.ad — the userland half of
