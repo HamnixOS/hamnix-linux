@@ -34,7 +34,7 @@ rather than argued:
 | Debian | `enter debian { sh }` — bookworm on its own filesystem, amd64+i386. `glxgears:i386` renders on the Hamnix desktop through XWayland → `wsyswl` → `wsysd` → `/dev/fb`. |
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
-| Build | **358 of 366** `user/*.ad` build through the LLVM lane |
+| Build | **358 of 366** `user/*.ad` build through the LLVM lane. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
 
 The eight that do not, grouped by cause rather than listed: four are
 `*_host.ad` TEST HARNESSES that import kernel source (`sys.src.port9.port.devsnarf`,
@@ -71,9 +71,12 @@ same failure this project exists to beat.
   bypasses it. Closing that means chrome state in a second segment at 0644.
 * **No audio device at all.** No `/dev/snd`, and `hamlinux_vm.sh` adds no
   sound hardware.
-* From the run sweep, still answering success-shaped: `service` and `help`
-  exit 0 after saying they cannot work; `nice_hi`/`nice_lo` announce a renice
-  that never happened; overlay clients print "ready" while owning no window.
+* The run-sweep score is **249 healthy / 323 runnable**. `service`, `help`,
+  `nice_hi`/`nice_lo`, `watch`, the power/logout actions and all 16 overlay
+  clients were fixed in bc9b75d8 — they now work or fail by name. Still
+  unexamined: `wakelat_echo`, `hamgame_mixer_demo`. And ~85 GUI rows have not
+  been re-measured under the sweep's new 12 s timeout, so the score is a
+  floor rather than a settled number.
 
 ### What answered the original open questions
 
