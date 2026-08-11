@@ -1,0 +1,1085 @@
+# user/xsnarfd.ad — ONE clipboard across the namespace boundary.
+#
+# THE PROBLEM
+# ===========
+# /dev/snarf and /dev/snarf.primary are served (user/linux-snarf.c), so copy
+# and paste work between HAMNIX programs: the editor, Notes, the browser URL
+# bar and the grid terminal all reach the same two buffers by name. A Debian or
+# Alpine binary gets ENOENT on those names -- measured, tests/linux/
+# snarf_device.sh arm 3 -- because they are served INSIDE the process by a path
+# interception in the Hamnix runtime, exactly as /dev/wsys, /net and /fd are.
+# A foreign binary has no Hamnix runtime, so it uses what it has always used:
+# X SELECTIONS, owned by the Xwayland inside its namespace.
+#
+# That is two clipboards. Copy a URL in Firefox, paste in the Hamnix editor:
+# nothing. Copy in the editor, paste in an xterm inside the namespace: nothing.
+#
+# AN X SELECTION IS NOT A BUFFER, WHICH IS THE WHOLE DESIGN
+# ========================================================
+# There is no place in an X server where the clipboard lives. A client OWNS the
+# selection; anyone pasting sends ConvertSelection and the OWNER answers with
+# the bytes, in a format the paster asked for. So a bridge cannot poll a buffer
+# on the X side and it cannot write one either. It has to BE a client:
+#
+#   * take ownership of CLIPBOARD and PRIMARY whenever /dev/snarf changes, and
+#     answer every ConvertSelection out of the Hamnix buffer;
+#   * notice when someone ELSE takes ownership, ask that owner for the bytes,
+#     and write them into /dev/snarf.
+#
+# Both halves, or it is the success-shaped failure this tree exists to beat:
+# a bridge that mirrors on copy but not on ownership change loses the paste
+# that mattered and says nothing.
+#
+# WHERE IT RUNS, AND WHY THAT IS THE ONLY PLACE IT CAN
+# ====================================================
+# The two things it must touch are on opposite sides of a namespace boundary:
+#
+#   /dev/snarf          served in-process by the Hamnix runtime, over a shared
+#                       segment whose name is $HAMSNARF, or $HAMWSYS + ".snarf"
+#                       when a window system is pinned, or /srv/snarf. /srv is
+#                       DELIBERATELY not carried into a subtree namespace, so
+#                       none of those names exist inside one.
+#   the X display       Xwayland runs INSIDE the distribution namespace, on
+#                       :0, with its socket at that tree's /tmp/.X11-unix/X0.
+#
+# So it runs OUTSIDE the namespace, as root, next to the wsyswl that serves the
+# same distribution -- and it reaches the display the Plan 9 way, BY NAME. The
+# boot binds each distribution at /n/<name> (etc/rc.boot.linux,
+# `bind '#distro/alpine' /n/alpine`), and that tree's /tmp is the medium's own,
+# so the X socket a client inside sees as /tmp/.X11-unix/X0 is
+# /n/alpine/tmp/.X11-unix/X0 from out here. Same inode, two names. Nothing is
+# bound, nothing is copied, and /srv stays out of the namespace.
+#
+# ONE PER DISTRIBUTION, not one overall, for the same reason /etc/rc.distros-wl
+# starts one wsyswl per distribution: there is one Xwayland per distribution and
+# an X connection is to one server. They all share the one Hamnix clipboard,
+# which is what makes it ONE clipboard: text copied in Debian's Firefox lands in
+# /dev/snarf, and the Alpine bridge then claims Alpine's CLIPBOARD with it. The
+# convergence is content-based, so it terminates instead of ringing.
+#
+# The socket path is an ARGUMENT, exactly as wsyswl's is -- no distribution name
+# is compiled into this file.
+#
+#     xsnarfd /n/alpine/tmp/.X11-unix/X0 alpine
+#
+# WHY THE X11 WIRE PROTOCOL BY HAND
+# =================================
+# Because the alternative is not available: linking libX11 would make this a
+# foreign binary, and a foreign binary is exactly the thing that cannot open
+# /dev/snarf. The bridge has to be a Hamnix binary to have a Hamnix clipboard,
+# so it speaks X11 on the wire. user/x11/xfill.ad already does that against the
+# in-tree toy server; this talks to a real Xwayland, so nothing here may assume
+# the toy server's fixed resource IDs -- the root window and the resource-id
+# base are read out of the connection setup reply, as they must be.
+#
+# WHAT IT ANSWERS, AND WHAT IT DOES NOT CLAIM TO
+# ==============================================
+# TARGETS, UTF8_STRING, STRING and TEXT, and TARGETS lists exactly those four.
+# TIMESTAMP is REFUSED (SelectionNotify with property None) rather than listed
+# and answered with a lie: getting a real ownership timestamp needs the
+# zero-length-property-append round trip, this does not do it, and advertising a
+# target one cannot answer is the same class of defect as a device path with no
+# server behind it. TEXT is answered with type UTF8_STRING, which is what ICCCM
+# asks of an owner that chose UTF-8; STRING is answered with the same bytes,
+# which is what every clipboard tool in practice does with UTF-8 text.
+#
+# THE 64 KiB CAP IS THE DEVICE'S AND IS NOT WIDENED HERE. An X selection larger
+# than SNARF_MAX is TRUNCATED at 65536 bytes and said so, loudly, by name and
+# size -- the same rule /dev/snarf itself applies to a 70 000-byte write from a
+# Hamnix program (docs/linux_clipboard.md §4). An owner that answers with an
+# INCR transfer is REFUSED loudly and the Hamnix clipboard is LEFT ALONE, which
+# is the honest answer: a half-received INCR stream is a corrupt paste.
+#
+# HOW A CHANGE ON THE HAMNIX SIDE IS NOTICED: BY CONTENT, and that is a gap
+# worth naming. struct snarfshm has magic and version but NO serial or
+# generation counter, so there is nothing to compare cheaply and nothing to
+# wait on. This polls both buffers four times a second and compares bytes.
+# It is correct (a change is a change) and it costs a 128 KiB memcmp per
+# second, but it cannot distinguish "written again with the same bytes" from
+# "not written", and it cannot wake instantly. A `uint64 serial` bumped in
+# hamsnarf_write would let this compare one word and would let a future
+# sys_waitfds park on the clipboard; see HANDOFF for the exact request.
+#
+# Adder quirks obeyed here: every buffer is a top-level BSS array (not a frame
+# local), there is no adjacent string-literal concatenation, and no string
+# literal is assigned into a global array.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_unix_connect(path: Ptr[char]) -> int32
+extern def sys_exit(code: uint64)
+
+# ---------------------------------------------------------------- constants
+SNARF_MAX: uint64 = 65536
+
+# X11 core request opcodes.
+OP_CreateWindow:       uint8 = 1
+OP_InternAtom:         uint8 = 16
+OP_ChangeProperty:     uint8 = 18
+OP_GetProperty:        uint8 = 20
+OP_SetSelectionOwner:  uint8 = 22
+OP_GetSelectionOwner:  uint8 = 23
+OP_ConvertSelection:   uint8 = 24
+OP_SendEvent:          uint8 = 25
+OP_QueryExtension:     uint8 = 98
+
+# X11 message type bytes.
+MSG_Error:            uint8 = 0
+MSG_Reply:            uint8 = 1
+EV_PropertyNotify:    uint8 = 28
+EV_SelectionClear:    uint8 = 29
+EV_SelectionRequest:  uint8 = 30
+EV_SelectionNotify:   uint8 = 31
+
+# Predefined atoms (X11 protocol appendix B) -- these need no InternAtom.
+ATOM_PRIMARY: uint32 = 1
+ATOM_ATOM:    uint32 = 4
+ATOM_STRING:  uint32 = 31
+
+# ---------------------------------------------------------------- buffers
+# All top-level, all BSS: this compiler cannot carry them as frame locals.
+reqbuf:   Array[512, uint8]        # every fixed-size request is built here
+xin:      Array[64, uint8]         # the 32-byte message header just read
+xferbuf:  Array[65600, uint8]      # a reply's variable part / a pull's bytes
+snbuf:    Array[65600, uint8]      # what /dev/snarf holds right now
+clipbuf:  Array[65600, uint8]      # what BOTH sides agree CLIPBOARD holds
+primbuf:  Array[65600, uint8]      # ditto PRIMARY
+sinkbuf:  Array[1024, uint8]       # drains a reply longer than we asked for
+padbuf:   Array[4, uint8]          # up to three zero pad bytes
+numbuf:   Array[24, uint8]
+sockpath: Array[512, uint8]
+tagbuf:   Array[64, uint8]
+waitset:  Array[4, int32]
+
+clip_len: uint64 = 0
+prim_len: uint64 = 0
+
+# ---------------------------------------------------------------- X state
+xfd:        int32  = -1
+xdead:      int32  = 0            # the connection broke; drop it and redial
+xseq:       uint32 = 0            # sequence number of the last request sent
+root_win:   uint32 = 0
+res_base:   uint32 = 0
+res_mask:   uint32 = 0
+max_req:    uint32 = 0            # maximum-request-length, in 4-byte units
+mywin:      uint32 = 0
+
+atom_clipboard: uint32 = 0
+atom_utf8:      uint32 = 0
+atom_targets:   uint32 = 0
+atom_text:      uint32 = 0
+atom_incr:      uint32 = 0
+atom_prop:      uint32 = 0        # the property we ask owners to answer into
+
+xfixes_op:    uint32 = 0          # XFIXES major opcode, 0 = not present
+xfixes_event: uint32 = 0          # its first event code
+
+own_clip: int32 = 0               # we are the X owner of CLIPBOARD
+own_prim: int32 = 0               # ... and of PRIMARY
+
+pull_clip: int32 = 0              # somebody else took it; go and ask them
+pull_prim: int32 = 0
+
+# The variable part of the reply x_await_reply() just consumed.
+rep_extra:  uint64 = 0
+rep_trunc:  int32  = 0
+
+# ---------------------------------------------------------------- basics
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: uint64):
+    n: uint64 = 0
+    x: uint64 = v
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+# Every line this program prints starts with its tag, so two bridges sharing a
+# console can be told apart without reading the path.
+def say(s: Ptr[uint8]):
+    puts(1, "[xsnarfd ")
+    puts(1, &tagbuf[0])
+    puts(1, "] ")
+    puts(1, s)
+
+
+def sayerr(s: Ptr[uint8]):
+    puts(2, "[xsnarfd ")
+    puts(2, &tagbuf[0])
+    puts(2, "] ")
+    puts(2, s)
+
+
+def put16(buf: Ptr[uint8], at: uint64, v: uint32):
+    buf[at]     = cast[uint8](v & 255)
+    buf[at + 1] = cast[uint8]((v >> 8) & 255)
+
+
+def put32(buf: Ptr[uint8], at: uint64, v: uint32):
+    buf[at]     = cast[uint8](v & 255)
+    buf[at + 1] = cast[uint8]((v >> 8) & 255)
+    buf[at + 2] = cast[uint8]((v >> 16) & 255)
+    buf[at + 3] = cast[uint8]((v >> 24) & 255)
+
+
+def get16(buf: Ptr[uint8], at: uint64) -> uint32:
+    return cast[uint32](buf[at]) | (cast[uint32](buf[at + 1]) << 8)
+
+
+def get32(buf: Ptr[uint8], at: uint64) -> uint32:
+    a: uint32 = cast[uint32](buf[at])
+    b: uint32 = cast[uint32](buf[at + 1]) << 8
+    c: uint32 = cast[uint32](buf[at + 2]) << 16
+    d: uint32 = cast[uint32](buf[at + 3]) << 24
+    return a | b | c | d
+
+
+def pad4(n: uint64) -> uint64:
+    r: uint64 = n % 4
+    if r == 0:
+        return n
+    return n + 4 - r
+
+
+def zero(buf: Ptr[uint8], n: uint64):
+    i: uint64 = 0
+    while i < n:
+        buf[i] = 0
+        i = i + 1
+
+
+def read_exact(fd: int32, buf: Ptr[uint8], count: uint64) -> int32:
+    got: uint64 = 0
+    while got < count:
+        n: int64 = sys_read(fd, &buf[got], count - got)
+        if n <= 0:
+            return 0
+        got = got + cast[uint64](n)
+    return 1
+
+
+def send_all(fd: int32, buf: Ptr[uint8], count: uint64) -> int32:
+    sent: uint64 = 0
+    while sent < count:
+        n: int64 = sys_write(fd, &buf[sent], count - sent)
+        if n <= 0:
+            return 0
+        sent = sent + cast[uint64](n)
+    return 1
+
+
+# ---------------------------------------------------------------- the wire
+
+def x_send(buf: Ptr[uint8], n: uint64) -> uint32:
+    # EVERY request bumps the sequence number, including the ones with no
+    # reply -- the server counts them all, and a reply matched against a
+    # sequence that skipped the silent requests matches the wrong thing.
+    xseq = xseq + 1
+    if send_all(xfd, buf, n) == 0:
+        xdead = 1
+    return xseq
+
+
+# One message, or nothing. Returns 1 = a 32-byte header is in xin (and, for a
+# reply, its variable part is in xferbuf), 0 = the timeout expired with the
+# socket quiet, -1 = the server went away.
+#
+# THE VARIABLE PART IS ALWAYS DRAINED HERE, in one place, because a reply left
+# half-read desynchronises the stream permanently and the symptom is an
+# unrelated event arriving mangled minutes later.
+def x_poll_msg(timeout_ms: int64) -> int32:
+    if xfd < 0 or xdead != 0:
+        return -1
+    waitset[0] = xfd
+    r: int64 = sys_waitfds(&waitset[0], 1, timeout_ms)
+    if r <= 0:
+        return 0
+    if read_exact(xfd, &xin[0], 32) == 0:
+        xdead = 1
+        return -1
+    rep_extra = 0
+    rep_trunc = 0
+    if xin[0] != MSG_Reply:
+        return 1
+    extra: uint64 = cast[uint64](get32(&xin[0], 4)) * 4
+    take: uint64 = extra
+    if take > 65600:
+        take = 65600
+        rep_trunc = 1
+    if take > 0:
+        if read_exact(xfd, &xferbuf[0], take) == 0:
+            xdead = 1
+            return -1
+    rep_extra = take
+    left: uint64 = extra - take
+    while left > 0:
+        chunk: uint64 = left
+        if chunk > 1024:
+            chunk = 1024
+        if read_exact(xfd, &sinkbuf[0], chunk) == 0:
+            xdead = 1
+            return -1
+        left = left - chunk
+    return 1
+
+
+# ---------------------------------------------------------------- events
+# Declared before x_await_reply because a reply can arrive with events queued
+# in front of it, and those events must be SERVED, not dropped: a paste in an
+# X client is a SelectionRequest, and it can land while we are waiting for the
+# reply to an InternAtom we sent a millisecond earlier.
+
+def serve_request():
+    when: uint32      = get32(&xin[0], 4)
+    requestor: uint32 = get32(&xin[0], 12)
+    sel: uint32       = get32(&xin[0], 16)
+    target: uint32    = get32(&xin[0], 20)
+    prop: uint32      = get32(&xin[0], 24)
+    # An obsolete client sends property None and means "put it in the target".
+    if prop == 0:
+        prop = target
+
+    src: Ptr[uint8] = &clipbuf[0]
+    n: uint64 = clip_len
+    okesel: int32 = 0
+    if sel == atom_clipboard:
+        okesel = 1
+    elif sel == ATOM_PRIMARY:
+        src = &primbuf[0]
+        n = prim_len
+        okesel = 1
+
+    if okesel == 0:
+        send_selection_notify(requestor, when, sel, target, 0)
+        return
+
+    if target == atom_targets:
+        # EXACTLY the four we answer, in the order a paster reads them.
+        zero(&reqbuf[0], 24)
+        reqbuf[0] = OP_ChangeProperty
+        reqbuf[1] = 0                       # mode = Replace
+        put16(&reqbuf[0], 2, 10)            # (24 + 16) / 4
+        put32(&reqbuf[0], 4, requestor)
+        put32(&reqbuf[0], 8, prop)
+        put32(&reqbuf[0], 12, ATOM_ATOM)
+        reqbuf[16] = 32                     # format
+        put32(&reqbuf[0], 20, 4)            # four atoms
+        put32(&reqbuf[0], 24, atom_targets)
+        put32(&reqbuf[0], 28, atom_utf8)
+        put32(&reqbuf[0], 32, ATOM_STRING)
+        put32(&reqbuf[0], 36, atom_text)
+        x_send(&reqbuf[0], 40)
+        send_selection_notify(requestor, when, sel, target, prop)
+        return
+
+    typ: uint32 = 0
+    if target == atom_utf8:
+        typ = atom_utf8
+    elif target == atom_text:
+        # ICCCM: the owner picks the encoding for TEXT and REPORTS it in the
+        # type. Ours is UTF-8, so say so rather than claiming STRING.
+        typ = atom_utf8
+    elif target == ATOM_STRING:
+        typ = ATOM_STRING
+    else:
+        # TIMESTAMP, COMPOUND_TEXT, image/png, whatever else: we do not answer
+        # it, so we REFUSE it. A property left unset with a SelectionNotify
+        # that names it is the shape that makes a paster hang.
+        send_selection_notify(requestor, when, sel, target, 0)
+        return
+
+    # The header goes out, then the bytes straight from the buffer, then the
+    # pad -- no third copy of a 64 KiB clipboard just to concatenate them.
+    total: uint64 = 24 + pad4(n)
+    if cast[uint64](max_req) * 4 < total:
+        sayerr("this X server's maximum request is too small for the clipboard; refusing rather than sending a truncated one\n")
+        send_selection_notify(requestor, when, sel, target, 0)
+        return
+    zero(&reqbuf[0], 24)
+    reqbuf[0] = OP_ChangeProperty
+    reqbuf[1] = 0
+    put16(&reqbuf[0], 2, cast[uint32](total / 4))
+    put32(&reqbuf[0], 4, requestor)
+    put32(&reqbuf[0], 8, prop)
+    put32(&reqbuf[0], 12, typ)
+    reqbuf[16] = 8                          # format = 8 bits per unit
+    put32(&reqbuf[0], 20, cast[uint32](n))
+    xseq = xseq + 1
+    if send_all(xfd, &reqbuf[0], 24) == 0:
+        xdead = 1
+        return
+    if n > 0:
+        if send_all(xfd, src, n) == 0:
+            xdead = 1
+            return
+    p: uint64 = pad4(n) - n
+    if p > 0:
+        zero(&padbuf[0], 4)
+        if send_all(xfd, &padbuf[0], p) == 0:
+            xdead = 1
+            return
+    send_selection_notify(requestor, when, sel, target, prop)
+
+
+def send_selection_notify(requestor: uint32, when: uint32, sel: uint32,
+                          target: uint32, prop: uint32):
+    # SendEvent: 12 bytes of request, then the 32-byte event.
+    zero(&reqbuf[0], 44)
+    reqbuf[0] = OP_SendEvent
+    reqbuf[1] = 0                           # propagate = False
+    put16(&reqbuf[0], 2, 11)                # 44 / 4
+    put32(&reqbuf[0], 4, requestor)
+    put32(&reqbuf[0], 8, 0)                 # event-mask 0: straight to them
+    reqbuf[12] = EV_SelectionNotify
+    put32(&reqbuf[0], 16, when)
+    put32(&reqbuf[0], 20, requestor)
+    put32(&reqbuf[0], 24, sel)
+    put32(&reqbuf[0], 28, target)
+    put32(&reqbuf[0], 32, prop)
+    x_send(&reqbuf[0], 44)
+
+
+def note_clear(sel: uint32):
+    if sel == atom_clipboard:
+        own_clip = 0
+    elif sel == ATOM_PRIMARY:
+        own_prim = 0
+
+
+# Every message that is not the reply we are waiting for lands here.
+def dispatch():
+    t: uint8 = xin[0]
+    if t == EV_SelectionRequest:
+        serve_request()
+        return
+    if t == EV_SelectionClear:
+        sel: uint32 = get32(&xin[0], 12)
+        note_clear(sel)
+        # WITHOUT XFixes this is the only notice we get that the X clipboard
+        # changed hands, so it has to trigger the pull. With XFixes the
+        # XFixesSelectionNotify below covers this and every handover between
+        # two OTHER clients as well, so the flag is set in one place only.
+        if xfixes_op == 0:
+            if sel == atom_clipboard:
+                pull_clip = 1
+            elif sel == ATOM_PRIMARY:
+                pull_prim = 1
+        return
+    if xfixes_op != 0 and cast[uint32](t) == xfixes_event:
+        owner: uint32 = get32(&xin[0], 8)
+        fsel: uint32  = get32(&xin[0], 12)
+        # Our OWN claim comes back as an event too. Acting on it would ask
+        # ourselves for the bytes we just published.
+        if owner == mywin:
+            return
+        if owner == 0:
+            # Nobody owns it now -- the last owner exited. There is no content
+            # to fetch and no reason to throw ours away, so keep what we have
+            # and say what happened.
+            note_clear(fsel)
+            say("the X selection lost its owner; keeping the last content\n")
+            return
+        note_clear(fsel)
+        if fsel == atom_clipboard:
+            pull_clip = 1
+        elif fsel == ATOM_PRIMARY:
+            pull_prim = 1
+        return
+    if t == MSG_Error:
+        # An error for a request we are not waiting on. Name it -- a silent
+        # BadWindow here is how a bridge ends up serving nobody.
+        sayerr("X error code ")
+        putd(2, cast[uint64](xin[1]))
+        puts(2, " for request opcode ")
+        putd(2, cast[uint64](xin[10]))
+        puts(2, "\n")
+        return
+    # PropertyNotify (we ask for no property events), Expose on nothing,
+    # MappingNotify: ignored on purpose.
+
+
+# Wait for the reply to request `seq`, serving whatever arrives first.
+# 1 = the reply is in xin (+ xferbuf), 0 = an X error or the wait timed out.
+def x_await_reply(seq: uint32) -> int32:
+    budget: int32 = 50                     # 50 x 100 ms = five seconds
+    while budget > 0:
+        r: int32 = x_poll_msg(100)
+        if r < 0:
+            return 0
+        if r == 0:
+            budget = budget - 1
+            continue
+        s: uint32 = get16(&xin[0], 2)
+        if xin[0] == MSG_Reply and s == (seq & 65535):
+            return 1
+        if xin[0] == MSG_Error and s == (seq & 65535):
+            sayerr("X error code ")
+            putd(2, cast[uint64](xin[1]))
+            puts(2, " replying to opcode ")
+            putd(2, cast[uint64](xin[10]))
+            puts(2, "\n")
+            return 0
+        dispatch()
+    sayerr("timed out waiting for an X reply\n")
+    return 0
+
+
+# ---------------------------------------------------------------- setup
+
+def x_connect(path: Ptr[uint8]) -> int32:
+    fd: int32 = sys_unix_connect(cast[Ptr[char]](path))
+    if fd < 0:
+        return 0
+    xfd = fd
+    xdead = 0
+    xseq = 0
+
+    # Connection setup: 'l', major 11, minor 0, no authorisation. Xwayland on
+    # this line is started with no -auth (etc/de-ns-run.linux,
+    # scripts/hamlinux_alpine.sh), so an empty authorisation is what it wants;
+    # a server that wanted a cookie would refuse here and say so below.
+    zero(&reqbuf[0], 12)
+    reqbuf[0] = 108
+    put16(&reqbuf[0], 2, 11)
+    if send_all(xfd, &reqbuf[0], 12) == 0:
+        sayerr("could not send the X connection setup\n")
+        x_drop()
+        return 0
+    if read_exact(xfd, &xin[0], 8) == 0:
+        sayerr("no X setup reply\n")
+        x_drop()
+        return 0
+    if xin[0] != 1:
+        sayerr("the X server REFUSED the connection (it wants authorisation this bridge does not send)\n")
+        x_drop()
+        return 0
+    body: uint64 = cast[uint64](get16(&xin[0], 6)) * 4
+    if body > 65600:
+        sayerr("X setup reply is implausibly large\n")
+        x_drop()
+        return 0
+    if read_exact(xfd, &xferbuf[0], body) == 0:
+        sayerr("short X setup reply\n")
+        x_drop()
+        return 0
+
+    # Offsets are from the start of the BODY (protocol offset 8).
+    res_base = get32(&xferbuf[0], 4)
+    res_mask = get32(&xferbuf[0], 8)
+    max_req  = get16(&xferbuf[0], 18)
+    vendor_len: uint64 = cast[uint64](get16(&xferbuf[0], 16))
+    nscreens: uint64   = cast[uint64](xferbuf[20])
+    nformats: uint64   = cast[uint64](xferbuf[21])
+    # vendor string, then nformats x 8 bytes, then the SCREENs. The first four
+    # bytes of the first screen are its root window -- which is the parent our
+    # window needs, and is NOT a constant however many toy servers say 1.
+    off: uint64 = 32 + pad4(vendor_len) + nformats * 8
+    if nscreens == 0 or off + 4 > body:
+        sayerr("X setup reply has no screen\n")
+        x_drop()
+        return 0
+    root_win = get32(&xferbuf[0], off)
+
+    say("connected: root window 0x")
+    putd(1, cast[uint64](root_win))
+    puts(1, ", resource base 0x")
+    putd(1, cast[uint64](res_base))
+    puts(1, ", max request ")
+    putd(1, cast[uint64](max_req) * 4)
+    puts(1, " bytes\n")
+    return 1
+
+
+def x_drop():
+    if xfd >= 0:
+        sys_close(xfd)
+    xfd = -1
+    xdead = 0
+    mywin = 0
+    own_clip = 0
+    own_prim = 0
+    pull_clip = 0
+    pull_prim = 0
+    xfixes_op = 0
+    xfixes_event = 0
+
+
+def intern_atom(name: Ptr[uint8]) -> uint32:
+    n: uint64 = slen(name)
+    total: uint64 = 8 + pad4(n)
+    zero(&reqbuf[0], total)
+    reqbuf[0] = OP_InternAtom
+    reqbuf[1] = 0                          # only-if-exists = False
+    put16(&reqbuf[0], 2, cast[uint32](total / 4))
+    put16(&reqbuf[0], 4, cast[uint32](n))
+    i: uint64 = 0
+    while i < n:
+        reqbuf[8 + i] = name[i]
+        i = i + 1
+    seq: uint32 = x_send(&reqbuf[0], total)
+    if x_await_reply(seq) == 0:
+        return 0
+    return get32(&xin[0], 8)
+
+
+def create_window() -> int32:
+    mywin = res_base | 1
+    zero(&reqbuf[0], 32)
+    reqbuf[0] = OP_CreateWindow
+    reqbuf[1] = 0                          # depth 0: CopyFromParent
+    put16(&reqbuf[0], 2, 8)
+    put32(&reqbuf[0], 4, mywin)
+    put32(&reqbuf[0], 8, root_win)
+    put16(&reqbuf[0], 12, 0)               # x
+    put16(&reqbuf[0], 14, 0)               # y
+    put16(&reqbuf[0], 16, 1)               # width
+    put16(&reqbuf[0], 18, 1)               # height
+    put16(&reqbuf[0], 20, 0)               # border width
+    put16(&reqbuf[0], 22, 2)               # class = InputOnly
+    put32(&reqbuf[0], 24, 0)               # visual = CopyFromParent
+    put32(&reqbuf[0], 28, 0)               # value mask = none
+    x_send(&reqbuf[0], 32)
+    # NEVER MAPPED. An owner window has no business on screen; the selection
+    # protocol needs a window ID, not a visible one.
+    return 1
+
+
+def query_xfixes() -> int32:
+    nm: Ptr[uint8] = "XFIXES"
+    n: uint64 = 6
+    total: uint64 = 8 + pad4(n)
+    zero(&reqbuf[0], total)
+    reqbuf[0] = OP_QueryExtension
+    put16(&reqbuf[0], 2, cast[uint32](total / 4))
+    put16(&reqbuf[0], 4, cast[uint32](n))
+    i: uint64 = 0
+    while i < n:
+        reqbuf[8 + i] = nm[i]
+        i = i + 1
+    seq: uint32 = x_send(&reqbuf[0], total)
+    if x_await_reply(seq) == 0:
+        return 0
+    if xin[8] == 0:
+        return 0
+    op: uint32 = cast[uint32](xin[9])
+    ev: uint32 = cast[uint32](xin[10])
+
+    # XFixesQueryVersion FIRST -- the extension refuses every other request
+    # until the client has told it which version it speaks.
+    zero(&reqbuf[0], 12)
+    reqbuf[0] = cast[uint8](op)
+    reqbuf[1] = 0                          # minor opcode 0
+    put16(&reqbuf[0], 2, 3)
+    put32(&reqbuf[0], 4, 5)                # client major 5
+    put32(&reqbuf[0], 8, 0)                # client minor 0
+    seq = x_send(&reqbuf[0], 12)
+    if x_await_reply(seq) == 0:
+        return 0
+    xfixes_op = op
+    xfixes_event = ev
+    return 1
+
+
+def xfixes_watch(sel: uint32):
+    zero(&reqbuf[0], 20)
+    reqbuf[0] = cast[uint8](xfixes_op)
+    reqbuf[1] = 2                          # XFixesSelectSelectionInput
+    put16(&reqbuf[0], 2, 5)
+    put32(&reqbuf[0], 4, mywin)
+    put32(&reqbuf[0], 8, sel)
+    put32(&reqbuf[0], 12, 7)               # SetOwner|WindowDestroy|ClientClose
+    x_send(&reqbuf[0], 20)
+
+
+def get_selection_owner(sel: uint32) -> uint32:
+    zero(&reqbuf[0], 8)
+    reqbuf[0] = OP_GetSelectionOwner
+    put16(&reqbuf[0], 2, 2)
+    put32(&reqbuf[0], 4, sel)
+    seq: uint32 = x_send(&reqbuf[0], 8)
+    if x_await_reply(seq) == 0:
+        return 0
+    return get32(&xin[0], 8)
+
+
+# ---------------------------------------------------------------- /dev/snarf
+
+def snarf_path(which: int32) -> Ptr[char]:
+    if which == 0:
+        return cast[Ptr[char]]("/dev/snarf")
+    return cast[Ptr[char]]("/dev/snarf.primary")
+
+
+# Read a whole clipboard buffer into snbuf. Returns its length, or -1 if the
+# device is not there -- which is the honest answer when this binary is run
+# somewhere the Hamnix runtime does not serve it.
+def snarf_read(which: int32) -> int64:
+    fd: int32 = sys_open(snarf_path(which))
+    if fd < 0:
+        return -1
+    got: uint64 = 0
+    while got < SNARF_MAX:
+        n: int64 = sys_read(fd, &snbuf[got], SNARF_MAX - got)
+        if n <= 0:
+            break
+        got = got + cast[uint64](n)
+    sys_close(fd)
+    return cast[int64](got)
+
+
+def snarf_write(which: int32, src: Ptr[uint8], n: uint64) -> int32:
+    fd: int32 = sys_open_write(snarf_path(which))
+    if fd < 0:
+        return 0
+    # A single write at offset 0 REPLACES, and a 0-byte write CLEARS -- the
+    # device's rule (lib/devsnarf.ad), which is why an empty X selection can
+    # be mirrored faithfully instead of leaving the old text behind.
+    if n == 0:
+        sys_write(fd, src, 0)
+        sys_close(fd)
+        return 1
+    done: uint64 = 0
+    while done < n:
+        k: int64 = sys_write(fd, &src[done], n - done)
+        if k <= 0:
+            sys_close(fd)
+            return 0
+        done = done + cast[uint64](k)
+    sys_close(fd)
+    return 1
+
+
+def same_bytes(a: Ptr[uint8], alen: uint64, b: Ptr[uint8], blen: uint64) -> int32:
+    if alen != blen:
+        return 0
+    i: uint64 = 0
+    while i < alen:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    return 1
+
+
+def copy_bytes(dst: Ptr[uint8], src: Ptr[uint8], n: uint64):
+    i: uint64 = 0
+    while i < n:
+        dst[i] = src[i]
+        i = i + 1
+
+
+# ---------------------------------------------------------------- pulling
+
+# Ask the current owner for `sel` as `target` and leave the bytes in xferbuf.
+# >= 0 : that many bytes.  -1 : refused / no answer.  -2 : an INCR transfer.
+def convert_and_get(sel: uint32, target: uint32) -> int64:
+    zero(&reqbuf[0], 24)
+    reqbuf[0] = OP_ConvertSelection
+    put16(&reqbuf[0], 2, 6)
+    put32(&reqbuf[0], 4, mywin)
+    put32(&reqbuf[0], 8, sel)
+    put32(&reqbuf[0], 12, target)
+    put32(&reqbuf[0], 16, atom_prop)
+    put32(&reqbuf[0], 20, 0)               # time = CurrentTime
+    x_send(&reqbuf[0], 24)
+
+    # The answer is an EVENT, not a reply, so it carries no sequence number to
+    # match: wait for a SelectionNotify naming this selection. Bounded, because
+    # an owner that never answers is a real thing (a client that died between
+    # taking ownership and being asked) and it must not wedge the bridge.
+    budget: int32 = 30                     # three seconds
+    prop: uint32 = 0
+    got_notify: int32 = 0
+    while budget > 0 and got_notify == 0:
+        r: int32 = x_poll_msg(100)
+        if r < 0:
+            return -1
+        if r == 0:
+            budget = budget - 1
+            continue
+        if xin[0] == EV_SelectionNotify and get32(&xin[0], 12) == sel:
+            prop = get32(&xin[0], 20)
+            got_notify = 1
+        else:
+            dispatch()
+    if got_notify == 0:
+        sayerr("the X selection owner did not answer in three seconds\n")
+        return -1
+    if prop == 0:
+        return -1                          # the owner refused this target
+
+    # delete = 1: take it and leave the owner's window clean.
+    zero(&reqbuf[0], 24)
+    reqbuf[0] = OP_GetProperty
+    reqbuf[1] = 1
+    put16(&reqbuf[0], 2, 6)
+    put32(&reqbuf[0], 4, mywin)
+    put32(&reqbuf[0], 8, prop)
+    put32(&reqbuf[0], 12, 0)               # AnyPropertyType
+    put32(&reqbuf[0], 16, 0)               # long offset
+    put32(&reqbuf[0], 20, 16384)           # 16384 * 4 == SNARF_MAX
+    seq: uint32 = x_send(&reqbuf[0], 24)
+    if x_await_reply(seq) == 0:
+        return -1
+    fmt: uint32   = cast[uint32](xin[1])
+    ptype: uint32 = get32(&xin[0], 8)
+    after: uint32 = get32(&xin[0], 12)
+    vlen: uint32  = get32(&xin[0], 16)
+    if ptype == atom_incr:
+        return -2
+    if vlen == 0:
+        return 0
+    if fmt != 8:
+        sayerr("the X selection answered with a non-byte format; refusing it\n")
+        return -1
+    n: uint64 = cast[uint64](vlen)
+    if n > rep_extra:
+        n = rep_extra
+    if after > 0:
+        sayerr("the X selection is larger than the 64 KiB clipboard: TRUNCATED, ")
+        putd(2, cast[uint64](after))
+        puts(2, " bytes dropped\n")
+    return cast[int64](n)
+
+
+def pull(sel: uint32, which: int32):
+    n: int64 = convert_and_get(sel, atom_utf8)
+    if n == -1:
+        # An owner that cannot do UTF8_STRING is usually an old client that
+        # can do STRING. Ask once more before giving up.
+        n = convert_and_get(sel, ATOM_STRING)
+    if n == -2:
+        sayerr("the X selection is an INCR (incremental) transfer, which this bridge does not receive; the Hamnix clipboard is UNCHANGED\n")
+        return
+    if n < 0:
+        sayerr("could not read the X selection; the Hamnix clipboard is UNCHANGED\n")
+        return
+
+    ln: uint64 = cast[uint64](n)
+    dst: Ptr[uint8] = &clipbuf[0]
+    if which == 1:
+        dst = &primbuf[0]
+    copy_bytes(dst, &xferbuf[0], ln)
+    # THE CACHE IS UPDATED BEFORE THE DEVICE IS WRITTEN, and that ordering is
+    # the whole anti-ping-pong invariant: the next poll of /dev/snarf must not
+    # see our own write as a Hamnix-side change and go claiming the selection
+    # back off the X client that just gave it to us.
+    if which == 0:
+        clip_len = ln
+    else:
+        prim_len = ln
+    if snarf_write(which, dst, ln) == 0:
+        sayerr("could not write /dev/snarf -- is this binary running where the Hamnix runtime serves it?\n")
+        return
+    say("X -> Hamnix: ")
+    putd(1, ln)
+    puts(1, " bytes into ")
+    if which == 0:
+        puts(1, "/dev/snarf\n")
+    else:
+        puts(1, "/dev/snarf.primary\n")
+
+
+# ---------------------------------------------------------------- claiming
+
+def claim(sel: uint32, which: int32) -> int32:
+    zero(&reqbuf[0], 16)
+    reqbuf[0] = OP_SetSelectionOwner
+    put16(&reqbuf[0], 2, 4)
+    put32(&reqbuf[0], 4, mywin)
+    put32(&reqbuf[0], 8, sel)
+    put32(&reqbuf[0], 12, 0)               # time = CurrentTime
+    x_send(&reqbuf[0], 16)
+    # ASK WHETHER IT WORKED. SetSelectionOwner has no reply, so a claim that
+    # the server dropped (a dead window, a bad atom) is otherwise indis-
+    # tinguishable from a claim that took -- and the symptom is a paste that
+    # quietly produces the wrong text for the rest of the session.
+    owner: uint32 = get_selection_owner(sel)
+    if owner != mywin:
+        sayerr("SetSelectionOwner did NOT take; the X side still has another owner\n")
+        return 0
+    if which == 0:
+        own_clip = 1
+    else:
+        own_prim = 1
+    say("Hamnix -> X: owning ")
+    if which == 0:
+        puts(1, "CLIPBOARD with ")
+        putd(1, clip_len)
+    else:
+        puts(1, "PRIMARY with ")
+        putd(1, prim_len)
+    puts(1, " bytes\n")
+    return 1
+
+
+# Has the Hamnix side changed under us? Compare bytes -- see the header note
+# about the missing serial.
+def snarf_tick():
+    n: int64 = snarf_read(0)
+    if n >= 0:
+        ln: uint64 = cast[uint64](n)
+        if same_bytes(&snbuf[0], ln, &clipbuf[0], clip_len) == 0:
+            copy_bytes(&clipbuf[0], &snbuf[0], ln)
+            clip_len = ln
+            claim(atom_clipboard, 0)
+    n = snarf_read(1)
+    if n >= 0:
+        ln2: uint64 = cast[uint64](n)
+        if same_bytes(&snbuf[0], ln2, &primbuf[0], prim_len) == 0:
+            copy_bytes(&primbuf[0], &snbuf[0], ln2)
+            prim_len = ln2
+            claim(ATOM_PRIMARY, 1)
+
+
+# ---------------------------------------------------------------- session
+
+# Everything that has to happen once per X connection. 0 = give up on this
+# connection and redial.
+def x_session_start() -> int32:
+    atom_clipboard = intern_atom("CLIPBOARD")
+    atom_utf8      = intern_atom("UTF8_STRING")
+    atom_targets   = intern_atom("TARGETS")
+    atom_text      = intern_atom("TEXT")
+    atom_incr      = intern_atom("INCR")
+    atom_prop      = intern_atom("HAMNIX_SNARF")
+    if atom_clipboard == 0 or atom_utf8 == 0 or atom_targets == 0:
+        sayerr("could not intern the selection atoms\n")
+        return 0
+    create_window()
+    if query_xfixes() == 0:
+        sayerr("WARNING no XFIXES on this X server. Handovers BETWEEN TWO OTHER X clients will be invisible to this bridge -- it will only notice the ones that take the selection away from IT.\n")
+    else:
+        xfixes_watch(atom_clipboard)
+        xfixes_watch(ATOM_PRIMARY)
+
+    # WHO WINS AT STARTUP, said once rather than left to whoever races.
+    # A live X owner holds content that is on somebody's screen right now, so
+    # it wins; an unowned selection has nothing to lose, so the Hamnix
+    # clipboard is published into it.
+    i: int32 = 0
+    while i < 2:
+        sel: uint32 = atom_clipboard
+        if i == 1:
+            sel = ATOM_PRIMARY
+        owner: uint32 = get_selection_owner(sel)
+        if owner != 0:
+            pull(sel, i)
+        else:
+            have: uint64 = clip_len
+            if i == 1:
+                have = prim_len
+            if have > 0:
+                claim(sel, i)
+        i = i + 1
+    if xdead != 0:
+        return 0
+    return 1
+
+
+def set_from(dst: Ptr[uint8], src: Ptr[uint8], cap: uint64):
+    i: uint64 = 0
+    while src[i] != 0 and i < cap - 1:
+        dst[i] = src[i]
+        i = i + 1
+    dst[i] = 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        puts(2, "usage: xsnarfd <x11-socket-path> [tag]\n")
+        puts(2, "  e.g. xsnarfd /n/alpine/tmp/.X11-unix/X0 alpine\n")
+        return 2
+    set_from(&sockpath[0], cast[Ptr[uint8]](argv[1]), 512)
+    if argc > 2:
+        set_from(&tagbuf[0], cast[Ptr[uint8]](argv[2]), 64)
+    else:
+        set_from(&tagbuf[0], cast[Ptr[uint8]]("x"), 64)
+
+    say("bridging ")
+    puts(1, &sockpath[0])
+    puts(1, " <-> /dev/snarf\n")
+
+    # PROVE THE HAMNIX HALF BEFORE CLAIMING ANYTHING. If /dev/snarf is not
+    # served here there is no bridge to build, and saying so now beats an X
+    # session that works perfectly and mirrors into nothing.
+    if snarf_read(0) < 0:
+        sayerr("/dev/snarf is NOT served in this process; nothing to bridge. (This must run as a Hamnix binary, outside the distribution namespace.)\n")
+        return 1
+    clip_len = cast[uint64](snarf_read(0))
+    copy_bytes(&clipbuf[0], &snbuf[0], clip_len)
+    prim_len = cast[uint64](snarf_read(1))
+    copy_bytes(&primbuf[0], &snbuf[0], prim_len)
+
+    quiet: int32 = 0
+    while 1 == 1:
+        if xfd < 0:
+            if x_connect(&sockpath[0]) == 0 or x_session_start() == 0:
+                x_drop()
+                # The X server inside a namespace is started by the session,
+                # not by the boot, so "not there yet" is the NORMAL state for
+                # as long as nobody has launched a program. Say it once and
+                # then once a minute, rather than a line a second for ever.
+                if quiet == 0:
+                    say("no X server at that socket yet; retrying every second\n")
+                quiet = quiet + 1
+                if quiet >= 60:
+                    quiet = 0
+                sys_waitfds(&waitset[0], 0, 1000)
+                continue
+            quiet = 0
+
+        r: int32 = x_poll_msg(200)
+        if r < 0:
+            sayerr("the X connection went away; redialling\n")
+            x_drop()
+            continue
+        while r == 1:
+            dispatch()
+            r = x_poll_msg(0)
+        if r < 0:
+            sayerr("the X connection went away; redialling\n")
+            x_drop()
+            continue
+
+        # Deferred because a pull is a round trip that can serve other events
+        # in the middle of it, and doing that from inside dispatch() would
+        # nest the message pump inside itself.
+        if pull_clip != 0:
+            pull_clip = 0
+            pull(atom_clipboard, 0)
+        if pull_prim != 0:
+            pull_prim = 0
+            pull(ATOM_PRIMARY, 1)
+        if xdead != 0:
+            sayerr("the X connection went away; redialling\n")
+            x_drop()
+            continue
+
+        snarf_tick()
+        if xdead != 0:
+            sayerr("the X connection went away; redialling\n")
+            x_drop()
+    return 0

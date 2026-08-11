@@ -2063,6 +2063,51 @@ int32_t sys_unix_accept(int32_t lfd)
     return fd < 0 ? -1 : (int32_t)fd;
 }
 
+/* extern def sys_unix_connect(path: Ptr[char]) -> int32
+ *
+ * The other end of sys_unix_listen: a CONNECTED AF_UNIX stream socket, for a
+ * Hamnix program that has to speak somebody else's protocol to a server it did
+ * not start.  user/xsnarfd.ad is the first: it connects to the Xwayland inside
+ * a distribution namespace at /n/<name>/tmp/.X11-unix/X0 and speaks the X11
+ * wire protocol, because there is no libX11 on this side of the boundary and
+ * an X selection is owned by a client, not read out of a file.
+ *
+ * IT IS BLOCKING, unlike sys_unix_accept.  A connect(2) that has to be retried
+ * is a server that is not up yet, and the caller's answer to that is to try
+ * again in a second -- not to spin.  Once connected, the descriptor is an
+ * ordinary fd: sys_read/sys_write pass it straight through, sys_read_nb polls
+ * it (0 = nothing yet, -1 = the server went away) and sys_waitfds parks on it.
+ *
+ * SIGPIPE IS DISARMED for the same reason sys_unix_listen does it, with the
+ * roles reversed: here it is the SERVER that can vanish mid-write -- an
+ * Xwayland exits every time its distribution's X session ends -- and the
+ * default disposition would kill the bridge instead of letting it notice and
+ * reconnect. */
+int32_t sys_unix_connect(const char *path)
+{
+    struct sockaddr_un sa;
+    if (!path || strlen(path) >= sizeof sa.sun_path) {
+        errno = EINVAL;
+        return -1;
+    }
+    signal(SIGPIPE, SIG_IGN);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -1;
+    memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX;
+    strcpy(sa.sun_path, path);
+    while (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
+        if (errno == EINTR)
+            continue;
+        int e = errno;
+        close(fd);
+        errno = e;
+        return -1;
+    }
+    return (int32_t)fd;
+}
+
 /* extern def sys_scm_recv(fd: int32, buf: Ptr[uint8], cap: uint64,
  *                         fds: Ptr[int32], maxfds: int32,
  *                         nfds: Ptr[int32]) -> int64
