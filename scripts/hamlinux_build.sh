@@ -73,8 +73,7 @@ if [ ! -f "$SC_OBJ" ] || [ user/linux-syscalls.c -nt "$SC_OBJ" ] \
         || [ user/linux-wsys.h -nt "$SC_OBJ" ] \
         || [ user/linux-fdns.h -nt "$SC_OBJ" ] \
         || [ user/linux-net.h -nt "$SC_OBJ" ] \
-        || [ user/linux-auth.h -nt "$SC_OBJ" ] \
-        || [ user/linux-audio.h -nt "$SC_OBJ" ]; then
+        || [ user/linux-auth.h -nt "$SC_OBJ" ]; then
     "$CLANG" -O2 -Iuser -c user/linux-syscalls.c -o "$SC_OBJ" || {
         echo "[hamlinux] ERROR: could not compile user/linux-syscalls.c" >&2
         exit 1
@@ -142,13 +141,22 @@ fi
 # drivers/audio/audio_cdev.ad onto ALSA. It talks to /dev/snd/pcmC*D*p through
 # the kernel's own PCM ioctls, so there is no libasound to link and nothing
 # extra for the initramfs to carry.
-AUD_OBJ="$OUT_DIR/.linux-audio.o"
-if [ ! -f "$AUD_OBJ" ] || [ user/linux-audio.c -nt "$AUD_OBJ" ] \
-        || [ user/linux-audio.h -nt "$AUD_OBJ" ]; then
-    "$CLANG" -O2 -Iuser -c user/linux-audio.c -o "$AUD_OBJ" || {
-        echo "[hamlinux] ERROR: could not compile user/linux-audio.c" >&2
-        exit 1
-    }
+# The audio device server is OPTIONAL at this point in its life: the .c is not
+# in the tree yet on every branch, and a build script that cannot run without
+# a file that may not exist is a build script that breaks a clean checkout.
+# It broke exactly that way once -- this block was committed while
+# user/linux-audio.c was still untracked, so a fresh worktree of the mainline
+# could not compile ANY program. Guarded rather than assumed.
+AUD_OBJ=""
+if [ -f user/linux-audio.c ]; then
+    AUD_OBJ="$OUT_DIR/.linux-audio.o"
+    if [ ! -f "$AUD_OBJ" ] || [ user/linux-audio.c -nt "$AUD_OBJ" ] \
+            || [ user/linux-audio.h -nt "$AUD_OBJ" ]; then
+        "$CLANG" -O2 -Iuser -c user/linux-audio.c -o "$AUD_OBJ" || {
+            echo "[hamlinux] ERROR: could not compile user/linux-audio.c" >&2
+            exit 1
+        }
+    fi
 fi
 
 LL="${OUT_ELF%.elf}.ll"
@@ -187,7 +195,7 @@ case "$(basename "$IN_AD" .ad)" in
     wsysd) EXTRA_OBJS=(user/linux-vk.c user/linux-vkhost.c -ldl) ;;
 esac
 
-if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" "$NET_OBJ" "$AU_OBJ" "$AUD_OBJ" \
+if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" "$NET_OBJ" "$AU_OBJ" ${AUD_OBJ:+"$AUD_OBJ"} \
         "${EXTRA_OBJS[@]}" \
         $TLSLIBS -lcrypt \
         "$@" -o "$OUT_ELF" 2>"$LL.link.log"; then
