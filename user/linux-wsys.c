@@ -69,6 +69,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "linux-wsys.h"
@@ -83,8 +86,9 @@
  * field after it.  A mismatch re-initialises rather than being ignored — /srv is tmpfs
  * and recreated every boot, so the only way to meet an old one is to mix two
  * builds, and silently sharing a table whose layout you disagree about is the
- * success-shaped failure this tree keeps paying for. */
-#define WSYS_VERSION      3
+ * success-shaped failure this tree keeps paying for.  4 adds `inputgen`, the
+ * futex word a parked client sleeps on, which moves every window after it. */
+#define WSYS_VERSION      4
 #define WSYS_MAX_WINDOWS  32
 #define WSYS_SCENE_CAP    16384              /* = lib/hamscene.ad HAMSCENE_CAP */
 #define WSYS_RING_CAP     8192
@@ -135,6 +139,20 @@ struct wshm {
     int32_t  next_wid;                        /* newwindow, any uid           */
     int32_t  desktop;                         /* the rl5 flip: compositor owns fb */
     uint32_t gen;                             /* ++ on any published change */
+    /* THE INPUT GENERATION, and the futex a parked client sleeps on.
+     *
+     * In Hamnix a client parks in sys_waitfds on /dev/wsys/<wid>/keys and the
+     * KERNEL wakes it (wsys_route_key_byte -> waitfds_notify).  Here the rings
+     * are shared memory with no kernel behind them, so the wake has to be
+     * carried by something the writing PROCESS can poke and the parked one can
+     * sleep on: a futex word in the shared segment.  Every ring_write bumps it
+     * and FUTEX_WAKEs; user/linux-syscalls.c's sys_waitfds FUTEX_WAITs on it.
+     *
+     * ONE counter for every ring in the segment, deliberately.  A woken client
+     * re-checks its OWN rings and parks again if they are empty, so a spurious
+     * wake costs a few microseconds -- and when the desktop is idle there is
+     * no input at all, which is the case that has to cost nothing. */
+    uint32_t inputgen;
     struct wwin  win[WSYS_MAX_WINDOWS];
     struct wsink sink[WSYS_SINKS];            /* the PUBLIC sinks only        */
 };
@@ -1378,6 +1396,98 @@ static int sink_write_allowed(const char *name)
     return hostowner() && chrome_rw;
 }
 
+/* ------------------------------------------------------------------ *
+ * THE PARK, and why it is a futex
+ *
+ * A scene client's idle loop is: drain my rings, redraw if anything changed,
+ * then PARK until input arrives or a timeout lapses.  In Hamnix the park is
+ * sys_waitfds and the kernel's devwsys wakes it.  On this line /dev/wsys is
+ * shared memory and the "kernel" is the writing process, so the wake has to
+ * be an IPC primitive over that same memory.
+ *
+ * THIS IS THE FIX FOR THE 175% IDLE DESKTOP.  sys_waitfds used to hand its
+ * fds straight to poll(2) -- and a /dev/wsys descriptor is a real descriptor
+ * on **/dev/null**, which poll reports READABLE instantly and always.  So
+ * hamdesktop's `sys_waitfds(event_fd, 250)` and hampanelscene's
+ * `sys_waitfds(event_fds, 16)` -- both written specifically to avoid a spin,
+ * both commented as parking off the runqueue -- returned immediately on every
+ * iteration, forever.  The two programs the user looks at each pegged a core
+ * on an empty desktop, in state R, and every functional gate passed.
+ * ------------------------------------------------------------------ */
+static long futex_op(uint32_t *addr, int op, uint32_t val,
+                     const struct timespec *ts)
+{
+    return syscall(SYS_futex, addr, op, val, ts, NULL, 0);
+}
+
+/* Publish that a ring got bytes and wake every parked client. */
+static void input_posted(void)
+{
+    if (!shm) return;
+    __atomic_add_fetch(&shm->inputgen, 1, __ATOMIC_RELEASE);
+    /* FUTEX_WAKE, not FUTEX_WAKE_PRIVATE: the waiters are OTHER PROCESSES
+     * sharing this mapping, which is the whole point of the segment. */
+    futex_op(&shm->inputgen, FUTEX_WAKE, (uint32_t)INT32_MAX, NULL);
+}
+
+/* The generation a caller should quote back to hamwsys_input_wait().  Read it
+ * BEFORE checking the rings, or a write landing between the check and the wait
+ * is slept through -- the classic lost wakeup. */
+uint32_t hamwsys_input_gen(void)
+{
+    if (shm_attach() < 0 || !shm) return 0;
+    return __atomic_load_n(&shm->inputgen, __ATOMIC_ACQUIRE);
+}
+
+/* Sleep until the input generation moves off `seen`, or `timeout_ms` elapses
+ * (negative = forever).  Returns 0 always; the caller re-checks its rings. */
+int hamwsys_input_wait(uint32_t seen, int64_t timeout_ms)
+{
+    if (!shm) return 0;
+    struct timespec ts;
+    struct timespec *tp = NULL;
+    if (timeout_ms >= 0) {
+        ts.tv_sec  = (time_t)(timeout_ms / 1000);
+        ts.tv_nsec = (long)((timeout_ms % 1000) * 1000000L);
+        tp = &ts;
+    }
+    futex_op(&shm->inputgen, FUTEX_WAIT, seen, tp);
+    return 0;
+}
+
+/* 1 when this open is a per-window event ring -- the only /dev/wsys files a
+ * readability wait means anything for.  Everything else under /dev/wsys is a
+ * snapshot read: it is ready by definition, which is what poll on /dev/null
+ * accidentally reported and the only reason that bug was survivable. */
+int hamwsys_is_ring(const struct hamwsys_file *f)
+{
+    switch (f->leaf) {
+    case HAMWSYS_WIN_KEYS:
+    case HAMWSYS_WIN_POINTER:
+    case HAMWSYS_WIN_EVENT:
+    case HAMWSYS_WIN_TEXT:
+    case HAMWSYS_WIN_CMD:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* 1 when that ring has bytes waiting to be read. */
+int hamwsys_ring_ready(const struct hamwsys_file *f)
+{
+    if (!hamwsys_is_ring(f)) return 1;
+    if (shm_attach() < 0 || !shm) return 0;
+    struct wwin *v = win_find(f->wid);
+    if (!v) return 0;
+    const struct wring *q = f->leaf == HAMWSYS_WIN_KEYS    ? &v->keys
+                          : f->leaf == HAMWSYS_WIN_POINTER ? &v->pointer
+                          : f->leaf == HAMWSYS_WIN_EVENT   ? &v->event
+                          : f->leaf == HAMWSYS_WIN_TEXT    ? &v->text
+                                                           : &v->cmd;
+    return q->r != q->w;
+}
+
 static void ring_write(struct wring *q, const uint8_t *b, uint64_t n)
 {
     for (uint64_t i = 0; i < n; i++) {
@@ -1388,6 +1498,7 @@ static void ring_write(struct wring *q, const uint8_t *b, uint64_t n)
         if (q->w - q->r > WSYS_RING_CAP)
             q->r = q->w - WSYS_RING_CAP;
     }
+    if (n) input_posted();
 }
 
 static uint64_t ring_read(struct wring *q, uint8_t *b, uint64_t cap)

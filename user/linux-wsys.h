@@ -70,6 +70,16 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap);
 int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n);
 void    hamwsys_close(struct hamwsys_file *f);
 
+/* THE IDLE PARK.  sys_waitfds (user/linux-syscalls.c) uses these to sleep a
+ * scene client off the runqueue until input lands in one of its rings.  A
+ * /dev/wsys descriptor is a descriptor on /dev/null, so poll(2) calls it
+ * readable instantly and always; without this seam every parking event loop
+ * on the system is a busy spin.  See THE PARK in user/linux-wsys.c. */
+int      hamwsys_is_ring(const struct hamwsys_file *f);
+int      hamwsys_ring_ready(const struct hamwsys_file *f);
+uint32_t hamwsys_input_gen(void);
+int      hamwsys_input_wait(uint32_t seen, int64_t timeout_ms);
+
 /* The two syscalls hamUI uses to bind a spawned task to a window. */
 int32_t hamwsys_alloc(uint64_t pid);
 int32_t hamwsys_free(int32_t wid);
