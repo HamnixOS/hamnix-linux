@@ -107,12 +107,10 @@ file, and it is pinned by construction rather than by remembering to.
 which is why this change touches no file in `etc/` and no build recipe beyond
 one compile stanza.
 
-## 3. The X clipboard is a different clipboard, and this pass did not bridge it
+## 3. The X clipboard is a different clipboard, and `user/xsnarfd.ad` bridges it
 
 A Debian or Alpine program in a namespace uses X selections, owned by the
-Xwayland inside that namespace; `jwm` and the Wayland path have their own. That
-is a genuine design question and the answer here is *separate, for now, and
-said out loud*.
+Xwayland inside that namespace; `jwm` and the Wayland path have their own.
 
 **The boundary is measured, not asserted.** `tests/linux/snarf_device.sh` arm 3
 runs the host's `/bin/cat` — standing in for a foreign binary — against
@@ -121,15 +119,72 @@ the Hamnix `cat` prints the clipboard's contents. That is not a defect: it is
 true of `/dev/wsys`, `/net` and `/fd` too, all of which are served *inside the
 process* by the Hamnix runtime.
 
-Bridging is not a line in a device server. It needs a process that OWNS an X
-selection and mirrors it in both directions, reacting to selection-ownership
-changes on both sides — a program, and one that belongs beside the Wayland/X
-path rather than here. **Doing half of it** — mirroring X into Hamnix but not
-back, or on copy but not on ownership change — **would be exactly the
-success-shaped failure NORTH_STAR exists to beat**, so it is named as not done
-instead of quietly approximated. The Plan 9 half is already in place: a name is
-what crosses a boundary, and `/dev/snarf` is reachable from inside any
-namespace that runs Hamnix binaries, with nothing bound.
+The pass that wrote this file named the shape of the fix and did not build it:
+
+> Bridging is not a line in a device server. It needs a process that OWNS an X
+> selection and mirrors it in both directions, reacting to selection-ownership
+> changes on both sides.
+
+That is what `user/xsnarfd.ad` is. §6 is its record.
+
+## 3a. Why an X selection cannot be mirrored like a buffer
+
+There is no place in an X server where the clipboard lives. A client **owns**
+`CLIPBOARD` (and `PRIMARY`); anyone pasting sends `ConvertSelection` and the
+**owner** answers, in a target the paster asked for. So:
+
+* the bridge cannot *poll* the X side — there is nothing to read;
+* the bridge cannot *write* the X side — there is nowhere to write;
+* the bridge must **be a client**, take ownership when `/dev/snarf` changes,
+  and answer every conversion request out of the Hamnix buffer;
+* and it must notice when somebody **else** takes ownership, ask that owner
+  for the bytes, and put them into `/dev/snarf`.
+
+Both halves or neither. A bridge that mirrors on copy but not on ownership
+change loses exactly the paste that mattered and says nothing.
+
+## 3b. Where it runs, and why there is nowhere else
+
+The two things it must touch are on opposite sides of a namespace boundary:
+
+| | |
+|--|--|
+| `/dev/snarf` | served **in-process** by the Hamnix runtime over a segment named `$HAMSNARF`, or `$HAMWSYS + ".snarf"`, or `/srv/snarf`. **`/srv` is deliberately not carried into a subtree namespace**, so none of those names exist inside one. |
+| the X display | **Xwayland runs inside** the distribution namespace, on `:0`, socket at that tree's `/tmp/.X11-unix/X0`. |
+
+So it runs **outside** the namespace, as root, and reaches the display the
+Plan 9 way — **by name**. The boot binds each distribution at `/n/<name>`, and
+that tree's `/tmp` is the medium's own, so the socket a client inside sees as
+`/tmp/.X11-unix/X0` is `/n/alpine/tmp/.X11-unix/X0` from out here. *Same
+inode, two names.* Nothing is bound, nothing is copied, `/srv` stays out of the
+namespace, and the socket path is an argument exactly as `wsyswl`'s is.
+
+**One bridge per distribution, not one overall** — the same construction
+`/etc/rc.distros-wl` already uses for `wsyswl`, and for the same reason: there
+is one Xwayland per distribution and an X connection is to one server. They all
+share the one `/dev/snarf`, and *that* is what makes it one clipboard: text
+copied in Debian's Firefox lands in `/dev/snarf`, and the Alpine bridge then
+claims Alpine's `CLIPBOARD` with it. The convergence is content-based, so it
+terminates instead of ringing.
+
+It is started **at boot**, from the generated `/etc/rc.distros-wl`, even though
+the X server it wants will not exist until somebody launches a program: it
+retries once a second and says so once a minute. Starting it *with* the session
+instead would make the first copy of every session the one that is lost.
+
+## 3c. Why the X11 wire protocol is written out by hand
+
+Because the alternative is not available. Linking `libX11` would make the
+bridge a **foreign binary**, and a foreign binary is precisely the thing that
+cannot open `/dev/snarf`. It has to be a Hamnix binary to have a Hamnix
+clipboard, so it speaks X11 on the wire — `user/x11/xfill.ad` already does that
+against the in-tree toy server. Nothing in `xsnarfd` may assume that server's
+fixed resource IDs: the root window and the resource-id base are read out of
+the connection setup reply, as they must be against a real Xwayland.
+
+`sys_unix_connect` (`user/linux-syscalls.c`) is the one new runtime primitive.
+`sys_unix_listen` and `sys_unix_accept` existed for `wsyswl`'s side of a
+socket; nothing had ever needed the other end.
 
 ## 4. Verification
 
@@ -211,7 +266,8 @@ Still green, unchanged by this work:
 
 ## 5. What is left undone
 
-* **The X / namespace clipboard bridge** (§3). Named, not started.
+* **The X / namespace clipboard bridge** (§3) is built and measured — see §6
+  for what it does *not* do.
 * **No locking.** The length is published after the bytes, so a reader never
   walks off the end of what has been written, but two programs copying at the
   same instant still interleave. That is what it means anywhere; a seqlock
@@ -232,3 +288,139 @@ Still green, unchanged by this work:
   here rather than implied by the assertions that were run: on the Hamnix line
   it was exactly this gap that let nine green gates sit on top of a feature
   that was dead on device (`docs/text_selection_clipboard.md` §4).
+
+---
+
+## 6. The bridge: `user/xsnarfd.ad`
+
+    xsnarfd /n/alpine/tmp/.X11-unix/X0 alpine
+
+An X client that owns `CLIPBOARD` and `PRIMARY` on the Xwayland inside one
+distribution namespace, and mirrors both against `/dev/snarf` and
+`/dev/snarf.primary`. §3a–3c are why it is shaped this way; this is what it
+does, what it refuses, and what was measured.
+
+### 6.1 The two directions
+
+**Hamnix → X.** Both buffers are read four times a second and compared with
+what the bridge last saw. A change means the Hamnix side copied, so the bridge
+sends `SetSelectionOwner` — and then **asks the server who the owner is**,
+because `SetSelectionOwner` has no reply and a claim the server dropped is
+otherwise indistinguishable from one that took. From then on every
+`SelectionRequest` is answered out of the buffer.
+
+**X → Hamnix.** `XFixesSelectSelectionInput` on both selections, so every
+change of owner produces an `XFixesSelectionNotify` — *including handovers
+between two other clients, which is the case a bridge that watches only its own
+`SelectionClear` cannot see at all.* On a change the bridge sends
+`ConvertSelection` for `UTF8_STRING`, falls back to `STRING` once, reads the
+answer with `GetProperty(delete=1)` and writes it into the device.
+
+`SelectionClear` **also** arms the pull, XFixes or not.
+`XFixesSelectSelectionInput` has no reply, so a bridge that trusted it alone
+would go silently one-way if that request were ever refused — which is exactly
+what a wrong length field did here once (§6.4).
+
+**The anti-ping-pong invariant** is one line and it is the whole reason this
+converges: the bridge's cache is updated *before* the device is written, so the
+next poll does not see its own write as a Hamnix-side change and go claiming
+the selection back off the X client that just handed it over.
+
+### 6.2 What it answers, and what it refuses
+
+`TARGETS`, `UTF8_STRING`, `STRING`, `TEXT` — and `TARGETS` lists **exactly**
+those four. `TEXT` is answered with type `UTF8_STRING`, which is what ICCCM
+asks of an owner that chose UTF-8.
+
+`TIMESTAMP` is **refused** (`SelectionNotify` with property `None`) rather than
+listed and answered with a lie: a real ownership timestamp needs the
+zero-length-property-append round trip, this does not do it, and advertising a
+target one cannot answer is the same class of defect as a device path with no
+server behind it.
+
+**The 64 KiB cap is the device's and is not widened here.** A larger X
+selection is truncated at `SNARF_MAX` and **said so by size** — the same rule
+`/dev/snarf` applies to a 70 000-byte write from a Hamnix program (§4). An
+owner that answers with an **INCR** (incremental) transfer is **refused
+loudly** and the Hamnix clipboard is **left alone**: a half-received INCR
+stream is a corrupt paste, and the two clipboards genuinely differing is the
+honest state to be in and to say.
+
+### 6.3 Verification
+
+`tests/linux/xsnarf_bridge.sh` — QEMU-free, **25 assertions, 25 PASS**. An
+Xvfb and a few `xclip`s stand in for an X client in a namespace; the Hamnix
+side is the *same two probes* `snarf_device.sh` uses —
+`tests/linux/snarfcopy.ad` copying through `lib/hamtextbox.ad` (the editor /
+Notes / URL-bar path) and `tests/linux/snarfpaste.ad` pasting through
+`lib/htermsel.ad` (the grid terminal's path), in separate processes. So what is
+asserted is **copy in one world, paste in the other, through the shipped
+toolkit code**:
+
+* both directions on **both** selections, and the two staying independent
+  across a pull;
+* a handover **between two other X clients** — the arm that fails if the XFixes
+  watch is refused;
+* **four rounds of ownership changing hands alternately**, with no loss of sync
+  and no wedge;
+* a 70 000-byte selection landing as exactly 65 536 with the drop named, and a
+  2 MB one refused as INCR with the clipboard unchanged;
+* **the X server killed and restarted underneath the bridge** — it redials and
+  bridges the new one, still alive at the end. An Xwayland exits every time a
+  distribution's X session ends, so this is the normal case, not the edge.
+
+It runs in a private mount namespace with a **tmpfs over `/tmp`**, which makes
+the display number and the X socket private: two agents running this at once
+cannot collide on `:77`, and the host's real `/tmp` — 16 GB of somebody's RAM —
+is never touched. `$HAMSNARF` is pinned per run for the reason
+`docs/steam_namespace.md` §11 records. Nothing here touches the host's display:
+Xvfb scans out to memory by definition.
+
+**Xvfb, not Xwayland, and that is deliberate for this gate.** What the bridge
+talks to is an X server over a unix socket at a path; Xwayland's difference —
+that it is itself a Wayland client — is on the far side of the server, in the
+pixels. Nothing in the selection protocol changes.
+
+### 6.4 Two defects worth keeping written down
+
+Both were found by measurement against a real X server, neither by reading.
+
+1. **`XFixesSelectSelectionInput` is 16 bytes, length 4** — it was 20/5 for one
+   run. It has no reply, so the only trace was the unmatched-error line
+   printing `X error code 16 for request opcode 138`: BadLength. With the watch
+   refused, the whole X → Hamnix direction was dead and nothing said so. That
+   the bridge prints unmatched X errors *at all* is why this took minutes.
+2. **The send-event bit.** An event a client *sent* (rather than one the server
+   generated) arrives with the top bit of the type byte **set** — and
+   `SendEvent` is how a selection owner answers `ConvertSelection`. So every
+   `SelectionNotify` arrived as type 159, not 31, matched nothing, and was
+   dropped: the Hamnix → X direction worked perfectly while X → Hamnix timed
+   out three seconds at a time with no error anywhere.
+
+### 6.5 What the bridge does not do
+
+* **A change on the Hamnix side is noticed by CONTENT, not by a serial.**
+  `struct snarfshm` has `magic` and `version` but no generation counter, so
+  there is nothing cheap to compare and nothing to wait on. The bridge polls
+  both buffers four times a second and compares bytes. That is correct — a
+  change is a change — but it cannot tell "written again with the same bytes"
+  from "not written", and it cannot wake instantly.
+  **The request, precisely:** add `uint64_t serial;` to `struct snarfshm`
+  (`user/linux-snarf.c`, the struct at line 127) and `(*serialp)++;` at the end
+  of `hamsnarf_write` (line 289), beside the existing "the length is published
+  last" store. The poll then compares one word, and a later `sys_waitfds` arm
+  could park on the clipboard instead of polling it at all. That file is owned
+  by another pass, so this is a request rather than a change.
+* **INCR is refused, not received.** Receiving it is a `PropertyNotify` loop
+  against `PropertyChangeMask` on the owner window; the 64 KiB cap means most
+  of what arrives would be discarded anyway, which is why refusing loudly was
+  chosen first.
+* **No `TARGETS`-driven format negotiation for incoming content.** The bridge
+  asks for `UTF8_STRING` and falls back to `STRING`. An owner offering only
+  `COMPOUND_TEXT` or `text/plain;charset=utf-8` is refused, loudly.
+* **No clipboard persistence after the owner exits.** When the last X owner
+  disappears the bridge keeps the last content it saw rather than clearing —
+  said on the log line, and the same choice every X clipboard manager makes.
+* **Nothing bridges the Wayland side.** `wl_data_device` is a separate
+  protocol; a Wayland-native client that never goes through Xwayland has a
+  third clipboard. It is named here rather than implied to be covered.
