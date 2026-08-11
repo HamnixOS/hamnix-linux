@@ -31,6 +31,10 @@ PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
 
 export HAMLINUX_VNC="${HAMLINUX_VNC:-none}"
+# Nothing here enters a distribution namespace, but a build/image that has the
+# distro media in it would otherwise be opened with an exclusive write lock and
+# collide with any other VM on this host. Read-only, snapshot-backed.
+export HAMLINUX_DISTRO_RO="${HAMLINUX_DISTRO_RO:-1}"
 WAIT="${1:-300}"
 WORK="build/hpmsigvm"; mkdir -p "$WORK"
 PKG="${HAMLINUX_SIGPKG:-hamnix-diff}"     # ships /bin/diff, which the image does NOT carry
