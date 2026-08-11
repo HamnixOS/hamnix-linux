@@ -11,6 +11,10 @@
 #   did it build      exit status of scripts/hamlinux_build.sh
 #   did it run        exit status / signal / timeout of the program itself
 #   did it DO it      what came out of stdout, and what files it changed
+#   what did it COST  cpu seconds next to wall-clock seconds, because a park
+#                     and a busy spin are identical in every other column here
+#                     (THE IDLE CENSUS, HANDOFF §0 — the desktop burned two
+#                     cores while every gate on this tree passed)
 #
 # THE ORACLE IS THE PROGRAM'S OWN HEADER, NOT GNU COREUTILS. `wc` and `head`
 # in this tree are stdin-only and ignore file operands, and their headers say
@@ -218,6 +222,41 @@ cp -a tests/fixtures "$BASE/work/tests/fixtures" 2>/dev/null
 # A real gzip stream, so `gunzip` is tested on gzip rather than on prose.
 gzip -c "$BASE/work/f1.txt" > "$BASE/work/f1.gz" 2>/dev/null
 
+# A REAL display list for scene_raster_host, dumped by the program whose own
+# error message names it: "cannot open the display list -- dump one with
+# hamdesktop/hampanelscene --scene-dump". The harness had been handed the
+# literal argv `in.dl out.ppm`, so it opened a file that has never existed and
+# the sweep recorded the refusal as the rasterizer's failure.
+[ -x "$OUT/obj/hamdesktop.elf" ] && \
+    "$OUT/obj/hamdesktop.elf" --scene-dump "$BASE/work/scene.dl" >/dev/null 2>&1
+
+# The two BMP fixtures hamsdl_image_host asserts against, generated exactly as
+# scripts/test_hamsdl_image_host.sh generates them (24-bit coordinate-coded so
+# a sample nails channel + row order; 32-bit half-opaque for the alpha blend).
+# It had been handed %F %F2 -- two text files -- and "loads BMP sprite(s)"
+# cannot be judged from a harness fed prose.
+python3 - "$BASE/work/fix24.bmp" "$BASE/work/fix32.bmp" <<'PY' 2>/dev/null
+import struct, sys
+def bmp(width, height, bitcount, px):
+    bpp = bitcount // 8
+    stride = (width * bpp + 3) & ~3
+    pad = stride - width * bpp
+    rows = bytearray()
+    for fy in range(height):                 # BMP is bottom-up
+        y = height - 1 - fy
+        for x in range(width):
+            b, g, r, a = px(x, y)
+            rows += bytes((b, g, r, a)) if bpp == 4 else bytes((b, g, r))
+        rows += b'\x00' * pad
+    off = 14 + 40
+    fh = b'BM' + struct.pack('<IHHI', off + len(rows), 0, 0, off)
+    ih = struct.pack('<IiiHHIIiiII', 40, width, height, 1, bitcount, 0,
+                     len(rows), 2835, 2835, 0, 0)
+    return fh + ih + bytes(rows)
+open(sys.argv[1], 'wb').write(bmp(8, 8, 24, lambda x, y: (200, 16 + y * 24, 16 + x * 24, 255)))
+open(sys.argv[2], 'wb').write(bmp(8, 8, 32, lambda x, y: (0, 255, 0, 255 if x < 4 else 128)))
+PY
+
 # ---------------------------------------------------------------------------
 # 3. run
 # ---------------------------------------------------------------------------
@@ -240,8 +279,37 @@ if [ -f "$RECIPES" ]; then
 fi
 
 : > "$OUT/results.tsv"
-printf '#app\tclass\tbuild\tverdict\trc\tsecs\tout\terr\tchanged\tempty\twins\tdetail\tclaim\n' \
+printf '#app\tclass\tbuild\tverdict\trc\tsecs\tcpu\tout\terr\tchanged\tempty\twins\tdetail\tclaim\n' \
     >> "$OUT/results.tsv"
+
+# CPU SECONDS, next to wall-clock seconds, because THE IDLE CENSUS (HANDOFF §0)
+# was invisible to every functional gate on this tree — including this one.
+# `sys_waitfds` could not sleep, `sleep` was a busy-wait, and a shell at a
+# prompt burned a core; the desktop sat at 203.6% of one cpu and every gate
+# here still passed, because a spin and a park produce the SAME exit status,
+# the SAME output and the SAME wall clock. A sweep that runs 367 programs and
+# never asks what any of them COST cannot see that class of defect at all.
+#
+# The measurement is bash's own `times`, whose second line is cumulative
+# reaped-CHILD user+system time: sample it either side of the run and the
+# difference is what that program burned.
+#
+# It answers through a GLOBAL, and that is not a style choice. `times` reports
+# the counters of the shell that runs it, and $(...) forks -- so `c0=$(cpu_now)`
+# samples a brand-new subshell whose children have used no time at all and
+# every row reads 0.0. (Measured, in this file: `yes` spinning for 12 s
+# reported cpu 0.0.) `{ times; }` with a plain redirect does not fork, and the
+# assignment below happens in the caller's own shell.
+CPU_NOW=0
+cpu_now() {
+    { times; } > "$OUT/.times"
+    CPU_NOW=$(awk 'NR==2{ n=0
+                for (i = 1; i <= NF; i++) {
+                    split($i, a, "m"); sub(/s$/, "", a[2])
+                    n += a[1] * 60 + a[2]
+                }
+                printf "%.2f", n }' "$OUT/.times")
+}
 
 # The programs whose CONTRACT is to say nothing and change nothing. Without
 # this list `true` is indistinguishable from a program that did not run.
@@ -264,29 +332,29 @@ test
 pathchk"
 
 # The programs whose CONTRACT is a NON-ZERO exit under this recipe. Without
-# this list the sweep reports a failure for five programs that are behaving
-# exactly as specified — the same manufactured result as the 4 s GUI timeout,
-# only in the opposite direction, and just as dishonest in a headline number.
+# this the sweep reports a failure for programs behaving exactly as specified —
+# the same manufactured result as the 4 s GUI timeout, only in the opposite
+# direction, and just as dishonest in a headline number.
 #
-# The bar is the mirror of EXPECT_SILENT's: THE STATUS MUST BE THE ANSWER, not
-# merely the observed outcome. "cannot open /proc/svc", "no audio device" and
-# "cannot open /dev/vt/ctl" are REAL gaps and stay unhealthy; these five are
-# not gaps at all:
-#   false          exit 1 is its entire specification
-#   cmp / diff     POSIX: 1 means "the files differ", and the recipe hands
-#                  them two files that DO differ, on purpose
-#   tty            its own header says "exit 0 if a tty, 1 otherwise"; stdin
-#                  here is a regular file, so 1 is the correct answer
-#   kill           the recipe picks pid 99999 precisely SO THAT the target is
-#                  not found — "(PID chosen so target is not found (safe))"
-# A row here still has to produce its normal output; it is scored EXPECTED_FAIL
-# and counted with the healthy, and anything that lands here without earning
-# it is a finding exactly like a stray SILENT_OK.
-EXPECT_NONZERO="false
-cmp
-diff
-tty
-kill"
+# It is a TABLE with a REASON PER ROW, not a bare list, and the reason is
+# written into the results row. The bar, what qualifies and what emphatically
+# does not (a device this port owes and does not have is a REAL gap and stays
+# unhealthy), is stated at the top of that file:
+#
+#   tests/linux/runsweep_expected_fail.tsv
+#
+# A row there still has to produce its normal output; it is scored
+# EXPECTED_FAIL and counted with the healthy, and anything that lands there
+# without earning it is a finding exactly like a stray SILENT_OK.
+XFAILS="$PROJ_ROOT/tests/linux/runsweep_expected_fail.tsv"
+declare -A XFAIL
+if [ -f "$XFAILS" ]; then
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        case "$line" in \#*) continue ;; esac
+        XFAIL["${line%%$'\t'*}"]="${line#*$'\t'}"
+    done < "$XFAILS"
+fi
 
 run_one() {
     local app="$1"
@@ -315,14 +383,14 @@ run_one() {
     # regression and must still show up as a failure, so rc 13 on anything not
     # declared a library falls through to BUILD_FAIL below.
     if [ "${BRC[$app]:-1}" = 13 ] && [ "$cls" = lib ]; then
-        printf '%s\t%s\t0\tNOT_SMOKE_TESTABLE\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
+        printf '%s\t%s\t0\tNOT_SMOKE_TESTABLE\t-\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
             "$app" "$cls" "library module: no def main, nothing to link or run" \
             "$claim" >> "$OUT/results.tsv"
         return
     fi
 
     if [ "${BRC[$app]:-1}" != 0 ]; then
-        printf '%s\t%s\t%s\tBUILD_FAIL\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
+        printf '%s\t%s\t%s\tBUILD_FAIL\t-\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
             "$app" "$cls" "${BRC[$app]:-?}" \
             "$(grep -vE '^; ADDER_STAT' "$OUT/run/$app.build.err" 2>/dev/null \
                | grep -m1 -iE 'error|bailed|NOT-AN-APPLICATION' | cut -c1-120 | tr '\t\n' '  ')" \
@@ -340,7 +408,7 @@ run_one() {
         unsafe)  skip="$claim" ;;
     esac
     if [ -n "$skip" ]; then
-        printf '%s\t%s\t0\tNOT_SMOKE_TESTABLE\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
+        printf '%s\t%s\t0\tNOT_SMOKE_TESTABLE\t-\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
             "$app" "$cls" "$skip" "$claim" >> "$OUT/results.tsv"
         return
     fi
@@ -366,6 +434,9 @@ run_one() {
     argv="${argv//%WAV//work/tests/fixtures/sounds/test.wav}"
     argv="${argv//%MP3//work/tests/fixtures/sounds/test.mp3}"
     argv="${argv//%GZ//work/f1.gz}"
+    argv="${argv//%HMJV//work/tests/fixtures/videos/test.hmjv}"
+    argv="${argv//%BMP24//work/fix24.bmp}"
+    argv="${argv//%BMP32//work/fix32.bmp}"
     local -a av=()
     [ -n "$argv" ] && read -r -a av <<< "$argv"
 
@@ -373,7 +444,12 @@ run_one() {
     case "$sin" in
         -)     : > "$sf" ;;
         %F)    cp "$BASE/work/f1.txt" "$sf" ;;
-        *)     printf '%s\n' "$sin" > "$sf" ;;
+        # %b, not %s: a program that PROMPTS TWICE needs two lines, and the
+        # recipes column writes them `line1\nline2`. With %s that backslash-n
+        # stayed two characters, so `passwd` was handed ONE line containing a
+        # literal \n for both prompts and answered "passwords do not match" --
+        # correctly, to a question the harness had got wrong.
+        *)     printf '%b\n' "$sin" > "$sf" ;;
     esac
 
     local t="$TMO"
@@ -395,13 +471,40 @@ run_one() {
     # a path inside the throwaway root.
     jail_run() {   # jail_run <timeout> <stdin-file> <out> <err> <argv...>
         local jt="$1" jin="$2" jout="$3" jerr="$4"; shift 4
-        # 4 MB is a safety net, not a test parameter: `yes` writes for ever by
-        # design and would otherwise fill the disk in the seconds it is given.
-        ( ulimit -f 4096
+        # A safety net, not a test parameter: `yes` writes for ever by design
+        # and would otherwise fill the disk in the seconds it is given.
+        #
+        # 256 MiB, NOT 4 MiB, and the four zeroes are the whole point. The
+        # window system's shared segments are FILES, and two of them are
+        # large: /srv/wsys.bb is BB_SLOTS(8) x 2 x 1920x1080x4 = 132 MB of
+        # v2 backbuffer, and /srv/wsys.img is the 4,195,144-byte named-image
+        # store. `ulimit -f` bounds the OFFSET a process may write, so at 4096
+        # blocks (4,194,304 bytes) BOTH ftruncate(2)s were refused EFBIG --
+        # the image store by 840 bytes.
+        #
+        # What that did to the measurement, A/B in the same jail with the same
+        # binary (tests/linux/runsweep_jail.sh, /bin/hamimgscene):
+        #
+        #   ulimit -f 4096   -> "[hamimgscene] FATAL: the 'I' named-image
+        #                        upload to /dev/wsys/2/draw/ctl was refused,
+        #                        rc=-5", exit 2; /srv/wsys.img 0 bytes
+        #   ulimit -f 16384  -> "[hamimgscene] scene window ready with the
+        #                        32x32 image uploaded"; /srv/wsys.img 4195144
+        #
+        # So the sweep reported the named-image tier as broken when the tier
+        # works and the HARNESS refused it -- and it did worse than that with
+        # the backbuffer, silently: a v2 blit client attaches its window
+        # (2.5 MB, under the cap), so the window probe found a wid and the row
+        # was scored DREW_WINDOW, while /srv/wsys.bb stayed 0 bytes and not one
+        # pixel was ever stored. `sdlpong` under this jail: wsys.bb 0 bytes at
+        # 4 MiB and at 16 MiB, 132,710,628 bytes with no cap. "Came up and
+        # drew" for a client that drew nothing is precisely the success-shaped
+        # answer this sweep exists to catch, manufactured by the sweep.
+        ( ulimit -f 262144
           env -i \
             PATH=/bin:/usr/bin HOME=/root USER=root LOGNAME=root TERM=dumb \
             SHELL=/bin/hamsh PWD=/work TMPDIR=/tmp LANG=C \
-            HAMWSYS=/srv/wsys HAMWSYS_BB=/srv/wsys.bb \
+            HAMWSYS=/srv/wsys HAMWSYS_BB=/srv/wsys.bb HAMWSYS_IMG=/srv/wsys.img \
             HAMFDNS=/srv/fdns HAMFDNS_DIR=/srv HAMNET=/srv/net \
             HAMFB_FILE=/run/fb.raw HAMFB_GEOM=1280x800 \
             timeout -k 2 "$jt" \
@@ -410,7 +513,8 @@ run_one() {
             < "$jin" > "$jout" 2> "$jerr" ) 2>/dev/null
     }
 
-    local t0 t1 rc
+    local t0 t1 rc c0 c1
+    cpu_now; c0=$CPU_NOW
     t0=$(date +%s.%N)
     jail_run "$t" "$sf" "$OUT/run/$app.out" "$OUT/run/$app.err" \
              "/bin/$app" "${av[@]}"
@@ -440,7 +544,23 @@ run_one() {
         fi
     fi
     t1=$(date +%s.%N)
+    cpu_now; c1=$CPU_NOW
     local secs; secs=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.1f", b-a}')
+    # Sampled around the RUN only, before the window probe below: the probe is
+    # the harness's own work and would be charged to the program.
+    local cpu; cpu=$(awk -v a="$c0" -v b="$c1" 'BEGIN{printf "%.1f", b-a}')
+    # A PROGRAM KILLED AT THE TIMEOUT HAS NO MEASURABLE COST HERE, and the
+    # column says so rather than saying 0.0. `unshare --kill-child` SIGKILLs
+    # the subtree and exits, so nothing ever wait(2)s for it and its rusage is
+    # never folded into this shell's child totals -- measured: a 4 s pure CPU
+    # burner under `timeout -k 2 4 unshare --fork --pid --kill-child` reports a
+    # delta of exactly 0. Printing 0.0 there would be a number that reads
+    # "this daemon used no cpu", which is the shape of claim this whole file
+    # exists to refuse. Everything that EXITS -- every filter, cmd, hosttest
+    # and bench, ~300 of the rows -- is measured for real, and that is where
+    # the regression sentinel lives: `sleep 1` reads cpu 0.0 of 1.0 wall now
+    # and read cpu 1.0 when it was a busy-wait.
+    case "$rc" in 124|137) cpu=- ;; esac
 
     # What it changed. The overlay upper layer IS the diff. /srv and /run hold
     # the synthetic devices' own backing files, which every client touches and
@@ -498,16 +618,20 @@ run_one() {
     elif [ "$rc" = 153 ]; then
         # SIGXFSZ: it hit the harness's 64 MB output cap. `yes` does this
         # because `yes` is supposed to.
-        verdict=STAYS_UP; detail="wrote past the 4MB output cap — $detail"
-        # 4 MB, and it is worth being exact: bash's `ulimit -f` counts
+        verdict=STAYS_UP; detail="wrote past the 256MB output cap — $detail"
+        # 256 MiB, and it is worth being exact: bash's `ulimit -f` counts
         # 1024-byte blocks (measured -- `ulimit -f 1` truncates at 1024), so
-        # the 4096 above is 4 MiB. This line used to say 64 MB, which is a
-        # wrong number in a comment about a cap and the next reader would have
-        # believed it.
+        # the 262144 above is 256 MiB. This line has been wrong twice (it said
+        # 64 MB when the cap was 4 MiB); a wrong number in a comment about a
+        # cap is one the next reader believes.
     elif [ "$rc" -gt 128 ] && [ "$rc" -lt 160 ]; then
         verdict=CRASH; detail="signal $((rc-128)) — $detail"
-    elif [ "$rc" != 0 ] && grep -qx "$app" <<< "$EXPECT_NONZERO"; then
+    elif [ "$rc" != 0 ] && [ -n "${XFAIL[$app]:-}" ]; then
         verdict=EXPECTED_FAIL
+        # The reason travels WITH the row. A verdict that says "we expected
+        # this" without saying why is an assertion, and the next reader has to
+        # take it on trust or re-derive it.
+        detail="expected: ${XFAIL[$app]} — $detail"
     elif [ "$rc" != 0 ]; then
         verdict=EXIT_NONZERO
     elif [ "$cls" = gui ] && [ "$wins" != - ] && [ "$wins" -gt 0 ]; then
@@ -537,9 +661,9 @@ run_one() {
     esac
     detail="$detail$note"
 
-    printf '%s\t%s\t0\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$app" "$cls" "$verdict" "$rc" "$secs" "$ob" "$eb" "$nch" "$nempty" \
-        "$wins" "$detail" "$claim" >> "$OUT/results.tsv"
+    printf '%s\t%s\t0\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$app" "$cls" "$verdict" "$rc" "$secs" "$cpu" "$ob" "$eb" "$nch" \
+        "$nempty" "$wins" "$detail" "$claim" >> "$OUT/results.tsv"
 }
 
 echo "[runsweep] running ${#APPS[@]} applications"
@@ -592,6 +716,16 @@ unshare -r rm -rf "$OUT/ov" 2>/dev/null || rm -rf "$OUT/ov"
     echo "-- the ones that succeed while doing nothing --"
     awk -F'\t' 'NR>1 && ($4=="SILENT_OK"||$4=="EMPTY_EFFECT"){printf "%-24s %s\n", $1, $4}' \
         "$OUT/results.tsv"
+    echo
+    # THE IDLE CENSUS, as a standing column. A program that PARKS and a program
+    # that SPINS are identical in every other field here -- same status, same
+    # output, same wall clock -- which is how the desktop came to sit at 203.6%
+    # of one cpu with every gate on this tree passing. >= 80% of its own wall
+    # clock in cpu, for at least a second, is a program that did not sleep.
+    echo "-- burned a core while it waited (cpu / wall >= 0.8) --"
+    awk -F'\t' 'NR>1 && $7 != "-" && $7+0 >= 1 && $6+0 > 0 && ($7+0)/($6+0) >= 0.8 {
+                    printf "%-24s %-14s cpu %6.1fs of %6.1fs wall\n", $1, $4, $7, $6 }' \
+        "$OUT/results.tsv" | sort -k4 -nr
 } > "$OUT/summary.txt"
 cat "$OUT/summary.txt"
 echo "[runsweep] results: $OUT/results.tsv"
