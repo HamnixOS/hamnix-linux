@@ -25,9 +25,10 @@
 #   narrow enough to tell those three cases apart.
 #
 #   A SLOW WRITER MUST NOT STALL A FAST ONE. Phase 2 runs the same 1 kHz beside
-#   a producer deliberately handing over 5.3 ms of audio every 40 ms -- an
-#   eighth of real time (`playtone <hz> <ms> <pause_ms>`). The slow stream's own
-#   tone comes out broken, which is what underfeeding sounds like and is not a
+#   a producer deliberately handing over 5.3 ms of audio every 10 ms -- about a
+#   third of real time, paced by a sleep rather than by the ring
+#   (`playtone <hz> <ms> <pause_ms>`). The slow stream's own tone comes out
+#   broken, which is what underfeeding sounds like and is not a
 #   defect. What is asserted is that the 1 kHz is CONTINUOUS through the whole
 #   window: measured as a 1 kHz band-energy envelope that never drops below a
 #   quarter of its median. That is the failure mode this whole design is
@@ -67,9 +68,9 @@ sleep 7
 echo '[audio_mix] device says:'
 cat /dev/audio
 sleep 3
-echo '[audio_mix] PHASE 2: the same 1 kHz beside a writer at 1/8 real time'
+echo '[audio_mix] PHASE 2: the same 1 kHz beside a writer at a third of real time'
 playtone 1000 3000 &
-playtone 300 3000 40 &
+playtone 300 1500 10 &
 sleep 9
 echo '[audio_mix] DONE'
 RC
@@ -124,19 +125,26 @@ segs = sorted(sorted(segs, key=lambda s: s[1] - s[0])[-3:])
 
 
 def bin_mag(seg, f0):
-    """Magnitude of `seg` at f0, by a Goertzel-equivalent single-bin DFT, and
-    the local noise floor beside it. Reported as a RATIO so it does not depend
-    on the window length or on QEMU's resampling gain."""
+    """Magnitude of `seg` at f0 by a single-bin DFT, and that magnitude AS A
+    FRACTION OF THE SEGMENT'S RMS.
+
+    The fraction is the number the assertions use, and it is deliberately not a
+    signal-to-noise ratio: the first draft of this gate divided by a `noise
+    floor` sampled at three nearby frequencies, and in a capture of two clean
+    square waves that floor is essentially zero -- so it reported the 1 kHz
+    tone at 2e8 over the floor AND the absent 300 Hz tone at 7.6e3 over it, and
+    no threshold can separate those two. A measurement whose scale is set by
+    numerical noise is not a measurement. Against the RMS the numbers are
+    bounded and mean something: a Hann-windowed single-bin DFT of a square wave
+    at its own fundamental lands near 0.64 of the RMS (4/pi for the square's
+    fundamental, halved by the window), and a frequency nothing is playing
+    lands near 0.001."""
     n = len(seg)
     t = np.arange(n) / sr
     win = np.hanning(n)
-    ref = np.abs(np.sum(seg * win * np.exp(-2j * np.pi * f0 * t))) / n
-    # the floor: the same measurement at frequencies that carry neither tone
-    # nor either tone's odd harmonics
-    off = [f0 * 0.72, f0 * 1.31, f0 * 1.62]
-    fl = np.median([np.abs(np.sum(seg * win * np.exp(-2j * np.pi * f * t))) / n
-                    for f in off])
-    return ref, (ref / fl if fl > 0 else float('inf'))
+    mag = 2.0 * np.abs(np.sum(seg * win * np.exp(-2j * np.pi * f0 * t))) / n
+    r = seg.std()
+    return mag, (mag / r if r > 0 else 0.0)
 
 
 def phase(i, name):
@@ -154,27 +162,29 @@ seg, _ = phase(0, "solo")
 m1k, r1k = bin_mag(seg, 1000.0)
 m300, r300 = bin_mag(seg, 300.0)
 solo_rms = seg.std()
-print("[audio_mix] phase 0 (1 kHz alone): 1000 Hz x%.1f over the floor, "
-      "300 Hz x%.1f, rms %.0f" % (r1k, r300, solo_rms))
-if r1k < 8:
+print("[audio_mix] phase 0 (1 kHz alone): 1000 Hz %.3f of rms, "
+      "300 Hz %.3f, rms %.0f" % (r1k, r300, solo_rms))
+if r1k < 0.30:
     fail.append("phase 0: the 1 kHz tone is not in the capture at all "
-                "(x%.1f over its own noise floor)" % r1k)
-if r300 > 4:
-    fail.append("phase 0: 300 Hz is x%.1f over the floor with nothing playing "
-                "it -- the control is not a control" % r300)
+                "(%.3f of the rms; a square wave's own fundamental is ~0.64)"
+                % r1k)
+if r300 > 0.05:
+    fail.append("phase 0: 300 Hz is %.3f of the rms with nothing playing it -- "
+                "the control is not a control" % r300)
 
 # --- PHASE 1: two programs, two tones, one capture -------------------
 seg, _ = phase(1, "mixed")
 m1k_x, r1k_x = bin_mag(seg, 1000.0)
 m300_x, r300_x = bin_mag(seg, 300.0)
 mix_rms = seg.std()
-print("[audio_mix] phase 1 (both):        1000 Hz x%.1f over the floor, "
-      "300 Hz x%.1f, rms %.0f" % (r1k_x, r300_x, mix_rms))
-if r1k_x < 8:
-    fail.append("phase 1: the 1 kHz tone is missing from the mix (x%.1f)" % r1k_x)
-if r300_x < 8:
-    fail.append("phase 1: the 300 Hz tone is missing from the mix (x%.1f) -- "
-                "the second program was not heard" % r300_x)
+print("[audio_mix] phase 1 (both):        1000 Hz %.3f of rms, "
+      "300 Hz %.3f, rms %.0f" % (r1k_x, r300_x, mix_rms))
+if r1k_x < 0.20:
+    fail.append("phase 1: the 1 kHz tone is missing from the mix (%.3f of the "
+                "rms)" % r1k_x)
+if r300_x < 0.20:
+    fail.append("phase 1: the 300 Hz tone is missing from the mix (%.3f of the "
+                "rms) -- the second program was not heard" % r300_x)
 # Neither may have swamped the other: a device that simply handed the card to
 # whichever process wrote last would show one bin and a floor at the other.
 if m1k_x > 0 and m300_x > 0:
@@ -200,14 +210,14 @@ if len(seg) > 3 * k:
     seg = seg[k:-k]
 m1k_s, r1k_s = bin_mag(seg, 1000.0)
 m300_s, r300_s = bin_mag(seg, 300.0)
-print("[audio_mix] phase 2 (fast+slow):   1000 Hz x%.1f over the floor, "
-      "300 Hz x%.1f" % (r1k_s, r300_s))
-if r1k_s < 8:
+print("[audio_mix] phase 2 (fast+slow):   1000 Hz %.3f of rms, "
+      "300 Hz %.3f" % (r1k_s, r300_s))
+if r1k_s < 0.20:
     fail.append("phase 2: the fast stream's 1 kHz is not in the capture beside "
-                "a slow writer (x%.1f)" % r1k_s)
-if r300_s < 3:
-    fail.append("phase 2: the slow writer is inaudible (x%.1f) -- underfed is "
-                "meant to be choppy, not silent" % r300_s)
+                "a slow writer (%.3f of the rms)" % r1k_s)
+if r300_s < 0.05:
+    fail.append("phase 2: the slow writer is inaudible (%.3f of the rms) -- "
+                "underfed is meant to be choppy, not silent" % r300_s)
 
 # CONTINUITY. Band-energy at 1 kHz in 40 ms hops. A stall shows up here and
 # nowhere else: a whole-window FFT of a tone with a 300 ms hole in it still has
