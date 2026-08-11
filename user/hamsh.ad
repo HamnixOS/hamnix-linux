@@ -116,6 +116,55 @@ extern def sys_nslabel(op: int32, label: Ptr[char], to_path: Ptr[char],
 extern def sys_get_jiffies() -> uint64
 extern def sys_yield() -> int32
 
+# THE PARK, and why a shell needs one.
+#
+# sys_waitpid_jc is non-blocking by contract, so every loop that waits on
+# it has to do something between polls. `sys_yield()` was that something,
+# and it is a BUSY SPIN: the task stays STATE_READY and burns a whole core
+# for as long as the child runs. `sleep 45` in the boot rc made PID 1 --
+# the shell itself -- sit at 100% for 45 seconds, and a build or a copy in
+# a terminal costs a second core for its whole duration. Nothing failed;
+# the fan just never stopped.
+#
+# sys_waitfds with nfds == 0 is this tree's portable sleep (lib/hamscreen.ad,
+# user/dhcpc.ad spell it the same way): the task parks OFF the runqueue for
+# the timeout. 10 ms is far below anything a person can perceive at a
+# prompt and drops the idle cost of waiting to nothing measurable.
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+SH_POLL_MS: int64 = 10
+
+# The cap on the INTERACTIVE idle park (see sh_park_stdin). A keystroke wakes
+# the park immediately -- this only bounds how long the heartbeat tick and the
+# service supervisor can be kept waiting when nobody is typing, and 100 ms is
+# far finer than either needs (the heartbeat's own cadence is ~3 s).
+SH_IDLE_MS: int64 = 100
+
+# Top-level BSS arrays, not frame locals: adder requires it, and sys_waitfds
+# never dereferences the first at nfds == 0.
+sh_park_fds: Array[1, int32]
+sh_stdin_fds: Array[1, int32]
+
+def sh_park():
+    sys_waitfds(&sh_park_fds[0], 0, SH_POLL_MS)
+
+
+def sh_park_stdin():
+    # The IDLE PROMPT park. A shell sitting at a prompt with nobody typing
+    # burned a whole core: ed_readline polls stdin with sys_read_nb and
+    # spun on sys_yield between polls. Measured on an idle desktop with one
+    # terminal open, that terminal's shell was in state R with 21 seconds of
+    # CPU in a 20-second window -- the single most expensive thing on the
+    # machine once the window system's own spin was fixed, and the one a user
+    # is most likely to have running.
+    #
+    # Parking on fd 0 keeps the non-blocking read loop exactly as it is (the
+    # heartbeat and the service supervisor still tick) and simply stops the
+    # shell being on the runqueue while it waits. Echo is if anything faster:
+    # a byte on stdin wakes the park at once instead of at the next rotation.
+    sh_stdin_fds[0] = 0
+    sys_waitfds(&sh_stdin_fds[0], 1, SH_IDLE_MS)
+
 # docs/security.md: Plan-9-shape identity syscalls. SYS_GETUID/GETGID
 # return current task's uid/gid. SYS_SETUID is privileged — only
 # hostowner (uid 1) can call it (the kernel rejects with -EPERM
@@ -11658,6 +11707,38 @@ def jobs_reap_and_report():
         j = j + 1
 
 
+def jobs_reap_quiet():
+    # THE ZOMBIE REAPER, and why it is separate from the reporter above.
+    #
+    # A process that has exited is a ZOMBIE until its parent waits on it.
+    # Background jobs were only ever waited on at a PROMPT — so on a boot
+    # where the rc is still running (`sleep`, a long install, a desktop
+    # session that never returns to the console) every finished background
+    # job sat in the table as a zombie for as long as that took. The idle
+    # census found two: the per-distribution `wsyswl` servers, exited and
+    # unreaped, on a desktop that had been up for a minute.
+    #
+    # This folds EXITED into JOB_DONE — which is what actually calls
+    # waitpid and frees the kernel's task_struct — and prints NOTHING.
+    # The `[n] Done cmd` notice still belongs at a prompt, and
+    # jobs_reap_and_report still delivers it there from the DONE state
+    # this leaves behind; interleaving it into the output of whatever
+    # command the shell is currently running would be its own defect.
+    st_word: Array[1, int64]
+    j: uint64 = 0
+    while j < JOBS_MAX:
+        if job_state[j] == JOB_RUNNING:
+            r: int64 = sys_waitpid_jc(job_pid[j], &st_word[0])
+            if r > 0:
+                kind: int64 = st_word[0] & 0xFF
+                if kind == WAITJC_EXITED:
+                    job_code[j]  = cast[int32]((st_word[0] >> 8) & 0xFF)
+                    job_state[j] = JOB_DONE
+                elif kind == WAITJC_STOPPED:
+                    job_state[j] = JOB_STOPPED
+        j = j + 1
+
+
 def _job_wait_foreground(slot: uint64) -> int32:
     # Give the terminal to the EXISTING job's group, then poll it to
     # completion OR until it stops (Ctrl-Z → SIGTSTP). Returns the exit
@@ -11681,7 +11762,10 @@ def _job_wait_foreground(slot: uint64) -> int32:
                 write_cstr1("\n")
                 _job_report_line(slot, "Stopped")
                 break
-        sys_yield()
+        # PARK, do not spin: see SH_POLL_MS. `fg`-ing a long job used to
+        # cost a whole core for as long as the job ran.
+        jobs_reap_quiet()
+        sh_park()
     # Reclaim the controlling terminal for the shell (pgid 1).
     sys_tcsetpgrp(1)
     return rc
@@ -11737,7 +11821,11 @@ def launch_foreground_pid(pid: int32) -> int32:
                     _job_report_line(su, "Stopped")
                 rc = 0
                 break
-        sys_yield()
+        # PARK, do not spin. THIS is the line that made PID 1 burn a core
+        # for the whole of `sleep 45` in the boot rc, and a terminal's
+        # shell burn one for the whole of any command run in it.
+        jobs_reap_quiet()
+        sh_park()
     sys_tcsetpgrp(1)
     return rc
 
@@ -16408,7 +16496,7 @@ def ed_readline() -> int64:
             # and fire any restart-due transitions. Non-blocking; cheap
             # when the table is empty (zero-svc_count fast-path).
             svc_supervisor_tick()
-            sys_yield()
+            sh_park_stdin()
             continue
         c: uint8 = rb[0]
         # Any byte other than Tab ends a consecutive-Tab run, so the

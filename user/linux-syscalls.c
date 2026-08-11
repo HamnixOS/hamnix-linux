@@ -1121,13 +1121,68 @@ int32_t sys_socketpair(int32_t domain, int32_t type, int32_t protocol,
 #define RFFDG    0x0004   /* copy the fd group */
 #define RFNAMEG  0x0008   /* copy (privatise) the namespace */
 #define RFCNAMEG 0x0080   /* start with an EMPTY namespace */
+#define RFNOWAIT 0x0100   /* detach: the parent never reaps this child */
 
 /* Defined with the namespace verbs below: acquire CAP_SYS_ADMIN over our own
  * mounts by creating a user namespace we own. */
 static int ns_privilege(void);
 
+/* ------------------------------------------------------------------ *
+ * RFNOWAIT, and the zombies it left
+ *
+ * lib/p9.ad's spawn_detached is the tree's fire-and-forget launcher -- the DE
+ * chime, the panel's menu launches, the file manager's editor. Its contract
+ * (lib/p9.ad:428) is that "RFNOWAIT severs the parent link at creation, so the
+ * child is published as a DETACHED zombie on exit and the kernel's
+ * reap_orphan_zombies() (run at every fork) reclaims it -- no wait4 needed."
+ *
+ * This port ignored the flag outright, so there was no reaper and no severed
+ * link: every detached spawn left a permanent zombie under a parent that would
+ * never wait for it. The idle census found `aplay` -- hamdesktop's boot chime,
+ * exited in a second, still on the process table a minute later.
+ *
+ * The faithful port is the reaper, not a double fork. A double fork would sever
+ * the link but reparent the grandchild onto PID 1, moving the same zombie onto
+ * hamsh and losing the pid the caller is handed back. Instead the runtime
+ * REMEMBERS which children were detached and waits on THOSE, and only those --
+ * so no other child's exit status can ever be stolen from the code that is
+ * waiting for it, which is the failure a blanket waitpid(-1) drain would risk.
+ *
+ * "Run at every fork" is ported literally, plus every idle park: a program like
+ * hamdesktop fires one chime and may never spawn again, but it parks in
+ * sys_waitfds constantly, so that is where its detached child is reclaimed.
+ * ------------------------------------------------------------------ */
+#define DETACHED_MAX 64
+static pid_t detached_pid[DETACHED_MAX];
+static int   detached_n;
+
+static void detached_remember(pid_t p)
+{
+    if (detached_n < DETACHED_MAX) {
+        detached_pid[detached_n++] = p;
+        return;
+    }
+    /* Full. Reap what we can and drop the oldest rather than growing without
+     * bound -- an unreclaimed slot costs one zombie, a leak costs the table. */
+    detached_n = 0;
+}
+
+void reap_detached(void)
+{
+    for (int i = 0; i < detached_n; ) {
+        int st;
+        pid_t r;
+        do {
+            r = waitpid(detached_pid[i], &st, WNOHANG);
+        } while (r < 0 && errno == EINTR);
+        if (r == 0) { i++; continue; }          /* still running */
+        detached_pid[i] = detached_pid[--detached_n];   /* gone, or not ours */
+    }
+}
+
 int32_t sys_rfork(int32_t flags)
 {
+    reap_detached();                            /* "run at every fork" */
     if (flags & RFMEM) {
         errno = ENOSYS;     /* that is sys_rfork_thread's job — HANDOFF §7.5 */
         return -ENOSYS;
@@ -1206,6 +1261,10 @@ int32_t sys_rfork(int32_t flags)
          * that opens /fd/N must wait rather than fall back to what it
          * inherited. See user/linux-fdns.c. */
         fdns_after_fork_parent((int32_t)pid);
+        /* RFNOWAIT: the caller has promised never to wait for this one, so
+         * the runtime takes on the obligation. See RFNOWAIT above. */
+        if (flags & RFNOWAIT)
+            detached_remember(pid);
     }
     if (pid == 0) {
         /* The child inherits the parent's fifo KEEPER descriptors (see
@@ -2066,26 +2125,136 @@ int32_t sys_setuid_auth(int32_t authfd)
  *
  * Multi-fd readiness wait — the GUI event loop's idle wait. Returns the
  * number of ready fds, 0 on timeout, -1 on error. poll(2) is the direct
- * equivalent; the caller only ever asks about readability. */
+ * equivalent; the caller only ever asks about readability.
+ *
+ * BUT A SYNTHETIC-DEVICE FD IS NOT A POLLABLE THING, and handing one to
+ * poll(2) is why an idle desktop burned both CPUs.
+ *
+ * devtab_open backs every /dev/wsys, /net, /dev/fb, /dev/audio and /dev/snarf
+ * open with a real descriptor on /dev/null -- a genuine fd table slot that
+ * survives fork and cannot collide, with the actual state in the table beside
+ * it. That is right for read/write/close and catastrophic for poll: /dev/null
+ * is ALWAYS readable, so `poll` returned "ready" the instant it was called,
+ * every time, for every caller.
+ *
+ * Every parking event loop on this system is therefore a busy spin, including
+ * the two written specifically not to be: hamdesktop parks on its /event fd
+ * with a 250 ms timeout, hampanelscene on up to four with 16 ms, both with
+ * comments explaining that this is what keeps an idle desktop near 0% CPU.
+ * Measured, they each held a core at 100% in state R with nothing on screen,
+ * and the panel's own CPU widget reported it faithfully.
+ *
+ * So the fds are SORTED by what they actually are:
+ *
+ *   a /dev/wsys event ring — readiness is "the ring has bytes", and the sleep
+ *     is a futex on an input generation counter in the shared segment, poked
+ *     by whichever process writes a ring (THE PARK in user/linux-wsys.c). This
+ *     is the faithful stand-in for devwsys's waitfds_notify: a keystroke wakes
+ *     the park immediately, and an idle desktop performs no wakeups at all.
+ *   a /net file — poll the REAL socket underneath it (hamnet_sockfd), which is
+ *     what the caller meant. dhcpc waited on one of these and spun.
+ *   an ordinary fd — poll(2), unchanged.
+ *   any other synthetic device — a snapshot read, ready by definition. Counted
+ *     ready without sleeping, which is what the old code did by accident and
+ *     is the only reason that bug was survivable.
+ *
+ * nfds == 0 is a plain sleep, and stays one. */
 #define WAITFDS_MAX 64
 int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
 {
     fdns_gate_release();
-    struct pollfd pfd[WAITFDS_MAX];
+    /* The idle park is also where a detached child is reclaimed. hamdesktop
+     * fires the boot chime once and may never spawn again, so "reap at every
+     * fork" alone would leave that zombie forever. See RFNOWAIT above. */
+    reap_detached();
     if (nfds > WAITFDS_MAX) {
         errno = EINVAL;
         return -1;
     }
+
+    struct pollfd pfd[WAITFDS_MAX];
+    nfds_t npoll = 0;
+    struct devfile *ring[WAITFDS_MAX];
+    int nring = 0;
+    int always_ready = 0;
+
     for (uint64_t i = 0; i < nfds; i++) {
-        pfd[i].fd = fds[i];
-        pfd[i].events = POLLIN;
-        pfd[i].revents = 0;
+        struct devfile *v = devtab_find((int)fds[i]);
+        if (v && v->isw && hamwsys_is_ring(&v->w)) {
+            ring[nring++] = v;
+        } else if (v && v->isnet) {
+            int s = hamnet_sockfd(&v->nf);
+            if (s < 0) { always_ready++; continue; }
+            pfd[npoll].fd = s;
+            pfd[npoll].events = POLLIN;
+            pfd[npoll].revents = 0;
+            npoll++;
+        } else if (v) {
+            always_ready++;                    /* a snapshot device */
+        } else {
+            pfd[npoll].fd = fds[i];
+            pfd[npoll].events = POLLIN;
+            pfd[npoll].revents = 0;
+            npoll++;
+        }
     }
-    int r;
-    do {
-        r = poll(pfd, (nfds_t)nfds, (int)timeout_ms);
-    } while (r < 0 && errno == EINTR);
-    return r < 0 ? -1 : (int64_t)r;
+
+    /* No ring in the set: poll(2) answers it, and always_ready short-circuits
+     * the sleep exactly as the old code did. */
+    if (nring == 0) {
+        if (always_ready) {
+            int r = 0;
+            if (npoll) {
+                do { r = poll(pfd, npoll, 0); } while (r < 0 && errno == EINTR);
+                if (r < 0) r = 0;
+            }
+            return (int64_t)(r + always_ready);
+        }
+        int r;
+        do {
+            r = poll(pfd, npoll, (int)timeout_ms);
+        } while (r < 0 && errno == EINTR);
+        return r < 0 ? -1 : (int64_t)r;
+    }
+
+    /* At least one ring. Sleep in the futex, waking to re-check both the rings
+     * and any ordinary fds. Deadline arithmetic is done in milliseconds against
+     * CLOCK_MONOTONIC so a wake that finds nothing ready does not restart the
+     * caller's timeout — which would turn a 16 ms park into an unbounded one. */
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    int64_t start = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+
+    for (;;) {
+        /* Read the generation BEFORE checking readiness: a ring written
+         * between the check and the futex wait must bump it and be seen as a
+         * mismatch, not slept through. */
+        uint32_t seen = hamwsys_input_gen();
+
+        int ready = always_ready;
+        for (int i = 0; i < nring; i++)
+            if (hamwsys_ring_ready(&ring[i]->w)) ready++;
+        if (npoll) {
+            int r;
+            do { r = poll(pfd, npoll, 0); } while (r < 0 && errno == EINTR);
+            if (r > 0) ready += r;
+        }
+        if (ready) return (int64_t)ready;
+
+        int64_t left = -1;
+        if (timeout_ms >= 0) {
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t elapsed = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000
+                              - start;
+            left = timeout_ms - elapsed;
+            if (left <= 0) return 0;
+        }
+        /* An ordinary fd mixed in with a ring cannot be futex-woken, so cap
+         * the sleep and re-poll it. Mixing is rare (nothing in the tree does it
+         * today); the cap keeps it correct rather than fast. */
+        if (npoll && (left < 0 || left > 20)) left = 20;
+        hamwsys_input_wait(seen, left);
+    }
 }
 
 /* extern def sys_openchan(path: Ptr[char], write: int32) -> int32

@@ -1,13 +1,37 @@
 # user/sleep.ad
 #
-# Hamnix `sleep N`: busy-waits N seconds against the 100Hz jiffies
-# counter. There's no nanosleep yet, so we spin in user mode reading
-# sys_get_jiffies — the scheduler still preempts us on the timer
-# tick, so other tasks make forward progress.
+# `sleep N` — PARK for N seconds against the 100Hz jiffies counter.
+#
+# THIS USED TO BE A BUSY-WAIT, and it was the single largest consumer of
+# CPU on an idle machine. The comment that stood here said "there's no
+# nanosleep yet, so we spin in user mode reading sys_get_jiffies", and
+# then a later fix added a sys_yield() to the spin so peers would not be
+# starved. Both are true statements about a spin and neither makes it stop
+# being one: the task stays STATE_READY for the whole duration and holds a
+# core.
+#
+# What it cost, measured. With the desktop up and nothing else running, a
+# text-only boot whose entire workload was PID 1 executing `sleep`, the
+# host's QEMU vCPU thread sat at 95.2% — with `ps` inside the guest showing
+# every process at 0:00, because the spinner is a short-lived child that
+# exists only between the two samples. It is what remained after the
+# window-system park was fixed (see sys_waitfds in user/linux-syscalls.c),
+# and it is why every rc script's `sleep 4` costs a core for four seconds.
+#
+# sys_waitfds with nfds == 0 is this tree's portable sleep — lib/hamscreen.ad
+# and user/dhcpc.ad already spell it exactly this way — and it parks the task
+# OFF the runqueue on both kernels. The jiffies DEADLINE stays, so a short or
+# spurious wake cannot end the sleep early: the park is the mechanism, the
+# tick count is still the contract.
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_get_jiffies() -> uint64
-extern def sys_yield() -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+
+# A top-level BSS array, not a frame local: adder requires it, and
+# sys_waitfds never dereferences it at nfds == 0.
+park_fds: Array[1, int32]
 
 
 def strlen_u8(s: Ptr[uint8]) -> uint64:
@@ -48,16 +72,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # within the run window.
     start: uint64 = sys_get_jiffies()
     target: uint64 = cast[uint64](secs) * 100
-    while sys_get_jiffies() - start < target:
-        # COOPERATIVE YIELD (DE launch-queue / detached-client fix).
-        # Hamnix multitasks cooperatively and ring-3 timer preemption is
-        # not reliable enough to rotate a task that never blocks (see the
-        # SYS_YIELD note in arch/x86/kernel/syscall.ad). A bare spin here
-        # therefore MONOPOLIZES the CPU for the whole sleep: the DE's
-        # `sleep 6` (the visual-gate runner, and any launch chain that
-        # sleeps between spawns) starved every other rl5 scene client, so
-        # the window-mapping apps (hamdesktop / hampanelscene / …) never got
-        # the CPU to newwindow — 0 windows, blank desktop. Yield each pass so
-        # peers run while we wait out the tick budget.
-        sys_yield()
+    while True:
+        done: uint64 = sys_get_jiffies() - start
+        if done >= target:
+            break
+        # Park for what is LEFT, in milliseconds. 10 ms per jiffy at 100 Hz.
+        # A woken-early park just re-measures and parks again, so the
+        # deadline above remains the only thing that ends the sleep — the
+        # DE launch chain that this used to starve is now not competing for
+        # the CPU at all rather than politely taking turns for it.
+        left: int64 = cast[int64](target - done) * 10
+        sys_waitfds(&park_fds[0], 0, left)
     return 0
