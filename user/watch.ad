@@ -14,9 +14,14 @@
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_waitpid(pid: int32) -> int64
 extern def sys_get_jiffies() -> uint64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 
 
 from lib.p9 import spawn
+
+# A top-level BSS array, not a frame local: adder requires it, and
+# sys_waitfds never dereferences it at nfds == 0.
+watch_park_fds: Array[1, int32]
 
 def strlen_u8(s: Ptr[uint8]) -> uint64:
     n: uint64 = 0
@@ -43,13 +48,34 @@ def parse_int(s: Ptr[uint8]) -> int64:
     return n
 
 
+# THE GAP BETWEEN RUNS IS A PARK, NOT A SPIN.
+#
+# This was `while sys_get_jiffies() - start < target: pass` -- the exact
+# busy-wait THE IDLE CENSUS (HANDOFF §0) found in user/sleep.ad and fixed
+# there, left behind here. `watch -n 5 CMD` held a core for five seconds out
+# of every five, on a program whose entire purpose is to sit idle between two
+# runs of something else.
+#
+# It was invisible for the same reason the census was: a spin and a park have
+# the same exit status, the same output and the same wall clock. The run
+# sweep's cpu column caught it on its first run -- `watch -n 1 /bin/uptime`,
+# cpu 1.0s of 1.0s wall.
+#
+# sys_waitfds with nfds == 0 is this tree's portable sleep and parks the task
+# OFF the runqueue on both kernels; the jiffies DEADLINE stays, so a short or
+# spurious wake cannot shorten the interval. Identical in shape to sleep.ad's,
+# deliberately: the same wait should not be spelled two ways.
 def sleep_seconds(secs: int64):
     if secs <= 0:
         return
     start: uint64 = sys_get_jiffies()
     target: uint64 = cast[uint64](secs) * 100        # 100 Hz tick
-    while sys_get_jiffies() - start < target:
-        pass
+    while True:
+        done: uint64 = sys_get_jiffies() - start
+        if done >= target:
+            break
+        left: int64 = cast[int64](target - done) * 10     # 10 ms per jiffy
+        sys_waitfds(&watch_park_fds[0], 0, left)
 
 
 # argv we forward to the child — slot 0 = CMD path, slots 1..N = extra

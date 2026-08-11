@@ -311,7 +311,7 @@ od	filter	-	%F	hex dump of stdin, 16 bytes/line, lowercase, space-separated, no 
 oopsread	cmd	-	-	opens /proc/oops and renders the structured kernel panic record from the last boot
 p9srv_demo	hosttest	-	-	minimal userspace 9P2000 server fixture speaking T/R-messages over stdin/stdout, not rio
 panelclock_host	hosttest	OUT.ppm 0	-	host-only clock applet renderer; writes a fixed-epoch clock scene as a PPM, no sockets/Plan9
-passwd	cmd	-	newpass123\nnewpass123	changes current user's password via /dev/auth setpass verb; prompts twice with no local echo
+passwd	cmd	live	newpass123\nnewpass123	changes current user's password via /dev/auth setpass verb; prompts twice with no local echo
 paste	cmd	%F %F2	-	column-merge corresponding lines of FILE args joined by TAB delimiter; not a stdin filter
 patch	cmd	--dry-run %F	-	apply a unified/normal diff to a target file; --dry-run verifies only, changes nothing
 pathchk	cmd	%F	-	check PATH operands are valid usable file names (length/empty checks); exit 1 if any fails
