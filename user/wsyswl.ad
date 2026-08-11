@@ -1636,10 +1636,17 @@ def x_defer_push():
     xdefer_n = xdefer_n + 1
 
 
+# A ROUND TRIP HERE STOPS THE WHOLE COMPOSITOR, which is why the budget is a
+# second and not the five xsnarfd allows itself. Everything this waits for is a
+# local X server answering GetProperty or InternAtom, so a second is already
+# generous; and losing the race costs a TITLE or a property fallback, never a
+# window -- the association itself arrives as a ClientMessage and waits for
+# nothing. A compositor that blocks for five seconds because an X server is
+# busy is a desktop that stutters for reasons no counter would explain.
 def x_await(seq: uint32) -> int32:
-    budget: int32 = 50                          # 50 x 100 ms = five seconds
+    budget: int32 = 20                          # 20 x 50 ms = one second
     while budget > 0:
-        r: int32 = x_poll_msg(100)
+        r: int32 = x_poll_msg(50)
         if r < 0:
             return 0
         if r == 0:
@@ -2271,7 +2278,16 @@ def xwm_pump():
             xwm_retry = 0
             xwm_connect()
         return
-    while x_poll_msg(0) == 1:
+    # BOUNDED, because this is the compositor's frame loop. An X server with
+    # something to say every microsecond -- a client resizing in a tight loop,
+    # or a broken one -- would otherwise hold this `while` for ever and every
+    # WAYLAND client on the server would stop being served, which is a
+    # compositor-wide freeze caused by one X display. 256 messages is far more
+    # than a frame's worth; whatever is left is read on the next pass, 16 ms
+    # later, and nothing is dropped.
+    n: int32 = 0
+    while n < 256 and x_poll_msg(0) == 1:
+        n = n + 1
         if xin[0] >= 2:
             xwm_event()
         elif xin[0] == 0:
