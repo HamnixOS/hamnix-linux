@@ -189,6 +189,80 @@ same failure this project exists to beat.
   is a separate one baked into its image, and the two share their two
   hardest-won lines by copy. Worth merging when there is a third.
   `docs/linux_distro_namespaces.md` §7.
+* **The GPU backend has never been measured on a real GPU.** It is proven
+  correct and proven to install; every microsecond quoted anywhere is
+  lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
+  rasterizer, which is why the default is gated on the device being silicon.
+  venus does not come up on this dev host (the NVIDIA driver's GBM backend
+  cannot create a device; wants `nvidia-drm.modeset=1` and a reboot).
+* **The wsys window table is still world-writable, though the chrome is not.**
+  `/dev/wsys` was one 0666 segment, so a program that mmapped `/srv/wsys`
+  directly bypassed the uid gate entirely — measured: as uid 1001 it
+  overwrote the `lock` chrome sink and the protocol read the new value back.
+  The chrome now lives in a second segment, `/srv/wsys.chrome`, 0644 and owned
+  by the host owner, so the same program is refused by the KERNEL (`open`
+  `O_RDWR` → EACCES, no `PROT_WRITE|MAP_SHARED`, `mprotect` refused) while
+  still reading it PROT_READ, which is what keeps the session sighted.
+  `tests/linux/wsys_bypass.sh`. What remains open is the window table, which
+  must stay 0666 or an unprivileged client cannot map its own window: a
+  bypasser can still retitle another client's window or scribble its scene.
+  Closing that needs a mapping per owner-uid or the table behind an RPC to
+  wsysd — a different change, and the test asserts the hole so it cannot be
+  forgotten.
+* **Every `http9` caller must size its buffer for the WHOLE response, and
+  three shipped programs do not.** `http9.http_get`'s `dst_cap` covers status
+  line + headers + body, and it returns `-6` — discarding the status — the
+  moment the response reaches it. That is what made `hpm` unable to fetch a
+  129-byte signature behind 640 bytes of CDN headers into a 512-byte buffer,
+  for the whole life of the repository. `hpm` is safe on every path now;
+  `curl`, `wget` and `hambrowse` share the same edge and were not audited. A
+  small response from a chatty server is the case that breaks, which is why it
+  survived: the obvious local test server sends 203-byte headers and never
+  reproduces it.
+
+* **The 4-stream software mixer is not ported.** An ALSA hardware substream
+  has one writer, so `stream`/`mixplay` return `-EINVAL` and
+  `user/audiolife.ad` will not do here what it does on Hamnix. The status
+  line's `streams 100 100 100 100` is a placeholder. Capture *content* is
+  also unverifiable in an automated run — QEMU's only host-free input backend
+  is silence — and the card is not ready for ~2 s after boot.
+* The run-sweep score is **261 healthy / 325 runnable**, and it is now a
+  MEASURED number rather than a floor: the full sweep was re-run end to end
+  under the 12 s GUI timeout, so the ~85 unre-measured GUI rows are settled
+  and `wakelat_echo` and `hamgame_mixer_demo` are examined. The score the
+  sweep prints is also the score it computes — `summary.txt` has a `headline`
+  block with the definition beside it (`healthy = RAN + DREW_WINDOW +
+  STAYS_UP + EXPECTED_FAIL`; `runnable` = rows minus NOT_SMOKE_TESTABLE minus
+  BUILD_FAIL), because the previous figure was derived by hand into a commit
+  message and its denominator was simply wrong.
+  **The measured baseline before this pass was 249 / 325**, not 249/323: the
+  healthy count was right, the denominator was not, and one program
+  (`arecord`) has been added to `user/` since. `+12`, reconciling exactly:
+  five rows are the harness no longer calling a correct program broken
+  (`false`, `cmp`, `diff`, `tty`, `kill` — a non-zero exit that IS the answer
+  is now `EXPECTED_FAIL`); three are a recipe bug (`mktemp`, `route`, `pr`
+  were being handed a literal `-` argument borrowed from the stdin column);
+  three are timeouts that were killing bounded programs a second before they
+  printed (`nice_lo`, `wakelat_hog`, `preempt_hog`); two are `SILENT_OK` rows
+  that now report what they did (`hamgame_mixer_demo`, `hamnotify`); one is a
+  real crash fixed (`hxd`); and **two go the other way for the right reason**
+  — `login` and, through it, `getty`, which used to exit 0 when the login
+  prompt hit end-of-input, reporting a session that was never established.
+  Zero `SILENT_OK`, zero `EMPTY_EFFECT`, zero `CRASH` remain. The two
+  remaining `TIMEOUT`s (`wakelat`, `sysirqprobe`) both print a named FAIL
+  about `/proc/self/ctl` before they run long, so they are honest.
+  Both `results.tsv` files are kept, under
+  `/home/david/.hamnix-build/sweep-a4b04e0f/{BASELINE,AFTER}-preserved/` —
+  **not** `/tmp`, which is a 16 GB tmpfs and is where a previous pass's
+  baseline went during a disk-full cleanup, leaving its before/after resting
+  on a figure it had not measured.
+
+#### Solved, kept because the shape is the lesson
+
+These are FIXED and measured. They stay because each is a worked example of
+the failure this project keeps having — an answer shaped like success — and
+the shape is more reusable than the fix. They are NOT open work.
+
 * **THE FOURTH FAULT OF THAT FAMILY IS FIXED, and it took the unprivileged
   half of the D-Bus gap with it. `$XDG_RUNTIME_DIR` is now `/run/user/1001`,
   0700, owned by the session user.** §8.5 named three — a mount point in the
@@ -234,26 +308,6 @@ same failure this project exists to beat.
   The `/tmp` half of it was already fixed: the generated `/etc/rc.distros`
   clears root-owned `*.log` / `*.err` left in a distribution's sticky `/tmp` by
   a root-run session, by class rather than by a list of three literal names.
-* **The GPU backend has never been measured on a real GPU.** It is proven
-  correct and proven to install; every microsecond quoted anywhere is
-  lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
-  rasterizer, which is why the default is gated on the device being silicon.
-  venus does not come up on this dev host (the NVIDIA driver's GBM backend
-  cannot create a device; wants `nvidia-drm.modeset=1` and a reboot).
-* **The wsys window table is still world-writable, though the chrome is not.**
-  `/dev/wsys` was one 0666 segment, so a program that mmapped `/srv/wsys`
-  directly bypassed the uid gate entirely — measured: as uid 1001 it
-  overwrote the `lock` chrome sink and the protocol read the new value back.
-  The chrome now lives in a second segment, `/srv/wsys.chrome`, 0644 and owned
-  by the host owner, so the same program is refused by the KERNEL (`open`
-  `O_RDWR` → EACCES, no `PROT_WRITE|MAP_SHARED`, `mprotect` refused) while
-  still reading it PROT_READ, which is what keeps the session sighted.
-  `tests/linux/wsys_bypass.sh`. What remains open is the window table, which
-  must stay 0666 or an unprivileged client cannot map its own window: a
-  bypasser can still retitle another client's window or scribble its scene.
-  Closing that needs a mapping per owner-uid or the table behind an RPC to
-  wsysd — a different change, and the test asserts the hole so it cannot be
-  forgotten.
 * **~~`hamscene_image` renders a hole, on every image in the system.`~~ FIXED.**
   The `'I'` named-image upload is ported: devwsys's #128 scene image tier — 16
   slots, 256×256, 31-byte names, keyed by (owning wid, name), replace on
@@ -296,49 +350,6 @@ same failure this project exists to beat.
   share `/srv` with the session, which would give it a private window system —
   the failure shape `shm_attach` already names. It is a launch/namespace
   question, not an image one.
-* **The 4-stream software mixer is not ported.** An ALSA hardware substream
-  has one writer, so `stream`/`mixplay` return `-EINVAL` and
-  `user/audiolife.ad` will not do here what it does on Hamnix. The status
-  line's `streams 100 100 100 100` is a placeholder. Capture *content* is
-  also unverifiable in an automated run — QEMU's only host-free input backend
-  is silence — and the card is not ready for ~2 s after boot.
-* The run-sweep score is **261 healthy / 325 runnable**, and it is now a
-  MEASURED number rather than a floor: the full sweep was re-run end to end
-  under the 12 s GUI timeout, so the ~85 unre-measured GUI rows are settled
-  and `wakelat_echo` and `hamgame_mixer_demo` are examined. The score the
-  sweep prints is also the score it computes — `summary.txt` has a `headline`
-  block with the definition beside it (`healthy = RAN + DREW_WINDOW +
-  STAYS_UP + EXPECTED_FAIL`; `runnable` = rows minus NOT_SMOKE_TESTABLE minus
-  BUILD_FAIL), because the previous figure was derived by hand into a commit
-  message and its denominator was simply wrong.
-  **The measured baseline before this pass was 249 / 325**, not 249/323: the
-  healthy count was right, the denominator was not, and one program
-  (`arecord`) has been added to `user/` since. `+12`, reconciling exactly:
-  five rows are the harness no longer calling a correct program broken
-  (`false`, `cmp`, `diff`, `tty`, `kill` — a non-zero exit that IS the answer
-  is now `EXPECTED_FAIL`); three are a recipe bug (`mktemp`, `route`, `pr`
-  were being handed a literal `-` argument borrowed from the stdin column);
-  three are timeouts that were killing bounded programs a second before they
-  printed (`nice_lo`, `wakelat_hog`, `preempt_hog`); two are `SILENT_OK` rows
-  that now report what they did (`hamgame_mixer_demo`, `hamnotify`); one is a
-  real crash fixed (`hxd`); and **two go the other way for the right reason**
-  — `login` and, through it, `getty`, which used to exit 0 when the login
-  prompt hit end-of-input, reporting a session that was never established.
-  Zero `SILENT_OK`, zero `EMPTY_EFFECT`, zero `CRASH` remain. The two
-  remaining `TIMEOUT`s (`wakelat`, `sysirqprobe`) both print a named FAIL
-  about `/proc/self/ctl` before they run long, so they are honest.
-  Both `results.tsv` files are kept, under
-  `/home/david/.hamnix-build/sweep-a4b04e0f/{BASELINE,AFTER}-preserved/` —
-  **not** `/tmp`, which is a 16 GB tmpfs and is where a previous pass's
-  baseline went during a disk-full cleanup, leaving its before/after resting
-  on a figure it had not measured.
-
-#### Solved, kept because the shape is the lesson
-
-These are FIXED and measured. They stay because each is a worked example of
-the failure this project keeps having — an answer shaped like success — and
-the shape is more reusable than the fix. They are NOT open work.
-
 * **The environment DOES cross `enter`; the drop is an `exec` one level up.**
   §8.5 recorded, unmeasured, that `enter` against an `ns clean { }` template
   rforks with `RFCNAMEG` and so "the environment does not appear to cross".
