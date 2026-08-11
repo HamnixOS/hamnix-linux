@@ -64,7 +64,22 @@ matching public key, so `hpm update` verifies before it trusts a single hash.
 
 ## 2. What did NOT work, and what each one costs
 
-### 2a. `hpm refresh` refuses `https://255.one/` with no flags
+### 2a. `hpm refresh` refuses `https://255.one/` with no flags — FIXED
+
+**This now works, with no flags at all**, and the sentence this section used
+to end with — "the fix is a publish, not a patch" — was half right, which is
+the interesting part. `tests/linux/hpm_signed_refresh.sh`, in a VM, against
+the live repository:
+
+```
+hpm: fetching channel linux from https://255.one/linux/
+hpm:   (97 packages)
+hpm: refreshed index from https://255.one/ (97 packages across 1 channels)
+hpm: resolved 2 package(s): hamnix-init@1.0.8, hamnix-diff@1.0.8
+hpm: SHA-256 verified ... installed
+```
+
+What this section originally recorded:
 
 ```
 hpm: fetching channel linux from https://255.one/linux/
@@ -73,17 +88,46 @@ hpm: no index.json.sig for this channel (unsigned repo).
 hpm: refresh: aborting — untrusted index for channel linux
 ```
 
-`https://255.one/linux/index.json.sig` is **404**, and so is
-`https://255.one/main/index.json.sig`. hpm is right to refuse — an unsigned
-index is a MITM's index — but the owner's command, typed exactly, does not
-work today on any machine, live or installed. The index itself fetches fine
-over TLS; only the signature is missing.
+The publish happened (channel `linux`, 1.0.8, signed; the trust root was
+rotated to a key whose secret exists, `6607d729`) **and the client still
+refused**, with the same four lines plus `hpm: HTTP fetch failed` in front of
+them. The remaining half was a patch, and the message above is what hid it for
+as long as it hid it:
 
-**The fix is a publish, not a patch.** `scripts/hpm_sign.py sign <index.json>
-<secret> <index.json.sig>` produces it; the secret is the repository
-operator's and the matching public key is already compiled into `hpm`
-(`etc/hpm/trusted.pub`). Until then a machine needs `--allow-unsigned`, which
-is what the gate uses for the 255.one half so the rest can be measured.
+* `fetch_to_buf` hands its destination buffer straight to `http9.http_get`,
+  whose `dst_cap` covers the **status line + headers + body**; http9 returns
+  `-6` the moment the response reaches `dst_cap`. The signature buffer was
+  **512 bytes**. GitHub Pages puts **640 bytes of headers** in front of the
+  129-byte signature. 640 + 129 > 512, so the signature fetch failed on
+  exactly the server whose 50 KB `index.json` — into a 256 KB buffer — had
+  succeeded seconds earlier. Nothing about TLS, a reused connection, or the
+  repository was ever involved: the identical failure reproduces over **plain
+  HTTP** from a local server that merely pads its headers to 640 bytes.
+* And "unsigned repo" was a diagnosis the code had not earned. A fetch that
+  fails says nothing about whether a signature exists, and that advice sends
+  the operator to `--allow-unsigned`, which disables signature checking
+  permanently on a repository that is signed. hpm now distinguishes them: a
+  real **404** says the server answered 404 and suggests the flag; anything
+  else says it is a fetch failure and explicitly not evidence of an unsigned
+  repo, after a line naming the actual transport error ("response (headers +
+  body) exceeds the 512-byte receive buffer").
+
+The buffer is now 64 KiB — sized for the RESPONSE, not for the resource, and
+large enough to receive the **9,379-byte HTML 404 page** GitHub serves for a
+channel that genuinely has no signature, because a response that overruns the
+buffer loses the status code too and "404, unsigned" then cannot be told from
+"the fetch broke".
+
+Gates: `tests/linux/hpm_index_sig.sh` (7 checks, offline, ~15 s — it serves
+the bytes itself with a CDN-sized header block, and the pre-fix binary fails
+its first check over plain HTTP) and `tests/linux/hpm_signed_refresh.sh`
+(9 checks, in a VM, against the real repository, refresh **and** install).
+
+`scripts/hpm_sign.py sign <index.json> <secret> <index.json.sig>` is still
+what produces the signature; the secret is the repository operator's and the
+matching public key is compiled into `hpm` (`etc/hpm/trusted.pub`).
+`tests/linux/installed_update.sh` still passes `--allow-unsigned` for the
+255.one half and prints a NOTE about it; both can now go.
 
 ### 2b. `hpm` takes the installed machine's `/etc/rc.boot` — and removing it is worse
 
@@ -232,6 +276,23 @@ with the directory 0777 (sticky `/tmp` still protects it). **Not** a
 world-writable shared cache: the index is the root of trust for every package
 hash, so a copy any local user can rewrite is a privilege escalation against
 root's next `hpm install`. The gate now passes that arm.
+
+### 2e. The gate's `NEWVER` collides with whatever 255.one is serving
+
+`tests/linux/installed_update.sh` installs `hamnix-diff` from the live
+repository and then publishes a "newer build" to a local channel at
+`NEWVER`, which defaults to **1.0.8**. 255.one now serves 1.0.8 itself, so the
+first install already lands 1.0.8, the local channel offers the same version,
+`hpm update` correctly reports `upgraded=0`, and five checks fail — the bytes,
+the stamp, and their post-reboot repeats. Nothing is wrong with the update
+loop; the "newer" build was not newer.
+
+Measured both ways on 2026-08-11: default 1.0.8 → 31 PASS / 5 FAIL,
+`HAMLINUX_UPD_VERSION=1.0.9` → **36 PASS, 0 FAIL, exit 0**, including
+`iupd: PASS a bare 'hpm refresh' trusts https://255.one/` where that line used
+to be a NOTE. The default wants to become "one above whatever the live
+repository currently serves" — read from the index rather than hard-coded, so
+publishing to 255.one cannot silently fail somebody else's gate.
 
 ---
 

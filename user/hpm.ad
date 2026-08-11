@@ -540,6 +540,20 @@ fetch_path_scratch: Array[1536, uint8]
 # the authority adds <= ~270 bytes, so 2048 has comfortable headroom.
 fetch_url_buf: Array[2048, uint8]
 
+# Outcome of the LAST fetch_to_buf call, so a caller can tell "the server
+# answered 404, this resource is genuinely not there" from "the transfer
+# failed and we learned nothing about the resource". Before this existed the
+# signature check collapsed both into "unsigned repo", which is a diagnosis
+# the code had not earned — the same class of error as hamsh printing a fixed
+# CAP_SYS_ADMIN cause for an ENOENT.
+#   fetch_last_rc:      the http9 transport rc (0 = a complete response),
+#                       or one of the hpm-side codes below.
+#   fetch_last_status:  the HTTP status when fetch_last_rc == 0, else 0.
+FETCH_RC_OK:        int64 = 0
+FETCH_RC_PATH:      int64 = -20      # local path overflow / file read failed
+fetch_last_rc:      int64 = 0
+fetch_last_status:  int64 = 0
+
 
 def _build_full_url():
     # Compose "<scheme>://<host>[:<port>]<url_path_buf>" into
@@ -599,12 +613,18 @@ def _net9_put_dec_local(out: Ptr[uint8], pos: uint64, v: uint64) -> uint64:
 
 def fetch_to_buf(tail: Ptr[uint8], dst: Ptr[uint8],
                  dst_cap: uint64) -> int64:
+    fetch_last_rc = FETCH_RC_OK
+    fetch_last_status = 0
     if url_scheme == 2:
         if _build_file_path(&fetch_path_scratch[0], 1536, tail) != 0:
             write_str(2, "hpm: file path overflow\n")
+            fetch_last_rc = FETCH_RC_PATH
             return -1
-        return _file_read_path(cast[Ptr[char]](&fetch_path_scratch[0]),
-                               dst, dst_cap)
+        fr: int64 = _file_read_path(cast[Ptr[char]](&fetch_path_scratch[0]),
+                                    dst, dst_cap)
+        if fr < 0:
+            fetch_last_rc = FETCH_RC_PATH
+        return fr
     _build_url_path(tail)
     _build_full_url()
     status:   int64 = 0
@@ -612,18 +632,48 @@ def fetch_to_buf(tail: Ptr[uint8], dst: Ptr[uint8],
     body_len: uint64 = 0
     rc: int64 = http_get(&fetch_url_buf[0], dst, dst_cap,
                          &status, &body_off, &body_len)
+    fetch_last_rc = rc
     if rc < 0:
-        if rc == -2:
-            write_str(2, "hpm: connect/TLS failed for ")
+        # Name the transport failure. "HTTP fetch failed" for all of them
+        # is how a 641-byte header block overflowing a 512-byte buffer got
+        # read as "the repo is unsigned" for as long as it did.
+        write_str(2, "hpm: fetch of ")
+        write_str(2, &fetch_url_buf[0])
+        write_str(2, " failed: ")
+        if rc == -1:
+            write_str(2, "malformed URL\n")
+        elif rc == -2:
+            write_str(2, "connect/TLS failed for ")
             write_str(2, &host_buf[0])
             write_str(2, "\n")
+        elif rc == -3:
+            write_str(2, "short write sending the request\n")
+        elif rc == -4:
+            write_str(2, "read error on the response\n")
+        elif rc == -5:
+            write_str(2, "empty or truncated (non-HTTP) response\n")
+        elif rc == -6:
+            write_str(2, "response (headers + body) exceeds the ")
+            write_dec_u64(2, dst_cap)
+            write_str(2, "-byte receive buffer\n")
         elif rc == -7:
-            write_str(2, "hpm: malformed chunked transfer-encoding\n")
+            write_str(2, "malformed chunked transfer-encoding\n")
+        elif rc == -8:
+            write_str(2, "too many redirect hops / redirect loop\n")
+        elif rc == -9:
+            write_str(2, "https -> http downgrade redirect rejected\n")
         else:
-            write_str(2, "hpm: HTTP fetch failed\n")
+            write_str(2, "transport error ")
+            write_dec_u64(2, cast[uint64](0 - rc))
+            write_str(2, "\n")
         return -1
+    fetch_last_status = status
     if status != 200:
-        write_str(2, "hpm: HTTP request did not return 200 OK\n")
+        write_str(2, "hpm: ")
+        write_str(2, &fetch_url_buf[0])
+        write_str(2, ": HTTP ")
+        write_dec_u64(2, cast[uint64](status))
+        write_str(2, ", not 200 OK\n")
         return -1
     # Slide body bytes to the front of dst so callers see a clean buffer.
     if body_off > 0:
@@ -1827,9 +1877,33 @@ local_trusted_pub_set: int32 = 0
 # BOTH the production root (remote) AND the local root (file://).
 user_trusted_key_set:  int32 = 0
 allow_unsigned:   int32 = 0
-# The fetched detached signature: up to 128 hex chars + slack, decoded
-# into 64 raw bytes.
-sig_hex_buf:      Array[512, uint8]
+# The fetched detached signature: 128 hex chars + a newline, decoded into
+# 64 raw bytes.
+#
+# SIZED FOR THE WHOLE HTTP RESPONSE, NOT FOR THE BODY. fetch_to_buf hands
+# its dst straight to http9.http_get, which reads STATUS LINE + HEADERS +
+# BODY into that one buffer and only afterwards reports where the body
+# starts; http9 returns -6 the moment the response reaches dst_cap. This
+# buffer was 512 bytes, which is more than enough for a 129-byte signature
+# and NOT enough for one served by a real CDN: GitHub Pages answers
+# https://255.one/linux/index.json.sig with 641 bytes of headers (server,
+# etag, cache-control, five x-github-*/x-cache/x-timer lines, via,
+# x-fastly-request-id) in front of those 129 bytes. 641 + 129 > 512, so the
+# fetch of the SIGNATURE failed on exactly the repo whose index.json — 50 KB
+# into a 256 KB buffer — had just succeeded on the same connection path.
+# The failure then arrived as "unsigned repo", which was a guess, not a
+# reading.
+#
+# 64 KiB, not 1 KiB, because the buffer must also be able to hold the
+# response for a channel that genuinely has NO signature: GitHub Pages
+# answers a missing object with a **9,379-byte HTML 404 page**, and a
+# response that overruns the buffer is reported by http9 as -6 with the
+# status thrown away — so a too-small buffer cannot tell "404, unsigned
+# repo" from "the fetch broke" either. Measured: 255.one/main/index.json.sig
+# is 636 + 9379 bytes of 404; 255.one/linux/index.json.sig is 640 + 129 of
+# signature.
+SIG_FETCH_CAP:    uint64 = 65536
+sig_hex_buf:      Array[65536, uint8]
 sig_raw_buf:      Array[64, uint8]
 # Scratch for reading a --trusted-key file.
 tkey_file_buf:    Array[512, uint8]
@@ -1963,10 +2037,10 @@ def _verify_index_signature_local(body: Ptr[uint8], body_len: uint64) -> int32:
     elif local_trusted_pub_set == 0:
         _load_local_trusted_pub()
     sn: int64 = fetch_to_buf(cast[Ptr[uint8]]("index.json.sig"),
-                             &sig_hex_buf[0], 512)
+                             &sig_hex_buf[0], SIG_FETCH_CAP)
     if sn < 0:
-        write_str(1, "hpm: local repo has no index.json.sig — trusting by "
-                     "construction (image-local bytes)\n")
+        write_str(1, "hpm: local repo has no readable index.json.sig — "
+                     "trusting by construction (image-local bytes)\n")
         return 0
     dn: int64 = _hex_decode(&sig_hex_buf[0], cast[uint64](sn),
                             &sig_raw_buf[0], 64)
@@ -1994,11 +2068,27 @@ def _verify_index_signature(body: Ptr[uint8], body_len: uint64) -> int32:
     if trusted_pub_set == 0:
         _load_default_trusted_pub()
     sn: int64 = fetch_to_buf(cast[Ptr[uint8]]("index.json.sig"),
-                             &sig_hex_buf[0], 512)
+                             &sig_hex_buf[0], SIG_FETCH_CAP)
     if sn < 0:
-        write_str(2, "hpm: no index.json.sig for this channel "
-                     "(unsigned repo). Re-run with --allow-unsigned to "
-                     "trust it anyway.\n")
+        # Two OPPOSITE things used to print the same sentence here. The
+        # server answering 404 means the resource is genuinely absent — the
+        # repo really is unsigned, and --allow-unsigned is the right advice.
+        # Any other outcome (TLS died, the response did not fit, a 500) means
+        # we learned NOTHING about whether the repo is signed, and telling
+        # the operator it is unsigned sends them to --allow-unsigned, which
+        # turns a transport fault into a permanently disabled signature
+        # check. Say which one happened.
+        if fetch_last_rc == FETCH_RC_OK and fetch_last_status == 404:
+            write_str(2, "hpm: no index.json.sig for this channel — the "
+                         "server answered 404 (unsigned repo). Re-run with "
+                         "--allow-unsigned to trust it anyway.\n")
+        else:
+            write_str(2, "hpm: could NOT fetch index.json.sig for this "
+                         "channel (see the fetch error above). This is a "
+                         "fetch failure, NOT evidence that the repo is "
+                         "unsigned — refusing rather than guessing. Fix the "
+                         "fetch; --allow-unsigned would disable signature "
+                         "checking for a repo that may well be signed.\n")
         return 1
     dn: int64 = _hex_decode(&sig_hex_buf[0], cast[uint64](sn),
                             &sig_raw_buf[0], 64)
@@ -2130,6 +2220,25 @@ def cmd_refresh() -> int32:
             idx_len = idx_len - 1
         total_pkgs = total_pkgs + added
         ci = ci + 1
+
+    # EVERY channel failed. This used to fall through and print
+    #
+    #   hpm: refreshed index from <url> (0 packages across 1 channels, 27 bytes)
+    #   hpm: warning: 1 channel(s) failed to fetch — partial index loaded
+    #
+    # and exit 0, having overwritten the cached index with an empty envelope —
+    # so the NEXT command answered "no such package" for a machine that simply
+    # had no network. A total fetch failure is not an empty repository, and a
+    # gap must not answer something success-shaped. Found by the negative
+    # control in tests/linux/hpm_index_sig.sh (the server switched off).
+    if n_channels > 0 and n_failed >= n_channels:
+        write_str(2, "hpm: refresh: FAILED — all ")
+        write_dec_u64(2, n_channels)
+        write_str(2, " channel(s) failed to fetch (see the errors above). "
+                     "The cached index is left as it was, NOT replaced with "
+                     "an empty one: this is a fetch failure, not an empty "
+                     "repository.\n")
+        return 1
 
     tail: Ptr[uint8] = "]}\n"
     if _idx_emit(tail) != 0:
