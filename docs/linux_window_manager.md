@@ -424,3 +424,168 @@ it. That is a Plan 9 argument and it is a good one. It is just not a
 shared-fate argument, and it should not be started until `BB_SLOTS` and the
 per-connection mapping table can carry one surface per X toplevel, because
 today they cannot.
+
+## 8b. Rootless, built — an X window is a file now
+
+`HAMNIX_X11_WM=rootless` is a **third session arm**. `jwm` is still the
+default and the rootful path is untouched; with `WSYSWL_XWM` unset the
+compositor does not advertise `xwayland_shell_v1`, dials no X connection, and
+takes the branch it always took. What follows is what the arm does, what was
+measured, and what is deliberately not built yet.
+
+### What it is for, stated once and not the other thing
+
+Not shared fate — §8a settled that and this section does not reopen it.
+`conns` is **1** on a rootless display exactly as on a rootful one, and
+`tests/linux/wsyswl_rootless.sh` asserts that on purpose so the two claims
+cannot be confused again.
+
+The reason is the one in the first line of `NORTH_STAR.md`'s shape:
+
+> Window management belongs in `wsysd`. Windows are already files under
+> `/dev/wsys/<wid>/`.
+
+Under rootful, an entire X session — every client, the window manager, its
+frames, Steam and all — is **one** `wl_surface` and therefore **one** wsys
+window. The desktop can move that rectangle; it cannot move a window inside
+it, because there is no window inside it to move. That is the whole reason a
+namespace needs `jwm`, and it is why a Debian application is a second-class
+citizen on this desktop while Firefox gets one wsys window per
+`xdg_toplevel`.
+
+### The measurement
+
+`tests/linux/wsyswl_rootless.sh`, 23 PASS, offscreen, about a minute, no VM
+and no Steam. Two `xterm`s on one rootless Xwayland:
+
+```
+xwl_managed 2   xwl_paired 2   windows_high_water 2   conns 1
+commits 4       drop_xwl_unpaired 0    xwm_refused 0
+/dev/wsys lists 2 application windows for one X display: wids 2 3
+wid 2 at 60,60 186x110    wid 3 at 400,60 186x110
+wid 2 is 97% alpha / 0% beta;   wid 3 is 0% alpha / 96% beta
+```
+
+and then the point of the whole thing, which is stated in pixels because a
+pair of window records pointing at the same pixels would pass a count:
+
+```
+the compositor moved wid 2 to 280,240
+and wid 3 did not move with it
+after the move: 97% of the new rectangle is the moved window's colour,
+                96% of the old rectangle is still the other window's colour
+```
+
+**The control is in the same script, on the same compositor**: the same two
+clients on a *rootful* Xwayland add **one** wsys window. And the negative,
+which is the load-bearing half: with no XWM configured the compositor must
+**not** advertise `xwayland_shell_v1`, because a client that binds it hands
+over surfaces nothing can ever pair with an X window — a rootless display that
+comes up managed and empty with no error anywhere.
+
+`docs/screenshots/linux/rootless-two-x-windows.png` is that frame: two
+decorated Hamnix windows carrying two X clients from one Xwayland, one of them
+where the compositor put it.
+
+### Two things had to be measured because reading was not enough
+
+**`CompositeRedirectSubwindows(root, Manual)` is the request without which the
+whole thing is a no-op.** With `SubstructureRedirect` held, `WL_SURFACE_SERIAL`
+interned, `xwayland_shell_v1` bound by Xwayland and both clients managed and
+mapped, Xwayland produced **zero** `wl_surface`s: `xwl_managed 2`,
+`commits 0`, `max_object_id 16`. Xwayland only builds a surface for a window
+whose drawing is redirected — `if (window->redirectDraw != RedirectDrawManual)
+return;` — and it does not redirect anything itself. Every other compositor's
+XWM issues that request in its first breath; nothing in the protocol
+documentation says you must.
+
+**The serial does not arrive as a window property.** The
+`xwayland-shell-v1` description reads as though `set_serial`'s value appears on
+the X window as `WL_SURFACE_SERIAL`. On Xwayland 24.1.6 it does not: the
+toplevel's full property list is `WM_PROTOCOLS`, `_NET_WM_PID`,
+`WM_CLIENT_LEADER`, `_XWAYLAND_ALLOW_COMMITS` (the one *we* set), `WM_CLASS`,
+`WM_HINTS`, `WM_NORMAL_HINTS`, `WM_NAME` and friends, and **no**
+`WL_SURFACE_SERIAL` — with and without a `-wm` fd, both tried. It arrives as a
+**ClientMessage** of that type, addressed to the X window, delivered to the
+root under `SubstructureRedirect`: `data.l[0]` is the low half, `data.l[1]` the
+high half. The property path is still read as a fallback, so a server that does
+set it works too.
+
+### The shape inside the compositor
+
+`user/wsyswl.ad` gained two things that are one thing:
+
+1. **The Wayland half.** `xwayland_shell_v1` / `xwayland_surface_v1`,
+   advertised only when the compositor is actually managing an X display. A
+   surface handed over this way has no `xdg_surface` and never will: its role
+   *is* an X window. `obj_e` on a `wl_surface` is `0` for an ordinary surface
+   (a cursor, say), `-1` for an X surface waiting to be paired, and the X
+   window id once the two halves have met.
+2. **The X half.** An X11 wire-protocol client — the shape `user/xsnarfd.ad`
+   already proved, with nothing assuming a fixed root window or resource base —
+   holding `SubstructureRedirect | SubstructureNotify` on the root. It maps
+   what it redirects, grants `ConfigureRequest`s as asked, tracks geometry and
+   override-redirect, and reads `WM_NAME` / `_NET_WM_NAME` onto the wsys title
+   bar.
+
+An X window and a `wl_surface` are two halves of one window and **either can
+arrive first**, so both directions attempt the association; neither half is
+allowed to be the one that gets there second and is ignored.
+
+`wsyswl-state` grew `xwm`, `xwm_connected`, `xwl_managed`, `xwl_paired`,
+`drop_xwl_unpaired` and `xwm_refused`, because a rootless session whose
+`windows_high_water` stays at 1 has to be answerable from the state file and
+not from a debugger.
+
+### The clipboard was already done, and §8 counted it twice
+
+§8's item 2 listed "selection ownership for `CLIPBOARD`/`PRIMARY` and XDND" as
+part of this work. It is not: `user/xsnarfd.ad` is an ordinary X client on the
+same display and owns those selections whether the display is rootful or
+rootless. Nothing about rootless changes it.
+
+### What is NOT built, named rather than half-done
+
+* **`WM_PROTOCOLS` / `WM_DELETE_WINDOW`.** A title-bar close today destroys the
+  wsys window and leaves the X client running. Closing a window should ask the
+  client to close.
+* **Compositor-side move and resize pushed back to X.** `wsysd` moving a window
+  does not send the X client a `ConfigureNotify`, so a client that asks where
+  it is gets its original position. Pointer coordinates are unaffected — they
+  are surface-local and Xwayland adds the window's own origin — which is why
+  the demonstration above works without it.
+* **EWMH.** No `_NET_SUPPORTING_WM_CHECK`, `_NET_SUPPORTED`, `_NET_WORKAREA`,
+  `_NET_CLIENT_LIST` or `_NET_WM_STATE`. A toolkit asking "am I maximised" or
+  "how big is the usable area" gets nothing, exactly as with no WM at all. This
+  is why `hamnix_x11session.sh` skips its window-manager check on the rootless
+  arm rather than printing a warning that is true and misleading at once.
+* **`WM_TRANSIENT_FOR` stacking**, so a dialog is not kept above its parent by
+  anything but z-order luck.
+* **Override-redirect placement is literal.** A menu is placed at its X-screen
+  coordinates, which are not its parent window's coordinates on the Hamnix
+  desktop once the user has moved the parent. Menus land in the right place
+  only until something is dragged.
+* **The two ceilings §8a named are still the ceilings.** `WINPERCONN` is 8, so
+  an X display may have eight toplevels on screen at once, and
+  `user/linux-wsys.c`'s `BB_SLOTS` is 8 **for the whole machine** — rootful
+  spends one of those on an entire X session, rootless spends one per X
+  toplevel. This is the reason rootless is an arm and not the default: a
+  namespace with nine X windows would exhaust the paint pool for the desktop,
+  Firefox included. **That is the next piece of work, and it is a prerequisite
+  for making this the default rather than an option.**
+
+### How to run it
+
+The compositor is told which display it manages, by name, from outside the
+namespace — the same way `xsnarfd` is:
+
+```
+WSYSWL_XWM=/n/debian/tmp/.X11-unix/X0  wsyswl /n/debian/run/wayland-0
+```
+
+and inside, `HAMNIX_X11_WM=rootless`. The session script **refuses to start**
+if the compositor serving its socket was not given `WSYSWL_XWM` — it reads
+`xwm` out of `wsyswl-state`, which is published beside the socket and is
+therefore the one fact that crosses the namespace boundary. A rootless X screen
+with a window manager on neither side is a display on which nothing is ever
+mapped, and that is not a thing to discover from an empty desktop.

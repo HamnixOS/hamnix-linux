@@ -68,8 +68,47 @@ case "${SW:-}:${SH:-}" in
         echo "hamnix-x11session: WARNING no $XDG_RUNTIME_DIR/hamnix-screen; the X screen size is Xwayland's own default, not the display's" >&2 ;;
 esac
 
+# ROOTLESS, THE THIRD ARM, AND WHY IT IS AN ARM AND NOT THE ANSWER YET.
+#
+# HAMNIX_X11_WM=rootless starts Xwayland with -rootless and NO window manager
+# in here, because the window manager is then wsyswl's own -- an X11 WM living
+# inside the compositor, holding SubstructureRedirect on this display from the
+# other side of the namespace boundary. Each X toplevel becomes its own
+# wl_surface and therefore its own wsys window under /dev/wsys/<wid>/, which
+# the Hamnix desktop can move, raise and stack exactly as it does Firefox's.
+# Rootful collapses this whole session onto ONE wsys window; `windows_high_water
+# 1` for an entire Steam session is what that looks like from outside.
+#
+# IT IS NOT THE DEFAULT AND MUST NOT SILENTLY BECOME ONE. It needs the
+# compositor serving this display to have been started with WSYSWL_XWM naming
+# this tree's X socket from OUTSIDE the namespace -- e.g.
+#   WSYSWL_XWM=/n/debian/tmp/.X11-unix/X0 wsyswl /n/debian/run/wayland-0
+# -- and if it was not, a rootless Xwayland comes up with a screen on which
+# nothing will ever be mapped: no window manager here, and none out there. So
+# this asks the compositor, out of the state file it publishes beside its own
+# socket, and REFUSES rather than starting a session with no windows in it.
+ROOTLESS=""
+if [ "${HAMNIX_X11_WM:-}" = rootless ]; then
+    ROOTLESS=-rootless
+    WLSTATE="$XDG_RUNTIME_DIR/wsyswl-state"
+    XWMON=""
+    [ -r "$WLSTATE" ] && XWMON="$(sed -n 's/^xwm \([0-9]*\)$/\1/p' "$WLSTATE" | tail -1)"
+    if [ "${XWMON:-0}" = 1 ]; then
+        echo "hamnix-x11session: ROOTLESS -- the compositor outside this namespace is managing this display; every X window becomes its own Hamnix window" >&2
+    else
+        echo "hamnix-x11session: ERROR HAMNIX_X11_WM=rootless, but the compositor serving" >&2
+        echo "hamnix-x11session: $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY was NOT started with WSYSWL_XWM." >&2
+        echo "hamnix-x11session: A rootless X screen with no window manager on either side is a" >&2
+        echo "hamnix-x11session: display on which nothing is ever mapped. Refusing to start one." >&2
+        echo "hamnix-x11session: Start the compositor as:" >&2
+        echo "hamnix-x11session:   WSYSWL_XWM=<this tree's /tmp/.X11-unix/X0, from outside> wsyswl <socket>" >&2
+        echo "hamnix-x11session: or use HAMNIX_X11_WM=jwm (the default) for the rootful session." >&2
+        exit 1
+    fi
+fi
+
 # shellcheck disable=SC2086
-Xwayland -shm -noreset $GEOMOPT :0 >/tmp/xwayland.log 2>&1 &
+Xwayland $ROOTLESS -shm -noreset $GEOMOPT :0 >/tmp/xwayland.log 2>&1 &
 XWPID=$!
 # WAIT FOR THE SERVER, NOT FOR THE SOCKET. The stale socket above outlived the
 # server that made it, so `[ -S /tmp/.X11-unix/X0 ]` reported an X server that
@@ -142,6 +181,16 @@ JWMRC="${HAMNIX_JWMRC:-/etc/jwm/hamnix.jwmrc}"
 case "$WM" in
     none)
         echo "hamnix-x11session: no window manager (HAMNIX_X11_WM=none) -- a MapWindow takes effect directly, and nothing in here can move, resize or close a window" >&2 ;;
+    rootless)
+        # NO WINDOW MANAGER IN HERE ON PURPOSE, and starting one would not be a
+        # duplicate -- it would be a REPLACEMENT. Only one X client may hold
+        # SubstructureRedirect on a root window; the second gets BadAccess and
+        # then manages nothing while looking exactly like a window manager. The
+        # compositor already holds it (checked above), so a jwm started here
+        # would take nothing, manage nothing, and leave every X window
+        # unassociated. The window manager for this display is wsysd, out
+        # there, where windows are files.
+        echo "hamnix-x11session: no window manager inside the namespace -- wsysd manages this display's windows from outside, one /dev/wsys window per X toplevel" >&2 ;;
     jwm|*/jwm)
         if ! command -v "$WM" >/dev/null 2>&1; then
             # By name, and with the package that supplies it. A session that
@@ -178,7 +227,16 @@ esac
 # check printed `WARNING jwm is not managing this screen` at a screen jwm was
 # plainly managing, because that image had no xprop -- the check committing the
 # exact failure it exists to catch. Say "cannot check" instead.
-if [ "$WM" != none ]; then
+#
+# ROOTLESS IS EXEMPT, AND IT IS EXEMPT FOR A REASON THAT IS ALSO A TODO. The
+# compositor's own X11 window manager redirects, maps, configures and titles,
+# and it publishes NO EWMH yet -- no _NET_SUPPORTING_WM_CHECK, no
+# _NET_SUPPORTED, no _NET_WORKAREA. Asking these questions on a rootless
+# display would print a warning that is true and misleading in the same breath:
+# the screen IS managed, from outside, and `xwl_managed` in
+# $XDG_RUNTIME_DIR/wsyswl-state is where the answer lives. Publishing EWMH from
+# the compositor is stage two -- docs/linux_window_manager.md 8b.
+if [ "$WM" != none ] && [ "$WM" != rootless ]; then
   if ! command -v xprop >/dev/null 2>&1; then
     echo "hamnix-x11session: cannot check whether $WM has the screen -- no xprop (x11-utils) in this namespace" >&2
   else
