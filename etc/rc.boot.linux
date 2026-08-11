@@ -134,11 +134,6 @@ export HAMNIX_IFACE
 
 echo 'rc.boot: network configured'
 
-# --- the graphical runlevel -----------------------------------------
-# Starts the scene compositor and the desktop session. Comment this line out
-# for a text-only boot; nothing below the compositor depends on it.
-source '/etc/rc.d/rc.5'
-
 # --- the distribution namespaces ------------------------------------
 # `#distro/<name>` is a subtree server backed by its own filesystem (a virtio
 # disk here). Each distribution's tree is bound under /n and NOTHING any of
@@ -152,31 +147,29 @@ source '/etc/rc.d/rc.5'
 # wrong distribution and report success. See etc/distros.linux.
 #
 # /n/distro is Debian's older name and stays bound, because user/xbridge.ad,
-# the DE panel's application scan and a pile of tests spell it that way.
+# etc/install.hamsh.linux and a pile of tests spell it that way.
 bind '#distro' /n/distro
-bind '#distro/debian' /n/debian
-bind '#distro/alpine' /n/alpine
 
-# `enter debian { sh }` from the CONSOLE shell too, not just from a desktop
-# terminal. etc/rc.de-user captures these templates for the DE-spawned shell,
-# but PID 1 -- the shell you land in on a serial boot, on a headless install,
-# and every time the DE is not running -- had no template at all, so the one
-# command this subsystem exists to offer did not exist there. Capturing a
-# template grants nothing: `ns clean { }` is a description, and what an
-# `enter` switches to is the Debian root, never the native one.
+# THE BIND AND THE TEMPLATE, PER DISTRIBUTION, DERIVED FROM /etc/distros.
+# This block used to be the same five-line `ns clean { }` recipe written out
+# by hand once per distribution -- here, in etc/rc.boot.installed, and again in
+# etc/rc.de-user.linux. Adding Fedora meant editing three files, and the
+# installed one had never been run at all. /etc/rc.distros is generated from
+# /etc/distros by scripts/hamlinux_image.sh, so the table is the only place a
+# distribution is named, and all three of these files agree by construction.
 #
-# `debian` is the name to teach; `linux` is the alias that keeps working
-# because etc/install.hamsh and several tests spell it that way. See the note
-# in etc/rc.de-user.linux for why `linux` was the wrong name: the kernel under
-# BOTH namespaces is Linux, so it distinguishes nothing, and someone typing it
-# wants apt and Firefox, not a kernel.
-debian = ns clean {
-    bind '#distro/debian' /
-    bind '#c' /dev
-    bind '#p' /proc
-    bind '#s' /srv
-    bind '#/' /n
-}
+# `enter debian { sh }` from the CONSOLE shell too, not just from a desktop
+# terminal: PID 1 is the shell you land in on a serial boot, on a headless
+# install, and every time the DE is not running. Capturing a template grants
+# nothing -- `ns clean { }` is a description, and what an `enter` switches to
+# is the distribution's root, never the native one.
+source '/etc/rc.distros'
+
+# `linux` is the ALIAS, kept working because etc/install.hamsh.linux and
+# several tests spell it that way. It is not the one to teach: the kernel
+# under BOTH namespaces is Linux, so it distinguishes nothing, and someone
+# typing it wants apt and Firefox, not a kernel. It is written out here rather
+# than generated because an alias is not a row in the table.
 linux = ns clean {
     bind '#distro/debian' /
     bind '#c' /dev
@@ -184,16 +177,14 @@ linux = ns clean {
     bind '#s' /srv
     bind '#/' /n
 }
-# THE SECOND ONE, and the reason any of the above is written the way it is.
-# It is the SAME five lines with one name changed -- no new device letter, no
-# new code path, nothing in the shell or the kernel that knows what Alpine is.
-# That is what makes `#distro` a mechanism rather than a Debian disk with a
-# general-sounding name. Adding `fedora` is these five lines plus a line in
-# /etc/distros plus a medium with the matching label.
-alpine = ns clean {
-    bind '#distro/alpine' /
-    bind '#c' /dev
-    bind '#p' /proc
-    bind '#s' /srv
-    bind '#/' /n
-}
+
+# --- the graphical runlevel -----------------------------------------
+# Starts the scene compositor and the desktop session. Comment this line out
+# for a text-only boot; nothing below the compositor depends on it.
+#
+# IT COMES AFTER THE DISTRIBUTION BINDS, and that ordering is now load-bearing
+# rather than incidental: the DE application menu scans /n/<name> at panel
+# STARTUP, so a panel started before the binds finds no distribution and shows
+# no sections. It used to be first, and the menu's distribution section was
+# empty on every image ever built.
+source '/etc/rc.d/rc.5'

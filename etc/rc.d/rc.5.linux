@@ -45,4 +45,17 @@ echo '[rc.5] desktop backdrop started'
 /bin/hampanelscene > /var/log/panel.log &
 echo '[rc.5] panel started'
 
+# One Wayland server per distribution namespace, socket inside that
+# distribution's own tree at /n/<name>/run/wayland-0. GENERATED from
+# /etc/distros by scripts/hamlinux_image.sh, because wsyswl's socket path is
+# an argument and the only thing that differs per distribution is the name.
+#
+# This is what a GUI application launched from the menu's "<Name> apps"
+# fly-out connects to: user/hampanelscene.ad spawns
+# `/bin/hamsh /etc/rc.de-ns/<name> <prog>`, which exports
+# WAYLAND_DISPLAY=wayland-0 and `enter <name> { … }` -- and inside that root,
+# /run/wayland-0 is this socket. Without it the app starts, finds no display
+# and dies, which is a launcher that does nothing while reporting a launch.
+source '/etc/rc.distros-wl'
+
 echo '[rc.5] desktop up'

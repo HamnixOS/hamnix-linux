@@ -247,19 +247,10 @@ the Debian case.
 Named precisely, because a half-general mechanism described as general is worse
 than a special case described as one.
 
-1. **The DE application menu.** `user/hampanelscene.ad`'s `_linux_apps_dir()`
-   is the literal string `/n/linux/usr/share/applications`, and the menu has
-   exactly one "Linux" section. To carry N distributions it needs the scan to
-   be driven by `/etc/distros` — one section per name, each launching
-   `enter <name> { … }` — which is a real change to the panel's Adder, not a
-   path edit. **It is inert on this line today**: `etc/rc.d/rc.5.linux` never
-   binds `/n/linux`, so the section is empty whichever distribution is
-   installed. Nothing regressed; nothing was gained either.
-2. **`user/install.ad`.** The installed-disk story is one named root called
-   `distro` written into a `.hamnix-roots` sentinel (`sysroot .` / `distro
-   distro`). A second distribution on an installed disk would need a second
-   subtree and a second sentinel line. Untested here — this work was verified
-   on the live/initramfs boot, not on an installed disk.
+1. ~~**The DE application menu.**~~ **DONE.** The scan is driven by
+   `/etc/distros`: one section per distribution actually attached under `/n`,
+   named after it, each row launching `enter <name> { … }`. See §8.
+2. ~~**`user/install.ad`.**~~ **DONE, and it was the wrong file.** See §9.
 3. **`user/xbridge.ad`** and several tests spell `/n/distro` literally. That
    name is kept bound for exactly this reason, so they work; they are just not
    parameterised.
@@ -272,3 +263,145 @@ than a special case described as one.
    there is a third. What they DO share as one file is the window manager's
    configuration: `etc/jwmrc.linux`, installed by both build scripts as
    `/etc/jwm/hamnix.jwmrc` — see `docs/linux_window_manager.md`.
+
+
+---
+
+## 8. The DE application menu, N sections
+
+`user/hampanelscene.ad` held one literal path, `/n/linux/usr/share/applications`,
+and one menu section called "Linux". It now reads the same description the
+rest of the system reads.
+
+**The panel reads only the NAMES out of `/etc/distros`, and that is the whole
+design rather than an economy.** A `source` is a volume label; resolving one
+means opening a block device; the panel could do it today (it runs as the host
+owner) and a session-owned panel could not. The name is what crosses, and
+`/n/<name>` is where the boot already posted the server — §2.4 again, one
+layer up.
+
+Three states, deliberately distinct, because this was a **dead path being made
+live** and each of the wrong answers here is success-shaped:
+
+| state | menu |
+|--|--|
+| named in `/etc/distros`, `/n/<name>` empty or absent | **no section.** The distribution is described, not attached. A section would claim a namespace that is not there and every click would launch into nothing. The panel says which one, once, on its log. |
+| attached, but no `usr/share/applications` (or nothing displayable in it) | a section with one disabled row, `No <name> apps installed`. The namespace IS there; it ships no launchers. A different fact. |
+| attached with launchers | the section, its apps, `enter <name> { … }` |
+
+Entries sort by `cat = DE_CAT_LINUX + <section index>`, so each distribution's
+rows stay contiguous and after the native ones: a section is a SLICE of the one
+model, not a second model.
+
+### 8.1 Four things this turned up, all of which were already broken
+
+* **`etc/rc.boot.linux` bound the distributions AFTER `source '/etc/rc.d/rc.5'`.**
+  The panel scans at startup, so a panel started first sees nothing. The binds
+  now come first, in both boot rcs.
+* **The Applications button was pointed at `/bin/hamappmenu`** (#263, a separate
+  v2 window client) **which this line does not build.** So the button spawned a
+  program that does not exist, printed `[panel] launched /bin/hamappmenu -self`,
+  and opened nothing — on every image ever built here. It now falls back to the
+  panel's own dropdown when the client is absent, and says which one it used.
+* **`sub_open` is one global; `menu_open` is per panel.** The image ships two
+  panels, so the bottom taskbar draining any pointer event read its own
+  `menu_open` of 0 and closed the *other* panel's fly-out. The dropdown stayed
+  up and the fly-out vanished with nothing said.
+* **Alpine's only `.desktop` file was `org.freedesktop.Xwayland.desktop`**, which
+  carries `NoDisplay=true` and is correctly hidden — so an Alpine section could
+  only ever have been empty, and "Alpine ships no launchers" would have looked
+  exactly like "the scan is broken". `xterm` is now in the Alpine GUI set: it is
+  the one member of that set that ships a `.desktop`, and an Alpine shell in a
+  window from the menu is the useful thing to put there anyway.
+
+### 8.2 The rc scripts are GENERATED from the table
+
+The same five-line `ns clean { }` recipe used to be written out by hand once per
+distribution in three files — `etc/rc.boot.linux`, `etc/rc.boot.installed`,
+`etc/rc.de-user.linux` — and they had drifted: the installed one had none of
+them. `scripts/hamlinux_image.sh` now generates `/etc/rc.distros` from
+`/etc/distros` and all three `source` it, so they agree by construction.
+
+It is generated rather than looped at boot because **hamsh's `enter` takes a
+namespace VALUE, not a string**: `NS='alpine'; enter $NS { }` cannot be written
+at all, a template has to be captured under a literal name. Generating the
+literals from the table is how the table stays the only place a distribution is
+named.
+
+`/etc/rc.distros-wl` (one `wsyswl` per distribution, socket inside its own tree)
+and `/etc/rc.de-ns/<name>` (the DE launcher rc) are generated the same way.
+
+### 8.3 Verified
+
+`tests/linux/distro_menu.sh` — one boot, the menu driven OPEN by synthetic
+pointer events written into the panel window's event ring, three screendumps,
+and the panel's **display list** read back per fly-out. The scene is the
+evidence: `glyphs … "Install Steam"` is the panel having drawn that row.
+Debian's catalogue has `Install Steam` and Alpine's does not, so
+"drawn while hovering the first section, NOT while hovering the second" is the
+negative control that distinguishes two real sections from one list drawn twice.
+
+`docs/screenshots/linux/distro-menu-debian.png`,
+`docs/screenshots/linux/distro-menu-alpine.png`.
+
+### 8.4 What does NOT work: launching a GUI app from the fly-out
+
+Named here rather than left to be discovered. The fly-out draws and the row is
+hit-tested; clicking spawns `/bin/hamsh /etc/rc.de-ns/<name> <prog>`, and that
+rc parses, drops to uid 1001, and reaches `enter <name>` — where the **first**
+bind of the template, the root switch, fails `ENOENT`
+(`chdir("/n/<name>")` inside the entered child).
+
+The identical five lines DO work at uid 1001 from a console shell and from a
+desktop terminal (`two_namespaces.sh`, `enter_user_run.sh`), so it is something
+about this spawned shell's namespace rather than the template or the drop.
+Three shapes of the launcher rc were built and measured: with the full
+`/etc/rc.de-wayland` bind surface (all five template binds fail ENOENT), with
+none (the root switch alone fails), and with three (unchanged).
+`tests/linux/distro_menu.sh` reports it as a `GAP` line every run.
+
+---
+
+## 9. The installed disk — and `user/install.ad` was the wrong file
+
+§7 item 2 said `user/install.ad` writes one named root, `distro distro`, into
+an installed disk's `.hamnix-roots`, and that a second distribution would need a
+second subtree and a second sentinel line.
+
+**That is true of Hamnix and false of this line, and the difference is worth
+recording because it is the shape of the whole port.** `.hamnix-roots` is read
+by the *Hamnix kernel*, which posts each named subtree as a file server before
+ELF-loading `/init`. There is no kernel doing that here: `#sysroot` resolves to
+a device (`sysroot_device()`, from the kernel command line) and `bind` performs
+the mount itself. Nothing on this line reads `.hamnix-roots` at all — `grep`
+finds it only in `user/install.ad`, `user/useradd.ad` and comments.
+
+An installed hamnix-linux disk is built by `scripts/hamlinux_disk.sh`, and the
+distribution media are **the same two labelled filesystems**, attached as their
+own disks. So a second distribution on an installed disk needs no second
+subtree and no sentinel: it needs the installed boot rc to do what the live one
+does.
+
+It did not. `etc/rc.boot.installed` had **no distribution bind and no
+`ns clean { }` template in it at all**, so `enter debian { sh }` on an installed
+system answered `enter: debian is not a namespace template`. The subsystem
+worked on every boot that is thrown away and on none of the boots that persist,
+and nothing said so, because no test had ever booted an installed disk and
+typed the command.
+
+It now `source`s the same generated `/etc/rc.distros` the live boot does, before
+runlevel 5.
+
+**`HAMLINUX_DISK_RC`** (`scripts/hamlinux_disk.sh`) stages a different
+`/etc/rc.boot` onto the root partition, the way `HAMLINUX_RC` does for the
+initramfs — an installed disk was the one boot with no hook, which is exactly
+why it was the one boot never under test. The real rc is staged alongside as
+`/etc/rc.boot.installed`, so a test's rc can `source` it verbatim and then ask
+its questions.
+
+`tests/linux/installed_distros.sh` — build a disk, boot it through UEFI, and
+from the installed root: `enter alpine` -> `3.24.1`, `enter debian` -> `12.15`,
+the `linux` alias -> `12.15`, the negative control (Alpine's release file is not
+readable inside Debian) and **both again as uid 1001**, which is the arm that
+proves the mount-point fallback of §2.4 still holds on a machine whose disk
+enumeration is nothing like the live boot's. 12 PASS.

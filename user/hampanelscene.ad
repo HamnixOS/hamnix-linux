@@ -1700,14 +1700,16 @@ MENU_H: int64 = 202
 # The main dropdown's OWN box height (native rows + the "Linux apps" parent
 # row). Distinct from MENU_H, which also has to cover the child fly-out.
 menu_main_h: int64 = 202
-# MATE-style "Linux apps" HOVER SUBMENU (a child fly-out popup). The main
-# dropdown lists the NATIVE apps plus one parent row, "Linux apps ▸"; mousing
-# over that row opens this child popup listing every Debian/Linux-ns .desktop
-# app (cat == DE_CAT_LINUX), launched via `enter linux`. Wider than MENU_W so
-# full Linux app names + the "No Linux apps installed" placeholder fit (8px
-# mono cell).
+# MATE-style HOVER SUBMENUS (child fly-out popups), one PER DISTRIBUTION. The
+# main dropdown lists the NATIVE apps plus one parent row per attached
+# distribution — "Debian apps ▸", "Alpine apps ▸" — and mousing over one opens
+# its child popup listing that distribution's .desktop apps, launched via
+# `enter <name> { … }`. Wider than MENU_W so full app names + the
+# "No <name> apps installed" placeholder fit (8px mono cell).
 SUBMENU_W: int64 = 224
-sub_open:  int32 = 0                  # 1 while the Linux fly-out is showing
+# 0 = no fly-out open; otherwise the section index + 1 (so `!= 0` still reads
+# as "a fly-out is showing", which is what every call site asks).
+sub_open:  int32 = 0
 sub_box_x: int64 = 0
 sub_box_y: int64 = 0
 SYSMON_W: int64 = 116
@@ -1744,14 +1746,51 @@ AM_PROG_CAP: uint64 = 96
 def _apps_dir() -> Ptr[uint8]:
     return "/etc/hamde/apps"
 
-# The Debian/Linux-namespace application catalogue, reached through the
-# READ bind of the `#distro` file server at /n/linux (planted in the DE
-# panel's namespace by /etc/rc.d/rc.5). Freedesktop drops installed apps'
-# .desktop files here; scanning it surfaces real Debian apps in the menu's
-# "Linux" section without a code edit per app — the same data-driven shape
-# the native /etc/hamde/apps catalogue uses.
-def _linux_apps_dir() -> Ptr[uint8]:
-    return "/n/linux/usr/share/applications"
+# ====================================================================
+# THE DISTRIBUTION NAMESPACES — one menu section per distribution
+# ====================================================================
+# This used to be `_linux_apps_dir()`, the literal string
+# "/n/linux/usr/share/applications", and ONE menu section called "Linux".
+# That is a Debian disk with a general-sounding name, not a mechanism: a
+# second distribution needed a code edit here, and the section was empty on
+# every image anyway because nothing ever bound /n/linux.
+#
+# What replaces it is the same description the rest of the system reads:
+# /etc/distros, the `<name> <source>` table that `bind '#distro/<name>'`
+# resolves (docs/linux_distro_namespaces.md §2.2). The panel reads only the
+# NAMES out of it — which is the whole point, and the reason it can: reading
+# a `source` means resolving a volume LABEL, which means opening a block
+# device, which an unprivileged process cannot do. The name is what crosses
+# the boundary; the boot already posted each namespace's server at /n/<name>.
+#
+# So the scan is: for every name in /etc/distros, if /n/<name> is a real
+# populated tree, give it a menu section called after it and scan
+# /n/<name>/usr/share/applications for its .desktop files.
+#
+# THE THREE STATES ARE DELIBERATELY DISTINCT, because this is a dead path
+# being made live and the failure modes here are exactly the success-shaped
+# ones NORTH_STAR.md names:
+#
+#   * named in /etc/distros, /n/<name> empty or absent  -> NO SECTION. The
+#     distribution is DESCRIBED, not attached (its medium was not built, or
+#     the bind failed). A section for it would claim a namespace that is not
+#     there, and clicking into it would launch into nothing.
+#   * attached, but no usr/share/applications, or none of its .desktop files
+#     is displayable -> A SECTION with one disabled row saying so, by name.
+#     The namespace IS there; it just ships no launchers. That is a real
+#     answer and a different one.
+#   * attached with launchers -> the section, its apps, launched with
+#     `enter <name> { … }`.
+DM_MAX:      uint64 = 6
+DM_NAME_CAP: uint64 = 24
+dm_count:    uint64 = 0
+dm_name:     Array[6, Array[24, uint8]]
+dm_name_len: Array[6, uint64]
+# Per-section entry count, in the same order. The model stores every
+# distribution's entries contiguously after the native ones (they sort by
+# cat = DE_CAT_LINUX + section index), so a section's slice is
+# [_dm_start(i), _dm_start(i) + dm_apps[i]).
+dm_apps:     Array[6, uint64]
 
 am_count: uint64 = 0
 am_name:     Array[64, Array[40, uint8]]
@@ -1769,6 +1808,16 @@ am_term:     Array[64, uint8]
 _am_listbuf: Array[4096, uint8]
 _am_filebuf: Array[2048, uint8]
 _am_path:    Array[160, uint8]
+
+# Distribution-table scratch. Top-level BSS, not frame locals: this compiler
+# puts a large frame array nowhere useful.
+_dm_buf:   Array[2048, uint8]     # /etc/distros, read whole
+_dm_list:  Array[1024, uint8]     # the /n/<name> presence probe's listing
+_dm_path:  Array[160, uint8]      # "/n/<name>/usr/share/applications"
+_dm_label: Array[48, uint8]       # "<Name> apps" — the parent row's text
+_dm_empty: Array[48, uint8]       # "No <name> apps installed"
+_dm_cmd:   Array[224, uint8]      # "enter <name> { <prog> }"
+_dm_rc:    Array[64, uint8]       # "/etc/rc.de-ns/<name>"
 
 
 # Compare menu slot `i` against (cat, name) for insertion-sort ordering.
@@ -1899,6 +1948,169 @@ def _am_build_path(dir: Ptr[uint8], name: Ptr[uint8], nlen: uint64):
     _am_path[p] = 0
 
 
+# ---- /etc/distros: the names, and only the names --------------------
+
+def _dm_is_space(c: uint8) -> int32:
+    if c == 32 or c == 9 or c == 13:
+        return 1
+    return 0
+
+
+# Is _dm_buf[s..e) exactly the literal `lit`?
+def _dm_tok_eq(s: uint64, e: uint64, lit: Ptr[uint8]) -> int32:
+    k: uint64 = 0
+    while s + k < e and lit[k] != 0:
+        if _dm_buf[s + k] != lit[k]:
+            return 0
+        k = k + 1
+    if s + k == e and lit[k] == 0:
+        return 1
+    return 0
+
+
+# "/n/<name>" (apps == 0) or "/n/<name>/usr/share/applications" (apps != 0),
+# NUL-terminated, into _dm_path.
+def _dm_mkpath(i: uint64, apps: int32):
+    _dm_path[0] = 47                                  # '/'
+    _dm_path[1] = 110                                 # 'n'
+    _dm_path[2] = 47                                  # '/'
+    p: uint64 = 3
+    k: uint64 = 0
+    while k < dm_name_len[i] and p < 100:
+        _dm_path[p] = dm_name[i][k]
+        p = p + 1
+        k = k + 1
+    if apps != 0:
+        sfx: Ptr[uint8] = cast[Ptr[uint8]]("/usr/share/applications")
+        q: uint64 = 0
+        while sfx[q] != 0 and p < 159:
+            _dm_path[p] = sfx[q]
+            p = p + 1
+            q = q + 1
+    _dm_path[p] = 0
+
+
+# Is the distribution's server actually posted at /n/<name>, with a tree
+# behind it? An EMPTY directory called /n/alpine is the case that must not
+# pass: it is what a failed `bind '#distro/alpine' /n/alpine` leaves behind,
+# and a section built on it would launch every click into nothing.
+def _dm_present(i: uint64) -> int32:
+    _dm_mkpath(i, 0)
+    if p9_listdir(cast[Ptr[char]](&_dm_path[0]), &_dm_list[0], 1024) <= 0:
+        return 0
+    return 1
+
+
+# Record _dm_buf[s..e) as a section name.
+def _dm_add(s: uint64, e: uint64):
+    if dm_count >= DM_MAX:
+        return
+    n: uint64 = e - s
+    if n >= DM_NAME_CAP:
+        n = DM_NAME_CAP - 1
+    k: uint64 = 0
+    while k < n:
+        dm_name[dm_count][k] = _dm_buf[s + k]
+        k = k + 1
+    dm_name[dm_count][n] = 0
+    dm_name_len[dm_count] = n
+    dm_apps[dm_count] = 0
+    dm_count = dm_count + 1
+
+
+# Read the distribution NAMES out of /etc/distros, keeping the ones whose
+# namespace is really attached. `default` is skipped: it is an ALIAS for one
+# of the other rows (docs/linux_distro_namespaces.md §2.2), so listing it
+# would put Debian in the menu twice under two names — which is the same
+# class of confidently-wrong answer as entering the wrong distribution.
+def _load_distros():
+    dm_count = 0
+    fd: int32 = sys_open(cast[Ptr[char]]("/etc/distros"))
+    if fd < 0:
+        _writeall(1, cast[Ptr[uint8]]("[panel] no /etc/distros: no distribution sections\n"))
+        return
+    n: int64 = sys_read(fd, &_dm_buf[0], 2047)
+    sys_close(fd)
+    if n <= 0:
+        return
+    cap: uint64 = cast[uint64](n)
+    i: uint64 = 0
+    while i < cap and dm_count < DM_MAX:
+        e: uint64 = i
+        while e < cap and _dm_buf[e] != 10:
+            e = e + 1
+        # '#' starts a comment; the row is what precedes it.
+        c: uint64 = i
+        while c < e and _dm_buf[c] != 35:
+            c = c + 1
+        # first token = the name
+        s: uint64 = i
+        while s < c and _dm_is_space(_dm_buf[s]) != 0:
+            s = s + 1
+        t: uint64 = s
+        while t < c and _dm_is_space(_dm_buf[t]) == 0:
+            t = t + 1
+        # a row needs a SECOND token (the source) to be a row at all
+        u: uint64 = t
+        while u < c and _dm_is_space(_dm_buf[u]) != 0:
+            u = u + 1
+        if t > s and u < c and _dm_tok_eq(s, t, cast[Ptr[uint8]]("default")) == 0:
+            _dm_add(s, t)
+            if _dm_present(dm_count - 1) == 0:
+                # Described but not attached. Say which, once, on the panel
+                # log: a distribution silently missing from the menu is how
+                # someone spends an hour looking for an app that was never
+                # mounted.
+                _writeall(1, cast[Ptr[uint8]]("[panel] distribution not attached at /n/: "))
+                _writeall(1, &dm_name[dm_count - 1][0])
+                _writeall(1, cast[Ptr[uint8]]("\n"))
+                dm_count = dm_count - 1
+        i = e + 1
+
+
+# The parent row's label, "<Name> apps", into _dm_label. The name is the
+# distribution's own — the menu says `Alpine`, not `Linux`, because which
+# Linux it is, is the entire information the section carries.
+def _dm_mklabel(i: uint64):
+    p: uint64 = 0
+    while p < dm_name_len[i] and p < 30:
+        c: uint8 = dm_name[i][p]
+        if p == 0 and c >= 97 and c <= 122:
+            c = c - 32
+        _dm_label[p] = c
+        p = p + 1
+    sfx: Ptr[uint8] = cast[Ptr[uint8]](" apps")
+    q: uint64 = 0
+    while sfx[q] != 0 and p < 47:
+        _dm_label[p] = sfx[q]
+        p = p + 1
+        q = q + 1
+    _dm_label[p] = 0
+
+
+# The disabled placeholder for an ATTACHED distribution that ships no
+# launchers: "No <name> apps installed". Named, so it cannot be confused
+# with the distribution not being there at all (which shows no section).
+def _dm_mkempty(i: uint64):
+    pre: Ptr[uint8] = cast[Ptr[uint8]]("No ")
+    p: uint64 = 0
+    while pre[p] != 0:
+        _dm_empty[p] = pre[p]
+        p = p + 1
+    k: uint64 = 0
+    while k < dm_name_len[i] and p < 30:
+        _dm_empty[p] = dm_name[i][k]
+        p = p + 1
+        k = k + 1
+    sfx: Ptr[uint8] = cast[Ptr[uint8]](" apps installed")
+    q: uint64 = 0
+    while sfx[q] != 0 and p < 47:
+        _dm_empty[p] = sfx[q]
+        p = p + 1
+        q = q + 1
+    _dm_empty[p] = 0
+
+
 # Scan ONE *.desktop directory into the menu model. `force_cat` >= 0 pins
 # every parsed entry to that category (the Linux section); < 0 keeps the
 # freedesktop-classified native category. Returns how many entries were
@@ -1959,50 +2171,83 @@ def _scan_apps_dir(dir: Ptr[uint8], force_cat: int32) -> uint64:
     return added
 
 
-# Scan the native /etc/hamde/apps/*.desktop catalogue AND the Debian
-# /n/linux/usr/share/applications/*.desktop catalogue, populating the
-# menu model. Native entries keep their freedesktop category; Linux
-# entries are forced into the distinct DE_CAT_LINUX section (sorts last)
-# and launched inside the `enter linux` namespace. Falls back to the
-# hardcoded native set if the native directory yields no entries (the
-# Linux section is additive on top). Refreshes MENU_H to the row count.
+# Scan the native /etc/hamde/apps/*.desktop catalogue AND every attached
+# distribution's /n/<name>/usr/share/applications, populating the menu model.
+# Native entries keep their freedesktop category; a distribution's entries are
+# forced to cat DE_CAT_LINUX + <section index>, which does two jobs at once:
+# it sorts them after the native rows AND keeps each distribution's entries
+# contiguous and in table order, so a section is a SLICE of the one model
+# rather than a second one. Falls back to the hardcoded native set if the
+# native directory yields no entries (the distribution sections are additive
+# on top). Refreshes MENU_H to the row count.
 am_linux_count: uint64 = 0
 def _load_apps():
     am_count = 0
     native: uint64 = _scan_apps_dir(_apps_dir(), -1)
     if native == 0:
         _seed_fallback()
-    # Additive Linux-ns section (readonly #distro bind at /n/linux). Absent
-    # or empty on a stripped image → the "Linux apps" fly-out shows a disabled
-    # "No Linux apps installed" row (never an error, never vanishes — so the
-    # user always sees the feature exists).
-    am_linux_count = _scan_apps_dir(_linux_apps_dir(), DE_CAT_LINUX)
-    # The main dropdown lists the NATIVE apps + one "Linux apps ▸" parent row.
-    nrows: int64 = cast[int64](_native_count()) + 1
+    _load_distros()
+    am_linux_count = 0
+    d: uint64 = 0
+    while d < dm_count:
+        _dm_mkpath(d, 1)
+        dm_apps[d] = _scan_apps_dir(&_dm_path[0], DE_CAT_LINUX + cast[int32](d))
+        am_linux_count = am_linux_count + dm_apps[d]
+        d = d + 1
+    # The main dropdown lists the NATIVE apps + ONE parent row per attached
+    # distribution. No distribution attached means no parent rows at all —
+    # not an empty "Linux apps" row promising a namespace that is not there.
+    nrows: int64 = cast[int64](_native_count()) + cast[int64](dm_count)
+    if nrows < 1:
+        nrows = 1
     menu_main_h = nrows * MENU_ROW_H + 4
     # The window-reservation height must cover whichever popup is taller: the
-    # main dropdown OR the Linux fly-out child (max(1, linux_count) rows).
-    crows: int64 = cast[int64](am_linux_count)
-    if crows < 1:
-        crows = 1
+    # main dropdown, or the tallest fly-out child.
     mh: int64 = nrows
-    if crows > mh:
-        mh = crows
+    d = 0
+    while d < dm_count:
+        crows: int64 = cast[int64](dm_apps[d])
+        if crows < 1:
+            crows = 1
+        if crows > mh:
+            mh = crows
+        d = d + 1
     MENU_H = mh * MENU_ROW_H + 4
 
 
-# Number of NATIVE (non-Linux) menu entries — the leading am_* rows, since
-# DE_CAT_LINUX sorts LAST. The Linux entries are am_[native .. am_count).
+# Number of NATIVE menu entries — the leading am_* rows, since every
+# distribution's cat sorts LAST. A distribution's entries are the slice
+# am_[_dm_start(i) .. +dm_apps[i]).
 def _native_count() -> uint64:
     if am_linux_count >= am_count:
         return 0
     return am_count - am_linux_count
 
 
-# Height of the "Linux apps" child fly-out (max(1, linux_count) rows — the
-# lone row being the disabled "No Linux apps installed" placeholder).
+# Model index of distribution `i`'s first entry.
+def _dm_start(i: uint64) -> uint64:
+    s: uint64 = _native_count()
+    j: uint64 = 0
+    while j < i and j < dm_count:
+        s = s + dm_apps[j]
+        j = j + 1
+    return s
+
+
+# Which fly-out is open: 0 = none, otherwise the section index PLUS ONE, so
+# `sub_open != 0` keeps meaning "a fly-out is showing" everywhere it did.
+def _sub_idx() -> uint64:
+    if sub_open <= 0:
+        return 0
+    return cast[uint64](sub_open) - 1
+
+
+# Height of the open fly-out (max(1, its app count) rows — the lone row being
+# the disabled "No <name> apps installed" placeholder).
 def _sub_h() -> int64:
-    rows: int64 = cast[int64](am_linux_count)
+    rows: int64 = 0
+    if sub_open > 0 and _sub_idx() < dm_count:
+        rows = cast[int64](dm_apps[_sub_idx()])
     if rows < 1:
         rows = 1
     return rows * MENU_ROW_H + 4
@@ -2976,13 +3221,14 @@ def _compute_menu_box(bar: int64):
         menu_box_y = menu_lo
 
 
-# Compute the "Linux apps" child fly-out box origin (window-local). MATE
-# style: the child opens to the RIGHT of the main dropdown, its top roughly
-# aligned with the parent ("Linux apps") row, clamped so it stays inside the
-# grown panel window (MENU_H tall). If it would overflow the window's right
-# edge it flips to the LEFT of the main box. Requires _compute_menu_box first.
+# Compute the open child fly-out's box origin (window-local). MATE style: the
+# child opens to the RIGHT of the main dropdown, its top roughly aligned with
+# ITS OWN parent row ("Debian apps" / "Alpine apps"), clamped so it stays
+# inside the grown panel window (MENU_H tall). If it would overflow the
+# window's right edge it flips to the LEFT of the main box. Requires
+# _compute_menu_box first.
 def _compute_sub_box(bar: int64):
-    nc: uint64 = _native_count()
+    nc: uint64 = _native_count() + _sub_idx()
     # parent-row top within the main box.
     prtop: int64 = menu_box_y + 2 + cast[int64](nc) * MENU_ROW_H
     sh: int64 = _sub_h()
@@ -3167,21 +3413,28 @@ def _emit_panel(bar: int64, btime: uint64):
             ry: int64 = menu_box_y + 5 + cast[int64](mi) * MENU_ROW_H
             _glyphs(menu_box_x + 10, ry, &am_name[mi][0], fg, cur_bold)
             mi = mi + 1
-        # "Linux apps" parent row (last) — hovering it opens the child fly-out.
-        pry: int64 = menu_box_y + 5 + cast[int64](nc) * MENU_ROW_H
-        if sub_open != 0:
-            # highlight the parent row while its fly-out is showing.
-            hamscene_fill(mx + 1, cast[int32](menu_box_y + 2
-                          + cast[int64](nc) * MENU_ROW_H),
-                          cast[int32](MENU_W - 2), cast[int32](MENU_ROW_H),
-                          cast[Ptr[uint8]]("#d3e3fb"))
-        _glyphs(menu_box_x + 10, pry, cast[Ptr[uint8]]("Linux apps"), fg,
-                cur_bold)
-        # right-pointing chevron marking the sub-menu.
-        _glyphs(menu_box_x + MENU_W - 16, pry, cast[Ptr[uint8]](">"), fg,
-                cur_bold)
-        # The child fly-out popup with the Linux-ns apps.
-        if sub_open != 0:
+        # One parent row per ATTACHED distribution, named for it — hovering
+        # one opens its child fly-out. No distribution attached draws no rows
+        # here at all, which is the honest picture of a machine with no
+        # distribution namespace on it.
+        di: uint64 = 0
+        while di < dm_count:
+            prtop: int64 = menu_box_y + 2 + cast[int64](nc + di) * MENU_ROW_H
+            pry: int64 = prtop + 3
+            if sub_open != 0 and _sub_idx() == di:
+                # highlight the parent row while its fly-out is showing.
+                hamscene_fill(mx + 1, cast[int32](prtop),
+                              cast[int32](MENU_W - 2), cast[int32](MENU_ROW_H),
+                              cast[Ptr[uint8]]("#d3e3fb"))
+            _dm_mklabel(di)
+            _glyphs(menu_box_x + 10, pry, &_dm_label[0], fg, cur_bold)
+            # right-pointing chevron marking the sub-menu.
+            _glyphs(menu_box_x + MENU_W - 16, pry, cast[Ptr[uint8]](">"), fg,
+                    cur_bold)
+            di = di + 1
+        # The child fly-out popup with that distribution's apps.
+        if sub_open != 0 and _sub_idx() < dm_count:
+            si: uint64 = _sub_idx()
             _compute_sub_box(bar)
             sh: int64 = _sub_h()
             sx: int32 = cast[int32](sub_box_x)
@@ -3192,15 +3445,18 @@ def _emit_panel(bar: int64, btime: uint64):
             hamscene_roundrect(sx + 1, sy + 1, cast[int32](SUBMENU_W) - 2,
                                cast[int32](sh) - 2, 7,
                                cast[Ptr[uint8]]("#f7f8fa"))
-            if am_linux_count == 0:
-                # disabled placeholder — the feature is present but empty.
-                _glyphs(sub_box_x + 10, sub_box_y + 5,
-                        cast[Ptr[uint8]]("No Linux apps installed"),
+            if dm_apps[si] == 0:
+                # Disabled placeholder. The namespace IS attached; it just
+                # ships no launchers — a different answer from "there is no
+                # such distribution", which shows no section at all.
+                _dm_mkempty(si)
+                _glyphs(sub_box_x + 10, sub_box_y + 5, &_dm_empty[0],
                         cast[Ptr[uint8]]("#909090"), cur_bold)
             else:
+                base: uint64 = _dm_start(si)
                 li: uint64 = 0
-                while li < am_linux_count:
-                    idx: uint64 = nc + li
+                while li < dm_apps[si]:
+                    idx: uint64 = base + li
                     sry: int64 = sub_box_y + 5 + cast[int64](li) * MENU_ROW_H
                     _glyphs(sub_box_x + 10, sry, &am_name[idx][0], fg,
                             cur_bold)
@@ -3593,13 +3849,47 @@ def _launch_appmenu():
         _writeall(1, cast[Ptr[uint8]]("[panel] launched /bin/hamappmenu -self\n"))
 
 
+# Is the separate categorized menu client actually installed? Cached (-1
+# unknown, 0 absent, 1 present).
+#
+# THIS IS NOT A DEFENSIVE CHECK, it is a bug being closed. #263 pointed the
+# Applications button at /bin/hamappmenu, a separate v2 window client, instead
+# of the panel's own in-panel dropdown. hamnix-linux's image does not build
+# hamappmenu (it is not in scripts/hamlinux_image.sh's APPS list), so on this
+# line the button spawned a program that does not exist and the menu never
+# appeared -- measured: the click is delivered, the panel drains the event,
+# `[panel] launched /bin/hamappmenu -self` is printed, and nothing opens. A
+# claim of a launch with no window is precisely the success-shaped answer this
+# tree keeps being bitten by, so the button now falls back to the dropdown the
+# panel draws itself, and says once which one it is using.
+_appmenu_present: int32 = -1
+def _appmenu_available() -> int32:
+    if _appmenu_present < 0:
+        fd: int32 = sys_open(cast[Ptr[char]]("/bin/hamappmenu"))
+        if fd >= 0:
+            sys_close(fd)
+            _appmenu_present = 1
+            _writeall(1, cast[Ptr[uint8]]("[panel] Applications button -> /bin/hamappmenu\n"))
+        else:
+            _appmenu_present = 0
+            _writeall(1, cast[Ptr[uint8]]("[panel] no /bin/hamappmenu; Applications button -> the panel's own dropdown\n"))
+    return _appmenu_present
+
+
 # The Applications button click TOGGLES the categorized Applications menu
 # (/bin/hamappmenu), mirroring the tray inbox toggle: if our last-spawned menu
 # is still up, ask it to close and do NOT stack a duplicate; otherwise spawn a
 # fresh one. #263: previously this toggled a FLAT in-panel dropdown, so the
 # user never saw the categorized fly-out menu that already shipped as a
-# separate v2 client — the panel now defaults to it.
+# separate v2 client — the panel now defaults to it WHEN IT IS THERE.
 def _toggle_appmenu():
+    if _appmenu_available() == 0:
+        if menu_open != 0:
+            menu_open = 0
+            sub_open = 0
+        else:
+            menu_open = 1
+        return
     if _appmenu_alive(appmenu_pid) != 0:
         p9_note(appmenu_pid, cast[Ptr[uint8]]("terminate"))
         return
@@ -3697,6 +3987,121 @@ def _launch_linux_term(prog: Ptr[char]):
         _writeall(1, cast[Ptr[uint8]]("[panel] launched (linux term) "))
         _writeall(1, cast[Ptr[uint8]](prog))
         _writeall(1, cast[Ptr[uint8]]("\n"))
+
+
+# ---- launching INTO a named distribution namespace ------------------
+# Both of these carry ONE thing across the boundary: the distribution's NAME.
+# Not a path, not a device, not a descriptor — the same thing `bind` falls
+# back to when it cannot open a block device to read a volume label
+# (docs/linux_distro_namespaces.md §2.4). The panel never learns which medium
+# is behind `alpine`, and does not need to.
+#
+# A CLI app (freedesktop Terminal=true) has no window surface, so it is hosted
+# in a rendered native terminal, which is handed the literal command text
+# `enter <name> { <prog> }`. That works because a shell parses text: the
+# NAME is a word in a command line, and hamtermscene's shell has the template
+# captured (etc/rc.de-user sources /etc/rc.distros).
+#
+# A GUI app cannot go that way, and this is the part worth stating plainly:
+# hamsh's `enter` takes a namespace VALUE, not a string, so `enter $NAME { }`
+# cannot be written in a shared rc. So the launcher rc is GENERATED PER NAME
+# at image-build time from the same /etc/distros this menu reads —
+# /etc/rc.de-ns/<name>, five lines, no hand-written copy per distribution
+# (scripts/hamlinux_image.sh). Adding Fedora is still a line in a file.
+_dn_argv: Array[4, uint64]
+_dn_sh:   Array[16, uint8]
+
+# "/etc/rc.de-ns/<name>" into _dm_rc; "/bin/hamsh" into _dn_sh.
+def _dn_paths(si: uint64):
+    pre: Ptr[uint8] = cast[Ptr[uint8]]("/etc/rc.de-ns/")
+    p: uint64 = 0
+    while pre[p] != 0:
+        _dm_rc[p] = pre[p]
+        p = p + 1
+    k: uint64 = 0
+    while k < dm_name_len[si] and p < 62:
+        _dm_rc[p] = dm_name[si][k]
+        p = p + 1
+        k = k + 1
+    _dm_rc[p] = 0
+    sh: Ptr[uint8] = cast[Ptr[uint8]]("/bin/hamsh")
+    p = 0
+    while sh[p] != 0:
+        _dn_sh[p] = sh[p]
+        p = p + 1
+    _dn_sh[p] = 0
+
+
+# GUI app: `/bin/hamsh /etc/rc.de-ns/<name> <prog>`. hamsh main() stamps
+# HAMNIX_DE_PROG from argv[2]; the generated rc captures that ONE namespace
+# template, sets the Wayland client environment and runs
+# `enter <name> { $HAMNIX_DE_PROG }`.
+def _launch_distro_ns(si: uint64, prog: Ptr[char]):
+    _dn_paths(si)
+    _dn_argv[0] = cast[uint64](&_dn_sh[0])
+    _dn_argv[1] = cast[uint64](&_dm_rc[0])
+    _dn_argv[2] = cast[uint64](prog)
+    _dn_argv[3] = 0
+    pid: int32 = spawn_detached(cast[Ptr[char]](&_dn_sh[0]), &_dn_argv[0],
+                                -2, -2, cast[Ptr[uint64]](0))
+    _writeall(1, cast[Ptr[uint8]]("[panel] launch in ns "))
+    _writeall(1, &dm_name[si][0])
+    _writeall(1, cast[Ptr[uint8]](" -> "))
+    _writeall(1, cast[Ptr[uint8]](prog))
+    if pid < 0:
+        _writeall(1, cast[Ptr[uint8]](" FAILED to spawn"))
+    _writeall(1, cast[Ptr[uint8]]("\n"))
+
+
+# CLI app: a rendered native terminal running `enter <name> { <prog> }`.
+def _launch_distro_term(si: uint64, prog: Ptr[char]):
+    pre: Ptr[uint8] = cast[Ptr[uint8]]("enter ")
+    q: uint64 = 0
+    while pre[q] != 0:
+        _dm_cmd[q] = pre[q]
+        q = q + 1
+    k: uint64 = 0
+    while k < dm_name_len[si] and q < 40:
+        _dm_cmd[q] = dm_name[si][k]
+        q = q + 1
+        k = k + 1
+    mid: Ptr[uint8] = cast[Ptr[uint8]](" { ")
+    r: uint64 = 0
+    while mid[r] != 0:
+        _dm_cmd[q] = mid[r]
+        q = q + 1
+        r = r + 1
+    pp: Ptr[uint8] = cast[Ptr[uint8]](prog)
+    r = 0
+    while pp[r] != 0 and q < 218:
+        _dm_cmd[q] = pp[r]
+        q = q + 1
+        r = r + 1
+    _dm_cmd[q] = 32                                   # ' '
+    q = q + 1
+    _dm_cmd[q] = 125                                  # '}'
+    q = q + 1
+    _dm_cmd[q] = 0
+    _lt_argv[0] = cast[uint64](&_lt_term[0])
+    _lt_argv[1] = cast[uint64](&_dm_cmd[0])
+    _lt_argv[2] = 0
+    pid: int32 = spawn_detached(cast[Ptr[char]](&_lt_term[0]), &_lt_argv[0],
+                                -2, -2, cast[Ptr[uint64]](0))
+    _writeall(1, cast[Ptr[uint8]]("[panel] launch in terminal: "))
+    _writeall(1, &_dm_cmd[0])
+    if pid < 0:
+        _writeall(1, cast[Ptr[uint8]](" FAILED to spawn"))
+    _writeall(1, cast[Ptr[uint8]]("\n"))
+
+
+# Dispatch one fly-out row: section `si`, model slot `idx`.
+def _launch_distro(si: uint64, idx: uint64):
+    if si >= dm_count or idx >= am_count:
+        return
+    if am_term[idx] != 0:
+        _launch_distro_term(si, cast[Ptr[char]](&am_prog[idx][0]))
+    else:
+        _launch_distro_ns(si, cast[Ptr[char]](&am_prog[idx][0]))
 
 
 # ---- DE launch-queue drain (#99) -----------------------------------
@@ -3912,12 +4317,15 @@ def _insert_index_at_flow(flow: int64) -> int64:
 def _handle_menu_hover(x: int64, y: int64, bar: int64) -> int32:
     _compute_menu_box(bar)
     nc: uint64 = _native_count()
-    prtop: int64 = menu_box_y + 2 + cast[int64](nc) * MENU_ROW_H
-    prbot: int64 = prtop + MENU_ROW_H
+    ptop: int64 = menu_box_y + 2 + cast[int64](nc) * MENU_ROW_H
+    pbot: int64 = ptop + cast[int64](dm_count) * MENU_ROW_H
+    # WHICH parent row, not just "a parent row": with N distributions the
+    # answer has to say which fly-out to open, or hovering Alpine would leave
+    # Debian's showing.
     over_parent: int32 = 0
     if x >= menu_box_x and x < menu_box_x + MENU_W \
-            and y >= prtop and y < prbot:
-        over_parent = 1
+            and y >= ptop and y < pbot:
+        over_parent = cast[int32]((y - ptop) / MENU_ROW_H) + 1
     over_child: int32 = 0
     if sub_open != 0:
         _compute_sub_box(bar)
@@ -3926,11 +4334,13 @@ def _handle_menu_hover(x: int64, y: int64, bar: int64) -> int32:
             over_child = 1
     over_native: int32 = 0
     if x >= menu_box_x and x < menu_box_x + MENU_W \
-            and y >= menu_box_y + 2 and y < prtop:
+            and y >= menu_box_y + 2 and y < ptop:
         over_native = 1
     want: int32 = sub_open
-    if over_parent != 0 or over_child != 0:
-        want = 1
+    if over_parent != 0:
+        want = over_parent
+    elif over_child != 0:
+        want = sub_open
     elif over_native != 0:
         want = 0
     # otherwise (pointer off both popups) leave the state as-is (no flicker).
@@ -3948,23 +4358,19 @@ def _handle_click(x: int64, y: int64, bar: int64) -> int32:
     if menu_open != 0 and menu_slot >= 0:
         _compute_menu_box(bar)
         nc: uint64 = _native_count()
-        # 1) A click inside the open "Linux apps" child fly-out launches that
-        #    Linux-ns app (via `enter linux`) and dismisses the whole menu.
-        if sub_open != 0:
+        # 1) A click inside the open child fly-out launches that
+        #    distribution's app (via `enter <name> { … }`) and dismisses the
+        #    whole menu.
+        if sub_open != 0 and _sub_idx() < dm_count:
+            si: uint64 = _sub_idx()
             _compute_sub_box(bar)
             if x >= sub_box_x and x < sub_box_x + SUBMENU_W \
                     and y >= sub_box_y and y < sub_box_y + _sub_h():
-                if am_linux_count > 0:
+                if dm_apps[si] > 0:
                     li: int64 = (y - sub_box_y - 2) / MENU_ROW_H
-                    if li >= 0 and cast[uint64](li) < am_linux_count:
-                        idx: uint64 = nc + cast[uint64](li)
-                        # Terminal=true CLI apps (no Wayland surface) must be
-                        # hosted in a rendered terminal, else clicking opens
-                        # nothing; GUI Wayland apps launch directly.
-                        if am_term[idx] != 0:
-                            _launch_linux_term(cast[Ptr[char]](&am_prog[idx][0]))
-                        else:
-                            _launch_linux(cast[Ptr[char]](&am_prog[idx][0]))
+                    if li >= 0 and cast[uint64](li) < dm_apps[si]:
+                        idx: uint64 = _dm_start(si) + cast[uint64](li)
+                        _launch_distro(si, idx)
                 menu_open = 0
                 sub_open = 0
                 return 1
@@ -3978,13 +4384,15 @@ def _handle_click(x: int64, y: int64, bar: int64) -> int32:
                 menu_open = 0
                 sub_open = 0
                 return 1
-            if row >= 0 and cast[uint64](row) == nc:
-                # the "Linux apps" parent row: toggle the fly-out (also lets a
+            if row >= 0 and cast[uint64](row) >= nc \
+                    and cast[uint64](row) < nc + dm_count:
+                # a distribution's parent row: toggle ITS fly-out (also lets a
                 # tap open it, not just hover) — keep the main menu open.
-                if sub_open != 0:
+                want: int32 = cast[int32](cast[uint64](row) - nc) + 1
+                if sub_open == want:
                     sub_open = 0
                 else:
-                    sub_open = 1
+                    sub_open = want
                 return 1
             # a click in the empty tail of the box: dismiss.
             menu_open = 0
@@ -4672,9 +5080,19 @@ def _drain_events(pi: uint64, sw: int64, sh: int64) -> int32:
             i = j
         else:
             i = i + 1
-    # The Linux fly-out is a child of the dropdown: if the dropdown closed
-    # (any dismiss path), drop the fly-out too.
-    if menu_open == 0:
+    # The fly-out is a child of the dropdown: if the dropdown closed (any
+    # dismiss path), drop the fly-out too.
+    #
+    # `pre_menu != 0` is load-bearing and was not there. `sub_open` is ONE
+    # global but `menu_open` is PER PANEL (restored from pw_menu[pi] by
+    # _select_panel), and this image ships two panels. So draining an event on
+    # the panel that does NOT have the dropdown open -- the bottom taskbar,
+    # under a pointer on its way somewhere -- read its own menu_open of 0 and
+    # closed the OTHER panel's fly-out. The dropdown stayed up, the fly-out
+    # vanished, and nothing anywhere said why: exactly the shape of a menu that
+    # half-works. Now the fly-out is dropped only when THIS panel's dropdown
+    # actually closed during THIS drain.
+    if menu_open == 0 and pre_menu != 0:
         sub_open = 0
     # persist this panel's menu state; if the menu OR the context menu toggled
     # (or the context menu changed height), the window must grow/shrink —
@@ -4959,14 +5377,23 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     _apnl: uint64 = _u64_to_dec(am_count, &_apn[0])
     _apn[_apnl] = 0
     _writeall(1, &_apn[0])
-    # Explicit Linux-section count so the serial log self-documents that the
-    # /n/linux read-bind was scanned (0 = no #distro apps found / bind empty).
-    _writeall(1, cast[Ptr[uint8]](" (linux section: "))
-    _lxn: Array[24, uint8]
-    _lxnl: uint64 = _u64_to_dec(am_linux_count, &_lxn[0])
-    _lxn[_lxnl] = 0
-    _writeall(1, &_lxn[0])
-    _writeall(1, cast[Ptr[uint8]](")\n"))
+    _writeall(1, cast[Ptr[uint8]]("\n"))
+    # ONE LINE PER DISTRIBUTION SECTION, naming it and its count. The old
+    # single "(linux section: N)" could not distinguish "no distributions" from
+    # "one distribution with nothing in it", and both were printed as 0.
+    _dsi: uint64 = 0
+    while _dsi < dm_count:
+        _writeall(1, cast[Ptr[uint8]]("[panel] distro section "))
+        _writeall(1, &dm_name[_dsi][0])
+        _writeall(1, cast[Ptr[uint8]](": "))
+        _lxn: Array[24, uint8]
+        _lxnl: uint64 = _u64_to_dec(dm_apps[_dsi], &_lxn[0])
+        _lxn[_lxnl] = 0
+        _writeall(1, &_lxn[0])
+        _writeall(1, cast[Ptr[uint8]](" apps\n"))
+        _dsi = _dsi + 1
+    if dm_count == 0:
+        _writeall(1, cast[Ptr[uint8]]("[panel] no distribution namespace attached under /n\n"))
 
     btime: uint64 = _read_btime()
 

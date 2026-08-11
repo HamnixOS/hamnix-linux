@@ -65,6 +65,18 @@
 #                       proven is that the WINDOW PATH is not Debian-specific,
 #                       and a browser would prove that no better while taking
 #                       400 MB to do it.
+#   xterm               the one package here that is in the set for a reason
+#                       OTHER than the window path: it is the only member that
+#                       ships a `.desktop` FILE.  The DE application menu is
+#                       driven by /usr/share/applications/*.desktop, and before
+#                       this the only such file in the whole Alpine tree was
+#                       `org.freedesktop.Xwayland.desktop`, which carries
+#                       NoDisplay=true and is correctly hidden -- so an Alpine
+#                       section in the menu could only ever have been empty,
+#                       and "Alpine has no applications" would have looked
+#                       exactly like "the scan is broken".  xterm also happens
+#                       to be the useful thing to put there: an Alpine shell,
+#                       in a window, from the menu.
 #   xkeyboard-config    NOT OPTIONAL, and Debian never had to say so.  Alpine's
 #                       `xwayland` package depends on xkbcomp but not on the
 #                       keymap DATA, so the server starts, fails to compile a

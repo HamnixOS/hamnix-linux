@@ -33,7 +33,7 @@ rather than argued:
 | Wayland | `user/wsyswl.ad`, a Wayland compositor in Adder. Firefox runs as a native Wayland client with its menus as separate windows; XWayland carries X11 clients. |
 | Windows *inside* a namespace | `jwm`, the same one and the same configuration (`etc/jwmrc.linux` → `/etc/jwm/hamnix.jwmrc`) in Debian and Alpine. Reparenting, a real title bar, 66 `_NET_SUPPORTED` atoms, `_NET_WORKAREA` the full screen, no D-Bus and no settings daemon. `xdotool` move and resize both take effect and the client stays `IsViewable`, for `xterm` and for Firefox; **Steam's `Sign in to Steam` is `IsViewable` at 700x440+290+180 and in `_NET_CLIENT_LIST`** where matchbox left it `IsUnMapped`. It costs **0.5 MiB and one new package** in Debian (Firefox had already installed all sixteen of its dependencies) and **+28.5 MiB** in the *graphical* Alpine image, measured by building it both ways; `HAMLINUX_ALPINE_GUI=0` is still 26 MiB. `docs/linux_window_manager.md` has the table for every candidate, including why openbox — the most EWMH-complete of them — costs 57.9 MiB here, and why **rootless Xwayland** is the better long-term answer and its own piece of work. |
 | Debian | `enter debian { sh }` — bookworm on its own filesystem, amd64+i386. Works **from a uid-1001 desktop terminal**, and something inside can build a container (`bwrap --unshare-user`). The root switch is `MS_MOVE` + `chroot`, what `switch_root(8)` does: `pivot_root` returns EINVAL on an initramfs boot's unattached `rootfs`. `glxgears:i386` renders on the Hamnix desktop through XWayland → `wsyswl` → `wsysd` → `/dev/fb`. |
-| Distributions | **Two, at once.** `#distro/<name>` is a parameterised subtree server; `/etc/distros` maps a name to a medium **by ext4 volume label**, so which disk is `/dev/vda` cannot silently decide which distribution you entered. `enter alpine { … }` (musl, 3.24.1) and `enter debian { … }` (glibc, 12.15) both work in ONE boot from the console AND as uid 1001 — `tests/linux/two_namespaces.sh`, with a negative control that `/etc/alpine-release` is invisible inside Debian. An unprivileged process cannot open a block device to read a label, so `bind` falls back to the mount point the boot already posted the server at: **the name is what crosses the privilege boundary.** Alpine costs **26 MiB** without graphics, 333 MiB with; Debian is 4.5 GiB. `docs/linux_distro_namespaces.md`. |
+| Distributions | **Two, at once, on the live boot AND on an installed disk.** `#distro/<name>` is a parameterised subtree server; `/etc/distros` maps a name to a medium **by ext4 volume label**, so which disk is `/dev/vda` cannot silently decide which distribution you entered. `enter alpine { … }` (musl, 3.24.1) and `enter debian { … }` (glibc, 12.15) both work in ONE boot from the console AND as uid 1001 — `tests/linux/two_namespaces.sh`, with a negative control that `/etc/alpine-release` is invisible inside Debian. An unprivileged process cannot open a block device to read a label, so `bind` falls back to the mount point the boot already posted the server at: **the name is what crosses the privilege boundary.** Alpine costs **26 MiB** without graphics, 333 MiB with; Debian is 4.5 GiB. Each has its own section in the DE application menu, named for it, driven from `/etc/distros` rather than from a compiled-in path. `etc/rc.boot.installed` sources the same generated `/etc/rc.distros` the live boot does, so `enter alpine` and `enter debian` survive a reboot into an installed system -- `tests/linux/installed_distros.sh`, the boot nobody had ever run. `docs/linux_distro_namespaces.md`. |
 | Audio | `/dev/audio`, `/dev/audioctl`, `/dev/audioin` on intel-hda, ported from Hamnix's `audio_cdev.ad` + `hda.ad`. Proven by FFT on a WAV captured out of QEMU: 1000.28 Hz, 444.57 Hz and a 660.90 Hz sine, right durations, square-wave harmonics. `arecord` delivers 97.4% of a 48 kHz stereo second. |
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
@@ -132,20 +132,58 @@ same failure this project exists to beat.
   with **no compositor at all** — booting to a black screen while rc.5 printed
   `compositor started`. Failed links are now named separately, with their build
   logs, and wsysd/hamsh/hamdesktop/hampanelscene failing to build exits 1.
-* **Three things are still Debian-shaped, and are named rather than hidden.**
-  (1) `user/hampanelscene.ad`'s app menu has ONE "Linux" section at the literal
-  path `/n/linux/usr/share/applications`; carrying N distributions means
-  driving that scan from `/etc/distros`, which is a real change to the panel's
-  Adder. It is inert on this line today — `etc/rc.d/rc.5.linux` never binds
-  `/n/linux` — so nothing regressed and nothing was gained.
-  (2) `user/install.ad` writes ONE named root, `distro distro`, into the
-  installed disk's `.hamnix-roots` sentinel; a second distribution on an
-  INSTALLED disk needs a second subtree and a second line, and was not tested
-  here (all of this was verified on the live/initramfs boot).
+* **One thing is still Debian-shaped. Two were, and are not any more.**
+  (1) **DONE — the DE application menu carries N distributions.**
+  `user/hampanelscene.ad` no longer holds a literal
+  `/n/linux/usr/share/applications` and one "Linux" section: the scan is driven
+  by `/etc/distros`, one section per distribution actually attached under `/n`,
+  named after it. Screenshots:
+  `docs/screenshots/linux/distro-menu-{debian,alpine}.png`; gate
+  `tests/linux/distro_menu.sh`, which drives the menu open with synthetic
+  pointer events and reads the panel's DISPLAY LIST back per fly-out (Debian's
+  `Install Steam` must be drawn under the first section and NOT under the
+  second — one list drawn twice would pass a screenshot and fails this).
+  Making a dead path live found four things that were already broken and said
+  nothing: the boot rc bound the distributions AFTER starting the panel that
+  scans them; the Applications button was pointed at `/bin/hamappmenu`, which
+  this line does not build, so it spawned a missing program and printed a
+  launch; `sub_open` is one global while `menu_open` is per panel, so the
+  bottom taskbar closed the top panel's fly-out on any pointer event; and
+  Alpine's only `.desktop` file is `NoDisplay=true`, so its section could only
+  ever have been empty. `docs/linux_distro_namespaces.md` §8.
+  (2) **DONE, and `user/install.ad` was the wrong file.** `.hamnix-roots` is
+  read by the HAMNIX KERNEL; nothing on this line reads it — `#sysroot` is a
+  device from the command line and `bind` mounts it. An installed
+  hamnix-linux disk gets its distributions from the same two labelled
+  filesystems the live boot uses, so it needed no second subtree and no
+  sentinel line. What it needed was for `etc/rc.boot.installed` to do what the
+  live rc does, and that file had **no distribution bind and no `ns clean { }`
+  template in it at all**: `enter debian { sh }` on an installed system
+  answered `not a namespace template`. The subsystem worked on every boot that
+  is thrown away and none that persist. Both rcs now `source` a generated
+  `/etc/rc.distros`; `HAMLINUX_DISK_RC` gives an installed disk the hook it
+  never had, which is why it was the one boot never under test. Gate:
+  `tests/linux/installed_distros.sh`, 12 PASS — UEFI boot of a real installed
+  disk, both namespaces, both uids, negative control.
+  `docs/linux_distro_namespaces.md` §9.
   (3) `tests/linux/hamnix_x11session.sh` is Debian's session script; Alpine's
   is a separate one baked into its image, and the two share their two
   hardest-won lines by copy. Worth merging when there is a third.
   `docs/linux_distro_namespaces.md` §7.
+* **Launching a GUI app FROM the distribution fly-out does not work.** The menu
+  draws and hit-tests correctly; clicking spawns
+  `/bin/hamsh /etc/rc.de-ns/<name> <prog>` (generated per name, because hamsh's
+  `enter` takes a namespace VALUE so `enter $NAME { }` cannot be written), and
+  that rc parses, drops to uid 1001, and reaches `enter <name>` — where the
+  FIRST bind of the template, the root switch, fails ENOENT
+  (`chdir("/n/<name>")` in the entered child). The identical five lines work at
+  uid 1001 from a console shell and a desktop terminal
+  (`two_namespaces.sh`, `enter_user_run.sh`), so it is something about this
+  SPAWNED shell's namespace, not the template or the drop. Three shapes of the
+  launcher rc were built and measured (full bind surface, none, three); all
+  three fail, differing only in how many binds fail. `distro_menu.sh` prints it
+  as a `GAP` line every run rather than letting it be rediscovered.
+  `docs/linux_distro_namespaces.md` §8.4.
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software

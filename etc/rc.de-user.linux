@@ -42,30 +42,23 @@ bind '#p' /proc
 bind '#s' /srv
 bind '#/' /n
 
-# The Debian namespace, captured as a template and entered on demand. Nothing
-# is granted by capturing it: `ns clean { }` is a description, and what an
-# `enter` switches to is the Debian root, never the native one.
-debian = ns clean {
-    bind '#distro/debian' /
-    bind '#c' /dev
-    bind '#p' /proc
-    bind '#s' /srv
-    bind '#/' /n
-}
-# The alias, kept working, deliberately second.
+# EVERY distribution namespace, captured as a template and entered on demand.
+# Nothing is granted by capturing one: `ns clean { }` is a description, and
+# what an `enter` switches to is that distribution's root, never the native
+# one. A session that never types either word pays nothing for having both.
+#
+# This used to be the same five lines written out once per distribution, in
+# this file AND in etc/rc.boot.linux AND in etc/rc.boot.installed -- three
+# copies that had to be kept in step by hand, and were not: the installed one
+# had none of them. /etc/rc.distros is generated from /etc/distros by
+# scripts/hamlinux_image.sh and sourced by all three, so `enter alpine { sh }`
+# means the same thing on the console, in a desktop terminal, and after a
+# reboot into an installed disk, by construction rather than by diligence.
+source '/etc/rc.distros'
+# The alias, kept working, deliberately after the real names. An alias is not
+# a row in the table, so it is written out rather than generated.
 linux = ns clean {
     bind '#distro/debian' /
-    bind '#c' /dev
-    bind '#p' /proc
-    bind '#s' /srv
-    bind '#/' /n
-}
-# Alpine, the second distribution namespace, available to the desktop terminal
-# at the same time and by the same verb: `enter alpine { sh }`. Both templates
-# are captured here and NEITHER is entered -- capturing grants nothing, and a
-# session that never types either word pays nothing for having both.
-alpine = ns clean {
-    bind '#distro/alpine' /
     bind '#c' /dev
     bind '#p' /proc
     bind '#s' /srv

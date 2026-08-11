@@ -42,7 +42,37 @@ ifconfig gw 10.0.2.2
 ifconfig dns 10.0.2.3
 echo 'rc.boot: network configured'
 
+# --- the distribution namespaces -------------------------------------
+# THE PART NOBODY HAD EVER RUN. Every line of the two-namespace work was
+# verified on the live/initramfs boot; this file -- the boot of a machine
+# somebody actually installed -- had no distribution bind and no `ns clean { }`
+# template in it at all, so `enter debian { sh }` on an installed system
+# answered `hamsh: enter: linux is not a namespace template`. The subsystem
+# the whole design exists to offer did not exist on the only boot that
+# persists.
+#
+# It is the same three things the initramfs boot does, and it is deliberately
+# the SAME TEXT: /etc/rc.distros is generated once from /etc/distros by
+# scripts/hamlinux_image.sh and copied onto the root partition with everything
+# else, so the installed system and the live one cannot drift.
+#
+# The media themselves are found by ext4 volume LABEL, which is why this works
+# at all on a machine with more disks than the live boot had: the installed
+# root is /dev/vda2 here and the distribution disks are whatever the firmware
+# enumerated after it. A label travels with the filesystem; /dev/vdN does not.
+bind '#distro' /n/distro
+source '/etc/rc.distros'
+linux = ns clean {
+    bind '#distro/debian' /
+    bind '#c' /dev
+    bind '#p' /proc
+    bind '#s' /srv
+    bind '#/' /n
+}
+
 # --- the desktop -----------------------------------------------------
+# After the binds, not before: the panel scans /n/<name> at startup, so a
+# desktop brought up first has no distribution sections in its menu.
 source '/etc/rc.d/rc.5'
 
 echo 'rc.boot: up'
