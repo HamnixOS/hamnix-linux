@@ -73,7 +73,8 @@ if [ ! -f "$SC_OBJ" ] || [ user/linux-syscalls.c -nt "$SC_OBJ" ] \
         || [ user/linux-wsys.h -nt "$SC_OBJ" ] \
         || [ user/linux-fdns.h -nt "$SC_OBJ" ] \
         || [ user/linux-net.h -nt "$SC_OBJ" ] \
-        || [ user/linux-auth.h -nt "$SC_OBJ" ]; then
+        || [ user/linux-auth.h -nt "$SC_OBJ" ] \
+        || [ user/linux-audio.h -nt "$SC_OBJ" ]; then
     "$CLANG" -O2 -Iuser -c user/linux-syscalls.c -o "$SC_OBJ" || {
         echo "[hamlinux] ERROR: could not compile user/linux-syscalls.c" >&2
         exit 1
@@ -137,6 +138,19 @@ if [ ! -f "$AU_OBJ" ] || [ user/linux-auth.c -nt "$AU_OBJ" ] \
     }
 fi
 
+# /dev/audio, /dev/audioctl and /dev/audioin -- the port of Hamnix's
+# drivers/audio/audio_cdev.ad onto ALSA. It talks to /dev/snd/pcmC*D*p through
+# the kernel's own PCM ioctls, so there is no libasound to link and nothing
+# extra for the initramfs to carry.
+AUD_OBJ="$OUT_DIR/.linux-audio.o"
+if [ ! -f "$AUD_OBJ" ] || [ user/linux-audio.c -nt "$AUD_OBJ" ] \
+        || [ user/linux-audio.h -nt "$AUD_OBJ" ]; then
+    "$CLANG" -O2 -Iuser -c user/linux-audio.c -o "$AUD_OBJ" || {
+        echo "[hamlinux] ERROR: could not compile user/linux-audio.c" >&2
+        exit 1
+    }
+fi
+
 LL="${OUT_ELF%.elf}.ll"
 [ "$LL" = "$OUT_ELF" ] && LL="$OUT_ELF.ll"
 
@@ -151,7 +165,30 @@ if ! grep -q "^define i64 @main(" "$LL"; then
     exit 11
 fi
 
-if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" "$NET_OBJ" "$AU_OBJ" \
+# --- per-program extra objects --------------------------------------------
+# A few programs need more than the common runtime, and THE BUILD SCRIPT is
+# where that has to be known -- not in one caller.
+#
+# This exists because it was got wrong. wsysd selects the Vulkan rasterization
+# backend, so it needs user/linux-vk.c (the ICD shim), user/linux-vkhost.c
+# (the glibc floor that makes lib/vk/vk_core.ad link at all) and -ldl. That
+# was taught to scripts/hamlinux_image.sh alone, so the image built a working
+# compositor and EVERY OTHER PATH -- this script invoked directly, which is
+# what the docs tell you to do, and scripts/hamlinux_runsweep.sh -- failed to
+# link the single most important program in the distribution with a wall of
+# undefined hvk_* symbols. The run sweep caught it; a person following the
+# README would have hit it first.
+#
+# They are NOT in the common list on purpose: nothing that draws a rectangle
+# should acquire libdl and a Vulkan device bring-up. Per-program is the right
+# granularity; one caller knowing about it was the bug.
+EXTRA_OBJS=()
+case "$(basename "$IN_AD" .ad)" in
+    wsysd) EXTRA_OBJS=(user/linux-vk.c user/linux-vkhost.c -ldl) ;;
+esac
+
+if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" "$NET_OBJ" "$AU_OBJ" "$AUD_OBJ" \
+        "${EXTRA_OBJS[@]}" \
         $TLSLIBS -lcrypt \
         "$@" -o "$OUT_ELF" 2>"$LL.link.log"; then
     sed 's/^/[link] /' "$LL.link.log" >&2
