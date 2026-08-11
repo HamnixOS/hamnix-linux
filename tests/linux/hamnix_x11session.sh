@@ -44,20 +44,29 @@ rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
 # the Xwayland version rather than of the display. wsyswl publishes the real
 # geometry as a file beside its socket, which is the one name that crosses the
 # namespace boundary; read it and tell Xwayland.
-GEOMOPT=""
+#
+# -geometry ONLY EXISTS FROM XWAYLAND 23.1. Bookworm ships 22.1.9, which does
+# not know the option and dies with `Unrecognized option: -geometry` -- and
+# 22.1.9 is exactly the version that does not need it, because rootful
+# Xwayland took its size from the wl_output until 23.1 stopped doing that. So
+# ASK the server what it accepts rather than assuming either behaviour.
+SW=""; SH=""; GEOMOPT=""
 if [ -r "$XDG_RUNTIME_DIR/hamnix-screen" ]; then
     read -r SW SH < "$XDG_RUNTIME_DIR/hamnix-screen" || true
-    case "${SW:-}:${SH:-}" in
-        [1-9]*:[1-9]*) GEOMOPT="-geometry ${SW}x${SH}" ;;
-    esac
 fi
-if [ -n "$GEOMOPT" ]; then
-    echo "hamnix-x11session: screen $SW x $SH, from $XDG_RUNTIME_DIR/hamnix-screen" >&2
-else
-    # Not fatal -- an older wsyswl does not publish it -- but say so, because
-    # the alternative is an X screen whose size nobody chose.
-    echo "hamnix-x11session: WARNING no $XDG_RUNTIME_DIR/hamnix-screen; the X screen size is Xwayland's own default, not the display's" >&2
-fi
+case "${SW:-}:${SH:-}" in
+    [1-9]*:[1-9]*)
+        if Xwayland -help 2>&1 | grep -q -- '-geometry'; then
+            GEOMOPT="-geometry ${SW}x${SH}"
+            echo "hamnix-x11session: screen ${SW}x${SH} from $XDG_RUNTIME_DIR/hamnix-screen, passed as -geometry" >&2
+        else
+            echo "hamnix-x11session: screen ${SW}x${SH} from $XDG_RUNTIME_DIR/hamnix-screen; this Xwayland has no -geometry, so it must take the size from the wl_output" >&2
+        fi ;;
+    *)
+        # Not fatal -- an older wsyswl does not publish it -- but say so,
+        # because the alternative is an X screen whose size nobody chose.
+        echo "hamnix-x11session: WARNING no $XDG_RUNTIME_DIR/hamnix-screen; the X screen size is Xwayland's own default, not the display's" >&2 ;;
+esac
 
 # shellcheck disable=SC2086
 Xwayland -shm -noreset $GEOMOPT :0 >/tmp/xwayland.log 2>&1 &
@@ -106,7 +115,9 @@ if command -v dbus-daemon >/dev/null 2>&1; then
         [ -e /run/dbus/system_bus_socket ] && \
             echo "hamnix-x11session: stale /run/dbus/system_bus_socket (nothing listening); removing" >&2
         rm -f /run/dbus/system_bus_socket /run/dbus/pid
-        dbus-daemon --system --fork >/dev/null 2>&1 || true
+        # Keep its complaint. "No system bus" with no reason attached is how
+        # this went unexamined for a whole pass.
+        dbus-daemon --system --fork >/tmp/dbus-system.log 2>&1 || true
         for _ in 1 2 3 4 5 6 7 8 9 10; do
             dbus-send --system --print-reply --dest=org.freedesktop.DBus \
                       / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 && break
@@ -118,6 +129,7 @@ if command -v dbus-daemon >/dev/null 2>&1; then
         echo "hamnix-x11session: system bus answering on /run/dbus/system_bus_socket" >&2
     else
         echo "hamnix-x11session: WARNING no system bus -- CEF will log a connect failure per subprocess" >&2
+        [ -s /tmp/dbus-system.log ] && sed 's/^/hamnix-x11session:   dbus-daemon: /' /tmp/dbus-system.log >&2
     fi
 fi
 if command -v dbus-launch >/dev/null 2>&1; then

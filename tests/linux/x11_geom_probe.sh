@@ -75,8 +75,15 @@ GEOMOPT=""
 if [ -r "$WORK/hamnix-screen" ]; then
     read -r PW PH < "$WORK/hamnix-screen" || true
     case "${PW:-}:${PH:-}" in
-        [1-9]*:[1-9]*) GEOMOPT="-geometry ${PW}x${PH}"
-                       ok "wsyswl published its screen size as a file (${PW}x${PH})" ;;
+        [1-9]*:[1-9]*)
+            ok "wsyswl published its screen size as a file (${PW}x${PH})"
+            # -geometry only exists from Xwayland 23.1; bookworm's 22.1.9 dies
+            # on it and is also the version that does not need it.
+            if Xwayland -help 2>&1 | grep -q -- '-geometry'; then
+                GEOMOPT="-geometry ${PW}x${PH}"
+            else
+                info "this Xwayland has no -geometry; it must size itself from the wl_output"
+            fi ;;
     esac
 fi
 [ -n "$GEOMOPT" ] || bad "wsyswl published no screen size beside its socket"

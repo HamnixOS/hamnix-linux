@@ -45,7 +45,9 @@ server socket (§8).
 | Steam client install | **works** | bootstrap pre-staged, client downloaded, `Steam client's requirements are satisfied` |
 | pressure-vessel container | **works as root** | `srt-bwrap` alive with the sniper runtime, `steamwebhelper` running inside it |
 | pressure-vessel as a user | **works** | the root switch is `MS_MOVE` onto `/`, not `chroot`, so `bwrap --unshare-user` builds a container as uid 1001 — §5, §7 |
-| Steam UI window | **not yet** | CEF loads `steamloopback.host/library.js`, creates its browser, and no window is scanned out — §6 |
+| X screen geometry | **works** | 1280x800 at 96 dpi inside the namespace; `matchbox` publishes `_NET_WORKAREA = 0,0,1280,800` — §6.1 |
+| a Chromium window, end to end | **works** | `tests/linux/x11_geom_probe.sh`: a real Chromium maps a 1000x600 toplevel through Xwayland → wsyswl → wsysd and its pixels reach the framebuffer |
+| Steam UI window | **not yet** | every Steam window is created and left `IsUnMapped`; CEF's GPU process exits twice per launch — §6.2 |
 | audio | **absent** | no `/dev/snd`, no sound device in the VM at all — §8 |
 
 ---
@@ -207,12 +209,103 @@ CONSOLE(2) "SteamApp Init - Before Login - SystemNetworkStore - ERROR
             TypeError: SteamClient.System.Network.RegisterForDeviceChanges is not a function"
 ```
 
-`xwininfo` inside the namespace shows only helper windows
-(`steamwebhelper` 200x200 and 10x10, `Steam` 64x24) — the login window is
-never mapped at a visible size. Two leads, neither confirmed: CEF's GPU process
-exits during initialisation (`viz_main_impl.cc(166)`), and the browser is
-created at `(-2147483648, -2147483648)`, which `matchbox-window-manager` does
-not move. **This is where the work stops today.**
+### 6.1 What was checked, and what it ruled out
+
+The loudest clue was `(-2147483648, -2147483648)` — `INT32_MIN`, which is what
+a toolkit uses when a geometry query gave it nothing. Three hypotheses were
+tested, in this order. **Two of them are dead, by measurement.**
+
+**The X screen is not garbage.** Inside the namespace, with Steam running:
+
+```
+xdiag: === xdpyinfo
+  dimensions:    1280x800 pixels (338x211 millimeters)
+  resolution:    96x96 dots per inch
+```
+
+That is the display's real size and a sane DPI. Nothing in our stack answers
+the screen-size question with a sentinel.
+
+**Something *is* managing the windows, and it publishes a work area.**
+`matchbox-window-manager` is running and the EWMH handshake is complete:
+
+```
+_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x200006
+_NET_WORKAREA(CARDINAL) = 0, 0, 1280, 800
+_NET_DESKTOP_GEOMETRY(CARDINAL) = 1280, 800
+_NET_ACTIVE_WINDOW(WINDOW): window id # 0x1800015
+_NET_SUPPORTED(ATOM) = _NET_WM_WINDOW_TYPE_TOOLBAR, ... _NET_WM_PING
+```
+
+A client asking "how much room have I got" gets `1280x800`, not silence.
+
+**The window path carries Chromium — which is what CEF is.**
+`tests/linux/x11_geom_probe.sh` runs the whole chain offscreen against the
+host's own Xwayland and puts a real Chromium down it: it maps a 1000x600
+toplevel and its pixels land in the framebuffer
+(`build/x11geom/chromium_offscreen.png`). So a Chromium window is not
+something this stack is incapable of showing.
+
+**What the hypotheses DID find** is written up in its own commit and is real,
+just not Steam's blocker: `wsyswl` had the screen size as the literal
+`1280x800`, so every Wayland and X11 client in the namespace was told the dev
+VM's resolution rather than the display's; and a *rootful* Xwayland stopped
+sizing itself from the `wl_output` at version 23.1, so the X screen size was
+silently a property of the Xwayland version. Both are fixed — `wsyswl` reads
+`/dev/wsys/screen` through `lib/hamscreen.ad` and publishes the answer as a
+file beside its socket, which is the one name that crosses the namespace
+boundary, and the session passes it as `-geometry` **when the server has that
+option** (22.1.9 does not, and does not need it).
+
+### 6.2 Where Steam actually stops
+
+Every Steam window on the display is **created and never mapped**:
+
+```
+0x1600003 "steamwebhelper"  200x200+0+0    Map State: IsUnMapped
+0x1600001 "steamwebhelper"   10x10+10+10   Map State: IsUnMapped
+0xa00005  ("Steam" "Steam")  64x24+0+0     Map State: IsUnMapped
+0xc00001  "steam"            10x10+10+10   Map State: IsUnMapped
+0x200101  (matchbox desktop) 1280x800+0+0  Map State: IsViewable
+```
+
+The only viewable window on the whole X screen belongs to the window manager.
+`_NET_CLIENT_LIST` names `0x1800015`, which is not in the tree any more — so a
+managed window existed at some point and went away.
+
+The UI itself is alive: the login page runs and polls, which is a thing only
+a loaded page does —
+
+```
+CONSOLE(2) "Login: Failed to poll auth session. Result 2. Transport Error: 2"
+```
+
+and the last line CEF ever writes is `atom_cache.cc(229) Add STEAM_GAME to
+kAtomsToCache`, after which nothing further happens. So Steam builds its UI,
+runs it, and never shows it.
+
+Two things are wrong around it, both measured, and neither yet proven to be
+the cause:
+
+* **CEF's GPU process exits twice per launch** —
+  `[518:518] ERROR:viz_main_impl.cc(166) Exiting GPU process due to errors
+  during initialization`, once for the GPU process and once for its fallback,
+  with no preceding error of its own. A browser whose viz compositor never
+  comes up has no first frame to map a window with. Steam's own pass-through
+  switches (`steam -cef-disable-gpu -cef-disable-gpu-compositing`) are the
+  obvious lever and the next thing to run.
+* **The system D-Bus was dead, and for the tree's signature reason.** The
+  namespace's `/run` is on the ext4 and survives reboots, so the first boot's
+  `dbus-daemon` left `/run/dbus/system_bus_socket` behind for ever; the
+  session's `[ ! -S ... ]` guard saw a socket, skipped starting the daemon,
+  and every CEF process logged `Failed to connect to socket
+  /run/dbus/system_bus_socket: Connection refused`. **Waiting for the socket
+  is not waiting for the server** — the same trap as `/tmp/.X0-lock` in §10,
+  one directory over. `hamnix_x11session.sh` now pings the bus and clears the
+  corpse; `hamnix_xdiag.sh` reports which of the two it found.
+
+**This is where the work stops today**, and the search has moved from our
+window path into Steam's own compositor bring-up.
 
 ---
 
@@ -333,6 +426,7 @@ Two more worth writing down because they cost time and are not Steam's fault:
 
 ```sh
 scripts/hamlinux_distro.sh                    # multiarch image, prints the size delta
+tests/linux/x11_geom_probe.sh                 # the window path, OFFSCREEN, no VM at all
 tests/linux/steam_probe_run.sh                # the 24-check scoreboard, headless
 tests/linux/steam_gui_run.sh \
     "/usr/local/bin/hamnix-x11session /usr/bin/glxgears" out.png 60

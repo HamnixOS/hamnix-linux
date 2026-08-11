@@ -48,6 +48,7 @@ else
     echo "xdiag: system bus DOES NOT ANSWER (socket present: $([ -e /run/dbus/system_bus_socket ] && echo yes || echo no))"
 fi
 ls -l /run/dbus/ 2>&1 | head -5
+[ -s /tmp/dbus-system.log ] && sed 's/^/xdiag: dbus-daemon: /' /tmp/dbus-system.log
 
 echo "xdiag: === Xwayland's own log"
 tail -25 /tmp/xwayland.log 2>&1

@@ -50,10 +50,35 @@ Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
 * **Steam reaches its own UI and shows no window.** It installs, brings up
-  pressure-vessel, and Chromium loads to `SteamApp Init - Before Login`; the
-  CEF GPU process exits and the browser is created at `(-2147483648, …)` —
-  which is `INT32_MIN`, i.e. a failed geometry query, not a layout choice.
+  pressure-vessel, and Chromium loads to `SteamApp Init - Before Login`.
+  What that is NOT, now measured rather than guessed (`docs/steam_namespace.md`
+  §6.1): the `(-2147483648, …)` in the CEF log is not our stack answering a
+  geometry query with a sentinel — the X screen is a real 1280x800 at 96 dpi,
+  `matchbox` is managing and publishes `_NET_WORKAREA = 0,0,1280,800`, and a
+  real Chromium — which is what CEF is — maps a window through Xwayland →
+  wsyswl → wsysd and gets its pixels onto the framebuffer. The window path is
+  not the problem.
+  Nor is it CEF's GPU process, which does exit twice per launch
+  (`viz_main_impl.cc(166)`): run with Steam's own `-cef-disable-gpu
+  -cef-disable-gpu-compositing`, those errors stop and the window tree is
+  unchanged.
+  What it IS: every window Steam creates it leaves **`IsUnMapped`** — the UI is
+  alive behind them (the login page runs and polls), and even the *launcher's*
+  `Show window`, which happens before CEF exists, puts no pixels on a
+  framebuffer sampled once a second across the three seconds it is up.
+  The next measurements are named in `docs/steam_namespace.md` §6.3 and none of
+  them is blocked: trace the X protocol for a `MapWindow`, run the session with
+  no window manager, and read what `dbus-daemon` is actually complaining about.
   Its probe is 23 PASS / 1 FAIL (the remaining one is the PulseAudio socket).
+* **The Debian namespace has no system D-Bus.** The namespace's `/run` is on
+  the ext4 and survives reboots, so the first boot's `dbus-daemon` left
+  `/run/dbus/system_bus_socket` behind and the session's `[ ! -S … ]` guard
+  then skipped starting the bus on every boot after; every CEF process logged
+  `Connection refused` against it. The stale socket is now detected by pid
+  liveness and cleared by name (`tests/linux/hamnix_x11session.sh`), and the
+  daemon still does not come up — its own complaint is now captured to
+  `/tmp/dbus-system.log` instead of being thrown away. Not fixed, but no
+  longer silent.
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software

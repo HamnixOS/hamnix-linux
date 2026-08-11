@@ -83,14 +83,6 @@ GUI_APPS=(
 )
 APPS+=("${GUI_APPS[@]}")
 
-# Applications that need more than the default object list. wsysd selects the
-# Vulkan rasterization backend (lib/vk/vk_linux.ad), so it carries the C shim
-# that dlopens the ICD, the glibc floor vk_core.ad needs in order to link at
-# all, and -ldl. These are deliberately NOT in hamlinux_build.sh's defaults:
-# only a program that actually wants a GPU should pay a libdl dependency and a
-# Vulkan device bring-up. Getting this wrong is not subtle — wsysd would
-# simply fail to link and drop out of the image — but it is silent in the
-# build log, which is why it is named here rather than assumed.
 # NO app_extra_objs() HERE. 6a27c0ec moved the per-program object list into
 # scripts/hamlinux_build.sh, which is the only place that can be right; this
 # script kept its own copy and passed it as well, so wsysd was compiled with
