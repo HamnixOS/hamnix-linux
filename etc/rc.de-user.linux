@@ -46,7 +46,7 @@ bind '#/' /n
 # is granted by capturing it: `ns clean { }` is a description, and what an
 # `enter` switches to is the Debian root, never the native one.
 debian = ns clean {
-    bind '#distro' /
+    bind '#distro/debian' /
     bind '#c' /dev
     bind '#p' /proc
     bind '#s' /srv
@@ -54,7 +54,18 @@ debian = ns clean {
 }
 # The alias, kept working, deliberately second.
 linux = ns clean {
-    bind '#distro' /
+    bind '#distro/debian' /
+    bind '#c' /dev
+    bind '#p' /proc
+    bind '#s' /srv
+    bind '#/' /n
+}
+# Alpine, the second distribution namespace, available to the desktop terminal
+# at the same time and by the same verb: `enter alpine { sh }`. Both templates
+# are captured here and NEITHER is entered -- capturing grants nothing, and a
+# session that never types either word pays nothing for having both.
+alpine = ns clean {
+    bind '#distro/alpine' /
     bind '#c' /dev
     bind '#p' /proc
     bind '#s' /srv

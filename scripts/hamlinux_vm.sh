@@ -108,6 +108,15 @@ if [ -f "$IMG/distro.ext4" ]; then
     COMMON+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe")
 fi
 
+# The SECOND distribution namespace, on its own volume for the same reason.
+# WHICH ONE IS /dev/vda IS NOT DECIDED HERE ANY MORE: the guest resolves
+# `#distro/<name>` through /etc/distros to an ext4 volume LABEL, so adding a
+# drive above or below this line cannot silently make `enter alpine` enter
+# Debian. That was the whole reason for labels -- see etc/distros.linux.
+if [ -f "$IMG/alpine.ext4" ]; then
+    COMMON+=(-drive "file=$IMG/alpine.ext4,if=virtio,format=raw,cache=unsafe")
+fi
+
 # A blank disk to INSTALL onto, when one has been made. This is what turns the
 # live boot into an installer test: user/hlinstall.ad partitions it, makes the
 # filesystems and copies the system, and then `scripts/hamlinux_vm.sh disk`
@@ -219,6 +228,9 @@ case "$MODE" in
     if [ -f "$IMG/distro.ext4" ]; then
         VENUS+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe")
     fi
+    if [ -f "$IMG/alpine.ext4" ]; then
+        VENUS+=(-drive "file=$IMG/alpine.ext4,if=virtio,format=raw,cache=unsafe")
+    fi
     exec qemu-system-x86_64 "${VENUS[@]}" "$@"
     ;;
   disk|disk-gpu)
@@ -253,6 +265,9 @@ case "$MODE" in
     if [ -w /dev/kvm ]; then DISK+=(-enable-kvm -cpu host); else DISK+=(-cpu max); fi
     if [ -f "$IMG/distro.ext4" ]; then
         DISK+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe")
+    fi
+    if [ -f "$IMG/alpine.ext4" ]; then
+        DISK+=(-drive "file=$IMG/alpine.ext4,if=virtio,format=raw,cache=unsafe")
     fi
     if [ "$MODE" = disk-gpu ]; then
         exec qemu-system-x86_64 "${DISK[@]}" -display gtk -serial mon:stdio "$@"

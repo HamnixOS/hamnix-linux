@@ -1,0 +1,29 @@
+# /etc/distros — the distribution namespaces this machine knows about.
+#
+# Staged into the image as /etc/distros. It is the DESCRIPTION that
+# `bind '#distro/<name>' <dir>` reads (user/linux-syscalls.c, distro_resolve):
+# a namespace is something you describe and then enter, so which media exist
+# and what they are called is data here rather than a compiled-in constant.
+#
+#   <name>   <source>
+#
+# A source is one of:
+#   LABEL=<fslabel>   the filesystem carrying that ext2/3/4 volume label,
+#                     found by reading superblocks off /proc/partitions.
+#                     THIS IS THE ONE TO USE. With two distro disks attached,
+#                     which one is /dev/vda is a property of the order QEMU was
+#                     handed its -drive arguments; a label travels with the
+#                     filesystem and cannot be reordered.
+#   /dev/...          a block device, mounted here
+#   /some/dir         a directory, bind-mounted here
+#
+# `default` is what bare `#distro` means -- the spelling every rc script and
+# test used when there was only one. $HAMNIX_DISTRO overrides `default` and
+# $HAMNIX_DISTRO_<NAME> overrides one entry, both without editing this file.
+#
+# Adding a distribution is adding a LINE. There is no code change in
+# `enter fedora { }` beyond building the medium and labelling it.
+
+default   LABEL=hamnix-debian
+debian    LABEL=hamnix-debian
+alpine    LABEL=hamnix-alpine

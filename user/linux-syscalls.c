@@ -28,6 +28,7 @@
  */
 
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -2193,6 +2194,248 @@ static const char *envdef(const char *k, const char *d)
     return (v && *v) ? v : d;
 }
 
+/* ------------------------------------------------------------------ *
+ * NAMED DISTRIBUTION NAMESPACES  —  `#distro/<name>`
+ *
+ * `#distro` used to mean "the one distro disk", spelled /dev/vda. That is a
+ * special case that happens to work, not a mechanism, and NORTH_STAR.md asks
+ * for the mechanism: `enter debian { }` and `enter alpine { }` at once, and
+ * `enter fedora { }` later with no code edit.
+ *
+ * THE SHAPE, and why this one.
+ *
+ *   * ONE device letter, PARAMETERISED, not one letter per distribution.
+ *     `#distro/alpine` is a name with a component, exactly like `#r/home` and
+ *     `#t/foo` already are. Adding `#alpine` to the table instead would mean a
+ *     recompile per distribution, which is the opposite of what a namespace
+ *     being DESCRIBED rather than compiled is for.
+ *
+ *   * THE MAP FROM NAME TO MEDIUM IS A FILE, `/etc/distros`. That is the Plan 9
+ *     grain and it is also Hamnix's own precedent: the Hamnix kernel parses the
+ *     rootfs partition's `.hamnix-roots` sentinel at boot and posts each NAMED
+ *     subtree as a file server. There is no kernel doing that here, so bind
+ *     reads the description itself — same idea, one less layer. Format:
+ *
+ *         # name    source
+ *         default   LABEL=hamnix-debian
+ *         debian    LABEL=hamnix-debian
+ *         alpine    LABEL=hamnix-alpine
+ *
+ *     A source is a block-device path, a directory, or `LABEL=<fslabel>`.
+ *
+ *   * THE MEDIUM IS ADDRESSED BY LABEL, not by /dev/vdN. With two distro disks
+ *     attached, which one is vda is a property of the ORDER QEMU was handed its
+ *     -drive arguments, and getting it wrong does not fail — it mounts Alpine
+ *     where Debian was asked for and everything downstream is confidently
+ *     wrong. A label is a NAME, it travels with the filesystem, and it is what
+ *     crosses the boundary here. `HAMNIX_DISTRO_<NAME>` overrides one entry and
+ *     `HAMNIX_DISTRO` overrides the default, both without touching the file.
+ *
+ * `/n/<name>` is the mount-point convention: /n/debian, /n/alpine. /n/distro
+ * stays bound as well, because user/xbridge.ad, the panel and a pile of tests
+ * spell it that way and a name that worked should keep working.
+ * ------------------------------------------------------------------ */
+
+/* The ext4/ext3/ext2 volume label, read straight out of the superblock: magic
+ * 0xEF53 at byte 1024+56, s_volume_name (16 bytes, NUL-padded) at 1024+120.
+ * No libblkid, no udev, no /dev/disk/by-label — none of which exist on an
+ * initramfs boot that has only what the Adder PID 1 bound. */
+static int fs_label(const char *dev, char *out, size_t outn)
+{
+    unsigned char sb[1024];
+    int fd = open(dev, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    ssize_t n = pread(fd, sb, sizeof sb, 1024);
+    close(fd);
+    if (n != (ssize_t)sizeof sb)
+        return 0;
+    if (!(sb[56] == 0x53 && sb[57] == 0xEF))
+        return 0;
+    size_t k = 0;
+    while (k < 16 && sb[120 + k])
+        k++;
+    if (k == 0 || k >= outn)
+        return 0;
+    memcpy(out, sb + 120, k);
+    out[k] = '\0';
+    return 1;
+}
+
+/* Which block device carries the filesystem labelled `label`.
+ *
+ * /proc/partitions is the enumerator: it is already mounted (rc.boot binds
+ * '#p' /proc before anything asks for a distro) and it lists exactly the
+ * whole-disk and partition names the kernel knows. Partitions are checked too,
+ * so a distro living on a partition of the installed disk resolves the same
+ * way as one living on a whole virtio-blk volume. */
+static const char *dev_by_label(const char *label, char *out, size_t outn)
+{
+    FILE *f = fopen("/proc/partitions", "r");
+    if (!f)
+        return NULL;
+    char line[512], name[128], path[160], got[64];
+    const char *hit = NULL;
+    while (!hit && fgets(line, sizeof line, f)) {
+        if (sscanf(line, " %*u %*u %*s %127s", name) != 1)
+            continue;
+        if (!strcmp(name, "name"))              /* the header row */
+            continue;
+        snprintf(path, sizeof path, "/dev/%s", name);
+        if (fs_label(path, got, sizeof got) && !strcmp(got, label)) {
+            snprintf(out, outn, "%s", path);
+            hit = out;
+        }
+    }
+    fclose(f);
+    return hit;
+}
+
+/* A source spec -> a path bind can act on. `LABEL=x` is resolved here; anything
+ * else is already a path. Returns NULL when a label names no attached
+ * filesystem, which is a real answer and not a reason to guess. */
+static const char *distro_source_spec(const char *spec, char *out, size_t outn)
+{
+    if (strncmp(spec, "LABEL=", 6) != 0) {
+        snprintf(out, outn, "%s", spec);
+        return out;
+    }
+    return dev_by_label(spec + 6, out, outn);
+}
+
+/* Is `path` the mount point of something? */
+static int path_is_mountpoint(const char *path)
+{
+    FILE *f = fopen("/proc/self/mountinfo", "r");
+    if (!f)
+        return 0;
+    char line[4096], mp[1024];
+    int hit = 0;
+    while (!hit && fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%*d %*d %*s %*s %1023s", mp) != 1)
+            continue;
+        if (!strcmp(mp, path))
+            hit = 1;
+    }
+    fclose(f);
+    return hit;
+}
+
+/* THE SERVER IS ALREADY POSTED AT ITS NAME.
+ *
+ * Reading a volume label means opening the block device, and a block device is
+ * root:disk 0660 -- so an unprivileged process CANNOT resolve `LABEL=` at all.
+ * That is not a bug to work around with permissions; it is the ordinary Plan 9
+ * situation. The subtree server was posted at boot, by the boot, at a NAME:
+ * etc/rc.boot.linux runs `bind '#distro/alpine' /n/alpine` while it is still
+ * root. A session that later says `bind '#distro/alpine' /` is not asking to
+ * find a disk, it is asking for the server at that name -- and the name is the
+ * one thing that crosses the privilege boundary intact.
+ *
+ * Measured, tests/linux/two_namespaces.sh: without this, uid 0 entered both
+ * namespaces and uid 1001 entered neither, with `no distribution namespace
+ * named alpine' -- from a machine that had it mounted at /n/alpine.
+ *
+ * `/n/<name>` for a named distro, and `/n/distro` for the default, which is
+ * where Debian has always been bound. Only a real mount point counts: an empty
+ * directory called /n/alpine would otherwise be entered as a namespace whose
+ * root has nothing in it, and `sh: not found` is a much worse answer than
+ * "there is no such namespace". */
+static const char *distro_mountpoint(const char *name, char *out, size_t outn)
+{
+    if (!strcmp(name, "default")) {
+        snprintf(out, outn, "/n/distro");
+        if (path_is_mountpoint(out))
+            return out;
+        return NULL;
+    }
+    snprintf(out, outn, "/n/%s", name);
+    return path_is_mountpoint(out) ? out : NULL;
+}
+
+/* The `name source` table. Blank lines and `#` comments ignored. */
+static int distro_table_lookup(const char *name, char *out, size_t outn)
+{
+    const char *tf = envdef("HAMNIX_DISTROS", "/etc/distros");
+    FILE *f = fopen(tf, "r");
+    if (!f)
+        return 0;
+    char line[512], n[128], s[256];
+    int hit = 0;
+    while (!hit && fgets(line, sizeof line, f)) {
+        char *h = strchr(line, '#');
+        if (h) *h = '\0';
+        if (sscanf(line, "%127s %255s", n, s) != 2)
+            continue;
+        if (!strcmp(n, name)) {
+            snprintf(out, outn, "%s", s);
+            hit = 1;
+        }
+    }
+    fclose(f);
+    return hit;
+}
+
+/* Resolve `#distro/<name>` (or bare `#distro`) to the medium behind it.
+ *
+ * Order, most specific first: the per-name environment override, the
+ * description file, and then — for the DEFAULT name only — /dev/vda, which is
+ * what `#distro` meant before this file existed. An explicitly named distro
+ * that resolves to nothing FAILS BY NAME; it does not fall back to the
+ * default, because entering Debian when Alpine was asked for is precisely the
+ * success-shaped wrong answer this tree keeps being bitten by. */
+static const char *distro_resolve(const char *name, char *out, size_t outn)
+{
+    int is_default = (name == NULL || *name == '\0');
+    char envkey[160], spec[256];
+    const char *r;
+
+    if (is_default) {
+        const char *e = getenv("HAMNIX_DISTRO");
+        if (e && *e && (r = distro_source_spec(e, out, outn)))
+            return r;
+        name = "default";
+    } else {
+        size_t k = 0;
+        memcpy(envkey, "HAMNIX_DISTRO_", 14);
+        k = 14;
+        for (size_t i = 0; name[i] && k < sizeof envkey - 1; i++, k++)
+            envkey[k] = (char)toupper((unsigned char)name[i]);
+        envkey[k] = '\0';
+        const char *e = getenv(envkey);
+        if (e && *e && (r = distro_source_spec(e, out, outn)))
+            return r;
+    }
+
+    if (distro_table_lookup(name, spec, sizeof spec)
+        && (r = distro_source_spec(spec, out, outn)))
+        return r;
+
+    /* The medium could not be addressed -- which for anyone but root is the
+     * NORMAL case, because reading a volume label means opening a block
+     * device. Ask for the server by the name it was posted under. */
+    if ((r = distro_mountpoint(name, out, outn)))
+        return r;
+
+    if (is_default) {
+        /* The pre-/etc/distros world. Kept so an image built before this
+         * change, or a test that stages its own rc and no table, still finds
+         * the one disk it has always found -- and said out loud, once, because
+         * a fallback nobody can see is how the next wrong mount happens. */
+        static int said;
+        if (!said) {
+            said = 1;
+            const char *m = "bind: no `default` in /etc/distros; "
+                            "using /dev/vda for `#distro`\n";
+            ssize_t w = write(2, m, strlen(m));
+            (void)w;
+        }
+        snprintf(out, outn, "/dev/vda");
+        return out;
+    }
+    return NULL;
+}
+
 static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
 {
     static struct devsrv tab[] = {
@@ -2211,7 +2454,11 @@ static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
         { "#d",       NULL,       NULL, 0, NULL },
         { "#r",       NULL,       NULL, 1, NULL },   /* root partition subtree */
         { "#sysroot", NULL,       NULL, 0, NULL },
-        { "#distro",  NULL,       NULL, 0, NULL },   /* the Debian namespace */
+        /* `#distro/<name>` — the distribution namespaces. PREFIXED, because
+         * the component after the letter is WHICH ONE: `#distro/debian`,
+         * `#distro/alpine`. Bare `#distro` is the default, which is what
+         * every rc script and test wrote before there was more than one. */
+        { "#distro",  NULL,       NULL, 1, NULL },
         /* #I -> /net needs no mount: user/linux-net.c serves the tree. */
         { "#I",       NULL,       NULL, 0, NULL },
         { "#b",       NULL, NULL, 0, "the /dev/blk file server is not written yet" },
@@ -2760,10 +3007,46 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
 
     /* Bind-mount forms. Resolve the source root. */
     char srcpath[4096];
+    char distropath[512];
     const char *root;
-    if (!strcmp(d->letter, "#distro"))
-        root = envdef("HAMNIX_DISTRO", "/dev/vda");
-    else if (!strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r"))
+    if (!strcmp(d->letter, "#distro")) {
+        /* `sub` after `#distro` is the NAME of the distribution, not a
+         * subpath: `#distro/alpine`, `#distro/alpine/usr`. Split the first
+         * component off and let what is left be the subpath, so both forms
+         * mean what they look like. */
+        char name[128];
+        const char *rest = "";
+        if (sub[0] == '/') {
+            const char *p = sub + 1;
+            const char *slash = strchr(p, '/');
+            size_t n = slash ? (size_t)(slash - p) : strlen(p);
+            if (n >= sizeof name) {
+                errno = ENAMETOOLONG;
+                return -1;
+            }
+            memcpy(name, p, n);
+            name[n] = '\0';
+            rest = slash ? slash : "";
+        } else {
+            name[0] = '\0';
+        }
+        sub = rest;
+        root = distro_resolve(name, distropath, sizeof distropath);
+        if (!root) {
+            /* By name, with what would fix it. The alternative answer to this
+             * is mounting SOME other distribution and reporting success. */
+            char m[320];
+            int n = snprintf(m, sizeof m,
+                "bind: no distribution namespace named `%s': not in "
+                "/etc/distros, $HAMNIX_DISTRO_<NAME> unset, no attached "
+                "filesystem carries the label it names, and nothing is mounted "
+                "at /n/%s\n", name, name);
+            ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
+            (void)w;
+            errno = ENOENT;
+            return -ENOENT;
+        }
+    } else if (!strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r"))
         root = sysroot_device();
     else
         root = d->source;

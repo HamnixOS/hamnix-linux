@@ -25,6 +25,12 @@ cd "$PROJ_ROOT"
 OUT="${1:-build/image}"
 ROOT="$OUT/root"
 rm -rf "$ROOT"
+# The object/build-log directory. It survived every build in a tree that had
+# already built once, so a FRESH checkout was the only thing that hit it: every
+# `>"$OUT/obj/$app.build.log"` redirect failed, every application landed in
+# MISSING, and the first honest error was `no host_ac.elf` several hundred
+# lines later.
+mkdir -p "$OUT/obj"
 mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,home,mnt,boot,lib,lib64,var/log,var/lib/hpm,var/cache,usr/bin,usr/share/adder}
 
 # The applications that go in /bin. Kept to things that build AND run today
@@ -219,6 +225,10 @@ for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
          services protocols networks host.conf; do
     [ -f "etc/$f" ] && install -m644 "etc/$f" "$ROOT/etc/$f"
 done
+# The distribution namespaces. /etc/distros maps a NAME to the medium behind
+# it, and `bind '#distro/alpine' /n/alpine` reads it -- so a second (or fifth)
+# distribution is a line in a file, not a recompile. See etc/distros.linux.
+install -m644 etc/distros.linux "$ROOT/etc/distros"
 # The package manager's channel list and trust roots.
 mkdir -p "$ROOT/etc/hpm" "$ROOT/var/lib/hpm"
 for f in trusted.pub local-trusted.pub; do
