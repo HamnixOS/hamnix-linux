@@ -1,23 +1,458 @@
 # user/md5sum.ad
 #
-# Hamnix `md5sum` — output marker shape ONLY. We emit the coreutils
-# "<hex>  -" line for stdin, but the hex is a fixed string (real MD5
-# of the empty input) rather than a true digest of the bytes we read.
-# Real MD5 is ~100 lines of 32-bit rotates + table arithmetic; that's
-# deferred behind L-track scope. For now drains stdin (so callers
-# can pipe into us without SIGPIPE) and prints the constant line.
+# Hamnix `md5sum`: print the MD5 (RFC 1321) digest of each FILE, or of
+# stdin when no FILE is given. Output matches coreutils exactly — a
+# 32-hex-digit lowercase digest, two spaces, then the file name:
+#
+#   md5sum /etc/motd
+#   d41d8cd9...  /etc/motd
+#   echo -n abc | md5sum           -> 900150983cd24fb0d6963f7d28e17f72  -
+#
+# WHAT THIS REPLACED, and why it mattered. Until now this file was a
+# marker-shape STUB: it drained stdin, ignored its argument entirely,
+# and printed the MD5 of the EMPTY STRING as a compiled-in constant.
+# `md5sum /bin/diff` blocked forever on a console (no file operand, so
+# it sat on stdin), and on a pipe it answered
+# `d41d8cd98f00b204e9800998ecf8427e` for every input in the world. A
+# checksum tool that returns a constant does not merely fail to verify
+# — it VERIFIES ANYTHING, which is worse than not shipping one, and it
+# is precisely the class of failure this project is organised against.
+# Found by tests/linux/installed_update.sh hanging on it; recorded in
+# docs/linux_installed_update.md §3.
+#
+# Streams files of any size in 4 KiB chunks. Also supports `-c FILE`:
+# read "HEX  NAME" lines and verify each named file, printing
+# "NAME: OK" / "NAME: FAILED" (exit 1 on any mismatch), matching
+# `md5sum -c`. Shaped deliberately like user/sha1sum.ad and
+# user/sha256sum.ad so the three read as one family.
 
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
 
 
-def main() -> int32:
-    # Drain stdin so pipelines (`echo hi | /md5sum`) don't block the
-    # writer. We discard every byte — the output is the same regardless.
-    buf: Array[256, uint8]
+def strlen_u8(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def write_str(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, strlen_u8(s))
+
+
+# ---- MD5 (streaming) ----
+#
+# MD5 differs from the SHA family in two ways that are easy to get
+# wrong and that the test vectors below pin down: the message schedule
+# is LITTLE-endian (SHA is big-endian), and so is the trailing length
+# field and the emitted digest.
+md_state:    Array[4, uint32]
+md_m:        Array[16, uint32]
+md_k:        Array[64, uint32]
+md_block:    Array[64, uint8]
+md_block_n:  uint64 = 0
+md_total:    uint64 = 0
+md_digest:   Array[16, uint8]
+md_hex:      Array[40, uint8]
+md_k_ready:  int32 = 0
+
+
+def _md5_rotl32(v: uint32, n: uint64) -> uint32:
+    x: uint64 = cast[uint64](v) & 0xFFFFFFFF
+    hi: uint64 = (x << n) & 0xFFFFFFFF
+    lo: uint64 = x >> (32 - n)
+    return cast[uint32](hi | lo)
+
+
+# K[i] = floor(abs(sin(i+1)) * 2^32). There is no floating point on
+# this line, so the table is written out rather than computed. A
+# string literal assigned into a global array comes out NULL in Adder,
+# so this is 64 assignments and not a blob.
+def _md5_init_k():
+    if md_k_ready != 0:
+        return
+    md_k[0]  = 0xd76aa478
+    md_k[1]  = 0xe8c7b756
+    md_k[2]  = 0x242070db
+    md_k[3]  = 0xc1bdceee
+    md_k[4]  = 0xf57c0faf
+    md_k[5]  = 0x4787c62a
+    md_k[6]  = 0xa8304613
+    md_k[7]  = 0xfd469501
+    md_k[8]  = 0x698098d8
+    md_k[9]  = 0x8b44f7af
+    md_k[10] = 0xffff5bb1
+    md_k[11] = 0x895cd7be
+    md_k[12] = 0x6b901122
+    md_k[13] = 0xfd987193
+    md_k[14] = 0xa679438e
+    md_k[15] = 0x49b40821
+    md_k[16] = 0xf61e2562
+    md_k[17] = 0xc040b340
+    md_k[18] = 0x265e5a51
+    md_k[19] = 0xe9b6c7aa
+    md_k[20] = 0xd62f105d
+    md_k[21] = 0x02441453
+    md_k[22] = 0xd8a1e681
+    md_k[23] = 0xe7d3fbc8
+    md_k[24] = 0x21e1cde6
+    md_k[25] = 0xc33707d6
+    md_k[26] = 0xf4d50d87
+    md_k[27] = 0x455a14ed
+    md_k[28] = 0xa9e3e905
+    md_k[29] = 0xfcefa3f8
+    md_k[30] = 0x676f02d9
+    md_k[31] = 0x8d2a4c8a
+    md_k[32] = 0xfffa3942
+    md_k[33] = 0x8771f681
+    md_k[34] = 0x6d9d6122
+    md_k[35] = 0xfde5380c
+    md_k[36] = 0xa4beea44
+    md_k[37] = 0x4bdecfa9
+    md_k[38] = 0xf6bb4b60
+    md_k[39] = 0xbebfbc70
+    md_k[40] = 0x289b7ec6
+    md_k[41] = 0xeaa127fa
+    md_k[42] = 0xd4ef3085
+    md_k[43] = 0x04881d05
+    md_k[44] = 0xd9d4d039
+    md_k[45] = 0xe6db99e5
+    md_k[46] = 0x1fa27cf8
+    md_k[47] = 0xc4ac5665
+    md_k[48] = 0xf4292244
+    md_k[49] = 0x432aff97
+    md_k[50] = 0xab9423a7
+    md_k[51] = 0xfc93a039
+    md_k[52] = 0x655b59c3
+    md_k[53] = 0x8f0ccc92
+    md_k[54] = 0xffeff47d
+    md_k[55] = 0x85845dd1
+    md_k[56] = 0x6fa87e4f
+    md_k[57] = 0xfe2ce6e0
+    md_k[58] = 0xa3014314
+    md_k[59] = 0x4e0811a1
+    md_k[60] = 0xf7537e82
+    md_k[61] = 0xbd3af235
+    md_k[62] = 0x2ad7d2bb
+    md_k[63] = 0xeb86d391
+    md_k_ready = 1
+
+
+# The per-round left-rotation amounts repeat in fours, so they are
+# derived from i rather than tabled.
+def _md5_shift(i: uint64) -> uint64:
+    j: uint64 = i & 3
+    if i < 16:
+        if j == 0:
+            return 7
+        if j == 1:
+            return 12
+        if j == 2:
+            return 17
+        return 22
+    if i < 32:
+        if j == 0:
+            return 5
+        if j == 1:
+            return 9
+        if j == 2:
+            return 14
+        return 20
+    if i < 48:
+        if j == 0:
+            return 4
+        if j == 1:
+            return 11
+        if j == 2:
+            return 16
+        return 23
+    if j == 0:
+        return 6
+    if j == 1:
+        return 10
+    if j == 2:
+        return 15
+    return 21
+
+
+def _md5_compress():
+    i: uint64 = 0
+    while i < 16:
+        b0: uint32 = cast[uint32](md_block[i * 4 + 0])
+        b1: uint32 = cast[uint32](md_block[i * 4 + 1])
+        b2: uint32 = cast[uint32](md_block[i * 4 + 2])
+        b3: uint32 = cast[uint32](md_block[i * 4 + 3])
+        md_m[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        i = i + 1
+
+    a: uint32 = md_state[0]
+    b: uint32 = md_state[1]
+    c: uint32 = md_state[2]
+    d: uint32 = md_state[3]
+
+    i = 0
+    while i < 64:
+        f: uint32 = 0
+        g: uint64 = 0
+        if i < 16:
+            f = (b & c) | ((~b) & d)
+            g = i
+        elif i < 32:
+            f = (d & b) | ((~d) & c)
+            g = (5 * i + 1) & 15
+        elif i < 48:
+            f = b ^ c ^ d
+            g = (3 * i + 5) & 15
+        else:
+            f = c ^ (b | (~d))
+            g = (7 * i) & 15
+        t64: uint64 = (cast[uint64](a) & 0xFFFFFFFF) \
+            + (cast[uint64](f) & 0xFFFFFFFF) \
+            + (cast[uint64](md_k[i]) & 0xFFFFFFFF) \
+            + (cast[uint64](md_m[g]) & 0xFFFFFFFF)
+        tmp: uint32 = cast[uint32](t64 & 0xFFFFFFFF)
+        rot: uint32 = _md5_rotl32(tmp, _md5_shift(i))
+        s64: uint64 = (cast[uint64](b) & 0xFFFFFFFF) \
+            + (cast[uint64](rot) & 0xFFFFFFFF)
+        a = d
+        d = c
+        c = b
+        b = cast[uint32](s64 & 0xFFFFFFFF)
+        i = i + 1
+
+    s0: uint64 = cast[uint64](md_state[0]) + cast[uint64](a)
+    s1: uint64 = cast[uint64](md_state[1]) + cast[uint64](b)
+    s2: uint64 = cast[uint64](md_state[2]) + cast[uint64](c)
+    s3: uint64 = cast[uint64](md_state[3]) + cast[uint64](d)
+    md_state[0] = cast[uint32](s0 & 0xFFFFFFFF)
+    md_state[1] = cast[uint32](s1 & 0xFFFFFFFF)
+    md_state[2] = cast[uint32](s2 & 0xFFFFFFFF)
+    md_state[3] = cast[uint32](s3 & 0xFFFFFFFF)
+
+
+def _md5_reset():
+    _md5_init_k()
+    md_state[0] = 0x67452301
+    md_state[1] = 0xefcdab89
+    md_state[2] = 0x98badcfe
+    md_state[3] = 0x10325476
+    md_block_n = 0
+    md_total = 0
+
+
+def _md5_update(data: Ptr[uint8], n: uint64):
+    pos: uint64 = 0
+    while pos < n:
+        room: uint64 = 64 - md_block_n
+        take: uint64 = n - pos
+        if take > room:
+            take = room
+        i: uint64 = 0
+        while i < take:
+            md_block[md_block_n + i] = data[pos + i]
+            i = i + 1
+        md_block_n = md_block_n + take
+        pos = pos + take
+        if md_block_n == 64:
+            _md5_compress()
+            md_block_n = 0
+    md_total = md_total + n
+
+
+def _md5_final():
+    buflen: uint64 = md_block_n
+    md_block[buflen] = 0x80
+    buflen = buflen + 1
+    if buflen > 56:
+        while buflen < 64:
+            md_block[buflen] = 0
+            buflen = buflen + 1
+        _md5_compress()
+        buflen = 0
+    while buflen < 56:
+        md_block[buflen] = 0
+        buflen = buflen + 1
+    # LITTLE-endian bit length — the half of MD5 that is not SHA.
+    total_bits: uint64 = md_total * 8
+    j: uint64 = 0
+    while j < 8:
+        md_block[56 + j] = cast[uint8]((total_bits >> (j * 8)) & 0xFF)
+        j = j + 1
+    _md5_compress()
+
+    hexd: Ptr[uint8] = "0123456789abcdef"
+    k: uint64 = 0
+    while k < 4:
+        w: uint32 = md_state[k]
+        md_digest[k * 4 + 0] = cast[uint8](w & 0xFF)
+        md_digest[k * 4 + 1] = cast[uint8]((w >> 8) & 0xFF)
+        md_digest[k * 4 + 2] = cast[uint8]((w >> 16) & 0xFF)
+        md_digest[k * 4 + 3] = cast[uint8]((w >> 24) & 0xFF)
+        k = k + 1
+    m: uint64 = 0
+    while m < 16:
+        byte_v: uint8 = md_digest[m]
+        md_hex[m * 2 + 0] = hexd[cast[uint64]((byte_v >> 4) & 0x0F)]
+        md_hex[m * 2 + 1] = hexd[cast[uint64](byte_v & 0x0F)]
+        m = m + 1
+    md_hex[32] = 0
+
+
+# Hash an open fd to completion, leaving the lowercase hex in md_hex.
+CHUNK: Array[4096, uint8]
+
+
+def hash_fd(fd: int32):
+    _md5_reset()
     while True:
-        n: int64 = sys_read(0, &buf[0], 256)
+        n: int64 = sys_read(fd, &CHUNK[0], 4096)
         if n <= 0:
             break
-    sys_write(1, "d41d8cd98f00b204e9800998ecf8427e  -\n", 36)
+        _md5_update(&CHUNK[0], cast[uint64](n))
+    _md5_final()
+
+
+# Compare md_hex[0..32) against a 32-byte lowercase hex string.
+def hex_eq(want: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while i < 32:
+        if want[i] != md_hex[i]:
+            return 0
+        i = i + 1
+    return 1
+
+
+# ---- `-c` check mode ----
+CBUF: Array[8192, uint8]
+CNAME: Array[512, uint8]
+
+
+def read_all_fd(fd: int32, buf: Ptr[uint8], cap: uint64) -> uint64:
+    total: uint64 = 0
+    while total < cap - 1:
+        n: int64 = sys_read(fd, cast[Ptr[uint8]](cast[uint64](buf) + total),
+                            cap - 1 - total)
+        if n <= 0:
+            break
+        total = total + cast[uint64](n)
+    buf[total] = 0
+    return total
+
+
+def is_hex(c: uint8) -> int32:
+    if c >= 48 and c <= 57:
+        return 1
+    if c >= 97 and c <= 102:
+        return 1
     return 0
+
+
+# check mode: parse "HEX  NAME" lines from CBUF, verify each. Returns
+# the number of FAILED/unreadable entries (0 => all good).
+def run_check(clen: uint64) -> int32:
+    bad: int32 = 0
+    want: Array[33, uint8]
+    i: uint64 = 0
+    while i < clen:
+        if CBUF[i] == 10:
+            i = i + 1
+            continue
+        h: uint64 = 0
+        while h < 32 and i < clen and is_hex(CBUF[i]) != 0:
+            want[h] = CBUF[i]
+            h = h + 1
+            i = i + 1
+        want[32] = 0
+        if h != 32:
+            while i < clen and CBUF[i] != 10:
+                i = i + 1
+            if i < clen:
+                i = i + 1
+            continue
+        while i < clen and (CBUF[i] == 32 or CBUF[i] == 9 or CBUF[i] == 42):
+            i = i + 1
+        nl: uint64 = 0
+        while i < clen and CBUF[i] != 10 and nl < 511:
+            CNAME[nl] = CBUF[i]
+            nl = nl + 1
+            i = i + 1
+        CNAME[nl] = 0
+        while i < clen and CBUF[i] != 10:
+            i = i + 1
+        if i < clen:
+            i = i + 1
+        fd: int32 = sys_open(cast[Ptr[char]](&CNAME[0]))
+        if fd < 0:
+            write_str(1, &CNAME[0])
+            write_str(1, ": FAILED open or read\n")
+            bad = bad + 1
+            continue
+        hash_fd(fd)
+        sys_close(fd)
+        write_str(1, &CNAME[0])
+        if hex_eq(&want[0]) != 0:
+            write_str(1, ": OK\n")
+        else:
+            write_str(1, ": FAILED\n")
+            bad = bad + 1
+    return bad
+
+
+def emit_digest_line(name: Ptr[uint8]):
+    sys_write(1, &md_hex[0], 32)
+    write_str(1, "  ")
+    write_str(1, name)
+    write_str(1, "\n")
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc >= 2:
+        a1: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
+        if a1[0] == 45 and a1[1] == 99 and a1[2] == 0:      # "-c"
+            if argc < 3:
+                clen: uint64 = read_all_fd(0, &CBUF[0], 8192)
+                if run_check(clen) != 0:
+                    return 1
+                return 0
+            rc_bad: int32 = 0
+            ci: int32 = 2
+            while ci < argc:
+                cp: Ptr[char] = cast[Ptr[char]](argv[ci])
+                cfd: int32 = sys_open(cp)
+                if cfd < 0:
+                    write_str(2, "md5sum: cannot open ")
+                    write_str(2, cast[Ptr[uint8]](cp))
+                    write_str(2, "\n")
+                    rc_bad = 1
+                else:
+                    clen2: uint64 = read_all_fd(cfd, &CBUF[0], 8192)
+                    sys_close(cfd)
+                    if run_check(clen2) != 0:
+                        rc_bad = 1
+                ci = ci + 1
+            return rc_bad
+
+    if argc < 2:
+        hash_fd(0)
+        emit_digest_line("-")
+        return 0
+
+    rc: int32 = 0
+    ai: int32 = 1
+    while ai < argc:
+        path: Ptr[char] = cast[Ptr[char]](argv[ai])
+        fd: int32 = sys_open(path)
+        if fd < 0:
+            write_str(2, "md5sum: cannot open ")
+            write_str(2, cast[Ptr[uint8]](path))
+            write_str(2, "\n")
+            rc = 1
+        else:
+            hash_fd(fd)
+            sys_close(fd)
+            emit_digest_line(cast[Ptr[uint8]](path))
+        ai = ai + 1
+    return rc

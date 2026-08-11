@@ -1,11 +1,21 @@
 # user/cksum.ad
 #
-# Hamnix `cksum`: POSIX CRC checksum + byte count of stdin. Implements
-# the exact algorithm POSIX/coreutils `cksum` uses: a CRC-32 with the
-# polynomial 0x04C11DB7 processed MSB-first, the total byte length fed
-# through the CRC as a trailing little-tail of length bytes, and a
-# final ones-complement. Output: "<crc> <bytes>\n", matching GNU
-# coreutils. Reads only stdin (the common `... | cksum` pipeline).
+# Hamnix `cksum`: POSIX CRC checksum + byte count of each FILE, or of
+# stdin when no FILE is given. Implements the exact algorithm
+# POSIX/coreutils `cksum` uses: a CRC-32 with the polynomial 0x04C11DB7
+# processed MSB-first, the total byte length fed through the CRC as a
+# trailing little-tail of length bytes, and a final ones-complement.
+# Output matches GNU coreutils: "<crc> <bytes>\n" for stdin,
+# "<crc> <bytes> <name>\n" for a named file.
+#
+# THE FILE OPERAND IS NEW, and it is why this comment says so. cksum
+# read stdin ONLY, so the only way to checksum a file was `cksum <
+# FILE` — and inside a script whose own source is the file being
+# redirected from (an rc redirecting from /etc/rc.boot) that wedges the
+# shell dead. tests/linux/installed_update.sh spent two boots learning
+# it; docs/linux_installed_update.md §3 records it. A checksum tool
+# that cannot be handed a name is a checksum tool you cannot use from
+# a boot script.
 #
 # The CRC is computed bit-by-bit (no 256-entry table) to keep the
 # binary self-contained; throughput is fine for the byte volumes a
@@ -13,8 +23,29 @@
 
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
 
 POLY: uint32 = 0x04C11DB7
+
+chunk: Array[1024, uint8]
+out:   Array[128, uint8]
+dtmp:  Array[24, uint8]
+
+# Result of the last cksum_fd().
+ck_crc:   uint32 = 0
+ck_total: uint64 = 0
+
+
+def strlen_u8(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def write_str(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, strlen_u8(s))
 
 
 def crc_byte(crc: uint32, b: uint8) -> uint32:
@@ -30,12 +61,11 @@ def crc_byte(crc: uint32, b: uint8) -> uint32:
     return c
 
 
-def main() -> int32:
+def cksum_fd(fd: int32):
     crc: uint32 = 0
     total: uint64 = 0
-    chunk: Array[1024, uint8]
     while True:
-        n: int64 = sys_read(0, &chunk[0], 1024)
+        n: int64 = sys_read(fd, &chunk[0], 1024)
         if n <= 0:
             break
         i: uint64 = 0
@@ -51,52 +81,72 @@ def main() -> int32:
         crc = crc_byte(crc, cast[uint8](len_left & 0xFF))
         len_left = len_left >> 8
 
-    crc = ~crc
+    ck_crc = ~crc
+    ck_total = total
 
-    # Render "<crc> <bytes>\n".
-    out: Array[64, uint8]
-    p: uint64 = 0
 
-    # crc as decimal.
-    if crc == 0:
+# Append `v` in decimal to out[p..]; returns the new position.
+def put_dec(p: uint64, v: uint64) -> uint64:
+    if v == 0:
         out[p] = 48
+        return p + 1
+    ti: uint64 = 0
+    x: uint64 = v
+    while x != 0:
+        dtmp[ti] = cast[uint8](x % 10) + 48
+        x = x / 10
+        ti = ti + 1
+    j: uint64 = 0
+    while j < ti:
+        out[p] = dtmp[ti - 1 - j]
         p = p + 1
-    else:
-        tmp: Array[16, uint8]
-        ti: uint64 = 0
-        v: uint32 = crc
-        while v != 0:
-            tmp[ti] = cast[uint8](v % 10) + 48
-            v = v / 10
-            ti = ti + 1
-        j: uint64 = 0
-        while j < ti:
-            out[p] = tmp[ti - 1 - j]
-            p = p + 1
-            j = j + 1
+        j = j + 1
+    return p
 
+
+def emit_line(name: Ptr[uint8], have_name: int32):
+    p: uint64 = 0
+    p = put_dec(p, cast[uint64](ck_crc))
     out[p] = 32
     p = p + 1
-
-    # byte count as decimal.
-    if total == 0:
-        out[p] = 48
+    p = put_dec(p, ck_total)
+    if have_name == 0:
+        out[p] = 10
         p = p + 1
-    else:
-        tmp2: Array[24, uint8]
-        ti2: uint64 = 0
-        v2: uint64 = total
-        while v2 != 0:
-            tmp2[ti2] = cast[uint8](v2 % 10) + 48
-            v2 = v2 / 10
-            ti2 = ti2 + 1
-        j2: uint64 = 0
-        while j2 < ti2:
-            out[p] = tmp2[ti2 - 1 - j2]
-            p = p + 1
-            j2 = j2 + 1
-
-    out[p] = 10
+        sys_write(1, &out[0], p)
+        return
+    out[p] = 32
     p = p + 1
     sys_write(1, &out[0], p)
-    return 0
+    write_str(1, name)
+    write_str(1, "\n")
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        cksum_fd(0)
+        emit_line("-", 0)
+        return 0
+
+    rc: int32 = 0
+    ai: int32 = 1
+    while ai < argc:
+        path: Ptr[char] = cast[Ptr[char]](argv[ai])
+        pu: Ptr[uint8] = cast[Ptr[uint8]](path)
+        if pu[0] == 45 and pu[1] == 0:               # "-" == stdin
+            cksum_fd(0)
+            emit_line("-", 1)
+            ai = ai + 1
+            continue
+        fd: int32 = sys_open(path)
+        if fd < 0:
+            write_str(2, "cksum: cannot open ")
+            write_str(2, pu)
+            write_str(2, "\n")
+            rc = 1
+        else:
+            cksum_fd(fd)
+            sys_close(fd)
+            emit_line(pu, 1)
+        ai = ai + 1
+    return rc
