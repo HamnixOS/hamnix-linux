@@ -390,9 +390,100 @@ same failure this project exists to beat.
   `/dev/vt/ctl`, `/proc/kmsg`, `/proc/svc`, `/proc/tasks`, `/proc/oops`,
   `/dev/firewall`, `/dev/keymap`, no `sys_srv_open`, no `/proc/self/ctl`
   nice control, and five scene clients that want a compositor the sweep does
-  not run (`hamlock`, `hampanelscene`, `hamshotui`, `hamtoast`, `wsyswl` —
-  these five could become real DREW_WINDOW rows by starting `wsysd` inside the
-  jail, which is the obvious next improvement to the harness).
+  not run (`hamlock`, `hampanelscene`, `hamshotui`, `hamtoast`, `wsyswl`).
+  **That last one is done — see THE SWEEP HAS A COMPOSITOR NOW, below.**
+
+#### THE SWEEP HAS A COMPOSITOR NOW, and a quarter of the desktop spins
+
+The run sweep could not test a GUI program. It ran every scene client in a
+jail with **no window system in it**, so the five above died in
+`lib/hamscreen.ad`'s handshake with "no screen geometry" — correctly refusing
+to guess, with nothing measured. Those five rows were the visible part. The
+invisible part was worse: for every OTHER windowed program the verdict was
+*did it exit*, because a client creates the shared `/dev/wsys` segment and maps
+a window into it all by itself. Nothing composited anything, so nothing could
+tell a client that DREW from one that mapped a window and painted nothing —
+which is precisely how a v2 blit client came to score `DREW_WINDOW` with a
+0-byte backbuffer, above.
+
+`user/wsysd.ad` now runs **inside the jail, offscreen** (`HAMFB_FILE`), for
+every `gui` and `daemon` row, and the sweep reads the framebuffer afterwards.
+Measured, before and after, same 368 binaries, both preserved under
+`/home/david/.hamnix-build/rs-wsysd/{before,final}/`:
+
+| | before | after |
+|--|--|--|
+| SCORE | 296 / 329 | **301 / 329** |
+| the five | 5 × `EXIT_NONZERO`, "no screen geometry" | 4 × `PAINTED`, `wsyswl` `STAYS_UP` and listening on `/tmp/wayland-0` |
+| windowed rows with pixels on the screen | not askable | **51 `PAINTED`** of 88 |
+| run phase | 895 s | 1035 s (**+16%**) |
+
+* **`PAINTED` is a new verdict and `fbpx` a new column**: the sampled pixels in
+  which this program's screen differs from **the bare compositor's own
+  screen**, composed twice at the top of the run and *checked to be
+  reproducible* before the column is trusted at all. "Is the framebuffer
+  non-blank" would have said yes for every GUI row including the ones that
+  drew nothing. `hamlock` 255,971 of 256,000 sampled — a lock screen covering
+  the display, which is what it is for; `hamtoast` 5,700; `hampanelscene`
+  16,640 across 2 bars.
+* **One compositor PER PROGRAM.** One per class was the cheaper-sounding
+  option and is wrong: the per-program overlay upper layer is this sweep's
+  diff *and* its isolation, and `HAMWSYS`, `HAMWSYS_BB`, `HAMWSYS_IMG` and
+  `HAMFB_FILE` are one file per HOST by default (`docs/steam_namespace.md`
+  §11, where a stale backbuffer slot cost an hour) — a shared compositor hands
+  each program the previous one's windows and the previous one's frame, and
+  the pixel question becomes unanswerable. It costs +16% of the run phase.
+  `VK_ICD_FILENAMES` is forced to lavapipe on every jail run.
+* **The `wins` column was only ever answered by a pid collision.** It was
+  probed from a SECOND run of the jail, i.e. a second pid namespace, and
+  `win_reap_dead()` frees any window whose pid answers ESRCH — so every window
+  should have been reaped. None were, because the program was `exec`ed and so
+  was pid 1, the probe's own shell is pid 1 in its namespace, and `kill(1, 0)`
+  succeeds. It is probed inside the program's own pid namespace now, while it
+  is still alive, and a window still in the table after the program exits is
+  reported as a leak instead of counted as a pass.
+* **The end-of-run frame is the wrong sample point.** A client that exits has
+  its window reaped and the compositor repaints without it, so the last frame
+  of a program that FINISHED is the bare screen: `hamtoast` measured `fbpx 0`,
+  "put nothing on the screen", for a program that had. The frame kept is the
+  last one in which the program owned a window.
+
+**AND THE COST COLUMN WAS BLIND TO THE ENTIRE DESKTOP.** `cpu` is bash's
+`times` delta, i.e. reaped-child time, and `unshare --kill-child` SIGKILLs the
+subtree — so every daemon and every scene client still up at the timeout, which
+is nearly all of them, reported `-`. The jail samples the program's own
+`$MNT/proc/<pid>/stat` while it runs now (the program's cost, not the
+compositor's, which is a different pid), and the census immediately named
+**twenty-three scene clients plus `hamscreensaver` each burning a FULL CORE**
+for their whole run — `sdlpong`, `scenetest`, `multiwintest`, `hamview`,
+`hamsnake`, `hamsettings`, `hamsessui`, `hampaint`, `hamnotesscene`, `hammon`,
+`hamlogscene`, `hamlock`, `haminstallui`, `haminput`, `hamimgscene`,
+`hamgamesnake`, `hamgamedemo`, `hamfiles`, `hamedit`, `hamcalscene`,
+`hamcalc`, `hamappmenu`, `ham2048`. Verified independently per pid: `sdlpong`
+1.11 s of cpu per second of wall clock while `wsysd` beside it — the process
+actually rasterizing and presenting — spends 0.34 s in seven. `hamclock`,
+`hampanelscene` and `hamdesktop` read 0.1 s, so this is not everything that
+draws; it is a specific loop, and it is **THE IDLE CENSUS's third bullet still
+in the tree**: a jiffy window spun on `sys_get_jiffies` with a `sys_yield` in
+it to make it polite. 21 files under `user/` carry that shape.
+
+Two are fixed here as the demonstration, both re-measured:
+
+* **`user/hamtoast.ad`: 3.97 s → 0.06 s** over the toast's four-second life,
+  pixel-for-pixel identical (`fbpx 5700` in both arms).
+* **`user/crond.ad`: 14.3 s → 0.0 s.** Its poll loop was `while
+  sys_get_jiffies() - start < POLL_JIFFIES: pass` — a bare spin with not even
+  a yield — under a comment that says "Sleep". **crond is started on every
+  boot**, so an installed machine has been burning a whole core in the
+  background since it landed.
+
+The remaining 22 are named with a number beside them by
+`scripts/hamlinux_runsweep.sh`'s own summary and are the obvious next piece of
+work. The park they all want is the one `lib/hamscreen.ad` and `wsysd`'s frame
+loop already use: `sys_waitfds(fds, 0, ms)` with `nfds` 0, a plain timed wait.
+
+One known miss: a client that renders and exits inside the first 0.25 s (`hamui_demo render`) is alive for none of the probe's samples and reports
+`wins 0`, `fbpx 0`, while its own stdout says it rendered.
   Also found by reading OUTPUT rather than verdicts, because no exit status
   could have caught them: **`nproc` printed `1` on a twelve-core machine**
   (Linux `/proc/cpuinfo` has no `cpus_online:` field, so the fallback fired
