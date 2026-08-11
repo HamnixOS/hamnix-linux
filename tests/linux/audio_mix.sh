@@ -276,7 +276,7 @@ if fail:
     sys.exit(1)
 print("[audio_mix] PASS: two processes playing two different tones appear in "
       "ONE capture as BOTH frequencies, summed rather than switched, and a "
-      "writer running at an eighth of real time does not interrupt the other.")
+      "writer running at a third of real time does not interrupt the other.")
 PY
 RC=$?
 [ $RC -eq 0 ] || echo "[audio_mix] the capture is at $WAV"
