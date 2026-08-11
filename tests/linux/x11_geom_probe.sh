@@ -24,6 +24,15 @@ KEEP="${X11GEOM_KEEP:-0}"
 export HAMWSYS="$WORK/wsys.shm"
 export HAMFB_FILE="$WORK/fb.raw"
 export HAMFB_GEOM="$GEOM"
+# The v2 backbuffer segment defaults to /srv/wsys.bb then /dev/shm/... -- ONE
+# FILE PER HOST, outliving every process that touches it, with slots keyed by
+# wid. Two runs sharing it hand each other stale slots and each measures the
+# other's last window. See docs/steam_namespace.md §6.2a and §11.
+export HAMWSYS_BB="$WORK/wsys.bb"
+# wsysd has a real Vulkan backend and this host has a real GPU in it that
+# belongs to someone. Software ICD for anything offscreen.
+[ -r /usr/share/vulkan/icd.d/lvp_icd.json ] && \
+    export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 
 pass=0; fail=0
 ok()   { echo "x11geom: PASS $*"; pass=$((pass+1)); }

@@ -50,23 +50,33 @@ the correct answer; one genuinely bails the backend's SSA subset
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
-* **Steam's window is mapped and painted, and the framebuffer does not have
-  it.** The blocker moved one hop, and it moved onto us. With **no window
-  manager** in the session, `Sign in to Steam` is `IsViewable` at
-  `700x440+290+180` and `xwd -root` finds 210 distinct colours inside that
-  rectangle — the Steam UI is drawn on the X screen. The QEMU screendump of
-  the same VM at the same second has a control `xterm` on it and nothing where
-  Steam is; move that `xterm` with `xdotool` and the scanout does not follow.
-  Rootful Xwayland is ONE `wl_surface`, so that means the whole surface is
-  stale: `wsyswl` stops delivering it after an early frame. The Hamnix desktop
-  itself is fine — the panel clock ticks between screendumps.
-  What that retires: **matchbox** was why every window read `IsUnMapped` (it
-  is the only child of the root when it runs; without it there are ten, and
-  `xev -root` counts a `MapNotify` for Steam's toplevel), and the **system
-  D-Bus** comes up and answers `GetId`. `tests/linux/hamnix_x11session.sh`
-  now starts no window manager by default (`HAMNIX_X11_WM=matchbox` restores
-  it) and starts the bus with `--nofork`. `docs/steam_namespace.md` §6.2–6.3
-  names the three suspects left, all inside `user/wsyswl.ad`.
+* **(SOLVED — kept because the shape is the lesson) Steam's login window is on
+  the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
+  `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X
+  session holds **26**. Past 16, `map_alloc` returned -1 and `commit_buffer`
+  dropped every frame at `mi < 0` — and a rootful Xwayland is ONE
+  `wl_surface`, so one exhausted table froze the entire X session, which is
+  why the control `xterm` and Steam's window were never two problems. Two
+  boots of the same image differing only in that number:
+  `map_alloc_failed 10 / drop_no_mapping 508 / commits 3` and a black screen,
+  against `maps_high_water 26 / every drop 0 / commits 506` and the login
+  dialog (`build/steamprobe/steam_black_maxmap16.png` is the control).
+  **The lesson, which is this project's own:** the answer was in the third
+  suspect list, and it took three passes because a compositor that drops a
+  frame said nothing. Every silent `return` in `commit_buffer` is now counted
+  by reason, named once on stderr, and published as `wsyswl-state` beside the
+  Wayland socket — the one directory that spans the namespace boundary, so
+  `cat /run/wsyswl-state` answers from either side, like
+  `/dev/wsys/wsysd/state` before it. `MAXOBJ` went 256 → 1024 in the same
+  pass (nothing hit it: `max_object_id 97`).
+  A SECOND fault of the same class was found and fixed on the way, in
+  `user/linux-wsys.c`: a v2 window's backbuffer slot carries its own `w/h`,
+  the client writes rows at THAT width and `user/wsysd.ad` re-rows them at the
+  WINDOW's width, and nothing checked the two agreed — a stale slot inherited
+  by wid from a dead process put the whole X screen on the scanout as two
+  half-height copies side by side. `tests/linux/wsyswl_stall.sh` reproduces
+  both offscreen in three minutes with no VM and no Steam, and plants the
+  stride mismatch by hand as a negative control.
 * **(historical, kept for the shape)** It installs, brings up
   pressure-vessel, and Chromium loads to `SteamApp Init - Before Login`.
   What that is NOT, now measured rather than guessed (`docs/steam_namespace.md`

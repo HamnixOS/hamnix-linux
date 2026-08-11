@@ -396,7 +396,92 @@ the cause:
   one directory over. `hamnix_x11session.sh` now pings the bus and clears the
   corpse; `hamnix_xdiag.sh` reports which of the two it found.
 
+### 6.2a THE ANSWER: sixteen shm mappings, and Steam holds twenty-six
+
+**It was the first suspect in §6.3's list, and the reason it took three passes
+to reach is that nothing said so.** `wsyswl` gave each connection `MAXMAP = 16`
+wl_shm mappings. Steam's X session holds **26** at once. Past the sixteenth,
+`map_alloc` returns -1, the pool has no mapping, and `commit_buffer` returns at
+`mi < 0` — for every frame, for ever. A rootful Xwayland presents the whole X
+screen as ONE `wl_surface`, so one exhausted table freezes the entire session
+at once: that is why the control `xterm` went stale in the same breath as
+Steam's window went missing, and why neither was ever about Steam.
+
+Two boots of the same image, differing only in that number, read off the
+counters the compositor now publishes:
+
+| | `MAXMAP=16` | `MAXMAP=64` |
+|--|--|--|
+| `commits` | 3 | 506 |
+| `map_alloc_failed` | 10 | 0 |
+| `drop_no_mapping` | 508 | 0 |
+| `maps_high_water` | 16 (full) | 26 |
+| the screen | black where Steam is; the `xterm` still 484x316 at +40+40 sixty seconds after `xdotool` moved it to 900x500+300+250 | **`Sign in to Steam`** — fields, buttons and QR block — with the moved `xterm` behind it |
+
+`build/steamprobe/steam_login_maxmap64.png` and, as the control,
+`build/steamprobe/steam_black_maxmap16.png`.
+
+**And this time the console said it itself**, the first time it happened:
+
+```
+wsyswl: DROPPING FRAMES -- wl_shm mappings exhausted -- raise MAXMAP
+wsyswl: DROPPING FRAMES -- the wl_buffer has no shm mapping (map_alloc failed earlier)
+```
+
+#### What the compositor publishes now
+
+Every silent `return` in `commit_buffer` is counted by reason, named **once**
+on stderr, and the whole set is written to `wsyswl-state` **beside the Wayland
+socket** — the one directory that spans the namespace boundary (§6), so
+`cat /run/wsyswl-state` answers from inside Debian and
+`cat /n/distro/run/wsyswl-state` from outside it. `/dev/wsys/wsysd/state` is
+the precedent, and reading a server's own state with `cat` is how the bug
+before this one was caught. Counters and not `WSYSWL_VERBOSE=1`, whose
+line-per-commit filled the initramfs tmpfs and silenced the guest console
+inside two minutes, twice.
+
+`MAXOBJ` went 256 → 1024 in the same pass. Nothing hit it — `max_object_id 97`
+under Steam — but an id at or above `MAXOBJ` is an object that is unknown for
+the rest of the run, and it is counted now rather than guessed at.
+
+#### The second fault, found on the way and fixed with it
+
+A v2 backbuffer slot carries its own `w/h`; `user/linux-wsys.c`'s `bb_blit`
+writes rows at THAT width and `user/wsysd.ad`'s `paint_backbuffer` re-rows them
+at the WINDOW's width. **Two authorities for one stride, and nothing checked
+they agreed.** When they did not, the scanout showed the client twice side by
+side at half height with everything below row h/2 gone — for a rootful
+Xwayland, a whole X session that painted once and never moved again.
+
+They came apart two ways, both now closed: a **stale slot** (the segment is a
+file that outlives the process, and a killed client never releases its slot, so
+the next run's window takes the same low wid and inherits its size), and
+`bb_resize` beginning `if (!bb) return;`, which made it a no-op in any process
+that had not blitted yet — exactly when `wsyswl` sends the geometry it
+deliberately sends first. `bb_for` now re-fits any slot whose size disagrees
+with its window, reclaims the slots of windows that no longer exist before
+declaring itself full, and names every remaining failure once.
+
+#### The test that outlives the bug
+
+`tests/linux/wsyswl_stall.sh` — the whole chain offscreen against the host's
+Xwayland, three minutes, no VM and no Steam. An `xterm` moved and resized 40
+times, then the stride mismatch **planted by hand** to prove the next blit
+notices. 11 PASS; without the `linux-wsys.c` change the planted fault is never
+corrected and never mentioned, which is the two FAILs it exists to produce. It
+pins `HAMWSYS_BB` into its own work directory (the default is one file per
+HOST — two agents sharing it hand each other stale slots, which is how this was
+found) and forces the software Vulkan ICD.
+
+Firefox, the existing native-Wayland client of this same path, still renders
+its full chrome through it: 13514 commits, zero drops
+(`build/steamprobe/firefox_wayland_offscreen.png`).
+
 ### 6.3 What is left, and what it would take
+
+> **Answered.** §6.2a is the answer: it was `MAXMAP`, the first suspect below.
+> The list is kept because the elimination in it is still true and still worth
+> what it cost.
 
 **This is where the work stops today.** What has been eliminated is worth as
 much as what has not, so, plainly:
@@ -426,7 +511,8 @@ and two of them came back the opposite way round:
 `Sign in to Steam` on it and the framebuffer does not. The suspects, in the
 order they are cheapest to test:
 
-* **wsyswl stops delivering the rootful Xwayland surface.** `commit_buffer`
+* **CONVICTED — see §6.2a. wsyswl stops delivering the rootful Xwayland
+  surface.** `commit_buffer`
   has four silent `return`s and any of them would produce exactly this: `mi <
   0` when `map_alloc` runs out of its **16** per-connection mappings,
   `pos + rowbytes > maplen` when a pool grew without the mapping following,
@@ -564,6 +650,9 @@ Two more worth writing down because they cost time and are not Steam's fault:
 
 ```sh
 scripts/hamlinux_distro.sh                    # multiarch image, prints the size delta
+tests/linux/wsyswl_stall.sh                   # does the compositor KEEP delivering
+                                              # a surface? OFFSCREEN, 3 minutes,
+                                              # no VM and no Steam (§6.2a)
 tests/linux/x11_geom_probe.sh                 # the window path, OFFSCREEN, no VM at all
 tests/linux/steam_probe_run.sh                # the 24-check scoreboard, headless
 tests/linux/steam_gui_run.sh \
@@ -620,3 +709,23 @@ What the measurements in §6.2 used instead, and what the next pass should use:
   `/tmp` on this host is a 16 GB tmpfs, i.e. the owner's RAM.
 * `HAMLINUX_VNC=none`, and never `pkill` a QEMU by pattern: every VM in this
   tree has the same argv. `quit` on its own monitor socket is how a run ends.
+
+Two more, learned in the pass that closed §6.2a:
+
+* **`build/` is not always the shared one.** In this worktree it was an empty
+  private directory, so the whole redirection was `mkdir build/image` and a
+  symlink to the shared `distro.ext4` and `alpine.ext4`; every script resolves
+  it from its own `PROJ_ROOT`. `scripts/hamlinux_image.sh` then writes a
+  private `vmlinuz` (copied from the host's `/boot`) and `initramfs.cpio.gz`,
+  and nothing shared is written at all. Check which you have before assuming.
+* **The scripts go in as a SECOND CPIO SEGMENT, which is simpler than either
+  debugfs or unpack-and-repack.** The initramfs loader unpacks concatenated
+  gzipped `newc` archives in order, so
+  `find etc | cpio -o -H newc | gzip >> build/image/initramfs.cpio.gz` adds
+  files to `/etc`, and `rc.boot` copies them into `/n/distro/tmp/` at run time
+  where `HAMLINUX_DISTRO_RO=1` puts the write in the throwaway overlay.
+* **`HAMWSYS_BB` is the third shared file, and it bit.** The v2 backbuffer
+  segment defaults to `/srv/wsys.bb`, then `/dev/shm/hamnix-wsys-bb`, then
+  `/tmp/hamnix-wsys-bb` — one per HOST, with slots keyed by wid and no owner.
+  An offscreen run inherited another run's slot, at another window's size, and
+  spent an hour looking like a compositor bug. Pin it per run.
