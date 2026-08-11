@@ -366,11 +366,22 @@ $n = ns clean {
 setuid 1001
 HOME='/home/live'
 export HOME
-XDG_RUNTIME_DIR='/run'
+# THE RUNTIME DIRECTORY IS THE SESSION'S OWN, NOT THE DISTRIBUTION'S /run.
+# This used to say /run, which is 40755 uid 0 on both media: the session could
+# read everything wsyswl publishes there and create nothing --
+# docs/linux_distro_namespaces.md 8.6, the fourth fault of the family 8.4 and
+# 8.5 opened. /run/user/1001 is staged 0700 owned by uid 1001 at boot, by root,
+# in the same breath as the mount points (user/linux-syscalls.c,
+# distro_stage_runtime), and the names wsyswl publishes in /run are symlinked
+# into it -- so this moves the DIRECTORY without moving the socket, which four
+# other files name by its /run path.
+XDG_RUNTIME_DIR='/run/user/1001'
 export XDG_RUNTIME_DIR
 WAYLAND_DISPLAY='wayland-0'
 export WAYLAND_DISPLAY
-XDG_CONFIG_HOME='/run'
+# And these two followed /run for the same bad reason -- they were pointed at
+# the first directory that existed, not the first one this uid could write.
+XDG_CONFIG_HOME='/run/user/1001'
 export XDG_CONFIG_HOME
 if \$HAMNIX_DE_PROG:
     echo 'rc.de-ns: entering $n to run' \$HAMNIX_DE_PROG

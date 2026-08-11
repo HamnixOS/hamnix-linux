@@ -93,7 +93,10 @@ same failure this project exists to beat.
   `dbus-daemon --system --nofork --print-address &`, the bus comes up,
   `/run/dbus/pid` names a live process, and `dbus-send --system … GetId`
   returns a real reply from inside the namespace. (`dbus-send` IS in the
-  image — the comment that said otherwise was wrong.) What remains absent are
+  image — the comment that said otherwise was wrong.) **And it now comes up
+  for the SESSION USER, not only for root** — that was the other half of this,
+  and it was blocked by `/run/dbus` being root-owned, not by anything about
+  dbus: see the fourth-fault entry below. What remains absent are
   SERVICES on the bus, which CEF names itself:
   `org.freedesktop.UPower … was not provided by any .service files`.
 * **One thing is still Debian-shaped. Two were, and are not any more.**
@@ -134,28 +137,51 @@ same failure this project exists to beat.
   is a separate one baked into its image, and the two share their two
   hardest-won lines by copy. Worth merging when there is a third.
   `docs/linux_distro_namespaces.md` §7.
-* **THE FOURTH FAULT OF THAT FAMILY: `$XDG_RUNTIME_DIR` is the distribution's
-  `/run`, root-owned 0755.** §8.5 named three — a mount point in the medium
-  (`/n`), a stale X lock in its `/tmp`, a socket in its `/run` — each created
-  by root when root was its only user, each invisible to the unprivileged
-  session that came later. The fourth is the directory the third lives in.
-  `debugfs` on both media: `/run` `40755` uid 0, `/run/dbus` `40755` uid 0,
-  `/run/dconf` `40700` uid 0. So the session can **read** what `wsyswl`
-  publishes (the socket, and the `hamnix-screen` geometry file beside it, both
-  0644 already) and **create nothing** — confirmed live in the same boot that
-  proved the socket fix: `system_bus_socket': Permission denied`,
-  `rm: cannot remove '/run/dbus/pid': Permission denied`, and
-  `hamnix-x11session: WARNING no system bus`. That is the *unprivileged* half
-  of the D-Bus gap below, and it is still open. `/etc/de-ns-run` now probes
-  `$XDG_RUNTIME_DIR` and names the directory and the uid when it is not
-  writable, so it announces itself instead of arriving as `Connection refused`
-  three layers down. The likely right answer is a per-user `/run/user/<uid>`
-  (0700 — **narrower** than today), not a world-writable `/run`; it is not
-  taken here because it moves the socket path that `hamnix-x11session`,
-  `alpine_gui_run.sh`, `steam_gui_run.sh` and `x11_geom_probe.sh` all name.
-  The `/tmp` half of it IS fixed: the generated `/etc/rc.distros` now clears
-  root-owned `*.log` / `*.err` left in a distribution's sticky `/tmp` by a
-  root-run session, by class rather than by a list of three literal names.
+* **THE FOURTH FAULT OF THAT FAMILY IS FIXED, and it took the unprivileged
+  half of the D-Bus gap with it. `$XDG_RUNTIME_DIR` is now `/run/user/1001`,
+  0700, owned by the session user.** §8.5 named three — a mount point in the
+  medium (`/n`), a stale X lock in its `/tmp`, a socket in its `/run` — each
+  created by root when root was its only user, each invisible to the
+  unprivileged session that came later. The fourth was the *directory* the
+  third lives in: `/run` `40755` uid 0 on both media, so the session could
+  **read** what `wsyswl` publishes (the socket at 0666, `hamnix-screen` at
+  0644) and **create nothing**. Root now stages `/run/user/1001` at
+  `bind '#distro/<name>' /n/<name>` — the same call, the same moment and the
+  file next door to where the *first* fault of this family was fixed
+  (`user/linux-syscalls.c`, `distro_stage_runtime` beside
+  `distro_stage_mountpoints`). Narrower than the `/run` it replaces, not wider.
+  **Nothing moved on disk**, which is what made it affordable: five files name
+  the socket by its `/run` path and every one of them needed **no change**,
+  because the three names `wsyswl` publishes are *symlinked* into the new
+  directory (`../../wayland-0` &c.) and `connect(2)`, `[ -S ]` and `read` all
+  follow symlinks — so `wl_display_connect(NULL)`'s
+  `$XDG_RUNTIME_DIR/wayland-0` resolves for a client that has never heard of
+  `/run/wayland-0`. `wsyswl` itself is untouched. **The system bus is a
+  separate answer and the distinction matters**: `/run/dbus/system_bus_socket`
+  is a *compile-time* path in dbus that no environment variable moves, so
+  `/run/user/<uid>` alone fixes the session bus and dconf and nothing else.
+  Nothing here starts the system bus as root — `hamnix-x11session` runs
+  `dbus-daemon --system` itself as uid 1001 — so the same staging **chowns**
+  `/run/dbus` and `/run/dconf` to the session user with their **modes
+  untouched**: a transfer, not a share, since a distribution namespace has one
+  session user. Measured, one boot, `tests/linux/distro_menu.sh` 0 FAIL:
+  `runtime dir /run/user/1001 is WRITABLE by uid 1001: created …probe.226`,
+  `(drwx------ 2 live live /run/user/1001)`,
+  `system bus live on /run/dbus/system_bus_socket (pid 262)`,
+  `system bus ANSWERED GetId` — where the previous boot had
+  `system_bus_socket': Permission denied` and `WARNING no system bus`. The
+  witness in `/etc/de-ns-run` is `ls -lL` now, not `ls -l`: the gated fact is
+  the mode of the thing `connect(2)` opens and the path is a symlink, and it
+  *probes by creating a file* rather than by reading a mode bit, because this
+  whole family is the mode bits reading correctly while the effective answer
+  is still no. Gate: `tests/linux/session_runtime_dir.sh`, **8 PASS 0 FAIL** —
+  its own file rather than a corner of `distro_menu.sh`, because a permission
+  fact that can only be measured by first standing up a compositor, an X server
+  and a window manager is a fact nobody will re-measure; this one needs none of
+  them. `docs/linux_distro_namespaces.md` §8.6.
+  The `/tmp` half of it was already fixed: the generated `/etc/rc.distros`
+  clears root-owned `*.log` / `*.err` left in a distribution's sticky `/tmp` by
+  a root-run session, by class rather than by a list of three literal names.
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
