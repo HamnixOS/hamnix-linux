@@ -122,17 +122,35 @@ struct slotrec {
     char     path[PATH_CAP];
 };
 
+/* bindrec.used: 0 free, BIND_RESERVED claimed but not yet filled in,
+ * BIND_LIVE a complete record. The middle state exists because two processes
+ * allocate from this table at once -- a shell binding a child's names and
+ * that child binding its own -- and "scan for a zero, then fill it in" let
+ * both pick the SAME record and the second overwrite the first. The loser's
+ * /fd name then resolved to its inherited descriptor: the stage wrote to the
+ * console and the next stage waited for a writer for ever. Claiming with a
+ * compare-and-swap and publishing afterwards is what makes the claim
+ * exclusive. */
+#define BIND_RESERVED 2u
+#define BIND_LIVE     1u
+
 struct bindrec {
     uint32_t used;
     int32_t  pid;
     int32_t  fdnum;
     int32_t  kind;
     int32_t  slot;
+    /* WHEN this record was written, on the segment's own clock.  It is what
+     * lets the parent's stale-pid clear tell "a record the last occupant of
+     * this pid left behind" from "a record THIS child has already written
+     * for itself" -- see fdns_after_fork_parent. */
+    uint64_t seq;
 };
 
 struct fdshm {
     uint32_t magic;
     int32_t  next_slot;
+    uint64_t next_seq;
     struct slotrec slot[MAX_SLOTS];
     struct bindrec bind[MAX_BINDS];
 };
@@ -228,7 +246,7 @@ int fdns_is_path(const char *path)
 static struct bindrec *bind_find(int32_t pid, int32_t fdnum)
 {
     for (int i = 0; i < MAX_BINDS; i++)
-        if (shm->bind[i].used && shm->bind[i].pid == pid
+        if (shm->bind[i].used == BIND_LIVE && shm->bind[i].pid == pid
             && shm->bind[i].fdnum == fdnum)
             return &shm->bind[i];
     return NULL;
@@ -340,19 +358,43 @@ static int slot_referenced(int32_t slot)
 {
     for (int i = 0; i < MAX_BINDS; i++) {
         struct bindrec *b = &shm->bind[i];
-        if (!b->used || b->slot != slot) continue;
+        if (b->used != BIND_LIVE || b->slot != slot) continue;
         if (b->kind == FDNS_NONE) continue;
         if (pid_alive(b->pid)) return 1;
     }
     return 0;
 }
 
+/* Reclaim the /fd NAMES of processes that no longer exist.
+ *
+ * This table leaked as badly as the slot table and hurt sooner.  A record is
+ * keyed by pid, and the only thing that ever cleared one was a new child
+ * LANDING ON THE SAME PID -- but pids climb, so a boot's binds accumulated
+ * about eight per spawned command until all 512 were used.  From then on
+ * fdns_fdbind returned ENOSPC, hamsh ignored it, and a pipeline stage's
+ * /fd/1 simply never got bound: the writer wrote to its inherited console
+ * and the reader waited for a writer that was never going to open the pipe.
+ * Measured as a boot that ran 36 pipelines in under a second and then hung
+ * for ever on the 37th, which is a far worse shape than an error.
+ *
+ * Returns the number of records reclaimed. */
+static int bind_gc(void)
+{
+    int freed = 0;
+    for (int i = 0; i < MAX_BINDS; i++)
+        /* Only complete records. A RESERVED one belongs to a process that is
+         * mid-bind right now and is nobody's to take. */
+        if (shm->bind[i].used == BIND_LIVE && !pid_alive(shm->bind[i].pid)) {
+            shm->bind[i].used = 0;
+            freed++;
+        }
+    return freed;
+}
+
 static void slot_gc(void)
 {
     /* Dead pids first: their bindings are what keep slots referenced. */
-    for (int i = 0; i < MAX_BINDS; i++)
-        if (shm->bind[i].used && !pid_alive(shm->bind[i].pid))
-            shm->bind[i].used = 0;
+    bind_gc();
 
     for (int i = 0; i < MAX_SLOTS; i++) {
         struct slotrec *s = &shm->slot[i];
@@ -407,25 +449,61 @@ static int slot_alloc(void)
 #define GATE_FD (-1)          /* a bindrec with this fdnum is a gate */
 
 static int32_t pending_child;
+static uint64_t fork_cut;
+
+/* Called in the parent immediately BEFORE fork(2).
+ *
+ * THIS IS WHERE THE STALE NAMES GO, and the timing is the whole point. The
+ * table is keyed by pid and Linux reuses pids, so a fresh process could
+ * inherit a /fd/1 bound to a file some long-dead command was redirected
+ * into. Measured: after `hpm update` spawned a few dozen children, the next
+ * `uname` ran, exited 0 and printed nothing -- its stdout was a stale
+ * binding pointing into a package's extraction path.
+ *
+ * That used to be cleaned up AFTER the fork, by pid, and it was a race the
+ * whole time: a pipeline stage binds its OWN /fd/0 and /fd/1 the instant
+ * rfork returns (hamsh and lib/p9.ad both do, deliberately, to close a
+ * different race), and the child is runnable before the parent's next
+ * instruction. So the clear sometimes deleted the binding the child had just
+ * made, the stage ran with an unbound name, its output went to the inherited
+ * console, and the next stage waited for a writer that never opened the
+ * pipe. One run in thirty of tests/linux/fdns_pipe.sh, and no amount of
+ * ordering or re-checking inside the clear can fix it: two processes were
+ * writing one record with opposite intentions.
+ *
+ * Here there is no child to race. A pid can only be reused after its holder
+ * has been reaped, so every record that a child-to-be could inherit belongs,
+ * at this instant, to a pid that no longer exists -- which is exactly what
+ * bind_gc reclaims. The cost is one pass with a kill(pid, 0) per live record
+ * per fork, against a fork+exec that costs far more. */
+void fdns_before_fork(void)
+{
+    if (attach() < 0) return;
+    bind_gc();
+    fork_cut = (uint64_t)shm->next_seq;
+}
 
 void fdns_after_fork_parent(int32_t child)
 {
     if (attach() < 0) return;
 
-    /* CLEAR THE CHILD'S OLD NAMES FIRST.  The table is keyed by pid and Linux
-     * reuses pids, so a fresh process could inherit a /fd/1 bound to some file
-     * a long-dead command was redirected into.  Measured: after `hpm update`
-     * spawned a few dozen children, the next `uname` ran, exited 0, and
-     * printed nothing -- its stdout was a stale binding pointing into a
-     * package's extraction path.  A new process starts with a clean fd table
-     * or the model is not the model.
+    /* The child's stale names were already reclaimed, BEFORE the fork, by
+     * fdns_before_fork -- see the long note there for why doing it here
+     * raced the child's own binds and could not be made not to. Nothing to
+     * clear; only the gate to close.
      *
-     * The clear happens BEFORE the gate is created, and the child waits for
-     * the gate to EXIST, so "the child can see a gate" implies "the clear has
-     * already happened".  That is what makes this ordered rather than racy. */
-    for (int i = 0; i < MAX_BINDS; i++)
-        if (shm->bind[i].used && shm->bind[i].pid == child)
-            shm->bind[i].used = 0;
+     * A record for `child` that predates the fork can only exist if
+     * before_fork was skipped (a fork that does not go through sys_rfork),
+     * so say so rather than silently running with someone else's stdout. */
+    for (int i = 0; i < MAX_BINDS; i++) {
+        struct bindrec *b = &shm->bind[i];
+        if (b->used == BIND_LIVE && b->pid == child && b->fdnum != GATE_FD
+            && b->seq <= fork_cut) {
+            fdns_note("stale /fd record survived a fork -- "
+                      "was fdns_before_fork skipped?");
+            break;
+        }
+    }
 
     fdns_fdbind(child, GATE_FD, FDNS_NONE, 0);   /* closed */
     pending_child = child;
@@ -697,15 +775,50 @@ int32_t fdns_fdbind(int32_t pid, int32_t fdnum, int32_t kind, int32_t slot)
     if (attach() < 0) return -1;
     if (pid == 0) pid = (int32_t)getpid();      /* 0 means "me" */
 
+    uint64_t stamp = (uint64_t)__sync_add_and_fetch(&shm->next_seq, 1);
+
     struct bindrec *b = bind_find(pid, fdnum);
     if (!b) {
-        for (int i = 0; i < MAX_BINDS; i++)
-            if (!shm->bind[i].used) { b = &shm->bind[i]; break; }
-        if (!b) { errno = ENOSPC; return -1; }
-        b->used  = 1;
+        /* CLAIM, then fill in, then publish. Two processes allocate here at
+         * once -- a shell binding a child's names and that child binding its
+         * own -- and a plain "find a zero and write into it" let both take
+         * the same record, the second silently overwriting the first. */
+        for (int pass = 0; pass < 2 && !b; pass++) {
+            for (int i = 0; i < MAX_BINDS; i++)
+                if (__sync_bool_compare_and_swap(&shm->bind[i].used,
+                                                 0u, BIND_RESERVED)) {
+                    b = &shm->bind[i];
+                    break;
+                }
+            if (!b && pass == 0) bind_gc();
+        }
+        /* Still full, with every record belonging to a LIVE process. Say so:
+         * the caller's next move is to run with an unbound /fd name, and
+         * every one of those is a silent wrong destination. hamsh does not
+         * check this return, so stderr is the only place it can be said. */
+        if (!b) {
+            fdns_note("/fd bind table full -- a name will go unbound");
+            errno = ENOSPC;
+            return -1;
+        }
         b->pid   = pid;
         b->fdnum = fdnum;
+        b->kind  = kind;
+        b->slot  = slot;
+        b->seq   = stamp;
+        __sync_synchronize();
+        b->used  = BIND_LIVE;         /* last: publishes a complete record */
+        if (kind != FDNS_NONE) {
+            struct slotrec *s = slot_find(slot);
+            if (s) s->bound = 1;
+        }
+        return 0;
     }
+    /* An existing record for this (pid, fdnum) is ours to rewrite: only the
+     * process it names, or its parent between fork and exec, ever touches
+     * it. */
+    b->seq  = stamp;
+    __sync_synchronize();
     b->kind = kind;
     b->slot = slot;
     if (kind != FDNS_NONE) {

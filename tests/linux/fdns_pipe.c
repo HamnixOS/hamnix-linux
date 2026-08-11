@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -54,7 +55,10 @@ static int run_case(int (*fn)(void), const char *name)
     pid_t p = fork();
     if (p == 0) {
         alarm(CASE_TIMEOUT);
-        _exit(fn() == 0 ? 0 : 1);
+        int r = fn();
+        fflush(stdout);      /* _exit does not flush, and the diagnosis is
+                              * printed by the case, not by the reaper. */
+        _exit(r == 0 ? 0 : 1);
     }
     int st = 0;
     waitpid(p, &st, 0);
@@ -84,14 +88,41 @@ static int stage_open(int fdnum, int32_t slot, int kind)
     return fdns_open(name, kind == FDNS_PIPE_W);
 }
 
+/* Did /fd/<n> actually resolve to the pipe, or did it fall back to the
+ * INHERITED descriptor?  That fallback is silent by design -- an unbound /fd
+ * name is the caller's own fd -- so a stage whose binding was lost writes its
+ * output to the console and the next stage waits for a writer for ever.  The
+ * only honest check is the inode: the slot's fifo is a file with a name.
+ * (The creator is this process's parent, which is how the name is derived.) */
+static int fd_is_slot(int fd, int32_t slot)
+{
+    const char *dir = getenv("HAMFDNS_DIR");
+    if (!dir || !*dir) dir = "/srv";
+    char path[256];
+    snprintf(path, sizeof path, "%s/chan.%d.%d", dir, (int)getppid(), (int)slot);
+    struct stat a, b;
+    int fa = fstat(fd, &a), fb = stat(path, &b);
+    if (fa == 0 && fb == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino)
+        return 1;
+    fprintf(stderr, "     [fd_is_slot] pid=%d fd=%d slot=%d path=%s "
+                    "fstat=%d stat=%d fdmode=%o bind_kind=%d\n",
+            (int)getpid(), fd, (int)slot, path, fa, fb,
+            fa == 0 ? (unsigned)(a.st_mode & S_IFMT) : 0,
+            (int)fdns_slot_kind(0, fd == 1 ? 1 : 0));
+    fflush(stderr);
+    return 0;
+}
+
 static pid_t fork_writer(int32_t slot, size_t nbytes, int *epipe_out)
 {
+    fdns_before_fork();
     pid_t p = fork();
     if (p != 0) { fdns_after_fork_parent((int32_t)p); fdns_gate_release(); return p; }
     fdns_after_fork_child();
     signal(SIGPIPE, SIG_IGN);           /* report EPIPE rather than die on it */
     int fd = stage_open(1, slot, FDNS_PIPE_W);
     if (fd < 0) _exit(3);
+    if (!fd_is_slot(fd, slot)) _exit(43);   /* 43 == the binding was lost */
     static char blk[4096];
     memset(blk, 'a', sizeof blk);
     size_t sent = 0;
@@ -113,11 +144,13 @@ static pid_t fork_writer(int32_t slot, size_t nbytes, int *epipe_out)
 
 static pid_t fork_reader(int32_t slot, size_t expect, size_t read_only)
 {
+    fdns_before_fork();
     pid_t p = fork();
     if (p != 0) { fdns_after_fork_parent((int32_t)p); fdns_gate_release(); return p; }
     fdns_after_fork_child();
     int fd = stage_open(0, slot, FDNS_PIPE_R);
     if (fd < 0) _exit(3);
+    if (!fd_is_slot(fd, slot)) _exit(43);
     static char buf[8192];
     size_t total = 0;
     for (;;) {
@@ -129,6 +162,44 @@ static pid_t fork_reader(int32_t slot, size_t expect, size_t read_only)
     }
     if (read_only) _exit(0);
     _exit(total == expect ? 0 : 5);
+}
+
+/* Name what a stage did, rather than reporting "the case returned 1". The
+ * exit codes are the diagnosis: 43 is "this stage's /fd name did not resolve
+ * to the pipe", 5 is "it read the wrong number of bytes", 42 is EPIPE. */
+static const char *why(int st)
+{
+    static char s[64];
+    if (WIFSIGNALED(st)) {
+        snprintf(s, sizeof s, "killed by signal %d", WTERMSIG(st));
+        return s;
+    }
+    if (!WIFEXITED(st)) return "did not exit";
+    switch (WEXITSTATUS(st)) {
+    case 0:  return "ok";
+    case 3:  return "could not open its /fd name";
+    case 4:  return "read/write error";
+    case 5:  return "wrong byte count";
+    case 42: return "took EPIPE";
+    case 43: return "its /fd name did not resolve to the pipe";
+    }
+    snprintf(s, sizeof s, "exit %d", WEXITSTATUS(st));
+    return s;
+}
+
+static int stages_ok(const char *what, int s1, int s2, int s3)
+{
+    int bad = 0;
+    if (!WIFEXITED(s1) || WEXITSTATUS(s1) != 0) {
+        printf("     %s: stage 1 %s\n", what, why(s1)); bad = 1;
+    }
+    if (!WIFEXITED(s2) || WEXITSTATUS(s2) != 0) {
+        printf("     %s: stage 2 %s\n", what, why(s2)); bad = 1;
+    }
+    if (!WIFEXITED(s3) || WEXITSTATUS(s3) != 0) {
+        printf("     %s: stage 3 %s\n", what, why(s3)); bad = 1;
+    }
+    return bad;
 }
 
 /* ------------------------------------------------------------------ */
@@ -231,12 +302,14 @@ static int case_three_stage(void)
 
     pid_t p1 = fork_writer(a, 4096, NULL);
 
+    fdns_before_fork();
     pid_t p2 = fork();
     if (p2 == 0) {
         fdns_after_fork_child();
         int in  = stage_open(0, a, FDNS_PIPE_R);
         int out = stage_open(1, b, FDNS_PIPE_W);
         if (in < 0 || out < 0) _exit(3);
+        if (!fd_is_slot(in, a) || !fd_is_slot(out, b)) _exit(43);
         static char buf[8192];
         for (;;) {
             ssize_t n = read(in, buf, sizeof buf);
@@ -257,8 +330,7 @@ static int case_three_stage(void)
     waitpid(p1, &s1, 0);
     waitpid(p2, &s2, 0);
     waitpid(p3, &s3, 0);
-    return (WIFEXITED(s2) && WEXITSTATUS(s2) == 0
-            && WIFEXITED(s3) && WEXITSTATUS(s3) == 0) ? 0 : 1;
+    return stages_ok("three-stage", s1, s2, s3);
 }
 
 /* 7. The slot table is 64 entries and nothing ever freed one, so a shell
@@ -278,6 +350,12 @@ static int case_slot_reuse(void)
         int sw = 0, sr = 0;
         waitpid(w, &sw, 0);
         waitpid(r, &sr, 0);
+        if ((WIFEXITED(sw) && WEXITSTATUS(sw) == 43)
+            || (WIFEXITED(sr) && WEXITSTATUS(sr) == 43)) {
+            printf("     iteration %d: a stage's /fd name did not resolve to"
+                   " the pipe (the parent's stale-bind clear raced it)\n", i);
+            return 1;
+        }
         if (!WIFEXITED(sr) || WEXITSTATUS(sr) != 0) {
             printf("     iteration %d lost its payload\n", i);
             return 1;

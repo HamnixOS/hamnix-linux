@@ -1,21 +1,57 @@
 # user/wc.ad
 #
-# Minimal Hamnix `wc`. Reads stdin to EOF and reports counts. With no
-# flags it writes "<lines> <words> <byte_ct>\n" — the same three
-# columns, in the same order, as POSIX wc. A "word" is a run of
+# Hamnix `wc`: line, word and byte counts of each FILE, or of stdin when
+# no FILE is given. With no flags it writes "<lines> <words> <bytes>" —
+# the same three columns, in the same order, as POSIX wc — followed by
+# the file's name when it was given one. A "word" is a run of
 # non-whitespace separated by whitespace; the line count is the number
-# of newline bytes seen.
+# of newline bytes seen. More than one FILE also gets a `total` line.
 #
-# Flags (QA-by-using): `-l` (lines only), `-w` (words only), `-c`
-# (bytes only), `-m` (chars — same as bytes here, ASCII/byte streams).
-# Flags may be combined (`-lw`) and select which columns print, in the
-# canonical wc order (lines, words, bytes). Without any count flag all
-# three print. Any argv token starting with `-` is parsed as flags;
-# everything else is ignored (Hamnix wc reads stdin only — no file
-# operands yet).
+# Flags: `-l` (lines), `-w` (words), `-c` (bytes), `-m` (chars — same as
+# bytes here, ASCII/byte streams). Combinable (`-lw`); they select which
+# columns print, in the canonical wc order. Without any count flag all
+# three print.
+#
+# THE FILE OPERAND IS NEW, and this comment says so because its absence
+# was the expensive part. `wc` parsed argv, IGNORED every non-flag token
+# and read stdin — so `wc -c /etc/rc.boot` did not count that file, did
+# not say it could not, and blocked on stdin for ever. In an rc it takes
+# the boot with it, because hamsh is PID 1: measured, at
+# `pipegate: REF 2`, where it wedged a boot two lines after the pipeline
+# it was there to cross-check.
+#
+# That is the same fault `head`, `cksum` and `md5sum` each had, all three
+# found the same way and all three fixed in docs/linux_installed_update.md
+# §3 — this is the fourth member of the family, and the last of the
+# counting tools that could only be reached through a redirect. A tool
+# that answers something other than the truth about the name it was
+# handed is exactly what NORTH_STAR.md is organised against; blocking for
+# ever is the same failure with a longer fuse.
 
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+
+# Top-level BSS, not frame locals.
+buf:  Array[1024, uint8]
+out:  Array[128, uint8]
+dtmp: Array[24, uint8]
+
+# Result of the last count_fd().
+wc_lines: uint64 = 0
+wc_words: uint64 = 0
+wc_bytes: uint64 = 0
+
+# Running totals across FILE operands.
+tot_lines: uint64 = 0
+tot_words: uint64 = 0
+tot_bytes: uint64 = 0
+
+# Which columns to print.
+want_l: int32 = 0
+want_w: int32 = 0
+want_c: int32 = 0
 
 
 def is_ws(c: uint8) -> int32:
@@ -24,32 +60,102 @@ def is_ws(c: uint8) -> int32:
     return 0
 
 
-def put_dec(n: uint64):
-    if n == 0:
-        sys_write(1, "0", 1)
-        return
-    digits: Array[24, uint8]
-    i: uint64 = 0
-    while n != 0:
-        digits[i] = cast[uint8](n % 10) + 48
-        n = n / 10
-        i = i + 1
-    # Reverse-print.
-    out: Array[24, uint8]
+def strlen_u8(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def write_str(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, strlen_u8(s))
+
+
+def count_fd(fd: int32):
+    lines: uint64 = 0
+    words: uint64 = 0
+    bytes_ct: uint64 = 0
+    in_word: int32 = 0
+    while True:
+        n: int64 = sys_read(fd, &buf[0], 1024)
+        if n <= 0:
+            break
+        i: uint64 = 0
+        while i < cast[uint64](n):
+            c: uint8 = buf[i]
+            bytes_ct = bytes_ct + 1
+            if c == 10:
+                lines = lines + 1
+            if is_ws(c) != 0:
+                in_word = 0
+            else:
+                if in_word == 0:
+                    words = words + 1
+                    in_word = 1
+            i = i + 1
+    wc_lines = lines
+    wc_words = words
+    wc_bytes = bytes_ct
+    tot_lines = tot_lines + lines
+    tot_words = tot_words + words
+    tot_bytes = tot_bytes + bytes_ct
+
+
+# Append `v` in decimal to out[p..]; returns the new position.
+def put_dec(p: uint64, v: uint64) -> uint64:
+    if v == 0:
+        out[p] = 48
+        return p + 1
+    ti: uint64 = 0
+    x: uint64 = v
+    while x != 0:
+        dtmp[ti] = cast[uint8](x % 10) + 48
+        x = x / 10
+        ti = ti + 1
     j: uint64 = 0
-    while j < i:
-        out[j] = digits[i - 1 - j]
+    while j < ti:
+        out[p] = dtmp[ti - 1 - j]
+        p = p + 1
         j = j + 1
-    sys_write(1, &out[0], i)
+    return p
+
+
+# The selected columns, then the name when there is one.
+def emit_counts(l: uint64, w: uint64, b: uint64,
+                name: Ptr[uint8], have_name: int32):
+    p: uint64 = 0
+    printed: int32 = 0
+    if want_l != 0:
+        p = put_dec(p, l)
+        printed = 1
+    if want_w != 0:
+        if printed != 0:
+            out[p] = 32
+            p = p + 1
+        p = put_dec(p, w)
+        printed = 1
+    if want_c != 0:
+        if printed != 0:
+            out[p] = 32
+            p = p + 1
+        p = put_dec(p, b)
+        printed = 1
+    if have_name == 0:
+        out[p] = 10
+        p = p + 1
+        sys_write(1, &out[0], p)
+        return
+    out[p] = 32
+    p = p + 1
+    sys_write(1, &out[0], p)
+    write_str(1, name)
+    write_str(1, "\n")
 
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
-    # Parse flags: -l lines, -w words, -c bytes, -m chars (==bytes for
-    # byte streams). Combinable (`-lw`). Any non-flag operand is
-    # ignored (stdin-only). No count flag selected => print all three.
-    want_l: int32 = 0
-    want_w: int32 = 0
-    want_c: int32 = 0
+    # Pass 1: flags, and how many operands there are. A lone "-" is an
+    # operand (stdin), not a flag.
+    nfiles: int32 = 0
     ai: int32 = 1
     while ai < argc:
         a: Ptr[uint8] = cast[Ptr[uint8]](argv[ai])
@@ -64,49 +170,48 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 elif f == 99 or f == 109:  # 'c' / 'm'
                     want_c = 1
                 fi = fi + 1
+        else:
+            nfiles = nfiles + 1
         ai = ai + 1
     if want_l == 0 and want_w == 0 and want_c == 0:
         want_l = 1
         want_w = 1
         want_c = 1
 
-    buf: Array[1024, uint8]
-    lines: uint64 = 0
-    words: uint64 = 0
-    byte_ct: uint64 = 0
-    in_word: int32 = 0
-    while True:
-        n: int64 = sys_read(0, &buf[0], 1024)
-        if n <= 0:
-            break
-        i: uint64 = 0
-        while i < cast[uint64](n):
-            c: uint8 = buf[i]
-            byte_ct = byte_ct + 1
-            if c == 10:
-                lines = lines + 1
-            if is_ws(c) != 0:
-                in_word = 0
-            else:
-                if in_word == 0:
-                    words = words + 1
-                    in_word = 1
-            i = i + 1
-    # Emit only the selected columns, space-separated in canonical
-    # wc order (lines, words, bytes), then a newline.
-    printed: int32 = 0
-    if want_l != 0:
-        put_dec(lines)
-        printed = 1
-    if want_w != 0:
-        if printed != 0:
-            sys_write(1, " ", 1)
-        put_dec(words)
-        printed = 1
-    if want_c != 0:
-        if printed != 0:
-            sys_write(1, " ", 1)
-        put_dec(byte_ct)
-        printed = 1
-    sys_write(1, "\n", 1)
-    return 0
+    # No FILE: stdin, and no name on the line — the shape a pipeline
+    # wants, and the one `cat F | wc -c` produces.
+    if nfiles == 0:
+        count_fd(0)
+        emit_counts(wc_lines, wc_words, wc_bytes, "-", 0)
+        return 0
+
+    rc: int32 = 0
+    ai = 1
+    while ai < argc:
+        a2: Ptr[uint8] = cast[Ptr[uint8]](argv[ai])
+        if a2[0] == 45 and a2[1] != 0:
+            ai = ai + 1
+            continue
+        if a2[0] == 45 and a2[1] == 0:               # "-" == stdin
+            count_fd(0)
+            emit_counts(wc_lines, wc_words, wc_bytes, "-", 1)
+            ai = ai + 1
+            continue
+        path: Ptr[char] = cast[Ptr[char]](argv[ai])
+        fd: int32 = sys_open(path)
+        if fd < 0:
+            # BY NAME, and non-zero. The old code's answer to a name it
+            # could not use was to wait on stdin for ever.
+            write_str(2, "wc: cannot open ")
+            write_str(2, a2)
+            write_str(2, "\n")
+            rc = 1
+        else:
+            count_fd(fd)
+            sys_close(fd)
+            emit_counts(wc_lines, wc_words, wc_bytes, a2, 1)
+        ai = ai + 1
+
+    if nfiles > 1:
+        emit_counts(tot_lines, tot_words, tot_bytes, "total", 1)
+    return rc

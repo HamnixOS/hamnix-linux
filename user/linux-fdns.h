@@ -44,6 +44,7 @@ void    fdns_keeper_sweep(int wait_ms);
  * `parent` is called with the new child's pid right after fork; `release` is
  * called from every other runtime entry point and means "the parent has moved
  * on, so no more binds are coming". */
+void    fdns_before_fork(void);
 void    fdns_after_fork_parent(int32_t child);
 void    fdns_gate_release(void);
 

@@ -1356,6 +1356,11 @@ int32_t sys_rfork(int32_t flags)
         return 0;                       /* nothing asked for */
     }
 
+    /* Read the /fd table's clock while this process is still the only one
+     * that could be writing to it on behalf of the child-to-be. See
+     * fdns_after_fork_parent: it is what makes clearing the child's stale
+     * names exact instead of a race with the child's own first binds. */
+    fdns_before_fork();
     pid_t pid = fork();
     if (pid < 0)
         return rc32(-1);
