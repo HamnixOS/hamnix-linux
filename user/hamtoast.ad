@@ -27,7 +27,7 @@ extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_get_jiffies() -> uint64
-extern def sys_yield() -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> int32
 extern def sys_exit(code: uint64)
 
@@ -153,6 +153,10 @@ def parse_pointer(s: Ptr[uint8], n: uint64, bbtn: Ptr[int64]) -> int32:
 # ====================================================================
 # CONTENT (from argv, copied into fixed buffers).
 # ====================================================================
+# Top-level BSS, not a frame local: see the note in lib/hamscreen.ad. nfds 0
+# makes sys_waitfds a plain timed wait, so the array is never read -- it is
+# here because the call still needs an address.
+ht_wait: Array[4, int32]
 title_buf: Array[64, uint8]
 body_buf:  Array[96, uint8]
 
@@ -301,8 +305,17 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                                 btn_down = now_down
                         ls = i + 1
                     i = i + 1
-        # cooperative yield window (~30ms) between polls.
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK for 30 ms between polls. This was a "cooperative yield window"
+        # -- a while loop on sys_get_jiffies() calling sys_yield() -- and it
+        # cost A FULL CORE for the whole four seconds the toast is on screen:
+        # measured per pid, 1.13 s of cpu per second of wall clock, while the
+        # compositor beside it doing the actual compositing spent 0.08 s in
+        # ten. That is the third bullet of THE IDLE CENSUS (HANDOFF §0) still
+        # in the tree, and no gate could see it until the run sweep grew a
+        # compositor, because without one this program never got past the
+        # geometry handshake to reach this loop at all.
+        #
+        # nfds 0 is a plain timed wait, the way wsysd's frame loop and
+        # lib/hamscreen.ad's retry both sleep. Waiting is not yielding.
+        sys_waitfds(&ht_wait[0], 0, 30)
     return 0
