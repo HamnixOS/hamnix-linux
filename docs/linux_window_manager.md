@@ -525,8 +525,16 @@ set it works too.
    already proved, with nothing assuming a fixed root window or resource base —
    holding `SubstructureRedirect | SubstructureNotify` on the root. It maps
    what it redirects, grants `ConfigureRequest`s as asked, tracks geometry and
-   override-redirect, and reads `WM_NAME` / `_NET_WM_NAME` onto the wsys title
-   bar.
+   override-redirect, and reads `WM_NAME` / `_NET_WM_NAME` onto the wsys
+   window's `title`.
+
+   The title goes where a native Wayland client's goes and is **not visible**,
+   because `wsysd`'s decoration fills a coloured bar and renders no text for
+   any window, native or bridged. Checked rather than assumed: a 4× crop of
+   the bar over a window titled `Hello Rootless` is plain blue. That is a
+   `wsysd` gap, not a rootless one, and it is written down here so the next
+   person does not spend an afternoon debugging an X property that is arriving
+   correctly.
 
 An X window and a `wl_surface` are two halves of one window and **either can
 arrive first**, so both directions attempt the association; neither half is
@@ -561,6 +569,9 @@ rootless. Nothing about rootless changes it.
   arm rather than printing a warning that is true and misleading at once.
 * **`WM_TRANSIENT_FOR` stacking**, so a dialog is not kept above its parent by
   anything but z-order luck.
+* **A visible title.** The name is set on the wsys window; `wsysd` paints no
+  text on a title bar for anything. Whoever adds it gets X windows named for
+  free.
 * **Override-redirect placement is literal.** A menu is placed at its X-screen
   coordinates, which are not its parent window's coordinates on the Hamnix
   desktop once the user has moved the parent. Menus land in the right place

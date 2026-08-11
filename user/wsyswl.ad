@@ -2022,6 +2022,15 @@ def xwm_read_serial(i: uint64):
         puts(1, "\n")
 
 
+# WHERE THIS TITLE GOES, AND WHERE IT DOES NOT. It is the wsys window's
+# `title` verb -- the same one send_title() writes for a native Wayland client
+# -- so an X window is named in exactly the place anything reading the window
+# table would look for a name. It is NOT visible on the title bar: wsysd's
+# decoration (user/wsysd.ad, `Server-side decoration`) fills a coloured bar and
+# renders no text for ANY window, native or bridged. Checked rather than
+# assumed -- a 4x crop of the bar over a window titled "Hello Rootless" is
+# plain blue. Saying so here so the next person does not spend an afternoon
+# debugging an X property that is arriving correctly.
 def xwm_apply_title(i: uint64, wid: int32):
     if xw_tlen[i] == 0:
         return
