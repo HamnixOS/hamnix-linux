@@ -54,7 +54,7 @@ scope and remain prebuilt.
 
 ## FILES
 
-- `/tmp/hpm/index.json` — refreshed index cache (tmpfs, volatile)
+- `/tmp/hpm/index-<uid>.json` — refreshed index cache, one per user (tmpfs, volatile)
 - `/var/lib/hpm/installed.json` — installed-package database
 - `/var/lib/hpm/channels` — enabled channel list
 

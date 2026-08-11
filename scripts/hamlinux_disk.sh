@@ -84,6 +84,21 @@ FSTAB
 install -m644 etc/rc.boot.installed "$ROOTDIR/etc/rc.boot.installed"
 install -m644 "${HAMLINUX_DISK_RC:-etc/rc.boot.installed}" "$ROOTDIR/etc/rc.boot"
 
+# HAMLINUX_DISK_EXTRA=<dir> overlays <dir> onto the root partition before it is
+# made. HAMLINUX_DISK_RC covers the one file a test needs MOST, but a test that
+# reboots the machine needs a SECOND rc already on the disk before the first
+# boot -- the disk cannot be rebuilt between the two boots without destroying
+# the persistence the reboot is there to prove. Anything else an installed
+# machine is supposed to already have (a trusted key, a seeded config) goes in
+# the same way. It is an overlay, so it can also replace a staged file.
+if [ -n "${HAMLINUX_DISK_EXTRA:-}" ]; then
+    [ -d "$HAMLINUX_DISK_EXTRA" ] || {
+        echo "[disk] HAMLINUX_DISK_EXTRA is not a directory: $HAMLINUX_DISK_EXTRA" >&2
+        exit 1; }
+    cp -a "$HAMLINUX_DISK_EXTRA/." "$ROOTDIR/"
+    echo "[disk] overlaid $HAMLINUX_DISK_EXTRA onto the root"
+fi
+
 mkfs.ext4 -q -L hamnix -d "$ROOTDIR" -m 1 "$ROOTFS" 2600M
 echo "[disk] root filesystem: $(du -h "$ROOTFS" | cut -f1)"
 

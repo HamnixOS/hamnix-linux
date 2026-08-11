@@ -23,7 +23,8 @@
 # `file:///mnt/iso-packages/` repo (see docs/packages.md "Bootstrap").
 #
 # Files this binary touches:
-#   /tmp/hpm/index.json        — refreshed index cache (volatile, tmpfs)
+#   /tmp/hpm/index-<uid>.json  — refreshed index cache, ONE PER USER (volatile,
+#                                tmpfs). See _index_cache_path.
 #   /tmp/hpm/<tarball>         — staging .tar.gz downloads (Phase 2)
 #   /var/lib/hpm/installed.json — installed-package DB (persistent /var)
 #
@@ -98,7 +99,7 @@ INSTALLED_CAP: uint64 = 131072   # 128 KiB cap on installed.json
 http_buf:    Array[262144, uint8]
 http_stage:  Array[65536, uint8]
 
-# Index cache. Loaded on every `hpm` invocation from /tmp/hpm/index.json
+# Index cache. Loaded on every `hpm` invocation from /tmp/hpm/index-<uid>.json
 # (or freshly fetched on `hpm refresh`). The JSON parser indexes ONTO
 # this buffer — package fields are pointers + lengths into idx_buf.
 idx_buf:     Array[262144, uint8]
@@ -1491,28 +1492,85 @@ def _pkg_set_channel_url(pi: uint64) -> int32:
 
 # -- index cache: load + refresh --------------------------------------
 
+# THE INDEX CACHE IS PER-USER, AND THAT IS NOT TIDINESS.
+#
+# It used to be one file, /tmp/hpm/index.json, in a directory whichever
+# principal ran hpm first created. On an installed machine that is always
+# root — the boot, or the operator installing something — and root's mkdir
+# leaves /tmp/hpm mode 0755 root-owned inside a STICKY /tmp. The person at the
+# desktop is uid 1001, and their next `hpm refresh` (which is also the Refresh
+# button in the Software app) died with
+#
+#     hpm: cannot open /tmp/hpm/index.json for write: Permission denied
+#
+# on a machine where the same command worked perfectly for root. Measured on
+# an installed disk, tests/linux/installed_update.sh. It is the third fault of
+# this exact shape in this tree — a directory, a lock file and a socket that
+# existed only because root made them — and the first two were not in hpm.
+#
+# WHY PER-USER AND NOT A WORLD-WRITABLE CACHE. Making /tmp/hpm 0777 and the
+# file 0666 would also "work", and it would let any local user hand ROOT a
+# forged index on its next `hpm install`. The index is the root of trust for
+# every package hash; a shared, writable copy of it is a privilege escalation
+# with a convenience argument attached. One cache per uid, each 0600, costs a
+# few kilobytes of tmpfs and cannot be poisoned across a privilege boundary.
+
+cache_path_buf: Array[64, uint8]
+
+
+def _index_cache_path() -> Ptr[uint8]:
+    # "/tmp/hpm/index-<uid>.json", composed into a BSS buffer (a frame-local
+    # Array is the U9 miscompile).
+    pre: Ptr[uint8] = "/tmp/hpm/index-"
+    p: uint64 = 0
+    while pre[p] != 0:
+        cache_path_buf[p] = pre[p]
+        p = p + 1
+    p = _net9_put_dec_local(&cache_path_buf[0], p, cast[uint64](sys_getuid()))
+    suf: Ptr[uint8] = ".json"
+    si: uint64 = 0
+    while suf[si] != 0:
+        cache_path_buf[p] = suf[si]
+        p = p + 1
+        si = si + 1
+    cache_path_buf[p] = 0
+    return &cache_path_buf[0]
+
+
 def _ensure_hpm_tmpdir():
     # /tmp is tmpfs-owned; mkdir is idempotent (returns -EEXIST on retry).
+    # 0777 on the DIRECTORY so a later, unprivileged hpm can create its own
+    # cache in it; /tmp is sticky, so nobody can remove anybody else's. The
+    # chmod is unconditional because the directory root made yesterday at 0755
+    # is exactly the one that has to be fixed.
     sys_mkdir("/tmp/hpm")
+    sys_chmod("/tmp/hpm", 511)                            # 0777
 
 
 def _save_index_cache() -> int32:
     _ensure_hpm_tmpdir()
-    fd: int32 = sys_open_write("/tmp/hpm/index.json")
+    path: Ptr[uint8] = _index_cache_path()
+    fd: int32 = sys_open_write(cast[Ptr[char]](path))
     if fd < 0:
-        perror("hpm: cannot open /tmp/hpm/index.json for write")
+        write_str(2, "hpm: cannot open ")
+        write_str(2, path)
+        perror(" for write")
         return -1
+    # Nobody else's business, and nobody else's to forge.
+    sys_chmod(cast[Ptr[char]](path), 384)                 # 0600
     wn: int64 = _write_full(fd, &idx_buf[0], idx_len)
     sys_close(fd)
     if wn < 0 or cast[uint64](wn) != idx_len:
-        write_str(2, "hpm: short write on /tmp/hpm/index.json\n")
+        write_str(2, "hpm: short write on ")
+        write_str(2, path)
+        write_str(2, "\n")
         return -1
     return 0
 
 
 def _load_index_cache() -> int32:
     # Try the tmpfs cache. If absent, hpm requires a `refresh` first.
-    fd: int32 = sys_open("/tmp/hpm/index.json")
+    fd: int32 = sys_open(cast[Ptr[char]](_index_cache_path()))
     if fd < 0:
         return -1
     total: uint64 = 0
