@@ -99,14 +99,6 @@ APPS+=("${GUI_APPS[@]}")
 # was `hamsh: command not found: /bin/wsysd` in the middle of rc.5, followed by
 # `[rc.5] compositor started`. The build script knows. Ask it and nothing else.
 
-# $OUT/obj was never created here. Every build worked only because the
-# directory survived from a previous one -- so in a CLEAN tree the first image
-# build produces 0 of 87 applications, and the only reason it does not report
-# success is that hamsh happens to be on the must-build list. That is the
-# "drop a program and still say done" shape this file already carries a
-# warning about, one layer down.
-mkdir -p "$OUT/obj"
-
 echo "[image] building $(( ${#APPS[@]} )) applications + the Adder PID 1"
 BUILT=0; MISSING=(); FAILED=()
 for app in "${APPS[@]}"; do
