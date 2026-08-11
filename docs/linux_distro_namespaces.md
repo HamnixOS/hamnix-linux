@@ -577,50 +577,136 @@ mapped by `jwm` inside the Debian namespace, composited through Xwayland →
 medium — a missing font package, not a display fault; the window is mapped,
 sized and on the scanout.)
 
-#### The fourth fault, which is the directory itself
+#### The fourth fault, which is the directory itself — FIXED
 
 §8.4 and this section name three: a mount point in the medium (`/n`), a stale
 X lock in its `/tmp`, a socket in its `/run`. Looking for the fourth in the
 same family found it one level up from the third. Measured with `debugfs` on
-both media:
+both media, and what it is now:
 
-| path | mode | uid |
-|--|--|--|
-| `/run` (`= $XDG_RUNTIME_DIR`) | `40755` | 0 |
-| `/run/wayland-0` | `140755` → now `140666` | 0 |
-| `/run/hamnix-screen` | `100644` | 0 |
-| `/run/dbus` | `40755` | 0 |
-| `/run/dconf` | `40700` | 0 |
+| path | mode | uid | now |
+|--|--|--|--|
+| `/run` (`= $XDG_RUNTIME_DIR`) | `40755` | 0 | unchanged — no longer `$XDG_RUNTIME_DIR` |
+| `/run/user/1001` (`= $XDG_RUNTIME_DIR`) | — | — | `40700` uid **1001**, staged at boot |
+| `/run/wayland-0` | `140755` → `140666` | 0 | unchanged; symlinked into the above |
+| `/run/hamnix-screen` | `100644` | 0 | unchanged; symlinked into the above |
+| `/run/dbus` | `40755` | 0 | `40755` uid **1001** — mode untouched |
+| `/run/dconf` | `40700` | 0 | `40700` uid **1001** — mode untouched |
 
-So the session can **read** everything `wsyswl` publishes there — the socket's
-mode was the only thing in the way, and the two sibling files are 0644 already
-— and can **create nothing**. Fixing the socket mode fixed *connecting*; it
-does not fix *creating*, and the next casualties are already known:
-`dbus-daemon --system` cannot make `/run/dbus/system_bus_socket` as uid 1001,
-which is the unprivileged half of the D-Bus gap in `HANDOFF.md` §0, and every
-toolkit that wants a runtime file lands on `/run/dconf`, mode 0700 root.
+So the session could **read** everything `wsyswl` publishes there — the
+socket's mode was the only thing in the way, and the two sibling files are 0644
+already — and could **create nothing**. Fixing the socket mode fixed
+*connecting*; it never touched *creating*, and the casualties were already
+known: `dbus-daemon --system` could not make `/run/dbus/system_bus_socket` as
+uid 1001, which is the unprivileged half of the D-Bus gap in `HANDOFF.md` §0,
+and every toolkit that wants a runtime file landed on `/run/dconf`, mode 0700
+root.
+
+#### The fix: `/run/user/<uid>`, staged by root at boot — and nothing moves
 
 A per-user `$XDG_RUNTIME_DIR` is normally `/run/user/<uid>`, owned by that uid
-and mode 0700 — **narrower** than what is there now, not wider. That is
-probably the right answer, and it is not taken here: it moves the socket path,
-which `hamnix-x11session` in both distributions, `alpine_gui_run.sh`,
-`steam_gui_run.sh` and `x11_geom_probe.sh` all name, and the `hamnix-screen`
-sibling-file contract depends on the socket's directory being the one name
-that crosses the boundary. Silently making a distribution's `/run`
-world-writable instead would be a real access-control decision taken by a
-launcher shim, which is the wrong place for it.
+and mode 0700 — **narrower** than the `/run` it replaces, not wider: the
+session gets a directory of its own instead of read-and-traverse over the whole
+of a distribution's runtime state. The alternative, making a distribution's
+`/run` world-writable, hands every principal in the namespace write access to
+the display socket's directory to solve one uid's problem, and it is a real
+access-control decision that does not belong in a launcher shim.
 
-What is done instead is what this project's own standard asks for: it is
-**named, once, at the moment it starts to matter.** `/etc/de-ns-run` now
-probes `$XDG_RUNTIME_DIR` for writability and logs the directory and the uid
-when it is not — so the fourth fault announces itself by name the first time
-it costs anything, instead of arriving as `Connection refused` from a CEF
-subprocess three layers down.
+**Who creates it, and when.** There is no systemd here, so the pattern is this
+tree's own: **root prepares it at boot, at the moment the boot posts the server
+at its name.** `bind '#distro/<name>' /n/<name>` is that moment, and it is
+already where the *first* fault of this family was fixed. `distro_stage_runtime`
+(`user/linux-syscalls.c`) sits beside `distro_stage_mountpoints` and is called
+from it — root only, `EEXIST` is success, a read-only medium says so once per
+path.
 
-`/etc/de-ns-run` also logs `ls -l` of the socket before delegating, from
-**inside** the namespace — the side that actually has to connect. That is the
-witness `tests/linux/distro_menu.sh` now gates on (`srw-rw-rw-`), and it does
-not depend on which `hamnix-x11session` a given medium happens to ship.
+**Nothing moves on disk, which is what makes it affordable.** The reason this
+was not taken earlier is real: **four** files name the socket by its `/run`
+path, and none of them is one file —
+
+| dependant | what it names | what it needed |
+|--|--|--|
+| `hamnix-x11session`, Debian (`tests/linux/hamnix_x11session.sh`) | `export XDG_RUNTIME_DIR=/run`, then `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` and `$XDG_RUNTIME_DIR/hamnix-screen` | nothing — `/run/wayland-0` is still there |
+| `hamnix-x11session`, Alpine (baked into the medium by `scripts/hamlinux_alpine.sh`) | the same two names, a second copy | nothing — same reason |
+| `tests/linux/alpine_gui_run.sh` | starts a `wsyswl` by hand at `/n/alpine/run/wayland-0` | nothing |
+| `tests/linux/steam_gui_run.sh` | plants the Debian session script and its `/run` paths | nothing |
+| `tests/linux/x11_geom_probe.sh` | sets `XDG_RUNTIME_DIR="$WORK"` — a host-side offscreen run | nothing; it never sees a distribution's `/run` |
+
+So the socket **stays** at `/run/wayland-0`, and what goes into the new
+directory is a **symlink per published name** — `wayland-0`, `hamnix-screen`,
+`wsyswl-state`, each `../../<name>`. `connect(2)`, `[ -S ]`, `[ -r ]` and
+`read` all follow symlinks, so `$XDG_RUNTIME_DIR/wayland-0` — exactly what
+libwayland's `wl_display_connect(NULL)` builds — resolves for a client that has
+never heard of `/run/wayland-0`. The links dangle between `rc.boot` and `rc.5`,
+when the per-distribution `wsyswl` actually posts its socket; a dangling
+symlink is the correct state for a name whose server has not started, and it is
+the same *post the server at its name* order everything else here is built on.
+`wsyswl` did not have to change at all.
+
+`/etc/rc.de-ns/<name>` (generated by `scripts/hamlinux_image.sh`) now exports
+`XDG_RUNTIME_DIR=/run/user/1001`, and `XDG_CONFIG_HOME` with it — that had been
+pointed at `/run` too, for the same bad reason: the first directory that
+existed rather than the first one this uid could write. `/etc/de-ns-run`
+prefers `/run/user/$(id -u)` over any inherited value that is **not writable**,
+and leaves a writable inherited value alone.
+
+**The witness had to change one character.** `/etc/de-ns-run` logs the socket
+from **inside** the namespace, and `tests/linux/distro_menu.sh` gates on
+`srw-rw-rw-` in that line. `$XDG_RUNTIME_DIR/wayland-0` is now a symlink, and
+`ls -l` on a symlink prints `lrwxrwxrwx`. It is `ls -lL`: the fact the line
+exists to witness is the mode of the thing `connect(2)` opens, and `-L` prints
+that whether the path is a link or the socket itself.
+
+**And the probe writes.** `[ -w ]` answers from the mode bits, and this entire
+family of faults is the mode bits being read correctly while the effective
+answer is still no — an unmapped uid, a sticky `/tmp`, a read-only medium under
+`HAMLINUX_DISTRO_RO=1`. `/etc/de-ns-run` creates a file and reports the result
+either way. Measured, one boot, `tests/linux/distro_menu.sh`, 0 FAIL:
+
+```
+de-ns-run: wayland socket srw-rw-rw- 1 nobody nogroup 0 /run/user/1001/wayland-0
+de-ns-run: runtime dir /run/user/1001 is WRITABLE by uid 1001: created /run/user/1001/.de-ns-run-probe.226
+de-ns-run:   (drwx------ 2 live live 4096 /run/user/1001)
+de-ns-run: /run/dbus is writable by uid 1001; the system bus can be started here
+```
+
+#### The system bus is a SEPARATE directory and a separate answer
+
+Worth stating plainly, because conflating the two is the obvious mistake here:
+**`/run/user/<uid>` does not bring the system bus up.**
+`/run/dbus/system_bus_socket` is a **compile-time** path in dbus and no
+environment variable moves it. Getting `$XDG_RUNTIME_DIR` right fixes the
+*session* bus and dconf and leaves `system_bus_socket': Permission denied`
+exactly where it was.
+
+There are two ways to close it and only one is small. Root could start a bus
+per distribution at boot — new machinery, a daemon supervised by nobody. Or the
+one principal that actually runs the bus can own the directory it must write:
+nothing here starts the system bus as root, `hamnix-x11session` runs
+`dbus-daemon --system` itself **as uid 1001**. So `distro_stage_runtime`
+**chowns** `/run/dbus` and `/run/dconf` to the session user and leaves their
+**modes untouched** (0755 and 0700). Inside a distribution namespace there is
+exactly one session user, so this transfers a directory rather than sharing it,
+and no other uid gains anything. If a distribution ever grows a real root-run
+bus, that is the line to delete.
+
+It works, and this is the unprivileged half of the D-Bus gap in `HANDOFF.md` §0
+closing. Same boot as above:
+
+```
+hamnix-x11session: stale /run/dbus/system_bus_socket (no live dbus-daemon); removing
+hamnix-x11session: machine id dfb3872d1bce5b75b8a82f766a7aa5b9
+hamnix-x11session: system bus live on /run/dbus/system_bus_socket (pid 262)
+hamnix-x11session: system bus ANSWERED GetId
+hamnix-x11session: session bus unix:path=/tmp/dbus-0Y6duvEPCy,guid=...
+```
+
+The `removing` line is the second thing that had been failing: the previous
+boot's `rm: cannot remove '/run/dbus/pid': Permission denied` was a root-owned
+file in a root-owned directory. Unlinking needs write on the **directory**, and
+`/run/dbus` is not sticky, so the session can now clear a stale bus left by a
+root-run session — the same shape as the `/tmp` half of §8.5, one directory
+over.
 
 #### Two faults in the GATE, found by the fix making the run get further
 
