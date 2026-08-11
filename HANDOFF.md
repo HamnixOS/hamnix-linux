@@ -40,7 +40,7 @@ rather than argued:
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
 | Build | **Every application in `user/` builds through the LLVM lane** — 363 of 363, with 4 of the 367 files being LIBRARY MODULES that have no `main` and are not applications. `scripts/hamlinux_sweep.sh` computes and prints that headline next to its own definition; nothing is hand-derived. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
-| Idle | **An idle desktop is idle.** It was not: with nothing open, no input and nothing running, the host's QEMU sat at **203.6%** of one cpu and `hamdesktop`, `hampanelscene` and PID 1 each burned 11 s in a 20 s window, in state R. Now **6.8%** with the bare desktop and **7.3%** with a terminal open, every process at `0:00`, no zombies. Four separate spins, all the same shape and all invisible to every functional gate — see THE IDLE CENSUS below. `tests/linux/de_idle_cpu.sh`. |
+| Idle | **An idle desktop is idle.** It was not: with nothing open, no input and nothing running, the host's QEMU sat at **203.6%** of one cpu and `hamdesktop`, `hampanelscene` and PID 1 each burned 11 s in a 20 s window, in state R. Now **6.8%** with the bare desktop and **7.3%** with a terminal open, every process at `0:00`, no zombies. Five separate causes, all the same shape and all invisible to every functional gate — see THE IDLE CENSUS below. And an idle desktop is not the only thing that has to be idle: **an idle APPLICATION does too**, and 26 of them each burned a full core with every gate green. The run sweep's `cpu` column found them; all 26 are now at 0.1 s of cpu in a 16.7 s run and pixel-identical. `tests/linux/de_idle_cpu.sh`, `scripts/hamlinux_runsweep.sh`. |
 
 #### THE IDLE CENSUS, and why nothing caught it
 
@@ -53,7 +53,9 @@ of the VM boundary — guest `ps` deltas name the guilty process, and the host's
 own `/proc/<qemu>/stat` catches the ones `ps` cannot see. It had to: after the
 first fix every guest process read `0:00` and the host still read 104.5%.
 
-Four causes, found in that order:
+Five causes, found in that order. The fifth is the largest by count and was
+invisible until the run sweep grew a `cpu` column, because a park and a spin
+are identical in every other column a sweep has.
 
 * **`sys_waitfds` handed its fds to `poll(2)`, and a `/dev/wsys` fd is a
   descriptor on `/dev/null`.** `devtab_open` backs every synthetic-device open
@@ -84,6 +86,54 @@ Four causes, found in that order:
   was waiting for it. Separately, background jobs were only reaped at a PROMPT,
   so on a boot whose rc is still running they stayed zombies for as long as
   that took (`jobs_reap_quiet`).
+* **26 APPLICATIONS EACH BURNED A FULL CORE, AND ONLY A `cpu` COLUMN COULD SEE
+  IT.** With the four above fixed the desktop idled at 6.3% — but that is the
+  desktop with nothing open. Open almost any application and a core went back
+  on. The run sweep now records cpu seconds beside wall seconds and named 23
+  scene clients plus `hamscreensaver` at ~1.0 s of cpu per second of wall,
+  while the compositor beside them — the process actually rasterizing — spent
+  0.08 s in ten. `crond`, which starts on every boot, was 14.3 s of 15.6 s.
+  Fixed in `hamtoast` + `crond` (the two demonstrations) then all the rest;
+  **measured before and after in the same jail, 28 rows: every one of the 24
+  goes 14.9 s → 0.1 s of cpu in a ~16.7 s run, and every one is
+  PIXEL-IDENTICAL — the sweep's `fbpx` column reads the same number in both
+  arms for all 28 rows, controls included.** Four distinct causes:
+
+  * a yield dressed as a sleep — `while sys_get_jiffies() - s < N:
+    sys_yield()` — in 8 scene clients;
+  * a bare `sys_yield()` at the bottom of a `hamui` event loop, with nothing
+    pacing it at all, in 9;
+  * a bare jiffy spin with not even a yield in it, crond's shape, in 2;
+  * **one line in a library**: `lib/hamsdl_dev.ad`'s `sdl_dev_delay()`, the
+    frame pacer every hamSDL and hamGame device client ends its frame with —
+    `sdlpong`, `hamgamedemo`, `hamgamesnake`, three programs from one fix.
+
+  Two were doing worse than spinning: `hamview` re-published its WHOLE v2
+  backbuffer (a full recomposite) on every pass of that loop, and
+  `hamimgscene`, whose entire remaining job after uploading its image is to
+  EXIST, did that with `while 1 == 1: sys_yield()`.
+
+  **And two of the fixes were in the helpers written to cure this.**
+  `lib/hamsceneloop.ad`'s `hamscene_park` fell back to `sys_yield()` when
+  given no keys fd, under a comment saying that was how "a keyless app never
+  busy-spins either"; `lib/hamui.ad`'s `hamui_wait` had the same fallback for
+  a caller with no window yet. Both now park.
+
+  **Nothing is less responsive and several things are more**: `/keys` is
+  waitfds-wake-wired, so every client that now parks on it is woken BY the
+  keystroke instead of rediscovering it on its next round-robin turn. Where a
+  client has no fd to be woken by, the park interval is the same number the
+  spin window was. `sdl_dev_delay` deliberately does NOT wake on a key —
+  these games advance their simulation once per loop, so an early wake would
+  speed the game up when you press a key.
+
+  A last one worth keeping: **eight more programs carry the identical loop and
+  the cpu column read 0.1 for every one of them**, because in the jail they
+  never reach it (`hampkgscene` blocks in `hpm refresh`; `hamctl` and
+  `hamfmscene` exit; the `hamdesktop` / `hampanelscene` / `hamtermscene` spins
+  are fallback branches; `ham2048scene`'s is inside a tile animation). They
+  are fixed on the strength of the shape. A green row for a loop that was
+  never entered is not evidence about the loop.
 
 One test-side lesson worth keeping: the reported census showed two `wsyswl`
 zombies, and the first draft of this gate reproduced them — because it sourced
