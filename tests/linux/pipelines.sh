@@ -82,7 +82,11 @@ cat /tmp/pg.txt | head -2
 
 echo 'pipegate: MARK 7 capture'
 echo captured > /tmp/cap.txt
+echo 'pipegate: REF 7'
+cat /tmp/cap.txt
 echo 'pipegate: capture' `{ cat /tmp/cap.txt }
+echo 'pipegate: MARK 7b builtin-capture'
+echo 'pipegate: bcapture' `{ echo inner }
 
 echo 'pipegate: MARK 8 seventy-pipelines'
 RC
@@ -128,6 +132,7 @@ MARKS=(
     "MARK 5 three-stage"
     "MARK 6 reader-exits-early"
     "MARK 7 capture"
+    "MARK 7b builtin-capture"
     "MARK 8 seventy-pipelines"
     "MARK 9 pipe-after-many"
 )
@@ -188,9 +193,24 @@ v="$(after 'MARK 6 reader-exits-early' | tr -d ' ')"
 [ "$v" = "1" ] && ok "cat F | head -2 answered (the writer took the close)" \
                || bad "cat F | head -2 -> '$v' (want the first line, 1)"
 
+# The control first: if the redirect that made the file did not work, the
+# capture below is not the thing being measured.
+r="$(after 'REF 7')"
+[ "$r" = "captured" ] && ok "echo > FILE then cat FILE round-trips" \
+                      || bad "the control file read back as '$r' (want 'captured')"
 v="$(grep -m1 'pipegate: capture' "$WORK/boot.txt" | sed 's/.*pipegate: capture *//')"
-[ "$v" = "captured" ] && ok "\`{ echo captured }\` capture returned its output" \
+[ "$v" = "captured" ] && ok "\`{ cat FILE }\` capture returned its output" \
                       || bad "capture returned '$v' (want 'captured')"
+
+# A BUILTIN inside `{ … }` runs in this process, so its output goes to the
+# shell's own stdout and the capture gets nothing. That is a real gap and it
+# is NOT fixed here -- what is fixed is that it now says so. An empty
+# substitution and a broken one must not look the same.
+if grep -q 'substitution of the BUILTIN echo is not captured' "$WORK/boot.txt"; then
+    ok "a builtin inside \`{ … }\` reports that it was not captured"
+else
+    bad "a builtin inside \`{ … }\` yielded the empty string in silence"
+fi
 
 n="$(grep -c '^p[0-9]' "$WORK/boot.txt")"
 [ "$n" = "70" ] && ok "70 pipelines in one boot, on a 64-slot fd table" \
