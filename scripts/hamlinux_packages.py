@@ -1094,16 +1094,22 @@ def describe(cmd):
     return "hamnix-linux %s command" % cmd
 
 
-# Per-application additions to hamlinux_build.sh's default object list.
-# wsysd selects the real-Vulkan rasterization backend, so it needs the C shim
-# that dlopens the ICD (user/linux-vk.c), the glibc floor that lets
-# lib/vk/vk_core.ad link outside the Hamnix kernel (user/linux-vkhost.c) and
-# -ldl. Everything else builds against the defaults; a GPU bring-up and a
-# libdl dependency are not something every coreutil should carry.
-EXTRA_OBJS = {
-    "wsysd": ["user/linux-vk.c", "user/linux-vkhost.c", "-ldl"],
-}
-
+# NO per-application object list here. scripts/hamlinux_build.sh knows which
+# programs need extra objects (wsysd needs the Vulkan shim, the glibc floor
+# and -ldl) and adds them itself since 6a27c0ec.
+#
+# This file used to keep its own copy, and passing them a SECOND time is 27
+# `multiple definition of hvk_*` errors -- so wsysd did not link and
+# hamnix-desktop was silently dropped from the channel with one line of
+# output. It went unnoticed because build_one REUSES a cached .elf newer than
+# its source: every channel built in a tree that had already built wsysd
+# picked up the old artefact and packaged it. Only a clean worktree actually
+# ran the compiler, and the first one that did produced a channel with no
+# desktop in it.
+#
+# scripts/hamlinux_image.sh had the identical duplicate and it shipped an
+# initramfs with NO COMPOSITOR for hours (069f7c1f). This was the third copy.
+# One place knows: the build script.
 
 def build_one(cmd, objdir):
     """Build user/<cmd>.ad through the Linux lane. Returns the ELF path or
@@ -1115,8 +1121,7 @@ def build_one(cmd, objdir):
     if os.path.exists(out) and os.path.getmtime(out) > os.path.getmtime(src):
         return out
     rc = subprocess.call(
-        [os.path.join(ROOT, "scripts/hamlinux_build.sh"), src, out]
-        + EXTRA_OBJS.get(cmd, []),
+        [os.path.join(ROOT, "scripts/hamlinux_build.sh"), src, out],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT)
     return out if rc == 0 else None
 
