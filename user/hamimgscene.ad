@@ -15,18 +15,24 @@
 # host by user/hamimgscene_host.ad — the two share the exact hamscene_image +
 # compositor blit path, only the pixel SOURCE differs.
 #
-# ON hamnix-linux THIS CANNOT WORK YET, and it now says so instead of dying
-# mutely. The 'I' verb is a devwsys.ad feature that user/linux-wsys.c never
-# ported: its draw/ctl implements 'B', 'D' and 'C' only, so the named image
-# store does not exist on this line and the scene's `image … NAME` op resolves
-# to nothing (lib/hamui_host.ad's rasterizer takes its `slot < 0` no-op path).
-# The old code returned a bare 1/2/3 with NOT ONE BYTE of output, so the run
-# sweep saw a gui client that mapped a window and then exited 2 for no stated
-# reason — a failure as uninformative as a false success, and from the outside
-# indistinguishable from a crash. Every exit is now named, and the 'I' write's
-# errno is reported, because ENOSYS ("this port has no such verb") and EINVAL
-# ("you sent garbage") are the two answers a reader has to be able to tell
-# apart.
+# ON hamnix-linux THIS WORKS AS OF THE 'I' PORT. It did not for the whole of
+# the port before it: user/linux-wsys.c implemented draw/ctl's 'B', 'D' and 'C'
+# and dropped devwsys's named-image upload, so the store did not exist, the
+# scene's `image … NAME` op resolved to nothing, and lib/hamui_host.ad's
+# rasterizer took a `slot < 0 -> return 1` path that drew a hole and claimed
+# the op. Nothing failed, so nothing noticed — on every image in the system,
+# every run. The device now stores the image (a segment at <seg>.img, keyed by
+# (wid, name)) and user/wsysd.ad reads it back through <wid>/draw/images and
+# blits it.
+#
+# EVERY EXIT HERE IS STILL NAMED, and the 'I' write's errno is still reported
+# by number, because the four answers it can give are four different facts:
+# ENOSYS was "this port has no such verb" (it no longer can be), EINVAL is
+# "you sent garbage", EMSGSIZE is "bigger than the 256x256 the store holds"
+# and ENOSPC is "all sixteen slots are taken". The old code returned a bare
+# 1/2/3 with NOT ONE BYTE of output, and the run sweep saw a gui client that
+# mapped a window and exited 2 for no stated reason — as uninformative as a
+# false success and, from the outside, indistinguishable from a crash.
 
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
@@ -226,9 +232,18 @@ def _upload_image(wid: int32) -> int32:
         _puts(2, " was refused, rc=")
         _puti(2, w)
         if w == cast[int64](-38):
-            _puts(2, " (ENOSYS). user/linux-wsys.c implements draw/ctl 'B', 'D' and 'C' but NOT 'I': hamnix-linux has no named image store, so `hamscene_image` cannot be backed on this line. Nothing was drawn.\n")
+            _puts(2, " (ENOSYS). The draw/ctl 'I' verb is not implemented by this build of user/linux-wsys.c, so there is no named image store to upload to and `hamscene_image` cannot be backed. Nothing was drawn.\n")
         else:
-            _puts(2, "\n")
+            if w == cast[int64](-90):
+                _puts(2, " (EMSGSIZE). The image is larger than the 256x256 the named-image store holds; devwsys caps it there and this port keeps the cap. Nothing was drawn.\n")
+            else:
+                if w == cast[int64](-28):
+                    _puts(2, " (ENOSPC). All sixteen named-image slots are held by live windows. The store REFUSES rather than evicting, so no other window's picture was silently replaced. Nothing was drawn.\n")
+                else:
+                    if w == cast[int64](-22):
+                        _puts(2, " (EINVAL). The 'I' verb was malformed -- bad name length, zero dimensions or an unknown pixel format. Nothing was drawn.\n")
+                    else:
+                        _puts(2, "\n")
         return -1
     if w < cast[int64](n):
         _puts(2, "[hamimgscene] FATAL: short 'I' upload; the image is incomplete and would render torn\n")

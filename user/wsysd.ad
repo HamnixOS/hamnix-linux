@@ -119,7 +119,10 @@
 from lib.hamscene import hamscene_load
 from lib.hamui_host import hamui_host_begin, hamui_host_begin_into, \
     hamui_host_rasterize, hamui_host_set_bgra, \
-    hamui_host_row_base, hamui_host_width, hamui_host_height
+    hamui_host_row_base, hamui_host_width, hamui_host_height, \
+    hamui_host_register_image, hamui_host_clear_images, \
+    hamui_host_image_misses, hamui_host_image_miss_count, \
+    hamui_host_image_miss_name
 from lib.vk.vk_2d import vk2d_set_router, vk2d_clear_router
 from lib.vk.vk_core import vk_set_backend, vk_linux_frame_alloc, \
     VK_BACKEND_LINUX, VK_BACKEND_SW, VK_SUCCESS
@@ -202,6 +205,10 @@ win_dec: Array[32, int32]
 win_vis: Array[32, int32]
 win_gen: Array[32, int32]
 win_bbgen: Array[32, int32]
+# The named-image content serial, field 12 of <wid>/ctl. It is in the frame
+# signature below because a re-uploaded image leaves the scene text identical:
+# without it a video's picture freezes on frame one and nothing says so.
+win_imggen: Array[32, int32]
 win_proto: Array[32, int32]
 n_win:   uint64 = 0
 
@@ -449,6 +456,7 @@ def load_window(wid: int32) -> int32:
     win_proto[i] = take_int(&ctlbuf[0], &pos[0], cap)
     win_gen[i]   = take_int(&ctlbuf[0], &pos[0], cap)
     win_bbgen[i] = take_int(&ctlbuf[0], &pos[0], cap)
+    win_imggen[i] = take_int(&ctlbuf[0], &pos[0], cap)
     n_win = n_win + 1
     return 1
 
@@ -510,11 +518,29 @@ def scan_windows():
             t = win_bbgen[b - 1]
             win_bbgen[b - 1] = win_bbgen[b]
             win_bbgen[b] = t
+            t = win_imggen[b - 1]
+            win_imggen[b - 1] = win_imggen[b]
+            win_imggen[b] = t
             t = win_proto[b - 1]
             win_proto[b - 1] = win_proto[b]
             win_proto[b] = t
             b = b - 1
         a = a + 1
+    # Reclaim cache slots whose window is gone. A wid is reused, and a cache
+    # that kept a dead window's pictures would both leak all sixteen slots to
+    # churn and hand a recycled wid a picture it never uploaded.
+    c: uint64 = 0
+    while c < WSYSD_IMG_SLOTS:
+        if imgc_used[c] != 0:
+            live: int32 = 0
+            q: uint64 = 0
+            while q < n_win:
+                if win_id[q] == imgc_wid[c]:
+                    live = 1
+                q = q + 1
+            if live == 0:
+                forget_window_images(imgc_wid[c])
+        c = c + 1
 
 
 def frame_signature() -> uint64:
@@ -525,7 +551,7 @@ def frame_signature() -> uint64:
     h: uint64 = 14695981039346656037
     i: uint64 = 0
     while i < n_win:
-        vals: Array[10, int32]
+        vals: Array[11, int32]
         vals[0] = win_id[i]
         vals[1] = win_x[i]
         vals[2] = win_y[i]
@@ -536,8 +562,9 @@ def frame_signature() -> uint64:
         vals[7] = win_vis[i]
         vals[8] = win_gen[i]
         vals[9] = win_bbgen[i]
+        vals[10] = win_imggen[i]
         k: uint64 = 0
-        while k < 10:
+        while k < 11:
             h = h ^ cast[uint64](cast[uint32](vals[k]))
             h = h * 1099511628211
             k = k + 1
@@ -959,6 +986,259 @@ def blit_window_image(ox: int32, oy: int32, w: int32, h: int32):
         j = j + 1
 
 
+# ====================================================================
+# NAMED IMAGES — the compositor half of the draw/ctl 'I' verb.
+# ====================================================================
+# In Hamnix the compositor IS devwsys, so the named-image store and the scene
+# rasterizer share an address space and `image x y w h NAME` is a table lookup.
+# Here the compositor is this program and the store is a shared segment behind
+# /dev/wsys, so the pixels have to be READ -- through files, like everything
+# else, which is what makes wsysd an ordinary program:
+#
+#   /dev/wsys/<wid>/draw/images        "<name> <w> <h> <serial>\n" per image
+#   /dev/wsys/<wid>/draw/image/<name>  raw RGBA8888, w*h*4 bytes
+#
+# CACHED ON THE SERIAL, and that is what makes it affordable. A 256x256 image
+# is 256 KiB and lib/hamvideocore.ad re-uploads its "frame" every tick; copying
+# every image of every window every frame would cost more than the rasterizer.
+# The serial is bumped by the device on every store, so a window whose pictures
+# have not changed costs ONE small text read per frame and no pixel copy.
+#
+# SIXTEEN SLOTS, matching the device's cap exactly, so this cache can never be
+# the thing that refuses -- if the store accepted an image, there is room here
+# for it. What CAN still refuse is lib/hamui_host.ad's per-window registry,
+# which is eight; that refusal is reported by name rather than dropped.
+WSYSD_IMG_SLOTS: uint64 = 16
+WSYSD_IMG_NAME:  uint64 = 32
+WSYSD_IMG_BYTES: uint64 = 262144         # 256*256*4, the device's ceiling
+imgc_used:   Array[16, int32]
+imgc_wid:    Array[16, int32]
+imgc_w:      Array[16, int32]
+imgc_h:      Array[16, int32]
+imgc_serial: Array[16, int32]
+imgc_name:   Array[512, uint8]           # 16 * 32, NUL-terminated
+imgc_px:     Array[4194304, uint8]       # 16 * 256 KiB
+imglist:     Array[2048, uint8]          # the draw/images listing
+
+
+def imgpath(wid: int32, name: Ptr[uint8], ns: uint64, ne: uint64):
+    # "/dev/wsys/<wid>/draw/image/<name>\0" into pathbuf.
+    winpath(wid, "draw/image/")
+    i: uint64 = 0
+    while pathbuf[i] != 0:
+        i = i + 1
+    k: uint64 = ns
+    while k < ne and i < 127:
+        pathbuf[i] = name[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+
+def _imgc_eq(slot: uint64, buf: Ptr[uint8], ns: uint64, ne: uint64) -> int32:
+    nb: uint64 = slot * WSYSD_IMG_NAME
+    k: uint64 = ns
+    j: uint64 = nb
+    while k < ne:
+        if imgc_name[j] == 0 or imgc_name[j] != buf[k]:
+            return 0
+        k = k + 1
+        j = j + 1
+    if imgc_name[j] != 0:
+        return 0
+    return 1
+
+
+def _imgc_find(wid: int32, buf: Ptr[uint8], ns: uint64, ne: uint64) -> int32:
+    s: uint64 = 0
+    while s < WSYSD_IMG_SLOTS:
+        if imgc_used[s] != 0 and imgc_wid[s] == wid:
+            if _imgc_eq(s, buf, ns, ne) == 1:
+                return cast[int32](s)
+        s = s + 1
+    return -1
+
+
+# Read <wid>/draw/image/<name> into cache slot `u`. 1 on a WHOLE image, 0 if
+# the read came up short -- a short image is not blitted, because half a
+# picture stretched over the whole rect is a worse answer than the complaint.
+def _imgc_fill(u: uint64, wid: int32, buf: Ptr[uint8], ns: uint64, ne: uint64,
+               w: int32, h: int32) -> int32:
+    want: uint64 = cast[uint64](w) * cast[uint64](h) * 4
+    if want == 0 or want > WSYSD_IMG_BYTES:
+        return 0
+    imgpath(wid, buf, ns, ne)
+    fd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
+    if fd < 0:
+        return 0
+    base: uint64 = u * WSYSD_IMG_BYTES
+    got: uint64 = 0
+    while got < want:
+        k: int64 = sys_read(fd, &imgc_px[base + got], want - got)
+        if k <= 0:
+            got = want + 1                       # short: mark and stop
+        else:
+            got = got + cast[uint64](k)
+    sys_close(fd)
+    if got != want:
+        return 0
+    return 1
+
+
+# Register every image window `wid` owns into lib/hamui_host.ad's registry,
+# refreshing the cache for any whose serial moved. Called immediately before
+# the rasterize, and it CLEARS first: the device store is keyed by (wid, name)
+# so two windows may each own a "frame", and carrying window A's registration
+# into window B would draw A's picture in B.
+def load_window_images(wid: int32):
+    hamui_host_clear_images()
+    winpath(wid, "draw/images")
+    n: int64 = slurp(cast[Ptr[char]](&pathbuf[0]), &imglist[0], 2048)
+    if n <= 0:
+        return
+    end: uint64 = cast[uint64](n)
+    p: uint64 = 0
+    while p < end:
+        ns: uint64 = p
+        while p < end and imglist[p] != 32 and imglist[p] != 10:
+            p = p + 1
+        ne: uint64 = p
+        iw: int32 = 0
+        ih: int32 = 0
+        isr: int32 = 0
+        f: int32 = 0
+        while f < 3:
+            while p < end and imglist[p] == 32:
+                p = p + 1
+            v: int32 = 0
+            got: int32 = 0
+            while p < end and imglist[p] >= 48 and imglist[p] <= 57:
+                v = v * 10 + cast[int32](imglist[p]) - 48
+                got = 1
+                p = p + 1
+            if got == 0:
+                v = -1
+            if f == 0:
+                iw = v
+            if f == 1:
+                ih = v
+            if f == 2:
+                isr = v
+            f = f + 1
+        while p < end and imglist[p] != 10:
+            p = p + 1
+        p = p + 1
+        if ns < ne and iw > 0 and ih > 0:
+            slot: int32 = _imgc_find(wid, &imglist[0], ns, ne)
+            if slot < 0:
+                s2: uint64 = 0
+                while s2 < WSYSD_IMG_SLOTS and slot < 0:
+                    if imgc_used[s2] == 0:
+                        slot = cast[int32](s2)
+                    s2 = s2 + 1
+                if slot >= 0:
+                    u2: uint64 = cast[uint64](slot)
+                    nb: uint64 = u2 * WSYSD_IMG_NAME
+                    k2: uint64 = ns
+                    q: uint64 = 0
+                    while k2 < ne and q < WSYSD_IMG_NAME - 1:
+                        imgc_name[nb + q] = imglist[k2]
+                        k2 = k2 + 1
+                        q = q + 1
+                    imgc_name[nb + q] = 0
+                    imgc_wid[u2] = wid
+                    imgc_used[u2] = 1
+                    imgc_serial[u2] = -1         # forces the fill below
+            if slot >= 0:
+                u: uint64 = cast[uint64](slot)
+                if imgc_serial[u] != isr or imgc_w[u] != iw or imgc_h[u] != ih:
+                    if _imgc_fill(u, wid, &imglist[0], ns, ne, iw, ih) != 0:
+                        imgc_w[u] = iw
+                        imgc_h[u] = ih
+                        imgc_serial[u] = isr
+                    else:
+                        imgc_w[u] = 0
+                        imgc_h[u] = 0
+                        imgc_serial[u] = -1
+                if imgc_w[u] > 0:
+                    # The registry takes a CALLER-OWNED pointer, which is what
+                    # lets the rasterizer read straight out of this cache with
+                    # no second copy. It stays valid until the next call here,
+                    # and the rasterize happens in between.
+                    if hamui_host_register_image(&imgc_name[u * WSYSD_IMG_NAME],
+                                                 imgc_w[u], imgc_h[u],
+                                                 &imgc_px[u * WSYSD_IMG_BYTES]) == 0:
+                        puts(2, "wsysd: image registry full, not drawing ")
+                        puts(2, &imgc_name[u * WSYSD_IMG_NAME])
+                        puts(2, "\n")
+
+
+# Drop every cache slot owned by wid. A wid is reused, and a recycled window
+# must never inherit a dead one's pictures -- the device frees its own store on
+# teardown for the same reason.
+def forget_window_images(wid: int32):
+    s: uint64 = 0
+    while s < WSYSD_IMG_SLOTS:
+        if imgc_used[s] != 0 and imgc_wid[s] == wid:
+            imgc_used[s] = 0
+            imgc_wid[s] = 0
+            imgc_w[s] = 0
+            imgc_h[s] = 0
+            imgc_serial[s] = -1
+            imgc_name[s * WSYSD_IMG_NAME] = 0
+        s = s + 1
+
+
+# ONE LINE PER (window, name), EVER. The defect this whole path exists to fix
+# was a scene op that drew nothing and said nothing; the opposite failure is a
+# message every frame, which filled the initramfs tmpfs and silenced the guest
+# console inside two minutes the last time this file printed per-frame. So the
+# complaint is remembered and never repeated.
+IMGWARN_SLOTS: uint64 = 16
+imgwarn_wid:  Array[16, int32]
+imgwarn_name: Array[512, uint8]
+imgwarn_n:    uint64 = 0
+
+
+def report_image_misses(wid: int32):
+    if hamui_host_image_misses() == 0:
+        return
+    c: uint64 = hamui_host_image_miss_count()
+    k: uint64 = 0
+    while k < c:
+        nm: Ptr[uint8] = hamui_host_image_miss_name(k)
+        seen: int32 = 0
+        s: uint64 = 0
+        while s < imgwarn_n:
+            if imgwarn_wid[s] == wid:
+                nb: uint64 = s * WSYSD_IMG_NAME
+                j: uint64 = 0
+                mt: int32 = 1
+                while nm[j] != 0 and mt == 1:
+                    if imgwarn_name[nb + j] != nm[j]:
+                        mt = 0
+                    j = j + 1
+                if mt == 1 and imgwarn_name[nb + j] == 0:
+                    seen = 1
+            s = s + 1
+        if seen == 0 and imgwarn_n < IMGWARN_SLOTS:
+            nb2: uint64 = imgwarn_n * WSYSD_IMG_NAME
+            j2: uint64 = 0
+            while nm[j2] != 0 and j2 < WSYSD_IMG_NAME - 1:
+                imgwarn_name[nb2 + j2] = nm[j2]
+                j2 = j2 + 1
+            imgwarn_name[nb2 + j2] = 0
+            imgwarn_wid[imgwarn_n] = wid
+            imgwarn_n = imgwarn_n + 1
+            puts(2, "wsysd: window ")
+            putd(2, wid)
+            puts(2, " scene names image '")
+            puts(2, nm)
+            puts(2, "' that it never uploaded -- nothing drawn there. ")
+            puts(2, "Upload it with the 'I' verb on draw/ctl before the commit that names it.\n")
+        k = k + 1
+
+
 def paint_window(i: uint64) -> int32:
     wid: int32 = win_id[i]
     if win_vis[i] == 0:
@@ -1014,6 +1294,11 @@ def paint_window(i: uint64) -> int32:
         fill_rect(ox, oy, w, h, 1842204)                 # 0x1C1C1C
         return 1
 
+    # The window's named images, refreshed and registered before anything is
+    # rasterized: `image x y w h NAME` in the display list below resolves
+    # against exactly what this puts in the registry, and nothing else.
+    load_window_images(wid)
+
     tr0: uint64 = 0
     if bench_on != 0:
         tr0 = now_us()
@@ -1046,6 +1331,7 @@ def paint_window(i: uint64) -> int32:
             hamui_host_rasterize()
     if bench_on != 0:
         t_rast = t_rast + (now_us() - tr0)
+    report_image_misses(wid)
 
     if direct != 0:
         return 1

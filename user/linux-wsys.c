@@ -1633,20 +1633,36 @@ static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v)
      * private syscall, only the files every client has.
      *
      *   "<wid> <x> <y> <w> <h> <z> <decorate> <visible> <proto> <scene_gen>
-     *    <backbuffer_gen>\n"
+     *    <backbuffer_gen> <image_gen>\n"
      *
-     * The two generation counters are the frame counters: scene_gen changes
+     * The three generation counters are the frame counters: scene_gen changes
      * only on `commit`, backbuffer_gen only on a v2 dirty-rect, so a
      * compositor that remembers them repaints exactly the windows that
-     * changed and rasterizes nothing else. */
-    uint8_t b[128];
+     * changed and rasterizes nothing else.
+     *
+     * IMAGE_GEN IS THE THIRD, AND IT HAD TO BE.  A client that re-uploads a
+     * named image sends the SAME scene text afterwards -- lib/hamvideocore.ad
+     * writes `image ... frame` on every tick and the bytes are identical -- so
+     * a compositor watching scene_gen alone would call a new video frame
+     * "nothing to paint" and the picture would freeze on frame one while every
+     * return code stayed 0.  devwsys bumps a per-window content serial in
+     * _wsys_img_store for exactly this reason; this field is that serial, made
+     * readable.  It is APPENDED, so a reader that parses eleven fields is
+     * unaffected. */
+    uint8_t b[160];
     uint64_t n = 0;
     int bslot = bb_for(v->wid, 0, 0, 0);
-    int32_t fields[11] = { v->wid, v->x, v->y, v->w, v->h, v->z,
+    int32_t igen = 0;
+    if (img || img_attach() >= 0)
+        for (int i = 0; i < WSYS_IMG_SLOTS; i++)
+            if (img->slot[i].used && img->slot[i].wid == v->wid)
+                igen += (int32_t)img->slot[i].serial;
+    int32_t fields[12] = { v->wid, v->x, v->y, v->w, v->h, v->z,
                            v->decorate, v->visible, v->proto,
                            (int32_t)v->scene_gen,
-                           bslot >= 0 ? (int32_t)bb->slot[bslot].gen : 0 };
-    for (int i = 0; i < 11; i++) {
+                           bslot >= 0 ? (int32_t)bb->slot[bslot].gen : 0,
+                           igen };
+    for (int i = 0; i < 12; i++) {
         if (i) b[n++] = ' ';
         n = put_int(b, n, fields[i]);
     }
