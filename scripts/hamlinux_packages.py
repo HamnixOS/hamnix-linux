@@ -103,7 +103,38 @@ COMPONENTS = {
     "hamnix-init": (
         "hamnix-linux init (the Adder PID 1) and the boot rc scripts",
         [("linuxinit", "bin/linuxinit")],
+        # /etc/rc.boot IS SHIPPED, AND IT IS WRONG, AND TAKING IT OUT IS WORSE
+        # UNTIL user/hlinstall.ad CHANGES. Both halves are measured, on an
+        # installed disk, by tests/linux/installed_update.sh:
+        #
+        #   * AS IT IS. hamnix-init ships etc/rc.boot.linux AS /etc/rc.boot.
+        #     On the live image that is the same bytes twice and invisible. On
+        #     an INSTALLED machine `hpm install` replaced the boot script of
+        #     the running system with the initramfs one -- measured: after the
+        #     install the machine's /etc/rc.boot began "# /etc/rc.boot.linux
+        #     -- the bootstrap rc for the Linux line".
+        #
+        #   * SHIPPING IT UNDER ITS OWN NAME INSTEAD deletes it. hpm's upgrade
+        #     removes the files the OLD version owned before laying down the
+        #     new one, and 1.0.7 owns etc/rc.boot. Measured, with exactly that
+        #     change in place: after `hpm update` on the installed disk,
+        #     `ls -l /etc/rc.boot` answered "ls: open failed: /etc/rc.boot".
+        #     The machine had no boot script at all. That is not a smaller
+        #     fault than the first one; it is a brick.
+        #
+        # WHAT ACTUALLY FIXES IT, and it is not a line in this file: an
+        # installed /etc/rc.boot should be one line, `source
+        # '/etc/rc.boot.installed'`, written by user/hlinstall.ad and owned by
+        # no package -- and hamnix-init should ship etc/rc.boot.linux and
+        # etc/rc.boot.installed under their own names so an update delivers
+        # every change to either. Then which rc a machine boots is a property
+        # of the MACHINE, which is what it always was. Doing that needs the
+        # installer and this file to change together, and needs one release
+        # that ships /etc/rc.boot as well so the upgrade does not remove it
+        # from the machines that already have it.
         [("etc/rc.boot.linux", "etc/rc.boot"),
+         ("etc/rc.boot.linux", "etc/rc.boot.linux"),
+         ("etc/rc.boot.installed", "etc/rc.boot.installed"),
          ("etc/rc.d/rc.5.linux", "etc/rc.d/rc.5"),
          ("etc/rc.de-user.linux", "etc/rc.de-user"),
          ("etc/passwd", "etc/passwd"),
