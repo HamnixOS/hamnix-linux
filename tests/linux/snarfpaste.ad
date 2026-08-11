@@ -1,0 +1,62 @@
+# tests/linux/snarfpaste.ad — PASTE, in a SECOND process, through a DIFFERENT
+# shipped library than the one that copied.
+#
+# tests/linux/snarfcopy.ad copies via lib/hamtextbox.ad (the editor / Notes /
+# URL-bar path). This pastes via lib/htermsel.ad (the grid terminal's path).
+# The two libraries carry their OWN copies of the path selector
+# (_htb_clip_path and _htsel_clip_path) precisely because importing hamtextbox
+# into the terminal would drag the proportional TTF font engine in with it --
+# so a test that copied and pasted through one library would not have proved
+# they agree about which name is which buffer. This one does.
+#
+#     snarfpaste <prim>             prim: 0 = CLIPBOARD, 1 = PRIMARY
+#
+# Prints "paste <prim> <n> <bytes>" -- the count first so an empty paste is
+# distinguishable from a paste of an empty line, which is the exact ambiguity
+# that let "copy and paste does nothing" go unnoticed.
+
+from lib.htermsel import htsel_clip_get
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+
+# Top-level BSS: this compiler wants buffers at module scope, and 64 KiB is
+# well past what a frame would carry anyway. One byte over HAMSNARF_MAX so a
+# device that ignored its own cap would show up as a longer answer here.
+_sp_buf: Array[65537, uint8]
+_sp_dec: Array[24, uint8]
+
+
+def _sp_put_dec(v: uint64):
+    n: uint64 = 0
+    if v == 0:
+        sys_write(1, "0", 1)
+        return
+    while v > 0:
+        _sp_dec[n] = cast[uint8](48 + (v % 10))
+        v = v / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        sys_write(1, &_sp_dec[n], 1)
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    prim: int32 = 0
+    if argc > 1:
+        ps: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
+        if ps[0] != 48:
+            prim = 1
+    n: uint64 = htsel_clip_get(prim, &_sp_buf[0], 65537)
+    sys_write(1, "paste ", 6)
+    _sp_put_dec(cast[uint64](prim))
+    sys_write(1, " ", 1)
+    _sp_put_dec(n)
+    # The separator is emitted only when there ARE bytes, so an empty paste is
+    # "paste 0 0" exactly -- no trailing space for an assertion to disagree
+    # with invisibly. An empty clipboard and a clipboard holding one space are
+    # then still distinguishable, which is the ambiguity worth keeping out.
+    if n > 0:
+        sys_write(1, " ", 1)
+        sys_write(1, &_sp_buf[0], n)
+    sys_write(1, "\n", 1)
+    return 0

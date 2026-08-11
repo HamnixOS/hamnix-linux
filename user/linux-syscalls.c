@@ -65,6 +65,7 @@
 #include "linux-net.h"
 #include "linux-auth.h"
 #include "linux-audio.h"
+#include "linux-snarf.h"
 
 /* ------------------------------------------------------------------ *
  * Return convention
@@ -304,6 +305,10 @@ struct devfile {
     int      isau;      /* 1 => /dev/audio, /dev/audioctl or /dev/audioin;
                          * `au` is live */
     struct hamaudio_file au;
+    int      issn;      /* 1 => /dev/snarf or /dev/snarf.primary; `sn` is
+                         * live.  No pointers inside, so devtab_clone's
+                         * struct copy is already a correct deep copy. */
+    struct hamsnarf_file sn;
 };
 static struct devfile devtab[DEVTAB_MAX];
 
@@ -326,8 +331,9 @@ static int devtab_open(const char *path, int for_write)
                 ? hamnet_kind(path) : HAMNET_NONE;
     int akind = hamauth_is_path(path);
     int aukind = hamaudio_kind(path);
+    int snkind = hamsnarf_kind(path);
     if (kind == HAMFB_NONE && wkind == HAMWSYS_NONE && nkind == HAMNET_NONE
-        && !akind && aukind == HAMAUDIO_NONE) {
+        && !akind && aukind == HAMAUDIO_NONE && snkind == HAMSNARF_NONE) {
         errno = ENODEV;
         return -1;
     }
@@ -343,6 +349,10 @@ static int devtab_open(const char *path, int for_write)
     } else if (akind) {
         hamauth_open(&slot->af);
         slot->isauth = 1;
+    } else if (snkind != HAMSNARF_NONE) {
+        if (hamsnarf_open(path, for_write, &slot->sn) < 0)
+            return -1;
+        slot->issn = 1;
     } else if (aukind != HAMAUDIO_NONE) {
         if (hamaudio_open(path, for_write, &slot->au) < 0)
             return -1;
@@ -387,7 +397,8 @@ static int dev_path(const char *path)
         || hamwsys_kind(path) != HAMWSYS_NONE
         || hamnet_kind(path) != HAMNET_NONE
         || hamauth_is_path(path)
-        || hamaudio_kind(path) != HAMAUDIO_NONE;
+        || hamaudio_kind(path) != HAMAUDIO_NONE
+        || hamsnarf_kind(path) != HAMSNARF_NONE;
 }
 
 /* /proc/<pid>/note — Plan 9 delivers a SIGNAL by writing a NAME to a file, and
@@ -653,6 +664,8 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
             return hamauth_read(&v->af, buf, count);
         if (v->isau)
             return hamaudio_read(&v->au, buf, count);
+        if (v->issn)
+            return hamsnarf_read(&v->sn, buf, count);
         if (v->isnet)
             return hamnet_read(&v->nf, buf, count);
         if (v->isw)
@@ -703,6 +716,11 @@ int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
          * answers 0, which is what this call means by "nothing yet". */
         if (v->isau)
             return hamaudio_read(&v->au, buf, count);
+        /* The clipboard is memory: a read never blocks, so "nothing ready
+         * yet" and "end of the buffer" are the same 0 here and the blocking
+         * path is already the non-blocking one. */
+        if (v->issn)
+            return hamsnarf_read(&v->sn, buf, count);
         if (v->isnet) {
             /* A /net data file is a real socket, and reading it blocks. This
              * used to fall through to sys_read, so a caller that asked for a
@@ -787,6 +805,8 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
             return hamauth_write(&v->af, buf, count);
         if (v->isau)
             return hamaudio_write(&v->au, buf, count);
+        if (v->issn)
+            return hamsnarf_write(&v->sn, buf, count);
         if (v->isnet)
             return hamnet_write(&v->nf, buf, count);
         if (v->isw)
@@ -809,8 +829,10 @@ int32_t sys_close(int32_t fd)
         if (v->isw)   hamwsys_close(&v->w);
         if (v->isnet) hamnet_close(&v->nf);
         if (v->isau)  hamaudio_close(&v->au);
+        if (v->issn)  hamsnarf_close(&v->sn);
         if (v->isauth) explicit_bzero(&v->af, sizeof v->af);
         v->used = 0; v->isw = 0; v->isnet = 0; v->isauth = 0; v->isau = 0;
+        v->issn = 0;
         return rc32(close((int)fd));
     }
     struct dirstream *d = dirtab_find((int)fd);
@@ -830,6 +852,12 @@ int64_t sys_lseek(int32_t fd, int64_t off, int32_t whence)
          * staged sound, which is what lib/hamsdl_audio_dev.ad means by it. */
         if (v->isau)
             return hamaudio_seek(&v->au, off,
+                                 whence == SEEK_CUR ? 1 :
+                                 whence == SEEK_END ? 2 : 0);
+        /* Seeking the clipboard moves the offset the device protocol is
+         * addressed by -- a seek to 0 followed by a write is a REPLACE. */
+        if (v->issn)
+            return hamsnarf_seek(&v->sn, off,
                                  whence == SEEK_CUR ? 1 :
                                  whence == SEEK_END ? 2 : 0);
         if (v->isnet) {
@@ -949,9 +977,11 @@ int32_t sys_dup2(int32_t oldfd, int32_t newfd)
     if (old_view) {
         if (old_view->isw) hamwsys_close(&old_view->w);
         if (old_view->isau) hamaudio_close(&old_view->au);
+        if (old_view->issn) hamsnarf_close(&old_view->sn);
         old_view->used = 0;
         old_view->isw = 0;
         old_view->isau = 0;
+        old_view->issn = 0;
     }
     int r = dup2((int)oldfd, (int)newfd);
     if (r < 0) return rc32(r);

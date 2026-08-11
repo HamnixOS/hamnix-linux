@@ -71,7 +71,30 @@ The clipboard finding that fell out of it is in the HONESTLY BROKEN list below.
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
-* **There is no clipboard on this line. Copy and paste between programs does
+* **(SOLVED — kept because the argument is the lesson) There was no clipboard
+  on this line.** `/dev/snarf` and `/dev/snarf.primary` are SERVED now, by
+  `user/linux-snarf.c`, in the same shape as `/dev/wsys` and `/dev/audio`: a
+  shared segment carrying the two byte buffers, with `lib/devsnarf.ad`'s
+  offset-addressed protocol ported rule for rule rather than re-decided.
+  **The cheap answer below was measured, correct, and not taken**, which is the
+  part worth reading: two ordinary files give the toolkit its semantics but
+  make `/dev/snarf` not a device — retiring by hand the premise the `playtone`
+  `O_CREAT` guard rests on — and they have no 64 KiB cap in a RAM-backed
+  `/dev`, no stated owner when the chrome is root and the session is uid 1001,
+  and only an accidental agreement with the offset protocol. Measured, 23
+  assertions in `tests/linux/snarf_device.sh`: copy through
+  `lib/hamtextbox.ad` in one process, paste through `lib/htermsel.ad` in
+  another; root copies and uid 1001 pastes it and copies back; `echo x >
+  /dev/snarf` lands BOTH chunks (Defect 2); a 70 000-byte copy reads back
+  65 536; and after all of it there is still NO FILE at `/dev/snarf`. It needs
+  **no rc line and no image change** — a served device creates nothing at boot.
+  **What is deliberately NOT done, and named rather than half-done: the X /
+  namespace clipboard bridge.** A foreign binary in a namespace does not see
+  `/dev/snarf` (measured, arm 3), the same as `/dev/wsys` and `/net`; bridging
+  needs a process that owns an X selection and mirrors it BOTH ways.
+  `docs/linux_clipboard.md`. The original entry follows.
+* **(the original entry) There is no clipboard on this line. Copy and paste
+  between programs does
   nothing, and says nothing when it doesn't.** `lib/hamtextbox.ad` and
   `lib/htermsel.ad` — the shipped code the editor, Notes, the browser URL bar
   and the grid terminal all go through — reach the clipboard BY PATH,

@@ -92,7 +92,8 @@ if [ ! -f "$SC_OBJ" ] || [ user/linux-syscalls.c -nt "$SC_OBJ" ] \
         || [ user/linux-wsys.h -nt "$SC_OBJ" ] \
         || [ user/linux-fdns.h -nt "$SC_OBJ" ] \
         || [ user/linux-net.h -nt "$SC_OBJ" ] \
-        || [ user/linux-auth.h -nt "$SC_OBJ" ]; then
+        || [ user/linux-auth.h -nt "$SC_OBJ" ] \
+        || [ user/linux-snarf.h -nt "$SC_OBJ" ]; then
     "$CLANG" -O2 -Iuser -c user/linux-syscalls.c -o "$SC_OBJ" || {
         echo "[hamlinux] ERROR: could not compile user/linux-syscalls.c" >&2
         exit 1
@@ -152,6 +153,21 @@ if [ ! -f "$AU_OBJ" ] || [ user/linux-auth.c -nt "$AU_OBJ" ] \
         || [ user/linux-auth.h -nt "$AU_OBJ" ]; then
     "$CLANG" -O2 -Iuser -c user/linux-auth.c -o "$AU_OBJ" || {
         echo "[hamlinux] ERROR: could not compile user/linux-auth.c" >&2
+        exit 1
+    }
+fi
+
+# /dev/snarf and /dev/snarf.primary -- the clipboard device, the port of
+# Hamnix's sys/src/9/port/devsnarf.ad onto a shared segment. NOT optional and
+# NOT guarded like the audio stanza below: every program in the tree links the
+# runtime, lib/hamtextbox.ad and lib/htermsel.ad reach these two paths by name,
+# and a missing object here is an undefined reference at link time rather than
+# a program that builds and silently cannot paste.
+SN_OBJ="$OUT_DIR/.linux-snarf.o"
+if [ ! -f "$SN_OBJ" ] || [ user/linux-snarf.c -nt "$SN_OBJ" ] \
+        || [ user/linux-snarf.h -nt "$SN_OBJ" ]; then
+    "$CLANG" -O2 -Iuser -c user/linux-snarf.c -o "$SN_OBJ" || {
+        echo "[hamlinux] ERROR: could not compile user/linux-snarf.c" >&2
         exit 1
     }
 fi
@@ -221,7 +237,7 @@ case "$(basename "$IN_AD" .ad)" in
     wsysd) EXTRA_OBJS=(user/linux-vk.c user/linux-vkhost.c -ldl) ;;
 esac
 
-if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" "$NET_OBJ" "$AU_OBJ" ${AUD_OBJ:+"$AUD_OBJ"} \
+if ! "$CLANG" "$OPTLVL" "$LL" scripts/adder_llvm_runtime.c "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" "$NET_OBJ" "$AU_OBJ" "$SN_OBJ" ${AUD_OBJ:+"$AUD_OBJ"} \
         "${EXTRA_OBJS[@]}" \
         $TLSLIBS -lcrypt \
         "$@" -o "$OUT_ELF" 2>"$LL.link.log"; then

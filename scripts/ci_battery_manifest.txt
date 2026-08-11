@@ -372,6 +372,27 @@ bash scripts/test_htb_evt_paste_host.sh
 # detector, and asserts the extracted text is what a paste reads back. Also
 # native-compiles the new /bin/haminput Input Event Inspector. Host-only; ms.
 bash scripts/test_primary_paste_chain_host.sh
+# THE LINUX LINE's clipboard device, /dev/snarf + /dev/snarf.primary
+# (user/linux-snarf.c). The four gates above all drive lib/devsnarf.ad's buffer
+# semantics DIRECTLY; this one drives the SYSCALL PATH under them, which is
+# where "there is no clipboard on this line" lived. Copy in one PROCESS through
+# lib/hamtextbox.ad, paste in ANOTHER through lib/htermsel.ad -- two libraries
+# carrying independent path selectors, so it also proves they agree about which
+# name is which buffer. Plus: REPLACE-on-write including shrinking, a 0-byte
+# write clearing one buffer and not the other, the 64 KiB cap (70000 in, 65536
+# out), root-copies/uid-1001-pastes across the boundary the DE session drops
+# over, `echo x > /dev/snarf` landing BOTH of echo's write chunks (Defect 2),
+# and the negative control that after all of it there is still NO FILE at
+# /dev/snarf. Runs in a private mount namespace with a tmpfs over /dev, never
+# the host's. Host-only (no QEMU); seconds. docs/linux_clipboard.md.
+bash tests/linux/snarf_device.sh
+# The same device on a REAL BOOT: the shipped image under QEMU, linuxinit as
+# PID 1, /srv the tmpfs it mounts. Asserts the segment is created by the FIRST
+# OPEN at 131096 bytes and mode 0666 (not the umask's 0644 -- that difference
+# is a blind session), and that the uid-1001 session reads what root copied and
+# copies back. Offscreen proof is not on-device proof; this line has been
+# caught by that gap before. Needs QEMU; ~2 min including the image stage.
+bash tests/linux/snarf_ondevice.sh
 # Guards the namec inline-cdev id gate: DEV_MAX must sit STRICTLY above every
 # inline DEV_* constant, because _chan_id_valid rejects dev_type >= DEV_MAX and
 # then EVERY read/write on that device returns -EBADF before the cdev body runs
