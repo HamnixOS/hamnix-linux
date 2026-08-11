@@ -308,6 +308,229 @@ them, are what the optimisations above were measured against. Current:
 `wsysd -bench N` prints the same counters for a real compositor frame
 (`ops/frame`, `dispatch/frame`, `batched/frame`, `barriers/frame`).
 
+## Do those counters predict anything? Measured, and the answer is "one of them"
+
+The paragraph above was an argument, not a measurement: the counters were
+*asserted* to be device-independent and *assumed* to be the right levers.
+Neither had been tested, because nothing could move a counter without also
+moving the pixels — and a number you cannot vary cannot be shown to predict
+anything.
+
+`user/linux-vk.c` now has two levers that move the counters and **not** a
+single output pixel (the gate asserts byte-identity at both settings):
+
+| | |
+|--|--|
+| `HAMNIX_VK_MAX_BATCH=N` | cap the `OP_BATCH` entry count. `=1` is exactly the one-dispatch-per-op shape the batching replaced. |
+| `HAMNIX_VK_NO_COVCACHE=1` | disable the per-frame glyph coverage cache — the 1.3 MiB-of-staging shape the cache replaced. |
+
+`scripts/bench_vk_linux_device.sh` sweeps both. Everything below is lavapipe
+on the dev host (12 cores, 1280×800, the same two fixture frames), and every
+row was byte-identical to the software rasterizer.
+
+### 1. The counters really are a property of the op stream, not the device
+
+`LP_NUM_THREADS` changes how fast the "device" is by 3.6× and changes the
+counters by nothing at all:
+
+| LP_NUM_THREADS | DE+text µs | fills µs | ops | dispatches | barriers | staged |
+|--|--|--|--|--|--|--|
+| 1 | 38,229 | 27,902 | 1724 | 15 | 12 | 41,808 |
+| 2 | 20,728 | 15,122 | 1724 | 15 | 12 | 41,808 |
+| 4 | 11,225 | 7,744 | 1724 | 15 | 12 | 41,808 |
+| 8 | 10,492 | 7,427 | 1724 | 15 | 12 | 41,808 |
+
+That is the claim "these are device-independent" turned into evidence. It is
+the weak half of the question, but it had never been shown either.
+
+### 2. Dispatch count predicts — strongly, and at 17.7 µs each
+
+DE+text frame, identical pixels, identical barriers (12) and identical staging
+(41,808 words) in every row. The *only* thing that changes is how many
+dispatches the same 1,724 ops are packed into:
+
+| `MAX_BATCH` | dispatches | GPU µs |
+|--|--|--|
+| 1 | 1,724 | 38,300 |
+| 2 | 866 | 27,200 |
+| 4 | 439 | 18,100 |
+| 8 | 227 | 13,400 |
+| 16 | 119 | 10,600 |
+| 32 | 67 | 9,800 |
+| 64 | 39 | 8,700 |
+| 1024 (default) | **15** | **8,100** |
+
+4.7× from that lever alone, and the slope is **≈17.7 µs per dispatch** on
+lavapipe — which is what "one dispatch per glyph is fatal" was worth, now as a
+number rather than a before/after anecdote.
+
+### 3. Fewer dispatches is NOT always faster, and the fills frame proves it
+
+The same sweep on the 44-op fills frame runs the other way:
+
+| `MAX_BATCH` | dispatches | GPU µs |
+|--|--|--|
+| 1 | 44 | **5,000** |
+| 2 | 23 | 10,200 |
+| 4 | 19 | 5,800 |
+| 8 | 15 | 6,600 |
+| 1024 (default) | 15 | 6,200 |
+
+One dispatch per op is the **fastest** setting for that frame, and the shipped
+default is ~20% slower. The cause is in the code and is not subtle: a batch
+launches `max(gx) × max(gy)` workgroups for *every* entry, and the growth
+guard permits up to 2× padded waste — so at `MAX_BATCH=2` a full-screen fill
+pairs with a small one and the frame costs 1.7× the unbatched one. The guard
+is doing its job (the wider settings recover); what is refuted is the shorthand
+that dispatch count alone is the lever. **The lever is the pair (dispatches,
+padded workgroups)**, and only the first of the two is currently counted.
+
+### 4. Staged words predict nothing here, and that is a fact about the memory
+
+| | staged_words | GPU µs |
+|--|--|--|
+| coverage cache on (default) | 41,808 | 8,100 |
+| coverage cache off | 364,176 | 8,100 |
+
+8.7× the staging costs no measurable time. That is not a defect in the cache —
+it is the memory model doing exactly what "The memory model is the interesting
+part" says: the arena is host-visible, host-coherent memory, and the "device"
+reads it at CPU speed, so staging a megabyte more is a megabyte of memcpy lost
+in an 8 ms frame. **On a discrete card without resizable BAR that same
+staging crosses PCIe**, which is precisely the case
+`vk_linux_frame_device_local()` reports and precisely where this row should
+change. Until then, `staged_words` is an honest counter of a cost this device
+does not charge for.
+
+### So: what transfers to real silicon, and what does not
+
+* **Transfers**: the counters themselves (shown, not argued), and the *shape*
+  of the dispatch result — a per-dispatch cost exists on every device and the
+  batching is worth roughly `dispatches × that cost`.
+* **Does not transfer**: the 17.7 µs. On a GPU a dispatch is a command
+  processor's packet, not a CPU thread-pool fan-out, and it should be far
+  cheaper — which also moves the crossover in §3, because an idle workgroup
+  retires nearly free on a GPU and does not on llvmpipe. The fills result is
+  the first thing to re-check on hardware, and its *sign* may flip.
+* **Untested anywhere**: the staging slope. It is zero here by construction.
+
+## What could be measured on this host, and what could not
+
+The wall is recorded in `scripts/hamlinux_vm.sh` and it is real. What follows
+is what was *checked* rather than assumed, so the next pass does not re-do it.
+
+### The venus wall is confirmed, and it did not need root
+
+`hamlinux_vm.sh` records the NVIDIA GBM failure as "the usual symptom of
+`nvidia-drm.modeset=0`" and notes that confirming it needs root, because
+`/sys/module/nvidia_drm/parameters/modeset` is `0400`. It does not:
+
+```
+$ ls /sys/class/drm/
+card0  renderD128  version
+```
+
+`nvidia_drm` **is** loaded (`lsmod`), and it registered a DRM device — but no
+connectors (`tests/linux/vk_icd_survey.sh` prints the connector count for
+every card it finds, which is why that survey is the first thing to run on a
+new machine). A KMS-capable DRM driver exposes one `cardN-<connector>` node per
+output (`card0-DP-1`, `card0-HDMI-A-1`, …); there is not one here. That is
+modeset being off, observed from userspace, without opening the device and
+without a privilege this tree does not have. The recorded hypothesis is now
+evidence.
+
+### No other ICD on this host can find a device
+
+Every Mesa ICD in `/usr/share/vulkan/icd.d/` was asked to enumerate, in a
+private mount namespace with a `tmpfs` mounted over `/dev/dri` — so the host
+GPU's nodes were *provably* never opened, which is the standing rule here.
+That is `tests/linux/vk_icd_survey.sh`, and it is a script rather than a
+paragraph because every word of this section is a claim about the MACHINE,
+which goes stale the moment someone plugs in a card:
+
+```
+$ tests/linux/vk_icd_survey.sh
+[icdsurvey]   card0: driver nvidia, 0 KMS connector(s)
+[icdsurvey]     ^ no connectors: this driver is not modesetting
+[icdsurvey] lvp_icd.json             DEVICE type 4  llvmpipe (LLVM 19.1.7, 256 bits)
+[icdsurvey] nvidia_icd.json: NOT RUN (reaches the GPU through /dev/nvidiactl)
+[icdsurvey] <every other ICD>        no-device (... -> VkResult -3)
+[icdsurvey] CPU-ONLY — correctness is gateable, performance is not
+```
+
+| ICD | result |
+|--|--|
+| `lvp` (lavapipe) | `llvmpipe (LLVM 19.1.7, 256 bits)`, type 4 |
+| `virtio` (venus) | `vkEnumeratePhysicalDevices` → `VK_ERROR_INITIALIZATION_FAILED` |
+| `gfxstream` | same |
+| `nouveau`, `radeon`, `intel`, `intel_hasvk` | same |
+| `nvidia` | **not run** — that is the host's GPU |
+
+And this is not an artefact of the mask. The host has exactly one DRM device,
+`/sys/class/drm/card0`, whose driver is `/sys/bus/pci/drivers/nvidia`
+(`01:00.0 GeForce RTX 3090`). Every Mesa ICD in that list claims a *different*
+kernel driver — `nouveau`, `amdgpu`, `i915`/`xe`, `virtio_gpu` — so none of
+them would claim that node even unmasked, and the one that would is the one
+that is off limits. `gfxstream` and `virtio` both want a **virtgpu** node,
+which exists only inside a VM. There is no third option on this box.
+
+### QEMU without venus does not give the guest a Vulkan device — measured
+
+The tempting reasoning is that plain `virtio-gpu-pci` is at least a *different
+profile*: a real PCI device, real DMA, real scanout, even if the rasterizer is
+still a CPU. So it was booted and asked, rather than argued about
+(`scripts/hamlinux_vm.sh script`, an `/etc/rc.boot` appended to the initramfs
+as a second cpio segment — `docs/steam_namespace.md` §11):
+
+```
+VKPROBE_DRI:    card0  renderD128        <- a real virtio-gpu DRM device
+VKPROBE_ICD:    virtio_icd.json          <- the image ships venus, and only venus
+VKPROBE_RUN:    vkprobe: instance ok, 0 physical device(s)
+```
+
+The loader comes up, venus loads, `vkCreateInstance` succeeds — and there are
+**zero** physical devices, because a plain `virtio-gpu-pci` advertises no
+venus capset for the ICD to claim. A real device on a real bus is not a Vulkan
+device. Two ways to make that a different profile, neither of which is a GPU
+measurement:
+
+* install **lavapipe into the guest** (`HAMLINUX_VULKAN=lavapipe`) — then the
+  numbers are llvmpipe's again, on 2 vCPUs instead of 12, and §1 above already
+  says the counters will be identical;
+* `virtio-gpu-gl-pci,venus=on`, which is the mode that needs the host's
+  `/dev/dri` and is exactly the wall above.
+
+There is no QEMU GPU path on this host that reaches a Vulkan device without
+the host's `/dev/dri`. QEMU 10.0.8 here offers `virtio-gpu-pci`,
+`virtio-gpu-gl-pci` and their `-device` variants and **no `virtio-gpu-rutabaga`**,
+which is the one backend that could have been driven headless by a host
+*software* Vulkan driver. `-display none` is refused outright by the GL path,
+and `egl-headless` needs a GBM-capable render node, i.e. the host GPU.
+
+### So: the one command, on the day a machine is available
+
+On any machine with a real GPU — including this one after a reboot with
+`nvidia-drm.modeset=1`, which is the **owner's** call and nobody else's:
+
+```
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/<real>_icd.json \
+    scripts/bench_vk_linux_device.sh
+```
+
+It builds what it needs, refuses to be quoted as a GPU result if the device
+turns out to be a CPU ICD, asserts byte-identity at every lever setting, and
+prints the three tables above for that device plus the per-dispatch cost. The
+four numbers to bring back are: `VK_DEVICE_IS_SILICON`, `FRAME_DEVICE_LOCAL`,
+the default-vs-`MAX_BATCH=1` pair (the per-dispatch cost), and the
+`nocovcache` row (the staging slope, which is zero here and should not be
+there). Five minutes, and the last big unknown in the graphics stack is a
+table instead of a caveat.
+
+Inside a VM on such a host, the venus path is
+`HAMLINUX_DISPLAY=egl-headless,rendernode=/dev/dri/renderD128
+scripts/hamlinux_vm.sh venus` — everything but the host EGL/GBM device is
+already verified (see the comment block in `scripts/hamlinux_vm.sh`).
+
 ## Shader changes (backwards compatible, and verified so)
 
 `scripts/shaders/vk2d_raster.comp` gained three things. Every one of them is a

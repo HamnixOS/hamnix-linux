@@ -35,14 +35,18 @@
  *              COUNT — callers must loop, as user/aplay.ad's push() does.
  *          A zero-length write drains (STREAM) or starts (STAGED), matching
  *          devaudio_write's `count == 0` arms.
- *   read   ONE status line, then EOF. Byte-identical in shape to Hamnix's:
+ *   read   ONE status line, then EOF. Byte-identical in shape to Hamnix's,
+ *          with this line's own telemetry appended -- which is Hamnix's own
+ *          idiom for extending it without breaking a parser that stops early:
  *            loaded <n> cap <n> master <pct> streams <p0> <p1> <p2> <p3>
  *            mute <0|1> space <bytes> pos <bytes>
+ *            mixed <n> hush <n> nogain <n>
  *          user/hamctl.ad parses `master` and `mute` out of exactly this.
  *          Reading /dev/audio is NOT capture — /dev/audioin is.
  * /dev/audioctl
  *   write  one verb per line: rate, channels, bits, format, streamopen,
- *          nonblock, drain, start, stop, reset, master, mute, unmute.
+ *          nonblock, drain, start, stop, reset, master, mute, unmute,
+ *          `stream <id> <pct>` and mixplay.
  *   read   always EOF.
  * /dev/audioin
  *   read   captured PCM, non-blocking: an empty ring answers 0, not EAGAIN.
@@ -63,25 +67,88 @@
  * <sound/asound.h>, so that scripts/ac-link.sh can still build the runtime
  * inside a Debian namespace that has no kernel headers installed.
  *
- * WHAT IS NOT PORTED, said plainly
- * ================================
- *  * THE 4-STREAM SOFTWARE MIXER. Hamnix's hda.ad sums a second live
- *    process's writes into the owner's ring (drivers/audio/mixer.ad). Here a
- *    hardware substream has ONE writer: a second process opening /dev/audio
- *    while another is playing gets EBUSY straight from the kernel. That is a
- *    real difference and user/audiolife.ad depends on the mixed behaviour, so
- *    it will not do here what it does on Hamnix. The `stream` and `mixplay`
- *    ctl verbs therefore FAIL (-EINVAL) rather than being accepted and
- *    ignored, which is what Hamnix does with verbs it does not know. An
- *    accepted verb that changes nothing is precisely the success-shaped
- *    answer this tree forbids. The `streams` field of the status line reports
- *    the fixed 100s, and means nothing.
- *  * NOTHING, for `master`/`mute`: those DO drive the codec's own amps, the
- *    same as on Hamnix, through the control device. A card with no mixer
- *    elements at all (virtio_snd) falls back to scaling the samples in
- *    software, so the verb means the same thing either way.
- *  * NO RESAMPLING. `rate` is passed to the hardware. If the card refuses it
- *    the ctl write fails; it does not silently play at another rate.
+ * THE SOFTWARE MIXER — two programs making a sound at the same time
+ * =================================================================
+ * An ALSA hardware substream has exactly ONE writer, so for a while this file
+ * had none: a second process opening /dev/audio while another played got
+ * EBUSY, `stream` and `mixplay` returned -EINVAL, and the status line's
+ * `streams 100 100 100 100` was a placeholder that meant nothing. That is now
+ * gone. What replaced it is Hamnix's design, ported rather than invented, from
+ * drivers/audio/hda.ad (`hda_stream_mix`, `hda_owner`, the DMA ring and the
+ * service tick) and drivers/audio/mixer.ad (the four per-stream volumes, the
+ * Q8 gains, the saturating sum, the master gain and the mute latch).
+ *
+ * THE THREE PIECES, and what each one is the port OF:
+ *
+ *   THE MIX RING is /srv/audio, a MAP_SHARED file (see au_attach), and it is
+ *   the port of hda.ad's DMA ring: AU_RING_BYTES of s16le PCM, a monotonic
+ *   `play` cursor and a monotonic `w` high-water. Every writer in the system
+ *   maps it. hda.ad's ring is kernel DMA memory that every process reaches
+ *   through the one kernel; here the processes are separate and the shared
+ *   mapping is what stands in for that.
+ *
+ *   THE PUMP is the port of the DMA ENGINE and of hda.ad's service tick. It is
+ *   a detached process (double-forked, setsid, reparented to PID 1) that owns
+ *   the one ALSA substream and does nothing but move the ring into it, one
+ *   period at a time. NOTHING WAKES IT: the blocking write(2) to the substream
+ *   is paced by the hardware itself, exactly as the DMA engine is. When no
+ *   writer has anything it hands the card a period of SILENCE, which is why a
+ *   slow or stalled writer cannot stall the others -- the clock keeps running
+ *   and the other streams keep flowing through it. After AU_IDLE_MS with
+ *   nothing to play it CLOSES THE CARD and parks in a futex on the shared
+ *   segment: that is hda.ad's "stop a ring whose owner has exited" from the
+ *   service tick, and it is a park rather than an exit because an orphan that
+ *   exits under this PID 1 is a zombie (see the PARK comment in au_pump_loop).
+ *
+ *   THE MIX is au_mix(), the port of hda_stream_mix() and of mixer.ad's mix
+ *   loop. A writer SUMS its samples into the ring just ahead of the play
+ *   cursor -- never appends behind a ring-full of somebody else's audio, which
+ *   is the "two apps, half the sounds don't play" report hda.ad's comment
+ *   names. Each writer carries its OWN cursor, so a slow producer falls behind
+ *   on its own account and the fast one is untouched.
+ *
+ * CLIPPING: SATURATION, not scaling. Four streams at full scale sum to four
+ * times int16, and the two honest answers are to clamp the sum or to divide
+ * every stream by four. This clamps -- `_hda_sat_add_s16` and mixer.ad's
+ * `_mix_sat_add` both do, and the reason is that dividing makes the COMMON
+ * case (one program playing) 12 dB quiet to buy headroom for a case that
+ * rarely happens. A sum that clips is audible distortion on a loud moment; a
+ * mixer that is permanently a quarter volume is a device nobody can hear. The
+ * per-stream volume is the control for the case where you want the other one.
+ *
+ * THE FOUR NUMBERS ON THE STATUS LINE ARE REAL. `streams <p0> <p1> <p2> <p3>`
+ * is the four AU_SLOTS per-stream Q8 gains, in percent, and `stream <id>
+ * <pct>` sets one. A slot is claimed by the pid of the first writer to use it
+ * and released when that pid closes the device or dies (au_reap, the port of
+ * hda.ad's `_hda_owner_alive`). AND THE FIFTH: hda_stream_mix has no voice
+ * table and so no concurrency ceiling, and neither has this. A fifth
+ * simultaneous writer still SOUNDS -- it is summed into the ring like the
+ * others -- it just has no volume slot of its own and plays at unity. That is
+ * counted, and the count is on the status line as `nogain`, because a stream
+ * whose volume control silently does nothing is the kind of quiet lie this
+ * tree is organised against.
+ *
+ * WHAT IS STILL NOT PORTED, said plainly
+ * ======================================
+ *  * NO RESAMPLING AND NO FORMAT CONVERSION. The pump runs the hardware at
+ *    one rate/channel-count/width, set by the first stream to arrive. A later
+ *    stream that asks for a different one is REFUSED BY NAME on the ctl write
+ *    -- "the mixer is running at 48000 Hz / 2 ch / 16 bit; this stream asked
+ *    for 44100" -- and not silently played at the wrong speed. When the mixer
+ *    is idle the format is free to change.
+ *  * THE MIX MATHS IS s16le, as mixer.ad's is. `bits 8`, `bits 24` and
+ *    `bits 32` still work for a lone stream (the ring carries the bytes
+ *    through untouched), but a SECOND writer arriving while the hardware is in
+ *    one of those widths is refused by name rather than summed wrongly.
+ *  * NOTHING, for `master`/`mute`: those drive the codec's own amps, the same
+ *    as on Hamnix, through the control device. A card with no mixer elements
+ *    at all (virtio_snd has none) falls back to scaling the mix in software in
+ *    the pump, so the verb means the same thing either way.
+ *  * `mixplay` is `start`. On Hamnix it means "render the mixer slots and hand
+ *    the result to the DMA buffer", which is a distinct act because the plain
+ *    /dev/audio path there does not go through mixer.ad. Here EVERY path goes
+ *    through the mix ring, so the two verbs name the same thing and `mixplay`
+ *    is honoured rather than refused.
  */
 
 #define _GNU_SOURCE
@@ -92,9 +159,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
+#include <signal.h>
+#include <sys/syscall.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "linux-audio.h"
@@ -290,8 +363,389 @@ static int      muted;
 
 static uint8_t *clip;                   /* the staged one-shot buffer    */
 static unsigned clip_len;
+static int      clip_pending;           /* staged, and no `start` yet    */
 
 static uint64_t played_bytes;           /* total handed to the ring      */
+
+/* ================================================================== *
+ * THE MIX RING — the port of hda.ad's DMA ring into a shared mapping.
+ *
+ * Every field here is written by more than one process, so every rule about
+ * who may touch what is stated where the field is. The short version: `play`
+ * belongs to the pump and nothing else advances it; `w` and the ring bytes are
+ * touched only under `lock`; a slot belongs to the pid in it.
+ * ================================================================== */
+
+#define AU_MAGIC     0x4155444fu        /* "AUDO"                         */
+#define AU_VERSION   1
+
+/* 245760 bytes = 1.28 s of 48 kHz stereo s16le, and it is divisible by 2, 3,
+ * 4, 6, 8, 12, 16 and 24 -- every frame size this device can be configured
+ * for. That is not tidiness: a ring whose length is not a whole number of
+ * frames shifts every sample by a byte on each wrap and turns the stream into
+ * noise a lap at a time. */
+#define AU_RING_BYTES 245760u
+#define AU_SLOTS      4                 /* mixer.ad: MIX_MAX_STREAMS = 4  */
+#define AU_UNITY      256               /* mixer.ad: Q8, 256 == 100 %     */
+#define AU_IDLE_MS    2500              /* pump quits after this much hush */
+#define AU_CHUNK      8192u             /* bytes summed per lock hold     */
+
+struct au_slot {
+    int32_t  used;                      /* 1 == claimed                    */
+    int32_t  pid;                        /* the process it belongs to       */
+    int32_t  gain;                       /* Q8 per-stream volume, 0..256    */
+    int32_t  pad;
+    uint64_t mixw;                       /* THIS stream's write cursor.
+                                          * Per-slot, and that is the whole
+                                          * reason a slow writer cannot stall
+                                          * a fast one: they fall behind
+                                          * independently.                  */
+    uint64_t written;                    /* bytes this stream has summed    */
+};
+
+struct au_shm {
+    uint32_t magic, version;
+    int32_t  lock;                       /* the ring/`w` spinlock           */
+    int32_t  pump_pid;                   /* 0 == no pump                    */
+    uint32_t rate, chans, bits;          /* the format the MIX runs at      */
+    uint32_t fmt_gen;                    /* bumped when the format changes  */
+    uint32_t period_bytes;               /* published by the pump           */
+    uint32_t master_pct, muted;
+    uint32_t hw_amps;                    /* the codec has real amps, so the
+                                          * pump must NOT scale as well     */
+    uint32_t nogain;                     /* writers that found no free slot
+                                          * and are playing at unity        */
+    uint64_t play;                       /* bytes the pump has consumed     */
+    uint64_t w;                          /* high-water summed by anyone     */
+    uint64_t mixed_in;                   /* hda_mixed_in                    */
+    uint64_t clipped;                    /* hda_mix_clipped                 */
+    uint64_t sat;                        /* samples the sum actually clamped*/
+    uint64_t underruns;                  /* pump periods filled with hush   */
+    uint32_t wake;                       /* the futex the parked pump sleeps
+                                          * on; every writer bumps it       */
+    uint32_t pad2;
+    struct au_slot slot[AU_SLOTS];
+    uint8_t  ring[AU_RING_BYTES];
+};
+
+static struct au_shm *shm;
+static int  my_slot = -1;
+static pid_t my_slot_pid;
+static int  in_pump;                    /* this process IS the pump         */
+
+static void au_pump_ensure(void);
+
+/* The frame size the MIX is running at, taken from the shared format rather
+ * than from this process's idea of it: a writer that never opened the card has
+ * no `frame_bytes` of its own, and a partial frame in the ring shifts every
+ * later sample by a byte. */
+static unsigned au_frame(void)
+{
+    unsigned f = shm->chans * ((shm->bits + 7) / 8);
+    return f ? f : 4;
+}
+
+static const char *au_shm_path(void)
+{
+    const char *p = getenv("HAMAUDIO");
+    if (p && *p) return p;
+    return "/srv/audio";                /* linuxinit mounts /srv 1777       */
+}
+
+static uint64_t au_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
+static void au_nap(unsigned ms)
+{
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+/* THE PARK. An idle pump must cost nothing -- THE IDLE CENSUS in HANDOFF.md
+ * is the record of what a polling loop costs on this tree -- and it must wake
+ * the instant a sound arrives. A futex on a word in the shared segment is both:
+ * the pump sleeps in the kernel with no timer running, and a writer's
+ * increment-and-wake reaches it in microseconds. It is the same mechanism
+ * sys_waitfds uses to park a /dev/wsys client on the `inputgen` word, for the
+ * same reason. */
+static void au_futex_wait(uint32_t *w, uint32_t val, unsigned ms)
+{
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    syscall(SYS_futex, w, 9 /* FUTEX_WAIT_BITSET */, val, &ts, NULL,
+            (uint32_t)-1);
+}
+static void au_futex_wake(uint32_t *w)
+{
+    syscall(SYS_futex, w, 10 /* FUTEX_WAKE_BITSET */, INT_MAX, NULL, NULL,
+            (uint32_t)-1);
+}
+static void au_kick(void)
+{
+    if (!shm) return;
+    __sync_fetch_and_add(&shm->wake, 1);
+    au_futex_wake(&shm->wake);
+}
+
+/* ATTACH BEFORE CREATE, on every candidate -- the same rule and for the same
+ * reason as linux-wsys.c's shm_attach: O_CREAT on a file somebody else owns in
+ * a sticky world-writable directory is refused by fs.protected_regular, and a
+ * failure that falls through to the next candidate would have this process
+ * mixing into a ring no pump is draining. */
+static int au_attach(void)
+{
+    if (shm) return 0;
+    const char *cands[3];
+    int nc = 0;
+    cands[nc++] = au_shm_path();
+    cands[nc++] = "/dev/shm/hamnix-audio";
+    cands[nc++] = "/tmp/hamnix-audio";
+
+    int fd = -1;
+    for (int i = 0; i < nc && fd < 0; i++) {
+        fd = open(cands[i], O_RDWR);
+        if (fd < 0) fd = open(cands[i], O_RDWR | O_CREAT, 0666);
+    }
+    if (fd < 0) return -1;
+    if (fchmod(fd, 0666) < 0) { /* not the creator; the mode is already set */ }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) { int e = errno; close(fd); errno = e; return -1; }
+    if ((uint64_t)st.st_size < sizeof(struct au_shm)
+        && ftruncate(fd, (off_t)sizeof(struct au_shm)) < 0) {
+        int e = errno; close(fd); errno = e; return -1;
+    }
+    void *m = mmap(NULL, sizeof(struct au_shm), PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    int e = errno;
+    close(fd);
+    if (m == MAP_FAILED) { errno = e; return -1; }
+    shm = (struct au_shm *)m;
+    if (shm->magic != AU_MAGIC || shm->version != AU_VERSION) {
+        memset(shm, 0, sizeof *shm);
+        shm->magic      = AU_MAGIC;
+        shm->version    = AU_VERSION;
+        shm->rate       = 48000;
+        shm->chans      = 2;
+        shm->bits       = 16;
+        shm->master_pct = 100;
+        for (int i = 0; i < AU_SLOTS; i++)
+            shm->slot[i].gain = AU_UNITY;   /* mixer.ad: default unity      */
+    }
+    return 0;
+}
+
+/* The spinlock. Held for at most AU_CHUNK bytes of summing, which is tens of
+ * microseconds. A holder that is KILLED mid-sum would otherwise wedge every
+ * other program on the box, so the wait has a deadline and breaking it is
+ * reported rather than silent. */
+static void au_lock(void)
+{
+    for (unsigned spin = 0;; spin++) {
+        if (__sync_bool_compare_and_swap(&shm->lock, 0, 1))
+            return;
+        if (spin < 200) { sched_yield(); continue; }
+        if (spin > 200 + 500) {
+            fprintf(stderr, "[audio] breaking a mix lock held for 500 ms -- "
+                            "a writer died inside it\n");
+            shm->lock = 1;
+            return;
+        }
+        au_nap(1);
+    }
+}
+static void au_unlock(void) { __sync_lock_release(&shm->lock); }
+
+/* hda.ad's `_hda_owner_alive`, applied to every slot: a slot whose pid is gone
+ * is free. Without this a program that crashed mid-clip would hold one of the
+ * four volume slots for the life of the machine. */
+static void au_reap(void)
+{
+    for (int i = 0; i < AU_SLOTS; i++) {
+        if (!shm->slot[i].used) continue;
+        pid_t p = (pid_t)shm->slot[i].pid;
+        if (p > 0 && kill(p, 0) == 0) continue;
+        if (p > 0 && errno == EPERM) continue;   /* alive, just not ours    */
+        shm->slot[i].used = 0;
+        shm->slot[i].pid  = 0;
+        shm->slot[i].mixw = 0;
+    }
+}
+
+/* Claim this process's volume slot. Returns the slot index, or -1 when all
+ * four are taken -- and -1 is NOT an error: hda_stream_mix has no voice table
+ * and no ceiling, so a fifth stream still plays. It plays at unity and is
+ * counted in `nogain`. */
+static int au_slot_claim(void)
+{
+    if (my_slot >= 0 && my_slot_pid == getpid()
+        && shm->slot[my_slot].used && shm->slot[my_slot].pid == (int32_t)getpid())
+        return my_slot;
+    my_slot = -1;
+    au_lock();
+    au_reap();
+    for (int i = 0; i < AU_SLOTS; i++) {
+        if (shm->slot[i].used) continue;
+        shm->slot[i].used = 1;
+        shm->slot[i].pid  = (int32_t)getpid();
+        if (shm->slot[i].gain <= 0) shm->slot[i].gain = AU_UNITY;
+        shm->slot[i].mixw = 0;
+        shm->slot[i].written = 0;
+        my_slot = i;
+        my_slot_pid = getpid();
+        break;
+    }
+    if (my_slot < 0) shm->nogain++;
+    au_unlock();
+    au_kick();
+    return my_slot;
+}
+
+static void au_slot_release(void)
+{
+    if (!shm || my_slot < 0) return;
+    if (shm->slot[my_slot].pid == (int32_t)getpid()) {
+        shm->slot[my_slot].used = 0;
+        shm->slot[my_slot].pid  = 0;
+        shm->slot[my_slot].mixw = 0;
+    }
+    my_slot = -1;
+}
+
+static int au_live_writers(void)
+{
+    int n = 0;
+    for (int i = 0; i < AU_SLOTS; i++)
+        if (shm->slot[i].used) n++;
+    return n;
+}
+
+/* ---- the mix maths, straight out of mixer.ad ---------------------- */
+
+static int16_t au_sat_add(int32_t a, int32_t b)
+{
+    int32_t s = a + b;
+    if (s >  32767) { shm->sat++; return  32767; }
+    if (s < -32768) { shm->sat++; return -32768; }
+    return (int16_t)s;
+}
+static int32_t au_gain(int32_t sample, int32_t g)
+{
+    return (int32_t)(((int64_t)sample * (int64_t)g) / 256);
+}
+
+/* THE GUARD. How far ahead of the play cursor a stream's samples are placed.
+ * It must be at least one pump period, because the pump consumes [play,
+ * play+period) without the writer's knowledge -- anything laid down inside
+ * that window is bytes the writer wrote and nobody heard. Two periods, which
+ * is hda.ad's `_hda_mix_guard` reasoning arriving at the same place: past the
+ * consumer, and under the ~100 ms at which a sound stops feeling attached to
+ * the thing that caused it. At 1024-frame periods and 48 kHz stereo that is
+ * 43 ms. */
+static uint64_t au_guard(void)
+{
+    uint32_t per = shm->period_bytes ? shm->period_bytes : 4096;
+    uint64_t g = (uint64_t)per * 2;
+    if (g > AU_RING_BYTES / 4) g = AU_RING_BYTES / 4;
+    unsigned fb = au_frame();
+    return (g / fb) * fb;
+}
+
+/* Sum `n` bytes into the ring ahead of the play cursor. This is
+ * hda_stream_mix, and the structure is deliberately the same: anchor the
+ * cursor to the live edge if it has fallen behind, refuse to run more than
+ * half a ring ahead (and SAY so), take what fits, sum with saturation.
+ *
+ * Returns bytes consumed. Short returns are real and callers loop. */
+static int64_t au_mix(const uint8_t *buf, size_t n, int blocking)
+{
+    if (au_attach() < 0) { errno = ENODEV; return -1; }
+    /* BEFORE the loop, not after it: with no pump running nothing advances
+     * `play`, so the first blocking wait would never end. */
+    au_pump_ensure();
+    int slot = au_slot_claim();
+    int32_t g = slot >= 0 ? shm->slot[slot].gain : AU_UNITY;
+
+    /* The mix maths is s16le. A lone stream at another width is carried
+     * through untouched; a second one is refused BY NAME rather than summed
+     * as if its bytes were 16-bit samples. */
+    int wide = shm->bits != 16;
+    if (wide && au_live_writers() > 1) {
+        fprintf(stderr, "[audio] the mixer is running at %u-bit and the mix "
+                        "maths is s16le: a second stream cannot be summed "
+                        "into it\n", shm->bits);
+        errno = EBUSY;
+        return -1;
+    }
+
+    size_t done = 0;
+    uint64_t stalled = 0;
+    while (done < n) {
+        au_lock();
+        uint64_t play  = shm->play;
+        uint64_t edge  = play + au_guard();
+        uint64_t *mixw = slot >= 0 ? &shm->slot[slot].mixw : NULL;
+        uint64_t cur   = mixw ? *mixw : 0;
+        if (!mixw || cur < edge) cur = edge;
+        /* Never more than half a ring ahead: past that the sound is heard so
+         * late it is no longer attached to what caused it. Reported, not
+         * hidden -- hda.ad's mix-in BACKLOG arm. */
+        uint64_t limit = play + AU_RING_BYTES / 2;
+        if (cur >= limit) {
+            au_unlock();
+            if (!blocking) break;
+            au_pump_ensure();               /* it may have been reaped */
+            au_nap(2);
+            if (++stalled > 15000) {            /* 30 s: no pump is draining */
+                fprintf(stderr, "[audio] no pump has drained the mix ring for "
+                                "30 s; giving up with %zu of %zu bytes\n",
+                        done, n);
+                break;
+            }
+            continue;
+        }
+        stalled = 0;
+        size_t take = n - done;
+        if (take > AU_CHUNK) take = AU_CHUNK;
+        if (cur + take > limit) take = (size_t)(limit - cur);
+        take -= take % au_frame();
+        if (take == 0) { au_unlock(); break; }
+
+        for (size_t i = 0; i < take; ) {
+            uint64_t abs = cur + i;
+            size_t   p   = (size_t)(abs % AU_RING_BYTES);
+            if (wide) {
+                shm->ring[p] = buf[done + i];
+                i += 1;
+                continue;
+            }
+            /* Anything at or past the high-water is fresh ring: it holds the
+             * silence the pump left behind, so the sum starts from zero. */
+            int32_t old = 0;
+            if (abs + 2 <= shm->w)
+                old = (int16_t)((uint16_t)shm->ring[p]
+                                | ((uint16_t)shm->ring[(p + 1) % AU_RING_BYTES] << 8));
+            int32_t add = (int16_t)((uint16_t)buf[done + i]
+                                    | ((uint16_t)buf[done + i + 1] << 8));
+            int16_t mixed = au_sat_add(old, au_gain(add, g));
+            shm->ring[p] = (uint8_t)((uint16_t)mixed & 0xff);
+            shm->ring[(p + 1) % AU_RING_BYTES] = (uint8_t)(((uint16_t)mixed >> 8) & 0xff);
+            i += 2;
+        }
+        uint64_t end = cur + take;
+        if (mixw) { *mixw = end; shm->slot[slot].written += take; }
+        if (end > shm->w) shm->w = end;
+        shm->mixed_in++;
+        au_unlock();
+        done += take;
+    }
+    if (done < n) shm->clipped++;
+    if (done) au_kick();
+    return (int64_t)done;
+}
 
 /* ------------------------------------------------------------------ */
 
@@ -673,30 +1127,6 @@ static int64_t ring_write(const uint8_t *buf, size_t n)
     }
 }
 
-/* Push a whole buffer, looping over short transfers. Honours `nonblock` by
- * stopping at the first short count, which is the contract aplay.ad's push()
- * already loops around. */
-static int64_t ring_push(const uint8_t *buf, size_t n)
-{
-    if (pcm_ready() < 0)
-        return -1;
-    size_t off = 0;
-    while (off < n) {
-        int64_t w = ring_write(buf + off, n - off);
-        if (w < 0)
-            return off ? (int64_t)off : -1;
-        if (w == 0) {
-            if (nonblock)
-                break;
-            /* The descriptor is blocking, so a 0 here means the residue was
-             * smaller than a frame. Nothing more can be sent. */
-            break;
-        }
-        off += (size_t)w;
-    }
-    return (int64_t)off;
-}
-
 /* One ring's worth of SILENCE behind whatever was just written. This is
  * hda.ad's HDA_ONESHOT_PAD, and it is not decoration: the stream stops when
  * the hardware pointer catches the write pointer, and the last period or two
@@ -731,6 +1161,177 @@ static void pcm_drain(void)
     pcm_prepared = 0;
 }
 
+/* ================================================================== *
+ * THE PUMP — the port of hda.ad's DMA engine and its service tick.
+ *
+ * It owns the ONE ALSA substream and it is the only thing in the system that
+ * writes to it. Its whole job is: take one period out of the mix ring, hand it
+ * to the card, advance `play`. The write(2) blocks until the card has room, so
+ * the HARDWARE paces this loop — there is no timer, no poll and nothing to
+ * wake. That is what makes it the port of a DMA engine rather than of a
+ * scheduler, and it is why a writer that stalls cannot stall anyone else: the
+ * pump simply hands over a period of silence for that stream's share and every
+ * other stream in the ring keeps flowing at exactly its own rate.
+ *
+ * It also ZEROES each byte as it consumes it. hda.ad's
+ * `_hda_ring_silence_ahead` exists for the same reason: a ring that is not
+ * re-silenced replays the previous lap when a producer falls behind, which is
+ * the "on close it played the last sound effect over and over" report. Here it
+ * has a second job — it is what lets au_mix() sum into virgin ring without
+ * having to track which bytes are stale.
+ * ================================================================== */
+
+/* What silence IS depends on the width: s16/s24/s32 silence is 0, and u8
+ * silence is 0x80. Filling a u8 stream's gaps with 0 would be a full-scale
+ * negative DC step -- a click, on every underrun. */
+static uint8_t au_hush_byte(void) { return shm->bits == 8 ? 0x80 : 0x00; }
+
+static void au_pump_loop(void)
+{
+    static uint8_t chunkbuf[65536];
+    in_pump = 1;
+    my_slot = -1;
+    uint32_t gen = (uint32_t)-1;
+    uint64_t idle_since = au_now_ms();
+
+    for (;;) {
+        if (shm->fmt_gen != gen) {
+            /* The format is the mix's, not this process's: the pump follows
+             * whatever the first stream established. */
+            if (shm->rate)  cfg_rate  = shm->rate;
+            if (shm->chans) cfg_chans = shm->chans;
+            if (shm->bits)  cfg_bits  = shm->bits;
+            cfg_dirty = 1;
+            gen = shm->fmt_gen;
+        }
+        /* BEFORE pcm_ready, not after: bringing the card up writes the
+         * amps, and writing them from a stale level is how a `master 40` set
+         * through hamctl would last exactly until the next sound. pcm_ready
+         * may ADOPT the codec's own level when it configures (mixer_apply(0)),
+         * so the answer is published back afterwards -- otherwise the status
+         * line would report 100 for a codec sitting at 30. */
+        master_pct = shm->master_pct;
+        muted      = shm->muted ? 1 : 0;
+        if (pcm_ready() < 0) {
+            fprintf(stderr, "[audio] the mix pump cannot bring the card up: "
+                            "%s\n", strerror(errno));
+            shm->pump_pid = 0;
+            _exit(1);
+        }
+        shm->master_pct   = master_pct;
+        shm->period_bytes = buf_bytes ? buf_bytes / 8 : 4096;
+        shm->hw_amps      = mixer_hw ? 1u : 0u;
+
+        unsigned chunk = shm->period_bytes;
+        if (chunk > sizeof chunkbuf) chunk = (unsigned)sizeof chunkbuf;
+        chunk -= chunk % frame_bytes;
+        if (!chunk) chunk = frame_bytes;
+
+        uint8_t hush = au_hush_byte();
+        au_lock();
+        uint64_t play = shm->play;
+        uint64_t w    = shm->w;
+        uint64_t ahead = w > play ? w - play : 0;
+        unsigned have = ahead > chunk ? chunk : (unsigned)ahead;
+        for (unsigned i = 0; i < chunk; i++) {
+            size_t p = (size_t)((play + i) % AU_RING_BYTES);
+            if (i < have) { chunkbuf[i] = shm->ring[p]; shm->ring[p] = hush; }
+            else            chunkbuf[i] = hush;
+        }
+        shm->play = play + chunk;
+        int writers = au_live_writers();
+        if (have < chunk && writers) shm->underruns++;
+        au_unlock();
+
+        if (have || writers) idle_since = au_now_ms();
+
+        if (ring_write(chunkbuf, chunk) < 0) {
+            fprintf(stderr, "[audio] the mix pump lost the card: %s\n",
+                    strerror(errno));
+            shm->pump_pid = 0;
+            _exit(1);
+        }
+
+        /* THE PARK. Nothing to play and nobody holding a slot: give the card
+         * back and sleep on the futex until a writer bumps it.
+         *
+         * IT PARKS RATHER THAN EXITING, and that is not a preference. PID 1
+         * here is hamsh, and the runtime's reaper waits on the pids it
+         * REMEMBERS -- deliberately, so it cannot steal a status from code
+         * that wanted one (HANDOFF.md, THE IDLE CENSUS). An orphaned pump that
+         * exited would therefore sit on the process table as a zombie, and one
+         * per sound is a leak with a bell on it. So the pump is started once
+         * and lives; what it gives up when idle is the CARD, which is the
+         * thing that actually costs something -- an open substream keeps
+         * QEMU's audio thread and a real codec's DMA engine running, and an
+         * idle desktop on this tree is measured in host CPU.
+         *
+         * The 1 s timeout on the wait is a safety net, not the mechanism: a
+         * writer that summed into the ring and died before its wake would
+         * otherwise leave its audio sitting there unheard. */
+        if (have == 0 && writers == 0
+            && au_now_ms() - idle_since > AU_IDLE_MS) {
+            pcm_drain();
+            if (pcm_fd >= 0) { close(pcm_fd); pcm_fd = -1; }
+            pcm_prepared = 0;
+            cfg_dirty = 1;
+            while (shm->w <= shm->play && au_live_writers() == 0) {
+                uint32_t seen = shm->wake;
+                if (shm->w > shm->play || au_live_writers()) break;
+                au_futex_wait(&shm->wake, seen, 1000);
+            }
+            idle_since = au_now_ms();
+        }
+    }
+}
+
+/* Start the pump if there is not already a live one. The claim is a
+ * compare-and-swap on `pump_pid`, so two programs that reach for the card in
+ * the same microsecond cannot both get it -- which would be two processes
+ * fighting over one substream and the exact EBUSY this whole file exists to
+ * remove. */
+static void au_pump_ensure(void)
+{
+    if (in_pump || !shm) return;
+    int32_t p = shm->pump_pid;
+    if (p > 0) {
+        if (kill((pid_t)p, 0) == 0 || errno == EPERM) return;
+    }
+    if (!__sync_bool_compare_and_swap(&shm->pump_pid, p, -1))
+        return;                              /* somebody else is starting it */
+
+    pid_t f = fork();
+    if (f < 0) { shm->pump_pid = 0; return; }
+    if (f == 0) {
+        /* DETACH. setsid plus a second fork leaves the pump reparented to PID
+         * 1, so it outlives the program that started it -- which is the whole
+         * point: the music must keep playing when the process that queued a
+         * sound effect exits. */
+        setsid();
+        pid_t g = fork();
+        if (g != 0) _exit(0);
+        /* Nothing of the parent's descriptors comes along. A pump holding the
+         * write end of its parent's pipe would keep a shell pipeline from ever
+         * seeing EOF -- a hang with no visible cause. The mapping survives the
+         * close; that is what mmap is for. */
+        for (int fd = 3; fd < 256; fd++) close(fd);
+        int nul = open("/dev/console", O_WRONLY);
+        if (nul < 0) nul = open("/dev/null", O_WRONLY);
+        if (nul >= 0) { dup2(nul, 1); dup2(nul, 2); if (nul > 2) close(nul); }
+        int zin = open("/dev/null", O_RDONLY);
+        if (zin >= 0) { dup2(zin, 0); if (zin > 0) close(zin); }
+        pcm_fd = -1; cap_fd = -1; pcm_prepared = 0; cfg_dirty = 1;
+        shm->pump_pid = (int32_t)getpid();
+        au_pump_loop();
+        _exit(0);
+    }
+    waitpid(f, NULL, 0);                     /* the middle process, at once  */
+    /* Wait for the pump to publish its period size: au_guard() is wrong until
+     * it has, and a stream placed inside the pump's own consume window is
+     * bytes that were written and never heard. */
+    for (int i = 0; i < 400 && shm->period_bytes == 0; i++) au_nap(5);
+}
+
 /* ------------------------------------------------------------------ */
 
 int hamaudio_open(const char *path, int for_write, struct hamaudio_file *a)
@@ -750,20 +1351,74 @@ int hamaudio_open(const char *path, int for_write, struct hamaudio_file *a)
         clip = malloc(CLIP_CAP);
         if (!clip) { errno = ENOMEM; return -1; }
     }
+    /* A NEW OPEN IS A NEW SOUND, and that is what parks the mix cursor.
+     *
+     * au_mix continues from this stream's own cursor rather than restacking
+     * every write at the live edge, because it has to: hda.ad's comment on
+     * hda_mixw records that a 0.600 s effect arriving as a dozen chunks came
+     * out as 0.075 s when each chunk was placed at "play + guard" on top of
+     * the last. Chunks of ONE sound must lay down end to end.
+     *
+     * But SEPARATE sounds must not. lib/hamgame_dev.ad opens /dev/audio,
+     * writes one effect and closes, once per effect -- so six effects fired
+     * 200 ms apart share one process and one slot, and continuing the cursor
+     * across them welds them into one continuous 600 ms tone. Measured
+     * exactly that: audiolife's six 100 ms bursts spanned 14% of the music
+     * instead of 30%, all six audible and none of them WHEN it happened.
+     * The open is the boundary between one sound and the next, so the cursor
+     * is parked here and re-anchored to the live edge by the next write. */
+    if (kind == HAMAUDIO_PCM && shm && my_slot >= 0
+        && shm->slot[my_slot].pid == (int32_t)getpid())
+        shm->slot[my_slot].mixw = 0;
     return 0;
 }
 
 void hamaudio_close(struct hamaudio_file *a)
 {
     if (!a) return;
-    if (a->kind == HAMAUDIO_PCM && pcm_fd >= 0) {
-        /* Closing the sink means "I am done": play out what is in the ring
-         * rather than letting the descriptor close cut the tail off. A
-         * client that wanted the audio abandoned says `stop` first. */
-        pcm_drain();
-        close(pcm_fd);
-        pcm_fd = -1;
-        pcm_prepared = 0;
+    if (a->kind == HAMAUDIO_PCM) {
+        /* THE AUTO-START, and it is a port rather than a convenience.
+         * hda.ad stamps `hda_stage_arm_j` on the LAST staged write and the
+         * service tick starts the clip half a second later, so a program that
+         * writes raw PCM to /dev/audio and never touches /dev/audioctl at all
+         * is still HEARD -- lib/hamgame_dev.ad's game_dev_play_pcm does
+         * exactly that, and user/audiolife.ad's `raw` and `sfx` phases
+         * reproduce it. There is no timer in a library, but there is a moment
+         * that means the same thing and is better: the writer closing the
+         * device is "the writer has finished handing the clip over", which is
+         * precisely what the deadline was standing in for.
+         *
+         * Closing does NOT mean "stop". What this process summed into the mix
+         * ring is already there and the pump plays it out -- which is the
+         * behaviour the whole port is for: a program that queues a sound
+         * effect and exits is heard, and hda.ad has the same property because
+         * its ring outlives the writer. All that is given up here is the
+         * volume slot. A client that wanted the audio abandoned says `stop`.
+         * What this process summed into the mix ring is already there and the
+         * pump plays it out -- which is the behaviour the whole port is for:
+         * a program that queues a sound effect and exits is HEARD, and hda.ad
+         * has the same property because its ring outlives the writer. All that
+         * is given up here is the volume slot. A client that wanted the audio
+         */
+        if (clip_pending && clip_len && !stream_mode) {
+            clip_pending = 0;
+            au_mix(clip, clip_len, 1);
+            /* AND THE CLIP IS SPENT. Measured without this line:
+             * user/audiolife.ad's phase D closes /dev/audio and THEN writes
+             * `start` to /dev/audioctl -- so the clip was mixed twice and a
+             * 3.000 s tone came out of the capture as 5.373 s of overlapping
+             * 1 kHz, which is report (2), "it played the last sound effect
+             * over and over", reintroduced by the fix for report (1).
+             *
+             * hda.ad does not have the problem because its auto-start is a
+             * DEADLINE in the service tick and `hda_start` on an
+             * already-running stream is a no-op; a close followed
+             * immediately by `start` starts it once. A spent clip is this
+             * line's equivalent: `start` on an empty clip returns 0, exactly
+             * as it does for a client that never staged anything. */
+            clip_len = 0;
+        }
+        au_slot_release();
         stream_mode = 0;
     }
     if (a->kind == HAMAUDIO_IN && cap_fd >= 0) {
@@ -775,21 +1430,50 @@ void hamaudio_close(struct hamaudio_file *a)
 
 /* ---- the status line ---------------------------------------------- */
 
+/* EVERY NUMBER ON THIS LINE IS MEASURED. It used to carry
+ * `streams 100 100 100 100`, four constants that were there because
+ * user/hamctl.ad parses the line and expects the field -- a placeholder a real
+ * program reads, which is worse than an absence. They are now the four
+ * per-stream Q8 gains out of the shared mixer, in percent, exactly as
+ * `hda_mix_stream_pct` reports them on Hamnix.
+ *
+ * `space` and `pos` are the mix ring's, not one substream's: `pos` is what the
+ * pump has actually handed the card (hda.ad's LPIB-derived play cursor -- what
+ * was HEARD, not what a wall clock says) and `space` is what a producer may
+ * append right now without running past the half-ring bound. The three
+ * telemetry fields after them are appended, which is Hamnix's own idiom for
+ * extending this line without breaking a parser that stops earlier:
+ *   mixed   summed writes (hda_mixed_in)
+ *   hush    pump periods that had to be filled with silence -- the number that
+ *           goes up when a writer cannot keep up, and the one to look at when
+ *           somebody says the audio is stuttering
+ *   nogain  writers that found all four volume slots taken and are playing at
+ *           unity with no control of their own */
 static int status_line(char *out, size_t cap)
 {
-    long delay = 0;
-    unsigned long space = buf_bytes;
-    uint64_t pos = played_bytes;
-    if (pcm_fd >= 0 && ioctl(pcm_fd, PCM_IOCTL_DELAY, &delay) == 0 && delay > 0) {
-        uint64_t queued = (uint64_t)delay * frame_bytes;
-        space = (queued < buf_bytes) ? (unsigned long)(buf_bytes - queued) : 0;
-        pos   = (queued < played_bytes) ? played_bytes - queued : 0;
-    }
+    if (au_attach() < 0)
+        return snprintf(out, cap, "loaded %u cap %u master %u "
+                        "streams 0 0 0 0 mute %d space 0 pos 0 "
+                        "mixed 0 hush 0 nogain 0\n",
+                        clip_len, CLIP_CAP, master_pct, muted ? 1 : 0);
+    au_reap();
+    uint64_t play = shm->play, w = shm->w;
+    uint64_t inflight = w > play ? w - play : 0;
+    uint64_t half = AU_RING_BYTES / 2;
+    unsigned long space = inflight >= half ? 0ul : (unsigned long)(half - inflight);
+    unsigned pct[AU_SLOTS];
+    for (int i = 0; i < AU_SLOTS; i++)
+        pct[i] = (unsigned)(((uint64_t)(shm->slot[i].gain < 0 ? 0
+                                        : shm->slot[i].gain) * 100 + 128) / 256);
     return snprintf(out, cap,
-                    "loaded %u cap %u master %u streams 100 100 100 100 "
-                    "mute %d space %lu pos %llu\n",
-                    clip_len, CLIP_CAP, master_pct, muted ? 1 : 0,
-                    space, (unsigned long long)pos);
+                    "loaded %u cap %u master %u streams %u %u %u %u "
+                    "mute %d space %lu pos %llu "
+                    "mixed %llu hush %llu nogain %u\n",
+                    clip_len, CLIP_CAP, shm->master_pct,
+                    pct[0], pct[1], pct[2], pct[3],
+                    shm->muted ? 1 : 0, space, (unsigned long long)play,
+                    (unsigned long long)shm->mixed_in,
+                    (unsigned long long)shm->underruns, shm->nogain);
 }
 
 int64_t hamaudio_read(struct hamaudio_file *a, uint8_t *buf, uint64_t cap)
@@ -867,6 +1551,79 @@ static unsigned uint_after(const char *p, size_t n, unsigned dflt)
     return v;
 }
 
+/* THE FORMAT IS THE MIX'S, NOT ONE PROGRAM'S.
+ *
+ * There is one hardware substream and the pump runs it at one rate, one
+ * channel count and one width. The first stream to arrive sets them. A stream
+ * that arrives later and wants something else has three possible answers and
+ * only one of them is honest here: convert it (this file does no resampling
+ * and says so), play it at the wrong speed (the silent lie), or REFUSE BY
+ * NAME. It refuses, and the message names both formats so the person reading
+ * it knows what to change.
+ *
+ * When the mixer is idle -- no other live writer and nothing left in the ring
+ * -- the format is free, so a program that runs on its own never sees this. */
+static int au_busy_with_other(void)
+{
+    if (!shm) return 0;
+    au_reap();
+    for (int i = 0; i < AU_SLOTS; i++)
+        if (shm->slot[i].used && shm->slot[i].pid != (int32_t)getpid())
+            return 1;
+    return shm->w > shm->play;              /* audio still queued to be heard */
+}
+
+static int au_set_fmt(unsigned rate, unsigned chans, unsigned bits)
+{
+    if (au_attach() < 0) { errno = ENODEV; return -1; }
+    if (rate == shm->rate && chans == shm->chans && bits == shm->bits) {
+        cfg_rate = rate; cfg_chans = chans; cfg_bits = bits;
+        return 0;
+    }
+    if (au_busy_with_other()) {
+        fprintf(stderr, "[audio] the mixer is running at %u Hz / %u ch / "
+                        "%u bit and this stream asked for %u Hz / %u ch / "
+                        "%u bit; there is no resampler here, so it is refused "
+                        "rather than played at the wrong speed\n",
+                shm->rate, shm->chans, shm->bits, rate, chans, bits);
+        errno = EBUSY;
+        return -1;
+    }
+    shm->rate  = rate;
+    shm->chans = chans;
+    shm->bits  = bits;
+    shm->fmt_gen++;                          /* the pump reconfigures on this */
+    cfg_rate = rate; cfg_chans = chans; cfg_bits = bits;
+    cfg_dirty = 1;
+    return 0;
+}
+
+/* Play out everything THIS process has summed, then let go. hda_stream_drain's
+ * contract: it returns when what was written has been heard, which is why
+ * user/aplay.ad can end with it and know the clip finished. It waits on the
+ * pump's play cursor -- the thing that actually reached the card -- not on a
+ * wall clock that keeps running when nothing is being played. */
+static void au_drain(void)
+{
+    if (au_attach() < 0) return;
+    if (my_slot < 0) return;
+    uint64_t target = shm->slot[my_slot].mixw;
+    uint64_t last = shm->play;
+    unsigned stuck = 0;
+    while (shm->play < target) {
+        au_pump_ensure();
+        au_nap(5);
+        if (shm->play == last) {
+            if (++stuck > 2000) {           /* 10 s with the cursor frozen */
+                fprintf(stderr, "[audio] drain: the play cursor has not moved "
+                                "in 10 s with %llu bytes still queued\n",
+                        (unsigned long long)(target - shm->play));
+                return;
+            }
+        } else { stuck = 0; last = shm->play; }
+    }
+}
+
 /* One line. Returns 0, or -1 with errno for a verb that cannot be honoured. */
 static int ctl_line(const char *p, size_t n)
 {
@@ -876,21 +1633,18 @@ static int ctl_line(const char *p, size_t n)
     if (tok_eq(p, n, "rate")) {
         unsigned v = uint_after(p, n, cfg_rate);
         if (v < 4000 || v > 384000) { errno = EINVAL; return -1; }
-        if (v != cfg_rate) { cfg_rate = v; cfg_dirty = 1; }
-        return 0;
+        return au_set_fmt(v, cfg_chans, cfg_bits);
     }
     if (tok_eq(p, n, "channels")) {
         unsigned v = uint_after(p, n, cfg_chans);
         if (v < 1) v = 1;
         if (v > 8) v = 8;               /* hda_set_channels clamps 1..8 */
-        if (v != cfg_chans) { cfg_chans = v; cfg_dirty = 1; }
-        return 0;
+        return au_set_fmt(cfg_rate, v, cfg_bits);
     }
     if (tok_eq(p, n, "bits")) {
         unsigned v = uint_after(p, n, cfg_bits);
         if (v != 8 && v != 16 && v != 24 && v != 32) { errno = EINVAL; return -1; }
-        if (v != cfg_bits) { cfg_bits = v; cfg_dirty = 1; }
-        return 0;
+        return au_set_fmt(cfg_rate, cfg_chans, v);
     }
     if (tok_eq(p, n, "format")) {
         /* Hamnix hardcodes the argument at offset 7; this scans for it, so
@@ -904,77 +1658,108 @@ static int ctl_line(const char *p, size_t n)
         else if (i < n && k >= 5 && !memcmp(p + i, "s24le", 5)) v = 24;
         else if (i < n && k >= 5 && !memcmp(p + i, "s32le", 5)) v = 32;
         if (!v) { errno = EINVAL; return -1; }
-        if (v != cfg_bits) { cfg_bits = v; cfg_dirty = 1; }
-        return 0;
+        return au_set_fmt(cfg_rate, cfg_chans, v);
     }
     if (tok_eq(p, n, "streamopen")) {
+        /* NOT "seize the card and zero the ring", which is what this verb did
+         * when there was one writer. Somebody else may be playing. It claims a
+         * volume slot, makes sure the pump is up and arms the streaming write
+         * path; the ring is shared and stays as it is. */
+        if (au_attach() < 0) { errno = ENODEV; return -1; }
         stream_mode = 1;
         clip_len = 0;
-        return pcm_ready();
+        au_pump_ensure();
+        au_slot_claim();
+        return 0;
     }
     if (tok_eq(p, n, "nonblock")) {
         nonblock = uint_after(p, n, 1) != 0;
         return 0;
     }
     if (tok_eq(p, n, "drain")) {
-        pcm_drain();
+        au_drain();
         stream_mode = 0;
         return 0;
     }
-    if (tok_eq(p, n, "start")) {
-        /* Staged one-shot: hand the whole clip to the ring. The transfer
-         * blocks while the ring is full, so `start` returns once the last
-         * period has been QUEUED, not once it has been heard -- the clip is
-         * still playing out when the caller gets control back, which is what
-         * playtone's post-`start` wait exists for. */
+    if (tok_eq(p, n, "start") || tok_eq(p, n, "mixplay")) {
+        /* Staged one-shot: sum the whole clip into the mix ring. It blocks
+         * while the ring is a half-ring ahead of the play cursor, so `start`
+         * returns once the last byte has been QUEUED, not once it has been
+         * heard -- the clip is still sounding when the caller gets control
+         * back, and it keeps sounding after the caller EXITS, because the ring
+         * and the pump outlive it.
+         *
+         * `mixplay` lands here too: on Hamnix it renders mixer.ad's slots into
+         * the DMA buffer, which is a distinct act only because the plain
+         * /dev/audio path there does not go through the mixer. Here every path
+         * does, so the two verbs name one thing. */
         if (clip_len == 0)
             return 0;
-        if (pcm_ready() < 0)
-            return -1;
-        size_t off = 0;
-        while (off < clip_len) {
-            int64_t w = ring_write(clip + off, clip_len - off);
-            if (w < 0) return -1;
-            if (w == 0) break;
-            off += (size_t)w;
-        }
-        if (off < clip_len) {
-            fprintf(stderr, "[audio] start: only %zu of %u staged bytes "
-                            "reached the ring\n", off, clip_len);
-            return 0;
-        }
-        ring_pad();
+        clip_pending = 0;
+        int64_t w = au_mix(clip, clip_len, 1);
+        if (w < 0) return -1;
+        if ((unsigned)w < clip_len)
+            fprintf(stderr, "[audio] start: only %lld of %u staged bytes "
+                            "reached the mix ring\n", (long long)w, clip_len);
         return 0;
     }
     if (tok_eq(p, n, "stop")) {
-        if (pcm_fd >= 0) {
-            ioctl(pcm_fd, PCM_IOCTL_DROP);
-            pcm_prepared = 0;
+        /* STOP IS THIS STREAM'S, not the machine's. Dropping the hardware ring
+         * would silence every other program mixed into it -- the exact
+         * cross-program damage this file was rewritten to remove. So: give up
+         * this stream's queued audio by parking its cursor, and only when
+         * nothing else is playing does the ring itself get dropped. */
+        if (au_attach() < 0) return 0;
+        int alone = !au_busy_with_other();
+        au_lock();
+        if (my_slot >= 0) shm->slot[my_slot].mixw = 0;
+        if (alone) {
+            memset(shm->ring, au_hush_byte(), sizeof shm->ring);
+            shm->w = shm->play;
         }
+        au_unlock();
         return 0;
     }
     if (tok_eq(p, n, "reset")) {
         clip_len = 0;
+        clip_pending = 0;
         return 0;
     }
     if (tok_eq(p, n, "master")) {
         unsigned v = uint_after(p, n, master_pct);
         master_pct = v > 100 ? 100 : v;
+        if (au_attach() == 0) shm->master_pct = master_pct;
         mixer_hw = mixer_apply(1) > 0;
+        if (shm) shm->hw_amps = mixer_hw ? 1u : 0u;
         return 0;
     }
     if (tok_eq(p, n, "mute") || tok_eq(p, n, "unmute")) {
         muted = tok_eq(p, n, "mute");
+        if (au_attach() == 0) shm->muted = muted ? 1u : 0u;
         mixer_hw = mixer_apply(1) > 0;
+        if (shm) shm->hw_amps = mixer_hw ? 1u : 0u;
         return 0;
     }
-
-    /* `stream` and `mixplay` are the 4-stream software mixer, which is not
-     * ported -- see the header comment. They fail rather than being accepted
-     * and quietly doing nothing. */
-    if (tok_eq(p, n, "stream") || tok_eq(p, n, "mixplay")) {
-        errno = EINVAL;
-        return -1;
+    /* "stream <id> <pct>" -- mixer.ad's hda_mix_set_stream_pct, and now a verb
+     * that does something. An id outside 0..3 is an error rather than a
+     * rounding: a program that meant slot 7 has a bug and being told so is the
+     * point. */
+    if (tok_eq(p, n, "stream")) {
+        if (au_attach() < 0) { errno = ENODEV; return -1; }
+        size_t i = 6;
+        while (i < n && (p[i] < '0' || p[i] > '9')) i++;
+        unsigned id = uint_after(p + i, n - i, 0);
+        while (i < n && p[i] >= '0' && p[i] <= '9') i++;
+        unsigned pct = uint_after(p + i, n - i, 100);
+        if (id >= AU_SLOTS) {
+            fprintf(stderr, "[audio] stream %u: the mixer has %d volume slots "
+                            "(0..%d)\n", id, AU_SLOTS, AU_SLOTS - 1);
+            errno = EINVAL;
+            return -1;
+        }
+        if (pct > 100) pct = 100;
+        shm->slot[id].gain = (int32_t)((pct * 256) / 100);  /* mixer.ad's Q8 */
+        return 0;
     }
     /* Anything else: accepted and ignored, as audio_cdev.ad does. */
     return 0;
@@ -1000,14 +1785,14 @@ int64_t hamaudio_write(struct hamaudio_file *a, const uint8_t *buf, uint64_t n)
 
     /* /dev/audio */
     if (n == 0) {
-        /* devaudio_write's count == 0 arms: drain the ring in stream mode,
-         * start the staged clip otherwise. */
-        if (stream_mode) { pcm_drain(); return 0; }
+        /* devaudio_write's count == 0 arms: drain in stream mode, start the
+         * staged clip otherwise. */
+        if (stream_mode) { au_drain(); return 0; }
         return ctl_line("start", 5) < 0 ? -1 : 0;
     }
 
     if (stream_mode) {
-        int64_t w = ring_push(buf, (size_t)n);
+        int64_t w = au_mix(buf, (size_t)n, !nonblock);
         if (w > 0) a->off += (uint64_t)w;
         return w;
     }
@@ -1018,16 +1803,19 @@ int64_t hamaudio_write(struct hamaudio_file *a, const uint8_t *buf, uint64_t n)
         clip = malloc(CLIP_CAP);
         if (!clip) { errno = ENOMEM; return -1; }
     }
-    if (a->off == 0)
-        clip_len = 0;
+    if (a->off == 0) {
+        clip_len = 0;                   /* offset 0 means "a new clip"      */
+        clip_pending = 0;
+    }
     if (a->off >= CLIP_CAP)
-        return 0;                       /* full: hda_dev_write returns 0 */
+        return 0;                       /* full: hda_dev_write returns 0    */
     uint64_t room = CLIP_CAP - a->off;
     uint64_t take = n < room ? n : room;
     memcpy(clip + a->off, buf, (size_t)take);
     a->off += take;
     if (a->off > clip_len)
         clip_len = (unsigned)a->off;
+    clip_pending = 1;                   /* see hamaudio_close: the auto-start */
     return (int64_t)take;
 }
 
