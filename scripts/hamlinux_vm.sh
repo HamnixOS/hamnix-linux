@@ -61,6 +61,45 @@ COMMON=(
     -device virtio-net-pci,netdev=n0
 )
 
+# --- sound ----------------------------------------------------------------
+# An Intel HD Audio controller with the DUPLEX codec, which is what gives the
+# guest /dev/snd/pcmC0D0p (playback) AND /dev/snd/pcmC0D0c (capture), i.e. the
+# two nodes user/linux-audio.c opens for /dev/audio and /dev/audioin.
+#
+# WHY intel-hda AND NOT virtio-sound-pci. Three reasons, in order of weight:
+#   * It is the device Hamnix's own audio driver was written and measured
+#     against (drivers/audio/hda.ad, scripts/run_installer.sh), so the two
+#     kernels present the SAME hardware to the same userland and a difference
+#     in behaviour is a difference in the port rather than in the emulation.
+#   * hda-duplex carries a capture stream. virtio-sound-pci does too, but the
+#     guest driver (virtio_snd) is far younger than snd-hda-intel and the
+#     failure modes are less well trodden; snd-hda-intel + the generic codec
+#     is the boring, universally-supported path. virtio_snd is staged into the
+#     image anyway (scripts/hamlinux_image.sh), so pointing this at
+#     `-device virtio-sound-pci,audiodev=snd0` instead needs no guest change.
+#   * ich6 intel-hda rather than ich9-intel-hda: no MSI, no extra PCI bridge
+#     requirements, and identical from the driver's seat.
+#
+# THE BACKEND DEFAULTS TO `none`, AND THAT IS THE POINT. `none` is a real,
+# correctly-timed sink that consumes samples at the stream's rate and throws
+# them away -- so the guest driver behaves exactly as it would with speakers,
+# and QEMU never opens the host's sound card. Nothing on this line may play
+# out of the developer's machine, and nothing in the automated gates may
+# depend on the host having a card at all.
+#
+#   HAMLINUX_AUDIODEV=wav,path=/tmp/guest.wav   capture the codec output to a
+#                                               WAV file -- this is how the
+#                                               audio gates MEASURE that a
+#                                               tone was really played.
+#   HAMLINUX_AUDIODEV=pipewire|pa|alsa          actually hear it. Operator
+#                                               choice, never a default.
+AUDIODEV="${HAMLINUX_AUDIODEV:-none}"
+COMMON+=(
+    -audiodev "${AUDIODEV},id=snd0"
+    -device intel-hda
+    -device hda-duplex,audiodev=snd0
+)
+
 # The Debian namespace lives on its own filesystem image, attached as a plain
 # virtio-blk disk and mounted by `bind '#distro' /n/distro`. Keeping it on a
 # SEPARATE volume is the point: nothing Debian installs can reach the Hamnix
@@ -90,7 +129,12 @@ case "$MODE" in
   script)
     # Non-interactive: the guest shell reads stdin, so a heredoc on our stdin
     # drives it. timeout keeps a hung boot from wedging CI.
-    CMD=(qemu-system-x86_64 "${COMMON[@]}" -vnc 127.0.0.1:9 -serial stdio
+    # The VNC display is a fixed port, which means two gates cannot run at
+    # once: the second dies with "Failed to find an available port" before the
+    # guest is even started, and the failure looks nothing like a port clash
+    # in the test's own output. HAMLINUX_VNC overrides it -- `none` for a gate
+    # that only wants the serial console.
+    CMD=(qemu-system-x86_64 "${COMMON[@]}" -vnc "${HAMLINUX_VNC:-127.0.0.1:9}" -serial stdio
          -monitor unix:build/image/mon.sock,server,nowait
          -append "$APPEND" "$@")
     if [ -n "$TIMEOUT" ]; then exec timeout "$TIMEOUT" "${CMD[@]}"; else exec "${CMD[@]}"; fi
@@ -201,6 +245,10 @@ case "$MODE" in
         -vga none -device virtio-gpu-pci
         -device virtio-keyboard-pci -device virtio-tablet-pci
         -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+        # Same card as the live boot -- an INSTALLED system that lost its
+        # sound hardware would be a difference nobody would look for.
+        -audiodev "${AUDIODEV},id=snd0"
+        -device intel-hda -device hda-duplex,audiodev=snd0
     )
     if [ -w /dev/kvm ]; then DISK+=(-enable-kvm -cpu host); else DISK+=(-cpu max); fi
     if [ -f "$IMG/distro.ext4" ]; then

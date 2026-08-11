@@ -62,6 +62,15 @@ APPS=(
     insmod modprobe lsmod rmmod
     xbridge wsyswl nsrun dhcpc ntpd
     hlinstall reboot haminstallui
+    # Audio. All three are thin Plan 9 clients of /dev/audio, /dev/audioctl
+    # and /dev/audioin (user/linux-audio.c) and none of them knows anything
+    # about ALSA: `playtone` synthesises a square wave and needs no fixture at
+    # all, which is what makes it the thing a gate can drive on a bare
+    # console; `aplay` streams a .wav; `arecord` captures one. They were
+    # absent from the image while the device was absent -- and `playtone`
+    # reported success into a regular FILE called /dev/audio, which is exactly
+    # why they are here now that there is a device behind the name.
+    playtone aplay arecord
 )
 
 # The desktop. wsysd is the compositor (user/wsysd.ad — the userland half of
@@ -248,6 +257,34 @@ cp -a etc/skel "$ROOT/etc/skel"
 mkdir -p "$ROOT/home/live" "$ROOT/home/hostowner"
 cp -a etc/skel/. "$ROOT/home/live/"
 
+# --- a sound to play ------------------------------------------------------
+# /usr/share/sounds/test.wav, so `aplay` has something to play on a machine
+# that has just booted an initramfs, and so the audio gates can exercise the
+# STREAMING path (aplay uses `streamopen` + `drain`) and not only the staged
+# one-shot that playtone uses.
+#
+# It is SYNTHESISED here rather than committed as a binary: half a second of a
+# 660 Hz sine at 48 kHz stereo s16le, which is a signal an FFT can check
+# exactly, and 96 KB that nobody has to review. The header is the canonical
+# 44-byte RIFF/WAVE one user/aplay.ad parses.
+mkdir -p "$ROOT/usr/share/sounds"
+python3 - "$ROOT/usr/share/sounds/test.wav" <<'WAVPY'
+import math, struct, sys
+rate, chans, secs, freq, amp = 48000, 2, 0.5, 660.0, 11000
+n = int(rate * secs)
+pcm = bytearray()
+for i in range(n):
+    v = int(amp * math.sin(2 * math.pi * freq * i / rate))
+    pcm += struct.pack('<hh', v, v)
+data = bytes(pcm)
+hdr = (b'RIFF' + struct.pack('<I', 36 + len(data)) + b'WAVEfmt '
+       + struct.pack('<IHHIIHH', 16, 1, chans, rate,
+                     rate * chans * 2, chans * 2, 16)
+       + b'data' + struct.pack('<I', len(data)))
+open(sys.argv[1], 'wb').write(hdr + data)
+WAVPY
+echo "[image] staged /usr/share/sounds/test.wav ($(du -h "$ROOT/usr/share/sounds/test.wav" | cut -f1))"
+
 # --- kernel modules -------------------------------------------------------
 # The north star is real hardware, and on a Debian kernel nearly every driver
 # is a module -- even in QEMU, /dev/dri/card0 does not exist until virtio-gpu
@@ -262,7 +299,16 @@ MODPROBE=/usr/sbin/modprobe
 # vfat is here because the INSTALLER needs it: an ESP is FAT32, and without
 # the driver `bind /dev/sdb1 /n/esp` fails with ENODEV -- which reads like a
 # broken partition rather than a missing module.
-WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk ext4 vfat nls_ascii nls_cp437 overlay squashfs loop}"
+# The sound modules are here for the same reason virtio-gpu is: without them
+# devtmpfs never publishes /dev/snd/pcmC0D0p and user/linux-audio.c's
+# /dev/audio has nothing to open. snd-hda-codec-generic is listed BEFORE
+# snd-hda-intel deliberately -- the controller normally pulls its codec driver
+# in with request_module(), and PID 1 here loads modules by absolute path with
+# no modules.dep to resolve against, so an autoload would quietly not happen
+# and the card would enumerate with no PCM device at all. Loading the codec
+# first makes that impossible. virtio_snd rides along so an image booted
+# against `-device virtio-sound-pci` finds a card too.
+WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk ext4 vfat nls_ascii nls_cp437 overlay squashfs loop snd-hda-codec-generic snd-hda-intel virtio_snd}"
 : > "$ROOT/etc/modules"
 if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
     mkdir -p "$ROOT/lib/modules/$KVER"
