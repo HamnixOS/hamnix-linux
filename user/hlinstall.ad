@@ -268,6 +268,45 @@ def copy_file(src: Ptr[char], dst: Ptr[char]) -> int32:
     return rc
 
 
+# THE INSTALLED MACHINE'S /etc/rc.boot IS AN INDIRECTION, NOT A COPY.
+#
+# It used to be a byte-for-byte copy of /etc/rc.boot.installed, and that made
+# the machine's boot script and the package's boot script the same object:
+# `hpm install` on an installed box replaced the running system's rc with the
+# initramfs one, and the obvious repair -- letting the package stop owning
+# etc/rc.boot -- left the machine with NO rc at all, because an upgrade
+# removes what the old version owned. Both were measured on a real installed
+# disk; docs/linux_installed_update.md §2b has them.
+#
+# So what goes on the disk is one line that names the real rc:
+#
+#     source '/etc/rc.boot.installed'
+#
+# Everything a release can improve now lives in /etc/rc.boot.installed, which
+# hamnix-init owns and an update DELIVERS; the file the machine boots stays
+# the machine's, and hpm knows not to touch it
+# (user/hpm.ad:_is_machine_owned). Anything specific to this box goes below
+# the source line and survives every update.
+#
+# The live image's own /etc/rc.boot.machine is preferred when it is there, so
+# the installed file is the same bytes the package would lay down; the
+# written fallback keeps an image that does not carry it installable.
+def write_machine_rc_boot() -> int32:
+    if copy_file(cast[Ptr[char]]("/etc/rc.boot.machine"),
+                 cast[Ptr[char]]("/n/target/etc/rc.boot")) == 0:
+        return 0
+    fd: int32 = sys_open_write(cast[Ptr[char]]("/n/target/etc/rc.boot"))
+    if fd < 0:
+        return -1
+    sys_write(fd, "# /etc/rc.boot -- the boot script of THIS MACHINE.\n", 51)
+    sys_write(fd, "# Written by the installer; owned by no package.\n", 49)
+    sys_write(fd, "# The rc a release can improve is the one it sources.\n", 54)
+    sys_write(fd, "\n", 1)
+    sys_write(fd, "source '/etc/rc.boot.installed'\n", 32)
+    sys_close(fd)
+    return 0
+
+
 def streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
     i: uint64 = 0
     while a[i] != 0 and b[i] != 0:
@@ -682,11 +721,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
               cast[Ptr[char]]("/n/esp/initramfs.cpio.gz"))
 
     step(cast[Ptr[uint8]]("5/5  the installed system's boot rc"))
-    # The installed root brings itself online; the live one has nothing to
-    # bring online. The difference is one line, and it lives in PID 1 rather
-    # than in the rc -- see etc/rc.boot.installed.
-    if copy_file(cast[Ptr[char]]("/etc/rc.boot.installed"),
-                 cast[Ptr[char]]("/n/target/etc/rc.boot")) != 0:
+    if write_machine_rc_boot() != 0:
         puts(2, "hlinstall: could not write the installed boot rc\n")
         return 1
 

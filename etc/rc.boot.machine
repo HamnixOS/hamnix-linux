@@ -1,0 +1,24 @@
+# /etc/rc.boot — the boot script of THIS MACHINE.
+#
+# One line, on purpose. /etc/rc.boot is what hamsh runs as PID 1, so it is the
+# one file on an installed system whose contents are a property of the MACHINE
+# and not of any package: the installer wrote it, and nobody who types
+# `hpm update` is asking for their boot configuration to be replaced.
+#
+# So the machine's copy is an indirection and nothing else. Everything that
+# can be improved by a release lives in /etc/rc.boot.installed, which
+# hamnix-init DOES own and an update DOES deliver; anything specific to this
+# box is added here, below the source line, where no package will touch it.
+# hpm knows this path is machine-owned (user/hpm.ad:_is_machine_owned): it
+# will write this file when it is ABSENT -- repairing a machine that lost its
+# rc -- and will neither overwrite nor delete it when it is there.
+#
+# The live image does NOT use this file: it boots etc/rc.boot.linux, staged as
+# /etc/rc.boot by scripts/hamlinux_image.sh into an initramfs root that the
+# next boot throws away.
+#
+# See docs/linux_installed_update.md §2b for the two measured failures that
+# produced this shape -- a package taking the running system's rc, and a
+# package deleting it.
+
+source '/etc/rc.boot.installed'
