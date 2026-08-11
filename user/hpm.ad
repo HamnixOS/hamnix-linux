@@ -2221,6 +2221,25 @@ def cmd_refresh() -> int32:
         total_pkgs = total_pkgs + added
         ci = ci + 1
 
+    # EVERY channel failed. This used to fall through and print
+    #
+    #   hpm: refreshed index from <url> (0 packages across 1 channels, 27 bytes)
+    #   hpm: warning: 1 channel(s) failed to fetch — partial index loaded
+    #
+    # and exit 0, having overwritten the cached index with an empty envelope —
+    # so the NEXT command answered "no such package" for a machine that simply
+    # had no network. A total fetch failure is not an empty repository, and a
+    # gap must not answer something success-shaped. Found by the negative
+    # control in tests/linux/hpm_index_sig.sh (the server switched off).
+    if n_channels > 0 and n_failed >= n_channels:
+        write_str(2, "hpm: refresh: FAILED — all ")
+        write_dec_u64(2, n_channels)
+        write_str(2, " channel(s) failed to fetch (see the errors above). "
+                     "The cached index is left as it was, NOT replaced with "
+                     "an empty one: this is a fetch failure, not an empty "
+                     "repository.\n")
+        return 1
+
     tail: Ptr[uint8] = "]}\n"
     if _idx_emit(tail) != 0:
         write_str(2, "hpm: refresh: idx_buf overflow (tail)\n")
