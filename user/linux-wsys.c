@@ -162,6 +162,9 @@ static int            chrome_rw;              /* the kernel let us map it W   */
  *   'B' x0 y0 x1 y1 fmt <pixels>   opaque blit into the backbuffer
  *   'D' x0 y0 x1 y1                dirty-rect invalidation
  *   'C' hot_x hot_y w h fmt <px>   cursor sprite (not yet composited)
+ *   'I' namelen name w h fmt <px>  NAMED IMAGE UPLOAD — NOT IMPLEMENTED HERE.
+ *                                  It answers ENOSYS by name; see the 'I' arm
+ *                                  in hamwsys_write for what depends on it.
  *
  * Integers are little-endian int32. A client opts in with `version 2` on its
  * window ctl; the compositor walks the v1 scene path or this one per window.
@@ -1774,6 +1777,31 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                 if (carried - i < 18 + need) break;
                 used = 18 + need;      /* accepted; the compositor draws its
                                           own cursor for now */
+            } else if (verb == 'I') {
+                /* 'I' <namelen:u8> <name...> <w> <h> <fmt> <pixels> — the
+                 * NAMED IMAGE UPLOAD.  devwsys.ad has it; this port does not,
+                 * and that is a gap rather than a bug in the caller, so it
+                 * gets its own answer.  ENOSYS, not EINVAL: "you sent me
+                 * garbage" and "this kernel does not implement that verb" are
+                 * different facts, and a client that cannot tell them apart
+                 * cannot print a useful message.
+                 *
+                 * WHAT IS MISSING, so the next person does not have to
+                 * rediscover it: the scene display list's `image X Y W H NAME`
+                 * op resolves NAME against a store that is populated ONLY by
+                 * this verb on the native line (lib/hamui_host.ad's
+                 * hamui_host_register_image is the host twin, and only host
+                 * harnesses call it).  With no store, lib/hamui_host.ad's
+                 * rasterizer takes its `slot < 0 -> return 1` path and draws
+                 * NOTHING, silently — so every `hamscene_image` on this line
+                 * renders a hole.  That reaches user/hamimgscene.ad,
+                 * lib/hamvideocore.ad ("frame") and lib/hamsdl.ad.  Closing it
+                 * means a named-image table in the shared segment plus wsysd
+                 * registering from it; until then this refusal is the honest
+                 * answer and hamimgscene prints it. */
+                carried = 0;
+                errno = ENOSYS;
+                return -ENOSYS;
             } else {
                 /* Not a verb we know. Resynchronising by scanning would invent
                  * a frame out of noise, so drop what is buffered and say so. */

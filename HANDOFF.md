@@ -36,7 +36,7 @@ rather than argued:
 | Audio | `/dev/audio`, `/dev/audioctl`, `/dev/audioin` on intel-hda, ported from Hamnix's `audio_cdev.ad` + `hda.ad`. Proven by FFT on a WAV captured out of QEMU: 1000.28 Hz, 444.57 Hz and a 660.90 Hz sine, right durations, square-wave harmonics. `arecord` delivers 97.4% of a 48 kHz stereo second. |
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
-| Build | **358 of 366** `user/*.ad` build through the LLVM lane. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
+| Build | **359 of 367** `user/*.ad` build through the LLVM lane (re-measured; the eight failures are unchanged, `user/` gained `arecord`). `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
 
 The eight that do not, grouped by cause rather than listed: four are
 `*_host.ad` TEST HARNESSES that import kernel source (`sys.src.port9.port.devsnarf`,
@@ -149,12 +149,48 @@ same failure this project exists to beat.
   line's `streams 100 100 100 100` is a placeholder. Capture *content* is
   also unverifiable in an automated run — QEMU's only host-free input backend
   is silence — and the card is not ready for ~2 s after boot.
-* The run-sweep score is **249 healthy / 323 runnable**. `service`, `help`,
-  `nice_hi`/`nice_lo`, `watch`, the power/logout actions and all 16 overlay
-  clients were fixed in bc9b75d8 — they now work or fail by name. Still
-  unexamined: `wakelat_echo`, `hamgame_mixer_demo`. And ~85 GUI rows have not
-  been re-measured under the sweep's new 12 s timeout, so the score is a
-  floor rather than a settled number.
+* The run-sweep score is **261 healthy / 325 runnable**, and it is now a
+  MEASURED number rather than a floor: the full sweep was re-run end to end
+  under the 12 s GUI timeout, so the ~85 unre-measured GUI rows are settled
+  and `wakelat_echo` and `hamgame_mixer_demo` are examined. The score the
+  sweep prints is also the score it computes — `summary.txt` has a `headline`
+  block with the definition beside it (`healthy = RAN + DREW_WINDOW +
+  STAYS_UP + EXPECTED_FAIL`; `runnable` = rows minus NOT_SMOKE_TESTABLE minus
+  BUILD_FAIL), because the previous figure was derived by hand into a commit
+  message and its denominator was simply wrong.
+  **The measured baseline before this pass was 249 / 325**, not 249/323: the
+  healthy count was right, the denominator was not, and one program
+  (`arecord`) has been added to `user/` since. `+12`, reconciling exactly:
+  five rows are the harness no longer calling a correct program broken
+  (`false`, `cmp`, `diff`, `tty`, `kill` — a non-zero exit that IS the answer
+  is now `EXPECTED_FAIL`); three are a recipe bug (`mktemp`, `route`, `pr`
+  were being handed a literal `-` argument borrowed from the stdin column);
+  three are timeouts that were killing bounded programs a second before they
+  printed (`nice_lo`, `wakelat_hog`, `preempt_hog`); two are `SILENT_OK` rows
+  that now report what they did (`hamgame_mixer_demo`, `hamnotify`); one is a
+  real crash fixed (`hxd`); and **two go the other way for the right reason**
+  — `login` and, through it, `getty`, which used to exit 0 when the login
+  prompt hit end-of-input, reporting a session that was never established.
+  Zero `SILENT_OK`, zero `EMPTY_EFFECT`, zero `CRASH` remain. The two
+  remaining `TIMEOUT`s (`wakelat`, `sysirqprobe`) both print a named FAIL
+  about `/proc/self/ctl` before they run long, so they are honest.
+  Both `results.tsv` files are kept, under
+  `/home/david/.hamnix-build/sweep-a4b04e0f/{BASELINE,AFTER}-preserved/` —
+  **not** `/tmp`, which is a 16 GB tmpfs and is where a previous pass's
+  baseline went during a disk-full cleanup, leaving its before/after resting
+  on a figure it had not measured.
+* **The `/dev/wsys/<wid>/draw/ctl` `'I'` verb was never ported, so
+  `hamscene_image` renders nothing on this line.** Found by tracing
+  `hamimgscene`, which was exiting 2 in total silence. `user/linux-wsys.c`
+  implements the blit protocol's `'B'`, `'D'` and `'C'` and dropped devwsys's
+  named image upload; with no store behind it, `lib/hamui_host.ad`'s
+  rasterizer takes its `slot < 0 → return 1` path and draws a hole without
+  complaining. That reaches `user/hamimgscene.ad`, `lib/hamvideocore.ad`
+  (the `"frame"` image a video player blits) and `lib/hamsdl.ad`. It now
+  answers **ENOSYS by name** — distinct from the `EINVAL` it gives real
+  garbage — and `hamimgscene` prints the whole explanation and exits 2.
+  Closing it needs a named-image table in the shared segment plus `wsysd`
+  registering from it; not attempted here.
 
 ### What answered the original open questions
 
@@ -213,6 +249,14 @@ single entry:
   screen that has not locked anything.
 * `enter debian { steam }` from a desktop terminal running a Hamnix binary in
   the NATIVE root and exiting 0.
+* `login` returning 0 when the login prompt hit end-of-input — `getty` EXECS
+  it, so login's status IS the VT session's status, and a supervisor could
+  not tell "logged in and out again" from "nobody ever typed a name".
+* `hxd` looping for ever because its hex-byte loop was missing `b = b + 1`.
+  The symptom was not a wrong dump: it wrote three bytes per iteration
+  through the end of a 128-byte row buffer, over `page_len`, `file_size` and
+  `top`, and on until it walked off `.bss` — a SIGSEGV whose cause was four
+  frames and a whole BSS away from the missing line.
 * `shm_attach` using `O_RDWR|O_CREAT` → `fs.protected_regular` refuses
   `O_CREAT` on a file you do not own in a sticky directory, so an
   unprivileged client silently created its own private window system and drew
