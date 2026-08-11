@@ -258,6 +258,17 @@ same failure this project exists to beat.
   is a separate one baked into its image, and the two share their two
   hardest-won lines by copy. Worth merging when there is a third.
   `docs/linux_distro_namespaces.md` §7.
+* **The NATIVE build lane cannot link eight programs, and the divergence is
+  mine.** `scripts/build_user.sh` — the native Hamnix target, not this line's
+  LLVM lane — fails at `ld` with `undefined reference to sys_chmod`,
+  `sys_stat_mode` and `sys_uname`, for `cp`, `hpm`, `insmod`, `modprobe`,
+  `rmmod`, `uname`, `nice_hi` and `nice_lo`. Those three syscalls were added
+  to `user/linux-syscalls.c` — the HOSTED runtime — to fix real bugs on this
+  line (a fresh `hpm install` arriving non-executable; `cp` not carrying a
+  mode), and no native counterpart was ever written. Measured directly:
+  `scripts/build_user.sh uname` names all three. Nothing on the Linux line is
+  affected; anyone building the native target from this tree is.
+
 * **The GPU backend has never been measured on a real GPU, and on this
   machine it cannot be.** It is proven correct and proven to install; every
   microsecond quoted anywhere is lavapipe's, where it is 2.3–2.9× *slower*
