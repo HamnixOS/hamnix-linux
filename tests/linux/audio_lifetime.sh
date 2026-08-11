@@ -173,8 +173,16 @@ else:
                     "'half the sounds don't play' from the player's seat"
                     % p300)
     else:
-        # WHERE in the window, not just whether: the effects are meant to be
-        # heard AS the music plays, not bunched at one end.
+        # HOW MUCH of the effects, and WHERE. The report was "HALF the sounds
+        # don't play", so the number that answers it is how many SECONDS of
+        # 300 Hz are in the music's window against the 0.600 s phase B wrote
+        # (six bursts of 100 ms).
+        #
+        # It is NOT how widely they are spread, which is what the first draft
+        # of this assertion measured and got wrong: B sleeps 100 ms between
+        # 100 ms bursts, so 0.6 s of effects occupies about 0.65 s of wall
+        # clock and always will. Demanding that they span a quarter of a 4 s
+        # window was demanding a scenario audiolife does not run.
         hop = int(0.050 * sr)
         nh = len(seg) // hop
         f = np.fft.rfftfreq(hop, 1.0 / sr)
@@ -183,13 +191,22 @@ else:
                                             * np.hanning(hop)))[m].sum()
                          for i in range(nh)])
         hot = np.where(b300 > b300.max() * 0.35)[0]
-        spread = (hot[-1] - hot[0]) / float(nh) if len(hot) > 1 else 0.0
-        print("[audio_lifetime] C+B: the 300 Hz bursts span %.0f%% of the "
-              "music's window (%d of %d 50 ms hops carry them)"
-              % (100 * spread, len(hot), nh))
-        if spread < 0.25:
-            fail.append("the effects are bunched into %.0f%% of the music -- "
-                        "they are not being mixed as it plays" % (100 * spread))
+        secs = len(hot) * 0.050
+        print("[audio_lifetime] C+B: %.2f s of 300 Hz inside the music, "
+              "against the 0.60 s phase B wrote; from %.2f s to %.2f s of a "
+              "%.2f s window"
+              % (secs, hot[0] * 0.050 if len(hot) else 0,
+                 hot[-1] * 0.050 if len(hot) else 0, nh * 0.050))
+        if secs < 0.40:
+            fail.append("REPORT (3): only %.2f s of the 0.60 s of effects is "
+                        "inside the music -- that IS 'half the sounds don't "
+                        "play'" % secs)
+        # ...and inside it, not leaking off either end, which is what an
+        # APPENDING device does: the effects come out after the music.
+        if len(hot) and (hot[0] == 0 or hot[-1] >= nh - 1):
+            fail.append("the effects touch the edge of the music's window -- "
+                        "they are being queued around it rather than summed "
+                        "into it")
 
 if fail:
     for m in fail:
