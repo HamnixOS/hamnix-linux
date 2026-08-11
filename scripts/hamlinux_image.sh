@@ -67,7 +67,22 @@ APPS=(
     ifconfig route ping host curl wget hpm
     insmod modprobe lsmod rmmod
     xbridge wsyswl nsrun dhcpc ntpd
-    hlinstall reboot haminstallui
+    hlinstall haminstallui
+    # Stopping the machine. `reboot` was here alone because the installer
+    # wanted it; `poweroff` and `halt` were not shipped at all, so on a booted
+    # system they answered `command not found` -- measured by
+    # tests/linux/reboot_device.sh, which found 127 where it expected a
+    # refusal. All three are one write of one verb to /dev/reboot
+    # (user/linux-syscalls.c), they differ only in the verb, and `poweroff` is
+    # the one most people type. A distribution that cannot be turned off by
+    # name is not one somebody installs.
+    #
+    # initctl/telinit are deliberately NOT here: they reach PID 1 by writing
+    # /proc/svc/ctl, a Hamnix-kernel node this line does not serve, so they
+    # could only ever fail. hamsh's `init 0` / `init 6` builtins do the same
+    # job in-process and DO work. Shipping a command that cannot work would be
+    # the success-shaped answer this tree exists to avoid.
+    reboot poweroff halt
     # Audio. All three are thin Plan 9 clients of /dev/audio, /dev/audioctl
     # and /dev/audioin (user/linux-audio.c) and none of them knows anything
     # about ALSA: `playtone` synthesises a square wave and needs no fixture at

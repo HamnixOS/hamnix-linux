@@ -88,8 +88,17 @@ say() { echo "[rbdev] $*"; }
 # very file being opened). Nothing here redirects from /etc/rc.boot; the only
 # redirect target is /dev/reboot itself, which is a device and not a file the
 # shell is reading.
-cat > "$WORK/rc.live" <<'RC'
-source '/etc/rc.boot.linux'
+#
+# THE REAL BOOT RC IS PREPENDED, NOT SOURCED. etc/rc.boot.linux is staged into
+# the image AS /etc/rc.boot and under no other name, so `source
+# '/etc/rc.boot.linux'` inside the guest is "source: cannot open file" -- and
+# because HAMLINUX_RC REPLACES that one file, sourcing the name this test
+# stages would be a loop. Concatenating is also the more honest test: the
+# probe then runs on a machine that booted normally, with the compositor and
+# the desktop up, which is the state somebody is in when they reach for the
+# power menu.
+cat etc/rc.boot.linux > "$WORK/rc.live"
+cat >> "$WORK/rc.live" <<'RC'
 
 echo '[rbdev] ===== LIVE: the /dev/reboot protocol'
 
@@ -139,7 +148,12 @@ HAMLINUX_RC="$WORK/rc.live" scripts/hamlinux_image.sh >"$WORK/live-build.log" 2>
     echo "FAIL live image build"; tail -20 "$WORK/live-build.log"; exit 1; }
 
 say "live boot (up to ${WAIT_LIVE}s)"
-( sleep "$((WAIT_LIVE + 10))" ) | timeout "$((WAIT_LIVE + 15))" \
+# STDIN CLOSES EARLY, as installed_update.sh does it: hamsh IS pid 1 and falls
+# through to reading the console when the rc ends, so an open stdin would hold
+# the VM for the whole budget on every run. At EOF pid 1 exits, the kernel
+# panics (panic=-1) and -no-reboot makes QEMU quit -- so the number below is a
+# CEILING, not a duration.
+( sleep 5 ) | timeout "$((WAIT_LIVE + 15))" \
     scripts/hamlinux_vm.sh script --timeout "$WAIT_LIVE" \
     >"$WORK/live.log" 2>&1
 
