@@ -13,21 +13,28 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
-**hamnix-linux boots to a desktop, installs itself, and updates from
-255.one.** Concretely, all of the following are measured rather than argued:
+**hamnix-linux boots to a desktop, installs itself, updates from 255.one, and
+compiles Adder on the box.** Concretely, all of the following are measured
+rather than argued:
 
 | | |
 |--|--|
 | Boot | Linux kernel → `user/linuxinit.ad` (the Adder PID 1) → namespace via `sys_bind` → `hamsh` → the rc scripts |
 | Installed boot | UEFI → a unified kernel image on an ESP → PID 1 → `bind '#sysroot' /` → the real ext4 root. Files written on one boot are there on the next. |
-| Display | `/dev/fb` on fbdev, `wsysd` compositing at 1280×800, verified by QEMU screendump of the SCANNED-OUT surface |
-| Windows | `/dev/wsys`, the port of `devwsys.ad`, in shared memory. Both protocols: the v1 scene display list and the v2 blit surface. |
+| Display | `/dev/fb` on fbdev AND on raw DRM/KMS, double-buffered with `MODE_PAGE_FLIP` — 481 flips, `stalled=0`. `flip` is a `/dev/fbctl` verb; double buffering arms lazily, so a program that never flips runs the old path untouched. |
+| Windows | `/dev/wsys`, the port of `devwsys.ad`, in shared memory. Both protocols: the v1 scene display list and the v2 blit surface. The screen size is published at `/dev/wsys/screen`. |
+| Compositor | `user/wsysd.ad`. A 1724-op frame at 1280×800 costs **625 µs**, down from 5503; a pointer-only frame costs **5 µs**, down from 6543. Pixel-identical to the pre-optimisation code at three geometries. |
 | Input | every `/dev/input/event*`, decoded in the compositor, routed to the focused window in window-local coordinates |
 | Desktop | `hamdesktop` + `hampanelscene`, unmodified. Launch a terminal from the menu, type in it, get output. |
-| Networking | `/net` as a file tree, TCP/UDP/ICMP, TLS, and `announce`/`accept` across process boundaries |
-| Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1 |
-| Debian | a namespace on its own filesystem; Firefox runs in it and is composited onto the Hamnix desktop through the blit protocol |
-| Build | **354 of 362** `user/*.ad` build through the LLVM lane |
+| Session | `login` → `/dev/auth` (real `/etc/shadow` + `crypt_r`) → `setuid 1001`. The session is unprivileged; the compositor and chrome are not. |
+| Access control | devwsys's uid gate is ported: `live` cannot drive system-chrome ctl verbs, and can still map and draw its own window. `tests/linux/wsys_uidgate.sh`. |
+| Networking | `/net` as a file tree, TCP/UDP/ICMP, TLS, `announce`/`accept` across process boundaries, and DHCP (`user/dhcpc.ad`) |
+| Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1. **The update loop is proven end to end**: install at 1.0.2 from the live repo, a newer build lands, `hpm update`, the upgraded binary still runs. No re-image anywhere in it. |
+| Wayland | `user/wsyswl.ad`, a Wayland compositor in Adder. Firefox runs as a native Wayland client with its menus as separate windows; XWayland carries X11 clients. |
+| Debian | `enter debian { sh }` — bookworm on its own filesystem, amd64+i386. `glxgears:i386` renders on the Hamnix desktop through XWayland → `wsyswl` → `wsysd` → `/dev/fb`. |
+| Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
+| GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
+| Build | **358 of 366** `user/*.ad` build through the LLVM lane |
 
 The eight that do not, grouped by cause rather than listed: four are
 `*_host.ad` TEST HARNESSES that import kernel source (`sys.src.port9.port.devsnarf`,
@@ -35,6 +42,38 @@ the clipboard device) which is not in this repository; three are LIBRARIES
 with no `main` (`http9`, `net9`, `httpdconf`), where the sweep's "no @main" is
 the correct answer; one genuinely bails the backend's SSA subset
 (`hambrowse_tabs`).
+
+### What is HONESTLY BROKEN right now
+
+Kept here deliberately, because a handoff that lists only successes is the
+same failure this project exists to beat.
+
+* **`enter debian { … }` does not work from a desktop terminal.** The session
+  is uid 1001, `bind` is a real `mount(2)` needing CAP_SYS_ADMIN, so the
+  template's binds fail. Since 526a168e it fails loudly (exit 126) instead of
+  running the body in the native root and reporting success — honest, not
+  working. The fix is `pivot_root` instead of `chroot` in `enter_root`.
+* **Steam reaches its own UI and shows no window.** It installs, brings up
+  pressure-vessel, and Chromium loads to `SteamApp Init - Before Login`; the
+  CEF GPU process exits and the browser is created at `(-2147483648, …)`.
+  Its container also cannot run as non-root: the kernel refuses
+  `CLONE_NEWUSER` to a chrooted process. Same `pivot_root` fix.
+  Catch, measured: an initramfs boot's root mount is `rootfs`, which
+  `pivot_root` rejects.
+* **The GPU backend has never been measured on a real GPU.** It is proven
+  correct and proven to install; every microsecond quoted anywhere is
+  lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
+  rasterizer, which is why the default is gated on the device being silicon.
+  venus does not come up on this dev host (the NVIDIA driver's GBM backend
+  cannot create a device; wants `nvidia-drm.modeset=1` and a reboot).
+* **The wsys uid gate is a library check, not a kernel boundary.** `/dev/wsys`
+  is a 0666 shared segment, so a program that mmaps `/srv/wsys` directly
+  bypasses it. Closing that means chrome state in a second segment at 0644.
+* **No audio device at all.** No `/dev/snd`, and `hamlinux_vm.sh` adds no
+  sound hardware.
+* From the run sweep, still answering success-shaped: `service` and `help`
+  exit 0 after saying they cannot work; `nice_hi`/`nice_lo` announce a renice
+  that never happened; overlay clients print "ready" while owning no window.
 
 ### What answered the original open questions
 
@@ -75,6 +114,28 @@ single entry:
   terminal decided its shell had died the instant it started.
 * `sys_read_nb` leaving `O_NONBLOCK` set → the next blocking read returned
   EAGAIN, which `hamsh` read as end-of-input and exited.
+* `ps` printing a kernel banner and exiting 0, because `/proc/tasks` is
+  Hamnix's process list and does not exist on Linux.
+* `hpm install a b c` silently dropping `b` and `c`; and a fresh install
+  arriving non-executable, hidden because overwriting an existing binary
+  inherits its mode.
+* Six syscalls with **no body at all** in the hosted lane — `sys_mount`,
+  `sys_nslabel`, `sys_srv_open`, `sys_fdslot_arg`, `sys_svc_publish`,
+  `sys_svc_ctl` fell through an `#ifndef ADDER_HOSTED` block that is compiled
+  out here, ran off the end of `.text`, and executed arbitrary bytes. `hamsh`
+  — PID 1 — calls all six, one of them on every `enter`. It mostly got away
+  with it, which is the worst available failure mode.
+* Every DE client defaulting to 800×600 because `/dev/wsys` recorded the
+  screen size in fields nothing could read back, so each one opened `/dev/fb`
+  privately — which can never work while the compositor holds DRM master.
+  `hamlock` did it at 1024×768, covering 53% of a 1080p display: a lock
+  screen that has not locked anything.
+* `enter debian { steam }` from a desktop terminal running a Hamnix binary in
+  the NATIVE root and exiting 0.
+* `shm_attach` using `O_RDWR|O_CREAT` → `fs.protected_regular` refuses
+  `O_CREAT` on a file you do not own in a sticky directory, so an
+  unprivileged client silently created its own private window system and drew
+  into a screen nobody composites.
 
 None of these failed loudly. Three were found only by tracing, one only by
 running `strace` **as PID 1**, and one only after publishing the compositor's
