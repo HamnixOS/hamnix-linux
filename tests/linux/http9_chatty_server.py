@@ -34,6 +34,11 @@ ROUTES
                      cannot tell "missing" from "broken".
     /hdrsize         200, body is the decimal size of this server's header
                      block (so a test can print what it is measuring)
+    /redirect/<path> 302 to <path>, behind a body big enough to overrun a
+                     small buffer -- the hop is decided by the HEAD, so a
+                     fat 3xx must still redirect
+    /chunked/<bytes> 200, <bytes> of body in Transfer-Encoding: chunked
+                     frames with no Content-Length (the "read to EOF" arm)
 
 USAGE
     http9_chatty_server.py [--port N] [--pad BYTES] [--host 127.0.0.1]
@@ -77,10 +82,10 @@ class Handler(socketserver.StreamRequestHandler):
             if e.lower().startswith(b"content-type:"):
                 ctype = e
         extra = [e for e in extra if not e.lower().startswith(b"content-type:")]
-        base = [
-            b"Server: GitHub.com",
-            ctype,
-            b"Content-Length: %d" % body_len,
+        base = [b"Server: GitHub.com", ctype]
+        if body_len is not None:                 # None => chunked, no length
+            base.append(b"Content-Length: %d" % body_len)
+        base = base + [
             b"Last-Modified: Mon, 09 Feb 2026 11:22:33 GMT",
             b"Access-Control-Allow-Origin: *",
             b"ETag: \"67a8b9c0-81\"",
@@ -127,6 +132,42 @@ class Handler(socketserver.StreamRequestHandler):
 
         status = b"HTTP/1.1 200 OK"
         extra = []
+        if path.startswith("/redirect/"):
+            # A 302 whose BODY is deliberately fat. The redirect is decided
+            # entirely by the head, so a caller with a small buffer must still
+            # follow it -- http9 returning -6 here would strand the client on
+            # a page it was never meant to see.
+            status = b"HTTP/1.1 302 Found"
+            body = b"<html>redirecting</html>" + b"x" * 20000
+            extra = [b"Location: /" + path[len("/redirect/"):].encode(),
+                     b"Content-Type: text/html"]
+            head = self._headers(status, extra, len(body))
+            self._emit(path, status, head, body)
+            return
+        if path.startswith("/chunked/"):
+            try:
+                nbytes = int(path[len("/chunked/"):])
+            except ValueError:
+                nbytes = 0
+            payload = bytearray()
+            i = 0
+            while len(payload) < nbytes:
+                payload += b"%063d\n" % i
+                i += 1
+            payload = bytes(payload[:nbytes])
+            framed = bytearray()
+            off = 0
+            while off < len(payload):
+                piece = payload[off:off + 4096]
+                framed += b"%X\r\n" % len(piece) + piece + b"\r\n"
+                off += len(piece)
+            framed += b"0\r\n\r\n"
+            # No Content-Length: chunked framing IS the length, which is the
+            # arm of the drain loop that reads to EOF.
+            head = self._headers(status, [b"Transfer-Encoding: chunked"],
+                                 None)
+            self._emit(path, status, head, bytes(framed))
+            return
         if path.startswith("/n/"):
             try:
                 nbytes = int(path[3:])
@@ -150,6 +191,9 @@ class Handler(socketserver.StreamRequestHandler):
             body = TINY_BODY
 
         head = self._headers(status, extra, len(body))
+        self._emit(path, status, head, body)
+
+    def _emit(self, path, status, head, body):
         if not self.quiet:
             sys.stderr.write("[chatty] %s -> status=%s hdrbytes=%d "
                              "bodybytes=%d totalbytes=%d\n"
