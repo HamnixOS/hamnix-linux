@@ -1,6 +1,7 @@
 # HANDOFF — porting the Hamnix userland to the Linux kernel
 
-You are starting with no context. Read this first, then `README.md`.
+You are starting with no context. Read `NORTH_STAR.md` for what this is FOR,
+then this file for where it stands, then `README.md`.
 
 ---
 
