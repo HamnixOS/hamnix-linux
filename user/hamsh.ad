@@ -9001,6 +9001,42 @@ def _flag_word(s: Ptr[uint8]) -> int32:
 # ONE caller -- apply_ns_template -- and the reason is in the long note there.
 ns_bind_fails: int32 = 0
 
+# WHICH bind failed, and why. `ns_bind_fails` counted them and named none, so
+# `enter debian { firefox }` from the DE application menu answered
+#
+#     hamsh: namespace not entered -- a bind in the template failed
+#     hamsh: bind ... needs CAP_SYS_ADMIN; a desktop session runs as uid 1001
+#
+# on a failure that was ENOENT, not EPERM -- a fixed guess printed in the
+# place where the measured answer belongs, which is the failure mode
+# NORTH_STAR.md exists to forbid. These carry the FIRST failure of the current
+# template out to _ns_apply_failed so it can say the source, the target and
+# the kernel's own reason.
+ns_fail_src: Array[256, uint8]
+ns_fail_dst: Array[256, uint8]
+ns_fail_err: Array[192, uint8]
+
+
+def _ns_fail_copy(dst: Ptr[uint8], src: Ptr[uint8], cap: uint64):
+    i: uint64 = 0
+    while src[i] != 0 and i + 1 < cap:
+        dst[i] = src[i]
+        i = i + 1
+    dst[i] = 0
+
+
+def _ns_fail_record(src: Ptr[uint8], dst: Ptr[uint8]):
+    # First failure of this template only: the one that STOPPED it is the one
+    # worth naming. A root switch that fails ENOENT makes every later bind in
+    # the template fail too, and printing five identical consequences buries
+    # the cause -- that is exactly how the three measured "shapes" of
+    # /etc/rc.de-ns/<name> differed only in how many binds failed.
+    if ns_bind_fails != 0:
+        return
+    _ns_fail_copy(&ns_fail_src[0], src, 256)
+    _ns_fail_copy(&ns_fail_dst[0], dst, 256)
+    _ns_fail_copy(&ns_fail_err[0], &errstr_buf[0], 192)
+
 
 def builtin_bind(argc: int32) -> int32:
     # bind [-b|-a] SRC DST — graft SRC onto the lookup name DST in the
@@ -9043,6 +9079,7 @@ def builtin_bind(argc: int32) -> int32:
                          cast[Ptr[char]](src_p), flag)
     if rc < 0:
         errstr_pull_kernel()
+        _ns_fail_record(src_p, dst_p)
         ns_bind_fails = ns_bind_fails + 1
         return 1
     return 0
@@ -12306,8 +12343,25 @@ def exec_spawn(node: int32) -> int32:
 # 126 is the shell convention for "found it, could not run it", which is
 # exactly the situation: the namespace exists, we could not enter it.
 def _ns_apply_failed():
-    write_str(2, "hamsh: namespace not entered -- a bind in the template failed, so the body was NOT run.\n")
-    write_str(2, "hamsh: bind performs a real mount(2) and needs CAP_SYS_ADMIN; a desktop session runs as uid 1001.\n")
+    # NAME THE BIND. The old text asserted CAP_SYS_ADMIN/uid 1001 regardless of
+    # what the kernel actually said, so an ENOENT root switch was reported as a
+    # privilege problem and three passes were spent on the wrong suspect.
+    write_str(2, "hamsh: namespace not entered -- the body was NOT run.\n")
+    write_str(2, "hamsh: first failing bind: ")
+    write_str(2, &ns_fail_src[0])
+    write_str(2, " -> ")
+    write_str(2, &ns_fail_dst[0])
+    write_str(2, ": ")
+    if ns_fail_err[0] == 0:
+        write_str(2, "(no errstr)")
+    else:
+        write_str(2, &ns_fail_err[0])
+    write_str(2, "\n")
+    if ns_bind_fails > 1:
+        write_str(2, "hamsh: (the remaining binds in the template failed as a consequence)\n")
+    write_str(2, "hamsh: bind performs a real mount(2). EPERM is no CAP_SYS_ADMIN (a desktop session is uid 1001).\n")
+    write_str(2, "hamsh: ENOENT after the root switch is a missing mount point INSIDE the new root -- the target\n")
+    write_str(2, "hamsh: directory does not exist there and an unprivileged process cannot create it.\n")
 
 
 def apply_ns_template(nsval: int32) -> int32:
@@ -12336,6 +12390,9 @@ def apply_ns_template(nsval: int32) -> int32:
     if bodynode == 0:
         return 1
     ns_bind_fails = 0
+    ns_fail_err[0] = 0
+    ns_fail_src[0] = 0
+    ns_fail_dst[0] = 0
     exec_block(bodynode)
     if ns_bind_fails != 0:
         return 0

@@ -2844,6 +2844,91 @@ static const char *root_stage_dir(char *out, size_t outn)
  * right root -- it is only the user-namespace property that is missing, so
  * degrading to it is honest where refusing outright would take away a working
  * `enter` to protect a feature the caller may not want. */
+/* THE MOUNT POINTS INSIDE A DISTRIBUTION'S OWN ROOT, MADE AT THE ONE MOMENT
+ * ROOT HOLDS THE MEDIUM.
+ *
+ * `enter alpine { … }` assembles a new root and binds /dev, /proc, /srv and
+ * /n INTO it (enter_root's `always[]`, and the four bind lines every
+ * `ns clean { }` template carries). A bind whose TARGET DIRECTORY does not
+ * exist fails ENOENT — and the session user cannot create one: the
+ * distribution's `/` is uid 0, and uid 0 is NOT mapped into the user namespace
+ * ns_privilege() acquires, so CAP_DAC_OVERRIDE does not reach it. enter_root
+ * calls mkdir() for exactly this reason and its return value is ignored,
+ * because at uid 0 it always worked.
+ *
+ * AND THAT IS THE WHOLE OF docs/linux_distro_namespaces.md §8.4. Those
+ * directories were only ever created as a SIDE EFFECT of somebody running
+ * `enter <name>` AS ROOT earlier in the same boot on a WRITABLE medium, where
+ * enter_root's mkdir succeeded and left them behind on the disk. Measured:
+ * `debugfs -R 'ls -l /'` shows `n` in build/image/distro.ext4 and NOT in
+ * build/image/alpine.ext4 — Debian had been entered by root at some point in
+ * its life and Alpine had not. So the console worked, the desktop terminal
+ * worked (both run a root `enter` first, or run on the medium that already
+ * had the directory), and the DE application menu — the ONE launcher that
+ * reaches `enter` before any root `enter` has run — did not. The failure was
+ * read as "the first bind, the root switch, fails ENOENT"; it is in fact the
+ * LAST bind, `#/` onto /n, with the root switch having succeeded.
+ *
+ * Doing it here makes the boot's `bind '#distro/<name>' /n/<name>` post a
+ * server that is COMPLETE at its name, which is what the rest of this file
+ * already assumes. Root only: for anyone else this is a no-op, and the bind
+ * they are about to attempt will name its own failure.
+ */
+static void distro_stage_mountpoints(const char *dst)
+{
+    if (geteuid() != 0)
+        return;
+    static const char *pts[] = { "/n", "/dev", "/proc", "/sys", "/srv" };
+    char p[1024];
+    for (size_t i = 0; i < sizeof pts / sizeof pts[0]; i++) {
+        if ((size_t)snprintf(p, sizeof p, "%s%s", dst, pts[i]) >= sizeof p)
+            continue;
+        if (mkdir(p, 0755) == 0 || errno == EEXIST)
+            continue;
+        /* A read-only medium is the honest case here, and it PREDICTS the
+         * ENOENT an unprivileged `enter` will hit later. Say it now, once per
+         * point, rather than letting it surface as a launcher that does
+         * nothing. */
+        char m[320];
+        int n = snprintf(m, sizeof m,
+            "bind: could not create the mount point `%s' (%s); "
+            "`enter' as the session user will fail there\n", p,
+            strerror(errno));
+        ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
+        (void)w;
+    }
+}
+
+/* The bind that stages the tree, named by the paths the RESOLVER produced
+ * rather than by the `#letter` the caller typed. `bind '#distro/alpine' /`
+ * failing ENOENT is unactionable; "/n/alpine -> /tmp/.hamns-412: No such file
+ * or directory" says which of the two names does not exist. */
+static void bind_stage_failed(const char *src, const char *dst)
+{
+    char m[512];
+    int n = snprintf(m, sizeof m,
+        "bind: could not graft `%s' onto `%s': %s\n", src, dst,
+        strerror(errno));
+    ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
+    (void)w;
+}
+
+/* Say which STEP of the root switch failed, and on which path. Not rate-
+ * limited by a `static int said`: an `enter` that does not enter happens once
+ * per launch and the caller needs the line for THAT launch, not for the first
+ * one the process ever attempted. */
+static void enter_root_failed(const char *step, const char *path)
+{
+    char m[512];
+    int n = snprintf(m, sizeof m,
+        "bind: the root switch failed at %s(\"%s\"): %s -- the staged root is "
+        "assembled under /n/.root (root) or $TMPDIR/.hamns-<pid> (a session "
+        "user), and the body will NOT be run.\n",
+        step, path, strerror(errno));
+    ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
+    (void)w;
+}
+
 static int32_t enter_root(const char *mnt, int is_sysroot)
 {
     /* /n comes across too: it is the conventional mount-point parent, and a
@@ -2868,8 +2953,15 @@ static int32_t enter_root(const char *mnt, int is_sysroot)
                 ns_mount(sysroot_only[i], dest, NULL, MS_BIND | MS_REC, NULL);
         }
     }
-    if (chdir(mnt) < 0)
+    /* THE ROOT SWITCH HAS FOUR STEPS AND ONLY ONE ERRNO. A caller that sees
+     * ENOENT out of `bind '#distro/alpine' /` cannot tell whether the medium
+     * failed to resolve, the staging directory vanished, or the chroot did --
+     * and docs/linux_distro_namespaces.md §8.4 spent three measured passes on
+     * that ambiguity. Each step now names itself and the path it was given. */
+    if (chdir(mnt) < 0) {
+        enter_root_failed("chdir", mnt);
         return -(int32_t)errno;
+    }
     /* "." rather than mnt: the cwd is already INSIDE the new mount, so the
      * move cannot be confused by the name it used to have. */
     if (mount(".", "/", NULL, MS_MOVE, NULL) < 0) {
@@ -2887,10 +2979,14 @@ static int32_t enter_root(const char *mnt, int is_sysroot)
             (void)w;
         }
     }
-    if (chroot(".") < 0)
+    if (chroot(".") < 0) {
+        enter_root_failed("chroot", mnt);
         return -(int32_t)errno;
-    if (chdir("/") < 0)
+    }
+    if (chdir("/") < 0) {
+        enter_root_failed("chdir-after-chroot", "/");
         return -(int32_t)errno;
+    }
     return 0;
 }
 
@@ -3081,6 +3177,10 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
      * which is a stronger guarantee than "we agreed not to write to it". */
     int to_root = (dst[0] == '/' && dst[1] == '\0');
     int is_sysroot = !strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r");
+    /* Posting a distribution AT ITS NAME (`bind '#distro/alpine' /n/alpine`)
+     * rather than entering it: that is the moment the mount points inside it
+     * get made. See distro_stage_mountpoints. */
+    int posting_distro = !to_root && !strcmp(d->letter, "#distro");
     char stage[256];
     const char *mnt = dst;
     if (to_root) {
@@ -3105,8 +3205,12 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
      * /n/distro when it was root, and this binds THAT. */
     char existing[1024];
     if (blk_already_mounted(srcpath, existing, sizeof existing)) {
-        if (ns_mount(existing, mnt, NULL, MS_BIND | MS_REC, NULL) < 0)
+        if (ns_mount(existing, mnt, NULL, MS_BIND | MS_REC, NULL) < 0) {
+            bind_stage_failed(existing, mnt);
             return -(int32_t)errno;
+        }
+        if (posting_distro)
+            distro_stage_mountpoints(mnt);
         return to_root ? enter_root(mnt, is_sysroot) : 0;
     }
 
@@ -3116,8 +3220,11 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
                                          "vfat", "btrfs", "xfs" };
         int last = ENODEV;
         for (size_t i = 0; i < sizeof fstypes / sizeof fstypes[0]; i++) {
-            if (mount(srcpath, mnt, fstypes[i], 0, NULL) == 0)
+            if (mount(srcpath, mnt, fstypes[i], 0, NULL) == 0) {
+                if (posting_distro)
+                    distro_stage_mountpoints(mnt);
                 return to_root ? enter_root(mnt, is_sysroot) : 0;
+            }
             last = errno;
             /* EBUSY means something is already mounted there; trying more
              * filesystem types will not help. EPERM means we are not root and
@@ -3130,8 +3237,12 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
         return -(int32_t)last;
     }
 
-    if (ns_mount(srcpath, mnt, NULL, MS_BIND | MS_REC, NULL) < 0)
+    if (ns_mount(srcpath, mnt, NULL, MS_BIND | MS_REC, NULL) < 0) {
+        bind_stage_failed(srcpath, mnt);
         return -(int32_t)errno;
+    }
+    if (posting_distro)
+        distro_stage_mountpoints(mnt);
     return to_root ? enter_root(mnt, is_sysroot) : 0;
 }
 
