@@ -12,6 +12,22 @@
 #   -noreset the server would otherwise reset when its last client exits and
 #            take the Wayland surface down with it.
 set -u
+
+# THE EXPERIMENT KNOBS, AND WHY THEY ARE IN A FILE RATHER THAN THE ENVIRONMENT.
+# This script is exec'd through `spawn debian { ... }` from an rc, and what an
+# rc exports is not what crosses a namespace entry -- so an experiment selected
+# with an environment variable would silently run the DEFAULT and report on it,
+# which is the exact failure shape NORTH_STAR.md exists to beat. The harness
+# plants this file beside the script instead, so the setting is on disk in the
+# image and can be read back afterwards.
+#
+#   HAMNIX_X11_WM=matchbox|none   which window manager, if any
+#   HAMNIX_X11_XTRACE=0|1         proxy the display through xtrace(1) and log
+#                                 every X request the session makes
+[ -r /usr/local/etc/hamnix-x11session.env ] && . /usr/local/etc/hamnix-x11session.env
+HAMNIX_X11_WM="${HAMNIX_X11_WM:-matchbox}"
+HAMNIX_X11_XTRACE="${HAMNIX_X11_XTRACE:-0}"
+
 export XDG_RUNTIME_DIR=/run
 export WAYLAND_DISPLAY=wayland-0
 # $HOME, and why "/" is not acceptable. hamsh hands an entering program the
@@ -90,8 +106,66 @@ else
 fi
 
 export DISPLAY=:0
-matchbox-window-manager -use_titlebar no >/tmp/mbwm.log 2>&1 &
-sleep 1
+
+# XTRACE: DOES THE CLIENT EVER ASK FOR THE WINDOW TO BE MAPPED?
+# docs/steam_namespace.md §6.2 measured that every window Steam creates it
+# leaves IsUnMapped. That single fact has two completely different causes --
+# Steam never issues MapWindow, or it issues one that is refused or undone --
+# and no amount of xwininfo can tell them apart, because xwininfo only ever
+# sees the outcome. xtrace fakes an X server on :9, forwards to the real :0 and
+# writes down every request, so the question is answered by the wire.
+#
+# The whole session goes through it, window manager included: a MapRequest is
+# redirected TO the WM, so a trace that omitted the WM would show the request
+# vanish and could not say who dropped it.
+if [ "$HAMNIX_X11_XTRACE" = 1 ]; then
+    if ! command -v xtrace >/dev/null 2>&1; then
+        # Not in the Debian archive's default set for this image; the harness
+        # plants it as a tarball rather than adding 2 GB of rebuild.
+        [ -f /usr/local/lib/xtrace-bundle.tar.gz ] && \
+            tar xzf /usr/local/lib/xtrace-bundle.tar.gz -C /usr 2>/dev/null
+    fi
+    if command -v xtrace >/dev/null 2>&1; then
+        rm -f /tmp/xtrace.log
+        # -k  keep running when a client disconnects; the session outlives any
+        #     one client and the launcher exits long before CEF does.
+        # -m 8  truncate long lists -- an ATOM list is not what is under test
+        #       and untruncated they bury the log.
+        xtrace -k -d :0 -D :9 -m 8 -o /tmp/xtrace.log >/tmp/xtrace.err 2>&1 &
+        i=0
+        while [ $i -lt 40 ]; do
+            [ -e /tmp/.X11-unix/X9 ] && break
+            i=$((i+1)); sleep 0.25
+        done
+        if DISPLAY=:9 xdpyinfo >/dev/null 2>&1; then
+            export DISPLAY=:9
+            echo "hamnix-x11session: xtrace proxying :9 -> :0, log /tmp/xtrace.log" >&2
+        else
+            echo "hamnix-x11session: WARNING xtrace did not come up; staying on :0" >&2
+            [ -s /tmp/xtrace.err ] && sed 's/^/hamnix-x11session:   xtrace: /' /tmp/xtrace.err >&2
+        fi
+    else
+        echo "hamnix-x11session: WARNING HAMNIX_X11_XTRACE=1 but no xtrace binary" >&2
+    fi
+fi
+
+# THE WINDOW MANAGER, WHICH IS OPTIONAL AND IS A SUSPECT.
+# matchbox is a SINGLE-WINDOW handheld WM and it is the only thing standing
+# between a client's MapRequest and the screen: SubstructureRedirect means the
+# map does not happen unless the WM performs it. X11 does not require a window
+# manager at all, so running with none is a control, not a degradation.
+case "$HAMNIX_X11_WM" in
+    none)
+        echo "hamnix-x11session: NO window manager (HAMNIX_X11_WM=none) -- MapWindow takes effect directly" >&2 ;;
+    matchbox)
+        matchbox-window-manager -use_titlebar no >/tmp/mbwm.log 2>&1 &
+        echo "hamnix-x11session: window manager matchbox" >&2
+        sleep 1 ;;
+    *)
+        $HAMNIX_X11_WM >/tmp/wm.log 2>&1 &
+        echo "hamnix-x11session: window manager $HAMNIX_X11_WM" >&2
+        sleep 1 ;;
+esac
 
 # A SESSION BUS. Steam's steam-runtime-launcher-service exits on startup
 # without one ("Can't find session bus"), and retries until it disables
@@ -127,9 +201,24 @@ if command -v dbus-daemon >/dev/null 2>&1; then
         [ -e /run/dbus/system_bus_socket ] && \
             echo "hamnix-x11session: stale /run/dbus/system_bus_socket (no live dbus-daemon); removing" >&2
         rm -f /run/dbus/system_bus_socket /run/dbus/pid
-        # A machine id, because an mmdebstrap root has none and libdbus refuses
-        # to start without one ("unable to determine the machine uuid").
-        command -v dbus-uuidgen >/dev/null 2>&1 && dbus-uuidgen --ensure 2>/dev/null
+        # A MACHINE ID, AND IT REALLY IS MISSING. An mmdebstrap root has no
+        # /etc/machine-id and an EMPTY /var/lib/dbus -- verified by reading the
+        # image itself with debugfs, without booting anything:
+        #     debugfs -R "ls -l /var/lib/dbus" build/image/distro.ext4  ->  . ..
+        # dbus-daemon refuses to start without one. `dbus-uuidgen --ensure`
+        # was already being called here, with its output thrown away and its
+        # exit status ignored, so if it failed nothing said so. Do both files
+        # by name and REPORT, because a machine id that was not created is
+        # indistinguishable from one that was until the bus fails to start.
+        [ -s /etc/machine-id ] || dbus-uuidgen > /etc/machine-id 2>/tmp/dbus-uuidgen.log
+        mkdir -p /var/lib/dbus
+        [ -s /var/lib/dbus/machine-id ] || cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
+        if [ -s /etc/machine-id ] && [ -s /var/lib/dbus/machine-id ]; then
+            echo "hamnix-x11session: machine id $(cat /etc/machine-id)" >&2
+        else
+            echo "hamnix-x11session: WARNING no machine id -- dbus-daemon will refuse to start" >&2
+            [ -s /tmp/dbus-uuidgen.log ] && sed 's/^/hamnix-x11session:   dbus-uuidgen: /' /tmp/dbus-uuidgen.log >&2
+        fi
         # Keep its complaint. "No system bus" with no reason attached is how
         # this went unexamined for a whole pass.
         dbus-daemon --system --fork >/tmp/dbus-system.log 2>&1 || true
@@ -140,6 +229,19 @@ if command -v dbus-daemon >/dev/null 2>&1; then
     fi
     if bus_alive; then
         echo "hamnix-x11session: system bus live on /run/dbus/system_bus_socket (pid $(cat /run/dbus/pid 2>/dev/null))" >&2
+        # AND ASK IT SOMETHING, because a socket plus a live pid is still only
+        # circumstantial. dbus-send IS in this image (/usr/bin/dbus-send, from
+        # the `dbus` package) -- an earlier comment here asserted it was not,
+        # which is why the liveness test was reduced to file inspection.
+        if command -v dbus-send >/dev/null 2>&1; then
+            if dbus-send --system --dest=org.freedesktop.DBus --print-reply \
+                 /org/freedesktop/DBus org.freedesktop.DBus.GetId >/tmp/dbus-ping.log 2>&1; then
+                echo "hamnix-x11session: system bus ANSWERED GetId" >&2
+            else
+                echo "hamnix-x11session: WARNING system bus did NOT answer GetId" >&2
+                sed 's/^/hamnix-x11session:   dbus-send: /' /tmp/dbus-ping.log >&2
+            fi
+        fi
     else
         echo "hamnix-x11session: WARNING no system bus -- CEF will log a connect failure per subprocess" >&2
         [ -s /tmp/dbus-system.log ] && sed 's/^/hamnix-x11session:   dbus-daemon: /' /tmp/dbus-system.log >&2

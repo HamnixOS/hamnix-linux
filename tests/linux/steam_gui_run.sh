@@ -40,8 +40,15 @@ echo "[gui] planting the session scripts in the namespace image"
 # Doing both in one session leaves the new directory entry carrying the OLD
 # inode's type: the file came out mode 0140755 (a symlink) with size 0, and
 # the only symptom was `hamsh: command not found` on a path that plainly
-# existed. Verify the SIZE afterwards, not merely the name -- the zero-length
-# version passed a name check happily.
+# existed. Verify what landed afterwards, not merely the name -- the
+# zero-length version passed a name check happily.
+#
+# CHECK THE TYPE, NOT A SIZE THRESHOLD. The original guard was `size > 100`,
+# which is a proxy for "not the zero-length symlink" and it misfires the moment
+# a legitimately small file is planted: an 81-byte env file was rejected as
+# "did not land" when it had landed perfectly. Ask for the thing that was
+# actually wrong -- the inode type -- and require only that the size matches
+# the file that was written.
 plant() {   # plant <host-file> <path-in-namespace>
     /sbin/debugfs -w -R "rm $2" "$IMG/distro.ext4" >/dev/null 2>&1
     /sbin/e2fsck -fy "$IMG/distro.ext4" >/dev/null 2>&1
@@ -50,13 +57,50 @@ write $1 $2
 sif $2 mode 0100755
 EOF
     /sbin/e2fsck -fy "$IMG/distro.ext4" >/dev/null 2>&1
-    sz=$(/sbin/debugfs -R "stat $2" "$IMG/distro.ext4" 2>/dev/null \
-         | sed -n 's/.*Size: \([0-9]*\).*/\1/p' | head -1)
-    [ "${sz:-0}" -gt 100 ] || { echo "$2 did not land (size=${sz:-0})" >&2; exit 1; }
+    st=$(/sbin/debugfs -R "stat $2" "$IMG/distro.ext4" 2>/dev/null)
+    sz=$(printf '%s\n' "$st" | sed -n 's/.*Size: \([0-9]*\).*/\1/p' | head -1)
+    want=$(stat -c %s "$1")
+    printf '%s\n' "$st" | grep -q 'Type: regular' \
+        || { echo "$2 did not land as a regular file" >&2
+             printf '%s\n' "$st" | head -3 >&2; exit 1; }
+    [ "${sz:-0}" = "$want" ] \
+        || { echo "$2 did not land (size=${sz:-0}, expected $want)" >&2; exit 1; }
     echo "[gui]   $2 ($sz bytes)"
 }
 plant tests/linux/hamnix_x11session.sh /usr/local/bin/hamnix-x11session
 plant tests/linux/hamnix_xdiag.sh       /usr/local/bin/hamnix-xdiag
+
+# WHICH EXPERIMENT. See the header of hamnix_x11session.sh for why this is a
+# planted FILE and not an exported variable: an rc's environment does not
+# survive `spawn debian { ... }`, so a knob passed that way would silently run
+# the default and the log would describe an experiment that never happened.
+WM="${HAMNIX_X11_WM:-matchbox}"
+XTRACE="${HAMNIX_X11_XTRACE:-0}"
+cat > "$WORK/session.env" <<ENV
+# planted by tests/linux/steam_gui_run.sh
+HAMNIX_X11_WM=$WM
+HAMNIX_X11_XTRACE=$XTRACE
+ENV
+plant "$WORK/session.env" /usr/local/etc/hamnix-x11session.env
+echo "[gui] experiment: window manager=$WM  xtrace=$XTRACE"
+
+# xtrace is not in the image's package set and adding it to
+# scripts/hamlinux_distro.sh means a 2 GB rebuild to gain 96 KB. Fetch the
+# BOOKWORM binary (1.4.0-1+b1, Depends: libc6 >= 2.17 -- trixie's 1.4.0-1.1
+# wants 2.38 and will not run in there) and plant it as a tarball. Nothing is
+# installed on the host; the deb is unpacked into build/ and never executed.
+if [ "$XTRACE" = 1 ]; then
+    BUNDLE=build/xtrace/xtrace-bundle.tar.gz
+    if [ ! -s "$BUNDLE" ]; then
+        mkdir -p build/xtrace/x
+        curl -sfL -o build/xtrace/xtrace.deb \
+          'http://deb.debian.org/debian/pool/main/x/xtrace/xtrace_1.4.0-1%2bb1_amd64.deb' \
+          || { echo "could not fetch xtrace" >&2; exit 1; }
+        dpkg-deb -x build/xtrace/xtrace.deb build/xtrace/x
+        ( cd build/xtrace/x && tar czf ../xtrace-bundle.tar.gz usr/bin/xtrace usr/share/xtrace )
+    fi
+    plant "$BUNDLE" /usr/local/lib/xtrace-bundle.tar.gz
+fi
 
 cat > "$WORK/rc.boot" <<RC
 echo 'rc.boot: hamnix-linux starting'

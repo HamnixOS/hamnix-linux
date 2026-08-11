@@ -54,6 +54,32 @@ fi
 ls -l /run/dbus/ 2>&1 | head -5
 [ -s /tmp/dbus-system.log ] && sed 's/^/xdiag: dbus-daemon: /' /tmp/dbus-system.log
 
+echo "xdiag: === which experiment this run is"
+cat /usr/local/etc/hamnix-x11session.env 2>/dev/null | sed 's/^/xdiag:     /' \
+    || echo "xdiag:     no env file -- defaults (matchbox, no xtrace)"
+
+echo "xdiag: === the X wire: is MapWindow ever REQUESTED?"
+# The whole point of the trace. IsUnMapped has two causes that look identical
+# from xwininfo -- nobody asked, or the ask was refused/undone -- and only the
+# wire separates them. Count first, then show the requests themselves.
+if [ -s /tmp/xtrace.log ]; then
+    echo "xdiag:     $(wc -l < /tmp/xtrace.log) lines of trace"
+    for req in MapWindow MapSubwindows UnmapWindow CreateWindow ReparentWindow \
+               DestroyWindow ConfigureWindow; do
+        echo "xdiag:     $req requests: $(grep -c "$req" /tmp/xtrace.log)"
+    done
+    echo "xdiag: --- every MapWindow / MapSubwindows, in order"
+    grep -n -E 'MapWindow|MapSubwindows' /tmp/xtrace.log | cut -c1-160 | head -60
+    echo "xdiag: --- every MapNotify / UnmapNotify event the server sent back"
+    grep -n -E 'MapNotify|UnmapNotify|MapRequest' /tmp/xtrace.log | cut -c1-160 | head -60
+    echo "xdiag: --- every protocol ERROR on the wire"
+    grep -n -i -E 'Error|BadWindow|BadAccess|BadMatch|BadValue' /tmp/xtrace.log \
+        | cut -c1-160 | head -40
+else
+    echo "xdiag:     no /tmp/xtrace.log (not tracing this run)"
+    [ -s /tmp/xtrace.err ] && sed 's/^/xdiag:     xtrace stderr: /' /tmp/xtrace.err
+fi
+
 echo "xdiag: === Xwayland's own log"
 tail -25 /tmp/xwayland.log 2>&1
 echo "xdiag: === matchbox's own log"
