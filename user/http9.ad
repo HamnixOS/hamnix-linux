@@ -137,11 +137,15 @@ h9_ce:       Array[80, uint8]           # Content-Encoding header value
 # or 0 when no head has been read (a URL-parse / connect / write failure).
 #
 # 16 KiB is chosen against what servers send, not against what any caller
-# expects: nginx's default `large_client_header_buffers` is 8 KiB, Apache's
-# `LimitRequestFieldSize` 8 KiB, and the chattiest CDN response measured here
-# (GitHub Pages) is 640 bytes. A head that will not fit is a fault of the
-# SERVER and is reported as its own rc (-10) rather than being charged to
-# whichever caller happened to make the request.
+# expects: nginx's default `large_client_header_buffers` is 8 KiB and Apache's
+# `LimitRequestFieldSize` is 8 KiB, so a head past 16 KiB is one most of the
+# web would refuse to generate. Measured off the wire here: GitHub Pages sends
+# 668 bytes, DuckDuckGo 3080. That spread — a factor of nearly five between two
+# ordinary sites, and 668 where 640 was recorded a few weeks earlier — is the
+# argument for this buffer existing at all: the number is not stable, not
+# knowable in advance, and not the caller's to know. A head that will not fit
+# is a fault of the SERVER and is reported as its own rc (-10) rather than
+# being charged to whichever caller happened to make the request.
 H9_HDR_CAP:  uint64 = 16384
 h9_hdr:      Array[16384, uint8]
 h9_hdr_len:  uint64 = 0
