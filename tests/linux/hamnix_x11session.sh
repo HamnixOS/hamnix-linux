@@ -122,8 +122,13 @@ if [ "$HAMNIX_X11_XTRACE" = 1 ]; then
     if ! command -v xtrace >/dev/null 2>&1; then
         # Not in the Debian archive's default set for this image; the harness
         # plants it as a tarball rather than adding 2 GB of rebuild.
-        [ -f /usr/local/lib/xtrace-bundle.tar.gz ] && \
-            tar xzf /usr/local/lib/xtrace-bundle.tar.gz -C /usr 2>/dev/null
+        # -C / : the tarball's members are usr/bin/xtrace and usr/share/xtrace,
+        # so unpacking it at /usr puts the binary in /usr/usr/bin and the only
+        # symptom is this script saying "no xtrace binary" one line later.
+        if [ -f /usr/local/lib/xtrace-bundle.tar.gz ]; then
+            tar xzf /usr/local/lib/xtrace-bundle.tar.gz -C / 2>/tmp/xtrace-untar.log \
+                || sed 's/^/hamnix-x11session:   tar: /' /tmp/xtrace-untar.log >&2
+        fi
     fi
     if command -v xtrace >/dev/null 2>&1; then
         rm -f /tmp/xtrace.log
