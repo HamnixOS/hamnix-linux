@@ -17,14 +17,22 @@ The gate is `tests/linux/installed_update.sh`: it installs a disk, boots it
 through UEFI, refreshes from the real `https://255.one/`, installs a package
 the image does not ship, publishes a newer **signed** build to a local
 channel, updates against it, reboots the machine, and asks every question
-again as the desktop user. Unattended, re-runnable, **37 PASS / 0 FAIL**.
+again as the desktop user. Unattended, re-runnable, **43 PASS / 0 FAIL**.
 
-Two of its arms report rather than gate, and both currently report the gap
-(so they are the difference between this 37 and the 39 recorded earlier):
-`https://255.one/` still serves no `index.json.sig`, and `hpm` still replaces
-the machine's own `/etc/rc.boot`. Both are named in §2a/§2b below and neither
-is a defect in the update path itself. The reboot arm used to be a third —
-it is a real check now that §2c is closed.
+**ONE** arm still reports rather than gates: `https://255.one/` serves no
+`index.json.sig`, so the owner's command typed bare does not work on any
+machine. It is named in §2a and it is a publish, not a patch. The rc.boot arm
+used to be a second one — it is a real check now that §2b is closed, and it
+brought four more with it: the digest tool it asks the machine for, and the
+file operands `cksum` and `head` grew (§3). The reboot arm was a third and
+became real when §2c closed.
+
+Note that the §2b arm **could not have passed in the shape it was written**:
+it looked for the rc's byte count in the output of `ls -l /etc/rc.boot`, and
+`ls -l FILE` prints the file's *contents* on this line. It named the fault
+correctly by accident and would have gone on naming it after the fix. It is an
+MD5 of the running rc now, against the digest the host computed for the bytes
+it wrote.
 
 **The "newer build" version is derived, not hard-coded.** It was `1.0.8`, and
 the gate went red the day the real repository published `hamnix-diff 1.0.8`
@@ -54,6 +62,7 @@ Measured on a 3 GB disk built by `scripts/hamlinux_disk.sh`, booted twice with
 | The version moved | `hpm list` → `hamnix-diff 1.0.8` |
 | The BYTES moved | `cksum </bin/diff` on the guest is `1495419638 144920` — the CRC the host computed over the very bytes it served |
 | The EDIT landed | a token minted by the test run, carried in the new tarball as `etc/hamnix-update-stamp`, is readable on the machine |
+| **The machine keeps its own rc** | `/etc/rc.boot` is byte-identical after `hpm install` and `hpm update` — checked by MD5 against what the host wrote, not by eye (§2b) |
 | **After a reboot** | version, bytes and stamp all still there; the upgraded binary gives both answers again; and all of it holds as **uid 1001** |
 
 The signature path is the one under test, not `--allow-unsigned`: the local
@@ -129,12 +138,13 @@ matching public key is compiled into `hpm` (`etc/hpm/trusted.pub`).
 `tests/linux/installed_update.sh` still passes `--allow-unsigned` for the
 255.one half and prints a NOTE about it; both can now go.
 
-### 2b. `hpm` takes the installed machine's `/etc/rc.boot` — and removing it is worse
+### 2b. FIXED — `hpm` took the installed machine's `/etc/rc.boot`
 
-`hamnix-init` ships `etc/rc.boot.linux` **as** `/etc/rc.boot`. On the live
-image that is the same bytes twice and invisible. On an installed machine it
-replaces the boot script of the running system. Measured, immediately after
-`hpm install` on the installed disk:
+This is how it read when it was found. `hamnix-init` shipped
+`etc/rc.boot.linux` **as** `/etc/rc.boot`. On the live image that is the same
+bytes twice and invisible. On an installed machine it replaces the boot script
+of the running system. Measured, immediately after `hpm install` on the
+installed disk:
 
 ```
 [iupd] p1 /etc/rc.boot after installing from the PUBLISHED 1.0.7:
@@ -152,23 +162,50 @@ removes the files the *old* version owned before laying down the new one, and
 ls: open failed: /etc/rc.boot
 ```
 
-The machine had no boot script at all. So the shipped behaviour is left as it
-is, and the whole measurement is recorded in the `hamnix-init` entry of
-`scripts/hamlinux_packages.py`.
+The machine had no boot script at all. Not a smaller fault than the first one:
+a brick.
 
-**What actually fixes it** (needs `user/hlinstall.ad`, which this agent does
-not own): an installed `/etc/rc.boot` should be one line —
+**Both are the same missing concept, and it is the package manager's.** A path
+can be **machine-owned**: written by whichever image or installer made the
+machine, and therefore not any package's to write, to delete, or to claim.
+dpkg calls these conffiles. Three parts, and each one is load-bearing:
 
-```
-source '/etc/rc.boot.installed'
-```
+1. **`user/hpm.ad` — `_is_machine_owned()`.** `etc/rc.boot` is never
+   overwritten, never unlinked by a remove (which is what an upgrade does
+   first), and never **recorded** in `installed.json` as a package's file, so
+   no later remove can reach it either. hpm still writes it when it is
+   **absent**, which makes an update *repair* a machine that lost its rc
+   rather than leave the hole. The list is compiled in rather than read from
+   package metadata for the reason in point 3: the hpm that must not delete
+   your boot script is the one **already on the machine** when you type the
+   command, and nothing a future package says about itself can reach it.
 
-— written by the installer and owned by no package, with `hamnix-init`
-shipping `etc/rc.boot.linux` and `etc/rc.boot.installed` under their own
-names. Then an update delivers every change to either rc and cannot touch the
-machine's own boot configuration. The transition needs **one release that
-ships `/etc/rc.boot` as well**, so the upgrade does not remove it from the
-machines that already have it.
+2. **`user/hlinstall.ad` — the installed `/etc/rc.boot` is an indirection.**
+   It is `etc/rc.boot.machine`, whose only executable line is
+
+   ```
+   source '/etc/rc.boot.installed'
+   ```
+
+   Everything a release can improve lives in `/etc/rc.boot.installed`, which
+   `hamnix-init` owns and an update delivers; anything specific to this box
+   goes below the source line, where nothing will touch it. The installer
+   prefers the image's copy of `etc/rc.boot.machine` and falls back to writing
+   the line itself, so an image that does not carry that file still installs.
+
+3. **`scripts/hamlinux_packages.py` — the transition release.** `hamnix-init`
+   **still ships `/etc/rc.boot`**, now as the one-liner. This is the half that
+   is easy to get wrong and it is the whole reason 2b was hard: an installed
+   1.0.7/1.0.8 box runs **1.0.7's hpm**, which knows nothing of point 1 and
+   will delete `etc/rc.boot` on the `hamnix-init` upgrade whatever this tree
+   does. The only thing that can put a working rc back on such a machine is
+   the package it is upgrading *to*. So the package ships one — and ships the
+   right one, so that machine ends up sourcing the real installed rc instead
+   of being handed the initramfs rc it used to get. It is safe on every other
+   machine because of point 1. Dropping the entry before no pre-fix hpm is
+   left in the field re-creates the brick, and the entry says so.
+
+The gate's rc.boot arm is a **check** now rather than a note.
 
 ### 2c. FIXED — an installed machine could not restart or shut itself down
 
@@ -296,24 +333,53 @@ publishing to 255.one cannot silently fail somebody else's gate.
 
 ---
 
-## 3. Three commands that answer without doing anything
+## 3. Three commands that answered without doing anything — FIXED
 
-Found by this test hanging on them, and all three matter beyond it.
+Found by this test hanging on them, and all three mattered beyond it.
 
-* **`md5sum` is a marker-shape stub.** `user/md5sum.ad` drains stdin, ignores
-  its argument entirely and prints the MD5 of the *empty string* as a
-  constant. `md5sum /bin/diff` blocks forever on a console and, on a pipe,
-  answers `d41d8cd98f00b204e9800998ecf8427e` for every input in the world.
-  `user/cksum.ad` is the real thing (POSIX CRC-32, agrees with GNU `cksum`)
-  and is what the gate uses — but it reads stdin only, so `cksum < FILE`.
-* **`head` takes no file operand.** `head -3 /etc/rc.boot` blocks on stdin
-  forever rather than saying it cannot do that.
+* **`md5sum` was a marker-shape stub.** `user/md5sum.ad` drained stdin,
+  ignored its argument entirely and printed the MD5 of the *empty string* as a
+  compiled-in constant. `md5sum /bin/diff` blocked forever on a console and,
+  on a pipe, answered `d41d8cd98f00b204e9800998ecf8427e` for every input in
+  the world. It would not merely have failed to verify a file — **it would
+  have verified any file**, which is worse than shipping no checksum tool, and
+  it is exactly the class of failure this project is organised against.
+
+  It is real MD5 (RFC 1321) now, streaming, shaped like `user/sha1sum.ad`:
+  FILE operands, stdin when there are none, and `-c` check mode. The 64-entry
+  K table is checked against `floor(abs(sin(i+1)) * 2^32)` and the round
+  structure against Python's `hashlib` on twelve inputs, including every
+  55/56/57/63/64/65-byte padding boundary and a 100 KB random file; on the
+  device it is checked against the digest GNU `md5sum` computed on the host
+  for the same bytes. (The `.ad` cannot be run on the host to compare
+  directly: the runtime's `sys_*` are Hamnix numbers, not host Linux ones, so
+  a host-built binary calls `lseek` where it meant `write`.)
+* **`head` took no file operand.** `head -3 /etc/rc.boot` ignored the name and
+  blocked on stdin forever rather than saying it could not do that. It takes
+  FILEs now, with the GNU `==> NAME <==` banner when there is more than one.
+* **`cksum` read stdin only**, so the only way to checksum a file was
+  `cksum < FILE`. It takes FILEs now and prints the GNU
+  `<crc> <bytes> <name>` form for them. It was already the real thing (POSIX
+  CRC-32, agrees with GNU `cksum`) and is what the gate uses.
+* **A PIPE INTO `md5sum` NEVER RETURNED**, and it cost a whole boot. The rc
+  asked `cat /etc/hamnix-update-stamp | md5sum` for the stream half of the
+  digest check; the banner printed, no digest appeared under it, and the VM
+  died on the host's timeout with every phase-2 check failing as collateral.
+  The same `md5sum` had answered two FILE operands correctly in the two lines
+  immediately above, so what did not finish is the **pipe's EOF**, not the
+  hash. Not chased down here — it is a `hamsh`/`sys_pipechan` question and
+  this gate is not the place to burn boots on it, but it is a real fault: a
+  pipeline that never ends is indistinguishable from a hung command. The
+  stream arm uses `md5sum < FILE`, the same shape as the `cksum < FILE` that
+  has always worked.
 * **A redirect whose source is the running rc wedges the shell.** Inside
   `/etc/rc.boot`, both `head -3 < /etc/rc.boot` and `cksum < /etc/rc.boot`
   hang the boot dead — as does overwriting `/etc/rc.boot` mid-script, which
   replaces the bytes PID 1 is about to read. `ls -l /etc/rc.boot` is the form
   that answers. Two boots were spent learning this; the gate says so where it
-  matters.
+  matters. Note that this is a property of the **redirect**, not of the
+  commands: `head -3 /etc/rc.boot` and `cksum /etc/rc.boot`, which are now
+  legal, open the file themselves and do not go through the shell.
 
 ---
 

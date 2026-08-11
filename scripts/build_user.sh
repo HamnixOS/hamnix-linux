@@ -378,7 +378,7 @@ build_adder_user dup_demo             # M16.41: exercises sys_dup / sys_dup2
 build_adder_user ls                   # M16.46: directory listing
 build_adder_user lsblk                # enumerate /dev/blk devices + sizes (pre-install disk check)
 build_adder_user pwd                  # M16.47: print working dir
-build_adder_user head                 # M16.57: first N lines
+build_adder_user head                 # first N lines of FILE(s) or stdin
 build_adder_user wc                   # M16.57: line/word/byte count
 build_adder_user grep                 # egrep: ERE (-E) via shared lib/regex.ad; flags -i/-v/-c/-n/-o/-w/-x/-F/-e
 build_adder_user seq                  # M16.64: 1..N or M..N output
@@ -399,7 +399,7 @@ build_adder_user uniq                 # collapse adjacent dup lines (-c/-d/-u)
 build_adder_user nl                   # number stdin lines (-ba/-bt)
 build_adder_user tac                  # cat in reverse line order
 build_adder_user fold                 # wrap lines to width (-w N)
-build_adder_user cksum                # POSIX CRC32 + byte count of stdin
+build_adder_user cksum                # POSIX CRC32 + byte count of FILE(s) or stdin
 build_adder_user rm                   # M16.65: tmpfs unlink
 build_adder_user touch                # M16.65: create-empty / truncate
 build_adder_user mkdir                # M16.65: no-op stub (flat tmpfs)
@@ -488,7 +488,7 @@ build_adder_user base64               # M16.86: RFC 4648 encode/decode
 build_adder_user tar                  # native ustar (POSIX tar): -c/-x/-t -f ARCHIVE; -z read (inflate) + write (-czf, lib/zlib/deflate)
 build_adder_user gzip                 # native gzip: fixed-Huffman + LZ77 DEFLATE (lib/zlib/deflate) + .gz framing; -d via inflate
 build_adder_user gunzip               # native gunzip: full INFLATE (stored/fixed/dynamic) via lib/zlib/inflate
-build_adder_user md5sum               # M16.86: fixed-hash stub (real MD5 deferred)
+build_adder_user md5sum               # MD5 (RFC 1321) digest of FILE(s)/stdin (+ -c check mode)
 build_adder_user env_show             # M16.86: hint about hamsh's `env` builtin
 build_adder_user watch                # M16.86: -n N CMD, runs CMD twice w/ delay
 build_adder_user crond                # cron daemon: /var/cron/crontab, minute-edge scheduler

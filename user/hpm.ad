@@ -4586,6 +4586,74 @@ def _has_entry_in_tar(tar_len: uint64, tail: Ptr[uint8]) -> int32:
 # function is unused in Phase 2 and lives for Phase 3 to wire up.
 
 
+# =====================================================================
+# MACHINE-OWNED FILES — the one thing a package may not take
+# =====================================================================
+#
+# `/etc/rc.boot` is the script PID 1 executes. WHICH RC A MACHINE BOOTS
+# IS A PROPERTY OF THE MACHINE, not of any package: the live image's
+# copy is written by scripts/hamlinux_image.sh, an installed machine's
+# by user/hlinstall.ad (or scripts/hamlinux_disk.sh). Nobody who typed
+# `hpm update` asked for their boot configuration to be replaced.
+#
+# It was, and both of the obvious repairs were measured on a real
+# installed disk by tests/linux/installed_update.sh:
+#
+#   * hamnix-init shipped etc/rc.boot.linux AS /etc/rc.boot. On the
+#     live image that is the same bytes twice and invisible. On an
+#     INSTALLED machine `hpm install` replaced the running system's
+#     boot script with the initramfs one -- measured: afterwards
+#     /etc/rc.boot began "# /etc/rc.boot.linux -- the bootstrap rc for
+#     the Linux line".
+#
+#   * Dropping it from the package instead DELETED it. An upgrade
+#     removes the files the OLD version owned before laying the new
+#     one down, and the old version owned etc/rc.boot -- measured:
+#     "ls: open failed: /etc/rc.boot". The machine had no boot script
+#     at all. That is not a smaller fault; it is a brick.
+#
+# Both faults are the same missing concept, and it is a PACKAGE
+# MANAGER's concept, not an installer's: a path can be machine-owned,
+# and then hpm neither overwrites it nor deletes it nor records itself
+# as its owner. It writes it only when it is ABSENT, which makes an
+# update REPAIR a machine that somehow lost its rc instead of merely
+# leaving the hole alone. dpkg calls these conffiles.
+#
+# It is a compiled-in list rather than package metadata on purpose:
+# the hpm that must not delete your boot script is the one ALREADY ON
+# THE MACHINE when you type the command, so nothing a future package
+# says about itself can protect a machine running today's binary.
+# That is also why hamnix-init still SHIPS etc/rc.boot -- as the
+# one-line `source '/etc/rc.boot.installed'` -- for exactly one
+# transition: a machine whose hpm predates this rule will delete its
+# rc.boot on the upgrade, and the package has to put a working one
+# back. See the hamnix-init entry in scripts/hamlinux_packages.py.
+#
+# The list is deliberately tiny. Every entry is a file that some
+# IMAGE or INSTALLER writes and no package can know the right
+# contents of; a path that merely "looks like config" does not
+# qualify, or `hpm install` would stop being able to update anything
+# under /etc.
+def _is_machine_owned(rel: Ptr[uint8], rel_len: uint64) -> int32:
+    want: Ptr[uint8] = "etc/rc.boot"
+    if rel_len != 11:
+        return 0
+    i: uint64 = 0
+    while i < 11:
+        if rel[i] != want[i]:
+            return 0
+        i = i + 1
+    return 1
+
+
+def _path_exists_u8(path: Ptr[uint8]) -> int32:
+    fd: int32 = sys_open(cast[Ptr[char]](path))
+    if fd < 0:
+        return 0
+    sys_close(fd)
+    return 1
+
+
 def _stage_extract_files(tar_len: uint64, target_prefix: Ptr[uint8]) -> int32:
     # Walk tar_buf[0..tar_len); for any entry whose name is
     # "<pkg_prefix>files/<rel>" (regular file) write the body to
@@ -4711,6 +4779,23 @@ def _stage_extract_files(tar_len: uint64, target_prefix: Ptr[uint8]) -> int32:
             write_str(2, "\n")
             off = off + 512 + body_blocks * 512
             continue
+
+        # A MACHINE-OWNED PATH THAT ALREADY EXISTS IS NOT OURS TO
+        # WRITE, AND NOT OURS TO CLAIM. Skipping the _new_files_record
+        # below is the half that matters most: an unrecorded file is
+        # one no future `hpm remove` can delete either. Only the live
+        # VFS is checked -- in target-dev mode hpm is laying down a
+        # FRESH disk through the install_file ctl verb, where there is
+        # no running system's rc to protect and the installer writes
+        # the machine's own copy afterwards.
+        if target_dev_buf[0] == 0:
+            if _is_machine_owned(&warn_buf[rel_start], rel_len) != 0:
+                if _path_exists_u8(&extract_path_buf[0]) != 0:
+                    write_str(1, "hpm: keeping this machine's own ")
+                    write_str(1, &extract_path_buf[0])
+                    write_str(1, "\n")
+                    off = off + 512 + body_blocks * 512
+                    continue
 
         # Regular file.
         body_off: uint64 = off + 512
@@ -6026,11 +6111,26 @@ def cmd_remove(name: Ptr[uint8]) -> int32:
     # Delete files in REVERSE install order.
     fc: uint64 = inst_file_count[fi]
     fs: uint64 = inst_file_start[fi]
+    kept: uint64 = 0
     if fc > 0:
         ri: uint64 = fc
         while ri > 0:
             ri = ri - 1
             slot: uint64 = fs + ri
+            # A MACHINE-OWNED PATH SURVIVES ITS PACKAGE. An upgrade is
+            # a remove followed by an install, so this arm is what
+            # stands between `hpm update` and a machine with no boot
+            # script -- and it has to hold even for a record written
+            # by an OLDER hpm that did claim the file. See
+            # _is_machine_owned.
+            if _is_machine_owned(&inst_buf[inst_file_off[slot]],
+                                 inst_file_len[slot]) != 0:
+                write_str(1, "hpm: keeping this machine's own ")
+                sys_write(1, &inst_buf[inst_file_off[slot]],
+                          inst_file_len[slot])
+                write_str(1, "\n")
+                kept = kept + 1
+                continue
             # Compose <target_prefix><rel> into extract_path_buf.
             po: uint64 = 0
             tp: uint64 = 0
@@ -6047,7 +6147,7 @@ def cmd_remove(name: Ptr[uint8]) -> int32:
             extract_path_buf[po] = 0
             sys_unlink(cast[Ptr[char]](&extract_path_buf[0]))
     write_str(1, "hpm: deleted ")
-    write_dec_u64(1, fc)
+    write_dec_u64(1, fc - kept)
     write_str(1, " files\n")
 
     if has_staging != 0:
