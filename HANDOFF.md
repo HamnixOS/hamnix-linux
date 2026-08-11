@@ -338,7 +338,26 @@ same failure this project exists to beat.
   in the file would then pass on the pre-fix code — which is exactly how this
   survived. Proved to fail on the pre-fix binaries: five assertions flip, and
   the obvious small-response case passes in both arms.
-  `tests/linux/http9_chatty_server.py` is the padding server.
+  `tests/linux/http9_chatty_server.py` is the padding server. It also gates
+  the ORIGINAL incident against the live repo, because no local server can be
+  trusted to imitate a CDN forever — GitHub Pages' header block measured
+  **668** bytes on the day this landed, not the 640 recorded when the bug was
+  found, and **DuckDuckGo's is 3080**: three kilobytes that used to come out
+  of whatever buffer the caller had brought.
+    `https://255.one/linux/index.json.sig` cap=512 → `RC=0 STATUS=200 BODYLEN=129`
+    `https://255.one/main/index.json.sig`  cap=512 → `RC=-6 STATUS=404`
+  The first is the fetch that could not be made for the life of the
+  repository; the second is a channel that genuinely has no signature, still
+  legible as a 404 through a buffer far too small for its error page.
+
+  `hpm` did not regress: `tests/linux/hpm_index_sig.sh` **7 PASS**,
+  `tests/linux/hpm_signed_refresh.sh` **9 PASS** against the live 255.one
+  (98 packages, install + run, no flags). That second gate did report one
+  failure, and it was the gate: hamsh echoes the rc script it runs, comments
+  and all, and its own comment says "an unsigned repo", which its `nocheck`
+  then matched on a run where `hpm` had said nothing of the kind. Fixed to
+  read guest output only — **a test failing on its own source text is the same
+  class of error as a program answering something success-shaped.**
 
 * **THE SOFTWARE MIXER IS PORTED. Two programs make a sound at the same time,
   and the capture carries both.** An ALSA hardware substream has one writer, so
