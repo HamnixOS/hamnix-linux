@@ -1877,7 +1877,7 @@ def _hex_decode(src: Ptr[uint8], n: uint64,
 # Load the compiled-in default trust root (matches etc/hpm/trusted.pub).
 def _load_default_trusted_pub():
     src: Ptr[uint8] = \
-        "87c67427ce90c5f12718b3ee8fbc7bb8edd164b9ad3a3a7bc613999f00eb336f"
+        "67d38b2c47886c95dc28aede9d2d4025dbf894dbcf3007de79f82070f6ca4774"
     if _hex_decode(src, 64, &trusted_pub[0], 32) != 32:
         # A compile-time constant; can't legitimately fail.
         write_str(2, "hpm: internal: bad built-in trust root\n")
