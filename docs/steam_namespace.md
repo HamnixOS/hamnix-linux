@@ -50,7 +50,7 @@ server socket (§8).
 | system D-Bus | **works** | the image had no machine id at all; created, and CEF's `Connection refused` per subprocess is gone — §6.4 |
 | Steam's login window exists and is mapped | **works, with no window manager** | `0x1600015 "Sign in to Steam" 700x440+290+180 Map State: IsViewable`, with its full Chromium render subtree. Under `matchbox` that window does not survive at all — §6.4 |
 | Steam UI window, on screen | **not yet** | the mapped window is never painted into: 21 burst frames byte-identical black — §6.5 |
-| audio | **absent** | no `/dev/snd`, no sound device in the VM at all — §8 |
+| audio | **works** | `/dev/audio` on intel-hda since b18e105b, proven by FFT on a WAV captured out of QEMU. Steam's remaining probe FAIL is the PulseAudio socket, which is a different thing from having a card. |
 
 ---
 
