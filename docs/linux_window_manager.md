@@ -194,16 +194,39 @@ and the framebuffer — the QEMU screendump of the Hamnix desktop — carries th
 title bar, the minimise/maximise/close buttons, both windows and their
 stacking order.
 
-**One caveat, and it is not this change's.** On this branch, a screendump
-taken with the shipped compositor showed the X session's first frame and then
-nothing: `wsyswl`/`wsysd` stop delivering the rootful Xwayland surface. That
-is the bug named in `docs/steam_namespace.md` §6.3 and fixed on another
-branch (`bf9befa4`, "one stride, not two"); the screenshots above were taken
-with `wsysd`/`wsyswl` built from that branch into a private image, and
-everything on the **X** side — the window tree, `_NET_FRAME_EXTENTS`, the
-`xwd -root` pixel counts inside each frame rectangle — is identical with and
-without it. The window manager's behaviour does not depend on that fix; only
-the picture of it does.
+**And the case matchbox failed, which is the strongest evidence there is.**
+With `jwm` and the merged compositor (`bb6ab02f`, `MAXMAP` 16 → 64), Steam's
+login window is on the Hamnix desktop: the SIGN IN form, the account-name and
+password fields, `Remember me`, the `Sign in` button and the QR block, beside
+a decorated jwm-managed `xterm` (`build/steamprobe/steam_login_jwm.png`; the
+`xterm` and Firefox arms are `wm_jwm_xterm.png` and `wm_jwm_firefox.png`
+beside it). Read out of the same boot:
+
+```
+0x1a00015 "Sign in to Steam" ("steamwebhelper" "steam") 700x440+290+180  IsViewable
+_NET_CLIENT_LIST(WINDOW): window id # 0x140000c, 0x1a00015
+_NET_ACTIVE_WINDOW(WINDOW): window id # 0x1a00015
+```
+
+matchbox left that window `IsUnMapped`. jwm manages it, lists it, makes it the
+active window — and does **not** reparent it, which is also correct: CEF sets
+no-decorations and jwm honours that, so Steam draws its own chrome and gets
+exactly the 700x440 at +290+180 it asked for.
+
+The compositor's own account of the same run, `cat /run/wsyswl-state` from
+inside the namespace, with a window manager in the session:
+
+```
+commits 639   rows 511200   every drop_* counter 0   map_alloc_failed 0
+maps_in_use 31   maps_high_water 31   max_object_id 132   windows_high_water 1
+limits MAXMAP=64 MAXOBJ=1024 MAXWIN=12 FCMAX=64
+```
+
+Two numbers in there are worth carrying forward. **31 mappings, not 26** —
+adding a window manager to the X session costs about five more `wl_shm`
+mappings on the one shared connection, which would have been over the old
+limit of 16 by itself. And **`windows_high_water 1`**: the entire X session,
+window manager, frames, Steam and all, is ONE wsys window. That is §8.
 
 ## 8. The bigger question: rootless Xwayland
 
@@ -215,8 +238,23 @@ each X toplevel would get its own `wl_surface`, `wsysd` would place, stack and
 decorate them exactly as it does for Wayland clients, and the namespace would
 need no window manager of its own.
 
-**That is the better long-term answer and it is not what this change is.**
-Stating why, so the next pass does not have to rediscover it:
+**That is the better long-term answer, and the MAXMAP wall is the argument
+for it.** `windows_high_water 1` is not a curiosity: it means every X client in
+the namespace shares one connection, one object-id space, one `wl_shm` mapping
+table, one frame-callback ring — and therefore one fate. `MAXMAP` was 16 and
+Steam's session needs 31; what that produced was not "Steam is broken" but an
+entire X screen that painted once and then froze, with the control `xterm` and
+Steam's window as the same symptom, and it took three passes to establish that
+they were. `MAXWIN=12` and `FCMAX=64` are the same shape waiting to happen: a
+namespace with a dozen X windows open, or a busy client asking for more frame
+callbacks than the ring holds, hits a per-connection limit and everything on
+that X screen stops together. Raising the constants buys headroom; it does not
+remove shared fate. **Rootless removes it** — one `wl_surface`, one set of
+limits, per toplevel — and hands placement, stacking and decoration to
+`wsysd`, which already does all three for Wayland clients.
+
+**It is still not what this change is.** Stating why, so the next pass does not
+have to rediscover it:
 
 * Rootless Xwayland is not a flag on the same server. It requires a real X11
   window manager **on the compositor side**: Xwayland `-rootless` emits
@@ -239,3 +277,22 @@ So: **recommended, as its own piece of work, with `wsysd` owning window
 management — which is where a Plan 9-shaped system wants it.** In the
 meantime the namespace has a window manager that works, costs 0.5 MiB in
 Debian, and can be deleted in one line when the compositor takes the job over.
+
+**What it would need from `user/wsyswl.ad`**, named here rather than started,
+so whoever picks it up has the list and the merge stays clean:
+
+1. `xwayland_shell_v1` (and `xwayland_surface_v1`), so Xwayland `-rootless`
+   can associate a `wl_surface` with an X window id. Today `wsyswl` binds
+   `xdg_shell` only.
+2. An **X11 window manager inside the compositor**, holding
+   `SubstructureRedirect` on the X root: `MapRequest`/`ConfigureRequest`,
+   `WM_PROTOCOLS`/`WM_DELETE_WINDOW`, `WM_TRANSIENT_FOR`, `_NET_WM_STATE`,
+   override-redirect placement for menus, and selection ownership for
+   `CLIPBOARD`/`PRIMARY` and XDND. This is the large piece, and it is why the
+   window manager currently lives inside the namespace instead.
+3. Per-toplevel limits instead of per-connection ones — the whole point.
+4. `wsysd` already places, stacks and decorates; what it would need is that
+   these X toplevels arrive as ordinary windows, which is the shape it has.
+
+Nothing in this change has to be undone for any of it: a rootless session
+simply sets `HAMNIX_X11_WM=none`, which is one `case` arm that already exists.

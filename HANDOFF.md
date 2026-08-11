@@ -83,7 +83,12 @@ same failure this project exists to beat.
   and the **system D-Bus** comes up and answers `GetId`. The session
   no longer starts matchbox; it starts `jwm` (see the table above and
   `docs/linux_window_manager.md`), under which `Sign in to Steam` is
-  `IsViewable` at `700x440+290+180` **and** in `_NET_CLIENT_LIST`.
+  `IsViewable` at `700x440+290+180` **and** in `_NET_CLIENT_LIST`. Both halves
+  were needed and neither was sufficient: the window has to be mapped *and*
+  the frames have to be delivered. With a window manager in the session the
+  same run reads `maps_high_water 31`, five above Steam's own 26 and twice the
+  old limit — and `windows_high_water 1`, which is the whole rootful-Xwayland
+  shared-fate problem stated as a number.
 * **(historical, kept for the shape)** It installs, brings up
   pressure-vessel, and Chromium loads to `SteamApp Init - Before Login`.
   What that is NOT, now measured rather than guessed (`docs/steam_namespace.md`
