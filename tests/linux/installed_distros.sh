@@ -75,6 +75,15 @@ echo '[idisk] u1001 debian status:' $status
 echo '[idisk] DONE'
 RC
 
+# The disk is assembled from build/image/root, and /etc/rc.distros -- which
+# is what defines the namespace templates -- is GENERATED into that root by
+# scripts/hamlinux_image.sh. Run against a stale root this gate fails nine
+# ways with `enter: not a namespace: alpine`, which reads exactly like the
+# feature being broken rather than the image being old. Build first.
+echo "[idisk] staging the image root (rc.distros is generated there)"
+HAMLINUX_JOBS="${HAMLINUX_JOBS:-4}" scripts/hamlinux_image.sh >"$WORK/image.log" 2>&1 || {
+    echo "FAIL image build"; tail -20 "$WORK/image.log"; exit 1; }
+
 echo "[idisk] building an installed disk with that rc"
 HAMLINUX_DISK_RC="$WORK/rc.boot" scripts/hamlinux_disk.sh \
     "$IMG/installedns.img" 3G >"$WORK/build.log" 2>&1 || {
