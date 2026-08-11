@@ -22,7 +22,7 @@ rather than argued:
 | Boot | Linux kernel → `user/linuxinit.ad` (the Adder PID 1) → namespace via `sys_bind` → `hamsh` → the rc scripts |
 | Installed boot | UEFI → a unified kernel image on an ESP → PID 1 → `bind '#sysroot' /` → the real ext4 root. Files written on one boot are there on the next. |
 | Display | `/dev/fb` on fbdev AND on raw DRM/KMS, double-buffered with `MODE_PAGE_FLIP` — 481 flips, `stalled=0`. `flip` is a `/dev/fbctl` verb; double buffering arms lazily, so a program that never flips runs the old path untouched. |
-| Windows | `/dev/wsys`, the port of `devwsys.ad`, in shared memory. Both protocols: the v1 scene display list and the v2 blit surface. The screen size is published at `/dev/wsys/screen`. |
+| Windows | `/dev/wsys`, the port of `devwsys.ad`, in shared memory. Both protocols: the v1 scene display list and the v2 blit surface, plus the `'I'` named-image tier (a scene client can draw a real photograph without converting its window to a blit surface). The screen size is published at `/dev/wsys/screen`. |
 | Compositor | `user/wsysd.ad`. A 1724-op frame at 1280×800 costs **625 µs**, down from 5503; a pointer-only frame costs **5 µs**, down from 6543. Pixel-identical to the pre-optimisation code at three geometries. |
 | Input | every `/dev/input/event*`, decoded in the compositor, routed to the focused window in window-local coordinates |
 | Desktop | `hamdesktop` + `hampanelscene`, unmodified. Launch a terminal from the menu, type in it, get output. |
@@ -176,15 +176,48 @@ same failure this project exists to beat.
   Closing that needs a mapping per owner-uid or the table behind an RPC to
   wsysd — a different change, and the test asserts the hole so it cannot be
   forgotten.
-* **`hamscene_image` renders a hole, on every image in the system.**
-  `/dev/wsys/<wid>/draw/ctl` has no `'I'` verb — `linux-wsys.c` ported
-  `'B'`/`'D'`/`'C'` and dropped devwsys's named-image upload, and
-  `lib/hamui_host.ad` answered an unknown image name with a silent
-  `slot < 0 → return 1`. So `hamimgscene`, `hamvideocore`'s `"frame"` and
-  `lib/hamsdl` have all been drawing nothing and reporting success. The device
-  now answers ENOSYS by name (distinct from EINVAL for real garbage) and
-  `hamimgscene` prints the whole explanation, but **the verb is not
-  implemented** — no image draws.
+* **~~`hamscene_image` renders a hole, on every image in the system.`~~ FIXED.**
+  The `'I'` named-image upload is ported: devwsys's #128 scene image tier — 16
+  slots, 256×256, 31-byte names, keyed by (owning wid, name), replace on
+  re-upload, **refusal not eviction** at the cap — in a fourth shared segment
+  `<seg>.img`, 0666 and derived from the segment `shm_attach` actually joined.
+  It is on the world-writable side because the verb's gate is owner-or-host
+  (the rule THE SPLIT states), and the case against is argued in the file
+  rather than skipped. Three refusals answer three errnos where devwsys folds
+  them into one: EMSGSIZE, ENOSPC, EINVAL.
+  The compositor is a user process here, not the kernel, so the store is read
+  back through files — `<wid>/draw/images` and `<wid>/draw/image/<name>` — and
+  cached on a per-image SERIAL, so a video re-uploading 256 KiB a tick costs
+  one small text read per unchanged frame. `<wid>/ctl` grows a twelfth field,
+  `image_gen`, because a re-uploaded image leaves the scene text byte-identical
+  and a compositor watching `scene_gen` alone freezes the picture on frame one.
+  `lib/hamui_host.ad`'s silent `slot < 0 → return 1` now records the NAME and
+  returns *not handled*; `user/wsysd.ad` reports one line per (window, name),
+  once ever.
+  **Two more defects fell out of it, both of the same silent-success family:**
+  opening `draw/ctl` for writing used to flip the window to protocol 2, so an
+  `'I'`-only scene client got a blank backbuffer painted over a correct scene
+  (the opt-in is now the first `'B'`/`'D'`); and `background`/`pin` was never
+  ported, so `hamdesktop`'s full-screen backdrop kept `z 6` and was painted
+  OVER every ordinary client window — a desktop with wallpaper, icons, a panel
+  and not one application window, with every return code 0.
+  **Measured**: `tests/linux/wsys_image.sh` (8 PASS) reads the framebuffer and
+  checks the pattern at natural size and through the scaler, because "every
+  layer returned success" is exactly what this defect looked like for the whole
+  port. All three callers verified —
+  `docs/screenshots/linux/wsys-image-on-desktop.png` (hamimgscene composited
+  over hamdesktop's backdrop), `wsys-image-video.png` (hamvideocore's `"frame"`,
+  advancing), `wsys-image-hamsdl.png` (hamGame presents its ENTIRE surface as
+  one named image, so for a hamSDL game the missing verb was the whole frame).
+  Regressions re-run: `wsys_uidgate` PASS, `wsys_bypass` PASS, `wsyswl_stall`
+  11, `wsyswl_shared_fate` 18, `x11_geom_probe` 9.
+  **What is NOT settled**: launched from the VM's root console with
+  `hamimgscene &`, the window does not appear on the booted desktop, though the
+  identical composition works offscreen with the same three programs. Not
+  diagnosed; the leading suspicion is that a backgrounded `hamsh` job does not
+  share `/srv` with the session, which would give it a private window system —
+  the failure shape `shm_attach` already names. It is a launch/namespace
+  question, not an image one.
 * **The 4-stream software mixer is not ported.** An ALSA hardware substream
   has one writer, so `stream`/`mixplay` return `-EINVAL` and
   `user/audiolife.ad` will not do here what it does on Hamnix. The status
@@ -374,7 +407,8 @@ the shape is more reusable than the fix. They are NOT open work.
   `build/distromenu/shot-launched.png` is `uxterm`, launched from the DE
   application menu, running in the Debian namespace on the Hamnix desktop.
   `docs/linux_distro_namespaces.md` §8.5.
-* **(same defect as the `hamscene_image` entry above, kept for the detail)**
+* **(FIXED — same defect as the `hamscene_image` entry above; kept for the
+  detail of how it was found)**
   The `/dev/wsys/<wid>/draw/ctl` `'I'` verb was never ported, so
   `hamscene_image` renders nothing on this line.** Found by tracing
   `hamimgscene`, which was exiting 2 in total silence. `user/linux-wsys.c`
@@ -386,7 +420,9 @@ the shape is more reusable than the fix. They are NOT open work.
   answers **ENOSYS by name** — distinct from the `EINVAL` it gives real
   garbage — and `hamimgscene` prints the whole explanation and exits 2.
   Closing it needs a named-image table in the shared segment plus `wsysd`
-  registering from it; not attempted here.
+  registering from it; not attempted here. **That is exactly what was then
+  done** — see the entry above for the shape it took and for the two further
+  defects the end-to-end measurement turned up.
 
 ### What answered the original open questions
 
