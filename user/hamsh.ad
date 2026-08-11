@@ -8997,6 +8997,11 @@ def _flag_word(s: Ptr[uint8]) -> int32:
     return -1
 
 
+# Count of bind failures since ns_bind_fails was last reset. This exists for
+# ONE caller -- apply_ns_template -- and the reason is in the long note there.
+ns_bind_fails: int32 = 0
+
+
 def builtin_bind(argc: int32) -> int32:
     # bind [-b|-a] SRC DST — graft SRC onto the lookup name DST in the
     # ambient namespace. Source-first order matches BOTH Linux's
@@ -9038,6 +9043,7 @@ def builtin_bind(argc: int32) -> int32:
                          cast[Ptr[char]](src_p), flag)
     if rc < 0:
         errstr_pull_kernel()
+        ns_bind_fails = ns_bind_fails + 1
         return 1
     return 0
 
@@ -12214,7 +12220,9 @@ def exec_enter(node: int32) -> int32:
     if pid == 0:
         # child — apply the captured namespace template, run body.
         _ns_child_ensure_stdio(clean)
-        apply_ns_template(nsval)
+        if apply_ns_template(nsval) == 0:
+            _ns_apply_failed()
+            sys_exit(126)
         ex: int32 = exec_block(nd_b[nu])
         # The child's exit status IS the body's last command status
         # (eval_status) — so `enter s { false }` propagates nonzero.
@@ -12267,7 +12275,9 @@ def exec_spawn(node: int32) -> int32:
         # The detached flag controls reaping, not the namespace base —
         # the stdio-ensure clean argument tracks the namespace base.
         _ns_child_ensure_stdio(clean)
-        apply_ns_template(nsval)
+        if apply_ns_template(nsval) == 0:
+            _ns_apply_failed()
+            sys_exit(126)
         ex: int32 = exec_block(nd_b[nu])
         # The child's exit status IS the body's last command status
         # (eval_status) — so `enter s { false }` propagates nonzero.
@@ -12293,15 +12303,43 @@ def exec_spawn(node: int32) -> int32:
     return EX_NORMAL
 
 
-def apply_ns_template(nsval: int32):
+# 126 is the shell convention for "found it, could not run it", which is
+# exactly the situation: the namespace exists, we could not enter it.
+def _ns_apply_failed():
+    write_str(2, "hamsh: namespace not entered -- a bind in the template failed, so the body was NOT run.\n")
+    write_str(2, "hamsh: bind performs a real mount(2) and needs CAP_SYS_ADMIN; a desktop session runs as uid 1001.\n")
+
+
+def apply_ns_template(nsval: int32) -> int32:
     # A namespace value (VT_NS) carries a captured ND_NS body node in
     # its payload. Applying it = running that body's bind/mount
     # statements in the current (already-rfork'd) namespace.
+    #
+    # RETURNS 1 only if EVERY bind in the template landed. This used to
+    # return nothing and the caller used to ignore it, and that combination
+    # was the most user-visible bug on this line:
+    #
+    #   `enter debian { sh }` from a desktop terminal runs as uid 1001.
+    #   bind performs a real mount(2), mount(2) needs CAP_SYS_ADMIN, so all
+    #   five binds fail with EPERM. The template prints five errors -- and
+    #   then the body RAN ANYWAY, in the NATIVE root, and `enter` exited 0.
+    #
+    # So `enter debian { steam }` from the desktop silently ran a Hamnix
+    # binary, or nothing, and reported success. Running a body in the wrong
+    # root is worse than not running it: the whole contract of `enter` is
+    # "this executes over there", and a caller has no way to tell that it
+    # did not. A template that did not fully apply is not that namespace,
+    # so the body must not run.
     if val_type[cast[uint64](nsval)] != VT_NS:
-        return
+        return 0
     bodynode: int32 = cast[int32](val_pay[cast[uint64](nsval)])
-    if bodynode != 0:
-        exec_block(bodynode)
+    if bodynode == 0:
+        return 1
+    ns_bind_fails = 0
+    exec_block(bodynode)
+    if ns_bind_fails != 0:
+        return 0
+    return 1
 
 
 def exec_assign(node: int32) -> int32:
@@ -12765,7 +12803,9 @@ def _exec_with_enter(node: int32) -> int32:
     pid: int32 = sys_rfork(flags)
     if pid == 0:
         _ns_child_ensure_stdio(clean)
-        apply_ns_template(nsval)
+        if apply_ns_template(nsval) == 0:
+            _ns_apply_failed()
+            sys_exit(126)
         ex: int32 = exec_block(nd_c[nu])
         st: uint64 = cast[uint64](eval_status)
         if ex == EX_ERROR:
@@ -13816,7 +13856,9 @@ def _svc_spawn_into_ns(idx: int32) -> int32:
         # Child: clean namespace shape, apply template, switch uid
         # (Phase 11), exec the binary via spawn(), propagate exit.
         _ns_child_ensure_stdio(clean)
-        apply_ns_template(nsval)
+        if apply_ns_template(nsval) == 0:
+            _ns_apply_failed()
+            sys_exit(126)
         if target_uid != 1:
             rs2: int32 = sys_setuid(target_uid)
             if rs2 < 0:
