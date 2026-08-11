@@ -532,6 +532,17 @@ same failure this project exists to beat.
   over hamdesktop's backdrop), `wsys-image-video.png` (hamvideocore's `"frame"`,
   advancing), `wsys-image-hamsdl.png` (hamGame presents its ENTIRE surface as
   one named image, so for a hamSDL game the missing verb was the whole frame).
+  **The first version of that first screenshot carried a defect of its own and
+  the machine owner found it**: hamimgscene's window was a black rectangle
+  roughly twice the size of the picture in it, because the client never wrote a
+  `geometry` verb and took `win_alloc`'s 640x480 default while painting 320x260
+  — and `wsysd` clears a window to opaque black and blits the whole `w*h` rect,
+  so the difference reached the screen as black. Fixed in the client (a window
+  is as big as what is painted, and it is the client that says so; devwsys's own
+  default for a window that never asks is 320x240, not 640x480): black pixels
+  inside the window box **223883 → 0**, same run, before and after. The
+  screenshot is now the fixed one. **And the class is now gated rather than
+  eyeballed** — see THE COVERAGE GUARD below.
   Regressions re-run: `wsys_uidgate` PASS, `wsys_bypass` PASS, `wsyswl_stall`
   11, `wsyswl_shared_fate` 18, `x11_geom_probe` 9.
   **What is NOT settled**: launched from the VM's root console with
@@ -541,6 +552,61 @@ same failure this project exists to beat.
   share `/srv` with the session, which would give it a private window system —
   the failure shape `shm_attach` already names. It is a launch/namespace
   question, not an image one.
+
+#### THE COVERAGE GUARD, and the three clients still waiting on a verb
+
+A window whose scene does not cover it reaches the screen as a black
+rectangle: `user/wsysd.ad` clears a window's colour image to opaque black
+before rasterizing and then blits the whole `w*h` rect. The machine owner
+found **two** of these by looking at screenshots, weeks apart, and that is the
+detection mechanism the tree had. Every gate passed both times — the display
+lists were right, every op drew, every layer returned success.
+
+**The sweep found the class has exactly two causes, and only one of them is a
+client bug.**
+
+* **A client that never states its size** — `user/hamimgscene.ad`, and it was
+  the only one. Every other native scene client either writes a `geometry`
+  verb of its own or gets one from `lib/hamui.ad`'s `_h_win_setup`, which sets
+  `640x480` and whose root widget fills exactly that. `user/hamvideoselftest.ad`
+  creates a window and never paints, but it runs headless as `/init` with no
+  compositor and is correct as it stands. Fixed in the client, because a
+  window's size is the client's to state; that is the Plan 9 shape and
+  devwsys's, which keeps `wsys_win_geo_init` per window and answers
+  `WSYS_SCENE_DEFAULT_W/H` = **320x240** — not 640x480 — for one that never
+  said.
+* **A client whose window is DELIBERATELY larger than its paint, asking the
+  compositor for alpha-keyed present — and this port never implemented the
+  verb.** `sys/src/9/port/devwsys.ad:8085` documents `keyed 1` as existing for
+  exactly this, and names the client: *"a decorate-0 client (e.g.
+  hampanelscene) whose window rect is LARGER than the pixels it actually
+  paints — a panel that GROWS full-width to host an Applications dropdown,
+  then paints only the bar + the menu card and leaves the rest of the grown
+  band UNPAINTED"*. `user/hampanelscene.ad` already writes `keyed 1` on every
+  panel window it allocates, and says why in a comment quoting the same
+  user-reported symptom. **`user/linux-wsys.c` has no `keyed` and no `blend`,
+  an unknown ctl verb is ignored, and so the fix regressed silently in the
+  port** — the same shape and the same file as `background`/`pin`, which
+  ea23c834 found the same way. Three clients are waiting on it:
+  `hampanelscene` (`keyed`, the Applications dropdown — the black band in
+  `docs/screenshots/linux/distro-menu-debian.png`), `hamappmenu` (`keyed`, the
+  hover fly-out band), `hamshotui` (`blend`, the screenshot dim scrim, which
+  is currently an opaque black rectangle over the desktop it is meant to dim).
+  **This one is server-side and is NOT fixed here** — see the routing note.
+
+**And it is a gate now.** `lib/hamui_host.ad` — the rasterizer wsysd
+composites every window with — unions each painting op's destination rect into
+a per-row interval and answers `hamui_host_uncovered_rows()` /
+`_covered_w()` / `_covered_h()`. Like the image-miss table beside it the module
+is pure and cannot print: it records, the caller reports.
+`user/scene_raster_host.ad` takes an optional `[w h]` and prints the verdict
+naming both sizes. `tests/linux/wsys_cover.sh` (7 PASS, host-only, seconds)
+carries a positive control that a full-window fill and a full-window roundrect
+are **not** accused, both real defect shapes reproduced with their exact
+numbers, and the real panel's own `--scene-dump` asserted to cover its resting
+bar. The measure is a per-row **union** and therefore conservative: it never
+accuses a scene that is fine, and an interior hole with paint either side of
+it on one row is not reported. Said out loud rather than left to be found.
 * The run-sweep score is **297 healthy / 328 runnable**, re-measured end to
   end (`/home/david/.hamnix-build/sweep-a74b5560/{BEFORE,AFTER}/`), and the
   interesting part is the run BEFORE the fixes: **265 / 329, row for row
