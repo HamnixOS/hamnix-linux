@@ -134,16 +134,36 @@ def build_proc_path(name: Ptr[uint8]):
     svc_proc_path[i] = 0
 
 
-def do_status(name: Ptr[uint8]):
+# Explain, ONCE, why the supervisor cannot be reached, and where the
+# working path is. Written wherever /proc/svc or /proc/svc/ctl is missing.
+def explain_no_supervisor():
+    write_str(2, "service: FATAL: /proc/svc does not exist, so the supervisor cannot be reached and NOTHING was done.\n")
+    write_str(2, "service: /proc/svc is a Hamnix-kernel mirror published by SYS_SVC_PUBLISH. On this line /proc is the Linux kernel's own procfs, that syscall has no implementation (it returns -1), and the service registry lives entirely inside hamsh, which is PID 1.\n")
+    write_str(2, "service: the working path is the hamsh builtin of the same name -- `service <name> start|stop|restart|status` typed at the shell prompt dispatches inside PID 1, which IS the supervisor, and does not go through this binary at all.\n")
+
+
+def do_status(name: Ptr[uint8]) -> int32:
     # `service status` (no name) -> whole list; `service <name> status`
     # -> single entry. Both render the kernel mirror at /proc/svc.
+    #
+    # IT USED TO PRINT THE FAILURE AND EXIT 0. cat_path returning -1 was
+    # reported on stderr and then discarded: do_status returned void and
+    # every caller in main() did a bare `return 0`. So `service status` on
+    # this port listed no services, said it could not, and told its caller
+    # it had succeeded -- a script driving it (`service foo status ||
+    # start_it`) saw a healthy system with zero services running. That is
+    # the failure NORTH_STAR.md names, not a cosmetic one, so the status is
+    # now the return value and main() propagates it.
     if cast[uint64](name) == 0:
         if cat_path("/proc/svc") < 0:
-            write_str(2, "service: /proc/svc unavailable\n")
-        return
+            explain_no_supervisor()
+            return 1
+        return 0
     build_proc_path(name)
     if cat_path(cast[Ptr[char]](&svc_proc_path[0])) < 0:
-        write_str(2, "service: /proc/svc unavailable\n")
+        explain_no_supervisor()
+        return 1
+    return 0
 
 
 svc_ctl_verb_buf: Array[128, uint8]
@@ -156,7 +176,7 @@ def do_ctl(verb: int32, name: Ptr[uint8], action: Ptr[uint8]) -> int32:
     # ctl file expects ("start", "stop", "restart", "enable", "disable").
     fd: int32 = sys_open_write("/proc/svc/ctl")
     if fd < 0:
-        write_str(2, "service: cannot open /proc/svc/ctl\n")
+        explain_no_supervisor()
         return 1
     pos: uint64 = 0
     ai: uint64 = 0
@@ -200,26 +220,21 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     #   service <name> <verb>         -> control / status one
     #   service <name>                -> status one
     if argc < 2:
-        do_status(cast[Ptr[uint8]](0))
-        return 0
+        return do_status(cast[Ptr[uint8]](0))
     a1: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
     if cstr_eq(a1, "status") != 0 or cstr_eq(a1, "list") != 0:
         # `service status [<name>]`
         if argc >= 3:
-            do_status(cast[Ptr[uint8]](argv[2]))
-        else:
-            do_status(cast[Ptr[uint8]](0))
-        return 0
+            return do_status(cast[Ptr[uint8]](argv[2]))
+        return do_status(cast[Ptr[uint8]](0))
     # First arg is a service name.
     name: Ptr[uint8] = a1
     if argc < 3:
         # `service <name>` with no verb -> status of that service.
-        do_status(name)
-        return 0
+        return do_status(name)
     verb: Ptr[uint8] = cast[Ptr[uint8]](argv[2])
     if cstr_eq(verb, "status") != 0:
-        do_status(name)
-        return 0
+        return do_status(name)
     if cstr_eq(verb, "start") != 0:
         return do_ctl(CTL_START, name, "start")
     if cstr_eq(verb, "stop") != 0:

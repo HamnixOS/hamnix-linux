@@ -228,35 +228,66 @@ def _spawn_hamlock():
           -2, -2, cast[Ptr[uint64]](0))
 
 
-def _logout():
+# Log Out / Power Off / Restart: ANNOUNCE AFTER THE WRITE, NOT BEFORE, AND
+# SAY SO WHEN IT DOES NOT LAND.
+#
+# Both of these opened a control file, wrote to it only `if fd >= 0`, and
+# said nothing at all when the open failed -- and _do_action() then called
+# sys_exit(0) and dismissed the modal regardless. So on a system without
+# /proc/svc/ctl (a Hamnix-kernel node; this port's /proc is Linux's own) or
+# without /dev/reboot, clicking "Log Out" printed "logout requested", closed
+# the dialog, changed nothing, and reported success -- and clicking
+# "Power Off" did not even print that much. A power menu that dismisses
+# itself without powering anything off is the single most convincing form of
+# the success-shaped answer this project exists to eliminate: the user walks
+# away from a machine they believe is off.
+#
+# Both now return 0 on success and 1 on failure, name the file that was not
+# there, and _do_action() exits with that status. user/halt.ad has always
+# done exactly this ("halt: cannot open /dev/reboot", exit 1); this is that
+# same discipline applied to the button that calls the same device.
+def _logout() -> int32:
     # Drop the graphical session: runlevel 5 (graphical) -> 3 (multi-user).
     # PID 1's supervisor drains the verb on its next idle tick.
-    _writeall(1, cast[Ptr[uint8]]("[hamsessui] logout requested (runlevel 3)\n"))
     fd: int32 = sys_open_write(cast[Ptr[char]]("/proc/svc/ctl"))
-    if fd >= 0:
-        _writeall(fd, cast[Ptr[uint8]]("runlevel 3\n"))
-        sys_close(fd)
+    if fd < 0:
+        _writeall(2, cast[Ptr[uint8]]("[hamsessui] FATAL: cannot open /proc/svc/ctl -- the runlevel request was NOT made and you are still logged in. /proc/svc is a Hamnix-kernel mirror; this kernel has no such node, so the supervisor cannot be reached from outside PID 1.\n"))
+        return 1
+    _writeall(fd, cast[Ptr[uint8]]("runlevel 3\n"))
+    sys_close(fd)
+    _writeall(1, cast[Ptr[uint8]]("[hamsessui] logout requested (runlevel 3)\n"))
+    return 0
 
 
-def _power(verb: Ptr[uint8]):
+def _power(verb: Ptr[uint8]) -> int32:
     fd: int32 = sys_open(cast[Ptr[char]]("/dev/reboot"))
-    if fd >= 0:
-        _writeall(fd, verb)
-        sys_close(fd)
+    if fd < 0:
+        _writeall(2, cast[Ptr[uint8]]("[hamsessui] FATAL: cannot open /dev/reboot -- nothing was powered off or restarted. THE MACHINE IS STILL RUNNING.\n"))
+        return 1
+    _writeall(fd, verb)
+    sys_close(fd)
+    # Reaching here at all means the write did not take: a successful
+    # poweroff/reboot never returns. Same reasoning as user/halt.ad.
+    _writeall(2, cast[Ptr[uint8]]("[hamsessui] FATAL: wrote to /dev/reboot and the machine is still here -- the power verb did not take.\n"))
+    return 1
 
 
 # Perform row `r`'s action, then dismiss the modal (process exits).
 def _do_action(r: int64):
+    st: int32 = 0
     if r == 0:
         _spawn_hamlock()
     elif r == 1:
-        _logout()
+        st = _logout()
     elif r == 2:
-        _power(cast[Ptr[uint8]]("poweroff\n"))
+        st = _power(cast[Ptr[uint8]]("poweroff\n"))
     elif r == 3:
-        _power(cast[Ptr[uint8]]("reboot\n"))
-    # All four actions dismiss the dialog.
-    sys_exit(0)
+        st = _power(cast[Ptr[uint8]]("reboot\n"))
+    # All four actions dismiss the dialog — but the EXIT STATUS now carries
+    # whether the action happened, so a session script that spawns this
+    # dialog can tell "the user picked Power Off and it worked" from "the
+    # user picked Power Off and nothing happened".
+    sys_exit(cast[uint64](st))
 
 
 # Parse "m <x> <y> <buttons> ..." → 1 + fills bx/by/bbtn; else 0.

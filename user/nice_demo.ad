@@ -13,10 +13,28 @@
 # test_sched_fair.sh boots this via hamsh, captures both "[nice] hi
 # iters=" / "[nice] lo iters=" lines, and asserts hi > lo by a clear
 # margin (the end-to-end CPU-share proof).
+#
+# IT USED TO EXIT 0 WITHOUT KNOWING ANYTHING. The parent spawned both hogs,
+# printed "both hogs spawned", and returned immediately — deliberately, on
+# the theory that waiting would steal CPU from the tasks under test. That
+# theory is wrong (a task blocked in waitpid is off the runqueue and costs
+# nothing) and the cost of it was real: this program reported success
+# whether the hogs ran, failed to exec, or — as they in fact did — ran at
+# the wrong priority entirely. Its exit status carried no information about
+# the experiment it exists to run, which is the same success-shaped answer
+# HANDOFF.md §0 catalogues.
+#
+# It now waits for both and propagates. nice_hi is waited on FIRST because
+# its failure is the interesting one and it fails immediately: it refuses to
+# start unless it really reached nice -20, which needs CAP_SYS_NICE. If the
+# high-priority half could not get its priority there is no contrast to
+# measure, so the demo says so and exits non-zero rather than letting the
+# low half run a lone six-second window and calling that a result.
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_exit(code: uint64)
 extern def sys_get_jiffies() -> uint64
+extern def sys_waitpid(pid: int32) -> int64
 
 
 lo_argv: Array[2, uint64]
@@ -60,8 +78,21 @@ def main() -> int32:
         return 1
 
     write_str(1, "[nice] demo: both hogs spawned; they share one CPU\n")
-    # The parent exits; the two hogs run their bounded windows and print
-    # their own iter counts. Exiting (rather than spinning) keeps the
-    # parent from stealing CPU share from the very tasks under test.
+
+    # Wait for the high half first: it exits 1 straight away if it could
+    # not actually reach nice -20, and that verdict is the whole point.
+    # Blocking here costs the hogs nothing — a waiting task is off the
+    # runqueue.
+    rhi: int64 = sys_waitpid(chi)
+    if rhi != 0:
+        write_str(2, "[nice] FAIL: /bin/nice_hi exited non-zero. Either it is not installed at that path (spawn forks first, so a failed exec is not visible until the wait) or it refused to run because it could not reach nice -20, which needs CAP_SYS_NICE. Its own message, if any, is above. Either way there is no high-priority half, so no CPU-share contrast exists and the low half's iteration count would prove nothing.\n")
+        sys_exit(1)
+        return 1
+    rlo: int64 = sys_waitpid(clo)
+    if rlo != 0:
+        write_str(2, "[nice] FAIL: /bin/nice_lo exited non-zero -- not installed, or it could not reach nice +19. Its own message, if any, is above.\n")
+        sys_exit(1)
+        return 1
+    write_str(1, "[nice] demo: both hogs completed their windows\n")
     sys_exit(0)
     return 0

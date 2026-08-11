@@ -8,12 +8,20 @@
 # user/nice_demo.ad; sharing one CPU it should complete FEWER iterations
 # in the window because the weighted-fair scheduler gives it a smaller
 # CPU share than its nice -20 sibling.
+#
+# It had the same defect as its sibling: the "pri 19" write to /proc/self/ctl
+# could not land on a Linux kernel (no such node), the failure was swallowed
+# by `if ctl_fd >= 0:`, and the next line announced the renice regardless.
+# See lib/hamnice.ad for the whole story and for the ask-then-VERIFY that
+# replaces it. RAISING nice is unprivileged, so unlike nice_hi this one is
+# expected to succeed anywhere — which is exactly why it must still check
+# rather than assume the easy case.
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
-extern def sys_open_write(path: Ptr[char]) -> int32
-extern def sys_close(fd: int32) -> int32
 extern def sys_get_jiffies() -> uint64
 extern def sys_exit(code: uint64)
+
+from lib.hamnice import hamnice_set_or_fail
 
 
 WINDOW_JIFFIES: uint64 = 600
@@ -56,14 +64,12 @@ def write_u64(fd: int32, v: uint64):
 
 
 def main() -> int32:
-    # F2 #447: re-nice to +19 via /proc/self/ctl, the Plan-9-shape
-    # control surface. (See user/nice_hi.ad for the matching write.)
-    ctl_fd: int32 = sys_open_write("/proc/self/ctl")
-    if ctl_fd >= 0:
-        verb: Ptr[uint8] = "pri 19\n"
-        sys_write(ctl_fd, verb, 7)
-        sys_close(ctl_fd)
-    write_str(1, "[nice] lo: re-niced to +19 via /proc/self/ctl, running CPU window\n")
+    # Re-nice to +19 and PROVE it before saying so. (See user/nice_hi.ad
+    # and lib/hamnice.ad.)
+    if hamnice_set_or_fail(19, cast[Ptr[uint8]]("[nice] lo")) == 0:
+        sys_exit(1)
+        return 1
+    write_str(1, "[nice] lo: re-niced to +19 (verified by getpriority), running CPU window\n")
 
     start: uint64 = sys_get_jiffies()
     deadline: uint64 = start + WINDOW_JIFFIES

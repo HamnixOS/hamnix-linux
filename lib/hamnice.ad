@@ -1,0 +1,144 @@
+# lib/hamnice.ad
+#
+# SHARED "actually change my scheduling priority, then prove it" helper, and
+# the ONE place user/nice_hi.ad and user/nice_lo.ad are allowed to ask.
+#
+# WHY THIS EXISTS. Both fixtures opened /proc/self/ctl, wrote "pri <N>\n",
+# and — if the open failed — silently skipped the write and printed
+# "re-niced to <N> via /proc/self/ctl" anyway. /proc/self/ctl is a HAMNIX
+# KERNEL node; on this line /proc is Linux's own procfs and has no such file,
+# so the open ALWAYS failed and the announcement was ALWAYS false. Two hogs
+# that both ran at nice 0 then "proved" that nice -20 gets more CPU than
+# nice +19. The bug was not in the scheduler; it was a control write that
+# never happened being reported as one (HANDOFF.md §0).
+#
+# WHAT IT DOES NOW. Ask twice, then check:
+#
+#   1. /proc/self/ctl `pri <N>` — kept FIRST because it is the Plan-9-shape
+#      control surface and it is the working path on the Hamnix kernel. The
+#      rc scripts and the userland are supposed to say what they mean and not
+#      know which kernel is underneath (NORTH_STAR.md, "the shape").
+#   2. setpriority(2) — the same act through the kernel that is actually
+#      underneath here. glibc is linked on this lane, so this is a plain
+#      extern, the way user/wsysd.ad externs getenv().
+#   3. getpriority(2) — READ IT BACK. This is the part that was missing.
+#
+# THE VERIFY IS THE POINT, NOT THE FALLBACK. Lowering nice below 0 needs
+# CAP_SYS_NICE (or RLIMIT_NICE headroom), which an ordinary user does not
+# have and which a process inside an unprivileged user namespace does not
+# have either — `capable()`, not `ns_capable()`, is what can_nice() calls, so
+# being root in a nested userns buys nothing. setpriority() reports that
+# honestly with -1/EPERM, but the ONLY way to be sure the level took is to
+# read it. A caller that cannot get the level it asked for is told the level
+# it actually got, by name, and is expected to exit non-zero: a CPU-share
+# fixture running at the wrong priority does not produce a weak result, it
+# produces a meaningless one.
+#
+# getpriority(2)'s -1-is-ambiguous problem does not arise here, because we
+# never ask "did it error?" — we ask "is the level equal to the one I
+# requested?", and -1 is not equal to -20 or to +19.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def setpriority(which: int32, who: uint32, prio: int32) -> int32
+extern def getpriority(which: int32, who: uint32) -> int32
+
+HN_PRIO_PROCESS: int32 = 0
+
+hn_ctl_buf: Array[24, uint8]
+hn_num_buf: Array[24, uint8]
+
+
+def _hn_len(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def _hn_puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, _hn_len(s))
+
+
+# Render a SIGNED decimal into hn_num_buf and write it to fd. Nice levels are
+# -20..+19, so the sign matters and an unsigned renderer would print 4294967276.
+def _hn_putint(fd: int32, v: int32):
+    n: uint64 = 0
+    x: int32 = v
+    if x < 0:
+        hn_num_buf[0] = 45                       # '-'
+        n = 1
+        x = 0 - x
+    d: Array[12, uint8]
+    k: uint64 = 0
+    if x == 0:
+        d[0] = 48
+        k = 1
+    while x > 0:
+        d[k] = cast[uint8](48 + (x % 10))
+        x = x / 10
+        k = k + 1
+    i: uint64 = 0
+    while i < k:
+        hn_num_buf[n + i] = d[k - 1 - i]
+        i = i + 1
+    sys_write(fd, &hn_num_buf[0], n + k)
+
+
+# Attempt 1: the Plan-9 control file. Returns 1 if the write went out, 0 if
+# the file is not there. A 1 here is NOT proof the level changed — only
+# hamnice_verify() is.
+def _hn_try_ctl(prio: int32) -> int32:
+    fd: int32 = sys_open_write(cast[Ptr[char]]("/proc/self/ctl"))
+    if fd < 0:
+        return 0
+    pre: Ptr[uint8] = "pri "
+    p: uint64 = 0
+    while pre[p] != 0:
+        hn_ctl_buf[p] = pre[p]
+        p = p + 1
+    x: int32 = prio
+    if x < 0:
+        hn_ctl_buf[p] = 45                       # '-'
+        p = p + 1
+        x = 0 - x
+    d: Array[12, uint8]
+    k: uint64 = 0
+    if x == 0:
+        d[0] = 48
+        k = 1
+    while x > 0:
+        d[k] = cast[uint8](48 + (x % 10))
+        x = x / 10
+        k = k + 1
+    i: uint64 = 0
+    while i < k:
+        hn_ctl_buf[p + i] = d[k - 1 - i]
+        i = i + 1
+    p = p + k
+    hn_ctl_buf[p] = 10                           # '\n'
+    p = p + 1
+    sys_write(fd, &hn_ctl_buf[0], p)
+    sys_close(fd)
+    return 1
+
+
+# Set this task's nice level to `prio` and PROVE it. Returns 1 on success.
+# On failure it names `who`, prints what was asked and what the kernel
+# actually reports, and returns 0 — the caller's only correct response is to
+# exit non-zero. `who` MUST be a literal at the call site (a string literal
+# assigned into a global comes out NULL on this compiler).
+def hamnice_set_or_fail(prio: int32, who: Ptr[uint8]) -> int32:
+    _hn_try_ctl(prio)
+    setpriority(HN_PRIO_PROCESS, 0, prio)
+    got: int32 = getpriority(HN_PRIO_PROCESS, 0)
+    if got == prio:
+        return 1
+    _hn_puts(2, who)
+    _hn_puts(2, ": FATAL: asked for nice ")
+    _hn_putint(2, prio)
+    _hn_puts(2, ", still running at nice ")
+    _hn_putint(2, got)
+    _hn_puts(2, ". /proc/self/ctl is a Hamnix-kernel node and does not exist on Linux, and setpriority(2) was refused -- lowering nice needs CAP_SYS_NICE in the INITIAL user namespace, which an ordinary session (and a process inside an unprivileged userns) does not have. Refusing to run the CPU window: a priority fixture at the wrong priority measures nothing.\n")
+    return 0

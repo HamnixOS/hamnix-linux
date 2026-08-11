@@ -33,7 +33,9 @@
 #   RUNSWEEP_JOBS      parallel build jobs (default: HAMLINUX_JOBS, see
 #                      scripts/hamlinux_jobs.sh -- workers, not cores)
 #   RUNSWEEP_TIMEOUT   seconds for an ordinary program (default 5)
-#   RUNSWEEP_DTIMEOUT  seconds a daemon/GUI client is given to stay up (default 4)
+#   RUNSWEEP_DTIMEOUT  seconds a daemon/GUI client is given to stay up
+#                      (default 12; MUST exceed the DE's readiness handshakes
+#                      — see the note at DTMO below)
 #   RUNSWEEP_NOBUILD=1 reuse <outdir>/obj from a previous run
 #
 # Output:
@@ -51,7 +53,22 @@ OUT="$(mkdir -p "$OUT" && cd "$OUT" && pwd)"
 . "$(dirname "$0")/hamlinux_jobs.sh"
 JOBS="${RUNSWEEP_JOBS:-$HAMLINUX_JOBS}"
 TMO="${RUNSWEEP_TIMEOUT:-5}"
-DTMO="${RUNSWEEP_DTIMEOUT:-4}"
+# 12, NOT 4. A DE client does not fail the instant it cannot find the
+# compositor: lib/hamscreen.ad waits 100 x 100 ms for /dev/wsys/screen to be
+# published and lib/hamwid.ad waits 20 x 100 ms for /dev/wsys/self, because
+# rc.5's `sleep 1` is a guess a slow boot can outrun and a readiness
+# handshake is the correct answer to a startup race. At DTMO=4 the sweep
+# killed those clients MID-HANDSHAKE, before they could print the named
+# FATAL they were about to print, and then scored them UP_NO_WINDOW — "alive
+# at the timeout, owning no window", which reads as a client that came up
+# and did nothing. hamlock, hamtoast, hamshotui and hampanelscene were all
+# recorded that way while being, in fact, correct: run with 15 s each prints
+# "[hamlock]: FATAL: no screen geometry ..." and exits 1. A harness that
+# times out a program's error path and reports the silence as the program's
+# behaviour is making exactly the mistake this sweep exists to catch, so the
+# floor is now longer than the longest handshake in the tree (10 s) plus
+# room to print and exit.
+DTMO="${RUNSWEEP_DTIMEOUT:-12}"
 RECIPES="$PROJ_ROOT/tests/linux/runsweep_recipes.tsv"
 JAIL="$PROJ_ROOT/tests/linux/runsweep_jail.sh"
 
@@ -209,8 +226,23 @@ printf '#app\tclass\tbuild\tverdict\trc\tsecs\tout\terr\tchanged\tempty\twins\td
 
 # The programs whose CONTRACT is to say nothing and change nothing. Without
 # this list `true` is indistinguishable from a program that did not run.
+#
+# The bar for being on this list is that SILENCE IS THE CORRECT ANSWER, not
+# merely that the program happens to be quiet:
+#   true / false   their entire output is the exit status
+#   sync           its effect is on the block layer, not in the filesystem
+#   sleep          its whole job is to consume wall-clock time — and the
+#                  sweep records `secs`, so "slept" and "returned instantly"
+#                  are still distinguishable in the results (sleep 1 = 1.0)
+#   test           the exit status IS the answer; printing would be a bug
+#   pathchk        speaks only when an operand is BAD; a valid path is a
+#                  silent 0, which is the POSIX contract
+# Anything else that lands in SILENT_OK is a finding, not a false positive.
 EXPECT_SILENT="true
-sync"
+sync
+sleep
+test
+pathchk"
 
 run_one() {
     local app="$1"

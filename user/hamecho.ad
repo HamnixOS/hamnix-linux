@@ -35,6 +35,7 @@
 # kernel's SYS_WSYS_ALLOC is hostowner-only). The compositor hands us our
 # wid as argv[1] when it spawns us; standalone runs default to wid 1.
 
+from lib.hamwid import hamwid_self_or_fail
 from lib.hamui import (
     hamui_init, hamui_fixed, hamui_label, hamui_add, hamui_set_size,
     hamui_fixed_place, hamui_set_text, hamui_window_on, hamui_render
@@ -187,31 +188,18 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # renders as "<wid>\n" for the CALLING task ("0\n" if we own none).
     # argv[1] is still honoured as an explicit override for standalone
     # runs; a standalone run with neither falls back to wid 1.
-    wid: int32 = 1
-    sp: Ptr[uint8] = "/dev/wsys/self"
-    sfd: int32 = sys_open(cast[Ptr[char]](sp))
-    if sfd >= 0:
-        self_buf: Array[16, uint8]
-        sn: int64 = sys_read_nb(sfd, &self_buf[0], 16)
-        sys_close(sfd)
-        if sn > 0:
-            sv: int32 = 0
-            si: uint64 = 0
-            while si < cast[uint64](sn) and self_buf[si] >= 48 \
-                    and self_buf[si] <= 57:
-                sv = sv * 10 + cast[int32](self_buf[si]) - 48
-                si = si + 1
-            if sv >= 2:
-                wid = sv
-    if argc > 1:
-        ap: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
-        v: int32 = 0
-        i: uint64 = 0
-        while ap[i] >= 48 and ap[i] <= 57:
-            v = v * 10 + cast[int32](ap[i]) - 48
-            i = i + 1
-        if v >= 1:
-            wid = v
+    # THE WID IS HANDED TO US; IT IS NEVER GUESSED. This block used to open
+    # with `wid: int32 = 1` and override it only if /dev/wsys/self or argv
+    # answered. When neither did, the 1 stood — and user/linux-wsys.c seeds
+    # the segment with next_wid = 2 under the comment "0 invalid, 1 =
+    # foreground", so wid 1 is never a window. hamui_window_on() records the
+    # wid without checking and returns it, so the bind "succeeded", the v2
+    # protocol negotiated, the paint went nowhere and this program printed
+    # "ready" while owning nothing. lib/hamwid.ad now resolves the wid from
+    # /dev/wsys/self or argv AND confirms it exists, or fails by name.
+    wid: int32 = hamwid_self_or_fail(argc, argv, cast[Ptr[uint8]]("[hamecho]"))
+    if wid < 2:
+        return 1
 
     bound: int32 = hamui_window_on(root, wid)
     if bound < 0:

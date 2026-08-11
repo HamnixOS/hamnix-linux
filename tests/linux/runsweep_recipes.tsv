@@ -286,9 +286,9 @@ multiwintest	gui	-	-	opens two /dev/wsys windows from one pid and proves indepen
 mv	cmd	%F %NEW	-	copy SRC to DST then unlink SRC; simplest rename semantics, unbounded file size via buffered copy
 net9	lib	-	-	no main(); Plan-9 /net dial helper library wrapping tcp/udp/tls connect for other programs
 net9_host	hosttest	-	-	host harness proving unchanged http9/net9 code fetches a live web page via a host socket shim
-nice_demo	daemon	-	-	spawns nice_hi/nice_lo CPU-bound siblings and never waitpids them; runs as a scheduler-fairness demo
-nice_hi	cmd	-	-	re-nices itself to -20 then runs a fixed wall-clock CPU counting loop and prints iteration count
-nice_lo	cmd	-	-	re-nices itself to +19 then runs the same fixed wall-clock CPU counting loop and prints iterations
+nice_demo	cmd		-	spawns nice_hi/nice_lo CPU-bound siblings, WAITS for both, and exits non-zero if either could not reach its nice level; it is a bounded experiment, not a daemon
+nice_hi	cmd		-	re-nices itself to -20, VERIFIES the level with getpriority, then runs a fixed wall-clock CPU counting loop; refuses (exit 1) if it could not get -20, which needs CAP_SYS_NICE
+nice_lo	cmd		-	re-nices itself to +19, VERIFIES the level with getpriority, then runs the same fixed wall-clock CPU counting loop and prints iterations
 nl	filter	-	%F	number non-empty lines of stdin (GNU -b t default), right-justified 6-wide field plus TAB
 nproc	cmd	-	-	print the number of online CPUs, read from /proc/cpuinfo cpus_online field; falls back to 1
 nsbindprobe	cmd	-	-	binds /extbind_probe over /tmp in its own private namespace copy, prints a marker, exits
@@ -377,7 +377,7 @@ vk2d_host	hosttest	%NEW	-	host shim drawing every vk2d primitive into a 64x64 RG
 wakelat	hosttest		-	wakeup-latency reproducer; spawns wakelat_echo + wakelat_hog copies, measures preempt vs handoff wakeup distributions
 wakelat_echo	hosttest		-	responder half of the wakeup-latency reproducer; times its own service latency from a woken pipe read, no argv
 wakelat_hog	cmd		-	CPU hog with a throughput meter: fixed wall-clock window, syscall-free counting loop, prints "[wakelat] hog iters=N"
-watch	cmd	-n 1 /uptime	-	runs CMD twice with an N-second gap between runs; no -c colors, no -d diff, no terminal redraw loop
+watch	cmd	-n 1 /bin/uptime	-	runs CMD twice with an N-second gap between runs; no -c colors, no -d diff, no terminal redraw loop
 wc	filter		%F	reports "<lines> <words> <bytes>\n" for stdin; -l/-w/-c/-m select columns; reads stdin only, no file operands
 wget	net	http://example.com/	-	native HTTP client over the /net file tree; saves the body to the URL basename or -O FILE; needs real network
 whatis	cmd	ls	-	one-line description for a hardcoded set of common binary names; unknown names get coreutils' "nothing appropriate"

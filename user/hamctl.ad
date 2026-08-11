@@ -797,20 +797,33 @@ def _act_lock():
     _writeall(1, cast[Ptr[uint8]]("[hamctl] lock -> /bin/hamlock\n"))
 
 
+# THE CONFIRMATION LINE USED TO PRINT WHETHER OR NOT ANYTHING HAPPENED.
+# Both of these wrote to the control file only `if fd >= 0` and then printed
+# "[hamctl] logout -> runlevel 3" / "[hamctl] power -> /dev/reboot"
+# UNCONDITIONALLY — including on the path where the open had just failed and
+# nothing at all had been written. On this port /proc/svc/ctl does not exist
+# (it is a Hamnix-kernel node) so the logout line was always a false report.
+# The message now sits after the write, and the failure gets named instead.
+# See user/halt.ad, which has always done this correctly for the same device.
 def _act_logout():
     fd: int32 = sys_open_write(cast[Ptr[char]]("/proc/svc/ctl"))
-    if fd >= 0:
-        _writeall(fd, cast[Ptr[uint8]]("runlevel 3\n"))
-        sys_close(fd)
+    if fd < 0:
+        _writeall(2, cast[Ptr[uint8]]("[hamctl] FATAL: cannot open /proc/svc/ctl -- no runlevel change was requested and the session is untouched.\n"))
+        return
+    _writeall(fd, cast[Ptr[uint8]]("runlevel 3\n"))
+    sys_close(fd)
     _writeall(1, cast[Ptr[uint8]]("[hamctl] logout -> runlevel 3\n"))
 
 
 def _act_power(verb: Ptr[uint8]):
     fd: int32 = sys_open(cast[Ptr[char]]("/dev/reboot"))
-    if fd >= 0:
-        _writeall(fd, verb)
-        sys_close(fd)
-    _writeall(1, cast[Ptr[uint8]]("[hamctl] power -> /dev/reboot\n"))
+    if fd < 0:
+        _writeall(2, cast[Ptr[uint8]]("[hamctl] FATAL: cannot open /dev/reboot -- nothing was powered off or restarted. THE MACHINE IS STILL RUNNING.\n"))
+        return
+    _writeall(fd, verb)
+    sys_close(fd)
+    # A successful power verb never returns, so getting here is a failure.
+    _writeall(2, cast[Ptr[uint8]]("[hamctl] FATAL: wrote to /dev/reboot and the machine is still here -- the power verb did not take.\n"))
 
 
 # ---- network read-out (SYS_NETCFG GET) + REAL DNS sink (SET_DNS) ---------

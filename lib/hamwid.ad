@@ -1,0 +1,186 @@
+# lib/hamwid.ad
+#
+# SHARED "which window am I?" resolver, and the ONE place a compositor-spawned
+# OVERLAY client is allowed to ask.
+#
+# WHY THIS EXISTS. An overlay client -- the context menu, the OSD, the panel,
+# the tray, the rubber band, the resize grip, the run dialog, the window
+# cycler, the calendar popup, the notification toast, the bottom bar, the
+# terminal -- does NOT create its own top-level window. The compositor creates
+# the window first, stamps the child's pid against the fresh wid
+# (`hamwsys_alloc`, the hostowner-only `alloc <pid>` path), and only then
+# spawns the client into it. The client learns which wid it was handed by
+# reading /dev/wsys/self, or from argv[1] when the spawner passes it there.
+# It then binds with hamui_window_on(), which -- unlike hamui_window() --
+# deliberately does NOT allocate: an overlay that self-allocated would be a
+# second, unparented window and not the one the compositor is compositing.
+#
+# THE BUG THIS REPLACES. Every one of those sixteen clients opened with
+#
+#     wid: int32 = 1
+#
+# and then OVERRODE that value if /dev/wsys/self answered or argv carried a
+# number. When neither did, the 1 stood -- and 1 is not a window. user/
+# linux-wsys.c seeds the shared segment with `shm->next_wid = 2` under the
+# comment "0 invalid, 1 = foreground": no window is ever allocated wid 1, by
+# construction. hamui_window_on() does not check (it records root and wid and
+# returns the wid, which is >= 1, so it "succeeds"), and neither does
+# hamui_set_protocol_v2_dims(). So the client bound to a window that does not
+# exist, negotiated a protocol for it, painted into it, printed
+# "HAM<NAME> ready" on stdout and sat in its event loop for ever. Exit code:
+# still running. Windows owned: none. That is precisely the failure NORTH_STAR
+# names -- a gap answering something success-shaped instead of the truth --
+# and it is worse than a crash, because "ready" is what a supervisor greps for.
+#
+# THE FIX IS NOT A BETTER DEFAULT. There is no defensible default. A context
+# menu with no parent window, an OSD with nothing to overlay, a resize grip
+# with no window to resize -- none of these mean anything without the wid the
+# compositor was going to hand over. If nobody handed one over, the honest
+# answer is to say who we are, say that no window was given, and exit non-zero
+# so whatever spawned us learns it failed.
+#
+# AND THE ANSWER IS VERIFIED, NOT TRUSTED. /dev/wsys/self is authoritative --
+# snap_self() answers a wid only when a window in the shared segment carries
+# this task's pid or its parent's, so a non-empty answer is proof. argv[1] is
+# NOT: it is a number somebody typed. Both are therefore confirmed the same
+# way, by opening /dev/wsys/<wid>, which snap_dir() answers ENOENT for when
+# win_find() misses. One check, no trusted path.
+#
+# Compiler-quirk discipline: buffers are top-level BSS, never frame locals,
+# and `who` MUST be passed as a literal at the call site -- a string literal
+# assigned INTO a global array comes out NULL on this compiler.
+
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+hw_self_buf: Array[32, uint8]
+hw_path_buf: Array[32, uint8]
+hw_wait: Array[4, int32]
+
+# 20 tries x 100 ms = two seconds of grace. See hamwid_self: the stamp
+# happens a moment AFTER the spawn, so an empty answer on the first attempt
+# is a race, not a verdict. Two seconds is enormous next to the microseconds
+# the stamp actually takes, and short enough that a client with no compositor
+# at all reports the truth while someone is still watching the console.
+HW_TRIES: int32 = 20
+HW_WAIT_MS: int64 = 100
+
+
+# Parse a leading unsigned decimal out of `p`, stopping at the first byte
+# that is not a digit. Returns 0 when there is no digit at all -- which is
+# also what an EMPTY /dev/wsys/self must mean, and 0 is never a valid wid.
+def _hw_parse(p: Ptr[uint8], n: uint64) -> int32:
+    i: uint64 = 0
+    v: int32 = 0
+    got: int32 = 0
+    while i < n and p[i] >= 48 and p[i] <= 57:
+        v = v * 10 + cast[int32](p[i]) - 48
+        got = 1
+        i = i + 1
+    if got == 0:
+        return 0
+    return v
+
+
+# Does window `wid` actually exist? Opening /dev/wsys/<wid> is a directory
+# open that snap_dir() refuses with ENOENT unless win_find(wid) hits, so this
+# is the segment's own answer and not a second opinion.
+def hamwid_exists(wid: int32) -> int32:
+    if wid < 2:
+        return 0
+    pre: Ptr[uint8] = "/dev/wsys/"
+    i: uint64 = 0
+    while pre[i] != 0:
+        hw_path_buf[i] = pre[i]
+        i = i + 1
+    # Render wid as decimal, MSB first, into the tail of the path.
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = wid
+    while x > 0:
+        d[n] = cast[uint8](48 + (x % 10))
+        x = x / 10
+        n = n + 1
+    k: uint64 = 0
+    while k < n:
+        hw_path_buf[i + k] = d[n - 1 - k]
+        k = k + 1
+    hw_path_buf[i + n] = 0
+    fd: int32 = sys_open(cast[Ptr[char]](&hw_path_buf[0]))
+    if fd < 0:
+        return 0
+    sys_close(fd)
+    return 1
+
+
+# ONE attempt at resolving the wid.
+#
+# Order: /dev/wsys/self first because it is the authoritative source and needs
+# no cooperation from the spawner; argv[1] second, because a spawner that
+# passes the wid explicitly is overriding on purpose (that is the order every
+# one of these clients already used).
+def _hw_try(argc: int32, argv: Ptr[uint64]) -> int32:
+    wid: int32 = 0
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/self"))
+    if fd >= 0:
+        r: int64 = sys_read(fd, &hw_self_buf[0], 31)
+        sys_close(fd)
+        if r > 0:
+            wid = _hw_parse(&hw_self_buf[0], cast[uint64](r))
+    if argc > 1:
+        v: int32 = _hw_parse(cast[Ptr[uint8]](argv[1]), 20)
+        if v >= 2:
+            wid = v
+    if hamwid_exists(wid) == 0:
+        return 0
+    return wid
+
+
+# Learn the wid the compositor spawned us into. Returns a wid >= 2 that has
+# been CONFIRMED to exist, or 0 -- never a guess, never a default.
+#
+# THE RETRY IS NOT A FALLBACK, IT IS A HANDSHAKE. hamUId's
+# daemon_spawn_window_prog() spawns the child FIRST and only then calls
+# sys_wsys_alloc(pid) to stamp the fresh wid against it, so there is a real
+# window during which the child is running and /dev/wsys/self is still empty.
+# The old `wid = 1` default papered over that race by producing a wrong answer
+# instantly; refusing instantly would replace it with a wrong FAILURE, which
+# is better but still wrong. So we wait for the fact to appear -- the same
+# readiness handshake lib/hamscreen.ad performs for the screen geometry, and
+# for the same reason: waiting for a fact is not the same as inventing one.
+def hamwid_self(argc: int32, argv: Ptr[uint64]) -> int32:
+    t: int32 = 0
+    while t < HW_TRIES:
+        w: int32 = _hw_try(argc, argv)
+        if w >= 2:
+            return w
+        # nfds=0 is a plain timed wait, not a spin: what we are waiting for
+        # is another process.
+        sys_waitfds(&hw_wait[0], 0, HW_WAIT_MS)
+        t = t + 1
+    return 0
+
+
+# The whole failure protocol in one call, so no overlay client has to
+# reinvent it and none of them can quietly get it wrong. On success returns
+# the wid. On failure names the caller on fd 2 and returns 0; the caller's
+# only correct response is to stop with a non-zero exit.
+def hamwid_self_or_fail(argc: int32, argv: Ptr[uint64],
+                        who: Ptr[uint8]) -> int32:
+    wid: int32 = hamwid_self(argc, argv)
+    if wid >= 2:
+        return wid
+    k: uint64 = 0
+    while who[k] != 0:
+        k = k + 1
+    sys_write(2, who, k)
+    m: Ptr[uint8] = cast[Ptr[uint8]](
+        ": FATAL: no window. /dev/wsys/self is empty and argv carries no live wid, so nothing has created a window for this overlay to draw into. It does not allocate its own -- the compositor allocates it and spawns this program into it. Refusing to bind wid 1, which is the foreground placeholder and never a real window.\n")
+    j: uint64 = 0
+    while m[j] != 0:
+        j = j + 1
+    sys_write(2, m, j)
+    return 0

@@ -8,6 +8,27 @@
 # loop for a fixed WALL-CLOCK window measured in jiffies (100 Hz). When
 # the window closes it prints how many iterations it completed and exits.
 #
+# THE RENICE USED TO BE A CLAIM, NOT AN ACT (HANDOFF.md §0). /proc/self/ctl
+# is a HAMNIX KERNEL file. On this line /proc is the Linux kernel's own
+# procfs and there is no `ctl` node in it, so sys_open_write returned -1,
+# the whole write was skipped by `if ctl_fd >= 0:` — and the very next
+# statement printed "re-niced to -20 via /proc/self/ctl" and ran the loop at
+# whatever priority it already had. Both hogs then ran at nice 0, the
+# scheduler handed them an equal share, and test_sched_fair.sh's hi > lo
+# assertion was measuring noise. Nothing crashed; the announcement was
+# simply false. That is the exact shape NORTH_STAR.md exists to beat.
+#
+# SO THE RENICE IS NOW REAL, AND THEN VERIFIED. The ctl file is still tried
+# first, because it is the Plan-9-shape surface and it is the working path
+# on the Hamnix kernel. When it is not there, setpriority(2) does the same
+# job through the kernel that is actually underneath. Either way the result
+# is READ BACK with getpriority(2) before anything is announced: an
+# unprivileged process cannot go below nice 0 (CAP_SYS_NICE / RLIMIT_NICE),
+# and a fixture that quietly ran at 0 while claiming -20 is worse than one
+# that does not run at all. If the priority is not the one we asked for,
+# this program says who it is, what it asked for, what it got, and exits 1
+# — the measurement it exists to support would be meaningless otherwise.
+#
 # The legacy SYS_NICE(311) syscall is kept as a deprecated convenience
 # shim (same body, same `sched_set_nice` core); this fixture switched to
 # the file form to prove the ctl-file path is end-to-end working.
@@ -22,10 +43,10 @@
 # changes CPU share through preempt_tick's vruntime accrual.
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
-extern def sys_open_write(path: Ptr[char]) -> int32
-extern def sys_close(fd: int32) -> int32
 extern def sys_get_jiffies() -> uint64
 extern def sys_exit(code: uint64)
+
+from lib.hamnice import hamnice_set_or_fail
 
 
 # Wall-clock window in jiffies (100 Hz => 600 jiffies = 6 s). Long enough
@@ -75,16 +96,14 @@ def write_u64(fd: int32, v: uint64):
 
 
 def main() -> int32:
-    # F2 #447: re-nice to -20 by writing "pri -20\n" to /proc/self/ctl.
-    # The kernel parses the verb in devproc_write (DEVPROC_KIND_CTL arm)
-    # and calls sched_set_nice on the resolved task slot — clamps to
-    # [-20, +19] internally.
-    ctl_fd: int32 = sys_open_write("/proc/self/ctl")
-    if ctl_fd >= 0:
-        verb: Ptr[uint8] = "pri -20\n"
-        sys_write(ctl_fd, verb, 8)
-        sys_close(ctl_fd)
-    write_str(1, "[nice] hi: re-niced to -20 via /proc/self/ctl, running CPU window\n")
+    # Re-nice to -20, and DO NOT announce it until the kernel agrees.
+    # lib/hamnice.ad tries the Plan-9 ctl file first, then setpriority(2),
+    # then reads the level back with getpriority(2). Anything short of -20
+    # and we stop: see the header, and HANDOFF.md §0.
+    if hamnice_set_or_fail(-20, cast[Ptr[uint8]]("[nice] hi")) == 0:
+        sys_exit(1)
+        return 1
+    write_str(1, "[nice] hi: re-niced to -20 (verified by getpriority), running CPU window\n")
 
     start: uint64 = sys_get_jiffies()
     deadline: uint64 = start + WINDOW_JIFFIES

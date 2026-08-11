@@ -137,14 +137,29 @@ def emit_index_line(entry: Ptr[uint8], elen: uint64, hdr_len: uint64):
     sys_write(1, "\n", 1)
 
 
-def print_index():
-    write_str(1, "Hamnix commands. `man <topic>` or `help <topic>` for details.\n")
-    write_str(1, "\n")
+# Print the topical index. Returns the number of pages listed, or -1 if the
+# manual directory could not be read at all.
+#
+# THE BANNER MOVED, AND THE EXIT CODE NOW MEANS SOMETHING. This used to
+# print "Hamnix commands. `man <topic>` ..." FIRST, then discover that
+# /usr/share/man/ was empty, write one line to stderr, and return — and
+# main() returned 0 regardless. So `help` on a system with no manual pages
+# printed a heading for a list it then did not print, and told its caller it
+# had succeeded. A discovery command that discovers nothing has failed, and
+# the heading is a promise it cannot keep, so neither is emitted until there
+# is at least one page to put under it (HANDOFF.md §0).
+#
+# Nor is an index of ZERO pages a success: p9_listdir can return a positive
+# byte count for a directory holding nothing this program can use (no .md
+# entries, or entries whose header would not read). Counting what was
+# actually EMITTED, rather than what was listed, is the difference between
+# measuring the answer and measuring the attempt.
+def print_index() -> int64:
     n: int64 = p9_listdir(cast[Ptr[char]]("/usr/share/man/"),
                           &list_buf[0], LIST_CAP)
     if n <= 0:
-        write_str(2, "help: /usr/share/man/ is empty or missing\n")
-        return
+        return -1
+    shown: int64 = 0
     nu: uint64 = cast[uint64](n)
     i: uint64 = 0
     while i < nu:
@@ -162,10 +177,19 @@ def print_index():
             if compose_full(entry, elen) == 0:
                 hdr_n: int64 = read_header(elen)
                 if hdr_n > 0:
+                    # Banner emitted lazily, on the first page we can
+                    # actually show, so it is never a heading over nothing.
+                    if shown == 0:
+                        write_str(1, "Hamnix commands. `man <topic>` or `help <topic>` for details.\n")
+                        write_str(1, "\n")
                     emit_index_line(entry, elen, cast[uint64](hdr_n))
+                    shown = shown + 1
         i = j + 1
+    if shown == 0:
+        return 0
     write_str(1, "\n")
     write_str(1, "Also: `help builtins` for shell-internal commands.\n")
+    return shown
 
 
 def print_builtins():
@@ -220,8 +244,18 @@ def cstr_eq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if argc < 2:
-        print_index()
-        return 0
+        shown: int64 = print_index()
+        if shown > 0:
+            return 0
+        # Nothing to discover. Say which of the two it was, and exit
+        # non-zero: `help` with an empty answer is a failure, not a
+        # quiet success (see print_index's header).
+        if shown < 0:
+            write_str(2, "help: FATAL: cannot read /usr/share/man/ -- the manual pages are not installed. scripts/hamlinux_image.sh stages etc/man/*.md there; a root built without that step has no discovery index. Nothing listed.\n")
+        else:
+            write_str(2, "help: FATAL: /usr/share/man/ contains no readable *.md page, so there is no index to print. Nothing listed.\n")
+        write_str(2, "help: `help builtins` still works -- it is compiled in, not read from disk.\n")
+        return 1
     topic: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
     if cstr_eq(topic, "builtins") != 0:
         print_builtins()

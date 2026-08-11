@@ -57,14 +57,37 @@ def sleep_seconds(secs: int64):
 child_argv: Array[16, uint64]
 
 
+# Run CMD once. Returns the child's exit status, or -1 if it could not be
+# started at all.
+#
+# THE WAIT STATUS USED TO BE THROWN AWAY. `spawn` forks and only then execs,
+# so `pid < 0` catches an out-of-processes condition and NOTHING ELSE: a CMD
+# that does not exist forks fine and the failure appears only in the child's
+# exit status, which this discarded. `watch -n 1 /uptime` (the very example
+# in this file's own header, and a path that does not exist -- it is
+# /bin/uptime) therefore forked twice, exec'd nothing twice, printed not one
+# byte, and exited 0. lib/p9.ad already distinguishes the cases for us:
+# 127 = no such binary, 126 = present but not executable. Reporting those is
+# the difference between "your command printed nothing" and "your command
+# never ran", which is the whole of HANDOFF.md §0.
 def run_once(cmd: Ptr[char]) -> int32:
     pid: int32 = spawn(cmd, &child_argv[0], 0, 1,
                            cast[Ptr[uint64]](0))
     if pid < 0:
-        write_str(2, "watch: spawn failed\n")
-        return 1
-    sys_waitpid(pid)
-    return 0
+        write_str(2, "watch: cannot fork\n")
+        return -1
+    st: int64 = sys_waitpid(pid)
+    if st == 127:
+        write_str(2, "watch: cannot run ")
+        write_str(2, cast[Ptr[uint8]](cmd))
+        write_str(2, ": no such binary. It never ran; nothing was watched.\n")
+        return -1
+    if st == 126:
+        write_str(2, "watch: cannot run ")
+        write_str(2, cast[Ptr[uint8]](cmd))
+        write_str(2, ": not executable. It never ran; nothing was watched.\n")
+        return -1
+    return cast[int32](st)
 
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
@@ -93,7 +116,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
     # Two iterations: enough to show "rerun after N seconds" without
     # turning watch into a non-terminating process.
-    run_once(cmd)
+    # A command that never ran is watch's own failure and stops it: sleeping
+    # N seconds to fail to run it a second time helps nobody. A command that
+    # ran and returned non-zero is NOT watch's failure -- that is the thing
+    # being watched, and reporting it is the point -- so it is passed through
+    # rather than swallowed.
+    if run_once(cmd) < 0:
+        return 1
     sleep_seconds(secs)
-    run_once(cmd)
-    return 0
+    last: int32 = run_once(cmd)
+    if last < 0:
+        return 1
+    return last
