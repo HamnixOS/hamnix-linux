@@ -134,7 +134,16 @@ from lib.hamscreen import hamscreen_dims_or_fail
 # --- protocol constants ---------------------------------------------
 
 MAXCONN: uint64 = 4
-MAXOBJ:  uint64 = 256                  # client ids stay dense and low
+MAXOBJ:  uint64 = 1024                 # client ids stay dense and low --
+                                       # but Xwayland is a bigger client
+                                       # than anything this server carried
+                                       # before, and an id at or above
+                                       # MAXOBJ is an object that is
+                                       # UNKNOWN FOR EVER: every later
+                                       # request to it falls off the end of
+                                       # dispatch in silence. It is counted
+                                       # now (obj_id_refused), and the
+                                       # ceiling is four times higher.
 ACC:     uint64 = 8192                 # per-connection reassembly buffer
 
 T_NONE: int32 = 0
@@ -237,20 +246,20 @@ conn_title: Array[192, uint8]          # 4 * 48
 conn_title_len: Array[4, uint64]
 
 # Per object, indexed conn * MAXOBJ + id.
-obj_type: Array[1024, int32]
-obj_a: Array[1024, int32]
-obj_b: Array[1024, int32]
-obj_c: Array[1024, int32]
-obj_d: Array[1024, int32]
-obj_e: Array[1024, int32]
-obj_f: Array[1024, int32]
-obj_g: Array[1024, int32]
+obj_type: Array[4096, int32]
+obj_a: Array[4096, int32]
+obj_b: Array[4096, int32]
+obj_c: Array[4096, int32]
+obj_d: Array[4096, int32]
+obj_e: Array[4096, int32]
+obj_f: Array[4096, int32]
+obj_g: Array[4096, int32]
 # Two more per-object words, added for xdg_positioner: placing a menu needs a
 # size, an anchor rect, an anchor, a gravity and an offset, which is ten
 # numbers, and obj_a..obj_g are seven.
-obj_h: Array[1024, int32]
-obj_i: Array[1024, int32]
-surf_parent: Array[1024, int32]
+obj_h: Array[4096, int32]
+obj_i: Array[4096, int32]
+surf_parent: Array[4096, int32]
 
 # SHM MAPPINGS ARE OWNED BY THE CONNECTION, NOT BY THE POOL OBJECT.
 #
@@ -273,11 +282,25 @@ surf_parent: Array[1024, int32]
 # browser whose window painted and whose MENUS were invisible -- the menu was
 # simply the first surface unlucky enough to be created after the table was
 # full.
-MAXMAP: uint64 = 16
-map_addr: Array[64, uint64]            # 4 conns * 16
-map_len:  Array[64, uint64]
-map_used: Array[64, int32]
-map_ref:  Array[64, int32]
+#
+# SIXTEEN WAS THE STEAM BUG, MEASURED IN BOTH DIRECTIONS. Steam's X session
+# holds TWENTY-SIX of these at once. With the table at 16 it fills, map_alloc
+# returns -1, and from that moment every commit is dropped at `mi < 0` -- so
+# Xwayland's ONE rootful surface freezes and both the login window and the
+# xterm sitting behind it stop reaching the framebuffer, which is exactly what
+# three passes of this investigation were looking at. Two boots of the same
+# image differing only in this number: at 16, `map_alloc_failed 10`,
+# `drop_no_mapping 508`, 3 commits, a black screen and an xterm still at the
+# size it started at; at 64, `maps_high_water 26`, zero drops, 506 commits, and
+# `Sign in to Steam` on the desktop.
+#
+# A bare Xwayland with one xterm on it already touches 8, so 16 was half a
+# table for the smallest session there is. Sixty-four costs 2 KB of BSS.
+MAXMAP: uint64 = 64
+map_addr: Array[256, uint64]           # 4 conns * 64
+map_len:  Array[256, uint64]
+map_used: Array[256, int32]
+map_ref:  Array[256, int32]
 
 # RECEIVED DESCRIPTORS ARE A QUEUE, NOT A PROPERTY OF THE MESSAGE.
 #
