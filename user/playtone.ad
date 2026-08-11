@@ -25,6 +25,24 @@ extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_get_jiffies() -> uint64
+extern def sys_yield() -> int32
+
+
+# Sleep `ms` milliseconds against the 100 Hz jiffies clock, YIELDING rather
+# than spinning. The spin at the end of main predates THE IDLE CENSUS and is
+# left alone because it runs once, at exit; this one runs between every chunk
+# of the slow-writer mode and a busy-wait there would burn a core for the whole
+# of a deliberately-slow stream — and then the thing being measured would be
+# the test program's spin, not the mixer.
+def nap_ms(ms: uint64):
+    if ms == 0:
+        return
+    ticks: uint64 = (ms + 9) / 10
+    if ticks == 0:
+        ticks = 1
+    t0: uint64 = sys_get_jiffies()
+    while sys_get_jiffies() - t0 < ticks:
+        sys_yield()
 
 
 def strlen_u8(s: Ptr[uint8]) -> uint64:
@@ -106,6 +124,20 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         if dur_ms == 0:
             dur_ms = 500
 
+    # THE THIRD ARGUMENT — `playtone <hz> <ms> <pause_ms>` — is the SLOW
+    # WRITER, and it exists so that "a slow producer must not stall a fast
+    # one" is something a gate can measure rather than something a comment can
+    # claim. With it, playtone stops staging a clip and instead opens the
+    # continuous stream (`streamopen`) and hands over one 256-frame chunk —
+    # 5.3 ms of audio — every `pause_ms` milliseconds. At 40 ms that is a
+    # producer running at roughly an eighth of real time: it underfeeds the
+    # mixer on purpose. Its OWN tone comes out broken up, which is correct and
+    # is what underfeeding sounds like; what tests/linux/audio_mix.sh asserts
+    # is that the other program's tone is not.
+    slow_ms: uint64 = 0
+    if argc >= 4:
+        slow_ms = parse_dec(cast[Ptr[uint8]](argv[3]))
+
     # A square wave alternates every half period. half_period (in samples)
     # = rate / (2*freq). Guard against 0 for very-high freq.
     half_period: uint64 = rate / (2 * freq)
@@ -127,6 +159,8 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     ctl_verb(ctlfd, "rate", rate)
     ctl_verb(ctlfd, "channels", channels)
     write_str(ctlfd, "format s16le\n")
+    if slow_ms != 0:
+        write_str(ctlfd, "streamopen\n")
 
     # Synthesize + stream the square-wave tone in 256-frame chunks.
     frames_per_chunk: uint64 = 256
@@ -155,9 +189,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             f_in_chunk = f_in_chunk + 1
             frame = frame + 1
         sys_write(audfd, &tone_chunk[0], ci)
+        nap_ms(slow_ms)
 
-    # Start playback.
-    write_str(ctlfd, "start\n")
+    # Start playback. In slow-writer mode there is nothing to start: the
+    # stream has been sounding since the first chunk, so the end of the tone is
+    # `drain`, which returns when what was written has actually been heard.
+    if slow_ms != 0:
+        write_str(ctlfd, "drain\n")
+    else:
+        write_str(ctlfd, "start\n")
 
     # Emit the one-line summary a serial-driven gate can grep for BEFORE the
     # wait, so it flushes to the console while the stream plays out (if this
@@ -198,6 +238,8 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # (or a listener) would only get the leading fragment. Wait the tone
     # duration plus a margin against the 100 Hz jiffies clock (10 ms/tick).
     wait_jiffies: uint64 = (dur_ms + 700) / 10
+    if slow_ms != 0:
+        wait_jiffies = 0                 # `drain` already waited, and truthfully
     start_j: uint64 = sys_get_jiffies()
     while sys_get_jiffies() - start_j < wait_jiffies:
         pass
