@@ -110,7 +110,8 @@ same failure this project exists to beat.
   them is blocked: trace the X protocol for a `MapWindow`, run the session with
   no window manager, and read what `dbus-daemon` is actually complaining about.
   Its probe is 23 PASS / 1 FAIL (the remaining one is the PulseAudio socket).
-* **The Debian namespace has no system D-Bus.** The namespace's `/run` is on
+* **The Debian namespace's D-Bus has no SERVICES** (the bus itself now works).
+  The namespace's `/run` is on
   the ext4 and survives reboots, so the first boot's `dbus-daemon` left
   `/run/dbus/system_bus_socket` behind and the session's `[ ! -S … ]` guard
   then skipped starting the bus on every boot after; every CEF process logged
@@ -210,7 +211,8 @@ same failure this project exists to beat.
   **not** `/tmp`, which is a 16 GB tmpfs and is where a previous pass's
   baseline went during a disk-full cleanup, leaving its before/after resting
   on a figure it had not measured.
-* **The `/dev/wsys/<wid>/draw/ctl` `'I'` verb was never ported, so
+* **(same defect as the `hamscene_image` entry above, kept for the detail)**
+  The `/dev/wsys/<wid>/draw/ctl` `'I'` verb was never ported, so
   `hamscene_image` renders nothing on this line.** Found by tracing
   `hamimgscene`, which was exiting 2 in total silence. `user/linux-wsys.c`
   implements the blit protocol's `'B'`, `'D'` and `'C'` and dropped devwsys's
