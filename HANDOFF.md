@@ -32,6 +32,7 @@ rather than argued:
 | Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1. **The update loop is proven end to end**: install at 1.0.2 from the live repo, a newer build lands, `hpm update`, the upgraded binary still runs. No re-image anywhere in it. |
 | Wayland | `user/wsyswl.ad`, a Wayland compositor in Adder. Firefox runs as a native Wayland client with its menus as separate windows; XWayland carries X11 clients. |
 | Debian | `enter debian { sh }` — bookworm on its own filesystem, amd64+i386. Works **from a uid-1001 desktop terminal**, and something inside can build a container (`bwrap --unshare-user`). The root switch is `MS_MOVE` + `chroot`, what `switch_root(8)` does: `pivot_root` returns EINVAL on an initramfs boot's unattached `rootfs`. `glxgears:i386` renders on the Hamnix desktop through XWayland → `wsyswl` → `wsysd` → `/dev/fb`. |
+| Audio | `/dev/audio`, `/dev/audioctl`, `/dev/audioin` on intel-hda, ported from Hamnix's `audio_cdev.ad` + `hda.ad`. Proven by FFT on a WAV captured out of QEMU: 1000.28 Hz, 444.57 Hz and a 660.90 Hz sine, right durations, square-wave harmonics. `arecord` delivers 97.4% of a 48 kHz stereo second. |
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
 | Build | **358 of 366** `user/*.ad` build through the LLVM lane. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
@@ -62,8 +63,12 @@ same failure this project exists to beat.
 * **The wsys uid gate is a library check, not a kernel boundary.** `/dev/wsys`
   is a 0666 shared segment, so a program that mmaps `/srv/wsys` directly
   bypasses it. Closing that means chrome state in a second segment at 0644.
-* **No audio device at all.** No `/dev/snd`, and `hamlinux_vm.sh` adds no
-  sound hardware.
+* **The 4-stream software mixer is not ported.** An ALSA hardware substream
+  has one writer, so `stream`/`mixplay` return `-EINVAL` and
+  `user/audiolife.ad` will not do here what it does on Hamnix. The status
+  line's `streams 100 100 100 100` is a placeholder. Capture *content* is
+  also unverifiable in an automated run — QEMU's only host-free input backend
+  is silence — and the card is not ready for ~2 s after boot.
 * The run-sweep score is **249 healthy / 323 runnable**. `service`, `help`,
   `nice_hi`/`nice_lo`, `watch`, the power/logout actions and all 16 overlay
   clients were fixed in bc9b75d8 — they now work or fail by name. Still
