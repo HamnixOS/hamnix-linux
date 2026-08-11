@@ -47,6 +47,9 @@ enum {
     HAMWSYS_WIN_CMD,      /* /dev/wsys/<wid>/cmd                             */
     HAMWSYS_DRAWCTL,      /* /dev/wsys/<wid>/draw/ctl — the v2 blit protocol */
     HAMWSYS_BACKBUF,      /* /dev/wsys/<wid>/backbuffer — the v2 pixels       */
+    HAMWSYS_IMAGES,       /* /dev/wsys/<wid>/draw/images — the named-image    */
+                          /*   directory: "<name> <w> <h> <serial>\n" each    */
+    HAMWSYS_IMAGE,        /* /dev/wsys/<wid>/draw/image/<name> — raw RGBA8888 */
     HAMWSYS_SINK,         /* every other /dev/wsys/... path — a named buffer */
 };
 

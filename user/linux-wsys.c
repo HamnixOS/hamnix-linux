@@ -162,9 +162,10 @@ static int            chrome_rw;              /* the kernel let us map it W   */
  *   'B' x0 y0 x1 y1 fmt <pixels>   opaque blit into the backbuffer
  *   'D' x0 y0 x1 y1                dirty-rect invalidation
  *   'C' hot_x hot_y w h fmt <px>   cursor sprite (not yet composited)
- *   'I' namelen name w h fmt <px>  NAMED IMAGE UPLOAD — NOT IMPLEMENTED HERE.
- *                                  It answers ENOSYS by name; see the 'I' arm
- *                                  in hamwsys_write for what depends on it.
+ *   'I' namelen name w h fmt <px>  named image upload, keyed by (wid, name);
+ *                                  read back at <wid>/draw/images and
+ *                                  <wid>/draw/image/<name>.  See THE
+ *                                  NAMED-IMAGE STORE below.
  *
  * Integers are little-endian int32. A client opts in with `version 2` on its
  * window ctl; the compositor walks the v1 scene path or this one per window.
@@ -788,6 +789,240 @@ static int shm_attach(void)
     return 0;
 }
 
+/* ================================================================== *
+ * THE NAMED-IMAGE STORE — devwsys.ad's #128 scene image tier, ported
+ * ==================================================================
+ *
+ * WHAT IT IS.  A scene client that wants a REAL raster image — a decoded PNG,
+ * a photo, a video frame, an icon that is not expressible as fill/line
+ * primitives — cannot say it in the v1 display list, which is text capped at
+ * 16 KiB.  devwsys.ad's answer is FILE-REF + format tag and it is ported here
+ * unchanged:
+ *
+ *   1. the client DECODES in userland and UPLOADS raw pixels to its window
+ *      with the binary 'I' verb on /dev/wsys/<wid>/draw/ctl:
+ *          'I' <namelen:u8> <name...> <w:i32le> <h:i32le> <fmt:u8> <pixels>
+ *      fmt is one of the WSYS_BLIT_FMT_* the 'B' verb already takes; the store
+ *      normalizes everything to RGBA8888.  Re-uploading a name REPLACES it.
+ *   2. the client references it from the display list with `image x y w h NAME`
+ *      (lib/hamscene.ad's hamscene_image), and the compositor looks the name up
+ *      in THAT WINDOW's store and blits it, nearest-neighbour scaled.
+ *
+ * The store is keyed by (owning wid, name), exactly as devwsys keys it, so two
+ * windows may both own an image called "frame" and neither can read or replace
+ * the other's.
+ *
+ * WHY A THIRD PARTY HAS TO READ IT, and why that is the whole difference from
+ * Hamnix.  In devwsys the compositor IS the kernel: it walks the display list
+ * with the store in the same address space.  Here the compositor is
+ * user/wsysd.ad, an ordinary program, so the store must be READABLE by it —
+ * through files, like everything else, never through a new syscall:
+ *
+ *   /dev/wsys/<wid>/draw/images        "<name> <w> <h> <serial>\n" per image
+ *   /dev/wsys/<wid>/draw/image/<name>  the raw RGBA8888 pixels, w*h*4 bytes
+ *
+ * The SERIAL is what makes that affordable.  A 256x256 image is 256 KiB and a
+ * video client re-uploads one every tick; a compositor that re-read every
+ * image every frame would spend the whole frame in memcpy.  The serial is
+ * bumped on every store, so wsysd re-reads pixels only when they changed, and
+ * the per-frame cost of a static image is one small text read.
+ *
+ * WHICH SEGMENT — measured against THE SPLIT's rule, not assumed.
+ * ---------------------------------------------------------------
+ * The rule is: a field belongs in the 0666 segment IFF the ported devwsys gate
+ * would let a non-hostowner write it.  Run it: the 'I' verb arrives on
+ * <wid>/draw/ctl, whose gate in this file is `hostowner() || owns_wid(wid)` —
+ * the same owner-or-host rule as the scene buffer and the event rings.  A
+ * uid-1001 client uploading an image to ITS OWN window is an ordinary,
+ * constant, unprivileged act; refusing it would blind exactly the session
+ * hamimgscene, hamvideocore and hamsdl run in.  So: the world-writable side.
+ *
+ * The case AGAINST, stated rather than skipped, because it is not frivolous.
+ * Image pixels are the largest single thing a client can put into shared
+ * memory here, and a bypasser that mmaps the file (the hole THE SPLIT names
+ * and does not close) can overwrite another window's image — so a program
+ * could make another program's window display a picture of its choosing.  That
+ * is a real capability and it is worse than retitling a window.  It is
+ * nonetheless the SAME hole, not a new one: the same bypasser can already
+ * rewrite that window's scene text and its v2 backbuffer, which is a strictly
+ * larger power over the same pixels (the backbuffer IS the whole window).
+ * Putting the image store in the 0644 chrome segment would not close it and
+ * WOULD break the ordinary case, because a uid-1001 client cannot write the
+ * chrome segment at all — the desktop would render holes for every image, in
+ * silence, which is the exact defect this work exists to fix.  So the store
+ * goes where its writers are, and the residual is the one already recorded
+ * against SEGMENT A and /srv/wsys.bb, not a new entry.
+ *
+ * A SEGMENT OF ITS OWN, /srv/wsys.img, for the reason the backbuffers have
+ * one: 16 slots of 256 KiB is 4 MiB, and every client of /dev/wsys maps the
+ * window table.  It is DERIVED from the segment shm_attach actually joined
+ * (`<seg>.img`) with no candidate list, exactly as chrome_path is, so it can
+ * never end up beside a different window system — that is the hazard
+ * docs/steam_namespace.md §11 records against HAMWSYS_BB, which is one per
+ * HOST and bit once already.  The file is created sparse and tmpfs allocates
+ * on first touch, so a slot nobody uploads to costs nothing.
+ *
+ * THE CAP, AND WHAT HAPPENS AT IT.  devwsys's numbers, ported rather than
+ * re-chosen: 16 slots, 256x256 maximum, 31-byte names.  The behaviour at the
+ * ceiling is REFUSAL, NOT EVICTION, and that is devwsys's rule too
+ * (_wsys_img_store returns 0 and the verb fails).  Eviction would be the
+ * success-shaped answer: the upload reports success and some other window's
+ * image silently becomes a hole one frame later, with nothing anywhere saying
+ * which.  A refusal is a number the client can print.
+ *
+ * The three refusals answer three DIFFERENT errnos, because they are three
+ * different facts and a client that cannot tell them apart cannot say anything
+ * useful:  EMSGSIZE — the image is bigger than 256x256;  ENOSPC — all 16 slots
+ * are taken by live windows;  EINVAL — the bytes are malformed.  devwsys folds
+ * all three into one EINVAL, which is the one place this port deliberately
+ * says MORE than its reference; the ENOSYS-vs-EINVAL distinction that this
+ * whole defect was found through is the argument for it.
+ *
+ * Slots are freed when the owning window is torn down (hamwsys_free), which is
+ * devwsys's _wsys_img_release_wid, and reclaimed when a wid is REUSED by
+ * win_alloc — a fresh window must never inherit the dead one's pictures.
+ * ================================================================== */
+#define WSYS_IMG_MAGIC     0x474d4957u        /* "WIMG" */
+#define WSYS_IMG_VERSION   1
+#define WSYS_IMG_SLOTS     16
+#define WSYS_IMG_MAX_W     256
+#define WSYS_IMG_MAX_H     256
+#define WSYS_IMG_NAME_CAP  32                 /* incl. NUL; max 31 name bytes */
+#define WSYS_IMG_BYTES     ((size_t)WSYS_IMG_MAX_W * WSYS_IMG_MAX_H * 4)
+
+struct wimg {
+    uint32_t used;
+    int32_t  wid;                              /* owning window */
+    int32_t  w, h;
+    uint32_t serial;                           /* ++ on every store           */
+    char     name[WSYS_IMG_NAME_CAP];
+    uint8_t  px[WSYS_IMG_BYTES];               /* RGBA8888, w*h*4 significant */
+};
+
+struct wimgshm {
+    uint32_t magic, version;
+    struct wimg slot[WSYS_IMG_SLOTS];
+};
+
+static struct wimgshm *img;
+static char img_path[576];
+
+static int img_attach(void)
+{
+    if (img) return 0;
+    if (!seg_path[0]) return -1;               /* shm_attach has not run */
+
+    const char *ov = getenv("HAMWSYS_IMG");
+    if (ov && *ov) snprintf(img_path, sizeof img_path, "%s", ov);
+    else           snprintf(img_path, sizeof img_path, "%s.img", seg_path);
+
+    /* Attach before create, then fchmod 0666 — both for the reasons spelled
+     * out at length in shm_attach above, and both already the fix for a
+     * measured silent failure: O_CREAT on a file another uid owns in a sticky
+     * 1777 directory is refused by fs.protected_regular, and open(2)'s mode is
+     * masked by PID 1's umask to 0644, which locks the uid-1001 session out of
+     * the store its own windows upload to. */
+    int fd = open(img_path, O_RDWR);
+    if (fd < 0) fd = open(img_path, O_RDWR | O_CREAT, 0666);
+    if (fd < 0) return -1;
+    if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) { int e = errno; close(fd); errno = e; return -1; }
+    if ((uint64_t)st.st_size < sizeof(struct wimgshm)
+        && ftruncate(fd, (off_t)sizeof(struct wimgshm)) < 0) {
+        int e = errno; close(fd); errno = e; return -1;
+    }
+    void *m = mmap(NULL, sizeof(struct wimgshm), PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    int e = errno;
+    close(fd);
+    if (m == MAP_FAILED) { errno = e; return -1; }
+    img = (struct wimgshm *)m;
+    if (img->magic != WSYS_IMG_MAGIC || img->version != WSYS_IMG_VERSION) {
+        memset(img, 0, sizeof *img);
+        img->magic   = WSYS_IMG_MAGIC;
+        img->version = WSYS_IMG_VERSION;
+    }
+    return 0;
+}
+
+/* devwsys's _wsys_img_release_wid: free every slot owned by wid.  Called on
+ * window teardown AND on wid reuse — a recycled window id must not inherit a
+ * dead window's images, which would be a picture appearing in a program that
+ * never uploaded one. */
+static void img_release_wid(int32_t wid)
+{
+    if (wid <= 0 || (!img && img_attach() < 0)) return;
+    for (int i = 0; i < WSYS_IMG_SLOTS; i++)
+        if (img->slot[i].used && img->slot[i].wid == wid) {
+            img->slot[i].used = 0;
+            img->slot[i].wid  = 0;
+            img->slot[i].w = img->slot[i].h = 0;
+            img->slot[i].name[0] = '\0';
+        }
+}
+
+/* devwsys's _wsys_img_find, over the shared table.  Empty name never matches;
+ * the name is compared over its FULL length, so "log" never finds "logo". */
+static struct wimg *img_find(int32_t wid, const char *name, size_t nlen)
+{
+    if (!img || wid <= 0 || nlen == 0 || nlen >= WSYS_IMG_NAME_CAP) return NULL;
+    for (int i = 0; i < WSYS_IMG_SLOTS; i++) {
+        struct wimg *s = &img->slot[i];
+        if (!s->used || s->wid != wid) continue;
+        if (strlen(s->name) == nlen && !memcmp(s->name, name, nlen))
+            return s;
+    }
+    return NULL;
+}
+
+/* devwsys's _wsys_img_store: (wid,name) -> w x h RGBA8888, converting from
+ * `fmt`.  Reuses the existing (wid,name) slot or the first free one.  0 on
+ * success, -errno on refusal — see THE CAP above for which errno means what. */
+static int img_store(int32_t wid, const char *name, size_t nlen,
+                     int32_t w, int32_t h, uint8_t fmt, const uint8_t *px)
+{
+    if (img_attach() < 0) return -EIO;
+    if (nlen == 0 || nlen >= WSYS_IMG_NAME_CAP) return -EINVAL;
+    if (w <= 0 || h <= 0) return -EINVAL;
+    if (w > WSYS_IMG_MAX_W || h > WSYS_IMG_MAX_H) return -EMSGSIZE;
+    int bpp = (fmt == 3) ? 1 : (fmt == 1 || fmt == 2) ? 4 : 0;
+    if (!bpp) return -EINVAL;
+
+    struct wimg *s = img_find(wid, name, nlen);
+    if (!s) {
+        for (int i = 0; i < WSYS_IMG_SLOTS && !s; i++)
+            if (!img->slot[i].used) s = &img->slot[i];
+    }
+    if (!s) return -ENOSPC;                    /* refusal, never eviction */
+
+    memcpy(s->name, name, nlen);
+    s->name[nlen] = '\0';
+    s->wid  = wid;
+    s->w    = w;
+    s->h    = h;
+    s->used = 1;
+    uint64_t npx = (uint64_t)w * (uint64_t)h;
+    for (uint64_t i = 0; i < npx; i++) {
+        const uint8_t *q = px + i * bpp;
+        uint8_t *d = s->px + i * 4;
+        if (fmt == 2) {                        /* FMT_BGRA8888 */
+            d[0] = q[2]; d[1] = q[1]; d[2] = q[0]; d[3] = q[3];
+        } else if (fmt == 3) {                 /* FMT_A8 -> white * alpha */
+            d[0] = d[1] = d[2] = d[3] = q[0];
+        } else {                               /* FMT_RGBA8888 */
+            d[0] = q[0]; d[1] = q[1]; d[2] = q[2]; d[3] = q[3];
+        }
+    }
+    /* PUBLISHED LAST, like the snarf segment's length: a compositor that
+     * samples the serial before this store re-reads next frame, and one that
+     * samples it after finds pixels that are already in place.  Not a lock,
+     * and not pretending to be one. */
+    s->serial++;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ *
  * Small helpers
  * ------------------------------------------------------------------ */
@@ -809,6 +1044,13 @@ static struct wwin *win_alloc(int32_t pid)
         memset(v, 0, sizeof(*v));
         v->used     = 1;
         v->wid      = shm->next_wid++;
+        /* A wid is a small integer and next_wid wraps around a reboot only in
+         * principle -- but the image segment OUTLIVES the process that made it
+         * (it is a file in /srv), so a fresh window can be handed an id whose
+         * pictures are still in the store from a previous run.  Clear them:
+         * inheriting a dead window's images would put a picture in a program
+         * that never uploaded one. */
+        img_release_wid(v->wid);
         v->pid      = pid;
         v->x = 120; v->y = 90; v->w = 640; v->h = 480;
         v->z        = 5;
@@ -1195,6 +1437,7 @@ static int classify(const char *path, struct hamwsys_file *f)
 
     int leaf = HAMWSYS_NONE, wid = 0;
     char name[64];
+    name[0] = '\0';
 
     if (p[0] >= '0' && p[0] <= '9') {
         /* /dev/wsys/<wid>/<leaf> */
@@ -1213,6 +1456,15 @@ static int classify(const char *path, struct hamwsys_file *f)
             else if (!strcmp(l, "cmd"))     leaf = HAMWSYS_WIN_CMD;
             else if (!strcmp(l, "draw/ctl")) leaf = HAMWSYS_DRAWCTL;
             else if (!strcmp(l, "backbuffer")) leaf = HAMWSYS_BACKBUF;
+            else if (!strcmp(l, "draw/images")) leaf = HAMWSYS_IMAGES;
+            else if (!strncmp(l, "draw/image/", 11) && l[11]) {
+                /* The named-image read leaf.  The name is the REST of the
+                 * path, taken whole: a prefix match would let "draw/image/lo"
+                 * answer with "logo"'s pixels, which is the same class of
+                 * mistake as a device path with no server behind it. */
+                leaf = HAMWSYS_IMAGE;
+                snprintf(name, sizeof name, "%s", l + 11);
+            }
             else                            leaf = HAMWSYS_SINK;  /* wctl, … */
         } else {
             return HAMWSYS_NONE;
@@ -1239,6 +1491,9 @@ static int classify(const char *path, struct hamwsys_file *f)
             memcpy(f->name, name, sizeof f->name < sizeof name
                                   ? sizeof f->name : sizeof name);
             f->name[sizeof f->name - 1] = '\0';
+        } else if (leaf == HAMWSYS_IMAGE) {
+            /* Already the bare image name, taken above. */
+            snprintf(f->name, sizeof f->name, "%s", name);
         } else {
             f->name[0] = '\0';
         }
@@ -1421,7 +1676,7 @@ static int snap_dir(struct hamwsys_file *f)
     } else {
         if (!win_find(f->wid)) { errno = ENOENT; return -1; }
         const char *leaves[] = { "ctl", "scene", "keys", "pointer",
-                                 "event", "text", "cmd" };
+                                 "event", "text", "cmd", "draw/images" };
         for (unsigned i = 0; i < sizeof leaves / sizeof leaves[0]; i++) {
             for (const char *c = leaves[i]; *c; c++) buf[n++] = (uint8_t)*c;
             buf[n++] = '\n';
@@ -1470,6 +1725,41 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -1; }
         if (bb_for(v->wid, 0, 0, 0) < 0 && !for_write) { errno = ENOENT; return -1; }
+        return 0;
+    }
+    case HAMWSYS_IMAGES: {
+        /* READ-ONLY, and deliberately.  The way to put an image in the store is
+         * the 'I' verb on draw/ctl; a second writable spelling of the same
+         * state is how two sources of truth start (the same argument
+         * /dev/wsys/screen makes just below). */
+        if (for_write) { errno = EACCES; return -1; }
+        struct wwin *v = win_find(f->wid);
+        if (!v) { errno = ENOENT; return -1; }
+        if (img_attach() < 0) return snap_set(f, NULL, 0);
+        uint8_t b[WSYS_IMG_SLOTS * (WSYS_IMG_NAME_CAP + 48)];
+        uint64_t n = 0;
+        for (int i = 0; i < WSYS_IMG_SLOTS; i++) {
+            struct wimg *s = &img->slot[i];
+            if (!s->used || s->wid != f->wid) continue;
+            for (const char *c = s->name; *c; c++) b[n++] = (uint8_t)*c;
+            b[n++] = ' '; n = put_int(b, n, s->w);
+            b[n++] = ' '; n = put_int(b, n, s->h);
+            b[n++] = ' '; n = put_int(b, n, (int32_t)s->serial);
+            b[n++] = '\n';
+        }
+        return snap_set(f, b, n);
+    }
+    case HAMWSYS_IMAGE: {
+        if (for_write) { errno = EACCES; return -1; }
+        if (!win_find(f->wid)) { errno = ENOENT; return -1; }
+        if (img_attach() < 0) { errno = ENOENT; return -1; }
+        /* ENOENT, not an empty read.  "this window has no image by that name"
+         * is a fact the caller must be able to act on; zero bytes would be
+         * indistinguishable from a 0x0 picture, which is the shape of failure
+         * this whole defect was. */
+        if (!img_find(f->wid, f->name, strlen(f->name))) {
+            errno = ENOENT; return -1;
+        }
         return 0;
     }
     case HAMWSYS_DRAWCTL: {
@@ -1571,6 +1861,23 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
         uint64_t k = size - f->off;
         if (k > cap) k = cap;
         memcpy(buf, bb->px[slot][bb->slot[slot].front] + f->off, (size_t)k);
+        f->off += k;
+        return (int64_t)k;
+    }
+    if (f->leaf == HAMWSYS_IMAGE) {
+        /* The stored pixels, RGBA8888, row-major at the image's own width —
+         * offset-addressed exactly like the backbuffer, so wsysd reads it with
+         * the same loop and no new mechanism.  The slot is re-resolved on every
+         * read because it may have been freed by a teardown between reads; that
+         * reads as EOF, not as somebody else's pixels. */
+        struct wimg *s = img ? img_find(f->wid, f->name, strlen(f->name)) : NULL;
+        if (!s) return 0;
+        uint64_t size = (uint64_t)s->w * (uint64_t)s->h * 4;
+        if (size > WSYS_IMG_BYTES) size = WSYS_IMG_BYTES;
+        if (f->off >= size) return 0;
+        uint64_t k = size - f->off;
+        if (k > cap) k = cap;
+        memcpy(buf, s->px + f->off, (size_t)k);
         f->off += k;
         return (int64_t)k;
     }
@@ -1858,30 +2165,53 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                 used = 18 + need;      /* accepted; the compositor draws its
                                           own cursor for now */
             } else if (verb == 'I') {
-                /* 'I' <namelen:u8> <name...> <w> <h> <fmt> <pixels> — the
-                 * NAMED IMAGE UPLOAD.  devwsys.ad has it; this port does not,
-                 * and that is a gap rather than a bug in the caller, so it
-                 * gets its own answer.  ENOSYS, not EINVAL: "you sent me
-                 * garbage" and "this kernel does not implement that verb" are
-                 * different facts, and a client that cannot tell them apart
-                 * cannot print a useful message.
+                /* 'I' <namelen:u8> <name...> <w:i32le> <h:i32le> <fmt:u8>
+                 * <pixels> — the NAMED IMAGE UPLOAD, devwsys.ad's #128.  See
+                 * THE NAMED-IMAGE STORE above for the store this fills and for
+                 * why each refusal answers the errno it does.
                  *
-                 * WHAT IS MISSING, so the next person does not have to
-                 * rediscover it: the scene display list's `image X Y W H NAME`
-                 * op resolves NAME against a store that is populated ONLY by
-                 * this verb on the native line (lib/hamui_host.ad's
-                 * hamui_host_register_image is the host twin, and only host
-                 * harnesses call it).  With no store, lib/hamui_host.ad's
-                 * rasterizer takes its `slot < 0 -> return 1` path and draws
-                 * NOTHING, silently — so every `hamscene_image` on this line
-                 * renders a hole.  That reaches user/hamimgscene.ad,
-                 * lib/hamvideocore.ad ("frame") and lib/hamsdl.ad.  Closing it
-                 * means a named-image table in the shared segment plus wsysd
-                 * registering from it; until then this refusal is the honest
-                 * answer and hamimgscene prints it. */
-                carried = 0;
-                errno = ENOSYS;
-                return -ENOSYS;
+                 * A verb that is not all here yet BREAKS rather than failing:
+                 * the carry buffer above exists precisely because a client may
+                 * split a record across write(2) calls, and a 256x256 image is
+                 * 262 KiB — sixty-four of the 4 KiB chunks the syscall bounce
+                 * delivers.  devwsys needs a whole staging allocator for this
+                 * (_wsys_img_stg_begin/_body); here the carry buffer already
+                 * IS that staging, so the streaming case is the same code as
+                 * the small one. */
+                if (carried - i < 2) break;
+                uint64_t nlen = carry[i + 1];
+                if (nlen == 0 || nlen >= WSYS_IMG_NAME_CAP) {
+                    carried = 0; errno = EINVAL; return -EINVAL;
+                }
+                uint64_t hdr = 2 + nlen + 9;
+                if (carried - i < hdr) break;
+                int32_t iw = le32(carry + i + 2 + nlen);
+                int32_t ih = le32(carry + i + 2 + nlen + 4);
+                uint8_t ifmt = carry[i + 2 + nlen + 8];
+                int ibpp = (ifmt == 3) ? 1 : (ifmt == 1 || ifmt == 2) ? 4 : 0;
+                if (iw <= 0 || ih <= 0 || !ibpp) {
+                    carried = 0; errno = EINVAL; return -EINVAL;
+                }
+                if (iw > WSYS_IMG_MAX_W || ih > WSYS_IMG_MAX_H) {
+                    /* Refused BEFORE the payload is waited for: an oversized
+                     * image would otherwise sit in the carry buffer until it
+                     * overflowed, and the client would be told EMSGSIZE about
+                     * the wrong thing several megabytes later. */
+                    carried = 0; errno = EMSGSIZE; return -EMSGSIZE;
+                }
+                uint64_t ipix = (uint64_t)iw * (uint64_t)ih * (uint64_t)ibpp;
+                if (carried - i < hdr + ipix) break;
+                int rc = img_store(v->wid, (const char *)carry + i + 2, nlen,
+                                   iw, ih, ifmt, carry + i + hdr);
+                if (rc < 0) { carried = 0; errno = -rc; return rc; }
+                /* The scene display list naming this image is byte-identical
+                 * frame to frame, so a damage diff over the scene text alone
+                 * would call a re-uploaded video frame "nothing to paint".
+                 * devwsys bumps a per-window content serial here for exactly
+                 * that; the analogue on this line is the segment generation
+                 * the compositor already watches. */
+                shm->gen++;
+                used = hdr + ipix;
             } else {
                 /* Not a verb we know. Resynchronising by scanning would invent
                  * a frame out of noise, so drop what is buffered and say so. */
@@ -1961,6 +2291,7 @@ int32_t hamwsys_free(int32_t wid)
      * down somebody else's window. */
     if (!hostowner() && !owns_wid(wid)) { errno = EPERM; return -1; }
     bb_release(wid);
+    img_release_wid(wid);              /* devwsys's _wsys_img_release_wid */
     v->used = 0;
     if (shm->focus_wid == wid) shm->focus_wid = 0;
     shm->gen++;
