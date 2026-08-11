@@ -302,8 +302,79 @@ same failure this project exists to beat.
   line's `streams 100 100 100 100` is a placeholder. Capture *content* is
   also unverifiable in an automated run — QEMU's only host-free input backend
   is silence — and the card is not ready for ~2 s after boot.
-* The run-sweep score is **261 healthy / 325 runnable**, and it is now a
-  MEASURED number rather than a floor: the full sweep was re-run end to end
+* The run-sweep score is **297 healthy / 328 runnable**, re-measured end to
+  end (`/home/david/.hamnix-build/sweep-a74b5560/{BEFORE,AFTER}/`), and the
+  interesting part is the run BEFORE the fixes: **265 / 329, row for row
+  IDENTICAL to the sweep taken forty commits earlier.** Nothing moved. The
+  `sys_waitfds` park, the named-image tier, the backdrop, the clipboard,
+  `/dev/reboot` — none of it changed a single verdict, and the reasons are
+  worth more than the number:
+  - **The sweep's own 4 MiB file cap was refusing `/dev/wsys`.** The window
+    system's shared segments are FILES: `/srv/wsys.img` is 4,195,144 bytes and
+    `/srv/wsys.bb` is 132 MB of v2 backbuffer, and `ulimit -f` bounds the
+    offset a process may write, so both `ftruncate`s were refused EFBIG — the
+    image store by 840 bytes. A/B in the same jail with the same binary: at
+    4096 blocks `hamimgscene` prints "the 'I' named-image upload ... was
+    refused, rc=-5" and `/srv/wsys.img` is 0 bytes; at 16384 it prints "scene
+    window ready with the 32x32 image uploaded". So the sweep reported the
+    tier as broken while the tier worked. It did worse with the backbuffer,
+    *silently*: a v2 client's window table fits under the cap, so the probe
+    found a wid and the row was scored **DREW_WINDOW while `/srv/wsys.bb`
+    stayed 0 bytes and not one pixel was stored** (`sdlpong`: 0 bytes at
+    4 MiB, 132,710,628 with no cap). Cap is 256 MiB now.
+  - **A spin and a park are identical in every column the sweep had.** THE
+    IDLE CENSUS could not have been caught here and a fix for it cannot be
+    seen here — same status, same output, same wall clock. There is a `cpu`
+    column now, and the summary lists anything at ≥80% of its own wall clock.
+    It found `user/watch.ad` busy-waiting on `sys_get_jiffies` — the identical
+    loop the census fixed in `sleep` and left behind here — in the first
+    summary it ever printed: `watch -n 1 /bin/uptime`, cpu 1.0s of 1.0s wall,
+    now 0.0s of 1.0s. `sleep 1` reading 0.0/1.0 is the standing sentinel that
+    the census fix has not regressed. A row killed at the timeout reports `-`,
+    not 0.0: `unshare --kill-child` SIGKILLs the subtree and nothing waits for
+    it, so its rusage is never folded up, and "0.0" there would read as "this
+    daemon used no cpu".
+  - **`/dev/reboot`, `poweroff` and `halt` are class `unsafe`** and the sweep
+    declines to run them by design, so that whole landing is invisible to this
+    instrument on purpose.
+  **+32, reconciling exactly (23 + 8 + 1).** Twenty-three rows are correct
+  programs correctly refusing, now `EXPECTED_FAIL` with a REASON PER ROW in
+  `tests/linux/runsweep_expected_fail.tsv` — sixteen chrome-spawned overlays
+  whose own library (`lib/hamwid.ad`) says "the compositor allocates it and
+  spawns this program into it ... the caller's only correct response is to
+  stop with a non-zero exit", plus `login`, `getty`, `su`, `useradd`,
+  `crontab`, `httpd_worker` and `wakelat_echo`. Eight are recipes that were
+  asking the wrong question (`ac` handed prose to compile; `rm` handed a path
+  that must not exist; `inflate_host`, `mp3decode_host`, `hamview_zoom_host`,
+  `hamvideoscene_host`, `hamsdl_image_host`, `hamfmscene_host` and
+  `scene_raster_host` handed nothing, the wrong file type, or one argument
+  short). One is `hamimgscene`, freed by the cap. `net9_host` fetches a LIVE
+  web page and is class `net`, so it leaves the DENOMINATOR rather than
+  joining the numerator: 329 → 328.
+  `umdf_host` is `EXIT_NONZERO` in BOTH runs and so moves nothing, but for a
+  different reason each time: it used to be handed a text file as its `.ko`,
+  and now runs its own `selftest-dma` — whose failure path **printed "dma
+  alloc FAILED" and exited 0**, as did all three of its self-tests. That is a
+  fix the headline cannot show, which is the argument for reading rows.
+  What is left unhealthy is 29 `EXIT_NONZERO` and 2 `TIMEOUT`, and they are
+  now almost entirely REAL GAPS named by the program: no `/dev/audioctl`,
+  `/dev/vt/ctl`, `/proc/kmsg`, `/proc/svc`, `/proc/tasks`, `/proc/oops`,
+  `/dev/firewall`, `/dev/keymap`, no `sys_srv_open`, no `/proc/self/ctl`
+  nice control, and five scene clients that want a compositor the sweep does
+  not run (`hamlock`, `hampanelscene`, `hamshotui`, `hamtoast`, `wsyswl` —
+  these five could become real DREW_WINDOW rows by starting `wsysd` inside the
+  jail, which is the obvious next improvement to the harness).
+  Also found by reading OUTPUT rather than verdicts, because no exit status
+  could have caught them: **`nproc` printed `1` on a twelve-core machine**
+  (Linux `/proc/cpuinfo` has no `cpus_online:` field, so the fallback fired
+  silently — now it counts `processor` lines and says so on stderr if it can
+  do neither), and **`/dev/auth` accepted a verb it has never served** — any
+  line that is not `user` or `pass` fell through and the write returned "all
+  your bytes were accepted", which is how `passwd` came to report "not
+  authorised, or no such user" for `setpass`, a verb that does not exist on
+  this port. Unknown verb is EINVAL now and `passwd` names the real gap.
+* The previous score was **261 healthy / 325 runnable**, and it was
+  MEASURED rather than a floor: the full sweep was re-run end to end
   under the 12 s GUI timeout, so the ~85 unre-measured GUI rows are settled
   and `wakelat_echo` and `hamgame_mixer_demo` are examined. The score the
   sweep prints is also the score it computes — `summary.txt` has a `headline`
