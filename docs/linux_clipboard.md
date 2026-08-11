@@ -381,6 +381,68 @@ talks to is an X server over a unix socket at a path; Xwayland's difference —
 that it is itself a Wayland client — is on the far side of the server, in the
 pixels. Nothing in the selection protocol changes.
 
+`tests/linux/xsnarf_ondevice.sh` — **8 assertions, 8 PASS, in the VM**, and
+the assertion is a **mouse**. Offscreen proof is not on-device proof, and what
+is only true on device is the boundary:
+
+```
+the namespace                    out here (root, the Hamnix side)
+-----------------------------    -------------------------------------------
+Xvfb :0                          /bin/xsnarfd /n/debian/tmp/.X11-unix/X0
+  socket /tmp/.X11-unix/X0  <--- THE SAME INODE, by its other name
+xterm, xdotool                   /dev/snarf, over /srv/snarf - which the
+                                 namespace description does NOT bind in
+```
+
+A **triple-click** in a real Debian `xterm` makes xterm own `PRIMARY`, and
+`cat /dev/snarf.primary` out here then prints the line that was on that xterm's
+screen. A **middle-click** makes xterm ask the bridge for the bytes and feed
+them to the shell it is running, which writes
+`PASTED:[PASTE-ME-FROM-HAMNIX-9f3a]` to a file inside the namespace that this
+side reads. Both are the ordinary X idiom, performed by a Debian binary that
+has never heard of any of this. Also asserted: the bridge is started **before**
+any X server exists and waits for it; a `CLIPBOARD` copy does not disturb
+`PRIMARY`.
+
+```
+[xsnarfd debian] bridging /n/debian/tmp/.X11-unix/X0 <-> /dev/snarf
+[xsnarfd debian] no X server at that socket yet; retrying every second
+[xsnarfd debian] connected: root window 0x1293, resource base 0x4194304, max request 262140 bytes
+[xsnarfd debian] X -> Hamnix: 24 bytes into /dev/snarf.primary
+[xsnarfd debian] Hamnix -> X: owning PRIMARY with 26 bytes
+[xsnarfd debian] Hamnix -> X: owning CLIPBOARD with 22 bytes
+```
+
+It plants nothing with `debugfs`: the rc and the two namespace-side scripts go
+in as a **second cpio segment** and `HAMLINUX_DISTRO_RO=1` puts every guest
+write in a throwaway overlay, so the shared distro media are never touched.
+
+Three things that arm cost, kept because each is a trap for the next person:
+`matchbox` **maximises** the window, so the `-geometry` asked for is not where
+the text is — the first run triple-clicked a blank line and faithfully pulled
+the one byte a blank line's selection is; the Debian medium has no
+`xfonts-base`, so `xterm` needs `-fa/-fs` or it dies naming a font that is not
+there; and a `sed` address whose marker contained a path reported **empty**
+while the log plainly held the answer.
+
+**The desktop still comes up with two bridges started at boot** —
+`docs/screenshots/linux/clipboard-bridge-desktop.png`, a full VM boot with the
+generated `/etc/rc.distros-wl` running a `wsyswl` *and* an `xsnarfd` per
+distribution:
+
+```
+[rc.5] compositor started
+[rc.5] desktop backdrop started
+[rc.5] panel started
+[rc.5] wayland server for debian
+[rc.5] clipboard bridge for debian
+[rc.5] wayland server for alpine
+[rc.5] clipboard bridge for alpine
+[rc.5] desktop up
+```
+
+`tests/linux/snarf_device.sh` is still **23/23** with `sys_unix_connect` added.
+
 ### 6.4 Two defects worth keeping written down
 
 Both were found by measurement against a real X server, neither by reading.
