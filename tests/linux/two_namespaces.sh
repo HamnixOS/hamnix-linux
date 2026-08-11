@@ -105,6 +105,11 @@ HAMLINUX_RC="$WORK/rc.boot" scripts/hamlinux_image.sh > "$WORK/build.log" 2>&1 |
 
 echo "[twons] booting (up to ${WAIT}s)"
 ( sleep "$((WAIT + 10))" ) | timeout "$((WAIT + 5))" \
+    # Read-only distro media: this test only READS the two namespaces, and
+    # several agents may be booting VMs against the same images at once.
+    # Without it QEMU's write lock makes the second run fail with something
+    # that looks nothing like contention.
+    HAMLINUX_DISTRO_RO=1 \
     scripts/hamlinux_vm.sh script --timeout "$WAIT" > "$WORK/boot.log" 2>&1
 
 echo

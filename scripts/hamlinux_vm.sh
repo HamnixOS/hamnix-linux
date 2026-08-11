@@ -104,8 +104,28 @@ COMMON+=(
 # virtio-blk disk and mounted by `bind '#distro' /n/distro`. Keeping it on a
 # SEPARATE volume is the point: nothing Debian installs can reach the Hamnix
 # filesystem.
+# CONCURRENT RUNS. QEMU takes a write lock on every -drive, so two VMs sharing
+# a distro image collide -- "Failed to get \"write\" lock" -- and the second one
+# does not start. That is not hypothetical: with several agents each booting
+# VMs against the same tree, it is the normal case, and the failure looks
+# nothing like resource contention.
+#
+# HAMLINUX_DISTRO_RO=1 attaches the distro media through `snapshot=on`, so
+# QEMU writes to a throwaway overlay and the backing file is opened read-only.
+# Any number of VMs can then share one image, and none of their writes
+# survive -- which is exactly right for a test that only wants to READ the
+# namespace, and exactly wrong for `apt install`, so it is opt-in.
+# snapshot=on alone is NOT enough: QEMU still takes a SHARED write lock on the
+# backing file, which an exclusive lock from another VM refuses. file.locking=off
+# is what actually lets several readers share it, and it is safe here precisely
+# BECAUSE snapshot=on means nothing writes to the backing -- every guest write
+# lands in its own throwaway overlay. Using file.locking=off without snapshot=on
+# would be the unsafe combination and is not what this does.
+DISTRO_RO=""
+[ "${HAMLINUX_DISTRO_RO:-0}" = "1" ] && DISTRO_RO=",snapshot=on,file.locking=off"
+
 if [ -f "$IMG/distro.ext4" ]; then
-    COMMON+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe")
+    COMMON+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe$DISTRO_RO")
 fi
 
 # The SECOND distribution namespace, on its own volume for the same reason.
@@ -114,7 +134,7 @@ fi
 # drive above or below this line cannot silently make `enter alpine` enter
 # Debian. That was the whole reason for labels -- see etc/distros.linux.
 if [ -f "$IMG/alpine.ext4" ]; then
-    COMMON+=(-drive "file=$IMG/alpine.ext4,if=virtio,format=raw,cache=unsafe")
+    COMMON+=(-drive "file=$IMG/alpine.ext4,if=virtio,format=raw,cache=unsafe$DISTRO_RO")
 fi
 
 # A blank disk to INSTALL onto, when one has been made. This is what turns the
@@ -226,10 +246,10 @@ case "$MODE" in
     )
     if [ -w /dev/kvm ]; then VENUS+=(-enable-kvm -cpu host); else VENUS+=(-cpu max); fi
     if [ -f "$IMG/distro.ext4" ]; then
-        VENUS+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe")
+        VENUS+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe$DISTRO_RO")
     fi
     if [ -f "$IMG/alpine.ext4" ]; then
-        VENUS+=(-drive "file=$IMG/alpine.ext4,if=virtio,format=raw,cache=unsafe")
+        VENUS+=(-drive "file=$IMG/alpine.ext4,if=virtio,format=raw,cache=unsafe$DISTRO_RO")
     fi
     exec qemu-system-x86_64 "${VENUS[@]}" "$@"
     ;;
@@ -264,10 +284,10 @@ case "$MODE" in
     )
     if [ -w /dev/kvm ]; then DISK+=(-enable-kvm -cpu host); else DISK+=(-cpu max); fi
     if [ -f "$IMG/distro.ext4" ]; then
-        DISK+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe")
+        DISK+=(-drive "file=$IMG/distro.ext4,if=virtio,format=raw,cache=unsafe$DISTRO_RO")
     fi
     if [ -f "$IMG/alpine.ext4" ]; then
-        DISK+=(-drive "file=$IMG/alpine.ext4,if=virtio,format=raw,cache=unsafe")
+        DISK+=(-drive "file=$IMG/alpine.ext4,if=virtio,format=raw,cache=unsafe$DISTRO_RO")
     fi
     if [ "$MODE" = disk-gpu ]; then
         exec qemu-system-x86_64 "${DISK[@]}" -display gtk -serial mon:stdio "$@"
