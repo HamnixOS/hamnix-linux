@@ -397,15 +397,173 @@ def _host_blit_image(slot: int32, dx: int32, dy: int32, dw: int32, dh: int32):
     sh: int32 = host_img_h[u]
     if sw <= 0 or sh <= 0:
         return
+    # dw/dh <= 0 means natural size, which is the source's own dimensions.
+    cw: int32 = dw
+    ch: int32 = dh
+    if cw <= 0:
+        cw = sw
+    if ch <= 0:
+        ch = sh
+    _host_cov_add(dx, dy, cw, ch)
     vk2d_raster_blit(_host_cbase(), cast[uint64](host_w), cast[uint64](host_h),
                      src, cast[uint64](sw), cast[uint64](sh),
                      cast[int64](dx), cast[int64](dy),
                      cast[int64](dw), cast[int64](dh), 0, 0, 0, 0)
 
 
+# ================================================================== *
+# COVERAGE: does the committed scene actually COVER the window it is in?
+# ==================================================================
+#
+# WHY THIS EXISTS. The machine owner found two windows by LOOKING at a
+# screenshot -- hamimgscene painting 320x260 of a 640x480 window, and the
+# panel's Applications dropdown painting a 136 px menu column into a window
+# that is the full width of the display. Both reached the framebuffer as a
+# large black rectangle, because user/wsysd.ad clears a window's colour image
+# to opaque black before rasterizing and then blits the WHOLE w*h rect. Both
+# were invisible to every gate in the tree: the display list was right, the
+# ops all drew, every layer returned success. The detection mechanism was a
+# human's eye, and that is not a mechanism.
+#
+# WHAT IS MEASURED, EXACTLY. Every op that puts pixels down passes through
+# one of the four helpers below, and each one unions its destination rect
+# into a PER-ROW interval [x0,x1). After a rasterize, a row is COVERED iff
+# its interval spans the whole window width. hamui_host_uncovered_rows()
+# counts the rows that do not.
+#
+# WHAT THIS DELIBERATELY DOES NOT CLAIM. A per-row interval is a UNION, so
+# two disjoint spans on one row read as one span covering the gap between
+# them: an interior hole with paint on both sides is NOT reported. The
+# measure is therefore CONSERVATIVE -- it never accuses a scene that is fine,
+# and it can miss a hole that is. It catches the shape both real defects had
+# (a band of rows with no paint at all, or paint that stops short of the
+# right edge) at a cost of two int32 per row and one loop per op.
+#
+# THIS MODULE IS PURE -- no extern, no syscall -- so it cannot print, exactly
+# as the image-miss table above cannot. It RECORDS; the caller reports. The
+# caller is user/wsysd.ad, which already reads hamui_host_image_misses()
+# after every rasterize and names each miss once.
+host_cov_x0: Array[1080, int32]         # HOST_MAX_H; leftmost painted x
+host_cov_x1: Array[1080, int32]         # HOST_MAX_H; rightmost painted x + 1
+host_cov_on: int32 = 0                  # 1 while a rasterize is being tracked
+
+# Alpha byte of the clear that opens the NEXT rasterize (RGB is always 0).
+# 255 = opaque black, the behaviour every caller has always had; 0 = leave
+# every unpainted pixel transparent, for a caller that presents the window
+# ALPHA-KEYED. It is consumed by the next hamui_host_begin/-_into and reset,
+# so it can never leak into the window after it.
+host_clear_a: uint32 = 255
+
+
+# Ask for the NEXT rasterize's clear to be transparent (a == 0) or opaque
+# (anything else). This is the half of devwsys's `keyed 1` ctl verb that
+# lives in the rasterizer: sys/src/9/port/devwsys.ad:8085 documents the verb
+# as existing FOR "a decorate-0 client (e.g. hampanelscene) whose window rect
+# is LARGER than the pixels it actually paints -- a panel that GROWS
+# full-width to host an Applications dropdown, then paints only the bar + the
+# menu card and leaves the rest of the grown band UNPAINTED (alpha-0 from the
+# per-frame memset)". user/hampanelscene.ad already writes `keyed 1` on every
+# panel window it allocates; this port's /dev/wsys does not implement the verb
+# yet, and the black band to the right of the Applications menu in
+# docs/screenshots/linux/distro-menu-debian.png is what that costs.
+def hamui_host_set_clear_alpha(a: int32):
+    if a == 0:
+        host_clear_a = 0
+        return
+    host_clear_a = 255
+
+
+def _host_cov_reset(rows: int32):
+    y: int32 = 0
+    while y < rows and cast[uint64](y) < HOST_MAX_H:
+        u: uint64 = cast[uint64](y)
+        host_cov_x0[u] = 0
+        host_cov_x1[u] = 0
+        y = y + 1
+
+
+# Union the destination rect (x,y,w,h) into the per-row coverage, clipped to
+# the window. Called by every painting helper; cheap enough to be
+# unconditional (one iteration per row the op actually touches).
+def _host_cov_add(x: int32, y: int32, w: int32, h: int32):
+    if host_cov_on == 0:
+        return
+    if w <= 0 or h <= 0:
+        return
+    x0: int32 = x
+    x1: int32 = x + w
+    y0: int32 = y
+    y1: int32 = y + h
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > host_w:
+        x1 = host_w
+    if y1 > host_h:
+        y1 = host_h
+    if x1 <= x0 or y1 <= y0:
+        return
+    r: int32 = y0
+    while r < y1:
+        u: uint64 = cast[uint64](r)
+        if host_cov_x1[u] <= host_cov_x0[u]:
+            host_cov_x0[u] = x0
+            host_cov_x1[u] = x1
+        else:
+            if x0 < host_cov_x0[u]:
+                host_cov_x0[u] = x0
+            if x1 > host_cov_x1[u]:
+                host_cov_x1[u] = x1
+        r = r + 1
+
+
+# Rows of the last rasterize whose paint does not span the window width.
+# 0 means the scene covers its window; anything else is the number of rows
+# that reach the screen partly or wholly as the compositor's clear colour.
+def hamui_host_uncovered_rows() -> int32:
+    n: int32 = 0
+    r: int32 = 0
+    while r < host_h:
+        u: uint64 = cast[uint64](r)
+        if host_cov_x0[u] > 0 or host_cov_x1[u] < host_w:
+            n = n + 1
+        r = r + 1
+    return n
+
+
+# The largest rectangle [0,0,W,H) that the last rasterize is known to have
+# covered completely: W is the narrowest right edge over the leading covered
+# rows, H is how many rows from the top are covered from x=0. Together with
+# hamui_host_width/height these are what a report says out loud -- "this
+# scene covers 320x260 of a 640x480 window" is actionable where "some rows
+# were short" is not.
+def hamui_host_covered_w() -> int32:
+    w: int32 = host_w
+    hh: int32 = hamui_host_covered_h()
+    r: int32 = 0
+    while r < hh:
+        u: uint64 = cast[uint64](r)
+        if host_cov_x1[u] < w:
+            w = host_cov_x1[u]
+        r = r + 1
+    return w
+
+
+def hamui_host_covered_h() -> int32:
+    r: int32 = 0
+    while r < host_h:
+        u: uint64 = cast[uint64](r)
+        if host_cov_x0[u] > 0 or host_cov_x1[u] <= 0:
+            return r
+        r = r + 1
+    return host_h
+
+
 # Solid opaque rectangle fill via the vk2d fill op (alpha 0xFF).
 def _fill_rect(x: int32, y: int32, w: int32, h: int32, r: uint8, g: uint8,
                b: uint8):
+    _host_cov_add(x, y, w, h)
     vk2d_raster_fill_rect(_host_cbase(), cast[uint64](host_w),
                           cast[uint64](host_h), cast[int64](x), cast[int64](y),
                           cast[int64](w), cast[int64](h),
@@ -422,6 +580,7 @@ def _fill_rect_a(x: int32, y: int32, w: int32, h: int32, r: uint8, g: uint8,
                  b: uint8, a: uint8):
     if a == 0:
         return
+    _host_cov_add(x, y, w, h)
     vk2d_raster_fill_rect_alpha(_host_cbase(), cast[uint64](host_w),
                                 cast[uint64](host_h), cast[int64](x),
                                 cast[int64](y), cast[int64](w), cast[int64](h),
@@ -436,6 +595,10 @@ def _fill_rect_a(x: int32, y: int32, w: int32, h: int32, r: uint8, g: uint8,
 # the exact same pixels; rr<=0 falls through to a plain source-over rectangle.
 def _fill_roundrect(x: int32, y: int32, w: int32, h: int32, rad: int32,
                     corners: int32, r: uint8, g: uint8, b: uint8, a: uint8):
+    # The AA corners nibble a few pixels out of the rect; counting the full
+    # rect as covered is the conservative direction (a rounded card that fills
+    # its window is not accused of leaving its four corners bare).
+    _host_cov_add(x, y, w, h)
     vk2d_raster_fill_roundrect(_host_cbase(), cast[uint64](host_w),
                                cast[uint64](host_h), cast[int64](x),
                                cast[int64](y), cast[int64](w), cast[int64](h),
@@ -723,11 +886,20 @@ def _host_begin_common(w: int32, h: int32):
     if cast[uint64](hh) > HOST_MAX_H:
         hh = cast[int32](HOST_MAX_H)
     host_w = ww
+    # ...and so does the coverage. Reset AFTER the clamp so it clears exactly
+    # the rows this rasterize can touch, not the whole 1080-row ceiling.
+    _host_cov_reset(hh)
+    host_cov_on = 1
     host_h = hh
-    # Clear the vk colour image to OPAQUE BLACK (0,0,0,255) via the vk2d fill op
-    # — the RGB channels match the old byte-wise zero of the RGB framebuffer.
+    # Clear the vk colour image to BLACK at host_clear_a — opaque (255) by
+    # default, which is the byte-wise zero of the old RGB framebuffer plus a
+    # full alpha byte. A caller that presents the result ALPHA-KEYED asks for
+    # 0 first (see hamui_host_set_clear_alpha); every pixel no op paints then
+    # carries alpha 0 and can be skipped instead of blitted as black.
     vk2d_raster_fill_rect(_host_cbase(), cast[uint64](ww), cast[uint64](hh),
-                          0, 0, cast[int64](ww), cast[int64](hh), 0x000000FF)
+                          0, 0, cast[int64](ww), cast[int64](hh),
+                          cast[uint32](host_clear_a))
+    host_clear_a = 255                  # one rasterize; never sticky
 
 
 # Parse the scene buffer produced by the last hamscene_* build pass and draw
