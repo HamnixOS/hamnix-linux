@@ -19,6 +19,7 @@ extern def sys_yield() -> int32
 extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> int32
 
 from lib.hamui import hamscene_commit
+from lib.hamsceneloop import hamscene_park, HAMSCENE_IDLE_MS
 from lib.hamcalcore import hamcal_set_today, hamcal_set_now, hamcal_set_uptime, \
     hamcal_build_scene, hamcal_click, hamcal_key_line, hamcal_sw_running, \
     parse_pointer, _cal_slen, _cal_u64_to_dec
@@ -240,7 +241,11 @@ def main() -> int32:
 
         if changed != 0:
             emit_scene(wid)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK on /keys. The 30 ms "cooperative yield window" this replaces
+        # was a busy spin (THE IDLE CENSUS, HANDOFF §0): 14.4 s of cpu in a
+        # 15.7 s run. The stopwatch above repaints on a CENTISECOND change, so
+        # its cadence is bounded by this cap -- 16 ms, shorter than the 30 ms
+        # window it replaces, so the stopwatch ticks no more coarsely than it
+        # did.
+        hamscene_park(kfd, HAMSCENE_IDLE_MS)
     return 0

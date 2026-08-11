@@ -31,6 +31,11 @@ extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_get_jiffies() -> uint64
 extern def sys_yield() -> int32
 extern def sys_waitpid(pid: int32) -> int64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+# Top-level BSS, not a frame local. nfds 0 makes sys_waitfds a plain timed
+# wait, so nothing is ever read out of it -- the call still needs an address.
+_s_wait_fds: Array[4, int32]
 
 
 HZ_JIF: uint64 = 100                          # kernel jiffies/second
@@ -71,12 +76,37 @@ def _s_parse_u64(s: Ptr[uint8]) -> uint64:
     return v
 
 
-# Cooperative sleep: yields until at least `secs` seconds (in jiffies) have
-# passed since `start_jif`. Cheap and good enough at our 100 Hz cadence.
+# SLEEP until at least `secs` seconds (in jiffies) have passed since
+# `start_jif`.
+#
+# This was "cooperative sleep ... cheap and good enough at our 100 Hz
+# cadence":
+#
+#     while sys_get_jiffies() < target:
+#         sys_yield()
+#
+# It is not cheap and it is not a sleep. A yield hands the core to whoever
+# else wants it and takes it straight back, so the screensaver daemon burned
+# A FULL CORE for its entire five-minute idle window -- 14.3 s of cpu in a
+# 15.6 s run -- and it is running the whole time the desktop is up, doing
+# nothing but waiting to do nothing. That is THE IDLE CENSUS's third bullet
+# (HANDOFF §0) in a daemon whose only job is to wait.
+#
+# nfds 0 makes sys_waitfds a plain timed wait. It is re-armed in a loop
+# because the kernel may return early (a signal, a short sleep), and the
+# contract of this function is "not before `target`", which the loop keeps
+# exactly. The cap of one second per park bounds nothing that matters here
+# and keeps the wait responsive to a future wake source.
 def _s_wait_until(start_jif: uint64, secs: uint64):
     target: uint64 = start_jif + secs * HZ_JIF
     while sys_get_jiffies() < target:
-        sys_yield()
+        rem: uint64 = target - sys_get_jiffies()
+        ms: int64 = cast[int64](rem * 10)
+        if ms > 1000:
+            ms = 1000
+        if ms < 1:
+            ms = 1
+        sys_waitfds(&_s_wait_fds[0], 0, ms)
 
 
 # Spawn /bin/hamlock and block until it exits. Returns the child's status.

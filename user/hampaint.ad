@@ -59,6 +59,11 @@ extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 extern def sys_mkdir(path: Ptr[char]) -> int32
 extern def sys_yield() -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+# Wait set for the idle park at the bottom of main(). Top-level BSS, not a
+# frame local -- see the note in lib/hamscreen.ad.
+_hp_wait: Array[4, int32]
 
 
 # ---- module buffers -------------------------------------------------
@@ -455,7 +460,34 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     _hp_keys_fd = sys_open(cast[Ptr[char]](&_hp_path_buf[0]))
 
     while True:
-        sys_yield()
+        # PARK on this window's /event and /keys. The loop was
+        #
+        #     while True:
+        #         sys_yield()
+        #         _poll_events(wid)
+        #         _poll_keys(wid)
+        #
+        # and a yield is not a wait, so hampaint polled two non-blocking fds
+        # as fast as the scheduler would let it: 14.4 s of cpu in a 15.7 s
+        # run with nothing being drawn (THE IDLE CENSUS, HANDOFF §0).
+        #
+        # /keys is waitfds-wake-wired, so a keystroke wakes this in ~0 ms.
+        # /event (pointer) has no wake hook, so it is re-polled at the 16 ms
+        # timeout -- and DRAG SMOOTHNESS is the thing to watch here, since
+        # hampaint draws strokes from pointer motion. 16 ms is one 60 Hz
+        # frame: the compositor cannot deliver motion faster than it
+        # composites, so the stroke is sampled at least once per displayed
+        # frame, which is as smooth as it can be seen to be.
+        # /event is deliberately NOT in the wait set: its readable predicate
+        # reports class-0 not-ready (see lib/hamsceneloop.ad), so adding it
+        # could only ever be a no-op at best and an instant-return spin at
+        # worst. It is re-polled on the timeout, which is what the timeout is
+        # for.
+        nw: uint64 = 0
+        if _hp_keys_fd >= 0:
+            _hp_wait[nw] = _hp_keys_fd
+            nw = nw + 1
+        sys_waitfds(&_hp_wait[0], nw, 16)
         _poll_events(wid)
         _poll_keys(wid)
 

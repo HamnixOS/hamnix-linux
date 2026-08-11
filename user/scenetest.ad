@@ -24,7 +24,12 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_get_jiffies() -> uint64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> int32
+
+# Top-level BSS, not a frame local. nfds 0 makes sys_waitfds a plain timed
+# wait, so nothing is ever read out of it -- the call still needs an address.
+_st_wait: Array[4, int32]
 
 
 def _slen(s: Ptr[uint8]) -> uint64:
@@ -304,7 +309,16 @@ def main() -> int32:
         if rfd2 >= 0:
             _writeall(rfd2, cast[Ptr[uint8]]("commit\n"))
             sys_close(rfd2)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 20:
-            pass
+        # PARK for 200 ms between polls. This was
+        #
+        #     s2 = sys_get_jiffies()
+        #     while sys_get_jiffies() - s2 < 20:
+        #         pass
+        #
+        # a BARE spin on the jiffy clock with not even a sys_yield in it --
+        # the same shape as crond's, and it cost 14.9 s of cpu in a 16.8 s
+        # run (THE IDLE CENSUS, HANDOFF §0). nfds 0 is a plain timed wait and
+        # the 200 ms interval is unchanged, so the gate's event-routing proof
+        # sees exactly the same poll cadence it saw before.
+        sys_waitfds(&_st_wait[0], 0, 200)
     return 0

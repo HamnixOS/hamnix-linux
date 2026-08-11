@@ -36,6 +36,7 @@ extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> in
 from lib.hamscene import hamscene_begin, hamscene_fill, hamscene_glyphs, \
     hamscene_glyphs_bold, hamscene_headerbar
 from lib.hamui import hamscene_commit
+from lib.hamsceneloop import hamscene_park
 
 
 _hi_WIN_W: int32 = 640
@@ -465,7 +466,15 @@ def main() -> int32:
             sys_close(efd)
         if changed != 0:
             _hi_emit_scene(wid)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 2:
-            sys_yield()
+        # PARK for 20 ms. This was `while sys_get_jiffies() - s2 < 2:
+        # sys_yield()` -- a spin, not a sleep (THE IDLE CENSUS, HANDOFF §0),
+        # 14.4 s of cpu in a 15.8 s run.
+        #
+        # The interval is deliberately UNCHANGED at 20 ms and this stays a
+        # PLAIN TIMED WAIT rather than a park on /keys: this program is the
+        # input INSPECTOR, and it reads its key events out of the window
+        # /event stream on purpose (see the header) so that what it displays
+        # is exactly what the compositor routed. Opening /keys to get an
+        # early wake would change the thing being inspected.
+        hamscene_park(0 - 1, 20)
     return 0

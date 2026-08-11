@@ -58,6 +58,7 @@ extern def sys_pipechan() -> int32
 extern def sys_fdbind(pid: int32, fdnum: int32, kind: int32, slot: int32) -> int32
 
 from lib.p9 import spawn, p9_listdir
+from lib.hamsceneloop import hamscene_park, HAMSCENE_IDLE_MS
 
 # Spawn stdio-namespace sentinel + sys_fdbind kinds (mirrors hamtermscene).
 # The install child's stdout AND stderr are routed through a pipe we drain
@@ -1452,7 +1453,10 @@ def main() -> int32:
                     changed = 1
         if changed != 0:
             emit_scene(wid)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK on /keys. The 30 ms "cooperative yield window" here was a busy
+        # spin (THE IDLE CENSUS, HANDOFF §0) -- 14.4 s of cpu in a 15.8 s run
+        # -- in the INSTALLER, which is the longest-lived window on the disk
+        # this port ships. /keys is waitfds-wake-wired, so typing into the
+        # hostname / password fields wakes the park immediately.
+        hamscene_park(kfd, HAMSCENE_IDLE_MS)
     return 0

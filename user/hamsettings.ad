@@ -28,6 +28,7 @@ extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> in
 
 from lib.hamui import hamscene_begin, hamscene_fill, hamscene_rect, \
     hamscene_stroke, hamscene_glyphs, hamscene_panel_button, hamscene_commit
+from lib.hamsceneloop import hamscene_park
 
 
 def _slen(s: Ptr[uint8]) -> uint64:
@@ -933,7 +934,10 @@ def main() -> int32:
                     i = i + 1
         if changed != 0:
             emit_scene(wid)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK for 30 ms, the same interval the "cooperative yield window"
+        # above it nominally waited and in fact SPUN (THE IDLE CENSUS,
+        # HANDOFF §0): 14.4 s of cpu in a 15.7 s run. This client is
+        # pointer-only -- it opens /event and never /keys -- so there is no fd
+        # to wake it early and hamscene_park(-1, ms) is a plain timed wait.
+        hamscene_park(0 - 1, 30)
     return 0

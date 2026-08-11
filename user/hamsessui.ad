@@ -41,6 +41,7 @@ extern def sys_exit(code: uint64)
 
 from lib.hamui import hamscene_begin, hamscene_fill, hamscene_rect, \
     hamscene_glyphs, hamscene_stroke, hamscene_panel_button, hamscene_commit
+from lib.hamsceneloop import hamscene_park, HAMSCENE_IDLE_MS
 from lib.p9 import spawn
 
 
@@ -438,8 +439,9 @@ def main() -> int32:
                     i = i + 1
         if changed != 0:
             emit_scene(wid)
-        # cooperative yield window (matches hamcalcscene); /event read blocks.
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK on /keys. This was a 30 ms "cooperative yield window" -- a
+        # jiffy loop calling sys_yield() -- and it burned 14.4 s of cpu in a
+        # 15.7 s run: a yield is not a wait (THE IDLE CENSUS, HANDOFF §0).
+        # /keys is waitfds-wake-wired so Escape still lands instantly.
+        hamscene_park(kfd, HAMSCENE_IDLE_MS)
     return 0

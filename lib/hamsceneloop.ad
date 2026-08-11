@@ -43,13 +43,21 @@ HAMSCENE_IDLE_MS: int64 = 16
 
 
 # Park the caller off the runqueue until a key lands on `kfd` (instant wake)
-# or `timeout_ms` elapses (bounding the non-blocking /event re-poll). Falls
-# back to a plain cooperative yield when there is no keys fd (headless /
-# pre-window bring-up) so a keyless app never busy-spins either.
+# or `timeout_ms` elapses (bounding the non-blocking /event re-poll).
+#
+# WITH NO KEYS FD this used to `sys_yield()`, under a comment claiming that
+# was how "a keyless app never busy-spins either". IT SPINS. A yield hands
+# the core to whoever else wants it and takes it straight back, so a caller
+# whose loop is `poll /event; hamscene_park(-1, ms)` runs that loop as fast
+# as the scheduler will let it and burns a whole core -- the third bullet of
+# THE IDLE CENSUS (HANDOFF §0), hiding inside the helper written to cure it.
+# nfds 0 makes sys_waitfds a PLAIN TIMED WAIT (what wsysd's frame loop and
+# lib/hamscreen.ad's retry both use), so the keyless caller now sleeps for
+# exactly the poll interval it asked for instead of spinning through it.
 def hamscene_park(kfd: int32, timeout_ms: int64):
+    wfds: Array[1, int32]
     if kfd >= 0:
-        wfds: Array[1, int32]
         wfds[0] = kfd
         sys_waitfds(&wfds[0], 1, timeout_ms)
         return
-    sys_yield()
+    sys_waitfds(&wfds[0], 0, timeout_ms)

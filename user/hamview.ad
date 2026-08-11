@@ -72,6 +72,12 @@ extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 extern def sys_yield() -> int32
+extern def sys_get_jiffies() -> uint64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+# Wait set for the idle park in _loop(). Top-level BSS, not a frame local.
+# nfds is 0 there (a plain timed wait) but the call still needs an address.
+_hv_wait: Array[4, int32]
 
 # ====================================================================
 # Caps (no malloc — every buffer is a fixed module global).
@@ -819,12 +825,39 @@ def _open_events(wid: int32):
 
 # Event/idle loop — drain scroll-wheel events (re-render on a zoom change) and
 # re-present periodically so the frame survives an expose/damage from other
-# windows, yielding the CPU between passes.
+# windows, PARKING between passes.
+#
+# TWO SEPARATE SPINS LIVED HERE and together they cost 14.4 s of cpu in a
+# 15.7 s run — hamview burned a whole core displaying a still image (THE IDLE
+# CENSUS, HANDOFF §0):
+#
+#   1. `sys_yield()` is not a wait. It hands the core to whoever else wants it
+#      and takes it straight back, so this loop ran at scheduler speed.
+#   2. Worse, the else-branch re-published the WHOLE v2 backbuffer — a
+#      `buffer 0 0 W H` scene verb plus a commit, i.e. a full recomposite —
+#      on EVERY one of those passes. The re-present exists to survive damage
+#      from other windows; that is a once-in-a-while concern, not a
+#      per-iteration one.
+#
+# Now: park 30 ms (the /event ring has no waitfds wake hook, so pointer/wheel
+# is polled at that cadence — a 30 ms scroll response is well inside what a
+# wheel notch feels like), repaint IMMEDIATELY on a zoom change exactly as
+# before, and re-present the undamaged frame at most twice a second. The
+# pixels published are identical either way; only how often the identical
+# bytes are re-sent changes.
+REPRESENT_JIFFIES: uint64 = 50                     # re-publish at most 2 Hz
+
+
 def _loop(wid: int32):
     _open_events(wid)
+    next_present: uint64 = 0
     while True:
-        sys_yield()
+        sys_waitfds(&_hv_wait[0], 0, 30)
         if _poll_events() != 0:
             _repaint()
+            next_present = sys_get_jiffies() + REPRESENT_JIFFIES
         else:
-            _present_v2(wid)
+            now_jif: uint64 = sys_get_jiffies()
+            if now_jif >= next_present:
+                next_present = now_jif + REPRESENT_JIFFIES
+                _present_v2(wid)

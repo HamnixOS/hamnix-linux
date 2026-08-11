@@ -3110,10 +3110,12 @@ def hamui_wait(extra: Ptr[int32], n_extra: uint64, timeout_ms: int64) -> int64:
             n = n + 1
         k = k + 1
     if n == 0:
-        # No fds to park on (headless / pre-window): fall back to a plain
-        # cooperative yield so we still let peers run.
-        sys_yield()
-        return 0
+        # No fds to park on (headless / pre-window). This was `sys_yield()`,
+        # which is NOT a wait: it hands the core over and takes it straight
+        # back, so a caller looping on hamui_wait with no window yet spins at
+        # scheduler speed. nfds 0 is a plain timed wait -- the same park, just
+        # without anything to be woken early BY.
+        return sys_waitfds(&wfds[0], 0, timeout_ms)
     return sys_waitfds(&wfds[0], n, timeout_ms)
 
 

@@ -21,6 +21,7 @@ extern def sys_yield() -> int32
 extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> int32
 
 from lib.hamui import hamscene_commit
+from lib.hamsceneloop import hamscene_park, HAMSCENE_IDLE_MS
 from lib.hamtextbox import htb_click_count
 from lib.hamnotescore import hamnotes_build_scene, hamnotes_key_line, \
     hamnotes_set_text, hamnotes_text_ptr, hamnotes_len, hamnotes_dirty, \
@@ -424,7 +425,14 @@ def main() -> int32:
                     ei = ei + 1
         if changed != 0:
             emit_scene(wid)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK on /keys instead of spinning a 30 ms "cooperative yield
+        # window". The window was `while sys_get_jiffies() - s2 < 3:
+        # sys_yield()`, which is THE IDLE CENSUS's third bullet (HANDOFF §0)
+        # -- a yield is not a wait -- and the run sweep measured this client
+        # at 14.4 s of cpu in a 15.7 s run. hamscene_park sleeps OFF the
+        # runqueue and /keys is waitfds-wake-wired, so a keystroke wakes it in
+        # ~0 ms: strictly MORE responsive than the spin it replaces, and the
+        # 16 ms cap on the /event (pointer) re-poll is shorter than the 30 ms
+        # it used to be.
+        hamscene_park(kfd, HAMSCENE_IDLE_MS)
     return 0

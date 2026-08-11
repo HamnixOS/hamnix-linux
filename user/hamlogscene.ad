@@ -19,6 +19,7 @@ extern def sys_yield() -> int32
 extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> int32
 
 from lib.hamui import hamscene_commit
+from lib.hamsceneloop import hamscene_park
 from lib.hamlogcore import hamlog_clear, hamlog_add_text, hamlog_build_scene, \
     hamlog_click, hamlog_wheel, hamlog_tail, hamlog_parse_pointer
 
@@ -200,7 +201,14 @@ def main() -> int32:
             changed = 1
         if changed != 0:
             emit_scene(wid)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK for 30 ms. This was `while sys_get_jiffies() - s2 < 3:
+        # sys_yield()`, a busy spin dressed as a sleep (THE IDLE CENSUS,
+        # HANDOFF §0) that cost 14.4 s of cpu in a 15.8 s run.
+        #
+        # This client is POINTER-ONLY -- it never opens /keys, only /event --
+        # so there is no fd to be woken early by, and hamscene_park(-1, ms) is
+        # a plain timed wait. The interval is deliberately the SAME 30 ms the
+        # spin window was, so the `ticks % 60` follow-mode re-slurp above
+        # still fires every ~1.8 s exactly as before.
+        hamscene_park(0 - 1, 30)
     return 0

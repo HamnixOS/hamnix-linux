@@ -53,7 +53,7 @@ from lib.hamui import (
     hamui_statusbar, hamui_treeview, hamui_treeview_add, hamui_treeview_clear,
     hamui_add, hamui_window, hamui_set_size, hamui_set_expand,
     hamui_set_text, hamui_status_set, hamui_step, hamui_take_event,
-    hamui_render, hamui_set_title
+    hamui_render, hamui_set_title, hamui_wait, HAMUI_IDLE_MS
 )
 
 extern def sys_open(path: Ptr[char]) -> int32
@@ -61,6 +61,7 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_yield() -> int32
+extern def sys_get_jiffies() -> uint64
 
 
 # --- tiny stdout helpers (for the boot/diagnostic line) --------------
@@ -82,9 +83,15 @@ PROC_CAP:     uint64 = 8192
 ROWS_VISIBLE: uint64 = 16
 ROW_CAP:      uint64 = 96
 
-# Idle sys_yield iterations between auto-refreshes (mirrors user/top.ad's
-# poll counter — no new time syscalls, just count idle yields).
-REFRESH_YIELDS: uint64 = 200000
+# Auto-refresh cadence, in JIFFIES (100 Hz). This was `REFRESH_YIELDS =
+# 200000`, "idle sys_yield iterations between auto-refreshes ... no new time
+# syscalls, just count idle yields" -- which is only a cadence if the loop
+# spins, and it did: hammon burned 14.4 s of cpu in a 15.7 s run (THE IDLE
+# CENSUS, HANDOFF §0). 200000 turns of a parked loop would be hours, so the
+# counter cannot survive the park and the refresh is timed off the clock
+# instead. sys_get_jiffies is not a new syscall to this tree; it is the one
+# every other loop here already reads.
+REFRESH_JIFFIES: uint64 = 200                 # re-read /proc every 2 s
 
 # /proc read scratch.
 proc_buf:  Array[8192, uint8]
@@ -354,7 +361,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
     # ---- event / refresh loop ---------------------------------------
     running: int32 = 1
-    idle: uint64 = 0
+    next_refresh: uint64 = sys_get_jiffies() + REFRESH_JIFFIES
     while running != 0:
         hamui_step()
         ev: int32 = hamui_take_event()
@@ -363,16 +370,26 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 running = 0
             elif ev == btn_refresh:
                 refresh_all()
-                idle = 0
+                next_refresh = sys_get_jiffies() + REFRESH_JIFFIES
             ev = hamui_take_event()
 
-        # Auto-refresh after a bounded number of idle yields so it is a
-        # live monitor without a dedicated timer syscall.
-        idle = idle + 1
-        if idle >= REFRESH_YIELDS:
-            idle = 0
+        # Auto-refresh on the WALL CLOCK so it is a live monitor. See
+        # REFRESH_JIFFIES for why this is no longer a count of idle yields.
+        now_jif: uint64 = sys_get_jiffies()
+        if now_jif >= next_refresh:
+            next_refresh = now_jif + REFRESH_JIFFIES
             refresh_all()
 
-        sys_yield()
+        # PARK on /keys + /pointer until the next refresh is due, waking
+        # early on a click (Quit / Refresh). This replaces a bare
+        # `sys_yield()` that cost a whole core.
+        wait_ms: int64 = 0
+        if next_refresh > now_jif:
+            wait_ms = cast[int64]((next_refresh - now_jif) * 10)
+        if wait_ms > HAMUI_IDLE_MS:
+            wait_ms = HAMUI_IDLE_MS
+        if wait_ms < 1:
+            wait_ms = 1
+        hamui_wait(cast[Ptr[int32]](0), 0, wait_ms)
 
     return 0

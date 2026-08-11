@@ -40,6 +40,11 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_yield() -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+# Top-level BSS, not a frame local. nfds 0 makes sys_waitfds a plain timed
+# wait, so nothing is ever read out of it -- the call still needs an address.
+_hi_wait: Array[4, int32]
 extern def sys_get_jiffies() -> uint64
 
 from lib.hamscene import hamscene_begin, hamscene_fill, hamscene_glyphs, \
@@ -293,7 +298,16 @@ def main() -> int32:
         _puts(2, "[hamimgscene] FATAL: could not write the scene or commit it\n")
         return 3
     _puts(1, "[hamimgscene] scene window ready with the 32x32 image uploaded\n")
-    # Keep the window alive so the image stays on screen; yield forever.
+    # Keep the window alive so the image stays on screen. This was
+    # `while 1 == 1: sys_yield()` -- "yield forever" -- and it is the purest
+    # example in the tree of THE IDLE CENSUS's third bullet (HANDOFF §0): a
+    # program whose ENTIRE remaining job is to exist, burning a full core to
+    # do it (14.3 s of cpu in a 15.7 s run). A yield is not a wait.
+    #
+    # There is nothing to wake for -- this client has no input at all -- so
+    # nfds 0 with a long timeout is the whole answer: sleep a second, wake,
+    # sleep again. The window stays mapped and the pixels stay on screen
+    # because the compositor owns them, not because this process is running.
     while 1 == 1:
-        sys_yield()
+        sys_waitfds(&_hi_wait[0], 0, 1000)
     return 0

@@ -50,6 +50,7 @@ extern def sys_exit(code: uint64)
 from lib.hamui import hamscene_begin, hamscene_fill, hamscene_glyphs, \
     hamscene_stroke, hamscene_commit
 from lib.hamscreen import hamscreen_dims_or_fail
+from lib.hamsceneloop import hamscene_park
 from lib.passwd.passwd import passwd_parse, passwd_lookup_by_uid, \
     passwd_entry_name
 
@@ -364,9 +365,20 @@ def main() -> int32:
     while True:
         r: int64 = sys_read(kfd, &kbuf[0], 255)
         if r <= 0:
-            s2: uint64 = sys_get_jiffies()
-            while sys_get_jiffies() - s2 < 2:
-                sys_yield()
+            # THE READ ABOVE DOES NOT BLOCK. The comment two lines up says it
+            # "blocks until a key arrives (parks off-runqueue)"; on this
+            # kernel it returns 0 immediately, and the empty-read branch then
+            # SPUN a 20 ms jiffy window with sys_yield() -- so the lock screen
+            # burned 14.4 s of cpu in a 15.8 s run, every second the machine
+            # was locked. That is THE IDLE CENSUS's third bullet (HANDOFF §0)
+            # sitting under a comment asserting the opposite.
+            #
+            # Park on the keys fd itself: /keys is waitfds-wake-wired
+            # (wsys_route_key_byte -> waitfds_notify), so the FIRST character
+            # of the password wakes this in ~0 ms -- faster than the 20 ms
+            # poll it replaces. The 200 ms cap is only the backstop for a
+            # kernel that delivered without notifying.
+            hamscene_park(kfd, 200)
             continue
         changed: int32 = 0
         i: uint64 = 0
