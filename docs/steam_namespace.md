@@ -321,7 +321,7 @@ the cause:
   one directory over. `hamnix_x11session.sh` now pings the bus and clears the
   corpse; `hamnix_xdiag.sh` reports which of the two it found.
 
-### 6.3 The three measurements §6.3 asked for — all three run
+### 6.3 The three measurements that were named, and what they found
 
 The previous pass named three unblocked next steps and did not run them. They
 have been run. Two of them changed the answer.
