@@ -194,7 +194,6 @@ probe_once() {
     if [ "$n" -gt 0 ] && [ -n "$FBSNAP" ] && [ -s "$MNT/run/fb.raw" ]; then
         cp "$MNT/run/fb.raw" "$FBSNAP" 2>/dev/null
     fi
-    cpu_sample
 }
 
 # WHAT THE PROGRAM ITSELF COST, sampled from the outside while it runs.
@@ -213,14 +212,58 @@ probe_once() {
 # not the harness's -- the compositor is a different pid and is not counted,
 # which also stops a busy client's repaints being charged to it or its own
 # spin being hidden behind the compositor's park.
+# IT READS $MNT/proc, NOT /proc, AND THAT IS THE WHOLE THING. Two ways to get
+# this wrong were found by running it, and both answered SOMETHING:
+#
+#   1. `pgrep -P $CPID` matched nothing and the sampler wrote no file at all --
+#      a measurement that silently measured nothing, in the change added to
+#      stop exactly that. `unshare` given only --root and --wd creates no
+#      namespace, so it does not fork: it chroots, chdirs and execve()s the
+#      program IN PLACE, and $CPID therefore IS the program.
+#   2. Reading /proc/$CPID/stat then gave every single row the SAME number --
+#      35.8 s of cpu in a 15.8 s run, for four different programs. $! is a pid
+#      in OUR pid namespace (we are its init), while /proc out here is the
+#      HOST's procfs, where that number belongs to an unrelated long-lived
+#      kernel thread. A wrong answer that looked like a measurement, which is
+#      the shape this whole sweep exists to refuse.
+#
+# $MNT/proc is a procfs mounted BY a process in this pid namespace, so it is
+# the one place where $CPID means what $! said it meant.
+#
+# The program and its children, so a harness that forks is counted whole;
+# cutime/cstime pick up the ones it has already reaped. The compositor is
+# neither -- its parent is us, not $CPID -- so a busy client's repaints are
+# not charged to it and its own spin is not hidden behind the compositor's
+# park.
 cpu_sample() {
     [ -n "$WINPROBE" ] || return
-    local tot=0 c v
-    for c in $(pgrep -P "$CPID" 2>/dev/null); do
-        v=$(awk '{print $14+$15+$16+$17}' "/proc/$c/stat" 2>/dev/null)
-        [ -n "$v" ] && tot=$((tot + v))
-    done
-    [ "$tot" -gt 0 ] && echo "$tot" > "$WINPROBE.cpu"
+    local tot
+    # comm can contain spaces and parentheses, so everything after the LAST
+    # ") " is what may be split on whitespace: a[1] is field 3 (state), so
+    # a[k] is field k+2 -- ppid a[2], utime a[12], stime a[13], cutime a[14],
+    # cstime a[15].
+    tot=$(awk -v t="$CPID" '
+        { i = index($0, ") "); if (i == 0) next
+          split(substr($0, i + 2), a, " ")
+          if ($1 == t || a[2] == t) s += a[12] + a[13] + a[14] + a[15] }
+        END { print s + 0 }' "$MNT"/proc/[0-9]*/stat 2>/dev/null)
+    # THE MAXIMUM, NOT THE LAST, and the difference is not academic: the final
+    # sample races the program's death, and once the pid is gone the sum is 0.
+    # Keeping the last value made hamlock report 0.0 for a run in which the
+    # sample before it had read 14.4 -- a spinning client filed as a parked
+    # one, by one unlucky read. Process cpu only goes up, so the largest
+    # sample is the truthful one.
+    #
+    # And it is recorded even when it is ZERO, which is why cpu_best starts as
+    # a written 0 rather than an absent file: a program that used no
+    # measurable cpu in fifteen seconds is the ANSWER here, it is what a
+    # parked daemon looks like, and an absent file prints `-`, which means
+    # "not measured". `crond` reads 0.0 now and read 14.3 before it was fixed;
+    # a column that cannot say 0.0 cannot show that.
+    if [ -n "$tot" ] && [ "$tot" -gt "$cpu_best" ]; then
+        cpu_best="$tot"
+        echo "$tot" > "$WINPROBE.cpu"
+    fi
 }
 
 # `<&0` is not a no-op: POSIX redirects an asynchronous command's stdin from
@@ -231,15 +274,23 @@ CPID=$!
 
 if [ -n "$WINPROBE" ]; then
     best=0
+    cpu_best=0
     : > "$WINPROBE"
-    rm -f "$WINPROBE.cpu" "$WINPROBE.after"
+    rm -f "$WINPROBE.after"
+    echo 0 > "$WINPROBE.cpu"
     # A first sample after a second, then once a second for as long as the
     # program lives. lib/hamwid.ad's map handshake is 20 x 100 ms, so a client
     # that maps at all has done so by the second sample.
+    # The FIRST look is early, then once a second. A client that renders and
+    # exits -- `hamui_demo render` is up for well under a second -- was alive
+    # for none of a once-a-second schedule's samples, so the row said it owned
+    # no window while its own stdout said "wid=2 ... rendered".
+    first=1
     while kill -0 "$CPID" 2>/dev/null; do
-        sleep 1
+        if [ "$first" = 1 ]; then sleep 0.25; first=0; else sleep 1; fi
         kill -0 "$CPID" 2>/dev/null || break
         probe_once
+        cpu_sample
     done
     wait "$CPID"; rc=$?
     # One last look after it exited. A window still in the table here belongs

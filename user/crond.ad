@@ -54,6 +54,11 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_get_jiffies() -> uint64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+# Top-level BSS, not a frame local. nfds 0 makes sys_waitfds a plain timed
+# wait, so nothing is ever read out of it -- the call still needs an address.
+cr_wait: Array[4, int32]
 
 
 # --- small string helpers -------------------------------------------
@@ -389,7 +394,7 @@ def scan_crontab(reboot_pass: int32):
 
 # --- main loop ------------------------------------------------------
 
-POLL_JIFFIES: uint64 = 300                  # ~3 s at 100 Hz
+POLL_MS: int64 = 3000                       # 3 s, as a real park
 
 
 def main() -> int32:
@@ -409,10 +414,20 @@ def main() -> int32:
         have_last = 1
 
     while True:
-        # Sleep ~POLL_JIFFIES then re-check the wall clock.
-        start: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - start < POLL_JIFFIES:
-            pass
+        # PARK for three seconds, then re-check the wall clock.
+        #
+        # This said "Sleep ~POLL_JIFFIES" and was `while sys_get_jiffies() -
+        # start < POLL_JIFFIES: pass` -- a spin on the jiffy clock with not
+        # even a sys_yield in it. Measured by the run sweep once it could see
+        # a daemon's cpu at all: 14.3 s of cpu in a 15.6 s run, i.e. crond
+        # burns a whole core for as long as the machine is on, and it is
+        # started on every boot. Same shape as THE IDLE CENSUS (HANDOFF §0),
+        # where `sleep` itself was a busy-wait on this very clock.
+        #
+        # nfds 0 is a plain timed wait -- the park lib/hamscreen.ad and
+        # wsysd's frame loop both use. A comment saying "sleep" over a loop
+        # that does not is worse than no comment.
+        sys_waitfds(&cr_wait[0], 0, POLL_MS)
 
         read_realtime()
         if rt_ok == 0:
