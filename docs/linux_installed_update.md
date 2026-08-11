@@ -17,14 +17,22 @@ The gate is `tests/linux/installed_update.sh`: it installs a disk, boots it
 through UEFI, refreshes from the real `https://255.one/`, installs a package
 the image does not ship, publishes a newer **signed** build to a local
 channel, updates against it, reboots the machine, and asks every question
-again as the desktop user. Unattended, re-runnable, **37 PASS / 0 FAIL**.
+again as the desktop user. Unattended, re-runnable, **43 PASS / 0 FAIL**.
 
-Two of its arms report rather than gate, and both currently report the gap
-(so they are the difference between this 37 and the 39 recorded earlier):
-`https://255.one/` still serves no `index.json.sig`, and `hpm` still replaces
-the machine's own `/etc/rc.boot`. Both are named in §2a/§2b below and neither
-is a defect in the update path itself. The reboot arm used to be a third —
-it is a real check now that §2c is closed.
+**ONE** arm still reports rather than gates: `https://255.one/` serves no
+`index.json.sig`, so the owner's command typed bare does not work on any
+machine. It is named in §2a and it is a publish, not a patch. The rc.boot arm
+used to be a second one — it is a real check now that §2b is closed, and it
+brought four more with it: the digest tool it asks the machine for, and the
+file operands `cksum` and `head` grew (§3). The reboot arm was a third and
+became real when §2c closed.
+
+Note that the §2b arm **could not have passed in the shape it was written**:
+it looked for the rc's byte count in the output of `ls -l /etc/rc.boot`, and
+`ls -l FILE` prints the file's *contents* on this line. It named the fault
+correctly by accident and would have gone on naming it after the fix. It is an
+MD5 of the running rc now, against the digest the host computed for the bytes
+it wrote.
 
 **The "newer build" version is derived, not hard-coded.** It was `1.0.8`, and
 the gate went red the day the real repository published `hamnix-diff 1.0.8`
@@ -54,6 +62,7 @@ Measured on a 3 GB disk built by `scripts/hamlinux_disk.sh`, booted twice with
 | The version moved | `hpm list` → `hamnix-diff 1.0.8` |
 | The BYTES moved | `cksum </bin/diff` on the guest is `1495419638 144920` — the CRC the host computed over the very bytes it served |
 | The EDIT landed | a token minted by the test run, carried in the new tarball as `etc/hamnix-update-stamp`, is readable on the machine |
+| **The machine keeps its own rc** | `/etc/rc.boot` is byte-identical after `hpm install` and `hpm update` — checked by MD5 against what the host wrote, not by eye (§2b) |
 | **After a reboot** | version, bytes and stamp all still there; the upgraded binary gives both answers again; and all of it holds as **uid 1001** |
 
 The signature path is the one under test, not `--allow-unsigned`: the local
@@ -291,6 +300,17 @@ Found by this test hanging on them, and all three mattered beyond it.
   `cksum < FILE`. It takes FILEs now and prints the GNU
   `<crc> <bytes> <name>` form for them. It was already the real thing (POSIX
   CRC-32, agrees with GNU `cksum`) and is what the gate uses.
+* **A PIPE INTO `md5sum` NEVER RETURNED**, and it cost a whole boot. The rc
+  asked `cat /etc/hamnix-update-stamp | md5sum` for the stream half of the
+  digest check; the banner printed, no digest appeared under it, and the VM
+  died on the host's timeout with every phase-2 check failing as collateral.
+  The same `md5sum` had answered two FILE operands correctly in the two lines
+  immediately above, so what did not finish is the **pipe's EOF**, not the
+  hash. Not chased down here — it is a `hamsh`/`sys_pipechan` question and
+  this gate is not the place to burn boots on it, but it is a real fault: a
+  pipeline that never ends is indistinguishable from a hung command. The
+  stream arm uses `md5sum < FILE`, the same shape as the `cksum < FILE` that
+  has always worked.
 * **A redirect whose source is the running rc wedges the shell.** Inside
   `/etc/rc.boot`, both `head -3 < /etc/rc.boot` and `cksum < /etc/rc.boot`
   hang the boot dead — as does overwriting `/etc/rc.boot` mid-script, which
