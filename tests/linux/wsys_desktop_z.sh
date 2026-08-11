@@ -25,20 +25,25 @@
 # owns this region", answered by counting a client's OWN FLAT COLOUR:
 #
 #   1. the application's rectangle is the application's pixels     (over the backdrop)
-#   2. the backdrop's z is STRICTLY below every ordinary window's  (pinned means bottom)
-#   3. a click on the desktop does not bury the application        (pinned never raises)
-#   4. a raise brings an occluded window to the front, both ways
-#   5. the panel stays over an ordinary window that overlaps it
+#   2. the backdrop is below the lowest z a window can ASK for     (pinned means bottom)
+#   3. the panel stays over an ordinary window that overlaps it
+#   4. a click on the desktop does not bury the application        (pinned never raises)
+#   5. a raise brings an occluded window to the front, both ways
 #   6. a closed window's pixels leave the screen
 #
-# 2 and 3 are the ones with TEETH against ea23c834: revert its hunk and the
-# backdrop's z is 6, equal to an ordinary window's, so 2 fails outright, and a
-# raise puts the backdrop over everything, so 3 fails in the framebuffer.  1 on
-# its own passes either way -- the tie between two windows at z 6 goes to the
-# one mapped later, which is the client -- and that is written down here rather
-# than glossed, because "the gate passes" doing no work is the exact failure
-# this file was created in response to.  Both arms were measured; see
-# docs/linux_window_manager.md.
+# WHICH OF THESE HAVE TEETH, MEASURED RATHER THAN CLAIMED.  Both arms were run:
+# with ea23c834's hunk reverted this gate reports FAIL on 4 (the backdrop
+# raises to top+1 on a desktop click and 0% of the application is left) and on
+# 2 (the backdrop sits at z 5, which any window may ask for with one `z` verb).
+#
+# 1 PASSES IN BOTH ARMS AND IS SAID SO HERE RATHER THAN GLOSSED.  In the broken
+# build the backdrop keeps win_alloc's default z 5, which is already below the
+# z 6 lib/hamui.ad hands an ordinary window -- so "the application is over the
+# backdrop" is true by luck there, and a gate that stopped at 1 would report a
+# pass while the desktop was unusable.  That is precisely the mistake this file
+# exists to stop repeating: "the gate passes" was doing no work when this bug
+# was diagnosed, and a reader assumed it was.  1 is kept because it is the
+# statement of what the screen must show; 2 and 4 are what make it hold.
 #
 # Entirely offscreen (HAMFB_FILE): it never touches the host's display, and the
 # software Vulkan ICD is forced because wsysd has a real Vulkan backend and
@@ -200,7 +205,7 @@ fi
 # ---- the applications -----------------------------------------------------
 # Two ordinary windows at the default z, overlapping, in colours nothing else
 # on this screen paints.
-CA=7A1FA2; CB=1FA27A; CC=A21F7A
+CA=7A1FA2; CB=1FA27A; CC=A21F7A; CD=C8A020
 AX=200; AY=200; AW=400; AH=300
 BX=400; BY=350; BW=400; BH=300
 "$WORK/wsys_zclient.elf" $AX $AY $AW $AH 6 $CA appA 120 </dev/null >"$WORK/a.log" 2>&1 &
@@ -240,60 +245,45 @@ DESKLEFT=$(samepct 0 $((PANELY + PANELH + 4)) 120 300 "$WORK/ab.raw" "$WORK/desk
 [ "$DESKLEFT" -ge 90 ] && ok "the backdrop is still there beside the window (${DESKLEFT}% unchanged)" \
                        || bad "the backdrop vanished when a window mapped (${DESKLEFT}% unchanged)"
 
-# ==== 2. STRUCTURAL: pinned means BELOW, and strictly ======================
-# This is the assertion `background 1` exists to make true.  With ea23c834's
-# hunk reverted the backdrop's z is 6 -- EQUAL to an ordinary window's -- and
-# equal is not below: which of the two you see is then decided by the order
-# they happened to map in.
+# ==== 2. THE FLOOR: pinned is below the lowest z a window can ASK for ======
+# This is the assertion `background 1` exists to make true, and asking it of
+# appA and appB would be asking nothing: with ea23c834's hunk reverted the
+# backdrop keeps win_alloc's default z 5, which is already below the z 6
+# lib/hamui.ad gives an ordinary window -- so "the backdrop is below the
+# windows on this screen" is TRUE in the broken build, by luck, and a gate that
+# stopped there would report a pass while the desktop was unusable.  Measured,
+# both arms, rather than assumed; it is the whole reason this file exists.
+#
+# The property that is actually true only when the fix is in is that the pinned
+# backdrop is below the lowest z an ordinary window can OBTAIN.  `z` refuses a
+# negative, so that floor is 0, and appD is a window sitting on it -- which is
+# not a contrivance: hamdesktop's own comment says "`background 1` subsumes the
+# old `z 0`", so z 0 is where a backdrop-like client used to live, and a second
+# one must not be buried by the first.
+DX=150; DY=560; DW=240; DH=180
+"$WORK/wsys_zclient.elf" $DX $DY $DW $DH 0 $CD appD 100 </dev/null >"$WORK/d.log" 2>&1 &
+PIDS="$PIDS $!"
+sleep 3
+snap d
+WD="$(awk '/mapped wid/{print $NF}' "$WORK/d.log")"
 BZ=$(winfield "$BACKDROP" 6)
 AZ=$(winfield "$WA" 6)
-BZ2=$(winfield "$WB" 6)
-info "z: backdrop $BZ, appA $AZ, appB $BZ2, panel $PANELZ"
-if [ "$BZ" -lt "$AZ" ] && [ "$BZ" -lt "$BZ2" ] && [ "$BZ" -lt "$PANELZ" ]; then
-    ok "the backdrop's z ($BZ) is STRICTLY below every other window's -- it is pinned, not merely early"
+DZ=$(winfield "${WD:-$WA}" 6)
+DPIX=$(colourpct $DX $DY $DW $DH "$WORK/d.raw" $CD)
+info "z: backdrop $BZ, appD (asked for the floor) $DZ, appA $AZ, panel $PANELZ; appD's rectangle is ${DPIX}% its own colour"
+if [ "$BZ" -lt "$DZ" ] && [ "$BZ" -lt "$AZ" ] && [ "$BZ" -lt "$PANELZ" ]; then
+    ok "the backdrop's z ($BZ) is below even a window asking for the floor ($DZ) -- it is PINNED, not merely early"
 else
-    bad "the backdrop is at z $BZ, not strictly below the windows it must never cover (app $AZ, panel $PANELZ)"
+    bad "the backdrop is at z $BZ, not below the floor an ordinary window can ask for ($DZ) -- one z verb away from covering the screen"
 fi
+[ "$DPIX" -ge 95 ] && ok "a window at the lowest z it can ask for is still ON TOP of the backdrop (${DPIX}%)" \
+                   || bad "the backdrop covers a window at the lowest z it can ask for (${DPIX}% of it is left)"
 
-# ==== 3. THE GATE, second half: a click on the desktop ====================
-# user/wsysd.ad's raise_window writes exactly this line when a button press
-# lands on a window, so this IS a click on the desktop -- the "all windows
-# vanish on desktop click" case, without an input device.
-poke /dev/wsys/ctl "raise $BACKDROP"
-sleep 2
-snap clickdesk
-CLICKED=$(colourpct $AOX $AOY $AOW $AOH "$WORK/clickdesk.raw" $CA)
-NEWBZ=$(winfield "$BACKDROP" 6)
-info "after a click on the desktop: backdrop z $NEWBZ, the application's rectangle ${CLICKED}% its own colour"
-if [ "$CLICKED" -ge 95 ] && [ "$NEWBZ" -lt "$AZ" ]; then
-    ok "a click on the desktop did NOT bury the application (a pinned backdrop never raises)"
-else
-    bad "a click on the desktop put the backdrop over the application (z $NEWBZ, ${CLICKED}% of the window left)"
-fi
-
-# ==== 4. a raise brings an occluded window to the front ===================
-OVA=$(colourpct $OX $OY $OW $OH "$WORK/ab.raw" $CA)
-OVB=$(colourpct $OX $OY $OW $OH "$WORK/ab.raw" $CB)
-info "the overlap starts ${OVA}% appA / ${OVB}% appB"
-poke /dev/wsys/ctl "raise $WA"
-sleep 2
-snap raisea
-RA=$(colourpct $OX $OY $OW $OH "$WORK/raisea.raw" $CA)
-poke /dev/wsys/ctl "raise $WB"
-sleep 2
-snap raiseb
-RB=$(colourpct $OX $OY $OW $OH "$WORK/raiseb.raw" $CB)
-info "after raise appA the overlap is ${RA}% appA; after raise appB it is ${RB}% appB"
-if [ "$RA" -ge 95 ] && [ "$RB" -ge 95 ]; then
-    ok "a raise brings the raised window to the FRONT, and it works in both directions"
-else
-    bad "a raise did not bring the window to the front (appA ${RA}%, then appB ${RB}%)"
-fi
-
-# ==== 5. the panel stays over an ordinary window ==========================
-# A THIRD client, never raised, so it is at the default z the panel is above.
-# (A raised window goes to top+1, which is above the panel too -- that is the
-# compositor's current contract and this gate does not pretend otherwise.)
+# ==== 3. the panel stays over an ordinary window ==========================
+# A client never raised, so it is at the default z the panel is above.  (A
+# raised window goes to top+1, which is above the panel too -- that is the
+# compositor's current contract and this gate does not pretend otherwise,
+# which is why this is asked BEFORE anything is raised.)
 # Straddle the bar: 120px of window on each side of it, clamped to the screen,
 # so this works whether the panel is along the top edge or the bottom.
 CX=850; CW=380
@@ -317,6 +307,43 @@ if [ "$INBAR" -eq 0 ] && [ "$BELOW" -ge 95 ]; then
     ok "the panel is drawn OVER an ordinary window that overlaps it, and the window elsewhere is untouched"
 else
     bad "the panel/window order is wrong: ${INBAR}% of the bar is the window (want 0), ${BELOW}% below it (want >=95)"
+fi
+
+# ==== 4. THE GATE, second half: a click on the desktop ====================
+# user/wsysd.ad's raise_window writes exactly this line when a button press
+# lands on a window, so this IS a click on the desktop -- the "all windows
+# vanish on desktop click" case, without an input device.  This is the arm with
+# the sharpest teeth: with ea23c834's hunk reverted the backdrop raises to
+# top+1 and NOTHING is left on the screen but wallpaper, icons and a panel.
+poke /dev/wsys/ctl "raise $BACKDROP"
+sleep 2
+snap clickdesk
+CLICKED=$(colourpct $AOX $AOY $AOW $AOH "$WORK/clickdesk.raw" $CA)
+NEWBZ=$(winfield "$BACKDROP" 6)
+info "after a click on the desktop: backdrop z $NEWBZ, the application's rectangle ${CLICKED}% its own colour"
+if [ "$CLICKED" -ge 95 ] && [ "$NEWBZ" -lt "$AZ" ]; then
+    ok "a click on the desktop did NOT bury the application (a pinned backdrop never raises)"
+else
+    bad "a click on the desktop put the backdrop over the application (z $NEWBZ, ${CLICKED}% of the window left)"
+fi
+
+# ==== 5. a raise brings an occluded window to the front ===================
+OVA=$(colourpct $OX $OY $OW $OH "$WORK/ab.raw" $CA)
+OVB=$(colourpct $OX $OY $OW $OH "$WORK/ab.raw" $CB)
+info "the overlap starts ${OVA}% appA / ${OVB}% appB"
+poke /dev/wsys/ctl "raise $WA"
+sleep 2
+snap raisea
+RA=$(colourpct $OX $OY $OW $OH "$WORK/raisea.raw" $CA)
+poke /dev/wsys/ctl "raise $WB"
+sleep 2
+snap raiseb
+RB=$(colourpct $OX $OY $OW $OH "$WORK/raiseb.raw" $CB)
+info "after raise appA the overlap is ${RA}% appA; after raise appB it is ${RB}% appB"
+if [ "$RA" -ge 95 ] && [ "$RB" -ge 95 ]; then
+    ok "a raise brings the raised window to the FRONT, and it works in both directions"
+else
+    bad "a raise did not bring the window to the front (appA ${RA}%, then appB ${RB}%)"
 fi
 
 # ==== 6. a closed window's pixels leave the screen ========================
