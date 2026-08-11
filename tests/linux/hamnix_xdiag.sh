@@ -56,8 +56,20 @@ ls -l /run/dbus/ 2>&1 | head -5
 
 echo "xdiag: === Xwayland's own log"
 tail -25 /tmp/xwayland.log 2>&1
-echo "xdiag: === matchbox's own log"
-tail -15 /tmp/mbwm.log 2>&1
+echo "xdiag: === the window manager's own log"
+tail -15 /tmp/wm.log 2>&1
+# What is actually managing this screen, asked of the X server rather than of
+# the process table -- a window manager that started and then exited on a
+# missing theme leaves a process that ran and a screen nobody manages.
+WMCHECK="$(xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | sed -n 's/.*# *\(0x[0-9a-f]*\).*/\1/p')"
+if [ -n "$WMCHECK" ]; then
+    echo "xdiag: window manager: $(xprop -id "$WMCHECK" _NET_WM_NAME 2>/dev/null | sed 's/.*= //')"
+    echo "xdiag:   _NET_SUPPORTED atoms: $(xprop -root _NET_SUPPORTED 2>/dev/null | sed 's/.*= //' | tr ',' '\n' | wc -l)"
+    xprop -root _NET_WORKAREA _NET_CLIENT_LIST _NET_ACTIVE_WINDOW 2>&1 \
+        | cut -c1-200 | sed 's/^/xdiag:   /'
+else
+    echo "xdiag: NOTHING IS MANAGING THIS SCREEN -- no _NET_SUPPORTING_WM_CHECK"
+fi
 
 echo "xdiag: === CEF: where did it put the browser, and why"
 CEF=/.steam/debian-installation/logs/cef_log.txt
@@ -81,6 +93,6 @@ CL="$(ls -1 /home/*/.steam/steam/logs/console-linux.txt 2>/dev/null | head -1)"
 [ -n "$CL" ] && tail -50 "$CL" || echo "xdiag: NO console-linux.txt"
 
 echo "xdiag: === steam processes"
-ps ax 2>/dev/null | grep -i -E "steam|Xwayland|matchbox" | grep -v grep \
+ps ax 2>/dev/null | grep -i -E "steam|Xwayland|jwm|matchbox" | grep -v grep \
     | cut -c1-160 | head -25
 echo "xdiag: === end"

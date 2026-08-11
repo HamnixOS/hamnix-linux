@@ -29,15 +29,32 @@
 #                  pure-pixman screen; the default glamor path wants GL) and
 #                  -noreset (or the server resets when its last client exits
 #                  and tears the Wayland surface down with it).
-#   matchbox-window-manager
-#                  a WINDOW MANAGER. Without one, X places windows wherever
-#                  they ask and never resizes them, so Firefox's main window
-#                  and its session-restore window landed side by side, each
-#                  clipped -- which looks exactly like a compositor bug and is
-#                  not one. matchbox fullscreens whatever is on top, which is
-#                  right here: the Hamnix compositor is already doing the
-#                  window management, and the X session inside the bridge is
-#                  one application's screen.
+#   jwm            THE WINDOW MANAGER, and the third answer this line has had.
+#                  matchbox-window-manager was the first and is convicted: it
+#                  is a single-window handheld WM that takes over every
+#                  MapRequest, and with it running the X root has ONE child --
+#                  its own 5x5 check window -- and Steam's login dialog reads
+#                  IsUnMapped. No window manager at all was the second, and it
+#                  is right for a session running one application and wrong
+#                  for a desktop: nothing inside the namespace can then move,
+#                  resize, stack or close a window, and every EWMH question
+#                  comes back empty.
+#                  jwm reparents, draws a real title bar, and publishes 66
+#                  _NET_SUPPORTED atoms (measured; openbox publishes 85 and
+#                  costs 57.9 MiB here, because bookworm's libimlib2 depends
+#                  on libspectre1 which depends on GHOSTSCRIPT).
+#                  IT COSTS 0.5 MiB AND NOT ONE NEW PACKAGE: all sixteen of
+#                  its dependencies -- cairo, pango, librsvg, Xft, Xpm, Xmu --
+#                  are already here because firefox-esr and GTK dragged them
+#                  in. It wants no D-Bus, no settings daemon and no session
+#                  manager, which is what rules out marco, xfwm4 and metacity
+#                  whatever their size. docs/linux_window_manager.md has the
+#                  measured table for every candidate.
+#                  Its configuration is OURS -- etc/jwmrc.linux, copied in
+#                  below as /etc/jwm/hamnix.jwmrc. Debian's default
+#                  /etc/jwm/system.jwmrc launches its own xclock into a tray
+#                  and vertically maximises xterms, which is the same class of
+#                  behaviour matchbox was thrown out for.
 #   fonts, ca-certificates, dbus  what a browser refuses to be useful without.
 #   gdisk, dosfstools, e2fsprogs, rsync, mtools
 #                  THE INSTALLER'S TOOLS. Partitioning a disk and making an
@@ -134,7 +151,12 @@ I386="${HAMLINUX_I386:-1}"
 command -v mmdebstrap >/dev/null || {
     echo "[distro] need mmdebstrap (apt install mmdebstrap)" >&2; exit 1; }
 
-PKGS="xvfb,x11-apps,xdotool,x11-utils,matchbox-window-manager,\
+# xterm is in the BASE list, not only in the Steam set: jwm's first dependency
+# is `rxvt-unicode | gnome-terminal | konsole | x-terminal-emulator`, and with
+# nothing providing x-terminal-emulator apt satisfies it by installing
+# rxvt-unicode -- a second terminal emulator nobody asked for, in the
+# single-architecture image only, where it would be very easy not to notice.
+PKGS="xvfb,x11-apps,xdotool,x11-utils,jwm,xterm,matchbox-window-manager,\
 firefox-esr,xwayland,ca-certificates,dbus,dbus-x11,fonts-dejavu-core,fonts-liberation,\
 libgl1,libgtk-3-0,procps,coreutils,bash,less,nano,\
 gdisk,dosfstools,e2fsprogs,rsync,mtools,\
@@ -149,7 +171,7 @@ if [ "$I386" = 1 ]; then
     # the 32-bit closure.  The rest are steam-libs' Recommends -- mmdebstrap
     # does not install Recommends, and every one of these is a library Steam
     # dlopen()s for graphics or input rather than an optional extra.
-    PKGS="$PKGS,steam-installer,zenity,xdg-utils,xterm,bubblewrap,\
+    PKGS="$PKGS,steam-installer,zenity,xdg-utils,bubblewrap,\
 pulseaudio,libasound2-plugins,\
 mesa-utils:i386,vulkan-tools:i386,mesa-utils-bin,\
 libgl1:i386,libgl1-mesa-dri:i386,libglx-mesa0:i386,libegl1:i386,libgbm1:i386,\
@@ -261,6 +283,16 @@ nameserver 10.0.2.3
 nameserver 1.1.1.1
 RESOLVEOS
 
+# --- the window manager's configuration ------------------------------------
+# ONE file for every namespace: Alpine's build copies the same etc/jwmrc.linux
+# to the same path. What is inside it, and what is deliberately not, is
+# documented in the file itself; the short version is that Debian's own
+# /etc/jwm/system.jwmrc launches an xclock into a tray and vertically
+# maximises xterms, so running with the packaging default would be running a
+# window manager nobody chose.
+mkdir -p "$STAGE/etc/jwm"
+cp "$PROJ_ROOT/etc/jwmrc.linux" "$STAGE/etc/jwm/hamnix.jwmrc"
+
 mkdir -p "$(dirname "$OUT")"
 PREV_SZ=0
 [ -f "$OUT" ] && PREV_SZ="$(du -m "$OUT" | cut -f1)"
@@ -291,6 +323,7 @@ mmdebstrap \
     --include="$PKGS" \
     --components=main,contrib \
     --customize-hook="copy-in $STAGE/etc/resolv.conf /etc" \
+    --customize-hook="copy-in $STAGE/etc/jwm/hamnix.jwmrc /etc/jwm" \
     --customize-hook='chroot "$1" sh -c "
         # The DE session runs as uid 1001 (etc/rc.de-user.linux drops to it),
         # so a program that enters this namespace arrives as 1001. Without a
@@ -319,7 +352,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
     [ -e /tmp/xfb/Xvfb_screen0 ] && break
     sleep 0.5
 done
-DISPLAY=:0 matchbox-window-manager -use_titlebar no &
+DISPLAY=:0 jwm -f /etc/jwm/hamnix.jwmrc &
 sleep 1
 DISPLAY=:0 exec \"\\\$@\"
 EOS

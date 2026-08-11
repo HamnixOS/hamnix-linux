@@ -1,0 +1,119 @@
+<?xml version="1.0"?>
+<!--
+  etc/jwmrc.linux — the window manager configuration for a distribution
+  namespace's X session (tests/linux/hamnix_x11session.sh).
+
+  ONE file, shared by every namespace. Debian's build copies it to
+  /etc/jwm/hamnix.jwmrc (scripts/hamlinux_distro.sh) and Alpine's copies it to
+  the same path (scripts/hamlinux_alpine.sh), so `enter debian { }` and
+  `enter alpine { }` get the same windows with the same title bars. A window
+  manager whose behaviour is a distribution's packaging default is a window
+  manager nobody chose; this one is stated here.
+
+  WHY THIS IS NOT DEBIAN'S /etc/jwm/system.jwmrc. Measured, in the boot that
+  chose jwm: Debian's default file has a Tray at the bottom with a
+  `<Swallow name="xclock">xclock</Swallow>` in it, so it LAUNCHES ITS OWN
+  xclock and reparents the session's real one into a 25px strip, and its
+  `<Group><Option>tiled</Option></Group>` plus `<Group><Name>xterm</Name>
+  <Option>vmax</Option></Group>` re-place and vertically maximise windows that
+  asked for neither. Both are exactly the class of behaviour matchbox was
+  convicted for. None of it is here.
+
+  WHAT IS DELIBERATELY ABSENT:
+
+  * NO TRAY. The Hamnix desktop already has a panel (hampanelscene) and it is
+    the system chrome; a second task bar inside the namespace's X screen would
+    duplicate it and, worse, would take 25 rows out of _NET_WORKAREA, so every
+    EWMH-aware client in the namespace would be told the screen is 25px
+    shorter than it is. Measured: with Debian's tray, _NET_WORKAREA came back
+    0,0,1280,775 on a 1280x800 screen.
+  * NO VIRTUAL DESKTOPS (`Desktops width="1"`). With four, a client can be put
+    on a desktop that nothing inside the namespace can switch to, because the
+    namespace has no panel of its own; a window that exists and cannot be
+    reached is the shape this project exists to avoid.
+  * NO Exit/Restart/Poweroff menu entries. `Exit` would kill the window
+    manager and leave the session unmanaged, and the poweroff script is
+    systemd's; neither means anything inside a namespace.
+-->
+<JWM>
+
+    <!-- Button 3 on the root: enough to get a shell without a panel. The
+         window operations menu is on the title bar's own button 3. -->
+    <RootMenu onroot="12" label="hamnix">
+        <Program label="Terminal">xterm</Program>
+        <Separator/>
+        <Program label="Firefox">firefox-esr</Program>
+    </RootMenu>
+
+    <!-- Placement is the CLIENT's business unless it says nothing. No global
+         `tiled`, no per-application maximise: a 700x440 dialog that asks for
+         +290+180 gets 700x440 at +290+180. -->
+
+    <WindowStyle decorations="motif">
+        <Font>Sans-11:bold</Font>
+        <Width>4</Width>
+        <Height>24</Height>
+        <Corner>0</Corner>
+        <Foreground>#cccccc</Foreground>
+        <Background>#3a3a3a</Background>
+        <Outline>#101010</Outline>
+        <Active>
+            <Foreground>#ffffff</Foreground>
+            <Background>#0077cc</Background>
+            <Outline>#004488</Outline>
+        </Active>
+    </WindowStyle>
+
+    <MenuStyle decorations="motif">
+        <Font>Sans-11</Font>
+        <Foreground>#ffffff</Foreground>
+        <Background>#333333</Background>
+        <Active>
+            <Foreground>#ffffff</Foreground>
+            <Background>#0077cc</Background>
+        </Active>
+    </MenuStyle>
+
+    <PopupStyle>
+        <Font>Sans-11</Font>
+        <Foreground>#000000</Foreground>
+        <Background>#dddddd</Background>
+    </PopupStyle>
+
+    <Desktops width="1" height="1">
+        <Background type="solid">#101010</Background>
+    </Desktops>
+
+    <DoubleClickSpeed>400</DoubleClickSpeed>
+    <DoubleClickDelta>2</DoubleClickDelta>
+    <!-- click, not sloppy: pointer motion across the framebuffer should not
+         silently move the keyboard focus while a dialog is up. -->
+    <FocusModel>click</FocusModel>
+    <SnapMode distance="10">border</SnapMode>
+    <MoveMode>opaque</MoveMode>
+    <ResizeMode>opaque</ResizeMode>
+
+    <Key mask="A" key="Tab">nextstacked</Key>
+    <Key mask="A" key="F4">close</Key>
+    <Key mask="A" key="F2">window</Key>
+    <Key mask="A" key="F10">maximize</Key>
+    <Key key="Up">up</Key>
+    <Key key="Down">down</Key>
+    <Key key="Right">right</Key>
+    <Key key="Left">left</Key>
+    <Key key="Return">select</Key>
+    <Key key="Escape">escape</Key>
+
+    <Mouse context="title" button="1">move</Mouse>
+    <Mouse context="title" button="3">window</Mouse>
+    <Mouse context="title" button="11">maximize</Mouse>
+    <Mouse context="border" button="1">resize</Mouse>
+    <Mouse context="border" button="2">move</Mouse>
+    <Mouse context="border" button="3">window</Mouse>
+    <Mouse context="close" button="-1">close</Mouse>
+    <Mouse context="maximize" button="-1">maximize</Mouse>
+    <Mouse context="maximize" button="-2">maxv</Mouse>
+    <Mouse context="maximize" button="-3">maxh</Mouse>
+    <Mouse context="minimize" button="-1">minimize</Mouse>
+
+</JWM>

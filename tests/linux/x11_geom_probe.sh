@@ -141,13 +141,17 @@ else
 fi
 
 echo "x11geom: === EWMH: is anything managing these windows?"
-# The session inside the namespace runs matchbox-window-manager. The host
+# The session inside the namespace runs jwm (docs/linux_window_manager.md); the
+# list below is tried in that order so that, on a host which happens to have
+# it, this probe asks the EWMH questions of the same window manager the
+# namespace runs rather than of whatever else is installed. The host
 # usually has no window manager to stand in for it, so with none started the
 # EWMH answers below are the answers a client gets from a BARE X server --
 # reported, but not counted as our failure. tests/linux/hamnix_xdiag.sh asks
-# the same questions where matchbox is actually running.
+# the same questions inside the namespace, where the session's own window
+# manager is actually running.
 WM=""
-for w in matchbox-window-manager openbox twm; do
+for w in jwm openbox twm matchbox-window-manager; do
     command -v "$w" >/dev/null 2>&1 && { WM="$w"; break; }
 done
 if [ -n "$WM" ]; then

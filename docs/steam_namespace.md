@@ -51,7 +51,8 @@ server socket (§8).
 | Steam client install | **works** | bootstrap pre-staged, client downloaded, `Steam client's requirements are satisfied` |
 | pressure-vessel container | **works as root** | `srt-bwrap` alive with the sniper runtime, `steamwebhelper` running inside it |
 | pressure-vessel as a user | **works** | the root switch is `MS_MOVE` onto `/`, not `chroot`, so `bwrap --unshare-user` builds a container as uid 1001 — §5, §7 |
-| X screen geometry | **works** | 1280x800 at 96 dpi inside the namespace; `matchbox` publishes `_NET_WORKAREA = 0,0,1280,800` — §6.1 |
+| X screen geometry | **works** | 1280x800 at 96 dpi inside the namespace; the session's window manager publishes `_NET_WORKAREA = 0,0,1280,800` — §6.1 |
+| window management in the namespace | **works** | `jwm`, reparenting, 27px title bar, 66 `_NET_SUPPORTED` atoms, `xdotool` move and resize both take effect and the client stays `IsViewable`; Firefox too — `docs/linux_window_manager.md` |
 | a Chromium window, end to end | **works** | `tests/linux/x11_geom_probe.sh`: a real Chromium maps a 1000x600 toplevel through Xwayland → wsyswl → wsysd and its pixels reach the framebuffer |
 | Steam UI window, in X | **works** | with no window manager, `Sign in to Steam` is `IsViewable` at 700x440+290+180 and `xwd -root` finds 210 distinct colours inside it — the UI is drawn — §6.2 |
 | Steam UI window, on the framebuffer | **not yet** | the same screendump has the control `xterm` on it and nothing where Steam's window is: the rootful Xwayland surface stops being delivered through `wsyswl` — §6.2, §6.3 |
@@ -293,8 +294,19 @@ Chromium's clipboard window, the launcher's 1x1 IPC windows, steamwebhelper's
 10x10 hidden helpers. The tracing question in §6.3 was answered by the WM
 experiment before a tracer was needed.
 
-`tests/linux/hamnix_x11session.sh` therefore starts **no window manager** by
-default now; `HAMNIX_X11_WM=matchbox` puts the old behaviour back.
+`tests/linux/hamnix_x11session.sh` therefore stopped starting matchbox. For
+one pass it started **no window manager at all**, which was right for a
+session running one application and wrong for a desktop — with nothing
+managing the screen, nothing inside the namespace can move, resize, stack or
+close a window and `_NET_SUPPORTED` comes back with zero atoms. The default is
+now **`jwm`**: reparenting, a real title bar, 66 `_NET_SUPPORTED` atoms, no
+D-Bus and no settings daemon, and **0.5 MiB and one new package** in this
+image because `firefox-esr` had already installed all sixteen of its
+dependencies. `HAMNIX_X11_WM=none` restores the WM-less arm these
+measurements used and `HAMNIX_X11_WM=matchbox` the original behaviour;
+`docs/linux_window_manager.md` has the full table, including why openbox
+(85 atoms, the best EWMH of the candidates) costs 57.9 MiB here and why that
+is Ghostscript's fault.
 
 **(2) The window is mapped AND painted, and the framebuffer does not have
 it.** This is ours, not Steam's. The X server's own screen contents, read with
@@ -419,7 +431,9 @@ and two of them came back the opposite way round:
    having printed only `xauth remove terminated with exit code 1!` when `xauth`
    is missing.)
 2. **matchbox.** Convicted. It is why every window read `IsUnMapped`, and the
-   session no longer starts it.
+   session no longer starts it. The session now starts `jwm` instead of
+   starting nothing — see §6.2 and `docs/linux_window_manager.md`; that is a
+   change to what a desktop in the namespace can do, not to this diagnosis.
 3. **The system bus.** It comes up and answers. Retired as a suspect.
 
 **What is left is one hop, and it is ours.** The X screen has a fully painted

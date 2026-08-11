@@ -263,8 +263,12 @@ than a special case described as one.
 3. **`user/xbridge.ad`** and several tests spell `/n/distro` literally. That
    name is kept bound for exactly this reason, so they work; they are just not
    parameterised.
-4. **`tests/linux/hamnix_x11session.sh`** is Debian's session script (matchbox,
-   dbus, Steam). Alpine has its own, baked into its image by the build script.
-   The two share their two hardest-won lines (wait for the *server*, not the
-   socket; take the X screen size from `hamnix-screen`) by copy, not by a
-   common file. Worth merging when there is a third.
+4. **`tests/linux/hamnix_x11session.sh`** is Debian's session script (dbus,
+   Steam). Alpine has its own, baked into its image by the build script.
+   The two share their three hardest-won lines (wait for the *server*, not the
+   socket; take the X screen size from `hamnix-screen`; ask the X server
+   whether the window manager is actually managing, rather than the process
+   table whether it started) by copy, not by a common file. Worth merging when
+   there is a third. What they DO share as one file is the window manager's
+   configuration: `etc/jwmrc.linux`, installed by both build scripts as
+   `/etc/jwm/hamnix.jwmrc` — see `docs/linux_window_manager.md`.

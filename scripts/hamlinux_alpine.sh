@@ -80,11 +80,32 @@
 #                       tests/linux/hamnix_x11session.sh's hardest-won line.
 #   font-dejavu         xclock draws its numerals with a font or not at all.
 #
-# NO WINDOW MANAGER.  Debian's session runs matchbox because Firefox's several
-# toplevels needed placing; matchbox is not packaged for Alpine and these two
-# clients do not need one -- rootful Xwayland composites them onto its own
-# root window, which IS the Wayland surface.  Said out loud because "there is
-# no WM" would otherwise look like an oversight.
+#   jwm                 THE WINDOW MANAGER, and the SAME one Debian's
+#                       namespace runs, with the SAME configuration file
+#                       (etc/jwmrc.linux -> /etc/jwm/hamnix.jwmrc).  An
+#                       earlier note here said Alpine had no window manager
+#                       because "two clients do not need one" -- true for two
+#                       clients and false for a desktop: with nothing managing
+#                       the screen, nothing inside the namespace can move,
+#                       resize, stack or close a window and every EWMH
+#                       question comes back empty.
+#                       IT IS NOT FREE HERE, and that is the honest difference
+#                       between the two distributions.  In Debian jwm costs
+#                       0.5 MiB and no new packages, because firefox-esr has
+#                       already dragged in cairo, pango and librsvg.  Alpine
+#                       has none of them, so jwm pulls 24 packages and
+#                       22.0 MiB -- glib 5.1, librsvg 3.6, shared-mime-info
+#                       2.4, harfbuzz 1.6.  Measured against this image's own
+#                       /lib/apk/db/installed; docs/linux_window_manager.md
+#                       has the table.  It is charged to the GRAPHICAL image
+#                       only: HAMLINUX_ALPINE_GUI=0 is still 26 MiB and has no
+#                       window manager because it has no X server either.
+#                       fluxbox would be 8.9 MiB here and 61.7 MiB in Debian
+#                       (bookworm's libimlib2 depends on libspectre1 depends
+#                       on GHOSTSCRIPT), so choosing per-distribution would
+#                       buy 13 MiB on one side, lose 61 MiB on the other, and
+#                       give the two namespaces different window behaviour.
+#                       One window manager, one configuration, both trees.
 #
 # Usage: scripts/hamlinux_alpine.sh [out.ext4] [size] [branch]
 set -euo pipefail
@@ -135,7 +156,13 @@ echo "[alpine] $TARBALL sha256 OK"
 
 PKGS=""
 if [ "$GUI" = 1 ]; then
-    PKGS="xwayland xkeyboard-config xeyes xclock xdpyinfo font-dejavu"
+    # xprop is NOT optional decoration. Without it the session's "is the window
+    # manager actually managing this screen" check cannot ask the X server, and
+    # the first Alpine run with jwm printed `WARNING jwm is not managing this
+    # screen` at a screen jwm was plainly managing -- a decorated, titled
+    # window in the screendump. A check that cannot run must say it cannot run;
+    # it must never answer the question it failed to ask.
+    PKGS="xwayland xkeyboard-config xeyes xclock xdpyinfo xprop font-dejavu jwm xterm"
 fi
 
 # The resolver. mmdebstrap copies the BUILD HOST's /etc/resolv.conf into the
@@ -155,7 +182,7 @@ EOF
 cat > "$CACHE/alpine-build.sh" <<'BUILDEOF'
 #!/bin/sh
 set -eu
-R="$1"; TGZ="$2"; OUT="$3"; SIZE="$4"; LABEL="$5"; RESOLV="$6"; shift 6
+R="$1"; TGZ="$2"; OUT="$3"; SIZE="$4"; LABEL="$5"; RESOLV="$6"; JWMRC="$7"; shift 7
 PKGS="$*"
 
 rm -rf "$R"; mkdir -p "$R"
@@ -177,6 +204,14 @@ if [ -n "$PKGS" ]; then
     /usr/sbin/chroot "$R" /sbin/apk add --no-cache $PKGS
 fi
 
+# The window manager's configuration, and it is THE SAME FILE the Debian
+# namespace gets. A window manager configured by each distribution's packaging
+# default is two different window managers wearing one name.
+if [ -r "$JWMRC" ]; then
+    mkdir -p "$R/etc/jwm"
+    cp "$JWMRC" "$R/etc/jwm/hamnix.jwmrc"
+fi
+
 /usr/sbin/chroot "$R" /bin/sh -eu <<'INEOF'
 # chroot(2) does not change $PATH, so without this the shell inside is still
 # looking down the HOST's PATH and busybox's own applets are invisible:
@@ -195,8 +230,11 @@ chmod 1777 /tmp
 
 # The X session, baked in rather than planted with debugfs after the fact.
 # It is the Alpine twin of tests/linux/hamnix_x11session.sh and it is
-# deliberately SHORTER: no matchbox (not packaged here, and two clients do not
-# need one), no dbus (nothing in this set asks for a bus), no Steam.
+# deliberately SHORTER: no dbus (nothing in this set asks for a bus), no Steam.
+# It runs the SAME window manager on the SAME configuration file, though --
+# a namespace whose windows behave differently depending on which distribution
+# is behind it would make "does this work in the namespace" a question with
+# two answers.
 # What it keeps is the two lines that were paid for in the Debian one.
 # ...but only when there is an X server for it to start. A HAMLINUX_ALPINE_GUI=0
 # image that shipped this script would answer `hamnix-x11session` with a
@@ -287,8 +325,36 @@ else
 fi
 
 export DISPLAY=:0
-# No window manager: rootful Xwayland composites its clients onto its own root
-# window, which IS the Wayland surface, and neither client needs placing.
+
+# THE WINDOW MANAGER. Same one as Debian's namespace, same configuration file.
+# Not "none": rootful Xwayland does composite its clients onto its own root
+# window, but that root window is not managed by anybody, so nothing in here
+# can move, resize, stack or close what is on it -- and _NET_SUPPORTED comes
+# back with zero atoms to any client that asks.
+if command -v jwm >/dev/null 2>&1; then
+    if [ -r /etc/jwm/hamnix.jwmrc ]; then
+        jwm -f /etc/jwm/hamnix.jwmrc >/tmp/wm.log 2>&1 &
+    else
+        echo "hamnix-x11session(alpine): WARNING no /etc/jwm/hamnix.jwmrc; jwm will use its built-in defaults"
+        jwm >/tmp/wm.log 2>&1 &
+    fi
+    sleep 2
+    # Starting is not managing -- ask the X server, not the process table.
+    # And DO NOT ANSWER A QUESTION THAT COULD NOT BE ASKED: without xprop this
+    # said "not managing" about a screen jwm was managing, which is the exact
+    # failure mode this whole check exists to catch, committed by the check.
+    if ! command -v xprop >/dev/null 2>&1; then
+        echo "hamnix-x11session(alpine): cannot check whether jwm has the screen -- no xprop in this image"
+    elif timeout 3 xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id'; then
+        echo "hamnix-x11session(alpine): jwm has the screen: $(timeout 3 xprop -root _NET_SUPPORTED 2>/dev/null | sed 's/.*= //' | tr ',' '\n' | wc -l) _NET_SUPPORTED atoms, workarea $(timeout 3 xprop -root _NET_WORKAREA 2>/dev/null | sed 's/.*= //')"
+    else
+        echo "hamnix-x11session(alpine): WARNING jwm is not managing this screen; its log:"
+        cat /tmp/wm.log 2>&1
+    fi
+else
+    echo "hamnix-x11session(alpine): ERROR no jwm in this namespace -- nothing will be movable. apk add jwm"
+fi
+
 # THE CLIENT'S OWN OUTPUT GOES TO A FILE. It is the one thing that explains a
 # black X root window, and a spawned program's stderr does not reliably reach
 # the Hamnix console across the namespace boundary -- the first run of
@@ -332,7 +398,7 @@ unshare --map-auto --map-root-user -m --propagation private \
     /bin/sh "$CACHE/alpine-build.sh" \
         "$PROJ_ROOT/$ROOTDIR" "$PROJ_ROOT/$CACHE/$TARBALL" \
         "$PROJ_ROOT/$OUT" "$SIZE" "$LABEL" \
-        "$PROJ_ROOT/$CACHE/alpine-resolv.conf" $PKGS
+        "$PROJ_ROOT/$CACHE/alpine-resolv.conf" "$PROJ_ROOT/etc/jwmrc.linux" $PKGS
 
 /sbin/e2fsck -fp "$OUT" >/dev/null 2>&1 || true
 NEW_SZ="$(du -m "$OUT" | cut -f1)"
