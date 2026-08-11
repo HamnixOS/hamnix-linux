@@ -17,7 +17,23 @@ The gate is `tests/linux/installed_update.sh`: it installs a disk, boots it
 through UEFI, refreshes from the real `https://255.one/`, installs a package
 the image does not ship, publishes a newer **signed** build to a local
 channel, updates against it, reboots the machine, and asks every question
-again as the desktop user. Unattended, re-runnable, **39 PASS / 0 FAIL**.
+again as the desktop user. Unattended, re-runnable, **37 PASS / 0 FAIL**.
+
+Two of its arms report rather than gate, and both currently report the gap
+(so they are the difference between this 37 and the 39 recorded earlier):
+`https://255.one/` still serves no `index.json.sig`, and `hpm` still replaces
+the machine's own `/etc/rc.boot`. Both are named in §2a/§2b below and neither
+is a defect in the update path itself. The reboot arm used to be a third —
+it is a real check now that §2c is closed.
+
+**The "newer build" version is derived, not hard-coded.** It was `1.0.8`, and
+the gate went red the day the real repository published `hamnix-diff 1.0.8`
+itself: the first `hpm install`, whose job is to fetch the *older* release,
+already got 1.0.8, so `hpm update` correctly reported `upgraded=0` and the
+stamped local build never landed. Five checks failed and all five pointed at
+the update path rather than at the collision. The test now asks the repository
+what it serves and bumps the patch, so publishing a release cannot break the
+gate that exists to prove publishing works.
 
 ---
 
