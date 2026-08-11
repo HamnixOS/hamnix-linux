@@ -287,13 +287,28 @@ runs it, and never shows it.
 Two things are wrong around it, both measured, and neither yet proven to be
 the cause:
 
-* **CEF's GPU process exits twice per launch** —
-  `[518:518] ERROR:viz_main_impl.cc(166) Exiting GPU process due to errors
-  during initialization`, once for the GPU process and once for its fallback,
-  with no preceding error of its own. A browser whose viz compositor never
-  comes up has no first frame to map a window with. Steam's own pass-through
-  switches (`steam -cef-disable-gpu -cef-disable-gpu-compositing`) are the
-  obvious lever and the next thing to run.
+* **CEF's GPU process exiting is NOT the cause.** It does exit, twice per
+  launch — `[518:518] ERROR:viz_main_impl.cc(166) Exiting GPU process due to
+  errors during initialization`, once for the GPU process and once for its
+  fallback, with no error of its own beforehand. So it was tested directly, by
+  running Steam with its own pass-through switches:
+
+  ```
+  hamnix-steam -cef-disable-gpu -cef-disable-gpu-compositing
+  ```
+
+  They reach the webhelper (`exec ./steamwebhelper … --disable-gpu-compositing
+  --disable-gpu …`), the `viz_main_impl` errors stop completely, and **the
+  window tree is byte-for-byte the same**: the same four Steam windows, all
+  still `IsUnMapped`. That hypothesis is dead.
+
+* **Steam's launcher DOES try to show a window, and nothing appears.** Its
+  console log has `Show window` and, three seconds later, `Destroy window`,
+  around the "Verifying installation..." dialog — before CEF exists at all.
+  `tests/linux/steam_gui_burst.sh` screendumps every second across that
+  interval (37 frames spanning `04:01:00`, which is when `Show window`
+  happened) and every frame is byte-identical black. So the thing that does
+  not reach the screen is not specific to CEF.
 * **The system D-Bus was dead, and for the tree's signature reason.** The
   namespace's `/run` is on the ext4 and survives reboots, so the first boot's
   `dbus-daemon` left `/run/dbus/system_bus_socket` behind for ever; the
@@ -304,8 +319,36 @@ the cause:
   one directory over. `hamnix_x11session.sh` now pings the bus and clears the
   corpse; `hamnix_xdiag.sh` reports which of the two it found.
 
-**This is where the work stops today**, and the search has moved from our
-window path into Steam's own compositor bring-up.
+### 6.3 What is left, and what it would take
+
+**This is where the work stops today.** What has been eliminated is worth as
+much as what has not, so, plainly:
+
+* it is **not** the X screen size (1280x800, 96 dpi, measured),
+* it is **not** a missing window manager or a missing `_NET_WORKAREA`
+  (matchbox is up, EWMH is complete, measured),
+* it is **not** our window path (a real Chromium goes down it and lands its
+  pixels on the framebuffer, measured),
+* it is **not** CEF's GPU process (disabled by Steam's own switch, errors
+  gone, window tree unchanged, measured).
+
+What is left is inside Steam: every window it creates it leaves `IsUnMapped`,
+including one its *launcher* explicitly asks to show before CEF is involved.
+The next things to measure, in order:
+
+1. **Whether an X `MapWindow` is ever issued at all.** `xtrace`/`x11trace`
+   between Steam and Xwayland answers it in one run and would separate "Steam
+   never asks" from "the map is refused". Neither tool is in the image; adding
+   `xtrace` to `scripts/hamlinux_distro.sh` is a one-line change.
+2. **matchbox.** It is a single-window handheld WM and it is the only thing
+   between a MapRequest and the screen. Running the session with **no** window
+   manager at all — an override-redirect-heavy app like Steam does not need
+   one — is a two-line experiment and would clear or convict it immediately.
+3. **The system bus, properly.** `dbus-daemon --system` still does not come up;
+   its complaint now lands in `/tmp/dbus-system.log` instead of being
+   discarded, and nobody has read it yet.
+
+None of these is blocked on anything. They just have not been run.
 
 ---
 

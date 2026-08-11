@@ -79,6 +79,14 @@ same failure this project exists to beat.
   daemon still does not come up — its own complaint is now captured to
   `/tmp/dbus-system.log` instead of being thrown away. Not fixed, but no
   longer silent.
+* **The image build could drop a program and still say `done`.** Fixed in this
+  pass, and listed because the shape recurs: `scripts/hamlinux_image.sh` kept
+  its own copy of wsysd's extra objects after 6a27c0ec moved them into
+  `scripts/hamlinux_build.sh`, so the compositor failed to link, was printed in
+  the same list as two programs that have no source, and the initramfs shipped
+  with **no compositor at all** — booting to a black screen while rc.5 printed
+  `compositor started`. Failed links are now named separately, with their build
+  logs, and wsysd/hamsh/hamdesktop/hampanelscene failing to build exits 1.
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
