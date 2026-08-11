@@ -1121,13 +1121,68 @@ int32_t sys_socketpair(int32_t domain, int32_t type, int32_t protocol,
 #define RFFDG    0x0004   /* copy the fd group */
 #define RFNAMEG  0x0008   /* copy (privatise) the namespace */
 #define RFCNAMEG 0x0080   /* start with an EMPTY namespace */
+#define RFNOWAIT 0x0100   /* detach: the parent never reaps this child */
 
 /* Defined with the namespace verbs below: acquire CAP_SYS_ADMIN over our own
  * mounts by creating a user namespace we own. */
 static int ns_privilege(void);
 
+/* ------------------------------------------------------------------ *
+ * RFNOWAIT, and the zombies it left
+ *
+ * lib/p9.ad's spawn_detached is the tree's fire-and-forget launcher -- the DE
+ * chime, the panel's menu launches, the file manager's editor. Its contract
+ * (lib/p9.ad:428) is that "RFNOWAIT severs the parent link at creation, so the
+ * child is published as a DETACHED zombie on exit and the kernel's
+ * reap_orphan_zombies() (run at every fork) reclaims it -- no wait4 needed."
+ *
+ * This port ignored the flag outright, so there was no reaper and no severed
+ * link: every detached spawn left a permanent zombie under a parent that would
+ * never wait for it. The idle census found `aplay` -- hamdesktop's boot chime,
+ * exited in a second, still on the process table a minute later.
+ *
+ * The faithful port is the reaper, not a double fork. A double fork would sever
+ * the link but reparent the grandchild onto PID 1, moving the same zombie onto
+ * hamsh and losing the pid the caller is handed back. Instead the runtime
+ * REMEMBERS which children were detached and waits on THOSE, and only those --
+ * so no other child's exit status can ever be stolen from the code that is
+ * waiting for it, which is the failure a blanket waitpid(-1) drain would risk.
+ *
+ * "Run at every fork" is ported literally, plus every idle park: a program like
+ * hamdesktop fires one chime and may never spawn again, but it parks in
+ * sys_waitfds constantly, so that is where its detached child is reclaimed.
+ * ------------------------------------------------------------------ */
+#define DETACHED_MAX 64
+static pid_t detached_pid[DETACHED_MAX];
+static int   detached_n;
+
+static void detached_remember(pid_t p)
+{
+    if (detached_n < DETACHED_MAX) {
+        detached_pid[detached_n++] = p;
+        return;
+    }
+    /* Full. Reap what we can and drop the oldest rather than growing without
+     * bound -- an unreclaimed slot costs one zombie, a leak costs the table. */
+    detached_n = 0;
+}
+
+void reap_detached(void)
+{
+    for (int i = 0; i < detached_n; ) {
+        int st;
+        pid_t r;
+        do {
+            r = waitpid(detached_pid[i], &st, WNOHANG);
+        } while (r < 0 && errno == EINTR);
+        if (r == 0) { i++; continue; }          /* still running */
+        detached_pid[i] = detached_pid[--detached_n];   /* gone, or not ours */
+    }
+}
+
 int32_t sys_rfork(int32_t flags)
 {
+    reap_detached();                            /* "run at every fork" */
     if (flags & RFMEM) {
         errno = ENOSYS;     /* that is sys_rfork_thread's job — HANDOFF §7.5 */
         return -ENOSYS;
@@ -1206,6 +1261,10 @@ int32_t sys_rfork(int32_t flags)
          * that opens /fd/N must wait rather than fall back to what it
          * inherited. See user/linux-fdns.c. */
         fdns_after_fork_parent((int32_t)pid);
+        /* RFNOWAIT: the caller has promised never to wait for this one, so
+         * the runtime takes on the obligation. See RFNOWAIT above. */
+        if (flags & RFNOWAIT)
+            detached_remember(pid);
     }
     if (pid == 0) {
         /* The child inherits the parent's fifo KEEPER descriptors (see
@@ -2072,7 +2131,7 @@ int32_t sys_setuid_auth(int32_t authfd)
  * poll(2) is why an idle desktop burned both CPUs.
  *
  * devtab_open backs every /dev/wsys, /net, /dev/fb, /dev/audio and /dev/snarf
- * open with a real descriptor on **/dev/null** — a genuine fd table slot that
+ * open with a real descriptor on /dev/null -- a genuine fd table slot that
  * survives fork and cannot collide, with the actual state in the table beside
  * it. That is right for read/write/close and catastrophic for poll: /dev/null
  * is ALWAYS readable, so `poll` returned "ready" the instant it was called,
@@ -2104,6 +2163,10 @@ int32_t sys_setuid_auth(int32_t authfd)
 int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
 {
     fdns_gate_release();
+    /* The idle park is also where a detached child is reclaimed. hamdesktop
+     * fires the boot chime once and may never spawn again, so "reap at every
+     * fork" alone would leave that zombie forever. See RFNOWAIT above. */
+    reap_detached();
     if (nfds > WAITFDS_MAX) {
         errno = EINVAL;
         return -1;

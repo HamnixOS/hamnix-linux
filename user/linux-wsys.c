@@ -1407,7 +1407,7 @@ static int sink_write_allowed(const char *name)
  *
  * THIS IS THE FIX FOR THE 175% IDLE DESKTOP.  sys_waitfds used to hand its
  * fds straight to poll(2) -- and a /dev/wsys descriptor is a real descriptor
- * on **/dev/null**, which poll reports READABLE instantly and always.  So
+ * on /dev/null, which poll reports READABLE instantly and always.  So
  * hamdesktop's `sys_waitfds(event_fd, 250)` and hampanelscene's
  * `sys_waitfds(event_fds, 16)` -- both written specifically to avoid a spin,
  * both commented as parking off the runqueue -- returned immediately on every
