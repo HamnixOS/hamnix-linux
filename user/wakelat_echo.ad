@@ -44,6 +44,11 @@ h_b60:  uint64 = 0      # <=  60 ms   a full nice-0 quantum
 h_b120: uint64 = 0      # <= 120 ms
 h_over: uint64 = 0      # > 120 ms
 
+# Every message ever received, across all sentinels. h_n is reset by the
+# sentinel, so it cannot answer "did this responder ever service anything?" —
+# and that is the question an exit has to answer honestly.
+msgs_total: uint64 = 0
+
 
 def strlen_u8(s: Ptr[uint8]) -> uint64:
     n: uint64 = 0
@@ -156,14 +161,36 @@ def main() -> int32:
     msg: Array[8, uint8]
     while True:
         if read_exact(0, &msg[0], 8) != 8:
-            # Parent closed the pipe: we are done.
+            # The pipe closed. REPORT before exiting rather than exiting
+            # silently: an exit(0) with no output at all is indistinguishable
+            # from a responder that was never scheduled, never spawned, or
+            # exec'd nothing — the exact "success-shaped answer instead of the
+            # truth" this tree exists to catch. So the histogram is always
+            # printed when there is anything to say — a batch the sentinel has
+            # not yet flushed, or nothing at all, which is the case that
+            # matters. (h_n == 0 with messages behind us means the last
+            # sentinel already reported; a second identical empty line there
+            # would be noise, not evidence.)
+            if h_n > 0 or msgs_total == 0:
+                hist_report()
+            # ...and an EMPTY one is a FAILED reproducer, not a pass. Reaching
+            # end-of-input having timed nothing means no event ever arrived, so
+            # say which side is missing and exit non-zero. (In the real run
+            # scripts/test_wakeup_latency.sh drives, thousands of messages have
+            # arrived long before the pipe closes, so this never fires there.)
+            if msgs_total == 0:
+                write_str(1, "[wakelat] FAIL: serviced no events -- fd 0 reached end-of-input with no 8-byte message. wakelat_echo is the RESPONDER half; /bin/wakelat drives it.\n")
+                sys_exit(1)
+                return 1
             sys_exit(0)
             return 0
         # Timestamp FIRST — before any other work — so the number is the
-        # scheduler's latency and not this program's parsing cost.
+        # scheduler's latency and not this program's parsing cost. The receipt
+        # counter is bumped AFTER the clock read for the same reason.
         ts_now[0] = 0
         ts_now[1] = 0
         sys_clock_gettime(CLOCK_MONOTONIC, &ts_now[0])
+        msgs_total = msgs_total + 1
         t1: uint64 = ts_now[0] * 1000000000 + ts_now[1]
         t0: uint64 = 0
         i: uint64 = 0

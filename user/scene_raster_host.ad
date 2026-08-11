@@ -28,11 +28,23 @@ def _slen(s: Ptr[uint8]) -> uint64:
     return n
 
 
+def _puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, _slen(s))
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    # Every exit below used to be a bare number with no output, so this
+    # harness could fail four different ways and look identical from outside:
+    # a run sweep recorded "exit 1", full stop. A harness whose whole purpose
+    # is to make a blank render visible must not itself fail invisibly.
     if argc < 3:
+        _puts(2, "usage: scene_raster_host <in.dl> <out.ppm>\n")
         return 2
     fd: int32 = sys_open(cast[Ptr[char]](argv[1]))
     if fd < 0:
+        _puts(2, "scene_raster_host: cannot open the display list ")
+        _puts(2, cast[Ptr[uint8]](argv[1]))
+        _puts(2, " -- dump one with hamdesktop/hampanelscene --scene-dump\n")
         return 1
     total: uint64 = 0
     while total < 16384:
@@ -42,6 +54,9 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             break
         total = total + cast[uint64](n)
     sys_close(fd)
+    if total == 0:
+        _puts(2, "scene_raster_host: the display list is EMPTY -- rasterizing it would produce a blank PPM and call it a render\n")
+        return 1
 
     hamscene_load(&dlbuf[0], total)
     hamui_host_begin(800, 600)
@@ -49,9 +64,17 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
     ofd: int32 = sys_open_write(cast[Ptr[char]](argv[2]))
     if ofd < 0:
+        _puts(2, "scene_raster_host: cannot create the output PPM ")
+        _puts(2, cast[Ptr[uint8]](argv[2]))
+        _puts(2, "\n")
         return 1
     hlen: uint64 = hamui_host_ppm_header(&ppm_hdr[0])
     sys_write(ofd, &ppm_hdr[0], hlen)
     sys_write(ofd, hamui_host_fb_ptr(), hamui_host_fb_bytes())
     sys_close(ofd)
+    _puts(1, "scene_raster_host: rasterized ")
+    _puts(1, cast[Ptr[uint8]](argv[1]))
+    _puts(1, " -> ")
+    _puts(1, cast[Ptr[uint8]](argv[2]))
+    _puts(1, "\n")
     return 0

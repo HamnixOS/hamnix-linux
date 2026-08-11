@@ -244,6 +244,31 @@ sleep
 test
 pathchk"
 
+# The programs whose CONTRACT is a NON-ZERO exit under this recipe. Without
+# this list the sweep reports a failure for five programs that are behaving
+# exactly as specified — the same manufactured result as the 4 s GUI timeout,
+# only in the opposite direction, and just as dishonest in a headline number.
+#
+# The bar is the mirror of EXPECT_SILENT's: THE STATUS MUST BE THE ANSWER, not
+# merely the observed outcome. "cannot open /proc/svc", "no audio device" and
+# "cannot open /dev/vt/ctl" are REAL gaps and stay unhealthy; these five are
+# not gaps at all:
+#   false          exit 1 is its entire specification
+#   cmp / diff     POSIX: 1 means "the files differ", and the recipe hands
+#                  them two files that DO differ, on purpose
+#   tty            its own header says "exit 0 if a tty, 1 otherwise"; stdin
+#                  here is a regular file, so 1 is the correct answer
+#   kill           the recipe picks pid 99999 precisely SO THAT the target is
+#                  not found — "(PID chosen so target is not found (safe))"
+# A row here still has to produce its normal output; it is scored EXPECTED_FAIL
+# and counted with the healthy, and anything that lands here without earning
+# it is a finding exactly like a stray SILENT_OK.
+EXPECT_NONZERO="false
+cmp
+diff
+tty
+kill"
+
 run_one() {
     local app="$1"
     local cls="${CLASS[$app]:-cmd}"
@@ -306,7 +331,17 @@ run_one() {
     esac
 
     local t="$TMO"
-    case "$cls" in daemon|gui) t="$DTMO" ;; esac
+    # `bench` is a BOUNDED experiment that simply takes longer than an
+    # ordinary command, and it exists for the same reason DTMO is 12 and not
+    # 4: at TMO=5 the sweep was killing programs one second before they
+    # printed their answer and then reporting the silence as their behaviour.
+    # Measured: user/nice_lo.ad and user/wakelat_hog.ad run fixed wall-clock
+    # windows of WINDOW_JIFFIES 600 and 700 -- 6 s and 7 s at 100 Hz -- and
+    # both were scored TIMEOUT, wakelat_hog with an EMPTY output column, which
+    # reads as a CPU hog that never even started. They finish and print inside
+    # DTMO. Unlike daemon/gui, a `bench` that is STILL running at the timeout
+    # is a genuine TIMEOUT: its contract is to end.
+    case "$cls" in daemon|gui|bench) t="$DTMO" ;; esac
 
     # One invocation of the jail. Everything the program can see is set here:
     # env -i so the developer's environment cannot leak in and make a result
@@ -418,10 +453,26 @@ run_one() {
         # SIGXFSZ: it hit the harness's 64 MB output cap. `yes` does this
         # because `yes` is supposed to.
         verdict=STAYS_UP; detail="wrote past the 4MB output cap — $detail"
+        # 4 MB, and it is worth being exact: bash's `ulimit -f` counts
+        # 1024-byte blocks (measured -- `ulimit -f 1` truncates at 1024), so
+        # the 4096 above is 4 MiB. This line used to say 64 MB, which is a
+        # wrong number in a comment about a cap and the next reader would have
+        # believed it.
     elif [ "$rc" -gt 128 ] && [ "$rc" -lt 160 ]; then
         verdict=CRASH; detail="signal $((rc-128)) — $detail"
+    elif [ "$rc" != 0 ] && grep -qx "$app" <<< "$EXPECT_NONZERO"; then
+        verdict=EXPECTED_FAIL
     elif [ "$rc" != 0 ]; then
         verdict=EXIT_NONZERO
+    elif [ "$cls" = gui ] && [ "$wins" != - ] && [ "$wins" -gt 0 ]; then
+        # BEFORE the two "did nothing" buckets, not after, which is where this
+        # test used to sit. A scene client that maps a window, paints it and
+        # exits 0 without printing anything or touching a file outside /srv
+        # matched SILENT_OK first and was reported as having done nothing --
+        # while its window was sitting in the table the probe had just read.
+        # The window IS the effect for a gui client, so it is the first thing
+        # asked about.
+        verdict=DREW_WINDOW
     elif [ "$ob" = 0 ] && [ "$eb" = 0 ] && [ "$nch" = 0 ] \
          && ! grep -qx "$app" <<< "$EXPECT_SILENT"; then
         # Exit 0, said nothing, changed nothing. On this port that is the
@@ -430,8 +481,6 @@ run_one() {
         verdict=SILENT_OK
     elif [ "$nch" -gt 0 ] && [ "$nempty" = "$nch" ] && [ "$ob" = 0 ]; then
         verdict=EMPTY_EFFECT
-    elif [ "$cls" = gui ] && [ "$wins" != - ] && [ "$wins" -gt 0 ]; then
-        verdict=DREW_WINDOW
     else
         verdict=RAN
     fi
@@ -462,6 +511,29 @@ unshare -r rm -rf "$OUT/ov" 2>/dev/null || rm -rf "$OUT/ov"
 # ---------------------------------------------------------------------------
 {
     echo "=== hamlinux_runsweep $(date -Is) ==="
+    echo
+    # THE HEADLINE, COMPUTED HERE. It used to be derived by hand from the
+    # verdict table and quoted into HANDOFF.md, and a figure that lives only
+    # in a commit message is a figure nobody can check: one pass reported
+    # "249/323" against a baseline results.tsv it had already deleted, and the
+    # 323 was simply wrong (it is 324). Printing the definition next to the
+    # number means the next reader re-derives nothing.
+    #
+    #   healthy  = RAN + DREW_WINDOW + STAYS_UP + EXPECTED_FAIL
+    #   runnable = every row MINUS the ones we declined to run
+    #              (NOT_SMOKE_TESTABLE) and the ones we could not build
+    #              (BUILD_FAIL)
+    awk -F'\t' 'NR>1{
+        n++; c[$4]++
+    } END {
+        healthy = c["RAN"] + c["DREW_WINDOW"] + c["STAYS_UP"] + c["EXPECTED_FAIL"]
+        runnable = n - c["NOT_SMOKE_TESTABLE"] - c["BUILD_FAIL"]
+        printf "-- headline --\n"
+        printf "healthy   %4d   (RAN + DREW_WINDOW + STAYS_UP + EXPECTED_FAIL)\n", healthy
+        printf "runnable  %4d   (%d rows - %d NOT_SMOKE_TESTABLE - %d BUILD_FAIL)\n", \
+               runnable, n, c["NOT_SMOKE_TESTABLE"], c["BUILD_FAIL"]
+        printf "SCORE     %d / %d\n", healthy, runnable
+    }' "$OUT/results.tsv"
     echo
     echo "-- by verdict --"
     awk -F'\t' 'NR>1{c[$4]++} END{for(v in c) printf "%-20s %4d\n", v, c[v]}' \

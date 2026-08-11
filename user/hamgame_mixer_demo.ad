@@ -3,20 +3,158 @@
 # the SAME game_* verbs the host harness does. Its job in CI is to keep the
 # native half of the mixer compiling (mirrors user/hamsdl_audio_demo.ad); the
 # rendered buffer is what a device backend would stream to /dev/audio.
+#
+# IT PRINTS WHAT IT MIXED, and that is the point of this file as much as the
+# compile is. The first version rendered its frame block into a buffer nothing
+# ever looked at and returned 0: silent, no files touched, exit 0 — which is
+# indistinguishable from a binary that ran off the end of main having done
+# nothing at all, and is precisely the "success-shaped answer instead of the
+# truth" NORTH_STAR.md is about. `mixed two tones` is a CLAIM, so the claim is
+# now measured on the rendered PCM (voices, bytes, peak, zero crossings) and
+# printed, and a render that comes back SILENT is a named failure rather than a
+# quiet 0. The oracle is the same one user/hamgame_mixer_host.ad uses.
 
-from lib.hamgame import game_mixer_init, game_play_tone, game_load_sound, \
-    game_play_sound, game_mixer_render, game_mixer_voices, game_stop_all_sounds
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+
+from lib.hamgame import game_mixer_init, game_mixer_rate, game_play_tone, \
+    game_mixer_render, game_mixer_voices, game_stop_all_sounds
+
+RATE:   uint32 = 22050
+FRAMES: uint64 = 2048
 
 _dbuf: Array[8192, uint8]
+_numbuf: Array[24, uint8]
+
+
+def _slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def _puts(s: Ptr[uint8]):
+    sys_write(1, s, _slen(s))
+
+
+def _kv(label: Ptr[uint8], v: int64):
+    _puts(label)
+    sys_write(1, cast[Ptr[uint8]](" "), 1)
+    neg: int32 = 0
+    u: uint64 = 0
+    if v < 0:
+        neg = 1
+        u = cast[uint64](0 - v)
+    else:
+        u = cast[uint64](v)
+    if u == 0:
+        _numbuf[0] = 48
+        sys_write(1, &_numbuf[0], 1)
+    else:
+        tmp: Array[24, uint8]
+        n: uint64 = 0
+        while u > 0:
+            tmp[n] = cast[uint8](u % 10) + 48
+            u = u / 10
+            n = n + 1
+        p: uint64 = 0
+        if neg == 1:
+            _numbuf[p] = 45
+            p = p + 1
+        i: uint64 = 0
+        while i < n:
+            _numbuf[p] = tmp[n - 1 - i]
+            p = p + 1
+            i = i + 1
+        sys_write(1, &_numbuf[0], p)
+    sys_write(1, cast[Ptr[uint8]]("\n"), 1)
+
+
+# ---- s16le stats over the rendered block ---------------------------------
+def _rd16(buf: Ptr[uint8], i: uint64) -> int32:
+    raw: uint32 = cast[uint32](buf[i]) | (cast[uint32](buf[i + 1]) << 8)
+    s: int32 = cast[int32](raw)
+    if s >= 32768:
+        s = s - 65536
+    return s
+
+
+def _peak(buf: Ptr[uint8], frames: uint64) -> int32:
+    pk: int32 = 0
+    i: uint64 = 0
+    while i < frames:
+        a: int32 = _rd16(buf, i * 2)
+        if a < 0:
+            a = 0 - a
+        if a > pk:
+            pk = a
+        i = i + 1
+    return pk
+
+
+# Zero crossings are what separates "a tone was mixed in" from "the block is a
+# DC constant that happens to be loud": a 440 Hz square over 40 ms has to
+# change sign, and silence never does.
+def _sign_changes(buf: Ptr[uint8], frames: uint64) -> int32:
+    if frames < 2:
+        return 0
+    n: int32 = 0
+    prev: int32 = _rd16(buf, 0)
+    i: uint64 = 1
+    while i < frames:
+        cur: int32 = _rd16(buf, i * 2)
+        ppos: int32 = 0
+        if prev > 0:
+            ppos = 1
+        cpos: int32 = 0
+        if cur > 0:
+            cpos = 1
+        if cur != 0 and ppos != cpos:
+            n = n + 1
+        if cur != 0:
+            prev = cur
+        i = i + 1
+    return n
 
 
 def main() -> int32:
-    game_mixer_init(22050)
+    game_mixer_init(RATE)
     # Play two beeps at once and mix a frame block (a game's per-tick audio).
-    game_play_tone(440, 40, 128)
-    game_play_tone(660, 40, 96)
-    if game_mixer_voices() < 2:
+    v1: int32 = game_play_tone(440, 40, 128)
+    v2: int32 = game_play_tone(660, 40, 96)
+    if v1 < 0 or v2 < 0:
+        _puts("[mixer-demo] FAIL: game_play_tone refused a voice\n")
         return 1
-    game_mixer_render(&_dbuf[0], 2048)
+    voices: int32 = game_mixer_voices()
+    if voices < 2:
+        _kv("[mixer-demo] FAIL: fewer than 2 voices active; voices", cast[int64](voices))
+        return 1
+
+    nb: uint64 = game_mixer_render(&_dbuf[0], FRAMES)
+    if nb != FRAMES * 2:
+        _kv("[mixer-demo] FAIL: short render; bytes", cast[int64](nb))
+        return 1
+
+    pk: int32 = _peak(&_dbuf[0], FRAMES)
+    zc: int32 = _sign_changes(&_dbuf[0], FRAMES)
+    _kv("[mixer-demo] rate", cast[int64](game_mixer_rate()))
+    _kv("[mixer-demo] voices", cast[int64](voices))
+    _kv("[mixer-demo] bytes", cast[int64](nb))
+    _kv("[mixer-demo] peak", cast[int64](pk))
+    _kv("[mixer-demo] crossings", cast[int64](zc))
+
+    # A buffer full of zeroes is a mixer that rendered SILENCE while reporting
+    # two live voices. That is the failure worth catching here, so it is named.
+    if pk == 0:
+        _puts("[mixer-demo] FAIL: rendered block is silent (peak 0) with 2 voices active\n")
+        return 1
+    if zc < 2:
+        _puts("[mixer-demo] FAIL: rendered block never changes sign; that is not a mixed tone\n")
+        return 1
+
     game_stop_all_sounds()
+    if game_mixer_voices() != 0:
+        _puts("[mixer-demo] FAIL: game_stop_all_sounds left voices running\n")
+        return 1
+    _puts("[mixer-demo] ok: 2 tones mixed, voices drained\n")
     return 0
