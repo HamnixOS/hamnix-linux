@@ -539,6 +539,37 @@ def http_response_header(name: Ptr[uint8], out: Ptr[uint8],
     return http_find_header(&h9_hdr[0], h9_hdr_len, name, out, out_cap)
 
 
+# Reassemble the RAW response — status line + headers + body — as one
+# contiguous run in the caller's buffer, for a consumer that parses the head
+# itself. hambrowse's JS fetch() transport is the one: the engine wants the
+# bytes exactly as they came off the wire.
+#
+# It lives HERE and not in that caller because it is the one piece of the
+# change with an overlapping copy in it, and a shift that runs the wrong way
+# corrupts a page silently. In http9 it is reachable from a host probe and is
+# gated by tests/linux/http9_response_cap.sh; in hambrowse it would only ever
+# run inside a VM.
+#
+# dst[0..body_len) must hold the body as http_get left it. Returns the total
+# byte count, or -1 if head + body will not fit in dst_cap (the caller should
+# size its body cap at dst_cap - H9_HDR_CAP to make that unreachable).
+def http_prepend_head(dst: Ptr[uint8], dst_cap: uint64,
+                      body_len: uint64) -> int64:
+    hl: uint64 = h9_hdr_len
+    if hl + body_len > dst_cap:
+        return -1
+    # BACKWARDS: source and destination overlap and the destination is higher.
+    k: uint64 = body_len
+    while k > 0:
+        k = k - 1
+        dst[hl + k] = dst[k]
+    j: uint64 = 0
+    while j < hl:
+        dst[j] = h9_hdr[j]
+        j = j + 1
+    return cast[int64](hl + body_len)
+
+
 # Content-Length from the response head, or -1 when it is absent or has
 # no digits. -1 and 0 are DIFFERENT answers: 0 means "the server said the
 # body is empty", -1 means "the server did not say", and the drain loop

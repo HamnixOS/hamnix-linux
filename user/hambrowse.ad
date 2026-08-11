@@ -54,7 +54,7 @@ from lib.hamui import hamui_window_on, hamui_set_protocol_v2_dims, \
     hamui_v2_is_active, hamui_v2_fill_rect, hamui_v2_commit_rect, \
     hamui_v2_bb_ptr, hamui_v2_bb_w, hamui_v2_bb_h
 from user.http9 import http_get, http_post, http_effective_url, \
-    http_header_bytes, http_header_len
+    http_prepend_head
 # Direct engine seam: register the real over-the-wire fetch() transport. The whole
 # program is one Adder compilation unit, so this is the SAME engine htmlengine
 # drives — one shared fetch_transport_addr; no htmlengine passthrough needed.
@@ -941,22 +941,18 @@ def _js_fetch_transport(url: Ptr[uint8], url_len: int32,
         return cast[Ptr[uint8]](0)
     out_status[0] = st
 
-    # Reassemble the RAW response the engine parses: shift the body right by
-    # the head length and copy the head in front of it. The shift runs
-    # BACKWARDS because source and destination overlap.
-    hl: uint64 = http_header_len()
-    if hl > JSFETCH_HDR_RESERVE:
-        hl = JSFETCH_HDR_RESERVE
-    hp: Ptr[uint8] = http_header_bytes()
-    k: uint64 = bl
-    while k > 0:
-        k = k - 1
-        jsfetch_buf[hl + k] = jsfetch_buf[k]
-    j: uint64 = 0
-    while j < hl:
-        jsfetch_buf[j] = hp[j]
-        j = j + 1
-    out_len[0] = cast[int32](hl + bl)
+    # Reassemble the RAW response the engine parses. The overlapping shift
+    # lives in http9 (http_prepend_head) so it is reachable from a host probe
+    # and gated by tests/linux/http9_response_cap.sh — a shift that ran the
+    # wrong way would corrupt a page silently, and this file only ever runs
+    # inside a VM. JSFETCH_BODY_CAP = JSFETCH_CAP - JSFETCH_HDR_RESERVE makes
+    # the -1 (will not fit) branch unreachable, but it is handled rather than
+    # assumed away.
+    raw: int64 = http_prepend_head(&jsfetch_buf[0], JSFETCH_CAP, bl)
+    if raw < 0:
+        out_len[0] = 0
+        return cast[Ptr[uint8]](0)
+    out_len[0] = cast[int32](raw)
     return &jsfetch_buf[0]
 
 

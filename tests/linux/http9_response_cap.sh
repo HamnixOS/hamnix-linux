@@ -181,6 +181,29 @@ expect "a 302 behind a 20 KB body still follows into a 1 KB buffer" \
 expect "chunked body, no Content-Length, decoded" \
     "$(probe "$U/chunked/50000" 262144)" "RC=0 STATUS=200 BODYLEN=50000"
 
+# 7a. http_prepend_head — the overlapping shift that reassembles the RAW
+#     response for hambrowse's JS fetch() transport, which hands the engine
+#     the bytes as they came off the wire. It is gated HERE, host-side,
+#     because in hambrowse it would only ever run inside a VM, and a shift
+#     that ran the wrong way would corrupt a page silently.
+for pair in "$U/tiny 4096" "$U/n/100000 200000"; do
+    set -- $pair
+    raw="$("$PROBE" "$1" "$2" raw 2>/dev/null | tr -d '\r' | tr '\n' ' ')"
+    hdrlen="$(sed 's/.*HDRLEN=\([0-9]*\).*/\1/' <<< "$raw")"
+    bodylen="$(sed 's/.*BODYLEN=\([0-9]*\).*/\1/' <<< "$raw")"
+    rawlen="$(sed 's/.*RAW=\([0-9]*\).*/\1/' <<< "$raw")"
+    if [ -n "$rawlen" ] && [ "$rawlen" = "$((hdrlen + bodylen))" ]; then
+        ok "http_prepend_head($1): RAW=$rawlen = HDRLEN $hdrlen + BODYLEN $bodylen"
+    else
+        bad "http_prepend_head($1): RAW=$rawlen != $hdrlen + $bodylen"
+    fi
+    expect "http_prepend_head($1) puts the status line in front" \
+        "$raw" "RAW0=HTTP/1.1 200 OK"
+    # The body's last 16 bytes were captured BEFORE the shift and compared
+    # after it: a backwards copy done forwards smears the tail.
+    expect "http_prepend_head($1) moved the body intact" "$raw" "TAILMATCH=1"
+done
+
 # ---- what a USER sees: curl and wget ----------------------------------
 echo "[http9_cap] (4/4) curl / wget ..."
 

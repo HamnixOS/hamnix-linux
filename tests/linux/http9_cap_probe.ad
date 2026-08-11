@@ -13,13 +13,21 @@
 # question about the SERVER's headers any more. This probe takes the cap as
 # an argument so a gate can stand on each of those points directly.
 #
-# usage: http9_cap_probe <url> <body-cap-bytes>
+# usage: http9_cap_probe <url> <body-cap-bytes> [raw]
 # prints one line:
-#   RC=<rc> STATUS=<n> BODYLEN=<n> HDRLEN=<n> CAP=<n>
+#   RC=<rc> STATUS=<n> BODYLEN=<n> HDRLEN=<n> CAP=<n> CTYPE=<...>
 # and then, on a completed fetch, the first 64 body bytes as a second line
 # prefixed "BODY0: " so a gate can assert on content and not only on counts.
+#
+# With a third argument "raw" it also calls http_prepend_head — the overlapping
+# shift hambrowse's JS fetch() transport uses to hand the engine the response
+# exactly as it came off the wire — and prints
+#   RAW=<total> RAW0=<first 16 bytes> RAWTAIL=<last 16 bytes>
+# so a gate can prove the head landed in front and the body survived the move.
+# That code would otherwise only ever run inside a VM.
 
-from user.http9 import http_get, http_header_len, http_response_header
+from user.http9 import http_get, http_header_len, http_response_header, \
+    http_prepend_head
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 
@@ -125,4 +133,48 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         nl: Array[1, uint8]
         nl[0] = 10
         sys_write(1, &nl[0], 1)
+
+    # Optional third argument "raw": exercise http_prepend_head in place.
+    if argc >= 4:
+        a3: Ptr[uint8] = cast[Ptr[uint8]](argv[3])
+        if a3[0] == 114 and a3[1] == 97 and a3[2] == 119:      # "raw"
+            # Remember the body's last 16 bytes BEFORE the shift, so the
+            # comparison after it is against something the move could break.
+            tail_pre: Array[16, uint8]
+            tn: uint64 = 16
+            if bl[0] < tn:
+                tn = bl[0]
+            t: uint64 = 0
+            while t < tn:
+                tail_pre[t] = probe_buf[bl[0] - tn + t]
+                t = t + 1
+            raw: int64 = http_prepend_head(&probe_buf[0], PROBE_CAP, bl[0])
+            r: uint64 = 0
+            r = _app(r, "RAW=")
+            r = _app_i(r, raw)
+            r = _app(r, " RAW0=")
+            sys_write(1, &line_buf[0], r)
+            if raw > 0:
+                # 15 bytes, not 16: the 16th is the status line's CR, and a
+                # bare CR in the middle of a gate's grep line is a trap.
+                h: uint64 = 15
+                if cast[uint64](raw) < h:
+                    h = cast[uint64](raw)
+                sys_write(1, &probe_buf[0], h)
+                m: uint64 = 0
+                m = _app(m, " RAWTAIL=")
+                sys_write(1, &line_buf[0], m)
+                sys_write(1, &probe_buf[cast[uint64](raw) - tn], tn)
+                m = 0
+                m = _app(m, " TAILMATCH=")
+                same: int32 = 1
+                z: uint64 = 0
+                while z < tn:
+                    if probe_buf[cast[uint64](raw) - tn + z] != tail_pre[z]:
+                        same = 0
+                    z = z + 1
+                m = _app_i(m, cast[int64](same))
+                line_buf[m] = 10
+                m = m + 1
+                sys_write(1, &line_buf[0], m)
     return 0
