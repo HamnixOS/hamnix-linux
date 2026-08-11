@@ -47,7 +47,9 @@ server socket (§8).
 | pressure-vessel as a user | **works** | the root switch is `MS_MOVE` onto `/`, not `chroot`, so `bwrap --unshare-user` builds a container as uid 1001 — §5, §7 |
 | X screen geometry | **works** | 1280x800 at 96 dpi inside the namespace; `matchbox` publishes `_NET_WORKAREA = 0,0,1280,800` — §6.1 |
 | a Chromium window, end to end | **works** | `tests/linux/x11_geom_probe.sh`: a real Chromium maps a 1000x600 toplevel through Xwayland → wsyswl → wsysd and its pixels reach the framebuffer |
-| Steam UI window | **not yet** | every Steam window is created and left `IsUnMapped`; CEF's GPU process exits twice per launch — §6.2 |
+| system D-Bus | **works** | the image had no machine id at all; created, and CEF's `Connection refused` per subprocess is gone — §6.4 |
+| Steam's login window exists and is mapped | **works, with no window manager** | `0x1600015 "Sign in to Steam" 700x440+290+180 Map State: IsViewable`, with its full Chromium render subtree. Under `matchbox` that window does not survive at all — §6.4 |
+| Steam UI window, on screen | **not yet** | the mapped window is never painted into: 21 burst frames byte-identical black — §6.5 |
 | audio | **absent** | no `/dev/snd`, no sound device in the VM at all — §8 |
 
 ---
@@ -319,38 +321,158 @@ the cause:
   one directory over. `hamnix_x11session.sh` now pings the bus and clears the
   corpse; `hamnix_xdiag.sh` reports which of the two it found.
 
-### 6.3 What is left, and what it would take
+### 6.3 The three measurements §6.3 asked for — all three run
 
-**This is where the work stops today.** What has been eliminated is worth as
-much as what has not, so, plainly:
+The previous pass named three unblocked next steps and did not run them. They
+have been run. Two of them changed the answer.
 
-* it is **not** the X screen size (1280x800, 96 dpi, measured),
-* it is **not** a missing window manager or a missing `_NET_WORKAREA`
-  (matchbox is up, EWMH is complete, measured),
-* it is **not** our window path (a real Chromium goes down it and lands its
-  pixels on the framebuffer, measured),
-* it is **not** CEF's GPU process (disabled by Steam's own switch, errors
-  gone, window tree unchanged, measured).
+**1. Is a `MapWindow` ever issued?** This no longer needs a trace to answer,
+because the experiment in step 2 answered it outright: with no window manager,
+Steam's login window is `IsViewable`. A window does not become viewable
+without a map, so Steam asks, and the ask is honoured. The `xtrace` machinery
+was still built (`HAMNIX_X11_XTRACE=1`, `tests/linux/hamnix_x11session.sh`)
+because the *next* question — whether anything ever draws into that window —
+is the same shape and only the wire answers it.
 
-What is left is inside Steam: every window it creates it leaves `IsUnMapped`,
-including one its *launcher* explicitly asks to show before CEF is involved.
-The next things to measure, in order:
+Two traps in getting it there, both of which cost a run and both of which
+produced a log that looked fine:
 
-1. **Whether an X `MapWindow` is ever issued at all.** `xtrace`/`x11trace`
-   between Steam and Xwayland answers it in one run and would separate "Steam
-   never asks" from "the map is refused". Neither tool is in the image; adding
-   `xtrace` to `scripts/hamlinux_distro.sh` is a one-line change.
-2. **matchbox.** It is a single-window handheld WM and it is the only thing
-   between a MapRequest and the screen. Running the session with **no** window
-   manager at all — an override-redirect-heavy app like Steam does not need
-   one — is a two-line experiment and would clear or convict it immediately.
-3. **The system bus, properly.** `dbus-daemon --system` still does not come up;
-   its complaint now lands in `/tmp/dbus-system.log` instead of being
-   discarded, and nobody has read it yet.
+* the bundle's members are `usr/bin/xtrace`, so unpacking at `/usr` put the
+  binary at `/usr/usr/bin/xtrace` and the session said `no xtrace binary`;
+* Debian has two amd64 builds of xtrace 1.4.0 and the pool listing gives no
+  hint which is which. `1.4.0-1.1` is trixie's and needs `GLIBC_2.38`;
+  bookworm has 2.36, so it dies with `version GLIBC_2.38 not found`.
+  `1.4.0-1+b1` is the one, `Depends: libc6 (>= 2.17)`.
 
-None of these is blocked on anything. They just have not been run.
+**2. matchbox. Convicted, by direct A/B.** Same image, same Steam, same rc,
+the window manager the only difference:
 
----
+```
+matchbox            no window manager
+----------------    ---------------------------------------------------------
+(absent)            0x1600015 "Sign in to Steam" 700x440+290+180  IsViewable
+0x1600003  200x200  IsUnMapped                     0x1400003  200x200  IsUnMapped
+0x1600001   10x10   IsUnMapped                     0x1400001   10x10   IsUnMapped
+0xa00005    64x24   IsUnMapped                     0x800005    64x24   IsUnMapped
+0xc00001    10x10   IsUnMapped                     0xa00001    10x10   IsUnMapped
+0x200101  1280x800  IsViewable  (matchbox desktop)
+```
+
+Under matchbox the Steam UI window **is not in the tree at all** — and
+matchbox's own `_NET_CLIENT_LIST` and `_NET_ACTIVE_WINDOW` still name
+`0x1800015`, a window that no longer exists. So it is not that matchbox
+refuses to map the window: matchbox *manages* it, makes it active, and the
+window is then destroyed. matchbox is a single-window handheld WM and forcing
+a 700x440 CEF dialog through it does not survive. Everything else in the tree
+is unchanged, which is what makes this an A/B rather than an anecdote.
+
+With no window manager the login window is created at 700x440+290+180 —
+centred on a 1280x800 screen, the size Steam asked for — with the complete
+Chromium render subtree beneath it and all of it correctly positioned:
+
+```
+0x1600015 "Sign in to Steam"  700x440+290+180   IsViewable
+   0x1200006                  700x440+0+0       (+290+180)
+      0x1200008               700x440+0+0       (+290+180)
+```
+
+X11 does not require a window manager, so "no WM" is a configuration, not a
+degradation. What it costs is move/resize/close by mouse, which a session that
+runs one full-screen application does not need.
+
+**3. The system bus. Fixed, and the cause was not the corpse socket.**
+`/etc/machine-id` does not exist in this image and `/var/lib/dbus` is **empty**
+— read straight out of the ext4 without booting anything:
+
+```
+$ debugfs -R "ls -l /var/lib/dbus" build/image/distro.ext4
+  33482  40755  4096  .
+  33471  40755  4096  ..
+```
+
+dbus-daemon will not start without a machine id. `dbus-uuidgen --ensure` was
+already being called, with its output discarded and its exit status ignored,
+so whatever it did or failed to do said nothing either way. Both files are now
+written by name and the id is printed. The bus comes up and **answers**:
+
+```
+hamnix-x11session: machine id dfb3872d1bce5b75b8a82f766a7aa5b9
+hamnix-x11session: system bus live on /run/dbus/system_bus_socket (pid 192)
+hamnix-x11session: system bus ANSWERED GetId
+```
+
+The proof that this is real and not another socket-shaped lie comes from CEF,
+which is not in on it. Before, every subprocess logged
+`Failed to connect to socket /run/dbus/system_bus_socket: Connection refused`.
+Now that line is gone from `cef_log.txt` entirely and what replaces it is a
+*bus* error — `org.freedesktop.DBus.Error.ServiceUnknown: The name
+org.freedesktop.UPower was not provided by any .service files` — which only a
+live bus can produce.
+
+Two related corrections, because both were wrong in this file:
+
+* `dbus-send` **is** in this image, at `/usr/bin/dbus-send`. A comment here
+  asserted it was not, which is why bus liveness had been reduced to
+  inspecting a socket and a pid file. The session now asks the bus for its
+  `GetId`.
+* "the daemon still does not come up" was itself never measured. `/run/dbus/pid`
+  in the image holds `191` with a timestamp from the run that wrote it, so a
+  daemon *had* started on one earlier boot; every boot after that was the
+  stale-socket guard skipping it. The corpse-clearing fix and the machine id
+  are both in, and the run above is the first time either was executed.
+
+### 6.4 Where Steam stops NOW: a mapped window that is never painted
+
+The window exists, is `IsViewable`, is the right size, is in the right place,
+has its full render subtree, and **no pixels ever arrive**.
+`tests/linux/steam_gui_burst.sh` samples the framebuffer every 10 s from
+t=150 s to t=350 s: 21 frames, every one of them byte-identical, `black=93.5%`
+— 93.5% being exactly the screen minus the Hamnix panel and taskbar.
+
+This is not the compositing chain. The control is a static X client down the
+identical path in the identical session:
+
+```
+tests/linux/steam_gui_run.sh \
+    "/usr/local/bin/hamnix-x11session /usr/bin/xclock" xclock.png 90 60
+```
+
+`xclock` renders on the Hamnix desktop (`build/steamprobe/xclock.png`), no
+window manager, showing the correct time. A plain mapped X window's pixels
+reach the framebuffer. Steam's do not.
+
+**And it is still not the GPU process.** That elimination was previously made
+under matchbox, where the window did not survive at all — so it could not have
+shown a difference whatever the truth was. Re-run now that the window exists:
+
+```
+hamnix-steam -cef-disable-gpu -cef-disable-gpu-compositing
+```
+
+The `viz_main_impl.cc(166)` errors stop, the login window is still created,
+still `IsViewable`, still 700x440+290+180 — and the framebuffer is still black
+(`build/steamprobe/nowm_nogpu.png`). The elimination holds, and now it holds
+for a reason that means something.
+
+### 6.5 What to measure next
+
+1. **Does CEF ever draw?** A viewable window nobody paints into is
+   indistinguishable from a missing one, and only the wire tells them apart —
+   the same argument that motivated the map trace, one layer down.
+   `HAMNIX_X11_XTRACE=1` now works and `hamnix_xdiag.sh` counts `PutImage`,
+   `ShmPutImage`, `CopyArea` and `RenderComposite` against `0x1200008`, the
+   innermost render window. Zero of all of them convicts CEF; a healthy count
+   moves the fault to Xwayland → wsyswl and makes the next question "why is
+   damage on a child window not committed".
+2. **MIT-SHM.** It is the one thing `xclock` does not use and CEF does.
+   Xwayland is started `-shm`; whether `ShmAttachFd` survives this path has
+   never been checked, and a silent SHM failure is exactly the shape that
+   produces a correct, empty window.
+3. **A window manager that is not matchbox.** matchbox is convicted of
+   destroying the UI window, and running with none is fine for a
+   single-application session but not for a desktop. Anything reparenting and
+   EWMH-complete would do; the cheap check is whether the login window
+   survives it.
 
 ## 7. `enter debian { … }` from the desktop session — solved
 

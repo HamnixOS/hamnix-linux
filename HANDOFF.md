@@ -49,36 +49,52 @@ the correct answer; one genuinely bails the backend's SSA subset
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
-* **Steam reaches its own UI and shows no window.** It installs, brings up
-  pressure-vessel, and Chromium loads to `SteamApp Init - Before Login`.
-  What that is NOT, now measured rather than guessed (`docs/steam_namespace.md`
-  §6.1): the `(-2147483648, …)` in the CEF log is not our stack answering a
-  geometry query with a sentinel — the X screen is a real 1280x800 at 96 dpi,
-  `matchbox` is managing and publishes `_NET_WORKAREA = 0,0,1280,800`, and a
-  real Chromium — which is what CEF is — maps a window through Xwayland →
-  wsyswl → wsysd and gets its pixels onto the framebuffer. The window path is
-  not the problem.
-  Nor is it CEF's GPU process, which does exit twice per launch
-  (`viz_main_impl.cc(166)`): run with Steam's own `-cef-disable-gpu
-  -cef-disable-gpu-compositing`, those errors stop and the window tree is
-  unchanged.
-  What it IS: every window Steam creates it leaves **`IsUnMapped`** — the UI is
-  alive behind them (the login page runs and polls), and even the *launcher's*
-  `Show window`, which happens before CEF exists, puts no pixels on a
-  framebuffer sampled once a second across the three seconds it is up.
-  The next measurements are named in `docs/steam_namespace.md` §6.3 and none of
-  them is blocked: trace the X protocol for a `MapWindow`, run the session with
-  no window manager, and read what `dbus-daemon` is actually complaining about.
-  Its probe is 23 PASS / 1 FAIL (the remaining one is the PulseAudio socket).
-* **The Debian namespace has no system D-Bus.** The namespace's `/run` is on
-  the ext4 and survives reboots, so the first boot's `dbus-daemon` left
-  `/run/dbus/system_bus_socket` behind and the session's `[ ! -S … ]` guard
-  then skipped starting the bus on every boot after; every CEF process logged
-  `Connection refused` against it. The stale socket is now detected by pid
-  liveness and cleared by name (`tests/linux/hamnix_x11session.sh`), and the
-  daemon still does not come up — its own complaint is now captured to
-  `/tmp/dbus-system.log` instead of being thrown away. Not fixed, but no
-  longer silent.
+* **Steam's window is created, mapped and never painted — and `matchbox` was
+  destroying it.** It installs, brings up pressure-vessel, and Chromium loads
+  to `SteamApp Init - Before Login`. The three measurements
+  `docs/steam_namespace.md` §6.3 named have all now been run, and two of them
+  changed the answer.
+  **The window manager was in the way.** Direct A/B, same image and same rc
+  with only the WM differing: under `matchbox` there is no Steam UI window in
+  the tree at all, while `matchbox`'s own `_NET_CLIENT_LIST` still names
+  `0x1800015` — so matchbox *manages* the window, makes it active, and it is
+  then destroyed. With **no window manager** the same run produces
+  `0x1600015 "Sign in to Steam" 700x440+290+180 Map State: IsViewable`, centred
+  on the screen, with its complete Chromium render subtree
+  (`0x1200006` → `0x1200008`, both 700x440, both correctly placed). So Steam
+  does ask for the map and the map is honoured — the question §6.3 wanted a
+  protocol trace for is answered by a window being viewable at all.
+  **What is broken now is one layer down: nothing ever paints into it.**
+  `tests/linux/steam_gui_burst.sh` samples the framebuffer every 10 s from
+  t=150 s to t=350 s and all 21 frames are byte-identical, `black=93.5%` — the
+  screen minus the panel and taskbar. It is not the compositing chain:
+  `xclock` down the *identical* path in the identical session renders on the
+  Hamnix desktop (`build/steamprobe/xclock.png`). And it is still not CEF's GPU
+  process, which is worth restating because the earlier elimination was made
+  under matchbox where the window did not survive and so could not have shown a
+  difference either way: re-run with `-cef-disable-gpu
+  -cef-disable-gpu-compositing` now that the window exists, the
+  `viz_main_impl.cc(166)` errors stop, the window is still there and still
+  `IsViewable`, and the framebuffer is still black.
+  Next, in `docs/steam_namespace.md` §6.5: count the drawing requests on the
+  wire against `0x1200008` (`HAMNIX_X11_XTRACE=1` now works), check MIT-SHM —
+  the one thing `xclock` does not use and CEF does — and try a window manager
+  that is not matchbox. Its probe is 23 PASS / 1 FAIL (PulseAudio's socket).
+* **~~The Debian namespace has no system D-Bus.~~ FIXED, and the cause was not
+  the stale socket.** `/etc/machine-id` does not exist in this image and
+  `/var/lib/dbus` is **empty** — read straight out of `distro.ext4` with
+  `debugfs`, without booting anything — and `dbus-daemon` will not start
+  without a machine id. `dbus-uuidgen --ensure` was already being called with
+  its output discarded and its exit status ignored, so its failure said
+  nothing. Both files are now written by name and the id is printed; the bus
+  comes up and **answers `GetId`**. The proof it is real comes from CEF, which
+  is not in on it: `Failed to connect to socket /run/dbus/system_bus_socket:
+  Connection refused` is gone from `cef_log.txt` entirely and what replaces it
+  is a *bus* error (`ServiceUnknown: org.freedesktop.UPower`), which only a
+  live bus can produce. Two corrections went with it: `dbus-send` **is** in
+  this image (a comment here claimed it was not, which is why liveness had been
+  reduced to inspecting a socket and a pid file), and "the daemon still does
+  not come up" had itself never been measured.
 * **The image build could drop a program and still say `done`.** Fixed in this
   pass, and listed because the shape recurs: `scripts/hamlinux_image.sh` kept
   its own copy of wsysd's extra objects after 6a27c0ec moved them into

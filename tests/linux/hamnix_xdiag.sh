@@ -29,8 +29,16 @@ xprop -root _NET_SUPPORTED 2>&1 | cut -c1-600
 echo "xdiag: === window tree"
 xwininfo -root -children 2>&1 | head -40
 
+echo "xdiag: === the FULL tree, children included"
+# -children shows top-levels only, and Chromium draws into a CHILD of its
+# toplevel: a toplevel that is IsViewable with an unmapped render child looks
+# exactly like a window that works, and puts no pixels anywhere.
+xwininfo -root -tree 2>&1 | head -60
+
 echo "xdiag: === every top-level, in full"
-for w in $(xwininfo -root -children 2>/dev/null \
+# -tree, not -children: Chromium's toplevel has a two-deep render subtree and
+# the map state of THOSE is the thing that decides whether anything is drawn.
+for w in $(xwininfo -root -tree 2>/dev/null \
            | sed -n 's/^ *\(0x[0-9a-f]*\).*/\1/p'); do
     echo "xdiag: --- $w"
     xwininfo -id "$w" -all 2>&1 | grep -E \
@@ -72,6 +80,12 @@ if [ -s /tmp/xtrace.log ]; then
     grep -n -E 'MapWindow|MapSubwindows' /tmp/xtrace.log | cut -c1-160 | head -60
     echo "xdiag: --- every MapNotify / UnmapNotify event the server sent back"
     grep -n -E 'MapNotify|UnmapNotify|MapRequest' /tmp/xtrace.log | cut -c1-160 | head -60
+    echo "xdiag: --- does anything ever DRAW? (a viewable window that is never"
+    echo "xdiag:     painted into is indistinguishable from a missing one)"
+    for req in PutImage ShmPutImage CopyArea PolyFillRectangle ClearArea \
+               CreatePixmap RenderComposite; do
+        echo "xdiag:     $req: $(grep -c "$req" /tmp/xtrace.log)"
+    done
     echo "xdiag: --- every protocol ERROR on the wire"
     grep -n -i -E 'Error|BadWindow|BadAccess|BadMatch|BadValue' /tmp/xtrace.log \
         | cut -c1-160 | head -40

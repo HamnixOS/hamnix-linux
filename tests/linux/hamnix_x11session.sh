@@ -119,16 +119,18 @@ export DISPLAY=:0
 # redirected TO the WM, so a trace that omitted the WM would show the request
 # vanish and could not say who dropped it.
 if [ "$HAMNIX_X11_XTRACE" = 1 ]; then
-    if ! command -v xtrace >/dev/null 2>&1; then
-        # Not in the Debian archive's default set for this image; the harness
-        # plants it as a tarball rather than adding 2 GB of rebuild.
-        # -C / : the tarball's members are usr/bin/xtrace and usr/share/xtrace,
-        # so unpacking it at /usr puts the binary in /usr/usr/bin and the only
-        # symptom is this script saying "no xtrace binary" one line later.
-        if [ -f /usr/local/lib/xtrace-bundle.tar.gz ]; then
-            tar xzf /usr/local/lib/xtrace-bundle.tar.gz -C / 2>/tmp/xtrace-untar.log \
-                || sed 's/^/hamnix-x11session:   tar: /' /tmp/xtrace-untar.log >&2
-        fi
+    # UNPACK UNCONDITIONALLY, not "if xtrace is missing". This filesystem is on
+    # the ext4 and survives reboots -- the same property that left a stale
+    # X lock and a stale bus socket behind -- so a WRONG xtrace unpacked by an
+    # earlier run is still there, `command -v` finds it, the untar is skipped
+    # and the run traces nothing while the harness reports a freshly planted
+    # bundle. That cost a full run.
+    #
+    # -C / : the tarball's members are usr/bin/xtrace and usr/share/xtrace, so
+    # unpacking it at /usr puts the binary in /usr/usr/bin. That cost one too.
+    if [ -f /usr/local/lib/xtrace-bundle.tar.gz ]; then
+        tar xzf /usr/local/lib/xtrace-bundle.tar.gz -C / 2>/tmp/xtrace-untar.log \
+            || sed 's/^/hamnix-x11session:   tar: /' /tmp/xtrace-untar.log >&2
     fi
     if command -v xtrace >/dev/null 2>&1; then
         rm -f /tmp/xtrace.log
@@ -136,7 +138,13 @@ if [ "$HAMNIX_X11_XTRACE" = 1 ]; then
         #     one client and the launcher exits long before CEF does.
         # -m 8  truncate long lists -- an ATOM list is not what is under test
         #       and untruncated they bury the log.
-        xtrace -k -d :0 -D :9 -m 8 -o /tmp/xtrace.log >/tmp/xtrace.err 2>&1 &
+        # -n  do not touch xauth. xtrace's default is to COPY the display's
+        #     MIT-MAGIC-COOKIE onto the fake display by shelling out to
+        #     xauth(1), and here that dies with `xauth remove terminated with
+        #     exit code 1!` before it ever listens. This Xwayland is started
+        #     with no -auth and clients connect to it unauthenticated, so there
+        #     is no cookie to copy in the first place.
+        xtrace -n -k -d :0 -D :9 -m 8 -o /tmp/xtrace.log >/tmp/xtrace.err 2>&1 &
         i=0
         while [ $i -lt 40 ]; do
             [ -e /tmp/.X11-unix/X9 ] && break
