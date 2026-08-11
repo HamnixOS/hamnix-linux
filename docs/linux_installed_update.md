@@ -202,6 +202,23 @@ world-writable shared cache: the index is the root of trust for every package
 hash, so a copy any local user can rewrite is a privilege escalation against
 root's next `hpm install`. The gate now passes that arm.
 
+### 2e. The gate's `NEWVER` collides with whatever 255.one is serving
+
+`tests/linux/installed_update.sh` installs `hamnix-diff` from the live
+repository and then publishes a "newer build" to a local channel at
+`NEWVER`, which defaults to **1.0.8**. 255.one now serves 1.0.8 itself, so the
+first install already lands 1.0.8, the local channel offers the same version,
+`hpm update` correctly reports `upgraded=0`, and five checks fail — the bytes,
+the stamp, and their post-reboot repeats. Nothing is wrong with the update
+loop; the "newer" build was not newer.
+
+Measured both ways on 2026-08-11: default 1.0.8 → 31 PASS / 5 FAIL,
+`HAMLINUX_UPD_VERSION=1.0.9` → **36 PASS, 0 FAIL, exit 0**, including
+`iupd: PASS a bare 'hpm refresh' trusts https://255.one/` where that line used
+to be a NOTE. The default wants to become "one above whatever the live
+repository currently serves" — read from the index rather than hard-coded, so
+publishing to 255.one cannot silently fail somebody else's gate.
+
 ---
 
 ## 3. Three commands that answer without doing anything
