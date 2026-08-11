@@ -91,25 +91,27 @@ APPS+=("${GUI_APPS[@]}")
 # Vulkan device bring-up. Getting this wrong is not subtle — wsysd would
 # simply fail to link and drop out of the image — but it is silent in the
 # build log, which is why it is named here rather than assumed.
-app_extra_objs() {
-    case "$1" in
-    wsysd) echo "user/linux-vk.c user/linux-vkhost.c -ldl" ;;
-    *)     echo "" ;;
-    esac
-}
+# NO app_extra_objs() HERE. 6a27c0ec moved the per-program object list into
+# scripts/hamlinux_build.sh, which is the only place that can be right; this
+# script kept its own copy and passed it as well, so wsysd was compiled with
+# user/linux-vk.c TWICE and the link died on a page of "multiple definition of
+# hvk_*". The image then dropped it into a MISSING list printed among the
+# harmless "(no source)" entries and said `done`, so every image built since
+# has shipped a desktop with NO COMPOSITOR -- and the boot log's only symptom
+# was `hamsh: command not found: /bin/wsysd` in the middle of rc.5, followed by
+# `[rc.5] compositor started`. The build script knows. Ask it and nothing else.
 
 echo "[image] building $(( ${#APPS[@]} )) applications + the Adder PID 1"
-BUILT=0; MISSING=()
+BUILT=0; MISSING=(); FAILED=()
 for app in "${APPS[@]}"; do
     src="user/$app.ad"
     if [ ! -f "$src" ]; then MISSING+=("$app(no source)"); continue; fi
-    # shellcheck disable=SC2046  # word splitting is what we want here
     if scripts/hamlinux_build.sh "$src" "$OUT/obj/$app.elf" \
-            $(app_extra_objs "$app") >/dev/null 2>&1; then
+            >"$OUT/obj/$app.build.log" 2>&1; then
         install -m755 "$OUT/obj/$app.elf" "$ROOT/bin/$app"
         BUILT=$((BUILT+1))
     else
-        MISSING+=("$app")
+        MISSING+=("$app"); FAILED+=("$app")
     fi
 done
 
@@ -159,6 +161,25 @@ install -m755 "$OUT/obj/linuxinit.elf" "$ROOT/bin/linuxinit"
 
 echo "[image] built $BUILT/${#APPS[@]} apps"
 [ ${#MISSING[@]} -gt 0 ] && echo "[image] not included: ${MISSING[*]}"
+
+# A PROGRAM THAT FAILED TO BUILD IS NOT THE SAME AS A PROGRAM WITH NO SOURCE,
+# and printing them in one list is how a missing compositor went unnoticed.
+# Say which ones broke, show why, and -- for the handful the system cannot
+# boot a desktop without -- refuse to call the image done.
+if [ ${#FAILED[@]} -gt 0 ]; then
+    echo "[image] THESE FAILED TO BUILD (they have source and it did not link):" >&2
+    for app in "${FAILED[@]}"; do
+        echo "[image]   $app -- $OUT/obj/$app.build.log" >&2
+        tail -3 "$OUT/obj/$app.build.log" 2>/dev/null | sed 's/^/[image]     /' >&2
+    done
+    for app in "${FAILED[@]}"; do
+        case "$app" in
+            wsysd|hamsh|hamdesktop|hampanelscene)
+                echo "[image] FATAL: $app is not optional -- there is no desktop without it." >&2
+                exit 1 ;;
+        esac
+    done
+fi
 
 # This lane links glibc (HANDOFF.md §7.4), so the loader and libc have to be in
 # the image. That is the deliberate trade: a dynamic link is what buys us
