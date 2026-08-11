@@ -123,17 +123,35 @@ The clipboard finding that fell out of it is in the HONESTLY BROKEN list below.
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
-* **The Hamnix clipboard and the namespace clipboard are two clipboards.**
-  `/dev/snarf` is served (`user/linux-snarf.c`; `tests/linux/snarf_device.sh`
-  23/23), so copy and paste work between Hamnix programs. A Debian or Alpine
-  binary gets ENOENT on it — measured, and the same answer `/dev/wsys` and
-  `/net` give. Bridging needs a process that OWNS an X selection and mirrors it
-  both ways, reacting to ownership changes on each side; half of that is worse
-  than none. Two further gaps: no locking, so two simultaneous copies
-  interleave; and **no end-to-end mouse test** — a drag-select in one DE window
-  pasted into another — because the click derivation was never ported from the
-  Hamnix line, where that exact gap once let nine green gates sit on a dead
-  feature.
+* **The Hamnix clipboard and the namespace clipboard were two clipboards.
+  NOW BRIDGED — `user/xsnarfd.ad`.** `/dev/snarf` is served
+  (`user/linux-snarf.c`; `tests/linux/snarf_device.sh` 23/23), so copy and
+  paste work between Hamnix programs; a Debian or Alpine binary still gets
+  ENOENT on it, the same answer `/dev/wsys` and `/net` give. What was missing
+  was the process this list asked for: one that **owns** an X selection and
+  mirrors it both ways, reacting to ownership changes on each side. It exists,
+  one per distribution, started by the generated `/etc/rc.distros-wl` beside
+  that distribution's `wsyswl`, running **outside** the namespace and reaching
+  the Xwayland inside it **by name** — `/n/<name>/tmp/.X11-unix/X0`, the same
+  inode the namespace calls `/tmp/.X11-unix/X0`, with nothing bound and `/srv`
+  still not carried in. `tests/linux/xsnarf_bridge.sh` (25/25, QEMU-free) and
+  `tests/linux/xsnarf_ondevice.sh` (8/8 in the VM, where the assertion is a
+  **mouse**: a triple-click in a real Debian `xterm` lands in
+  `/dev/snarf.primary` out here, and a middle-click feeds what was copied out
+  here to the shell that xterm is running). `docs/linux_clipboard.md` §3a–§6.
+  What is still open, in that file's §6.5: an **INCR** transfer is refused
+  loudly rather than received; a selection over 64 KiB is truncated loudly at
+  `SNARF_MAX`; the Wayland-native `wl_data_device` clipboard is a third one and
+  is not bridged; and **the Hamnix side is polled by CONTENT four times a
+  second** because `struct snarfshm` has no serial. The precise request against
+  `user/linux-snarf.c` (another pass's file) is two lines: `uint64_t serial;`
+  in the struct at line 127, `(*serialp)++;` at the end of `hamsnarf_write`
+  (line 289). Two further gaps unchanged: no locking, so two simultaneous
+  copies interleave; and **no end-to-end mouse test between two DE windows** —
+  a drag-select in one pasted into another — because the click derivation was
+  never ported from the Hamnix line, where that exact gap once let nine green
+  gates sit on a dead feature. (The bridge's own mouse test is the *namespace*
+  boundary, not the DE-window one.)
 * **The Debian namespace's D-Bus has no SERVICES** (the bus itself now works).
   The namespace's `/run` is on
   the ext4 and survives reboots, so the first boot's `dbus-daemon` left

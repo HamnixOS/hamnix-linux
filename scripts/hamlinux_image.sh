@@ -67,6 +67,13 @@ APPS=(
     ifconfig route ping host curl wget hpm
     insmod modprobe lsmod rmmod
     xbridge wsyswl nsrun dhcpc ntpd
+    # The clipboard bridge. It is here rather than among the GUI apps because
+    # it draws nothing: it is an X CLIENT that owns CLIPBOARD and PRIMARY on
+    # the Xwayland inside a distribution namespace and mirrors both against
+    # /dev/snarf, so that Firefox in Debian and the Hamnix editor have ONE
+    # clipboard. One per distribution, started by the generated
+    # /etc/rc.distros-wl beside that distribution's wsyswl.
+    xsnarfd
     hlinstall haminstallui
     # Stopping the machine. `reboot` was here alone because the installer
     # wanted it; `poweroff` and `halt` were not shipped at all, so on a booted
@@ -429,9 +436,27 @@ done
     echo "# One Wayland server per distribution namespace, socket inside its"
     echo "# own tree. See tests/linux/alpine_gui_run.sh, which does this by"
     echo "# hand for one distribution."
+    echo "#"
+    echo "# And one CLIPBOARD BRIDGE per distribution, for the same reason and"
+    echo "# by the same construction: there is one Xwayland per distribution,"
+    echo "# an X connection is to one server, and the socket path is an"
+    echo "# argument. Both servers run OUT HERE, as root, and reach into the"
+    echo "# tree by name -- /srv (where the clipboard segment lives) is"
+    echo "# deliberately not carried into a subtree namespace, and the X socket"
+    echo "# a client inside sees as /tmp/.X11-unix/X0 is this same inode."
+    echo "# They all share the one /dev/snarf, which is what makes it ONE"
+    echo "# clipboard across every namespace. See docs/linux_clipboard.md."
     for n in $DISTRO_NAMES; do
         echo "/bin/wsyswl /n/$n/run/wayland-0 > /var/log/wsyswl-$n.log &"
         echo "echo '[rc.5] wayland server for $n'"
+        # The X server inside the namespace is started by the SESSION (the
+        # first menu launch), not by the boot, so the bridge will not find it
+        # for a while. It retries once a second and says so once a minute --
+        # which is why it is started here and not from the launch path: it has
+        # to be there BEFORE the first X client takes a selection, or the first
+        # copy of the session is the one that is lost.
+        echo "/bin/xsnarfd /n/$n/tmp/.X11-unix/X0 $n > /var/log/xsnarfd-$n.log &"
+        echo "echo '[rc.5] clipboard bridge for $n'"
     done
 } > "$ROOT/etc/rc.distros-wl"
 chmod 644 "$ROOT/etc/rc.distros-wl"
