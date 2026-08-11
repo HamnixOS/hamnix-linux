@@ -1351,6 +1351,25 @@ int hamaudio_open(const char *path, int for_write, struct hamaudio_file *a)
         clip = malloc(CLIP_CAP);
         if (!clip) { errno = ENOMEM; return -1; }
     }
+    /* A NEW OPEN IS A NEW SOUND, and that is what parks the mix cursor.
+     *
+     * au_mix continues from this stream's own cursor rather than restacking
+     * every write at the live edge, because it has to: hda.ad's comment on
+     * hda_mixw records that a 0.600 s effect arriving as a dozen chunks came
+     * out as 0.075 s when each chunk was placed at "play + guard" on top of
+     * the last. Chunks of ONE sound must lay down end to end.
+     *
+     * But SEPARATE sounds must not. lib/hamgame_dev.ad opens /dev/audio,
+     * writes one effect and closes, once per effect -- so six effects fired
+     * 200 ms apart share one process and one slot, and continuing the cursor
+     * across them welds them into one continuous 600 ms tone. Measured
+     * exactly that: audiolife's six 100 ms bursts spanned 14% of the music
+     * instead of 30%, all six audible and none of them WHEN it happened.
+     * The open is the boundary between one sound and the next, so the cursor
+     * is parked here and re-anchored to the live edge by the next write. */
+    if (kind == HAMAUDIO_PCM && shm && my_slot >= 0
+        && shm->slot[my_slot].pid == (int32_t)getpid())
+        shm->slot[my_slot].mixw = 0;
     return 0;
 }
 
@@ -1384,6 +1403,20 @@ void hamaudio_close(struct hamaudio_file *a)
         if (clip_pending && clip_len && !stream_mode) {
             clip_pending = 0;
             au_mix(clip, clip_len, 1);
+            /* AND THE CLIP IS SPENT. Measured without this line:
+             * user/audiolife.ad's phase D closes /dev/audio and THEN writes
+             * `start` to /dev/audioctl -- so the clip was mixed twice and a
+             * 3.000 s tone came out of the capture as 5.373 s of overlapping
+             * 1 kHz, which is report (2), "it played the last sound effect
+             * over and over", reintroduced by the fix for report (1).
+             *
+             * hda.ad does not have the problem because its auto-start is a
+             * DEADLINE in the service tick and `hda_start` on an
+             * already-running stream is a no-op; a close followed
+             * immediately by `start` starts it once. A spent clip is this
+             * line's equivalent: `start` on an empty clip returns 0, exactly
+             * as it does for a client that never staged anything. */
+            clip_len = 0;
         }
         au_slot_release();
         stream_mode = 0;
