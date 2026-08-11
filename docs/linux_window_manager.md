@@ -278,6 +278,13 @@ management — which is where a Plan 9-shaped system wants it.** In the
 meantime the namespace has a window manager that works, costs 0.5 MiB in
 Debian, and can be deleted in one line when the compositor takes the job over.
 
+> **§8a below revisits this section's central claim and finds it wrong.**
+> Rootless is still worth wanting, for the reasons in the paragraph above —
+> but *"rootless removes shared fate"*, which is the argument §8 makes for it
+> and the argument that was carried forward into `HANDOFF.md`, does not
+> survive being measured. The recommendation stands on the Plan 9 shape; it
+> does not stand on the `MAXMAP` wall. Read §8a before starting the work.
+
 **What it would need from `user/wsyswl.ad`**, named here rather than started,
 so whoever picks it up has the list and the merge stays clean:
 
@@ -296,3 +303,124 @@ so whoever picks it up has the list and the merge stays clean:
 
 Nothing in this change has to be undone for any of it: a rootless session
 simply sets `HAMNIX_X11_WM=none`, which is one `case` arm that already exists.
+
+## 8a. Rootless was measured before it was built, and item 3 above is false
+
+§8 was written from `windows_high_water 1` and it drew the right picture of
+the problem and the wrong conclusion about the cure. The cure was going to be
+item 3 in that list — *"per-toplevel limits instead of per-connection ones —
+the whole point"* — and **a per-toplevel `wl_surface` does not produce a
+per-toplevel limit, because none of these limits is per surface.** They are
+per **connection**, and Xwayland opens exactly one connection either way.
+
+Everything below is `tests/linux/wsyswl_shared_fate.sh`, which is offscreen,
+needs no VM and no Steam, and runs in about two minutes.
+
+### The census
+
+Five X clients on one rootful Xwayland, read out of the compositor's own
+`wsyswl-state`:
+
+```
+5 X windows on the root;  conns 1   windows_high_water 1
+the shared mapping table is at 2 of 64 with 5 X windows on it
+```
+
+Then the same server with a **rootless** Xwayland alongside the rootful one:
+
+```
+with a rootful AND a rootless Xwayland on the server, conns 2
+```
+
+**Two servers, two connections. One connection each.** `-rootless` is not a
+second Wayland client and never becomes one however many X toplevels it
+carries: `MAXMAP`, `MAXOBJ`, the frame-callback slice and the window budget
+are all indexed `c * LIMIT + i` in `user/wsyswl.ad`, so every X client on one
+X display draws from one table in rootless exactly as in rootful. Rootless
+changes *which surface freezes*; it does not change *whose table ran out*.
+
+### And it makes the table it was supposed to fix worse
+
+The second measurement is the one that settles it. Under rootful, the mapping
+table does not grow with the X session at all:
+
+| X clients on one rootful Xwayland | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 8, all resizing at once |
+|---|---|---|---|---|---|---|---|---|---|
+| `maps_in_use` | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 |
+| `maps_high_water` | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | **2** |
+
+Eight X windows, concurrent churn, **two** mappings — because rootful presents
+one surface and double-buffers it. A Chromium (which is what CEF and therefore
+Steam's UI is) with eight X windows of its own reads the same 2. Steam's 26
+came from Steam's session, not from having windows.
+
+Rootless inverts that. Each X toplevel becomes its own `wl_surface` with its
+own buffers, out of **the same per-connection table** — so mapping demand
+starts scaling with window count against the one budget that has already
+frozen this system once. `MAXMAP` at 64 is 2 in use today; the change proposed
+to relieve it is the change that would make it grow.
+
+### Three further ceilings rootless would hit first
+
+* **`BB_SLOTS` is 8, for the whole system.** `user/linux-wsys.c`'s v2
+  backbuffer has eight slots shared by every wsys window on the machine, and
+  the ninth is refused with `all slots are in use by live windows -- this
+  window will never be painted`. Rootful spends **one** of those on an entire
+  X session. Rootless spends one per X toplevel, so nine X windows in a
+  namespace would exhaust the paint pool for the whole desktop — Firefox
+  included. Raising it is not free either: a slot is `2 * 1920 * 1080 * 4`, so
+  eight is already 132 MB of address space.
+* **`MAXWIN` was 12, globally.** Rootful can never reach it (one window per X
+  display, four connections). Rootless makes it the first thing hit.
+* **`MAXCONN` was 4.** Two distribution namespaces each carry an Xwayland,
+  Firefox is a native client beside them, and the desktop chrome is another —
+  four before the user starts anything, and the fifth client was refused
+  outright.
+
+`tests/linux/wsyswl_shared_fate.sh` also records what rootless does today with
+no X11 window manager inside the compositor: an X client on the rootless
+display produces **no wsys window at all**. That is item 2 of §8's list — the
+several-thousand-line piece — confirmed as load-bearing rather than optional.
+
+### What was done instead
+
+The shared-fate bugs that were actually there, in the actually shared tables,
+all in `user/wsyswl.ad`:
+
+| | was | now | why |
+|---|---|---|---|
+| frame callbacks | one table of 64, scanned end to end | `FCPERCONN` 32, partitioned by connection (`FCMAX` 256) | the client that took the 64th slot denied the 65th to **every other client on the server**, and an unanswered initial-draw callback is a window that renders one empty frame and stops for ever |
+| window budget | `n_win >= MAXWIN`, 12 for the whole server | `WINPERCONN` 8 per connection, `MAXWIN` 64 = `MAXCONN * WINPERCONN` | one client's window count decided whether another client's window existed |
+| connections | `MAXCONN` 4 | 8 | a connection is the unit of independence here; four was fewer than the distribution already wants, and the fifth client was refused silently |
+| the refusals | silent, or a bare `return` | `window_budget_full` counted, `too many clients -- raise MAXCONN` named | §6.2a's lesson |
+
+`MAXWIN >= MAXCONN * WINPERCONN` and `FCMAX >= MAXCONN * FCPERCONN` are now
+**checked by the test as arithmetic**, so a future edit cannot quietly make
+either table global again. And `wsyswl-state` splits its limits into the two
+kinds, because a counter whose owner is unknown is what cost three passes:
+
+```
+conns 1
+conns_high_water 1
+window_budget_full 0
+limits per_conn MAXMAP=64 MAXOBJ=1024 WINPERCONN=8 FCPERCONN=32
+limits shared   MAXCONN=8 MAXWIN=64 FCMAX=256 MAXMAP_BUILT=64
+```
+
+### So what should give an X session its own fate?
+
+**Its own Xwayland**, which is its own connection, which is its own everything
+— and that is a session-script arm, not a compositor rewrite. `MAXCONN` at 8
+is what makes it affordable: `enter debian { steam }` can have a display of
+its own, and Steam filling its mapping table then cannot reach Firefox, the
+desktop, or the other namespace. This is the same conclusion §8 reached about
+*where* independence lives, arrived at from the other end: independence here
+is bought per connection, and the cheapest connection is a second server.
+
+**Rootless remains worth building** — for the reason §8 gives that survives:
+window management belongs in `wsysd`, windows are already files under
+`/dev/wsys/<wid>/`, and a namespace should not need a window manager inside
+it. That is a Plan 9 argument and it is a good one. It is just not a
+shared-fate argument, and it should not be started until `BB_SLOTS` and the
+per-connection mapping table can carry one surface per X toplevel, because
+today they cannot.
