@@ -11926,12 +11926,31 @@ def capture_command(sref: uint64) -> int32:
     saved_pos: uint64 = ps_pos
     lex_line(src, slen)
     ps_pos = 0
+    # THE SAME FRAMING TOKENS eval_subexpr already skips for `${ … }`, and
+    # for the same reason: hamsh is Python-flavoured, so lex_line measures
+    # this fragment's LEADING WHITESPACE as an INDENT — and the substitution's
+    # source is the raw text between the braces, which for the conventional
+    # `{ cmd } spelling starts with a space. So `{cmd} parsed and ran while
+    # `{ cmd } failed to parse, became the empty string, and said nothing.
+    # Measured on a boot: `echo x `{ cat /tmp/cap.txt } printed "x " and
+    # spawned no process at all. etc/rc.boot works around "`{ … }` capture
+    # deadlocks this early in the PID-1 bootstrap" with a try/except idiom;
+    # this is at least one of the two things it was working around.
+    while tok_kind[ps_pos] == TK_INDENT or tok_kind[ps_pos] == TK_NEWLINE:
+        ps_pos = ps_pos + 1
     cmdtree: int32 = parse_pipeline()
     captured_ref: uint64 = 0
     if ps_error == 0:
         captured_ref = _run_and_capture(cmdtree)
     else:
+        # A substitution that CANNOT BE PARSED used to become the empty
+        # string in silence, so `x = `{ … }` looked like a command that
+        # produced no output. Say which text failed: an empty capture and a
+        # broken capture must not be the same observable event.
         ps_error = 0
+        write_str(2, "hamsh: cannot parse command substitution: ")
+        sys_write(2, src, slen)
+        write_str(2, "\n")
     _restore_tokens(saved_tok)
     ps_pos = saved_pos
     return v_str_ref(captured_ref)
@@ -11953,12 +11972,19 @@ def _run_and_capture(cmdnode: int32) -> uint64:
     # opens that name to get a readable fd, drains it. Returns an
     # interned string ref of the output with one trailing newline
     # stripped. Command substitution is just another /fd bind (§7/§8).
+    # THE THREE WAYS THIS USED TO ANSWER THE EMPTY STRING IN SILENCE.
+    # Each of them is a substitution that did not run, and each was
+    # indistinguishable from a command that legitimately printed nothing —
+    # the exact shape NORTH_STAR.md is written against. They report by name
+    # now, on fd 2 so the captured VALUE is unaffected.
     k: int32 = nd_kind[cast[uint64](cmdnode)]
     if k != ND_CMD:
-        # capture of a pipeline stage — not wired at this milestone
+        write_str(2, "hamsh: command substitution of a PIPELINE is not wired")
+        write_str(2, " -- use a single command\n")
         return 0
     slot: int32 = sys_pipechan()
     if slot < 0:
+        write_str(2, "hamsh: command substitution: no pipe channel available\n")
         return 0
     # Read end at the shell's own /fd/9; open it for a readable fd.
     sys_fdbind(0, CAPTURE_FD, DEVFD_PIPE_R, slot)
@@ -11983,6 +12009,18 @@ def _run_and_capture(cmdnode: int32) -> uint64:
     if argc > 0:
         cmd: Ptr[uint8] = cast[Ptr[uint8]](argv_ptr[0])
         rc_b: int32 = run_builtin(cmd, argc)
+        if rc_b >= 0:
+            # A BUILTIN ran IN THIS PROCESS, so its output went to the
+            # shell's own stdout and the capture pipe got nothing: the
+            # substitution silently yields the empty string, AND the text
+            # lands on the console instead of in the variable. `{ echo x }`
+            # is the obvious case and it is not obscure. Naming it is not a
+            # fix -- the fix is to fork the builtin the way
+            # _run_builtin_in_pipeline already does -- but a wrong answer
+            # that says so is worth much more than one that does not.
+            write_str(2, "hamsh: command substitution of the BUILTIN ")
+            sys_write(2, cmd, cstr_len(cmd))
+            write_str(2, " is not captured (its output went to stdout)\n")
         if rc_b < 0:
             pid = spawn_resolved(cmd, cast[Ptr[uint64]](&argv_ptr[0]))
             if pid >= 0:

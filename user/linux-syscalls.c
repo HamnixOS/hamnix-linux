@@ -787,6 +787,11 @@ int32_t sys_open_write(const char *path)
 int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
 {
     fdns_gate_release();
+    /* The OTHER place a process stops making progress on its own: a blocking
+     * read of a pipe this process created. `{ cmd }` command substitution is
+     * exactly that -- the shell holds the keeper and reads the pipe -- so
+     * without this the substitution never ends either. */
+    fdns_keeper_sweep(FDNS_KEEPER_WAIT_MS);
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         int64_t n;
@@ -842,6 +847,12 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
  * the device, so it would return 0 for ever and no GUI app would see input. */
 int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
 {
+    /* Zero wait: this call must not block, ever. But a poller still needs the
+     * keeper gone or it can never reach true end-of-input -- a terminal
+     * polling its shell's output would never learn that the shell had
+     * exited. Sweeping only the slots whose two real ends are already open
+     * costs nothing and cannot wait. */
+    fdns_keeper_sweep(0);
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         if (v->isw)
@@ -1351,6 +1362,11 @@ int32_t sys_rfork(int32_t flags)
         return 0;                       /* nothing asked for */
     }
 
+    /* Read the /fd table's clock while this process is still the only one
+     * that could be writing to it on behalf of the child-to-be. See
+     * fdns_after_fork_parent: it is what makes clearing the child's stale
+     * names exact instead of a race with the child's own first binds. */
+    fdns_before_fork();
     pid_t pid = fork();
     if (pid < 0)
         return rc32(-1);
@@ -1832,6 +1848,11 @@ int32_t sys_set_realtime(uint64_t epoch)
 int64_t sys_waitpid(int32_t pid)
 {
     fdns_gate_release();
+    /* A shell that has forked every stage of a pipeline and is now going to
+     * block until they finish must not still be holding their pipes open --
+     * a keeper is a WRITER, so the last stage would never see EOF and the
+     * wait would never return. See fdns_keeper_sweep(). */
+    fdns_keeper_sweep(FDNS_KEEPER_WAIT_MS);
     int status;
     pid_t r;
     do {

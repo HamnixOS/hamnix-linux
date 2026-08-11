@@ -386,6 +386,24 @@ bash scripts/test_primary_paste_chain_host.sh
 # /dev/snarf. Runs in a private mount namespace with a tmpfs over /dev, never
 # the host's. Host-only (no QEMU); seconds. docs/linux_clipboard.md.
 bash tests/linux/snarf_device.sh
+# DOES A PIPE END? `cat FILE | md5sum` never returned and it cost a boot: the
+# shell's own O_RDWR keeper on the slot's fifo is a WRITER, and nothing closed
+# it, so no reader on any pipe in the system could see EOF and no writer could
+# see EPIPE. Seven cases against user/linux-fdns.c directly -- EOF, the bytes
+# actually arriving (dropping the keeper naively answers EOF with ZERO bytes,
+# which is worse), a megabyte, EPIPE when the reader leaves early, the creator
+# reading its own pipe, three stages, and 200 pipes on a 64-slot table. Each
+# runs in a child under an alarm, so a hang is a named FAIL and never a test
+# that runs for ever. Host-only (no QEMU); seconds.
+bash tests/linux/fdns_pipe.sh
+# The same question in a BOOT, where hamsh is PID 1 and a pipeline that hangs
+# takes the whole machine with it -- so it reports which mark the boot last
+# reached rather than a wall of collateral failures. Every stream arm is
+# cross-checked against a FILE arm computed without a pipe (`cat F | md5sum`
+# against `md5sum F`), because a pipeline that ends and delivers nothing is
+# the other failure mode and it is success-shaped. Needs QEMU; ~3 min
+# including the image stage.
+bash tests/linux/pipelines.sh
 # The same device on a REAL BOOT: the shipped image under QEMU, linuxinit as
 # PID 1, /srv the tmpfs it mounts. Asserts the segment is created by the FIRST
 # OPEN at 131096 bytes and mode 0666 (not the umask's 0644 -- that difference

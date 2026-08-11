@@ -402,15 +402,21 @@ md5sum /etc/rc.boot
 # stream whose content the host minted this run.
 echo '[iupd] p1 md5 of the binary the update installed:'
 md5sum $BIN
-# A STREAM, VIA A REDIRECT AND NOT A PIPE. \`cat /etc/hamnix-update-stamp |
-# md5sum\` was tried here first and NEVER RETURNED -- the boot died on the
-# host's timeout with the banner printed and no digest under it. md5sum had
-# answered two file operands correctly in the two lines above, so what did not
-# finish is the pipe's EOF and not the hash; it is not chased here. A redirect
-# from a plain file exercises the same stdin path (\`cksum < \$BIN\` above is
-# the same shape) without betting a boot on it.
+# A STREAM, AND IT IS A PIPE AGAIN. \`cat /etc/hamnix-update-stamp | md5sum\`
+# was tried here first and NEVER RETURNED -- the boot died on the host's
+# timeout with the banner printed and no digest under it, and every later
+# check in this phase failed as collateral. md5sum had answered two file
+# operands correctly in the two lines above, so what did not finish was the
+# PIPE'S EOF and not the hash, and this gate used \`md5sum < FILE\` instead.
+#
+# The cause was hamsh's own O_RDWR keeper on the fifo: a writer that never
+# closed, so no reader on any pipe in the system could see EOF. Fixed in
+# user/linux-fdns.c, with tests/linux/fdns_pipe.sh and
+# tests/linux/pipelines.sh measuring it directly. THE PIPE IS BACK HERE
+# DELIBERATELY: this line is the cleanest possible proof, because it is the
+# exact command that cost the boot.
 echo '[iupd] p1 md5 of a stream:'
-md5sum < /etc/hamnix-update-stamp
+cat /etc/hamnix-update-stamp | md5sum
 # cksum and head with a FILE OPERAND -- both took none until now.
 echo '[iupd] p1 cksum with a file operand:'
 cksum $BIN

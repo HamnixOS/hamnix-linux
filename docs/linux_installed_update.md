@@ -367,11 +367,28 @@ Found by this test hanging on them, and all three mattered beyond it.
   died on the host's timeout with every phase-2 check failing as collateral.
   The same `md5sum` had answered two FILE operands correctly in the two lines
   immediately above, so what did not finish is the **pipe's EOF**, not the
-  hash. Not chased down here — it is a `hamsh`/`sys_pipechan` question and
-  this gate is not the place to burn boots on it, but it is a real fault: a
-  pipeline that never ends is indistinguishable from a hung command. The
-  stream arm uses `md5sum < FILE`, the same shape as the `cksum < FILE` that
-  has always worked.
+  hash. It was not chased down here — it is a `hamsh`/`sys_pipechan` question
+  and this gate was not the place to burn boots on it — and the stream arm
+  used `md5sum < FILE`, the same shape as the `cksum < FILE` that has always
+  worked.
+
+  **CHASED DOWN AND FIXED SINCE.** The answer to "which end did not finish"
+  is the **writer**, and the writer that never closed was **hamsh itself**.
+  `sys_pipechan` (`user/linux-fdns.c`) opens each pipe slot's fifo `O_RDWR`
+  and keeps that descriptor so the terminal's first open cannot deadlock —
+  but `O_RDWR` is a writer, and nothing ever closed it, so no reader on any
+  pipe in the system could ever see EOF. It was not an md5sum bug and it was
+  not even a pipeline-specific bug; only readers that drain to EOF could show
+  it. The keeper now has a lifetime rather than a presence: the slot records
+  whether each REAL end has ever been opened and the keeper is closed once
+  both have. Four more faults of the same family came out of the boot that
+  followed — a leaking `/fd` bind table that ran out silently, a stale-bind
+  clear that raced the child it was cleaning up for, two processes claiming
+  one record, and `wc` ignoring its FILE operands (the fourth member of the
+  `head`/`cksum`/`md5sum` family in this very list). `tests/linux/fdns_pipe.sh`
+  and `tests/linux/pipelines.sh`, and **this gate's stream arm is
+  `cat /etc/hamnix-update-stamp | md5sum` again** — the exact command that
+  cost the boot, which makes it the cleanest available proof.
 * **A redirect whose source is the running rc wedges the shell.** Inside
   `/etc/rc.boot`, both `head -3 < /etc/rc.boot` and `cksum < /etc/rc.boot`
   hang the boot dead — as does overwriting `/etc/rc.boot` mid-script, which
