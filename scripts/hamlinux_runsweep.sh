@@ -76,6 +76,53 @@ DTMO="${RUNSWEEP_DTIMEOUT:-12}"
 RECIPES="$PROJ_ROOT/tests/linux/runsweep_recipes.tsv"
 JAIL="$PROJ_ROOT/tests/linux/runsweep_jail.sh"
 
+# ---------------------------------------------------------------------------
+# THE COMPOSITOR
+# ---------------------------------------------------------------------------
+# WHY. Until this landed, the sweep could not test a GUI program. It ran every
+# scene client in a jail with NO WINDOW SYSTEM in it, and the five that ask
+# lib/hamscreen.ad how big the screen is -- hamlock, hampanelscene, hamshotui,
+# hamtoast, wsyswl -- correctly refused to guess and exited 1. Those five rows
+# were the visible part. The invisible part was worse: for every OTHER windowed
+# program the verdict was "did it exit", because a client can create the shared
+# /dev/wsys segment and map a window into it all by itself. Nothing composited
+# anything, so nothing could tell a client that DREW from one that mapped a
+# window and painted nothing -- which is exactly how a v2 blit client came to
+# score DREW_WINDOW with a 0-byte backbuffer and not one pixel ever stored
+# (the ulimit note in jail_run below).
+#
+# So a `gui` row now runs with user/wsysd.ad up in the same jail, offscreen,
+# and the sweep reads the FRAMEBUFFER afterwards. See tests/linux/runsweep_jail.sh
+# for the mechanism and PAINTED below for what the pixels are asked.
+#
+# ONE COMPOSITOR PER PROGRAM, and that is not the expensive choice it sounds
+# like. The alternative -- one compositor for the whole gui class -- would mean
+# one overlay for the whole gui class, and the per-program upper layer IS this
+# sweep's diff and its isolation both. /srv/wsys, /srv/wsys.bb, /srv/wsys.img
+# and /run/fb.raw default to one file per HOST (docs/steam_namespace.md §11,
+# where a stale backbuffer slot cost an hour), so a shared compositor would
+# hand each program the previous program's windows and its previous frame --
+# and the framebuffer question below would then be unanswerable, because the
+# pixels on the screen would belong to whoever ran before. Measured cost of
+# doing it per program is in the summary this script prints.
+#
+# RUNSWEEP_WSYSD=0 turns it off and restores the old behaviour exactly.
+WSYSD_BIN="/bin/wsysd"
+[ "${RUNSWEEP_WSYSD:-1}" = 0 ] && WSYSD_BIN=""
+FBGEOM="${RUNSWEEP_GEOM:-1280x800}"
+FBW="${FBGEOM%x*}"; FBH="${FBGEOM#*x}"
+# FORCED, always, per NORTH_STAR's standing constraint: wsysd arms a real
+# Vulkan backend on real silicon, and this host's GPU belongs to someone who is
+# using it. lavapipe is a CPU device, so wsysd's own gate leaves the software
+# rasterizer armed as well. (The staged root has no Vulkan tree at all, so
+# there is nothing to dlopen either -- this is the belt to that pair of braces,
+# and it is set on EVERY jail_run, not only the composited ones.)
+VKICD="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
+# The two per-call switches, read by tests/linux/runsweep_jail.sh.
+JWSYSD=""
+JWINPROBE=""
+JFBSNAP=""
+
 command -v unshare >/dev/null || { echo "need util-linux unshare" >&2; exit 1; }
 unshare -rm true 2>/dev/null || { echo "need unprivileged user namespaces" >&2; exit 1; }
 
@@ -132,6 +179,17 @@ done
 # below reads /dev/wsys/windows with it, and a sweep of one application would
 # otherwise report "no window" because the probe could not run.
 [ -f "$OUT/obj/cat.elf" ] && install -m755 "$OUT/obj/cat.elf" "$BASE/bin/cat"
+# THE COMPOSITOR, staged the same way and for the same reason. `wsysd` and
+# `sleep` are what a GUI row needs to be a measurement rather than a
+# bereavement (see WSYSD below), and a sweep of one named application would
+# otherwise find neither in obj/ -- so build them here if this run did not.
+if [ "${RUNSWEEP_WSYSD:-1}" != 0 ]; then
+    for w in wsysd sleep; do
+        [ -f "$OUT/obj/$w.elf" ] || scripts/hamlinux_build.sh "user/$w.ad" \
+            "$OUT/obj/$w.elf" >/dev/null 2>"$OUT/run/$w.build.err"
+        [ -f "$OUT/obj/$w.elf" ] && install -m755 "$OUT/obj/$w.elf" "$BASE/bin/$w"
+    done
+fi
 # /bin/install is the same program as hlinstall (haminstallui spawns that name).
 [ -f "$BASE/bin/hlinstall" ] && install -m755 "$BASE/bin/hlinstall" "$BASE/bin/install"
 [ -f build/cutover/host_ac.elf ] && install -m755 build/cutover/host_ac.elf "$BASE/bin/host_ac"
@@ -279,7 +337,7 @@ if [ -f "$RECIPES" ]; then
 fi
 
 : > "$OUT/results.tsv"
-printf '#app\tclass\tbuild\tverdict\trc\tsecs\tcpu\tout\terr\tchanged\tempty\twins\tdetail\tclaim\n' \
+printf '#app\tclass\tbuild\tverdict\trc\tsecs\tcpu\tout\terr\tchanged\tempty\twins\tfbpx\tdetail\tclaim\n' \
     >> "$OUT/results.tsv"
 
 # CPU SECONDS, next to wall-clock seconds, because THE IDLE CENSUS (HANDOFF §0)
@@ -356,6 +414,84 @@ if [ -f "$XFAILS" ]; then
     done < "$XFAILS"
 fi
 
+# THE FRAMEBUFFER COMPARATOR. Counts the sampled pixels in which two frames
+# differ. Rows are compared whole first, so an unchanged row costs one memcmp
+# and a bare screen costs ~400 of them; only a row that differs is walked.
+FBCMP="$OUT/.fbcmp.py"
+cat > "$FBCMP" <<'PY'
+import sys
+ref = open(sys.argv[1], 'rb').read()
+cur = open(sys.argv[2], 'rb').read()
+W, H = int(sys.argv[3]), int(sys.argv[4])
+need = W * H * 4
+if len(ref) < need or len(cur) < need:
+    print(-1); raise SystemExit
+n = 0
+stride = W * 4
+for y in range(0, H, 2):
+    o = y * stride
+    a = ref[o:o + stride]; b = cur[o:o + stride]
+    if a == b:
+        continue
+    for x in range(0, stride, 8):
+        if a[x:x + 3] != b[x:x + 3]:
+            n += 1
+print(n)
+PY
+
+# One invocation of the jail. Everything the program can see is set here:
+# env -i so the developer's environment cannot leak in and make a result
+# unreproducible, and the HAM* variables pointing every synthetic device at
+# a path inside the throwaway root.
+jail_run() {   # jail_run <timeout> <stdin-file> <out> <err> <argv...>
+    local jt="$1" jin="$2" jout="$3" jerr="$4"; shift 4
+    # A safety net, not a test parameter: `yes` writes for ever by design
+    # and would otherwise fill the disk in the seconds it is given.
+    #
+    # 256 MiB, NOT 4 MiB, and the four zeroes are the whole point. The
+    # window system's shared segments are FILES, and two of them are
+    # large: /srv/wsys.bb is BB_SLOTS(8) x 2 x 1920x1080x4 = 132 MB of
+    # v2 backbuffer, and /srv/wsys.img is the 4,195,144-byte named-image
+    # store. `ulimit -f` bounds the OFFSET a process may write, so at 4096
+    # blocks (4,194,304 bytes) BOTH ftruncate(2)s were refused EFBIG --
+    # the image store by 840 bytes.
+    #
+    # What that did to the measurement, A/B in the same jail with the same
+    # binary (tests/linux/runsweep_jail.sh, /bin/hamimgscene):
+    #
+    #   ulimit -f 4096   -> "[hamimgscene] FATAL: the 'I' named-image
+    #                        upload to /dev/wsys/2/draw/ctl was refused,
+    #                        rc=-5", exit 2; /srv/wsys.img 0 bytes
+    #   ulimit -f 16384  -> "[hamimgscene] scene window ready with the
+    #                        32x32 image uploaded"; /srv/wsys.img 4195144
+    #
+    # So the sweep reported the named-image tier as broken when the tier
+    # works and the HARNESS refused it -- and it did worse than that with
+    # the backbuffer, silently: a v2 blit client attaches its window
+    # (2.5 MB, under the cap), so the window probe found a wid and the row
+    # was scored DREW_WINDOW, while /srv/wsys.bb stayed 0 bytes and not one
+    # pixel was ever stored. `sdlpong` under this jail: wsys.bb 0 bytes at
+    # 4 MiB and at 16 MiB, 132,710,628 bytes with no cap. "Came up and
+    # drew" for a client that drew nothing is precisely the success-shaped
+    # answer this sweep exists to catch, manufactured by the sweep.
+    ( ulimit -f 262144
+      env -i \
+        PATH=/bin:/usr/bin HOME=/root USER=root LOGNAME=root TERM=dumb \
+        SHELL=/bin/hamsh PWD=/work TMPDIR=/tmp LANG=C \
+        HAMWSYS=/srv/wsys HAMWSYS_BB=/srv/wsys.bb HAMWSYS_IMG=/srv/wsys.img \
+        HAMFDNS=/srv/fdns HAMFDNS_DIR=/srv HAMNET=/srv/net \
+        HAMFB_FILE=/run/fb.raw HAMFB_GEOM="$FBGEOM" \
+        VK_ICD_FILENAMES="$VKICD" \
+        RUNSWEEP_WSYSD="$JWSYSD" \
+        RUNSWEEP_WSYSD_LOG="$OUT/run/$app.wsysd.log" \
+        RUNSWEEP_WINPROBE="$JWINPROBE" \
+        RUNSWEEP_FBSNAP="$JFBSNAP" \
+        timeout -k 2 "$jt" \
+        unshare -rmn --fork --pid --kill-child \
+            "$JAIL" "$BASE" "$up" "$wk" "$mnt" "$@" \
+        < "$jin" > "$jout" 2> "$jerr" ) 2>/dev/null
+}
+
 run_one() {
     local app="$1"
     local cls="${CLASS[$app]:-cmd}"
@@ -383,14 +519,14 @@ run_one() {
     # regression and must still show up as a failure, so rc 13 on anything not
     # declared a library falls through to BUILD_FAIL below.
     if [ "${BRC[$app]:-1}" = 13 ] && [ "$cls" = lib ]; then
-        printf '%s\t%s\t0\tNOT_SMOKE_TESTABLE\t-\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
+        printf '%s\t%s\t0\tNOT_SMOKE_TESTABLE\t-\t-\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
             "$app" "$cls" "library module: no def main, nothing to link or run" \
             "$claim" >> "$OUT/results.tsv"
         return
     fi
 
     if [ "${BRC[$app]:-1}" != 0 ]; then
-        printf '%s\t%s\t%s\tBUILD_FAIL\t-\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
+        printf '%s\t%s\t%s\tBUILD_FAIL\t-\t-\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
             "$app" "$cls" "${BRC[$app]:-?}" \
             "$(grep -vE '^; ADDER_STAT' "$OUT/run/$app.build.err" 2>/dev/null \
                | grep -m1 -iE 'error|bailed|NOT-AN-APPLICATION' | cut -c1-120 | tr '\t\n' '  ')" \
@@ -408,7 +544,7 @@ run_one() {
         unsafe)  skip="$claim" ;;
     esac
     if [ -n "$skip" ]; then
-        printf '%s\t%s\t0\tNOT_SMOKE_TESTABLE\t-\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
+        printf '%s\t%s\t0\tNOT_SMOKE_TESTABLE\t-\t-\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
             "$app" "$cls" "$skip" "$claim" >> "$OUT/results.tsv"
         return
     fi
@@ -465,53 +601,36 @@ run_one() {
     # is a genuine TIMEOUT: its contract is to end.
     case "$cls" in daemon|gui|bench) t="$DTMO" ;; esac
 
-    # One invocation of the jail. Everything the program can see is set here:
-    # env -i so the developer's environment cannot leak in and make a result
-    # unreproducible, and the HAM* variables pointing every synthetic device at
-    # a path inside the throwaway root.
-    jail_run() {   # jail_run <timeout> <stdin-file> <out> <err> <argv...>
-        local jt="$1" jin="$2" jout="$3" jerr="$4"; shift 4
-        # A safety net, not a test parameter: `yes` writes for ever by design
-        # and would otherwise fill the disk in the seconds it is given.
-        #
-        # 256 MiB, NOT 4 MiB, and the four zeroes are the whole point. The
-        # window system's shared segments are FILES, and two of them are
-        # large: /srv/wsys.bb is BB_SLOTS(8) x 2 x 1920x1080x4 = 132 MB of
-        # v2 backbuffer, and /srv/wsys.img is the 4,195,144-byte named-image
-        # store. `ulimit -f` bounds the OFFSET a process may write, so at 4096
-        # blocks (4,194,304 bytes) BOTH ftruncate(2)s were refused EFBIG --
-        # the image store by 840 bytes.
-        #
-        # What that did to the measurement, A/B in the same jail with the same
-        # binary (tests/linux/runsweep_jail.sh, /bin/hamimgscene):
-        #
-        #   ulimit -f 4096   -> "[hamimgscene] FATAL: the 'I' named-image
-        #                        upload to /dev/wsys/2/draw/ctl was refused,
-        #                        rc=-5", exit 2; /srv/wsys.img 0 bytes
-        #   ulimit -f 16384  -> "[hamimgscene] scene window ready with the
-        #                        32x32 image uploaded"; /srv/wsys.img 4195144
-        #
-        # So the sweep reported the named-image tier as broken when the tier
-        # works and the HARNESS refused it -- and it did worse than that with
-        # the backbuffer, silently: a v2 blit client attaches its window
-        # (2.5 MB, under the cap), so the window probe found a wid and the row
-        # was scored DREW_WINDOW, while /srv/wsys.bb stayed 0 bytes and not one
-        # pixel was ever stored. `sdlpong` under this jail: wsys.bb 0 bytes at
-        # 4 MiB and at 16 MiB, 132,710,628 bytes with no cap. "Came up and
-        # drew" for a client that drew nothing is precisely the success-shaped
-        # answer this sweep exists to catch, manufactured by the sweep.
-        ( ulimit -f 262144
-          env -i \
-            PATH=/bin:/usr/bin HOME=/root USER=root LOGNAME=root TERM=dumb \
-            SHELL=/bin/hamsh PWD=/work TMPDIR=/tmp LANG=C \
-            HAMWSYS=/srv/wsys HAMWSYS_BB=/srv/wsys.bb HAMWSYS_IMG=/srv/wsys.img \
-            HAMFDNS=/srv/fdns HAMFDNS_DIR=/srv HAMNET=/srv/net \
-            HAMFB_FILE=/run/fb.raw HAMFB_GEOM=1280x800 \
-            timeout -k 2 "$jt" \
-            unshare -rmn --fork --pid --kill-child \
-                "$JAIL" "$BASE" "$up" "$wk" "$mnt" "$@" \
-            < "$jin" > "$jout" 2> "$jerr" ) 2>/dev/null
-    }
+
+    # WHICH ROWS GET A COMPOSITOR: the windowed classes, gui AND daemon.
+    #
+    # `daemon` is in for a reason that was measured rather than assumed. It
+    # holds four windowed programs -- wsyswl, hamscreensaver, hamUId, distrofs
+    # -- and wsyswl is one of the five this whole change is about: it is a
+    # Wayland compositor that is itself a /dev/wsys CLIENT, so with the
+    # compositor armed for `gui` only it went on failing "no screen geometry"
+    # while the four scene clients beside it came up. Classing it `daemon` is
+    # correct (it runs for ever); needing a window system is orthogonal to
+    # that, so the switch follows the window probe and not the class name.
+    #
+    # EXCEPT THE COMPOSITOR ITSELF. Two wsysd instances on one offscreen
+    # framebuffer would both hold the window table and both present, and the
+    # wsysd row -- the one that measures the compositor -- would be measuring
+    # a fight. Its own recipe already runs it alone, which is the right test.
+    JWSYSD=""
+    JWINPROBE=""
+    JFBSNAP=""
+    case "$cls" in gui|daemon) JWINPROBE="$OUT/run/$app.wins" ;; esac
+    if [ -n "$JWINPROBE" ] && [ -n "$WSYSD_BIN" ] && [ "$app" != wsysd ]; then
+        JWSYSD="$WSYSD_BIN"
+        JFBSNAP="$OUT/run/$app.fb"
+        rm -f "$JFBSNAP"
+        # The program still gets its full DTMO. The compositor's readiness
+        # handshake and the settle interval afterwards are the HARNESS's time,
+        # and charging them to the program would shorten a GUI run by ~1.5 s --
+        # the same mistake, in miniature, that DTMO=4 made.
+        t=$((t + 3))
+    fi
 
     local t0 t1 rc c0 c1
     cpu_now; c0=$CPU_NOW
@@ -593,13 +712,47 @@ run_one() {
     # OSD and overlay client -- the whole undecorated half of the DE -- as
     # having drawn nothing.
     local wins=-
-    if [ "$cls" = gui ] || [ "$cls" = daemon ]; then
-        jail_run 5 /dev/null "$OUT/run/$app.wins" /dev/null \
-                 /bin/cat /dev/wsys
+    if [ -n "$JWINPROBE" ]; then
         # grep -c exits 1 when the count is zero, so `|| echo 0` would append a
         # SECOND line and split the TSV row.
         wins=$(grep -c '^[0-9][0-9]*$' "$OUT/run/$app.wins" 2>/dev/null)
         [ -z "$wins" ] && wins=0
+        # A WINDOW THAT OUTLIVED ITS OWNER. The jail looks once more after the
+        # program has exited; anything still in the table there is a window
+        # user/linux-wsys.c's win_reap_dead() should have freed, and a leaked
+        # window is an opaque rectangle no click can reach (the comment on that
+        # function is the bug report). It is a finding, so it is said out loud
+        # in the row rather than folded into the count.
+        local after=0
+        [ -f "$OUT/run/$app.wins.after" ] && after=$(cat "$OUT/run/$app.wins.after")
+        if [ "${after:-0}" -gt 0 ] && [ "$rc" != 124 ] && [ "$rc" != 137 ]; then
+            note="$note [${after} window(s) still in the table after it exited]"
+        fi
+    fi
+
+    # DID IT PUT PIXELS ON THE SCREEN? A window in the table is a client that
+    # ASKED for one; the framebuffer is what a person would have seen. The two
+    # come apart, and when they do it is always in the same direction and
+    # always silently -- a mapped window whose backbuffer was never written
+    # scores "drew" on the table and shows nothing.
+    #
+    # The oracle is the compositor's own bare screen, composed ONCE at the top
+    # of this run with no client at all, so what this counts is the pixels THIS
+    # PROGRAM is responsible for and not the compositor's wallpaper or its
+    # pointer. Sampled every other pixel in both axes, like
+    # tests/linux/wsys_desktop_z.sh, which is a quarter of the work for the
+    # same answer at this resolution.
+    local fbpx=- frame=""
+    if [ -n "$JWSYSD" ] && [ -n "$FBREF" ]; then
+        # The frame the jail kept while the program still owned a window, and
+        # only failing that the overlay's final frame -- see the note on
+        # probe_once() in tests/linux/runsweep_jail.sh for why those differ.
+        if   [ -s "$JFBSNAP" ];         then frame="$JFBSNAP"
+        elif [ -f "$up/run/fb.raw" ];   then frame="$up/run/fb.raw"; fi
+        if [ -n "$frame" ]; then
+            fbpx=$(python3 "$FBCMP" "$FBREF" "$frame" "$FBW" "$FBH" 2>/dev/null)
+            [ -z "$fbpx" ] && fbpx=-
+        fi
     fi
 
     # --- the verdict -------------------------------------------------------
@@ -634,6 +787,11 @@ run_one() {
         detail="expected: ${XFAIL[$app]} — $detail"
     elif [ "$rc" != 0 ]; then
         verdict=EXIT_NONZERO
+    elif [ "$fbpx" != - ] && [ "$fbpx" -gt 0 ]; then
+        # PIXELS ON THE FRAMEBUFFER. Strictly stronger than DREW_WINDOW, and it
+        # is asked first so that a client which did both is never filed under
+        # the weaker of the two.
+        verdict=PAINTED
     elif [ "$cls" = gui ] && [ "$wins" != - ] && [ "$wins" -gt 0 ]; then
         # BEFORE the two "did nothing" buckets, not after, which is where this
         # test used to sit. A scene client that maps a window, paints it and
@@ -656,17 +814,62 @@ run_one() {
     fi
     case "$verdict" in
         STAYS_UP)
-            if [ "$wins" != - ] && [ "$wins" -gt 0 ]; then verdict=DREW_WINDOW
+            if [ "$fbpx" != - ] && [ "$fbpx" -gt 0 ]; then verdict=PAINTED
+            elif [ "$wins" != - ] && [ "$wins" -gt 0 ]; then verdict=DREW_WINDOW
             elif [ "$cls" = gui ]; then verdict=UP_NO_WINDOW; fi ;;
     esac
     detail="$detail$note"
 
-    printf '%s\t%s\t0\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t0\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$app" "$cls" "$verdict" "$rc" "$secs" "$cpu" "$ob" "$eb" "$nch" \
-        "$nempty" "$wins" "$detail" "$claim" >> "$OUT/results.tsv"
+        "$nempty" "$wins" "$fbpx" "$detail" "$claim" >> "$OUT/results.tsv"
 }
 
+# ---------------------------------------------------------------------------
+# 3a. the bare screen — the oracle for "did this program put pixels up"
+# ---------------------------------------------------------------------------
+# The compositor composes a screen of its own before any client exists: a
+# background and a pointer. Asking "is the framebuffer non-blank" would
+# therefore answer YES for every GUI row including the ones that drew nothing,
+# which is a success-shaped answer to the wrong question. So the reference is
+# the compositor's OWN screen with no client on it, composed here once, and
+# what each row reports is the pixels that program is responsible for.
+#
+# It is composed TWICE and the two are compared. A reference that is not
+# reproducible is not a reference, and a blinking cursor or a clock in the
+# compositor's own chrome would make every row report pixels it did not paint.
+# If the two disagree the sweep says so and switches the column off rather
+# than publishing a number it cannot stand behind.
+FBREF=""
+if [ -n "$WSYSD_BIN" ] && [ -x "$BASE/bin/wsysd" ] && [ -x "$BASE/bin/sleep" ]; then
+    echo "[runsweep] composing the bare screen (the framebuffer oracle)"
+    fbref_t0=$(date +%s.%N)
+    for r in 1 2; do
+        app="fbref$r"; up="$OUT/ov/$app.up"; wk="$OUT/ov/$app.wk"; mnt="$OUT/ov/$app.mnt"
+        unshare -r rm -rf "$up" "$wk" "$mnt" 2>/dev/null || rm -rf "$up" "$wk" "$mnt"
+        mkdir -p "$up" "$wk" "$mnt"
+        JWSYSD="$WSYSD_BIN"
+        jail_run 20 /dev/null "$OUT/run/$app.out" "$OUT/run/$app.err" \
+                 /bin/sleep 2
+        cp "$up/run/fb.raw" "$OUT/fb.ref$r" 2>/dev/null
+    done
+    JWSYSD=""
+    fbref_t1=$(date +%s.%N)
+    FBREF_SECS=$(awk -v a="$fbref_t0" -v b="$fbref_t1" 'BEGIN{printf "%.1f", (b-a)/2}')
+    if [ -s "$OUT/fb.ref1" ] && cmp -s "$OUT/fb.ref1" "$OUT/fb.ref2"; then
+        FBREF="$OUT/fb.ref1"
+        echo "[runsweep] bare screen reproducible, ${FBREF_SECS}s per composited run"
+    else
+        echo "[runsweep] WARNING: the bare compositor screen is NOT reproducible;" \
+             "the fbpx column is off for this run" >&2
+        [ -s "$OUT/run/fbref1.err" ] && sed 's/^/[runsweep]   /' "$OUT/run/fbref1.err" >&2
+        [ -s "$OUT/run/fbref1.wsysd.log" ] && \
+            sed 's/^/[runsweep]   wsysd: /' "$OUT/run/fbref1.wsysd.log" >&2
+    fi
+fi
+
 echo "[runsweep] running ${#APPS[@]} applications"
+RUN_T0=$(date +%s.%N)
 i=0
 for app in "${APPS[@]}"; do
     i=$((i+1))
@@ -674,6 +877,8 @@ for app in "${APPS[@]}"; do
     run_one "$app"
 done
 echo >&2
+RUN_T1=$(date +%s.%N)
+RUN_SECS=$(awk -v a="$RUN_T0" -v b="$RUN_T1" 'BEGIN{printf "%.0f", b-a}')
 unshare -r rm -rf "$OUT/ov" 2>/dev/null || rm -rf "$OUT/ov"
 
 # ---------------------------------------------------------------------------
@@ -689,17 +894,22 @@ unshare -r rm -rf "$OUT/ov" 2>/dev/null || rm -rf "$OUT/ov"
     # 323 was simply wrong (it is 324). Printing the definition next to the
     # number means the next reader re-derives nothing.
     #
-    #   healthy  = RAN + DREW_WINDOW + STAYS_UP + EXPECTED_FAIL
+    #   healthy  = RAN + PAINTED + DREW_WINDOW + STAYS_UP + EXPECTED_FAIL
+    #
+    # PAINTED is DREW_WINDOW's stronger sibling and joins it in the numerator
+    # rather than replacing it: both are a GUI client that came up and did its
+    # job, and the difference between them -- a window in the table versus
+    # pixels on the framebuffer -- is what the fbpx column is for.
     #   runnable = every row MINUS the ones we declined to run
     #              (NOT_SMOKE_TESTABLE) and the ones we could not build
     #              (BUILD_FAIL)
     awk -F'\t' 'NR>1{
         n++; c[$4]++
     } END {
-        healthy = c["RAN"] + c["DREW_WINDOW"] + c["STAYS_UP"] + c["EXPECTED_FAIL"]
+        healthy = c["RAN"] + c["PAINTED"] + c["DREW_WINDOW"] + c["STAYS_UP"] + c["EXPECTED_FAIL"]
         runnable = n - c["NOT_SMOKE_TESTABLE"] - c["BUILD_FAIL"]
         printf "-- headline --\n"
-        printf "healthy   %4d   (RAN + DREW_WINDOW + STAYS_UP + EXPECTED_FAIL)\n", healthy
+        printf "healthy   %4d   (RAN + PAINTED + DREW_WINDOW + STAYS_UP + EXPECTED_FAIL)\n", healthy
         printf "runnable  %4d   (%d rows - %d NOT_SMOKE_TESTABLE - %d BUILD_FAIL)\n", \
                runnable, n, c["NOT_SMOKE_TESTABLE"], c["BUILD_FAIL"]
         printf "SCORE     %d / %d\n", healthy, runnable
@@ -712,6 +922,31 @@ unshare -r rm -rf "$OUT/ov" 2>/dev/null || rm -rf "$OUT/ov"
     echo "-- by class --"
     awk -F'\t' 'NR>1{c[$2]++} END{for(v in c) printf "%-20s %4d\n", v, c[v]}' \
         "$OUT/results.tsv" | sort -k2 -nr
+    echo
+    # WHAT THE COMPOSITOR BOUGHT, AND WHAT IT COST. Both, next to each other,
+    # because "the sweep grew a column" is not a finding until the wall clock
+    # is beside it.
+    echo "-- the windowed half, now that there is a compositor --"
+    awk -F'\t' -v ref="$FBREF" 'NR>1 && ($2=="gui" || $2=="daemon"){
+            g++
+            if      ($4=="PAINTED")      p++
+            else if ($4=="DREW_WINDOW")  d++
+            else if ($4=="UP_NO_WINDOW") u++
+            else                         o++
+        } END {
+            if (ref == "") { print "  (no compositor in this run -- fbpx is off)"; exit }
+            printf "  %4d gui + daemon rows\n", g
+            printf "  %4d PAINTED       pixels of their own on the framebuffer\n", p+0
+            printf "  %4d DREW_WINDOW   a window in the table, and NOTHING on the screen\n", d+0
+            printf "  %4d UP_NO_WINDOW  alive at the timeout, no window at all\n", u+0
+            printf "  %4d other         (see the verdict table above)\n", o+0
+        }' "$OUT/results.tsv"
+    echo "  run phase ${RUN_SECS}s wall for ${#APPS[@]} applications"
+    echo
+    echo "-- a window in the table with no pixels behind it --"
+    awk -F'\t' 'NR>1 && ($2=="gui" || $2=="daemon") && $4=="DREW_WINDOW" {
+                    printf "  %-24s wins %s, fbpx %s\n", $1, $12, $13 }' \
+        "$OUT/results.tsv"
     echo
     echo "-- the ones that succeed while doing nothing --"
     awk -F'\t' 'NR>1 && ($4=="SILENT_OK"||$4=="EMPTY_EFFECT"){printf "%-24s %s\n", $1, $4}' \
