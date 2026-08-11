@@ -153,6 +153,11 @@ same failure this project exists to beat.
   Zero `SILENT_OK`, zero `EMPTY_EFFECT`, zero `CRASH` remain. The two
   remaining `TIMEOUT`s (`wakelat`, `sysirqprobe`) both print a named FAIL
   about `/proc/self/ctl` before they run long, so they are honest.
+  Both `results.tsv` files are kept, under
+  `/home/david/.hamnix-build/sweep-a4b04e0f/{BASELINE,AFTER}-preserved/` —
+  **not** `/tmp`, which is a 16 GB tmpfs and is where a previous pass's
+  baseline went during a disk-full cleanup, leaving its before/after resting
+  on a figure it had not measured.
 * **The `/dev/wsys/<wid>/draw/ctl` `'I'` verb was never ported, so
   `hamscene_image` renders nothing on this line.** Found by tracing
   `hamimgscene`, which was exiting 2 in total silence. `user/linux-wsys.c`
