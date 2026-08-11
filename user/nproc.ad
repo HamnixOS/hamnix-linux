@@ -1,12 +1,25 @@
 # user/nproc.ad
 #
 # Hamnix `nproc`: print the number of online CPUs, mirroring
-# coreutils' `nproc`. The kernel exposes the SMP count through
-# /proc/cpuinfo as a "cpus_online: N" line (see
-# sys/src/9/port/devcpuinfo.ad). We read that file, find the
-# "cpus_online:" label, parse the integer that follows, and print
-# it on its own line. If the field can't be found we fall back to
-# 1 — a running system always has at least one online CPU.
+# coreutils' `nproc`.
+#
+# TWO KERNELS, TWO SPELLINGS OF THE SAME FACT. The Hamnix kernel exposes the
+# SMP count through /proc/cpuinfo as a "cpus_online: N" line (see
+# sys/src/9/port/devcpuinfo.ad). THE LINUX KERNEL DOES NOT: its /proc/cpuinfo
+# has no such field and instead emits one "processor\t: N" block PER CPU. So
+# on hamnix-linux this program found no label, took its fallback, and printed
+#
+#     1
+#
+# on a twelve-core machine — silently, exit 0, indistinguishable from a real
+# answer of one. That is a DEFAULT STANDING IN FOR AN ANSWER, which NORTH_STAR
+# names as the failure mode of this port, and it is worse in `nproc` than most
+# places: the whole point of the program is to be believed by a build script
+# deciding how many jobs to run.
+#
+# The order is: the Hamnix label if it is there, else COUNT the Linux
+# `processor` lines, else say on stderr that neither was found and answer 1 —
+# because a fallback that cannot be told from a measurement is the bug.
 #
 # No --all / --ignore flags: coreutils distinguishes "configured"
 # vs "online" CPUs, but Hamnix only tracks online CPUs, so the two
@@ -67,42 +80,79 @@ def matches_label(buf: Ptr[uint8], n: uint64, at: uint64) -> int32:
 def main() -> int32:
     fd: int32 = sys_open("/proc/cpuinfo")
     if fd < 0:
-        # No /proc/cpuinfo — still a valid single-CPU answer.
+        write_str(2, "nproc: cannot open /proc/cpuinfo; answering 1 without having counted anything\n")
         write_str(1, "1\n")
         return 0
-    total: uint64 = 0
-    while total < CPUINFO_CAP:
-        r: int64 = sys_read(fd, cast[Ptr[uint8]](
-                                cast[uint64](&cpuinfo_buf[0]) + total),
-                            CPUINFO_CAP - total)
+
+    count: uint64 = 1
+    found: int32 = 0
+    # Linux emits one "processor" line per cpu and the file runs to tens of
+    # kilobytes, so the count is made INCREMENTALLY across reads rather than
+    # from one buffered slurp: `bol` says we are at the start of a line and
+    # `mpos` how much of the label has matched so far, which is what carries a
+    # match across a chunk boundary. The old 512-byte slurp would have counted
+    # only the first cpu or two even with the right label.
+    procs: uint64 = 0
+    bol: int32 = 1
+    mpos: uint64 = 0
+    label: Ptr[uint8] = "processor"
+    first: int32 = 1
+    while True:
+        r: int64 = sys_read(fd, &cpuinfo_buf[0], CPUINFO_CAP)
         if r <= 0:
             break
-        total = total + cast[uint64](r)
+        n: uint64 = cast[uint64](r)
+
+        # The Hamnix field, if this kernel publishes it. Scanned on the FIRST
+        # chunk only: devcpuinfo.ad's whole file is a few dozen bytes, so it
+        # cannot straddle a 512-byte boundary, and scanning every chunk would
+        # be pretending to a generality this does not have.
+        if first != 0:
+            first = 0
+            i: uint64 = 0
+            while i < n:
+                if matches_label(&cpuinfo_buf[0], n, i) != 0:
+                    j: uint64 = i + 12                   # past "cpus_online:"
+                    while j < n and cpuinfo_buf[j] == 32:
+                        j = j + 1
+                    v: uint64 = 0
+                    saw: int32 = 0
+                    while j < n and cpuinfo_buf[j] >= 48 and cpuinfo_buf[j] <= 57:
+                        v = v * 10 + cast[uint64](cpuinfo_buf[j] - 48)
+                        saw = 1
+                        j = j + 1
+                    if saw != 0 and v > 0:
+                        count = v
+                        found = 1
+                    break
+                i = i + 1
+            if found != 0:
+                break
+
+        k: uint64 = 0
+        while k < n:
+            c: uint8 = cpuinfo_buf[k]
+            if c == 10:
+                bol = 1
+                mpos = 0
+            elif bol != 0:
+                if mpos < 9 and c == label[mpos]:
+                    mpos = mpos + 1
+                    if mpos == 9:
+                        procs = procs + 1
+                        bol = 0            # this line is counted; stop matching
+                        mpos = 0
+                else:
+                    bol = 0
+                    mpos = 0
+            k = k + 1
     sys_close(fd)
 
-    # Scan for the "cpus_online:" label, then read the integer after it.
-    i: uint64 = 0
-    found: int32 = 0
-    count: uint64 = 1
-    while i < total:
-        if matches_label(&cpuinfo_buf[0], total, i) != 0:
-            j: uint64 = i + 12                       # past "cpus_online:"
-            # skip spaces
-            while j < total and cpuinfo_buf[j] == 32:
-                j = j + 1
-            v: uint64 = 0
-            saw: int32 = 0
-            while j < total and cpuinfo_buf[j] >= 48 and cpuinfo_buf[j] <= 57:
-                v = v * 10 + cast[uint64](cpuinfo_buf[j] - 48)
-                saw = 1
-                j = j + 1
-            if saw != 0 and v > 0:
-                count = v
-                found = 1
-            break
-        i = i + 1
-
+    if found == 0 and procs > 0:
+        count = procs
+        found = 1
     if found == 0:
+        write_str(2, "nproc: /proc/cpuinfo has neither a `cpus_online:` field nor any `processor` line; answering 1 without having counted anything\n")
         count = 1
     write_dec(count)
     sys_write(1, "\n", 1)
