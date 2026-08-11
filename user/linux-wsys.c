@@ -78,11 +78,12 @@
 #define WSYS_MAGIC        0x53595357u        /* "WSYS" */
 /* 2, not 1: the chrome state left this segment (see THE SPLIT below), so a
  * segment written by a version-1 build has a different meaning for the same
- * bytes.  A mismatch re-initialises rather than being ignored — /srv is tmpfs
+ * bytes.  3 adds the pinned-background flag to struct wwin, which moves every
+ * field after it.  A mismatch re-initialises rather than being ignored — /srv is tmpfs
  * and recreated every boot, so the only way to meet an old one is to mix two
  * builds, and silently sharing a table whose layout you disagree about is the
  * success-shaped failure this tree keeps paying for. */
-#define WSYS_VERSION      2
+#define WSYS_VERSION      3
 #define WSYS_MAX_WINDOWS  32
 #define WSYS_SCENE_CAP    16384              /* = lib/hamscene.ad HAMSCENE_CAP */
 #define WSYS_RING_CAP     8192
@@ -90,6 +91,10 @@
 #define WSYS_SINKS        32
 #define WSYS_SINK_NAME    64
 #define WSYS_SINK_CAP     4096
+/* devwsys's WSYS_PINNED_Z: a reserved floor BELOW the lowest z an ordinary
+ * window can ask for (`z` refuses a negative), so nothing can land on it by
+ * accident. */
+#define WSYS_PINNED_Z     (-1)
 
 struct wring {
     uint32_t r, w;                            /* byte counters, monotone */
@@ -102,6 +107,7 @@ struct wwin {
     int32_t  pid;                             /* owner, 0 = unowned */
     int32_t  x, y, w, h, z;
     int32_t  decorate, visible, proto;
+    int32_t  pinned;                          /* devwsys's wsys_win_pinned   */
     uint32_t scene_len;                       /* published */
     uint32_t scene_gen;                       /* ++ on every commit */
     uint32_t stage_len;                       /* being written */
@@ -1937,6 +1943,8 @@ static int ctl_global(const char *s, size_t n)
         p = 5;
         int32_t wid = take_int(s, &p, n);
         struct wwin *v = win_find(wid);
+        if (v && v->pinned) return 0;          /* a pinned background never
+                                                  raises -- see ctl_window */
         if (v) {
             int32_t top = 0;
             for (int i = 0; i < WSYS_MAX_WINDOWS; i++)
@@ -2064,6 +2072,36 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
     if (n >= 1 && s[0] == 'z') {
         p = 1; int32_t z = take_int(s, &p, n);
         if (z >= 0) { v->z = z; shm->gen++; }
+        return;
+    }
+    /* background [0|1] / pin — devwsys's PINNED BACKGROUND.
+     *
+     * MEASURED, and it is why the desktop had no windows on it.  hamdesktop
+     * writes `background 1` for its full-screen backdrop (its own comment says
+     * "`background 1` subsumes the old `z 0`"), this port had no such verb, and
+     * an unknown verb is ignored -- so the backdrop kept lib/hamui.ad's default
+     * `z 6` and the compositor, which paints z ascending, painted a
+     * full-screen opaque backdrop OVER every ordinary client window.  On a VM
+     * boot the result is a desktop with wallpaper, icons and a panel (z 9,
+     * above it) and NOT ONE application window, with every return code 0 and
+     * the taskbar still listing the windows it was covering.  The terminal was
+     * running the whole time.
+     *
+     * devwsys forces a pinned window to a reserved lowest z (WSYS_PINNED_Z,
+     * which is -1 -- BELOW the 0 an ordinary window can ask for, so the floor
+     * cannot be reached by accident) and never raises it, which is the other
+     * half: without that, one click on the desktop raises the backdrop over
+     * everything again ("all windows vanish on desktop click", the bug
+     * devwsys's comment names).  Both halves are ported.  `pin` takes no
+     * argument and means 1. */
+    if ((n >= 10 && !strncmp(s, "background", 10))
+        || (n >= 3 && !strncmp(s, "pin", 3))) {
+        p = (s[0] == 'p') ? 3 : 10;
+        int32_t bv = take_int(s, &p, n);
+        if (bv < 0) bv = 1;                    /* `pin`, or no argument */
+        v->pinned = bv ? 1 : 0;
+        v->z = bv ? WSYS_PINNED_Z : 0;
+        shm->gen++;
         return;
     }
     /* Unknown verb: ignore, as devwsys does.  A window must not die because a

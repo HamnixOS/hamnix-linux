@@ -86,6 +86,12 @@ GUI_APPS=(
     wsysd
     hamdesktop hampanelscene hamtermscene hameditscene hamsettings hamfm
     hamUI hamUId
+    # The demo for the scene IMAGE tier (the draw/ctl 'I' verb).  It is here
+    # because for the whole of the port before the verb was ported it would
+    # have been the ONLY thing on the box that could tell you the tier was
+    # broken -- every other image client drew a hole and exited 0.  It is 40 KB
+    # and it is the reproduction.
+    hamimgscene
 )
 APPS+=("${GUI_APPS[@]}")
 
