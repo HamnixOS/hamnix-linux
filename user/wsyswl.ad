@@ -190,6 +190,8 @@ T_XDG_OUT_MGR: int32 = 24
 T_XDG_OUT: int32 = 25
 T_POSITIONER: int32 = 26
 T_XDG_POPUP: int32 = 27
+T_XWL_SHELL: int32 = 28
+T_XWL_SURF: int32 = 29
 
 G_COMPOSITOR: uint32 = 1
 G_SHM: uint32 = 2
@@ -200,6 +202,7 @@ G_DDM: uint32 = 6
 G_SUBCOMPOSITOR: uint32 = 7
 G_VIEWPORTER: uint32 = 8
 G_XDG_OUTPUT: uint32 = 9
+G_XWL_SHELL: uint32 = 10
 
 DISPLAY_ID: uint32 = 1
 
@@ -570,6 +573,16 @@ S_WINFULL:  uint64 = 18         # a window refused: this CONNECTION's budget
 # docs/linux_window_manager.md §8a stated as a measurement.
 S_CONN:     uint64 = 19         # gauge: connections in use right now
 S_CONNHI:   uint64 = 20         # high water of the above
+# ROOTLESS XWAYLAND. An X toplevel becomes a wsys window only when TWO facts
+# meet: Xwayland has told this server a surface's serial over
+# xwayland_shell_v1, and the X window carrying that same serial in its
+# WL_SURFACE_SERIAL property has been seen by the window manager inside this
+# compositor. Either half arriving without the other is a window that exists
+# and is not on the screen, which is precisely the failure this file counts
+# rather than swallows.
+S_XWLPAIR:  uint64 = 21         # X window <-> wl_surface associations made
+S_XWLUNP:   uint64 = 22         # a commit on an X surface with no X window yet
+S_XWLERR:   uint64 = 23         # the XWM refused something, by name on stderr
 
 statepath: Array[256, uint8]
 
@@ -1413,6 +1426,871 @@ def win_close(wid: int32):
     n_win = n_win - 1
 
 
+# --- rootless Xwayland: the X11 window manager INSIDE the compositor --
+#
+# WHY THIS EXISTS, AND THE REASON THAT DOES NOT.
+# ==============================================
+# It is NOT to end shared fate. docs/linux_window_manager.md §8a measured that
+# and it is false: every limit in this file is per CONNECTION, and Xwayland
+# opens exactly one connection whether it is rootful or rootless (`conns 1`,
+# measured both ways). The shared-fate bugs that were really there were fixed
+# by partitioning the frame-callback and window tables per connection, and the
+# way to give an X session its own fate is to give it its own Xwayland.
+#
+# The reason that survives is the project's own, and it is architectural:
+#
+#     WINDOW MANAGEMENT BELONGS IN wsysd. WINDOWS ARE ALREADY FILES UNDER
+#     /dev/wsys/<wid>/.
+#
+# A rootful Xwayland collapses every X client in a namespace onto ONE
+# wl_surface and therefore ONE wsys window -- `windows_high_water 1` for an
+# entire Steam session. The Hamnix desktop cannot move, raise, stack or close
+# an individual X window because it cannot SEE one; it sees a rectangle. That
+# is the only reason a namespace needs `jwm` inside it, and it is why a Debian
+# application is a second-class citizen on this desktop while Firefox, a native
+# Wayland client, gets one wsys window per xdg_toplevel.
+#
+# Rootless makes each X toplevel its own wl_surface and therefore its own wsys
+# window: a file, addressable by name, managed by the compositor that manages
+# everything else.
+#
+# THE PIECE THAT IS NOT OPTIONAL.
+# ===============================
+# A rootless Xwayland with no X11 window manager on the compositor side
+# produces NO wsys window at all -- measured, tests/linux/wsyswl_shared_fate.sh.
+# Xwayland -rootless creates a wl_surface per X toplevel and hands it over
+# through `xwayland_shell_v1`, which carries ONE fact: a 64-bit serial. The
+# same serial appears on the X window as the WL_SURFACE_SERIAL property. Only
+# something holding BOTH an X connection and the Wayland connection can put the
+# two halves together, which is why the window manager has to live in here.
+#
+# So this section is two things at once: the Wayland half (the
+# xwayland_shell_v1 global, below in do_registry/dispatch) and an X11 client
+# that holds SubstructureRedirect on the root window. It speaks the X wire
+# protocol by hand for the same reason user/xsnarfd.ad does -- linking libX11
+# would make this a foreign binary -- and it borrows that file's shape: nothing
+# assumes a fixed root window or resource base, both are read out of the
+# connection setup reply.
+#
+# WHAT IT IS AND IS NOT, TODAY. Stage one: association, mapping, geometry,
+# titles, and one wsys window per mapped X toplevel. NOT yet: WM_PROTOCOLS /
+# WM_DELETE_WINDOW (so a title-bar close destroys the wsys window and leaves
+# the X client running), _NET_WM_STATE round trips, WM_TRANSIENT_FOR stacking,
+# _NET_SUPPORTED, and compositor-side move/resize pushed back to the X client
+# as a ConfigureNotify. Every one of those is named in HANDOFF and in
+# docs/linux_window_manager.md §8b rather than half-done here.
+#
+# THE CLIPBOARD IS ALREADY DONE AND IS NOT ON THAT LIST. §8's item 2 counted
+# "selection ownership for CLIPBOARD/PRIMARY" as part of this work. It is not:
+# user/xsnarfd.ad is an ordinary X client on the same display and owns the
+# selections there whether the display is rootful or rootless.
+
+XWMAX: uint64 = 32                     # X windows this compositor will manage
+XDEFER: uint64 = 64                    # X events parked while awaiting a reply
+XTITLE_CAP: uint64 = 64
+
+xwm_on:    int32 = 0                   # 1 = WSYSWL_XWM named an X socket
+xwm_path:  Array[256, uint8]
+xwm_retry: int32 = 0
+xfd:       int32 = -1
+xdead:     int32 = 0
+xseq:      uint32 = 0
+x_root:    uint32 = 0
+x_resbase: uint32 = 0
+x_maxreq:  uint32 = 0
+x_atom_serial:  uint32 = 0
+x_atom_allow:   uint32 = 0
+x_atom_netname: uint32 = 0
+x_prop_fmt: int32 = 0
+x_prop_n:   uint32 = 0
+xerr_seq:   uint32 = 0
+xerr_code:  int32 = 0
+
+xreq:   Array[1024, uint8]
+xin:    Array[64, uint8]
+xrep:   Array[4096, uint8]
+xrep_n: uint64 = 0
+xsink:  Array[1024, uint8]
+xdefer_buf: Array[2048, uint8]         # 64 events * 32 bytes
+xdefer_n: uint64 = 0
+xwait:  Array[2, int32]
+
+xw_win:   Array[32, int32]
+xw_serlo: Array[32, int32]
+xw_serhi: Array[32, int32]
+xw_have:  Array[32, int32]             # a WL_SURFACE_SERIAL has been read
+xw_or:    Array[32, int32]             # override-redirect: a menu, not a window
+xw_map:   Array[32, int32]
+xw_x:     Array[32, int32]
+xw_y:     Array[32, int32]
+xw_w:     Array[32, int32]
+xw_h:     Array[32, int32]
+xw_surf:  Array[32, int32]             # the paired wl_surface object id
+xw_conn:  Array[32, int32]
+xw_title: Array[2048, uint8]           # 32 * 64
+xw_tlen:  Array[32, uint64]
+n_xw:     uint64 = 0
+
+
+def xput16(buf: Ptr[uint8], at: uint64, v: uint32):
+    buf[at]     = cast[uint8](v & 255)
+    buf[at + 1] = cast[uint8]((v >> 8) & 255)
+
+
+def xget16(buf: Ptr[uint8], at: uint64) -> uint32:
+    return cast[uint32](buf[at]) | (cast[uint32](buf[at + 1]) << 8)
+
+
+# X sends window positions as SIGNED 16-bit. A window at -20 read unsigned is a
+# window at 65516, which the placement below would clamp to the far edge of the
+# screen -- a menu that opens off the side of the display for no visible reason.
+def xs16(buf: Ptr[uint8], at: uint64) -> int32:
+    v: uint32 = xget16(buf, at)
+    if v >= 32768:
+        return cast[int32](v) - 65536
+    return cast[int32](v)
+
+
+def xzero(n: uint64):
+    i: uint64 = 0
+    while i < n:
+        xreq[i] = 0
+        i = i + 1
+
+
+def x_send(n: uint64) -> uint32:
+    # EVERY request bumps the sequence, including the ones with no reply: the
+    # server counts them all, and a reply matched against a sequence that
+    # skipped the silent requests matches the wrong thing.
+    xseq = xseq + 1
+    sent: uint64 = 0
+    while sent < n:
+        k: int64 = sys_write(xfd, &xreq[sent], n - sent)
+        if k <= 0:
+            xdead = 1
+            return xseq
+        sent = sent + cast[uint64](k)
+    return xseq
+
+
+def x_read_exact(buf: Ptr[uint8], n: uint64) -> int32:
+    got: uint64 = 0
+    while got < n:
+        k: int64 = sys_read(xfd, &buf[got], n - got)
+        if k <= 0:
+            return 0
+        got = got + cast[uint64](k)
+    return 1
+
+
+# One X message, or nothing. 1 = a 32-byte header is in xin (and a reply's
+# variable part in xrep), 0 = the timeout expired quiet, -1 = the server went.
+# THE VARIABLE PART IS ALWAYS DRAINED HERE, in one place: a reply left
+# half-read desynchronises the stream permanently, and the symptom is an
+# unrelated event arriving mangled minutes later.
+def x_poll_msg(timeout_ms: int64) -> int32:
+    if xfd < 0 or xdead != 0:
+        return -1
+    xwait[0] = xfd
+    r: int64 = sys_waitfds(&xwait[0], 1, timeout_ms)
+    if r <= 0:
+        return 0
+    if x_read_exact(&xin[0], 32) == 0:
+        xdead = 1
+        return -1
+    xrep_n = 0
+    if xin[0] != 1:
+        return 1
+    extra: uint64 = cast[uint64](ru32(&xin[0], 4)) * 4
+    take: uint64 = extra
+    if take > 4096:
+        take = 4096
+    if take > 0:
+        if x_read_exact(&xrep[0], take) == 0:
+            xdead = 1
+            return -1
+    xrep_n = take
+    left: uint64 = extra - take
+    while left > 0:
+        chunk: uint64 = left
+        if chunk > 1024:
+            chunk = 1024
+        if x_read_exact(&xsink[0], chunk) == 0:
+            xdead = 1
+            return -1
+        left = left - chunk
+    return 1
+
+
+# An event that arrived while we were waiting for a reply is PARKED, not
+# dropped. A MapRequest lost because it landed in the middle of an InternAtom
+# round trip is an X window that never appears, and nothing would say so.
+def x_defer_push():
+    if xdefer_n >= XDEFER:
+        drop(S_XWLERR, "the XWM's parked-event ring overflowed -- an X window may be unmanaged")
+        return
+    i: uint64 = 0
+    while i < 32:
+        xdefer_buf[xdefer_n * 32 + i] = xin[i]
+        i = i + 1
+    xdefer_n = xdefer_n + 1
+
+
+def x_await(seq: uint32) -> int32:
+    budget: int32 = 50                          # 50 x 100 ms = five seconds
+    while budget > 0:
+        r: int32 = x_poll_msg(100)
+        if r < 0:
+            return 0
+        if r == 0:
+            budget = budget - 1
+            continue
+        s: uint32 = xget16(&xin[0], 2)
+        if xin[0] == 1 and s == (seq & 65535):
+            return 1
+        if xin[0] == 0:
+            xerr_seq = s
+            xerr_code = cast[int32](xin[1])
+            if s == (seq & 65535):
+                return 0
+        elif xin[0] != 1:
+            x_defer_push()
+    return 0
+
+
+def x_intern(name: Ptr[uint8]) -> uint32:
+    n: uint64 = slen(name)
+    total: uint64 = 8 + (n + 3) / 4 * 4
+    xzero(total)
+    xreq[0] = 16                                # InternAtom
+    xreq[1] = 0                                 # only-if-exists = False
+    xput16(&xreq[0], 2, cast[uint32](total / 4))
+    xput16(&xreq[0], 4, cast[uint32](n))
+    i: uint64 = 0
+    while i < n:
+        xreq[8 + i] = name[i]
+        i = i + 1
+    seq: uint32 = x_send(total)
+    if x_await(seq) == 0:
+        return 0
+    return ru32(&xin[0], 8)
+
+
+def x_select_input(win: uint32, mask: uint32) -> uint32:
+    xzero(16)
+    xreq[0] = 2                                 # ChangeWindowAttributes
+    xput16(&xreq[0], 2, 4)
+    put_le32(&xreq[0], 4, cast[int32](win))
+    put_le32(&xreq[0], 8, 0x0800)               # CWEventMask
+    put_le32(&xreq[0], 12, cast[int32](mask))
+    return x_send(16)
+
+
+def x_map_window(win: uint32):
+    xzero(8)
+    xreq[0] = 8                                 # MapWindow
+    xput16(&xreq[0], 2, 2)
+    put_le32(&xreq[0], 4, cast[int32](win))
+    x_send(8)
+
+
+# _XWAYLAND_ALLOW_COMMITS, set to 1 the moment a window is seen. Xwayland asks
+# its window manager's permission before it will commit a redirected window's
+# pixels; a compositor that never answers gets a window that is mapped,
+# associated, and permanently blank. Setting it unconditionally is the honest
+# answer for a compositor that does no frame synchronisation: we are always
+# ready.
+def x_allow_commits(win: uint32):
+    if x_atom_allow == 0:
+        return
+    xzero(28)
+    xreq[0] = 18                                # ChangeProperty
+    xreq[1] = 0                                 # mode = Replace
+    xput16(&xreq[0], 2, 7)
+    put_le32(&xreq[0], 4, cast[int32](win))
+    put_le32(&xreq[0], 8, cast[int32](x_atom_allow))
+    put_le32(&xreq[0], 12, 6)                   # type = CARDINAL
+    xreq[16] = 32                               # format
+    put_le32(&xreq[0], 20, 1)                   # one value
+    put_le32(&xreq[0], 24, 1)                   # ... and it is 1
+    x_send(28)
+
+
+# Grant a ConfigureRequest exactly as asked, minus the stacking half. An X
+# client that asks for 700x440 at +290+180 gets 700x440 at +290+180; wsysd
+# decides where that window LANDS ON THE DESKTOP, which is a different
+# question and the one this whole section is about.
+def x_grant_configure(win: uint32, mask: uint32, x: int32, y: int32,
+                      w: int32, h: int32, bw: int32):
+    m: uint32 = mask & 31                       # X|Y|W|H|BorderWidth
+    if m == 0:
+        return
+    at: uint64 = 12
+    if (m & 1) != 0:
+        put_le32(&xreq[0], at, x)
+        at = at + 4
+    if (m & 2) != 0:
+        put_le32(&xreq[0], at, y)
+        at = at + 4
+    if (m & 4) != 0:
+        put_le32(&xreq[0], at, w)
+        at = at + 4
+    if (m & 8) != 0:
+        put_le32(&xreq[0], at, h)
+        at = at + 4
+    if (m & 16) != 0:
+        put_le32(&xreq[0], at, bw)
+        at = at + 4
+    xreq[0] = 12                                # ConfigureWindow
+    xreq[1] = 0
+    xput16(&xreq[0], 2, cast[uint32](at / 4))
+    put_le32(&xreq[0], 4, cast[int32](win))
+    xput16(&xreq[0], 8, m)
+    xput16(&xreq[0], 10, 0)
+    x_send(at)
+
+
+# 1 = a reply is in xrep, x_prop_n items of x_prop_fmt bits each.
+def x_get_prop(win: uint32, prop: uint32) -> int32:
+    x_prop_fmt = 0
+    x_prop_n = 0
+    if prop == 0:
+        return 0
+    xzero(24)
+    xreq[0] = 20                                # GetProperty
+    xreq[1] = 0                                 # delete = False
+    xput16(&xreq[0], 2, 6)
+    put_le32(&xreq[0], 4, cast[int32](win))
+    put_le32(&xreq[0], 8, cast[int32](prop))
+    put_le32(&xreq[0], 12, 0)                   # type = AnyPropertyType
+    put_le32(&xreq[0], 16, 0)                   # long-offset
+    put_le32(&xreq[0], 20, 256)                 # long-length: 1 KiB is plenty
+    seq: uint32 = x_send(24)
+    if x_await(seq) == 0:
+        return 0
+    x_prop_fmt = cast[int32](xin[1])
+    x_prop_n = ru32(&xin[0], 16)
+    return 1
+
+
+def x_query_ext(name: Ptr[uint8]) -> uint32:
+    n: uint64 = slen(name)
+    total: uint64 = 8 + (n + 3) / 4 * 4
+    xzero(total)
+    xreq[0] = 98                                # QueryExtension
+    xput16(&xreq[0], 2, cast[uint32](total / 4))
+    xput16(&xreq[0], 4, cast[uint32](n))
+    i: uint64 = 0
+    while i < n:
+        xreq[8 + i] = name[i]
+        i = i + 1
+    seq: uint32 = x_send(total)
+    if x_await(seq) == 0:
+        return 0
+    if xin[8] == 0:                             # present = False
+        return 0
+    return cast[uint32](xin[9])                 # its major opcode
+
+
+# THE ONE REQUEST WITHOUT WHICH ROOTLESS IS A NO-OP, and it took a measurement
+# to find because everything else looks right without it.
+#
+# With SubstructureRedirect held, WL_SURFACE_SERIAL interned and
+# xwayland_shell_v1 bound by Xwayland, two X clients mapped, were managed, and
+# produced ZERO wl_surfaces: `xwl_managed 2`, `commits 0`, `max_object_id 16`.
+# Xwayland only builds a wl_surface for a window whose drawing is REDIRECTED --
+# `if (window->redirectDraw != RedirectDrawManual) return;` in its realize path
+# -- and it does not redirect anything itself. The window manager has to, with
+# CompositeRedirectSubwindows(root, Manual), which is what every other
+# compositor's XWM does in its first breath. Without it a rootless session is a
+# window manager managing windows that are not on any screen: the exact
+# success-shaped failure NORTH_STAR.md names, arrived at from the inside.
+def x_composite_redirect() -> int32:
+    op: uint32 = x_query_ext("Composite")
+    if op == 0:
+        return 0
+    # QueryVersion FIRST -- the extension refuses every other request until the
+    # client has said which version it speaks. (xsnarfd learned the same about
+    # XFIXES, at the cost of an afternoon.)
+    xzero(12)
+    xreq[0] = cast[uint8](op)
+    xreq[1] = 0                                 # CompositeQueryVersion
+    xput16(&xreq[0], 2, 3)
+    put_le32(&xreq[0], 4, 0)                    # client major 0
+    put_le32(&xreq[0], 8, 4)                    # client minor 4
+    seq: uint32 = x_send(12)
+    if x_await(seq) == 0:
+        return 0
+    xzero(12)
+    xreq[0] = cast[uint8](op)
+    xreq[1] = 2                                 # CompositeRedirectSubwindows
+    xput16(&xreq[0], 2, 3)
+    put_le32(&xreq[0], 4, cast[int32](x_root))
+    xreq[8] = 1                                 # update = Manual
+    x_send(12)
+    return 1
+
+
+def xwm_find(win: int32) -> int32:
+    i: uint64 = 0
+    while i < n_xw:
+        if xw_win[i] == win:
+            return cast[int32](i)
+        i = i + 1
+    return -1
+
+
+def xwm_add(win: int32) -> int32:
+    s: int32 = xwm_find(win)
+    if s >= 0:
+        return s
+    if n_xw >= XWMAX:
+        drop(S_XWLERR, "more X windows at once than the XWM table holds -- raise XWMAX")
+        return -1
+    i: uint64 = n_xw
+    xw_win[i] = win
+    xw_serlo[i] = 0
+    xw_serhi[i] = 0
+    xw_have[i] = 0
+    xw_or[i] = 0
+    xw_map[i] = 0
+    xw_x[i] = 0
+    xw_y[i] = 0
+    xw_w[i] = 0
+    xw_h[i] = 0
+    xw_surf[i] = 0
+    xw_conn[i] = -1
+    xw_tlen[i] = 0
+    n_xw = n_xw + 1
+    # xwl_managed is published out of n_xw, and publish_state only rewrites the
+    # file when something is dirty. Without this line the state file said
+    # `xwl_managed 0` while the window manager was holding two X windows -- a
+    # counter lying by omission, which is the one thing this file may not do.
+    stat_dirty = 1
+    if verbose != 0:
+        puts(1, "wsyswl: XWM now manages ")
+        putd(1, cast[int32](n_xw))
+        puts(1, " X windows (added ")
+        putd(1, win)
+        puts(1, ")\n")
+    return cast[int32](i)
+
+
+# Take the wsys window away and forget the association, but keep the entry: an
+# X client may unmap and remap the same window, and Xwayland makes a NEW
+# wl_surface with a NEW serial each time.
+def xwm_unpair(i: uint64):
+    if xw_surf[i] != 0 and xw_conn[i] >= 0:
+        c: uint64 = cast[uint64](xw_conn[i])
+        si: uint64 = oidx(c, cast[uint32](xw_surf[i]))
+        if obj_type[si] == T_SURFACE:
+            if obj_a[si] > 0:
+                win_close(obj_a[si])
+                obj_a[si] = 0
+            obj_e[si] = -1
+    xw_surf[i] = 0
+    xw_conn[i] = -1
+    xw_have[i] = 0
+    xw_serlo[i] = 0
+    xw_serhi[i] = 0
+
+
+def xwm_del(i: uint64):
+    xwm_unpair(i)
+    stat_dirty = 1
+    k: uint64 = i
+    while k + 1 < n_xw:
+        xw_win[k] = xw_win[k + 1]
+        xw_serlo[k] = xw_serlo[k + 1]
+        xw_serhi[k] = xw_serhi[k + 1]
+        xw_have[k] = xw_have[k + 1]
+        xw_or[k] = xw_or[k + 1]
+        xw_map[k] = xw_map[k + 1]
+        xw_x[k] = xw_x[k + 1]
+        xw_y[k] = xw_y[k + 1]
+        xw_w[k] = xw_w[k + 1]
+        xw_h[k] = xw_h[k + 1]
+        xw_surf[k] = xw_surf[k + 1]
+        xw_conn[k] = xw_conn[k + 1]
+        xw_tlen[k] = xw_tlen[k + 1]
+        t: uint64 = 0
+        while t < XTITLE_CAP:
+            xw_title[k * XTITLE_CAP + t] = xw_title[(k + 1) * XTITLE_CAP + t]
+            t = t + 1
+        k = k + 1
+    n_xw = n_xw - 1
+
+
+# THE ASSOCIATION, from the X side: this X window's serial is known, find the
+# wl_surface that claimed the same one. obj_e on a wl_surface is -1 for "an
+# Xwayland surface waiting for its X window" and the X window id once paired.
+def xwm_pair(i: uint64) -> int32:
+    if xw_have[i] == 0:
+        return 0
+    if xw_surf[i] != 0:
+        return 1
+    c: uint64 = 0
+    while c < MAXCONN:
+        if conn_inuse[c] != 0:
+            o: uint64 = 1
+            while o < MAXOBJ:
+                oi: uint64 = c * MAXOBJ + o
+                if obj_type[oi] == T_SURFACE and obj_e[oi] == -1 \
+                        and obj_h[oi] == xw_serlo[i] \
+                        and obj_i[oi] == xw_serhi[i]:
+                    obj_e[oi] = xw_win[i]
+                    xw_surf[i] = cast[int32](o)
+                    xw_conn[i] = cast[int32](c)
+                    hit(S_XWLPAIR)
+                    return 1
+                o = o + 1
+        c = c + 1
+    return 0
+
+
+# ... and from the Wayland side, because set_serial and the X property arrive
+# in either order and neither is allowed to be the one that gets there second
+# and is ignored.
+def xwm_pair_surface(c: uint64, surf: uint32):
+    si: uint64 = oidx(c, surf)
+    i: uint64 = 0
+    while i < n_xw:
+        if xw_have[i] != 0 and xw_surf[i] == 0 \
+                and xw_serlo[i] == obj_h[si] and xw_serhi[i] == obj_i[si]:
+            obj_e[si] = xw_win[i]
+            xw_surf[i] = cast[int32](surf)
+            xw_conn[i] = cast[int32](c)
+            hit(S_XWLPAIR)
+            return
+        i = i + 1
+
+
+def xwm_read_serial(i: uint64):
+    if x_atom_serial == 0:
+        return
+    r: int32 = x_get_prop(cast[uint32](xw_win[i]), x_atom_serial)
+    if verbose != 0:
+        puts(1, "wsyswl: WL_SURFACE_SERIAL on ")
+        putd(1, xw_win[i])
+        puts(1, ": reply ")
+        putd(1, r)
+        puts(1, " fmt ")
+        putd(1, x_prop_fmt)
+        puts(1, " nitems ")
+        putd(1, cast[int32](x_prop_n))
+        puts(1, "\n")
+    if r == 0:
+        return
+    if x_prop_fmt != 32 or x_prop_n < 2:
+        return
+    xw_serlo[i] = cast[int32](ru32(&xrep[0], 0))
+    xw_serhi[i] = cast[int32](ru32(&xrep[0], 4))
+    xw_have[i] = 1
+    p: int32 = xwm_pair(i)
+    if verbose != 0:
+        puts(1, "wsyswl: serial ")
+        putd(1, xw_serlo[i])
+        puts(1, ",")
+        putd(1, xw_serhi[i])
+        puts(1, " paired ")
+        putd(1, p)
+        puts(1, "\n")
+
+
+def xwm_apply_title(i: uint64, wid: int32):
+    if xw_tlen[i] == 0:
+        return
+    at: uint64 = 0
+    p: Ptr[uint8] = "title "
+    k: uint64 = 0
+    while p[k] != 0:
+        ctlbuf[at] = p[k]
+        at = at + 1
+        k = k + 1
+    k = 0
+    while k < xw_tlen[i]:
+        b: uint8 = xw_title[i * XTITLE_CAP + k]
+        # A newline inside a title would end the ctl line early and turn the
+        # rest of somebody's window title into a verb.
+        if b == 10 or b == 0:
+            b = 32
+        ctlbuf[at] = b
+        at = at + 1
+        k = k + 1
+    ctlbuf[at] = 10
+    ctlbuf[at + 1] = 0
+    win_ctl(wid, &ctlbuf[0])
+
+
+def xwm_read_title(i: uint64):
+    win: uint32 = cast[uint32](xw_win[i])
+    got: int32 = 0
+    if x_get_prop(win, x_atom_netname) != 0 and x_prop_n > 0:
+        got = 1
+    if got == 0:
+        if x_get_prop(win, 39) != 0 and x_prop_n > 0:      # WM_NAME, predefined
+            got = 1
+    if got == 0:
+        return
+    n: uint64 = cast[uint64](x_prop_n)
+    if n > XTITLE_CAP - 1:
+        n = XTITLE_CAP - 1
+    if n > xrep_n:
+        n = xrep_n
+    k: uint64 = 0
+    while k < n:
+        xw_title[i * XTITLE_CAP + k] = xrep[k]
+        k = k + 1
+    xw_tlen[i] = n
+    # If the window is already on the screen, rename it now: a title that only
+    # arrives if you happen to ask before the first frame is a title bar that
+    # says "Wayland" for the life of the window.
+    if xw_surf[i] != 0 and xw_conn[i] >= 0:
+        si: uint64 = oidx(cast[uint64](xw_conn[i]), cast[uint32](xw_surf[i]))
+        if obj_type[si] == T_SURFACE and obj_a[si] > 0:
+            xwm_apply_title(i, obj_a[si])
+
+
+def xwm_event():
+    # int32 and not uint8: the event code is compared against a dozen small
+    # literals below, and a uint8 on one side of those comparisons is the kind
+    # of quiet mismatch that makes every branch fall through and the window
+    # manager sit there receiving events and managing nothing.
+    t: int32 = cast[int32](xin[0] & 127)
+    if verbose != 0:
+        puts(1, "wsyswl: X event ")
+        putd(1, t)
+        puts(1, " win ")
+        putd(1, cast[int32](ru32(&xin[0], 8)))
+        puts(1, "\n")
+    win: int32 = 0
+    s: int32 = 0
+    if t == 16:                                  # CreateNotify
+        win = cast[int32](ru32(&xin[0], 8))
+        s = xwm_add(win)
+        if s >= 0:
+            i: uint64 = cast[uint64](s)
+            xw_x[i] = xs16(&xin[0], 12)
+            xw_y[i] = xs16(&xin[0], 14)
+            xw_w[i] = cast[int32](xget16(&xin[0], 16))
+            xw_h[i] = cast[int32](xget16(&xin[0], 18))
+            xw_or[i] = cast[int32](xin[22])
+            # PropertyChange BEFORE the window is mapped, or WL_SURFACE_SERIAL
+            # can be set in the gap and never announced.
+            x_select_input(cast[uint32](win), 0x420000)
+            x_allow_commits(cast[uint32](win))
+    elif t == 20:                                # MapRequest
+        win = cast[int32](ru32(&xin[0], 8))
+        s = xwm_add(win)
+        if s >= 0:
+            x_allow_commits(cast[uint32](win))
+        # THE WHOLE POINT OF SubstructureRedirect: the map does not happen
+        # unless we do it. A window manager that redirects and then never maps
+        # is matchbox's failure with the volume turned down.
+        x_map_window(cast[uint32](win))
+    elif t == 19:                                # MapNotify
+        win = cast[int32](ru32(&xin[0], 8))
+        s = xwm_add(win)
+        if s >= 0:
+            i2: uint64 = cast[uint64](s)
+            xw_map[i2] = 1
+            xw_or[i2] = cast[int32](xin[12])
+            xwm_read_serial(i2)
+            xwm_read_title(i2)
+    elif t == 18:                                # UnmapNotify
+        win = cast[int32](ru32(&xin[0], 8))
+        s = xwm_find(win)
+        if s >= 0:
+            xw_map[cast[uint64](s)] = 0
+            xwm_unpair(cast[uint64](s))
+    elif t == 17:                                # DestroyNotify
+        win = cast[int32](ru32(&xin[0], 8))
+        s = xwm_find(win)
+        if s >= 0:
+            xwm_del(cast[uint64](s))
+    elif t == 22:                                # ConfigureNotify
+        win = cast[int32](ru32(&xin[0], 8))
+        s = xwm_find(win)
+        if s >= 0:
+            i3: uint64 = cast[uint64](s)
+            xw_x[i3] = xs16(&xin[0], 16)
+            xw_y[i3] = xs16(&xin[0], 18)
+            xw_w[i3] = cast[int32](xget16(&xin[0], 20))
+            xw_h[i3] = cast[int32](xget16(&xin[0], 22))
+    elif t == 23:                                # ConfigureRequest
+        win = cast[int32](ru32(&xin[0], 8))
+        x_grant_configure(cast[uint32](win), xget16(&xin[0], 26),
+                          xs16(&xin[0], 16), xs16(&xin[0], 18),
+                          cast[int32](xget16(&xin[0], 20)),
+                          cast[int32](xget16(&xin[0], 22)),
+                          cast[int32](xget16(&xin[0], 24)))
+    elif t == 33:                                # ClientMessage
+        # HOW THE SERIAL ACTUALLY ARRIVES, and it is not where the protocol
+        # description made it sound. xwayland-shell-v1 says the serial "is set
+        # on the X11 window", and it is not: Xwayland 24.1 delivers it as a
+        # ClientMessage of type WL_SURFACE_SERIAL, addressed to the X window,
+        # sent to the ROOT with SubstructureRedirect -- which is to say, to
+        # whoever manages the screen. Measured: the toplevel's full property
+        # list has WM_NAME, WM_CLASS, WM_PROTOCOLS, _NET_WM_PID and the
+        # _XWAYLAND_ALLOW_COMMITS we set ourselves, and NO WL_SURFACE_SERIAL --
+        # with and without a `-wm` fd, both tried. data.l[0] is the low half,
+        # data.l[1] the high half, exactly as set_serial sends them.
+        atom2: uint32 = ru32(&xin[0], 8)
+        if atom2 == x_atom_serial:
+            win = cast[int32](ru32(&xin[0], 4))
+            s = xwm_add(win)
+            if s >= 0:
+                i4: uint64 = cast[uint64](s)
+                xw_serlo[i4] = cast[int32](ru32(&xin[0], 12))
+                xw_serhi[i4] = cast[int32](ru32(&xin[0], 16))
+                xw_have[i4] = 1
+                xwm_pair(i4)
+    elif t == 28:                                # PropertyNotify
+        win = cast[int32](ru32(&xin[0], 4))
+        atom: uint32 = ru32(&xin[0], 8)
+        s = xwm_find(win)
+        if s >= 0 and xin[16] == 0:              # state = NewValue
+            if atom == x_atom_serial:
+                xwm_read_serial(cast[uint64](s))
+            elif atom == x_atom_netname or atom == 39:
+                xwm_read_title(cast[uint64](s))
+
+
+def x_drop_conn():
+    if xfd >= 0:
+        sys_close(xfd)
+    xfd = -1
+    xdead = 0
+    xdefer_n = 0
+    while n_xw > 0:
+        xwm_del(n_xw - 1)
+
+
+def xwm_connect() -> int32:
+    fd: int32 = sys_unix_connect(cast[Ptr[char]](&xwm_path[0]))
+    if fd < 0:
+        return 0
+    xfd = fd
+    xdead = 0
+    xseq = 0
+    xerr_seq = 0
+    xerr_code = 0
+    # 'l', major 11, minor 0, no authorisation. The Xwayland this manages is
+    # started by the session with no -auth; a server that wanted a cookie
+    # refuses here and says so rather than hanging.
+    xzero(12)
+    xreq[0] = 108
+    xput16(&xreq[0], 2, 11)
+    sent: uint64 = 0
+    while sent < 12:
+        k: int64 = sys_write(xfd, &xreq[sent], 12 - sent)
+        if k <= 0:
+            x_drop_conn()
+            return 0
+        sent = sent + cast[uint64](k)
+    if x_read_exact(&xin[0], 8) == 0:
+        x_drop_conn()
+        return 0
+    if xin[0] != 1:
+        puts(2, "wsyswl: the X server REFUSED this compositor's window-manager connection\n")
+        x_drop_conn()
+        return 0
+    body: uint64 = cast[uint64](xget16(&xin[0], 6)) * 4
+    if body > 4096:
+        body = 4096
+    if x_read_exact(&xrep[0], body) == 0:
+        x_drop_conn()
+        return 0
+    x_resbase = ru32(&xrep[0], 4)
+    x_maxreq  = xget16(&xrep[0], 18)
+    vlen: uint64 = cast[uint64](xget16(&xrep[0], 16))
+    nfmt: uint64 = cast[uint64](xrep[21])
+    nscr: uint64 = cast[uint64](xrep[20])
+    off: uint64 = 32 + (vlen + 3) / 4 * 4 + nfmt * 8
+    if nscr == 0 or off + 4 > body:
+        puts(2, "wsyswl: the X setup reply has no screen -- cannot manage windows\n")
+        x_drop_conn()
+        return 0
+    x_root = ru32(&xrep[0], off)
+
+    # SubstructureRedirect | SubstructureNotify on the root. This is the whole
+    # claim: from here on nothing gets mapped on that screen unless this
+    # compositor maps it.
+    rseq: uint32 = x_select_input(x_root, 0x180000)
+    x_atom_serial  = x_intern("WL_SURFACE_SERIAL")
+    x_atom_allow   = x_intern("_XWAYLAND_ALLOW_COMMITS")
+    x_atom_netname = x_intern("_NET_WM_NAME")
+    # Only ONE X client may hold SubstructureRedirect on a root window; the
+    # second gets BadAccess and silently manages nothing. That is exactly the
+    # shape a `jwm` left running inside the namespace would produce, so it is
+    # named rather than discovered later as "rootless does not work".
+    if xerr_code != 0 and xerr_seq == (rseq & 65535):
+        puts(2, "wsyswl: ANOTHER X CLIENT ALREADY MANAGES THIS DISPLAY.\n")
+        puts(2, "wsyswl: SubstructureRedirect on the root was refused (BadAccess), so no\n")
+        puts(2, "wsyswl: X window can become a wsys window. A rootless session must start\n")
+        puts(2, "wsyswl: NO window manager inside the namespace -- HAMNIX_X11_WM=rootless.\n")
+        drop(S_XWLERR, "SubstructureRedirect refused -- a window manager is already running inside the namespace")
+        x_drop_conn()
+        return 0
+    if x_atom_serial == 0:
+        puts(2, "wsyswl: could not intern WL_SURFACE_SERIAL -- this X server is not an Xwayland\n")
+        x_drop_conn()
+        return 0
+    if x_composite_redirect() == 0:
+        puts(2, "wsyswl: this X server has no Composite extension, so nothing on it can be\n")
+        puts(2, "wsyswl: redirected -- Xwayland will make no wl_surface for any X window and\n")
+        puts(2, "wsyswl: the display would come up managed and EMPTY. Refusing it instead.\n")
+        drop(S_XWLERR, "no Composite extension -- a rootless X display cannot hand over surfaces")
+        x_drop_conn()
+        return 0
+    if xerr_code != 0:
+        puts(2, "wsyswl: XWM setup saw X error code ")
+        putd(2, xerr_code)
+        puts(2, " for request sequence ")
+        putd(2, cast[int32](xerr_seq))
+        puts(2, "\n")
+    puts(1, "wsyswl: managing the X display at ")
+    puts(1, &xwm_path[0])
+    puts(1, " -- root window ")
+    putd(1, cast[int32](x_root))
+    puts(1, "\n")
+    return 1
+
+
+def xwm_pump():
+    if xwm_on == 0:
+        return
+    if xfd < 0 or xdead != 0:
+        # Xwayland is started by the session AFTER the compositor, so a failed
+        # dial is normal for the first second or two. Retry about twice a
+        # second and never busier than that.
+        if xdead != 0:
+            x_drop_conn()
+        xwm_retry = xwm_retry + 1
+        if xwm_retry >= 32:
+            xwm_retry = 0
+            xwm_connect()
+        return
+    while x_poll_msg(0) == 1:
+        if xin[0] >= 2:
+            xwm_event()
+        elif xin[0] == 0:
+            xerr_seq = xget16(&xin[0], 2)
+            xerr_code = cast[int32](xin[1])
+    # Parked events, in arrival order. xwm_event may park more (a GetProperty
+    # round trip inside it), which is why this walks by index and only resets
+    # the ring when it has caught up with itself.
+    di: uint64 = 0
+    while di < xdefer_n:
+        i: uint64 = 0
+        while i < 32:
+            xin[i] = xdefer_buf[di * 32 + i]
+            i = i + 1
+        di = di + 1
+        xwm_event()
+    xdefer_n = 0
+
+
 # --- shm buffer -> the window's backbuffer ----------------------------
 
 def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
@@ -1466,26 +2344,54 @@ def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
         px: int32 = -1
         py: int32 = -1
         decor: int32 = 1
+        xsl: int32 = -1
         role: int32 = obj_f[si]
-        if role == 0 or obj_get_type(c, cast[uint32](role)) != T_XDG_SURF:
+        if role != 0 and obj_get_type(c, cast[uint32](role)) == T_XDG_SURF:
+            ri: uint64 = oidx(c, cast[uint32](role))
+            if obj_e[ri] == 1:
+                px = obj_h[ri]
+                py = obj_i[ri]
+                decor = 0
+        else:
             # A SURFACE WITHOUT A ROLE IS NOT A WINDOW. wl_pointer.set_cursor
             # takes an ordinary wl_surface and the client then attaches a
             # cursor image to it and commits, which is indistinguishable from
             # a window's first frame except for this: it never got an
             # xdg_surface. Before this check, moving the mouse over a client
             # opened a second 24x24 Hamnix window containing an arrow.
-            hit(S_NOROLE)
-            return
-        ri: uint64 = oidx(c, cast[uint32](role))
-        if obj_e[ri] == 1:
-            px = obj_h[ri]
-            py = obj_i[ri]
-            decor = 0
+            #
+            # ...UNLESS IT IS AN XWAYLAND SURFACE, which has no xdg_surface by
+            # design: its role is an X window, and it arrives over
+            # xwayland_shell_v1 instead. obj_e is 0 for an ordinary surface,
+            # -1 for an X surface still waiting to be paired with its X
+            # window, and the X window id once the two halves have met.
+            xwl: int32 = obj_e[si]
+            if xwl == 0:
+                hit(S_NOROLE)
+                return
+            if xwl < 0:
+                drop(S_XWLUNP,
+                     "an Xwayland surface committed before its X window was associated")
+                return
+            xsl = xwm_find(xwl)
+            if xsl < 0:
+                drop(S_XWLUNP,
+                     "an Xwayland surface whose X window this compositor no longer manages")
+                return
+            # An override-redirect X window is a menu or a tooltip: it placed
+            # ITSELF, and it gets no title bar. A menu with a title bar is not
+            # a menu -- the same rule this file already applies to xdg popups.
+            if xw_or[cast[uint64](xsl)] != 0:
+                px = xw_x[cast[uint64](xsl)]
+                py = xw_y[cast[uint64](xsl)]
+                decor = 0
         wid = win_open(c, eff, width, height, px, py, decor)
         if wid < 0:
             drop(S_NOWIN, "no wsys window could be opened for this surface")
             return
         obj_a[si] = wid
+        if xsl >= 0:
+            xwm_apply_title(cast[uint64](xsl), wid)
         high(S_WINHI, cast[int32](n_win))
     elif obj_c[si] != width or obj_d[si] != height:
         # A resize is a geometry announcement and nothing else: linux-wsys.c's
@@ -1594,6 +2500,14 @@ def do_display(c: uint64, opcode: uint32, args: Ptr[uint8], arglen: uint64):
             # server sends the whole output description once and never
             # changes it, so the older latch is the one it can honour.
             send_global(reg, G_XDG_OUTPUT, "zxdg_output_manager_v1", 2)
+            # ONLY WHEN THIS COMPOSITOR IS ACTUALLY MANAGING AN X DISPLAY.
+            # xwayland_shell_v1 is a promise, not a courtesy: a client that
+            # binds it hands over surfaces that will never be shown unless
+            # something in here holds SubstructureRedirect and can pair them
+            # with an X window. Advertising it without the window manager is
+            # how a rootless Xwayland ends up with zero windows and no error.
+            if xwm_on != 0:
+                send_global(reg, G_XWL_SHELL, "xwayland_shell_v1", 1)
 
 
 def do_registry(c: uint64, args: Ptr[uint8], arglen: uint64):
@@ -1639,6 +2553,8 @@ def do_registry(c: uint64, args: Ptr[uint8], arglen: uint64):
         new_obj(c, newid, T_VIEWPORTER)
     elif name == G_XDG_OUTPUT:
         new_obj(c, newid, T_XDG_OUT_MGR)
+    elif name == G_XWL_SHELL:
+        new_obj(c, newid, T_XWL_SHELL)
 
 
 def do_seat(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
@@ -2221,6 +3137,40 @@ def dispatch(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
                         win_close(pw2)
                         obj_a[oidx(c, cast[uint32](ps2))] = 0
             free_obj(c, obj)
+    elif otype == T_XWL_SHELL:
+        if opcode == 1:
+            # get_xwayland_surface(id, surface). The surface is marked as an X
+            # surface HERE and not at set_serial, because a commit can land in
+            # between and the difference between "no role" and "an X window
+            # that has not been paired yet" is the difference between a
+            # cursor and a missing window.
+            if arglen >= 8:
+                xsid: uint32 = ru32(args, 0)
+                xsurf: uint32 = ru32(args, 4)
+                new_obj(c, xsid, T_XWL_SURF)
+                if valid_id(xsid) != 0:
+                    obj_a[oidx(c, xsid)] = cast[int32](xsurf)
+                if obj_get_type(c, xsurf) == T_SURFACE:
+                    if obj_e[oidx(c, xsurf)] == 0:
+                        obj_e[oidx(c, xsurf)] = -1
+        elif opcode == 0:
+            free_obj(c, obj)
+    elif otype == T_XWL_SURF:
+        if opcode == 0:
+            # set_serial(serial_lo, serial_hi) -- the ONE fact this protocol
+            # carries, and the only thing that ties a wl_surface to an X
+            # window. The X half is the window's WL_SURFACE_SERIAL property.
+            if arglen >= 8:
+                s2: int32 = obj_a[oidx(c, obj)]
+                if s2 != 0 and obj_get_type(c, cast[uint32](s2)) == T_SURFACE:
+                    s2i: uint64 = oidx(c, cast[uint32](s2))
+                    obj_h[s2i] = cast[int32](ru32(args, 0))
+                    obj_i[s2i] = cast[int32](ru32(args, 4))
+                    if obj_e[s2i] == 0:
+                        obj_e[s2i] = -1
+                    xwm_pair_surface(c, cast[uint32](s2))
+        elif opcode == 1:
+            free_obj(c, obj)
     elif otype == T_SEAT:
         do_seat(c, obj, opcode, args, arglen)
     elif otype == T_POINTER:
@@ -2768,6 +3718,29 @@ def publish_state():
     st_kv(fd, "window_budget_full", S_WINFULL)
     st_kv(fd, "conns", S_CONN)
     st_kv(fd, "conns_high_water", S_CONNHI)
+    # ROOTLESS. `xwm 0` is the rootful path, unchanged and unmeasured by these
+    # three. `xwm 1` means this compositor holds SubstructureRedirect on an X
+    # display: `xwl_paired` is how many X windows have found their wl_surface,
+    # `drop_xwl_unpaired` is how many frames were thrown away because one half
+    # arrived without the other, and `xwl_managed` is how many X windows the
+    # XWM has on its books right now. A rootless session where
+    # windows_high_water stays at 1 is answered by these lines and by nothing
+    # else in the file.
+    puts(fd, "xwm ")
+    putd(fd, xwm_on)
+    puts(fd, "\n")
+    puts(fd, "xwm_connected ")
+    if xfd >= 0:
+        putd(fd, 1)
+    else:
+        putd(fd, 0)
+    puts(fd, "\n")
+    puts(fd, "xwl_managed ")
+    putd(fd, cast[int32](n_xw))
+    puts(fd, "\n")
+    st_kv(fd, "xwl_paired", S_XWLPAIR)
+    st_kv(fd, "drop_xwl_unpaired", S_XWLUNP)
+    st_kv(fd, "xwm_refused", S_XWLERR)
     # THE LIMITS, SPLIT BY WHOSE THEY ARE. A reader cannot tell what any of the
     # counters above mean without knowing which of these is shared and which is
     # not, and the first three passes of the Steam investigation are what a
@@ -2808,6 +3781,22 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         str_copy(&sockpath[0], cast[Ptr[uint8]](argv[1]), 256)
     if sys_getenv(cast[Ptr[char]]("WSYSWL_VERBOSE"), &envbuf[0], 256) >= 0:
         verbose = 1
+
+    # WSYSWL_XWM=<path to an X11 socket> -- ROOTLESS MODE, and it is opt-in for
+    # the reason docs/linux_window_manager.md §8 gives: the rootful path works,
+    # ships, and has a window manager inside the namespace, and this is a third
+    # session arm rather than a replacement until it has earned the swap. With
+    # it unset, not one byte of behaviour changes: xwayland_shell_v1 is not
+    # advertised, no X connection is dialled, and the commit path takes the
+    # branch it always took.
+    xn: int64 = sys_getenv(cast[Ptr[char]]("WSYSWL_XWM"), &envbuf[0], 256)
+    if xn > 0:
+        str_copy(&xwm_path[0], &envbuf[0], 256)
+        xwm_on = 1
+        puts(1, "wsyswl: ROOTLESS -- this compositor will manage the X display at ")
+        puts(1, &xwm_path[0])
+        puts(1, "\n")
+        puts(1, "wsyswl: no window manager may run inside the namespace on that display.\n")
 
     # WSYSWL_MAXMAP -- shrink the per-connection wl_shm mapping table, so
     # tests/linux/wsyswl_shared_fate.sh can exhaust it in seconds instead of
@@ -2925,7 +3914,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # A short timeout rather than a pure wait: the input rings are files,
         # not descriptors that poll can speak for, so they have to be looked
         # at on a clock. 16 ms is one frame.
+        if xfd >= 0 and nfd < 16:
+            waitset[nfd] = xfd
+            nfd = nfd + 1
         sys_waitfds(&waitset[0], nfd, 16)
+        xwm_pump()
         conn_accept()
         i = 0
         while i < MAXCONN:
