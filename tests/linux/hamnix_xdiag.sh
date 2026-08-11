@@ -41,11 +41,15 @@ for w in $(xwininfo -root -children 2>/dev/null \
 done
 
 echo "xdiag: === the buses, which CEF needs one of and complains about both"
-if dbus-send --system --print-reply --dest=org.freedesktop.DBus \
-             / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
-    echo "xdiag: system bus ANSWERS"
+# NOT with dbus-send: it is not in this image, so a ping check reports "no bus"
+# no matter what is true. A live system bus is a socket plus the pid in
+# /run/dbus/pid still existing.
+BPID=""
+[ -r /run/dbus/pid ] && read -r BPID < /run/dbus/pid
+if [ -S /run/dbus/system_bus_socket ] && [ -n "${BPID:-}" ] && [ -d "/proc/$BPID" ]; then
+    echo "xdiag: system bus LIVE (dbus-daemon pid $BPID)"
 else
-    echo "xdiag: system bus DOES NOT ANSWER (socket present: $([ -e /run/dbus/system_bus_socket ] && echo yes || echo no))"
+    echo "xdiag: system bus NOT LIVE (socket: $([ -e /run/dbus/system_bus_socket ] && echo present || echo absent), pid file: ${BPID:-none})"
 fi
 ls -l /run/dbus/ 2>&1 | head -5
 [ -s /tmp/dbus-system.log ] && sed 's/^/xdiag: dbus-daemon: /' /tmp/dbus-system.log

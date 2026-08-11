@@ -108,25 +108,38 @@ sleep 1
 #     Failed to connect to socket /run/dbus/system_bus_socket: Connection refused
 # -- measured, build/steamprobe/steamA.boot.log. A socket file is not a server.
 # Ask the bus whether it is there, and clear the corpse if it is not.
+#
+# HOW TO ASK. `dbus-send` is NOT in this image, so a ping-based check answers
+# "no bus" whatever the truth is -- which is the same class of lie as the
+# stale socket it was meant to catch, and it fired: CEF was getting real
+# replies from a bus this script had just declared dead. dbus-daemon --system
+# writes its pid to /run/dbus/pid, so a live bus is a socket AND a process
+# that still exists. That needs no tools beyond the shell.
+bus_alive() {
+    [ -S /run/dbus/system_bus_socket ] || return 1
+    [ -r /run/dbus/pid ] || return 1
+    read -r bpid < /run/dbus/pid 2>/dev/null || return 1
+    [ -n "${bpid:-}" ] && [ -d "/proc/$bpid" ]
+}
 if command -v dbus-daemon >/dev/null 2>&1; then
     mkdir -p /run/dbus
-    if ! dbus-send --system --print-reply --dest=org.freedesktop.DBus \
-                   / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+    if ! bus_alive; then
         [ -e /run/dbus/system_bus_socket ] && \
-            echo "hamnix-x11session: stale /run/dbus/system_bus_socket (nothing listening); removing" >&2
+            echo "hamnix-x11session: stale /run/dbus/system_bus_socket (no live dbus-daemon); removing" >&2
         rm -f /run/dbus/system_bus_socket /run/dbus/pid
+        # A machine id, because an mmdebstrap root has none and libdbus refuses
+        # to start without one ("unable to determine the machine uuid").
+        command -v dbus-uuidgen >/dev/null 2>&1 && dbus-uuidgen --ensure 2>/dev/null
         # Keep its complaint. "No system bus" with no reason attached is how
         # this went unexamined for a whole pass.
         dbus-daemon --system --fork >/tmp/dbus-system.log 2>&1 || true
         for _ in 1 2 3 4 5 6 7 8 9 10; do
-            dbus-send --system --print-reply --dest=org.freedesktop.DBus \
-                      / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 && break
+            bus_alive && break
             sleep 0.3
         done
     fi
-    if dbus-send --system --print-reply --dest=org.freedesktop.DBus \
-                 / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
-        echo "hamnix-x11session: system bus answering on /run/dbus/system_bus_socket" >&2
+    if bus_alive; then
+        echo "hamnix-x11session: system bus live on /run/dbus/system_bus_socket (pid $(cat /run/dbus/pid 2>/dev/null))" >&2
     else
         echo "hamnix-x11session: WARNING no system bus -- CEF will log a connect failure per subprocess" >&2
         [ -s /tmp/dbus-system.log ] && sed 's/^/hamnix-x11session:   dbus-daemon: /' /tmp/dbus-system.log >&2
