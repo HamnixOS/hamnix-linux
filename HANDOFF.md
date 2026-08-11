@@ -93,65 +93,6 @@ same failure this project exists to beat.
   RAM-only lifetime that `lib/devsnarf.ad` documents. Left undone because the
   rc scripts were not that pass's to change. `docs/linux_build_count.md` §4.
 
-* **(SOLVED — kept because the shape is the lesson) Steam's login window is on
-  the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
-  `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X
-  session holds **26**. Past 16, `map_alloc` returned -1 and `commit_buffer`
-  dropped every frame at `mi < 0` — and a rootful Xwayland is ONE
-  `wl_surface`, so one exhausted table froze the entire X session, which is
-  why the control `xterm` and Steam's window were never two problems. Two
-  boots of the same image differing only in that number:
-  `map_alloc_failed 10 / drop_no_mapping 508 / commits 3` and a black screen,
-  against `maps_high_water 26 / every drop 0 / commits 506` and the login
-  dialog (`build/steamprobe/steam_black_maxmap16.png` is the control).
-  **The lesson, which is this project's own:** the answer was in the third
-  suspect list, and it took three passes because a compositor that drops a
-  frame said nothing. Every silent `return` in `commit_buffer` is now counted
-  by reason, named once on stderr, and published as `wsyswl-state` beside the
-  Wayland socket — the one directory that spans the namespace boundary, so
-  `cat /run/wsyswl-state` answers from either side, like
-  `/dev/wsys/wsysd/state` before it. `MAXOBJ` went 256 → 1024 in the same
-  pass (nothing hit it: `max_object_id 97`).
-  A SECOND fault of the same class was found and fixed on the way, in
-  `user/linux-wsys.c`: a v2 window's backbuffer slot carries its own `w/h`,
-  the client writes rows at THAT width and `user/wsysd.ad` re-rows them at the
-  WINDOW's width, and nothing checked the two agreed — a stale slot inherited
-  by wid from a dead process put the whole X screen on the scanout as two
-  half-height copies side by side. `tests/linux/wsyswl_stall.sh` reproduces
-  both offscreen in three minutes with no VM and no Steam, and plants the
-  stride mismatch by hand as a negative control.
-  What the same two boots also retired, and is worth keeping in one
-  place: **matchbox** was why every Steam window read `IsUnMapped`,
-  and the **system D-Bus** comes up and answers `GetId`. The session
-  no longer starts matchbox; it starts `jwm` (see the table above and
-  `docs/linux_window_manager.md`), under which `Sign in to Steam` is
-  `IsViewable` at `700x440+290+180` **and** in `_NET_CLIENT_LIST`. Both halves
-  were needed and neither was sufficient: the window has to be mapped *and*
-  the frames have to be delivered. With a window manager in the session the
-  same run reads `maps_high_water 31`, five above Steam's own 26 and twice the
-  old limit — and `windows_high_water 1`, which is the whole rootful-Xwayland
-  shared-fate problem stated as a number.
-* **(historical, kept for the shape)** It installs, brings up
-  pressure-vessel, and Chromium loads to `SteamApp Init - Before Login`.
-  What that is NOT, now measured rather than guessed (`docs/steam_namespace.md`
-  §6.1): the `(-2147483648, …)` in the CEF log is not our stack answering a
-  geometry query with a sentinel — the X screen is a real 1280x800 at 96 dpi,
-  `matchbox` is managing and publishes `_NET_WORKAREA = 0,0,1280,800`, and a
-  real Chromium — which is what CEF is — maps a window through Xwayland →
-  wsyswl → wsysd and gets its pixels onto the framebuffer. The window path is
-  not the problem.
-  Nor is it CEF's GPU process, which does exit twice per launch
-  (`viz_main_impl.cc(166)`): run with Steam's own `-cef-disable-gpu
-  -cef-disable-gpu-compositing`, those errors stop and the window tree is
-  unchanged.
-  What it IS: every window Steam creates it leaves **`IsUnMapped`** — the UI is
-  alive behind them (the login page runs and polls), and even the *launcher's*
-  `Show window`, which happens before CEF exists, puts no pixels on a
-  framebuffer sampled once a second across the three seconds it is up.
-  The next measurements are named in `docs/steam_namespace.md` §6.3 and none of
-  them is blocked: trace the X protocol for a `MapWindow`, run the session with
-  no window manager, and read what `dbus-daemon` is actually complaining about.
-  Its probe is 23 PASS / 1 FAIL (the remaining one is the PulseAudio socket).
 * **The Debian namespace's D-Bus has no SERVICES** (the bus itself now works).
   The namespace's `/run` is on
   the ext4 and survives reboots, so the first boot's `dbus-daemon` left
@@ -166,14 +107,6 @@ same failure this project exists to beat.
   image — the comment that said otherwise was wrong.) What remains absent are
   SERVICES on the bus, which CEF names itself:
   `org.freedesktop.UPower … was not provided by any .service files`.
-* **The image build could drop a program and still say `done`.** Fixed in this
-  pass, and listed because the shape recurs: `scripts/hamlinux_image.sh` kept
-  its own copy of wsysd's extra objects after 6a27c0ec moved them into
-  `scripts/hamlinux_build.sh`, so the compositor failed to link, was printed in
-  the same list as two programs that have no source, and the initramfs shipped
-  with **no compositor at all** — booting to a black screen while rc.5 printed
-  `compositor started`. Failed links are now named separately, with their build
-  logs, and wsysd/hamsh/hamdesktop/hampanelscene failing to build exits 1.
 * **One thing is still Debian-shaped. Two were, and are not any more.**
   (1) **DONE — the DE application menu carries N distributions.**
   `user/hampanelscene.ad` no longer holds a literal
@@ -212,37 +145,6 @@ same failure this project exists to beat.
   is a separate one baked into its image, and the two share their two
   hardest-won lines by copy. Worth merging when there is a third.
   `docs/linux_distro_namespaces.md` §7.
-* **(SOLVED — kept because the shape is the lesson) Launching an app from the
-  distribution fly-out.** This entry used to say the FIRST bind of the
-  template, the root switch, failed ENOENT, that the identical lines worked
-  from a console shell, and that it was therefore "something about this
-  SPAWNED shell's namespace". Three shapes of the launcher rc and three passes
-  over the spawn gate and `rfork` went into that, and **nobody had ever asked
-  which bind failed** — because `hamsh` answered with a fixed sentence naming
-  a fixed suspect (`needs CAP_SYS_ADMIN … uid 1001`) for a failure that was
-  ENOENT, not EPERM. The error message was the thing answering something
-  success-shaped.
-  It is the **LAST** bind, `#/` onto `/n`, with the root switch already
-  succeeded. `enter <name>` binds /dev, /proc, /srv and /n INTO the
-  distribution's own root, a bind whose target directory does not exist fails
-  ENOENT, and the session user cannot create one — the distribution's `/` is
-  uid 0 and **uid 0 is not mapped into the user namespace `ns_privilege()`
-  acquires**, so CAP_DAC_OVERRIDE does not reach it. Those directories had
-  only ever existed as a side effect of somebody running `enter <name>` AS
-  ROOT on a WRITABLE medium, where `enter_root`'s own ignored `mkdir`
-  succeeded: `debugfs -R 'ls -l /'` finds `n` in `distro.ext4` and not in
-  `alpine.ext4`. The console and the desktop terminal "worked" because their
-  tests run a root `enter` first, in the same boot.
-  They are now made deliberately, by root, when the boot posts the server at
-  its name (`user/linux-syscalls.c`, `distro_stage_mountpoints`), and a medium
-  that refuses says so then rather than at launch. `hamsh` names the failing
-  bind, its target and the kernel's own reason (`_ns_apply_failed`).
-  Underneath it was a second gap: a `.desktop` names an **X11 client** and
-  nothing in the namespace served X, so `etc/de-ns-run.linux` — copied into
-  each tree at boot — now gives a menu-launched program a display, delegating
-  to the distribution's own `hamnix-x11session` where there is one.
-  `docs/linux_distro_namespaces.md` §8.4, `tests/linux/distro_menu.sh` (which
-  now clicks a row and screendumps what comes up).
 * **A menu-launched app reaches its namespace and cannot reach the DISPLAY.**
   The click works, the namespace works, the application starts — and Xwayland,
   as uid 1001 inside the namespace, cannot `connect(2)` to `/run/wayland-0`:
@@ -319,6 +221,111 @@ same failure this project exists to beat.
   **not** `/tmp`, which is a 16 GB tmpfs and is where a previous pass's
   baseline went during a disk-full cleanup, leaving its before/after resting
   on a figure it had not measured.
+
+#### Solved, kept because the shape is the lesson
+
+These are FIXED and measured. They stay because each one is a worked example
+of the failure this project keeps having — an answer shaped like success —
+and the shape is more reusable than the fix. They are NOT open work.
+
+* **The image build could drop a program and still say `done`.** Fixed in this
+  pass, and listed because the shape recurs: `scripts/hamlinux_image.sh` kept
+  its own copy of wsysd's extra objects after 6a27c0ec moved them into
+  `scripts/hamlinux_build.sh`, so the compositor failed to link, was printed in
+  the same list as two programs that have no source, and the initramfs shipped
+  with **no compositor at all** — booting to a black screen while rc.5 printed
+  `compositor started`. Failed links are now named separately, with their build
+  logs, and wsysd/hamsh/hamdesktop/hampanelscene failing to build exits 1.
+* **(SOLVED — kept because the shape is the lesson) Steam's login window is on
+  the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
+  `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X
+  session holds **26**. Past 16, `map_alloc` returned -1 and `commit_buffer`
+  dropped every frame at `mi < 0` — and a rootful Xwayland is ONE
+  `wl_surface`, so one exhausted table froze the entire X session, which is
+  why the control `xterm` and Steam's window were never two problems. Two
+  boots of the same image differing only in that number:
+  `map_alloc_failed 10 / drop_no_mapping 508 / commits 3` and a black screen,
+  against `maps_high_water 26 / every drop 0 / commits 506` and the login
+  dialog (`build/steamprobe/steam_black_maxmap16.png` is the control).
+  **The lesson, which is this project's own:** the answer was in the third
+  suspect list, and it took three passes because a compositor that drops a
+  frame said nothing. Every silent `return` in `commit_buffer` is now counted
+  by reason, named once on stderr, and published as `wsyswl-state` beside the
+  Wayland socket — the one directory that spans the namespace boundary, so
+  `cat /run/wsyswl-state` answers from either side, like
+  `/dev/wsys/wsysd/state` before it. `MAXOBJ` went 256 → 1024 in the same
+  pass (nothing hit it: `max_object_id 97`).
+  A SECOND fault of the same class was found and fixed on the way, in
+  `user/linux-wsys.c`: a v2 window's backbuffer slot carries its own `w/h`,
+  the client writes rows at THAT width and `user/wsysd.ad` re-rows them at the
+  WINDOW's width, and nothing checked the two agreed — a stale slot inherited
+  by wid from a dead process put the whole X screen on the scanout as two
+  half-height copies side by side. `tests/linux/wsyswl_stall.sh` reproduces
+  both offscreen in three minutes with no VM and no Steam, and plants the
+  stride mismatch by hand as a negative control.
+  What the same two boots also retired, and is worth keeping in one
+  place: **matchbox** was why every Steam window read `IsUnMapped`,
+  and the **system D-Bus** comes up and answers `GetId`. The session
+  no longer starts matchbox; it starts `jwm` (see the table above and
+  `docs/linux_window_manager.md`), under which `Sign in to Steam` is
+  `IsViewable` at `700x440+290+180` **and** in `_NET_CLIENT_LIST`. Both halves
+  were needed and neither was sufficient: the window has to be mapped *and*
+  the frames have to be delivered. With a window manager in the session the
+  same run reads `maps_high_water 31`, five above Steam's own 26 and twice the
+  old limit — and `windows_high_water 1`, which is the whole rootful-Xwayland
+  shared-fate problem stated as a number.
+* **(historical, kept for the shape)** It installs, brings up
+  pressure-vessel, and Chromium loads to `SteamApp Init - Before Login`.
+  What that is NOT, now measured rather than guessed (`docs/steam_namespace.md`
+  §6.1): the `(-2147483648, …)` in the CEF log is not our stack answering a
+  geometry query with a sentinel — the X screen is a real 1280x800 at 96 dpi,
+  `matchbox` is managing and publishes `_NET_WORKAREA = 0,0,1280,800`, and a
+  real Chromium — which is what CEF is — maps a window through Xwayland →
+  wsyswl → wsysd and gets its pixels onto the framebuffer. The window path is
+  not the problem.
+  Nor is it CEF's GPU process, which does exit twice per launch
+  (`viz_main_impl.cc(166)`): run with Steam's own `-cef-disable-gpu
+  -cef-disable-gpu-compositing`, those errors stop and the window tree is
+  unchanged.
+  What it IS: every window Steam creates it leaves **`IsUnMapped`** — the UI is
+  alive behind them (the login page runs and polls), and even the *launcher's*
+  `Show window`, which happens before CEF exists, puts no pixels on a
+  framebuffer sampled once a second across the three seconds it is up.
+  The next measurements are named in `docs/steam_namespace.md` §6.3 and none of
+  them is blocked: trace the X protocol for a `MapWindow`, run the session with
+  no window manager, and read what `dbus-daemon` is actually complaining about.
+  Its probe is 23 PASS / 1 FAIL (the remaining one is the PulseAudio socket).
+* **(SOLVED — kept because the shape is the lesson) Launching an app from the
+  distribution fly-out.** This entry used to say the FIRST bind of the
+  template, the root switch, failed ENOENT, that the identical lines worked
+  from a console shell, and that it was therefore "something about this
+  SPAWNED shell's namespace". Three shapes of the launcher rc and three passes
+  over the spawn gate and `rfork` went into that, and **nobody had ever asked
+  which bind failed** — because `hamsh` answered with a fixed sentence naming
+  a fixed suspect (`needs CAP_SYS_ADMIN … uid 1001`) for a failure that was
+  ENOENT, not EPERM. The error message was the thing answering something
+  success-shaped.
+  It is the **LAST** bind, `#/` onto `/n`, with the root switch already
+  succeeded. `enter <name>` binds /dev, /proc, /srv and /n INTO the
+  distribution's own root, a bind whose target directory does not exist fails
+  ENOENT, and the session user cannot create one — the distribution's `/` is
+  uid 0 and **uid 0 is not mapped into the user namespace `ns_privilege()`
+  acquires**, so CAP_DAC_OVERRIDE does not reach it. Those directories had
+  only ever existed as a side effect of somebody running `enter <name>` AS
+  ROOT on a WRITABLE medium, where `enter_root`'s own ignored `mkdir`
+  succeeded: `debugfs -R 'ls -l /'` finds `n` in `distro.ext4` and not in
+  `alpine.ext4`. The console and the desktop terminal "worked" because their
+  tests run a root `enter` first, in the same boot.
+  They are now made deliberately, by root, when the boot posts the server at
+  its name (`user/linux-syscalls.c`, `distro_stage_mountpoints`), and a medium
+  that refuses says so then rather than at launch. `hamsh` names the failing
+  bind, its target and the kernel's own reason (`_ns_apply_failed`).
+  Underneath it was a second gap: a `.desktop` names an **X11 client** and
+  nothing in the namespace served X, so `etc/de-ns-run.linux` — copied into
+  each tree at boot — now gives a menu-launched program a display, delegating
+  to the distribution's own `hamnix-x11session` where there is one.
+  `docs/linux_distro_namespaces.md` §8.4, `tests/linux/distro_menu.sh` (which
+  now clicks a row and screendumps what comes up).
 * **(same defect as the `hamscene_image` entry above, kept for the detail)**
   The `/dev/wsys/<wid>/draw/ctl` `'I'` verb was never ported, so
   `hamscene_image` renders nothing on this line.** Found by tracing
