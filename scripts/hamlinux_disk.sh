@@ -73,7 +73,16 @@ FSTAB
 
 # The installed system's boot rc differs from the initramfs one in exactly one
 # way: it brings the real root online first.
-install -m644 etc/rc.boot.installed "$ROOTDIR/etc/rc.boot"
+#
+# It is staged TWICE, under both names, and that is not redundancy: an
+# installed disk is the one boot with no HAMLINUX_RC hook, so until now nothing
+# could drive an installed system non-interactively and the installed boot was
+# the only one never under test -- which is exactly why `enter debian` had
+# never worked there. HAMLINUX_DISK_RC stages a different /etc/rc.boot, and a
+# test's rc can `source '/etc/rc.boot.installed'` to run the REAL one verbatim
+# and then ask its questions.
+install -m644 etc/rc.boot.installed "$ROOTDIR/etc/rc.boot.installed"
+install -m644 "${HAMLINUX_DISK_RC:-etc/rc.boot.installed}" "$ROOTDIR/etc/rc.boot"
 
 mkfs.ext4 -q -L hamnix -d "$ROOTDIR" -m 1 "$ROOTFS" 2600M
 echo "[disk] root filesystem: $(du -h "$ROOTFS" | cut -f1)"
