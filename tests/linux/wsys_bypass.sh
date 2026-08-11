@@ -61,7 +61,20 @@ if [ "${1:-}" = "--inner" ]; then
     #    title lands in the 0666 table) and two pieces of chrome (which land in
     #    the 0644 one).
     echo "-- setup, as the host owner (inner uid 0)"
-    as 0 "$PROBE" client                       | sed 's/^/== root./'
+    # IN THE BACKGROUND, AND HELD.  A window whose owner has exited is not a
+    # window: user/linux-wsys.c reaps one whose pid is gone, which is what
+    # devwsys gets for free when the dying process's fid closes.  Every step
+    # below is a SEPARATE process from the one that made this window, so
+    # something has to still be holding it -- otherwise the bypass has nothing
+    # to overwrite and the read-back has nothing to read, and this gate would
+    # be measuring a window that no longer exists.
+    as 0 "$PROBE" client hold >"$W/root.client.out" 2>&1 &
+    HOLDER=$!
+    for _ in $(seq 1 50); do
+        grep -q 'commit=' "$W/root.client.out" 2>/dev/null && break
+        sleep 0.1
+    done
+    sed 's/^/== root./' "$W/root.client.out"
     # Decorated, so the window appears in /dev/wsys/windows -- that listing is
     # what makes step 3 able to read the bypass's overwrite back through the
     # protocol, and it is the same file the panel's taskbar parses.
@@ -103,6 +116,7 @@ if [ "${1:-}" = "--inner" ]; then
     as 1001 "$PROBE" read /dev/wsys/wallpaper                | sed 's/^/== wp.afterctl./'
     as 1001 "$PROBE" chrome /dev/wsys/wallpaper 'WPFILE'     | sed 's/^/== wp.file./'
     as 1001 "$PROBE" read /dev/wsys/wallpaper                | sed 's/^/== wp.afterfile./'
+    kill "$HOLDER" 2>/dev/null
     exit 0
 fi
 

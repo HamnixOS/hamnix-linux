@@ -21,7 +21,7 @@
 #       from, which is the half of the split that must not regress.  Purely
 #       additive: no line above changed, and wsys_uidgate.sh is untouched.
 #
-#   wsys_uidgate client
+#   wsys_uidgate client [hold]
 #       do what an ORDINARY unprivileged client does and nothing more:
 #       self-serve a window with `newwindow`, read the wid back, then title
 #       it, write a one-line scene and commit it.  Prints
@@ -35,6 +35,7 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 
 wbuf: Array[1024, uint8]        # the bytes handed to sys_write
 rbuf: Array[256, uint8]         # the ctl read-back
@@ -186,7 +187,21 @@ def do_read(path: Ptr[char]) -> int32:
     return 0
 
 
-def do_client() -> int32:
+def hold_open():
+    # STAY ALIVE, holding the window.  A window whose owner has exited is not a
+    # window -- user/linux-wsys.c reaps one whose pid is gone, as devwsys does
+    # when the dying process's fid closes -- so a caller that needs the window
+    # to still BE there when a later step reads the table has to keep a process
+    # on it.  tests/linux/wsys_bypass.sh is that caller: its bypass and its
+    # read-back are separate processes from the client that made the window.
+    ws: Array[4, int32]
+    j: int32 = 0
+    while j < 600:
+        sys_waitfds(&ws[0], 0, 100)
+        j = j + 1
+
+
+def do_client(hold: int32) -> int32:
     ctl: Ptr[char] = "/dev/wsys/ctl"
     puts("client")
     nw: Ptr[uint8] = "newwindow"
@@ -244,12 +259,14 @@ def do_client() -> int32:
     puts("\n")
     if r1 < 0 or r2 < 0 or r3 < 0:
         return 1
+    if hold != 0:
+        hold_open()
     return 0
 
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if argc < 2:
-        puts("usage: wsys_uidgate chrome <path> <text> | client | read <path>\n")
+        puts("usage: wsys_uidgate chrome <path> <text> | client [hold] | read <path>\n")
         return 2
     cmd: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
     cl: Ptr[uint8] = "client"
@@ -261,7 +278,10 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             return 2
         return do_read(cast[Ptr[char]](argv[2]))
     if streq(cmd, cl) == 1:
-        return do_client()
+        h: int32 = 0
+        if argc > 2:
+            h = 1
+        return do_client(h)
     if streq(cmd, ch) == 1:
         if argc < 4:
             puts("usage: wsys_uidgate chrome <path> <text>\n")
