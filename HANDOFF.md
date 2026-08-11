@@ -143,6 +143,15 @@ same failure this project exists to beat.
   Closing that needs a mapping per owner-uid or the table behind an RPC to
   wsysd — a different change, and the test asserts the hole so it cannot be
   forgotten.
+* **`hamscene_image` renders a hole, on every image in the system.**
+  `/dev/wsys/<wid>/draw/ctl` has no `'I'` verb — `linux-wsys.c` ported
+  `'B'`/`'D'`/`'C'` and dropped devwsys's named-image upload, and
+  `lib/hamui_host.ad` answered an unknown image name with a silent
+  `slot < 0 → return 1`. So `hamimgscene`, `hamvideocore`'s `"frame"` and
+  `lib/hamsdl` have all been drawing nothing and reporting success. The device
+  now answers ENOSYS by name (distinct from EINVAL for real garbage) and
+  `hamimgscene` prints the whole explanation, but **the verb is not
+  implemented** — no image draws.
 * **The 4-stream software mixer is not ported.** An ALSA hardware substream
   has one writer, so `stream`/`mixplay` return `-EINVAL` and
   `user/audiolife.ad` will not do here what it does on Hamnix. The status
