@@ -134,6 +134,13 @@ if [ "$HAMNIX_X11_XTRACE" = 1 ]; then
     fi
     if command -v xtrace >/dev/null 2>&1; then
         rm -f /tmp/xtrace.log
+        # AND THE SAME TRAP, A THIRD TIME IN THIS ONE FILE. /tmp is on the
+        # ext4, so the socket xtrace listened on last boot is still there;
+        # xtrace cannot bind over it and dies, and a wait loop that watches for
+        # the socket FILE breaks out immediately and declares success. Remove
+        # the corpse, and wait by CONNECTING, exactly as the Xwayland wait
+        # above already does.
+        rm -f /tmp/.X11-unix/X9 /tmp/.X9-lock
         # -k  keep running when a client disconnects; the session outlives any
         #     one client and the launcher exits long before CEF does.
         # -m 8  truncate long lists -- an ATOM list is not what is under test
@@ -145,9 +152,11 @@ if [ "$HAMNIX_X11_XTRACE" = 1 ]; then
         #     with no -auth and clients connect to it unauthenticated, so there
         #     is no cookie to copy in the first place.
         xtrace -n -k -d :0 -D :9 -m 8 -o /tmp/xtrace.log >/tmp/xtrace.err 2>&1 &
+        XTPID=$!
         i=0
         while [ $i -lt 40 ]; do
-            [ -e /tmp/.X11-unix/X9 ] && break
+            DISPLAY=:9 xdpyinfo >/dev/null 2>&1 && break
+            kill -0 "$XTPID" 2>/dev/null || break
             i=$((i+1)); sleep 0.25
         done
         if DISPLAY=:9 xdpyinfo >/dev/null 2>&1; then

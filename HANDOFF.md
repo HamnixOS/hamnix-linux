@@ -76,10 +76,22 @@ same failure this project exists to beat.
   -cef-disable-gpu-compositing` now that the window exists, the
   `viz_main_impl.cc(166)` errors stop, the window is still there and still
   `IsViewable`, and the framebuffer is still black.
-  Next, in `docs/steam_namespace.md` §6.5: count the drawing requests on the
-  wire against `0x1200008` (`HAMNIX_X11_XTRACE=1` now works), check MIT-SHM —
-  the one thing `xclock` does not use and CEF does — and try a window manager
-  that is not matchbox. Its probe is 23 PASS / 1 FAIL (PulseAudio's socket).
+  **The wire says Steam is blameless.** `HAMNIX_X11_XTRACE=1` traces the
+  session through `xtrace`: five `MapWindow` requests, each answered with a
+  `MapNotify`, zero `ReparentWindow` — so the map is asked for and granted —
+  and **496 image blits into `0x01200008`**, the 700x440 render window, one of
+  them a 1x17 sliver repainted at a fixed spot, which is a text caret blinking
+  in the login box. Steam creates the window, gets it mapped, and paints into
+  it; nothing reaches the framebuffer.
+  **The suspect is MIT-SHM.** Every one of those blits is
+  `MIT-SHM-Request(130,3): PutImage`, not core-X `PutImage` — and MIT-SHM is
+  precisely the thing `xclock`, which renders correctly down the identical
+  path, does not use. A shared segment the client writes and the server reads
+  as zeroes produces exactly what is on screen: a correct, complete, entirely
+  black window. `/dev/shm` in the namespace is Hamnix's own tmpfs
+  (`bind '#t' /dev/shm`). `docs/steam_namespace.md` §6.6 has the next three
+  measurements, the first of which needs no Steam at all.
+  Its probe is 23 PASS / 1 FAIL (PulseAudio's socket).
 * **~~The Debian namespace has no system D-Bus.~~ FIXED, and the cause was not
   the stale socket.** `/etc/machine-id` does not exist in this image and
   `/var/lib/dbus` is **empty** — read straight out of `distro.ext4` with

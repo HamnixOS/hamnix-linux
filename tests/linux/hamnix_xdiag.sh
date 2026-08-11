@@ -82,10 +82,27 @@ if [ -s /tmp/xtrace.log ]; then
     grep -n -E 'MapNotify|UnmapNotify|MapRequest' /tmp/xtrace.log | cut -c1-160 | head -60
     echo "xdiag: --- does anything ever DRAW? (a viewable window that is never"
     echo "xdiag:     painted into is indistinguishable from a missing one)"
-    for req in PutImage ShmPutImage CopyArea PolyFillRectangle ClearArea \
-               CreatePixmap RenderComposite; do
+    # NOTE the two flavours of PutImage. xtrace prints the MIT-SHM one as
+    # `MIT-SHM-Request(130,3): PutImage`, NOT as "ShmPutImage" -- so a plain
+    # grep for ShmPutImage answers 0 while hundreds of shared-memory blits are
+    # going past, and a grep for PutImage counts both together. Count them
+    # apart, because which of the two it is decides where to look next.
+    echo "xdiag:     PutImage, core X:  $(grep -c 'Request(72): PutImage' /tmp/xtrace.log)"
+    echo "xdiag:     PutImage, MIT-SHM: $(grep -c 'MIT-SHM-Request(.*): PutImage' /tmp/xtrace.log)"
+    for req in CopyArea PolyFillRectangle ClearArea CreatePixmap RenderComposite; do
         echo "xdiag:     $req: $(grep -c "$req" /tmp/xtrace.log)"
     done
+    echo "xdiag: --- WHICH drawable is painted into, and how often"
+    # The count alone does not attribute the drawing. If nothing ever paints
+    # into the innermost render window, the fault is CEF's; if that window is
+    # painted hundreds of times and the screen is still black, the fault is
+    # downstream of the X server and CEF is exonerated.
+    grep -o 'PutImage[^ ]* drawable=0x[0-9a-f]*' /tmp/xtrace.log 2>/dev/null \
+        | sed 's/.*drawable=//' | sort | uniq -c | sort -rn | head -12 \
+        | sed 's/^/xdiag:     /'
+    echo "xdiag: --- the last few PutImage requests in full"
+    grep 'PutImage' /tmp/xtrace.log 2>/dev/null | tail -4 | cut -c1-200 \
+        | sed 's/^/xdiag:     /'
     echo "xdiag: --- every protocol ERROR on the wire"
     grep -n -i -E 'Error|BadWindow|BadAccess|BadMatch|BadValue' /tmp/xtrace.log \
         | cut -c1-160 | head -40

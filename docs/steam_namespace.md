@@ -454,25 +454,85 @@ still `IsViewable`, still 700x440+290+180 — and the framebuffer is still black
 (`build/steamprobe/nowm_nogpu.png`). The elimination holds, and now it holds
 for a reason that means something.
 
-### 6.5 What to measure next
+### 6.5 CEF draws 496 times, into the right window, and the screen stays black
 
-1. **Does CEF ever draw?** A viewable window nobody paints into is
-   indistinguishable from a missing one, and only the wire tells them apart —
-   the same argument that motivated the map trace, one layer down.
-   `HAMNIX_X11_XTRACE=1` now works and `hamnix_xdiag.sh` counts `PutImage`,
-   `ShmPutImage`, `CopyArea` and `RenderComposite` against `0x1200008`, the
-   innermost render window. Zero of all of them convicts CEF; a healthy count
-   moves the fault to Xwayland → wsyswl and makes the next question "why is
-   damage on a child window not committed".
-2. **MIT-SHM.** It is the one thing `xclock` does not use and CEF does.
-   Xwayland is started `-shm`; whether `ShmAttachFd` survives this path has
-   never been checked, and a silent SHM failure is exactly the shape that
-   produces a correct, empty window.
+`HAMNIX_X11_XTRACE=1` works now, and it answers both questions on the wire.
+
+**The map is issued and honoured.** Five `MapWindow` requests, three of them
+the login window and its render subtree, each answered with a `MapNotify`:
+
+```
+6011:023:<:010e:  Request(8): MapWindow window=0x01200008
+6025:023:<:0115:  Request(8): MapWindow window=0x01200006
+6175:028:<:012a:  Request(8): MapWindow window=0x01600015
+6016:023:>:0110:  Event MapNotify(19) event=0x01200008 override-redirect=true
+6027:023:>:0115:  Event MapNotify(19) event=0x01200006 override-redirect=false
+6176:028:>:012a:  Event MapNotify(19) event=0x01600015 override-redirect=false
+```
+
+Zero `ReparentWindow`, which is what "no window manager" looks like from the
+wire. So the §6.3 question — *never asks* or *asked and refused* — is neither:
+**asked, and granted.**
+
+**And CEF draws. 496 times, into the innermost render window, at the right
+size.** The histogram of every image blit in the run:
+
+```
+496  0x01200008     <- the render window, 700x440
+  2  0x01200006
+  1  0x00800005
+```
+
+and what each of them actually is:
+
+```
+036:<:02bd: MIT-SHM-Request(130,3): PutImage drawable=0x01200008 gc=0x01c00000
+            total-width=700 total-height=440 src-x=52 src-y=132
+            src-width=1 src-height=17 dst-x=52 dst-y=132 depth=24 format=ZPixmap
+```
+
+A 1x17 sliver repainted over and over at a fixed spot is a **text caret
+blinking in the login box**. The UI is not merely loaded, it is animating.
+
+So Steam is exonerated end to end: it creates the window, asks for the map,
+gets it, and paints into it — and none of it reaches the framebuffer. The
+fault is downstream of the X client, in the server or below.
+
+**MIT-SHM is the prime suspect, and it is the one thing that separates CEF
+from the control.** Every one of those 496 blits is `MIT-SHM-Request`, not
+core-X `PutImage`. `xclock`, which renders correctly down the identical path
+in the identical session, uses core X and no shared memory. A shared segment
+that the client writes and the server reads as zeroes produces exactly what is
+on the screen: a correct, complete, entirely black window. `/dev/shm` in the
+namespace is Hamnix's own tmpfs (`bind '#t' /dev/shm`, `etc/rc.boot.linux`),
+which is the obvious place for that to go wrong.
+
+One caveat stated rather than glossed: this trace was taken through an xtrace
+proxy, and a proxy that cannot forward file descriptors would push a client
+off `ShmAttachFd` onto the SysV path. The blits are real either way — the
+question the next pass must ask first is whether the segment behind them holds
+the pixels the client thinks it wrote.
+
+**Also worth naming, because it cost two runs and it is this tree's signature
+failure:** `xtrace` prints the shared-memory blit as
+`MIT-SHM-Request(130,3): PutImage`, so a grep for `ShmPutImage` reports **0**
+while five hundred of them go past. `hamnix_xdiag.sh` now counts the two
+flavours apart.
+
+### 6.6 What to measure next
+
+1. **The MIT-SHM segment.** Whether `ShmAttach` succeeds is not the question —
+   the blits prove it did. The question is whether the server reads back what
+   the client wrote. A twenty-line X client that attaches a segment, fills it
+   with a known colour, `ShmPutImage`s it and then `GetImage`s the window back
+   answers it without Steam anywhere near, and it belongs beside
+   `tests/linux/x11_geom_probe.sh`.
+2. **Trace without the proxy.** `LD_PRELOAD` on `XShmAttach`/`XShmPutImage`
+   inside the namespace removes the fd-forwarding caveat above.
 3. **A window manager that is not matchbox.** matchbox is convicted of
-   destroying the UI window, and running with none is fine for a
-   single-application session but not for a desktop. Anything reparenting and
-   EWMH-complete would do; the cheap check is whether the login window
-   survives it.
+   destroying the UI window (§6.3). Running with none is fine for a session
+   that runs one application and not for a desktop, so the desktop story needs
+   a reparenting, EWMH-complete WM that a 700x440 CEF dialog survives.
 
 ## 7. `enter debian { … }` from the desktop session — solved
 
