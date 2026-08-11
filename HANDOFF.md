@@ -71,50 +71,17 @@ The clipboard finding that fell out of it is in the HONESTLY BROKEN list below.
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
-* **(SOLVED — kept because the argument is the lesson) There was no clipboard
-  on this line.** `/dev/snarf` and `/dev/snarf.primary` are SERVED now, by
-  `user/linux-snarf.c`, in the same shape as `/dev/wsys` and `/dev/audio`: a
-  shared segment carrying the two byte buffers, with `lib/devsnarf.ad`'s
-  offset-addressed protocol ported rule for rule rather than re-decided.
-  **The cheap answer below was measured, correct, and not taken**, which is the
-  part worth reading: two ordinary files give the toolkit its semantics but
-  make `/dev/snarf` not a device — retiring by hand the premise the `playtone`
-  `O_CREAT` guard rests on — and they have no 64 KiB cap in a RAM-backed
-  `/dev`, no stated owner when the chrome is root and the session is uid 1001,
-  and only an accidental agreement with the offset protocol. Measured, 23
-  assertions in `tests/linux/snarf_device.sh`: copy through
-  `lib/hamtextbox.ad` in one process, paste through `lib/htermsel.ad` in
-  another; root copies and uid 1001 pastes it and copies back; `echo x >
-  /dev/snarf` lands BOTH chunks (Defect 2); a 70 000-byte copy reads back
-  65 536; and after all of it there is still NO FILE at `/dev/snarf`. It needs
-  **no rc line and no image change** — a served device creates nothing at boot.
-  **What is deliberately NOT done, and named rather than half-done: the X /
-  namespace clipboard bridge.** A foreign binary in a namespace does not see
-  `/dev/snarf` (measured, arm 3), the same as `/dev/wsys` and `/net`; bridging
-  needs a process that owns an X selection and mirrors it BOTH ways.
-  `docs/linux_clipboard.md`. The original entry follows.
-* **(the original entry) There is no clipboard on this line. Copy and paste
-  between programs does
-  nothing, and says nothing when it doesn't.** `lib/hamtextbox.ad` and
-  `lib/htermsel.ad` — the shipped code the editor, Notes, the browser URL bar
-  and the grid terminal all go through — reach the clipboard BY PATH,
-  `/dev/snarf` and `/dev/snarf.primary`. Nothing in this repository serves or
-  creates those two paths (`grep -rn snarf etc/` is empty), so
-  `htsel_clip_put` opens, gets `-ENOENT`, and returns 0 to a caller that
-  ignores it. Measured against the real `user/linux-syscalls.c` in a private
-  mount namespace with a tmpfs over `/dev`:
-  `sys_open_write("/dev/snarf") = -2` and nothing created — which is the
-  CORRECT behaviour of the `/dev/` guard that stopped `playtone` reporting
-  "played 1000 Hz square wave, 24000 frames" into a regular file called
-  `/dev/audio`. **The fix is cheap and measured**: two ordinary files at those
-  paths give exactly the semantics the toolkit needs — `sys_open_write` is
-  `O_WRONLY|O_TRUNC` so a write REPLACES including shrinking, `sys_read` is
-  offset-addressed and hits EOF, the two buffers are independent, and being
-  real files they persist across processes. Creating them in the rc scripts
-  would make copy/paste work with no new server and no client change; a real
-  file server would additionally buy the 64 KiB cap and the
-  RAM-only lifetime that `lib/devsnarf.ad` documents. Left undone because the
-  rc scripts were not that pass's to change. `docs/linux_build_count.md` §4.
+* **The Hamnix clipboard and the namespace clipboard are two clipboards.**
+  `/dev/snarf` is served now (`user/linux-snarf.c`; `tests/linux/snarf_device.sh`
+  23/23), so copy and paste work between Hamnix programs. A Debian or Alpine
+  binary gets ENOENT on it — measured, and the same answer `/dev/wsys` and
+  `/net` give. Bridging needs a process that OWNS an X selection and mirrors
+  it both ways, reacting to ownership changes on each side; half of that would
+  be worse than none. Two further gaps, named: no locking, so two simultaneous
+  copies interleave; and **no end-to-end mouse test** — a drag-select in one DE
+  window pasted into another — because the click derivation has not been
+  ported from the Hamnix line, where that exact gap once let nine green gates
+  sit on a dead feature.
 
 * **The Debian namespace's D-Bus has no SERVICES** (the bus itself now works).
   The namespace's `/run` is on
@@ -251,6 +218,28 @@ These are FIXED and measured. They stay because each one is a worked example
 of the failure this project keeps having — an answer shaped like success —
 and the shape is more reusable than the fix. They are NOT open work.
 
+* **(SOLVED — kept because the argument is the lesson) There was no clipboard
+  on this line.** `/dev/snarf` and `/dev/snarf.primary` are SERVED now, by
+  `user/linux-snarf.c`, in the same shape as `/dev/wsys` and `/dev/audio`: a
+  shared segment carrying the two byte buffers, with `lib/devsnarf.ad`'s
+  offset-addressed protocol ported rule for rule rather than re-decided.
+  **The cheap answer below was measured, correct, and not taken**, which is the
+  part worth reading: two ordinary files give the toolkit its semantics but
+  make `/dev/snarf` not a device — retiring by hand the premise the `playtone`
+  `O_CREAT` guard rests on — and they have no 64 KiB cap in a RAM-backed
+  `/dev`, no stated owner when the chrome is root and the session is uid 1001,
+  and only an accidental agreement with the offset protocol. Measured, 23
+  assertions in `tests/linux/snarf_device.sh`: copy through
+  `lib/hamtextbox.ad` in one process, paste through `lib/htermsel.ad` in
+  another; root copies and uid 1001 pastes it and copies back; `echo x >
+  /dev/snarf` lands BOTH chunks (Defect 2); a 70 000-byte copy reads back
+  65 536; and after all of it there is still NO FILE at `/dev/snarf`. It needs
+  **no rc line and no image change** — a served device creates nothing at boot.
+  **What is deliberately NOT done, and named rather than half-done: the X /
+  namespace clipboard bridge.** A foreign binary in a namespace does not see
+  `/dev/snarf` (measured, arm 3), the same as `/dev/wsys` and `/net`; bridging
+  needs a process that owns an X selection and mirrors it BOTH ways.
+  `docs/linux_clipboard.md`. The original entry follows.
 * **The image build could drop a program and still say `done`.** Fixed in this
   pass, and listed because the shape recurs: `scripts/hamlinux_image.sh` kept
   its own copy of wsysd's extra objects after 6a27c0ec moved them into
