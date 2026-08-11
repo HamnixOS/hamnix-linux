@@ -48,6 +48,22 @@
 #      a rootless display that comes up managed and empty with no error
 #      anywhere. The negative is the load-bearing half.
 #
+#   5. AND ALL OF IT ON THE ACTUAL DESKTOP. This used to compose `wsysd` plus
+#      the two clients and nothing else, so it proved the windows EXIST on a
+#      bare compositor and said nothing about whether they WORK on the desktop.
+#      The machine owner spotted that from the screenshot it produced --
+#      docs/screenshots/linux/rootless-two-x-windows.png had two X windows on
+#      a black screen: no wallpaper, no icons, no panel. A window that is
+#      first-class on an empty compositor and buried by the backdrop on a real
+#      one is exactly the success-shaped answer NORTH_STAR.md is about, and
+#      that was not a hypothetical: ea23c834 fixed a bug where hamdesktop's
+#      backdrop painted over EVERY ordinary client window for the whole port.
+#      So the real DE is composed here -- the same composition
+#      tests/linux/wsys_desktop_z.sh uses, `wsysd` + `hamdesktop` +
+#      `hampanelscene` -- and an X window out of a namespace is required to be
+#      a first-class window ON it: over the wallpaper, under the panel, and in
+#      the taskbar list BY ITS X NAME.
+#
 # Offscreen throughout: HAMFB_FILE for the framebuffer and the HOST's Xwayland,
 # so it touches no display, needs no VM, and takes about a minute.
 set -uo pipefail
@@ -100,12 +116,13 @@ for t in Xwayland xterm xwininfo python3; do
 done
 
 for t in wsysd:user/wsysd.ad wsyswl:user/wsyswl.ad \
+         hamdesktop:user/hamdesktop.ad hampanelscene:user/hampanelscene.ad \
          wsys_poke:tests/linux/wsys_poke.ad; do
     name="${t%%:*}"; src="${t#*:}"
     scripts/hamlinux_build.sh "$src" "$WORK/$name.elf" >"$WORK/$name.build.log" 2>&1 || {
         echo "FAIL could not build $src" >&2; tail -20 "$WORK/$name.build.log" >&2; exit 1; }
 done
-ok "the compositor, the Wayland server and the window probe all build"
+ok "the compositor, the Wayland server, the desktop, the panel and the window probe all build"
 
 # The window table, straight out of the device every client reads:
 #   "<wid> <x> <y> <w> <h> <z> <decorate> <visible> <proto> ..."
@@ -137,10 +154,78 @@ print(0 if tot == 0 else hit * 100 // tot)
 PY
 colourpct() { python3 "$FRAC_PY" "$FBW" "$FBH" "$1" "$2" "$3" "$4" "$5" "$6"; }
 
+# ... and "how much of this rectangle is UNCHANGED between two frames", which
+# is how "the wallpaper is still there" is asked without knowing what the
+# wallpaper looks like.
+SAME_PY="$WORK/same.py"
+cat >"$SAME_PY" <<'PY'
+import sys
+W, H = int(sys.argv[1]), int(sys.argv[2])
+x, y, w, h = (int(v) for v in sys.argv[3:7])
+a = open(sys.argv[7], 'rb').read()
+b = open(sys.argv[8], 'rb').read()
+tot = hit = 0
+for j in range(max(y, 0), min(y + h, H), 2):
+    row = j * W * 4
+    for i in range(max(x, 0), min(x + w, W), 2):
+        o = row + i * 4
+        if o + 3 > len(a) or o + 3 > len(b):
+            continue
+        tot += 1
+        if a[o:o+3] == b[o:o+3]:
+            hit += 1
+print(0 if tot == 0 else hit * 100 // tot)
+PY
+samepct() { python3 "$SAME_PY" "$FBW" "$FBH" "$1" "$2" "$3" "$4" "$5" "$6"; }
+
 "$WORK/wsysd.elf" </dev/null >"$WORK/wsysd.log" 2>&1 &
 WSYSDPID=$!
 for _ in $(seq 1 60); do [ -s "$HAMFB_FILE" ] && break; sleep 0.1; done
 [ -s "$HAMFB_FILE" ] || { bad "wsysd never produced a framebuffer"; cat "$WORK/wsysd.log"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# THE DESKTOP, BEFORE ANY X EXISTS. Everything below happens ON this, not on a
+# bare compositor, because "an X window is a window" and "an X window is a
+# window on the Hamnix desktop" are different claims and only the second one
+# is the project's. The composition is the one wsys_desktop_z.sh uses.
+# ---------------------------------------------------------------------------
+"$WORK/hamdesktop.elf" </dev/null >"$WORK/hamdesktop.log" 2>&1 &
+DEPIDS="$!"
+sleep 3
+"$WORK/hampanelscene.elf" </dev/null >"$WORK/hampanelscene.log" 2>&1 &
+DEPIDS="$DEPIDS $!"
+KIDS="$KIDS $DEPIDS"
+sleep 3
+cp "$HAMFB_FILE" "$WORK/desktop.raw"          # the desktop with nothing on it
+
+# Find the backdrop and the bar the way anything else would -- no wid is
+# hardcoded. The backdrop is the full-screen undecorated visible window; the
+# bar is the full-width window nearest the top that is not it.
+BACKDROP=""; PANELZ=""; PANELY=""; PANELH=""
+for wid in $(seq 2 40); do
+    line="$(winctl "$wid")"
+    [ -n "$line" ] || continue
+    set -- $line
+    [ "${8:-0}" = 1 ] || continue                       # visible
+    [ "${4:-}" = "$FBW" ] || continue                   # full width
+    if [ "${5:-}" = "$FBH" ] && [ "${7:-}" = "0" ]; then
+        BACKDROP="$1"; continue
+    fi
+    if [ "${5:-0}" -lt 200 ]; then                      # a bar, not a window
+        if [ -z "$PANELY" ] || [ "${3:-0}" -lt "$PANELY" ]; then
+            PANELZ="${6:-}"; PANELY="${3:-}"; PANELH="${5:-}"
+        fi
+    fi
+done
+[ -n "$BACKDROP" ] \
+    && ok "hamdesktop mapped its full-screen backdrop (wid $BACKDROP) -- there is a desktop here" \
+    || bad "hamdesktop never mapped a backdrop; the desktop assertions below cannot be asked"
+if [ -n "$PANELZ" ]; then
+    ok "hampanelscene mapped its bar at y $PANELY, height $PANELH, z $PANELZ"
+else
+    bad "hampanelscene mapped no bar"
+    PANELZ=100; PANELY=0; PANELH=26
+fi
 
 DISPNUM="${RLESS_DISPLAY:-:84}"
 XSOCK="/tmp/.X11-unix/X${DISPNUM#:}"
@@ -390,8 +475,76 @@ info "                ${STAY_PCT}% of the old rectangle is still the other windo
     && ok "the other window's pixels are exactly where they were" \
     || bad "the other window's pixels changed (${STAY_PCT}%) -- one X window's move disturbed another"
 
+# ---------------------------------------------------------------------------
+# 2b. IS IT A FIRST-CLASS WINDOW ON THE DESKTOP?
+#     Everything above would read the same on a bare compositor. These are the
+#     assertions that need the desktop to be there, and each one is a
+#     relationship between two things on the screen rather than a coordinate.
+# ---------------------------------------------------------------------------
+echo "rless: === 2b. is an X window from the namespace a window ON THE DESKTOP?"
+
+# OVER THE WALLPAPER. The same rectangle, on the same screen, before the X
+# client existed and after: 0% then, its own colour now. The "before" half is
+# what makes this evidence -- without it, a wallpaper that happened to be
+# magenta would pass.
+WAS=$(colourpct "$SX" "$SY" "$SW" "$SH" "$WORK/desktop.raw" "$STAYER_COL")
+NOW=$(colourpct "$SX" "$SY" "$SW" "$SH" "$WORK/after.raw" "$STAYER_COL")
+info "the X window's rectangle: ${WAS}% its colour on the bare desktop, ${NOW}% with the client up"
+if [ "$WAS" -eq 0 ] && [ "$NOW" -ge 30 ]; then
+    ok "the X window is composited OVER the wallpaper, not under it"
+else
+    bad "the X window is not over the wallpaper (${WAS}% before, ${NOW}% after)"
+fi
+
+# AND THE DESKTOP IS STILL A DESKTOP. A screen whose backdrop vanished when a
+# window mapped would pass the check above for the wrong reason. Sample a strip
+# down the left edge, clear of the bar and of both clients.
+DESKLEFT=$(samepct 0 $((PANELY + PANELH + 200)) 40 400 "$WORK/after.raw" "$WORK/desktop.raw")
+[ "$DESKLEFT" -ge 90 ] \
+    && ok "the wallpaper is still there beside the X windows (${DESKLEFT}% unchanged)" \
+    || bad "the desktop changed under the X windows (${DESKLEFT}% unchanged)"
+
+# UNDER THE PANEL. Drive the X window up so it straddles the bar -- with the
+# compositor's own `geometry` verb, which is the desktop moving a window -- and
+# require the bar to win where they overlap and the window to win where they do
+# not. A window that goes OVER the panel is a window you cannot get out from
+# under, and it is the same z question ea23c834 was about, asked from the other
+# side.
+poke "/dev/wsys/$STAYER/ctl" "geometry 700 $PANELY $SW $SH"
+sleep 2
+cp "$HAMFB_FILE" "$WORK/overpanel.raw"
+INBAR=$(colourpct 700 "$PANELY" "$SW" "$PANELH" "$WORK/overpanel.raw" "$STAYER_COL")
+BELOW=$(colourpct 700 $((PANELY + PANELH + 20)) "$SW" $((SH - PANELH - 40)) \
+                  "$WORK/overpanel.raw" "$STAYER_COL")
+info "an X window straddling the bar: ${INBAR}% of the bar is the window, ${BELOW}% of it clear of the bar"
+if [ "$INBAR" -eq 0 ] && [ "$BELOW" -ge 30 ]; then
+    ok "the panel is drawn OVER an X window that overlaps it, and the window elsewhere is untouched"
+else
+    bad "the panel/X-window order is wrong: ${INBAR}% of the bar is the window (want 0), ${BELOW}% below it (want >=30)"
+fi
+# Put it back somewhere a person would have left it, so the screenshot below is
+# the desktop and not the test rig.
+poke "/dev/wsys/$STAYER/ctl" "geometry 700 430 $SW $SH"
+sleep 2
+
+# IN THE TASKBAR, BY ITS X NAME. /dev/wsys/windows is the file the panel's
+# taskbar reads (user/hampanelscene.ad:_refresh_windows): one line per mapped
+# decorated window, "<wid> <title>". An X window that the desktop cannot LIST
+# is not a first-class window however well it paints, and the title has to be
+# the X client's own -- wsyswl takes it from WM_NAME/_NET_WM_NAME, and the two
+# xterms here are called `alpha` and `beta`.
+WINLIST="$(poke /dev/wsys/windows)"
+info "/dev/wsys/windows says: $(tr '\n' '|' <<<"$WINLIST")"
+if grep -q 'alpha' <<<"$WINLIST" && grep -q 'beta' <<<"$WINLIST"; then
+    ok "both X windows are in the taskbar list, under the names their X clients set"
+else
+    bad "the taskbar list does not name both X clients -- an X window the desktop cannot list"
+fi
+
+cp "$HAMFB_FILE" "$WORK/desktopshot.raw"
+
 if [ -n "$SHOT" ]; then
-    python3 - "$WORK/after.raw" "$FBW" "$FBH" "$SHOT" <<'PY'
+    python3 - "$WORK/desktopshot.raw" "$FBW" "$FBH" "$SHOT" <<'PY'
 import sys, zlib, struct
 raw = open(sys.argv[1], 'rb').read()
 W, H, out = int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
@@ -428,12 +581,18 @@ if [ -S "/tmp/.X11-unix/X${DISP2#:}" ]; then
     DISPLAY="$DISP2" xterm -geometry 20x5+300+200 -e "sleep 300" >/dev/null 2>&1 &
     KIDS="$KIDS $!"
     sleep 4
+    # The SAME filter part 2 counted with -- visible, and not full-width, so
+    # the desktop's backdrop and the panel's bar are excluded from both sides
+    # of the subtraction. Counting them here and not there would have made the
+    # control read two extra windows and fail for a reason that is not the one
+    # under test.
     NW2=0
     for wid in $(seq 2 40); do
         line="$(winctl "$wid")"
         [ -n "$line" ] || continue
         set -- $line
         [ "${8:-0}" = 1 ] || continue
+        [ "${4:-0}" = "$FBW" ] && continue
         NW2=$((NW2 + 1))
     done
     ROOTFUL_WINS=$((NW2 - NW))
