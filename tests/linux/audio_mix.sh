@@ -147,6 +147,27 @@ def bin_mag(seg, f0):
     return mag, (mag / r if r > 0 else 0.0)
 
 
+def band_power(seg, f0, bw=40.0):
+    """Fraction of `seg`'s total power inside [f0-bw, f0+bw].
+
+    The coherent measure above is the right one for a stream that is fed
+    steadily: its phase is continuous, so the whole window adds up. It is the
+    WRONG one for the underfed stream in phase 2, and the reason is the design
+    rather than the arithmetic. A writer whose cursor has fallen behind is
+    re-anchored to the live edge -- hda.ad's hda_stream_mix does exactly this,
+    and so does au_mix -- so each of its 5.3 ms bursts lands at a fresh place
+    in the ring and starts a fresh phase. Summed coherently over a 2.6 s window
+    those bursts CANCEL: measured at 0.022 of the rms while the rms itself said
+    the energy was plainly there. Power in a band does not care about phase."""
+    n = len(seg)
+    sp = np.abs(np.fft.rfft(seg * np.hanning(n))) ** 2
+    f = np.fft.rfftfreq(n, 1.0 / sr)
+    tot = sp.sum()
+    if tot <= 0:
+        return 0.0
+    return float(sp[(f > f0 - bw) & (f < f0 + bw)].sum() / tot)
+
+
 def phase(i, name):
     a, b = segs[i]
     seg = x[a:b]
@@ -215,9 +236,20 @@ print("[audio_mix] phase 2 (fast+slow):   1000 Hz %.3f of rms, "
 if r1k_s < 0.20:
     fail.append("phase 2: the fast stream's 1 kHz is not in the capture beside "
                 "a slow writer (%.3f of the rms)" % r1k_s)
-if r300_s < 0.05:
-    fail.append("phase 2: the slow writer is inaudible (%.3f of the rms) -- "
-                "underfed is meant to be choppy, not silent" % r300_s)
+# THE SLOW STREAM'S OWN AUDIO, measured as band power against the phase-0
+# capture as the floor -- phase 0 had no 300 Hz source at all, so whatever it
+# reads in that band is QEMU's resampler and the square wave's skirts, and it
+# is exactly the right reference.
+seg0, _ = phase(0, "solo")
+b300_solo = band_power(seg0, 300.0)
+b300_slow = band_power(seg, 300.0)
+print("[audio_mix] phase 2: power in the 300 Hz band is %.5f of the total, "
+      "against %.5f in phase 0 where nothing played it (%.0fx)"
+      % (b300_slow, b300_solo, b300_slow / b300_solo if b300_solo else 0))
+if b300_solo <= 0 or b300_slow < b300_solo * 5:
+    fail.append("phase 2: the slow writer is inaudible -- %.5f of the power in "
+                "its band against %.5f with nothing playing it; underfed is "
+                "meant to be choppy, not silent" % (b300_slow, b300_solo))
 
 # CONTINUITY. Band-energy at 1 kHz in 40 ms hops. A stall shows up here and
 # nowhere else: a whole-window FFT of a tone with a 300 ms hole in it still has
