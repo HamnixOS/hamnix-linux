@@ -493,12 +493,49 @@ single entry:
   `O_CREAT` on a file you do not own in a sticky directory, so an
   unprivileged client silently created its own private window system and drew
   into a screen nobody composites.
+* `background 1` — the verb `hamdesktop` sends to pin its backdrop — not
+  ported, and an unknown ctl verb is IGNORED, so the backdrop kept
+  `lib/hamui.ad`'s default `z 6` and the compositor, which paints z ascending,
+  painted an opaque full-screen backdrop over every application window. A
+  desktop with wallpaper, icons and a panel and NOT ONE application, every
+  return code 0, and the taskbar still listing the windows it was covering
+  (ea23c834).
+* A window whose owner had exited or crashed **stayed on the screen for ever**
+  — an opaque rectangle no click could reach, still listed in the taskbar,
+  because `/dev/wsys` is shared memory with no fid table and nothing ever
+  freed a window its owner had not freed by hand. Nothing in `lib/hamui.ad`
+  ever does, so a NORMAL exit leaked one too (165195bc).
 
 None of these failed loudly. Three were found only by tracing, one only by
 running `strace` **as PID 1**, and one only after publishing the compositor's
 own state as a file (`/dev/wsys/wsysd/state`) so it could be `cat`-ed from
 inside a misbehaving desktop. When something here does not work, assume a call
 is lying before you assume it is broken.
+
+### The gate the last two of those got
+
+`tests/linux/wsys_desktop_z.sh` composites **the real desktop** — `wsysd` +
+`hamdesktop` + `hampanelscene` + application windows, offscreen through
+`HAMFB_FILE` — and reads the answer out of the framebuffer. It exists because
+nothing did: `wsys_image.sh` passes with the `background`/`pin` fix reverted,
+because it never runs `hamdesktop`, and every other gate composites ONE client,
+or reads the window table, or asks a layer whether it succeeded.
+
+Six assertions, each of a z-order RELATIONSHIP rather than a fixed coordinate:
+the application's rectangle is the application's pixels; the backdrop is below
+the lowest z a window can *ask* for; the panel stays over a window that
+overlaps it; a click on the desktop does not bury the application; a raise
+brings an occluded window to the front; a closed window's pixels leave the
+screen. Each client paints one flat colour, so "which of these two windows owns
+this region" has an arithmetic answer.
+
+**Both arms are measured, and the first version of assertion 2 had no teeth.**
+With `ea23c834`'s hunk reverted the gate reports 9 PASS / 3 FAIL and exits 1;
+with it in, 12 PASS / 0 FAIL. "The application is over the backdrop" on its own
+passes in BOTH arms — the unpinned backdrop keeps `win_alloc`'s default z 5,
+already below an ordinary window's 6 — which is written into the file rather
+than glossed, because a gate that passes either way is what this line already
+had. The last assertion found 165195bc on its first run.
 
 ### Running it
 
