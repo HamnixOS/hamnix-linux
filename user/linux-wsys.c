@@ -39,6 +39,16 @@
  *   /dev/wsys/<wid>/{event,text,cmd}   the other per-window rings
  *   everything else under /dev/wsys/   a named byte buffer (a "sink").
  *
+ * TWO SEGMENTS, AND WHY — the kernel boundary
+ * -------------------------------------------
+ * There is a SECOND mapping, /srv/wsys.chrome, mode 0644 and owned by the host
+ * owner.  Read THE SPLIT below (just above chrome_attach) for exactly which
+ * state lives in which, and why the line falls where it does.  In one
+ * sentence: everything an ordinary client legitimately writes stays in the
+ * 0666 segment, and the system chrome moves to the 0644 one, so that a program
+ * which bypasses this file entirely and mmaps the raw files cannot write the
+ * chrome — the FILE MODE is the gate and the Linux kernel enforces it.
+ *
  * WHY THE RINGS ARE READ/WRITE BOTH WAYS
  * --------------------------------------
  * In Hamnix the kernel routes input into the focused window's ring.  Here the
@@ -66,7 +76,13 @@
  * The shared segment
  * ------------------------------------------------------------------ */
 #define WSYS_MAGIC        0x53595357u        /* "WSYS" */
-#define WSYS_VERSION      1
+/* 2, not 1: the chrome state left this segment (see THE SPLIT below), so a
+ * segment written by a version-1 build has a different meaning for the same
+ * bytes.  A mismatch re-initialises rather than being ignored — /srv is tmpfs
+ * and recreated every boot, so the only way to meet an old one is to mix two
+ * builds, and silently sharing a table whose layout you disagree about is the
+ * success-shaped failure this tree keeps paying for. */
+#define WSYS_VERSION      2
 #define WSYS_MAX_WINDOWS  32
 #define WSYS_SCENE_CAP    16384              /* = lib/hamscene.ad HAMSCENE_CAP */
 #define WSYS_RING_CAP     8192
@@ -103,18 +119,36 @@ struct wsink {
     uint8_t  b[WSYS_SINK_CAP];
 };
 
+/* SEGMENT A — /srv/wsys, mode 0666.  The window table.  Every field in here
+ * is one an ordinary unprivileged client must be able to write; see THE SPLIT.
+ * The screen geometry USED TO live here and does not any more: it is chrome. */
 struct wshm {
     uint32_t magic, version;
-    int32_t  screen_w, screen_h;
-    int32_t  focus_wid;
-    int32_t  next_wid;
+    int32_t  focus_wid;                       /* raise/focus, owner-or-host   */
+    int32_t  next_wid;                        /* newwindow, any uid           */
     int32_t  desktop;                         /* the rl5 flip: compositor owns fb */
     uint32_t gen;                             /* ++ on any published change */
     struct wwin  win[WSYS_MAX_WINDOWS];
-    struct wsink sink[WSYS_SINKS];
+    struct wsink sink[WSYS_SINKS];            /* the PUBLIC sinks only        */
 };
 
-static struct wshm *shm;
+/* SEGMENT B — /srv/wsys.chrome, mode 0644, owned by the host owner.  The
+ * system chrome.  Non-owners map this PROT_READ and the kernel refuses them
+ * PROT_WRITE|MAP_SHARED, which is what makes the gate a real boundary rather
+ * than a check inside a library. */
+#define WCHROME_MAGIC     0x4d524843u        /* "CHRM" */
+#define WCHROME_VERSION   1
+
+struct wchrome {
+    uint32_t magic, version;
+    int32_t  screen_w, screen_h;              /* the `screen W H` ctl verb    */
+    uint32_t gen;
+    struct wsink sink[WSYS_SINKS];            /* the CHROME sinks             */
+};
+
+static struct wshm   *shm;
+static struct wchrome *chrome;
+static int            chrome_rw;              /* the kernel let us map it W   */
 
 /* ------------------------------------------------------------------ *
  * WINDOW BACKBUFFERS — the v2 blit protocol
@@ -355,6 +389,221 @@ static const char *shm_path(void)
     return "/srv/wsys";
 }
 
+/* Which candidate shm_attach actually joined.  The chrome segment's name is
+ * DERIVED from it rather than resolved independently, so the two can never end
+ * up in different directories — see chrome_attach. */
+static char seg_path[512];
+static char chrome_path[576];
+
+/* ================================================================== *
+ * THE SPLIT — what lives in the 0666 segment, what lives in the 0644 one
+ * ==================================================================
+ *
+ * THE PROBLEM THIS EXISTS FOR.  The uid gate below is a check inside a
+ * LIBRARY.  It binds every caller of the /dev/wsys file protocol — which is
+ * every program in this tree — and NOTHING ELSE.  /dev/wsys is the file
+ * /srv/wsys, mode 0666, MAP_SHARED into every client, so a hostile or merely
+ * buggy program that skips the protocol and mmaps that file itself could write
+ * any byte of it, and no `if` in this file could stop it.  devwsys.ad has no
+ * such problem because there the state is KERNEL memory and the file protocol
+ * is the only way in.  This is the asymmetry being compensated for.
+ *
+ * The 0666 mode itself is LOAD-BEARING and stays.  /etc/rc.de-user drops the
+ * session to uid 1001; if a client of that uid cannot attach and map its own
+ * window, the desktop is unprivileged and BLIND — it silently draws into a
+ * screen nobody composites, which is the worse failure of the two.  So the fix
+ * cannot be "make the segment 0644".  It has to be a SECOND segment, at 0644
+ * and owned by the host owner, holding only what a non-owner has no business
+ * writing.  Then the file mode IS the gate and the kernel enforces it.
+ *
+ * WHERE THE LINE FALLS, and the rule that puts it there.  A field belongs in
+ * the 0666 segment IF AND ONLY IF the ported devwsys gate would let a
+ * non-hostowner write it through the protocol.  That equivalence is the whole
+ * design: after this split, "writable by anyone" and "lives in the
+ * world-writable file" are the same set, so the kernel's answer and the
+ * library's answer cannot drift apart.  Getting it wrong in the permissive
+ * direction leaves the hole open; getting it wrong in the restrictive
+ * direction blinds the session.
+ *
+ *   SEGMENT A, /srv/wsys, 0666 — an ordinary client genuinely writes all of:
+ *     win[] entirely      geometry, z, title, decorate, visible, proto, the
+ *                         scene staging + published buffers, and the five
+ *                         event rings.  A client draws its own window; the
+ *                         compositor writes input INTO a client's rings.  Both
+ *                         are ordinary, both happen constantly, and devwsys's
+ *                         rule for them is owner-OR-hostowner, not
+ *                         hostowner-only.
+ *     next_wid            `newwindow` is devwsys's explicit exception, parsed
+ *                         before its gate "so a NOBODY-uid app can self-serve
+ *                         a window".  Allocating bumps this.
+ *     focus_wid           set by `raise`/`focus`, whose rule is owner-or-host:
+ *                         a client raising its OWN window writes it.
+ *     desktop             the rl5 flip; devwsys parses `desktop` before its
+ *                         gate — "the DE claiming its own screen".
+ *     gen                 bumped by every published change, including a
+ *                         client's own commit.
+ *     the PUBLIC sinks    the per-window `<wid>/…` sinks (owner-or-host); the
+ *                         launch queues, `post` and `lock/verify`, which
+ *                         devwsys deliberately leaves open to any uid; and the
+ *                         sinks behind the ctl verbs devwsys parses BEFORE its
+ *                         gate — `wallpaper` ("choosing your own desktop
+ *                         picture is not a host-owner privilege") and the
+ *                         instruments perf/ptrlat/sysirq/wklat/m2p/ptrsvc ("a
+ *                         diagnostic you cannot turn on from the session you
+ *                         are diagnosing is not a diagnostic").
+ *
+ *   SEGMENT B, /srv/wsys.chrome, 0644 owned by the host owner — chrome only:
+ *     screen_w/screen_h   the `screen W H` verb, which is BEHIND devwsys's
+ *                         gate.  Only the process that set the mode may
+ *                         publish it, and a lie here is not cosmetic: the
+ *                         whole desktop lays itself out from this number, and
+ *                         a lock screen that believes the display is 1024x768
+ *                         covers 53% of it.  Every client READS it, which the
+ *                         0644 mode allows and reads were never gated anyway.
+ *     every other sink    lock, run, notif, appmenu, setapp, cycler, calpop,
+ *                         rband, sessui, sysmon, ctxmenu, snap, resize, osd,
+ *                         tray, ws, kbd, frame, session, workspace, damage,
+ *                         idle_ms, cursor/scene, wsysd/state — and, because
+ *                         the rule is a DENY-list of public names and not an
+ *                         allow-list of chrome ones, every future name too.
+ *                         A name nobody has classified lands on the protected
+ *                         side, so a chrome file added later cannot arrive
+ *                         world-writable by omission.
+ *
+ * ONE DELIBERATE BEHAVIOUR CHANGE falls out of the equivalence.  Before this,
+ * `echo "wallpaper /x" > /dev/wsys/ctl` was allowed to any uid (devwsys parses
+ * it before the gate) while `echo /x > /dev/wsys/wallpaper` was refused to a
+ * non-owner — a gate on one of two spellings of the same act.  This file
+ * already argues, for the chrome verbs, that "a gate on only one of the two
+ * spellings is not a gate"; the same argument run the other way says the
+ * UNGATED verbs must be ungated in both spellings.  They now are.  The
+ * alternative was to keep the wallpaper sink protected and have the ungated
+ * ctl verb fail on write, which would have re-introduced by hand the exact bug
+ * devwsys names in its own comment: the Control Center reporting "wallpaper
+ * applied" while the backdrop never changes.
+ *
+ * WHAT IS STILL NOT CLOSED, stated where it can be measured.  A bypasser can
+ * still write SEGMENT A, so it can still corrupt or spy on the window table —
+ * retitle another client's window, scribble its scene, inject into its key
+ * ring — and the same is true of the THIRD mapping, /srv/wsys.bb, which holds
+ * the v2 backbuffers and is 0666 for exactly the same reason: a client of any
+ * uid has to blit its own pixels into it.  Neither is closeable while one
+ * shared mapping has to be writable by every uid; it needs either a mapping
+ * per owner-uid or an RPC compositor, and both are a different change from
+ * this one.  What IS closed is the system
+ * chrome: after this, a bypasser cannot lock the screen, queue a spawn, post a
+ * notification, drive the app menu, or lie about the display geometry, because
+ * the kernel refuses it PROT_WRITE on the file those live in.
+ * tests/linux/wsys_bypass.sh measures both halves of that sentence.
+ * ================================================================== */
+static int chrome_attach(void)
+{
+    if (chrome) return 0;
+    if (!seg_path[0]) return -1;
+
+    const char *ov = getenv("HAMWSYS_CHROME");
+    if (ov && *ov) snprintf(chrome_path, sizeof chrome_path, "%s", ov);
+    else           snprintf(chrome_path, sizeof chrome_path, "%s.chrome",
+                            seg_path);
+
+    /* THREE OPENS, IN THIS ORDER, AND NO CANDIDATE LIST.
+     *
+     * O_RDWR first: the host owner (and root) get read/write.  Then O_RDONLY,
+     * which 0644 grants everybody — that is how a uid-1001 client reads the
+     * screen geometry and the chrome model it renders.  O_CREAT last and only
+     * for the host owner.
+     *
+     * Two traps are being avoided here and both have already cost this file a
+     * silent failure.
+     *
+     * (1) NO FALLBACK PATHS.  shm_attach tries /dev/shm and /tmp after
+     *     $HAMWSYS, and that is exactly how a client once ended up with its
+     *     own private window system, allocating wids nobody composited.  The
+     *     chrome segment is named FROM the segment that was actually joined,
+     *     so it is either beside it or absent; there is no second place for it
+     *     to be, and therefore no way to invent one.
+     *
+     * (2) ONLY THE HOST OWNER MAY CREATE IT.  fs.protected_regular (=2 here)
+     *     refuses O_CREAT on a file you do NOT own in a sticky world-writable
+     *     directory — which /srv is, at 1777 — but it does NOT refuse creating
+     *     a name that does not exist yet.  So without this check an
+     *     unprivileged client that got there first would CREATE the chrome
+     *     segment, own it, and be handed write access to the very state this
+     *     split exists to protect: the boundary inverted by a race.  On a real
+     *     boot rc.5 starts wsysd, as root, before anything drops, and
+     *     shm_attach creates both segments together — so the owner always wins
+     *     that race by construction.  A non-owner that finds no chrome segment
+     *     maps nothing, reads chrome sinks as empty (which is what an unwritten
+     *     sink has always read as) and is refused chrome writes by the uid gate
+     *     anyway.  Fail closed, with no inversion available. */
+    int fd = open(chrome_path, O_RDWR);
+    int rw = fd >= 0;
+    if (fd < 0) fd = open(chrome_path, O_RDONLY);
+    if (fd < 0 && (geteuid() == 0
+                   || (seg_owner_known && geteuid() == seg_owner))) {
+        fd = open(chrome_path, O_RDWR | O_CREAT, 0644);
+        rw = fd >= 0;
+    }
+    if (fd < 0) return -1;
+
+    /* 0644, restated rather than assumed.  open(2)'s mode is masked by the
+     * umask, and PID 1's is 022 — which happens to leave 0644 alone, but the
+     * mode here is a SECURITY property and must not depend on inheriting the
+     * right umask.  It is also the repair path for a segment left at the wrong
+     * mode by an older build; only the owner can perform it, and a non-owner's
+     * failure is expected and ignored. */
+    if (rw && fchmod(fd, 0644) < 0) { /* not ours; mode is already what it is */ }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) { int e = errno; close(fd); errno = e; return -1; }
+    if ((uint64_t)st.st_size < sizeof(struct wchrome)) {
+        /* Only the creator can size it.  A short file mapped anyway would
+         * SIGBUS on first touch, so a non-owner that loses this race treats
+         * the segment as absent rather than as something to map. */
+        if (!rw || ftruncate(fd, (off_t)sizeof(struct wchrome)) < 0) {
+            close(fd);
+            errno = EAGAIN;
+            return -1;
+        }
+    }
+    void *m = mmap(NULL, sizeof(struct wchrome),
+                   rw ? (PROT_READ | PROT_WRITE) : PROT_READ,
+                   MAP_SHARED, fd, 0);
+    int e = errno;
+    close(fd);
+    if (m == MAP_FAILED) { errno = e; return -1; }
+
+    chrome = (struct wchrome *)m;
+    chrome_rw = rw;
+    if (rw && (chrome->magic != WCHROME_MAGIC
+               || chrome->version != WCHROME_VERSION)) {
+        memset(chrome, 0, sizeof *chrome);
+        chrome->magic   = WCHROME_MAGIC;
+        chrome->version = WCHROME_VERSION;
+        /* ZERO MEANS "NOBODY HAS SAID YET", and it has to.  This used to be
+         * 1280x800 — the development VM's mode, written in as a default — and
+         * a default here is indistinguishable from an answer: /dev/wsys/screen
+         * would confidently report a geometry that no compositor had ever
+         * measured, on a machine that might be 1920x1080.  The only process
+         * entitled to fill these in is the one that set the mode, via the
+         * `screen W H` ctl verb (wsysd's announce_screen).  Until it does,
+         * reads of /dev/wsys/screen fail with ENXIO and the caller knows it
+         * does not know. */
+        chrome->screen_w = 0;
+        chrome->screen_h = 0;
+    }
+    if (chrome->magic != WCHROME_MAGIC) {
+        /* Read-only and uninitialised: the owner has not brought it up yet.
+         * Say so by unmapping rather than serving zeroes as answers. */
+        munmap(m, sizeof(struct wchrome));
+        chrome = NULL;
+        chrome_rw = 0;
+        errno = EAGAIN;
+        return -1;
+    }
+    return 0;
+}
+
 static int shm_attach(void)
 {
     if (shm) return 0;
@@ -391,6 +640,8 @@ static int shm_attach(void)
         fd = open(cands[i], O_RDWR);
         if (fd < 0)
             fd = open(cands[i], O_RDWR | O_CREAT, 0666);
+        if (fd >= 0)
+            snprintf(seg_path, sizeof seg_path, "%s", cands[i]);
     }
     if (fd < 0)
         return -1;
@@ -431,25 +682,25 @@ static int shm_attach(void)
     if (m == MAP_FAILED) { errno = e; return -1; }
 
     shm = (struct wshm *)m;
-    if (shm->magic != WSYS_MAGIC) {
+    if (shm->magic != WSYS_MAGIC || shm->version != WSYS_VERSION) {
         /* First attacher initialises.  A fresh tmpfs file is all zeroes, so
          * this is the only place the defaults are set. */
         memset(shm, 0, sizeof(*shm));
         shm->magic    = WSYS_MAGIC;
         shm->version  = WSYS_VERSION;
         shm->next_wid = 2;                     /* 0 invalid, 1 = foreground */
-        /* ZERO MEANS "NOBODY HAS SAID YET", and it has to.  This used to be
-         * 1280x800 — the development VM's mode, written in as a default — and
-         * a default here is indistinguishable from an answer: /dev/wsys/screen
-         * would confidently report a geometry that no compositor had ever
-         * measured, on a machine that might be 1920x1080.  The only process
-         * entitled to fill these in is the one that set the mode, via the
-         * `screen W H` ctl verb (wsysd's announce_screen).  Until it does,
-         * reads of /dev/wsys/screen fail with ENXIO and the caller knows it
-         * does not know.  Nothing else in this file reads these fields. */
-        shm->screen_w = 0;
-        shm->screen_h = 0;
         shm->focus_wid = 0;
+    }
+    /* Best effort, and errno-neutral.  The host owner creates the chrome
+     * segment here, which is what wins the create race by construction on a
+     * real boot (rc.5 runs wsysd as root before anything drops).  A non-owner
+     * that finds it absent simply has no chrome yet and retries on the next
+     * chrome access -- and must not have this attempt's errno mistaken for a
+     * failure of the attach it just completed. */
+    {
+        int e = errno;
+        chrome_attach();
+        errno = e;
     }
     return 0;
 }
@@ -561,19 +812,22 @@ static struct wwin *win_alloc(int32_t pid)
  * (sys_setuid is a real setuid(2); see user/linux-syscalls.c).  There is no
  * spoofable "which uid is asking" field anywhere in this path.
  *
- * WHAT THIS GATE IS NOT, said plainly.  Because the segment is 0666 and
- * mapped MAP_SHARED into every client, a program that DOES NOT GO THROUGH
- * THIS FILE -- one that opens /srv/wsys and mmaps it itself -- can still
- * write any byte of the window table, and no check here can stop it.  This
- * gate binds every caller of the /dev/wsys file protocol, which is every
- * program in the tree and every program the DE will spawn; it is not a
- * kernel privilege boundary the way devwsys's check is.  Making it one means
- * the chrome state stops living in a world-writable mapping: either a second
- * segment, mode 0644 and owned by the host owner, that non-owners map
- * PROT_READ (the file mode then IS the gate, enforced by the kernel), or
- * moving the chrome verbs to an RPC to wsysd.  Both are larger changes than
- * a permission check and the second needs user/wsysd.ad, which this task does
- * not own.  Named here so it is not mistaken for solved -- the same reason
+ * WHAT THIS GATE IS AND IS NOT, said plainly.  On its own it is a check
+ * inside a LIBRARY: it binds every caller of the /dev/wsys file protocol --
+ * every program in this tree and every program the DE will spawn -- and
+ * nothing else.  A program that DOES NOT GO THROUGH THIS FILE, one that opens
+ * the segment and mmaps it itself, is not bound by any `if` written here.
+ *
+ * That is why THE SPLIT above exists, and the two are meant to be read
+ * together.  The split moves the system chrome into a second segment at 0644
+ * owned by the host owner, so for chrome the FILE MODE is the gate and the
+ * kernel enforces it against everybody, protocol or not; the checks below are
+ * then the thing that turns a would-be SIGSEGV on a read-only page into an
+ * EPERM the caller can print.  For the WINDOW TABLE, which has to stay
+ * world-writable or an unprivileged session is blind, these checks are still
+ * the only gate there is: a bypasser can retitle another client's window or
+ * scribble its scene, and closing that needs a mapping per owner-uid or an RPC
+ * compositor.  Named here so it is not mistaken for solved -- the same reason
  * the limit it replaces was named in etc/rc.de-user.
  *
  * FAIL CLOSED.  If the segment owner could not be established (no fstat, no
@@ -677,6 +931,37 @@ static int ctl_verb_window_target(const char *s, size_t n)
     return 0;
 }
 
+/* The names of the ctl verbs devwsys parses BEFORE its hostowner gate that
+ * this port routes into a sink.  `newwindow`, `desktop`, `raise`, `focus`,
+ * `close` and `screen` are handled by ctl_global directly and never reach a
+ * sink, so they are not here. */
+static int name_is_ungated_verb(const char *name)
+{
+    static const char *v[] = {
+        "wallpaper", "perf", "ptrlat", "sysirq", "wklat", "m2p", "ptrsvc",
+    };
+    for (size_t i = 0; i < sizeof v / sizeof *v; i++)
+        if (!strcmp(name, v[i])) return 1;
+    return 0;
+}
+
+/* THE SPLIT, as a predicate.  1 = this sink lives in segment A (0666); 0 = it
+ * is chrome and lives in segment B (0644).  Exactly the set a non-hostowner
+ * may write through the protocol, which is the invariant the whole design
+ * rests on — see THE SPLIT above.  Everything unrecognised is chrome. */
+static int sink_is_public(const char *name)
+{
+    if (name[0] >= '0' && name[0] <= '9') {    /* "<wid>/<leaf>" */
+        const char *p = name;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '/') return 1;
+    }
+    if (sink_is_launch_queue(name)) return 1;
+    if (!strcmp(name, "post")) return 1;
+    if (!strcmp(name, "lock/verify")) return 1;
+    return name_is_ungated_verb(name);
+}
+
 /* May this uid write the sink called `name`?
  *
  * A sink is this line's catch-all: ctl_global() routes every verb it does not
@@ -708,7 +993,16 @@ static int sink_write_allowed(const char *name)
     if (sink_is_launch_queue(name)) return 1;  /* devwsys_appmenu_launch_write */
     if (!strcmp(name, "post")) return 1;       /* devwsys_post_write          */
     if (!strcmp(name, "lock/verify")) return 1;/* devwsys_lock_verify_write   */
-    return hostowner();
+    /* The verbs devwsys parses before its gate, in their FILE spelling.  See
+     * ONE DELIBERATE BEHAVIOUR CHANGE in THE SPLIT for why both spellings of
+     * an ungated verb have to be ungated. */
+    if (name_is_ungated_verb(name)) return 1;
+    /* Chrome.  Two answers must agree, and the more restrictive one wins: the
+     * ported devwsys gate (this uid is the host owner) and the kernel's (it
+     * gave us a writable mapping of the 0644 segment).  chrome_rw is not
+     * belt-and-braces — it is what stops a write reaching a PROT_READ page and
+     * turning a permission refusal into a SIGSEGV. */
+    return hostowner() && chrome_rw;
 }
 
 static void ring_write(struct wring *q, const uint8_t *b, uint64_t n)
@@ -733,12 +1027,28 @@ static uint64_t ring_read(struct wring *q, uint8_t *b, uint64_t cap)
     return n;
 }
 
+/* Find (or claim) a sink, IN THE SEGMENT THE SPLIT PUTS IT IN.
+ *
+ * The routing is by name and nothing else, so a name can never exist in both
+ * tables and a reader and a writer can never disagree about which one they
+ * mean.  A chrome sink with no writable chrome mapping answers NULL on
+ * create — a non-owner reading one it has never seen written gets the same
+ * "empty, not an error" it always got, and a non-owner WRITING one was already
+ * refused by sink_write_allowed before it got here. */
 static struct wsink *sink_find(const char *name, int create)
 {
     if (shm_attach() < 0) return NULL;
+    struct wsink *table;
+    if (sink_is_public(name)) {
+        table = shm->sink;
+    } else {
+        if (!chrome && chrome_attach() < 0) return NULL;
+        if (create && !chrome_rw) { errno = EPERM; return NULL; }
+        table = chrome->sink;
+    }
     struct wsink *free_slot = NULL;
     for (int i = 0; i < WSYS_SINKS; i++) {
-        struct wsink *s = &shm->sink[i];
+        struct wsink *s = &table[i];
         if (s->used) {
             if (strncmp(s->name, name, WSYS_SINK_NAME - 1) == 0)
                 return s;
@@ -952,11 +1262,16 @@ static int snap_self(struct hamwsys_file *f)
  * waits for the compositor or says why it is stopping. */
 static int snap_screen(struct hamwsys_file *f)
 {
-    if (shm->screen_w <= 0 || shm->screen_h <= 0) { errno = ENXIO; return -1; }
+    /* In the CHROME segment since the split: `screen W H` is behind devwsys's
+     * gate, so only the compositor may publish it — and every client may read
+     * it, which 0644 grants.  No chrome segment at all reads the same as an
+     * unannounced geometry, because that is what it means. */
+    if (!chrome && chrome_attach() < 0) { errno = ENXIO; return -1; }
+    if (chrome->screen_w <= 0 || chrome->screen_h <= 0) { errno = ENXIO; return -1; }
     uint8_t b[32];
-    uint64_t n = put_int(b, 0, shm->screen_w);
+    uint64_t n = put_int(b, 0, chrome->screen_w);
     b[n++] = ' ';
-    n = put_int(b, n, shm->screen_h);
+    n = put_int(b, n, chrome->screen_h);
     b[n++] = '\n';
     return snap_set(f, b, n);
 }
@@ -1113,9 +1428,15 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     case HAMWSYS_CTL:     return for_write ? 0 : snap_ctl(f);
     case HAMWSYS_DIR:     return snap_dir(f);
     case HAMWSYS_SINK: {
+        errno = 0;
         struct wsink *s = sink_find(f->name, for_write);
         if (for_write) {
-            if (!s) { errno = ENOSPC; return -1; }
+            /* sink_find answers EPERM when the sink is chrome and this process
+             * has no writable chrome mapping.  Do not overwrite that with
+             * ENOSPC: "the kernel will not let you write this" and "there is
+             * no slot left" are different facts and the caller must be able to
+             * tell them apart. */
+            if (!s) { if (!errno) errno = ENOSPC; return -1; }
             s->len = 0;                        /* open-for-write truncates */
             return 0;
         }
@@ -1179,14 +1500,20 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
     return (int64_t)n;
 }
 
-/* One global-ctl verb line. */
-static void ctl_global(const char *s, size_t n)
+/* One global-ctl verb line.  0 on success, -1 with errno set.
+ *
+ * It USED to be void, and the one caller that could fail — the sink catch-all
+ * — just returned.  Since the split a chrome verb can also fail because the
+ * chrome segment is absent or read-only, and a chrome verb that is quietly
+ * dropped is precisely the success-shaped answer this tree keeps paying for:
+ * `hamctl` would print "wallpaper applied" over a write that went nowhere. */
+static int ctl_global(const char *s, size_t n)
 {
     size_t p = 0;
     if (n >= 9 && !strncmp(s, "newwindow", 9)) {
         struct wwin *v = win_alloc((int32_t)getpid());
         last_new = v ? v->wid : -1;
-        return;
+        return v ? 0 : -1;
     }
     if (n >= 5 && !strncmp(s, "raise", 5)) {
         p = 5;
@@ -1200,24 +1527,36 @@ static void ctl_global(const char *s, size_t n)
             shm->focus_wid = wid;
             shm->gen++;
         }
-        return;
+        return 0;
     }
     if (n >= 5 && !strncmp(s, "focus", 5)) {
         p = 5;
         int32_t wid = take_int(s, &p, n);
         if (win_find(wid)) { shm->focus_wid = wid; shm->gen++; }
-        return;
+        return 0;
     }
     if (n >= 6 && !strncmp(s, "screen", 6)) {
         p = 6;
         int32_t w = take_int(s, &p, n), h = take_int(s, &p, n);
-        if (w > 0 && h > 0) { shm->screen_w = w; shm->screen_h = h; shm->gen++; }
-        return;
+        if (w <= 0 || h <= 0) return 0;        /* no geometry named: no-op */
+        /* CHROME.  The published display geometry is the one number the whole
+         * desktop lays itself out from, so it lives in the 0644 segment and
+         * only the host owner can write it -- kernel-enforced, not by this
+         * `if`.  A refusal must be LOUD: a compositor whose announce_screen
+         * silently did nothing would leave every client reading ENXIO and
+         * blaming itself. */
+        if (!chrome && chrome_attach() < 0) return -1;
+        if (!chrome_rw) { errno = EPERM; return -1; }
+        chrome->screen_w = w;
+        chrome->screen_h = h;
+        chrome->gen++;
+        shm->gen++;
+        return 0;
     }
     if (n >= 7 && !strncmp(s, "desktop", 7)) {
         shm->desktop = 1;                      /* the rl5 flip */
         shm->gen++;
-        return;
+        return 0;
     }
     if (n >= 5 && !strncmp(s, "close", 5)) {
         p = 5;
@@ -1232,7 +1571,7 @@ static void ctl_global(const char *s, size_t n)
             v->used = 0;
             shm->gen++;
         }
-        return;
+        return 0;
     }
     /* Everything else (ws, wallpaper, rband, lock, run, sessui, …) is a
      * message to a DE component, not to the window table.  Keep the last one
@@ -1242,16 +1581,17 @@ static void ctl_global(const char *s, size_t n)
     size_t vn = 0;
     while (vn < n && s[vn] != ' ' && s[vn] != '\n' && vn < WSYS_SINK_NAME - 1)
         vn++;
-    if (vn == 0) return;
+    if (vn == 0) return 0;
     char nm[WSYS_SINK_NAME];
     memcpy(nm, s, vn);
     nm[vn] = '\0';
     struct wsink *sk = sink_find(nm, 1);
-    if (!sk) return;
+    if (!sk) { if (!errno) errno = ENOSPC; return -1; }
     uint32_t cp = (uint32_t)(n > WSYS_SINK_CAP ? WSYS_SINK_CAP : n);
     memcpy(sk->b, s, cp);
     sk->len = cp;
     shm->gen++;
+    return 0;
 }
 
 /* One per-window ctl verb line. */
@@ -1336,7 +1676,12 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                                     : hostowner();
                     if (!ok) { errno = EPERM; return -EPERM; }
                 }
-                ctl_global(s, ln);
+                errno = 0;
+                if (ctl_global(s, ln) < 0) {
+                    int e = errno ? errno : EIO;
+                    errno = e;
+                    return -e;
+                }
             }
             i = (e < n) ? e + 1 : e;
         }
@@ -1447,8 +1792,9 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
     }
     case HAMWSYS_SINK: {
         if (!sink_write_allowed(f->name)) { errno = EPERM; return -EPERM; }
+        errno = 0;
         struct wsink *s = sink_find(f->name, 1);
-        if (!s) { errno = ENOSPC; return -ENOSPC; }
+        if (!s) { int e = errno ? errno : ENOSPC; errno = e; return -e; }
         uint64_t room = WSYS_SINK_CAP - s->len;
         uint64_t k = n < room ? n : room;
         memcpy(s->b + s->len, buf, (size_t)k);

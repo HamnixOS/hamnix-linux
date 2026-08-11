@@ -27,7 +27,7 @@ rather than argued:
 | Input | every `/dev/input/event*`, decoded in the compositor, routed to the focused window in window-local coordinates |
 | Desktop | `hamdesktop` + `hampanelscene`, unmodified. Launch a terminal from the menu, type in it, get output. |
 | Session | `login` → `/dev/auth` (real `/etc/shadow` + `crypt_r`) → `setuid 1001`. The session is unprivileged; the compositor and chrome are not. |
-| Access control | devwsys's uid gate is ported: `live` cannot drive system-chrome ctl verbs, and can still map and draw its own window. `tests/linux/wsys_uidgate.sh`. |
+| Access control | devwsys's uid gate is ported: `live` cannot drive system-chrome ctl verbs, and can still map and draw its own window. `tests/linux/wsys_uidgate.sh`. The chrome state lives in a SECOND segment, `/srv/wsys.chrome`, 0644 and host-owner-owned, so for chrome the file mode is the gate and the kernel enforces it against programs that skip the protocol. `tests/linux/wsys_bypass.sh`. |
 | Networking | `/net` as a file tree, TCP/UDP/ICMP, TLS, `announce`/`accept` across process boundaries, and DHCP (`user/dhcpc.ad`) |
 | Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1. **The update loop is proven end to end**: install at 1.0.2 from the live repo, a newer build lands, `hpm update`, the upgraded binary still runs. No re-image anywhere in it. |
 | Wayland | `user/wsyswl.ad`, a Wayland compositor in Adder. Firefox runs as a native Wayland client with its menus as separate windows; XWayland carries X11 clients. |
@@ -93,9 +93,20 @@ same failure this project exists to beat.
   rasterizer, which is why the default is gated on the device being silicon.
   venus does not come up on this dev host (the NVIDIA driver's GBM backend
   cannot create a device; wants `nvidia-drm.modeset=1` and a reboot).
-* **The wsys uid gate is a library check, not a kernel boundary.** `/dev/wsys`
-  is a 0666 shared segment, so a program that mmaps `/srv/wsys` directly
-  bypasses it. Closing that means chrome state in a second segment at 0644.
+* **The wsys window table is still world-writable, though the chrome is not.**
+  `/dev/wsys` was one 0666 segment, so a program that mmapped `/srv/wsys`
+  directly bypassed the uid gate entirely — measured: as uid 1001 it
+  overwrote the `lock` chrome sink and the protocol read the new value back.
+  The chrome now lives in a second segment, `/srv/wsys.chrome`, 0644 and owned
+  by the host owner, so the same program is refused by the KERNEL (`open`
+  `O_RDWR` → EACCES, no `PROT_WRITE|MAP_SHARED`, `mprotect` refused) while
+  still reading it PROT_READ, which is what keeps the session sighted.
+  `tests/linux/wsys_bypass.sh`. What remains open is the window table, which
+  must stay 0666 or an unprivileged client cannot map its own window: a
+  bypasser can still retitle another client's window or scribble its scene.
+  Closing that needs a mapping per owner-uid or the table behind an RPC to
+  wsysd — a different change, and the test asserts the hole so it cannot be
+  forgotten.
 * **The 4-stream software mixer is not ported.** An ALSA hardware substream
   has one writer, so `stream`/`mixplay` return `-EINVAL` and
   `user/audiolife.ad` will not do here what it does on Hamnix. The status

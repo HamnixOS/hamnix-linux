@@ -15,6 +15,15 @@
  * window being addressed.  Ordinary client operations, `newwindow` and
  * everything under the caller's own wid, are open to every uid: that is what
  * the segment's 0666 mode is for.
+ *
+ * TWO SEGMENTS, which is what makes that gate real for the system chrome.
+ * /srv/wsys stays 0666 and holds the window table — a client of any uid must
+ * be able to map and draw its own window or the DE session is blind.
+ * /srv/wsys.chrome is 0644 and owned by the host owner, and holds the screen
+ * geometry and the chrome sinks; non-owners map it PROT_READ, so the kernel
+ * refuses a chrome write even to a program that skips this file entirely.  The
+ * rule for which state goes where, and what is still NOT covered, is THE SPLIT
+ * in user/linux-wsys.c.
  */
 #ifndef HAMNIX_LINUX_WSYS_H
 #define HAMNIX_LINUX_WSYS_H

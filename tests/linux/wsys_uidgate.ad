@@ -11,6 +11,16 @@
 #           chrome open=<fd> write=<rc>
 #       rc < 0 is the refusal (-1 in the Adder ABI, EPERM underneath).
 #
+#   wsys_uidgate read <path>
+#       open <path> for READING and print what comes back, on one line with
+#       newlines shown as '|'.  Prints
+#           read open=<fd> n=<rc> [<bytes>]
+#       Added for tests/linux/wsys_bypass.sh, which needs the PROTOCOL's view
+#       of state a bypasser wrote directly into the mapping -- and needs to
+#       show that a non-owner can still READ the chrome segment it renders
+#       from, which is the half of the split that must not regress.  Purely
+#       additive: no line above changed, and wsys_uidgate.sh is untouched.
+#
 #   wsys_uidgate client
 #       do what an ORDINARY unprivileged client does and nothing more:
 #       self-serve a window with `newwindow`, read the wid back, then title
@@ -148,6 +158,34 @@ def winpath(wid: int64, leaf: Ptr[uint8]):
     pbuf[n] = 0
 
 
+def do_read(path: Ptr[char]) -> int32:
+    puts("read")
+    fd: int32 = sys_open(path)
+    puts(" open=")
+    puti(cast[int64](fd))
+    if fd < 0:
+        puts("\n")
+        return 1
+    n: int64 = sys_read(fd, &rbuf[0], 255)
+    sys_close(fd)
+    puts(" n=")
+    puti(n)
+    if n > 0:
+        puts(" [")
+        i: uint64 = 0
+        while i < cast[uint64](n):
+            # One line out, so a newline in the payload becomes '|'.
+            if rbuf[i] == 10:
+                rbuf[i] = 124
+            i = i + 1
+        sys_write(1, &rbuf[0], cast[uint64](n))
+        puts("]")
+    puts("\n")
+    if n < 0:
+        return 1
+    return 0
+
+
 def do_client() -> int32:
     ctl: Ptr[char] = "/dev/wsys/ctl"
     puts("client")
@@ -211,11 +249,17 @@ def do_client() -> int32:
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if argc < 2:
-        puts("usage: wsys_uidgate chrome <path> <text> | wsys_uidgate client\n")
+        puts("usage: wsys_uidgate chrome <path> <text> | client | read <path>\n")
         return 2
     cmd: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
     cl: Ptr[uint8] = "client"
     ch: Ptr[uint8] = "chrome"
+    rd: Ptr[uint8] = "read"
+    if streq(cmd, rd) == 1:
+        if argc < 3:
+            puts("usage: wsys_uidgate read <path>\n")
+            return 2
+        return do_read(cast[Ptr[char]](argv[2]))
     if streq(cmd, cl) == 1:
         return do_client()
     if streq(cmd, ch) == 1:
