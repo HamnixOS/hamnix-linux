@@ -1902,6 +1902,24 @@ def xwm_unpair(i: uint64):
     xw_serhi[i] = 0
 
 
+# A CONNECTION WENT AWAY, so every association through it is stale -- and
+# staleness here is not harmless. conn_free blanks the object table and the
+# NEXT client to take that slot re-uses the same small object ids, so an
+# xw_surf left pointing at "surface 7 on connection 0" would come back to life
+# aimed at an unrelated client's surface. Cleared by hand rather than left to
+# the obj_type guard, which cannot tell a dead id from a recycled one.
+def xwm_conn_gone(c: uint64):
+    i: uint64 = 0
+    while i < n_xw:
+        if xw_conn[i] == cast[int32](c):
+            xw_surf[i] = 0
+            xw_conn[i] = -1
+            xw_have[i] = 0
+            xw_serlo[i] = 0
+            xw_serhi[i] = 0
+        i = i + 1
+
+
 def xwm_del(i: uint64):
     xwm_unpair(i)
     stat_dirty = 1
@@ -3282,6 +3300,7 @@ def conn_reset(c: uint64):
 def conn_free(c: uint64):
     if conn_inuse[c] == 0:
         return
+    xwm_conn_gone(c)
     i: uint64 = 0
     while i < MAXOBJ:
         oi: uint64 = c * MAXOBJ + i
