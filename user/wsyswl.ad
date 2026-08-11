@@ -133,7 +133,22 @@ from lib.hamscreen import hamscreen_dims_or_fail
 
 # --- protocol constants ---------------------------------------------
 
-MAXCONN: uint64 = 4
+# A CONNECTION IS THE UNIT OF INDEPENDENCE ON THIS SERVER, and four of them was
+# not enough to go round. Every limit below -- the shm mapping table, the object
+# id space, the frame-callback slice, the window budget -- is indexed by
+# connection, so two clients share a fate exactly when they share a connection
+# and never otherwise. What that makes MAXCONN is not "how many programs may
+# draw" but "how many INDEPENDENT fates this server can hold", and the
+# distribution already wants more than four: `enter debian { … }` and
+# `enter alpine { … }` run at once (HANDOFF §0) and each carries an Xwayland,
+# Firefox is a native Wayland client beside them, and the desktop's own chrome
+# is another. That is four before anything the user started, and the fifth
+# client was refused ENTIRELY -- not one window, the whole program, silently
+# until this pass named it.
+#
+# Eight costs about 350 KB of BSS, nearly all of it the object tables, and it is
+# BSS: pages the kernel never faults in for a connection that never arrives.
+MAXCONN: uint64 = 8
 MAXOBJ:  uint64 = 1024                 # client ids stay dense and low --
                                        # but Xwayland is a bigger client
                                        # than anything this server carried
@@ -230,36 +245,36 @@ serial: uint32 = 0
 scr_w: int32 = 0
 scr_h: int32 = 0
 
-conn_inuse: Array[4, int32]
-conn_fd:    Array[4, int32]
-conn_reg:   Array[4, int32]
-conn_acc:   Array[32768, uint8]        # 4 * 8192
-conn_acclen: Array[4, uint64]
-conn_seat:  Array[4, int32]
-conn_pointer: Array[4, int32]
-conn_keyboard: Array[4, int32]
-conn_xdg_wm: Array[4, int32]
-conn_output: Array[4, int32]           # the client's wl_output object, for enter
+conn_inuse: Array[8, int32]
+conn_fd:    Array[8, int32]
+conn_reg:   Array[8, int32]
+conn_acc:   Array[65536, uint8]        # 8 * 8192
+conn_acclen: Array[8, uint64]
+conn_seat:  Array[8, int32]
+conn_pointer: Array[8, int32]
+conn_keyboard: Array[8, int32]
+conn_xdg_wm: Array[8, int32]
+conn_output: Array[8, int32]           # the client's wl_output object, for enter
 
 TITLE_CAP: uint64 = 48
-conn_title: Array[192, uint8]          # 4 * 48
-conn_title_len: Array[4, uint64]
+conn_title: Array[384, uint8]          # 8 * 48
+conn_title_len: Array[8, uint64]
 
 # Per object, indexed conn * MAXOBJ + id.
-obj_type: Array[4096, int32]
-obj_a: Array[4096, int32]
-obj_b: Array[4096, int32]
-obj_c: Array[4096, int32]
-obj_d: Array[4096, int32]
-obj_e: Array[4096, int32]
-obj_f: Array[4096, int32]
-obj_g: Array[4096, int32]
+obj_type: Array[8192, int32]
+obj_a: Array[8192, int32]
+obj_b: Array[8192, int32]
+obj_c: Array[8192, int32]
+obj_d: Array[8192, int32]
+obj_e: Array[8192, int32]
+obj_f: Array[8192, int32]
+obj_g: Array[8192, int32]
 # Two more per-object words, added for xdg_positioner: placing a menu needs a
 # size, an anchor rect, an anchor, a gravity and an offset, which is ten
 # numbers, and obj_a..obj_g are seven.
-obj_h: Array[4096, int32]
-obj_i: Array[4096, int32]
-surf_parent: Array[4096, int32]
+obj_h: Array[8192, int32]
+obj_i: Array[8192, int32]
+surf_parent: Array[8192, int32]
 
 # SHM MAPPINGS ARE OWNED BY THE CONNECTION, NOT BY THE POOL OBJECT.
 #
@@ -296,11 +311,24 @@ surf_parent: Array[4096, int32]
 #
 # A bare Xwayland with one xterm on it already touches 8, so 16 was half a
 # table for the smallest session there is. Sixty-four costs 2 KB of BSS.
+#
+# THIS TABLE IS PER CONNECTION, AND THAT IS THE WHOLE POINT -- see the census
+# in docs/linux_window_manager.md §8a. Xwayland makes exactly ONE Wayland
+# connection whether it is rootful or rootless (measured, both ways), so every
+# X client on one X display shares this table and always will. What buys an X
+# session its own table is its own Xwayland, not its own wl_surface.
 MAXMAP: uint64 = 64
-map_addr: Array[256, uint64]           # 4 conns * 64
-map_len:  Array[256, uint64]
-map_used: Array[256, int32]
-map_ref:  Array[256, int32]
+map_addr: Array[512, uint64]           # 8 conns * 64
+map_len:  Array[512, uint64]
+map_used: Array[512, int32]
+map_ref:  Array[512, int32]
+
+# The EFFECTIVE size of that table, so the shared-fate property can be tested
+# without rebuilding the compiler's constant. Set by WSYSWL_MAXMAP, clamped to
+# [4, MAXMAP]; it is MAXMAP unless a test says otherwise. §6.2a proved this
+# number matters by booting the image twice with two different values -- a
+# property worth a test is worth a knob that does not need a second build.
+map_limit: uint64 = 64
 
 # RECEIVED DESCRIPTORS ARE A QUEUE, NOT A PROPERTY OF THE MESSAGE.
 #
@@ -313,9 +341,9 @@ map_ref:  Array[256, int32]
 # thing that works: push received fds onto a FIFO and let each request with an
 # fd argument pop one, in order. This is that FIFO.
 FDQ: uint64 = 8
-fdq:     Array[32, int32]              # 4 conns * 8
-fdq_head: Array[4, uint64]
-fdq_tail: Array[4, uint64]
+fdq:     Array[64, int32]              # 8 conns * 8
+fdq_head: Array[8, uint64]
+fdq_tail: Array[8, uint64]
 
 # FRAME CALLBACKS ARE A LIST PER SURFACE, NOT ONE SLOT.
 #
@@ -329,10 +357,23 @@ fdq_tail: Array[4, uint64]
 # the one Firefox waits on to decide the window is ready to draw. The window
 # comes up, renders one empty frame, and stops forever, with nothing in any log
 # to say why. This table is the fix.
-FCMAX: uint64 = 64
-fc_conn: Array[64, int32]              # -1 when the slot is free
-fc_surf: Array[64, int32]
-fc_cb:   Array[64, int32]
+#
+# ...AND IT IS PARTITIONED BY CONNECTION, which is a second fix on top of the
+# first. It used to be ONE table of 64 scanned end to end, so the connection
+# that asked for the 64th frame callback denied the 65th to EVERY OTHER CLIENT
+# ON THE SERVER -- Firefox's menus could silence Xwayland's whole X screen, and
+# the failure is the worst kind this table already knows about: a client whose
+# initial-draw callback is never answered renders one empty frame and stops for
+# ever. Nothing measured had reached 64 yet, which is exactly why it was worth
+# closing before something did; `frame_callbacks_full` was a counter waiting for
+# a bug report. Each connection now has its OWN slice of FCPERCONN and can only
+# starve itself. MAXCONN * FCPERCONN is the array, so the slices never overlap
+# and no arithmetic anywhere can make them.
+FCPERCONN: uint64 = 32
+FCMAX: uint64 = 256                    # 8 conns * 32
+fc_conn: Array[256, int32]             # -1 when the slot is free
+fc_surf: Array[256, int32]
+fc_cb:   Array[256, int32]
 
 out:     Array[8192, uint8]
 out_pos: uint64 = 0
@@ -352,18 +393,34 @@ envbuf:  Array[256, uint8]
 
 # wid -> the fds we hold open on that window. Small and linear: a session has
 # a handful of windows and the lookup is off the hot path.
-MAXWIN: uint64 = 12
-w_wid:  Array[12, int32]
-w_draw: Array[12, int32]
-w_keys: Array[12, int32]
-w_ptr:  Array[12, int32]
-w_conn: Array[12, int32]
-w_surf: Array[12, int32]
-w_btn:  Array[12, int32]               # last pointer button mask seen
-w_in:   Array[12, int32]               # pointer has entered this surface
-w_focus: Array[12, int32]              # keyboard focus is on this surface
-w_x:    Array[12, int32]               # where this window was placed, so a
-w_y:    Array[12, int32]               # popup can be placed against it
+#
+# THE TABLE IS COMPACT; THE BUDGET IS PER CONNECTION. MAXWIN used to be 12 for
+# the WHOLE SERVER, checked as `n_win >= MAXWIN` with no idea whose windows
+# they were, so the first client to open twelve windows denied a thirteenth to
+# everybody -- and what a denied window looks like from the client's side is
+# `win_open` returning -1, `drop_no_window`, and a toplevel that simply never
+# appears. MAXWIN is now MAXCONN * WINPERCONN and win_open counts THIS
+# connection's windows, so the arithmetic guarantees what a comment cannot: a
+# connection asking for its WINPERCONN-th window can always be given one, no
+# matter what any other client has done.
+#
+# WINPERCONN is 8 because user/linux-wsys.c's v2 backbuffer has BB_SLOTS = 8
+# for the whole system and an unpainted window is worse than a refused one.
+# That file is the real ceiling on how many windows this server can PAINT, and
+# raising this number past it would only move the silence somewhere else.
+WINPERCONN: uint64 = 8
+MAXWIN: uint64 = 64                    # 8 conns * 8
+w_wid:  Array[64, int32]
+w_draw: Array[64, int32]
+w_keys: Array[64, int32]
+w_ptr:  Array[64, int32]
+w_conn: Array[64, int32]
+w_surf: Array[64, int32]
+w_btn:  Array[64, int32]               # last pointer button mask seen
+w_in:   Array[64, int32]               # pointer has entered this surface
+w_focus: Array[64, int32]              # keyboard focus is on this surface
+w_x:    Array[64, int32]               # where this window was placed, so a
+w_y:    Array[64, int32]               # popup can be placed against it
 n_win:  uint64 = 0
 cascade: int32 = 0
 
@@ -480,9 +537,9 @@ def str_copy(dst: Ptr[uint8], s: Ptr[uint8], cap: uint64) -> uint64:
 # spans the namespace boundary (§6 of docs/steam_namespace.md). Reading a
 # server's own state with `cat` is how the wsysd bug before this one was
 # caught; `/dev/wsys/wsysd/state` is the precedent.
-NSTAT: uint64 = 20
-stat_n:    Array[20, int32]
-stat_said: Array[20, int32]
+NSTAT: uint64 = 24
+stat_n:    Array[24, int32]
+stat_said: Array[24, int32]
 stat_dirty: int32 = 1
 
 S_COMMIT:   uint64 = 0          # buffers actually blitted to a window
@@ -503,6 +560,15 @@ S_MAPUSE:   uint64 = 14         # gauge: mappings in use right now
 S_MAPHI:    uint64 = 15         # high water of the above
 S_IDHI:     uint64 = 16         # highest object id ever seen
 S_WINHI:    uint64 = 17         # high water of open windows
+S_WINFULL:  uint64 = 18         # a window refused: this CONNECTION's budget
+# HOW MANY CLIENTS ARE ON THIS SERVER, published for one reason: every limit
+# above is per CONNECTION, and the only way to read "26 mappings" correctly is
+# to know how many clients that is spread over. Xwayland is ONE connection
+# whether it runs rootful or rootless -- so a rootful X session with fifteen
+# windows on it reads `conns 1`, and that number is the argument in
+# docs/linux_window_manager.md §8a stated as a measurement.
+S_CONN:     uint64 = 19         # gauge: connections in use right now
+S_CONNHI:   uint64 = 20         # high water of the above
 
 statepath: Array[256, uint8]
 
@@ -653,8 +719,9 @@ def fdq_pop(c: uint64) -> int32:
 
 
 def fc_add(c: uint64, surf: uint32, cb: uint32) -> int32:
-    i: uint64 = 0
-    while i < FCMAX:
+    i: uint64 = c * FCPERCONN
+    end: uint64 = i + FCPERCONN
+    while i < end:
         if fc_conn[i] < 0:
             fc_conn[i] = cast[int32](c)
             fc_surf[i] = cast[int32](surf)
@@ -665,18 +732,19 @@ def fc_add(c: uint64, surf: uint32, cb: uint32) -> int32:
 
 
 def fc_drop_surf(c: uint64, surf: uint32):
-    i: uint64 = 0
-    while i < FCMAX:
-        if fc_conn[i] == cast[int32](c) and fc_surf[i] == cast[int32](surf):
+    i: uint64 = c * FCPERCONN
+    end: uint64 = i + FCPERCONN
+    while i < end:
+        if fc_surf[i] == cast[int32](surf):
             fc_conn[i] = -1
         i = i + 1
 
 
 def fc_drop_conn(c: uint64):
-    i: uint64 = 0
-    while i < FCMAX:
-        if fc_conn[i] == cast[int32](c):
-            fc_conn[i] = -1
+    i: uint64 = c * FCPERCONN
+    end: uint64 = i + FCPERCONN
+    while i < end:
+        fc_conn[i] = -1
         i = i + 1
 
 
@@ -692,7 +760,7 @@ def map_count(c: uint64) -> int32:
 
 def map_alloc(c: uint64) -> int32:
     i: uint64 = 0
-    while i < MAXMAP:
+    while i < map_limit:
         if map_used[c * MAXMAP + i] == 0:
             map_used[c * MAXMAP + i] = 1
             map_addr[c * MAXMAP + i] = 0
@@ -703,7 +771,7 @@ def map_alloc(c: uint64) -> int32:
             high(S_MAPHI, n)
             return cast[int32](i)
         i = i + 1
-    drop(S_MAPFULL, "wl_shm mappings exhausted -- raise MAXMAP")
+    drop(S_MAPFULL, "this connection's wl_shm mappings are exhausted -- raise MAXMAP")
     return -1
 
 
@@ -1229,8 +1297,24 @@ def win_slot(wid: int32) -> int32:
 # px/py < 0 means "you place it": a toplevel gets the cascade. A popup arrives
 # with a position already worked out from its positioner and must land exactly
 # there, undecorated -- a menu with a title bar is not a menu.
+def win_count(c: uint64) -> int32:
+    n: int32 = 0
+    i: uint64 = 0
+    while i < n_win:
+        if w_conn[i] == cast[int32](c):
+            n = n + 1
+        i = i + 1
+    return n
+
+
 def win_open(c: uint64, surf: uint32, w: int32, h: int32,
              px: int32, py: int32, decor: int32) -> int32:
+    # THIS connection's budget, not the server's. See the table's comment: a
+    # global ceiling let one client's window count decide whether another
+    # client's window existed, and neither of them was ever told.
+    if cast[uint64](win_count(c)) >= WINPERCONN:
+        drop(S_WINFULL, "this connection's window budget is full -- raise WINPERCONN")
+        return -1
     if n_win >= MAXWIN:
         return -1
     wid: int32 = newwindow()
@@ -1778,8 +1862,9 @@ def do_surface(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
         # same frame -- a client that sees two times for one frame can compute
         # a nonsense refresh rate from the difference.
         evt_time = evt_time + 16
-        fi: uint64 = 0
-        while fi < FCMAX:
+        fi: uint64 = c * FCPERCONN
+        fend: uint64 = fi + FCPERCONN
+        while fi < fend:
             if fc_conn[fi] == cast[int32](c) and fc_surf[fi] == cast[int32](obj):
                 fcb2: uint32 = cast[uint32](fc_cb[fi])
                 fc_conn[fi] = -1
@@ -2188,6 +2273,17 @@ def dispatch(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
 
 # --- connections ------------------------------------------------------
 
+def conn_gauge():
+    n: int32 = 0
+    i: uint64 = 0
+    while i < MAXCONN:
+        if conn_inuse[i] != 0:
+            n = n + 1
+        i = i + 1
+    gauge(S_CONN, n)
+    high(S_CONNHI, n)
+
+
 def conn_reset(c: uint64):
     conn_acclen[c] = 0
     conn_reg[c] = 0
@@ -2246,6 +2342,7 @@ def conn_free(c: uint64):
     sys_close(conn_fd[c])
     conn_inuse[c] = 0
     conn_fd[c] = -1
+    conn_gauge()
     puts(1, "wsyswl: client gone\n")
 
 
@@ -2264,9 +2361,14 @@ def conn_accept():
                 placed = 1
                 puts(1, "wsyswl: client connected\n")
             c = c + 1
+        conn_gauge()
         if placed == 0:
             sys_close(fd)
-            puts(2, "wsyswl: too many clients\n")
+            # MAXCONN is the ceiling on how many INDEPENDENT clients this
+            # server can carry, and independence is what the per-connection
+            # tables above are for -- so refusing a connection is refusing a
+            # whole client, not one window. Say so, and count it.
+            puts(2, "wsyswl: too many clients -- raise MAXCONN\n")
 
 
 # Drain one client's socket and run every complete message in it.
@@ -2662,14 +2764,31 @@ def publish_state():
     st_kv(fd, "maps_high_water", S_MAPHI)
     st_kv(fd, "max_object_id", S_IDHI)
     st_kv(fd, "windows_high_water", S_WINHI)
-    puts(fd, "limits MAXMAP=")
-    putd(fd, cast[int32](MAXMAP))
+    st_kv(fd, "window_budget_full", S_WINFULL)
+    st_kv(fd, "conns", S_CONN)
+    st_kv(fd, "conns_high_water", S_CONNHI)
+    # THE LIMITS, SPLIT BY WHOSE THEY ARE. A reader cannot tell what any of the
+    # counters above mean without knowing which of these is shared and which is
+    # not, and the first three passes of the Steam investigation are what a
+    # reader guessing looks like. `per_conn` is a budget this client is
+    # guaranteed; `shared` is a ceiling every client on the server pays into.
+    puts(fd, "limits per_conn MAXMAP=")
+    putd(fd, cast[int32](map_limit))
     puts(fd, " MAXOBJ=")
     putd(fd, cast[int32](MAXOBJ))
+    puts(fd, " WINPERCONN=")
+    putd(fd, cast[int32](WINPERCONN))
+    puts(fd, " FCPERCONN=")
+    putd(fd, cast[int32](FCPERCONN))
+    puts(fd, "\n")
+    puts(fd, "limits shared MAXCONN=")
+    putd(fd, cast[int32](MAXCONN))
     puts(fd, " MAXWIN=")
     putd(fd, cast[int32](MAXWIN))
     puts(fd, " FCMAX=")
     putd(fd, cast[int32](FCMAX))
+    puts(fd, " MAXMAP_BUILT=")
+    putd(fd, cast[int32](MAXMAP))
     puts(fd, "\n")
     sys_close(fd)
     stat_dirty = 0
@@ -2688,6 +2807,25 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         str_copy(&sockpath[0], cast[Ptr[uint8]](argv[1]), 256)
     if sys_getenv(cast[Ptr[char]]("WSYSWL_VERBOSE"), &envbuf[0], 256) >= 0:
         verbose = 1
+
+    # WSYSWL_MAXMAP -- shrink the per-connection wl_shm mapping table, so
+    # tests/linux/wsyswl_shared_fate.sh can exhaust it in seconds instead of
+    # needing Steam and a VM. It can only ever LOWER the ceiling: a test that
+    # could raise a limit would be testing something the distribution does not
+    # ship. Clamped to [4, MAXMAP], and NAMED on stderr when it is in force,
+    # because a compositor running with a deliberately crippled limit and not
+    # saying so is the exact silence this file's counters exist to end.
+    map_limit = MAXMAP
+    ml: int64 = sys_getenv(cast[Ptr[char]]("WSYSWL_MAXMAP"), &envbuf[0], 256)
+    if ml > 0:
+        want: int32 = parse_int_at(&envbuf[0], 0, cast[uint64](ml))
+        if want >= 4 and cast[uint64](want) < MAXMAP:
+            map_limit = cast[uint64](want)
+            puts(2, "wsyswl: WSYSWL_MAXMAP -- per-connection mapping table capped at ")
+            putd(2, want)
+            puts(2, " of ")
+            putd(2, cast[int32](MAXMAP))
+            puts(2, "\n")
 
     # BEFORE the socket exists. A client that connects and binds wl_output in
     # the same breath must not be able to catch a zero.
