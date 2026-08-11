@@ -530,9 +530,10 @@ def _build_file_path(out: Ptr[uint8], cap: uint64, tail: Ptr[uint8]) -> int32:
 #   http / https  -> http9.http_get
 #   file          -> _file_read_path
 #
-# For HTTP the body lands at dst[body_off..body_off+len); we slide it
-# down to dst[0..len) so callers see a clean buffer that starts with the
-# resource.
+# For HTTP the body lands at dst[0..len): http9's dst_cap covers the BODY
+# ALONE (the status line + headers go to http9's own buffer), so dst_cap
+# here is a statement about the RESOURCE and never about the server's
+# header block. See the SIG_FETCH_CAP note for what it cost to learn that.
 
 fetch_path_scratch: Array[1536, uint8]
 # Full "scheme://host[:port]<path>" composed for the http9.http_get
@@ -628,11 +629,15 @@ def fetch_to_buf(tail: Ptr[uint8], dst: Ptr[uint8],
     _build_url_path(tail)
     _build_full_url()
     status:   int64 = 0
-    body_off: uint64 = 0
     body_len: uint64 = 0
     rc: int64 = http_get(&fetch_url_buf[0], dst, dst_cap,
-                         &status, &body_off, &body_len)
+                         &status, &body_len)
     fetch_last_rc = rc
+    # http9 reports the status even when the BODY overran dst_cap, so record
+    # it BEFORE the failure branch: "the server said 404" and "the transfer
+    # failed and we learned nothing" must stay different answers on every
+    # path, which is the distinction this whole wrapper exists to keep.
+    fetch_last_status = status
     if rc < 0:
         # Name the transport failure. "HTTP fetch failed" for all of them
         # is how a 641-byte header block overflowing a 512-byte buffer got
@@ -653,7 +658,9 @@ def fetch_to_buf(tail: Ptr[uint8], dst: Ptr[uint8],
         elif rc == -5:
             write_str(2, "empty or truncated (non-HTTP) response\n")
         elif rc == -6:
-            write_str(2, "response (headers + body) exceeds the ")
+            write_str(2, "HTTP ")
+            write_dec_u64(2, cast[uint64](status))
+            write_str(2, ", body exceeds the ")
             write_dec_u64(2, dst_cap)
             write_str(2, "-byte receive buffer\n")
         elif rc == -7:
@@ -662,12 +669,13 @@ def fetch_to_buf(tail: Ptr[uint8], dst: Ptr[uint8],
             write_str(2, "too many redirect hops / redirect loop\n")
         elif rc == -9:
             write_str(2, "https -> http downgrade redirect rejected\n")
+        elif rc == -10:
+            write_str(2, "response headers exceed http9's header buffer\n")
         else:
             write_str(2, "transport error ")
             write_dec_u64(2, cast[uint64](0 - rc))
             write_str(2, "\n")
         return -1
-    fetch_last_status = status
     if status != 200:
         write_str(2, "hpm: ")
         write_str(2, &fetch_url_buf[0])
@@ -675,12 +683,8 @@ def fetch_to_buf(tail: Ptr[uint8], dst: Ptr[uint8],
         write_dec_u64(2, cast[uint64](status))
         write_str(2, ", not 200 OK\n")
         return -1
-    # Slide body bytes to the front of dst so callers see a clean buffer.
-    if body_off > 0:
-        i: uint64 = 0
-        while i < body_len:
-            dst[i] = dst[body_off + i]
-            i = i + 1
+    # http9 lands the body at dst[0] — the header block never enters the
+    # caller's buffer at all now, so there is nothing left to slide down.
     return cast[int64](body_len)
 
 
@@ -1880,11 +1884,11 @@ allow_unsigned:   int32 = 0
 # The fetched detached signature: 128 hex chars + a newline, decoded into
 # 64 raw bytes.
 #
-# SIZED FOR THE WHOLE HTTP RESPONSE, NOT FOR THE BODY. fetch_to_buf hands
-# its dst straight to http9.http_get, which reads STATUS LINE + HEADERS +
-# BODY into that one buffer and only afterwards reports where the body
-# starts; http9 returns -6 the moment the response reaches dst_cap. This
-# buffer was 512 bytes, which is more than enough for a 129-byte signature
+# HISTORY, KEPT BECAUSE THE CAUSE IS WORTH MORE THAN THE FIX. http9 used to
+# take ONE buffer whose dst_cap covered STATUS LINE + HEADERS + BODY, and it
+# returned -6 — discarding the status — the moment the response reached that
+# cap, so the correctness of this number depended on a number hpm cannot see.
+# This buffer was 512 bytes, which is more than enough for a 129-byte signature
 # and NOT enough for one served by a real CDN: GitHub Pages answers
 # https://255.one/linux/index.json.sig with 641 bytes of headers (server,
 # etag, cache-control, five x-github-*/x-cache/x-timer lines, via,
@@ -1894,14 +1898,17 @@ allow_unsigned:   int32 = 0
 # The failure then arrived as "unsigned repo", which was a guess, not a
 # reading.
 #
-# 64 KiB, not 1 KiB, because the buffer must also be able to hold the
-# response for a channel that genuinely has NO signature: GitHub Pages
-# answers a missing object with a **9,379-byte HTML 404 page**, and a
-# response that overruns the buffer is reported by http9 as -6 with the
-# status thrown away — so a too-small buffer cannot tell "404, unsigned
-# repo" from "the fetch broke" either. Measured: 255.one/main/index.json.sig
-# is 636 + 9379 bytes of 404; 255.one/linux/index.json.sig is 640 + 129 of
-# signature.
+# 64 KiB, not 1 KiB, because the buffer must also be able to hold the BODY
+# for a channel that genuinely has NO signature: GitHub Pages answers a
+# missing object with a **9,379-byte HTML 404 page**. Measured:
+# 255.one/main/index.json.sig is 636 bytes of headers + 9379 of 404;
+# 255.one/linux/index.json.sig is 640 + 129 of signature.
+#
+# The header half of that trap is gone: http9 now keeps the head in its own
+# buffer and reports *out_status even on -6, so a too-small buffer can still
+# tell "404, unsigned repo" from "the fetch broke". 64 KiB stays anyway,
+# because sizing for the ERROR PAGE rather than for the resource is the
+# habit that survives the next CDN.
 SIG_FETCH_CAP:    uint64 = 65536
 sig_hex_buf:      Array[65536, uint8]
 sig_raw_buf:      Array[64, uint8]

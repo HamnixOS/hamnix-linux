@@ -72,9 +72,14 @@ class Handler(socketserver.StreamRequestHandler):
         x-served-by, x-cache, x-fastly-request-id, ...) and a single huge
         header would be a strawman a real server never sends.
         """
+        ctype = b"Content-Type: application/octet-stream"
+        for e in extra:
+            if e.lower().startswith(b"content-type:"):
+                ctype = e
+        extra = [e for e in extra if not e.lower().startswith(b"content-type:")]
         base = [
             b"Server: GitHub.com",
-            b"Content-Type: application/octet-stream",
+            ctype,
             b"Content-Length: %d" % body_len,
             b"Last-Modified: Mon, 09 Feb 2026 11:22:33 GMT",
             b"Access-Control-Allow-Origin: *",

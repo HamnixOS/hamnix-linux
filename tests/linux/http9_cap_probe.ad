@@ -1,0 +1,128 @@
+# tests/linux/http9_cap_probe.ad — ask http9 for a URL with an EXPLICIT
+# body cap and print exactly what it reported.
+#
+# WHY A PROBE AND NOT JUST curl(1)
+# --------------------------------
+# The defect this gates is a relationship between THREE numbers: the
+# server's header block, the resource's size, and the caller's buffer cap.
+# `curl` and `wget` pin the third at 8 MiB, so driving them alone can only
+# ever test one point on that surface. Every other http9 caller picks a
+# different cap — hambrowse fetches images and stylesheets at 262144 and a
+# script fetch() at 114688, hpm sizes per resource — and the whole point of
+# the fix is that NONE of those numbers is allowed to be a correctness
+# question about the SERVER's headers any more. This probe takes the cap as
+# an argument so a gate can stand on each of those points directly.
+#
+# usage: http9_cap_probe <url> <body-cap-bytes>
+# prints one line:
+#   RC=<rc> STATUS=<n> BODYLEN=<n> HDRLEN=<n> CAP=<n>
+# and then, on a completed fetch, the first 64 body bytes as a second line
+# prefixed "BODY0: " so a gate can assert on content and not only on counts.
+
+from user.http9 import http_get, http_header_len, http_response_header
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+
+PROBE_CAP: uint64 = 16777216
+probe_buf: Array[16777216, uint8]
+line_buf:  Array[512, uint8]
+ctype_buf: Array[128, uint8]
+
+
+def _slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def _app(pos: uint64, s: Ptr[uint8]) -> uint64:
+    i: uint64 = 0
+    while s[i] != 0 and pos + 1 < 512:
+        line_buf[pos] = s[i]
+        pos = pos + 1
+        i = i + 1
+    return pos
+
+
+def _app_i(pos: uint64, v: int64) -> uint64:
+    if v < 0:
+        line_buf[pos] = 45                                   # '-'
+        pos = pos + 1
+        v = 0 - v
+    if v == 0:
+        line_buf[pos] = 48
+        return pos + 1
+    digs: Array[24, uint8]
+    n: uint64 = 0
+    u: uint64 = cast[uint64](v)
+    while u != 0:
+        digs[n] = cast[uint8](u % 10) + 48
+        u = u / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        line_buf[pos] = digs[n]
+        pos = pos + 1
+    return pos
+
+
+def _parse_u64(s: Ptr[uint8]) -> uint64:
+    v: uint64 = 0
+    i: uint64 = 0
+    while s[i] >= 48 and s[i] <= 57:
+        v = v * 10 + cast[uint64](s[i] - 48)
+        i = i + 1
+    return v
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 3:
+        m: Ptr[uint8] = "usage: http9_cap_probe <url> <body-cap-bytes>\n"
+        sys_write(2, m, _slen(m))
+        return 2
+    url: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
+    cap: uint64 = _parse_u64(cast[Ptr[uint8]](argv[2]))
+    if cap > PROBE_CAP:
+        cap = PROBE_CAP
+
+    st: Array[1, int64]
+    bl: Array[1, uint64]
+    st[0] = 0
+    bl[0] = 0
+    rc: int64 = http_get(url, &probe_buf[0], cap, &st[0], &bl[0])
+
+    p: uint64 = 0
+    p = _app(p, "RC=")
+    p = _app_i(p, rc)
+    p = _app(p, " STATUS=")
+    p = _app_i(p, st[0])
+    p = _app(p, " BODYLEN=")
+    p = _app_i(p, cast[int64](bl[0]))
+    p = _app(p, " HDRLEN=")
+    p = _app_i(p, cast[int64](http_header_len()))
+    p = _app(p, " CAP=")
+    p = _app_i(p, cast[int64](cap))
+    # Prove the header block is reachable even when the body overran: a
+    # caller that gets -6 must still be able to read Content-Type.
+    p = _app(p, " CTYPE=")
+    if http_response_header("content-type", &ctype_buf[0], 128) != 0:
+        p = _app(p, &ctype_buf[0])
+    else:
+        p = _app(p, "(none)")
+    line_buf[p] = 10
+    p = p + 1
+    sys_write(1, &line_buf[0], p)
+
+    if bl[0] > 0:
+        q: uint64 = 0
+        q = _app(q, "BODY0: ")
+        sys_write(1, &line_buf[0], q)
+        n: uint64 = bl[0]
+        if n > 64:
+            n = 64
+        sys_write(1, &probe_buf[0], n)
+        nl: Array[1, uint8]
+        nl[0] = 10
+        sys_write(1, &nl[0], 1)
+    return 0

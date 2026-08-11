@@ -77,14 +77,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     url: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
 
     status: Array[1, int64]
-    boff:   Array[1, uint64]
     blen:   Array[1, uint64]
     status[0] = 0
-    boff[0] = 0
     blen[0] = 0
 
+    # NH_CAP is a cap on the BODY: http9 keeps the status line and headers in
+    # its own buffer, so the body lands at nh_dst[0].
     rc: int64 = http_get(url, &nh_dst[0], NH_CAP,
-                         &status[0], &boff[0], &blen[0])
+                         &status[0], &blen[0])
 
     # Header line: "RC=<rc> STATUS=<status> BODYLEN=<blen>\n" — greppable by the
     # host test; RC and STATUS come straight out of the Plan-9 transport.
@@ -107,7 +107,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # On a completed transport, emit the body bytes verbatim so the test can
     # confirm real HTML came back off the wire.
     if rc >= 0 and blen[0] > 0:
-        sys_write(1, &nh_dst[boff[0]], blen[0])
+        sys_write(1, &nh_dst[0], blen[0])
 
     if rc < 0:
         return 1
