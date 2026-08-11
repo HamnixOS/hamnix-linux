@@ -1,0 +1,251 @@
+# tests/linux/wsys_zclient.ad — a flat-coloured scene client, placed from argv.
+#
+#   wsys_zclient <x> <y> <w> <h> <z> <colour> <title> [seconds]
+#
+# tests/linux/wsys_client.ad already exists and is deliberately fixed: one
+# geometry, one palette, so the pixel checks that use it can be literal. This
+# one is its opposite, and it exists because a Z-ORDER question cannot be asked
+# with one window. To assert that a raise brings a window to the FRONT you need
+# two windows that overlap and that the framebuffer can tell apart; to assert
+# that the panel stays over a client you need a client you can move UNDER the
+# panel. Both are argv here.
+#
+# The scene is ONE FLAT FILL, and that is the whole design. "What fraction of
+# this rectangle is exactly colour C" is a question with an arithmetic answer,
+# and z-order is a question about which of two answers you get — a gradient or
+# a glyph would turn every assertion into a tolerance argument.
+#
+# Colour is a 6-hex-digit RGB argument WITHOUT the '#', because the '#' is a
+# comment character in most of the shells that will invoke this.
+
+from lib.hamscene import hamscene_begin, hamscene_fill, hamscene_bufptr, \
+    hamscene_length
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+pathbuf: Array[128, uint8]
+ctlbuf:  Array[256, uint8]
+colbuf:  Array[16, uint8]
+rbuf:    Array[64, uint8]
+numbuf:  Array[24, uint8]
+waitset: Array[4, int32]
+my_wid:  int32 = 0
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: int32):
+    n: uint64 = 0
+    x: int32 = v
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def atoi(s: Ptr[uint8]) -> int32:
+    v: int32 = 0
+    i: uint64 = 0
+    neg: int32 = 0
+    if s[0] == 45:
+        neg = 1
+        i = 1
+    while s[i] >= 48 and s[i] <= 57:
+        v = v * 10 + cast[int32](s[i]) - 48
+        i = i + 1
+    if neg != 0:
+        return 0 - v
+    return v
+
+
+def put_str(buf: Ptr[uint8], at: uint64, s: Ptr[uint8]) -> uint64:
+    i: uint64 = at
+    k: uint64 = 0
+    while s[k] != 0:
+        buf[i] = s[k]
+        i = i + 1
+        k = k + 1
+    return i
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = v
+    i: uint64 = at
+    if v < 0:
+        buf[i] = 45
+        i = i + 1
+        x = 0 - v
+    if x == 0:
+        d[0] = 48
+        n = 1
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = d[n]
+        i = i + 1
+    return i
+
+
+def winpath(wid: int32, leaf: Ptr[uint8]):
+    i: uint64 = 0
+    p: Ptr[uint8] = "/dev/wsys/"
+    k: uint64 = 0
+    while p[k] != 0:
+        pathbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&pathbuf[0], i, wid)
+    pathbuf[i] = 47
+    i = i + 1
+    k = 0
+    while leaf[k] != 0:
+        pathbuf[i] = leaf[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+
+def write_path(path: Ptr[char], data: Ptr[uint8], n: uint64) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    sys_write(fd, data, n)
+    sys_close(fd)
+    return 0
+
+
+def win_ctl(n: uint64):
+    ctlbuf[n] = 10
+    winpath(my_wid, "ctl")
+    write_path(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0], n + 1)
+
+
+def alloc_window() -> int32:
+    s: Ptr[uint8] = "newwindow\n"
+    if write_path(cast[Ptr[char]]("/dev/wsys/ctl"), s, 10) != 0:
+        return -1
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if fd < 0:
+        return -1
+    n: int64 = sys_read(fd, &rbuf[0], 32)
+    sys_close(fd)
+    if n <= 0:
+        return -1
+    v: int32 = 0
+    i: uint64 = 0
+    while i < cast[uint64](n) and rbuf[i] >= 48 and rbuf[i] <= 57:
+        v = v * 10 + cast[int32](rbuf[i]) - 48
+        i = i + 1
+    if v < 2:
+        return -1
+    return v
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    x: int32 = 100
+    y: int32 = 60
+    w: int32 = 320
+    h: int32 = 200
+    z: int32 = 6
+    secs: int32 = 60
+    col: Ptr[uint8] = "7A1FA2"
+    title: Ptr[uint8] = "zprobe"
+    if argc > 1:
+        x = atoi(cast[Ptr[uint8]](argv[1]))
+    if argc > 2:
+        y = atoi(cast[Ptr[uint8]](argv[2]))
+    if argc > 3:
+        w = atoi(cast[Ptr[uint8]](argv[3]))
+    if argc > 4:
+        h = atoi(cast[Ptr[uint8]](argv[4]))
+    if argc > 5:
+        z = atoi(cast[Ptr[uint8]](argv[5]))
+    if argc > 6:
+        col = cast[Ptr[uint8]](argv[6])
+    if argc > 7:
+        title = cast[Ptr[uint8]](argv[7])
+    if argc > 8:
+        secs = atoi(cast[Ptr[uint8]](argv[8]))
+
+    my_wid = alloc_window()
+    if my_wid < 2:
+        puts(2, "wsys_zclient: no window\n")
+        return 1
+
+    n: uint64 = put_str(&ctlbuf[0], 0, "geometry ")
+    n = emit_int(&ctlbuf[0], n, x)
+    ctlbuf[n] = 32
+    n = emit_int(&ctlbuf[0], n + 1, y)
+    ctlbuf[n] = 32
+    n = emit_int(&ctlbuf[0], n + 1, w)
+    ctlbuf[n] = 32
+    n = emit_int(&ctlbuf[0], n + 1, h)
+    win_ctl(n)
+
+    n = put_str(&ctlbuf[0], 0, "decorate 0")
+    win_ctl(n)
+    n = put_str(&ctlbuf[0], 0, "z ")
+    n = emit_int(&ctlbuf[0], n, z)
+    win_ctl(n)
+    n = put_str(&ctlbuf[0], 0, "title ")
+    n = put_str(&ctlbuf[0], n, title)
+    win_ctl(n)
+
+    # "RRGGBB" on the command line, "#RRGGBB" in the display list.
+    colbuf[0] = 35
+    i: uint64 = 0
+    while i < 6 and col[i] != 0:
+        colbuf[i + 1] = col[i]
+        i = i + 1
+    colbuf[i + 1] = 0
+
+    hamscene_begin()
+    hamscene_fill(0, 0, w, h, &colbuf[0])
+    winpath(my_wid, "scene")
+    fd: int32 = sys_open_write(cast[Ptr[char]](&pathbuf[0]))
+    if fd < 0:
+        puts(2, "wsys_zclient: cannot open the scene\n")
+        return 1
+    sys_write(fd, hamscene_bufptr(), hamscene_length())
+    sys_close(fd)
+    n = put_str(&ctlbuf[0], 0, "commit")
+    win_ctl(n)
+
+    puts(1, "wsys_zclient: mapped wid ")
+    putd(1, my_wid)
+    puts(1, "\n")
+
+    # Stay alive: a window whose owner has exited is not a window. The wait is
+    # what makes this loop real -- an empty one is deleted at -O2, which cost
+    # tests/linux/wsys_client.ad two black screenshots.
+    j: int32 = 0
+    while j < secs * 10:
+        sys_waitfds(&waitset[0], 0, 100)
+        j = j + 1
+    return 0
