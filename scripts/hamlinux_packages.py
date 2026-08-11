@@ -67,6 +67,17 @@ COREUTILS = """
 
 NET_CMDS = "ifconfig route ping host curl wget".split()
 
+# The /dev/audio clients. They are thin Plan 9 clients of the device served by
+# user/linux-audio.c and know nothing about ALSA. They are packaged SEPARATELY
+# rather than folded into the base command set because they are only useful on
+# a machine that has a sound card, and because leaving them out of the channel
+# entirely -- which is what happened when audio first landed -- means an
+# installed machine that runs `hpm update` gets the audio DEVICE (it is
+# compiled into the runtime of every binary) and none of the programs that can
+# drive it. The gap was silent: nothing failed, there was simply no way to
+# play a sound.
+AUDIO_CMDS = "playtone aplay arecord".split()
+
 DESKTOP_CMDS = ("wsysd wsyswl xbridge hamdesktop hampanelscene hamtermscene "
                 "hameditscene hamsettings hamfm hamUI hamUId").split()
 
@@ -96,6 +107,10 @@ COMPONENTS = {
         [("hpm", "bin/hpm")],
         [("etc/hpm/channels", "etc/hpm/channels")],
         ["hamnix-init>=1"]),
+    "hamnix-audio": (
+        "hamnix-linux audio userland -- playtone, aplay, arecord, clients of "
+        "/dev/audio",
+        [(c, "bin/" + c) for c in AUDIO_CMDS], [], ["hamnix-init>=1"]),
     "hamnix-desktop": (
         "hamnix-linux desktop -- the scene compositor and the DE clients",
         [(c, "bin/" + c) for c in DESKTOP_CMDS],
