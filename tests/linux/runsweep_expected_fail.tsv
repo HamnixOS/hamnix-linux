@@ -1,0 +1,62 @@
+# tests/linux/runsweep_expected_fail.tsv — the programs whose CONTRACT, under
+# THIS sweep's recipe, is a NON-ZERO exit, and the reason each one earns it.
+# Read by scripts/hamlinux_runsweep.sh; a row here that exits non-zero is
+# scored EXPECTED_FAIL and counted with the healthy, and the reason is written
+# into the results row so the next reader re-derives nothing.
+#
+# THE BAR: THE STATUS MUST BE THE ANSWER. Two shapes qualify and no others:
+#
+#   1. the exit status IS the program's output    `false`, `cmp`, `diff`, `tty`
+#      -- there is nothing else it could say, and the recipe deliberately sets
+#      up the case whose answer is non-zero (two files that DO differ; a pid
+#      chosen so the target is not found; a stdin that is not a tty).
+#
+#   2. the sweep withholds something the program's own header says its LAUNCHER
+#      must provide, and the program refuses BY NAME rather than pretending.
+#      `hamwid_self_or_fail` states this outright: "the compositor allocates
+#      [the window] and spawns this program into it ... the caller's only
+#      correct response is to stop with a non-zero exit". A sweep that runs a
+#      chrome-spawned overlay standalone and then scores its correct refusal as
+#      a failure is measuring its own staging, which is the mistake this file
+#      exists to stop making — the same one that produced the 4 s GUI timeout
+#      and the `-` borrowed from the stdin column.
+#
+# WHAT DOES **NOT** QUALIFY, however plausible it looks: a device the port owes
+# and does not have. "cannot open /dev/audioctl", "cannot open /dev/vt/ctl",
+# "cannot open /proc/svc", "cannot open /proc/kmsg", "sys_srv_open failed:
+# Function not implemented" are REAL GAPS. They stay EXIT_NONZERO and they stay
+# out of the healthy count, because the port is supposed to serve those names
+# and does not. The distinction is not the message, it is whose job the missing
+# thing was: the LAUNCHER's (qualifies) or THIS PORT's (does not).
+#
+# Columns, tab separated:
+#   name    the program, i.e. user/<name>.ad
+#   reason  why a non-zero exit is the correct answer HERE, in one line
+false	exit 1 is its entire specification; there is no other output
+cmp	POSIX: 1 means "the files differ", and the recipe hands it two that do
+diff	POSIX: 1 means "the files differ", and the recipe hands it two that do
+tty	its own header: "exit 0 if a tty, 1 otherwise"; stdin here is a regular file
+kill	the recipe picks pid 99999 precisely so the target is NOT found (safe)
+hambottom	chrome-spawned overlay: lib/hamwid.ad requires the compositor to allocate the wid and spawn it into one; standalone, refusing non-zero is the documented contract
+hamcalpop	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamctxmenu	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamcycler	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamde	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamecho	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamnotif	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamosd	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hampanel	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamrband	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamresize	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamrun	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamsnap	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamsysmon	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamterm	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+hamtray	chrome-spawned overlay: no wid from a launcher, refuses by name (lib/hamwid.ad)
+login	the recipe's stdin is at end-of-input, so no password can be proved; exiting 0 would report a session that was never established (that regression is in HANDOFF.md)
+getty	same as login, one level up: no /dev/vt to open and end-of-input at the prompt
+su	/dev/auth is offered no password (stdin is EOF); authentication MUST fail
+useradd	hostowner-only by design and gated on uid==1; the sweep is not the host owner
+crontab	`crontab -l` with no crontab installed: the absence IS the answer
+httpd_worker	argv is a /net/tcp connection NUMBER the master would have accepted; standalone there is no such connection, and its header says so
+wakelat_echo	the RESPONDER half: end-of-input with no 8-byte message is the FAILED reproducer it names, and /bin/wakelat is the half that drives it

@@ -114,7 +114,22 @@ static int verify(const char *name, const char *pass)
 
 int64_t hamauth_write(struct hamauth_file *a, const uint8_t *buf, uint64_t n)
 {
-    /* One verb per line: `user <name>` then `pass <secret>`. */
+    /* One verb per line: `user <name>` then `pass <secret>`.
+     *
+     * AN UNRECOGNISED VERB IS REFUSED, and it used to be swallowed: any line
+     * that matched neither prefix fell out of the loop and the write returned
+     * `n` -- "all your bytes were accepted" -- for a verb this device does not
+     * implement. That is the ignored-ctl-verb defect that cost this port its
+     * desktop backdrop (`background`/`pin` was never ported, an unknown verb
+     * was IGNORED, and hamdesktop painted an opaque full-screen window over
+     * every application with every return code 0; HANDOFF §0).
+     *
+     * What it hides here, measured: `user/passwd.ad` writes `setpass <new>`,
+     * which this device has never served. The write said it worked, the
+     * status read then said "no", and passwd reported "password change denied
+     * (not authorised, or no such user)" -- naming an authorisation failure
+     * for a verb that does not exist. EINVAL says the true thing, and passwd
+     * cannot change a password on this port until /dev/auth grows setpass. */
     uint64_t i = 0;
     while (i < n) {
         uint64_t e = i;
@@ -144,6 +159,13 @@ int64_t hamauth_write(struct hamauth_file *a, const uint8_t *buf, uint64_t n)
             }
             /* The secret does not outlive the check, even on the stack. */
             explicit_bzero(pass, sizeof pass);
+        } else if (e < n && len > 0) {
+            /* A COMPLETE line -- newline seen -- that names no verb we serve.
+             * A trailing fragment is NOT judged: a client may split a verb
+             * across write(2) calls, and refusing half a line would break a
+             * caller that is doing nothing wrong. */
+            errno = EINVAL;
+            return -1;
         }
         i = (e < n) ? e + 1 : e;
     }

@@ -256,7 +256,13 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     _o_ch(10)
     if w200 > w100:
         _o_str("ZOOM OK: 200% is wider than 100%\n")
-    else:
-        _o_str("ZOOM FAIL: 200% not wider than 100%\n")
+        _o_flush()
+        return 0
+    # THE ASSERTION IS THE PROGRAM. Printing "ZOOM FAIL" and then returning 0
+    # made the one thing this harness exists to check invisible to anything
+    # reading an exit status -- a run sweep, a CI battery, a `&&` in a script
+    # -- and a harness whose failure looks like a pass is worse than no
+    # harness at all. The status carries the verdict now.
+    _o_str("ZOOM FAIL: 200% not wider than 100%\n")
     _o_flush()
-    return 0
+    return 1
