@@ -17,7 +17,23 @@ The gate is `tests/linux/installed_update.sh`: it installs a disk, boots it
 through UEFI, refreshes from the real `https://255.one/`, installs a package
 the image does not ship, publishes a newer **signed** build to a local
 channel, updates against it, reboots the machine, and asks every question
-again as the desktop user. Unattended, re-runnable, **39 PASS / 0 FAIL**.
+again as the desktop user. Unattended, re-runnable, **37 PASS / 0 FAIL**.
+
+Two of its arms report rather than gate, and both currently report the gap
+(so they are the difference between this 37 and the 39 recorded earlier):
+`https://255.one/` still serves no `index.json.sig`, and `hpm` still replaces
+the machine's own `/etc/rc.boot`. Both are named in §2a/§2b below and neither
+is a defect in the update path itself. The reboot arm used to be a third —
+it is a real check now that §2c is closed.
+
+**The "newer build" version is derived, not hard-coded.** It was `1.0.8`, and
+the gate went red the day the real repository published `hamnix-diff 1.0.8`
+itself: the first `hpm install`, whose job is to fetch the *older* release,
+already got 1.0.8, so `hpm update` correctly reported `upgraded=0` and the
+stamped local build never landed. Five checks failed and all five pointed at
+the update path rather than at the collision. The test now asks the repository
+what it serves and bumps the patch, so publishing a release cannot break the
+gate that exists to prove publishing works.
 
 ---
 
@@ -110,7 +126,9 @@ machine's own boot configuration. The transition needs **one release that
 ships `/etc/rc.boot` as well**, so the upgrade does not remove it from the
 machines that already have it.
 
-### 2c. An installed machine cannot restart or shut itself down
+### 2c. FIXED — an installed machine could not restart or shut itself down
+
+This is how it read when it was found:
 
 ```
 [iupd] p1 can this machine restart itself?
@@ -121,20 +139,77 @@ reboot: cannot open /dev/reboot
 
 `/bin/reboot`, `/bin/poweroff`, `/bin/halt` and `hamsh`'s `init 0` / `init 6`
 all do the Plan-9 thing: write a verb to `/dev/reboot`. That is a Hamnix
-**kernel** device, and on this line no kernel serves it — nothing in
-`user/linux-syscalls.c` claims the name, so the open falls through to devtmpfs
-and fails. Consequences:
+**kernel** device, and on this line no kernel served it — nothing in
+`user/linux-syscalls.c` claimed the name, so the open fell through to devtmpfs
+and failed. Consequences:
 
-* A machine somebody installed has no supported way to reboot or power off.
-* Nothing flushes the filesystems on the way down. The gate works around it by
-  idling 30 s after its last write so the ext4 journal commits before the host
-  takes the VM away — not something a user can be asked to do.
+* A machine somebody installed had no supported way to reboot or power off.
+* **Nothing flushed the filesystems on the way down.** Every restart of an
+  installed hamnix-linux to that point was the equivalent of pulling the plug,
+  and survived only because ext4 has a journal. This gate worked around it by
+  idling 30 s after its last write so the journal committed before the host
+  took the VM away — not something a user can be asked to do.
 
-The fix is a `/dev/reboot` in `user/linux-syscalls.c` (not this agent's file):
-open claims the name; a write of `reboot` / `poweroff` / `halt` calls
-`sync(2)` and then `reboot(2)` with `LINUX_REBOOT_CMD_RESTART` / `_POWER_OFF`
-/ `_HALT`. ~20 lines, and it makes `reboot`, `poweroff`, `halt` and both
-runlevel paths in `hamsh` work at once, live and installed.
+`user/linux-syscalls.c` now serves it, ported from Hamnix's `DEV_REBOOT` cdev
+(`sys/src/9/port/namec.ad:_devreboot_write`) with the protocol intact: the
+**first token** of the write, delimited by NUL / `\n` / space / end-of-count,
+case-sensitive, and exactly three verbs — `poweroff`, `reboot`, `halt`. Reads
+are EOF so a stray `cat` cannot wedge, and an unknown verb is accepted and
+ignored, as it is there. A recognised verb calls **`sync(2)` and then
+`reboot(2)`** with `RB_POWER_OFF` / `RB_AUTOBOOT` / `RB_HALT_SYSTEM`. Hamnix's
+`power_action()` flushes every filesystem and block device before it touches
+the hardware; Linux's `reboot(2)` does not, so the port does it.
+
+It is served **inline** rather than as a `user/linux-reboot.c`. The devices
+with their own file (fb, wsys, snarf, net, audio) all carry real state — a
+shared segment, a window table, a DRM master, an lseek cursor. This one
+carries none, and `/proc/<pid>/note` directly above it in the same file is the
+same shape (a name written to a file is a kernel action) and is served the
+same way.
+
+It does **not** stop services or the desktop first, deliberately: that policy
+already lives in `hamsh`'s `svc_runlevel_halt()` / `svc_runlevel_reboot()`,
+which SIGTERM every supervised service and source `rc.0` / `rc.6` *before*
+they write here, exactly as Hamnix does. A shutdown that hangs forever waiting
+for one service to die is worse than a fast one.
+
+**Measured** by `tests/linux/reboot_device.sh`, **37 PASS / 0 FAIL** — a live
+boot for the protocol and the privilege question, then an installed disk
+booted twice:
+
+| | |
+|--|--|
+| It restarts | disk boot 1 asks, the kernel says `reboot: Restarting system`, and the machine stops **on its own in 13 s** of a 240 s ceiling. Checked against the kernel's own line, because with `-no-reboot` a PID-1 panic also makes QEMU exit — the exit alone proves nothing. |
+| **`sync(2)` does the work** | boot 1 writes a stamp to `/etc`, rewrites `/etc/rc.boot`, and reboots **in the same breath — no sleep, nothing given time to settle.** Boot 2 is running the rc boot 1 wrote and finds the stamp. There is no success line to fake that with: without the flush those bytes would still have been in the page cache when the CPU was reset. |
+| It powers off | disk boot 2 calls `poweroff`, the kernel says `reboot: Power down`, and QEMU exits **11 s** in because the *guest* asked for S5 rather than because the host took it away. |
+
+**Who may do it.** `reboot(2)` needs `CAP_SYS_BOOT`, and `linux-syscalls.c` is
+linked into every Adder program, so the call happens as whoever wrote to the
+device. That is a real difference from Hamnix, where the cdev is ungated (the
+`devcons` permission hook admits every uid) and only the Linux-ABI `reboot(2)`
+requires the hostowner. Here uid 1001 gets `EPERM` back from the write, and
+every client in the tree already reports that **by name** and exits non-zero:
+
+```
+[rbdev] u1001 reboot:
+reboot: requested reboot
+reboot: reboot did not take
+[rbdev] u1001 reboot status: 1
+[rbdev] u1001 STILL HERE after reboot
+```
+
+The desktop's **Power Off** still works, because `hamsessui` is spawned by
+`hampanelscene`, which `etc/rc.de-user.linux` keeps as **root** on purpose —
+it is system chrome, and handing a session to a user is the privileged act.
+So the session asks the chrome and the chrome has the authority. If that ever
+changes, `user/hamsessui.ad:_power()` names the failure and exits non-zero
+rather than dismissing the dialog — the shape commit `bc9b75d8` fixed.
+
+**`poweroff` and `halt` were not in the image at all**, found by the same
+test getting `127` where it expected a refusal. The app list in
+`scripts/hamlinux_image.sh` carried `reboot` alone, added for the installer,
+so the most obvious of the three commands answered *command not found* on a
+console and on an installed disk. All three ship now.
 
 ### 2d. FIXED — root's `/tmp/hpm` locked the desktop user out of `hpm refresh`
 

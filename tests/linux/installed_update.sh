@@ -65,9 +65,54 @@ mkdir -p "$TMPDIR"
 
 WAIT1="${1:-900}"
 WAIT2="${2:-600}"
-NEWVER="${HAMLINUX_UPD_VERSION:-1.0.8}"
 PKG=hamnix-diff          # ships /bin/diff, which the image does NOT carry
 BIN=/bin/diff
+
+# THE "NEWER BUILD" MUST ACTUALLY BE NEWER THAN THE REAL REPOSITORY'S.
+#
+# This was a hard-coded 1.0.8, and it went red the day https://255.one/
+# published hamnix-diff 1.0.8 itself: the first `hpm install` -- which is
+# supposed to fetch the OLDER release from the real repo -- already got 1.0.8,
+# so `hpm update` correctly reported `upgraded=0`, and the stamped local build
+# never landed. Five checks failed and every one of them pointed at the update
+# path rather than at the collision, which is the expensive kind of red.
+#
+# So the version is DERIVED: ask the real repository what it serves and bump
+# the patch. The number this test invents can then never be a number the
+# repository already has, and publishing a new release cannot break the gate
+# that proves publishing works.
+_repo_ver() {
+    curl -fsS --max-time 20 https://255.one/linux/index.json 2>/dev/null |
+    PKG="$PKG" python3 -c '
+import json, os, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+p = d.get("packages", d) if isinstance(d, dict) else d
+rows = p if isinstance(p, list) else [dict(v, name=k) for k, v in p.items()]
+for r in rows:
+    if r.get("name") == os.environ["PKG"]:
+        print(r.get("version", ""))
+        break
+' 2>/dev/null
+}
+if [ -n "${HAMLINUX_UPD_VERSION:-}" ]; then
+    NEWVER="$HAMLINUX_UPD_VERSION"
+else
+    BASEVER="$(_repo_ver)"
+    if [ -n "$BASEVER" ]; then
+        # <major>.<minor>.<patch+1>. A repository version this cannot parse
+        # falls back rather than inventing a version that sorts BELOW it.
+        NEWVER="$(printf '%s\n' "$BASEVER" | awk -F. 'NF==3 && $3 ~ /^[0-9]+$/ {print $1"."$2"."$3+1}')"
+        [ -n "$NEWVER" ] || NEWVER=1.0.99
+        say_ver="derived from the live repository's $BASEVER"
+    else
+        NEWVER=1.0.99
+        say_ver="the repository did not answer; using a version above any it is likely to serve"
+    fi
+    echo "[iupd] the 'newer build' will be $NEWVER ($say_ver)"
+fi
 
 WORK=build/installedupd; mkdir -p "$WORK"
 IMG=build/image
@@ -335,10 +380,15 @@ ls -l /etc/rc.boot
 
 date
 echo '[iupd] PHASE1 DONE'
-# The disk has no /dev/reboot on this line (see the report): nothing in the
-# guest can flush and stop the machine, so the ext4 journal is given time to
-# commit before the host takes the VM away.
-sleep 30
+# THE 30-SECOND IDLE IS GONE, AND ITS ABSENCE IS NOW PART OF THE TEST.
+# There used to be a `sleep 30` here, because nothing in the guest could flush
+# and stop the machine and the ext4 journal had to be given time to commit
+# before the host took the VM away. /dev/reboot is served now
+# (user/linux-syscalls.c) and a verb it recognises is sync(2) then reboot(2),
+# so the flush is the shutdown's job again. Everything below is written and
+# the machine is reset in the same breath; if the sync were not happening,
+# phase 2 would come up running the OLD rc and every phase-2 check would say
+# so.
 echo '[iupd] PHASE1 SETTLED'
 
 # Arm the reboot -- LAST, for the reason above: this replaces the file pid 1
@@ -348,10 +398,11 @@ echo '[iupd] PHASE1 SETTLED'
 cp /etc/rc.phase2 /etc/rc.boot
 echo '[iupd] p1 armed the next boot'
 
-# CAN AN INSTALLED MACHINE RESTART ITSELF? The tree ships /bin/reboot, and it
-# is the Plan-9 shape: write "reboot" to /dev/reboot. That device is a Hamnix
-# KERNEL device; on this line there is no kernel underneath serving it. Asking
-# here is how the answer gets written down instead of assumed.
+# AN INSTALLED MACHINE RESTARTS ITSELF. The tree ships /bin/reboot, and it is
+# the Plan-9 shape: write "reboot" to /dev/reboot. That device is served here
+# by user/linux-syscalls.c, and the verb is sync(2) then reboot(2) -- so this
+# is both how phase 2 gets started and the flush that makes everything written
+# above survive into it. The line below never returns when it works.
 echo '[iupd] p1 can this machine restart itself?'
 reboot
 echo '[iupd] p1 reboot status:' \$status
@@ -441,9 +492,10 @@ boot() {   # boot <logfile> <seconds>
     # hold the VM there until the host's timeout fired, and every boot would
     # cost its whole budget. With stdin at EOF pid 1 exits the moment its rc
     # is done, the kernel panics (panic=-1) and -no-reboot makes QEMU exit --
-    # so the budget below is a CEILING rather than a duration. The rc sleeps
-    # 30 s before that point so the ext4 journal has committed; there is no
-    # /dev/reboot on this line to do it properly (see docs).
+    # so the budget below is a CEILING rather than a duration. Phase 1 does not
+    # reach that fallback any more: it ends by asking /dev/reboot to restart
+    # the machine, which flushes and resets it properly. The rc used to idle
+    # 30 s here instead, waiting on the ext4 journal.
     ( sleep 5 ) | HAMLINUX_DISK="$DISK" \
         timeout "$(($2 + 15))" scripts/hamlinux_vm.sh disk --timeout "$2" \
         >"$1" 2>&1
@@ -535,15 +587,20 @@ else
 fi
 check  "phase 1 reached the end"                 '\[iupd\] PHASE1 DONE'
 check  "the write to /etc landed (next boot armed)" '\[iupd\] p1 armed the next boot'
-# Reported, not gated: /dev/reboot is a Hamnix KERNEL device and this line has
-# no such kernel. Until something serves it, an installed machine cannot
-# restart itself and the host has to take the VM away -- so this prints what
-# happened rather than turning a known, named gap into a red gate.
-if grep -aq '\[iupd\] p1 reboot status: 0' "$LOG"; then
-    echo "iupd: NOTE  the installed machine restarted itself (/dev/reboot works)"
-else
-    echo "iupd: NOTE  the installed machine CANNOT restart itself: $(grep -a 'reboot:' "$LOG" | head -1 | tr -d '\r')"
-fi
+# THE MACHINE RESTARTS ITSELF. This used to be a NOTE rather than a check,
+# because /dev/reboot is a Hamnix KERNEL device and nothing on this line served
+# it -- `reboot` died on the open and the host had to take the VM away.
+# user/linux-syscalls.c serves it now, so it is a real gate.
+#
+# The KERNEL's line is what is checked, not `reboot status: 0`. A successful
+# reboot never returns, so there is no status to read; and with -no-reboot a
+# PID-1 panic also makes QEMU exit, so the exit alone cannot tell the two
+# apart. `reboot: Restarting system` is the kernel saying it did the thing.
+# (The old NOTE greped for the first line matching 'reboot:' and would happily
+# have printed the guest's own "reboot: requested reboot" as evidence of
+# failure while the kernel was restarting one line below it.)
+check  "the installed machine restarted ITSELF"  'reboot: Restarting system'
+nocheck "and it was not the old missing-device fault" 'cannot open /dev/reboot'
 
 echo
 echo "--- boot 2: the same disk, booted again"
