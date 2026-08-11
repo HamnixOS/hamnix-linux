@@ -408,23 +408,33 @@ envbuf:  Array[256, uint8]
 # connection asking for its WINPERCONN-th window can always be given one, no
 # matter what any other client has done.
 #
-# WINPERCONN is 8 because user/linux-wsys.c's v2 backbuffer has BB_SLOTS = 8
-# for the whole system and an unpainted window is worse than a refused one.
-# That file is the real ceiling on how many windows this server can PAINT, and
-# raising this number past it would only move the silence somewhere else.
-WINPERCONN: uint64 = 8
-MAXWIN: uint64 = 64                    # 8 conns * 8
-w_wid:  Array[64, int32]
-w_draw: Array[64, int32]
-w_keys: Array[64, int32]
-w_ptr:  Array[64, int32]
-w_conn: Array[64, int32]
-w_surf: Array[64, int32]
-w_btn:  Array[64, int32]               # last pointer button mask seen
-w_in:   Array[64, int32]               # pointer has entered this surface
-w_focus: Array[64, int32]              # keyboard focus is on this surface
-w_x:    Array[64, int32]               # where this window was placed, so a
-w_y:    Array[64, int32]               # popup can be placed against it
+# WINPERCONN WAS 8, AND EIGHT WAS THE WHOLE REASON ROOTLESS COULD NOT BE THE
+# DEFAULT. user/linux-wsys.c's v2 backbuffer pool was BB_SLOTS = 8 for the
+# whole machine, so a ninth window would have existed and never been painted,
+# and this number was pinned to it deliberately: a refused window is better
+# than a blank one. Rootful spends ONE of those slots on an entire X session;
+# rootless spends one per TOPLEVEL, so eight was "a namespace may have eight X
+# windows, and Firefox is sharing them".
+#
+# That pool is no longer a number: BB_SLOTS is now WSYS_MAX_WINDOWS, checked
+# at compile time, so the paint pool can never be the first thing to run out
+# and /dev/wsys/pool states it. The ceiling that is left is the window table,
+# which is 128, and this is 8 * 16 -- the same reservation arithmetic as
+# before (every connection can always be given its whole budget), with a
+# budget a Debian namespace can actually live in.
+WINPERCONN: uint64 = 16
+MAXWIN: uint64 = 128                   # 8 conns * 16, and = WSYS_MAX_WINDOWS
+w_wid:  Array[128, int32]
+w_draw: Array[128, int32]
+w_keys: Array[128, int32]
+w_ptr:  Array[128, int32]
+w_conn: Array[128, int32]
+w_surf: Array[128, int32]
+w_btn:  Array[128, int32]               # last pointer button mask seen
+w_in:   Array[128, int32]               # pointer has entered this surface
+w_focus: Array[128, int32]              # keyboard focus is on this surface
+w_x:    Array[128, int32]               # where this window was placed, so a
+w_y:    Array[128, int32]               # popup can be placed against it
 n_win:  uint64 = 0
 cascade: int32 = 0
 
@@ -1485,7 +1495,12 @@ def win_close(wid: int32):
 # user/xsnarfd.ad is an ordinary X client on the same display and owns the
 # selections there whether the display is rootful or rootless.
 
-XWMAX: uint64 = 32                     # X windows this compositor will manage
+# SIXTY-FOUR, not thirty-two. This counts every X window that exists on the
+# display, not just the ones that become Hamnix windows: a CreateNotify adds
+# a row whether the window is ever mapped or not, and a toolkit makes several
+# unmapped helpers per visible window. Thirty-two was under the twelve-window
+# ceiling this file now permits.
+XWMAX: uint64 = 64                     # X windows this compositor will manage
 XDEFER: uint64 = 64                    # X events parked while awaiting a reply
 XTITLE_CAP: uint64 = 64
 
@@ -1515,20 +1530,20 @@ xdefer_buf: Array[2048, uint8]         # 64 events * 32 bytes
 xdefer_n: uint64 = 0
 xwait:  Array[2, int32]
 
-xw_win:   Array[32, int32]
-xw_serlo: Array[32, int32]
-xw_serhi: Array[32, int32]
-xw_have:  Array[32, int32]             # a WL_SURFACE_SERIAL has been read
-xw_or:    Array[32, int32]             # override-redirect: a menu, not a window
-xw_map:   Array[32, int32]
-xw_x:     Array[32, int32]
-xw_y:     Array[32, int32]
-xw_w:     Array[32, int32]
-xw_h:     Array[32, int32]
-xw_surf:  Array[32, int32]             # the paired wl_surface object id
-xw_conn:  Array[32, int32]
-xw_title: Array[2048, uint8]           # 32 * 64
-xw_tlen:  Array[32, uint64]
+xw_win:   Array[64, int32]
+xw_serlo: Array[64, int32]
+xw_serhi: Array[64, int32]
+xw_have:  Array[64, int32]             # a WL_SURFACE_SERIAL has been read
+xw_or:    Array[64, int32]             # override-redirect: a menu, not a window
+xw_map:   Array[64, int32]
+xw_x:     Array[64, int32]
+xw_y:     Array[64, int32]
+xw_w:     Array[64, int32]
+xw_h:     Array[64, int32]
+xw_surf:  Array[64, int32]             # the paired wl_surface object id
+xw_conn:  Array[64, int32]
+xw_title: Array[4096, uint8]           # 64 * 64
+xw_tlen:  Array[64, uint64]
 n_xw:     uint64 = 0
 
 

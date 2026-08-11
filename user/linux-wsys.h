@@ -37,6 +37,12 @@ enum {
     HAMWSYS_SELF,         /* /dev/wsys/self       — this task's wid, if any  */
     HAMWSYS_WINDOWS,      /* /dev/wsys/windows    — "<wid> <title>\n" each   */
     HAMWSYS_SCREEN,       /* /dev/wsys/screen     — "<w> <h>\n", read-only   */
+    HAMWSYS_POOL,         /* /dev/wsys/pool       — the v2 paint pool, read- */
+                          /*   only: how many backbuffer slots exist, how    */
+                          /*   many are in use, and how many times one was   */
+                          /*   REFUSED.  A window with no slot is never      */
+                          /*   painted and cannot say so itself; this is how */
+                          /*   that condition is read back.                  */
     HAMWSYS_DIR,          /* /dev/wsys, /dev/wsys/<wid> — directory listing  */
     HAMWSYS_WIN_CTL,      /* /dev/wsys/<wid>/ctl                             */
     HAMWSYS_WIN_SCENE,    /* /dev/wsys/<wid>/scene                           */

@@ -63,6 +63,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,9 +88,26 @@
  * and recreated every boot, so the only way to meet an old one is to mix two
  * builds, and silently sharing a table whose layout you disagree about is the
  * success-shaped failure this tree keeps paying for.  4 adds `inputgen`, the
- * futex word a parked client sleeps on, which moves every window after it. */
-#define WSYS_VERSION      4
-#define WSYS_MAX_WINDOWS  32
+ * futex word a parked client sleeps on, which moves every window after it.
+ * 5 doubles WSYS_MAX_WINDOWS and adds `wmdelete` to struct wwin, which moves
+ * every field after it and every window after the first. */
+#define WSYS_VERSION      5
+/* SIXTY-FOUR, NOT THIRTY-TWO, and the reason is rootless Xwayland.
+ *
+ * A ROOTFUL X session is one wl_surface and therefore ONE row in this table
+ * however many X clients are behind it -- an entire Steam session, its window
+ * manager, its frames and all, is a single window.  Rootless spends one row
+ * per X TOPLEVEL.  Thirty-two for the whole machine is the desktop's
+ * backdrop, its panel, its chrome, Firefox and its menus, and then whatever
+ * is left for a namespace, which is how "the ninth X window did not appear"
+ * gets to be an answer.
+ *
+ * The cost is memory in ONE segment -- about 74 KiB per row, two scene
+ * buffers and five rings -- so this is 9.5 MiB of shared memory where it was
+ * 2.4, mapped once and shared by every client.  See BB_SLOTS below, which is
+ * now tied to this number by an assertion rather than by a comment, and
+ * user/wsyswl.ad's MAXCONN * WINPERCONN, which is 8 * 16 and fits here. */
+#define WSYS_MAX_WINDOWS  128
 #define WSYS_SCENE_CAP    16384              /* = lib/hamscene.ad HAMSCENE_CAP */
 #define WSYS_RING_CAP     8192
 #define WSYS_TITLE_CAP    64
@@ -205,15 +223,32 @@ static int            chrome_rw;              /* the kernel let us map it W   */
  * a gigabyte of shared memory for windows that mostly do not use it. Four
  * slots are claimed on demand.
  * ------------------------------------------------------------------ */
-/* Eight, not three.  Three was chosen when the only v2 client was the X
- * bridge and one window was the whole session; with a Wayland compositor
- * every toplevel is a v2 window, so three is "your fourth window is blank".
- * And it was blank SILENTLY: bb_for returned -1, the window still existed
- * with a taskbar entry and correct geometry, and nothing composited into it.
+/* ONE SLOT PER WINDOW THIS DEVICE CAN HOLD, and that is the whole design.
  *
- * The buffers are allocated lazily -- a slot costs nothing until something
- * blits -- so the cost of eight is address space in a mapping, not memory. */
-#define BB_SLOTS   8
+ * The history is two identical failures.  Three slots was chosen when the only
+ * v2 client was the X bridge and one window was a whole X session; a Wayland
+ * compositor makes every toplevel a v2 window, so three became "your fourth
+ * window is blank" -- SILENTLY, because bb_for returned -1, the window still
+ * existed with a taskbar entry and correct geometry, and nothing composited
+ * into it.  It was raised to eight.  Rootless Xwayland then spends one slot
+ * per X TOPLEVEL where rootful spent one per SESSION, and eight became "your
+ * ninth window is blank" with exactly the same silence available.
+ *
+ * A number that has been wrong twice for the same reason should not be picked
+ * a third time.  So it is not picked: the pool is the size of the window
+ * table, asserted at compile time, and the paint pool can therefore NEVER be
+ * the thing that runs out first.  The ceiling a user meets is the window
+ * table, which is a number the device can state.
+ *
+ * WHAT THAT COSTS, exactly, because 64 screen-sized double-buffered surfaces
+ * sounds like a gigabyte and is not.  It is a gigabyte of ADDRESS SPACE in a
+ * mapping of a sparse file, and the resident cost is the sum of the windows'
+ * OWN areas: bb_fit and bb_blit touch w*h*4 bytes and never BB_BYTES, and
+ * the segment's initialiser zeroes the headers and not the pixels.  Twelve
+ * 186x110 xterms are 12 * 82 KiB of real memory, not 12 * 16 MiB.  Getting
+ * that wrong is the difference between this being free and this being
+ * impossible, so it is a property of the code below and not a hope. */
+#define BB_SLOTS   WSYS_MAX_WINDOWS
 #define BB_W       1920
 #define BB_H       1080
 #define BB_BYTES   ((size_t)BB_W * BB_H * 4)
@@ -240,13 +275,67 @@ struct bbhdr {
     uint32_t started;      /* a frame is in progress on the back page */
 };
 
+/* THE HEADERS ARE ONE SMALL MAPPING; THE PIXELS ARE ONE MAPPING PER PAGE IN
+ * USE, and that separation is what makes a pool this size free.
+ *
+ * `px` used to be a member of this struct: BB_SLOTS * 2 * 8 MiB of address
+ * space mapped by every process that so much as read a window's ctl file.  At
+ * eight slots that was 132 MiB and nobody noticed.  At one slot per window it
+ * would be two gigabytes of VSZ in every GUI program on the machine, which is
+ * a number somebody would eventually have to explain.
+ *
+ * So the segment is laid out by hand: this struct first, then slot i's two
+ * pages at BB_PX_OFF(i, page).  A process maps a page the first time it
+ * touches that slot and never maps the ones it does not use -- a client maps
+ * its own window's two pages, and the compositor maps the pages of the
+ * windows it is actually painting. */
 struct bbshm {
     uint32_t magic;
+    uint32_t nslots;       /* what the build that made it believed BB_SLOTS was */
+    /* AN EXHAUSTED PAINT POOL MUST BE READABLE.  Twice now the symptom of a
+     * full pool has been a window that is never painted and says nothing; a
+     * line on stderr is only visible to whoever is watching the console at
+     * the time.  These are what /dev/wsys/pool reports, so the condition is
+     * answerable from a file after the fact, by a test or by a person. */
+    uint32_t full_evt;     /* times a window was refused a slot              */
+    int32_t  full_wid;     /* the last window refused one                    */
+    int32_t  full_w, full_h;
     struct bbhdr slot[BB_SLOTS];
-    uint8_t  px[BB_SLOTS][2][BB_W * BB_H * 4];
 };
 
+/* Page-aligned, because mmap's offset must be.  BB_BYTES is a multiple of the
+ * page size on every architecture this runs on (it is 1920*1080*4), and the
+ * header is rounded up to 64 KiB so the arithmetic holds on a 64 KiB-page
+ * kernel too. */
+#define BB_HDR_BYTES  ((size_t)((sizeof(struct bbshm) + 65535) & ~(size_t)65535))
+#define BB_PX_OFF(i, pg) \
+    ((off_t)BB_HDR_BYTES + (off_t)(((size_t)(i) * 2 + (size_t)(pg)) * BB_BYTES))
+#define BB_FILE_BYTES ((off_t)BB_HDR_BYTES + (off_t)BB_SLOTS * 2 * (off_t)BB_BYTES)
+
+/* The pool can never be the first thing to run out.  If someone shrinks it
+ * below the window table, this fails to compile rather than becoming a blank
+ * window six months later. */
+typedef char bb_pool_covers_the_window_table[
+    (BB_SLOTS >= WSYS_MAX_WINDOWS) ? 1 : -1];
+
 static struct bbshm *bb;
+static int       bb_fd = -1;           /* kept open: pages are mapped lazily */
+static uint8_t  *bb_px[BB_SLOTS][2];   /* per-process, NULL until first touch */
+
+/* Slot i's page `pg`, mapped on demand.  NULL means the mapping failed, and
+ * every caller treats that as "this window has no pixels this frame" rather
+ * than writing somewhere else. */
+static uint8_t *bb_page(int i, unsigned pg)
+{
+    if (i < 0 || i >= BB_SLOTS || pg > 1) return NULL;
+    if (bb_px[i][pg]) return bb_px[i][pg];
+    if (bb_fd < 0) return NULL;
+    void *m = mmap(NULL, BB_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED,
+                   bb_fd, BB_PX_OFF(i, pg));
+    if (m == MAP_FAILED) return NULL;
+    bb_px[i][pg] = (uint8_t *)m;
+    return bb_px[i][pg];
+}
 
 static int bb_attach(void)
 {
@@ -276,19 +365,33 @@ static int bb_attach(void)
     if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
     struct stat st;
     if (fstat(fd, &st) < 0) { close(fd); return -1; }
-    if ((uint64_t)st.st_size < sizeof(struct bbshm)
-        && ftruncate(fd, (off_t)sizeof(struct bbshm)) < 0) {
+    /* SPARSE, and it has to be: this is a two-gigabyte file that holds a few
+     * hundred kilobytes.  ftruncate on tmpfs sets the size and allocates
+     * nothing; blocks arrive when a page is written, which is exactly the
+     * window area bb_fit and bb_blit touch. */
+    if ((uint64_t)st.st_size < (uint64_t)BB_FILE_BYTES
+        && ftruncate(fd, BB_FILE_BYTES) < 0) {
         close(fd); return -1;
     }
-    void *m = mmap(NULL, sizeof(struct bbshm), PROT_READ | PROT_WRITE,
+    void *m = mmap(NULL, BB_HDR_BYTES, PROT_READ | PROT_WRITE,
                    MAP_SHARED, fd, 0);
     int e = errno;
-    close(fd);
-    if (m == MAP_FAILED) { errno = e; return -1; }
+    if (m == MAP_FAILED) { close(fd); errno = e; return -1; }
     bb = (struct bbshm *)m;
-    if (bb->magic != 0x42425746u) {
+    bb_fd = fd;                        /* kept open for bb_page's mappings */
+    /* The magic carries the slot count, so a segment laid out by a build with
+     * a different BB_SLOTS is re-initialised rather than half-believed: the
+     * pixel pages are addressed by slot index, and two builds that disagree
+     * about that stride would quietly read each other's windows.
+     *
+     * The pixels are not touched here.  A fresh file is already zero, and a
+     * stale one's pixels are unreachable: every slot is cleared to its
+     * window's size by bb_fit when it is claimed, and reads are bounded by
+     * the same size. */
+    if (bb->magic != 0x42425747u || bb->nslots != (uint32_t)BB_SLOTS) {
         memset(bb, 0, sizeof *bb);
-        bb->magic = 0x42425746u;
+        bb->magic  = 0x42425747u;
+        bb->nslots = (uint32_t)BB_SLOTS;
     }
     return 0;
 }
@@ -316,11 +419,24 @@ static int bb_warn_full, bb_warn_clamp, bb_warn_drop, bb_warn_refit;
  * answer than a blank one it immediately overwrites. */
 static void bb_fit(int i, int w, int h)
 {
+    /* THE OLD SIZE MATTERS, because the clear has to cover it. */
+    size_t was = (size_t)bb->slot[i].w * bb->slot[i].h * 4;
     bb->slot[i].w = w > 0 && w <= BB_W ? w : BB_W;
     bb->slot[i].h = h > 0 && h <= BB_H ? h : BB_H;
     bb->slot[i].started = 0;
-    memset(bb->px[i][0], 0, BB_BYTES);
-    memset(bb->px[i][1], 0, BB_BYTES);
+    /* CLEAR THE PIXELS THIS SLOT CAN ACTUALLY SHOW, not BB_BYTES.  Rows are
+     * packed at the SLOT's width (see bb_blit), so a window's pixels are
+     * w*h*4 contiguous bytes at the start of each page and everything past
+     * them is unreachable -- reads are bounded by the same product.  Zeroing
+     * 8 MiB for a 186x110 xterm is what made a large pool unaffordable; this
+     * is 82 KiB.  The old extent is cleared too where it was larger, so a
+     * shrink cannot leave a previous tenant's pixels inside the new one. */
+    size_t now = (size_t)bb->slot[i].w * bb->slot[i].h * 4;
+    size_t clr = was > now ? was : now;
+    if (clr > BB_BYTES) clr = BB_BYTES;
+    uint8_t *p0 = bb_page(i, 0), *p1 = bb_page(i, 1);
+    if (p0) memset(p0, 0, clr);
+    if (p1) memset(p1, 0, clr);
     bb->slot[i].gen++;
     if ((w > 0 && w > BB_W) || (h > 0 && h > BB_H))
         bb_once(&bb_warn_clamp, "window is bigger than the backbuffer -- "
@@ -383,8 +499,18 @@ static int bb_for(int wid, int create, int w, int h)
             return i;
         }
     }
+    /* UNREACHABLE UNLESS SOMEONE BREAKS THE INVARIANT above -- BB_SLOTS is
+     * WSYS_MAX_WINDOWS, and a window that does not exist cannot ask for a
+     * slot -- but it is recorded rather than only printed, because the two
+     * times this pool has been too small the symptom was a window that is
+     * never painted and NOTHING that says why.  /dev/wsys/pool reads these. */
+    bb->full_evt++;
+    bb->full_wid = wid;
+    bb->full_w = w;
+    bb->full_h = h;
     bb_once(&bb_warn_full, "all slots are in use by live windows -- this "
-            "window will never be painted", wid, BB_SLOTS, w, h);
+            "window will never be painted; read /dev/wsys/pool", wid,
+            BB_SLOTS, w, h);
     errno = ENOSPC;
     return -1;
 }
@@ -454,9 +580,26 @@ static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
     uint32_t back = h->front ^ 1u;
     if (!h->started) {
         /* Carry the last published frame forward: a client that blits only
-         * what changed must not find the rest of its window blank. */
-        memcpy(bb->px[slot][back], bb->px[slot][h->front], BB_BYTES);
+         * what changed must not find the rest of its window blank.  The
+         * window's OWN extent, for the reason in bb_fit -- this used to copy
+         * 8 MiB per frame per window whatever the window's size was, which is
+         * both the pool's cost and a memcpy on the frame path. */
+        size_t live = (size_t)h->w * h->h * 4;
+        if (live > BB_BYTES) live = BB_BYTES;
+        uint8_t *bp = bb_page(slot, back), *fp = bb_page(slot, h->front);
+        if (!bp || !fp) {
+            bb_once(&bb_warn_drop, "a blit was thrown away: this window's "
+                    "pixels could not be mapped", v->wid, slot, (int)live, 0);
+            return 18 + need;
+        }
+        memcpy(bp, fp, live);
         h->started = 1;
+    }
+    uint8_t *backpx = bb_page(slot, back);
+    if (!backpx) {
+        bb_once(&bb_warn_drop, "a blit was thrown away: this window's back "
+                "page could not be mapped", v->wid, slot, 0, 0);
+        return 18 + need;
     }
     const uint8_t *src = b + 18;
     for (int32_t y = y0; y < y1; y++) {
@@ -465,7 +608,7 @@ static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
             if (x < 0 || x >= h->w) continue;
             const uint8_t *s = src + ((uint64_t)(y - y0) * (x1 - x0)
                                       + (x - x0)) * bpp;
-            uint8_t *d = &bb->px[slot][back][((uint64_t)y * h->w + x) * 4];
+            uint8_t *d = &backpx[((uint64_t)y * h->w + x) * 4];
             if (fmt == 2) {                       /* FMT_BGRA8888 */
                 d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
             } else if (fmt == 3) {                /* FMT_A8 */
@@ -1636,6 +1779,8 @@ static int classify(const char *path, struct hamwsys_file *f)
         leaf = HAMWSYS_WINDOWS;
     } else if (!strcmp(p, "screen")) {
         leaf = HAMWSYS_SCREEN;
+    } else if (!strcmp(p, "pool")) {
+        leaf = HAMWSYS_POOL;
     } else {
         leaf = HAMWSYS_SINK;
     }
@@ -1758,6 +1903,44 @@ static int snap_self(struct hamwsys_file *f)
  * read, or a plausible default, would hand the caller something it could
  * mistake for an answer.  The open fails instead, loudly, and the client
  * waits for the compositor or says why it is stopping. */
+/* /dev/wsys/pool — THE PAINT POOL, STATED.
+ *
+ *   "slots <used>/<total> exhausted <n> last_refused <wid> <w>x<h>\n"
+ *
+ * Every v2 window (which is every Wayland toplevel, every X toplevel on a
+ * rootless display, and the browser) needs one backbuffer slot, and a window
+ * that cannot get one EXISTS, has geometry, has a taskbar entry, and is never
+ * painted.  That failure has been shipped twice, and both times what made it
+ * expensive was that no file anywhere said the pool was full.  This is that
+ * file.  It is read-only and needs no window: a program diagnosing a blank
+ * window is not necessarily the program that owns it. */
+static int snap_pool(struct hamwsys_file *f)
+{
+    if (bb_attach() < 0) { errno = ENXIO; return -1; }
+    int used = 0;
+    for (int i = 0; i < BB_SLOTS; i++)
+        if (bb->slot[i].used) used++;
+    uint8_t b[128];
+    uint64_t n = 0;
+    const char *k = "slots ";
+    while (*k) b[n++] = (uint8_t)*k++;
+    n = put_int(b, n, used);
+    b[n++] = '/';
+    n = put_int(b, n, BB_SLOTS);
+    k = " exhausted ";
+    while (*k) b[n++] = (uint8_t)*k++;
+    n = put_int(b, n, (int32_t)bb->full_evt);
+    k = " last_refused ";
+    while (*k) b[n++] = (uint8_t)*k++;
+    n = put_int(b, n, bb->full_wid);
+    b[n++] = ' ';
+    n = put_int(b, n, bb->full_w);
+    b[n++] = 'x';
+    n = put_int(b, n, bb->full_h);
+    b[n++] = '\n';
+    return snap_set(f, b, n);
+}
+
 static int snap_screen(struct hamwsys_file *f)
 {
     /* In the CHROME segment since the split: `screen W H` is behind devwsys's
@@ -1836,11 +2019,11 @@ static int snap_dir(struct hamwsys_file *f)
      * shape sys_open on a real directory produces (see linux-syscalls.c's
      * dirtab).  Neither "." nor ".." appears, for the reason recorded there:
      * the tree's recursive walkers have no self/parent guard. */
-    uint8_t buf[1024];
+    uint8_t buf[WSYS_MAX_WINDOWS * 8 + 256];
     uint64_t n = 0;
     if (f->wid == 0) {
         win_reap_dead();           /* the compositor must not paint a dead one */
-        const char *fixed[] = { "ctl", "self", "windows", "screen" };
+        const char *fixed[] = { "ctl", "self", "windows", "screen", "pool" };
         for (unsigned i = 0; i < sizeof fixed / sizeof fixed[0]; i++) {
             for (const char *c = fixed[i]; *c; c++) buf[n++] = (uint8_t)*c;
             buf[n++] = '\n';
@@ -1985,6 +2168,12 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
          * spelling of the same state is how two sources of truth start. */
         if (for_write) { errno = EACCES; return -1; }
         return snap_screen(f);
+    case HAMWSYS_POOL:
+        /* Read-only for the same reason `screen` is: this is the device
+         * reporting its own storage, and a writable spelling of it would be a
+         * second source of truth for how many windows can be painted. */
+        if (for_write) { errno = EACCES; return -1; }
+        return snap_pool(f);
     case HAMWSYS_WINDOWS: return for_write ? 0 : snap_windows(f);
     case HAMWSYS_SELF:    return for_write ? 0 : snap_self(f);
     case HAMWSYS_CTL:     return for_write ? 0 : snap_ctl(f);
@@ -2049,7 +2238,9 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
         if (f->off >= size) return 0;
         uint64_t k = size - f->off;
         if (k > cap) k = cap;
-        memcpy(buf, bb->px[slot][bb->slot[slot].front] + f->off, (size_t)k);
+        const uint8_t *fp = bb_page(slot, bb->slot[slot].front);
+        if (!fp) return 0;
+        memcpy(buf, fp + f->off, (size_t)k);
         f->off += k;
         return (int64_t)k;
     }
@@ -2469,6 +2660,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                                                   caller's problem here */
     }
     case HAMWSYS_SELF: case HAMWSYS_WINDOWS: case HAMWSYS_DIR:
+    case HAMWSYS_POOL:
     default:
         errno = EPERM;
         return -EPERM;

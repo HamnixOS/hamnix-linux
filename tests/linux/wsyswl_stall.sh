@@ -211,20 +211,39 @@ fi
 # notice and re-fit, or nothing ever does.
 python3 - "$WORK/wsys.bb" <<'PY'
 import struct, sys
+# THE SEGMENT'S HEADER, from user/linux-wsys.c's struct bbshm:
+#   magic, nslots, full_evt, full_wid, full_w, full_h   -- 24 bytes
+# then nslots * struct bbhdr, 28 bytes each.
+# CHECKED, NOT ASSUMED. This script silently planted nothing for a while after
+# the header grew -- it wrote "640x480" over four bytes of the header, reported
+# "planted on wid 0", and the assertion below then failed for a reason that had
+# nothing to do with the compositor. A test that injects a fault must prove it
+# injected one.
+HDR = 24
+MAGIC = 0x42425747
 f = open(sys.argv[1], 'r+b')
-f.seek(0); magic, = struct.unpack('<I', f.read(4))
-for i in range(8):
-    off = 4 + i * 28
+magic, nslots = struct.unpack('<II', f.read(8))
+if magic != MAGIC:
+    sys.exit("wlstall: the backbuffer segment's magic is %#x, not %#x -- this "
+             "script does not know its layout and planted NOTHING" % (magic, MAGIC))
+planted = False
+for i in range(nslots):
+    off = HDR + i * 28
     f.seek(off)
     used, wid, w, h, gen, front, started = struct.unpack('<IiiiIII', f.read(28))
-    if used:
+    if used and wid >= 2 and w > 0 and h > 0:
         f.seek(off)
         f.write(struct.pack('<IiiiIII', used, wid, 640, 480, gen, front, 0))
         print("wlstall: INFO planted a stale 640x480 slot on wid %d (was %dx%d)"
               % (wid, w, h))
+        planted = True
         break
 f.close()
+if not planted:
+    sys.exit("wlstall: no live backbuffer slot to plant a fault in -- nothing "
+             "was injected and the assertion below would be meaningless")
 PY
+[ $? = 0 ] || { bad "the fault could not be planted, so nothing below is evidence"; }
 xdotool windowsize "$XT" 800 400
 xdotool windowmove "$XT" 300 300
 sleep 4
