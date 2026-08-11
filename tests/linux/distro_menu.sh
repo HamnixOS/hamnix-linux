@@ -168,7 +168,13 @@ echo '[dmenu] CLICKED'
 # HAMNIX side -- /tmp/de-ns-run.log inside the tree is /n/debian/tmp from here,
 # and it is the one file that spans the boundary.
 sleep 75
+# BOTH logs. /etc/de-ns-run writes what the program wrote into its own log --
+# so for a command-line probe the banner is IN HERE, not on the console, and
+# the first version of this file looked for it on the console and called a
+# working launcher a failure. The log is the witness; read it from the side
+# that can.
 echo '[dmenu] DENSRUNLOG-BEGIN'
+cat /n/alpine/tmp/de-ns-run.log
 cat /n/debian/tmp/de-ns-run.log
 echo '[dmenu] DENSRUNLOG-END'
 echo '[dmenu] DONE'
@@ -292,7 +298,14 @@ fi
 # mkdir left them behind. They are now made deliberately, by root, when the
 # boot posts the server at its name (user/linux-syscalls.c,
 # distro_stage_mountpoints). docs/linux_distro_namespaces.md 8.4.
-lrc() { sed -n "/LAUNCHRC-BEGIN/,/LAUNCHRC-END/p" "$WORK/boot.log" | tr -d '\r'; }
+# The program's own output. It reaches the console when /etc/de-ns-run runs it
+# directly and the shim's log when it does not, so BOTH are the same question
+# and the answer is "did a program that only exists in that root produce its
+# banner". Looking in only one place is how the previous version of this check
+# reported a GAP for a launcher that worked.
+lrc() { { sed -n "/LAUNCHRC-BEGIN/,/LAUNCHRC-END/p" "$WORK/boot.log"
+          sed -n "/DENSRUNLOG-BEGIN/,/DENSRUNLOG-END/p" "$WORK/boot.log"; } \
+        | tr -d '\r'; }
 if lrc | grep -qi 'apk-tools'; then
     echo "dmenu: PASS /etc/rc.de-ns/alpine ran a program from inside Alpine (apk-tools)"
 else
@@ -307,12 +320,19 @@ fi
 # --- AND THE PATH A PERSON TAKES: the click, and what came up -------------
 # The panel names its own launch, so "the row was hit-tested and the launcher
 # spawned" is a fact from the panel rather than an inference from a picture.
-if grep -aq '\[panel\] launch in ns debian ->' "$WORK/boot.log"; then
-    echo "dmenu: PASS clicking a fly-out row launched into the debian namespace"
-    grep -a '\[panel\] launch in ns' "$WORK/boot.log" | sed 's/^/dmenu:      /'
+# The witness is the SHIM'S LOG INSIDE THE TREE, not the panel's stdout. The
+# panel spawns detached, so its `[panel] launch in ns …' line does not
+# reliably reach this console -- and an absent log line is not evidence of an
+# absent launch. A `=== de-ns-run <prog>' header in /n/debian/tmp is the
+# program having been started, in that namespace, by that click.
+DENS() { sed -n '/DENSRUNLOG-BEGIN/,/DENSRUNLOG-END/p' "$WORK/boot.log" | tr -d '\r'; }
+CLICKED_PROG="$(DENS | grep -a '^=== de-ns-run' | tail -1 | sed 's/.*: //')"
+if [ -n "$CLICKED_PROG" ]; then
+    echo "dmenu: PASS clicking a fly-out row launched '$CLICKED_PROG' in the debian namespace"
 else
     echo "dmenu: FAIL clicking a fly-out row launched nothing"; fail=1
 fi
+grep -a '\[panel\] launch in ns' "$WORK/boot.log" | sed 's/^/dmenu:      /'
 # The shim's log lives INSIDE the tree, which is the only place both sides can
 # read. An empty one means the click never reached `enter`.
 if sed -n '/DENSRUNLOG-BEGIN/,/DENSRUNLOG-END/p' "$WORK/boot.log" \
@@ -327,6 +347,21 @@ if [ -s "$WORK/shot-launched.png" ]; then
     echo "dmenu: PASS screendump of the launched app ($WORK/shot-launched.png)"
 else
     echo "dmenu: FAIL no screendump of the launched app"; fail=1
+fi
+# DID IT GET A DISPLAY? Reported separately from "was it launched", because
+# they are two different facts and collapsing them is what made this whole
+# area unreadable for three passes. See docs/linux_distro_namespaces.md §8.5.
+if DENS | grep -qi 'could not connect to wayland server'; then
+    echo "dmenu: GAP  the app was launched and could not reach the display:"
+    echo "dmenu:      Xwayland, as uid 1001 inside the namespace, cannot connect to"
+    echo "dmenu:      /run/wayland-0 -- the per-distribution wsyswl is started by ROOT"
+    echo "dmenu:      at rc.5 and its socket comes out srwxr-xr-x, and connect(2) on a"
+    echo "dmenu:      unix socket needs WRITE. The socket has to be writable by the"
+    echo "dmenu:      session user (or the server started as them). §8.5."
+elif DENS | grep -qi 'Xwayland FAILED TO START'; then
+    echo "dmenu: GAP  the app was launched and Xwayland did not start; the reason is above"
+elif DENS | grep -qi 'de-ns-run: exec\|hamnix-x11session: exec'; then
+    echo "dmenu: PASS the launched app got a display and was exec'd into it"
 fi
 if sect FIRST | grep -q 'Alpine apps' && sect FIRST | grep -q 'Debian apps'; then
     echo "dmenu: PASS both distributions have a parent row, named for them"

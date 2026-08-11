@@ -200,8 +200,19 @@ same failure this project exists to beat.
   nothing in the namespace served X, so `etc/de-ns-run.linux` — copied into
   each tree at boot — now gives a menu-launched program a display, delegating
   to the distribution's own `hamnix-x11session` where there is one.
-  `docs/linux_distro_namespaces.md` §8.4, `tests/linux/distro_menu.sh` (no
-  `GAP` line any more; it clicks a row and screendumps what comes up).
+  `docs/linux_distro_namespaces.md` §8.4, `tests/linux/distro_menu.sh` (which
+  now clicks a row and screendumps what comes up).
+* **A menu-launched app reaches its namespace and cannot reach the DISPLAY.**
+  The click works, the namespace works, the application starts — and Xwayland,
+  as uid 1001 inside the namespace, cannot `connect(2)` to `/run/wayland-0`:
+  `/etc/rc.distros-wl` starts the per-distribution `wsyswl` **as root** and the
+  socket comes out `srwxr-xr-x`, owner-writable only, owner not even mapped
+  into the entering process's user namespace. Measured, by name, in
+  `/n/debian/tmp/de-ns-run.log`. Nothing had hit it because every previous
+  GUI-in-a-namespace run (`steam_gui_run.sh`, `alpine_gui_run.sh`) ran its
+  client as ROOT. Fix: create the socket writable by the session user, or
+  start `wsyswl` as them — `user/wsyswl.ad`, whoever owns it.
+  `docs/linux_distro_namespaces.md` §8.5.
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software

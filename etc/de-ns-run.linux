@@ -27,10 +27,17 @@
 # The failure this replaces was a menu row that did nothing and logged
 # nothing on either side of the boundary.
 set -u
-exec 2>>/tmp/de-ns-run.log
-echo "=== de-ns-run: $* ($(date 2>/dev/null))" >&2
+LOG=/tmp/de-ns-run.log
+# NOT `exec 2>>$LOG`. The first version did that, and it swallowed the
+# PROGRAM's own stderr along with the shim's -- so the one probe that runs a
+# command-line tool through here to prove the namespace was reached printed
+# nothing at all on the console, and looked exactly like the failure it was
+# there to rule out. The shim's notes go to the log; what the program writes
+# is the program's business.
+note() { echo "de-ns-run: $*" >> "$LOG"; }
+echo "=== de-ns-run $(date 2>/dev/null): $*" >> "$LOG"
 
-[ $# -gt 0 ] || { echo "de-ns-run: no program given" >&2; exit 2; }
+[ $# -gt 0 ] || { note "no program given"; echo "de-ns-run: no program given" >&2; exit 2; }
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
@@ -48,7 +55,7 @@ export HOME
 # to pay for an X server to find out, and an X server it did not want is a
 # second thing that can fail in the middle of that measurement.
 if [ "${HAMNIX_DE_XSESSION:-1}" = "0" ]; then
-    echo "de-ns-run: HAMNIX_DE_XSESSION=0; running the program with no display" >&2
+    note "HAMNIX_DE_XSESSION=0; running the program with no display"
     exec "$@"
 fi
 
@@ -58,15 +65,29 @@ fi
 # recipes (Xwayland geometry, the jwm choice, the stale-lock removal); this
 # file must not become a second, divergent copy of them.
 if [ -x /usr/local/bin/hamnix-x11session ]; then
-    echo "de-ns-run: delegating to /usr/local/bin/hamnix-x11session" >&2
-    exec /usr/local/bin/hamnix-x11session "$@"
+    # THE ONE THING THAT STOPS IT DEAD, NAMED BEFORE IT HAPPENS. That script
+    # writes /tmp/xwayland.log and unlinks /tmp/.X0-lock; a distribution's
+    # /tmp is the medium's own, is sticky 1777, and survives reboots -- so a
+    # file a ROOT-run session left there can be neither truncated nor unlinked
+    # by uid 1001, and the only symptom is `Xwayland FAILED TO START'. The
+    # boot clears these (the generated /etc/rc.distros); if one is still here
+    # and not ours, say which and why rather than letting it read as an X bug.
+    for f in /tmp/xwayland.log /tmp/.X0-lock /tmp/.X11-unix/X0; do
+        [ -e "$f" ] || continue
+        [ -O "$f" ] && continue
+        note "WARNING $f exists and is not ours; uid $(id -u 2>/dev/null) cannot"
+        note "  replace it in a sticky /tmp, and Xwayland will fail to start."
+        note "  It is left by a ROOT-run X session; /etc/rc.distros clears it at boot."
+    done
+    note "delegating to /usr/local/bin/hamnix-x11session"
+    exec /usr/local/bin/hamnix-x11session "$@" >>"$LOG" 2>&1
 fi
 
 # 2. NO WRAPPER. If this distribution has no Xwayland it has no X clients
 # either, so the program is a Wayland-native one (or a CLI) and runs as it is.
 if ! command -v Xwayland >/dev/null 2>&1; then
-    echo "de-ns-run: no Xwayland in this namespace; running the program directly" >&2
-    echo "de-ns-run: (if it is an X11 client it will fail to open a display, and say so below)" >&2
+    note "no Xwayland in this namespace; running the program directly"
+    note "(if it is an X11 client it will fail to open a display and say so)"
     exec "$@"
 fi
 
@@ -90,8 +111,8 @@ if ! DISPLAY=:0 xdpyinfo >/dev/null 2>&1; then
             if Xwayland -help 2>&1 | grep -q -- '-geometry'; then
                 GEOMOPT="-geometry ${SW}x${SH}"
             fi
-            echo "de-ns-run: X screen ${SW}x${SH}" >&2 ;;
-        *)  echo "de-ns-run: WARNING no $XDG_RUNTIME_DIR/hamnix-screen; the X screen size is Xwayland's default, not the display's" >&2 ;;
+            note "X screen ${SW}x${SH}" ;;
+        *)  note "WARNING no $XDG_RUNTIME_DIR/hamnix-screen; the X screen size is Xwayland's default, not the display's" ;;
     esac
     # shellcheck disable=SC2086
     Xwayland -shm -noreset $GEOMOPT :0 >/tmp/de-ns-xwayland.log 2>&1 &
@@ -104,13 +125,13 @@ if ! DISPLAY=:0 xdpyinfo >/dev/null 2>&1; then
         i=$((i+1)); sleep 0.25
     done
     if DISPLAY=:0 xdpyinfo >/dev/null 2>&1; then
-        echo "de-ns-run: Xwayland up after $i polls" >&2
+        note "Xwayland up after $i polls"
     else
-        echo "de-ns-run: Xwayland FAILED TO START -- the program will not get a display" >&2
-        tail -12 /tmp/de-ns-xwayland.log >&2 2>/dev/null
+        note "Xwayland FAILED TO START -- the program will not get a display"
+        tail -12 /tmp/de-ns-xwayland.log >>"$LOG" 2>/dev/null
     fi
 else
-    echo "de-ns-run: an X server is already on :0; reusing it" >&2
+    note "an X server is already on :0; reusing it"
 fi
 export DISPLAY=:0
 
@@ -125,14 +146,14 @@ if ! xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id'; the
             jwm >/tmp/de-ns-wm.log 2>&1 &
         fi
         sleep 1
-        echo "de-ns-run: started jwm" >&2
+        note "started jwm"
     else
-        echo "de-ns-run: no jwm in this namespace -- the window will not be movable" >&2
+        note "no jwm in this namespace -- the window will not be movable"
     fi
 fi
 
-echo "de-ns-run: exec $*" >&2
-"$@" >>/tmp/de-ns-run.log 2>&1
+note "exec $*"
+"$@" >>"$LOG" 2>&1
 rc=$?
-echo "de-ns-run: $1 exited $rc" >&2
+note "$1 exited $rc"
 exit $rc

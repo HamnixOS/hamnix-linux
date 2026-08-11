@@ -458,10 +458,62 @@ an X server to find out. Everything it does lands in `/tmp/de-ns-run.log`
 **inside** the tree — i.e. `/n/<name>/tmp/de-ns-run.log` from the Hamnix side,
 the one path both sides can read.
 
-`tests/linux/distro_menu.sh` no longer prints a `GAP`. It runs both generated
-launcher rcs, **clicks a fly-out row** with synthetic pointer events, reads the
-shim's log back across the namespace boundary, and takes a fourth screendump
-of what came up.
+`tests/linux/distro_menu.sh` no longer prints a `GAP` for the namespace. It
+runs both generated launcher rcs, **clicks a fly-out row** with synthetic
+pointer events, reads the shim's log back across the namespace boundary, and
+takes a fourth screendump of what came up.
+
+### 8.5 What is left: the Wayland socket is not writable by the session user
+
+**The click works. The namespace works. The application starts. It cannot
+reach the display**, and this is the third fault of the same family in one
+path, which is why it is worth naming as a family rather than as three bugs.
+
+Measured, from `/n/debian/tmp/de-ns-run.log` — the shim's log, read from the
+Hamnix side:
+
+```
+=== de-ns-run Tue Aug 11 11:29:38 UTC 2026: uxterm
+de-ns-run: delegating to /usr/local/bin/hamnix-x11session
+hamnix-x11session: wayland socket /run/wayland-0
+srwxr-xr-x 1 nobody nogroup 0 Aug 11 11:28 /run/wayland-0
+hamnix-x11session: Xwayland FAILED TO START
+_XSERVTransmkdir: Owner of /tmp/.X11-unix should be set to root
+could not connect to wayland server
+(EE) Fatal server error:
+(EE) Couldn't add screen
+```
+
+`connect(2)` on a unix socket requires **write** permission on the socket.
+`/etc/rc.distros-wl` starts one `wsyswl` per distribution **as root**, at
+runlevel 5, and the socket comes out `srwxr-xr-x` — owner-writable only, and
+the owner is a uid that is not even mapped into the entering process's user
+namespace (`nobody nogroup` is what uid 0 looks like from in there). So the
+one thing a menu-launched application must do — connect to the display — is
+the one thing the session user cannot do.
+
+**Nothing had ever hit this**, and the reason is the same as everywhere else
+in §8.4: every previous GUI-in-a-namespace run (`steam_gui_run.sh`,
+`alpine_gui_run.sh`) ran its client **as root**, where the socket mode never
+mattered. The DE application menu is the first caller that is unprivileged by
+construction.
+
+The fix is one of two, and it belongs with whoever owns `user/wsyswl.ad`:
+create the socket writable by the session user (`0777`, the way every other
+Wayland compositor's `$XDG_RUNTIME_DIR` socket is reachable, with the
+directory carrying the access control), or start the per-distribution
+`wsyswl` **as** the session user so the socket is theirs. The second is the
+better shape — it is the same argument as `etc/rc.de-user`'s privilege drop,
+one layer out — but it needs `wsyswl` to be able to open `/dev/fb` and the
+`/srv` segments first, which is why it is not a one-line change.
+
+The three faults, together, are one lesson: **a namespace's contents are not
+the namespace's interface.** Three different resources — a directory in the
+medium (`/n`), a lock file in its `/tmp`, a socket in its `/run` — were each
+created by root at a moment when root was the only one who ever used them,
+and each became invisible to the unprivileged session that came later. Each
+failed silently, and each now says which resource, which uid, and what would
+fix it.
 
 ---
 
