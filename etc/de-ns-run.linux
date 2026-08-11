@@ -39,8 +39,34 @@ echo "=== de-ns-run $(date 2>/dev/null): $*" >> "$LOG"
 
 [ $# -gt 0 ] || { note "no program given"; echo "de-ns-run: no program given" >&2; exit 2; }
 
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+
+# THE RUNTIME DIRECTORY, WHICH IS THE FOURTH FAULT OF THE FAMILY BELOW AND IS
+# NOW FIXED. It used to be the distribution's whole /run -- 40755 uid 0 -- so
+# the session could read everything wsyswl publishes there and create nothing.
+# `bind '#distro/<name>' /n/<name>' now stages /run/user/<uid> at 0700 owned by
+# the session user, at boot, as root, in the same breath as the mount points
+# (user/linux-syscalls.c, distro_stage_runtime). That is the standard Linux
+# shape and it is NARROWER than what it replaces, not wider.
+#
+# PREFER IT OVER AN INHERITED VALUE THAT DOES NOT WORK. A caller that exported
+# XDG_RUNTIME_DIR=/run is naming a directory it cannot write, and every
+# consequence of that is three layers down in someone else's error message; a
+# writable directory that exists beats an unwritable one that was inherited.
+# An inherited value that IS writable is left alone -- it is a deliberate
+# choice by whoever made it.
+_xrd="/run/user/$(id -u 2>/dev/null || echo 1001)"
+if [ -d "$_xrd" ] && [ -w "$_xrd" ]; then
+    case "${XDG_RUNTIME_DIR:-}" in
+        "$_xrd") : ;;
+        "") XDG_RUNTIME_DIR="$_xrd" ;;
+        *)  [ -w "${XDG_RUNTIME_DIR}" ] || {
+                note "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR is not writable by uid $(id -u 2>/dev/null); using $_xrd"
+                XDG_RUNTIME_DIR="$_xrd"
+            } ;;
+    esac
+fi
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run}"
 
 # THE DISPLAY SOCKET, NAMED WITH ITS MODE, BEFORE ANYTHING TRIES TO USE IT.
 # connect(2) on a unix socket needs WRITE permission on it, and this is the
@@ -52,9 +78,17 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 # it 0666 at creation (docs/linux_distro_namespaces.md 8.5); this line is the
 # WITNESS for that, logged from the side that actually has to connect, and it
 # does not depend on which hamnix-x11session this distribution ships.
+#
+# `ls -lL', NOT `ls -l'. $XDG_RUNTIME_DIR is now /run/user/<uid> and the name
+# in it is a SYMLINK to the real socket at /run/wayland-0 -- which is how the
+# runtime directory moved without the socket moving (user/linux-syscalls.c,
+# distro_stage_runtime). `ls -l' on the link prints `lrwxrwxrwx', and the one
+# fact this line exists to witness is the MODE OF THE THING connect(2) opens.
+# -L follows it and prints `srw-rw-rw-' either way, so the witness says the
+# same thing whether the path is a link or the socket itself.
 WLSOCK="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
 if [ -S "$WLSOCK" ]; then
-    note "wayland socket $(ls -l "$WLSOCK" 2>/dev/null)"
+    note "wayland socket $(ls -lL "$WLSOCK" 2>/dev/null)"
     [ -w "$WLSOCK" ] || {
         note "ERROR $WLSOCK is NOT writable by uid $(id -u 2>/dev/null), and"
         note "  connect(2) needs write. Every client here will fail with"
@@ -65,35 +99,66 @@ else
     note "WARNING no wayland socket at $WLSOCK; is /etc/rc.distros-wl running a wsyswl for this distribution?"
 fi
 
-# THE FOURTH FAULT OF THE SAME FAMILY, SAID OUT LOUD RATHER THAN LEFT TO BE
-# REDISCOVERED. docs/linux_distro_namespaces.md 8.5 names three: a mount point
-# in the medium (/n), a stale X lock in its /tmp, and this namespace's Wayland
-# socket in its /run -- each created by root when root was its only user, each
-# invisible to the unprivileged session that came later. The fourth is the
-# DIRECTORY those last two live in. Measured with debugfs on both media:
+# THE FOURTH FAULT OF THE SAME FAMILY, NOW FIXED -- AND PROVED BY CREATING A
+# FILE, NOT BY READING A MODE. docs/linux_distro_namespaces.md 8.5 names three:
+# a mount point in the medium (/n), a stale X lock in its /tmp, and this
+# namespace's Wayland socket in its /run -- each created by root when root was
+# its only user, each invisible to the unprivileged session that came later.
+# The fourth was the DIRECTORY those last two live in. Measured with debugfs on
+# both media, before:
 #
 #     /run          40755 uid 0        <- $XDG_RUNTIME_DIR
 #     /run/dbus     40755 uid 0
 #     /run/dconf    40700 uid 0
 #
-# So the session can READ what wsyswl publishes here (wayland-0, and the
-# hamnix-screen geometry file beside it, both 0644) and can CREATE NOTHING. A
-# per-user XDG_RUNTIME_DIR is normally /run/user/<uid>, owned by that uid and
-# mode 0700; here it is the distribution's whole /run, owned by root. Fixing
-# the socket mode fixed CONNECTING; it does not fix CREATING, and the next
-# casualties are already known -- `dbus-daemon --system' cannot make
-# /run/dbus/system_bus_socket as uid 1001, which is the unprivileged half of
-# the D-Bus gap in HANDOFF.md 0, and every toolkit that wants a runtime file.
+# So the session could READ what wsyswl publishes (wayland-0 at 0666, the
+# hamnix-screen geometry file at 0644) and CREATE NOTHING. Fixing the socket
+# mode fixed CONNECTING and never touched CREATING.
 #
-# Not silently widened here: making a distribution's /run world-writable is a
-# real access-control decision and it belongs with whoever owns the
-# XDG_RUNTIME_DIR convention, not with a launcher shim. What a launcher shim
-# owes it is a name, once, at the moment it starts to matter.
-if [ ! -w "$XDG_RUNTIME_DIR" ]; then
-    note "NOTE XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR is not writable by uid $(id -u 2>/dev/null)"
+# The boot now stages /run/user/<uid> at 0700 owned by the session user, and
+# chowns /run/dbus and /run/dconf to it without changing their modes -- root, at
+# the one moment it holds the medium, which is where the first fault of this
+# family was fixed too (user/linux-syscalls.c, distro_stage_runtime).
+#
+# WHY THE PROBE WRITES. `[ -w ]` answers from the mode bits, and this whole
+# family of faults is a case of the mode bits being read correctly and the
+# effective answer still being no -- a uid that is not mapped into the user
+# namespace, a sticky /tmp, a read-only medium under HAMLINUX_DISTRO_RO=1. The
+# one honest question is whether this uid can create a file here, so ask it that
+# way, once, and say the answer either way. NORTH_STAR.md: a gap must never
+# answer something success-shaped instead of the truth.
+_probe="$XDG_RUNTIME_DIR/.de-ns-run-probe.$$"
+if : > "$_probe" 2>/dev/null; then
+    note "runtime dir $XDG_RUNTIME_DIR is WRITABLE by uid $(id -u 2>/dev/null): created $_probe"
+    note "  ($(ls -ld "$XDG_RUNTIME_DIR" 2>/dev/null))"
+    rm -f "$_probe" 2>/dev/null
+else
+    note "ERROR uid $(id -u 2>/dev/null) CANNOT create a file in XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
     note "  ($(ls -ld "$XDG_RUNTIME_DIR" 2>/dev/null)). Reading what wsyswl"
     note "  publishes here works; anything that must CREATE a runtime file --"
-    note "  dbus-daemon's system_bus_socket, dconf, a toolkit cache -- will not."
+    note "  dbus-daemon's session bus, dconf, a toolkit cache -- will not."
+    note "  The boot stages /run/user/<uid> (user/linux-syscalls.c,"
+    note "  distro_stage_runtime); if it is missing, this tree was posted by a"
+    note "  bind that did not run it, or the medium is read-only."
+fi
+# THE SYSTEM BUS IS A SEPARATE DIRECTORY AND A SEPARATE ANSWER, and conflating
+# the two cost a pass. /run/dbus/system_bus_socket is a COMPILE-TIME path in
+# dbus; no XDG_RUNTIME_DIR moves it. Getting the runtime directory right fixes
+# the SESSION bus and dconf and does nothing at all for the system bus -- which
+# is why the boot chowns /run/dbus to the session user as well, since
+# hamnix-x11session is what runs `dbus-daemon --system' here and it runs as that
+# user. Named separately so a later reader does not have to rediscover that
+# these are two facts.
+if [ -d /run/dbus ]; then
+    _dprobe="/run/dbus/.de-ns-run-probe.$$"
+    if : > "$_dprobe" 2>/dev/null; then
+        note "/run/dbus is writable by uid $(id -u 2>/dev/null); the system bus can be started here"
+        rm -f "$_dprobe" 2>/dev/null
+    else
+        note "NOTE /run/dbus is NOT writable by uid $(id -u 2>/dev/null)"
+        note "  ($(ls -ld /run/dbus 2>/dev/null)); \`dbus-daemon --system' will fail"
+        note "  with \`Failed to bind socket .../system_bus_socket: Permission denied'."
+    fi
 fi
 # hamsh hands an entering program "/" as $HOME when it has not resolved a
 # passwd entry, and "/" IS a directory, so `[ -d "$HOME" ]` accepts it -- and

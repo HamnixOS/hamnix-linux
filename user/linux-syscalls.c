@@ -2904,6 +2904,8 @@ static const char *root_stage_dir(char *out, size_t outn)
  * already assumes. Root only: for anyone else this is a no-op, and the bind
  * they are about to attempt will name its own failure.
  */
+static void distro_stage_runtime(const char *dst);
+
 static void distro_stage_mountpoints(const char *dst)
 {
     if (geteuid() != 0)
@@ -2926,6 +2928,164 @@ static void distro_stage_mountpoints(const char *dst)
             strerror(errno));
         ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
         (void)w;
+    }
+    /* The same moment, the same argument, the fourth member of the same
+     * family: see distro_stage_runtime just below. */
+    distro_stage_runtime(dst);
+}
+
+/* THE SESSION'S RUNTIME DIRECTORY, AND IT IS THE FOURTH FAULT OF THE FAMILY
+ * THE FUNCTION ABOVE OPENED.
+ *
+ * §8.4 and §8.5 of docs/linux_distro_namespaces.md name three faults, and all
+ * three are the same mistake: a thing ROOT made when root was its only user,
+ * invisible to the unprivileged session that came later. A mount point in the
+ * medium (`/n` — the function above). A stale X lock in its `/tmp` (cleared by
+ * the generated /etc/rc.distros). The Wayland socket in its `/run`, `srwxr-xr-x`
+ * when connect(2) needs write (wsyswl chmods it 0666 at creation).
+ *
+ * The fourth is the DIRECTORY the third lives in. Measured with debugfs on both
+ * media: `/run` 40755 uid 0, `/run/dbus` 40755 uid 0, `/run/dconf` 40700 uid 0.
+ * `$XDG_RUNTIME_DIR` WAS that `/run`. So the session could READ everything
+ * wsyswl publishes there — the socket at 0666 and the `hamnix-screen` geometry
+ * file at 0644 — and CREATE NOTHING. Fixing the socket mode fixed CONNECTING;
+ * it never touched CREATING, and a runtime directory a session cannot write is
+ * not a runtime directory.
+ *
+ * WHAT IS MADE HERE, AND WHY IT IS NARROWER THAN WHAT IT REPLACES. `/run/user/
+ * <uid>` at 0700 owned by that uid is the ordinary Linux shape, and against
+ * today's `/run` it is a TIGHTENING, not a widening: the session gets a
+ * directory of its own instead of read-and-traverse over the whole of a
+ * distribution's runtime state. The alternative — making a distribution's
+ * `/run` world-writable — is the one this project already rejected, and
+ * rightly: it hands every principal in the namespace write access to the
+ * display socket's directory to solve one uid's problem.
+ *
+ * NOTHING MOVES. The socket stays at `/run/wayland-0`, because four separate
+ * files name that path (`hamnix-x11session` in both distributions,
+ * tests/linux/alpine_gui_run.sh, tests/linux/steam_gui_run.sh and
+ * tests/linux/x11_geom_probe.sh) and a fix that silently relocates a display
+ * socket is a fix that breaks four measurements to close one gap. What goes
+ * into the new directory instead is a SYMLINK per published name, pointing back
+ * up at the real one. `connect(2)`, `[ -S ]`, `[ -r ]` and `read` all follow
+ * symlinks, so `$XDG_RUNTIME_DIR/wayland-0` and `$XDG_RUNTIME_DIR/hamnix-screen`
+ * resolve for a client that has never heard of `/run/wayland-0` — which is
+ * exactly what libwayland's `wl_display_connect(NULL)` builds. The links are
+ * dangling between here (rc.boot) and rc.5, when the per-distribution wsyswl
+ * actually posts its socket; a dangling symlink is the correct state for a
+ * name whose server has not started yet, and it is the same "post the server at
+ * its name" order the rest of this file is built on.
+ *
+ * `/run/dbus` AND `/run/dconf` ARE CHOWNED, NOT WIDENED, and this is the part
+ * worth arguing rather than assuming. Their MODES are left exactly as they are
+ * (0755 and 0700); only the owner changes, from uid 0 to the session uid. On a
+ * real Linux the system bus is started by init as root and the session never
+ * writes `/run/dbus` — but nothing here starts it as root: `hamnix-x11session`
+ * runs `dbus-daemon --system` itself, as uid 1001, and `/run/dbus/system_bus_
+ * socket` is a COMPILE-TIME path in dbus that no environment variable moves. So
+ * `/run/user/<uid>` alone does not bring the system bus up; it fixes the SESSION
+ * bus and dconf and leaves `system_bus_socket': Permission denied` exactly where
+ * it was. There are two ways to close it and only one of them is small: root
+ * starts a bus per distribution at boot (new machinery, a daemon supervised by
+ * nobody), or the one principal that actually runs the bus owns the directory it
+ * must write. Inside a distribution namespace there IS one session user, so the
+ * second transfers a directory rather than sharing it, and no other uid gains
+ * anything. That is the choice taken here; if a distribution ever grows a real
+ * root-run bus, this is the line to delete.
+ *
+ * Root only, EEXIST is success, and a read-only medium says so once per path —
+ * the same three rules as the function above, for the same reason: this runs on
+ * every `bind '#distro/<name>' /n/<name>`, which the boot does per distribution
+ * and a session user may attempt at any time.
+ */
+#define HAMNIX_SESSION_UID 1001
+#define HAMNIX_SESSION_GID 1001
+
+static void distro_stage_note(const char *what, const char *p)
+{
+    char m[512];
+    int n = snprintf(m, sizeof m,
+        "bind: could not %s `%s' (%s); the session user's runtime directory "
+        "will not be complete\n", what, p, strerror(errno));
+    ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
+    (void)w;
+}
+
+static void distro_stage_runtime(const char *dst)
+{
+    if (geteuid() != 0)
+        return;
+    char p[1024];
+
+    /* /run itself, then /run/user: both 0755 root, which is what they are on a
+     * distribution today and what every other Linux has. Only the leaf is the
+     * session's. */
+    if ((size_t)snprintf(p, sizeof p, "%s/run", dst) >= sizeof p)
+        return;
+    if (mkdir(p, 0755) < 0 && errno != EEXIST) {
+        /* A read-only medium. Nothing below can work, and the launcher shim
+         * will say the same thing again from inside; once is enough here. */
+        distro_stage_note("create", p);
+        return;
+    }
+    if ((size_t)snprintf(p, sizeof p, "%s/run/user", dst) >= sizeof p)
+        return;
+    if (mkdir(p, 0755) < 0 && errno != EEXIST) {
+        distro_stage_note("create", p);
+        return;
+    }
+
+    /* The leaf. mkdir's mode is masked by the umask (022 in every boot here),
+     * so 0700 survives it -- but chmod anyway, because a directory left by an
+     * earlier boot with a different umask is the case EEXIST hides. */
+    char rt[1024];
+    if ((size_t)snprintf(rt, sizeof rt, "%s/run/user/%d", dst,
+                         HAMNIX_SESSION_UID) >= sizeof rt)
+        return;
+    if (mkdir(rt, 0700) < 0 && errno != EEXIST) {
+        distro_stage_note("create", rt);
+        return;
+    }
+    if (chown(rt, HAMNIX_SESSION_UID, HAMNIX_SESSION_GID) < 0)
+        distro_stage_note("chown", rt);
+    if (chmod(rt, 0700) < 0)
+        distro_stage_note("chmod 0700", rt);
+
+    /* The names wsyswl publishes in `/run`, linked into the new directory so
+     * that moving $XDG_RUNTIME_DIR moves NOTHING on disk. Relative targets:
+     * from /run/user/<uid>/ the string `../../wayland-0' is /run/wayland-0,
+     * which stays correct however the tree is bound or entered. */
+    static const char *pub[] = { "wayland-0", "hamnix-screen", "wsyswl-state" };
+    for (size_t i = 0; i < sizeof pub / sizeof pub[0]; i++) {
+        char link[1152], tgt[64];
+        if ((size_t)snprintf(link, sizeof link, "%s/%s", rt, pub[i]) >= sizeof link)
+            continue;
+        snprintf(tgt, sizeof tgt, "../../%s", pub[i]);
+        /* A LINK LEFT BY AN EARLIER BOOT IS NOT EVIDENCE THAT IT POINTS
+         * ANYWHERE USEFUL. /run is on the medium and survives the reboot, so
+         * replace rather than trust: unlink then symlink, and EEXIST from a
+         * plain symlink(2) would otherwise be read as success for ever. */
+        if (unlink(link) < 0 && errno != ENOENT) {
+            distro_stage_note("replace", link);
+            continue;
+        }
+        if (symlink(tgt, link) < 0)
+            distro_stage_note("link", link);
+    }
+
+    /* The two runtime directories a desktop session must write and could not.
+     * Owner only -- the modes are untouched. See the argument above. */
+    static const char *own[] = { "/run/dbus", "/run/dconf" };
+    static const mode_t ownmode[] = { 0755, 0700 };
+    for (size_t i = 0; i < sizeof own / sizeof own[0]; i++) {
+        if ((size_t)snprintf(p, sizeof p, "%s%s", dst, own[i]) >= sizeof p)
+            continue;
+        if (mkdir(p, ownmode[i]) < 0 && errno != EEXIST) {
+            distro_stage_note("create", p);
+            continue;
+        }
+        if (chown(p, HAMNIX_SESSION_UID, HAMNIX_SESSION_GID) < 0)
+            distro_stage_note("chown", p);
     }
 }
 
