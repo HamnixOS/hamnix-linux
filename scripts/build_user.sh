@@ -104,8 +104,13 @@ _bu_write_stamp() {
 #     drains we exit non-zero if ANY compile failed (a backgrounded failure
 #     is never silently swallowed).
 #
-# Concurrency level: HAMNIX_BUILD_JOBS (default: nproc).
-_BUILD_JOBS="${HAMNIX_BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+# Concurrency level: HAMNIX_BUILD_JOBS, defaulting to the tree-wide worker cap
+# in scripts/hamlinux_jobs.sh rather than to nproc. See that file for why the
+# cap is on WORKERS and not on cores.
+if [ -r "$(dirname "${BASH_SOURCE[0]}")/hamlinux_jobs.sh" ]; then
+    . "$(dirname "${BASH_SOURCE[0]}")/hamlinux_jobs.sh"
+fi
+_BUILD_JOBS="${HAMNIX_BUILD_JOBS:-${HAMLINUX_JOBS:-4}}"
 [ "$_BUILD_JOBS" -ge 1 ] 2>/dev/null || _BUILD_JOBS=1
 
 # Build host_ac.elf ONCE before fanning out (no-op under ADDER_CC=python).

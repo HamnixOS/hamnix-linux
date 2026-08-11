@@ -30,7 +30,8 @@
 #   scripts/hamlinux_runsweep.sh <outdir> [app ...]
 #
 # Env:
-#   RUNSWEEP_JOBS      parallel build jobs (default: nproc)
+#   RUNSWEEP_JOBS      parallel build jobs (default: HAMLINUX_JOBS, see
+#                      scripts/hamlinux_jobs.sh -- workers, not cores)
 #   RUNSWEEP_TIMEOUT   seconds for an ordinary program (default 5)
 #   RUNSWEEP_DTIMEOUT  seconds a daemon/GUI client is given to stay up (default 4)
 #   RUNSWEEP_NOBUILD=1 reuse <outdir>/obj from a previous run
@@ -47,7 +48,8 @@ cd "$PROJ_ROOT"
 
 OUT="${1:?usage: hamlinux_runsweep.sh <outdir> [app ...]}"; shift
 OUT="$(mkdir -p "$OUT" && cd "$OUT" && pwd)"
-JOBS="${RUNSWEEP_JOBS:-$(nproc)}"
+. "$(dirname "$0")/hamlinux_jobs.sh"
+JOBS="${RUNSWEEP_JOBS:-$HAMLINUX_JOBS}"
 TMO="${RUNSWEEP_TIMEOUT:-5}"
 DTMO="${RUNSWEEP_DTIMEOUT:-4}"
 RECIPES="$PROJ_ROOT/tests/linux/runsweep_recipes.tsv"
@@ -70,7 +72,7 @@ if [ -z "${RUNSWEEP_NOBUILD:-}" ]; then
     # Serialise the shared runtime objects first: every parallel build would
     # otherwise race to compile user/linux-*.c into the same .o.
     scripts/hamlinux_build.sh user/echo.ad "$OUT/obj/echo.elf" >/dev/null 2>&1
-    printf '%s\n' "${APPS[@]}" | xargs -P "$JOBS" -I{} \
+    printf '%s\n' "${APPS[@]}" | nice -n "$HAMLINUX_NICE" xargs -P "$JOBS" -I{} \
         bash -c 'scripts/hamlinux_build.sh user/{}.ad '"$OUT"'/obj/{}.elf \
                  >/dev/null 2>'"$OUT"'/run/{}.build.err; echo "{} $?" \
                  >> '"$OUT"'/build.rc'
@@ -131,6 +133,16 @@ for l in /lib/x86_64-linux-gnu/libnss_{files,dns}.so.2; do
 done
 
 cp -a etc/. "$BASE/etc/"
+# The manual pages, staged EXACTLY where scripts/hamlinux_image.sh puts them.
+# Without this the sweep was not measuring `help` and `man`, it was measuring
+# its own staging: both walk /usr/share/man/, both found an empty tree, and
+# `help` reported that and exited 0 — so the sweep recorded a pass for a
+# discovery command that had discovered nothing. A smoke test whose root is
+# not the root the program ships against manufactures its own failures
+# (HANDOFF.md §5, the same reason the recipes' oracle is each program's own
+# header and not GNU coreutils).
+mkdir -p "$BASE/usr/share/man"
+install -m644 etc/man/*.md "$BASE/usr/share/man/" 2>/dev/null || true
 install -m644 etc/rc.boot.linux       "$BASE/etc/rc.boot"
 install -m644 etc/rc.d/rc.5.linux     "$BASE/etc/rc.d/rc.5"
 install -m644 etc/rc.de-user.linux    "$BASE/etc/rc.de-user"

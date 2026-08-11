@@ -70,5 +70,10 @@ argument — including an argument made by the person writing this file.
   without the machine owner saying so. Test in the VM, or offscreen with
   `HAMFB_FILE`. Host-side Vulkan is forced to the software ICD.
 - Work on a branch. Commit as you go, with real messages. Do not force-push.
+- **This machine belongs to someone who is using it.** Fan-out is capped at
+  `HAMLINUX_JOBS` workers (default 4) — see `scripts/hamlinux_jobs.sh`, and
+  cap workers rather than pinning cores. Reap what you start: two leaked
+  `hamsh` processes once spun at 100% for 25 hours and 7 hours respectively
+  before anyone noticed.
 - `https://255.one/` is the package repository, served from `HamnixOS/packages`
   (GitHub Pages). Publishing there is authorized.
