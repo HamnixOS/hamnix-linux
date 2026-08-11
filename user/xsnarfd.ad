@@ -469,24 +469,38 @@ def note_clear(sel: uint32):
         own_prim = 0
 
 
+# THE SEND-EVENT BIT. An event a client sent with SendEvent rather than one
+# the server generated arrives with the top bit of the type byte SET -- so a
+# SelectionNotify from an owner answering our ConvertSelection is type 159, not
+# 31, and every ICCCM answer in the protocol comes that way because SendEvent
+# is how an owner replies. Comparing the raw byte cost one measured run in
+# which the Hamnix->X direction worked perfectly and X->Hamnix timed out three
+# seconds at a time with no error anywhere: the message was arriving, being
+# recognised as nothing, and being dropped.
+def evtype() -> uint8:
+    return xin[0] & 127
+
+
 # Every message that is not the reply we are waiting for lands here.
 def dispatch():
-    t: uint8 = xin[0]
+    t: uint8 = evtype()
     if t == EV_SelectionRequest:
         serve_request()
         return
     if t == EV_SelectionClear:
         sel: uint32 = get32(&xin[0], 12)
         note_clear(sel)
-        # WITHOUT XFixes this is the only notice we get that the X clipboard
-        # changed hands, so it has to trigger the pull. With XFixes the
-        # XFixesSelectionNotify below covers this and every handover between
-        # two OTHER clients as well, so the flag is set in one place only.
-        if xfixes_op == 0:
-            if sel == atom_clipboard:
-                pull_clip = 1
-            elif sel == ATOM_PRIMARY:
-                pull_prim = 1
+        # ALWAYS armed, XFixes or not. Without XFixes this is the only notice
+        # we get that the clipboard changed hands. With XFixes it is a second
+        # notice of the same handover -- and it stays armed deliberately,
+        # because XFixesSelectSelectionInput has NO REPLY, so a bridge that
+        # relied on it alone would go silently one-way if that request were
+        # ever refused (which is exactly what a wrong length field did here
+        # once). Both paths set the same flag; the pull happens once.
+        if sel == atom_clipboard:
+            pull_clip = 1
+        elif sel == ATOM_PRIMARY:
+            pull_prim = 1
         return
     if xfixes_op != 0 and cast[uint32](t) == xfixes_event:
         owner: uint32 = get32(&xin[0], 8)
@@ -704,14 +718,19 @@ def query_xfixes() -> int32:
 
 
 def xfixes_watch(sel: uint32):
-    zero(&reqbuf[0], 20)
+    # 16 bytes, length 4: header(4) window(4) selection(4) eventMask(4). It was
+    # 20/5 here for one measured run, and the whole X-to-Hamnix direction was
+    # dead with nothing to show for it but `X error code 16 for request opcode
+    # 138` -- BadLength, on a request with no reply to carry the failure. That
+    # line existing at all is why this took minutes instead of an afternoon.
+    zero(&reqbuf[0], 16)
     reqbuf[0] = cast[uint8](xfixes_op)
     reqbuf[1] = 2                          # XFixesSelectSelectionInput
-    put16(&reqbuf[0], 2, 5)
+    put16(&reqbuf[0], 2, 4)
     put32(&reqbuf[0], 4, mywin)
     put32(&reqbuf[0], 8, sel)
     put32(&reqbuf[0], 12, 7)               # SetOwner|WindowDestroy|ClientClose
-    x_send(&reqbuf[0], 20)
+    x_send(&reqbuf[0], 16)
 
 
 def get_selection_owner(sel: uint32) -> uint32:
@@ -819,7 +838,7 @@ def convert_and_get(sel: uint32, target: uint32) -> int64:
         if r == 0:
             budget = budget - 1
             continue
-        if xin[0] == EV_SelectionNotify and get32(&xin[0], 12) == sel:
+        if evtype() == EV_SelectionNotify and get32(&xin[0], 12) == sel:
             prop = get32(&xin[0], 20)
             got_notify = 1
         else:
