@@ -35,6 +35,40 @@ echo 'rc.boot: hamnix-linux starting'
 # devtmpfs has no such node, so the messages went nowhere: a GUI app could be
 # reporting a fault every frame and the operator would see silence.
 ln -s /dev/console /dev/cons
+
+# /dev/fd, and the three names that hang off it.
+#
+# devtmpfs does not create these -- on a normal Debian system systemd or the
+# initramfs does, and nothing here was doing it. The symptom is not a missing
+# device: it is that BASH PROCESS SUBSTITUTION stops working, because `<(...)`
+# is implemented as /dev/fd/<n>. Steam's own runtime setup uses it, and what
+# you get is
+#
+#   .../steam-runtime/setup.sh: line 131: /dev/fd/63: No such file or directory
+#
+# from a script that is plainly there, on a system where the shell is fine.
+# Every /dev in the tree comes from this one devtmpfs -- including the Debian
+# namespace's, which enter_root bind-mounts from here -- so fixing it here
+# fixes it for both userlands at once.
+ln -s /proc/self/fd /dev/fd
+ln -s /proc/self/fd/0 /dev/stdin
+ln -s /proc/self/fd/1 /dev/stdout
+ln -s /proc/self/fd/2 /dev/stderr
+
+# /dev/shm — POSIX shared memory.
+#
+# devtmpfs does not provide it and nothing else was mounting it, so every
+# shm_open(3) in the system failed. That is invisible until something large
+# needs it: Steam's controller subsystem reports
+# "Failed creating file mapping SteamController_Master_mem", and Chromium --
+# which is what Steam's UI is -- cannot start its renderer at all. Firefox and
+# any other browser in the namespace are in the same position.
+#
+# It is mounted HERE, on the one devtmpfs, so the Debian namespace inherits it:
+# enter_root bind-mounts /dev with MS_REC, which carries submounts across.
+mkdir /dev/shm
+bind '#t' /dev/shm
+
 echo 'rc.boot: kernel is Linux; userland is Adder'
 
 # Nothing else to bring up yet. When /net and wsys land this is where they get
@@ -78,6 +112,26 @@ echo 'rc.boot: handing off to an interactive shell'
 ifconfig eth0 10.0.2.15 netmask 255.255.255.0
 ifconfig gw 10.0.2.2
 ifconfig dns 10.0.2.3
+
+# LOOPBACK. Nothing was bringing `lo` up, and the address on it is not a
+# kernel default -- so 127.0.0.1 was unassignable and every program that talks
+# to ITSELF over a socket failed. Steam does exactly that for its inter-process
+# IPC and reports
+#   src/common/processpipe_posix.cpp (325) : Assertion Failed:
+#   socket bind failed: Cannot assign requested address
+# which says nothing about loopback at all. X, dbus and any local server are
+# in the same position.
+#
+# HAMNIX_IFACE is how the interface is selected: sys_netcfg (user/linux-net.c)
+# takes the name from the environment, NOT from ifconfig's first argument, so
+# `ifconfig lo ...` on its own would have configured eth0. Set it, configure
+# lo, and put it back -- the export is the operative line, not the argument.
+HAMNIX_IFACE='lo'
+export HAMNIX_IFACE
+ifconfig lo 127.0.0.1 netmask 255.0.0.0
+HAMNIX_IFACE='eth0'
+export HAMNIX_IFACE
+
 echo 'rc.boot: network configured'
 
 # --- the graphical runlevel -----------------------------------------

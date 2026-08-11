@@ -50,6 +50,56 @@
 #                  That is the boundary docs/packages.md draws anyway -- hpm
 #                  does not try to be apt, and Hamnix does not try to
 #                  reimplement e2fsprogs.
+#   --- the Steam-class set, added because the owner asked for large apps ---
+#   i386 MULTIARCH  Steam's bootstrap (`ubuntu12_32/steam`) is an ELF 32-bit
+#                  i386 dynamic binary and there is no 64-bit build of it, so
+#                  the namespace has to be a multiarch namespace or the top
+#                  of the Steam stack cannot be exec'd at all.  This is
+#                  `--architectures=amd64,i386`, which is mmdebstrap's way of
+#                  saying `dpkg --add-architecture i386` before the first
+#                  package is unpacked rather than after.
+#                  IT IS NOT FREE: the i386 Mesa (libgl1-mesa-dri:i386 plus
+#                  mesa-vulkan-drivers:i386) is the single largest thing in
+#                  this image after clang.  The size delta is printed at the
+#                  end of this script, because this is a distro and it matters.
+#   steam-installer  Debian's contrib wrapper.  It is NOT Steam: it is a shell
+#                  script at /usr/games/steam that downloads Valve's
+#                  bootstrap and unpacks it into $HOME.  Its dependency list
+#                  (steam-libs:i386) is the authoritative statement of what a
+#                  32-bit Steam needs from the host system, which is why it is
+#                  used here instead of a hand-written list.
+#   the bootstrap, PRE-SEEDED
+#                  /usr/games/steam's first run pops a zenity dialog and then
+#                  curls repo.steampowered.com.  Both are staged in here at
+#                  build time instead (/opt/hamnix-steam/bootstrap.tar.xz,
+#                  sha256-verified on the host), so first run inside the VM
+#                  needs neither a GUI prompt nor that round trip.  What it
+#                  still needs is the network, because the ~300 MB Steam
+#                  CLIENT is downloaded by the bootstrap from Valve's CDN and
+#                  nothing in this image can pre-empt that.
+#   mesa-utils:i386, vulkan-tools:i386
+#                  the representative 32-bit graphics clients: glxgears and
+#                  glxinfo (GLX/X11), vkcube and vulkaninfo (Vulkan, X11 and
+#                  Wayland).  Deliberately the i386 build of each and not the
+#                  amd64 one -- an amd64 glxgears proves nothing about the
+#                  32-bit path, and the 32-bit path is the one Steam is on.
+#   bubblewrap     what Steam's sniper/soldier container runtimes (pressure-
+#                  vessel) call to build a game's container.  Installed so the
+#                  question can be ANSWERED rather than guessed at; see
+#                  docs/steam_namespace.md for what the answer turned out to
+#                  be.
+#   pulseaudio, libpulse0:i386
+#                  Steam expects a sound server.  The client-side library is
+#                  what Steam links; the server is here so that the missing
+#                  piece is provably the DEVICE and not the userland.
+#   the `live` user (uid 1001)
+#                  the DE session drops to uid 1001 (etc/rc.de-user.linux), so
+#                  a program entering this namespace arrives as 1001 with
+#                  $HOME=/home/live.  Without a matching passwd entry HERE,
+#                  getpwuid(getuid()) fails inside the namespace and Steam --
+#                  which uses it to find its own data directory -- does not
+#                  start.  Nothing announces this; the account is created so
+#                  it cannot happen.
 #   clang, libssl-dev
 #                  THE COMPILER'S SECOND HALF, and the reason hamnix-linux can
 #                  compile Adder on itself.  `ac foo.ad` (user/ac.ad) runs
@@ -72,20 +122,148 @@ PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJ_ROOT"
 
 OUT="${1:-build/image/distro.ext4}"
-SIZE="${2:-6G}"
+# 6G was the pre-multiarch size and it does not fit any more: the i386 Mesa
+# alone is most of a gigabyte.  The file is SPARSE, so this costs nothing on
+# the host until it is written to.
+SIZE="${2:-12G}"
 SUITE="${3:-bookworm}"
 MIRROR="${HAMLINUX_MIRROR:-http://deb.debian.org/debian}"
+# Set HAMLINUX_I386=0 for the old single-architecture image (no Steam).
+I386="${HAMLINUX_I386:-1}"
 
 command -v mmdebstrap >/dev/null || {
     echo "[distro] need mmdebstrap (apt install mmdebstrap)" >&2; exit 1; }
 
 PKGS="xvfb,x11-apps,xdotool,x11-utils,matchbox-window-manager,\
-firefox-esr,xwayland,ca-certificates,dbus,fonts-dejavu-core,fonts-liberation,\
+firefox-esr,xwayland,ca-certificates,dbus,dbus-x11,fonts-dejavu-core,fonts-liberation,\
 libgl1,libgtk-3-0,procps,coreutils,bash,less,nano,\
 gdisk,dosfstools,e2fsprogs,rsync,mtools,\
-clang,libssl-dev,libdrm-dev,libcrypt-dev"
+clang,libssl-dev,libdrm-dev,libcrypt-dev,\
+libgl1-mesa-dri,libglx-mesa0,libvulkan1,mesa-vulkan-drivers,\
+curl,file,xz-utils,strace,psmisc,net-tools,iputils-ping"
+
+ARCHS="amd64"
+if [ "$I386" = 1 ]; then
+    ARCHS="amd64,i386"
+    # steam-installer pulls steam-libs:i386, which is Debian's own statement of
+    # the 32-bit closure.  The rest are steam-libs' Recommends -- mmdebstrap
+    # does not install Recommends, and every one of these is a library Steam
+    # dlopen()s for graphics or input rather than an optional extra.
+    PKGS="$PKGS,steam-installer,zenity,xdg-utils,xterm,bubblewrap,\
+pulseaudio,libasound2-plugins,\
+mesa-utils:i386,vulkan-tools:i386,mesa-utils-bin,\
+libgl1:i386,libgl1-mesa-dri:i386,libglx-mesa0:i386,libegl1:i386,libgbm1:i386,\
+libvulkan1:i386,mesa-vulkan-drivers:i386,\
+libx11-6:i386,libx11-xcb1:i386,libxext6:i386,libxfixes3:i386,libxdamage1:i386,\
+libxrandr2:i386,libxcursor1:i386,libxcomposite1:i386,libxinerama1:i386,\
+libxi6:i386,libxss1:i386,libxxf86vm1:i386,libxtst6:i386,\
+libsdl2-2.0-0:i386,libasound2:i386,libpulse0:i386,libnss3:i386,\
+libfontconfig1:i386,libfreetype6:i386,libexpat1:i386,libdbus-1-3:i386"
+fi
+
+# --- Valve's bootstrap, staged on the HOST ---------------------------------
+# /usr/games/steam does exactly this at first run, and the version, URL and
+# sha256 are read off that script rather than invented here.  Doing it now
+# means the first `steam` inside the VM does not need a GUI prompt or a round
+# trip to repo.steampowered.com.  NOTHING is installed on the host: the
+# tarball is unpacked into the image and never executed here.
+STEAM_VER=1.0.0.75
+STEAM_DEBVER="${STEAM_VER}+ds-5"
+STEAM_SHA=e52565a5e33b9a4184c5bdc222978b7fea958efd32641d5d5967774d751236a7
+STEAM_URL="https://repo.steampowered.com/steam/archive/stable/steam_${STEAM_VER}.tar.gz"
+CACHE="build/cache"
+STAGE="build/distro-stage"
+mkdir -p "$CACHE" "$STAGE/opt/hamnix-steam" "$STAGE/usr/local/bin"
+
+if [ "$I386" = 1 ]; then
+    TGZ="$CACHE/steam_${STEAM_VER}.tar.gz"
+    if [ ! -f "$TGZ" ]; then
+        echo "[distro] fetching Valve's Steam bootstrap ($STEAM_URL)"
+        curl -fL -o "$TGZ.part" "$STEAM_URL"
+        mv "$TGZ.part" "$TGZ"
+    fi
+    got="$(sha256sum "$TGZ" | cut -d' ' -f1)"
+    # A wrong tarball here would be a wrong Steam, silently. Fail on it.
+    [ "$got" = "$STEAM_SHA" ] || {
+        echo "[distro] steam tarball sha256 mismatch" >&2
+        echo "  expected $STEAM_SHA" >&2
+        echo "  got      $got" >&2
+        exit 1; }
+    tar -C "$STAGE/opt/hamnix-steam" --strip-components=1 -xzf "$TGZ" \
+        steam-launcher/bootstraplinux_ubuntu12_32.tar.xz
+    mv "$STAGE/opt/hamnix-steam/bootstraplinux_ubuntu12_32.tar.xz" \
+       "$STAGE/opt/hamnix-steam/bootstrap.tar.xz"
+    echo "$STEAM_DEBVER" > "$STAGE/opt/hamnix-steam/version"
+
+    cat > "$STAGE/usr/local/bin/hamnix-steam" <<'STEAMEOS'
+#!/bin/sh
+# hamnix-steam — run Steam inside the Debian namespace.
+#
+# /usr/games/steam (Debian's steam-installer) wants to ask a zenity question
+# and then curl Valve's bootstrap.  Both were done at image build time, so all
+# this does is put the pre-staged bootstrap where that script looks for it and
+# then get out of the way.  The four `needed` paths and the version file are
+# exactly what /usr/games/steam tests for; if they are present and current it
+# does no network I/O of its own at all.
+set -e
+
+# $HOME matters more than it looks: Steam installs ~2.5 GB of client under it.
+# hamsh hands an entering program the placeholder "/" when it has not resolved
+# a passwd entry, and "/" IS a directory -- so a `[ -d ]` guard accepts it and
+# the whole client lands in /.steam at the root of the namespace. Reject the
+# placeholder by name.
+case "${HOME:-}" in
+    ""|"/") HOME=/home/live ;;
+esac
+[ -d "$HOME" ] || mkdir -p "$HOME" 2>/dev/null || HOME=/root
+export HOME
+
+STEAMDIR="$HOME/.steam/debian-installation"
+if [ ! -x "$STEAMDIR/steam.sh" ]; then
+    echo "hamnix-steam: seeding $STEAMDIR from /opt/hamnix-steam" >&2
+    mkdir -p "$STEAMDIR/deb-installer"
+    tar -C "$STEAMDIR" -xf /opt/hamnix-steam/bootstrap.tar.xz
+    cp /opt/hamnix-steam/bootstrap.tar.xz "$STEAMDIR/bootstrap.tar.xz"
+    cp /opt/hamnix-steam/version "$STEAMDIR/deb-installer/version"
+fi
+
+# Steam refuses to draw without a display.  Both are legitimate here: the
+# Wayland socket is wsyswl's (run it on the Hamnix side with its socket path
+# inside this tree -- `wsyswl /n/distro/run/wayland-0`), and DISPLAY is
+# XWayland's.  Neither is defaulted, because a wrong one looks like a Steam
+# bug rather than a missing compositor.
+if [ -z "${DISPLAY-}" ] && [ -z "${WAYLAND_DISPLAY-}" ]; then
+    echo "hamnix-steam: no DISPLAY and no WAYLAND_DISPLAY -- Steam has no" >&2
+    echo "  screen to draw on.  Start wsyswl on the Hamnix side and set" >&2
+    echo "  XDG_RUNTIME_DIR=/run WAYLAND_DISPLAY=wayland-0, or run Xwayland" >&2
+    echo "  in here and set DISPLAY=:0." >&2
+    exit 1
+fi
+
+exec /usr/games/steam "$@"
+STEAMEOS
+    chmod 755 "$STAGE/usr/local/bin/hamnix-steam"
+fi
+
+# /etc/resolv.conf.  mmdebstrap copies the BUILD HOST's in, and the build
+# host's nameserver is not reachable from inside the VM -- so every DNS lookup
+# in the namespace timed out while the network itself was fine.  Steam cannot
+# reach its CDN without this, and the failure looks like Steam being broken.
+# 10.0.2.3 is QEMU user-mode networking's forwarder, which is the same address
+# etc/rc.boot.linux hands to `ifconfig dns`.
+mkdir -p "$STAGE/etc"
+cat > "$STAGE/etc/resolv.conf" <<'RESOLVEOS'
+# hamnix-linux: the Debian namespace's resolver.
+# 10.0.2.3 is QEMU user-mode networking's DNS forwarder (scripts/hamlinux_vm.sh
+# puts the guest on 10.0.2.0/24), and matches `ifconfig dns` in rc.boot.linux.
+# The second line is what a real machine falls back to until DHCP writes here.
+nameserver 10.0.2.3
+nameserver 1.1.1.1
+RESOLVEOS
 
 mkdir -p "$(dirname "$OUT")"
+PREV_SZ=0
+[ -f "$OUT" ] && PREV_SZ="$(du -m "$OUT" | cut -f1)"
 rm -f "$OUT"
 
 echo "[distro] bootstrapping Debian $SUITE into $OUT ($SIZE)"
@@ -94,12 +272,34 @@ echo "[distro] this downloads a few hundred megabytes and takes a while"
 # --format=ext4 needs the target to exist at the size we want.
 truncate -s "$SIZE" "$OUT"
 
+# The Steam staging only exists in the multiarch build; without i386 there is
+# nothing that could run the bootstrap, so shipping it would be a lie on disk.
+STEAM_HOOKS=()
+if [ "$I386" = 1 ]; then
+    STEAM_HOOKS=(
+        --customize-hook="copy-in $STAGE/opt/hamnix-steam /opt"
+        --customize-hook="copy-in $STAGE/usr/local/bin/hamnix-steam /usr/local/bin"
+    )
+fi
+
 mmdebstrap \
+    "${STEAM_HOOKS[@]}" \
     --mode=unshare \
     --format=ext4 \
     --variant=important \
+    --architectures="$ARCHS" \
     --include="$PKGS" \
     --components=main,contrib \
+    --customize-hook="copy-in $STAGE/etc/resolv.conf /etc" \
+    --customize-hook='chroot "$1" sh -c "
+        # The DE session runs as uid 1001 (etc/rc.de-user.linux drops to it),
+        # so a program that enters this namespace arrives as 1001. Without a
+        # passwd entry HERE, getpwuid(getuid()) returns NULL in the namespace
+        # and Steam -- which uses it to locate its own data directory -- exits
+        # before drawing anything. Create the account so it resolves.
+        id live >/dev/null 2>&1 || useradd -u 1001 -m -s /bin/bash live
+        mkdir -p /home/live && chown 1001:1001 /home/live
+    "' \
     --customize-hook='chroot "$1" sh -c "
         # A namespace, not a machine: no init, no services, no login. What it
         # needs is to be able to RUN a program when someone enters it.
@@ -127,5 +327,27 @@ EOS
     "' \
     "$SUITE" "$OUT" "$MIRROR"
 
+# GROW THE FILESYSTEM TO $SIZE.  mmdebstrap sizes the ext4 to fit what it
+# installed and truncates the file down to it, so the `truncate -s 12G` above
+# buys no free space at all -- the first build came out with 310 MB free
+# INSIDE a 12 GB file.  That is not enough for Steam to unpack its ~300 MB
+# client, let alone a game, and the failure would arrive as ENOSPC in the
+# middle of a download rather than as anything about image sizing.  The file
+# stays sparse, so the headroom costs nothing until it is used.
+if command -v /sbin/resize2fs >/dev/null; then
+    truncate -s "$SIZE" "$OUT"
+    /sbin/resize2fs "$OUT" >/dev/null 2>&1 || echo "[distro] resize2fs failed; image has only its packed size" >&2
+    echo "[distro] filesystem grown to $SIZE ($(/sbin/dumpe2fs -h "$OUT" 2>/dev/null | awk '/Free blocks:/{print $3*4/1024/1024" GiB"}') free)"
+else
+    echo "[distro] no resize2fs -- the image has no free space beyond its packages" >&2
+fi
+
+NEW_SZ="$(du -m "$OUT" | cut -f1)"
 echo "[distro] done: $OUT ($(du -h "$OUT" | cut -f1))"
+echo "[distro] architectures: $ARCHS"
+if [ "$PREV_SZ" -gt 0 ]; then
+    # This is a distro. What multiarch costs is a number somebody has to live
+    # with, so it is printed rather than left to be discovered.
+    echo "[distro] size: ${PREV_SZ} MiB -> ${NEW_SZ} MiB (delta $((NEW_SZ - PREV_SZ)) MiB)"
+fi
 echo "  attach it: scripts/hamlinux_vm.sh (picks it up automatically)"
