@@ -14,17 +14,38 @@
 #     the body wedges on TLS close_notify — see the drain loop note)
 #
 # Entry points:
-#   http_get(url, dst, dst_cap, *out_status, *out_body_off, *out_body_len)
+#   http_get(url, dst, dst_cap, *out_status, *out_body_len)
 #     -> 0 on a completed transport (HTTP status in *out_status, even
 #        for 4xx/5xx), or negative on a transport / parse failure.
 #   http_post(url, body, body_len, content_type, dst, dst_cap,
-#             *out_status, *out_body_off, *out_body_len)
+#             *out_status, *out_body_len)
 #     -> as http_get, but writes a POST request line + Content-Type /
 #        Content-Length headers + the entity body over the SAME /net
 #        connection (no sockets, no second stack).
 #
-# The body lands at dst[*out_body_off .. *out_body_off+*out_body_len);
-# callers that want a clean buffer slide it down themselves (hpm does).
+# `dst` IS THE BODY BUFFER, AND `dst_cap` IS A CAP ON THE BODY ALONE.
+# The body lands at dst[0 .. *out_body_len). The status line and the
+# header block land in http9's OWN buffer (h9_hdr) and are readable via
+# http_header_bytes() / http_header_len() / http_response_header().
+#
+# WHY, AND WHAT IT COST TO LEARN — this module used to take ONE buffer
+# whose cap covered status line + headers + body, and it returned -6,
+# DISCARDING THE HTTP STATUS, the moment the response reached that cap.
+# So the correctness of every caller's buffer size depended on a number
+# the caller cannot see: the SERVER's header block. `hpm` sized 512 bytes
+# for a 129-byte signature, GitHub Pages answered with 640 bytes of
+# headers, 640 + 129 = 769 > 512, and for the entire life of the package
+# repository `hpm refresh` could not fetch a signature and reported it as
+# "unsigned repo" — a cause it had never checked. Four callers each
+# sizing a buffer correctly is four chances to get that wrong again, so
+# the header block is no longer the caller's problem: a caller now sizes
+# for the RESOURCE, which is the only thing it knows anything about.
+#
+# AND THE STATUS IS NEVER LOST. Once the head has been read, *out_status
+# is set — including on -6 (body larger than dst_cap). A resource that
+# genuinely 404s can come back as a 9 KB HTML error page; a caller that
+# sized for the expected body must still be able to tell "missing" from
+# "broken", and now can.
 #
 # Compiler-quirk discipline (memory/feedback_compiler_quirks.md U9):
 # every large buffer is a top-level BSS Array — never a frame local.
@@ -108,6 +129,28 @@ h9_inf:      InflateState
 H9_GZOUT:    uint64 = 262144
 h9_gzout:    Array[262144, uint8]
 h9_ce:       Array[80, uint8]           # Content-Encoding header value
+
+# -- the response HEAD, in http9's own buffer -------------------------
+#
+# The status line + header block of the CURRENT (or last) response, up to
+# and including the terminating CRLFCRLF. h9_hdr_len is its byte length,
+# or 0 when no head has been read (a URL-parse / connect / write failure).
+#
+# 16 KiB is chosen against what servers send, not against what any caller
+# expects: nginx's default `large_client_header_buffers` is 8 KiB and Apache's
+# `LimitRequestFieldSize` is 8 KiB, so a head past 16 KiB is one most of the
+# web would refuse to generate. Measured off the wire here: GitHub Pages sends
+# 668 bytes, DuckDuckGo 3080. That spread — a factor of nearly five between two
+# ordinary sites, and 668 where 640 was recorded a few weeks earlier — is the
+# argument for this buffer existing at all: the number is not stable, not
+# knowable in advance, and not the caller's to know. A head that will not fit
+# is a fault of the SERVER and is reported as its own rc (-10) rather than
+# being charged to whichever caller happened to make the request.
+H9_HDR_CAP:  uint64 = 16384
+h9_hdr:      Array[16384, uint8]
+h9_hdr_len:  uint64 = 0
+h9_clen_buf: Array[32, uint8]           # Content-Length header value
+h9_probe:    Array[1, uint8]            # 1-byte "is there more?" probe
 
 
 def _h9_strlen(s: Ptr[uint8]) -> uint64:
@@ -472,57 +515,82 @@ def http_request_bytes() -> Ptr[uint8]:
     return &h9_req[0]
 
 
-# -- response length probe --------------------------------------------
+# -- response head accessors ------------------------------------------
 #
-# Returns the expected total response length once both the header
-# terminator AND a Content-Length header have been observed; else 0.
+# The status line + headers of the last response, in http9's own buffer.
+# Valid after http_get / http_post return (including on a -6, where the
+# head was read in full and only the BODY overran the caller's buffer).
+# `curl -i` prints exactly these bytes.
 
-def _h9_expected_len(dst: Ptr[uint8], total: uint64) -> uint64:
-    hdr_end: uint64 = 0
-    found: int32 = 0
-    p: uint64 = 0
-    while p + 3 < total:
-        if dst[p] == 13 and dst[p + 1] == 10 \
-                and dst[p + 2] == 13 and dst[p + 3] == 10:
-            hdr_end = p + 4
-            found = 1
+def http_header_bytes() -> Ptr[uint8]:
+    return &h9_hdr[0]
+
+
+def http_header_len() -> uint64:
+    return h9_hdr_len
+
+
+# Look a header up in the last response's head. The (dst, total) form
+# below still exists for callers holding raw response bytes of their own;
+# this is the one every http_get caller wants, because after this change
+# the caller no longer HAS the header block.
+def http_response_header(name: Ptr[uint8], out: Ptr[uint8],
+                         out_cap: uint64) -> int32:
+    return http_find_header(&h9_hdr[0], h9_hdr_len, name, out, out_cap)
+
+
+# Reassemble the RAW response — status line + headers + body — as one
+# contiguous run in the caller's buffer, for a consumer that parses the head
+# itself. hambrowse's JS fetch() transport is the one: the engine wants the
+# bytes exactly as they came off the wire.
+#
+# It lives HERE and not in that caller because it is the one piece of the
+# change with an overlapping copy in it, and a shift that runs the wrong way
+# corrupts a page silently. In http9 it is reachable from a host probe and is
+# gated by tests/linux/http9_response_cap.sh; in hambrowse it would only ever
+# run inside a VM.
+#
+# dst[0..body_len) must hold the body as http_get left it. Returns the total
+# byte count, or -1 if head + body will not fit in dst_cap (the caller should
+# size its body cap at dst_cap - H9_HDR_CAP to make that unreachable).
+def http_prepend_head(dst: Ptr[uint8], dst_cap: uint64,
+                      body_len: uint64) -> int64:
+    hl: uint64 = h9_hdr_len
+    if hl + body_len > dst_cap:
+        return -1
+    # BACKWARDS: source and destination overlap and the destination is higher.
+    k: uint64 = body_len
+    while k > 0:
+        k = k - 1
+        dst[hl + k] = dst[k]
+    j: uint64 = 0
+    while j < hl:
+        dst[j] = h9_hdr[j]
+        j = j + 1
+    return cast[int64](hl + body_len)
+
+
+# Content-Length from the response head, or -1 when it is absent or has
+# no digits. -1 and 0 are DIFFERENT answers: 0 means "the server said the
+# body is empty", -1 means "the server did not say", and the drain loop
+# reads to EOF only in the second case.
+def _h9_clen() -> int64:
+    if http_find_header(&h9_hdr[0], h9_hdr_len, "content-length",
+                        &h9_clen_buf[0], 32) == 0:
+        return -1
+    v: int64 = 0
+    have: int32 = 0
+    i: uint64 = 0
+    while h9_clen_buf[i] != 0:
+        c: uint8 = h9_clen_buf[i]
+        if c < 48 or c > 57:
             break
-        p = p + 1
-    if found == 0:
-        return 0
-
-    name: Ptr[uint8] = "content-length"
-    name_len: uint64 = 14
-    line: uint64 = 0
-    while line < hdr_end:
-        match_n: int32 = 1
-        j: uint64 = 0
-        while j < name_len:
-            c: uint8 = dst[line + j]
-            if c >= 65 and c <= 90:
-                c = c + 32
-            if c != name[j]:
-                match_n = 0
-                break
-            j = j + 1
-        if match_n != 0 and dst[line + name_len] == 58:    # ':'
-            v: uint64 = line + name_len + 1
-            while v < hdr_end and dst[v] == 32:
-                v = v + 1
-            clen: uint64 = 0
-            have_digit: int32 = 0
-            while v < hdr_end and dst[v] >= 48 and dst[v] <= 57:
-                clen = clen * 10 + cast[uint64](dst[v] - 48)
-                have_digit = 1
-                v = v + 1
-            if have_digit != 0:
-                return hdr_end + clen
-            return 0
-        nl: uint64 = line
-        while nl < hdr_end and dst[nl] != 10:
-            nl = nl + 1
-        line = nl + 1
-    return 0
+        v = v * 10 + cast[int64](c - 48)
+        have = 1
+        i = i + 1
+    if have == 0:
+        return -1
+    return v
 
 
 # -- chunked detection -------------------------------------------------
@@ -807,12 +875,12 @@ def http_effective_url() -> Ptr[uint8]:
 
 # -- one HTTP request/response transaction ----------------------------
 #
-# Parses `url`, connects, sends the GET, drains the response into dst
-# (capped at dst_cap), and reports the HTTP status + body span. A
-# chunked body is DECODED in place into a clean body. Returns 0 on a
-# completed transport (even for a 3xx/4xx/5xx status, which the caller
-# inspects via *out_status), or a negative transport/parse error (see
-# the http_get rc table).
+# Parses `url`, connects, sends the request, reads the HEAD into h9_hdr
+# and the BODY into dst (capped at dst_cap), and reports the HTTP status
+# + body length. A chunked body is DECODED in place into a clean body.
+# Returns 0 on a completed transport (even for a 3xx/4xx/5xx status,
+# which the caller inspects via *out_status), or a negative
+# transport/parse error (see the http_get rc table).
 
 # -- gzip content-encoding --------------------------------------------
 #
@@ -882,11 +950,11 @@ def _h9_gunzip(body: Ptr[uint8], body_len: uint64, out_cap: uint64) -> int64:
 
 
 def _h9_fetch_once(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
-                   out_status: Ptr[int64], out_body_off: Ptr[uint64],
+                   out_status: Ptr[int64],
                    out_body_len: Ptr[uint64]) -> int64:
     out_status[0] = 0
-    out_body_off[0] = 0
     out_body_len[0] = 0
+    h9_hdr_len = 0
 
     if http_parse_url(url) != 0:
         return -1
@@ -897,81 +965,112 @@ def _h9_fetch_once(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
         sys_close(fd)
         return -3
 
-    total: uint64 = 0
-    while total < dst_cap:
-        want: uint64 = _h9_expected_len(dst, total)
-        if want != 0 and total >= want:
-            break
-        room: uint64 = dst_cap - total
+    # -- phase 1: the response HEAD, into h9_hdr ----------------------
+    #
+    # Read until the CRLFCRLF terminator. Whatever came in the same read
+    # AFTER the terminator is the first slice of the body and is carried
+    # forward — a TCP read boundary is not a protocol boundary, and this
+    # is the only place that fact is allowed to matter.
+    filled:  uint64 = 0
+    hdr_end: uint64 = 0
+    scan:    uint64 = 0
+    while hdr_end == 0:
+        if filled >= H9_HDR_CAP:
+            sys_close(fd)
+            return -10
         n: int64 = sys_read(fd, cast[Ptr[uint8]](
-            cast[uint64](dst) + total), room)
+            cast[uint64](&h9_hdr[0]) + filled), H9_HDR_CAP - filled)
         if n < 0:
             sys_close(fd)
             return -4
         if n == 0:
             break
-        total = total + cast[uint64](n)
-    sys_close(fd)
-
-    exact: uint64 = _h9_expected_len(dst, total)
-    if exact != 0 and total > exact:
-        total = exact
-
-    if total == 0:
+        filled = filled + cast[uint64](n)
+        while scan + 3 < filled:
+            if h9_hdr[scan] == 13 and h9_hdr[scan + 1] == 10 \
+                    and h9_hdr[scan + 2] == 13 and h9_hdr[scan + 3] == 10:
+                hdr_end = scan + 4
+                break
+            scan = scan + 1
+    if hdr_end == 0:
+        sys_close(fd)
         return -5
-    if total >= dst_cap:
-        return -6
+    h9_hdr_len = hdr_end
 
-    status: int64 = http_parse_status(dst, total)
+    status: int64 = http_parse_status(&h9_hdr[0], h9_hdr_len)
     if status < 0:
+        sys_close(fd)
         return -5
+    # Reported BEFORE anything the body can do goes wrong. A caller that
+    # overruns its buffer still learns whether the server said 200 or 404.
     out_status[0] = status
 
-    # Locate the header terminator -> body offset.
-    bo: uint64 = 0
-    found: int32 = 0
-    p: uint64 = 0
-    while p + 3 < total:
-        if dst[p] == 13 and dst[p + 1] == 10 \
-                and dst[p + 2] == 13 and dst[p + 3] == 10:
-            bo = p + 4
-            found = 1
-            break
-        p = p + 1
-    if found == 0:
-        return -5
+    # -- phase 2: the BODY, into the caller's dst ---------------------
+    lead:  uint64 = filled - hdr_end
+    over:  int32  = 0
+    ncopy: uint64 = lead
+    if ncopy > dst_cap:
+        ncopy = dst_cap
+        over = 1
+    i: uint64 = 0
+    while i < ncopy:
+        dst[i] = h9_hdr[hdr_end + i]
+        i = i + 1
+    blen: uint64 = ncopy
 
-    # Chunked body: DECODE it in place (dst+bo -> dst+bo). http_dechunk
-    # is bounds-safe on attacker-controlled sizes; a malformed frame is
-    # a clean -7 rather than leaked framing.
-    if _h9_expected_len(dst, total) == 0 and http_is_chunked(dst, total) != 0:
-        body: Ptr[uint8] = cast[Ptr[uint8]](cast[uint64](dst) + bo)
+    clen: int64 = _h9_clen()
+    while over == 0:
+        # A declared Content-Length that is already satisfied ends the
+        # drain BEFORE the dst_cap test, so a body that exactly fills the
+        # buffer is a complete body and not an overflow. The old code
+        # tested `total >= dst_cap` and failed the exactly-full case too.
+        if clen >= 0 and blen >= cast[uint64](clen):
+            break
+        if blen >= dst_cap:
+            # dst is full and the body is not known to be complete: ask
+            # for ONE more byte. If it arrives, the body genuinely does
+            # not fit and that is -6; if it is EOF, the body fit exactly.
+            pn: int64 = sys_read(fd, &h9_probe[0], 1)
+            if pn > 0:
+                over = 1
+            break
+        rn: int64 = sys_read(fd, cast[Ptr[uint8]](
+            cast[uint64](dst) + blen), dst_cap - blen)
+        if rn < 0:
+            sys_close(fd)
+            return -4
+        if rn == 0:
+            break
+        blen = blen + cast[uint64](rn)
+    sys_close(fd)
+    if clen >= 0 and blen > cast[uint64](clen):
+        blen = cast[uint64](clen)
+
+    if over != 0:
+        # The truncated prefix is handed back rather than thrown away, so
+        # a caller can show what it got; the rc says it is not the whole
+        # resource and out_status says what the server answered.
+        out_body_len[0] = blen
+        return -6
+
+    # Chunked body: DECODE it in place (dst -> dst). http_dechunk is
+    # bounds-safe on attacker-controlled sizes; a malformed frame is a
+    # clean -7 rather than leaked framing.
+    if clen < 0 and http_is_chunked(&h9_hdr[0], h9_hdr_len) != 0:
         dec: Array[1, uint64]
         dec[0] = 0
-        drc: int32 = http_dechunk(body, total - bo, body,
-                                  dst_cap - bo, &dec[0])
+        drc: int32 = http_dechunk(dst, blen, dst, dst_cap, &dec[0])
         if drc < 0:
             return -7
-        blen: uint64 = dec[0]
-        # RFC 7230 §3.3.1: with both chunked + gzip, dechunk THEN ungzip.
-        if _h9_ce_is_gzip(dst, total) != 0:
-            gl: int64 = _h9_gunzip(body, blen, dst_cap - bo)
-            if gl >= 0:
-                blen = cast[uint64](gl)
-        out_body_off[0] = bo
-        out_body_len[0] = blen
-        return 0
-
-    blen2: uint64 = total - bo
-    # Content-Encoding: gzip on a non-chunked body — inflate in place so the
-    # HTML parser sees plaintext, not the opaque gzip stream (blank page).
-    if _h9_ce_is_gzip(dst, total) != 0:
-        body2: Ptr[uint8] = cast[Ptr[uint8]](cast[uint64](dst) + bo)
-        gl2: int64 = _h9_gunzip(body2, blen2, dst_cap - bo)
-        if gl2 >= 0:
-            blen2 = cast[uint64](gl2)
-    out_body_off[0] = bo
-    out_body_len[0] = blen2
+        blen = dec[0]
+    # Content-Encoding: gzip — inflate in place so the HTML parser sees
+    # plaintext, not the opaque gzip stream (blank page). RFC 7230 §3.3.1:
+    # with both chunked + gzip, dechunk THEN ungzip, which is this order.
+    if _h9_ce_is_gzip(&h9_hdr[0], h9_hdr_len) != 0:
+        gl: int64 = _h9_gunzip(dst, blen, dst_cap)
+        if gl >= 0:
+            blen = cast[uint64](gl)
+    out_body_len[0] = blen
     return 0
 
 
@@ -988,10 +1087,15 @@ def _h9_fetch_once(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
 #   -3  short write sending the request
 #   -4  read error on the response
 #   -5  empty / truncated / non-HTTP response
-#   -6  response exceeds dst_cap
+#   -6  the BODY exceeds dst_cap. *out_status IS SET and the header block
+#       is readable — the resource did not fit, which is a different fact
+#       from "the fetch failed", and callers must be able to say which.
+#       *out_body_len holds the truncated prefix that did fit.
 #   -7  chunked body malformed (decode failed)
 #   -8  too many redirect hops / redirect loop
 #   -9  https -> http downgrade redirect rejected (TLS downgrade)
+#  -10  the response HEAD exceeds http9's 16 KiB header buffer. A server
+#       fault, named as one, and NOT chargeable to the caller's dst_cap.
 # (http->https and https->https redirects ARE followed transparently; the
 #  per-hop dial re-runs the TLS handshake when the target is https://.)
 
@@ -1000,10 +1104,9 @@ def _h9_fetch_once(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
 # GET (h9_method demoted, body cleared) — matching how browsers turn a POST's
 # 301/302/303 into a bodyless GET of the Location.
 def _h9_run(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
-            out_status: Ptr[int64], out_body_off: Ptr[uint64],
+            out_status: Ptr[int64],
             out_body_len: Ptr[uint64]) -> int64:
     out_status[0] = 0
-    out_body_off[0] = 0
     out_body_len[0] = 0
 
     h9_nvisited = 0
@@ -1034,8 +1137,11 @@ def _h9_run(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
         _h9_remember(&h9_url_work[0])
 
         rc: int64 = _h9_fetch_once(&h9_url_work[0], dst, dst_cap,
-                                   out_status, out_body_off, out_body_len)
-        if rc < 0:
+                                   out_status, out_body_len)
+        # -6 is "the head is in hand, the BODY did not fit". A 3xx whose
+        # body happens to be enormous is still a redirect, and the hop is
+        # decided entirely by the head, so it must not die here.
+        if rc < 0 and rc != -6:
             return rc
 
         status: int64 = out_status[0]
@@ -1047,8 +1153,7 @@ def _h9_run(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
             return rc
 
         # 3xx: need a Location to follow; absent -> treat as the final page.
-        if http_find_header(dst, out_body_off[0],
-                            "location", &h9_loc[0], 1600) == 0:
+        if http_response_header("location", &h9_loc[0], 1600) == 0:
             _h9_url_copy(&h9_effective_url[0], &h9_url_work[0])
             return rc
 
@@ -1079,12 +1184,12 @@ def _h9_run(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
 # http_get — GET `url`, following redirects; the public entry the browser /
 # hpm / curl / wget front-ends use. Signature UNCHANGED; a plain GET.
 def http_get(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
-             out_status: Ptr[int64], out_body_off: Ptr[uint64],
+             out_status: Ptr[int64],
              out_body_len: Ptr[uint64]) -> int64:
     h9_method = 0
     h9_body_ptr = 0
     h9_body_len = 0
-    return _h9_run(url, dst, dst_cap, out_status, out_body_off, out_body_len)
+    return _h9_run(url, dst, dst_cap, out_status, out_body_len)
 
 
 # Copy a caller Content-Type into h9_ctype, defaulting to the Fetch-spec string
@@ -1115,10 +1220,10 @@ def _h9_copy_ctype(ct: Ptr[uint8]):
 # http_get; a 3xx redirect is followed as a bodyless GET.
 def http_post(url: Ptr[uint8], body: Ptr[uint8], body_len: uint64,
               content_type: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
-              out_status: Ptr[int64], out_body_off: Ptr[uint64],
+              out_status: Ptr[int64],
               out_body_len: Ptr[uint64]) -> int64:
     h9_method = 1
     h9_body_ptr = cast[uint64](body)
     h9_body_len = body_len
     _h9_copy_ctype(content_type)
-    return _h9_run(url, dst, dst_cap, out_status, out_body_off, out_body_len)
+    return _h9_run(url, dst, dst_cap, out_status, out_body_len)

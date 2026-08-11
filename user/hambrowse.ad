@@ -53,7 +53,8 @@ extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> in
 from lib.hamui import hamui_window_on, hamui_set_protocol_v2_dims, \
     hamui_v2_is_active, hamui_v2_fill_rect, hamui_v2_commit_rect, \
     hamui_v2_bb_ptr, hamui_v2_bb_w, hamui_v2_bb_h
-from user.http9 import http_get, http_post, http_effective_url
+from user.http9 import http_get, http_post, http_effective_url, \
+    http_prepend_head
 # Direct engine seam: register the real over-the-wire fetch() transport. The whole
 # program is one Adder compilation unit, so this is the SAME engine htmlengine
 # drives — one shared fetch_transport_addr; no htmlengine passthrough needed.
@@ -175,9 +176,11 @@ def _u64_to_dec(v: uint64, out: Ptr[uint8]) -> uint64:
 # ====================================================================
 # FRONT-END I/O + UI state (the engine owns geometry + the layout model).
 #
-# resp_buf holds an HTTP response; html_buf holds a local file / the built-in
-# demo / an error page.  src_ptr/src_len (in the engine) point at the HTML to
-# parse (either &resp_buf[body_off] or &html_buf[0]).
+# resp_buf holds an HTTP response BODY (http9 keeps the status line and the
+# header block in its own buffer, so RESP_CAP is a cap on the page and not on
+# the page plus whatever the CDN felt like sending); html_buf holds a local
+# file / the built-in demo / an error page. src_ptr/src_len (in the engine)
+# point at the HTML to parse (either &resp_buf[0] or &html_buf[0]).
 # ====================================================================
 RESP_CAP: uint64 = 4194304
 HTML_CAP: uint64 = 4194304
@@ -188,7 +191,17 @@ html_len: uint64 = 0
 # Dedicated buffers for the JS fetch() transport, kept SEPARATE from resp_buf so a
 # page-script's fetch (which runs during he_layout, while resp_buf still holds the
 # page bytes) cannot corrupt the document being laid out.
+# The JS engine wants the RAW response (status line + headers + body) in one
+# contiguous run, because it parses the status and headers itself. http9 no
+# longer produces that shape — it keeps the head in its own buffer so a
+# caller's cap is about the RESOURCE — so the transport fetches the body into
+# jsfetch_buf, shifts it right by the head length and prepends the head. The
+# body cap is therefore JSFETCH_CAP minus the largest head http9 will accept
+# (JSFETCH_HDR_RESERVE mirrors http9's H9_HDR_CAP), so the reassembly can
+# never overrun no matter how chatty the server is.
 JSFETCH_CAP: uint64 = 131072
+JSFETCH_HDR_RESERVE: uint64 = 16384
+JSFETCH_BODY_CAP: uint64 = 114688
 jsfetch_buf: Array[131072, uint8]     # raw HTTP response for a script fetch()
 jsfetch_url: Array[2048, uint8]       # NUL-terminated URL for http_get
 jsfetch_body: Array[65536, uint8]     # POST body bytes (copied from the engine)
@@ -458,20 +471,18 @@ def _slurp_img() -> int64:
     if _starts(&img_path[0], cast[Ptr[uint8]]("http://")) != 0 or \
        _starts(&img_path[0], cast[Ptr[uint8]]("https://")) != 0:
         st: Array[1, int64]
-        bo: Array[1, uint64]
         bl: Array[1, uint64]
         st[0] = 0
-        bo[0] = 0
         bl[0] = 0
+        # http9's dst_cap now covers the BODY ALONE (the head lands in
+        # http9's own buffer), so 262144 is a statement about the IMAGE and
+        # the server's header block cannot eat into it. It used to: a
+        # 262-KiB-minus-a-bit photograph behind a chatty CDN failed the
+        # whole fetch, and the browser could not tell that from a 404.
         rc: int64 = http_get(&img_path[0], &png_file_buf[0], 262144,
-                             &st[0], &bo[0], &bl[0])
+                             &st[0], &bl[0])
         if rc < 0 or bl[0] == 0:
             return -1
-        # Move the body to the front of png_file_buf so png_decode sees it at [0].
-        m: uint64 = 0
-        while m < bl[0]:
-            png_file_buf[m] = png_file_buf[bo[0] + m]
-            m = m + 1
         return cast[int64](bl[0])
     path: Ptr[uint8] = &img_path[0]
     if _starts(&img_path[0], cast[Ptr[uint8]]("file://")) != 0:
@@ -500,19 +511,13 @@ def _slurp_css() -> int64:
     if _starts(&img_path[0], cast[Ptr[uint8]]("http://")) != 0 or \
        _starts(&img_path[0], cast[Ptr[uint8]]("https://")) != 0:
         st: Array[1, int64]
-        bo: Array[1, uint64]
         bl: Array[1, uint64]
         st[0] = 0
-        bo[0] = 0
         bl[0] = 0
         rc: int64 = http_get(&img_path[0], &css_dl_buf[0], 262144,
-                             &st[0], &bo[0], &bl[0])
+                             &st[0], &bl[0])
         if rc < 0 or bl[0] == 0:
             return -1
-        m: uint64 = 0
-        while m < bl[0]:
-            css_dl_buf[m] = css_dl_buf[bo[0] + m]
-            m = m + 1
         return cast[int64](bl[0])
     path: Ptr[uint8] = &img_path[0]
     if _starts(&img_path[0], cast[Ptr[uint8]]("file://")) != 0:
@@ -904,7 +909,6 @@ def _js_fetch_transport(url: Ptr[uint8], url_len: int32,
         is_post = 1
 
     st: int64 = 0
-    bo: uint64 = 0
     bl: uint64 = 0
     rc: int64 = 0
     if is_post != 0:
@@ -923,18 +927,32 @@ def _js_fetch_transport(url: Ptr[uint8], url_len: int32,
             c = c + 1
         jsfetch_ctype[c] = 0
         rc = http_post(&jsfetch_url[0], &jsfetch_body[0], cast[uint64](bn),
-                       &jsfetch_ctype[0], &jsfetch_buf[0], JSFETCH_CAP,
-                       &st, &bo, &bl)
+                       &jsfetch_ctype[0], &jsfetch_buf[0], JSFETCH_BODY_CAP,
+                       &st, &bl)
     else:
-        rc = http_get(&jsfetch_url[0], &jsfetch_buf[0], JSFETCH_CAP,
-                      &st, &bo, &bl)
-    if rc < 0:
+        rc = http_get(&jsfetch_url[0], &jsfetch_buf[0], JSFETCH_BODY_CAP,
+                      &st, &bl)
+    # -6 means the body outgrew JSFETCH_BODY_CAP; the status and headers are
+    # still in hand, so the Promise fulfils with what did arrive (ok=false is
+    # the Fetch spec's answer for a bad status, not for a big one) rather than
+    # rejecting as if the transport had failed.
+    if rc < 0 and rc != -6:
         out_len[0] = 0
         return cast[Ptr[uint8]](0)
     out_status[0] = st
-    # Raw response length = header block (up to body_off) + body length. http_get
-    # decodes chunked bodies in place, so bo+bl spans headers + the decoded body.
-    out_len[0] = cast[int32](bo + bl)
+
+    # Reassemble the RAW response the engine parses. The overlapping shift
+    # lives in http9 (http_prepend_head) so it is reachable from a host probe
+    # and gated by tests/linux/http9_response_cap.sh — a shift that ran the
+    # wrong way would corrupt a page silently, and this file only ever runs
+    # inside a VM. JSFETCH_BODY_CAP = JSFETCH_CAP - JSFETCH_HDR_RESERVE makes
+    # the -1 (will not fit) branch unreachable, but it is handled rather than
+    # assumed away.
+    raw: int64 = http_prepend_head(&jsfetch_buf[0], JSFETCH_CAP, bl)
+    if raw < 0:
+        out_len[0] = 0
+        return cast[Ptr[uint8]](0)
+    out_len[0] = cast[int32](raw)
     return &jsfetch_buf[0]
 
 
@@ -1012,13 +1030,20 @@ def _fetch(url: Ptr[uint8]):
     if _starts(url, cast[Ptr[uint8]]("http://")) != 0 or \
        _starts(url, cast[Ptr[uint8]]("https://")) != 0:
         st: Array[1, int64]
-        bo: Array[1, uint64]
         bl: Array[1, uint64]
         st[0] = 0
-        bo[0] = 0
         bl[0] = 0
+        # RESP_CAP is a cap on the BODY alone now; the status line and
+        # headers land in http9's own buffer. A -6 means the PAGE was
+        # bigger than 4 MiB, and http9 still reports the status, so the
+        # oversize page is rendered as far as it goes rather than becoming
+        # an indistinguishable "transport error (DNS/connect/TLS)".
         rc: int64 = http_get(url, &resp_buf[0], RESP_CAP,
-                             &st[0], &bo[0], &bl[0])
+                             &st[0], &bl[0])
+        trunc: int32 = 0
+        if rc == -6:
+            trunc = 1
+            rc = 0
         if rc < 0:
             _build_error(cast[Ptr[uint8]]("Fetch failed"), url)
             _set_status(cast[Ptr[uint8]]("transport error (DNS/connect/TLS)"))
@@ -1033,7 +1058,7 @@ def _fetch(url: Ptr[uint8]):
             fp = fp + 1
             sys_write(1, &fl[0], fp)
             return
-        src_ptr = cast[Ptr[uint8]](cast[uint64](&resp_buf[0]) + bo[0])
+        src_ptr = &resp_buf[0]
         src_len = bl[0]
         # http_get may have followed 3xx redirects; adopt the FINAL URL so
         # relative links + the address bar resolve against where we landed.
@@ -1054,6 +1079,11 @@ def _fetch(url: Ptr[uint8]):
             sp = sp + 1
             a = a + 1
         sp = sp + _u64_to_dec(bl[0], &sb[sp])
+        # A page that outgrew RESP_CAP is rendered as far as it goes, but it
+        # must NEVER look like a whole page: half a document laid out silently
+        # is exactly the success-shaped answer this whole change is against.
+        if trunc != 0:
+            sp = _sapp(&sb[0], sp, cast[Ptr[uint8]](" TRUNCATED"))
         sb[sp] = 0
         _set_status(&sb[0])
         # LOUD serial diagnostic (printed BEFORE newwindow rebinds stdout off
@@ -1116,14 +1146,16 @@ def _fetch(url: Ptr[uint8]):
 # body; it is NUL-terminated by the caller but http_post takes an explicit length.
 def _fetch_post(url: Ptr[uint8], body: Ptr[uint8], blen: uint64):
     st: Array[1, int64]
-    bo: Array[1, uint64]
     bl: Array[1, uint64]
     st[0] = 0
-    bo[0] = 0
     bl[0] = 0
     ct: Ptr[uint8] = cast[Ptr[uint8]]("application/x-www-form-urlencoded")
     rc: int64 = http_post(url, body, blen, ct, &resp_buf[0], RESP_CAP,
-                          &st[0], &bo[0], &bl[0])
+                          &st[0], &bl[0])
+    ptrunc: int32 = 0
+    if rc == -6:
+        ptrunc = 1
+        rc = 0
     if rc < 0:
         _build_error(cast[Ptr[uint8]]("Form POST failed"), url)
         _set_status(cast[Ptr[uint8]]("transport error (DNS/connect/TLS)"))
@@ -1135,7 +1167,7 @@ def _fetch_post(url: Ptr[uint8], body: Ptr[uint8], blen: uint64):
         fp = fp + 1
         sys_write(1, &fl[0], fp)
         return
-    src_ptr = cast[Ptr[uint8]](cast[uint64](&resp_buf[0]) + bo[0])
+    src_ptr = &resp_buf[0]
     src_len = bl[0]
     _set_cur_url(http_effective_url())
     sb: Array[64, uint8]
@@ -1143,6 +1175,8 @@ def _fetch_post(url: Ptr[uint8], body: Ptr[uint8], blen: uint64):
     sp = sp + _u64_to_dec(cast[uint64](st[0]), &sb[sp])
     sp = _sapp(&sb[0], sp, cast[Ptr[uint8]]("  bytes "))
     sp = sp + _u64_to_dec(bl[0], &sb[sp])
+    if ptrunc != 0:
+        sp = _sapp(&sb[0], sp, cast[Ptr[uint8]](" TRUNCATED"))
     sb[sp] = 0
     _set_status(&sb[0])
     # LOUD serial proof that a FORM POST left the browser over the wire — a nav

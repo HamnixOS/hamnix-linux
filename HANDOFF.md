@@ -296,16 +296,86 @@ same failure this project exists to beat.
   Closing that needs a mapping per owner-uid or the table behind an RPC to
   wsysd — a different change, and the test asserts the hole so it cannot be
   forgotten.
-* **Every `http9` caller must size its buffer for the WHOLE response, and
-  three shipped programs do not.** `http9.http_get`'s `dst_cap` covers status
-  line + headers + body, and it returns `-6` — discarding the status — the
-  moment the response reaches it. That is what made `hpm` unable to fetch a
-  129-byte signature behind 640 bytes of CDN headers into a 512-byte buffer,
-  for the whole life of the repository. `hpm` is safe on every path now;
-  `curl`, `wget` and `hambrowse` share the same edge and were not audited. A
-  small response from a chatty server is the case that breaks, which is why it
-  survived: the obvious local test server sends 203-byte headers and never
-  reproduces it.
+* **FIXED, AND IN THE API RATHER THAN IN THE FOUR CALLERS: a caller's
+  `dst_cap` is now a cap on the BODY, and the header block is `http9`'s
+  problem.** The defect was that `http9.http_get` took ONE buffer covering
+  status line + headers + body and returned `-6` — discarding the status — the
+  moment the response reached it, so the correctness of every caller's buffer
+  size was a question about a number the caller cannot see: the SERVER's
+  header block. That is what made `hpm` unable to fetch a 129-byte signature
+  behind 640 bytes of CDN headers into a 512-byte buffer for the whole life of
+  the repository, and report it as "unsigned repo". **Four callers each sizing
+  a buffer correctly is four chances to get it wrong again**, so the head now
+  lands in `http9`'s own 16 KiB buffer (`http_header_bytes()` /
+  `http_header_len()` / `http_response_header()`), the body lands at `dst[0]`,
+  and `http_get`/`http_post` lose their `out_body_off` parameter. **The status
+  is never lost**: `*out_status` is set as soon as the head parses, INCLUDING
+  on `-6`, so a caller sized for a resource can still tell a 404 that arrived
+  as a 9 KB HTML page from a dead connection. A body that EXACTLY fills
+  `dst_cap` is a complete body (the old test was `total >= dst_cap` and failed
+  that too). New `-10` names an over-16-KiB response head as the SERVER fault
+  it is.
+
+  **What the audit actually found, measured rather than read.** `curl` and
+  `wget` were **not** broken at the `hpm` edge — a 129-byte resource behind a
+  642-byte header block fetched fine, because their caps were 1 MiB — and they
+  were broken at the other end of the same equation: **anything from about a
+  megabyte up died as `curl: transport error fetching URL`, exit 7, naming
+  neither the status nor the size and indistinguishable from the network being
+  down.** Measured against a 642-byte-header server, the wall was a
+  **1047929-byte body**; `wget` of a package tarball, which is what a person
+  runs `wget` for, is exactly the case. Both now carry 8 MiB body caps, fetch
+  3 MB whole, and when something genuinely does not fit they say so **by size
+  and by HTTP status** (`curl` exit 23, `wget` exit 9 with the word
+  INCOMPLETE) and still write what did arrive. `hambrowse` fetched images and
+  stylesheets at 262144 and a script `fetch()` at 131072 covering headers +
+  body; those caps are now about the resource, and its JS transport
+  reassembles head + body for the engine out of `http9`'s head buffer.
+
+  `tests/linux/http9_response_cap.sh` — 29 PASS, host-side, QEMU-free, over
+  byte-for-byte unchanged `http9`/`net9` linked to the `/net` host shim.
+  **Its step 0 is a REFUSAL**: it measures the server's header block and exits
+  1 below 600 bytes, because python's `http.server` sends 203 and every case
+  in the file would then pass on the pre-fix code — which is exactly how this
+  survived. Proved to fail on the pre-fix binaries: five assertions flip, and
+  the obvious small-response case passes in both arms.
+  `tests/linux/http9_chatty_server.py` is the padding server. It also gates
+  the ORIGINAL incident against the live repo, because no local server can be
+  trusted to imitate a CDN forever — GitHub Pages' header block measured
+  **668** bytes on the day this landed, not the 640 recorded when the bug was
+  found, and **DuckDuckGo's is 3080**: three kilobytes that used to come out
+  of whatever buffer the caller had brought.
+    `https://255.one/linux/index.json.sig` cap=512 → `RC=0 STATUS=200 BODYLEN=129`
+    `https://255.one/main/index.json.sig`  cap=512 → `RC=-6 STATUS=404`
+  The first is the fetch that could not be made for the life of the
+  repository; the second is a channel that genuinely has no signature, still
+  legible as a 404 through a buffer far too small for its error page.
+
+  `hpm` did not regress: `tests/linux/hpm_index_sig.sh` **7 PASS**,
+  `tests/linux/hpm_signed_refresh.sh` **9 PASS** against the live 255.one
+  (98 packages, install + run, no flags). That second gate did report one
+  failure, and it was the gate: hamsh echoes the rc script it runs, comments
+  and all, and its own comment says "an unsigned repo", which its `nocheck`
+  then matched on a run where `hpm` had said nothing of the kind. Fixed to
+  read guest output only — **a test failing on its own source text is the same
+  class of error as a program answering something success-shaped.**
+
+  One piece of this could not be gated where it lives. `hambrowse`'s JS
+  `fetch()` hands the engine the response as it came off the wire, so with the
+  head in `http9`'s buffer something must put it back in front of the body —
+  an OVERLAPPING shift, and one that runs the wrong way smears the tail while
+  leaving the length right. Written inside `hambrowse.ad` it would only ever
+  execute inside a VM, and **the on-device gate cannot be built in this
+  worktree**: `scripts/build_user.sh` fails 8 programs for want of `sys_chmod`
+  / `sys_stat_mode` at link (`user/cp.ad`, `user/hpm.ad`, `insmod`, `modprobe`,
+  `rmmod`, `uname`, `nice_hi`, `nice_lo`) when the native lane takes over from
+  LLVM — seven of them untouched by any of this, so it is the lane and not the
+  change, but it does mean `tests/linux/hambrowse_fetch_ondevice` and its
+  siblings come back INCONCLUSIVE here. The shift therefore moved into
+  `http9.http_prepend_head`, where a host probe reaches it: the gate captures
+  the body's last 16 bytes BEFORE the shift and compares them after
+  (`TAILMATCH=1`), so a backwards copy done forwards fails in the gate instead
+  of in someone's browser.
 
 * **THE SOFTWARE MIXER IS PORTED. Two programs make a sound at the same time,
   and the capture carries both.** An ALSA hardware substream has one writer, so

@@ -8,7 +8,9 @@
 #   wget -O FILE URL         save the body to FILE instead
 #
 # Prints a short summary line to stderr. Exit status: 0 on a 2xx
-# response, non-zero on an HTTP error (>= 400) or transport failure.
+# response, 8 on an HTTP error (>= 400), 9 when the body was larger than
+# the receive buffer (the file is written but is INCOMPLETE, and says so),
+# and 7 on a transport failure.
 #
 # Compiler-quirk discipline (memory/feedback_compiler_quirks.md U9):
 # every large buffer is a top-level BSS Array — never a frame local.
@@ -21,8 +23,18 @@ extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 
 
-RESP_CAP: uint64 = 1048576
-resp_buf:  Array[1048576, uint8]
+# 8 MiB BODY cap. http9's dst_cap covers the BODY ALONE — the status line
+# and headers land in http9's own buffer — so this is a statement about the
+# RESOURCE and not about the server's header block, which wget cannot see.
+#
+# It was 1 MiB covering headers + body: `wget` of anything at or above about
+# a megabyte printed "wget: transport error fetching URL" and exited 7,
+# naming neither the status nor the size and looking exactly like the
+# network being down. Measured against a chatty server here the wall was a
+# 1047929-byte body. Downloading a package tarball is the thing a person
+# runs wget FOR, so this is the caller the old cap hurt most.
+RESP_CAP: uint64 = 8388608
+resp_buf:  Array[8388608, uint8]
 # Derived default output filename (basename of the URL path).
 name_buf:  Array[512, uint8]
 
@@ -163,19 +175,37 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         out_path = &name_buf[0]
 
     status:   int64 = 0
-    body_off: uint64 = 0
     body_len: uint64 = 0
+    truncated: int32 = 0
     rc: int64 = http_get(url, &resp_buf[0], RESP_CAP,
-                         &status, &body_off, &body_len)
-    if rc < 0:
+                         &status, &body_len)
+    # -6 is NOT a transport failure: the server answered and the status is
+    # in hand; only the body outgrew the buffer. It is reported after the
+    # save, by size, so a short file is never mistaken for a whole one.
+    if rc == -6:
+        truncated = 1
+    elif rc < 0:
+        write_str(2, "wget: ")
         if rc == -1:
-            write_str(2, "wget: malformed or unsupported URL\n")
+            write_str(2, "malformed or unsupported URL\n")
         elif rc == -2:
-            write_str(2, "wget: could not connect to host\n")
+            write_str(2, "could not connect to host\n")
+        elif rc == -3:
+            write_str(2, "short write sending the request\n")
+        elif rc == -4:
+            write_str(2, "read error on the response\n")
+        elif rc == -5:
+            write_str(2, "empty or truncated (non-HTTP) response\n")
         elif rc == -7:
-            write_str(2, "wget: malformed chunked transfer-encoding\n")
+            write_str(2, "malformed chunked transfer-encoding\n")
+        elif rc == -8:
+            write_str(2, "too many redirect hops / redirect loop\n")
+        elif rc == -9:
+            write_str(2, "https -> http downgrade redirect rejected\n")
+        elif rc == -10:
+            write_str(2, "response headers exceed the header buffer\n")
         else:
-            write_str(2, "wget: transport error fetching URL\n")
+            write_str(2, "transport error fetching URL\n")
         return 7
 
     if status >= 400:
@@ -191,12 +221,23 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         write_str(2, "\n")
         return 3
 
-    body_ptr: Ptr[uint8] = cast[Ptr[uint8]](cast[uint64](&resp_buf[0]) + body_off)
-    if _write_full(out_fd, body_ptr, body_len) < 0:
+    if _write_full(out_fd, &resp_buf[0], body_len) < 0:
         sys_close(out_fd)
         write_str(2, "wget: write error\n")
         return 4
     sys_close(out_fd)
+
+    if truncated != 0:
+        write_str(2, "wget: HTTP ")
+        write_dec(2, status)
+        write_str(2, ", body larger than the ")
+        write_dec(2, cast[int64](RESP_CAP))
+        write_str(2, "-byte receive buffer; ")
+        write_str(2, out_path)
+        write_str(2, " holds the first ")
+        write_dec(2, cast[int64](body_len))
+        write_str(2, " bytes ONLY and is INCOMPLETE\n")
+        return 9
 
     # Summary line to stderr: "wget: saved <n> bytes to <file>".
     write_str(2, "wget: saved ")

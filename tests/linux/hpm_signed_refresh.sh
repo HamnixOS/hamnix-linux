@@ -107,7 +107,15 @@ check() {   # check <description> <regex>
     fi
 }
 nocheck() { # nocheck <description> <regex that must NOT appear>
-    if grep -aqE "$2" "$WORK/boot.log"; then
+    # hamsh ECHOES the rc script it is running, comments and all, so the
+    # console carries this file's own prose as well as the guest's output.
+    # One of the phrases below ("an unsigned repo") appears in a comment two
+    # dozen lines up, and matching it made this gate fail on a run in which
+    # hpm had said nothing of the kind — a test failing on its own source
+    # text is the same class of error as a program answering something
+    # success-shaped: the string was there, it just was not evidence.
+    # Echoed lines are prefixed "> "; only unprefixed lines are guest output.
+    if grep -av '^> ' "$WORK/boot.log" | grep -aqE "$2"; then
         echo "hsig: FAIL $1   (found /$2/)"
         fail=1
     else

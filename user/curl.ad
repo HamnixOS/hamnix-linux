@@ -9,23 +9,40 @@
 #   curl -L URL              follow a single 3xx Location redirect
 #
 # Exit status: 0 on a 2xx/3xx response, 22 on an HTTP status >= 400
-# (mirrors curl's --fail-ish behaviour at the smallest scope), and a
-# small non-zero code on a transport / parse failure.
+# (mirrors curl's --fail-ish behaviour at the smallest scope), 23 when the
+# response body was larger than the receive buffer (real curl's
+# CURLE_WRITE_ERROR number; the status line still prints, and what did fit
+# is still written), and a small non-zero code on a transport / parse
+# failure.
 #
 # Compiler-quirk discipline (memory/feedback_compiler_quirks.md U9):
 # every large buffer is a top-level BSS Array — never a frame local.
 # String literals are materialised inline; no adjacent string concat.
 
-from user.http9 import http_get, http_find_header
+from user.http9 import http_get, http_response_header, \
+    http_header_bytes, http_header_len
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 
 
-# 1 MiB response cap — comfortably covers index.json + small pages.
-RESP_CAP: uint64 = 1048576
-resp_buf:  Array[1048576, uint8]
+# 8 MiB BODY cap. http9's dst_cap covers the BODY ALONE — the status line
+# and headers land in http9's own buffer — so this number is a statement
+# about the RESOURCE, which is the only thing curl can reason about, and
+# not about the server's header block, which it cannot see.
+#
+# It was 1 MiB covering headers + body, which meant `curl` could not fetch
+# anything at or above about a megabyte and said "transport error fetching
+# URL" when it could not: measured against a chatty server here, the wall
+# was a 1047929-byte body, the message named no status and no size, and
+# the exit code was 7 — indistinguishable from DNS failing. 8 MiB is sized
+# for what a person actually curls (a package tarball, an ISO manifest, a
+# JSON dump); anything past it is now reported BY SIZE with its HTTP
+# status, so the number being too small can never again look like the
+# network being down.
+RESP_CAP: uint64 = 8388608
+resp_buf:  Array[8388608, uint8]
 # Scratch for a followed redirect's Location target.
 loc_buf:   Array[2048, uint8]
 
@@ -117,37 +134,56 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         return 2
 
     status:   int64 = 0
-    body_off: uint64 = 0
     body_len: uint64 = 0
     fetch_url: Ptr[uint8] = url
     redirects: int32 = 0
+    truncated: int32 = 0
 
     while True:
         rc: int64 = http_get(fetch_url, &resp_buf[0], RESP_CAP,
-                             &status, &body_off, &body_len)
-        if rc < 0:
+                             &status, &body_len)
+        # -6 is NOT a transport failure: the server answered, the status
+        # and headers are in hand, and only the body was larger than the
+        # buffer. Reporting it as "transport error" was a lie a user could
+        # not see through — it looked exactly like the network being down.
+        if rc == -6:
+            truncated = 1
+        elif rc < 0:
+            write_str(2, "curl: ")
             if rc == -1:
-                write_str(2, "curl: malformed or unsupported URL\n")
+                write_str(2, "malformed or unsupported URL\n")
             elif rc == -2:
-                write_str(2, "curl: could not connect to host\n")
+                write_str(2, "could not connect to host\n")
+            elif rc == -3:
+                write_str(2, "short write sending the request\n")
+            elif rc == -4:
+                write_str(2, "read error on the response\n")
+            elif rc == -5:
+                write_str(2, "empty or truncated (non-HTTP) response\n")
             elif rc == -7:
-                write_str(2, "curl: malformed chunked transfer-encoding\n")
+                write_str(2, "malformed chunked transfer-encoding\n")
+            elif rc == -8:
+                write_str(2, "too many redirect hops / redirect loop\n")
+            elif rc == -9:
+                write_str(2, "https -> http downgrade redirect rejected\n")
+            elif rc == -10:
+                write_str(2, "response headers exceed the header buffer\n")
             else:
-                write_str(2, "curl: transport error fetching URL\n")
+                write_str(2, "transport error fetching URL\n")
             return 7
 
         # Follow a single 3xx Location redirect when -L is set.
         if follow != 0 and status >= 300 and status < 400 and redirects < 1:
-            if http_find_header(&resp_buf[0], body_off,
-                                "location", &loc_buf[0], 2048) != 0:
+            if http_response_header("location", &loc_buf[0], 2048) != 0:
                 fetch_url = &loc_buf[0]
                 redirects = redirects + 1
+                truncated = 0
                 continue
         break
 
     if inc_headers != 0:
-        # The header block is resp_buf[0 .. body_off).
-        _write_full(1, &resp_buf[0], body_off)
+        # The header block lives in http9's own buffer now, not ours.
+        _write_full(1, http_header_bytes(), http_header_len())
 
     out_fd: int32 = 1
     opened: int32 = 0
@@ -160,14 +196,26 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             return 3
         opened = 1
 
-    body_ptr: Ptr[uint8] = cast[Ptr[uint8]](cast[uint64](&resp_buf[0]) + body_off)
-    if _write_full(out_fd, body_ptr, body_len) < 0:
+    if _write_full(out_fd, &resp_buf[0], body_len) < 0:
         if opened != 0:
             sys_close(out_fd)
         write_str(2, "curl: write error\n")
         return 4
     if opened != 0:
         sys_close(out_fd)
+
+    if truncated != 0:
+        # Say all three things: the server answered, what it answered, and
+        # exactly how much of the body we kept. A partial file that claims
+        # to be whole is the failure mode this whole change exists to end.
+        write_str(2, "curl: HTTP ")
+        write_dec(2, status)
+        write_str(2, ", body larger than the ")
+        write_dec(2, cast[int64](RESP_CAP))
+        write_str(2, "-byte receive buffer; wrote the first ")
+        write_dec(2, cast[int64](body_len))
+        write_str(2, " bytes only\n")
+        return 23
 
     if status >= 400:
         write_str(2, "curl: server returned HTTP ")

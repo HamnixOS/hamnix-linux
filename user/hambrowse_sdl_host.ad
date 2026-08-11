@@ -339,27 +339,22 @@ def _set_cur_url(u: Ptr[uint8]):
 # URL is acknowledged with a phase-2 status line and NOT fetched.
 # ====================================================================
 # Fetch a live http(s) URL into html_buf via the UNCHANGED Plan-9 http9/net9
-# stack. http_get lands the body at html_buf[body_off..]; we slide it down to
-# html_buf[0] (a forward copy, body_off > 0, so overlap-safe) and set html_len.
-# Returns the body byte count, or -1 on any transport/parse failure.
+# stack. http_get lands the body at html_buf[0] and FILE_CAP caps the BODY
+# alone (the status line + headers live in http9's own buffer), so there is
+# nothing to slide. Returns the body byte count, or -1 on a transport failure;
+# a -6 (page bigger than FILE_CAP) renders as far as it goes, because the
+# status is known and a partial page beats an indistinguishable error.
 def _fetch_http(url: Ptr[uint8]) -> int64:
     st: Array[1, int64]
-    bo: Array[1, uint64]
     bl: Array[1, uint64]
     st[0] = 0
-    bo[0] = 0
     bl[0] = 0
-    rc: int64 = http_get(url, &html_buf[0], FILE_CAP, &st[0], &bo[0], &bl[0])
-    if rc < 0:
+    rc: int64 = http_get(url, &html_buf[0], FILE_CAP, &st[0], &bl[0])
+    if rc < 0 and rc != -6:
         return -1
-    boff: uint64 = bo[0]
     blen: uint64 = bl[0]
     if blen > FILE_CAP:
         blen = FILE_CAP
-    i: uint64 = 0
-    while i < blen:
-        html_buf[i] = html_buf[boff + i]
-        i = i + 1
     html_len = blen
     return cast[int64](blen)
 
