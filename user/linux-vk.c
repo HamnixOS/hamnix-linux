@@ -416,6 +416,41 @@ static uint64_t g_stat_last_us, g_stat_arena_bytes, g_stat_batched;
 static uint64_t g_stat_staged;      /* uints written into the source arena */
 static uint64_t g_stat_covreuse;    /* glyphs that reused a staged mask */
 
+/* --- the measurement levers -------------------------------------------
+ * dispatches, barriers and staged words are the device-INDEPENDENT numbers
+ * this backend is tuned against, and a number is only shown to predict
+ * anything if it can be VARIED while the output pixels stay identical.
+ * These two knobs are that instrument. Neither changes a single pixel and
+ * both default to off:
+ *
+ *   HAMNIX_VK_MAX_BATCH=N   cap the OP_BATCH entry count. =1 reproduces the
+ *                           one-dispatch-per-op shape the batching replaced,
+ *                           so the SAME frame can be measured at 15 and at
+ *                           1724 dispatches and the per-dispatch cost read
+ *                           straight off the slope.
+ *   HAMNIX_VK_NO_COVCACHE=1 disable the per-frame glyph coverage cache, so
+ *                           the same frame can be measured at 41,808 and at
+ *                           363,792 staged words.
+ *
+ * They exist for the day this backend meets real silicon: the two slopes are
+ * the whole question, and on a GPU they are different numbers, not different
+ * conclusions -- see docs/vk_linux_backend.md. */
+static int32_t g_batch_max = -1;    /* <0: env not read yet */
+static int32_t g_no_covcache;
+
+static void hvk_tunables(void)
+{
+    if (g_batch_max >= 0) return;
+    g_batch_max = HVK_BATCH_MAX;
+    const char* s = getenv("HAMNIX_VK_MAX_BATCH");
+    if (s && s[0]) {
+        long v = strtol(s, 0, 10);
+        if (v >= 1 && v <= HVK_BATCH_MAX) g_batch_max = (int32_t)v;
+    }
+    s = getenv("HAMNIX_VK_NO_COVCACHE");
+    g_no_covcache = (s && s[0] && s[0] != '0') ? 1 : 0;
+}
+
 static int hvk_fail(const char* why)
 {
     snprintf(g_err, sizeof g_err, "%s", why);
@@ -1101,18 +1136,25 @@ int32_t hvk_glyph(uint64_t cov_base, int32_t cov_w, int32_t cov_h,
     uint32_t words = (uint32_t)cov_w * (uint32_t)cov_h;
     const uint8_t* cov = (const uint8_t*)(uintptr_t)cov_base;
 
-    /* Have we already staged exactly these bytes this frame? */
-    uint32_t hsh = 2166136261u;
-    for (uint32_t i = 0; i < words; i++)
-        hsh = (hsh ^ cov[i]) * 16777619u;
+    /* Have we already staged exactly these bytes this frame? The whole
+     * lookup -- hash included -- is skipped when the cache is disabled, so
+     * HAMNIX_VK_NO_COVCACHE=1 measures the frame WITHOUT the cache rather
+     * than the frame paying for a cache it is forbidden to use. */
+    hvk_tunables();
+    uint32_t hsh = 0;
     int32_t off = -1;
-    for (int32_t k = 0; k < g_ncov; k++) {
-        if (g_cov[k].hash != hsh || g_cov[k].w != cov_w || g_cov[k].h != cov_h)
-            continue;
-        const uint32_t* have = g_amap + g_cov[k].off;
-        uint32_t i = 0;
-        while (i < words && have[i] == (uint32_t)cov[i]) i++;
-        if (i == words) { off = g_cov[k].off; g_stat_covreuse++; break; }
+    if (!g_no_covcache) {
+        hsh = 2166136261u;
+        for (uint32_t i = 0; i < words; i++)
+            hsh = (hsh ^ cov[i]) * 16777619u;
+        for (int32_t k = 0; k < g_ncov; k++) {
+            if (g_cov[k].hash != hsh || g_cov[k].w != cov_w || g_cov[k].h != cov_h)
+                continue;
+            const uint32_t* have = g_amap + g_cov[k].off;
+            uint32_t i = 0;
+            while (i < words && have[i] == (uint32_t)cov[i]) i++;
+            if (i == words) { off = g_cov[k].off; g_stat_covreuse++; break; }
+        }
     }
     if (off < 0) {
         if (ensure_arena((VkDeviceSize)(g_ause + words) * 4u)) {
@@ -1123,7 +1165,7 @@ int32_t hvk_glyph(uint64_t cov_base, int32_t cov_w, int32_t cov_h,
         for (uint32_t i = 0; i < words; i++) g_amap[off + i] = cov[i];
         g_ause += words;
         g_stat_staged += words;
-        if (g_ncov < HVK_COV_CACHE) {
+        if (!g_no_covcache && g_ncov < HVK_COV_CACHE) {
             g_cov[g_ncov].hash = hsh;
             g_cov[g_ncov].w = cov_w;
             g_cov[g_ncov].h = cov_h;
@@ -1180,6 +1222,7 @@ static int32_t batch_table(int32_t first, int32_t cnt)
  * does not encode — the ordering guarantee that makes mixed frames correct. */
 int32_t hvk_frame_sync(void)
 {
+    hvk_tunables();
     if (!hvk_available() || !g_fmap) return -1;
     if (g_nops == 0) return g_frame_err;
     uint64_t t0 = now_us();
@@ -1239,7 +1282,7 @@ int32_t hvk_frame_sync(void)
              * workgroups that immediately return. Grow the batch only while
              * the padded launch stays within 2x the work the separate
              * dispatches would have done. */
-            while (k + 1 < gend && cnt < HVK_BATCH_MAX) {
+            while (k + 1 < gend && cnt < g_batch_max) {
                 uint32_t nx = g_grp[k + 1][0] > mgx ? g_grp[k + 1][0] : mgx;
                 uint32_t ny = g_grp[k + 1][1] > mgy ? g_grp[k + 1][1] : mgy;
                 uint64_t nsum = sum + (uint64_t)g_grp[k + 1][0] * g_grp[k + 1][1];
