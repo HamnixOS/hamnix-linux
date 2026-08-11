@@ -31,7 +31,7 @@ rather than argued:
 | Networking | `/net` as a file tree, TCP/UDP/ICMP, TLS, `announce`/`accept` across process boundaries, and DHCP (`user/dhcpc.ad`) |
 | Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1. **The update loop is proven end to end**: install at 1.0.2 from the live repo, a newer build lands, `hpm update`, the upgraded binary still runs. No re-image anywhere in it. |
 | Wayland | `user/wsyswl.ad`, a Wayland compositor in Adder. Firefox runs as a native Wayland client with its menus as separate windows; XWayland carries X11 clients. |
-| Debian | `enter debian { sh }` — bookworm on its own filesystem, amd64+i386. `glxgears:i386` renders on the Hamnix desktop through XWayland → `wsyswl` → `wsysd` → `/dev/fb`. |
+| Debian | `enter debian { sh }` — bookworm on its own filesystem, amd64+i386. Works **from a uid-1001 desktop terminal**, and something inside can build a container (`bwrap --unshare-user`). The root switch is `MS_MOVE` + `chroot`, what `switch_root(8)` does: `pivot_root` returns EINVAL on an initramfs boot's unattached `rootfs`. `glxgears:i386` renders on the Hamnix desktop through XWayland → `wsyswl` → `wsysd` → `/dev/fb`. |
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
 | Build | **358 of 366** `user/*.ad` build through the LLVM lane. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
@@ -48,18 +48,11 @@ the correct answer; one genuinely bails the backend's SSA subset
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
-* **`enter debian { … }` does not work from a desktop terminal.** The session
-  is uid 1001, `bind` is a real `mount(2)` needing CAP_SYS_ADMIN, so the
-  template's binds fail. Since 526a168e it fails loudly (exit 126) instead of
-  running the body in the native root and reporting success — honest, not
-  working. The fix is `pivot_root` instead of `chroot` in `enter_root`.
 * **Steam reaches its own UI and shows no window.** It installs, brings up
   pressure-vessel, and Chromium loads to `SteamApp Init - Before Login`; the
-  CEF GPU process exits and the browser is created at `(-2147483648, …)`.
-  Its container also cannot run as non-root: the kernel refuses
-  `CLONE_NEWUSER` to a chrooted process. Same `pivot_root` fix.
-  Catch, measured: an initramfs boot's root mount is `rootfs`, which
-  `pivot_root` rejects.
+  CEF GPU process exits and the browser is created at `(-2147483648, …)` —
+  which is `INT32_MIN`, i.e. a failed geometry query, not a layout choice.
+  Its probe is 23 PASS / 1 FAIL (the remaining one is the PulseAudio socket).
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
