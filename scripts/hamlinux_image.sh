@@ -99,6 +99,14 @@ APPS=(
     # reported success into a regular FILE called /dev/audio, which is exactly
     # why they are here now that there is a device behind the name.
     playtone aplay arecord
+    # The audio LIFETIME scenario driver.  It is here for the same reason
+    # hamimgscene is: it is the reproduction.  Its five phases are the shapes
+    # every real audio client in this tree has (a staged clip that exits, a raw
+    # write with no ctl at all, a streaming producer, a burst of effects over
+    # music), and it is the only program on the box that runs two of them AT
+    # ONCE -- which is the whole question tests/linux/audio_lifetime.sh asks.
+    # 197 KB.
+    audiolife
 )
 
 # The desktop. wsysd is the compositor (user/wsysd.ad — the userland half of
