@@ -8,14 +8,26 @@
 #           gui     needs /dev/wsys — a scene client or the toolkit
 #           daemon  runs for ever by design; "still up at the timeout" is a PASS
 #           hosttest a *_host.ad harness whose job is to self-test
-#           filter/cmd/gui/daemon/hosttest are RUN. The rest are not:
+#           bench   a BOUNDED experiment that simply runs longer than an
+#                   ordinary command (a fixed wall-clock CPU window). It gets
+#                   the daemon/gui timeout, because at 5 s the sweep was
+#                   killing nice_lo and wakelat_hog one second short of the
+#                   line they exist to print. It is still expected to END:
+#                   a bench alive at the timeout is a real TIMEOUT.
+#           filter/cmd/gui/daemon/hosttest/bench are RUN. The rest are not:
 #           lib     no main
 #           disk    wants a block device, a partition table or an image
 #           net     wants a host on the outside; the sweep stays offline
 #           payload runs as /init or as a bare-metal EL0 image, not as a program
 #           unsafe  would reboot, halt or replace PID 1
 #   argv    argv to run it with. %F %F2 are scratch text files, %D a scratch
-#           directory, %NEW a path that does NOT exist.
+#           directory, %NEW a path that does NOT exist. EMPTY means no
+#           arguments -- `-` here is a literal argument and is passed as one.
+#           That bit three rows which had borrowed the STDIN column's `-`
+#           sentinel: `mktemp -` answered "template must end with XXXXXX",
+#           `route -` printed its usage, and `pr -` tried to open a file
+#           called "-". All three are CORRECT answers to the wrong question,
+#           and all three were counted as failures of the program.
 #   stdin   `-` for immediate EOF, `%F` for the scratch file, else a literal
 #   claim   what the program says IT does, in its own header — including where
 #           it deliberately differs from POSIX. THIS IS THE ORACLE. `wc` and
@@ -277,7 +289,7 @@ mkdir	cmd	%NEW	-	calls sys_mkdir for each argv path; only /tmp/* paths succeed, 
 mkdir_at_slot	disk	/dev/blk/vdbp2 usr/share/foo	-	mkdir -p on a NOT-mounted ext4 partition via /dev/blk/<dev>/ctl mkdir verb
 mkfs_ext4	disk	/dev/blk/vdb	-	format a block device/partition via ext4_mkfs over the /dev/blk/<dev>/ctl channel
 mkfs_fat	disk	/dev/blk/vdbp1 32	-	format device as FAT via ctl channel; kernel-side fat_mkfs is currently a stub returning -1
-mktemp	cmd	-	-	create a uniquely-named temp file under /tmp, print its path, exit 0; mirrors coreutils mktemp
+mktemp	cmd		-	create a uniquely-named temp file under /tmp, print its path, exit 0; mirrors coreutils mktemp
 modprobe	cmd	nonexistentmod	-	resolve a module's dependency chain from modules.dep and load it via SYS_INIT_MODULE
 more	filter	-	%F	drain stdin into a 32 KiB buffer then page it 24 lines at a time, pausing for input each page
 motd	cmd	-	-	stream /etc/motd to stdout; exit 1 if the file is missing
@@ -288,7 +300,7 @@ net9	lib	-	-	no main(); Plan-9 /net dial helper library wrapping tcp/udp/tls con
 net9_host	hosttest	-	-	host harness proving unchanged http9/net9 code fetches a live web page via a host socket shim
 nice_demo	cmd		-	spawns nice_hi/nice_lo CPU-bound siblings, WAITS for both, and exits non-zero if either could not reach its nice level; it is a bounded experiment, not a daemon
 nice_hi	cmd		-	re-nices itself to -20, VERIFIES the level with getpriority, then runs a fixed wall-clock CPU counting loop; refuses (exit 1) if it could not get -20, which needs CAP_SYS_NICE
-nice_lo	cmd		-	re-nices itself to +19, VERIFIES the level with getpriority, then runs the same fixed wall-clock CPU counting loop and prints iterations
+nice_lo	bench		-	re-nices itself to +19, VERIFIES the level with getpriority, then runs the same fixed wall-clock CPU counting loop and prints iterations
 nl	filter	-	%F	number non-empty lines of stdin (GNU -b t default), right-justified 6-wide field plus TAB
 nproc	cmd	-	-	print the number of online CPUs, read from /proc/cpuinfo cpus_online field; falls back to 1
 nsbindprobe	cmd	-	-	binds /extbind_probe over /tmp in its own private namespace copy, prints a marker, exits
@@ -307,9 +319,9 @@ pgrep	cmd	sh	-	reads /proc/tasks and prints the PID of every task whose comm sub
 ping	net	127.0.0.1 -c 1	-	ICMP echo client dialing /net/icmp to a real host; -c 1 sends one request then stops
 playtone	other	-	-	synthesizes and plays a square-wave tone via /dev/audioctl+/dev/audio HDA device, no input file needed
 poweroff	unsafe		-	would ask the kernel to power the machine off — writes poweroff verb to /dev/reboot; on success the machine powers off and never returns - refuse to run
-pr	filter	-	%F	paginate stdin into fixed-length pages (default 66 lines) with header/trailer; -t omits them
+pr	filter		%F	paginate stdin into fixed-length pages (default 66 lines) with header/trailer; -t omits them
 preempt_demo	cmd	-	-	spawns a syscall-free CPU-hog sibling then runs its own bounded CPU loop to prove preemption works
-preempt_hog	cmd	-	-	spins forever in a syscall-free tight loop as a preemption-test CPU hog fixture; never returns
+preempt_hog	daemon		-	spins forever in a syscall-free tight loop as a preemption-test CPU hog fixture; never returns
 primary_paste_chain_host	hosttest	-	-	host gate joining terminal selection extraction to a real PRIMARY snarf buffer and paste wire line
 printenv	cmd	FOO=bar FOO	-	prints own argv NAME=VALUE tokens as its environment (no real environ[]); queries print matching VALUE
 printf	cmd	%s\n hi	-	minimal coreutils-style printf: %s/%d plus \n \t \\ \0 escapes; unknown conversions emitted literally
@@ -320,7 +332,7 @@ reboot	unsafe		-	would ask the kernel to reboot the machine — writes reboot ve
 rev	filter	-	%F	reverse the byte order of each stdin line; newlines preserved as line boundaries, not reversed
 rm	cmd	%NEW	-	unlink each argv path via sys_unlink; only /tmp/* is writable, other paths surface -EROFS
 rmmod	cmd	1	-	unload a module by numeric slot id or name (atoi-decoded); mirrors busybox rmmod minimally
-route	cmd	-	-	show/configure kernel IPv4 routing table via SYS_NETCFG; bare form lists the table, no real net needed
+route	cmd		-	show/configure kernel IPv4 routing table via SYS_NETCFG; bare form lists the table, no real net needed
 scene_raster_host	hosttest	in.dl out.ppm	-	loads a scene-dump display list and rasterizes it to a PPM via the host hamui raster path
 scenetest	gui	-	-	opens two overlapping /dev/wsys windows plus a cursor scene and commits them, printing sync markers
 sdlpong	gui	-	-	drives the shared lib/sdlpong.ad game through the native hamSDL device backend; needs real display
@@ -376,7 +388,7 @@ video_pointer_host	hosttest		-	host shim proving the video player's mouse-transp
 vk2d_host	hosttest	%NEW	-	host shim drawing every vk2d primitive into a 64x64 RGBA image, dumps a PPM and prints sampled pixel colours
 wakelat	hosttest		-	wakeup-latency reproducer; spawns wakelat_echo + wakelat_hog copies, measures preempt vs handoff wakeup distributions
 wakelat_echo	hosttest		-	responder half of the wakeup-latency reproducer; times its own service latency from a woken pipe read, no argv
-wakelat_hog	cmd		-	CPU hog with a throughput meter: fixed wall-clock window, syscall-free counting loop, prints "[wakelat] hog iters=N"
+wakelat_hog	bench		-	CPU hog with a throughput meter: fixed wall-clock window, syscall-free counting loop, prints "[wakelat] hog iters=N"
 watch	cmd	-n 1 /bin/uptime	-	runs CMD twice with an N-second gap between runs; no -c colors, no -d diff, no terminal redraw loop
 wc	filter		%F	reports "<lines> <words> <bytes>\n" for stdin; -l/-w/-c/-m select columns; reads stdin only, no file operands
 wget	net	http://example.com/	-	native HTTP client over the /net file tree; saves the body to the URL basename or -O FILE; needs real network

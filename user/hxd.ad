@@ -209,6 +209,14 @@ def draw_row(row_off: uint64, base: uint64, nbytes: uint64):
             p = p + 1
         row_out[p] = 32             # trailing space after each byte
         p = p + 1
+        # The loop variable. It was MISSING, and the consequence was not a
+        # wrong hex dump but a SIGSEGV: `b` never reached BYTES_PER_ROW, so
+        # this loop ran for ever writing three bytes an iteration into
+        # row_out[128] — straight through page_len, file_size and top (which
+        # is why the header printed "46 bytes" and the status bar never came)
+        # and on until it walked off the end of .bss. The ASCII gutter loop
+        # below always had its `a = a + 1`; this one simply did not.
+        b = b + 1
     # ASCII gutter, bracketed.
     row_out[p] = 32
     p = p + 1

@@ -221,8 +221,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         write_str(1, "login: ")
         ul: int64 = read_line_echo(&user_buf[0], USER_MAX)
         if ul < 0:
-            # EOF on stdin — give up.
-            return 0
+            # EOF on stdin. This USED to `return 0`, and a zero here is a lie
+            # of exactly the shape NORTH_STAR.md names: login's whole job is to
+            # establish a credentialed session, and on this path it established
+            # none. getty(8) EXECS this program, so login's status IS the VT
+            # session's status — a supervisor that restarts a failed VT could
+            # not tell "the user logged in and logged out" from "the console
+            # went away before anyone typed a name". Say which one it was.
+            write_str(2, "login: end-of-input at the login: prompt -- no session established\n")
+            return 1
         if ul == 0:
             # Blank username — reprompt.
             continue

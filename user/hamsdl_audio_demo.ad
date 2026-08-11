@@ -5,27 +5,69 @@
 # game makes on device. Its job in CI is to keep the DEVICE half of the audio
 # dual-target seam compiling (mirrors how user/sdlpong.ad guards hamSDL's video
 # seam); scripts/test_hamsdl_audio_host.sh compiles it for x86_64-adder-user.
+#
+# IT SAYS WHAT HAPPENED. Every path here used to be a bare `return 1` or
+# `return 0` with not one byte of output, so on a machine with no sound card
+# this demo exited 1 in total silence and the run sweep could record only "it
+# failed" — no reason, no name, nothing to act on. That is the mirror image of
+# the success-shaped answer NORTH_STAR.md is about: an unexplained failure is
+# just as useless as an unearned success. Each step now names itself, so "there
+# is no audio device here" and "the hamSDL seam is broken" can never again be
+# the same output.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 
 from lib.hamsdl_audio import sdl_set_volume
 from lib.hamsdl_audio_dev import sdl_audio_init, sdl_load_sound, \
     sdl_play_sound, sdl_play_music, sdl_stop_music, sdl_audio_pump
 
 
+def _slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def _puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, _slen(s))
+
+
 def main() -> int32:
     if sdl_audio_init() != 0:
+        _puts(2, "hamsdl_audio_demo: FATAL: sdl_audio_init could not open /dev/audioctl (no audio device?); nothing was played\n")
         return 1
     sdl_set_volume(96)
 
-    # Load a one-shot sound effect and play it.
-    if sdl_load_sound(cast[Ptr[uint8]]("blip"),
-                      cast[Ptr[char]]("/usr/share/sounds/test.wav")) >= 0:
+    # Load a one-shot sound effect and play it. A missing fixture is not fatal
+    # — the seam under test is the DEVICE, not the sample — but it is said out
+    # loud, because "played a sound" and "had no sound to play" are different
+    # facts and this used to report neither.
+    sfx: int32 = sdl_load_sound(cast[Ptr[uint8]]("blip"),
+                                cast[Ptr[char]]("/usr/share/sounds/test.wav"))
+    if sfx >= 0:
         sdl_play_sound(cast[Ptr[uint8]]("blip"))
+        _puts(1, "[hamsdl_audio] sfx: loaded and played /usr/share/sounds/test.wav\n")
+    else:
+        _puts(1, "[hamsdl_audio] sfx: /usr/share/sounds/test.wav did not load; skipped\n")
 
     # Start looping background music, then service the loop each "frame".
-    sdl_play_music(cast[Ptr[char]]("/usr/share/sounds/test.wav"), 1)
+    #
+    # CHECK THE RETURN. The first version of this rewrite printed "music:
+    # started looping, pumped 4 frames" and "ok: device seam exercised end to
+    # end" WITHOUT looking at what sdl_play_music answered — and on a host with
+    # no /usr/share/sounds/test.wav it answers -1 immediately, having opened no
+    # PCM and staged no bytes. The new output was therefore a fresh instance of
+    # the exact bug this file was being edited to remove. Measured, not
+    # reasoned: run with the fixture missing, it claimed success.
+    if sdl_play_music(cast[Ptr[char]]("/usr/share/sounds/test.wav"), 1) != 0:
+        _puts(2, "hamsdl_audio_demo: FATAL: sdl_play_music could not stage /usr/share/sounds/test.wav (missing/undecodable clip, or the PCM would not start); the music path was NOT exercised\n")
+        return 1
     i: int32 = 0
     while i < 4:
         sdl_audio_pump()
         i = i + 1
     sdl_stop_music()
+    _puts(1, "[hamsdl_audio] music: started looping, pumped 4 frames, stopped\n")
+    _puts(1, "[hamsdl_audio] ok: device seam exercised end to end\n")
     return 0
