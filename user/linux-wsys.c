@@ -62,6 +62,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -969,6 +970,47 @@ static void img_release_wid(int32_t wid)
         }
 }
 
+/* A WINDOW WHOSE OWNER IS GONE IS NOT A WINDOW.
+ *
+ * MEASURED, by tests/linux/wsys_desktop_z.sh, which is the gate that found it:
+ * kill an application and 100% of its pixels are still on the screen, an
+ * opaque rectangle no click can reach, with the taskbar still listing it.  It
+ * never goes away, because nothing in this port ever frees a window that its
+ * owner did not free by hand — and nothing in lib/hamui.ad frees one, so a
+ * NORMAL exit leaks it too.  Every return code 0, and the screen is wrong,
+ * which is this tree's most expensive failure shape.
+ *
+ * devwsys does not have this bug and does not need this function: there a
+ * window belongs to a FID, and the kernel closes every fid a dying process
+ * held, crash or not.  /dev/wsys here is shared memory with no fid table, so
+ * the liveness has to be asked for.  kill(pid, 0) is the question.
+ *
+ * It FAILS CLOSED in both directions that matter.  A pid whose number has been
+ * recycled answers "alive", so the window is KEPT — a stale window is a
+ * cosmetic fault and tearing down a live application's window is not.  EPERM
+ * (a live process this uid may not signal) is likewise "alive".  A window with
+ * no owner stamped (pid 0) is never touched: nothing is known about it.
+ *
+ * Called from the two reads that enumerate windows — the directory (which is
+ * what the compositor walks every frame) and /dev/wsys/windows (which is what
+ * the taskbar walks) — so the screen and the taskbar agree, and so the sweep
+ * costs one kill(2) per window per frame rather than one per file operation. */
+static void win_reap_dead(void)
+{
+    if (!shm) return;
+    for (int i = 0; i < WSYS_MAX_WINDOWS; i++) {
+        struct wwin *v = &shm->win[i];
+        if (!v->used || v->pid <= 0) continue;
+        errno = 0;
+        if (kill((pid_t)v->pid, 0) == 0 || errno != ESRCH) continue;
+        bb_release(v->wid);
+        img_release_wid(v->wid);
+        if (shm->focus_wid == v->wid) shm->focus_wid = 0;
+        v->used = 0;
+        shm->gen++;
+    }
+}
+
 /* devwsys's _wsys_img_find, over the shared table.  Empty name never matches;
  * the name is compared over its FULL length, so "log" never finds "logo". */
 static struct wimg *img_find(int32_t wid, const char *name, size_t nlen)
@@ -1555,6 +1597,7 @@ static int snap_windows(struct hamwsys_file *f)
 {
     uint8_t buf[WSYS_MAX_WINDOWS * (WSYS_TITLE_CAP + 16)];
     uint64_t n = 0;
+    win_reap_dead();               /* the taskbar must not list a dead window */
     /* Lowest wid first: the taskbar shows windows in the order they opened. */
     for (int pass = 2; pass < shm->next_wid; pass++) {
         struct wwin *v = win_find(pass);
@@ -1685,6 +1728,7 @@ static int snap_dir(struct hamwsys_file *f)
     uint8_t buf[1024];
     uint64_t n = 0;
     if (f->wid == 0) {
+        win_reap_dead();           /* the compositor must not paint a dead one */
         const char *fixed[] = { "ctl", "self", "windows", "screen" };
         for (unsigned i = 0; i < sizeof fixed / sizeof fixed[0]; i++) {
             for (const char *c = fixed[i]; *c; c++) buf[n++] = (uint8_t)*c;
