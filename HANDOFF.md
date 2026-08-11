@@ -39,6 +39,57 @@ rather than argued:
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
 | Build | **Every application in `user/` builds through the LLVM lane** — 363 of 363, with 4 of the 367 files being LIBRARY MODULES that have no `main` and are not applications. `scripts/hamlinux_sweep.sh` computes and prints that headline next to its own definition; nothing is hand-derived. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
+| Idle | **An idle desktop is idle.** It was not: with nothing open, no input and nothing running, the host's QEMU sat at **203.6%** of one cpu and `hamdesktop`, `hampanelscene` and PID 1 each burned 11 s in a 20 s window, in state R. Now **6.8%** with the bare desktop and **7.3%** with a terminal open, every process at `0:00`, no zombies. Four separate spins, all the same shape and all invisible to every functional gate — see THE IDLE CENSUS below. `tests/linux/de_idle_cpu.sh`. |
+
+#### THE IDLE CENSUS, and why nothing caught it
+
+The defect the machine's owner spotted from his own panel's CPU widget. It is
+worth its own section because of *how* it hid: everything worked. Every gate
+on this tree passed, the screenshots were right, the display lists were right,
+and the machine was on fire. A measurement of TIME was the only thing that
+could see it, which is why the gate measures TIME and does it **on both sides**
+of the VM boundary — guest `ps` deltas name the guilty process, and the host's
+own `/proc/<qemu>/stat` catches the ones `ps` cannot see. It had to: after the
+first fix every guest process read `0:00` and the host still read 104.5%.
+
+Four causes, found in that order:
+
+* **`sys_waitfds` handed its fds to `poll(2)`, and a `/dev/wsys` fd is a
+  descriptor on `/dev/null`.** `devtab_open` backs every synthetic-device open
+  with a real `/dev/null` fd so it survives fork and cannot collide — right for
+  read/write/close, catastrophic for poll, because `/dev/null` is always
+  readable. So **every parking event loop in the system was a busy spin**,
+  including the two written specifically not to be and commented as such.
+  `sys_waitfds` now sorts its fds by what they are: a `/dev/wsys` ring waits on
+  the ring's contents and sleeps in a **futex on an `inputgen` word in the
+  shared segment** (the faithful stand-in for devwsys's `waitfds_notify` — a
+  keystroke wakes the park at once, an idle desktop wakes never); a `/net` file
+  polls the real socket underneath it; an ordinary fd still goes to `poll`.
+* **`sleep` was a busy-wait** on `sys_get_jiffies`, with a `sys_yield` added
+  later to make the spin polite rather than absent. Every `sleep 4` in every rc
+  cost a core for four seconds. This was the 104.5% that remained when every
+  process read `0:00`: `sleep` is a child that lives entirely between the two
+  `ps` samples and appears in neither.
+* **A shell at a prompt with nobody typing burned a core.** `ed_readline` polls
+  stdin non-blocking (the heartbeat and the service supervisor must tick) and
+  spun on `sys_yield` between polls. A desktop with ONE TERMINAL OPEN — the
+  case a person is actually in — was back at 110.2%.
+* **`RFNOWAIT` was ignored, so every detached spawn left a permanent zombie.**
+  `lib/p9.ad`'s `spawn_detached` relies on the kernel reaping detached children
+  at every fork; this port had no reaper and no severed link, so hamdesktop's
+  boot chime was still on the process table a minute after it played. The
+  runtime now remembers detached pids and waits on **those and only those** —
+  not a blanket `waitpid(-1)` drain, which could steal a status from code that
+  was waiting for it. Separately, background jobs were only reaped at a PROMPT,
+  so on a boot whose rc is still running they stayed zombies for as long as
+  that took (`jobs_reap_quiet`).
+
+One test-side lesson worth keeping: the reported census showed two `wsyswl`
+zombies, and the first draft of this gate reproduced them — because it sourced
+only `/etc/rc.d/rc.5`, skipping the distribution binds, so each per-distribution
+Wayland server died on `cannot listen on /n/debian/run/wayland-0`. That is a
+defect of the TEST that would have been reported as a defect of the system.
+The gate boots the production `rc.boot` verbatim now.
 
 That number used to read "359 of 367", with the eight shortfalls grouped as
 four `*_host.ad` harnesses importing kernel source that is not in this
