@@ -65,7 +65,7 @@ COREUTILS = """
     ascii awk cmp column comm diff
 """.split()
 
-NET_CMDS = "ifconfig route ping host curl wget".split()
+NET_CMDS = "ifconfig route ping host curl wget dhcpc ntpd".split()
 
 # The /dev/audio clients. They are thin Plan 9 clients of the device served by
 # user/linux-audio.c and know nothing about ALSA. They are packaged SEPARATELY
@@ -77,6 +77,22 @@ NET_CMDS = "ifconfig route ping host curl wget".split()
 # drive it. The gap was silent: nothing failed, there was simply no way to
 # play a sound.
 AUDIO_CMDS = "playtone aplay arecord".split()
+
+# Identity. These three are the whole reason /dev/auth exists: they change
+# who you are, and none of them ever sees a password hash. Packaged together
+# because a machine that can log in but cannot change a password is not a
+# system you can administer.
+AUTH_CMDS = "login su passwd whoami".split()
+
+# Kernel modules. On a stock Debian kernel every graphics, filesystem and
+# network driver is a module, so on real hardware these are the difference
+# between a working machine and a black screen -- see the GPU packages below,
+# which install .ko files these programs are the only way to load.
+MOD_CMDS = "insmod lsmod modprobe rmmod".split()
+
+# Bringing a machine up and putting a system on it: the installer (CLI and
+# the GUI wizard), the namespace launcher, and reboot.
+SYS_CMDS = "hlinstall haminstallui nsrun reboot".split()
 
 DESKTOP_CMDS = ("wsysd wsyswl xbridge hamdesktop hampanelscene hamtermscene "
                 "hameditscene hamsettings hamfm hamUI hamUId").split()
@@ -107,6 +123,18 @@ COMPONENTS = {
         [("hpm", "bin/hpm")],
         [("etc/hpm/channels", "etc/hpm/channels")],
         ["hamnix-init>=1"]),
+    "hamnix-auth": (
+        "identity -- login, su, passwd, whoami; clients of /dev/auth",
+        [(c, "bin/" + c) for c in AUTH_CMDS], [], ["hamnix-init>=1"]),
+    "hamnix-modules": (
+        "kernel module tools -- insmod, lsmod, modprobe, rmmod",
+        [(c, "bin/" + c) for c in MOD_CMDS], [], ["hamnix-init>=1"]),
+    "hamnix-install": (
+        "installer and system tools -- hlinstall, haminstallui, nsrun, reboot",
+        [(c, "bin/" + c) for c in SYS_CMDS], [], ["hamnix-init>=1"]),
+    "hamnix-adder": (
+        "the Adder compiler driver -- `ac foo.ad -o foo` on the box",
+        [("ac", "bin/ac")], [], ["hamnix-init>=1"]),
     "hamnix-audio": (
         "hamnix-linux audio userland -- playtone, aplay, arecord, clients of "
         "/dev/audio",
