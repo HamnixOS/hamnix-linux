@@ -194,6 +194,33 @@ probe_once() {
     if [ "$n" -gt 0 ] && [ -n "$FBSNAP" ] && [ -s "$MNT/run/fb.raw" ]; then
         cp "$MNT/run/fb.raw" "$FBSNAP" 2>/dev/null
     fi
+    cpu_sample
+}
+
+# WHAT THE PROGRAM ITSELF COST, sampled from the outside while it runs.
+#
+# The sweep's cpu column is bash's `times` delta, which is REAPED-CHILD time,
+# and it has a hole exactly where the window system lives: `unshare
+# --kill-child` SIGKILLs the subtree, nothing wait(2)s for it, and the column
+# prints `-`. Every daemon and every scene client that stays up -- which is
+# nearly all of them -- therefore reported NO COST AT ALL, and a GUI client
+# that spins is indistinguishable from one that parks. That is THE IDLE
+# CENSUS's own failure mode (HANDOFF §0), left standing in the column written
+# to catch it.
+#
+# So: utime+stime out of /proc, for the program and the children it has
+# reaped, sampled in the same once-a-second loop. It is the PROGRAM's cost and
+# not the harness's -- the compositor is a different pid and is not counted,
+# which also stops a busy client's repaints being charged to it or its own
+# spin being hidden behind the compositor's park.
+cpu_sample() {
+    [ -n "$WINPROBE" ] || return
+    local tot=0 c v
+    for c in $(pgrep -P "$CPID" 2>/dev/null); do
+        v=$(awk '{print $14+$15+$16+$17}' "/proc/$c/stat" 2>/dev/null)
+        [ -n "$v" ] && tot=$((tot + v))
+    done
+    [ "$tot" -gt 0 ] && echo "$tot" > "$WINPROBE.cpu"
 }
 
 # `<&0` is not a no-op: POSIX redirects an asynchronous command's stdin from
@@ -205,6 +232,7 @@ CPID=$!
 if [ -n "$WINPROBE" ]; then
     best=0
     : > "$WINPROBE"
+    rm -f "$WINPROBE.cpu" "$WINPROBE.after"
     # A first sample after a second, then once a second for as long as the
     # program lives. lib/hamwid.ad's map handshake is 20 x 100 ms, so a client
     # that maps at all has done so by the second sample.

@@ -680,6 +680,23 @@ run_one() {
     # the regression sentinel lives: `sleep 1` reads cpu 0.0 of 1.0 wall now
     # and read cpu 1.0 when it was a busy-wait.
     case "$rc" in 124|137) cpu=- ;; esac
+    # ... EXCEPT for the windowed classes, where the jail sampled the program's
+    # own /proc while it ran. That closes the hole the line above leaves: every
+    # daemon and every scene client that is still up at the timeout is killed
+    # rather than reaped, so `times` never saw it and the column printed `-` --
+    # which is to say the one census on this tree that exists to catch a busy
+    # spin was blind to the entire desktop. It is the PROGRAM's cpu, not the
+    # harness's: the compositor is a different pid and is not in it.
+    #
+    # It is a sample, so it can be up to one second stale if the program died
+    # between samples; on a 12-second run that is the difference between "it
+    # spun" and "it spun", and on a short one the reaped `times` figure is
+    # available anyway and is preferred.
+    if [ "$cpu" = - ] && [ -n "$JWINPROBE" ] && [ -f "$OUT/run/$app.wins.cpu" ]; then
+        cpu=$(awk -v t="$(getconf CLK_TCK)" '{printf "%.1f", $1 / t}' \
+              "$OUT/run/$app.wins.cpu" 2>/dev/null)
+        [ -z "$cpu" ] && cpu=-
+    fi
 
     # What it changed. The overlay upper layer IS the diff. /srv and /run hold
     # the synthetic devices' own backing files, which every client touches and
@@ -957,6 +974,9 @@ unshare -r rm -rf "$OUT/ov" 2>/dev/null || rm -rf "$OUT/ov"
     # output, same wall clock -- which is how the desktop came to sit at 203.6%
     # of one cpu with every gate on this tree passing. >= 80% of its own wall
     # clock in cpu, for at least a second, is a program that did not sleep.
+    # Now that a windowed program's cpu is measured at all (see the /proc
+    # sample in the jail), this list finally covers the half of the tree the
+    # IDLE CENSUS was about.
     echo "-- burned a core while it waited (cpu / wall >= 0.8) --"
     awk -F'\t' 'NR>1 && $7 != "-" && $7+0 >= 1 && $6+0 > 0 && ($7+0)/($6+0) >= 0.8 {
                     printf "%-24s %-14s cpu %6.1fs of %6.1fs wall\n", $1, $4, $7, $6 }' \
