@@ -185,7 +185,19 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     user_prefix: Ptr[uint8] = "user "
     setp_prefix: Ptr[uint8] = "setpass "
     auth_write_line(fd, user_prefix, 5, &target[0], strlen_u8(&target[0]))
-    auth_write_line(fd, setp_prefix, 8, &new_pw[0], nlen)
+    sw: int64 = auth_write_line(fd, setp_prefix, 8, &new_pw[0], nlen)
+    if sw < 0:
+        # THE DEVICE REFUSED THE VERB, which is not the same thing as refusing
+        # the change, and the two must not print the same line. /dev/auth on
+        # this port serves `user` and `pass` and has never served `setpass`;
+        # until this was checked the refusal arrived as "not authorised, or no
+        # such user", which names an authorisation decision that was never
+        # taken. Say what actually happened.
+        write_str(2, "passwd: /dev/auth refused the `setpass` verb -- this kernel's auth device does not implement it, so no password can be changed here (it serves `user` + `pass` only)\n")
+        sys_close(fd)
+        wipe(&new_pw[0], PW_MAX)
+        wipe(&confirm[0], PW_MAX)
+        return 1
     rn: int64 = sys_read(fd, &authresp[0], 64)
     sys_close(fd)
 
