@@ -21,6 +21,17 @@ trap 'rm -rf "$WORK"' EXIT
 export HAMWSYS="$WORK/wsys.shm"
 export HAMFB_FILE="$WORK/fb.raw"
 export HAMFB_GEOM=800x600
+# The v2 backbuffer segment defaults to one file per HOST, outliving every
+# process that touches it, with slots keyed by wid -- two runs sharing it hand
+# each other stale slots. Private, like the main segment above.
+export HAMWSYS_BB="$WORK/wsys.bb"
+# wsysd arms a REAL Vulkan backend when the device is real silicon, and this
+# host has a GPU in it that belongs to someone. Nothing offscreen may touch
+# it: force the software ICD, the same rule every other offscreen gate here
+# follows. Without this line an ordinary `make test` runs the compositor on
+# the developer's display adapter.
+[ -r /usr/share/vulkan/icd.d/lvp_icd.json ] && \
+    export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 
 for t in wsysd:user/wsysd.ad client:tests/linux/wsys_client.ad \
          reader:tests/linux/input_reader.ad; do

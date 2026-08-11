@@ -267,23 +267,98 @@ static int bb_attach(void)
     return 0;
 }
 
+/* Say it once, on stderr, and never again.  A backbuffer that is not being
+ * scanned out is invisible by construction, so the ONLY way it can announce
+ * itself is a line on the console -- and one line, because the thing that made
+ * the last attempt at diagnosing this useless was volume: a message per frame
+ * filled the initramfs tmpfs and silenced the guest console inside two
+ * minutes. */
+struct wwin;
+static struct wwin *win_find(int wid);
+
+static void bb_once(int *flag, const char *msg, int a, int b, int c, int d)
+{
+    if (*flag) return;
+    *flag = 1;
+    fprintf(stderr, "wsys: BACKBUFFER %s (%d %d %d %d)\n", msg, a, b, c, d);
+}
+
+static int bb_warn_full, bb_warn_clamp, bb_warn_drop, bb_warn_refit;
+
+/* Fit a slot to a size, clearing it.  A resize means the client is about to
+ * redraw, and a stretched copy of the old frame in the meantime is a worse
+ * answer than a blank one it immediately overwrites. */
+static void bb_fit(int i, int w, int h)
+{
+    bb->slot[i].w = w > 0 && w <= BB_W ? w : BB_W;
+    bb->slot[i].h = h > 0 && h <= BB_H ? h : BB_H;
+    bb->slot[i].started = 0;
+    memset(bb->px[i][0], 0, BB_BYTES);
+    memset(bb->px[i][1], 0, BB_BYTES);
+    bb->slot[i].gen++;
+    if ((w > 0 && w > BB_W) || (h > 0 && h > BB_H))
+        bb_once(&bb_warn_clamp, "window is bigger than the backbuffer -- "
+                "its pixels will be cut to BB_W x BB_H", w, h, BB_W, BB_H);
+}
+
+/* THE SLOT'S SIZE IS THE WINDOW'S SIZE, AND NOTHING ELSE MAY DECIDE IT.
+ *
+ * This function's caller writes pixels at the SLOT's width; user/wsysd.ad
+ * reads them back and re-rows them at the WINDOW's width (paint_backbuffer,
+ * win_w[i]).  Two authorities for one stride, and when they disagreed nothing
+ * anywhere said so: the compositor scanned out a window drawn at 640 as though
+ * it were 1280, which is two half-height copies of the client side by side and
+ * everything below row h/2 dropped.  A rootful Xwayland is ONE surface, so
+ * what that looked like was a whole X session -- xterm, Steam's login window,
+ * the lot -- that painted once and then never followed a move again, with no
+ * error in any log.  It cost three passes to localise.
+ *
+ * Two ways they came apart, both fixed here:
+ *
+ *   * a STALE SLOT.  The segment is a file (/srv/wsys.bb, or /dev/shm/... on a
+ *     host run) that outlives the process, and a client that is killed never
+ *     releases its slot.  The next run's window takes the same low wid, finds
+ *     the corpse, and inherits its size.
+ *   * bb_resize() was a no-op whenever `bb` was NULL -- i.e. before this
+ *     process's first blit, which is EXACTLY when wsyswl sends the geometry it
+ *     deliberately sends first (see win_open's comment in user/wsyswl.ad).
+ *
+ * So: attach before resizing, and re-fit an existing slot whose size does not
+ * match what the caller asked for.  Every blit passes the window's current
+ * w/h, so after this the two can be out of step for at most one frame. */
 static int bb_for(int wid, int create, int w, int h)
 {
     if (bb_attach() < 0) return -1;
     for (int i = 0; i < BB_SLOTS; i++)
-        if (bb->slot[i].used && bb->slot[i].wid == wid)
+        if (bb->slot[i].used && bb->slot[i].wid == wid) {
+            if (create && w > 0 && h > 0
+                && (bb->slot[i].w != w || bb->slot[i].h != h)) {
+                bb_once(&bb_warn_refit, "a slot's size did not match its "
+                        "window's -- re-fitting", wid, bb->slot[i].w,
+                        bb->slot[i].h, w);
+                bb_fit(i, w, h);
+            }
             return i;
+        }
     if (!create) return -1;
-    for (int i = 0; i < BB_SLOTS; i++) {
-        if (bb->slot[i].used) continue;
-        memset(&bb->slot[i], 0, sizeof bb->slot[i]);
-        memset(bb->px[i], 0, BB_BYTES * 2);
-        bb->slot[i].used = 1;
-        bb->slot[i].wid  = wid;
-        bb->slot[i].w    = w > 0 && w <= BB_W ? w : BB_W;
-        bb->slot[i].h    = h > 0 && h <= BB_H ? h : BB_H;
-        return i;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < BB_SLOTS; i++) {
+            /* Second pass: reclaim the slots of windows that no longer exist.
+             * A client killed with SIGKILL never closes its window, and eight
+             * such corpses used to mean the ninth window was blank for ever. */
+            if (bb->slot[i].used) {
+                if (pass == 0 || win_find(bb->slot[i].wid)) continue;
+                bb->slot[i].used = 0;
+            }
+            memset(&bb->slot[i], 0, sizeof bb->slot[i]);
+            bb->slot[i].used = 1;
+            bb->slot[i].wid  = wid;
+            bb_fit(i, w, h);
+            return i;
+        }
     }
+    bb_once(&bb_warn_full, "all slots are in use by live windows -- this "
+            "window will never be painted", wid, BB_SLOTS, w, h);
     errno = ENOSPC;
     return -1;
 }
@@ -299,17 +374,18 @@ static int bb_for(int wid, int create, int w, int h)
  * blank one it immediately overwrites. */
 static void bb_resize(int wid, int w, int h)
 {
-    if (!bb || w <= 0 || h <= 0 || w > BB_W || h > BB_H) return;
+    if (w <= 0 || h <= 0) return;
+    /* ATTACH FIRST.  This used to be `if (!bb) return;`, which made the call
+     * a silent no-op in any process that had not blitted yet -- and the one
+     * caller is the `geometry` ctl verb, which wsyswl sends BEFORE its first
+     * blit on purpose.  So the correction never ran in the one process that
+     * needed it.  See bb_for. */
+    if (bb_attach() < 0) return;
     for (int i = 0; i < BB_SLOTS; i++) {
         struct bbhdr *hh = &bb->slot[i];
         if (!hh->used || hh->wid != wid) continue;
         if (hh->w == w && hh->h == h) return;
-        hh->w = w;
-        hh->h = h;
-        hh->started = 0;
-        memset(bb->px[i][0], 0, BB_BYTES);
-        memset(bb->px[i][1], 0, BB_BYTES);
-        hh->gen++;
+        bb_fit(i, w, h);
         return;
     }
 }
@@ -343,7 +419,11 @@ static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
     if (n < 18 + need) return 0;
 
     int slot = bb_for(v->wid, 1, v->w, v->h);
-    if (slot < 0) return 18 + need;
+    if (slot < 0) {
+        bb_once(&bb_warn_drop, "a blit was thrown away: this window has no "
+                "backbuffer slot", v->wid, v->w, v->h, (int)need);
+        return 18 + need;
+    }
     struct bbhdr *h = &bb->slot[slot];
     uint32_t back = h->front ^ 1u;
     if (!h->started) {
