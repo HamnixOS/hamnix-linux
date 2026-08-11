@@ -291,16 +291,43 @@ same failure this project exists to beat.
   is a separate one baked into its image, and the two share their two
   hardest-won lines by copy. Worth merging when there is a third.
   `docs/linux_distro_namespaces.md` §7.
-* **The NATIVE build lane cannot link eight programs, and the divergence is
-  mine.** `scripts/build_user.sh` — the native Hamnix target, not this line's
-  LLVM lane — fails at `ld` with `undefined reference to sys_chmod`,
-  `sys_stat_mode` and `sys_uname`, for `cp`, `hpm`, `insmod`, `modprobe`,
-  `rmmod`, `uname`, `nice_hi` and `nice_lo`. Those three syscalls were added
-  to `user/linux-syscalls.c` — the HOSTED runtime — to fix real bugs on this
-  line (a fresh `hpm install` arriving non-executable; `cp` not carrying a
-  mode), and no native counterpart was ever written. Measured directly:
-  `scripts/build_user.sh uname` names all three. Nothing on the Linux line is
-  affected; anyone building the native target from this tree is.
+* **The NATIVE build lane links again — 278/278, 0 undefined — but two of the
+  six entry points it got are honest −1s.** `scripts/build_user.sh` used to
+  fail at `ld` for `cp`, `hpm`, `insmod`, `modprobe`, `rmmod`, `uname`,
+  `nice_hi` and `nice_lo`. Six symbols had been added to the HOSTED runtime
+  (`user/linux-syscalls.c`) to fix real bugs on this line and never got a
+  native counterpart; `user/runtime.S` now carries them, written against the
+  frozen reference at `~/Hamnix`. Four are real: **`sys_chmod`** over Plan 9
+  `wstat(5)` (`SYS_WSTAT` 266 → `vfs_chmod`, persisted on ext4, documented
+  no-op success on tmpfs/cpio); **`sys_init_module`** over `SYS_INIT_MODULE`
+  (175), with a stat/mmap/read adapter in the runtime because that kernel has
+  only the old `(image, size, params)` shape and Linux grew `finit_module(2)`;
+  **`sys_delete_module`** over `SYS_DELETE_MODULE` (176), which unloads by
+  SLOT ID, so an all-digits name decodes and anything else is −1 rather than
+  unloading whatever slot a pointer's value landed on; and
+  **`get`/`setpriority`** over `SYS_NICE` (311), self-only, so any target
+  other than `(PRIO_PROCESS, 0)` is −1 rather than a re-nice that never
+  happened. Two are −1 **because that is the true answer**: `sys_uname` (that
+  kernel has no utsname anywhere in its number space — `user/uname.ad`'s
+  existing arm prints `Hamnix`, which is shorter than the hosted lane's line
+  and every byte of it is true), and **`sys_stat_mode`**, which is the one to
+  know about. `SYS_STAT_P9`'s Dir record *has* a mode field, but every stat
+  hook in `sys/src/9/port/sysfile.ad` hard-codes it — 0644 for a file,
+  `DMDIR|0755` for a directory — including `_stat_hook_ext4`, which does it
+  while holding the inode whose real `i_mode` it just read. A confident 0644
+  would make `cp /bin/hamsh /n/disk/bin/hamsh` chmod the destination
+  NON-EXECUTABLE; native Hamnix enforces no exec bit and would not notice, and
+  the ext4 image it just wrote is the one THIS line boots — the "Attempted to
+  kill init" panic, re-created from the other side. So `cp` carries no mode on
+  that kernel, because that kernel has no mode to carry. **Untested on the
+  native target: this repository has no Hamnix kernel in it and cannot boot
+  one.** Verified only to assemble and link. Remaining lane divergence, in
+  full: eleven hosted `sys_*` (`sys_unix_listen`/`_accept`/`_connect`,
+  `sys_scm_send`/`_recv`, `sys_memfd`, `sys_mmap_shared`, `sys_munmap_at`,
+  `sys_fd_size`, `sys_getenv`, `sys_open3`) plus `getenv`, all of them AF_UNIX
+  / SCM_RIGHTS / memfd / environ mechanisms declared only by
+  `user/wsyswl.ad`, `user/wsysd.ad`, `user/xsnarfd.ad` and one Linux-ABI test
+  — programs `scripts/build_user.sh` does not build at all.
 
 * **The GPU backend has never been measured on a real GPU, and on this
   machine it cannot be.** It is proven correct and proven to install; every
