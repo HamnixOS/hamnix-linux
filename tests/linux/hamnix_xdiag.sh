@@ -56,6 +56,23 @@ ls -l /run/dbus/ 2>&1 | head -5
 
 echo "xdiag: === Xwayland's own log"
 tail -25 /tmp/xwayland.log 2>&1
+
+# THE COMPOSITOR'S OWN ACCOUNT OF THIS SESSION, which is the one thing in here
+# that can say "your window is fine and I threw the frames away". It is a file
+# beside the Wayland socket precisely so it can be read from THIS side of the
+# namespace boundary (docs/steam_namespace.md §6.2a) -- and for three passes
+# nothing on this side ever read it, which is most of why the Steam bug took
+# three passes. `commits` climbing with every drop counter at 0 is a healthy
+# session; `commits 3` with `drop_no_mapping 508` is the bug this file exists
+# for. `conns` says how many INDEPENDENT clients that is: a rootful Xwayland
+# is 1, however many X clients are on it, so every per_conn limit below is one
+# table shared by all of them (docs/linux_window_manager.md §8a).
+echo "xdiag: === the Wayland compositor's own counters"
+if [ -r /run/wsyswl-state ]; then
+    sed 's/^/xdiag:   /' /run/wsyswl-state
+else
+    echo "xdiag: NO /run/wsyswl-state -- the compositor is not publishing, or the socket is not at /run/wayland-0"
+fi
 echo "xdiag: === the window manager's own log"
 tail -15 /tmp/wm.log 2>&1
 # What is actually managing this screen, asked of the X server rather than of
