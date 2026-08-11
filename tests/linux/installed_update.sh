@@ -249,6 +249,14 @@ PY
 EXPECT_CKSUM="$(cksum < "$PUBLISHED")"
 say "the published $BIN is cksum '$EXPECT_CKSUM'"
 
+# AND THE MD5, COMPUTED BY GNU md5sum, over the same bytes. user/md5sum.ad is
+# a real RFC 1321 digest now; this is what the guest's copy has to agree with,
+# on a 150 KB file and on a stream, or the tool is back to answering without
+# doing anything.
+EXPECT_MD5="$(md5sum "$PUBLISHED" | cut -d' ' -f1)"
+EXPECT_MD5_STREAM="$(printf '%s\n' "$STAMP" | md5sum | cut -d' ' -f1)"
+say "the published $BIN is md5 $EXPECT_MD5; the stamp stream is md5 $EXPECT_MD5_STREAM"
+
 # SIGN IT, and give the machine the key.
 #
 # hpm verifies a detached Ed25519 signature over the raw index bytes before it
@@ -377,6 +385,37 @@ echo '[iupd] p1 upgraded diff status:' \$status
 # this rc has, and etc/rc.boot.linux differs by thousands.
 echo '[iupd] p1 stat of /etc/rc.boot after hpm ran:'
 ls -l /etc/rc.boot
+# AND THE SAME QUESTION ANSWERED IN ONE NUMBER. \`ls -l FILE\` on this line
+# prints the file's CONTENTS, not a size, so the arm that looked for a byte
+# count in its output could never have matched no matter what hpm did -- it
+# reported the fault correctly by accident, and would have gone on reporting
+# it after the fix. A digest of the running rc is unambiguous: the host knows
+# what it wrote, and only these exact bytes produce this line.
+echo '[iupd] p1 md5 of /etc/rc.boot after hpm ran:'
+md5sum /etc/rc.boot
+
+# THE DIGEST TOOL ITSELF, ON THIS MACHINE, AGAINST GNU. user/md5sum.ad used
+# to drain stdin, ignore its argument and print the MD5 of the empty string as
+# a constant -- it would have "verified" any file on the disk, and the line
+# above would have been worthless. So the same tool is asked for a file whose
+# digest the host computed with GNU md5sum over the bytes it served, and for a
+# stream whose content the host minted this run.
+echo '[iupd] p1 md5 of the binary the update installed:'
+md5sum $BIN
+# A STREAM, VIA A REDIRECT AND NOT A PIPE. \`cat /etc/hamnix-update-stamp |
+# md5sum\` was tried here first and NEVER RETURNED -- the boot died on the
+# host's timeout with the banner printed and no digest under it. md5sum had
+# answered two file operands correctly in the two lines above, so what did not
+# finish is the pipe's EOF and not the hash; it is not chased here. A redirect
+# from a plain file exercises the same stdin path (\`cksum < \$BIN\` above is
+# the same shape) without betting a boot on it.
+echo '[iupd] p1 md5 of a stream:'
+md5sum < /etc/hamnix-update-stamp
+# cksum and head with a FILE OPERAND -- both took none until now.
+echo '[iupd] p1 cksum with a file operand:'
+cksum $BIN
+echo '[iupd] p1 head with a file operand:'
+head -1 /etc/rc.boot.installed
 
 date
 echo '[iupd] PHASE1 DONE'
@@ -481,7 +520,7 @@ HAMLINUX_DISK_RC="$WORK/rc.phase1" HAMLINUX_DISK_EXTRA="$EXTRA" \
     echo "FAIL disk build"; tail -20 "$WORK/build.log"; exit 1; }
 
 DISK_SUM_BEFORE="$(md5sum "$DISK" | cut -d' ' -f1)"
-RC1_SIZE="$(stat -c%s "$WORK/rc.phase1")"
+RC1_MD5="$(md5sum "$WORK/rc.phase1" | cut -d' ' -f1)"
 
 # =========================================================================
 # 6. Boot it. Twice. Nothing is rebuilt in between.
@@ -570,21 +609,41 @@ after  "the version MOVED to $NEWVER"            '[iupd] list after update:' "$P
 after  "the bytes on disk are the bytes published" "[iupd] p1 cksum of" "$EXPECT_CKSUM"
 after  "the edit landed: the stamp minted by THIS run" '[iupd] p1 the stamp' "$STAMP"
 check  "the UPGRADED binary still runs"          '\[iupd\] p1 upgraded diff status: 1'
-# A PACKAGE MUST NOT OWN THE MACHINE'S BOOT SCRIPT. hamnix-init ships
-# etc/rc.boot.linux AS /etc/rc.boot: on the live image that is the same bytes
-# twice and invisible, and on an installed machine it replaces the boot script
-# of the running system. Simply dropping it from the package is WORSE -- hpm's
-# upgrade removes the files the old version owned, and the machine ends up
-# with no /etc/rc.boot at all; both halves were measured here. The long note
-# in scripts/hamlinux_packages.py has the fix, which needs user/hlinstall.ad
-# to change with it. Named rather than gated red until that lands.
-if grep -aA3 -F '[iupd] p1 stat of /etc/rc.boot after hpm ran:' "$LOG" \
-   | grep -qE "(^| )$RC1_SIZE( |$)"; then
-    echo "iupd: PASS hpm left the machine's own /etc/rc.boot alone"
-else
-    echo "iupd: NOTE  hpm REPLACED the machine's /etc/rc.boot (expected $RC1_SIZE bytes, got '$(grep -aA1 -F '[iupd] p1 stat of /etc/rc.boot after hpm ran:' "$LOG" | tail -1 | tr -d '\r')')"
-    echo "iupd: NOTE  -> see the hamnix-init note in scripts/hamlinux_packages.py; the fix needs user/hlinstall.ad too"
-fi
+# A PACKAGE MUST NOT OWN THE MACHINE'S BOOT SCRIPT, and this is a GATE now.
+#
+# hamnix-init used to ship etc/rc.boot.linux AS /etc/rc.boot: on the live
+# image that is the same bytes twice and invisible, and on an installed
+# machine it replaced the boot script of the running system. Simply dropping
+# it from the package was measured WORSE -- an upgrade removes the files the
+# old version owned, and the machine ended up with no /etc/rc.boot at all.
+# user/hpm.ad:_is_machine_owned is the fix: hpm neither overwrites, deletes,
+# nor claims that path, and writes it only when it is ABSENT. hamnix-init
+# still ships it, as the one-line etc/rc.boot.machine, for the machines whose
+# own hpm predates the rule. docs/linux_installed_update.md §2b has all of it.
+#
+# THE DIGEST IS THE ASSERTION, NOT THE BYTE COUNT. `ls -l FILE` prints the
+# file's CONTENTS on this line, so the byte-count form this arm used could
+# never have matched -- it named the fault correctly by accident and would
+# have gone on naming it after the fix. The host wrote rc.phase1 and knows its
+# MD5; nothing else produces that line.
+after  "hpm left the machine's own /etc/rc.boot alone" \
+       '[iupd] p1 md5 of /etc/rc.boot after hpm ran:' "$RC1_MD5"
+nocheck "and it is not the initramfs rc wearing that name" \
+        'the bootstrap rc for the Linux line'
+# THE TOOL THAT ANSWERS THE QUESTION ABOVE HAS TO BE REAL. It was not:
+# user/md5sum.ad ignored its argument and printed the MD5 of the empty string
+# as a constant, so it would have "verified" any file in the world.
+after  "md5sum agrees with GNU md5sum on a 150 KB file" \
+       '[iupd] p1 md5 of the binary the update installed:' "$EXPECT_MD5"
+after  "md5sum agrees with GNU md5sum on a stream" \
+       '[iupd] p1 md5 of a stream:' "$EXPECT_MD5_STREAM"
+after  "cksum takes a FILE operand"  '[iupd] p1 cksum with a file operand:' \
+       "$EXPECT_CKSUM"
+# The expectation is a phrase from the FILE'S FIRST LINE, not its name: hamsh
+# traces each command it runs, so 'rc.boot.installed' matches the echoed
+# `head -1 /etc/rc.boot.installed` and would pass on a head that read nothing.
+after  "head takes a FILE operand instead of blocking on stdin" \
+       '[iupd] p1 head with a file operand:' 'the boot rc for an INSTALLED'
 check  "phase 1 reached the end"                 '\[iupd\] PHASE1 DONE'
 check  "the write to /etc landed (next boot armed)" '\[iupd\] p1 armed the next boot'
 # THE MACHINE RESTARTS ITSELF. This used to be a NOTE rather than a check,
