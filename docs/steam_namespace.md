@@ -22,15 +22,19 @@ from the **console** (uid 0) gets you: the launcher, a ~2.5 GB client
 download, the sniper container, `steamwebhelper`, and a Steam UI that logs
 `SteamApp Init - Before Login` — and no window you can see.
 
-From a **desktop terminal** it gets you something worse, and this is the first
-thing to fix. See §7.
+From a **desktop terminal**, which is uid 1001, it used to get you something
+worse: the body ran in the native root and reported success. It now gets you
+the same namespace the console does, container and all. See §7.
 
 ---
 
 ## 2. The scoreboard
 
 `tests/linux/steam_probe.sh`, run inside the namespace by
-`tests/linux/steam_probe_run.sh`. **21 PASS, 3 FAIL** as of this writing.
+`tests/linux/steam_probe_run.sh`. **23 PASS, 1 FAIL** as of this writing --
+and it now scores the same from a uid-1001 session as from the console, which
+it could not do at all before (§7). The one remaining FAIL is the PulseAudio
+server socket (§8).
 
 | Piece | State | Evidence |
 |--|--|--|
@@ -40,7 +44,7 @@ thing to fix. See §7.
 | network + DNS | **works** | `getent hosts`, and HTTPS to `repo.steampowered.com` |
 | Steam client install | **works** | bootstrap pre-staged, client downloaded, `Steam client's requirements are satisfied` |
 | pressure-vessel container | **works as root** | `srt-bwrap` alive with the sniper runtime, `steamwebhelper` running inside it |
-| pressure-vessel as a user | **blocked** | chroot forbids `CLONE_NEWUSER` — §5 |
+| pressure-vessel as a user | **works** | the root switch is `MS_MOVE` onto `/`, not `chroot`, so `bwrap --unshare-user` builds a container as uid 1001 — §5, §7 |
 | Steam UI window | **not yet** | CEF loads `steamloopback.host/library.js`, creates its browser, and no window is scanned out — §6 |
 | audio | **absent** | no `/dev/snd`, no sound device in the VM at all — §8 |
 
@@ -119,38 +123,55 @@ inside a chroot, inside a private mount namespace. bwrap as root does not need
 a user namespace, and everything else it wants — `CLONE_NEWNS`, `CLONE_NEWPID`,
 mounts — is available.
 
-**As a non-root user, it cannot work, and the reason is structural.** bwrap
-run by an unprivileged user must create a user namespace first, and the kernel
-refuses that to a chrooted process:
+**It used to be impossible as a non-root user, and the reason was structural.**
+bwrap run by an unprivileged user must create a user namespace first, and the
+kernel refuses that to a chrooted process — `create_user_ns()` →
+`current_chrooted()` → `EPERM`. bubblewrap's own message blames the sysctl,
+the sysctl was fine (`max_user_namespaces=15605`), and `enter debian` was
+implemented as `chroot(2)`.
+
+**FIXED. `enter_root` no longer chroots into the namespace; it moves the new
+root onto `/` first.** Both halves of the scoreboard now pass, and they pass
+for the session user as well as for root:
 
 ```
 steamprobe: PASS bwrap WITHOUT --unshare-user runs (uid 0)
-steamprobe: FAIL bwrap --unshare-user: bwrap: No permissions to create new
-            namespace, likely because the kernel does not allow non-privileged
-            user namespaces.
-steamprobe: INFO max_user_namespaces=15605 (so the sysctl is NOT the cause)
+steamprobe: PASS bwrap --unshare-user runs (the chroot restriction is gone)
+steamprobe: PASS bwrap WITHOUT --unshare-user runs (uid 1001)
+steamprobe: PASS bwrap --unshare-user runs (the chroot restriction is gone)
 ```
 
-bubblewrap's message blames the sysctl and the sysctl is fine. The actual rule
-is `create_user_ns()` → `current_chrooted()` → `EPERM`, and `enter debian` is
-implemented as `chroot(2)` (`enter_root` in `user/linux-syscalls.c`).
+**The prescription in the previous version of this section was wrong, and the
+measurement that corrected it is worth keeping.** "Use `pivot_root` instead of
+`chroot`" is the textbook answer and it does not work on this boot:
 
-**Proved on the host, unprivileged, with no root and nothing touched** — a
-user namespace, an rbind of `/`, and the same kernel:
+```
+nsprobe: initial root mount id=38 parent=38 UNATTACHED | 38 38 0:2 / / rw - rootfs
+nsprobe: RESULT pivot_root(".","."): FAIL Invalid argument
+nsprobe: RESULT MS_MOVE -> /: OK
+nsprobe: RESULT after-switch nested CLONE_NEWUSER: OK
+```
 
-| | `unshare -U` | `unshare -m` | `bwrap --unshare-all` |
-|--|--|--|--|
-| not chrooted | OK | OK | OK |
-| after `chroot` | **EPERM** | OK | **fails, same message** |
-| after `pivot_root` | OK | OK | **OK** |
+On the live initramfs boot the root mount is `rootfs`, whose mount id equals
+its parent id — it is not attached to anything — and `pivot_root(2)` rejects
+that with `EINVAL`, for root and unprivileged alike. What works is what
+`switch_root(8)` has always done on exactly this filesystem:
+`mount(new, "/", MS_MOVE)` then `chroot(".")`. The kernel's
+`current_chrooted()` walks down from the mount namespace's root dentry through
+whatever is mounted there and compares that with the process's root; moving
+the new root onto `/` makes those the same path, so the `chroot(2)` that
+follows is invisible to it. Same confinement, and the user namespaces work.
+The probe is `tests/linux/ns_probe.c`; run it from a boot rc.
 
-So the fix is named and its mechanism is verified: **`enter_root` would have to
-`pivot_root` rather than `chroot`.** What is *not* verified, and should not be
-assumed, is that pivot_root can be used here as-is: on the initramfs boot the
-process's root mount is `rootfs`, which has no parent mount, and `pivot_root`
-rejects that with `EINVAL`. That is the next thing someone has to measure. Until
-then, `chroot` with a fallback is the honest shape, and the consequence is the
-one above: containers for root, not for the session user.
+**The privilege the session user is missing is taken, not borrowed.** `mount(2)`
+needs `CAP_SYS_ADMIN`, and `unshare(CLONE_NEWUSER)` grants a full capability
+set in the namespace it creates — so the first `bind` that fails `EPERM` makes
+one and retries (`ns_privilege()` in `user/linux-syscalls.c`). Two traps, both
+measured: `/proc/self/uid_map` opens `EACCES` after a `setuid(2)` drop until
+`prctl(PR_SET_DUMPABLE, 1)` undoes what `commit_creds()` did, and a namespace
+with *no* map is uid 65534 with nothing mapped, which fails the nested
+`CLONE_NEWUSER` bwrap needs anyway. The map is the **identity** (`1001 1001 1`)
+— see §7.
 
 ---
 
@@ -195,31 +216,66 @@ not move. **This is where the work stops today.**
 
 ---
 
-## 7. `enter debian { … }` does not work from the desktop session
+## 7. `enter debian { … }` from the desktop session — solved
 
-The single most user-visible defect found, and it has nothing to do with Steam.
+The single most user-visible defect found, and it had nothing to do with
+Steam. `etc/rc.de-user.linux` drops the session to uid 1001, and `enter`
+performs `unshare(CLONE_NEWNS)` + `mount(2)` + a root switch, all of which
+need `CAP_SYS_ADMIN`. The namespace was not entered, the body ran in the
+**native** root, and the exit status was **0** — the tree's own recurring
+failure shape. Commit 526a168e made that fail loudly with 126 instead, which
+was honest but still did not work.
 
-`etc/rc.de-user.linux` drops the session to uid 1001, and `enter` performs
-`unshare(CLONE_NEWNS)` + `mount(2)` + `chroot(2)`, all of which need
-`CAP_SYS_ADMIN`. From a desktop terminal you get:
+**It works now.** The acceptance test is `tests/linux/enter_user_run.sh`, which
+drops to 1001 exactly the way the session does and then enters:
 
 ```
-rfork: no private namespace (needs CAP_SYS_ADMIN); continuing shared
-bind: Operation not permitted        (x5)
-uid=1001(live) gid=1001(live) groups=1001(live)
-[steamprobe] --- uid 1001 enter status: 0
+[enteruser] --- as the session user (uid 1001)
+enteruser: PASS this is Debian 12.15
+enteruser: INFO uid=1001 user=live
+enteruser: PASS unshare -U (CLONE_NEWUSER) from inside the namespace
+enteruser: PASS bwrap --unshare-user builds a container
+[enteruser] --- uid 1001 enter status: 0
 ```
 
-Read that last pair carefully. The namespace was **not** entered, the body ran
-in the **native** root — so `/bin/id` there is Hamnix's, not Debian's — and the
-**exit status was 0**. That is the tree's own recurring failure shape: a gap
-that answers something success-shaped instead of the truth. A user typing
-`enter debian { steam }` from the desktop gets `command not found` and a
-zero-ish status, and nothing tells them why.
+Three changes made it work, all in `user/linux-syscalls.c`:
 
-It needs a real answer (a small setuid helper, a privileged namespace service,
-or a capability), not a louder warning. Named here so it is not mistaken for
-solved.
+* **The privilege is created, not required.** A `mount(2)` that fails `EPERM`
+  makes a user namespace the caller owns and retries. Lazily, on the first
+  failing bind — `RFPROC|RFFDG|RFNAMEG` is on *every* spawn in this tree and
+  `ls` has no use for a user namespace.
+* **`bind '#distro' /` binds the mount that already exists.** `etc/rc.boot`
+  mounts the Debian filesystem at `/n/distro` while it is still root; mounting
+  the same block device a second time was always questionable and is flatly
+  impossible for anyone but real root, because no user namespace can grant a
+  real filesystem mount. The device is looked up in `/proc/self/mountinfo`
+  and bound from where it already is.
+* **The new root is `MS_MOVE`d onto `/`** rather than chroot'd into — §5.
+
+**The uid mapping is the identity, and that is a security property.** Mapping
+1001 → 0 would be the conventional rootless-container choice and it would
+break `user/linux-wsys.c`'s uid gate wide open: that gate asks whether
+`geteuid()` equals the owner of the `/srv/wsys` segment, and inside a
+1001 → 0 namespace both sides read 0, so the session would be handed the lock
+screen and the spawn queue. Measured with the identity map instead:
+
+```
+gate: before-userns: geteuid=1001  stat(/srv/wsys).st_uid=0      -> not host owner
+gate: in-userns:     geteuid=1001  stat(/srv/wsys).st_uid=65534  -> not host owner
+```
+
+It fails **closed** — root's segment is not in the map, so it reads back as
+`nobody` — and the harness arm where the segment belongs to 1001 itself still
+recognises its owner, because 1001 maps to 1001. `tests/linux/wsys_uidgate.sh`
+passes unchanged. There is no conflict with bubblewrap: bwrap does not need to
+be uid 0 inside, it needs its uid to *be mapped*, which the identity map does.
+And a process that is already root never escalates at all — its mounts
+succeed, and `ns_privilege()` refuses outright for `geteuid() == 0`.
+
+Inside `enter debian` the question is moot anyway: `enter_root` carries
+`/dev /proc /sys /n` into a subtree namespace but **not** `/srv`, so
+`enter debian { ls -l /srv }` prints `total 0` — the empty tmpfs the
+template's own `bind '#s' /srv` just mounted.
 
 ---
 

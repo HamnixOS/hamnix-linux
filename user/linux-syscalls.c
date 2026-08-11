@@ -45,6 +45,9 @@
 #include <pwd.h>
 #include <grp.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/statfs.h>
+#include <sys/sysmacros.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -1058,6 +1061,10 @@ int32_t sys_socketpair(int32_t domain, int32_t type, int32_t protocol,
 #define RFNAMEG  0x0008   /* copy (privatise) the namespace */
 #define RFCNAMEG 0x0080   /* start with an EMPTY namespace */
 
+/* Defined with the namespace verbs below: acquire CAP_SYS_ADMIN over our own
+ * mounts by creating a user namespace we own. */
+static int ns_privilege(void);
+
 int32_t sys_rfork(int32_t flags)
 {
     if (flags & RFMEM) {
@@ -1074,8 +1081,20 @@ int32_t sys_rfork(int32_t flags)
      * visible only to this process and its children. It needs CAP_SYS_ADMIN,
      * which PID 1 and its descendants have inside the VM. */
     if (!(flags & RFPROC)) {
-        if (flags & (RFNAMEG | RFCNAMEG))
-            return rc32(unshare(CLONE_NEWNS));
+        if (flags & (RFNAMEG | RFCNAMEG)) {
+            if (unshare(CLONE_NEWNS) == 0)
+                return 0;
+            /* An rfork WITHOUT RFPROC is a program saying "privatise my
+             * namespace, I am about to mount" -- user/nsrun.ad and
+             * user/distrofs.ad both do exactly that. So take the capability
+             * now rather than waiting for the mount: there is no ambiguity
+             * about whether this caller wants it. (The RFPROC arm below stays
+             * lazy, because that flag combination is on EVERY spawn in the
+             * tree and most spawns never mount anything.) */
+            if (errno == EPERM && ns_privilege())
+                return 0;
+            return rc32(-1);
+        }
         return 0;                       /* nothing asked for */
     }
 
@@ -1099,16 +1118,21 @@ int32_t sys_rfork(int32_t flags)
              * always sets all three), that made the whole userland
              * unrunnable outside root.
              *
-             * Carry on WITHOUT the private namespace, and say so once. The
-             * child is still a real child with a private fd table; what it
-             * loses is mount isolation, which only matters to a program that
-             * goes on to bind something. Degrading silently would be the
-             * worse of the two, so it is on stderr. */
+             * Carry on, and say so once. The child is still a real child with
+             * a private fd table; what it loses for now is mount isolation,
+             * which only matters to a program that goes on to bind something
+             * -- and a program that DOES bind gets the namespace at that
+             * point, because sys_bind's ns_mount() acquires a user namespace
+             * on the first EPERM. Deferring rather than escalating here is
+             * deliberate: RFPROC|RFFDG|RFNAMEG is on every spawn in this tree
+             * (lib/p9.ad's _spawn_flags), and `ls` has no use for a user
+             * namespace. */
             static int said;
             if (!said) {
                 said = 1;
-                const char *m = "rfork: no private namespace "
-                                "(needs CAP_SYS_ADMIN); continuing shared\n";
+                const char *m = "rfork: no private namespace yet "
+                                "(needs CAP_SYS_ADMIN); one is created on the "
+                                "first bind\n";
                 ssize_t ignored = write(2, m, strlen(m));
                 (void)ignored;
             }
@@ -2221,6 +2245,281 @@ static const char *sysroot_device(void)
     return dev;
 }
 
+/* ------------------------------------------------------------------ *
+ * Privilege for the namespace verbs, and the shape of the root switch
+ *
+ * MEASURED IN THE VM, 2026-08-10, because every line below turns on a number
+ * the kernel would not tell you from the outside. `tests/linux/ns_probe.c` is
+ * the probe; these are its answers on the live initramfs boot:
+ *
+ *   1. The root mount is `rootfs`, and it is UNATTACHED --
+ *      `38 38 0:2 / / rw - rootfs rootfs rw` (mount id == parent id).
+ *      pivot_root(2) refuses that: EINVAL, for root and unprivileged alike.
+ *      So docs/steam_namespace.md §5's "the fix is pivot_root" is the right
+ *      DIAGNOSIS and the wrong PRESCRIPTION -- it cannot be used here.
+ *
+ *   2. `mount(new, "/", MS_MOVE)` + `chroot(".")` -- which is what
+ *      switch_root(8) does, and what every Linux initramfs has always done --
+ *      works, and is EQUIVALENT for the purpose. The kernel's
+ *      current_chrooted() walks down from the mount namespace's root dentry
+ *      through whatever is mounted there and compares that with the process's
+ *      root; moving the new root ONTO "/" makes those the same path, so the
+ *      process is not chrooted even though it called chroot(2).
+ *      Measured directly: after this sequence a child's unshare(CLONE_NEWUSER)
+ *      returns OK; after a plain chroot(2) it returns EPERM.
+ *      That is the whole of symptom 2 -- bubblewrap, pressure-vessel, Steam.
+ *
+ *   3. An unprivileged process CAN have CAP_SYS_ADMIN over its own mounts:
+ *      unshare(CLONE_NEWUSER|CLONE_NEWNS) grants a full capability set in the
+ *      new user namespace. Two traps, both measured:
+ *        - /proc/self/uid_map opens EACCES after a setuid(2) drop, because
+ *          commit_creds() clears the mm's dumpable flag and that reowns the
+ *          process's own /proc files to root. prctl(PR_SET_DUMPABLE, 1) undoes
+ *          it, and is a self-operation that always succeeds.
+ *        - with NO map written the process is uid 65534 and NOTHING is mapped,
+ *          so the nested CLONE_NEWUSER that bubblewrap needs fails EPERM
+ *          anyway. The map is not optional.
+ *      The mapping is the IDENTITY (`1001 1001 1`), not `1001 0 1`.
+ *
+ * WHY THE MAP IS THE IDENTITY, which is a security property and not a
+ * preference. user/linux-wsys.c's uid gate (commit c9d010e6, the port of
+ * devwsys.ad's current_task_is_hostowner) decides whether a caller may drive
+ * the system chrome by comparing geteuid() with the OWNER OF THE /srv/wsys
+ * SEGMENT. A user namespace changes both sides of that comparison, so the
+ * mapping is what decides whether the gate keeps meaning anything:
+ *
+ *   1001 -> 0   would make geteuid() return 0 AND make the root-owned segment
+ *               read back as owner 0. The gate would then conclude that the
+ *               session IS the host owner and hand it the lock screen, the
+ *               spawn queue and every other window's title. A confident wrong
+ *               answer from a number that stopped meaning what it meant.
+ *   1001 -> 1001 (this) leaves geteuid() at 1001, and the root-owned segment
+ *               reads back as 65534 (uid 0 is not in the map), so the gate
+ *               concludes "not the host owner" -- the same answer it gave
+ *               before, and it fails CLOSED rather than open. Measured in the
+ *               VM: `before-userns: geteuid=1001 st_uid=0` and
+ *               `in-userns: geteuid=1001 st_uid=65534`; both refuse.
+ *               It also keeps the harness arm working, where the segment
+ *               belongs to 1001 itself: 1001 maps to 1001, so the owner is
+ *               still recognised as the owner.
+ *
+ * There is NO conflict between that and what bubblewrap needs. bwrap does not
+ * need to be uid 0 inside; it needs its own uid to BE MAPPED, so that the
+ * nested CLONE_NEWUSER it performs has an owner the kernel can resolve.
+ * Measured with the identity map, as uid 1001, inside the namespace:
+ * `bwrap --unshare-user` builds a container.
+ *
+ * And the Hamnix /srv is not carried into a subtree namespace at all -- see
+ * enter_root's `always[]` (/dev /proc /sys /n) versus `sysroot_only[]`
+ * (/srv /tmp). Measured: `enter debian { ls -l /srv }` prints `total 0`, the
+ * empty tmpfs the template's `bind '#s' /srv` just mounted. So inside
+ * `enter debian` the gate's object does not exist; the case that matters is a
+ * process that acquires a namespace WITHOUT entering a root, and that is the
+ * one the paragraph above measures.
+ * ------------------------------------------------------------------ */
+
+/* Read /proc/self/mountinfo, calling `want` for each line's (major:minor,
+ * mount root, mount point, filesystem type). Returns 1 as soon as `want`
+ * accepts, having copied that line's mount point into `mp`.
+ *
+ * The paths are relative to the CALLER's root, which is what makes this usable
+ * after the root switch: a /dev carried across shows up as /dev. */
+static int mountinfo_scan(int (*want)(const char *dev, const char *root,
+                                      const char *mp, const char *type,
+                                      void *ctx),
+                          void *ctx, char *mp_out, size_t mp_n)
+{
+    FILE *f = fopen("/proc/self/mountinfo", "r");
+    if (!f)
+        return 0;
+    char line[4096];
+    int hit = 0;
+    while (!hit && fgets(line, sizeof line, f)) {
+        char dev[64], root[1024], mp[1024], type[128];
+        /* fields: id parent major:minor root mountpoint opts... - type src */
+        if (sscanf(line, "%*d %*d %63s %1023s %1023s", dev, root, mp) != 3)
+            continue;
+        const char *sep = strstr(line, " - ");
+        if (!sep || sscanf(sep + 3, "%127s", type) != 1)
+            continue;
+        if (want(dev, root, mp, type, ctx)) {
+            snprintf(mp_out, mp_n, "%s", mp);
+            hit = 1;
+        }
+    }
+    fclose(f);
+    return hit;
+}
+
+struct devmatch { unsigned maj, min; };
+
+static int want_dev(const char *dev, const char *root, const char *mp,
+                    const char *type, void *ctx)
+{
+    (void)mp; (void)type;
+    struct devmatch *m = ctx;
+    unsigned a, b;
+    /* root must be "/": a bind of a SUBTREE of the filesystem is not the
+     * filesystem, and handing one back would silently enter the wrong tree. */
+    return strcmp(root, "/") == 0 && sscanf(dev, "%u:%u", &a, &b) == 2
+           && a == m->maj && b == m->min;
+}
+
+/* Where, if anywhere, this block device is already mounted whole.
+ *
+ * `bind '#distro' /` used to mount /dev/vda a SECOND time, on top of the one
+ * etc/rc.boot already made at /n/distro. Two mounts of one ext4 is a bad idea
+ * on its own, and it is impossible for the session user: mounting a real
+ * filesystem needs CAP_SYS_ADMIN in the INITIAL user namespace, which nothing
+ * short of real root has. Binding the mount that already exists needs only
+ * CAP_SYS_ADMIN over our own mounts, which is exactly what a user namespace
+ * gives us -- and it is the same filesystem, not a substitute for it. */
+static const char *blk_already_mounted(const char *devpath, char *out,
+                                       size_t outn)
+{
+    struct stat sb;
+    if (stat(devpath, &sb) != 0 || !S_ISBLK(sb.st_mode))
+        return NULL;
+    struct devmatch m = { major(sb.st_rdev), minor(sb.st_rdev) };
+    return mountinfo_scan(want_dev, &m, out, outn) ? out : NULL;
+}
+
+struct typematch { const char *mp; const char *type; };
+
+static int want_type(const char *dev, const char *root, const char *mp,
+                     const char *type, void *ctx)
+{
+    (void)dev; (void)root;
+    struct typematch *t = ctx;
+    return strcmp(mp, t->mp) == 0 && strcmp(type, t->type) == 0;
+}
+
+/* Is `dst` ALREADY a mount of `fstype`? EBUSY is the kernel saying so and
+ * sys_bind has always treated it as success; inside a user namespace the
+ * kernel says EPERM instead -- devtmpfs and (sometimes) proc cannot be mounted
+ * there at all -- and the question "is the server already at that name?" has
+ * the same answer and deserves the same one. This checks rather than assumes:
+ * if the name is NOT already that filesystem, the bind still fails. */
+static int already_mounted_type(const char *dst, const char *fstype)
+{
+    struct typematch t = { dst, fstype };
+    char mp[1024];
+    return mountinfo_scan(want_type, &t, mp, sizeof mp);
+}
+
+/* Acquire CAP_SYS_ADMIN over our own mounts by creating a user namespace we
+ * own. Once per process; returns 1 if we have it, 0 if we could not get it.
+ *
+ * This is deliberately LAZY -- called only when a mount has already failed
+ * EPERM -- so that an ordinary spawn from an unprivileged shell does not get a
+ * user namespace it has no use for. The processes that pay for one are exactly
+ * the processes that bind. */
+static int ns_privilege(void)
+{
+    static int state;                   /* 0 unknown, 1 have it, -1 refused */
+    if (state)
+        return state > 0;
+    state = -1;
+
+    if (getenv("HAMNIX_NO_USERNS"))     /* an operator's bisect handle */
+        return 0;
+
+    /* NEVER for root, even if a mount somehow returned EPERM. Two reasons and
+     * both matter. Real root does not need this -- its mounts succeed -- so
+     * reaching here at all would mean something else was wrong. And
+     * user/linux-wsys.c's uid gate decides "is this caller the host owner?" by
+     * comparing geteuid() with the owner of the /srv/wsys segment; a root
+     * process that entered a user namespace would still compare 0 against 0
+     * and pass the gate while having lost its real capabilities. Refusing
+     * keeps the gate's two inputs meaning what they meant. */
+    if (geteuid() == 0)
+        return 0;
+
+    /* See trap (a) above: without this the map files are root's, not ours. */
+    prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+
+    uid_t u = getuid();
+    gid_t g = getgid();
+    if (unshare(CLONE_NEWUSER | CLONE_NEWNS) < 0)
+        return 0;
+
+    char buf[64];
+    int fd = open("/proc/self/setgroups", O_WRONLY);
+    if (fd >= 0) {
+        ssize_t w = write(fd, "deny", 4);   /* required before gid_map */
+        (void)w;
+        close(fd);
+    }
+    int mapped = 0;
+    snprintf(buf, sizeof buf, "%u %u 1\n", (unsigned)u, (unsigned)u);
+    if ((fd = open("/proc/self/uid_map", O_WRONLY)) >= 0) {
+        mapped = write(fd, buf, strlen(buf)) > 0;
+        close(fd);
+    }
+    snprintf(buf, sizeof buf, "%u %u 1\n", (unsigned)g, (unsigned)g);
+    if ((fd = open("/proc/self/gid_map", O_WRONLY)) >= 0) {
+        ssize_t w = write(fd, buf, strlen(buf));
+        (void)w;
+        close(fd);
+    }
+    if (!mapped) {
+        /* An unmapped process is uid 65534 and can create no further user
+         * namespaces, so bubblewrap inside would fail with the message that
+         * sent docs/steam_namespace.md §5 after the wrong sysctl. Say so by
+         * name rather than carrying on in a namespace that half-works. */
+        const char *m = "bind: user namespace created but uid_map could not be "
+                        "written; the namespace would be unusable\n";
+        ssize_t w = write(2, m, strlen(m));
+        (void)w;
+        return 0;
+    }
+    /* Plan 9's namespace copy is private by construction. */
+    mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+    state = 1;
+    return 1;
+}
+
+/* mount(2), with one retry after acquiring privilege. Every mount sys_bind
+ * performs goes through here, so "the session user cannot mount" is answered
+ * in one place instead of at five call sites. */
+static int ns_mount(const char *src, const char *dst, const char *type,
+                    unsigned long flags, const void *data)
+{
+    if (mount(src, dst, type, flags, data) == 0)
+        return 0;
+    if (errno != EPERM)
+        return -1;
+    int saved = errno;
+    if (!ns_privilege()) {
+        errno = saved;
+        return -1;
+    }
+    return mount(src, dst, type, flags, data);
+}
+
+/* Where to assemble a new root before switching onto it.
+ *
+ * /n/.root is the tree's own name for it and stays the answer for root. The
+ * session user cannot create it -- /n is the system's, mode 0755 -- and a
+ * user namespace does not help, because CAP_DAC_OVERRIDE only applies to
+ * files whose owner is mapped into it, and uid 0 is not. So fall back to a
+ * private directory in /tmp, which is the 1777 tmpfs `bind '#t' /tmp` put
+ * there. The directory is left behind in a mount namespace that dies with the
+ * process, so there is nothing to clean up. */
+static const char *root_stage_dir(char *out, size_t outn)
+{
+    mkdir("/n", 0755);
+    if (mkdir("/n/.root", 0755) == 0 || errno == EEXIST) {
+        snprintf(out, outn, "/n/.root");
+        return out;
+    }
+    const char *tmp = envdef("TMPDIR", "/tmp");
+    snprintf(out, outn, "%s/.hamns-%d", tmp, (int)getpid());
+    if (mkdir(out, 0700) == 0 || errno == EEXIST)
+        return out;
+    return NULL;
+}
+
 /* Make `mnt` the process's root. chroot alone leaves the old root reachable
  * through the cwd, so chdir first — that is the difference between confinement
  * and a suggestion. */
@@ -2241,6 +2540,33 @@ static const char *sysroot_device(void)
  * user/xbridge.ad on the Hamnix side found nothing at /n/distro/tmp/xfb.  The
  * X server was running perfectly and its output was in a private universe.
  * And BIND, not MOVE: a child must not take the parent's mounts away. */
+/* HOW THE SWITCH IS PERFORMED, and why it is not chroot(2) and not
+ * pivot_root(2). The measurements are in the block above enter_root's helpers;
+ * this is what they decided.
+ *
+ *   mount(mnt, "/", MS_MOVE)  then  chroot(".")
+ *
+ * The MS_MOVE is the whole change. chroot(2) alone leaves the process's root
+ * DIFFERENT from its mount namespace's root, and the kernel calls that being
+ * chrooted -- create_user_ns() refuses outright
+ * (kernel/user_namespace.c: current_chrooted() -> EPERM). That is why
+ * bubblewrap could not build a container for a non-root user inside
+ * `enter debian`, and why its own error message blamed a sysctl that was
+ * fine. Moving the new root onto "/" first makes the two the same path, so
+ * the chroot(2) that follows is a no-op as far as current_chrooted() is
+ * concerned and the containers work.
+ *
+ * pivot_root(2) is the textbook answer and it does not work here: on the live
+ * initramfs boot the root mount is `rootfs`, which has no parent mount, and
+ * pivot_root rejects that with EINVAL. Measured, both as root and in a user
+ * namespace. MS_MOVE has no such restriction -- it is what switch_root(8)
+ * does, on exactly this filesystem, on every Linux boot there has ever been.
+ *
+ * If the MS_MOVE fails we fall back to a plain chroot(2) and SAY SO, naming
+ * what is lost. That fallback is a real confinement -- the body runs in the
+ * right root -- it is only the user-namespace property that is missing, so
+ * degrading to it is honest where refusing outright would take away a working
+ * `enter` to protect a feature the caller may not want. */
 static int32_t enter_root(const char *mnt, int is_sysroot)
 {
     /* /n comes across too: it is the conventional mount-point parent, and a
@@ -2255,18 +2581,35 @@ static int32_t enter_root(const char *mnt, int is_sysroot)
             if (mount(always[i], dest, NULL, MS_MOVE, NULL) == 0)
                 continue;
         }
-        mount(always[i], dest, NULL, MS_BIND | MS_REC, NULL);
+        ns_mount(always[i], dest, NULL, MS_BIND | MS_REC, NULL);
     }
     if (is_sysroot) {
         for (size_t i = 0; i < sizeof sysroot_only / sizeof sysroot_only[0]; i++) {
             snprintf(dest, sizeof dest, "%s%s", mnt, sysroot_only[i]);
             mkdir(dest, 0755);
             if (mount(sysroot_only[i], dest, NULL, MS_MOVE, NULL) < 0)
-                mount(sysroot_only[i], dest, NULL, MS_BIND | MS_REC, NULL);
+                ns_mount(sysroot_only[i], dest, NULL, MS_BIND | MS_REC, NULL);
         }
     }
     if (chdir(mnt) < 0)
         return -(int32_t)errno;
+    /* "." rather than mnt: the cwd is already INSIDE the new mount, so the
+     * move cannot be confused by the name it used to have. */
+    if (mount(".", "/", NULL, MS_MOVE, NULL) < 0) {
+        static int said;
+        if (!said) {
+            said = 1;
+            char m[256];
+            int n = snprintf(m, sizeof m,
+                "enter: could not move the new root onto / (%s); "
+                "falling back to chroot(2) -- the body runs in the right root, "
+                "but nothing inside it can create a user namespace, so "
+                "bubblewrap/pressure-vessel containers will not start.\n",
+                strerror(errno));
+            ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
+            (void)w;
+        }
+    }
     if (chroot(".") < 0)
         return -(int32_t)errno;
     if (chdir("/") < 0)
@@ -2312,7 +2655,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
             errno = last;
             return -(int32_t)last;
         }
-        return rc32(mount(src, dst, NULL, MS_BIND | MS_REC, NULL));
+        return rc32(ns_mount(src, dst, NULL, MS_BIND | MS_REC, NULL));
     }
 
     const char *sub = "";
@@ -2362,7 +2705,16 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
     mkdir(dst, 0755);
 
     if (d->fstype) {
-        if (mount(d->fstype, dst, d->fstype, 0, NULL) == 0)
+        if (ns_mount(d->fstype, dst, d->fstype, 0, NULL) == 0)
+            return 0;
+        /* EPERM with the server ALREADY at that name. Inside a user namespace
+         * devtmpfs cannot be mounted at all and proc sometimes cannot, so the
+         * kernel answers EPERM where it would otherwise have answered EBUSY --
+         * and EBUSY has always meant "it is already there", which for a Plan 9
+         * re-bind of the same server over the same point is success. Checked
+         * against /proc/self/mountinfo, not assumed: if the name is not
+         * already that filesystem this still fails. */
+        if (errno == EPERM && already_mounted_type(dst, d->fstype))
             return 0;
         /* EBUSY means it is ALREADY mounted there, and that is a success, not
          * a failure. The rc scripts bind these repeatedly on purpose --
@@ -2416,11 +2768,33 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
      * which is a stronger guarantee than "we agreed not to write to it". */
     int to_root = (dst[0] == '/' && dst[1] == '\0');
     int is_sysroot = !strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r");
+    char stage[256];
     const char *mnt = dst;
     if (to_root) {
-        mnt = "/n/.root";
-        mkdir("/n", 0755);
-        mkdir(mnt, 0755);
+        mnt = root_stage_dir(stage, sizeof stage);
+        if (!mnt) {
+            /* No writable place to assemble the new root. Naming it matters:
+             * the alternative answer to this is entering NOTHING and running
+             * the body in the native root. */
+            const char *m = "bind: no writable staging directory for the new "
+                            "root (tried /n/.root and $TMPDIR)\n";
+            ssize_t w = write(2, m, strlen(m));
+            (void)w;
+            errno = EACCES;
+            return -EACCES;
+        }
+    }
+
+    /* A filesystem this device already carries is the one to use. See
+     * blk_already_mounted: mounting it a second time is both wrong and
+     * impossible for anyone but real root, and `bind '#distro' /` from a
+     * desktop session is exactly that case -- etc/rc.boot mounted the tree at
+     * /n/distro when it was root, and this binds THAT. */
+    char existing[1024];
+    if (blk_already_mounted(srcpath, existing, sizeof existing)) {
+        if (ns_mount(existing, mnt, NULL, MS_BIND | MS_REC, NULL) < 0)
+            return -(int32_t)errno;
+        return to_root ? enter_root(mnt, is_sysroot) : 0;
     }
 
     struct stat sb;
@@ -2433,15 +2807,17 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
                 return to_root ? enter_root(mnt, is_sysroot) : 0;
             last = errno;
             /* EBUSY means something is already mounted there; trying more
-             * filesystem types will not help. */
-            if (last == EBUSY)
+             * filesystem types will not help. EPERM means we are not root and
+             * mounting a real filesystem is not something a user namespace can
+             * grant -- the same is true of every other type in the list. */
+            if (last == EBUSY || last == EPERM)
                 break;
         }
         errno = last;
         return -(int32_t)last;
     }
 
-    if (mount(srcpath, mnt, NULL, MS_BIND | MS_REC, NULL) < 0)
+    if (ns_mount(srcpath, mnt, NULL, MS_BIND | MS_REC, NULL) < 0)
         return -(int32_t)errno;
     return to_root ? enter_root(mnt, is_sysroot) : 0;
 }
