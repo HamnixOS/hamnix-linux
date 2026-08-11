@@ -443,6 +443,13 @@ distribution:
 
 `tests/linux/snarf_device.sh` is still **23/23** with `sys_unix_connect` added.
 
+**An idle bridge is idle**, measured because on this tree that is never
+assumed (HANDOFF's IDLE CENSUS): `/proc/<pid>/stat` over 15 s reads
+`utime=0 stime=0` both while it is retrying a socket that does not exist yet
+*and* while it is connected to a quiet X server. The two waits are a
+`sys_waitfds` park each; the four-times-a-second content poll of two clipboard
+buffers does not register.
+
 ### 6.4 Two defects worth keeping written down
 
 Both were found by measurement against a real X server, neither by reading.
