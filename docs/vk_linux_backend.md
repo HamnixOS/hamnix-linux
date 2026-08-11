@@ -431,7 +431,9 @@ card0  renderD128  version
 ```
 
 `nvidia_drm` **is** loaded (`lsmod`), and it registered a DRM device — but no
-connectors. A KMS-capable DRM driver exposes one `cardN-<connector>` node per
+connectors (`tests/linux/vk_icd_survey.sh` prints the connector count for
+every card it finds, which is why that survey is the first thing to run on a
+new machine). A KMS-capable DRM driver exposes one `cardN-<connector>` node per
 output (`card0-DP-1`, `card0-HDMI-A-1`, …); there is not one here. That is
 modeset being off, observed from userspace, without opening the device and
 without a privilege this tree does not have. The recorded hypothesis is now
@@ -441,11 +443,19 @@ evidence.
 
 Every Mesa ICD in `/usr/share/vulkan/icd.d/` was asked to enumerate, in a
 private mount namespace with a `tmpfs` mounted over `/dev/dri` — so the host
-GPU's nodes were *provably* never opened, which is the standing rule here:
+GPU's nodes were *provably* never opened, which is the standing rule here.
+That is `tests/linux/vk_icd_survey.sh`, and it is a script rather than a
+paragraph because every word of this section is a claim about the MACHINE,
+which goes stale the moment someone plugs in a card:
 
 ```
-$ unshare -Urm --map-root-user sh -c \
-      'mount -t tmpfs none /dev/dri; VK_ICD_FILENAMES=<icd> ./icdprobe'
+$ tests/linux/vk_icd_survey.sh
+[icdsurvey]   card0: driver nvidia, 0 KMS connector(s)
+[icdsurvey]     ^ no connectors: this driver is not modesetting
+[icdsurvey] lvp_icd.json             DEVICE type 4  llvmpipe (LLVM 19.1.7, 256 bits)
+[icdsurvey] nvidia_icd.json: NOT RUN (reaches the GPU through /dev/nvidiactl)
+[icdsurvey] <every other ICD>        no-device (... -> VkResult -3)
+[icdsurvey] CPU-ONLY — correctness is gateable, performance is not
 ```
 
 | ICD | result |

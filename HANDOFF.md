@@ -207,12 +207,30 @@ same failure this project exists to beat.
   is a separate one baked into its image, and the two share their two
   hardest-won lines by copy. Worth merging when there is a third.
   `docs/linux_distro_namespaces.md` §7.
-* **The GPU backend has never been measured on a real GPU.** It is proven
-  correct and proven to install; every microsecond quoted anywhere is
-  lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
-  rasterizer, which is why the default is gated on the device being silicon.
-  venus does not come up on this dev host (the NVIDIA driver's GBM backend
-  cannot create a device; wants `nvidia-drm.modeset=1` and a reboot).
+* **The GPU backend has never been measured on a real GPU, and on this
+  machine it cannot be.** It is proven correct and proven to install; every
+  microsecond quoted anywhere is lavapipe's, where it is 2.3–2.9× *slower*
+  than the hand-tuned software rasterizer, which is why the default is gated
+  on the device being silicon. What is now *established* rather than assumed
+  (`docs/vk_linux_backend.md`, "What could be measured on this host"): venus
+  is blocked because `nvidia_drm` registered **no connector nodes** in
+  `/sys/class/drm` — `modeset=0` seen from userspace, no root needed, so the
+  recorded hypothesis is evidence; **no** other ICD on this host finds a
+  device (all seven asked, with `/dev/dri` masked by a tmpfs so the host GPU
+  was provably never opened); and a plain `virtio-gpu` VM was booted and
+  measured to have a real DRM device, the venus ICD, and **zero** Vulkan
+  devices. QEMU 10.0.8 here has no `rutabaga` backend, so there is no headless
+  path to a guest Vulkan device that does not go through the host's
+  `/dev/dri`. What it takes: a machine with a non-blocked GPU, or this one
+  rebooted with `nvidia-drm.modeset=1` — **the owner's call, do not ask**.
+  The one command on that day is
+  `VK_ICD_FILENAMES=<real>.json scripts/bench_vk_linux_device.sh`.
+  Meanwhile the *levers* were measured, which is the part that transfers:
+  dispatch count predicts (17.7 µs each on lavapipe), `staged_words` predicts
+  nothing while the frame is host-visible, and "fewer dispatches is faster" is
+  refuted as a rule — on the fills frame the shipped batching is 20% slower
+  than one dispatch per op, because a batch pads its grid to the max over its
+  entries.
 * **The wsys window table is still world-writable, though the chrome is not.**
   `/dev/wsys` was one 0666 segment, so a program that mmapped `/srv/wsys`
   directly bypassed the uid gate entirely — measured: as uid 1001 it
