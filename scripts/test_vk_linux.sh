@@ -85,6 +85,35 @@ if echo "$BACKEND_OUT" | grep -q "^BENCH_DE_TEXT_1280x800 GPU_US"; then
         fail=1; }
 fi
 
+# ---- 1c. the levers, and the second path they open up --------------------
+# HAMNIX_VK_MAX_BATCH=1 bypasses OP_BATCH entirely: every op gets its own
+# dispatch and its own push constants, which is a DIFFERENT code path through
+# both the host and the shader from the batched one the default takes. So this
+# is not only a check that the measurement lever still works -- it is the
+# assertion that the batched and unbatched paths produce the SAME PIXELS.
+# Nothing else in this gate compares those two against each other.
+# HAMNIX_VK_NO_COVCACHE=1 does the same for the glyph coverage cache: the
+# frame is re-staged in full, and must still land byte for byte.
+if echo "$BACKEND_OUT" | grep -q "VK_DEVICE "; then
+    note "the levers: unbatched (MAX_BATCH=1) and uncached (NO_COVCACHE=1)"
+    LEV1="$(HAMNIX_VK_MAX_BATCH=1 "$OUT/vk_linux_test" 2>/dev/null)"
+    LEV2="$(HAMNIX_VK_NO_COVCACHE=1 "$OUT/vk_linux_test" 2>/dev/null)"
+    for k in IDENTITY_RGBA IDENTITY_BGRA BENCH_FILLS_1280x800 BENCH_DE_TEXT_1280x800; do
+        echo "$LEV1" | grep -q "^$k PASS byte-identical" || {
+            echo "FAIL: $k differed with the batching disabled"; fail=1; }
+        echo "$LEV2" | grep -q "^$k PASS byte-identical" || {
+            echo "FAIL: $k differed with the coverage cache disabled"; fail=1; }
+    done
+    # ...and the levers must actually LEVER, or they measure nothing.
+    D1=$(echo "$LEV1" | sed -n 's/.*BENCH_DE_TEXT_1280x800 .* dispatches \([0-9]*\) .*/\1/p')
+    S2=$(echo "$LEV2" | sed -n 's/.*BENCH_DE_TEXT_1280x800 .* staged_words \([0-9]*\) .*/\1/p')
+    [ -n "$D1" ] && [ "$D1" -eq 1724 ] || {
+        echo "FAIL: MAX_BATCH=1 gave $D1 dispatches for 1724 ops, not 1724"; fail=1; }
+    [ -n "$S2" ] && [ "$S2" -gt 300000 ] || {
+        echo "FAIL: NO_COVCACHE=1 staged only $S2 words; the cache is still on"; fail=1; }
+    note "unbatched $D1 dispatches, uncached $S2 staged words, both byte-identical"
+fi
+
 # ---- 2. the vk_core seam gate -------------------------------------------
 note "building tests/linux/vk_core_linux_test.ad"
 ./scripts/hamlinux_build.sh tests/linux/vk_core_linux_test.ad "$OUT/vk_core_linux_test" \
