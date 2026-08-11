@@ -123,6 +123,13 @@ extern def sys_fd_size(fd: int32) -> int64
 extern def sys_memfd(name: Ptr[char], len: uint64) -> int32
 extern def sys_getenv(name: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64
 
+# The ONE place a client is allowed to ask how big the screen is. See
+# lib/hamscreen.ad: every DE client used to answer this question privately and
+# every one of them answered it wrong. This server answers it for EVERY
+# Wayland client at once -- and, through Xwayland, for every X11 client -- so
+# getting it wrong here is that bug multiplied by the whole distribution.
+from lib.hamscreen import hamscreen_dims_or_fail
+
 
 # --- protocol constants ---------------------------------------------
 
@@ -186,8 +193,11 @@ TOP_STATE_ACTIVATED: uint32 = 4
 
 # What a maximised toplevel is told it may have. wsysd draws a title bar and a
 # frame around every window, so "maximised" here cannot mean the whole output:
-# a client handed the full 1280x800 would have its chrome pushed off the
-# bottom of the screen by the decoration it cannot see.
+# a client handed the whole screen would have its chrome pushed off the bottom
+# by the decoration it cannot see. Set from the real screen size at startup --
+# these are the inset, not a resolution.
+MAX_INSET_W: int32 = 120
+MAX_INSET_H: int32 = 100
 MAX_W: int32 = 1160
 MAX_H: int32 = 700
 
@@ -205,8 +215,11 @@ FMT_BGRA8888: uint8 = 2
 
 listen_fd: int32 = -1
 serial: uint32 = 0
-scr_w: int32 = 1280
-scr_h: int32 = 800
+# NOT a default and not a guess -- resolve_screen() overwrites both from
+# /dev/wsys/screen before the socket exists, and refuses to serve if the
+# compositor has not published one.
+scr_w: int32 = 0
+scr_h: int32 = 0
 
 conn_inuse: Array[4, int32]
 conn_fd:    Array[4, int32]
@@ -2375,6 +2388,84 @@ def drain_window(i: uint64):
         flush(conn_fd[c])
 
 
+# --- the screen -------------------------------------------------------
+
+# Top-level BSS, not frame locals: an Adder frame local array is not a place
+# to put a buffer on this line.
+scr_wp: Array[1, int64]
+scr_hp: Array[1, int64]
+scrpath: Array[256, uint8]
+scrline: Array[64, uint8]
+
+
+# HOW BIG IS THE SCREEN? This server answers that question for every Wayland
+# client -- wl_output.mode, wl_output.geometry and zxdg_output_v1.logical_size
+# are all it -- and, through Xwayland, for every X11 client behind it too. It
+# used to answer 1280x800 because that is what the VM happens to be, which is
+# the exact bug lib/hamscreen.ad exists to end: a plausible wrong answer, on
+# any display that is not 1280x800, for the entire Debian namespace at once.
+#
+# So it comes from the compositor, which is the process that actually set the
+# mode, and there is NO fallback. A Wayland server that does not know how big
+# its output is has nothing true to tell a client, and inventing a number here
+# would be inventing it for Firefox and for Steam simultaneously.
+def resolve_screen() -> int32:
+    if hamscreen_dims_or_fail(&scr_wp[0], &scr_hp[0],
+                              cast[Ptr[uint8]]("wsyswl")) == 0:
+        return 0
+    scr_w = cast[int32](scr_wp[0])
+    scr_h = cast[int32](scr_hp[0])
+    # "Maximised" is the screen minus what wsysd's title bar and frame take,
+    # not the screen: a client handed the whole thing loses its own chrome off
+    # the bottom edge. Small screens get a floor rather than a negative size.
+    MAX_W = scr_w - MAX_INSET_W
+    MAX_H = scr_h - MAX_INSET_H
+    if MAX_W < 320:
+        MAX_W = 320
+    if MAX_H < 240:
+        MAX_H = 240
+    return 1
+
+
+# PUBLISH IT NEXT TO THE SOCKET, because a program on the other side of the
+# namespace boundary cannot read /dev/wsys.
+#
+# Xwayland is started INSIDE the Debian namespace, whose root is the Debian
+# tree, so /dev/wsys does not exist for it and lib/hamscreen is unreachable.
+# The one name it already shares with us is the directory holding the Wayland
+# socket (docs/steam_namespace.md §6). A sibling file there is therefore the
+# only fact we can hand across, and it is exactly the Plan 9 answer: publish
+# the geometry as a file, and let the client name it.
+#
+# It matters because a ROOTFUL Xwayland does not size itself from the
+# wl_output. Bookworm's 22.1.9 happens to; 24.1.6 does not and comes up
+# 640x480 -- measured, tests/linux/x11_geom_probe.sh -- so an X11 session's
+# screen size silently depends on the Xwayland version unless it is told.
+def publish_screen():
+    i: uint64 = 0
+    cut: uint64 = 0
+    while sockpath[i] != 0:
+        if sockpath[i] == 47:                  # '/'
+            cut = i
+        i = i + 1
+    if cut == 0:
+        return
+    j: uint64 = 0
+    while j < cut and j + 16 < 256:
+        scrpath[j] = sockpath[j]
+        j = j + 1
+    str_copy(&scrpath[j], "/hamnix-screen", 256 - j)
+    fd: int32 = sys_open_write(cast[Ptr[char]](&scrpath[0]))
+    if fd < 0:
+        return
+    n: uint64 = emit_int(&scrline[0], 0, scr_w)
+    scrline[n] = 32
+    n = emit_int(&scrline[0], n + 1, scr_h)
+    scrline[n] = 10
+    sys_write(fd, &scrline[0], n + 1)
+    sys_close(fd)
+
+
 # --- main -------------------------------------------------------------
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
@@ -2388,6 +2479,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         str_copy(&sockpath[0], cast[Ptr[uint8]](argv[1]), 256)
     if sys_getenv(cast[Ptr[char]]("WSYSWL_VERBOSE"), &envbuf[0], 256) >= 0:
         verbose = 1
+
+    # BEFORE the socket exists. A client that connects and binds wl_output in
+    # the same breath must not be able to catch a zero.
+    if resolve_screen() == 0:
+        return 1
+    puts(1, "wsyswl: screen ")
+    putd(1, scr_w)
+    puts(1, "x")
+    putd(1, scr_h)
+    puts(1, "\n")
 
     i: uint64 = 0
     while i < MAXCONN:
@@ -2405,6 +2506,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         puts(2, &sockpath[0])
         puts(2, "\n")
         return 1
+    publish_screen()
     puts(1, "wsyswl: listening on ")
     puts(1, &sockpath[0])
     puts(1, "\n")

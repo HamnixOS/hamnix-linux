@@ -37,7 +37,30 @@ ls -l "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" >&2 || echo "hamnix-x11session: NO WAY
 # and Xwayland never starts.
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
 
-Xwayland -shm -noreset :0 >/tmp/xwayland.log 2>&1 &
+# HOW BIG IS THE X SCREEN? A ROOTFUL Xwayland does not take its size from the
+# wl_output: bookworm's 22.1.9 happens to, and 24.1.6 comes up 640x480 no
+# matter what the compositor advertises (measured -- tests/linux/x11_geom_probe.sh).
+# So the X screen size of this whole session would otherwise be a property of
+# the Xwayland version rather than of the display. wsyswl publishes the real
+# geometry as a file beside its socket, which is the one name that crosses the
+# namespace boundary; read it and tell Xwayland.
+GEOMOPT=""
+if [ -r "$XDG_RUNTIME_DIR/hamnix-screen" ]; then
+    read -r SW SH < "$XDG_RUNTIME_DIR/hamnix-screen" || true
+    case "${SW:-}:${SH:-}" in
+        [1-9]*:[1-9]*) GEOMOPT="-geometry ${SW}x${SH}" ;;
+    esac
+fi
+if [ -n "$GEOMOPT" ]; then
+    echo "hamnix-x11session: screen $SW x $SH, from $XDG_RUNTIME_DIR/hamnix-screen" >&2
+else
+    # Not fatal -- an older wsyswl does not publish it -- but say so, because
+    # the alternative is an X screen whose size nobody chose.
+    echo "hamnix-x11session: WARNING no $XDG_RUNTIME_DIR/hamnix-screen; the X screen size is Xwayland's own default, not the display's" >&2
+fi
+
+# shellcheck disable=SC2086
+Xwayland -shm -noreset $GEOMOPT :0 >/tmp/xwayland.log 2>&1 &
 XWPID=$!
 # WAIT FOR THE SERVER, NOT FOR THE SOCKET. The stale socket above outlived the
 # server that made it, so `[ -S /tmp/.X11-unix/X0 ]` reported an X server that
@@ -66,9 +89,36 @@ sleep 1
 # itself. dbus-launch comes from dbus-x11, which is not pulled in by `dbus`.
 # A SYSTEM BUS as well: Steam's CEF asks for /run/dbus/system_bus_socket and
 # logs a connect failure per subprocess without one.
-if [ ! -S /run/dbus/system_bus_socket ] && command -v dbus-daemon >/dev/null 2>&1; then
+#
+# WAITING FOR THE SOCKET IS NOT WAITING FOR THE SERVER -- AGAIN. The namespace's
+# /run is on the ext4 and survives reboots (the same trap as /tmp/.X0-lock,
+# docs/steam_namespace.md §10), so the FIRST boot's dbus-daemon leaves
+# /run/dbus/system_bus_socket behind for ever. On every later boot the old
+# `[ ! -S ... ]` guard saw a socket, skipped starting the daemon, and every
+# CEF process in Steam then logged
+#     Failed to connect to socket /run/dbus/system_bus_socket: Connection refused
+# -- measured, build/steamprobe/steamA.boot.log. A socket file is not a server.
+# Ask the bus whether it is there, and clear the corpse if it is not.
+if command -v dbus-daemon >/dev/null 2>&1; then
     mkdir -p /run/dbus
-    dbus-daemon --system --fork >/dev/null 2>&1 || true
+    if ! dbus-send --system --print-reply --dest=org.freedesktop.DBus \
+                   / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+        [ -e /run/dbus/system_bus_socket ] && \
+            echo "hamnix-x11session: stale /run/dbus/system_bus_socket (nothing listening); removing" >&2
+        rm -f /run/dbus/system_bus_socket /run/dbus/pid
+        dbus-daemon --system --fork >/dev/null 2>&1 || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            dbus-send --system --print-reply --dest=org.freedesktop.DBus \
+                      / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 && break
+            sleep 0.3
+        done
+    fi
+    if dbus-send --system --print-reply --dest=org.freedesktop.DBus \
+                 / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+        echo "hamnix-x11session: system bus answering on /run/dbus/system_bus_socket" >&2
+    else
+        echo "hamnix-x11session: WARNING no system bus -- CEF will log a connect failure per subprocess" >&2
+    fi
 fi
 if command -v dbus-launch >/dev/null 2>&1; then
     eval "$(dbus-launch --sh-syntax 2>/dev/null)" || true
