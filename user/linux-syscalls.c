@@ -847,6 +847,12 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
  * the device, so it would return 0 for ever and no GUI app would see input. */
 int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
 {
+    /* Zero wait: this call must not block, ever. But a poller still needs the
+     * keeper gone or it can never reach true end-of-input -- a terminal
+     * polling its shell's output would never learn that the shell had
+     * exited. Sweeping only the slots whose two real ends are already open
+     * costs nothing and cannot wait. */
+    fdns_keeper_sweep(0);
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         if (v->isw)

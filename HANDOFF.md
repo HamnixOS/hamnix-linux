@@ -123,6 +123,39 @@ The clipboard finding that fell out of it is in the HONESTLY BROKEN list below.
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
+* **NO PIPELINE IN THE SYSTEM COULD END. NOW FIXED — `user/linux-fdns.c`.**
+  `cat FILE | md5sum` never returned and it cost a whole boot
+  (`docs/linux_installed_update.md` §3). It was never md5sum: the same md5sum
+  answered two FILE operands correctly one line above. **The end that did not
+  finish was the WRITER end, and the writer that never closed was hamsh
+  itself.** `sys_pipechan` opens each pipe slot's fifo `O_RDWR` and keeps that
+  descriptor, so the terminal's first open cannot deadlock — but `O_RDWR` is a
+  writer, and nothing ever closed it. No reader on any pipe could see EOF and
+  no writer could see EPIPE; only readers that DRAIN TO EOF (md5sum, wc,
+  cksum, sort) could show it. Dropping the keeper is worse and the harness
+  says so: the writer then finished before the reader opened, the fifo's open
+  count hit zero, the kernel discarded the bytes, and the reader read "EOF
+  after 0 bytes" — a silent empty answer. So the keeper has a LIFETIME: the
+  slot records whether each REAL end has ever been opened, and
+  `fdns_keeper_sweep()` (called from `sys_waitpid` and `sys_read`) closes it
+  once both have. Four more faults of the same family fell out of the boot
+  that followed, each a `/fd` name that silently resolved to the INHERITED
+  descriptor: the **bind table leaked and ran out** (512 records, keyed by a
+  pid that only climbs — 36 pipelines in under a second, then a hang for
+  ever); the **stale-bind clear raced the child it was cleaning up for** and
+  is now done BEFORE the fork, where there is no child to race; **two
+  processes could claim the same free record**, now a compare-and-swap; and
+  **`wc` ignored its FILE operands** and blocked on stdin, the fourth member
+  of the `head`/`cksum`/`md5sum` family. `tests/linux/fdns_pipe.sh` (7 PASS,
+  host, seconds) and `tests/linux/pipelines.sh` (12 PASS, in a boot).
+  `tests/linux/installed_update.sh`'s `md5sum < FILE` workaround is
+  `cat FILE | md5sum` again.
+  **Still open:** `` `{ … }` `` command substitution of a **BUILTIN** runs it
+  in-process, so its output goes to the shell's own stdout and the capture
+  gets nothing — `` `{ echo x } `` yields the empty string. It now says so by
+  name and the gate asserts that it does; the fix is to fork the stage the way
+  `_run_builtin_in_pipeline` already does.
+
 * **The Hamnix clipboard and the namespace clipboard were two clipboards.
   NOW BRIDGED — `user/xsnarfd.ad`.** `/dev/snarf` is served
   (`user/linux-snarf.c`; `tests/linux/snarf_device.sh` 23/23), so copy and

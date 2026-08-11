@@ -94,9 +94,9 @@
 
 #include "linux-fdns.h"
 
-/* Bumped when struct fdshm's layout changed (the slot grew its rever/wever/
- * done words).  A segment left behind by an older binary is re-initialised
- * rather than misread. */
+/* Bumped when struct fdshm's layout changed (the slot grew rever/wever/done/
+ * bound, the bind grew seq, and the segment grew next_seq).  A segment left
+ * behind by an older binary is re-initialised rather than misread. */
 #define FDNS_MAGIC   0x32534E46u          /* "FNS2" */
 #define MAX_SLOTS    64
 #define MAX_BINDS    512
@@ -140,10 +140,11 @@ struct bindrec {
     int32_t  fdnum;
     int32_t  kind;
     int32_t  slot;
-    /* WHEN this record was written, on the segment's own clock.  It is what
-     * lets the parent's stale-pid clear tell "a record the last occupant of
-     * this pid left behind" from "a record THIS child has already written
-     * for itself" -- see fdns_after_fork_parent. */
+    /* WHEN this record was written, on the segment's own clock.  It tells
+     * "a record the last occupant of this pid left behind" from "a record
+     * written since the fork" -- which is what fdns_after_fork_parent now
+     * ASSERTS about rather than acts on, the clearing itself having moved to
+     * fdns_before_fork where it cannot race the child. */
     uint64_t seq;
 };
 
