@@ -174,7 +174,11 @@ same failure this project exists to beat.
   the mode of the thing `connect(2)` opens and the path is a symlink, and it
   *probes by creating a file* rather than by reading a mode bit, because this
   whole family is the mode bits reading correctly while the effective answer
-  is still no. `docs/linux_distro_namespaces.md` §8.6.
+  is still no. Gate: `tests/linux/session_runtime_dir.sh`, **8 PASS 0 FAIL** —
+  its own file rather than a corner of `distro_menu.sh`, because a permission
+  fact that can only be measured by first standing up a compositor, an X server
+  and a window manager is a fact nobody will re-measure; this one needs none of
+  them. `docs/linux_distro_namespaces.md` §8.6.
   The `/tmp` half of it was already fixed: the generated `/etc/rc.distros`
   clears root-owned `*.log` / `*.err` left in a distribution's sticky `/tmp` by
   a root-run session, by class rather than by a list of three literal names.
