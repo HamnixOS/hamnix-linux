@@ -1,0 +1,70 @@
+# tests/linux/snarfcopy.ad — COPY, in one process, through the real shipped
+# toolkit path.
+#
+# This is deliberately not a harness that calls the device directly. It calls
+# lib/hamtextbox.ad's htb_clip_put — the same function the editor, Notes and
+# the browser URL bar reach on Ctrl+C — so what is measured is the path that
+# actually runs on the desktop, from the widget down through sys_open_write to
+# user/linux-snarf.c. Its partner, tests/linux/snarfpaste.ad, PASTES in a
+# SECOND process through lib/htermsel.ad, which is the grid terminal's path.
+# Two programs, two libraries, one clipboard: that is the property "copy and
+# paste between programs" names, and neither half can fake it alone.
+#
+#     snarfcopy <prim> <text>       prim: 0 = CLIPBOARD, 1 = PRIMARY
+#
+# Prints "copy <prim> <rc> <n>" so a caller can tell "wrote nothing" from
+# "could not open", which is the distinction the old code destroyed by
+# returning 0 to a caller that ignored it.
+
+from lib.hamtextbox import htb_clip_put
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+
+
+def _sc_strlen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+# Top-level BSS, not a frame local: this compiler wants arrays at module
+# scope, and a digit buffer is still an array.
+_sc_dec: Array[24, uint8]
+
+
+def _sc_put_dec(v: uint64):
+    n: uint64 = 0
+    if v == 0:
+        sys_write(1, "0", 1)
+        return
+    while v > 0:
+        _sc_dec[n] = cast[uint8](48 + (v % 10))
+        v = v / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        sys_write(1, &_sc_dec[n], 1)
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 3:
+        sys_write(2, "usage: snarfcopy <prim> <text>\n", 31)
+        return 2
+    ps: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
+    prim: int32 = 0
+    if ps[0] != 48:
+        prim = 1
+    txt: Ptr[uint8] = cast[Ptr[uint8]](argv[2])
+    n: uint64 = _sc_strlen(txt)
+    rc: int32 = htb_clip_put(prim, txt, n)
+    sys_write(1, "copy ", 5)
+    _sc_put_dec(cast[uint64](prim))
+    sys_write(1, " ", 1)
+    _sc_put_dec(cast[uint64](rc))
+    sys_write(1, " ", 1)
+    _sc_put_dec(n)
+    sys_write(1, "\n", 1)
+    if rc == 0:
+        return 1
+    return 0

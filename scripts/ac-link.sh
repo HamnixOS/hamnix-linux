@@ -129,6 +129,7 @@ build_obj() {                        # build_obj <src> <obj> <extra flags...>
 #   linux-fb.c        /dev/fb on DRM/KMS         linux-net.c   /net
 #   linux-wsys.c      /dev/wsys                  linux-auth.c  /dev/auth
 #   linux-fdns.c      /fd                        adder_llvm_runtime.c the prelude
+#   linux-snarf.c     /dev/snarf + .primary
 OBJS=""
 build_obj "$AC_SRC/linux-runtime.S" "$AC_CACHE/linux-runtime.o"
 OBJS="$AC_CACHE/linux-runtime.o"

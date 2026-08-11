@@ -207,6 +207,34 @@ the behaviour. **This is left undone deliberately** — the rc scripts were not
 this pass's to change — and it is recorded here as the next step, with the
 measurement that says it will work.
 
+### 4b. What the next pass did with that (2026-08-11): SERVED, not planted
+
+The measurement above is correct and it was **not** the answer taken. It is
+kept exactly as written because the argument against it is the useful part.
+
+`/dev/snarf` and `/dev/snarf.primary` are now a real device, `user/linux-snarf.c`,
+in the same shape as `/dev/wsys` and `/dev/audio`: a shared segment carrying the
+two byte buffers, with `lib/devsnarf.ad`'s offset-addressed protocol ported rule
+for rule. The four reasons the two-file answer was declined — and each is
+something this tree has already been bitten by once — are:
+
+1. `/dev/snarf` would not be a **device**, which retires by hand the premise the
+   `playtone` `O_CREAT` guard in §4 above rests on.
+2. **No 64 KiB cap** in a RAM-backed `/dev`: `cat bigfile > /dev/snarf` is an
+   ordinary thing to type and would take the owner's memory with no error.
+3. The offset protocol would be **re-derived by accident** from `O_TRUNC`
+   rather than held as a rule — and Defect 2 is where that stops agreeing.
+4. **No stated owner** when the chrome is root and the session is uid 1001;
+   whoever opens first owns it, at whatever the umask of that moment says.
+
+And it needs **no rc line and no image change**: `grep -rn snarf etc/` is still
+empty, because a served device creates nothing at boot. 23 host assertions in
+`tests/linux/snarf_device.sh` (copy through `lib/hamtextbox.ad` in one process,
+paste through `lib/htermsel.ad` in another) and 6 on-device in
+`tests/linux/snarf_ondevice.sh`. `docs/linux_clipboard.md` has the whole
+argument, including the X/namespace clipboard bridge, which is deliberately
+**not** done and is named rather than half-done.
+
 ## 4a. One thing for the `adder` project: an unresolvable import is silent
 
 Not an SSA gap — there is no SSA gap — but a real defect of the same family,
