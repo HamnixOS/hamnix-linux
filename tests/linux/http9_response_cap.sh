@@ -279,6 +279,31 @@ else
     bad "curl on /missing: rc=$rc [$(cat "$WORK/curl_404.err")]"
 fi
 
+# ---- the ORIGINAL bug, against the REAL server ------------------------
+#
+# The loopback cases above are the mechanism. These two are the incident: the
+# exact URLs, the exact 512-byte buffer, and GitHub Pages' own header block,
+# which no local server can be trusted to imitate forever. Reading from
+# 255.one is expected; nothing here publishes. SKIPPED, not failed, with no
+# network — the mechanism cases are what gate the code.
+if getent hosts 255.one >/dev/null 2>&1; then
+    echo "[http9_cap] (bonus) the original incident, against the live repo ..."
+    live="$(probe "https://255.one/linux/index.json.sig" 512)"
+    case "$live" in
+        *"RC=0 STATUS=200 BODYLEN=129"*)
+            ok "512-byte buffer fetches the live 129-byte signature ($(sed 's/.*\(HDRLEN=[0-9]*\).*/\1/' <<< "$live") off GitHub Pages)" ;;
+        *) bad "live signature fetch at cap=512: [$live]" ;;
+    esac
+    # A channel that genuinely has NO signature answers with a 9 KB HTML 404.
+    # "unsigned repo" and "the fetch broke" must stay different answers even
+    # when the buffer is far too small for the error page.
+    live404="$(probe "https://255.one/main/index.json.sig" 512)"
+    expect "a live missing signature is a 404, not a bare failure" \
+        "$live404" "RC=-6 STATUS=404"
+else
+    echo "[http9_cap] SKIP live 255.one cases (no DNS for 255.one)"
+fi
+
 echo "[http9_cap] ---- $PASS PASS, $FAIL FAIL ----"
 if [ "$FAIL" -eq 0 ]; then
     echo "[http9_cap] PASS"
