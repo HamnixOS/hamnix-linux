@@ -47,6 +47,7 @@
 #include <grp.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/reboot.h>
 #include <sys/statfs.h>
 #include <sys/sysmacros.h>
 #include <stdint.h>
@@ -289,6 +290,10 @@ static int adopt_if_directory(int fd)
  * Only read/write/lseek/close consult the table.
  * ------------------------------------------------------------------ */
 #define DEVTAB_MAX 64
+/* /dev/reboot is served inline further down, next to /proc/<pid>/note, which
+ * is the same shape (a NAME written to a file is a kernel action). It is
+ * claimed here, so only the predicate needs to be visible this early. */
+static int reboot_is_path(const char *path);
 struct devfile {
     int      used;
     int      fd;
@@ -309,6 +314,9 @@ struct devfile {
                          * live.  No pointers inside, so devtab_clone's
                          * struct copy is already a correct deep copy. */
     struct hamsnarf_file sn;
+    int      isreboot;  /* 1 => /dev/reboot.  Carries NO per-open state at
+                         * all: the device is one write of one verb, so
+                         * devtab_clone's struct copy is trivially correct. */
 };
 static struct devfile devtab[DEVTAB_MAX];
 
@@ -332,8 +340,10 @@ static int devtab_open(const char *path, int for_write)
     int akind = hamauth_is_path(path);
     int aukind = hamaudio_kind(path);
     int snkind = hamsnarf_kind(path);
+    int rbkind = reboot_is_path(path);
     if (kind == HAMFB_NONE && wkind == HAMWSYS_NONE && nkind == HAMNET_NONE
-        && !akind && aukind == HAMAUDIO_NONE && snkind == HAMSNARF_NONE) {
+        && !akind && aukind == HAMAUDIO_NONE && snkind == HAMSNARF_NONE
+        && !rbkind) {
         errno = ENODEV;
         return -1;
     }
@@ -343,7 +353,12 @@ static int devtab_open(const char *path, int for_write)
     if (!slot) { errno = EMFILE; return -1; }
 
     memset(slot, 0, sizeof *slot);
-    if (kind != HAMFB_NONE) {
+    if (rbkind) {
+        /* Nothing to open. The device is stateless and the verb is the whole
+         * protocol; an open that allocated anything would have to be undone
+         * on the path that never returns. */
+        slot->isreboot = 1;
+    } else if (kind != HAMFB_NONE) {
         if (hamfb_open(kind, for_write) < 0)
             return -1;
     } else if (akind) {
@@ -398,7 +413,8 @@ static int dev_path(const char *path)
         || hamnet_kind(path) != HAMNET_NONE
         || hamauth_is_path(path)
         || hamaudio_kind(path) != HAMAUDIO_NONE
-        || hamsnarf_kind(path) != HAMSNARF_NONE;
+        || hamsnarf_kind(path) != HAMSNARF_NONE
+        || reboot_is_path(path);
 }
 
 /* /proc/<pid>/note — Plan 9 delivers a SIGNAL by writing a NAME to a file, and
@@ -452,6 +468,120 @@ static int64_t note_write(int pid, const uint8_t *buf, uint64_t count)
     else if (count >= 5 && !memcmp(buf, "alarm",     5)) sig = SIGALRM;
     if (kill((pid_t)pid, sig) < 0)
         return rc64(-1);
+    return (int64_t)count;
+}
+
+/* ------------------------------------------------------------------ *
+ * /dev/reboot — turning the machine off.
+ *
+ * This is the port of Hamnix's DEV_REBOOT cdev (sys/src/9/port/namec.ad:
+ * _devreboot_write, backed by arch/x86/kernel/power.ad:power_action). Until
+ * it existed here, NOTHING on this line served the name, so `reboot`,
+ * `poweroff`, `halt` and hamsh's `init 0` / `init 6` all died on the open --
+ * "reboot: cannot open /dev/reboot" -- and an installed machine had no
+ * supported way to stop. Worse than the inconvenience: nothing flushed the
+ * filesystems, so every restart of an installed hamnix-linux to date was the
+ * equivalent of pulling the plug, and survived only because ext4 has a
+ * journal. docs/linux_installed_update.md §2c is the measurement.
+ *
+ * WHY IT LIVES HERE AND NOT IN user/linux-reboot.c. The other served devices
+ * (linux-fb.c, linux-wsys.c, linux-snarf.c, ...) get their own file because
+ * they carry real state -- a shared segment, a window table, a DRM master,
+ * a cursor addressed by lseek. This device carries NONE: no per-open state,
+ * no seek, reads are EOF, and the whole implementation is one token matcher
+ * and one write. /proc/<pid>/note directly above is the same shape (a name
+ * written to a file becomes a kernel action) and is served inline for the
+ * same reason. Doing it inline also means scripts/hamlinux_build.sh needs no
+ * new object, no new header in the staleness list, and no new name on the
+ * link line -- a whole class of "it builds here but not on that path" that
+ * this tree has already paid for once.
+ *
+ * THE PROTOCOL IS PORTED, NOT INVENTED. Hamnix matches the FIRST TOKEN of
+ * the buffer, delimited by NUL, '\n', ' ' or the end of `count`, so
+ * "reboot", "reboot\n" and "reboot now" all mean the same thing; the match
+ * is case-sensitive; and the three verbs are exactly `poweroff`, `reboot`,
+ * `halt`. Every client in this tree already writes one of those with a
+ * trailing newline (user/reboot.ad, user/halt.ad, user/poweroff.ad,
+ * hamsh's svc_runlevel_halt/_reboot, hamsessui's power menu, hamctl's).
+ *
+ * SYNC IS THE POINT. Hamnix's power_action() flushes every filesystem and
+ * every block device before it touches the hardware. Linux's reboot(2) does
+ * NOT sync -- the caller must -- so the port is sync(2) and then reboot(2).
+ * sync(2) on Linux waits for the writeback it started, which is what makes
+ * "the file I wrote before the reboot is there afterwards" true without
+ * relying on the journal to replay it.
+ *
+ * IT DOES NOT STOP SERVICES OR THE DESKTOP, deliberately. That policy
+ * already lives one layer up and in the right place: hamsh's
+ * svc_runlevel_halt() / svc_runlevel_reboot() SIGTERM every supervised
+ * service and source /etc/rc.d/rc.0 / rc.6 BEFORE they write here, exactly
+ * as Hamnix does. Putting it in the device instead would mean a machine that
+ * cannot power off because one service will not die -- and a shutdown that
+ * hangs forever is worse than a fast one. So the device is the primitive:
+ * flush, and go.
+ *
+ * WHO MAY DO IT. reboot(2) needs CAP_SYS_BOOT, and this file is linked into
+ * every Adder program, so the call happens as whoever wrote to the device.
+ * That is a REAL difference from Hamnix, where the cdev is ungated (the
+ * devcons permission hook admits every uid) and only the Linux-ABI reboot(2)
+ * requires the hostowner. Here the unprivileged session gets EPERM back from
+ * the write and every client in the tree already reports that by name and
+ * exits non-zero. It is NOT silently swallowed.
+ * ------------------------------------------------------------------ */
+static int reboot_is_path(const char *path)
+{
+    return path && !strcmp(path, "/dev/reboot");
+}
+
+/* 1 iff the first token of `buf` equals `word`. The port of
+ * namec.ad:_verb_matches, delimiters and all. */
+static int reboot_verb(const uint8_t *buf, uint64_t count, const char *word)
+{
+    uint64_t n = (uint64_t)strlen(word);
+    if (count < n || memcmp(buf, word, (size_t)n) != 0)
+        return 0;
+    if (count == n)
+        return 1;
+    uint8_t c = buf[n];
+    return c == 0 || c == '\n' || c == ' ';
+}
+
+static int64_t reboot_write(const uint8_t *buf, uint64_t count)
+{
+    int cmd;
+    const char *name;
+    if      (reboot_verb(buf, count, "poweroff")) { cmd = RB_POWER_OFF;   name = "poweroff"; }
+    else if (reboot_verb(buf, count, "reboot"))   { cmd = RB_AUTOBOOT;    name = "reboot"; }
+    else if (reboot_verb(buf, count, "halt"))     { cmd = RB_HALT_SYSTEM; name = "halt"; }
+    else {
+        /* Hamnix answers `count` and does nothing for a verb it does not
+         * know, so a stray writer cannot wedge on the device. Ported as-is:
+         * an rc script must not behave differently on the two kernels. */
+        return (int64_t)count;
+    }
+
+    /* THE INHIBIT. This object is linked into every Adder binary, and some of
+     * them are HOST-side harnesses that run on a developer's own machine. A
+     * test that exercised this path there would power off a workstation. The
+     * escape hatch is opt-in, so a real system with no such variable set is
+     * untouched, and it FAILS BY NAME rather than pretending to have worked --
+     * the caller gets EPERM and a line saying why. */
+    if (getenv("HAMNIX_REBOOT_INHIBIT")) {
+        fprintf(stderr,
+                "/dev/reboot: %s INHIBITED by HAMNIX_REBOOT_INHIBIT"
+                " -- the machine is still running\n", name);
+        fflush(stderr);
+        errno = EPERM;
+        return -EPERM;
+    }
+
+    /* Flush first, and only then ask for the power action. reboot(2) does not
+     * do this for us. */
+    sync();
+
+    if (reboot(cmd) < 0)
+        return rc64(-1);
+    /* Unreachable on success: the machine is gone. */
     return (int64_t)count;
 }
 
@@ -660,6 +790,10 @@ int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         int64_t n;
+        /* /dev/reboot is write-only; a read is EOF so a stray `cat` gets an
+         * answer instead of wedging. Hamnix's _devtab_read does the same. */
+        if (v->isreboot)
+            return 0;
         if (v->isauth)
             return hamauth_read(&v->af, buf, count);
         if (v->isau)
@@ -801,6 +935,8 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
     if (v) {
         if (v->note_pid > 0)
             return note_write(v->note_pid, buf, count);
+        if (v->isreboot)
+            return reboot_write(buf, count);
         if (v->isauth)
             return hamauth_write(&v->af, buf, count);
         if (v->isau)
@@ -832,7 +968,7 @@ int32_t sys_close(int32_t fd)
         if (v->issn)  hamsnarf_close(&v->sn);
         if (v->isauth) explicit_bzero(&v->af, sizeof v->af);
         v->used = 0; v->isw = 0; v->isnet = 0; v->isauth = 0; v->isau = 0;
-        v->issn = 0;
+        v->issn = 0; v->isreboot = 0;
         return rc32(close((int)fd));
     }
     struct dirstream *d = dirtab_find((int)fd);
@@ -982,6 +1118,7 @@ int32_t sys_dup2(int32_t oldfd, int32_t newfd)
         old_view->isw = 0;
         old_view->isau = 0;
         old_view->issn = 0;
+        old_view->isreboot = 0;
     }
     int r = dup2((int)oldfd, (int)newfd);
     if (r < 0) return rc32(r);
