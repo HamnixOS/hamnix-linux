@@ -257,19 +257,25 @@ done
 # while hovering the SECOND" is the pair of facts that distinguishes two real
 # sections from one section drawn twice -- the same negative-control shape
 # tests/linux/two_namespaces.sh uses for the trees themselves.
-sect() { sed -n "/SCENE-$1-BEGIN/,/SCENE-$1-END/p" "$WORK/boot.log" | tr -d '\r'; }
-if sect FIRST | grep -q 'Install Steam'; then
+sect() { sed -n "/SCENE-$1-BEGIN/,/SCENE-$1-END/p" "$WORK/boot.log" | tr -d '\r\0'; }
+# Captured, not piped, for the pipefail/SIGPIPE reason spelled out at lrc()
+# below: a scene dump is the largest block in this log and `grep -q` returning
+# early is exactly what makes the race lose.
+SECT_FIRST="$(sect FIRST)"; SECT_SECOND="$(sect SECOND)"
+sect_first() { grep -aq "$1" <<<"$SECT_FIRST"; }
+sect_second() { grep -aq "$1" <<<"$SECT_SECOND"; }
+if sect_first 'Install Steam'; then
     echo "dmenu: PASS the Debian fly-out drew a Debian-only app (Install Steam)"
 else
     echo "dmenu: FAIL the Debian fly-out drew no Debian-only app"; fail=1
 fi
 if [ "${ALPINE_APPS:-0}" -gt 0 ] 2>/dev/null; then
-    if sect SECOND | grep -q 'XTerm'; then
+    if sect_second 'XTerm'; then
         echo "dmenu: PASS the Alpine fly-out drew an Alpine app (XTerm)"
     else
         echo "dmenu: FAIL the Alpine fly-out drew nothing"; fail=1
     fi
-elif sect SECOND | grep -qi 'No alpine apps'; then
+elif grep -aqi 'No alpine apps' <<<"$SECT_SECOND"; then
     # The medium ships no launchers, and the panel says exactly that -- a
     # DIFFERENT answer from "the scan is broken", which is the whole point of
     # the three-state table in §8. This arm is a real check, not a bypass.
@@ -277,7 +283,7 @@ elif sect SECOND | grep -qi 'No alpine apps'; then
 else
     echo "dmenu: FAIL Alpine offers no launchers and the panel did not say so"; fail=1
 fi
-if sect SECOND | grep -q 'Install Steam'; then
+if sect_second 'Install Steam'; then
     echo "dmenu: FAIL the Alpine fly-out drew Debian's apps -- the sections are one list"
     fail=1
 else
@@ -303,9 +309,32 @@ fi
 # and the answer is "did a program that only exists in that root produce its
 # banner". Looking in only one place is how the previous version of this check
 # reported a GAP for a launcher that worked.
+#
+# `tr -d '\0'` IS LOAD-BEARING, and it was found the honest way: by the fix in
+# §8.5 making this run get FURTHER. Once the Wayland socket became connectable,
+# the shim really did start Xwayland, jwm and an xterm inside the namespace,
+# and their output -- which the guest cats onto the console -- carries NUL
+# bytes. That makes `$WORK/boot.log` a BINARY file to grep, and a plain
+# `grep -q` over binary input matched nothing: two checks that had passed for
+# runs which died early reported "did not reach the Alpine root" for a launcher
+# that had just been proved to reach it. Every other grep in this file already
+# passes -a for exactly this reason; these two did not, and nothing had ever
+# produced a byte that told them apart. Strip the NULs here, once, so the
+# helper's callers cannot forget.
+#
+# AND IT IS CAPTURED INTO A VARIABLE, NOT LEFT AS A PIPELINE, because
+# `lrc | grep -q …` under this file's `set -o pipefail` REPORTS FAILURE ON A
+# SUCCESSFUL MATCH. `grep -q` exits 0 the instant it matches; `tr` upstream is
+# still writing, takes SIGPIPE, and dies 141; pipefail then makes the
+# PIPELINE's status 141 and the `if` takes the else branch. It is a race, so it
+# passed for years on short logs and started failing the moment the §8.5 fix
+# made this run produce a long one -- reporting "did not reach the Alpine root"
+# for a launcher whose own log, four lines above in the same output, showed it
+# reaching it. Grep a here-string instead: no pipeline, nothing to signal.
 lrc() { { sed -n "/LAUNCHRC-BEGIN/,/LAUNCHRC-END/p" "$WORK/boot.log"
           sed -n "/DENSRUNLOG-BEGIN/,/DENSRUNLOG-END/p" "$WORK/boot.log"; } \
-        | tr -d '\r'; }
+        | tr -d '\r\0'; }
+LRC_TEXT="$(lrc)"
 # THE WITNESS IS THE SHIM'S OWN HEADER, and it is a stronger one than the
 # program's banner. /etc/de-ns-run exists only INSIDE a distribution (the boot
 # copies it in), and it names the program it was handed -- so
@@ -315,18 +344,22 @@ lrc() { { sed -n "/LAUNCHRC-BEGIN/,/LAUNCHRC-END/p" "$WORK/boot.log"
 #
 # The banner is checked too, and its ABSENCE is not a failure: the program is
 # exec'd into the X session, whose output goes to that session's log, and
-# `enter' does not carry the environment across a `ns clean' Pgrp so
-# HAMNIX_DE_XSESSION cannot reliably steer it (§8.5).
-nsran() { lrc | grep -q "^=== de-ns-run.*: $1"; }
+# HAMNIX_DE_XSESSION cannot steer it. That last clause used to say `enter' does
+# not carry the environment across a `ns clean' Pgrp; MEASURED
+# (tests/linux/enter_env.sh), `enter' carries it fine and the drop is one level
+# up -- a freshly exec'd hamsh seeds its env mirror with PATH and HOME and
+# never reads the inherited environ, and the launcher IS a fresh hamsh. Same
+# conclusion for this check, different cause. §8.5.
+nsran() { grep -aq "^=== de-ns-run.*: $1" <<<"$LRC_TEXT"; }
 if nsran '/sbin/apk'; then
     echo "dmenu: PASS /etc/rc.de-ns/alpine reached the Alpine root (ran its /etc/de-ns-run on /sbin/apk)"
-    lrc | grep -qi 'apk-tools' && echo "dmenu:      and apk printed its banner"
+    grep -aqi 'apk-tools' <<<"$LRC_TEXT" && echo "dmenu:      and apk printed its banner"
 else
     echo "dmenu: FAIL /etc/rc.de-ns/alpine did not reach the Alpine root"; fail=1
 fi
 if nsran '/usr/bin/dpkg'; then
     echo "dmenu: PASS /etc/rc.de-ns/debian reached the Debian root (ran its /etc/de-ns-run on /usr/bin/dpkg)"
-    lrc | grep -qi 'Usage: dpkg' && echo "dmenu:      and dpkg printed its usage"
+    grep -aqi 'Usage: dpkg' <<<"$LRC_TEXT" && echo "dmenu:      and dpkg printed its usage"
 else
     echo "dmenu: FAIL /etc/rc.de-ns/debian did not reach the Debian root"; fail=1
 fi
@@ -339,8 +372,18 @@ fi
 # reliably reach this console -- and an absent log line is not evidence of an
 # absent launch. A `=== de-ns-run <prog>' header in /n/debian/tmp is the
 # program having been started, in that namespace, by that click.
-DENS() { sed -n '/DENSRUNLOG-BEGIN/,/DENSRUNLOG-END/p' "$WORK/boot.log" | tr -d '\r'; }
-CLICKED_PROG="$(DENS | grep -a '^=== de-ns-run' | tail -1 | sed 's/.*: //')"
+# `\0` for the same reason as lrc() above: a namespace that really gets a
+# display puts an X session's output in this block, and that is binary. A
+# display check that a NUL byte can silence is worse than no display check.
+DENS() { sed -n '/DENSRUNLOG-BEGIN/,/DENSRUNLOG-END/p' "$WORK/boot.log" | tr -d '\r\0'; }
+# Captured once, for the same reason as LRC_TEXT above: `DENS | grep -q …` is a
+# pipeline under `set -o pipefail`, and a successful `grep -q` SIGPIPEs the
+# upstream `tr` and reports 141. The display verdict below is the check this
+# whole pass exists to make trustworthy; it must not be decided by a race.
+DENS_TEXT="$(DENS)"
+dens_has() { grep -aq "$1" <<<"$DENS_TEXT"; }
+dens_hasi() { grep -aqi "$1" <<<"$DENS_TEXT"; }
+CLICKED_PROG="$(grep -a '^=== de-ns-run' <<<"$DENS_TEXT" | tail -1 | sed 's/.*: //')"
 if [ -n "$CLICKED_PROG" ]; then
     echo "dmenu: PASS clicking a fly-out row launched '$CLICKED_PROG' in the debian namespace"
 else
@@ -349,11 +392,9 @@ fi
 grep -a '\[panel\] launch in ns' "$WORK/boot.log" | sed 's/^/dmenu:      /'
 # The shim's log lives INSIDE the tree, which is the only place both sides can
 # read. An empty one means the click never reached `enter`.
-if sed -n '/DENSRUNLOG-BEGIN/,/DENSRUNLOG-END/p' "$WORK/boot.log" \
-        | grep -qi 'de-ns-run: exec\|de-ns-run: delegating'; then
+if dens_hasi 'de-ns-run: exec\|de-ns-run: delegating'; then
     echo "dmenu: PASS /etc/de-ns-run ran inside the namespace and said so"
-    sed -n '/DENSRUNLOG-BEGIN/,/DENSRUNLOG-END/p' "$WORK/boot.log" \
-        | grep -ai 'de-ns-run:\|hamnix-x11session:' | head -12 | sed 's/^/dmenu:      /'
+    DENS | grep -ai 'de-ns-run:\|hamnix-x11session:' | head -12 | sed 's/^/dmenu:      /'
 else
     echo "dmenu: FAIL /etc/de-ns-run left no log inside the namespace"; fail=1
 fi
@@ -365,19 +406,47 @@ fi
 # DID IT GET A DISPLAY? Reported separately from "was it launched", because
 # they are two different facts and collapsing them is what made this whole
 # area unreadable for three passes. See docs/linux_distro_namespaces.md §8.5.
-if DENS | grep -qi 'could not connect to wayland server'; then
-    echo "dmenu: GAP  the app was launched and could not reach the display:"
-    echo "dmenu:      Xwayland, as uid 1001 inside the namespace, cannot connect to"
-    echo "dmenu:      /run/wayland-0 -- the per-distribution wsyswl is started by ROOT"
-    echo "dmenu:      at rc.5 and its socket comes out srwxr-xr-x, and connect(2) on a"
-    echo "dmenu:      unix socket needs WRITE. The socket has to be writable by the"
-    echo "dmenu:      session user (or the server started as them). §8.5."
-elif DENS | grep -qi 'Xwayland FAILED TO START'; then
-    echo "dmenu: GAP  the app was launched and Xwayland did not start; the reason is above"
-elif DENS | grep -qi 'de-ns-run: exec\|hamnix-x11session: exec'; then
-    echo "dmenu: PASS the launched app got a display and was exec'd into it"
+# THE SOCKET'S MODE IS ITS OWN FACT, and it is logged by /etc/de-ns-run from
+# INSIDE the namespace -- the side that actually has to connect -- so it does
+# not depend on which hamnix-x11session a given medium ships. `connect(2)` on a
+# unix socket needs WRITE: `srwxr-xr-x` is the bug, `srw-rw-rw-` is the fix
+# (user/wsyswl.ad chmods it 0666 at creation). Asserting the MODE separately
+# from the outcome is what makes a regression here readable: a socket that goes
+# back to 0755 says so in one line instead of as a fatal X server error.
+if dens_has 'de-ns-run: wayland socket srw-rw-rw-'; then
+    echo "dmenu: PASS the namespace Wayland socket is mode 0666 (connect(2) needs write)"
+elif dens_has 'de-ns-run: wayland socket'; then
+    echo "dmenu: FAIL the namespace Wayland socket is not 0666:"
+    DENS | grep -a 'de-ns-run: wayland socket' | head -4 | sed 's/^/dmenu:      /'
+    fail=1
+else
+    echo "dmenu: FAIL /etc/de-ns-run logged no wayland socket line at all"; fail=1
 fi
-if sect FIRST | grep -q 'Alpine apps' && sect FIRST | grep -q 'Debian apps'; then
+# DID IT GET A DISPLAY? Reported separately from "was it launched", because
+# they are two different facts and collapsing them is what made this whole area
+# unreadable for three passes. This was a GAP (§8.5) and is now a GATE: the
+# failure arms set `fail`, because a desktop that offers to launch an
+# application and hands it no display is the thing this line exists to fix, and
+# a check that only ever prints GAP cannot notice it coming back.
+if dens_hasi 'could not connect to wayland server'; then
+    echo "dmenu: FAIL the app was launched and could not reach the display:"
+    echo "dmenu:      connect(2) on a unix socket needs WRITE. The per-distribution"
+    echo "dmenu:      wsyswl is started by ROOT at rc.5, and its socket used to come"
+    echo "dmenu:      out srwxr-xr-x owned by a uid not mapped into the entering"
+    echo "dmenu:      process's user namespace. user/wsyswl.ad chmods it 0666. §8.5."
+    fail=1
+elif dens_hasi 'Xwayland FAILED TO START'; then
+    echo "dmenu: FAIL the app was launched and Xwayland did not start; the reason is above"
+    DENS | grep -ai 'hamnix-x11session:\|de-ns-run:' | tail -8 | sed 's/^/dmenu:      /'
+    fail=1
+elif dens_hasi 'de-ns-run: exec\|hamnix-x11session: exec'; then
+    echo "dmenu: PASS the launched app got a display and was exec'd into it"
+else
+    echo "dmenu: FAIL no verdict on the display -- the shim logged neither a failure"
+    echo "dmenu:      nor an exec, which means it did not get as far as either"
+    fail=1
+fi
+if sect_first 'Alpine apps' && sect_first 'Debian apps'; then
     echo "dmenu: PASS both distributions have a parent row, named for them"
 else
     echo "dmenu: FAIL the two named parent rows are not both drawn"; fail=1

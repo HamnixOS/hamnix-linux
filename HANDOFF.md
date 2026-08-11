@@ -243,17 +243,76 @@ same failure this project exists to beat.
   to the distribution's own `hamnix-x11session` where there is one.
   `docs/linux_distro_namespaces.md` §8.4, `tests/linux/distro_menu.sh` (which
   now clicks a row and screendumps what comes up).
-* **A menu-launched app reaches its namespace and cannot reach the DISPLAY.**
-  The click works, the namespace works, the application starts — and Xwayland,
-  as uid 1001 inside the namespace, cannot `connect(2)` to `/run/wayland-0`:
-  `/etc/rc.distros-wl` starts the per-distribution `wsyswl` **as root** and the
-  socket comes out `srwxr-xr-x`, owner-writable only, owner not even mapped
-  into the entering process's user namespace. Measured, by name, in
-  `/n/debian/tmp/de-ns-run.log`. Nothing had hit it because every previous
-  GUI-in-a-namespace run (`steam_gui_run.sh`, `alpine_gui_run.sh`) ran its
-  client as ROOT. Fix: create the socket writable by the session user, or
-  start `wsyswl` as them — `user/wsyswl.ad`, whoever owns it.
+* **(SOLVED) A menu-launched app reached its namespace and could not reach the
+  DISPLAY.** The click worked, the namespace worked, the application started —
+  and Xwayland, as uid 1001 inside the namespace, could not `connect(2)` to
+  `/run/wayland-0`: `/etc/rc.distros-wl` starts the per-distribution `wsyswl`
+  **as root**, `bind(2)` creates a unix socket 0777 masked by the umask (022),
+  so it came out `srwxr-xr-x` — owner-writable only, owner not even mapped into
+  the entering process's user namespace (`nobody nogroup`). Nothing had hit it
+  because every previous GUI-in-a-namespace run (`steam_gui_run.sh`,
+  `alpine_gui_run.sh`) ran its client as ROOT.
+  **`user/wsyswl.ad` now `sys_chmod`s its own socket 0666 at creation** — the
+  server knows its own path (it is `argv[1]`), so the mode is set in the one
+  place a caller cannot forget, and a failed `chmod` is named on stderr. This
+  is the same 0666, for the same reason, as `/srv/wsys` (`user/linux-wsys.c`,
+  THE SPLIT; `ad440707`): what a connection buys is a Wayland *client* session,
+  and `wsyswl` issues no gated verb on a client's behalf — `newwindow` is
+  devwsys's explicit pre-gate exception and the `<wid>/ctl` verbs it drives are
+  on windows it owns. The access control is the path, as with every Wayland
+  compositor: the socket is inside ONE distribution's `/run`.
+  Starting `wsyswl` as the session user was considered and rejected, and the
+  reason previously given for rejecting it was wrong in both halves: it does
+  not need `/dev/fb` (that is `wsysd`; `wsyswl` is a *client* of `/dev/wsys`)
+  and the uid gate does not block it either. What blocks it is that the
+  distribution's `/run` is root-owned 0755, so a uid-1001 `wsyswl` could not
+  create the socket there at all — it moves root-prepared state rather than
+  removing it, and widens the blast radius from one socket to a directory.
+  **Measured**: `tests/linux/distro_menu.sh` reports "launched" and "got a
+  display" as two facts and both are now PASS, with the socket's mode gated
+  separately (`srw-rw-rw-`, logged by the shim from *inside* the namespace);
+  `build/distromenu/shot-launched.png` is `uxterm`, launched from the DE
+  application menu, running in the Debian namespace on the Hamnix desktop.
   `docs/linux_distro_namespaces.md` §8.5.
+* **THE FOURTH FAULT OF THAT FAMILY: `$XDG_RUNTIME_DIR` is the distribution's
+  `/run`, root-owned 0755.** §8.5 named three — a mount point in the medium
+  (`/n`), a stale X lock in its `/tmp`, a socket in its `/run` — each created
+  by root when root was its only user, each invisible to the unprivileged
+  session that came later. The fourth is the directory the third lives in.
+  `debugfs` on both media: `/run` `40755` uid 0, `/run/dbus` `40755` uid 0,
+  `/run/dconf` `40700` uid 0. So the session can **read** what `wsyswl`
+  publishes (the socket, and the `hamnix-screen` geometry file beside it, both
+  0644 already) and **create nothing** — confirmed live in the same boot that
+  proved the socket fix: `system_bus_socket': Permission denied`,
+  `rm: cannot remove '/run/dbus/pid': Permission denied`, and
+  `hamnix-x11session: WARNING no system bus`. That is the *unprivileged* half
+  of the D-Bus gap below, and it is still open. `/etc/de-ns-run` now probes
+  `$XDG_RUNTIME_DIR` and names the directory and the uid when it is not
+  writable, so it announces itself instead of arriving as `Connection refused`
+  three layers down. The likely right answer is a per-user `/run/user/<uid>`
+  (0700 — **narrower** than today), not a world-writable `/run`; it is not
+  taken here because it moves the socket path that `hamnix-x11session`,
+  `alpine_gui_run.sh`, `steam_gui_run.sh` and `x11_geom_probe.sh` all name.
+  The `/tmp` half of it IS fixed: the generated `/etc/rc.distros` now clears
+  root-owned `*.log` / `*.err` left in a distribution's sticky `/tmp` by a
+  root-run session, by class rather than by a list of three literal names.
+* **The environment DOES cross `enter`; the drop is an `exec` one level up.**
+  §8.5 recorded, unmeasured, that `enter` against an `ns clean { }` template
+  rforks with `RFCNAMEG` and so "the environment does not appear to cross".
+  The observation was right and the mechanism was wrong, which matters because
+  the two boundaries are fixed in different places. `tests/linux/enter_env.sh`
+  asks them separately with sentinel values no default in the tree produces:
+  `rfork(RFPROC|RFCNAMEG)` is a process **fork** and `RFCNAMEG` empties the
+  Pgrp — the mount table — not the address space, and `hamsh`'s exported
+  variables are ordinary BSS arrays that the fork copies. But a **fresh
+  `hamsh`** seeds its mirror with exactly `PATH` and `HOME` and never reads
+  the inherited `environ`, so anything an ancestor exported dies at the `exec`
+  into `/bin/hamsh /etc/rc.de-ns/<name> <prog>` — which is precisely how the DE
+  panel spawns the launcher, and where `HAMNIX_DE_XSESSION` went. Consequence:
+  the `HOME` / `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` / `XDG_CONFIG_HOME`
+  exports at the bottom of `/etc/rc.de-ns/<name>` **do** reach the client (they
+  are set in the same shell that then enters), and `HAMNIX_DE_XSESSION` can
+  never be steered from an outer shell no matter what is done to `enter`.
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
