@@ -93,12 +93,13 @@ def emit_scene_anim(wid: int32):
     hamscene_commit(wid)
 
 
-# Busy-wait ~n jiffies (100Hz -> ~10ms each), yielding cooperatively so the
-# rest of the system runs. Used to pace the per-frame animation cadence.
+# Sleep ~n jiffies (100 Hz -> ~10 ms each) to pace the per-frame animation
+# cadence. It said "busy-wait ... yielding cooperatively so the rest of the
+# system runs", which is the census's third bullet in its own words: a yield
+# is not a wait, so this burned a core for the length of every slide+pop
+# animation. hamscene_park(-1, ms) is a plain timed wait of the same length.
 def _delay(n: uint64):
-    s: uint64 = sys_get_jiffies()
-    while sys_get_jiffies() - s < n:
-        sys_yield()
+    hamscene_park(0 - 1, cast[int64](n * 10))
 
 
 # Drive a just-armed move to completion: render each slide+pop frame with a

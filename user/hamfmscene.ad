@@ -1396,7 +1396,8 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         else:
             if efd >= 0:
                 sys_close(efd)
-            s2: uint64 = sys_get_jiffies()
-            while sys_get_jiffies() - s2 < 3:
-                sys_yield()
+            # Was 30 ms of sys_yield(), i.e. 30 ms of spinning, on the demo /
+            # no-event path. nfds 0 is a plain timed wait at the same 30 ms.
+            wfd0: Array[1, int32]
+            sys_waitfds(&wfd0[0], 0, 30)
     return 0

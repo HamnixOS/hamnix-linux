@@ -30,6 +30,7 @@ extern def sys_fdbind(pid: int32, fdnum: int32, kind: int32, slot: int32) -> int
 
 from lib.p9 import spawn
 from lib.hamui import hamscene_commit
+from lib.hamsceneloop import hamscene_park, HAMSCENE_IDLE_MS
 from lib.hampkgcore import hampkg_init, hampkg_build_scene, hampkg_key_line, \
     hampkg_hit, hampkg_scroll, hampkg_reset_list, hampkg_installed_reset, \
     hampkg_add_search_line, hampkg_mark_installed_line, hampkg_detail_reset, \
@@ -477,7 +478,14 @@ def main() -> int32:
                     ei = ei + 1
         if changed != 0:
             emit_scene(wid)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK on /keys, not a 30 ms spin. THE SWEEP DID NOT CATCH THIS ONE:
+        # its cpu column read 0.1 s for hampkgscene, because in the jail this
+        # program never REACHES the loop -- it paints once and then blocks in
+        # `hpm refresh` with no network. The loop is character-for-character
+        # hamnotesscene's, which the sweep measured at 14.4 s of cpu in a
+        # 15.7 s run, so the 0.1 is a fact about the harness and not about
+        # this program. Fixed on the strength of the shape (THE IDLE CENSUS,
+        # HANDOFF §0), and said out loud because "the sweep is green" is
+        # exactly the success-shaped answer this tree exists to distrust.
+        hamscene_park(kfd, HAMSCENE_IDLE_MS)
     return 0

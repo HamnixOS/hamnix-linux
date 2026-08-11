@@ -2441,9 +2441,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 # noted and reaped rather than left behind.
                 _shutdown_shell()
                 return 0
-            s2: uint64 = sys_get_jiffies()
-            while sys_get_jiffies() - s2 < 2:
-                sys_yield()
+            # The "slow poll" this comment promises was 20 ms of sys_yield(),
+            # which is not slow and is not a poll interval -- it is a spin.
+            # nfds 0 is a plain timed wait at the same 20 ms.
+            wfd0: Array[1, int32]
+            sys_waitfds(&wfd0[0], 0, 20)
         return 0
 
     # READINESS-MULTIPLEXING loop (KEYSTONE BUG #1 FIX).

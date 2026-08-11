@@ -33,6 +33,7 @@ extern def sys_fdbind(pid: int32, fdnum: int32, kind: int32, slot: int32) -> int
 
 from lib.p9 import spawn, p9_listdir
 from lib.hamui import hamscene_commit
+from lib.hamsceneloop import hamscene_park, HAMSCENE_IDLE_MS
 from lib.hampkgcore import hampkg_init, hampkg_build_scene, hampkg_key_line, \
     hampkg_hit, hampkg_scroll, hampkg_reset_list, hampkg_installed_reset, \
     hampkg_add_search_line, hampkg_mark_installed_line, hampkg_detail_reset, \
@@ -699,7 +700,8 @@ def main() -> int32:
                     ei = ei + 1
         if changed != 0:
             emit_scene(wid)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK on /keys. Same loop, same 30 ms spin and the same reason the
+        # sweep's cpu column did not name it as hampkgscene above -- see the
+        # note there.
+        hamscene_park(kfd, HAMSCENE_IDLE_MS)
     return 0

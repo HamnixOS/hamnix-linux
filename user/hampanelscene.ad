@@ -5628,9 +5628,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 nwf = nwf + 1
             pi = pi + 1
         if nwf == 0:
-            s2: uint64 = sys_get_jiffies()
-            while sys_get_jiffies() - s2 < 3:
-                sys_yield()
+            # No panel /event fd opened this pass. This was a 30 ms
+            # sys_yield() window -- a spin, in the branch taken exactly when
+            # there is nothing to be woken by, i.e. the branch that most needs
+            # a real sleep. nfds 0 makes sys_waitfds a plain timed wait at the
+            # same 30 ms.
+            sys_waitfds(&_wait_efds[0], 0, 30)
         else:
             # ~16ms timeout: long enough that an idle panel sits near 0% CPU
             # (it still wakes instantly on input via waitfds_notify), short

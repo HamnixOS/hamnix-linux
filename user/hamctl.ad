@@ -29,6 +29,7 @@ extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> in
 extern def sys_netcfg(op: uint64, a1: uint64, a2: uint64) -> int64
 
 from lib.hamui import hamscene_commit
+from lib.hamsceneloop import hamscene_park
 from lib.p9 import spawn_detached
 from lib.hamctlcore import hamctl_init, hamctl_build_scene, hamctl_click, \
     hamctl_set_datetime, hamctl_swatch, hamctl_sw_r, hamctl_sw_g, hamctl_sw_b, \
@@ -1061,7 +1062,10 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             changed = 1
         if changed != 0:
             emit_scene(wid)
-        s2: uint64 = sys_get_jiffies()
-        while sys_get_jiffies() - s2 < 3:
-            sys_yield()
+        # PARK for 30 ms. Pointer-only client (it opens /event and never
+        # /keys), so this is a plain timed wait at the SAME interval the spin
+        # window used -- the `ticks % 30` clock refresh above still fires
+        # every ~0.9 s. The sweep scored hamctl RAN / 1.0 s wall and so never
+        # measured this loop; the shape is the one the census names.
+        hamscene_park(0 - 1, 30)
     return 0

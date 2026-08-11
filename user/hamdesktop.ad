@@ -2841,8 +2841,8 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # ~250ms timeout lapses (which drives the periodic re-scan), so an idle
         # desktop sits near 0% CPU yet still reflects external changes. During
         # the startup self-heal window, and when the demo needs loop-cadence
-        # pacing, fall back to the short bounded yield spin so the fast re-emit
-        # cadence that closes the compositor race is preserved.
+        # pacing, fall back to a SHORT 30 ms park so the fast re-emit cadence
+        # that closes the compositor race is preserved.
         if efd >= 0 and demo_mode == 0 and heal_pass > HEAL_FAST_PASSES:
             wfd: Array[1, int32]
             wfd[0] = efd
@@ -2851,7 +2851,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         else:
             if efd >= 0:
                 sys_close(efd)
-            s2: uint64 = sys_get_jiffies()
-            while sys_get_jiffies() - s2 < 3:
-                sys_yield()
+            # This fallback was a "short bounded yield spin" -- 30 ms of
+            # sys_yield(), which is 30 ms of burning a core, taken on every
+            # pass of the startup self-heal window and for the whole of a demo
+            # run. nfds 0 is a plain timed wait at the same 30 ms, so the
+            # cadence is identical and the core is not.
+            wfd0: Array[1, int32]
+            sys_waitfds(&wfd0[0], 0, 30)
     return 0
