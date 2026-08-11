@@ -32,12 +32,44 @@
  *
  * So `sys_pipechan` also opens the fifo O_RDWR and keeps that descriptor.
  * O_RDWR on a fifo never blocks, and holding it means neither direction is
- * ever without a peer, so every later open returns immediately.  The keeper
- * lives in the CREATING process only, which also gives the right lifetime: when
- * the terminal exits, its keeper closes, and the shell's stdin finally sees
- * EOF -- "the terminal goes away, its shell reads EOF and exits", which is the
- * behaviour user/hamtermscene.ad's own comment says it was always supposed to
- * get and did not.
+ * ever without a peer, so every later open returns immediately.
+ *
+ * THE KEEPER IS ALSO A WRITER, AND THAT IS WHY A PIPELINE NEVER RETURNED
+ * ---------------------------------------------------------------------
+ * `cat FILE | md5sum` hung for ever, and it was not md5sum: the same md5sum
+ * hashed two FILE operands correctly one line above.  Measured at this layer
+ * with a two-stage harness, the reader RECEIVED ITS BYTES and then blocked in
+ * read(2) for ever.  EOF on a fifo is "the last WRITER closed", and the shell
+ * that created the slot still held the O_RDWR keeper -- a writer.  So the end
+ * that never finished is the WRITER end, and it was the shell's own keeper,
+ * not the `cat`.  Every pipeline in the system had it; only the ones whose
+ * reader drains to EOF (md5sum, wc, cksum, sort) could show it.
+ *
+ * Simply not keeping a keeper is worse, and the same harness says so: with the
+ * keeper dropped before the stages ran, `cat` opened, wrote, closed and exited
+ * before the reader opened, the fifo's open count hit zero, the kernel threw
+ * the buffered bytes away and the reader read "EOF after 0 bytes" -- a SILENT
+ * EMPTY ANSWER, which is worse than a hang.
+ *
+ * So the keeper has a LIFETIME rather than a presence: it is created with the
+ * slot, and it is closed as soon as BOTH real ends have been opened by the
+ * processes that own them (`rever` / `wever` on the slot, set by fdns_open).
+ * From that moment the fifo is held up by the real ends alone, so
+ *
+ *   - EOF fires exactly when the last real writer closes, and
+ *   - EPIPE fires exactly when the last real reader closes,
+ *
+ * which is what a pipe is.  `fdns_keeper_sweep()` performs the close, and the
+ * runtime calls it from the two places a process is about to stop making
+ * progress on its own -- sys_read and sys_waitpid -- with a bounded wait, so a
+ * stage that never opens its end costs a timeout and an EPIPE rather than a
+ * hang.  A pipeline that hangs for ever is the worst failure a shell has.
+ *
+ * The keeper still lives in the CREATING process only, which keeps the other
+ * lifetime it was written for: when the terminal exits, everything it held
+ * closes, and the shell's stdin finally sees EOF -- "the terminal goes away,
+ * its shell reads EOF and exits", which is the behaviour
+ * user/hamtermscene.ad's own comment says it was always supposed to get.
  *
  * UNBOUND /fd/N
  * -------------
@@ -50,6 +82,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +94,10 @@
 
 #include "linux-fdns.h"
 
-#define FDNS_MAGIC   0x534E4446u          /* "FDNS" */
+/* Bumped when struct fdshm's layout changed (the slot grew its rever/wever/
+ * done words).  A segment left behind by an older binary is re-initialised
+ * rather than misread. */
+#define FDNS_MAGIC   0x32534E46u          /* "FNS2" */
 #define MAX_SLOTS    64
 #define MAX_BINDS    512
 #define PATH_CAP     256
@@ -76,6 +112,13 @@ struct slotrec {
     int32_t  kind;                    /* SLOT_FIFO | SLOT_FILE */
     int32_t  mode;                    /* SLOT_FILE: OPENCHAN_* */
     int32_t  owner;                   /* the pid that called pipechan */
+    /* SLOT_FIFO only, and the whole of the EOF story: has a real read end /
+     * a real write end ever been opened by the process that owns it?  When
+     * both are set the creator's keeper has done its job and is closed. */
+    uint32_t rever;
+    uint32_t wever;
+    uint32_t done;                    /* the keeper has been dropped */
+    uint32_t bound;                   /* some /fd name has pointed here */
     char     path[PATH_CAP];
 };
 
@@ -100,6 +143,10 @@ static struct fdshm *shm;
  * Indexed by slot id modulo MAX_SLOTS. */
 static int keeper[MAX_SLOTS];
 static int keeper_init;
+/* How many of them are still open here.  Zero is the overwhelmingly common
+ * case (every process that never made a pipe), and it is what makes the
+ * sweep free to call from a hot syscall path. */
+static int keeper_live;
 
 static const char *shm_path(void)
 {
@@ -194,6 +241,149 @@ static struct slotrec *slot_find(int32_t slot)
         if (shm->slot[i].used && (int32_t)(i + 1) == slot)
             return &shm->slot[i];
     return NULL;
+}
+
+/* HAMFDNS_DEBUG=1 traces /fd resolution and keeper lifetime to stderr. */
+static int fdns_dbg_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("HAMFDNS_DEBUG"); on = (e && *e) ? 1 : 0; }
+    return on;
+}
+
+static void fdns_note(const char *msg)
+{
+    char m[192];
+    int n = snprintf(m, sizeof m, "[fdns] pid=%d %s\n", (int)getpid(), msg);
+    ssize_t ignored = write(2, m, (size_t)(n < 0 ? 0 : n));
+    (void)ignored;
+}
+
+/* ------------------------------------------------------------------ *
+ * THE KEEPER'S LIFETIME -- see the long note at the top of this file.
+ *
+ * A keeper is an O_RDWR descriptor, so while it is open the fifo has a
+ * writer AND a reader and NEITHER end can ever finish: no EOF for the
+ * reader, no EPIPE for the writer.  It exists only to carry the slot across
+ * the window between "the pipe was created" and "both real ends are open",
+ * and it is closed the moment that window shuts.
+ * ------------------------------------------------------------------ */
+static void keeper_close(int i)
+{
+    if (keeper[i] < 0) return;
+    close(keeper[i]);
+    keeper[i] = -1;
+    if (keeper_live > 0) keeper_live--;
+    if (shm && shm->slot[i].used) shm->slot[i].done = 1;
+    if (fdns_dbg_on()) {
+        char m[128];
+        snprintf(m, sizeof m, "keeper closed slot=%d", i + 1);
+        fdns_note(m);
+    }
+}
+
+void fdns_keeper_sweep(int wait_ms)
+{
+    if (!keeper_init || keeper_live <= 0) return;
+    if (!shm && attach() < 0) return;
+
+    int waited = 0;
+    for (;;) {
+        int pending = 0;
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            if (keeper[i] < 0) continue;
+            struct slotrec *s = &shm->slot[i];
+            if (!s->used || s->kind != SLOT_FIFO) { keeper_close(i); continue; }
+            if (s->rever && s->wever) { keeper_close(i); continue; }
+            pending = 1;
+        }
+        if (!pending || keeper_live <= 0) return;
+        if (waited >= wait_ms) break;
+        usleep(1000);
+        waited++;
+    }
+
+    /* The bound expired with one end still unopened.  Drop the keeper anyway:
+     * a pipeline that hangs for ever is a worse answer than one that ends.
+     * The two ways to get here are worth telling apart in a trace --
+     *
+     *   wever && !rever : bytes were written that nobody ever opened to read.
+     *                     Closing here is what delivers EPIPE to the writer.
+     *   !wever          : nothing was ever written, so nothing is lost.
+     */
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        if (keeper[i] < 0) continue;
+        if (fdns_dbg_on()) {
+            char m[160];
+            snprintf(m, sizeof m,
+                     "keeper timeout slot=%d rever=%u wever=%u -- dropping",
+                     i + 1, shm->slot[i].rever, shm->slot[i].wever);
+            fdns_note(m);
+        }
+        keeper_close(i);
+    }
+}
+
+/* Reclaim slots.  Nothing ever freed one, so the table was a 64-entry budget
+ * for the LIFETIME OF THE SEGMENT -- shared by every pipe AND every shell
+ * redirect, both of which allocate here.  hamsh is PID 1, so "the owner
+ * exited" never reclaimed anything either: the 65th redirect of a boot got
+ * ENOSPC for ever.  Called only when allocation is about to fail, so the
+ * normal path pays nothing for it. */
+static int pid_alive(int32_t pid)
+{
+    if (pid <= 0) return 0;
+    return kill((pid_t)pid, 0) == 0 || errno != ESRCH;
+}
+
+static int slot_referenced(int32_t slot)
+{
+    for (int i = 0; i < MAX_BINDS; i++) {
+        struct bindrec *b = &shm->bind[i];
+        if (!b->used || b->slot != slot) continue;
+        if (b->kind == FDNS_NONE) continue;
+        if (pid_alive(b->pid)) return 1;
+    }
+    return 0;
+}
+
+static void slot_gc(void)
+{
+    /* Dead pids first: their bindings are what keep slots referenced. */
+    for (int i = 0; i < MAX_BINDS; i++)
+        if (shm->bind[i].used && !pid_alive(shm->bind[i].pid))
+            shm->bind[i].used = 0;
+
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        struct slotrec *s = &shm->slot[i];
+        if (!s->used) continue;
+        if (keeper[i] >= 0) continue;            /* still ours and still live */
+        /* Never take a slot that has been minted but not yet bound: hamsh
+         * calls sys_openchan/sys_pipechan and sys_fdbind as two steps, and
+         * collecting in between would hand the same number to two things. */
+        if (!s->bound) continue;
+        int owner_gone = !pid_alive(s->owner);
+        int spent = (s->kind == SLOT_FIFO) ? (s->done != 0) : 1;
+        if (!owner_gone && !spent) continue;
+        if (slot_referenced((int32_t)(i + 1))) continue;
+        if (s->kind == SLOT_FIFO && s->path[0]) unlink(s->path);
+        memset(s, 0, sizeof *s);
+    }
+}
+
+/* A free slot index, or -1.  Runs the collector once before giving up: an
+ * ENOSPC here is a shell that can no longer pipe or redirect at all. */
+static int slot_alloc(void)
+{
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < MAX_SLOTS; i++)
+            if (!shm->slot[i].used) {
+                memset(&shm->slot[i], 0, sizeof shm->slot[i]);
+                return i;
+            }
+        if (pass == 0) slot_gc();
+    }
+    return -1;
 }
 
 /* THE SPAWN GATE.
@@ -324,9 +514,7 @@ static struct bindrec *await_bind(int32_t pid, int32_t fdnum)
  * descriptor and the program works, just not where the caller meant. */
 static void fdns_trace(const char *path, struct bindrec *b, int r)
 {
-    static int on = -1;
-    if (on < 0) { const char *e = getenv("HAMFDNS_DEBUG"); on = (e && *e) ? 1 : 0; }
-    if (!on) return;
+    if (!fdns_dbg_on()) return;
     char m[192];
     int n = snprintf(m, sizeof m, "[fdns] pid=%d %s -> kind=%d slot=%d fd=%d\n",
                      (int)getpid(), path, b ? b->kind : -1,
@@ -407,7 +595,18 @@ int fdns_open(const char *path, int for_write)
     /* The direction comes from the BIND, not from how the caller opened it:
      * the binder is the one that decided which end of the pipe this name is. */
     int flags = (b->kind == FDNS_PIPE_W) ? O_WRONLY : O_RDONLY;
-    return open(s->path, flags);
+    int r = open(s->path, flags);
+    /* A REAL end is now open, and the creator's keeper is one step closer to
+     * being unnecessary.  Recorded on the SLOT, in shared memory, because the
+     * process that must act on it (the creator, in fdns_keeper_sweep) is not
+     * this one.  Monotonic on purpose: it answers "has this end ever been
+     * opened", which is the only question the keeper's lifetime turns on. */
+    if (r >= 0) {
+        if (b->kind == FDNS_PIPE_W) s->wever = 1;
+        else                        s->rever = 1;
+    }
+    fdns_trace(path, b, r);
+    return r;
 }
 
 /* Record a redirect target as a SLOT. The path, not a descriptor: see the
@@ -423,40 +622,44 @@ int32_t fdns_openchan(const char *path, int32_t mode)
     if (probe < 0) return -1;
     close(probe);
 
-    for (int i = 0; i < MAX_SLOTS; i++) {
-        if (shm->slot[i].used) continue;
-        int pn = snprintf(shm->slot[i].path, PATH_CAP, "%s", path);
-        if (pn < 0 || pn >= PATH_CAP) { errno = ENAMETOOLONG; return -1; }
-        shm->slot[i].used  = 1;
-        shm->slot[i].kind  = SLOT_FILE;
-        shm->slot[i].mode  = mode;
-        shm->slot[i].owner = (int32_t)getpid();
-        return (int32_t)(i + 1);
+    int i = slot_alloc();
+    if (i < 0) { errno = ENOSPC; return -1; }
+    int pn = snprintf(shm->slot[i].path, PATH_CAP, "%s", path);
+    if (pn < 0 || pn >= PATH_CAP) {
+        memset(&shm->slot[i], 0, sizeof shm->slot[i]);
+        errno = ENAMETOOLONG;
+        return -1;
     }
-    errno = ENOSPC;
-    return -1;
+    shm->slot[i].used  = 1;
+    shm->slot[i].kind  = SLOT_FILE;
+    shm->slot[i].mode  = mode;
+    shm->slot[i].owner = (int32_t)getpid();
+    return (int32_t)(i + 1);
 }
 
 int32_t fdns_pipechan(void)
 {
     if (attach() < 0) return -1;
-    for (int i = 0; i < MAX_SLOTS; i++) {
-        if (shm->slot[i].used) continue;
+    {
+        int i = slot_alloc();
+        if (i < 0) { errno = ENOSPC; return -1; }
         int32_t slot = (int32_t)(i + 1);
         int pn = snprintf(shm->slot[i].path, PATH_CAP, "%s/chan.%d.%d",
                           chan_dir(), (int)getpid(), (int)slot);
         if (pn < 0 || pn >= PATH_CAP) {
             /* A truncated path is a DIRECTORY name, and mkfifo on it returns
              * EEXIST -- i.e. it looks like it worked. Refuse instead. */
-            shm->slot[i].path[0] = '\0';
+            memset(&shm->slot[i], 0, sizeof shm->slot[i]);
             errno = ENAMETOOLONG;
             return -1;
         }
         shm->slot[i].owner = (int32_t)getpid();
         shm->slot[i].kind  = SLOT_FIFO;
         unlink(shm->slot[i].path);
-        if (mkfifo(shm->slot[i].path, 0666) < 0 && errno != EEXIST)
+        if (mkfifo(shm->slot[i].path, 0666) < 0 && errno != EEXIST) {
+            memset(&shm->slot[i], 0, sizeof shm->slot[i]);
             return -1;
+        }
         /* mkfifo's mode argument is masked by the process umask, which the
          * kernel hands PID 1 as 022 -- so the fifo lands 0644 no matter what
          * is written above. That was invisible while EVERYTHING ran as one
@@ -471,20 +674,22 @@ int32_t fdns_pipechan(void)
          * relaxation. */
         chmod(shm->slot[i].path, 0666);
         /* The keeper. Without it the first open of either end deadlocks --
-         * see the header comment; this is not a convenience. */
+         * see the header comment; this is not a convenience.  It is closed
+         * again by fdns_keeper_sweep as soon as both real ends exist, which
+         * is what gives the reader an EOF and the writer an EPIPE. */
         int k = open(shm->slot[i].path, O_RDWR | O_CLOEXEC);
         if (k < 0) {
-            shm->slot[i].owner = (int32_t)getpid();
-        shm->slot[i].kind  = SLOT_FIFO;
-        unlink(shm->slot[i].path);
+            int e = errno;
+            unlink(shm->slot[i].path);
+            memset(&shm->slot[i], 0, sizeof shm->slot[i]);
+            errno = e;
             return -1;
         }
         keeper[i] = k;
+        keeper_live++;
         shm->slot[i].used = 1;
         return slot;
     }
-    errno = ENOSPC;
-    return -1;
 }
 
 int32_t fdns_fdbind(int32_t pid, int32_t fdnum, int32_t kind, int32_t slot)
@@ -503,6 +708,10 @@ int32_t fdns_fdbind(int32_t pid, int32_t fdnum, int32_t kind, int32_t slot)
     }
     b->kind = kind;
     b->slot = slot;
+    if (kind != FDNS_NONE) {
+        struct slotrec *s = slot_find(slot);
+        if (s) s->bound = 1;
+    }
     return 0;
 }
 
@@ -524,4 +733,5 @@ void fdns_after_fork_child(void)
     if (!keeper_init) return;
     for (int i = 0; i < MAX_SLOTS; i++)
         if (keeper[i] >= 0) { close(keeper[i]); keeper[i] = -1; }
+    keeper_live = 0;
 }

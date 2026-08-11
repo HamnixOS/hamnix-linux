@@ -787,6 +787,11 @@ int32_t sys_open_write(const char *path)
 int64_t sys_read(int32_t fd, uint8_t *buf, uint64_t count)
 {
     fdns_gate_release();
+    /* The OTHER place a process stops making progress on its own: a blocking
+     * read of a pipe this process created. `{ cmd }` command substitution is
+     * exactly that -- the shell holds the keeper and reads the pipe -- so
+     * without this the substitution never ends either. */
+    fdns_keeper_sweep(FDNS_KEEPER_WAIT_MS);
     struct devfile *v = devtab_find((int)fd);
     if (v) {
         int64_t n;
@@ -1832,6 +1837,11 @@ int32_t sys_set_realtime(uint64_t epoch)
 int64_t sys_waitpid(int32_t pid)
 {
     fdns_gate_release();
+    /* A shell that has forked every stage of a pipeline and is now going to
+     * block until they finish must not still be holding their pipes open --
+     * a keeper is a WRITER, so the last stage would never see EOF and the
+     * wait would never return. See fdns_keeper_sweep(). */
+    fdns_keeper_sweep(FDNS_KEEPER_WAIT_MS);
     int status;
     pid_t r;
     do {
