@@ -1044,7 +1044,9 @@ def _fetch(url: Ptr[uint8]):
         # an indistinguishable "transport error (DNS/connect/TLS)".
         rc: int64 = http_get(url, &resp_buf[0], RESP_CAP,
                              &st[0], &bl[0])
+        trunc: int32 = 0
         if rc == -6:
+            trunc = 1
             rc = 0
         if rc < 0:
             _build_error(cast[Ptr[uint8]]("Fetch failed"), url)
@@ -1081,6 +1083,11 @@ def _fetch(url: Ptr[uint8]):
             sp = sp + 1
             a = a + 1
         sp = sp + _u64_to_dec(bl[0], &sb[sp])
+        # A page that outgrew RESP_CAP is rendered as far as it goes, but it
+        # must NEVER look like a whole page: half a document laid out silently
+        # is exactly the success-shaped answer this whole change is against.
+        if trunc != 0:
+            sp = _sapp(&sb[0], sp, cast[Ptr[uint8]](" TRUNCATED"))
         sb[sp] = 0
         _set_status(&sb[0])
         # LOUD serial diagnostic (printed BEFORE newwindow rebinds stdout off
@@ -1149,7 +1156,9 @@ def _fetch_post(url: Ptr[uint8], body: Ptr[uint8], blen: uint64):
     ct: Ptr[uint8] = cast[Ptr[uint8]]("application/x-www-form-urlencoded")
     rc: int64 = http_post(url, body, blen, ct, &resp_buf[0], RESP_CAP,
                           &st[0], &bl[0])
+    ptrunc: int32 = 0
     if rc == -6:
+        ptrunc = 1
         rc = 0
     if rc < 0:
         _build_error(cast[Ptr[uint8]]("Form POST failed"), url)
@@ -1170,6 +1179,8 @@ def _fetch_post(url: Ptr[uint8], body: Ptr[uint8], blen: uint64):
     sp = sp + _u64_to_dec(cast[uint64](st[0]), &sb[sp])
     sp = _sapp(&sb[0], sp, cast[Ptr[uint8]]("  bytes "))
     sp = sp + _u64_to_dec(bl[0], &sb[sp])
+    if ptrunc != 0:
+        sp = _sapp(&sb[0], sp, cast[Ptr[uint8]](" TRUNCATED"))
     sb[sp] = 0
     _set_status(&sb[0])
     # LOUD serial proof that a FORM POST left the browser over the wire — a nav
