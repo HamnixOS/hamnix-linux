@@ -331,7 +331,7 @@ same failure this project exists to beat.
   body; those caps are now about the resource, and its JS transport
   reassembles head + body for the engine out of `http9`'s head buffer.
 
-  `tests/linux/http9_response_cap.sh` — 21 PASS, host-side, QEMU-free, over
+  `tests/linux/http9_response_cap.sh` — 29 PASS, host-side, QEMU-free, over
   byte-for-byte unchanged `http9`/`net9` linked to the `/net` host shim.
   **Its step 0 is a REFUSAL**: it measures the server's header block and exits
   1 below 600 bytes, because python's `http.server` sends 203 and every case
@@ -358,6 +358,23 @@ same failure this project exists to beat.
   then matched on a run where `hpm` had said nothing of the kind. Fixed to
   read guest output only — **a test failing on its own source text is the same
   class of error as a program answering something success-shaped.**
+
+  One piece of this could not be gated where it lives. `hambrowse`'s JS
+  `fetch()` hands the engine the response as it came off the wire, so with the
+  head in `http9`'s buffer something must put it back in front of the body —
+  an OVERLAPPING shift, and one that runs the wrong way smears the tail while
+  leaving the length right. Written inside `hambrowse.ad` it would only ever
+  execute inside a VM, and **the on-device gate cannot be built in this
+  worktree**: `scripts/build_user.sh` fails 8 programs for want of `sys_chmod`
+  / `sys_stat_mode` at link (`user/cp.ad`, `user/hpm.ad`, `insmod`, `modprobe`,
+  `rmmod`, `uname`, `nice_hi`, `nice_lo`) when the native lane takes over from
+  LLVM — seven of them untouched by any of this, so it is the lane and not the
+  change, but it does mean `tests/linux/hambrowse_fetch_ondevice` and its
+  siblings come back INCONCLUSIVE here. The shift therefore moved into
+  `http9.http_prepend_head`, where a host probe reaches it: the gate captures
+  the body's last 16 bytes BEFORE the shift and compares them after
+  (`TAILMATCH=1`), so a backwards copy done forwards fails in the gate instead
+  of in someone's browser.
 
 * **THE SOFTWARE MIXER IS PORTED. Two programs make a sound at the same time,
   and the capture carries both.** An ALSA hardware substream has one writer, so
