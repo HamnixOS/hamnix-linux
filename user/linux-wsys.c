@@ -1781,14 +1781,26 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     case HAMWSYS_DRAWCTL: {
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -1; }
-        if (for_write) {
-            /* Opening the draw sink IS the v2 opt-in as far as the compositor
-             * is concerned: a client that blits pixels is not going to send a
-             * scene, and treating it as v1 would show an empty window. */
-            v->proto = 2;
-            bb_for(v->wid, 1, v->w, v->h);
-            shm->gen++;
-        }
+        /* OPENING THIS FILE IS NOT THE v2 OPT-IN, and it used to be.
+         *
+         * The flip lived here -- "a client that blits pixels is not going to
+         * send a scene" -- and that reasoning is sound for 'B'/'D' and WRONG
+         * for 'I'.  devwsys.ad says so in as many words at its own 'I' arm:
+         * the verb "is accepted at ANY protocol version so a legacy scene
+         * client can drop in a named image without converting its whole window
+         * to the v2 blit backbuffer".  That is the entire point of the image
+         * tier -- a scene app that wants ONE photograph, not a surface.
+         *
+         * With the flip here, MEASURED: hamimgscene opened draw/ctl to upload
+         * its image, the window became protocol 2, wsysd took the backbuffer
+         * path, found a backbuffer nobody had ever blitted into, and painted
+         * 640x480 of black over a scene that was sitting there committed and
+         * correct.  Every return code was 0.
+         *
+         * So the opt-in is now the first verb that actually means "I render my
+         * own surface" -- 'B' or 'D', both of which allocate the slot they
+         * need where they are handled.  A real v2 client sends one of those
+         * before it has anything to show, so nothing it does changes. */
         return 0;
     }
     case HAMWSYS_WIN_CTL: case HAMWSYS_WIN_SCENE: case HAMWSYS_WIN_KEYS:
@@ -2154,8 +2166,13 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
             uint8_t verb = carry[i];
             uint64_t used = 0;
             if (verb == 'B') {
+                /* THE v2 OPT-IN, here rather than at open -- see the DRAWCTL
+                 * arm of hamwsys_open.  A blit is the client saying it renders
+                 * its own surface; opening the file is not. */
+                if (v->proto != 2) { v->proto = 2; shm->gen++; }
                 used = bb_blit(v, carry + i, carried - i);
             } else if (verb == 'D') {
+                if (v->proto != 2) { v->proto = 2; shm->gen++; }
                 if (carried - i < 17) break;
                 int slot = bb_for(v->wid, 1, v->w, v->h);
                 if (slot >= 0) {
