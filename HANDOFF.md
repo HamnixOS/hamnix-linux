@@ -35,7 +35,7 @@ rather than argued:
 | Shared fate between clients | **Measured, and the received answer was wrong.** `windows_high_water 1` said a rootful X session is one surface, and §8 concluded rootless would give each X toplevel its own limits. It would not: `MAXMAP`, `MAXOBJ`, the frame-callback slice and the window budget are per **connection**, and **Xwayland opens exactly one connection rootful or rootless** — measured both ways, `conns 1` each. Rootless would also make the mapping table *grow* with window count where rootful holds it at 2 for any number of X clients (8 X windows, all resizing: still 2), and it would hit `BB_SLOTS = 8` — the whole system's v2 backbuffer pool, one slot per X toplevel instead of one per X session. What was actually shared and should not have been is now fixed in `user/wsyswl.ad`: the frame-callback table was ONE table of 64 for every client (a client taking the last slot silenced everyone else's initial-draw callback), `MAXWIN` was 12 for the whole server, and `MAXCONN` was 4 — fewer than two namespaces plus Firefox plus the chrome. Now `FCPERCONN`/`WINPERCONN` partitioned per connection with `MAXWIN >= MAXCONN * WINPERCONN` checked as arithmetic by the test, and `MAXCONN` 8. `tests/linux/wsyswl_shared_fate.sh` (18 PASS) and `docs/linux_window_manager.md` §8a. |
 | Debian | `enter debian { sh }` — bookworm on its own filesystem, amd64+i386. Works **from a uid-1001 desktop terminal**, and something inside can build a container (`bwrap --unshare-user`). The root switch is `MS_MOVE` + `chroot`, what `switch_root(8)` does: `pivot_root` returns EINVAL on an initramfs boot's unattached `rootfs`. `glxgears:i386` renders on the Hamnix desktop through XWayland → `wsyswl` → `wsysd` → `/dev/fb`. |
 | Distributions | **Two, at once, on the live boot AND on an installed disk.** `#distro/<name>` is a parameterised subtree server; `/etc/distros` maps a name to a medium **by ext4 volume label**, so which disk is `/dev/vda` cannot silently decide which distribution you entered. `enter alpine { … }` (musl, 3.24.1) and `enter debian { … }` (glibc, 12.15) both work in ONE boot from the console AND as uid 1001 — `tests/linux/two_namespaces.sh`, with a negative control that `/etc/alpine-release` is invisible inside Debian. An unprivileged process cannot open a block device to read a label, so `bind` falls back to the mount point the boot already posted the server at: **the name is what crosses the privilege boundary.** Alpine costs **26 MiB** without graphics, 333 MiB with; Debian is 4.5 GiB. Each has its own section in the DE application menu, named for it, driven from `/etc/distros` rather than from a compiled-in path. `etc/rc.boot.installed` sources the same generated `/etc/rc.distros` the live boot does, so `enter alpine` and `enter debian` survive a reboot into an installed system -- `tests/linux/installed_distros.sh`, the boot nobody had ever run. `docs/linux_distro_namespaces.md`. |
-| Audio | `/dev/audio`, `/dev/audioctl`, `/dev/audioin` on intel-hda, ported from Hamnix's `audio_cdev.ad` + `hda.ad`. Proven by FFT on a WAV captured out of QEMU: 1000.28 Hz, 444.57 Hz and a 660.90 Hz sine, right durations, square-wave harmonics. `arecord` delivers 97.4% of a 48 kHz stereo second. |
+| Audio | `/dev/audio`, `/dev/audioctl`, `/dev/audioin` on intel-hda, ported from Hamnix's `audio_cdev.ad` + `hda.ad`. Proven by FFT on a WAV captured out of QEMU: 1000.28 Hz, 444.57 Hz and a 660.90 Hz sine, right durations, square-wave harmonics. `arecord` delivers 97.4% of a 48 kHz stereo second. **It MIXES**: an ALSA substream has one writer, so `/srv/audio` is a shared mix ring and a detached pump owns the card — two programs playing two tones appear in ONE capture as both frequencies, summed (rms 1.42× solo), and a writer at a third of real time interrupts the other in 0 of 65 windows. `docs/linux_audio_mixer.md`. |
 | Shutdown | **An installed machine can be turned off, and the filesystems are flushed on the way down.** `/dev/reboot` is served (`user/linux-syscalls.c`), ported from Hamnix's `DEV_REBOOT` cdev with its protocol intact — first token, three verbs `poweroff` / `reboot` / `halt`, reads are EOF. A recognised verb is `sync(2)` then `reboot(2)`. Until this landed nothing served the name, so `reboot`, `poweroff`, `halt` and `init 0` / `init 6` all died on the open and **every restart of an installed machine was the equivalent of pulling the plug** — it survived only because ext4 has a journal. An installed disk now writes to `/etc` and reboots **in the same breath with no sleep**, and the next boot is running the rc the last one wrote: `tests/linux/reboot_device.sh`, 37 PASS, `reboot: Restarting system` in 13 s and `reboot: Power down` in 11 s. `poweroff` and `halt` were not in the image at all and now are. uid 1001 gets EPERM and every client reports it **by name**; the desktop's Power Off works because `hamsessui` is spawned by the root chrome. `docs/linux_installed_update.md` §2c. |
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
@@ -256,12 +256,39 @@ same failure this project exists to beat.
   survived: the obvious local test server sends 203-byte headers and never
   reproduces it.
 
-* **The 4-stream software mixer is not ported.** An ALSA hardware substream
-  has one writer, so `stream`/`mixplay` return `-EINVAL` and
-  `user/audiolife.ad` will not do here what it does on Hamnix. The status
-  line's `streams 100 100 100 100` is a placeholder. Capture *content* is
-  also unverifiable in an automated run — QEMU's only host-free input backend
-  is silence — and the card is not ready for ~2 s after boot.
+* **THE SOFTWARE MIXER IS PORTED. Two programs make a sound at the same time,
+  and the capture carries both.** An ALSA hardware substream has one writer, so
+  the mixer lives in the device server: `/srv/audio` is a `MAP_SHARED` mix ring
+  standing in for `hda.ad`'s DMA buffer, every writer SUMS into it just ahead of
+  the play cursor with its own cursor, and a detached PUMP process owns the one
+  substream and moves the ring into it a period at a time — paced by the
+  blocking `write(2)` the way the DMA engine is paced by the hardware, and
+  handing the card SILENCE for a starved period, which is what stops a stalled
+  writer stalling anyone else. It parks in a futex with the card closed when
+  nothing is playing (it must give the card back — THE IDLE CENSUS — and must
+  not exit, because an orphan under this PID 1 is a zombie). Summing SATURATES
+  rather than scaling, for `mixer.ad`'s reason: halving to buy headroom makes
+  the common case 12 dB quiet. Measured, `tests/linux/audio_mix.sh`: 1 kHz alone
+  reads 0.645 of the rms at 1000 Hz and **0.000 at 300 Hz** (the control), 1 kHz
+  and 300 Hz from two pids read **0.454 each** at an rms of **1.42× the solo**
+  (a real sum is 1.41×, one winner 1.0×, a halving mixer 0.71×), and beside a
+  writer running at a third of real time the fast stream's 1 kHz band drops out
+  in **0 of 65** 40 ms windows. `user/audiolife.ad` is in the image and does
+  here what it does on Hamnix — `tests/linux/audio_lifetime.sh`, all three of
+  its reports: a 3.000 s clip sounds ONCE for 3.003 s, a raw write with no ctl
+  at all sounds as itself (300 Hz 0.818 of its power, 1000 Hz 0.000) rather than
+  as the previous clip's tail, and 0.65 s of a second program's effects are
+  HEARD INSIDE another program's 4.001 s of music. The status line's
+  `streams 100 100 100 100` was a placeholder a real program (`hamctl.ad`)
+  parses; it is now the four per-slot Q8 gains, `stream <id> <pct>` sets one,
+  `mixplay` is honoured instead of returning `-EINVAL`, and a format that does
+  not match the running mix is refused BY NAME. `docs/linux_audio_mixer.md`.
+  Still open there: no resampler (so a second stream at another rate is refused
+  rather than converted), s16le-only summing, per-stream volume addressed by
+  SLOT rather than by name, and `/dev/audioin` still has one reader. Capture
+  *content* also remains unverifiable in an automated run — QEMU's only
+  host-free input backend is silence — and the card is not ready for ~2 s after
+  boot.
 * **THE FOURTH FAULT OF THAT FAMILY IS FIXED, and it took the unprivileged
   half of the D-Bus gap with it. `$XDG_RUNTIME_DIR` is now `/run/user/1001`,
   0700, owned by the session user.** §8.5 named three — a mount point in the
