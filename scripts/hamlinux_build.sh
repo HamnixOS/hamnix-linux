@@ -24,6 +24,25 @@
 #   10 = host_ac failed to emit IR      (front-end / language failure)
 #   11 = @main bailed the SSA subset    (backend coverage failure)
 #   12 = clang link failed              (missing sys_* runtime symbols)
+#   13 = the source has NO `def main`   (a LIBRARY MODULE, not an application)
+#
+# 13 exists because 11 was answering for both, and the two are opposites. The
+# check used to be "no `define i64 @main(` in the .ll -> the body bailed the
+# SSA subset", and it said that about four files that have no `main` to bail:
+# user/http9.ad, user/net9.ad, user/httpdconf.ad and user/hambrowse_tabs.ad are
+# library modules, imported by hpm/curl/wget, by the /net dialers, by httpd and
+# by hambrowse. Every one of them emits every function it has --
+# `funcs=74 emitted=74 bailed=0` for http9 -- and then gets reported as a
+# backend coverage failure. HANDOFF.md carried "one genuinely bails the
+# backend's SSA subset (hambrowse_tabs)" on the strength of that message; it
+# never bailed anything.
+#
+# So the two cases are now told apart by the SOURCE, which is where the answer
+# is: a file with a top-level `def main` that produced no `@main` really did
+# bail (11); a file with no `def main` at all was never an application (13).
+# Both are still non-zero -- this script's job is to produce a linked ELF and
+# it did not -- but a sweep can now count them apart, and a build count whose
+# denominator is "applications" can stop counting libraries as failures.
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJ_ROOT"
@@ -169,8 +188,15 @@ fi
 grep -E "^; ADDER_STAT" "$LL" >&2 || true
 
 if ! grep -q "^define i64 @main(" "$LL"; then
-    echo "[hamlinux] ERROR: no @main emitted (body bailed the SSA subset); .ll=$LL" >&2
-    exit 11
+    # Which of the two is it? Ask the source, not the IR. See the exit-code
+    # note in the header: a file with no top-level `def main` is a library
+    # module and never had a main to bail.
+    if grep -qE '^def[[:space:]]+main[[:space:]]*\(' "$IN_AD"; then
+        echo "[hamlinux] ERROR: no @main emitted ($IN_AD declares main, so its body bailed the SSA subset); .ll=$LL" >&2
+        exit 11
+    fi
+    echo "[hamlinux] NOT-AN-APPLICATION: $IN_AD has no 'def main' — it is a library module, imported by other programs, and there is nothing here to link into an ELF" >&2
+    exit 13
 fi
 
 # --- per-program extra objects --------------------------------------------

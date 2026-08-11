@@ -137,7 +137,26 @@ install -m644 scripts/ac-link.sh "$BASE/usr/share/adder/ac-link.sh" 2>/dev/null
 install -m644 tests/linux/hello.ad "$BASE/usr/share/adder/hello.ad" 2>/dev/null
 
 # glibc and the loader: this lane links dynamically (HANDOFF §7.4).
-probe="$(ls -1 "$BASE"/bin/* 2>/dev/null | head -1)"
+#
+# The probe must be a binary THIS LANE built, and it used to be
+# `ls -1 "$BASE"/bin/* | head -1` — whatever sorted first. That is fine for a
+# whole-tree sweep only by luck: `ac` sorts first and is dynamic, so old and
+# new pick the same file and the whole-tree numbers are unaffected. For a sweep
+# of a named subset it is not, because `host_ac` is staged unconditionally a few
+# lines above and is STATICALLY linked, so `ldd` printed nothing, `readelf`
+# found no interpreter, no libc and no loader were staged, and every program in
+# the run died with rc 127 / "No such file or directory" — which the jail
+# reports as the PROGRAM's exit status. Eight applications that run correctly
+# were scored EXIT_NONZERO by a staging bug in the harness. That is precisely
+# the failure this sweep exists to catch, made by the sweep.
+#
+# So: walk the staged binaries and take the first that actually HAS a PT_INTERP.
+probe=""
+for p in "$BASE"/bin/*; do
+    [ -f "$p" ] || continue
+    if readelf -l "$p" 2>/dev/null | grep -q 'interpreter'; then probe="$p"; break; fi
+done
+[ -n "$probe" ] || probe="$(ls -1 "$BASE"/bin/* 2>/dev/null | head -1)"
 ldd "$probe" 2>/dev/null | awk '/=> \//{print $3}' | sort -u | while read -r lib; do
     mkdir -p "$BASE$(dirname "$lib")"; cp -Ln "$lib" "$BASE$lib" 2>/dev/null
 done
@@ -276,10 +295,37 @@ run_one() {
     local sin="${STDIN[$app]:--}"
     local claim="${CLAIM[$app]:-}"
 
+    # A LIBRARY MODULE IS NOT A BUILD FAILURE. rc 13 from
+    # scripts/hamlinux_build.sh means the source has no `def main` at all --
+    # user/http9.ad, user/net9.ad, user/httpdconf.ad and user/hambrowse_tabs.ad
+    # are modules that hpm, the /net dialers, httpd and hambrowse IMPORT. They
+    # emit every function they have and then have no `main` to link.
+    #
+    # This test has to come BEFORE the BUILD_FAIL test, and that ordering is
+    # the whole bug it fixes: the recipes table has classified all four as
+    # class `lib` with the skip reason "library: no main, nothing to run" for
+    # as long as they have been in it, and not one of them ever reached that
+    # line, because the build check fired first and scored them BUILD_FAIL.
+    # The headline's `runnable` denominator subtracts NOT_SMOKE_TESTABLE and
+    # BUILD_FAIL alike, so the SCORE was not wrong -- but the verdict table
+    # said four libraries had failed to build, and HANDOFF.md's build count
+    # believed it.
+    #
+    # Only for class `lib`. An application that lost its `main` is a real
+    # regression and must still show up as a failure, so rc 13 on anything not
+    # declared a library falls through to BUILD_FAIL below.
+    if [ "${BRC[$app]:-1}" = 13 ] && [ "$cls" = lib ]; then
+        printf '%s\t%s\t0\tNOT_SMOKE_TESTABLE\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
+            "$app" "$cls" "library module: no def main, nothing to link or run" \
+            "$claim" >> "$OUT/results.tsv"
+        return
+    fi
+
     if [ "${BRC[$app]:-1}" != 0 ]; then
         printf '%s\t%s\t%s\tBUILD_FAIL\t-\t-\t-\t-\t-\t-\t-\t%s\t%s\n' \
             "$app" "$cls" "${BRC[$app]:-?}" \
-            "$(grep -m1 -iE 'error|bailed' "$OUT/run/$app.build.err" 2>/dev/null | cut -c1-120 | tr '\t\n' '  ')" \
+            "$(grep -vE '^; ADDER_STAT' "$OUT/run/$app.build.err" 2>/dev/null \
+               | grep -m1 -iE 'error|bailed|NOT-AN-APPLICATION' | cut -c1-120 | tr '\t\n' '  ')" \
             "$claim" >> "$OUT/results.tsv"
         return
     fi

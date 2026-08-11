@@ -6,7 +6,7 @@
 # It wires together the THREE real pieces of the shipped mechanism, with no DE,
 # no compositor, and no flaky mouse injection:
 #
-#   1. the kernel dual-buffer device — sys/src/9/port/devsnarf.ad's
+#   1. the dual-buffer clipboard device — lib/devsnarf.ad's
 #      devsnarf_{read,write} (CLIPBOARD, /dev/snarf) and
 #      devsnarf_primary_{read,write} (PRIMARY, /dev/snarf.primary);
 #   2. the toolkit's PATH selector — lib/htermsel.ad::_htsel_clip_path (the
@@ -24,7 +24,7 @@
 # compositor-independent proof that PRIMARY works side by side with, and
 # independent of, the CLIPBOARD.
 
-from sys.src.port9.port.devsnarf import devsnarf_write, devsnarf_read, \
+from lib.devsnarf import devsnarf_write, devsnarf_read, \
     devsnarf_primary_write, devsnarf_primary_read
 from lib.htermsel import _htsel_clip_path
 from lib.hamtextbox import _htb_clip_path

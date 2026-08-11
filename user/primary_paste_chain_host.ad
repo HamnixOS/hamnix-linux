@@ -26,7 +26,7 @@
 # Pure logic, no DE, no compositor, no flaky mouse injection — the deterministic
 # proof of the consumer path the on-device haminput inspector confirms live.
 
-from sys.src.port9.port.devsnarf import devsnarf_primary_write, \
+from lib.devsnarf import devsnarf_primary_write, \
     devsnarf_primary_read, devsnarf_write, devsnarf_read
 from lib.htermsel import htsel_reset, htsel_begin, htsel_extend, htsel_active, \
     htsel_extract, _htsel_clip_path

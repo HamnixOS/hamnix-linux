@@ -3,8 +3,9 @@
 # the X11-style PRIMARY selection (task #315): highlighting text SETS a second
 # clipboard buffer (/dev/snarf.primary) INDEPENDENT of the CLIPBOARD
 # (/dev/snarf, Ctrl+C/Ctrl+V), and a middle-click paste READS it back. It joins
-# the three real pieces of the shipped mechanism — the kernel dual-buffer device
-# (sys/src/9/port/devsnarf.ad), the toolkit path selectors (lib/htermsel.ad +
+# the three real pieces of the shipped mechanism — the dual-buffer clipboard
+# device (lib/devsnarf.ad on this line; it was sys/src/9/port/devsnarf.ad on
+# Hamnix, and that path is not in this repository), the toolkit path selectors (lib/htermsel.ad +
 # lib/hamtextbox.ad), and the kernel's path->buffer routing — with no DE, no
 # compositor, and no flaky mouse injection, then drives the exact put/get
 # sequence the widgets make and asserts the two buffers never clobber each other.

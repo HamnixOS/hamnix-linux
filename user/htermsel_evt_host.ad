@@ -30,7 +30,7 @@
 # selection is gated on the live tail, the PASTE is NOT; and the terminal's
 # middle-edge detector must agree with the editor's on every button bitmap.
 
-from sys.src.port9.port.devsnarf import devsnarf_primary_write, \
+from lib.devsnarf import devsnarf_primary_write, \
     devsnarf_primary_read, devsnarf_write, devsnarf_read
 from lib.htermsel import htsel_reset, htsel_active, htsel_extract, \
     htsel_pix_to_cell, htsel_evt_parse_m, htsel_mid_edge, htsel_pointer_step, \

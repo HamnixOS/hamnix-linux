@@ -10,7 +10,7 @@
 #
 # It asserts:
 #   * a button-1 press/drag/release over a run SELECTS it and the release SETS
-#     the PRIMARY buffer (the real sys/src/9/port/devsnarf.ad primary_buf, via
+#     the PRIMARY buffer (the real lib/devsnarf.ad primary_buf, via
 #     the same path-routing shim snarf_primary_host uses);
 #   * a synthetic "m <x> <y> 4 0" (buttons bit2 = MIDDLE) parsed and dispatched
 #     through the real state machine PASTES the PRIMARY selection into the box
@@ -22,7 +22,7 @@
 # This is the "test the actual event-delivery path, not just the buffer API"
 # gate the #315 completion needed.
 
-from sys.src.port9.port.devsnarf import devsnarf_primary_write, \
+from lib.devsnarf import devsnarf_primary_write, \
     devsnarf_primary_read
 from lib.hamtextbox import htb_new, htb_set, htb_text, htb_len, htb_caret, \
     htb_set_caret, htb_text_width, htb_evt_parse_m, htb_mid_edge, \

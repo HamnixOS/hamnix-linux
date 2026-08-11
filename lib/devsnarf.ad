@@ -1,0 +1,125 @@
+# lib/devsnarf.ad — the clipboard BUFFER SEMANTICS of Hamnix's
+# sys/src/9/port/devsnarf.ad, ported to the Linux line.
+#
+# WHAT THIS IS, AND WHAT IT IS NOT.
+#
+# On Hamnix, /dev/snarf and /dev/snarf.primary are a KERNEL DEVICE: two
+# in-kernel byte buffers with an offset-addressed read/write surface, reached
+# through namec(). hamnix-linux has no Hamnix kernel, and nothing on this line
+# serves those two paths yet (see the note at the bottom) — so what is ported
+# here is the part that is kernel-independent and testable: the buffer
+# semantics themselves, as four plain functions over two module-scope arrays.
+#
+#   devsnarf_read(off, buf, count)            /dev/snarf          — CLIPBOARD
+#   devsnarf_write(off, buf, count)
+#   devsnarf_primary_read(off, buf, count)    /dev/snarf.primary  — PRIMARY
+#   devsnarf_primary_write(off, buf, count)
+#
+# Two independent backing arrays with their own lengths, so a Ctrl+C into the
+# CLIPBOARD never clobbers a live highlight's PRIMARY and vice versa. That
+# independence is the whole property the X11 two-buffer model asks for, and it
+# is what the host harnesses in user/*_host.ad assert.
+#
+# Both surfaces are OFFSET-ADDRESSED on write, not replace-always. That is not
+# a refinement: it is a fix for a user-visible bug recorded in
+# docs/text_selection_clipboard.md §"Defect 2". `echo text > /dev/snarf` goes
+# through the shell's echo, which emits the payload and its trailing newline as
+# SEPARATE write() calls at offsets 0 and len; a replace-always device let the
+# second clobber the first and the clipboard ended up holding one byte, "\n".
+# So: off == 0 REPLACES (a 0-byte write CLEARS, which is Plan 9's semantics),
+# off > 0 writes there and extends the length.
+#
+# Reads are offset-addressed for the mirror-image reason: `cat /dev/snarf` with
+# a small block size must reach EOF instead of regenerating the buffer forever.
+#
+# Adder-quirk note: the shared-shape helper carries the `_sn_` prefix to dodge
+# the flat-namespace collision class. The buffers are top-level BSS arrays, not
+# frame locals, which on this compiler they have to be at this size.
+#
+# STATUS ON THIS LINE. lib/hamtextbox.ad and lib/htermsel.ad already select
+# between the two clipboards BY PATH (`_htb_clip_path`, `_htsel_clip_path`
+# return "/dev/snarf" or "/dev/snarf.primary"), and those two selectors are the
+# real, shipped code that the editor, Notes, the browser URL bar and the grid
+# terminal all go through. What is missing on hamnix-linux is a SERVER for
+# those two paths: nothing in this tree creates them, so an open() of either
+# fails and copy/paste between programs does not work here yet. This module is
+# the semantics half of that server, sitting in the tree and under test, so
+# that when the file server is written the behaviour it must implement is
+# already pinned down by running assertions rather than by a comment.
+
+SNARF_MAX: uint64 = 65536          # 64 KiB cap
+
+snarf_buf: Array[65536, uint8]
+snarf_len: uint64 = 0
+
+primary_buf: Array[65536, uint8]
+primary_len: uint64 = 0
+
+
+def devsnarf_read(off: uint64, buf: Ptr[uint8],
+                  count: uint64) -> int64:
+    # Offset-addressed read of the CLIPBOARD. Returns 0 (EOF) once
+    # off >= snarf_len, so a chunked reader terminates.
+    if off >= snarf_len:
+        return 0
+    avail: uint64 = snarf_len - off
+    take: uint64 = count
+    if take > avail:
+        take = avail
+    i: uint64 = 0
+    while i < take:
+        buf[i] = snarf_buf[off + i]
+        i = i + 1
+    return cast[int64](take)
+
+
+def _sn_store(dst: Ptr[uint8], cur_len: uint64, off: uint64,
+              buf: Ptr[uint8], count: uint64) -> uint64:
+    # Shared body for both buffers. Returns the new buffer length.
+    #   off == 0  -> REPLACE   (a 0-byte write CLEARS)
+    #   off  > 0  -> write there and extend
+    start: uint64 = off
+    if start > SNARF_MAX:
+        return cur_len                       # write starts past the cap
+    take: uint64 = count
+    if start + take > SNARF_MAX:
+        take = SNARF_MAX - start             # truncate at the cap
+    i: uint64 = 0
+    while i < take:
+        dst[start + i] = buf[i]
+        i = i + 1
+    if start == 0:
+        return take                          # REPLACE
+    if start + take > cur_len:
+        return start + take                  # extended
+    return cur_len
+
+
+def devsnarf_write(off: uint64, buf: Ptr[uint8], count: uint64) -> int64:
+    # Writes past SNARF_MAX are truncated at the cap; we still report `count`
+    # consumed so userland's write loop terminates.
+    snarf_len = _sn_store(&snarf_buf[0], snarf_len, off, buf, count)
+    return cast[int64](count)
+
+
+# ---- PRIMARY selection (/dev/snarf.primary) -------------------------------
+# Byte-for-byte the same surface over the second backing array.
+def devsnarf_primary_read(off: uint64, buf: Ptr[uint8],
+                          count: uint64) -> int64:
+    if off >= primary_len:
+        return 0
+    avail: uint64 = primary_len - off
+    take: uint64 = count
+    if take > avail:
+        take = avail
+    i: uint64 = 0
+    while i < take:
+        buf[i] = primary_buf[off + i]
+        i = i + 1
+    return cast[int64](take)
+
+
+def devsnarf_primary_write(off: uint64, buf: Ptr[uint8],
+                           count: uint64) -> int64:
+    primary_len = _sn_store(&primary_buf[0], primary_len, off, buf, count)
+    return cast[int64](count)

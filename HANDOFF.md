@@ -38,19 +38,60 @@ rather than argued:
 | Audio | `/dev/audio`, `/dev/audioctl`, `/dev/audioin` on intel-hda, ported from Hamnix's `audio_cdev.ad` + `hda.ad`. Proven by FFT on a WAV captured out of QEMU: 1000.28 Hz, 444.57 Hz and a 660.90 Hz sine, right durations, square-wave harmonics. `arecord` delivers 97.4% of a 48 kHz stereo second. |
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
-| Build | **359 of 367** `user/*.ad` build through the LLVM lane (re-measured; the eight failures are unchanged, `user/` gained `arecord`). `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
+| Build | **Every application in `user/` builds through the LLVM lane** — 363 of 363, with 4 of the 367 files being LIBRARY MODULES that have no `main` and are not applications. `scripts/hamlinux_sweep.sh` computes and prints that headline next to its own definition; nothing is hand-derived. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
 
-The eight that do not, grouped by cause rather than listed: four are
-`*_host.ad` TEST HARNESSES that import kernel source (`sys.src.port9.port.devsnarf`,
-the clipboard device) which is not in this repository; three are LIBRARIES
-with no `main` (`http9`, `net9`, `httpdconf`), where the sweep's "no @main" is
-the correct answer; one genuinely bails the backend's SSA subset
-(`hambrowse_tabs`).
+That number used to read "359 of 367", with the eight shortfalls grouped as
+four `*_host.ad` harnesses importing kernel source that is not in this
+repository, three libraries with no `main`, and **one that genuinely bailed the
+backend's SSA subset (`hambrowse_tabs`)**. That grouping was made by reading.
+Re-measured by running, `docs/linux_build_count.md`:
+
+* **Nothing bails the SSA subset, and nothing ever did.** `hambrowse_tabs` is a
+  fourth LIBRARY, imported by `hambrowse` and `hambrowse_gfx_window`. It emits
+  `funcs=28 emitted=28 bailed=0` and then printed "body bailed the SSA subset"
+  because `hamlinux_build.sh` inferred a cause it had not checked: it looked
+  for `@main` in the IR and, on not finding one, asserted a bail. A file with
+  no `def main` was never going to emit one. That is now a distinct exit code
+  (13, "no `def main`: a library module") and every `user/*.ad` in the tree
+  reports `bailed=0`.
+* **The four harnesses now build and RUN**, asserting 64 things about this
+  tree's own `lib/htermsel.ad` and `lib/hamtextbox.ad`. The import they needed
+  was pure — two byte buffers with an offset-addressed read/write surface — so
+  it was ported rather than excluded: `lib/devsnarf.ad`. Four dead
+  `ci_battery_manifest.txt` entries are alive again with it.
+* **367 is files, not applications.** Four of them are libraries. The
+  denominator is 363, the numerator is 363, and the sweep now prints both with
+  their definition rather than leaving a number to be quoted into a commit
+  message.
+
+The clipboard finding that fell out of it is in the HONESTLY BROKEN list below.
 
 ### What is HONESTLY BROKEN right now
 
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
+
+* **There is no clipboard on this line. Copy and paste between programs does
+  nothing, and says nothing when it doesn't.** `lib/hamtextbox.ad` and
+  `lib/htermsel.ad` — the shipped code the editor, Notes, the browser URL bar
+  and the grid terminal all go through — reach the clipboard BY PATH,
+  `/dev/snarf` and `/dev/snarf.primary`. Nothing in this repository serves or
+  creates those two paths (`grep -rn snarf etc/` is empty), so
+  `htsel_clip_put` opens, gets `-ENOENT`, and returns 0 to a caller that
+  ignores it. Measured against the real `user/linux-syscalls.c` in a private
+  mount namespace with a tmpfs over `/dev`:
+  `sys_open_write("/dev/snarf") = -2` and nothing created — which is the
+  CORRECT behaviour of the `/dev/` guard that stopped `playtone` reporting
+  "played 1000 Hz square wave, 24000 frames" into a regular file called
+  `/dev/audio`. **The fix is cheap and measured**: two ordinary files at those
+  paths give exactly the semantics the toolkit needs — `sys_open_write` is
+  `O_WRONLY|O_TRUNC` so a write REPLACES including shrinking, `sys_read` is
+  offset-addressed and hits EOF, the two buffers are independent, and being
+  real files they persist across processes. Creating them in the rc scripts
+  would make copy/paste work with no new server and no client change; a real
+  file server would additionally buy the 64 KiB cap and the
+  RAM-only lifetime that `lib/devsnarf.ad` documents. Left undone because the
+  rc scripts were not that pass's to change. `docs/linux_build_count.md` §4.
 
 * **(SOLVED — kept because the shape is the lesson) Steam's login window is on
   the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
