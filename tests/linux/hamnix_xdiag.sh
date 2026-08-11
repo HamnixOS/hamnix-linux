@@ -29,16 +29,8 @@ xprop -root _NET_SUPPORTED 2>&1 | cut -c1-600
 echo "xdiag: === window tree"
 xwininfo -root -children 2>&1 | head -40
 
-echo "xdiag: === the FULL tree, children included"
-# -children shows top-levels only, and Chromium draws into a CHILD of its
-# toplevel: a toplevel that is IsViewable with an unmapped render child looks
-# exactly like a window that works, and puts no pixels anywhere.
-xwininfo -root -tree 2>&1 | head -60
-
 echo "xdiag: === every top-level, in full"
-# -tree, not -children: Chromium's toplevel has a two-deep render subtree and
-# the map state of THOSE is the thing that decides whether anything is drawn.
-for w in $(xwininfo -root -tree 2>/dev/null \
+for w in $(xwininfo -root -children 2>/dev/null \
            | sed -n 's/^ *\(0x[0-9a-f]*\).*/\1/p'); do
     echo "xdiag: --- $w"
     xwininfo -id "$w" -all 2>&1 | grep -E \
@@ -61,55 +53,6 @@ else
 fi
 ls -l /run/dbus/ 2>&1 | head -5
 [ -s /tmp/dbus-system.log ] && sed 's/^/xdiag: dbus-daemon: /' /tmp/dbus-system.log
-
-echo "xdiag: === which experiment this run is"
-cat /usr/local/etc/hamnix-x11session.env 2>/dev/null | sed 's/^/xdiag:     /' \
-    || echo "xdiag:     no env file -- defaults (matchbox, no xtrace)"
-
-echo "xdiag: === the X wire: is MapWindow ever REQUESTED?"
-# The whole point of the trace. IsUnMapped has two causes that look identical
-# from xwininfo -- nobody asked, or the ask was refused/undone -- and only the
-# wire separates them. Count first, then show the requests themselves.
-if [ -s /tmp/xtrace.log ]; then
-    echo "xdiag:     $(wc -l < /tmp/xtrace.log) lines of trace"
-    for req in MapWindow MapSubwindows UnmapWindow CreateWindow ReparentWindow \
-               DestroyWindow ConfigureWindow; do
-        echo "xdiag:     $req requests: $(grep -c "$req" /tmp/xtrace.log)"
-    done
-    echo "xdiag: --- every MapWindow / MapSubwindows, in order"
-    grep -n -E 'MapWindow|MapSubwindows' /tmp/xtrace.log | cut -c1-160 | head -60
-    echo "xdiag: --- every MapNotify / UnmapNotify event the server sent back"
-    grep -n -E 'MapNotify|UnmapNotify|MapRequest' /tmp/xtrace.log | cut -c1-160 | head -60
-    echo "xdiag: --- does anything ever DRAW? (a viewable window that is never"
-    echo "xdiag:     painted into is indistinguishable from a missing one)"
-    # NOTE the two flavours of PutImage. xtrace prints the MIT-SHM one as
-    # `MIT-SHM-Request(130,3): PutImage`, NOT as "ShmPutImage" -- so a plain
-    # grep for ShmPutImage answers 0 while hundreds of shared-memory blits are
-    # going past, and a grep for PutImage counts both together. Count them
-    # apart, because which of the two it is decides where to look next.
-    echo "xdiag:     PutImage, core X:  $(grep -c 'Request(72): PutImage' /tmp/xtrace.log)"
-    echo "xdiag:     PutImage, MIT-SHM: $(grep -c 'MIT-SHM-Request(.*): PutImage' /tmp/xtrace.log)"
-    for req in CopyArea PolyFillRectangle ClearArea CreatePixmap RenderComposite; do
-        echo "xdiag:     $req: $(grep -c "$req" /tmp/xtrace.log)"
-    done
-    echo "xdiag: --- WHICH drawable is painted into, and how often"
-    # The count alone does not attribute the drawing. If nothing ever paints
-    # into the innermost render window, the fault is CEF's; if that window is
-    # painted hundreds of times and the screen is still black, the fault is
-    # downstream of the X server and CEF is exonerated.
-    grep -o 'PutImage[^ ]* drawable=0x[0-9a-f]*' /tmp/xtrace.log 2>/dev/null \
-        | sed 's/.*drawable=//' | sort | uniq -c | sort -rn | head -12 \
-        | sed 's/^/xdiag:     /'
-    echo "xdiag: --- the last few PutImage requests in full"
-    grep 'PutImage' /tmp/xtrace.log 2>/dev/null | tail -4 | cut -c1-200 \
-        | sed 's/^/xdiag:     /'
-    echo "xdiag: --- every protocol ERROR on the wire"
-    grep -n -i -E 'Error|BadWindow|BadAccess|BadMatch|BadValue' /tmp/xtrace.log \
-        | cut -c1-160 | head -40
-else
-    echo "xdiag:     no /tmp/xtrace.log (not tracing this run)"
-    [ -s /tmp/xtrace.err ] && sed 's/^/xdiag:     xtrace stderr: /' /tmp/xtrace.err
-fi
 
 echo "xdiag: === Xwayland's own log"
 tail -25 /tmp/xwayland.log 2>&1
