@@ -1,0 +1,159 @@
+#!/bin/sh
+# /etc/de-ns-run -- run ONE program from the DE application menu inside a
+# distribution namespace, with a display it can actually draw on.
+#
+# Staged into the Hamnix image as /etc/de-ns-run by scripts/hamlinux_image.sh,
+# and COPIED INTO EACH DISTRIBUTION at boot by the generated /etc/rc.distros
+# -- at the one moment root holds the medium, which is the same moment the
+# mount points inside it are made (user/linux-syscalls.c,
+# distro_stage_mountpoints). It has to live inside the tree because by the
+# time it runs, that tree is `/`.
+#
+# WHY IT EXISTS. `/etc/rc.de-ns/<name>` used to end with
+#
+#     enter <name> { $HAMNIX_DE_PROG }
+#
+# and a `.desktop` file in Debian or Alpine names an X11 client. Nothing in
+# the namespace was serving X, so the honest outcome of a successful `enter`
+# was still no window -- the program starting, failing to open $DISPLAY, and
+# exiting. A desktop that offers to launch an application owes it a display;
+# that is this file.
+#
+# It is POSIX sh on purpose: it runs under the DISTRIBUTION's shell (busybox
+# ash in Alpine, bash in Debian), not under hamsh.
+#
+# EVERYTHING IT DOES IS SAID, ONCE, in /tmp/de-ns-run.log -- which is inside
+# the tree, i.e. readable from the Hamnix side as /n/<name>/tmp/de-ns-run.log.
+# The failure this replaces was a menu row that did nothing and logged
+# nothing on either side of the boundary.
+set -u
+LOG=/tmp/de-ns-run.log
+# NOT `exec 2>>$LOG`. The first version did that, and it swallowed the
+# PROGRAM's own stderr along with the shim's -- so the one probe that runs a
+# command-line tool through here to prove the namespace was reached printed
+# nothing at all on the console, and looked exactly like the failure it was
+# there to rule out. The shim's notes go to the log; what the program writes
+# is the program's business.
+note() { echo "de-ns-run: $*" >> "$LOG"; }
+echo "=== de-ns-run $(date 2>/dev/null): $*" >> "$LOG"
+
+[ $# -gt 0 ] || { note "no program given"; echo "de-ns-run: no program given" >&2; exit 2; }
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+# hamsh hands an entering program "/" as $HOME when it has not resolved a
+# passwd entry, and "/" IS a directory, so `[ -d "$HOME" ]` accepts it -- and
+# a toolkit then writes its cache into the root of the namespace. Reject the
+# placeholder by name, the way tests/linux/hamnix_x11session.sh does.
+case "${HOME:-}" in ""|"/") HOME=/home/live ;; esac
+[ -d "$HOME" ] || mkdir -p "$HOME" 2>/dev/null || HOME=/root
+export HOME
+
+# HAMNIX_DE_XSESSION=0 -- run the program and start nothing. The operator's
+# handle, in the shape user/linux-syscalls.c's HAMNIX_NO_USERNS already uses:
+# a test that wants to know whether the NAMESPACE was reached should not have
+# to pay for an X server to find out, and an X server it did not want is a
+# second thing that can fail in the middle of that measurement.
+if [ "${HAMNIX_DE_XSESSION:-1}" = "0" ]; then
+    note "HAMNIX_DE_XSESSION=0; running the program with no display"
+    exec "$@"
+fi
+
+# 1. AN X SESSION THIS DISTRIBUTION ALREADY KNOWS HOW TO START WINS.
+# scripts/hamlinux_alpine.sh installs /usr/local/bin/hamnix-x11session, and
+# tests/linux/steam_gui_run.sh plants the Debian one. Those are the measured
+# recipes (Xwayland geometry, the jwm choice, the stale-lock removal); this
+# file must not become a second, divergent copy of them.
+if [ -x /usr/local/bin/hamnix-x11session ]; then
+    # THE ONE THING THAT STOPS IT DEAD, NAMED BEFORE IT HAPPENS. That script
+    # writes /tmp/xwayland.log and unlinks /tmp/.X0-lock; a distribution's
+    # /tmp is the medium's own, is sticky 1777, and survives reboots -- so a
+    # file a ROOT-run session left there can be neither truncated nor unlinked
+    # by uid 1001, and the only symptom is `Xwayland FAILED TO START'. The
+    # boot clears these (the generated /etc/rc.distros); if one is still here
+    # and not ours, say which and why rather than letting it read as an X bug.
+    for f in /tmp/xwayland.log /tmp/.X0-lock /tmp/.X11-unix/X0; do
+        [ -e "$f" ] || continue
+        [ -O "$f" ] && continue
+        note "WARNING $f exists and is not ours; uid $(id -u 2>/dev/null) cannot"
+        note "  replace it in a sticky /tmp, and Xwayland will fail to start."
+        note "  It is left by a ROOT-run X session; /etc/rc.distros clears it at boot."
+    done
+    note "delegating to /usr/local/bin/hamnix-x11session"
+    exec /usr/local/bin/hamnix-x11session "$@" >>"$LOG" 2>&1
+fi
+
+# 2. NO WRAPPER. If this distribution has no Xwayland it has no X clients
+# either, so the program is a Wayland-native one (or a CLI) and runs as it is.
+if ! command -v Xwayland >/dev/null 2>&1; then
+    note "no Xwayland in this namespace; running the program directly"
+    note "(if it is an X11 client it will fail to open a display and say so)"
+    exec "$@"
+fi
+
+# 3. A MINIMAL X SESSION. Same shape as the wrappers above, minus their
+# per-distribution measurements, because this path is the fallback.
+#
+# An X server killed by a power cut leaves its lock in the namespace's /tmp,
+# which is ON DISK and survives the reboot -- `Server is already active for
+# display 0` on every boot afterwards.
+if ! DISPLAY=:0 xdpyinfo >/dev/null 2>&1; then
+    rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
+    GEOMOPT=""
+    SW=""; SH=""
+    if [ -r "$XDG_RUNTIME_DIR/hamnix-screen" ]; then
+        read -r SW SH < "$XDG_RUNTIME_DIR/hamnix-screen" || true
+    fi
+    case "${SW:-}:${SH:-}" in
+        [1-9]*:[1-9]*)
+            # -geometry only exists from Xwayland 23.1; 22.1.9 dies on it and
+            # is exactly the version that does not need it. Ask, do not assume.
+            if Xwayland -help 2>&1 | grep -q -- '-geometry'; then
+                GEOMOPT="-geometry ${SW}x${SH}"
+            fi
+            note "X screen ${SW}x${SH}" ;;
+        *)  note "WARNING no $XDG_RUNTIME_DIR/hamnix-screen; the X screen size is Xwayland's default, not the display's" ;;
+    esac
+    # shellcheck disable=SC2086
+    Xwayland -shm -noreset $GEOMOPT :0 >/tmp/de-ns-xwayland.log 2>&1 &
+    XWPID=$!
+    # WAIT FOR THE SERVER, NOT FOR THE SOCKET: a socket file is not a server.
+    i=0
+    while [ $i -lt 60 ]; do
+        DISPLAY=:0 xdpyinfo >/dev/null 2>&1 && break
+        kill -0 "$XWPID" 2>/dev/null || break
+        i=$((i+1)); sleep 0.25
+    done
+    if DISPLAY=:0 xdpyinfo >/dev/null 2>&1; then
+        note "Xwayland up after $i polls"
+    else
+        note "Xwayland FAILED TO START -- the program will not get a display"
+        tail -12 /tmp/de-ns-xwayland.log >>"$LOG" 2>/dev/null
+    fi
+else
+    note "an X server is already on :0; reusing it"
+fi
+export DISPLAY=:0
+
+# The window manager. docs/linux_window_manager.md: rootful Xwayland composites
+# its clients onto a root window nobody manages, so without one nothing in here
+# can be moved, resized, stacked or closed, and _NET_SUPPORTED comes back empty.
+if ! xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id'; then
+    if command -v jwm >/dev/null 2>&1; then
+        if [ -r /etc/jwm/hamnix.jwmrc ]; then
+            jwm -f /etc/jwm/hamnix.jwmrc >/tmp/de-ns-wm.log 2>&1 &
+        else
+            jwm >/tmp/de-ns-wm.log 2>&1 &
+        fi
+        sleep 1
+        note "started jwm"
+    else
+        note "no jwm in this namespace -- the window will not be movable"
+    fi
+fi
+
+note "exec $*"
+"$@" >>"$LOG" 2>&1
+rc=$?
+note "$1 exited $rc"
+exit $rc

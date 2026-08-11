@@ -212,20 +212,48 @@ same failure this project exists to beat.
   is a separate one baked into its image, and the two share their two
   hardest-won lines by copy. Worth merging when there is a third.
   `docs/linux_distro_namespaces.md` §7.
-* **Launching a GUI app FROM the distribution fly-out does not work.** The menu
-  draws and hit-tests correctly; clicking spawns
-  `/bin/hamsh /etc/rc.de-ns/<name> <prog>` (generated per name, because hamsh's
-  `enter` takes a namespace VALUE so `enter $NAME { }` cannot be written), and
-  that rc parses, drops to uid 1001, and reaches `enter <name>` — where the
-  FIRST bind of the template, the root switch, fails ENOENT
-  (`chdir("/n/<name>")` in the entered child). The identical five lines work at
-  uid 1001 from a console shell and a desktop terminal
-  (`two_namespaces.sh`, `enter_user_run.sh`), so it is something about this
-  SPAWNED shell's namespace, not the template or the drop. Three shapes of the
-  launcher rc were built and measured (full bind surface, none, three); all
-  three fail, differing only in how many binds fail. `distro_menu.sh` prints it
-  as a `GAP` line every run rather than letting it be rediscovered.
-  `docs/linux_distro_namespaces.md` §8.4.
+* **(SOLVED — kept because the shape is the lesson) Launching an app from the
+  distribution fly-out.** This entry used to say the FIRST bind of the
+  template, the root switch, failed ENOENT, that the identical lines worked
+  from a console shell, and that it was therefore "something about this
+  SPAWNED shell's namespace". Three shapes of the launcher rc and three passes
+  over the spawn gate and `rfork` went into that, and **nobody had ever asked
+  which bind failed** — because `hamsh` answered with a fixed sentence naming
+  a fixed suspect (`needs CAP_SYS_ADMIN … uid 1001`) for a failure that was
+  ENOENT, not EPERM. The error message was the thing answering something
+  success-shaped.
+  It is the **LAST** bind, `#/` onto `/n`, with the root switch already
+  succeeded. `enter <name>` binds /dev, /proc, /srv and /n INTO the
+  distribution's own root, a bind whose target directory does not exist fails
+  ENOENT, and the session user cannot create one — the distribution's `/` is
+  uid 0 and **uid 0 is not mapped into the user namespace `ns_privilege()`
+  acquires**, so CAP_DAC_OVERRIDE does not reach it. Those directories had
+  only ever existed as a side effect of somebody running `enter <name>` AS
+  ROOT on a WRITABLE medium, where `enter_root`'s own ignored `mkdir`
+  succeeded: `debugfs -R 'ls -l /'` finds `n` in `distro.ext4` and not in
+  `alpine.ext4`. The console and the desktop terminal "worked" because their
+  tests run a root `enter` first, in the same boot.
+  They are now made deliberately, by root, when the boot posts the server at
+  its name (`user/linux-syscalls.c`, `distro_stage_mountpoints`), and a medium
+  that refuses says so then rather than at launch. `hamsh` names the failing
+  bind, its target and the kernel's own reason (`_ns_apply_failed`).
+  Underneath it was a second gap: a `.desktop` names an **X11 client** and
+  nothing in the namespace served X, so `etc/de-ns-run.linux` — copied into
+  each tree at boot — now gives a menu-launched program a display, delegating
+  to the distribution's own `hamnix-x11session` where there is one.
+  `docs/linux_distro_namespaces.md` §8.4, `tests/linux/distro_menu.sh` (which
+  now clicks a row and screendumps what comes up).
+* **A menu-launched app reaches its namespace and cannot reach the DISPLAY.**
+  The click works, the namespace works, the application starts — and Xwayland,
+  as uid 1001 inside the namespace, cannot `connect(2)` to `/run/wayland-0`:
+  `/etc/rc.distros-wl` starts the per-distribution `wsyswl` **as root** and the
+  socket comes out `srwxr-xr-x`, owner-writable only, owner not even mapped
+  into the entering process's user namespace. Measured, by name, in
+  `/n/debian/tmp/de-ns-run.log`. Nothing had hit it because every previous
+  GUI-in-a-namespace run (`steam_gui_run.sh`, `alpine_gui_run.sh`) ran its
+  client as ROOT. Fix: create the socket writable by the session user, or
+  start `wsyswl` as them — `user/wsyswl.ad`, whoever owns it.
+  `docs/linux_distro_namespaces.md` §8.5.
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software

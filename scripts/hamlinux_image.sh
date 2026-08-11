@@ -221,6 +221,11 @@ done
 # it, and `bind '#distro/alpine' /n/alpine` reads it -- so a second (or fifth)
 # distribution is a line in a file, not a recompile. See etc/distros.linux.
 install -m644 "${HAMLINUX_DISTROS:-etc/distros.linux}" "$ROOT/etc/distros"
+# The shim the DE application menu runs a distribution's program through. It
+# is staged HERE, in the Hamnix root, and copied INTO each distribution by the
+# generated /etc/rc.distros at boot -- see etc/de-ns-run.linux for why it has
+# to be a file inside the tree.
+install -m755 etc/de-ns-run.linux "$ROOT/etc/de-ns-run"
 
 # --- and the rc scripts DERIVED from that table ---------------------------
 # Three hand-written copies of the same five-line `ns clean { }` recipe used to
@@ -247,9 +252,34 @@ DISTRO_NAMES="$(awk '{sub(/#.*/,"")} NF>=2 && $1!="default" {print $1}' "$ROOT/e
     echo "# under /n/<name>, and capture -- not enter -- an \`ns clean { }\`"
     echo "# template called after it. Capturing grants nothing; \`enter alpine"
     echo "# { sh }\` is what spends it."
+    echo "#"
+    echo "# The \`bind '#distro/<name>' /n/<name>\` below is ALSO what creates"
+    echo "# the mount points inside that distribution's own root (/n, /dev,"
+    echo "# /proc, /sys, /srv), because it is the one moment root holds the"
+    echo "# medium -- user/linux-syscalls.c, distro_stage_mountpoints. The"
+    echo "# session user cannot make them and \`enter <name>\` cannot work"
+    echo "# without them: docs/linux_distro_namespaces.md 8.4."
+    echo "#"
+    echo "# And it is where /etc/de-ns-run is copied INTO each tree. That is"
+    echo "# the shim the DE application menu runs a distribution's program"
+    echo "# through (etc/de-ns-run.linux): by the time it runs, that tree is"
+    echo "# \`/', so it has to be a file inside it, and root at boot is the"
+    echo "# only one who can put it there."
     for n in $DISTRO_NAMES; do
         echo ""
         echo "bind '#distro/$n' /n/$n"
+        echo "cp /etc/de-ns-run /n/$n/etc/de-ns-run"
+        echo "# Stale X session state, cleared by ROOT because the session user"
+        echo "# cannot. A distribution's /tmp is the medium's own and survives"
+        echo "# the reboot (user/linux-syscalls.c, enter_root), it is sticky"
+        echo "# 1777, and the lock, socket and log a ROOT-run X session left"
+        echo "# behind are root-owned -- so uid 1001 can neither truncate nor"
+        echo "# unlink them, and \`hamnix-x11session' dies on"
+        echo "# \`cannot create /tmp/xwayland.log: Permission denied'. The X"
+        echo "# server that made them cannot still be running: we just booted."
+        echo "rm /n/$n/tmp/.X0-lock 2>/dev/null"
+        echo "rm /n/$n/tmp/.X11-unix/X0 2>/dev/null"
+        echo "rm /n/$n/tmp/xwayland.log 2>/dev/null"
         echo "$n = ns clean {"
         echo "    bind '#distro/$n' /"
         echo "    bind '#c' /dev"
@@ -322,8 +352,16 @@ XDG_CONFIG_HOME='/run'
 export XDG_CONFIG_HOME
 if \$HAMNIX_DE_PROG:
     echo 'rc.de-ns: entering $n to run' \$HAMNIX_DE_PROG
+    # THROUGH /etc/de-ns-run, NOT DIRECTLY. A \`.desktop\` file in a
+    # distribution names an X11 client, and nothing in the namespace was
+    # serving X -- so even a successful \`enter\` produced a program that
+    # could not open a display and exited. The shim (etc/de-ns-run.linux,
+    # copied into this tree by /etc/rc.distros) starts the distribution's own
+    # X session if it has one and otherwise runs the program as it is. Its
+    # log is /tmp/de-ns-run.log INSIDE the tree, i.e. /n/$n/tmp/de-ns-run.log
+    # from out here -- which is the only place either side can read it.
     enter $n {
-        \$HAMNIX_DE_PROG
+        /bin/sh /etc/de-ns-run \$HAMNIX_DE_PROG
     }
     exit \$status
 echo 'rc.de-ns: no HAMNIX_DE_PROG set; nothing to launch'

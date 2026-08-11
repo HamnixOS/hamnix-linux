@@ -344,21 +344,188 @@ negative control that distinguishes two real sections from one list drawn twice.
 `docs/screenshots/linux/distro-menu-debian.png`,
 `docs/screenshots/linux/distro-menu-alpine.png`.
 
-### 8.4 What does NOT work: launching a GUI app from the fly-out
+### 8.4 Launching an app from the fly-out — and the diagnosis that was wrong
 
-Named here rather than left to be discovered. The fly-out draws and the row is
-hit-tested; clicking spawns `/bin/hamsh /etc/rc.de-ns/<name> <prog>`, and that
-rc parses, drops to uid 1001, and reaches `enter <name>` — where the **first**
-bind of the template, the root switch, fails `ENOENT`
-(`chdir("/n/<name>")` inside the entered child).
+**This section used to say the following, and every clause of it was mistaken
+in the same way.** It is kept verbatim because the shape of the error is the
+lesson:
 
-The identical five lines DO work at uid 1001 from a console shell and from a
-desktop terminal (`two_namespaces.sh`, `enter_user_run.sh`), so it is something
-about this spawned shell's namespace rather than the template or the drop.
-Three shapes of the launcher rc were built and measured: with the full
-`/etc/rc.de-wayland` bind surface (all five template binds fail ENOENT), with
-none (the root switch alone fails), and with three (unchanged).
-`tests/linux/distro_menu.sh` reports it as a `GAP` line every run.
+> …reaches `enter <name>` — where the **first** bind of the template, the root
+> switch, fails `ENOENT` (`chdir("/n/<name>")` inside the entered child). The
+> identical five lines DO work at uid 1001 from a console shell and from a
+> desktop terminal, so it is something about this **spawned shell's
+> namespace** rather than the template or the drop. Three shapes of the
+> launcher rc were built and measured…
+
+Three shapes of the rc were built, three passes were spent on the spawn gate
+and `rfork`, and **nobody had ever asked which bind failed.** `hamsh` printed
+
+```
+hamsh: namespace not entered -- a bind in the template failed, so the body was NOT run.
+hamsh: bind performs a real mount(2) and needs CAP_SYS_ADMIN; a desktop session runs as uid 1001.
+```
+
+— a fixed sentence naming a fixed suspect, printed in the place where the
+measured answer belonged. The failure was `ENOENT`; the text asserted `EPERM`.
+It is the same class of fault as every entry in NORTH_STAR.md's list, except
+that here the thing answering something success-shaped was the *error
+message*.
+
+#### What it actually is
+
+`hamsh` now names the bind (`_ns_apply_failed`), and the first run said:
+
+```
+bind: could not graft `/' onto `/n': No such file or directory
+hamsh: first failing bind: #/ -> /n: No such file or directory
+```
+
+The **last** bind of the template, not the first. The root switch had already
+succeeded.
+
+`enter <name>` binds `/dev`, `/proc`, `/srv` and `/n` **into** the
+distribution's own root (`enter_root`'s `always[]`, plus the four bind lines
+every `ns clean { }` template carries). A bind whose **target directory does
+not exist** fails `ENOENT`, and the session user cannot create one: the
+distribution's `/` is uid 0, and **uid 0 is not mapped into the user namespace
+`ns_privilege()` acquires**, so `CAP_DAC_OVERRIDE` does not reach it.
+`enter_root` calls `mkdir()` for exactly this reason and ignores the result —
+because at uid 0 it always worked.
+
+So the directories only ever existed as a **side effect** of somebody having
+run `enter <name>` **as root** earlier, on a **writable** medium, where that
+ignored `mkdir` succeeded and left them behind on the disk. Measured, with
+`debugfs -R 'ls -l /'` on the two media:
+
+| medium | `/dev` | `/proc` | `/srv` | `/sys` | `/n` |
+|--|--|--|--|--|--|
+| `build/image/distro.ext4` (Debian) | yes | yes | yes | yes | **yes** |
+| `build/image/alpine.ext4` (Alpine) | yes | yes | yes | yes | **no** |
+
+Debian had been entered by root at some point in its life; Alpine had not.
+That single missing directory is the whole of it, and it explains every
+observation the old text could not:
+
+* **why the console and the desktop terminal worked** — `two_namespaces.sh`
+  and `enter_user_run.sh` both run a *root* `enter` before the uid-1001 one,
+  which creates the directories in the same boot;
+* **why "three shapes of the rc" differed only in how many binds failed** —
+  the count is the number of mount points missing from that root, nothing more;
+* **why it looked like the spawned shell** — the spawned shell was simply the
+  one launcher that reaches `enter` before any root `enter` has.
+
+The negative control is direct: a spawned `hamsh`, at uid 1001, with the same
+three top-level binds, entered Alpine and ran `/bin/busybox` **successfully**
+— in a boot where a root `enter alpine` had run first. Same shell, same
+template, same privilege drop, opposite result.
+
+#### The fix
+
+The mount points are made **by root, at the one moment root holds the
+medium**: when the boot posts the server at its name with
+`bind '#distro/<name>' /n/<name>`. `user/linux-syscalls.c`,
+`distro_stage_mountpoints` — root only, `EEXIST` is success, and a medium that
+refuses the `mkdir` (a read-only one) **says so then**, naming the path,
+because that failure predicts the `ENOENT` an unprivileged `enter` will hit
+later.
+
+Measured, one boot, running the generated launcher rcs exactly as the panel
+spawns them:
+
+```
+/bin/hamsh /etc/rc.de-ns/alpine /sbin/apk    -> apk-tools 3.0.6-r0, compiled for x86_64.
+/bin/hamsh /etc/rc.de-ns/debian /usr/bin/dpkg -> Usage: dpkg [<option>...] <command>
+```
+
+Both programs exist only inside their own distribution.
+
+#### The second gap, which was underneath it
+
+A `.desktop` file in a distribution names an **X11 client**, and nothing in
+the namespace was serving X — so even a successful `enter` produced a program
+that could not open a display and exited. A desktop that offers to launch an
+application owes it a display. `etc/de-ns-run.linux` is that: a POSIX-sh shim
+staged into the Hamnix root, copied into each tree by the generated
+`/etc/rc.distros` (it has to be a file *inside* the tree, because by the time
+it runs that tree is `/`), and run by `/etc/rc.de-ns/<name>` instead of the
+program directly. It delegates to the distribution's own
+`/usr/local/bin/hamnix-x11session` when there is one — those are the measured
+recipes and this must not become a divergent second copy of them — starts a
+minimal Xwayland + `jwm` session when there is not, and runs the program as it
+is when the distribution has no Xwayland at all. `HAMNIX_DE_XSESSION=0` skips
+the session, so a test asking about the *namespace* does not have to pay for
+an X server to find out. Everything it does lands in `/tmp/de-ns-run.log`
+**inside** the tree — i.e. `/n/<name>/tmp/de-ns-run.log` from the Hamnix side,
+the one path both sides can read.
+
+`tests/linux/distro_menu.sh` no longer prints a `GAP` for the namespace. It
+runs both generated launcher rcs, **clicks a fly-out row** with synthetic
+pointer events, reads the shim's log back across the namespace boundary, and
+takes a fourth screendump of what came up.
+
+### 8.5 What is left: the Wayland socket is not writable by the session user
+
+**The click works. The namespace works. The application starts. It cannot
+reach the display**, and this is the third fault of the same family in one
+path, which is why it is worth naming as a family rather than as three bugs.
+
+Measured, from `/n/debian/tmp/de-ns-run.log` — the shim's log, read from the
+Hamnix side:
+
+```
+=== de-ns-run Tue Aug 11 11:29:38 UTC 2026: uxterm
+de-ns-run: delegating to /usr/local/bin/hamnix-x11session
+hamnix-x11session: wayland socket /run/wayland-0
+srwxr-xr-x 1 nobody nogroup 0 Aug 11 11:28 /run/wayland-0
+hamnix-x11session: Xwayland FAILED TO START
+_XSERVTransmkdir: Owner of /tmp/.X11-unix should be set to root
+could not connect to wayland server
+(EE) Fatal server error:
+(EE) Couldn't add screen
+```
+
+`connect(2)` on a unix socket requires **write** permission on the socket.
+`/etc/rc.distros-wl` starts one `wsyswl` per distribution **as root**, at
+runlevel 5, and the socket comes out `srwxr-xr-x` — owner-writable only, and
+the owner is a uid that is not even mapped into the entering process's user
+namespace (`nobody nogroup` is what uid 0 looks like from in there). So the
+one thing a menu-launched application must do — connect to the display — is
+the one thing the session user cannot do.
+
+**Nothing had ever hit this**, and the reason is the same as everywhere else
+in §8.4: every previous GUI-in-a-namespace run (`steam_gui_run.sh`,
+`alpine_gui_run.sh`) ran its client **as root**, where the socket mode never
+mattered. The DE application menu is the first caller that is unprivileged by
+construction.
+
+The fix is one of two, and it belongs with whoever owns `user/wsyswl.ad`:
+create the socket writable by the session user (`0777`, the way every other
+Wayland compositor's `$XDG_RUNTIME_DIR` socket is reachable, with the
+directory carrying the access control), or start the per-distribution
+`wsyswl` **as** the session user so the socket is theirs. The second is the
+better shape — it is the same argument as `etc/rc.de-user`'s privilege drop,
+one layer out — but it needs `wsyswl` to be able to open `/dev/fb` and the
+`/srv` segments first, which is why it is not a one-line change.
+
+**One more thing this turned up, unfixed and worth knowing before it costs
+somebody a pass.** `enter <name> { … }` against an `ns clean { }` template
+rforks with `RFCNAMEG`, whose Pgrp is EMPTY — and `hamsh` re-seeds only `/fd`
+in that child (`_ns_child_ensure_stdio`). The **environment does not appear to
+cross**: `HAMNIX_DE_XSESSION=0`, exported before the `enter`, did not reach
+`/etc/de-ns-run` on the other side, which took its default branch instead.
+That means the `HOME` / `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` /
+`XDG_CONFIG_HOME` exports at the bottom of `/etc/rc.de-ns/<name>` may not be
+reaching the client either — the shim defaults all four to the same values, so
+this has been invisible. It is a separate measurement and it has not been
+made; the exports should not be assumed to work until it has.
+
+The three faults, together, are one lesson: **a namespace's contents are not
+the namespace's interface.** Three different resources — a directory in the
+medium (`/n`), a lock file in its `/tmp`, a socket in its `/run` — were each
+created by root at a moment when root was the only one who ever used them,
+and each became invisible to the unprivileged session that came later. Each
+failed silently, and each now says which resource, which uid, and what would
+fix it.
 
 ---
 
