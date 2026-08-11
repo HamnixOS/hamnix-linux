@@ -139,11 +139,23 @@ echo 'rc.boot: network configured'
 # for a text-only boot; nothing below the compositor depends on it.
 source '/etc/rc.d/rc.5'
 
-# --- the Debian namespace -------------------------------------------
-# `#distro` is a subtree server backed by its own filesystem (a virtio disk
-# here). Debian's tree is bound at /n/distro and NOTHING it installs is written
-# into the Hamnix filesystem -- that separation is the whole reason for it.
+# --- the distribution namespaces ------------------------------------
+# `#distro/<name>` is a subtree server backed by its own filesystem (a virtio
+# disk here). Each distribution's tree is bound under /n and NOTHING any of
+# them installs is written into the Hamnix filesystem -- that separation is the
+# whole reason for it, and it is per-distribution: Alpine cannot reach Debian's
+# tree either.
+#
+# WHICH MEDIUM IS WHICH is /etc/distros' answer, by ext4 volume label, not
+# /dev/vdN -- with two distro disks attached the device order is a property of
+# the order QEMU was handed its arguments, and getting it wrong would enter the
+# wrong distribution and report success. See etc/distros.linux.
+#
+# /n/distro is Debian's older name and stays bound, because user/xbridge.ad,
+# the DE panel's application scan and a pile of tests spell it that way.
 bind '#distro' /n/distro
+bind '#distro/debian' /n/debian
+bind '#distro/alpine' /n/alpine
 
 # `enter debian { sh }` from the CONSOLE shell too, not just from a desktop
 # terminal. etc/rc.de-user captures these templates for the DE-spawned shell,
@@ -159,14 +171,27 @@ bind '#distro' /n/distro
 # BOTH namespaces is Linux, so it distinguishes nothing, and someone typing it
 # wants apt and Firefox, not a kernel.
 debian = ns clean {
-    bind '#distro' /
+    bind '#distro/debian' /
     bind '#c' /dev
     bind '#p' /proc
     bind '#s' /srv
     bind '#/' /n
 }
 linux = ns clean {
-    bind '#distro' /
+    bind '#distro/debian' /
+    bind '#c' /dev
+    bind '#p' /proc
+    bind '#s' /srv
+    bind '#/' /n
+}
+# THE SECOND ONE, and the reason any of the above is written the way it is.
+# It is the SAME five lines with one name changed -- no new device letter, no
+# new code path, nothing in the shell or the kernel that knows what Alpine is.
+# That is what makes `#distro` a mechanism rather than a Debian disk with a
+# general-sounding name. Adding `fedora` is these five lines plus a line in
+# /etc/distros plus a medium with the matching label.
+alpine = ns clean {
+    bind '#distro/alpine' /
     bind '#c' /dev
     bind '#p' /proc
     bind '#s' /srv

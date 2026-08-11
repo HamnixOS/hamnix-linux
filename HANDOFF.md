@@ -32,6 +32,7 @@ rather than argued:
 | Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1. **The update loop is proven end to end**: install at 1.0.2 from the live repo, a newer build lands, `hpm update`, the upgraded binary still runs. No re-image anywhere in it. |
 | Wayland | `user/wsyswl.ad`, a Wayland compositor in Adder. Firefox runs as a native Wayland client with its menus as separate windows; XWayland carries X11 clients. |
 | Debian | `enter debian { sh }` — bookworm on its own filesystem, amd64+i386. Works **from a uid-1001 desktop terminal**, and something inside can build a container (`bwrap --unshare-user`). The root switch is `MS_MOVE` + `chroot`, what `switch_root(8)` does: `pivot_root` returns EINVAL on an initramfs boot's unattached `rootfs`. `glxgears:i386` renders on the Hamnix desktop through XWayland → `wsyswl` → `wsysd` → `/dev/fb`. |
+| Distributions | **Two, at once.** `#distro/<name>` is a parameterised subtree server; `/etc/distros` maps a name to a medium **by ext4 volume label**, so which disk is `/dev/vda` cannot silently decide which distribution you entered. `enter alpine { … }` (musl, 3.24.1) and `enter debian { … }` (glibc, 12.15) both work in ONE boot from the console AND as uid 1001 — `tests/linux/two_namespaces.sh`, with a negative control that `/etc/alpine-release` is invisible inside Debian. An unprivileged process cannot open a block device to read a label, so `bind` falls back to the mount point the boot already posted the server at: **the name is what crosses the privilege boundary.** Alpine costs **26 MiB** without graphics, 333 MiB with; Debian is 4.5 GiB. `docs/linux_distro_namespaces.md`. |
 | Audio | `/dev/audio`, `/dev/audioctl`, `/dev/audioin` on intel-hda, ported from Hamnix's `audio_cdev.ad` + `hda.ad`. Proven by FFT on a WAV captured out of QEMU: 1000.28 Hz, 444.57 Hz and a 660.90 Hz sine, right durations, square-wave harmonics. `arecord` delivers 97.4% of a 48 kHz stereo second. |
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
@@ -87,6 +88,20 @@ same failure this project exists to beat.
   with **no compositor at all** — booting to a black screen while rc.5 printed
   `compositor started`. Failed links are now named separately, with their build
   logs, and wsysd/hamsh/hamdesktop/hampanelscene failing to build exits 1.
+* **Three things are still Debian-shaped, and are named rather than hidden.**
+  (1) `user/hampanelscene.ad`'s app menu has ONE "Linux" section at the literal
+  path `/n/linux/usr/share/applications`; carrying N distributions means
+  driving that scan from `/etc/distros`, which is a real change to the panel's
+  Adder. It is inert on this line today — `etc/rc.d/rc.5.linux` never binds
+  `/n/linux` — so nothing regressed and nothing was gained.
+  (2) `user/install.ad` writes ONE named root, `distro distro`, into the
+  installed disk's `.hamnix-roots` sentinel; a second distribution on an
+  INSTALLED disk needs a second subtree and a second line, and was not tested
+  here (all of this was verified on the live/initramfs boot).
+  (3) `tests/linux/hamnix_x11session.sh` is Debian's session script; Alpine's
+  is a separate one baked into its image, and the two share their two
+  hardest-won lines by copy. Worth merging when there is a third.
+  `docs/linux_distro_namespaces.md` §7.
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
@@ -185,6 +200,7 @@ scripts/hamlinux_vm.sh gpu         # boot it with a display
 scripts/hamlinux_disk.sh           # an INSTALLED disk (GPT + ESP + ext4)
 scripts/hamlinux_vm.sh disk-gpu    # boot the installed disk through UEFI
 scripts/hamlinux_distro.sh         # the Debian namespace (Firefox lives here)
+scripts/hamlinux_alpine.sh         # the Alpine namespace (HAMLINUX_ALPINE_GUI=0 for 26 MiB)
 scripts/hamlinux_packages.py       # build the `linux` hpm channel
 scripts/hamlinux_shot.sh out.png   # boot and screendump in one command
 tests/linux/*.sh, tests/linux/*_probe.ad

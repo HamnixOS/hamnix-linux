@@ -342,6 +342,15 @@ else
     echo "[distro] no resize2fs -- the image has no free space beyond its packages" >&2
 fi
 
+# THE VOLUME LABEL IS THE NAME. /etc/distros says `debian LABEL=hamnix-debian`,
+# and `bind '#distro/debian' /n/debian` finds the medium by reading superblocks
+# rather than by trusting that this image is the one QEMU happened to enumerate
+# first. With a second distro disk attached that assumption is a coin flip, and
+# losing it does not fail -- it enters the wrong distribution and says nothing.
+LABEL="${HAMLINUX_DISTRO_LABEL:-hamnix-debian}"
+/sbin/tune2fs -L "$LABEL" "$OUT" >/dev/null
+echo "[distro] volume label: $LABEL"
+
 NEW_SZ="$(du -m "$OUT" | cut -f1)"
 echo "[distro] done: $OUT ($(du -h "$OUT" | cut -f1))"
 echo "[distro] architectures: $ARCHS"
