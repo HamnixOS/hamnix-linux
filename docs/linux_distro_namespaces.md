@@ -507,6 +507,18 @@ better shape — it is the same argument as `etc/rc.de-user`'s privilege drop,
 one layer out — but it needs `wsyswl` to be able to open `/dev/fb` and the
 `/srv` segments first, which is why it is not a one-line change.
 
+**One more thing this turned up, unfixed and worth knowing before it costs
+somebody a pass.** `enter <name> { … }` against an `ns clean { }` template
+rforks with `RFCNAMEG`, whose Pgrp is EMPTY — and `hamsh` re-seeds only `/fd`
+in that child (`_ns_child_ensure_stdio`). The **environment does not appear to
+cross**: `HAMNIX_DE_XSESSION=0`, exported before the `enter`, did not reach
+`/etc/de-ns-run` on the other side, which took its default branch instead.
+That means the `HOME` / `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` /
+`XDG_CONFIG_HOME` exports at the bottom of `/etc/rc.de-ns/<name>` may not be
+reaching the client either — the shim defaults all four to the same values, so
+this has been invisible. It is a separate measurement and it has not been
+made; the exports should not be assumed to work until it has.
+
 The three faults, together, are one lesson: **a namespace's contents are not
 the namespace's interface.** Three different resources — a directory in the
 medium (`/n`), a lock file in its `/tmp`, a socket in its `/run` — were each

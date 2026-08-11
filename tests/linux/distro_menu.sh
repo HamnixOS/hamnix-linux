@@ -306,13 +306,27 @@ fi
 lrc() { { sed -n "/LAUNCHRC-BEGIN/,/LAUNCHRC-END/p" "$WORK/boot.log"
           sed -n "/DENSRUNLOG-BEGIN/,/DENSRUNLOG-END/p" "$WORK/boot.log"; } \
         | tr -d '\r'; }
-if lrc | grep -qi 'apk-tools'; then
-    echo "dmenu: PASS /etc/rc.de-ns/alpine ran a program from inside Alpine (apk-tools)"
+# THE WITNESS IS THE SHIM'S OWN HEADER, and it is a stronger one than the
+# program's banner. /etc/de-ns-run exists only INSIDE a distribution (the boot
+# copies it in), and it names the program it was handed -- so
+# `=== de-ns-run …: /sbin/apk' in a log read out of /n/alpine can only have
+# been written by a shim running in the Alpine root, whatever apk then did
+# with its own output.
+#
+# The banner is checked too, and its ABSENCE is not a failure: the program is
+# exec'd into the X session, whose output goes to that session's log, and
+# `enter' does not carry the environment across a `ns clean' Pgrp so
+# HAMNIX_DE_XSESSION cannot reliably steer it (§8.5).
+nsran() { lrc | grep -q "^=== de-ns-run.*: $1"; }
+if nsran '/sbin/apk'; then
+    echo "dmenu: PASS /etc/rc.de-ns/alpine reached the Alpine root (ran its /etc/de-ns-run on /sbin/apk)"
+    lrc | grep -qi 'apk-tools' && echo "dmenu:      and apk printed its banner"
 else
     echo "dmenu: FAIL /etc/rc.de-ns/alpine did not reach the Alpine root"; fail=1
 fi
-if lrc | grep -qi 'Usage: dpkg'; then
-    echo "dmenu: PASS /etc/rc.de-ns/debian ran a program from inside Debian (dpkg)"
+if nsran '/usr/bin/dpkg'; then
+    echo "dmenu: PASS /etc/rc.de-ns/debian reached the Debian root (ran its /etc/de-ns-run on /usr/bin/dpkg)"
+    lrc | grep -qi 'Usage: dpkg' && echo "dmenu:      and dpkg printed its usage"
 else
     echo "dmenu: FAIL /etc/rc.de-ns/debian did not reach the Debian root"; fail=1
 fi
