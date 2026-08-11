@@ -107,6 +107,7 @@ extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_wsys_free(wid: int32) -> int32
+extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
 extern def sys_exit(code: uint64)
 
 # user/wsyswl-sys.c — the five entry points the runtime does not have yet.
@@ -2853,6 +2854,53 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         puts(2, &sockpath[0])
         puts(2, "\n")
         return 1
+
+    # 0666, AND THE MODE IS THE WHOLE OF IT: connect(2) on a unix socket needs
+    # WRITE permission on the socket inode. bind(2) creates it 0777 masked by
+    # the umask, which is 022 in every boot here, so it came out `srwxr-xr-x`
+    # -- writable by the owner alone. /etc/rc.distros-wl starts one wsyswl per
+    # distribution AS ROOT at rc.5, so the owner was uid 0, and uid 0 is not
+    # even mapped into the user namespace an unprivileged `enter` acquires: the
+    # session saw `srwxr-xr-x 1 nobody nogroup`. The one thing a menu-launched
+    # application must do -- connect to the display -- was the one thing the
+    # session user could not do, and the only symptom was Xwayland's
+    # `could not connect to wayland server` / `Couldn't add screen`.
+    # docs/linux_distro_namespaces.md 8.5.
+    #
+    # NOT A LOOSENING, AND THE PRECEDENT IS THIS TREE'S OWN. `/srv/wsys` is
+    # 0666 deliberately (user/linux-wsys.c, THE SPLIT; commit ad440707): a
+    # uid-1001 client has to be able to map and draw its OWN window, and a
+    # desktop whose session cannot is unprivileged and blind. The system chrome
+    # was moved to a SECOND segment at 0644 so the kernel enforces the gate
+    # against programs that skip the protocol. The same line falls in the same
+    # place here: what a connection to this socket buys is a Wayland client
+    # session -- map a surface, commit your own pixels -- which is exactly the
+    # 0666 half. wsyswl issues no gated verb on the client's behalf: it drives
+    # `newwindow` (devwsys's explicit pre-gate exception) and the per-window
+    # `<wid>/ctl` verbs decorate/z/version/title on windows it owns itself,
+    # every one of them owner-or-hostowner. Nothing about connecting reaches
+    # the chrome, so this is 0666 for the same reason /srv/wsys is, not a
+    # wider one.
+    #
+    # THE BLAST RADIUS IS THE DIRECTORY, WHICH IS THE POINT. The mode is on the
+    # socket; the access control is the path, which is how every Wayland
+    # compositor's $XDG_RUNTIME_DIR socket has always worked. This socket lives
+    # at /n/<name>/run/wayland-0 -- inside ONE distribution's own /run -- so
+    # "anyone who can reach this path" is "anyone already inside that
+    # distribution's namespace, plus root". That is exactly the set that should
+    # be able to draw on that distribution's display.
+    #
+    # AND IT IS SAID OUT LOUD IF IT FAILS. A display server whose socket nobody
+    # can connect to is the silent success-shaped failure this file's counters
+    # exist to end (NORTH_STAR.md): it would accept zero connections and report
+    # `listening on ...` exactly as it does when it works.
+    if sys_chmod(cast[Ptr[char]](&sockpath[0]), 0o666) != 0:
+        puts(2, "wsyswl: WARNING could not chmod 0666 ")
+        puts(2, &sockpath[0])
+        puts(2, "\n")
+        puts(2, "wsyswl: connect(2) needs WRITE on the socket, so an unprivileged\n")
+        puts(2, "wsyswl: client will fail with `could not connect to wayland server'.\n")
+
     publish_screen()
     build_statepath()
     publish_state()

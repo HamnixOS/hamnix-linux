@@ -72,17 +72,16 @@ Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
 * **The Hamnix clipboard and the namespace clipboard are two clipboards.**
-  `/dev/snarf` is served now (`user/linux-snarf.c`; `tests/linux/snarf_device.sh`
+  `/dev/snarf` is served (`user/linux-snarf.c`; `tests/linux/snarf_device.sh`
   23/23), so copy and paste work between Hamnix programs. A Debian or Alpine
   binary gets ENOENT on it — measured, and the same answer `/dev/wsys` and
-  `/net` give. Bridging needs a process that OWNS an X selection and mirrors
-  it both ways, reacting to ownership changes on each side; half of that would
-  be worse than none. Two further gaps, named: no locking, so two simultaneous
-  copies interleave; and **no end-to-end mouse test** — a drag-select in one DE
-  window pasted into another — because the click derivation has not been
-  ported from the Hamnix line, where that exact gap once let nine green gates
-  sit on a dead feature.
-
+  `/net` give. Bridging needs a process that OWNS an X selection and mirrors it
+  both ways, reacting to ownership changes on each side; half of that is worse
+  than none. Two further gaps: no locking, so two simultaneous copies
+  interleave; and **no end-to-end mouse test** — a drag-select in one DE window
+  pasted into another — because the click derivation was never ported from the
+  Hamnix line, where that exact gap once let nine green gates sit on a dead
+  feature.
 * **The Debian namespace's D-Bus has no SERVICES** (the bus itself now works).
   The namespace's `/run` is on
   the ext4 and survives reboots, so the first boot's `dbus-daemon` left
@@ -135,17 +134,28 @@ same failure this project exists to beat.
   is a separate one baked into its image, and the two share their two
   hardest-won lines by copy. Worth merging when there is a third.
   `docs/linux_distro_namespaces.md` §7.
-* **A menu-launched app reaches its namespace and cannot reach the DISPLAY.**
-  The click works, the namespace works, the application starts — and Xwayland,
-  as uid 1001 inside the namespace, cannot `connect(2)` to `/run/wayland-0`:
-  `/etc/rc.distros-wl` starts the per-distribution `wsyswl` **as root** and the
-  socket comes out `srwxr-xr-x`, owner-writable only, owner not even mapped
-  into the entering process's user namespace. Measured, by name, in
-  `/n/debian/tmp/de-ns-run.log`. Nothing had hit it because every previous
-  GUI-in-a-namespace run (`steam_gui_run.sh`, `alpine_gui_run.sh`) ran its
-  client as ROOT. Fix: create the socket writable by the session user, or
-  start `wsyswl` as them — `user/wsyswl.ad`, whoever owns it.
-  `docs/linux_distro_namespaces.md` §8.5.
+* **THE FOURTH FAULT OF THAT FAMILY: `$XDG_RUNTIME_DIR` is the distribution's
+  `/run`, root-owned 0755.** §8.5 named three — a mount point in the medium
+  (`/n`), a stale X lock in its `/tmp`, a socket in its `/run` — each created
+  by root when root was its only user, each invisible to the unprivileged
+  session that came later. The fourth is the directory the third lives in.
+  `debugfs` on both media: `/run` `40755` uid 0, `/run/dbus` `40755` uid 0,
+  `/run/dconf` `40700` uid 0. So the session can **read** what `wsyswl`
+  publishes (the socket, and the `hamnix-screen` geometry file beside it, both
+  0644 already) and **create nothing** — confirmed live in the same boot that
+  proved the socket fix: `system_bus_socket': Permission denied`,
+  `rm: cannot remove '/run/dbus/pid': Permission denied`, and
+  `hamnix-x11session: WARNING no system bus`. That is the *unprivileged* half
+  of the D-Bus gap below, and it is still open. `/etc/de-ns-run` now probes
+  `$XDG_RUNTIME_DIR` and names the directory and the uid when it is not
+  writable, so it announces itself instead of arriving as `Connection refused`
+  three layers down. The likely right answer is a per-user `/run/user/<uid>`
+  (0700 — **narrower** than today), not a world-writable `/run`; it is not
+  taken here because it moves the socket path that `hamnix-x11session`,
+  `alpine_gui_run.sh`, `steam_gui_run.sh` and `x11_geom_probe.sh` all name.
+  The `/tmp` half of it IS fixed: the generated `/etc/rc.distros` now clears
+  root-owned `*.log` / `*.err` left in a distribution's sticky `/tmp` by a
+  root-run session, by class rather than by a list of three literal names.
 * **The GPU backend has never been measured on a real GPU.** It is proven
   correct and proven to install; every microsecond quoted anywhere is
   lavapipe's, where it is 2.3–2.9× *slower* than the hand-tuned software
@@ -214,40 +224,27 @@ same failure this project exists to beat.
 
 #### Solved, kept because the shape is the lesson
 
-These are FIXED and measured. They stay because each one is a worked example
-of the failure this project keeps having — an answer shaped like success —
-and the shape is more reusable than the fix. They are NOT open work.
+These are FIXED and measured. They stay because each is a worked example of
+the failure this project keeps having — an answer shaped like success — and
+the shape is more reusable than the fix. They are NOT open work.
 
-* **(SOLVED — kept because the argument is the lesson) There was no clipboard
-  on this line.** `/dev/snarf` and `/dev/snarf.primary` are SERVED now, by
-  `user/linux-snarf.c`, in the same shape as `/dev/wsys` and `/dev/audio`: a
-  shared segment carrying the two byte buffers, with `lib/devsnarf.ad`'s
-  offset-addressed protocol ported rule for rule rather than re-decided.
-  **The cheap answer below was measured, correct, and not taken**, which is the
-  part worth reading: two ordinary files give the toolkit its semantics but
-  make `/dev/snarf` not a device — retiring by hand the premise the `playtone`
-  `O_CREAT` guard rests on — and they have no 64 KiB cap in a RAM-backed
-  `/dev`, no stated owner when the chrome is root and the session is uid 1001,
-  and only an accidental agreement with the offset protocol. Measured, 23
-  assertions in `tests/linux/snarf_device.sh`: copy through
-  `lib/hamtextbox.ad` in one process, paste through `lib/htermsel.ad` in
-  another; root copies and uid 1001 pastes it and copies back; `echo x >
-  /dev/snarf` lands BOTH chunks (Defect 2); a 70 000-byte copy reads back
-  65 536; and after all of it there is still NO FILE at `/dev/snarf`. It needs
-  **no rc line and no image change** — a served device creates nothing at boot.
-  **What is deliberately NOT done, and named rather than half-done: the X /
-  namespace clipboard bridge.** A foreign binary in a namespace does not see
-  `/dev/snarf` (measured, arm 3), the same as `/dev/wsys` and `/net`; bridging
-  needs a process that owns an X selection and mirrors it BOTH ways.
-  `docs/linux_clipboard.md`. The original entry follows.
-* **The image build could drop a program and still say `done`.** Fixed in this
-  pass, and listed because the shape recurs: `scripts/hamlinux_image.sh` kept
-  its own copy of wsysd's extra objects after 6a27c0ec moved them into
-  `scripts/hamlinux_build.sh`, so the compositor failed to link, was printed in
-  the same list as two programs that have no source, and the initramfs shipped
-  with **no compositor at all** — booting to a black screen while rc.5 printed
-  `compositor started`. Failed links are now named separately, with their build
-  logs, and wsysd/hamsh/hamdesktop/hampanelscene failing to build exits 1.
+* **The environment DOES cross `enter`; the drop is an `exec` one level up.**
+  §8.5 recorded, unmeasured, that `enter` against an `ns clean { }` template
+  rforks with `RFCNAMEG` and so "the environment does not appear to cross".
+  The observation was right and the mechanism was wrong, which matters because
+  the two boundaries are fixed in different places. `tests/linux/enter_env.sh`
+  asks them separately with sentinel values no default in the tree produces:
+  `rfork(RFPROC|RFCNAMEG)` is a process **fork** and `RFCNAMEG` empties the
+  Pgrp — the mount table — not the address space, and `hamsh`'s exported
+  variables are ordinary BSS arrays that the fork copies. But a **fresh
+  `hamsh`** seeds its mirror with exactly `PATH` and `HOME` and never reads
+  the inherited `environ`, so anything an ancestor exported dies at the `exec`
+  into `/bin/hamsh /etc/rc.de-ns/<name> <prog>` — which is precisely how the DE
+  panel spawns the launcher, and where `HAMNIX_DE_XSESSION` went. Consequence:
+  the `HOME` / `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` / `XDG_CONFIG_HOME`
+  exports at the bottom of `/etc/rc.de-ns/<name>` **do** reach the client (they
+  are set in the same shell that then enters), and `HAMNIX_DE_XSESSION` can
+  never be steered from an outer shell no matter what is done to `enter`.
 * **(SOLVED — kept because the shape is the lesson) Steam's login window is on
   the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
   `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X
@@ -307,6 +304,14 @@ and the shape is more reusable than the fix. They are NOT open work.
   them is blocked: trace the X protocol for a `MapWindow`, run the session with
   no window manager, and read what `dbus-daemon` is actually complaining about.
   Its probe is 23 PASS / 1 FAIL (the remaining one is the PulseAudio socket).
+* **The image build could drop a program and still say `done`.** Fixed in this
+  pass, and listed because the shape recurs: `scripts/hamlinux_image.sh` kept
+  its own copy of wsysd's extra objects after 6a27c0ec moved them into
+  `scripts/hamlinux_build.sh`, so the compositor failed to link, was printed in
+  the same list as two programs that have no source, and the initramfs shipped
+  with **no compositor at all** — booting to a black screen while rc.5 printed
+  `compositor started`. Failed links are now named separately, with their build
+  logs, and wsysd/hamsh/hamdesktop/hampanelscene failing to build exits 1.
 * **(SOLVED — kept because the shape is the lesson) Launching an app from the
   distribution fly-out.** This entry used to say the FIRST bind of the
   template, the root switch, failed ENOENT, that the identical lines worked
@@ -338,6 +343,37 @@ and the shape is more reusable than the fix. They are NOT open work.
   to the distribution's own `hamnix-x11session` where there is one.
   `docs/linux_distro_namespaces.md` §8.4, `tests/linux/distro_menu.sh` (which
   now clicks a row and screendumps what comes up).
+* **(SOLVED) A menu-launched app reached its namespace and could not reach the
+  DISPLAY.** The click worked, the namespace worked, the application started —
+  and Xwayland, as uid 1001 inside the namespace, could not `connect(2)` to
+  `/run/wayland-0`: `/etc/rc.distros-wl` starts the per-distribution `wsyswl`
+  **as root**, `bind(2)` creates a unix socket 0777 masked by the umask (022),
+  so it came out `srwxr-xr-x` — owner-writable only, owner not even mapped into
+  the entering process's user namespace (`nobody nogroup`). Nothing had hit it
+  because every previous GUI-in-a-namespace run (`steam_gui_run.sh`,
+  `alpine_gui_run.sh`) ran its client as ROOT.
+  **`user/wsyswl.ad` now `sys_chmod`s its own socket 0666 at creation** — the
+  server knows its own path (it is `argv[1]`), so the mode is set in the one
+  place a caller cannot forget, and a failed `chmod` is named on stderr. This
+  is the same 0666, for the same reason, as `/srv/wsys` (`user/linux-wsys.c`,
+  THE SPLIT; `ad440707`): what a connection buys is a Wayland *client* session,
+  and `wsyswl` issues no gated verb on a client's behalf — `newwindow` is
+  devwsys's explicit pre-gate exception and the `<wid>/ctl` verbs it drives are
+  on windows it owns. The access control is the path, as with every Wayland
+  compositor: the socket is inside ONE distribution's `/run`.
+  Starting `wsyswl` as the session user was considered and rejected, and the
+  reason previously given for rejecting it was wrong in both halves: it does
+  not need `/dev/fb` (that is `wsysd`; `wsyswl` is a *client* of `/dev/wsys`)
+  and the uid gate does not block it either. What blocks it is that the
+  distribution's `/run` is root-owned 0755, so a uid-1001 `wsyswl` could not
+  create the socket there at all — it moves root-prepared state rather than
+  removing it, and widens the blast radius from one socket to a directory.
+  **Measured**: `tests/linux/distro_menu.sh` reports "launched" and "got a
+  display" as two facts and both are now PASS, with the socket's mode gated
+  separately (`srw-rw-rw-`, logged by the shim from *inside* the namespace);
+  `build/distromenu/shot-launched.png` is `uxterm`, launched from the DE
+  application menu, running in the Debian namespace on the Hamnix desktop.
+  `docs/linux_distro_namespaces.md` §8.5.
 * **(same defect as the `hamscene_image` entry above, kept for the detail)**
   The `/dev/wsys/<wid>/draw/ctl` `'I'` verb was never ported, so
   `hamscene_image` renders nothing on this line.** Found by tracing

@@ -463,7 +463,7 @@ runs both generated launcher rcs, **clicks a fly-out row** with synthetic
 pointer events, reads the shim's log back across the namespace boundary, and
 takes a fourth screendump of what came up.
 
-### 8.5 What is left: the Wayland socket is not writable by the session user
+### 8.5 The Wayland socket was not writable by the session user — FIXED
 
 **The click works. The namespace works. The application starts. It cannot
 reach the display**, and this is the third fault of the same family in one
@@ -498,34 +498,242 @@ in §8.4: every previous GUI-in-a-namespace run (`steam_gui_run.sh`,
 mattered. The DE application menu is the first caller that is unprivileged by
 construction.
 
-The fix is one of two, and it belongs with whoever owns `user/wsyswl.ad`:
-create the socket writable by the session user (`0777`, the way every other
-Wayland compositor's `$XDG_RUNTIME_DIR` socket is reachable, with the
-directory carrying the access control), or start the per-distribution
-`wsyswl` **as** the session user so the socket is theirs. The second is the
-better shape — it is the same argument as `etc/rc.de-user`'s privilege drop,
-one layer out — but it needs `wsyswl` to be able to open `/dev/fb` and the
-`/srv` segments first, which is why it is not a one-line change.
+#### The fix: `wsyswl` chmods its own socket 0666 at creation
 
-**One more thing this turned up, unfixed and worth knowing before it costs
-somebody a pass.** `enter <name> { … }` against an `ns clean { }` template
-rforks with `RFCNAMEG`, whose Pgrp is EMPTY — and `hamsh` re-seeds only `/fd`
-in that child (`_ns_child_ensure_stdio`). The **environment does not appear to
-cross**: `HAMNIX_DE_XSESSION=0`, exported before the `enter`, did not reach
-`/etc/de-ns-run` on the other side, which took its default branch instead.
-That means the `HOME` / `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` /
-`XDG_CONFIG_HOME` exports at the bottom of `/etc/rc.de-ns/<name>` may not be
-reaching the client either — the shim defaults all four to the same values, so
-this has been invisible. It is a separate measurement and it has not been
-made; the exports should not be assumed to work until it has.
+Two shapes were on the table, and the one this section used to prefer is the
+one that does not work.
 
-The three faults, together, are one lesson: **a namespace's contents are not
-the namespace's interface.** Three different resources — a directory in the
-medium (`/n`), a lock file in its `/tmp`, a socket in its `/run` — were each
-created by root at a moment when root was the only one who ever used them,
-and each became invisible to the unprivileged session that came later. Each
-failed silently, and each now says which resource, which uid, and what would
-fix it.
+**Chosen: give the socket a mode a session can connect to.**
+`user/wsyswl.ad`, immediately after `sys_unix_listen`, `sys_chmod(sockpath,
+0o666)`. `bind(2)` creates a unix socket 0777 masked by the umask, which is
+022 in every boot here, hence `srwxr-xr-x`. The server already knows its own
+socket path — it is `argv[1]` — so the mode is set in the one place that
+cannot be forgotten by a caller, atomically with creation, and a failed
+`chmod` is named on stderr rather than leaving a display server that accepts
+zero connections while printing `listening on …` exactly as it does when it
+works.
+
+**0666 is not a loosening, and the precedent is this tree's own.** `/srv/wsys`
+is 0666 deliberately (`user/linux-wsys.c`, THE SPLIT; commit `ad440707`,
+`tests/linux/wsys_bypass.sh`): a uid-1001 client has to be able to map and
+draw its *own* window, and a desktop whose session cannot is unprivileged and
+blind. The system chrome was moved to a **second** segment at 0644 owned by
+the host owner, so for chrome the file mode is the gate and the kernel
+enforces it. The same line falls in the same place here. What a connection to
+this socket buys is a Wayland client session — bind `wl_compositor`, map a
+surface, commit your own pixels — which is exactly the 0666 half. And
+`wsyswl` issues **no gated verb on a client's behalf**: it drives `newwindow`
+(devwsys's explicit pre-gate exception, "so a NOBODY-uid app can self-serve a
+window") and the per-window `<wid>/ctl` verbs `decorate` / `z` / `version` /
+`title` on windows it owns itself, every one of them owner-or-hostowner. It
+*reads* `/dev/wsys/screen`, which 0644 grants everybody and which was never
+gated. Nothing about connecting reaches the chrome.
+
+**The blast radius is the directory, which is the point.** The mode is on the
+socket; the access control is the path — which is how every Wayland
+compositor's `$XDG_RUNTIME_DIR` socket has always worked. This socket is at
+`/n/<name>/run/wayland-0`, inside **one distribution's own `/run`**, so
+"anyone who can reach this path" is "anyone already inside that distribution's
+namespace, plus root". That is exactly the set that should be able to draw on
+that distribution's display, and it is narrower than the host-wide `/srv/wsys`
+the same argument already justifies.
+
+**Rejected: start the per-distribution `wsyswl` as the session user.** It is
+the better shape in principle — a compositor serving a session need not be
+root, the same argument as `etc/rc.de-user`'s privilege drop one layer out —
+and the reason given above for not doing it was wrong in both halves. It does
+**not** need `/dev/fb`: `wsyswl` never opens the framebuffer, `user/wsysd.ad`
+does; `wsyswl` is a *client* of `/dev/wsys`. And the uid gate is not the
+blocker either, for the reason just given — every verb it issues is ungated.
+What actually blocks it is the **directory**: the socket lives at
+`/n/<name>/run/wayland-0` and that `/run` is root-owned 0755, so a uid-1001
+`wsyswl` could not create the socket, the `hamnix-screen` geometry file or
+`wsyswl-state` there at all. Starting the server as the session user therefore
+does not remove root-prepared state; it *moves* it, and widens the blast
+radius from one socket to the whole directory. It also needs new machinery —
+`rc.5` must stay root after sourcing `/etc/rc.distros-wl`, so each server
+would need its own generated setuid-then-exec rc.
+
+**Measured, one boot, the same path a person takes** — click a fly-out row,
+then read the shim's log back from the Hamnix side:
+
+```
+=== de-ns-run Tue Aug 11 12:20:12 UTC 2026: uxterm
+de-ns-run: wayland socket srw-rw-rw- 1 nobody nogroup 0 Aug 11 12:19 /run/wayland-0
+de-ns-run: delegating to /usr/local/bin/hamnix-x11session
+hamnix-x11session: screen 1280x800 from /run/hamnix-screen
+hamnix-x11session: Xwayland up (  dimensions:    1280x800 pixels (339x212 millimeters))
+hamnix-x11session: exec uxterm
+```
+
+`srwxr-xr-x` → `srw-rw-rw-`, and the two facts
+`tests/linux/distro_menu.sh` reports separately — "launched" and "got a
+display" — are both PASS, with the whole gate at 0 FAIL.
+`docs/screenshots/linux/distro-menu-launched.png` is that xterm,
+mapped by `jwm` inside the Debian namespace, composited through Xwayland →
+`wsyswl` → `wsysd` → `/dev/fb`, on the Hamnix desktop with the taskbar reading
+`Xwayland on :`. (Its interior is blank because bookworm's `uxterm` cannot find
+`-misc-fixed-medium-r-semicondensed--13-120-75-75-c-60-iso10646-1` in that
+medium — a missing font package, not a display fault; the window is mapped,
+sized and on the scanout.)
+
+#### The fourth fault, which is the directory itself
+
+§8.4 and this section name three: a mount point in the medium (`/n`), a stale
+X lock in its `/tmp`, a socket in its `/run`. Looking for the fourth in the
+same family found it one level up from the third. Measured with `debugfs` on
+both media:
+
+| path | mode | uid |
+|--|--|--|
+| `/run` (`= $XDG_RUNTIME_DIR`) | `40755` | 0 |
+| `/run/wayland-0` | `140755` → now `140666` | 0 |
+| `/run/hamnix-screen` | `100644` | 0 |
+| `/run/dbus` | `40755` | 0 |
+| `/run/dconf` | `40700` | 0 |
+
+So the session can **read** everything `wsyswl` publishes there — the socket's
+mode was the only thing in the way, and the two sibling files are 0644 already
+— and can **create nothing**. Fixing the socket mode fixed *connecting*; it
+does not fix *creating*, and the next casualties are already known:
+`dbus-daemon --system` cannot make `/run/dbus/system_bus_socket` as uid 1001,
+which is the unprivileged half of the D-Bus gap in `HANDOFF.md` §0, and every
+toolkit that wants a runtime file lands on `/run/dconf`, mode 0700 root.
+
+A per-user `$XDG_RUNTIME_DIR` is normally `/run/user/<uid>`, owned by that uid
+and mode 0700 — **narrower** than what is there now, not wider. That is
+probably the right answer, and it is not taken here: it moves the socket path,
+which `hamnix-x11session` in both distributions, `alpine_gui_run.sh`,
+`steam_gui_run.sh` and `x11_geom_probe.sh` all name, and the `hamnix-screen`
+sibling-file contract depends on the socket's directory being the one name
+that crosses the boundary. Silently making a distribution's `/run`
+world-writable instead would be a real access-control decision taken by a
+launcher shim, which is the wrong place for it.
+
+What is done instead is what this project's own standard asks for: it is
+**named, once, at the moment it starts to matter.** `/etc/de-ns-run` now
+probes `$XDG_RUNTIME_DIR` for writability and logs the directory and the uid
+when it is not — so the fourth fault announces itself by name the first time
+it costs anything, instead of arriving as `Connection refused` from a CEF
+subprocess three layers down.
+
+`/etc/de-ns-run` also logs `ls -l` of the socket before delegating, from
+**inside** the namespace — the side that actually has to connect. That is the
+witness `tests/linux/distro_menu.sh` now gates on (`srw-rw-rw-`), and it does
+not depend on which `hamnix-x11session` a given medium happens to ship.
+
+#### Two faults in the GATE, found by the fix making the run get further
+
+Both were latent for as long as the gate has existed and neither could fire
+until a menu-launched application actually reached a display. They are
+recorded because the shape is this project's own, run backwards: not a gap
+answering something success-shaped, but a **check answering something
+failure-shaped instead of the truth.**
+
+1. **The log became binary.** Once the socket was connectable, the shim really
+   did start Xwayland, `jwm` and an xterm inside the namespace, and their
+   output — which the guest `cat`s onto the console — carries NUL bytes. Two
+   `grep`s in `distro_menu.sh` lacked `-a`, so they matched nothing and
+   reported *"`/etc/rc.de-ns/debian` did not reach the Debian root"* about a
+   launcher whose own log, printed four lines above in the same output, showed
+   it reaching it. `lrc()`/`DENS()`/`sect()` now strip `\0` as well as `\r`.
+
+2. **`grep -q` in a pipeline under `set -o pipefail` reports failure on a
+   successful match.** `grep -q` exits 0 the instant it matches; the upstream
+   `tr` is still writing, takes `SIGPIPE`, and dies **141**; `pipefail` then
+   makes the pipeline's status 141 and the `if` takes the `else` branch. It is
+   a race on how much is still buffered, so it passed for as long as this log
+   was short and began failing every time the moment the log grew. Measured
+   directly, same log, same shell options: the old `lrc | grep -aq …` form
+   **200 failures in 200 attempts, status 141**; grepping a captured
+   here-string instead, **0 in 200**. Every check in the file that decides a
+   PASS now greps `"$LRC_TEXT"` / `"$DENS_TEXT"` / `"$SECT_FIRST"` /
+   `"$SECT_SECOND"` — captured once — rather than a pipeline.
+
+The second one is worth remembering beyond this file: **every**
+`something | grep -q` in a `pipefail` script has it, and it fails in the
+direction that turns a working system into a red gate.
+
+#### Does the environment cross `enter`? Yes — and the drop is somewhere else
+
+This section used to record, explicitly unmeasured, that `enter` against an
+`ns clean { }` template rforks with `RFCNAMEG` whose Pgrp is empty, that
+`hamsh` re-seeds only `/fd` in that child, and that the environment therefore
+"does not appear to cross" — the evidence being that `HAMNIX_DE_XSESSION=0`,
+exported before the `enter`, did not reach `/etc/de-ns-run`.
+
+**The observation was right and the mechanism was wrong, and the difference
+matters because the two boundaries are fixed in different places.**
+`tests/linux/enter_env.sh` asks the two separately, with sentinel values that
+no default anywhere in the tree would produce — `WAYLAND_DISPLAY` is set to
+`envx-sentinel-wl`, not to `wayland-0`, precisely because the shim defaults
+all four variables and a probe that reads back a default has learned nothing.
+
+* **`enter` carries the environment.** `rfork(RFPROC|RFCNAMEG)` is a process
+  **fork**; `RFCNAMEG` empties the Pgrp — the mount table — not the address
+  space. `hamsh`'s exported variables live in ordinary BSS arrays
+  (`env_name` / `env_val` / `env_used`, `user/hamsh.ad`), the fork copies
+  them, and `_build_envp()` renders `envp` from that copy for the `execve`.
+  Nothing in that path touches the namespace. `enter debian { /usr/bin/env }`
+  — Debian's own `env(1)`, running inside the namespace — prints back:
+
+  ```
+  [envx] A-BEGIN
+  PATH=/bin:/sbin:/usr/bin
+  HOME=/envx-sentinel-home
+  HAMNIX_ENVPROBE=envx-crossed
+  WAYLAND_DISPLAY=envx-sentinel-wl
+  XDG_RUNTIME_DIR=/envx-sentinel-run
+  HAMNIX_DE_XSESSION=0
+  [envx] A-END
+  ```
+
+  Every sentinel, across `enter`, into a program that exists only in the other
+  root.
+* **A fresh `hamsh` drops it.** `main()` seeds the mirror with exactly
+  `PATH=/bin:/sbin:/usr/bin` and `HOME=/` and **never reads the inherited
+  `environ`** — the header comment says a fresh shell "seeds the mirror from
+  /env at startup", and on this line there is no `#e` device to seed from. So
+  anything an ancestor exported is dropped at the **`exec` into a new
+  `hamsh`**, one level *above* the `enter`. The same boot, arm B:
+
+  ```
+  [envx] B1 new-hamsh sees HAMNIX_ENVPROBE=
+  [envx] B2 new-hamsh sees WAYLAND_DISPLAY=
+  [envx] B3 new-hamsh, across enter:
+  PATH=/bin:/sbin:/usr/bin
+  HOME=/
+  ```
+
+  Exactly the two seeds `main()` sets, and nothing else. `enter` carried
+  faithfully what that shell actually had, which was nothing.
+
+That is exactly where `HAMNIX_DE_XSESSION` went: it was exported in the boot
+rc's `hamsh` (PID 1), and the launcher is a **separate**
+`/bin/hamsh /etc/rc.de-ns/<name> <prog>` process — which is also precisely how
+the DE panel spawns it. The variable never reached that shell, so `enter` had
+nothing to carry.
+
+The practical consequences, which are the reason to write this down:
+
+* The `HOME` / `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` / `XDG_CONFIG_HOME`
+  exports at the bottom of `/etc/rc.de-ns/<name>` **do** reach the client.
+  They are set in the same `hamsh` process that then runs `enter`, so they are
+  in the mirror the fork copies. They are not decorative and the shim is not
+  merely re-deriving them.
+* `HAMNIX_DE_XSESSION` **cannot** be steered from an outer shell, and no
+  amount of work on `enter` will change that. It has to be set inside the
+  launcher rc, or passed as an argument.
+* `env_set` silently `return`s when the 32-slot table is full, and values are
+  capped at 192 bytes. Nothing here is near either bound, but both are silent.
+
+The four faults, together, are one lesson: **a namespace's contents are not
+the namespace's interface.** Four resources — a directory in the medium
+(`/n`), a lock file in its `/tmp`, a socket in its `/run`, and the `/run` that
+holds it — were each created by root at a moment when root was the only one
+who ever used them, and each became invisible to the unprivileged session that
+came later. Each failed silently, and each now says which resource, which uid,
+and what would fix it.
 
 ---
 

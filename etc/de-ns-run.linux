@@ -41,6 +41,60 @@ echo "=== de-ns-run $(date 2>/dev/null): $*" >> "$LOG"
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+
+# THE DISPLAY SOCKET, NAMED WITH ITS MODE, BEFORE ANYTHING TRIES TO USE IT.
+# connect(2) on a unix socket needs WRITE permission on it, and this is the
+# one fact that decided whether a menu-launched application could reach the
+# display at all. The per-distribution wsyswl runs OUTSIDE this namespace, as
+# root, and its socket used to come out `srwxr-xr-x' owned by a uid that is not
+# mapped in here -- so `ls -l' showed `nobody nogroup' and the only symptom was
+# Xwayland's `could not connect to wayland server'. user/wsyswl.ad now chmods
+# it 0666 at creation (docs/linux_distro_namespaces.md 8.5); this line is the
+# WITNESS for that, logged from the side that actually has to connect, and it
+# does not depend on which hamnix-x11session this distribution ships.
+WLSOCK="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+if [ -S "$WLSOCK" ]; then
+    note "wayland socket $(ls -l "$WLSOCK" 2>/dev/null)"
+    [ -w "$WLSOCK" ] || {
+        note "ERROR $WLSOCK is NOT writable by uid $(id -u 2>/dev/null), and"
+        note "  connect(2) needs write. Every client here will fail with"
+        note "  \`could not connect to wayland server'. wsyswl chmods the socket"
+        note "  0666 at creation -- an old wsyswl, or a socket left by one, does not."
+    }
+else
+    note "WARNING no wayland socket at $WLSOCK; is /etc/rc.distros-wl running a wsyswl for this distribution?"
+fi
+
+# THE FOURTH FAULT OF THE SAME FAMILY, SAID OUT LOUD RATHER THAN LEFT TO BE
+# REDISCOVERED. docs/linux_distro_namespaces.md 8.5 names three: a mount point
+# in the medium (/n), a stale X lock in its /tmp, and this namespace's Wayland
+# socket in its /run -- each created by root when root was its only user, each
+# invisible to the unprivileged session that came later. The fourth is the
+# DIRECTORY those last two live in. Measured with debugfs on both media:
+#
+#     /run          40755 uid 0        <- $XDG_RUNTIME_DIR
+#     /run/dbus     40755 uid 0
+#     /run/dconf    40700 uid 0
+#
+# So the session can READ what wsyswl publishes here (wayland-0, and the
+# hamnix-screen geometry file beside it, both 0644) and can CREATE NOTHING. A
+# per-user XDG_RUNTIME_DIR is normally /run/user/<uid>, owned by that uid and
+# mode 0700; here it is the distribution's whole /run, owned by root. Fixing
+# the socket mode fixed CONNECTING; it does not fix CREATING, and the next
+# casualties are already known -- `dbus-daemon --system' cannot make
+# /run/dbus/system_bus_socket as uid 1001, which is the unprivileged half of
+# the D-Bus gap in HANDOFF.md 0, and every toolkit that wants a runtime file.
+#
+# Not silently widened here: making a distribution's /run world-writable is a
+# real access-control decision and it belongs with whoever owns the
+# XDG_RUNTIME_DIR convention, not with a launcher shim. What a launcher shim
+# owes it is a name, once, at the moment it starts to matter.
+if [ ! -w "$XDG_RUNTIME_DIR" ]; then
+    note "NOTE XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR is not writable by uid $(id -u 2>/dev/null)"
+    note "  ($(ls -ld "$XDG_RUNTIME_DIR" 2>/dev/null)). Reading what wsyswl"
+    note "  publishes here works; anything that must CREATE a runtime file --"
+    note "  dbus-daemon's system_bus_socket, dconf, a toolkit cache -- will not."
+fi
 # hamsh hands an entering program "/" as $HOME when it has not resolved a
 # passwd entry, and "/" IS a directory, so `[ -d "$HOME" ]` accepts it -- and
 # a toolkit then writes its cache into the root of the namespace. Reject the
