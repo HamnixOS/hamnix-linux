@@ -771,9 +771,49 @@ same failure this project exists to beat.
   `tests/linux/wsys_bypass.sh`. What remains open is the window table, which
   must stay 0666 or an unprivileged client cannot map its own window: a
   bypasser can still retitle another client's window or scribble its scene.
-  Closing that needs a mapping per owner-uid or the table behind an RPC to
-  wsysd — a different change, and the test asserts the hole so it cannot be
-  forgotten.
+  **AND A FOURTH ATTACK, WHICH NEEDS NO WRITE AT ALL, so no file mode and no
+  write-side authority can close it.** The three attacks the gate already drove
+  are integrity and each needs `PROT_WRITE`; the table must also stay
+  world-*readable*, because `/dev/wsys/windows` is the panel taskbar's input.
+  That alone is enough: measured, a uid-1001 process opens the table
+  `O_RDONLY`, maps it `PROT_READ`, and **reads a uid-1001 victim's KEYSTROKES
+  out of its `keys` ring** — the bytes between `r` and `w`, without moving
+  either, so the victim receives everything normally and cannot tell — plus its
+  committed scene and its whole row. `wsys_bypass.sh`'s attack 4 of 4 (`snoop`),
+  35 ok. This kills the cheapest fix anyone proposes after reading THE SPLIT:
+  one table at 0644 with every write behind an authenticated RPC closes 1–3 and
+  leaves a keylogger between the terminal and the browser.
+* **The RPC authority is affordable — the hot path was never the blocker, and
+  that had been an argument, not a measurement.** THE SPLIT said the fix was
+  left because a round trip per frame and per keystroke would put `wsysd` on
+  every client's path. `tests/linux/wsys_write_census.sh` counts every mutation
+  of both segments at the one choke point all of them pass through, off a real
+  offscreen desktop (`wsysd` + `hamdesktop` + `hampanelscene`, synthetic evdev
+  mouse). **A whole session — bring-up, ten idle seconds, twelve under a mouse
+  — makes FIFTEEN lifecycle writes in TOTAL** (3 `newwindow`, 6 `geometry`, 5
+  attribute, 1 `focus`) against 771 per-frame ones; **435:1 while the mouse
+  moves, and ZERO lifecycle writes on an idle desktop.** The instrument is off
+  unless `$HAMWSYS_WRSTAT` names a directory (asserted, not promised) and
+  counts into a `MAP_SHARED` file rather than flushing at exit, because every
+  process that matters here is killed with a signal. 10 PASS. **The gate caught
+  itself**: on the required reverted run its first draft came back *7 passed, 0
+  failed* with every counter empty — 0/0 took a "no lifecycle writes" sentinel
+  and reported 999999:1 — so three assertions now check the denominator before
+  anything is concluded from it. Reverted: 6 passed, 4 failed.
+  **THE BOUNDARY IS RECORDED FIELD BY FIELD** in THE SPLIT: tier 1 a public
+  index at a NEW path, 0644, written only by `wsysd` after `SO_PEERCRED`; tier 2
+  per-window `memfd`s passed over `SCM_RIGHTS` at create time for scene, rings,
+  backbuffer and images (a memfd has no path, which is the only construction
+  that closes attack 4); tier 3 the chrome segment unchanged. What stays open
+  afterwards is named there too — enumeration, a client spoofing its OWN
+  window, and row exhaustion. **Still not built**, and the surviving blockers
+  are not performance: tier 2 is an attach rewrite (two gates, `wsys_uidgate.sh`
+  and `wsys_bypass.sh`, prove what they prove by running a client with no
+  compositor alive), a root daemon is a new binary and therefore a
+  package-channel change, and the layout change REMOVES fields so this file's
+  append-and-freeze rule cannot apply — the table must move to a new path or an
+  old binary meeting a new segment memsets a running session's window table,
+  which `hpm update` of half the desktop makes an ordinary event.
 * **FIXED, AND IN THE API RATHER THAN IN THE FOUR CALLERS: a caller's
   `dst_cap` is now a cap on the BODY, and the header block is `http9`'s
   problem.** The defect was that `http9.http_get` took ONE buffer covering

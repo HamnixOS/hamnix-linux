@@ -161,6 +161,17 @@ echo 'rc.de-user: namespace ready'
 # measurements, read back through the protocol, so the day any of them closes
 # the test says so.
 #
+# AND A FOURTH, WHICH NEEDS NO WRITE AT ALL AND SO NO MODE CAN CLOSE. The three
+# above are integrity and each needs PROT_WRITE. The table also has to be
+# world-READABLE -- the panel taskbar parses every window's title out of
+# /dev/wsys/windows -- and that alone is enough for one uid-1001 process to read
+# another's KEYSTROKES straight out of its `keys` ring, without disturbing the
+# ring, so the victim receives them normally and cannot tell. Its committed
+# scene (what is drawn inside it) and its whole row read the same way.
+# wsys_bypass.sh drives it O_RDONLY as attack 4 of 4. This is why the fix
+# cannot be "one table at 0644 with the writes behind an RPC": that would close
+# 1-3 and leave a keylogger between the terminal and the browser on this line.
+#
 # And which of the two recorded fixes actually closes it, now measured rather
 # than left open: NOT a mapping per owner-uid. This line is the reason -- it
 # drops the WHOLE session to uid 1001, so the terminal, the browser and a
@@ -173,6 +184,21 @@ echo 'rc.de-user: namespace ready'
 # to wsysd, which authenticates each request's peer pid against the window's
 # owner -- a subsystem, not an edit, and THE SPLIT in user/linux-wsys.c records
 # why a partial version (a title-only RPC) is unsound and must not be shipped.
+#
+# WHAT THAT SUBSYSTEM WOULD COST, now measured instead of feared. The reason it
+# was left was that an RPC per frame and per keystroke would put wsysd on every
+# client's hot path. tests/linux/wsys_write_census.sh counts every mutation of
+# both segments off a real offscreen desktop and the fear does not survive it:
+# a whole session -- bring-up, ten idle seconds and twelve under a mouse --
+# makes FIFTEEN lifecycle writes in TOTAL (3 newwindow, 6 geometry, 5 attr, 1
+# focus) against 771 per-frame ones, 435:1 while the mouse moves, and an IDLE
+# desktop makes ZERO. Identity and lifecycle behind an authority is affordable
+# by two orders of magnitude. What is NOT affordable, and what attack 4 above
+# forces, is that the per-frame half must move too -- into per-window memory a
+# non-owner cannot map at all (a memfd handed out at window creation), because
+# a shared table that anyone may read is a keylogger no matter who may write it.
+# THE SPLIT records that boundary field by field, and what an attacker can
+# still do after it.
 echo 'rc.de-user: dropping the session to regular user live (uid 1001)'
 setuid 1001
 

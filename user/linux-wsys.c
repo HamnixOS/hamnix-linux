@@ -833,8 +833,29 @@ static char chrome_path[576];
  * ring — and the same is true of the THIRD mapping, /srv/wsys.bb, which holds
  * the v2 backbuffers and is 0666 for exactly the same reason: a client of any
  * uid has to blit its own pixels into it.  tests/linux/wsys_bypass.sh now
- * drives ALL THREE of those attacks as measurements, each read back through
+ * drives ALL FOUR of those attacks as measurements, each read back through
  * the protocol, not just the retitle.
+ *
+ * AND THE FOURTH IS READ-ONLY, which is the finding that decides the shape of
+ * any fix.  The first three are INTEGRITY and every one of them needs
+ * PROT_WRITE — which is why the 0644 chrome segment stops them dead.  The
+ * fourth is CONFIDENTIALITY and needs nothing but O_RDONLY:
+ *
+ *     KEYLOG     the bytes between another window's `keys` ring r and w are
+ *                that window's keystrokes.  wsys_bypass.sh's `snoop` reads a
+ *                uid-1001 victim's typing out of a uid-1001 attacker, WITHOUT
+ *                moving r or w, so the victim receives every keystroke normally
+ *                and has no way to notice.  Measured, not argued.
+ *     SCRAPE     another window's committed `scene` is what is drawn inside it.
+ *     ENUMERATE  every row's wid, pid, geometry and title.
+ *
+ * And the table HAS to stay world-readable: /dev/wsys/windows is the panel
+ * taskbar's input (user/hampanelscene.ad:_refresh_windows), and a uid-1001
+ * client reads the geometry root published.  So the cheapest fix that survives
+ * a first reading of this comment — keep ONE table, drop it to 0644, put every
+ * write behind an authenticated RPC — closes attacks 1-3 and NOT ONE of these.
+ * A keylogger between two of the user's own applications is untouched by it.
+ * That is the difference between a boundary and a gate that looks shut.
  *
  * AND WHICH OF THE TWO RECORDED FIXES ACTUALLY CLOSES IT — the measurement
  * that decides it, because the answer was NOT the neutral "either would do"
@@ -862,23 +883,107 @@ static char chrome_path[576];
  *   means wsysd owning the window table in private memory and every mutation
  *   arriving as an authenticated message.
  *
- * WHY IT IS NOT DONE IN THIS PASS, and why a partial version would be worse
- * than the documented hole.  Two things make it a subsystem, not an edit:
- *   (1) the input/commit HOT PATH.  A client writes its own scene and reads
- *       its input rings thousands of times a second through shared memory with
- *       a futex wake (see `inputgen`); a round-trip to wsysd on each would put
- *       the compositor on every client's per-frame and per-keystroke path.  A
- *       sound design is a HYBRID — identity and lifecycle (create, own, title,
- *       geometry, z) authenticated through the channel; per-frame pixels and
- *       rings still in shared memory but in a region the authority hands out
- *       at create time — which is more than a mechanical move.
- *   (2) a title-only RPC is UNSOUND, which rules out the tempting small start.
- *       wsysd would authenticate "set window W's title" by comparing the
- *       sender pid to win[W].pid — but win[W].pid lives in this same 0666
- *       table and is itself spoofable, so the check is only as trustworthy as
- *       the ownership record, and moving THAT into the authority is moving the
- *       whole table.  It is all of it or none, and half of it is a gate that
- *       looks shut and is not.
+ * THE HOT PATH, MEASURED, because the hybrid's whole premise is that the split
+ * is lopsided and that was an argument until tests/linux/wsys_write_census.sh
+ * turned it into a number.  Every mutation of either segment is counted at the
+ * one choke point all of them pass through (THE WRITE CENSUS, further down this
+ * file), off a real offscreen desktop — wsysd + hamdesktop + hampanelscene:
+ *
+ *     whole session, bring-up included:  15 LIFECYCLE WRITES, TOTAL.
+ *                                        3 newwindow, 6 geometry, 5 attr,
+ *                                        1 focus.  Not per second.  Total.
+ *     idle, 10 s                         0 lifecycle    130 per-frame (13.0/s)
+ *     under a mouse, 12.6 s              1 lifecycle    435 per-frame (34.6/s)
+ *
+ * 435:1 on this desktop, and that is the FLOOR: the census sees no v2 blits at
+ * all here, and a browser or a Steam session pushes megabytes of them a second
+ * down the same path.  So an RPC on the lifecycle half is affordable by two
+ * orders of magnitude, and an idle desktop would leave the authority asleep —
+ * which on a laptop is the number that decides whether this ships at all (see
+ * tests/linux/de_idle_cpu.sh for why that sentence is not decorative here).
+ *
+ * THE BOUNDARY, field by field, so the next pass does not have to re-derive it.
+ * THREE tiers, not two, and the third is the one attack 4 forces:
+ *
+ *   TIER 1 — the public INDEX.  /srv/wsys, dropped to 0644 owned by the host
+ *     owner.  wid, owner pid, x/y/w/h, z, title, decorate/visible/pinned/
+ *     keyed/blend/wmdelete/proto, focus_wid, next_wid, desktop, gen, inputgen.
+ *     Everybody reads it — the taskbar, the compositor, /dev/wsys/self.  NOBODY
+ *     writes it but wsysd, and wsysd writes it only after SO_PEERCRED says the
+ *     sender's pid is the row's owner.  That is the answer to the unsoundness
+ *     below: the ownership record itself is in the tier the attacker cannot
+ *     write, so the check is worth something.  15 writes a session.
+ *
+ *   TIER 2 — PER-WINDOW PRIVATE memory, one memfd per window, created by wsysd
+ *     at `newwindow` and passed to the creating client over SCM_RIGHTS.  scene,
+ *     stage, the five rings, the v2 backbuffer, the named images.  A memfd has
+ *     no name in the filesystem, so there is no path for a bypasser to open:
+ *     this is the only construction that closes attack 4, because it is the
+ *     only one where a non-owner cannot MAP the bytes at all.  wsysd keeps
+ *     every fd (it composites, and it writes routed input into the rings); the
+ *     owner keeps its own.  Nothing on this tier ever touches the RPC — the
+ *     34.6/s above, and the megabytes/s a browser adds, stay exactly as fast as
+ *     they are today.
+ *
+ *   TIER 3 — /srv/wsys.chrome, 0644, unchanged.  Already correct.
+ *
+ * WHAT AN ATTACKER CAN STILL DO AFTERWARDS, named rather than left for someone
+ * to discover, because a fix whose residue is undocumented is the same failure
+ * as a hole that is:
+ *   a. ENUMERATE.  Tier 1 stays world-readable, so every window's wid, pid,
+ *      geometry and TITLE is still readable by any process on the machine.
+ *      This is not fixable while /dev/wsys/windows is the taskbar's input, and
+ *      a title is on screen anyway.  Only the keystrokes and the pixels move.
+ *   b. SPOOF ITS OWN WINDOW.  A client may set its own title to "Firefox — Sign
+ *      in" and draw a convincing login form, and it is the legitimate owner of
+ *      every byte it needs to do so.  No ownership check can reach this; only
+ *      trusted chrome the compositor draws and a client cannot (devwsys's
+ *      `decorate` is where that would live) can, and this design does not
+ *      attempt it.
+ *   c. EXHAUST.  `newwindow` is open to every uid by devwsys's own rule, so any
+ *      process can take all WSYS_MAX_WINDOWS rows and starve the desktop.  An
+ *      authority makes a per-peer quota POSSIBLE for the first time; it does
+ *      not impose one, and this design does not add it.
+ *   d. WATCH THE COMPOSITOR'S OWN SURFACES.  Anything the compositor publishes
+ *      for everyone (the wallpaper sink, a screenshot path) is still public by
+ *      construction.  "No screen scraping" is NOT what tier 2 buys; "no reading
+ *      another client's window" is.
+ *
+ * WHY IT IS STILL NOT BUILT IN THIS PASS.  Not the hot path — that turned out
+ * to be affordable, and this comment used to say otherwise on no evidence.  The
+ * blockers are the ones the measurement exposed rather than removed:
+ *   (1) TIER 2 IS AN ATTACH REWRITE, NOT A MOVE.  Today every process mmaps one
+ *       named file and is done; afterwards it must connect to a daemon and be
+ *       HANDED its window before it can draw a pixel.  Twenty test scripts in
+ *       tests/linux set $HAMWSYS and TWO of them never run a compositor at
+ *       all — and the two are wsys_uidgate.sh and wsys_bypass.sh, the gates on
+ *       this very boundary, which prove what they prove precisely by driving a
+ *       client with nothing else alive.  They need an answer that is not "start
+ *       a daemon first", and so does every single-program `hamlinux_build.sh`
+ *       run a person does by hand.
+ *   (2) A NEW ROOT DAEMON is a new binary, and NORTH_STAR.md's standing
+ *       invariant makes that a package-channel change (scripts/hamlinux_packages.py
+ *       plus tests/linux/channel_covers_image.sh), not a file.
+ *   (3) THE SEGMENT LAYOUT CHANGE CANNOT USE THE APPEND-AND-FREEZE RULE this
+ *       file has used for every previous version bump.  Tier 2 REMOVES scene,
+ *       stage and the rings from struct wwin, so the prefix is not frozen and
+ *       static assertions cannot save it.  And the version counter's own
+ *       remedy — re-initialise — is actively dangerous here: an OLD binary
+ *       arriving in a NEW session (which a package channel makes ordinary, and
+ *       which is exactly what `hpm update` of half the desktop looks like)
+ *       would map the new table, read a version it does not know, and MEMSET
+ *       THE RUNNING SESSION'S WINDOW TABLE.  So tier 1 has to live at a NEW
+ *       PATH — /srv/wsys2 — and an old binary must find /srv/wsys absent and
+ *       fail loudly by name.  That is a decision about the whole distribution,
+ *       not about this file.
+ *
+ *   And the one that has not changed: A TITLE-ONLY RPC IS UNSOUND, which rules
+ *   out the tempting small start.  wsysd would authenticate "set window W's
+ *   title" by comparing the sender pid to win[W].pid — but win[W].pid lives in
+ *   this same 0666 table and is itself spoofable, so the check is only as
+ *   trustworthy as the ownership record.  Moving THAT into the authority is
+ *   moving tier 1, and tier 1 without tier 2 leaves the keylogger.  It is all
+ *   of it or none, and half of it is a gate that looks shut and is not.
  *
  * So this pass lands the measurement and this design and does NOT half-build
  * the access control.  What IS closed, and by the kernel rather than by an if,
@@ -2423,6 +2528,118 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
     return (int64_t)n;
 }
 
+/* ================================================================== *
+ * THE WRITE CENSUS — the measurement THE SPLIT's recorded fix is sized on
+ * ==================================================================
+ *
+ * WHY THIS EXISTS.  THE SPLIT above says the only mechanism that can tell two
+ * same-uid processes apart is an RPC to wsysd that authenticates the peer, and
+ * then says the reason it was not built is that a round trip on the per-frame
+ * and per-keystroke path would put the compositor on every client's hot path.
+ * That is an ARGUMENT, and this tree's rule is that a measurement is worth more
+ * than one — including one made by the person who wrote the file.  So the
+ * argument is now a number: every mutation of either segment is counted, at the
+ * one choke point every one of them passes through, and classified LIFECYCLE
+ * (identity, ownership, title, geometry, z — the things an authority would have
+ * to arbitrate) or PER-FRAME (scene bytes, commits, blits, routed input — the
+ * things it must never see).  tests/linux/wsys_write_census.sh drives a real
+ * desktop under a synthetic mouse and reads these files back.
+ *
+ * IT IS OFF UNLESS ASKED FOR.  No counter is touched, and no file is created,
+ * unless $HAMWSYS_WRSTAT names a directory.  The cost on the hot path when it
+ * is unset is one load of a null pointer and a predicted-not-taken branch.
+ *
+ * THE FILE IS A MAPPING, NOT A FLUSH AT EXIT, and that is deliberate: wsysd,
+ * hamdesktop and hampanelscene are all killed with a signal at the end of every
+ * gate in this tree, so an atexit(3) dump would measure exactly the processes
+ * that do not matter and lose the three that do.  Counters are incremented in
+ * place in a MAP_SHARED file, so the numbers survive SIGKILL.
+ *
+ * The category NAMES live in the file, so the reader does not carry a copy of
+ * this enum that can drift away from it.
+ * ================================================================== */
+enum {
+    WR_NEWWIN = 0, WR_DESTROY, WR_OWNER, WR_FOCUS, WR_TITLE, WR_GEOM, WR_ATTR,
+    WR_SCENE, WR_COMMIT, WR_BLIT, WR_DAMAGE, WR_CURSOR, WR_IMAGE,
+    WR_KEYS, WR_POINTER, WR_EVENT, WR_TEXT, WR_CMD,
+    WR_SINK, WR_CHROME, WR_GLOBAL, WR_N
+};
+#define WR_NAMELEN 16
+static const char wr_names[WR_N][WR_NAMELEN] = {
+    "newwindow", "destroy", "setowner", "focus", "title", "geometry", "attr",
+    "scene", "commit", "blit", "damage", "cursor", "image",
+    "keys", "pointer", "event", "text", "cmd",
+    "sink", "chrome", "globalctl",
+};
+struct wrstat {
+    char     magic[8];                  /* "HAMWRST1" */
+    uint32_t ncat, namelen;
+    uint64_t t_first_ns, t_last_ns;
+    int32_t  pid, _pad;
+    char     name[WR_N][WR_NAMELEN];
+    uint64_t count[WR_N];
+    uint64_t bytes[WR_N];
+};
+static struct wrstat *wrs;
+static int            wr_tried;
+
+static uint64_t wr_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void wr_init(void)
+{
+    wr_tried = 1;
+    const char *d = getenv("HAMWSYS_WRSTAT");
+    if (!d || !*d) return;
+    char path[640];
+    /* The command name is in the file NAME and not only in its bytes, so that
+     * a census of nine processes can be read with ls(1) and attributed without
+     * opening anything.  A pid alone is unattributable after the run. */
+    char comm[32] = "";
+    int cf = open("/proc/self/comm", O_RDONLY);
+    if (cf >= 0) {
+        ssize_t k = read(cf, comm, sizeof comm - 1);
+        close(cf);
+        if (k > 0) {
+            comm[k] = '\0';
+            for (char *q = comm; *q; q++)
+                if (*q == '\n' || *q == '/' || *q == ' ') { *q = '\0'; break; }
+        }
+    }
+    snprintf(path, sizeof path, "%s/wr.%s.%d", d, comm[0] ? comm : "proc",
+             (int)getpid());
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return;
+    if (ftruncate(fd, (off_t)sizeof(struct wrstat)) < 0) { close(fd); return; }
+    void *m = mmap(NULL, sizeof(struct wrstat), PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    close(fd);
+    if (m == MAP_FAILED) return;
+    wrs = (struct wrstat *)m;
+    memcpy(wrs->magic, "HAMWRST1", 8);
+    wrs->ncat = WR_N;
+    wrs->namelen = WR_NAMELEN;
+    wrs->pid = (int32_t)getpid();
+    memcpy(wrs->name, wr_names, sizeof wr_names);
+    wrs->t_first_ns = wrs->t_last_ns = wr_now_ns();
+}
+
+static void wr(int cat, uint64_t bytes)
+{
+    if (!wrs) {
+        if (wr_tried) return;
+        wr_init();
+        if (!wrs) return;
+    }
+    wrs->count[cat]++;
+    wrs->bytes[cat] += bytes;
+    wrs->t_last_ns = wr_now_ns();
+}
+
 /* One global-ctl verb line.  0 on success, -1 with errno set.
  *
  * It USED to be void, and the one caller that could fail — the sink catch-all
@@ -2434,11 +2651,13 @@ static int ctl_global(const char *s, size_t n)
 {
     size_t p = 0;
     if (n >= 9 && !strncmp(s, "newwindow", 9)) {
+        wr(WR_NEWWIN, n);
         struct wwin *v = win_alloc((int32_t)getpid());
         last_new = v ? v->wid : -1;
         return v ? 0 : -1;
     }
     if (n >= 5 && !strncmp(s, "raise", 5)) {
+        wr(WR_FOCUS, n);
         p = 5;
         int32_t wid = take_int(s, &p, n);
         struct wwin *v = win_find(wid);
@@ -2455,12 +2674,14 @@ static int ctl_global(const char *s, size_t n)
         return 0;
     }
     if (n >= 5 && !strncmp(s, "focus", 5)) {
+        wr(WR_FOCUS, n);
         p = 5;
         int32_t wid = take_int(s, &p, n);
         if (win_find(wid)) { shm->focus_wid = wid; shm->gen++; }
         return 0;
     }
     if (n >= 6 && !strncmp(s, "screen", 6)) {
+        wr(WR_CHROME, n);
         p = 6;
         int32_t w = take_int(s, &p, n), h = take_int(s, &p, n);
         if (w <= 0 || h <= 0) return 0;        /* no geometry named: no-op */
@@ -2479,6 +2700,7 @@ static int ctl_global(const char *s, size_t n)
         return 0;
     }
     if (n >= 7 && !strncmp(s, "desktop", 7)) {
+        wr(WR_GLOBAL, n);
         shm->desktop = 1;                      /* the rl5 flip */
         shm->gen++;
         return 0;
@@ -2502,6 +2724,7 @@ static int ctl_global(const char *s, size_t n)
      * the window's owner or the host owner may ask.  A stranger closing your
      * windows is not a courtesy. */
     if (n >= 6 && !strncmp(s, "delete", 6)) {
+        wr(WR_DESTROY, n);
         p = 6;
         int32_t wid = take_int(s, &p, n);
         struct wwin *v = win_find(wid);
@@ -2517,6 +2740,7 @@ static int ctl_global(const char *s, size_t n)
         return 0;
     }
     if (n >= 5 && !strncmp(s, "close", 5)) {
+        wr(WR_DESTROY, n);
         p = 5;
         int32_t wid = take_int(s, &p, n);
         struct wwin *v = win_find(wid);
@@ -2536,6 +2760,7 @@ static int ctl_global(const char *s, size_t n)
      * of each verb in a sink named for the verb so the component that owns it
      * can read it back — the same shape as the singleton /dev/wsys/<name>
      * files, which is where those components already look. */
+    wr(WR_GLOBAL, n);
     size_t vn = 0;
     while (vn < n && s[vn] != ' ' && s[vn] != '\n' && vn < WSYS_SINK_NAME - 1)
         vn++;
@@ -2557,6 +2782,7 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
 {
     size_t p;
     if (n >= 8 && !strncmp(s, "geometry", 8)) {
+        wr(WR_GEOM, n);
         p = 8;
         int32_t x = take_int(s, &p, n), y = take_int(s, &p, n);
         int32_t w = take_int(s, &p, n), h = take_int(s, &p, n);
@@ -2599,34 +2825,41 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
         return;
     }
     if (n >= 8 && !strncmp(s, "decorate", 8)) {
+        wr(WR_ATTR, n);
         p = 8; v->decorate = take_int(s, &p, n) > 0; shm->gen++; return;
     }
     /* devwsys's `keyed` and `blend`.  No argument means 1, as with `pin`:
      * hampanelscene writes `keyed 1`, but a client that writes bare `keyed`
      * has said the same thing and must not be silently ignored. */
     if (n >= 5 && !strncmp(s, "keyed", 5)) {
+        wr(WR_ATTR, n);
         p = 5; int32_t k = take_int(s, &p, n);
         v->keyed = (k < 0 || k > 0) ? 1 : 0; shm->gen++; return;
     }
     if (n >= 5 && !strncmp(s, "blend", 5)) {
+        wr(WR_ATTR, n);
         p = 5; int32_t b = take_int(s, &p, n);
         v->blend = (b < 0 || b > 0) ? 1 : 0; shm->gen++; return;
     }
     if (n >= 7 && !strncmp(s, "version", 7)) {
+        wr(WR_ATTR, n);
         p = 7; v->proto = take_int(s, &p, n); return;
     }
     /* "wmdelete [0|1]" -- ASK ME BEFORE YOU CLOSE ME.  The owner opts in; the
      * default is the old behaviour, so a client that has never heard of this
      * verb is closed exactly as it always was.  No argument means 1. */
     if (n >= 8 && !strncmp(s, "wmdelete", 8)) {
+        wr(WR_ATTR, n);
         p = 8; int32_t d = take_int(s, &p, n);
         v->wmdelete = (d < 0 || d > 0) ? 1 : 0;
         return;
     }
     if (n >= 7 && !strncmp(s, "visible", 7)) {
+        wr(WR_ATTR, n);
         p = 7; v->visible = take_int(s, &p, n) > 0; shm->gen++; return;
     }
     if (n >= 5 && !strncmp(s, "title", 5)) {
+        wr(WR_TITLE, n);
         size_t i = 5;
         while (i < n && s[i] == ' ') i++;
         size_t k = 0;
@@ -2637,6 +2870,7 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
         return;
     }
     if (n >= 6 && !strncmp(s, "commit", 6)) {
+        wr(WR_COMMIT, v->stage_len);
         /* PUBLISH.  This is the only place scene_len moves, and it moves
          * after the bytes are already in place, so a compositor that sees the
          * new scene_gen is guaranteed a whole frame. */
@@ -2646,9 +2880,14 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
         shm->gen++;
         return;
     }
-    if (n >= 4 && !strncmp(s, "hide", 4)) { v->visible = 0; shm->gen++; return; }
-    if (n >= 4 && !strncmp(s, "show", 4)) { v->visible = 1; shm->gen++; return; }
+    if (n >= 4 && !strncmp(s, "hide", 4)) {
+        wr(WR_ATTR, n); v->visible = 0; shm->gen++; return;
+    }
+    if (n >= 4 && !strncmp(s, "show", 4)) {
+        wr(WR_ATTR, n); v->visible = 1; shm->gen++; return;
+    }
     if (n >= 1 && s[0] == 'z') {
+        wr(WR_GEOM, n);
         p = 1; int32_t z = take_int(s, &p, n);
         if (z >= 0) { v->z = z; shm->gen++; }
         return;
@@ -2675,6 +2914,7 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
      * argument and means 1. */
     if ((n >= 10 && !strncmp(s, "background", 10))
         || (n >= 3 && !strncmp(s, "pin", 3))) {
+        wr(WR_GEOM, n);
         p = (s[0] == 'p') ? 3 : 10;
         int32_t bv = take_int(s, &p, n);
         if (bv < 0) bv = 1;                    /* `pin`, or no argument */
@@ -2742,6 +2982,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
         uint64_t room = WSYS_SCENE_CAP - v->stage_len;
         uint64_t k = n < room ? n : room;
         if (k == 0 && n > 0) { errno = ENOSPC; return -ENOSPC; }
+        wr(WR_SCENE, k);
         memcpy(v->stage + v->stage_len, buf, (size_t)k);
         v->stage_len += (uint32_t)k;
         return (int64_t)k;
@@ -2756,6 +2997,10 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                         : f->leaf == HAMWSYS_WIN_EVENT   ? &v->event
                         : f->leaf == HAMWSYS_WIN_TEXT    ? &v->text
                                                          : &v->cmd;
+        wr(f->leaf == HAMWSYS_WIN_KEYS    ? WR_KEYS
+         : f->leaf == HAMWSYS_WIN_POINTER ? WR_POINTER
+         : f->leaf == HAMWSYS_WIN_EVENT   ? WR_EVENT
+         : f->leaf == HAMWSYS_WIN_TEXT    ? WR_TEXT : WR_CMD, n);
         ring_write(q, buf, n);
         return (int64_t)n;
     }
@@ -2788,6 +3033,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                  * its own surface; opening the file is not. */
                 if (v->proto != 2) { v->proto = 2; shm->gen++; }
                 used = bb_blit(v, carry + i, carried - i);
+                if (used) wr(WR_BLIT, used);
             } else if (verb == 'D') {
                 if (v->proto != 2) { v->proto = 2; shm->gen++; }
                 if (carried - i < 17) break;
@@ -2804,6 +3050,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                     h->gen++;
                 }
                 shm->gen++;
+                wr(WR_DAMAGE, 17);
                 used = 17;
             } else if (verb == 'C') {
                 if (carried - i < 18) break;
@@ -2812,6 +3059,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                 int bpp = (fmt == 3) ? 1 : 4;
                 uint64_t need = (uint64_t)cw * ch * bpp;
                 if (carried - i < 18 + need) break;
+                wr(WR_CURSOR, 18 + need);
                 used = 18 + need;      /* accepted; the compositor draws its
                                           own cursor for now */
             } else if (verb == 'I') {
@@ -2861,6 +3109,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                  * that; the analogue on this line is the segment generation
                  * the compositor already watches. */
                 shm->gen++;
+                wr(WR_IMAGE, hdr + ipix);
                 used = hdr + ipix;
             } else {
                 /* Not a verb we know. Resynchronising by scanning would invent
@@ -2881,6 +3130,7 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
     case HAMWSYS_SINK: {
         if (!sink_write_allowed(f->name)) { errno = EPERM; return -EPERM; }
         errno = 0;
+        wr(sink_is_public(f->name) ? WR_SINK : WR_CHROME, n);
         struct wsink *s = sink_find(f->name, 1);
         if (!s) { int e = errno ? errno : ENOSPC; errno = e; return -e; }
         uint64_t room = WSYS_SINK_CAP - s->len;
@@ -2926,6 +3176,7 @@ int32_t hamwsys_alloc(uint64_t pid)
      * privileged act of handing a window to another process.  A client that
      * wants its own window writes `newwindow`, which no uid is refused. */
     if (!hostowner()) { errno = EPERM; return -1; }
+    wr(WR_OWNER, 0);
     struct wwin *v = win_alloc((int32_t)pid);
     if (!v) return -1;
     return v->wid;
@@ -2941,6 +3192,7 @@ int32_t hamwsys_free(int32_t wid)
      * is the union of the two and refuses exactly what both refuse: tearing
      * down somebody else's window. */
     if (!hostowner() && !owns_wid(wid)) { errno = EPERM; return -1; }
+    wr(WR_DESTROY, 0);
     bb_release(wid);
     img_release_wid(wid);              /* devwsys's _wsys_img_release_wid */
     v->used = 0;
