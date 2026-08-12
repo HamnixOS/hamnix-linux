@@ -638,9 +638,30 @@ barh() {   # barh <log> <marker>
                    inb && NF >= 6 && $3 == 0 && $6 == 100 {print $5; exit}' \
         "$1" | tr -d '\r'
 }
-ptrcount() {   # ptrcount <log> <marker>   -- the compositor's own event counter
+statefield() {   # statefield <log> <marker> <field>
     grep -aA1 -F "$2" "$1" | tail -1 | tr -d '\r' |
-        awk '{for (i = 1; i < NF; i++) if ($i == "pointer") print $(i+1)}'
+        awk -v f="$3" '{for (i = 1; i < NF; i++) if ($i == f) print $(i+1)}'
+}
+# DID THE MOUSE ARRIVE? Two witnesses, because one of them cannot speak in the
+# case that matters most. `pointer` counts events wsysd ROUTED TO A WINDOW, so
+# on a boot with zero windows it stays 0 no matter how hard the mouse is
+# moved -- deliver_pointer returns early when nothing is under the cursor. The
+# first version of this gate read that as "nothing was clicked" and said so,
+# next to a click the QMP log shows was accepted: a false sentence about the
+# mouse standing in front of a true one about the desktop. `curframes` counts
+# the cursor-only frames the compositor drew, which is the pointer MOVING and
+# needs no window at all.
+mouse_arrived() {   # mouse_arrived <log> <before-marker> <after-marker> <label>
+    local pb pa cb ca
+    pb="$(statefield "$1" "$2" pointer)";    pa="$(statefield "$1" "$3" pointer)"
+    cb="$(statefield "$1" "$2" curframes)";  ca="$(statefield "$1" "$3" curframes)"
+    if [ -n "$pb" ] && [ -n "$pa" ] && [ "$pa" -gt "$pb" ]; then
+        echo "lupd: PASS the real pointer reached $4 (it routed $pb -> $pa pointer events to a window)"
+    elif [ -n "$cb" ] && [ -n "$ca" ] && [ "$ca" -gt "$cb" ]; then
+        echo "lupd: PASS the real pointer reached $4 (cursor-only frames $cb -> $ca; it routed none to a window, which is what zero windows means)"
+    else
+        echo "lupd: FAIL nothing was clicked at $4: pointer '$pb'->'$pa', curframes '$cb'->'$ca'"; fail=1
+    fi
 }
 
 echo "--- boot 1: the machine gets the desktop it was installed with"
@@ -659,8 +680,6 @@ LOG="$WORK/boot2.log"
 check "the desktop came up on the installed boot" '\[lupd\] p2 WINS-BEFORE'
 B2BEFORE="$(barh "$LOG" '[lupd] p2 WINS-BEFORE')"
 B2AFTER="$(barh "$LOG" '[lupd] p2 WINS-AFTER')"
-P2P_BEFORE="$(ptrcount "$LOG" '[lupd] p2 STATE-BEFORE:')"
-P2P_AFTER="$(ptrcount "$LOG" '[lupd] p2 STATE-AFTER:')"
 if [ -n "$B2BEFORE" ] && [ -n "$B2AFTER" ]; then
     echo "lupd: INFO the top panel is ${B2BEFORE} px before the click and ${B2AFTER} px after it"
 else
@@ -669,11 +688,8 @@ fi
 # THE CLICK REACHED THE COMPOSITOR. Without this the line below would be
 # satisfied by a mouse that was never delivered -- a gate answering
 # "the desktop is dead" when the truth is "nothing was clicked".
-if [ -n "$P2P_BEFORE" ] && [ -n "$P2P_AFTER" ] && [ "$P2P_AFTER" -gt "$P2P_BEFORE" ]; then
-    echo "lupd: PASS the real pointer reached the OLD compositor (its pointer counter went $P2P_BEFORE -> $P2P_AFTER)"
-else
-    echo "lupd: FAIL nothing was clicked: the compositor's pointer counter is '$P2P_BEFORE' -> '$P2P_AFTER'"; fail=1
-fi
+mouse_arrived "$LOG" '[lupd] p2 STATE-BEFORE:' '[lupd] p2 STATE-AFTER:' \
+              "the OLD compositor"
 if [ -n "$B2BEFORE" ] && [ "${B2AFTER:-0}" = "$B2BEFORE" ]; then
     echo "lupd: PASS and the DE chrome did NOT move: the Applications button is dead on this machine (panel still $B2AFTER px)"
 else
@@ -719,14 +735,9 @@ if [ "$NOUPD" != 1 ]; then
 fi
 B3BEFORE="$(barh "$LOG" '[lupd] p3 WINS-BEFORE')"
 B3AFTER="$(barh "$LOG" '[lupd] p3 WINS-AFTER')"
-P3P_BEFORE="$(ptrcount "$LOG" '[lupd] p3 STATE-BEFORE:')"
-P3P_AFTER="$(ptrcount "$LOG" '[lupd] p3 STATE-AFTER:')"
 echo "lupd: INFO the top panel is ${B3BEFORE:-?} px before the click and ${B3AFTER:-?} px after it"
-if [ -n "$P3P_BEFORE" ] && [ -n "$P3P_AFTER" ] && [ "$P3P_AFTER" -gt "$P3P_BEFORE" ]; then
-    echo "lupd: PASS the real pointer reached the compositor (pointer counter $P3P_BEFORE -> $P3P_AFTER)"
-else
-    echo "lupd: FAIL nothing was clicked in boot 3: pointer counter '$P3P_BEFORE' -> '$P3P_AFTER'"; fail=1
-fi
+mouse_arrived "$LOG" '[lupd] p3 STATE-BEFORE:' '[lupd] p3 STATE-AFTER:' \
+              "the UPDATED compositor"
 # ===== THE SENTENCE THIS WHOLE FILE EXISTS FOR =====
 # Three outcomes, and they are three different sentences. A gate that collapsed
 # "the panel did not grow" and "there is no panel" into one line would report a
