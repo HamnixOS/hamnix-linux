@@ -3030,31 +3030,139 @@ scores 1/2. It compiles nothing and runs in about a second, and it prints how
 many exemptions are still only `NOT YET CONVERTED` so the green is never
 mistaken for "all of them are private".
 
-#### The survey: every host-side gate, and whether it is private
+#### The survey: every host-side gate, and whether it is private — PAID DOWN
 
-Isolated (verified at the score they held before): `de_panel_conf_replace` 17,
-`de_focus_dismiss` 14, `de_mouse_chrome` 13, `wsys_desktop_z` 12,
-`de_appmenu_band` 11, `wsys_write_census` 10, `wsys_keyed` 8, `wsys_cover` 7,
-plus `private_ns_isolates` 7 itself.
+`gates_are_private.sh` used to end every run with *"16 of the 27 are exempt
+only because nobody has converted and re-run them yet — this gate is green
+with that debt named, not paid"*. **That line is gone: the count is 0.** The
+gate now reads *28 host-side gates start the window system: 24 isolated,
+4 exempt by name, 0 neither.*
 
-**Deliberately NOT isolated, with the reason in the file:**
-`tests/linux/wsys_uidgate.sh`. The namespace is only obtainable with
-`--map-root-user` (`--map-current-user` leaves `CapEff 0`, measured), so
-`geteuid()` is 0 inside, and `linux-wsys.c:1207` and `:1843` both branch on
-it. A gate whose whole question is which uid may open which window would still
-print its passes while being about the wrong uid.
+Converted **and re-run**, because the exemption existed precisely because
+nobody had re-run them. Score after isolation, and the score it had before
+where one was on record:
 
-**Still exposed, named rather than fixed** — each needs a verification run
-this session did not have room for, and each is a two-line change:
-
-| gate | what escapes | note |
+| gate | after | before |
 |---|---|---|
-| `channel_runs_desktop.sh` | the full desktop write-set **and** the shm fallback — it sets no `HAMWSYS` at all | the highest-value one left: `scripts/hamlinux_packages.py` runs it before writing `index.json`, so it runs on every publish |
-| `runsweep_jail.sh` | same, plus `wsyswl` | |
-| `wsyswl_rootless.sh` | the desktop write-set (it does set `HAMWSYS`) | |
-| `wsyswl_{ceiling,conn_ceiling,shared_fate,stall,two_browsers,wheel}.sh`, `wsys_{title,image,close_button,bypass}.sh`, `x11_geom_probe.sh`, `input_probe.sh` | nothing from the desktop write-set; they set `HAMWSYS`/`HAMWSYS_BB`. The residue is the Wayland socket and whatever `wsyswl` puts in `XDG_RUNTIME_DIR`, which this helper does **not** shadow | lowest risk of the group |
-| `snarf_device.sh`, `snarf_serial.sh`, `xsnarf_bridge.sh`, `wlsnarf_bridge.sh` | they set `HAMSNARF`, so the `/srv/snarf` and `/dev/shm/hamnix-snarf` fallbacks should not fire — unverified | `wlsnarf_bridge.sh` also does `mkdir -p /tmp/.X11-unix` and binds `X$DPY` in it: a host-global X socket directory, and a display-number collision reaches a real X session |
-| `ac_ns_host.sh`, `hpm_hook_bounded.sh`, `lex_error_fatal.sh` | write `/tmp` paths only *inside* a chroot/fixture root they made | private already |
+| `wsyswl_rootless.sh` | **37 PASS** | 37 |
+| `wlsnarf_bridge.sh` | **35 PASS** | 35 |
+| `wsyswl_conn_ceiling.sh` | **30 PASS** | 30 |
+| `wsyswl_two_browsers.sh` | **24 PASS** | 24 |
+| `wsys_title.sh` | **23 PASS** | 23 |
+| `wsyswl_shared_fate.sh` | **18 PASS** | 18 |
+| `wsyswl_wheel.sh` | **16 PASS** | — |
+| `wsyswl_ceiling.sh` | **11 PASS** | 11 |
+| `wsyswl_stall.sh` | **11 PASS** | — |
+| `wsys_close_button.sh` | **10 PASS** | — |
+| `x11_geom_probe.sh` | **9 PASS** | — |
+| `channel_runs_desktop.sh` | **9 PASS** | — |
+| `wsys_image.sh` | **8 PASS** | — |
+| `input_probe.sh` | **ALL PASS** | — |
+
+Already isolated, re-run as regressions against the helper's two changes
+below: `private_ns_isolates` 7, `wsys_keychan` 14, `wsys_keyed` 8,
+`de_appmenu_band` 11.
+
+#### `$XDG_RUNTIME_DIR` — the caveat that shipped with the helper, closed
+
+Eight of the exemptions said the same thing: *"`wsyswl`'s Wayland socket lands
+in `XDG_RUNTIME_DIR`, which `private_ns.sh` does NOT shadow, so converting it
+is necessary but not sufficient."* It is shadowed now, and it **keeps its
+name**, so a gate that reads the variable and one that hardcodes
+`/run/user/$(id -u)` both land on the same fresh tmpfs. Mode `0700`, not
+`1777`, because a Wayland compositor checks that. Where it is unset the run
+gets `/tmp/privns-run` inside the already-private tmpfs rather than falling
+back on the machine's. `priv_ns_assert` REFUSES if it is neither a mount point
+of its own nor inside the private `/tmp`.
+
+Measured: inside the namespace `/run/user/1000` has **0** entries; a marker
+written there does not appear among the host's **20**.
+
+#### The id map — an isolation that made a gate lie, and the fix
+
+`--map-root-user` maps exactly ONE id. `wsyswl_rootless.sh` converted with
+that alone went **37 PASS → 12 PASS / 4 FAIL**, reproducibly, reading like a
+compositor defect: *the X root has 1 children*, *the XWM manages 1 X windows*,
+*windows_high_water is 1*, */dev/wsys lists 0 application windows*. A
+standalone probe (Xvfb + two `xterm`s inside the namespace) found the cause:
+
+```
+xterm: Cannot chown /dev/pts/7 to 0,5: Invalid argument
+```
+
+and both clients dead — gid 5 (`tty`) is not in a one-id map. **That is the
+NORTH STAR shape in the other direction**: a FAIL-shaped answer that was not
+the truth, and an agent reading it would have gone hunting in `wsyswl`'s XWM.
+
+So `priv_ns_reexec` now picks its map in three steps and says which it got:
+`--map-auto` (needs `/etc/subuid`, `/etc/subgid` and setuid
+`newuidmap`/`newgidmap`); failing that — the NESTED case, where `id -un` is
+root and has no subuid line — a MIRROR of `/proc/self/{uid,gid}_map`, which a
+process that is root in the namespace it is leaving may write; failing that,
+the one-id map, named as such by `priv_ns_describe`.
+
+#### And it is proved for the riskiest one — `tests/linux/rless_is_private.sh`
+
+The same experiment `private_ns_isolates.sh` runs for
+`de_panel_conf_replace.sh`, pointed at `wsyswl_rootless.sh`: a live desktop
+with its own segment and framebuffer — so the only things it can share with
+the gate are the fixed `/tmp` names and `/tmp/.X11-unix` — running while the
+gate runs beside it. **8 PASS, 0 FAIL**, with a negative control that fires on
+BOTH instruments:
+
+| | isolated | `HAMTEST_NO_PRIVNS=1` |
+|---|---|---|
+| `/tmp/.hamdesktop.src` | marker intact | **MARKER GONE** |
+| `/tmp/.X11-unix` peak, sampled *during* the run | 0 (from 0) | **2** (from 0) |
+| witness's bars visible | 1 1 → 1 1 | 1 1 → 1 1 |
+| witness's taskbar pixels | 81% → 81% | 81% → 81% |
+| the gate's own score | 37 PASS | 37 PASS |
+
+The gate scores the same 37 in both arms: the isolation changed nothing about
+what it proves and everything about what it touches. The X-socket count had to
+be sampled *while* the gate ran — a before/after pair reads 0 → 0 in both arms,
+because the gate kills its X servers on the way out, and that is a witness that
+cannot feel what it is pointed at.
+
+#### Deliberately NOT isolated, each with the reason in the table
+
+* **`wsys_uidgate.sh`** — its subject is the uid. `geteuid()` is 0 inside and
+  `linux-wsys.c:1207`/`:1843` branch on it.
+* **`wsys_bypass.sh`** — NEW, and measured: it builds its OWN user namespace
+  for the uid split it is about (`unshare -U --map-users=0:$(id -u):1
+  --map-users=1001:$SUB:1`, `$SUB` from `/etc/subuid` for `id -un`). Inside the
+  helper's namespace `id -un` is root, `/etc/subuid` has no root line, and the
+  gate correctly **SKIPs** — 47 PASS became 0. Its residue is the smallest on
+  the list: one `mktemp` under `/tmp` holding `$HAMWSYS` and its derived `.bb`
+  and `.chrome`, no `/srv`, no `/dev/shm`, no fixed `hamnix-*` name, no desktop
+  client.
+* **`runsweep_jail.sh`** — NOT a gate and already in a STRICTER jail.
+  `hamlinux_runsweep.sh` runs it under `unshare -rmn --fork --pid --kill-child`
+  before its first line, after which it `exec unshare --root=$MNT`s into an
+  overlay root: its `/tmp`, `/dev/shm` and `/srv` are the per-program upper
+  layer. It takes five positional arguments, not a gate's `"$@"`.
+* **`private_ns_isolates.sh`**, **`rless_is_private.sh`** — they ARE the
+  proofs; their last assertion has to see the real host.
+
+#### One thing the record had wrong
+
+The exemption for `channel_runs_desktop.sh` said it *"sets no `HAMWSYS` at all
+— it takes `linux-wsys.c`'s `/srv`, then the `/dev/shm/hamnix-wsys` fallback"*.
+**It does not.** It starts no compositor; it hands the unpacked binaries to
+`de_mouse_chrome.sh`, which pins `HAMWSYS`, `HAMWSYS_BB`, `HAMWSYS_IMG` and
+`HAMFB_FILE` into its own `$WORK` (`:146-150`) and is itself already isolated.
+A witness desktop on the DEFAULT segment, run beside this gate with the
+isolation switched **off**, saw its window table unchanged (3 windows → 3). It
+is isolated anyway — "the delegate happens to pin its segment" is a property of
+the delegate, not of this gate — and the note in the file now records what was
+measured instead of what was assumed.
+
+Still unsurveyed rather than exposed: `snarf_device.sh`, `snarf_serial.sh` and
+`xsnarf_bridge.sh` set `HAMSNARF`, so the `/srv/snarf` and
+`/dev/shm/hamnix-snarf` fallbacks should not fire; `gates_are_private.sh` does
+not put them in scope because they start no compositor. `ac_ns_host.sh`,
+`hpm_hook_bounded.sh` and `lex_error_fatal.sh` write `/tmp` paths only inside a
+chroot/fixture root they made.
 
 Everything under `qemu`/VM control writes inside the guest and is private by
 construction.
