@@ -138,34 +138,10 @@
  * deliver nothing to anybody; a v6 client would park on that ring for ever and
  * report no keyboard input.  A silent half-share of a table two builds disagree
  * about is what this counter exists to prevent, and "the layout matches" is not
- * "the protocol matches".
- *
- * "IT IS LOUD -- THE WINDOWS GO" WAS WRONG, AND IT WAS MEASURED WRONG.
- * This paragraph used to end by calling the re-initialise LOUD and therefore
- * acceptable, the alternative being "a desktop that looks right and ignores the
- * keyboard".  tests/linux/installed_update_wsysver.sh ran that sentence on a
- * real installed UEFI+ext4 machine and it is neither loud nor acceptable:
- *
- *   * `hpm update` exits 0 and says nothing about a window system or a session.
- *   * The next application opened flips the segment to v7 and the ENTIRE
- *     DESKTOP disappears -- wallpaper, icons, panel, taskbar and the person's
- *     own terminal.  What is left is a featureless slab and a mouse cursor;
- *     one run instead showed one window titled "Terminal" painting the dead
- *     BACKDROP's wallpaper, because the new client took the dead backdrop's row.
- *   * The compositor keeps running and repaints nothing.  It still counts
- *     keystrokes and routes them nowhere.  It still owns /dev/fb, so the text
- *     console is not behind it.
- *   * There is no panel, no Applications button and nothing to click.  On a
- *     physical machine the only remaining control is the power button.
- *
- * A compositor that is up and painting nothing is precisely the success-shaped
- * answer NORTH_STAR.md forbids.  So the remedy is no longer unconditional: see
- * A LIVE SESSION IS NOT A LEFTOVER, above shm_attach.  A build meeting a
- * foreign segment that some LIVE process still holds a window in REFUSES TO
- * ATTACH, says so by name on stderr, and changes nothing; the running session
- * survives whole and only the newly-started program fails.  A leftover segment
- * -- nobody holding a row -- is re-initialised exactly as before, which is what
- * keeps the first program after a boot working.
+ * "the protocol matches".  The re-initialise it forces costs the previous
+ * session's windows, which is what a version mismatch has always meant here,
+ * and it is LOUD -- the windows go -- where the alternative is a desktop that
+ * looks right and ignores the keyboard.
  *
  * VERSION 7 CARRIES TWO CHANGES, not one, and they landed from different
  * branches: the window table grew to 512 rows AND the keystrokes left the
@@ -177,12 +153,9 @@
  * != 6 and re-inits.  This is the MAPPED-PREFIX direction, not the
  * complete-and-clean one -- v7 is 37,972,380 bytes to v6's 19,052,956, so a v6
  * build maps and re-inits only the prefix and cannot reach rows 256..511; the
- * next v7 attacher punches the whole segment before anything reads a row --
- * UNLESS that segment is a live session, in which case it now refuses.  A v6
- * build has no such refusal in it, because the refusal ships in v7: the FIRST
- * bump this protects is 7 -> 8, and what it does for 6 -> 7 is stop every v7
- * binary (which is every binary the update installs) from wiping the v6 session
- * it finds running.  No new binary
+ * next v7 attacher punches the whole segment before anything reads a row.  The running session's windows are gone and every live client is
+ * re-attached to an empty table -- the established consequence of a live
+ * `hpm update` of the window system, unchanged by this pass.  No new binary
  * ships here and no package list changes: the channel is code inside
  * user/linux-wsys.c, which every wsys program already links. */
 #define WSYS_VERSION      7
@@ -1296,142 +1269,6 @@ static int chrome_attach(void)
     return 0;
 }
 
-/* ================================================================== *
- * A LIVE SESSION IS NOT A LEFTOVER
- * ==================================================================
- *
- * WHAT THIS ANSWERS.  shm_attach used to treat "the segment on disk says a
- * version I do not know" as one situation with one remedy: clear it and carry
- * on.  There are two situations and they need opposite answers.
- *
- *   A LEFTOVER.  Nothing is running against it.  /srv is tmpfs and made fresh
- *   every boot, so on a real machine this is the first program after a boot
- *   meeting a segment some earlier program in the same boot left behind, or a
- *   test harness re-using an $HAMWSYS file.  Re-initialising is correct and
- *   MUST keep working -- "a fresh boot re-initialises a stale segment
- *   normally" is a property this pass is not allowed to break.
- *
- *   A LIVE SESSION.  A compositor is compositing, a panel is drawing, a person
- *   is typing into a terminal.  Re-initialising takes every one of those
- *   windows away from processes that are still running and cannot be told.
- *   That is the measured slab.
- *
- * HOW THEY ARE TOLD APART, and it is deliberately not "is wsysd running".
- * Asking after a process by NAME means /proc, a name that can be spoofed and a
- * daemon that might legitimately be called something else in a namespace.  The
- * question that actually matters is narrower and is answered by the segment
- * itself: DOES ANY ROW OF THIS WINDOW TABLE BELONG TO A PROCESS THAT IS STILL
- * ALIVE?  If yes, wiping the table hurts somebody; if no, there is nobody to
- * hurt.  A compositor with no windows is not a session worth protecting -- and
- * a compositor that has one has, by construction, a row here.
- *
- * READING A FOREIGN TABLE WITHOUT SHARING IT.  The rows are read with pread(2)
- * on the fd -- twelve bytes per row -- and the segment is never mapped, so
- * this is not the "silent half-share of a table two builds disagree about"
- * that the version counter exists to prevent.  Three bytes of layout are
- * relied on and all three are FROZEN and asserted below:
- *
- *   * struct wshm's prefix (magic .. inputgen) is byte-for-byte the same at
- *     v5, v6 and v7, so win[] starts at the same offset in all three;
- *   * struct wwin is byte-for-byte the same, so row i is at a computable
- *     offset and `used`, `wid` and `pid` are its first three words;
- *   * struct wsink is unchanged, so the row COUNT of a foreign segment can be
- *     recovered from its size alone:
- *
- *         rows = (size - sizeof(prefix) - WSYS_SINKS * sizeof(struct wsink))
- *                / sizeof(struct wwin)
- *
- *     and the division must come out EXACT.  A size that does not decompose
- *     this way is a layout this build has no business guessing at, so it is
- *     treated as not-live and the old behaviour (re-initialise) stands: this
- *     check may never turn an unrecognisable segment into a refusal that no
- *     reboot clears.  19,052,956 is 256 rows; 37,972,380 is 512.
- *
- * WHY kill(pid, 0) AND NOT /proc.  It is the same question with fewer moving
- * parts and it works inside a pid namespace where /proc may not be mounted.
- * EPERM counts as alive -- a process owned by another uid is still a process
- * with a window on the screen.  A recycled pid is the one false positive
- * available, and its cost is a refusal on a segment that could have been
- * cleared: the person reboots, which they were going to do anyway.  The
- * opposite error costs a desktop. */
-/* THE FROZEN THREE, asserted rather than described.  seg_rows_in() recovers a
- * foreign segment's row count from its SIZE, which is only possible while
- * these three numbers are the same in the build that wrote it and the build
- * reading it.  They have been the same at v5, v6 and v7 and the comments above
- * say so in prose; here they say so to the compiler.  A pass that changes one
- * of them must come here, and must then decide what a live-session refusal
- * means for a segment whose rows it can no longer find -- the answer is not
- * "adjust the number", it is "sizes stop identifying versions, so put the row
- * count in the frozen prefix".  19,052,956 and 37,972,380 are v6 and v7 and
- * are the numbers tests/linux/installed_update_wsysver.sh reads off /srv. */
-_Static_assert(offsetof(struct wshm, win) == 28,      "wshm prefix is frozen");
-_Static_assert(sizeof(struct wwin)        == 73904,   "struct wwin is frozen");
-_Static_assert(sizeof(struct wsink)       == 4172,    "struct wsink is frozen");
-_Static_assert(offsetof(struct wshm, win) + 256 * sizeof(struct wwin)
-               + WSYS_SINKS * sizeof(struct wsink) == 19052956u,
-               "a v6 segment is 19,052,956 bytes");
-_Static_assert(sizeof(struct wshm) == 37972380u,
-               "a v7 segment is 37,972,380 bytes");
-
-static int seg_force_reinit(void)
-{
-    /* THE ESCAPE HATCH, and it is an escape hatch and not a policy.  A gate
-     * that deliberately drives an old segment under a live client needs to be
-     * able to say so, and an operator whose session is wedged needs a way
-     * through that is not "edit the source".  It is OFF unless set, and
-     * nothing in the rc scripts sets it. */
-    const char *v = getenv("HAMWSYS_FORCE_REINIT");
-    return v && *v && *v != '0';
-}
-
-static int seg_rows_in(off_t size)
-{
-    off_t fixed = (off_t)offsetof(struct wshm, win)
-                + (off_t)(WSYS_SINKS * sizeof(struct wsink));
-    if (size <= fixed) return -1;
-    off_t body = size - fixed;
-    if (body % (off_t)sizeof(struct wwin)) return -1;
-    off_t rows = body / (off_t)sizeof(struct wwin);
-    if (rows <= 0 || rows > 65536) return -1;
-    return (int)rows;
-}
-
-static int shm_seg_is_live(int fd, off_t size)
-{
-    int rows = seg_rows_in(size);
-    if (rows < 0) return 0;                    /* a shape we cannot read */
-    for (int i = 0; i < rows; i++) {
-        int32_t row[3] = { 0, 0, 0 };          /* used, wid, pid */
-        off_t at = (off_t)offsetof(struct wshm, win)
-                 + (off_t)i * (off_t)sizeof(struct wwin);
-        if (pread(fd, row, sizeof row, at) != (ssize_t)sizeof row) return 0;
-        if (!row[0] || row[2] <= 0) continue;
-        if (kill((pid_t)row[2], 0) == 0 || errno == EPERM) return 1;
-    }
-    return 0;
-}
-
-/* SAY IT, ONCE, BY NAME, ON STDERR.  A program that silently fails to draw is
- * the failure shape this tree keeps paying for, so the refusal is never left
- * to the caller's errno handling -- EPROTO out of an open(2) of a file under
- * /dev/wsys is not a sentence anybody can act on.  Once per process: a client
- * that retries the attach in a loop must not turn the explanation into a
- * scroll. */
-static void seg_refuse_message(const char *path, uint32_t theirs)
-{
-    static int said;
-    if (said) return;
-    said = 1;
-    fprintf(stderr,
-        "wsys: REFUSING to attach to %s: it is a LIVE window-system session of\n"
-        "wsys:   version %u and this program is version %u.  Attaching would erase\n"
-        "wsys:   every window on that desktop, so nothing has been changed.\n"
-        "wsys: The window system was updated underneath the running session.\n"
-        "wsys:   REBOOT (or restart the session) and start this program again.\n",
-        path && *path ? path : "the window system segment",
-        (unsigned)theirs, (unsigned)WSYS_VERSION);
-}
-
 static int shm_attach(void)
 {
     if (shm) return 0;
@@ -1488,10 +1325,8 @@ static int shm_attach(void)
      * one that can.  The segment is a shared IPC rendezvous in a 1777 tmpfs --
      * 0666 is its correct mode, the same as /dev/shm.  Per-window authority is
      * NOT a file-mode question: devwsys gates the system-chrome ctl verbs on
-     * uid separately, and THE UID GATE section below is that gate, ported.
-     *
-     * IT HAPPENS AFTER THE REFUSAL BELOW, not before it -- see NOTHING IS DONE
-     * TO THE FILE BEFORE THE DECISION. */
+     * uid separately, and THE UID GATE section below is that gate, ported. */
+    if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
 
     struct stat st;
     if (fstat(fd, &st) < 0) { int e = errno; close(fd); errno = e; return -1; }
@@ -1511,6 +1346,11 @@ static int shm_attach(void)
     seg_dev = st.st_dev;
     seg_ino = st.st_ino;
     seg_id_known = 1;
+    if ((uint64_t)st.st_size < sizeof(struct wshm)) {
+        if (ftruncate(fd, (off_t)sizeof(struct wshm)) < 0) {
+            int e = errno; close(fd); errno = e; return -1;
+        }
+    }
     /* Read the header BEFORE mapping, because the decision "does this segment
      * need re-initialising" now changes what we do to the FILE and not only to
      * the mapping. */
@@ -1518,56 +1358,6 @@ static int shm_attach(void)
     int need_init = 1;
     if (old_size >= (off_t)sizeof hdr && pread(fd, hdr, sizeof hdr, 0) == (ssize_t)sizeof hdr)
         need_init = (hdr[0] != WSYS_MAGIC || hdr[1] != WSYS_VERSION);
-
-    /* REFUSE, RATHER THAN WIPE A DESKTOP SOMEBODY IS SITTING IN FRONT OF.
-     * ------------------------------------------------------------------
-     * See A LIVE SESSION IS NOT A LEFTOVER above shm_seg_is_live().  Every
-     * paragraph above this one describes re-initialising a foreign segment as
-     * the LOUD, acceptable answer.  It was measured on a real installed
-     * machine and it is neither: the windows go, the compositor keeps running
-     * and repainting nothing, it still owns /dev/fb so the text console is not
-     * behind it, and the person is left with a featureless slab whose only
-     * remaining control is the power button.  Nothing had told them, and
-     * nothing asks for the reboot that fixes it.
-     *
-     * So the re-initialise is now conditional on the segment being DEAD.  If a
-     * process is still holding a window in it, this program declines to attach,
-     * says so by name on stderr, and changes NOTHING -- not the header, not a
-     * hole punched in the file, not one byte.  The running session survives
-     * whole; the new program is the only thing that fails, which is the right
-     * thing to lose. */
-    if (need_init && old_size > 0 && hdr[0] == WSYS_MAGIC
-        && hdr[1] != WSYS_VERSION && !seg_force_reinit()
-        && shm_seg_is_live(fd, old_size)) {
-        seg_refuse_message(seg_path, hdr[1]);
-        close(fd);
-        seg_owner_known = 0;
-        seg_id_known = 0;
-        seg_path[0] = '\0';
-        errno = EPROTO;
-        return -1;
-    }
-
-    /* NOTHING IS DONE TO THE FILE BEFORE THE DECISION, and this ordering was
-     * WRONG in the first version of this pass -- caught by the gate, in the one
-     * number the gate exists to read.
-     *
-     * The chmod and this ftruncate used to sit above the header read, where
-     * they had always been.  So a v7 binary meeting a live v6 session GREW THE
-     * FILE from 19,052,956 to 37,972,380 bytes and only then refused.  The
-     * desktop survived -- the header and every row were untouched, the screen
-     * was pixel-identical, the four windows were still there -- and
-     * installed_update_wsysver.sh still said FAIL, because the size of /srv/wsys
-     * is how that gate knows WHICH WINDOW SYSTEM A SESSION IS, and a refusal
-     * that resizes the segment has destroyed exactly that.  It also made the
-     * refusal's own words false: "nothing has been changed" was not true of the
-     * file.  Two costs, one cause, and the fix is an ordering. */
-    if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
-    if (old_size < (off_t)sizeof(struct wshm)) {
-        if (ftruncate(fd, (off_t)sizeof(struct wshm)) < 0) {
-            int e = errno; close(fd); errno = e; return -1;
-        }
-    }
     /* THE ZEROES WE DO NOT WRITE — see WSYS_MAX_WINDOWS above for the number
      * this buys.  A re-init used to be `memset(shm, 0, sizeof *shm)`, and on a
      * FRESH segment every one of those bytes was already zero: the memset's
