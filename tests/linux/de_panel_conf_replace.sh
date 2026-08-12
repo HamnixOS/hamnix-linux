@@ -68,14 +68,28 @@
 # an event ring. Assertion 13 enforces that mechanically, for the reason
 # tests/linux/de_mouse_chrome.sh records at length.
 #
-# THE CONFIG FILE THIS USES. `_open_config` prefers the writable runtime
-# override /tmp/hamnix-panel.conf and falls back to the shipped
-# /etc/panel.conf; it returns ONE fd and every line after it — `_cfg_changed`,
-# `_load_config`, `_reload_panels` — is shared. The host running this gate has
-# no writable /etc/panel.conf, so the replacement is performed on the override
-# path. Its CONTENT is now `etc/panel.conf` ITSELF, copied byte for byte,
-# comment header and all — see panel_conf() below for why it could not be
-# until the streaming reader landed.
+# THE CONFIG FILE THIS USES, AND WHY THIS GATE RUNS IN ITS OWN NAMESPACE
+# ======================================================================
+# `_open_config` prefers the writable runtime override /tmp/hamnix-panel.conf
+# and falls back to the shipped /etc/panel.conf; it returns ONE fd and every
+# line after it — `_cfg_changed`, `_load_config`, `_reload_panels` — is shared.
+# The host running this gate has no writable /etc/panel.conf, so the
+# replacement is performed on the override path.
+#
+# That path is NOT scratch. It is the desktop's live configuration override,
+# one fixed name shared by every process on the machine, and an earlier
+# revision of this gate wrote the real one. It cost two other agents their
+# conclusions — the incident is written up in tests/linux/private_ns.sh, which
+# is the fix: this gate now re-execs itself inside a private mount namespace
+# where /tmp, /dev/shm and /srv are fresh empty tmpfs belonging to this run
+# alone. The replacement below is performed on a /tmp/hamnix-panel.conf that
+# no other process on this machine can see, and that ceases to exist when the
+# gate does. Nothing else about what is measured changes.
+#
+# Its CONTENT is `etc/panel.conf` ITSELF, copied byte for byte, comment
+# header and all. That only became possible when the streaming reader landed
+# -- until then the header alone overran `_load_config`'s 2047-byte read and
+# a verbatim copy of the shipped file was never parsed at all.
 #
 # Entirely offscreen (HAMFB_FILE + a file of evdev records): no VM, no display,
 # no GPU, about half a minute. The software Vulkan ICD is forced because wsysd
@@ -83,6 +97,14 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+
+# FIRST, before anything creates a file. Everything below this line runs in a
+# mount namespace whose /tmp, /dev/shm and /srv are this run's alone; the call
+# above it execs and does not return. reap.sh must be sourced AFTER it: its
+# registry defaults to a mktemp under /tmp, and a registry made before the
+# tmpfs lands on /tmp is a registry the gate can no longer see.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 . tests/linux/reap.sh
 
 WORK="${PANELCONF_WORK:-$(mktemp -d -p "${TMPDIR:-/tmp}" panelconf.XXXXXX)}"
@@ -101,8 +123,11 @@ export HAMWSYSD_INPUT="$WORK/input.evdev"
 [ -r /usr/share/vulkan/icd.d/lvp_icd.json ] && \
     export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 
-# The active panel config. The panel is the only program in the tree that
-# reads this path; it is removed on every path out of this gate.
+# The active panel config. On a real machine this is the desktop's live
+# override, read by the panel in preference to /etc/panel.conf. Here it is the
+# same name inside this run's own /tmp, which no other process can see. The
+# rm in cleanup below is now redundant — the tmpfs takes it — and is kept as
+# the thing that still holds if someone runs with HAMTEST_NO_PRIVNS=1.
 CONF=/tmp/hamnix-panel.conf
 
 pass=0; fail=0
@@ -110,10 +135,27 @@ ok()   { echo "panelconf: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "panelconf: FAIL $*"; fail=$((fail+1)); }
 info() { echo "panelconf: INFO $*"; }
 
+# Stated, not assumed: priv_ns_reexec has already REFUSED to get this far if
+# the namespace was not in place, so this line is a report of a fact the run
+# depends on rather than a check that could still fail. It is deliberately not
+# scored -- the gate's score is about the panel, and an assertion count that
+# moves for an unrelated reason is a worse answer than a printed fact.
+info "$(priv_ns_describe)"
+
 reap_track "$WORK/reaped"
 cleanup() {   # reap_on_exit has already run reap_all by the time this is called
     rm -f "$CONF"
-    [ "$KEEP" = 1 ] || rm -rf "$WORK"
+    # $WORK is inside this run's private /tmp, which the kernel takes down with
+    # the namespace whatever happens here -- so KEEP=1 has to copy anything it
+    # wants to survive OUT, to a path the namespace does not shadow.
+    if [ "$KEEP" = 1 ] && [ "${HAMTEST_NO_PRIVNS:-0}" != 1 ]; then
+        local dest; dest="$(priv_ns_keep panelconf)" && {
+            cp -a "$WORK/." "$dest/" 2>/dev/null
+            echo "panelconf: INFO kept the run's artefacts at $dest"
+        }
+    elif [ "$KEEP" != 1 ]; then
+        rm -rf "$WORK"
+    fi
 }
 reap_on_exit cleanup
 done_report() { echo "panelconf: $pass passed, $fail failed"; [ "$fail" = 0 ]; }
@@ -227,7 +269,12 @@ click() {   # click <x> <y> -- move, settle, press, hold, release
 # question specifically.
 SHIPPED_CONF="$PROJ_ROOT/etc/panel.conf"
 panel_conf() {   # panel_conf <marker> [one]  -- the config, with a marker line
-    echo "# $1"
+    # PANELCONF_TAG lets a caller stamp every config this run writes with
+    # something no other run can produce, so that "did this file escape?" is
+    # answerable by identity rather than by a count that cannot tell whose
+    # leak it found. tests/linux/private_ns_isolates.sh uses it for exactly
+    # that. It is otherwise inert.
+    echo "# $1 ${PANELCONF_TAG:-}"
     if [ "${2:-}" = one ]; then
         # the shipped file with its SECOND `panel ... end` block deleted
         sed '/^panel bottom$/,/^end$/d' "$SHIPPED_CONF"

@@ -2608,6 +2608,129 @@ arrived. The premise now follows the arm. A red for the right reason worded
 as a red for the wrong one is still the failure this project keeps paying
 for.
 
+### And the gate THE GATES got — `tests/linux/private_ns.sh`
+
+**A gate that passes while corrupting the machine around it is the
+success-shaped answer, and it was green throughout.**
+
+`tests/linux/de_panel_conf_replace.sh` proved a real defect, scored 17 PASS,
+and wrote **`/tmp/hamnix-panel.conf`** — which is not a scratch path.
+`user/hampanelscene.ad`'s `_open_config` reads it *in preference to* the
+shipped `/etc/panel.conf` and `user/hamsettings.ad` writes it: it is the
+desktop's live runtime override, one fixed name shared by every process on the
+host.
+
+The cost is measured, not imagined. While that gate ran, **another agent's
+independent offscreen run** of the published desktop binaries watched its
+panel log `config reload applied: 2 panel(s)` then `1 panel(s)`, found its top
+bar gone, and concluded it had reproduced a defect. It had observed this
+gate's assertion 11 ("a config that drops to ONE panel must withdraw the
+surplus window") landing in the middle of its run. That false reproduction was
+relayed onward to a third agent as a finding. **One gate's scratch file cost
+two agents' conclusions.**
+
+**The fixed names are mostly not in the test scripts.** They are compiled into
+the programs under test, so no amount of care in a gate can move them:
+
+| program | fixed host-global names it writes |
+|---|---|
+| `hampanelscene` | `/tmp/hamnix-panel.conf` `…panel.health` `…panel.fault` `/tmp/hamnix-panel-drop` `/tmp/hamnix-notif.log` |
+| `hamdesktop` | `/tmp/hamdesktop-wp.status` `/tmp/.hamdesktop.src` `/tmp/hamnix-panel-drop` |
+| `hamctl` | `/tmp/hamnix-wallpaper.{ppm,conf}` `…-tz.conf` `…-{display,mouse,kbd,sound,net}.conf` |
+| `hamsettings` | `/tmp/hamnix-wallpaper.ppm` `/tmp/hamnix-panel.conf` |
+| `linux-wsys.c` | `/srv/wsys`, else `/dev/shm/hamnix-wsys`, else `/tmp/hamnix-wsys` (and `-bb`) |
+| `linux-snarf.c` / `-audio` / `-net` / `-fdns` | `/srv/<name>`, else `/dev/shm/hamnix-<name>` |
+
+Those last two rows are live on this machine today: `/dev/shm` holds
+`hamnix-wsys`, `hamnix-wsys-bb`, `hamnix-net` and `hamnix-fdns`, and `/tmp`
+holds a `hamnix-wsys-bb` owned by **uid 100000** — a userns-mapped uid from
+somebody's earlier run. A gate that starts `wsysd` without setting `HAMWSYS`
+attaches to *those*.
+
+**The fix is at the namespace, not at the path.** `tests/linux/private_ns.sh`
+re-execs the calling gate inside an unprivileged user + mount namespace where
+`/tmp`, `/dev/shm` and `/srv` are each a fresh empty tmpfs of that run alone,
+made after `mount --make-rprivate /` so nothing propagates back out, and taken
+down by the kernel with the namespace — including on SIGKILL, which no trap
+survives. Two lines in a gate:
+
+```sh
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"          # FIRST -- before reap.sh, before $WORK
+```
+
+It **refuses by name** when the kernel will not provide the namespace, rather
+than falling back to writing the machine. `HAMTEST_NO_PRIVNS=1` is the
+deliberate, loud escape hatch. `$WORK` may stay under `/tmp`; for a `KEEP=1`
+post-mortem, `priv_ns_keep` hands back a directory outside the shadowed paths.
+
+**And it is proved, not asserted.** `tests/linux/private_ns_isolates.sh` runs
+the incident as an experiment — a *second*, independent desktop up and reading
+`/tmp/hamnix-panel.conf` while `de_panel_conf_replace.sh` replaces that file
+four times beside it — and **calibrates the witness with a negative control**,
+because a witness that survives by being unable to feel anything proves
+nothing:
+
+| | reloads the witness saw | its taskbar, in framebuffer pixels | its config marker |
+|---|---|---|---|
+| isolated | 0 → 0 | 81% → 81% | intact |
+| `HAMTEST_NO_PRIVNS=1` | 0 → **6** | 81% → **0%** | **gone** |
+
+That `81% → 0%` is the other agent's missing top bar, reproduced on demand.
+Both experiments run inside an *outer* namespace of their own, so the control
+reproduces the contamination without inflicting it on the machine, and the
+host-leak assertion is by **identity** (a per-run tag), not by a count — its
+first version failed on somebody *else's* concurrent file, and blaming this
+run for another run's write is FAIL-shaped instead of true, the same sin in
+the other direction. **7 PASS.**
+
+**The gate still has teeth.** With `user/linux-wsys.c`'s `hide`/`show`
+argument handling reverted (`git apply -R` of the fix, not `git stash push`,
+which stashes nothing on an already-committed change and exits happy),
+`de_panel_conf_replace.sh` scores **11 PASS / 6 FAIL** inside the namespace —
+the same score it scored before it was isolated.
+
+**And it refuses to come back.** `tests/linux/gates_are_private.sh` is the same
+shape as `channel_covers_image.sh`'s packaging rule: a host-side gate that
+starts the window system either isolates itself, or is named in that file's
+`EXEMPT` table **with a reason** — an unlisted one FAILS, with the two lines
+it needs printed in the failure. A stale exemption (a file that no longer
+exists, or one since converted) fails too, so the list cannot quietly become
+where unfinished things go to be forgotten. Both arms were demonstrated: a
+planted unisolated gate scores 2/1, an exemption pointing at a deleted file
+scores 1/2. It compiles nothing and runs in about a second, and it prints how
+many exemptions are still only `NOT YET CONVERTED` so the green is never
+mistaken for "all of them are private".
+
+#### The survey: every host-side gate, and whether it is private
+
+Isolated (verified at the score they held before): `de_panel_conf_replace` 17,
+`de_focus_dismiss` 14, `de_mouse_chrome` 13, `wsys_desktop_z` 12,
+`de_appmenu_band` 11, `wsys_write_census` 10, `wsys_keyed` 8, `wsys_cover` 7,
+plus `private_ns_isolates` 7 itself.
+
+**Deliberately NOT isolated, with the reason in the file:**
+`tests/linux/wsys_uidgate.sh`. The namespace is only obtainable with
+`--map-root-user` (`--map-current-user` leaves `CapEff 0`, measured), so
+`geteuid()` is 0 inside, and `linux-wsys.c:1207` and `:1843` both branch on
+it. A gate whose whole question is which uid may open which window would still
+print its passes while being about the wrong uid.
+
+**Still exposed, named rather than fixed** — each needs a verification run
+this session did not have room for, and each is a two-line change:
+
+| gate | what escapes | note |
+|---|---|---|
+| `channel_runs_desktop.sh` | the full desktop write-set **and** the shm fallback — it sets no `HAMWSYS` at all | the highest-value one left: `scripts/hamlinux_packages.py` runs it before writing `index.json`, so it runs on every publish |
+| `runsweep_jail.sh` | same, plus `wsyswl` | |
+| `wsyswl_rootless.sh` | the desktop write-set (it does set `HAMWSYS`) | |
+| `wsyswl_{ceiling,conn_ceiling,shared_fate,stall,two_browsers,wheel}.sh`, `wsys_{title,image,close_button,bypass}.sh`, `x11_geom_probe.sh`, `input_probe.sh` | nothing from the desktop write-set; they set `HAMWSYS`/`HAMWSYS_BB`. The residue is the Wayland socket and whatever `wsyswl` puts in `XDG_RUNTIME_DIR`, which this helper does **not** shadow | lowest risk of the group |
+| `snarf_device.sh`, `snarf_serial.sh`, `xsnarf_bridge.sh`, `wlsnarf_bridge.sh` | they set `HAMSNARF`, so the `/srv/snarf` and `/dev/shm/hamnix-snarf` fallbacks should not fire — unverified | `wlsnarf_bridge.sh` also does `mkdir -p /tmp/.X11-unix` and binds `X$DPY` in it: a host-global X socket directory, and a display-number collision reaches a real X session |
+| `ac_ns_host.sh`, `hpm_hook_bounded.sh`, `lex_error_fatal.sh` | write `/tmp` paths only *inside* a chroot/fixture root they made | private already |
+
+Everything under `qemu`/VM control writes inside the guest and is private by
+construction.
+
 ### Running it
 
 ```
