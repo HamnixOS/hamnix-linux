@@ -472,12 +472,23 @@ boot() {   # boot <logfile> <seconds> <tag> [hand]
 cleanup() { rm -f "$QMP"; }
 reap_on_exit cleanup
 
+# HAMLINUX_AR_REPORT=1 re-reads the screendumps and logs an earlier run left
+# behind and re-prints the report over them. It exists because the reporting
+# half of this file has now been wrong twice while the MEASUREMENT was right --
+# an assertion looking in the boot log for lines the panel writes inside the
+# guest, and a closure test that answered about the wrong menu -- and 20
+# minutes of booting per attempt is a good way to leave such a bug in place.
+# It boots nothing and can therefore prove nothing on its own.
+if [ "${HAMLINUX_AR_REPORT:-0}" = 1 ]; then
+    say "REPORT ONLY: re-reading $WORK; nothing is booted and nothing here is new evidence"
+else
 say "boot 1 of 3: ARM NEW -- the machine as it ships (up to ${WAIT1}s)"
 boot "$WORK/boot.new.log" "$WAIT1" NEW
 say "boot 2 of 3: ARM FAV -- the same disk rebooted, with a launch in its history"
 boot "$WORK/boot.fav.log" "$WAIT2" FAV stage_hand_open
 say "boot 3 of 3: ARM OLD -- the same disk, hamappmenu moved aside (up to ${WAIT2}s)"
 boot "$WORK/boot.old.log" "$WAIT2" OLD
+fi
 
 # ===========================================================================
 # WHAT THE SCREEN AND THE WINDOW TABLE SAY.
@@ -646,12 +657,17 @@ fi
 
 # ---- 5. A CLICK THAT LAUNCHES -------------------------------------------
 # The launch is measured twice, because the two halves fail separately: the
-# menu CLOSED (its card is off the glass and its window is out of the table),
-# and the launch was RECORDED (the favourites file). On this machine the first
-# is true and the second is not.
+# menu CLOSED, and the launch was RECORDED where a reboot can find it.
+#
+# CLOSURE IS A PIXEL QUESTION AND ONLY A PIXEL QUESTION. It was briefly also
+# "and no menu window is in the table at the fav probe", which failed a run in
+# which everything worked: by the time the guest read the table the host had
+# already clicked Applications again and there WAS a menu window -- the one the
+# reopen had just opened. Two different menus, one assertion, and the answer
+# was about the wrong one.
 LCLOSE="$(ppn NEW-1-idle NEW-6-launched "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
-if [ "${LCLOSE:-$TOTAL}" -le $((TOTAL / 20)) ] && [ -z "$(menuwin "$WORK/boot.new.log" NEW-fav)" ]; then
-    ok "a real click on the filtered row CLOSED the menu: row 1 is back to bare wallpaper ($LCLOSE of $TOTAL px differ) and the menu's window is gone from the table"
+if [ "${LCLOSE:-$TOTAL}" -le $((TOTAL / 20)) ]; then
+    ok "a real click on the filtered row CLOSED the menu: row 1 of its card is back to bare wallpaper ($LCLOSE of $TOTAL px differ from the desktop photographed before any menu existed)"
 else
     bad "after clicking the app row the menu is still on the screen ($LCLOSE of $TOTAL px of row 1 still differ from the bare desktop)"
 fi
@@ -679,31 +695,41 @@ else
     bad "THE DEFECT: after a reboot with $LAUNCH_PROG in the favourites file, the first menu shows no Favourites section -- row 1 is ${FHDR1:-?}% header and ${FCAT1:-?}% category button (with no history it was ${NEWHDR}%/${NEWCAT}%)"
 fi
 
-# ---- 7. THE FREEZE, AND THE DEAD BUTTON AFTER IT -----------------------
-# Reported, not failed: the cause is a stale entry in a catalogue that should
-# not have been in use at all (FINDING 1), not the menu. But it is what a
-# person clicking "Files" gets, so it is measured rather than mentioned.
+# ---- 7. REOPENING IN THE SAME SESSION, AFTER A LAUNCH ------------------
+# MEASURED AND PRINTED, NOT ASSERTED, and the reason is a run that happened.
+# On one of three runs of this file the screen STOPPED CHANGING the moment the
+# menu launched /bin/hamfm: the 2nd click on Applications moved 0 px, the 3rd
+# moved 0 px, the CLOCK DID NOT ADVANCE over a minute, no second menu window
+# ever appeared, the panel logged one spawn for three clicks, and `ps` showed
+# hamfm with 2:02 of CPU in state R -- 100% of a core, a TUI with no terminal.
+# The other two runs reopened normally (2nd click opens, 3rd click toggles it
+# shut) with hamfm at 0:00. So it is INTERMITTENT, it is not the menu, and
+# writing either "it froze" or "it works" as this gate's verdict would be a
+# claim about one sample. What the file does instead is print the four numbers
+# every run, so the next person sees which of the two they got.
+#
+# The prose that WOULD have been wrong here is worth recording: an earlier
+# version of this block asserted the freeze in fixed text, and the very next
+# run printed that text above numbers saying the opposite.
 REWID="$(menuwin "$WORK/boot.new.log" NEW-fav)"
 R3WID="$(menuwin "$WORK/boot.new.log" NEW-third)"
 R2="$(ppn NEW-6-launched NEW-7-reopened)"
 R3="$(ppn NEW-7-reopened NEW-8-third)"
 OR2="$(ppn OLD-6-launched OLD-7-reopened)"
+SPAWNS="$(panelsaid "$WORK/boot.new.log" NEW | grep -c 'launched /bin/hamappmenu')"
 echo
-echo "--- THE FREEZE (measured, reported, not this gate's failure)"
-echo "    After the menu launched $LAUNCH_PROG, the screen STOPPED CHANGING:"
-echo "    the 2nd click on Applications moved $R2 px and the 3rd moved $R3 px"
-echo "    -- not even the clock advanced -- and no second menu window ever"
-echo "    appeared (after 2nd: '${REWID:-none}', after 3rd: '${R3WID:-none}')."
-echo "    The panel printed \"launched /bin/hamappmenu -self\" $(panelsaid "$WORK/boot.new.log" NEW | grep -c 'launched /bin/hamappmenu') time(s) for 3 clicks."
-echo "    In ARM OLD the same three clicks on the panel's OWN dropdown moved"
-echo "    $OR2 px, so this is not the machine being slow: it is specific to"
-echo "    what got launched. $LAUNCH_PROG is the TUI file manager and it was"
-echo "    spinning at 100% of a core with no terminal:"
+echo "--- REOPENING THE MENU IN THE SAME SESSION, AFTER A LAUNCH (measured, not asserted)"
+echo "    2nd click on Applications: $R2 px changed, menu window '${REWID:-none}'"
+echo "    3rd click on Applications: $R3 px changed, menu window '${R3WID:-none}'"
+echo "    the panel logged $SPAWNS spawn(s) of /bin/hamappmenu for 3 clicks"
+echo "    ARM OLD, same three clicks on the panel's own dropdown: $OR2 px"
+echo "    the launched program at the end of the boot:"
 echo "      $(awk '/PROCS-NEW:/{i=1;next} i&&/hamfm/{print;exit}' "$WORK/boot.new.log" | tr -d '\r')"
-echo "    It is in the menu because /etc/hamde/apps is not on the machine"
-echo "    (FINDING 1) and hamappmenu's built-in fallback names /bin/hamfm;"
-echo "    the SHIPPED catalogue entry, etc/hamde/apps/files.desktop, says"
-echo "    Exec=/bin/hamfmscene."
+echo "    ONE RUN IN THREE FROZE HERE: 0 px, 0 px, one spawn, no window, and"
+echo "    hamfm at 2:02 of CPU in state R. $LAUNCH_PROG is the TUI file manager;"
+echo "    it is in this menu only because /etc/hamde/apps is not on the machine"
+echo "    (FINDING 1) and hamappmenu's built-in fallback names it, where the"
+echo "    SHIPPED etc/hamde/apps/files.desktop says Exec=/bin/hamfmscene."
 
 # ---- 7. THE ARM THAT MUST FAIL ------------------------------------------
 # Everything above, asked of the same disk with the binary moved aside. If any
@@ -768,7 +794,7 @@ echo "    which 8 of the 11 entries name programs that are not installed"
 echo "    (/bin/calculator, /bin/hamterm, /bin/hamedit, /bin/hamview,"
 echo "    /bin/hambrowse, /bin/hammonscene, /bin/hamctl, /bin/hamvideoscene,"
 echo "    /bin/hamaudioscene). What the guest found:"
-echo "      $(awk -v m="CATALOGUE-NEW:" 'index($0,m){i=1;next} i&&NF>0{printf "%s ", $0} i&&n++>3{exit}' "$WORK/boot.new.log" | tr -d '\r')"
+echo "      $(awk -v m="CATALOGUE-NEW:" 'index($0,m){i=1;next} i&&NF>0{print;exit}' "$WORK/boot.new.log" | tr -d '\r')"
 echo "    Clicking one of those eight is a menu entry that does nothing. This"
 echo "    gate launches Files (/bin/hamfm), one of the three that are real."
 echo
