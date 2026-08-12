@@ -474,6 +474,49 @@ same failure this project exists to beat.
   became a permanent desync. Every `if n > CAP: n = CAP` on a stream socket in
   this tree is the same bug waiting for a bigger peer.
 
+* **`accept` HANDED BACK THE LISTENER, SO EVERY ADDER SERVER ON THIS LINE READ
+  THE WRONG SOCKET.** Found by refusing to write off "x11srv fails its
+  handshake on this host" as host-specific. strace says it in two lines:
+
+      accept(5, NULL, NULL)       = 6
+      read(5, ..., 12)            = -1 ENOTCONN
+
+  It accepts a client and then reads from the socket it accepts ON.
+  **PRE-EXISTING** -- both halves are byte-identical at `4b50eae2`, and the
+  previous commit to `user/linux-net.c` is `8f4a1026`. **NOT host-specific**:
+  it lives in this line's networking, so it is every user's, not this
+  machine's.
+
+  **WHY.** Plan 9's accept answers the NEW connection number on the ctl file.
+  `user/net9.ad`'s `net_accept` does the only dance it can -- open ctl for
+  WRITE, write "accept", CLOSE it (an fd opened for writing cannot be read
+  back), reopen for READ, read the number. `linux-net.c` kept that answer in
+  the OPEN FILE's snapshot, so the close threw it away and the reopen answered
+  the LISTENER's own number. `net_accept` returned that, its caller opened
+  `/net/tcp/<listener>/data`, and the first read is ENOTCONN because a
+  listening socket has no peer. A lifetime mismatch between two sides' idea of
+  what a ctl file remembers, and it fails as somebody else's error message --
+  what x11srv printed was `setup read failed`.
+
+  **THE BLAST RADIUS IS EVERY SERVER THAT TAKES A CONNECTION**: `httpd.ad`,
+  `httpd_worker.ad`, `sshd.ad`, `u_server.ad`, `x11srv.ad`. Their own gates run
+  on the BARE-METAL lane, where /net is the real devnet and the dance works --
+  which is exactly why nothing here ever caught it.
+
+  The answer is now left pending on the listener for exactly one read (the one
+  open `net_accept` makes after closing the fd it wrote to), process-local on
+  purpose: `struct connrec` is in a SHARED segment whose layout other builds
+  agree on, and no other process has any business seeing this value.
+
+  **GATE**: `tests/linux/x11_stream_resync.sh`, 5 PASS / 0 FAIL, offscreen,
+  seconds. It asserts the handshake COMPLETES (that is the whole of this
+  defect) and that the stream survives an oversized request (that is the
+  clamp-without-drain one, measured at last -- it could not be, before this,
+  because this defect sat in front of it). **The gate is proved able to fail**:
+  against a build with the drain removed and this fix left in it reports 3 PASS
+  / 1 FAIL and `VERDICT: DESYNCHRONISED`. It SKIPS rather than binding over
+  anything already on port 6000, which is X display :0.
+
 * **"CLAMP A PEER-DECLARED LENGTH AND KEEP PARSING THE SAME STREAM" IS A CLASS,
   AND THE TREE HAS BEEN SWEPT FOR IT.** The X setup reply that broke the
   browser path was one instance. The shape is: read a length off a STREAM (no
