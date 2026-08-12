@@ -20,6 +20,24 @@ trust root that has a matching secret key in existence.
 
 ### Desktop
 
+- **THE DESKTOP CAN BE CLICKED WITH A MOUSE.** It could not, at all, before
+  this release. The compositor delivered pointer events to one ring and the
+  panel and desktop read a different ring that nothing ever filled, so a real
+  click on the Applications menu or a desktop icon did nothing whatever. It
+  survived unnoticed because every test in the tree wrote that ring by hand as
+  the host owner — the gate that proves it now drives synthetic evdev instead,
+  and asserts about itself that it never pokes a ring.
+  A second defect was found in the same place: the compositor drained every
+  pending input record before routing once per frame, so a move/press/release
+  arriving together collapsed into a lone release and the PRESS was never
+  delivered at all.
+- **Windows have their names on their title bars.** Titles were stored and
+  never painted, so several open windows were indistinguishable. Long titles
+  are ellipsised, under two independent bounds: the measurement decides where
+  text is cut, and the surface rasterized into decides where ink can reach.
+  A client can set any title it likes and cannot escape its band or inject a
+  drawing command — but it CAN lie about which window is which, which needs a
+  per-uid window table to fix and is recorded rather than glossed.
 - **Windows can be closed with the mouse.** The close button ASKS the client
   to close rather than destroying its window underneath it, so a program gets
   to decide what happens to unsaved work.
@@ -37,6 +55,24 @@ trust root that has a matching secret key in existence.
 
 ### X and Wayland clients
 
+- **The connection ceiling is 16, up from 8, and the window table is 256.**
+  Firefox alone opened 8 connections, so a browser exhausted the compositor by
+  itself and a namespace's Xwayland arriving next lost a whole program, not a
+  window. Firefox's 8 was confirmed to be its true appetite rather than a
+  truncation: rebuilt with room for 32, it still opens exactly 8, with one tab
+  and with ten. The cost is honest and worth knowing — the window segment is
+  resident, not sparse, so it grew from 9.15 MiB to **18.17 MiB always
+  resident**. Two browsers still do not fit (18 > 16); that is the next
+  ceiling and it is named rather than hidden.
+  Three latent defects turned up while raising it, all the same shape — a
+  ceiling written down twice: a fixed 16-entry wait array with no bound check
+  that the new limit would have overrun on every pass of the event loop; a
+  listen backlog left as a literal 8; and a refusal message staged into a
+  buffer that held another client's pending file descriptor, which would have
+  handed a real client's keymap to the program being turned away.
+- **Being turned away says so.** A refused connection used to close the socket,
+  and the program printed `No wl_shm global` — blaming a feature that is
+  present. It now gets a named protocol error built from the actual limit.
 - **Rootless Xwayland**: an X window from a distribution namespace is a window
   ON THE DESKTOP, alongside native ones, not a client on a separate bare
   compositor. Firefox and Steam both render.
@@ -99,9 +135,10 @@ trust root that has a matching secret key in existence.
 See `HANDOFF.md` for the full list, which is kept honest rather than short.
 The ones most likely to be noticed:
 
-- **Window title bars show no text.** Titles are stored and never painted.
-- **The Applications menu spans the full display width**, with the right side
-  blank instead of showing the desktop behind it.
+- **Clicking away does not dismiss an open menu.** The compositor emits no
+  focus lines at all, so a window is never told it lost focus; the
+  Applications menu closes only if you click its button a second time.
+- **Two browsers at once still do not fit** in the 16-connection ceiling.
 - **The GPU stack has never been measured on real silicon.** The Vulkan
   userspace is real and `vkprobe` will report what an installed ICD
   enumerates, but on this build host every run has been software. Install a
