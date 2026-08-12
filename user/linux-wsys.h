@@ -45,6 +45,10 @@ enum {
                           /*   that condition is read back.                  */
     HAMWSYS_DIR,          /* /dev/wsys, /dev/wsys/<wid> — directory listing  */
     HAMWSYS_WIN_CTL,      /* /dev/wsys/<wid>/ctl                             */
+    HAMWSYS_WIN_WCTL,     /* /dev/wsys/<wid>/wctl — Plan 9 rio's per-window  */
+                          /*   control file: version/focus/resize/move, and  */
+                          /*   a read of the LIVE rect. devwsys.ad's "DE      */
+                          /*   primitive". lib/hamui.ad negotiates v2 here.  */
     HAMWSYS_WIN_SCENE,    /* /dev/wsys/<wid>/scene                           */
     HAMWSYS_WIN_KEYS,     /* /dev/wsys/<wid>/keys                            */
     HAMWSYS_WIN_POINTER,  /* /dev/wsys/<wid>/pointer                         */

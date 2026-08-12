@@ -360,7 +360,22 @@ struct wwin {
      * already destroy the row outright. */
     uint32_t scene_len_dead;
     uint32_t scene_gen;                       /* ++ on every commit */
-    uint32_t stage_len_dead;
+    /* WAS stage_len_dead, AND IT IS NOW wctl's FOCUS MODE -- 0 click (the
+     * default), 1 sloppy.  Reusing a dead word rather than adding a field is
+     * deliberate: struct wwin is byte-for-byte what versions 6, 7 and 8 had,
+     * and a new field would move every field after it, change sizeof(struct
+     * wwin) and sizeof(struct wshm), and cost a WSYS_VERSION bump -- which is
+     * an update that refuses to attach to a running desktop.  A dead word
+     * costs nothing and moves nothing.
+     *
+     * SAFE AGAINST THE BUILDS ALREADY IN THE FIELD: this word is dead in every
+     * shipped v8 binary, so an old binary sharing the segment neither reads nor
+     * writes it and simply does not know about focus mode.  Nothing degrades.
+     * It is world-writable like the rest of the row, so like `scene_gen` it is
+     * a HINT -- an attacker who flips it changes a focus policy on a window
+     * whose title, geometry and existence it could already change.  That is the
+     * CORRUPTION residue THE SPLIT names, not a new exposure. */
+    uint32_t focus_mode;
     char     title[WSYS_TITLE_CAP];
     uint8_t  scene_dead[WSYS_SCENE_CAP];
     uint8_t  stage_dead[WSYS_SCENE_CAP];
@@ -2227,6 +2242,14 @@ static struct wwin *win_find(int wid)
     return NULL;
 }
 
+/* wctl's focus policy, 0 = click (the DE-wide default), 1 = sloppy.  Read
+ * through a helper so the one place that knows which word carries it is the
+ * declaration in struct wwin, not every caller. */
+static int win_focus_sloppy(const struct wwin *v)
+{
+    return v && v->focus_mode == 1;
+}
+
 static struct wwin *win_alloc(int32_t pid)
 {
     if (shm_attach() < 0) return NULL;
@@ -3984,6 +4007,38 @@ static uint64_t put_int(uint8_t *out, uint64_t at, int32_t v)
  * ------------------------------------------------------------------ */
 static const char *WSYS_ROOT = "/dev/wsys";
 
+/* SAY WHICH LEAF, AND SAY IT ONCE PER NAME.
+ *
+ * An unknown per-window file is now ENOENT (see classify).  That is the right
+ * answer, but an errno alone is how the last one hid for months: the caller
+ * that meets it is a library like lib/hamui.ad, which checks for failure,
+ * takes its documented fallback and says nothing.  So the DEVICE says it, by
+ * name, on stderr -- the next leaf somebody forgets to wire up is then found
+ * by reading the console instead of by measuring a desktop that is subtly
+ * wrong.  Once per distinct name per process, so a client retrying in a loop
+ * cannot turn the explanation into a scroll. */
+static void unknown_win_leaf(int wid, const char *leaf)
+{
+    static char seen[8][32];
+    static int  nseen;
+    if (!leaf || !*leaf) return;
+    for (int i = 0; i < nseen; i++)
+        if (!strcmp(seen[i], leaf)) return;
+    if (nseen < (int)(sizeof seen / sizeof seen[0])) {
+        snprintf(seen[nseen], sizeof seen[0], "%s", leaf);
+        nseen++;
+    }
+    fprintf(stderr,
+            "wsys: /dev/wsys/%d/%s: no such per-window file.\n"
+            "wsys:   A window's files are a fixed set (ctl, wctl, scene, keys, "
+            "pointer, event,\n"
+            "wsys:   text, cmd, draw/ctl, draw/images, draw/image/<name>, "
+            "backbuffer).\n"
+            "wsys:   This used to be accepted as a named buffer and silently "
+            "reach nothing.\n",
+            wid, leaf);
+}
+
 /* Fills f->leaf/f->wid/f->name.  Returns the leaf kind. */
 static int classify(const char *path, struct hamwsys_file *f)
 {
@@ -4012,6 +4067,7 @@ static int classify(const char *path, struct hamwsys_file *f)
         } else if (p[i] == '/') {
             const char *l = p + i + 1;
             if      (!strcmp(l, "ctl"))     leaf = HAMWSYS_WIN_CTL;
+            else if (!strcmp(l, "wctl"))    leaf = HAMWSYS_WIN_WCTL;
             else if (!strcmp(l, "scene"))   leaf = HAMWSYS_WIN_SCENE;
             else if (!strcmp(l, "keys"))    leaf = HAMWSYS_WIN_KEYS;
             else if (!strcmp(l, "pointer")) leaf = HAMWSYS_WIN_POINTER;
@@ -4029,7 +4085,41 @@ static int classify(const char *path, struct hamwsys_file *f)
                 leaf = HAMWSYS_IMAGE;
                 snprintf(name, sizeof name, "%s", l + 11);
             }
-            else                            leaf = HAMWSYS_SINK;  /* wctl, … */
+            /* A WINDOW'S FILES ARE A CLOSED SET, AND AN UNKNOWN ONE IS AN
+             * ERROR -- NOT A BUFFER.  This `else` used to read
+             *
+             *     else  leaf = HAMWSYS_SINK;   // wctl, …
+             *
+             * and the comment named the very leaf it was swallowing.  A write
+             * to /dev/wsys/<wid>/wctl -- which is how EVERY hamui application
+             * negotiates the v2 blit protocol -- opened a generic named
+             * buffer, took the bytes, returned success, and reached nothing.
+             * The client set h_v2_active = 1 and believed it was a v2 client
+             * for the rest of its life; the window stayed protocol 1 and no
+             * backbuffer was ever allocated.  A surface that lies is worse
+             * than one that errors, and devwsys.ad learned that lesson in this
+             * very file (its wctl once parked resize/move in a private store
+             * "the compositor never read and never wrote").
+             *
+             * THE ORIGINAL AGREES: Hamnix's namec.ad matches the per-window
+             * leaves by name and returns DEV_NONE -- ENOENT -- for anything
+             * else.  A window's namespace is a closed set there, so it is one
+             * here.  MEASURED before changing it: across every .ad file under
+             * user and lib, the only window-relative leaves any client opens are
+             * ctl, wctl, scene, keys, pointer, event, text, cmd, draw/ctl,
+             * draw/images, draw/image/<name> and backbuffer -- every one of
+             * which is named above.  Nothing in this tree used the fallback
+             * for anything but the bug.
+             *
+             * The TOP-LEVEL fallback below is deliberately kept: /dev/wsys/
+             * <name> IS an open namespace (wallpaper, lock, run/launch,
+             * appmenu/launch, and whatever a client invents), and a sink is
+             * what those are.  The difference is that one is open by design
+             * and this one is a fixed per-window file set. */
+            else {
+                unknown_win_leaf(wid, l);
+                return HAMWSYS_NONE;
+            }
         } else {
             return HAMWSYS_NONE;
         }
@@ -4347,6 +4437,14 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
         case HAMWSYS_WIN_CTL: case HAMWSYS_WIN_SCENE: case HAMWSYS_WIN_KEYS:
         case HAMWSYS_WIN_POINTER: case HAMWSYS_WIN_EVENT: case HAMWSYS_WIN_TEXT:
         case HAMWSYS_WIN_CMD: case HAMWSYS_DRAWCTL: case HAMWSYS_BACKBUF:
+        /* wctl takes the SAME rule, and devwsys.ad says why in as many words:
+         * "this is a PER-WINDOW surface, so the WINDOW'S OWNER may write it
+         * regardless of hostowner/uid/namespace -- that is what lets a
+         * DE-spawned client (panels/menu/terminal/apps, all running as uid
+         * NOBODY) write `version 2` and opt into the blit path".  Non-owner
+         * and non-hostowner is denied: a process may control its OWN window,
+         * not another's.  The system-wide /dev/wsys/ctl stays hostowner-only. */
+        case HAMWSYS_WIN_WCTL:
             if (!win_find(f->wid)) { errno = ENOENT; return -1; }
             if (!hostowner() && !owns_wid(f->wid)) return deny();
             break;
@@ -4466,6 +4564,32 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
          * need where they are handled.  A real v2 client sends one of those
          * before it has anything to show, so nothing it does changes. */
         return 0;
+    }
+    /* /dev/wsys/<wid>/wctl — READ: the window AS IT IS COMPOSITED RIGHT NOW.
+     *
+     *     "<x> <y> <w> <h> <focus>\n"      focus is "click" or "sloppy"
+     *
+     * devwsys.ad's shape exactly, and its warning is the reason this reads the
+     * LIVE rect out of the row rather than anything the verbs parked: that file
+     * once kept a private request store the compositor never read, so every
+     * window reported "0 0 0 0 click" whatever its real geometry and readers
+     * had to route around wctl to the per-window ctl.  "A SURFACE THAT LIES IS
+     * WORSE THAN ONE THAT ERRORS."  Reads are unrestricted, as they are there,
+     * so a compositor can poll the line whoever spawned the client. */
+    case HAMWSYS_WIN_WCTL: {
+        struct wwin *v = win_find(f->wid);
+        if (!v) { errno = ENOENT; return -1; }
+        if (for_write) return 0;               /* verbs handled in the write */
+        uint8_t b[96];
+        uint64_t n = put_int(b, 0, v->x);
+        b[n++] = ' '; n = put_int(b, n, v->y);
+        b[n++] = ' '; n = put_int(b, n, v->w);
+        b[n++] = ' '; n = put_int(b, n, v->h);
+        b[n++] = ' ';
+        const char *fm = win_focus_sloppy(v) ? "sloppy" : "click";
+        while (*fm) b[n++] = (uint8_t)*fm++;
+        b[n++] = '\n';
+        return snap_set(f, b, n);
     }
     case HAMWSYS_WIN_CTL: case HAMWSYS_WIN_SCENE: case HAMWSYS_WIN_KEYS:
     case HAMWSYS_WIN_POINTER: case HAMWSYS_WIN_EVENT: case HAMWSYS_WIN_TEXT:
@@ -5199,6 +5323,87 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
             i = (e < n) ? e + 1 : e;
         }
         return (int64_t)n;
+    }
+    /* /dev/wsys/<wid>/wctl — WRITE: devwsys.ad's per-window verb sink.
+     *
+     *   version <n>       0/1 legacy scene, 2 the blit protocol.  ANYTHING
+     *                     ELSE IS REJECTED so the parser stays a closed set --
+     *                     devwsys's words, and the reason a future protocol
+     *                     increment has to add a verb here rather than being
+     *                     quietly accepted and ignored.
+     *   focus click|sloppy
+     *   resize <w> <h>    APPLIED, not parked (see below)
+     *   move   <x> <y>
+     *
+     * EVERY VERB EITHER CHANGES THE WINDOW OR RETURNS AN ERROR.  devwsys's own
+     * wctl once parked resize/move in a private store nothing read, so the
+     * writes "changed nothing on screen" and the read handed the request back
+     * as though it were the truth.  resize/move here go through exactly the
+     * state the ctl `geometry` verb sets -- one rect, one authority -- and
+     * bb_resize follows it so a v2 client's backbuffer is not left cut to the
+     * size it opened at. */
+    case HAMWSYS_WIN_WCTL: {
+        struct wwin *v = win_find(f->wid);
+        if (!v) { errno = ENOENT; return -ENOENT; }
+        if (!hostowner() && !owns_wid(f->wid)) { errno = EPERM; return -EPERM; }
+        if (n == 0) return 0;
+        const char *s = (const char *)buf;
+        size_t ln = n;
+        while (ln && (s[ln - 1] == '\n' || s[ln - 1] == '\r')) ln--;
+        size_t p = 0;
+        while (p < ln && (s[p] == ' ' || s[p] == '\t')) p++;
+        size_t vs = p;
+        while (p < ln && s[p] != ' ' && s[p] != '\t') p++;
+        size_t vlen = p - vs;
+        if (!vlen) { errno = EINVAL; return -EINVAL; }
+        int arg_p = (int)p;
+
+        if (vlen == 7 && !strncmp(s + vs, "version", 7)) {
+            size_t cur = (size_t)arg_p;
+            int32_t k = take_int(s, &cur, ln);
+            if (k < 0 || k > 2) { errno = EINVAL; return -EINVAL; }
+            if (v->proto != k) {
+                v->proto = k;
+                /* A protocol switch is a damage event for the whole window --
+                 * the compositor must repaint to pick up the new path. */
+                v->scene_gen++;
+                shm->gen++;
+            }
+            return (int64_t)n;
+        }
+        if (vlen == 5 && !strncmp(s + vs, "focus", 5)) {
+            size_t cur = (size_t)arg_p;
+            while (cur < ln && (s[cur] == ' ' || s[cur] == '\t')) cur++;
+            size_t as = (size_t)cur;
+            while (cur < ln && s[cur] != ' ' && s[cur] != '\t') cur++;
+            size_t alen = (size_t)cur - as;
+            if (alen == 5 && !strncmp(s + as, "click", 5))       v->focus_mode = 0;
+            else if (alen == 6 && !strncmp(s + as, "sloppy", 6)) v->focus_mode = 1;
+            else { errno = EINVAL; return -EINVAL; }
+            shm->gen++;
+            return (int64_t)n;
+        }
+        if ((vlen == 6 && !strncmp(s + vs, "resize", 6))
+            || (vlen == 4 && !strncmp(s + vs, "move", 4))) {
+            size_t cur = (size_t)arg_p;
+            int32_t a1 = take_int(s, &cur, ln);
+            int32_t a2 = take_int(s, &cur, ln);
+            if (a1 == -1 && a2 == -1 && cur >= ln) { errno = EINVAL; return -EINVAL; }
+            if (vlen == 6) {
+                if (a1 <= 0 || a2 <= 0) { errno = EINVAL; return -EINVAL; }
+                v->w = a1; v->h = a2;
+                bb_resize(v->wid, a1, a2);
+            } else {
+                v->x = a1; v->y = a2;
+            }
+            shm->gen++;
+            return (int64_t)n;
+        }
+        /* A CLOSED SET: an unknown verb is refused, not swallowed.  This whole
+         * file exists because a write that succeeds and reaches nothing is the
+         * worst answer a device can give. */
+        errno = EINVAL;
+        return -EINVAL;
     }
     case HAMWSYS_WIN_SCENE: {
         struct wwin *v = win_find(f->wid);
