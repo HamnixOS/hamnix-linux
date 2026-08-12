@@ -60,6 +60,14 @@
 #      its size usable as a serial. "Dismissed" and "nothing was refused" are
 #      different states inside the panel and have to stay different: waving
 #      the card away must not silence the NEXT program that refuses.
+#  11. A REFUSED Applications menu leaves NO $HOME/.hamde/appmenu.fault. That
+#      file means "this program is broken" and the panel, having seen it once,
+#      drops the Applications button to its legacy dropdown for the rest of
+#      its life -- and it is on the ext4 root, so it OUTLIVES the reboot the
+#      refusal asks for. A refusal is about the SESSION, not the program.
+#  12. CONTROL for 11: a menu that was NOT refused does not take the
+#      suppressing branch, so the fix is conditional and a genuinely broken
+#      menu still gets written down.
 #
 # 3 and 8 are the instrument check. If the colour or the rectangle were wrong
 # EVERY reading would be 0 and 6 would FAIL — there is no way for a broken
@@ -328,6 +336,77 @@ if [ "$AGAIN" -ge 40 ]; then
     ok "A SECOND REFUSAL RAISES THE NOTICE AGAIN: the rectangle is back to ${AGAIN}% #$FACE after a dismissal took it to ${GONE}%"
 else
     bad "after being dismissed once the notice never came back (${AGAIN}%): the machine tells a person about the first program that refused and stays silent about every one after it"
+fi
+
+# ---- 11. A REFUSED MENU MUST NOT LEAVE "THIS PROGRAM IS BROKEN" ----------
+# THE DEFECT: $HOME/.hamde/appmenu.fault means "hamappmenu could not open a
+# window", and the panel, having seen it once, routes the Applications button
+# to its own legacy dropdown for the rest of its life. That is right for a
+# broken menu and wrong for a REFUSED one -- and the fault is in $HOME on the
+# ext4 root, so it OUTLIVES THE REBOOT the refusal asks for. Measured on a real
+# disk: after the restart that fixes everything else, the machine comes up
+# healthy and the categorised Applications menu is gone for good, with nothing
+# anywhere saying why.
+#
+# BOTH DIRECTIONS ARE ASKED, because suppressing the fault altogether would
+# also make the first half pass and would be a different defect.
+export HOME="$WORK/home"
+mkdir -p "$HOME"
+"$TREE9/scripts/hamlinux_build.sh" user/hamappmenu.ad "$WORK/appmenu9.elf" \
+    >"$WORK/appmenu9.build.log" 2>&1 || {
+    bad "the v$NEXT hamappmenu did not build"; tail -20 "$WORK/appmenu9.build.log" >&2
+    done_report; exit 1; }
+
+rm -rf "$HOME/.hamde"
+# `timeout` on both arms: a refused menu returns on its own, but a menu that
+# unexpectedly GETS a window never does -- it sits in its event loop -- and an
+# assertion that can hang is an assertion that never reports.
+timeout 40 "$WORK/appmenu9.elf" -self >"$WORK/appmenu9.out" 2>"$WORK/appmenu9.err"
+if grep -q 'REFUSING to attach' "$WORK/appmenu9.err"; then
+    ok "the v$NEXT Applications menu was refused by the live v$TREE_VER session"
+else
+    bad "the v$NEXT Applications menu was not refused -- this assertion is not about what it thinks it is"
+    sed 's/^/        /' "$WORK/appmenu9.err" | head -5
+fi
+if [ -e "$HOME/.hamde/appmenu.fault" ]; then
+    bad "A REFUSED MENU LEFT A FAULT FILE ($HOME/.hamde/appmenu.fault). The panel reads it and drops the Applications button to its legacy dropdown -- permanently, and across the reboot the refusal asks for. The restart that fixes everything else would not fix this."
+else
+    ok "A REFUSED MENU LEAVES NO FAULT: the refusal is about the SESSION, not the program, so the Applications button survives the restart that fixes it"
+fi
+
+# THE CONTROL, and an honest account of how strong it is.
+#
+# What I wanted to assert: a failure that is NOT a refusal still leaves the
+# fault, so the fix above is not just "stop reporting faults" -- which would
+# leave a genuinely broken menu answering the Applications button with nothing
+# at all, for ever.
+#
+# WHY THAT EXACT ASSERTION IS NOT RUNNABLE HERE, measured rather than assumed:
+# the obvious way to make hamappmenu fail without being refused is to point
+# $HAMWSYS at something unusable. shm_attach's CANDIDATE LIST then does its
+# documented job -- /dev/shm/hamnix-wsys, then /tmp/hamnix-wsys -- so the menu
+# CREATES ITS OWN SEGMENT, gets a window in it, and sits in its event loop
+# forever drawing into a screen nobody composites. The first version of this
+# control hung for thirty minutes doing exactly that.
+#
+# So the control asks the discriminating half instead: that the suppression is
+# CONDITIONAL. A run that is not refused must not take the new branch -- it
+# must not print the line, which means it reached the fault write the same way
+# it always did. Bounded by `timeout`, because a menu that DOES get a window
+# never returns.
+CTRL_HOME="$WORK/home-ctrl"
+rm -rf "$CTRL_HOME"; mkdir -p "$CTRL_HOME"
+mkdir -p "$WORK/notasegment"
+( export HOME="$CTRL_HOME"
+  export HAMWSYS="$WORK/notasegment"
+  timeout 25 "$WORK/appmenu9.elf" -self >"$WORK/appmenuctrl.out" 2>"$WORK/appmenuctrl.err" )
+if grep -q 'REFUSING to attach' "$WORK/appmenuctrl.err"; then
+    bad "CONTROL: the not-refused arm was refused after all, so it discriminates nothing"
+elif grep -q 'NOT leaving a fault' "$WORK/appmenuctrl.err"; then
+    bad "CONTROL: a menu that was NOT refused still took the new branch and suppressed its fault. The fix is unconditional, which is indistinguishable from deleting the fault mechanism: a genuinely broken menu would now answer the Applications button with nothing at all."
+    sed 's/^/        /' "$WORK/appmenuctrl.err" | head -5
+else
+    ok "CONTROL: a menu that was NOT refused did not take the fault-suppressing branch, so the suppression is conditional on the refusal and the panel's fallback is intact for a genuinely broken menu"
 fi
 
 done_report
