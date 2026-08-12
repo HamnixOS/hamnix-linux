@@ -53,7 +53,6 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
-. tests/linux/reap.sh
 
 fail=0
 note() { printf '%s\n' "$*"; }
@@ -68,6 +67,14 @@ if [ "${1:-}" = "--inner" ]; then
     export HAMWSYS="$W/seg"
     rm -f "$HAMWSYS" "$HAMWSYS".bb "$HAMWSYS".chrome
 
+    # FROM $W, NOT FROM THE TREE. The inner half is a COPY of this file at
+    # $W/inner.sh, so the $PROJ_ROOT computed at the top of it -- dirname of
+    # the copy, up two -- is `/`, and the shell has already cd'd there. A
+    # relative `. tests/linux/reap.sh` here silently found nothing: the traps
+    # were never installed, every reap_add was a "command not found", and the
+    # error text landed in the `== root.` stream the assertions below parse.
+    # The outer half copies the helper in beside inner.sh for this reason.
+    . "$W/reap.sh"
     reap_track "$W/reaped.inner"
     reap_on_exit
 
@@ -227,6 +234,7 @@ fi
 
 # ---- outer half ----------------------------------------------------------
 W="$(mktemp -d "${TMPDIR:-/tmp}/wsysbypass.XXXXXX")"
+. tests/linux/reap.sh
 reap_on_exit_cleanup() { rm -rf "$W"; }
 reap_on_exit reap_on_exit_cleanup
 # 1777 for the same reason wsys_uidgate.sh needs it: two uids create files in
@@ -243,6 +251,9 @@ cc -std=gnu11 -O1 -o "$W/wsys_bypass" tests/linux/wsys_bypass.c \
     >>"$W/build.log" 2>&1 || { cat "$W/build.log"; echo "BUILD FAILED"; exit 2; }
 chmod 755 "$W/wsys_uidgate" "$W/wsys_bypass"
 cp "$0" "$W/inner.sh"; chmod 755 "$W/inner.sh"
+# The inner half runs as a copy in $W with $PROJ_ROOT resolving to `/`, so it
+# cannot reach the tree to source the reaper. It gets its own copy here.
+cp tests/linux/reap.sh "$W/reap.sh"
 
 command -v unshare >/dev/null || { echo "SKIP: no unshare(1)"; exit 0; }
 grep -q "^$(id -un):" /etc/subuid 2>/dev/null || {
