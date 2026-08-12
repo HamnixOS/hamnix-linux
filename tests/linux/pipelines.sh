@@ -202,14 +202,24 @@ v="$(grep -m1 'pipegate: capture' "$WORK/boot.txt" | sed 's/.*pipegate: capture 
 [ "$v" = "captured" ] && ok "\`{ cat FILE }\` capture returned its output" \
                       || bad "capture returned '$v' (want 'captured')"
 
-# A BUILTIN inside `{ … }` runs in this process, so its output goes to the
-# shell's own stdout and the capture gets nothing. That is a real gap and it
-# is NOT fixed here -- what is fixed is that it now says so. An empty
-# substitution and a broken one must not look the same.
-if grep -q 'substitution of the BUILTIN echo is not captured' "$WORK/boot.txt"; then
-    ok "a builtin inside \`{ … }\` reports that it was not captured"
+# A BUILTIN inside `{ … }` USED to run in this process, so its output went to
+# the shell's own stdout and the capture got the empty string -- and for a
+# while this gate asserted only that it SAID so, which was honest and still
+# broken. The builtin is forked now, the same way a builtin pipeline stage is,
+# so the capture is the builtin's output.
+#
+# TWO assertions, because they fail differently. The value has to be right,
+# AND the text must NOT have escaped onto the console: an in-process builtin
+# announces itself by printing to the terminal, so a capture that somehow read
+# "inner" while "inner" was also on stdout would be the old bug wearing the
+# new answer.
+v="$(grep -m1 'pipegate: bcapture' "$WORK/boot.txt" | sed 's/.*pipegate: bcapture *//')"
+[ "$v" = "inner" ] && ok "\`{ echo inner }\` capture of a BUILTIN returned its output" \
+                   || bad "builtin capture returned '$v' (want 'inner')"
+if grep -q 'substitution of the BUILTIN' "$WORK/boot.txt"; then
+    bad "the shell still reports a builtin substitution as uncaptured"
 else
-    bad "a builtin inside \`{ … }\` yielded the empty string in silence"
+    ok "no 'BUILTIN is not captured' diagnosis -- the builtin was forked"
 fi
 
 n="$(grep -c '^p[0-9]' "$WORK/boot.txt")"
