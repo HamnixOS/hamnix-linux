@@ -1453,6 +1453,13 @@ def paint_window(i: uint64) -> int32:
     # clear, which is precisely what a window that wants to show what is
     # behind it must not do -- and it is the full-screen case, which is
     # hamshotui's scrim exactly.
+    # SCENE WINDOWS ONLY, and that is a real limit rather than an oversight
+    # nobody noticed: a protocol-2 window has already returned above through
+    # paint_backbuffer, which blits its shared surface opaquely. All three
+    # clients that need these verbs -- hampanelscene's dropdown, hamappmenu's
+    # fly-out band, hamshotui's scrim -- are v1 scene clients, so the case is
+    # covered; a v2 client asking for `keyed` would be silently opaque, which
+    # is why it is written down here.
     pres: int32 = 0
     if win_keyed[i] != 0:
         pres = 1
