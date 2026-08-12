@@ -316,12 +316,34 @@ for _ in $(seq 1 80); do
     sleep 0.25
     grep -aq 'honoured, 4 panel(s)' "$WORK/panel.log" && break
 done
-snap maxc
-v_max="$(colourpct 2 $((FBH / 2 - 60)) 50 120 "$WORK/maxc.raw" ff00ff)"
+# WAIT FOR THE PIXELS, NOT FOR THE LOG LINE. `honoured, 4 panel(s)` is printed
+# when the config has been PARSED; the two new windows still have to be
+# created, painted, committed and composited after that. This assertion used to
+# snapshot the framebuffer the instant that line appeared and then blame the
+# CONFIG for the empty band -- the one part that had already worked. Measured
+# while fixing it: at that instant all four windows exist with the right
+# geometry (`0 0 56 800` for the left one) and are at gen 2 with nothing
+# presented; two seconds later they are at gen 9 and the band is 96% #ff00ff.
+# So the wait is for the thing being asserted, bounded, and what it prints when
+# it runs out says which half is missing.
+V_DEADLINE="${PANELSHIP_VPANEL_WAIT_S:-10}"
+v_max=0
+v_t0=$SECONDS
+while :; do
+    snap maxc
+    v_max="$(colourpct 2 $((FBH / 2 - 60)) 50 120 "$WORK/maxc.raw" ff00ff)"
+    [ "$v_max" -ge 60 ] && break
+    [ $((SECONDS - v_t0)) -ge "$V_DEADLINE" ] && break
+    sleep 0.25
+done
+V_CTL="$(winctl 5 | tr -d '\n')"
+[ -n "$V_CTL" ] || V_CTL="$(winctl 4 | tr -d '\n')"
 if grep -aq 'honoured, 4 panel(s)' "$WORK/panel.log" && [ "$v_max" -ge 60 ]; then
-    ok "the maximal panel set (4 panels x 12 launcher widgets, 5478 bytes serialized) is honoured and its VERTICAL panel is painted (${v_max}% of the left band is #ff00ff)"
+    ok "the maximal panel set (4 panels x 12 launcher widgets, 5478 bytes serialized) is honoured and its VERTICAL panel is painted (${v_max}% of the left band is #ff00ff, after $((SECONDS - v_t0)) s)"
+elif ! grep -aq 'honoured, 4 panel(s)' "$WORK/panel.log"; then
+    bad "the maximal panel set was never PARSED: no 'honoured, 4 panel(s)' line. The config is what failed here, not the drawing."
 else
-    bad "the maximal panel set did not come up (4-panel line: $(grep -ac 'honoured, 4 panel(s)' "$WORK/panel.log"), left band ${v_max}% #ff00ff)"
+    bad "the config was honoured (4 panels) but the VERTICAL panel never PAINTED within ${V_DEADLINE}s -- the left band is ${v_max}% #ff00ff and wants 60. A vertical panel's window: ${V_CTL:-<no window at wid 4 or 5>}. If that window exists with a sane width and height, the parse and the geometry are fine and what is missing is the paint or the composite; if it does not, the panel never mapped a window."
 fi
 
 # ---- 11+12. A CONFIG THAT PARSES TO NOTHING SAYS SO ----------------------
