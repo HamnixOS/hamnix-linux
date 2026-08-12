@@ -79,11 +79,20 @@ producing 908 frames a second, of which a 60 Hz screen can show 60. It is
 Measured on a real display in one session with one binary, both settings, with
 the probe proven against a known 50% load in the same run.
 
-**The saving is smaller than the frame rate suggests, and that is written down
-rather than rounded away:** the frame rate falls 15.8x and the CPU falls 5.1x.
-The difference is a cost the cap does not touch — the compositor still *wakes*
-about as often (920 to 861 times a second), it simply paints far less. What is
-left is being woken, not painting, and capping the frame rate cannot help it.
+**Capping the frame rate was only half of it, and the half it left behind was
+the larger one.** With the cap alone the CPU fell 5.1x while the frame rate fell
+15.8x, because the compositor still *woke* about as often — 920 times a second
+down to 861 — and simply declined to paint on almost all of them. Being woken,
+not painting, was most of what remained.
+
+So it now also stops waking for applications while a frame is already owed.
+Wakes fell to **118 a second** and a dragged window costs **3.5% of a core**
+instead of 7.0%, with the frame rate unchanged. Input is never deferred by this
+— only the repainting is — and the input-to-pixel figure above got slightly
+better rather than worse.
+
+**Together: 35.7% of a core down to 3.5%**, for a screen showing the same 60
+frames a second it could always show.
 
 ### The Applications menu no longer downgrades itself permanently after an update
 
