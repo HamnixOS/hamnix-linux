@@ -873,37 +873,48 @@ diff 830x680+214+80: IDENTICAL (0 of 564400 px)
 missing AND something else on the VM path also drops the wheel. Closing one
 hole did not open the pipe.
 
-**Where the remaining hole is NOT.** Not in `wsysd`'s routing or `wsyswl`'s
-translation: those are exactly what the offscreen gate exercises end to end,
-with a real Xwayland, and they work. The difference between the arm that
-passes and the arm that fails is **everything upstream of `/dev/input`** —
-the gate writes evdev records into a file, and the VM has QEMU's
-`virtio-tablet-pci` writing them into a device node.
+**The obvious suspect was QEMU, and it is not QEMU.** The offscreen gate
+writes evdev records into a *file*; the VM has `virtio-tablet-pci` writing
+them into a *device node*, and that is the one thing the two arms do not
+share. `tests/linux/vm_wheel_reaches.sh` asks the compositor directly — the
+desktop alone, no Steam and no namespace, with `wsysd`'s own
+`/dev/wsys/wsysd/state` published on the serial line by `rc.boot`. Its
+`pointer` field counts `deliver_pointer` calls, and `deliver_pointer` returns
+early unless something changed **including a non-zero `ptr_dz`**, so with the
+cursor held completely still that counter is a wheel detector:
 
-**So the next measurement is named rather than guessed, and it is written:**
-`tests/linux/vm_wheel_reaches.sh` boots the desktop alone (no Steam, no
-namespace) and reads `wsysd`'s own `/dev/wsys/wsysd/state`. Its `pointer`
-field counts `deliver_pointer` calls, and `deliver_pointer` returns early
-unless something changed **including a non-zero `ptr_dz`** — so with the
-cursor held still, a rise across a wheel burst means the wheel reached the
-compositor and a flat count means it never arrived on any evdev node it has
-open. A plain move, on the same devices and through the same counter, is the
-control in the same run. That splits the remaining question in two and only
-one half is ours:
+```
+pointer  0 ->  2     two QEMU pointer MOVEs        (the control)
+pointer  2 -> 22     twenty wheel events, cursor STILL
+```
 
-* `pointer` rises → QEMU delivers `REL_WHEEL`, and the drop is between
-  `wsysd`'s `pump_input` and the client, in this tree.
-* `pointer` is flat → QEMU's `virtio-tablet` is not delivering the wheel to
-  this guest at all (`wheel-axis=on` is its default, and that is the property
-  to check first), and nothing in this tree can be blamed for a scroll that
-  does not happen in a VM. **A real machine's mouse would still be fixed by
-  §12.2 and the gate would still be the proof of it** — but that would have
-  to be said as a claim about hardware, not about this VM.
+**Exactly twenty.** So QEMU's `virtio-tablet-pci` does deliver
+`EV_REL`/`REL_WHEEL` to this guest (`wheel-axis=on` is its default),
+`pump_input` accumulates it, `deliver_pointer` runs for each one, and
+`route_pointer` writes an `'s'` line with the delta to the window under the
+cursor. **Everything upstream of `/dev/wsys/<wid>/pointer` is ruled out, and
+the remaining hole is ours.**
 
-**That run had not finished when this was written.** The honest state is:
-one real defect found and fixed with a gate that fails on revert, and the
-user-visible symptom that found it still present, with the next measurement
-named and built.
+**What is left, stated as the narrow thing it now is.** The line reaches the
+ring and the client does not scroll, while the identical code path with a
+different Xwayland does. The two candidates, in order:
+
+1. **Xwayland's version.** The passing arm is the dev host's Xwayland (trixie,
+   24.x); the failing arm is the namespace's **22.1.9** (bookworm). If 22.1.9
+   will not turn this `axis` into button 4/5, the gate is measuring a newer
+   server than the distribution ships and should be made to run both.
+2. **Event order inside the frame.** `wl_pointer.axis_discrete` is emitted
+   *after* its `axis` event here; the protocol says it should precede it. The
+   host's Xwayland does not care. A stricter one would.
+
+Neither is guessed at further in this pass, because the measurement that
+would settle it is a third boot and the one above is what was worth the time.
+
+**The honest state:** one real defect found and fixed with a gate that fails
+on revert, the user-visible symptom that found it still present in the VM,
+and the search space for what is left narrowed from "the whole input stack"
+to "`wsyswl`'s axis emission against Xwayland 22.1.9" by a measurement rather
+than by an argument.
 
 ### 12.3 Two things seen in passing that are NOT the blocker
 

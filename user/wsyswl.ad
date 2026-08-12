@@ -4795,12 +4795,17 @@ def handle_ptr_line(c: uint64, i: uint64, surf: uint32, at: uint64, n: uint64):
         # because nothing about it looks broken.
         v: int32 = 0 - dz
         pv: int32 = conn_ptrver[c]
+        # THE ORDER IS THE PROTOCOL'S, not a preference. wl_pointer.axis_discrete
+        # "shall be sent before the corresponding wl_pointer.axis event", and
+        # axis_source before both. The dev host's Xwayland does not care and
+        # accepted the wrong order; the version in the Debian namespace is
+        # 22.1.9 and there is no reason to find out the hard way which of them
+        # a client is talking to.
         if pv >= 5:
             send_ptr_axis_source(cast[uint32](ptr), AXIS_SOURCE_WHEEL)
+            send_ptr_axis_discrete(cast[uint32](ptr), AXIS_VERTICAL, v)
         send_ptr_axis(cast[uint32](ptr), evt_time, AXIS_VERTICAL,
                       v * AXIS_NOTCH)
-        if pv >= 5:
-            send_ptr_axis_discrete(cast[uint32](ptr), AXIS_VERTICAL, v)
     send_ptr_frame(cast[uint32](ptr))
 
 
