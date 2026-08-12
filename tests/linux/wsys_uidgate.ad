@@ -37,7 +37,12 @@ extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 
-wbuf: Array[1024, uint8]        # the bytes handed to sys_write
+wbuf: Array[1024, uint8]
+# A FULL-WINDOW BLIT PAYLOAD.  880x600 RGBA is 2,112,000 bytes -- deliberately
+# bigger than the 1 MiB carry buffer the draw/ctl write path used to cap at,
+# which is the size a real browser window blits and the size at which the v2
+# path was refused outright.
+bigbuf: Array[2200000, uint8]        # the bytes handed to sys_write
 rbuf: Array[256, uint8]         # the ctl read-back
 pbuf: Array[128, uint8]         # a built "/dev/wsys/<wid>/<leaf>" path
 dbuf: Array[32, uint8]          # decimal scratch
@@ -484,6 +489,95 @@ def do_wctlv2() -> int32:
     return 0
 
 
+# BLIT A FULL-SIZED WINDOW IN ONE WRITE, the way lib/hamui.ad does.
+# hamui composes the whole 'B' header + RGBA payload into one scratch buffer
+# and issues ONE sys_write of it (hamui_v2_commit_rect).  For an 880x600
+# window that is 2,112,018 bytes in a single write.
+def do_bigblit(w: int32, h: int32) -> int32:
+    ctl: Ptr[char] = "/dev/wsys/ctl"
+    puts("bigblit")
+    poke(ctl, cast[Ptr[uint8]]("newwindow"))
+    wid: int64 = -1
+    rfd: int32 = sys_open(ctl)
+    if rfd >= 0:
+        k: int64 = sys_read(rfd, &rbuf[0], 255)
+        sys_close(rfd)
+        v: int64 = 0
+        seen: int32 = 0
+        i: uint64 = 0
+        while i < cast[uint64](k):
+            c: uint8 = rbuf[i]
+            if c >= 48 and c <= 57:
+                v = v * 10 + cast[int64](c - 48)
+                seen = 1
+            elif seen != 0:
+                break
+            i = i + 1
+        if seen != 0:
+            wid = v
+    puts(" wid=")
+    puti(wid)
+    if wid < 2:
+        puts("\n")
+        return 1
+    winpath(wid, cast[Ptr[uint8]]("ctl"))
+    poke(cast[Ptr[char]](&pbuf[0]), cast[Ptr[uint8]]("geometry 0 0 880 600"))
+    winpath(wid, cast[Ptr[uint8]]("ctl"))
+    poke(cast[Ptr[char]](&pbuf[0]), cast[Ptr[uint8]]("visible 1"))
+    winpath(wid, cast[Ptr[uint8]]("draw/ctl"))
+    fd: int32 = sys_open_write(cast[Ptr[char]](&pbuf[0]))
+    puts(" draw=")
+    puti(cast[int64](fd))
+    if fd < 0:
+        puts("\n")
+        return 1
+    bigbuf[0] = 66                       # 'B'
+    u: uint32 = 0
+    bigbuf[1] = 0
+    bigbuf[2] = 0
+    bigbuf[3] = 0
+    bigbuf[4] = 0
+    bigbuf[5] = 0
+    bigbuf[6] = 0
+    bigbuf[7] = 0
+    bigbuf[8] = 0
+    uw: uint32 = cast[uint32](w)
+    bigbuf[9]  = cast[uint8](uw & 255)
+    bigbuf[10] = cast[uint8]((uw >> 8) & 255)
+    bigbuf[11] = cast[uint8]((uw >> 16) & 255)
+    bigbuf[12] = cast[uint8]((uw >> 24) & 255)
+    uh: uint32 = cast[uint32](h)
+    bigbuf[13] = cast[uint8](uh & 255)
+    bigbuf[14] = cast[uint8]((uh >> 8) & 255)
+    bigbuf[15] = cast[uint8]((uh >> 16) & 255)
+    bigbuf[16] = cast[uint8]((uh >> 24) & 255)
+    bigbuf[17] = 1                       # fmt RGBA8888
+    npx: uint64 = cast[uint64](w) * cast[uint64](h)
+    i2: uint64 = 0
+    while i2 < npx:
+        bigbuf[18 + i2 * 4]     = 17
+        bigbuf[18 + i2 * 4 + 1] = 34
+        bigbuf[18 + i2 * 4 + 2] = 51
+        bigbuf[18 + i2 * 4 + 3] = 255
+        i2 = i2 + 1
+    nb: int64 = sys_write(fd, &bigbuf[0], 18 + npx * 4)
+    puts(" bytes=")
+    puti(cast[int64](18 + npx * 4))
+    puts(" wrote=")
+    puti(nb)
+    # publish
+    bigbuf[0] = 68                       # 'D'
+    sys_write(fd, &bigbuf[0], 17)
+    sys_close(fd)
+    puts("\n")
+    ws: Array[4, int32]
+    j: int32 = 0
+    while j < 150:
+        sys_waitfds(&ws[0], 0, 100)
+        j = j + 1
+    return 0
+
+
 def do_client(hold: int32, hold_flag: Ptr[char], needle: Ptr[uint8]) -> int32:
     ctl: Ptr[char] = "/dev/wsys/ctl"
     puts("client")
@@ -583,6 +677,9 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     fw: Ptr[uint8] = "fillwin"
     if streq(cmd, fw) == 1:
         return do_fillwin(16, 8)
+    bb: Ptr[uint8] = "bigblit"
+    if streq(cmd, bb) == 1:
+        return do_bigblit(880, 600)
     wv: Ptr[uint8] = "wctlv2"
     if streq(cmd, wv) == 1:
         return do_wctlv2()

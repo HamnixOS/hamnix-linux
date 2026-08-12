@@ -5454,29 +5454,72 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
          * looks like a driver bug and is not. */
         static uint8_t carry[1 << 20];
         static uint64_t carried;
-        uint64_t total = carried + n;
-        if (total > sizeof carry) {
-            carried = 0;
-            errno = EMSGSIZE;
-            return -EMSGSIZE;
+
+        /* A WHOLE RECORD IS READ STRAIGHT OUT OF THE CALLER'S BUFFER, and that
+         * is not an optimisation -- it is what makes a real window blittable.
+         *
+         * This used to copy every write into `carry` first and refuse anything
+         * that did not fit it: `if (carried + n > sizeof carry) return
+         * -EMSGSIZE`.  carry is 1 MiB, and lib/hamui.ad's hamui_v2_commit_rect
+         * composes the whole 'B' header plus the full RGBA payload into one
+         * scratch buffer and issues ONE write of it.  For an 880x600 browser
+         * window that is 2,112,018 bytes, so EVERY blit from EVERY v2 window
+         * bigger than about 512x512 was refused outright -- MEASURED: the
+         * write returned -90 (EMSGSIZE), the backbuffer stayed empty, the
+         * window painted nothing, and the client's own return check is the
+         * only place it was ever mentioned.  A browser is exactly such a
+         * window, which is why the v2 path had never carried a real one.
+         *
+         * The carry buffer exists for a client that SPLITS a record across
+         * write(2) calls, which is a different case and still handled: a
+         * partial remainder is copied out at the end.  What is gone is the
+         * requirement that a COMPLETE record fit in it. */
+        const uint8_t *rec;
+        uint64_t reclen;
+        if (carried == 0) {
+            rec = buf;                         /* nothing pending: parse in place */
+            reclen = n;
+        } else {
+            if (carried + n > sizeof carry) {
+                /* A SPLIT record larger than the carry buffer.  Rare and now
+                 * loud: the silent version of this is what hid the whole
+                 * defect above. */
+                static int said;
+                if (!said) {
+                    said = 1;
+                    fprintf(stderr,
+                            "wsys: /dev/wsys/%d/draw/ctl: a draw record split "
+                            "across writes exceeds the %zu-byte reassembly "
+                            "buffer (%llu pending + %llu now).\n"
+                            "wsys:   The frame is dropped.  Write a complete "
+                            "record in one write(2) and any size is accepted.\n",
+                            (int)f->wid, sizeof carry,
+                            (unsigned long long)carried, (unsigned long long)n);
+                }
+                carried = 0;
+                errno = EMSGSIZE;
+                return -EMSGSIZE;
+            }
+            memcpy(carry + carried, buf, (size_t)n);
+            carried += n;
+            rec = carry;
+            reclen = carried;
         }
-        memcpy(carry + carried, buf, (size_t)n);
-        carried = total;
 
         uint64_t i = 0;
-        while (i < carried) {
-            uint8_t verb = carry[i];
+        while (i < reclen) {
+            uint8_t verb = rec[i];
             uint64_t used = 0;
             if (verb == 'B') {
                 /* THE v2 OPT-IN, here rather than at open -- see the DRAWCTL
                  * arm of hamwsys_open.  A blit is the client saying it renders
                  * its own surface; opening the file is not. */
                 if (v->proto != 2) { v->proto = 2; shm->gen++; }
-                used = bb_blit(v, carry + i, carried - i);
+                used = bb_blit(v, rec + i, reclen - i);
                 if (used) wr(WR_BLIT, used);
             } else if (verb == 'D') {
                 if (v->proto != 2) { v->proto = 2; shm->gen++; }
-                if (carried - i < 17) break;
+                if (reclen - i < 17) break;
                 int slot = bb_for(v->wid, 1, v->w, v->h);
                 if (slot >= 0) {
                     /* PUBLISH. Flip only if something was actually drawn --
@@ -5493,12 +5536,12 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                 wr(WR_DAMAGE, 17);
                 used = 17;
             } else if (verb == 'C') {
-                if (carried - i < 18) break;
-                int32_t cw = le32(carry + i + 9), ch = le32(carry + i + 13);
-                uint8_t fmt = carry[i + 17];
+                if (reclen - i < 18) break;
+                int32_t cw = le32(rec + i + 9), ch = le32(rec + i + 13);
+                uint8_t fmt = rec[i + 17];
                 int bpp = (fmt == 3) ? 1 : 4;
                 uint64_t need = (uint64_t)cw * ch * bpp;
-                if (carried - i < 18 + need) break;
+                if (reclen - i < 18 + need) break;
                 wr(WR_CURSOR, 18 + need);
                 used = 18 + need;      /* accepted; the compositor draws its
                                           own cursor for now */
@@ -5516,16 +5559,16 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                  * (_wsys_img_stg_begin/_body); here the carry buffer already
                  * IS that staging, so the streaming case is the same code as
                  * the small one. */
-                if (carried - i < 2) break;
-                uint64_t nlen = carry[i + 1];
+                if (reclen - i < 2) break;
+                uint64_t nlen = rec[i + 1];
                 if (nlen == 0 || nlen >= WSYS_IMG_NAME_CAP) {
                     carried = 0; errno = EINVAL; return -EINVAL;
                 }
                 uint64_t hdr = 2 + nlen + 9;
-                if (carried - i < hdr) break;
-                int32_t iw = le32(carry + i + 2 + nlen);
-                int32_t ih = le32(carry + i + 2 + nlen + 4);
-                uint8_t ifmt = carry[i + 2 + nlen + 8];
+                if (reclen - i < hdr) break;
+                int32_t iw = le32(rec + i + 2 + nlen);
+                int32_t ih = le32(rec + i + 2 + nlen + 4);
+                uint8_t ifmt = rec[i + 2 + nlen + 8];
                 int ibpp = (ifmt == 3) ? 1 : (ifmt == 1 || ifmt == 2) ? 4 : 0;
                 if (iw <= 0 || ih <= 0 || !ibpp) {
                     carried = 0; errno = EINVAL; return -EINVAL;
@@ -5538,9 +5581,9 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                     carried = 0; errno = EMSGSIZE; return -EMSGSIZE;
                 }
                 uint64_t ipix = (uint64_t)iw * (uint64_t)ih * (uint64_t)ibpp;
-                if (carried - i < hdr + ipix) break;
-                int rc = img_store(v->wid, (const char *)carry + i + 2, nlen,
-                                   iw, ih, ifmt, carry + i + hdr);
+                if (reclen - i < hdr + ipix) break;
+                int rc = img_store(v->wid, (const char *)rec + i + 2, nlen,
+                                   iw, ih, ifmt, rec + i + hdr);
                 if (rc < 0) { carried = 0; errno = -rc; return rc; }
                 /* The scene display list naming this image is byte-identical
                  * frame to frame, so a damage diff over the scene text alone
@@ -5561,10 +5604,17 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
             if (used == 0) break;      /* incomplete: wait for more */
             i += used;
         }
-        if (i > 0) {
-            memmove(carry, carry + i, (size_t)(carried - i));
-            carried -= i;
+        /* Whatever is left is a PARTIAL record: keep it for the next write.
+         * It has to fit the reassembly buffer -- a partial larger than that is
+         * the loud case above on the next call. */
+        uint64_t left = reclen - i;
+        if (left > sizeof carry) {
+            carried = 0;
+            errno = EMSGSIZE;
+            return -EMSGSIZE;
         }
+        if (left) memmove(carry, rec + i, (size_t)left);
+        carried = left;
         return (int64_t)n;
     }
     case HAMWSYS_SINK: {
