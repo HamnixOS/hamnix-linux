@@ -744,3 +744,141 @@ Two more, learned in the pass that closed §6.2a:
   `/tmp/hamnix-wsys-bb` — one per HOST, with slots keyed by wid and no owner.
   An offscreen run inherited another run's slot, at another window's size, and
   spent an hour looking like a compositor bug. Pin it per run.
+
+---
+
+## 12. PAST THE LOGIN SCREEN — how far Steam actually gets
+
+**What this section replaces.** §6.2a ends at *"the `Sign in to Steam` window
+is on the framebuffer"*, and for three passes that sentence stood in for
+"Steam works". It does not. A window that renders and cannot be typed into is
+a screenshot. So the window was **driven** rather than photographed, and the
+answer is much better than the notes said and has one concrete hole in it.
+
+**How it was driven, and why not with the existing harness.**
+`tests/linux/steam_gui_ro.sh` boots, waits, screendumps once and quits.
+`tests/linux/steam_login_drive.sh` boots the same session and **leaves the VM
+up** with a QMP socket and the console shell on a fifo, and
+`tests/linux/qmp_input.py` puts pointer and key events on QEMU's own
+`virtio-tablet-pci` / `virtio-keyboard-pci`. In a VM that is the **only**
+input `wsysd` has — it scans `/dev/input/event0..15` — so every event below
+travelled the whole chain:
+
+```
+QEMU virtio-tablet/keyboard -> /dev/input/eventN -> wsysd -> /dev/wsys/<wid>/pointer,keys
+  -> wsyswl (wl_pointer / wl_keyboard) -> Xwayland -> jwm -> Steam's CEF
+```
+
+Nothing wrote a wsys ring by hand. That is the rule
+`tests/linux/de_mouse_chrome.sh` sets for the DE chrome, applied to a real
+X11 application three servers further down. Every number below is a pixel
+count from `tests/linux/ppmdiff.py` over two QEMU screendumps.
+
+### 12.1 The scoreboard, in the order it was measured
+
+| Step | Result | The measurement |
+|--|--|--|
+| the login window is on screen | **works** | non-black bounding box of the framebuffer is `699x440+290+180` — the same rectangle §6.2 reported, now found by scanning pixels rather than by asking X |
+| the pointer moves | **works** | the 12x17 cursor sprite left `+640+400` and appeared where it was sent |
+| Steam sees the pointer | **works** | moving over the username field repainted **97% of that field** — CEF's hover state. `wl_pointer.motion` reached the DOM |
+| a click focuses a field | **works** | a caret, then `3.46%` of the window repainted |
+| **typing** | **works** | `hamnix` typed on QEMU's keyboard **appears in Steam's username field** |
+| the password field masks | **works** | `secret123` → nine dots, `97%` of that field repainted |
+| a checkbox toggles | **works** | *Remember me* cleared, `97.7%` of the 22x22 box changed, and its hover tooltip drew |
+| **a second window, and navigation** | **works** | *Create a Free Account* replaced the 700x440 login window with an **~870x740 browser window** on the Steam store — `93.8%` of the old rectangle changed |
+| remote web content | **works** | that page loads the store chrome, an **hCaptcha** iframe and its assets, over the namespace's own network |
+| a dropdown menu | **works** | the store's *Browse* mega-menu opened: `99.99%` of the 260x300 column below it changed, with the CDN capsule artwork in it |
+| navigating the store | **works** | *Store Home* loaded the real front page — Counter-Strike 2 artwork, review counts, the discount carousel |
+| dragging | **works** | press-move-release on the page's scrollbar scrolled it: `96.44%` of an 830x680 rectangle changed |
+| **search, and live results** | **works** | `portal` typed into the store search box returned Portal, Portal 2, Portal Knights and Portal Worlds with prices and cover art, over the network, as an AJAX response |
+| **the scroll wheel** | **BROKEN — see 12.2** | eight wheel-down events over that same page changed **0 of 564400 pixels** |
+
+`build/steamprobe/` is not where these live; the run's screendumps are under
+`~/.hamnix-build/steamdrive/shots-run1/` (`s0.png` the login window, `s3_typed.png`
+the typed username, `s6_create.png` the second window, `s11_store.png` the
+store, `s16.png` the search results).
+
+**So the honest one-line answer is the opposite of the one this file used to
+imply:** Steam is not stuck at its login screen. Everything reachable
+*without an account* — the login form, account creation, the whole store,
+search — works, with a mouse and a keyboard, on this distribution.
+
+### 12.2 THE FIRST CONCRETE BLOCKER: the scroll wheel was never connected
+
+**The measurement.** With the pointer resting over Steam's store page, eight
+`REL_WHEEL` notches:
+
+```
+diff 830x680+214+80: IDENTICAL (0 of 564400 px)
+```
+
+**And the control that makes it mean something.** The same pointer, on the
+same page, pressed on the scrollbar, moved 240 px and released:
+
+```
+diff 830x680+214+80: 544328 of 564400 px (96.44%) differ
+```
+
+The page was scrollable. The wheel was not connected to it. A dead pointer
+would have produced the same zero, and the control is the only thing that
+rules it out.
+
+**What was wrong.** `user/wsysd.ad` has had the whole wheel since its input
+pump was written: `pump_input` accumulates `EV_REL`/`REL_WHEEL` into
+`ptr_dz`, `deliver_pointer` gives the routed line kind `'s'` for scroll, and
+`route_pointer` writes the delta as the **fifth** field of
+`<kind> <x> <y> <buttons> <dz>`. `user/wsyswl.ad`'s `handle_ptr_line` parsed
+the first four fields and stopped, and the file contained no
+`wl_pointer.axis` at all. So the delta was computed, routed, written to the
+ring, read back — and dropped on the floor one parse short of the client.
+
+That is not a Steam bug and it was never about Steam: **every** Wayland
+client behind this compositor, and through Xwayland every X11 client behind
+that, has had a dead scroll wheel for the whole port. Firefox in the
+namespace, a text editor, a file manager — all of them.
+
+**The fix** is three events and a version gate: `wl_pointer.axis` (version 1,
+always safe), plus `axis_source` and `axis_discrete` (version 5) gated on the
+version the client **bound `wl_seat` at**, not on the version this server
+advertises — libwayland aborts on an event a proxy has no listener slot for,
+which is the trap `wl_seat.name` was already gated for. The sign is inverted
+on purpose: evdev `REL_WHEEL` is positive away from the hand, and
+`wl_pointer.axis` is positive in the direction the content moves.
+
+**The gate: `tests/linux/wsyswl_wheel.sh`.** Offscreen, ~40 s, no VM and no
+Steam: a file of evdev records → `wsysd` → `wsyswl` → a real rootful
+Xwayland → `xev`, which prints what the **X server** delivered. An X11 wheel
+is button 4 (up) and button 5 (down), so one `xev` line is the whole chain.
+**10 PASS.** With the fix stashed and nothing else changed it is **6 PASS /
+4 FAIL**, and the four are the wheel ones — the control (an evdev *move*
+arrives as `MotionNotify`) still passes, so the file reports a dead wheel and
+not a dead pointer. It also asserts the **count** (four notches → exactly
+four button-5 presses) and the **sign** in both directions, because a wheel
+that scrolls backwards works and is wrong, which is worse than a dead one:
+nothing about it looks broken.
+
+### 12.3 Two things seen in passing that are NOT the blocker
+
+* **`wsyswl` printed `DROPPING FRAMES -- the wl_buffer has no shm mapping`
+  once**, when Steam's second (store) window appeared — the `MAXMAP` counter
+  of §6.2a, now at 64, brushed again by a session holding two CEF windows.
+  It did not stop anything: every interaction after that warning — the Browse
+  menu, two navigations, the scrollbar drag and the live search — repainted
+  normally. Worth watching, not the thing in the way. The exact counters
+  could not be read off this run, for the next reason.
+* **The console shell drops typed characters under load.** Driving the guest
+  console over a fifo while Steam is writing to the same serial line, `hamsh`
+  echoed `cat /n/distro/run/wsyswl-state` as far as `cat /n/distr` and then
+  ran *that*, reporting `cannot open /n/distr`. It is not a lost newline —
+  the line was truncated mid-word. This is why §12.1 is measured entirely
+  from the framebuffer rather than from inside the namespace, and it is its
+  own defect, unrelated to Steam and not chased here.
+
+### 12.4 What was deliberately not attempted
+
+**No Steam account was used and none was sought.** Everything above is what
+the client does with no credentials. Not measured, and each needs an account:
+signing in, the library view, downloading or launching a game, the friends
+list, the overlay. `pressure-vessel`'s container comes up (§5) and
+`steamwebhelper` runs inside it, but no *game* has ever been started here and
+this section does not imply one would.
