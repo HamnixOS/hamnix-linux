@@ -2140,12 +2140,31 @@ def title_build(i: uint64, avail: int32) -> uint64:
 # draws inside it. There is no second font system in this file and there must
 # not be one.
 #
-# The surface is TITLE-BAR SIZED and presented KEYED, not opaque: the clear
-# that opens the rasterize leaves alpha 0 (hamui_host_set_clear_alpha), every
-# glyph leaves 0xFF, and blit_window_image_mode(mode 1) writes only the
-# non-zero ones -- so the gradient and the bevel painted a moment ago show
-# between the letters instead of being replaced by a black box. That is the
-# same mechanism the panel's dropdown and the cursor sprite already use.
+# The surface is TITLE-BAR SIZED and presented BLENDED, not opaque: the clear
+# that opens the rasterize leaves alpha 0 (hamui_host_set_clear_alpha), each
+# glyph leaves its own anti-aliased COVERAGE in the alpha byte, and
+# blit_window_image_mode(mode 2) source-overs that onto the bar -- so the bar
+# colour painted a moment ago shows between the letters instead of being
+# replaced by a black box, and the soft edge of each letter blends against the
+# bar instead of against nothing.
+#
+# IT WAS `keyed` (mode 1) AND IT WAS A BLACK BOX ANYWAY, which is the whole
+# lesson of this function. Two things were wrong under one symptom:
+#
+#   * the glyph stamp forced alpha 255 across each glyph's BOUNDING BOX, cov==0
+#     cells included (lib/vk/vk_2d.ad's vk2d_raster_cov_mask fast path, whose
+#     comment states the assumption it is making: "same value the composite
+#     target holds" -- true of every target but a keyed one). Every unpainted
+#     cell inside a letter's box was therefore declared PAINTED, and painted
+#     black, so `keyed` correctly blitted a black box. The clear was
+#     transparent, the key was honoured, the ink was #f0f0f5 to the byte, and
+#     the answer was still black. Fixed in vk2d_raster_cov_mask_over.
+#   * and `keyed` is the wrong present for text even once alpha is honest:
+#     all-or-nothing writes a 1/255-coverage edge pixel as FULL-strength ink.
+#     Anti-aliased text needs the ramp, which is mode 2.
+#
+# The panel's dropdown and the cursor sprite still use the keyed present; they
+# are hard-edged fills, which is what mode 1 is for.
 #
 # ON hamui_host_uncovered_rows(). It is not the instrument for this layer and
 # saying so is more useful than a green number: it unions the destination
@@ -2168,7 +2187,7 @@ def title_draw(i: uint64, ox: int32, oy: int32, w: int32):
     hamui_host_begin(avail, TITLEBAR_H)
     hamui_host_rasterize()
     blit_window_image_mode(ox + TITLE_PAD, oy - TITLEBAR_H, avail,
-                           TITLEBAR_H, 1)
+                           TITLEBAR_H, 2)
 
 
 # 1 = (x, y) in screen coordinates is inside window i's close button.

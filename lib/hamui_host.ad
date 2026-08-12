@@ -31,6 +31,7 @@ from lib.vk.vk_2d import (
     vk2d_raster_clear_rect_a,
     vk2d_raster_blit, vk2d_raster_draw_line,
     vk2d_raster_fill_roundrect, vk2d_raster_cov_mask,
+    vk2d_raster_cov_mask_over,
     vk2d_set_bgra, vk2d_get_bgra,
 )
 
@@ -455,6 +456,16 @@ host_cov_on: int32 = 0                  # 1 while a rasterize is being tracked
 # so it can never leak into the window after it.
 host_clear_a: uint32 = 255
 
+# 1 while the rasterize in flight was opened with a TRANSPARENT clear, i.e.
+# its result is going to be presented alpha-keyed or blended. Unlike
+# host_clear_a (which is one-shot and consumed by begin) this describes the
+# WHOLE rasterize, because every op in it draws onto that transparent surface
+# and has to composite for it -- see _host_stamp_glyph, and the note on
+# vk2d_raster_cov_mask_over for what forcing alpha 255 into a keyed surface
+# costs. Set by _host_begin_common from the clear it just performed, so it can
+# never disagree with the clear.
+host_keyed: int32 = 0
+
 
 # Ask for the NEXT rasterize's clear to be transparent (a == 0) or opaque
 # (anything else). This is the half of devwsys's `keyed 1` ctl verb that
@@ -715,6 +726,19 @@ def _host_stamp_glyph(bw: int32, bh: int32, x0: int32, y0: int32,
             host_cov[cast[uint64](row * bw + col)] = glyph_cov(col, row)
             col = col + 1
         row = row + 1
+    # ONTO A KEYED SURFACE, THROUGH THE OP THAT KEEPS IT KEYED. The opaque
+    # stamp writes alpha 255 over the glyph's whole BOUNDING BOX -- cov==0
+    # cells included -- which on a transparent clear turns every letter into a
+    # black box the compositor then blits. That is what wsysd's title bar was:
+    # #f0f0f5 ink, correct to the pixel, sitting on black instead of on the
+    # bar. See vk2d_raster_cov_mask_over.
+    if host_keyed != 0:
+        vk2d_raster_cov_mask_over(_host_cbase(), cast[uint64](host_w),
+                                  cast[uint64](host_h),
+                                  cast[uint64](&host_cov[0]),
+                                  cast[int64](bw), cast[int64](bh),
+                                  cast[int64](x0), cast[int64](y0), ink)
+        return 1
     vk2d_raster_cov_mask(_host_cbase(), cast[uint64](host_w),
                          cast[uint64](host_h), cast[uint64](&host_cov[0]),
                          cast[int64](bw), cast[int64](bh),
@@ -903,7 +927,9 @@ def _host_begin_common(w: int32, h: int32):
     # clear came back OPAQUE, so `keyed 1` skipped nothing and the black band
     # this whole mechanism exists to remove was still there, with every layer
     # returning success.
+    host_keyed = 0
     if host_clear_a == 0:
+        host_keyed = 1
         vk2d_raster_clear_rect_a(_host_cbase(), cast[uint64](ww),
                                  cast[uint64](hh), 0, 0, cast[int64](ww),
                                  cast[int64](hh), 0, 0, 0, 0)
