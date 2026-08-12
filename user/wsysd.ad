@@ -1963,7 +1963,20 @@ def paint_window(i: uint64) -> int32:
     if bench_on != 0:
         t_rast = t_rast + (now_us() - tr0)
     report_image_misses(wid)
-    report_uncovered(wid, pres)
+    # NOT FOR A v2 WINDOW, for the same reason keyed and blended are exempt.
+    # report_uncovered measures coverage of the RASTERIZED SCENE, and a v2
+    # window's content does not come from its scene: paint_backbuffer()
+    # composites its backbuffer and returns above, before the scene is ever
+    # rasterized. Reaching here with proto 2 means the backbuffer was not
+    # ready THIS frame (the hand-up is on a clock and lands a moment later),
+    # so the scene is empty by construction and measuring it says nothing
+    # about the window. MEASURED before exempting it: the warning fired on
+    # every run, deterministically, naming a browser window that was putting
+    # 468,480 pixels of page on the screen -- a warning that is always wrong
+    # for the one client a person looks at, which is how a warning stops
+    # being read. tests/linux/de_browser_paints.sh holds this.
+    if win_proto[i] != 2:
+        report_uncovered(wid, pres)
 
     if direct != 0:
         return 1
