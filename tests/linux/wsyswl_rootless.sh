@@ -70,6 +70,17 @@ set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
 
+# THE MACHINE THIS RUNS ON IS NOT SCRATCH. This gate starts hamdesktop and
+# hampanelscene, and those write /tmp/hamdesktop-wp.status, /tmp/.hamdesktop.src,
+# /tmp/hamnix-panel.health and /tmp/hamnix-panel-drop under names compiled into
+# the binaries -- the same fixed names this machine's own desktop reads. It also
+# runs a Wayland compositor, whose socket lands in $XDG_RUNTIME_DIR. So it goes
+# in a namespace where all of those are a fresh tmpfs; see private_ns.sh for the
+# incident that bought this. It must come before anything that makes a file
+# under /tmp, $WORK included.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
+
 WORK="${RLESS_WORK:-$(mktemp -d -p "${TMPDIR:-/tmp}" rless.XXXXXX)}"
 mkdir -p "$WORK"
 GEOM="${HAMFB_GEOM:-1280x800}"
@@ -97,6 +108,11 @@ pass=0; fail=0
 ok()   { echo "rless: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "rless: FAIL $*"; fail=$((fail+1)); }
 info() { echo "rless: INFO $*"; }
+
+# Reported, not checked: priv_ns_reexec has already REFUSED to get this far if
+# the namespace was not in place. Deliberately unscored, so the gate's count
+# stays about rootless X and does not move for an unrelated reason.
+info "$(priv_ns_describe)"
 
 KIDS=""; XWPID=""; XWPID2=""; WLPID=""; WSYSDPID=""
 cleanup() {

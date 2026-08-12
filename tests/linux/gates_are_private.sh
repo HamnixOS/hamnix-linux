@@ -44,22 +44,9 @@ info() { echo "private: INFO $*"; }
 EXEMPT="$(cat <<'EOF'
 wsys_uidgate.sh	ITS SUBJECT IS THE UID. The namespace is only obtainable with --map-root-user (--map-current-user leaves CapEff 0, measured), so geteuid() would be 0 inside, and user/linux-wsys.c branches on exactly that at :1207 and :1843. It would still print its passes, about the wrong uid. Run it alone or in the VM. The file says so at its head.
 private_ns_isolates.sh	IT IS THE PROOF. It builds its own OUTER namespace for each of its two experiments -- one of which deliberately reproduces the contamination -- and its last assertion has to see the REAL host to answer whether anything leaked onto it. Re-execing itself would nest that assertion inside the very thing it is checking.
-channel_runs_desktop.sh	NOT YET CONVERTED, and the most valuable one left: scripts/hamlinux_packages.py runs it before it writes index.json, so it runs on every publish, and it sets no HAMWSYS at all -- it takes linux-wsys.c's /srv, then /dev/shm/hamnix-wsys fallback, which this machine's /dev/shm is holding right now. Two lines plus one verification run.
-runsweep_jail.sh	NOT YET CONVERTED. Runs the panel, the desktop and wsyswl. Needs a verification run.
-wsyswl_rootless.sh	NOT YET CONVERTED. Sets HAMWSYS, so the shared segment is private, but it starts hamdesktop and hampanelscene and those write /tmp/hamdesktop-wp.status, /tmp/.hamdesktop.src, /tmp/hamnix-panel.health and /tmp/hamnix-panel-drop under fixed names.
-wlsnarf_bridge.sh	NOT YET CONVERTED, and it has a second exposure the namespace would also close: `mkdir -p /tmp/.X11-unix` and a bind of X$DPY inside it. That is the host's X socket directory, and a display-number collision reaches a real X session on this machine.
-input_probe.sh	NOT YET CONVERTED. Sets HAMWSYS and HAMWSYS_BB and starts no desktop client, so the known residue is small; unverified rather than proved.
-wsys_bypass.sh	NOT YET CONVERTED. Sets HAMWSYS; no desktop client. Same standing as input_probe.sh.
-wsys_title.sh	NOT YET CONVERTED. Sets HAMWSYS and HAMWSYS_BB; no desktop client.
-wsys_image.sh	NOT YET CONVERTED. Sets HAMWSYS and HAMWSYS_BB; no desktop client.
-wsys_close_button.sh	NOT YET CONVERTED. Sets HAMWSYS and HAMWSYS_BB; runs wsyswl, whose Wayland socket lands in XDG_RUNTIME_DIR -- which private_ns.sh does NOT shadow, so converting it is necessary but not sufficient.
-x11_geom_probe.sh	NOT YET CONVERTED. Same standing as wsys_close_button.sh.
-wsyswl_ceiling.sh	NOT YET CONVERTED. Same standing as wsys_close_button.sh.
-wsyswl_conn_ceiling.sh	NOT YET CONVERTED. Same standing as wsys_close_button.sh.
-wsyswl_shared_fate.sh	NOT YET CONVERTED. Same standing as wsys_close_button.sh.
-wsyswl_stall.sh	NOT YET CONVERTED. Same standing as wsys_close_button.sh.
-wsyswl_two_browsers.sh	NOT YET CONVERTED. Same standing as wsys_close_button.sh.
-wsyswl_wheel.sh	NOT YET CONVERTED. Same standing as wsys_close_button.sh.
+rless_is_private.sh	IT IS THE PROOF, for wsyswl_rootless.sh, exactly as private_ns_isolates.sh is for de_panel_conf_replace.sh. It builds its own OUTER namespace for each of its two experiments -- one of which deliberately reproduces the contamination -- and its last assertion has to see the REAL host to answer whether anything leaked onto it. Re-execing itself would nest that assertion inside the very thing it is checking.
+wsys_bypass.sh	ITS SUBJECT IS THE UID SPLIT, like wsys_uidgate.sh, and it builds its OWN user namespace to get it: `unshare -U --map-users=0:$(id -u):1 --map-users=1001:$SUB:1` with $SUB read from /etc/subuid for `id -un`. Inside this helper's namespace `id -un` is root, /etc/subuid has no root line, and the gate correctly SKIPs -- 47 PASS became 0, measured. Mapping the inner 1001 to a subordinate id that is itself only a subordinate id here would change what the gate is about. Its residue is also the smallest of any gate in this list: it exports HAMWSYS into its own mktemp under /tmp and derives .bb and .chrome from it, touches no /srv, no /dev/shm and no fixed hamnix-* name, and starts no desktop client. Run it alone or in the VM.
+runsweep_jail.sh	IT IS ALREADY IN A STRICTER JAIL, AND IT IS NOT A GATE. scripts/hamlinux_runsweep.sh runs it as `unshare -rmn --fork --pid --kill-child runsweep_jail.sh <base> <up> <work> <mnt> <prog> [argv]`, so it is inside a user, mount, PID and NET namespace before its first line, and it then `exec unshare --root="$MNT"`s into an overlay root of its own: its /tmp, /dev/shm and /srv are the per-program upper layer, not the machine's. priv_ns_reexec on top would re-exec it with those five positional arguments through a second namespace for nothing, and it takes no "$@" of the gate shape. Isolation here is stronger than the helper's, not absent.
 EOF
 )"
 exempt_reason() { printf '%s\n' "$EXEMPT" | awk -F'\t' -v f="$1" '$1 == f { print $2; exit }'; }

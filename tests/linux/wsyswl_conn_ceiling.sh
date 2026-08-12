@@ -59,6 +59,19 @@ set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
 
+# THE MACHINE THIS RUNS ON IS NOT SCRATCH.
+#
+# It opens Wayland connections until the compositor refuses; every one of them is a
+# socket in $XDG_RUNTIME_DIR.
+#
+# The names that matter are compiled into the binaries, not written here, so no
+# care taken in this script can move them; the containment is the namespace.
+# tests/linux/private_ns.sh has the table and the incident that bought it. This
+# must come before anything that makes a file under /tmp, $WORK included, and
+# before reap.sh, whose registry is itself a mktemp under /tmp.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
+
 WORK="${CONNC_WORK:-$(mktemp -d -p "${TMPDIR:-/tmp}" connc.XXXXXX)}"
 mkdir -p "$WORK"
 KEEP="${CONNC_KEEP:-0}"

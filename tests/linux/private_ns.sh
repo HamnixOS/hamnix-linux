@@ -45,6 +45,9 @@
 #     linux-audio.c  /srv/audio /dev/shm/hamnix-audio
 #     linux-net.c    /srv/net   /dev/shm/hamnix-net
 #     linux-fdns.c   /srv/fdns  /dev/shm/hamnix-fdns
+#     wsyswl         $XDG_RUNTIME_DIR/wayland-0, /wsyswl-state, /hamnix-screen
+#                    and /tmp/.X11-unix/X<n> (the host's X socket directory:
+#                    a display-number collision reaches a REAL X session)
 #
 # So ANY gate that starts the desktop stack writes host-global state whether
 # its author intended to or not, and the ones that do not export HAMWSYS /
@@ -57,7 +60,7 @@
 # Re-executes the calling gate inside a private mount namespace (via a user
 # namespace, so no privilege is needed and none is gained) in which
 #
-#     /tmp   /dev/shm   /srv
+#     /tmp   /dev/shm   /srv   $XDG_RUNTIME_DIR
 #
 # are each a FRESH, EMPTY tmpfs belonging to this run alone. Every fixed name
 # above lands in it. Nothing the gate or its children write is visible to any
@@ -125,10 +128,14 @@ MS_REC, MS_PRIVATE = 16384, 1 << 18
 # Detach this namespace's propagation first, or a shared subtree carries the
 # mounts below straight back out to the host we are trying not to touch.
 mount(None, "/", None, MS_REC | MS_PRIVATE, None)
-for target in sys.argv[1:]:
+# An argument is either "/path" (mode 1777, the shared-scratch default) or
+# "/path=0700" for a directory whose whole point is that it is one user's --
+# $XDG_RUNTIME_DIR, whose permissions a Wayland compositor checks.
+for spec in sys.argv[1:]:
+    target, _, mode = spec.partition("=")
     if not os.path.isdir(target):
         continue
-    mount("none", target, "tmpfs", 0, "mode=1777")
+    mount("none", target, "tmpfs", 0, "mode=" + (mode or "1777"))
 PRIVNSPY
 }
 
@@ -171,13 +178,88 @@ priv_ns_reexec() {
         exit 1; }
 
     local prog; prog="$(priv_ns_mount_prog)"
-    exec unshare --user --map-root-user --mount -- \
+
+    # $XDG_RUNTIME_DIR IS A FOURTH SHARED NAME, and it was the caveat this
+    # helper shipped with. wsyswl binds its Wayland socket there under a name
+    # as fixed as any in the table above (wayland-0), and writes wsyswl-state
+    # and hamnix-screen beside it; on this machine $XDG_RUNTIME_DIR is
+    # /run/user/<uid>, which is the REAL session's. Isolating /tmp while
+    # leaving that alone is isolation that stops one path short.
+    #
+    # So it is shadowed too, keeping its NAME: a gate that hardcodes
+    # /run/user/$(id -u), and one that reads the variable, both land on the
+    # same fresh tmpfs. It gets mode 0700 rather than 1777 because a Wayland
+    # compositor checks that (libwayland warns, and some clients refuse).
+    local xdg="${XDG_RUNTIME_DIR:-}" targets=(/tmp /dev/shm /srv)
+    case "$xdg" in
+        ""|/tmp|/tmp/*|/dev/shm/*|/srv/*) ;;   # unset, or already inside one above
+        *) [ -d "$xdg" ] && targets+=("$xdg=0700") ;;
+    esac
+
+    # THE ID MAP IS PART OF THE FIDELITY, AND IT WAS MEASURED.
+    #
+    # `--map-root-user` alone maps exactly one id: 0 -> the invoking user.
+    # Every OTHER uid and gid is unmapped, and a program that touches one gets
+    # EINVAL. That is not theoretical -- tests/linux/wsyswl_rootless.sh drives
+    # two `xterm`s as its X clients, and inside the one-id namespace each one
+    # printed
+    #
+    #     xterm: Cannot chown /dev/pts/7 to 0,5: Invalid argument
+    #
+    # and DIED, because gid 5 (tty) is not in the map. The gate then reported
+    # "the X root has 1 children", "windows_high_water is 1" and "/dev/wsys
+    # lists 0 application windows" -- four FAILs that were the namespace's,
+    # about a compositor that had done nothing wrong. An isolation that makes
+    # a gate lie about its subject is not an improvement.
+    #
+    # So when the host has subordinate id ranges (/etc/subuid, /etc/subgid)
+    # and the setuid newuidmap/newgidmap helpers, `--map-auto` maps 65535 more
+    # ids beside root, gid 5 among them, and xterm lives. Where they are absent
+    # this falls back to the one-id map and SAYS which one it got, because a
+    # gate whose client needs a second id must be able to tell the two cases
+    # apart rather than read a failure as a finding.
+    #
+    # NESTING IS THE SECOND CASE. /etc/subuid is about the HOST's user, and
+    # inside a namespace `id -un` is root, which has no line in it -- so
+    # --map-auto fails for a gate re-exec'd from inside another namespace (the
+    # proof gates run their experiments that way). But a process that is root
+    # in the namespace it is leaving holds CAP_SETUID there, and may therefore
+    # write a child's id map directly for every id it already owns. So the
+    # fallback MIRRORS the current /proc/self/uid_map and gid_map: each range
+    # this namespace has, mapped to itself in the child. Nothing is gained and
+    # nothing is lost -- which is the point.
+    local mapargs=() mirror=() inner outer count
+    if unshare --user --map-root-user --map-auto --mount true 2>/dev/null; then
+        mapargs=(--map-root-user --map-auto)
+    else
+        while read -r inner outer count; do
+            [ -n "${count:-}" ] || continue
+            mirror+=(--map-users="$inner:$inner:$count")
+        done </proc/self/uid_map
+        while read -r inner outer count; do
+            [ -n "${count:-}" ] || continue
+            mirror+=(--map-groups="$inner:$inner:$count")
+        done </proc/self/gid_map
+        if [ "${#mirror[@]}" -gt 2 ] && \
+           unshare --user "${mirror[@]}" --mount true 2>/dev/null; then
+            mapargs=("${mirror[@]}")
+        else
+            mapargs=(--map-root-user)
+        fi
+    fi
+    exec unshare --user "${mapargs[@]}" --mount -- \
         /usr/bin/env PRIV_NS_ACTIVE=1 \
         bash -c '
-            python3 -c "$1" /tmp /dev/shm /srv || exit 1
-            shift 2
+            prog="$1"; shift
+            targets=(); while [ "$1" != -- ]; do targets+=("$1"); shift; done; shift
+            python3 -c "$prog" "${targets[@]}" || exit 1
+            # Unset, or a path that the fresh tmpfs above has just emptied:
+            # give this run a runtime directory of its own inside the private
+            # /tmp rather than leave a compositor to fall back on the machines.
+            [ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR=/tmp/privns-run
+            mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
             exec bash "$@"
-        ' private_ns "$prog" -- "$self" "$@"
+        ' private_ns "$prog" "${targets[@]}" -- "$self" "$@"
 }
 
 # priv_ns_assert -- is the isolation actually in place RIGHT NOW?
@@ -197,23 +279,45 @@ priv_ns_assert() {
             bad=1; }
     done
     [ "$bad" = 0 ] || return 1
-    if [ -n "$(ls -A /tmp 2>/dev/null)" ]; then
+    # /tmp/privns-run is this helper's own doing (see priv_ns_reexec), so it is
+    # not evidence of somebody else's /tmp.
+    local stray; stray="$(ls -A /tmp 2>/dev/null | grep -v '^privns-run$')"
+    if [ -n "$stray" ]; then
         echo "private_ns: REFUSING -- /tmp is a mount point but is not empty, so it is" >&2
         echo "private_ns: not the private tmpfs this run just made" >&2
         return 1
     fi
+    # And the fourth name. It is isolated either by being a mount point of its
+    # own, or by living inside the private /tmp -- both are answers, and an
+    # unshadowed /run/user/<uid> is not.
+    local x="${XDG_RUNTIME_DIR:-}"
+    case "$x" in
+        /tmp|/tmp/*) ;;
+        "") echo "private_ns: REFUSING -- XDG_RUNTIME_DIR is unset inside the namespace" >&2
+            return 1 ;;
+        *)  awk -v want="$x" '$5 == want { seen = 1 } END { exit !seen }' \
+                /proc/self/mountinfo || {
+                echo "private_ns: REFUSING -- XDG_RUNTIME_DIR ($x) is neither inside the" >&2
+                echo "private_ns: private /tmp nor a mount point of its own, so a Wayland" >&2
+                echo "private_ns: socket bound there is the MACHINE's session directory" >&2
+                return 1; } ;;
+    esac
     return 0
 }
 
 # priv_ns_describe -- one line a gate can print as its own evidence.
 priv_ns_describe() {
     if [ "${HAMTEST_NO_PRIVNS:-0}" = 1 ]; then
-        echo "NOT ISOLATED (HAMTEST_NO_PRIVNS=1): writing this machine's /tmp, /dev/shm and /srv"
+        echo "NOT ISOLATED (HAMTEST_NO_PRIVNS=1): writing this machine's /tmp, /dev/shm, /srv and \$XDG_RUNTIME_DIR"
         return 0
     fi
-    local dev
+    local dev xdev x="${XDG_RUNTIME_DIR:-<unset>}"
     dev="$(awk '$5 == "/tmp" { d = $3 } END { print d }' /proc/self/mountinfo)"
-    echo "isolated: /tmp, /dev/shm and /srv are private tmpfs of this run alone (/tmp is dev $dev in this mount namespace; the host's /tmp is untouched and unreadable from here)"
+    xdev="$(awk -v want="$x" '$5 == want { d = $3 } END { print d }' /proc/self/mountinfo)"
+    local idmap="one id only (root); a program needing a second uid/gid gets EINVAL"
+    [ "$(wc -l </proc/self/gid_map 2>/dev/null)" -gt 1 ] && \
+        idmap="root plus a subordinate range, so gid 5 (tty) and friends exist"
+    echo "isolated: /tmp, /dev/shm, /srv and \$XDG_RUNTIME_DIR ($x${xdev:+, dev $xdev}) are private tmpfs of this run alone (/tmp is dev $dev in this mount namespace; the host's /tmp is untouched and unreadable from here); id map: $idmap"
 }
 
 # priv_ns_keep <dir> -- a host-visible directory that OUTLIVES the namespace.

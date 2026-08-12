@@ -48,6 +48,23 @@ set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT" || exit 1
 
+# THE MACHINE THIS RUNS ON IS NOT SCRATCH.
+#
+# Its inner body already made a namespace of its own and mounted a tmpfs on /tmp --
+# which is why `mkdir -p /tmp/.X11-unix` and the bind of X$DPY were survivable --
+# but /dev/shm and /srv were the machine's throughout, and the OUTER half of the
+# gate (the builds, the tool checks) ran on the bare host. This puts the whole gate
+# inside, so the X socket directory, the shared segments and the runtime dir are all
+# this run's.
+#
+# The names that matter are compiled into the binaries, not written here, so no
+# care taken in this script can move them; the containment is the namespace.
+# tests/linux/private_ns.sh has the table and the incident that bought it. This
+# must come before anything that makes a file under /tmp, $WORK included, and
+# before reap.sh, whose registry is itself a mktemp under /tmp.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
+
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  PASS  $*"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL  $*"; }

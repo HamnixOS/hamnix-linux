@@ -51,6 +51,19 @@ set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
 
+# THE MACHINE THIS RUNS ON IS NOT SCRATCH.
+#
+# It sets HAMWSYS and HAMWSYS_BB but starts the window system, and /srv and
+# /dev/shm/hamnix-* are the fallbacks a dropped export lands on.
+#
+# The names that matter are compiled into the binaries, not written here, so no
+# care taken in this script can move them; the containment is the namespace.
+# tests/linux/private_ns.sh has the table and the incident that bought it. This
+# must come before anything that makes a file under /tmp, $WORK included, and
+# before reap.sh, whose registry is itself a mktemp under /tmp.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
+
 WORK="${TITLE_WORK:-$(mktemp -d -p "${TMPDIR:-/tmp}" wtitle.XXXXXX)}"
 mkdir -p "$WORK"
 GEOM="${HAMFB_GEOM:-1280x800}"
