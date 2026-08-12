@@ -492,6 +492,57 @@ software ratio to a GPU number is exactly the cross-path comparison that
 produced the 220-vs-38 confusion. **The capped real-content number is NOT
 MEASURED.** It is one short run once the display is free.
 
+### 3h. Re-verifying the shipped claims against the now-painting load
+
+Offscreen, software — the shipped configuration, and the display belongs to
+the machine owner. `binempty` = old empty-window drag load, `bin` = real
+content, **identical compositor in both**.
+
+**Two of the claims are structurally immune, and it is worth saying why
+before quoting any number.** In `de_fps_latency.sh`, load A runs *before*
+`de_dragload` starts, and the drag client is *killed* before the latency
+trials. So neither the pointer-rate figure nor input→pixel can be affected by
+what the drag window paints — the window does not exist during either.
+
+**That immunity is what exposed a confound.** A first, sequential run appeared
+to show input→pixel falling from 0.34 ms to 0.89 ms with real content. It also
+showed load A's CPU going 4.3% → 12.0% — and load A *cannot* be affected by
+the variable under test. Another agent was running the release candidate's
+gates on the same box. So the difference was the machine, not the change.
+
+`tests/linux/lat_null_control.sh` is the null experiment that settles it: the
+same compositor measured under both labels, interleaved rather than
+sequential, six runs:
+
+| | p50 |
+|---|---|
+| binempty | 0.35, 0.34, 0.36 ms |
+| bin | 0.29, 0.32, 0.36 ms |
+
+Same distribution, as it must be. **input→pixel reproduces at 0.29–0.36 ms**,
+and the drag load's content does not enter it.
+
+| claim | verdict |
+|---|---|
+| input→pixel ≈0.29 ms | **holds**, but 0.29 is the *best* of the range; typical is ~0.34 |
+| pointer rate ≈ input rate | **holds** — 257.0 / 251.3 fps at 250 ev/s |
+| idle unchanged | **holds**; idle presents 32–33 frames per 10 s in both, which is the panel's 320 ms resample and nothing else |
+| power arc 35.7 → 7.0 → 3.5 | **understated**, see below — not re-measurable offscreen |
+
+**The power arc is the exposed claim.** All three figures were measured on the
+display with a drag window that painted nothing, and paint is a *component* of
+each: roughly 2.1 of the 7.0 and 2.3 of the 3.5. Real content raises per-frame
+paint cost by 19–23% (§3g), so every figure in the arc is a **floor**, and the
+uncapped one — which paints 908 times a second rather than 57 — has the most
+paint in it to inflate. The *ratio* is therefore likely preserved or improved
+while the absolute numbers all rise.
+
+That is a direction, not a correction: §3g's ratio is the software rasterizer
+at 1280x800 and the arc is GPU scanout at 1920x1080, and scaling one by the
+other is the cross-path move this document already refuses twice. **The
+event counts are the content-independent part of the arc** — 908 → 57 frames
+presented, 920 → 118 wakes — because those count occurrences, not costs.
+
 ### Blocked on display access — not merely undone
 
 The card went back to the machine owner's session. These are **not** open
