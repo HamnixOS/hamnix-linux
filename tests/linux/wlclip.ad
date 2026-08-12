@@ -69,7 +69,12 @@ ID_SYNC:     uint32 = 7
 out:      Array[8192, uint8]
 inbuf:    Array[16384, uint8]
 acc:      Array[131072, uint8]       # partial wire messages accumulate here
-payload:  Array[65600, uint8]        # what we copy, or what we pasted
+# BIGGER THAN THE CLIPBOARD ON PURPOSE. The cap arm needs a client that
+# offers MORE than SNARF_MAX so the compositor is the thing that truncates; a
+# client whose own buffer stopped at 65 536 would make the test assert that
+# the test truncates, which is the kind of gate that passes over a hole.
+COPY_MAX: uint64 = 131072
+payload:  Array[131136, uint8]       # what we copy, or what we pasted
 mimebuf:  Array[256, uint8]          # the mime of the send/offer being parsed
 wantmime: Array[256, uint8]          # the mime `paste` asks for
 mimelist: Array[2048, uint8]         # every mime the offer advertised
@@ -603,8 +608,8 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             sayerr("cannot open the file to copy\n")
             return 1
         got: uint64 = 0
-        while got < SNARF_MAX:
-            n: int64 = sys_read(f, &payload[got], SNARF_MAX - got)
+        while got < COPY_MAX:
+            n: int64 = sys_read(f, &payload[got], COPY_MAX - got)
             if n <= 0:
                 break
             got = got + cast[uint64](n)
