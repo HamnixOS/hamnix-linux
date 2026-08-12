@@ -90,8 +90,38 @@
  * success-shaped failure this tree keeps paying for.  4 adds `inputgen`, the
  * futex word a parked client sleeps on, which moves every window after it.
  * 5 doubles WSYS_MAX_WINDOWS and adds `wmdelete` to struct wwin, which moves
- * every field after it and every window after the first. */
-#define WSYS_VERSION      5
+ * every field after it and every window after the first.
+ * 6 doubles WSYS_MAX_WINDOWS again, 128 -> 256, for user/wsyswl.ad's MAXCONN
+ * 16.  struct wwin is BYTE-FOR-BYTE UNCHANGED and so is every field of struct
+ * wshm that precedes win[], so a v5 and a v6 build agree about where window
+ * 0..127 are and disagree only about how many there are after them.  The
+ * version still has to move, and this is what each direction does -- checked
+ * by running it, in tests/linux/wsyswl_conn_ceiling.sh, not reasoned about:
+ *
+ *   A v6 BUILD MEETING A v5 SEGMENT.  st_size (9,593,244) is smaller than its
+ *   own sizeof (19,052,956), so it ftruncates the file up, maps the whole
+ *   thing, reads version 5 != 6 and memsets all 18.17 MiB.  Complete, clean,
+ *   and it costs the previous session's windows -- which is what a version
+ *   mismatch has always meant here.
+ *
+ *   A v5 BUILD MEETING A v6 SEGMENT.  This is the direction that is new,
+ *   because it is the first time the two builds disagree about the SIZE of
+ *   the mapping.  It maps only the first 9,593,244 bytes of an 19,052,956
+ *   byte file -- mmap is happy to map a prefix -- reads version 6 != 5, and
+ *   memsets what it mapped.  Rows 128..255 are left holding a dead session's
+ *   bytes.  It cannot read them: a v5 binary indexes win[0..127] and the
+ *   array bound is compiled in.  And the next v6 attacher sees version 5,
+ *   fails its own check, and memsets the full 18.17 MiB before anything
+ *   reads a row.  So the stale tail is unreachable in both builds and is
+ *   gone before it could be reached in either.  NOT a silent half-share of a
+ *   table two builds disagree about -- that is the failure this counter
+ *   exists to prevent, and it is prevented in this direction too.
+ *
+ * /srv is tmpfs and recreated every boot, so meeting an old segment at all
+ * means two builds in one session; the ONLY other way is a live `hpm update`
+ * of the window system underneath a running desktop, which re-initialises
+ * that desktop's window table by design and always has. */
+#define WSYS_VERSION      6
 /* SIXTY-FOUR, NOT THIRTY-TWO, and the reason is rootless Xwayland.
  *
  * A ROOTFUL X session is one wl_surface and therefore ONE row in this table
@@ -106,8 +136,30 @@
  * buffers and five rings -- so this is 9.5 MiB of shared memory where it was
  * 2.4, mapped once and shared by every client.  See BB_SLOTS below, which is
  * now tied to this number by an assertion rather than by a comment, and
- * user/wsyswl.ad's MAXCONN * WINPERCONN, which is 8 * 16 and fits here. */
-#define WSYS_MAX_WINDOWS  128
+ * user/wsyswl.ad's MAXCONN * WINPERCONN, which is 16 * 16 and fits here.
+ *
+ * TWO HUNDRED AND FIFTY-SIX, NOT ONE HUNDRED AND TWENTY-EIGHT, and the reason
+ * is MAXCONN and not windows.
+ *
+ * Nobody has 256 windows open.  This number is not a window budget, it is the
+ * no-starvation invariant MAXWIN >= MAXCONN * WINPERCONN made true: every
+ * connection is guaranteed its whole budget of 16 windows no matter what any
+ * other client has done, and wsyswl.ad's MAXCONN had to go to 16 because
+ * FIREFOX ALONE OPENS EIGHT CONNECTIONS.  Keeping the table at 128 was
+ * available and the price was halving WINPERCONN back to 8, which would have
+ * turned tests/linux/wsyswl_ceiling.sh red -- twelve X clients on one
+ * Xwayland are twelve windows on ONE connection.
+ *
+ * WHAT IT COSTS, and it is RESIDENT and not address space, which is the
+ * opposite of the BB_SLOTS story below and must not be confused with it:
+ * shm_attach memsets the whole of struct wshm on first attach, so every page
+ * is touched and stays touched.  sizeof(struct wshm) is 19,052,956 bytes --
+ * 18.17 MiB, where 128 rows was 9,593,244 (9.15 MiB).  Measured with
+ * du(1) on the segment file, not computed: the test prints both.  That is
+ * the whole price of the ceiling, it is paid once for the machine and shared
+ * by every client, and it is why MAXCONN is 16 and not 32 -- 32 would need
+ * 512 rows and 36.21 MiB resident on every boot of every machine. */
+#define WSYS_MAX_WINDOWS  256
 #define WSYS_SCENE_CAP    16384              /* = lib/hamscene.ad HAMSCENE_CAP */
 #define WSYS_RING_CAP     8192
 #define WSYS_TITLE_CAP    64
