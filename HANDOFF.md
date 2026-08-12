@@ -3532,10 +3532,25 @@ QEMU screendump of the scanned-out surface. Seven categories including
 **Office** and **Sound & Video**, which the fallback list never had, and an
 Accessories fly-out listing Calculator, Screenshot, Editor, Notes and Files.
 
-Green alongside: `de_appmenu_brisk.sh` **17**, `de_icons_distinct.sh` **15**,
-`de_mouse_chrome.sh` **13**, `channel_covers_image.sh` **8**,
-`gates_are_private.sh` **3**, and the channel builds **124 packages** with
-`channel_runs_desktop.sh` and `channel_compiles_adder.sh` green inside it.
+**AND A THIRD GATE WAS ABOUT TO GO SOFT-GREEN, in the same family.**
+`de_appmenu_realboot.sh`'s `panelwin()` selected the panel's window with
+`$5 < 400` — a bound put there to keep the desktop backdrop (also full-width
+and top-anchored, at 1280x800) out of the answer, when the ARM OLD panel grew
+to ~206 px to hold the flat dropdown. With the catalogue staged that dropdown
+holds 25 rows and the panel grows to **580**, so the filter stopped matching,
+`panelwin` returned nothing, and the assertion reading it **degraded to an
+INFO line**: 16 PASS became 15 *with nothing red*. The height is the answer,
+so it must not be in the question; the backdrop is excluded by its Z (-1 by
+construction) instead. **16 PASS / 0 FAIL**, and its favourites file names
+`/bin/hamfmscene` — the WINDOWED file manager, which is what a click reaches
+now.
+
+Green alongside: `de_appmenu_realboot.sh` **16**, `de_appmenu_brisk.sh` **17**,
+`de_icons_distinct.sh` **15**, `de_mouse_chrome.sh` **13**,
+`channel_covers_image.sh` **8** (331 image files, 804 channel files, 41
+excluded by name), `gates_are_private.sh` **3**, and the channel builds
+**124 packages** with `channel_runs_desktop.sh` and
+`channel_compiles_adder.sh` green inside it.
 
 ### Running it
 
