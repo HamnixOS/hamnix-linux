@@ -533,4 +533,84 @@ EOF
     fi
 done
 
+# ---- 10. TWO PANELS, ONE CARD --------------------------------------------
+# WHY THIS EXISTS AND WHY IT IS NOT THE CHECK IT REPLACES.
+#
+# An earlier version of this file asserted, on a BOTTOM panel, that the card
+# was NOT also drawn at the top -- a paired negative against a hardcoded y.
+# That pairing was dropped in favour of the derived boxes above, and the
+# reasoning was right: a build with a hardcoded y cannot put the card at the
+# derived bottom/left/right box, so each positive assertion up there already
+# fails it. The negative added nothing to that.
+#
+# It does not follow that no negative is needed, and this is the one that is.
+# user/hampanelscene.ad draws the card under
+#
+#     if notice_on != 0 and notice_panel == cur_panel_idx:
+#
+# -- ONE panel gets it, the one carrying the Applications button
+# (_notice_first_menu_panel). Every case above runs a SOLO panel, where that
+# guard is unreachable by construction: with one panel every index matches.
+# Delete the guard and everything above still passes. And two panels is not an
+# exotic layout -- it is what the image SHIPS (a top bar and a bottom taskbar),
+# so the untested guard is the one running on every real machine.
+#
+# So the negative is asked where it discriminates: the card must be on the
+# panel with the menu, and the other panel's box must stay EMPTY.
+info "two panels -- a top bar with the Applications button and a bottom taskbar without it"
+cat >/tmp/hamnix-panel.conf <<'EOF'
+panel topbar
+  edge top
+  size 26
+  widget menu
+  widget clock
+end
+panel taskbar
+  edge bottom
+  size 26
+  widget tasks
+end
+EOF
+TP_X=8;  TP_Y=26
+BP_X=8;  BP_Y=$((FBH - 26 - NOTICE_H_SRC))
+# NOTICE_TWOPANEL_AIM=top PROVES THE NEGATIVE CAN FAIL, in the same shape as
+# NOTICE_EDGE_NUDGE above: it aims the "the other panel must stay empty" box at
+# the panel that legitimately HAS the card, without touching the panel. If the
+# assertion is sound that must go red -- and it does, measured: 82% and
+# "the card is ALSO on the taskbar". An always-empty box, or a box off the
+# screen, would stay green and the check would be worth nothing.
+if [ "${NOTICE_TWOPANEL_AIM:-}" = top ]; then
+    BP_Y=$TP_Y
+    info "NOTICE_TWOPANEL_AIM=top: the 'other panel' box is aimed at the TOP panel's card; the negative below MUST fail"
+fi
+kill "$PANEL_PID" 2>/dev/null; sleep 0.5; kill -9 "$PANEL_PID" 2>/dev/null
+sleep 1
+# BOTH boxes proved empty with no panel running, for the same reason each edge
+# above proves its own: a card left in the framebuffer by the previous panel
+# would otherwise be counted as this one's, and here that would corrupt the
+# NEGATIVE half -- the direction where a leftover reads as a defect.
+TP_PRE="$(colourpct $((TP_X + 6)) $((TP_Y + 6)) $((NOTICE_W_SRC - 12)) $((NOTICE_H_SRC - 12)) "$FACE")"
+BP_PRE="$(colourpct $((BP_X + 6)) $((BP_Y + 6)) $((NOTICE_W_SRC - 12)) $((NOTICE_H_SRC - 12)) "$FACE")"
+if [ "$TP_PRE" -le 5 ] && [ "$BP_PRE" -le 5 ]; then
+    ok "CONTROL for the two-panel case: with no panel running both boxes are empty (top ${TP_PRE}%, bottom ${BP_PRE}%)"
+else
+    bad "CONTROL for the two-panel case: a box is already painted with no panel running (top ${TP_PRE}%, bottom ${BP_PRE}%) -- neither half below would mean anything"
+fi
+"$WORK/hampanelscene.elf" </dev/null >"$WORK/panel_two.log" 2>&1 &
+PANEL_PID=$!; PIDS="$PIDS $PANEL_PID"
+TP_PCT="$(await_notice $((TP_X + 6)) $((TP_Y + 6)) $((NOTICE_W_SRC - 12)) $((NOTICE_H_SRC - 12)) 40)"
+# Read the other box only AFTER the card has had its chance to appear, so
+# "absent" is a settled frame and not a race the panel had not reached yet.
+BP_PCT="$(colourpct $((BP_X + 6)) $((BP_Y + 6)) $((NOTICE_W_SRC - 12)) $((NOTICE_H_SRC - 12)) "$FACE")"
+if [ "$TP_PCT" -ge 40 ]; then
+    ok "THE CARD GOES TO THE PANEL WITH THE APPLICATIONS BUTTON: ${TP_PCT}% #$FACE at ${TP_X},${TP_Y} after ${AWAIT_S}s"
+else
+    bad "with two panels the card did not appear on the one carrying the menu (${TP_PCT}% #$FACE at ${TP_X},${TP_Y}) -- _notice_first_menu_panel picked the wrong panel, or none"
+fi
+if [ "$BP_PCT" -le 5 ]; then
+    ok "AND ONLY THAT PANEL: the taskbar's own box is ${BP_PCT}% #$FACE -- the notice is drawn once, not once per panel"
+else
+    bad "the card is ALSO on the taskbar (${BP_PCT}% #$FACE at ${BP_X},${BP_Y}): every panel is drawing it. On the shipped two-panel layout the person gets the same notice twice, and the \`notice_panel == cur_panel_idx\` guard in _emit_panel is not doing anything."
+fi
+
 done_report

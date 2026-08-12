@@ -270,9 +270,24 @@ command -v python3 >/dev/null || { echo "need python3" >&2; exit 1; }
 #
 # WHAT IS GIVEN UP, SAID PLAINLY: this gate no longer installs the REAL
 # published tarball, so it is no longer evidence that what is on 255.one today
-# unpacks and boots. That was never its subject -- tests/linux/installed_update.sh
-# and tests/linux/hpm_signed_refresh.sh are -- and it was the thing that made
+# unpacks and boots. That was never its subject, and it was the thing that made
 # it stop measuring its own subject.
+#
+# THE FIRST VERSION OF THIS PARAGRAPH NAMED THE WRONG COVER, and correcting it
+# is worth more than the paragraph. It said installed_update.sh carries that
+# evidence. It does not: that file BUILDS AND SERVES A LOCAL CHANNEL and only
+# touches 255.one to derive a version number and to note that a bare refresh
+# reaches it. "Some other gate covers it" is the sentence that hides holes, and
+# it hid one here for exactly as long as nobody ran the other gate.
+#
+# WHAT ACTUALLY COVERS IT:
+#   tests/linux/installed_update_live.sh   the published bytes onto a real
+#     UEFI+ext4 disk, three boots, and a REAL POINTER on the Applications
+#     button. 30 PASS / 0 FAIL against 1.0.20. This is the whole answer.
+#   tests/linux/hpm_signed_refresh.sh      the signed delivery path only --
+#     index authenticates, one small published package downloads, verifies,
+#     unpacks and RUNS. Fast, one throwaway boot, NO desktop.
+# Both files carry the same map in their headers; keep the three in step.
 #
 # HAMLINUX_WV_BASEWSYS EXISTS TO MAKE THE GATE PROVE ITSELF, and it is how the
 # fix above was verified: set it EQUAL to this tree's version and the run
