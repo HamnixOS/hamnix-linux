@@ -49,9 +49,12 @@
 #   9. THE FIX: an EVDEV click on the WALLPAPER, far from the panel, closes
 #      the menu — the panel window shrinks back to the bar.
 #  10. and the card is GONE from the framebuffer.
-#  11. and wsysd moved focus to the BACKDROP's wid. This is the assertion that
-#      makes 9 mean what it says: the menu closed because focus moved to a
-#      named other window, not because the click vanished or the panel died.
+#  11. and wsysd's own state moved focus to the BACKDROP's wid — a
+#      DISCRIMINATOR, not a claim about the fix. It passes with the fix
+#      reverted and is meant to: the compositor always knew focus had moved,
+#      it just told nobody, and that is the defect stated exactly. Its job is
+#      to rule out the other way 9 could go green (the click was swallowed or
+#      the panel died, and the short window means nothing).
 #  12. the panel is still live and reachable afterwards: clicking the
 #      Applications button again RE-OPENS the menu.
 #  13. NO REGRESSION on the path that already worked: a click on the menu's
@@ -277,20 +280,31 @@ if [ "$got" -le 5 ]; then
 else
     bad "THE DEFECT: the card is still $got% painted after the click on the wallpaper"
 fi
+# NOT an assertion about the fix — a DISCRIMINATOR, and it is worth being
+# explicit about why. wsysd moved its private `focus_wid` to the backdrop long
+# before this change existed; that is exactly the shape of the defect (it
+# knew, and told nobody), so this line PASSES WITH THE FIX REVERTED and is
+# supposed to. Its job is to separate the two ways assertion 9 could have gone
+# green: focus landed on the window that was actually clicked, or the panel
+# died / the click was swallowed and the short window means nothing.
 FOCUS_AWAY="$(focuswid)"
 if [ "$FOCUS_AWAY" = "$BACKDROP" ]; then
-    ok "and wsysd moved focus panel($PANEL) -> backdrop($BACKDROP): the menu closed because focus MOVED TO A NAMED WINDOW, not because the click was swallowed"
+    ok "wsysd's own state moved focus panel($PANEL) -> backdrop($BACKDROP): the click landed on the window we aimed at (this is true with or without the fix -- knowing and not saying was the whole defect)"
 else
-    bad "wsysd reports focus on wid $FOCUS_AWAY after the wallpaper click, not the backdrop ($BACKDROP) -- whatever closed the menu, it was not focus landing on the window that was clicked"
+    bad "wsysd reports focus on wid $FOCUS_AWAY after the wallpaper click, not the backdrop ($BACKDROP) -- the click did not land where this run thinks it did, so assertion 9 is measuring something else"
 fi
 
 # ---- 12. THE PANEL IS STILL LIVE -----------------------------------------
 # A dismissal that leaves the panel unreachable is not a dismissal, it is a
-# dead panel that happens to be short.
+# dead panel that happens to be short. Only askable if the menu DID dismiss:
+# with the fix reverted the menu is still open here, so this click is the
+# ordinary toggle closing it and "did it re-open" is not a question.
 click "$APPBTN_X" "$APPBTN_Y"
 set -- $(winctl "$PANEL")
 REOPENH="${5:-0}"
-if [ "$REOPENH" -gt "$PANELH" ]; then
+if [ "$AWAYH" != "$PANELH" ]; then
+    info "the away-click did not dismiss the menu, so 'is the panel still live afterwards' is not a question this run can answer (the click above just toggled the still-open menu shut: ${REOPENH} px)"
+elif [ "$REOPENH" -gt "$PANELH" ]; then
     ok "the panel is still live after the away-click: the Applications button RE-OPENS the menu (grew to ${REOPENH} px)"
 else
     bad "after the away-click the Applications button no longer opens the menu (${REOPENH} px) -- the dismiss left the panel unreachable"
@@ -304,8 +318,8 @@ click "$APPBTN_X" "$APPBTN_Y"
 snap toggled
 set -- $(winctl "$PANEL")
 TOGGLEDH="${5:-0}"
-if [ "$REOPENH" -le "$PANELH" ]; then
-    bad "the menu never re-opened, so 'the button still closes it' is not a question this run can answer"
+if [ "$AWAYH" != "$PANELH" ] || [ "$REOPENH" -le "$PANELH" ]; then
+    info "the menu never re-opened, so 'the button still closes it' is not a question this run can answer (panel is ${TOGGLEDH} px)"
 elif [ "$TOGGLEDH" = "$PANELH" ]; then
     ok "and clicking the menu's OWN PARENT -- the Applications button, on the already-focused panel -- still closes it (back to ${TOGGLEDH} px): no focus event is emitted when focus does not change"
 else
