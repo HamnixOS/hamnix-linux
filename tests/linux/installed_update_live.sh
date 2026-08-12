@@ -129,7 +129,33 @@ IMG=build/image
 DISK="$IMG/liveupd.img"
 REPO="$WORK/repo"
 EXTRA="$WORK/extra"
-QMP="$PROJ_ROOT/$WORK/qmp.sock"
+# THE QMP SOCKET PATH, AND THE 108 BYTES NOBODY GETS TO EXCEED.
+#
+# This was `$PROJ_ROOT/$WORK/qmp.sock`, which assumes $WORK is RELATIVE.
+# HAMLINUX_LIVEUPD_WORK is documented as a work directory and an ABSOLUTE one
+# is the obvious thing to pass; that concatenated the two into
+# `/home/.../worktrees/agent-xxxx//home/david/.hamnix-build/...`, which is over
+# the AF_UNIX limit, so QEMU refused to start and printed
+#
+#     UNIX socket path '...' is too long / Path must be less than 108 bytes
+#
+# MEASURED, and the cost is the point: not one of the three boots happened,
+# and the gate went on to score 31 FAIL -- "the update landed and the desktop
+# did not come up", "what the channel is serving is not a working desktop" --
+# about a machine that had never been switched on. A gate that says the
+# published channel is broken when its own socket path was wrong is worse than
+# one that says nothing.
+#
+# So: an absolute $WORK is used as-is, and if the result is still too long for
+# AF_UNIX the socket goes to a short path instead. The socket is a control
+# channel for this process; where it lives is not evidence about anything.
+case "$WORK" in
+    /*) QMP="$WORK/qmp.sock" ;;
+    *)  QMP="$PROJ_ROOT/$WORK/qmp.sock" ;;
+esac
+if [ "${#QMP}" -ge 100 ]; then
+    QMP="${TMPDIR:-/tmp}/lupd-$$.qmp"
+fi
 NOUPD="${HAMLINUX_LIVEUPD_NOUPDATE:-0}"
 
 fail=0
@@ -275,6 +301,21 @@ if [ "${HAMLINUX_LIVEUPD_REUSE:-0}" = 1 ] && [ -f "$REPO/linux/index.json" ]; th
     say "reusing the local channel at $OLDVER (HAMLINUX_LIVEUPD_REUSE=1)"
 else
     say "building the local channel at $OLDVER (the machine's original install)"
+    # BUILT INTO AN EMPTY DIRECTORY, ALWAYS. Building over a channel left by an
+    # earlier run of this gate produces one that will not publish: the packager
+    # rebuilds the tarballs and its own acceptance gate then reports
+    #
+    #   FAIL: hamnix-adder tarball sha256 <a> != index.json's <b>
+    #         -- the bytes tested are not the bytes served
+    #   REFUSING TO PUBLISH: the Adder toolchain in this channel cannot compile
+    #
+    # and no index.json is written, so this gate dies before its first boot with
+    # a message about the Adder toolchain that has nothing to do with what it
+    # was asked. Measured twice today, on the second and third runs into the
+    # same work directory; the first run into a fresh one was clean. Explicit
+    # reuse still short-circuits above, which is the case that WANTS the old
+    # bytes.
+    rm -rf "$REPO"; mkdir -p "$REPO"
     scripts/hamlinux_packages.py --out "$REPO" --version "$OLDVER" \
         --channel linux --base-url "$BASE" >"$WORK/repo.log" 2>&1 || {
         echo "FAIL channel build"; tail -20 "$WORK/repo.log"; exit 1; }
@@ -557,6 +598,15 @@ boot() {   # boot <logfile> <seconds> <click:0|1>
         timeout "$((secs + 25))" scripts/hamlinux_vm.sh disk --timeout "$secs" \
         -qmp "unix:$QMP,server=on,wait=off" >"$log" 2>&1 &
     VM=$!
+    # QEMU CAN REFUSE TO START, and when it does every assertion below reads
+    # an empty log and answers FAIL -- thirty-one sentences about a machine
+    # that was never switched on. Caught here, once, by name.
+    sleep 2
+    if ! kill -0 "$VM" 2>/dev/null && grep -aqE "^qemu-system|Path must be less than" "$log"; then
+        echo "lupd: FAIL QEMU NEVER STARTED, so nothing below was measured on a machine. This is a failure of this harness, NOT a verdict on the channel:"
+        grep -aE "^qemu-system|Path must be less than" "$log" | head -4 | sed 's/^/        /'
+        exit 1
+    fi
     if [ "$doclick" = 1 ]; then
         local i=0
         while [ "$i" -lt "$((secs * 2))" ]; do
@@ -636,6 +686,32 @@ after() {   # after <name> <banner> <regex>
 # THE TOP PANEL'S HEIGHT, out of the guest's own ctl lines. The bar is the
 # window at y=0 with z=100 -- the backdrop is z=-1 and the taskbar is at the
 # bottom of the screen -- so no window id is guessed anywhere in this file.
+# newwins <log> <before-marker> <after-marker> -- the wids present in the
+# AFTER table and absent from the BEFORE one.
+#
+# WHY THIS EXISTS: see THE MENU IS ITS OWN WINDOW NOW, below.
+newwins() {
+    local log="$1" b="$2" a="$3"
+    local before after w out=""
+    before=" $(awk -v m="$b" 'index($0, m) {inb=1; next}
+                    inb && index($0, "WINS-END") {exit}
+                    inb && NF >= 6 && $1 ~ /^[0-9]+$/ {printf "%s ", $1}' "$log" | tr -d '\r')"
+    after="$(awk -v m="$a" 'index($0, m) {inb=1; next}
+                    inb && index($0, "WINS-END") {exit}
+                    inb && NF >= 6 && $1 ~ /^[0-9]+$/ {printf "%s ", $1}' "$log" | tr -d '\r')"
+    for w in $after; do
+        case "$before" in *" $w "*) ;; *) out="$out$w " ;; esac
+    done
+    echo "$out"
+}
+
+# winline <log> <marker> <wid> -- that window's whole ctl line.
+winline() {
+    awk -v m="$2" -v w="$3" 'index($0, m) {inb=1; next}
+                    inb && index($0, "WINS-END") {exit}
+                    inb && $1 == w {print; exit}' "$1" | tr -d '\r'
+}
+
 barh() {   # barh <log> <marker>
     awk -v m="$2" 'index($0, m) {inb=1; next}
                    inb && index($0, "WINS-END") {exit}
@@ -727,10 +803,16 @@ fi
 # "the desktop is dead" when the truth is "nothing was clicked".
 mouse_arrived "$LOG" '[lupd] p2 STATE-BEFORE:' '[lupd] p2 STATE-AFTER:' \
               "the OLD compositor"
-if [ -n "$B2BEFORE" ] && [ "${B2AFTER:-0}" = "$B2BEFORE" ]; then
-    echo "lupd: PASS and the DE chrome did NOT move: the Applications button is dead on this machine (panel still $B2AFTER px)"
+# THE CONTROL IS ASKED THE SAME WAY THE ASSERTION IS. It used to look only at
+# the panel's height, while boot 3's verdict now also accepts "a new window
+# appeared" -- and a control that is weaker than the thing it controls is not a
+# control: an old desktop that opened a menu in its own window would have gone
+# unnoticed here and made boot 3's PASS mean nothing.
+B2NEW="$(newwins "$LOG" '[lupd] p2 WINS-BEFORE' '[lupd] p2 WINS-AFTER')"
+if [ -n "$B2BEFORE" ] && [ "${B2AFTER:-0}" = "$B2BEFORE" ] && [ -z "$B2NEW" ]; then
+    echo "lupd: PASS and the DE chrome did NOT move: the Applications button is dead on this machine (panel still $B2AFTER px, and no window appeared that was not already there)"
 else
-    echo "lupd: FAIL the pre-update desktop already reacted to the click ($B2BEFORE -> $B2AFTER px) -- the 'before' state is not the old one, so boot 3 proves nothing"; fail=1
+    echo "lupd: FAIL the pre-update desktop already reacted to the click ($B2BEFORE -> $B2AFTER px, new wids: [${B2NEW:-none}]) -- the 'before' state is not the old one, so boot 3 proves nothing"; fail=1
 fi
 after "the compositor on disk is still the PRE-FIX one" '[lupd] p2 md5 of /bin/wsysd before' "$OLD_MD5"
 
@@ -789,7 +871,46 @@ P3LIST="$(awk 'index($0, "[lupd] p3 WINS-BEFORE") {inb = 1; next}
                inb && index($0, "WINS-END") {exit}
                inb && NF >= 6 && $1 ~ /^[0-9]+$/ {printf "(%s) ", $0}' "$LOG" | tr -d '\r')"
 B3VIS="$(barvis "$LOG" '[lupd] p3 WINS-AFTER')"
-if [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ] &&
+# THE MENU IS ITS OWN WINDOW NOW, AND THIS GATE WAS STILL MEASURING THE OLD ONE.
+#
+# The question is "did the Applications menu open". This file answered it by
+# asking whether the PANEL WINDOW GREW, because that is how the legacy in-panel
+# dropdown worked: the panel's own window gets taller to hold the card.
+#
+# The desktop moved. `user/hampanelscene.ad`'s Applications button now SPAWNS
+# `/bin/hamappmenu`, which allocates a window of its OWN and places it just
+# under the bar. The panel window never grows, so on a machine where the menu
+# opens perfectly this file printed:
+#
+#     FAIL THE UPDATED MACHINE IS STILL RUNNING THE OLD DESKTOP ...
+#     The work published to the channel did not reach this machine
+#
+# MEASURED, against the live channel at 1.0.20: 29 PASS / 1 FAIL, and the one
+# FAIL was this line -- while the gate's OWN window table, four lines above it
+# in the same log, showed a new window `5 8 28 407 160 14 0 1 1` that was not
+# there before the click. (8, 28) is exactly where hamappmenu places itself.
+# The menu opened; the yardstick was stale. That is the worst kind of red:
+# it accuses the published channel of not delivering work that it delivered.
+#
+# So the question is asked the way a PERSON would ask it -- did something
+# appear that was not there before -- and BOTH mechanisms answer it: the panel
+# window growing (legacy) or a new visible window arriving (current). Neither
+# is assumed; both are read out of the same two window tables the guest
+# printed. It can still go red, and the negative control proves it does:
+# HAMLINUX_LIVEUPD_NOUPDATE=1 leaves the old compositor in place, where the
+# click routes and NOTHING appears by either measure.
+B3NEW="$(newwins "$LOG" '[lupd] p3 WINS-BEFORE' '[lupd] p3 WINS-AFTER')"
+B3NEWLINE=""
+for w in $B3NEW; do
+    l="$(winline "$LOG" '[lupd] p3 WINS-AFTER' "$w")"
+    # visible is field 8; a window that arrived withdrawn is not an open menu.
+    case "$l" in
+        *) set -- $l; [ "${8:-0}" = 1 ] && B3NEWLINE="$l" ;;
+    esac
+done
+if [ -n "$B3NEWLINE" ]; then
+    echo "lupd: PASS THE UPDATED MACHINE RUNS THE NEWER CODE: a real click on the Applications button opened the menu -- a window that was not in the table before the click is in it after, and it is visible: ($B3NEWLINE)"
+elif [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ] &&
    [ "${B3VIS:-0}" = 1 ]; then
     echo "lupd: PASS THE UPDATED MACHINE RUNS THE NEWER CODE: a real click on the Applications button opened the menu (the panel window grew $B3BEFORE -> $B3AFTER px, and it is visible)"
 elif [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ]; then
@@ -799,7 +920,7 @@ elif [ -z "$B3BEFORE" ]; then
     echo "lupd: FAIL THE UPDATE LANDED AND THE DESKTOP DID NOT COME UP. The bytes arrived (see the digest above) and the compositor is running with ${P3WINS:-?} windows, but NONE of them is the top bar (a full-width window at y=0, z=100), so there is no Applications button to click. Windows present: [${P3LIST:-none}]. What the channel is serving is not a working desktop."
     fail=1
 else
-    echo "lupd: FAIL THE UPDATED MACHINE IS STILL RUNNING THE OLD DESKTOP: after a real click the panel window is ${B3AFTER:-unknown} px, not more than $B3BEFORE. The work published to the channel did not reach this machine, or did not take effect."
+    echo "lupd: FAIL THE UPDATED MACHINE IS STILL RUNNING THE OLD DESKTOP: after a real click NOTHING APPEARED by either measure -- the panel window is ${B3AFTER:-unknown} px, not more than $B3BEFORE, and no new visible window is in the table (new wids: [${B3NEW:-none}]). The work published to the channel did not reach this machine, or did not take effect."
     fail=1
 fi
 check "phase 3 reached the end"                 '\[lupd\] PHASE3 DONE'
