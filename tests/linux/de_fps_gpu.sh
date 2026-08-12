@@ -175,6 +175,30 @@ if [ "${GPU_PRE:-0}" -gt "$(( ${GPU_CLR:-1} * 10 ))" ]; then
 else
     ok "the readback is gone: present ${GPU_PRE}us against the CPU path's ${SW_PRE}us, writeback ${GPU_WB}us against ${SW_WB}us, and clear (what the device does) ${GPU_CLR}us against ${SW_CLR}us"
 fi
+# ---- 1b. DEVICE COMPOSITING MUST STILL PRODUCE THE SOFTWARE'S PIXELS ------
+# The compositor can now write the composite entirely with device ops
+# (HAMNIX_WSYSD_VKCOMP=1), which is what the scanout path requires. That
+# conversion is exactly the kind that yields a frame which looks like a
+# desktop and is wrong -- it already rendered a blue window orange once, and
+# the cursor did not catch it because both cursor colours are grey.
+#
+# So this gate runs the pixel comparison, and it is RED WITHOUT THE FIX: with
+# the source R/B flip left at the router's default, 867,069 of 1,024,000
+# pixels differ. Shown going red in the commit that added it.
+echo
+echo "gpupath: ---- device compositing, pixel-compared with software -------"
+if [ -x tests/linux/pixcmp.sh ]; then
+    if PIXCMP_OUT="$WORK/pixcmp.txt" FPS_BIN_DIR="$BINDIR" \
+            tests/linux/pixcmp.sh >"$WORK/pixcmp.txt" 2>&1; then
+        ok "device compositing: $(grep -m1 'differ in R,G or B' "$WORK/pixcmp.txt" | sed 's/^pixcmp: //')"
+    else
+        bad "device compositing does NOT match the software rasterizer -- $(grep -m1 'differ in R,G or B' "$WORK/pixcmp.txt" | sed 's/^pixcmp: //'). See $WORK/pixcmp.txt"
+    fi
+    grep -E "differ|PASS|FAIL" "$WORK/pixcmp.txt" | sed 's/^/gpupath:   /'
+else
+    info "tests/linux/pixcmp.sh not executable; skipping the pixel gate"
+fi
+
 if [ "${GPU_HC:-0}" != 1 ]; then
     bad "the GPU frame is NOT host-cached (host_cached=${GPU_HC:-?}); every present pays the PCIe bus. This is the 13x-slower configuration."
 else

@@ -59,6 +59,9 @@ extern def hvk_device_name(buf: Ptr[uint8], cap: int32) -> int32
 extern def hvk_device_type() -> int32
 extern def hvk_frame_is_device_local() -> int32
 extern def hvk_frame_is_host_cached() -> int32
+extern def hvk_frame_create_scanout(w: int32, h: int32, bgra: int32) -> int32
+extern def hvk_can_export_dmabuf() -> int32
+extern def hvk_frame_is_scanout() -> int32
 extern def hvk_frame_create(w: int32, h: int32, bgra: int32) -> uint64
 extern def hvk_frame_base() -> uint64
 extern def hvk_frame_width() -> int32
@@ -70,6 +73,9 @@ extern def hvk_roundrect(x: int32, y: int32, w: int32, h: int32,
                          rad: int32, corners: int32, rgba: uint32) -> int32
 extern def hvk_line(x1: int32, y1: int32, x2: int32, y2: int32,
                     thick: int32, rgba: uint32) -> int32
+extern def hvk_blit_native(src_base: uint64, src_w: int32, src_h: int32,
+                    dx: int32, dy: int32, dw: int32, dh: int32,
+                    sx: int32, sy: int32, sw: int32, sh: int32) -> int32
 extern def hvk_blit(src_base: uint64, src_w: int32, src_h: int32,
                     dx: int32, dy: int32, dw: int32, dh: int32,
                     sx: int32, sy: int32, sw: int32, sh: int32) -> int32
@@ -141,6 +147,23 @@ def vk_linux_frame_device_local() -> int32:
     return hvk_frame_is_device_local()
 
 
+def vk_linux_frame_scanout_alloc(w: int32, h: int32, bgra: int32) -> int32:
+    # Allocate the frame in device-local VRAM, exportable and NOT host-mapped,
+    # and return its dmabuf fd (>= 0) for DRM to import. Negative on failure:
+    # -1 no device, -2 no export extensions, -3 allocation, -4 the driver
+    # refused the export. There is no CPU pointer to this frame by design --
+    # everything that touches the composite must be a device op.
+    return hvk_frame_create_scanout(w, h, bgra)
+
+
+def vk_linux_can_export() -> int32:
+    return hvk_can_export_dmabuf()
+
+
+def vk_linux_frame_is_scanout() -> int32:
+    return hvk_frame_is_scanout()
+
+
 def vk_linux_frame_host_cached() -> int32:
     # 1 iff the mapped frame is HOST_CACHED, i.e. iff the CPU can READ the
     # composite at ordinary RAM speed. For a compositor this is the number that
@@ -200,6 +223,17 @@ def vk_linux_blit(src_base: uint64, src_w: int32, src_h: int32,
     # source. The sampled rows are staged into the device source arena, so a
     # frame may carry many different source images.
     return hvk_blit(src_base, src_w, src_h, dx, dy, dw, dh, sx, sy, sw, sh)
+
+
+def vk_linux_blit_native(src_base: uint64, src_w: int32, src_h: int32,
+                         dx: int32, dy: int32, dw: int32, dh: int32,
+                         sx: int32, sy: int32, sw: int32, sh: int32) -> int32:
+    # As vk_linux_blit, but for a source that is ALREADY in the frame's byte
+    # order -- a compositor's own surface rather than a vk_2d image. The
+    # difference is one R/B flip in the shader, and getting it wrong renders a
+    # window in perfect shape and position with its colours inverted.
+    return hvk_blit_native(src_base, src_w, src_h, dx, dy, dw, dh,
+                           sx, sy, sw, sh)
 
 
 def vk_linux_glyph(cov_base: uint64, cov_w: int32, cov_h: int32,

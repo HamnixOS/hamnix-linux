@@ -202,6 +202,67 @@ DE currently spends per frame is therefore addressable.
 
 ---
 
+## 3b. wsysd ON the display, via scanout — measured
+
+Landed and run: `HAMNIX_WSYSD_SCANOUT=1` (plus the supervision assertion).
+wsysd probes DP-1's mode, allocates the frame in VRAM, exports it, DRM imports
+it, the mode is set, and the compositor draws entirely on the device. Real
+desktop, dragging window, **1920x1080** (the display's mode — 2x the pixels of
+the software baseline), µs per full frame:
+
+| | scene | rast | copy | cursor | **present** | **writeback** |
+|---|---|---|---|---|---|---|
+| software, 1280x800 | 730 | 6600 | 540 | 7 | 850 | 830 |
+| **scanout, 1920x1080** | 100–490 | **88–460** | 39–190 | 0 | **0** | **0** |
+
+`present` and `writeback` are **zero**, not small: the CRTC and the compute
+shader address the same VRAM, so there is nothing to copy and `/dev/fb` is
+never written. And `rast` collapsed from 6.6 ms to 0.1–0.5 ms because the
+full-screen backdrop is now rasterized *on the device*, into device-local
+memory, at twice the resolution.
+
+**Total instrumented compositor work per frame: ~0.2–1.1 ms at 1920x1080,
+against ~8.7 ms at 1280x800 — roughly 8–40x less work for 2x the pixels.**
+That is well past the ~2.9x this document predicted, because the prediction
+assumed `rast` stayed on the CPU; routing the backdrop to the device removed
+it too.
+
+### But the frame RATE barely moved, and that is the honest headline
+
+Derived from the same counters: **50.4 fps at 1920x1080**, against the
+software baseline's **50.0 fps at 1280x800**.
+
+The compositor is no longer what limits the desktop. `sys_waitfds(&waitset[0],
+0, 16)` is — the fixed 16 ms tick that HANDOFF.md already lists as broken, with
+`nfds` literally 0 so no input can wake the loop. A 16 ms tick caps the desktop
+at 62.5 fps no matter how cheap a frame becomes, and both paths now sit just
+under it. **Making frames 8–40x cheaper bought 0.4 fps, because the frame was
+never the constraint at this rate.**
+
+This also resolves an open item from §3a: the reason the phase counters
+explained only half the software/GPU rate gap is that the tick quantises the
+period, so per-frame work and delivered rate are only loosely coupled.
+
+**So the owner's 50x is real in the compositor and invisible on the screen
+until the tick is fixed.** The next win on how the desktop *feels* is not
+graphics work at all; it is filling `waitset` with the input fds.
+
+### What was not measured on this path, and why
+
+- **input→pixel latency and idle CPU.** Both harnesses sample the framebuffer
+  *file*; on scanout there is no file, by construction. Measuring latency here
+  needs a different instrument (a GPU-side timestamp, or a vblank-referenced
+  probe) and I did not build one. The numbers are therefore absent rather than
+  estimated.
+- **Tearing.** Single-buffered: the shader writes the surface being scanned
+  out. Double buffering needs two exported frames and a `PAGE_FLIP` between
+  them, which `user/linux-fb.c` already knows how to do.
+- **Un-encodable ops.** On the scanout path the router's identity is a host
+  array (see `rast_target()`); an op the device cannot encode would fall back
+  to writing that array, where it would be lost rather than displayed. No such
+  op occurred in these runs — `pixcmp` is byte-clean — but nothing yet *detects*
+  one. That is a real hole and it is not closed.
+
 ## 4. What it would take to put wsysd on this path
 
 Verified working here: export, import, ADDFB2, modeset, render. What is missing
