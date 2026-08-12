@@ -438,6 +438,96 @@ static int pixgrab(const char *tag, const char *path, int ms)
     return 0;
 }
 
+/* bbgrab <path> <ms> <needle> [tag]: THE BACKBUFFER HAND-UP, from both ends.
+ *
+ * This is pixgrab for the v2 pixels.  Once the backbuffer left /srv/wsys.bb for
+ * a per-window memfd, its pixels are handed to the compositor over an abstract
+ * AF_UNIX rendezvous "hamnix-wsys/<dev>.<ino>/backbuffer" -- the same shape as
+ * the pixel one, so the SAME two questions decide it:
+ *   uid 0     the segment owner (what wsysd is on a real boot).  It binds, and
+ *             the victim's pixels MUST arrive -- this is the compositor working,
+ *             and the positive control that proves a found=0 for the attacker
+ *             is a closed store and not a window that never painted.
+ *   uid 1001  a same-uid attacker.  It binds first (nothing stops it) and NO
+ *             descriptor may arrive, because the SENDER checks SO_PEERCRED.
+ *
+ * Reports bound=, fds= and found= (the needle, recovered from the first memfd
+ * handed over) -- the compromise or its refusal, not a proxy for it. */
+#define BB_PAGE_BYTES  (((size_t)1920 * 1080 * 4 + 65535u) & ~(size_t)65535u)
+#define BBPIX_BYTES    ((size_t)65536 + 2 * BB_PAGE_BYTES)
+
+static int bbgrab(const char *tag, const char *path, int ms, const char *needle)
+{
+    printf("== %s", tag);
+
+    struct stat st;
+    if (stat(path, &st) != 0) { printf(" stat=-%d found=0\n", errno); return 0; }
+
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    a.sun_path[0] = '\0';
+    int n = snprintf(a.sun_path + 1, sizeof a.sun_path - 1,
+                     "hamnix-wsys/%llu.%llu/backbuffer",
+                     (unsigned long long)st.st_dev,
+                     (unsigned long long)st.st_ino);
+    socklen_t alen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+    printf(" uid=%d addr=[%s]", (int)getuid(), a.sun_path + 1);
+
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK, 0);
+    if (s < 0) { printf(" socket=-%d bound=0 fds=0 found=0\n", errno); return 0; }
+    if (bind(s, (struct sockaddr *)&a, alen) < 0) {
+        printf(" bind=-%d bound=0 fds=0 found=0\n", errno);
+        close(s);
+        return 0;
+    }
+    if (listen(s, 64) < 0) { printf(" listen=-%d bound=0 fds=0 found=0\n", errno);
+                             close(s); return 0; }
+    printf(" bound=1");
+
+    int got = 0, found = 0;
+    for (int waited = 0; waited < ms; waited += 50) {
+        struct timespec ts = { 0, 50 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+        for (;;) {
+            int c = accept4(s, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+            if (c < 0) break;
+            int32_t wid = 0, fd = -1;
+            char cbuf[CMSG_SPACE(sizeof(int))];
+            struct iovec io = { &wid, sizeof wid };
+            struct msghdr m;
+            memset(&m, 0, sizeof m);
+            m.msg_iov = &io; m.msg_iovlen = 1;
+            m.msg_control = cbuf; m.msg_controllen = sizeof cbuf;
+            struct timespec t2 = { 0, 50 * 1000 * 1000 };
+            nanosleep(&t2, NULL);
+            ssize_t r = recvmsg(c, &m, MSG_DONTWAIT);
+            if (r == (ssize_t)sizeof wid)
+                for (struct cmsghdr *cm = CMSG_FIRSTHDR(&m); cm;
+                     cm = CMSG_NXTHDR(&m, cm))
+                    if (cm->cmsg_level == SOL_SOCKET
+                        && cm->cmsg_type == SCM_RIGHTS)
+                        memcpy(&fd, CMSG_DATA(cm), sizeof fd);
+            close(c);
+            if (fd < 0) continue;
+            got++;
+            /* The pixels are in the memfd; map the whole thing PROT_READ and
+             * search it, the same recovery bbscrape does on the shared file. */
+            void *p = mmap(NULL, BBPIX_BYTES, PROT_READ, MAP_SHARED, fd, 0);
+            if (p != MAP_FAILED) {
+                if (needle && *needle && memmem(p, BBPIX_BYTES, needle,
+                                                strlen(needle)))
+                    found = 1;
+                munmap(p, BBPIX_BYTES);
+            }
+            close(fd);
+        }
+    }
+    printf(" fds=%d found=%d\n", got, found);
+    close(s);
+    return 0;
+}
+
 /* bbscrape <bbpath> <needle> [tag]: the half of SCRAPE that is STILL OPEN.
  * See the header.  O_RDONLY and PROT_READ throughout, like `snoop`, because
  * that is the finding: no write access is needed to read a v2 window's pixels
@@ -670,6 +760,11 @@ int main(int argc, char **argv)
     if (argc >= 4 && strcmp(argv[1], "pixgrab") == 0)
         return pixgrab(argc >= 5 ? argv[4] : "pixgrab", argv[2],
                        atoi(argv[3]));
+
+    /* bbgrab <path> <ms> <needle> [tag] */
+    if (argc >= 5 && strcmp(argv[1], "bbgrab") == 0)
+        return bbgrab(argc >= 6 ? argv[5] : "bbgrab", argv[2],
+                      atoi(argv[3]), argv[4]);
 
     /* snoop <path> <victim> [tag] */
     if (argc >= 4 && strcmp(argv[1], "snoop") == 0)

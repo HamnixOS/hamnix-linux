@@ -359,6 +359,17 @@ if [ "${1:-}" = "--inner" ]; then
     # so it is re-read here.
     sed 's/^/== pixvictim./' "$W/live.client.out"
 
+    # AND THE SAME FOR THE BACKBUFFER, which is the whole point of this pass: the
+    # v2 pixels left /srv/wsys.bb for a per-window memfd handed up over
+    # "…/backbuffer", so both ends are driven exactly as the scene's are.  The
+    # attacker binds first and must be handed nothing; the segment owner then
+    # binds and MUST recover the victim's BACKBUFFERSECRET31337 -- which is the
+    # compositor working and the positive control for the sameuid.bbreal=found=0
+    # assertion above.  It runs here, after DRAIN, because the victim only ticks
+    # its hand-up once it is reading its ring (see hold_open).
+    as 1001 "$BYP" bbgrab "$HAMWSYS" 2500 "$BBSECRET" bbgrab.attacker
+    as 0    "$BYP" bbgrab "$HAMWSYS" 2500 "$BBSECRET" bbgrab.owner
+
     # 3c. ATTACK 5 OF 5 -- PEEK, and it is the one that walks THROUGH attack 4's
     #     fix.  The keystrokes left the mapping, so the snooper above finds
     #     nothing; but the VICTIM still has them in its own address space, and on
