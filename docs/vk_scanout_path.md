@@ -84,6 +84,17 @@ present was 67 ms of uncached reads. It was never a busy-wait.
 **Still slower than software: drag, 39.5 vs 52 fps.** Not investigated. Flagged,
 not explained.
 
+The software path was re-run in the same session to confirm it did not move:
+`tests/linux/de_fps_latency.sh` gives 61.2 fps pointer, 53.2 fps drag, p50
+8.64 ms, 8 passed / 0 failed. That is the published baseline, so nothing here
+regressed the path every shipped desktop actually runs.
+
+One further check worth recording: `lavapipe` — a CPU ICD — also advertises
+the three export extensions and `hvk_frame_create_scanout()` succeeds on it,
+returning a dmabuf that DRM imports. So the scanout plumbing does not depend
+on the proprietary driver being present, though nothing about its *speed*
+follows from that.
+
 So the placement fix takes the GPU path from 13x slower to roughly parity. It
 does not make it faster, and it cannot: at parity the frame is dominated by
 work both paths do identically.
