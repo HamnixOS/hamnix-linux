@@ -1,0 +1,213 @@
+# tests/linux/snarfserial.ad — the probe for /dev/snarf.serial.
+#
+# Three verbs, because the serial makes three claims and each of them has to be
+# checkable from outside the process that implements it:
+#
+#     snarfserial read
+#         Prints "serial <clip> <prim>" from one sample. This is the claim
+#         "there is a generation counter and you can read it".
+#
+#     snarfserial wait <timeout_ms>
+#         Samples, then PARKS in sys_waitfds on the descriptor /dev/snarf.serial
+#         hands back, and prints "wake <ms> <clip> <prim>" when the serial
+#         changes -- or "timeout <ms>" if it does not. This is the claim the
+#         whole change exists for: a clipboard is something an event loop can
+#         SLEEP on, rather than look at on a clock. A caller measures the ms and
+#         knows whether it was woken or whether it merely ran out of patience.
+#
+#     snarfserial writeopen
+#         Prints "writeopen <fd>". A serial is something the device TELLS you;
+#         an open for writing must be REFUSED, and a negative fd here is what
+#         says so. A device that swallowed the write would be a program
+#         believing it had announced a change it had not.
+#
+# Adder quirks obeyed: every buffer is a top-level BSS array, there is no
+# adjacent string-literal concatenation, and no string literal is assigned into
+# a global array.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
+extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
+
+SEEK_SET:        int32 = 0
+CLOCK_MONOTONIC: int32 = 1
+
+ss_buf:  Array[64, uint8]
+ss_dec:  Array[24, uint8]
+ss_ts:   Array[4, uint64]
+ss_wait: Array[4, int32]
+
+ss_clip: uint64 = 0
+ss_prim: uint64 = 0
+ss_fd:   int32  = -1
+
+
+def ss_strlen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def ss_puts(s: Ptr[uint8]):
+    sys_write(1, s, ss_strlen(s))
+
+
+def ss_putd(v: uint64):
+    n: uint64 = 0
+    if v == 0:
+        sys_write(1, "0", 1)
+        return
+    while v > 0:
+        ss_dec[n] = cast[uint8](48 + (v % 10))
+        v = v / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        sys_write(1, &ss_dec[n], 1)
+
+
+def ss_now_ms() -> int64:
+    if sys_clock_gettime(CLOCK_MONOTONIC, &ss_ts[0]) != 0:
+        return 0
+    return cast[int64](ss_ts[0]) * 1000 + cast[int64](ss_ts[1]) / 1000000
+
+
+def ss_eq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    if a[i] != b[i]:
+        return 0
+    return 1
+
+
+# Re-sample the held descriptor. The seek back to 0 is what takes a FRESH
+# sample -- the device snapshots at offset 0 -- and the read is also what
+# drains the notification the park woke for.
+def ss_sample() -> int32:
+    if ss_fd < 0:
+        return 0
+    if sys_lseek(ss_fd, 0, SEEK_SET) < 0:
+        return 0
+    got: uint64 = 0
+    while got < 48:
+        n: int64 = sys_read(ss_fd, &ss_buf[got], 48 - got)
+        if n <= 0:
+            break
+        got = got + cast[uint64](n)
+    if got < 42:
+        return 0
+    i: uint64 = 0
+    v: uint64 = 0
+    while i < got and (ss_buf[i] < 48 or ss_buf[i] > 57):
+        i = i + 1
+    while i < got and ss_buf[i] >= 48 and ss_buf[i] <= 57:
+        v = v * 10 + cast[uint64](ss_buf[i]) - 48
+        i = i + 1
+    ss_clip = v
+    v = 0
+    while i < got and (ss_buf[i] < 48 or ss_buf[i] > 57):
+        i = i + 1
+    while i < got and ss_buf[i] >= 48 and ss_buf[i] <= 57:
+        v = v * 10 + cast[uint64](ss_buf[i]) - 48
+        i = i + 1
+    ss_prim = v
+    return 1
+
+
+def ss_atoi(s: Ptr[uint8]) -> int64:
+    v: int64 = 0
+    i: uint64 = 0
+    while s[i] >= 48 and s[i] <= 57:
+        v = v * 10 + cast[int64](s[i]) - 48
+        i = i + 1
+    return v
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        ss_puts("usage: snarfserial read|wait <ms>|writeopen\n")
+        return 2
+    verb: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
+
+    if ss_eq(verb, "writeopen") == 1:
+        # THE DEVICE MUST BE THERE FOR ITS REFUSAL TO MEAN ANYTHING. A runtime
+        # that does not serve /dev/snarf.serial at all also fails an open for
+        # writing, and a caller that only looked at the negative fd would score
+        # "the refusal works" against a build that has no serial in it. Say
+        # which of the two it is.
+        r: int32 = sys_open(cast[Ptr[char]]("/dev/snarf.serial"))
+        if r < 0:
+            ss_puts("writeopen noserial\n")
+            return 1
+        sys_close(r)
+        w: int32 = sys_open_write(cast[Ptr[char]]("/dev/snarf.serial"))
+        ss_puts("writeopen ")
+        if w < 0:
+            ss_puts("-1\n")
+            return 0
+        sys_close(w)
+        ss_putd(cast[uint64](w))
+        ss_puts("\n")
+        return 1
+
+    ss_fd = sys_open(cast[Ptr[char]]("/dev/snarf.serial"))
+    if ss_fd < 0:
+        ss_puts("noserial\n")
+        return 1
+    if ss_sample() == 0:
+        ss_puts("nosample\n")
+        return 1
+
+    if ss_eq(verb, "read") == 1:
+        ss_puts("serial ")
+        ss_putd(ss_clip)
+        ss_puts(" ")
+        ss_putd(ss_prim)
+        ss_puts("\n")
+        return 0
+
+    if ss_eq(verb, "wait") == 0:
+        ss_puts("usage: snarfserial read|wait <ms>|writeopen\n")
+        return 2
+
+    tmo: int64 = 5000
+    if argc > 2:
+        tmo = ss_atoi(cast[Ptr[uint8]](argv[2]))
+    was_clip: uint64 = ss_clip
+    was_prim: uint64 = ss_prim
+    t0: int64 = ss_now_ms()
+
+    # THE PARK ITSELF. A spurious wake -- the inotify queue had something in it
+    # that was not a clipboard write -- re-parks for what is LEFT of the
+    # timeout rather than restarting it, so "timeout" below means the wall
+    # clock really did run out.
+    while 1 == 1:
+        left: int64 = tmo - (ss_now_ms() - t0)
+        if left <= 0:
+            ss_puts("timeout ")
+            ss_putd(cast[uint64](ss_now_ms() - t0))
+            ss_puts("\n")
+            return 1
+        ss_wait[0] = ss_fd
+        sys_waitfds(&ss_wait[0], 1, left)
+        if ss_sample() == 0:
+            ss_puts("nosample\n")
+            return 1
+        if ss_clip != was_clip or ss_prim != was_prim:
+            ss_puts("wake ")
+            ss_putd(cast[uint64](ss_now_ms() - t0))
+            ss_puts(" ")
+            ss_putd(ss_clip)
+            ss_puts(" ")
+            ss_putd(ss_prim)
+            ss_puts("\n")
+            return 0

@@ -90,15 +90,42 @@
 # INCR transfer is REFUSED loudly and the Hamnix clipboard is LEFT ALONE, which
 # is the honest answer: a half-received INCR stream is a corrupt paste.
 #
-# HOW A CHANGE ON THE HAMNIX SIDE IS NOTICED: BY CONTENT, and that is a gap
-# worth naming. struct snarfshm has magic and version but NO serial or
-# generation counter, so there is nothing to compare cheaply and nothing to
-# wait on. This polls both buffers four times a second and compares bytes.
-# It is correct (a change is a change) and it costs a 128 KiB memcmp per
-# second, but it cannot distinguish "written again with the same bytes" from
-# "not written", and it cannot wake instantly. A `uint64 serial` bumped in
-# hamsnarf_write would let this compare one word and would let a future
-# sys_waitfds park on the clipboard; see HANDOFF for the exact request.
+# HOW A CHANGE ON THE HAMNIX SIDE IS NOTICED: BY PARKING ON IT.
+# ==============================================================
+# This used to poll both buffers by CONTENT four times a second, for ever,
+# because struct snarfshm had magic and version and no generation counter.
+# It now has two, one per buffer, and /dev/snarf.serial is the name that reads
+# them -- backed by a real inotify descriptor on the segment, so it goes in the
+# waitset beside the X socket and this process SLEEPS until either side moves.
+# The 200 ms timeout that existed only to drive the content poll is now a
+# 2 000 ms RECONCILE timer, and an idle bridge wakes 0.5 times a second instead
+# of 5.
+#
+# WHAT THE SERIAL DECIDES AND WHAT IT DOES NOT. It decides whether to LOOK; the
+# content comparison still decides whether to ACT. That is not belt and braces,
+# it is the anti-ping-pong invariant of §6.1: this bridge's own `pull` writes
+# /dev/snarf, which bumps the serial, and a bridge that treated a serial change
+# as a Hamnix-side change would go straight back to claiming the selection off
+# the X client that had just handed it over. So a serial change means "read the
+# clipboard", and identical bytes still mean "do nothing".
+#
+# THE FALLBACK, AND WHY IT IS UNCONDITIONAL. A binary compiled before the
+# serial existed maps the same segment -- every v1 offset is frozen, which is
+# the point -- and writes the clipboard WITHOUT bumping anything. There is no
+# flag that can tell this process such a writer is alive, so there is no flag:
+# every RECONCILE_MS the content is re-read whatever the serial says. A stale
+# clipboard is then bounded at two seconds instead of being permanent, and if
+# /dev/snarf.serial cannot be opened at all this falls all the way back to the
+# 200 ms content poll it always did, out loud.
+#
+# THE SAMPLE IS TAKEN BEFORE THE CONTENT IS READ, and it is that sample which
+# is recorded as "what I have seen" -- never one taken afterwards. A write that
+# lands in between then leaves a serial DIFFERENT from the recorded one, so the
+# next wake reads it. Recording the later value is how a change gets skipped.
+#
+# WRAP: the counters are uint64 and are compared with !=, never with < or >.
+# See the note on struct snarfshm in user/linux-snarf.c for why 2^64 bumps is
+# not a duration this machine will see.
 #
 # Adder quirks obeyed here: every buffer is a top-level BSS array (not a frame
 # local), there is no adjacent string-literal concatenation, and no string
@@ -112,9 +139,24 @@ extern def sys_close(fd: int32) -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_unix_connect(path: Ptr[char]) -> int32
 extern def sys_exit(code: uint64)
+extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
+extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
 
 # ---------------------------------------------------------------- constants
 SNARF_MAX: uint64 = 65536
+
+SEEK_SET:       int32 = 0
+CLOCK_MONOTONIC: int32 = 1
+
+# How long an idle bridge parks, and therefore the worst-case age of a
+# clipboard written by a binary too old to bump the serial. Two seconds: long
+# enough that the wake rate is a tenth of what it was, short enough that the
+# fallback is a hiccup rather than a wrong paste.
+RECONCILE_MS: int64 = 2000
+
+# What the timeout was, and still is when /dev/snarf.serial is unavailable and
+# every wake has to do a content compare.
+POLL_MS: int64 = 200
 
 # X11 core request opcodes.
 OP_CreateWindow:       uint8 = 1
@@ -154,9 +196,20 @@ numbuf:   Array[24, uint8]
 sockpath: Array[512, uint8]
 tagbuf:   Array[64, uint8]
 waitset:  Array[4, int32]
+serbuf:   Array[64, uint8]         # the one fixed-width line /dev/snarf.serial is
+tsbuf:    Array[4, uint64]         # a timespec for CLOCK_MONOTONIC
 
 clip_len: uint64 = 0
 prim_len: uint64 = 0
+
+# ------------------------------------------------------------- the serial
+ser_fd:   int32  = -1              # /dev/snarf.serial, held open and parked on
+ser_have: int32  = 0               # a sample has been recorded at least once
+ser_clip: uint64 = 0               # the LAST SEEN generation of each buffer
+ser_prim: uint64 = 0
+ser_now_clip: uint64 = 0           # what the sample just taken says
+ser_now_prim: uint64 = 0
+next_rec: int64  = 0               # monotonic ms of the next forced reconcile
 
 # ---------------------------------------------------------------- X state
 xfd:        int32  = -1
@@ -954,23 +1007,99 @@ def claim(sel: uint32, which: int32) -> int32:
     return 1
 
 
-# Has the Hamnix side changed under us? Compare bytes -- see the header note
-# about the missing serial.
-def snarf_tick():
-    n: int64 = snarf_read(0)
-    if n >= 0:
-        ln: uint64 = cast[uint64](n)
-        if same_bytes(&snbuf[0], ln, &clipbuf[0], clip_len) == 0:
-            copy_bytes(&clipbuf[0], &snbuf[0], ln)
-            clip_len = ln
-            claim(atom_clipboard, 0)
-    n = snarf_read(1)
-    if n >= 0:
-        ln2: uint64 = cast[uint64](n)
-        if same_bytes(&snbuf[0], ln2, &primbuf[0], prim_len) == 0:
-            copy_bytes(&primbuf[0], &snbuf[0], ln2)
-            prim_len = ln2
-            claim(ATOM_PRIMARY, 1)
+# ---------------------------------------------------------------- the serial
+
+def now_ms() -> int64:
+    if sys_clock_gettime(CLOCK_MONOTONIC, &tsbuf[0]) != 0:
+        return 0
+    return cast[int64](tsbuf[0]) * 1000 + cast[int64](tsbuf[1]) / 1000000
+
+
+# Open the generation counters, once. 0 means this build of the runtime does
+# not serve them -- an older linux-snarf.c, or this binary running where
+# /dev/snarf itself is not served -- and the caller must say so and keep
+# polling by content.
+def serial_open() -> int32:
+    ser_fd = sys_open(cast[Ptr[char]]("/dev/snarf.serial"))
+    if ser_fd < 0:
+        return 0
+    return 1
+
+
+# Re-sample the held descriptor. The seek back to 0 is what takes a FRESH
+# sample -- the device snapshots at offset 0 -- and the read is what drains the
+# inotify queue behind the fd, so a wake that is not consumed here would spin
+# the park. 0 = the device stopped answering; the caller falls back to content.
+def serial_sample() -> int32:
+    if ser_fd < 0:
+        return 0
+    if sys_lseek(ser_fd, 0, SEEK_SET) < 0:
+        return 0
+    got: uint64 = 0
+    while got < 48:
+        n: int64 = sys_read(ser_fd, &serbuf[got], 48 - got)
+        if n <= 0:
+            break
+        got = got + cast[uint64](n)
+    if got < 42:
+        return 0
+    i: uint64 = 0
+    v: uint64 = 0
+    while i < got and (serbuf[i] < 48 or serbuf[i] > 57):
+        i = i + 1
+    while i < got and serbuf[i] >= 48 and serbuf[i] <= 57:
+        v = v * 10 + cast[uint64](serbuf[i]) - 48
+        i = i + 1
+    ser_now_clip = v
+    v = 0
+    while i < got and (serbuf[i] < 48 or serbuf[i] > 57):
+        i = i + 1
+    while i < got and serbuf[i] >= 48 and serbuf[i] <= 57:
+        v = v * 10 + cast[uint64](serbuf[i]) - 48
+        i = i + 1
+    ser_now_prim = v
+    return 1
+
+
+# Has the Hamnix side changed under us?
+#
+# `force` = 1 is the RECONCILE: read both buffers whatever the serial says,
+# which is what makes a writer too old to bump one converge instead of being
+# invisible for ever. See the header.
+def snarf_tick(force: int32):
+    look_clip: int32 = 1
+    look_prim: int32 = 1
+    if serial_sample() == 1:
+        if force == 0 and ser_have == 1:
+            look_clip = 0
+            look_prim = 0
+            if ser_now_clip != ser_clip:
+                look_clip = 1
+            if ser_now_prim != ser_prim:
+                look_prim = 1
+        # RECORDED BEFORE THE CONTENT IS READ, never after: a write landing
+        # during the reads below must leave a serial that differs from this,
+        # so the next wake goes and looks again.
+        ser_clip = ser_now_clip
+        ser_prim = ser_now_prim
+        ser_have = 1
+
+    if look_clip == 1:
+        n: int64 = snarf_read(0)
+        if n >= 0:
+            ln: uint64 = cast[uint64](n)
+            if same_bytes(&snbuf[0], ln, &clipbuf[0], clip_len) == 0:
+                copy_bytes(&clipbuf[0], &snbuf[0], ln)
+                clip_len = ln
+                claim(atom_clipboard, 0)
+    if look_prim == 1:
+        n2: int64 = snarf_read(1)
+        if n2 >= 0:
+            ln2: uint64 = cast[uint64](n2)
+            if same_bytes(&snbuf[0], ln2, &primbuf[0], prim_len) == 0:
+                copy_bytes(&primbuf[0], &snbuf[0], ln2)
+                prim_len = ln2
+                claim(ATOM_PRIMARY, 1)
 
 
 # ---------------------------------------------------------------- session
@@ -1052,6 +1181,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     prim_len = cast[uint64](snarf_read(1))
     copy_bytes(&primbuf[0], &snbuf[0], prim_len)
 
+    # THE PARK. Said out loud either way, because "which of the two loops am I
+    # in" is the difference between 0.5 and 5 wakes a second and nobody should
+    # have to guess it from a CPU graph.
+    if serial_open() == 1:
+        say("parking on /dev/snarf.serial; reconciling by content every 2 s\n")
+    else:
+        say("no /dev/snarf.serial in this runtime; falling back to the 200 ms content poll\n")
+
     quiet: int32 = 0
     while 1 == 1:
         if xfd < 0:
@@ -1070,7 +1207,21 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 continue
             quiet = 0
 
-        r: int32 = x_poll_msg(200)
+        # PARK ON BOTH SIDES AT ONCE. The X socket is a descriptor and always
+        # was; /dev/snarf.serial is one now, so the clipboard is no longer the
+        # thing that has to be looked at on a clock. With neither moving this
+        # sleeps for RECONCILE_MS and wakes twice a minute-ish rather than
+        # 300 times.
+        waitset[0] = xfd
+        nw: uint64 = 1
+        tmo: int64 = POLL_MS
+        if ser_fd >= 0:
+            waitset[1] = ser_fd
+            nw = 2
+            tmo = RECONCILE_MS
+        sys_waitfds(&waitset[0], nw, tmo)
+
+        r: int32 = x_poll_msg(0)
         if r < 0:
             sayerr("the X connection went away; redialling\n")
             x_drop()
@@ -1097,7 +1248,19 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             x_drop()
             continue
 
-        snarf_tick()
+        # The reconcile is on a MONOTONIC DEADLINE, not a count of wakes: a
+        # burst of X events must not turn "every two seconds" into "every two
+        # seconds' worth of quiet", and must not turn it into a content read
+        # per event either.
+        force: int32 = 0
+        if ser_fd < 0:
+            force = 1
+        else:
+            tnow: int64 = now_ms()
+            if tnow >= next_rec:
+                force = 1
+                next_rec = tnow + RECONCILE_MS
+        snarf_tick(force)
         if xdead != 0:
             sayerr("the X connection went away; redialling\n")
             x_drop()

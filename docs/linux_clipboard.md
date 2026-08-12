@@ -479,18 +479,47 @@ Both were found by measurement against a real X server, neither by reading.
 
 ### 6.5 What the bridge does not do
 
-* **A change on the Hamnix side is noticed by CONTENT, not by a serial.**
-  `struct snarfshm` has `magic` and `version` but no generation counter, so
-  there is nothing cheap to compare and nothing to wait on. The bridge polls
-  both buffers four times a second and compares bytes. That is correct — a
-  change is a change — but it cannot tell "written again with the same bytes"
-  from "not written", and it cannot wake instantly.
-  **The request, precisely:** add `uint64_t serial;` to `struct snarfshm`
-  (`user/linux-snarf.c`, the struct at line 127) and `(*serialp)++;` at the end
-  of `hamsnarf_write` (line 289), beside the existing "the length is published
-  last" store. The poll then compares one word, and a later `sys_waitfds` arm
-  could park on the clipboard instead of polling it at all. That file is owned
-  by another pass, so this is a request rather than a change.
+* ~~**A change on the Hamnix side is noticed by CONTENT, not by a serial.**~~
+  **CLOSED for this bridge, and DELIBERATELY NOT CLOSED for the Wayland one.**
+  `struct snarfshm` carries `clip_serial` and `prim_serial` now, `/dev/snarf.serial`
+  is the name that reads them, and its descriptor is a real `inotify` watch on
+  the segment — so `user/xsnarfd.ad` puts it in its waitset beside the X socket
+  and *sleeps* on the clipboard. **Measured, idle, from
+  `/proc/<pid>/status voluntary_ctxt_switches` across a ten-second window:
+  4.99 wakes/s before, 0.49 after.** `tests/linux/snarf_serial.sh` (17 PASS).
+  Three things about it that are not obvious and are each written out in full
+  at the top of `user/linux-snarf.c`:
+  * **The fields are APPENDED, not put in the header where the request above
+    asked for them.** A header field moves `clip[]` and `prim[]` by 8 bytes,
+    and `/srv/snarf` is a rendezvous between binaries that were not built
+    together — a package channel makes "old and new alive at once" ordinary.
+    The v1 prefix is frozen at 131096 bytes by `_Static_assert`; the segment is
+    now 131120. An old client maps the prefix and is correct; a new client
+    ftruncates a short segment up, which leaves existing mappings valid.
+  * **`version` stays at 1 on purpose, and every reader reconciles on a timer
+    anyway.** A version stamp can only describe the segment; the hazard is a
+    live *writer* that predates the serial and bumps nothing. The gate proves
+    the fallback rather than asserting it: a `python3` "old client" mmaps the
+    131096-byte prefix and stores through it — no `write(2)`, so no inotify,
+    and no serial — and `xsnarfd` still converges those bytes into the X
+    selection.
+  * **The bump is `__atomic_add_fetch`, not `(*serialp)++`.** Two processes
+    copying at the same instant must get two different serials, or the second
+    copy is invisible to a reader that already saw the first.
+* **The Wayland bridge was converted to the serial and the conversion was
+  MEASURED AND THROWN AWAY.** `lib/wlsnarf.ad` still polls by content, and the
+  numbers are in the file. `user/wsyswl.ad`'s loop runs at 16 ms for the input
+  rings whatever the clipboard does, so **no wake is saved — 62.5/s before and
+  62.5/s after.** All the serial saves there is work inside a wake that happens
+  regardless: `tests/linux/wlsnarfbench.ad`, 20 000 idle polls, median of five,
+  gives 2437 → 845 ns on an empty clipboard and 52687 → 2286 ns on a full
+  64 KiB one, i.e. **12.7 µs/s to 403 µs/s — four hundredths of one percent of
+  one core in the worst case that can be constructed.** And it is not free: a
+  serial-driven poll only re-reads content every *n*th time, so a writer too
+  old to bump would go from being seen in 128 ms to about two seconds. Paying a
+  16x worse worst case to save 0.04% of a core is a bad trade. The condition
+  for revisiting is stated in the file: if the compositor's loop ever stops
+  running on a 16 ms clock.
 * **INCR is refused, not received.** Receiving it is a `PropertyNotify` loop
   against `PropertyChangeMask` on the owner window; the 64 KiB cap means most
   of what arrives would be discarded anyway, which is why refusing loudly was
@@ -715,12 +744,13 @@ measured.
   latest offer. The owner of the current selection is skipped, because
   announcing an offer back at a source is how a toolkit concludes it *lost*
   the selection.
-* **Change on the Hamnix side is still found BY CONTENT, at 4 Hz** — the same
-  limitation, and the same fix, as §6.5. The request is unchanged and now
-  buys **two** bridges instead of one: add `uint64_t serial;` to
-  `struct snarfshm` (`user/linux-snarf.c`) and `(*serialp)++;` at the end of
-  `hamsnarf_write`. Both polls then compare one word, and a later
-  `sys_waitfds` arm could park on the clipboard instead of polling it at all.
+* **Change on the Hamnix side is still found BY CONTENT, at 4 Hz — and that is
+  now a decision with a number behind it rather than a missing feature.** The
+  serial exists (§6.5) and this bridge does not use it, because measuring said
+  it would save no wakes at all and between 12.7 and 403 microseconds of CPU
+  per second, while making a non-bumping writer 16x slower to notice. The
+  measurement, the table and the condition for revisiting are at the top of
+  `lib/wlsnarf.ad`; the instrument is `tests/linux/wlsnarfbench.ad`.
 * **No Firefox screenshot.** The mechanism is measured at every layer under it
   — both directions through the shipped toolkit libraries, all three worlds at
   once on one segment, ownership changing hands, and a real foreign Wayland

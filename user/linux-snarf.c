@@ -110,6 +110,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
+#include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -123,7 +125,73 @@
 
 /* The two buffers of sys/src/9/port/devsnarf.ad, and of lib/devsnarf.ad after
  * it: independent backing arrays with their own lengths, so a Ctrl+C into the
- * CLIPBOARD never clobbers a live highlight's PRIMARY and vice versa. */
+ * CLIPBOARD never clobbers a live highlight's PRIMARY and vice versa.
+ *
+ * ==================================================================
+ * THE SERIALS, AND WHY THEY ARE AT THE BOTTOM AND NOT THE TOP
+ * ==================================================================
+ *
+ * HANDOFF asked for this as "two lines: `uint64_t serial;` in the struct at
+ * line 127" -- i.e. in the header, beside `version`.  That placement is wrong
+ * and the reason is the only compatibility question this change has:
+ *
+ *   THE SEGMENT IS A RENDEZVOUS BETWEEN PROCESSES THAT WERE NOT BUILT
+ *   TOGETHER.  /srv/snarf outlives every program that maps it.  A field in the
+ *   header moves clip[] and prim[] by 8 bytes, so a binary compiled before the
+ *   change and one compiled after it, both alive on the same boot -- which is
+ *   exactly what a package channel makes possible -- would read each other's
+ *   clipboard at the wrong offset and paste garbage, silently.  Appending
+ *   instead FREEZES every v1 offset, and the _Static_asserts below make that
+ *   freeze a compile error rather than a convention.
+ *
+ * With the fields appended, sizeof(struct snarfshm) grows 131096 -> 131120 and
+ * the two directions are:
+ *
+ *   NEW CLIENT, OLD SEGMENT (131096 bytes, created before this change).
+ *     shm_attach already ftruncates any short segment up to sizeof, and a
+ *     ftruncate that GROWS a file leaves every existing mapping of it valid
+ *     (only shrinking can SIGBUS a mapper).  The new tail reads as zeroes, so
+ *     both serials start at 0, which is exactly where a fresh segment starts.
+ *
+ *   OLD CLIENT, NEW SEGMENT (131120 bytes).  It mmaps the first 131096 bytes,
+ *     which is a legal prefix of a longer file, and every field it knows about
+ *     is where it has always been.  Copy and paste work.  What it does NOT do
+ *     is bump a serial -- it has never heard of one.
+ *
+ * That last sentence is the whole reason the readers below keep a fallback.
+ * `version` is deliberately LEFT AT 1: a version stamp can only describe the
+ * segment, and the hazard is a live WRITER that predates the serial.  Bumping
+ * it on attach would let a reader conclude "this segment has serials, so I may
+ * trust them", which is false the moment an old binary is still running with
+ * it mapped.  A flag that can be wrong is worse than no flag, so there is
+ * none, and every reader reconciles on a timer regardless.
+ *
+ * WRAP.  A uint64 counter incremented once per write wraps after 2^64 =
+ * 1.8446744e19 writes.  hamsnarf_write cannot run faster than about 10 ns
+ * (an atomic read-modify-write on a shared line, plus a memcpy, plus the
+ * pwrite below), so a wrap needs upwards of 5 800 YEARS of a machine doing
+ * nothing but copying to the clipboard, on a segment whose lifetime is one
+ * boot of a tmpfs.  It does not wrap.  And if it somehow did: every reader
+ * compares !=, never < or >, so a wrapped value still differs from the last
+ * one seen unless EXACTLY a multiple of 2^64 bumps landed between two polls.
+ * There is no ordering claim anywhere in this file that a wrap could break.
+ *
+ * WHAT THE BUMP IS ATOMIC WITH RESPECT TO, said plainly:
+ *   - IT IS an atomic read-modify-write (__atomic_add_fetch, ACQ_REL), so two
+ *     processes copying at the same instant get two DIFFERENT serials.  A
+ *     plain `(*serialp)++` would not: both could load 5 and store 6, and the
+ *     second copy would then be invisible to a reader that had already seen 6.
+ *     That is a lost notification, which is the one failure a serial exists to
+ *     prevent, so the RMW is load-bearing and not decoration.
+ *   - IT IS ordered AFTER the bytes and the length: the release store cannot
+ *     be hoisted above them, so a reader that has seen serial N has, on its
+ *     matching acquire load, seen everything the writer of N wrote.
+ *   - IT IS NOT a lock.  Two writers still interleave their bytes -- the
+ *     pre-existing gap HANDOFF records -- and the serial does not fix it; it
+ *     only guarantees the interleaving is NOTICED.
+ *   - IT IS NOT a count of writes as far as any reader is concerned.  Readers
+ *     may only ask "is this different from what I last saw".
+ * ================================================================== */
 struct snarfshm {
     uint32_t magic;
     uint32_t version;
@@ -131,9 +199,29 @@ struct snarfshm {
     uint64_t prim_len;
     uint8_t  clip[HAMSNARF_MAX];
     uint8_t  prim[HAMSNARF_MAX];
+    /* ---- everything above is v1; these offsets are FROZEN ---- */
+    uint64_t clip_serial;
+    uint64_t prim_serial;
+    /* Written by pwrite(2) and read by nobody.  An mmap store generates no
+     * inotify event -- the kernel never sees it -- so a one-byte write through
+     * a real descriptor is what makes IN_MODIFY fire and lets a reader park on
+     * the clipboard instead of polling it.  Its VALUE is meaningless, which is
+     * the point: writing a constant cannot race another writer, whereas
+     * pwriting the serial itself could put back a value another process had
+     * already superseded and walk the counter BACKWARDS. */
+    uint8_t  poke;
 };
 
+/* The freeze, checkable by the compiler.  If someone adds a field to the
+ * header again, this is a build error and not a corrupted paste. */
+_Static_assert(offsetof(struct snarfshm, clip) == 24, "v1 clip offset moved");
+_Static_assert(offsetof(struct snarfshm, prim) == 24 + HAMSNARF_MAX,
+               "v1 prim offset moved");
+_Static_assert(offsetof(struct snarfshm, clip_serial) == 24 + 2 * HAMSNARF_MAX,
+               "the v1 prefix is no longer 131096 bytes");
+
 static struct snarfshm *shm;
+static int  seg_fd = -1;               /* kept open for the inotify poke */
 static char seg_path[512];
 
 const char *hamsnarf_segment(void)
@@ -202,9 +290,14 @@ static int shm_attach(void)
     }
     void *m = mmap(NULL, sizeof(struct snarfshm), PROT_READ | PROT_WRITE,
                    MAP_SHARED, fd, 0);
-    int e = errno;
-    close(fd);
-    if (m == MAP_FAILED) { errno = e; return -1; }
+    if (m == MAP_FAILED) { int e = errno; close(fd); errno = e; return -1; }
+    /* THE DESCRIPTOR IS KEPT, where it used to be closed: hamsnarf_write needs
+     * it for the one-byte poke that makes inotify fire, and an inotify watch
+     * needs a path that is still the same inode.  FD_CLOEXEC so it does not
+     * ride into a foreign binary in a namespace -- the clipboard is reached by
+     * NAME across that boundary, never by a descriptor (NORTH_STAR). */
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    seg_fd = fd;
     shm = (struct snarfshm *)m;
     if (shm->magic != SNARF_MAGIC) {
         memset(shm, 0, sizeof *shm);
@@ -226,6 +319,7 @@ int hamsnarf_kind(const char *path)
     if (!path) return HAMSNARF_NONE;
     if (!strcmp(path, "/dev/snarf"))         return HAMSNARF_CLIP;
     if (!strcmp(path, "/dev/snarf.primary")) return HAMSNARF_PRIMARY;
+    if (!strcmp(path, "/dev/snarf.serial"))  return HAMSNARF_SERIAL;
     return HAMSNARF_NONE;
 }
 
@@ -235,8 +329,28 @@ int hamsnarf_open(const char *path, int for_write, struct hamsnarf_file *f)
     if (k == HAMSNARF_NONE) { errno = ENODEV; return -1; }
     if (shm_attach() < 0)
         return -1;
+    /* REFUSED BY NAME.  A serial is something the device tells you, not
+     * something you tell it, and a write that was quietly swallowed here would
+     * be a program believing it had announced a clipboard change it had not. */
+    if (k == HAMSNARF_SERIAL && for_write) { errno = EPERM; return -1; }
     f->which = k;
     f->write = for_write;
+    f->wfd = -1;
+    f->linelen = 0;
+    if (k == HAMSNARF_SERIAL) {
+        /* The park.  IN_MODIFY on the segment file fires on the poke every
+         * hamsnarf_write performs; IN_NONBLOCK so draining it can never stall
+         * an event loop.  A failure here is NOT fatal -- the caller then has a
+         * device it can read and not wait on, which is exactly the state every
+         * caller must already tolerate (see the fallback note in the readers).
+         * A clipboard that has to be looked at on a clock still works. */
+        f->wfd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (f->wfd >= 0
+            && inotify_add_watch(f->wfd, seg_path, IN_MODIFY) < 0) {
+            close(f->wfd);
+            f->wfd = -1;
+        }
+    }
     /* OPENING DOES NOT TRUNCATE.  The buffer is cleared by a REPLACE write at
      * offset 0, which is where devsnarf.ad puts that decision, so an open
      * that is never written to leaves the clipboard alone.  A reader and a
@@ -247,8 +361,47 @@ int hamsnarf_open(const char *path, int for_write, struct hamsnarf_file *f)
 
 void hamsnarf_close(struct hamsnarf_file *f)
 {
+    /* `wfd` is NOT closed here.  devtab_open handed it to the caller AS the
+     * caller's descriptor, so the close(2) that reaches this device closes it
+     * on the way past; closing it again would shut a descriptor some other
+     * open has since been given the same number for.  That is the same
+     * ownership rule the /dev/null-backed devices already follow. */
     f->which = HAMSNARF_NONE;
     f->off = 0;
+    f->wfd = -1;
+    f->linelen = 0;
+}
+
+int hamsnarf_waitfd(const struct hamsnarf_file *f)
+{
+    return f->which == HAMSNARF_SERIAL ? f->wfd : -1;
+}
+
+/* The two counters, sampled with acquire loads so that everything the writer
+ * of this value published is visible to whoever acts on it. */
+static void serial_line(struct hamsnarf_file *f)
+{
+    uint64_t c = __atomic_load_n(&shm->clip_serial, __ATOMIC_ACQUIRE);
+    uint64_t p = __atomic_load_n(&shm->prim_serial, __ATOMIC_ACQUIRE);
+    int n = snprintf(f->line, sizeof f->line, "%20llu %20llu\n",
+                     (unsigned long long)c, (unsigned long long)p);
+    f->linelen = n < 0 ? 0 : (uint64_t)n;
+}
+
+/* Swallow whatever inotify has queued.  A LEVEL-triggered descriptor that is
+ * never drained is ready for ever, and an event loop parked on one would spin
+ * at the speed of the machine -- the exact failure sys_waitfds' own header
+ * records for /dev/null-backed devices.  Draining HERE, on the sample, is what
+ * makes "wait on it, then read it" a complete protocol for the caller: the
+ * read consumes the notification it woke for. */
+static void serial_drain(int wfd)
+{
+    if (wfd < 0) return;
+    char junk[512];
+    for (;;) {
+        ssize_t n = read(wfd, junk, sizeof junk);
+        if (n <= 0) break;
+    }
 }
 
 /* Which backing array and length this open addresses. */
@@ -267,6 +420,28 @@ static uint64_t *len_of(int which)
 int64_t hamsnarf_read(struct hamsnarf_file *f, uint8_t *buf, uint64_t count)
 {
     if (!shm || f->which == HAMSNARF_NONE) { errno = EBADF; return -EBADF; }
+
+    /* THE SAMPLE IS TAKEN AT OFFSET 0, not at open, and that is what makes a
+     * held descriptor usable as a poll point: a caller seeks back to 0 and
+     * reads again to take a fresh sample, and `cat /dev/snarf.serial` still
+     * hits EOF after one line instead of regenerating for ever.  Taking it
+     * once, rather than per read, is what stops a chunked reader from
+     * straddling two different samples and assembling a line that was never
+     * true. */
+    if (f->which == HAMSNARF_SERIAL) {
+        if (f->off == 0) {
+            serial_drain(f->wfd);
+            serial_line(f);
+        }
+        if (f->off >= f->linelen)
+            return 0;
+        uint64_t avail = f->linelen - f->off;
+        uint64_t take = count < avail ? count : avail;
+        memcpy(buf, f->line + f->off, (size_t)take);
+        f->off += take;
+        return (int64_t)take;
+    }
+
     /* The length is read ONCE and clamped to the cap.  A torn read against a
      * concurrent writer can then hand back stale bytes, but never bytes from
      * outside the buffer, and never a length the segment cannot hold. */
@@ -322,6 +497,40 @@ int64_t hamsnarf_write(struct hamsnarf_file *f, const uint8_t *buf,
         newlen = cur;
     *lenp = newlen;
 
+    /* THE SERIAL IS BUMPED LAST OF ALL, after the bytes and after the length,
+     * with an atomic read-modify-write and release ordering.  See the long
+     * note on `struct snarfshm`: the RMW is what stops two simultaneous
+     * copies from landing on the same serial and making the second one
+     * invisible, and the release is what makes "I have seen serial N" mean "I
+     * can see the bytes of N".
+     *
+     * IT IS BUMPED EVEN WHEN THE BYTES ARE IDENTICAL, deliberately.  A write
+     * IS an event: it is how a program says "this is the clipboard now", and
+     * it is the one thing a content comparison structurally cannot see.  The
+     * bridges still decide what to DO by comparing content -- that is their
+     * anti-ping-pong invariant and it is not being retired here -- but the
+     * device's job is to report what happened, not to guess what mattered.
+     *
+     * The truncated-past-the-cap path above returns early WITHOUT a bump,
+     * which is right: nothing was stored, so nothing changed. */
+    uint64_t *serialp = f->which == HAMSNARF_PRIMARY ? &shm->prim_serial
+                                                     : &shm->clip_serial;
+    __atomic_add_fetch(serialp, 1, __ATOMIC_ACQ_REL);
+
+    /* ...and the poke, which is the ONLY part of this the kernel can see.  It
+     * is what turns /dev/snarf.serial's inotify descriptor from a decoration
+     * into a wakeup, and it is a whole syscall on a path that runs once per
+     * human keystroke-pair, not once per frame.  Best effort: a segment
+     * mapped from a descriptor that has since gone (it has not, it is held
+     * open) leaves every reader on its reconcile timer, which still
+     * converges. */
+    if (seg_fd >= 0) {
+        static const uint8_t one = 1;
+        ssize_t pw = pwrite(seg_fd, &one, 1,
+                            (off_t)offsetof(struct snarfshm, poke));
+        (void)pw;
+    }
+
     f->off = start + take;
     return (int64_t)count;
 }
@@ -329,8 +538,13 @@ int64_t hamsnarf_write(struct hamsnarf_file *f, const uint8_t *buf,
 int64_t hamsnarf_seek(struct hamsnarf_file *f, int64_t off, int whence)
 {
     if (!shm || f->which == HAMSNARF_NONE) { errno = EBADF; return -EBADF; }
-    uint64_t len = *len_of(f->which);
-    if (len > HAMSNARF_MAX) len = HAMSNARF_MAX;
+    uint64_t len;
+    if (f->which == HAMSNARF_SERIAL)
+        len = HAMSNARF_SERIAL_LINE;    /* fixed width, so SEEK_END is exact */
+    else {
+        len = *len_of(f->which);
+        if (len > HAMSNARF_MAX) len = HAMSNARF_MAX;
+    }
     int64_t base = whence == 1 ? (int64_t)f->off
                  : whence == 2 ? (int64_t)len : 0;
     int64_t want = base + off;

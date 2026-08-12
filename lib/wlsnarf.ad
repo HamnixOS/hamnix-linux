@@ -134,11 +134,40 @@ def wlsn_present() -> int32:
 # the bridge last saw, and the cache has been brought up to date, so the caller
 # should announce a new selection to its Wayland clients.
 #
-# BY CONTENT, NOT BY A SERIAL, and that is a known limitation rather than a
-# choice: `struct snarfshm` has magic and version and no generation counter, so
-# there is nothing cheap to compare and nothing to park on. It is the same
-# limitation user/xsnarfd.ad records at §6.5, with the same two-line request
-# written down there, and closing it would fix both bridges at once.
+# BY CONTENT, AND THE SERIAL WAS TRIED HERE AND MEASURED AND REFUSED.
+# =================================================================
+# `struct snarfshm` HAS a generation counter now, and /dev/snarf.serial reads
+# it; user/xsnarfd.ad was converted to it and its idle wake rate went from
+# 4.99/s to 0.49/s, measured. This file was converted too, and then the
+# conversion was thrown away, because the same measurement here says the
+# opposite. The numbers, from tests/linux/wlsnarfbench.ad -- 20 000 idle polls,
+# nanoseconds each, median of five runs, this host:
+#
+#     clipboard    by content    by serial    saved at 8 polls/s
+#         0 B           2437          845          12.7 us/s
+#       4 KiB           5836          973            39 us/s
+#      64 KiB          52687         2286           403 us/s
+#
+# NO WAKE IS SAVED. Not one. user/wsyswl.ad's loop runs at 16 ms for the input
+# rings whatever the clipboard does and this is called on every eighth pass of
+# it, so the wake rate is 62.5/s before and 62.5/s after. The saving is work
+# inside a wake that was going to happen anyway, and the right-hand column is
+# all of it: four hundredths of one percent of one core with a completely full
+# 64 KiB clipboard, and a thousandth of a percent in the row that describes
+# what is actually on a clipboard.
+#
+# AND IT IS NOT FREE. A serial-driven poll only re-reads the content every
+# WLSN_RECONCILE-th time, because reading it every time is what it was avoiding
+# -- so a writer too old to bump the serial (a binary from before it existed,
+# mapping the same frozen v1 offsets) goes from being seen within 128 ms to
+# being seen within about two seconds. Paying a 16x worse worst case in the
+# thing this file exists to do, to save 0.02% of a core, is a bad trade, and
+# "the other bridge did it" is not an argument for making it.
+#
+# So this stays a content compare, and the number is written here rather than
+# left for the next person to assume the other way. If the compositor's loop
+# ever stops running on a 16 ms clock -- that is the condition -- this becomes
+# worth revisiting, and user/xsnarfd.ad is the worked example of how.
 def wlsn_poll() -> int32:
     n: int64 = wlsn_read_dev()
     if n < 0:

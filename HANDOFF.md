@@ -298,13 +298,34 @@ same failure this project exists to beat.
   here to the shell that xterm is running). `docs/linux_clipboard.md` §3a–§6.
   What is still open, in that file's §6.5: an **INCR** transfer is refused
   loudly rather than received; a selection over 64 KiB is truncated loudly at
-  `SNARF_MAX`; the Wayland-native `wl_data_device` clipboard is a third one and
-  is not bridged; and **the Hamnix side is polled by CONTENT four times a
-  second** because `struct snarfshm` has no serial. The precise request against
-  `user/linux-snarf.c` (another pass's file) is two lines: `uint64_t serial;`
-  in the struct at line 127, `(*serialp)++;` at the end of `hamsnarf_write`
-  (line 289). Two further gaps unchanged: no locking, so two simultaneous
-  copies interleave; and **no end-to-end mouse test between two DE windows** —
+  `SNARF_MAX`; and the Wayland-native `wl_data_device` clipboard is a third one
+  and is not bridged. **THE SERIAL IS DONE, and it did not land where the
+  request asked.** `struct snarfshm` carries `clip_serial`/`prim_serial`,
+  `/dev/snarf.serial` reads them, and its fd is a real `inotify` watch on the
+  segment, so `xsnarfd` parks on the clipboard beside the X socket instead of
+  polling it: **4.99 → 0.49 idle wakes/s**, sampled from
+  `voluntary_ctxt_switches` over a 10 s window, not from `ps` pcpu.
+  `tests/linux/snarf_serial.sh` (**17 PASS**, QEMU-free), and with the change
+  reverted it is 4 PASS / 13 FAIL. Three corrections to the request as written
+  here: the fields are **appended**, not put in the header at line 127 — a
+  header field moves `clip[]`/`prim[]` by 8 bytes and `/srv/snarf` is a
+  rendezvous between binaries that were not built together, so the v1 prefix is
+  `_Static_assert`ed frozen at 131096 and the segment grew to 131120; the bump
+  is `__atomic_add_fetch`, not `(*serialp)++`, or two simultaneous copies land
+  on one serial and the second becomes invisible; and `version` stays at **1**
+  on purpose, because a stamp can only describe the segment while the hazard is
+  a live *writer* that predates the serial — so every reader reconciles on a
+  timer regardless, and the gate proves that with a `python3` old client that
+  mmaps the 131096-byte prefix and stores through it (no `write(2)`, no
+  inotify, no bump) and is still converged into the X selection.
+  **`lib/wlsnarf.ad` was converted too and the conversion was thrown away**,
+  measured: `wsyswl`'s loop runs at 16 ms for the input rings whatever the
+  clipboard does, so it saves **no wakes at all** and 12.7–403 µs/s of CPU
+  (`tests/linux/wlsnarfbench.ad`, table in the file), while making a
+  non-bumping writer 16x slower to notice. That is a bad trade and the number
+  is now written next to the code. Two further gaps unchanged: no locking, so
+  two simultaneous copies interleave — the serial makes that
+  interleaving *noticed*, not prevented; and **no end-to-end mouse test between two DE windows** —
   a drag-select in one pasted into another — because the click derivation was
   never ported from the Hamnix line, where that exact gap once let nine green
   gates sit on a dead feature. (The bridge's own mouse test is the *namespace*

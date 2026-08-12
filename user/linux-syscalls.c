@@ -387,7 +387,14 @@ static int devtab_open(const char *path, int for_write)
      * whichever way the caller asked. */
     /* /dev/audio is opened for WRITING by every player and then READ for its
      * status line, so the standing descriptor must be read/write either way. */
-    int fd = open("/dev/null",
+    /* /dev/snarf.serial BRINGS ITS OWN DESCRIPTOR, and it is the only device
+     * here that does: an inotify watch on the clipboard segment, so an event
+     * loop can PARK on the clipboard rather than look at it on a clock (see
+     * user/linux-snarf.c).  Everything else gets the /dev/null slot whose
+     * always-readable-ness sys_waitfds has to sort out by hand below. */
+    int fd = slot->issn ? hamsnarf_waitfd(&slot->sn) : -1;
+    if (fd < 0)
+        fd = open("/dev/null",
                   (slot->isnet || slot->isauth || slot->isau || !for_write)
                       ? O_RDWR : O_WRONLY);
     if (fd < 0) {
@@ -2385,6 +2392,17 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
         struct devfile *v = devtab_find((int)fds[i]);
         if (v && v->isw && hamwsys_is_ring(&v->w)) {
             ring[nring++] = v;
+        } else if (v && v->issn && hamsnarf_waitfd(&v->sn) >= 0) {
+            /* A REAL PARK ON THE CLIPBOARD.  /dev/snarf.serial is backed by an
+             * inotify descriptor that fires when somebody writes the segment,
+             * so this is a genuine sleep and not the always-ready count below
+             * -- the difference between user/xsnarfd.ad waking five times a
+             * second for ever and waking when a human presses Ctrl+C.  The fd
+             * IS the caller's fd here; there is no second descriptor. */
+            pfd[npoll].fd = hamsnarf_waitfd(&v->sn);
+            pfd[npoll].events = POLLIN;
+            pfd[npoll].revents = 0;
+            npoll++;
         } else if (v && v->isnet) {
             int s = hamnet_sockfd(&v->nf);
             if (s < 0) { always_ready++; continue; }
