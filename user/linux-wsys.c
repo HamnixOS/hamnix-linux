@@ -1050,6 +1050,23 @@ static char chrome_path[576];
  *     whatever hands the memfd out, and it costs core dumps and same-uid
  *     debugging of DE clients — which is a decision, not a detail.
  *
+ *     THAT DECISION HAS SINCE BEEN TAKEN, AND IT UNBLOCKS THIS.  owner_harden()
+ *     further down calls PR_SET_DUMPABLE(0) from keychan_bind, so every window
+ *     owner already has the property — measured against a REAL owner in
+ *     wsys_bypass.sh's attack 5: mem=-13, enumerable=0, ptrace=-1.  The single
+ *     objection that DISPROVED the recorded memfd design — "/proc/<pid>/fd/<n>
+ *     IS a path" — no longer holds against a hardened owner.  So the memfd
+ *     construction for the scene, the stage, the backbuffer and the images is
+ *     viable again, and what it still needs is the part that was never about
+ *     /proc: an AUTHORITY to create the memfd and hand it to exactly one
+ *     process.  That is tier 1, which is a daemon, a new binary, a
+ *     package-channel change and a segment at a new path; blockers (1)-(3)
+ *     below are unchanged.
+ *     DO NOT READ THAT AS "THE PIXELS ARE SAFE NOW".  They are in the 0666
+ *     mapping, any process on the machine reads them, and wsys_bypass.sh's
+ *     `sameuid.snoop` prints the victim's committed scene on every green run
+ *     precisely so that nobody can come to believe otherwise.
+ *
  *   TIER 3 — /srv/wsys.chrome, 0644, unchanged.  Already correct.
  *
  * WHAT AN ATTACKER CAN STILL DO AFTERWARDS, named rather than left for someone
