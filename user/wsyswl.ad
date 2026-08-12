@@ -866,8 +866,27 @@ def st_kv(fd: int32, name: Ptr[uint8], k: uint64):
 
 # --- wire output ------------------------------------------------------
 
+# THE SAME DEFECT AS THE X SETUP REPLY, FACING THE OTHER WAY -- here WE are the
+# peer that truncates. flush() below says it plainly: "a short write would leave
+# half an event on the wire and desynchronise its parser for good". These two
+# builders could produce exactly that half event. o_u32 dropped the word and
+# said nothing, so emit_end then patched in a SIZE THAT DOES NOT MATCH the bytes
+# actually staged, and the client -- Firefox, through Xwayland -- would parse
+# the next message from the wrong offset with nothing wrong on this side.
+#
+# o_cstr was worse than a truncation: its loop stopped at 8192 but the NUL and
+# the padding after it were stored UNGUARDED, so a string that filled the buffer
+# wrote up to four bytes PAST the end of `out` into whatever follows it in BSS.
+#
+# So: every store is bounded, an overflow is RECORDED in out_full rather than
+# passed on, and flush() refuses to send a buffer that is known to be malformed.
+# A client that misses an event is stuck; a client whose stream desynchronises
+# is stuck AND cannot be diagnosed, so the loud, lossy answer is the better one.
+out_full: int32 = 0                     # a staged message did not fit
+
 def o_u32(v: uint32):
     if out_pos + 4 > 8192:
+        out_full = 1
         return
     put_le32(&out[0], out_pos, cast[int32](v))
     out_pos = out_pos + 4
@@ -883,11 +902,18 @@ def o_cstr(s: Ptr[uint8]):
         out[out_pos] = s[i]
         out_pos = out_pos + 1
         i = i + 1
-    out[out_pos] = 0
-    out_pos = out_pos + 1
-    while (out_pos & 3) != 0:
+    if i < n:
+        out_full = 1
+    if out_pos < 8192:
         out[out_pos] = 0
         out_pos = out_pos + 1
+    else:
+        out_full = 1
+    while (out_pos & 3) != 0 and out_pos < 8192:
+        out[out_pos] = 0
+        out_pos = out_pos + 1
+    if (out_pos & 3) != 0:
+        out_full = 1
 
 
 def emit_begin(obj: uint32) -> uint64:
@@ -908,6 +934,20 @@ def emit_end(start: uint64, opcode: uint32):
 # half an event on the wire and desynchronise its parser for good; sys_scm_send
 # blocks until the whole burst is gone, which is the only safe choice.
 def flush(fd: int32):
+    if out_full != 0:
+        # KNOWN MALFORMED: at least one staged message was cut short, so the
+        # size emit_end patched in does not describe the bytes here. Sending it
+        # is the one thing that must not happen -- see the note above o_u32.
+        puts(2, "wsyswl: a staged message overflowed the ")
+        putd(2, cast[int32](8192))
+        puts(2, "-byte output buffer and was NOT sent -- the client will miss\n")
+        puts(2, "wsyswl: an event rather than have its protocol stream desynchronised.\n")
+        out_full = 0
+        out_pos = 0
+        if out_fd >= 0:
+            sys_close(out_fd)
+            out_fd = -1
+        return
     if out_pos == 0 and out_fd < 0:
         return
     sys_scm_send(fd, &out[0], out_pos, out_fd)
@@ -4739,6 +4779,31 @@ def conn_pump(c: uint64) -> int32:
             # A corrupt header cannot be resynchronised by scanning -- any
             # four bytes look like an object id. Drop the connection instead
             # of inventing a message boundary.
+            conn_acclen[c] = 0
+            return -1
+        if size > ACC:
+            # A MESSAGE THAT CANNOT EVER FIT MUST NOT BE WAITED FOR.
+            #
+            # `size` is the 16-bit field of the Wayland header, so a client can
+            # declare up to 65535 against this 8192-byte reassembly buffer.
+            # libwayland's own connection buffer is 4096 and it never sends
+            # more, so no real client reaches here -- but "no real client does
+            # it" is what the X setup reply's 4096-byte clamp assumed too, and
+            # that assumption is what broke the whole X path when a newer
+            # Xwayland grew past it (see the note above xrep).
+            #
+            # The failure without this branch is not a desync, it is a SILENT
+            # WEDGE: `acclen - pos < size` stays true for ever, the buffer
+            # never compacts because pos stays 0, no further read is issued
+            # because acclen == ACC, and the connection sits there being served
+            # and making no progress, with nothing said anywhere. Say it, and
+            # drop the connection -- the client is either broken or hostile,
+            # and either way this server cannot assemble what it asked for.
+            puts(2, "wsyswl: a client declared a ")
+            putd(2, cast[int32](size))
+            puts(2, "-byte message and the reassembly buffer is ")
+            putd(2, cast[int32](ACC))
+            puts(2, " -- dropping that client, it cannot be served\n")
             conn_acclen[c] = 0
             return -1
         if acclen - pos < size:

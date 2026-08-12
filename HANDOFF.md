@@ -475,6 +475,53 @@ same failure this project exists to beat.
   became a permanent desync. Every `if n > CAP: n = CAP` on a stream socket in
   this tree is the same bug waiting for a bigger peer.
 
+* **"CLAMP A PEER-DECLARED LENGTH AND KEEP PARSING THE SAME STREAM" IS A CLASS,
+  AND THE TREE HAS BEEN SWEPT FOR IT.** The X setup reply that broke the
+  browser path was one instance. The shape is: read a length off a STREAM (no
+  message boundaries), clamp it to a fixed buffer, and carry on reading -- the
+  leftover bytes become the next message's header, so the failure never appears
+  at the clamp. It appears far away as a misparse wearing a confident wrong
+  message, which is why it costs so much to find.
+
+  **THE RULE, and it is three things and not one**: cap for the buffer, DRAIN
+  the remainder, and **bound the parse by what is IN the buffer, not by what
+  the peer said it sent**. That last clause is what actually prevents the
+  misparse; the first two only protect memory and alignment.
+
+  **FIXED THIS PASS** (all four found by sweeping, none by a failing test):
+  `user/x11/x11srv.ad`'s request loop -- an X11 request may declare 262140
+  bytes and PutImage routinely passes 4 KiB, so ONE oversized request
+  desynchronised the connection for ever; `user/x11/xfill.ad` and
+  `user/x11/xclient_demo.ad` -- the same setup-reply clamp as wsyswl, 504
+  bytes, surviving only because in-tree they talk to a server whose reply is
+  120 bytes; `user/sshd.ad` and `user/ssh.ad` -- the identification exchange
+  stopped counting at 255 and left the rest of the line on the wire, which
+  either accepted a truncated id (immediate binary-packet desync plus a wrong
+  exchange hash) or let bytes past 255 be presented as a fresh "SSH-" line.
+  **NOT EXERCISED**: those five files are the bare-metal line's, whose
+  harnesses rebuild the kernel and boot a guest; they compile, and the drains
+  are copies of the idiom already in the same files.
+
+  **ALREADY RIGHT, so the next sweep can skip them**: `user/xsnarfd.ad` (drains
+  into a sink, flags `rep_trunc`, and refuses an implausible setup outright --
+  the model implementation, and the same protocol wsyswl got wrong);
+  `wsyswl`'s `x_poll_msg`; `x11srv`'s setup auth drain; `distrofs` and
+  `p9srv_demo` (REJECT an oversized 9P message, and `SRV_BUF_CAP` equals the
+  advertised msize so a conforming client cannot exceed it); `ssh`/`sshd`'s
+  binary packets (reject over 8192 and tear the session down); `http9` and
+  `httpd_worker` (one request per connection, then close). **NTP and DHCP are
+  UDP and cannot have this bug** -- a datagram keeps its own boundaries.
+
+  **AND THE SAME DEFECT FACING OUTWARD**, which the sweep only found because it
+  was looking for the shape rather than the symptom: `wsyswl`'s `o_u32` dropped
+  a word when the 8192-byte output buffer was full and said nothing, so
+  `emit_end` patched in a size that did not describe the bytes staged and the
+  CLIENT's parser would desynchronise -- `flush()`'s own comment warns about
+  exactly that. `o_cstr` was worse: its copy loop stopped at the boundary but
+  the NUL and the padding after it were stored unguarded, four bytes past the
+  end of the array into BSS. Overflow is recorded now and `flush()` refuses to
+  send a buffer it knows is malformed.
+
 * **THE VULKAN/GPU COMPOSITOR PATH IS 13x SLOWER THAN THE SOFTWARE ONE, AND
   NO MACHINE HAS EVER RUN IT.** The image stages only the venus ICD, which
   enumerates nothing, so `vk_set_backend(VK_BACKEND_LINUX)` fails and every

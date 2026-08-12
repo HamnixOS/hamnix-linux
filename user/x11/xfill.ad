@@ -151,12 +151,39 @@ def recv_setup(fd: int32) -> int32:
     add_units: uint32 = x11_get16_le(&rep_buf[0], 6)
     add_bytes: uint64 = cast[uint64](add_units) * 4
 
-    # Read additional data (cap at 512 bytes for safety).
-    if add_bytes > 504:
-        add_bytes = 504
-    if read_exact(fd, &rep_buf[8], add_bytes) == 0:
+    # THE CAP KEEPS THE BUFFER SAFE; THE DRAIN KEEPS THE STREAM SAFE.
+    #
+    # This was `if add_bytes > 504: add_bytes = 504` and then straight on,
+    # leaving the rest of the setup reply in the socket -- and this connection
+    # goes on to read 32-byte replies and events from it, so every one of them
+    # would come from the wrong offset. It is the exact defect that broke
+    # user/wsyswl.ad's X manager, where a newer Xwayland grew its setup reply
+    # to 8268 bytes against a 4096-byte clamp; the length here is the same
+    # peer-declared 16-bit-units field and can reach 262140 bytes.
+    #
+    # It survives today only because in-tree it talks to user/x11/x11srv.ad,
+    # whose reply is about 120 bytes. "The server we happen to use is small"
+    # is not a bound, and it is the assumption that cost the X path once.
+    #
+    # `kept` -- what is IN the buffer -- is what the parse below is bounded by,
+    # never `declared`.
+    declared: uint64 = add_bytes
+    kept: uint64 = declared
+    if kept > 504:
+        kept = 504
+    if read_exact(fd, &rep_buf[8], kept) == 0:
         write_str(2, "[xfill] setup: failed to read body\n")
         return 0
+    over: uint64 = declared - kept
+    if over > 0:
+        sink: Array[256, uint8]
+        while over > 0:
+            chunk: uint64 = 256
+            if chunk > over:
+                chunk = over
+            if read_exact(fd, &sink[0], chunk) == 0:
+                return 0
+            over = over - chunk
 
     # resource-id-base is at offset 12 from the start of the body
     # (bytes 8..11 in our combined rep_buf).
