@@ -33,12 +33,22 @@ cap() {  # label  icd  extra-env...   -> writes $OUT
     local WP=$!
     for _ in $(seq 1 100); do [ -s "$HAMFB_FILE" ] && break; sleep 0.1; done
     "$BIN/hamdesktop" </dev/null >/dev/null 2>&1 & local DP=$!
+    # A DECORATED WINDOW, held still. Without one the desktop is nothing but
+    # the full-screen backdrop, which takes the `direct` path and never calls
+    # blit_window_image_mode -- so the site most likely to be wrong (three
+    # blit modes against one device source-over) would go untested and the
+    # comparer would print PASS having exercised none of it. Speed 0 keeps it
+    # deterministic.
+    local GP=0
+    if [ "${PIXCMP_WINDOW:-1}" = 1 ]; then
+        "$BIN/de_dragload" 480 320 160 340 0 8 >/dev/null 2>&1 & GP=$!
+    fi
     sleep "$SETTLE"
     cp "$HAMFB_FILE" "$out"
     grep -m1 "vk backend" "$W/wsysd.log" | sed "s/^/   [$label] /"
     grep -i "devcomp\|WARNING" "$W/wsysd.log" | head -3 | sed "s/^/   [$label] /"
-    kill "$DP" "$WP" 2>/dev/null; sleep 0.5
-    kill -9 "$DP" "$WP" 2>/dev/null; wait "$DP" "$WP" 2>/dev/null
+    kill "$GP" "$DP" "$WP" 2>/dev/null; sleep 0.5
+    kill -9 "$GP" "$DP" "$WP" 2>/dev/null; wait "$GP" "$DP" "$WP" 2>/dev/null
     rm -rf "$W"
 }
 
@@ -55,11 +65,26 @@ if len(a)!=len(b):
     print(f"pixcmp: FAIL different sizes {len(a)} vs {len(b)}"); sys.exit(1)
 if not a:
     print("pixcmp: FAIL empty framebuffer -- the instrument captured nothing"); sys.exit(1)
-diff=sum(1 for i in range(0,len(a),4) if a[i:i+4]!=b[i:i+4])
 tot=len(a)//4
-print(f"pixcmp: {diff} of {tot} pixels differ ({100.0*diff/tot:.3f}%)")
-if diff==0:
-    print("pixcmp: PASS byte-identical to the software rasterizer"); sys.exit(0)
+diff=sum(1 for i in range(0,len(a),4) if a[i:i+4]!=b[i:i+4])
+# THE X BYTE OF XRGB8888 IS UNDEFINED, AND THE SOFTWARE PATH DOES NOT AGREE
+# WITH ITSELF ABOUT IT. Measured on the software capture: 1,023,883 pixels
+# carry X=255 (window blits copy the source word, alpha included) and exactly
+# 117 carry X=0 -- the cursor, because put_px is the one writer that forces
+# it. So a byte-exact test on that byte is not a test of correctness, it is a
+# test of which of two software behaviours got there last.
+#
+# Both numbers are therefore reported and the RGB one is the gate. This is
+# deliberately NOT a silent mask: if the X byte were the ONLY difference the
+# run still says so, with the count, so the weakening cannot hide a real bug.
+rgbdiff=sum(1 for i in range(0,len(a),4) if a[i:i+3]!=b[i:i+3])
+xonly=diff-rgbdiff
+print(f"pixcmp: {diff} of {tot} pixels differ as whole words ({100.0*diff/tot:.3f}%)")
+print(f"pixcmp: {rgbdiff} differ in R,G or B  <-- THIS is the gate")
+print(f"pixcmp: {xonly} differ ONLY in the undefined X byte of XRGB8888")
+if rgbdiff==0:
+    print("pixcmp: PASS every displayed colour matches the software rasterizer")
+    sys.exit(0)
 # Where, and how badly -- a colour-order bug and a clipping bug look different.
 first=None; import collections
 c=collections.Counter()

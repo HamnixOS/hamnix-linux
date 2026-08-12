@@ -153,7 +153,7 @@ from lib.vk.vk_linux import vk_linux_device_name, vk_linux_device_type, \
     vk_linux_frame_host_cached, \
     vk_linux_frame_begin, vk_linux_frame_end, vk_linux_frame_sync, \
     vk_linux_fill_rect, vk_linux_roundrect, vk_linux_line, \
-    vk_linux_blit, vk_linux_glyph, \
+    vk_linux_blit, vk_linux_blit_native, vk_linux_glyph, \
     vk_linux_ops, vk_linux_dispatches, vk_linux_batched_ops, \
     vk_linux_barriers, vk_linux_last_submit_us
 
@@ -834,6 +834,15 @@ def fill_rect(x: int32, y: int32, w: int32, h: int32, rgb: uint32):
         y1 = scr_h
     if x1 <= x0 or y1 <= y0:
         return
+    # SITE 1 of 5. With device compositing the fill is a device op and the CPU
+    # never touches the composite. The device does its own clipping, so the
+    # clipped x0/y0/x1/y1 above are passed rather than the raw rect purely so
+    # the two paths agree exactly at the edges.
+    if vk_devcomp != 0:
+        # vk_2d's colour convention is 0xRRGGBBAA; wsysd's is 0x00RRGGBB.
+        vk_linux_fill_rect(0, x0, y0, x1 - x0, y1 - y0,
+                           ((rgb & 16777215) << 8) | 255)
+        return
     # The X byte is 0, exactly as put_px wrote it.
     word: uint32 = rgb & 16777215
     dst: Ptr[uint32] = comp_words()
@@ -895,6 +904,23 @@ vk_zero_copy:  int32 = 0        # the composite IS the GPU frame
 vk_devlocal:   int32 = 0        # ... and that frame is device-local memory
 vk_hostcached: int32 = 0        # ... and the CPU can READ it at RAM speed,
                                 # which is the one that decides present's cost
+# DEVICE COMPOSITING. 1 = every write into the composite is a device op and
+# the CPU must never touch comp_base. This is what a scanout frame REQUIRES
+# (there is no mapping to touch) and what makes the composite able to live in
+# device-local VRAM, which is worth 3x on rasterize: measured, the same frame
+# submits in 2.1 ms device-local against 6.3 ms in host memory.
+#
+# It is a separate flag from scanout so it can be validated OFFSCREEN, against
+# a mapped frame, by byte-comparing the framebuffer with the software
+# rasterizer (tests/linux/pixcmp.sh). Converting five CPU writes into device
+# ops is mechanical and is exactly the kind of change that yields a frame that
+# looks like a desktop and is wrong.
+vk_devcomp:    int32 = 0
+# Nesting depth for vk_linux_frame_begin/end. paint_window already opens a
+# device frame for the full-screen backdrop; with device compositing the WHOLE
+# of paint_frame is one device frame, and the inner begin/end must not close
+# it out from under the outer one.
+vk_frame_depth: int32 = 0
 vk_frames_gpu: int32 = 0        # frames the device actually rasterized
 vkname:        Array[256, uint8]
 
@@ -984,6 +1010,14 @@ def vk_arm():
     if vk_forced == 1:
         puts(1, " [forced on by HAMNIX_WSYSD_VK; NOT the default here]")
     puts(1, "\n")
+    # DEVICE COMPOSITING is opt-in and a normal boot cannot reach it. It is
+    # the prerequisite for scanout (where there is no mapping to write) and is
+    # separately switchable so it can be validated offscreen against the
+    # software rasterizer, byte for byte, before any modeset exists.
+    if env_flag(cast[Ptr[char]]("HAMNIX_WSYSD_VKCOMP")) == 1:
+        vk_devcomp = 1
+        puts(1, "wsysd: vk devcomp ON -- the composite is written ONLY by the")
+        puts(1, " device; the cursor save-under is off and every frame is full\n")
     if vk_hostcached == 0 and vk_devlocal != 0:
         # THIS is the configuration that measured 13x slower than software, and
         # for two years it printed as the GOOD one. present_rows() and the
@@ -1056,16 +1090,37 @@ def _rt_cov(cov_base: uint64, cov_w: int64, cov_h: int64,
 # rasterize will run on the device. w/h MUST be the surface bound at
 # comp_base, which is the screen -- that exactness is what makes the router's
 # "is this op aimed at the GPU frame?" test a three-integer compare.
+# Open/close a device frame, counting nesting so the outermost owner submits.
+# Returns 0 on success.
+def vkc_begin() -> int32:
+    if vk_frame_depth > 0:
+        vk_frame_depth = vk_frame_depth + 1
+        return 0
+    if vk_linux_frame_begin() != 0:
+        return -1
+    vk_frame_depth = 1
+    return 0
+
+
+def vkc_end() -> int32:
+    if vk_frame_depth <= 0:
+        return 0
+    vk_frame_depth = vk_frame_depth - 1
+    if vk_frame_depth > 0:
+        return 0
+    return vk_linux_frame_end()
+
+
 def vk_route_begin(w: int32, h: int32) -> int32:
     if vk_armed == 0:
         return 0
-    if vk_linux_frame_begin() != 0:
+    if vkc_begin() != 0:
         return 0
     if vk2d_set_router(comp_base, cast[uint64](w), cast[uint64](h),
                        cast[uint64](_rt_fill), cast[uint64](_rt_roundrect),
                        cast[uint64](_rt_line), cast[uint64](_rt_blit),
                        cast[uint64](_rt_cov)) != 0:
-        vk_linux_frame_end()
+        vkc_end()
         return 0
     return 1
 
@@ -1075,7 +1130,7 @@ def vk_route_begin(w: int32, h: int32) -> int32:
 # itself for good rather than produce a second half-drawn frame.
 def vk_route_end() -> int32:
     vk2d_clear_router()
-    if vk_linux_frame_end() != 0:
+    if vkc_end() != 0:
         vk_armed = 0
         vk_set_backend(VK_BACKEND_SW)
         puts(2, "wsysd: vk backend FAILED mid-frame; back to software\n")
@@ -1202,6 +1257,19 @@ def blit_window_image_mode(ox: int32, oy: int32, w: int32, h: int32,
     if dy + sh > scr_h:
         sh = scr_h - dy
     if sw <= 0 or sh <= 0:
+        return
+    # SITE 2 of 5. One device blit instead of sw*sh CPU word stores. The
+    # source rows are contiguous in the hamui image, which is what lets the
+    # whole rectangle go as a single op.
+    #
+    # THE THREE MODES ARE NOT ALL SOURCE-OVER, and the device blit is. mode 0
+    # is an opaque copy; on a hamui image whose X byte is 0 a source-over
+    # would draw NOTHING, so the alpha has to be forced. That is what
+    # hamui_host_set_blit_opaque below is for -- see the flag's own comment.
+    if vk_devcomp != 0:
+        vk_linux_blit_native(hamui_host_row_base(0),
+                             hamui_host_width(), hamui_host_height(),
+                             dx, dy, sw, sh, sx0, sy0, sw, sh)
         return
     dst: Ptr[uint32] = comp_words()
     j: int32 = 0
@@ -1803,7 +1871,15 @@ cur_save_x: int32 = 0
 cur_save_y: int32 = 0
 
 
+# SITE 4 of 5. The save-under READS the composite, which device compositing
+# forbids outright. It is not converted to a device op -- it is DROPPED: with
+# the composite on the device a full repaint costs ~3.1 ms (measured), so the
+# whole reason the save-under exists (a full frame was too expensive to pay
+# for one moved pointer) no longer holds. In device-compositing mode every
+# frame is a full frame; cursor_only_frame() is never taken. See main().
 def cursor_save_under(x: int32, y: int32):
+    if vk_devcomp != 0:
+        return
     src: Ptr[uint32] = comp_words()
     r: int32 = 0
     while r < CURSOR_H:
@@ -1824,6 +1900,8 @@ def cursor_save_under(x: int32, y: int32):
 
 
 def cursor_restore_under():
+    if vk_devcomp != 0:
+        return
     if cur_saved == 0:
         return
     dst: Ptr[uint32] = comp_words()
@@ -1914,6 +1992,19 @@ def bench_live_dump():
 
 def paint_frame():
     t0: uint64 = 0
+    # With device compositing the WHOLE frame is one device frame: clear,
+    # every window and the cursor accumulate into one op list and one submit.
+    # Opening it here rather than per-site is what keeps the submit count at
+    # one -- paint_window's own vk_route_begin nests inside it (vkc_begin).
+    if vk_devcomp != 0:
+        if vkc_begin() != 0:
+            # No composite to fall back to: the CPU cannot draw this frame.
+            # Say so and stop, rather than present a stale or half-drawn
+            # screen. Process death is also the console recovery on the
+            # scanout path -- see user/linux-fb.c.
+            puts(2, "wsysd: FATAL device frame would not open and there is no")
+            puts(2, " CPU composite to fall back to (device compositing)\n")
+            sys_exit(1)
     if bench_on != 0:
         t0 = now_us()
     clear_desktop()
@@ -1932,6 +2023,16 @@ def paint_frame():
     paint_cursor()
     if bench_on != 0:
         t_cur = t_cur + (now_us() - t0)
+    # Close the device frame BEFORE present: present reads the composite (or,
+    # on the scanout path, flips), and either way the device's writes have to
+    # have landed first. vkc_end() is the submit and the fence wait.
+    if vk_devcomp != 0:
+        if vkc_end() != 0:
+            puts(2, "wsysd: FATAL the device dropped a frame and there is no")
+            puts(2, " CPU composite to redraw it into (device compositing)\n")
+            sys_exit(1)
+        vk_frames_gpu = vk_frames_gpu + 1
+    if bench_on != 0:
         t0 = now_us()
     present()
     if bench_on != 0:
@@ -2853,7 +2954,42 @@ def cursor_init():
         r = r + 1
 
 
+# SITE 3 of 5. The cursor as a SPRITE, so device compositing costs one blit
+# rather than 204 single-pixel fills -- an op each would be more ops than the
+# rest of the frame put together. Built once, in the same 0xAARRGGBB the hamui
+# images use, with alpha 0 where the sprite is transparent so the ordinary
+# source-over blit does the right thing.
+cursor_sprite: Array[204, uint32]
+cursor_sprite_ready: int32 = 0
+
+
+def cursor_sprite_build():
+    r: int32 = 0
+    while r < CURSOR_H:
+        c: int32 = 0
+        while c < CURSOR_W:
+            i: uint64 = cast[uint64](r * CURSOR_W + c)
+            v: uint8 = cursor_bits[i]
+            if v == 1:
+                cursor_sprite[i] = 4278190080 + CUR_WHITE      # 0xFF000000 |
+            elif v == 2:
+                cursor_sprite[i] = 4278190080 + CUR_DARK
+            else:
+                cursor_sprite[i] = 0                            # transparent
+            c = c + 1
+        r = r + 1
+    cursor_sprite_ready = 1
+
+
 def paint_cursor():
+    if vk_devcomp != 0:
+        if cursor_sprite_ready == 0:
+            cursor_sprite_build()
+        vk_linux_blit_native(cast[uint64](&cursor_sprite[0]),
+                             CURSOR_W, CURSOR_H,
+                             ptr_x, ptr_y, CURSOR_W, CURSOR_H,
+                             0, 0, CURSOR_W, CURSOR_H)
+        return
     r: int32 = 0
     while r < CURSOR_H:
         c: int32 = 0
@@ -3101,7 +3237,13 @@ def run_bench(n: int32):
         ptr_y = ptr_y + 1
         if ptr_y > scr_h - 20:
             ptr_y = 4
-        cursor_only_frame()
+        if vk_devcomp != 0:
+            # There is no cursor-only frame with device compositing: the
+            # save-under it depends on reads the composite. Measure the frame
+            # that IS taken, so the number is not a fiction.
+            paint_frame()
+        else:
+            cursor_only_frame()
         f = f + 1
     ctot: uint64 = now_us() - tc
     puts(1, "bench: cursor-only us/frame ")
@@ -3215,7 +3357,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 bench_live_n = bench_live_n + 1
                 if bench_live_n >= bench_live_every:
                     bench_live_dump()
-        elif csig != last_csig:
+        elif csig != last_csig and vk_devcomp == 0:
             # Only the pointer moved: restore what the cursor covered, stamp it
             # at the new place, and push just those rows. No window is read,
             # rasterized or copied.

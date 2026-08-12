@@ -1535,6 +1535,36 @@ static int32_t arena_put(const void* src, uint32_t words)
  * The source image is RGBA8888 in HOST memory (a window surface, an icon, a
  * glyph atlas), so it is staged into the arena; a BGRA frame gets the same
  * per-pixel R/B flip vk_2d applies, done in the shader via `corners`. */
+/* WHOSE BYTE ORDER IS THE SOURCE IN?
+ *
+ * hvk_blit() is called by the vk_2d router, whose images are in vk_2d's own
+ * RGBA order, so it asks the shader to flip R and B on the way in (the
+ * `corners = g_fbgra` below). A compositor blitting one of ITS OWN surfaces --
+ * a hamui window image, a cursor sprite -- is handing over memory that is
+ * already in the frame's order, and flipping it produces a window whose
+ * colours are inverted while its shape, position and alpha are all perfect.
+ * That is precisely the plausible-looking wrong answer this codebase keeps
+ * being bitten by: it was 12,992 pixels of a blue window rendered orange, and
+ * the cursor did NOT catch it because both cursor colours are grey (0xf0f0f0
+ * and 0x202020), where R and B are equal and the bug is invisible.
+ *
+ * So the flip is a PARAMETER now, and the two callers say which they are. */
+static int32_t g_blit_srcflip = -1;   /* -1 = default to g_fbgra */
+
+int32_t hvk_blit(uint64_t src_base, int32_t src_w, int32_t src_h,
+                 int32_t dx, int32_t dy, int32_t dw, int32_t dh,
+                 int32_t sx, int32_t sy, int32_t sw, int32_t sh);
+
+int32_t hvk_blit_native(uint64_t src_base, int32_t src_w, int32_t src_h,
+                        int32_t dx, int32_t dy, int32_t dw, int32_t dh,
+                        int32_t sx, int32_t sy, int32_t sw, int32_t sh)
+{
+    g_blit_srcflip = 0;               /* already in the frame's byte order */
+    int32_t r = hvk_blit(src_base, src_w, src_h, dx, dy, dw, dh, sx, sy, sw, sh);
+    g_blit_srcflip = -1;
+    return r;
+}
+
 int32_t hvk_blit(uint64_t src_base, int32_t src_w, int32_t src_h,
                  int32_t dx, int32_t dy, int32_t dw, int32_t dh,
                  int32_t sx, int32_t sy, int32_t sw, int32_t sh)
@@ -1576,7 +1606,7 @@ int32_t hvk_blit(uint64_t src_base, int32_t src_w, int32_t src_h,
     pc.src_w = src_w;
     pc.src_h = row1 - row0;
     pc.mask_off = off;
-    pc.corners = g_fbgra;                /* shader-side source R/B flip */
+    pc.corners = (g_blit_srcflip >= 0) ? g_blit_srcflip : g_fbgra;
     push_op(pc, xx1 - xx0, yy1 - yy0);
     return 0;
 }

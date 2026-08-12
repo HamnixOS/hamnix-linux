@@ -70,6 +70,9 @@ extern def hvk_roundrect(x: int32, y: int32, w: int32, h: int32,
                          rad: int32, corners: int32, rgba: uint32) -> int32
 extern def hvk_line(x1: int32, y1: int32, x2: int32, y2: int32,
                     thick: int32, rgba: uint32) -> int32
+extern def hvk_blit_native(src_base: uint64, src_w: int32, src_h: int32,
+                    dx: int32, dy: int32, dw: int32, dh: int32,
+                    sx: int32, sy: int32, sw: int32, sh: int32) -> int32
 extern def hvk_blit(src_base: uint64, src_w: int32, src_h: int32,
                     dx: int32, dy: int32, dw: int32, dh: int32,
                     sx: int32, sy: int32, sw: int32, sh: int32) -> int32
@@ -200,6 +203,17 @@ def vk_linux_blit(src_base: uint64, src_w: int32, src_h: int32,
     # source. The sampled rows are staged into the device source arena, so a
     # frame may carry many different source images.
     return hvk_blit(src_base, src_w, src_h, dx, dy, dw, dh, sx, sy, sw, sh)
+
+
+def vk_linux_blit_native(src_base: uint64, src_w: int32, src_h: int32,
+                         dx: int32, dy: int32, dw: int32, dh: int32,
+                         sx: int32, sy: int32, sw: int32, sh: int32) -> int32:
+    # As vk_linux_blit, but for a source that is ALREADY in the frame's byte
+    # order -- a compositor's own surface rather than a vk_2d image. The
+    # difference is one R/B flip in the shader, and getting it wrong renders a
+    # window in perfect shape and position with its colours inverted.
+    return hvk_blit_native(src_base, src_w, src_h, dx, dy, dw, dh,
+                           sx, sy, sw, sh)
 
 
 def vk_linux_glyph(cov_base: uint64, cov_w: int32, cov_h: int32,
