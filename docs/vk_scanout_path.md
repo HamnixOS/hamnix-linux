@@ -301,6 +301,85 @@ that shows 60. That makes the vblank cap the next piece of work rather than an
 optional refinement, and it wants the same wait set — see "What fixing the
 tearing costs" above, which is the same mechanism.
 
+> **CORRECTION, and read §3e before quoting the 99.9%.** That figure came from
+> a *different harness* measuring the *software* path *offscreen*. It is in
+> this section, next to the scanout fps, where it reads as the scanout drag's
+> cost — and it is not. Measured on the display, on this path, with a probe
+> proven against a known load first: an uncapped scanout drag costs **35.7% of
+> a core**, not 99.9%. The conclusion of the paragraph survives (the cap is
+> worth doing) but the number does not, and pairing 99.9% with any capped
+> figure would be the cross-harness comparison that produced the 220-vs-38 fps
+> confusion earlier in this project.
+
+### 3e. The present cap, both arms, on the display — and what it does NOT save
+
+`tests/linux/cap_power_ab.sh`. Both arms on the display path in **one session
+with one binary**, both logging `SCANOUT armed`; probe proven in the same run
+against a known 100 ms busy / 100 ms idle child (reported 50.0%). CPU is
+`/proc/<pid>/stat` deltas over a fixed wall interval, on the pid the watchdog
+wrote down — never `ps pcpu`, never `pgrep`.
+
+| arm | fps | wakes/s | CPU, median of 3 × 10 s | samples |
+|---|---|---|---|---|
+| cap OFF (`HAMNIX_WSYSD_NOCAP=1`) | 908.2 | 920 | **35.7%** | 35.7 34.6 36.7 |
+| cap ON, 60 Hz (shipped) | 57.4 | 861 | **7.0%** | 6.6 7.2 7.0 |
+| cap forced to 30 Hz | 29.5 | 907 | **6.5%** | 6.7 6.3 6.5 |
+
+**The cap is justified, and it saves less than the frame rate suggests.**
+35.7% → 7.0% is 28.7 points and the cap should stay. But that is a **5.1x**
+reduction where the frame rate falls **15.8x**.
+
+**Because the wake did not fall with the paint.** 920 → 861 wakes/s, a 6%
+reduction, while the paint fell 94%. `iters` counts loop iterations: the loop
+still wakes ~860 times a second to drain, rescan (`scan_us` 29) and re-park,
+and merely declines to paint on 93% of them. Capping the paint does not cap
+the wake.
+
+**The 30 Hz arm is the test of that, and it was stated as a prediction that
+could fail.** If the remaining cost were the paint, halving the paint again
+would roughly halve what is left. It saved 0.5 points of 7.0 — 7%. The paint
+is not the cost.
+
+Fitting `CPU = a·paints + b·wakes` to any two of the three arms gives the same
+constants (a = 331 µs of CPU per painted frame, b = 61 µs per wake), so at the
+shipped 60 Hz cap the split is **wake 5.2 points, paint 1.9 points** — three
+to one. That does not rest on the fit: wsysd's own counters report `scan_us`
+29 and `pub_us` 6 per iteration at 861 iterations a second, which is 2.5% +
+0.5% = **3.0 of the 7.0 points in scan and publish alone**, with no model,
+before the drain or the `poll(2)` are counted at all.
+
+**So the next win is the wake, not the frame.** Skipping the drain and rescan
+while a frame is owed and sleeping the remainder targets the 5.2 points;
+taking the wake rate down to the paint rate would put a capped drag near
+**2.3%** rather than 7.0% — a larger saving than the entire remaining paint
+cost. Not implemented yet.
+
+**`submit_us` is a COLD-PIPELINE artefact — do not optimise it.** From the
+same three arms:
+
+| arm | gap between frames | `submit_us` |
+|---|---|---|
+| cap OFF | back to back | **0.53–0.64 ms** |
+| cap ON, 60 Hz | ~16 ms | 2.54–2.60 ms |
+| cap forced 30 Hz | ~33 ms | 2.60 ms |
+
+§3d already noted the 2.5 ms → 0.45 ms fall; these arms sharpen it into
+something actionable. The cost is **not proportional to the idle gap** —
+doubling the gap from 16 ms to 33 ms does not move it at all. It is binary:
+frames back to back cost ~0.55 ms to submit, and *any* meaningful pause costs
+~2.55 ms. That is a pipeline going cold, not work being done. §3c calls the
+submit round-trip "where the next graphics win is"; on a **capped** compositor
+it is not a graphics win at all, because the capped configuration is the one
+that is always cold by construction, and the 2 ms is the cap's own doing.
+Anyone optimising `vkc_end()` on the strength of a 2.5 ms figure measured
+under the cap is optimising the pause.
+
+**Caveat on every figure above**, as on every GPU figure in this document:
+measured through the host's proprietary NVIDIA ICD, which the distro does
+**not** ship — installed machines use NVK. The structure transfers (the wake
+outweighs the paint 3:1 under a cap; submit is bimodal in the gap, not
+proportional). The microseconds do not.
+
 ### But the frame RATE barely moved, and that is the honest headline
 
 Derived from the same counters: **50.4 fps at 1920x1080**, against the
