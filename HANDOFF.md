@@ -3347,6 +3347,65 @@ private window system nothing composites and hang for four minutes; and
 so the gate mounts a fresh tmpfs there rather than measure a write that could
 only fail.
 
+#### And then it was booted, because "it is in the package list" and "a person
+#### clicking Applications on a real machine gets it" are different claims
+
+Only the first of those was proven, and the whole reason the menu was invisible
+for months is that nobody checked the second. `tests/linux/de_appmenu_realboot.sh`
+checks it: a UEFI + ESP + ext4 disk built from this tree, booted through OVMF,
+and a **real pointer on `virtio-tablet-pci`** driven over QMP `input-send-event`
+onto the Applications button. **16 PASS / 0 FAIL**, three boots of one disk,
+~20 minutes.
+
+The two menus are told apart **by their pixels and by the window table**, never
+by a log line — the panel prints `launched /bin/hamappmenu -self` whether or not
+a window ever appears, and that is exactly the success-shaped claim that hid the
+bug. Measured on the real machine:
+
+| | new (hamappmenu) | old (in-panel dropdown) |
+|--|--|--|
+| window | **wid 5 at (8,28), 407×140**, panel still 26 px | **no new window**; the PANEL grows 26 → **206 px** |
+| row 0 | **70%** the white search field | 0% |
+| row 1 | **77%** the category-button strip | 0% |
+
+`fil` typed on `virtio-keyboard-pci` took row 6 from **3008 of 3008** covered
+pixels back to **0** and regrouped row 1 into an **88%** section header, so the
+search box filters on a real boot and not only in the offscreen harness, where
+the keystrokes are records in a file rather than a device.
+
+**Favourites are proven across a POWER CYCLE, not a process.** ARM NEW launches
+from the menu and reboots; ARM FAV boots the same disk and the **first click of
+the new boot** has an **85%** section header in row 1 — `Favourites / Files` —
+where the machine with no history had **0%** header and 77% category button.
+
+**The arm that must fail, and does:** ARM FAV's boot ends by moving
+`/bin/hamappmenu` aside and rebooting, re-creating exactly the machine everybody
+had before the fix. Same click, same hand: no window at (8,28), 0% search field,
+0% category strip, the panel's own window at 206 px, and
+`[panel] no /bin/hamappmenu; Applications button -> the panel's own dropdown`.
+
+Three things came out of the real boot that no offscreen gate could have seen,
+all reported rather than hidden:
+
+- **`/etc/hamde/apps` is on NO hamnix-linux machine.** `scripts/hamlinux_image.sh`
+  stages `/etc` with `for f in … hamde …; do [ -f "etc/$f" ] && install …`, and
+  `etc/hamde` is a **directory**, so `[ -f ]` is false and the 27 shipped
+  `.desktop` launchers never land. Both menus therefore run off hamappmenu's
+  built-in `_seed_fallback()` list, **8 of whose 11 entries name programs that
+  are not installed** (`/bin/calculator`, `/bin/hamterm`, `/bin/hamedit`, …).
+  Clicking one of those eight is a menu entry that does nothing. This is the
+  same shape as the bug above it, one level further out: the feature ships, and
+  the DATA it needs does not.
+- **One run in three froze after launching from the menu.** The fallback list's
+  Files is `/bin/hamfm`, the TUI (the shipped `files.desktop` says
+  `/bin/hamfmscene`, which is not on the image either). Launched with no
+  terminal it sat at **2:02 of CPU in state R**, the screen stopped changing —
+  2nd click 0 px, 3rd click 0 px, the clock did not advance — and the panel
+  logged one spawn for three clicks. The other two runs reopened normally. The
+  gate prints the four numbers every run instead of asserting either outcome.
+- **`ls` given a REGULAR FILE prints its CONTENTS**, exit 0. A probe that said
+  `ls -l /bin/hamappmenu` put 450 KB of ELF on the serial console three times.
+
 Green alongside it, unchanged: `de_mouse_chrome.sh` 13 (measured against the
 PACKAGED bytes by `channel_runs_desktop.sh`), `de_appmenu_band.sh` 11,
 `de_focus_dismiss.sh` 14, `de_panel_conf_replace.sh` 17,
