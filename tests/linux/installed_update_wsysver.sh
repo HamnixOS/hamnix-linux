@@ -602,6 +602,18 @@ wins() {   # wins <log> <tag>
                         i&&NF>=6&&$1~/^[0-9]+$/{printf "(%s) ", $0}' "$1" | tr -d '\r'
 }
 
+# IS A GIVEN WINDOW MARKED VISIBLE?  `cat /dev/wsys/<wid>/ctl` prints
+# `wid x y w h z decorate visible proto ...`, so field 8 is `visible`. This is
+# the field that tells "the panel is gone" apart from "the panel is there and
+# the click missed it", and it is the field that named the SEPARATE defect
+# below: wids 3 and 4 -- the top panel and the bottom taskbar -- go 1 -> 0 the
+# instant `hpm update` finishes, with the segment still v6.
+visfield() {   # visfield <log> <tag> <wid>
+    awk -v m="WINS-$2" -v w="$3" '
+        index($0,m){i=1;next} i&&index($0,"WINS-END"){exit}
+        i&&$1==w&&NF>=8{print $8; exit}' "$1" | tr -d '\r'
+}
+
 report_stage() {   # report_stage <log> <tag> <headline>
     local L="$1" s="$2"
     echo
@@ -785,6 +797,28 @@ if answered D; then
     echo "wv: PASS AFTER A REBOOT THE MACHINE IS HEALTHY: a real click on the Applications button opened the menu"
 else
     echo "wv: FAIL AFTER A REBOOT the machine did not open the Applications menu under a real click"
+    fail=1
+fi
+
+# DID THE PANEL COME BACK, OR IS IT GONE FOREVER?
+# =========================================================================
+# These are two very different sentences to put in a release note, and until
+# this check the gate could not tell them apart. The panel and the taskbar go
+# `visible` 1 -> 0 at STAGE B -- a config-reload defect in the RUNNING
+# pre-update binary, which `hpm` cannot reach because it replaced the file and
+# not the process. A person on the published version therefore pays for it
+# exactly once, on the update that carries its fix. That is only true if the
+# panel is back after the reboot, so the reboot is where it is asserted, by
+# name and by window id rather than by a pixel count that a wallpaper could
+# satisfy on its own.
+BPAN="$(visfield "$WORK/boot2.log" B 3)"; BTASK="$(visfield "$WORK/boot2.log" B 4)"
+APAN="$(visfield "$WORK/boot2.log" A 3)"; ATASK="$(visfield "$WORK/boot2.log" A 4)"
+DPAN="$(visfield "$WORK/boot3.log" D 3)"; DTASK="$(visfield "$WORK/boot3.log" D 4)"
+echo "wv: NOTE the panel (wid 3) and the taskbar (wid 4) are visible=${APAN:-?}/${ATASK:-?} at STAGE A and visible=${BPAN:-?}/${BTASK:-?} at STAGE B -- the SEPARATE config-reload defect, measured here and not scored here"
+if [ "$DPAN" = 1 ] && [ "$DTASK" = 1 ]; then
+    echo "wv: PASS AFTER A REBOOT THE PANEL AND THE TASKBAR ARE BACK (wid 3 and wid 4 both visible) -- the update hurt the session once, it did not break the desktop"
+else
+    echo "wv: FAIL AFTER A REBOOT the panel is wid 3 visible=${DPAN:-?} and the taskbar wid 4 visible=${DTASK:-?}: the desktop did not come back, so this is not a one-time cost of the update"
     fail=1
 fi
 check "phase 3 reached the end" '\[wv\] PHASE3 DONE' "$WORK/boot3.log"
