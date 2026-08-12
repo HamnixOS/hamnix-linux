@@ -205,6 +205,71 @@ TWO THINGS IT FOUND, both of the shape this project exists to beat:
   not. Every Debian kernel release has a `+` in it, so this was every `>>`
   into `/lib/modules/<release>/` on this port.
 
+### The coverage gate looked at `/bin`. 152 files lived one directory over.
+
+`tests/linux/channel_covers_image.sh` enforced the owner's permanent rule --
+what ships in the image must be updatable from the channel -- by comparing the
+image's `/bin` against the package tarballs. **It compared nothing else, and
+neither did anyone reading it.** Measured on the published 1.0.12 channel,
+whole image root against every package's file list: **154 files ship in the
+image and are in NO package.** Two are `/bin` binaries (the two already
+justified by name). The other **152 were in directories the gate never looked
+at**:
+
+| | |
+|--|--|
+| 34 | kernel modules -- `ext4`, `jbd2`, `mbcache`, `vfat`/`fat` + the `nls` tables, `virtio_blk`, `virtio_net`, `virtio_input`, `virtio-gpu`, `evdev`, `overlay`, `squashfs`, `loop`, and the whole `snd-hda` stack. Only `drm.ko` and `drm_kms_helper.ko` were carried by anything. |
+| 1 | `modules.dep` -- the table `modprobe` had just been made to depend on |
+| 23 | `/usr/share/adder` -- the Adder runtime SOURCES `/bin/ac` must link against; without them `ac hello.ad` compiles and dies at the linker |
+| 21 | `/usr/share/man` -- every page `man` and `help` read |
+| 20 | `/etc/skel` -- the launchers and documents a new account gets |
+| 12 | `/etc` -- `profile`, `issue`, `motd`, `os-release`, `lsb-release`, `debian_version`, `services`, `protocols`, `networks`, `host.conf`, `users/*.ns` |
+| 1 | `/usr/share/sounds/test.wav` -- the only thing `aplay` has to play |
+| 1 | **`/init`** -- the program the kernel executes on an installed machine |
+
+An installed machine could never receive a fix to the module that mounts its
+**root filesystem**, and nothing failed to say so. Same shape as the audio
+clients, the dropped desktop and the seven binaries.
+
+* Now packaged: **`hamnix-drivers-base`** (the 34 modules, minus the DRM core
+  `hamnix-drivers-drm` already owns -- both sets come from one
+  `drm_core_modules()`, so no two packages own one path; the module NAMES are
+  parsed out of `hamlinux_image.sh`'s `WANT_MODULES` so the lists cannot
+  drift), **`hamnix-man`**, and the rest folded into `hamnix-adder`,
+  `hamnix-desktop`, `hamnix-init` and `hamnix-audio`. `hamnix-base` now pulls
+  in the manual pages and the boot modules. **100 packages**, `chanrun` 8/0.
+* **`modules.dep` is not shipped, and that is the interesting part.** It is
+  machine state: `depmod` wrote it over that machine's modules and three
+  driver packages APPEND to it from their hooks. A package file at that path
+  would be deleted-then-rewritten on every upgrade and take the appended
+  driver lines with it -- `i915.ko` still on disk, and no line left that lets
+  `modprobe` name it. So `hamnix-drivers-base` owns **`modules.dep.base`** and
+  its hook **PREPENDS**: `cat base dep > new; mv new dep`. `user/modprobe.ad`'s
+  `find_line` returns the FIRST matching line, so the shipped lines win over a
+  stale copy and every appended driver line survives after them. Run under the
+  packaged `hamsh` with the packaged `cat` and `mv` before it was written down.
+* That hook does **not** touch `/etc/modules`, and that is a measurement:
+  `linuxinit` reads it with ONE 8192-byte read, the image writes 2338 bytes,
+  and appending 34 paths per update would silently truncate the boot's module
+  list after three updates.
+* `/init` ships from `hamnix-init`'s install hook (`rm` + `cp` from
+  `/bin/linuxinit`) rather than as a package file: `hpm` would open it for
+  writing on the running PID 1's text image and get `ETXTBSY`, failing the
+  install on every machine that is up.
+* **The gate now walks the whole root** and fails on an unlisted omission
+  anywhere in it -- **7 PASS / 0 FAIL**, 281 image files checked, 42 excluded
+  by name. `HOST_ONLY` became a table of path/reason pairs (host glibc and the
+  loader, `/etc/shadow`, `/etc/resolv.conf`, the `hpm` trust roots,
+  `/etc/distros` and everything generated from it, `/home/live`, the image
+  version stamp, `/etc/modules`, `modules.dep`), and the table is itself
+  checked for entries the image no longer has.
+* Both directions were constructed deliberately rather than argued: dropping
+  `ext4.ko`, `ls.1.md` and `etc/profile` from three built tarballs gives
+  **6 PASS / 3 FAIL**, each named; stripping `hamnix-init`'s `install.hamsh`
+  and `hamnix-drivers-base`'s `modules.dep.base` gives **4 PASS / 2 FAIL** --
+  the two exclusions that claim "it ships by another means" are read out of
+  the tarballs, not believed.
+
 ### What is HONESTLY BROKEN right now
 
 Kept here deliberately, because a handoff that lists only successes is the
