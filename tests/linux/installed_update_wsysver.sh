@@ -243,8 +243,10 @@ echo '[wv] SEG-$1:'
 ls -l /srv
 echo '[wv] DELOG-$1 wsysd:'
 tail -6 /var/log/wsysd.log
+echo '[wv] PANELCONF-$1:'
+ls -l /etc/panel.conf
 echo '[wv] DELOG-$1 panel:'
-tail -6 /var/log/panel.log
+tail -30 /var/log/panel.log
 echo '[wv] DELOG-$1 desktop:'
 tail -6 /var/log/hamdesktop.log
 echo '[wv] PROBE-END-$1'
@@ -469,9 +471,13 @@ statefield() {   # statefield <log> <tag> <field>
         awk -v f="$3" '{for (i = 1; i < NF; i++) if ($i == f) print $(i+1)}'
 }
 segsize() {   # segsize <log> <tag>
-    awk -v m="SEG-$2:" 'index($0, m) {inb=1; next}
-                        inb && $NF == "wsys" {print $(NF-1); exit}
-                        inb && index($0, "DELOG") {exit}' "$1" | tr -d '\r'
+    # The \r comes off the serial console and made $NF "wsys\r", which matched
+    # nothing and printed an empty size next to the one number in this gate
+    # that says which window system the session IS. Strip it first, not after.
+    tr -d '\r' <"$1" |
+        awk -v m="SEG-$2:" 'index($0, m) {inb=1; next}
+                            inb && $NF == "wsys" {print $(NF-1); exit}
+                            inb && index($0, "DELOG") {exit}'
 }
 wins() {   # wins <log> <tag>
     awk -v m="WINS-$2" 'index($0,m){i=1;next} i&&index($0,"WINS-END"){exit}
@@ -491,11 +497,14 @@ report_stage() {   # report_stage <log> <tag> <headline>
     echo "    Applications ->  $click px changed  $(pp diff "$SHOT/$s-2-idle.ppm" "$SHOT/$s-3-menu.ppm" | sed 's/^[^;]*; //')"
     echo "    typing ->        $typed px changed"
     echo "    window table:    $(wins "$L" "$s")"
-    echo "    titles:          $(grep -aA6 -F "TITLES-$s:" "$L" | sed -n '2,6p' | tr -d '\r' | tr '\n' '|')"
+    echo "    titles:          $(grep -aA6 -F "TITLES-$s:" "$L" | sed -n '2,6p' | tr -d '\r' | grep -v '^\[wv\]' | tr '\n' '|')"
     echo "    wsysd state:     $(grep -aA1 -F "STATE-$s:" "$L" | tail -1 | tr -d '\r')"
     echo "    /srv/wsys:       $(segsize "$L" "$s") bytes  (v6=$V6_BYTES v7=$V7_BYTES)"
     echo "    wsysd log:       $(grep -aA6 -F "DELOG-$s wsysd:" "$L" | sed -n '2,7p' | tr -d '\r' | tr '\n' '|')"
-    echo "    panel log:       $(grep -aA6 -F "DELOG-$s panel:" "$L" | sed -n '2,7p' | tr -d '\r' | tr '\n' '|')"
+    echo "    /etc/panel.conf: $(grep -aA1 -F "PANELCONF-$s:" "$L" | tail -1 | tr -d '\r')"
+    echo "    panel reloads:   $(grep -aA30 -F "DELOG-$s panel:" "$L" | tr -d '\r' | grep -c 'config reload applied')"
+    echo "    panel log:       $(grep -aA30 -F "DELOG-$s panel:" "$L" | tr -d '\r' | grep -vE '^\[panelbeacon\]|^\[wv\]' | sed -n '2,8p' | tr '\n' '|')"
+    echo "    panel beacon:    $(grep -aA30 -F "DELOG-$s panel:" "$L" | tr -d '\r' | grep '^\[panelbeacon\]' | tail -1)"
     python3 tests/linux/ppmdiff.py png "$SHOT/$s-1-idle.ppm" "$SHOT/$s-1-idle.png" >/dev/null 2>&1
     python3 tests/linux/ppmdiff.py png "$SHOT/$s-3-menu.ppm" "$SHOT/$s-3-menu.png" >/dev/null 2>&1
 }
