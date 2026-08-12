@@ -3673,6 +3673,29 @@ static void bbup_handup_one(int i)
  * pixel hand-up, and driven from the same seams (see pix_tick). */
 static void bbup_tick(void)
 {
+    /* THE COMPOSITOR BINDS PROACTIVELY, and this is not optional -- it is what
+     * the scene listener gets for free and the backbuffer one does not.  wsysd
+     * binds the PIXEL address the first time it composites the ever-present
+     * desktop scene, so it is always listening by the time any client hands up.
+     * The backbuffer address, bound only on a foreign BACKBUFFER read, would
+     * never bind for the FIRST v2 window if the compositor were idle-parked:
+     * it repaints on a gen change, reads a backbuffer only when it repaints,
+     * and would bind only when it read one -- so the hand-up that would MAKE it
+     * repaint never has anywhere to land.  A pure compositor (a process that
+     * owns no backbuffers of its own) therefore binds here, on its idle park,
+     * and its bbup_drain below then accepts the hand-up, bumps the window's
+     * gen, and the repaint follows.  This is the exact deadlock pix_tick's
+     * own comment describes, closed the same way: on the seam both sides share.
+     *
+     * A client never reaches the bind (bbup_listen is hostowner-gated, and on a
+     * real boot a client is not the host owner); the `have_own` guard keeps it
+     * out on a single-uid host too, where every process would otherwise pass
+     * that gate and a client could seize the address ahead of the compositor. */
+    int have_own = 0;
+    for (int i = 0; i < bbmap_n; i++)
+        if (bbmap[i].own) { have_own = 1; break; }
+    if (!have_own) bbup_listen();
+
     if (!bbmap_n && bbup_listen_fd < 0) return;
     uint64_t now = pix_now_ms();
     if (now < bbup_next_tick) return;
@@ -4052,13 +4075,14 @@ static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v)
      * readable in the file every client already reads. */
     uint8_t b[192];
     uint64_t n = 0;
-    /* THE BACKBUFFER GEN IS THE MEMFD'S NOW, not a shared slot's.  The reader
-     * of a foreign window's ctl is the compositor; it drains any pending
-     * hand-up first, so a window whose pixels just arrived reports the fresh
-     * gen this frame -- which is what makes frame_signature notice a new
-     * backbuffer frame (user/wsysd.ad) rather than freezing on frame one. */
-    bbup_listen();
-    bbup_drain();
+    /* THE BACKBUFFER GEN IS THE MEMFD'S NOW, not a shared slot's.  Report it
+     * from whatever this process holds for the window -- its own memfd if it is
+     * the owner, the handed-up one if it is the compositor.  The compositor
+     * drains on the BACKBUFFER read path and on its tick, so by the time it
+     * composites this window the gen is current; a first-frame lag converges on
+     * the frame clock exactly as a late scene hand-up does.  It does NOT listen
+     * here: a client reading its OWN ctl must never try to become the
+     * compositor (which on a single-uid host it otherwise could). */
     int bslot = bb_find(v->wid);
     int32_t bgen = (bslot >= 0 && bbmap[bslot].hdr) ? (int32_t)bbmap[bslot].hdr->gen : 0;
     int32_t igen = 0;
@@ -4180,7 +4204,21 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     case HAMWSYS_BACKBUF: {
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -1; }
-        if (bb_for(v->wid, 0, 0, 0) < 0 && !for_write) { errno = ENOENT; return -1; }
+        /* A READER MAY OPEN A v2 BACKBUFFER BEFORE ITS MEMFD ARRIVES.  The
+         * pixels are in a per-window memfd now, handed up on a clock, so
+         * "not received yet" must not read as "no such backbuffer" -- that
+         * would refuse the compositor's very first open of every browser and
+         * leave it blank for ever, the exact silent failure this device fights.
+         * Drain any pending hand-up first, then accept if this is a v2 window
+         * at all or we already hold its memfd; the read returns 0 until the
+         * descriptor lands and the frame clock retries.  A non-owner opening a
+         * victim's backbuffer still gets 0 bytes: only the process HANDED the
+         * memfd can read pixels, and a stranger is handed nothing. */
+        if (!for_write) {
+            int slot = bb_find(v->wid);
+            if (slot < 0 || !bbmap[slot].own) { bbup_listen(); bbup_drain(); }
+            if (bb_find(v->wid) < 0 && v->proto != 2) { errno = ENOENT; return -1; }
+        }
         return 0;
     }
     case HAMWSYS_IMAGES: {
@@ -4376,10 +4414,19 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
          * foreign scene, so a descriptor that has arrived is installed before
          * this read looks for it.  A window whose memfd has not been handed up
          * reads as empty, which the frame clock retries -- never somebody
-         * else's pixels, because there is no shared slab to stray into. */
-        bbup_listen();
-        bbup_drain();
+         * else's pixels, because there is no shared slab to stray into.
+         *
+         * ONLY A FOREIGN WINDOW MAKES US LISTEN.  Reading our OWN backbuffer
+         * (an owner glancing at its own pixels) must not try to bind the
+         * compositor's address -- on a single-uid host every process is the
+         * "owner" of the segment, so an unguarded listen would let a client
+         * seize the hand-up address ahead of the real compositor. */
         int slot = bb_find(f->wid);
+        if (slot < 0 || !bbmap[slot].own) {
+            bbup_listen();
+            bbup_drain();
+            slot = bb_find(f->wid);
+        }
         if (slot < 0) return 0;
         struct bbpix *h = bbmap[slot].hdr;
         if (!h) return 0;
