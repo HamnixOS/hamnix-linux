@@ -97,18 +97,41 @@ reap_on_exit cleanup
 done_report() { echo "deicons: $pass passed, $fail failed"; [ "$fail" = 0 ]; }
 
 # ---- the desktop this gate owns ------------------------------------------
-# hamdesktop builds its grid from $HOME/Desktop (lib/homedir: $HOME first).
-# Point it at a copy of the SHIPPED launcher set so the icons under test are
-# the ones the distribution actually installs.
-export HOME="$WORK/home"
-mkdir -p "$HOME/Desktop"
-cp etc/skel/Desktop/*.desktop "$HOME/Desktop/" 2>/dev/null
-NDESK=$(ls -1 "$HOME/Desktop"/*.desktop 2>/dev/null | wc -l)
+# hamdesktop builds its grid from the SESSION USER'S ~/Desktop, and it does
+# NOT mean getenv("HOME"): user/hamdesktop.ad:_desk_dir asks /env/HOME (the
+# Plan 9 spelling, which does not exist on a Linux host), then /etc/passwd BY
+# UID, then each regular account. Left alone on this host it therefore found
+# /home/david/Desktop and measured THE PERSON'S OWN DESKTOP -- 3 icons of
+# screenshots and a stray file, nothing to do with the distribution. Measured;
+# it is what the first run of this gate reported.
+#
+# So the gate supplies a passwd. We are root in a private MOUNT namespace
+# (tests/linux/private_ns.sh), so one bind-mount of one file redirects the
+# resolution at its source and touches nothing on the host.
+DESKHOME="$WORK/home"
+mkdir -p "$DESKHOME/Desktop"
+cp etc/skel/Desktop/*.desktop "$DESKHOME/Desktop/" 2>/dev/null
+UID_NOW="$(id -u)"
+{ printf 'gateuser:x:%s:%s::%s:/bin/sh\n' "$UID_NOW" "$(id -g)" "$DESKHOME"
+  grep -v ":x:$UID_NOW:" /etc/passwd; } >"$WORK/passwd"
+python3 - "$WORK/passwd" <<'PY' || { echo "deicons: FAIL cannot bind a passwd"; exit 1; }
+import ctypes, os, sys
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+MS_BIND = 4096
+if libc.mount(sys.argv[1].encode(), b"/etc/passwd", None,
+              ctypes.c_ulong(MS_BIND), None) != 0:
+    sys.stderr.write("bind /etc/passwd: %s\n"
+                     % os.strerror(ctypes.get_errno()))
+    raise SystemExit(1)
+PY
+info "/etc/passwd in this namespace puts uid $UID_NOW's home at $DESKHOME"
+export HOME="$DESKHOME"
+NDESK=$(ls -1 "$DESKHOME/Desktop"/*.desktop 2>/dev/null | wc -l)
 if [ "$NDESK" -lt 8 ]; then
     bad "etc/skel/Desktop has only $NDESK launchers -- nothing to compare"
     done_report; exit 1
 fi
-info "the shipped desktop is $NDESK launchers, copied into $HOME/Desktop"
+info "the shipped desktop is $NDESK launchers, copied into $DESKHOME/Desktop"
 
 # ---- build ----------------------------------------------------------------
 for t in wsysd:user/wsysd.ad hamdesktop:user/hamdesktop.ad; do
@@ -154,20 +177,26 @@ sleep 1.5
 cp "$HAMFB_FILE" "$WORK/frame2.raw"      # the negative control's second frame
 
 SRC=/tmp/.hamdesktop.src
-if [ -s "$SRC" ] && grep -q "^src=$HOME/Desktop " "$SRC"; then
-    ok "hamdesktop published its icon table and built the grid from THIS gate's $HOME/Desktop"
+if [ -s "$SRC" ] && grep -q "^src=$DESKHOME/Desktop " "$SRC"; then
+    ok "hamdesktop published its icon table and built the grid from THIS gate's $DESKHOME/Desktop"
 else
-    bad "no icon table at $SRC for $HOME/Desktop -- the desktop is showing someone else's icons, or none"
+    bad "no icon table at $SRC for $DESKHOME/Desktop -- the desktop is showing someone else's icons, or none"
     [ -s "$SRC" ] && sed 's/^/deicons:      /' "$SRC"
     sed 's/^/deicons:      /' "$WORK/hamdesktop.log"
     done_report; exit 1
 fi
 
+# One icon per launcher -- MINUS the live-medium-only ones. `Install Hamnix`
+# carries X-Hamnix-LiveOnly and hamdesktop deliberately hides it on a system
+# that is not the live image, which this host is not. Both counts are named so
+# neither reading is a guess.
 NICON=$(grep -c '^icon ' "$SRC")
-if [ "$NICON" = "$NDESK" ]; then
-    ok "one icon per shipped launcher ($NICON of $NDESK)"
+NLIVE=$(grep -lix 'X-Hamnix-LiveOnly=true' "$DESKHOME/Desktop"/*.desktop 2>/dev/null | wc -l)
+NEXP=$((NDESK - NLIVE))
+if [ "$NICON" = "$NEXP" ]; then
+    ok "one icon per launcher the desktop should show ($NICON of $NDESK, $NLIVE live-medium-only entry hidden)"
 else
-    bad "the desktop drew $NICON icons for $NDESK launchers"
+    bad "the desktop drew $NICON icons for $NDESK launchers ($NLIVE of them live-medium-only, so $NEXP expected)"
 fi
 
 # ---- 3. THE MISSES, NAMED ------------------------------------------------
@@ -278,9 +307,14 @@ else
         "$WORK/icons.tsv" | sed 's/^/deicons:      /'
 fi
 
-# The weakest pair, whoever it is: two icons that differ in 3% of their pixels
-# are the same picture to a person even though the fingerprints differ.
-read -r WA WB WP <<<"$(sort -t'	' -k3,3n "$WORK/pairs.tsv" | head -1)"
+# The weakest pair, whoever it is. A distinct fingerprint is not enough: two
+# icons that differ in 3% of their pixels are the SAME PICTURE to a person,
+# which is the complaint. (Labels contain spaces, so the fields are cut by
+# tab, never by `read`.)
+WEAK=$(sort -t'	' -k3,3n "$WORK/pairs.tsv" | head -1)
+WA=$(printf '%s' "$WEAK" | cut -f1)
+WB=$(printf '%s' "$WEAK" | cut -f2)
+WP=$(printf '%s' "$WEAK" | cut -f3)
 if [ "${WP:-0}" -ge 15 ]; then
     ok "even the most similar pair on the desktop differs in $WP% of its pixels ($WA vs $WB)"
 else
@@ -303,11 +337,15 @@ namedpair() {  # namedpair <labelA> <labelB>
         bad "THE REPORTED BUG: $1 and $2 differ in only $p% of their pixels"
     fi
 }
+# Each of these five pairs drew ONE picture before this gate existed:
+# the first three because both names were unknown to hamscene_icon_code and
+# fell to the generic page; the last two because the two .desktop files
+# literally named the same Icon=.
 namedpair Spreadsheet Presentation
 namedpair "Word Processor" "Video Player"
+namedpair "Audio Player" "Video Player"
+namedpair "Text Editor" Notes
 namedpair "Log Viewer" "System Monitor"
-namedpair Editor Notes
-namedpair "Install Hamnix" Software
 
 # ---- 8. THE NEGATIVE CONTROL ---------------------------------------------
 # Everything above rests on "these two rectangles differ". A metric that
