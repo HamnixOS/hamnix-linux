@@ -91,7 +91,40 @@ cd "$PROJ_ROOT"
 
 CHAN="${1:-$PROJ_ROOT/build/repo/linux}"
 KEEP="${CHANRUN_KEEP:-0}"
-WORK="$(mktemp -d -p "${CHANRUN_TMP:-${TMPDIR:-/tmp}}" chanrun.XXXXXX)"
+
+# THE WORK DIRECTORY MUST NOT BE UNDER /tmp, AND THAT IS NOT A PREFERENCE.
+#
+# The binaries unpacked below are handed to tests/linux/de_mouse_chrome.sh by
+# PATH, through MOUSE_BIN_DIR. That gate re-execs itself into a private mount
+# namespace with a FRESH TMPFS ON /tmp (tests/linux/private_ns.sh), so a path
+# under /tmp is simply not there once it has done so -- and de_mouse_chrome.sh
+# correctly refuses to substitute a fresh build for a binary it was asked
+# about, so the whole tier reads:
+#
+#     FAIL MOUSE_BIN_DIR=/tmp/chanrun.XXXXXX does not contain wsysd
+#     FAIL THE PACKAGED DESKTOP IS BROKEN: 0 PASS / 1 FAIL
+#
+# — an accusation against the CHANNEL for something the channel did not do,
+# and, because scripts/hamlinux_packages.py runs this gate before it writes
+# index.json, a refusal to publish any channel at all. The same run scores
+# 8 PASS / 0 FAIL with nothing changed but this path. Two gates were each
+# right on their own; the isolation one landed after this one and the seam
+# between them was never run.
+#
+# So the default is under build/, which no namespace replaces. CHANRUN_TMP
+# still overrides, and /tmp is still refused by name below rather than
+# silently accepted.
+WORKROOT="${CHANRUN_TMP:-$PROJ_ROOT/build/chanrun}"
+case "$WORKROOT" in
+    /tmp|/tmp/*)
+        echo "chanrun: REFUSING to work under $WORKROOT -- tests/linux/de_mouse_chrome.sh"
+        echo "chanrun: mounts a private tmpfs over /tmp, so the unpacked binaries this gate"
+        echo "chanrun: hands it by path would vanish and it would report the CHANNEL broken."
+        echo "chanrun: Set CHANRUN_TMP to somewhere outside /tmp."
+        exit 1;;
+esac
+mkdir -p "$WORKROOT"
+WORK="$(mktemp -d -p "$WORKROOT" chanrun.XXXXXX)"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "chanrun: PASS $*"; }
