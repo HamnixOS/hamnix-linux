@@ -91,7 +91,26 @@ cd "$PROJ_ROOT"
 
 CHAN="${1:-$PROJ_ROOT/build/repo/linux}"
 KEEP="${CHANRUN_KEEP:-0}"
-WORK="$(mktemp -d -p "${CHANRUN_TMP:-${TMPDIR:-/tmp}}" chanrun.XXXXXX)"
+# NOT /tmp, AND THAT IS LOAD-BEARING. This gate unpacks the channel's binaries
+# here and then hands the directory to tests/linux/de_mouse_chrome.sh as
+# MOUSE_BIN_DIR. That gate now re-execs itself into a private mount namespace
+# (tests/linux/private_ns.sh) whose /tmp, /dev/shm and /srv are fresh tmpfs --
+# so a directory under /tmp CEASES TO EXIST from inside it, and the packaged
+# binaries the whole gate exists to run become invisible.
+#
+# Measured, and it blocked a publish: the desktop gate reported
+#   "MOUSE_BIN_DIR=/tmp/chanrun.XXXX/bin does not contain wsysd"
+# and scripts/hamlinux_packages.py refused to write index.json with
+# "the binaries in this channel do not work" -- about a channel whose binaries
+# were fine and which the gate could not see. The refusal was right; the
+# accusation was not.
+#
+# Only /tmp, /dev/shm and /srv are replaced, so anywhere else survives the
+# re-exec. build/ is gitignored, on the same filesystem as the channel, and is
+# where every other large build artefact already lives.
+CHANRUN_DEFAULT_TMP="$PROJ_ROOT/build/chanrun"
+mkdir -p "$CHANRUN_DEFAULT_TMP"
+WORK="$(mktemp -d -p "${CHANRUN_TMP:-$CHANRUN_DEFAULT_TMP}" chanrun.XXXXXX)"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "chanrun: PASS $*"; }
