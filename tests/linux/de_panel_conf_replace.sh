@@ -264,7 +264,12 @@ click() {   # click <x> <y> -- move, settle, press, hold, release
 # /etc/panel.conf does nothing at all -- and this gate must not sit on top of
 # it, because a config that is never parsed cannot be replaced under anyone.
 panel_conf() {   # panel_conf <marker> [one]  -- the config, with a marker line
-    echo "# $1"
+    # PANELCONF_TAG lets a caller stamp every config this run writes with
+    # something no other run can produce, so that "did this file escape?" is
+    # answerable by identity rather than by a count that cannot tell whose
+    # leak it found. tests/linux/private_ns_isolates.sh uses it for exactly
+    # that. It is otherwise inert.
+    echo "# $1 ${PANELCONF_TAG:-}"
     cat <<'EOF'
 panel top
   edge top
