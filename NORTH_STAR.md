@@ -103,3 +103,18 @@ argument — including an argument made by the person writing this file.
 
   Run the gate before publishing. "The build said done" is not evidence — it
   said `done` every one of the three times.
+
+  **And the other half: the right NAMES are not the right BYTES.**
+  hamnix-desktop 1.0.10 shipped with every name present, every sha256 matching
+  the bytes served, and a desktop that mapped **no windows at all** — a stale
+  object cache had packaged a `wsysd` from 19:17 beside clients from 18:25.
+  Every gate in the tree builds from source, so the artefact that ships was
+  the one artefact nothing ran.
+
+  - `tests/linux/channel_runs_desktop.sh` unpacks the binaries out of the
+    built `.tar.gz` files and RUNS them — the desktop under a synthetic mouse,
+    the shell, `hpm`, the coreutils. It compiles nothing it asserts on, and
+    says so by grepping itself.
+  - `scripts/hamlinux_packages.py` runs it **before it writes `index.json`**,
+    so a channel whose binaries do not work has no index and installs nowhere.
+    Same shape as the two refusals above: not a checklist item, a refusal.

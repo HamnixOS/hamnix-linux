@@ -324,6 +324,12 @@ conn_acc:   Array[131072, uint8]        # 16 * 8192
 conn_acclen: Array[16, uint64]
 conn_seat:  Array[16, int32]
 conn_pointer: Array[16, int32]
+# The version the connection bound wl_seat at, carried onto its wl_pointer.
+# wl_pointer.axis_source and .axis_discrete are version 5 events, and
+# libwayland ABORTS on an event a proxy has no listener slot for -- the same
+# trap wl_seat.name is gated for. A client that bound at v1 gets the v1
+# wl_pointer.axis and nothing else.
+conn_ptrver: Array[16, int32]
 conn_keyboard: Array[16, int32]
 conn_xdg_wm: Array[16, int32]
 conn_output: Array[16, int32]           # the client's wl_output object, for enter
@@ -1258,6 +1264,54 @@ def send_ptr_button(ptr: uint32, ser: uint32, t: uint32, btn: uint32,
 def send_ptr_frame(ptr: uint32):
     s: uint64 = emit_begin(ptr)
     emit_end(s, 5)
+
+
+# --- the SCROLL WHEEL -------------------------------------------------
+#
+# THE DEFECT THESE THREE FIX. `wsysd` already had the whole wheel: evdev
+# EV_REL/REL_WHEEL accumulates into `ptr_dz`, `deliver_pointer` gives the line
+# kind `'s'` for scroll, and `route_pointer` writes the delta as the FIFTH
+# field of `<kind> <x> <y> <buttons> <dz>`. This file read the first four
+# fields and threw the fifth away, and had no wl_pointer.axis at all -- so
+# every Wayland client behind this compositor, and through Xwayland every X11
+# client too, had a dead scroll wheel. Measured on the real thing: eight
+# wheel-down events over Steam's store page changed **0 of 564400 pixels**,
+# while dragging the scrollbar with the same pointer scrolled it 96%. The
+# page was scrollable; the wheel was not connected.
+#
+# wl_pointer.axis is version 1, so it is always safe to send. axis_source (6)
+# and axis_discrete (8) are version 5 and are GATED on the version the client
+# bound the seat at -- libwayland aborts on an event a proxy has no listener
+# slot for, which is the trap send_seat_name already documents one screen up.
+AXIS_VERTICAL: uint32 = 0
+AXIS_HORIZONTAL: uint32 = 1
+AXIS_SOURCE_WHEEL: uint32 = 0
+# One wheel notch, in surface units. libinput and every other compositor
+# report 10.0 for a detented wheel, and Xwayland's accumulator turns each
+# 10.0 into one button-4/button-5 press; a smaller number scrolls nothing
+# until several notches have added up, which reads as a wheel that misses.
+AXIS_NOTCH: int32 = 10
+
+
+def send_ptr_axis(ptr: uint32, t: uint32, axis: uint32, val: int32):
+    s: uint64 = emit_begin(ptr)
+    o_u32(t)
+    o_u32(axis)
+    o_u32(fixed(val))
+    emit_end(s, 4)
+
+
+def send_ptr_axis_source(ptr: uint32, src: uint32):
+    s: uint64 = emit_begin(ptr)
+    o_u32(src)
+    emit_end(s, 6)
+
+
+def send_ptr_axis_discrete(ptr: uint32, axis: uint32, disc: int32):
+    s: uint64 = emit_begin(ptr)
+    o_u32(axis)
+    o_u32(cast[uint32](disc))
+    emit_end(s, 8)
 
 
 # --- the XKB keymap ---------------------------------------------------
@@ -3338,6 +3392,11 @@ def do_seat(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
             # toolkit binds is the one it is actually using.
             if conn_pointer[c] == 0:
                 conn_pointer[c] = cast[int32](p)
+                # obj is the wl_seat, and do_registry stored the version it
+                # was bound at in its obj_a. Read it here rather than
+                # assuming SEAT_VERSION: what the server ADVERTISES and what
+                # the client BOUND are different numbers.
+                conn_ptrver[c] = obj_a[oidx(c, obj)]
     elif opcode == 1:
         if arglen >= 4:
             k: uint32 = ru32(args, 0)
@@ -4344,6 +4403,7 @@ def conn_reset(c: uint64):
     conn_reg[c] = 0
     conn_seat[c] = 0
     conn_pointer[c] = 0
+    conn_ptrver[c] = 0
     conn_keyboard[c] = 0
     conn_xdg_wm[c] = 0
     conn_output[c] = 0
@@ -4714,6 +4774,11 @@ def handle_ptr_line(c: uint64, i: uint64, surf: uint32, at: uint64, n: uint64):
     y: int32 = parse_int_at(&inbuf[0], p, n)
     p = skip_field(&inbuf[0], p, n)
     btn: int32 = parse_int_at(&inbuf[0], p, n)
+    # THE FIFTH FIELD, which this function used to stop one short of. wsysd
+    # writes the accumulated REL_WHEEL delta here; positive is a wheel pushed
+    # AWAY from the hand, which every toolkit calls scrolling UP.
+    p = skip_field(&inbuf[0], p, n)
+    dz: int32 = parse_int_at(&inbuf[0], p, n)
     if w_in[i] == 0:
         serial = serial + 1
         send_ptr_enter(cast[uint32](ptr), serial, surf, x, y)
@@ -4721,6 +4786,26 @@ def handle_ptr_line(c: uint64, i: uint64, surf: uint32, at: uint64, n: uint64):
     evt_time = evt_time + 4
     send_ptr_motion(cast[uint32](ptr), evt_time, x, y)
     btn_edges(c, i, surf, btn)
+    if dz != 0:
+        # THE SIGN IS INVERTED ON PURPOSE. evdev REL_WHEEL is positive away
+        # from the hand; wl_pointer.axis is positive in the direction the
+        # CONTENT moves, which for a wheel pushed away is up the page, i.e.
+        # a negative axis value. Getting this backwards is a wheel that works
+        # and scrolls the wrong way, which is worse than one that is dead
+        # because nothing about it looks broken.
+        v: int32 = 0 - dz
+        pv: int32 = conn_ptrver[c]
+        # THE ORDER IS THE PROTOCOL'S, not a preference. wl_pointer.axis_discrete
+        # "shall be sent before the corresponding wl_pointer.axis event", and
+        # axis_source before both. The dev host's Xwayland does not care and
+        # accepted the wrong order; the version in the Debian namespace is
+        # 22.1.9 and there is no reason to find out the hard way which of them
+        # a client is talking to.
+        if pv >= 5:
+            send_ptr_axis_source(cast[uint32](ptr), AXIS_SOURCE_WHEEL)
+            send_ptr_axis_discrete(cast[uint32](ptr), AXIS_VERTICAL, v)
+        send_ptr_axis(cast[uint32](ptr), evt_time, AXIS_VERTICAL,
+                      v * AXIS_NOTCH)
     send_ptr_frame(cast[uint32](ptr))
 
 

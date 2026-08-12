@@ -177,6 +177,37 @@ The clipboard finding that fell out of it is in the HONESTLY BROKEN list below.
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
+* **THE `hamnix-desktop` PACKAGE ON https://255.one/ RIGHT NOW IS A MIXED
+  BUILD, AND A MACHINE THAT UPDATES TO IT LOSES ITS DESKTOP.** Measured, on an
+  installed disk, by `tests/linux/installed_update_live.sh`: after a bare
+  `hpm update` and a reboot there is **no top bar and so no Applications
+  button**, and it is not even deterministic — two runs of the same disk gave
+  `windows 0` (nothing came up at all) and `windows 2`
+  (`2 0 774 1280 26 100 …` the panel's BOTTOM taskbar and
+  `3 0 0 1280 800 -1 …` the wallpaper; the top bar simply absent). Reproduced
+  offscreen on the host in seconds: swap only
+  the published `hampanelscene` into `tests/linux/de_mouse_chrome.sh`
+  (`MOUSE_BIN_DIR=`) and the top bar disappears (13 PASS → 2 PASS / 1 FAIL),
+  and the framebuffer's top band goes from the panel's `#ecEEf2` to the empty
+  composite's `#203348`. The published **`wsysd` is fine** — pointed at it
+  alone, that gate is **13/0**, so 1.0.10's compositor really does carry the
+  mouse fix. It is the CLIENTS that are stale, and the cause is one line:
+
+  > `scripts/hamlinux_packages.py:build_one` reuses `build/repo-obj/<cmd>.elf`
+  > whenever its mtime beats **`user/<cmd>.ad`'s** — and it stats nothing else.
+  > Not `lib/*.ad`, not `user/linux-wsys.c`, not the compiler.
+
+  So an edit under `lib/` or to a `user/linux-*.c` backend invalidates NOTHING
+  and the previous object is published. The three binaries on 255.one are
+  byte-identical to the cached objects still sitting in
+  `build/repo-obj`: `hampanelscene.elf` and `hamdesktop.elf` built **18:25**,
+  `wsysd.elf` built **19:17**, with `user/linux-wsys.c` — the wsys backend all
+  three link — modified at **19:54**. Nothing here has ever RUN those objects:
+  every gate in the tree builds from source through `hamlinux_build.sh`, so
+  the artefact that actually ships is the one artefact nothing tests.
+  `channel_covers_image.sh` cannot see this either — it compares NAMES, and
+  every name is present.
+
 * **NO PIPELINE IN THE SYSTEM COULD END. NOW FIXED — `user/linux-fdns.c`.**
   `cat FILE | md5sum` never returned and it cost a whole boot
   (`docs/linux_installed_update.md` §3). It was never md5sum: the same md5sum
@@ -944,6 +975,80 @@ the shape is more reusable than the fix. They are NOT open work.
   exports at the bottom of `/etc/rc.de-ns/<name>` **do** reach the client (they
   are set in the same shell that then enters), and `HAMNIX_DE_XSESSION` can
   never be steered from an outer shell no matter what is done to `enter`.
+* **STEAM IS NOT STUCK AT ITS LOGIN SCREEN, and "the login window renders"
+  had been standing in for "Steam works" in this file's own notes.** The
+  window was DRIVEN rather than photographed — `tests/linux/steam_login_drive.sh`
+  keeps the VM up and `tests/linux/qmp_input.py` puts pointer and key events
+  on QEMU's own `virtio-tablet-pci`/`virtio-keyboard-pci`, which in a VM is
+  the only input `wsysd` has (it scans `/dev/input/eventN`), so every event
+  crossed wsysd → wsyswl → Xwayland → jwm → CEF. Nothing wrote a wsys ring by
+  hand; that is `de_mouse_chrome.sh`'s rule applied to a real X11 application
+  three servers down. Every number below is a pixel count over two QEMU
+  screendumps (`tests/linux/ppmdiff.py`), and `docs/steam_namespace.md` §12
+  is the table. **Works, with a mouse and a keyboard:** hover (moving over
+  the username field repaints **97%** of it — CEF's hover state), click,
+  **typing** (`hamnix` appears in Steam's username field), password masking,
+  the *Remember me* checkbox and its tooltip, **a second window** (*Create a
+  Free Account* replaces the 700x440 login window with an ~870x740 store
+  browser carrying a live **hCaptcha** iframe — 93.8% of the old rectangle
+  changed), the *Browse* mega-menu with its CDN artwork, navigating to the
+  store front page, dragging the scrollbar (**96.44%** of an 830x680
+  rectangle), and **live AJAX search** — `portal` returns Portal, Portal 2,
+  Portal Knights and Portal Worlds with prices and cover art. **The one thing
+  that did not work is the next entry.** No Steam account was used and none
+  was sought, so the library, downloads and launching a game are unmeasured
+  and are not claimed (§12.4).
+* **(FIXED) The scroll wheel was never connected to anything — for the whole
+  port, for every client.** Found by driving the real thing: with the pointer
+  over Steam's store page, eight `REL_WHEEL` notches changed **0 of 564400
+  pixels**, while a press-move-release DRAG of that same page's scrollbar with
+  that same pointer changed **96.44%** of them. The page was scrollable; the
+  wheel was not connected to it — and the drag is the control without which a
+  dead POINTER would have produced the same zero. `user/wsysd.ad` had the whole
+  wheel already (`EV_REL`/`REL_WHEEL` → `ptr_dz` → kind `'s'` → the **fifth**
+  field of the routed pointer line); `user/wsyswl.ad`'s `handle_ptr_line`
+  parsed the first four fields and stopped, and the file had no
+  `wl_pointer.axis` in it at all. So the delta was computed, routed, written
+  to the ring, read back, and dropped one parse short of the client — which
+  means Firefox in the namespace and every other Wayland/X11 client had a dead
+  wheel too. **Gate: `tests/linux/wsyswl_wheel.sh`** — offscreen, ~40 s, no VM
+  and no Steam: evdev records → wsysd → wsyswl → a real rootful Xwayland →
+  `xev`, which prints what the X SERVER delivered (an X11 wheel is button 4 up
+  / button 5 down). **10 PASS**; reverted with the fix stashed it is **6 PASS
+  / 4 FAIL** and the CONTROL (an evdev *move* arrives as `MotionNotify`) still
+  passes, so it reports a dead wheel and not a dead pointer. It asserts the
+  COUNT and the SIGN in both directions, because a wheel that scrolls
+  backwards works and is wrong, which is worse than a dead one: nothing about
+  it looks broken.
+  **AND THE FIX IS NOT SUFFICIENT, which is said here rather than left to be
+  discovered.** With the patched `wsyswl` in the image (verified by md5
+  against the staged `/bin/wsyswl`) a second full Steam run, back on the store
+  front page, wheeled over it and got **the same `IDENTICAL (0 of 564400 px)`**
+  as before. So `wl_pointer.axis` was missing AND something else on the VM
+  path also drops the wheel; closing one hole did not open the pipe. It is not
+  `wsysd`'s routing or `wsyswl`'s translation — those are precisely what the
+  offscreen gate exercises, against a real Xwayland, and they pass. The one
+  thing that differs between the passing arm and the failing arm is everything
+  UPSTREAM of `/dev/input`: a file of evdev records in one, QEMU's
+  `virtio-tablet-pci` in the other. `tests/linux/vm_wheel_reaches.sh` is
+  written and splits exactly that — `wsysd`'s own `pointer` counter across a
+  wheel burst with the cursor held still, with a plain move as the control in
+  the same run. **It ran: `pointer 0 → 2` for two moves, then `2 → 22` for
+  twenty wheel events with the cursor STILL.** Exactly twenty. So QEMU's
+  `virtio-tablet-pci` does deliver `EV_REL`/`REL_WHEEL`, `pump_input`
+  accumulates it, `deliver_pointer` fires and `route_pointer` writes the `'s'`
+  line — **everything upstream of `/dev/wsys/<wid>/pointer` is ruled out and
+  the remaining drop is in this tree.** A SECOND defect was found and fixed
+  there on the strength of that (`wl_pointer.axis_discrete` was being sent
+  *after* its `axis` event; the protocol says before), and a **third** Steam
+  boot still got `IDENTICAL (0 of 564400 px)` from the wheel on a loaded store
+  page. So: two real compositor defects fixed, gate green and failing on
+  revert, symptom still present. The one candidate left is that the gate uses
+  the dev host's Xwayland (trixie, 24.x) while the namespace ships **22.1.9**
+  — which makes the next step concrete and small: give `wsyswl_wheel.sh` an
+  arm that runs against 22.1.9, because a gate that only ever tests a newer
+  server than the distribution ships has a blind spot exactly the size of this
+  bug. `docs/steam_namespace.md` §12.2a carries all three measurements.
 * **(SOLVED — kept because the shape is the lesson) Steam's login window is on
   the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
   `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X
@@ -1354,6 +1459,127 @@ Green alongside it, unchanged: `de_mouse_chrome.sh` 13, `de_appmenu_band.sh`
 0% selected after a full click. Drop only the button-edge flush from
 `pump_input`: **12 PASS / 1 FAIL**, and the one that fails is the single-read
 click — which is why that assertion is in the file rather than assumed.
+
+### And the gate THE SHIPPED BYTES got — `tests/linux/channel_runs_desktop.sh`
+
+**9 PASS / 0 FAIL against the 1.0.11 channel, 20 s, offscreen, no VM.**
+
+The object-cache fix (563b0d96) closed the cause of the 1.0.10 mixed build.
+This closes the hole that let it reach users, stated by the agent who found
+it: *"every gate here builds from source through `hamlinux_build.sh`, so THE
+ARTEFACT THAT SHIPS IS THE ONE ARTEFACT NOTHING RUNS."*
+
+It takes the `.tar.gz` files under `build/repo/linux/packages/`, unpacks the
+binaries out of them and runs those:
+
+| Tier | What |
+|--|--|
+| Integrity | every needed package unpacks; **all 98** index entries hash to the bytes on disk, so what runs below is what an installed machine receives |
+| The desktop | `wsysd` + `hamdesktop` + `hampanelscene` from the tarballs, driven through `de_mouse_chrome.sh`'s `MOUSE_BIN_DIR` hook — **13/13** under a synthetic evdev mouse |
+| The floor | packaged `hamsh` sources an rc (PID 1 has something to exec); packaged `hpm` prints its verbs (the machine can still receive the NEXT fix); 8 packaged coreutils asserted on their real ANSWER, not exit 0 |
+| The rule | the file greps itself for `hamlinux_build.sh` and fails if a future edit lets it compile anything it asserts on |
+
+**Scope, and what is left out on purpose.** Not the other ~90 per-command
+packages: the channel carries `halt`, `poweroff`, `reboot`, `rm`, `kill`,
+`insmod`, `login`, `passwd`, `dhcpc`, `ntpd`, and executing those on the build
+host is an incident, not a test. The defect class is *shared-input staleness*,
+and the programs above link every backend between them, so a stale `lib/` or
+`linux-*.c` surfaces here. Not a VM either — `HAMFB_FILE` and
+`HAMWSYSD_INPUT` compose the whole desktop offscreen in 20 s, and 20 s is what
+lets it sit in the publish path instead of a checklist.
+
+**Where it sits: inside `scripts/hamlinux_packages.py`, BEFORE `index.json` is
+written.** A channel that fails it has no index, so nothing can install from
+it — the same shape as the duplicate-name and dangling-dependency refusals.
+`--no-desktop-gate` exists, prints a paragraph saying what it is giving up,
+and is used nowhere in this tree.
+
+**The revert arm — the 1.0.10 mixture, rebuilt and packaged.** `b3ecfb71`
+(19:03) is the commit: `WSYS_VERSION` 5 → 6 and `WSYS_MAX_WINDOWS` 128 → 256
+in `user/linux-wsys.c`. So `hamdesktop` and `hampanelscene` were rebuilt at
+`b3ecfb71^` and dropped into the `hamnix-desktop` tarball beside the current
+`wsysd`, with the index's `sha256` and `size` corrected — exactly what
+shipped, and exactly as verifiable.
+
+```
+chanrun: PASS all 98 packages in index.json hash to the bytes on disk -- what runs below is what an installed machine would receive
+chanrun: PASS wsysd, hamdesktop, hampanelscene, hamsh and hpm came out of the channel's tarballs (nothing was compiled)
+chanrun: PASS the desktop under test was the PACKAGED wsysd/hamdesktop/hampanelscene, not a fresh build
+chanrun: FAIL THE PACKAGED DESKTOP IS BROKEN: de_mouse_chrome.sh scores 2 PASS / 1 FAIL against the bytes in this channel -- and these are the bytes 'hpm update' would install.
+chanrun:      FAIL no full-width top bar -- there is no Applications button to click
+
+chanrun: 8 passed, 1 failed
+```
+
+Exit status 1. And the control, on that same reconstructed channel:
+
+```
+$ tests/linux/channel_covers_image.sh build/image/root <the 1.0.10 mixture>
+image /bin: 94    channel /bin: 98
+PASS: every binary in the image is carried by a package (94 checked)
+4 passed, 0 failed
+```
+
+The name gate is green on a channel that ships a desktop mapping no windows.
+That is the hole, measured.
+
+**And end to end through the packager.** Planting the two stale objects in
+`build/repo-obj` — literally what the old one-input cache did — the packager
+built all 98 packages, ran the gate, refused, and wrote **no `index.json`**
+(exit 1, `ls` of the channel shows `packages` and nothing else).
+
+One correction the arm forced, in `de_mouse_chrome.sh`: a binary
+`MOUSE_BIN_DIR` did not hold used to fall through and be **compiled from the
+tree**. That is a success-shaped answer to a different question — the caller
+asked about somebody else's bytes. It now fails by name.
+
+### And the gate THE UPDATE PATH got — `tests/linux/installed_update_live.sh`
+
+The other half of NORTH_STAR.md's permanent rule. `channel_covers_image.sh`
+gates work LEAVING here; nothing gated it ARRIVING — that a machine which
+INSTALLED this distribution can `hpm update` off the real
+`https://255.one/` and end up running the newer code.
+`installed_update.sh` proves the mechanism against a LOCAL channel, and a
+model of the repository cannot fail the way the repository can.
+
+**The evidence is a mouse, not a version string.** Three boots on one
+installed disk: install `hamnix-desktop` from a local channel at a version
+DERIVED below the live one whose `wsysd` has the `route_pointer_event` call
+reverted (the pre-1.0.10 machine, reconstructed — `MOUSE_BIN_DIR` against that
+binary scores the same 6/7 as the revert arm above); boot it and click the
+Applications button with a REAL pointer — QMP `input-send-event` on the
+guest's `virtio-tablet`, read back as the panel window's own
+`/dev/wsys/<wid>/ctl`; `hpm update`, no flags; reboot; click the same pixel.
+No version number is written down against the live repository — publishing
+1.0.8 once broke a test that did.
+
+**Result, on the current channel: 28 PASS / 2 FAIL, and the 2 are real.**
+
+| | |
+|--|--|
+| The old desktop under a real mouse | panel **26 px → 26 px**. Dead, exactly as 1.0.10's commit message describes — while the compositor's own counters move (`pointer 0 → 3`, `focus 0 → 3`), so it is the chrome that is inert and not a mouse that never arrived |
+| A bare `hpm refresh` | **status 0** against `https://255.one/` — the shipped `/etc/hpm/trusted.pub` verifies the published `index.json.sig`, so the `--allow-unsigned` NOTE in `installed_update.sh` is closed |
+| A bare `hpm update` | `upgrading hamnix-desktop 1.0.0 -> 1.0.10`, `SHA-256 verified`, `upgraded=3`, and `keeping this machine's own /etc/rc.boot` |
+| The bytes | guest `md5sum /bin/wsysd` = **`52e8b468…`** = the digest the HOST computed from the tarball 255.one served. Survives the reboot. No index field can satisfy that |
+| Boot 3, the point of the whole file | **no top bar.** The update landed and the desktop did not come up — see the first bullet under *What is HONESTLY BROKEN*. The delivery path works; what is being delivered does not |
+
+Run the no-update arm and it is **21 PASS / 1 FAIL**, the FAIL being the one
+sentence the file exists for: *"THE UPDATED MACHINE IS STILL RUNNING THE OLD
+DESKTOP: after a real click the panel window is 26 px, not more than 26"* —
+with the pointer proven delivered (`0 → 3` routed events) and the desktop
+proven up (3 windows). Exit status 1.
+
+**The did-not-update arm runs.** `HAMLINUX_LIVEUPD_NOUPDATE=1` does everything
+except `hpm update`, so the green is a statement about the update having
+happened rather than about the file reaching the end.
+
+Two of this gate's own early answers were wrong in the way this project keeps
+paying for and are written into it: it asserted phase 1's `rc.boot` digest
+when phase 2's is the one running, and went red pointing at `hpm`, which had
+behaved perfectly; and it read `pointer 0 → 0` on the zero-window boot as
+"nothing was clicked" while the QMP transcript showed the click accepted —
+`pointer` counts events routed TO A WINDOW, so `curframes` is the witness
+there.
 
 ### Running it
 

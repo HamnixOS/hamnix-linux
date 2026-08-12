@@ -113,17 +113,44 @@ colourpct() { python3 "$FRAC_PY" "$FBW" "$FBH" "$1" "$2" "$3" "$4" "$5" "$6"; }
 snap()      { cp "$HAMFB_FILE" "$WORK/$1.raw"; }
 
 # ---- build ----------------------------------------------------------------
+# MOUSE_BIN_DIR RUNS THIS GATE AGAINST BINARIES SOMEBODY ELSE PRODUCED.
+# Unset -- the normal case -- every program is compiled from this tree, and
+# the question is "does the source in front of me route a click". Set to a
+# directory of ELFs, the question becomes "do THOSE bytes route a click", and
+# the caller is tests/linux/installed_update_live.sh, which unpacks the
+# hamnix-desktop tarball that https://255.one/ is serving right now and asks
+# whether the PUBLISHED compositor carries the fix. A version string in an
+# index cannot answer that; running the bytes can. wsys_poke is a test
+# instrument and is always built from the tree -- it only ever READS a ctl
+# line (assertion 12), so where it comes from cannot change an answer.
+BINDIR="${MOUSE_BIN_DIR:-}"
 for t in wsysd:user/wsysd.ad \
          hamdesktop:user/hamdesktop.ad \
          hampanelscene:user/hampanelscene.ad \
          wsys_poke:tests/linux/wsys_poke.ad; do
     name="${t%%:*}"; src="${t#*:}"
+    if [ -n "$BINDIR" ] && [ "$name" != wsys_poke ]; then
+        # A binary MOUSE_BIN_DIR does not hold used to fall through and get
+        # compiled from this tree. That is the one substitution this hook must
+        # never make: the caller asked about SOMEBODY ELSE'S bytes, and quietly
+        # answering about the working tree's is a success-shaped answer to a
+        # different question. Refuse by name instead.
+        [ -f "$BINDIR/$name" ] || {
+            bad "MOUSE_BIN_DIR=$BINDIR does not contain $name -- refusing to substitute a fresh build for the binary you asked about"
+            done_report; exit 1; }
+        cp "$BINDIR/$name" "$WORK/$name.elf"; chmod +x "$WORK/$name.elf"
+        continue
+    fi
     scripts/hamlinux_build.sh "$src" "$WORK/$name.elf" \
         >"$WORK/$name.build.log" 2>&1 || {
         bad "could not build $src"; tail -20 "$WORK/$name.build.log" >&2
         done_report; exit 1; }
 done
-ok "the compositor, the desktop and the panel all build"
+if [ -n "$BINDIR" ]; then
+    ok "the compositor, the desktop and the panel came from $BINDIR (not built here)"
+else
+    ok "the compositor, the desktop and the panel all build"
+fi
 
 # wsys_poke is used for READS ONLY here (the window's ctl line, which is how
 # the panel's geometry is read back). See assertion 12.
