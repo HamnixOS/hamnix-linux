@@ -443,16 +443,36 @@ same failure this project exists to beat.
   server is up and being served. `wsyswl_conn_ceiling` is **30 PASS / 0 FAIL**,
   unchanged, so the Wayland path is not disturbed.
 
-  **CAUSE TWO, NEWLY VISIBLE AND NOT FIXED**: with the deadlock gone the
-  compositor gets further than it ever has and then says, twice a second,
-  *`could not intern WL_SURFACE_SERIAL -- this X server is not an Xwayland`*.
-  It IS an Xwayland (24.1.6) and it IS serving X -- `xdpyinfo` answers on the
-  same display at the same moment. So `x_intern("WL_SURFACE_SERIAL")` is
-  returning 0 against a server that should answer it, and until that is
-  understood the rootless path still does not work. **The deadlock was hiding
-  this**: nobody could have seen it, because nothing ever got past the read.
-  That is the next thing to pick up, and the minimal reproduction is in the
-  branch (a wsysd + wsyswl + Xwayland harness, no gate, seconds to run).
+  **CAUSE TWO, THE X SETUP REPLY -- ALSO FIXED, AND IT IS WHY THE PATH BROKE
+  IN THE FIRST PLACE.** `xwm_connect()` clamped the setup reply's additional
+  data to 4096 bytes (the size of `xrep`, correctly) and NEVER DRAINED THE
+  REST. Measured with a print in that function: **Xwayland 24.1.6 sends 8268
+  bytes**, so 4172 stayed on a stream socket and every message afterwards
+  started 4172 bytes into the wrong place. That is the desynchronisation that
+  produced the 12-of-32 read, and after the deadlock fix it produced *`could
+  not intern WL_SURFACE_SERIAL -- this X server is not an Xwayland`* against a
+  real Xwayland that was answering `xdpyinfo` at that moment -- a message
+  naming the one thing that was not wrong. `xrep` is 16 KiB now, the remainder
+  is drained into `xsink` the way `x_poll_msg` already did, and the parse is
+  bounded by what is in the BUFFER and not by what the server sent.
+  **`wsyswl_rootless` is 37 PASS / 0 FAIL** -- the count HANDOFF recorded for
+  it before it broke -- against 7 PASS / 1 FAIL both immediately before the fix
+  and at `4b50eae2`.
+
+  **STILL INTERMITTENT, AND NOT CLAIMED OTHERWISE**: `wsys_close_button` is
+  10 PASS / 0 FAIL on two runs and 2 PASS / 1 FAIL on two others, same source.
+  When it passes it passes completely -- two xterms mapped as wsys windows,
+  `WM_DELETE_WINDOW` routed, the right client exiting and its neighbour
+  surviving. When it fails it is always the same 10-second wait for
+  `xwm_connected`. So the two structural defects are gone and the TIMING of the
+  first connect is still marginal, most likely the one-attempt-per-32-passes
+  retry cadence against that window. Cause not established, so no cadence
+  change was made on a guess.
+
+  **THE LESSON WORTH KEEPING**: a newer Xwayland is all it took. Nothing in
+  this tree changed; the peer got bigger and a buffer that was never drained
+  became a permanent desync. Every `if n > CAP: n = CAP` on a stream socket in
+  this tree is the same bug waiting for a bigger peer.
 
 * **THE VULKAN/GPU COMPOSITOR PATH IS 13x SLOWER THAN THE SOFTWARE ONE, AND
   NO MACHINE HAS EVER RUN IT.** The image stages only the venus ICD, which
