@@ -255,13 +255,42 @@ graphics work at all; it is filling `waitset` with the input fds.
   probe) and I did not build one. The numbers are therefore absent rather than
   estimated.
 - **Tearing.** Single-buffered: the shader writes the surface being scanned
-  out. Double buffering needs two exported frames and a `PAGE_FLIP` between
-  them, which `user/linux-fb.c` already knows how to do.
+  out. See "What fixing the tearing costs" below.
 - **Un-encodable ops.** On the scanout path the router's identity is a host
   array (see `rast_target()`); an op the device cannot encode would fall back
   to writing that array, where it would be lost rather than displayed. No such
   op occurred in these runs — `pixcmp` is byte-clean — but nothing yet *detects*
   one. That is a real hole and it is not closed.
+
+### What fixing the tearing costs
+
+The scanout frame is single-buffered: the compute shader writes the surface the
+CRTC is reading, so a frame that lands mid-scan tears. Concretely, to fix it:
+
+- **Two exported frames instead of one.** `hvk_frame_create_scanout()` becomes
+  a pair, and `rebind_descriptors()` has to point binding 0 at whichever is the
+  back buffer, per frame. That is one `vkUpdateDescriptorSets` per frame — the
+  function already exists and is called on every resize.
+- **Two `ADDFB2` ids in `linux-fb.c`**, and `fb_flip()` alternating between
+  them with `MODE_PAGE_FLIP`. That code is already written and already works —
+  481 flips, stalled=0 — it is currently skipped because `fb.have_two` is 0 on
+  the scanout path.
+- **Memory**: one extra 1920x1080x4 = 8.3 MiB of VRAM. Negligible.
+- **The real cost is the wait.** A flip completes at vblank, so *something*
+  must not run ahead of it. The compositor must not block in the main loop on
+  the flip event — that would reintroduce a clock-paced loop and undo the
+  wake-on-input work, which is exactly the accident to avoid. The right shape
+  is to add the DRM fd to the existing wait set (it becomes readable when the
+  flip event arrives) rather than to introduce a second wait, and to skip the
+  flip when one is already pending, which is what `fb_drain_flip_event()`
+  already does.
+
+**This is the same mechanism a present-rate cap wants**, so the two should be
+built together rather than separately: the DRM fd's flip events *are* the
+display's frame clock, and `linux-fb.c` is where a refresh figure would come
+from — `fb.mode.vrefresh` is already populated by the modeset path, and
+`hamfb_probe_mode()` could return it alongside width and height. Two different
+notions of the display's frame time would be worse than either.
 
 ## 4. What it would take to put wsysd on this path
 
@@ -413,6 +442,13 @@ master taken and no commit performed:
 
 So the atomic path is on the table on this driver, and universal planes means
 the cursor could become a real plane rather than composited pixels.
+
+**Still UNDETERMINED after this pass** — I did not pursue it, because the
+tearing fix above turned out not to need it (legacy `PAGE_FLIP` already works
+on this driver, 481 flips, stalled=0) and the teardown hangs are already
+covered by the supervision requirement. If someone does pursue it, the payoff
+would be a *clean* teardown rather than relying on process death, which would
+remove the single most awkward constraint on this path.
 
 **Whether atomic avoids either hang is UNDETERMINED.** Establishing it requires
 a real atomic commit — building a property blob for the mode, setting
