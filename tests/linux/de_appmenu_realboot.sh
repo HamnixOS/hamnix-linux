@@ -548,10 +548,27 @@ menuwin() {   # menuwin <log> <tag>
         i&&$2==mx&&$3==my&&$4==ww{print $1; exit}' "$1" | tr -d '\r'
 }
 # THE PANEL: the full-width bar at the top of the screen. Prints "wid height".
+# panelwin <log> <tag> -> "<wid> <height>" for the TOP panel's own window.
+#
+# THE HEIGHT IS THE ANSWER, SO IT MUST NOT BE IN THE QUESTION. This used to
+# select `$5 < 400`, a bound put there to keep the desktop backdrop (also
+# full-width and top-anchored, at 1280x800) out of the answer -- and the ARM
+# OLD panel, whose whole point is that it GROWS to hold the flat dropdown, was
+# ~206 px at the time. With the /etc/hamde/apps catalogue actually staged the
+# dropdown holds 25 rows instead of the fallback's 8 and the panel grows to
+# **580**, so the filter stopped matching, `panelwin` returned nothing, and the
+# assertion that reads it degraded to an INFO line: 16 PASS became 15 with
+# NOTHING RED. A gate that quietly stops asking a question is the shape this
+# tree exists to beat, and a measurement filtered by the value it is measuring
+# will do it again at the next size.
+#
+# The backdrop is excluded by what actually distinguishes it -- its Z. The
+# backdrop sits at z -1 (below everything, by construction: it is the
+# wallpaper); the panels are at 100. Fields are `wid x y w h z ...`.
 panelwin() {   # panelwin <log> <tag>
     awk -v m="WINS-$2" -v sw="$SCREEN_W" '
         index($0,m){i=1;next} i&&index($0,"WINS-END"){exit}
-        i&&$3==0&&$4==sw&&$5<400{print $1, $5; exit}' "$1" | tr -d '\r'
+        i&&$2==0&&$3==0&&$4==sw&&$6>=0{print $1, $5; exit}' "$1" | tr -d '\r'
 }
 favfile() {   # favfile <log> <tag>
     awk -v m="FAV-$2:" 'index($0,m){i=1;next} i&&index($0,"FAV-END"){exit}
