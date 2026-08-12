@@ -299,7 +299,7 @@ lsblk	cmd	EMPTY	-	enumerate /dev/blk block devices and print capacity from each 
 lsmod	cmd	EMPTY	-	stub: prints Linux-shaped header plus one hard-coded demo module row, not real /proc/modules
 man	cmd	man	-	reads /usr/share/man/<topic>.<N>.md and writes it to stdout; renderer is a plain file copy
 md5sum	filter	EMPTY	%F	stdin only; emits fixed marker hex string for stdin, NOT a real MD5 digest
-memhog	cmd	16	-	allocate N MiB, touch every page for residency, hold, release, report actual vs requested
+memhog	cmd	64M	-	allocate SIZE (bare = BYTES, K/M/G binary), touch every page for residency, hold, release, and prove the drop in MemFree is at least half the ask
 mkdir	cmd	%NEW	-	calls sys_mkdir for each argv path; only /tmp/* paths succeed, others return -EROFS
 mkdir_at_slot	disk	/dev/blk/vdbp2 usr/share/foo	-	mkdir -p on a NOT-mounted ext4 partition via /dev/blk/<dev>/ctl mkdir verb
 mkfs_ext4	disk	/dev/blk/vdb	-	format a block device/partition via ext4_mkfs over the /dev/blk/<dev>/ctl channel
