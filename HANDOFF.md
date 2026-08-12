@@ -275,6 +275,113 @@ clients, the dropped desktop and the seven binaries.
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
+* ~~**A package install hook could wedge `hpm update` forever.**~~ **BOUNDED
+  NOW, IN THE PARENT — but read "what this cannot help" below before believing
+  it is closed.**
+
+  hamnix-drivers-base 1.0.13 shipped an install hook containing `put in front
+  of the machine's table`. The apostrophe closed the single-quoted string,
+  `hamsh` hit an unterminated quote, and the runaway token swallowed the rest
+  of the file **including the `\nexit\n` that `hpm` appends to every hook
+  wrapper as its safety net**. The spawned shell reached its interactive REPL
+  on a stdin nobody was feeding, and **`hpm update` never returned** — measured
+  on a real installed machine. The modules extracted, the dependency table was
+  never merged, and the machine sat wedged mid-update with no timeout and no
+  diagnostic.
+
+  `scripts/hamlinux_packages.py`'s `write_pkg` already refuses to publish a
+  hook with an odd number of single quotes on any non-comment line. **That
+  closes it from the publishing side only.** A hook from a third-party channel,
+  a hand-written package, or the next generator bug of a different shape still
+  reaches `_run_hook` — and a hook that hangs for a reason that has nothing to
+  do with quoting (an infinite loop, a read from a network, a wait on a device)
+  was never covered by a lexer rule at all.
+
+  **The defect was in the PARENT: `hpm` waited forever on a process it
+  spawned.** Two changes in `user/hpm.ad`'s `_run_hook`, and nothing else:
+
+  1. **The hook's stdin is `/dev/null`.** An install hook has no business
+     reading standard input, and with stdin at EOF a `hamsh` that reaches its
+     REPL reads EOF on its first poll and exits — so the `exit` net holds even
+     when the `exit` was swallowed, for a hook of ANY origin. **Measured, not
+     assumed**, because that assumption is the whole bug one level down: on the
+     exact runaway-quote wrapper, stdin on an open-but-silent pipe reaches
+     `[hamsh:stage-07] loop-enter` and never returns; the same wrapper with
+     stdin at `/dev/null` reaches the same line and exits in under a second.
+     `sys_read_nb` reports true end-of-input as `-1` (`user/linux-syscalls.c`
+     says so in as many words), which is exactly hamsh's `el == -1` EOF arm.
+  2. **The wait is bounded** — 60 s, then a kill note, then a *bounded* reap.
+     Where 60 comes from, measured with the tree's own `gzip` and `hamsh`: the
+     slowest hook this distribution actually ships is a driver package that
+     gunzips a ~10 MiB module (0.088 s) and appends its `/etc/modules` and
+     `modules.dep` lines (0.033 s for 500 appends, more than any shipped hook
+     has). 60 s is ~500× that. It bounds a **wedge**, not a performance budget.
+     On expiry `hpm` does not go quiet: it names the hook, names the package,
+     says the files are on disk and the hook did not finish, and fails the
+     install. And it does not trade one unbounded wait for another — an
+     unreapable corpse is reported, not waited on.
+
+  Gated by **`tests/linux/hpm_hook_bounded.sh` — 10 PASS / 0 FAIL**, 85 s, no
+  VM. It reproduces **the actual hang** first (assertion 1: the runaway-quote
+  wrapper on an open stdin, killed at 8 s having reached the REPL), proves
+  hamsh exits on EOF (assertion 2), then installs three fixture packages from a
+  `file://` repository inside a user+mount+pid namespace: the runaway-quote
+  hook, a hook that lexes perfectly and blocks forever in `open(2)` on a fifo
+  with no writer, and an ordinary hook as the control. Every invocation has its
+  own timeout, because a test for a hang that itself hangs teaches nobody
+  anything. **With `_run_hook` reverted it is 5 PASS / 5 FAIL**, assertion 5
+  reading `hpm STILL HANGS on the runaway-quote hook (killed at 45 s) -- this
+  is the original bug`.
+
+  One thing that gate had to learn the hard way and is worth carrying: **it
+  gives `hpm` a stdin that is open and silent**, from a fifo held open
+  read-write on fd 9. Run from a harness whose stdin is already at EOF, the
+  runaway-quote install terminates *with or without the fix* — measured, as a
+  green assertion 5 against fully reverted code. An installed machine's `hpm`
+  inherits an open console; a gate that does not reproduce that cannot fail.
+
+  **WHAT THIS CANNOT HELP, PLAINLY.** A machine that already installed a broken
+  `hpm` runs the **old** `hpm` when it updates. This change cannot rescue a
+  machine that is already wedged, and it cannot rescue a machine that takes the
+  next bad hook *before* it takes this `hpm`. It protects machines from the
+  hook **after** the one that carries it, and nothing else.
+
+* **OPEN QUESTION, deliberately not decided: should a lexical error be FATAL to
+  `hamsh` when it sources a script?**
+
+  Today it is not. `run_source` reports `hamsh: lexical error (unterminated
+  quote or token-limit exceeded)` and carries on, so the runaway-quote hook
+  **exits 0** and `hpm` reports `installed hooktest-quote@1.0.0` for a package
+  whose hook **ran nothing** — measured, and printed (not asserted) by
+  `tests/linux/hpm_hook_bounded.sh`. The machine no longer hangs; it is still
+  told a half-done install succeeded, which is exactly the success-shaped
+  answer NORTH_STAR names.
+
+  **It needs deciding on its own** because the same code path is how PID 1
+  sources `/etc/rc.boot`. Making a lex error fatal changes what the machine
+  does when the boot rc fails to lex: the difference between booting to a
+  degraded shell and not booting at all. That is a availability decision about
+  the installed machine, not a package-manager decision, and it should not ride
+  in on a hook fix. Whoever takes it should also decide whether `hpm` should
+  treat "the hook produced a lexical error" as an install failure independently
+  of the shell's exit status.
+
+* **FOUND WHILE FIXING THE ABOVE, NOT FIXED: a hook longer than 16 KiB is
+  SILENTLY TRUNCATED, and the cut can land inside a quote.**
+
+  `hamsh`'s `rc_buf` is `Array[16384]` and `_run_rc_path` stops reading there;
+  `hpm`'s `hook_body_buf` is the same 16384. Measured: a 37,895-byte script of
+  500 `echo '...' >> '...'` lines ran **217 of them** and then hit the severed
+  tail (`ec0`) as a command, exiting 127. Nothing anywhere said "truncated".
+  This matters because the generated driver hooks *are* one line per module and
+  one line per dependency edge — `scripts/hamlinux_packages.py`'s
+  `module_install_hook` — so a large enough driver package produces exactly
+  this. And if the 16,384th byte falls inside a single-quoted string, the
+  truncation **manufactures the unterminated quote by itself**, from a hook the
+  generator's odd-quote check would have passed. Two separate fixes are wanted:
+  hamsh should refuse (loudly) rather than truncate, and the hook path should
+  not have a 16 KiB ceiling at all.
+
 * ~~**`tail FILE` wedges the shell.**~~ **FIXED. `tail` NEVER OPENED THE FILE.**
   It looked at `argv[1]` only far enough to see whether it began with `-` and
   then read **stdin** whatever the arguments said, so on a console -- where

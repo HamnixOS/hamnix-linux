@@ -265,6 +265,21 @@ fi
 # THE WHOLE THING: hpm, installing real packages out of a real repository.
 echo "[hook-bounded] hpm, installing from a file:// repository"
 
+# HPM'S OWN STDIN MUST BE OPEN AND SILENT, or this gate cannot fail.
+#
+# On an installed machine hpm inherits a stdin that is OPEN -- the console, a
+# terminal, PID 1's -- and simply has nobody typing at it. That is what let the
+# hook's REPL park forever. A gate that runs hpm from a harness whose stdin is
+# already at EOF hands the hook an EOF it did not have to be given, and then
+# the runaway-quote install terminates WITH OR WITHOUT the fix: measured, that
+# was assertion 5 passing green against a fully reverted _run_hook.
+#
+# So: a fifo held open read-write on fd 9 for the life of this script. A reader
+# opens it immediately and never sees end-of-input, which is exactly a console
+# nobody is typing at.
+rm -f "$W/stdin.fifo"; mkfifo "$W/stdin.fifo"
+exec 9<> "$W/stdin.fifo"
+
 run_ns() {   # run_ns <seconds> <logfile> <hpm args...>
     local secs="$1" log="$2"; shift 2
     local args=("$@")
@@ -275,7 +290,7 @@ run_ns() {   # run_ns <seconds> <logfile> <hpm args...>
         echo "__RC__=$?"
         # A pid namespace whose init exits takes every process in it with it,
         # so nothing this gate started can outlive this line.
-    ' _ "$R" "$secs" "${args[@]}" > "$log" 2>&1
+    ' _ "$R" "$secs" "${args[@]}" > "$log" 2>&1 < "$W/stdin.fifo"
 }
 
 run_ns 60 "$W/refresh.log" --repo=file:///repo/ refresh
@@ -295,10 +310,18 @@ if grep -q '__RC__=124' "$W/quote.log"; then
 else
     ok "(5) hpm install hooktest-quote TERMINATES (${el}s) -- the runaway-quote hook is no longer a wedge"
 fi
+# AND IT WAS THE STDIN THAT DID IT, NOT THE DEADLINE. If the /dev/null stdin
+# were absent and only the 60 s bound were holding, this same install would
+# take a minute and end in a kill. Finishing in seconds is the observable
+# difference between the two protections.
 if grep -q 'cannot put /dev/null on the stdin' "$W/quote.log"; then
     bad "(6) hpm could not put /dev/null on the hook's stdin -- the first protection is not in effect"
+elif grep -q 'was KILLED' "$W/quote.log"; then
+    bad "(6) the runaway-quote hook had to be KILLED at the deadline -- the EOF exit did not happen; only the timeout saved it"
+elif [ "$el" -lt 15 ]; then
+    ok "(6) and the EOF exit is what did it, not the deadline: the hook ended in ${el}s, not at the 60 s bound, and hpm raised no /dev/null warning"
 else
-    ok "(6) the hook ran with /dev/null on its stdin (hpm raised no warning about it)"
+    bad "(6) the runaway-quote hook took ${el}s -- too close to the 60 s bound to have exited on EOF"
 fi
 
 # A HOOK THAT HANGS FOR A REASON /dev/null DOES NOTHING ABOUT. It lexes
