@@ -79,15 +79,28 @@
 # WHY IT WAS NOT SIMPLY ADDED HERE. Three routes were tried and measured:
 #   (a) A PACKAGED hamui APP (hambrowse is in the channel as
 #       hamnix-app-hambrowse). It calls hamui_set_protocol_v2_dims()
-#       unconditionally at startup -- and on hamnix-linux that call ALWAYS
-#       FAILS, because lib/hamui.ad writes `version 2` to /dev/wsys/<wid>/wctl
-#       and this port implements no `wctl` leaf (see classify() in
-#       user/linux-wsys.c: ctl, scene, keys, pointer, event, text, cmd,
-#       draw/ctl, backbuffer, draw/images -- no wctl). The client then falls
-#       back to the v1 markup path exactly as its own comment says it will, so
-#       the failure is SILENT. MEASURED against the packaged browser on a
-#       file:// page: the window came up with proto=1 and /dev/wsys/pool read
-#       `slots 0/512`. Every hamui app on Linux is in this position.
+#       unconditionally at startup -- and on hamnix-linux that negotiation
+#       NEVER REACHES THE WINDOW SYSTEM, in the worst possible way: it
+#       SUCCEEDS.
+#
+#       lib/hamui.ad writes `version 2` to /dev/wsys/<wid>/wctl. This port has
+#       no `wctl` leaf -- classify() in user/linux-wsys.c knows ctl, scene,
+#       keys, pointer, event, text, cmd, draw/ctl, backbuffer, draw/images --
+#       and its final `else` sends any other name to HAMWSYS_SINK, a generic
+#       named buffer ("5/wctl" and "wallpaper" are just distinct buffers).
+#       So the open succeeds, the write succeeds, hamui_set_protocol_v2_dims
+#       returns 0, and the client sets h_v2_active = 1 and believes it is a v2
+#       client for the rest of its life. The window system never hears the
+#       request. This is not the documented "on failure the legacy path stays
+#       authoritative" fallback -- there is no failure to observe.
+#
+#       MEASURED against the packaged browser on a file:// page:
+#         /dev/wsys/2/ctl   -> `2 50 40 880 600 12 1 1 1 3 0 0 0 0` (proto = 1)
+#         /dev/wsys/2/wctl  -> `version 2`   <- the negotiation, sitting in a
+#                                               sink nothing interprets
+#         /dev/wsys/pool    -> `slots 0/512` (no backbuffer was ever claimed)
+#       Every hamui app on Linux is in this position: the v2 blit path is
+#       unreachable for all of them, and nothing anywhere says so.
 #   (b) PACKAGED COREUTILS driving the wire protocol directly (`cp` a 'B' blit
 #       + 'D' publish record onto /dev/wsys/<wid>/draw/ctl). The bytes are only
 #       data, so this would still have been packaged programs under test. It
