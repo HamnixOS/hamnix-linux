@@ -257,7 +257,16 @@ def _vk2d_blend_at(o: uint64, r: uint8, g: uint8, b: uint8, a: uint8):
     cast[Ptr[uint8]](o)[0] = cast[uint8]((cast[uint32](r) * av + dr * ia) / 255)
     cast[Ptr[uint8]](o + 1)[0] = cast[uint8]((cast[uint32](g) * av + dg * ia) / 255)
     cast[Ptr[uint8]](o + 2)[0] = cast[uint8]((cast[uint32](b) * av + db * ia) / 255)
-    cast[Ptr[uint8]](o + 3)[0] = 255
+    # AND THE ALPHA CHANNEL, out_a = sa + da*(1-sa), for the reason spelled
+    # out in vk2d_raster_fill_rect_alpha below. This is the per-pixel path --
+    # glyph coverage, line AA, the rounded-rect corners -- so on a window
+    # presented `keyed 1` it is every soft edge: a hardcoded 255 declared each
+    # partial-coverage pixel FULLY OPAQUE after blending it toward the
+    # transparent clear, which puts a dark opaque fringe around every rounded
+    # corner and every glyph drawn straight onto the clear. Over an opaque
+    # destination this still yields 255, so nothing that was right moves.
+    da: uint32 = cast[uint32](cast[Ptr[uint8]](o + 3)[0])
+    cast[Ptr[uint8]](o + 3)[0] = cast[uint8](av + da * ia / 255)
 
 
 def _vk2d_blend(color_base: uint64, img_w: uint64, img_h: uint64,

@@ -1592,6 +1592,7 @@ x_atom_wmstate_focused: uint32 = 0
 x_atom_utf8:       uint32 = 0
 x_check_win:       uint32 = 0            # the _NET_SUPPORTING_WM_CHECK window
 x_ewmh_seen:       int32 = 0             # the client list we last published
+x_ewmh_active_win: int32 = 0             # ... and the active window
 x_prop_fmt: int32 = 0
 x_prop_n:   uint32 = 0
 xerr_seq:   uint32 = 0
@@ -1872,14 +1873,29 @@ def x_kill_client(win: uint32):
 # Does this window list WM_DELETE_WINDOW in WM_PROTOCOLS? One round trip, on
 # map, and never again -- the answer is a property of the toolkit, not of the
 # moment.
+#
+# "I COULD NOT ASK" AND "IT SAID NO" ARE DIFFERENT ANSWERS, and conflating them
+# is how a close button becomes a `kill -9`. x_get_prop returns 0 both when the
+# property is genuinely absent AND when the round trip lost its race inside
+# x_await's one-second budget or the server returned an error -- and several
+# windows mapping at once (Firefox's helpers, a toolkit's dialogs) is exactly
+# when that race is lost. Defaulting a FAILED READ to "cannot be asked" means
+# the next title-bar click terminates a client that implements
+# WM_DELETE_WINDOW perfectly well, with a log line saying the client said so.
+#
+# So the two are separate values: 1 = it advertises the protocol, 0 = it
+# answered and did not, -1 = we never got an answer. close_requested treats -1
+# as "ask anyway": a delete message to a client that ignores it does nothing at
+# all, which is the cheaper of the two mistakes by a wide margin.
 def xwm_read_protocols(i: uint64):
-    xw_del[i] = 0
+    xw_del[i] = -1
     if x_atom_protocols == 0 or x_atom_delete == 0:
         return
     if x_get_prop(cast[uint32](xw_win[i]), x_atom_protocols) == 0:
         return
     if x_prop_fmt != 32:
         return
+    xw_del[i] = 0
     k: uint64 = 0
     while k < cast[uint64](x_prop_n) and k * 4 + 4 <= xrep_n:
         if ru32(&xrep[0], k * 4) == x_atom_delete:
@@ -2219,9 +2235,21 @@ def x_ewmh_publish():
     x_prop32(x_root, x_atom_clientstk, 33, &ewmh_vals[0], n)
 
 
+# FOCUS MOVED. Both halves matter and the second one is the half that was
+# missing: the window LOSING focus has to have _NET_WM_STATE_FOCUSED taken off
+# it, or two windows claim it at once and a toolkit draws two active title
+# bars. Published on a CHANGE, so re-focusing the window that already has it
+# costs nothing and a burst of keystrokes costs one round trip, not one per
+# key.
 def x_ewmh_active(win: int32):
     if x_atom_active == 0 or xfd < 0:
         return
+    if win == x_ewmh_active_win:
+        return
+    prev: int32 = x_ewmh_active_win
+    x_ewmh_active_win = win
+    if prev != 0 and xwm_find(prev) >= 0:
+        x_prop32(cast[uint32](prev), x_atom_wmstate, 4, &ewmh_vals[0], 0)
     ewmh_vals[0] = win
     x_prop32(x_root, x_atom_active, 33, &ewmh_vals[0], 1)
     # _NET_WM_STATE_FOCUSED on the window itself, which is what a toolkit
@@ -2254,7 +2282,7 @@ def xwm_add(win: int32) -> int32:
     xw_have[i] = 0
     xw_or[i] = 0
     xw_map[i] = 0
-    xw_del[i] = 0
+    xw_del[i] = -1                      # not asked yet; see xwm_read_protocols
     xw_tfor[i] = 0
     xw_par[i] = 0
     xw_dx[i] = 0
@@ -2452,12 +2480,25 @@ def xwm_attach_or(i: uint64):
         return
     par: int32 = xw_tfor[i]
     if par == 0:
+        # THE INNERMOST CONTAINING RECTANGLE, not the last one in the table.
+        # This loop used to keep the last match, which is X CREATION order and
+        # not stacking order -- with two overlapping toplevels a menu opened
+        # over the older one was attributed to the newer, so dragging the
+        # WRONG window took the menu with it and dragging the real parent left
+        # it behind. This compositor cannot read wsysd's z from here, so the
+        # smallest enclosing window is the honest proxy: a menu bar inside a
+        # dialog inside a main window belongs to the dialog.
+        best: int64 = -1
         j: uint64 = 0
         while j < n_xw:
-            if j != i and xw_or[j] == 0 and xw_map[j] != 0 and xw_w[j] > 0:
+            if j != i and xw_or[j] == 0 and xw_map[j] != 0 \
+                    and xw_w[j] > 0 and xw_h[j] > 0:
                 if xw_x[i] >= xw_x[j] and xw_x[i] < xw_x[j] + xw_w[j] \
                         and xw_y[i] >= xw_y[j] and xw_y[i] < xw_y[j] + xw_h[j]:
-                    par = xw_win[j]
+                    area: int64 = cast[int64](xw_w[j]) * cast[int64](xw_h[j])
+                    if best < 0 or area < best:
+                        best = area
+                        par = xw_win[j]
             j = j + 1
     if par == 0:
         return
@@ -3904,8 +3945,14 @@ def conn_accept():
             # server can carry, and independence is what the per-connection
             # tables above are for -- so refusing a connection is refusing a
             # whole client, not one window. Say so, and count it.
-            drop(S_CONNFULL,
-                 "a whole client was refused -- MAXCONN is full, raise MAXCONN")
+            # The line, VERBATIM, and the counter beside it. `drop` would
+            # have printed "DROPPING FRAMES", which is the wrong noun for a
+            # refused connection -- nothing was dropped, a whole program was
+            # turned away -- and tests/linux/wsyswl_shared_fate.sh greps for
+            # this exact sentence, which is the contract that a client getting
+            # nothing is never turned away in silence.
+            puts(2, "wsyswl: too many clients -- raise MAXCONN\n")
+            hit(S_CONNFULL)
 
 
 # Drain one client's socket and run every complete message in it.
@@ -4179,6 +4226,7 @@ def close_requested(i: uint64):
             return
         k: uint64 = cast[uint64](xsl)
         if xw_del[k] != 0 and x_send_delete(cast[uint32](xwl)) != 0:
+            # != 0 is 1 (it advertises) OR -1 (we never got an answer).
             hit(S_CLOSEREQ)
             puts(1, "wsyswl: WM_DELETE_WINDOW -> X window ")
             putd(1, xwl)
@@ -4267,17 +4315,26 @@ def drain_window(i: uint64):
     fd = w_keys[i]
     if fd >= 0:
         got = sys_read_nb(fd, &inbuf[0], 1000)
-        if got > 0 and w_focus[i] == 0:
-            kbd: int32 = conn_keyboard[c]
-            if kbd != 0:
-                serial = serial + 1
-                send_kbd_enter(cast[uint32](kbd), serial, surf)
-                w_focus[i] = 1
+        if got > 0:
+            if w_focus[i] == 0:
+                kbd: int32 = conn_keyboard[c]
+                if kbd != 0:
+                    serial = serial + 1
+                    send_kbd_enter(cast[uint32](kbd), serial, surf)
+                    w_focus[i] = 1
             # _NET_ACTIVE_WINDOW, for an X window. wsysd owns focus and this
             # is where the compositor finds out about it: a window that is
-            # being given keys is the window that has the keyboard. A toolkit
-            # reads this to draw its own active chrome, and a taskbar reads it
-            # to know which entry to light.
+            # being given keys is the window that has the keyboard.
+            #
+            # OUTSIDE the w_focus guard, and that is the whole point. w_focus
+            # is set on the FIRST key a window ever receives and is never
+            # cleared, so hanging this off it published each window's focus
+            # exactly once, ever: focus A, focus B, focus A again, and
+            # _NET_ACTIVE_WINDOW still names B for the rest of the session
+            # while both A and B claim _NET_WM_STATE_FOCUSED. A property that
+            # is wrong is worse than one that is absent -- which is what this
+            # file's own EWMH comment says -- so the publish is driven by the
+            # keys arriving and deduplicated inside x_ewmh_active.
             si2: uint64 = oidx(c, surf)
             if obj_type[si2] == T_SURFACE and obj_e[si2] > 0:
                 x_ewmh_active(obj_e[si2])

@@ -329,14 +329,23 @@ struct bbshm {
     struct bbhdr slot[BB_SLOTS];
 };
 
-/* Page-aligned, because mmap's offset must be.  BB_BYTES is a multiple of the
- * page size on every architecture this runs on (it is 1920*1080*4), and the
- * header is rounded up to 64 KiB so the arithmetic holds on a 64 KiB-page
- * kernel too. */
-#define BB_HDR_BYTES  ((size_t)((sizeof(struct bbshm) + 65535) & ~(size_t)65535))
+/* PAGE-ALIGNED, AND THE STRIDE IS WHAT HAD TO BE ROUNDED, not just the header.
+ *
+ * mmap's offset must be a multiple of the page size.  BB_BYTES is
+ * 1920*1080*4 = 8294400, which is 2025 * 4096 -- fine on a 4 KiB-page kernel
+ * and NOT a multiple of 16 KiB or 64 KiB (8294400/65536 = 126.5625).  Rounding
+ * only the header up would leave every odd-numbered page offset misaligned on
+ * a 16 KiB- or 64 KiB-page kernel: mmap returns EINVAL, bb_page returns NULL,
+ * and half the windows are blank with "a blit was thrown away" -- the exact
+ * silent failure this rewrite exists to remove, waiting for the first arm64
+ * build.  So the per-page STRIDE is rounded to 64 KiB as well.  It costs
+ * address space in a sparse file and nothing else. */
+#define BB_ALIGN      ((size_t)65536)
+#define BB_HDR_BYTES  ((size_t)((sizeof(struct bbshm) + BB_ALIGN - 1) & ~(BB_ALIGN - 1)))
+#define BB_PAGE_BYTES ((size_t)((BB_BYTES + BB_ALIGN - 1) & ~(BB_ALIGN - 1)))
 #define BB_PX_OFF(i, pg) \
-    ((off_t)BB_HDR_BYTES + (off_t)(((size_t)(i) * 2 + (size_t)(pg)) * BB_BYTES))
-#define BB_FILE_BYTES ((off_t)BB_HDR_BYTES + (off_t)BB_SLOTS * 2 * (off_t)BB_BYTES)
+    ((off_t)BB_HDR_BYTES + (off_t)(((size_t)(i) * 2 + (size_t)(pg)) * BB_PAGE_BYTES))
+#define BB_FILE_BYTES ((off_t)BB_HDR_BYTES + (off_t)BB_SLOTS * 2 * (off_t)BB_PAGE_BYTES)
 
 /* The pool can never be the first thing to run out.  If someone shrinks it
  * below the window table, this fails to compile rather than becoming a blank

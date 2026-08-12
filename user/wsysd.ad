@@ -1062,7 +1062,12 @@ def blit_window_image_mode(ox: int32, oy: int32, w: int32, h: int32,
                     ob: uint32 = (sb * a + db * ia) / 255
                     og: uint32 = (sg * a + dg * ia) / 255
                     orr: uint32 = (sr * a + dr * ia) / 255
-                    dst[dofs] = (orr << 16) | (og << 8) | ob
+                    # X byte 0xFF, like both other modes: the file's own note
+                    # above says 0xFF-opaque is the more correct value of the
+                    # two if a future scanout ever samples it, and a composite
+                    # whose alpha byte depends on which window painted last is
+                    # the kind of inconsistency that is free to avoid.
+                    dst[dofs] = 4278190080 | (orr << 16) | (og << 8) | ob
                 sofs = sofs + 1
                 dofs = dofs + 1
                 k = k + 1
