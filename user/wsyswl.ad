@@ -203,21 +203,43 @@ from lib.wlsnarf import wlsn_present, wlsn_poll, wlsn_put, wlsn_ptr, wlsn_len, \
 # ceiling.sh, which recomputes it from the declarations rather than trusting
 # this paragraph.)
 #
-# WHY NOT HIGHER. Two hard walls, both arithmetic:
-#   * MAXWIN >= MAXCONN * WINPERCONN is the no-starvation invariant, and the
-#     window table is user/linux-wsys.c's `struct wshm`, which the first
-#     attacher memsets WHOLE -- so a row is 72.2 KiB of RESIDENT shared
-#     memory, not address space. 16 * 16 takes it to 256 rows and 18.17 MiB,
-#     doubling what was already spent. 32 connections would need 512 rows and
-#     36.21 MiB, always resident on every boot, and buying that with a
-#     weakened starvation guarantee is a different pass with its own test.
-#   * user/linux-syscalls.c's WAITFDS_MAX is 64 and the poll set is
-#     1 listener + MAXCONN + the XWM fd + the clipboard pipe, so nothing
-#     above MAXCONN = 61 can ever be waited on at all.
-# Sixteen sits under both with room. What it does NOT fit is TWO browsers at
-# once (8 + 8 + 2 = 18); that is named in HANDOFF as the next ceiling rather
-# than quietly hoped away.
-MAXCONN: uint64 = 16
+# THIRTY-TWO, AND THE REASON IS TWO BROWSERS.
+#
+# Sixteen did not fit them and that was named here rather than hoped away:
+# 8 + 8 + a namespace's Xwayland or two is 18 or 19, and the program past the
+# ceiling does not lose a window, it loses ITSELF. A person who has Firefox
+# open and starts Chromium is the ordinary case, not the exotic one.
+#
+# WHAT STOPPED IT, AND WHY IT WAS NOT WHAT IT LOOKED LIKE. The wall was
+# MAXWIN >= MAXCONN * WINPERCONN -- the no-starvation invariant -- taking the
+# device's window table to 512 rows, which the last pass measured at 36.21 MiB
+# of RESIDENT shared memory and refused to spend. The measurement was right and
+# the CAUSE was misattributed. The table was resident because the first
+# attacher ran `memset(shm, 0, sizeof *shm)` over a segment ftruncate(2) had
+# just handed it out of a fresh tmpfs file: every one of those bytes was
+# already zero, and the memset's only effect was to fault in and dirty 18 MiB
+# of window table with no windows in it. It is gone (user/linux-wsys.c, THE
+# ZEROES WE DO NOT WRITE), and with it the reason this number could not move:
+#
+#   256 rows, 16 connections, no windows:  18,608 KiB resident (measured, du)
+#   256 rows, 16 connections, no windows:   1,024 KiB resident (after)
+#   512 rows, 32 connections, no windows:  ~2,048 KiB resident
+#
+# So THE INVARIANT WAS NEVER THE PROBLEM and it is kept whole: every connection
+# is still reserved its full WINPERCONN, nothing is shared, no client can eat
+# another's budget, and there is no fairness policy to get wrong -- the cost of
+# the reservation is now address space, which is the same trade the paint pool
+# made when BB_SLOTS became WSYS_MAX_WINDOWS. A window that actually exists
+# still costs its 74,425 bytes; a window that does not costs 4 KiB (the page a
+# linear scan for `used` touches) instead of 74.
+#
+# WHY NOT HIGHER STILL. user/linux-syscalls.c's WAITFDS_MAX is 64 and the poll
+# set is 1 listener + MAXCONN + the XWM fd + the clipboard pipe, so nothing
+# above MAXCONN = 61 can ever be waited on at all. That wall is real and did
+# not move. Thirty-two sits under it with room for the workload plus a third
+# browser nobody has asked for; going to 61 would be a number chosen because
+# it is the maximum rather than because something needs it.
+MAXCONN: uint64 = 32
 MAXOBJ:  uint64 = 1024                 # client ids stay dense and low --
                                        # but Xwayland is a bigger client
                                        # than anything this server carried
@@ -317,28 +339,28 @@ serial: uint32 = 0
 scr_w: int32 = 0
 scr_h: int32 = 0
 
-conn_inuse: Array[16, int32]
-conn_fd:    Array[16, int32]
-conn_reg:   Array[16, int32]
-conn_acc:   Array[131072, uint8]        # 16 * 8192
-conn_acclen: Array[16, uint64]
-conn_seat:  Array[16, int32]
-conn_pointer: Array[16, int32]
+conn_inuse: Array[32, int32]
+conn_fd:    Array[32, int32]
+conn_reg:   Array[32, int32]
+conn_acc:   Array[262144, uint8]        # 32 * 8192
+conn_acclen: Array[32, uint64]
+conn_seat:  Array[32, int32]
+conn_pointer: Array[32, int32]
 # The version the connection bound wl_seat at, carried onto its wl_pointer.
 # wl_pointer.axis_source and .axis_discrete are version 5 events, and
 # libwayland ABORTS on an event a proxy has no listener slot for -- the same
 # trap wl_seat.name is gated for. A client that bound at v1 gets the v1
 # wl_pointer.axis and nothing else.
 conn_ptrver: Array[16, int32]
-conn_keyboard: Array[16, int32]
-conn_xdg_wm: Array[16, int32]
-conn_output: Array[16, int32]           # the client's wl_output object, for enter
+conn_keyboard: Array[32, int32]
+conn_xdg_wm: Array[32, int32]
+conn_output: Array[32, int32]           # the client's wl_output object, for enter
 
 # --- THE WAYLAND CLIPBOARD ---------------------------------------------
 # wl_data_device is implemented BY the compositor -- see lib/wlsnarf.ad for
 # why that means this cannot be a separate process the way user/xsnarfd.ad is.
-conn_ddev:  Array[16, int32]            # the client's wl_data_device, 0 = none
-conn_offer: Array[16, int32]            # the wl_data_offer WE last made it
+conn_ddev:  Array[32, int32]            # the client's wl_data_device, 0 = none
+conn_offer: Array[32, int32]            # the wl_data_offer WE last made it
 
 # A wl_data_offer is an object the SERVER creates, so its id comes out of the
 # server half of the id space (0xff000000 and up) and cannot live in the
@@ -370,24 +392,24 @@ mimebuf: Array[256, uint8]
 pipebuf: Array[2, int32]
 
 TITLE_CAP: uint64 = 48
-conn_title: Array[768, uint8]          # 16 * 48
-conn_title_len: Array[16, uint64]
+conn_title: Array[1536, uint8]          # 16 * 48
+conn_title_len: Array[32, uint64]
 
 # Per object, indexed conn * MAXOBJ + id.
-obj_type: Array[16384, int32]
-obj_a: Array[16384, int32]
-obj_b: Array[16384, int32]
-obj_c: Array[16384, int32]
-obj_d: Array[16384, int32]
-obj_e: Array[16384, int32]
-obj_f: Array[16384, int32]
-obj_g: Array[16384, int32]
+obj_type: Array[32768, int32]
+obj_a: Array[32768, int32]
+obj_b: Array[32768, int32]
+obj_c: Array[32768, int32]
+obj_d: Array[32768, int32]
+obj_e: Array[32768, int32]
+obj_f: Array[32768, int32]
+obj_g: Array[32768, int32]
 # Two more per-object words, added for xdg_positioner: placing a menu needs a
 # size, an anchor rect, an anchor, a gravity and an offset, which is ten
 # numbers, and obj_a..obj_g are seven.
-obj_h: Array[16384, int32]
-obj_i: Array[16384, int32]
-surf_parent: Array[16384, int32]
+obj_h: Array[32768, int32]
+obj_i: Array[32768, int32]
+surf_parent: Array[32768, int32]
 
 # SHM MAPPINGS ARE OWNED BY THE CONNECTION, NOT BY THE POOL OBJECT.
 #
@@ -431,10 +453,10 @@ surf_parent: Array[16384, int32]
 # X client on one X display shares this table and always will. What buys an X
 # session its own table is its own Xwayland, not its own wl_surface.
 MAXMAP: uint64 = 64
-map_addr: Array[1024, uint64]           # 16 conns * 64
-map_len:  Array[1024, uint64]
-map_used: Array[1024, int32]
-map_ref:  Array[1024, int32]
+map_addr: Array[2048, uint64]           # 16 conns * 64
+map_len:  Array[2048, uint64]
+map_used: Array[2048, int32]
+map_ref:  Array[2048, int32]
 
 # The EFFECTIVE size of that table, so the shared-fate property can be tested
 # without rebuilding the compiler's constant. Set by WSYSWL_MAXMAP, clamped to
@@ -454,9 +476,9 @@ map_limit: uint64 = 64
 # thing that works: push received fds onto a FIFO and let each request with an
 # fd argument pop one, in order. This is that FIFO.
 FDQ: uint64 = 8
-fdq:     Array[128, int32]              # 16 conns * 8
-fdq_head: Array[16, uint64]
-fdq_tail: Array[16, uint64]
+fdq:     Array[256, int32]              # 32 conns * 8
+fdq_head: Array[32, uint64]
+fdq_tail: Array[32, uint64]
 
 # FRAME CALLBACKS ARE A LIST PER SURFACE, NOT ONE SLOT.
 #
@@ -483,10 +505,10 @@ fdq_tail: Array[16, uint64]
 # starve itself. MAXCONN * FCPERCONN is the array, so the slices never overlap
 # and no arithmetic anywhere can make them.
 FCPERCONN: uint64 = 32
-FCMAX: uint64 = 512                    # 16 conns * 32
-fc_conn: Array[512, int32]             # -1 when the slot is free
-fc_surf: Array[512, int32]
-fc_cb:   Array[512, int32]
+FCMAX: uint64 = 1024                   # 32 conns * 32
+fc_conn: Array[1024, int32]             # -1 when the slot is free
+fc_surf: Array[1024, int32]
+fc_cb:   Array[1024, int32]
 
 out:     Array[8192, uint8]
 out_pos: uint64 = 0
@@ -512,11 +534,11 @@ numbuf:  Array[24, uint8]
 #
 # WAITSET = 1 listener + MAXCONN + the XWM fd + the clipboard pull pipe, and
 # the guards below are written against WAITSET rather than a literal so the
-# next person to move MAXCONN moves one number. user/linux-syscalls.c's
+# next person to move MAXCONN moves one number. It is 35 at MAXCONN 32. user/linux-syscalls.c's
 # sys_waitfds caps nfds at WAITFDS_MAX = 64 and returns EINVAL above it, so
 # this must also stay <= 64 -- which is the real ceiling on MAXCONN (61).
-WAITSET: uint64 = 19
-waitset: Array[19, int32]
+WAITSET: uint64 = 35
+waitset: Array[35, int32]
 recvfds: Array[8, int32]
 recvn:   Array[2, int32]
 sockpath: Array[256, uint8]
@@ -561,25 +583,40 @@ envbuf:  Array[256, uint8]
 # named ("taking the device's table to 256") and 18.17 MiB of resident
 # shared memory rather than 9.15. See WSYS_MAX_WINDOWS in user/linux-wsys.c,
 # which this must equal, and WSYS_VERSION, which had to move with it.
+#
+# AND IT DID NOT MOVE AGAIN AT MAXCONN 32 EITHER, this time for no price at
+# all. 32 * 16 = 512 rows, and a row that holds no window now costs 4 KiB
+# instead of 74 -- see MAXCONN above and THE ZEROES WE DO NOT WRITE in
+# user/linux-wsys.c. The alternative that had to be considered and was
+# rejected on the measurement: a SHARED POOL of rows with a per-connection cap
+# instead of a per-connection reservation. It would size the table for real
+# usage rather than for the product -- but it replaces an invariant that is
+# arithmetic (`MAXWIN >= MAXCONN * WINPERCONN`, checkable from source by a
+# test that runs nothing) with a POLICY: what happens when a client asks for
+# its 16th window and the pool is empty because another client took 400? The
+# honest answer is that it is refused, which means a client's guaranteed
+# budget stops being guaranteed and starts depending on its neighbours. That
+# is a real regression in independence, bought to save memory that is no
+# longer being spent. Reservation, kept.
 WINPERCONN: uint64 = 16
-MAXWIN: uint64 = 256                   # 16 conns * 16, and = WSYS_MAX_WINDOWS
-w_wid:  Array[256, int32]
-w_draw: Array[256, int32]
-w_keys: Array[256, int32]
-w_ptr:  Array[256, int32]
-w_conn: Array[256, int32]
-w_surf: Array[256, int32]
-w_btn:  Array[256, int32]               # last pointer button mask seen
-w_in:   Array[256, int32]               # pointer has entered this surface
+MAXWIN: uint64 = 512                   # 32 conns * 16, and = WSYS_MAX_WINDOWS
+w_wid:  Array[512, int32]
+w_draw: Array[512, int32]
+w_keys: Array[512, int32]
+w_ptr:  Array[512, int32]
+w_conn: Array[512, int32]
+w_surf: Array[512, int32]
+w_btn:  Array[512, int32]               # last pointer button mask seen
+w_in:   Array[512, int32]               # pointer has entered this surface
 # THE LAST SURFACE-LOCAL POINTER POSITION ACTUALLY SENT, so a line that only
 # carries a wheel delta does not send a wl_pointer.motion the pointer did not
 # make. See handle_ptr_line: that spurious motion is what kept Steam from
 # scrolling (docs/steam_namespace.md 12.2d).
-w_ptx:  Array[256, int32]
-w_pty:  Array[256, int32]
-w_focus: Array[256, int32]              # keyboard focus is on this surface
-w_x:    Array[256, int32]               # where this window was placed, so a
-w_y:    Array[256, int32]               # popup can be placed against it
+w_ptx:  Array[512, int32]
+w_pty:  Array[512, int32]
+w_focus: Array[512, int32]              # keyboard focus is on this surface
+w_x:    Array[512, int32]               # where this window was placed, so a
+w_y:    Array[512, int32]               # popup can be placed against it
 # THE WINDOW'S OWN EVENT RING, read every pump. Two things arrive on it and
 # neither could be learned any other way:
 #
@@ -596,7 +633,7 @@ w_y:    Array[256, int32]               # popup can be placed against it
 #
 # It is a ring, so a parked compositor is woken by it through the same futex
 # every other ring uses. An idle desktop posts nothing and costs nothing.
-w_evt:  Array[256, int32]
+w_evt:  Array[512, int32]
 n_win:  uint64 = 0
 cascade: int32 = 0
 
@@ -721,8 +758,8 @@ def str_copy(dst: Ptr[uint8], s: Ptr[uint8], cap: uint64) -> uint64:
 # spans the namespace boundary (§6 of docs/steam_namespace.md). Reading a
 # server's own state with `cat` is how the wsysd bug before this one was
 # caught; `/dev/wsys/wsysd/state` is the precedent.
-NSTAT: uint64 = 29
-stat_n:    Array[29, int32]
+NSTAT: uint64 = 30
+stat_n:    Array[30, int32]
 stat_said: Array[29, int32]
 stat_dirty: int32 = 1
 
@@ -780,7 +817,11 @@ S_ORFOLLOW: uint64 = 27         # an override-redirect child moved with parent
 # stderr and nowhere a test could read it -- and it is close: Firefox ALONE
 # reaches conns 8 with its content and GPU processes, measured, which is
 # MAXCONN exactly. A namespace's Xwayland arriving next is the ninth.
+# (And two browsers are 16 of 32, which is what MAXCONN 32 bought.)
 S_CONNFULL: uint64 = 28         # a client was refused: MAXCONN
+# THE DEVICE REFUSED `newwindow`, which is NOT the window budget and had no
+# counter of its own until it cost sixteen windows. See win_open.
+S_NEWWIN:   uint64 = 29         # /dev/wsys/ctl newwindow refused
 
 statepath: Array[256, uint8]
 
@@ -1577,8 +1618,17 @@ def win_open(c: uint64, surf: uint32, w: int32, h: int32,
         return -1
     if n_win >= MAXWIN:
         return -1
+    # AND IF THE DEVICE REFUSED, SAY SO AS THE DEVICE'S REFUSAL. This used to
+    # fall straight into the caller's `drop_no_window`, whose message points
+    # the reader at the window table -- which is exactly where the answer was
+    # NOT, the last time this failed: the runtime's own DEVTAB_MAX was 64,
+    # four synthetic files a window made that sixteen windows, and the window
+    # table had 240 free rows while every one of them was refused. The runtime
+    # names itself now (user/linux-syscalls.c, devtab_full); this counter is
+    # what makes the two halves of that failure distinguishable from a file.
     wid: int32 = newwindow()
     if wid < 2:
+        drop(S_NEWWIN, "the device refused `newwindow` -- this is NOT the window budget; see the runtime's own message about DEVTAB_MAX")
         return -1
     # Cascade far enough that two windows do not sit on top of each other.
     # There is no placement policy here worth the name -- wsysd owns stacking
@@ -5199,6 +5249,7 @@ def publish_state():
     st_kv(fd, "x_configure_pushed", S_XCONF)
     st_kv(fd, "or_children_followed", S_ORFOLLOW)
     st_kv(fd, "conn_refused", S_CONNFULL)
+    st_kv(fd, "newwindow_refused", S_NEWWIN)
     # THE LIMITS, SPLIT BY WHOSE THEY ARE. A reader cannot tell what any of the
     # counters above mean without knowing which of these is shared and which is
     # not, and the first three passes of the Steam investigation are what a

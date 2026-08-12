@@ -289,7 +289,42 @@ static int adopt_if_directory(int fd)
  * a genuine slot, survives fork, and cannot collide with an ordinary open.
  * Only read/write/lseek/close consult the table.
  * ------------------------------------------------------------------ */
-#define DEVTAB_MAX 64
+/* SIXTY-FOUR WAS THE REAL WINDOW CEILING OF THE WHOLE SYSTEM, and nothing
+ * anywhere said so.
+ *
+ * This table is per PROCESS and it was sized for a program that opens a
+ * handful of devices.  user/wsyswl.ad is not that program: it holds FOUR
+ * synthetic files open for every window it manages -- <wid>/draw/ctl,
+ * <wid>/keys, <wid>/pointer and <wid>/event -- so 64 entries is SIXTEEN
+ * WINDOWS, whatever user/linux-wsys.c's WSYS_MAX_WINDOWS says and whatever
+ * MAXCONN * WINPERCONN promises.  Measured, not deduced: 32 weston-simple-shm
+ * clients against a MAXCONN-32 build gave `conns 32` and
+ * `windows_high_water 16`, with every window after the sixteenth failing in
+ * `newwindow` and being counted as `drop_no_window`.
+ *
+ * That is the FIFTH link in the chain HANDOFF documents -- a ceiling written
+ * down twice, in a file nobody looks at when raising the other one -- and it
+ * is the worst-behaved of the five, because it does not merely fail: it fails
+ * as somebody ELSE's limit.  The compositor reports "no wsys window could be
+ * opened for this surface", which sends the reader to the window table (256
+ * rows, 240 of them free) rather than to the file table that actually ran out.
+ * The window budget invariant MAXWIN >= MAXCONN * WINPERCONN was arithmetic
+ * over a number that could not be reached.
+ *
+ * SO IT IS DERIVED NOW, not chosen: 4 files per window * the device's window
+ * table (user/linux-wsys.c, WSYS_MAX_WINDOWS 512) + 64 for everything else a
+ * process has open -- /dev/fb, /net, /dev/auth, /dev/snarf, the audio devices.
+ * tests/linux/wsyswl_conn_ceiling.sh re-derives it from both files, so the two
+ * cannot drift apart again in silence.
+ *
+ * WHAT IT COSTS.  sizeof(struct devfile) is about 390 bytes, so this is ~824
+ * KiB of BSS -- pages the kernel never faults in, because allocation takes the
+ * FIRST free slot and stops, and lookup no longer scans at all (see
+ * devtab_byfd below).  A program that opens three devices touches three
+ * slots.  The old 64-entry table was scanned end to end on every read and
+ * write of an ORDINARY file; the map below removes that too, so this is
+ * cheaper on the hot path than what it replaces as well as 32x larger. */
+#define DEVTAB_MAX 2112
 /* /dev/reboot is served inline further down, next to /proc/<pid>/note, which
  * is the same shape (a NAME written to a file is a kernel action). It is
  * claimed here, so only the predicate needs to be visible this early. */
@@ -320,9 +355,39 @@ struct devfile {
 };
 static struct devfile devtab[DEVTAB_MAX];
 
+/* fd -> slot+1, 0 meaning "not a synthetic device".  A HINT and never an
+ * authority: every hit is re-validated against the slot's own `used` and `fd`
+ * before it is returned, which is what makes it safe to leave stale entries
+ * behind on close.  A closed fd's slot either no longer matches (rejected) or
+ * has been handed the same fd again (in which case it IS that fd's entry).
+ *
+ * Why at all: devtab_find is called on EVERY read, write, lseek, close and
+ * dup of every fd, and on a miss -- which is the common case, since most fds
+ * are ordinary files -- it scanned the whole table.  That was 64 iterations
+ * over 390-byte structs per ordinary read before this, and would have been
+ * 2112 after.  Now it is one array index.
+ *
+ * Above DEVTAB_FDMAP the scan is still there and still correct; the kernel
+ * hands out the lowest free fd, so a process reaches 4096 open descriptors
+ * before it is used at all. */
+#define DEVTAB_FDMAP 4096
+static int16_t devtab_byfd[DEVTAB_FDMAP];
+
+static void devtab_index(struct devfile *slot)
+{
+    if (slot->fd >= 0 && slot->fd < DEVTAB_FDMAP)
+        devtab_byfd[slot->fd] = (int16_t)((slot - devtab) + 1);
+}
+
 static struct devfile *devtab_find(int fd)
 {
     if (fd < 0) return NULL;
+    if (fd < DEVTAB_FDMAP) {
+        int s = devtab_byfd[fd];
+        if (s <= 0 || s > DEVTAB_MAX) return NULL;
+        struct devfile *v = &devtab[s - 1];
+        return (v->used && v->fd == fd) ? v : NULL;
+    }
     for (int i = 0; i < DEVTAB_MAX; i++)
         if (devtab[i].used && devtab[i].fd == fd)
             return &devtab[i];
@@ -331,6 +396,26 @@ static struct devfile *devtab_find(int fd)
 
 /* Returns the new fd, or -1 with errno if `path` is not a synthetic device or
  * the device could not be opened. */
+/* THE FILE TABLE RUNNING OUT MUST NOT LOOK LIKE THE WINDOW SYSTEM RUNNING OUT.
+ * Before this, exhaustion was `errno = EMFILE` and nothing else, and what the
+ * person actually saw was user/wsyswl.ad's "no wsys window could be opened for
+ * this surface" -- a message that points at a window table with hundreds of
+ * free rows.  Once, on stderr, with the NAME OF THE NUMBER TO RAISE in it, so
+ * a reader is sent to this file instead of to the wrong one.  Once, because
+ * this fires per open attempt and a compositor retries every frame: the
+ * failure this diagnostic exists to make visible must not be the thing that
+ * fills the console and hides everything else. */
+static void devtab_full(void)
+{
+    static int said;
+    if (said) return;
+    said = 1;
+    fprintf(stderr, "hamnix: the synthetic-device file table is full "
+                    "(DEVTAB_MAX=%d) -- this open was refused by the RUNTIME, "
+                    "not by the device; see DEVTAB_MAX in user/linux-syscalls.c\n",
+            DEVTAB_MAX);
+}
+
 static int devtab_open(const char *path, int for_write)
 {
     int kind  = hamfb_kind(path);
@@ -350,7 +435,7 @@ static int devtab_open(const char *path, int for_write)
     struct devfile *slot = NULL;
     for (int i = 0; i < DEVTAB_MAX; i++)
         if (!devtab[i].used) { slot = &devtab[i]; break; }
-    if (!slot) { errno = EMFILE; return -1; }
+    if (!slot) { devtab_full(); errno = EMFILE; return -1; }
 
     memset(slot, 0, sizeof *slot);
     if (rbkind) {
@@ -408,6 +493,7 @@ static int devtab_open(const char *path, int for_write)
     }
     slot->used = 1; slot->fd = fd; slot->kind = kind;
     slot->write = for_write; slot->cursor = 0;
+    devtab_index(slot);
     return fd;
 }
 
@@ -451,7 +537,7 @@ static int note_open(int pid)
     struct devfile *slot = NULL;
     for (int i = 0; i < DEVTAB_MAX; i++)
         if (!devtab[i].used) { slot = &devtab[i]; break; }
-    if (!slot) { errno = EMFILE; return -1; }
+    if (!slot) { devtab_full(); errno = EMFILE; return -1; }
     /* Fail here rather than at the write, so a note to a dead process is an
      * open error the caller already checks for. */
     if (kill((pid_t)pid, 0) < 0)
@@ -461,6 +547,7 @@ static int note_open(int pid)
     memset(slot, 0, sizeof *slot);
     slot->used = 1; slot->fd = fd; slot->kind = HAMFB_NONE;
     slot->write = 1; slot->note_pid = pid;
+    devtab_index(slot);
     return fd;
 }
 
@@ -1100,10 +1187,13 @@ static void devtab_clone(struct devfile *src, int newfd)
     struct devfile *slot = NULL;
     for (int i = 0; i < DEVTAB_MAX; i++)
         if (!devtab[i].used) { slot = &devtab[i]; break; }
-    if (!slot)
+    if (!slot) {
+        devtab_full();
         return;                     /* table full: newfd stays a plain fd */
+    }
     *slot = *src;
     slot->fd = newfd;
+    devtab_index(slot);
     if (slot->isw && slot->w.snap) {
         slot->w.snap = malloc((size_t)slot->w.snaplen);
         if (slot->w.snap)

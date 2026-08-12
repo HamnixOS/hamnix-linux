@@ -312,5 +312,59 @@ if grep -c 'BACKBUFFER' "$WORK/wsysd.log" "$WORK/wsyswl.log" 2>/dev/null | grep 
     grep -h 'BACKBUFFER' "$WORK/wsysd.log" "$WORK/wsyswl.log" 2>/dev/null | sed 's/^/ceil:      /'
 fi
 
+# ---------------------------------------------------------------------------
+# 5. PAST SIXTEEN, which is where the REAL ceiling was hiding
+# ---------------------------------------------------------------------------
+# Sections 1-4 drive 12 windows and 12 fitted, which is why this was never
+# seen. The window table said 256 rows and the paint pool said 256 slots and
+# BOTH WERE TRUE and NEITHER WAS REACHABLE: user/linux-syscalls.c's DEVTAB_MAX
+# was 64, wsyswl holds FOUR synthetic device files per window, and 64/4 is
+# SIXTEEN WINDOWS for the whole machine. Measured before the fix: 32 clients,
+# `conns 32`, `windows_high_water 16`, and every window past the sixteenth
+# counted as `drop_no_window` -- the WINDOW SYSTEM's message, pointing at the
+# one table that had 240 free rows.
+#
+# So this section drives MORE THAN SIXTEEN and requires every one of them to
+# become a window. One client per window, because that is the cheapest way to
+# ask for many windows and it is the shape the connection ceiling already
+# uses. A count is enough here: sections 1-4 are what prove a window is
+# PAINTED and not merely recorded.
+echo "ceil: === 5. more than sixteen windows, which is where DEVTAB_MAX was"
+if command -v weston-simple-shm >/dev/null; then
+    WANT="${CEIL_N2:-24}"
+    WKIDS=""
+    n=0
+    while [ "$n" -lt "$WANT" ]; do
+        weston-simple-shm >>"$WORK/wss.log" 2>&1 &
+        WKIDS="$WKIDS $!"; KIDS="$KIDS $!"
+        n=$((n+1)); sleep 0.3
+    done
+    sleep 4
+    HW="$(sed -n 's/^windows_high_water \([0-9]*\)$/\1/p' "$STATE" 2>/dev/null | tail -1)"
+    NOWIN="$(sed -n 's/^drop_no_window \([0-9]*\)$/\1/p' "$STATE" 2>/dev/null | tail -1)"
+    NEWWIN="$(sed -n 's/^newwindow_refused \([0-9]*\)$/\1/p' "$STATE" 2>/dev/null | tail -1)"
+    info "$WANT one-window clients: windows_high_water $HW, drop_no_window ${NOWIN:-?}, newwindow_refused ${NEWWIN:-?}"
+    if [ "${HW:-0}" -ge "$WANT" ]; then
+        ok "all $WANT windows exist at once -- past the sixteen DEVTAB_MAX silently allowed"
+    else
+        bad "only $HW of $WANT windows were created; ${NOWIN:-?} surfaces were dropped for want of a window"
+    fi
+    # THE COUNTER MUST EXIST, not merely read zero. An absent counter and a
+    # counter reading 0 are the same empty string to `st`, so a build without
+    # this counter at all -- every build before it was added -- would have
+    # passed this line. Caught by running this file against a reverted tree,
+    # which is the only reason it is written this way.
+    if [ -z "${NEWWIN:-}" ]; then
+        bad "the server publishes no newwindow_refused counter at all -- 'the device refused a window' and 'this build cannot tell you' must not look alike"
+    elif [ "$NEWWIN" = 0 ]; then
+        ok "newwindow_refused is 0 -- the device never turned a window down, so the ceiling that is left is a real one"
+    else
+        bad "newwindow_refused is $NEWWIN: the device refused a window, which at 16 meant the RUNTIME's file table and not this device"
+    fi
+    for p in $WKIDS; do kill "$p" 2>/dev/null; done
+else
+    info "no weston-simple-shm on the host; the sixteen-window ceiling cannot be driven here"
+fi
+
 echo "ceil: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
