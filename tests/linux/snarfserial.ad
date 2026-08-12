@@ -139,6 +139,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     verb: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
 
     if ss_eq(verb, "writeopen") == 1:
+        # THE DEVICE MUST BE THERE FOR ITS REFUSAL TO MEAN ANYTHING. A runtime
+        # that does not serve /dev/snarf.serial at all also fails an open for
+        # writing, and a caller that only looked at the negative fd would score
+        # "the refusal works" against a build that has no serial in it. Say
+        # which of the two it is.
+        r: int32 = sys_open(cast[Ptr[char]]("/dev/snarf.serial"))
+        if r < 0:
+            ss_puts("writeopen noserial\n")
+            return 1
+        sys_close(r)
         w: int32 = sys_open_write(cast[Ptr[char]]("/dev/snarf.serial"))
         ss_puts("writeopen ")
         if w < 0:

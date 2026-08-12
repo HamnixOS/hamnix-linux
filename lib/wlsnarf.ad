@@ -49,15 +49,6 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
-extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
-
-WLSN_SEEK_SET: int32 = 0
-
-# How many polls may pass before the content is re-read whatever the serial
-# says. The caller sets the wall-clock cadence (user/wsyswl.ad calls this every
-# eighth 16 ms frame, so 16 polls is about two seconds); what is bounded HERE
-# is the number of polls, which is the thing this file can promise.
-WLSN_RECONCILE: uint64 = 16
 
 # The device's cap, and it is the device that enforces it (lib/devsnarf.ad,
 # user/linux-snarf.c). Repeated here so the bridge can truncate LOUDLY on the
@@ -70,20 +61,9 @@ WLSN_MAX: uint64 = 65536
 wlsn_dev:   Array[65600, uint8]     # what a read of the device just returned
 wlsn_cache: Array[65600, uint8]     # what the bridge believes is on it
 wlsn_mime:  Array[256, uint8]
-wlsn_ser:   Array[64, uint8]        # the one fixed-width line /dev/snarf.serial is
 
 wlsn_cache_len: uint64 = 0
 wlsn_have:      int32  = 0          # the device answered at least once
-
-# --- the generation counters -----------------------------------------
-# struct snarfshm carries a uint64 serial per buffer now, and /dev/snarf.serial
-# is the name that reads them. Only CLIPBOARD matters here: core Wayland has no
-# PRIMARY (see the header), so wlsn_prim_serial is never consulted.
-wlsn_serfd:    int32  = -2          # -2 = not tried yet, -1 = not served
-wlsn_ser_have: int32  = 0
-wlsn_ser_clip: uint64 = 0           # the LAST SEEN generation
-wlsn_ser_now:  uint64 = 0           # what the sample just taken says
-wlsn_since:    uint64 = 0           # polls since the last forced content read
 
 
 def wlsn_slen(s: Ptr[uint8]) -> uint64:
@@ -150,81 +130,45 @@ def wlsn_present() -> int32:
     return 1
 
 
-# Sample the CLIPBOARD generation counter. 1 = wlsn_ser_now is fresh, 0 = the
-# runtime does not serve /dev/snarf.serial (an older user/linux-snarf.c, or a
-# process where the device is not served at all) and the caller must read the
-# content as it always did.
-#
-# The seek back to 0 is what takes a fresh sample: the device snapshots at
-# offset 0 so a held descriptor can be re-read without reopening.
-def wlsn_serial() -> int32:
-    if wlsn_serfd == -2:
-        wlsn_serfd = sys_open(cast[Ptr[char]]("/dev/snarf.serial"))
-    if wlsn_serfd < 0:
-        return 0
-    if sys_lseek(wlsn_serfd, 0, WLSN_SEEK_SET) < 0:
-        return 0
-    got: uint64 = 0
-    while got < 48:
-        n: int64 = sys_read(wlsn_serfd, &wlsn_ser[got], 48 - got)
-        if n <= 0:
-            break
-        got = got + cast[uint64](n)
-    if got < 42:
-        return 0
-    i: uint64 = 0
-    v: uint64 = 0
-    while i < got and (wlsn_ser[i] < 48 or wlsn_ser[i] > 57):
-        i = i + 1
-    while i < got and wlsn_ser[i] >= 48 and wlsn_ser[i] <= 57:
-        v = v * 10 + cast[uint64](wlsn_ser[i]) - 48
-        i = i + 1
-    wlsn_ser_now = v
-    return 1
-
-
-# The change detector. 1 = /dev/snarf now holds something other than what the
-# bridge last saw, and the cache has been brought up to date, so the caller
+# The 4 Hz change detector. 1 = /dev/snarf now holds something other than what
+# the bridge last saw, and the cache has been brought up to date, so the caller
 # should announce a new selection to its Wayland clients.
 #
-# BY SERIAL, WITH CONTENT AS THE DECIDER. The generation counter says whether
-# to LOOK; comparing bytes still says whether to ACT, and that is the
-# anti-ping-pong invariant of the header rather than caution: wlsn_put writes
-# the device, which bumps the serial, and a bridge that treated every bump as a
-# change would re-announce the selection at the client that had just set it.
+# BY CONTENT, AND THE SERIAL WAS TRIED HERE AND MEASURED AND REFUSED.
+# =================================================================
+# `struct snarfshm` HAS a generation counter now, and /dev/snarf.serial reads
+# it; user/xsnarfd.ad was converted to it and its idle wake rate went from
+# 4.99/s to 0.49/s, measured. This file was converted too, and then the
+# conversion was thrown away, because the same measurement here says the
+# opposite. The numbers, from tests/linux/wlsnarfbench.ad -- 20 000 idle polls,
+# nanoseconds each, median of five runs, this host:
 #
-# WHAT THIS DOES AND DOES NOT SAVE, measured rather than assumed. It does NOT
-# save a wake: user/wsyswl.ad's loop runs at 16 ms for the input rings whatever
-# the clipboard does, and this is called on every eighth pass of it. What it
-# saves is the READ -- up to 64 KiB out of the segment and a 64 KiB compare,
-# eight times a second, in the compositor's own frame budget. With an empty or
-# small clipboard that is close to nothing and this change is not worth
-# arguing for; with a full one it is 512 KiB/s that no longer happens. The
-# numbers are in docs/linux_clipboard.md §6.5.
+#     clipboard    by content    by serial    saved at 8 polls/s
+#         0 B           2437          845          12.7 us/s
+#       4 KiB           5836          973            39 us/s
+#      64 KiB          52687         2286           403 us/s
 #
-# EVERY WLSN_RECONCILE-th POLL READS ANYWAY. A binary older than the serial
-# maps the same segment at the same frozen offsets and writes it without
-# bumping anything, and no flag can report that, so none is trusted: the
-# fallback is unconditional and the worst case is a clipboard two seconds
-# stale, not one that never converges.
+# NO WAKE IS SAVED. Not one. user/wsyswl.ad's loop runs at 16 ms for the input
+# rings whatever the clipboard does and this is called on every eighth pass of
+# it, so the wake rate is 62.5/s before and 62.5/s after. The saving is work
+# inside a wake that was going to happen anyway, and the right-hand column is
+# all of it: four hundredths of one percent of one core with a completely full
+# 64 KiB clipboard, and a thousandth of a percent in the row that describes
+# what is actually on a clipboard.
+#
+# AND IT IS NOT FREE. A serial-driven poll only re-reads the content every
+# WLSN_RECONCILE-th time, because reading it every time is what it was avoiding
+# -- so a writer too old to bump the serial (a binary from before it existed,
+# mapping the same frozen v1 offsets) goes from being seen within 128 ms to
+# being seen within about two seconds. Paying a 16x worse worst case in the
+# thing this file exists to do, to save 0.02% of a core, is a bad trade, and
+# "the other bridge did it" is not an argument for making it.
+#
+# So this stays a content compare, and the number is written here rather than
+# left for the next person to assume the other way. If the compositor's loop
+# ever stops running on a 16 ms clock -- that is the condition -- this becomes
+# worth revisiting, and user/xsnarfd.ad is the worked example of how.
 def wlsn_poll() -> int32:
-    look: int32 = 1
-    if wlsn_serial() == 1:
-        if wlsn_ser_have == 1 and wlsn_since < WLSN_RECONCILE:
-            look = 0
-            if wlsn_ser_now != wlsn_ser_clip:
-                look = 1
-        # RECORDED BEFORE THE CONTENT IS READ, never after -- see the same
-        # rule spelled out in user/xsnarfd.ad. A write that lands during the
-        # read below leaves a serial unequal to this one, so the next poll
-        # goes and looks again instead of skipping it.
-        wlsn_ser_clip = wlsn_ser_now
-        wlsn_ser_have = 1
-    if look == 0:
-        wlsn_since = wlsn_since + 1
-        return 0
-    wlsn_since = 0
-
     n: int64 = wlsn_read_dev()
     if n < 0:
         return 0

@@ -247,7 +247,11 @@ unchanged() { # unchanged <label> "<before> / <after>"
     local b a
     b="$(echo "$2" | awk -F' / ' '{print $1}')"
     a="$(echo "$2" | awk -F' / ' '{print $2}')"
-    if [ -n "$b" ] && [ "$b" = "$a" ]; then ok "$1 (both $b)"
+    # "noserial did not change into noserial" is not evidence of anything. A
+    # vacuous pass is the failure shape NORTH_STAR is written against, so the
+    # value has to BE a serial before its stability is worth a point.
+    if [ "${b#serial }" = "$b" ]; then bad "$1: [$b] is not a serial reading"
+    elif [ "$b" = "$a" ]; then ok "$1 (both $b)"
     else bad "$1: [$b] became [$a]"; fi
 }
 unchanged "and an old client's write moves NO counter" "$(line J)"
