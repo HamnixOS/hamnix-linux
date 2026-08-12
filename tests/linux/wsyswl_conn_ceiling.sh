@@ -178,6 +178,24 @@ else
     bad "window table disagreement: wsyswl MAXWIN=$MAXWIN wsysd MAX_WIN=$WSYSD_MAXWIN device WSYS_MAX_WINDOWS=$DEV_MAXWIN -- the smallest wins and the windows past it are never painted"
 fi
 
+# THE FOURTH FILE, and it was the ACTUAL ceiling of the whole system while the
+# three above agreed with each other. user/linux-syscalls.c's DEVTAB_MAX is the
+# per-process synthetic-device table, and wsyswl holds FOUR entries per window
+# -- <wid>/draw/ctl, keys, pointer, event. It was 64, which is SIXTEEN WINDOWS,
+# with 240 rows of the window table free and the whole MAXCONN * WINPERCONN
+# invariant arithmetic over a number that could not be reached. Measured: 32
+# clients gave conns 32 and windows_high_water 16, every window after the
+# sixteenth counted as drop_no_window -- i.e. it failed as the WINDOW SYSTEM's
+# limit, pointing the reader at the one table that had room.
+DEVTAB_MAX="$(cnum user/linux-syscalls.c DEVTAB_MAX)"
+NEED_DEVTAB=$((4 * DEV_MAXWIN))
+info "DEVTAB_MAX=$DEVTAB_MAX, and wsyswl needs 4 per window * $DEV_MAXWIN = $NEED_DEVTAB"
+if [ "${DEVTAB_MAX:-0}" -ge "$NEED_DEVTAB" ]; then
+    ok "DEVTAB_MAX $DEVTAB_MAX >= 4 files per window * $DEV_MAXWIN windows = $NEED_DEVTAB -- the window table is REACHABLE, not just declared"
+else
+    bad "DEVTAB_MAX $DEVTAB_MAX < $NEED_DEVTAB: the real window ceiling is $((DEVTAB_MAX / 4)), not $DEV_MAXWIN, and hitting it is reported as a WINDOW SYSTEM failure with the window table nearly empty"
+fi
+
 # THE POLL SET. The main loop writes one entry per live connection, plus the
 # listener, plus the XWM fd, plus the clipboard pipe. This was Array[16] with
 # MAXCONN 8 and no bound check on the connection loop at all.

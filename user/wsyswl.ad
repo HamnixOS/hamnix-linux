@@ -758,8 +758,8 @@ def str_copy(dst: Ptr[uint8], s: Ptr[uint8], cap: uint64) -> uint64:
 # spans the namespace boundary (§6 of docs/steam_namespace.md). Reading a
 # server's own state with `cat` is how the wsysd bug before this one was
 # caught; `/dev/wsys/wsysd/state` is the precedent.
-NSTAT: uint64 = 29
-stat_n:    Array[29, int32]
+NSTAT: uint64 = 30
+stat_n:    Array[30, int32]
 stat_said: Array[29, int32]
 stat_dirty: int32 = 1
 
@@ -819,6 +819,9 @@ S_ORFOLLOW: uint64 = 27         # an override-redirect child moved with parent
 # MAXCONN exactly. A namespace's Xwayland arriving next is the ninth.
 # (And two browsers are 16 of 32, which is what MAXCONN 32 bought.)
 S_CONNFULL: uint64 = 28         # a client was refused: MAXCONN
+# THE DEVICE REFUSED `newwindow`, which is NOT the window budget and had no
+# counter of its own until it cost sixteen windows. See win_open.
+S_NEWWIN:   uint64 = 29         # /dev/wsys/ctl newwindow refused
 
 statepath: Array[256, uint8]
 
@@ -1615,8 +1618,17 @@ def win_open(c: uint64, surf: uint32, w: int32, h: int32,
         return -1
     if n_win >= MAXWIN:
         return -1
+    # AND IF THE DEVICE REFUSED, SAY SO AS THE DEVICE'S REFUSAL. This used to
+    # fall straight into the caller's `drop_no_window`, whose message points
+    # the reader at the window table -- which is exactly where the answer was
+    # NOT, the last time this failed: the runtime's own DEVTAB_MAX was 64,
+    # four synthetic files a window made that sixteen windows, and the window
+    # table had 240 free rows while every one of them was refused. The runtime
+    # names itself now (user/linux-syscalls.c, devtab_full); this counter is
+    # what makes the two halves of that failure distinguishable from a file.
     wid: int32 = newwindow()
     if wid < 2:
+        drop(S_NEWWIN, "the device refused `newwindow` -- this is NOT the window budget; see the runtime's own message about DEVTAB_MAX")
         return -1
     # Cascade far enough that two windows do not sit on top of each other.
     # There is no placement policy here worth the name -- wsysd owns stacking
@@ -5237,6 +5249,7 @@ def publish_state():
     st_kv(fd, "x_configure_pushed", S_XCONF)
     st_kv(fd, "or_children_followed", S_ORFOLLOW)
     st_kv(fd, "conn_refused", S_CONNFULL)
+    st_kv(fd, "newwindow_refused", S_NEWWIN)
     # THE LIMITS, SPLIT BY WHOSE THEY ARE. A reader cannot tell what any of the
     # counters above mean without knowing which of these is shared and which is
     # not, and the first three passes of the Steam investigation are what a
