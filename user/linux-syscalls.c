@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sched.h>
+#include <sys/inotify.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <netdb.h>
@@ -2458,8 +2459,101 @@ int32_t sys_setuid_auth(int32_t authfd)
  *     ready without sleeping, which is what the old code did by accident and
  *     is the only reason that bug was survivable.
  *
- * nfds == 0 is a plain sleep, and stays one. */
+ * nfds == 0 is a plain sleep, and stays one.
+ *
+ * A REGULAR FILE IS THE SAME TRAP AS /dev/null, ONE LAYER OUT, and it is why
+ * this function grew a fourth class. poll(2) reports a regular file readable
+ * ALWAYS -- POSIX says so, because a disk read cannot block -- whatever the
+ * file offset is. Every offscreen gate in tests/linux runs the compositor with
+ * HAMWSYSD_INPUT naming a plain file of evdev records that the driver appends
+ * to, so the moment user/wsysd.ad started WAITING on its input fds instead of
+ * ticking, poll would have answered "ready" on an exhausted file forever and
+ * the compositor would have spun a core in every one of them -- and reported a
+ * flattering latency while doing it, which is this project's signature bug.
+ *
+ * So a regular file is classified: READINESS is "the offset is behind the end
+ * of the file" (the only thing the caller can mean -- there are unread bytes),
+ * and the SLEEP is inotify IN_MODIFY on the file, which is a genuine wake and
+ * not a cap-and-repoll. The watch is registered BEFORE the size is sampled, so
+ * a write landing between the two is a pending inotify event and not a lost
+ * wakeup. inotify already backs the clipboard park above; this is that
+ * mechanism, applied to the other unpollable thing in the tree. */
 #define WAITFDS_MAX 64
+
+/* How many of these regular files have bytes the caller has not read yet. */
+static int waitfds_reg_ready(const int *rfd, int nreg)
+{
+    int n = 0;
+    for (int i = 0; i < nreg; i++) {
+        struct stat st;
+        if (fstat(rfd[i], &st) != 0) continue;
+        off_t at = lseek(rfd[i], 0, SEEK_CUR);
+        if (at >= 0 && at < st.st_size) n++;
+    }
+    return n;
+}
+
+/* THE WATCH IS KEPT ACROSS CALLS, AND THAT IS NOT AN OPTIMISATION.
+ *
+ * The first version of this created an inotify instance, added the watches,
+ * polled, and closed it again on every single park. It was correct and it made
+ * the compositor SLOWER than the fixed tick it was replacing: measured with a
+ * clock_gettime either side of the poll, one sys_waitfds call took 16 ms of
+ * poll and then 4 to 32 ms MORE, so wsysd's 16 ms loop ran at 20-48 ms and
+ * input-to-pixel latency went from p50 8.9 ms to p50 9.9 / p95 21.4. The cost
+ * is the TEARDOWN: destroying an fsnotify mark waits on an SRCU grace period,
+ * and doing that 60 times a second pays it 60 times a second.
+ *
+ * So the instance and its watches live in the process and are rebuilt only
+ * when the set of regular files being waited on actually changes. Identity is
+ * (fd, st_dev, st_ino) and not the fd alone, because an fd number that has
+ * been closed and reopened onto a different file must not keep the old file's
+ * watch. The queue is drained BEFORE readiness is sampled: a write updates the
+ * file's size before its IN_MODIFY event is queued, so anything the drain
+ * throws away is either already visible to the size check below or still
+ * pending afterwards -- there is no order in which a wakeup is lost. */
+struct waitfds_reg { int fd; dev_t dev; ino_t ino; };
+static int waitfds_ino = -1;
+static struct waitfds_reg waitfds_watch[WAITFDS_MAX];
+static int waitfds_nwatch = 0;
+
+static void waitfds_ino_drain(void)
+{
+    char buf[512];
+    while (read(waitfds_ino, buf, sizeof buf) > 0) { }
+}
+
+/* Point the cached inotify instance at exactly this set of files. Returns the
+ * instance, or -1 when there is nothing to watch or inotify is unavailable. */
+static int waitfds_ino_arm(const struct waitfds_reg *want, int n)
+{
+    if (n <= 0) return -1;
+    int same = (waitfds_ino >= 0 && waitfds_nwatch == n);
+    for (int i = 0; same && i < n; i++)
+        if (waitfds_watch[i].fd != want[i].fd
+            || waitfds_watch[i].dev != want[i].dev
+            || waitfds_watch[i].ino != want[i].ino)
+            same = 0;
+    if (!same) {
+        if (waitfds_ino >= 0) close(waitfds_ino);
+        waitfds_nwatch = 0;
+        waitfds_ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (waitfds_ino < 0) return -1;
+        for (int i = 0; i < n; i++) {
+            char p[64];
+            snprintf(p, sizeof p, "/proc/self/fd/%d", want[i].fd);
+            if (inotify_add_watch(waitfds_ino, p, IN_MODIFY) < 0) continue;
+            waitfds_watch[waitfds_nwatch++] = want[i];
+        }
+        if (waitfds_nwatch == 0) {
+            close(waitfds_ino);
+            waitfds_ino = -1;
+            return -1;
+        }
+    }
+    waitfds_ino_drain();
+    return waitfds_ino;
+}
 int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
 {
     fdns_gate_release();
@@ -2479,11 +2573,15 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
         return -1;
     }
 
-    struct pollfd pfd[WAITFDS_MAX];
+    struct pollfd pfd[WAITFDS_MAX + 1];   /* + the inotify descriptor */
     nfds_t npoll = 0;
     struct devfile *ring[WAITFDS_MAX];
     int nring = 0;
     int always_ready = 0;
+    int rfd[WAITFDS_MAX];                 /* ordinary fds that are plain files */
+    struct waitfds_reg rid[WAITFDS_MAX];  /* ... and what file each one IS */
+    int nreg = 0;
+    int ino = -1, ino_slot = -1;
 
     for (uint64_t i = 0; i < nfds; i++) {
         struct devfile *v = devtab_find((int)fds[i]);
@@ -2510,54 +2608,58 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
         } else if (v) {
             always_ready++;                    /* a snapshot device */
         } else {
-            pfd[npoll].fd = fds[i];
+            struct stat st;
+            if (fstat((int)fds[i], &st) == 0 && S_ISREG(st.st_mode)) {
+                rid[nreg].fd = (int)fds[i];    /* see the note above */
+                rid[nreg].dev = st.st_dev;
+                rid[nreg].ino = st.st_ino;
+                rfd[nreg] = (int)fds[i];
+                nreg++;
+            } else {
+                pfd[npoll].fd = fds[i];
+                pfd[npoll].events = POLLIN;
+                pfd[npoll].revents = 0;
+                npoll++;
+            }
+        }
+    }
+
+    /* The watch is armed and its queue drained BEFORE any size is sampled: a
+     * write that lands between the two must be a pending event, not a lost
+     * wakeup. */
+    if (nreg) {
+        ino = waitfds_ino_arm(rid, nreg);
+        if (ino >= 0) {
+            ino_slot = (int)npoll;
+            pfd[npoll].fd = ino;
             pfd[npoll].events = POLLIN;
             pfd[npoll].revents = 0;
             npoll++;
         }
     }
 
-    /* No ring in the set: poll(2) answers it, and always_ready short-circuits
-     * the sleep exactly as the old code did. */
-    if (nring == 0) {
-        if (always_ready) {
-            int r = 0;
-            if (npoll) {
-                do { r = poll(pfd, npoll, 0); } while (r < 0 && errno == EINTR);
-                if (r < 0) r = 0;
-            }
-            return (int64_t)(r + always_ready);
-        }
-        int r;
-        do {
-            r = poll(pfd, npoll, (int)timeout_ms);
-        } while (r < 0 && errno == EINTR);
-        return r < 0 ? -1 : (int64_t)r;
-    }
-
-    /* At least one ring. Sleep in the futex, waking to re-check both the rings
-     * and any ordinary fds. Deadline arithmetic is done in milliseconds against
+    /* ONE deadline loop for every case. Readiness is recomputed on every pass;
+     * the SLEEP is a futex when a ring is in the set and a poll(2) when it is
+     * not -- and poll over an empty set is exactly the plain timed sleep that
+     * nfds == 0 asks for. Deadline arithmetic is done in milliseconds against
      * CLOCK_MONOTONIC so a wake that finds nothing ready does not restart the
-     * caller's timeout — which would turn a 16 ms park into an unbounded one. */
+     * caller's timeout — which would turn a 16 ms park into an unbounded one.
+     * always_ready still short-circuits the sleep exactly as the old code did:
+     * the first pass counts it and returns without waiting. */
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     int64_t start = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    int64_t rv;
 
     for (;;) {
         /* Read the generation BEFORE checking readiness: a ring written
          * between the check and the futex wait must bump it and be seen as a
          * mismatch, not slept through. */
-        uint32_t seen = hamwsys_input_gen();
+        uint32_t seen = nring ? hamwsys_input_gen() : 0;
 
-        int ready = always_ready;
+        int ready = always_ready + waitfds_reg_ready(rfd, nreg);
         for (int i = 0; i < nring; i++)
             if (hamwsys_ring_ready(&ring[i]->w)) ready++;
-        if (npoll) {
-            int r;
-            do { r = poll(pfd, npoll, 0); } while (r < 0 && errno == EINTR);
-            if (r > 0) ready += r;
-        }
-        if (ready) return (int64_t)ready;
 
         int64_t left = -1;
         if (timeout_ms >= 0) {
@@ -2565,8 +2667,70 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
             int64_t elapsed = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000
                               - start;
             left = timeout_ms - elapsed;
-            if (left <= 0) return 0;
+            if (left < 0) left = 0;
         }
+
+        if (nring == 0) {
+            /* No ring: everything left is pollable (ordinary fds, sockets, the
+             * clipboard's inotify, and now a regular file's inotify), so ONE
+             * poll(2) does the whole wait -- no cap, and no separate probe
+             * poll before it. THE COUNT OF POLLS IS THE IDLE COST: a park
+             * costs about 136 us of CPU here and a syscall is a measurable
+             * part of that, so the version of this loop that did a 0-timeout
+             * poll, then the sleeping poll, then another 0-timeout poll on the
+             * way out cost +0.36% of one core at idle against the plain
+             * timed sleep it replaced (four interleaved 30 s rounds,
+             * /proc/<pid>/stat). */
+            int r = 0;
+            int ms = ready ? 0 : (timeout_ms < 0 ? -1 : (int)left);
+            if (npoll) {
+                do { r = poll(pfd, npoll, ms); } while (r < 0 && errno == EINTR);
+                if (r < 0) { rv = -1; goto out; }
+                if (r > 0) {
+                    /* The inotify descriptor is OURS and not one of the
+                     * caller's fds: drain it and do not count it. What it
+                     * means -- a watched file grew -- is answered by
+                     * waitfds_reg_ready() against the offset, which is the
+                     * question the caller actually asked. */
+                    if (ino_slot >= 0 && pfd[ino_slot].revents) {
+                        waitfds_ino_drain();
+                        r--;
+                    }
+                    ready += r;
+                }
+            } else if (!ready && ms != 0) {
+                /* Nothing to watch at all: poll over an empty set is the
+                 * plain timed sleep nfds == 0 asks for, and stays one. */
+                do { r = poll(pfd, 0, ms); } while (r < 0 && errno == EINTR);
+                r = 0;
+            }
+            if (ready) { rv = (int64_t)ready; goto out; }
+            if (timeout_ms >= 0 && (ms == 0 || left <= 0)) { rv = 0; goto out; }
+            /* The sleep ran its course. A regular file is not in the poll set,
+             * so ask it once more before calling the park empty -- and then
+             * return rather than going round again: an fd that becomes ready
+             * after poll(2) timed out is indistinguishable from one that
+             * becomes ready just after this call returns. */
+            if (timeout_ms >= 0) {
+                rv = always_ready + waitfds_reg_ready(rfd, nreg);
+                goto out;
+            }
+            continue;
+        }
+
+        if (npoll) {
+            int r;
+            do { r = poll(pfd, npoll, 0); } while (r < 0 && errno == EINTR);
+            if (r > 0) {
+                if (ino_slot >= 0 && pfd[ino_slot].revents) {
+                    waitfds_ino_drain();
+                    r--;
+                }
+                ready += r;
+            }
+        }
+        if (ready) { rv = (int64_t)ready; goto out; }
+        if (timeout_ms >= 0 && left <= 0) { rv = 0; goto out; }
         /* An ordinary fd mixed in with a ring cannot be futex-woken, so cap
          * the sleep and re-poll it. The cap keeps it correct rather than fast.
          *
@@ -2610,6 +2774,10 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
         if (npoll && (left < 0 || left > 20)) left = 20;
         hamwsys_input_wait(seen, left);
     }
+out:
+    /* The inotify instance is NOT closed here -- see waitfds_ino_arm: closing
+     * it on every park is what made this whole path slower than the tick. */
+    return rv;
 }
 
 /* extern def sys_openchan(path: Ptr[char], write: int32) -> int32

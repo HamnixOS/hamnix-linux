@@ -23,7 +23,7 @@ rather than argued:
 | Installed boot | UEFI → a unified kernel image on an ESP → PID 1 → `bind '#sysroot' /` → the real ext4 root. Files written on one boot are there on the next. |
 | Display | `/dev/fb` on fbdev AND on raw DRM/KMS, double-buffered with `MODE_PAGE_FLIP` — 481 flips, `stalled=0`. `flip` is a `/dev/fbctl` verb; double buffering arms lazily, so a program that never flips runs the old path untouched. |
 | Windows | `/dev/wsys`, the port of `devwsys.ad`, in shared memory. Both protocols: the v1 scene display list and the v2 blit surface, plus the `'I'` named-image tier (a scene client can draw a real photograph without converting its window to a blit surface). The screen size is published at `/dev/wsys/screen`. |
-| Compositor | `user/wsysd.ad`. A 1724-op frame at 1280x800 costs **625 us**, down from 5503; a pointer-only frame costs **5 us**, down from 6543. Pixel-identical to the pre-optimisation code at three geometries. **AND THE DESKTOP NOW HAS A FRAME RATE AND A LATENCY, MEASURED RATHER THAN DIVIDED OUT OF THOSE** (`tests/linux/de_fps_latency.sh`, offscreen at 1280x800 on the SOFTWARE path -- the only one any shipped image has ever run): **61 fps** with the pointer moving at 250 ev/s (the cursor-only path, wsysd at 1.7% cpu), **52 fps** with a decorated 480x320 text window dragging across a 4-window desktop (every frame a full repaint, 15% cpu), **0 frames idle** from the compositor and the wallpaper, and **3.1 frames/s idle** from the panel -- which is exactly `hampanelscene`'s `SAMPLE_TICKS(20) * 16 ms = 320 ms` sysmon resample and nothing else, at 1.2% cpu. Input-to-pixel **p50 8.9 ms, p95 16.1 ms, max 18.7 ms** over 150 trials. **THE CEILING IS THE LOOP, NOT THE RASTERIZER.** `main` ends in `sys_waitfds(&waitset[0], 0, 16)` with nfds LITERALLY 0 -- `waitset` is declared and never filled -- so the compositor is a fixed 16 ms tick that no input can wake early. That caps the rate at 1000/(16 + frame_ms) ~= 60 and makes the latency ~uniform 0..16 ms plus the frame: the 625 us work is why 52-61 fps is reached, and the tick is what stops it going higher. **Filling `waitset` with the input fds is the single largest remaining win on how the desktop FEELS**, and it would halve the median. The gate refuses to report anything until its instrument passes a selftest (a deliberately SIGSTOPped compositor must MEASURE as stopped), and it keeps its own first, WRONG answer on the page as a control: a constant 80 ms settle is exactly five ticks, phase-locked the probe, and reported **p50 1.0 ms** -- one lucky phase repeated, 8x too good. |
+| Compositor | `user/wsysd.ad`. A 1724-op frame at 1280x800 costs **625 us**, down from 5503; a pointer-only frame costs **5 us**, down from 6543. Pixel-identical to the pre-optimisation code at three geometries. **AND THE DESKTOP NOW HAS A FRAME RATE AND A LATENCY, MEASURED RATHER THAN DIVIDED OUT OF THOSE** (`tests/linux/de_fps_latency.sh`, offscreen at 1280x800 on the SOFTWARE path -- the only one any shipped image has ever run): **61 fps** with the pointer moving at 250 ev/s (the cursor-only path, wsysd at 1.7% cpu), **52 fps** with a decorated 480x320 text window dragging across a 4-window desktop (every frame a full repaint, 15% cpu), **0 frames idle** from the compositor and the wallpaper, and **3.1 frames/s idle** from the panel -- which is exactly `hampanelscene`'s `SAMPLE_TICKS(20) * 16 ms = 320 ms` sysmon resample and nothing else, at 1.2% cpu. Input-to-pixel **p50 8.9 ms, p95 16.1 ms, max 18.7 ms** over 150 trials. **THE CEILING WAS THE LOOP, NOT THE RASTERIZER, AND THE LOOP IS FIXED.** `main` used to end in `sys_waitfds(&waitset[0], 0, 16)` with nfds LITERALLY 0 -- `waitset` declared and never filled -- so the compositor was a fixed 16 ms tick that no input could wake early, which capped the rate at 1000/(16 + frame_ms) ~= 60 and made the latency ~uniform 0..16 ms plus the frame. `waitset` is now FILLED with the input fds and the 16 ms timeout is the fallback. **THREE independent before/after pairs, each run back to back on the same host minutes apart** (the host's other load moved between them, which is exactly why they are reported as a range and not as one number): input-to-pixel **p50 8.68-9.64 -> 0.33-1.07 ms**, p95 **16.04-21.23 -> 0.54-7.31**, max **18.38-32.29 -> 2.67-12.22**; pointer fps **60.8-61.1 -> 240.5-250.0** (that is the 250 ev/s injection rate, not a ceiling -- at 1000 ev/s it presents 998.8 frames a second for 6.6% of a core); window-drag fps **unchanged within the noise** (52.0/46.1/39.2 against a baseline 51.9/44.6/50.4 -- with no input there is nothing to wake the loop, so it is the same fallback tick, and the mechanism says so as well as the number: parks/s at idle are 62.1 in both arms). **IDLE DOES NOT REGRESS, measured five interleaved 30 s rounds a side** from /proc/<pid>/stat: bare compositor 0.30/0.27/0.33/0.33/0.30% of one core against 0.30/0.33/0.30/0.33/0.33%, a 0.012 point difference where one clock tick over 30 s IS 0.033 points; the whole desktop 4.83/4.70/4.87% against 4.53/4.30/4.97%. It cost three passes; the first measured WORSE than the tick and the second regressed idle by +0.36 points, and both are written up below. The gate refuses to report anything until its instrument passes a selftest (a deliberately SIGSTOPped compositor must MEASURE as stopped), and it keeps its own first, WRONG answer on the page as a control: a constant 80 ms settle is exactly five ticks, phase-locked the probe, and reported **p50 1.0 ms** -- one lucky phase repeated, 8x too good. |
 | Window titles | **Every window on the desktop has its name on its title bar, and until this it had none.** Not "the title was missing" — the device has held one per window since the port began (`user/linux-wsys.c`, the `title` ctl verb, 64 bytes) and publishes the set at `/dev/wsys/windows`, which is where the panel's taskbar has been reading it all along; `wsysd` drew the bar and painted no text on it, so three terminals open were three identical grey bars. **NO NEW FONT.** The title is a one-line `hamscene` display list (`glyphs`, the same builder every DE client uses) rasterized by the same `lib/hamui_host.ad` this compositor already rasterizes every window with — the same DejaVu Sans at the same 14px through the same anti-aliased TrueType path — onto a title-bar-sized surface presented **blended**, so the bar colour shows between the letters instead of a black box. **IT SAID THAT BEFORE AND IT WAS FALSE**, and the machine's owner found it in a screenshot: `#f0f0f5` ink at full strength, correct to the byte, sitting in a black box on a `#5577dd` bar, with a 23-PASS gate agreeing. The surface WAS keyed and the clear WAS transparent; `vk2d_raster_cov_mask`'s opaque fast path forced alpha 255 across each glyph's whole BOUNDING BOX, cov==0 cells included -- its comment states the assumption ("same value the composite target holds"), which is true of every target but a keyed one -- so every unpainted cell inside a letter was declared painted, and painted black. A FOURTH silent layer of `e0df2d4a`'s three, one deeper. Fixed with `vk2d_raster_cov_mask_over` (straight-alpha source-over that keeps the destination's alpha byte; over an opaque destination it reduces exactly to the old formula, so nothing that was right moved), `host_keyed` in `lib/hamui_host.ad` set from the clear it just performed, and a mode-2 present -- because `keyed` is the wrong present for anti-aliased text even once the alpha byte is honest: all-or-nothing writes a 1/255-coverage edge pixel as full ink. It is measured with `htb_text_width()`, the one place in the tree that owns that advance sum, and ellipsised to fit. **THE TITLE IS UNTRUSTED AND IS TREATED AS SUCH**: the window table is `/srv/wsys`, mode 0666, and `linux-wsys.c` says in as many words that any uid can retitle any window. A hostile title cannot inject a draw op (`_hs_emit_str` maps `"` and newline to a space, and every byte outside printable ASCII is drawn as `.`), and cannot overrun — the measurement decides where the text is CUT, the surface decides where the ink can REACH, and the two bounds are independent because one of them is arithmetic. What it CAN still do is put 63 bytes of its choosing on another client's bar: it can lie about which window is which, which needs a per-uid mapping or an RPC compositor, exactly as for the scene and the key ring. `tests/linux/wsys_title.sh` (**29 PASS**, offscreen, under a minute): every assertion is a pixel count in a rectangle derived from the window's own geometry, with an **empty-title control on the same window in the same run** — and with the change reverted the gate is **16 PASS, 7 FAIL**. One of its assertions was itself success-shaped on the first revert run and was fixed: two blank bars compared by colour "differ" the moment one is focused and the other is not, so the two-window test compares the INK MASK, not the pixels. `hamui_host_uncovered_rows()` is deliberately NOT the instrument — it unions the fill and blit rects only, glyph ink is stamped through the coverage-mask op, and `tests/linux/wsys_cover.sh` already pins that ("a window with only text in it is reported uncovered"); the clip is proven on framebuffer pixels instead. **AND THE GATE'S OWN HOLE WAS THE DEFECT'S SHAPE**: all 23 assertions were about the INK -- how much of it, how light the lightest pixel is, whether two bars carry different amounts -- and none looked at the pixels the letters do NOT cover. Six more now do, on the focused bar (`#5577dd`) and the unfocused one (`#404040`): nothing in the band is darker than the bar, not one pixel of it is `#000000`, and the bar is positively there across the ink's span. Reverted, the original 23 are unchanged and those say `432 px darker than the bar, 182 pure black, darkest #000000`. |
 | Input | every `/dev/input/event*`, decoded in the compositor, routed to the focused window in window-local coordinates — **and the DE chrome actually reacts to a mouse, which for the whole port before this it did not.** This row read exactly as it does now while the Applications button, the desktop icons and every panel control were completely dead to a click: the compositor routed to `<wid>/pointer` and the chrome reads `<wid>/event`, and nothing bridged them. That is the warning this row now carries — "input is routed" was a true sentence about a desktop nobody could use. Proven from the evdev end by `tests/linux/de_mouse_chrome.sh` (13 PASS), which is forbidden to write a ring by hand and asserts that about itself, because writing the ring by hand as host owner is precisely what every earlier gate did and precisely why this went unseen. **Focus lines are still not emitted at all** (no `f in`/`f out`), so clicking away does not dismiss an open menu — see the running list. |
 | Desktop | `hamdesktop` + `hampanelscene`, unmodified. Launch a terminal from the menu, type in it, get output. |
@@ -280,27 +280,85 @@ clients, the dropped desktop and the seven binaries.
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
-* **THE COMPOSITOR CANNOT BE WOKEN BY INPUT, AND THAT IS HALF THE LATENCY A
-  PERSON FEELS.** `user/wsysd.ad`'s main loop ends in
+* ~~**THE COMPOSITOR CANNOT BE WOKEN BY INPUT**~~ — **FIXED, and the fix is
+  8 to 27x on the number a person feels.** It was `sys_waitfds(&waitset[0], 0, 16)`
+  with nfds LITERALLY 0 and `waitset: Array[4, int32]` never written, so the
+  compositor was a fixed 16 ms tick and input-to-pixel was **p50 8.9 / p95
+  16.1 / max 18.7 ms** against a 0.6 ms frame — 93% of the median was the loop
+  not being woken. `waitset` is now `Array[16]` and FILLED (one slot per evdev
+  device, `MAX_INPUT` 12, plus stdin; `WAITFDS_MAX` is 64), the 16 ms timeout
+  is the FALLBACK, and three before/after pairs run back to
+  back on the same host report **p50 0.33-1.07 ms, p95 0.54-7.31, max
+  2.67-12.22**, pointer fps **60.8-61.1 -> 240.5-250.0** (the injection rate,
+  not a ceiling: at 1000 ev/s it presents 998.8 frames a second for 6.6% of a
+  core), and **idle that does not regress** — 62.1 parks/s either side from
+  `/proc/<pid>/status`, 0 frames from the compositor, and five interleaved
+  30 s rounds a side of `/proc/<pid>/stat` that differ by 0.012 points of one
+  core when one clock tick over 30 s is 0.033. The un-jittered control that
+  used to read 8x too good (p50 1.02 against a true 8.93) now agrees with the
+  jittered probe to 0.02-0.75 ms, because there is no longer a tick to
+  phase-lock onto. See `work/wsysd-wake-on-input`.
 
-      sys_waitfds(&waitset[0], 0, 16)
+  **TWO THINGS THAT COST A PASS EACH AND ARE THE REUSABLE PART.**
 
-  with nfds LITERALLY 0. `waitset: Array[4, int32]` is declared at the top of
-  the file and never written. So the compositor is a fixed 16 ms tick: it
-  wakes, scans the window table, drains whatever evdev records arrived,
-  presents at most one frame, and sleeps 16 ms again, whatever happened. An
-  input that lands 1 ms after a tick waits 15 ms for the next one.
+  * **An fd only goes in the wait set if it is PROVED it can park on it.**
+    poll(2) reports some descriptors readable ALWAYS — `/dev/null` does, and
+    every offscreen gate runs `wsysd </dev/null`. One of those in the set does
+    not make the compositor faster, it makes the park return instantly for
+    ever: a busy spin that burns a core *and reports a flattering latency*.
+    So `build_waitset()` drains every source and asks for a zero-timeout wait
+    on each fd; one that still answers "ready" is answering about itself and
+    is left out, three rounds required so a real event cannot disable a device.
+  * **A REGULAR FILE IS THE SAME TRAP ONE LAYER OUT**, and it is why
+    `sys_waitfds` grew a fourth fd class. `HAMWSYSD_INPUT` names a plain file
+    of evdev records in every offscreen gate, and POSIX says a regular file is
+    always readable whatever the offset. Readiness for one is now "the offset
+    is behind the end of the file" and the sleep is an inotify `IN_MODIFY`
+    watch — the mechanism the clipboard park already used.
 
-  Measured (`tests/linux/de_fps_latency.sh`, 150 trials, offscreen, software
-  path): input-to-pixel **p50 8.9 ms, p95 16.1 ms, max 18.7 ms** — the shape
-  of a uniform 0..16 ms wait plus a frame, which is exactly what a fixed tick
-  with no wakeup produces. The frame itself is 0.6 ms and a pointer-only frame
-  is 5 us, so **93% of the median is the loop not being woken**. Filling
-  `waitset` with the input fds — which `sys_waitfds` already supports, and
-  which `user/hampanelscene.ad` already does with its own event fds — should
-  roughly halve the median and cut the tail to the frame time. It is the
-  single largest remaining win on how the desktop FEELS, and it is not a
-  rasterizer problem.
+  **AND THE FIRST VERSION OF THE FIX MEASURED WORSE THAN THE TICK IT
+  REPLACED** (p50 9.89, p95 21.41, drag 51.9 -> 31.6 fps), which is kept in
+  the branch history because the cause is not guessable. The wake mechanism in
+  isolation is **0.039 ms**. wsysd's park, with `now_us()` either side, was
+  16-40 ms where the baseline binary's is 16.107 ms every single time. The
+  `poll(2)` inside it took the 16.08 ms it asked for — so the time was in the
+  entry work: **creating and destroying an inotify instance on every park,
+  because tearing down an fsnotify mark waits on an SRCU grace period.** The
+  instance and its watches now live in the process, keyed on
+  `(fd, st_dev, st_ino)` so a recycled fd cannot inherit another file's watch,
+  and rebuilt only when the set changes.
+
+  **AND THE SECOND VERSION REGRESSED IDLE, WHICH IS THE OTHER THING THIS TASK
+  WAS TOLD TO WATCH.** Four interleaved 30 s rounds: baseline 1.07/0.63/1.00/
+  0.67% of one core, the fix 1.33/1.10/1.23/1.13%, at the SAME 61.5-61.9
+  parks/s -- the loop was not running more often, each park had got dearer by
+  about 59 us against a park that costs ~136 us of CPU in all. The cause was
+  the shape of the loop and not the wake: it ran a 0-timeout poll to sample
+  the ordinary fds, then the sleeping poll, then went round and ran a THIRD
+  0-timeout poll on the way out. The no-ring path now does ONE poll -- the
+  non-pollable sources are counted first and decide whether its timeout is 0
+  or the remainder, and when the sleep runs its course the regular files are
+  re-checked once and the call RETURNS instead of looping, because an fd that
+  becomes ready after poll(2) timed out is indistinguishable from one that
+  becomes ready just after the call returns.
+
+  **WHAT IS STILL TRUE**: a CLIENT REPAINT cannot wake this loop. wsysd learns
+  a window changed by comparing a signature it reads out of `/dev/wsys/<wid>/
+  ctl`, and those are snapshot files — ready by definition. The only waitable
+  `/dev/wsys` object is a per-window ring, and mixing one into this set would
+  be strictly WORSE than the tick: a set holding a ring sleeps in the futex on
+  `inputgen` and caps its poll at 20 ms, and an evdev fd cannot futex-wake
+  anything, so input would wait up to 20 ms instead of at once. The wait set
+  is therefore all ordinary fds, the one shape `sys_waitfds` answers with a
+  single uncapped `poll(2)`, and window-drag fps is therefore unchanged —
+  measured three times over, and the spread between the three pairs (39-52 fps
+  in BOTH arms) is the size of the host noise on that load, which is why the
+  parks/s equality is the stronger evidence. The price of the win is named
+  too: drag + pointer together is **62-66% of one core, for 244-250 fps,
+  where the tick was 15-38% for 38-53 fps** — every pointer event now forces a
+  full repaint instead of being coalesced into a tick, and there is no cap
+  saying the compositor may not present faster than a panel can show. That cap
+  is the obvious next question and it is NOT answered here.
 
 * **THE VULKAN/GPU COMPOSITOR PATH IS 13x SLOWER THAN THE SOFTWARE ONE, AND
   NO MACHINE HAS EVER RUN IT.** The image stages only the venus ICD, which
