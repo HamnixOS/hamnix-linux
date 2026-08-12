@@ -2660,15 +2660,68 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
         int ready = always_ready + waitfds_reg_ready(rfd, nreg);
         for (int i = 0; i < nring; i++)
             if (hamwsys_ring_ready(&ring[i]->w)) ready++;
+
+        int64_t left = -1;
+        if (timeout_ms >= 0) {
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t elapsed = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000
+                              - start;
+            left = timeout_ms - elapsed;
+            if (left < 0) left = 0;
+        }
+
+        if (nring == 0) {
+            /* No ring: everything left is pollable (ordinary fds, sockets, the
+             * clipboard's inotify, and now a regular file's inotify), so ONE
+             * poll(2) does the whole wait -- no cap, and no separate probe
+             * poll before it. THE COUNT OF POLLS IS THE IDLE COST: a park
+             * costs about 136 us of CPU here and a syscall is a measurable
+             * part of that, so the version of this loop that did a 0-timeout
+             * poll, then the sleeping poll, then another 0-timeout poll on the
+             * way out cost +0.36% of one core at idle against the plain
+             * timed sleep it replaced (four interleaved 30 s rounds,
+             * /proc/<pid>/stat). */
+            int r = 0;
+            int ms = ready ? 0 : (timeout_ms < 0 ? -1 : (int)left);
+            if (npoll) {
+                do { r = poll(pfd, npoll, ms); } while (r < 0 && errno == EINTR);
+                if (r < 0) { rv = -1; goto out; }
+                if (r > 0) {
+                    /* The inotify descriptor is OURS and not one of the
+                     * caller's fds: drain it and do not count it. What it
+                     * means -- a watched file grew -- is answered by
+                     * waitfds_reg_ready() against the offset, which is the
+                     * question the caller actually asked. */
+                    if (ino_slot >= 0 && pfd[ino_slot].revents) {
+                        waitfds_ino_drain();
+                        r--;
+                    }
+                    ready += r;
+                }
+            } else if (!ready && ms != 0) {
+                /* Nothing to watch at all: poll over an empty set is the
+                 * plain timed sleep nfds == 0 asks for, and stays one. */
+                do { r = poll(pfd, 0, ms); } while (r < 0 && errno == EINTR);
+                r = 0;
+            }
+            if (ready) { rv = (int64_t)ready; goto out; }
+            if (timeout_ms >= 0 && (ms == 0 || left <= 0)) { rv = 0; goto out; }
+            /* The sleep ran its course. A regular file is not in the poll set,
+             * so ask it once more before calling the park empty -- and then
+             * return rather than going round again: an fd that becomes ready
+             * after poll(2) timed out is indistinguishable from one that
+             * becomes ready just after this call returns. */
+            if (timeout_ms >= 0) {
+                rv = always_ready + waitfds_reg_ready(rfd, nreg);
+                goto out;
+            }
+            continue;
+        }
+
         if (npoll) {
             int r;
             do { r = poll(pfd, npoll, 0); } while (r < 0 && errno == EINTR);
             if (r > 0) {
-                /* The inotify descriptor is OURS and not one of the caller's
-                 * fds: drain it and do not count it. What it means -- a
-                 * watched file grew -- is already counted by
-                 * waitfds_reg_ready() above, against the offset, which is the
-                 * question the caller actually asked. */
                 if (ino_slot >= 0 && pfd[ino_slot].revents) {
                     waitfds_ino_drain();
                     r--;
@@ -2677,24 +2730,7 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
             }
         }
         if (ready) { rv = (int64_t)ready; goto out; }
-
-        int64_t left = -1;
-        if (timeout_ms >= 0) {
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            int64_t elapsed = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000
-                              - start;
-            left = timeout_ms - elapsed;
-            if (left <= 0) { rv = 0; goto out; }
-        }
-        if (nring == 0) {
-            /* No ring: everything left is pollable (ordinary fds, sockets, the
-             * clipboard's inotify, and now a regular file's inotify), so ONE
-             * poll(2) does the whole wait with no cap. */
-            int r;
-            do { r = poll(pfd, npoll, (int)left); } while (r < 0 && errno == EINTR);
-            if (r < 0) { rv = -1; goto out; }
-            continue;
-        }
+        if (timeout_ms >= 0 && left <= 0) { rv = 0; goto out; }
         /* An ordinary fd mixed in with a ring cannot be futex-woken, so cap
          * the sleep and re-poll it. The cap keeps it correct rather than fast.
          *
