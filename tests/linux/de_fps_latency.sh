@@ -89,6 +89,10 @@ KEEP="${FPS_KEEP:-0}"
 GEOM="${HAMFB_GEOM:-1280x800}"
 FBW="${GEOM%x*}"; FBH="${GEOM#*x}"
 SECONDS_LOAD="${FPS_SECONDS:-10}"
+# How many times each stated load is REPEATED. The cpu column needs it;
+# fps does not (57.1/57.9/57.5 across three runs) but is reported as the
+# median too so the row is internally consistent.
+LOAD_REPS="${LOAD_REPS:-3}"
 TRIALS="${FPS_TRIALS:-120}"
 
 pass=0; fail=0
@@ -244,7 +248,12 @@ echo "defps: ---- sustained fps, stated load ------------------------------"
 info "load A: pointer moving continuously at 250 events/s over the live"
 info "        desktop ($NWIN windows). This is the CURSOR-ONLY path -- wsysd's"
 info "        save-under means a pointer move re-rasterizes nothing."
-$DRV --mode fps --seconds "$SECONDS_LOAD" --rate 250 --tag "A pointer only"
+# --reps: the cpu column is a MEDIAN OF THREE with every sample printed, and
+# fps comes back as the median too. A single sample of this column ranged
+# 4.2-17.1 on this host for the SAME binary under this exact load, and was
+# once read as a 4x regression that had not happened. Set LOAD_REPS=1 for the
+# old single-sample cost if the fps number is all you want.
+$DRV --mode fps --seconds "$SECONDS_LOAD" --rate 250 --reps "$LOAD_REPS" --tag "A pointer only"
 
 # The full path needs the WINDOW SET to change, which pointer motion by
 # design does not do. tests/linux/de_dragload.ad owns a decorated 480x320
@@ -267,11 +276,11 @@ echo
 info "load B: that window dragging, and NO pointer motion. Every frame here is"
 info "        a full repaint: clear, re-rasterize $((NWIN+1)) windows' scenes, copy each"
 info "        into the composite, write the whole $((FBW*FBH*4/1024/1024)) MiB screen."
-$DRV --mode fps --seconds "$SECONDS_LOAD" --rate 0 --tag "B window drag"
+$DRV --mode fps --seconds "$SECONDS_LOAD" --rate 0 --reps "$LOAD_REPS" --tag "B window drag"
 echo
 info "load C: both at once -- a window being dragged while the pointer moves,"
 info "        which is what dragging a window with a mouse actually is."
-$DRV --mode fps --seconds "$SECONDS_LOAD" --rate 250 --tag "C drag + pointer"
+$DRV --mode fps --seconds "$SECONDS_LOAD" --rate 250 --reps "$LOAD_REPS" --tag "C drag + pointer"
 info "ceiling: the loop's own 16 ms sleep caps all three at 1000/(16+frame_ms)"
 info "         ~= 60 fps. A number at that ceiling means the RASTERIZER is no"
 info "         longer what limits the desktop; the tick is."

@@ -417,16 +417,94 @@ changed code while reporting a clean bill of health:
 | max | 18.20 ms | **16.80 ms** |
 
 **Idle held** at 0.5% capped (0.5 0.5 0.5). And the cursor-only path improved
-too: 16.7% → **8.1%** at 250 ev/s under a forced cap — worth stating because
-`de_fps_latency.sh`'s own single-sample CPU column reported that same
-comparison as 4.0% → 16.6%, i.e. **backwards**. Three samples with `cpuprobe`
-on a pid taken from the process we started reversed the sign of the result.
-That column is a lifetime-average-adjacent single sample and should not be
-used for conclusions.
+too: 16.7% → **8.1%** at 250 ev/s under a forced cap.
+
+> **RETRACTION — I accused an instrument that was correct.** This paragraph
+> previously said `de_fps_latency.sh`'s CPU column "reversed the sign", on the
+> strength of it reporting 4.0% → 16.6% where `cpuprobe` found 16.7% → 8.1%.
+> **That was my own cross-run comparison — the exact error I was warning about
+> — and the column is not wrong.** Run both instruments against the same pid
+> over the same 10 s window and they agree to within 0.2 points on every run:
+> 17.1/17.1, 11.8/11.8, 15.2/15.0, 9.5/9.5, 8.6/8.5, 4.2/4.2. The column reads
+> `utime+stime` out of `/proc/<pid>/stat` over the interval, on the pid the
+> harness started, which is the same method `cpuprobe` uses.
+>
+> **The real defect was that it was ONE sample of a quantity that moves
+> between runs** — those six readings are three runs of each of two binaries,
+> so the *same* binary under the *identical* load gave 17.1, 11.8 and 15.2.
+> One sample from each supports almost any story, including a 4x regression
+> that did not happen. Fixed rather than documented: `de_fps_driver.py` takes
+> `--reps`, and `de_fps_latency.sh` now passes 3, so the column is a median
+> with every sample printed and says `ONE SAMPLE` when it is not. With that in
+> place the same comparison reads:
+>
+> | load | pre-fix | post-fix |
+> |---|---|---|
+> | A pointer only | 4.1% (4.0 4.1 4.2) | 4.0% (4.0 4.0 4.0) |
+> | B window drag | 20.4% (19.7 20.4 21.3) | **15.0%** (14.7 15.0 15.5) |
+> | C drag + pointer | 33.8% (22.5 33.8 37.3) | **17.4%** (17.1 17.4 17.6) |
+>
+> Note load C's pre-fix spread, 22.5 to 37.3 — that alone is wider than most
+> of the effects measured in this document.
 
 Correctness is gated by `tests/linux/wake_coalesce_stale.sh`, which checks
 pixels rather than rates: live during the drag, converged after the client
 goes silent, and client-driven repaint still working after a deferral episode.
+
+### 3g. Every drag number above was of an EMPTY window
+
+`de_dragload` wrote its scene one line per `win_write()`, and each call
+reopens the file — which **starts a new frame** rather than appending. Only
+the last line survived to `commit`. wsysd reported it on every run for as long
+as the file existed, and it was read as a compositor complaint rather than as
+the load generator's bug:
+
+```
+wsysd: window 3 paints 480x0 of its 480x320 window -- 320 rows reach the
+       screen as the compositor's clear colour.
+```
+
+So the "full-frame load" behind every drag figure in this document — and in
+`de_fps_latency.sh`, `de_fps_gpu.sh`, `scanout_desktop.sh`, `drag_why.sh` and
+`cap_power_ab.sh` — was **a moving rectangle of the compositor's clear
+colour**. Fixed; the warning's presence/absence is now what distinguishes the
+two arms below.
+
+What it costs, same compositor, same screen, content the only variable.
+Offscreen, software, uncapped:
+
+| window | empty | real content | frame rate | per-frame cost |
+|---|---|---|---|---|
+| 480x320 (15% of screen) | 544.7 fps | 459.2 fps | −15.7% | **+18.6%** |
+| 1200x760 (89% of screen) | 363.7 fps | 295.7 fps | −18.7% | **+23.0%** |
+
+**The paint term was understated by roughly a fifth**, and it grows as the
+window covers more of the screen — the direction a real desktop goes. The
+gates' own headline moves much less (`de_fps_latency.sh` load B: 411.5 → 408.7
+fps, 0.7%) because there the dragged window is one of four and the frame is
+dominated by screen-wide clear, composite and writeback. Both are true; they
+answer different questions.
+
+**This does NOT license correcting §3f's split by arithmetic.** That 2.3-of-3.5
+paint figure is the GPU scanout path at 1920x1080, where rasterization happens
+on the device; these are the software rasterizer at 1280x800. Applying a
+software ratio to a GPU number is exactly the cross-path comparison that
+produced the 220-vs-38 confusion. **The capped real-content number is NOT
+MEASURED.** It is one short run once the display is free.
+
+### Blocked on display access — not merely undone
+
+The card went back to the machine owner's session. These are **not** open
+because nobody got to them; they cannot be done without DRM master on
+`card0`, and they should not be quietly re-listed as ordinary backlog:
+
+- **The capped arm with real content** (§3g). One run.
+- **Flip-completion pacing and the single-buffer tearing.** Costed as one
+  mechanism with the present cap — see "What fixing the tearing costs" — and
+  the wait-set shape that cap now uses is the same one a flip event needs.
+- **Atomic teardown is UNDETERMINED, and that is a different claim from
+  "works".** The atomic caps are *accepted*; no atomic commit and no teardown
+  has been performed. Nothing here should be read as evidence either way.
 
 **Idle, measured on this path rather than argued.** Idle was previously
 claimed to be structurally unaffected by the cap; that was reasoning, and this

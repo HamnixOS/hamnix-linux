@@ -246,11 +246,19 @@ def fps_run(fb, inp, cat, pid, seconds, rate_hz, w, h, drag=False,
                 full=d_f - d_c, fps=d_f / el, cpu_pct=cpu)
 
 
-def show_fps(tag, r):
-    print('%-30s %6.1f fps   (%d presented in %.2f s; %d full + %d cursor-only)'
-          '   input %d ev/s   wsysd cpu %.1f%%' %
-          (tag, r['fps'], r['frames'], r['elapsed'], r['full'], r['curframes'],
-           round(r['sent'] / r['elapsed']), r['cpu_pct']))
+def show_fps(tag, r, cpu_samples=None):
+    # THE CPU FIGURE IS A MEDIAN WHEN --reps SAYS SO, AND EVERY SAMPLE IS
+    # PRINTED. Read the note on `--reps` in main() before quoting one number.
+    line = ('%-30s %6.1f fps   (%d presented in %.2f s; %d full + %d '
+            'cursor-only)   input %d ev/s   wsysd cpu %.1f%%' %
+            (tag, r['fps'], r['frames'], r['elapsed'], r['full'],
+             r['curframes'], round(r['sent'] / r['elapsed']), r['cpu_pct']))
+    if cpu_samples and len(cpu_samples) > 1:
+        line += ' (median of %d; samples: %s)' % (
+            len(cpu_samples), ' '.join('%.1f' % c for c in cpu_samples))
+    else:
+        line += ' (ONE SAMPLE -- see --reps)'
+    print(line)
 
 
 # --------------------------------------------------------------- selftest ---
@@ -337,6 +345,12 @@ def main():
     ap.add_argument('--title', default='')
     ap.add_argument('--tag', default='')
     ap.add_argument('--nojitter', action='store_true')
+    # Default 1 so existing callers are unchanged in cost and output shape;
+    # a caller that wants to QUOTE the cpu column must ask for repeats, and
+    # the column says "ONE SAMPLE" when it has not.
+    ap.add_argument('--reps', type=int, default=1,
+                    help='repeat the whole fps load N times; report the '
+                         'median cpu and print every sample')
     a = ap.parse_args()
 
     w, h = (int(v) for v in a.geom.split('x'))
@@ -365,9 +379,32 @@ def main():
         txy = None
         if a.title:
             txy = tuple(int(v) for v in a.title.split(','))
-        r = fps_run(fb, inp, a.cat, a.pid, a.seconds, a.rate, w, h,
-                    drag=a.drag, title_xy=txy)
-        show_fps(a.tag or ('drag' if a.drag else 'pointer'), r)
+        # REPEAT THE WHOLE LOAD, because the CPU figure is a noisy quantity and
+        # the noise is BETWEEN RUNS, not within one. Measured on this host, the
+        # same binary under the identical pointer load gave 17.1, 11.8 and 15.2
+        # in three consecutive 10 s runs, and a second binary gave 9.5, 8.6 and
+        # 4.2. A single sample from each therefore supports almost any story
+        # you like, including a 4x REGRESSION THAT DID NOT HAPPEN -- which is
+        # what a single sample of this column was read as once.
+        #
+        # Sub-sampling inside one window would NOT fix it: the driver's column
+        # and cpuprobe.sh, run against the same pid over the same 10 s, agree
+        # to within 0.2 points on every run (17.1/17.1, 11.8/11.8, 15.2/15.0,
+        # 9.5/9.5, 8.6/8.5, 4.2/4.2). The instrument is right; the QUANTITY
+        # moves between runs. So the load itself is what has to be repeated.
+        #
+        # fps is not the problem and is not why this exists -- it came back
+        # 57.1, 57.9, 57.5 across the same three runs. The median is reported
+        # for both so the row stays internally consistent.
+        runs = []
+        for _ in range(max(1, a.reps)):
+            runs.append(fps_run(fb, inp, a.cat, a.pid, a.seconds, a.rate, w, h,
+                                drag=a.drag, title_xy=txy))
+        cpus = sorted(x['cpu_pct'] for x in runs)
+        med = sorted(runs, key=lambda x: x['cpu_pct'])[len(runs) // 2]
+        med = dict(med)
+        med['fps'] = sorted(x['fps'] for x in runs)[len(runs) // 2]
+        show_fps(a.tag or ('drag' if a.drag else 'pointer'), med, cpus)
         return
 
     if a.mode == 'latency':
