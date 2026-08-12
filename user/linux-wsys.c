@@ -139,6 +139,24 @@ struct wwin {
      * xterm holding a shell, and for Firefox means a browser you cannot see
      * and cannot quit.  This is X's WM_DELETE_WINDOW, spelled as a file. */
     int32_t  wmdelete;
+    /* ALPHA-KEYED and TRANSLUCENT present, devwsys.ad:8085's `keyed` and
+     * `blend`.  Both were missing here and an unknown ctl verb is ignored, so
+     * a fix that exists upstream and that the CLIENT ALREADY ASKS FOR
+     * regressed silently in the port -- the same shape, in the same function,
+     * as `background`/`pin`.
+     *
+     * `keyed 1` is for a decorate-0 window whose rect is LARGER than the
+     * pixels it paints: hampanelscene GROWS the panel to the full width of
+     * the display to host the Applications dropdown, then paints the bar and
+     * the menu card and leaves the rest of the band untouched.  Presented
+     * opaquely, that band is a black rectangle over the wallpaper and the
+     * desktop icons -- which is exactly what the machine's owner reported.
+     * A keyed present skips alpha-0 source pixels, like the cursor sprite.
+     *
+     * `blend 1` honours the whole 0..255 ramp instead of all-or-nothing, and
+     * is what makes hamshotui's "select area" scrim DIM the desktop rather
+     * than blit an opaque black rectangle over the thing it is dimming. */
+    int32_t  keyed, blend;
     uint32_t scene_len;                       /* published */
     uint32_t scene_gen;                       /* ++ on every commit */
     uint32_t stage_len;                       /* being written */
@@ -1269,7 +1287,13 @@ static struct wwin *win_alloc(int32_t pid)
          * that never uploaded one. */
         img_release_wid(v->wid);
         v->pid      = pid;
-        v->x = 120; v->y = 90; v->w = 640; v->h = 480;
+        /* 320x240, which is devwsys's default and not this port's guess.  It
+         * was 640x480 here, which is only ever seen by a client that opens a
+         * window and draws before it sets a geometry -- but for that window
+         * the difference is a rectangle twice the size of the one upstream
+         * would have shown, and "the port's defaults drifted" is how a whole
+         * class of small wrongness accumulates unnoticed. */
+        v->x = 120; v->y = 90; v->w = 320; v->h = 240;
         v->z        = 5;
         v->visible  = 1;
         v->decorate = 0;
@@ -1999,8 +2023,13 @@ static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v)
      * return code stayed 0.  devwsys bumps a per-window content serial in
      * _wsys_img_store for exactly this reason; this field is that serial, made
      * readable.  It is APPENDED, so a reader that parses eleven fields is
-     * unaffected. */
-    uint8_t b[160];
+     * unaffected.
+     *
+     * KEYED AND BLEND ARE FIELDS 13 AND 14, appended for the same reason and
+     * with the same promise: the compositor has no private channel to this
+     * device, so a per-window presentation flag it must honour has to be
+     * readable in the file every client already reads. */
+    uint8_t b[192];
     uint64_t n = 0;
     int bslot = bb_for(v->wid, 0, 0, 0);
     int32_t igen = 0;
@@ -2008,12 +2037,12 @@ static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v)
         for (int i = 0; i < WSYS_IMG_SLOTS; i++)
             if (img->slot[i].used && img->slot[i].wid == v->wid)
                 igen += (int32_t)img->slot[i].serial;
-    int32_t fields[12] = { v->wid, v->x, v->y, v->w, v->h, v->z,
+    int32_t fields[14] = { v->wid, v->x, v->y, v->w, v->h, v->z,
                            v->decorate, v->visible, v->proto,
                            (int32_t)v->scene_gen,
                            bslot >= 0 ? (int32_t)bb->slot[bslot].gen : 0,
-                           igen };
-    for (int i = 0; i < 12; i++) {
+                           igen, v->keyed, v->blend };
+    for (int i = 0; i < 14; i++) {
         if (i) b[n++] = ' ';
         n = put_int(b, n, fields[i]);
     }
@@ -2455,6 +2484,17 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
     }
     if (n >= 8 && !strncmp(s, "decorate", 8)) {
         p = 8; v->decorate = take_int(s, &p, n) > 0; shm->gen++; return;
+    }
+    /* devwsys's `keyed` and `blend`.  No argument means 1, as with `pin`:
+     * hampanelscene writes `keyed 1`, but a client that writes bare `keyed`
+     * has said the same thing and must not be silently ignored. */
+    if (n >= 5 && !strncmp(s, "keyed", 5)) {
+        p = 5; int32_t k = take_int(s, &p, n);
+        v->keyed = (k < 0 || k > 0) ? 1 : 0; shm->gen++; return;
+    }
+    if (n >= 5 && !strncmp(s, "blend", 5)) {
+        p = 5; int32_t b = take_int(s, &p, n);
+        v->blend = (b < 0 || b > 0) ? 1 : 0; shm->gen++; return;
     }
     if (n >= 7 && !strncmp(s, "version", 7)) {
         p = 7; v->proto = take_int(s, &p, n); return;
