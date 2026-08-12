@@ -315,8 +315,13 @@ hpm refresh
 echo '[wv] p1 refresh status:' \$status
 # THE WHOLE PUBLISHED USERLAND, not just the desktop. hamnix-base pulls
 # coreutils, hamsh, net, hpm, the drivers and the desktop -- so after this the
-# machine is what a person who installed hamnix-linux and ran `hpm update`
+# machine is what a person who installed hamnix-linux and ran \`hpm update\`
 # today HAS, and nothing on it is newer than the window system it is running.
+# (The backslashes are not decoration: this heredoc is UNQUOTED, so the
+# backticks ran \`hpm update\` ON THE HOST every time this gate started -- it
+# printed "hpm: command not found" and ate the words out of the comment. A
+# host with hpm on its PATH would have had its own machine updated by a
+# comment in a test.)
 echo '[wv] p1 install hamnix-base'
 hpm install hamnix-base
 echo '[wv] p1 install status:' \$status
@@ -403,6 +408,15 @@ RC
 _probe C /probe-cat
 cat <<RC
 
+# THE NEXT BOOT IS ARMED HERE, BEFORE THE CONTROL BELOW AND NOT AFTER IT.
+# The first version of this file armed it last, and the leftover control --
+# which is the newest and least-exercised code in the guest -- aborted the rc
+# with a parse error, so phase 3 never got installed and boot 3 ran PHASE 2
+# again on a disk that was already updated. The measurement of the reboot was
+# lost to a bug in a control taken after it. Anything below this line can now
+# fail without costing the boot that follows.
+cp /etc/rc.phase3 /etc/rc.boot
+
 # THE LEFTOVER CONTROL.  Everything above is about a segment somebody is USING.
 # A segment nobody is using must still be re-initialised, or the first program
 # after a boot never starts and the machine is bricked in a new way.  Both
@@ -411,8 +425,14 @@ cat <<RC
 #   * the PUBLISHED cat creates /stale/wsys, a v6 segment, and EXITS -- so no
 #     process holds a row in it;
 #   * this tree's cat meets it and must GROW it 19,052,956 -> 37,972,380.
+#
+# THE QUOTES AND THE ABSENT SPACES ARE LOAD-BEARING. hamsh's assignment is
+# \`NAME='value'\`: written \`HAMWSYS = /stale/wsys\` the right-hand side is
+# parsed as a NAME and the rc dies with "undefined name '/stale/wsys' -- glued
+# arithmetic?", which is exactly how the first run of this control lost its
+# phase 3. etc/rc.de-user carries the same warning over its own HOME=.
 mkdir '/stale'
-HAMWSYS = /stale/wsys
+HAMWSYS='/stale/wsys'
 export HAMWSYS
 echo '[wv] p2 ----- THE LEFTOVER CONTROL'
 /probe-cat '/dev/wsys/windows'
@@ -423,11 +443,10 @@ ls -l /stale
 echo '[wv] p2 stale use status:' \$status
 echo '[wv] STALE-AFTER:'
 ls -l /stale
-HAMWSYS = /srv/wsys
+HAMWSYS='/srv/wsys'
 export HAMWSYS
 date
 echo '[wv] PHASE2 DONE'
-cp /etc/rc.phase3 /etc/rc.boot
 reboot
 RC
 } > "$WORK/rc.phase2"
