@@ -69,18 +69,29 @@
  * every write behind an authenticated RPC -- closes all three integrity attacks
  * and NOT ONE of these:
  *
- *   KEYLOG      read the bytes between another window's `keys` ring r and w.
- *               Those are that window's keystrokes: its password, as typed.
- *   SCRAPE      read another window's committed `scene`, which is what is on
- *               the screen inside it.
- *   ENUMERATE   read every row's wid, pid, geometry and title.
- *
- * That is why THE SPLIT's "all of it or none" is not rhetoric: the only thing
- * that closes these is per-window memory a non-owner cannot map at all, handed
- * out by the authority at window creation -- not a mode, not a gate, not an RPC
- * in front of a shared table.
+ *   KEYLOG      CLOSED.  It used to read the bytes between another window's
+ *               `keys` ring r and w -- that window's password, as typed.  Those
+ *               bytes are not in this mapping any more (THE KEYSTROKE CHANNEL in
+ *               user/linux-wsys.c) and the ring is dead storage.  This mode is
+ *               UNCHANGED and still runs: the harness's assertion is INVERTED,
+ *               so the day anything puts keystrokes back in the segment it says
+ *               so rather than quietly passing.
+ *   SCRAPE      STILL OPEN.  Another window's committed `scene`, which is what
+ *               is on the screen inside it.
+ *   ENUMERATE   STILL OPEN.  Every row's wid, pid, geometry and title.
  *
  *   wsys_bypass snoop <path> <wid=N|title-run> [tag]
+ *
+ * A FOURTH MODE, `keysend`, drives the attack the fix invites.  The channel that
+ * replaced the keys ring is an ABSTRACT AF_UNIX address; abstract sockets carry
+ * no file mode and the name is derived from public facts, so anybody can compute
+ * it and anybody can sendto() it.  What refuses an attacker is the KERNEL's
+ * SCM_CREDENTIALS stamp on each datagram, checked by the receiver against the
+ * segment's owner.  The mode is run from BOTH uids by the harness, because a
+ * refusal measured without a matching success proves only that the address was
+ * wrong.
+ *
+ *   wsys_bypass keysend <path> <wid> <line> [tag]
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -91,7 +102,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 /* ---- the mirror, tracking user/linux-wsys.c exactly --------------------- */
@@ -195,6 +208,53 @@ static int inject_key(const char *tag, const char *path,
     return 0;
 }
 
+/* keysend <path> <wid> <line> [tag]: the attack the KEYSTROKE CHANNEL invites.
+ *
+ * The keys ring left the segment, so a bypasser can no longer read or write it
+ * -- but the channel that replaced it is an ABSTRACT AF_UNIX address, abstract
+ * sockets carry no file mode, and its name is derived from public facts (the
+ * segment's st_dev/st_ino and the wid).  So anybody can compute it and anybody
+ * can sendto() it.  This mode is that program, and it exists so the gate can
+ * prove the check is the KERNEL's SCM_CREDENTIALS stamp on the datagram and not
+ * the obscurity of the address:
+ *
+ *   run as the HOST OWNER  the victim receives the line   (the positive control
+ *                          that the address is right and the channel is real)
+ *   run as any other uid   the victim receives nothing    (the boundary)
+ *
+ * It links no runtime and knows no protocol, exactly like the modes above. */
+static int keysend(const char *tag, const char *path, const char *widarg,
+                   const char *line)
+{
+    printf("== %s", tag);
+
+    struct stat st;
+    if (stat(path, &st) != 0) { printf(" stat=-%d\n", errno); return 0; }
+
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    a.sun_path[0] = '\0';
+    int n = snprintf(a.sun_path + 1, sizeof a.sun_path - 1,
+                     "hamnix-wsys/%llu.%llu/%d/keys",
+                     (unsigned long long)st.st_dev,
+                     (unsigned long long)st.st_ino, atoi(widarg));
+    printf(" uid=%d addr=[%s]", (int)getuid(), a.sun_path + 1);
+    socklen_t alen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+
+    int s = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (s < 0) { printf(" socket=-%d sent=0\n", errno); return 0; }
+
+    char buf[256];
+    int ln = snprintf(buf, sizeof buf, "%s\n", line);
+    ssize_t w = sendto(s, buf, (size_t)ln, 0, (struct sockaddr *)&a, alen);
+    printf(" sendto=%zd", w);
+    if (w < 0) printf(" errno=%d", errno);
+    printf(" sent=%d\n", w > 0 ? 1 : 0);
+    close(s);
+    return 0;
+}
+
 /* Print a byte run with the framing characters made visible, so a ring's
  * contents survive being read out of a shell variable by the harness. */
 static void put_run(const uint8_t *b, size_t n)
@@ -278,6 +338,11 @@ int main(int argc, char **argv)
     /* snoop <path> <victim> [tag] */
     if (argc >= 4 && strcmp(argv[1], "snoop") == 0)
         return snoop(argc >= 5 ? argv[4] : "snoop.table", argv[2], argv[3]);
+
+    /* keysend <path> <wid> <line> [tag] */
+    if (argc >= 5 && strcmp(argv[1], "keysend") == 0)
+        return keysend(argc >= 6 ? argv[5] : "keysend", argv[2], argv[3],
+                       argv[4]);
 
     /* injkey <path> <victim-title> <keyline> [tag] */
     if (argc >= 5 && strcmp(argv[1], "injkey") == 0)

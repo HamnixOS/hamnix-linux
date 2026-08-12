@@ -159,15 +159,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         report("left press arrived as 'd ... 1'",
                contains(&buf[0], cast[Ptr[uint8]]("d 50 50 1")))
 
-    n = drain(wid, "keys")
-    if n <= 0:
-        report("key events reached the window", 0)
-    else:
-        puts(1, "       keys: ")
-        puts(1, &buf[0])
-        # KEY_A is Linux keycode 30; what must arrive is ASCII 'a' = 97.
-        report("KEY_A arrived as ASCII 97, not keycode 30",
-               contains(&buf[0], cast[Ptr[uint8]]("d 97")))
+    # THE KEYS RING IS NOT ASKED FOR HERE, and that is the finding rather than
+    # an omission.  This process does not own wid 2 -- tests/linux/wsys_client.ad
+    # does -- and a window's keystrokes now go to whoever holds its channel, so
+    # this drain would be a keylogger if it worked.  It does not: the open is
+    # refused by name.  input_probe.sh asks the OWNER instead, out of its log.
 
     if failures == 0:
         puts(1, "ALL PASS\n")

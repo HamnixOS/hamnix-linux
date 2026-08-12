@@ -162,6 +162,19 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     putd(1, my_wid)
     puts(1, "\n")
 
+    # AND IT DRAINS ITS OWN KEYS RING, because nothing else can.
+    #
+    # A window's keystrokes are delivered to whoever holds its channel and only
+    # its OWNER can hold one -- see THE KEYSTROKE CHANNEL in user/linux-wsys.c.
+    # tests/linux/input_probe.sh used to ask a SEPARATE reader process what the
+    # compositor had routed here; that question can only be put to the window
+    # itself now, so this client answers it.  Every line it receives is echoed
+    # as "wsys_client: keys <bytes>", which is what input_probe.sh greps.
+    kfd: int32 = -1
+    if argc > 1:
+        winpath(my_wid, "keys")
+        kfd = sys_open(cast[Ptr[char]](&pathbuf[0]))
+
     # Stay alive so the compositor has a window to draw. An EMPTY loop would
     # be deleted by the optimiser at -O2 (measured, and it cost two black
     # screenshots) -- the wait is what makes this loop real.
@@ -170,6 +183,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         live = 300
     j: int32 = 0
     while j < live:
-        sys_waitfds(&waitset[0], 0, 100)
+        if kfd >= 0:
+            waitset[0] = kfd
+            sys_waitfds(&waitset[0], 1, 100)
+            kn: int64 = sys_read(kfd, &rbuf[0], 60)
+            if kn > 0:
+                rbuf[kn] = 0
+                puts(1, "wsys_client: keys ")
+                puts(1, &rbuf[0])
+                puts(1, "\n")
+        else:
+            sys_waitfds(&waitset[0], 0, 100)
         j = j + 1
     return 0

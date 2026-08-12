@@ -68,9 +68,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <linux/futex.h>
 #include <time.h>
 #include <unistd.h>
@@ -123,7 +126,37 @@
  * /srv is tmpfs and recreated every boot, so meeting an old segment at all
  * means two builds in one session; the ONLY other way is a live `hpm update`
  * of the window system underneath a running desktop, which re-initialises
- * that desktop's window table by design and always has. */
+ * that desktop's window table by design and always has.
+ *
+ * 7 MOVES THE KEYSTROKES OUT OF THE SEGMENT (THE KEYSTROKE CHANNEL, below).
+ * struct wshm and struct wwin are BYTE-FOR-BYTE what 6 had -- the `keys` ring
+ * is still there, at the same offset, and is now dead storage -- so this is the
+ * first bump where the layouts agree completely and only the MEANING differs.
+ * That is exactly why it has to move.  A v6 binary sharing a v7 session would
+ * find a perfectly well-formed table, write a keystroke into the dead ring, and
+ * deliver nothing to anybody; a v6 client would park on that ring for ever and
+ * report no keyboard input.  A silent half-share of a table two builds disagree
+ * about is what this counter exists to prevent, and "the layout matches" is not
+ * "the protocol matches".  The re-initialise it forces costs the previous
+ * session's windows, which is what a version mismatch has always meant here,
+ * and it is LOUD -- the windows go -- where the alternative is a desktop that
+ * looks right and ignores the keyboard.
+ *
+ * VERSION 7 CARRIES TWO CHANGES, not one, and they landed from different
+ * branches: the window table grew to 512 rows AND the keystrokes left the
+ * segment.  They share a version because they ship together; a reader who
+ * knows only one of them would draw the wrong conclusion about the other.
+ *
+ * WHAT AN OLD BINARY DOES AGAINST A NEW LAYOUT, stated as NORTH_STAR.md's
+ * standing invariant requires: a v6 build meeting a v7 segment reads version 7
+ * != 6 and re-inits.  This is the MAPPED-PREFIX direction, not the
+ * complete-and-clean one -- v7 is 37,972,380 bytes to v6's 19,052,956, so a v6
+ * build maps and re-inits only the prefix and cannot reach rows 256..511; the
+ * next v7 attacher punches the whole segment before anything reads a row.  The running session's windows are gone and every live client is
+ * re-attached to an empty table -- the established consequence of a live
+ * `hpm update` of the window system, unchanged by this pass.  No new binary
+ * ships here and no package list changes: the channel is code inside
+ * user/linux-wsys.c, which every wsys program already links. */
 #define WSYS_VERSION      7
 /* SIXTY-FOUR, NOT THIRTY-TWO, and the reason is rootless Xwayland.
  *
@@ -246,7 +279,22 @@ struct wwin {
     char     title[WSYS_TITLE_CAP];
     uint8_t  scene[WSYS_SCENE_CAP];
     uint8_t  stage[WSYS_SCENE_CAP];
-    struct wring keys, pointer, event, text, cmd;
+    /* keys_dead IS DEAD STORAGE, and it is kept rather than removed.
+     *
+     * Keystrokes left this segment entirely -- see THE KEYSTROKE CHANNEL --
+     * because bytes in a world-readable mapping are readable by a keylogger and
+     * nothing in a mapping can be otherwise.  Nothing reads or writes these
+     * WSYS_RING_CAP bytes any more.  They stay because removing them would move
+     * every field after them and change sizeof(struct wwin), and THE SPLIT
+     * records why that is not a version bump this file can survive: an old
+     * binary meeting a new table memsets a running session.  struct wwin is
+     * byte-for-byte what version 6 had.
+     *
+     * It is also what lets tests/linux/wsys_bypass.sh keep DRIVING attack 3
+     * instead of deleting it: the bypasser still finds the row and still writes
+     * this ring, and the gate now asserts that nothing ever comes out of it. */
+    struct wring keys_dead;
+    struct wring pointer, event, text, cmd;
 };
 
 struct wsink {
@@ -530,6 +578,15 @@ static int bb_attach(void)
  * minutes. */
 struct wwin;
 static struct wwin *win_find(int wid);
+/* THE KEYSTROKE CHANNEL, defined below -- the one ring that is not in the
+ * shared segment.  Declared here because the park, the teardown and the
+ * open/read/write paths all reach it and they are spread across this file. */
+static void         keychan_unbind(int32_t wid);
+static int          keychan_ready(int32_t wid);
+static int          keychan_find(int32_t wid);
+static int          keychan_bind(int32_t wid);
+static uint64_t     keychan_recv(int32_t wid, uint8_t *b, uint64_t cap);
+static int64_t      keychan_send(int32_t wid, const uint8_t *b, uint64_t n);
 
 static void bb_once(int *flag, const char *msg, int a, int b, int c, int d)
 {
@@ -757,6 +814,12 @@ static int32_t last_new = -1;
 static uid_t seg_owner = (uid_t)-1;
 static int   seg_owner_known = 0;
 
+/* And its (dev, ino), which names this window system's keystroke channels.
+ * See THE KEYSTROKE CHANNEL below. */
+static dev_t seg_dev;
+static ino_t seg_ino;
+static int   seg_id_known = 0;
+
 static const char *shm_path(void)
 {
     const char *p = getenv("HAMWSYS");
@@ -874,13 +937,18 @@ static char chrome_path[576];
  * PROT_WRITE — which is why the 0644 chrome segment stops them dead.  The
  * fourth is CONFIDENTIALITY and needs nothing but O_RDONLY:
  *
- *     KEYLOG     the bytes between another window's `keys` ring r and w are
- *                that window's keystrokes.  wsys_bypass.sh's `snoop` reads a
- *                uid-1001 victim's typing out of a uid-1001 attacker, WITHOUT
- *                moving r or w, so the victim receives every keystroke normally
- *                and has no way to notice.  Measured, not argued.
- *     SCRAPE     another window's committed `scene` is what is drawn inside it.
- *     ENUMERATE  every row's wid, pid, geometry and title.
+ *     KEYLOG     CLOSED.  The bytes between another window's `keys` ring r and
+ *                w USED to be that window's keystrokes, and wsys_bypass.sh's
+ *                `snoop` read a uid-1001 victim's typing out of a uid-1001
+ *                attacker without moving r or w.  Keystrokes are not in this
+ *                mapping any more — THE KEYSTROKE CHANNEL, below — and the ring
+ *                is dead storage.  The snooper is unchanged and still runs; its
+ *                assertion is INVERTED, not deleted, so the day anything puts
+ *                keystrokes back in the segment the gate says so.
+ *     SCRAPE     STILL OPEN.  Another window's committed `scene` is what is
+ *                drawn inside it.  This is the rest of tier 2.
+ *     ENUMERATE  STILL OPEN, and unfixable while the taskbar reads this table:
+ *                every row's wid, pid, geometry and title.
  *
  * And the table HAS to stay world-readable: /dev/wsys/windows is the panel
  * taskbar's input (user/hampanelscene.ad:_refresh_windows), and a uid-1001
@@ -947,16 +1015,39 @@ static char chrome_path[576];
  *     below: the ownership record itself is in the tier the attacker cannot
  *     write, so the check is worth something.  15 writes a session.
  *
- *   TIER 2 — PER-WINDOW PRIVATE memory, one memfd per window, created by wsysd
- *     at `newwindow` and passed to the creating client over SCM_RIGHTS.  scene,
- *     stage, the five rings, the v2 backbuffer, the named images.  A memfd has
- *     no name in the filesystem, so there is no path for a bypasser to open:
- *     this is the only construction that closes attack 4, because it is the
- *     only one where a non-owner cannot MAP the bytes at all.  wsysd keeps
- *     every fd (it composites, and it writes routed input into the rings); the
- *     owner keeps its own.  Nothing on this tier ever touches the RPC — the
- *     34.6/s above, and the megabytes/s a browser adds, stay exactly as fast as
- *     they are today.
+ *   TIER 2 — PER-WINDOW PRIVATE memory.  scene, stage, the rings, the v2
+ *     backbuffer, the named images: bytes a non-owner must not be able to map.
+ *     Nothing on this tier ever touches the RPC — the 34.6/s above, and the
+ *     megabytes/s a browser adds, stay exactly as fast as they are today.
+ *
+ *     THE KEYS RING IS DONE, and NOT the way the next paragraph used to say.
+ *     It is a per-window abstract AF_UNIX datagram address the owner binds, with
+ *     delivery authorised by the kernel's SCM_CREDENTIALS stamp.  See THE
+ *     KEYSTROKE CHANNEL further down this file for the construction, and
+ *     tests/linux/wsys_keychan.sh for the measurement.
+ *
+ *     WHAT THIS PARAGRAPH USED TO SAY, AND WHY IT WAS WRONG, kept because the
+ *     error is instructive and would otherwise be made again: "one memfd per
+ *     window, created by wsysd at `newwindow` and passed to the creating client
+ *     over SCM_RIGHTS.  A memfd has no name in the filesystem, so there is no
+ *     path for a bypasser to open: this is the only construction that closes
+ *     attack 4."  /proc/<pid>/fd/<n> IS a path.  It is openable by any process
+ *     of the same uid, and same-uid is the entire threat model.  Measured:
+ *     open=3, mmap PROT_READ, `1 PASSWORD31337` read straight back out of the
+ *     victim's memfd.  Built as recorded, tier 2 would have moved the keylogger
+ *     one directory deeper and called it closed.  It was an argument that had
+ *     never been run, in a file whose own rule is that a measurement is worth
+ *     more than one.
+ *
+ *     WHAT REMAINS OF TIER 2 — the scene, the stage, the backbuffer and the
+ *     images.  Those are BYTES A COMPOSITOR MUST READ AT FRAME RATE, so they
+ *     cannot be datagrams and a memfd really is the right shape for them.  The
+ *     missing piece is therefore the /proc remedy, and it is measured and
+ *     waiting in the same gate: prctl(PR_SET_DUMPABLE, 0) in every window
+ *     owner turns that open into EACCES, makes /proc/<pid>/fd unlistable, and
+ *     refuses ptrace as well.  It is a per-process property, so it belongs with
+ *     whatever hands the memfd out, and it costs core dumps and same-uid
+ *     debugging of DE clients — which is a decision, not a detail.
  *
  *   TIER 3 — /srv/wsys.chrome, 0644, unchanged.  Already correct.
  *
@@ -982,9 +1073,28 @@ static char chrome_path[576];
  *      construction.  "No screen scraping" is NOT what tier 2 buys; "no reading
  *      another client's window" is.
  *
- * WHY IT IS STILL NOT BUILT IN THIS PASS.  Not the hot path — that turned out
- * to be affordable, and this comment used to say otherwise on no evidence.  The
- * blockers are the ones the measurement exposed rather than removed:
+ * WHY TIER 1 IS STILL NOT BUILT, and how the keys ring got past all three of
+ * these blockers without it.  Not the hot path — that turned out to be
+ * affordable, and this comment used to say otherwise on no evidence.
+ *
+ * WHAT THE KEYSTROKE CHANNEL DID INSTEAD OF WAITING FOR TIER 1, because the
+ * three blockers below are real and it went around every one of them rather
+ * than through: it needs NO daemon (the owner binds its own address and the
+ * only sender is the compositor that already writes the ring), NO new binary
+ * (it is code in this file, which every wsys program already links), and NO
+ * field removed from struct wwin (the ring stays as dead storage, so the layout
+ * is byte-for-byte frozen).  What it does need is a version bump, for the one
+ * reason a version counter exists: the layouts agree and the MEANING does not.
+ *
+ * AND IT IS NOT THE "TITLE-ONLY RPC" THE LAST PARAGRAPH BELOW RULES OUT, which
+ * is worth being precise about because the shape looks similar.  That is unsound
+ * because it authenticates against win[W].pid, a field in this 0666 table that
+ * the attacker can rewrite.  NOTHING in the keystroke channel reads win[].pid:
+ * the receiver is established by who holds the kernel's bind, and the sender by
+ * the kernel's credential stamp.  The spoofable ownership record is not in the
+ * path, so the check is worth what it claims to be worth.
+ *
+ * The blockers that remain, for TIER 1 and for the rest of tier 2:
  *   (1) TIER 2 IS AN ATTACH REWRITE, NOT A MOVE.  Today every process mmaps one
  *       named file and is done; afterwards it must connect to a daemon and be
  *       HANDED its window before it can draw a pixel.  Twenty test scripts in
@@ -1018,8 +1128,16 @@ static char chrome_path[576];
  *   moving tier 1, and tier 1 without tier 2 leaves the keylogger.  It is all
  *   of it or none, and half of it is a gate that looks shut and is not.
  *
- * So this pass lands the measurement and this design and does NOT half-build
- * the access control.  What IS closed, and by the kernel rather than by an if,
+ * WHAT THE PASS THAT BUILT THE KEYSTROKE CHANNEL LEFT OPEN, said plainly so it
+ * is not mistaken for the whole of tier 2: a same-uid attacker can still scrape
+ * another window's committed scene and its backbuffer, still enumerate every
+ * row, and still corrupt any of it (attacks 1 and 2 are untouched and their
+ * controls still pass).  What it can no longer do is read what is TYPED into
+ * another window, or put a keystroke into one.  That is one ring of five, and it
+ * is the one that carries passwords.
+ *
+ * So the earlier pass landed the measurement and this design and did NOT
+ * half-build the access control.  What IS closed, and by the kernel rather than by an if,
  * is the system chrome: a bypasser cannot lock the screen, queue a spawn, post
  * a notification, drive the app menu, or lie about the display geometry,
  * because the kernel refuses it PROT_WRITE on the 0644 file those live in.
@@ -1203,6 +1321,13 @@ static int shm_attach(void)
      * NOT WRITE below: every byte at or past it is a byte ftruncate(2) has
      * just promised reads as zero and that no page has been allocated for. */
     off_t old_size = st.st_size;
+    /* THE SEGMENT'S IDENTITY, which names the keystroke channels below.  It is
+     * the kernel's (dev, ino) and not the path, so two processes that reached
+     * one segment by different names agree, and two harnesses with different
+     * segments cannot collide in the abstract namespace they share. */
+    seg_dev = st.st_dev;
+    seg_ino = st.st_ino;
+    seg_id_known = 1;
     if ((uint64_t)st.st_size < sizeof(struct wshm)) {
         if (ftruncate(fd, (off_t)sizeof(struct wshm)) < 0) {
             int e = errno; close(fd); errno = e; return -1;
@@ -1477,6 +1602,7 @@ static void win_reap_dead(void)
         if (!v->used || v->pid <= 0) continue;
         errno = 0;
         if (kill((pid_t)v->pid, 0) == 0 || errno != ESRCH) continue;
+        keychan_unbind(v->wid);
         bb_release(v->wid);
         img_release_wid(v->wid);
         if (shm->focus_wid == v->wid) shm->focus_wid = 0;
@@ -1943,10 +2069,14 @@ int hamwsys_ring_ready(const struct hamwsys_file *f)
 {
     if (!hamwsys_is_ring(f)) return 1;
     if (shm_attach() < 0 || !shm) return 0;
+    /* The keystroke channel is a socket, not a ring: readiness is the kernel's
+     * answer about a pending datagram.  The PARK itself is unchanged -- the
+     * sender still bumps `inputgen` and FUTEX_WAKEs, so sys_waitfds sleeps and
+     * wakes exactly as it did and needs to know nothing about this. */
+    if (f->leaf == HAMWSYS_WIN_KEYS) return keychan_ready(f->wid);
     struct wwin *v = win_find(f->wid);
     if (!v) return 0;
-    const struct wring *q = f->leaf == HAMWSYS_WIN_KEYS    ? &v->keys
-                          : f->leaf == HAMWSYS_WIN_POINTER ? &v->pointer
+    const struct wring *q = f->leaf == HAMWSYS_WIN_POINTER ? &v->pointer
                           : f->leaf == HAMWSYS_WIN_EVENT   ? &v->event
                           : f->leaf == HAMWSYS_WIN_TEXT    ? &v->text
                                                            : &v->cmd;
@@ -1974,6 +2104,262 @@ static uint64_t ring_read(struct wring *q, uint8_t *b, uint64_t cap)
         q->r++;
     }
     return n;
+}
+
+/* ================================================================== *
+ * THE KEYSTROKE CHANNEL — the one ring that is NOT in the segment
+ * ==================================================================
+ *
+ * WHAT THIS CLOSES.  THE SPLIT's attack 4 of 4: a uid-1001 process opens
+ * /srv/wsys O_RDONLY, maps it PROT_READ, and reads the bytes between another
+ * uid-1001 window's `keys` r and w without moving either, so the victim
+ * receives every keystroke normally and cannot tell.  That is a keylogger
+ * between two of the user's own applications, it needs no write access at all,
+ * and no file mode can stop it: the table must stay world-READABLE because
+ * /dev/wsys/windows is the panel taskbar's input.  It is CONFIDENTIALITY, and
+ * the only fix is that the bytes are not in a mapping the attacker can obtain.
+ *
+ * So they are not in a mapping at all any more.  A window's keystrokes travel
+ * as DATAGRAMS to a socket the window's owner has bound, and the `keys` ring in
+ * struct wwin is dead storage that nothing reads and nothing writes (kept, byte
+ * for byte, so struct wwin is unchanged and so wsys_bypass.c's layout mirror
+ * still finds the row it means to attack -- the gate must be able to write the
+ * dead ring and prove nothing comes out of it).
+ *
+ * WHY A SOCKET AND NOT THE RECORDED memfd + SCM_RIGHTS.  THE SPLIT's tier 2
+ * says "a memfd has no name in the filesystem, so there is no path for a
+ * bypasser to open".  THAT IS FALSE, and it was measured before this was built
+ * rather than after:
+ *
+ *   $ ./procfd 1                       # an ordinary process holding a memfd
+ *     open(/proc/<victim>/fd/3) = 4 (OK)
+ *     mmap PROT_READ = OK, contents: 1 PASSWORD31337
+ *
+ * /proc/<pid>/fd/<n> IS a path, it is openable by any process of the same uid,
+ * and the whole premise of this attack is that attacker and victim share uid
+ * 1001.  A memfd handed to the owner over SCM_RIGHTS would have re-opened the
+ * exact hole it was chosen to close, one directory deeper.  (The remedy that
+ * does work for a memfd is prctl(PR_SET_DUMPABLE, 0) in every window owner --
+ * measured in the same run: open EACCES, opendir EACCES, ptrace EPERM.  It is
+ * recorded here because tier 2's REMAINING half, the scene and the backbuffer,
+ * cannot be a datagram and will need it.)
+ *
+ * A socket has the property the memfd was believed to have, and this too was
+ * measured, not assumed (tests/linux/wsys_keychan.sh re-runs all of it):
+ *
+ *   open(/proc/self/fd/<sock>) = -1 (No such device or address)
+ *
+ * A socket inode cannot be opened through /proc at all.  The ONLY way to
+ * receive what is sent to a bound datagram address is to be the process that
+ * bound it.  That is a kernel object with no mapping and no path, which is what
+ * the fix needed all along; it is also, unlike SCM_RIGHTS, what NORTH_STAR.md
+ * asks for in as many words -- "what crosses a process boundary is a NAME or a
+ * NUMBER, never a descriptor".
+ *
+ * THE NAME.  Abstract namespace (a leading NUL), so there is no filesystem
+ * object for anybody to unlink -- which matters, because a socket FILE in /srv
+ * would be owned by uid 1001 and any other uid-1001 process could unlink it and
+ * bind its own in its place, becoming the recipient of the victim's keystrokes.
+ * The abstract namespace has no unlink: a name is held by its socket until that
+ * socket closes.  The name carries the segment's st_dev and st_ino, so two
+ * offscreen harnesses (or a gate and a live session) that have different
+ * /srv/wsys files cannot collide -- the abstract namespace is per network
+ * namespace and this tree's gates unshare only the USER namespace.
+ *
+ * FIRST BINDER WINS, AND A LOSER FAILS LOUDLY.  bind(2) on a name already bound
+ * is EADDRINUSE (measured), so the owner's claim on its own wid cannot be taken
+ * from it afterwards.  What an attacker CAN do is get there first: next_wid is
+ * readable, so it may pre-bind a run of future wids.  Then the victim's own
+ * bind fails -- and a client whose keystrokes would silently go nowhere is
+ * exactly the success-shaped failure this tree keeps paying for, so it does not
+ * happen: `newwindow` FAILS, by name, on stderr, and no window is created.  A
+ * silent keylogger becomes a loud denial of service, and a denial of service by
+ * a same-uid process is already available for free (THE SPLIT's residue (c):
+ * newwindow is open to every uid, so anyone can exhaust the table).
+ *
+ * WHO MAY DELIVER A KEYSTROKE, decided by the KERNEL and not by a field in a
+ * world-writable table.  Anyone may sendto() an abstract address; abstract
+ * sockets have no mode.  So the RECEIVER checks, with SO_PASSCRED/
+ * SCM_CREDENTIALS -- credentials stamped by the kernel on each datagram, which
+ * the sender cannot forge:
+ *
+ *     accept if  sender uid == the segment's owner   (the compositor: wsysd,
+ *                                                     root on a real boot)
+ *            or  sender pid == this process          (a client typing into its
+ *                                                     own window)
+ *     drop otherwise.
+ *
+ * That closes THE SPLIT's attack 3 (INJECT a key into another client's ring)
+ * for the keys ring as well, and closes it against a SAME-UID attacker, which
+ * no file mode could: on a real desktop the only legitimate sender is root.
+ * Note what it does NOT rest on: win[wid].pid.  That field lives in the 0666
+ * table and is spoofable, and THE SPLIT is right that any check resting on it
+ * is worth nothing.  Nothing here rests on it -- the receiver is established by
+ * who holds the bind, and the sender by the kernel's own stamp.
+ *
+ * WHAT THIS DOES NOT CLOSE, so it is not mistaken for more than it is:
+ *   * THE SCENE AND THE BACKBUFFER are still in the shared mapping, so another
+ *     window's PIXELS are still scrapable (THE SPLIT's SCRAPE).  This closes
+ *     the ring that carries typed secrets, not the display.
+ *   * THE POINTER, EVENT, TEXT AND CMD RINGS are unchanged.  Pointer motion is
+ *     not a password; if that judgement ever stops holding, the mechanism here
+ *     is one call per ring away.
+ *   * ENUMERATION is unchanged and unfixable while the taskbar reads the table.
+ *   * ptrace.  A same-uid attacker that can PTRACE_ATTACH reads the victim's
+ *     memory directly and no userland mechanism can prevent it -- measured on
+ *     the dev host, where /proc/sys/kernel/yama/ptrace_scope is 0.  This is a
+ *     DISTRIBUTION-level setting, it is not set anywhere in this tree, and it
+ *     is worth one line in linuxinit; it is named in HANDOFF.md rather than
+ *     changed here, because a boot-policy change is not this pass.
+ * ------------------------------------------------------------------ */
+#define KEYCHAN_MAX  WSYS_MAX_WINDOWS
+
+static struct { int32_t wid; int fd; } keychan[KEYCHAN_MAX];
+static int  keychan_n;
+static int  keychan_out = -1;                 /* the send side, one per proc */
+
+/* The abstract address for one window's keystrokes.  Returns the length the
+ * kernel wants, or 0 when the segment identity is not established -- in which
+ * case there is no channel and the caller must fail rather than invent one. */
+static socklen_t keychan_addr(struct sockaddr_un *a, int32_t wid)
+{
+    if (!seg_id_known) return 0;
+    memset(a, 0, sizeof *a);
+    a->sun_family = AF_UNIX;
+    a->sun_path[0] = '\0';                     /* abstract */
+    int n = snprintf(a->sun_path + 1, sizeof a->sun_path - 1,
+                     "hamnix-wsys/%llu.%llu/%d/keys",
+                     (unsigned long long)seg_dev, (unsigned long long)seg_ino,
+                     (int)wid);
+    if (n <= 0 || (size_t)n >= sizeof a->sun_path - 1) return 0;
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+}
+
+static int keychan_find(int32_t wid)
+{
+    for (int i = 0; i < keychan_n; i++)
+        if (keychan[i].wid == wid) return keychan[i].fd;
+    return -1;
+}
+
+/* Claim this window's keystrokes for THIS process.  0 on success, -1 with a
+ * named message on stderr when the name is already taken.  Idempotent. */
+static int keychan_bind(int32_t wid)
+{
+    if (keychan_find(wid) >= 0) return 0;
+    if (keychan_n >= KEYCHAN_MAX) { errno = ENOSPC; return -1; }
+
+    struct sockaddr_un a;
+    socklen_t alen = keychan_addr(&a, wid);
+    if (!alen) { errno = EIO; return -1; }
+
+    int s = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (s < 0) return -1;
+    int on = 1;
+    /* Without this the datagrams arrive with no credentials and every one of
+     * them would have to be dropped -- fail closed, but silently deaf.  It is
+     * checked rather than assumed for that reason. */
+    if (setsockopt(s, SOL_SOCKET, SO_PASSCRED, &on, sizeof on) < 0) {
+        int e = errno; close(s); errno = e; return -1;
+    }
+    if (bind(s, (struct sockaddr *)&a, alen) < 0) {
+        int e = errno;
+        close(s);
+        fprintf(stderr,
+                "wsys: window %d: cannot claim keystroke delivery (%s).\n"
+                "wsys: another process holds it; this window would receive no "
+                "keyboard input.\n", (int)wid, strerror(e));
+        errno = e;
+        return -1;
+    }
+    keychan[keychan_n].wid = wid;
+    keychan[keychan_n].fd  = s;
+    keychan_n++;
+    return 0;
+}
+
+static void keychan_unbind(int32_t wid)
+{
+    for (int i = 0; i < keychan_n; i++)
+        if (keychan[i].wid == wid) {
+            close(keychan[i].fd);
+            keychan[i] = keychan[keychan_n - 1];
+            keychan_n--;
+            return;
+        }
+}
+
+/* Send.  Nobody bound is not an error the compositor can act on -- it is the
+ * old "wrote into a ring nobody drains", and it happens legitimately between
+ * `newwindow` and the owner's first open of its own /keys.  The bytes are
+ * reported as accepted, exactly as the ring reported them. */
+static int64_t keychan_send(int32_t wid, const uint8_t *b, uint64_t n)
+{
+    struct sockaddr_un a;
+    socklen_t alen = keychan_addr(&a, wid);
+    if (!alen) { errno = EIO; return -1; }
+    if (keychan_out < 0) {
+        keychan_out = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        if (keychan_out < 0) return -1;
+    }
+    ssize_t w = sendto(keychan_out, b, (size_t)n, 0, (struct sockaddr *)&a, alen);
+    if (w < 0 && errno != ECONNREFUSED && errno != ENOENT && errno != EAGAIN)
+        return -1;
+    /* The wake is unchanged: a parked client sleeps on `inputgen` in the shared
+     * segment and re-checks its own rings, so the futex still carries the
+     * wakeup and sys_waitfds needs no new mechanism. */
+    if (n) input_posted();
+    return (int64_t)n;
+}
+
+/* Receive, dropping every datagram the kernel did not stamp with an acceptable
+ * sender.  Only whole datagrams are returned, and a short buffer TRUNCATES one
+ * rather than splitting it across two reads: a key event is one line and the
+ * callers read with kilobyte buffers. */
+static uint64_t keychan_recv(int32_t wid, uint8_t *b, uint64_t cap)
+{
+    int s = keychan_find(wid);
+    if (s < 0 || cap == 0) return 0;
+    uint64_t got = 0;
+    for (;;) {
+        char cbuf[CMSG_SPACE(sizeof(struct ucred))];
+        struct iovec io;
+        struct msghdr m;
+        io.iov_base = b + got;
+        io.iov_len  = (size_t)(cap - got);
+        memset(&m, 0, sizeof m);
+        m.msg_iov = &io;
+        m.msg_iovlen = 1;
+        m.msg_control = cbuf;
+        m.msg_controllen = sizeof cbuf;
+        ssize_t n = recvmsg(s, &m, MSG_DONTWAIT);
+        if (n <= 0) break;
+
+        int ok = 0;
+        for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c))
+            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_CREDENTIALS) {
+                struct ucred u;
+                memcpy(&u, CMSG_DATA(c), sizeof u);
+                if ((seg_owner_known && u.uid == seg_owner) ||
+                    u.pid == getpid())
+                    ok = 1;
+            }
+        if (!ok) continue;                     /* not the compositor: dropped */
+        got += (uint64_t)n;
+        if (got >= cap) break;
+    }
+    return got;
+}
+
+static int keychan_ready(int32_t wid)
+{
+    int s = keychan_find(wid);
+    if (s < 0) return 0;
+    struct pollfd p;
+    p.fd = s; p.events = POLLIN; p.revents = 0;
+    int r;
+    do { r = poll(&p, 1, 0); } while (r < 0 && errno == EINTR);
+    return r > 0 && (p.revents & POLLIN) != 0;
 }
 
 /* Find (or claim) a sink, IN THE SEGMENT THE SPLIT PUTS IT IN.
@@ -2407,6 +2793,34 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
         }
     }
 
+    /* THE ONE FILE UNDER /dev/wsys A READ CAN BE REFUSED ON, and it is a
+     * deliberate departure from devwsys, where "reads are never refused".
+     *
+     * Refusing this read IS the confidentiality boundary.  A window's
+     * keystrokes are delivered to whoever holds its channel, and only its owner
+     * can hold that -- so a process reading somebody else's /keys can only ever
+     * get nothing, and returning zero bytes for ever would say "the user is not
+     * typing" to a caller that has no way to tell that apart from the truth.
+     * It says which of the two it is instead.
+     *
+     * The lazy bind is here for the hamwsys_alloc path: hamUI stamps a wid
+     * against a child's pid, and that child claims its own channel the first
+     * time it opens its own keys. */
+    if (f->leaf == HAMWSYS_WIN_KEYS && !for_write) {
+        if (!win_find(f->wid)) { errno = ENOENT; return -1; }
+        if (keychan_find(f->wid) < 0) {
+            if (!owns_wid(f->wid) || keychan_bind(f->wid) < 0) {
+                fprintf(stderr,
+                        "wsys: /dev/wsys/%d/keys: this process does not own "
+                        "window %d, so it cannot read its keystrokes.\n",
+                        (int)f->wid, (int)f->wid);
+                errno = EPERM;
+                return -1;
+            }
+        }
+        return 0;
+    }
+
     switch (f->leaf) {
     case HAMWSYS_BACKBUF: {
         struct wwin *v = win_find(f->wid);
@@ -2545,7 +2959,10 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
     struct wwin *v = NULL;
     struct wring *q = NULL;
     switch (f->leaf) {
-    case HAMWSYS_WIN_KEYS:    v = win_find(f->wid); if (v) q = &v->keys;    break;
+    case HAMWSYS_WIN_KEYS:
+        /* NOT the segment: see THE KEYSTROKE CHANNEL.  hamwsys_open has already
+         * refused this descriptor to anyone who does not hold the channel. */
+        return (int64_t)keychan_recv(f->wid, buf, cap);
     case HAMWSYS_WIN_POINTER: v = win_find(f->wid); if (v) q = &v->pointer; break;
     case HAMWSYS_WIN_EVENT:   v = win_find(f->wid); if (v) q = &v->event;   break;
     case HAMWSYS_WIN_TEXT:    v = win_find(f->wid); if (v) q = &v->text;    break;
@@ -2722,6 +3139,28 @@ static int ctl_global(const char *s, size_t n)
     if (n >= 9 && !strncmp(s, "newwindow", 9)) {
         wr(WR_NEWWIN, n);
         struct wwin *v = win_alloc((int32_t)getpid());
+        /* CLAIM THE KEYSTROKES BEFORE THE WINDOW EXISTS TO ANYONE ELSE.
+         * `newwindow` stamps the CALLER as the owner, so the process running
+         * this line is the one that will read this window's keys -- bind here
+         * rather than at its first open of /keys, so a keystroke routed in the
+         * gap is delivered instead of dropped.  (hamwsys_alloc, which stamps
+         * SOMEBODY ELSE's pid, deliberately does not bind: the owner does it
+         * lazily on its own first read, because binding on its behalf here
+         * would take the name the owner needs.)
+         *
+         * A FAILURE HERE FAILS THE WINDOW.  If the name is already held, this
+         * window can never receive a keystroke, and a program that comes up
+         * looking normal and is deaf to the keyboard is the success-shaped
+         * failure this tree exists to refuse.  keychan_bind has already said
+         * so by name on stderr. */
+        if (v && keychan_bind(v->wid) < 0) {
+            int e = errno;
+            v->used = 0;
+            shm->gen++;
+            last_new = -1;
+            errno = e;
+            return -1;
+        }
         last_new = v ? v->wid : -1;
         return v ? 0 : -1;
     }
@@ -2803,6 +3242,7 @@ static int ctl_global(const char *s, size_t n)
             ring_write(&v->event, req, sizeof req - 1);
             return 0;
         }
+        keychan_unbind(wid);
         bb_release(wid);
         v->used = 0;
         shm->gen++;
@@ -2818,6 +3258,7 @@ static int ctl_global(const char *s, size_t n)
              * not, so closing a window through ctl leaked a v2 slot for the
              * rest of the session -- and with slots scarce that showed up
              * later as some unrelated window compositing blank. */
+            keychan_unbind(wid);
             bb_release(wid);
             v->used = 0;
             shm->gen++;
@@ -3061,8 +3502,15 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -ENOENT; }
         if (!hostowner() && !owns_wid(f->wid)) { errno = EPERM; return -EPERM; }
-        struct wring *q = f->leaf == HAMWSYS_WIN_KEYS    ? &v->keys
-                        : f->leaf == HAMWSYS_WIN_POINTER ? &v->pointer
+        if (f->leaf == HAMWSYS_WIN_KEYS) {
+            /* The library gate above still refuses a non-owner, and the KERNEL
+             * refuses one again at the far end: the receiver drops every
+             * datagram the kernel did not stamp with the host owner's uid.
+             * This is the one that binds a program which skips this file. */
+            wr(WR_KEYS, n);
+            return keychan_send(f->wid, buf, n);
+        }
+        struct wring *q = f->leaf == HAMWSYS_WIN_POINTER ? &v->pointer
                         : f->leaf == HAMWSYS_WIN_EVENT   ? &v->event
                         : f->leaf == HAMWSYS_WIN_TEXT    ? &v->text
                                                          : &v->cmd;
@@ -3262,6 +3710,10 @@ int32_t hamwsys_free(int32_t wid)
      * down somebody else's window. */
     if (!hostowner() && !owns_wid(wid)) { errno = EPERM; return -1; }
     wr(WR_DESTROY, 0);
+    /* Release the name with the window, so a later wid reuse can bind it.  A
+     * process that is not the holder has nothing to release and this is a
+     * no-op there. */
+    keychan_unbind(wid);
     bb_release(wid);
     img_release_wid(wid);              /* devwsys's _wsys_img_release_wid */
     v->used = 0;

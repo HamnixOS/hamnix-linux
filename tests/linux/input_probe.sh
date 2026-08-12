@@ -72,13 +72,31 @@ timeout 4 "$WORK/wsysd.elf" "$WORK/events.bin" </dev/null >"$WORK/wsysd.log" 2>&
 WSYSD=$!
 sleep 2
 
-# The reader drains wid 2's rings and prints what it found.
+# THE READER DRAINS THE POINTER RING; THE WINDOW'S OWNER REPORTS ITS OWN KEYS.
+#
+# This used to be one reader process asking for both.  It cannot be, any more:
+# a window's keystrokes are delivered to whoever holds its channel and only the
+# OWNER can hold one (THE KEYSTROKE CHANNEL in user/linux-wsys.c), so a separate
+# reader asking for another window's keys is exactly the keylogger that closed,
+# and it is refused BY NAME rather than answered with a silent zero.  The
+# pointer ring is unchanged and still in the shared segment, so the reader still
+# answers for it.  The client echoes every key line it receives into its own log
+# and the assertion below reads it there -- which is the more truthful witness
+# anyway: it is the window saying what it got.
 "$WORK/reader.elf" 2 >"$WORK/reader.log" 2>&1
 RC=$?
 kill $WSYSD $CLIENT 2>/dev/null
 wait 2>/dev/null
 
 cat "$WORK/reader.log"
+# KEY_A is Linux keycode 30; what must arrive is ASCII 'a' = 97.
+if grep -q "wsys_client: keys .*d 97" "$WORK/client.log"; then
+    echo "ok   key events reached the window, and KEY_A arrived as ASCII 97"
+else
+    echo "FAIL key events reached the window (the owner's own log):"
+    sed 's/^/     /' "$WORK/client.log"
+    RC=1
+fi
 if [ $RC -ne 0 ]; then
     echo "--- wsysd said:"; sed 's/^/    /' "$WORK/wsysd.log"
 fi
