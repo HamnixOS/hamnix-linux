@@ -19,8 +19,8 @@
 # That paragraph had never been run. It is a claim about what EVERY updating
 # user is about to experience, and NORTH_STAR.md's rule is that a measurement
 # is worth more than an argument -- including one written in a comment by the
-# people who wrote the code. So this boots a real installed machine at the
-# CURRENT PUBLISHED version, with a desktop up and a window open, runs
+# people who wrote the code. So this boots a real installed machine ONE
+# WSYS_VERSION BELOW this tree, with a desktop up and a window open, runs
 # `hpm update`, and asks the SCREEN and the POINTER what happened. It asserts
 # nothing about exit codes.
 #
@@ -72,10 +72,14 @@
 #   * THE COMPOSITOR'S AND THE PANEL'S OWN LOGS, /var/log/{wsysd,panel,
 #     hamdesktop}.log, tailed at the end of every stage.
 #
-# NO VERSION NUMBER IS HARD-CODED. The published version is READ from the live
-# index at run time and the local channel is derived strictly above it. Nothing
-# is published: the update is served by python3 -m http.server on the loopback,
-# signed with a key minted for the run.
+# NO VERSION NUMBER IS HARD-CODED, AND NOTHING IS FETCHED. Every version in
+# this run is derived from the one WSYS_VERSION read out of user/linux-wsys.c;
+# all three channels are BUILT here from symlink farms over this tree, served
+# by python3 -m http.server on the loopback and signed with a key minted for
+# the run. See section 1 for why the baseline stopped being the live channel:
+# once the channel catches up with the tree there is no version bump left to
+# measure, and six assertions go red for want of one -- on exactly the days
+# when nothing has changed.
 #
 # WHAT THIS GATE MEASURED, AND WHAT WAS DONE ABOUT IT
 # ====================================================
@@ -194,13 +198,11 @@ WAIT2="${2:-1500}"
 WAIT3="${3:-900}"
 PKG=hamnix-desktop
 BIN=/bin/wsysd
-CHANNEL_URL="${HAMLINUX_WV_URL:-https://255.one/linux/index.json}"
 
 WORK="${HAMLINUX_WV_WORK:-$HOME/.hamnix-build/wsysver}"; mkdir -p "$WORK"
 SHOT="$WORK/shots"; mkdir -p "$SHOT"
 IMG=build/image
 DISK="$WORK/wsysver.img"
-REPO="${HAMLINUX_WV_REPO:-build/repo}"
 EXTRA="$WORK/extra"
 QMP="$WORK/qmp.sock"
 
@@ -226,172 +228,92 @@ say() { echo "[wv] $*"; }
 command -v python3 >/dev/null || { echo "need python3" >&2; exit 1; }
 
 # =========================================================================
-# 1. WHAT IS PUBLISHED RIGHT NOW, ASKED RATHER THAN ASSUMED.
+# 1. THREE WINDOW SYSTEMS, ONE WSYS_VERSION APART, ALL BUILT HERE.
 # =========================================================================
-say "asking $CHANNEL_URL what it serves"
-curl -fsS --max-time 60 "$CHANNEL_URL" -o "$WORK/live-index.json" || {
-    echo "FAIL: cannot reach $CHANNEL_URL -- the machine under test has to be" >&2
-    echo "      installed at the CURRENT PUBLISHED version and nothing else" >&2
-    echo "      can say what that is." >&2; exit 1; }
-LIVEVER="$(PKG="$PKG" python3 - "$WORK/live-index.json" <<'PY'
-import json, os, sys
-d = json.load(open(sys.argv[1]))
-for r in d["packages"]:
-    if r["name"] == os.environ["PKG"]:
-        print(r["version"]); break
-PY
-)"
-[ -n "$LIVEVER" ] || { echo "FAIL: the channel carries no $PKG at all" >&2; exit 1; }
-NEWVER="${HAMLINUX_WV_NEWVER:-$(LIVEVER="$LIVEVER" python3 <<'PY'
-import os
-a, b, c = (int(x) for x in os.environ["LIVEVER"].split("."))
-print("%d.%d.%d" % (a, b, c + 1))
-PY
-)}"
-NEWVER="$NEWVER" LIVEVER="$LIVEVER" python3 <<'PY' || {
-import os, sys
-def key(v): return [int(x) for x in v.split(".")]
-sys.exit(0 if key(os.environ["NEWVER"]) > key(os.environ["LIVEVER"]) else 1)
-PY
-    echo "FAIL: $NEWVER does not sort above the published $LIVEVER" >&2; exit 1; }
-say "published: $PKG $LIVEVER. This tree will be offered as $NEWVER."
-# THE PRECONDITION STAGES A-D HAVE, STATED WHERE IT CAN BE READ.
+# THIS USED TO ASK THE LIVE CHANNEL WHAT TO INSTALL, AND THAT IS THE DEFECT.
 #
-# Stages A-D measure what a WINDOW-SYSTEM VERSION BUMP does to a running
-# desktop, so they need the published channel to be BELOW this tree's
-# WSYS_VERSION. That was true when they were written (published v7, tree v8)
-# and it stops being true the moment this tree's version ships: after that,
-# published == tree, `hpm update` moves no version, and there is nothing for a
-# refusal to refuse. Nothing here can detect that in advance without running
-# the published compositor on this host, which this gate deliberately does not
-# do -- so it is said out loud instead, and the C-stage assertions below fail
-# by name if it has happened (SEGVER comes back empty, "no refusal" is FAIL).
+# The gate installed whatever https://255.one/linux serves and then updated to
+# this tree, on the reasoning that "the CURRENT PUBLISHED version" is the only
+# honest baseline. It is honest and it is not STABLE: the moment the channel
+# catches up with the tree -- which is the ordinary steady state right after
+# every release -- published == tree, `hpm update` moves no window-system
+# version, and there is nothing for a refusal to refuse.
 #
-# STAGE E IS NOT AFFECTED. It builds BOTH sides itself, one WSYS_VERSION
-# apart, so it measures a real bump in every run whatever the channel has
-# moved to -- which is also the reason it is the stage that can say anything
-# about what the person SEES.
-say "NOTE: stages A-D assume the published channel is BELOW this tree's wsys v$NEWWSYS."
-say "      If $LIVEVER already carries v$NEWWSYS there is no bump for them to see; STAGE E builds its own."
-
-LIVE_URL="$(PKG="$PKG" python3 - "$WORK/live-index.json" <<'PY'
-import json, os, sys
-d = json.load(open(sys.argv[1]))
-base = d.get("url", "")
-for r in d["packages"]:
-    if r["name"] == os.environ["PKG"]:
-        u = r["url"]
-        print(u if u.startswith("http") else base.rstrip("/") + "/" + u); break
-PY
-)"
-curl -fsS --max-time 300 "$LIVE_URL" -o "$WORK/live-pkg.tar.gz" || {
-    echo "FAIL: cannot download the published $PKG" >&2; exit 1; }
-rm -rf "$WORK/liveunpack"; mkdir -p "$WORK/liveunpack"
-tar xzf "$WORK/live-pkg.tar.gz" -C "$WORK/liveunpack" || {
-    echo "FAIL: the published tarball did not unpack" >&2; exit 1; }
-LIVE_WSYSD="$WORK/liveunpack/$PKG-$LIVEVER/files${BIN}"
-[ -f "$LIVE_WSYSD" ] || { echo "FAIL: the published $PKG carries no $BIN" >&2; exit 1; }
-LIVE_MD5="$(md5sum "$LIVE_WSYSD" | cut -d' ' -f1)"
-say "the published $BIN is md5 $LIVE_MD5"
-
-NEW_TAR="$REPO/linux/packages/$PKG-$NEWVER.tar.gz"
-[ -f "$NEW_TAR" ] || {
-    echo "FAIL: no $NEW_TAR -- build the channel first:" >&2
-    echo "  python3 scripts/hamlinux_packages.py --out $REPO --version $NEWVER \\" >&2
-    echo "      --channel linux --base-url http://10.0.2.2:9999/" >&2; exit 1; }
-rm -rf "$WORK/newunpack"; mkdir -p "$WORK/newunpack"
-tar xzf "$NEW_TAR" -C "$WORK/newunpack" || {
-    echo "FAIL: the local tarball did not unpack" >&2; exit 1; }
-NEW_MD5="$(md5sum "$WORK/newunpack/$PKG-$NEWVER/files$BIN" | cut -d' ' -f1)"
-[ "$NEW_MD5" != "$LIVE_MD5" ] || {
-    echo "FAIL: this tree's $BIN is byte-identical to the published one, so" >&2
-    echo "      there is no window-system change to measure the effect of." >&2
-    exit 1; }
-say "this tree's $BIN is md5 $NEW_MD5"
-
-# =========================================================================
-# 2. Serve the local channel, signed, on the loopback. NOTHING IS PUBLISHED.
-# =========================================================================
-PORT="$(python3 - <<'PY'
-import socket
-s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
-PY
-)"
-BASE="http://10.0.2.2:$PORT/"
-python3 - "$REPO/linux/index.json" "$BASE" <<'PY' || {
-import json, sys
-p = sys.argv[1]
-d = json.load(open(p))
-d["url"] = sys.argv[2]
-with open(p, "w") as fh:
-    json.dump(d, fh, indent=2); fh.write("\n")
-PY
-    echo "FAIL: could not re-point the local index" >&2; exit 1; }
-
-mkdir -p "$EXTRA/etc/hpm"
-python3 scripts/hpm_sign.py keygen --out-pub "$EXTRA/etc/hpm/wv-trusted.pub" \
-    --out-sec "$WORK/wv.sec" >/dev/null || {
-    echo "FAIL: cannot mint a signing key" >&2; exit 1; }
-python3 scripts/hpm_sign.py sign "$REPO/linux/index.json" "$WORK/wv.sec" \
-    "$REPO/linux/index.json.sig" || {
-    echo "FAIL: cannot sign the local index" >&2; exit 1; }
-
-python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$REPO" \
-    >"$WORK/http.log" 2>&1 &
-HTTPD=$!; reap_add "$HTTPD"
-sleep 1
-curl -fsS "http://127.0.0.1:$PORT/linux/index.json" >/dev/null || {
-    echo "FAIL: the local channel is not being served" >&2; exit 1; }
-say "this tree's channel is served at $BASE (pid $HTTPD)"
-
-# =========================================================================
-# 2b. A SECOND CHANNEL, ONE WINDOW-SYSTEM VERSION FURTHER ON — and the
-#     arithmetic that forces it to exist.
-# =========================================================================
-# STAGE E asks what a PERSON SEES when a program is refused.  Stages A-D
-# already proved the refusal is correct and safe; the open finding they left
-# is that a correct refusal and a dead button are the same picture.
+# MEASURED, on the run that found this. Published 1.0.20 carries wsys v8 and
+# this tree was v8. At STAGE C `cat /dev/wsys/windows` exited 0 and PRINTED THE
+# WINDOW TABLE; the window table GAINED a window (6 against 4) because the app
+# opened normally; the leftover control's md5 was `efdb...` for all four
+# attaches. Six assertions that exist to watch a version bump went red for want
+# of one. So the gate that protects the single most destructive failure this
+# project has -- the 6 -> 7 wipe, a desktop replaced by a featureless slab
+# whose only remaining control is the power button -- stopped checking on
+# exactly the days when nothing had changed, and would have done it again at
+# every release.
 #
-# The notice is drawn by the PANEL, because the panel is one of the two
-# processes that survive an update still holding the screen (see THE "RESTART
-# BEFORE OPENING APPS" NOTICE in user/hampanelscene.ad).  And that is exactly
-# why it cannot be measured at $LIVEVER -> $NEWVER: the panel that survives
-# THAT update is the PUBLISHED one, built before this code existed.  No change
-# made in this tree can put a notice on a screen owned by a binary that
-# shipped last month.  It is arithmetic, not an omission, and it is true of
-# every mechanism that could have been chosen here -- an exit-status watcher,
-# a stderr reader, a compositor-side check -- because all of them run in the
-# survivor.
+# THE FIX IS THE ONE STAGE E ALREADY USES: BUILD BOTH SIDES. This gate is about
+# what happens ACROSS a WSYS_VERSION boundary, so it now makes the boundary
+# rather than hoping to find one. Three private channels, each a symlink farm
+# over this tree whose only real file is user/linux-wsys.c:
 #
-# So the notice becomes measurable one bump later, and STAGE E IS THAT BUMP:
-# a second channel at $NEXTVER whose ONLY difference from $NEWVER is
-# WSYS_VERSION, built from a symlink farm over this tree (the pattern is
-# tests/linux/build_obj_cache.sh's mktree, and it is safe against the shared
-# object cache because rt_obj's cache key is the hash of the SOURCE).  Boot 3
-# comes up on $NEWVER -- this tree, notice code and all -- and then updates to
-# $NEXTVER, so BOTH sides of the update are this tree and the survivor is a
-# panel that knows what a refusal marker is.
+#     BASELINE  wsys v(N-1)   what the machine is installed at
+#     TREE      wsys v(N)     what it is updated to at STAGE B      <- this tree
+#     NEXT      wsys v(N+1)   what it is updated to again at STAGE E
 #
-# It is a separate repo root served on a separate port precisely so it cannot
-# reach stages A-D: boot 2's `hpm update` must still land on $NEWVER and see
-# exactly the 7 -> 8 world those witnesses were taken in.
+# and N is read out of user/linux-wsys.c, so no version number in this file is
+# typed by hand -- which was already the rule and is now the rule for the
+# baseline too.
+#
+# NO NETWORK. Not curl, not a channel, not a key that lives anywhere but this
+# run's $WORK. A gate that depends on a live channel is a gate somebody else's
+# push can turn red, and this one is the last line in front of a failure mode
+# that eats a running desktop. Everything below is the loopback.
+#
+# WHAT IS GIVEN UP, SAID PLAINLY: this gate no longer installs the REAL
+# published tarball, so it is no longer evidence that what is on 255.one today
+# unpacks and boots. That was never its subject -- tests/linux/installed_update.sh
+# and tests/linux/hpm_signed_refresh.sh are -- and it was the thing that made
+# it stop measuring its own subject.
+#
+# HAMLINUX_WV_BASEWSYS EXISTS TO MAKE THE GATE PROVE ITSELF, and it is how the
+# fix above was verified: set it EQUAL to this tree's version and the run
+# reproduces the stale world exactly -- the package version still moves, the
+# window-system version does not -- so the six assertions can be watched going
+# red on demand. Which is why setting it that way is a scored FAIL below and
+# not a quiet configuration.
 NEXTWSYS=$((NEWWSYS + 1))
-NEXTVER="$(NEWVER="$NEWVER" python3 <<'PY'
-import os
-a, b, c = (int(x) for x in os.environ["NEWVER"].split("."))
-print("%d.%d.%d" % (a, b, c + 1))
-PY
-)"
-REPO2="${HAMLINUX_WV_REPO2:-$WORK/repo-v$NEXTWSYS}"
-TREE9="$WORK/tree-v$NEXTWSYS"
-NEXT_TAR="$REPO2/linux/packages/$PKG-$NEXTVER.tar.gz"
-STAGE_E=0
-STAGE_E_WHY=""
+BASEWSYS="${HAMLINUX_WV_BASEWSYS:-$((NEWWSYS - 1))}"
+if [ "$BASEWSYS" -lt 1 ]; then
+    echo "wv: FAIL this tree is wsys v$NEWWSYS, so there is no v$((NEWWSYS - 1)) to install as a baseline and this gate cannot make a version bump to measure. It must not answer PASS about a boundary it could not build." >&2
+    exit 1
+fi
+# THE VERSION STRINGS carry the wsys version they were built at, and a trailing
+# ordinal so that they still SORT when two of them share a wsys version -- which
+# is exactly the forced-stale case above, where the package version has to move
+# while the window system does not. 0.x.y, never 1.x.y, so a tarball from this
+# gate can never be mistaken for a release.
+BASEVER="0.$BASEWSYS.1"
+NEWVER="${HAMLINUX_WV_NEWVER:-0.$NEWWSYS.2}"
+NEXTVER="0.$NEXTWSYS.3"
+REPO0="${HAMLINUX_WV_REPO0:-$WORK/repo-baseline}"
+REPO="${HAMLINUX_WV_REPO:-$WORK/repo-tree}"
+REPO2="${HAMLINUX_WV_REPO2:-$WORK/repo-next}"
+
+BASELINE_OK=1
+if [ "$BASEWSYS" -lt "$NEWWSYS" ]; then
+    say "BASELINE STRATEGY: built here, at wsys v$BASEWSYS, one below this tree's v$NEWWSYS."
+    say "  install $PKG $BASEVER (v$BASEWSYS) -> update to $NEWVER (v$NEWWSYS) -> update again to $NEXTVER (v$NEXTWSYS)"
+else
+    BASELINE_OK=0
+    say "BASELINE STRATEGY: NONE. HAMLINUX_WV_BASEWSYS=$BASEWSYS is not below this tree's v$NEWWSYS."
+    say "  stages A-D will see a package-version move with NO window-system move, which is the stale world this gate was rebuilt to stop entering by accident."
+fi
 
 # mktree <dir> <wsys-version> -- a symlink farm over $PROJ_ROOT whose only
 # real file is user/linux-wsys.c, with WSYS_VERSION set to <wsys-version>.
 # Lifted verbatim from tests/linux/build_obj_cache.sh so the two gates cannot
-# drift apart about what "the same tree at a different version" means.
+# drift apart about what "the same tree at a different version" means. Safe
+# against the shared object cache because rt_obj's key is the hash of the
+# SOURCE, not its path or its mtime.
 mktree() {
     local dir="$1" ver="$2" e
     mkdir -p "$dir/user"
@@ -409,73 +331,148 @@ mktree() {
     grep -q "^#define[[:space:]]\+WSYS_VERSION[[:space:]]\+$ver\$" "$dir/user/linux-wsys.c"
 }
 
-prepare_v9() {
-    # REUSED WHENEVER IT IS THERE, and NOT gated on HAMLINUX_WV_REUSE -- that
-    # flag also reuses the DISK, and the disk cannot be reused: phase 3 leaves
-    # /etc/rc.boot as rc.phase3, so a second run of the same image would boot
-    # phase 3 forever. The $NEWVER tarball beside it is treated the same way
-    # (§1 only requires it to exist), so a re-run costs three boots and not a
-    # second hundred-package build. Delete $REPO2 to force a rebuild.
-    if [ -f "$NEXT_TAR" ]; then
-        say "reusing $NEXT_TAR"
-    else
-        say "staging a v$NEXTWSYS tree and building $PKG $NEXTVER (this takes a few minutes)"
-        rm -rf "$TREE9"
-        mktree "$TREE9" "$NEXTWSYS" || {
-            STAGE_E_WHY="could not stage a v$NEXTWSYS symlink farm"; return 1; }
-        rm -rf "$REPO2"; mkdir -p "$REPO2"
-        ( cd "$TREE9" && nice -n 15 python3 scripts/hamlinux_packages.py \
-            --out "$REPO2" --version "$NEXTVER" --channel linux \
-            --base-url "http://10.0.2.2:9999/" ) >"$WORK/build-v$NEXTWSYS.log" 2>&1 || {
-            STAGE_E_WHY="the v$NEXTWSYS channel did not build (see $WORK/build-v$NEXTWSYS.log)"
-            return 1; }
+# build_channel <wsys-version> <pkg-version> <out-repo> <tag>
+# REUSED WHENEVER THE TARBALL IS ALREADY THERE. Three hundred-package builds is
+# the price of a hermetic gate and it is paid once: delete the repo to force a
+# rebuild. Note this is NOT gated on HAMLINUX_WV_REUSE, which also reuses the
+# DISK -- and the disk cannot be reused, because phase 3 leaves /etc/rc.boot as
+# rc.phase3 and a second run of the same image would boot phase 3 for ever.
+build_channel() {
+    local wv="$1" pv="$2" out="$3" tag="$4"
+    if [ -f "$out/linux/packages/$PKG-$pv.tar.gz" ]; then
+        say "reusing the $tag channel: $PKG $pv (wsys v$wv) in $out"
+        return 0
     fi
-    [ -f "$NEXT_TAR" ] || { STAGE_E_WHY="no $NEXT_TAR after the build"; return 1; }
-    # THE BUILD ACTUALLY DIFFERS, read off the bytes rather than assumed. If
-    # the farm had silently compiled $PROJ_ROOT's linux-wsys.c the two wsysd
-    # binaries would be identical and stage E would be measuring a version
-    # bump that never happened -- the exact shape of trap this gate exists to
-    # avoid.
-    rm -rf "$WORK/nextunpack"; mkdir -p "$WORK/nextunpack"
-    tar xzf "$NEXT_TAR" -C "$WORK/nextunpack" || {
-        STAGE_E_WHY="the v$NEXTWSYS tarball did not unpack"; return 1; }
-    NEXT_MD5="$(md5sum "$WORK/nextunpack/$PKG-$NEXTVER/files$BIN" | cut -d' ' -f1)"
-    [ "$NEXT_MD5" != "$NEW_MD5" ] || {
-        STAGE_E_WHY="the v$NEXTWSYS $BIN is byte-identical to the v$NEWWSYS one"
-        return 1; }
-    PORT2="$(python3 - <<'PY'
+    say "building the $tag channel: $PKG $pv at wsys v$wv (this takes a few minutes)"
+    local tree="$WORK/tree-$tag"
+    rm -rf "$tree"
+    mktree "$tree" "$wv" || return 1
+    rm -rf "$out"; mkdir -p "$out"
+    ( cd "$tree" && nice -n 15 python3 scripts/hamlinux_packages.py \
+        --out "$out" --version "$pv" --channel linux \
+        --base-url "http://10.0.2.2:9999/" ) >"$WORK/build-$tag.log" 2>&1 || return 1
+    [ -f "$out/linux/packages/$PKG-$pv.tar.gz" ]
+}
+
+# wsysd_md5 <repo> <pkg-version> <tag> -- the compositor that channel carries,
+# read off the bytes rather than assumed to be different from its neighbours.
+wsysd_md5() {
+    local out="$1" pv="$2" tag="$3"
+    local un="$WORK/unpack-$tag"
+    rm -rf "$un"; mkdir -p "$un"
+    tar xzf "$out/linux/packages/$PKG-$pv.tar.gz" -C "$un" || return 1
+    [ -f "$un/$PKG-$pv/files$BIN" ] || return 1
+    md5sum "$un/$PKG-$pv/files$BIN" | cut -d' ' -f1
+}
+
+build_channel "$BASEWSYS" "$BASEVER" "$REPO0" baseline || {
+    echo "wv: FAIL the v$BASEWSYS BASELINE channel did not build (see $WORK/build-baseline.log), so this run has nothing below this tree to install and cannot make a version bump. It must not answer PASS about a boundary it could not build." >&2
+    tail -20 "$WORK/build-baseline.log" >&2; exit 1; }
+build_channel "$NEWWSYS" "$NEWVER" "$REPO" tree || {
+    echo "wv: FAIL this tree's own channel did not build (see $WORK/build-tree.log)" >&2
+    tail -20 "$WORK/build-tree.log" >&2; exit 1; }
+
+BASE_MD5="$(wsysd_md5 "$REPO0" "$BASEVER" baseline)"
+NEW_MD5="$(wsysd_md5 "$REPO" "$NEWVER" tree)"
+[ -n "$BASE_MD5" ] && [ -n "$NEW_MD5" ] || {
+    echo "wv: FAIL could not read $BIN out of one of the built channels" >&2; exit 1; }
+say "the BASELINE $BIN (wsys v$BASEWSYS) is md5 $BASE_MD5"
+say "this tree's $BIN (wsys v$NEWWSYS) is md5 $NEW_MD5"
+# THE TWO SIDES REALLY DIFFER, read off the bytes. If the farm had silently
+# compiled $PROJ_ROOT's own linux-wsys.c the two would be identical and every
+# stage below would be measuring a bump that never happened -- which is the
+# exact shape of the trap this whole section exists to close. The one case
+# where identical is EXPECTED is the forced-stale control, and it is reported
+# rather than treated as a build failure.
+if [ "$BASE_MD5" = "$NEW_MD5" ]; then
+    if [ "$BASELINE_OK" = 1 ]; then
+        echo "wv: FAIL the v$BASEWSYS baseline $BIN is byte-identical to this tree's v$NEWWSYS one, so the symlink farm did not take and there is no window-system change to measure." >&2
+        exit 1
+    fi
+    say "the baseline and this tree carry the SAME $BIN, as the forced-stale control requires"
+fi
+
+# =========================================================================
+# 2. Serve all three, signed, on the loopback. NOTHING IS PUBLISHED.
+# =========================================================================
+mkdir -p "$EXTRA/etc/hpm"
+python3 scripts/hpm_sign.py keygen --out-pub "$EXTRA/etc/hpm/wv-trusted.pub" \
+    --out-sec "$WORK/wv.sec" >/dev/null || {
+    echo "FAIL: cannot mint a signing key" >&2; exit 1; }
+
+# serve_channel <repo> <tag> -- signs the index with THIS RUN's key, re-points
+# it at the port it is about to be served on, and serves it. Sets $SRV_BASE.
+# One key for all three so the disk carries a single trusted pubkey.
+SRV_BASE=""
+serve_channel() {
+    local repo="$1" tag="$2" port pid
+    port="$(python3 - <<'PY'
 import socket
 s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
 PY
 )"
-    BASE2="http://10.0.2.2:$PORT2/"
-    python3 - "$REPO2/linux/index.json" "$BASE2" <<'PY' || {
+    SRV_BASE="http://10.0.2.2:$port/"
+    python3 - "$repo/linux/index.json" "$SRV_BASE" <<'PY' || return 1
 import json, sys
 d = json.load(open(sys.argv[1]))
 d["url"] = sys.argv[2]
 with open(sys.argv[1], "w") as fh:
     json.dump(d, fh, indent=2); fh.write("\n")
 PY
-        STAGE_E_WHY="could not re-point the v$NEXTWSYS index"; return 1; }
-    # The SAME key as the $NEWVER channel, so the disk carries one pubkey.
-    python3 scripts/hpm_sign.py sign "$REPO2/linux/index.json" "$WORK/wv.sec" \
-        "$REPO2/linux/index.json.sig" || {
-        STAGE_E_WHY="could not sign the v$NEXTWSYS index"; return 1; }
-    python3 -m http.server "$PORT2" --bind 127.0.0.1 --directory "$REPO2" \
-        >"$WORK/http-v$NEXTWSYS.log" 2>&1 &
-    HTTPD2=$!; reap_add "$HTTPD2"
+    python3 scripts/hpm_sign.py sign "$repo/linux/index.json" "$WORK/wv.sec" \
+        "$repo/linux/index.json.sig" || return 1
+    python3 -m http.server "$port" --bind 127.0.0.1 --directory "$repo" \
+        >"$WORK/http-$tag.log" 2>&1 &
+    pid=$!; reap_add "$pid"
     sleep 1
-    curl -fsS "http://127.0.0.1:$PORT2/linux/index.json" >/dev/null || {
-        STAGE_E_WHY="the v$NEXTWSYS channel is not being served"; return 1; }
-    say "the v$NEXTWSYS channel ($PKG $NEXTVER, $BIN md5 $NEXT_MD5) is served at $BASE2 (pid $HTTPD2)"
-    return 0
+    curl -fsS "http://127.0.0.1:$port/linux/index.json" >/dev/null || return 1
+    say "the $tag channel is served at $SRV_BASE (pid $pid)"
 }
 
-if prepare_v9; then
-    STAGE_E=1
+serve_channel "$REPO0" baseline || { echo "FAIL: the baseline channel is not being served" >&2; exit 1; }
+BASE0="$SRV_BASE"
+serve_channel "$REPO" tree || { echo "FAIL: this tree's channel is not being served" >&2; exit 1; }
+BASE="$SRV_BASE"
+
+# =========================================================================
+# 2b. AND ONE WSYS_VERSION FURTHER ON, for STAGE E.
+# =========================================================================
+# STAGE E asks what a PERSON SEES when a program is refused. Stages A-D prove
+# the refusal is correct and safe; the finding they left is that a correct
+# refusal and a dead button are the same picture.
+#
+# The notice is drawn by the PANEL, because the panel is one of the two
+# processes that survive an update still holding the screen (see THE "RESTART
+# BEFORE OPENING APPS" NOTICE in user/hampanelscene.ad). And that is exactly
+# why it cannot be measured at the FIRST update in this run: the panel that
+# survives v$BASEWSYS -> v$NEWWSYS is the BASELINE one, built from a
+# linux-wsys.c that predates the notice. No change made in a tree can put a
+# notice on a screen owned by a binary that shipped before it. It is
+# arithmetic, not an omission, and it is true of every mechanism that could
+# have been chosen -- an exit-status watcher, a stderr reader, a
+# compositor-side check -- because all of them run in the survivor.
+#
+# So the notice becomes measurable one bump later, and STAGE E IS THAT BUMP.
+STAGE_E=0
+STAGE_E_WHY=""
+NEXT_MD5=""
+if build_channel "$NEXTWSYS" "$NEXTVER" "$REPO2" next; then
+    NEXT_MD5="$(wsysd_md5 "$REPO2" "$NEXTVER" next)"
+    if [ -z "$NEXT_MD5" ]; then
+        STAGE_E_WHY="could not read $BIN out of the v$NEXTWSYS channel"
+    elif [ "$NEXT_MD5" = "$NEW_MD5" ]; then
+        STAGE_E_WHY="the v$NEXTWSYS $BIN is byte-identical to the v$NEWWSYS one"
+    elif serve_channel "$REPO2" next; then
+        BASE2="$SRV_BASE"
+        say "the v$NEXTWSYS $BIN is md5 $NEXT_MD5"
+        STAGE_E=1
+    else
+        STAGE_E_WHY="the v$NEXTWSYS channel is not being served"
+    fi
 else
-    say "STAGE E will NOT run: $STAGE_E_WHY"
+    STAGE_E_WHY="the v$NEXTWSYS channel did not build (see $WORK/build-next.log)"
 fi
+[ "$STAGE_E" = 1 ] || say "STAGE E will NOT run: $STAGE_E_WHY"
 
 cleanup() { rm -f "$QMP"; }
 reap_on_exit cleanup
@@ -517,33 +514,39 @@ echo '[wv] PROBE-END-$1'
 W
 }
 
-# ---- phase 1: become a machine running the CURRENT PUBLISHED system ----
+# ---- phase 1: become a machine running the BASELINE window system ----
+# THE BASELINE IS SERVED FROM THIS HOST, at wsys v$BASEWSYS, and that is the
+# whole of the fix in section 1: the machine under test is installed one
+# WSYS_VERSION BELOW this tree BY CONSTRUCTION, instead of at whatever the
+# live channel happens to serve today. `dhcpc` still runs because the guest
+# reaches the loopback server through slirp at 10.0.2.2, but nothing here
+# leaves this machine.
 cat > "$WORK/rc.phase1" <<RC
 source '/etc/rc.boot.installed'
-echo '[wv] ===== PHASE 1: install the CURRENTLY PUBLISHED system ($LIVEVER)'
+echo '[wv] ===== PHASE 1: install the BASELINE system ($BASEVER, wsys v$BASEWSYS)'
 date
 dhcpc
 echo '[wv] p1 dhcpc status:' \$status
-echo '[wv] p1 refresh (the real repository, the shipped trusted key)'
-hpm refresh
+echo '[wv] p1 refresh (the BASELINE channel on the loopback, the key minted for this run)'
+hpm --repo=$BASE0 --trusted-key=/etc/hpm/wv-trusted.pub refresh
 echo '[wv] p1 refresh status:' \$status
-# THE WHOLE PUBLISHED USERLAND, not just the desktop. hamnix-base pulls
+# THE WHOLE BASELINE USERLAND, not just the desktop. hamnix-base pulls
 # coreutils, hamsh, net, hpm, the drivers and the desktop -- so after this the
-# machine is what a person who installed hamnix-linux and ran \`hpm update\`
-# today HAS, and nothing on it is newer than the window system it is running.
+# machine is a coherent v$BASEWSYS system and nothing on it is newer than the
+# window system it is running.
 # (The backslashes are not decoration: this heredoc is UNQUOTED, so the
 # backticks ran \`hpm update\` ON THE HOST every time this gate started -- it
 # printed "hpm: command not found" and ate the words out of the comment. A
 # host with hpm on its PATH would have had its own machine updated by a
 # comment in a test.)
 echo '[wv] p1 install hamnix-base'
-hpm install hamnix-base
+hpm --repo=$BASE0 --trusted-key=/etc/hpm/wv-trusted.pub install hamnix-base
 echo '[wv] p1 install status:' \$status
 echo '[wv] p1 list:'
 hpm list
 echo '[wv] p1 md5 of $BIN:'
 md5sum $BIN
-# The inspector for the stages where the session is still the published one.
+# The inspector for the stages where the session is still the baseline one.
 cp /bin/cat /probe-cat
 echo '[wv] p1 md5 of /bin/cat and /probe-cat:'
 md5sum /bin/cat /probe-cat
@@ -561,7 +564,7 @@ echo '[wv]               owner runs hpm update.'
 date
 dhcpc
 echo '[wv] p2 dhcpc status:' \$status
-echo '[wv] p2 md5 of $BIN (this is the PUBLISHED compositor):'
+echo '[wv] p2 md5 of $BIN (this is the BASELINE compositor, wsys v$BASEWSYS):'
 md5sum $BIN
 # rc.boot.installed ends by sourcing /etc/rc.d/rc.5; give the desktop the time
 # a desktop takes.
@@ -885,7 +888,7 @@ boot() {   # boot <logfile> <seconds> <marker>...
     VM=""
 }
 
-say "boot 1 of 3: install the published system (up to ${WAIT1}s)"
+say "boot 1 of 3: install the BASELINE system, wsys v$BASEWSYS (up to ${WAIT1}s)"
 boot "$WORK/boot1.log" "$WAIT1"
 say "boot 2 of 3: the live update, in three stages (up to ${WAIT2}s)"
 boot "$WORK/boot2.log" "$WAIT2" A B C
@@ -981,7 +984,7 @@ report_stage() {   # report_stage <log> <tag> <headline>
 echo "=========================================================="
 echo " WHAT A PERSON SEES WHEN THEY UPDATE A RUNNING DESKTOP"
 echo "=========================================================="
-report_stage "$WORK/boot2.log" A "before the update -- the published $LIVEVER desktop"
+report_stage "$WORK/boot2.log" A "before the update -- the BASELINE $BASEVER desktop (wsys v$BASEWSYS)"
 report_stage "$WORK/boot2.log" B "hpm update has run; nothing has been relaunched"
 report_stage "$WORK/boot2.log" C "the person opens one more app"
 report_stage "$WORK/boot3.log" D "after a reboot, on the new $NEWVER"
@@ -1012,17 +1015,17 @@ answered() {   # answered <tag> -- 0 if the click opened something
 }
 
 check "the installed root came online"  'rc\.boot: hamnix-linux \(installed\)' "$WORK/boot1.log"
-check "the published system installed"  '\[wv\] p1 install status: 0'          "$WORK/boot1.log"
-if grep -aA3 -F '[wv] p1 md5 of /bin/wsysd' "$WORK/boot1.log" | grep -aq "$LIVE_MD5"; then
-    echo "wv: PASS the machine is running the PUBLISHED compositor (md5 $LIVE_MD5)"
+check "the baseline system installed"  '\[wv\] p1 install status: 0'          "$WORK/boot1.log"
+if grep -aA3 -F '[wv] p1 md5 of /bin/wsysd' "$WORK/boot1.log" | grep -aq "$BASE_MD5"; then
+    echo "wv: PASS the machine is running the BASELINE compositor, wsys v$BASEWSYS (md5 $BASE_MD5)"
 else
-    echo "wv: FAIL the machine is not running the published compositor"; fail=1
+    echo "wv: FAIL the machine is not running the BASELINE compositor"; fail=1
 fi
 
 if answered A; then
-    echo "wv: PASS STAGE A the published desktop WORKS: a real click on the Applications button opened the menu"
+    echo "wv: PASS STAGE A the BASELINE desktop WORKS: a real click on the Applications button opened the menu"
 else
-    echo "wv: FAIL STAGE A the published desktop did not answer a real click -- the control is broken and nothing after it means anything"
+    echo "wv: FAIL STAGE A the BASELINE desktop did not answer a real click -- the control is broken and nothing after it means anything"
     fail=1
 fi
 ASEG="$(segsize "$WORK/boot2.log" A)"
@@ -1142,7 +1145,7 @@ VERPAIR="$(printf '%s\n' "$REF" | sed -n 's/^wsys: *version \([0-9][0-9]*\) and 
 SEGVER="${VERPAIR%% *}"; PROGVER="${VERPAIR##* }"
 [ "$VERPAIR" = "$SEGVER" ] && PROGVER=""
 if [ -n "$SEGVER" ] && [ -n "$PROGVER" ] && [ "$PROGVER" = "$NEWWSYS" ] && [ "$SEGVER" != "$NEWWSYS" ]; then
-    echo "wv: PASS STAGE C THE RUNNING SESSION IS STILL THE PUBLISHED WINDOW SYSTEM: the refused binary (version $PROGVER, this tree's WSYS_VERSION) read version $SEGVER out of the live segment AFTER the update"
+    echo "wv: PASS STAGE C THE RUNNING SESSION IS STILL THE BASELINE WINDOW SYSTEM: the refused binary (version $PROGVER, this tree's WSYS_VERSION) read version $SEGVER out of the live segment AFTER the update"
 else
     echo "wv: FAIL STAGE C the refusal did not name a live segment of some older version against this tree's $NEWWSYS: it said segment=${SEGVER:-?} program=${PROGVER:-?}"
     fail=1
@@ -1196,7 +1199,7 @@ if [ "$SB" = "$SEG_BYTES" ] && [ "$SA" = "$SEG_BYTES" ]; then
 else
     echo "wv: FAIL THE LEFTOVER CONTROL could not make a segment of the expected size: /stale/wsys is ${SB:-?} then ${SA:-?} bytes, wanted $SEG_BYTES"; fail=1
 fi
-echo "wv: NOTE the leftover segment's md5, four attaches: published=$M1 -> this tree=$M2 -> this tree again=$M3 -> published again=$M4"
+echo "wv: NOTE the leftover segment's md5, four attaches: baseline=$M1 -> this tree=$M2 -> this tree again=$M3 -> baseline again=$M4"
 if [ -n "$M1" ] && [ -n "$M2" ] && [ "$M1" != "$M2" ]; then
     echo "wv: PASS A LEFTOVER SEGMENT IS STILL RE-INITIALISED: this tree's binary rewrote /stale/wsys ($M1 -> $M2) instead of refusing it -- so a fresh boot still comes up"
 else
@@ -1210,11 +1213,11 @@ else
     fail=1
 fi
 if [ -n "$M4" ] && [ "$M3" != "$M4" ] && [ "$M4" = "$M1" ]; then
-    echo "wv: PASS the published binary took the leftover back and landed on the SAME bytes it first made ($M4 = $M1), so a fresh segment is deterministic and the differences above are the version and nothing else"
+    echo "wv: PASS the BASELINE binary took the leftover back and landed on the SAME bytes it first made ($M4 = $M1), so a fresh segment is deterministic and the differences above are the version and nothing else"
 elif [ -n "$M4" ] && [ "$M3" != "$M4" ]; then
-    echo "wv: NOTE the published binary re-initialised it again ($M3 -> $M4) but did not land on its own first bytes ($M1) -- something other than the version word also differs between two fresh segments; the re-initialise above still happened"
+    echo "wv: NOTE the BASELINE binary re-initialised it again ($M3 -> $M4) but did not land on its own first bytes ($M1) -- something other than the version word also differs between two fresh segments; the re-initialise above still happened"
 else
-    echo "wv: FAIL the published binary did NOT re-initialise a leftover segment of this tree's version: ${M3:-?} -> ${M4:-?}"
+    echo "wv: FAIL the BASELINE binary did NOT re-initialise a leftover segment of this tree's version: ${M3:-?} -> ${M4:-?}"
     fail=1
 fi
 if sed -n '/THE LEFTOVER CONTROL/,/PHASE2 DONE/p' "$WORK/boot2.log" |
@@ -1289,6 +1292,17 @@ check "phase 3 reached the end" '\[wv\] PHASE3 DONE' "$WORK/boot3.log"
 # struct wshm is byte-identical in both directions, and a size assertion would
 # answer PASS while measuring nothing -- the trap this gate has already been
 # caught by once.
+# THE BASELINE WAS BELOW THIS TREE -- the precondition every assertion above
+# about a version bump silently depends on. It is scored, at the end, next to
+# the things it governs, because a run that could not make a bump must never
+# be readable as a run in which nothing went wrong.
+echo
+if [ "$BASELINE_OK" = 1 ]; then
+    echo "wv: PASS THE RUN HAD A VERSION BUMP TO MEASURE: the machine was installed at wsys v$BASEWSYS and updated to this tree's v$NEWWSYS, both built here. Every assertion above about a refusal was asked of a real boundary."
+else
+    echo "wv: FAIL THE RUN HAD NO VERSION BUMP AT ALL: the baseline was wsys v$BASEWSYS and this tree is v$NEWWSYS, so \`hpm update\` moved the package version and not the window system. Every assertion above about a refusal was asked of a boundary that does not exist, and their answers say nothing about this tree. (This is what HAMLINUX_WV_BASEWSYS=$BASEWSYS is for; it is scored so it can never be a quiet configuration.)"
+    fail=1
+fi
 echo
 if [ "$STAGE_E" != 1 ]; then
     echo "wv: FINDING STAGE E WAS NOT MEASURED AT ALL: $STAGE_E_WHY. Nothing below was asked, and no PASS in this run says anything about what a person sees after an update."
