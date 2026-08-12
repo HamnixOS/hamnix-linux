@@ -3396,13 +3396,16 @@ all reported rather than hidden:
   Clicking one of those eight is a menu entry that does nothing. This is the
   same shape as the bug above it, one level further out: the feature ships, and
   the DATA it needs does not.
-- **One run in three froze after launching from the menu.** The fallback list's
-  Files is `/bin/hamfm`, the TUI (the shipped `files.desktop` says
-  `/bin/hamfmscene`, which is not on the image either). Launched with no
-  terminal it sat at **2:02 of CPU in state R**, the screen stopped changing —
-  2nd click 0 px, 3rd click 0 px, the clock did not advance — and the panel
-  logged one spawn for three clicks. The other two runs reopened normally. The
-  gate prints the four numbers every run instead of asserting either outcome.
+- **Two runs in four froze after launching from the menu**, and the same
+  measurement told the two cases apart every time. The fallback list's Files is
+  `/bin/hamfm`, the TUI (the shipped `files.desktop` says `/bin/hamfmscene`,
+  which is not on the image either). When it lands in state **R with 2:02 of
+  CPU** — 100% of a core, a TUI with no terminal — the screen stops changing:
+  2nd click 0 px, 3rd click 0 px, the clock does not advance, the panel logs
+  one spawn for three clicks. When it lands in **S with 0:00** the menu reopens
+  on the 2nd click and toggles shut on the 3rd. Four runs, four times that
+  correlation held. The gate prints the numbers every run rather than asserting
+  either outcome.
 - **`ls` given a REGULAR FILE prints its CONTENTS**, exit 0. A probe that said
   `ls -l /bin/hamappmenu` put 450 KB of ELF on the serial console three times.
 

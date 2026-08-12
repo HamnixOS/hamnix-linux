@@ -696,17 +696,18 @@ else
 fi
 
 # ---- 7. REOPENING IN THE SAME SESSION, AFTER A LAUNCH ------------------
-# MEASURED AND PRINTED, NOT ASSERTED, and the reason is a run that happened.
-# On one of three runs of this file the screen STOPPED CHANGING the moment the
+# MEASURED AND PRINTED, NOT ASSERTED, and the reason is the runs that happened.
+# On two of four runs of this file the screen STOPPED CHANGING the moment the
 # menu launched /bin/hamfm: the 2nd click on Applications moved 0 px, the 3rd
 # moved 0 px, the CLOCK DID NOT ADVANCE over a minute, no second menu window
 # ever appeared, the panel logged one spawn for three clicks, and `ps` showed
 # hamfm with 2:02 of CPU in state R -- 100% of a core, a TUI with no terminal.
-# The other two runs reopened normally (2nd click opens, 3rd click toggles it
-# shut) with hamfm at 0:00. So it is INTERMITTENT, it is not the menu, and
-# writing either "it froze" or "it works" as this gate's verdict would be a
-# claim about one sample. What the file does instead is print the four numbers
-# every run, so the next person sees which of the two they got.
+# On the other two the menu reopened on the 2nd click and toggled shut on the
+# 3rd, and hamfm was in state S with 0:00. The correlation held all four times.
+# So it is INTERMITTENT, it is not the menu, and writing either "it froze" or
+# "it works" as this gate's verdict would be a claim about one sample. What the
+# file does instead is print the numbers every run, so the next person sees
+# which of the two they got and which state hamfm was in.
 #
 # The prose that WOULD have been wrong here is worth recording: an earlier
 # version of this block asserted the freeze in fixed text, and the very next
@@ -725,9 +726,13 @@ echo "    the panel logged $SPAWNS spawn(s) of /bin/hamappmenu for 3 clicks"
 echo "    ARM OLD, same three clicks on the panel's own dropdown: $OR2 px"
 echo "    the launched program at the end of the boot:"
 echo "      $(awk '/PROCS-NEW:/{i=1;next} i&&/hamfm/{print;exit}' "$WORK/boot.new.log" | tr -d '\r')"
-echo "    ONE RUN IN THREE FROZE HERE: 0 px, 0 px, one spawn, no window, and"
-echo "    hamfm at 2:02 of CPU in state R. $LAUNCH_PROG is the TUI file manager;"
-echo "    it is in this menu only because /etc/hamde/apps is not on the machine"
+echo "    TWO RUNS IN FOUR FROZE HERE, and the two cases are told apart by the"
+echo "    line above and nothing else: when hamfm is in state R with ~2:02 of"
+echo "    CPU the screen stops changing (0 px, 0 px, one spawn, no window, the"
+echo "    clock stopped); when it is in state S with 0:00 the menu reopens on"
+echo "    the 2nd click and toggles shut on the 3rd. Four runs, four times that"
+echo "    correlation held. $LAUNCH_PROG is the TUI file manager and it is in"
+echo "    this menu only because /etc/hamde/apps is not on the machine"
 echo "    (FINDING 1) and hamappmenu's built-in fallback names it, where the"
 echo "    SHIPPED etc/hamde/apps/files.desktop says Exec=/bin/hamfmscene."
 
