@@ -184,8 +184,34 @@
  * binary (which is every binary the update installs) from wiping the v6 session
  * it finds running.  No new binary
  * ships here and no package list changes: the channel is code inside
- * user/linux-wsys.c, which every wsys program already links. */
-#define WSYS_VERSION      7
+ * user/linux-wsys.c, which every wsys program already links.
+ *
+ * 8 MOVES THE v1 DISPLAY LIST OUT OF THE SEGMENT (THE PIXEL HAND-UP, below).
+ * struct wshm and struct wwin are AGAIN byte-for-byte what 7 had -- scene,
+ * stage, scene_len and stage_len are still there, at the same offsets, and are
+ * now dead storage -- so this is the SECOND bump where the layouts agree
+ * completely and only the MEANING differs, and it is the same argument as 7's:
+ * a v7 binary sharing a v8 session would find a perfectly well-formed table,
+ * write its display list into the dead buffer and commit it, and NOTHING would
+ * ever be painted; a v7 compositor would read every window's scene out of the
+ * dead buffer and composite a screen of empty windows.  A silent half-share.
+ *
+ * WHAT IT COSTS A RUNNING DESKTOP, since 7's own bump was measured to cost more
+ * than its comment claimed.  Nothing, unless two builds meet: A LIVE SESSION IS
+ * NOT A LEFTOVER (above shm_attach) ships in v7, so a v8 binary that finds a
+ * LIVE v7 session REFUSES TO ATTACH and says so by name -- the newly-started
+ * program fails, the running desktop is untouched.  That refusal is what makes
+ * this bump affordable and it is why it could not have been made before 7.
+ * The v7 direction is the one with no remedy in it: a v7 binary started into a
+ * v8 session re-inits, exactly as `installed_update_wsysver.sh` measured.  The
+ * SIZE is identical at 7 and 8 (37,972,380 bytes, 512 rows), so seg_rows_in()
+ * still recovers the row count from the size in both directions and THE FROZEN
+ * THREE are unchanged.
+ *
+ * No new binary ships here either, and no package list changes: like the
+ * keystroke channel, the pixel hand-up is code inside user/linux-wsys.c, which
+ * every wsys program already links. */
+#define WSYS_VERSION      8
 /* SIXTY-FOUR, NOT THIRTY-TWO, and the reason is rootless Xwayland.
  *
  * A ROOTFUL X session is one wl_surface and therefore ONE row in this table
@@ -301,12 +327,38 @@ struct wwin {
      * is what makes hamshotui's "select area" scrim DIM the desktop rather
      * than blit an opaque black rectangle over the thing it is dimming. */
     int32_t  keyed, blend;
-    uint32_t scene_len;                       /* published */
+    /* scene_len_dead / stage_len_dead / scene_dead / stage_dead ARE DEAD
+     * STORAGE, kept for exactly the reason keys_dead below is kept.
+     *
+     * The v1 display list left this segment -- see THE PIXEL HAND-UP -- because
+     * bytes in a world-READABLE mapping are readable by anything on the machine
+     * and nothing in a mapping can be otherwise.  A window's committed scene is
+     * what is drawn inside it, spelled as text: `glyphs` ops carry the actual
+     * strings, so scraping a terminal's scene is reading its screen.  Nothing
+     * reads or writes these 32 KiB and these two lengths any more.
+     *
+     * They stay because removing them would change sizeof(struct wwin), and
+     * THE SPLIT records why that is not a version bump this file can survive.
+     * struct wwin is byte-for-byte what versions 6 and 7 had.
+     *
+     * They are also what lets tests/linux/wsys_bypass.sh keep DRIVING attack 2
+     * (SCRIBBLE) instead of deleting it: the bypasser still maps the table,
+     * still finds the row and still writes these bytes, and the gate now
+     * asserts that the committed scene is not among them and that the scribble
+     * never reaches the protocol.
+     *
+     * scene_gen IS NOT DEAD.  It is the public CHANGE NOTIFICATION -- the
+     * counter a compositor polls to learn that a window has a new frame -- and
+     * it says nothing about what the frame contains.  It stays in the table for
+     * the same reason the geometry does: /dev/wsys/wctl publishes it, and every
+     * reader of that file wants it.  It is world-writable and therefore a HINT:
+     * a liar can only cause a repaint of bytes it still cannot read. */
+    uint32_t scene_len_dead;
     uint32_t scene_gen;                       /* ++ on every commit */
-    uint32_t stage_len;                       /* being written */
+    uint32_t stage_len_dead;
     char     title[WSYS_TITLE_CAP];
-    uint8_t  scene[WSYS_SCENE_CAP];
-    uint8_t  stage[WSYS_SCENE_CAP];
+    uint8_t  scene_dead[WSYS_SCENE_CAP];
+    uint8_t  stage_dead[WSYS_SCENE_CAP];
     /* keys_dead IS DEAD STORAGE, and it is kept rather than removed.
      *
      * Keystrokes left this segment entirely -- see THE KEYSTROKE CHANNEL --
@@ -615,6 +667,11 @@ static int          keychan_find(int32_t wid);
 static int          keychan_bind(int32_t wid);
 static uint64_t     keychan_recv(int32_t wid, uint8_t *b, uint64_t cap);
 static int64_t      keychan_send(int32_t wid, const uint8_t *b, uint64_t n);
+/* THE PIXEL HAND-UP, defined below -- the v1 display list is not in the shared
+ * segment either.  Declared here for the same reason: a window's teardown is
+ * in four places and every one of them must give the memory back. */
+static void         pix_release(int32_t wid);
+static void         pix_tick(void);
 
 static void bb_once(int *flag, const char *msg, int a, int b, int c, int d)
 {
@@ -1831,6 +1888,7 @@ static void win_reap_dead(void)
         errno = 0;
         if (kill((pid_t)v->pid, 0) == 0 || errno != ESRCH) continue;
         keychan_unbind(v->wid);
+        pix_release(v->wid);
         bb_release(v->wid);
         img_release_wid(v->wid);
         if (shm->focus_wid == v->wid) shm->focus_wid = 0;
@@ -2677,6 +2735,524 @@ static int keychan_ready(int32_t wid)
     return r > 0 && (p.revents & POLLIN) != 0;
 }
 
+/* ================================================================== *
+ * THE PIXEL HAND-UP — the v1 display list is not in the segment either
+ * ==================================================================
+ *
+ * WHAT THIS CLOSES.  THE SPLIT's SCRAPE, for the v1 scene: a uid-1001 process
+ * opens /srv/wsys O_RDONLY, maps it PROT_READ, walks win[] and reads another
+ * window's COMMITTED DISPLAY LIST.  That is not a picture, it is TEXT -- the
+ * scene grammar's `glyphs` op carries the actual string it draws -- so scraping
+ * a terminal's scene is reading what is on its screen, letter for letter,
+ * without a single write and without the victim being able to tell.  It needs
+ * nothing but O_RDONLY, and the table has to stay world-READABLE because
+ * /dev/wsys/windows is the panel taskbar's input.  No file mode can reach it,
+ * for the same reason none could reach the keylogger.
+ *
+ * So the display list is not in a shared mapping any more.  Each window's
+ * scene and stage live in a per-window MEMFD that the window's OWNER creates,
+ * and win[].scene_dead/stage_dead are dead storage nothing reads or writes.
+ *
+ * WHY A MEMFD IS ALLOWED TO BE THE ANSWER HERE WHEN IT WAS NOT FOR THE KEYS.
+ * THE SPLIT's original tier 2 said a memfd has no name in the filesystem and
+ * therefore no path for a bypasser to open; that was DISPROVED by measurement
+ * -- /proc/<pid>/fd/<n> IS a path, openable by any process of the same uid, and
+ * `1 PASSWORD31337` was read straight back out of a victim's memfd.  The
+ * keystroke channel went to a socket instead.  What changed since is not the
+ * argument, it is the machine: every window owner now calls
+ * prctl(PR_SET_DUMPABLE, 0) (owner_harden, above, from keychan_bind -- and
+ * from pix_own below, so a window that never binds a keyboard is covered too)
+ * and PID 1 sets kernel.yama.ptrace_scope=1.  Against a hardened owner the same
+ * probe measures open(/proc/<victim>/fd/N) = -13 and ptrace = -1.  So the /proc
+ * path is shut and the memfd construction is viable -- for THESE bytes, which
+ * unlike a keystroke must be read by a compositor at frame rate and therefore
+ * cannot be datagrams.  tests/linux/wsys_keychan.sh drives both halves of that
+ * sentence and tests/linux/wsys_bypass.sh drives it against a real owner.
+ *
+ * A MEMFD NEEDS NO AUTHORITY TO CREATE IT, which is the whole reason this could
+ * be built without tier 1.  THE SPLIT records the memfd design as blocked on "a
+ * daemon, a new binary, a package-channel change and a segment at a new path",
+ * and every one of those blockers came from the assumption that the AUTHORITY
+ * creates the memfd and HANDS IT DOWN to one client.  It does not have to.
+ * memfd_create(2) is unprivileged; the client creates its own and hands it UP.
+ * The direction is what makes the difference:
+ *
+ *   HANDING DOWN needs an authority, because the recipient must be proved to be
+ *   the window's owner, and the only ownership record available is win[].pid in
+ *   the 0666 table -- which is spoofable, which is exactly why THE SPLIT rules
+ *   the "title-only RPC" unsound.
+ *
+ *   HANDING UP needs no ownership record at all.  The bytes start in the one
+ *   process that is definitionally entitled to them (it made them), and the
+ *   only question is who ELSE may have them.  That question is answered by the
+ *   kernel: the sender checks SO_PEERCRED on the connection before it passes
+ *   the descriptor, and passes it only to the SEGMENT OWNER -- root on a real
+ *   boot, which is wsysd.  Nothing reads win[].pid.  It is the keystroke
+ *   channel's rule, run in the opposite direction.
+ *
+ * THE MECHANISM, in full.
+ *
+ *   THE MEMFD.  memfd_create(MFD_CLOEXEC|MFD_ALLOW_SEALING), ftruncate to
+ *   sizeof(struct wpix), then sealed F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_SEAL.
+ *   THE SHRINK SEAL IS NOT HYGIENE, IT IS THE COMPOSITOR'S LIFE: a receiver
+ *   that has mapped a file another process can ftruncate smaller takes SIGBUS
+ *   on the next touch, and the receiver here is the process that paints the
+ *   whole screen.  The seal is applied by the creator, before the descriptor
+ *   is ever passed, and F_SEAL_SEAL makes it permanent.  The RECEIVER checks
+ *   the seals anyway (pix_install) rather than trusting a sender it has just
+ *   finished refusing to trust about everything else.
+ *
+ *   THE RENDEZVOUS.  An abstract AF_UNIX SOCK_SEQPACKET listener at
+ *   "hamnix-wsys/<st_dev>.<st_ino>/pixels" -- the same naming as the keystroke
+ *   channel, derived from the segment's identity so two harnesses cannot
+ *   collide.  The COMPOSITOR listens; the OWNER connects, checks, sends and
+ *   closes.
+ *
+ *   WHO MAY LISTEN, and the trap that decided this.  The obvious construction
+ *   is the keystroke channel's exactly: the receiver binds and checks
+ *   SCM_CREDENTIALS on what arrives.  IT INVERTS THE BOUNDARY HERE.  An
+ *   abstract name has no mode, so a uid-1001 attacker can bind the listener
+ *   first, and then every client on the desktop would hand IT their display
+ *   lists -- a strictly worse hole than the one being closed, arrived at by
+ *   copying a construction that is correct for the other direction.  What makes
+ *   the two differ is which end holds the secret: for keystrokes the RECEIVER
+ *   is the one to protect, so the receiver checks; for pixels the SENDER holds
+ *   them, so THE SENDER CHECKS.  connect(2) on an AF_UNIX socket gives the
+ *   client SO_PEERCRED for the listener it reached, stamped by the kernel, so
+ *   the check is available before a single byte is sent.  A client that finds
+ *   the listener is not owned by the segment's owner sends nothing and says so
+ *   on stderr.  tests/linux/wsys_bypass.sh drives that attacker.
+ *
+ *   WHO MAY LISTEN, second half: only a process that IS the segment owner ever
+ *   calls bind here (pix_listen refuses otherwise), so the ordinary
+ *   scene-reading path cannot be tricked into taking the name on an attacker's
+ *   behalf.  An attacker with its own socket code can still take it -- see the
+ *   residue below.
+ *
+ *   THE HAND-UP IS ON A CLOCK, NOT ON A COMMIT COUNT -- see pix_tick below for
+ *   the hole that distinction closes and why it is not a detail.  Every window
+ *   this process owns is offered every PIX_RETRY_MS while nobody holds it and
+ *   re-announced every PIX_REANN_MS after that, driven from every wsys
+ *   operation, so a compositor that starts late or restarts gets every window's
+ *   descriptor within a few seconds whether or not the window ever draws again.
+ *   The receiver recognises a duplicate by the memfd's st_ino and drops it, so
+ *   a re-announce costs a connect and a close.
+ *
+ *   COST, against the census in THE SPLIT.  A commit is a LIFECYCLE-rate event
+ *   for a still window and a per-frame event for a moving one; the hand-up adds
+ *   one socket, one connect, one getsockopt, one sendmsg and one close per
+ *   window per PIX_REANNOUNCE commits.  On the measured desktop (34.6 per-frame
+ *   writes a second under a moving mouse) that is under one hand-up a second
+ *   across the whole session.  The bytes themselves cost NOTHING: the client
+ *   writes its display list into its own mapping and the compositor reads it
+ *   out of the same pages.  The scene memcpy at commit is the memcpy that was
+ *   already there.
+ *
+ * WHAT AN ATTACKER CAN STILL DO, named here rather than left to be found:
+ *
+ *   THE v2 BACKBUFFER IS UNTOUCHED, and it is the important one to say out loud
+ *   because it decides which windows this protects.  /srv/wsys.bb is a third
+ *   0666 mapping holding every v2 window's pixels, and a v2 window is what a
+ *   browser, a video and a bridged X client are.  So: a hamUI application's
+ *   screen contents are out of the shared mapping and FIREFOX'S ARE NOT.  A
+ *   person cannot tell those apart by looking, which is why wsys_bypass.sh
+ *   drives a backbuffer scrape as a POSITIVE control on every green run.  The
+ *   construction here is the one the backbuffer needs -- per-window memfd,
+ *   sender-checked hand-up -- and applying it there is a pool rewrite (the
+ *   slots are shared, page-mapped on demand and accounted centrally), which is
+ *   a pass and not a paragraph.
+ *
+ *   THE NAMED IMAGES ARE UNTOUCHED (/srv/wsys.img, THE NAMED-IMAGE STORE below)
+ *   for the same reason and by the same measure.
+ *
+ *   ENUMERATION IS UNTOUCHED and stays unfixable while /dev/wsys/windows is the
+ *   taskbar's input: every row's wid, pid, geometry and TITLE is still readable
+ *   by anything on the machine.  What a scraper loses is the CONTENT of the
+ *   window, not its existence or its name.
+ *
+ *   CORRUPTION IS NOT CLOSED AND IS NOT MADE WORSE.  An attacker can no longer
+ *   write another window's display list (it has no descriptor for it), but it
+ *   can still take the listener's name or race a hand-up, and it can still
+ *   retitle, move, hide and destroy any row.  A window whose contents cannot be
+ *   read can still be lied about.  Integrity needs tier 1 and always did.
+ *
+ *   DENIAL OF SERVICE BY NAME-SQUATTING.  A same-uid attacker that binds
+ *   "…/pixels" before wsysd does makes wsysd's own bind EADDRINUSE, and the
+ *   desktop then paints no v1 window at all.  That is loud (wsysd says so by
+ *   name on stderr, and the screen is visibly empty) where the alternative
+ *   would have been silent, and it is the same trade the keystroke channel made
+ *   for the same reason -- denial of service by a same-uid process was already
+ *   free, since `newwindow` is open to every uid and anyone may exhaust the
+ *   table.  It is worth being exact that the blast radius is bigger here: the
+ *   keystroke squat cost one window, this costs every v1 window.
+ * ------------------------------------------------------------------ */
+
+#define WPIX_MAGIC        0x58495057u        /* "WPIX" */
+#define WPIX_VERSION      1
+#define PIXCHAN_MAX       WSYS_MAX_WINDOWS
+
+/* THE MEMFD'S CONTENTS.  The two LENGTHS live in here and not in the 0666
+ * table, and that is deliberate: a length in the world-writable segment is a
+ * number an attacker chooses for a buffer it cannot see, which is how a
+ * confidentiality fix turns into an over-read.  Here the only writer is the
+ * window's owner and the compositor, and both are clamped again on use. */
+struct wpix {
+    uint32_t magic, version;
+    int32_t  wid;
+    uint32_t scene_len;                       /* published */
+    uint32_t stage_len;                       /* being written */
+    uint32_t gen;                             /* ++ on every commit */
+    uint8_t  scene[WSYS_SCENE_CAP];
+    uint8_t  stage[WSYS_SCENE_CAP];
+};
+
+static struct {
+    int32_t      wid;
+    int          fd;
+    struct wpix *m;
+    int          own;                         /* we created it */
+    uint64_t     due;                         /* next hand-up attempt, ms */
+    int          handed;                      /* a hand-up has succeeded */
+    uint64_t     ino;                         /* the memfd's, for dup detect */
+} pixmap[PIXCHAN_MAX];
+static int pixmap_n;
+static int pix_listen_fd = -1;
+static int pix_listen_tried;
+static uint64_t pix_next_tick;                /* monotonic ms */
+
+static int pix_slot(int32_t wid)
+{
+    for (int i = 0; i < pixmap_n; i++)
+        if (pixmap[i].wid == wid) return i;
+    return -1;
+}
+
+static void pix_release(int32_t wid)
+{
+    int i = pix_slot(wid);
+    if (i < 0) return;
+    if (pixmap[i].m) munmap(pixmap[i].m, sizeof(struct wpix));
+    if (pixmap[i].fd >= 0) close(pixmap[i].fd);
+    pixmap[i] = pixmap[pixmap_n - 1];
+    pixmap_n--;
+}
+
+/* The abstract address the compositor listens on.  0 when the segment identity
+ * is not established -- in which case there is no channel and every caller
+ * fails rather than inventing one, exactly as keychan_addr does. */
+static socklen_t pix_addr(struct sockaddr_un *a)
+{
+    if (!seg_id_known) return 0;
+    memset(a, 0, sizeof *a);
+    a->sun_family = AF_UNIX;
+    a->sun_path[0] = '\0';                     /* abstract */
+    int n = snprintf(a->sun_path + 1, sizeof a->sun_path - 1,
+                     "hamnix-wsys/%llu.%llu/pixels",
+                     (unsigned long long)seg_dev, (unsigned long long)seg_ino);
+    if (n <= 0 || (size_t)n >= sizeof a->sun_path - 1) return 0;
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+}
+
+/* Map a descriptor we hold, whether we made it or were handed it.  Refuses
+ * anything that is not the right size or does not carry the right seals: a
+ * receiver that maps a sender's fd on the sender's word takes SIGBUS the first
+ * time that sender shrinks it. */
+static int pix_map(int i, int rw)
+{
+    struct stat st;
+    if (fstat(pixmap[i].fd, &st) < 0) return -1;
+    if ((uint64_t)st.st_size != (uint64_t)sizeof(struct wpix)) {
+        errno = EINVAL; return -1;
+    }
+    int seals = fcntl(pixmap[i].fd, F_GET_SEALS);
+    if (seals < 0 || !(seals & F_SEAL_SHRINK)) { errno = EINVAL; return -1; }
+    void *m = mmap(NULL, sizeof(struct wpix),
+                   rw ? (PROT_READ | PROT_WRITE) : PROT_READ,
+                   MAP_SHARED, pixmap[i].fd, 0);
+    if (m == MAP_FAILED) return -1;
+    pixmap[i].m   = (struct wpix *)m;
+    pixmap[i].ino = (uint64_t)st.st_ino;
+    return 0;
+}
+
+/* THE OWNER'S SIDE: get, or create, this process's own pixel memory for a
+ * window.  Creating one makes this process a window owner in the sense
+ * owner_harden means, so it hardens -- keychan_bind is the usual place a
+ * process becomes one, but a window that never reads a key still has pixels. */
+static struct wpix *pix_own(int32_t wid)
+{
+    int i = pix_slot(wid);
+    if (i >= 0) return pixmap[i].m;
+    if (pixmap_n >= PIXCHAN_MAX) { errno = ENOSPC; return NULL; }
+
+    int fd = (int)syscall(SYS_memfd_create, "hamnix-wsys-scene",
+                          MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) {
+        fprintf(stderr, "wsys: window %d: memfd_create failed (%s): this "
+                "window has nowhere private to keep its display list.\n",
+                (int)wid, strerror(errno));
+        return NULL;
+    }
+    if (ftruncate(fd, (off_t)sizeof(struct wpix)) < 0
+        || fcntl(fd, F_ADD_SEALS,
+                 F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) < 0) {
+        fprintf(stderr, "wsys: window %d: cannot seal its display list (%s).\n",
+                (int)wid, strerror(errno));
+        close(fd);
+        return NULL;
+    }
+    i = pixmap_n;
+    pixmap[i].wid = wid; pixmap[i].fd = fd; pixmap[i].m = NULL;
+    pixmap[i].own = 1;  pixmap[i].due = 0;
+    pixmap[i].handed = 0; pixmap[i].ino = 0;
+    if (pix_map(i, 1) < 0) {
+        fprintf(stderr, "wsys: window %d: cannot map its display list (%s).\n",
+                (int)wid, strerror(errno));
+        close(fd);
+        return NULL;
+    }
+    pixmap_n++;
+    pixmap[i].m->magic   = WPIX_MAGIC;
+    pixmap[i].m->version = WPIX_VERSION;
+    pixmap[i].m->wid     = wid;
+    owner_harden();
+    return pixmap[i].m;
+}
+
+/* THE COMPOSITOR'S SIDE: take the name.  ONLY the segment owner ever binds it.
+ * A client that merely wants to read a foreign scene must not be able to make
+ * this call happen on an attacker's behalf, and a non-owner has no business
+ * receiving anyone's pixels in the first place. */
+static void pix_listen(void)
+{
+    if (pix_listen_fd >= 0 || pix_listen_tried) return;
+    pix_listen_tried = 1;
+    if (!hostowner()) return;
+
+    struct sockaddr_un a;
+    socklen_t alen = pix_addr(&a);
+    if (!alen) return;
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (s < 0) return;
+    if (bind(s, (struct sockaddr *)&a, alen) < 0) {
+        fprintf(stderr,
+                "wsys: cannot claim the pixel hand-up address (%s).\n"
+                "wsys: another process holds it, so no window can hand this "
+                "one its display list and NOTHING WILL BE PAINTED.\n",
+                strerror(errno));
+        close(s);
+        return;
+    }
+    /* Deep enough that a burst of clients coming up together is queued rather
+     * than refused: a refused hand-up costs a frame, but only until the
+     * client's next commit retries. */
+    if (listen(s, 64) < 0) { close(s); return; }
+    pix_listen_fd = s;
+}
+
+/* Install a descriptor that arrived on the listener.  A duplicate (the same
+ * memfd inode, from a re-announce) is closed and forgotten. */
+static void pix_install(int32_t wid, int fd)
+{
+    int i = pix_slot(wid);
+    if (i >= 0) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && (uint64_t)st.st_ino == pixmap[i].ino) {
+            close(fd);                         /* the one we already hold */
+            return;
+        }
+        pix_release(wid);
+    }
+    if (pixmap_n >= PIXCHAN_MAX) { close(fd); return; }
+    i = pixmap_n;
+    pixmap[i].wid = wid; pixmap[i].fd = fd; pixmap[i].m = NULL;
+    pixmap[i].own = 0;  pixmap[i].due = 0;
+    pixmap[i].handed = 0; pixmap[i].ino = 0;
+    /* READ-WRITE, deliberately.  The compositor is the host owner and the uid
+     * gate has always let it write any window's scene (wsysd does not, but
+     * hamctl and the gates do); refusing it here would be a behaviour change
+     * smuggled in under a confidentiality fix. */
+    if (pix_map(i, 1) < 0) {
+        close(fd);
+        return;
+    }
+    if (pixmap[i].m->magic != WPIX_MAGIC
+        || pixmap[i].m->version != WPIX_VERSION
+        || pixmap[i].m->wid != wid) {
+        munmap(pixmap[i].m, sizeof(struct wpix));
+        close(fd);
+        return;
+    }
+    pixmap_n++;
+}
+
+/* Drain the accept queue.  Called before any read of a foreign window's scene,
+ * which on a real desktop is once per window per frame -- an accept(2) on an
+ * empty non-blocking queue is one failed syscall and that is the whole cost. */
+static void pix_drain(void)
+{
+    if (pix_listen_fd < 0) return;
+    for (;;) {
+        int c = accept4(pix_listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+        if (c < 0) break;
+        /* One message, one descriptor, and the wid is in the payload rather
+         * than taken from anything shared: a hand-up says which window it is
+         * for and the receiver believes only the descriptor, which it then
+         * checks against the header the creator stamped. */
+        int32_t wid = 0;
+        char cbuf[CMSG_SPACE(sizeof(int))];
+        struct iovec io;
+        struct msghdr m;
+        io.iov_base = &wid; io.iov_len = sizeof wid;
+        memset(&m, 0, sizeof m);
+        m.msg_iov = &io; m.msg_iovlen = 1;
+        m.msg_control = cbuf; m.msg_controllen = sizeof cbuf;
+        /* One blocking-free read; the sender writes before it closes, and a
+         * sender that does not is simply retried on its next commit. */
+        struct pollfd p; p.fd = c; p.events = POLLIN; p.revents = 0;
+        int pr; do { pr = poll(&p, 1, 50); } while (pr < 0 && errno == EINTR);
+        ssize_t n = (pr > 0) ? recvmsg(c, &m, MSG_DONTWAIT) : -1;
+        int got = -1;
+        if (n == (ssize_t)sizeof wid)
+            for (struct cmsghdr *cm = CMSG_FIRSTHDR(&m); cm;
+                 cm = CMSG_NXTHDR(&m, cm))
+                if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS)
+                    memcpy(&got, CMSG_DATA(cm), sizeof got);
+        close(c);
+        if (got >= 0) {
+            if (wid > 0) pix_install(wid, got);
+            else         close(got);
+        }
+    }
+}
+
+/* THE HAND-UP.  Connect, ASK THE KERNEL WHO IS LISTENING, and pass the
+ * descriptor only if the answer is the segment's owner.  This is the check the
+ * whole construction rests on: everything else here is plumbing. */
+static void pix_handup_one(int i)
+{
+    int32_t wid = pixmap[i].wid;
+    struct sockaddr_un a;
+    socklen_t alen = pix_addr(&a);
+    if (!alen) return;
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (s < 0) return;
+    if (connect(s, (struct sockaddr *)&a, alen) < 0) {
+        /* Nobody is listening: no compositor yet, or none any more.  Not an
+         * error the client can act on, and the next tick tries again. */
+        close(s);
+        pixmap[i].handed = 0;
+        return;
+    }
+    struct ucred pc;
+    socklen_t pl = sizeof pc;
+    if (getsockopt(s, SOL_SOCKET, SO_PEERCRED, &pc, &pl) < 0
+        || pl != sizeof pc
+        || !seg_owner_known || pc.uid != seg_owner) {
+        /* THE REFUSAL THAT IS THE POINT.  Somebody who is not the window
+         * system's owner is holding the hand-up address.  Say so, loudly and
+         * once per window, and hand over nothing. */
+        static int said;
+        if (!said) {
+            said = 1;
+            fprintf(stderr,
+                    "wsys: the pixel hand-up address is held by uid %ld, not by "
+                    "this window system's owner (uid %ld).\n"
+                    "wsys: no window's display list will be handed to it; "
+                    "windows will not be painted until that is fixed.\n",
+                    (long)(pl == sizeof pc ? (long)pc.uid : -1L),
+                    (long)(seg_owner_known ? (long)seg_owner : -1L));
+        }
+        close(s);
+        pixmap[i].handed = 0;
+        return;
+    }
+
+    char cbuf[CMSG_SPACE(sizeof(int))];
+    struct iovec io;
+    struct msghdr m;
+    int32_t w = wid;
+    io.iov_base = &w; io.iov_len = sizeof w;
+    memset(&m, 0, sizeof m);
+    memset(cbuf, 0, sizeof cbuf);
+    m.msg_iov = &io; m.msg_iovlen = 1;
+    m.msg_control = cbuf; m.msg_controllen = sizeof cbuf;
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&m);
+    cm->cmsg_level = SOL_SOCKET;
+    cm->cmsg_type  = SCM_RIGHTS;
+    cm->cmsg_len   = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cm), &pixmap[i].fd, sizeof(int));
+    pixmap[i].handed = (sendmsg(s, &m, MSG_NOSIGNAL) >= 0);
+    close(s);
+}
+
+static uint64_t pix_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
+/* HAND UP WHAT NEEDS HANDING UP, ON A CLOCK AND NOT ON A COMMIT COUNT.
+ *
+ * The first draft counted commits, and it had a hole a person would meet on an
+ * ordinary day: a compositor that starts (or RESTARTS) after a window has
+ * already drawn itself gets that window's descriptor only when the window
+ * commits again -- and a window that is merely SITTING THERE never commits
+ * again.  The desktop would come back with the wallpaper and the panel painted
+ * and the person's terminal a blank rectangle, for ever, with nothing on
+ * stderr.  That is precisely the success-shaped answer this file exists to
+ * refuse.
+ *
+ * A clock has no such state.  Every window this process owns is offered
+ * PIX_RETRY_MS after its last attempt while it is unheld, and PIX_REANN_MS
+ * after a successful one, and the tick is driven from every wsys operation --
+ * a client that is doing nothing at all still drains its event ring on its
+ * 250 ms park, which is a library call.  The global gate means the cost is one
+ * clock_gettime (vDSO, no syscall) per operation and nothing else.
+ *
+ * WHAT IT COSTS ON AN IDLE DESKTOP, since de_idle_cpu.sh is the gate that
+ * would catch a park turned into a spin: one connect/getsockopt/sendmsg/close
+ * per owned window per PIX_REANN_MS.  Three windows at 3 s is one hand-up a
+ * second across the whole session. */
+#define PIX_RETRY_MS   500                    /* while nobody holds it */
+#define PIX_REANN_MS   3000                   /* re-announce, for a restart */
+
+static void pix_tick(void)
+{
+    if (!pixmap_n) return;
+    uint64_t now = pix_now_ms();
+    if (now < pix_next_tick) return;
+    pix_next_tick = now + PIX_RETRY_MS;
+    for (int i = 0; i < pixmap_n; i++) {
+        if (!pixmap[i].own || now < pixmap[i].due) continue;
+        pix_handup_one(i);
+        pixmap[i].due = now + (pixmap[i].handed ? PIX_REANN_MS : PIX_RETRY_MS);
+    }
+}
+
+/* THE ONE LOOKUP EVERY SCENE OPERATION GOES THROUGH.  `mine` asks for a window
+ * this process owns (create on demand); otherwise this is a reader, and a
+ * reader that is the segment owner listens and drains first.
+ *
+ * A NULL here is a REFUSAL AND MUST BE REPORTED AS ONE.  The caller says which
+ * window and why on stderr; a zero-length scene served silently would be this
+ * tree's own worst bug shape -- a window that paints nothing and an exit 0. */
+static struct wpix *pix_get(int32_t wid, int mine)
+{
+    if (mine) {
+        int i = pix_slot(wid);
+        if (i >= 0) return pixmap[i].m;
+        return pix_own(wid);
+    }
+    int i = pix_slot(wid);
+    if (i >= 0) return pixmap[i].m;
+    pix_listen();
+    pix_drain();
+    i = pix_slot(wid);
+    return i >= 0 ? pixmap[i].m : NULL;
+}
+
 /* Find (or claim) a sink, IN THE SEGMENT THE SPLIT PUTS IT IN.
  *
  * The routing is by name and nothing else, so a name can never exist in both
@@ -3083,6 +3659,7 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     if (shm_attach() < 0) return -1;
     f->write = for_write;
     f->off = 0;
+    pix_tick();                                /* see hamwsys_read */
 
     /* THE GATE, AT OPEN.  It has to be here and not only in hamwsys_write
      * because opening for writing already MUTATES: a sink is truncated, a
@@ -3209,11 +3786,31 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -1; }
         /* Opening the scene for writing starts a fresh frame — the client
-         * writes the whole display list, then publishes it with `commit`. */
-        if (f->leaf == HAMWSYS_WIN_SCENE && for_write)
-            v->stage_len = 0;
-        if (f->leaf == HAMWSYS_WIN_SCENE && !for_write)
-            return snap_set(f, v->scene, v->scene_len);
+         * writes the whole display list, then publishes it with `commit`.
+         * IN THE MEMFD, NOT IN THE SEGMENT: see THE PIXEL HAND-UP.  The
+         * lengths moved with the bytes, because a length in the world-writable
+         * table is a number an attacker picks for a buffer it cannot see. */
+        if (f->leaf == HAMWSYS_WIN_SCENE) {
+            struct wpix *p = pix_get(f->wid, owns_wid(f->wid));
+            if (!p) {
+                /* A REFUSAL, SAID BY NAME.  Serving an empty scene here would
+                 * be a window that paints nothing and a read that succeeds --
+                 * the shape NORTH_STAR.md forbids.  The compositor reaches
+                 * this only for a window that has not handed its descriptor up
+                 * yet, and retries next frame. */
+                fprintf(stderr,
+                        "wsys: /dev/wsys/%d/scene: this process neither owns "
+                        "window %d nor holds its display list, so it cannot "
+                        "%s it.\n", (int)f->wid, (int)f->wid,
+                        for_write ? "draw into" : "read");
+                errno = EPERM;
+                return -1;
+            }
+            if (for_write) p->stage_len = 0;
+            else           return snap_set(f, p->scene,
+                                           p->scene_len > WSYS_SCENE_CAP
+                                           ? WSYS_SCENE_CAP : p->scene_len);
+        }
         if (f->leaf == HAMWSYS_WIN_CTL && !for_write)
             return snap_win_ctl(f, v);
         return 0;
@@ -3267,6 +3864,12 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
 int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
 {
     if (!shm) { errno = EIO; return -EIO; }
+
+    /* THE HAND-UP'S HEARTBEAT.  A client that is doing nothing at all still
+     * drains its event ring on every park, so this is the call that reaches a
+     * window which has stopped drawing -- see pix_tick.  It is gated on a
+     * monotonic clock read and returns immediately the rest of the time. */
+    pix_tick();
 
     /* The event rings are live, not snapshots: a read DRAINS whatever has
      * arrived and returns 0 when there is nothing.  hamui polls them
@@ -3558,6 +4161,7 @@ static int ctl_global(const char *s, size_t n)
             return 0;
         }
         keychan_unbind(wid);
+        pix_release(wid);
         bb_release(wid);
         v->used = 0;
         shm->gen++;
@@ -3574,6 +4178,7 @@ static int ctl_global(const char *s, size_t n)
              * rest of the session -- and with slots scarce that showed up
              * later as some unrelated window compositing blank. */
             keychan_unbind(wid);
+            pix_release(wid);
             bb_release(wid);
             v->used = 0;
             shm->gen++;
@@ -3695,14 +4300,34 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
         return;
     }
     if (n >= 6 && !strncmp(s, "commit", 6)) {
-        wr(WR_COMMIT, v->stage_len);
-        /* PUBLISH.  This is the only place scene_len moves, and it moves
-         * after the bytes are already in place, so a compositor that sees the
-         * new scene_gen is guaranteed a whole frame. */
-        memcpy(v->scene, v->stage, v->stage_len);
-        v->scene_len = v->stage_len;
+        /* PUBLISH, INSIDE THE MEMFD.  This is the only place scene_len moves,
+         * and it moves after the bytes are already in place, so a compositor
+         * that sees the new scene_gen is guaranteed a whole frame.
+         *
+         * scene_gen STAYS IN THE TABLE.  It is the change notification every
+         * reader of /dev/wsys/wctl polls; it says a frame happened and nothing
+         * about what is in it.  A commit with no pixel memory bumps NOTHING --
+         * announcing a frame that cannot be fetched is the success-shaped half
+         * of this operation, and it is refused rather than half-done.
+         *
+         * THE WRITE CENSUS STILL COUNTS IT.  wr(WR_COMMIT) is unchanged: a
+         * commit is still a mutation of the segment (scene_gen and gen both
+         * move), and tests/linux/wsys_write_census.sh's per-frame:lifecycle
+         * ratio is measuring the same event it always was. */
+        struct wpix *p = pix_get(v->wid, owns_wid(v->wid));
+        if (!p) {
+            fprintf(stderr, "wsys: window %d: commit with no display list of "
+                    "its own -- nothing published.\n", (int)v->wid);
+            return;
+        }
+        wr(WR_COMMIT, p->stage_len);
+        if (p->stage_len > WSYS_SCENE_CAP) p->stage_len = WSYS_SCENE_CAP;
+        memcpy(p->scene, p->stage, p->stage_len);
+        p->scene_len = p->stage_len;
+        p->gen++;
         v->scene_gen++;
         shm->gen++;
+        pix_tick();
         return;
     }
     /* "hide [0|1]" / "show [0|1]" -- AND THE ARGUMENT IS NOT OPTIONAL TO READ.
@@ -3832,12 +4457,15 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -ENOENT; }
         if (!hostowner() && !owns_wid(f->wid)) { errno = EPERM; return -EPERM; }
-        uint64_t room = WSYS_SCENE_CAP - v->stage_len;
+        struct wpix *p = pix_get(f->wid, owns_wid(f->wid));
+        if (!p) { errno = EPERM; return -EPERM; }
+        if (p->stage_len > WSYS_SCENE_CAP) p->stage_len = WSYS_SCENE_CAP;
+        uint64_t room = WSYS_SCENE_CAP - p->stage_len;
         uint64_t k = n < room ? n : room;
         if (k == 0 && n > 0) { errno = ENOSPC; return -ENOSPC; }
         wr(WR_SCENE, k);
-        memcpy(v->stage + v->stage_len, buf, (size_t)k);
-        v->stage_len += (uint32_t)k;
+        memcpy(p->stage + p->stage_len, buf, (size_t)k);
+        p->stage_len += (uint32_t)k;
         return (int64_t)k;
     }
     case HAMWSYS_WIN_KEYS: case HAMWSYS_WIN_POINTER: case HAMWSYS_WIN_EVENT:
@@ -4057,6 +4685,7 @@ int32_t hamwsys_free(int32_t wid)
      * process that is not the holder has nothing to release and this is a
      * no-op there. */
     keychan_unbind(wid);
+    pix_release(wid);
     bb_release(wid);
     img_release_wid(wid);              /* devwsys's _wsys_img_release_wid */
     v->used = 0;
