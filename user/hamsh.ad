@@ -15690,7 +15690,7 @@ def _ext_listdir(path: Ptr[uint8], buf: Ptr[uint8],
 
 line_buf:   Array[2048, uint8]
 # (Interactive input is collected by the line editor — see ed_readline
-#  below. The rc/init path reads its script into rc_buf directly.)
+#  below. The rc/init path loads its script whole via _script_load.)
 
 
 # ====================================================================
