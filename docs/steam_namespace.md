@@ -791,7 +791,7 @@ count from `tests/linux/ppmdiff.py` over two QEMU screendumps.
 | navigating the store | **works** | *Store Home* loaded the real front page — Counter-Strike 2 artwork, review counts, the discount carousel |
 | dragging | **works** | press-move-release on the page's scrollbar scrolled it: `96.44%` of an 830x680 rectangle changed |
 | **search, and live results** | **works** | `portal` typed into the store search box returned Portal, Portal 2, Portal Knights and Portal Worlds with prices and cover art, over the network, as an AJAX response |
-| **the scroll wheel** | **BROKEN IN STEAM ONLY — see 12.2c** | eight wheel-down events over that same page changed **0 of 564400 pixels**. Re-measured after every compositor fix landed: still **0**, while an `xterm` in the **same session, same minute** scrolled 471 px and back. The fault is above the X server and it is Steam's. |
+| **the scroll wheel** | **works — see 12.2d** | it was **ours**: `wsyswl` answered every wheel line with a `wl_pointer.motion` the pointer never made, Xwayland routed that to a different slave device from the axis, and the resulting `XI_DeviceChanged` before every scroll motion reset Chromium's per-device valuator baseline — so every delta was zero. Eight notches now move **97.41%** of the store page and eight back return it to `IDENTICAL (0 of 564400)`. |
 
 `build/steamprobe/` is not where these live; the run's screendumps are under
 `~/.hamnix-build/steamdrive/shots-run1/` (`s0.png` the login window, `s3_typed.png`
@@ -1059,8 +1059,15 @@ while Steam's CEF, one window over, did nothing with it. That is as clean a
 separation of "our stack" from "Steam" as this port can construct, and it says
 our stack is not the problem.
 
-What is left to look at, in the order a next pass should try it, is Steam's
-own input handling: CEF's `XISelectEvents` mask on **that** window (the XI2
+*(All three of those were tried and none of them was it; the answer is §12.2d,
+and it was in `wsyswl` after all. The paragraph is kept as written because the
+reasoning that produced it was sound and still wrong: every measurement in it
+holds, and the conclusion drawn from them -- "our stack is not the problem" --
+did not. What the run could not see was that the compositor was ALSO sending
+something extra, and the thing it broke was two servers downstream.)*
+
+What this pass thought was left to look at, in the order it recommended, was
+Steam's own input handling: CEF's `XISelectEvents` mask on **that** window (the XI2
 valuator is proven live at the server — `tests/linux/xi2_scroll_probe.c` — so
 the question is whether Steam selects for it), its GTK/SDL scroll settings,
 and whether `steamwebhelper` treats the store page's outer frame as a scroll
@@ -1093,6 +1100,131 @@ the command **fails silently** — no window, no message, nothing on the console
 That cost a boot's worth of time and is exactly the shape this project's
 standard of evidence is about, so it is named here rather than left as a
 footgun.
+
+### 12.2d SOLVED, AND IT WAS OURS: A `wl_pointer.motion` THE POINTER NEVER MADE
+
+**Steam scrolls.** Same page, same eight notches, same `830x680+214+80`
+rectangle as the `0 of 564400 px` that started all of this:
+
+| | 8 notches down | 8 notches back up | A vs C |
+|--|--|--|--|
+| **before** (§12.2c, and re-measured on the current tree) | `IDENTICAL (0 of 564400)` | `IDENTICAL (0 of 564400)` | — |
+| **after** | **549754 of 564400 (97.41%)** | **549754 (97.41%)** | **`IDENTICAL (0 of 564400)`** |
+| **after, second boot, independently** | **549379 (97.34%)** | **549379 (97.34%)** | **`IDENTICAL (0 of 564400)`** |
+
+with, in the same run: a **noise floor** of `0 of 564400` over 15 s with no
+input; a **pointer control** (a plain move changed 1040 px, bbox on the cursor
+sprite); and the **scrollbar-drag control** still moving 96.45% of the same
+rectangle. The reversal triple — A≠B, B≠C, **A=C** — is what says the page
+really scrolled and really scrolled back rather than merely repainting. With
+the pointer over the page's blank left MARGIN rather than over a list, eight
+notches moved 99.98%; §12.2c's guess that CEF might ignore the wheel over page
+background was not it either.
+
+**THE BUG.** `wsysd` writes a pointer line for every input event, including one
+that carries nothing but a `REL_WHEEL` delta with the cursor standing still.
+`wsyswl`'s `handle_ptr_line` answered every such line with a
+`wl_pointer.motion` at the coordinates the pointer already had. That looks
+harmless, and it is not, because of where Xwayland routes the two events —
+measured with an XI2 client that selects `XIAllDevices` the way CEF does,
+against the namespace's own Xwayland 22.1.9:
+
+```
+wl_pointer.axis    ->  slave device 7, 'xwayland-relative-pointer:4'
+wl_pointer.motion  ->  slave device 6, 'xwayland-pointer:4'
+```
+
+so one notch was `motion(6) -> axis(7) -> motion(6)` and the X **master**
+pointer had to switch slaves twice per notch. Every switch is an
+`XI_DeviceChanged`. Before the fix, one notch, verbatim:
+
+```
+DeviceChanged deviceid=2 sourceid=7 reason=1
+Motion        deviceid=2 sourceid=7 valmask= [3]=1.00      <- the scroll valuator
+ButtonPress   deviceid=2 sourceid=7 detail=5
+DeviceChanged deviceid=2 sourceid=7 reason=1
+DeviceChanged deviceid=2 sourceid=6 reason=1
+Motion        deviceid=2 sourceid=6 valmask= [0]=7168.00 [1]=26951.68
+```
+
+that last line being the motion we invented. After the fix: **one**
+`DeviceChanged` at the first event and then none, with the valuator running
+`1.00 -> 2.00` on one device.
+
+**WHY THAT KILLS A BROWSER AND NOT AN `xterm`.** A scroll valuator is a
+*running total*, so a client that reads the wheel from it keeps a baseline per
+device — and must throw that baseline away on `XI_DeviceChanged`, because the
+new device's valuator has nothing to do with the old one's. Chromium
+(`DeviceDataManagerX11`), which is Steam's entire user interface, does exactly
+that. With a `DeviceChanged` before every scroll motion the baseline was
+dropped every time, every motion was a first motion, and every delta was zero,
+forever. `xterm` reads **core button 4/5**, which none of this touches — which
+is precisely why §12.2c saw an `xterm` scroll 471 px in the same X session, in
+the same minute, in which Steam's store page moved nothing.
+
+**In the VM, counted:** `XI_DeviceChanged` delivered to Steam's client,
+before **332** for 32 notches; after **19** for 16 notches, of which the last
+is at t=329.8 s — the first notch of the first burst — and none at all for the
+fifteen notches after it.
+
+**AND THE PROBE THAT SAID IT WAS FINE.** §12.2b's headline was "the XInput2
+smooth-scroll valuator moves, on both servers, with the sign right in both
+directions", and it was measured with `tests/linux/xi2_scroll_probe.c`, which
+existed *specifically* to be the client Steam is. It was not shaped like it in
+the one way that mattered: it never selected `XI_DeviceChanged` and so never
+dropped its baseline. It accumulated straight through the device change that
+was resetting the real browser on every notch, and reported a healthy wheel
+for four passes. It now does what Chromium does, and
+`tests/linux/wsyswl_wheel.sh` is the regression gate:
+
+```
+with the fix     30 passed, 0 failed
+fix reverted     26 passed, 4 failed
+```
+
+and the four are exactly `THE XI2 SMOOTH-SCROLL VALUATOR NEVER MOVED` and its
+reversal, **on both arms**, while every core button 4/5 assertion still passes
+— the real symptom, reproduced offscreen in 40 seconds: an `xterm` scrolls and
+a browser does not.
+
+**What Steam asked for, and what it was told.** Answered by
+`tests/linux/x11_record_trace.c`, a RECORD tracer attached before Steam draws
+(`XIGetSelectedEvents` cannot answer it: the server filters that request with
+`SameClient()`, so aimed at another client's window it returns an empty list
+whether that client selected everything or nothing — a probe that says "Steam
+selected nothing" no matter what is true). Steam selects XI2 on
+`deviceid=0`/`XIAllDevices`, so it receives the slave copy *and* the master
+copy of every event, and it was being told everything: with the pointer over
+the store page and the wheel turning, the server delivered
+`XI2 ButtonPress detail=4/5` **and** `XI2 Motion` to client `0x01600000` on
+window `0x1600014` — and the page did not move. "Steam was never told" was
+never the answer; "Steam was told, and told to forget, before every single
+notch" was.
+
+**Which window the notch landed on.** `xdotool getmouselocation` at the
+measured point: window `0x1a0001b`, `"Create Steam Account"`,
+`WM_CLASS = "steamwebhelper", "steam"`, 900x800+190+0, a child of the root —
+with the CEF render window `0x1600014` (852x744+214+32) inside it, which is the
+window the trace shows the events arriving on. The events were landing exactly
+where they should.
+
+**Firefox, in the same X session, on the same server, after the fix:** eight
+notches over `file:///etc/services` moved **52547 of 280000 px (18.77%)**, eight
+back moved the same, and A=C `IDENTICAL (0 of 280000)`, with a `0 of 280000`
+noise floor. The second browser engine agrees.
+
+*(Firefox took two runs to launch, and the first failure is worth the line it
+takes: `Running Firefox as root in a regular user's session is not supported.
+($HOME is /home/live which is owned by live.)` — printed, and then **exit 0**.
+A launcher reporting success with no window. It was caught only because the
+harness puts the program's own stderr on the serial console.)*
+
+**Cost of the search, and the one line that would have shortened it.** Four
+passes looked below the X server because a probe built to model Chromium said
+the smooth-scroll path was healthy. The probe was green and the program was
+dead, and the difference between them was a single event type nobody had
+thought to select. When a stand-in for a program disagrees with the program,
+the stand-in is the thing to doubt first.
 
 ### 12.3 Two things seen in passing that are NOT the blocker
 
