@@ -1171,7 +1171,47 @@ the shape is more reusable than the fix. They are NOT open work.
   **What this does NOT say: Steam was not re-measured.** The compositor chain
   is now proven end to end to a real client's pixels in the real VM; whether
   Steam's CEF scrolls is a separate measurement and nobody has taken it since
-  the fixes landed.
+  the fixes landed. **(It has now. It is the next entry.)**
+* **(MEASURED, AND IT IS STEAM'S BUG, NOT OURS) Steam still does not scroll —
+  and an `xterm` in the SAME session, the same minute, does.** The measurement
+  the entry above deferred, taken on the current tree, fourth full Steam boot,
+  driven back to the store front page and wheeled over the same rectangle that
+  produced the original `0 of 564400 px` so the numbers are comparable:
+
+  | wheel over | 8 notches | 8 back | net |
+  |--|--|--|--|
+  | Steam's store page, `830x680+214+80` | `0 of 564400` | `0 of 564400` | — |
+  | same, a second position mid-page | `0 of 564400` | `0 of 564400` | — |
+  | same, a third position | `0 of 240000` | `0 of 240000` | — |
+  | **`xterm`, same session, same minute** | **471 of 14000 (3.36%)** | **471 of 14000** | **0** |
+
+  The xterm went 2974–3000 → 2934–2961 → back: 40 lines up, 40 down, eight
+  notches of five lines, while the Steam window *behind it* stayed
+  byte-identical across the same screendumps. **Three controls in that run,
+  because a zero proves nothing alone:** the page has no noise floor (two
+  screendumps 15 s apart with no input: `0 of 564400` — so any change would
+  have been real, and the screendump is not stale); the pointer is alive and
+  the framebuffer tracks it (a move changed `244 of 1024000`, bbox spanning
+  both cursor positions); and the page is scrollable by something else (a
+  240 px scrollbar drag changed **84.43%** of it and left the store at its
+  footer). And the reversal, stronger than the drag: Steam gave A=B=C, the
+  xterm gave A≠B, B≠C **and A=C**.
+
+  **So the search space is now entirely above the X server and it is Steam's.**
+  The same QEMU tablet, `wsysd`, `wsyswl`, Xwayland 22.1.9 and `jwm` carried a
+  notch to one program's pixels and not to the other's, in one session — which
+  is the cleanest separation of "our stack" from "Steam" this port can build,
+  and it exonerates our stack. Next, in order: whether CEF's `XISelectEvents`
+  mask on *that* window selects the valuator (the valuator itself is proven
+  live at the server, `tests/linux/xi2_scroll_probe.c`), its GTK/SDL scroll
+  settings, and whether `steamwebhelper` treats the page background as a
+  scroll target at all. `docs/steam_namespace.md` §12.2c has all of it.
+  Two things worth carrying forward: `spawn` does **not** search `PATH`, so
+  `spawn debian { sh /tmp/... }` fails **silently** — no window, no message —
+  and `/bin/sh` is required; and the store page moved ~600 px on its own
+  between two screendumps with no input directed at it, probably a focus
+  change scrolling an element into view, recorded because it is the only
+  unexplained motion in the run.
 * **(SOLVED — kept because the shape is the lesson) Steam's login window is on
   the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
   `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X

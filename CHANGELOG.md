@@ -79,13 +79,20 @@ never fetch a silently fixed one, so the fix has to arrive as a new version.
   So every Wayland and X client behind this compositor has had a **dead scroll
   wheel for the entire life of the port**, Firefox included. `wl_pointer.axis`
   is now sent, and `axis_discrete` precedes it as the protocol requires.
-  **NOT a complete fix, stated rather than glossed:** Steam inside a
-  distribution namespace still does not scroll, across three full boots with
-  the shipped binary verified against the source change. Everything upstream
-  of the window's pointer file is eliminated by measurement — the compositor's
-  own counter advances by exactly twenty for twenty wheel notches with the
-  cursor held still. The remaining suspect is a version difference: the test
-  runs against the host's Xwayland 24.x while the namespace ships 22.1.9.
+  **The wheel now moves a real program's pixels in a real VM**, on the Xwayland
+  this distribution actually ships: `tests/linux/vm_wheel_client.sh` scrolls an
+  `xterm` in the Debian namespace 415 px up, 415 px back, net 0.
+  **What it does NOT fix, stated rather than glossed:** Steam inside a
+  distribution namespace still does not scroll, now across four full boots.
+  That is no longer a mystery about this stack — in the fourth boot an `xterm`
+  in the **same X session, the same minute**, given the identical wheel events,
+  scrolled and scrolled back while Steam's store page changed **0 of 564400
+  pixels**, with a scrollbar drag of that same page moving 84.43% of it as the
+  control. The two candidates this entry used to name are both dead by
+  measurement: the compositor's counter advances by exactly twenty for twenty
+  notches with the cursor still, and Xwayland 22.1.9 and 24.1.6 behave
+  identically on both the core and the XInput2 smooth-scroll paths. The fault
+  is above the X server and it is Steam's own input handling.
 
 ## 1.0.10
 

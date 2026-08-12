@@ -791,7 +791,7 @@ count from `tests/linux/ppmdiff.py` over two QEMU screendumps.
 | navigating the store | **works** | *Store Home* loaded the real front page — Counter-Strike 2 artwork, review counts, the discount carousel |
 | dragging | **works** | press-move-release on the page's scrollbar scrolled it: `96.44%` of an 830x680 rectangle changed |
 | **search, and live results** | **works** | `portal` typed into the store search box returned Portal, Portal 2, Portal Knights and Portal Worlds with prices and cover art, over the network, as an AJAX response |
-| **the scroll wheel** | **BROKEN — see 12.2** | eight wheel-down events over that same page changed **0 of 564400 pixels** |
+| **the scroll wheel** | **BROKEN IN STEAM ONLY — see 12.2c** | eight wheel-down events over that same page changed **0 of 564400 pixels**. Re-measured after every compositor fix landed: still **0**, while an `xterm` in the **same session, same minute** scrolled 471 px and back. The fault is above the X server and it is Steam's. |
 
 `build/steamprobe/` is not where these live; the run's screendumps are under
 `~/.hamnix-build/steamdrive/shots-run1/` (`s0.png` the login window, `s3_typed.png`
@@ -1002,6 +1002,97 @@ is the whole compositor chain, end to end, to a real client's pixels, in the
 real VM, on the Xwayland that actually ships. Whether Steam's CEF scrolls is a
 separate measurement and nobody has taken it since these fixes landed — say so
 rather than assume it, in either direction.
+
+*(That measurement has since been taken. It is §12.2c, and the answer is no.)*
+
+### 12.2c STEAM STILL DOES NOT SCROLL — AND AN `xterm` IN THE SAME SESSION DOES
+
+**This is the measurement §12.2b said nobody had taken.** A fourth full Steam
+boot, on the current tree, driven back to the store front page and wheeled
+over — the same page, the same eight notches, the same `830x680+214+80`
+rectangle as the `0 of 564400 px` that started all of this, so the numbers are
+directly comparable. Then, **without rebooting and without touching the
+compositor**, a second X client was put into the *same* X session and given
+the identical wheel events.
+
+| what the wheel was over | 8 notches one way | 8 notches back | net |
+|--|--|--|--|
+| **Steam's store page**, `830x680+214+80` | `IDENTICAL (0 of 564400 px)` | `IDENTICAL (0 of 564400 px)` | — |
+| **Steam's store page**, second position, mid-page | `IDENTICAL (0 of 564400 px)` | `IDENTICAL (0 of 564400 px)` | — |
+| **Steam's store page**, third position, after the xterm was up | `IDENTICAL (0 of 240000 px)` | `IDENTICAL (0 of 240000 px)` | — |
+| **`xterm`, same session, same minute**, `40x350+16+30` | **471 of 14000 px (3.36%)** | **471 of 14000 px (3.36%)** | **`IDENTICAL (0 of 14000 px)`** |
+
+The xterm went from showing lines 2974–3000 to lines 2934–2961 and back — 40
+lines up, 40 lines down, eight notches of five lines each, exactly as a wheel
+should. The Steam window **behind it** is byte-identical across the same three
+screendumps.
+
+**THREE CONTROLS, ALL IN THAT RUN, BECAUSE A ZERO PROVES NOTHING ON ITS OWN.**
+
+1. **The page is quiet.** Two screendumps 15 s apart with no input at all:
+   `diff 830x680+214+80: IDENTICAL (0 of 564400 px)`. So the rectangle has no
+   noise floor — the featured carousel was not rotating under the measurement,
+   and a change of *any* size would have been real. This control is new here
+   and it cuts both ways: it is also why the zeros above cannot be an artefact
+   of a screendump that never refreshed.
+2. **The pointer is alive and the framebuffer tracks it.** A plain move:
+   `244 of 1024000 px differ; bbox 543x687+500+20` — the cursor sprite left
+   where it was and arrived where it was sent. A dead pointer produces the
+   same zero as a dead wheel, and this is the only thing that separates them.
+3. **The page is scrollable by something else.** Press–move–release on that
+   page's own scrollbar, 240 px:
+   `diff 830x680+214+80: 476499 of 564400 px (84.43%) differ`. The store front
+   page then really was at its footer. So "nothing moved" means the wheel is
+   not connected to *this client*, not that there was nowhere to go.
+
+**And the reversal, which is stronger than the drag.** Down-then-up on Steam
+gave A=B=C, which is the shape of nothing happening. Up-then-down on the
+xterm gave A≠B, B≠C **and A=C** — the triple that only real content that
+really scrolls and really scrolls back can produce. Same session. Same wheel.
+Same eight notches, ~90 seconds apart.
+
+**SO THE SEARCH SPACE IS NOW ENTIRELY ABOVE THE X SERVER, AND IT IS STEAM'S.**
+Everything below is proven in this run, not argued from another one: the same
+QEMU `virtio-tablet-pci`, the same `wsysd`, the same `wsyswl`, the same
+Xwayland 22.1.9, the same `jwm` — carried a wheel notch to a program's pixels
+while Steam's CEF, one window over, did nothing with it. That is as clean a
+separation of "our stack" from "Steam" as this port can construct, and it says
+our stack is not the problem.
+
+What is left to look at, in the order a next pass should try it, is Steam's
+own input handling: CEF's `XISelectEvents` mask on **that** window (the XI2
+valuator is proven live at the server — `tests/linux/xi2_scroll_probe.c` — so
+the question is whether Steam selects for it), its GTK/SDL scroll settings,
+and whether `steamwebhelper` treats the store page's outer frame as a scroll
+target at all when the pointer is over page background rather than over a
+list. `docs/steam_namespace.md` §12.3's note that the console drops characters
+under load is what makes asking Steam's own logs hard, and it is the thing to
+fix first if that route is taken.
+
+**One thing seen and not explained, recorded rather than tidied away.**
+Between two screendumps about two minutes apart, with **no** pointer, key or
+wheel event directed at Steam in between — only console typing that started a
+second X client — the store page moved on its own from mid-page to its footer,
+roughly 600 px. It is not the wheel (the wheel diffs immediately before and
+after are zero), and the most likely reading is a focus change on the new
+window making CEF scroll a focused element into view. It is written down
+because it is the only unexplained motion in the run.
+
+**How this was run**, so it can be repeated: `tests/linux/steam_login_drive.sh
+boot 400` with `SLD_WORK` and a private `build/image` (§11), then the
+navigation *Create a Free Account* → *Browse* → *Store Home* by
+`tests/linux/qmp_input.py`. The comparison client goes in through the shim
+that boot now stages into the namespace:
+
+```
+spawn debian { /bin/sh /tmp/de-ns-run xterm -sb -j -hold -geometry 80x40+0+0 -e /usr/bin/seq 1 3000 }
+```
+
+`/bin/sh` and not `sh`: `spawn` does not search `PATH`, and with the bare name
+the command **fails silently** — no window, no message, nothing on the console.
+That cost a boot's worth of time and is exactly the shape this project's
+standard of evidence is about, so it is named here rather than left as a
+footgun.
 
 ### 12.3 Two things seen in passing that are NOT the blocker
 
