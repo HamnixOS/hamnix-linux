@@ -392,22 +392,44 @@ same failure this project exists to beat.
   delay it gives back the whole 8.93 -> 0.33 ms result for exactly the
   interaction people notice most.
 
-* **A VERTICAL PANEL IS ACCEPTED BY THE CONFIG AND NEVER APPEARS ON SCREEN.**
-  `tests/linux/de_panel_conf_shipped.sh` is 14 PASS / 1 FAIL, and it fails the
-  same way with `user/wsysd.ad` and `user/linux-syscalls.c` reverted to
-  `4b50eae2`, so it is nobody's regression -- but "pre-existing" is not
-  "fine", and what is actually broken is now known rather than guessed. Its
-  section 10 writes four panels, one per edge, and the panel agrees in its own
-  log: `honoured, 4 panel(s)` and `config reload applied: 4 panel(s)`. The
-  COMPOSITED SCREEN at that moment (the gate's own `maxc.raw`, scanned pixel
-  by pixel) holds only the two HORIZONTAL ones: rows 0..55 and the bottom 56
-  rows are panel grey `#eceef2`, the left and right edges are wallpaper
-  `#284470` for at least 64 px in, and there is **not one `#ff00ff` pixel in
-  the whole 1280x800 frame** -- the colour the gate gave the left panel
-  precisely so it could not be confused with anything else. So `edge left` and
-  `edge right` parse, count, and produce no pixels. The gate's assertion is
-  right and its message ("the maximal panel set did not come up") points at
-  the config, which is the one part that works.
+* ~~**A VERTICAL PANEL IS ACCEPTED BY THE CONFIG AND NEVER APPEARS ON SCREEN**~~
+  -- **THERE WAS NO SUCH DEFECT. `edge left` and `edge right` parse, lay out
+  and paint correctly; the GATE looked one line too early and blamed the
+  config, which is the part that always worked.**
+
+  `de_panel_conf_shipped.sh` section 10 waited for `honoured, 4 panel(s)` in
+  the panel's log and then IMMEDIATELY snapshotted the framebuffer. That line
+  is printed when the config has been PARSED -- the two new windows still have
+  to be created, painted, committed and composited after it. Narrowed in three
+  runs: a cold start with one `edge left` panel gives window `0 0 56 800` and a
+  100% band; a cold start with the gate's exact maximal config (4 panels x 12
+  widgets) paints too; and the gate's own sequence -- two panels, then swap in
+  four -- snapshotted AT the log line shows all four windows present with the
+  right geometry (`0 0 56 800`, `1224 0 56 800`) **at gen 2 with ZERO magenta
+  pixels**, and the same windows at **gen 9 with 96%** two seconds later.
+
+  The gate now waits for the thing it is asserting (bounded,
+  `PANELSHIP_VPANEL_WAIT_S`, ~1 s in practice, and the PASS line says how long
+  it waited so a slowdown is visible). Its failure message distinguishes the
+  three outcomes and prints the vertical panel's own window line, so the next
+  person is told whether the parse, the geometry, or the paint is missing
+  instead of being pointed at the config. **15 PASS / 0 FAIL**, and with the
+  deadline forced to 0 it is **14 PASS / 1 FAIL** printing that message -- red
+  before it was called fixed.
+
+  **THE LESSON IS THE ONE THIS TREE KEEPS RE-LEARNING FROM THE OTHER SIDE**:
+  the numbers were real, the frame really did hold no magenta, and the
+  conclusion drawn from them was still wrong -- because the instrument
+  sampled a state that had not happened yet. A log line that means "I have
+  accepted your request" is not the event a pixel assertion may key on.
+
+  **AND THE `update notice on a bottom or vertical panel` ITEM IS NOT THE SAME
+  BUG, because there is no bug here to share.** Vertical panels demonstrably
+  lay out and paint. Separately: no `update`/`notice` widget exists in
+  `hampanelscene.ad`'s config vocabulary (`clock`, `tasks`, `tray`, `sysmon`,
+  `pager`, `launcher`, `spacer`, `menu`, `note`, ...) and nothing in `user/`,
+  `lib/` or `etc/` matches an update-notice string, so I could not locate the
+  feature to test it. It stays open, and it is NOT covered by the above.
 
 * **THE ROOTLESS X PATH -- WHICH IS THE BROWSER PATH -- IS BROKEN, AND THE
   FIRST OF ITS TWO CAUSES IS FIXED.** `wsys_close_button` is 2 PASS / 1 FAIL
