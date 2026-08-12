@@ -694,8 +694,8 @@ cat <<RC
 echo '[wv] p3 stashing the v$NEWWSYS cat as /probe-cat8 before the second update'
 cp /bin/cat /probe-cat8
 echo '[wv] p3 updating again, to $NEXTVER (wsys v$NEXTWSYS)'
-hpm --repo='$BASE2' --trusted-key='/etc/hpm/wv-trusted.pub' refresh
-hpm --repo='$BASE2' --trusted-key='/etc/hpm/wv-trusted.pub' update
+hpm --repo=$BASE2 --trusted-key=/etc/hpm/wv-trusted.pub refresh
+hpm --repo=$BASE2 --trusted-key=/etc/hpm/wv-trusted.pub update
 echo '[wv] p3 list after the second update:'
 hpm list
 echo '[wv] p3 md5 of $BIN after the second update:'

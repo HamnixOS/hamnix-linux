@@ -4654,6 +4654,13 @@ def _drain_launch_queues():
 # above, and it means dismissing cannot be undone by the next poll while a
 # genuinely NEW refusal still re-raises the notice.
 #
+# WHAT IT DOES NOT REPLACE. scripts/hamlinux_packages.py's hamnix-desktop
+# install hook already prints the same warning to the TERMINAL somebody typed
+# `hpm update` into, and it reaches the update that needs it, which nothing in
+# this file can. The two are for different people: that one is for whoever ran
+# the update, this one is for whoever walks up to the machine afterwards and
+# clicks Applications. Neither is a substitute for the other.
+#
 # NOT PRIMED AT STARTUP, unlike _peek_launch_serial. A panel that starts and
 # finds a marker is a panel in a session that still needs restarting -- the
 # condition is still true, so the honest answer is to show it.
