@@ -89,6 +89,22 @@ set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
 
+# THE MACHINE THIS RUNS ON IS NOT SCRATCH.
+#
+# THE MOST VALUABLE ONE: scripts/hamlinux_packages.py runs this gate before it writes
+# index.json, so it runs on every publish, and it sets no HAMWSYS at all -- it takes
+# linux-wsys.c's /srv, then the /dev/shm/hamnix-wsys fallback, which this machine's
+# /dev/shm is holding right now. Its own work directory is deliberately under build/
+# and not /tmp (see the note above), so the fresh tmpfs cannot take it away.
+#
+# The names that matter are compiled into the binaries, not written here, so no
+# care taken in this script can move them; the containment is the namespace.
+# tests/linux/private_ns.sh has the table and the incident that bought it. This
+# must come before anything that makes a file under /tmp, $WORK included, and
+# before reap.sh, whose registry is itself a mktemp under /tmp.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
+
 CHAN="${1:-$PROJ_ROOT/build/repo/linux}"
 KEEP="${CHANRUN_KEEP:-0}"
 

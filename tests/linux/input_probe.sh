@@ -16,6 +16,20 @@ set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
 
+# THE MACHINE THIS RUNS ON IS NOT SCRATCH.
+#
+# It sets HAMWSYS and HAMWSYS_BB and starts no desktop client, so the known residue
+# was small -- which is not the same as measured. $WORK was a bare mktemp -d in the
+# host's /tmp, and /srv and /dev/shm were the machine's.
+#
+# The names that matter are compiled into the binaries, not written here, so no
+# care taken in this script can move them; the containment is the namespace.
+# tests/linux/private_ns.sh has the table and the incident that bought it. This
+# must come before anything that makes a file under /tmp, $WORK included, and
+# before reap.sh, whose registry is itself a mktemp under /tmp.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 # A bare EXIT trap does not run when the shell is killed by a signal, so a
