@@ -284,8 +284,14 @@ def selftest(fb, inp, cat, pid, w, h):
     # 3. THE KNOWN QUANTITY. A deliberately slowed compositor must measure
     #    slower, by about the amount it was slowed.
     for stop_ms in (100, 250):
+        # The timeout has to leave room for the frame ITSELF on top of the
+        # stop. stop_ms + 400 was enough on the software path (0.6 ms/frame)
+        # and lost samples on the GPU path (70 ms/frame, and coalesced), where
+        # the tool then reported "lost" for a compositor that was working
+        # exactly as measured. A budget that only fits the fast path turns a
+        # slow result into a broken instrument.
         s = stats(latency_trials(fb, inp, 5, w // 4, h // 4, 3 * w // 4,
-                                 3 * h // 4, timeout_ms=stop_ms + 400,
+                                 3 * h // 4, timeout_ms=stop_ms + 2000,
                                  stopper=pid, stop_ms=stop_ms))
         if s and s['min'] >= stop_ms * 0.9:
             print('selftest: PASS  stopped    wsysd SIGSTOPped %d ms -> '
