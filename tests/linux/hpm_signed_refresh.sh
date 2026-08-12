@@ -22,6 +22,59 @@
 # an install with no --allow-unsigned anywhere is an end-to-end trusted chain
 # rather than a signature check that passed and was then ignored.
 #
+#
+# WHICH GATE ANSWERS WHICH QUESTION -- read this before adding an assertion
+# =========================================================================
+# Four files touch the PUBLISHED channel and they are not interchangeable.
+# Working that out cost a whole pass: a gate was named as "the cover" for
+# something it does not cover, and two full runs were spent before the log
+# said so. The division is deliberate and each line names what the file does
+# NOT answer, because that is the half that gets forgotten.
+#
+#   tests/linux/hpm_signed_refresh.sh   THE SIGNED DELIVERY PATH.  ~6 min, ONE
+#     throwaway initramfs boot, no disk.  A bare `hpm refresh` + `hpm install`
+#     against the real 255.one with NO FLAGS: the index authenticates against
+#     the SHIPPED trust root, one published package downloads, its hash is
+#     checked against that authenticated index, it unpacks, and the program it
+#     carries RUNS.  Does NOT answer: whether a desktop comes up, whether an
+#     installed disk survives a reboot, or anything about a package larger than
+#     the one it installs.  It is the fast one on purpose -- strengthening it to
+#     boot a desktop would make it a slower duplicate of the file below and
+#     leave nothing that can be run on every push.
+#
+#   tests/linux/installed_update_live.sh   THE WHOLE PATH, TO A WORKING SCREEN.
+#     ~30 min, THREE boots of a real UEFI+ext4 disk.  Installs an OLDER local
+#     channel, then takes the REAL published update with no flags, reboots, and
+#     puts a REAL POINTER on the Applications button over QMP.  This is the
+#     only file that answers "what is published today boots and works".  Does
+#     NOT answer: anything about a WSYS_VERSION bump, and nothing about
+#     packages other than the desktop's own delivery.
+#
+#   tests/linux/installed_update_modules.sh   PUBLISHED MODULE BYTES, into the
+#     kernel's own /proc/modules on a rebooted installed disk.  Nothing
+#     graphical.
+#
+#   tests/linux/installed_update_wsysver.sh   A WSYS_VERSION BOUNDARY, and
+#     NOTHING PUBLISHED AT ALL -- it builds all three of its channels itself,
+#     one version apart, with no network, because a boundary that exists only
+#     when the channel happens to be behind the tree is a boundary that stops
+#     existing right after every release.  It gave up the published-bytes arm
+#     on purpose; the two files above are where that lives.
+#
+# And two that never fetch and never boot: channel_runs_desktop.sh runs the
+# LOCAL channel's binaries offscreen, channel_covers_image.sh compares names
+# and /etc bytes.
+#
+# WHAT THIS FILE DOES NOT PROVE, SAID HERE SO IT IS NOT ASSUMED. The boot is a
+# throwaway initramfs one and the package is `hamnix-diff`, chosen because it
+# is small and the image does not already carry /bin/diff. So this is evidence
+# about the DELIVERY PATH -- authenticate, fetch, verify, unpack, run -- and
+# not about the desktop, an installed disk, or a reboot. That is a deliberate
+# scope and not a gap to be closed here: this file is cheap enough to run on
+# every push, and tests/linux/installed_update_live.sh already spends three
+# boots proving the rest. Making this one boot a desktop would cost most of
+# that file's time and leave the tree with no fast signature check at all.
+#
 # Usage: tests/linux/hpm_signed_refresh.sh [seconds]
 #
 # It needs the network (255.one) and it builds a PRIVATE image — nothing under
