@@ -336,12 +336,24 @@ sleep 3
 # 1.0.10 shape, a stale object cache packaging binaries from two builds -- and
 # it is the packages' fault, so say which and do not let it read as chrome that
 # ignored a click.
+#
+# AND IT STOPS HERE, which is the second half of the lesson. The first version
+# of this checkpoint reported the mixed channel and carried on -- and the NEXT
+# checkpoint then correctly observed that the probe had changed the version
+# back, and said "fix the instrument" about an instrument that was fine. A red
+# for the right reason worded as a red for the wrong one is still the failure
+# this project keeps paying for. Once the table has been re-initialised under a
+# live desktop nothing below is a question this run can answer: the panel and
+# the wallpaper are attached to a segment that was punched out from under them,
+# so every pixel from here on is a photograph of wreckage.
 SEG1="$(segstate)"; SEGV1="$(segver)"
 if [ "$SEGV1" != "$SEGV0" ]; then
-    bad "MIXED CHANNEL: the segment was $SEGV0 when wsysd made it and is $SEGV1 now that hamdesktop and hampanelscene have attached -- these three binaries are not one build, and each re-initialises the others' window table"
+    bad "MIXED CHANNEL: the segment was $SEGV0 when wsysd made it and is $SEGV1 now that hamdesktop and hampanelscene have attached -- these three binaries are not one build, and each re-initialises the others' window table. THIS IS A DEFECT IN THE BYTES, not in this gate: it is the 1.0.10 shape, a stale object cache packaging a compositor and its clients from two different builds."
     info "  before the clients: $SEG0"
     info "  after  the clients: $SEG1"
-    [ -n "$BINDIR" ] && info "  the bytes came from $BINDIR -- this is a defect in what was packaged, not in this gate"
+    [ -n "$BINDIR" ] && info "  the bytes came from $BINDIR"
+    info "  stopping: the window table was re-initialised under a live desktop, so 'is there a top bar' is not a question the pixels below can answer"
+    done_report; exit 1
 fi
 
 # CHECKPOINT 3 of 3 -- DID THE INSTRUMENT SURVIVE CONTACT? One ctl read, then
