@@ -278,6 +278,52 @@ clients, the dropped desktop and the seven binaries.
 
 ### What is HONESTLY BROKEN right now
 
+* **THE UPDATE NOTICE ON A BOTTOM OR VERTICAL PANEL: MEASURED, AND IT WORKS.**
+  It had only ever been proven on a TOP panel, which is the shipped default and
+  where it was developed. `_notice_box` and `_panel_grow_px` both branch on the
+  edge -- a bottom bar puts the card ABOVE itself, a left bar to its RIGHT, a
+  right bar to its LEFT, and the window grows along a different axis for each --
+  and none of those branches had been run. All three land where the panel's own
+  constants say:
+
+  | edge | card | panel window |
+  |---|---|---|
+  | bottom | 82% `#ffe9b0` at 8,688 | 1280x112 at 0,688 |
+  | left | 82% at 26,8 | 366x800 at 0,0 |
+  | right | 82% at 914,8 | 366x800 at 914,0 |
+
+  366 = 26 + `NOTICE_W`(340) and 112 = 26 + `NOTICE_H`(86), so the grow is on
+  the right axis in each case. `de_update_notice.sh` is **21 PASS / 0 FAIL**,
+  the box is DERIVED from those constants rather than typed, and each edge
+  proves its own box EMPTY before the panel is restarted -- a top panel's card
+  (8,26) and a left panel's (26,8) overlap heavily, so a reordering of that
+  loop would otherwise pass on a stale frame.
+
+  **THE FIXED SLEEP IS GONE** from the top-panel assertion too: it waited
+  `sleep 3` and now polls the rectangle, prints how long it waited, and gives up
+  at a stated deadline -- the same lesson as the withdrawn vertical-panel
+  defect below.
+
+  **AND THE FIRST RED-PROOF PROVED NOTHING, WHICH IS THE PART WORTH KEEPING.**
+  `NOTICE_EDGE_NUDGE` displaces the box the gate looks in without touching the
+  panel -- exactly the condition "the card did not follow the bar". Nudged a
+  fixed direction it pushed the RIGHT panel's box off the screen, where
+  `colourpct` counted only the clipped remainder, still 80% card, and the check
+  PASSED. It nudges toward the screen centre now and all three go red at 0%.
+  The off-screen case earned a real check as well: an expected box that does
+  not fit on the display is refused by name, because a percentage taken from a
+  clipped rectangle answers about something else.
+
+  **NOT DONE**: the real-disk arm, STAGE E of
+  `tests/linux/installed_update_wsysver.sh`, still covers only a top panel. It
+  boots QEMU against `build/image` with 900 s ceilings and would need the panel
+  config written inside the guest; that is a different pass, and this one
+  deliberately did not touch the shared image. (That gate already names the
+  size trap itself: v7 and v8 are both 512 rows, so the segment size
+  distinguishes nothing at such a bump and it says so where the constants are.)
+
+
+
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
