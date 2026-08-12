@@ -298,7 +298,7 @@ ls	cmd	%D	-	fast-path listing via p9_listdir NAME stream; -l switches to Dir-rec
 lsblk	cmd	EMPTY	-	enumerate /dev/blk block devices and print capacity from each node's size file; no flags
 lsmod	cmd	EMPTY	-	stub: prints Linux-shaped header plus one hard-coded demo module row, not real /proc/modules
 man	cmd	man	-	reads /usr/share/man/<topic>.<N>.md and writes it to stdout; renderer is a plain file copy
-md5sum	filter	EMPTY	%F	stdin only; emits fixed marker hex string for stdin, NOT a real MD5 digest
+md5sum	filter	EMPTY	%F	prints the real RFC-1321 MD5 of each FILE, or of stdin when there is no operand; output matches coreutils exactly
 memhog	cmd	64M	-	allocate SIZE (bare = BYTES, K/M/G binary), touch every page for residency, hold, release, and prove the drop in MemFree is at least half the ask
 mkdir	cmd	%NEW	-	calls sys_mkdir for each argv path; only /tmp/* paths succeed, others return -EROFS
 mkdir_at_slot	disk	/dev/blk/vdbp2 usr/share/foo	-	mkdir -p on a NOT-mounted ext4 partition via /dev/blk/<dev>/ctl mkdir verb
@@ -330,7 +330,7 @@ passwd	cmd	live	newpass123\nnewpass123	changes current user's password via /dev/
 paste	cmd	%F %F2	-	column-merge corresponding lines of FILE args joined by TAB delimiter; not a stdin filter
 patch	cmd	--dry-run %F	-	apply a unified/normal diff to a target file; --dry-run verifies only, changes nothing
 pathchk	cmd	%F	-	check PATH operands are valid usable file names (length/empty checks); exit 1 if any fails
-pgrep	cmd	sh	-	reads /proc/tasks and prints the PID of every task whose comm substring-matches NAME
+pgrep	cmd	pgrep	-	prints the PID of every task whose comm substring-matches NAME, from /proc/tasks on the Hamnix kernel and from /proc's pid directories on Linux; the pattern is its OWN name so the row does not depend on what else the jail happens to be running
 ping	net	127.0.0.1 -c 1	-	ICMP echo client dialing /net/icmp to a real host; -c 1 sends one request then stops
 playtone	other	EMPTY	-	synthesizes and plays a square-wave tone via /dev/audioctl+/dev/audio HDA device, no input file needed
 poweroff	unsafe	EMPTY	-	would ask the kernel to power the machine off — writes poweroff verb to /dev/reboot; on success the machine powers off and never returns - refuse to run
@@ -340,7 +340,7 @@ preempt_hog	daemon	EMPTY	-	spins forever in a syscall-free tight loop as a preem
 primary_paste_chain_host	hosttest	EMPTY	-	host gate joining terminal selection extraction to a real PRIMARY snarf buffer and paste wire line
 printenv	cmd	FOO=bar FOO	-	prints own argv NAME=VALUE tokens as its environment (no real environ[]); queries print matching VALUE
 printf	cmd	%s\n hi	-	minimal coreutils-style printf: %s/%d plus \n \t \\ \0 escapes; unknown conversions emitted literally
-ps	cmd	EMPTY	-	dumps /proc/version, /proc/uptime, /proc/tasks snapshots to stdout by re-opening each in turn
+ps	cmd	EMPTY	-	lists every process it can see -- PID, USER, S, TIME, CMD -- walking /proc's pid directories and reading <pid>/stat and <pid>/status; exits non-zero if it listed nothing
 pwd	cmd	EMPTY	-	prints the calling task's current working directory via SYS_GETCWD
 realpath	cmd	%F	-	print absolute canonicalised form of each argument path; lexical only, no symlink dereference
 reboot	unsafe	EMPTY	-	would ask the kernel to reboot the machine — writes reboot verb to /dev/reboot; on success the machine resets and never returns - refuse to run
