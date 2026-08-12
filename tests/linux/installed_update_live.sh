@@ -129,7 +129,33 @@ IMG=build/image
 DISK="$IMG/liveupd.img"
 REPO="$WORK/repo"
 EXTRA="$WORK/extra"
-QMP="$PROJ_ROOT/$WORK/qmp.sock"
+# THE QMP SOCKET PATH, AND THE 108 BYTES NOBODY GETS TO EXCEED.
+#
+# This was `$PROJ_ROOT/$WORK/qmp.sock`, which assumes $WORK is RELATIVE.
+# HAMLINUX_LIVEUPD_WORK is documented as a work directory and an ABSOLUTE one
+# is the obvious thing to pass; that concatenated the two into
+# `/home/.../worktrees/agent-xxxx//home/david/.hamnix-build/...`, which is over
+# the AF_UNIX limit, so QEMU refused to start and printed
+#
+#     UNIX socket path '...' is too long / Path must be less than 108 bytes
+#
+# MEASURED, and the cost is the point: not one of the three boots happened,
+# and the gate went on to score 31 FAIL -- "the update landed and the desktop
+# did not come up", "what the channel is serving is not a working desktop" --
+# about a machine that had never been switched on. A gate that says the
+# published channel is broken when its own socket path was wrong is worse than
+# one that says nothing.
+#
+# So: an absolute $WORK is used as-is, and if the result is still too long for
+# AF_UNIX the socket goes to a short path instead. The socket is a control
+# channel for this process; where it lives is not evidence about anything.
+case "$WORK" in
+    /*) QMP="$WORK/qmp.sock" ;;
+    *)  QMP="$PROJ_ROOT/$WORK/qmp.sock" ;;
+esac
+if [ "${#QMP}" -ge 100 ]; then
+    QMP="${TMPDIR:-/tmp}/lupd-$$.qmp"
+fi
 NOUPD="${HAMLINUX_LIVEUPD_NOUPDATE:-0}"
 
 fail=0
@@ -557,6 +583,15 @@ boot() {   # boot <logfile> <seconds> <click:0|1>
         timeout "$((secs + 25))" scripts/hamlinux_vm.sh disk --timeout "$secs" \
         -qmp "unix:$QMP,server=on,wait=off" >"$log" 2>&1 &
     VM=$!
+    # QEMU CAN REFUSE TO START, and when it does every assertion below reads
+    # an empty log and answers FAIL -- thirty-one sentences about a machine
+    # that was never switched on. Caught here, once, by name.
+    sleep 2
+    if ! kill -0 "$VM" 2>/dev/null && grep -aqE "^qemu-system|Path must be less than" "$log"; then
+        echo "lupd: FAIL QEMU NEVER STARTED, so nothing below was measured on a machine. This is a failure of this harness, NOT a verdict on the channel:"
+        grep -aE "^qemu-system|Path must be less than" "$log" | head -4 | sed 's/^/        /'
+        exit 1
+    fi
     if [ "$doclick" = 1 ]; then
         local i=0
         while [ "$i" -lt "$((secs * 2))" ]; do
