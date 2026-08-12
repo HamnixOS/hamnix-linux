@@ -1150,23 +1150,41 @@ single entry:
   because `/dev/wsys` is shared memory with no fid table and nothing ever
   freed a window its owner had not freed by hand. Nothing in `lib/hamui.ad`
   ever does, so a NORMAL exit leaked one too (165195bc).
-* **THE DE CHROME CANNOT BE CLICKED WITH A MOUSE, AND NOTHING SAYS SO. OPEN.**
-  `user/wsysd.ad`'s `route_pointer` writes the routed event to
-  `/dev/wsys/<wid>/pointer`. `lib/hamui.ad` reads that file, so every ordinary
-  application is fine. `user/hampanelscene.ad` and `user/hamdesktop.ad` — the
-  panel and the desktop, the two programs a person actually points at — read
-  `/dev/wsys/<wid>/event` instead, which is where Hamnix's `devwsys.ad` pushes
-  its `'m'` pointer lines (`~/Hamnix/sys/src/9/port/devwsys.ad:12387`). **In
-  this port nothing ever writes a pointer line to an event ring**, so the
-  Applications button, the desktop icons and the taskbar are inert under a
-  real mouse. Measured, not read: with `wsys_hold` holding a window whose owner
-  drains neither ring, a full evdev click leaves `pointer` holding
-  `m/d/m/u ...` and `event` **empty**. Every gate that drives the chrome —
-  `tests/linux/distro_menu.sh`, `tests/linux/de_appmenu_band.sh` — writes the
-  event ring by hand as host owner, which is why none of them noticed. Not
-  fixed: which ring is canonical is a decision (wsysd could mirror the line
-  into `event`, or the two chrome programs could read `pointer` like everything
-  else), and it needs a gate that drives real evdev at the panel.
+* **THE DE CHROME COULD NOT BE CLICKED WITH A MOUSE, AND NOTHING SAID SO.**
+  `user/wsysd.ad`'s `route_pointer` wrote the routed event to
+  `/dev/wsys/<wid>/pointer` **and to nothing else**. `lib/hamui.ad` reads that
+  file, so every ordinary application was fine. `user/hampanelscene.ad` and
+  `user/hamdesktop.ad` — the panel and the desktop, the two programs a person
+  actually points at — read `/dev/wsys/<wid>/event`, which is where Hamnix's
+  `devwsys.ad` pushes its `'m'` pointer lines
+  (`~/Hamnix/sys/src/9/port/devwsys.ad:12384`), and **nothing in this port ever
+  wrote a pointer line to an event ring**. So the Applications button, the
+  desktop icons and the taskbar were inert under a real mouse. Measured twice,
+  independently, with a `wsys_hold` window whose owner drains neither ring:
+  after a full evdev click `pointer` held `d 80 110 1 0` / `u 80 110 0 0` and
+  `event` was **empty**, six consecutive reads. Every gate that drives the
+  chrome — `tests/linux/distro_menu.sh`, `tests/linux/de_appmenu_band.sh` —
+  writes the event ring by hand as host owner, which is why none of them
+  noticed. **Fixed**: `route_pointer_event` puts the routed line on the EVENT
+  ring in devwsys's exact shape — `m <x> <y> <buttons> <dz>`, type byte always
+  `'m'`, the button STATE in the bitmap, which is what `hampanelscene`'s edge
+  detector (`bv & (bv ^ prev_bv)`) is written against. **The event ring is
+  canonical** because Hamnix says so: devwsys routes only there, and
+  `~/Hamnix/user/hamappmenu.ad:415` calls `/pointer` "the legacy ring …
+  now DEAD". `pointer` is still written here, unchanged, because on this line
+  it is not dead — `lib/hamui.ad` reads it and every hamUI application inherits
+  that; retiring it is Hamnix's migration, not this fix's. Gated by
+  `tests/linux/de_mouse_chrome.sh` (13 PASS), which is forbidden to poke a ring.
+* **And a click that arrived all at once was dropped entirely.** Found while
+  gating the above. `pump_input` drains every pending evdev record in one pass
+  and the frame loop routes ONCE afterwards, so a `move, down, up` read in a
+  single pass folded into one event — the last edge won, which is the release
+  with buttons 0, and the press was never delivered. That is not exotic: the
+  records queue in the node, and a compositor that spent a frame painting reads
+  them together. Measured: seven records written in one go left the ring holding
+  exactly `u 80 110 0 0`. Fixed by flushing the pending edge (`deliver_pointer`)
+  before accepting a second button transition in the same drain — devwsys routes
+  per event, and this is that at the granularity this poll loop has.
 
 None of these failed loudly. Three were found only by tracing, one only by
 running `strace` **as PID 1**, and one only after publishing the compositor's
@@ -1228,6 +1246,35 @@ device does not know instead of `keyed 1` — a CLIENT-side regression —
 panel. Reported live on 2026-08-11 and **not reproducible on HEAD**: the
 committed screenshot that carried the report,
 `docs/screenshots/linux/distro-menu-debian.png`, predates 61261904.
+
+### And the gate the MOUSE got
+
+`tests/linux/de_mouse_chrome.sh`, **13 PASS**, offscreen, ~40 s. This is the
+one file in the tree that is **not allowed to poke a ring**, and that rule is
+the whole point of it: `distro_menu.sh` and `de_appmenu_band.sh` both open the
+Applications menu by writing the panel's event ring as host owner, which is a
+fine shortcut for the geometry they gate and is precisely why the entire input
+path underneath could be missing with both of them green. Assertion 12 greps
+this file for a `wsys_poke` at an `event`/`pointer`/`keys` path and FAILS if a
+future edit takes the shortcut back.
+
+Every click is synthetic evdev — 24-byte `struct input_event` records appended
+to `HAMWSYSD_INPUT`, parsed by `wsysd`'s own `pump_input` — and every assertion
+is about what the chrome DID. It composes the real desktop (`wsysd` +
+`hamdesktop` + `hampanelscene`), then: an evdev click on the Applications
+button grows the panel window 26 → 206 px and paints the card (**87%** of the
+card column is the dropdown body `#f7f8fa`); a second click closes it (back to
+26 px, 0%); a click on the first desktop icon selects it (**59%** of the cell
+is `#3584e4`); a click on the second icon MOVES the selection (65% / 0%), so it
+cannot be satisfied by a desktop that highlighted everything at startup; and a
+click whose move/press/release arrive in ONE evdev read still opens the menu.
+Two controls run before any click at all: 0% card, 0% selection.
+
+**Two revert arms, both run.** Drop the `route_pointer_event` call from
+`deliver_pointer`: **6 PASS / 7 FAIL**, the panel still 1280x26 and the icon
+0% selected after a full click. Drop only the button-edge flush from
+`pump_input`: **12 PASS / 1 FAIL**, and the one that fails is the single-read
+click — which is why that assertion is in the file rather than assumed.
 
 ### Running it
 
