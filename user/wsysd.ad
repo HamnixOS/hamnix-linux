@@ -171,6 +171,7 @@ extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
 extern def sys_exit(code: uint64)
 extern def hamwsys_wake_listen() -> int32
 extern def hamwsys_wake_drain()
+extern def hamfb_frame_us() -> int32
 extern def hamfb_attach_scanout(dmabuf_fd: int32, w: uint32, h: uint32,
                                 pitch: uint32) -> int32
 extern def hamfb_probe_mode(w: Ptr[uint32], h: Ptr[uint32]) -> int32
@@ -2194,6 +2195,8 @@ def bench_live_dump():
     putd(2, vk_frames_gpu)
     puts(2, " refused ")
     putd(2, cast[int32](vk_refused))
+    puts(2, " capped ")
+    putd(2, cast[int32](n_capped))
     if t_loop_n > 0:
         puts(2, " | iters ")
         putd(2, cast[int32](t_loop_n))
@@ -3176,6 +3179,68 @@ def fd_is_waitable(fd: int32) -> int32:
 
 wake_fd: int32 = -1
 
+# ====================================================================
+# THE PRESENT CAP: do not draw faster than the screen can show
+# ====================================================================
+# Wake-on-client removed the pacing, and the frame rate went where the work
+# allowed: a drag measured 434 fps on the software path and 910 on scanout,
+# burning 99.9% of a core to render frames at a display that shows 60. That is
+# not a win, it is a power bug with a flattering number attached, and it is the
+# one thing standing between this loop and being a sensible default.
+#
+# frame_us comes from hamfb_frame_us() -- the mode ACTUALLY SET, not a
+# constant, so a 144 Hz panel paces at 144 Hz and there is only ever one notion
+# of frame time in the system. It is 0, meaning uncapped, offscreen under
+# HAMFB_FILE (so every gate keeps measuring the compositor rather than a rate
+# limiter, and the banked fps numbers stay comparable), on fbdev, and whenever
+# the mode carries no usable timing.
+frame_us:     int32 = 0
+last_paint_us: uint64 = 0
+paint_defer:  int32 = 0        # a frame is owed and was held back
+n_capped:     uint64 = 0       # frames the cap coalesced away
+
+
+# May we present now? The rule is deliberately NOT "wait for the next frame
+# boundary": it is "only hold back a frame that would land inside the SAME
+# frame interval as the last one".
+#
+# THE FIRST PRESENT AFTER A QUIET PERIOD IS NEVER DELAYED, and that is the
+# whole design constraint rather than a nicety. A click, a keystroke, the first
+# pixel of a drag -- these arrive after the compositor has been idle, so
+# now - last_paint is large, and this returns 1 immediately. Adding even one
+# frame time to those would undo the 0.28 ms input-to-pixel result on exactly
+# the interactions people notice, to save power that an idle desktop was not
+# spending anyway. Only the SECOND and subsequent frames of a continuous
+# animation are ever held, which is precisely where the wasted 850 fps was.
+def present_due() -> int32:
+    if frame_us <= 0:
+        return 1
+    now: uint64 = now_us()
+    if now < last_paint_us:
+        return 1
+    if now - last_paint_us >= cast[uint64](frame_us):
+        return 1
+    return 0
+
+
+# How long the loop may park. Normally the fallback; but when a frame is owed,
+# only until the frame boundary that lets it out -- otherwise a held frame
+# would sit unpainted until the next input or client poke, and a drag that
+# stopped moving would leave the screen one frame stale.
+def wait_ms_now() -> int64:
+    if paint_defer == 0 or frame_us <= 0:
+        return WAIT_FALLBACK_MS
+    now: uint64 = now_us()
+    if now < last_paint_us:
+        return 0
+    d: uint64 = now - last_paint_us
+    if d >= cast[uint64](frame_us):
+        return 0
+    left: int64 = cast[int64]((cast[uint64](frame_us) - d) / 1000) + 1
+    if left > WAIT_FALLBACK_MS:
+        return WAIT_FALLBACK_MS
+    return left
+
 
 def build_waitset():
     n_wait = 0
@@ -3706,6 +3771,37 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if vk_scanout == 0:
         vk_arm()
 
+    # THE DISPLAY'S FRAME TIME, read after the framebuffer exists -- which is
+    # after vk_arm_scanout() or read_screen(), because both establish the mode
+    # this is derived from. 0 here means uncapped and says why.
+    frame_us = hamfb_frame_us()
+    # An A/B switch, because the cap's whole justification is a POWER number
+    # and a power number needs the uncapped arm to compare against on the same
+    # hardware in the same run. It also gives a machine whose mode timing is
+    # wrong a way out without a rebuild.
+    if env_flag(cast[Ptr[char]]("HAMNIX_WSYSD_NOCAP")) == 1:
+        frame_us = 0
+        puts(1, "wsysd: present cap disabled by HAMNIX_WSYSD_NOCAP\n")
+    # FORCE a cap where there would be none. This exists so the claim that
+    # matters most -- that the cap never delays the first present after a
+    # quiet period -- can be TESTED by the ordinary offscreen latency harness,
+    # which is uncapped by design and therefore could not otherwise exercise
+    # the rule at all. Without this the rule would only ever be argued.
+    fcap: int32 = env_int(cast[Ptr[char]]("HAMNIX_WSYSD_CAP_US"))
+    if fcap > 0:
+        frame_us = fcap
+        puts(1, "wsysd: present cap FORCED to ")
+        putd(1, frame_us)
+        puts(1, " us/frame by HAMNIX_WSYSD_CAP_US\n")
+    puts(1, "wsysd: present cap ")
+    if frame_us > 0:
+        putd(1, 1000000 / frame_us)
+        puts(1, " Hz (")
+        putd(1, frame_us)
+        puts(1, " us/frame, from the mode actually set)\n")
+    else:
+        puts(1, "OFF -- offscreen, fbdev, or no usable mode timing\n")
+
     # The live phase breakdown. Off unless asked for; see bench_live_dump.
     bench_live_every = env_int(cast[Ptr[char]]("HAMNIX_WSYSD_BENCH_LIVE"))
     if bench_live_every > 0:
@@ -3774,15 +3870,27 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         deliver_pointer()
         sig: uint64 = frame_signature()
         csig: uint64 = cursor_signature()
-        if sig != last_sig:
+        if sig != last_sig and present_due() != 0:
             last_sig = sig
             last_csig = csig
+            last_paint_us = now_us()
+            paint_defer = 0
             paint_frame()
             lat_record()
             n_frames = n_frames + 1
             idle = 0
             bench_live_tick()
-        elif csig != last_csig and vk_devcomp == 0:
+        elif sig != last_sig:
+            # Held back, NOT dropped: last_sig is deliberately left stale so
+            # this same change repaints on the next eligible iteration, with
+            # whatever the client has published by then. Coalescing several
+            # updates into one frame is the point -- the screen cannot show
+            # them separately.
+            paint_defer = 1
+            n_capped = n_capped + 1
+        elif csig != last_csig and vk_devcomp == 0 and present_due() != 0:
+            last_paint_us = now_us()
+            paint_defer = 0
             # Only the pointer moved: restore what the cursor covered, stamp it
             # at the new place, and push just those rows. No window is read,
             # rasterized or copied.
@@ -3797,6 +3905,9 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             bench_live_tick()
             n_frames = n_frames + 1
             n_curframes = n_curframes + 1
+        elif csig != last_csig and vk_devcomp == 0:
+            paint_defer = 1
+            n_capped = n_capped + 1
             idle = 0
         else:
             idle = idle + 1
@@ -3812,5 +3923,5 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # rather than a wait for the next tick. n_wait is 0 only if every fd
         # was rejected as always-ready, and then this is the old plain sleep,
         # which is the right thing to degrade to.
-        sys_waitfds(&waitset[0], n_wait, WAIT_FALLBACK_MS)
+        sys_waitfds(&waitset[0], n_wait, wait_ms_now())
     return 0
