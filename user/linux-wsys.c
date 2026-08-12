@@ -2371,6 +2371,10 @@ uint32_t hamwsys_input_gen(void)
     return __atomic_load_n(&shm->inputgen, __ATOMIC_ACQUIRE);
 }
 
+/* THE PIXEL HAND-UP'S HEARTBEAT.  See linux-wsys.h for why the PARK is where
+ * this has to be called from, and pix_tick below for what it does. */
+void hamwsys_tick(void) { pix_tick(); }
+
 /* Sleep until the input generation moves off `seen`, or `timeout_ms` elapses
  * (negative = forever).  Returns 0 always; the caller re-checks its rings. */
 int hamwsys_input_wait(uint32_t seen, int64_t timeout_ms)
@@ -3149,6 +3153,34 @@ static void pix_install(int32_t wid, int fd)
         return;
     }
     pixmap_n++;
+    /* TELL THE COMPOSITOR THERE IS SOMETHING NEW TO PAINT, and this line is
+     * the whole difference between a window and a blank rectangle.
+     *
+     * wsysd repaints when shm->gen moves and not otherwise -- that is what
+     * makes an idle desktop cost nothing (tests/linux/de_idle_cpu.sh).  A
+     * hand-up that arrives AFTER the frame in which the window was refused
+     * therefore changes nothing anybody looks at: the descriptor is held, the
+     * display list is readable, and no frame is ever drawn again.  Measured:
+     * hamimgscene came up, uploaded its photograph, parked, handed its
+     * descriptor over -- and the screen stayed empty, with ONE line on wsysd's
+     * stderr and three seconds of nothing after it.
+     *
+     * Receiving a window's pixels for the first time IS a change to what this
+     * process renders, so it belongs on the same counters as every other one.
+     *
+     * AND IT IS THE ROW'S scene_gen THAT HAS TO MOVE, not just shm->gen, which
+     * cost a second run to find out: user/wsysd.ad's frame_signature() is an
+     * FNV hash over the WINDOWS -- geometry, z, title, scene_gen, bbgen, imggen
+     * -- and shm->gen is not in it at all.  Bumping only the segment counter
+     * moved a number nothing was watching.  scene_gen is the right one on its
+     * meaning as well as its effect: this row was advertising a frame that
+     * could not be fetched and now advertises one that can, which from every
+     * reader's side is a new frame. */
+    if (shm) {
+        struct wwin *v = win_find(wid);
+        if (v) v->scene_gen++;
+        shm->gen++;
+    }
 }
 
 /* Drain the accept queue.  Called before any read of a foreign window's scene,
@@ -3285,7 +3317,7 @@ static uint64_t pix_now_ms(void)
 
 static void pix_tick(void)
 {
-    if (!pixmap_n) return;
+    if (!pixmap_n && pix_listen_fd < 0) return;
     uint64_t now = pix_now_ms();
     if (now < pix_next_tick) return;
     pix_next_tick = now + PIX_RETRY_MS;
@@ -3294,6 +3326,21 @@ static void pix_tick(void)
         pix_handup_one(i);
         pixmap[i].due = now + (pixmap[i].handed ? PIX_REANN_MS : PIX_RETRY_MS);
     }
+    /* AND THE RECEIVING SIDE, ON THE SAME SEAM, BECAUSE THE TWO DEADLOCKED.
+     *
+     * Draining only from the scene-read path looks sufficient and is not, and
+     * the failure is a cycle rather than an omission: wsysd repaints when
+     * shm->gen moves, reads a scene only when it repaints, and drained only
+     * when it read a scene -- so a descriptor that arrives after the frame in
+     * which the window was refused is never accepted, nothing bumps gen,
+     * nothing repaints, and nothing drains.  The window is blank for ever with
+     * ONE line on stderr.  Measured, with hamimgscene: the client's second
+     * hand-up connected and succeeded, and the compositor never accepted it.
+     *
+     * The park breaks it because the park is the one thing both sides do while
+     * idle.  An accept4 on an empty non-blocking queue is a single failed
+     * syscall twice a second. */
+    pix_drain();
 }
 
 /* THE ONE LOOKUP EVERY SCENE OPERATION GOES THROUGH.  `mine` asks for a window
