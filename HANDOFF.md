@@ -172,10 +172,49 @@ Re-measured by running, `docs/linux_build_count.md`:
 
 The clipboard finding that fell out of it is in the HONESTLY BROKEN list below.
 
+### `modprobe` works now, and two things it found on the way
+
+`modprobe <name>` resolves a name to a module and loads its dependencies in
+order. It could not before: **no `modules.dep` was generated anywhere on this
+port** (`docs/runsweep_unhealthy.md` Kind 1), so `insmod /abs/path.ko` -- which
+resolves nothing -- was the only thing that worked. On a stock Debian kernel
+every graphics, filesystem and network driver is a module, so on real hardware
+that was the difference between a machine and a black screen.
+
+* The table is the build host's `depmod -b $ROOT $KVER` run over the modules
+  `scripts/hamlinux_image.sh` stages; the GPU driver packages append their own
+  lines from their install hook, because a table baked at image build time is
+  stale the moment `hpm install` lands a new `.ko`. `user/hlinstall.ad`'s
+  `copy_top("lib")` carries the file onto an installed disk.
+* Gate: `tests/linux/modprobe_deps.sh` -- **32 PASS / 0 FAIL**, and **12/19
+  with the change reverted**. It loads `bridge` -> `stp` -> `llc` in a VM and
+  reads the result out of `/proc/modules`, not out of an exit code.
+
+TWO THINGS IT FOUND, both of the shape this project exists to beat:
+
+* **`user/lsmod.ad` printed a fixed `kmod_hello` row on every machine and
+  exited 0** -- and it is the tool anyone reaches for to CHECK a modprobe, so
+  it would have certified a modprobe that loaded nothing. It reads
+  `/proc/modules`.
+* **hamsh dropped a redirect whose target contained a `+`, silently.**
+  `echo X >> /lib/modules/6.12.85+deb13-amd64/modules.dep` wrote to a file
+  called `/lib/modules/6.12.85`, left the named file untouched, handed the
+  rest of the path to `echo` as an argument, and exited 0. The lexer splits a
+  bare word at `+`; the ARGUMENT path has fused such runs with
+  `_glue_adjacent()` for a long time and the four redirect-target sites did
+  not. Every Debian kernel release has a `+` in it, so this was every `>>`
+  into `/lib/modules/<release>/` on this port.
+
 ### What is HONESTLY BROKEN right now
 
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
+
+* **`tail FILE` wedges the shell.** Measured in the guest during the gate
+  above: `tail /lib/modules/<release>/modules.dep` never returned and the VM
+  sat there until the host timeout took it away. `cat` on the same file is
+  fine. Not investigated -- named here so the next person does not lose the
+  afternoon to it that this one nearly did.
 
 * **THE `hamnix-desktop` PACKAGE ON https://255.one/ RIGHT NOW IS A MIXED
   BUILD, AND A MACHINE THAT UPDATES TO IT LOSES ITS DESKTOP.** Measured, on an
