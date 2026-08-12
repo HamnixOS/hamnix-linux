@@ -402,15 +402,35 @@ fi
 # the guest can read mentions the package. The ONLY difference from the real
 # 1.0.12 channel is the version numbers on everything else.
 say "removing $DRVPKG from the original-install channel (modelling pre-1.0.13)"
-REPO="$REPO" DRV="$DRVPKG" PKG="$PKG" OLDVER="$OLDVER" python3 <<'PY' \
+REPO="$REPO" DRV="$DRVPKG" PKG="$PKG" OLDVER="$OLDVER" \
+REUSE="${HAMLINUX_MODUPD_REUSE:-0}" python3 <<'PY' \
     || { echo "FAIL: could not strip $DRVPKG from the local channel"; exit 1; }
-import hashlib, io, json, os, tarfile
+import hashlib, io, json, os, sys, tarfile
 repo, drv, pkg, ver = (os.environ["REPO"], os.environ["DRV"],
                        os.environ["PKG"], os.environ["OLDVER"])
 lin = os.path.join(repo, "linux")
 tarpath = os.path.join(lin, "packages", "%s-%s.tar.gz" % (drv, ver))
 if os.path.exists(tarpath):
     os.unlink(tarpath)
+elif os.environ.get("REUSE") == "1":
+    # ALREADY STRIPPED BY A PREVIOUS RUN OF THIS FILE. Under REUSE the channel
+    # is the one this step already prepared, and stripping is idempotent by
+    # nature -- the state it is trying to reach is "the package is not there".
+    # Say so and check it rather than either refusing (a re-run of a negative
+    # control would be impossible) or assuming (this is the file the whole
+    # measurement stands on).
+    index = json.load(open(os.path.join(lin, "index.json")))
+    stale = [e["name"] for e in index["packages"] if e["name"] == drv]
+    dep = [t for e in index["packages"] if e["name"] == pkg
+             for t in e.get("depends", [])
+             if t.split(">")[0].split("=")[0] == drv]
+    if stale or dep:
+        raise SystemExit("%s is missing from the channel's packages but is "
+                         "still named in the index (entry=%s depends=%s) -- "
+                         "that is a half-stripped channel, not a reusable one"
+                         % (drv, stale, dep))
+    print("(the channel was already stripped of %s by an earlier run)" % drv)
+    sys.exit(0)
 else:
     raise SystemExit("the local channel had no %s to remove -- it was never "
                      "built, so this run would not be modelling anything" % drv)
