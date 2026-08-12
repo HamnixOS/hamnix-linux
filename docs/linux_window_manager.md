@@ -487,6 +487,29 @@ comes up managed and empty with no error anywhere.
 decorated Hamnix windows carrying two X clients from one Xwayland, one of them
 where the compositor put it.
 
+**And it is a frame of the DESKTOP, which it was not.** The first version of
+that screenshot showed the two windows on a bare compositor — no wallpaper, no
+icons, no panel — because the gate composed `wsysd` plus the two clients and
+nothing else. The machine owner spotted it. That proved the windows *exist*;
+it said nothing about whether they *work on the desktop*, which is the only
+claim worth making, and the difference is not hypothetical: ea23c834 fixed a
+bug in which `hamdesktop`'s backdrop painted over every ordinary client window
+for the whole port, with every return code 0 and the taskbar still listing the
+windows it was covering. `tests/linux/wsyswl_rootless.sh` now composes the
+real DE — the same `wsysd` + `hamdesktop` + `hampanelscene` composition
+`tests/linux/wsys_desktop_z.sh` uses — and asserts that an X window out of a
+namespace is a **first-class window on it**, each assertion a relationship
+between two things on the screen rather than a coordinate:
+
+| | measured |
+|--|--|
+| over the wallpaper | the X client's rectangle is **0%** its own colour on the bare desktop and **96%** with the client up — the "before" half is what makes it evidence |
+| the desktop survives it | a strip of wallpaper beside the windows is **100%** unchanged from the bare-desktop frame |
+| under the panel | driven up to straddle the bar with the compositor's own `geometry` verb: **0%** of the bar is the window, **98%** of the window clear of the bar |
+| in the taskbar, by its X name | `/dev/wsys/windows` reads `5 alpha` / `6 beta` — the names the X clients set in `WM_NAME`, carried through the XWM onto the wsys window and read by `hampanelscene`'s taskbar |
+
+29 PASS (was 23), still offscreen, still about a minute, still no VM.
+
 ### Two things had to be measured because reading was not enough
 
 **`CompositeRedirectSubwindows(root, Manual)` is the request without which the

@@ -256,10 +256,103 @@ def _upload_image(wid: int32) -> int32:
     return 0
 
 
+# ---- the window's OWN size ----------------------------------------------
+#
+# THE WINDOW IS AS BIG AS WHAT IS PAINTED, AND IT IS THIS CLIENT THAT SAYS SO.
+#
+# This used to write no `geometry` verb at all, and the black rectangle the
+# machine owner spotted in docs/screenshots/linux/wsys-image-on-desktop.png
+# — the bottom half and the right half of the window — was the whole of the
+# defect: `win_alloc` in user/linux-wsys.c hands EVERY new window a default
+# 640x480 at (120,90), this scene fills 320x260, and user/wsysd.ad clears a
+# window's colour image to opaque black before rasterizing and then blits the
+# WHOLE w*h rect to the screen. So 640x480 minus 320x260 was never painted by
+# anybody and reached the framebuffer as black. Nothing failed: the app was
+# drawing exactly what it meant to draw, into a window twice the size it had
+# ever asked for.
+#
+# WHY THE CLIENT AND NOT THE SERVER. A window's size is the client's to state
+# — the Plan 9 shape, and devwsys's: sys/src/9/port/devwsys.ad keeps
+# `wsys_win_geo_init` per window and answers 0x0 as WSYS_SCENE_DEFAULT_W/H
+# (320x240, NOT 640x480) for a window that never said. A default is not an
+# answer, and a client that knows its content size and does not say it is
+# relying on the server to guess right.
+#
+# These two constants are the SINGLE source of both the geometry verb and the
+# background fill below, so the window and its paint cannot drift apart the
+# way they had.
+SCENE_W: int32 = 320
+SCENE_H: int32 = 260
+SCENE_X: int32 = 120
+SCENE_Y: int32 = 90
+
+geo_buf: Array[64, uint8]
+
+
+def _geo_dec(pos: uint64, v: int32) -> uint64:
+    # Append v (>= 0) as decimal at geo_buf[pos]; return the new position.
+    if v == 0:
+        geo_buf[pos] = 48
+        return pos + 1
+    digs: Array[16, uint8]
+    n: uint64 = 0
+    u: uint32 = cast[uint32](v)
+    while u > 0:
+        digs[n] = cast[uint8](u % 10) + 48
+        u = u / 10
+        n = n + 1
+    p: uint64 = pos
+    while n > 0:
+        n = n - 1
+        geo_buf[p] = digs[n]
+        p = p + 1
+    return p
+
+
+def _set_geometry(wid: int32) -> int32:
+    # "geometry <x> <y> <w> <h>\n".  All FOUR are stated: user/linux-wsys.c's
+    # ctl_window takes a non-positive w or h as "leave that dimension alone",
+    # so a partial geometry silently keeps the 640x480 this is here to correct.
+    pre: Ptr[uint8] = cast[Ptr[uint8]]("geometry ")
+    p: uint64 = 0
+    i: uint64 = 0
+    while pre[i] != 0:
+        geo_buf[p] = pre[i]
+        p = p + 1
+        i = i + 1
+    p = _geo_dec(p, SCENE_X)
+    geo_buf[p] = 32
+    p = p + 1
+    p = _geo_dec(p, SCENE_Y)
+    geo_buf[p] = 32
+    p = p + 1
+    p = _geo_dec(p, SCENE_W)
+    geo_buf[p] = 32
+    p = p + 1
+    p = _geo_dec(p, SCENE_H)
+    geo_buf[p] = 10
+    p = p + 1
+    _wpath(wid, cast[Ptr[uint8]]("ctl"))
+    fd: int32 = sys_open_write(cast[Ptr[char]](&path_buf[0]))
+    if fd < 0:
+        _puts(2, "[hamimgscene] FATAL: cannot open ")
+        _puts(2, &path_buf[0])
+        _puts(2, " to state this window's size; it would stay at the compositor default and paint a black margin\n")
+        return -1
+    w: int64 = sys_write(fd, &geo_buf[0], p)
+    sys_close(fd)
+    if w < cast[int64](p):
+        _puts(2, "[hamimgscene] FATAL: the geometry verb was refused, rc=")
+        _puti(2, w)
+        _puts(2, "\n")
+        return -1
+    return 0
+
+
 # ---- scene build + commit ------------------------------------------------
 def _build_scene():
     hamscene_begin()
-    hamscene_fill(0, 0, 320, 260, cast[Ptr[uint8]]("#202830"))
+    hamscene_fill(0, 0, SCENE_W, SCENE_H, cast[Ptr[uint8]]("#202830"))
     hamscene_glyphs_bold(12, 20, cast[Ptr[uint8]]("Image demo (#128)"),
                          cast[Ptr[uint8]]("#e8e8e8"))
     hamscene_glyphs(12, 44, cast[Ptr[uint8]]("natural 32x32:"),
@@ -291,6 +384,8 @@ def main() -> int32:
     if wid < 0:
         _puts(2, "[hamimgscene] FATAL: /dev/wsys/ctl gave no window id; is the compositor up?\n")
         return 1
+    if _set_geometry(wid) < 0:
+        return 4
     if _upload_image(wid) < 0:
         return 2
     _build_scene()

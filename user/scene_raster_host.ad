@@ -5,7 +5,23 @@
 # scripts/test_de_scene_opt_host.sh to VIEW that the DE scene renders NON-BLANK
 # under --opt (the "scene-DE-blank" regression guard).
 #
-#   scene_raster_host <in.dl> <out.ppm>
+#   scene_raster_host <in.dl> <out.ppm> [w h]
+#
+# IT ALSO ANSWERS THE COVERAGE QUESTION. Given the window size the display
+# list was committed INTO, it reports whether the list actually covers it --
+# see the block on lib/hamui_host.ad's per-row coverage for why that is a
+# question worth asking. user/wsysd.ad clears a window's colour image to
+# opaque black and then blits the WHOLE w*h rect, so every row a scene leaves
+# short reaches the framebuffer as black. Two such windows were found in this
+# tree by a human looking at a screenshot (hamimgscene painting 320x260 of a
+# 640x480 window; the panel's Applications dropdown painting a 136 px menu
+# column into a full-width window), and a human's eye is not a gate. The
+# verdict line is machine-readable and states BOTH numbers:
+#
+#   scene_raster_host: COVERS <w>x<h>
+#   scene_raster_host: UNCOVERED <n> of <h> rows -- the scene covers <cw>x<ch>
+#                      of a <w>x<h> window; the rest reaches the screen as
+#                      unpainted black
 
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
@@ -15,10 +31,45 @@ extern def sys_close(fd: int32) -> int32
 
 from lib.hamscene import hamscene_load
 from lib.hamui_host import hamui_host_begin, hamui_host_rasterize, \
-    hamui_host_ppm_header, hamui_host_fb_ptr, hamui_host_fb_bytes
+    hamui_host_ppm_header, hamui_host_fb_ptr, hamui_host_fb_bytes, \
+    hamui_host_uncovered_rows, hamui_host_covered_w, hamui_host_covered_h, \
+    hamui_host_width, hamui_host_height
 
 dlbuf: Array[16384, uint8]
 ppm_hdr: Array[64, uint8]
+decbuf: Array[24, uint8]
+
+
+def _puti(fd: int32, v: int32):
+    if v < 0:
+        sys_write(fd, cast[Ptr[uint8]]("-"), 1)
+        v = 0 - v
+    if v == 0:
+        decbuf[0] = 48
+        sys_write(fd, &decbuf[0], 1)
+        return
+    tmp: Array[24, uint8]
+    n: uint64 = 0
+    u: uint32 = cast[uint32](v)
+    while u > 0:
+        tmp[n] = cast[uint8](u % 10) + 48
+        u = u / 10
+        n = n + 1
+    p: uint64 = 0
+    while n > 0:
+        n = n - 1
+        decbuf[p] = tmp[n]
+        p = p + 1
+    sys_write(fd, &decbuf[0], p)
+
+
+def _parse_dim(s: Ptr[uint8]) -> int32:
+    v: int32 = 0
+    i: uint64 = 0
+    while s[i] >= 48 and s[i] <= 57:
+        v = v * 10 + cast[int32](s[i]) - 48
+        i = i + 1
+    return v
 
 
 def _slen(s: Ptr[uint8]) -> uint64:
@@ -58,9 +109,45 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         _puts(2, "scene_raster_host: the display list is EMPTY -- rasterizing it would produce a blank PPM and call it a render\n")
         return 1
 
+    # The window size the list was committed INTO. 800x600 is what every
+    # existing caller got before this argument existed and is kept as the
+    # default so those gates are unchanged.
+    rw: int32 = 800
+    rh: int32 = 600
+    if argc >= 5:
+        rw = _parse_dim(cast[Ptr[uint8]](argv[3]))
+        rh = _parse_dim(cast[Ptr[uint8]](argv[4]))
+        if rw < 1 or rh < 1:
+            _puts(2, "scene_raster_host: w and h must both be positive\n")
+            return 2
+
     hamscene_load(&dlbuf[0], total)
-    hamui_host_begin(800, 600)
+    hamui_host_begin(rw, rh)
     hamui_host_rasterize()
+
+    # THE COVERAGE VERDICT. Printed for every run, so a gate can read it and a
+    # human reading a build log sees it without asking.
+    unc: int32 = hamui_host_uncovered_rows()
+    if unc == 0:
+        _puts(1, "scene_raster_host: COVERS ")
+        _puti(1, hamui_host_width())
+        _puts(1, "x")
+        _puti(1, hamui_host_height())
+        _puts(1, "\n")
+    else:
+        _puts(1, "scene_raster_host: UNCOVERED ")
+        _puti(1, unc)
+        _puts(1, " of ")
+        _puti(1, hamui_host_height())
+        _puts(1, " rows -- the scene covers ")
+        _puti(1, hamui_host_covered_w())
+        _puts(1, "x")
+        _puti(1, hamui_host_covered_h())
+        _puts(1, " of a ")
+        _puti(1, hamui_host_width())
+        _puts(1, "x")
+        _puti(1, hamui_host_height())
+        _puts(1, " window; the rest reaches the screen as unpainted black\n")
 
     ofd: int32 = sys_open_write(cast[Ptr[char]](argv[2]))
     if ofd < 0:

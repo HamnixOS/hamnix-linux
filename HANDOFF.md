@@ -32,7 +32,7 @@ rather than argued:
 | Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1. **The update loop is proven end to end**: install at 1.0.2 from the live repo, a newer build lands, `hpm update`, the upgraded binary still runs. No re-image anywhere in it. |
 | Wayland | `user/wsyswl.ad`, a Wayland compositor in Adder. Firefox runs as a native Wayland client with its menus as separate windows; XWayland carries X11 clients. |
 | Windows *inside* a namespace | `jwm`, the same one and the same configuration (`etc/jwmrc.linux` → `/etc/jwm/hamnix.jwmrc`) in Debian and Alpine. Reparenting, a real title bar, 66 `_NET_SUPPORTED` atoms, `_NET_WORKAREA` the full screen, no D-Bus and no settings daemon. `xdotool` move and resize both take effect and the client stays `IsViewable`, for `xterm` and for Firefox; **Steam's `Sign in to Steam` is `IsViewable` at 700x440+290+180 and in `_NET_CLIENT_LIST`** where matchbox left it `IsUnMapped`. It costs **0.5 MiB and one new package** in Debian (Firefox had already installed all sixteen of its dependencies) and **+28.5 MiB** in the *graphical* Alpine image, measured by building it both ways; `HAMLINUX_ALPINE_GUI=0` is still 26 MiB. `docs/linux_window_manager.md` has the table for every candidate, including why openbox — the most EWMH-complete of them — costs 57.9 MiB here, and why **rootless Xwayland** is the better long-term answer and its own piece of work. |
-| Rootless Xwayland | **An X window is a file now, and the desktop can move one.** `HAMNIX_X11_WM=rootless` is a THIRD session arm; `jwm` is still the default and the rootful path is byte-for-byte unchanged (with `WSYSWL_XWM` unset, `xwayland_shell_v1` is not advertised, no X connection is dialled, and the commit path takes the branch it always took). Under rootful an entire X session is ONE `wl_surface` and therefore ONE wsys window -- `windows_high_water 1` for a whole Steam session -- so the desktop can move that rectangle and nothing inside it, which is the only reason a namespace needs `jwm` at all. `user/wsyswl.ad` now carries `xwayland_shell_v1` AND an X11 window manager inside the compositor: an X wire-protocol client (the shape `user/xsnarfd.ad` proved) holding `SubstructureRedirect` on the root, mapping what it redirects, granting `ConfigureRequest`s, and titling from `WM_NAME`/`_NET_WM_NAME` (the name is set on the wsys window where a window list would read it; it is NOT visible, because `wsysd`'s decoration paints no text on a title bar for ANY window -- checked with a 4x crop of the bar, not assumed). **Measured: two `xterm`s on one rootless Xwayland are TWO wsys windows** -- wids 2 and 3, `windows_high_water 2`, `xwl_paired 2`, every drop counter 0 -- and moving one with the compositor's own `geometry` verb leaves the other where it was, in the table AND in the framebuffer (97% / 96% of their rectangles). The control is in the same script: the same two clients rootful are ONE window. `tests/linux/wsyswl_rootless.sh` (23 PASS, offscreen, a minute, no VM), `docs/screenshots/linux/rootless-two-x-windows.png`, `docs/linux_window_manager.md` §8b. **NOT a shared-fate claim** -- `conns` is still 1 and the test asserts it. **Two things had to be measured because reading was not enough**: `CompositeRedirectSubwindows(root, Manual)` is the request without which the whole thing is a no-op (Xwayland only makes a surface for a redirected window and redirects nothing itself -- `xwl_managed 2, commits 0` was the reading), and the serial does NOT arrive as the `WL_SURFACE_SERIAL` property the protocol description implies but as a ClientMessage to the root, with and without a `-wm` fd. **What is staged, not built**: `WM_DELETE_WINDOW` (a title-bar close destroys the window and leaves the client running), compositor move/resize pushed back as `ConfigureNotify`, all EWMH, `WM_TRANSIENT_FOR`, and override-redirect menus following a moved parent. **And the prerequisite for making it the default**: `WINPERCONN` is 8 and `user/linux-wsys.c`'s `BB_SLOTS` is 8 FOR THE WHOLE MACHINE -- rootful spends one slot on an entire X session, rootless one per toplevel, so nine X windows in a namespace would exhaust the paint pool for the desktop, Firefox included. |
+| Rootless Xwayland | **An X window is a file now, and the desktop can move one.** `HAMNIX_X11_WM=rootless` is a THIRD session arm; `jwm` is still the default and the rootful path is byte-for-byte unchanged (with `WSYSWL_XWM` unset, `xwayland_shell_v1` is not advertised, no X connection is dialled, and the commit path takes the branch it always took). Under rootful an entire X session is ONE `wl_surface` and therefore ONE wsys window -- `windows_high_water 1` for a whole Steam session -- so the desktop can move that rectangle and nothing inside it, which is the only reason a namespace needs `jwm` at all. `user/wsyswl.ad` now carries `xwayland_shell_v1` AND an X11 window manager inside the compositor: an X wire-protocol client (the shape `user/xsnarfd.ad` proved) holding `SubstructureRedirect` on the root, mapping what it redirects, granting `ConfigureRequest`s, and titling from `WM_NAME`/`_NET_WM_NAME` (the name is set on the wsys window where a window list would read it; it is NOT visible, because `wsysd`'s decoration paints no text on a title bar for ANY window -- checked with a 4x crop of the bar, not assumed). **Measured: two `xterm`s on one rootless Xwayland are TWO wsys windows** -- wids 2 and 3, `windows_high_water 2`, `xwl_paired 2`, every drop counter 0 -- and moving one with the compositor's own `geometry` verb leaves the other where it was, in the table AND in the framebuffer (97% / 96% of their rectangles). The control is in the same script: the same two clients rootful are ONE window. `tests/linux/wsyswl_rootless.sh` (**29 PASS**, offscreen, a minute, no VM), `docs/screenshots/linux/rootless-two-x-windows.png`, `docs/linux_window_manager.md` §8b. **AND IT IS PROVEN ON THE ACTUAL DESKTOP, WHICH IT WAS NOT.** The gate composed `wsysd` plus the two clients and nothing else, so the screenshot showed two X windows on a black screen -- no wallpaper, no icons, no panel -- and the machine owner spotted it. That proved the windows EXIST and said nothing about whether they WORK on the desktop, which is not a hypothetical distinction: ea23c834 fixed a bug in which hamdesktop's backdrop painted over EVERY ordinary client window for the whole port with every return code 0. The gate now composes the real DE -- the same `wsysd` + `hamdesktop` + `hampanelscene` composition `tests/linux/wsys_desktop_z.sh` uses -- and asserts an X window from a namespace is first-class ON it: **over the wallpaper** (its rectangle is 0% its own colour on the bare desktop and 96% with the client up), **the wallpaper survives it** (100% of a strip beside the windows unchanged), **under the panel** (driven up to straddle the bar with the compositor's own `geometry` verb: 0% of the bar is the window, 98% of the window clear of it), and **in the taskbar by its X name** (`/dev/wsys/windows` reads `5 alpha` / `6 beta`, the names the X clients set in `WM_NAME`). **NOT a shared-fate claim** -- `conns` is still 1 and the test asserts it. **Two things had to be measured because reading was not enough**: `CompositeRedirectSubwindows(root, Manual)` is the request without which the whole thing is a no-op (Xwayland only makes a surface for a redirected window and redirects nothing itself -- `xwl_managed 2, commits 0` was the reading), and the serial does NOT arrive as the `WL_SURFACE_SERIAL` property the protocol description implies but as a ClientMessage to the root, with and without a `-wm` fd. **What is staged, not built**: `WM_DELETE_WINDOW` (a title-bar close destroys the window and leaves the client running), compositor move/resize pushed back as `ConfigureNotify`, all EWMH, `WM_TRANSIENT_FOR`, and override-redirect menus following a moved parent. **And the prerequisite for making it the default**: `WINPERCONN` is 8 and `user/linux-wsys.c`'s `BB_SLOTS` is 8 FOR THE WHOLE MACHINE -- rootful spends one slot on an entire X session, rootless one per toplevel, so nine X windows in a namespace would exhaust the paint pool for the desktop, Firefox included. |
 | Shared fate between clients | **Measured, and the received answer was wrong.** `windows_high_water 1` said a rootful X session is one surface, and §8 concluded rootless would give each X toplevel its own limits. It would not: `MAXMAP`, `MAXOBJ`, the frame-callback slice and the window budget are per **connection**, and **Xwayland opens exactly one connection rootful or rootless** — measured both ways, `conns 1` each. Rootless would also make the mapping table *grow* with window count where rootful holds it at 2 for any number of X clients (8 X windows, all resizing: still 2), and it would hit `BB_SLOTS = 8` — the whole system's v2 backbuffer pool, one slot per X toplevel instead of one per X session. What was actually shared and should not have been is now fixed in `user/wsyswl.ad`: the frame-callback table was ONE table of 64 for every client (a client taking the last slot silenced everyone else's initial-draw callback), `MAXWIN` was 12 for the whole server, and `MAXCONN` was 4 — fewer than two namespaces plus Firefox plus the chrome. Now `FCPERCONN`/`WINPERCONN` partitioned per connection with `MAXWIN >= MAXCONN * WINPERCONN` checked as arithmetic by the test, and `MAXCONN` 8. `tests/linux/wsyswl_shared_fate.sh` (18 PASS) and `docs/linux_window_manager.md` §8a. |
 | Debian | `enter debian { sh }` — bookworm on its own filesystem, amd64+i386. Works **from a uid-1001 desktop terminal**, and something inside can build a container (`bwrap --unshare-user`). The root switch is `MS_MOVE` + `chroot`, what `switch_root(8)` does: `pivot_root` returns EINVAL on an initramfs boot's unattached `rootfs`. `glxgears:i386` renders on the Hamnix desktop through XWayland → `wsyswl` → `wsysd` → `/dev/fb`. |
 | Distributions | **Two, at once, on the live boot AND on an installed disk.** `#distro/<name>` is a parameterised subtree server; `/etc/distros` maps a name to a medium **by ext4 volume label**, so which disk is `/dev/vda` cannot silently decide which distribution you entered. `enter alpine { … }` (musl, 3.24.1) and `enter debian { … }` (glibc, 12.15) both work in ONE boot from the console AND as uid 1001 — `tests/linux/two_namespaces.sh`, with a negative control that `/etc/alpine-release` is invisible inside Debian. An unprivileged process cannot open a block device to read a label, so `bind` falls back to the mount point the boot already posted the server at: **the name is what crosses the privilege boundary.** Alpine costs **26 MiB** without graphics, 333 MiB with; Debian is 4.5 GiB. Each has its own section in the DE application menu, named for it, driven from `/etc/distros` rather than from a compiled-in path. `etc/rc.boot.installed` sources the same generated `/etc/rc.distros` the live boot does, so `enter alpine` and `enter debian` survive a reboot into an installed system -- `tests/linux/installed_distros.sh`, the boot nobody had ever run. `docs/linux_distro_namespaces.md`. |
@@ -559,6 +559,17 @@ same failure this project exists to beat.
   over hamdesktop's backdrop), `wsys-image-video.png` (hamvideocore's `"frame"`,
   advancing), `wsys-image-hamsdl.png` (hamGame presents its ENTIRE surface as
   one named image, so for a hamSDL game the missing verb was the whole frame).
+  **The first version of that first screenshot carried a defect of its own and
+  the machine owner found it**: hamimgscene's window was a black rectangle
+  roughly twice the size of the picture in it, because the client never wrote a
+  `geometry` verb and took `win_alloc`'s 640x480 default while painting 320x260
+  — and `wsysd` clears a window to opaque black and blits the whole `w*h` rect,
+  so the difference reached the screen as black. Fixed in the client (a window
+  is as big as what is painted, and it is the client that says so; devwsys's own
+  default for a window that never asks is 320x240, not 640x480): black pixels
+  inside the window box **223883 → 0**, same run, before and after. The
+  screenshot is now the fixed one. **And the class is now gated rather than
+  eyeballed** — see THE COVERAGE GUARD below.
   Regressions re-run: `wsys_uidgate` PASS, `wsys_bypass` PASS, `wsyswl_stall`
   11, `wsyswl_shared_fate` 18, `x11_geom_probe` 9.
   **What is NOT settled**: launched from the VM's root console with
@@ -568,6 +579,61 @@ same failure this project exists to beat.
   share `/srv` with the session, which would give it a private window system —
   the failure shape `shm_attach` already names. It is a launch/namespace
   question, not an image one.
+
+#### THE COVERAGE GUARD, and the three clients still waiting on a verb
+
+A window whose scene does not cover it reaches the screen as a black
+rectangle: `user/wsysd.ad` clears a window's colour image to opaque black
+before rasterizing and then blits the whole `w*h` rect. The machine owner
+found **two** of these by looking at screenshots, weeks apart, and that is the
+detection mechanism the tree had. Every gate passed both times — the display
+lists were right, every op drew, every layer returned success.
+
+**The sweep found the class has exactly two causes, and only one of them is a
+client bug.**
+
+* **A client that never states its size** — `user/hamimgscene.ad`, and it was
+  the only one. Every other native scene client either writes a `geometry`
+  verb of its own or gets one from `lib/hamui.ad`'s `_h_win_setup`, which sets
+  `640x480` and whose root widget fills exactly that. `user/hamvideoselftest.ad`
+  creates a window and never paints, but it runs headless as `/init` with no
+  compositor and is correct as it stands. Fixed in the client, because a
+  window's size is the client's to state; that is the Plan 9 shape and
+  devwsys's, which keeps `wsys_win_geo_init` per window and answers
+  `WSYS_SCENE_DEFAULT_W/H` = **320x240** — not 640x480 — for one that never
+  said.
+* **A client whose window is DELIBERATELY larger than its paint, asking the
+  compositor for alpha-keyed present — and this port never implemented the
+  verb.** `sys/src/9/port/devwsys.ad:8085` documents `keyed 1` as existing for
+  exactly this, and names the client: *"a decorate-0 client (e.g.
+  hampanelscene) whose window rect is LARGER than the pixels it actually
+  paints — a panel that GROWS full-width to host an Applications dropdown,
+  then paints only the bar + the menu card and leaves the rest of the grown
+  band UNPAINTED"*. `user/hampanelscene.ad` already writes `keyed 1` on every
+  panel window it allocates, and says why in a comment quoting the same
+  user-reported symptom. **`user/linux-wsys.c` has no `keyed` and no `blend`,
+  an unknown ctl verb is ignored, and so the fix regressed silently in the
+  port** — the same shape and the same file as `background`/`pin`, which
+  ea23c834 found the same way. Three clients are waiting on it:
+  `hampanelscene` (`keyed`, the Applications dropdown — the black band in
+  `docs/screenshots/linux/distro-menu-debian.png`), `hamappmenu` (`keyed`, the
+  hover fly-out band), `hamshotui` (`blend`, the screenshot dim scrim, which
+  is currently an opaque black rectangle over the desktop it is meant to dim).
+  **This one is server-side and is NOT fixed here** — see the routing note.
+
+**And it is a gate now.** `lib/hamui_host.ad` — the rasterizer wsysd
+composites every window with — unions each painting op's destination rect into
+a per-row interval and answers `hamui_host_uncovered_rows()` /
+`_covered_w()` / `_covered_h()`. Like the image-miss table beside it the module
+is pure and cannot print: it records, the caller reports.
+`user/scene_raster_host.ad` takes an optional `[w h]` and prints the verdict
+naming both sizes. `tests/linux/wsys_cover.sh` (7 PASS, host-only, seconds)
+carries a positive control that a full-window fill and a full-window roundrect
+are **not** accused, both real defect shapes reproduced with their exact
+numbers, and the real panel's own `--scene-dump` asserted to cover its resting
+bar. The measure is a per-row **union** and therefore conservative: it never
+accuses a scene that is fine, and an interior hole with paint either side of
+it on one row is not reported. Said out loud rather than left to be found.
 * The run-sweep score is **297 healthy / 328 runnable**, re-measured end to
   end (`/home/david/.hamnix-build/sweep-a74b5560/{BEFORE,AFTER}/`), and the
   interesting part is the run BEFORE the fixes: **265 / 329, row for row
