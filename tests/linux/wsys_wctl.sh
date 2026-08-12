@@ -48,25 +48,18 @@
 # if hamui is ever pointed somewhere else, the probe stops mirroring it and
 # this gate says so instead of silently testing a path nobody uses.
 #
-# WHAT REACHING v2 DOES NOT BY ITSELF FIX, measured against a real hamui app so
-# nobody reads this gate's green as more than it is.  hambrowse, unmodified, on
-# a file:// page, A/B against a reverted tree (both arms built WHOLE -- /dev/wsys
-# is implemented in-process, linux-wsys.c is linked into every binary, so a
-# pre-fix arm needs a pre-fix BROWSER as well as a pre-fix compositor):
+# WHAT REACHING v2 DID NOT BY ITSELF FIX -- AND WHAT DID.  This paragraph used
+# to end "the browser is not painted either way", and that is no longer true, so
+# it is corrected rather than left standing.
 #
-#   pre-fix   ctl: 2 50 40 880 600 12 1 1 1 3 ...   proto = 1
-#   fixed     ctl: 2 50 40 880 600 12 1 1 2 4 ...   proto = 2
-#
-# and wsysd says "window 2 paints 880x0 of its 880x600 window" on BOTH arms.
-# The browser is not painted either way: the scene it commits covers no rows,
-# which is that diagnostic's own third case ("either the scene should cover its
-# window, or the window should be the size of the scene, or it wants keyed 1").
-# So the negotiation landing is necessary and NOT sufficient -- there is a
-# separate, older gap in the hamui paint path on this port, and it is not this
-# fix's to claim.  The one extra stderr line the fixed arm emits (the scene
-# hand-up's "neither owns window N nor holds its display list") was counted at
-# 3 s, 8 s and 15 s and stays at 1: the startup race the hand-up clock exists to
-# clear, not a state the window sits in.
+# Landing the negotiation moved hambrowse from proto=1 to proto=2 and changed
+# nothing a person could see, because the NEXT link was also broken: the
+# draw/ctl write path copied every write into a 1 MiB reassembly buffer and
+# refused anything larger, and lib/hamui.ad sends a whole frame in ONE write --
+# 2,112,018 bytes for an 880x600 window. Every blit from every v2 window bigger
+# than about 512x512 was refused with EMSGSIZE. With a complete record now
+# parsed in place, the browser paints: 468,480 page pixels in the framebuffer,
+# measured, where there were none. tests/linux/de_browser_paints.sh holds that.
 #
 # Entirely offscreen: HAMFB_FILE and a file of evdev records, no VM, no DRM.
 set -uo pipefail
@@ -121,6 +114,18 @@ for _ in $(seq 1 80); do [ -s "$HAMFB_FILE" ] && break; sleep 0.1; done
                           tail -5 "$W/wsysd.log"; exit 1; }
 
 # 1. THE NEGOTIATION, exactly as hamui performs it.
+# THE PAINT CLIENT STARTS FIRST, AND THE ORDER IS A CORRECTION.
+# This gate used to run wctlv2 (which blits and then EXITS) before the paint
+# check, so the paint check ran with a dead v2 window already in the table --
+# and it failed about one run in four. Measured: with a single v2 client the
+# paint succeeds 8/8; preceded by an orphaned v2 window it fails intermittently.
+# That intermittency is a REAL defect (a v2 window after a dead one is
+# sometimes never painted) and is reported separately -- it is not this gate's
+# subject, and a gate that is red a quarter of the time trains people to re-run
+# it until it is green, which is how a real failure gets waved through.
+"$BIN/probe" fillwin >"$W/fill.out" 2>&1 &
+reap_add $!
+
 OUT="$("$BIN/probe" wctlv2 2>&1)"
 echo "     $OUT"
 WCTLRC="$(printf '%s' "$OUT" | sed -n 's/.*wctlrc=\(-\{0,1\}[0-9]\{1,\}\).*/\1/p')"
@@ -161,9 +166,26 @@ fi
 # 2. AND IT MUST BE PAINTED. A first-ever v2 window takes the v2 paint path for
 #    the first time; paint_window() bails on the scene read before reaching
 #    paint_backbuffer unless a v2 window's scene reads as a 0-byte success.
-"$BIN/probe" fillwin >"$W/fill.out" 2>&1 &
-reap_add $!
-sleep 3
+#    POLLED, NOT SLEPT, and that is a correction to this file rather than a
+#    detail. A fixed `sleep 3` made this assertion FLAKY -- measured 5/5, 5/5,
+#    4/5 across three runs on a loaded build host -- because the pixels arrive
+#    only after the backbuffer memfd hand-up (on a 500 ms clock) AND a
+#    compositor repaint. A flaky gate is worse than a slow one: it trains
+#    everyone to re-run it until it is green, which is how a real failure gets
+#    waved through. So this waits for the pixels for up to ~15 s and stops the
+#    moment they appear; a genuine failure still costs the full wait exactly
+#    once.
+FILL=0
+for _ in $(seq 1 75); do
+    FILL="$(python3 - "$HAMFB_FILE" <<'PY'
+import sys
+d=open(sys.argv[1],'rb').read()
+print(d.count(b'\x11\x22\x33')+d.count(b'\x33\x22\x11'))
+PY
+)"
+    [ "${FILL:-0}" -gt 0 ] 2>/dev/null && break
+    sleep 0.2
+done
 FILL="$(python3 - "$HAMFB_FILE" <<'PY'
 import sys
 d=open(sys.argv[1],'rb').read()

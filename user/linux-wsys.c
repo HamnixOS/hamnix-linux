@@ -5365,8 +5365,21 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
             if (v->proto != k) {
                 v->proto = k;
                 /* A protocol switch is a damage event for the whole window --
-                 * the compositor must repaint to pick up the new path. */
-                v->scene_gen++;
+                 * the compositor must repaint to pick up the new path.  THE
+                 * DAMAGE IS shm->gen AND NOT scene_gen, and that distinction
+                 * is load-bearing: the scene open path serves a v2 window's
+                 * scene as a 0-byte SUCCESS only while scene_gen == 0, and
+                 * turns it into an EPERM refusal once it moves.  A v2 client
+                 * never commits a scene, so bumping scene_gen here made the
+                 * compositor's very next scene read of the window it had just
+                 * been told about a refusal -- paint_window then bails at
+                 * `if n < 0` before it ever reaches paint_backbuffer, and the
+                 * window is never painted.  MEASURED: wsysd logging
+                 * "/dev/wsys/2/scene: this process neither owns window 2 nor
+                 * holds its display list" for a window whose only sin was
+                 * negotiating v2.  This is the same trap bbup_install carries a
+                 * comment about; it was reintroduced here and is now fixed in
+                 * both places. */
                 shm->gen++;
             }
             return (int64_t)n;
