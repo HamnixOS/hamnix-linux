@@ -272,6 +272,35 @@ it is not a graphics problem.
 device is not busy; the round-trip is. That, not rasterization, is where the
 next graphics win is.
 
+### 3d. With the client wake: the frame rate finally moves
+
+`build_waitset()` admitted input fds only, so a *client*-initiated change --
+a window moving -- had nothing to wake the compositor and rode the fallback
+tick. Giving the compositor a pollable wake on `shm->gen` (an abstract AF_UNIX
+datagram, see `user/linux-wsys.c`) removes the pacing entirely:
+
+| configuration | drag fps | what limits it |
+|---|---|---|
+| software 1280x800, 16 ms tick | 44.5 | the tick |
+| scanout 1920x1080, 16 ms tick | 52 | the tick |
+| software 1280x800 + client wake | **434** | the frame (2.1 ms) |
+| **scanout 1920x1080 + client wake** | **910** | the frame (~1.1 ms) |
+
+Also measured on the software path with the shipped harness: pointer
+**257 fps**, input->pixel **p50 0.28 ms** (from 0.91), idle **unchanged** at
+1.2-1.4%.
+
+**Scanout is now 2.1x the software path, at 2.2x the pixels** — the compositor
+win that three previous rounds of measurement could not see, because the
+pacing was hiding it. `submit_us` also fell from ~2.5 ms to ~0.45 ms once
+frames come back to back, so the round-trip cost was partly a cold pipeline.
+
+**And the cost is now obvious: a drag burns 99.9% of a core.** Nothing caps
+the present rate, so the compositor renders 910 frames a second at a display
+that shows 60. That makes the vblank cap the next piece of work rather than an
+optional refinement, and it wants the same wait set — see "What fixing the
+tearing costs" above, which is the same mechanism.
+
 ### But the frame RATE barely moved, and that is the honest headline
 
 Derived from the same counters: **50.4 fps at 1920x1080**, against the
@@ -289,8 +318,9 @@ explained only half the software/GPU rate gap is that the tick quantises the
 period, so per-frame work and delivered rate are only loosely coupled.
 
 **So the owner's 50x is real in the compositor and invisible on the screen
-until the tick is fixed.** The next win on how the desktop *feels* is not
-graphics work at all; it is filling `waitset` with the input fds.
+until the pacing is fixed.** That was written before the tick fix and the
+client wake landed; §3d above is what happened when they did. Both were
+loop-and-wakeup work, not graphics work.
 
 ### What was not measured on this path, and why
 
