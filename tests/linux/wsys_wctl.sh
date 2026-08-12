@@ -48,6 +48,26 @@
 # if hamui is ever pointed somewhere else, the probe stops mirroring it and
 # this gate says so instead of silently testing a path nobody uses.
 #
+# WHAT REACHING v2 DOES NOT BY ITSELF FIX, measured against a real hamui app so
+# nobody reads this gate's green as more than it is.  hambrowse, unmodified, on
+# a file:// page, A/B against a reverted tree (both arms built WHOLE -- /dev/wsys
+# is implemented in-process, linux-wsys.c is linked into every binary, so a
+# pre-fix arm needs a pre-fix BROWSER as well as a pre-fix compositor):
+#
+#   pre-fix   ctl: 2 50 40 880 600 12 1 1 1 3 ...   proto = 1
+#   fixed     ctl: 2 50 40 880 600 12 1 1 2 4 ...   proto = 2
+#
+# and wsysd says "window 2 paints 880x0 of its 880x600 window" on BOTH arms.
+# The browser is not painted either way: the scene it commits covers no rows,
+# which is that diagnostic's own third case ("either the scene should cover its
+# window, or the window should be the size of the scene, or it wants keyed 1").
+# So the negotiation landing is necessary and NOT sufficient -- there is a
+# separate, older gap in the hamui paint path on this port, and it is not this
+# fix's to claim.  The one extra stderr line the fixed arm emits (the scene
+# hand-up's "neither owns window N nor holds its display list") was counted at
+# 3 s, 8 s and 15 s and stays at 1: the startup race the hand-up clock exists to
+# clear, not a state the window sits in.
+#
 # Entirely offscreen: HAMFB_FILE and a file of evdev records, no VM, no DRM.
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
