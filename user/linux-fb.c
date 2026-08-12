@@ -55,9 +55,11 @@
 #  if __has_include(<drm/drm.h>)
 #    include <drm/drm.h>
 #    include <drm/drm_mode.h>
+#    include <drm/drm_fourcc.h>
 #  else
 #    include <libdrm/drm.h>
 #    include <libdrm/drm_mode.h>
+#    include <libdrm/drm_fourcc.h>
 #  endif
 #else
 #  include <drm/drm.h>
@@ -81,6 +83,10 @@ static struct {
     int      needs_dirty;  /* virtio-gpu and other transfer-based drivers */
     int      is_fbdev;     /* 1 = /dev/fbN via fbdev, 0 = raw DRM/KMS */
     int      offscreen;    /* 1 = a plain file (HAMFB_FILE), no display */
+    /* 1 = the display scans out a GPU dmabuf we imported. `map` is NULL and
+     * stays NULL: there is nothing for the CPU to write. See
+     * hamfb_attach_scanout(). */
+    int      scanout;
 
     /* --- double buffering (raw DRM/KMS only) ------------------------- *
      * Two dumb buffers of identical geometry. `front` is the one the CRTC
@@ -449,6 +455,152 @@ static int fbfile_try(void)
     return 0;
 }
 
+/* ------------------------------------------------------------------ *
+ * SCANOUT: the display reads a buffer the GPU owns, and /dev/fb stops
+ * ------------------------------------------------------------------ *
+ * Everything above assumes the compositor WRITES pixels at us and we get them
+ * to the display. This is the arrangement where it does not: the caller hands
+ * us a dmabuf that a GPU is rasterizing into, we import it, make a framebuffer
+ * of it and set a mode on it, and from then on there is nothing to copy --
+ * the CRTC is scanning out the same memory the shader writes.
+ *
+ * WHY THIS IS A SEPARATE FUNCTION AND NOT A FLAG ON drm_try_card(): every
+ * invariant that file holds is about `fb.map`, and on this path THERE IS NO
+ * MAP. hamfb_write() has nothing to write into and must fail rather than
+ * quietly succeed; fb_flush_rows() and fb_flip() have nothing to do. Bolting
+ * a mode onto the existing path would mean auditing each of those for a NULL
+ * it was never written to expect, which is how a "no picture" bug gets built.
+ *
+ * SUPERVISION IS MANDATORY, and this is not a style note. On nvidia-drm,
+ * MEASURED: restoring the saved CRTC with a legacy SETCRTC HANGS, and
+ * DROP_MASTER after a modeset HANGS. The console came back, every time, only
+ * because the PROCESS DIED and the kernel dropped master when the fd closed.
+ * So the documented recovery for anything that calls this is: kill it.
+ * Whatever runs a compositor on this path must be able to, and must be armed
+ * to, before the modeset happens -- see tests/linux/kms_watchdog.sh, which is
+ * proven to fire (tests/linux/hangmaster.c is the proof).
+ *
+ * Returns 0 on success. Never partially succeeds: on any failure the mode is
+ * not set, master is dropped and fb.ready stays 0, so the caller can fall
+ * back to the ordinary path.
+ */
+int hamfb_attach_scanout(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t pitch)
+{
+    if (fb.ready) { errno = EBUSY; return -1; }
+    if (dmabuf_fd < 0 || !w || !h) { errno = EINVAL; return -1; }
+    const char *path = getenv("HAMFB_CARD");
+    if (!path || !*path) path = "/dev/dri/card0";
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -1;
+    if (ioctl(fd, DRM_IOCTL_SET_MASTER, 0) < 0) { close(fd); return -1; }
+
+    struct drm_mode_card_res res;
+    memset(&res, 0, sizeof res);
+    if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) goto fail;
+    if (!res.count_connectors || !res.count_crtcs) { errno = ENODEV; goto fail; }
+    uint32_t *conns = calloc(res.count_connectors, sizeof(uint32_t));
+    uint32_t *crtcs = calloc(res.count_crtcs, sizeof(uint32_t));
+    if (!conns || !crtcs) { free(conns); free(crtcs); errno = ENOMEM; goto fail; }
+    res.connector_id_ptr = (uint64_t)(uintptr_t)conns;
+    res.crtc_id_ptr      = (uint64_t)(uintptr_t)crtcs;
+    res.count_fbs = res.count_encoders = 0;
+    if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) {
+        free(conns); free(crtcs); goto fail;
+    }
+
+    /* The connector must offer the EXACT geometry the GPU buffer was made
+     * for. Scaling is not available here: the buffer is the scanout surface,
+     * so a mismatch is a hard refusal rather than a letterbox. */
+    int found = 0;
+    for (uint32_t i = 0; i < res.count_connectors && !found; i++) {
+        struct drm_mode_get_connector c;
+        memset(&c, 0, sizeof c);
+        c.connector_id = conns[i];
+        if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) < 0) continue;
+        if (c.connection != 1 || !c.count_modes) continue;
+        struct drm_mode_modeinfo *ms = calloc(c.count_modes, sizeof *ms);
+        uint32_t *es = calloc(c.count_encoders ? c.count_encoders : 1, 4);
+        if (!ms || !es) { free(ms); free(es); continue; }
+        c.modes_ptr = (uint64_t)(uintptr_t)ms;
+        c.encoders_ptr = (uint64_t)(uintptr_t)es;
+        c.props_ptr = c.prop_values_ptr = 0; c.count_props = 0;
+        if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) == 0) {
+            for (uint32_t m = 0; m < c.count_modes; m++) {
+                if (ms[m].hdisplay != w || ms[m].vdisplay != h) continue;
+                fb.mode = ms[m];
+                fb.conn_id = c.connector_id;
+                if (c.encoder_id) {
+                    struct drm_mode_get_encoder e;
+                    memset(&e, 0, sizeof e);
+                    e.encoder_id = c.encoder_id;
+                    if (ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &e) == 0 && e.crtc_id)
+                        fb.crtc_id = e.crtc_id;
+                }
+                if (!fb.crtc_id) fb.crtc_id = crtcs[0];
+                found = 1;
+                break;
+            }
+        }
+        free(ms); free(es);
+    }
+    free(conns); free(crtcs);
+    if (!found) { errno = ENODEV; goto fail; }
+
+    struct drm_prime_handle prime;
+    memset(&prime, 0, sizeof prime);
+    prime.fd = dmabuf_fd;
+    if (ioctl(fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime) < 0) goto fail;
+    struct drm_mode_fb_cmd2 fbc;
+    memset(&fbc, 0, sizeof fbc);
+    fbc.width = w; fbc.height = h;
+    fbc.pixel_format = DRM_FORMAT_XRGB8888;
+    fbc.handles[0] = prime.handle;
+    fbc.pitches[0] = pitch ? pitch : w * 4;
+    if (ioctl(fd, DRM_IOCTL_MODE_ADDFB2, &fbc) < 0) goto fail;
+
+    struct drm_mode_crtc sc;
+    memset(&sc, 0, sizeof sc);
+    sc.crtc_id = fb.crtc_id;
+    sc.fb_id   = fbc.fb_id;
+    sc.set_connectors_ptr = (uint64_t)(uintptr_t)&fb.conn_id;
+    sc.count_connectors   = 1;
+    sc.mode = fb.mode;
+    sc.mode_valid = 1;
+    if (ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &sc) < 0) goto fail;
+
+    fb.drm_fd  = fd;
+    fb.fb_id   = fbc.fb_id;
+    fb.handle  = prime.handle;
+    fb.width   = w;
+    fb.height  = h;
+    fb.pitch   = fbc.pitches[0];
+    fb.size    = fb.pitch * h;
+    fb.map     = NULL;              /* THERE IS NO MAPPING. By construction. */
+    fb.scanout = 1;
+    fb.ready   = 1;
+    fb.tried   = 1;
+    fb.is_fbdev = fb.offscreen = fb.needs_dirty = 0;
+    fb.have_two = fb.dbl = 0;
+    if (getenv("HAMFB_QUIET") == NULL)
+        fprintf(stderr, "hamfb: SCANOUT %ux%u pitch=%u conn=%u crtc=%u fb=%u "
+                "-- the display is reading GPU memory; /dev/fb writes will "
+                "now FAIL, and this process MUST be supervised by something "
+                "that can kill it (DROP_MASTER hangs on nvidia-drm)\n",
+                w, h, fb.pitch, fb.conn_id, fb.crtc_id, fb.fb_id);
+    return 0;
+fail:
+    {
+        int e = errno;
+        ioctl(fd, DRM_IOCTL_DROP_MASTER, 0);
+        close(fd);
+        memset(&fb, 0, sizeof fb);
+        errno = e;
+    }
+    return -1;
+}
+
+int hamfb_is_scanout(void) { return fb.scanout ? 1 : 0; }
+
 static int fb_init(void)
 {
     if (fb.ready)
@@ -735,6 +887,17 @@ int64_t hamfb_write(uint64_t offset, const uint8_t *buf, uint64_t count)
 {
     if (!fb.ready) {
         errno = ENODEV;
+        return -1;
+    }
+    /* ON THE SCANOUT PATH THERE IS NOWHERE TO PUT THESE BYTES, and saying so
+     * is the whole point. fb.map is NULL, so the memcpy below would be a NULL
+     * dereference -- but the reason this returns an error rather than a short
+     * write or a silent 0 is that a compositor which still thinks it can
+     * write /dev/fb is MISCONFIGURED, and the failure that teaches it that
+     * must be loud and immediate. A silent success here would produce a
+     * desktop that renders nothing and reports no error. */
+    if (fb.scanout) {
+        errno = EOPNOTSUPP;
         return -1;
     }
     if (offset >= fb.size)
