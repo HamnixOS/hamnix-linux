@@ -306,17 +306,67 @@ same failure this project exists to beat.
   process being alive or the reload line, both of which stayed true through
   the defect. With the fix reverted: 11 PASS / 6 FAIL.
 
-* **THE SHIPPED `/etc/panel.conf` IS NEVER PARSED.** Found while gating the
-  above, not yet fixed. `_load_config` reads at most 2047 bytes; the file as
-  shipped is 3120 bytes and its first `panel` line does not begin until byte
-  ~2450, all of it comment header. So the file parses to zero panels and the
-  panel silently falls back to `_default_config` — which happens to render the
-  same layout, which is why nobody noticed. **Editing the documented config
-  file does nothing at all.** Measured: with the shipped file copied in, the
-  bars came up in a colour that is not the `color #d4d0c8` the file asks for.
-  (`de_panel_conf_replace.sh` therefore writes the same two `panel … end`
-  blocks WITHOUT the header, so it is not gating on top of a config that is
-  never read.)
+* ~~**THE SHIPPED `/etc/panel.conf` IS NEVER PARSED.**~~ **FIXED — the reader
+  streams now, and a config it cannot read says so by name.**
+
+  Found while gating the above. `_load_config` read at most 2047 bytes; the
+  file as shipped is 3120 bytes and its first `panel` line does not begin
+  until **byte 2834**, all of it comment header. So the file parsed to zero
+  panels and the panel silently fell back to `_default_config` — which happens
+  to render the same layout, which is why nobody noticed. **Editing the
+  documented config file did nothing at all.** The only visible tell, and the
+  thing that exposed it: the bars came up in a colour that is not the
+  `color #d4d0c8` the file asks for (`_begin_panel` leaves `#eceef2`, and
+  `_default_config` never overrides it). `_cfg_changed` had the same ceiling,
+  so an edit to the directives at the END of the file did not even register as
+  a **change**.
+
+  **The fix is a shape, not a number.** A fixed buffer that is merely larger
+  is the same defect at a larger size, and this tree has been bitten by
+  exactly that three times (a 16 KiB hook-output limit, an 8 KiB
+  `/etc/modules` ceiling, a `tail` that read only the first 8 KiB). So the
+  file is not held in memory at all: `_load_config` reads it in **4 KiB
+  chunks** and parses it **a line at a time** (`_cfg_parse_line` over a
+  512-byte line buffer), and `_cfg_changed` streams the same way, hashing
+  FNV-1a 64 over the whole file instead of keeping a snapshot buffer. The
+  config now has **no size ceiling at all**. The one bound left is the length
+  of a single LINE, which is a real bound on the grammar (the longest legal
+  directive is `widget launcher <exec> <label>`; `LEXEC_SZ + LLABEL_SZ` is 88)
+  — and crossing it is reported, not swallowed.
+
+  **And it says so.** Falling back is fine; falling back *silently* is the
+  bug, and it is the whole reason this survived. Every outcome now names the
+  file it read, on stderr:
+
+      hampanelscene: /etc/panel.conf: honoured, 2 panel(s)
+      hampanelscene: /etc/panel.conf: parsed 0 panels from 3120 byte(s) --
+          using the built-in default layout INSTEAD of this file
+      hampanelscene: /etc/panel.conf: TRUNCATED -- 1 line(s) are longer than
+          the 512-byte line limit and were cut; those directives are NOT what
+          the file says
+
+  `tests/linux/de_panel_conf_shipped.sh`, **14 PASS**, offscreen, ~40 s. The
+  measurement is the file's own colour reaching the bar (81% of both bar
+  strips are `#d4d0c8`, 0% are the fallback's `#eceef2`) — pixels, never a log
+  line, because the panel logged `config reload applied: 2 panel(s)` all the
+  way through the defect. Assertion 8 is the one that refuses a bigger fixed
+  buffer: the same directives behind a **65,010-byte** comment header must
+  still reach the bar, so a fix that moved 2048 → 8192 passes the headline
+  assertion and fails that one. Assertion 9 covers the live re-read (edit only
+  the `color` lines, all past byte 2834, and the bar must repaint). With the
+  fix reverted — `git checkout d965f155 -- user/hampanelscene.ad`, actually
+  run — **7 PASS / 7 FAIL**, headed by *"with etc/panel.conf verbatim in place
+  the bars are 0% / 0% of #d4d0c8"*.
+
+  `de_panel_conf_replace.sh` **can now use the real file, and does**: it used
+  to write the shipped file's two `panel … end` blocks out by hand without the
+  header, precisely because a verbatim copy was never parsed. It now copies
+  `etc/panel.conf` byte for byte (and its one-panel variant is the same file
+  with the second block sed-deleted, so there is no second hand-maintained
+  copy of the layout either). Still **17 PASS**.
+
+  `etc/panel.conf`'s CONTENT is unchanged, so the channel's byte-compare of
+  shared `/etc` files is unaffected and no new binary ships.
 
 * ~~**A package install hook could wedge `hpm update` forever.**~~ **BOUNDED
   NOW, IN THE PARENT — but read "what this cannot help" below before believing
