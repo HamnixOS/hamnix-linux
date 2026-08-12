@@ -25,7 +25,10 @@ TIMEOUT=""
 if [ "${1:-}" = "--timeout" ]; then TIMEOUT="$2"; shift 2; fi
 [ "${1:-}" = "--" ] && shift
 
-IMG=build/image
+# The staged image. HAMLINUX_IMAGE_DIR points this at a PRIVATE build --
+# several agents share this box and build/image is one directory, so two gates
+# that each rebuild it race each other into a boot of somebody else's tree.
+IMG="${HAMLINUX_IMAGE_DIR:-build/image}"
 [ -f "$IMG/vmlinuz" ] || { echo "no image; run scripts/hamlinux_image.sh first" >&2; exit 1; }
 
 # KVM when the host allows it; TCG otherwise, so this still runs in a container.
@@ -164,7 +167,7 @@ case "$MODE" in
     # in the test's own output. HAMLINUX_VNC overrides it -- `none` for a gate
     # that only wants the serial console.
     CMD=(qemu-system-x86_64 "${COMMON[@]}" -vnc "${HAMLINUX_VNC:-127.0.0.1:9}" -serial stdio
-         -monitor unix:build/image/mon.sock,server,nowait
+         -monitor "unix:$IMG/mon.sock,server,nowait"
          -append "$APPEND" "$@")
     if [ -n "$TIMEOUT" ]; then exec timeout "$TIMEOUT" "${CMD[@]}"; else exec "${CMD[@]}"; fi
     ;;

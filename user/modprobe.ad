@@ -13,13 +13,27 @@
 # Usage:
 #   modprobe NAME           # load NAME and its deps (no .ko / no path)
 #   modprobe -v NAME        # verbose: print each module as it loads
-#   modprobe -d FILE NAME   # use FILE as modules.dep (default below)
+#   modprobe -d FILE NAME   # use FILE as modules.dep (override)
 #
-# Default modules.dep path follows Linux convention:
-#   /lib/modules/<release>/modules.dep
-# Hamnix has no <release> resolved natively, so the default is the
-# release-less /lib/modules/modules.dep and an explicit -d FILE
-# override is provided (the test uses -d).
+# WHERE modules.dep COMES FROM, because for the whole of this port the
+# answer was "nowhere" and that is why modprobe did not work:
+#
+#   scripts/hamlinux_image.sh runs the BUILD HOST's `depmod -b $ROOT
+#   $KVER` over the modules it staged, so the image ships a real
+#   /lib/modules/<release>/modules.dep in depmod's own format. A
+#   package that installs MORE modules later (the GPU driver packages
+#   in scripts/hamlinux_packages.py) appends its own lines to that same
+#   file from its install hook -- the same mechanism it already uses for
+#   /etc/modules, and for the same reason: a table baked at image-build
+#   time is stale the moment a package installs a new .ko, and a stale
+#   table would make `modprobe i915` say "not found" on a machine that
+#   HAS i915 on disk.
+#
+# The default path is the Linux one, /lib/modules/<release>/modules.dep,
+# with <release> taken from uname(2) -- the same kernel string the
+# staging directory is named after. This file used to default to a
+# release-LESS /lib/modules/modules.dep, a path nothing has ever
+# written, so the default could only ever fail.
 #
 # modules.dep format (one line per module, depmod pre-flattens the
 # full transitive dep set onto each line):
@@ -58,11 +72,19 @@ extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_uname(buf: Ptr[uint8], cap: uint64) -> int64
 
 
 # --- fixed-size buffers (documented caps) ----------------------------
 #
-# modules.dep: up to 64 KiB of text.
+# modules.dep: up to 256 KiB of text. It was 64 KiB, and the read
+#   SILENTLY STOPPED there -- a modules.dep one byte over the cap would
+#   have lost its tail and reported "module not found" for every module
+#   in it, which is the failure this program exists to not have. The
+#   cap is still finite, so read_dep_file now reports the truncation by
+#   name instead of resolving against half a table. The image's own
+#   table is ~3 KiB for 36 modules; the driver packages append ~1 KiB
+#   each, so 256 KiB is thousands of modules of headroom.
 # .ko read buffer: 4 MiB. insmod.ad uses 1 MiB; we bump it because the
 #   foundational wifi framework modules Hamnix ships (cfg80211.ko,
 #   mac80211.ko) are ~2.4 MiB each — the largest .ko's in the tree.
@@ -72,14 +94,14 @@ extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 # Up to 32 dep tokens per modules.dep line (depmod flattens, so even a
 #   deep wifi driver lists well under this many).
 # Module basenames capped at 64 bytes; full paths capped at 256 bytes.
-DEP_CAP:      uint64 = 65536
+DEP_CAP:      uint64 = 262144
 KO_CAP:       uint64 = 4194304
 MAX_LOADED:   uint64 = 256
 MAX_DEPS:     uint64 = 32
 NAME_CAP:     uint64 = 64
 PATH_CAP:     uint64 = 256
 
-dep_buf:  Array[65536, uint8]            # modules.dep text
+dep_buf:  Array[262144, uint8]           # modules.dep text
 dep_len:  uint64 = 0
 ko_data:  Array[4194304, uint8]          # one .ko at a time
 
@@ -96,6 +118,14 @@ n_loaded:     uint64 = 0
 
 # Scratch for the path we hand to sys_open.
 open_path: Array[256, uint8]
+
+# Scratch for open_path + a compression suffix. See probe_compressed().
+alt_path: Array[264, uint8]
+
+# The modules.dep path actually consulted, NUL-terminated. Every failure
+# message names it: "not found" is only meaningful together with the
+# table it was not found in.
+dep_path_buf: Array[256, uint8]
 
 
 def strlen_u8(s: Ptr[uint8]) -> uint64:
@@ -194,8 +224,14 @@ def mark_loaded(name: Ptr[uint8]):
 # --- modules.dep load + parse ----------------------------------------
 
 def read_dep_file(path: Ptr[char]) -> int32:
-    # Slurp the whole modules.dep into dep_buf. Returns 0 on success,
-    # -1 on open failure or empty file.
+    # Slurp the whole modules.dep into dep_buf. Returns:
+    #    0  success
+    #   -1  open failure or empty file
+    #   -2  the file is LARGER than DEP_CAP -- we hold a prefix of the
+    #       table, so every lookup that misses would be a lie. Reported
+    #       separately because "your table is too big for this buffer"
+    #       and "your module is not in the table" are different facts
+    #       and the caller must not print the second for the first.
     fd: int32 = sys_open(path)
     if fd < 0:
         return -1
@@ -207,11 +243,70 @@ def read_dep_file(path: Ptr[char]) -> int32:
         if n <= 0:
             break
         total = total + cast[uint64](n)
+    # If the buffer filled exactly, ask for one more byte: a file that
+    # is exactly DEP_CAP long is fine, one that is longer is not, and
+    # only a read past the end tells them apart.
+    over: int32 = 0
+    if total == DEP_CAP:
+        probe: Array[1, uint8]
+        if sys_read(fd, &probe[0], 1) > 0:
+            over = 1
     sys_close(fd)
     dep_len = total
+    if over == 1:
+        return -2
     if total == 0:
         return -1
     return 0
+
+
+# Build "/lib/modules/<release>/modules.dep" into `out` from uname(2)'s
+# third field. sys_uname writes "<sysname> <machine> <release>\n".
+# Returns the length, or 0 if the release could not be determined --
+# in which case the caller must say so rather than guessing a path.
+def build_default_dep_path(out: Ptr[uint8], cap: uint64) -> uint64:
+    ub: Array[256, uint8]
+    n: int64 = sys_uname(&ub[0], 256)
+    if n <= 0:
+        return 0
+    ulen: uint64 = cast[uint64](n)
+    # Skip the first two whitespace-separated fields.
+    i: uint64 = 0
+    f: uint64 = 0
+    while f < 2:
+        while i < ulen and ub[i] != 32:
+            i = i + 1
+        while i < ulen and ub[i] == 32:
+            i = i + 1
+        f = f + 1
+    if i >= ulen:
+        return 0
+    rs: uint64 = i
+    while i < ulen and ub[i] != 32 and ub[i] != 10 and ub[i] != 0:
+        i = i + 1
+    rl: uint64 = i - rs
+    if rl == 0:
+        return 0
+    prefix: Ptr[uint8] = "/lib/modules/"
+    suffix: Ptr[uint8] = "/modules.dep"
+    o: uint64 = 0
+    k: uint64 = 0
+    while prefix[k] != 0 and o < cap - 1:
+        out[o] = prefix[k]
+        o = o + 1
+        k = k + 1
+    k = 0
+    while k < rl and o < cap - 1:
+        out[o] = ub[rs + k]
+        o = o + 1
+        k = k + 1
+    k = 0
+    while suffix[k] != 0 and o < cap - 1:
+        out[o] = suffix[k]
+        o = o + 1
+        k = k + 1
+    out[o] = 0
+    return o
 
 
 # Record the directory component of the modules.dep path (everything up
@@ -294,6 +389,26 @@ def build_open_path(rel: Ptr[uint8], rel_len: uint64):
     open_path[i + j] = 0
 
 
+# Is open_path + `suffix` present? Used only to explain a failed open:
+# a .ko that is on disk COMPRESSED is a different problem from a .ko
+# that is not on disk at all, and the fix is different too.
+def probe_compressed(suffix: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while open_path[i] != 0 and i < 255:
+        alt_path[i] = open_path[i]
+        i = i + 1
+    k: uint64 = 0
+    while suffix[k] != 0 and (i + k) < 263:
+        alt_path[i + k] = suffix[k]
+        k = k + 1
+    alt_path[i + k] = 0
+    fd: int32 = sys_open(cast[Ptr[char]](&alt_path[0]))
+    if fd < 0:
+        return 0
+    sys_close(fd)
+    return 1
+
+
 # Load one module given its relative .ko path slice [rel, rel+rel_len)
 # from modules.dep. The path is joined onto dep_dir, the file slurped,
 # and SYS_INIT_MODULE invoked. Tracks the basename in the loaded set.
@@ -320,6 +435,24 @@ def load_one(rel: Ptr[uint8], rel_len: uint64, verbose: int32) -> int32:
         write_str(2, "modprobe: cannot open ")
         write_str(2, &open_path[0])
         write_str(2, "\n")
+        # THE COMPRESSED CASE, which is not hypothetical here: the GPU
+        # driver packages ship any module over 4 MiB gzipped (i915.ko is
+        # ~9.9 MiB and hpm unpacks in a 4 MiB / 8 MiB RAM buffer), and
+        # their install hook runs `gzip -d` to leave the .ko beside it.
+        # If that hook did not run, the .ko.gz is on disk and the .ko is
+        # not -- and "cannot open" alone would send someone looking for
+        # a missing package rather than a failed hook. Name it.
+        if probe_compressed(".gz") == 1:
+            write_str(2, "modprobe: but ")
+            write_str(2, &alt_path[0])
+            write_str(2, " exists -- the module is still COMPRESSED.\n")
+            write_str(2, "modprobe: finit_module cannot take it; its package's install hook\n")
+            write_str(2, "modprobe: (`gzip -d`) did not run or did not finish.\n")
+        elif probe_compressed(".xz") == 1:
+            write_str(2, "modprobe: but ")
+            write_str(2, &alt_path[0])
+            write_str(2, " exists -- the module is still COMPRESSED.\n")
+            write_str(2, "modprobe: finit_module cannot take it; decompress it in place.\n")
         return -1
 
     # finit_module(2) loads from the DESCRIPTOR, so there is no image buffer
@@ -379,9 +512,20 @@ def load_one(rel: Ptr[uint8], rel_len: uint64, verbose: int32) -> int32:
 def load_with_deps(name: Ptr[uint8], verbose: int32) -> int32:
     off: int64 = find_line(name)
     if off < 0:
-        write_str(2, "modprobe: module not found in modules.dep: ")
+        # Exit non-zero and say WHICH table was consulted. The stale
+        # case is the likely one and is worth naming: a module that
+        # arrived by `hpm install` after the image was built is on disk
+        # but only in the table if its package's install hook appended
+        # its lines. Silence here would look exactly like "there is no
+        # such driver", which is a different and much worse answer.
+        write_str(2, "modprobe: module not found in ")
+        write_str(2, &dep_path_buf[0])
+        write_str(2, ": ")
         write_str(2, name)
         write_str(2, "\n")
+        write_str(2, "modprobe: nothing was loaded. If this module arrived with a package,\n")
+        write_str(2, "modprobe: that package's install hook did not append its dependency\n")
+        write_str(2, "modprobe: lines to the table above.\n")
         return 1
 
     ls: uint64 = cast[uint64](off)
@@ -432,10 +576,7 @@ def load_with_deps(name: Ptr[uint8], verbose: int32) -> int32:
 
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
-    # Default modules.dep path (Linux convention, release-less since
-    # Hamnix has no <release> resolved natively).
-    default_dep: Ptr[char] = "/lib/modules/modules.dep"
-    dep_path: Ptr[char] = default_dep
+    dep_path: Ptr[char] = cast[Ptr[char]](0)
     verbose: int32 = 0
     name: Ptr[char] = cast[Ptr[char]](0)
 
@@ -460,12 +601,43 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         write_str(2, "modprobe: usage: modprobe [-v] [-d FILE] NAME\n")
         return 1
 
-    if read_dep_file(dep_path) != 0:
-        write_str(2, "modprobe: cannot read modules.dep at ")
-        write_str(2, cast[Ptr[uint8]](dep_path))
-        write_str(2, "\n")
+    # Resolve the table's path once, into dep_path_buf, so every message
+    # below can name the exact file it consulted.
+    if cast[uint64](dep_path) != 0:
+        i2: uint64 = 0
+        pp: Ptr[uint8] = cast[Ptr[uint8]](dep_path)
+        while pp[i2] != 0 and i2 < PATH_CAP - 1:
+            dep_path_buf[i2] = pp[i2]
+            i2 = i2 + 1
+        dep_path_buf[i2] = 0
+    else:
+        if build_default_dep_path(&dep_path_buf[0], PATH_CAP) == 0:
+            write_str(2, "modprobe: uname(2) gave no kernel release, so the default\n")
+            write_str(2, "modprobe: /lib/modules/<release>/modules.dep cannot be named.\n")
+            write_str(2, "modprobe: pass -d FILE. Nothing was loaded.\n")
+            return 1
+
+    rcd: int32 = read_dep_file(cast[Ptr[char]](&dep_path_buf[0]))
+    if rcd == -2:
+        write_str(2, "modprobe: ")
+        write_str(2, &dep_path_buf[0])
+        write_str(2, " is larger than this modprobe's ")
+        write_dec(2, DEP_CAP)
+        write_str(2, "-byte buffer.\n")
+        write_str(2, "modprobe: resolving against a PREFIX of the table would report\n")
+        write_str(2, "modprobe: 'not found' for modules that are in it, so nothing was\n")
+        write_str(2, "modprobe: loaded. Raise DEP_CAP in user/modprobe.ad.\n")
         return 1
-    set_dep_dir(dep_path)
+    if rcd != 0:
+        write_str(2, "modprobe: cannot read modules.dep at ")
+        write_str(2, &dep_path_buf[0])
+        write_str(2, "\n")
+        write_str(2, "modprobe: no module can be resolved by name without it. It is\n")
+        write_str(2, "modprobe: written by `depmod` at image build time (see\n")
+        write_str(2, "modprobe: scripts/hamlinux_image.sh). insmod <path>.ko still works,\n")
+        write_str(2, "modprobe: but it will not load dependencies.\n")
+        return 1
+    set_dep_dir(cast[Ptr[char]](&dep_path_buf[0]))
 
     rc: int32 = load_with_deps(cast[Ptr[uint8]](name), verbose)
     if rc < 0:

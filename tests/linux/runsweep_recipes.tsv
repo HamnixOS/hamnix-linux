@@ -296,7 +296,7 @@ login	other	EMPTY	-	Interactive prompt-and-exec loop reading a raw-byte, no-echo
 losetup	disk	-a	-	Plan-9 loop attach/detach via /dev/loop/ctl verb lines; -a lists attached loop devices
 ls	cmd	%D	-	fast-path listing via p9_listdir NAME stream; -l switches to Dir-record per-entry stat mode
 lsblk	cmd	EMPTY	-	enumerate /dev/blk block devices and print capacity from each node's size file; no flags
-lsmod	cmd	EMPTY	-	stub: prints Linux-shaped header plus one hard-coded demo module row, not real /proc/modules
+lsmod	cmd	EMPTY	-	drains /proc/modules to stdout under a Linux-shaped header; refuses by name if that file cannot be opened (it used to print a hard-coded kmod_hello row on every machine)
 man	cmd	man	-	reads /usr/share/man/<topic>.<N>.md and writes it to stdout; renderer is a plain file copy
 md5sum	filter	EMPTY	%F	prints the real RFC-1321 MD5 of each FILE, or of stdin when there is no operand; output matches coreutils exactly
 memhog	cmd	64M	-	allocate SIZE (bare = BYTES, K/M/G binary), touch every page for residency, hold, release, and prove the drop in MemFree is at least half the ask
@@ -305,7 +305,7 @@ mkdir_at_slot	disk	/dev/blk/vdbp2 usr/share/foo	-	mkdir -p on a NOT-mounted ext4
 mkfs_ext4	disk	/dev/blk/vdb	-	format a block device/partition via ext4_mkfs over the /dev/blk/<dev>/ctl channel
 mkfs_fat	disk	/dev/blk/vdbp1 32	-	format device as FAT via ctl channel; kernel-side fat_mkfs is currently a stub returning -1
 mktemp	cmd	EMPTY	-	create a uniquely-named temp file under /tmp, print its path, exit 0; mirrors coreutils mktemp
-modprobe	cmd	nonexistentmod	-	resolve a module's dependency chain from modules.dep and load it via SYS_INIT_MODULE
+modprobe	cmd	nonexistentmod	-	resolve a module's dependency chain from /lib/modules/<release>/modules.dep (written by depmod in scripts/hamlinux_image.sh) and load it via SYS_INIT_MODULE. The sweep's jail stages no modules, so this row asks for the REFUSAL: it must name the table it consulted rather than resolve to nothing. The loading half is measured in a VM by tests/linux/modprobe_deps.sh
 more	filter	EMPTY	%F	drain stdin into a 32 KiB buffer then page it 24 lines at a time, pausing for input each page
 motd	cmd	EMPTY	-	stream /etc/motd to stdout; exit 1 if the file is missing
 mp3decode_host	hosttest	%MP3 /work/decoded.pcm	-	host-only harness decoding an mp3 via lib/mp3decode.ad and dumping PCM/format/checksum info
