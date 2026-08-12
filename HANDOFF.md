@@ -380,23 +380,22 @@ same failure this project exists to beat.
   shared `/etc` files is unaffected and no new binary ships.
 
 * **THE SAME DEFECT, IN FOUR MORE SHIPPED `/etc` FILES.** Swept while fixing
-  the above; **NOT fixed**, recorded here so the next person does not have to
-  find them again. Each is a file this tree ships, documents, and reads
-  through a fixed buffer, and in the first two the shipped file *already* does
-  not fit:
+  the above. Items 1 and 2 — the two where the shipped file *already* did not
+  fit, and the two with a security consequence — **are now FIXED** (see the
+  next entry). Items 3-5 are **still NOT fixed**, recorded here so the next
+  person does not have to find them again. Each is a file this tree ships,
+  documents, and reads through a fixed buffer:
 
-  1. **`/etc/hpm/trusted.pub` — 718 bytes, read through 512.** Reader:
-     `user/hpm.ad:2021` `_set_trusted_key_path()`, loop at `:2031`
-     (`while total < 512`), buffer `tkey_file_buf` (512). The 64-hex key token
-     begins at **byte 653**, past the ceiling, so the read captures only the
-     11-line comment header and `hpm --trusted-key=/etc/hpm/trusted.pub` dies
-     with *"malformed trusted-key file (want 64 hex chars)"* on a perfectly
+  1. ~~**`/etc/hpm/trusted.pub` — 718 bytes, read through 512.**~~ **FIXED.**
+     Reader: `user/hpm.ad` `_set_trusted_key_path()`, which read through
+     `tkey_file_buf` (512, `while total < 512`). The 64-hex key token begins
+     at **byte 653**, past the ceiling, so the read captured only the 11-line
+     comment header and `hpm --trusted-key=/etc/hpm/trusted.pub` died with
+     *"malformed trusted-key file (want 64 hex chars)"* on a perfectly
      well-formed file. **Rotating the trust root through the shipped,
-     documented mechanism is impossible.** This is the panel.conf defect with
-     a security consequence, and it is the one to fix first.
-  2. **`/etc/hpm/local-trusted.pub` — 1054 bytes, same 512-byte reader**, key
-     token at byte 989. Same failure, twice the margin. Only the compiled-in
-     copy at `user/hpm.ad:1984` works.
+     documented mechanism was impossible.**
+  2. ~~**`/etc/hpm/local-trusted.pub` — 1054 bytes, same 512-byte reader**~~,
+     key token at byte 989. **FIXED with it.** Same failure, twice the margin.
   3. **`/etc/rc.boot` — 15918 bytes into a 16384-byte ceiling (97.2% full).**
      `user/hamsh.ad` `_run_rc_path()` (`:17872`, read loop `:17886`,
      `rc_buf` 16384): on overflow the loop **just breaks, with no diagnostic
@@ -428,6 +427,93 @@ same failure this project exists to beat.
   documented but have **no reader anywhere in the tree** (`etc/services`,
   `etc/protocols`, `etc/hosts`, `etc/fstab`, `etc/inittab`, `etc/os-release`,
   … — and `etc/desktop.icons`, whose own header already admits it).
+
+* ~~**THE TRUST ROOT COULD NOT BE ROTATED.**~~ **FIXED — `--trusted-key` now
+  streams, and every refusal names the file.**
+
+  `hpm --trusted-key=<path>` is the documented mechanism for overriding the
+  compiled-in Ed25519 key that authenticates every package this distribution
+  installs. It read the file into `tkey_file_buf: Array[512, uint8]`. Both
+  files the tree SHIPS for that purpose are mostly the comment header that
+  documents the format:
+
+  | file | size | key token at byte |
+  |--|--|--|
+  | `etc/hpm/trusted.pub` | 718 | 653 |
+  | `etc/hpm/local-trusted.pub` | 1054 | 989 |
+
+  So the whole read landed inside the header and both died with *"malformed
+  trusted-key file"* on well-formed files. The one reason a trust root has an
+  override is that it might have to be REPLACED; on that day the documented
+  path did not work.
+
+  **Same shape as the panel fix, for the same reason.** A bigger fixed buffer
+  is the same defect at a larger size and this tree has four scars from it
+  (2047-byte panel config, this 512-byte key buffer, 8192-byte `/etc/modules`,
+  a `tail` that read the first 8 KiB). `_set_trusted_key_path` now reads
+  **4 KiB chunks and parses a line at a time** — no whole-file buffer, no size
+  ceiling. The only bound left is ONE LINE (512 bytes; the token is 64
+  characters), and a truncated line is never parsed at all, because half a
+  token is not a token. The token is decoded into scratch and copied into
+  `trusted_pub` only once 32 whole bytes are in hand; it used to decode
+  straight into the live trust root, which left it half-overwritten whenever
+  the token turned out to be bad.
+
+  **And every failure is loud and names the file.** Silently falling back to
+  the compiled-in root is the worst outcome available here — the operator asks
+  for key A, gets key B, and installs under a root they believe they replaced:
+
+      hpm: --trusted-key /etc/hpm/trusted.pub: cannot open it. NOT falling
+          back to the built-in trust root -- the key you asked for is the key
+          that must be used.
+      hpm: --trusted-key K: no key in it -- read 400 byte(s) over 7 line(s) to
+          end of file and found no bare 64-hex token. NOT falling back ...
+      hpm: --trusted-key K: line 1 is not an Ed25519 public key -- want
+          exactly 64 hex characters, this token is 8. NOT falling back ...
+      hpm: --trusted-key K: 1 line(s) are longer than the 512-byte line limit
+          and were NOT parsed -- a key on one of them was not read.
+
+  all rc=1. Success is loud too (`hpm: trust root taken from <path> (718
+  bytes, 12 lines)`), because an override of the thing that authenticates
+  every package should not happen silently. The usage text also claimed the
+  root was "(built-in, or --trusted-key / **/etc/hpm/trusted.pub**)", implying
+  that file is consulted automatically. It is not and never was — the root is
+  compiled in precisely so it cannot be swapped by editing a file. Reworded.
+
+  `tests/linux/hpm_trusted_key_file.sh`, **28 PASS**, host-side, loopback,
+  ~1 min, in a private mount namespace (it runs `hpm`, which writes
+  `/tmp/hpm/index-<uid>.json`). The positive is proved three ways: both
+  shipped files are read verbatim AND the key read out of them is USED (an
+  index they do not vouch for is refused as `signature INVALID`); a key behind
+  `etc/hpm/trusted.pub`'s own 653-byte header verifies, refreshes and
+  **installs a package onto disk**; and `etc/hpm/local-trusted.pub` — the one
+  shipped root whose secret is in the tree (`scripts/hpm_local_key.seed`) — is
+  proved byte-for-byte with no substitution at all, while `trusted.pub`
+  refuses that same index. Assertion 6 refuses a bigger fixed buffer: the same
+  key behind a **68,555-byte** comment header must still verify, so 512 → 8192
+  passes the headline assertions and fails that one. The negatives (missing,
+  empty, comment-only, truncated to 400 bytes, 8-char token, non-hex token,
+  900-char line) each require the message to NAME THE FILE, rc≠0, and nothing
+  refreshed. The live `https://255.one/linux/index.json` is fetched, verified
+  against `etc/hpm/trusted.pub`, served back from loopback and refreshed **with
+  no flags** under the compiled-in root, with one flipped byte still caught —
+  nothing is published, two GETs. Assertion 2 pins the compiled-in constants
+  to the shipped files' bytes, so a rotation that edits one and not the other
+  fails. With the fix reverted (`git checkout <pre-fix> -- user/hpm.ad`,
+  actually run) — **11 PASS / 17 FAIL**, every failure carrying
+  *"hpm: malformed trusted-key file (want 64 hex chars)"*.
+
+  `tests/linux/hpm_index_sig.sh` re-run after the change: **7 PASS, 0 FAIL**.
+
+  **What this did NOT change, and is worth knowing:** `hpm install` does not
+  re-verify the index signature — it reads the per-user cache
+  `/tmp/hpm/index-<uid>.json` that the last good `refresh` wrote and checks
+  each tarball's sha256 against it. That is apt's model (`refresh` is where the
+  trust decision is made) and the cache being per-user rather than a shared
+  world-writable file is what makes it safe. The gate clears the cache before
+  asking whether an untrusted package installs, and prints the cache behaviour
+  as an INFO line so its green is never read as a claim that `install`
+  re-checks the signature.
 
 * ~~**A package install hook could wedge `hpm update` forever.**~~ **BOUNDED
   NOW, IN THE PARENT — but read "what this cannot help" below before believing
