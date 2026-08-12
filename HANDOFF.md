@@ -210,11 +210,60 @@ TWO THINGS IT FOUND, both of the shape this project exists to beat:
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
-* **`tail FILE` wedges the shell.** Measured in the guest during the gate
-  above: `tail /lib/modules/<release>/modules.dep` never returned and the VM
-  sat there until the host timeout took it away. `cat` on the same file is
-  fine. Not investigated -- named here so the next person does not lose the
-  afternoon to it that this one nearly did.
+* ~~**`tail FILE` wedges the shell.**~~ **FIXED. `tail` NEVER OPENED THE FILE.**
+  It looked at `argv[1]` only far enough to see whether it began with `-` and
+  then read **stdin** whatever the arguments said, so on a console -- where
+  stdin is a terminal that never reaches EOF -- `tail /lib/modules/<release>/
+  modules.dep` waited forever on the keyboard while appearing to be busy with
+  the file. `cat` was fine because `cat` opens its operands. **There was no
+  backwards-seek loop, no unsigned counter wrapping and no stalled scan: the
+  hang was an omission, not an infinite loop**, which is why it was invisible
+  in the source at a glance. Reproduced ON THE HOST in seconds, no VM
+  involved: `tail` built through the Linux lane, stdin a fifo held open with
+  nothing on it, `rc=124` under a 10-second `timeout`.
+
+  **THE HANG HAD A SILENT TWIN AND IT IS THE WORSE HALF.** With stdin already
+  at EOF -- every script, every `rc` file, every non-interactive invocation --
+  the identical bug printed **nothing and exited 0**. Anything testing `tail`
+  the way `/etc/rc.boot` tests `cat` would have believed the file was empty.
+  That arm is asserted separately in the gate, because a gate that only
+  proved termination would have passed against it.
+
+  This is **byte-for-byte the bug `head` had**, found by
+  `tests/linux/installed_update.sh` and fixed then (`user/head.ad`'s header
+  tells the story); `tail` was simply never given the same treatment. `head`
+  is run as the control in the new gate and is green in both arms -- that
+  difference is the whole diagnosis: one file got the fix and its twin did
+  not.
+
+  **A SECOND, QUIETER WRONG ANSWER WAS FOUND UNDERNEATH IT.** The old `tail`
+  slurped the **first** 8 KiB of its input and tailed *that*, so on any input
+  over 8 KiB it returned promptly with the WRONG LINES and said nothing --
+  `tail huge` gave line 190 of 40,000 where GNU gives line 40,000. Returning
+  fast is not a fix; the gate diffs the bytes against GNU `tail`, never merely
+  the exit. `tail` now keeps a 64 KiB **trailing** ring (forward reads only --
+  no backwards seek to get stuck at offset 0), and on a seekable input longer
+  than the window it `lseek`s to `size - 65536` first, so a gigabyte log costs
+  one seek and one window. `lseek` reporting size 0 is deliberately NOT
+  believed to mean "empty" -- procfs says 0 for files that read back kilobytes
+  -- so those take the streaming path. And when the requested lines genuinely
+  cannot fit (one line larger than the window) the leading fragment is
+  **dropped rather than printed as though it were a whole line**, stderr names
+  the file, and the exit is 1.
+
+  Gated by **`tests/linux/tail_file.sh` -- 31 PASS / 0 FAIL**, 2.6 s, no
+  VM, every invocation under `timeout` because a test for a hang that itself
+  hangs teaches nobody anything. Twenty-three of the assertions are diffs
+  against GNU `tail` on the same argv: the real `modules.dep`, with and
+  without a trailing newline, one line with no newline, a lone newline, an
+  empty file, fewer lines than the default of 10 and more, `-0`/`-1`/`-99`,
+  40 KB and 300 KB inputs, several FILEs with the `==> NAME <==` banner, a
+  pipe, and `-` as an explicit stdin operand. **With the fix reverted it is
+  11 PASS / 20 FAIL**, the fifo arm reading `tail FILE HUNG for 10s -- the
+  defect` and sixteen others reading `output differs from GNU tail / ours:`
+  followed by nothing at all -- the silent twin, in the transcript, in its own
+  words. `tail` was already in `COREUTILS` in `scripts/hamlinux_packages.py`,
+  so the channel carries the fix; no new binary was added.
 
 * **`hamnix-desktop` 1.0.10 IS A MIXED BUILD AND A MACHINE THAT TOOK IT LOST
   ITS DESKTOP. RECOVERED — 1.0.11 IS LIVE, AND `hpm update` IS MEASURED TO
