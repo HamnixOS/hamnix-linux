@@ -46,13 +46,16 @@
 # cannot rescue a machine that takes the next bad hook before it takes this
 # hpm. It protects machines from the hook AFTER the one that carries it.
 #
-# AND THE PART THAT IS STILL OPEN (assertion 9 prints it; nothing asserts it)
-# A lexical error is NOT fatal to hamsh when it sources a script, so the
-# runaway-quote hook still exits 0 and hpm still says "installed". The machine
-# no longer hangs -- but it is told a half-done install succeeded. Making a lex
-# error fatal changes what PID 1 does when /etc/rc.boot fails to lex (boot to a
-# degraded shell, or do not boot), which is its own decision. HANDOFF.md §0
-# carries it as an open question.
+# THE PART THAT WAS OPEN HERE IS NOW CLOSED ELSEWHERE (2026-08-12)
+# This gate used to end by printing -- not asserting -- that the runaway-quote
+# hook still exited 0 and hpm still said "installed", because a lexical error
+# was not fatal to hamsh. It is fatal now: hamsh names the file and the line,
+# says the script was NOT RUN, and exits non-zero; hpm turns that into a named
+# install failure; and PID 1 alone is exempt from the exit, because an init
+# that exits panics the kernel -- it announces a rescue shell instead. That is
+# gated, in both halves and with a real boot, by tests/linux/lex_error_fatal.sh.
+# THIS file's subject is unchanged and so are its assertions: the wait on a
+# hook is bounded no matter WHY the hook does not finish.
 #
 # HOW IT RUNS: entirely on the host, no QEMU. hpm and hamsh are built for the
 # Linux line by scripts/hamlinux_build.sh and run inside a user + mount + pid
@@ -63,6 +66,16 @@
 # _run_hook and assertion 4 goes red (`hpm install hooktest-quote` never
 # returns); remove the deadline loop and assertions 6/7/8 go red (`hpm install
 # hooktest-hang` never returns).
+#
+# AND ONE CORRECTION TO ITS OWN HISTORY (2026-08-12). Assertions 1 and 2 were
+# measuring NOTHING: the fixture wrote the runaway-quote wrapper to a path
+# under $R while both assertions opened $W/quote.exec, so hamsh was handed a
+# FILE THAT DID NOT EXIST -- it said `boot rc ... not found`, fell into its
+# REPL, and hung / exited on stdin exactly as the real wrapper would have.
+# Green, both of them, without the bad quote ever being lexed once. It was
+# found only because a new diagnostic was missing from output that claimed to
+# be about it. The path is fixed and assertion 1 now refuses a `not found` as
+# evidence of anything. Same family as scripts/test_gate_softgreen.sh.
 #
 # Usage: tests/linux/hpm_hook_bounded.sh
 set -uo pipefail
@@ -132,10 +145,10 @@ cp /lib64/ld-linux-x86-64.so.2 "$R/lib64/" 2>/dev/null
 rm -f "$R/hangfifo"; mkfifo "$R/hangfifo"
 
 # ------------------------------------------------- the fixture repository
-python3 - "$R/repo/main" <<'PYFIX' || exit 1
+python3 - "$R/repo/main" "$W" <<'PYFIX' || exit 1
 import hashlib, json, os, shutil, sys, tarfile, tempfile
 
-out = sys.argv[1]
+out, work = sys.argv[1], sys.argv[2]
 pkgdir = os.path.join(out, "packages")
 os.makedirs(pkgdir, exist_ok=True)
 
@@ -157,6 +170,10 @@ HANG = ("# hooktest-hang -- lexes fine, blocks forever on an open(2).\n"
         "echo tail < /hangfifo\n"
         "echo '[hooktest-hang] finished'\n"
         "exit 0\n")
+
+# A well-formed script with NO `exit`, so it reaches the REPL legitimately.
+# Assertion 2 needs one: a script that does not lex no longer gets there.
+NOEXIT = ("echo noexit-ran\n")
 
 GOOD = ("# hooktest-good -- an ordinary, well-formed hook.\n"
         "echo '[hooktest-good] hook ran'\n"
@@ -211,9 +228,20 @@ with open(os.path.join(out, "index.json"), "w") as fh:
 
 # The wrapper hpm writes for the runaway-quote hook: the body, then the
 # "\nexit\n" safety net. This is the exact byte sequence _run_hook hands to
-# hamsh, and assertions 1-3 drive hamsh with it directly.
-with open(os.path.join(os.path.dirname(out), "..", "quote.exec"), "w") as fh:
+# hamsh, and assertions 1-2 drive hamsh with it directly.
+#
+# IT USED TO BE WRITTEN WHERE NOTHING READ IT. This path was
+# dirname(out)/.. == $R, while assertions 1-2 open $W/quote.exec -- so for
+# every run before 2026-08-12 hamsh was handed a file THAT DID NOT EXIST. It
+# printed `boot rc ... not found`, fell into its REPL, and hung or exited on
+# stdin exactly as a real runaway-quote wrapper would have, so both assertions
+# went green having never once lexed the bad quote. Found while making a lex
+# error fatal: the shell's new diagnostic was missing from output that claimed
+# to be about it.
+with open(os.path.join(work, "quote.exec"), "w") as fh:
     fh.write(QUOTE + "\nexit\n")
+with open(os.path.join(work, "noexit.exec"), "w") as fh:
+    fh.write(NOEXIT)
 print("fixture: %d packages" % len(entries))
 PYFIX
 
@@ -224,29 +252,48 @@ echo "[hook-bounded] ================================================"
 # test for a hang that itself hangs teaches nobody anything.
 echo "[hook-bounded] the mechanism: hamsh on the exact wrapper hpm writes"
 
-# (1) REPRODUCE THE HANG. stdin is an open-but-silent pipe -- which is what a
-#     hook inherited from hpm, whose stdin nobody is feeding, actually is.
+# (1) THE WRAPPER THAT WEDGED THE MACHINE, on an open-but-silent stdin --
+#     which is what a hook inherited from hpm, whose stdin nobody is feeding,
+#     actually is. It used to reach the interactive REPL here and never return.
+#     Since 2026-08-12 a lexical error is FATAL to the script (see
+#     tests/linux/lex_error_fatal.sh), so it never gets to the REPL at all: it
+#     names the file and the line and exits non-zero. EITHER of those is a
+#     pass; what must never happen again is the hang.
+#
+#     NOTE ON THIS ASSERTION'S OWN HISTORY: $W/quote.exec did not exist for
+#     every run before that date -- the fixture wrote it under $R -- so hamsh
+#     was handed a MISSING FILE, said `boot rc ... not found`, and fell into
+#     the REPL, and this assertion went green having never lexed the bad quote
+#     once. The path is fixed above; the check below no longer accepts a
+#     `not found` as evidence of anything.
 t0=$SECONDS
 sleep 12 | timeout 8 "$W/hamsh.elf" "$W/quote.exec" > "$W/m_pipe.out" 2>&1
 rc=$?
-if [ "$rc" = 124 ] && grep -q 'loop-enter' "$W/m_pipe.out"; then
-    ok "(1) THE HANG, reproduced: the runaway-quote wrapper on an open stdin reaches the interactive REPL and never returns (killed at 8 s)"
+el=$((SECONDS-t0))
+if grep -q 'not found' "$W/m_pipe.out"; then
+    bad "(1) the fixture wrapper $W/quote.exec is MISSING -- this assertion would be measuring nothing"
+elif [ "$rc" = 124 ]; then
+    bad "(1) THE HANG IS BACK: the runaway-quote wrapper on an open stdin never returned (killed at 8 s)"
+    sed -n '1,20p' "$W/m_pipe.out"
+elif [ "$rc" != 0 ] && grep -q 'lexical error' "$W/m_pipe.out"; then
+    ok "(1) the runaway-quote wrapper on an OPEN stdin does not wedge: hamsh reports the lexical error and exits $rc in ${el}s"
 else
-    bad "(1) expected the hang (rc 124 + loop-enter); got rc=$rc after $((SECONDS-t0))s"
+    bad "(1) unexpected: rc=$rc in ${el}s with no lexical error reported"
     sed -n '1,20p' "$W/m_pipe.out"
 fi
-grep -q 'lexical error' "$W/m_pipe.out" \
-    && note "     and the cause is visible in its output: hamsh: lexical error (unterminated quote ...)"
 
-# (2) THE SAME WRAPPER WITH STDIN AT /dev/null. This is the claim the fix
-#     rests on and it is MEASURED, not assumed -- the assumption is the whole
-#     bug one level down.
+# (2) HAMSH'S REPL EXITS ON EOF. This is the claim _run_hook's /dev/null stdin
+#     rests on, and it is MEASURED, not assumed -- the assumption is the whole
+#     bug one level down. It needs a script that REACHES the REPL, so it uses a
+#     well-formed hook with no `exit` (a script that does not lex no longer
+#     gets that far).
 t0=$SECONDS
-timeout 8 "$W/hamsh.elf" "$W/quote.exec" < /dev/null > "$W/m_null.out" 2>&1
+timeout 8 "$W/hamsh.elf" "$W/noexit.exec" < /dev/null > "$W/m_null.out" 2>&1
 rc=$?
 el=$((SECONDS-t0))
-if [ "$rc" != 124 ] && grep -q 'loop-enter' "$W/m_null.out"; then
-    ok "(2) hamsh's REPL DOES exit on EOF: same wrapper, stdin /dev/null, reaches loop-enter and exits in ${el}s (rc=$rc)"
+if [ "$rc" != 124 ] && grep -q 'loop-enter' "$W/m_null.out" \
+   && grep -q 'noexit-ran' "$W/m_null.out"; then
+    ok "(2) hamsh's REPL DOES exit on EOF: a hook with no \`exit\`, stdin /dev/null, reaches loop-enter and exits in ${el}s (rc=$rc)"
 else
     bad "(2) hamsh did not exit on EOF: rc=$rc after ${el}s"
     sed -n '1,20p' "$W/m_null.out"
@@ -362,18 +409,15 @@ else
     bad "(10) an ordinary install regressed"; sed -n '1,25p' "$W/good.log"
 fi
 
-# ------------------------------------------------------------------ open
-# NOT AN ASSERTION. Said out loud because it is the difference between "the
-# machine no longer hangs" and "the machine was told the truth".
-echo "[hook-bounded] ---- still open, deliberately not fixed here ----"
+# ------------------------------------------------------------- once open
+# NOT AN ASSERTION -- tests/linux/lex_error_fatal.sh asserts this now. Kept as
+# a tripwire: if this line ever prints again, a lexical error has stopped being
+# fatal to hamsh and hpm is back to believing a hook that ran nothing.
 if grep -q 'installed hooktest-quote@1.0.0' "$W/quote.log"; then
-    note "hpm reported 'installed hooktest-quote@1.0.0' for a hook that LEXED"
-    note "  AND THEREFORE RAN NOTHING. A lexical error is not fatal to hamsh"
-    note "  when it sources a script, so the hook exits 0 and hpm believes it."
-    note "  The machine no longer hangs; it is still told a half-done install"
-    note "  succeeded. Making a lex error fatal changes what PID 1 does when"
-    note "  /etc/rc.boot fails to lex, so it is its own decision -- HANDOFF.md"
-    note "  §0 carries it as an open question."
+    note "REGRESSION WATCH: hpm reported 'installed hooktest-quote@1.0.0' for a"
+    note "  hook that failed to lex AND THEREFORE RAN NOTHING. That was fixed on"
+    note "  2026-08-12 (a lex error is fatal to the script; hamsh exits non-zero"
+    note "  and hpm fails the install by name). See tests/linux/lex_error_fatal.sh."
 fi
 
 echo "[hook-bounded] ================================================"

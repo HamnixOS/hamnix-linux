@@ -4936,7 +4936,13 @@ bash tests/linux/hpm_hook_bounded.sh
 # and the second one IN A REAL BOOT: a private image whose /etc/rc.boot carries
 # the field's own apostrophe, booted under QEMU, driven over the serial console
 # after the boot settles. hamsh and hpm are both given an OPEN, silent stdin,
-# because an already-EOF stdin grants the fix for free. Reverted (user/hamsh.ad
-# at its parent commit): 10 PASS / 7 FAIL. ~7 min with the image staged;
+# because an already-EOF stdin grants the fix for free. 17 PASS / 0 FAIL;
+# reverted (user/hamsh.ad + user/hpm.ad at their parent commit) 8 PASS / 9 FAIL
+# -- 1,2,3 (hamsh hangs on an open stdin and names nothing), 6,7,8,9 (hpm says
+# `installed lexfixture-quote@1.0.0` and writes it to installed.json), and
+# 11,12 (the booted machine's only word about its unreadable rc is one unnamed
+# `hamsh: lexical error` line). 13-16 pass BOTH WAYS and that is the point: the
+# fall-through to a console shell is not new, so this change costs no machine.
+# ~7 min with the image staged;
 # LEXGATE_SKIP_BOOT=1 runs the host half alone in ~2 min.
 bash tests/linux/lex_error_fatal.sh
