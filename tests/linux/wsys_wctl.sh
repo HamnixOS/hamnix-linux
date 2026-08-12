@@ -178,6 +178,29 @@ else
         "scene must read as a 0-byte SUCCESS, not a refusal."
 fi
 
+# 3. A FULL-SIZED BLIT IN ONE WRITE -- the size a real window actually sends.
+#    lib/hamui.ad composes the whole 'B' header plus the RGBA payload into one
+#    scratch buffer and issues ONE write of it, so an 880x600 window blits
+#    2,112,018 bytes at once. The draw/ctl write path used to copy every write
+#    into a 1 MiB reassembly buffer and refuse anything larger, so EVERY blit
+#    from EVERY v2 window bigger than about 512x512 was refused: measured,
+#    write(2) returned -90 (EMSGSIZE) and the window painted nothing. The small
+#    blit above is 512 bytes and sails through, which is exactly why this
+#    assertion has to exist separately -- a tiny test cannot see this.
+BIG="$("$BIN/probe" bigblit 2>&1 | head -1)"
+echo "     $BIG"
+BW="$(printf '%s' "$BIG" | sed -n 's/.*wrote=\(-\{0,1\}[0-9]\{1,\}\).*/\1/p')"
+BB="$(printf '%s' "$BIG" | sed -n 's/.*bytes=\([0-9]\{1,\}\).*/\1/p')"
+if [ -n "$BW" ] && [ "$BW" = "${BB:-x}" ]; then
+    ok "a FULL-SIZED blit is accepted whole: ${BB} bytes in one write(2)"
+elif [ "${BW:-0}" = "-90" ]; then
+    bad "A FULL-SIZED BLIT IS REFUSED: write(2) returned -90 (EMSGSIZE) for"\
+        "${BB} bytes. Every v2 window bigger than ~512x512 -- which is every"\
+        "browser -- cannot put a single frame on screen."
+else
+    bad "a full-sized blit was not accepted: wrote=${BW:-?} of ${BB:-?} bytes"
+fi
+
 echo
 echo "wsys_wctl: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ] || { echo "FAIL wsys_wctl"; exit 1; }
