@@ -10,8 +10,44 @@
 # therefore an untested belief about the only part of the compositor nobody
 # had ever executed. This gate executes it.
 #
-# THE ANSWER IS THAT IT IS 13x SLOWER AND BURNS A CORE, AND WHERE
-# ===============================================================
+# THE ANSWER WAS THAT IT WAS 13x SLOWER AND BURNED A CORE. IT IS FIXED.
+# ======================================================================
+# Everything below this block was true and is now HISTORY, kept because a
+# measurement whose predecessor cannot be re-run is a claim. Re-run it with
+# HAMNIX_VK_FRAME_MEM=device, which restores the exact configuration it
+# describes.
+#
+# THE CAUSE was where the composite LIVED. vk's frame was allocated
+# DEVICE_LOCAL unconditionally, which on a discrete card without resizable BAR
+# is the PCIe BAR aperture: host-mappable, so nothing failed or warned, and
+# uncached, so every CPU read of it was a bus round trip. present_rows()
+# write(2)s the whole composite to /dev/fb every frame, so that placement cost
+# 66.6 ms per frame -- timed on its own by the `bench: writeback` counter this
+# work added, which reports the sys_write loop separately and finds it is
+# 96-99% of `present` in every configuration.
+#
+#   frame placement          writeback/frame   bandwidth
+#   DEVICE_LOCAL (the BAR)        66602 us        61 MB/s
+#   HOST_VISIBLE|COHERENT         10044 us       407 MB/s
+#   HOST_CACHED (now default)       155 us     26417 MB/s
+#   software, for scale             163 us     24988 MB/s
+#
+# AFTER, on this host, same harness, same geometry:
+#
+#                        before      after     software
+#   sustained, pointer   7.5 fps   58.1 fps     61 fps
+#   sustained, drag      4.1 fps   39.5 fps     52 fps
+#   input->pixel p50    84.3 ms     8.50 ms     8.9 ms
+#   wsysd cpu, IDLE       76 %       3.87 %     1.2 %
+#
+# So this gate's own attribution check now prints "present is not the dominant
+# term on this host", which is the correct report and not a regression: the
+# term it was built to find is gone. Drag remains 39.5 vs 52 and is NOT
+# explained. See docs/vk_scanout_path.md for the ceiling above all of this
+# (GPU composites into a dmabuf the display scans out: 12870 fps, zero bytes
+# toward the CPU) and for what it would take to put wsysd there.
+#
+# ---- WHAT FOLLOWS IS THE ORIGINAL FINDING, PRESERVED ------------------
 # On this host (RTX 3090, zero-copy 1, device-local 1 — the configuration the
 # code treats as the good one, and it says so out loud) against the identical
 # offscreen desktop, identical geometry, back to back:
@@ -125,10 +161,24 @@ SW_TOT="$(field "$WORK/bench_sw.txt" total)";   GPU_TOT="$(field "$WORK/bench_gp
 SW_PRE="$(field "$WORK/bench_sw.txt" present)"; GPU_PRE="$(field "$WORK/bench_gpu.txt" present)"
 SW_CLR="$(field "$WORK/bench_sw.txt" clear)";   GPU_CLR="$(field "$WORK/bench_gpu.txt" clear)"
 info "per frame: total ${SW_TOT}us -> ${GPU_TOT}us; clear ${SW_CLR}us -> ${GPU_CLR}us; present ${SW_PRE}us -> ${GPU_PRE}us"
+# THIS USED TO BE A DIAGNOSTIC AND IS NOW A GATE, and the polarity is
+# reversed. When the defect existed, "present dominates" was the FINDING and
+# was reported with ok(). It is now the REGRESSION: present dominating means
+# the composite is back behind the bus. A check that passes when the bug is
+# present is worse than no check.
+GPU_WB="$(sed -n 's/.*writeback us\/frame \([0-9]*\).*/\1/p' "$WORK/bench_gpu.txt" | head -1)"
+SW_WB="$(sed -n 's/.*writeback us\/frame \([0-9]*\).*/\1/p' "$WORK/bench_sw.txt" | head -1)"
+GPU_HC="$(sed -n 's/.*host_cached \([0-9]*\).*/\1/p' "$WORK/bench_gpu.txt" | head -1)"
+info "writeback (the sys_write loop alone): SW ${SW_WB}us -> GPU ${GPU_WB}us; frame host_cached ${GPU_HC}"
 if [ "${GPU_PRE:-0}" -gt "$(( ${GPU_CLR:-1} * 10 ))" ]; then
-    ok "the cost is LOCALISED and it is not the rasterizer: clear (what the device does) is ${GPU_CLR}us against the CPU's ${SW_CLR}us, while present (the CPU reading the composite back out of device-local VRAM to write /dev/fb) is ${GPU_PRE}us against ${SW_PRE}us"
+    bad "REGRESSION: present is ${GPU_PRE}us against clear ${GPU_CLR}us, i.e. the composite is behind the bus again. The writeback alone is ${GPU_WB}us against software's ${SW_WB}us. Check the frame's placement: host_cached is ${GPU_HC} and must be 1. See docs/vk_scanout_path.md."
 else
-    info "present is not the dominant term on this host -- the attribution in this file's header does not hold here and the header must be re-read against these numbers"
+    ok "the readback is gone: present ${GPU_PRE}us against the CPU path's ${SW_PRE}us, writeback ${GPU_WB}us against ${SW_WB}us, and clear (what the device does) ${GPU_CLR}us against ${SW_CLR}us"
+fi
+if [ "${GPU_HC:-0}" != 1 ]; then
+    bad "the GPU frame is NOT host-cached (host_cached=${GPU_HC:-?}); every present pays the PCIe bus. This is the 13x-slower configuration."
+else
+    ok "the GPU frame is host-cached, which is what makes the readback an ordinary memory copy"
 fi
 
 # ---- 2. THE LIVE DESKTOP ON THE GPU PATH --------------------------------

@@ -76,6 +76,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>          /* close(), for the exported dmabuf fd */
 
 #include "linux-vk-spv.h"
 
@@ -143,6 +144,7 @@ typedef uint64_t VkQueryPool;
 #define VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT  0x1
 #define VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT  0x2
 #define VK_MEMORY_PROPERTY_HOST_COHERENT_BIT 0x4
+#define VK_MEMORY_PROPERTY_HOST_CACHED_BIT   0x8
 
 #define VK_BUFFER_USAGE_TRANSFER_SRC_BIT   0x1
 #define VK_BUFFER_USAGE_TRANSFER_DST_BIT   0x2
@@ -288,6 +290,26 @@ typedef struct {
     uint32_t memoryHeapCount; VkMemoryHeap memoryHeaps[16];
 } VkPhysicalDeviceMemoryProperties;
 
+/* VK_MAX_EXTENSION_NAME_SIZE is 256 and the struct is name + specVersion. */
+typedef struct { char extensionName[256]; uint32_t specVersion; }
+    VkExtensionProperties;
+
+/* ---- external memory (dmabuf export), all from VK_KHR_external_memory_fd
+ * and VK_EXT_external_memory_dma_buf. Hand-declared like everything else
+ * here; the sType numbers are the extension-assigned ones. ---- */
+#define ST_EXTERNAL_MEMORY_BUFFER_CREATE_INFO 1000072000
+#define ST_EXPORT_MEMORY_ALLOCATE_INFO        1000072002
+#define ST_MEMORY_GET_FD_INFO_KHR             1000074002
+#define VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT 0x200
+
+typedef struct { uint32_t sType; const void* pNext; uint32_t handleTypes; }
+    VkExternalMemoryBufferCreateInfo;
+typedef struct { uint32_t sType; const void* pNext; uint32_t handleTypes; }
+    VkExportMemoryAllocateInfo;
+typedef struct { uint32_t sType; const void* pNext;
+                 VkDeviceMemory memory; uint32_t handleType; }
+    VkMemoryGetFdInfoKHR;
+
 typedef struct {
     uint32_t sType; const void* pNext; VkFlags flags;
     VkDeviceSize size; VkFlags usage; uint32_t sharingMode;
@@ -351,6 +373,9 @@ VKFN(void,     vkGetPhysicalDeviceProperties, (VkPhysicalDevice, VkPhysicalDevic
 VKFN(void,     vkGetPhysicalDeviceQueueFamilyProperties, (VkPhysicalDevice, uint32_t*, VkQueueFamilyProperties*));
 VKFN(void,     vkGetPhysicalDeviceMemoryProperties, (VkPhysicalDevice, VkPhysicalDeviceMemoryProperties*));
 VKFN(VkResult, vkCreateDevice, (VkPhysicalDevice, const VkDeviceCreateInfo*, const void*, VkDevice*));
+VKFN(VkResult, vkEnumerateDeviceExtensionProperties, (VkPhysicalDevice, const char*, uint32_t*, VkExtensionProperties*));
+VKFN(void*, vkGetDeviceProcAddr, (VkDevice, const char*));
+VKFN(VkResult, vkGetMemoryFdKHR, (VkDevice, const VkMemoryGetFdInfoKHR*, int*));
 VKFN(void,     vkDestroyDevice, (VkDevice, const void*));
 VKFN(void,     vkGetDeviceQueue, (VkDevice, uint32_t, uint32_t, VkQueue*));
 VKFN(VkResult, vkCreateBuffer, (VkDevice, const VkBufferCreateInfo*, const void*, VkBuffer*));
@@ -443,6 +468,11 @@ static uint8_t*      g_fmap;
 static int32_t       g_fw, g_fh;
 static int32_t       g_fbgra;
 static int           g_fdevlocal;
+static VkFlags       g_last_place_flags;   /* set by make_storage_buffer */
+static VkFlags       g_fflags;             /* ...captured for the frame */
+static int           g_can_export;         /* the 3 dmabuf extensions are on */
+static int           g_fexported;          /* the frame is an exportable alloc */
+static int           g_fdmabuf = -1;       /* its dmabuf fd, once exported */
 
 /* the source arena (binding 1): blit pixels + glyph coverage, grows on demand */
 static VkBuffer       g_abuf;
@@ -573,6 +603,28 @@ static int32_t g_no_covcache;
  * Pixels are unaffected either way, which is what makes it a lever. */
 static int32_t g_arena_devlocal;
 
+/* Where a mapped buffer is placed. The measured table that justifies these
+ * three, and the rule for choosing between them, is the comment above
+ * make_storage_buffer(); they are declared up here only because the tunables
+ * below have to name them. */
+#define HVK_PLACE_HOST_COHERENT 0   /* HOST_VISIBLE|HOST_COHERENT, uncached   */
+#define HVK_PLACE_DEVICE_FIRST  1   /* DEVICE_LOCAL|HOST_VISIBLE if it exists */
+#define HVK_PLACE_HOST_CACHED   2   /* ...|HOST_CACHED if it exists           */
+
+/* THE FOURTH LEVER, and the one nobody had ever pulled — where the FRAME
+ * lives. See the placement table above make_storage_buffer(). The frame's
+ * placement was not a lever at all before this: hvk_frame_create() passed a
+ * hardcoded 1 and got the BAR every time.
+ *
+ *   HAMNIX_VK_FRAME_MEM=cached    HOST_CACHED system RAM (the default)
+ *                       coherent  HOST_VISIBLE|HOST_COHERENT (uncached/WC)
+ *                       device    DEVICE_LOCAL|HOST_VISIBLE (the BAR — what
+ *                                 every measurement before this one used)
+ *
+ * `device` is kept precisely so the 13x-slower configuration stays
+ * reproducible: a fix whose predecessor cannot be re-run is a claim. */
+static int32_t g_frame_place = -1;
+
 static void hvk_tunables(void)
 {
     if (g_batch_max >= 0) return;
@@ -586,6 +638,14 @@ static void hvk_tunables(void)
     g_no_covcache = (s && s[0] && s[0] != '0') ? 1 : 0;
     s = getenv("HAMNIX_VK_ARENA_DEVLOCAL");
     g_arena_devlocal = (s && s[0] && s[0] != '0') ? 1 : 0;
+    g_frame_place = HVK_PLACE_HOST_CACHED;
+    s = getenv("HAMNIX_VK_FRAME_MEM");
+    if (s && s[0]) {
+        if (s[0] == 'd')      g_frame_place = HVK_PLACE_DEVICE_FIRST;
+        else if (s[0] == 'o') g_frame_place = HVK_PLACE_HOST_COHERENT;
+        else if (s[0] == 'c' && s[1] == 'o') g_frame_place = HVK_PLACE_HOST_COHERENT;
+        else                  g_frame_place = HVK_PLACE_HOST_CACHED;
+    }
 }
 
 static int hvk_fail(const char* why)
@@ -647,6 +707,8 @@ static int load_loader(void)
     BIND(vkGetPhysicalDeviceQueueFamilyProperties);
     BIND(vkGetPhysicalDeviceMemoryProperties);
     BIND(vkCreateDevice); BIND(vkDestroyDevice); BIND(vkGetDeviceQueue);
+    BIND(vkEnumerateDeviceExtensionProperties);
+    BIND(vkGetDeviceProcAddr);
     BIND(vkCreateBuffer); BIND(vkDestroyBuffer); BIND(vkGetBufferMemoryRequirements);
     BIND(vkAllocateMemory); BIND(vkFreeMemory); BIND(vkBindBufferMemory);
     BIND(vkMapMemory); BIND(vkUnmapMemory);
@@ -702,7 +764,31 @@ static const uint32_t* load_spv(size_t* nbytes, uint32_t** owned)
     return hvk_spv_vk2d_raster;
 }
 
-static int make_storage_buffer(VkDeviceSize sz, int prefer_device_local,
+/* WHERE A MAPPED BUFFER LIVES, AND WHY IT IS THE WHOLE PERFORMANCE STORY.
+ *
+ * Every buffer here is host-mapped, so every one of them has a CPU access
+ * pattern, and on a discrete GPU the placement decides that access's cost by
+ * two to three ORDERS OF MAGNITUDE. Measured on this RTX 3090 (proprietary
+ * ICD), memcpy of the 4 MiB 1280x800 composite OUT of each placement:
+ *
+ *   DEVICE_LOCAL|HOST_VISIBLE  (the BAR)     88.0 ms   0.05 GB/s
+ *   HOST_VISIBLE|HOST_COHERENT (uncached)    10.7 ms   0.38 GB/s
+ *   HOST_VISIBLE|HOST_COHERENT|HOST_CACHED    0.22 ms  18.3 GB/s
+ *   ordinary malloc'd RAM, for scale          0.16 ms  25.6 GB/s
+ *
+ * A CPU read of the BAR is 393x slower than a CPU read of cached host RAM and
+ * is not far off the cost of reading it over a network. So the rule is:
+ *
+ *   DEVICE_FIRST   the CPU only ever WRITES it, and the shader reads it hot
+ *                  (the source arena: writes to WC memory are posted and
+ *                  cheap, and g_ashadow already keeps CPU reads off the bus)
+ *   HOST_CACHED    the CPU READS it every frame (the composite: the shader's
+ *                  writes cross PCIe once, posted, while present_rows' read
+ *                  becomes an ordinary cached load)
+ *
+ * There is no placement that is best for both, which is the actual shape of
+ * this problem — see hvk_frame_create. */
+static int make_storage_buffer(VkDeviceSize sz, int place,
                                VkBuffer* buf, VkDeviceMemory* mem,
                                void** map, int* got_device_local)
 {
@@ -719,19 +805,33 @@ static int make_storage_buffer(VkDeviceSize sz, int prefer_device_local,
     p_vkGetBufferMemoryRequirements(g_dev, *buf, &mr);
     int mt = -1;
     if (got_device_local) *got_device_local = 0;
-    if (prefer_device_local) {
+    if (place == HVK_PLACE_DEVICE_FIRST) {
         /* Resizable-BAR / integrated / software ICDs give us memory that is
          * BOTH device-local and host-mappable: the shader writes at full
-         * device speed AND the compositor reads the frame with no copy. */
+         * device speed AND the compositor reads the frame with no copy.
+         * On a discrete card WITHOUT ReBAR this is the 256 MiB BAR aperture,
+         * which is host-mappable and catastrophic to read -- see the table. */
         mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
                       | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         if (mt >= 0 && got_device_local) *got_device_local = 1;
+    } else if (place == HVK_PLACE_HOST_CACHED) {
+        mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                      | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        /* A device-local type that is ALSO host-cached is the best of both and
+         * exists on integrated parts; the search above finds it there because
+         * find_mem takes the first type matching all the requested bits and
+         * integrated parts mark their single host heap device-local. */
     }
     if (mt < 0)
         mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (mt < 0) return hvk_fail("no host-visible coherent memory type");
+    if (got_device_local && (g_memprops.memoryTypes[mt].propertyFlags
+                             & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+        *got_device_local = 1;
+    g_last_place_flags = g_memprops.memoryTypes[mt].propertyFlags;
     VkMemoryAllocateInfo ai;
     memset(&ai, 0, sizeof ai);
     ai.sType = ST_MEMORY_ALLOCATE_INFO;
@@ -947,8 +1047,63 @@ static int hvk_bringup(void)
     dci.sType = ST_DEVICE_CREATE_INFO;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    VKCK(p_vkCreateDevice(g_phys, &dci, 0, &g_dev));
+    /* THE EXPORT EXTENSIONS, enabled iff the driver advertises all three.
+     *
+     * They cost nothing when unused and they are the difference between a
+     * composite that has to be COPIED to the display and one the display can
+     * SCAN OUT where it lies. Enabled here, at device creation, because that
+     * is the only place it can be done -- a device created without them
+     * cannot export later, and the failure then looks like "the driver cannot
+     * export" rather than "we did not ask".
+     *
+     * Best-effort by design: a driver without them (or a software ICD) simply
+     * gets g_can_export = 0 and every scanout entry point below refuses in a
+     * way the caller can report. */
+    const char* wanted[3] = { "VK_KHR_external_memory",
+                              "VK_KHR_external_memory_fd",
+                              "VK_EXT_external_memory_dma_buf" };
+    if (p_vkEnumerateDeviceExtensionProperties) {
+        uint32_t en = 0;
+        p_vkEnumerateDeviceExtensionProperties(g_phys, 0, &en, 0);
+        if (en > 0 && en < 4096) {
+            VkExtensionProperties* ep =
+                (VkExtensionProperties*)calloc(en, sizeof *ep);
+            if (ep) {
+                p_vkEnumerateDeviceExtensionProperties(g_phys, 0, &en, ep);
+                int found = 0;
+                for (uint32_t i = 0; i < en; i++)
+                    for (int k = 0; k < 3; k++)
+                        if (!strcmp(ep[i].extensionName, wanted[k])) found++;
+                if (found >= 3) g_can_export = 1;
+                free(ep);
+            }
+        }
+    }
+    if (g_can_export) {
+        dci.enabledExtensionCount = 3;
+        dci.ppEnabledExtensionNames = wanted;
+    }
+    if (p_vkCreateDevice(g_phys, &dci, 0, &g_dev) != VK_SUCCESS) {
+        /* If the only difference was the extensions, retry without them
+         * rather than lose the whole backend over an optional feature. */
+        if (!g_can_export) return hvk_fail("vkCreateDevice failed");
+        g_can_export = 0;
+        dci.enabledExtensionCount = 0;
+        dci.ppEnabledExtensionNames = 0;
+        VKCK(p_vkCreateDevice(g_phys, &dci, 0, &g_dev));
+    }
     p_vkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
+    /* RESOLVED THROUGH THE DEVICE, NOT dlsym. libvulkan.so.1 does NOT export
+     * vkGetMemoryFdKHR as a dynamic symbol -- dlsym returns NULL for it on
+     * this loader -- so a dlsym probe reports "this driver cannot export
+     * dmabufs" about a driver that advertises all three extensions and
+     * exports them perfectly well. Extension entry points come from
+     * vkGetDeviceProcAddr. */
+    if (g_can_export) {
+        *(void**)(&p_vkGetMemoryFdKHR) =
+            p_vkGetDeviceProcAddr(g_dev, "vkGetMemoryFdKHR");
+        if (!p_vkGetMemoryFdKHR) g_can_export = 0;
+    }
     memset(&g_memprops, 0, sizeof g_memprops);
     p_vkGetPhysicalDeviceMemoryProperties(g_phys, &g_memprops);
 
@@ -1019,6 +1174,16 @@ int32_t hvk_device_type(void) { return (int32_t)g_devtype; }
  * CPU. Callers should treat 0 as "measure before trusting". */
 int32_t hvk_frame_is_device_local(void) { return g_fdevlocal ? 1 : 0; }
 
+/* 1 iff the frame landed in HOST_CACHED memory -- i.e. iff the CPU can read
+ * the composite at ordinary RAM speed. This is the number that decides whether
+ * present_rows() costs 0.2 ms or 88 ms, so it is reported separately from
+ * device-local rather than inferred from it: on this card the two are mutually
+ * exclusive, and the one that matters for a compositor is THIS one. */
+int32_t hvk_frame_is_host_cached(void)
+{
+    return (g_fflags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? 1 : 0;
+}
+
 /* Create (or resize) the GPU-resident frame and return its mapped address, or
  * 0. The pointer is stable until the next size change: hand it to the vk color
  * image / compositor shadow and the whole path is copy-free. `bgra` selects
@@ -1035,15 +1200,137 @@ uint64_t hvk_frame_create(int32_t w, int32_t h, int32_t bgra)
     if (g_fmem) { p_vkFreeMemory(g_dev, g_fmem, 0); g_fmem = 0; }
     void* m = 0;
     VkDeviceSize sz = (VkDeviceSize)w * (VkDeviceSize)h * 4u;
-    if (make_storage_buffer(sz, 1, &g_fbuf, &g_fmem, &m, &g_fdevlocal)) {
+    /* THE PLACEMENT DECISION, and it is not the obvious one.
+     *
+     * This buffer used to ask for DEVICE_LOCAL unconditionally, on the
+     * reasoning that the shader should reach the frame at device speed. On a
+     * discrete card with no resizable BAR that lands it in the 256 MiB BAR
+     * aperture, which IS host-mappable -- so nothing fails, nothing warns, and
+     * every CPU read of the composite becomes an uncached PCIe round trip.
+     * wsysd reads the whole composite every frame, because present_rows()
+     * write(2)s it to /dev/fb and the cursor save-under reads it directly, so
+     * that decision cost 67 ms per frame and made the GPU path 13x SLOWER than
+     * the software rasterizer. See the placement table above
+     * make_storage_buffer for the measured 393x.
+     *
+     * The frame is therefore placed HOST_CACHED by default. The shader's
+     * writes then cross PCIe, but a GPU write across PCIe is POSTED -- it is
+     * fire-and-forget and the device does not stall on it -- whereas a CPU
+     * read of VRAM is a synchronous round trip with no prefetch. The two
+     * directions are not symmetric, and that asymmetry is the whole fix. */
+    hvk_tunables();
+    if (make_storage_buffer(sz, g_frame_place, &g_fbuf, &g_fmem, &m,
+                            &g_fdevlocal)) {
         g_fw = g_fh = 0;
         return 0;
     }
+    g_fflags = g_last_place_flags;
     g_fmap = (uint8_t*)m;
     g_fw = w;
     g_fh = h;
     if (rebind_descriptors()) return 0;
     return (uint64_t)(uintptr_t)g_fmap;
+}
+
+/* ==================================================================
+ * THE SCANOUT FRAME: a composite the display engine reads directly
+ * ==================================================================
+ * Everything above is about how expensive it is to get the composite from
+ * where the GPU wrote it to where the display can read it. This is the path
+ * where that question does not arise, because they are the same memory.
+ *
+ * The frame is allocated DEVICE-LOCAL and EXPORTABLE and is deliberately NOT
+ * host-mapped -- no BAR, no bus, no CPU pointer to be tempted by. Its dmabuf
+ * fd goes to DRM, which imports it (PRIME_FD_TO_HANDLE) and makes a
+ * framebuffer object of it (ADDFB2); from then on the compute shader
+ * rasterizes into VRAM and the CRTC scans that same VRAM out. Nothing crosses
+ * PCIe toward the CPU, ever, so the 88 ms readback is not reduced, it is
+ * ABSENT -- and so is the 4 MiB write(2), and so is /dev/fb.
+ *
+ * The cost of that is that the CPU can no longer touch the composite, which
+ * is a real constraint and not a detail: wsysd's cursor save-under and its
+ * software fallback for un-encodable ops both read and write comp_base
+ * directly. A compositor on this path has to do those on the device too.
+ *
+ * hvk_frame_is_scanout() reports 0 unless every step succeeded, so a caller
+ * cannot mistake a partial bring-up for a working one.
+ */
+int32_t hvk_can_export_dmabuf(void) { return g_can_export && p_vkGetMemoryFdKHR ? 1 : 0; }
+int32_t hvk_frame_is_scanout(void)  { return (g_fexported && g_fdmabuf >= 0) ? 1 : 0; }
+
+/* Create the frame as a device-local, exportable, UNMAPPED buffer and export
+ * a dmabuf fd for it. Returns the fd (>= 0), or a negative error:
+ *   -1 no device, -2 the export extensions are not available,
+ *   -3 allocation failed, -4 the driver refused the export.
+ * The fd is owned by this module and closed on the next frame create. */
+int32_t hvk_frame_create_scanout(int32_t w, int32_t h, int32_t bgra)
+{
+    if (!hvk_available()) return -1;
+    if (!hvk_can_export_dmabuf()) return -2;
+    if (w <= 0 || h <= 0) return -1;
+    g_fbgra = bgra ? 1 : 0;
+    p_vkDeviceWaitIdle(g_dev);
+    if (g_fdmabuf >= 0) { close(g_fdmabuf); g_fdmabuf = -1; }
+    if (g_fmap) { p_vkUnmapMemory(g_dev, g_fmem); g_fmap = 0; }
+    if (g_fbuf) { p_vkDestroyBuffer(g_dev, g_fbuf, 0); g_fbuf = 0; }
+    if (g_fmem) { p_vkFreeMemory(g_dev, g_fmem, 0); g_fmem = 0; }
+    g_fexported = 0;
+    VkDeviceSize sz = (VkDeviceSize)w * (VkDeviceSize)h * 4u;
+
+    VkExternalMemoryBufferCreateInfo ext;
+    memset(&ext, 0, sizeof ext);
+    ext.sType = ST_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+    ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkBufferCreateInfo bc;
+    memset(&bc, 0, sizeof bc);
+    bc.sType = ST_BUFFER_CREATE_INFO;
+    bc.pNext = &ext;
+    bc.size = sz;
+    bc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+             | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bc.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (p_vkCreateBuffer(g_dev, &bc, 0, &g_fbuf) != VK_SUCCESS)
+        return hvk_fail("scanout: vkCreateBuffer(exportable) failed"), -3;
+    VkMemoryRequirements mr;
+    memset(&mr, 0, sizeof mr);
+    p_vkGetBufferMemoryRequirements(g_dev, g_fbuf, &mr);
+    /* DEVICE_LOCAL only -- not host-visible. This is real VRAM, the fast kind,
+     * the kind the shader and the display controller both reach at full
+     * speed and the CPU cannot reach at all. */
+    int mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mt < 0) return hvk_fail("scanout: no device-local memory type"), -3;
+    VkExportMemoryAllocateInfo eai;
+    memset(&eai, 0, sizeof eai);
+    eai.sType = ST_EXPORT_MEMORY_ALLOCATE_INFO;
+    eai.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkMemoryAllocateInfo ai;
+    memset(&ai, 0, sizeof ai);
+    ai.sType = ST_MEMORY_ALLOCATE_INFO;
+    ai.pNext = &eai;
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = (uint32_t)mt;
+    if (p_vkAllocateMemory(g_dev, &ai, 0, &g_fmem) != VK_SUCCESS)
+        return hvk_fail("scanout: vkAllocateMemory(exportable) failed"), -3;
+    if (p_vkBindBufferMemory(g_dev, g_fbuf, g_fmem, 0) != VK_SUCCESS)
+        return hvk_fail("scanout: vkBindBufferMemory failed"), -3;
+
+    VkMemoryGetFdInfoKHR gi;
+    memset(&gi, 0, sizeof gi);
+    gi.sType = ST_MEMORY_GET_FD_INFO_KHR;
+    gi.memory = g_fmem;
+    gi.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    int fd = -1;
+    if (p_vkGetMemoryFdKHR(g_dev, &gi, &fd) != VK_SUCCESS || fd < 0)
+        return hvk_fail("scanout: vkGetMemoryFdKHR refused the export"), -4;
+
+    g_fmap = 0;                 /* THERE IS NO CPU POINTER. On purpose. */
+    g_fw = w; g_fh = h;
+    g_fdevlocal = 1;
+    g_fflags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    g_fexported = 1;
+    g_fdmabuf = fd;
+    if (rebind_descriptors()) return -3;
+    return fd;
 }
 
 uint64_t hvk_frame_base(void) { return (uint64_t)(uintptr_t)g_fmap; }
@@ -1054,7 +1341,9 @@ int32_t  hvk_frame_height(void) { return g_fh; }
  * intervening hvk_frame_sync) submits them. */
 int32_t hvk_frame_begin(void)
 {
-    if (!hvk_available() || !g_fmap) return -1;
+    /* A SCANOUT frame has no CPU mapping by design, so "is there a frame?"
+     * cannot be spelled `g_fmap` any more. */
+    if (!hvk_available() || (!g_fmap && !g_fexported)) return -1;
     g_nops = 0;
     g_ause = 0;
     g_ncov = 0;
@@ -1403,7 +1692,9 @@ static int32_t batch_table(int32_t first, int32_t cnt)
 int32_t hvk_frame_sync(void)
 {
     hvk_tunables();
-    if (!hvk_available() || !g_fmap) return -1;
+    /* As in hvk_frame_begin: a SCANOUT frame has no CPU mapping, and testing
+     * for one here silently produced zero frames and an empty error string. */
+    if (!hvk_available() || (!g_fmap && !g_fexported)) return -1;
     if (g_nops == 0) return g_frame_err;
     uint64_t t0 = now_us();
 
