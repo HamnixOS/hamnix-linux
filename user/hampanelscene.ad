@@ -86,6 +86,7 @@ extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> in
 # read of a file whose length we do not control, and sys_getenv resolves
 # $HAMWSYS so the panel watches the SAME segment the refusing client marked.
 extern def sys_fd_size(fd: int32) -> int64
+extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
 extern def sys_getenv(name: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64
 from lib.p9 import spawn, spawn_detached, p9_listdir, p9_note
 from lib.homedir import hd_resolve_home
@@ -4661,6 +4662,27 @@ def _drain_launch_queues():
 # the update, this one is for whoever walks up to the machine afterwards and
 # clicks Applications. Neither is a substitute for the other.
 #
+# AND IT DOES NOT RELY ON /srv BEING TMPFS, which is the one part of the
+# argument above that this code does not control. `bind '#s' /srv` goes
+# through linuxinit's bind_or_warn -- it WARNS AND CONTINUES -- and
+# scripts/hamlinux_disk.sh creates a real /srv on the ext4 root, so a boot
+# where that bind fails runs with a /srv that remembers. A host run as root
+# with no $HAMWSYS is on an ordinary /srv too. In any of those the marker
+# would outlive the reboot it asks for, and the desktop would tell somebody to
+# restart a session they have already restarted -- the exact shape of the
+# appmenu.fault defect this branch fixed.
+#
+# So the marker carries the KERNEL'S BOOT ID and this reader ignores any line
+# stamped with a different one. Only the LAST line is checked: the writer
+# appends, so if the newest refusal is from a previous boot then every one
+# before it is too, and there is nothing unshown. When a stale file is found
+# it is acknowledged up to its full length rather than merely skipped, so the
+# next genuine refusal still moves the serial past it.
+#
+# "boot=?" means the writer could not read /proc, and is treated as
+# "cannot tell" -- the behaviour this had before boot ids existed. A notice
+# that is silently impossible would be worse than one that is early.
+#
 # NOT PRIMED AT STARTUP, unlike _peek_launch_serial. A panel that starts and
 # finds a marker is a panel in a session that still needs restarting -- the
 # condition is still true, so the honest answer is to show it.
@@ -4673,6 +4695,10 @@ notice_box_x: int64 = 0
 notice_box_y: int64 = 0
 _notice_path: Array[600, uint8]
 _notice_path_ready: int32 = 0
+_notice_boot: Array[64, uint8]          # this boot's id, read once
+_notice_boot_len: uint64 = 0
+_notice_boot_ready: int32 = 0
+_notice_tail: Array[512, uint8]
 
 
 # "<segment>.refused", resolved once, the same way user/linux-wsys.c derives
@@ -4702,6 +4728,81 @@ def _notice_resolve_path():
     _notice_path[p] = 0
 
 
+# This boot's id, read once from the kernel. Empty when it cannot be read,
+# which makes the staleness test below fail open.
+def _notice_read_boot():
+    if _notice_boot_ready != 0:
+        return
+    _notice_boot_ready = 1
+    _notice_boot_len = 0
+    fd: int32 = sys_open(cast[Ptr[char]]("/proc/sys/kernel/random/boot_id"))
+    if fd < 0:
+        return
+    n: int64 = sys_read(fd, &_notice_boot[0], 63)
+    sys_close(fd)
+    if n <= 0:
+        return
+    p: uint64 = 0
+    while p < cast[uint64](n):
+        c: uint8 = _notice_boot[p]
+        if c == 10 or c == 13 or c == 32:
+            break
+        p = p + 1
+    _notice_boot_len = p
+
+
+# Does the marker's LAST line carry this boot's id? Returns 1 for "yes, or we
+# cannot tell", 0 for "no -- this file is left over from a previous boot".
+def _notice_marker_is_this_boot(fd: int32, sz: int64) -> int32:
+    _notice_read_boot()
+    if _notice_boot_len == 0:
+        return 1                          # cannot tell: behave as before
+    off: int64 = 0
+    if sz > 400:
+        off = sz - 400
+    if sys_lseek(fd, off, 0) < 0:
+        return 1
+    n: int64 = sys_read(fd, &_notice_tail[0], 400)
+    if n <= 0:
+        return 1
+    cap: uint64 = cast[uint64](n)
+    # Start of the last non-empty line.
+    e: uint64 = cap
+    while e > 0 and _notice_tail[e - 1] == 10:
+        e = e - 1
+    if e == 0:
+        return 1
+    b: uint64 = e
+    while b > 0 and _notice_tail[b - 1] != 10:
+        b = b - 1
+    # Find "boot=" within [b, e).
+    i: uint64 = b
+    while i + 5 <= e:
+        if _notice_tail[i] == 98 and _notice_tail[i+1] == 111 \
+                and _notice_tail[i+2] == 111 and _notice_tail[i+3] == 116 \
+                and _notice_tail[i+4] == 61:
+            vs: uint64 = i + 5
+            ve: uint64 = vs
+            while ve < e and _notice_tail[ve] != 32 and _notice_tail[ve] != 10:
+                ve = ve + 1
+            # An unstamped or unreadable marker cannot be judged.
+            if ve == vs:
+                return 1
+            if ve - vs == 1 and _notice_tail[vs] == 63:      # "?"
+                return 1
+            if ve - vs != _notice_boot_len:
+                return 0
+            k: uint64 = 0
+            while k < _notice_boot_len:
+                if _notice_tail[vs + k] != _notice_boot[k]:
+                    return 0
+                k = k + 1
+            return 1
+        i = i + 1
+    # No boot= at all: a marker written before this field existed.
+    return 1
+
+
 # The panel carrying the Applications button is the one that gets the notice
 # -- it is the button the person pressed and got nothing from. A layout with
 # no menu widget at all falls back to panel 0 so the notice is never
@@ -4729,8 +4830,19 @@ def _notice_poll() -> int32:
     if fd < 0:
         return 0
     sz: int64 = sys_fd_size(fd)
-    sys_close(fd)
     if sz <= notice_ack:
+        sys_close(fd)
+        return 0
+    fresh: int32 = _notice_marker_is_this_boot(fd, sz)
+    sys_close(fd)
+    if fresh == 0:
+        # A marker that outlived a reboot. Acknowledge the whole of it, so it
+        # is judged once and the next REAL refusal still moves the serial past
+        # it, and say so once -- a notice that silently did not appear is the
+        # failure shape this whole file exists to stop.
+        if notice_ack == 0:
+            _writeall(1, cast[Ptr[uint8]]("[panel] the window system's refusal marker is from a previous boot; ignoring it (see THE \"RESTART BEFORE OPENING APPS\" NOTICE in user/hampanelscene.ad)\n"))
+        notice_ack = sz
         return 0
     notice_on = 1
     notice_panel = _notice_first_menu_panel()

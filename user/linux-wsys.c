@@ -1692,8 +1692,31 @@ static int shm_seg_is_live(int fd, off_t size)
  *     One short line per refusing process (the guard above bounds it).
  *   * It lives in /srv, which linuxinit mounts as tmpfs and which is made
  *     fresh every boot.  The notice's advice is REBOOT, so the evidence for
- *     the notice must not survive the reboot that fixes it.  It cannot: the
- *     file is gone before the panel that would read it has started.
+ *     the notice must not survive the reboot that fixes it.
+ *
+ *     WHAT IF /srv IS NOT TMPFS.  That sentence was the whole liveness
+ *     argument and it rests on something this code does not control, so it
+ *     was checked instead of trusted -- and it is REACHABLE, three ways:
+ *
+ *       1. linuxinit's `bind '#s' /srv` goes through bind_or_warn, which
+ *          WARNS AND CONTINUES.  scripts/hamlinux_disk.sh creates a real /srv
+ *          directory on the ext4 root, so a boot where that bind fails runs
+ *          with /srv on the disk and every marker in it persists.
+ *       2. The same on any of the other eight rc scripts that bind it.
+ *       3. A host run as root with no $HAMWSYS: shm_path() returns /srv/wsys
+ *          and on an ordinary Linux box /srv is a directory on the root
+ *          filesystem.  (Unprivileged host runs fall through to /dev/shm,
+ *          which is tmpfs, and are fine.)
+ *
+ *     In any of those the marker outlives the reboot it asks for, and the
+ *     desktop tells a person to restart a session they have already
+ *     restarted -- the exact shape of the appmenu.fault defect fixed above,
+ *     where a flag outlived the reboot it asked for.
+ *
+ *     So the marker no longer depends on the filesystem forgetting: it
+ *     carries the KERNEL'S BOOT ID (seg_boot_id above), and a reader ignores
+ *     a marker stamped with any boot but the one it is running in.  The file
+ *     may survive; the notice cannot.
  *   * O_CREAT comes SECOND, for the fs.protected_regular reason written out
  *     at length in shm_attach: /srv is 1777 and the marker may already belong
  *     to another uid.  Opening the existing file first means a client that
@@ -1701,11 +1724,41 @@ static int shm_seg_is_live(int fd, off_t size)
  *   * It is entirely best-effort and errno-neutral.  The refusal is the
  *     safety property; the notice is cosmetic on top of it, and nothing about
  *     failing to write this file may change what the caller does. */
+/* THE BOOT THIS PROCESS IS RUNNING IN, or "?" when it cannot be read.
+ *
+ * See WHAT IF /srv IS NOT TMPFS in seg_refuse_mark below: the marker's whole
+ * liveness argument used to be "the filesystem forgets", and there are three
+ * ways for it not to. The kernel hands out a fresh UUID at every boot and
+ * nothing else has to cooperate, so the marker carries it and the reader can
+ * tell a refusal that happened in THIS boot from one that outlived a restart.
+ *
+ * "?" is deliberately fail-OPEN: a machine with no /proc gets the behaviour it
+ * had before this existed rather than a notice that can never appear. That
+ * leaves the stale-marker case unfixed on such a machine, which is a trade
+ * made on purpose -- /proc is bound by linuxinit before anything else runs,
+ * and a notice that is silently impossible is worse than one that is
+ * occasionally early. */
+static void seg_boot_id(char *out, size_t cap)
+{
+    snprintf(out, cap, "?");
+    int fd = open("/proc/sys/kernel/random/boot_id", O_RDONLY);
+    if (fd < 0) return;
+    char buf[64];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return;
+    buf[n] = '\0';
+    for (char *q = buf; *q; q++)
+        if (*q == '\n' || *q == '\r' || *q == ' ') { *q = '\0'; break; }
+    if (buf[0]) snprintf(out, cap, "%s", buf);
+}
+
 static void seg_refuse_mark(const char *path, uint32_t theirs)
 {
     int saved = errno;
     char mpath[600];
     char line[256];
+    char boot[64];
     if (!path || !*path) goto out;
     if (snprintf(mpath, sizeof mpath, "%s.refused", path) >= (int)sizeof mpath)
         goto out;
@@ -1714,8 +1767,11 @@ static void seg_refuse_mark(const char *path, uint32_t theirs)
         fd = open(mpath, O_WRONLY | O_APPEND | O_CREAT, 0666);
     if (fd < 0) goto out;
     if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
-    int n = snprintf(line, sizeof line, "refused live=%u mine=%u pid=%ld\n",
-                     (unsigned)theirs, (unsigned)WSYS_VERSION, (long)getpid());
+    seg_boot_id(boot, sizeof boot);
+    int n = snprintf(line, sizeof line,
+                     "refused live=%u mine=%u pid=%ld boot=%s\n",
+                     (unsigned)theirs, (unsigned)WSYS_VERSION, (long)getpid(),
+                     boot);
     if (n > 0 && n < (int)sizeof line) {
         ssize_t w = write(fd, line, (size_t)n);
         (void)w;
