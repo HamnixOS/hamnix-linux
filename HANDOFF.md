@@ -2332,8 +2332,87 @@ the whole point of it: `distro_menu.sh` and `de_appmenu_band.sh` both open the
 Applications menu by writing the panel's event ring as host owner, which is a
 fine shortcut for the geometry they gate and is precisely why the entire input
 path underneath could be missing with both of them green. Assertion 12 greps
-this file for a `wsys_poke` at an `event`/`pointer`/`keys` path and FAILS if a
-future edit takes the shortcut back.
+this file for an `event`/`pointer`/`keys` path under `/dev/wsys` and FAILS if a
+future edit takes the shortcut back. It names the RING and not the tool — it
+used to say `wsys_poke`, which `cat`, `echo >` or a fresh helper would each
+have walked straight past.
+
+#### And the day this gate accused a healthy channel
+
+`MOUSE_BIN_DIR` ran the compositor, the desktop and the panel out of a
+published tarball — and then read the panel's geometry back with `wsys_poke`
+**compiled from this tree**, because the substitution loop carried
+`[ "$name" != wsys_poke ]` on the grounds that a test tool is not part of the
+channel and *"it only ever READS a ctl line, so where it comes from cannot
+change an answer"*.
+
+That sentence is false, and `user/linux-wsys.c` says why in its own words:
+every program in this tree is a wsys client, **reading included**. Opening
+`/dev/wsys/<wid>/ctl` attaches to the shared segment, and an attacher whose
+`WSYS_VERSION` differs re-initialises it *by design* — "the running session's
+windows are gone and every live client is re-attached to an empty table". The
+tree went 6 → 7 at `11ffe583`; the published desktop was 6. So the gate stood
+up a healthy v6 desktop from packaged bytes, wiped it with its own v7 probe on
+the first ctl read, and reported **`no full-width top bar`** against the
+PACKAGES — while sitting in the publish path, before `index.json` is written.
+
+Measured on `hamnix-desktop-1.0.17.tar.gz`, same bytes both times:
+
+| probe | score |
+|--|--|
+| tree-built `wsys_poke` (v7) | **2 PASS / 1 FAIL** — `no full-width top bar` |
+| the channel's own `cat` (v6) | **13 PASS / 0 FAIL** |
+
+The same shape had already been found once and written into
+`installed_update_wsysver.sh`: *"`cat /dev/wsys/2/ctl` is a wsys client … the
+gate then photographed the wreck it had made and blamed the desktop."*
+NORTH_STAR.md's rule is that a gap must never answer something success-shaped
+instead of the truth; **a gate that manufactures a failure and bills it to the
+packages is the same lie with the sign flipped.**
+
+Two things followed:
+
+* **The exclusion is gone.** There is no "except the test tool" case left. The
+  window table is a FILE and `cat` is in the channel, so the probe is now the
+  channel's own `cat`, and with `MOUSE_BIN_DIR` set this gate **compiles
+  nothing at all** — no binary from this tree attaches to the segment.
+  Version-matching `wsys_poke` would have removed today's instance; removing
+  the tree binary removes the class.
+* **And the skew is detected anyway**, because "nothing here is from the tree"
+  is a property a future edit can lose quietly. `segstate` reads the first 24
+  bytes of the shm segment **from the host with python3** — magic, version,
+  focus, `next_wid`, desktop, gen, the prefix `linux-wsys.c` documents as
+  byte-for-byte identical across v5/v6/v7. A plain file read attaches to
+  nothing and cannot perturb what it is looking at. Three samples, three
+  different questions: after `wsysd` (the session's version, stated out loud —
+  `wsys v6 … bytes=19052956`); after the clients (a move here is a **MIXED
+  CHANNEL**, the 1.0.10 shape, named as the packages' fault, and the run
+  **stops** there because every pixel after a mid-run re-init is a photograph
+  of wreckage); after the first ctl read (a move here can only be this gate's
+  own instrument, and it says so and stops).
+
+The first version of that last checkpoint printed *"fix the instrument"* about
+an instrument that was fine, on the reconstructed 1.0.10 control — a red for
+the right reason worded as a red for the wrong one, which is still the failure
+this project keeps paying for. Hence the stop at checkpoint 2.
+
+Scores, all measured: published 1.0.17 **13/0**; current tree **13/0**;
+`channel_runs_desktop.sh` against the built channel **9/0** standalone and
+**8/0** with `CHANRUN_NO_INDEX=1`, reporting the packaged desktop at 13/13 on a
+**v6** session under a v7 tree. The reconstructed 1.0.10 mixed build
+(`hamdesktop`/`hampanelscene` at `b3ecfb71^` beside a current `wsysd`) is
+**2 PASS / 1 FAIL, exit 1**, and the FAIL now names the packages rather than
+the top bar. With the fix reverted, the published bytes go back to
+**2 PASS / 1 FAIL, `no full-width top bar`**.
+
+**Found on the way, still live:** `scripts/hamlinux_build.sh` caches its
+`.linux-*.o` objects **in the output directory** and invalidates them on the
+`.c` file's mtime. Building two different trees into one output directory
+therefore links the *first* tree's wsys backend into the second tree's
+binaries, silently — which is the 1.0.10 mechanism, in the gate lane rather
+than the packager lane. It bit the first attempt at the negative control above
+(a "current" `wsysd` that came out v5). Separate output directories per tree,
+or key the cache on content.
 
 Every click is synthetic evdev — 24-byte `struct input_event` records appended
 to `HAMWSYSD_INPUT`, parsed by `wsysd`'s own `pump_input` — and every assertion

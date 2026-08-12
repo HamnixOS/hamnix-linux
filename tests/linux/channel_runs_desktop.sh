@@ -204,20 +204,29 @@ else
     info "no index.json yet (invoked before the index is written) -- the sha256 cross-check is NOT part of this run's score"
 fi
 
-# The three programs of the 1.0.10 mixture, by name, before anything runs.
-# de_mouse_chrome.sh falls back to building anything MOUSE_BIN_DIR does not
-# hold, so "is it there" has to be answered here or a missing binary would be
-# silently replaced by a fresh one -- exactly the substitution this gate exists
-# to forbid.
+# The three programs of the 1.0.10 mixture, by name, before anything runs --
+# plus `cat`, which is not a spectator here. de_mouse_chrome.sh reads the panel
+# window's geometry back out of /dev/wsys/<wid>/ctl, and reading that file
+# ATTACHES to the wsys segment: the probe is a wsys client exactly like the
+# compositor is. It used to be a tree-built wsys_poke, and when the tree went
+# WSYS_VERSION 6 -> 7 that probe re-initialised the published v6 desktop's
+# window table on its first read and the gate reported the CHANNEL as broken --
+# hamnix-desktop 1.0.17 scored 2 PASS / 1 FAIL, "no full-width top bar", and
+# 13 PASS / 0 FAIL the moment the probe was version-matched. So the probe comes
+# out of this channel's own hamnix-cat now, and it has to BE here.
+#
+# de_mouse_chrome.sh refuses by name for anything MOUSE_BIN_DIR does not hold,
+# but "is it there" is answered here too so the sentence a person reads names
+# the CHANNEL rather than the hook.
 absent=""
-for b in wsysd hamdesktop hampanelscene hamsh hpm; do
+for b in wsysd hamdesktop hampanelscene hamsh hpm cat; do
     [ -x "$BIN/$b" ] || absent="$absent $b"
 done
 if [ -n "$absent" ]; then
     bad "unpacked from the channel but NOT present:$absent"
     report; exit 1
 fi
-ok "wsysd, hamdesktop, hampanelscene, hamsh and hpm came out of the channel's tarballs (nothing was compiled)"
+ok "wsysd, hamdesktop, hampanelscene, hamsh, hpm and the ctl probe cat came out of the channel's tarballs (nothing was compiled)"
 info "$(cd "$BIN" && ls | wc -l) binaries unpacked into $BIN"
 
 # =========================================================================

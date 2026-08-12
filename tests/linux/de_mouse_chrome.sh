@@ -53,6 +53,67 @@
 #      cell 2 gains it), so 7 cannot be satisfied by a desktop that lit
 #      everything up at startup.
 #
+# THE INSTRUMENT IS NOT ALLOWED TO BREAK THE THING IT MEASURES
+# ============================================================
+# This gate spent a day accusing a healthy channel. `MOUSE_BIN_DIR` took the
+# compositor, the desktop and the panel out of a published tarball -- and then
+# read the panel's geometry back with `wsys_poke` COMPILED FROM THIS TREE,
+# because the substitution loop below carried `[ "$name" != wsys_poke ]` on the
+# grounds that a test tool is not part of the channel and "it only ever READS a
+# ctl line, so where it comes from cannot change an answer".
+#
+# That sentence is false, and user/linux-wsys.c says why in its own words: EVERY
+# program in this tree is a wsys client, reading included. Opening
+# /dev/wsys/<wid>/ctl attaches to the shared segment, and an attacher whose
+# WSYS_VERSION differs from the segment's RE-INITIALISES IT BY DESIGN -- "the
+# running session's windows are gone and every live client is re-attached to an
+# empty table". The tree went 6 -> 7 (11ffe583); the published desktop was 6.
+# So the gate stood up a healthy v6 desktop from the packaged bytes, wiped it
+# with its own v7 probe on the first ctl read, and reported
+#
+#     mouse: FAIL no full-width top bar -- there is no Applications button
+#
+# against a channel that was fine. Measured on hamnix-desktop-1.0.17.tar.gz:
+# 2 PASS / 1 FAIL with the tree-built probe, 13 PASS / 0 FAIL with a v6 one.
+# The same shape had already been found and written down once, in
+# tests/linux/installed_update_wsysver.sh: "`cat /dev/wsys/2/ctl` is a wsys
+# client ... the gate then photographed the wreck it had made and blamed the
+# desktop." NORTH_STAR.md's rule is that a gap must never answer something
+# success-shaped instead of the truth; a gate that manufactures a failure and
+# bills it to the packages is the same lie with the sign flipped, and this one
+# decides whether a release ships.
+#
+# TWO THINGS FOLLOW, and both are here:
+#
+#   1. THE EXCLUSION IS GONE. There is no "except the test tool" case left.
+#      When MOUSE_BIN_DIR is set, every binary that touches the segment comes
+#      out of it, and a name it does not hold is refused BY NAME rather than
+#      substituted. The window table is a FILE and `cat` is in the channel, so
+#      the probe is now the channel's own `cat` -- the same idiom
+#      installed_update_wsysver.sh settled on, and the same one
+#      installed_recover_broken.sh reads window rows with. wsys_poke, a tree
+#      binary in a gate whose whole purpose is "run the bytes somebody else
+#      produced", is no longer part of this measurement at all. That removes
+#      the CLASS; version-matching wsys_poke would only have removed today's
+#      instance of it, and left the next tree binary someone reaches for.
+#
+#   2. AND THE SKEW IS DETECTED ANYWAY, because "nothing here is from the tree"
+#      is a property a future edit can lose quietly. `segstate` below reads the
+#      first 24 bytes of the shm segment FROM THE HOST with python3 -- magic,
+#      version, focus, next_wid, desktop, gen, the prefix of `struct wshm` that
+#      user/linux-wsys.c documents as byte-for-byte identical across v5, v6 and
+#      v7. A plain file read attaches to nothing and cannot perturb anything.
+#      It is sampled three times, and each gap answers a different question:
+#        after wsysd          -- the session's version, stated out loud;
+#        after the clients    -- did hamdesktop/hampanelscene agree with the
+#                                compositor? A disagreement here is a MIXED
+#                                CHANNEL and is the packages' fault, named as
+#                                such (this is the 1.0.10 shape);
+#        after the first read -- did the PROBE change it? That can only be this
+#                                gate's own instrument, and it says so and
+#                                stops, instead of going on to photograph the
+#                                wreck and blame the top bar.
+#
 # Entirely offscreen (HAMFB_FILE + a file of evdev records): no VM, no
 # display, no GPU. The software Vulkan ICD is forced because wsysd has a real
 # Vulkan backend and this host's GPU belongs to someone.
@@ -132,24 +193,62 @@ PY
 colourpct() { python3 "$FRAC_PY" "$FBW" "$FBH" "$1" "$2" "$3" "$4" "$5" "$6"; }
 snap()      { cp "$HAMFB_FILE" "$WORK/$1.raw"; }
 
+# ---- the segment probe, which is not a wsys client -----------------------
+# `struct wshm` opens { uint32 magic, version; int32 focus_wid, next_wid,
+# desktop; uint32 gen; } and user/linux-wsys.c states that this prefix is
+# byte-for-byte the same in v5, v6 and v7 -- the versions disagree only about
+# how many rows follow it. So the segment's own version is readable with a
+# 24-byte pread and NO ATTACH: this reads the file, it does not open
+# /dev/wsys/anything, and therefore cannot re-initialise what it is looking at.
+# That is the whole point -- the one measurement in this gate that is
+# structurally incapable of causing the thing it reports.
+SEG_PY="$WORK/seg.py"
+cat >"$SEG_PY" <<'PY'
+import os, struct, sys
+p = sys.argv[1]
+try:
+    with open(p, 'rb') as f:
+        h = f.read(24)
+    sz = os.path.getsize(p)
+except OSError:
+    print("absent - - - - -"); raise SystemExit
+if len(h) < 24:
+    print("short - - - - -"); raise SystemExit
+magic, ver, focus, nextwid, desktop, gen = struct.unpack('<IIiiiI', h)
+if magic != 0x53595357:                      # "WSYS"
+    print("nomagic - - - - -"); raise SystemExit
+print("v%d next=%d focus=%d desktop=%d gen=%d bytes=%d"
+      % (ver, nextwid, focus, desktop, gen, sz))
+PY
+segstate() { python3 "$SEG_PY" "$HAMWSYS"; }
+segver()   { segstate | cut -d' ' -f1; }
+segnext()  { segstate | sed -n 's/.* next=\([0-9-]*\).*/\1/p'; }
+
 # ---- build ----------------------------------------------------------------
 # MOUSE_BIN_DIR RUNS THIS GATE AGAINST BINARIES SOMEBODY ELSE PRODUCED.
 # Unset -- the normal case -- every program is compiled from this tree, and
 # the question is "does the source in front of me route a click". Set to a
 # directory of ELFs, the question becomes "do THOSE bytes route a click", and
-# the caller is tests/linux/installed_update_live.sh, which unpacks the
-# hamnix-desktop tarball that https://255.one/ is serving right now and asks
-# whether the PUBLISHED compositor carries the fix. A version string in an
-# index cannot answer that; running the bytes can. wsys_poke is a test
-# instrument and is always built from the tree -- it only ever READS a ctl
-# line (assertion 12), so where it comes from cannot change an answer.
+# the caller is tests/linux/channel_runs_desktop.sh, which unpacks the
+# hamnix-desktop tarball the packager is about to publish (or that
+# https://255.one/ is serving right now) and asks whether the PUBLISHED
+# compositor carries the fix. A version string in an index cannot answer that;
+# running the bytes can.
+#
+# THE LIST INCLUDES `cat`, AND THAT IS THE POINT. `cat` is how the panel's
+# geometry is read back (winctl, below), and reading /dev/wsys/<wid>/ctl makes
+# it a wsys client like any other -- see THE INSTRUMENT IS NOT ALLOWED TO BREAK
+# THE THING IT MEASURES at the top. So it is version-matched to the bytes under
+# test by coming out of the same channel they did, and with MOUSE_BIN_DIR set
+# this loop compiles NOTHING AT ALL: no binary from this tree touches the
+# segment. There is no "except the test tool" case any more.
 BINDIR="${MOUSE_BIN_DIR:-}"
 for t in wsysd:user/wsysd.ad \
          hamdesktop:user/hamdesktop.ad \
          hampanelscene:user/hampanelscene.ad \
-         wsys_poke:tests/linux/wsys_poke.ad; do
+         cat:user/cat.ad; do
     name="${t%%:*}"; src="${t#*:}"
-    if [ -n "$BINDIR" ] && [ "$name" != wsys_poke ]; then
+    if [ -n "$BINDIR" ]; then
         # A binary MOUSE_BIN_DIR does not hold used to fall through and get
         # compiled from this tree. That is the one substitution this hook must
         # never make: the caller asked about SOMEBODY ELSE'S bytes, and quietly
@@ -167,14 +266,15 @@ for t in wsysd:user/wsysd.ad \
         done_report; exit 1; }
 done
 if [ -n "$BINDIR" ]; then
-    ok "the compositor, the desktop and the panel came from $BINDIR (not built here)"
+    ok "the compositor, the desktop, the panel AND the ctl probe came from $BINDIR (nothing was built here, so nothing from this tree attaches to the segment)"
 else
-    ok "the compositor, the desktop and the panel all build"
+    ok "the compositor, the desktop, the panel and the ctl probe all build"
 fi
 
-# wsys_poke is used for READS ONLY here (the window's ctl line, which is how
-# the panel's geometry is read back). See assertion 12.
-winctl() { "$WORK/wsys_poke.elf" "/dev/wsys/$1/ctl" 2>/dev/null; }
+# READS ONLY, and by `cat` -- the window table is a file. See assertion 12 for
+# the rule that keeps it reads-only, and the header for why the binary that
+# does the reading has to be version-matched to the session.
+winctl() { "$WORK/cat.elf" "/dev/wsys/$1/ctl" 2>/dev/null; }
 
 # ---- THE MOUSE ------------------------------------------------------------
 # A real one. `struct input_event` is { struct timeval (16 bytes), __u16 type,
@@ -226,6 +326,17 @@ else
     bad "wsysd did not honour HAMWSYSD_INPUT -- it may be reading this host's keyboard"
 fi
 
+# CHECKPOINT 1 of 3 -- the session's wsys version, stated out loud, read off
+# the segment file by a program that is not a wsys client. Everything below is
+# measured against this number.
+SEG0="$(segstate)"; SEGV0="$(segver)"
+info "the session under test is wsys $SEG0"
+case "$SEGV0" in
+    v[0-9]*) : ;;
+    *) bad "wsysd produced a framebuffer but $HAMWSYS carries no WSYS segment header ($SEG0) -- nothing below can be trusted"
+       done_report; exit 1;;
+esac
+
 # ---- the desktop and the panel -------------------------------------------
 "$WORK/hamdesktop.elf" </dev/null >"$WORK/hamdesktop.log" 2>&1 &
 PIDS="$PIDS $!"
@@ -233,6 +344,66 @@ sleep 3
 "$WORK/hampanelscene.elf" </dev/null >"$WORK/hampanelscene.log" 2>&1 &
 PIDS="$PIDS $!"
 sleep 3
+
+# CHECKPOINT 2 of 3 -- DID THE CLIENTS AGREE WITH THE COMPOSITOR? hamdesktop
+# and hampanelscene have now attached. If the version moved, the desktop and
+# the panel are a different wsys build from the wsysd they were shipped beside,
+# each one wiping the other's table on attach. That is a MIXED CHANNEL -- the
+# 1.0.10 shape, a stale object cache packaging binaries from two builds -- and
+# it is the packages' fault, so say which and do not let it read as chrome that
+# ignored a click.
+#
+# AND IT STOPS HERE, which is the second half of the lesson. The first version
+# of this checkpoint reported the mixed channel and carried on -- and the NEXT
+# checkpoint then correctly observed that the probe had changed the version
+# back, and said "fix the instrument" about an instrument that was fine. A red
+# for the right reason worded as a red for the wrong one is still the failure
+# this project keeps paying for. Once the table has been re-initialised under a
+# live desktop nothing below is a question this run can answer: the panel and
+# the wallpaper are attached to a segment that was punched out from under them,
+# so every pixel from here on is a photograph of wreckage.
+SEG1="$(segstate)"; SEGV1="$(segver)"
+if [ "$SEGV1" != "$SEGV0" ]; then
+    bad "MIXED CHANNEL: the segment was $SEGV0 when wsysd made it and is $SEGV1 now that hamdesktop and hampanelscene have attached -- these three binaries are not one build, and each re-initialises the others' window table. THIS IS A DEFECT IN THE BYTES, not in this gate: it is the 1.0.10 shape, a stale object cache packaging a compositor and its clients from two different builds."
+    info "  before the clients: $SEG0"
+    info "  after  the clients: $SEG1"
+    [ -n "$BINDIR" ] && info "  the bytes came from $BINDIR"
+    info "  stopping: the window table was re-initialised under a live desktop, so 'is there a top bar' is not a question the pixels below can answer"
+    done_report; exit 1
+fi
+
+# CHECKPOINT 3 of 3 -- DID THE INSTRUMENT SURVIVE CONTACT? One ctl read, then
+# look at the segment again. Nothing else has happened in between, so anything
+# that moved was moved by the probe: a version bump means the probe is a
+# different wsys build from the session (the exact defect this file's header
+# describes -- a v7 `cat` reading a v6 desktop's ctl line), and next_wid
+# falling back to 2 means the table was re-initialised and every window the
+# desktop had mapped is gone. Either way the desktop below would photograph as
+# empty, and blaming the packages for that is the failure this checkpoint
+# exists to make impossible.
+NEXT_BEFORE="$(segnext)"
+winctl 2 >/dev/null 2>&1
+SEG2="$(segstate)"; SEGV2="$(segver)"; NEXT_AFTER="$(segnext)"
+if [ "$SEGV2" != "$SEGV1" ]; then
+    bad "THIS GATE'S OWN PROBE WIPED THE SESSION: the segment was $SEGV1 and one ctl read by $WORK/cat.elf made it $SEGV2. Reading /dev/wsys/<wid>/ctl attaches, and an attacher of a different WSYS_VERSION re-initialises the table by design. The bytes under test are NOT implicated -- fix the instrument."
+    info "  before the read: $SEG1"
+    info "  after  the read: $SEG2"
+    [ -n "$BINDIR" ] && info "  the probe must come from $BINDIR like everything else; it did not, or that channel's cat is a different wsys build from its wsysd"
+    done_report; exit 1
+elif [ "${NEXT_BEFORE:-0}" -gt 2 ] && [ "${NEXT_AFTER:-0}" -le 2 ]; then
+    bad "THIS GATE'S OWN PROBE WIPED THE SESSION: next_wid went $NEXT_BEFORE -> $NEXT_AFTER across a single ctl read, so the window table was re-initialised under a live desktop. The bytes under test are NOT implicated -- fix the instrument."
+    info "  before the read: $SEG1"
+    info "  after  the read: $SEG2"
+    done_report; exit 1
+else
+    # INFO and not PASS, deliberately. This is a PRECONDITION on the run being
+    # able to answer anything, not one of the eight things this file measures
+    # about a mouse -- and the score is quoted across HANDOFF.md and compared
+    # between channels (1.0.10 is 2/1, 1.0.11 and 1.0.17 are 13/0). A validity
+    # check that inflated the denominator would make every one of those
+    # comparisons a different question.
+    info "the probe left the session alone (still $SEGV2, next_wid $NEXT_BEFORE -> $NEXT_AFTER) -- it is version-matched to the bytes under test, so every FAIL below is about THEM"
+fi
 
 # The top panel, found rather than guessed: the full-width bar nearest the top
 # of the screen that is not the full-screen backdrop.
@@ -248,7 +419,12 @@ done
 if [ -n "$PANEL" ]; then
     ok "hampanelscene mapped a full-width top bar (wid $PANEL, height $PANELH)"
 else
+    # This sentence spent a day being wrong about a healthy channel, so it now
+    # carries the segment's own state with it. If the table is empty and
+    # next_wid is back at 2, the windows were WIPED rather than never mapped,
+    # and the three checkpoints above have already said by whom.
     bad "no full-width top bar -- there is no Applications button to click"
+    info "  segment now: $(segstate)   (at wsysd start: $SEG0)"
     sed 's/^/mouse:      /' "$WORK/hampanelscene.log"
     done_report; exit 1
 fi
@@ -382,13 +558,24 @@ fi
 # host owner, which is why a completely missing input path went unnoticed for
 # the life of the port. If a future edit takes that shortcut here, this file
 # stops testing anything and must say so rather than go quietly green.
+#
+# The pattern names the RING, not the tool. It used to say `wsys_poke`, and
+# that was already too narrow before wsys_poke left this file: `cat`, `echo >`,
+# a future helper or a fresh copy of wsys_poke would each have walked straight
+# past it. What must not appear here is an event, pointer or keys path under
+# /dev/wsys at all -- reading one is as disqualifying as writing one, since a
+# gate that drains a ring it did not create is no longer measuring delivery.
+# The regex is built in a variable so its own two uses cannot match it (the
+# literal that follows `/dev/wsys/` here is `[^ ]*`, and `[^ ]*` cannot match
+# `[^` and then find the `/` the pattern demands).
+RING_RE='/dev/wsys/[^ ]*/(event|pointer|keys)'
 if grep -vE '^[[:space:]]*#' "${BASH_SOURCE[0]}" \
-        | grep -nE 'wsys_poke[^|]*/(event|pointer|keys)' >/dev/null; then
-    bad "THIS GATE WRITES AN INPUT RING BY HAND -- it no longer proves a mouse reaches the chrome"
+        | grep -nE "$RING_RE" >/dev/null; then
+    bad "THIS GATE TOUCHES AN INPUT RING BY HAND -- it no longer proves a mouse reaches the chrome"
     grep -vE '^[[:space:]]*#' "${BASH_SOURCE[0]}" \
-        | grep -nE 'wsys_poke[^|]*/(event|pointer|keys)' | sed 's/^/mouse:      /'
+        | grep -nE "$RING_RE" | sed 's/^/mouse:      /'
 else
-    ok "every click in this file came from the evdev end: nothing here writes an event, pointer or keys ring"
+    ok "every click in this file came from the evdev end: nothing here names an event, pointer or keys ring, whatever program it might have used to do it"
 fi
 
 info "clicks delivered: $(grep -c . "$WORK/input.evdev" 2>/dev/null || echo '?') evdev bytes at $(stat -c%s "$WORK/input.evdev") total"
