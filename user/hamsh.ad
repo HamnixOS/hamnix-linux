@@ -2855,20 +2855,37 @@ def parse_simple_command() -> int32:
             w: int32 = _cmd_dash_arg_to_node()
             nd_kid_push(n, w)
             continue
+        # A REDIRECT TARGET IS GLUED THE SAME WAY AN ARGUMENT IS.
+        #
+        # It was not, and the consequence was the shape this tree exists to
+        # not have. The lexer splits a bare word at a '+' -- `a+b/f.txt`
+        # arrives as the word `a` followed by the word `+b/f.txt` -- and the
+        # argument path has fused runs like that with _glue_adjacent() ever
+        # since `p/$s/q` needed it. These three sites took ONE token. So
+        #
+        #     echo 'X' >> /lib/modules/6.12.85+deb13-amd64/modules.dep
+        #
+        # opened `/lib/modules/6.12.85`, wrote to it, handed `+deb13-amd64/
+        # modules.dep` to echo as an extra ARGUMENT, and exited 0. Measured:
+        # the named file was untouched, a file nobody asked for was created,
+        # and $status was 0. Every Debian kernel release has a '+' in it, so
+        # this was every `>>` into /lib/modules/<release>/ on this port.
+        #
+        # The fix is to call the function the argument path already calls.
         if pk_is_op(OP_GT) != 0:
             pk_advance()
-            tgt: int32 = _word_token_to_node()
+            tgt: int32 = _glue_adjacent(_word_token_to_node())
             nd_a[cast[uint64](n)] = tgt
             continue
         if pk_is_op(OP_DGT) != 0:
             pk_advance()
-            tgt: int32 = _word_token_to_node()
+            tgt: int32 = _glue_adjacent(_word_token_to_node())
             nd_a[cast[uint64](n)] = tgt
             nd_c[cast[uint64](n)] = nd_c[cast[uint64](n)] | 1
             continue
         if pk_is_op(OP_LT) != 0:
             pk_advance()
-            tgt: int32 = _word_token_to_node()
+            tgt: int32 = _glue_adjacent(_word_token_to_node())
             nd_b[cast[uint64](n)] = tgt
             continue
         if pk_is_op(OP_DUP21) != 0:
@@ -2878,7 +2895,7 @@ def parse_simple_command() -> int32:
         if pk_is_op(OP_REDIR2) != 0:
             pk_advance()
             # 2> file — store stderr target in nd_i (a node ref)
-            tgt: int32 = _word_token_to_node()
+            tgt: int32 = _glue_adjacent(_word_token_to_node())
             nd_i[cast[uint64](n)] = cast[int64](tgt)
             continue
         if pk_is_op(OP_AMP) != 0:

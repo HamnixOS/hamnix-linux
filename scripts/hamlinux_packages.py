@@ -391,12 +391,20 @@ def dep_lines(kver, staged):
     treat that as a refusal rather than shipping a package whose modules
     modprobe cannot name.
     """
+    return dep_lines_for_paths(
+        kver, [canonical for _h, _i, canonical, _b in staged])
+
+
+def dep_lines_for_paths(kver, canonicals):
+    """dep_lines() by absolute installed path, so a test can ask for the very
+    lines a hook would emit for a given set of .ko files without having to
+    build the package around them."""
     table = host_dep_table(kver)
     if not table:
         return []
     prefix = "/lib/modules/%s/" % kver
     out = []
-    for _host, _inside, canonical, _big in staged:
+    for canonical in canonicals:
         rel = canonical[len(prefix):]
         if rel not in table:
             raise SystemExit(
@@ -475,11 +483,20 @@ def module_install_hook(pkg, staged, note, deps=(), kver=None):
         if big:
             lines.append("gzip -d '%s.gz'" % canonical)
     for _host, _inside, canonical, _big in staged:
-        lines.append("echo '%s' >> /etc/modules" % canonical)
+        lines.append("echo '%s' >> '/etc/modules'" % canonical)
     if deps and kver:
         depfile = "/lib/modules/%s/modules.dep" % kver
+        # THE REDIRECT TARGET IS QUOTED, and it has to be. hamsh's lexer
+        # splits a BARE word at a '+', and every Debian kernel release has
+        # one -- 6.12.85+deb13-amd64. Unquoted, `>> /lib/modules/6.12.85+
+        # deb13-amd64/modules.dep` wrote to a file called
+        # /lib/modules/6.12.85, left the real table untouched and exited 0.
+        # user/hamsh.ad now glues redirect targets the way it has always
+        # glued arguments, so this is fixed at the source -- but a machine
+        # INSTALLED BEFORE that fix still has the old shell and would run
+        # this hook with it, so the quotes stay.
         for dl in deps:
-            lines.append("echo '%s' >> %s" % (dl, depfile))
+            lines.append("echo '%s' >> '%s'" % (dl, depfile))
         lines.append("echo '[%s] %d modules.dep line%s appended to %s'"
                      % (pkg, len(deps), "" if len(deps) == 1 else "s", depfile))
     lines += [
