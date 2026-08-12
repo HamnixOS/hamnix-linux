@@ -975,6 +975,80 @@ the shape is more reusable than the fix. They are NOT open work.
   exports at the bottom of `/etc/rc.de-ns/<name>` **do** reach the client (they
   are set in the same shell that then enters), and `HAMNIX_DE_XSESSION` can
   never be steered from an outer shell no matter what is done to `enter`.
+* **STEAM IS NOT STUCK AT ITS LOGIN SCREEN, and "the login window renders"
+  had been standing in for "Steam works" in this file's own notes.** The
+  window was DRIVEN rather than photographed — `tests/linux/steam_login_drive.sh`
+  keeps the VM up and `tests/linux/qmp_input.py` puts pointer and key events
+  on QEMU's own `virtio-tablet-pci`/`virtio-keyboard-pci`, which in a VM is
+  the only input `wsysd` has (it scans `/dev/input/eventN`), so every event
+  crossed wsysd → wsyswl → Xwayland → jwm → CEF. Nothing wrote a wsys ring by
+  hand; that is `de_mouse_chrome.sh`'s rule applied to a real X11 application
+  three servers down. Every number below is a pixel count over two QEMU
+  screendumps (`tests/linux/ppmdiff.py`), and `docs/steam_namespace.md` §12
+  is the table. **Works, with a mouse and a keyboard:** hover (moving over
+  the username field repaints **97%** of it — CEF's hover state), click,
+  **typing** (`hamnix` appears in Steam's username field), password masking,
+  the *Remember me* checkbox and its tooltip, **a second window** (*Create a
+  Free Account* replaces the 700x440 login window with an ~870x740 store
+  browser carrying a live **hCaptcha** iframe — 93.8% of the old rectangle
+  changed), the *Browse* mega-menu with its CDN artwork, navigating to the
+  store front page, dragging the scrollbar (**96.44%** of an 830x680
+  rectangle), and **live AJAX search** — `portal` returns Portal, Portal 2,
+  Portal Knights and Portal Worlds with prices and cover art. **The one thing
+  that did not work is the next entry.** No Steam account was used and none
+  was sought, so the library, downloads and launching a game are unmeasured
+  and are not claimed (§12.4).
+* **(FIXED) The scroll wheel was never connected to anything — for the whole
+  port, for every client.** Found by driving the real thing: with the pointer
+  over Steam's store page, eight `REL_WHEEL` notches changed **0 of 564400
+  pixels**, while a press-move-release DRAG of that same page's scrollbar with
+  that same pointer changed **96.44%** of them. The page was scrollable; the
+  wheel was not connected to it — and the drag is the control without which a
+  dead POINTER would have produced the same zero. `user/wsysd.ad` had the whole
+  wheel already (`EV_REL`/`REL_WHEEL` → `ptr_dz` → kind `'s'` → the **fifth**
+  field of the routed pointer line); `user/wsyswl.ad`'s `handle_ptr_line`
+  parsed the first four fields and stopped, and the file had no
+  `wl_pointer.axis` in it at all. So the delta was computed, routed, written
+  to the ring, read back, and dropped one parse short of the client — which
+  means Firefox in the namespace and every other Wayland/X11 client had a dead
+  wheel too. **Gate: `tests/linux/wsyswl_wheel.sh`** — offscreen, ~40 s, no VM
+  and no Steam: evdev records → wsysd → wsyswl → a real rootful Xwayland →
+  `xev`, which prints what the X SERVER delivered (an X11 wheel is button 4 up
+  / button 5 down). **10 PASS**; reverted with the fix stashed it is **6 PASS
+  / 4 FAIL** and the CONTROL (an evdev *move* arrives as `MotionNotify`) still
+  passes, so it reports a dead wheel and not a dead pointer. It asserts the
+  COUNT and the SIGN in both directions, because a wheel that scrolls
+  backwards works and is wrong, which is worse than a dead one: nothing about
+  it looks broken.
+  **AND THE FIX IS NOT SUFFICIENT, which is said here rather than left to be
+  discovered.** With the patched `wsyswl` in the image (verified by md5
+  against the staged `/bin/wsyswl`) a second full Steam run, back on the store
+  front page, wheeled over it and got **the same `IDENTICAL (0 of 564400 px)`**
+  as before. So `wl_pointer.axis` was missing AND something else on the VM
+  path also drops the wheel; closing one hole did not open the pipe. It is not
+  `wsysd`'s routing or `wsyswl`'s translation — those are precisely what the
+  offscreen gate exercises, against a real Xwayland, and they pass. The one
+  thing that differs between the passing arm and the failing arm is everything
+  UPSTREAM of `/dev/input`: a file of evdev records in one, QEMU's
+  `virtio-tablet-pci` in the other. `tests/linux/vm_wheel_reaches.sh` is
+  written and splits exactly that — `wsysd`'s own `pointer` counter across a
+  wheel burst with the cursor held still, with a plain move as the control in
+  the same run. **It ran: `pointer 0 → 2` for two moves, then `2 → 22` for
+  twenty wheel events with the cursor STILL.** Exactly twenty. So QEMU's
+  `virtio-tablet-pci` does deliver `EV_REL`/`REL_WHEEL`, `pump_input`
+  accumulates it, `deliver_pointer` fires and `route_pointer` writes the `'s'`
+  line — **everything upstream of `/dev/wsys/<wid>/pointer` is ruled out and
+  the remaining drop is in this tree.** A SECOND defect was found and fixed
+  there on the strength of that (`wl_pointer.axis_discrete` was being sent
+  *after* its `axis` event; the protocol says before), and a **third** Steam
+  boot still got `IDENTICAL (0 of 564400 px)` from the wheel on a loaded store
+  page. So: two real compositor defects fixed, gate green and failing on
+  revert, symptom still present. The one candidate left is that the gate uses
+  the dev host's Xwayland (trixie, 24.x) while the namespace ships **22.1.9**
+  — which makes the next step concrete and small: give `wsyswl_wheel.sh` an
+  arm that runs against 22.1.9, because a gate that only ever tests a newer
+  server than the distribution ships has a blind spot exactly the size of this
+  bug. `docs/steam_namespace.md` §12.2a carries all three measurements.
 * **(SOLVED — kept because the shape is the lesson) Steam's login window is on
   the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
   `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X
