@@ -1719,14 +1719,51 @@ def _kind_word(k: int32) -> Ptr[uint8]:
     return cast[Ptr[uint8]]("menu")
 
 
-_save_buf: Array[2048, uint8]
+# The WRITE side of the same file, and the other half of the same audit.
+#
+# Unlike the READ side, what _save_config emits is BOUNDED at compile time by
+# the panel model, so a fixed buffer is the right shape here — but it has to
+# be big enough to hold the bound, and 2048 was not. Worst case, exactly:
+#
+#   file header                                                     50
+#   per panel  "panel pN\n" 9 + edge 14 + size 28 + color 16 + font 14 = 81
+#   per widget "  widget launcher " 18 + LEXEC_SZ 63 + " " + LLABEL_SZ 23
+#              + "\n"                                              = 106
+#   per panel  81 + MAX_WIDGETS(12) * 106 + "end\n" 4              = 1357
+#   total      50 + MAX_PANELS(4) * 1357                           = 5478
+#
+# At 2048 a panel set carrying launchers ran off the end: _sb_emit clamped,
+# but the bare `_save_buf[p] = 10` newline stores and _u64_to_dec did not, and
+# `p` kept climbing past the array — a BSS overrun, not a truncation. 8192
+# covers the bound with 2.7 KB of margin, every store is bounds-checked
+# through _sb_byte, and a serialization that somehow still hits the cap is
+# REFUSED rather than written: half a config on disk is a config the panel
+# then reads back and obeys.
+SAVE_CAP: uint64 = 8192
+_save_buf: Array[8192, uint8]
+
+
+def _sb_byte(p: uint64, c: uint8) -> uint64:
+    if p + 1 >= SAVE_CAP:
+        return p
+    _save_buf[p] = c
+    return p + 1
+
+
 def _sb_emit(p: uint64, s: Ptr[uint8]) -> uint64:
     k: uint64 = 0
-    while s[k] != 0 and p < 2047:
+    while s[k] != 0 and p + 1 < SAVE_CAP:
         _save_buf[p] = s[k]
         p = p + 1
         k = k + 1
     return p
+
+
+def _sb_dec(p: uint64, v: uint64) -> uint64:
+    # _u64_to_dec writes up to 20 digits; only call it with room for them.
+    if p + 24 >= SAVE_CAP:
+        return p
+    return p + _u64_to_dec(v, &_save_buf[p])
 
 
 # Serialize the live panel set to /tmp/hamnix-panel.conf in the EXACT
@@ -1741,28 +1778,23 @@ def _save_config():
     pi: uint64 = 0
     while pi < n_panels:
         p = _sb_emit(p, cast[Ptr[uint8]]("panel p"))
-        p = p + _u64_to_dec(pi, &_save_buf[p])
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_dec(p, pi)
+        p = _sb_byte(p, 10)
         p = _sb_emit(p, cast[Ptr[uint8]]("  edge "))
         p = _sb_emit(p, _edge_word(p_edge[pi]))
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_byte(p, 10)
         p = _sb_emit(p, cast[Ptr[uint8]]("  size "))
-        p = p + _u64_to_dec(cast[uint64](p_size[pi]), &_save_buf[p])
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_dec(p, cast[uint64](p_size[pi]))
+        p = _sb_byte(p, 10)
         p = _sb_emit(p, cast[Ptr[uint8]]("  color "))
         p = _sb_emit(p, p_color_ptr(pi))
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_byte(p, 10)
         p = _sb_emit(p, cast[Ptr[uint8]]("  font "))
         if p_bold[pi] != 0:
             p = _sb_emit(p, cast[Ptr[uint8]]("bold"))
         else:
             p = _sb_emit(p, cast[Ptr[uint8]]("normal"))
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_byte(p, 10)
         nw: uint64 = p_nwidg[pi]
         a: uint64 = 0
         while a < nw:
@@ -1780,12 +1812,21 @@ def _save_config():
                 pin: int64 = p_wx_pin[gslot]
                 if pin >= 0:
                     p = _sb_emit(p, cast[Ptr[uint8]](" x "))
-                    p = p + _u64_to_dec(cast[uint64](pin), &_save_buf[p])
-            _save_buf[p] = 10
-            p = p + 1
+                    p = _sb_dec(p, cast[uint64](pin))
+            p = _sb_byte(p, 10)
             a = a + 1
         p = _sb_emit(p, cast[Ptr[uint8]]("end\n"))
         pi = pi + 1
+    if p + 32 >= SAVE_CAP:
+        # Unreachable given the bound computed at SAVE_CAP — which is exactly
+        # why it must say so rather than write. A HALF config is worse than no
+        # config: the panel reads its own write back on the next tick and
+        # obeys whatever survived the cut.
+        _cfg_src = CFGSRC_TMP
+        _cfg_say(cast[Ptr[uint8]]("REFUSING TO SAVE -- the serialized panel set needs at least "),
+                 p,
+                 cast[Ptr[uint8]](" bytes and the buffer is 8192; your edit is NOT on disk\n"))
+        return
     fd: int32 = sys_open_write(cast[Ptr[char]]("/tmp/hamnix-panel.conf"))
     if fd >= 0:
         sys_write(fd, &_save_buf[0], p)

@@ -276,7 +276,40 @@ else
     bad "an edit to the directives at the END of the file changed ${t_alt}% of the bar to #$ALT -- the live re-read still only looks at the head of the file, so an edit down here is not even noticed as a CHANGE"
 fi
 
-# ---- 10+11. A CONFIG THAT PARSES TO NOTHING SAYS SO ----------------------
+# ---- 10. THE MAXIMAL PANEL SET ------------------------------------------
+# MAX_PANELS(4) x MAX_WIDGETS(12) launchers is the biggest thing the panel
+# model can hold, and it is the input `_save_config`'s buffer bound is
+# computed from (50 + 4 * 1357 = 5478 bytes serialized; the buffer was 2048
+# and its newline stores were unguarded, i.e. a BSS overrun rather than a
+# truncation). This proves that input is REACHABLE through the config, so the
+# bound is a real bound and not a hypothetical one. A vertical panel is used
+# as the pixel witness because its band is somewhere no other panel paints.
+MAXC="$WORK/max.conf"
+: >"$MAXC"
+i=0
+for e in top bottom left right; do
+    i=$((i + 1))
+    { echo "panel p$i"; echo "  edge $e"; echo "  size 56"; } >>"$MAXC"
+    [ "$e" = left ] && echo "  color #ff00ff" >>"$MAXC"
+    for w in $(seq 1 12); do
+        echo "  widget launcher /bin/hamtermscene T$w" >>"$MAXC"
+    done
+    echo end >>"$MAXC"
+done
+cp "$MAXC" "$CONF"
+for _ in $(seq 1 80); do
+    sleep 0.25
+    grep -aq 'honoured, 4 panel(s)' "$WORK/panel.log" && break
+done
+snap maxc
+v_max="$(colourpct 2 $((FBH / 2 - 60)) 50 120 "$WORK/maxc.raw" ff00ff)"
+if grep -aq 'honoured, 4 panel(s)' "$WORK/panel.log" && [ "$v_max" -ge 60 ]; then
+    ok "the maximal panel set (4 panels x 12 launcher widgets, 5478 bytes serialized) is honoured and its VERTICAL panel is painted (${v_max}% of the left band is #ff00ff)"
+else
+    bad "the maximal panel set did not come up (4-panel line: $(grep -ac 'honoured, 4 panel(s)' "$WORK/panel.log"), left band ${v_max}% #ff00ff)"
+fi
+
+# ---- 11+12. A CONFIG THAT PARSES TO NOTHING SAYS SO ----------------------
 # The shipped file's comment header ALONE -- the exact bytes the old reader
 # saw and drew a desktop from without a word.
 python3 - "$SHIPPED" "$CONF" <<'PY'
