@@ -451,6 +451,61 @@ Correctness is gated by `tests/linux/wake_coalesce_stale.sh`, which checks
 pixels rather than rates: live during the drag, converged after the client
 goes silent, and client-driven repaint still working after a deferral episode.
 
+### 3g. Every drag number above was of an EMPTY window
+
+`de_dragload` wrote its scene one line per `win_write()`, and each call
+reopens the file — which **starts a new frame** rather than appending. Only
+the last line survived to `commit`. wsysd reported it on every run for as long
+as the file existed, and it was read as a compositor complaint rather than as
+the load generator's bug:
+
+```
+wsysd: window 3 paints 480x0 of its 480x320 window -- 320 rows reach the
+       screen as the compositor's clear colour.
+```
+
+So the "full-frame load" behind every drag figure in this document — and in
+`de_fps_latency.sh`, `de_fps_gpu.sh`, `scanout_desktop.sh`, `drag_why.sh` and
+`cap_power_ab.sh` — was **a moving rectangle of the compositor's clear
+colour**. Fixed; the warning's presence/absence is now what distinguishes the
+two arms below.
+
+What it costs, same compositor, same screen, content the only variable.
+Offscreen, software, uncapped:
+
+| window | empty | real content | frame rate | per-frame cost |
+|---|---|---|---|---|
+| 480x320 (15% of screen) | 544.7 fps | 459.2 fps | −15.7% | **+18.6%** |
+| 1200x760 (89% of screen) | 363.7 fps | 295.7 fps | −18.7% | **+23.0%** |
+
+**The paint term was understated by roughly a fifth**, and it grows as the
+window covers more of the screen — the direction a real desktop goes. The
+gates' own headline moves much less (`de_fps_latency.sh` load B: 411.5 → 408.7
+fps, 0.7%) because there the dragged window is one of four and the frame is
+dominated by screen-wide clear, composite and writeback. Both are true; they
+answer different questions.
+
+**This does NOT license correcting §3f's split by arithmetic.** That 2.3-of-3.5
+paint figure is the GPU scanout path at 1920x1080, where rasterization happens
+on the device; these are the software rasterizer at 1280x800. Applying a
+software ratio to a GPU number is exactly the cross-path comparison that
+produced the 220-vs-38 confusion. **The capped real-content number is NOT
+MEASURED.** It is one short run once the display is free.
+
+### Blocked on display access — not merely undone
+
+The card went back to the machine owner's session. These are **not** open
+because nobody got to them; they cannot be done without DRM master on
+`card0`, and they should not be quietly re-listed as ordinary backlog:
+
+- **The capped arm with real content** (§3g). One run.
+- **Flip-completion pacing and the single-buffer tearing.** Costed as one
+  mechanism with the present cap — see "What fixing the tearing costs" — and
+  the wait-set shape that cap now uses is the same one a flip event needs.
+- **Atomic teardown is UNDETERMINED, and that is a different claim from
+  "works".** The atomic caps are *accepted*; no atomic commit and no teardown
+  has been performed. Nothing here should be read as evidence either way.
+
 **Idle, measured on this path rather than argued.** Idle was previously
 claimed to be structurally unaffected by the cap; that was reasoning, and this
 is the measurement, same harness, same session shape, three samples each:
