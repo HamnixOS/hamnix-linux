@@ -20,7 +20,52 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-*(nothing right now — 1.0.18 carries everything that had landed.)*
+*(nothing right now — 1.0.19 carries everything that had landed.)*
+
+## 1.0.19
+
+### Three things you can see
+
+All three were reported by the machine's owner looking at a screenshot, and all
+three turned out to have a real defect underneath rather than a rough edge.
+
+- **Window titles no longer sit in a black box.** The text is composited onto
+  the title bar properly, and its anti-aliased edges finally blend against the
+  bar instead of against nothing. The cause was one line in the glyph
+  rasteriser: it marked *every cell of a letter's bounding box* as fully
+  painted, including the empty space between strokes — so each word arrived as
+  an opaque black rectangle with correct ink inside it, and every layer of the
+  compositor reported success.
+- **The Applications menu is the categorised one.** Search box at the top,
+  Favourites showing what you launched recently, and a category list with
+  fly-out submenus — the shape MATE's Brisk menu has. This menu was **already
+  written**; it had simply never been added to the image or the package list,
+  so it existed on no machine and the panel quietly fell back to a flat list.
+  Favourites also never worked: the menu is a separate program started per
+  click, so it recorded your launch and then exited, every time. Both fixed.
+  Your history lives in your own home directory.
+- **Application icons are distinguishable.** Fifteen desktop icons were
+  drawing as nine pictures. Nothing was missing from disk — every icon here is
+  drawn in code, and any name the drawing code had not been taught fell back
+  to a generic page, which is also what an application that *wants* a generic
+  page gets. Twenty new icons, and an unrecognised name is now reported by
+  name instead of silently drawing the wrong thing.
+
+### Things that could have destroyed data
+
+- **`svc enable` was truncating service definition files.** It read the file
+  into a buffer too small for it and then **wrote that buffer back** — losing
+  998 bytes of a real file under measurement, welding two lines together inside a
+  comment where nothing would parse them, and exiting 0 without having saved
+  the change it destroyed the file for.
+- **The boot script was at 97% of the buffer that reads it**, and the overflow
+  path was to silently stop reading. A slightly longer boot script would have
+  produced a machine that boots with the tail of its configuration never
+  having run, and said nothing. Scripts are now read whole, and one that
+  cannot be says so and does not run at all.
+- **The build could link one source tree's code into another tree's
+  binaries**, because its cache was keyed on timestamps. That is the same
+  mechanism that shipped a broken desktop in 1.0.10.
 
 ## 1.0.18
 
