@@ -301,14 +301,48 @@ def handle_request(fd: int32) -> int32:
     req_len_units: uint32 = x11_get16_le(&hdr[0], 2)
     # Total bytes in request = req_len_units * 4; we already have 4.
     total_bytes: uint64 = cast[uint64](req_len_units) * 4
-    body_bytes: uint64 = 0
+    declared: uint64 = 0
     if total_bytes > 4:
-        body_bytes = total_bytes - 4
+        declared = total_bytes - 4
+    # THE CAP KEEPS THE BUFFER SAFE; THE DRAIN KEEPS THE STREAM SAFE, AND THEY
+    # ARE TWO DIFFERENT JOBS.
+    #
+    # This used to be `if body_bytes > 4092: body_bytes = 4092` and then
+    # straight on to the dispatch, leaving `declared - 4092` bytes of request
+    # payload sitting in the socket. The next time round this function they are
+    # read as an opcode and a length -- so one oversized request desynchronises
+    # the connection PERMANENTLY, and what a person sees is a BadRequest storm
+    # or a hang somewhere unrelated, never an error at the request that did it.
+    # An X11 request length is 16 bits in 4-byte units, i.e. up to 262140
+    # bytes, and PutImage, ChangeProperty, SetFontPath and a PolyFillRectangle
+    # with many rects all pass 4 KiB in ordinary use -- so this is not a
+    # hypothetical peer, it is Tuesday.
+    #
+    # The same file already knew how to do this: the setup handshake below
+    # drains oversized auth data in 256-byte chunks. This is that, applied to
+    # the request loop.
+    #
+    # `body_bytes` is deliberately left holding WHAT IS IN THE BUFFER and not
+    # what the client declared, because every handler below bounds its parse
+    # with it (`if body_bytes < 24`, `while rp + 8 <= body_bytes`). Bounding a
+    # parse by the declared size is how a truncated request becomes a read of
+    # whatever the last request left in the array.
+    body_bytes: uint64 = declared
     if body_bytes > 4092:
-        body_bytes = 4092      # cap to our buffer
+        body_bytes = 4092
     if body_bytes > 0:
         if read_exact(fd, &req_buf[0], body_bytes) == 0:
             return 0
+    over: uint64 = declared - body_bytes
+    if over > 0:
+        sink: Array[256, uint8]
+        while over > 0:
+            chunk: uint64 = 256
+            if chunk > over:
+                chunk = over
+            if read_exact(fd, &sink[0], chunk) == 0:
+                return 0
+            over = over - chunk
 
     seq_num = seq_num + 1
 

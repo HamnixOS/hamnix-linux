@@ -359,8 +359,29 @@ def _do_version_exchange() -> int32:
     # Read the server's identification line. The server MAY send banner
     # lines before its SSH- line; accept the first SSH- prefixed one.
     while True:
+        # A LINE TOO LONG MUST STILL BE CONSUMED TO ITS END.
+        #
+        # This loop used to stop counting at 255 and leave the REST OF THE LINE
+        # in the socket, which breaks two ways and both are silent:
+        #
+        #   * if the truncated 255 bytes happened to start with "SSH-" it was
+        #     accepted as the peer's identification string, and the binary
+        #     packet protocol then took its first 4-byte length word from the
+        #     middle of that line -- an immediate, permanent desync, plus an
+        #     exchange hash computed over a truncated id so KEX fails with
+        #     something that names neither cause;
+        #   * if it did not, the outer loop treated the REMAINDER of the same
+        #     physical line as a fresh line, so anything after byte 255 could
+        #     be made to look like the start of an identification string.
+        #
+        # RFC 4253 bounds the identification line to 255 bytes including CR LF,
+        # so a conformant peer never trips this -- but the banner lines a peer
+        # may send BEFORE it are not bounded at all, and long MOTD banners are
+        # ordinary in the field. So: always read to the LF, remember that the
+        # line overflowed, and never accept an overflowed line as the id.
         ll: uint64 = 0
-        while ll < 255:
+        over: int32 = 0
+        while True:
             c: Array[1, uint8]
             if _recv_exact(&c[0], 1) != 0:
                 return -1
@@ -368,9 +389,15 @@ def _do_version_exchange() -> int32:
                 continue
             if c[0] == 10:                        # LF
                 break
-            v_s_buf[ll] = c[0]
-            ll = ll + 1
+            if ll < 255:
+                v_s_buf[ll] = c[0]
+                ll = ll + 1
+            else:
+                over = 1
         v_s_buf[ll] = 0
+        if over != 0:
+            _log("[ssh] a pre-identification line was longer than 255 bytes -- skipped whole\n")
+            continue
         if ll >= 4:
             if v_s_buf[0] == 83:                  # 'S'
                 if v_s_buf[1] == 83:              # 'S'
