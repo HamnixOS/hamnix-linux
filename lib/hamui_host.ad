@@ -28,6 +28,7 @@ from lib.font_ttf import font_ttf_loaded, font_ttf_render, font_ttf_ascent_px, \
     glyph_adv, FACE_TT_MONO, FACE_TT_SANS, FACE_TT_SANS_BOLD
 from lib.vk.vk_2d import (
     vk2d_raster_fill_rect, vk2d_raster_fill_rect_alpha,
+    vk2d_raster_clear_rect_a,
     vk2d_raster_blit, vk2d_raster_draw_line,
     vk2d_raster_fill_roundrect, vk2d_raster_cov_mask,
     vk2d_set_bgra, vk2d_get_bgra,
@@ -896,9 +897,20 @@ def _host_begin_common(w: int32, h: int32):
     # full alpha byte. A caller that presents the result ALPHA-KEYED asks for
     # 0 first (see hamui_host_set_clear_alpha); every pixel no op paints then
     # carries alpha 0 and can be skipped instead of blitted as black.
-    vk2d_raster_fill_rect(_host_cbase(), cast[uint64](ww), cast[uint64](hh),
-                          0, 0, cast[int64](ww), cast[int64](hh),
-                          cast[uint32](host_clear_a))
+    # ALPHA-PRESERVING when a keyed present asked for it. vk2d_raster_fill_rect
+    # forces 255 into the alpha byte (_vk2d_pack_opaque), which is correct for
+    # every other fill and made hamui_host_set_clear_alpha(0) a no-op: the
+    # clear came back OPAQUE, so `keyed 1` skipped nothing and the black band
+    # this whole mechanism exists to remove was still there, with every layer
+    # returning success.
+    if host_clear_a == 0:
+        vk2d_raster_clear_rect_a(_host_cbase(), cast[uint64](ww),
+                                 cast[uint64](hh), 0, 0, cast[int64](ww),
+                                 cast[int64](hh), 0, 0, 0, 0)
+    else:
+        vk2d_raster_fill_rect(_host_cbase(), cast[uint64](ww), cast[uint64](hh),
+                              0, 0, cast[int64](ww), cast[int64](hh),
+                              cast[uint32](host_clear_a))
     host_clear_a = 255                  # one rasterize; never sticky
 
 

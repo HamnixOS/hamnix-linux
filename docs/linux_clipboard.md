@@ -1,5 +1,11 @@
 # The clipboard on the Linux line — `/dev/snarf` and `/dev/snarf.primary`
 
+> **All three clipboards are bridged.** `/dev/snarf` is the clipboard (§1–2),
+> `user/xsnarfd.ad` bridges the X selections to it (§6), and `user/wsyswl.ad`
+> + `lib/wlsnarf.ad` bridge `wl_data_device` to it (**§7**) — which is the one
+> Firefox uses. `/dev/snarf.primary` is bridged to X only, because core
+> Wayland has no PRIMARY; §7.6 says so by name.
+
 `docs/linux_build_count.md` §4 and `HANDOFF.md` §0 recorded this as honestly
 broken: **there was no clipboard on this line.** `lib/hamtextbox.ad` and
 `lib/htermsel.ad` — the shipped code the editor, Notes, the browser URL bar and
@@ -111,6 +117,11 @@ one compile stanza.
 
 A Debian or Alpine program in a namespace uses X selections, owned by the
 Xwayland inside that namespace; `jwm` and the Wayland path have their own.
+
+> **And the Wayland path's own is bridged separately — §7.** The two bridges
+> share `/dev/snarf` and converge on content, which is what makes the three
+> one clipboard rather than three that sometimes agree. §7.5 arm 8 is the
+> measurement of all three at once.
 
 **The boundary is measured, not asserted.** `tests/linux/snarf_device.sh` arm 3
 runs the host's `/bin/cat` — standing in for a foreign binary — against
@@ -490,6 +501,239 @@ Both were found by measurement against a real X server, neither by reading.
 * **No clipboard persistence after the owner exits.** When the last X owner
   disappears the bridge keeps the last content it saw rather than clearing —
   said on the log line, and the same choice every X clipboard manager makes.
-* **Nothing bridges the Wayland side.** `wl_data_device` is a separate
-  protocol; a Wayland-native client that never goes through Xwayland has a
-  third clipboard. It is named here rather than implied to be covered.
+* ~~**Nothing bridges the Wayland side.**~~ **It is bridged now — §7.**
+  `wl_data_device` was a separate protocol with a third clipboard behind it,
+  and since a Wayland-native client (Firefox) never goes through Xwayland,
+  that was the clipboard most users would actually meet.
+
+---
+
+## 7. The third bridge: `wl_data_device` in `user/wsyswl.ad` + `lib/wlsnarf.ad`
+
+§6.5 named this as the thing that was not covered. This is what closed it.
+
+### 7.1 What `wl_data_device_manager` was doing before, exactly
+
+`user/wsyswl.ad` has advertised `wl_data_device_manager` at **version 3** for
+the whole port, and the header said why: *"GTK will not create a seat without
+it"*. What it did with it was an object graph and nothing else —
+`create_data_source` and `get_data_device` minted a `T_DATA_SOURCE` /
+`T_DATA_DEVICE` apiece, and every request on those objects fell off the end of
+`dispatch` into the branch commented *"Anything else … is consumed silently"*.
+No `wl_data_device.data_offer` and no `.selection` event was ever sent to
+anybody, in either direction.
+
+**So the handshake was satisfied and the clipboard behind it did not exist**,
+which is precisely the shape `NORTH_STAR.md` is a monument to. Measured
+against the shipped binary before any of this work:
+
+```
+a Wayland client copies, a Hamnix program pastes   ->  paste 0 0
+a Hamnix program copies, a Wayland client pastes   ->  wlpaste NOSELECTION
+the mime types the compositor offers               ->  wlmimes NONE
+```
+
+and **not one line on any log**, either way. `enter debian { firefox }` is a
+native Wayland client, so copying a URL out of Firefox and pasting it into the
+Hamnix editor did nothing — while the same copy out of an *X* application
+worked, through `xsnarfd`. A user cannot tell which toolkit an application
+uses, so the whole thing read as *"the clipboard works sometimes"*.
+
+### 7.2 Why this one could NOT be a separate process, unlike `xsnarfd`
+
+§3a is the X argument: there is nowhere in an X server that the clipboard
+lives, a client **owns** the selection, so the bridge had to *be* a client.
+Wayland inverts every clause of that:
+
+| | X | Wayland |
+|--|--|--|
+| who holds the selection | a client, any client | **the compositor** |
+| how a paste is served | the owner answers `ConvertSelection` | the compositor hands the paster a **pipe fd** |
+| can an outside process own it | yes — that is `xsnarfd` | **no** |
+
+There is no seat at that table for an outside process. The protocols that
+would make one possible — `wlr-data-control-unstable-v1`, `ext-data-control-v1`
+— are themselves compositor-implemented, so building one of those *first* and
+then a separate bridge on top would be strictly more code in `wsyswl.ad` than
+doing the job directly. **So the wire lives in `user/wsyswl.ad` and everything
+that could leave it lives in `lib/wlsnarf.ad`**: the device I/O, the change
+detector, the mime rules and the anti-ping-pong invariant. The change to
+`wsyswl.ad` is additive — new functions, new dispatch branches, three lines in
+`conn_reset` / `conn_free` / the main loop — and no existing function body
+changed behaviour.
+
+### 7.3 The shape, and the one non-obvious decision
+
+**The device is the single copy of the truth, not the client.** When a client
+calls `set_selection`, the compositor immediately asks its source for the bytes
+over a pipe and puts them in `/dev/snarf`. Every paste, from any client, is
+then answered **out of `/dev/snarf`** rather than forwarded to the owner.
+
+That is what makes it *one* clipboard rather than two that agree:
+
+* text that arrived from an `xterm` through `xsnarfd` is offered to Wayland
+  clients on exactly the same footing as text a Wayland client copied;
+* and **a paste still works after the tab you copied from has closed** — which
+  a compositor that forwarded pastes to the owner would lose. The gate asserts
+  it by killing the owning client.
+
+**The pull is ASYNCHRONOUS, and that is the decision worth defending.** The
+obvious version reads the pipe to EOF inside `set_selection` — and that is a
+compositor that stops painting for as long as a client takes to answer, by a
+client which, being a client, may take for ever or never answer at all. *The
+whole desktop would hang on a copy.* Instead the read end is put in the main
+loop's `sys_waitfds` (a **park**, not a spin — HANDOFF's IDLE CENSUS) and
+stepped non-blocking on the 16 ms frame, with a 3-second deadline after which
+the copy is **refused by name** and `/dev/snarf` is left alone.
+
+**The anti-ping-pong invariant is `xsnarfd`'s, ported rather than re-decided**
+(`lib/wlsnarf.ad`, `wlsn_put`): the cache is updated **before** the device is
+written, so the next 4 Hz poll does not see the bridge's own write as a
+Hamnix-side change and go re-announcing a selection at the client that just
+handed it over. Both bridges converge on **content**, so a copy in Firefox
+reaching an `xterm` goes Wayland → `/dev/snarf` → X and stops, instead of
+ringing.
+
+### 7.4 What it answers, and what it refuses
+
+**Four mime types, and all four are the same UTF-8 bytes:**
+`text/plain;charset=utf-8`, `text/plain`, `UTF8_STRING`, `TEXT`.
+
+**`STRING` is deliberately NOT among them**, and the gate asserts its absence.
+In X, `STRING` means Latin-1. `xsnarfd` answers it anyway because an X paster
+may ask for nothing else and a wrong encoding beats no paste at all; there is
+no such forced choice on the Wayland side, where every toolkit asks for
+`text/plain;charset=utf-8`, so offering it would be a claim about an encoding
+these bytes do not carry.
+
+Refused, each of them **loudly and by name**:
+
+* **a source offering no type the bridge can carry** (`image/png` and nothing
+  else, say) — `/dev/snarf` is left alone, the refusal names the situation,
+  and the client is told with **`wl_data_source.cancelled`**. A source left
+  believing it owns a selection the compositor dropped is the silent half of
+  this failure and is what makes the *next* copy in that application do
+  nothing too.
+* **a paste asking for a type the bridge does not have** — the fd is closed,
+  which is what the protocol gives a compositor to say no with, and the type
+  is printed. A closed fd alone is an empty paste and no explanation.
+* **more than `SNARF_MAX`** — truncated at 64 KiB and the drop named **by
+  size**, the same rule `/dev/snarf` applies to a 70 000-byte write (§4) and
+  `xsnarfd` applies to an oversized X selection (§6.2). The compositor keeps
+  draining the pipe past the cap so the client is not left blocked on a write.
+* **`set_selection(NULL)`** does *not* clear the clipboard — the same choice
+  §6.5 records for X, and the one every clipboard manager makes. Closing the
+  window you copied from emptying the clipboard is what nobody expects.
+
+### 7.5 Verification
+
+`tests/linux/wlsnarf_bridge.sh` — QEMU-free, offscreen, **35 assertions, 35
+PASS**, about a minute. The Hamnix side is the **same two probes**
+`snarf_device.sh` and `xsnarf_bridge.sh` use — `snarfcopy.ad` copying through
+`lib/hamtextbox.ad` and `snarfpaste.ad` pasting through `lib/htermsel.ad`, in
+separate processes — so what is asserted is copy in one world and paste in the
+other **through the shipped toolkit code**.
+
+**`tests/linux/wlclip.ad` is a native Wayland client written for this**, and it
+speaks the Wayland wire by hand for the reason `xsnarfd` speaks X11 by hand
+(§3c). It exists because the alternatives do not cover the job:
+
+* **`wl-copy` / `wl-paste` are not on this host** — checked by name, and their
+  absence is an `exit 2`, never a pass;
+* **Xwayland is here and is used**, but it answers only what its own X
+  selection code chooses to ask for. It cannot be told *"offer a mime nobody
+  can deliver"* or *"ask for a type the compositor does not have"*, and those
+  are the arms that prove a refusal is a refusal rather than a silence.
+
+**Arm 8 is what makes "one clipboard" a claim about all three worlds.** An
+`Xvfb` with `user/xsnarfd.ad` bridging it runs **beside** the Wayland
+compositor, on **one `$HAMSNARF`**: text copied in a Wayland client is pasted
+by an X client, text copied in an X client is pasted by a Wayland client, and
+the Hamnix side holds the same bytes throughout. A bridge that worked alone
+and looped or lost sync beside the other one would pass every arm above this
+and be useless.
+
+Also asserted: four rounds of ownership changing hands alternately with no
+loss of sync; a client that connects *after* the copy still sees it (without
+which the first paste of every newly started program returns nothing,
+silently); and the compositor still alive and still bridging at the end.
+
+**Arm 9 is a measured NEGATIVE, and it is the thing this pass got wrong first.**
+A **rootful Xwayland does not turn an X selection into a `wl_data_source` at
+all**: an `xclip` inside it copies and `/dev/snarf` does not move. That is not
+a defect in this code — it is exactly *why* `xsnarfd` exists per namespace,
+reaching the X clipboard by owning its selections rather than by going through
+Xwayland. The obvious explanation was **tested and rejected** rather than
+written down as a guess: the first hypothesis was that Xwayland had no input
+serial, because this compositor sends `wl_keyboard.enter` only on the **first
+keystroke into a window** (`drain_window`) — injecting a keystroke with
+`tests/linux/wsys_poke.ad` into the Xwayland window's `keys` ring did not
+change the answer, and neither did `-rootless`. So the arm asserts the state of
+affairs; **if the rootless-XWM pass makes Xwayland bridge, that arm will fail
+and force this section to be rewritten**, which is the point of asserting a
+negative. What arm 9 *does* assert positively is that the bridge keeps working
+in both directions with the largest foreign client this server carries
+attached to it.
+
+**An idle bridge is idle**, measured because on this tree that is never assumed
+(HANDOFF's IDLE CENSUS). `/proc/<wsyswl>/stat` over 15 s of a quiet compositor
+reads **`utime=0 stime=3`** clock ticks with the clipboard in, against
+**`utime=1 stime=1`** for the same binary without it — 30 ms against 20 ms in
+fifteen seconds, i.e. both are idle and the 4 Hz poll is inside the noise.
+
+Still green, unchanged by this work:
+
+| gate | result |
+|--|--|
+| `tests/linux/snarf_device.sh` | `passes=23 fails=0` / PASS |
+| `tests/linux/xsnarf_bridge.sh` | `passes=25 fails=0` / PASS |
+| `tests/linux/wsyswl_shared_fate.sh` | `18 PASS, 0 FAIL` |
+| `tests/linux/wsyswl_rootless.sh` | `29 passed, 0 failed` |
+
+The last two are there because this work changed `user/wsyswl.ad`, and a
+clipboard that cost the compositor a window would be a bad trade nobody
+measured.
+
+### 7.6 What this does NOT do
+
+* **PRIMARY is not bridged to Wayland.** Core Wayland has no middle-click
+  selection — that is `zwp_primary_selection_device_manager_v1`, a separate
+  protocol this compositor does not advertise. So `/dev/snarf.primary` is
+  bridged to X and **not** to Wayland: a triple-click in an `xterm` still
+  reaches `/dev/snarf.primary`, and middle-clicking in Firefox will not paste
+  it. Named here rather than left to be discovered by middle-clicking.
+* **No drag and drop.** `wl_data_device.start_drag` is consumed. This
+  compositor carries a selection, not a drag, and nothing advertises otherwise.
+* **Non-text content is not carried.** A client that copies an image and
+  offers `image/png` and nothing else is refused by name. Carrying it would
+  mean holding arbitrary blobs the 64 KiB device cannot hold and inventing a
+  second store beside it.
+* **The `selection` event goes to every client with a `wl_data_device`, not
+  only the focused one.** The protocol says the focused one. Withholding the
+  clipboard until focus arrives is how a paste into a window that was never
+  clicked returns nothing with no error; every toolkit simply records the
+  latest offer. The owner of the current selection is skipped, because
+  announcing an offer back at a source is how a toolkit concludes it *lost*
+  the selection.
+* **Change on the Hamnix side is still found BY CONTENT, at 4 Hz** — the same
+  limitation, and the same fix, as §6.5. The request is unchanged and now
+  buys **two** bridges instead of one: add `uint64_t serial;` to
+  `struct snarfshm` (`user/linux-snarf.c`) and `(*serialp)++;` at the end of
+  `hamsnarf_write`. Both polls then compare one word, and a later
+  `sys_waitfds` arm could park on the clipboard instead of polling it at all.
+* **No Firefox screenshot.** The mechanism is measured at every layer under it
+  — both directions through the shipped toolkit libraries, all three worlds at
+  once on one segment, ownership changing hands, and a real foreign Wayland
+  client attached — but **the actual `enter debian { firefox }`, copy a URL,
+  paste it in the Hamnix editor round trip has not been performed.** That is
+  the gap §4's last bullet warns about in its own words: on the Hamnix line it
+  was exactly this kind of gap that let nine green gates sit on top of a
+  feature that was dead on device. It needs a VM boot and a mouse, and it is
+  the first thing the next pass should do.
+* **An adjacent gap this work found and does not own:** `wl_keyboard.enter` is
+  sent only when a window first receives a **keystroke** (`drain_window` in
+  `user/wsyswl.ad`), not when it gains focus. A Wayland client that has never
+  been typed into therefore has no input serial. Firefox will have one by the
+  time anyone presses Ctrl-C, so this is not believed to affect the clipboard
+  — but it is the kind of thing that produces a plausible wrong answer later,
+  and it is written down here because this is where it was noticed.

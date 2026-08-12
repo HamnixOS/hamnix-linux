@@ -608,6 +608,248 @@ rootless. Nothing about rootless changes it.
   Firefox included. **That is the next piece of work, and it is a prerequisite
   for making this the default rather than an option.**
 
+> **All six of the above are done — see §8c**, which is stage two. `BB_SLOTS`
+> is now tied to the window table by a compile-time assertion rather than
+> being a number, `WINPERCONN` is 16, and twelve X windows are on the screen
+> at once with all twelve painted. The list is left standing because how each
+> gap was described here and what it turned out to be are not the same in
+> three of the six cases, and that difference is the useful part.
+
+---
+
+## 8c. Rootless, stage two — the list in 8b, and what it cost to close it
+
+§8b ended with five named gaps and one prerequisite. All six are now done and
+measured. What follows is what each one turned out to be, because in three
+cases the thing that was actually wrong was not the thing that was named.
+
+### The prerequisite: the paint pool
+
+§8b called it "the two ceilings §8a named", and the fix is not a bigger
+number. `BB_SLOTS` had already been raised once — 3 → 8, after a fourth
+window went blank with no error — and a number that has been wrong twice for
+the same reason should not be picked a third time. So it is not picked:
+
+> **`BB_SLOTS == WSYS_MAX_WINDOWS`, asserted at compile time.** The paint pool
+> can never be the first thing to run out. The ceiling that is left is the
+> window table, which is a number the device can state.
+
+What made a pool that size affordable is the interesting half, because it is
+why it had not simply been done. A slot cost a screen-sized double buffer
+*whatever the window's size was*: the segment was `memset` whole at creation,
+each slot `memset` whole on fit, and the front page `memcpy`d whole into the
+back **on every frame**. Three changes make the cost the window's own area:
+
+* the pixels are no longer a member of `struct bbshm`. The headers are one
+  small mapping; slot *i*'s two pages are mapped **on demand** at a computed
+  offset, so a process maps only the slots it touches instead of two gigabytes
+  of address space in every GUI program on the machine;
+* `bb_fit` clears `w*h*4` — and the *old* extent too, so a shrink cannot leave
+  the previous tenant's pixels inside the new window;
+* `bb_blit`'s carry-forward copies `w*h*4`. That one was also 8 MiB per frame
+  per window on the frame path.
+
+Measured, `tests/linux/wsyswl_ceiling.sh` (9 PASS, offscreen, no VM): **twelve
+X clients on one rootless Xwayland are twelve Hamnix windows, all twelve
+painted in their own colour in the framebuffer**, and the backbuffer segment —
+2025 MiB long, sparse on purpose — has **1924 KiB allocated**. The same run
+before this gave 8 windows and four X clients that vanished.
+
+And the ceiling is READABLE now, which is the part that had cost the most.
+`/dev/wsys/pool` answers
+
+```
+slots 12/128 exhausted 0 last_refused 0 0x0
+```
+
+so a window that is never painted is diagnosable from a file after the fact,
+rather than from a line on a console somebody had to be watching at the time.
+
+The chain of ceilings behind it had one more link that nothing had noticed:
+`user/wsysd.ad`'s own window table was 32 while the device's was 32, which
+agreed *by accident*. Raising the device to 128 made the compositor's array
+the next silent ceiling — a 33rd window would have been listed and never
+painted. Both are 128, and the ceiling test is what keeps them equal.
+
+### `WM_DELETE_WINDOW` — and why there was no close button at all
+
+Not "the close button was broken". There was none, on any window, native or
+bridged, and the reason is worth recording: the only thing `wsysd` could have
+done with the click was write `close <wid>`, which **destroys the window
+record and leaves the program running**. An invisible `xterm` holding a shell;
+a browser you cannot see and cannot quit; an editor with unsaved work and
+nobody to ask. A button that does that is worse than no button.
+
+So the device grew a second verb. **`delete <wid>` asks.** A window whose owner
+set `wmdelete 1` on its ctl gets the request on its own `event` ring and the
+owner decides; anything that never heard of the verb is destroyed exactly as
+`close` always did, so a scene app is unaffected. `wsyswl` sets `wmdelete 1` on
+every window it opens and turns the request into `WM_DELETE_WINDOW` for an X
+client that advertises it in `WM_PROTOCOLS`, `xdg_toplevel.close` for a native
+Wayland toplevel, and `KillClient` for an X client that said it cannot be
+asked. Which of the three happened is a counter, because *"the window would
+not close"* and *"the client was killed"* are different bugs with one symptom.
+
+`tests/linux/wsys_close_button.sh` (10 PASS): the button is painted at exactly
+the coordinates the hit test uses (91% of that rectangle, the rest being the
+cross); a click elsewhere on the title bar does not close; and a real click on
+the button makes **the X client exit** — the process, not the window record —
+while the other client is untouched.
+
+That test needed a pointer, so `wsysd` grew `HAMWSYSD_INPUT`, which names an
+evdev stream and **replaces** the `/dev/input` scan. Same justification as
+`HAMFB_FILE`: an offscreen compositor with no pointer cannot be asked anything
+a pointer does. What is read from it is evdev byte for byte, through the same
+dispatch loop — a test that invented its own event format would be testing its
+own invention — and *replacing* the scan is what keeps an offscreen run on a
+development host off that host's real keyboard.
+
+One thing the first run of that test found, worth having written down: press
+and release must land in **separate 16 ms pumps**. `wsysd` keeps one
+`ptr_edge`, so a collapsed pair reads as a release with no press. No human at
+a mouse could produce the collapsed case; a test can, and did.
+
+### `ConfigureNotify`, and why the absence was invisible
+
+`wsysd` moving a window was invisible to the program inside it. An X client
+that asked its own geometry got the corner it opened at for the rest of its
+life, and an override-redirect menu placed at *"my parent's corner plus
+twenty"* was placed against a corner that had not been true since the first
+drag. **Pointer coordinates were never affected** — they are surface-local and
+Xwayland adds the origin itself — which is exactly why everything *looked*
+right and this was easy to leave out of stage one.
+
+The fix is in two halves and the first is a file. `geometry` written by anyone
+but the window's owner now posts the new rectangle on the window's own `event`
+ring: the file-server half of `ConfigureNotify`, on a ring a parked client is
+already asleep on, so it costs a wakeup when a window moves and **nothing at
+all** when none does. The compositor reads it and pushes it on to the X window
+as a `ConfigureWindow`, which the X server turns into the `ConfigureNotify`
+the client is waiting for.
+
+X and wsys therefore agree on where a window is — which has a second effect
+worth more than the first: **a menu opened *after* a move is placed correctly
+by the client, with no help from us at all.**
+
+Measured in `wsyswl_rootless.sh` by `xprop`/`xwininfo`, a different program
+asking the X server: after the compositor moves a window to 280,240, the X
+server says the client is at 280,240.
+
+### `WM_TRANSIENT_FOR` and menus that follow
+
+`WM_TRANSIENT_FOR` is read on map: a dialog goes one z band above an ordinary
+toplevel, where before it stayed on top only by having been created later and
+one click on the parent buried it.
+
+An override-redirect menu is attributed on map to the toplevel it opened over
+— by `WM_TRANSIENT_FOR` when the client set it, otherwise by whose rectangle
+contains its corner — and the offset is remembered, so a menu that is **already
+open** when its parent is dragged moves with it. That is the one case the
+client cannot get right, because nothing tells it; everything opened after the
+move is handled by the coordinate sync above.
+
+### EWMH — the answer was not "bad", it was "no window manager"
+
+Until stage two a rootless display answered these questions **byte-for-byte
+the way a bare X screen does**. That is not a poor answer; a toolkit correctly
+concluded there was no window manager and laid itself out accordingly, and a
+client asking how big the usable desktop is got nothing and guessed. `jwm` —
+the arm this replaces — publishes 66 atoms.
+
+Published now, from the compositor's own XWM, and **only what is true**:
+`_NET_SUPPORTING_WM_CHECK` (on a real window that points back at itself and
+carries `_NET_WM_NAME` "wsyswl"), `_NET_SUPPORTED` with sixteen atoms,
+`_NET_WORKAREA`, `_NET_DESKTOP_GEOMETRY`, `_NET_DESKTOP_VIEWPORT`,
+`_NET_NUMBER_OF_DESKTOPS`, `_NET_CURRENT_DESKTOP`, `_NET_CLIENT_LIST`,
+`_NET_CLIENT_LIST_STACKING`, `_NET_ACTIVE_WINDOW`, `_NET_WM_STATE` and
+`_NET_WM_STATE_FOCUSED`.
+
+There is no `_NET_WM_STATE_FULLSCREEN`, no `_NET_MOVERESIZE_WINDOW` and no
+`_NET_WM_STATE_HIDDEN`, because this compositor does not do those things: **a
+hint claimed and not honoured is worse than one absent**, since absent is a
+fact a client can act on. `_NET_WORKAREA` is the screen minus `wsysd`'s title
+bar and frame — the same `MAX_INSET_W/H` arithmetic `xdg_toplevel.configure`
+already uses, or a maximised X client and a maximised Wayland client would be
+different sizes on the same desktop. `_NET_CLIENT_LIST_STACKING` carries the
+same *set*, and the code says outright that its *order* is not to be trusted,
+because `wsysd` owns z and this compositor does not read it back.
+
+`hamnix_x11session.sh` no longer skips its window-manager check on the
+rootless arm. That skip existed because the check would have printed a warning
+that was true and misleading at once; the same question now has the same
+meaning on all three arms.
+
+Measured by `xprop`:
+
+```
+_NET_SUPPORTED lists 16 atoms
+check window 0x200001 names 0x200001 and calls itself "wsyswl"
+_NET_WORKAREA is 0, 0, 1160, 700
+_NET_CLIENT_LIST has 2 windows
+```
+
+### The visible title — judged, and it is still out of scope
+
+Stage one established by measurement that `wsysd` paints **no text on a title
+bar for any window**, native or bridged, and §8b asked whoever came next to
+judge whether to fix it here. The judgement is no, and the reason is that it is
+not a rootless question at all: it is one `wsysd` change that gives every
+window on the desktop a visible name, X windows included, for free. Doing it
+inside a rootless pass would put it in the wrong commit and under the wrong
+test. The name is already set on the wsys window and already correct; what is
+missing is a glyph run in `paint_window`'s decoration, next to the close box
+this pass did add.
+
+### The two real clients, re-run
+
+Neither had been run against this path since stage one, and everything in
+this pass touches the device and the compositor that both of them go through:
+`WSYS_VERSION` went to 5, the backbuffer segment was re-laid-out, `wsysd`'s
+window table doubled twice, and `lib/vk/vk_2d.ad`'s source-over now composes
+the alpha channel. So both were run, and both render.
+
+**Firefox**, the native Wayland client, offscreen against `wsyswl`:
+`docs/screenshots/linux/rootless-stage2-firefox-wayland.png` — full chrome,
+tab strip, address bar, content, in a decorated Hamnix window with a close
+button on it. 1550 backbuffer generations, every drop counter 0.
+
+It also produced the number in "what is still not built" below: **`conns 8`,
+`conns_high_water 8`**. Firefox alone is `MAXCONN`.
+
+**Steam**, in the Debian namespace, in the VM:
+`docs/screenshots/linux/rootless-stage2-steam-login.png` — "Sign in to Steam"
+with the logo, both fields, the button, the QR code and the links, on the
+desktop with the panel above it and the taskbar below.
+`xwininfo` says `700x440+290+180`, `IsViewable`. Rootful, which is the arm
+Steam uses and which this pass leaves alone by construction.
+
+That run used `tests/linux/steam_gui_ro.sh`, which is `steam_gui_run.sh`'s
+measurement **without writing to the shared namespace image**: no `debugfs`,
+`HAMLINUX_DISTRO_RO=1`, and the session scripts appended to the initramfs as a
+second cpio segment. `build/` is not isolated by a git worktree, and two
+agents planting into `distro.ext4` at once destroy each other's runs silently.
+
+### What is still not built
+
+* **Resize by dragging an edge.** `wsysd` has a close button now and no move
+  or resize grip; the `geometry` verb is the only mover, which is what every
+  test here uses. This is the largest remaining gap in the desktop's own
+  window management and it is not specific to X.
+* **`_NET_WM_STATE` round trips.** The property exists and is published; a
+  client *requesting* maximise through `_NET_WM_STATE` with a ClientMessage is
+  not honoured yet.
+* **Stacking order.** `_NET_CLIENT_LIST_STACKING` is published as a set with
+  an order that is not the stacking order, and is documented as such.
+* **`MAXCONN` is the next ceiling, and it is closer than it looks.** It is 8,
+  and **Firefox alone reaches `conns 8`** with its content and GPU processes —
+  measured, this pass. A namespace's Xwayland arriving next is the ninth, and
+  hitting that ceiling does not cost a window, it costs a whole program. It is
+  a counter now (`conn_refused`) rather than only a line on stderr, but the
+  number has not been raised: `MAXWIN >= MAXCONN * WINPERCONN` is the
+  reservation the shared-fate work established, and raising `MAXCONN` to 16
+  means either halving the per-connection window budget this pass just doubled
+  or taking the device's window table to 256.
+
 ### How to run it
 
 The compositor is told which display it manages, by name, from outside the

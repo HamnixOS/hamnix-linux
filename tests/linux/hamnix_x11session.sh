@@ -228,15 +228,17 @@ esac
 # plainly managing, because that image had no xprop -- the check committing the
 # exact failure it exists to catch. Say "cannot check" instead.
 #
-# ROOTLESS IS EXEMPT, AND IT IS EXEMPT FOR A REASON THAT IS ALSO A TODO. The
-# compositor's own X11 window manager redirects, maps, configures and titles,
-# and it publishes NO EWMH yet -- no _NET_SUPPORTING_WM_CHECK, no
-# _NET_SUPPORTED, no _NET_WORKAREA. Asking these questions on a rootless
-# display would print a warning that is true and misleading in the same breath:
-# the screen IS managed, from outside, and `xwl_managed` in
-# $XDG_RUNTIME_DIR/wsyswl-state is where the answer lives. Publishing EWMH from
-# the compositor is stage two -- docs/linux_window_manager.md 8b.
-if [ "$WM" != none ] && [ "$WM" != rootless ]; then
+# ROOTLESS IS NO LONGER EXEMPT. It used to be, and the exemption was itself a
+# TODO: the compositor's X11 window manager redirected, mapped, configured and
+# titled while publishing NO EWMH, so asking these questions on a rootless
+# display printed a warning that was true and misleading in the same breath --
+# the screen WAS managed, from outside. user/wsyswl.ad now publishes
+# _NET_SUPPORTING_WM_CHECK (on a real check window that points back at itself),
+# _NET_SUPPORTED, _NET_WORKAREA, _NET_CLIENT_LIST and _NET_ACTIVE_WINDOW, so
+# the same question has the same meaning on all three arms and is asked on all
+# three. `xwl_managed` in $XDG_RUNTIME_DIR/wsyswl-state is still the compositor
+# side of the same fact.
+if [ "$WM" != none ]; then
   if ! command -v xprop >/dev/null 2>&1; then
     echo "hamnix-x11session: cannot check whether $WM has the screen -- no xprop (x11-utils) in this namespace" >&2
   else
@@ -245,6 +247,7 @@ if [ "$WM" != none ] && [ "$WM" != rootless ]; then
         echo "hamnix-x11session: window manager has the screen: $(xprop -id "$WMCHECK" _NET_WM_NAME 2>/dev/null | sed 's/.*= //'), $(xprop -root _NET_SUPPORTED 2>/dev/null | sed 's/.*= //' | tr ',' '\n' | wc -l) _NET_SUPPORTED atoms, $(xprop -root _NET_WORKAREA 2>/dev/null | sed 's/.*= //')" >&2
     else
         echo "hamnix-x11session: WARNING $WM is not managing this screen -- no _NET_SUPPORTING_WM_CHECK. Its log:" >&2
+        [ "$WM" = rootless ] && echo "hamnix-x11session:   rootless: the window manager is the COMPOSITOR's, outside this namespace. Read xwm/xwl_managed in \$XDG_RUNTIME_DIR/wsyswl-state." >&2
         [ -s /tmp/wm.log ] && sed 's/^/hamnix-x11session:   /' /tmp/wm.log >&2
     fi
   fi

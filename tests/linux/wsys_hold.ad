@@ -1,0 +1,200 @@
+# tests/linux/wsys_hold.ad — hold a window open and drive it from a file.
+#
+#   wsys_hold <script>     print the new wid, then obey <script> for ever
+#
+# WHY THIS EXISTS AND wsys_poke DOES NOT SUFFICE. A window's owner pid is
+# stamped at `newwindow`, and user/linux-wsys.c's win_reap_dead() destroys any
+# window whose owner has exited -- deliberately, so a client killed with
+# SIGKILL does not leave a rectangle on the desktop for ever. A shell test
+# driving the window system with one wsys_poke per verb therefore creates a
+# window that is already dead by the time the next line runs, and the symptom
+# is a compositor that paints nothing while every command returns 0.
+#
+# So: ONE process creates the window, keeps running, and reads its instructions
+# from a file the test appends to. Lines are executed in order and the file is
+# re-read as it grows, so a test can change a ctl verb and watch the
+# framebuffer change.
+#
+#   ctl <verb>      -> /dev/wsys/<wid>/ctl
+#   gctl <verb>     -> /dev/wsys/ctl
+#   scene <line>    -> /dev/wsys/<wid>/scene, then `commit`
+#
+# Anything else is ignored, so a blank line or a comment costs nothing.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+pathbuf: Array[256, uint8]
+line:    Array[2048, uint8]
+filebuf: Array[16384, uint8]
+numbuf:  Array[24, uint8]
+waitset: Array[4, int32]
+wid:     int32 = 0
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    if v == 0:
+        buf[at] = 48
+        return at + 1
+    x: int32 = v
+    i: uint64 = at
+    if x < 0:
+        buf[i] = 45
+        i = i + 1
+        x = 0 - x
+    n: uint64 = 0
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = numbuf[n]
+        i = i + 1
+    return i
+
+
+# /dev/wsys/<wid>/<leaf> into pathbuf.
+def winpath(leaf: Ptr[uint8]):
+    i: uint64 = 0
+    p: Ptr[uint8] = "/dev/wsys/"
+    k: uint64 = 0
+    while p[k] != 0:
+        pathbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&pathbuf[0], i, wid)
+    pathbuf[i] = 47
+    i = i + 1
+    k = 0
+    while leaf[k] != 0:
+        pathbuf[i] = leaf[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+
+def write_path(path: Ptr[char], data: Ptr[uint8], n: uint64) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    sys_write(fd, data, n)
+    sys_close(fd)
+    return 0
+
+
+def newwindow() -> int32:
+    if write_path(cast[Ptr[char]]("/dev/wsys/ctl"),
+                  cast[Ptr[uint8]]("newwindow\n"), 10) != 0:
+        return -1
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if fd < 0:
+        return -1
+    n: int64 = sys_read(fd, &line[0], 32)
+    sys_close(fd)
+    if n <= 0:
+        return -1
+    v: int32 = 0
+    i: uint64 = 0
+    while i < cast[uint64](n) and line[i] >= 48 and line[i] <= 57:
+        v = v * 10 + cast[int32](line[i]) - 48
+        i = i + 1
+    return v
+
+
+# 1 if filebuf[at..end) starts with `pfx`.
+def starts(at: uint64, end: uint64, pfx: Ptr[uint8]) -> int32:
+    k: uint64 = 0
+    while pfx[k] != 0:
+        if at + k >= end or filebuf[at + k] != pfx[k]:
+            return 0
+        k = k + 1
+    return 1
+
+
+# Copy filebuf[from..end) into line, NUL-terminated, and return its length.
+def take(from_: uint64, end: uint64) -> uint64:
+    n: uint64 = 0
+    i: uint64 = from_
+    while i < end and n < 2046:
+        line[n] = filebuf[i]
+        n = n + 1
+        i = i + 1
+    line[n] = 10
+    line[n + 1] = 0
+    return n + 1
+
+
+def do_line(at: uint64, end: uint64):
+    if starts(at, end, "scene ") != 0:
+        n: uint64 = take(at + 6, end)
+        winpath("scene")
+        write_path(cast[Ptr[char]](&pathbuf[0]), &line[0], n)
+        winpath("ctl")
+        write_path(cast[Ptr[char]](&pathbuf[0]),
+                   cast[Ptr[uint8]]("commit\n"), 7)
+        return
+    if starts(at, end, "gctl ") != 0:
+        n2: uint64 = take(at + 5, end)
+        write_path(cast[Ptr[char]]("/dev/wsys/ctl"), &line[0], n2)
+        return
+    if starts(at, end, "ctl ") != 0:
+        n3: uint64 = take(at + 4, end)
+        winpath("ctl")
+        write_path(cast[Ptr[char]](&pathbuf[0]), &line[0], n3)
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        puts(2, "usage: wsys_hold <script>\n")
+        return 2
+    wid = newwindow()
+    if wid < 2:
+        puts(2, "wsys_hold: newwindow refused\n")
+        return 1
+    n: uint64 = emit_int(&line[0], 0, wid)
+    line[n] = 10
+    sys_write(1, &line[0], n + 1)
+
+    done: uint64 = 0                   # bytes of the script already obeyed
+    while 1 == 1:
+        fd: int32 = sys_open(cast[Ptr[char]](argv[1]))
+        if fd >= 0:
+            total: uint64 = 0
+            while total < 16383:
+                k: int64 = sys_read(fd, &filebuf[total], 16383 - total)
+                if k <= 0:
+                    total = total
+                    break
+                total = total + cast[uint64](k)
+            sys_close(fd)
+            # Only whole lines, and only the ones past what has been obeyed:
+            # the file is being appended to while this reads it, so a trailing
+            # partial line must wait for its newline rather than be executed
+            # in half -- which for a `scene` line is a display list cut mid-op.
+            i: uint64 = done
+            s: uint64 = done
+            while i < total:
+                if filebuf[i] == 10:
+                    if i > s:
+                        do_line(s, i)
+                    s = i + 1
+                    done = s
+                i = i + 1
+        sys_waitfds(&waitset[0], 0, 100)
+    return 0

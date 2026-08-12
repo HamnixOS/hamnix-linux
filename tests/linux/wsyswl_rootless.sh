@@ -463,6 +463,35 @@ else
     bad "wid $STAYER moved too (${SX},${SY} -> ${TX},${TY}); these share a fate they should not"
 fi
 
+# ---- AND DOES THE CLIENT KNOW? --------------------------------------------
+# The move above was measured in the framebuffer and in the window table, and
+# for stage one that was the whole claim. It left the X client believing it
+# was still where it opened: `xwininfo` on it reported the ORIGINAL corner for
+# the rest of the session, and an override-redirect menu placed at "my corner
+# plus twenty" was placed against a corner that had not been true since the
+# first drag. Pointer coordinates were never affected -- they are
+# surface-local and Xwayland adds the origin itself -- which is exactly why
+# everything LOOKED right and this was easy to leave out.
+#
+# So the compositor now pushes the new rectangle back as a ConfigureWindow,
+# which the X server turns into the ConfigureNotify the client is waiting for.
+# The evidence is the X server's own answer, asked by a different program.
+MOVER_NAME=alpha
+[ "$MOVER_COL" = "$COL_B" ] && MOVER_NAME=beta
+XI="$(xwininfo -name "$MOVER_NAME" 2>/dev/null)"
+XPX="$(sed -n 's/^ *Absolute upper-left X: *\([0-9-]*\).*/\1/p' <<<"$XI" | head -1)"
+XPY="$(sed -n 's/^ *Absolute upper-left Y: *\([0-9-]*\).*/\1/p' <<<"$XI" | head -1)"
+PUSHED="$(sed -n 's/^x_configure_pushed \([0-9]*\)$/\1/p' "$STATE" 2>/dev/null | tail -1)"
+info "the X server says '$MOVER_NAME' is at ${XPX:-?},${XPY:-?}; x_configure_pushed ${PUSHED:-?}"
+if [ "${XPX:-x}" = "$NEWX" ] && [ "${XPY:-x}" = "$NEWY" ]; then
+    ok "the X client was TOLD where the desktop put it -- X and wsys agree on ${NEWX},${NEWY}"
+else
+    bad "the X client still thinks it is at ${XPX:-?},${XPY:-?}, not ${NEWX},${NEWY}"
+fi
+[ "${PUSHED:-0}" -ge 1 ] \
+    && ok "and the compositor counts the pushes it made ($PUSHED)" \
+    || bad "x_configure_pushed is ${PUSHED:-absent}"
+
 cp "$HAMFB_FILE" "$WORK/after.raw"
 MOVED_PCT="$(colourpct "$NEWX" "$NEWY" "$MW" "$MH" "$WORK/after.raw" "$MOVER_COL")"
 STAY_PCT="$(colourpct "$SX" "$SY" "$SW" "$SH" "$WORK/after.raw" "$STAYER_COL")"
@@ -566,6 +595,61 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
+# 2c. EWMH -- IS THERE A WINDOW MANAGER ON THIS SCREEN, AND WHAT CAN IT DO?
+#
+# Until this, the answer was byte-for-byte the answer a BARE X SCREEN gives:
+# no _NET_SUPPORTED, no _NET_SUPPORTING_WM_CHECK, no _NET_WORKAREA, no
+# _NET_CLIENT_LIST. That is not "answered badly" -- a toolkit correctly
+# concluded there was no window manager and laid itself out accordingly, and
+# it is why hamnix_x11session.sh had to SKIP its window-manager check on this
+# arm rather than print a warning that was true and misleading at once.
+#
+# The check window is the load-bearing one and is asserted BOTH ways: the
+# property on the root must name a window that exists and carries the same
+# property pointing at itself. A window manager that publishes hints on the
+# root and then dies leaves exactly the first half, which is what
+# docs/linux_window_manager.md §4 records matchbox doing.
+# ---------------------------------------------------------------------------
+echo "rless: === 2c. does this screen have a window manager, as far as X is concerned?"
+if command -v xprop >/dev/null; then
+    SUP="$(xprop -root _NET_SUPPORTED 2>/dev/null)"
+    NSUP="$(tr ',' '\n' <<<"$SUP" | grep -c '_NET_')"
+    info "_NET_SUPPORTED lists $NSUP atoms"
+    [ "${NSUP:-0}" -ge 8 ] \
+        && ok "_NET_SUPPORTED is published with $NSUP atoms" \
+        || bad "_NET_SUPPORTED has ${NSUP:-0} atoms -- a toolkit reads that as no window manager"
+    CHECK="$(xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null \
+             | sed -n 's/.*window id # \(0x[0-9a-f]*\).*/\1/p')"
+    if [ -n "$CHECK" ]; then
+        BACKREF="$(xprop -id "$CHECK" _NET_SUPPORTING_WM_CHECK 2>/dev/null \
+                   | sed -n 's/.*window id # \(0x[0-9a-f]*\).*/\1/p')"
+        WMNAME="$(xprop -id "$CHECK" _NET_WM_NAME 2>/dev/null \
+                  | sed -n 's/.*= "\(.*\)"/\1/p')"
+        info "check window $CHECK names $BACKREF and calls itself \"$WMNAME\""
+        [ "$BACKREF" = "$CHECK" ] \
+            && ok "the check window exists and points back at itself -- a LIVE window manager" \
+            || bad "the check window does not point back at itself ($BACKREF); this reads as a dead WM"
+        [ -n "$WMNAME" ] \
+            && ok "and it names itself: $WMNAME" \
+            || bad "the check window carries no _NET_WM_NAME"
+    else
+        bad "_NET_SUPPORTING_WM_CHECK is absent -- X sees no window manager at all"
+    fi
+    WA="$(xprop -root _NET_WORKAREA 2>/dev/null | sed -n 's/.*= //p')"
+    info "_NET_WORKAREA is $WA"
+    [ -n "$WA" ] \
+        && ok "_NET_WORKAREA answers, so a client asking how big the desktop is gets a number" \
+        || bad "_NET_WORKAREA is absent"
+    CL="$(xprop -root _NET_CLIENT_LIST 2>/dev/null | tr ',' '\n' | grep -c '0x')"
+    info "_NET_CLIENT_LIST has $CL windows"
+    [ "${CL:-0}" -ge 2 ] \
+        && ok "_NET_CLIENT_LIST carries both X windows -- a taskbar could list them" \
+        || bad "_NET_CLIENT_LIST has ${CL:-0} entries, expected 2"
+else
+    info "xprop is not on this host; the EWMH assertions are skipped"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. THE CONTROL: the same two clients, rootful, on the same compositor
 # ---------------------------------------------------------------------------
 echo "rless: === 3. the control -- the same two clients on a ROOTFUL Xwayland"
@@ -629,7 +713,17 @@ if [ -n "$MAXWIN" ] && [ -n "$MAXCONN" ] && [ -n "$WINPERCONN" ]; then
     # and it is written down here so the next person meets it as a number
     # rather than as "the ninth window did not appear".
     info "an X display may therefore have at most WINPERCONN=$WINPERCONN toplevels on screen at once"
-    info "and user/linux-wsys.c's BB_SLOTS is the harder one behind it -- see docs 8b"
+    # BB_SLOTS USED TO BE THE HARDER CEILING BEHIND THIS ONE and is not any
+    # more: user/linux-wsys.c ties the v2 backbuffer pool to the window table
+    # with a compile-time assertion, so the paint pool can never be the first
+    # thing to run out. /dev/wsys/pool states it, and tests/linux/wsyswl_ceiling.sh
+    # puts twelve X windows on the screen at once and checks all twelve PIXELS.
+    POOL="$(poke /dev/wsys/pool)"
+    if [ -n "$POOL" ]; then
+        ok "and the paint pool behind it is readable: $POOL"
+    else
+        bad "/dev/wsys/pool does not exist -- an exhausted paint pool would be silent again"
+    fi
 fi
 
 echo "rless: $pass passed, $fail failed"

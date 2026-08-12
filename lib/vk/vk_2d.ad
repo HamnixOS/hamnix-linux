@@ -257,7 +257,16 @@ def _vk2d_blend_at(o: uint64, r: uint8, g: uint8, b: uint8, a: uint8):
     cast[Ptr[uint8]](o)[0] = cast[uint8]((cast[uint32](r) * av + dr * ia) / 255)
     cast[Ptr[uint8]](o + 1)[0] = cast[uint8]((cast[uint32](g) * av + dg * ia) / 255)
     cast[Ptr[uint8]](o + 2)[0] = cast[uint8]((cast[uint32](b) * av + db * ia) / 255)
-    cast[Ptr[uint8]](o + 3)[0] = 255
+    # AND THE ALPHA CHANNEL, out_a = sa + da*(1-sa), for the reason spelled
+    # out in vk2d_raster_fill_rect_alpha below. This is the per-pixel path --
+    # glyph coverage, line AA, the rounded-rect corners -- so on a window
+    # presented `keyed 1` it is every soft edge: a hardcoded 255 declared each
+    # partial-coverage pixel FULLY OPAQUE after blending it toward the
+    # transparent clear, which puts a dark opaque fringe around every rounded
+    # corner and every glyph drawn straight onto the clear. Over an opaque
+    # destination this still yields 255, so nothing that was right moves.
+    da: uint32 = cast[uint32](cast[Ptr[uint8]](o + 3)[0])
+    cast[Ptr[uint8]](o + 3)[0] = cast[uint8](av + da * ia / 255)
 
 
 def _vk2d_blend(color_base: uint64, img_w: uint64, img_h: uint64,
@@ -327,6 +336,63 @@ def vk2d_raster_fill_rect(color_base: uint64, img_w: uint64, img_h: uint64,
             o = o + 4
             xx = xx + 1
         yy = yy + 1
+
+
+# A CLEAR THAT KEEPS THE ALPHA BYTE IT WAS GIVEN.
+#
+# vk2d_raster_fill_rect above hardcodes 255 into the alpha byte
+# (_vk2d_pack_opaque, and the name says so), which is right for every fill
+# that goes to an XRGB scanout and wrong for exactly one caller:
+# lib/hamui_host.ad's opening clear, when the window is going to be presented
+# ALPHA-KEYED. hamui_host_set_clear_alpha(0) exists to say "leave the pixels
+# no op paints transparent so the compositor can skip them" -- and it could
+# not, because the clear it asked for came back opaque. `keyed 1` therefore
+# did nothing while every layer returned success, which is the same shape as
+# the missing ctl verb it was added to fix.
+#
+# Separate function, not a flag on the old one: every existing caller keeps
+# the packed-word fast path byte for byte, and this one is never routed to the
+# device, because the alpha byte is the entire point and what the device does
+# with it is not ours to assume.
+def vk2d_raster_clear_rect_a(color_base: uint64, img_w: uint64, img_h: uint64,
+                             x: int64, y: int64, w: int64, h: int64,
+                             r: uint8, g: uint8, b: uint8, a: uint8):
+    if color_base == 0 or w <= 0 or h <= 0:
+        return
+    rr: uint8 = r
+    bb: uint8 = b
+    if _vk2d_bgra != 0:
+        rb_t2: uint8 = rr
+        rr = bb
+        bb = rb_t2
+    iw: int64 = cast[int64](img_w)
+    ih: int64 = cast[int64](img_h)
+    x0: int64 = x
+    y0: int64 = y
+    x1: int64 = x + w
+    y1: int64 = y + h
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > iw:
+        x1 = iw
+    if y1 > ih:
+        y1 = ih
+    if x0 >= x1 or y0 >= y1:
+        return
+    pword: uint32 = cast[uint32](rr) | (cast[uint32](g) << 8) \
+                  | (cast[uint32](bb) << 16) | (cast[uint32](a) << 24)
+    yy2: int64 = y0
+    while yy2 < y1:
+        o: uint64 = color_base + (cast[uint64](yy2) * img_w
+                                  + cast[uint64](x0)) * 4
+        xx2: int64 = x0
+        while xx2 < x1:
+            cast[Ptr[uint32]](o)[0] = pword
+            o = o + 4
+            xx2 = xx2 + 1
+        yy2 = yy2 + 1
 
 
 def vk2d_raster_fill_rect_alpha(color_base: uint64, img_w: uint64,
@@ -404,7 +470,16 @@ def vk2d_raster_fill_rect_alpha(color_base: uint64, img_w: uint64,
             cast[Ptr[uint8]](o)[0] = cast[uint8]((rav + dr * ia) / 255)
             cast[Ptr[uint8]](o + 1)[0] = cast[uint8]((gav + dg * ia) / 255)
             cast[Ptr[uint8]](o + 2)[0] = cast[uint8]((bav + db * ia) / 255)
-            cast[Ptr[uint8]](o + 3)[0] = 255
+            # SOURCE-OVER COMPOSES THE ALPHA CHANNEL TOO: out_a = sa + da*(1-sa).
+            # This was a hardcoded 255, which is invisible on an XRGB scanout
+            # (the top byte is ignored) and fatal to a window presented with
+            # `blend 1`: a #00000066 scrim rasterized over a transparent clear
+            # came out as OPAQUE black, so the compositor's source-over had
+            # nothing to blend with and covered the desktop it was meant to
+            # dim. Over an opaque destination this still yields 255, so every
+            # existing caller's pixels are unchanged.
+            da: uint32 = cast[uint32](cast[Ptr[uint8]](o + 3)[0])
+            cast[Ptr[uint8]](o + 3)[0] = cast[uint8](av + da * ia / 255)
             o = o + 4
             xc = xc + 1
         yr = yr + 1

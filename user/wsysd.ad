@@ -122,7 +122,8 @@ from lib.hamui_host import hamui_host_begin, hamui_host_begin_into, \
     hamui_host_row_base, hamui_host_width, hamui_host_height, \
     hamui_host_register_image, hamui_host_clear_images, \
     hamui_host_image_misses, hamui_host_image_miss_count, \
-    hamui_host_image_miss_name
+    hamui_host_image_miss_name, hamui_host_set_clear_alpha, \
+    hamui_host_uncovered_rows, hamui_host_covered_w, hamui_host_covered_h
 from lib.vk.vk_2d import vk2d_set_router, vk2d_clear_router
 from lib.vk.vk_core import vk_set_backend, vk_linux_frame_alloc, \
     VK_BACKEND_LINUX, VK_BACKEND_SW, VK_SUCCESS
@@ -194,32 +195,45 @@ scr_h: int32 = 0
 scr_pitch: int32 = 0
 
 # --- the window set ---------------------------------------------------
-MAX_WIN: uint64 = 32
-win_id:  Array[32, int32]
-win_x:   Array[32, int32]
-win_y:   Array[32, int32]
-win_w:   Array[32, int32]
-win_h:   Array[32, int32]
-win_z:   Array[32, int32]
-win_dec: Array[32, int32]
-win_vis: Array[32, int32]
-win_gen: Array[32, int32]
-win_bbgen: Array[32, int32]
+# A HUNDRED AND TWENTY-EIGHT, because that is how many windows the device
+# holds. This used to be 32 while /dev/wsys held 32, which agreed by
+# accident; when the device's table was raised to 128 for rootless Xwayland
+# this array was the next silent ceiling in the chain -- a 33rd window would
+# have existed, been listed, and never been PAINTED, which is the exact
+# failure the backbuffer pool was just fixed for. The two numbers are the
+# same number and tests/linux/wsyswl_ceiling.sh is what keeps them so.
+MAX_WIN: uint64 = 128
+win_id:  Array[128, int32]
+win_x:   Array[128, int32]
+win_y:   Array[128, int32]
+win_w:   Array[128, int32]
+win_h:   Array[128, int32]
+win_z:   Array[128, int32]
+win_dec: Array[128, int32]
+win_vis: Array[128, int32]
+win_gen: Array[128, int32]
+win_bbgen: Array[128, int32]
 # The named-image content serial, field 12 of <wid>/ctl. It is in the frame
 # signature below because a re-uploaded image leaves the scene text identical:
 # without it a video's picture freezes on frame one and nothing says so.
-win_imggen: Array[32, int32]
-win_proto: Array[32, int32]
+win_imggen: Array[128, int32]
+win_proto: Array[128, int32]
+# devwsys's `keyed` and `blend`, fields 13 and 14 of <wid>/ctl. See the long
+# note on blit_window_image_keyed below for what each one is FOR; both were
+# ignored by this port while the clients that need them were already asking.
+win_keyed: Array[128, int32]
+win_blend: Array[128, int32]
 n_win:   uint64 = 0
 
 # --- scratch ----------------------------------------------------------
 pathbuf:  Array[128, uint8]
-dirbuf:   Array[1024, uint8]
+dirbuf:   Array[2048, uint8]        # 128 wids + the fixed leaves
 ctlbuf:   Array[256, uint8]
 scenebuf: Array[16384, uint8]
 numbuf:   Array[24, uint8]
 inbuf:    Array[256, uint8]
 waitset:  Array[4, int32]
+inpath:   Array[256, uint8]            # HAMWSYSD_INPUT, see open_inputs
 
 fb_fd: int32 = -1
 fbctl_fd: int32 = -1                   # persistent write fd to /dev/fbctl
@@ -457,6 +471,14 @@ def load_window(wid: int32) -> int32:
     win_gen[i]   = take_int(&ctlbuf[0], &pos[0], cap)
     win_bbgen[i] = take_int(&ctlbuf[0], &pos[0], cap)
     win_imggen[i] = take_int(&ctlbuf[0], &pos[0], cap)
+    win_keyed[i] = take_int(&ctlbuf[0], &pos[0], cap)
+    win_blend[i] = take_int(&ctlbuf[0], &pos[0], cap)
+    # A device that predates these two fields answers -1 for both, which is
+    # neither keyed nor blended -- the old behaviour, exactly.
+    if win_keyed[i] < 0:
+        win_keyed[i] = 0
+    if win_blend[i] < 0:
+        win_blend[i] = 0
     n_win = n_win + 1
     return 1
 
@@ -465,7 +487,7 @@ def scan_windows():
     # /dev/wsys is a directory: a packed "NAME\n" stream of the fixed leaves
     # plus one line per live wid. The numeric lines are the windows.
     n_win = 0
-    n: int64 = slurp(cast[Ptr[char]]("/dev/wsys"), &dirbuf[0], 1024)
+    n: int64 = slurp(cast[Ptr[char]]("/dev/wsys"), &dirbuf[0], 2048)
     if n <= 0:
         return
     i: uint64 = 0
@@ -482,7 +504,7 @@ def scan_windows():
             i = i + 1
         if i < cap:
             i = i + 1
-    # z-order ascending (insertion sort; 32 windows at most, and the set
+    # z-order ascending (insertion sort; MAX_WIN at most, and the set
     # changes rarely).
     a: uint64 = 1
     while a < n_win:
@@ -524,6 +546,12 @@ def scan_windows():
             t = win_proto[b - 1]
             win_proto[b - 1] = win_proto[b]
             win_proto[b] = t
+            t = win_keyed[b - 1]
+            win_keyed[b - 1] = win_keyed[b]
+            win_keyed[b] = t
+            t = win_blend[b - 1]
+            win_blend[b - 1] = win_blend[b]
+            win_blend[b] = t
             b = b - 1
         a = a + 1
     # Reclaim cache slots whose window is gone. A wid is reused, and a cache
@@ -944,7 +972,31 @@ def paint_backbuffer(i: uint64) -> int32:
 # X RGB8888, the top byte is ignored by scanout, and linux-fb.c memcpys it
 # through untouched. (If a future scanout ever samples it, 0xFF-opaque is the
 # more correct value of the two.)
-def blit_window_image(ox: int32, oy: int32, w: int32, h: int32):
+# THE SAME LIFT, ALPHA-KEYED AND SOURCE-OVER. `mode` is 0 opaque, 1 keyed,
+# 2 blend -- one function rather than three, because the clipping above it is
+# the fiddly part and three copies of it is three chances to clip differently.
+#
+# WHY EITHER EXISTS, and it is not a rendering flourish. devwsys.ad:8085 names
+# hampanelscene in the comment that documents `keyed`: the panel GROWS to the
+# full width of the display to host the Applications dropdown, then paints the
+# bar and the menu card and leaves the rest of the grown band UNPAINTED. Blit
+# that band opaquely -- which is what this compositor did -- and it is a black
+# rectangle over the wallpaper and the desktop icons for as long as the menu
+# is open. The machine's owner reported exactly that. The client has been
+# writing `keyed 1` the whole time; nothing here was listening.
+#
+# `blend` is the same idea with the full 0..255 ramp instead of all-or-
+# nothing, and it is what makes hamshotui's "select area" scrim DIM the
+# desktop instead of covering the thing it is meant to dim with opaque black.
+#
+# The alpha byte is real here because hamui_host_set_clear_alpha(0) made it
+# real: the clear that opens the rasterize leaves alpha 0, and every op that
+# paints leaves 0xFF. The word is BGRA in memory, so alpha is the top byte.
+# The cursor sprite blit in this same file is the keyed shape already, which
+# is how the correctness of `mode 1` was checked -- against something that was
+# already on the screen and right.
+def blit_window_image_mode(ox: int32, oy: int32, w: int32, h: int32,
+                           mode: int32):
     sx0: int32 = 0
     sy0: int32 = 0
     sw: int32 = w
@@ -978,12 +1030,52 @@ def blit_window_image(ox: int32, oy: int32, w: int32, h: int32):
         sofs: uint64 = cast[uint64](sx0)
         dofs: uint64 = cast[uint64](dy + j) * cast[uint64](scr_w) + cast[uint64](dx)
         k: int32 = 0
-        while k < sw:
-            dst[dofs] = src[sofs]
-            sofs = sofs + 1
-            dofs = dofs + 1
-            k = k + 1
+        if mode == 0:
+            while k < sw:
+                dst[dofs] = src[sofs]
+                sofs = sofs + 1
+                dofs = dofs + 1
+                k = k + 1
+        elif mode == 1:
+            while k < sw:
+                sp: uint32 = src[sofs]
+                if (sp >> 24) != 0:
+                    dst[dofs] = sp
+                sofs = sofs + 1
+                dofs = dofs + 1
+                k = k + 1
+        else:
+            while k < sw:
+                sp2: uint32 = src[sofs]
+                a: uint32 = sp2 >> 24
+                if a == 255:
+                    dst[dofs] = sp2
+                elif a != 0:
+                    dp: uint32 = dst[dofs]
+                    ia: uint32 = 255 - a
+                    sb: uint32 = sp2 & 255
+                    sg: uint32 = (sp2 >> 8) & 255
+                    sr: uint32 = (sp2 >> 16) & 255
+                    db: uint32 = dp & 255
+                    dg: uint32 = (dp >> 8) & 255
+                    dr: uint32 = (dp >> 16) & 255
+                    ob: uint32 = (sb * a + db * ia) / 255
+                    og: uint32 = (sg * a + dg * ia) / 255
+                    orr: uint32 = (sr * a + dr * ia) / 255
+                    # X byte 0xFF, like both other modes: the file's own note
+                    # above says 0xFF-opaque is the more correct value of the
+                    # two if a future scanout ever samples it, and a composite
+                    # whose alpha byte depends on which window painted last is
+                    # the kind of inconsistency that is free to avoid.
+                    dst[dofs] = 4278190080 | (orr << 16) | (og << 8) | ob
+                sofs = sofs + 1
+                dofs = dofs + 1
+                k = k + 1
         j = j + 1
+
+
+def blit_window_image(ox: int32, oy: int32, w: int32, h: int32):
+    blit_window_image_mode(ox, oy, w, h, 0)
 
 
 # ====================================================================
@@ -1200,6 +1292,56 @@ imgwarn_name: Array[512, uint8]
 imgwarn_n:    uint64 = 0
 
 
+# A WINDOW THAT PAINTS LESS THAN IT OWNS SAYS SO, ONCE, BY NAME.
+#
+# lib/hamui_host.ad measures per-row coverage of every rasterize; this is the
+# one line that turns the measurement into a sentence. Both of the real
+# defects that motivated it -- hamimgscene's 640x480 window holding a 320x260
+# picture, and the panel's Applications dropdown painting a 136 px menu column
+# into a window the full width of the display -- reached the framebuffer as a
+# large black rectangle with every gate in the tree green: the display list
+# was right, the ops all drew, every layer returned success. The detection
+# mechanism was a human's eye, and that is not a mechanism.
+#
+# NOT FOR A KEYED OR BLENDED WINDOW. Those two are the case where painting
+# less than you own is the CORRECT and requested behaviour -- it is the whole
+# point of the verb -- so reporting them would be a warning that is always
+# wrong, which is how a warning stops being read.
+covwarn_wid: Array[64, int32]
+covwarn_n:   uint64 = 0
+
+
+def report_uncovered(wid: int32, pres: int32):
+    if pres != 0:
+        return
+    if hamui_host_uncovered_rows() == 0:
+        return
+    s: uint64 = 0
+    while s < covwarn_n:
+        if covwarn_wid[s] == wid:
+            return
+        s = s + 1
+    if covwarn_n >= 64:
+        return
+    covwarn_wid[covwarn_n] = wid
+    covwarn_n = covwarn_n + 1
+    puts(2, "wsysd: window ")
+    putd(2, wid)
+    puts(2, " paints ")
+    putd(2, hamui_host_covered_w())
+    puts(2, "x")
+    putd(2, hamui_host_covered_h())
+    puts(2, " of its ")
+    putd(2, hamui_host_width())
+    puts(2, "x")
+    putd(2, hamui_host_height())
+    puts(2, " window -- ")
+    putd(2, hamui_host_uncovered_rows())
+    puts(2, " rows reach the screen as the compositor's clear colour.\n")
+    puts(2, "wsysd: either the scene should cover its window, or the window\n")
+    puts(2, "wsysd: should be the size of the scene, or it wants `keyed 1`.\n")
+
+
 def report_image_misses(wid: int32):
     if hamui_host_image_misses() == 0:
         return
@@ -1271,6 +1413,7 @@ def paint_window(i: uint64) -> int32:
         fill_rect(ox - 1, oy, 1, h, top)
         fill_rect(ox + w, oy, 1, h, top)
         fill_rect(ox - 1, oy + h, w + 2, 1, top)
+        draw_close_box(ox, oy, w)
 
     # A v2 window renders its OWN pixels and submits them as blits. The scene
     # grammar is a text display list capped at 16 KiB: it can express a widget
@@ -1310,7 +1453,30 @@ def paint_window(i: uint64) -> int32:
     # must be the screen's rows (see hamui_host's host_ext_base note).
     direct: int32 = 0
     gpu: int32 = 0
-    if ox == 0 and oy == 0 and w == scr_w and h == scr_h and win_dec[i] == 0:
+    # A KEYED OR BLENDED WINDOW CANNOT TAKE THE DIRECT PATH. Rasterizing
+    # straight into the composite means the window's clear IS the desktop
+    # clear, which is precisely what a window that wants to show what is
+    # behind it must not do -- and it is the full-screen case, which is
+    # hamshotui's scrim exactly.
+    # SCENE WINDOWS ONLY, and that is a real limit rather than an oversight
+    # nobody noticed: a protocol-2 window has already returned above through
+    # paint_backbuffer, which blits its shared surface opaquely. All three
+    # clients that need these verbs -- hampanelscene's dropdown, hamappmenu's
+    # fly-out band, hamshotui's scrim -- are v1 scene clients, so the case is
+    # covered; a v2 client asking for `keyed` would be silently opaque, which
+    # is why it is written down here.
+    pres: int32 = 0
+    if win_keyed[i] != 0:
+        pres = 1
+    if win_blend[i] != 0:
+        pres = 2
+    if pres != 0:
+        # The clear that opens the rasterize leaves alpha 0, so every pixel no
+        # op paints can be skipped or composited instead of blitted as black.
+        # It is one-shot in hamui_host and re-armed per window per frame.
+        hamui_host_set_clear_alpha(0)
+    if pres == 0 and ox == 0 and oy == 0 and w == scr_w and h == scr_h \
+            and win_dec[i] == 0:
         # Arm the device BEFORE begin_into: _host_begin_common's opening
         # full-image clear is itself a vk2d fill, and it is the single
         # largest op in the frame, so leaving it on the CPU would hand the
@@ -1332,13 +1498,14 @@ def paint_window(i: uint64) -> int32:
     if bench_on != 0:
         t_rast = t_rast + (now_us() - tr0)
     report_image_misses(wid)
+    report_uncovered(wid, pres)
 
     if direct != 0:
         return 1
     tc0: uint64 = 0
     if bench_on != 0:
         tc0 = now_us()
-    blit_window_image(ox, oy, w, h)
+    blit_window_image_mode(ox, oy, w, h, pres)
     if bench_on != 0:
         t_copy = t_copy + (now_us() - tc0)
     return 1
@@ -1566,6 +1733,80 @@ def route_pointer(wid: int32, kind: uint8, lx: int32, ly: int32,
     write_path(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0])
 
 
+# --- the close button -------------------------------------------------
+#
+# A WINDOW YOU CANNOT CLOSE IS NOT A WINDOW ON A DESKTOP. There was no close
+# button here at all, for a defensible reason: the only thing this compositor
+# could have done with a click was write `close <wid>` on the global ctl,
+# which DESTROYS THE WINDOW RECORD and leaves the program running -- an
+# invisible xterm holding a shell, a browser you cannot see and cannot quit.
+# That is worse than no button.
+#
+# So the device grew a second verb. `delete <wid>` asks the window's OWNER to
+# close it if the owner said it wanted to be asked (`wmdelete 1` on the
+# window's ctl), and destroys it exactly as `close` does if it did not. For a
+# bridged X client user/wsyswl.ad turns that request into WM_DELETE_WINDOW;
+# for a native Wayland toplevel, into xdg_toplevel.close. A scene app that
+# has never heard of any of this is closed the way it always was.
+#
+# The geometry is computed in ONE place and used by both the painter and the
+# hit test, because a close button drawn somewhere other than where it is
+# clickable is the kind of defect that takes a day and looks like a driver.
+CLOSE_SZ: int32 = 14
+cb_x: int32 = 0
+cb_y: int32 = 0
+
+
+def close_box_at(ox: int32, oy: int32, w: int32):
+    cb_x = ox + w - CLOSE_SZ - 3
+    cb_y = oy - TITLEBAR_H + (TITLEBAR_H - CLOSE_SZ) / 2
+
+
+def draw_close_box(ox: int32, oy: int32, w: int32):
+    # Not on a window too narrow to hold one: half a close button over the
+    # left edge of a 20-pixel window is a smear, not a control.
+    if w < CLOSE_SZ * 3:
+        return
+    close_box_at(ox, oy, w)
+    fill_rect(cb_x, cb_y, CLOSE_SZ, CLOSE_SZ, 13391163)  # 0xCC553B
+    # The cross, two diagonals, one pixel at a time. Fourteen rows of two
+    # single-pixel spans per decorated window per frame -- the fill_rect above
+    # already costs more than this does.
+    k: int32 = 3
+    while k < CLOSE_SZ - 3:
+        fill_rect(cb_x + k, cb_y + k, 1, 1, 16777215)
+        fill_rect(cb_x + CLOSE_SZ - 1 - k, cb_y + k, 1, 1, 16777215)
+        k = k + 1
+
+
+# 1 = (x, y) in screen coordinates is inside window i's close button.
+def close_box_hit(i: uint64, x: int32, y: int32) -> int32:
+    if win_dec[i] == 0:
+        return 0
+    if win_w[i] < CLOSE_SZ * 3:
+        return 0
+    close_box_at(win_x[i], win_y[i], win_w[i])
+    if x < cb_x or x >= cb_x + CLOSE_SZ:
+        return 0
+    if y < cb_y or y >= cb_y + CLOSE_SZ:
+        return 0
+    return 1
+
+
+def delete_window(wid: int32):
+    i: uint64 = 0
+    p: Ptr[uint8] = "delete "
+    k: uint64 = 0
+    while p[k] != 0:
+        ctlbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&ctlbuf[0], i, wid)
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    write_path(cast[Ptr[char]]("/dev/wsys/ctl"), &ctlbuf[0])
+
+
 # The topmost visible window under (x, y), or 0. Walks the z-sorted list
 # backwards, so the window the user sees on top is the one that gets the click.
 def window_at(x: int32, y: int32) -> int32:
@@ -1627,6 +1868,17 @@ def deliver_pointer():
     kind: uint8 = 109                                    # 'm' motion
     if ptr_edge > 0:
         kind = 100                                       # 'd' button down
+        # THE CLOSE BUTTON, before anything else a press does. It is part of
+        # the DECORATION, which is this compositor's and not the client's, so
+        # the press is consumed here and never routed: a window must not
+        # receive a click on the button that is closing it.
+        if close_box_hit(i, ptr_x, ptr_y) != 0:
+            delete_window(wid)
+            n_ptr = n_ptr + 1
+            ptr_moved = 0
+            ptr_edge = 0
+            ptr_dz = 0
+            return
         # A press is also what raises and focuses a window -- click-to-focus,
         # the behaviour every one of these apps was written against.
         if wid != focus_wid:
@@ -1770,6 +2022,28 @@ def open_input_path(path: Ptr[char]) -> int32:
 
 
 def open_inputs():
+    # HAMWSYSD_INPUT NAMES THE ONLY INPUT DEVICE, and it exists for the same
+    # reason HAMFB_FILE does: an offscreen compositor with no pointer cannot be
+    # asked anything a pointer does, and "does the close button close the
+    # window" is exactly that question. It is not a private protocol -- what is
+    # read from it is evdev, byte for byte, the same 24-byte struct input_event
+    # the real nodes deliver, dispatched by the same loop below. A test that
+    # invented its own event format would be testing its own invention.
+    #
+    # And it REPLACES the scan rather than adding to it: an offscreen run on a
+    # development host must not open that host's real keyboard and mouse.
+    ip: Ptr[uint8] = getenv(cast[Ptr[char]]("HAMWSYSD_INPUT"))
+    if cast[uint64](ip) != 0 and ip[0] != 0:
+        k: uint64 = 0
+        while ip[k] != 0 and k < 255:
+            inpath[k] = ip[k]
+            k = k + 1
+        inpath[k] = 0
+        open_input_path(cast[Ptr[char]](&inpath[0]))
+        puts(1, "wsysd: input from ")
+        puts(1, &inpath[0])
+        puts(1, " only\n")
+        return
     # Every evdev node, because which one is the mouse and which the keyboard
     # depends on enumeration order and on whether the machine is a VM. Reading
     # them all and dispatching on the event TYPE is both simpler and right.
