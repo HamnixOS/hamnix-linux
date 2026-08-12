@@ -1,13 +1,35 @@
 # user/pgrep.ad
 #
-# Minimal Hamnix `pgrep NAME`: reads /proc/tasks and prints the PID
-# of every task whose comm contains the literal NAME substring.
-# /proc/tasks layout is `<pid> <state> <comm>\n` (see fs/procfs.ad)
-# so we tokenize each line into those three fields, substring-match
-# against the comm, and emit the pid one per line on stdout.
+# `pgrep NAME` — print the PID of every task whose comm contains the
+# literal NAME substring. Exits 0 if at least one match was emitted, 1
+# otherwise — same convention as procps' pgrep.
 #
-# Exits 0 if at least one match was emitted, 1 otherwise — same
-# convention as procps' pgrep.
+# TWO KERNELS, TWO PROCESS TABLES, AND WHY BOTH ARE READ HERE.
+#
+# On Hamnix's own kernel the process table is ONE FILE: /proc/tasks,
+# laid out `<pid> <state> <comm>\n` (fs/procfs.ad). On Linux there is
+# no such file at all — the same information is a DIRECTORY PER PID
+# under /proc, with the comm in <pid>/stat between the first '(' and
+# the LAST ')'.
+#
+# Until now this program only knew the first shape, so on this port it
+# opened a name that has never existed, printed "cannot open
+# /proc/tasks" and exited 1 — every time, for every NAME. `pgrep` was
+# not a working command on hamnix-linux; it was a command that always
+# failed. user/ps.ad had exactly this bug and was fixed the same way
+# (see its header); this is the rest of that fix.
+#
+# So: /proc/tasks FIRST, because where it exists it is the cheaper and
+# more direct answer and it keeps this binary working on the Hamnix
+# kernel; the /proc/<pid>/stat walk when it does not. If NEITHER is
+# readable, pgrep says which two names it tried and exits 1 — it does
+# not report "no matches", because "I could not look" and "I looked and
+# found nothing" are different answers and a pgrep that confuses them is
+# the success-shaped failure this project is organised against.
+#
+# NOTE on Linux comm: the kernel truncates it to 15 characters, so
+# `pgrep hampanelscene` matches on the truncated name exactly as procps'
+# pgrep does. This is a property of the kernel's field, not of pgrep.
 
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
@@ -50,8 +72,128 @@ def contains(hay: Ptr[uint8], hay_len: uint64,
 
 # 8 KiB is far more than the 32-slot task table can produce, so we
 # slurp the whole /proc/tasks snapshot in one pass and never worry
-# about partial-line boundaries.
+# about partial-line boundaries. The /proc DIRECTORY stream on Linux is
+# a "NAME\n" list of every entry and is much larger; it gets its own
+# 64 KiB buffer, the same size user/ps.ad uses for the same read.
 buf: Array[8192, uint8]
+dirbuf: Array[65536, uint8]
+statbuf: Array[4096, uint8]
+pathbuf: Array[128, uint8]
+
+
+def put_str(dst: Ptr[uint8], at: uint64, s: Ptr[uint8]) -> uint64:
+    p: uint64 = at
+    k: uint64 = 0
+    while s[k] != 0:
+        dst[p] = s[k]
+        p = p + 1
+        k = k + 1
+    return p
+
+
+def build_stat_path(pid: Ptr[uint8]):
+    p: uint64 = 0
+    pathbuf[p] = 47                                # '/'
+    p = p + 1
+    p = put_str(&pathbuf[0], p, cast[Ptr[uint8]]("proc/"))
+    p = put_str(&pathbuf[0], p, pid)
+    pathbuf[p] = 47
+    p = p + 1
+    p = put_str(&pathbuf[0], p, cast[Ptr[uint8]]("stat"))
+    pathbuf[p] = 0
+
+
+def read_whole(path: Ptr[char], dst: Ptr[uint8], cap: uint64) -> int64:
+    fd: int32 = sys_open(path)
+    if fd < 0:
+        return -1
+    total: uint64 = 0
+    while total < cap - 1:
+        n: int64 = sys_read(fd, &dst[total], cap - 1 - total)
+        if n <= 0:
+            break
+        total = total + cast[uint64](n)
+    sys_close(fd)
+    dst[total] = 0
+    return cast[int64](total)
+
+
+# The Linux walk. /proc/<pid>/stat is "pid (comm) S ...", and comm MAY
+# CONTAIN SPACES AND PARENTHESES — a process named "(evil) x" breaks
+# every naive parser — so the comm is what lies between the FIRST '('
+# and the LAST ')'. Same rule user/ps.ad's parse_stat() follows, and for
+# the same reason.
+def match_one_pid(pid: Ptr[uint8], needle: Ptr[uint8],
+                  needle_len: uint64) -> int32:
+    build_stat_path(pid)
+    if read_whole(cast[Ptr[char]](&pathbuf[0]), &statbuf[0], 4096) < 0:
+        return 0                                   # exited between readdir and now
+    n: uint64 = strlen_u8(&statbuf[0])
+    open_at: uint64 = 0
+    found_open: int32 = 0
+    i: uint64 = 0
+    while i < n:
+        if statbuf[i] == 40:                       # '('
+            open_at = i
+            found_open = 1
+            break
+        i = i + 1
+    if found_open == 0:
+        return 0
+    close_at: uint64 = 0
+    found_close: int32 = 0
+    i = n
+    while i > open_at:
+        i = i - 1
+        if statbuf[i] == 41:                       # ')'
+            close_at = i
+            found_close = 1
+            break
+    if found_close == 0 or close_at <= open_at + 1:
+        return 0
+    if contains(&statbuf[open_at + 1], close_at - open_at - 1,
+                needle, needle_len) == 0:
+        return 0
+    write_str(1, pid)
+    sys_write(1, "\n", 1)
+    return 1
+
+
+def walk_proc(needle: Ptr[uint8], needle_len: uint64) -> int32:
+    fd: int32 = sys_open("/proc")
+    if fd < 0:
+        return -1
+    total: uint64 = 0
+    while total < 65535:
+        n: int64 = sys_read(fd, &dirbuf[total], 65535 - total)
+        if n <= 0:
+            break
+        total = total + cast[uint64](n)
+    sys_close(fd)
+    dirbuf[total] = 0
+    if total == 0:
+        return -1
+    matches: int32 = 0
+    i: uint64 = 0
+    while i < total:
+        s: uint64 = i
+        while i < total and dirbuf[i] != 10:
+            i = i + 1
+        dirbuf[i] = 0
+        # Only the all-digit entries are pids; /proc also holds cpuinfo,
+        # meminfo, self and every other non-process name.
+        allnum: int32 = 1
+        k: uint64 = s
+        if k == i:
+            allnum = 0
+        while k < i:
+            if dirbuf[k] < 48 or dirbuf[k] > 57:
+                allnum = 0
+            k = k + 1
+        if allnum == 1:
+            matches = matches + match_one_pid(&dirbuf[s], needle, needle_len)
+        i = i + 1
+    return matches
 
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
@@ -63,8 +205,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
     fd: int32 = sys_open("/proc/tasks")
     if fd < 0:
-        write_str(2, "pgrep: cannot open /proc/tasks\n")
-        return 1
+        # Linux: no /proc/tasks, one directory per pid instead.
+        walked: int32 = walk_proc(needle, needle_len)
+        if walked < 0:
+            write_str(2, "pgrep: cannot read the process table -- neither /proc/tasks (the Hamnix kernel's) nor a /proc with pid directories in it (Linux's) could be read, so NOTHING was searched.\n")
+            return 1
+        if walked == 0:
+            return 1
+        return 0
     total: uint64 = 0
     while total < 8192:
         n: int64 = sys_read(fd, cast[Ptr[uint8]](
