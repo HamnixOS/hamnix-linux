@@ -20,7 +20,59 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-*(nothing right now — 1.0.19 carries everything that had landed.)*
+*(nothing right now — 1.0.20 carries everything that had landed.)*
+
+## 1.0.20
+
+### Before you update, if a desktop is running
+
+**After updating, restart your session or reboot before opening new
+applications.** Your desktop keeps working — windows, panel, wallpaper, all of
+it — but anything you start after the update will refuse to open, with an
+explanation that only reaches the console. On screen it looks like the click
+did nothing. A reboot finishes the update and everything is normal.
+
+This is the safe end of a trade. The previous time the window system changed
+this way, opening an application **wiped the whole desktop** to a blank screen
+with nothing left but the power button. Now the new program declines to start,
+changes nothing, and says why. Measured on a real installed machine: the
+desktop survives with all four windows and a live shell, and after a reboot
+the panel and taskbar are back.
+
+### The Applications menu now lists programs that exist
+
+It was listing **eleven entries, nine of which named programs that were not on
+the machine.** Clicking those did nothing at all.
+
+Three faults were stacked: the application catalogue was never installed (a
+directory was being tested as though it were a file); once installed, it was
+not carried by the package repository; and of its 26 entries, only **three**
+named a program the system actually shipped. All 23 others existed in the
+source and in no released package.
+
+The menu now shows **25 real applications** in seven categories, including
+Office and Sound & Video, which the fallback list never had. Every application
+now ships **with its own launcher in the same package**, so a menu entry
+cannot be published without the program it points at. An entry whose program
+is genuinely missing is hidden and named on the console rather than silently
+doing nothing, and a launch that fails now says so.
+
+### A file manager was burning a whole CPU core
+
+Opening the file manager from the menu left it spinning at **102.7% of one
+core**, which froze the desktop — the screen stopped updating, later clicks
+did nothing, the clock stopped. It was polling for keystrokes that were never
+coming instead of waiting for them. It now waits: **7.2%**, idle.
+
+### Under the hood
+
+- What a window is drawing is now private to that window. A program running as
+  you could previously read another window's screen contents out of shared
+  memory; that display list now lives in memory only its owner and the
+  compositor can reach.
+- Three checks that were passing while measuring the wrong thing — including
+  one whose comparison was decided by a shell error on every clean run — now
+  measure what they claim.
 
 ## 1.0.19
 
