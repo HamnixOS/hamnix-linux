@@ -815,6 +815,26 @@ def put_px(x: int32, y: int32, rgb: uint32):
 # word store lays down the same four bytes B,G,R,X that four byte stores did --
 # and the compiler cannot prove that for itself through the uint8 array, which
 # is why the fills below reach for the word view explicitly.
+# THE RASTERIZE TARGET, which is not always the composite.
+#
+# hamui_host_begin_into() needs a CPU-addressable surface, and so does the
+# vk_2d router -- it uses the base address to decide "is this op aimed at the
+# screen?", which is a three-integer compare and nothing more. On the SCANOUT
+# path the composite has no CPU address at all, so passing comp_base (0) makes
+# begin_into fail, the `direct` path is abandoned, and the full-screen
+# backdrop is instead rasterized on the CPU and staged into the device arena:
+# 8 MiB of memcpy per frame, measured as `copy` 1.6-2.0 ms with `rast` at
+# 10-12 ms. That is the whole win handed back.
+#
+# So on the scanout path the ROUTER'S IDENTITY is the host composite array
+# while the ops it routes land on the device frame. The address is only ever
+# compared, never written, when every op is encodable.
+def rast_target() -> uint64:
+    if vk_scanout != 0:
+        return cast[uint64](&composite[0])
+    return comp_base
+
+
 def comp_words() -> Ptr[uint32]:
     return cast[Ptr[uint32]](comp_base)
 
@@ -1200,7 +1220,7 @@ def vk_route_begin(w: int32, h: int32) -> int32:
         return 0
     if vkc_begin() != 0:
         return 0
-    if vk2d_set_router(comp_base, cast[uint64](w), cast[uint64](h),
+    if vk2d_set_router(rast_target(), cast[uint64](w), cast[uint64](h),
                        cast[uint64](_rt_fill), cast[uint64](_rt_roundrect),
                        cast[uint64](_rt_line), cast[uint64](_rt_blit),
                        cast[uint64](_rt_cov)) != 0:
@@ -1219,7 +1239,11 @@ def vk_route_end() -> int32:
         vk_set_backend(VK_BACKEND_SW)
         puts(2, "wsysd: vk backend FAILED mid-frame; back to software\n")
         return -1
-    vk_frames_gpu = vk_frames_gpu + 1
+    # Only the OUTERMOST close is a submitted frame. Counting here while
+    # nested inside paint_frame's device frame counted every routed window as
+    # a frame too, and gpu_frames ran at twice the real rate.
+    if vk_frame_depth == 0:
+        vk_frames_gpu = vk_frames_gpu + 1
     return 0
 
 
@@ -1822,7 +1846,7 @@ def paint_window(i: uint64) -> int32:
         # largest op in the frame, so leaving it on the CPU would hand the
         # device the cheap half of the work.
         gpu = vk_route_begin(w, h)
-        direct = hamui_host_begin_into(comp_base, w, h)
+        direct = hamui_host_begin_into(rast_target(), w, h)
         if direct == 0 and gpu != 0:
             vk_route_end()
             gpu = 0
@@ -1833,7 +1857,7 @@ def paint_window(i: uint64) -> int32:
         if vk_route_end() != 0:
             # The device dropped the frame. It has disarmed itself; redo this
             # window in software so the screen is never half-painted.
-            hamui_host_begin_into(comp_base, w, h)
+            hamui_host_begin_into(rast_target(), w, h)
             hamui_host_rasterize()
     if bench_on != 0:
         t_rast = t_rast + (now_us() - tr0)
