@@ -86,7 +86,9 @@ at `/home/david/.hamnix-build/sweep-a6145486/{BEFORE,AFTER}/`:
 | `TIMEOUT` | 3 | 3 |
 | run phase | 308 s | 996 s |
 
-The 23 rows below are the whole of what is left.
+The 23 rows below are the whole of what is left. One of them -- `modprobe`
+-- has since been CLOSED; its row is struck through and says how, and what
+the obvious-looking start would have got wrong.
 
 ## The list
 
@@ -102,7 +104,7 @@ The 23 rows below are the whole of what is left.
 | `service` | `/proc/svc` | as above |
 | `nsrun` | `sys_srv_open` | `ENOSYS` in `user/linux-syscalls.c`, and deliberately: posting an open fd under a name is HANDOFF §7.1's cross-process fd-addressing question, which the `/net` design has not answered yet |
 | `umdf_host` | `sys_umdf_dma_alloc` | `ENOSYS` **on purpose** — the stub's own comment says Linux owns the hardware and "deleting the call sites is the actual fix". The self-test correctly reports the primitive is absent (it used to print FAILED and exit 0) |
-| `modprobe` | `/lib/modules/modules.dep` | no `modules.dep` is generated anywhere on this port. `scripts/hamlinux_image.sh` stages `.ko` files and an `/etc/modules` list, and PID 1 loads them **by absolute path** — its own comment notes that an autoload "would quietly not happen". `scripts/build_modules_dep.py` exists and is the obvious start |
+| ~~`modprobe`~~ | ~~`/lib/modules/modules.dep`~~ | **CLOSED.** `scripts/hamlinux_image.sh` now runs the build host's `depmod -b $ROOT $KVER` over the modules it stages, so the image ships a real `/lib/modules/<release>/modules.dep`, and `modprobe`'s default path is uname(2)'s release rather than a release-less path nothing ever wrote. The driver packages append their OWN lines from their install hook, because a table baked at image-build time is stale the moment `hpm install` lands a new `.ko`. Measured by `tests/linux/modprobe_deps.sh`: `bridge` -> `stp` -> `llc` loaded in the VM and read back out of `/proc/modules`; 32 PASS, and 12/19 with the change reverted. `scripts/build_modules_dep.py` was NOT the start it looked like -- it emits bare module NAMES for the Hamnix kernel's flat `/lib/modules`, not `depmod`'s relative `.ko` paths, so every line would have resolved to a file that does not exist |
 
 ### Kind 2 — hardware or privilege the harness will not take
 
