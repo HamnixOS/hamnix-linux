@@ -1675,7 +1675,20 @@ serving 1.0.10's tarballs, or has nothing newer than it, the gate stops and
 says which — it never substitutes a locally built lookalike, which would
 answer a different question in the same shape.
 
-**The did-not-update arm runs.** `HAMLINUX_RECOVER_NOUPDATE=1`.
+**The did-not-update arm runs, and it goes red.** `HAMLINUX_RECOVER_NOUPDATE=1`
+does everything except `hpm update`: **23 PASS / 1 FAIL, exit 1**, the FAIL
+being the one sentence the file exists for. It also produced the OTHER
+breakage shape on its own — boot 3 came up `windows 2`,
+`(2 0 0 1280 800 -1 …)` the wallpaper and `(3 0 774 1280 26 100 …)` the BOTTOM
+taskbar, top bar absent — so both shapes HANDOFF records for 1.0.10 turned up
+across the two runs of this gate, from the published bytes, unprompted.
+
+That arm's first run also printed a false sentence on top of a correct red:
+the boot-3 verdict opened *"THE UPDATE LANDED AND THE DESKTOP DID NOT COME
+BACK. The bytes arrived…"* in the arm where no update was run and no bytes
+arrived. The premise now follows the arm. A red for the right reason worded
+as a red for the wrong one is still the failure this project keeps paying
+for.
 
 ### Running it
 

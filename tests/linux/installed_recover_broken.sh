@@ -745,8 +745,18 @@ B3BEFORE="$(barh "$LOG" '[rcvr] p3 WINS-BEFORE')"
 B3AFTER="$(barh "$LOG" '[rcvr] p3 WINS-AFTER')"
 echo "rcvr: INFO the recovered desktop reports windows=${B3WINS:-?}; windows present: [${B3LIST:-none}]"
 echo "rcvr: INFO the top panel is ${B3BEFORE:-absent} px before the click and ${B3AFTER:-absent} px after it"
-mouse_arrived "$LOG" '[rcvr] p3 STATE-BEFORE:' '[rcvr] p3 STATE-AFTER:' \
-              "the RECOVERED desktop"
+# The label and the premise BOTH have to follow the arm. Under
+# HAMLINUX_RECOVER_NOUPDATE=1 nothing was updated, so a verdict that opened
+# with "THE UPDATE LANDED" would be a false sentence sitting on top of a
+# correct red -- the control arm's first run printed exactly that.
+if [ "$NOUPD" = 1 ]; then
+    P3WHAT="the STILL-BROKEN desktop (no update was run)"
+    P3PREMISE="NO UPDATE WAS RUN (HAMLINUX_RECOVER_NOUPDATE=1) AND THE DESKTOP IS STILL BROKEN, WHICH IS WHAT THIS ARM EXISTS TO SHOW"
+else
+    P3WHAT="the RECOVERED desktop"
+    P3PREMISE="THE UPDATE LANDED AND THE DESKTOP DID NOT COME BACK (the bytes arrived -- see the digests above)"
+fi
+mouse_arrived "$LOG" '[rcvr] p3 STATE-BEFORE:' '[rcvr] p3 STATE-AFTER:' "$P3WHAT"
 # ===== THE SENTENCE THIS WHOLE FILE EXISTS FOR =====
 # Three outcomes, three different sentences. A gate that collapsed "the panel
 # did not grow" and "there is no panel" into one line would report a desktop
@@ -754,10 +764,10 @@ mouse_arrived "$LOG" '[rcvr] p3 STATE-BEFORE:' '[rcvr] p3 STATE-AFTER:' \
 if [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ]; then
     echo "rcvr: PASS A MACHINE THAT INSTALLED THE BROKEN $BROKENVER RAN \`hpm update\` AND CAME BACK: a real click on the Applications button opened the menu (the panel window grew $B3BEFORE -> $B3AFTER px)"
 elif [ -z "$B3BEFORE" ]; then
-    echo "rcvr: FAIL THE UPDATE LANDED AND THE DESKTOP DID NOT COME BACK. The bytes arrived (see the digests above) and the compositor is running with ${B3WINS:-?} windows, but NONE of them is the top bar (a window at y=0, z=100), so there is no Applications button to click. Windows present: [${B3LIST:-none}]. \`hpm update\` DOES NOT RECOVER A MACHINE THAT TOOK $BROKENVER."
+    echo "rcvr: FAIL $P3PREMISE: the compositor is running with ${B3WINS:-?} windows, but NONE of them is the top bar (a window at y=0, z=100), so there is no Applications button to click. Windows present: [${B3LIST:-none}].$([ "$NOUPD" = 1 ] || printf ' `hpm update` DOES NOT RECOVER A MACHINE THAT TOOK %s.' "$BROKENVER")"
     fail=1
 else
-    echo "rcvr: FAIL THE UPDATE LANDED AND THE DESKTOP IS STILL INERT: after a real click the panel window is ${B3AFTER:-unknown} px, not more than $B3BEFORE. The bytes changed and the behaviour did not, so \`hpm update\` DOES NOT RECOVER A MACHINE THAT TOOK $BROKENVER."
+    echo "rcvr: FAIL $P3PREMISE: after a real click the panel window is ${B3AFTER:-unknown} px, not more than $B3BEFORE.$([ "$NOUPD" = 1 ] || printf ' The bytes changed and the behaviour did not, so `hpm update` DOES NOT RECOVER A MACHINE THAT TOOK %s.' "$BROKENVER")"
     fail=1
 fi
 check "phase 3 reached the end"                 '\[rcvr\] PHASE3 DONE'
