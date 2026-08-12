@@ -627,7 +627,7 @@ Refused, each of them **loudly and by name**:
 
 ### 7.5 Verification
 
-`tests/linux/wlsnarf_bridge.sh` — QEMU-free, offscreen, **34 assertions, 34
+`tests/linux/wlsnarf_bridge.sh` — QEMU-free, offscreen, **35 assertions, 35
 PASS**, about a minute. The Hamnix side is the **same two probes**
 `snarf_device.sh` and `xsnarf_bridge.sh` use — `snarfcopy.ad` copying through
 `lib/hamtextbox.ad` and `snarfpaste.ad` pasting through `lib/htermsel.ad`, in
@@ -687,6 +687,12 @@ Still green, unchanged by this work:
 |--|--|
 | `tests/linux/snarf_device.sh` | `passes=23 fails=0` / PASS |
 | `tests/linux/xsnarf_bridge.sh` | `passes=25 fails=0` / PASS |
+| `tests/linux/wsyswl_shared_fate.sh` | `18 PASS, 0 FAIL` |
+| `tests/linux/wsyswl_rootless.sh` | `29 passed, 0 failed` |
+
+The last two are there because this work changed `user/wsyswl.ad`, and a
+clipboard that cost the compositor a window would be a bad trade nobody
+measured.
 
 ### 7.6 What this does NOT do
 

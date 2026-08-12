@@ -190,6 +190,12 @@ awk 'BEGIN{s="";while(length(s)<70000)s=s "x";printf "%s", substr(s,1,70000)}' >
 wcopy copyfile "$OUT/big70k"
 sleep 1.0
 echo "G $("$PA" 0 | awk '{print $1, $2, $3, length($4)}')"
+# ... and a FULL 64 KiB clipboard must come back OUT through the pipe too.
+# This is the arm that would catch the compositor parking on a blocking write:
+# a pipe's default capacity is 64 KiB and SNARF_MAX is 64 KiB, so a full
+# clipboard fits without the client having read a byte -- which is the whole
+# reason clip_offer_receive is allowed to write synchronously.
+echo "G2 $(wpaste | awk '{print $1, $2, length($3)}')"
 
 # --- 6. Giving the selection up does not empty the clipboard ---------------
 "$CP" 0 STILL-HERE-AFTERWARDS >/dev/null
@@ -346,6 +352,8 @@ chk "a client that connects after the copy still sees it" \
 
 # 5: the cap
 chk "a 70 000-byte Wayland copy lands as exactly 65 536" "paste 0 65536 65536" "$(get G)"
+chk "... and a full 64 KiB clipboard comes back out through the pipe" \
+    "wlpaste 65536 65536" "$(get G2)"
 has "... and the truncation is said out loud, by size" "TRUNCATED, 4464 bytes dropped" "$WLLOG"
 
 # 6: giving up the selection
