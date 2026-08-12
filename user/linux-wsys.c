@@ -4171,6 +4171,10 @@ static void unknown_win_leaf(int wid, const char *leaf)
             wid, leaf);
 }
 
+/* The /dev/wsys operation counter; see its definition below. Counting only,
+ * and inert unless HAMWSYS_OPCOUNT is set. kind: 0=open 1=read 2=write. */
+static void opc_note(int leaf, int kind);
+
 /* Fills f->leaf/f->wid/f->name.  Returns the leaf kind. */
 static int classify(const char *path, struct hamwsys_file *f)
 {
@@ -4550,6 +4554,7 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
 {
     memset(f, 0, sizeof *f);
     if (classify(path, f) == HAMWSYS_NONE) { errno = ENODEV; return -1; }
+    opc_note(f->leaf, 0);
     if (shm_attach() < 0) return -1;
     f->write = for_write;
     f->off = 0;
@@ -4820,6 +4825,7 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
 
 int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
 {
+    opc_note(f ? f->leaf : 0, 1);
     if (!shm) { errno = EIO; return -EIO; }
 
     /* THE HAND-UP'S HEARTBEAT.  A client that is doing nothing at all still
@@ -5381,6 +5387,94 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
      * newer client sent a verb this kernel does not know. */
 }
 
+/* ---- THE OPERATION COUNTER ---------------------------------------------
+ *
+ * COUNTING ONLY. It exists to answer one question with a number instead of an
+ * argument: if /dev/wsys became a userland FILE SERVER -- clients talking to
+ * wsysd rather than sharing memory with it -- how many round trips a second
+ * would that be? Cost per op is worthless without the denominator, and the
+ * denominator may settle the question on its own in either direction.
+ *
+ * Every op here is one that WOULD become a round trip: in a file server an
+ * open, a read and a write are each a message. The in-process path makes them
+ * function calls, which is where the 0.3 ms input-to-pixel comes from and also
+ * why there is no privilege boundary inside the object.
+ *
+ * A PER-SECOND TIME SERIES, NOT A TOTAL, because bursts are what would hurt
+ * and a mean hides them: 250 ops/s spread evenly and 250 ops arriving in one
+ * 4 ms clump are the same mean and completely different designs. Printed as it
+ * goes rather than accumulated and dumped at exit, so a client that is
+ * SIGKILLed -- which most of these harnesses do -- still leaves its record.
+ *
+ * Inert unless HAMWSYS_OPCOUNT is set: one branch on a cached int. */
+static int      opc_on = -1;            /* -1 = not yet looked up */
+static uint64_t opc_leaf[64][3];        /* [leaf][0=open 1=read 2=write] */
+static uint64_t opc_sec_ops;            /* ops in the current second      */
+static uint64_t opc_sec_t0;             /* start of the current second, us */
+static uint64_t opc_max_10ms, opc_cur_10ms, opc_10ms_t0;
+
+static const char *opc_leafname(int l)
+{
+    switch (l) {
+    case HAMWSYS_CTL: return "ctl";            case HAMWSYS_SELF: return "self";
+    case HAMWSYS_WINDOWS: return "windows";    case HAMWSYS_SCREEN: return "screen";
+    case HAMWSYS_POOL: return "pool";          case HAMWSYS_DIR: return "dir";
+    case HAMWSYS_WIN_CTL: return "wid/ctl";    case HAMWSYS_WIN_WCTL: return "wid/wctl";
+    case HAMWSYS_WIN_SCENE: return "wid/scene";case HAMWSYS_WIN_KEYS: return "wid/keys";
+    case HAMWSYS_WIN_POINTER: return "wid/pointer";
+    case HAMWSYS_WIN_EVENT: return "wid/event";case HAMWSYS_WIN_TEXT: return "wid/text";
+    case HAMWSYS_WIN_CMD: return "wid/cmd";    case HAMWSYS_DRAWCTL: return "wid/draw/ctl";
+    case HAMWSYS_BACKBUF: return "wid/backbuffer";
+    case HAMWSYS_IMAGES: return "wid/draw/images";
+    case HAMWSYS_IMAGE: return "wid/draw/image";
+    case HAMWSYS_SINK: return "sink";          default: return "other";
+    }
+}
+
+static uint64_t opc_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
+}
+
+static void opc_note(int leaf, int kind)
+{
+    if (opc_on < 0) {
+        const char *e = getenv("HAMWSYS_OPCOUNT");
+        opc_on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    if (!opc_on) return;
+    if (leaf < 0 || leaf >= 64) leaf = 0;
+    opc_leaf[leaf][kind]++;
+    uint64_t now = opc_now_us();
+    if (!opc_sec_t0) { opc_sec_t0 = now; opc_10ms_t0 = now; }
+    /* THE BURST WINDOW. 10 ms because that is the scale a round trip would be
+     * paid on -- a frame is 16 ms, so ops clumped inside one 10 ms window are
+     * the ones that would serialise against each other rather than spreading. */
+    if (now - opc_10ms_t0 >= 10000) {
+        if (opc_cur_10ms > opc_max_10ms) opc_max_10ms = opc_cur_10ms;
+        opc_cur_10ms = 0;
+        opc_10ms_t0 = now;
+    }
+    opc_cur_10ms++;
+    opc_sec_ops++;
+    if (now - opc_sec_t0 >= 1000000) {
+        fprintf(stderr, "opcount: %llu ops/s  peak %llu per 10ms (=%llu/s)\n",
+                (unsigned long long)opc_sec_ops,
+                (unsigned long long)opc_max_10ms,
+                (unsigned long long)opc_max_10ms * 100u);
+        for (int i = 0; i < 64; i++) {
+            if (!opc_leaf[i][0] && !opc_leaf[i][1] && !opc_leaf[i][2]) continue;
+            fprintf(stderr, "opcount:    %-18s open %llu read %llu write %llu\n",
+                    opc_leafname(i), (unsigned long long)opc_leaf[i][0],
+                    (unsigned long long)opc_leaf[i][1],
+                    (unsigned long long)opc_leaf[i][2]);
+        }
+        opc_sec_ops = 0; opc_sec_t0 = now; opc_max_10ms = 0;
+    }
+}
+
 /* The real body; hamwsys_write wraps it to notice a published change. */
 static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                                    uint64_t n);
@@ -5400,6 +5494,7 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
  * an idle desktop idle. */
 int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
 {
+    opc_note(f ? f->leaf : 0, 2);
     uint32_t before = shm ? __atomic_load_n(&shm->gen, __ATOMIC_ACQUIRE) : 0;
     int64_t r = hamwsys_write_inner(f, buf, n);
     if (shm && __atomic_load_n(&shm->gen, __ATOMIC_ACQUIRE) != before)
