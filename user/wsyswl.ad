@@ -435,6 +435,23 @@ w_in:   Array[128, int32]               # pointer has entered this surface
 w_focus: Array[128, int32]              # keyboard focus is on this surface
 w_x:    Array[128, int32]               # where this window was placed, so a
 w_y:    Array[128, int32]               # popup can be placed against it
+# THE WINDOW'S OWN EVENT RING, read every pump. Two things arrive on it and
+# neither could be learned any other way:
+#
+#   "close"                 the user pressed the title bar's close button.
+#                           wsysd writes `delete <wid>`; the device turns that
+#                           into this line for a window whose owner asked to
+#                           be asked (`wmdelete 1`), instead of destroying the
+#                           window and leaving the program running blind.
+#   "geometry <x> <y> <w> <h>"
+#                           somebody ELSE moved or resized this window -- the
+#                           desktop dragging it, a script, hamdesktop. This is
+#                           X's ConfigureNotify arriving as a file, and it is
+#                           what lets an X client know where it is.
+#
+# It is a ring, so a parked compositor is woken by it through the same futex
+# every other ring uses. An idle desktop posts nothing and costs nothing.
+w_evt:  Array[128, int32]
 n_win:  uint64 = 0
 cascade: int32 = 0
 
@@ -551,9 +568,9 @@ def str_copy(dst: Ptr[uint8], s: Ptr[uint8], cap: uint64) -> uint64:
 # spans the namespace boundary (§6 of docs/steam_namespace.md). Reading a
 # server's own state with `cat` is how the wsysd bug before this one was
 # caught; `/dev/wsys/wsysd/state` is the precedent.
-NSTAT: uint64 = 24
-stat_n:    Array[24, int32]
-stat_said: Array[24, int32]
+NSTAT: uint64 = 28
+stat_n:    Array[28, int32]
+stat_said: Array[28, int32]
 stat_dirty: int32 = 1
 
 S_COMMIT:   uint64 = 0          # buffers actually blitted to a window
@@ -593,6 +610,17 @@ S_CONNHI:   uint64 = 20         # high water of the above
 S_XWLPAIR:  uint64 = 21         # X window <-> wl_surface associations made
 S_XWLUNP:   uint64 = 22         # a commit on an X surface with no X window yet
 S_XWLERR:   uint64 = 23         # the XWM refused something, by name on stderr
+# THE CLOSE BUTTON, AND WHAT IT DID. These two are separate on purpose: "the
+# window would not close" and "the client was killed" are different bugs with
+# the same symptom, and a single `closes` counter would make them one.
+S_CLOSEREQ: uint64 = 24         # a client was ASKED to close and agreed to be
+S_CLOSEKILL: uint64 = 25        # ... a client that could not be asked, killed
+# COMPOSITOR-SIDE MOVES PUSHED BACK TO X. wsysd moving a window used to be
+# invisible to the client inside it; this is how many times the new position
+# was sent on as a ConfigureWindow, which the X server turns into the
+# ConfigureNotify the client is waiting for.
+S_XCONF:    uint64 = 26         # a move/resize pushed back to an X client
+S_ORFOLLOW: uint64 = 27         # an override-redirect child moved with parent
 
 statepath: Array[256, uint8]
 
@@ -1376,6 +1404,13 @@ def win_open(c: uint64, surf: uint32, w: int32, h: int32,
         win_ctl(wid, cast[Ptr[uint8]]("z 8\n"))
     send_title(wid, c)
     win_ctl(wid, cast[Ptr[uint8]]("version 2\n"))
+    # ASK ME BEFORE YOU CLOSE ME. Without this the desktop's close button
+    # destroys the window record and leaves the client running with nothing on
+    # screen -- an invisible xterm holding a shell, a browser you cannot see
+    # and cannot quit. With it the request arrives on the event ring below and
+    # becomes WM_DELETE_WINDOW or xdg_toplevel.close, which is what the client
+    # is waiting to be told.
+    win_ctl(wid, cast[Ptr[uint8]]("wmdelete 1\n"))
     winpath(wid, "draw/ctl")
     dfd: int32 = sys_open_write(cast[Ptr[char]](&pathbuf[0]))
     if dfd < 0:
@@ -1384,6 +1419,8 @@ def win_open(c: uint64, surf: uint32, w: int32, h: int32,
     kfd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
     winpath(wid, "pointer")
     pfd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
+    winpath(wid, "event")
+    efd: int32 = sys_open(cast[Ptr[char]](&pathbuf[0]))
     w_wid[n_win] = wid
     w_draw[n_win] = dfd
     w_keys[n_win] = kfd
@@ -1395,6 +1432,7 @@ def win_open(c: uint64, surf: uint32, w: int32, h: int32,
     w_focus[n_win] = 0
     w_x[n_win] = x
     w_y[n_win] = y
+    w_evt[n_win] = efd
     n_win = n_win + 1
     puts(1, "wsyswl: surface -> wid ")
     putd(1, wid)
@@ -1413,6 +1451,8 @@ def win_close(wid: int32):
         sys_close(w_keys[i])
     if w_ptr[i] >= 0:
         sys_close(w_ptr[i])
+    if w_evt[i] >= 0:
+        sys_close(w_evt[i])
     # sys_wsys_free, not a `close <wid>` on the global ctl. Only the syscall
     # releases the window's v2 backbuffer slot, and user/linux-wsys.c has
     # THREE of them for the whole system -- a leaked slot is a window that can
@@ -1432,6 +1472,7 @@ def win_close(wid: int32):
         w_focus[k] = w_focus[k + 1]
         w_x[k] = w_x[k + 1]
         w_y[k] = w_y[k + 1]
+        w_evt[k] = w_evt[k + 1]
         k = k + 1
     n_win = n_win - 1
 
@@ -1516,6 +1557,8 @@ x_maxreq:  uint32 = 0
 x_atom_serial:  uint32 = 0
 x_atom_allow:   uint32 = 0
 x_atom_netname: uint32 = 0
+x_atom_protocols: uint32 = 0
+x_atom_delete:    uint32 = 0
 x_prop_fmt: int32 = 0
 x_prop_n:   uint32 = 0
 xerr_seq:   uint32 = 0
@@ -1540,6 +1583,18 @@ xw_x:     Array[64, int32]
 xw_y:     Array[64, int32]
 xw_w:     Array[64, int32]
 xw_h:     Array[64, int32]
+xw_del:   Array[64, int32]             # lists WM_DELETE_WINDOW in WM_PROTOCOLS
+xw_tfor:  Array[64, int32]             # WM_TRANSIENT_FOR: the X window this
+                                       #   dialog belongs to, or 0
+# WHICH TOPLEVEL A MENU BELONGS TO, and where inside it. An override-redirect
+# window places ITSELF, in X screen coordinates, worked out from where its
+# parent was when the menu opened. Nothing tells it the parent has since been
+# dragged, so the compositor has to carry the offset instead: on map, the menu
+# is attributed to the toplevel whose rectangle it opened over, and the offset
+# is remembered. When that toplevel moves, the menu moves with it.
+xw_par:   Array[64, int32]             # the X window this menu opened over
+xw_dx:    Array[64, int32]             # ... and where inside it
+xw_dy:    Array[64, int32]
 xw_surf:  Array[64, int32]             # the paired wl_surface object id
 xw_conn:  Array[64, int32]
 xw_title: Array[4096, uint8]           # 64 * 64
@@ -1738,6 +1793,68 @@ def x_allow_commits(win: uint32):
     x_send(28)
 
 
+# ASK AN X CLIENT TO CLOSE ITSELF -- WM_DELETE_WINDOW, the oldest and most
+# universally implemented convention in X, and the reason a title-bar close
+# button can exist at all.
+#
+# The alternative, which is what this compositor did until now because it had
+# no button to press, is to take the window away and leave the process
+# running. For an X client that means a program with no way to be seen and no
+# way to be quit; for a text editor it means unsaved work with nobody to ask.
+#
+# A client advertises the protocol by listing WM_DELETE_WINDOW in its
+# WM_PROTOCOLS property, which is read once when the window maps. A client
+# that does NOT advertise it has said it cannot be asked, and the convention's
+# answer for that case is KillClient -- which is what a close button on such a
+# window has to mean, and is what every other window manager does. Both are
+# below, and which one was used is visible in the log rather than guessed at.
+def x_send_delete(win: uint32) -> int32:
+    if x_atom_protocols == 0 or x_atom_delete == 0:
+        return 0
+    xzero(44)
+    xreq[0] = 25                                # SendEvent
+    xreq[1] = 0                                 # propagate = False
+    xput16(&xreq[0], 2, 11)
+    put_le32(&xreq[0], 4, cast[int32](win))     # destination
+    put_le32(&xreq[0], 8, 0)                    # event-mask: to the client
+    # ... and the 32-byte event itself.
+    xreq[12] = 33                               # ClientMessage
+    xreq[13] = 32                               # format
+    put_le32(&xreq[0], 16, cast[int32](win))
+    put_le32(&xreq[0], 20, cast[int32](x_atom_protocols))
+    put_le32(&xreq[0], 24, cast[int32](x_atom_delete))
+    put_le32(&xreq[0], 28, 0)                   # timestamp = CurrentTime
+    x_send(44)
+    return 1
+
+
+def x_kill_client(win: uint32):
+    xzero(8)
+    xreq[0] = 113                               # KillClient
+    xput16(&xreq[0], 2, 2)
+    put_le32(&xreq[0], 4, cast[int32](win))
+    x_send(8)
+
+
+# Does this window list WM_DELETE_WINDOW in WM_PROTOCOLS? One round trip, on
+# map, and never again -- the answer is a property of the toolkit, not of the
+# moment.
+def xwm_read_protocols(i: uint64):
+    xw_del[i] = 0
+    if x_atom_protocols == 0 or x_atom_delete == 0:
+        return
+    if x_get_prop(cast[uint32](xw_win[i]), x_atom_protocols) == 0:
+        return
+    if x_prop_fmt != 32:
+        return
+    k: uint64 = 0
+    while k < cast[uint64](x_prop_n) and k * 4 + 4 <= xrep_n:
+        if ru32(&xrep[0], k * 4) == x_atom_delete:
+            xw_del[i] = 1
+            return
+        k = k + 1
+
+
 # Grant a ConfigureRequest exactly as asked, minus the stacking half. An X
 # client that asks for 700x440 at +290+180 gets 700x440 at +290+180; wsysd
 # decides where that window LANDS ON THE DESKTOP, which is a different
@@ -1876,6 +1993,11 @@ def xwm_add(win: int32) -> int32:
     xw_have[i] = 0
     xw_or[i] = 0
     xw_map[i] = 0
+    xw_del[i] = 0
+    xw_tfor[i] = 0
+    xw_par[i] = 0
+    xw_dx[i] = 0
+    xw_dy[i] = 0
     xw_x[i] = 0
     xw_y[i] = 0
     xw_w[i] = 0
@@ -1946,6 +2068,11 @@ def xwm_del(i: uint64):
         xw_have[k] = xw_have[k + 1]
         xw_or[k] = xw_or[k + 1]
         xw_map[k] = xw_map[k + 1]
+        xw_del[k] = xw_del[k + 1]
+        xw_tfor[k] = xw_tfor[k + 1]
+        xw_par[k] = xw_par[k + 1]
+        xw_dx[k] = xw_dx[k + 1]
+        xw_dy[k] = xw_dy[k + 1]
         xw_x[k] = xw_x[k + 1]
         xw_y[k] = xw_y[k + 1]
         xw_w[k] = xw_w[k + 1]
@@ -1986,6 +2113,112 @@ def xwm_pair(i: uint64) -> int32:
                 o = o + 1
         c = c + 1
     return 0
+
+
+# THE WSYS WINDOW THIS X WINDOW IS BEING SHOWN IN, or 0. The chain is
+# X window -> wl_surface -> wsys wid, and every link can be absent: a window
+# that has not been paired, a connection that has gone, a surface that has not
+# committed a frame yet.
+def xwm_wid(k: uint64) -> int32:
+    if xw_surf[k] == 0 or xw_conn[k] < 0:
+        return 0
+    c: uint64 = cast[uint64](xw_conn[k])
+    if conn_inuse[c] == 0:
+        return 0
+    si: uint64 = oidx(c, cast[uint32](xw_surf[k]))
+    if obj_type[si] != T_SURFACE:
+        return 0
+    return obj_a[si]
+
+
+# TELL THE X CLIENT WHERE IT IS -- the ConfigureNotify half of rootless, and
+# the thing whose absence §8b named.
+#
+# wsysd decides where a window LANDS ON THE DESKTOP. Until this, the X client
+# inside it was never told: a program that asked its own geometry got the
+# position it opened at for the rest of its life, and -- worse -- an
+# override-redirect menu placed at "my parent's corner plus twenty" was placed
+# relative to a corner that had not been true since the user first dragged the
+# window. Pointer coordinates were never affected (they are surface-local and
+# Xwayland adds the origin itself), which is why everything LOOKED right.
+#
+# So the X window is kept at the same coordinates as its Hamnix window. The X
+# server turns a ConfigureWindow on a managed toplevel into a ConfigureNotify
+# to its client, which is the event the client is waiting for. It also means
+# the client's own idea of the screen and the desktop's agree, so a menu
+# opened AFTER a move lands in the right place with no help at all.
+def xwm_push_geom(k: uint64, gx: int32, gy: int32, gw: int32, gh: int32):
+    if xw_x[k] == gx and xw_y[k] == gy and xw_w[k] == gw and xw_h[k] == gh:
+        return
+    xw_x[k] = gx
+    xw_y[k] = gy
+    xw_w[k] = gw
+    xw_h[k] = gh
+    x_grant_configure(cast[uint32](xw_win[k]), 15, gx, gy, gw, gh, 0)
+    hit(S_XCONF)
+
+
+# A menu that is ALREADY OPEN when its parent is dragged. Everything opened
+# after the move is placed correctly by the client itself, because of the sync
+# above; this is the one case the client cannot get right, because nothing
+# tells it.
+def xwm_move_or_children(k: uint64):
+    par: int32 = xw_win[k]
+    j: uint64 = 0
+    while j < n_xw:
+        if xw_or[j] != 0 and xw_map[j] != 0 and xw_par[j] == par:
+            nx: int32 = xw_x[k] + xw_dx[j]
+            ny: int32 = xw_y[k] + xw_dy[j]
+            wid: int32 = xwm_wid(j)
+            if wid > 0 and (xw_x[j] != nx or xw_y[j] != ny):
+                xwm_push_geom(j, nx, ny, xw_w[j], xw_h[j])
+                send_geometry(wid, nx, ny, xw_w[j], xw_h[j])
+                sl: int32 = win_slot(wid)
+                if sl >= 0:
+                    w_x[cast[uint64](sl)] = nx
+                    w_y[cast[uint64](sl)] = ny
+                hit(S_ORFOLLOW)
+        j = j + 1
+
+
+# Attribute a just-mapped override-redirect window to the toplevel it opened
+# over, and remember where inside it. WM_TRANSIENT_FOR first when the client
+# bothered to set it -- a menu that names its own parent is not guessed at --
+# and otherwise the topmost managed toplevel whose rectangle contains the
+# menu's corner, which is what a menu opening off a menu bar looks like.
+def xwm_attach_or(i: uint64):
+    if xw_or[i] == 0:
+        return
+    par: int32 = xw_tfor[i]
+    if par == 0:
+        j: uint64 = 0
+        while j < n_xw:
+            if j != i and xw_or[j] == 0 and xw_map[j] != 0 and xw_w[j] > 0:
+                if xw_x[i] >= xw_x[j] and xw_x[i] < xw_x[j] + xw_w[j] \
+                        and xw_y[i] >= xw_y[j] and xw_y[i] < xw_y[j] + xw_h[j]:
+                    par = xw_win[j]
+            j = j + 1
+    if par == 0:
+        return
+    k: int32 = xwm_find(par)
+    if k < 0:
+        return
+    xw_par[i] = par
+    xw_dx[i] = xw_x[i] - xw_x[cast[uint64](k)]
+    xw_dy[i] = xw_y[i] - xw_y[cast[uint64](k)]
+
+
+# WM_TRANSIENT_FOR, read on map. Two things use it: a menu that names its own
+# parent above, and the z band below -- a dialog belongs on top of the window
+# it came from, and until now it stayed there only by the luck of being
+# created later.
+def xwm_read_transient(i: uint64):
+    xw_tfor[i] = 0
+    if x_get_prop(cast[uint32](xw_win[i]), 68) == 0:     # WM_TRANSIENT_FOR
+        return
+    if x_prop_fmt != 32 or x_prop_n < 1 or xrep_n < 4:
+        return
+    xw_tfor[i] = cast[int32](ru32(&xrep[0], 0))
 
 
 # ... and from the Wayland side, because set_serial and the X property arrive
@@ -2146,6 +2379,9 @@ def xwm_event():
             xw_or[i2] = cast[int32](xin[12])
             xwm_read_serial(i2)
             xwm_read_title(i2)
+            xwm_read_protocols(i2)
+            xwm_read_transient(i2)
+            xwm_attach_or(i2)
     elif t == 18:                                # UnmapNotify
         win = cast[int32](ru32(&xin[0], 8))
         s = xwm_find(win)
@@ -2166,6 +2402,11 @@ def xwm_event():
             xw_y[i3] = xs16(&xin[0], 18)
             xw_w[i3] = cast[int32](xget16(&xin[0], 20))
             xw_h[i3] = cast[int32](xget16(&xin[0], 22))
+            # An X client is free to move its OWN toplevel, and an open menu
+            # has to come with it whoever asked. This is the same follow the
+            # desktop's drag gets, on the other side of the same fact.
+            if xw_or[i3] == 0:
+                xwm_move_or_children(i3)
     elif t == 23:                                # ConfigureRequest
         win = cast[int32](ru32(&xin[0], 8))
         x_grant_configure(cast[uint32](win), xget16(&xin[0], 26),
@@ -2269,6 +2510,8 @@ def xwm_connect() -> int32:
     x_atom_serial  = x_intern("WL_SURFACE_SERIAL")
     x_atom_allow   = x_intern("_XWAYLAND_ALLOW_COMMITS")
     x_atom_netname = x_intern("_NET_WM_NAME")
+    x_atom_protocols = x_intern("WM_PROTOCOLS")
+    x_atom_delete    = x_intern("WM_DELETE_WINDOW")
     # Only ONE X client may hold SubstructureRedirect on a root window; the
     # second gets BadAccess and silently manages nothing. That is exactly the
     # shape a `jwm` left running inside the namespace would produce, so it is
@@ -2449,7 +2692,21 @@ def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
             return
         obj_a[si] = wid
         if xsl >= 0:
-            xwm_apply_title(cast[uint64](xsl), wid)
+            xk: uint64 = cast[uint64](xsl)
+            xwm_apply_title(xk, wid)
+            # WM_TRANSIENT_FOR: a dialog goes one z band above an ordinary
+            # toplevel, which is where "keep this above its parent" is spelled
+            # on this desktop. Until now it stayed above by the luck of having
+            # been created later, and one click on the parent buried it.
+            if xw_tfor[xk] != 0 and xw_or[xk] == 0:
+                win_ctl(wid, cast[Ptr[uint8]]("z 8\n"))
+            # AND TELL THE CLIENT WHERE IT LANDED. win_open cascades a new
+            # toplevel; without this the X window still believes it is at the
+            # corner it asked for, and the first menu it opens is placed there.
+            sl0: int32 = win_slot(wid)
+            if sl0 >= 0 and xw_or[xk] == 0:
+                xwm_push_geom(xk, w_x[cast[uint64](sl0)], w_y[cast[uint64](sl0)],
+                              width, height)
         high(S_WINHI, cast[int32](n_win))
     elif obj_c[si] != width or obj_d[si] != height:
         # A resize is a geometry announcement and nothing else: linux-wsys.c's
@@ -3602,6 +3859,110 @@ def handle_ptr_line(c: uint64, i: uint64, surf: uint32, at: uint64, n: uint64):
     send_ptr_frame(cast[uint32](ptr))
 
 
+# SOMEBODY ELSE MOVED THIS WINDOW. The desktop dragged it, a script wrote
+# `geometry` on its ctl, hamdesktop tiled it -- the device posts the new
+# rectangle on the window's event ring and this is where it lands. For a
+# native Wayland toplevel there is nothing to say: a Wayland client is not
+# told where it is, by design. For an X client there is everything to say.
+def win_moved(i: uint64, gx: int32, gy: int32, gw: int32, gh: int32):
+    w_x[i] = gx
+    w_y[i] = gy
+    if w_conn[i] < 0:
+        return
+    c: uint64 = cast[uint64](w_conn[i])
+    if conn_inuse[c] == 0:
+        return
+    si: uint64 = oidx(c, cast[uint32](w_surf[i]))
+    if obj_type[si] != T_SURFACE:
+        return
+    xwl: int32 = obj_e[si]
+    if xwl <= 0:
+        return
+    xsl: int32 = xwm_find(xwl)
+    if xsl < 0:
+        return
+    k: uint64 = cast[uint64](xsl)
+    xwm_push_geom(k, gx, gy, gw, gh)
+    xwm_move_or_children(k)
+
+
+# --- the desktop asking a window to close -----------------------------
+#
+# ONE REQUEST, TWO CLIENTS, AND NEITHER OF THEM IS THIS PROGRAM. The user
+# pressed a button on a title bar that wsysd painted; what has to happen is
+# that the program inside the window is asked to quit, in whichever protocol
+# that program speaks. This compositor is the only thing that knows which.
+def close_requested(i: uint64):
+    c: uint64 = cast[uint64](w_conn[i])
+    if conn_inuse[c] == 0:
+        return
+    surf: uint32 = cast[uint32](w_surf[i])
+    si: uint64 = oidx(c, surf)
+    if obj_type[si] != T_SURFACE:
+        return
+    # AN X WINDOW. obj_e on the surface is the X window id once the two halves
+    # have met (0 for an ordinary surface, -1 for one still waiting).
+    xwl: int32 = obj_e[si]
+    if xwl > 0:
+        xsl: int32 = xwm_find(xwl)
+        if xsl < 0:
+            return
+        k: uint64 = cast[uint64](xsl)
+        if xw_del[k] != 0 and x_send_delete(cast[uint32](xwl)) != 0:
+            hit(S_CLOSEREQ)
+            puts(1, "wsyswl: WM_DELETE_WINDOW -> X window ")
+            putd(1, xwl)
+            puts(1, "\n")
+        else:
+            # It did not advertise WM_PROTOCOLS/WM_DELETE_WINDOW, which is a
+            # client saying it cannot be asked. KillClient is the convention's
+            # answer and what every other window manager does; saying which
+            # one happened matters, because "the window would not close" and
+            # "the client was killed" are different bugs.
+            x_kill_client(cast[uint32](xwl))
+            hit(S_CLOSEKILL)
+            puts(1, "wsyswl: no WM_DELETE_WINDOW on X window ")
+            putd(1, xwl)
+            puts(1, " -- KillClient\n")
+        return
+    # A NATIVE WAYLAND TOPLEVEL. xdg_toplevel.close, event opcode 1: the
+    # client is asked, and closes its own surface. Firefox honours it; so does
+    # every toolkit. A popup has no close event and is not given one.
+    role: int32 = obj_f[si]
+    if role == 0 or obj_get_type(c, cast[uint32](role)) != T_XDG_SURF:
+        return
+    top: int32 = obj_d[oidx(c, cast[uint32](role))]
+    if top == 0 or obj_get_type(c, cast[uint32](top)) != T_XDG_TOP:
+        return
+    st: uint64 = emit_begin(cast[uint32](top))
+    emit_end(st, 1)                             # xdg_toplevel.close
+    flush(conn_fd[c])
+    hit(S_CLOSEREQ)
+    puts(1, "wsyswl: xdg_toplevel.close -> object ")
+    putd(1, top)
+    puts(1, "\n")
+
+
+# One line off a window's event ring. `at` is where the line starts.
+def handle_evt_line(i: uint64, at: uint64, n: uint64):
+    if n - at >= 5 and inbuf[at] == 99 and inbuf[at + 1] == 108 \
+            and inbuf[at + 2] == 111 and inbuf[at + 3] == 115 \
+            and inbuf[at + 4] == 101:                    # "close"
+        close_requested(i)
+        return
+    if n - at >= 8 and inbuf[at] == 103 and inbuf[at + 1] == 101 \
+            and inbuf[at + 2] == 111:                    # "geometry"
+        p: uint64 = skip_field(&inbuf[0], at, n)
+        gx: int32 = parse_int_at(&inbuf[0], p, n)
+        p = skip_field(&inbuf[0], p, n)
+        gy: int32 = parse_int_at(&inbuf[0], p, n)
+        p = skip_field(&inbuf[0], p, n)
+        gw: int32 = parse_int_at(&inbuf[0], p, n)
+        p = skip_field(&inbuf[0], p, n)
+        gh: int32 = parse_int_at(&inbuf[0], p, n)
+        win_moved(i, gx, gy, gw, gh)
+
+
 # Read whatever is in one window's rings and translate it. The rings are
 # written a whole line at a time by wsysd, so a read almost never splits one;
 # a split line is DROPPED rather than carried, because the alternative is a
@@ -3620,6 +3981,17 @@ def drain_window(i: uint64):
             if inbuf[k] == 10:
                 if k > s:
                     handle_ptr_line(c, i, surf, s, k)
+                s = k + 1
+            k = k + 1
+    fd = w_evt[i]
+    if fd >= 0:
+        got = sys_read_nb(fd, &inbuf[0], 1000)
+        s = 0
+        k = 0
+        while k < cast[uint64](got):
+            if inbuf[k] == 10:
+                if k > s:
+                    handle_evt_line(i, s, k)
                 s = k + 1
             k = k + 1
     fd = w_keys[i]
@@ -3800,6 +4172,10 @@ def publish_state():
     st_kv(fd, "xwl_paired", S_XWLPAIR)
     st_kv(fd, "drop_xwl_unpaired", S_XWLUNP)
     st_kv(fd, "xwm_refused", S_XWLERR)
+    st_kv(fd, "close_requested", S_CLOSEREQ)
+    st_kv(fd, "close_killed", S_CLOSEKILL)
+    st_kv(fd, "x_configure_pushed", S_XCONF)
+    st_kv(fd, "or_children_followed", S_ORFOLLOW)
     # THE LIMITS, SPLIT BY WHOSE THEY ARE. A reader cannot tell what any of the
     # counters above mean without knowing which of these is shared and which is
     # not, and the first three passes of the Steam investigation are what a

@@ -378,6 +378,35 @@ else
     bad "wid $STAYER moved too (${SX},${SY} -> ${TX},${TY}); these share a fate they should not"
 fi
 
+# ---- AND DOES THE CLIENT KNOW? --------------------------------------------
+# The move above was measured in the framebuffer and in the window table, and
+# for stage one that was the whole claim. It left the X client believing it
+# was still where it opened: `xwininfo` on it reported the ORIGINAL corner for
+# the rest of the session, and an override-redirect menu placed at "my corner
+# plus twenty" was placed against a corner that had not been true since the
+# first drag. Pointer coordinates were never affected -- they are
+# surface-local and Xwayland adds the origin itself -- which is exactly why
+# everything LOOKED right and this was easy to leave out.
+#
+# So the compositor now pushes the new rectangle back as a ConfigureWindow,
+# which the X server turns into the ConfigureNotify the client is waiting for.
+# The evidence is the X server's own answer, asked by a different program.
+MOVER_NAME=alpha
+[ "$MOVER_COL" = "$COL_B" ] && MOVER_NAME=beta
+XI="$(xwininfo -name "$MOVER_NAME" 2>/dev/null)"
+XPX="$(sed -n 's/^ *Absolute upper-left X: *\([0-9-]*\).*/\1/p' <<<"$XI" | head -1)"
+XPY="$(sed -n 's/^ *Absolute upper-left Y: *\([0-9-]*\).*/\1/p' <<<"$XI" | head -1)"
+PUSHED="$(sed -n 's/^x_configure_pushed \([0-9]*\)$/\1/p' "$STATE" 2>/dev/null | tail -1)"
+info "the X server says '$MOVER_NAME' is at ${XPX:-?},${XPY:-?}; x_configure_pushed ${PUSHED:-?}"
+if [ "${XPX:-x}" = "$NEWX" ] && [ "${XPY:-x}" = "$NEWY" ]; then
+    ok "the X client was TOLD where the desktop put it -- X and wsys agree on ${NEWX},${NEWY}"
+else
+    bad "the X client still thinks it is at ${XPX:-?},${XPY:-?}, not ${NEWX},${NEWY}"
+fi
+[ "${PUSHED:-0}" -ge 1 ] \
+    && ok "and the compositor counts the pushes it made ($PUSHED)" \
+    || bad "x_configure_pushed is ${PUSHED:-absent}"
+
 cp "$HAMFB_FILE" "$WORK/after.raw"
 MOVED_PCT="$(colourpct "$NEWX" "$NEWY" "$MW" "$MH" "$WORK/after.raw" "$MOVER_COL")"
 STAY_PCT="$(colourpct "$SX" "$SY" "$SW" "$SH" "$WORK/after.raw" "$STAYER_COL")"
@@ -470,7 +499,17 @@ if [ -n "$MAXWIN" ] && [ -n "$MAXCONN" ] && [ -n "$WINPERCONN" ]; then
     # and it is written down here so the next person meets it as a number
     # rather than as "the ninth window did not appear".
     info "an X display may therefore have at most WINPERCONN=$WINPERCONN toplevels on screen at once"
-    info "and user/linux-wsys.c's BB_SLOTS is the harder one behind it -- see docs 8b"
+    # BB_SLOTS USED TO BE THE HARDER CEILING BEHIND THIS ONE and is not any
+    # more: user/linux-wsys.c ties the v2 backbuffer pool to the window table
+    # with a compile-time assertion, so the paint pool can never be the first
+    # thing to run out. /dev/wsys/pool states it, and tests/linux/wsyswl_ceiling.sh
+    # puts twelve X windows on the screen at once and checks all twelve PIXELS.
+    POOL="$(poke /dev/wsys/pool)"
+    if [ -n "$POOL" ]; then
+        ok "and the paint pool behind it is readable: $POOL"
+    else
+        bad "/dev/wsys/pool does not exist -- an exhausted paint pool would be silent again"
+    fi
 fi
 
 echo "rless: $pass passed, $fail failed"

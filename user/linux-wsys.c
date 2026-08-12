@@ -131,6 +131,14 @@ struct wwin {
     int32_t  x, y, w, h, z;
     int32_t  decorate, visible, proto;
     int32_t  pinned;                          /* devwsys's wsys_win_pinned   */
+    /* THE CLIENT ASKED TO BE TOLD BEFORE IT IS CLOSED.  A window whose owner
+     * sets this is not destroyed by `delete <wid>`: the request is delivered
+     * on its `event` ring and the owner decides.  Without it a title-bar
+     * close destroys the window record and leaves the program running with
+     * nothing on screen -- which for a bridged X client means an invisible
+     * xterm holding a shell, and for Firefox means a browser you cannot see
+     * and cannot quit.  This is X's WM_DELETE_WINDOW, spelled as a file. */
+    int32_t  wmdelete;
     uint32_t scene_len;                       /* published */
     uint32_t scene_gen;                       /* ++ on every commit */
     uint32_t stage_len;                       /* being written */
@@ -1452,7 +1460,7 @@ static int ctl_verb_is_ungated(const char *s, size_t n)
  * the target wid, or 0 if this is not one of those verbs. */
 static int ctl_verb_window_target(const char *s, size_t n)
 {
-    static const char *win_verbs[] = { "raise", "focus", "close" };
+    static const char *win_verbs[] = { "raise", "focus", "close", "delete" };
     size_t vn = 0;
     while (vn < n && s[vn] != ' ' && s[vn] != '\t' && s[vn] != '\n') vn++;
     for (size_t i = 0; i < sizeof win_verbs / sizeof *win_verbs; i++) {
@@ -2330,6 +2338,39 @@ static int ctl_global(const char *s, size_t n)
         shm->gen++;
         return 0;
     }
+    /* "delete <wid>" -- CLOSE THE WINDOW THE WAY ITS OWNER WANTS.
+     *
+     * `close` below destroys the window record.  For a program that draws its
+     * own pixels that is not closing an application, it is taking its screen
+     * away: the process keeps running, keeps its files open, and has no
+     * window.  A title-bar close button that did that would be worse than no
+     * close button, which is why there was none.
+     *
+     * So the desktop writes `delete` and the DEVICE decides which it means:
+     * a window whose owner set `wmdelete` gets the request on its own event
+     * ring and closes itself (wsyswl turns it into WM_DELETE_WINDOW for an X
+     * client, xdg_toplevel.close for a native one); anything else is
+     * destroyed exactly as before, so a scene client that has never heard of
+     * the verb behaves the way it always did.
+     *
+     * It is a WINDOW-targeted verb, so ctl_verb_window_target gates it: only
+     * the window's owner or the host owner may ask.  A stranger closing your
+     * windows is not a courtesy. */
+    if (n >= 6 && !strncmp(s, "delete", 6)) {
+        p = 6;
+        int32_t wid = take_int(s, &p, n);
+        struct wwin *v = win_find(wid);
+        if (!v) return 0;
+        if (v->wmdelete) {
+            static const uint8_t req[] = "close\n";
+            ring_write(&v->event, req, sizeof req - 1);
+            return 0;
+        }
+        bb_release(wid);
+        v->used = 0;
+        shm->gen++;
+        return 0;
+    }
     if (n >= 5 && !strncmp(s, "close", 5)) {
         p = 5;
         int32_t wid = take_int(s, &p, n);
@@ -2375,12 +2416,40 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
         int32_t x = take_int(s, &p, n), y = take_int(s, &p, n);
         int32_t w = take_int(s, &p, n), h = take_int(s, &p, n);
         if (w > 0 && h > 0) {
+            int moved = (v->x != x || v->y != y || v->w != w || v->h != h);
             v->x = x; v->y = y; v->w = w; v->h = h;
             /* A v2 window's backbuffer has to follow its geometry, or the
              * client draws at the new size into a surface still cut to the
              * old one. */
             bb_resize(v->wid, w, h);
             shm->gen++;
+            /* THE WINDOW WAS MOVED BY SOMEBODY ELSE, so its owner is told.
+             *
+             * This is the file-server half of X's ConfigureNotify, and it
+             * exists because the compositor moving a window used to be
+             * invisible to the program inside it: an X client that asked
+             * where it was got the position it opened at for ever, and an
+             * override-redirect menu placed at its parent's X coordinates
+             * landed wherever the parent USED to be.  The device posts the
+             * new geometry on the window's own event ring -- a ring a parked
+             * client is already asleep on (see THE PARK) -- so it costs a
+             * wakeup when a window moves and nothing at all when none does.
+             *
+             * ONLY when the writer is not the owner.  wsyswl sends `geometry`
+             * itself on every resize; echoing that back is a loop between two
+             * authorities over one rectangle, which would look like jitter
+             * and read like a rendering bug. */
+            if (moved && v->pid && (int32_t)getpid() != v->pid) {
+                uint8_t e[80];
+                uint64_t k = 0;
+                const char *w0 = "geometry ";
+                while (*w0) e[k++] = (uint8_t)*w0++;
+                k = put_int(e, k, x); e[k++] = ' ';
+                k = put_int(e, k, y); e[k++] = ' ';
+                k = put_int(e, k, w); e[k++] = ' ';
+                k = put_int(e, k, h); e[k++] = '\n';
+                ring_write(&v->event, e, k);
+            }
         }
         return;
     }
@@ -2389,6 +2458,14 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
     }
     if (n >= 7 && !strncmp(s, "version", 7)) {
         p = 7; v->proto = take_int(s, &p, n); return;
+    }
+    /* "wmdelete [0|1]" -- ASK ME BEFORE YOU CLOSE ME.  The owner opts in; the
+     * default is the old behaviour, so a client that has never heard of this
+     * verb is closed exactly as it always was.  No argument means 1. */
+    if (n >= 8 && !strncmp(s, "wmdelete", 8)) {
+        p = 8; int32_t d = take_int(s, &p, n);
+        v->wmdelete = (d < 0 || d > 0) ? 1 : 0;
+        return;
     }
     if (n >= 7 && !strncmp(s, "visible", 7)) {
         p = 7; v->visible = take_int(s, &p, n) > 0; shm->gen++; return;
