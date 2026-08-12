@@ -92,18 +92,33 @@ if has sock_cred "sender_is_child=1"; then
 else bad "the credential pid was not the sender's: $(line sock_cred)"; fi
 
 echo ""
-echo "AND THE ONE THIS CANNOT CLOSE, named rather than left to be discovered:"
+echo "AND THE ONE THIS FILE CANNOT CLOSE, WHICH IS NOW CLOSED SOMEWHERE ELSE:"
 PS="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo unset)"
-echo "  /proc/sys/kernel/yama/ptrace_scope = $PS on this host."
+echo "  /proc/sys/kernel/yama/ptrace_scope = $PS on this DEV HOST."
 if has memfd_samuid "ptrace=0"; then
     echo "  A same-uid attacker PTRACE_ATTACHes the victim and reads its memory"
     echo "  directly -- no userland mechanism prevents that, and every window"
-    echo "  system on Linux has the same exposure.  It is a DISTRIBUTION setting"
-    echo "  (ptrace_scope 1) and it is not set anywhere in this tree.  Recorded"
-    echo "  in HANDOFF.md; not changed here, because boot policy is not this pass."
+    echo "  system on Linux has the same exposure.  It is a DISTRIBUTION setting,"
+    echo "  and user/linuxinit.ad now sets kernel.yama.ptrace_scope=1 as PID 1"
+    echo "  and reads it back.  It is NOT set on this dev host (that would be a"
+    echo "  change to somebody's working machine, and ptrace_scope is not"
+    echo "  namespaced, so no unprivileged harness can set it either), which is"
+    echo "  why the ptrace=0 above is still the honest reading HERE and why the"
+    echo "  measurement of the setting lives in a real boot:"
+    echo "      tests/linux/ptrace_scope_boot.sh   -- 6 assertions, one of them"
+    echo "      this exact attack run on this host (attach SUCCEEDS, scope 0)"
+    echo "      and inside a boot of this tree (REFUSED, scope 1)."
 else
     echo "  ptrace was refused here, so this host already restricts it."
 fi
+echo ""
+echo "AND THE REMEDY MEASURED ABOVE IS NOW APPLIED, not just available:"
+echo "  prctl(PR_SET_DUMPABLE, 0) is called by owner_harden() in"
+echo "  user/linux-wsys.c's keychan_bind, so every window owner has it."
+echo "  Driven against a REAL window owner as attack 5 of 5 in"
+echo "  tests/linux/wsys_bypass.sh, where the same-uid attacker takes the"
+echo "  victim's pid out of the world-readable table and is then refused"
+echo "  /proc/<pid>/mem, /proc/<pid>/fd and PTRACE_ATTACH."
 
 echo ""
 [ $fail -eq 0 ] && echo "PASS wsys_keychan" || echo "FAIL wsys_keychan"

@@ -822,6 +822,70 @@ same failure this project exists to beat.
   refuted as a rule — on the fills frame the shipped batching is 20% slower
   than one dispatch per op, because a batch pads its grid to the max over its
   entries.
+* **AND THE ATTACK THAT WALKED THROUGH THAT FIX: `/proc/<pid>/mem`. CLOSED, from
+  two sides.** The entry below moved a window's keystrokes out of the shared
+  segment, so the snooper reads nothing out of the table. The VICTIM still has
+  them, and on Linux one process reads another of the **same uid** out of
+  `/proc/<pid>/mem` with **no ptrace call, no stop and nothing to notice**. The
+  chain is two steps long, because the table must stay world-readable for the
+  taskbar and it hands over `pid=`:
+
+      snoop -> pid=1234 -> open(/proc/1234/mem) -> `1 PASSWORD31337`
+
+  It is driven as **attack 5 of 5** in `tests/linux/wsys_bypass.sh` (`peek` mode
+  in `wsys_bypass.c`), and with the fix reverted it reads
+  `found=1 mem=3 maps=4 secret=1 enumerable=1 ptrace=0` — the victim's password,
+  read out of its address space.
+  **(1) `prctl(PR_SET_DUMPABLE, 0)` IN EVERY WINDOW OWNER.** `owner_harden()` in
+  `user/linux-wsys.c`, called from `keychan_bind` — the ONE place a process
+  becomes the recipient of a window's keystrokes, on both the `newwindow` path
+  and the lazy bind, so no future window-owning program can forget it. Measured
+  against a real owner: `mem=-13 maps=-13 secret=0 enumerable=0 ptrace=-1`.
+  **IT COSTS** core dumps from every window owner and same-uid `gdb -p` /
+  `strace -p` / `perf -p` against a live DE client; launching a client UNDER a
+  debugger still works. `HAMWSYS_DUMPABLE=1` opts out and says on stderr that it
+  did. `/proc/<pid>/stat` and `/proc/<pid>/cmdline` are NOT ptrace-gated, so
+  `ps`, the panel and this file's own `owns_wid` parent-pid walk are unaffected —
+  checked before it landed.
+  **(2) `kernel.yama.ptrace_scope=1`, SET IN `user/linuxinit.ad` AS PID 1**, the
+  instant `/proc` exists. Debian's and Ubuntu's default, so not a novel policy: a
+  non-ancestor same-uid attach is refused and a debugger still debugs anything it
+  launched itself. **Yama IS on this kernel** — the image ships the build host's
+  newest `/boot/vmlinuz-*`, which is the kernel the host is running, and
+  `/proc/sys/kernel/yama/ptrace_scope` exists on it. **It is READ BACK**, and
+  absent-Yama, unwritable-knob and write-did-not-take are three different
+  messages naming three different causes.
+  **NEITHER IS SUFFICIENT ALONE**: Yama is a boot setting a person can turn off
+  and an `lsm=` line can omit, and it does not gate `/proc/<pid>/mem` at all;
+  `PR_SET_DUMPABLE` is core kernel and always there, but only covers processes
+  that opt in.
+  **THE GATE:** `tests/linux/ptrace_scope_boot.sh`, **6 ok**, a REAL BOOT —
+  ptrace_scope is not namespaced, so no unprivileged harness can measure the set
+  state on the dev host. Its positive control is the same probe run on the dev
+  host (scope 0, sibling attach **SUCCEEDS**). Reverted `linuxinit.ad`:
+  **PASS 3 / FAIL 3**, with `uid=1001 scope=0 dumpable=1 attach=0` inside the
+  boot. `wsys_bypass.sh` **42 ok → 47 ok**.
+  **THE GATES LIED THREE TIMES BEFORE THEY TOLD THE TRUTH**, and every one was
+  caught by running the reverted case rather than reasoning about it. (a) `peek`
+  scanned only ANONYMOUS writable regions on the reasoning that a keystroke
+  buffer is heap or stack — it is not, `wsys_uidgate.ad` reads into a top-level
+  BSS array and a small `.bss` sits inside the binary's own **file-backed** `rw-`
+  mapping, so the scrape skipped the one page the password was on and printed
+  `secret=0` **on the reverted run**. (b) The boot probe ran from `rc.boot`, i.e.
+  as **root**, which holds `CAP_SYS_PTRACE` and which Yama never restricts:
+  `uid=0 scope=1 attach=0`, a successful attach on a correctly configured
+  machine. (c) After the probe dropped to uid 1001, the uid change **cleared the
+  dumpable flag** (`suid_dumpable` is 0), so the attach was refused by the
+  dumpable check and the **reverted** run printed `attach=-1` and PASSED. All
+  three are now asserted against by name: every writable region is scanned, a
+  `uid=0` line is refused, and a refusal against a non-dumpable target is a VOID
+  measurement rather than a pass.
+  **WHAT IS STILL OPEN AFTERWARDS**, unchanged by any of this: SCRAPE another
+  window's committed scene and backbuffer out of the 0666 table, ENUMERATE every
+  row, and CORRUPT any of it. That is THE SPLIT's tier 2 remainder and it needs
+  the tier-1 authority — a daemon, a new binary, a package-channel change and a
+  segment at a new path — not another pass over this file.
+
 * **THE KEYLOGGER IS CLOSED: a window's keystrokes are not in the shared
   segment any more.** This was the whole of attack 4 — a uid-1001 process opened
   `/srv/wsys` `O_RDONLY`, mapped it `PROT_READ` and read a uid-1001 victim's
@@ -875,13 +939,16 @@ same failure this project exists to beat.
   and their positive controls still pass. One ring of five moved, and it is the
   one that carries passwords. `pointer`/`event`/`text`/`cmd` are unchanged; the
   mechanism is one call per ring away if that judgement ever stops holding.
-  **AND THE ONE NOTHING IN USERLAND CAN CLOSE:** `/proc/sys/kernel/yama/
-  ptrace_scope` is **0** on the dev host and is set NOWHERE in this tree, so a
-  same-uid attacker can `PTRACE_ATTACH` the victim and read its memory directly —
-  past this, past a memfd, past anything. `PR_SET_DUMPABLE(0)` in the victim
-  refuses it (measured), and so does `ptrace_scope 1` in `linuxinit`. That is a
-  boot-policy decision and it is named here rather than taken.
-  **THE GATES.** `tests/linux/wsys_bypass.sh` is **42 ok**, and the three
+  **AND THE ONE NOTHING IN USERLAND CAN CLOSE — SINCE TAKEN, see the entry
+  above.** `/proc/sys/kernel/yama/ptrace_scope` is **0** on the dev host and was
+  set NOWHERE in this tree, so a same-uid attacker could `PTRACE_ATTACH` the
+  victim and read its memory directly — past this, past a memfd, past anything.
+  It is now `1`, set by `user/linuxinit.ad` as PID 1 and read back, and
+  `PR_SET_DUMPABLE(0)` is applied in every window owner. The dev host is
+  deliberately left at 0: it is somebody's working machine, and the setting is
+  measured in a real boot instead (`tests/linux/ptrace_scope_boot.sh`).
+  **THE GATES.** `tests/linux/wsys_bypass.sh` is **42 ok** (now **47** — see the
+  entry above), and the three
   controls that closed are **INVERTED, not deleted** — the snooper still runs
   unchanged, still maps the table read-only, still finds the row and still
   scrapes the scene, and now asserts the password is NOT there. It drives a new
