@@ -20,7 +20,40 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-*(nothing right now — 1.0.14 carries everything that had landed.)*
+*(nothing right now — 1.0.15 carries everything that had landed.)*
+
+## 1.0.15
+
+**If you are on 1.0.13 or 1.0.14, this is the release that lets your machine
+take an update at all.** Both of the following were live.
+
+- **`hpm update` hung forever.** A package's install hook contained the words
+  *"in front of the machine's table"*, and the apostrophe closed a quoted
+  string. The shell reported an unterminated quote, and the runaway token
+  swallowed the rest of the file — **including the `exit` the package manager
+  appends to every hook as its safety net**. The shell then reached an
+  interactive prompt on input nobody was feeding, and the update never
+  returned. The modules extracted; the dependency table was never merged; the
+  machine sat wedged mid-update. Caused by an `echo`.
+- **Installing from the repository disconnected you from it.** The package
+  manager's own package shipped the subscription list belonging to the *other*
+  line of this system — one channel name, wrong for this kernel. Since the
+  flagship package depends on it, installing rewrote the machine's
+  subscription, and every later refresh failed on a missing index.
+
+Two refusals so neither can return: publishing rejects any hook line with an
+odd number of single quotes — a build error nobody sees beats an update that
+hangs on every machine that takes it — and the coverage check now compares the
+**bytes** of every `/etc` file the image and a package share, not merely that
+the path is carried. That second check named the subscription file by itself.
+
+**Proven afterwards on a real installed disk, against this channel:** a machine
+that *updates* can load a kernel module with real dependencies — verified from
+the kernel's own module list, with the dependency edge visible in it, and the
+module's bytes matching the published ones. The lines a driver package had
+appended to that machine's table **survived** the update; the shipped lines win
+by order, not by overwriting. And a plain refresh works after installing the
+package manager itself, which no machine had ever been able to demonstrate.
 
 ## 1.0.14
 
