@@ -360,6 +360,72 @@ same failure this project exists to beat.
   saying the compositor may not present faster than a panel can show. That cap
   is the obvious next question and it is NOT answered here.
 
+* **THE COMPOSITOR PRESENTS AS FAST AS INPUT ARRIVES, AND CAPPING IT IS WORTH
+  LESS THAN THE FRAME COUNT SAYS -- MEASURED BEFORE ANYBODY WRITES THE CAP.**
+  Since the wake-on-input change there is nothing saying wsysd may not present
+  faster than a panel can show: 250 pointer events a second produce 250 frames,
+  1000 produce 998.8. The obvious inference is that a 60 Hz cap would save
+  three quarters of the work. IT WOULD NOT. Same drag load, same binary, only
+  the INPUT rate changed (which is what a cap would change about the output):
+
+      input   60 ev/s ->  61.1 fps (907 full + 10 cursor-only)  38.6% of a core
+      input  250 ev/s -> 248.0 fps (3707 full + 13 cursor-only)  60.5% of a core
+
+  **4.1x the full repaints for 1.57x the CPU**, and the cost per presented
+  frame FALLS from 6.31 ms to 2.44 ms. So the prize for capping this load at
+  60 Hz is about **22 points of one core, not 45** -- real, and a third of what
+  a frame-count argument promises. For scale, the OLD tick-paced compositor
+  under the same load is 37.7% of a core for 39.6 fps: capping the new one to
+  60 Hz would cost about what the tick cost and deliver 1.5x the frames at
+  1/27th the latency.
+  **THE LIKELY MECHANISM, STATED AS A HYPOTHESIS BECAUSE IT IS NOT PROVEN
+  HERE**: present_rows() writes only the rows that changed, and a window that
+  is being dragged moves a fixed distance per second, so four times as many
+  presents each carry about a quarter of the damage. The pixels written per
+  second are roughly constant and the frame COUNT is not what costs.
+  **NOT MEASURED**: the same ratio on the GPU scanout path (which is
+  single-buffered and tears), and whether pacing to vblank would fix the
+  tearing and the power in one change. That is the design note for whoever
+  writes the cap, along with: key it on the display's refresh rather than a
+  constant, never cap OFFSCREEN (or every gate starts measuring a rate limiter
+  instead of the compositor), and make it a MINIMUM INTERVAL BETWEEN PRESENTS
+  that never delays the first input after a quiet period -- a cap that does
+  delay it gives back the whole 8.93 -> 0.33 ms result for exactly the
+  interaction people notice most.
+
+* **A VERTICAL PANEL IS ACCEPTED BY THE CONFIG AND NEVER APPEARS ON SCREEN.**
+  `tests/linux/de_panel_conf_shipped.sh` is 14 PASS / 1 FAIL, and it fails the
+  same way with `user/wsysd.ad` and `user/linux-syscalls.c` reverted to
+  `4b50eae2`, so it is nobody's regression -- but "pre-existing" is not
+  "fine", and what is actually broken is now known rather than guessed. Its
+  section 10 writes four panels, one per edge, and the panel agrees in its own
+  log: `honoured, 4 panel(s)` and `config reload applied: 4 panel(s)`. The
+  COMPOSITED SCREEN at that moment (the gate's own `maxc.raw`, scanned pixel
+  by pixel) holds only the two HORIZONTAL ones: rows 0..55 and the bottom 56
+  rows are panel grey `#eceef2`, the left and right edges are wallpaper
+  `#284470` for at least 64 px in, and there is **not one `#ff00ff` pixel in
+  the whole 1280x800 frame** -- the colour the gate gave the left panel
+  precisely so it could not be confused with anything else. So `edge left` and
+  `edge right` parse, count, and produce no pixels. The gate's assertion is
+  right and its message ("the maximal panel set did not come up") points at
+  the config, which is the one part that works.
+
+* **wsyswl STOPS THE MOMENT Xwayland CONNECTS, AND THAT IS WHY
+  `wsys_close_button` IS 2 PASS / 1 FAIL.** Also unchanged at `4b50eae2`.
+  Xwayland starts, creates `/tmp/.X11-unix/X88`, and connects as a Wayland
+  client -- `wsyswl: client connected` is the last line its log ever gets.
+  `publish_state()` is called unconditionally from the main loop every 32
+  ticks (about twice a second), and the state file's mtime FROZE at that
+  instant and did not move again in 26 s of watching, with `conns 0` and
+  `xwm_connected 0` still in it. So the loop stops making progress when the
+  first Wayland client arrives, and `xwm_connect()` -- which is retried from
+  that same loop -- never runs. **WHAT I DID NOT ESTABLISH**: whether the loop
+  HANGS or the process DIES. The gate runs in a private namespace where the
+  pid is not visible from outside, and the standalone reproduction I wrote was
+  invalid (wsyswl exits early with `FATAL: no screen geometry` unless wsysd
+  published one first, which the gate does and my repro did not). That is the
+  next hour's work, not this pass's.
+
 * **THE VULKAN/GPU COMPOSITOR PATH IS 13x SLOWER THAN THE SOFTWARE ONE, AND
   NO MACHINE HAS EVER RUN IT.** The image stages only the venus ICD, which
   enumerates nothing, so `vk_set_backend(VK_BACKEND_LINUX)` fails and every
