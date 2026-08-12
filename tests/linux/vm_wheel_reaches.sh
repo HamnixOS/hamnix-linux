@@ -65,9 +65,16 @@ echo '[vmwheel] the desktop is up'
 # all. Two reasons, both measured: hamsh's console line editor echoes about
 # one character per second here, and worse, it only ADVANCES when more input
 # arrives -- on an idle system a typed line stalls half-finished for ever.
-# `while 1 { }` is a parse error in hamsh; `for` over a fixed word list is
-# the loop that works, and 40 iterations at 5 s is longer than this run.
-spawn detached {
+#
+# TWO PIECES OF hamsh SYNTAX, both found by running the shell on the HOST
+# against a scratch script rather than by another eight-minute VM round trip:
+# `while 1 { }` is a parse error (the loop that works is `for VAR in WORDS`),
+# and `spawn detached { }` is one too -- `spawn` wants a NAMESPACE, which is
+# what `ns { }` describes and what every caller in /etc/rc.d/rc.5 passes.
+# 40 iterations at 5 s is longer than this run.
+stateloop = ns {
+}
+spawn detached stateloop {
     for i in a b c d e f g h i j k l m n o p q r s t u v w x y z 1 2 3 4 5 6 7 8 9 0 A B C D {
         echo -n 'VMWHEEL '
         cat /dev/wsys/wsysd/state
