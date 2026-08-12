@@ -4903,3 +4903,22 @@ bash scripts/test_pidh_no_tombstone.sh
 # 43 KB payload and was proven blind 7/7 by mutation. No QEMU, ~1 s.
 bash scripts/test_gate_pipefail_grepq.sh
 bash scripts/ci_run_gate.sh scripts/test_track_boot_armed.sh
+
+# --- a package hook cannot wedge the machine's update (added 2026-08-12) ----
+# hamnix-drivers-base 1.0.13 shipped an install hook containing `the machine's
+# table`. The apostrophe closed a single-quoted string, hamsh hit an
+# unterminated quote, and the runaway token swallowed the `\nexit\n` hpm
+# appends to every hook wrapper -- so the spawned shell reached its interactive
+# REPL on a stdin nobody was feeding and `hpm update` NEVER RETURNED, measured
+# on a real installed machine. The generator now refuses to publish such a
+# hook, but that is the publishing side only: the defect was in the PARENT,
+# which waited forever on a process it spawned. _run_hook now gives the hook
+# /dev/null for stdin (so a REPL reads EOF and exits even when the `exit` was
+# eaten) and bounds the wait at 60 s, killing and naming the package on expiry.
+# This gate reproduces THE ACTUAL HANG first, then installs three fixture
+# packages from a file:// repo in a user+mount+pid namespace: the runaway
+# quote, a hook that lexes fine and blocks forever in open(2) on a fifo, and an
+# ordinary hook. It feeds hpm an OPEN stdin from a held-open fifo, because with
+# an already-EOF stdin the gate passes against fully reverted code. Reverted:
+# 5 PASS / 5 FAIL. Host-only (no QEMU); ~85 s.
+bash tests/linux/hpm_hook_bounded.sh
