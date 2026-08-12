@@ -72,6 +72,17 @@ extern def sys_resolve(hostname: Ptr[uint8], hlen: uint64) -> int64
 # Hooks are spawned as `/bin/hamsh <hook-script>` — hamsh's argv[1] is
 # a script path (see user/hamsh.ad main()).
 extern def sys_waitpid(pid: int32) -> int64
+# A hook is waited for with a DEADLINE, never with the blocking
+# sys_waitpid above — see _run_hook. sys_waitpid_jc is the non-blocking
+# poll (returns > 0 with a (data << 8) | kind status word), sys_waitfds
+# with nfds == 0 is this tree's portable sleep (see user/sleep.ad), and
+# sys_get_jiffies is the 100 Hz monotonic tick the deadline is measured
+# in. All three exist in BOTH runtimes — user/runtime.S (Hamnix kernel)
+# and user/linux-syscalls.c (the Linux lane) — so the bound is the same
+# program on either kernel.
+extern def sys_waitpid_jc(pid: int32, status: Ptr[int64]) -> int64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_get_jiffies() -> uint64
 # docs/security.md: Plan-9-shape hostowner gate. `hpm install/remove/
 # update/pin/unpin` are privileged operations — they write to
 # /var/lib/hpm/, /bin/, /lib/, etc., all of which are hostowner-owned.
@@ -154,7 +165,7 @@ repo_base_buf: Array[1024, uint8]
 
 # -- tiny stdio helpers (mirrors apt.ad/dpkg_deb.ad) ------------------
 
-from lib.p9 import spawn
+from lib.p9 import spawn, p9_note
 # TODO net-item closure: surface backend-specific errstr ("ext4: ...",
 # "tmpfs: ...") on hpm's file-I/O failures instead of bare "cannot
 # open" lines that hid the cause.
@@ -5492,6 +5503,48 @@ hook_body_buf:    Array[16384, uint8]  # raw hook body for re-emit
 hook_env_strs:    Array[2048, uint8]   # backing for env strings
 hook_env_ptrs:    Array[8, uint64]     # NULL-terminated env array
 hook_argv_buf:    Array[3, uint64]
+# Bounded-wait scratch (see _run_hook). hook_wait_status receives
+# sys_waitpid_jc's (data << 8) | kind word; hook_park_fds is the empty
+# fd set sys_waitfds parks on (nfds == 0 is a plain sleep, and
+# sys_waitfds never dereferences the pointer at nfds == 0 — the same
+# idiom user/sleep.ad uses).
+hook_wait_status: Array[1, int64]
+hook_park_fds:    Array[1, int32]
+
+# sys_waitpid_jc status kinds, mirroring user/hamsh.ad:11586 and
+# user/linux-syscalls.c's WAITJC_*.
+HOOK_WAIT_EXITED: int64 = 1
+
+# THE BOUND ON A HOOK, AND WHERE THE NUMBER COMES FROM.
+#
+# 100 Hz jiffies, so 6000 == 60 seconds.
+#
+# Measured, not argued. The slowest hook this distribution actually
+# ships is a driver package's install.hamsh (scripts/hamlinux_packages.py
+# module_install_hook / base_module_install_hook): it gunzips every
+# module that had to ship compressed — i915.ko is the biggest at ~9.9 MiB
+# — and then appends one line per module to /etc/modules and one line per
+# dependency edge to modules.dep. On this host, with the tree's OWN gzip
+# and hamsh:
+#
+#     gzip -d of a 10 MiB module           0.088 s
+#     500 quoted appends through hamsh     0.033 s   (more append lines
+#                                                    than any shipped
+#                                                    hook has)
+#
+# So the worst hook in the channel costs ~0.12 s of real work. 60 s is
+# ~500x that, and ~10x a deliberately pessimistic "installed on slow
+# rotational media, weak CPU, cold cache" estimate of a few seconds. It
+# is a bound on a WEDGE, not a performance budget: nothing legitimate
+# should ever come near it, and a hook that does has stopped doing file
+# copies and appends and started doing something hpm has no business
+# waiting on.
+HOOK_TIMEOUT_CS: uint64 = 6000
+# How long to wait for the corpse after the kill note. A SIGKILLed
+# process cannot decline, so this only covers the scheduling delay;
+# past it we say so and move on rather than trading one unbounded wait
+# for another.
+HOOK_REAP_CS: uint64 = 200
 
 
 def _stage_tarball(tar_len: uint64) -> int32:
@@ -5768,15 +5821,149 @@ def _run_hook(staging_root: Ptr[uint8], hook_name: Ptr[uint8],
     hook_argv_buf[0] = cast[uint64](cast[Ptr[uint8]]("/bin/hamsh"))
     hook_argv_buf[1] = cast[uint64](&hook_wrap_path[0])
     hook_argv_buf[2] = 0
+
+    # THE HOOK'S STDIN IS /dev/null, AND THAT IS WHAT MAKES THE `exit`
+    # SAFETY NET ABOVE ACTUALLY SAFE.
+    #
+    # The wrapper appends "\nexit\n" so the spawned hamsh quits instead of
+    # falling into its REPL. That net has a hole: the appended bytes are
+    # part of the SAME script, so a hook whose body ends inside an
+    # unterminated single quote makes the runaway token swallow the `exit`
+    # along with everything else. hamsh then reports its lexical error,
+    # returns from the rc with rcrc != 2, and drops into the interactive
+    # read-eval loop — on a stdin it inherited from hpm, which nobody is
+    # feeding. `hpm update` then never returned. That was measured on a
+    # real installed machine: a generated hook containing `put in front of
+    # the machine's table` extracted its modules, never merged the
+    # dependency table, and wedged the machine mid-update with no timeout
+    # and no diagnostic.
+    #
+    # An install hook has no business reading standard input. With stdin
+    # at /dev/null, a hamsh that reaches its REPL reads EOF on the first
+    # poll and exits — so the net holds even when the `exit` was eaten,
+    # for a hook from ANY origin (a third-party channel, a hand-written
+    # package, the next generator bug of a different shape), not just the
+    # ones this tree's own generator can now refuse to publish.
+    #
+    # MEASURED, not assumed — the assumption is the whole bug one level
+    # down. Driving the built hamsh with the exact runaway-quote hook:
+    # stdin on an open-but-silent pipe reaches `[hamsh:stage-07]
+    # loop-enter` and never returns (killed at the harness timeout);
+    # the same hook with stdin at /dev/null reaches the same line and
+    # exits in under a second. sys_read_nb reports true end-of-input as
+    # -1 (user/linux-syscalls.c says so in as many words), which is
+    # exactly the `el == -1` EOF arm of hamsh's loop.
+    #
+    # spawn()'s `sin` in [0, 16) means "dup2 the parent's fd N onto the
+    # child's fd 0" (lib/p9.ad:_spawn_flags). RFFDG gave the child a
+    # private fd-table copy, so the parent may close its own descriptor
+    # immediately afterwards without racing the child's dup2.
+    hook_sin: int32 = 0
+    devnull: int32 = sys_open(cast[Ptr[char]]("/dev/null"))
+    if devnull >= 0 and devnull < 16:
+        hook_sin = devnull
+    else:
+        # Say so rather than silently running the hook on the inherited
+        # stdin: the timeout below still bounds it, but the `exit`-eaten
+        # case would now hang until that bound instead of exiting at once,
+        # and a person reading the log should know which of the two
+        # protections is doing the work.
+        write_str(2, "hpm: WARNING: cannot put /dev/null on the stdin of hook ")
+        write_str(2, hook_name)
+        write_str(2, " (")
+        if devnull < 0:
+            write_str(2, "/dev/null would not open")
+        else:
+            write_str(2, "descriptor out of spawn's dup2 range")
+        write_str(2, "); it runs on hpm's own stdin and is bounded only by the timeout\n")
+
     pid: int32 = spawn(cast[Ptr[char]]("/bin/hamsh"),
-                           &hook_argv_buf[0], 0, 1, envp)
+                           &hook_argv_buf[0], hook_sin, 1, envp)
+    if devnull >= 0:
+        sys_close(devnull)
     if pid < 0:
         write_str(2, "hpm: hook spawn failed\n")
         return -1
-    code: int64 = sys_waitpid(pid)
+
+    # THE WAIT IS BOUNDED. The defect that wedged the machine was in the
+    # PARENT: hpm waited forever on a process it spawned. /dev/null fixes
+    # the shell that reaches its REPL; it does nothing for a hook that
+    # loops, reads a socket, or parks on a device. A hook that hangs for
+    # ANY reason must fail BY NAME, with the package named, rather than
+    # take the machine's update with it.
+    #
+    # sys_waitpid_jc is non-blocking by contract; sys_waitfds(nfds == 0)
+    # is the sleep between polls, and it also releases the fd-namespace
+    # spawn gate the way the blocking sys_waitpid would have
+    # (user/linux-syscalls.c: fdns_gate_release).
+    start: uint64 = sys_get_jiffies()
+    code: int64 = 0
+    timed_out: int32 = 0
+    while True:
+        hook_wait_status[0] = 0
+        wr: int64 = sys_waitpid_jc(pid, &hook_wait_status[0])
+        if wr < 0:
+            write_str(2, "hpm: cannot wait for hook ")
+            write_str(2, hook_name)
+            write_str(2, " of package ")
+            write_str(2, pkg_name)
+            write_str(2, " (pid ")
+            write_dec_u64(2, cast[uint64](pid))
+            write_str(2, " unwaitable); the hook's effect is UNKNOWN\n")
+            return -1
+        if wr > 0 and (hook_wait_status[0] & 255) == HOOK_WAIT_EXITED:
+            # Exited or was signalled; the low byte says EXITED for both
+            # and the data byte carries 128+signo in the signalled case.
+            code = hook_wait_status[0] >> 8
+            break
+        # Elapsed-delta, not an absolute deadline, so the comparison is
+        # robust to the tick wrapping (same reason user/sleep.ad does it).
+        if sys_get_jiffies() - start >= HOOK_TIMEOUT_CS:
+            timed_out = 1
+            break
+        sys_waitfds(&hook_park_fds[0], 0, 25)
+
+    if timed_out != 0:
+        write_str(2, "hpm: hook ")
+        write_str(2, hook_name)
+        write_str(2, " of package ")
+        write_str(2, pkg_name)
+        write_str(2, " ran longer than ")
+        write_dec_u64(2, HOOK_TIMEOUT_CS / 100)
+        write_str(2, " seconds and was KILLED (pid ")
+        write_dec_u64(2, cast[uint64](pid))
+        write_str(2, ").\n")
+        write_str(2, "hpm: ")
+        write_str(2, pkg_name)
+        write_str(2, " is NOT correctly installed: its files were unpacked but its hook did not finish.\n")
+        p9_note(pid, cast[Ptr[uint8]]("kill"))
+        rstart: uint64 = sys_get_jiffies()
+        reaped: int32 = 0
+        while sys_get_jiffies() - rstart < HOOK_REAP_CS:
+            hook_wait_status[0] = 0
+            wr2: int64 = sys_waitpid_jc(pid, &hook_wait_status[0])
+            if wr2 < 0:
+                reaped = 1                       # already gone
+                break
+            if wr2 > 0 and (hook_wait_status[0] & 255) == HOOK_WAIT_EXITED:
+                reaped = 1
+                break
+            sys_waitfds(&hook_park_fds[0], 0, 25)
+        if reaped == 0:
+            # One unbounded wait is what we are here to remove; do not
+            # introduce a second one to tidy up after it.
+            write_str(2, "hpm: hook process ")
+            write_dec_u64(2, cast[uint64](pid))
+            write_str(2, " did not die within ")
+            write_dec_u64(2, HOOK_REAP_CS / 100)
+            write_str(2, "s of the kill note; leaving it unreaped rather than blocking this update forever\n")
+        return -1
+
     if code != 0:
         write_str(2, "hpm: hook ")
         write_str(2, hook_name)
+        write_str(2, " of package ")
+        write_str(2, pkg_name)
         write_str(2, " exited non-zero (")
         write_dec_u64(2, cast[uint64](code))
         write_str(2, ")\n")
