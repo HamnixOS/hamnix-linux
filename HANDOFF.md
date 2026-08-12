@@ -380,12 +380,11 @@ same failure this project exists to beat.
   `etc/panel.conf`'s CONTENT is unchanged, so the channel's byte-compare of
   shared `/etc` files is unaffected and no new binary ships.
 
-* **THE SAME DEFECT, IN FOUR MORE SHIPPED `/etc` FILES.** Swept while fixing
-  the above. Items 1 and 2 — the two where the shipped file *already* did not
-  fit, and the two with a security consequence — **are now FIXED** (see the
-  next entry). Items 3-5 are **still NOT fixed**, recorded here so the next
-  person does not have to find them again. Each is a file this tree ships,
-  documents, and reads through a fixed buffer:
+* ~~**THE SAME DEFECT, IN FOUR MORE SHIPPED `/etc` FILES.**~~ **ALL FIVE ARE
+  NOW FIXED.** Items 1-2 were done with the panel; items 3-5 are done now —
+  see *THE BOOT RC, THE SERVICE FILE AND THE DISTRIBUTION TABLE* below for
+  what each one cost and what proves it. The list is kept in full because the
+  measurements are the record of what the class looked like:
 
   1. ~~**`/etc/hpm/trusted.pub` — 718 bytes, read through 512.**~~ **FIXED.**
      Reader: `user/hpm.ad` `_set_trusted_key_path()`, which read through
@@ -397,7 +396,8 @@ same failure this project exists to beat.
      documented mechanism was impossible.**
   2. ~~**`/etc/hpm/local-trusted.pub` — 1054 bytes, same 512-byte reader**~~,
      key token at byte 989. **FIXED with it.** Same failure, twice the margin.
-  3. **`/etc/rc.boot` — 15918 bytes into a 16384-byte ceiling (97.2% full).**
+  3. ~~**`/etc/rc.boot` — 15918 bytes into a 16384-byte ceiling (97.2% full).**~~
+     **FIXED.**
      `user/hamsh.ad` `_run_rc_path()` (`:17872`, read loop `:17886`,
      `rc_buf` 16384): on overflow the loop **just breaks, with no diagnostic
      of any kind**. 467 more bytes — one added comment paragraph — cuts the
@@ -406,20 +406,20 @@ same failure this project exists to beat.
      cpio fallback looking fine. Same ceiling, same silence:
      `etc/rc.de-user.linux` 13267 B (81%), `etc/install.hamsh` 12850 B (78%),
      `etc/rc.boot.full` 12255 B (75%, via `builtin_source`'s `src_buf`).
-  4. **`/etc/services.d/hamde.svc` — 3186 bytes into 4096 (78%).**
+  4. ~~**`/etc/services.d/hamde.svc` — 3186 bytes into 4096 (78%).**~~
+     **FIXED — and the write-back really did destroy the file; it was
+     reproduced before it was fixed.**
      `user/hamsh.ad:14914` `_svc_read_def_file()`, `svc_def_buf`
      (`SVC_DEF_BUF_MAX` 4096) — and `_svc_persist_enabled` (`:14232`)
      **re-writes the file from that same buffer**, so an `enable`/`disable`
      on an over-4K def would destroy the tail of the file on disk.
-  5. **`/etc/distros` (from `etc/distros.linux`, 1426 B) — a SINGLE unlooped
-     `sys_read(fd, &_dm_buf[0], 2047)`** at `user/hampanelscene.ad:2144`
-     `_load_distros()`. Only 621 bytes of headroom, and with no accumulate
-     loop a short read truncates at any size. The rows are at the END of the
-     file behind ~1300 bytes of header, so a truncation drops the
-     distributions out of the Applications menu — silently. Deliberately left
-     alone here so this change stayed one defect wide; it is in the file the
-     fix above already touches, and `_cfg_chunk`/`_cfg_parse_line` are right
-     there to reuse.
+  5. ~~**`/etc/distros` (from `etc/distros.linux`, 1426 B) — a SINGLE unlooped
+     `sys_read(fd, &_dm_buf[0], 2047)`**~~ **FIXED.** At
+     `user/hampanelscene.ad` `_load_distros()`. Only 621 bytes of headroom,
+     and with no accumulate loop a short read truncates at any size. The rows
+     are at the END of the file behind **1336 bytes** of header (measured by
+     the gate), so a truncation drops the distributions out of the
+     Applications menu — silently.
 
   Cleared in the same sweep (no finding): `etc/passwd`/`shadow`/`group`
   (readers all ≥4096 or line-based), `etc/man/*.md` and `etc/motd` (already
@@ -428,6 +428,122 @@ same failure this project exists to beat.
   documented but have **no reader anywhere in the tree** (`etc/services`,
   `etc/protocols`, `etc/hosts`, `etc/fstab`, `etc/inittab`, `etc/os-release`,
   … — and `etc/desktop.icons`, whose own header already admits it).
+
+* ~~**THE BOOT RC, THE SERVICE FILE AND THE DISTRIBUTION TABLE.**~~ **FIXED —
+  all three, and one of them was not a read bug at all.**
+
+  Items 3-5 of the sweep above, in the order they matter.
+
+  **`/etc/rc.boot` is PID 1's script and it was at 97.2% of its buffer, with a
+  bare `break` for an overflow path.** 467 bytes — one added comment
+  paragraph — would have cut the file's last line, which is `source
+  /etc/rc.boot.full` (line 303 of 304), and the machine would have booted on
+  the cpio fallback, reached a console, and looked entirely fine having run
+  half its boot recipe. The same shell had two more of the identical shape:
+  `builtin_source`'s `src_buf` (16 KiB; `/etc/rc.boot.full` 12255 B, 75%) and
+  `_svc_read_def_file`'s `svc_def_buf` (4 KiB).
+
+  **The size was not raised. It was removed.** `_script_load` reads a script
+  into a 16 KiB static stage and, if it does not fit, replays it into an
+  anonymous mapping that DOUBLES until the whole file is in hand. A 15 KiB rc
+  costs exactly what it cost before and calls no `mmap` at all — which matters
+  because this is PID 1 before anything else exists — and a 300 KiB rc runs.
+  There are three stages, one per nesting role (boot rc / `source` / `.svc`),
+  because sourcing nests: `rc.boot` is live in stage 0 when it sources
+  `rc.boot.full` into stage 1. A fourth level of nesting takes the mapped path
+  instead of corrupting a shared buffer, which the two 16 KiB buffers it
+  replaces could do to each other.
+
+  **What replaces the ceiling is a LOUD REFUSAL, not a bigger ceiling.** The
+  loader returns NOTHING — never a prefix — names the file and the byte count,
+  and every caller declines to run:
+
+      hamsh: /etc/rc.boot: CANNOT BE READ WHOLE -- 1048576 byte(s) read and no
+          memory for the rest.
+      hamsh: /etc/rc.boot: NOT RUN -- none of it took effect. Half a script is
+          not a script: the cut lands mid-statement, so running the part that
+          fitted would be a different program than the file you wrote.
+
+  `_run_rc_path` gains return code 4 for it and `main()` answers 4 exactly as
+  it answers 3 (did-not-lex): PID 1 says THE BOOT RC DID NOT RUN and lands in
+  the RESCUE SHELL rather than panicking; anyone else exits non-zero.
+
+  **THE ONE BOUND LEFT is named rather than hidden: `TOK_MAX`, 4096 tokens for
+  one lex input, and a line costs one.** It is kept precisely because it is
+  LOUD — overrunning it is a lexical error, so nothing runs, the file is
+  named, and PID 1 says RESCUE SHELL. `etc/rc.boot` is ~900 tokens. The gate
+  asserts that loudness rather than leaving it to be rediscovered.
+
+  **`/etc/services.d/*.svc` WAS NOT A READ BUG. `svc enable` DELETED THE
+  FILE.** Verified before it was fixed, because "reads it wrong" and "eats it"
+  are different bugs. `_svc_persist_enabled` read through the 4 KiB buffer and
+  then `sys_open_write`'d THE SAME PATH — which truncates — and re-emitted the
+  file out of that buffer. On a 5088-byte definition, with the pre-fix binary:
+
+      size before=5088 after=4098   (lost 990 bytes)
+      tail marker still present: 0
+      uid: line still present:   0
+      last line: `# doc line 0040 yyyyyyyyyyyyyyyyyyyyyyyyybenabled: yes`
+
+  990 bytes deleted, a real `uid: 1234` directive gone, and — because the cut
+  landed mid-line — the fresh flag welded onto the tail of a COMMENT, where
+  the parser (which ends a line at the first `#`) cannot see it. **It ate the
+  file AND failed to persist the enable it ate the file for.** Exit status 0,
+  nothing printed. The shipped `hamde.svc` is 3186 bytes: eleven documented
+  lines from an `enable` that eats its own tail. Now: the whole file or
+  nothing; if it cannot be held whole the rewrite is REFUSED out loud (a
+  truncating write is far worse than an unpersisted flag); the `enabled:` line
+  is replaced IN PLACE rather than dropped and re-appended; and a file whose
+  last line has no newline no longer makes the writer read one byte past the
+  buffer. There is no `rename(2)` in either runtime, so the truncate-then-
+  write window is not atomic and the source says so rather than implying it
+  away.
+
+  **`/etc/distros` was two defects in one line** — the 2047-byte ceiling AND
+  a single unlooped `read(2)`, which truncates at any size because a short
+  read is legal from a pipe, a fifo, a slow device or a 9P mount. Streamed
+  now, a row at a time, through `_cfg_chunk`; the panel always says what it
+  read (`[panel] /etc/distros: 1426 byte(s), 29 line(s), 0 attached
+  distribution(s)`), and a row past the 512-byte line bound is reported and
+  NOT parsed — half a name is a different distribution.
+
+  **GATES.** `tests/linux/scripts_read_whole.sh` — **23 PASS**, ~9 min, two VM
+  boots. A LADDER (20 KB, 64 KB, 256 KB, 1 MiB, 4 MiB, each with a marker on
+  both sides of the padding) so no raised constant can satisfy it; the
+  `ulimit -v` arm that takes the memory away and requires the refusal by name,
+  a non-zero exit, and **not even the first line having run**; the `svc
+  enable` fixture; and **A REAL BOOT** whose `/etc/rc.boot` is the tree's own
+  `etc/rc.boot.linux` with 200 KB of padding before its last statement —
+  **209,540 bytes through PID 1's reader** — asserting that the far side of
+  the padding RAN and that the graphical runlevel past it started. With
+  `user/hamsh.ad` reverted to `7ff7cd21` and rebuilt: **6 PASS / 17 FAIL**,
+  and section 4 fails in exactly the shape the fix exists for —
+
+      ok   (4.1) the machine booted and the FIRST half of its rc ran
+      FAIL (4.2) THE TAIL OF /etc/rc.boot NEVER RAN. The machine booted
+                 anyway, which is the whole danger
+      FAIL (4.3) the rc's last statement (the graphical runlevel) left no trace
+      ok   (4.6) no kernel panic
+      ok   (4.7) and the console still answers a typed command
+
+  — a booted machine, a live console, no panic, no diagnostic, half a boot.
+
+  `tests/linux/de_distros_table.sh` — **10 PASS**, ~1 min, no compositor and
+  no VM: it drives the menu-model build through `hampanelscene --scene-dump`
+  in a private mount namespace **whose `/etc` is its own** (the host's is
+  bind-mounted aside and symlinked back, so only `/etc/distros` is the
+  fixture). The shipped file verbatim; the same file behind a 65 KB and then a
+  300 KB header (a 2047 → 8192 fix passes the first assertion and fails
+  these); **the table delivered through a FIFO by one writer that pauses
+  mid-file**, so the first `read(2)` really does return only the header — the
+  half no buffer size fixes; a 900-character row; and no file at all. With
+  `user/hampanelscene.ad` reverted: **5 PASS / 5 FAIL**, the 66,946- and
+  308,626-byte tables parsing **0 rows** and the fifo one parsing 0.
+
+  `de_panel_conf_shipped.sh` is still **15 PASS** (the distribution parse now
+  shares `_cfg_chunk` with the config parse; the two never run inside one
+  another), and `gates_are_private.sh` is 3 PASS with the new gate counted
+  among the isolated.
 
 * ~~**THE TRUST ROOT COULD NOT BE ROTATED.**~~ **FIXED — `--trusted-key` now
   streams, and every refusal names the file.**
