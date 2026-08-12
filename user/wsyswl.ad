@@ -1855,7 +1855,24 @@ xerr_code:  int32 = 0
 
 xreq:   Array[1024, uint8]
 xin:    Array[64, uint8]
-xrep:   Array[4096, uint8]
+# THE X SETUP REPLY DOES NOT FIT IN 4096 BYTES ON A MODERN XWAYLAND, AND WHAT
+# DID NOT FIT WAS LEFT IN THE SOCKET.
+#
+# Measured on this host, Xwayland 24.1.6: the connection setup reply's
+# additional data is **8268 bytes**. xwm_connect read `body` capped at 4096 and
+# never drained the remaining 4172, so every read after it was offset into
+# leftover setup bytes and the X stream was desynchronised for ever. The
+# symptom was a read that asked for a 32-byte message, got 12, and waited --
+# and the compositor then declared "this X server is not an Xwayland" against a
+# real Xwayland that was answering xdpyinfo at that very moment.
+#
+# The buffer is 16 KiB now so a whole setup fits with room, and BOTH readers
+# drain whatever is past it rather than leaving it on the wire (x_poll_msg
+# always did; xwm_connect did not). The cap and the drain are separate things
+# and each is needed: the cap protects this array, the drain protects the
+# stream.
+XREP_CAP: uint64 = 16384
+xrep:   Array[16384, uint8]
 xrep_n: uint64 = 0
 xsink:  Array[1024, uint8]
 xdefer_buf: Array[2048, uint8]         # 64 events * 32 bytes
@@ -2011,8 +2028,8 @@ def x_poll_msg(timeout_ms: int64) -> int32:
         return 1
     extra: uint64 = cast[uint64](ru32(&xin[0], 4)) * 4
     take: uint64 = extra
-    if take > 4096:
-        take = 4096
+    if take > XREP_CAP:
+        take = XREP_CAP
     if take > 0:
         if x_read_exact(&xrep[0], take) == 0:
             xdead = 1
@@ -3098,19 +3115,36 @@ def xwm_connect() -> int32:
         puts(2, "wsyswl: the X server REFUSED this compositor's window-manager connection\n")
         x_drop_conn()
         return 0
+    # THE WHOLE REPLY COMES OFF THE WIRE, whatever is kept. Reading only what
+    # fits and leaving the rest desynchronises every message after it -- see
+    # the note above xrep. 8268 bytes is what Xwayland 24.1.6 sends here.
     body: uint64 = cast[uint64](xget16(&xin[0], 6)) * 4
-    if body > 4096:
-        body = 4096
-    if x_read_exact(&xrep[0], body) == 0:
+    take: uint64 = body
+    if take > XREP_CAP:
+        take = XREP_CAP
+    if x_read_exact(&xrep[0], take) == 0:
         x_drop_conn()
         return 0
+    left: uint64 = body - take
+    while left > 0:
+        chunk: uint64 = left
+        if chunk > 1024:
+            chunk = 1024
+        if x_read_exact(&xsink[0], chunk) == 0:
+            x_drop_conn()
+            return 0
+        left = left - chunk
     x_resbase = ru32(&xrep[0], 4)
     x_maxreq  = xget16(&xrep[0], 18)
     vlen: uint64 = cast[uint64](xget16(&xrep[0], 16))
     nfmt: uint64 = cast[uint64](xrep[21])
     nscr: uint64 = cast[uint64](xrep[20])
     off: uint64 = 32 + (vlen + 3) / 4 * 4 + nfmt * 8
-    if nscr == 0 or off + 4 > body:
+    # BOUNDED BY WHAT IS IN THE BUFFER (`take`), not by what the server sent
+    # (`body`): the two differ the moment a setup reply is larger than
+    # XREP_CAP, and reading past `take` would be reading whatever the previous
+    # reply left in the array.
+    if nscr == 0 or off + 4 > take:
         puts(2, "wsyswl: the X setup reply has no screen -- cannot manage windows\n")
         x_drop_conn()
         return 0
