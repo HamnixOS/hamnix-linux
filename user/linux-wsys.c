@@ -70,6 +70,7 @@
 #include <string.h>
 #include <poll.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -2205,13 +2206,96 @@ static uint64_t ring_read(struct wring *q, uint8_t *b, uint64_t cap)
  *     not a password; if that judgement ever stops holding, the mechanism here
  *     is one call per ring away.
  *   * ENUMERATION is unchanged and unfixable while the taskbar reads the table.
- *   * ptrace.  A same-uid attacker that can PTRACE_ATTACH reads the victim's
- *     memory directly and no userland mechanism can prevent it -- measured on
- *     the dev host, where /proc/sys/kernel/yama/ptrace_scope is 0.  This is a
- *     DISTRIBUTION-level setting, it is not set anywhere in this tree, and it
- *     is worth one line in linuxinit; it is named in HANDOFF.md rather than
- *     changed here, because a boot-policy change is not this pass.
+ *
+ * AND THE ONE THAT WENT FROM "NOT THIS PASS" TO SET: ptrace.  A same-uid
+ * attacker that can PTRACE_ATTACH reads the victim's memory directly, and
+ * everything above it -- the socket, the credential stamp, the refusal on
+ * another window's /keys -- is worth nothing against it.  It is closed from two
+ * sides now, and neither side is sufficient alone:
+ *
+ *   THE BOOT POLICY.  user/linuxinit.ad sets kernel.yama.ptrace_scope=1 as PID
+ *   1, the instant /proc exists, and READS IT BACK -- so a kernel with no Yama
+ *   says so on the console instead of leaving the desktop to claim a boundary
+ *   nothing enforces.  That is Debian's and Ubuntu's default setting: a
+ *   non-ancestor same-uid attach is refused, and a debugger still debugs
+ *   anything it launched itself.  tests/linux/ptrace_scope_boot.sh measures it
+ *   in a real boot, with the same probe run on the dev host (scope 0, attach
+ *   SUCCEEDS) as the matching positive control.
+ *
+ *   THE PROCESS PROPERTY, below: owner_harden(), prctl(PR_SET_DUMPABLE, 0) in
+ *   every window owner.  Yama is a boot setting a person can turn off, an
+ *   `lsm=` line can omit and another distribution's kernel may not carry;
+ *   PR_SET_DUMPABLE is enforced by core kernel code that is always there.  It
+ *   also does something Yama does not: it makes /proc/<pid>/mem, /proc/<pid>/fd
+ *   and /proc/<pid>/maps unreadable to a same-uid process, which is a path to
+ *   the victim's memory that needs no ptrace call at all.
  * ------------------------------------------------------------------ */
+
+/* HARDEN THIS PROCESS AGAINST BEING READ BY ANOTHER OF THE SAME UID.
+ *
+ * WHY IT IS HERE AND NOT IN EVERY PROGRAM'S main().  A window owner is not a
+ * list of binaries -- hamUI clients, the terminal, the browser bridge, a gate's
+ * one-file probe and anything a person compiles tomorrow all become one by
+ * claiming a window.  keychan_bind() is the single place a process becomes the
+ * recipient of a window's keystrokes, on both paths (`newwindow` in ctl_global,
+ * and the lazy bind when an owner first opens its own /keys), so it is the one
+ * place that cannot be forgotten by a new program.
+ *
+ * WHAT IT BUYS, measured in tests/linux/wsys_keychan.sh against an ordinary
+ * process and in tests/linux/wsys_bypass.sh against a real window owner:
+ *   open("/proc/<victim>/mem")   -1 EACCES   (was: an fd, and the memory)
+ *   opendir("/proc/<victim>/fd") -1 EACCES   (was: a listing)
+ *   ptrace(PTRACE_ATTACH)        -1 EPERM    (was: attached)
+ * The first of those is the one worth the most: reading another same-uid
+ * process's /proc/<pid>/mem needs no attach and stops nothing, so it is a
+ * keylogger that neither Yama's scope 1 nor SIGSTOP-noise would reveal.
+ *
+ * WHAT IT COSTS, because this is a decision and not a detail:
+ *   * NO CORE DUMPS from any window owner.  A crashing DE client leaves a
+ *     kernel log line and no core.  That is a real loss of post-mortem
+ *     debugging on a distribution meant to be used.
+ *   * NO SAME-UID ATTACH to a DE client, so `gdb -p`, `strace -p` and `perf
+ *     top -p` against an already-running window stop working.  Launching the
+ *     program UNDER the debugger still works (the debugger is then the parent,
+ *     and PR_SET_DUMPABLE does not gate a tracer that is already attached).
+ *   * /proc/<pid>/{mem,maps,fd,environ,io} of a window owner become
+ *     unreadable to the user who owns it.  /proc/<pid>/stat and
+ *     /proc/<pid>/cmdline are NOT ptrace-gated, so `ps`, the panel's process
+ *     list and this file's own owns_wid() parent-pid walk are unaffected --
+ *     that was checked before this landed rather than after.
+ *
+ * THE ESCAPE HATCH IS NAMED AND LOUD.  HAMWSYS_DUMPABLE=1 in the environment
+ * skips it, for the session where somebody genuinely has to attach to a live
+ * client -- and says on stderr that it did, because a security property turned
+ * off silently by an environment variable is the same shape as one that was
+ * never there.  It cannot help an attacker: the variable is read from the
+ * VICTIM's own environment, which an attacker who could set it would already
+ * have won.
+ *
+ * IT IS NOT UNDONE ON keychan_unbind.  A process that has held a window has
+ * had the window's keystrokes in its address space, and closing the window does
+ * not take them back out of the pages it already touched. */
+static void owner_harden(void)
+{
+    static int done;
+    if (done) return;
+    done = 1;
+
+    const char *e = getenv("HAMWSYS_DUMPABLE");
+    if (e && e[0] == '1' && e[1] == '\0') {
+        fprintf(stderr,
+                "wsys: HAMWSYS_DUMPABLE=1: this window owner stays dumpable, so "
+                "another process of the same uid can read its memory through "
+                "/proc/%d/mem and ptrace it.\n", (int)getpid());
+        return;
+    }
+    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) < 0)
+        fprintf(stderr,
+                "wsys: prctl(PR_SET_DUMPABLE, 0) failed (%s): this window "
+                "owner's memory is readable by any process of the same uid.\n",
+                strerror(errno));
+}
+
 #define KEYCHAN_MAX  WSYS_MAX_WINDOWS
 
 static struct { int32_t wid; int fd; } keychan[KEYCHAN_MAX];
@@ -2275,6 +2359,10 @@ static int keychan_bind(int32_t wid)
     keychan[keychan_n].wid = wid;
     keychan[keychan_n].fd  = s;
     keychan_n++;
+    /* This process is now the recipient of a window's keystrokes.  AFTER the
+     * bind, not before: a process that failed to claim the channel is not a
+     * window owner and has no reason to give up its core dumps. */
+    owner_harden();
     return 0;
 }
 

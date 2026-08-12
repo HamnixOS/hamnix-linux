@@ -30,6 +30,15 @@
 # unprivileged and BLIND is what the 0666 mode on the window table exists to
 # prevent, and the split must not have reintroduced it by the back door.
 #
+# FIVE ATTACKS NOW, and the fifth was found by asking what an attacker does
+# AFTER attack 4 is closed.  The keystrokes left the mapping, so nothing can be
+# read out of the table any more -- but the victim still holds them in its own
+# address space, and /proc/<pid>/mem is readable by any process of the same uid
+# whose target is dumpable, with no ptrace call and nothing to notice.  The
+# table hands over `pid=` (it must: the taskbar reads that row), so the chain is
+# two steps long.  It is closed by prctl(PR_SET_DUMPABLE, 0) in every window
+# owner, and by kernel.yama.ptrace_scope=1 at boot for the ptrace half.
+#
 # FOUR ATTACKS, NOT THREE, and the fourth is the one that decides the fix.
 # Attacks 1-3 (retitle, scribble, inject) are INTEGRITY: each needs PROT_WRITE,
 # and the 0644 chrome segment shows exactly what the kernel does to them when it
@@ -269,6 +278,22 @@ if [ "${1:-}" = "--inner" ]; then
     chmod 666 "$DRAIN"
     sleep 1
     sed 's/^/== victim./' "$W/live.client.out"
+
+    # 3c. ATTACK 5 OF 5 -- PEEK, and it is the one that walks THROUGH attack 4's
+    #     fix.  The keystrokes left the mapping, so the snooper above finds
+    #     nothing; but the VICTIM still has them in its own address space, and on
+    #     Linux one process reads another of the SAME UID out of /proc/<pid>/mem
+    #     with no ptrace call, no stop and no trace.  The chain starts exactly
+    #     where attack 4 ended: the world-readable table hands over `pid=`.
+    #
+    #     IT RUNS LAST, AFTER THE VICTIM HAS BEEN READ.  Two reasons, and the
+    #     second is the destructive-witness rule this file has been bitten by
+    #     twice.  (1) The password is only IN the victim's memory once the victim
+    #     has drained it -- before the drain it is sitting in a kernel socket
+    #     buffer and a memory scrape would truthfully find nothing, which would
+    #     pass on the reverted run for the wrong reason.  (2) The PTRACE_ATTACH
+    #     it ends with STOPS the victim, so nothing may observe it afterwards.
+    as 1001 "$BYP" peek "$HAMWSYS" "wid=${LWID:-0}" 'PASSWORD31337' sameuid.peek
     kill "$LHOLDER" 2>/dev/null
 
     # 4. THE ONE DELIBERATE BEHAVIOUR CHANGE the split carries, measured.
@@ -455,6 +480,36 @@ if grep -q "^== victim.keysgot .*PASSWORD31337" "$OUT"; then
     ok "and the victim DOES receive what was typed at it -- delivery still works"
 else bad "the victim never got the keystroke: closing the leak by breaking the"\
         "keyboard is not closing it: $(grep -c '^== victim.keysgot' "$OUT") drains seen"; fi
+
+note ""
+note "attack 5 of 5 -- PEEK: the owner's PID out of the table, then its MEMORY."
+note "(this attack is NEW, and it is the one that walked through attack 4's fix:"
+note " the keystrokes are not in the mapping any more, but the VICTIM still has"
+note " them, and /proc/<pid>/mem is readable by any same-uid process whose target"
+note " is DUMPABLE -- no ptrace call, no stop, nothing to notice.  What refuses it"
+note " is prctl(PR_SET_DUMPABLE, 0) in every window owner, in keychan_bind.)"
+if has sameuid.peek "found=1"; then
+    ok "the attacker still reads the victim's pid straight out of the 0666 table"
+else bad "the peek never found the victim's row, so the chain proves nothing:"\
+        "$(line sameuid.peek)"; fi
+# THE FOUR THAT ARE THE POINT.  With user/linux-wsys.c reverted every one of
+# them goes the other way -- mem= an fd, secret=1, enumerable=1, ptrace=0 --
+# which is what makes this a measurement and not a description.
+if has sameuid.peek "mem=-13"; then
+    ok "and is refused the victim's memory: /proc/<pid>/mem EACCES (was: an fd)"
+else bad "CONTROL FAILED: a same-uid attacker opened the window owner's"\
+        "/proc/<pid>/mem: $(line sameuid.peek)"; fi
+if has sameuid.peek "secret=0"; then
+    ok "so the typed password is NOT scraped out of the owner's address space"
+else bad "CONTROL FAILED: the victim's password was read out of its memory --"\
+        "the keystroke channel is bypassed: $(line sameuid.peek)"; fi
+if has sameuid.peek "enumerable=0"; then
+    ok "and /proc/<pid>/fd is not listable, so its descriptors are not inventory"
+else bad "CONTROL FAILED: the owner's fd table was enumerable: $(line sameuid.peek)"; fi
+if has sameuid.peek "ptrace=-1"; then
+    ok "and PTRACE_ATTACH is refused (here by PR_SET_DUMPABLE; on a real boot by kernel.yama.ptrace_scope=1 as well -- tests/linux/ptrace_scope_boot.sh)"
+else bad "CONTROL FAILED: a same-uid attacker attached to the window owner:"\
+        "$(line sameuid.peek)"; fi
 
 note ""
 note "THE HOLE, CLOSED on the chrome segment -- by the kernel, not by an if:"

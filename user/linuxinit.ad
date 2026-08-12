@@ -34,6 +34,7 @@ extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_init_module(path: Ptr[char], params: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
 
 RFPROC: int32 = 1
 
@@ -43,6 +44,7 @@ init_envp: Array[8, uint64]
 errbuf:    Array[128, uint8]
 modlist:   Array[8192, uint8]
 modpath:   Array[512, uint8]
+ptbuf:     Array[64, uint8]
 
 
 def write_cstr(fd: int32, s: Ptr[uint8]):
@@ -161,6 +163,102 @@ def cmdline_has_root() -> int32:
     return 0
 
 
+def ptrace_is_unrestricted():
+    # Said once, in one place, so every way of failing to set the knob reports
+    # the same consequence in the same words.
+    write_cstr(2, "linuxinit: WARNING: ANY process may PTRACE_ATTACH another of the SAME UID and read its memory directly.\n")
+    write_cstr(2, "linuxinit: WARNING: on this boot the window system's keystroke channel is bypassable that way -- see THE KEYSTROKE CHANNEL in user/linux-wsys.c.\n")
+
+
+def set_ptrace_scope():
+    # THE ONE THING NO USERLAND MECHANISM CAN DO FOR ITSELF.
+    #
+    # user/linux-wsys.c moved a window's keystrokes out of the shared segment
+    # and into a per-window abstract socket, so a same-uid process can no longer
+    # read what is typed into another window by mapping a file. None of that
+    # survives ptrace: a process that can PTRACE_ATTACH another of the SAME UID
+    # reads its memory directly, keystrokes and pixels and all, and there is no
+    # arrangement of file modes, sockets or descriptors underneath it that can
+    # prevent it. /etc/rc.de-user drops the terminal, the browser and a
+    # malicious download to uid 1001 TOGETHER, which is exactly that case.
+    #
+    # Linux's answer is the Yama LSM. ptrace_scope 1 -- Debian's and Ubuntu's
+    # default, and therefore not a novel policy -- says a process may only be
+    # attached by one of its own ANCESTORS. A debugger still debugs anything it
+    # launches itself (`gdb ./prog`, `strace prog`), which is how debugging is
+    # done nine times in ten; what stops working is attaching to a process
+    # somebody else started, and PR_SET_PTRACER exists for the tenth.
+    #
+    # IT IS SET HERE, IN PID 1, and not in an rc script, for one reason: it must
+    # be true BEFORE the first process a person did not start comes up. This
+    # runs immediately after `bind '#p' /proc`, which is the earliest instant
+    # /proc/sys exists at all.
+    #
+    # AND IT IS READ BACK. A sysctl write that is accepted and does not take is
+    # precisely the success-shaped answer NORTH_STAR.md forbids -- and this one
+    # has TWO ways to be silently absent, a kernel built without Yama and a
+    # kernel booted with `lsm=` omitting it. Both leave the path absent, so the
+    # open fails; a kernel that accepts the write and ignores it would leave the
+    # read-back wrong. Every one of those cases says so, by name, on stderr, and
+    # says what it costs. A boot with no Yama is still a boot -- the desktop
+    # works -- so this warns rather than refusing to come up; what it must never
+    # do is stay quiet and let the window system claim a confidentiality
+    # boundary the kernel is not enforcing.
+    # ABSENT AND UNWRITABLE ARE DIFFERENT FAULTS and are reported as different
+    # faults. The first draft of this said "no Yama LSM on this kernel" for
+    # both, and the very first run of it -- as an ordinary user on a host that
+    # HAS Yama -- printed that sentence about a kernel where the file was
+    # sitting right there and only the write was refused. A diagnostic that
+    # names the wrong cause is the same failure as one that says nothing.
+    probe: int32 = sys_open(
+        cast[Ptr[char]]("/proc/sys/kernel/yama/ptrace_scope"))
+    if probe < 0:
+        write_cstr(2, "linuxinit: WARNING: /proc/sys/kernel/yama/ptrace_scope does not exist: ")
+        pn: int32 = sys_errstr(&errbuf[0], 128)
+        if pn > 0:
+            write_cstr(2, &errbuf[0])
+        write_cstr(2, "\n")
+        write_cstr(2, "linuxinit: WARNING: this kernel has no Yama LSM (not built in, or not in the boot `lsm=` list).\n")
+        ptrace_is_unrestricted()
+        return
+    sys_close(probe)
+
+    fd: int32 = sys_open_write(
+        cast[Ptr[char]]("/proc/sys/kernel/yama/ptrace_scope"))
+    if fd < 0:
+        write_cstr(2, "linuxinit: WARNING: Yama is present, but kernel.yama.ptrace_scope could not be opened for writing: ")
+        n: int32 = sys_errstr(&errbuf[0], 128)
+        if n > 0:
+            write_cstr(2, &errbuf[0])
+        write_cstr(2, "\n")
+        ptrace_is_unrestricted()
+        return
+    sys_write(fd, "1\n", 2)
+    sys_close(fd)
+
+    rfd: int32 = sys_open(cast[Ptr[char]]("/proc/sys/kernel/yama/ptrace_scope"))
+    if rfd < 0:
+        write_cstr(2, "linuxinit: WARNING: kernel.yama.ptrace_scope was written but cannot be read back; the setting is UNVERIFIED.\n")
+        return
+    got: int64 = sys_read(rfd, &ptbuf[0], 63)
+    sys_close(rfd)
+    if got <= 0:
+        write_cstr(2, "linuxinit: WARNING: kernel.yama.ptrace_scope read back empty; the setting is UNVERIFIED.\n")
+        return
+    ptbuf[got] = 0
+    i: uint64 = 0
+    while i < cast[uint64](got):
+        if ptbuf[i] == 10:
+            ptbuf[i] = 0
+        i = i + 1
+    if ptbuf[0] == 49:                            # '1'
+        say("kernel.yama.ptrace_scope = 1 — a same-uid PTRACE_ATTACH by a non-ancestor is refused")
+        return
+    write_cstr(2, "linuxinit: WARNING: kernel.yama.ptrace_scope reads back as ")
+    write_cstr(2, &ptbuf[0])
+    write_cstr(2, " after writing 1: the write did not take, and same-uid ptrace is NOT restricted on this boot.\n")
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     say("Hamnix on Linux — bringing up the namespace")
 
@@ -173,6 +271,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     bind_or_warn(cast[Ptr[char]]("/srv"),     cast[Ptr[char]]("#s"))
     bind_or_warn(cast[Ptr[char]]("/n"),       cast[Ptr[char]]("#/"))
     bind_or_warn(cast[Ptr[char]]("/tmp"),     cast[Ptr[char]]("#t"))
+
+    # Boot policy, set at the first instant /proc/sys exists. See the comment
+    # on the function: everything the window system does about same-uid
+    # confidentiality rests on this one line.
+    set_ptrace_scope()
 
     # Drivers come after /sys and /dev exist: the module init paths want both,
     # and devtmpfs is what materialises /dev/dri/card0 once virtio-gpu attaches.

