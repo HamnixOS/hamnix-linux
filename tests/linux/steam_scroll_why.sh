@@ -241,8 +241,19 @@ export MOZ_ENABLE_WAYLAND=0
 _u=$(id -u 2>/dev/null || echo 0)
 if [ -d "/run/user/$_u" ]; then XDG_RUNTIME_DIR="/run/user/$_u"; else XDG_RUNTIME_DIR=/run; fi
 export XDG_RUNTIME_DIR
-HOME=/home/live
-[ -d "$HOME" ] || HOME=/root
+# THE HOME DIRECTORY MUST BE ONE THIS UID OWNS, and Firefox is the only
+# program here that says so out loud:
+#
+#   Running Firefox as root in a regular user's session is not supported.
+#   ($HOME is /home/live which is owned by live.)
+#
+# It printed that and EXITED 0. So the first run of this arm saw a launcher
+# that reported success, no window, and nothing else -- the exact shape
+# NORTH_STAR.md forbids, caught only because this script now puts Firefox's
+# own stderr on the console. rc.boot spawns into the namespace as root, so
+# root gets /root.
+if [ "$_u" = 0 ]; then HOME=/root; else HOME=/home/live; fi
+[ -d "$HOME" ] || HOME=/tmp
 export HOME
 echo "ssw-ff: uid=$_u HOME=$HOME XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DISPLAY=$DISPLAY"
 if : > "$HOME/.ssw-probe" 2>/dev/null; then
