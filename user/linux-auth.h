@@ -12,6 +12,12 @@ struct hamauth_file {
     uint32_t gid;
     int      ok;         /* the credential checked out */
     int      drained;    /* the answer has been read */
+    /* `setpass` succeeded. IT IS A SEPARATE FLAG FROM `ok` ON PURPOSE:
+     * setting a password is not authenticating as anybody, so it must
+     * answer "ok" to the reader without ever making hamauth_become()
+     * succeed. Folding the two together would turn "I changed this
+     * account's password" into "I am now this account". */
+    int      spok;
 };
 
 int     hamauth_is_path(const char *path);
