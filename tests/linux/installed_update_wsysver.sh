@@ -75,6 +75,56 @@
 # is published: the update is served by python3 -m http.server on the loopback,
 # signed with a key minted for the run.
 #
+# WHAT THIS GATE MEASURED, AND WHAT WAS DONE ABOUT IT
+# ====================================================
+# The first run answered the question and the answer was worse than the comment
+# claimed.  At STAGE C the screen became THREE DISTINCT COLOURS over 1,024,000
+# pixels -- a featureless dark-blue slab and a mouse cursor -- where STAGE B had
+# 1,474; the compositor reported `windows 0`; /srv/wsys had grown from
+# 19,052,956 bytes to 37,972,380; and nothing between `hpm update` finishing and
+# the desktop vanishing had mentioned the window system, a session or a restart.
+# The compositor kept running, kept counting keystrokes, kept owning /dev/fb and
+# painted nothing.  There was no panel and nothing to click.
+#
+# user/linux-wsys.c now REFUSES rather than wipes: a build meeting a segment of
+# another version that some LIVE process still holds a window in declines to
+# attach, says so by name on stderr, and changes not one byte of it.  A
+# LEFTOVER segment -- nobody holding a row -- is still re-initialised, which is
+# what keeps the first program after a boot working.  So this file now asks
+# four more questions, and all four are about STAGE C:
+#
+#   * IS THE SEGMENT STILL THERE?  /srv/wsys must still be 19,052,956 bytes
+#     after the new binary has met it.  This is the whole fix in one number.
+#   * IS THE SCREEN STILL A DESKTOP?  Answered in pixels, and specifically in
+#     DISTINCT COLOURS, because that is what told the slab apart from a desktop:
+#     a wallpaper with a panel and windows on it is over a thousand, the slab is
+#     three.  Also that the screen at C is substantially the screen at B.
+#   * DOES THE WINDOW TABLE STILL HOLD THE SESSION'S WINDOWS?  `windows 0` was
+#     the shape of the failure; the count at C must equal the count at B.
+#   * DID IT SAY SO?  The refused binary must print the refusal BY NAME.  A
+#     program that silently declines to draw is the same success-shaped silence
+#     in a smaller box.
+#
+# AND ONE CONTROL, because "refuse" that cannot be switched off is a machine
+# that never boots again: THE LEFTOVER CONTROL at the end of phase 2 makes a
+# v6 segment with a PUBLISHED binary that then exits, so no process holds a row
+# in it, and requires this tree's binary to re-initialise it -- 19,052,956 ->
+# 37,972,380 bytes -- in the same boot in which /srv/wsys was refused.  One run,
+# both answers, so "live" and "leftover" are demonstrably being told apart and
+# not merely asserted.
+#
+# WHAT THIS FILE DELIBERATELY DOES NOT FAIL ON, and it is measured every run.
+# STAGE B -- the desktop stops answering the mouse the instant `hpm update`
+# finishes, while the segment is still v6 and before anything has been
+# relaunched -- is a SEPARATE defect with a separate cause, and it was already
+# here before this pass (baseline: the STAGE B click moved 234 px against 43,666
+# at STAGE A).  It is reported as a FINDING, not a failure, because a gate that
+# goes red for somebody else's bug stops being read.  Its consequence for THIS
+# gate is named rather than worked around: because the panel is not answering
+# clicks at B, the STAGE C CLICK cannot pass either, so the evidence that the
+# session survived C is the segment, the pixels and the window table -- none of
+# which depends on the panel answering.
+#
 # Usage: tests/linux/installed_update_wsysver.sh [b1s] [b2s] [b3s]
 #   HAMLINUX_WV_REUSE=1   reuse the disk built by an earlier run
 set -uo pipefail
@@ -265,8 +315,13 @@ hpm refresh
 echo '[wv] p1 refresh status:' \$status
 # THE WHOLE PUBLISHED USERLAND, not just the desktop. hamnix-base pulls
 # coreutils, hamsh, net, hpm, the drivers and the desktop -- so after this the
-# machine is what a person who installed hamnix-linux and ran `hpm update`
+# machine is what a person who installed hamnix-linux and ran \`hpm update\`
 # today HAS, and nothing on it is newer than the window system it is running.
+# (The backslashes are not decoration: this heredoc is UNQUOTED, so the
+# backticks ran \`hpm update\` ON THE HOST every time this gate started -- it
+# printed "hpm: command not found" and ate the words out of the comment. A
+# host with hpm on its PATH would have had its own machine updated by a
+# comment in a test.)
 echo '[wv] p1 install hamnix-base'
 hpm install hamnix-base
 echo '[wv] p1 install status:' \$status
@@ -335,11 +390,63 @@ sleep 18
 echo '[wv] MARK-C'
 sleep 60
 RC
-_probe C /bin/cat
+# THE INSPECTOR AT C IS STILL THE PUBLISHED cat, AND THAT IS THE POINT.
+# It used to be /bin/cat here, on the reasoning that by stage C the session had
+# already been flipped to v7 by the app that was opened, so the new binary was
+# the matching one.  If the session SURVIVES, that reasoning inverts: /srv/wsys
+# is still v6, so v6 is still the build that may read it, and a v7 /bin/cat
+# reading it would be one more client attaching -- the very act under test.
+# The v7 attach is driven DELIBERATELY, once, immediately below, where its
+# refusal is the measurement rather than a side effect of taking one.
 cat <<RC
+
+echo '[wv] REFUSE-C:'
+/bin/cat '/dev/wsys/windows'
+echo '[wv] p2 refuse status:' \$status
+echo '[wv] REFUSE-END-C'
+RC
+_probe C /probe-cat
+cat <<RC
+
+# THE NEXT BOOT IS ARMED HERE, BEFORE THE CONTROL BELOW AND NOT AFTER IT.
+# The first version of this file armed it last, and the leftover control --
+# which is the newest and least-exercised code in the guest -- aborted the rc
+# with a parse error, so phase 3 never got installed and boot 3 ran PHASE 2
+# again on a disk that was already updated. The measurement of the reboot was
+# lost to a bug in a control taken after it. Anything below this line can now
+# fail without costing the boot that follows.
+cp /etc/rc.phase3 /etc/rc.boot
+
+# THE LEFTOVER CONTROL.  Everything above is about a segment somebody is USING.
+# A segment nobody is using must still be re-initialised, or the first program
+# after a boot never starts and the machine is bricked in a new way.  Both
+# answers are taken in this one boot, seconds apart, so the two cases are
+# demonstrably being told apart:
+#   * the PUBLISHED cat creates /stale/wsys, a v6 segment, and EXITS -- so no
+#     process holds a row in it;
+#   * this tree's cat meets it and must GROW it 19,052,956 -> 37,972,380.
+#
+# THE QUOTES AND THE ABSENT SPACES ARE LOAD-BEARING. hamsh's assignment is
+# \`NAME='value'\`: written \`HAMWSYS = /stale/wsys\` the right-hand side is
+# parsed as a NAME and the rc dies with "undefined name '/stale/wsys' -- glued
+# arithmetic?", which is exactly how the first run of this control lost its
+# phase 3. etc/rc.de-user carries the same warning over its own HOME=.
+mkdir '/stale'
+HAMWSYS='/stale/wsys'
+export HAMWSYS
+echo '[wv] p2 ----- THE LEFTOVER CONTROL'
+/probe-cat '/dev/wsys/windows'
+echo '[wv] p2 stale make status:' \$status
+echo '[wv] STALE-BEFORE:'
+ls -l /stale
+/bin/cat '/dev/wsys/windows'
+echo '[wv] p2 stale use status:' \$status
+echo '[wv] STALE-AFTER:'
+ls -l /stale
+HAMWSYS='/srv/wsys'
+export HAMWSYS
 date
 echo '[wv] PHASE2 DONE'
-cp /etc/rc.phase3 /etc/rc.boot
 reboot
 RC
 } > "$WORK/rc.phase2"
@@ -470,18 +577,41 @@ statefield() {   # statefield <log> <tag> <field>
     grep -aA1 -F "STATE-$2:" "$1" | tail -1 | tr -d '\r' |
         awk -v f="$3" '{for (i = 1; i < NF; i++) if ($i == f) print $(i+1)}'
 }
-segsize() {   # segsize <log> <tag>
+sizeat() {   # sizeat <log> <marker> -- the size of the `wsys` line after <marker>
     # The \r comes off the serial console and made $NF "wsys\r", which matched
     # nothing and printed an empty size next to the one number in this gate
     # that says which window system the session IS. Strip it first, not after.
     tr -d '\r' <"$1" |
-        awk -v m="SEG-$2:" 'index($0, m) {inb=1; next}
-                            inb && $NF == "wsys" {print $(NF-1); exit}
-                            inb && index($0, "DELOG") {exit}'
+        awk -v m="$2" 'index($0, m) {inb=1; next}
+                       inb && $NF == "wsys" {print $(NF-1); exit}
+                       inb && index($0, "DELOG") {exit}'
+}
+segsize() {   # segsize <log> <tag>
+    sizeat "$1" "SEG-$2:"
+}
+# HOW MANY COLOURS ARE ON THE SCREEN.  The slab and a desktop are told apart by
+# this number and by nothing else that is cheap: a wallpaper with a panel, a
+# taskbar and windows on it is over a thousand distinct colours, and the
+# featureless slab the first run photographed is THREE (the fill, plus 117 px
+# of mouse cursor).  ppmdiff.py `rect` prints "N distinct of M px".
+distinct() {   # distinct <ppm>
+    pp rect "$1" | sed -n 's/.*: \([0-9]*\) distinct of .*/\1/p' | head -1
 }
 wins() {   # wins <log> <tag>
     awk -v m="WINS-$2" 'index($0,m){i=1;next} i&&index($0,"WINS-END"){exit}
                         i&&NF>=6&&$1~/^[0-9]+$/{printf "(%s) ", $0}' "$1" | tr -d '\r'
+}
+
+# IS A GIVEN WINDOW MARKED VISIBLE?  `cat /dev/wsys/<wid>/ctl` prints
+# `wid x y w h z decorate visible proto ...`, so field 8 is `visible`. This is
+# the field that tells "the panel is gone" apart from "the panel is there and
+# the click missed it", and it is the field that named the SEPARATE defect
+# below: wids 3 and 4 -- the top panel and the bottom taskbar -- go 1 -> 0 the
+# instant `hpm update` finishes, with the segment still v6.
+visfield() {   # visfield <log> <tag> <wid>
+    awk -v m="WINS-$2" -v w="$3" '
+        index($0,m){i=1;next} i&&index($0,"WINS-END"){exit}
+        i&&$1==w&&NF>=8{print $8; exit}' "$1" | tr -d '\r'
 }
 
 report_stage() {   # report_stage <log> <tag> <headline>
@@ -496,6 +626,7 @@ report_stage() {   # report_stage <log> <tag> <headline>
     echo "    idle -> idle:    $noise px changed  (the noise floor: a cursor, a clock)"
     echo "    Applications ->  $click px changed  $(pp diff "$SHOT/$s-2-idle.ppm" "$SHOT/$s-3-menu.ppm" | sed 's/^[^;]*; //')"
     echo "    typing ->        $typed px changed"
+    echo "    distinct colours: $(distinct "$SHOT/$s-1-idle.ppm")  (a desktop is >1000; the slab was 3)"
     echo "    window table:    $(wins "$L" "$s")"
     echo "    titles:          $(grep -aA6 -F "TITLES-$s:" "$L" | sed -n '2,6p' | tr -d '\r' | grep -v '^\[wv\]' | tr '\n' '|')"
     echo "    wsysd state:     $(grep -aA1 -F "STATE-$s:" "$L" | tail -1 | tr -d '\r')"
@@ -575,10 +706,86 @@ else
 fi
 
 CWIN="$(statefield "$WORK/boot2.log" C windows)"
+BWIN="$(statefield "$WORK/boot2.log" B windows)"
 if answered C; then
     echo "wv: PASS STAGE C the desktop still answers the mouse after an app was opened"
 else
-    echo "wv: FINDING STAGE C THE DESKTOP NO LONGER ANSWERS THE MOUSE once an app is opened after the update. The compositor reports ${CWIN:-?} windows. A person in front of this machine has no Applications button to click."
+    echo "wv: FINDING STAGE C the desktop does not answer the mouse after an app is opened. The compositor reports ${CWIN:-?} windows. NOT scored: STAGE B does not answer either, before any version bump -- see WHAT THIS FILE DELIBERATELY DOES NOT FAIL ON."
+fi
+
+# =========================================================================
+# 7. DID THE RUNNING SESSION SURVIVE THE NEW BINARY?
+# =========================================================================
+# Four witnesses, none of which needs the panel to answer a click, and every
+# one of which was the OPPOSITE before user/linux-wsys.c learned to refuse.
+CSEG="$(segsize "$WORK/boot2.log" C)"
+if [ "$CSEG" = "$V6_BYTES" ]; then
+    echo "wv: PASS STAGE C THE RUNNING SESSION WAS NOT WIPED: /srv/wsys is still $CSEG bytes (the v6 table the desktop is using)"
+elif [ "$CSEG" = "$V7_BYTES" ]; then
+    echo "wv: FAIL STAGE C the new binary RE-INITIALISED the running session's window table: /srv/wsys is $CSEG bytes (v7). Every window on that desktop belonged to a process that is still running."
+    fail=1
+else
+    echo "wv: FAIL STAGE C /srv/wsys is ${CSEG:-?} bytes, which is neither v6 ($V6_BYTES) nor v7 ($V7_BYTES)"
+    fail=1
+fi
+
+CDIST="$(distinct "$SHOT/C-1-idle.ppm")"
+BDIST="$(distinct "$SHOT/B-1-idle.ppm")"
+if [ -n "$CDIST" ] && [ "$CDIST" -ge 500 ]; then
+    echo "wv: PASS STAGE C THE SCREEN IS STILL A DESKTOP: $CDIST distinct colours (STAGE B had ${BDIST:-?}; the featureless slab this gate photographed before the fix had 3)"
+else
+    echo "wv: FAIL STAGE C THE SCREEN IS A FEATURELESS SLAB: ${CDIST:-?} distinct colours over 1,024,000 pixels. There is nothing on it to click."
+    fail=1
+fi
+
+BCDIFF="$(ppn "$SHOT/B-1-idle.ppm" "$SHOT/C-1-idle.ppm")"
+if [ -n "$BCDIFF" ] && [ "$BCDIFF" -lt 512000 ]; then
+    echo "wv: PASS STAGE C the screen did not turn over underneath the person: $BCDIFF px differ from STAGE B (a whole-screen repaint is 1,024,000)"
+else
+    echo "wv: FAIL STAGE C THE WHOLE SCREEN CHANGED when one app was opened: ${BCDIFF:-?} of 1,024,000 px"
+    fail=1
+fi
+
+if [ -n "$CWIN" ] && [ -n "$BWIN" ] && [ "$CWIN" = "$BWIN" ] && [ "$CWIN" != 0 ]; then
+    echo "wv: PASS STAGE C the compositor still has the session's windows: $CWIN, the same as at STAGE B"
+else
+    echo "wv: FAIL STAGE C the window table lost the session's windows: ${CWIN:-?} at C against ${BWIN:-?} at B"
+    fail=1
+fi
+
+# DID IT SAY SO?  A refusal nobody can read is the same silence in a smaller
+# box.  The message has to name the file, both versions and the remedy, and it
+# has to come out of the binary that was refused -- so it is looked for between
+# the markers that bracket that one command and nowhere else.
+if sed -n '/\[wv\] REFUSE-C:/,/\[wv\] REFUSE-END-C/p' "$WORK/boot2.log" |
+        tr -d '\r' | grep -aq 'REFUSING to attach'; then
+    echo "wv: PASS THE NEW BINARY SAID SO, BY NAME:"
+    sed -n '/\[wv\] REFUSE-C:/,/\[wv\] REFUSE-END-C/p' "$WORK/boot2.log" |
+        tr -d '\r' | grep -a '^wsys:' | sed 's/^/        /'
+else
+    echo "wv: FAIL the new binary attached (or failed) WITHOUT SAYING WHY -- this is what it printed:"
+    sed -n '/\[wv\] REFUSE-C:/,/\[wv\] REFUSE-END-C/p' "$WORK/boot2.log" |
+        tr -d '\r' | sed 's/^/        /' | head -8
+    fail=1
+fi
+
+# =========================================================================
+# 8. AND A LEFTOVER SEGMENT MUST STILL BE RE-INITIALISED.
+# =========================================================================
+# Same boot, seconds after the refusal above, so this is the two cases being
+# TOLD APART rather than one behaviour being described twice.
+SB="$(sizeat "$WORK/boot2.log" 'STALE-BEFORE:')"
+SA="$(sizeat "$WORK/boot2.log" 'STALE-AFTER:')"
+if [ "$SB" = "$V6_BYTES" ]; then
+    echo "wv: PASS THE LEFTOVER CONTROL starts from a real v6 segment nobody holds a row in ($SB bytes)"
+else
+    echo "wv: FAIL THE LEFTOVER CONTROL could not make a v6 segment: /stale/wsys is ${SB:-?} bytes"; fail=1
+fi
+if [ "$SA" = "$V7_BYTES" ]; then
+    echo "wv: PASS A LEFTOVER SEGMENT IS STILL RE-INITIALISED: /stale/wsys grew to $SA bytes (v7) when this tree's binary met it -- so a fresh boot still comes up"
+else
+    echo "wv: FAIL A LEFTOVER SEGMENT WAS NOT RE-INITIALISED: /stale/wsys is ${SA:-?} bytes, wanted $V7_BYTES. The refusal is refusing too much and the first program after a boot will not start."
+    fail=1
 fi
 
 if grep -aA3 -F '[wv] p3 md5 of /bin/wsysd' "$WORK/boot3.log" | grep -aq "$NEW_MD5"; then
@@ -590,6 +797,28 @@ if answered D; then
     echo "wv: PASS AFTER A REBOOT THE MACHINE IS HEALTHY: a real click on the Applications button opened the menu"
 else
     echo "wv: FAIL AFTER A REBOOT the machine did not open the Applications menu under a real click"
+    fail=1
+fi
+
+# DID THE PANEL COME BACK, OR IS IT GONE FOREVER?
+# =========================================================================
+# These are two very different sentences to put in a release note, and until
+# this check the gate could not tell them apart. The panel and the taskbar go
+# `visible` 1 -> 0 at STAGE B -- a config-reload defect in the RUNNING
+# pre-update binary, which `hpm` cannot reach because it replaced the file and
+# not the process. A person on the published version therefore pays for it
+# exactly once, on the update that carries its fix. That is only true if the
+# panel is back after the reboot, so the reboot is where it is asserted, by
+# name and by window id rather than by a pixel count that a wallpaper could
+# satisfy on its own.
+BPAN="$(visfield "$WORK/boot2.log" B 3)"; BTASK="$(visfield "$WORK/boot2.log" B 4)"
+APAN="$(visfield "$WORK/boot2.log" A 3)"; ATASK="$(visfield "$WORK/boot2.log" A 4)"
+DPAN="$(visfield "$WORK/boot3.log" D 3)"; DTASK="$(visfield "$WORK/boot3.log" D 4)"
+echo "wv: NOTE the panel (wid 3) and the taskbar (wid 4) are visible=${APAN:-?}/${ATASK:-?} at STAGE A and visible=${BPAN:-?}/${BTASK:-?} at STAGE B -- the SEPARATE config-reload defect, measured here and not scored here"
+if [ "$DPAN" = 1 ] && [ "$DTASK" = 1 ]; then
+    echo "wv: PASS AFTER A REBOOT THE PANEL AND THE TASKBAR ARE BACK (wid 3 and wid 4 both visible) -- the update hurt the session once, it did not break the desktop"
+else
+    echo "wv: FAIL AFTER A REBOOT the panel is wid 3 visible=${DPAN:-?} and the taskbar wid 4 visible=${DTASK:-?}: the desktop did not come back, so this is not a one-time cost of the update"
     fail=1
 fi
 check "phase 3 reached the end" '\[wv\] PHASE3 DONE' "$WORK/boot3.log"
