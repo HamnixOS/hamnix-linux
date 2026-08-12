@@ -275,15 +275,22 @@ MRDONLY_FLAG: int32 = 16
 # no variables referencing high cells — see _maybe_recycle_arenas).
 LINE_MAX:      uint64 = 2048     # one logical input line (multi-line)
 # tokens per logical input. The rc/init path (_run_rc_path) reads a
-# whole multi-line script into a 16 KiB buffer and lexes it in ONE
-# pass, so this must comfortably exceed the token count of the largest
-# sourced script (etc/rc.d/rc.5 lexes to ~600 tokens incl. one
-# TK_NEWLINE per line). A too-small value used to make _emit_tok
+# whole multi-line script — of ANY size, see _script_load — and lexes it
+# in ONE pass, so this must comfortably exceed the token count of the
+# largest sourced script (etc/rc.d/rc.5 lexes to ~600 tokens incl. one
+# TK_NEWLINE per line; etc/rc.boot, the biggest one shipped, is 304
+# lines and 412 non-comment words, so roughly 900 tokens). A
+# too-small value used to make _emit_tok
 # SILENTLY drop the script's tail — including its closing `}` and the
 # trailing TK_EOF — so the parser ran into zeroed token slots mid-block
 # and aborted the whole script with a spurious "empty command". Sized
 # generously now, and lex_line raises a clean "token-limit exceeded"
 # instead of truncating (see _emit_tok / lex_error).
+#
+# THIS IS THE ONLY BOUND LEFT ON SCRIPT SIZE now that the read side has
+# none, and it is deliberately kept because it is LOUD: overrunning it is
+# a lexical error, so the script does not run, hamsh names the file, and
+# PID 1 says RESCUE SHELL rather than booting on half an rc.
 TOK_MAX:       uint64 = 4096     # tokens per logical input
 NODE_MAX:      uint64 = 16384    # AST node arena (session-lifetime)
 # STR_ARENA_MAX — interned string bytes, SESSION-LIFETIME.
@@ -10906,6 +10913,204 @@ def builtin_import(argc: int32) -> int32:
     return 1
 
 
+# ====================================================================
+# WHOLE-SCRIPT LOADING, WITH NO SIZE CEILING
+# ====================================================================
+# EVERY script hamsh reads used to go into a FIXED buffer whose overflow
+# path was a bare `break`. Three of them, all silent:
+#
+#   _run_rc_path   rc_buf      16384   /etc/rc.boot is 15918 bytes — 97.2%
+#   builtin_source src_buf     16384   /etc/rc.boot.full is 12255 — 75%
+#   _svc_read_def  svc_def_buf  4096   /etc/services.d/hamde.svc 3186 — 78%
+#
+# The first one is PID 1's boot script and the tail it would have cut is
+# `source /etc/rc.boot.full` — the machine would have come up on the cpio
+# fallback, looking fine, having silently run half its rc. 467 bytes of
+# headroom stood between this distribution and that boot; one added comment
+# paragraph is 467 bytes.
+#
+# A BIGGER FIXED BUFFER IS THE SAME DEFECT AT A LARGER SIZE. This tree has
+# five scars from exactly that (2047-byte panel config, 512-byte trust root,
+# 8192-byte /etc/modules, an 8 KiB `tail`, a 16 KiB hook capture). So the
+# size is not raised: it is REMOVED. A script is read into a 16 KiB static
+# STAGE, and if it does not fit there the staging is replayed into an
+# anonymous mapping that DOUBLES until the whole file is in hand. A 15 KiB
+# rc costs exactly what it costs today (no mmap at all, which matters
+# because this runs as PID 1 before anything else exists); a 300 KiB rc
+# works; and there is no size at which the answer becomes a quiet prefix.
+#
+# WHAT REPLACES THE CEILING IS NOT A BIGGER CEILING, IT IS A LOUD REFUSAL.
+# If the mapping cannot be had, the loader returns NOTHING — never a
+# prefix — names the file and the byte count on the console, and every
+# caller declines to run rather than running the part that fitted. Half a
+# script is not a script: the cut lands mid-statement, and the boot that
+# silently ran half its rc is the exact failure NORTH_STAR.md exists to
+# refuse.
+#
+# THE BOUND THAT IS LEFT, named rather than hidden: `lex_line` tokenizes a
+# whole script as ONE input against TOK_MAX (4096 tokens, roughly one per
+# line plus one per word). Overrunning THAT is already loud — it is a
+# lexical error, so the script does not run, hamsh says so by name, and PID
+# 1 lands in the rescue shell. A loud bound is a different thing from a
+# silent one, and this is the only one still standing on this path.
+extern def sys_mmap(addr: uint64, len: uint64, prot: int32, flags: int32,
+                    fd: int32, off: uint64) -> int64
+extern def sys_munmap(addr: uint64, len: uint64) -> int32
+
+SL_PROT_RW:   int32 = 0x3        # PROT_READ | PROT_WRITE
+SL_MAP_PANON: int32 = 0x22       # MAP_PRIVATE | MAP_ANONYMOUS
+
+# The static stages. One per NESTING ROLE, because sourcing nests: the boot
+# rc is mid-execution in stage 0 when it runs `source /etc/rc.boot.full`
+# into stage 1, which may register a service definition into stage 2. A
+# fourth level of nesting does not fail — it takes the mapped path, which is
+# also what a script too big for its stage takes.
+SL_STAGE_CAP: uint64 = 16384
+sl_stage_rc:  Array[16384, uint8]    # 0: _run_rc_path (the boot rc)
+sl_stage_src: Array[16384, uint8]    # 1: `source` / runlevel rc scripts
+sl_stage_svc: Array[16384, uint8]    # 2: /etc/services.d/<name>.svc
+sl_busy:      Array[3, int32]
+
+# Live mappings, so _script_release can give them back. Depth here is
+# sourcing depth, not file size — 8 is far past anything real, and running
+# out of SLOTS is treated exactly like running out of memory (loud refusal),
+# never as a reason to truncate.
+SL_LIVE_MAX:  uint64 = 8
+sl_live_addr: Array[8, uint64]
+sl_live_len:  Array[8, uint64]
+
+# Result of the last _script_load. Read them IMMEDIATELY — a nested load
+# overwrites them.
+sl_len: uint64 = 0               # bytes of the file (the WHOLE file)
+sl_err: int32 = 0                # 0 ok | 1 cannot open | 2 cannot hold it
+
+
+def _sl_stage_base(sid: int32) -> Ptr[uint8]:
+    if sid == 0:
+        return &sl_stage_rc[0]
+    if sid == 1:
+        return &sl_stage_src[0]
+    return &sl_stage_svc[0]
+
+
+def _sl_map(n: uint64) -> uint64:
+    # Anonymous mapping of n bytes, or 0. mmap reports failure as a small
+    # negative (-errno), which cast to uint64 is astronomically large — so
+    # the test is on the SIGNED value before any cast.
+    got: int64 = sys_mmap(0, n, SL_PROT_RW, SL_MAP_PANON, -1, 0)
+    if got <= 0:
+        return 0
+    return cast[uint64](got)
+
+
+def _sl_track(addr: uint64, n: uint64) -> int32:
+    i: uint64 = 0
+    while i < SL_LIVE_MAX:
+        if sl_live_addr[i] == 0:
+            sl_live_addr[i] = addr
+            sl_live_len[i] = n
+            return 0
+        i = i + 1
+    return -1
+
+
+def _script_too_big(path: Ptr[char], got: uint64):
+    # The ONE failure the ceiling used to answer with silence.
+    write_cstr1("hamsh: ")
+    write_cstr1(cast[Ptr[uint8]](path))
+    write_cstr1(": CANNOT BE READ WHOLE -- ")
+    write_cstr1(render_int(cast[int64](got)))
+    write_cstr1(" byte(s) read and no memory for the rest.\n")
+    write_cstr1("hamsh: ")
+    write_cstr1(cast[Ptr[uint8]](path))
+    write_cstr1(": NOT RUN -- none of it took effect. Half a script is not a script:\n")
+    write_cstr1("hamsh: the cut lands mid-statement, so running the part that fitted would\n")
+    write_cstr1("hamsh: be a different program than the file you wrote.\n")
+
+
+def _script_load(path: Ptr[char], sid: int32) -> Ptr[uint8]:
+    # Read the file at `path` ENTIRELY into memory and return a pointer to
+    # it, with sl_len set to its size. Returns 0 on failure with sl_err
+    # saying which — and 0 means NOTHING, never a prefix. The caller must
+    # _script_release() what it gets back.
+    sl_err = 0
+    sl_len = 0
+    fd: int32 = sys_open(path)
+    if fd < 0:
+        sl_err = 1
+        return cast[Ptr[uint8]](0)
+    buf:  Ptr[uint8] = cast[Ptr[uint8]](0)
+    cap:  uint64 = SL_STAGE_CAP
+    heap: uint64 = 0                 # non-zero: `buf` is a mapping of `cap`
+    if sl_busy[sid] == 0:
+        sl_busy[sid] = 1
+        buf = _sl_stage_base(sid)
+    else:
+        heap = _sl_map(SL_STAGE_CAP)
+        if heap == 0:
+            sys_close(fd)
+            sl_err = 2
+            return cast[Ptr[uint8]](0)
+        buf = cast[Ptr[uint8]](heap)
+    total: uint64 = 0
+    while True:
+        if total >= cap:
+            # Full, and the file is not finished. Double, copy, carry on.
+            ncap: uint64 = cap * 2
+            na: uint64 = _sl_map(ncap)
+            if na == 0:
+                if heap != 0:
+                    sys_munmap(heap, cap)
+                else:
+                    sl_busy[sid] = 0
+                sys_close(fd)
+                sl_err = 2
+                sl_len = total
+                return cast[Ptr[uint8]](0)
+            nb: Ptr[uint8] = cast[Ptr[uint8]](na)
+            i: uint64 = 0
+            while i < total:
+                nb[i] = buf[i]
+                i = i + 1
+            if heap != 0:
+                sys_munmap(heap, cap)
+            else:
+                sl_busy[sid] = 0     # the stage is free again for a nested load
+            buf = nb
+            heap = na
+            cap = ncap
+        n: int64 = sys_read(fd, &buf[total], cap - total)
+        if n <= 0:
+            break
+        total = total + cast[uint64](n)
+    sys_close(fd)
+    if heap != 0:
+        if _sl_track(heap, cap) != 0:
+            sys_munmap(heap, cap)
+            sl_err = 2
+            sl_len = total
+            return cast[Ptr[uint8]](0)
+    sl_len = total
+    return buf
+
+
+def _script_release(p: Ptr[uint8], sid: int32):
+    if cast[uint64](p) == 0:
+        return
+    if cast[uint64](p) == cast[uint64](_sl_stage_base(sid)):
+        sl_busy[sid] = 0
+        return
+    a: uint64 = cast[uint64](p)
+    i: uint64 = 0
+    while i < SL_LIVE_MAX:
+        if sl_live_addr[i] == a:
+            sys_munmap(a, sl_live_len[i])
+            sl_live_addr[i] = 0
+            sl_live_len[i] = 0
+            return
+        i = i + 1
+
+
 # `source FILE` — read FILE and execute its statements in THIS shell
 # process, so any `bind`/`=` it performs mutates the calling shell's
 # ambient namespace and scope (unlike running a script as an external
@@ -10915,13 +11120,13 @@ def builtin_import(argc: int32) -> int32:
 # visible only after `bind '#sysroot' /` lands): the partition rc's
 # binds/services apply to PID 1 itself.
 #
-# Implementation: read into a DEDICATED buffer (NOT rc_buf — that one
-# may hold the bootstrap rc we are mid-executing) and feed it to
+# Implementation: _script_load into stage 1 (NOT the rc stage — that one
+# holds the bootstrap rc we are mid-executing) and feed the whole file to
 # run_source. The node/value arenas are append-only and the lexer's
 # token buffer was already consumed by the outer parse, so re-entering
 # the lex/parse/exec pipeline here is safe. Returns 0 on success (file
-# ran), 1 if the file was absent or unreadable.
-src_buf: Array[16384, uint8]
+# ran), 1 if the file was absent, unreadable, or too large to hold —
+# which is a REFUSAL, not a truncation.
 
 
 def builtin_source(argc: int32) -> int32:
@@ -10929,33 +11134,32 @@ def builtin_source(argc: int32) -> int32:
         errstr_set("source: usage: source file")
         return 1
     path: Ptr[char] = cast[Ptr[char]](argv_ptr[1])
-    fd: int32 = sys_open(path)
-    if fd < 0:
+    buf: Ptr[uint8] = _script_load(path, 1)
+    if cast[uint64](buf) == 0:
+        if sl_err == 2:
+            _script_too_big(path, sl_len)
+            errstr_set("source: file too large to read whole; nothing in it ran")
+            return 1
         errstr_set("source: cannot open file")
         return 1
-    total: uint64 = 0
-    while True:
-        n: int64 = sys_read(fd, &src_buf[total], 16384 - total)
-        if n <= 0:
-            break
-        total = total + cast[uint64](n)
-        if total >= 16384:
-            break
-    sys_close(fd)
+    total: uint64 = sl_len
     if total > 0:
         prev_name: Ptr[uint8] = lex_src_name
         lex_src_name = cast[Ptr[uint8]](path)
         lex_fatal = 0
-        run_source(&src_buf[0], total)
+        run_source(buf, total)
         fatal: int32 = lex_fatal
         lex_fatal = 0
         lex_src_name = prev_name
+        _script_release(buf, 1)
         # A sourced file that did not lex ran NOTHING; `source` says so with
         # a non-zero status rather than letting the caller carry on as
         # though the file had taken effect.
         if fatal != 0:
             errstr_set("source: file did not lex; nothing in it ran")
             return 1
+        return 0
+    _script_release(buf, 1)
     return 0
 
 
@@ -14316,27 +14520,24 @@ def _svc_rl_path_build(level: int32):
 
 
 def _svc_source_path(path: Ptr[char]) -> int32:
-    # Read `path` into src_buf and run it as hamsh statements in THIS
-    # process. Returns 0 if sourced, -1 if the file was absent.
-    fd: int32 = sys_open(path)
-    if fd < 0:
+    # Read `path` WHOLE and run it as hamsh statements in THIS process.
+    # Returns 0 if sourced, -1 if the file was absent or could not be held
+    # entire — a runlevel script that half-fits is not run at all, and says
+    # so, because half a runlevel is not a runlevel.
+    buf: Ptr[uint8] = _script_load(path, 1)
+    if cast[uint64](buf) == 0:
+        if sl_err == 2:
+            _script_too_big(path, sl_len)
         return -1
-    total: uint64 = 0
-    while True:
-        n: int64 = sys_read(fd, &src_buf[total], 16384 - total)
-        if n <= 0:
-            break
-        total = total + cast[uint64](n)
-        if total >= 16384:
-            break
-    sys_close(fd)
+    total: uint64 = sl_len
     if total > 0:
         prev_name: Ptr[uint8] = lex_src_name
         lex_src_name = cast[Ptr[uint8]](path)
         lex_fatal = 0
-        run_source(&src_buf[0], total)
+        run_source(buf, total)
         lex_fatal = 0
         lex_src_name = prev_name
+    _script_release(buf, 1)
     return 0
 
 
@@ -17738,6 +17939,24 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         #   loader. Exit NON-ZERO. The caller asked for a script to be run,
         #   the script did not run, and the honest answer is a failure, not
         #   a shell it never asked for on a stdin nobody is feeding.
+        #
+        # rcrc == 4 is the SAME DECISION for a different cause: the file
+        # could not be held in memory in one piece, so it was not run at
+        # all. _script_too_big has already named the file and the byte
+        # count. It gets the same two answers — rescue shell for PID 1,
+        # non-zero for everyone else — because the consequence is
+        # identical: the caller asked for a script and no part of it ran.
+        if rcrc == 4:
+            if sys_getpid() == 1:
+                write_cstr1("hamsh: PID 1: THE BOOT RC DID NOT RUN.\n")
+                write_cstr1("hamsh: PID 1: ")
+                write_cstr1(cast[Ptr[uint8]](rc_path))
+                write_cstr1(" could not be read whole, so none of it took effect: no\n")
+                write_cstr1("hamsh: PID 1: namespace recipe, no services, no login. This machine is\n")
+                write_cstr1("hamsh: PID 1: in a RESCUE SHELL on the console. It was NOT truncated and\n")
+                write_cstr1("hamsh: PID 1: half-run -- that would have booted a machine that looked fine.\n")
+            else:
+                return 1
         if rcrc == 3:
             if sys_getpid() == 1:
                 write_cstr1("hamsh: PID 1: THE BOOT RC DID NOT RUN.\n")
@@ -17861,12 +18080,10 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
 # --- rc / startup script --------------------------------------------
 # The boot rc (/etc/rc.boot) does the namespace recipe, service
-# launches, and the captured Linux-runtime `ns {}` value. 16 KiB is
-# comfortably more than that script (with its explanatory comments)
-# needs — and a truncated rc is a silent-failure footgun (the cut
-# lands mid-statement, so the boot recipe runs only partially), so the
-# buffer must stay safely larger than the on-disk rc.
-rc_buf: Array[16384, uint8]
+# launches, and the captured Linux-runtime `ns {}` value. It is read
+# WHOLE OR NOT AT ALL — see the _script_load block above for why the
+# 16 KiB ceiling that used to live here (with a bare `break` for an
+# overflow path, at 97.2% full) is gone rather than raised.
 
 
 def _run_rc_path(path: Ptr[char]) -> int32:
@@ -17876,32 +18093,31 @@ def _run_rc_path(path: Ptr[char]) -> int32:
     # propagate the unwind out of main() — used by `hamsh <script>`
     # forms like hpm hooks to exit after the script rather than
     # dropping into an interactive REPL the caller's stdin is probably
-    # not feeding), and 3 if the file FAILED TO LEX — in which case none
-    # of it ran and the caller must not pretend otherwise.
-    fd: int32 = sys_open(path)
-    if fd < 0:
+    # not feeding), 3 if the file FAILED TO LEX, and 4 if the file could
+    # not be read whole. In the last two cases NONE of it ran and the
+    # caller must not pretend otherwise.
+    buf: Ptr[uint8] = _script_load(path, 0)
+    if cast[uint64](buf) == 0:
+        if sl_err == 2:
+            _script_too_big(path, sl_len)
+            return 4
         return 0
-    total: uint64 = 0
-    while True:
-        n: int64 = sys_read(fd, &rc_buf[total], 16384 - total)
-        if n <= 0:
-            break
-        total = total + cast[uint64](n)
-        if total >= 16384:
-            break
-    sys_close(fd)
+    total: uint64 = sl_len
     if total > 0:
         prev_name: Ptr[uint8] = lex_src_name
         lex_src_name = cast[Ptr[uint8]](path)
         lex_fatal = 0
-        r: int32 = run_source(&rc_buf[0], total)
+        r: int32 = run_source(buf, total)
         fatal: int32 = lex_fatal
         lex_fatal = 0
         lex_src_name = prev_name
+        _script_release(buf, 0)
         if fatal != 0:
             return 3
         if r != 0:
             return 2
+        return 1
+    _script_release(buf, 0)
     return 1
 
 
