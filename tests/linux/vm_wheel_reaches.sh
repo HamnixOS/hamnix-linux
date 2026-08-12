@@ -21,10 +21,9 @@
 # unless something changed, INCLUDING a non-zero `ptr_dz`. So with the cursor
 # held still, a rise in `pointer` across a burst of wheel events means wsysd
 # saw the wheel; a flat `pointer` means it never arrived on any evdev node it
-# has open. The state is asked for at the guest console, which is reliable
-# HERE because there is no Steam writing to the same serial line -- the
-# character-dropping in docs/steam_namespace.md §12.3 is a property of a busy
-# console, and this one is idle.
+# has open. rc.boot publishes that line on the serial console by itself, on a
+# loop; nothing is typed at the guest, because hamsh's line editor turned out
+# to be unusable for this (see the note beside the loop).
 #
 # The control is in the same run: a plain MOVE, on the same devices, through
 # the same counter. A dead pointer would otherwise read exactly like a dead
@@ -76,7 +75,11 @@ stateloop = ns {
 }
 spawn detached stateloop {
     for i in a b c d e f g h i j k l m n o p q r s t u v w x y z 1 2 3 4 5 6 7 8 9 0 A B C D {
-        echo -n 'VMWHEEL '
+        # NOT `echo -n`: hamsh's echo has no -n, so it printed the flag as a
+        # WORD and the state landed on the next line -- and the reader, which
+        # was matching `VMWHEEL .*pointer`, then found nothing on any line and
+        # would have reported the counter flat no matter what the wheel did.
+        # The state line is matched by its own shape instead.
         cat /dev/wsys/wsysd/state
         sleep 5
     }
@@ -113,7 +116,7 @@ Q() { python3 tests/linux/qmp_input.py "$QMP" "$@" >/dev/null 2>&1; }
 # answer back and report every counter unchanged, which is the exact shape of
 # the failure this file exists to rule out. Two fresh lines, so the one being
 # read was published entirely after the events were sent.
-nstates() { grep -ac VMWHEEL "$LOG" 2>/dev/null | head -1; }
+nstates() { grep -ac 'focus .* pointer ' "$LOG" 2>/dev/null | head -1; }
 settle() {
     local before; before="$(nstates)"
     for _ in $(seq 1 60); do
@@ -122,7 +125,7 @@ settle() {
     done
     return 1
 }
-ptrcount() { sed -n 's/.*VMWHEEL .*pointer \([0-9]*\) .*/\1/p' "$LOG" | tail -1; }
+ptrcount() { sed -n 's/.*focus .* pointer \([0-9]*\) .*/\1/p' "$LOG" | tail -1; }
 
 for _ in $(seq 1 80); do [ -n "$(ptrcount)" ] && break; sleep 3; done
 P0="$(ptrcount)"
@@ -154,6 +157,6 @@ if [ "${P2:-0}" -gt "${P1:-0}" ]; then
 else
     bad "QEMU's wheel never reaches wsysd (pointer $P1 -> ${P2:-?} across 20 events, cursor still). The virtio-tablet is not delivering REL_WHEEL to this guest -- nothing between /dev/input and the client can be blamed for a scroll that does not happen in a VM"
 fi
-info "last state line: $(grep -a VMWHEEL "$LOG" | tail -1)"
+info "last state line: $(grep -a 'focus .* pointer ' "$LOG" | tail -1)"
 echo "vmwheel: $pass passed, $fail failed"
 [ "$fail" = 0 ]
