@@ -1136,7 +1136,29 @@ def describe(cmd):
 
 def build_one(cmd, objdir):
     """Build user/<cmd>.ad through the Linux lane. Returns the ELF path or
-    None. Reuses an existing artefact so a rebuild of the channel is cheap."""
+    None. Reuses an existing artefact so a rebuild of the channel is cheap.
+
+    KNOWN HAZARD, MEASURED, NOT YET FIXED -- read before trusting this cache.
+    The staleness check below stats ONE input: user/<cmd>.ad. It does not stat
+    lib/*.ad, user/linux-*.c, or the compiler. So an edit under lib/ or to a
+    user/linux-*.c backend invalidates NOTHING here and the previous object is
+    published.
+
+    That has already shipped. hamnix-desktop 1.0.10 on https://255.one/ carries
+    a wsysd built at 19:17 beside a hampanelscene and a hamdesktop built at
+    18:25, with user/linux-wsys.c -- the wsys backend all three link --
+    modified at 19:54; the three published binaries are byte-identical to the
+    objects still in build/repo-obj. A machine that runs `hpm update` gets a
+    desktop that maps NO WINDOWS AT ALL (`cat /dev/wsys/wsysd/state` ->
+    `windows 0`), measured on an installed disk by
+    tests/linux/installed_update_live.sh and reproduced offscreen in seconds
+    with `MOUSE_BIN_DIR=<published bin> tests/linux/de_mouse_chrome.sh`.
+
+    Nothing in this tree RUNS these objects -- every gate builds from source
+    through hamlinux_build.sh -- so the artefact that actually ships is the one
+    artefact nothing tests, and channel_covers_image.sh cannot see it because
+    it compares NAMES and every name is present. Until this stats every input,
+    `rm -rf build/repo-obj` before publishing."""
     src = os.path.join(ROOT, "user", cmd + ".ad")
     if not os.path.exists(src):
         return None
