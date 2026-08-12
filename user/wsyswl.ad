@@ -1932,13 +1932,62 @@ def x_send(n: uint64) -> uint32:
     return xseq
 
 
+# A PARTIAL X MESSAGE MUST NOT STOP THE WHOLE COMPOSITOR, and it used to.
+#
+# This was a loop on BLOCKING sys_read until it had all n bytes, called from
+# the one thread that serves every Wayland client. Its callers ask for 32 bytes
+# (x_poll_msg) or for the setup reply (xwm_connect) after a poll that only ever
+# guarantees ONE byte is readable. So a peer that sends a message in two pieces
+# parked wsyswl in read(2) for ever.
+#
+# THAT IS NOT HYPOTHETICAL -- IT IS A DEADLOCK WITH XWAYLAND, AND IT BROKE THE
+# WHOLE X PATH (which is to say: the browser). Measured, both sides, at the
+# moment tests/linux/wsys_close_button.sh gives up:
+#
+#   wsyswl    state S, wchan unix_stream_read_generic, syscall 0
+#             read(fd=6, count=20)   -- the tail of a 32-byte X message
+#   Xwayland  state S, wchan do_epoll_wait, epoll_wait(..., -1)
+#
+# Xwayland is idle waiting on ITS Wayland connection, which only wsyswl can
+# service, and wsyswl is blocked waiting for the rest of an X message only
+# Xwayland can send. Neither ever moves. The compositor's own state file froze
+# at that instant (`conns 0`, `xwm_connected 0`) and did not move again in 26 s,
+# because publish_state() is downstream of this read. With WSYSWL_XWM unset --
+# no X manager, no X socket -- the same binaries are healthy and wsyswl sits in
+# poll(2 fds, 16 ms) as it should, which is what localised it.
+#
+# So the read is NON-BLOCKING with a BOUNDED wait. A message that is merely
+# split arrives within microseconds and costs nothing; a peer that has stopped
+# talking costs at most X_READ_TRIES * X_READ_WAIT_MS and is then declared
+# dead, which drops the X connection and RETURNS TO THE MAIN LOOP. That is what
+# breaks the deadlock: the moment wsyswl is serving Wayland again, Xwayland
+# finishes coming up, and xwm_pump's retry (about twice a second) reconnects
+# into a server that can now answer.
+#
+# Dropping mid-message cannot desynchronise the stream the way the note above
+# x_poll_msg warns about: the caller's answer to 0 is xdead, and xdead drops
+# the whole connection rather than reading on from the middle of a reply.
+X_READ_WAIT_MS: int64 = 20
+X_READ_TRIES:   int32 = 4
+
 def x_read_exact(buf: Ptr[uint8], n: uint64) -> int32:
     got: uint64 = 0
+    waits: int32 = 0
     while got < n:
-        k: int64 = sys_read(xfd, &buf[got], n - got)
-        if k <= 0:
+        k: int64 = sys_read_nb(xfd, &buf[got], n - got)
+        if k < 0:
             return 0
-        got = got + cast[uint64](k)
+        if k == 0:
+            # Nothing more YET -- or the server is gone; sys_read_nb answers 0
+            # for both. Wait a bounded time for the rest and give up rather
+            # than park this thread on a peer that may be waiting for us.
+            if waits >= X_READ_TRIES:
+                return 0
+            waits = waits + 1
+            xwait[0] = xfd
+            sys_waitfds(&xwait[0], 1, X_READ_WAIT_MS)
+        else:
+            got = got + cast[uint64](k)
     return 1
 
 
