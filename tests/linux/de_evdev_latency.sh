@@ -33,6 +33,20 @@
 #     so the /dev/input/eventN it produces is root:input 0640 as well and
 #     neither the probe nor wsysd can open it.
 #
+# CHECKED ON THIS HOST, WITH open(2) AND NOT WITH THE MODE BITS: all 13
+# /dev/input/event* are root:input 0660, none carries an ACL for the invoking
+# user, and open(2) fails on every one — with the X session DOWN and the user
+# logged in at tty1 on seat0, so this is not something a session change fixes.
+#
+# TO CLOSE THE GAP FOR REAL, one of these has to be true of the machine, and
+# both are the owner's call and not a test's:
+#     usermod -aG input <user>          (then log in again), or
+#     a udev rule giving the uinput-created device uaccess/mode 0660 to the
+#     seat user, e.g. matching ATTRS{name}=="hamnix-latency-probe".
+# When either holds, `--uinput-check` prints READABLE, this gate says so, and
+# the probe should be taught to prefer that node over the pty — the device is
+# already created and named for exactly that purpose.
+#
 # A pty slave is what is left, and it is worth exactly this much: to
 # sys_waitfds it is INDISTINGUISHABLE from an evdev node — devtab_find misses
 # it, fstat says S_ISCHR so it is not the regular-file class, and it goes into

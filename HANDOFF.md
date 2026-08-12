@@ -359,6 +359,39 @@ same failure this project exists to beat.
   saying the compositor may not present faster than a panel can show. That cap
   is the obvious next question and it is NOT answered here.
 
+* **THE COMPOSITOR PRESENTS AS FAST AS INPUT ARRIVES, AND CAPPING IT IS WORTH
+  LESS THAN THE FRAME COUNT SAYS -- MEASURED BEFORE ANYBODY WRITES THE CAP.**
+  Since the wake-on-input change there is nothing saying wsysd may not present
+  faster than a panel can show: 250 pointer events a second produce 250 frames,
+  1000 produce 998.8. The obvious inference is that a 60 Hz cap would save
+  three quarters of the work. IT WOULD NOT. Same drag load, same binary, only
+  the INPUT rate changed (which is what a cap would change about the output):
+
+      input   60 ev/s ->  61.1 fps (907 full + 10 cursor-only)  38.6% of a core
+      input  250 ev/s -> 248.0 fps (3707 full + 13 cursor-only)  60.5% of a core
+
+  **4.1x the full repaints for 1.57x the CPU**, and the cost per presented
+  frame FALLS from 6.31 ms to 2.44 ms. So the prize for capping this load at
+  60 Hz is about **22 points of one core, not 45** -- real, and a third of what
+  a frame-count argument promises. For scale, the OLD tick-paced compositor
+  under the same load is 37.7% of a core for 39.6 fps: capping the new one to
+  60 Hz would cost about what the tick cost and deliver 1.5x the frames at
+  1/27th the latency.
+  **THE LIKELY MECHANISM, STATED AS A HYPOTHESIS BECAUSE IT IS NOT PROVEN
+  HERE**: present_rows() writes only the rows that changed, and a window that
+  is being dragged moves a fixed distance per second, so four times as many
+  presents each carry about a quarter of the damage. The pixels written per
+  second are roughly constant and the frame COUNT is not what costs.
+  **NOT MEASURED**: the same ratio on the GPU scanout path (which is
+  single-buffered and tears), and whether pacing to vblank would fix the
+  tearing and the power in one change. That is the design note for whoever
+  writes the cap, along with: key it on the display's refresh rather than a
+  constant, never cap OFFSCREEN (or every gate starts measuring a rate limiter
+  instead of the compositor), and make it a MINIMUM INTERVAL BETWEEN PRESENTS
+  that never delays the first input after a quiet period -- a cap that does
+  delay it gives back the whole 8.93 -> 0.33 ms result for exactly the
+  interaction people notice most.
+
 * **A VERTICAL PANEL IS ACCEPTED BY THE CONFIG AND NEVER APPEARS ON SCREEN.**
   `tests/linux/de_panel_conf_shipped.sh` is 14 PASS / 1 FAIL, and it fails the
   same way with `user/wsysd.ad` and `user/linux-syscalls.c` reverted to
