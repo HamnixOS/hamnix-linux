@@ -1185,6 +1185,31 @@ single entry:
   exactly `u 80 110 0 0`. Fixed by flushing the pending edge (`deliver_pointer`)
   before accepting a second button transition in the same drain — devwsys routes
   per event, and this is that at the granularity this poll loop has.
+* **And focus was a private variable the compositor never told anyone about.**
+  Named by the agent that made the DE clickable, fixed here. `wsysd` kept
+  `focus_wid`, used it to route keys and to colour the active titlebar, and
+  emitted **no `f` line at all** — where devwsys pushes `f in\n` / `f out\n`
+  onto the per-window EVENT ring on every focus change (`_wsys_set_focus` →
+  `_wsys_evt_emit_focus`, `~/Hamnix/sys/src/9/port/devwsys.ad:12399`). The
+  client half was already written and waiting: `hampanelscene`'s `_drain_events`
+  parses `f out` and closes its Applications dropdown on it. So the menu could
+  only be dismissed by hitting the same button a second time — clicking the
+  wallpaper left the card hanging over the desktop, which a person notices in
+  the first ten seconds. **Fixed**: `route_focus_event` emits Hamnix's exact
+  line shape on the same ring as the `m` lines, and `set_focus` is now the ONE
+  place `focus_wid` moves. Three call sites: the click-to-focus press, a press
+  on bare backdrop with no window under it (`set_focus(0)`, devwsys's
+  `pressed == 1 and target == 0`), and `pick_focus`, so launching a window from
+  the menu dismisses the menu too. **The order it guarantees**, on wsysd's
+  single thread with synchronous `/dev/wsys` writes: `f out` to the loser
+  returns → `focus_wid` moves → `f in` to the gainer → *then* the caller's `m`
+  line for the very press that moved focus, which is devwsys's order (focus
+  first, `_wsys_evt_emit_pointer` after). A client never sees the press before
+  the `f in` explaining it. **The no-change early return is load-bearing**: the
+  dropdown here is not an override-redirect window, it is the panel's OWN
+  window grown taller, so a click on the Applications button must emit nothing
+  or the focus line would fight the toggle that already worked. Gated by
+  `tests/linux/de_focus_dismiss.sh` (14 PASS).
 
 None of these failed loudly. Three were found only by tracing, one only by
 running `strace` **as PID 1**, and one only after publishing the compositor's
@@ -1269,6 +1294,39 @@ is `#3584e4`); a click on the second icon MOVES the selection (65% / 0%), so it
 cannot be satisfied by a desktop that highlighted everything at startup; and a
 click whose move/press/release arrive in ONE evdev read still opens the menu.
 Two controls run before any click at all: 0% card, 0% selection.
+
+### And the gate CLICKING AWAY got
+
+`tests/linux/de_focus_dismiss.sh`, **14 PASS**, offscreen, same rule: it never
+pokes a ring (its last assertion greps itself, as `de_mouse_chrome.sh` does),
+and `wsys_poke` appears only in reads — the window `ctl` lines and
+`/dev/wsys/wsysd/state`. It opens the Applications menu with an evdev click,
+then clicks the **wallpaper** at a point it has proved is inside the backdrop
+window and below the grown panel, and asks whether the menu went away: the
+panel window back to 26 px and 0% of the card column still the dropdown body.
+Then it checks the panel is still reachable (the button re-opens the menu) and
+that the path that already worked still works — a click on the menu's own
+parent, the already-focused panel, where `set_focus` must emit nothing.
+
+**The revert arm, and what it taught the file.** With `user/wsysd.ad` at
+c515cae0 and the gate unchanged: **10 PASS / 2 FAIL**, `the panel window is
+still 206 px tall, not 26` and `the card is still 87% painted after the click
+on the wallpaper`. The first run of that arm also exposed two assertions that
+were not measuring what they claimed, both since fixed:
+
+* `wsysd moved focus panel → backdrop` **passed with the fix reverted**, and
+  had to — wsysd always moved its private `focus_wid`, it just never said so,
+  which *is* the defect. It is now labelled as what it is: a discriminator that
+  rules out the other way the dismiss assertion could go green (the click was
+  swallowed, or the panel died).
+* The two follow-on assertions **failed in the revert arm for a reason that had
+  nothing to do with them** — the menu was still open, so those clicks were an
+  ordinary toggle. They are now gated on the away-click having actually
+  dismissed, and report INFO when it did not. A question a run cannot answer
+  must not be scored as an answer.
+
+Green alongside it, unchanged: `de_mouse_chrome.sh` 13, `de_appmenu_band.sh`
+11, `wsys_desktop_z.sh` 12, `wsys_title.sh` 23.
 
 **Two revert arms, both run.** Drop the `route_pointer_event` call from
 `deliver_pointer`: **6 PASS / 7 FAIL**, the panel still 1280x26 and the icon
