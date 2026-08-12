@@ -4,6 +4,12 @@
 # scored EXPECTED_FAIL and counted with the healthy, and the reason is written
 # into the results row so the next reader re-derives nothing.
 #
+# THE ROWS THAT DO **NOT** BELONG HERE ARE NAMED, WITH THEIR REASONS, IN
+# docs/runsweep_unhealthy.md -- the real gaps, the hardware and privilege this
+# harness withholds on purpose, and the launchers it does not run. Adding a row
+# to THIS file is how a belief gets laundered into a score; putting it in that
+# one is how it gets recorded instead.
+#
 # THE BAR: THE STATUS MUST BE THE ANSWER. Two shapes qualify and no others:
 #
 #   1. the exit status IS the program's output    `false`, `cmp`, `diff`, `tty`

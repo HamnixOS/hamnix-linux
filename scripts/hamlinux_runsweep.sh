@@ -48,6 +48,13 @@
 #   <outdir>/run/<app>.diff            the files it created or changed
 #   <outdir>/obj/<app>.elf             the binary
 #   <outdir>/summary.txt               counts by verdict and by class
+#
+# THE ROWS THAT ARE NOT IN THE NUMERATOR ARE NAMED, WITH THEIR REASONS, IN
+# docs/runsweep_unhealthy.md. A score with no list behind it is an argument
+# rather than a measurement, and the four reasons a row can be unhealthy --
+# a name this port owes, hardware or privilege this harness withholds, a
+# launcher it does not run, and its own mistakes -- need four different
+# responses. Read it before deciding what a number here means.
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJ_ROOT"
