@@ -77,7 +77,7 @@ from lib.hamui import hamscene_begin, hamscene_fill, hamscene_rect, \
     hamscene_glyphs, hamscene_glyphs_bold, hamscene_line, \
     hamscene_roundrect, \
     hamscene_icon_folder, hamscene_icon_file, hamscene_commit, \
-    hamscene_icon_draw, hamscene_icon_code
+    hamscene_icon_draw, hamscene_icon_code, hamscene_icon_known
 from lib.hamfmcore import fmc_set_cur_path, fmc_mkdir, \
     fmc_load_dir, fmc_refresh_if_changed, fmc_num_entries, \
     fmc_has_up_entry, fmc_entry_is_dir, fmc_entry_name_copy, \
@@ -1043,8 +1043,45 @@ def _desk_is_live() -> int32:
 # (0 -> caller falls back to _load_defaults).
 desk_file_buf: Array[2048, uint8]
 name_scratch: Array[128, uint8]
+
+# UNRESOLVED Icon= NAMES, KEPT SO SOMETHING CAN SAY THEM.
+# hamscene_icon_code() answers HS_ICON_FILE for a name it has never heard of,
+# exactly as it does for an app with no Icon= at all. That is the failure the
+# machine's owner saw and called "the icons are missing": Spreadsheet,
+# Presentation, Word Processor and Video Player each named a real freedesktop
+# icon, each got the anonymous page, and NOTHING ANYWHERE NAMED THE MISS. An
+# icon that cannot be drawn must say which one, so every name that fails to
+# resolve is collected here and published in /tmp/.hamdesktop.src as
+# "icon-unknown <name>". A gate reads those lines; so can a person.
+UNK_CAP: uint64 = 512
+unk_buf: Array[512, uint8]
+unk_len: uint64 = 0
+unk_dropped: uint64 = 0
+
+def _note_unknown_icon(name: Ptr[uint8]):
+    if name == cast[Ptr[uint8]](0) or name[0] == 0:
+        return                                  # no Icon= at all: page is right
+    if hamscene_icon_known(name) != 0:
+        return
+    n: uint64 = 0
+    while name[n] != 0 and n < 64:
+        n = n + 1
+    if unk_len + n + 1 > UNK_CAP:
+        unk_dropped = unk_dropped + 1
+        return
+    i: uint64 = 0
+    while i < n:
+        unk_buf[unk_len] = name[i]
+        unk_len = unk_len + 1
+        i = i + 1
+    unk_buf[unk_len] = 10                       # '\n'
+    unk_len = unk_len + 1
+
+
 def _build_icons_from_fmc() -> uint64:
     n_icons = 0
+    unk_len = 0
+    unk_dropped = 0
     base: uint64 = 0
     if fmc_has_up_entry() != 0:                          # skip synthetic ".."
         base = 1
@@ -1075,6 +1112,7 @@ def _build_icons_from_fmc() -> uint64:
                         # on an installed system). A valid-but-hidden entry is
                         # still "handled" so it is NOT re-added as a plain file.
                         if desktop_liveonly() == 0 or _desk_is_live() != 0:
+                            _note_unknown_icon(desktop_icon_ptr())
                             _add_icon(desktop_name_ptr(), desktop_name_len(),
                                       0, desktop_prog_ptr(), desktop_prog_len(),
                                       -1, -1,
@@ -1140,6 +1178,24 @@ def _report_icon_source(n: uint64):
         sys_write(fd, label_ptr(i), ic_label_len[i])
         _writeall(fd, cast[Ptr[uint8]]("\n"))
         i = i + 1
+    # And then the MISSES, one "icon-unknown <name>" line each. An empty tail
+    # is the healthy state and says so by its absence; a name here is an app
+    # that got the anonymous page glyph, named.
+    u: uint64 = 0
+    while u < unk_len:
+        _writeall(fd, cast[Ptr[uint8]]("icon-unknown "))
+        s: uint64 = u
+        while u < unk_len and unk_buf[u] != 10:
+            u = u + 1
+        sys_write(fd, &unk_buf[s], u - s)
+        _writeall(fd, cast[Ptr[uint8]]("\n"))
+        u = u + 1
+    if unk_dropped > 0:
+        _writeall(fd, cast[Ptr[uint8]]("icon-unknown-overflow "))
+        ob: Array[24, uint8]
+        ol: uint64 = _u64_to_dec(unk_dropped, &ob[0])
+        sys_write(fd, &ob[0], ol)
+        _writeall(fd, cast[Ptr[uint8]]("\n"))
     sys_close(fd)
 
 

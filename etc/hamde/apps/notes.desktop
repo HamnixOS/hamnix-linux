@@ -3,5 +3,5 @@ Type=Application
 Name=Notes
 Comment=Quick sticky-note scratchpad
 Exec=/bin/hamnotesscene
-Icon=accessories-text-editor
+Icon=accessories-notes
 Categories=Accessories;Utility;

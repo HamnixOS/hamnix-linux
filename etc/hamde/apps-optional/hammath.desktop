@@ -3,5 +3,5 @@ Type=Application
 Name=HamMath
 Comment=Expression calculator: type a whole expression with correct precedence, parentheses and unary minus, then evaluate it
 Exec=/bin/hammath
-Icon=accessories-calculator
+Icon=accessories-math
 Categories=Utility;Calculator;Office;

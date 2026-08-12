@@ -3,5 +3,5 @@ Type=Application
 Name=HamMark
 Comment=Markdown document viewer: read .md docs as a formatted, scrollable page with headings, lists, code blocks and quotes
 Exec=/bin/hammark
-Icon=accessories-text-editor
+Icon=text-markdown
 Categories=Utility;Viewer;Office;

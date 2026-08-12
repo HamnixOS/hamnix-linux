@@ -3,5 +3,5 @@ Type=Application
 Name=Software
 Comment=Browse, search, install, remove and upgrade software packages (hpm front-end)
 Exec=/bin/hamsoftware
-Icon=system-installer
+Icon=system-software-install
 Categories=System;Administration;

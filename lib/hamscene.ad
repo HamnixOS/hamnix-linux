@@ -600,6 +600,32 @@ HS_ICON_INSTALLER: int32 = 8   # system-installer
 HS_ICON_BROWSER: int32 = 9     # web-browser
 HS_ICON_SHOT: int32 = 10       # applets-screenshooter
 HS_ICON_GAME: int32 = 11       # ham2048
+# --- second wave (the "all my icons are the same blank page" report) -------
+# Every name below WAS shipped in a .desktop and resolved to HS_ICON_FILE,
+# so Spreadsheet, Presentation, Word Processor, Video Player and Audio Player
+# all drew the SAME anonymous page on the desktop. That is what the machine's
+# owner was reading as "the icons are missing": they were drawn, successfully,
+# and said nothing. One code + one glyph per application from here down.
+HS_ICON_DOC: int32 = 12        # x-office-document        (Word Processor)
+HS_ICON_SHEET: int32 = 13      # x-office-spreadsheet     (Spreadsheet)
+HS_ICON_SLIDES: int32 = 14     # x-office-presentation    (Presentation)
+HS_ICON_VIDEO: int32 = 15      # multimedia-video-player  (Video Player)
+HS_ICON_AUDIO: int32 = 16      # multimedia-audio-player  (Audio Player)
+HS_ICON_LOG: int32 = 17        # utilities-log-viewer     (Log Viewer)
+HS_ICON_MOUSE: int32 = 18      # input-mouse              (Input Inspector)
+HS_ICON_PACKAGE: int32 = 19    # system-software-install  (Software)
+HS_ICON_STICKY: int32 = 20     # accessories-notes        (Notes)
+HS_ICON_SNAKE: int32 = 21      # hamsnake / hamgamesnake
+HS_ICON_TETRIS: int32 = 22     # hamtetris
+HS_ICON_MINE: int32 = 23       # hammine
+HS_ICON_CHESS: int32 = 24      # hamchess
+HS_ICON_PAD: int32 = 25        # applications-games / hamgamedemo
+HS_ICON_PAINT: int32 = 26      # applications-graphics    (HamPaint)
+HS_ICON_CLOCK: int32 = 27      # hamclock
+HS_ICON_UNITS: int32 = 28      # accessories-units        (HamConvert)
+HS_ICON_MATH: int32 = 29       # accessories-math         (HamMath)
+HS_ICON_MARKDOWN: int32 = 30   # text-markdown            (HamMark)
+HS_ICON_BOOK: int32 = 31       # multimedia-audiobook     (Audiobook)
 
 
 # NUL-terminated string equality (small, local — hamscene stays extern-free).
@@ -640,7 +666,70 @@ def hamscene_icon_code(name: Ptr[uint8]) -> int32:
         return HS_ICON_SHOT
     if _hs_streq(name, cast[Ptr[uint8]]("ham2048")) != 0:
         return HS_ICON_GAME
+    if _hs_streq(name, cast[Ptr[uint8]]("x-office-document")) != 0:
+        return HS_ICON_DOC
+    if _hs_streq(name, cast[Ptr[uint8]]("x-office-spreadsheet")) != 0:
+        return HS_ICON_SHEET
+    if _hs_streq(name, cast[Ptr[uint8]]("x-office-presentation")) != 0:
+        return HS_ICON_SLIDES
+    if _hs_streq(name, cast[Ptr[uint8]]("multimedia-video-player")) != 0:
+        return HS_ICON_VIDEO
+    if _hs_streq(name, cast[Ptr[uint8]]("multimedia-audio-player")) != 0:
+        return HS_ICON_AUDIO
+    if _hs_streq(name, cast[Ptr[uint8]]("utilities-log-viewer")) != 0:
+        return HS_ICON_LOG
+    if _hs_streq(name, cast[Ptr[uint8]]("input-mouse")) != 0:
+        return HS_ICON_MOUSE
+    if _hs_streq(name, cast[Ptr[uint8]]("system-software-install")) != 0:
+        return HS_ICON_PACKAGE
+    if _hs_streq(name, cast[Ptr[uint8]]("accessories-notes")) != 0:
+        return HS_ICON_STICKY
+    if _hs_streq(name, cast[Ptr[uint8]]("hamsnake")) != 0:
+        return HS_ICON_SNAKE
+    if _hs_streq(name, cast[Ptr[uint8]]("hamgamesnake")) != 0:
+        return HS_ICON_SNAKE
+    if _hs_streq(name, cast[Ptr[uint8]]("hamtetris")) != 0:
+        return HS_ICON_TETRIS
+    if _hs_streq(name, cast[Ptr[uint8]]("hammine")) != 0:
+        return HS_ICON_MINE
+    if _hs_streq(name, cast[Ptr[uint8]]("hamchess")) != 0:
+        return HS_ICON_CHESS
+    if _hs_streq(name, cast[Ptr[uint8]]("applications-games")) != 0:
+        return HS_ICON_PAD
+    if _hs_streq(name, cast[Ptr[uint8]]("hamgamedemo")) != 0:
+        return HS_ICON_PAD
+    if _hs_streq(name, cast[Ptr[uint8]]("applications-graphics")) != 0:
+        return HS_ICON_PAINT
+    if _hs_streq(name, cast[Ptr[uint8]]("hamclock")) != 0:
+        return HS_ICON_CLOCK
+    if _hs_streq(name, cast[Ptr[uint8]]("accessories-units")) != 0:
+        return HS_ICON_UNITS
+    if _hs_streq(name, cast[Ptr[uint8]]("accessories-math")) != 0:
+        return HS_ICON_MATH
+    if _hs_streq(name, cast[Ptr[uint8]]("text-markdown")) != 0:
+        return HS_ICON_MARKDOWN
+    if _hs_streq(name, cast[Ptr[uint8]]("multimedia-audiobook")) != 0:
+        return HS_ICON_BOOK
     return HS_ICON_FILE
+
+
+# DID THAT NAME ACTUALLY RESOLVE? hamscene_icon_code answers HS_ICON_FILE for
+# BOTH "no Icon= at all" (correct: the generic page IS the answer) and "an
+# Icon= this build has never heard of" (a defect: the app gets an anonymous
+# page and nothing anywhere says which name went unmatched). That second case
+# is the success-shaped answer this whole change exists to remove, so it gets
+# its own predicate: 1 iff `name` is non-empty and matched a REAL glyph.
+# A caller that renders icons reports the misses; see hamdesktop's
+# /tmp/.hamdesktop.src "icon-unknown <name>" lines.
+def hamscene_icon_known(name: Ptr[uint8]) -> int32:
+    if name == cast[Ptr[uint8]](0) or name[0] == 0:
+        return 0
+    if hamscene_icon_code(name) != HS_ICON_FILE:
+        return 1
+    # "text-x-generic" is the one name that legitimately MEANS the page glyph.
+    if _hs_streq(name, cast[Ptr[uint8]]("text-x-generic")) != 0:
+        return 1
+    return 0
 
 
 # --- individual glyphs ----------------------------------------------
@@ -894,6 +983,530 @@ def hamscene_icon_game(x: int32, y: int32, w: int32, h: int32):
     hamscene_roundrect(bx + 4 + cw, by + 4 + ch, cw, ch, 2, t4)
 
 
+# ====================================================================
+# THE SECOND WAVE OF GLYPHS.
+#
+# Same rules as above: fill / line / roundrect / stroke only, no bitmap
+# tier, nothing to package. Each is written to survive being scaled down
+# to the ~15px panel chip, which is why every one of them leads with a
+# BODY COLOUR that is unique in this set — at 15px the silhouette and the
+# dominant hue are all a person gets, so two office documents that differ
+# only in their little grey text lines would still read as "the same
+# icon", which is the exact complaint being answered.
+#
+#   DOC     white page, BLUE banner        SHEET   white page, GREEN grid
+#   SLIDES  ORANGE screen on a stand       VIDEO   BLACK screen, play triangle
+#   AUDIO   PURPLE tile, note              LOG     white page, magnifier
+#   MOUSE   pale grey mouse                PACKAGE brown carton
+#   STICKY  YELLOW square                  SNAKE   dark green board
+#   TETRIS  four bright tetrominoes        MINE    grey field, black mine
+#   CHESS   black/white checker            PAD     dark gamepad
+#   PAINT   palette + paint dots           CLOCK   white dial
+#   UNITS   two teal arrows                MATH    four operators
+#   MARKDOWN page + dark "M" chevron       BOOK    open book + headphone
+# ====================================================================
+
+# Word processor document: a white page with a BLUE title banner and
+# justified body text. The banner is the thing that separates it from the
+# generic page at a glance.
+def hamscene_icon_doc(x: int32, y: int32, w: int32, h: int32):
+    page: Ptr[uint8] = cast[Ptr[uint8]]("#ffffff")
+    band: Ptr[uint8] = cast[Ptr[uint8]]("#2a5db0")
+    textc: Ptr[uint8] = cast[Ptr[uint8]]("#7f8c9b")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#8a8a8a")
+    bx: int32 = x + w / 6
+    bw: int32 = (w * 2) / 3
+    hamscene_fill(bx, y, bw, h, page)
+    hamscene_fill(bx, y, bw, h / 4, band)
+    ly: int32 = y + h / 4 + 4
+    n: int32 = 0
+    while n < 4 and ly + 2 < y + h - 3:
+        ww: int32 = bw - 8
+        if n == 3:
+            ww = (bw - 8) / 2
+        hamscene_fill(bx + 4, ly, ww, 2, textc)
+        ly = ly + 5
+        n = n + 1
+    hamscene_stroke(bx, y, bw, h, 1, edge)
+
+
+# Spreadsheet: a white page under a GREEN header row, ruled into cells,
+# with one cell highlighted the way a selection looks.
+def hamscene_icon_sheet(x: int32, y: int32, w: int32, h: int32):
+    page: Ptr[uint8] = cast[Ptr[uint8]]("#ffffff")
+    head: Ptr[uint8] = cast[Ptr[uint8]]("#1e8e3e")
+    rule: Ptr[uint8] = cast[Ptr[uint8]]("#9ccfae")
+    selc: Ptr[uint8] = cast[Ptr[uint8]]("#c8e6c9")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#4a7f5c")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    hh: int32 = h / 5
+    hamscene_fill(bx, y, bw, h, page)
+    hamscene_fill(bx, y, bw, hh, head)
+    # Ruled cells: three columns, rows every 6px.
+    cw: int32 = bw / 3
+    hamscene_fill(bx + cw, y + hh, bw - cw * 2, 6, selc)   # the "selected" cell
+    row: int32 = y + hh
+    while row < y + h - 1:
+        hamscene_line(bx, row, bx + bw - 1, row, 1, rule)
+        row = row + 6
+    hamscene_line(bx + cw, y + hh, bx + cw, y + h - 1, 1, rule)
+    hamscene_line(bx + cw * 2, y + hh, bx + cw * 2, y + h - 1, 1, rule)
+    hamscene_stroke(bx, y, bw, h, 1, edge)
+
+
+# Presentation: an ORANGE slide on a projector stand with a white bar
+# chart on it. The stand legs are the silhouette cue at small sizes.
+def hamscene_icon_slides(x: int32, y: int32, w: int32, h: int32):
+    slide: Ptr[uint8] = cast[Ptr[uint8]]("#e8710a")
+    barc: Ptr[uint8] = cast[Ptr[uint8]]("#ffffff")
+    stand: Ptr[uint8] = cast[Ptr[uint8]]("#5d4037")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#a0522d")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    bh: int32 = (h * 5) / 8
+    hamscene_fill(bx, y + 2, bw, bh, slide)
+    hamscene_stroke(bx, y + 2, bw, bh, 1, edge)
+    # Three ascending bars on the slide.
+    bwid: int32 = bw / 6
+    base: int32 = y + 2 + bh - 3
+    hamscene_fill(bx + bwid, base - bh / 4, bwid, bh / 4, barc)
+    hamscene_fill(bx + bwid * 5 / 2, base - bh / 2, bwid, bh / 2, barc)
+    hamscene_fill(bx + bwid * 4, base - (bh * 3) / 4, bwid, (bh * 3) / 4, barc)
+    # Stand: a post and two splayed legs.
+    cx: int32 = x + w / 2
+    hamscene_fill(cx - 1, y + 2 + bh, 3, h / 6, stand)
+    hamscene_line(cx, y + 2 + bh + h / 6, cx - bw / 4, y + h - 1, 1, stand)
+    hamscene_line(cx, y + 2 + bh + h / 6, cx + bw / 4, y + h - 1, 1, stand)
+
+
+# Video player: a BLACK screen with sprocket holes down both edges and a
+# big white play triangle.
+def hamscene_icon_video(x: int32, y: int32, w: int32, h: int32):
+    film: Ptr[uint8] = cast[Ptr[uint8]]("#14161a")
+    screen: Ptr[uint8] = cast[Ptr[uint8]]("#2b3440")
+    hole: Ptr[uint8] = cast[Ptr[uint8]]("#f0f0f0")
+    play: Ptr[uint8] = cast[Ptr[uint8]]("#ff5252")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    by: int32 = y + h / 8
+    bh: int32 = (h * 3) / 4
+    hamscene_roundrect(bx, by, bw, bh, 3, film)
+    sp: int32 = bw / 7
+    hamscene_fill(bx + sp + 1, by + 2, bw - sp * 2 - 2, bh - 4, screen)
+    # Sprocket holes down the left and right margins.
+    hy: int32 = by + 3
+    while hy < by + bh - 4:
+        hamscene_fill(bx + 2, hy, sp - 3, 3, hole)
+        hamscene_fill(bx + bw - sp + 1, hy, sp - 3, 3, hole)
+        hy = hy + 7
+    # Play triangle in the screen: rows of a filled triangle.
+    tcx: int32 = bx + bw / 2 - bw / 12
+    tcy: int32 = by + bh / 2
+    tr: int32 = bh / 4
+    d: int32 = 0
+    while d < tr:
+        hamscene_fill(tcx - tr / 2 + d, tcy - (tr - d), 2, (tr - d) * 2, play)
+        d = d + 2
+
+
+# Audio player: a PURPLE tile with a white quaver — a beam, a stem and a
+# round note head.
+def hamscene_icon_audio(x: int32, y: int32, w: int32, h: int32):
+    body: Ptr[uint8] = cast[Ptr[uint8]]("#7b3fb5")
+    note: Ptr[uint8] = cast[Ptr[uint8]]("#ffffff")
+    shade: Ptr[uint8] = cast[Ptr[uint8]]("#5a2b86")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    hamscene_roundrect(bx, y + 2, bw, h - 4, 5, body)
+    hamscene_fill(bx + 2, y + h - 8, bw - 4, 4, shade)
+    # Stem + flag + head.
+    sx: int32 = bx + bw / 2 + 2
+    hamscene_fill(sx, y + 7, 3, h / 2, note)
+    hamscene_fill(sx, y + 7, bw / 4, 3, note)               # the flag
+    hamscene_fill(sx + bw / 4 - 3, y + 7, 3, h / 6, note)
+    hd: int32 = bw / 5
+    hamscene_roundrect(sx - hd + 2, y + 7 + h / 2 - hd / 2, hd, hd,
+                       hd / 2, note)
+
+
+# Log viewer: a white page of DENSE monospace lines with a magnifier over
+# the lower right — a reader, not a monitor (which is what it used to
+# borrow, so Log Viewer and System Monitor drew the same picture).
+def hamscene_icon_log(x: int32, y: int32, w: int32, h: int32):
+    page: Ptr[uint8] = cast[Ptr[uint8]]("#f7f7f2")
+    line1: Ptr[uint8] = cast[Ptr[uint8]]("#5a6572")
+    warn: Ptr[uint8] = cast[Ptr[uint8]]("#d98324")
+    glass: Ptr[uint8] = cast[Ptr[uint8]]("#1e88e5")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#8a8a8a")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    hamscene_fill(bx, y, bw, h, page)
+    hamscene_stroke(bx, y, bw, h, 1, edge)
+    ly: int32 = y + 3
+    n: int32 = 0
+    while n < 7 and ly + 1 < y + h - 2:
+        c: Ptr[uint8] = line1
+        if n == 2:
+            c = warn
+        ww: int32 = bw - 6
+        if n == 4:
+            ww = (bw - 6) / 2
+        hamscene_fill(bx + 3, ly, ww, 2, c)
+        ly = ly + 4
+        n = n + 1
+    # Magnifier: a ring plus a handle, over the bottom-right corner.
+    mr: int32 = w / 6
+    mcx: int32 = bx + bw - mr - 1
+    mcy: int32 = y + h - mr - 1
+    hamscene_roundrect(mcx - mr, mcy - mr, mr * 2, mr * 2, mr - 1, glass)
+    hamscene_roundrect(mcx - mr + 2, mcy - mr + 2, mr * 2 - 4, mr * 2 - 4,
+                       mr - 2, page)
+    hamscene_line(mcx + mr - 1, mcy + mr - 1, mcx + mr + 3, mcy + mr + 3,
+                  2, glass)
+
+
+# Input inspector: a pale mouse — rounded body, a split between the two
+# buttons, a scroll wheel and a cable going up out of the top.
+def hamscene_icon_mouse(x: int32, y: int32, w: int32, h: int32):
+    shell: Ptr[uint8] = cast[Ptr[uint8]]("#dfe4ea")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#7f8c8d")
+    wheel: Ptr[uint8] = cast[Ptr[uint8]]("#2d3436")
+    cable: Ptr[uint8] = cast[Ptr[uint8]]("#95a5a6")
+    bw: int32 = w / 2
+    bx: int32 = x + (w - bw) / 2
+    by: int32 = y + h / 6
+    bh: int32 = h - h / 6 - 1
+    hamscene_fill(bx + bw / 2 - 1, y, 2, h / 6, cable)
+    hamscene_roundrect(bx, by, bw, bh, bw / 2, shell)
+    hamscene_stroke(bx, by, bw, bh, 1, edge)
+    # Button split: a horizontal seam and a vertical divider on the top half.
+    hamscene_line(bx + 1, by + bh / 3, bx + bw - 2, by + bh / 3, 1, edge)
+    hamscene_line(bx + bw / 2, by + 1, bx + bw / 2, by + bh / 3, 1, edge)
+    # Scroll wheel between the buttons.
+    hamscene_fill(bx + bw / 2 - 1, by + bh / 6, 3, bh / 6, wheel)
+
+
+# Software / package manager: a brown shipping carton with a lighter lid
+# and a tape seam down the front.
+def hamscene_icon_package(x: int32, y: int32, w: int32, h: int32):
+    box: Ptr[uint8] = cast[Ptr[uint8]]("#a1662f")
+    lid: Ptr[uint8] = cast[Ptr[uint8]]("#c8874a")
+    tape: Ptr[uint8] = cast[Ptr[uint8]]("#f0d8a8")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#6d4420")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    lh: int32 = h / 4
+    by: int32 = y + lh
+    bh: int32 = h - lh - 1
+    hamscene_fill(bx, y + 2, bw, lh, lid)
+    hamscene_fill(bx, by, bw, bh, box)
+    hamscene_fill(bx + bw / 2 - 2, y + 2, 5, h - 3, tape)     # vertical tape
+    hamscene_fill(bx, by, bw, 3, tape)                        # tape across
+    hamscene_stroke(bx, y + 2, bw, h - 3, 1, edge)
+
+
+# Notes: a YELLOW sticky square with a turned-up bottom-right corner and
+# three short lines of scribble.
+def hamscene_icon_sticky(x: int32, y: int32, w: int32, h: int32):
+    pad: Ptr[uint8] = cast[Ptr[uint8]]("#ffd94a")
+    curl: Ptr[uint8] = cast[Ptr[uint8]]("#d4a017")
+    ink: Ptr[uint8] = cast[Ptr[uint8]]("#6b5410")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#c69214")
+    s: int32 = h - 4
+    if w - 8 < s:
+        s = w - 8
+    bx: int32 = x + (w - s) / 2
+    by: int32 = y + 2
+    hamscene_fill(bx, by, s, s, pad)
+    # Peeled corner, bottom-right.
+    cs: int32 = s / 3
+    hamscene_fill(bx + s - cs, by + s - cs, cs, cs, curl)
+    hamscene_line(bx + s - cs, by + s - 1, bx + s - 1, by + s - cs, 1, edge)
+    ly: int32 = by + 5
+    n: int32 = 0
+    while n < 3:
+        ww: int32 = s - 10
+        if n == 2:
+            ww = (s - 10) / 2
+        hamscene_fill(bx + 4, ly, ww, 2, ink)
+        ly = ly + 6
+        n = n + 1
+    hamscene_stroke(bx, by, s, s, 1, edge)
+
+
+# Snake: a dark board with a four-segment green snake and a red apple.
+def hamscene_icon_snake(x: int32, y: int32, w: int32, h: int32):
+    board: Ptr[uint8] = cast[Ptr[uint8]]("#16321f")
+    body: Ptr[uint8] = cast[Ptr[uint8]]("#4caf50")
+    head: Ptr[uint8] = cast[Ptr[uint8]]("#a5d6a7")
+    apple: Ptr[uint8] = cast[Ptr[uint8]]("#e53935")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    by: int32 = y + 2
+    bh: int32 = h - 4
+    hamscene_roundrect(bx, by, bw, bh, 3, board)
+    c: int32 = bw / 5
+    hamscene_fill(bx + c, by + c, c, c, body)
+    hamscene_fill(bx + c * 2, by + c, c, c, body)
+    hamscene_fill(bx + c * 3, by + c, c, c, body)
+    hamscene_fill(bx + c * 3, by + c * 2, c, c, head)
+    hamscene_roundrect(bx + c, by + c * 3, c, c, c / 2, apple)
+
+
+# Tetris: four bright tetrominoes stacked in a well.
+def hamscene_icon_tetris(x: int32, y: int32, w: int32, h: int32):
+    well: Ptr[uint8] = cast[Ptr[uint8]]("#1a1a2e")
+    c1: Ptr[uint8] = cast[Ptr[uint8]]("#00bcd4")
+    c2: Ptr[uint8] = cast[Ptr[uint8]]("#ffc107")
+    c3: Ptr[uint8] = cast[Ptr[uint8]]("#8e24aa")
+    c4: Ptr[uint8] = cast[Ptr[uint8]]("#43a047")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    by: int32 = y + 2
+    bh: int32 = h - 4
+    hamscene_roundrect(bx, by, bw, bh, 2, well)
+    c: int32 = bw / 4
+    hamscene_fill(bx + 1, by + 2, c * 3, c, c1)                 # I piece
+    hamscene_fill(bx + 1, by + bh - c * 2 - 1, c, c, c3)        # S piece
+    hamscene_fill(bx + 1 + c, by + bh - c * 2 - 1, c, c, c3)
+    hamscene_fill(bx + 1 + c, by + bh - c - 1, c, c, c3)
+    hamscene_fill(bx + bw - c - 2, by + bh - c * 2 - 1, c, c, c2)   # O piece
+    hamscene_fill(bx + bw - c - 2, by + bh - c - 1, c, c, c4)
+
+
+# Minesweeper: a grey field with a black mine and four spikes.
+def hamscene_icon_mine(x: int32, y: int32, w: int32, h: int32):
+    field: Ptr[uint8] = cast[Ptr[uint8]]("#bdbdbd")
+    rule: Ptr[uint8] = cast[Ptr[uint8]]("#8d8d8d")
+    mine: Ptr[uint8] = cast[Ptr[uint8]]("#212121")
+    glint: Ptr[uint8] = cast[Ptr[uint8]]("#f5f5f5")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    by: int32 = y + 2
+    bh: int32 = h - 4
+    hamscene_fill(bx, by, bw, bh, field)
+    hamscene_line(bx + bw / 3, by, bx + bw / 3, by + bh - 1, 1, rule)
+    hamscene_line(bx + (bw * 2) / 3, by, bx + (bw * 2) / 3, by + bh - 1, 1, rule)
+    hamscene_line(bx, by + bh / 3, bx + bw - 1, by + bh / 3, 1, rule)
+    hamscene_line(bx, by + (bh * 2) / 3, bx + bw - 1, by + (bh * 2) / 3, 1, rule)
+    cx: int32 = bx + bw / 2
+    cy: int32 = by + bh / 2
+    rr: int32 = bw / 4
+    hamscene_fill(cx - 1, cy - rr - 3, 3, rr * 2 + 6, mine)     # vertical spike
+    hamscene_fill(cx - rr - 3, cy - 1, rr * 2 + 6, 3, mine)     # horizontal
+    hamscene_roundrect(cx - rr, cy - rr, rr * 2, rr * 2, rr - 1, mine)
+    hamscene_fill(cx - rr / 2, cy - rr / 2, 2, 2, glint)
+    hamscene_stroke(bx, by, bw, bh, 1, rule)
+
+
+# Chess: a checkered board with a light pawn standing on it.
+def hamscene_icon_chess(x: int32, y: int32, w: int32, h: int32):
+    lightsq: Ptr[uint8] = cast[Ptr[uint8]]("#efe0c0")
+    darksq: Ptr[uint8] = cast[Ptr[uint8]]("#7a5230")
+    pawn: Ptr[uint8] = cast[Ptr[uint8]]("#fdfdfd")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#3e2a18")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    by: int32 = y + 2
+    bh: int32 = h - 4
+    hamscene_fill(bx, by, bw, bh, lightsq)
+    c: int32 = bw / 4
+    r: int32 = 0
+    while r < 4:
+        cc: int32 = 0
+        while cc < 4:
+            if (r + cc) % 2 == 1:
+                hamscene_fill(bx + cc * c, by + r * (bh / 4), c, bh / 4, darksq)
+            cc = cc + 1
+        r = r + 1
+    # A pawn: head, collar, body, base.
+    pcx: int32 = bx + bw / 2
+    hd: int32 = bw / 6
+    hamscene_roundrect(pcx - hd, by + 3, hd * 2, hd * 2, hd - 1, pawn)
+    hamscene_fill(pcx - hd + 1, by + 3 + hd * 2, hd * 2 - 2, 2, pawn)
+    hamscene_fill(pcx - hd / 2, by + 5 + hd * 2, hd, bh / 4, pawn)
+    hamscene_fill(pcx - hd - 1, by + bh - 6, hd * 2 + 2, 4, pawn)
+    hamscene_stroke(bx, by, bw, bh, 1, edge)
+
+
+# Games (generic) / hamGame demos: a dark gamepad with a d-pad and two
+# action buttons.
+def hamscene_icon_pad(x: int32, y: int32, w: int32, h: int32):
+    body: Ptr[uint8] = cast[Ptr[uint8]]("#37474f")
+    grip: Ptr[uint8] = cast[Ptr[uint8]]("#263238")
+    dpad: Ptr[uint8] = cast[Ptr[uint8]]("#eceff1")
+    b1: Ptr[uint8] = cast[Ptr[uint8]]("#e53935")
+    b2: Ptr[uint8] = cast[Ptr[uint8]]("#43a047")
+    bw: int32 = (w * 7) / 8
+    bx: int32 = x + (w - bw) / 2
+    bh: int32 = h / 2
+    by: int32 = y + (h - bh) / 2
+    hamscene_roundrect(bx, by, bw, bh, bh / 3, body)
+    hamscene_roundrect(bx, by + bh / 2, bw / 4, bh / 2 + 3, 3, grip)
+    hamscene_roundrect(bx + bw - bw / 4, by + bh / 2, bw / 4, bh / 2 + 3, 3, grip)
+    # D-pad cross on the left.
+    dcx: int32 = bx + bw / 4
+    dcy: int32 = by + bh / 2
+    dl: int32 = bh / 3
+    hamscene_fill(dcx - dl, dcy - 1, dl * 2, 3, dpad)
+    hamscene_fill(dcx - 1, dcy - dl, 3, dl * 2, dpad)
+    # Two action buttons on the right.
+    acx: int32 = bx + (bw * 3) / 4
+    br: int32 = bh / 5
+    hamscene_roundrect(acx - br * 2, dcy - br, br * 2, br * 2, br - 1, b1)
+    hamscene_roundrect(acx, dcy - br, br * 2, br * 2, br - 1, b2)
+
+
+# Paint / graphics: a painter's palette with a thumb hole and four blobs.
+def hamscene_icon_paint(x: int32, y: int32, w: int32, h: int32):
+    wood: Ptr[uint8] = cast[Ptr[uint8]]("#c98a3f")
+    hole: Ptr[uint8] = cast[Ptr[uint8]]("#f2f2f2")
+    p1: Ptr[uint8] = cast[Ptr[uint8]]("#e53935")
+    p2: Ptr[uint8] = cast[Ptr[uint8]]("#1e88e5")
+    p3: Ptr[uint8] = cast[Ptr[uint8]]("#fdd835")
+    p4: Ptr[uint8] = cast[Ptr[uint8]]("#43a047")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    by: int32 = y + 3
+    bh: int32 = h - 6
+    hamscene_roundrect(bx, by, bw, bh, bh / 3, wood)
+    hr: int32 = bw / 7
+    hamscene_roundrect(bx + bw - hr * 3, by + bh - hr * 3, hr * 2, hr * 2,
+                       hr - 1, hole)
+    dr: int32 = bw / 6
+    hamscene_roundrect(bx + 3, by + 3, dr, dr, dr / 2, p1)
+    hamscene_roundrect(bx + bw / 2, by + 2, dr, dr, dr / 2, p2)
+    hamscene_roundrect(bx + 2, by + bh / 2, dr, dr, dr / 2, p3)
+    hamscene_roundrect(bx + bw / 3, by + bh - dr - 3, dr, dr, dr / 2, p4)
+
+
+# Clock: a white dial with a dark rim, ticks at 12/3/6/9 and two hands.
+def hamscene_icon_clock(x: int32, y: int32, w: int32, h: int32):
+    rim: Ptr[uint8] = cast[Ptr[uint8]]("#37474f")
+    face: Ptr[uint8] = cast[Ptr[uint8]]("#fafafa")
+    hand: Ptr[uint8] = cast[Ptr[uint8]]("#263238")
+    second: Ptr[uint8] = cast[Ptr[uint8]]("#e53935")
+    cx: int32 = x + w / 2
+    cy: int32 = y + h / 2
+    rr: int32 = w / 3
+    if h / 2 - 1 < rr:
+        rr = h / 2 - 1
+    hamscene_roundrect(cx - rr, cy - rr, rr * 2, rr * 2, rr - 1, rim)
+    hamscene_roundrect(cx - rr + 2, cy - rr + 2, rr * 2 - 4, rr * 2 - 4,
+                       rr - 3, face)
+    hamscene_fill(cx - 1, cy - rr + 3, 2, 3, hand)      # 12
+    hamscene_fill(cx - 1, cy + rr - 6, 2, 3, hand)      # 6
+    hamscene_fill(cx - rr + 3, cy - 1, 3, 2, hand)      # 9
+    hamscene_fill(cx + rr - 6, cy - 1, 3, 2, hand)      # 3
+    hamscene_line(cx, cy, cx, cy - rr + 6, 2, hand)     # minute hand
+    hamscene_line(cx, cy, cx + rr - 8, cy + 3, 2, second)   # hour hand
+    hamscene_fill(cx - 1, cy - 1, 3, 3, second)
+
+
+# Unit converter: two teal arrows pointing opposite ways across a divider.
+def hamscene_icon_units(x: int32, y: int32, w: int32, h: int32):
+    plate: Ptr[uint8] = cast[Ptr[uint8]]("#e0f2f1")
+    arrow: Ptr[uint8] = cast[Ptr[uint8]]("#00897b")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#00695c")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    by: int32 = y + 3
+    bh: int32 = h - 6
+    hamscene_roundrect(bx, by, bw, bh, 4, plate)
+    hamscene_stroke(bx, by, bw, bh, 1, edge)
+    ty: int32 = by + bh / 3
+    byy: int32 = by + (bh * 2) / 3
+    hamscene_fill(bx + 4, ty, bw - 10, 3, arrow)        # top shaft, points right
+    hamscene_line(bx + bw - 10, ty - 4, bx + bw - 5, ty + 1, 2, arrow)
+    hamscene_line(bx + bw - 10, ty + 6, bx + bw - 5, ty + 1, 2, arrow)
+    hamscene_fill(bx + 6, byy, bw - 10, 3, arrow)       # bottom shaft, left
+    hamscene_line(bx + 10, byy - 4, bx + 5, byy + 1, 2, arrow)
+    hamscene_line(bx + 10, byy + 6, bx + 5, byy + 1, 2, arrow)
+
+
+# Maths: a white slate carrying the four operators, one per quadrant.
+def hamscene_icon_math(x: int32, y: int32, w: int32, h: int32):
+    slate: Ptr[uint8] = cast[Ptr[uint8]]("#fffde7")
+    op: Ptr[uint8] = cast[Ptr[uint8]]("#3949ab")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#9fa8da")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    by: int32 = y + 3
+    bh: int32 = h - 6
+    hamscene_fill(bx, by, bw, bh, slate)
+    hamscene_stroke(bx, by, bw, bh, 1, edge)
+    qx: int32 = bx + bw / 4
+    qy: int32 = by + bh / 4
+    s: int32 = bw / 8
+    # plus (top-left)
+    hamscene_fill(qx - s, qy - 1, s * 2, 3, op)
+    hamscene_fill(qx - 1, qy - s, 3, s * 2, op)
+    # minus (top-right)
+    hamscene_fill(qx + bw / 2 - s, qy - 1, s * 2, 3, op)
+    # multiply (bottom-left)
+    hamscene_line(qx - s, qy + bh / 2 - s, qx + s, qy + bh / 2 + s, 2, op)
+    hamscene_line(qx - s, qy + bh / 2 + s, qx + s, qy + bh / 2 - s, 2, op)
+    # divide (bottom-right)
+    hamscene_fill(qx + bw / 2 - s, qy + bh / 2 - 1, s * 2, 3, op)
+    hamscene_fill(qx + bw / 2 - 1, qy + bh / 2 - s - 2, 3, 3, op)
+    hamscene_fill(qx + bw / 2 - 1, qy + bh / 2 + s, 3, 3, op)
+
+
+# Markdown: a page carrying the "M + chevron" mark, drawn as strokes.
+def hamscene_icon_markdown(x: int32, y: int32, w: int32, h: int32):
+    page: Ptr[uint8] = cast[Ptr[uint8]]("#ffffff")
+    mark: Ptr[uint8] = cast[Ptr[uint8]]("#212121")
+    edge: Ptr[uint8] = cast[Ptr[uint8]]("#616161")
+    bx: int32 = x + w / 8
+    bw: int32 = (w * 3) / 4
+    by: int32 = y + h / 5
+    bh: int32 = (h * 3) / 5
+    hamscene_fill(bx, by, bw, bh, page)
+    hamscene_stroke(bx, by, bw, bh, 2, mark)
+    mx: int32 = bx + 4
+    my: int32 = by + 4
+    mh: int32 = bh - 8
+    hamscene_fill(mx, my, 3, mh, mark)                       # M left stem
+    hamscene_line(mx, my, mx + bw / 8, my + mh / 2, 2, mark)  # M vee down
+    hamscene_line(mx + bw / 8, my + mh / 2, mx + bw / 4, my, 2, mark)
+    hamscene_fill(mx + bw / 4, my, 3, mh, mark)              # M right stem
+    # Down chevron on the right half.
+    cxx: int32 = bx + (bw * 3) / 4
+    hamscene_fill(cxx - 1, my, 3, mh / 2, mark)
+    hamscene_line(cxx - bw / 10, my + mh / 2 - 2, cxx, my + mh - 2, 2, mark)
+    hamscene_line(cxx + bw / 10, my + mh / 2 - 2, cxx, my + mh - 2, 2, mark)
+    hamscene_stroke(bx, by, bw, bh, 1, edge)
+
+
+# Audiobook: an open book with a headphone arc over it.
+def hamscene_icon_book(x: int32, y: int32, w: int32, h: int32):
+    cover: Ptr[uint8] = cast[Ptr[uint8]]("#00695c")
+    paper: Ptr[uint8] = cast[Ptr[uint8]]("#fdfdf5")
+    rule: Ptr[uint8] = cast[Ptr[uint8]]("#b0bec5")
+    band: Ptr[uint8] = cast[Ptr[uint8]]("#ff7043")
+    bx: int32 = x + w / 10
+    bw: int32 = (w * 4) / 5
+    by: int32 = y + h / 3
+    bh: int32 = (h * 2) / 3 - 2
+    hamscene_fill(bx, by, bw, bh, cover)
+    hamscene_fill(bx + 2, by + 2, bw / 2 - 3, bh - 4, paper)
+    hamscene_fill(bx + bw / 2 + 1, by + 2, bw / 2 - 3, bh - 4, paper)
+    ly: int32 = by + 5
+    while ly < by + bh - 4:
+        hamscene_line(bx + 4, ly, bx + bw / 2 - 3, ly, 1, rule)
+        hamscene_line(bx + bw / 2 + 3, ly, bx + bw - 5, ly, 1, rule)
+        ly = ly + 5
+    # Headphone: a band arc above the book plus two ear cups.
+    hcx: int32 = x + w / 2
+    hr: int32 = w / 4
+    hamscene_line(hcx - hr, by - 2, hcx - hr + 2, y + 3, 2, band)
+    hamscene_line(hcx - hr + 2, y + 3, hcx + hr - 2, y + 3, 2, band)
+    hamscene_line(hcx + hr - 2, y + 3, hcx + hr, by - 2, 2, band)
+    hamscene_fill(hcx - hr - 1, by - 6, 4, 6, band)
+    hamscene_fill(hcx + hr - 2, by - 6, 4, 6, band)
+
+
 # Dispatch: paint the glyph for CODE into (x,y,w,h). Unknown -> page glyph.
 def hamscene_icon_draw(x: int32, y: int32, w: int32, h: int32, code: int32):
     if code == HS_ICON_FOLDER:
@@ -918,6 +1531,46 @@ def hamscene_icon_draw(x: int32, y: int32, w: int32, h: int32, code: int32):
         hamscene_icon_shot(x, y, w, h)
     elif code == HS_ICON_GAME:
         hamscene_icon_game(x, y, w, h)
+    elif code == HS_ICON_DOC:
+        hamscene_icon_doc(x, y, w, h)
+    elif code == HS_ICON_SHEET:
+        hamscene_icon_sheet(x, y, w, h)
+    elif code == HS_ICON_SLIDES:
+        hamscene_icon_slides(x, y, w, h)
+    elif code == HS_ICON_VIDEO:
+        hamscene_icon_video(x, y, w, h)
+    elif code == HS_ICON_AUDIO:
+        hamscene_icon_audio(x, y, w, h)
+    elif code == HS_ICON_LOG:
+        hamscene_icon_log(x, y, w, h)
+    elif code == HS_ICON_MOUSE:
+        hamscene_icon_mouse(x, y, w, h)
+    elif code == HS_ICON_PACKAGE:
+        hamscene_icon_package(x, y, w, h)
+    elif code == HS_ICON_STICKY:
+        hamscene_icon_sticky(x, y, w, h)
+    elif code == HS_ICON_SNAKE:
+        hamscene_icon_snake(x, y, w, h)
+    elif code == HS_ICON_TETRIS:
+        hamscene_icon_tetris(x, y, w, h)
+    elif code == HS_ICON_MINE:
+        hamscene_icon_mine(x, y, w, h)
+    elif code == HS_ICON_CHESS:
+        hamscene_icon_chess(x, y, w, h)
+    elif code == HS_ICON_PAD:
+        hamscene_icon_pad(x, y, w, h)
+    elif code == HS_ICON_PAINT:
+        hamscene_icon_paint(x, y, w, h)
+    elif code == HS_ICON_CLOCK:
+        hamscene_icon_clock(x, y, w, h)
+    elif code == HS_ICON_UNITS:
+        hamscene_icon_units(x, y, w, h)
+    elif code == HS_ICON_MATH:
+        hamscene_icon_math(x, y, w, h)
+    elif code == HS_ICON_MARKDOWN:
+        hamscene_icon_markdown(x, y, w, h)
+    elif code == HS_ICON_BOOK:
+        hamscene_icon_book(x, y, w, h)
     else:
         hamscene_icon_file(x, y, w, h, cast[Ptr[uint8]]("#ffffff"))
 

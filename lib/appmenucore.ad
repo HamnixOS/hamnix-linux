@@ -320,6 +320,80 @@ def _amc_substr(hay: Ptr[uint8], needle: Ptr[uint8]) -> int32:
 # generic page fallback (HS_ICON_FILE). Order matters (specific first).
 def _amc_app_icon_name(a: uint64) -> Ptr[uint8]:
     p: Ptr[uint8] = &_amc_prog[a][0]
+    # --- THE SPECIFIC PROGRAMS FIRST -----------------------------------
+    # Everything below this block is a broad keyword ("edit", "view",
+    # "game") that used to swallow a dozen different applications into one
+    # picture: /bin/hamlogscene matched "view"->camera, /bin/hamnotesscene
+    # matched "note"->the editor's page, /bin/hamsoftware matched
+    # "package"->the Control Center gear, and every one of hamsheet,
+    # hamslides, hamwrite, hamvideoscene and hamaudioscene matched NOTHING
+    # and got the anonymous page. Named programs win over keywords.
+    if _amc_substr(p, cast[Ptr[uint8]]("hamsheet")) != 0:
+        s1: Ptr[uint8] = "x-office-spreadsheet"
+        return s1
+    if _amc_substr(p, cast[Ptr[uint8]]("hamslides")) != 0:
+        s2: Ptr[uint8] = "x-office-presentation"
+        return s2
+    if _amc_substr(p, cast[Ptr[uint8]]("hamwrite")) != 0:
+        s3: Ptr[uint8] = "x-office-document"
+        return s3
+    if _amc_substr(p, cast[Ptr[uint8]]("video")) != 0:
+        s4: Ptr[uint8] = "multimedia-video-player"
+        return s4
+    if _amc_substr(p, cast[Ptr[uint8]]("audiobook")) != 0:
+        s5: Ptr[uint8] = "multimedia-audiobook"
+        return s5
+    if _amc_substr(p, cast[Ptr[uint8]]("audio")) != 0:
+        s6: Ptr[uint8] = "multimedia-audio-player"
+        return s6
+    if _amc_substr(p, cast[Ptr[uint8]]("log")) != 0:
+        s7: Ptr[uint8] = "utilities-log-viewer"
+        return s7
+    if _amc_substr(p, cast[Ptr[uint8]]("notes")) != 0:
+        s8: Ptr[uint8] = "accessories-notes"
+        return s8
+    if _amc_substr(p, cast[Ptr[uint8]]("software")) != 0 \
+            or _amc_substr(p, cast[Ptr[uint8]]("hpm")) != 0:
+        s9: Ptr[uint8] = "system-software-install"
+        return s9
+    if _amc_substr(p, cast[Ptr[uint8]]("input")) != 0:
+        s10: Ptr[uint8] = "input-mouse"
+        return s10
+    if _amc_substr(p, cast[Ptr[uint8]]("paint")) != 0:
+        s11: Ptr[uint8] = "applications-graphics"
+        return s11
+    if _amc_substr(p, cast[Ptr[uint8]]("mark")) != 0:
+        s12: Ptr[uint8] = "text-markdown"
+        return s12
+    if _amc_substr(p, cast[Ptr[uint8]]("math")) != 0:
+        s13: Ptr[uint8] = "accessories-math"
+        return s13
+    if _amc_substr(p, cast[Ptr[uint8]]("convert")) != 0:
+        s14: Ptr[uint8] = "accessories-units"
+        return s14
+    if _amc_substr(p, cast[Ptr[uint8]]("hamclock")) != 0:
+        s15: Ptr[uint8] = "hamclock"
+        return s15
+    # The games, one picture each rather than five 2048 boards.
+    if _amc_substr(p, cast[Ptr[uint8]]("snake")) != 0:
+        g1: Ptr[uint8] = "hamsnake"
+        return g1
+    if _amc_substr(p, cast[Ptr[uint8]]("tetris")) != 0:
+        g2: Ptr[uint8] = "hamtetris"
+        return g2
+    if _amc_substr(p, cast[Ptr[uint8]]("mine")) != 0:
+        g3: Ptr[uint8] = "hammine"
+        return g3
+    if _amc_substr(p, cast[Ptr[uint8]]("chess")) != 0:
+        g4: Ptr[uint8] = "hamchess"
+        return g4
+    if _amc_substr(p, cast[Ptr[uint8]]("2048")) != 0:
+        g5: Ptr[uint8] = "ham2048"
+        return g5
+    if _amc_substr(p, cast[Ptr[uint8]]("gamedemo")) != 0 \
+            or _amc_substr(p, cast[Ptr[uint8]]("angrybirds")) != 0:
+        g6: Ptr[uint8] = "applications-games"
+        return g6
     if _amc_substr(p, cast[Ptr[uint8]]("term")) != 0:
         r: Ptr[uint8] = "terminal"
         return r
