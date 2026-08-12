@@ -20,6 +20,26 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
+### Another program running as you can no longer read your windows' pixels
+
+If you typed a password into a web page, it sat in a store that any other
+program running as you could read — and read **by name**, so it could pick your
+browser deliberately. Typed into one of this system's own dialogs it was already
+private. Nothing about the two windows told you which kind you were looking at.
+
+That is closed. Window pixels now live in per-window memory handed up from the
+program that owns them, not in a shared slab.
+
+The attack was written first and **proved it worked** before anything was fixed:
+a separate account-mate process recovered a test window's literal text out of the
+shared store. After the fix it recovers nothing — while a control proves the
+desktop itself still receives those pixels, so the check cannot pass by simply
+breaking everything.
+
+**Still open, deliberately:** other programs can still see that a window exists,
+its size, position and title (the taskbar needs that), and can still move,
+retitle or close windows. What is closed is *reading what is drawn in them*.
+
 ### The desktop now SAYS a restart is needed, instead of just not opening
 
 1.0.20 shipped the safe half of this: after a window-system update your desktop
