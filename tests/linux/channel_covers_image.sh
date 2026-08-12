@@ -247,6 +247,69 @@ else
     bad "modules.dep is excluded on the grounds that modules.dep.base ships instead, and NO package carries modules.dep.base"
 fi
 
+# --- THE RIGHT NAME IS NOT THE RIGHT BYTES ---------------------------------
+# Everything above this line compares NAMES. NORTH_STAR.md already records
+# what that misses -- hamnix-desktop 1.0.10 shipped every name, every sha256
+# matched, and the desktop mapped no windows -- and it missed it again, in a
+# different subsystem and in a way no binary gate could see:
+#
+#   The `hpm` package shipped etc/hpm/channels, the NATIVE line's
+#   subscription list, whose one entry is `main`. The image stages
+#   etc/hpm/channels.LINUX at that path, whose entry is `linux`. Both files
+#   are called etc/hpm/channels, so the comparison above was silent. What it
+#   meant is that `hpm install hamnix-base` -- the flagship package, which
+#   declares hpm>=1 -- REWROTE the machine's subscription to a channel of
+#   NATIVE binaries, and every `hpm refresh` and `hpm update` afterwards
+#   aborted on a 404 for https://255.one/main/index.json.sig. A machine was
+#   cut off from its own repository by the act of installing from it.
+#
+# So: for every /etc file the image stages AND a package carries, compare the
+# BYTES. /etc is the whole scope on purpose -- the binaries are covered by
+# tests/linux/channel_runs_desktop.sh, which RUNS them, and a per-byte compare
+# of an ELF would go red on any legitimate rebuild. A configuration file has
+# no such excuse: if the channel's copy differs from the one the image boots
+# with, one of the two is wrong and nobody knows which.
+echo
+: > "$TMP/etcdiff"
+ETCN=0
+UNPACK="$TMP/unpack"; mkdir -p "$UNPACK"
+for t in "$CHAN"/packages/*.tar.gz; do
+    [ -e "$t" ] || continue
+    tar xzf "$t" -C "$UNPACK" --wildcards '*/files/etc/*' 2>/dev/null || true
+done
+#
+# TWO KINDS OF ENTRY ARE SKIPPED, and neither is a judgement call:
+#   * a file the channel carries and the image does not stage AT ALL is not a
+#     mismatch -- it is the "more in the channel than the image" case, already
+#     reported at the end of this file. etc/rc.boot.linux, .installed and
+#     .machine are all of these: the image stages one of them AS /etc/rc.boot.
+#   * etc/rc.boot itself, whose difference is the DESIGN: the channel ships
+#     etc/rc.boot.machine there (the one-line `source '/etc/rc.boot.installed'`)
+#     while the image stages etc/rc.boot.linux, and hpm's _is_machine_owned
+#     keeps whichever one a machine already has. Named here with its reason,
+#     the same way every exclusion in this file is.
+ETC_BYTE_SKIP="etc/rc.boot"
+while IFS= read -r rel; do
+    case " $ETC_BYTE_SKIP " in *" $rel "*) continue ;; esac
+    [ -f "$IMG/$rel" ] || continue
+    src="$(find "$UNPACK" -path "*/files/$rel" -type f 2>/dev/null | head -1)"
+    [ -n "$src" ] || continue
+    ETCN=$((ETCN + 1))
+    cmp -s "$src" "$IMG/$rel" || printf '%s\n' "$rel" >> "$TMP/etcdiff"
+done < <(grep '^etc/' "$TMP/chan")
+NDIFF=$(grep -c . "$TMP/etcdiff" 2>/dev/null || echo 0)
+if [ "$ETCN" -lt 5 ]; then
+    bad "only $ETCN /etc files were found in both the image and the channel -- this comparison is not measuring anything"
+elif [ "$NDIFF" -gt 0 ]; then
+    while IFS= read -r d; do
+        bad "/$d in the channel is NOT the bytes the image boots with -- an installed machine's copy is replaced by a different file on every update, and nothing says which one is right"
+        diff "$(find "$UNPACK" -path "*/files/$d" -type f | head -1)" "$IMG/$d" \
+            | head -8 | sed 's|^|      |'
+    done < "$TMP/etcdiff"
+else
+    ok "all $ETCN /etc files the channel carries are BYTE-IDENTICAL to the ones the image stages -- no package quietly replaces a machine's configuration with a different file"
+fi
+
 # The other direction is NOT a failure -- a channel may offer more than the
 # initramfs has room for -- but it is worth saying out loud, because a file in
 # the channel and not the image is a file nobody has ever seen on a live boot.

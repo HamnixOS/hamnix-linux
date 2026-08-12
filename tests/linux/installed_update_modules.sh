@@ -649,6 +649,12 @@ date
 echo '[modupd] p3 LIST-BEGIN'
 hpm list
 echo '[modupd] p3 LIST-END'
+# WHICH REPOSITORY DOES THIS MACHINE STILL BELIEVE IT SUBSCRIBES TO? An
+# installed machine that has taken one update must still be able to take the
+# next one, and this file is the only thing that decides where it looks.
+echo '[modupd] p3 CHANNELS-BEGIN'
+cat /etc/hpm/channels
+echo '[modupd] p3 CHANNELS-END'
 RC
 _dump p3 BEFORE
 cat <<RC
@@ -809,9 +815,15 @@ else
     has '\[modupd\] p2 refresh status: 0' \
         && ok "a bare 'hpm refresh' TRUSTS the real repository" \
         || bad "a bare 'hpm refresh' did not exit 0"
-    has "hpm: (fetching channel|refreshed index from) .*255\.one" \
-        && ok "and it was the real repository" \
-        || bad "the refresh did not name 255.one"
+    # AND IT WENT TO THE RIGHT CHANNEL. `main` holds Hamnix NATIVE binaries;
+    # `linux` holds this userland. A machine that installed hamnix-base used to
+    # be rewritten to `main` by the hpm package's own copy of
+    # /etc/hpm/channels, and every refresh afterwards died on a 404 for
+    # https://255.one/main/index.json.sig -- the machine cut off from its own
+    # repository by the act of installing from it.
+    has "hpm: (fetching channel|refreshed index from) .*255\.one/linux" \
+        && ok "and it went to the real repository's LINUX channel -- installing the flagship package did not rewrite this machine's subscription" \
+        || bad "the refresh did not name 255.one/linux: $(grep -a 'fetching channel' "$LOG" | head -1)"
     has '\[modupd\] p2 update status: 0' \
         && ok "a bare 'hpm update' exited 0" || bad "'hpm update' did not exit 0"
     has "hpm: upgrading $PKG $OLDVER -> $LIVEVER" \
@@ -852,6 +864,18 @@ if [ "$NOUPD" != 1 ]; then
         && ok "the new package survived the reboot ($DRVPKG $DRVVER)" \
         || bad "$DRVPKG is not installed after the reboot"
 fi
+# CAN THIS MACHINE TAKE THE *NEXT* UPDATE? A machine that has taken one and
+# lost its subscription is a machine that will never take another, and nothing
+# on it would say so.
+P3CHAN="$(sect p3 CHANNELS)"
+if printf '%s\n' "$P3CHAN" | grep -qx 'linux'; then
+    ok "after the update the machine is still subscribed to the linux channel -- it can take the NEXT update too"
+elif printf '%s\n' "$P3CHAN" | grep -qx 'main'; then
+    bad "THE UPDATE REWROTE THIS MACHINE'S SUBSCRIPTION TO 'main'. That channel serves Hamnix NATIVE binaries and has no index.json.sig, so every future 'hpm refresh' on this machine aborts with a 404 and it can never take another update. The hpm package on the live channel ships etc/hpm/channels (the native list) at /etc/hpm/channels; the image stages etc/hpm/channels.linux there. Fixed in scripts/hamlinux_packages.py on this branch -- the live channel still carries the broken file and must be republished."
+else
+    bad "the machine's /etc/hpm/channels names no channel this gate recognises: $(printf '%s' "$P3CHAN" | tr '\n' '|')"
+fi
+
 P3BEFORE="$(sect p3 MODULES-BEFORE)"
 for m in "$MOD" "$DEPMOD_" "$LATE"; do
     if inker "$P3BEFORE" "$m"; then
