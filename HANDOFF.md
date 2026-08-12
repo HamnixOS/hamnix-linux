@@ -1148,6 +1148,23 @@ single entry:
   because `/dev/wsys` is shared memory with no fid table and nothing ever
   freed a window its owner had not freed by hand. Nothing in `lib/hamui.ad`
   ever does, so a NORMAL exit leaked one too (165195bc).
+* **THE DE CHROME CANNOT BE CLICKED WITH A MOUSE, AND NOTHING SAYS SO. OPEN.**
+  `user/wsysd.ad`'s `route_pointer` writes the routed event to
+  `/dev/wsys/<wid>/pointer`. `lib/hamui.ad` reads that file, so every ordinary
+  application is fine. `user/hampanelscene.ad` and `user/hamdesktop.ad` — the
+  panel and the desktop, the two programs a person actually points at — read
+  `/dev/wsys/<wid>/event` instead, which is where Hamnix's `devwsys.ad` pushes
+  its `'m'` pointer lines (`~/Hamnix/sys/src/9/port/devwsys.ad:12387`). **In
+  this port nothing ever writes a pointer line to an event ring**, so the
+  Applications button, the desktop icons and the taskbar are inert under a
+  real mouse. Measured, not read: with `wsys_hold` holding a window whose owner
+  drains neither ring, a full evdev click leaves `pointer` holding
+  `m/d/m/u ...` and `event` **empty**. Every gate that drives the chrome —
+  `tests/linux/distro_menu.sh`, `tests/linux/de_appmenu_band.sh` — writes the
+  event ring by hand as host owner, which is why none of them noticed. Not
+  fixed: which ring is canonical is a decision (wsysd could mirror the line
+  into `event`, or the two chrome programs could read `pointer` like everything
+  else), and it needs a gate that drives real evdev at the panel.
 
 None of these failed loudly. Three were found only by tracing, one only by
 running `strace` **as PID 1**, and one only after publishing the compositor's
@@ -1179,6 +1196,36 @@ passes in BOTH arms — the unpinned backdrop keeps `win_alloc`'s default z 5,
 already below an ordinary window's 6 — which is written into the file rather
 than glossed, because a gate that passes either way is what this line already
 had. The last assertion found 165195bc on its first run.
+
+### And the gate the Applications menu got
+
+`tests/linux/de_appmenu_band.sh`, **11 PASS**, offscreen. The owner reported
+the Applications dropdown as "the full width of the display and the right part
+blank", over the wallpaper *and over the other apps*. 61261904 fixed the
+mechanism — devwsys's `keyed` verb, dropped by three layers of this port — and
+gated it with `tests/linux/wsys_keyed.sh`, which builds a **synthetic**
+full-width window out of `wsys_hold` and paints its left 200 px. Nothing
+asserted anything about the Applications menu, and nothing anywhere tested the
+"or the other apps" half.
+
+So this one composes the real desktop, puts an ordinary client at z 6 *inside
+the rectangle the menu is about to grow over*, opens the menu the way a person
+does, and asserts the panel window GREW to 1280x206, the menu card is painted,
+the wallpaper right of it is byte-identical to the frame before, and the
+application under the band is still 100% its own colour. **The control is in
+the same run**: `keyed 0` on the same window and the same scene buries both
+(0% and 0%), then `keyed 1` and both come back — without it, "the wallpaper is
+still there" is also satisfied by a menu that opened somewhere else.
+
+**Three revert arms, all measured.** Layer 1 (the `keyed` ctl verb removed from
+`user/linux-wsys.c`): 8 PASS / 3 FAIL. Layer 3 (`vk2d_raster_clear_rect_a`
+stamping alpha 255 again, the `_vk2d_pack_opaque` shape): 8 PASS / 3 FAIL.
+**And the arm the older gate cannot have**: `hampanelscene` writing a verb the
+device does not know instead of `keyed 1` — a CLIENT-side regression —
+9 PASS / 2 FAIL, where `wsys_keyed.sh` stays green because it never runs the
+panel. Reported live on 2026-08-11 and **not reproducible on HEAD**: the
+committed screenshot that carried the report,
+`docs/screenshots/linux/distro-menu-debian.png`, predates 61261904.
 
 ### Running it
 
