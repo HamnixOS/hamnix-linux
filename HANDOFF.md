@@ -923,6 +923,51 @@ the shape is more reusable than the fix. They are NOT open work.
   exports at the bottom of `/etc/rc.de-ns/<name>` **do** reach the client (they
   are set in the same shell that then enters), and `HAMNIX_DE_XSESSION` can
   never be steered from an outer shell no matter what is done to `enter`.
+* **STEAM IS NOT STUCK AT ITS LOGIN SCREEN, and "the login window renders"
+  had been standing in for "Steam works" in this file's own notes.** The
+  window was DRIVEN rather than photographed — `tests/linux/steam_login_drive.sh`
+  keeps the VM up and `tests/linux/qmp_input.py` puts pointer and key events
+  on QEMU's own `virtio-tablet-pci`/`virtio-keyboard-pci`, which in a VM is
+  the only input `wsysd` has (it scans `/dev/input/eventN`), so every event
+  crossed wsysd → wsyswl → Xwayland → jwm → CEF. Nothing wrote a wsys ring by
+  hand; that is `de_mouse_chrome.sh`'s rule applied to a real X11 application
+  three servers down. Every number below is a pixel count over two QEMU
+  screendumps (`tests/linux/ppmdiff.py`), and `docs/steam_namespace.md` §12
+  is the table. **Works, with a mouse and a keyboard:** hover (moving over
+  the username field repaints **97%** of it — CEF's hover state), click,
+  **typing** (`hamnix` appears in Steam's username field), password masking,
+  the *Remember me* checkbox and its tooltip, **a second window** (*Create a
+  Free Account* replaces the 700x440 login window with an ~870x740 store
+  browser carrying a live **hCaptcha** iframe — 93.8% of the old rectangle
+  changed), the *Browse* mega-menu with its CDN artwork, navigating to the
+  store front page, dragging the scrollbar (**96.44%** of an 830x680
+  rectangle), and **live AJAX search** — `portal` returns Portal, Portal 2,
+  Portal Knights and Portal Worlds with prices and cover art. **The one thing
+  that did not work is the next entry.** No Steam account was used and none
+  was sought, so the library, downloads and launching a game are unmeasured
+  and are not claimed (§12.4).
+* **(FIXED) The scroll wheel was never connected to anything — for the whole
+  port, for every client.** Found by driving the real thing: with the pointer
+  over Steam's store page, eight `REL_WHEEL` notches changed **0 of 564400
+  pixels**, while a press-move-release DRAG of that same page's scrollbar with
+  that same pointer changed **96.44%** of them. The page was scrollable; the
+  wheel was not connected to it — and the drag is the control without which a
+  dead POINTER would have produced the same zero. `user/wsysd.ad` had the whole
+  wheel already (`EV_REL`/`REL_WHEEL` → `ptr_dz` → kind `'s'` → the **fifth**
+  field of the routed pointer line); `user/wsyswl.ad`'s `handle_ptr_line`
+  parsed the first four fields and stopped, and the file had no
+  `wl_pointer.axis` in it at all. So the delta was computed, routed, written
+  to the ring, read back, and dropped one parse short of the client — which
+  means Firefox in the namespace and every other Wayland/X11 client had a dead
+  wheel too. **Gate: `tests/linux/wsyswl_wheel.sh`** — offscreen, ~40 s, no VM
+  and no Steam: evdev records → wsysd → wsyswl → a real rootful Xwayland →
+  `xev`, which prints what the X SERVER delivered (an X11 wheel is button 4 up
+  / button 5 down). **10 PASS**; reverted with the fix stashed it is **6 PASS
+  / 4 FAIL** and the CONTROL (an evdev *move* arrives as `MotionNotify`) still
+  passes, so it reports a dead wheel and not a dead pointer. It asserts the
+  COUNT and the SIGN in both directions, because a wheel that scrolls
+  backwards works and is wrong, which is worse than a dead one: nothing about
+  it looks broken.
 * **(SOLVED — kept because the shape is the lesson) Steam's login window is on
   the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
   `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X
