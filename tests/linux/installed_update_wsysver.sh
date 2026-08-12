@@ -125,6 +125,46 @@
 # session survived C is the segment, the pixels and the window table -- none of
 # which depends on the panel answering.
 #
+# =========================================================================
+# THE SECOND BUMP THIS GATE HAS MEASURED: 7 -> 8, AND WHY IT NEEDED A NEW SET
+# OF WITNESSES
+# =========================================================================
+# Everything above was written for 6 -> 7, where the refusal did not yet exist
+# in the binary the machine was RUNNING -- so what it measured was v7 binaries
+# not wiping a v6 session.  WSYS_VERSION is 8 now (the v1 display list left the
+# world-readable segment for a per-window memfd, tests/linux/wsys_bypass.sh),
+# the published channel is v7, and THIS is the first bump where the refusal
+# that shipped in v7 is the RUNNING code that has to protect a real person.
+#
+# THE SIZE STOPPED BEING A WITNESS, and that is a fact about v8 and not a
+# weakening of this file.  6 -> 7 doubled the table, so `ls -l /srv` told the
+# two versions apart by 19,052,956 against 37,972,380.  v8's struct wshm is
+# BYTE-FOR-BYTE v7's -- 512 rows, 37,972,380 bytes, only the MEANING of the
+# scene buffers changed -- so a size is no longer an answer to "which window
+# system is this session".  Substituted, and each is a real read of the bytes
+# rather than an inference:
+#
+#   * THE REFUSAL'S OWN WORDS.  The refused v8 binary prints the version it
+#     found in the header it just pread(2)'d.  At STAGE C that number must be
+#     the OLD one -- i.e. after the update, the live segment is still what the
+#     desktop made -- and the version it names for itself must be this tree's
+#     WSYS_VERSION, which is read out of user/linux-wsys.c and not typed here.
+#   * THE WINDOW TABLE AND THE PIXELS, exactly as before: the count at C must
+#     equal the count at B, and the screen must still be a desktop.
+#   * THE SIZE, still checked, but now as "the file was not resized or
+#     truncated under the person" and no longer as a version.
+#   * THE LEFTOVER CONTROL IS NOW A FOUR-POINT md5 SIGNATURE.  A leftover
+#     segment re-initialised in place does not change size at all at 7 -> 8, so
+#     the control drives the same file through four attaches and asserts the
+#     shape of the sequence: published-makes-it (m1), this tree's binary meets
+#     it (m2), this tree's binary meets it again (m3), the published binary
+#     meets it again (m4).  m1 != m2 is the re-initialise; m2 == m3 is "it
+#     recognised its own and wrote nothing"; m3 != m4 is the old build taking
+#     it back; and m4 == m1 is the control on the control -- a fresh segment is
+#     deterministic, so the only thing the differences can be is the version
+#     word.  A single "it changed" could have been an innocent write; this
+#     two-state ping-pong could not.
+#
 # Usage: tests/linux/installed_update_wsysver.sh [b1s] [b2s] [b3s]
 #   HAMLINUX_WV_REUSE=1   reuse the disk built by an earlier run
 set -uo pipefail
@@ -154,8 +194,19 @@ QMP="$WORK/qmp.sock"
 
 reap_track "$WORK/reaped"
 
-V7_BYTES=37972380
+# THE SEGMENT SIZE, AND WHAT IT CAN AND CANNOT ANSWER NOW.  256 rows is
+# 19,052,956 bytes and 512 rows is 37,972,380; v7 AND v8 are both 512 rows, so
+# at this bump the size distinguishes NOTHING about the version and is used
+# only to say the file was not resized under a running desktop.  Kept as three
+# names so a future bump that DOES move the size still has them.
 V6_BYTES=19052956
+V7_BYTES=37972380
+SEG_BYTES=37972380
+# THIS TREE'S WINDOW-SYSTEM VERSION, READ FROM THE SOURCE.  No version number
+# in this file is typed by hand -- not the package version (taken off the live
+# index above) and not this one.
+NEWWSYS="$(sed -n 's/^#define WSYS_VERSION *\([0-9][0-9]*\).*/\1/p' user/linux-wsys.c | head -1)"
+[ -n "$NEWWSYS" ] || { echo "FAIL: cannot read WSYS_VERSION out of user/linux-wsys.c" >&2; exit 1; }
 
 fail=0
 say() { echo "[wv] $*"; }
@@ -422,9 +473,15 @@ cp /etc/rc.phase3 /etc/rc.boot
 # after a boot never starts and the machine is bricked in a new way.  Both
 # answers are taken in this one boot, seconds apart, so the two cases are
 # demonstrably being told apart:
-#   * the PUBLISHED cat creates /stale/wsys, a v6 segment, and EXITS -- so no
-#     process holds a row in it;
-#   * this tree's cat meets it and must GROW it 19,052,956 -> 37,972,380.
+#   * the PUBLISHED cat creates /stale/wsys, a segment of the PUBLISHED
+#     version, and EXITS -- so no process holds a row in it;
+#   * this tree's cat meets it and must RE-INITIALISE it.
+#
+# AT 6 -> 7 THAT SHOWED UP AS A SIZE (19,052,956 -> 37,972,380).  At 7 -> 8 the
+# two layouts are the same size, so the file is driven through four attaches
+# and the SEQUENCE of md5s is the witness -- see THE SECOND BUMP at the top of
+# this file.  md5sum is on the machine already (the phase-1 rc uses it on
+# /bin/wsysd), so this needs nothing the published userland does not have.
 #
 # THE QUOTES AND THE ABSENT SPACES ARE LOAD-BEARING. hamsh's assignment is
 # \`NAME='value'\`: written \`HAMWSYS = /stale/wsys\` the right-hand side is
@@ -439,10 +496,22 @@ echo '[wv] p2 ----- THE LEFTOVER CONTROL'
 echo '[wv] p2 stale make status:' \$status
 echo '[wv] STALE-BEFORE:'
 ls -l /stale
+echo '[wv] STALE-MD5-1:'
+md5sum /stale/wsys
 /bin/cat '/dev/wsys/windows'
 echo '[wv] p2 stale use status:' \$status
 echo '[wv] STALE-AFTER:'
 ls -l /stale
+echo '[wv] STALE-MD5-2:'
+md5sum /stale/wsys
+/bin/cat '/dev/wsys/windows'
+echo '[wv] p2 stale reuse status:' \$status
+echo '[wv] STALE-MD5-3:'
+md5sum /stale/wsys
+/probe-cat '/dev/wsys/windows'
+echo '[wv] p2 stale back status:' \$status
+echo '[wv] STALE-MD5-4:'
+md5sum /stale/wsys
 HAMWSYS='/srv/wsys'
 export HAMWSYS
 date
@@ -630,7 +699,7 @@ report_stage() {   # report_stage <log> <tag> <headline>
     echo "    window table:    $(wins "$L" "$s")"
     echo "    titles:          $(grep -aA6 -F "TITLES-$s:" "$L" | sed -n '2,6p' | tr -d '\r' | grep -v '^\[wv\]' | tr '\n' '|')"
     echo "    wsysd state:     $(grep -aA1 -F "STATE-$s:" "$L" | tail -1 | tr -d '\r')"
-    echo "    /srv/wsys:       $(segsize "$L" "$s") bytes  (v6=$V6_BYTES v7=$V7_BYTES)"
+    echo "    /srv/wsys:       $(segsize "$L" "$s") bytes  (256 rows=$V6_BYTES, 512 rows=$V7_BYTES -- v7 AND v8 are 512)"
     echo "    wsysd log:       $(grep -aA6 -F "DELOG-$s wsysd:" "$L" | sed -n '2,7p' | tr -d '\r' | tr '\n' '|')"
     echo "    /etc/panel.conf: $(grep -aA1 -F "PANELCONF-$s:" "$L" | tail -1 | tr -d '\r')"
     echo "    panel reloads:   $(grep -aA30 -F "DELOG-$s panel:" "$L" | tr -d '\r' | grep -c 'config reload applied')"
@@ -688,9 +757,13 @@ else
     fail=1
 fi
 ASEG="$(segsize "$WORK/boot2.log" A)"
-[ "$ASEG" = "$V6_BYTES" ] &&
-    echo "wv: PASS STAGE A the running session is a v6 window table ($ASEG bytes)" ||
-    echo "wv: NOTE STAGE A /srv/wsys is ${ASEG:-?} bytes (v6=$V6_BYTES v7=$V7_BYTES)"
+# THE SIZE IS NOT THE VERSION AT THIS BUMP.  It says how many ROWS the running
+# session's table has, and both the published window system and this tree's
+# have 512.  Which VERSION the session is comes from the refusal below, which
+# is the new binary reading the header it refused to attach to.
+[ "$ASEG" = "$SEG_BYTES" ] &&
+    echo "wv: PASS STAGE A the running session's window table is the expected $ASEG bytes (512 rows)" ||
+    echo "wv: NOTE STAGE A /srv/wsys is ${ASEG:-?} bytes (256 rows=$V6_BYTES, 512 rows=$V7_BYTES)"
 
 check "hpm update exited 0" '\[wv\] p2 update status: 0' "$WORK/boot2.log"
 if grep -aA3 -F '[wv] p2 md5 of /bin/wsysd after update:' "$WORK/boot2.log" | grep -aq "$NEW_MD5"; then
@@ -719,13 +792,11 @@ fi
 # Four witnesses, none of which needs the panel to answer a click, and every
 # one of which was the OPPOSITE before user/linux-wsys.c learned to refuse.
 CSEG="$(segsize "$WORK/boot2.log" C)"
-if [ "$CSEG" = "$V6_BYTES" ]; then
-    echo "wv: PASS STAGE C THE RUNNING SESSION WAS NOT WIPED: /srv/wsys is still $CSEG bytes (the v6 table the desktop is using)"
-elif [ "$CSEG" = "$V7_BYTES" ]; then
-    echo "wv: FAIL STAGE C the new binary RE-INITIALISED the running session's window table: /srv/wsys is $CSEG bytes (v7). Every window on that desktop belonged to a process that is still running."
-    fail=1
+BSEG="$(segsize "$WORK/boot2.log" B)"
+if [ -n "$CSEG" ] && [ "$CSEG" = "$BSEG" ] && [ "$CSEG" = "$SEG_BYTES" ]; then
+    echo "wv: PASS STAGE C THE SEGMENT WAS NOT RESIZED UNDER THE PERSON: /srv/wsys is still $CSEG bytes, the same as at STAGE B"
 else
-    echo "wv: FAIL STAGE C /srv/wsys is ${CSEG:-?} bytes, which is neither v6 ($V6_BYTES) nor v7 ($V7_BYTES)"
+    echo "wv: FAIL STAGE C /srv/wsys is ${CSEG:-?} bytes at C against ${BSEG:-?} at B (expected $SEG_BYTES). The new binary resized the running session's window table."
     fail=1
 fi
 
@@ -769,6 +840,34 @@ else
     fail=1
 fi
 
+# AND WHICH WINDOW SYSTEM WAS IT LOOKING AT?  This is the witness that replaces
+# the size at a bump where the size does not move.  The two numbers in the
+# refusal are read out of the SEGMENT'S HEADER by the binary that refused --
+# a pread(2) of the live file, taken after `hpm update` -- so "the session is
+# still the published window system" is an observation and not an assumption.
+REF="$(sed -n '/\[wv\] REFUSE-C:/,/\[wv\] REFUSE-END-C/p' "$WORK/boot2.log" | tr -d '\r')"
+VERPAIR="$(printf '%s\n' "$REF" | sed -n 's/^wsys: *version \([0-9][0-9]*\) and this program is version \([0-9][0-9]*\).*/\1 \2/p' | head -1)"
+SEGVER="${VERPAIR%% *}"; PROGVER="${VERPAIR##* }"
+[ "$VERPAIR" = "$SEGVER" ] && PROGVER=""
+if [ -n "$SEGVER" ] && [ -n "$PROGVER" ] && [ "$PROGVER" = "$NEWWSYS" ] && [ "$SEGVER" != "$NEWWSYS" ]; then
+    echo "wv: PASS STAGE C THE RUNNING SESSION IS STILL THE PUBLISHED WINDOW SYSTEM: the refused binary (version $PROGVER, this tree's WSYS_VERSION) read version $SEGVER out of the live segment AFTER the update"
+else
+    echo "wv: FAIL STAGE C the refusal did not name a live segment of some older version against this tree's $NEWWSYS: it said segment=${SEGVER:-?} program=${PROGVER:-?}"
+    fail=1
+fi
+
+# WHAT THE PERSON WHO CLICKED ACTUALLY GOT.  The refusal above was driven from
+# the console, where its stderr is on the screen. The app the DE launched is
+# the case that matters and its stderr goes wherever the panel's spawn sends
+# it, so this reports -- it does not score -- whether the words reached any log
+# a person could be pointed at.
+echo "wv: NOTE what the launched app's refusal reached, between the update and STAGE C:"
+sed -n '/\[wv\] MARK-B/,/\[wv\] PROBE-END-C/p' "$WORK/boot2.log" | tr -d '\r' |
+    grep -a 'REFUSING to attach' | head -3 | sed 's/^/        /'
+sed -n '/\[wv\] MARK-B/,/\[wv\] PROBE-END-C/p' "$WORK/boot2.log" | tr -d '\r' |
+    grep -aq 'REFUSING to attach' ||
+    echo "        (nothing: the program the person launched failed without a word reaching the console or the DE logs)"
+
 # =========================================================================
 # 8. AND A LEFTOVER SEGMENT MUST STILL BE RE-INITIALISED.
 # =========================================================================
@@ -776,16 +875,45 @@ fi
 # TOLD APART rather than one behaviour being described twice.
 SB="$(sizeat "$WORK/boot2.log" 'STALE-BEFORE:')"
 SA="$(sizeat "$WORK/boot2.log" 'STALE-AFTER:')"
-if [ "$SB" = "$V6_BYTES" ]; then
-    echo "wv: PASS THE LEFTOVER CONTROL starts from a real v6 segment nobody holds a row in ($SB bytes)"
+stalemd5() {   # stalemd5 <n> -- the md5 printed after STALE-MD5-<n>:
+    grep -aA1 -F "STALE-MD5-$1:" "$WORK/boot2.log" | tail -1 | tr -d '\r' |
+        awk '{print $1}'
+}
+M1="$(stalemd5 1)"; M2="$(stalemd5 2)"; M3="$(stalemd5 3)"; M4="$(stalemd5 4)"
+if [ "$SB" = "$SEG_BYTES" ] && [ "$SA" = "$SEG_BYTES" ]; then
+    echo "wv: PASS THE LEFTOVER CONTROL starts from a real segment nobody holds a row in ($SB bytes) and it is not resized ($SA)"
 else
-    echo "wv: FAIL THE LEFTOVER CONTROL could not make a v6 segment: /stale/wsys is ${SB:-?} bytes"; fail=1
+    echo "wv: FAIL THE LEFTOVER CONTROL could not make a segment of the expected size: /stale/wsys is ${SB:-?} then ${SA:-?} bytes, wanted $SEG_BYTES"; fail=1
 fi
-if [ "$SA" = "$V7_BYTES" ]; then
-    echo "wv: PASS A LEFTOVER SEGMENT IS STILL RE-INITIALISED: /stale/wsys grew to $SA bytes (v7) when this tree's binary met it -- so a fresh boot still comes up"
+echo "wv: NOTE the leftover segment's md5, four attaches: published=$M1 -> this tree=$M2 -> this tree again=$M3 -> published again=$M4"
+if [ -n "$M1" ] && [ -n "$M2" ] && [ "$M1" != "$M2" ]; then
+    echo "wv: PASS A LEFTOVER SEGMENT IS STILL RE-INITIALISED: this tree's binary rewrote /stale/wsys ($M1 -> $M2) instead of refusing it -- so a fresh boot still comes up"
 else
-    echo "wv: FAIL A LEFTOVER SEGMENT WAS NOT RE-INITIALISED: /stale/wsys is ${SA:-?} bytes, wanted $V7_BYTES. The refusal is refusing too much and the first program after a boot will not start."
+    echo "wv: FAIL A LEFTOVER SEGMENT WAS NOT RE-INITIALISED: /stale/wsys is byte-identical (${M1:-?}) after this tree's binary met it. Either the refusal is refusing too much -- and the first program after a boot will not start -- or a foreign table was silently shared."
     fail=1
+fi
+if [ -n "$M2" ] && [ "$M2" = "$M3" ]; then
+    echo "wv: PASS the second attach by the same build changed nothing ($M2): it recognised its own segment"
+else
+    echo "wv: FAIL this tree's binary re-initialised a segment IT HAD JUST MADE: $M2 -> ${M3:-?}. Every program started would wipe the one before it."
+    fail=1
+fi
+if [ -n "$M4" ] && [ "$M3" != "$M4" ] && [ "$M4" = "$M1" ]; then
+    echo "wv: PASS the published binary took the leftover back and landed on the SAME bytes it first made ($M4 = $M1), so a fresh segment is deterministic and the differences above are the version and nothing else"
+elif [ -n "$M4" ] && [ "$M3" != "$M4" ]; then
+    echo "wv: NOTE the published binary re-initialised it again ($M3 -> $M4) but did not land on its own first bytes ($M1) -- something other than the version word also differs between two fresh segments; the re-initialise above still happened"
+else
+    echo "wv: FAIL the published binary did NOT re-initialise a leftover segment of this tree's version: ${M3:-?} -> ${M4:-?}"
+    fail=1
+fi
+if sed -n '/THE LEFTOVER CONTROL/,/PHASE2 DONE/p' "$WORK/boot2.log" |
+        tr -d '\r' | grep -aq 'REFUSING to attach'; then
+    echo "wv: FAIL the leftover segment was REFUSED. Nobody holds a row in it; refusing here is the machine that never boots again."
+    sed -n '/THE LEFTOVER CONTROL/,/PHASE2 DONE/p' "$WORK/boot2.log" | tr -d '\r' |
+        grep -a '^wsys:' | sed 's/^/        /' | head -5
+    fail=1
+else
+    echo "wv: PASS nothing refused the leftover segment"
 fi
 
 if grep -aA3 -F '[wv] p3 md5 of /bin/wsysd' "$WORK/boot3.log" | grep -aq "$NEW_MD5"; then
