@@ -2492,6 +2492,68 @@ static int waitfds_reg_ready(const int *rfd, int nreg)
     }
     return n;
 }
+
+/* THE WATCH IS KEPT ACROSS CALLS, AND THAT IS NOT AN OPTIMISATION.
+ *
+ * The first version of this created an inotify instance, added the watches,
+ * polled, and closed it again on every single park. It was correct and it made
+ * the compositor SLOWER than the fixed tick it was replacing: measured with a
+ * clock_gettime either side of the poll, one sys_waitfds call took 16 ms of
+ * poll and then 4 to 32 ms MORE, so wsysd's 16 ms loop ran at 20-48 ms and
+ * input-to-pixel latency went from p50 8.9 ms to p50 9.9 / p95 21.4. The cost
+ * is the TEARDOWN: destroying an fsnotify mark waits on an SRCU grace period,
+ * and doing that 60 times a second pays it 60 times a second.
+ *
+ * So the instance and its watches live in the process and are rebuilt only
+ * when the set of regular files being waited on actually changes. Identity is
+ * (fd, st_dev, st_ino) and not the fd alone, because an fd number that has
+ * been closed and reopened onto a different file must not keep the old file's
+ * watch. The queue is drained BEFORE readiness is sampled: a write updates the
+ * file's size before its IN_MODIFY event is queued, so anything the drain
+ * throws away is either already visible to the size check below or still
+ * pending afterwards -- there is no order in which a wakeup is lost. */
+struct waitfds_reg { int fd; dev_t dev; ino_t ino; };
+static int waitfds_ino = -1;
+static struct waitfds_reg waitfds_watch[WAITFDS_MAX];
+static int waitfds_nwatch = 0;
+
+static void waitfds_ino_drain(void)
+{
+    char buf[512];
+    while (read(waitfds_ino, buf, sizeof buf) > 0) { }
+}
+
+/* Point the cached inotify instance at exactly this set of files. Returns the
+ * instance, or -1 when there is nothing to watch or inotify is unavailable. */
+static int waitfds_ino_arm(const struct waitfds_reg *want, int n)
+{
+    if (n <= 0) return -1;
+    int same = (waitfds_ino >= 0 && waitfds_nwatch == n);
+    for (int i = 0; same && i < n; i++)
+        if (waitfds_watch[i].fd != want[i].fd
+            || waitfds_watch[i].dev != want[i].dev
+            || waitfds_watch[i].ino != want[i].ino)
+            same = 0;
+    if (!same) {
+        if (waitfds_ino >= 0) close(waitfds_ino);
+        waitfds_nwatch = 0;
+        waitfds_ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (waitfds_ino < 0) return -1;
+        for (int i = 0; i < n; i++) {
+            char p[64];
+            snprintf(p, sizeof p, "/proc/self/fd/%d", want[i].fd);
+            if (inotify_add_watch(waitfds_ino, p, IN_MODIFY) < 0) continue;
+            waitfds_watch[waitfds_nwatch++] = want[i];
+        }
+        if (waitfds_nwatch == 0) {
+            close(waitfds_ino);
+            waitfds_ino = -1;
+            return -1;
+        }
+    }
+    waitfds_ino_drain();
+    return waitfds_ino;
+}
 int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
 {
     fdns_gate_release();
@@ -2517,6 +2579,7 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
     int nring = 0;
     int always_ready = 0;
     int rfd[WAITFDS_MAX];                 /* ordinary fds that are plain files */
+    struct waitfds_reg rid[WAITFDS_MAX];  /* ... and what file each one IS */
     int nreg = 0;
     int ino = -1, ino_slot = -1;
 
@@ -2547,7 +2610,11 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
         } else {
             struct stat st;
             if (fstat((int)fds[i], &st) == 0 && S_ISREG(st.st_mode)) {
-                rfd[nreg++] = (int)fds[i];     /* see the note above */
+                rid[nreg].fd = (int)fds[i];    /* see the note above */
+                rid[nreg].dev = st.st_dev;
+                rid[nreg].ino = st.st_ino;
+                rfd[nreg] = (int)fds[i];
+                nreg++;
             } else {
                 pfd[npoll].fd = fds[i];
                 pfd[npoll].events = POLLIN;
@@ -2557,27 +2624,17 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
         }
     }
 
-    /* The watch goes on BEFORE any size is sampled: a write that lands between
-     * the two must be a pending event, not a lost wakeup. */
+    /* The watch is armed and its queue drained BEFORE any size is sampled: a
+     * write that lands between the two must be a pending event, not a lost
+     * wakeup. */
     if (nreg) {
-        ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        ino = waitfds_ino_arm(rid, nreg);
         if (ino >= 0) {
-            int watched = 0;
-            for (int i = 0; i < nreg; i++) {
-                char p[64];
-                snprintf(p, sizeof p, "/proc/self/fd/%d", rfd[i]);
-                if (inotify_add_watch(ino, p, IN_MODIFY) >= 0) watched++;
-            }
-            if (watched) {
-                ino_slot = (int)npoll;
-                pfd[npoll].fd = ino;
-                pfd[npoll].events = POLLIN;
-                pfd[npoll].revents = 0;
-                npoll++;
-            } else {
-                close(ino);
-                ino = -1;
-            }
+            ino_slot = (int)npoll;
+            pfd[npoll].fd = ino;
+            pfd[npoll].events = POLLIN;
+            pfd[npoll].revents = 0;
+            npoll++;
         }
     }
 
@@ -2613,8 +2670,7 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
                  * waitfds_reg_ready() above, against the offset, which is the
                  * question the caller actually asked. */
                 if (ino_slot >= 0 && pfd[ino_slot].revents) {
-                    char drain[512];
-                    while (read(ino, drain, sizeof drain) > 0) { }
+                    waitfds_ino_drain();
                     r--;
                 }
                 ready += r;
@@ -2683,7 +2739,8 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
         hamwsys_input_wait(seen, left);
     }
 out:
-    if (ino >= 0) close(ino);
+    /* The inotify instance is NOT closed here -- see waitfds_ino_arm: closing
+     * it on every park is what made this whole path slower than the tick. */
     return rv;
 }
 
