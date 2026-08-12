@@ -488,30 +488,39 @@ COMPONENT_HOOKS = {
     # OLD hpm. A change in user/hpm.ad or user/wsysd.ad would not: it would
     # only help the update after the one that needs it.
     #
-    # The condition is the segment's existence, `ls /srv/wsys`. /srv is tmpfs
-    # and made fresh every boot, so the file exists exactly when a window
-    # system has been brought up on this boot. It is a plain path -- only
-    # /dev/wsys is intercepted by the wsys backend (classify() in
-    # user/linux-wsys.c) -- so this test cannot itself be the attach that
-    # empties the table.
+    # IT IS UNCONDITIONAL, AND THAT IS THE SECOND THING THIS PASS MEASURED.
+    #
+    # The first version guarded the message with `ls '/srv/wsys' > /dev/null`
+    # and `if $status == 0`, on the reasoning that /srv is tmpfs and made fresh
+    # every boot, so the segment exists exactly when a window system came up.
+    # The reasoning was right and the command was not: user/ls.ad's plain mode
+    # calls p9_listdir on whatever it is given, so `ls` ON A PLAIN FILE reads
+    # the file as if it were a directory, and on a 19 MB one it prints
+    # "listing TRUNCATED at 65536 bytes" and EXITS 1. Measured on the installed
+    # disk, in the real hpm update: the hook ran, the test said no, and the
+    # person was told nothing -- the warning had silently deleted itself.
+    #
+    # So there is no test. A warning that can quietly not appear is not a
+    # warning, and the sentence below is true in every case a hook can be in:
+    # it is addressed to a session that may or may not be running, and it says
+    # which. The only thing it needs is `echo`, which is a hook's floor --
+    # hamnix-init's hook has printed through it since it was written.
     "hamnix-desktop": {"install.hamsh": "\n".join([
         "# hamnix-desktop -- install hook. See COMPONENT_HOOKS in",
         "# scripts/hamlinux_packages.py for the measurement behind this.",
-        "ls '/srv/wsys' > /dev/null",
-        "if $status == 0 {",
-        "    echo ''",
-        "    echo 'hamnix-desktop: THE WINDOW SYSTEM WAS REPLACED WHILE A "
-        "SESSION IS RUNNING.'",
-        "    echo 'hamnix-desktop: The desktop on your screen belongs to the "
-        "OLD window system,'",
-        "    echo 'hamnix-desktop: and the two cannot share one session. The "
-        "next application you'",
-        "    echo 'hamnix-desktop: open will EMPTY THE DESKTOP -- windows, "
-        "panel and all -- and'",
-        "    echo 'hamnix-desktop: nothing but a reboot brings it back.'",
-        "    echo 'hamnix-desktop: REBOOT NOW, before you open anything else.'",
-        "    echo ''",
-        "}",
+        "echo ''",
+        "echo 'hamnix-desktop: THE WINDOW SYSTEM WAS REPLACED.'",
+        "echo 'hamnix-desktop: If a desktop session is running on this machine "
+        "right now, it'",
+        "echo 'hamnix-desktop: belongs to the OLD window system, and the two "
+        "cannot share one'",
+        "echo 'hamnix-desktop: session. The next application you open will "
+        "EMPTY THE DESKTOP --'",
+        "echo 'hamnix-desktop: your windows, the panel and all -- and nothing "
+        "but a reboot'",
+        "echo 'hamnix-desktop: brings it back.'",
+        "echo 'hamnix-desktop: REBOOT NOW, before you open anything else.'",
+        "echo ''",
         "exit 0",
         "",
     ])},
