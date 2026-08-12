@@ -20,6 +20,33 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
+### X programs work again — including the browser
+
+Anything that runs through X — Firefox above all — stopped the instant it
+connected. Not slowly, not badly: the moment the X server came up, the bridge
+that serves it froze, and so did the program.
+
+It was a deadlock, and it was **not caused by any change here**. A newer
+Xwayland simply outgrew an assumption: the setup message it sends at connection
+is 8,268 bytes, and the bridge only ever read the first 4,096 and never
+collected the rest. Every read after that landed 4,172 bytes into the wrong
+place. The version of this that shipped before worked only because the X server
+used to be smaller.
+
+The rootless-X checks are back to 37 passing, 0 failing — the same count they
+had before this broke.
+
+### The desktop repaints when you move the mouse, not when a clock says so
+
+Moving the pointer, dragging a window and typing now reach the screen in
+**0.29 ms instead of 9.98 ms**. The compositor used to wake on a fixed 16 ms
+timer no matter what you did; it now wakes because you did something.
+
+You will notice it most while dragging a window, where the desktop went from
+about 60 repaints a second to as many as the mouse actually reports.
+
+Idle cost did not change.
+
 ### Another program running as you can no longer read your windows' pixels
 
 If you typed a password into a web page, it sat in a store that any other
