@@ -410,21 +410,70 @@ same failure this project exists to beat.
   right and its message ("the maximal panel set did not come up") points at
   the config, which is the one part that works.
 
-* **wsyswl STOPS THE MOMENT Xwayland CONNECTS, AND THAT IS WHY
-  `wsys_close_button` IS 2 PASS / 1 FAIL.** Also unchanged at `4b50eae2`.
-  Xwayland starts, creates `/tmp/.X11-unix/X88`, and connects as a Wayland
-  client -- `wsyswl: client connected` is the last line its log ever gets.
-  `publish_state()` is called unconditionally from the main loop every 32
-  ticks (about twice a second), and the state file's mtime FROZE at that
-  instant and did not move again in 26 s of watching, with `conns 0` and
-  `xwm_connected 0` still in it. So the loop stops making progress when the
-  first Wayland client arrives, and `xwm_connect()` -- which is retried from
-  that same loop -- never runs. **WHAT I DID NOT ESTABLISH**: whether the loop
-  HANGS or the process DIES. The gate runs in a private namespace where the
-  pid is not visible from outside, and the standalone reproduction I wrote was
-  invalid (wsyswl exits early with `FATAL: no screen geometry` unless wsysd
-  published one first, which the gate does and my repro did not). That is the
-  next hour's work, not this pass's.
+* **THE ROOTLESS X PATH -- WHICH IS THE BROWSER PATH -- IS BROKEN, AND THE
+  FIRST OF ITS TWO CAUSES IS FIXED.** `wsys_close_button` is 2 PASS / 1 FAIL
+  and `wsyswl_rootless` is 7 PASS / 1 FAIL, both on "the compositor never got
+  an X connection", and both fail identically at `4b50eae2`, so this predates
+  everything in this session. It is not a gate problem: every X client, and
+  therefore Firefox, goes through this.
+
+  **CAUSE ONE, A DEADLOCK WITH XWAYLAND -- FIXED.** `x_read_exact()` looped on
+  BLOCKING `sys_read` until it had all n bytes, called from the one thread that
+  serves every Wayland client, and its callers ask for 32 bytes (`x_poll_msg`)
+  or a setup reply (`xwm_connect`) after a poll that only ever guarantees ONE
+  byte is readable. Both sides caught in the act, from `/proc`:
+
+      wsyswl    state S  wchan unix_stream_read_generic  read(fd=6, count=20)
+      Xwayland  state S  wchan do_epoll_wait             epoll_wait(..., -1)
+
+  20 is the tail of a 32-byte X message after 12 bytes arrived. Xwayland is
+  idle waiting on ITS Wayland connection, which only wsyswl can service;
+  wsyswl is waiting for the rest of a message only Xwayland can send. Neither
+  moves again, `publish_state()` is downstream of the read so the state file
+  freezes mid-session (`conns 0`, `xwm_connected 0`, mtime unchanged for 26 s),
+  and the compositor stops serving EVERY client, not just the X one.
+  **The discriminator that localised it**: with `WSYSWL_XWM` unset the same
+  binaries are healthy and wsyswl sits in `poll(2 fds, 16 ms)`. It is the X
+  manager, not Wayland.
+  The read is now non-blocking with a bounded wait (`X_READ_TRIES` x
+  `X_READ_WAIT_MS`, 4 x 20 ms), and giving up drops the X connection and
+  returns to the main loop -- which is what breaks the cycle, because once
+  wsyswl is serving Wayland again Xwayland comes up and `xwm_pump`'s retry
+  reconnects. **Measured after**: wsyswl stays in its 16 ms park, the state
+  file keeps ticking, `conns 1`, and `xdpyinfo -display :88` succeeds -- the X
+  server is up and being served. `wsyswl_conn_ceiling` is **30 PASS / 0 FAIL**,
+  unchanged, so the Wayland path is not disturbed.
+
+  **CAUSE TWO, THE X SETUP REPLY -- ALSO FIXED, AND IT IS WHY THE PATH BROKE
+  IN THE FIRST PLACE.** `xwm_connect()` clamped the setup reply's additional
+  data to 4096 bytes (the size of `xrep`, correctly) and NEVER DRAINED THE
+  REST. Measured with a print in that function: **Xwayland 24.1.6 sends 8268
+  bytes**, so 4172 stayed on a stream socket and every message afterwards
+  started 4172 bytes into the wrong place. That is the desynchronisation that
+  produced the 12-of-32 read, and after the deadlock fix it produced *`could
+  not intern WL_SURFACE_SERIAL -- this X server is not an Xwayland`* against a
+  real Xwayland that was answering `xdpyinfo` at that moment -- a message
+  naming the one thing that was not wrong. `xrep` is 16 KiB now, the remainder
+  is drained into `xsink` the way `x_poll_msg` already did, and the parse is
+  bounded by what is in the BUFFER and not by what the server sent.
+  **`wsyswl_rootless` is 37 PASS / 0 FAIL** -- the count HANDOFF recorded for
+  it before it broke -- against 7 PASS / 1 FAIL both immediately before the fix
+  and at `4b50eae2`.
+
+  **STILL INTERMITTENT, AND NOT CLAIMED OTHERWISE**: `wsys_close_button` is
+  10 PASS / 0 FAIL on two runs and 2 PASS / 1 FAIL on two others, same source.
+  When it passes it passes completely -- two xterms mapped as wsys windows,
+  `WM_DELETE_WINDOW` routed, the right client exiting and its neighbour
+  surviving. When it fails it is always the same 10-second wait for
+  `xwm_connected`. So the two structural defects are gone and the TIMING of the
+  first connect is still marginal, most likely the one-attempt-per-32-passes
+  retry cadence against that window. Cause not established, so no cadence
+  change was made on a guess.
+
+  **THE LESSON WORTH KEEPING**: a newer Xwayland is all it took. Nothing in
+  this tree changed; the peer got bigger and a buffer that was never drained
+  became a permanent desync. Every `if n > CAP: n = CAP` on a stream socket in
+  this tree is the same bug waiting for a bigger peer.
 
 * **THE VULKAN/GPU COMPOSITOR PATH IS 13x SLOWER THAN THE SOFTWARE ONE, AND
   NO MACHINE HAS EVER RUN IT.** The image stages only the venus ICD, which
