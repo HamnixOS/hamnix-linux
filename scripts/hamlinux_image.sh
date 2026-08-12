@@ -116,6 +116,18 @@ GUI_APPS=(
     wsysd
     hamdesktop hampanelscene hamtermscene hameditscene hamsettings hamfm
     hamUI hamUId
+    # THE APPLICATIONS MENU. It is here because for the whole of the port it
+    # was NOT, and hampanelscene's _appmenu_available() says what that cost in
+    # as many words: the Applications button was pointed at /bin/hamappmenu,
+    # the image did not build it, so the button spawned a program that did not
+    # exist on every real machine and the panel quietly used its own flat
+    # dropdown instead. The categorised menu -- search box, Favourites, one
+    # fly-out per category, the Brisk shape the machine owner asked for --
+    # existed in the tree and reached nobody. That is NORTH_STAR.md's worst
+    # bug shape (a program in the tree and in no ship vehicle), and it is only
+    # closed by BOTH this line and DESKTOP_CMDS in scripts/hamlinux_packages.py
+    # -- tests/linux/channel_covers_image.sh fails if either is missing.
+    hamappmenu
     # The demo for the scene IMAGE tier (the draw/ctl 'I' verb).  It is here
     # because for the whole of the port before the verb was ported it would
     # have been the ONLY thing on the box that could tell you the tier was

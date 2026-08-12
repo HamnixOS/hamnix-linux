@@ -124,9 +124,15 @@ SYS_CMDS = "hlinstall haminstallui nsrun reboot halt poweroff install".split()
 # xsnarfd is the X clipboard bridge and hamimgscene is the image viewer. Both
 # ship in the image; neither was in the channel until the coverage gate below
 # was written and named them.
+# hamappmenu is the Applications menu the panel's Applications button spawns
+# (hampanelscene _launch_appmenu). It was in neither this list nor the image's
+# APPS, so `_appmenu_available()` returned 0 on every installed machine and
+# the categorised menu shipped nowhere -- the exact shape NORTH_STAR.md calls
+# the project's worst bug. Both lists are needed: the image's APPS puts it in
+# /bin, this one puts it in a package so `hpm update` can ever fix it.
 DESKTOP_CMDS = ("wsysd wsyswl xbridge hamdesktop hampanelscene hamtermscene "
                 "hameditscene hamsettings hamfm hamUI hamUId xsnarfd "
-                "hamimgscene").split()
+                "hamimgscene hamappmenu").split()
 
 
 # --------------------------------------------------------------------------

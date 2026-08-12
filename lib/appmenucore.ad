@@ -186,7 +186,13 @@ def amc_classify(cats: Ptr[uint8]) -> int32:
 # Human header label for a bucket code.
 def amc_cat_name(code: int32) -> Ptr[uint8]:
     if code == AMC_HDR_RECENT:
-        r: Ptr[uint8] = "Recent"
+        # BRISK-MENU SHAPE: the top section is "Favourites", and what it holds
+        # is what you have launched most recently -- the machine owner's words
+        # were "a top category of favorites, showing you what you've launched
+        # recently", which is one section, not two. MATE's Brisk names it
+        # Favourites, so this does. The BUCKET code is still AMC_HDR_RECENT
+        # because the mechanism is a recency list; only the label changed.
+        r: Ptr[uint8] = "Favourites"
         return r
     if code == AMC_ACCESSORIES:
         a: Ptr[uint8] = "Accessories"
@@ -511,6 +517,35 @@ def amc_mark_launch(prog: Ptr[uint8]):
 
 def amc_recent_count() -> uint64:
     return _amc_recent_count
+
+
+# --- READ-BACK, so the list can OUTLIVE THE PROCESS -------------------
+# The Applications menu is a SEPARATE PROCESS spawned fresh on every click of
+# the panel's Applications button and killed on dismiss (user/hamappmenu.ad's
+# _am_close). So an in-memory recency list is born empty and dies at exit: the
+# Favourites section could never contain anything you launched, because the
+# only thing that could put an entry there -- amc_mark_launch -- ran in a
+# process that was about to exit. `amc_mark_launch`'s own comment already said
+# "a caller may persist/reload the list via amc_recent_* accessors"; there was
+# no accessor that could READ a slot back out, so no caller could.
+#
+# These two are that accessor. They are the whole of the persistence contract
+# this pure module has: the client reads slot 0..amc_recent_count()-1 (most
+# recent FIRST) and writes them to its own store, and on the next start replays
+# them OLDEST FIRST through amc_mark_launch, which rebuilds the identical
+# order. Nothing about WHERE that store lives is decided here -- this file has
+# no externs and opens nothing.
+def amc_recent_prog(r: uint64) -> Ptr[uint8]:
+    if r >= _amc_recent_count:
+        e: Ptr[uint8] = ""
+        return e
+    return &_amc_recent[r][0]
+
+
+def amc_recent_prog_len(r: uint64) -> uint64:
+    if r >= _amc_recent_count:
+        return 0
+    return _amc_recent_len[r]
 
 
 # The app index whose prog matches recent slot `r`, or -1 if that recent
