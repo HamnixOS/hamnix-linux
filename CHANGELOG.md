@@ -20,7 +20,59 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-*(nothing right now — 1.0.15 carries everything that had landed.)*
+*(nothing right now — 1.0.16 carries everything that had landed.)*
+
+## 1.0.16
+
+### Steam scrolls, and so does Firefox
+
+**The scroll wheel now works in a distribution namespace.** Eight notches over
+Steam's store page move **97.4%** of it and scroll back to a byte-identical
+frame; Firefox moves 18.8% in the same session. Before this, the page changed
+**zero pixels of 564,400**, across four full sessions, while a terminal in the
+same session scrolled perfectly.
+
+The cause was ours and it was a single event that should never have been sent:
+for an input carrying nothing but a wheel delta — the cursor standing still —
+the compositor was reporting a pointer *movement* alongside the scroll. The X
+server routes movement and scrolling to **two different input devices**, so
+every notch made the pointer appear to switch devices twice, and a browser
+resets its smooth-scrolling baseline whenever the device changes. Every scroll
+was therefore treated as the first scroll, and every first scroll is zero. A
+terminal reads the older, coarser scroll path, which is untouched by any of
+this — which is exactly why a terminal scrolled while the browser did not, in
+the same session, on the same events.
+
+The test written to catch this had been green throughout, because it never
+subscribed to the device-changed notification and so accumulated straight
+across the reset that was breaking the real browser. It now does what a
+browser does.
+
+### Updates cannot be wedged by a package's install script
+
+A hook that fails to parse used to take the machine's update with it: nothing
+in the hook ran, the safety net at the end of the file was swallowed too, and
+the package manager waited forever on a shell sitting at a prompt nobody was
+typing at. Hooks now run with **no input** and a **60-second limit**, so a
+hook that hangs for any reason fails by name with its package named. The limit
+comes from timing the slowest hook this distribution actually ships — about
+500× headroom.
+
+**This cannot rescue a machine already running an older package manager**: it
+protects against the *next* bad hook, not the one that arrives before this
+update does.
+
+A hook of 16 KiB or more is now refused at publish time. Beyond that size it
+is silently truncated, and a cut landing inside a quoted string manufactures
+exactly the parse failure described above — out of a hook that was correct in
+the file.
+
+### Known, and stated rather than left to be discovered
+
+A hook that fails to parse still reports the package as installed. The machine
+no longer hangs, but it is told a half-done install succeeded. Fixing that
+means deciding what happens when the *boot* script fails to parse, which is
+the same code path — being worked on separately rather than guessed at.
 
 ## 1.0.15
 
