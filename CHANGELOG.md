@@ -72,12 +72,23 @@ big. Both are fixed in this release.
 ### Dragging a window no longer costs five times the power it needs to
 
 The compositor now presents at the display's refresh rate instead of as fast as
-it can. Dragging a window used to run the machine at **35.7% of a CPU core**
-producing 908 frames a second, of which a 60 Hz screen can show 60. It is
-**7.0% of a core** at 57.4 frames a second now.
+it can, and it no longer wakes up for applications while a frame it already owes
+is still waiting.
 
-Measured on a real display in one session with one binary, both settings, with
-the probe proven against a known 50% load in the same run.
+The two counts tell the story on their own:
+
+- it drew **908 frames a second** at a screen that can show 60. Now **57**.
+- it woke **920 times a second** to decide whether to draw. Now **118**.
+
+That cost **about 36% of a CPU core** while dragging a window, and now costs
+**under 4%**.
+
+Measured on a real display in one session with one binary, with the probe proven
+against a known 50% load in the same run. **Treat the CPU figures as a floor
+rather than a promise:** they were measured with a test window that draws less
+than a real one, so a desktop with real content in it will use somewhat more at
+both ends. The two counts above are unaffected by that — they count how often
+things happened, not what each one cost.
 
 **Capping the frame rate was only half of it, and the half it left behind was
 the larger one.** With the cap alone the CPU fell 5.1x while the frame rate fell
@@ -126,8 +137,8 @@ had before this broke.
 ### The desktop repaints when you move the mouse, not when a clock says so
 
 Moving the pointer, dragging a window and typing now reach the screen in
-**0.29 ms instead of 9.98 ms**. The compositor used to wake on a fixed 16 ms
-timer no matter what you did; it now wakes because you did something.
+**about 0.3 ms instead of about 10 ms**. The compositor used to wake on a fixed
+16 ms timer no matter what you did; it now wakes because you did something.
 
 You will notice it most while dragging a window, where the desktop went from
 about 60 repaints a second to as many as the mouse actually reports.
