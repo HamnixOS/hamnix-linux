@@ -224,14 +224,29 @@ if [ "${1:-}" = "--inner" ]; then
     #     mapping can gate this.  Here it is, measured: a uid-1001 holder's
     #     window, and a SEPARATE uid-1001 process injecting a key into it.
     echo "-- same-uid: a uid-1001 attacker against a uid-1001 victim"
-    as_bg 1001 "$PROBE" client hold "$DRAIN" >"$W/live.client.out" 2>&1
+    # THE NEEDLE THE VICTIM PAINTS.  This holder also renders a v2 BACKBUFFER
+    # whose pixels are this exact byte string -- it is the browser-shaped window
+    # whose screen contents the backbuffer scrape below recovers by name.  The
+    # string is distinctive so a hit in the 8 GB store is the victim's pixels
+    # and not a coincidence.
+    BBSECRET='BACKBUFFERSECRET31337'
+    as_bg 1001 "$PROBE" client hold "$DRAIN" "$BBSECRET" >"$W/live.client.out" 2>&1
     LHOLDER=$!
     for _ in $(seq 1 50); do
-        grep -q 'commit=' "$W/live.client.out" 2>/dev/null && break
+        grep -q 'blit=1' "$W/live.client.out" 2>/dev/null && break
         sleep 0.1
     done
     sed 's/^/== live.hold./' "$W/live.client.out"
     LWID="$(sed -n 's/.*wid=\([0-9][0-9]*\).*/\1/p' "$W/live.client.out" | head -1)"
+    # THE REAL BACKBUFFER SCRAPE, and the one that decides the fix.  The victim
+    # above rendered a v2 backbuffer whose pixels ARE $BBSECRET; now a SEPARATE
+    # uid-1001 process -- no protocol, no /dev/wsys, just open+mmap of the store
+    # -- recovers those exact bytes by walking the shared surface.  This is the
+    # "Firefox's pixels are readable" finding, driven end to end: a hit here is
+    # the victim's screen contents in the attacker's hands.  On the old tree it
+    # MUST find them (the positive control that proves the scrape is real); the
+    # day the store goes private it MUST NOT, and this assertion says which.
+    as 1001 "$BYP" bbscrape "$HAMWSYS".bb "$BBSECRET" sameuid.bbreal
     # The attacker is a SEPARATE process at the SAME uid 1001 -- no file-mode
     # boundary exists between it and the victim, and none could.  It targets the
     # victim by WID rather than by title, because "uidgate probe" is the title
@@ -343,6 +358,17 @@ if [ "${1:-}" = "--inner" ]; then
     # output was already printed above under `victim.`, before any of this ran,
     # so it is re-read here.
     sed 's/^/== pixvictim./' "$W/live.client.out"
+
+    # AND THE SAME FOR THE BACKBUFFER, which is the whole point of this pass: the
+    # v2 pixels left /srv/wsys.bb for a per-window memfd handed up over
+    # "…/backbuffer", so both ends are driven exactly as the scene's are.  The
+    # attacker binds first and must be handed nothing; the segment owner then
+    # binds and MUST recover the victim's BACKBUFFERSECRET31337 -- which is the
+    # compositor working and the positive control for the sameuid.bbreal=found=0
+    # assertion above.  It runs here, after DRAIN, because the victim only ticks
+    # its hand-up once it is reading its ring (see hold_open).
+    as 1001 "$BYP" bbgrab "$HAMWSYS" 2500 "$BBSECRET" bbgrab.attacker
+    as 0    "$BYP" bbgrab "$HAMWSYS" 2500 "$BBSECRET" bbgrab.owner
 
     # 3c. ATTACK 5 OF 5 -- PEEK, and it is the one that walks THROUGH attack 4's
     #     fix.  The keystrokes left the mapping, so the snooper above finds
@@ -486,11 +512,41 @@ if has sameuid.bb "ro=1"; then
     ok "and the scrape asked for no write access: O_RDONLY, PROT_READ"
 else bad "the backbuffer scrape did not run read-only: $(line sameuid.bb)"; fi
 if has sameuid.bb "mapped=1"; then
-    ok "STILL OPEN: a uid-1001 attacker holds every v2 window's pixels in a"\
-       "shared mapping (what it proves is the exposure, not a victim's pixels:"\
-       "this gate drives no v2 client, so found=0 means nothing blitted)"
-else bad "the attacker could not map the v2 backbuffer store -- if that is a"\
-        "fix it is an unmeasured one: $(line sameuid.bb)"; fi
+    note "  (the store is still a shared mapping an attacker can open; what"
+    note "   decides the fix is whether a victim's PIXELS come back through it,"
+    note "   which the real scrape below measures)"
+else bad "the attacker could not map the v2 backbuffer store: $(line sameuid.bb)"; fi
+
+note ""
+note "  THE REAL BACKBUFFER SCRAPE -- a victim's actual pixels, recovered by a"
+note "  same-uid process (this is the finding, driven end to end):"
+note "  (the victim rendered a v2 backbuffer whose pixels are BACKBUFFERSECRET"
+note "   31337; a SEPARATE uid-1001 process then opened the store O_RDONLY and"
+note "   searched it.  found=1 is the victim's screen contents in the attacker's"
+note "   hands -- Firefox's pixels read by name.  The instrument is proven by the"
+note "   POSITIVE CONTROL: the compositor's own hand-up read below recovers the"
+note "   SAME bytes, so a found=0 for the attacker is a closed store, not a"
+note "   window that never painted.)"
+# THE POSITIVE CONTROL FIRST -- the pixels exist and are reachable by the one
+# process entitled to them.  On the old tree that is the raw shared store (the
+# hole); on the fixed tree it is the memfd hand-up (bbgrab as the segment owner).
+if has bbgrab.owner "found=1"; then
+    ok "the compositor (segment owner) recovers the victim's pixels: the window"\
+       "really painted BACKBUFFERSECRET31337, so the attacker's result is meaningful"
+else bad "the instrument did not confirm the pixels exist -- a scrape result"\
+        "against a blank window proves nothing: $(line bbgrab.owner)"; fi
+# THE ATTACK ITSELF -- the fixed-tree expectation is that it comes back EMPTY.
+# On the unfixed tree this line goes RED, which is the point: a gate that has
+# never gone red is not a gate.
+if has sameuid.bbreal "found=0"; then
+    ok "CLOSED: a same-uid attacker recovers NO pixel content from the store"
+else bad "OPEN: a same-uid attacker recovered the victim's backbuffer pixels"\
+        "by name -- Firefox's screen contents are readable: $(line sameuid.bbreal)"; fi
+# AND THE ATTACKER'S HAND-UP GRAB IS REFUSED, the way pixgrab's is, so the fix
+# is not merely "the pixels moved to a place this one scrape misses".
+if has bbgrab.attacker "found=0"; then
+    ok "and the attacker's hand-up grab is refused too: no pixels by that route either"
+else note "  (bbgrab.attacker not measured on this tree: $(line bbgrab.attacker))"; fi
 
 note "  attack 3 of 4 -- INJECT a key into another client's ring:"
 note "  (CLOSED, and the control below is INVERTED rather than deleted.  The"

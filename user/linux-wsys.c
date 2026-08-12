@@ -533,6 +533,9 @@ struct bbhdr {
  * touches that slot and never maps the ones it does not use -- a client maps
  * its own window's two pages, and the compositor maps the pages of the
  * windows it is actually painting. */
+/* Bumped from 0x42425747 ("GWBB") when the pixels left this file: a build that
+ * still put pixels here is re-initialised rather than trusted (see bb_attach). */
+#define BBSHM_MAGIC 0x42425753u        /* "SWBB" */
 struct bbshm {
     uint32_t magic;
     uint32_t nslots;       /* what the build that made it believed BB_SLOTS was */
@@ -561,9 +564,12 @@ struct bbshm {
 #define BB_ALIGN      ((size_t)65536)
 #define BB_HDR_BYTES  ((size_t)((sizeof(struct bbshm) + BB_ALIGN - 1) & ~(BB_ALIGN - 1)))
 #define BB_PAGE_BYTES ((size_t)((BB_BYTES + BB_ALIGN - 1) & ~(BB_ALIGN - 1)))
-#define BB_PX_OFF(i, pg) \
-    ((off_t)BB_HDR_BYTES + (off_t)(((size_t)(i) * 2 + (size_t)(pg)) * BB_PAGE_BYTES))
-#define BB_FILE_BYTES ((off_t)BB_HDR_BYTES + (off_t)BB_SLOTS * 2 * (off_t)BB_PAGE_BYTES)
+/* THE METADATA FILE HOLDS NO PIXELS ANY MORE.  Its whole extent is the header
+ * struct (rounded up), and the two pixel pages per slot that used to follow it
+ * are GONE FROM THE SHARED MAPPING -- see THE BACKBUFFER MEMFD below.  This is
+ * the byte count that changed the /srv/wsys.bb scrape from "the whole desktop's
+ * pixels" to "a table of geometry a client already publishes". */
+#define BB_FILE_BYTES ((off_t)BB_HDR_BYTES)
 
 /* The pool can never be the first thing to run out.  If someone shrinks it
  * below the window table, this fails to compile rather than becoming a blank
@@ -572,22 +578,105 @@ typedef char bb_pool_covers_the_window_table[
     (BB_SLOTS >= WSYS_MAX_WINDOWS) ? 1 : -1];
 
 static struct bbshm *bb;
-static int       bb_fd = -1;           /* kept open: pages are mapped lazily */
-static uint8_t  *bb_px[BB_SLOTS][2];   /* per-process, NULL until first touch */
+static int       bb_fd = -1;           /* the metadata file, kept open */
 
-/* Slot i's page `pg`, mapped on demand.  NULL means the mapping failed, and
- * every caller treats that as "this window has no pixels this frame" rather
- * than writing somewhere else. */
-static uint8_t *bb_page(int i, unsigned pg)
+/* ------------------------------------------------------------------ *
+ * THE BACKBUFFER MEMFD — the confidentiality fix, and why it is one.
+ *
+ * WHAT WAS OPEN.  /srv/wsys.bb was a third 0666 mapping holding every v2
+ * window's PIXELS -- and a v2 window is what a browser, a video and a bridged X
+ * client are.  Any same-uid process could open it O_RDONLY, map it and read
+ * another window's backbuffer BY NAME (the slot carries its wid): a password
+ * typed into a web page sat in a slab any process on the machine could scrape,
+ * while the same password typed into a hamUI dialog did not.  tests/linux/
+ * wsys_bypass.sh's `sameuid.bbreal` recovers exactly those bytes to prove it.
+ *
+ * THE FIX IS THE PIXEL HAND-UP'S, APPLIED TO PIXELS.  It is the SAME
+ * construction the v1 display list already uses (THE PIXEL HAND-UP, far below):
+ * the bytes live in a per-window MEMFD the window's OWNER creates -- which has
+ * no name in the filesystem and, against a hardened owner (PR_SET_DUMPABLE 0 +
+ * ptrace_scope=1), no /proc path either -- and the owner hands the descriptor
+ * UP to the compositor over an abstract AF_UNIX rendezvous, checking
+ * SO_PEERCRED so it hands it to nobody but the segment's owner.  A non-owner
+ * has no descriptor for a window it does not own and no mapping to scrape.
+ *
+ * WHY A SECOND MEMFD AND NOT THE SCENE'S.  The scene memfd (struct wpix) is
+ * 64 KiB; a backbuffer is two 8 MiB pages.  A v2 window (a browser) has no v1
+ * scene and a v1 window (a terminal) has no backbuffer -- they are disjoint in
+ * practice -- so folding the pixels into struct wpix would put 16 MiB of
+ * address space behind every terminal's scene and a scene buffer behind every
+ * browser, both dead.  The MECHANISM is reused (the abstract rendezvous, the
+ * sender-side SO_PEERCRED check, the clock-driven re-announce, the seal check,
+ * the inode dup-detect); only the payload and the address suffix differ.  A
+ * dedicated channel also keeps this change out of the shipped-and-gated scene
+ * hand-up, which another pass depends on.
+ *
+ * WHY IT IS A POOL REWRITE AND NOT A MOVE.  The old shared slabs were a central
+ * pool of BB_SLOTS page-mapped surfaces; a non-owner mapped the pool and
+ * indexed it.  Moving the pool to another offset in the same 0666 file would
+ * change nothing.  The pool is DISMANTLED: each window's pixels become private
+ * memory the owner alone maps and the compositor alone is handed, page-mapped
+ * on demand exactly as before (a 32x6 window still dirties a few KiB of a 16 MiB
+ * sparse memfd).  The shared file keeps ONLY the pool ACCOUNTING -- used slots,
+ * exhaustion events -- which is geometry, already world-readable in the window
+ * table, and no longer any pixels at all.
+ * ------------------------------------------------------------------ */
+#define BBPIX_MAGIC     0x32425747u    /* "GWB2" */
+#define BBPIX_VERSION   1
+#define BBPIX_HDR_BYTES BB_ALIGN
+#define BBPIX_PX_OFF(pg) ((off_t)BBPIX_HDR_BYTES + (off_t)(pg) * (off_t)BB_PAGE_BYTES)
+#define BBPIX_BYTES     ((off_t)BBPIX_HDR_BYTES + 2 * (off_t)BB_PAGE_BYTES)
+
+/* The memfd's header.  The double-buffer state (front/started/gen) lives HERE,
+ * shared between the one owner that writes the pixels and the one compositor it
+ * hands them to -- not in the 0666 metadata file, whose front word an attacker
+ * could otherwise steer at pixels it still cannot read. */
+struct bbpix {
+    uint32_t magic, version;
+    int32_t  wid;
+    int32_t  w, h;
+    uint32_t gen;          /* ++ on every flip */
+    uint32_t front;        /* which page the compositor reads */
+    uint32_t started;      /* a frame is in progress on the back page */
+};
+
+/* One entry per window this process touches: the owner's own memfd (own=1,
+ * created and handed up) or a foreign window's memfd this process was handed
+ * (own=0, the compositor's copy).  Keyed by wid; the two never collide because
+ * a process is never both a window's owner and its compositor. */
+struct bbmap {
+    int32_t       wid;
+    int           fd;
+    struct bbpix *hdr;      /* the 64 KiB header mapping */
+    uint8_t      *px[2];    /* the two pixel pages, mapped on demand */
+    int           own;      /* we created it (an owner) vs were handed it */
+    uint64_t      due;      /* next hand-up attempt, ms (owner side) */
+    int           handed;   /* a hand-up has succeeded */
+    uint64_t      ino;      /* the memfd's, for dup detect */
+};
+static struct bbmap bbmap[WSYS_MAX_WINDOWS];
+static int          bbmap_n;
+
+static int bb_find(int32_t wid)
 {
-    if (i < 0 || i >= BB_SLOTS || pg > 1) return NULL;
-    if (bb_px[i][pg]) return bb_px[i][pg];
-    if (bb_fd < 0) return NULL;
+    for (int i = 0; i < bbmap_n; i++)
+        if (bbmap[i].wid == wid) return i;
+    return -1;
+}
+
+/* Entry i's page `pg`, mapped on demand from that window's memfd.  NULL means
+ * the mapping failed, and every caller treats that as "this window has no
+ * pixels this frame" rather than writing somewhere else. */
+static uint8_t *bbpix_page(int i, unsigned pg)
+{
+    if (i < 0 || i >= bbmap_n || pg > 1) return NULL;
+    if (bbmap[i].px[pg]) return bbmap[i].px[pg];
+    if (bbmap[i].fd < 0) return NULL;
     void *m = mmap(NULL, BB_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED,
-                   bb_fd, BB_PX_OFF(i, pg));
+                   bbmap[i].fd, BBPIX_PX_OFF(pg));
     if (m == MAP_FAILED) return NULL;
-    bb_px[i][pg] = (uint8_t *)m;
-    return bb_px[i][pg];
+    bbmap[i].px[pg] = (uint8_t *)m;
+    return bbmap[i].px[pg];
 }
 
 static int bb_attach(void)
@@ -638,18 +727,18 @@ static int bb_attach(void)
      * of this device opens the segment for itself, by name. */
     bb_fd = fd;
     fcntl(bb_fd, F_SETFD, FD_CLOEXEC);
-    /* The magic carries the slot count, so a segment laid out by a build with
-     * a different BB_SLOTS is re-initialised rather than half-believed: the
-     * pixel pages are addressed by slot index, and two builds that disagree
-     * about that stride would quietly read each other's windows.
-     *
-     * The pixels are not touched here.  A fresh file is already zero, and a
-     * stale one's pixels are unreachable: every slot is cleared to its
-     * window's size by bb_fit when it is claimed, and reads are bounded by
-     * the same size. */
-    if (bb->magic != 0x42425747u || bb->nslots != (uint32_t)BB_SLOTS) {
+    /* THE MAGIC IS BUMPED FOR THE PIXEL-OUT REWRITE, and the bump is what makes
+     * a stale segment from a pixel-carrying build safe to meet: an old file's
+     * magic (0x42425747) fails this test, so it is re-initialised to the new,
+     * pixel-free header AND ftruncated back down to it -- which DROPS the stale
+     * pixel pages a scraper could otherwise still find in an oversized leftover.
+     * A build that disagrees about BB_SLOTS is likewise re-initialised, so the
+     * pool accounting is never half-believed. */
+    if (bb->magic != BBSHM_MAGIC || bb->nslots != (uint32_t)BB_SLOTS) {
+        if ((uint64_t)st.st_size > (uint64_t)BB_FILE_BYTES)
+            (void)ftruncate(fd, BB_FILE_BYTES);   /* drop stale pixel pages */
         memset(bb, 0, sizeof *bb);
-        bb->magic  = 0x42425747u;
+        bb->magic  = BBSHM_MAGIC;
         bb->nslots = (uint32_t)BB_SLOTS;
     }
     return 0;
@@ -663,6 +752,13 @@ static int bb_attach(void)
  * minutes. */
 struct wwin;
 static struct wwin *win_find(int wid);
+/* Defined far below, but reached by bb_own here (a window owner hardens the
+ * moment it creates private pixel memory, whether that is a scene or a
+ * backbuffer) and by the backbuffer hand-up, which mirrors the pixel one. */
+static void         owner_harden(void);
+static void         bbup_tick(void);
+static void         bbup_listen(void);
+static void         bbup_drain(void);
 /* THE KEYSTROKE CHANNEL, defined below -- the one ring that is not in the
  * shared segment.  Declared here because the park, the teardown and the
  * open/read/write paths all reach it and they are spread across this file. */
@@ -687,140 +783,170 @@ static void bb_once(int *flag, const char *msg, int a, int b, int c, int d)
 
 static int bb_warn_full, bb_warn_clamp, bb_warn_drop, bb_warn_refit;
 
-/* Fit a slot to a size, clearing it.  A resize means the client is about to
- * redraw, and a stretched copy of the old frame in the meantime is a worse
- * answer than a blank one it immediately overwrites. */
-static void bb_fit(int i, int w, int h)
+/* THE POOL ACCOUNTING, and NOTHING ELSE, now lives in the shared file.  These
+ * two calls keep /dev/wsys/pool's used-slot count and exhaustion events global
+ * across processes -- geometry a client already publishes -- while the pixels
+ * they used to sit beside have moved to the per-window memfd. */
+static void bb_pool_claim(int32_t wid, int w, int h)
 {
-    /* THE OLD SIZE MATTERS, because the clear has to cover it. */
-    size_t was = (size_t)bb->slot[i].w * bb->slot[i].h * 4;
-    bb->slot[i].w = w > 0 && w <= BB_W ? w : BB_W;
-    bb->slot[i].h = h > 0 && h <= BB_H ? h : BB_H;
-    bb->slot[i].started = 0;
-    /* CLEAR THE PIXELS THIS SLOT CAN ACTUALLY SHOW, not BB_BYTES.  Rows are
-     * packed at the SLOT's width (see bb_blit), so a window's pixels are
-     * w*h*4 contiguous bytes at the start of each page and everything past
-     * them is unreachable -- reads are bounded by the same product.  Zeroing
-     * 8 MiB for a 186x110 xterm is what made a large pool unaffordable; this
-     * is 82 KiB.  The old extent is cleared too where it was larger, so a
-     * shrink cannot leave a previous tenant's pixels inside the new one. */
-    size_t now = (size_t)bb->slot[i].w * bb->slot[i].h * 4;
-    size_t clr = was > now ? was : now;
-    if (clr > BB_BYTES) clr = BB_BYTES;
-    uint8_t *p0 = bb_page(i, 0), *p1 = bb_page(i, 1);
-    if (p0) memset(p0, 0, clr);
-    if (p1) memset(p1, 0, clr);
-    bb->slot[i].gen++;
-    if ((w > 0 && w > BB_W) || (h > 0 && h > BB_H))
-        bb_once(&bb_warn_clamp, "window is bigger than the backbuffer -- "
-                "its pixels will be cut to BB_W x BB_H", w, h, BB_W, BB_H);
-}
-
-/* THE SLOT'S SIZE IS THE WINDOW'S SIZE, AND NOTHING ELSE MAY DECIDE IT.
- *
- * This function's caller writes pixels at the SLOT's width; user/wsysd.ad
- * reads them back and re-rows them at the WINDOW's width (paint_backbuffer,
- * win_w[i]).  Two authorities for one stride, and when they disagreed nothing
- * anywhere said so: the compositor scanned out a window drawn at 640 as though
- * it were 1280, which is two half-height copies of the client side by side and
- * everything below row h/2 dropped.  A rootful Xwayland is ONE surface, so
- * what that looked like was a whole X session -- xterm, Steam's login window,
- * the lot -- that painted once and then never followed a move again, with no
- * error in any log.  It cost three passes to localise.
- *
- * Two ways they came apart, both fixed here:
- *
- *   * a STALE SLOT.  The segment is a file (/srv/wsys.bb, or /dev/shm/... on a
- *     host run) that outlives the process, and a client that is killed never
- *     releases its slot.  The next run's window takes the same low wid, finds
- *     the corpse, and inherits its size.
- *   * bb_resize() was a no-op whenever `bb` was NULL -- i.e. before this
- *     process's first blit, which is EXACTLY when wsyswl sends the geometry it
- *     deliberately sends first (see win_open's comment in user/wsyswl.ad).
- *
- * So: attach before resizing, and re-fit an existing slot whose size does not
- * match what the caller asked for.  Every blit passes the window's current
- * w/h, so after this the two can be out of step for at most one frame. */
-static int bb_for(int wid, int create, int w, int h)
-{
-    if (bb_attach() < 0) return -1;
+    if (bb_attach() < 0) return;
     for (int i = 0; i < BB_SLOTS; i++)
         if (bb->slot[i].used && bb->slot[i].wid == wid) {
-            if (create && w > 0 && h > 0
-                && (bb->slot[i].w != w || bb->slot[i].h != h)) {
-                bb_once(&bb_warn_refit, "a slot's size did not match its "
-                        "window's -- re-fitting", wid, bb->slot[i].w,
-                        bb->slot[i].h, w);
-                bb_fit(i, w, h);
-            }
-            return i;
+            bb->slot[i].w = w; bb->slot[i].h = h; return;
         }
-    if (!create) return -1;
-    for (int pass = 0; pass < 2; pass++) {
+    for (int pass = 0; pass < 2; pass++)
         for (int i = 0; i < BB_SLOTS; i++) {
-            /* Second pass: reclaim the slots of windows that no longer exist.
-             * A client killed with SIGKILL never closes its window, and eight
-             * such corpses used to mean the ninth window was blank for ever. */
+            /* Second pass: reclaim the accounting rows of windows that no
+             * longer exist, exactly as the pixel pool used to. */
             if (bb->slot[i].used) {
                 if (pass == 0 || win_find(bb->slot[i].wid)) continue;
                 bb->slot[i].used = 0;
             }
             memset(&bb->slot[i], 0, sizeof bb->slot[i]);
-            bb->slot[i].used = 1;
-            bb->slot[i].wid  = wid;
-            bb_fit(i, w, h);
-            return i;
+            bb->slot[i].used = 1; bb->slot[i].wid = wid;
+            bb->slot[i].w = w; bb->slot[i].h = h;
+            return;
         }
-    }
-    /* UNREACHABLE UNLESS SOMEONE BREAKS THE INVARIANT above -- BB_SLOTS is
-     * WSYS_MAX_WINDOWS, and a window that does not exist cannot ask for a
-     * slot -- but it is recorded rather than only printed, because the two
-     * times this pool has been too small the symptom was a window that is
-     * never painted and NOTHING that says why.  /dev/wsys/pool reads these. */
-    bb->full_evt++;
-    bb->full_wid = wid;
-    bb->full_w = w;
-    bb->full_h = h;
-    bb_once(&bb_warn_full, "all slots are in use by live windows -- this "
-            "window will never be painted; read /dev/wsys/pool", wid,
-            BB_SLOTS, w, h);
-    errno = ENOSPC;
-    return -1;
+    bb->full_evt++; bb->full_wid = wid; bb->full_w = w; bb->full_h = h;
+    bb_once(&bb_warn_full, "no accounting row left for a window's backbuffer; "
+            "read /dev/wsys/pool", wid, BB_SLOTS, w, h);
 }
 
-/* Re-fit a slot to a window's current size.
- *
- * bb_for fixes w/h at the FIRST blit and nothing could change them, so a
- * client that resized its surface stayed clipped to whatever size it opened
- * at -- which for a Wayland client is its initial configure, i.e. every
- * window that was ever resized was wrong.  The published page is cleared
- * rather than scaled: a resize means the client is about to redraw, and a
- * stretched copy of the old frame in the meantime is a worse answer than a
- * blank one it immediately overwrites. */
-static void bb_resize(int wid, int w, int h)
-{
-    if (w <= 0 || h <= 0) return;
-    /* ATTACH FIRST.  This used to be `if (!bb) return;`, which made the call
-     * a silent no-op in any process that had not blitted yet -- and the one
-     * caller is the `geometry` ctl verb, which wsyswl sends BEFORE its first
-     * blit on purpose.  So the correction never ran in the one process that
-     * needed it.  See bb_for. */
-    if (bb_attach() < 0) return;
-    for (int i = 0; i < BB_SLOTS; i++) {
-        struct bbhdr *hh = &bb->slot[i];
-        if (!hh->used || hh->wid != wid) continue;
-        if (hh->w == w && hh->h == h) return;
-        bb_fit(i, w, h);
-        return;
-    }
-}
-
-static void bb_release(int wid)
+static void bb_pool_release(int32_t wid)
 {
     if (!bb) return;
     for (int i = 0; i < BB_SLOTS; i++)
         if (bb->slot[i].used && bb->slot[i].wid == wid)
             bb->slot[i].used = 0;
+}
+
+/* Fit a window's memfd to a size, clearing it.  A resize means the client is
+ * about to redraw, and a stretched copy of the old frame in the meantime is a
+ * worse answer than a blank one it immediately overwrites. */
+static void bb_fit(int i, int w, int h)
+{
+    struct bbpix *hd = bbmap[i].hdr;
+    if (!hd) return;
+    /* THE OLD SIZE MATTERS, because the clear has to cover it. */
+    size_t was = (size_t)hd->w * hd->h * 4;
+    hd->w = w > 0 && w <= BB_W ? w : BB_W;
+    hd->h = h > 0 && h <= BB_H ? h : BB_H;
+    hd->started = 0;
+    /* CLEAR THE PIXELS THIS WINDOW CAN ACTUALLY SHOW, not BB_BYTES.  Rows are
+     * packed at the window's width (see bb_blit), so its pixels are w*h*4
+     * contiguous bytes at the start of each page and everything past them is
+     * unreachable -- reads are bounded by the same product.  A fresh memfd is
+     * already zero, so this only costs anything on a genuine resize; the old
+     * extent is cleared too where it was larger, so a shrink cannot leave a
+     * previous frame's pixels inside the new one. */
+    size_t now = (size_t)hd->w * hd->h * 4;
+    size_t clr = was > now ? was : now;
+    if (clr > BB_BYTES) clr = BB_BYTES;
+    if (clr) {
+        uint8_t *p0 = bbpix_page(i, 0), *p1 = bbpix_page(i, 1);
+        if (p0) memset(p0, 0, clr);
+        if (p1) memset(p1, 0, clr);
+    }
+    hd->gen++;
+    if ((w > 0 && w > BB_W) || (h > 0 && h > BB_H))
+        bb_once(&bb_warn_clamp, "window is bigger than the backbuffer -- "
+                "its pixels will be cut to BB_W x BB_H", w, h, BB_W, BB_H);
+}
+
+/* THE OWNER'S SIDE: get, or create, this process's own backbuffer memfd for a
+ * window.  It has no name in the filesystem, and creating it hardens the
+ * process (owner_harden, exactly as pix_own does) so its /proc/<pid>/fd cannot
+ * be walked for the descriptor either.  The double-buffer state lives in the
+ * memfd's header; the shared file gets only an accounting row. */
+static int bb_own(int32_t wid, int w, int h)
+{
+    if (bbmap_n >= WSYS_MAX_WINDOWS) { errno = ENOSPC; return -1; }
+    int fd = (int)syscall(SYS_memfd_create, "hamnix-wsys-bb",
+                          MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) {
+        bb_once(&bb_warn_drop, "memfd_create for a backbuffer failed -- this "
+                "window has nowhere private to keep its pixels", wid, errno, 0, 0);
+        return -1;
+    }
+    /* SEALED like the scene memfd, and the SHRINK seal is the compositor's
+     * life: a receiver that has mapped a file the sender can ftruncate smaller
+     * takes SIGBUS on the next touch, and the receiver here paints the screen. */
+    if (ftruncate(fd, (off_t)BBPIX_BYTES) < 0
+        || fcntl(fd, F_ADD_SEALS,
+                 F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) < 0) {
+        close(fd);
+        return -1;
+    }
+    void *m = mmap(NULL, BBPIX_HDR_BYTES, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { close(fd); return -1; }
+    int i = bbmap_n++;
+    bbmap[i].wid = wid; bbmap[i].fd = fd; bbmap[i].hdr = (struct bbpix *)m;
+    bbmap[i].px[0] = NULL; bbmap[i].px[1] = NULL;
+    bbmap[i].own = 1; bbmap[i].due = 0; bbmap[i].handed = 0; bbmap[i].ino = 0;
+    bbmap[i].hdr->magic   = BBPIX_MAGIC;
+    bbmap[i].hdr->version = BBPIX_VERSION;
+    bbmap[i].hdr->wid     = wid;
+    bb_pool_claim(wid, w, h);
+    owner_harden();
+    bb_fit(i, w, h);
+    return i;
+}
+
+/* THE WINDOW'S SIZE IS THE WINDOW'S SIZE, AND NOTHING ELSE MAY DECIDE IT.  The
+ * caller writes pixels at the window's width; user/wsysd.ad reads them back and
+ * re-rows them at the same width.  When they disagreed the compositor scanned
+ * out a window drawn at 640 as though it were 1280 -- two half-height copies
+ * side by side, no error in any log, three passes to localise.  So the owner
+ * re-fits its memfd whenever a blit's w/h no longer matches; every blit passes
+ * the window's current w/h, so the two are out of step for at most one frame. */
+static int bb_for(int wid, int create, int w, int h)
+{
+    int i = bb_find(wid);
+    if (i >= 0) {
+        if (create && bbmap[i].own && w > 0 && h > 0
+            && (bbmap[i].hdr->w != w || bbmap[i].hdr->h != h)) {
+            bb_once(&bb_warn_refit, "a backbuffer's size did not match its "
+                    "window's -- re-fitting", wid, bbmap[i].hdr->w,
+                    bbmap[i].hdr->h, w);
+            bb_fit(i, w, h);
+            bb_pool_claim(wid, w, h);
+        }
+        return i;
+    }
+    if (!create) return -1;
+    return bb_own(wid, w, h);
+}
+
+/* Re-fit an owned window's memfd to its current geometry.  Called from the
+ * `geometry` ctl verb, which wsyswl sends BEFORE its first blit on purpose --
+ * so a window that has not blitted yet has no memfd and this is a no-op, and
+ * the first blit then creates the memfd at the window's current w/h.  A window
+ * that HAS blitted is re-fit here so a resized surface is not clipped to the
+ * size it opened at.  The page is cleared rather than scaled: a resize means a
+ * redraw is coming, and a stretched old frame is worse than a blank one. */
+static void bb_resize(int wid, int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+    int i = bb_find(wid);
+    if (i < 0 || !bbmap[i].own) return;
+    if (bbmap[i].hdr->w == w && bbmap[i].hdr->h == h) return;
+    bb_fit(i, w, h);
+    bb_pool_claim(wid, w, h);
+}
+
+static void bb_release(int wid)
+{
+    int i = bb_find(wid);
+    if (i >= 0) {
+        if (bbmap[i].px[0]) munmap(bbmap[i].px[0], BB_BYTES);
+        if (bbmap[i].px[1]) munmap(bbmap[i].px[1], BB_BYTES);
+        if (bbmap[i].hdr)   munmap(bbmap[i].hdr, BBPIX_HDR_BYTES);
+        if (bbmap[i].fd >= 0) close(bbmap[i].fd);
+        bbmap[i] = bbmap[bbmap_n - 1];
+        bbmap_n--;
+    }
+    bb_pool_release(wid);
 }
 
 static int32_t le32(const uint8_t *p)
@@ -846,20 +972,18 @@ static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
     int slot = bb_for(v->wid, 1, v->w, v->h);
     if (slot < 0) {
         bb_once(&bb_warn_drop, "a blit was thrown away: this window has no "
-                "backbuffer slot", v->wid, v->w, v->h, (int)need);
+                "backbuffer memfd", v->wid, v->w, v->h, (int)need);
         return 18 + need;
     }
-    struct bbhdr *h = &bb->slot[slot];
+    struct bbpix *h = bbmap[slot].hdr;
     uint32_t back = h->front ^ 1u;
     if (!h->started) {
         /* Carry the last published frame forward: a client that blits only
          * what changed must not find the rest of its window blank.  The
-         * window's OWN extent, for the reason in bb_fit -- this used to copy
-         * 8 MiB per frame per window whatever the window's size was, which is
-         * both the pool's cost and a memcpy on the frame path. */
+         * window's OWN extent, for the reason in bb_fit. */
         size_t live = (size_t)h->w * h->h * 4;
         if (live > BB_BYTES) live = BB_BYTES;
-        uint8_t *bp = bb_page(slot, back), *fp = bb_page(slot, h->front);
+        uint8_t *bp = bbpix_page(slot, back), *fp = bbpix_page(slot, h->front);
         if (!bp || !fp) {
             bb_once(&bb_warn_drop, "a blit was thrown away: this window's "
                     "pixels could not be mapped", v->wid, slot, (int)live, 0);
@@ -868,7 +992,7 @@ static uint64_t bb_blit(struct wwin *v, const uint8_t *b, uint64_t n)
         memcpy(bp, fp, live);
         h->started = 1;
     }
-    uint8_t *backpx = bb_page(slot, back);
+    uint8_t *backpx = bbpix_page(slot, back);
     if (!backpx) {
         bb_once(&bb_warn_drop, "a blit was thrown away: this window's back "
                 "page could not be mapped", v->wid, slot, 0, 0);
@@ -2440,7 +2564,7 @@ uint32_t hamwsys_input_gen(void)
 
 /* THE PIXEL HAND-UP'S HEARTBEAT.  See linux-wsys.h for why the PARK is where
  * this has to be called from, and pix_tick below for what it does. */
-void hamwsys_tick(void) { pix_tick(); }
+void hamwsys_tick(void) { pix_tick(); bbup_tick(); }
 
 /* Sleep until the input generation moves off `seen`, or `timeout_ms` elapses
  * (negative = forever).  Returns 0 always; the caller re-checks its rings. */
@@ -3410,6 +3534,251 @@ static void pix_tick(void)
     pix_drain();
 }
 
+/* ================================================================== *
+ * THE BACKBUFFER HAND-UP — the pixel hand-up, run for the v2 pixels
+ * ==================================================================
+ *
+ * This is THE PIXEL HAND-UP's construction (above), applied to the v2
+ * backbuffer memfds bb_own creates.  Every argument there holds here unchanged:
+ * the rendezvous is an abstract AF_UNIX SOCK_SEQPACKET name derived from the
+ * segment's identity, so it collides with nothing and needs no file mode; the
+ * SENDER checks SO_PEERCRED, because the sender holds the pixels and the
+ * question is who else may have them; only the segment owner ever binds; the
+ * hand-up is on a clock, so a compositor that starts late or restarts is caught
+ * up within a few seconds; and a duplicate is recognised by the memfd's inode.
+ *
+ * The ONLY differences from pix_* are the address suffix ("backbuffer" not
+ * "pixels") and the payload it maps (a bbpix header, not a wpix).  It is a
+ * separate channel rather than the same one because the payloads differ in size
+ * by three orders of magnitude and a v1 and a v2 window do not overlap -- see
+ * THE BACKBUFFER MEMFD.  tests/linux/wsys_bypass.sh's `bbgrab` drives both the
+ * owner (which must be handed the descriptor) and a same-uid attacker (which
+ * must not), exactly as `pixgrab` does for the scene. */
+static int bbup_listen_fd = -1;
+static int bbup_listen_tried;
+static uint64_t bbup_next_tick;
+
+static socklen_t bbup_addr(struct sockaddr_un *a)
+{
+    if (!seg_id_known) return 0;
+    memset(a, 0, sizeof *a);
+    a->sun_family = AF_UNIX;
+    a->sun_path[0] = '\0';                     /* abstract */
+    int n = snprintf(a->sun_path + 1, sizeof a->sun_path - 1,
+                     "hamnix-wsys/%llu.%llu/backbuffer",
+                     (unsigned long long)seg_dev, (unsigned long long)seg_ino);
+    if (n <= 0 || (size_t)n >= sizeof a->sun_path - 1) return 0;
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+}
+
+/* Map a received backbuffer memfd's header, refusing anything that is not the
+ * right size or missing the shrink seal -- a receiver that trusts a sender's
+ * word about either takes SIGBUS when the sender lies. */
+static int bbup_map(int i)
+{
+    struct stat st;
+    if (fstat(bbmap[i].fd, &st) < 0) return -1;
+    if ((uint64_t)st.st_size != (uint64_t)BBPIX_BYTES) { errno = EINVAL; return -1; }
+    int seals = fcntl(bbmap[i].fd, F_GET_SEALS);
+    if (seals < 0 || !(seals & F_SEAL_SHRINK)) { errno = EINVAL; return -1; }
+    void *m = mmap(NULL, BBPIX_HDR_BYTES, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, bbmap[i].fd, 0);
+    if (m == MAP_FAILED) return -1;
+    bbmap[i].hdr = (struct bbpix *)m;
+    bbmap[i].ino = (uint64_t)st.st_ino;
+    return 0;
+}
+
+/* THE COMPOSITOR'S SIDE: take the name.  ONLY the segment owner ever binds it,
+ * for the reason pix_listen gives -- a non-owner has no business receiving
+ * anyone's pixels and must not be able to make this call happen on its behalf. */
+static void bbup_listen(void)
+{
+    if (bbup_listen_fd >= 0 || bbup_listen_tried) return;
+    bbup_listen_tried = 1;
+    if (!hostowner()) return;
+    struct sockaddr_un a;
+    socklen_t alen = bbup_addr(&a);
+    if (!alen) return;
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (s < 0) return;
+    if (bind(s, (struct sockaddr *)&a, alen) < 0) {
+        fprintf(stderr,
+                "wsys: cannot claim the backbuffer hand-up address (%s).\n"
+                "wsys: another process holds it, so no v2 window can hand this "
+                "one its pixels and BROWSERS WILL NOT BE PAINTED.\n",
+                strerror(errno));
+        close(s);
+        return;
+    }
+    if (listen(s, 64) < 0) { close(s); return; }
+    bbup_listen_fd = s;
+}
+
+/* Install a received descriptor.  A duplicate (the same inode, from a
+ * re-announce) is dropped; a first arrival bumps the window's scene_gen and
+ * shm->gen so the compositor repaints -- the same wake pix_install needs, for
+ * the same reason (wsysd only repaints when the frame signature moves). */
+static void bbup_install(int32_t wid, int fd)
+{
+    int i = bb_find(wid);
+    if (i >= 0) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && (uint64_t)st.st_ino == bbmap[i].ino) {
+            close(fd);                         /* the one we already hold */
+            return;
+        }
+        bb_release(wid);
+    }
+    if (bbmap_n >= WSYS_MAX_WINDOWS) { close(fd); return; }
+    i = bbmap_n;
+    bbmap[i].wid = wid; bbmap[i].fd = fd; bbmap[i].hdr = NULL;
+    bbmap[i].px[0] = NULL; bbmap[i].px[1] = NULL;
+    bbmap[i].own = 0; bbmap[i].due = 0; bbmap[i].handed = 0; bbmap[i].ino = 0;
+    if (bbup_map(i) < 0) { close(fd); return; }
+    if (bbmap[i].hdr->magic != BBPIX_MAGIC
+        || bbmap[i].hdr->version != BBPIX_VERSION
+        || bbmap[i].hdr->wid != wid) {
+        munmap(bbmap[i].hdr, BBPIX_HDR_BYTES);
+        close(fd);
+        return;
+    }
+    bbmap_n++;
+    /* DO NOT TOUCH scene_gen HERE, AND THIS IS THE WHOLE PAINT PATH OF EVERY
+     * BROWSER.  pix_install bumps it because a v1 window's new display list is
+     * only visible through that counter.  Doing the same for a v2 window is a
+     * SILENT KILL: the scene open path (HAMWSYS_WIN_SCENE, above) serves a v2
+     * window's scene as a 0-byte SUCCESS only while `scene_gen == 0` -- that is
+     * the line whose comment says, in as many words, that without it "A BROWSER,
+     * A VIDEO AND EVERY ROOTLESS X CLIENT WOULD STOP BEING PAINTED", because
+     * user/wsysd.ad's paint_window slurps <wid>/scene for every window and
+     * `if n < 0: return 0` bails before it ever reaches paint_backbuffer.  A v2
+     * client never commits a scene, so its scene_gen is 0 for ever; bumping it
+     * here turned that 0-byte success into an EPERM refusal and the window was
+     * never painted again.  Measured: a fill client that commits no scene
+     * painted 0 pixels with the bump and its full blit without it.
+     *
+     * NOTHING IS LOST BY LEAVING IT ALONE.  The repaint this needs to trigger
+     * comes from the BACKBUFFER GEN, which is already in wsysd's frame
+     * signature (field 11 of the window ctl, snap_win_ctl above): it reads 0
+     * while no memfd is held and the client's real gen the moment one is
+     * installed, so accepting a hand-up moves the signature by itself. */
+    if (shm) shm->gen++;
+}
+
+static void bbup_drain(void)
+{
+    if (bbup_listen_fd < 0) return;
+    for (;;) {
+        int c = accept4(bbup_listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+        if (c < 0) break;
+        int32_t wid = 0;
+        char cbuf[CMSG_SPACE(sizeof(int))];
+        struct iovec io;
+        struct msghdr m;
+        io.iov_base = &wid; io.iov_len = sizeof wid;
+        memset(&m, 0, sizeof m);
+        m.msg_iov = &io; m.msg_iovlen = 1;
+        m.msg_control = cbuf; m.msg_controllen = sizeof cbuf;
+        struct pollfd p; p.fd = c; p.events = POLLIN; p.revents = 0;
+        int pr; do { pr = poll(&p, 1, 50); } while (pr < 0 && errno == EINTR);
+        ssize_t n = (pr > 0) ? recvmsg(c, &m, MSG_DONTWAIT) : -1;
+        int got = -1;
+        if (n == (ssize_t)sizeof wid)
+            for (struct cmsghdr *cm = CMSG_FIRSTHDR(&m); cm;
+                 cm = CMSG_NXTHDR(&m, cm))
+                if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS)
+                    memcpy(&got, CMSG_DATA(cm), sizeof got);
+        close(c);
+        if (got >= 0) {
+            if (wid > 0) bbup_install(wid, got);
+            else         close(got);
+        }
+    }
+}
+
+/* THE HAND-UP.  Connect, ASK THE KERNEL WHO IS LISTENING, and pass the
+ * descriptor only if the answer is the segment's owner. */
+static void bbup_handup_one(int i)
+{
+    int32_t wid = bbmap[i].wid;
+    struct sockaddr_un a;
+    socklen_t alen = bbup_addr(&a);
+    if (!alen) return;
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (s < 0) return;
+    if (connect(s, (struct sockaddr *)&a, alen) < 0) {
+        close(s);
+        bbmap[i].handed = 0;
+        return;
+    }
+    struct ucred pc;
+    socklen_t pl = sizeof pc;
+    if (getsockopt(s, SOL_SOCKET, SO_PEERCRED, &pc, &pl) < 0
+        || pl != sizeof pc
+        || !seg_owner_known || pc.uid != seg_owner) {
+        /* THE REFUSAL THAT IS THE POINT: the address is held by someone who is
+         * not the window system's owner.  Say so once, and hand over nothing. */
+        static int said;
+        if (!said) {
+            said = 1;
+            fprintf(stderr,
+                    "wsys: the backbuffer hand-up address is held by uid %ld, not "
+                    "by this window system's owner (uid %ld).\n"
+                    "wsys: no window's pixels will be handed to it.\n",
+                    (long)(pl == sizeof pc ? (long)pc.uid : -1L),
+                    (long)(seg_owner_known ? (long)seg_owner : -1L));
+        }
+        close(s);
+        bbmap[i].handed = 0;
+        return;
+    }
+    char cbuf[CMSG_SPACE(sizeof(int))];
+    struct iovec io;
+    struct msghdr m;
+    int32_t w = wid;
+    io.iov_base = &w; io.iov_len = sizeof w;
+    memset(&m, 0, sizeof m);
+    memset(cbuf, 0, sizeof cbuf);
+    m.msg_iov = &io; m.msg_iovlen = 1;
+    m.msg_control = cbuf; m.msg_controllen = sizeof cbuf;
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&m);
+    cm->cmsg_level = SOL_SOCKET;
+    cm->cmsg_type  = SCM_RIGHTS;
+    cm->cmsg_len   = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cm), &bbmap[i].fd, sizeof(int));
+    bbmap[i].handed = (sendmsg(s, &m, MSG_NOSIGNAL) >= 0);
+    close(s);
+}
+
+/* Owner side hands up, compositor side drains -- on the same clock as the
+ * pixel hand-up, and driven from the same seams (see pix_tick). */
+static void bbup_tick(void)
+{
+    /* NO PROACTIVE BIND HERE, and the reason is which processes are host owner.
+     * The compositor binds the backbuffer address the first time it composites
+     * a v2 window (the BACKBUFFER read path calls bbup_listen), exactly as it
+     * binds the PIXEL address the first time it composites a scene -- and a v2
+     * window that appears while the compositor is active is composited that
+     * frame, which is when the bind happens.  Binding here instead would let
+     * ANY host-owner process that owns no backbuffer -- a plain scene client
+     * running as the segment owner, root's own taskbar -- seize the address
+     * ahead of the compositor, which is a denial of service, not a hand-up.
+     * So the listener is bound only by a reader that is actually reading a
+     * backbuffer, and this tick only HANDS UP owned windows and DRAINS what a
+     * bound listener has received. */
+    if (!bbmap_n && bbup_listen_fd < 0) return;
+    uint64_t now = pix_now_ms();
+    if (now < bbup_next_tick) return;
+    bbup_next_tick = now + PIX_RETRY_MS;
+    for (int i = 0; i < bbmap_n; i++) {
+        if (!bbmap[i].own || now < bbmap[i].due) continue;
+        bbup_handup_one(i);
+        bbmap[i].due = now + (bbmap[i].handed ? PIX_REANN_MS : PIX_RETRY_MS);
+    }
+    bbup_drain();
+}
+
 /* THE ONE LOOKUP EVERY SCENE OPERATION GOES THROUGH.  `mine` asks for a window
  * this process owns (create on demand); otherwise this is a reader, and a
  * reader that is the segment owner listens and drains first.
@@ -3777,7 +4146,16 @@ static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v)
      * readable in the file every client already reads. */
     uint8_t b[192];
     uint64_t n = 0;
-    int bslot = bb_for(v->wid, 0, 0, 0);
+    /* THE BACKBUFFER GEN IS THE MEMFD'S NOW, not a shared slot's.  Report it
+     * from whatever this process holds for the window -- its own memfd if it is
+     * the owner, the handed-up one if it is the compositor.  The compositor
+     * drains on the BACKBUFFER read path and on its tick, so by the time it
+     * composites this window the gen is current; a first-frame lag converges on
+     * the frame clock exactly as a late scene hand-up does.  It does NOT listen
+     * here: a client reading its OWN ctl must never try to become the
+     * compositor (which on a single-uid host it otherwise could). */
+    int bslot = bb_find(v->wid);
+    int32_t bgen = (bslot >= 0 && bbmap[bslot].hdr) ? (int32_t)bbmap[bslot].hdr->gen : 0;
     int32_t igen = 0;
     if (img || img_attach() >= 0)
         for (int i = 0; i < WSYS_IMG_SLOTS; i++)
@@ -3786,7 +4164,7 @@ static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v)
     int32_t fields[14] = { v->wid, v->x, v->y, v->w, v->h, v->z,
                            v->decorate, v->visible, v->proto,
                            (int32_t)v->scene_gen,
-                           bslot >= 0 ? (int32_t)bb->slot[bslot].gen : 0,
+                           bgen,
                            igen, v->keyed, v->blend };
     for (int i = 0; i < 14; i++) {
         if (i) b[n++] = ' ';
@@ -3839,6 +4217,7 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     f->write = for_write;
     f->off = 0;
     pix_tick();                                /* see hamwsys_read */
+    bbup_tick();                               /* and the backbuffer's hand-up */
 
     /* THE GATE, AT OPEN.  It has to be here and not only in hamwsys_write
      * because opening for writing already MUTATES: a sink is truncated, a
@@ -3896,7 +4275,21 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     case HAMWSYS_BACKBUF: {
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -1; }
-        if (bb_for(v->wid, 0, 0, 0) < 0 && !for_write) { errno = ENOENT; return -1; }
+        /* A READER MAY OPEN A v2 BACKBUFFER BEFORE ITS MEMFD ARRIVES.  The
+         * pixels are in a per-window memfd now, handed up on a clock, so
+         * "not received yet" must not read as "no such backbuffer" -- that
+         * would refuse the compositor's very first open of every browser and
+         * leave it blank for ever, the exact silent failure this device fights.
+         * Drain any pending hand-up first, then accept if this is a v2 window
+         * at all or we already hold its memfd; the read returns 0 until the
+         * descriptor lands and the frame clock retries.  A non-owner opening a
+         * victim's backbuffer still gets 0 bytes: only the process HANDED the
+         * memfd can read pixels, and a stranger is handed nothing. */
+        if (!for_write) {
+            int slot = bb_find(v->wid);
+            if (slot < 0 || !bbmap[slot].own) { bbup_listen(); bbup_drain(); }
+            if (bb_find(v->wid) < 0 && v->proto != 2) { errno = ENOENT; return -1; }
+        }
         return 0;
     }
     case HAMWSYS_IMAGES: {
@@ -4063,6 +4456,7 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
      * window which has stopped drawing -- see pix_tick.  It is gated on a
      * monotonic clock read and returns immediately the rest of the time. */
     pix_tick();
+    bbup_tick();
 
     /* The event rings are live, not snapshots: a read DRAINS whatever has
      * arrived and returns 0 when there is nothing.  hamui polls them
@@ -4084,16 +4478,34 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
         return (int64_t)ring_read(q, buf, cap);
 
     if (f->leaf == HAMWSYS_BACKBUF) {
-        /* The v2 pixels, straight out of the shared surface. RGBA8888, row
-         * major, the window's own width -- the compositor seeks and reads it
-         * exactly like any other file. */
-        int slot = bb_for(f->wid, 0, 0, 0);
+        /* The v2 pixels, out of the window's PER-WINDOW MEMFD -- not a shared
+         * surface any more (THE BACKBUFFER MEMFD).  The reader here is the
+         * compositor, which was handed the descriptor over the backbuffer
+         * hand-up: it listens and drains first, exactly as pix_get does for a
+         * foreign scene, so a descriptor that has arrived is installed before
+         * this read looks for it.  A window whose memfd has not been handed up
+         * reads as empty, which the frame clock retries -- never somebody
+         * else's pixels, because there is no shared slab to stray into.
+         *
+         * ONLY A FOREIGN WINDOW MAKES US LISTEN.  Reading our OWN backbuffer
+         * (an owner glancing at its own pixels) must not try to bind the
+         * compositor's address -- on a single-uid host every process is the
+         * "owner" of the segment, so an unguarded listen would let a client
+         * seize the hand-up address ahead of the real compositor. */
+        int slot = bb_find(f->wid);
+        if (slot < 0 || !bbmap[slot].own) {
+            bbup_listen();
+            bbup_drain();
+            slot = bb_find(f->wid);
+        }
         if (slot < 0) return 0;
-        uint64_t size = (uint64_t)bb->slot[slot].w * bb->slot[slot].h * 4;
+        struct bbpix *h = bbmap[slot].hdr;
+        if (!h) return 0;
+        uint64_t size = (uint64_t)h->w * h->h * 4;
         if (f->off >= size) return 0;
         uint64_t k = size - f->off;
         if (k > cap) k = cap;
-        const uint8_t *fp = bb_page(slot, bb->slot[slot].front);
+        const uint8_t *fp = bbpix_page(slot, h->front);
         if (!fp) return 0;
         memcpy(buf, fp + f->off, (size_t)k);
         f->off += k;
@@ -4723,12 +5135,12 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
                     /* PUBLISH. Flip only if something was actually drawn --
                      * a bare 'D' on an untouched surface is a no-op, not a
                      * flip back to a stale page. */
-                    struct bbhdr *h = &bb->slot[slot];
-                    if (h->started) {
+                    struct bbpix *h = bbmap[slot].hdr;
+                    if (h && h->started) {
                         h->front ^= 1u;
                         h->started = 0;
                     }
-                    h->gen++;
+                    if (h) h->gen++;
                 }
                 shm->gen++;
                 wr(WR_DAMAGE, 17);
