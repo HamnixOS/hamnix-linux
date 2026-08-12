@@ -276,6 +276,48 @@ clients, the dropped desktop and the seven binaries.
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
+* ~~**`hpm update` left the desktop with NO PANEL AND NO TASKBAR.**~~ **FIXED,
+  and gated offscreen.**
+
+  Measured on a real installed machine running the published 1.0.17: the
+  instant `hpm update` finished, the top panel and the taskbar vanished —
+  both windows `visible` 1 → 0 — while the panel PROCESS stayed alive and
+  kept logging `config reload applied: 2 panel(s)`. A real click on the
+  Applications button afterwards moved 234 pixels: the mouse cursor and
+  nothing else. The exact success shape NORTH_STAR.md warns about — healthy
+  to anything counting processes or grepping logs, and no desktop at all to
+  the person in front of it.
+
+  `user/hampanelscene.ad`'s `_set_window_hidden` spells BOTH directions of one
+  ctl verb — `hide 1` to withdraw a pooled panel window, `hide 0` to put it
+  back — and `_reload_panels` writes `hide 0` to every panel window it is
+  about to redraw. `user/linux-wsys.c`'s parser never read the argument: any
+  line beginning `hide` set `visible = 0`. So **every reload of the panel
+  config withdrew every panel window**, and rewriting `/etc/panel.conf` under
+  a running panel is exactly what an update does. Nothing to do with the wsys
+  version bump the same investigation was chasing, and nothing to do with hpm
+  unlinking rather than rewriting — an in-place rewrite through the same inode
+  reproduces it identically. `hamdesktop` is untouched because the backdrop
+  never writes this verb, which is why the wallpaper survived and only the
+  chrome disappeared. `tests/linux/de_panel_conf_replace.sh`, **17 PASS**,
+  offscreen, ~40 s: it replaces the active config under a running panel (both
+  ways) and asserts on the window table's `visible` field, on the bar PIXELS,
+  and on a synthetic-evdev click producing a painted menu — never on the
+  process being alive or the reload line, both of which stayed true through
+  the defect. With the fix reverted: 11 PASS / 6 FAIL.
+
+* **THE SHIPPED `/etc/panel.conf` IS NEVER PARSED.** Found while gating the
+  above, not yet fixed. `_load_config` reads at most 2047 bytes; the file as
+  shipped is 3120 bytes and its first `panel` line does not begin until byte
+  ~2450, all of it comment header. So the file parses to zero panels and the
+  panel silently falls back to `_default_config` — which happens to render the
+  same layout, which is why nobody noticed. **Editing the documented config
+  file does nothing at all.** Measured: with the shipped file copied in, the
+  bars came up in a colour that is not the `color #d4d0c8` the file asks for.
+  (`de_panel_conf_replace.sh` therefore writes the same two `panel … end`
+  blocks WITHOUT the header, so it is not gating on top of a config that is
+  never read.)
+
 * ~~**A package install hook could wedge `hpm update` forever.**~~ **BOUNDED
   NOW, IN THE PARENT — but read "what this cannot help" below before believing
   it is closed.**
