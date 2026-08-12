@@ -476,6 +476,53 @@ same failure this project exists to beat.
   became a permanent desync. Every `if n > CAP: n = CAP` on a stream socket in
   this tree is the same bug waiting for a bigger peer.
 
+* **THE FOUR SERVERS THAT ACCEPT CONNECTIONS HAD NEVER BEEN RUN ON THIS LINE.
+  TWO NOW WORK, ONE CANNOT, AND THE REASON IT CANNOT IS A DESIGN CONFLICT.**
+  The accept fix below was proven for `x11srv` and INFERRED for the rest, which
+  is the status this project keeps having to convert. Converted:
+
+  | | status | evidence |
+  |---|---|---|
+  | `u_server` | **MEASURED** | a request arrives and `hamnix-userserver-ok` comes back |
+  | `sshd` | **MEASURED** | identification exchange + **KEXINIT (msg type 20)**, 180 bytes declared |
+  | `httpd` | **STILL BROKEN**, third cause below | `read(6, ...) = -1 EBADF` in the worker |
+  | `httpd_worker` | not independently testable | it only exists to be handed a connection by httpd |
+
+  **A SECOND DEFECT, FIXED**: `sys_execve_env(path, argv, NULL)` passed a NULL
+  envp to `execve(2)` verbatim, giving the child an EMPTY environment -- while
+  the contract one screen above it says "the Hamnix form INHERITS the
+  environment". httpd's worker therefore had no `HAMNET`, fell down
+  `linux-net.c`'s candidate list to a DIFFERENT `/net` segment from its
+  master's, looked up its connection number in a table that did not contain it,
+  and answered nothing. Neither process said a word. NULL now means inherit.
+
+  **THE THIRD CAUSE IS NOT FIXED AND SHOULD NOT BE FIXED IN A HURRY.** httpd
+  hands the connection NUMBER to a spawned worker, but `lib/p9.ad`'s spawn ends
+  in `p9_closefrom(3)` -- the child gets a deliberately clean fd table -- while
+  `linux-net.c` keeps the accepted connection as a HOST fd in the accepting
+  process. The worker re-opens `/net/tcp/<n>/data` by name, which on this line
+  re-creates nothing, and reads a descriptor its own table no longer has. On
+  the bare-metal lane the kernel owns the connection and the name is enough,
+  which is exactly why the model was written this way. The choice -- pass the
+  fd with SCM_RIGHTS, exempt it from closefrom, or proxy in the master -- is a
+  design decision.
+
+  **GATE**: `tests/linux/net_accept_servers.sh`, **5 PASS / 0 FAIL**, seconds,
+  and it **touches no port of the machine it runs on**: every arm runs inside a
+  private network namespace with only loopback, which is also the only way sshd
+  can be tested at all, its port being the literal 22. **Proved able to fail**:
+  against a pre-fix sshd it is 2 PASS / 1 FAIL.
+
+  **AND THE SSH BANNER CLAMP IS MEASURED AT LAST** -- it was recorded as
+  reasoned-and-not-measured when it was fixed. A banner line of exactly 255
+  bytes followed immediately by `SSH-...` used to be read as TWO lines, the
+  second of which was accepted as the peer's identification string: **a peer
+  choosing where its own data is framed**. The first version of that probe
+  PADDED 300 BYTES AND PROVED NOTHING -- the continuation began with padding,
+  so the old code rejected it too and happened to recover. 255 exactly is what
+  puts the injected prefix at the start of the continuation, and the probe's
+  header says so, because the number IS the test.
+
 * **`accept` HANDED BACK THE LISTENER, SO EVERY ADDER SERVER ON THIS LINE READ
   THE WRONG SOCKET.** Found by refusing to write off "x11srv fails its
   handshake on this host" as host-specific. strace says it in two lines:
