@@ -192,6 +192,21 @@ t_copy:   uint64 = 0                  # window image -> screen composite
 t_bb:     uint64 = 0                  # v2 backbuffer read + copy
 t_cur:    uint64 = 0                  # cursor
 t_pres:   uint64 = 0                  # write the composite to /dev/fb
+# THE READBACK, SPLIT OUT OF `present` BY ITSELF.
+#
+# `present` is open + lseek + the write loop + close + flip, and the claim that
+# the GPU path's 67 ms is the CPU READING the composite out of device memory
+# rests entirely on the write loop being the whole of it. That is a reading of
+# the source until it is a measurement, so it is a measurement: t_pres_w times
+# ONLY the sys_write loop, and b_pres_w counts the bytes it moved, so the cost
+# can be quoted per frame AND as a bandwidth -- and a bandwidth is the thing
+# that can be compared against memcpy out of the same mapping.
+#
+# If t_pres_w is NOT ~all of t_pres, the diagnosis is wrong and the syscall
+# overhead or the flip is the story instead. That is the point of splitting it.
+t_pres_w: uint64 = 0
+b_pres_w: uint64 = 0
+n_pres_w: uint64 = 0                  # write loop entries (not syscalls)
 
 
 def now_us() -> uint64:
@@ -1680,11 +1695,19 @@ def present_rows(y0: int32, y1: int32):
             # No seek on this /dev/fb: fall back to the whole screen rather
             # than write the rows to the wrong place.
             off = 0
+    tw0: uint64 = 0
+    wbase: uint64 = off
+    if bench_on != 0:
+        tw0 = now_us()
     while off < total:
         k: int64 = sys_write(fd, cast[Ptr[uint8]](comp_base + off), total - off)
         if k <= 0:
             break
         off = off + cast[uint64](k)
+    if bench_on != 0:
+        t_pres_w = t_pres_w + (now_us() - tw0)
+        b_pres_w = b_pres_w + (off - wbase)
+        n_pres_w = n_pres_w + 1
     sys_close(fd)
     fb_flip()
 
@@ -2884,6 +2907,9 @@ def run_bench(n: int32):
     t_bb = 0
     t_cur = 0
     t_pres = 0
+    t_pres_w = 0
+    b_pres_w = 0
+    n_pres_w = 0
     t0: uint64 = now_us()
     f: int32 = 0
     while f < n:
@@ -2916,6 +2942,32 @@ def run_bench(n: int32):
     putd(1, cast[int32](t_cur / d))
     puts(1, " present ")
     putd(1, cast[int32](t_pres / d))
+    puts(1, "\n")
+    # THE READBACK, ON ITS OWN. `writeback` is the sys_write loop only; the
+    # remainder of `present` is open/lseek/close/flip. MB/s is computed from
+    # the bytes that loop actually moved, so it is directly comparable with a
+    # memcpy out of the same mapping -- which is how the placement table in
+    # user/linux-vk.c was measured.
+    puts(1, "bench: writeback us/frame ")
+    if n_pres_w > 0:
+        putd(1, cast[int32](t_pres_w / n_pres_w))
+    else:
+        putd(1, 0)
+    puts(1, " (")
+    if t_pres > 0:
+        putd(1, cast[int32](t_pres_w * 100 / t_pres))
+    else:
+        putd(1, 0)
+    puts(1, "% of present) bytes/frame ")
+    if n_pres_w > 0:
+        putd(1, cast[int32](b_pres_w / n_pres_w))
+    else:
+        putd(1, 0)
+    puts(1, " MB/s ")
+    if t_pres_w > 0:
+        putd(1, cast[int32](b_pres_w / t_pres_w))
+    else:
+        putd(1, 0)
     puts(1, "\n")
     puts(1, "bench: fps ")
     if total > 0:

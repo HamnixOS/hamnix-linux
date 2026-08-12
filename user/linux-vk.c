@@ -576,6 +576,14 @@ static int32_t g_no_covcache;
  * Pixels are unaffected either way, which is what makes it a lever. */
 static int32_t g_arena_devlocal;
 
+/* Where a mapped buffer is placed. The measured table that justifies these
+ * three, and the rule for choosing between them, is the comment above
+ * make_storage_buffer(); they are declared up here only because the tunables
+ * below have to name them. */
+#define HVK_PLACE_HOST_COHERENT 0   /* HOST_VISIBLE|HOST_COHERENT, uncached   */
+#define HVK_PLACE_DEVICE_FIRST  1   /* DEVICE_LOCAL|HOST_VISIBLE if it exists */
+#define HVK_PLACE_HOST_CACHED   2   /* ...|HOST_CACHED if it exists           */
+
 /* THE FOURTH LEVER, and the one nobody had ever pulled — where the FRAME
  * lives. See the placement table above make_storage_buffer(). The frame's
  * placement was not a lever at all before this: hvk_frame_create() passed a
@@ -751,10 +759,6 @@ static const uint32_t* load_spv(size_t* nbytes, uint32_t** owned)
  *
  * There is no placement that is best for both, which is the actual shape of
  * this problem — see hvk_frame_create. */
-#define HVK_PLACE_HOST_COHERENT 0   /* HOST_VISIBLE|HOST_COHERENT, uncached  */
-#define HVK_PLACE_DEVICE_FIRST  1   /* DEVICE_LOCAL|HOST_VISIBLE if it exists */
-#define HVK_PLACE_HOST_CACHED   2   /* ...|HOST_CACHED if it exists           */
-
 static int make_storage_buffer(VkDeviceSize sz, int place,
                                VkBuffer* buf, VkDeviceMemory* mem,
                                void** map, int* got_device_local)
