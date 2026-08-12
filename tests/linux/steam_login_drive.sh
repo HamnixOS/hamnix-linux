@@ -81,6 +81,16 @@ debian = ns clean {
 cp /etc/hamnix-x11session.sh /n/distro/tmp/x11session.sh
 cp /etc/hamnix-xdiag.sh /n/distro/tmp/xdiag.sh
 cp /etc/steam-look.sh /n/distro/tmp/look.sh
+# A SECOND X CLIENT INTO THE SAME SESSION. This rc.boot builds the namespace by
+# hand rather than sourcing /etc/rc.distros, so the shim that /etc/rc.distros
+# normally copies into each tree is not in there -- and without it the only way
+# to start another X program in this session is x11session.sh, which begins by
+# removing /tmp/.X0-lock and would pull the running server out from under Steam.
+# de-ns-run reuses an X server that is already on :0 ("an X server is already on
+# :0; reusing it"), which is exactly what a comparison client needs: Firefox
+# scrolling or not scrolling in the SAME session as Steam is what separates
+# "our stack" from "Steam".
+cp /etc/de-ns-run /n/distro/tmp/de-ns-run
 
 echo '[gui] starting wsyswl on /n/distro/run/wayland-0'
 /bin/wsyswl /n/distro/run/wayland-0 > /var/log/wsyswl.log &
