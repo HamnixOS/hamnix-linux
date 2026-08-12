@@ -305,6 +305,28 @@ else
     wait "$CPID"; rc=$?
 fi
 
+# THE COMPOSITOR MUST OUTLIVE THE PROGRAM, and until this check existed it
+# was not required to.
+#
+# The readiness gate above only proves wsysd got as far as publishing a screen
+# geometry. It allocates the v2 backbuffer pool LAZILY, on the first window,
+# so a compositor can pass that gate and die seconds later -- and it did:
+# BB_FILE_BYTES outgrew the harness's `ulimit -f` (4,261,478,400 bytes against
+# a 256 MiB cap), ftruncate(2) was refused EFBIG, and the kernel killed wsysd
+# with SIGXFSZ. The 50 clients behind it were then measured against NO
+# COMPOSITOR and scored UP_NO_WINDOW -- "alive at the timeout, owning no
+# window" -- which reads as fifty broken programs and was one broken harness.
+#
+# So: if the compositor is not still alive here, this run measured nothing
+# about the program and says so with 125 (HARNESS_FAIL) rather than handing
+# back a verdict. Reporting the client's silence as the client's behaviour is
+# exactly the mistake the readiness gate was added to stop, one stage later.
+if [ -n "$WPID" ] && ! kill -0 "$WPID" 2>/dev/null; then
+    echo "runsweep_jail: the compositor DIED during this run -- the program was measured against no window system, so this row is the harness's failure and not the program's." >&2
+    [ "${WLOG:-/dev/null}" != /dev/null ] && sed 's/^/runsweep_jail: wsysd: /' "$WLOG" >&2
+    exit 125
+fi
+
 # One settle interval so the compositor composes the program's LAST commit
 # before we exit and the kernel kills it. A client that runs to the timeout
 # never reaches this line and does not need to: it has had the whole run.

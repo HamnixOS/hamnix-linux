@@ -76,6 +76,22 @@ DTMO="${RUNSWEEP_DTIMEOUT:-12}"
 RECIPES="$PROJ_ROOT/tests/linux/runsweep_recipes.tsv"
 JAIL="$PROJ_ROOT/tests/linux/runsweep_jail.sh"
 
+# THE FILE-SIZE CAP, IN 1024-BYTE BLOCKS (bash's `ulimit -f` unit), and there
+# are two of them for one reason: the window system's shared segments are
+# SPARSE FILES whose SIZE is enormous and whose block usage is not. The full
+# argument, the measurements and the three times this has been got wrong are
+# at the head of jail_run below.
+#
+#   FCAP_PLAIN  256 MiB. What `yes` and friends are held to, because their
+#               bytes are real bytes and this is somebody's disk.
+#   FCAP_WSYS   6 GiB, for the rows that run a compositor. It must exceed
+#               BB_FILE_BYTES in user/linux-wsys.c, which at WSYS_MAX_WINDOWS
+#               = 256 is 4,261,478,400 bytes; the headroom is for the next
+#               time that constant moves. The jail reports HARNESS_FAIL if
+#               the compositor dies anyway, so an outgrown cap is loud.
+FCAP_PLAIN="${RUNSWEEP_FCAP:-262144}"
+FCAP_WSYS="${RUNSWEEP_FCAP_WSYS:-6291456}"
+
 # ---------------------------------------------------------------------------
 # THE COMPOSITOR
 # ---------------------------------------------------------------------------
@@ -482,6 +498,10 @@ PY
 # a path inside the throwaway root.
 jail_run() {   # jail_run <timeout> <stdin-file> <out> <err> <argv...>
     local jt="$1" jin="$2" jout="$3" jerr="$4"; shift 4
+    # The file-size cap for THIS run: the pool-sized one when a compositor
+    # is in the jail, the ordinary one otherwise. See the note below.
+    local FCAP="$FCAP_PLAIN"
+    [ -n "$JWSYSD" ] && FCAP="$FCAP_WSYS"
     # A safety net, not a test parameter: `yes` writes for ever by design
     # and would otherwise fill the disk in the seconds it is given.
     #
@@ -511,7 +531,38 @@ jail_run() {   # jail_run <timeout> <stdin-file> <out> <err> <argv...>
     # 4 MiB and at 16 MiB, 132,710,628 bytes with no cap. "Came up and
     # drew" for a client that drew nothing is precisely the success-shaped
     # answer this sweep exists to catch, manufactured by the sweep.
-    ( ulimit -f 262144
+    #
+    # AND IT HAPPENED A THIRD TIME, because the paragraph above quotes a
+    # NUMBER that the window system then outgrew. `BB_SLOTS(8)` is stale:
+    # user/linux-wsys.c's WSYS_MAX_WINDOWS went 8 -> 64 -> 128 -> 256 (the
+    # last for wsyswl's MAXCONN), BB_SLOTS follows it, and BB_FILE_BYTES is
+    # now 65536 + 256 * 2 * 8323072 = 4,261,478,400 bytes -- SIXTEEN TIMES
+    # the 256 MiB cap. So `wsysd`'s ftruncate(2) of /srv/wsys.bb was
+    # refused EFBIG and the kernel killed it with SIGXFSZ, AFTER it had
+    # already printed "wsysd: screen 1280x800" and passed the readiness
+    # gate. Every client behind it then found no compositor:
+    #
+    #   50 of the sweep's 88 windowed rows scored UP_NO_WINDOW / rc 153,
+    #   and PAINTED fell from 51 to 2.
+    #
+    # Measured, same binary, same jail, /bin/hamclock:
+    #   ulimit -f  262144 -> wsysd killed, wsys.bb 0 bytes, wins 0, fbpx -
+    #   ulimit -f 6291456 -> wsys.bb 4,261,478,400 bytes, wins 1,
+    #                        fbpx 52117 (PAINTED)
+    #
+    # THE FILE IS SPARSE, which is why this is a cap on an OFFSET and not
+    # on disk: 4 GB of ftruncate cost 22,856 KiB of actual blocks in that
+    # run. So the pool-sized cap is given ONLY to the rows that run a
+    # compositor, and everything else -- `yes` included -- keeps the 256
+    # MiB the paragraph above argues for, because those rows write their
+    # bytes for real.
+    #
+    # A stale number here is not allowed to be silent again: the jail
+    # reports HARNESS_FAIL if the compositor is not alive at the end of a
+    # run (tests/linux/runsweep_jail.sh, THE COMPOSITOR MUST OUTLIVE THE
+    # PROGRAM), so the next time the pool outgrows this the sweep says so
+    # instead of blaming fifty programs.
+    ( ulimit -f "$FCAP"
       env -i \
         PATH=/bin:/usr/bin HOME=/root USER=root LOGNAME=root TERM=dumb \
         SHELL=/bin/hamsh PWD=/work TMPDIR=/tmp LANG=C \
@@ -757,6 +808,30 @@ run_one() {
 
     local ob eb
     ob=$(stat -c%s "$OUT/run/$app.out"); eb=$(stat -c%s "$OUT/run/$app.err")
+
+    # THE CAPTURE IS BOUNDED; THE NUMBER IN THE ROW IS NOT.
+    #
+    # `ulimit -f` is what stops a runaway writer, and on a windowed row it is
+    # now 6 GiB because the window system's SPARSE segments need that much
+    # OFFSET (see jail_run). `yes` is class `daemon`, so it gets that cap and
+    # writes 6 GiB of real bytes to its capture in twelve seconds -- measured,
+    # 6,442,450,944 in run/yes.out. That is somebody's disk, and a results
+    # directory that cannot be kept is a measurement nobody re-reads.
+    #
+    # So an oversized capture is TRUNCATED and SAYS SO, after `ob`/`eb` have
+    # already recorded the real size. The row still reports the true byte
+    # count, which is the fact the verdict is computed from; what is thrown
+    # away is the middle of a stream whose whole content is one repeated line.
+    local keep f fsz
+    for f in "$OUT/run/$app.out" "$OUT/run/$app.err"; do
+        fsz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+        if [ "$fsz" -gt $((256 * 1024 * 1024)) ]; then
+            keep=$((1024 * 1024))
+            truncate -s "$keep" "$f"
+            printf '\n[runsweep] TRUNCATED: this capture was %s bytes; the first %s are kept and the `out`/`err` column above reports the real size.\n' \
+                "$fsz" "$keep" >> "$f"
+        fi
+    done
 
     # Did a scene client actually MAP A WINDOW? Re-enter the same overlay --
     # the window table is a file in it -- and read the /dev/wsys DIRECTORY,
