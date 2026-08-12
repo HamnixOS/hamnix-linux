@@ -108,7 +108,15 @@ if [ "${1:-}" = "--inner" ]; then
     # something has to still be holding it -- otherwise the bypass has nothing
     # to overwrite and the read-back has nothing to read, and this gate would
     # be measuring a window that no longer exists.
-    as_bg 0 "$PROBE" client hold >"$W/root.client.out" 2>&1
+    # THE DRAIN FLAG.  Both holders keep their own keys fd open from the start
+    # -- that is what claims the window's channel -- but read NOTHING until this
+    # file exists.  A drain is destructive, and a witness that drains while the
+    # attacks are being driven eats the evidence: with it draining freely this
+    # gate went GREEN ON THE REVERTED RUN, reporting that the keystrokes were
+    # not in the mapping about a hole that was wide open.
+    DRAIN="$W/drain.flag"
+    rm -f "$DRAIN"
+    as_bg 0 "$PROBE" client hold "$DRAIN" >"$W/root.client.out" 2>&1
     HOLDER=$!
     for _ in $(seq 1 50); do
         grep -q 'commit=' "$W/root.client.out" 2>/dev/null && break
@@ -147,7 +155,6 @@ if [ "${1:-}" = "--inner" ]; then
     as 1001 "$BYP" bypass.table  "$HAMWSYS" 'uidgate probe' 'PWNEDBYPASSER'
     as 1001 "$BYP" bypass.chrome "$HAMWSYS".chrome  'CHROMEMARK' 'BYPASSEDXX'
     as 1001 "$BYP" bypass.scene  "$HAMWSYS" '0x334455' '0xDEAD99'
-    as 1001 "$BYP" injkey "$HAMWSYS" 'PWNEDBYPASSER' '7 111'
 
     # 3. What the PROTOCOL sees afterwards.  This is what makes step 2 mean
     #    something: a write into a mapping that nothing reads back is not a
@@ -179,7 +186,7 @@ if [ "${1:-}" = "--inner" ]; then
     #     mapping can gate this.  Here it is, measured: a uid-1001 holder's
     #     window, and a SEPARATE uid-1001 process injecting a key into it.
     echo "-- same-uid: a uid-1001 attacker against a uid-1001 victim"
-    as_bg 1001 "$PROBE" client hold >"$W/live.client.out" 2>&1
+    as_bg 1001 "$PROBE" client hold "$DRAIN" >"$W/live.client.out" 2>&1
     LHOLDER=$!
     for _ in $(seq 1 50); do
         grep -q 'commit=' "$W/live.client.out" 2>/dev/null && break
@@ -193,8 +200,14 @@ if [ "${1:-}" = "--inner" ]; then
     # every probe window carries (including the reaped not-blind one above) and
     # a title needle would alias to a stale row; a hostile program that has read
     # struct wshm walks win[] for the wid just as readily.
-    as 1001 "$BYP" injkey "$HAMWSYS" "wid=${LWID:-0}" '9 222' sameuid.inj
+    # THE PROTOCOL READ FIRST, AND THE INJECTION AFTER.  A uid-1001 non-owner
+    # asking for the victim's keystrokes through the protocol is itself an
+    # attack, and it is now refused by name.  It runs BEFORE the injection
+    # because a library without this change would SERVE it -- draining the
+    # injected key and hiding it from the victim, which would make the
+    # assertion below pass for the wrong reason on the reverted run.
     as 1001 "$PROBE" read "/dev/wsys/${LWID:-0}/keys" | sed 's/^/== sameuid.keys./'
+    as 1001 "$BYP" injkey "$HAMWSYS" "wid=${LWID:-0}" '9 222' sameuid.inj
 
     #     AND THE ATTACK THE NEW CHANNEL INVITES, driven rather than assumed.
     #     The keys ring left the segment for an ABSTRACT AF_UNIX address, and an
@@ -233,7 +246,6 @@ if [ "${1:-}" = "--inner" ]; then
     echo "-- same-uid: reading the victim's keystrokes, O_RDONLY"
     as 0 "$PROBE" chrome "/dev/wsys/${LWID:-0}/keys" '1 PASSWORD31337' \
         | sed 's/^/== sameuid.typed./'
-    sleep 0.5
     as 1001 "$BYP" snoop "$HAMWSYS" "wid=${LWID:-0}" sameuid.snoop
     # AND THE VICTIM STILL GETS IT, ASKED OF THE VICTIM.  A fix that closed the
     # keylogger by breaking keyboard delivery would pass every assertion above
@@ -241,7 +253,21 @@ if [ "${1:-}" = "--inner" ]; then
     # printed here and asserted on.  It is the holder process itself: it opened
     # /dev/wsys/<wid>/keys at startup and prints a `keysgot [...]` line for
     # every event it receives (tests/linux/wsys_uidgate.ad, hold_open).
-    sleep 0.5
+    # ATTACK 3 AGAINST THE uid-0 WINDOW, DRIVEN LAST ON PURPOSE.  It used to run
+    # up with the other three, and the `read /dev/wsys/2/keys` in step 3 -- the
+    # one that now measures a refusal -- would DRAIN the injected key before its
+    # owner could be asked about it, so on the reverted run the owner truthfully
+    # reported never receiving a key that had in fact been delivered to somebody.
+    # One ring, two questions, and the earlier reader consumed the answer to the
+    # later one.  The injection happens after every read, so nothing but the
+    # owner can consume it.
+    as 1001 "$BYP" injkey "$HAMWSYS" 'PWNEDBYPASSER' '7 111'
+
+    # EVERY ATTACK HAS BEEN DRIVEN.  Now let the witnesses drain and say what
+    # they actually received.
+    : >"$DRAIN"
+    chmod 666 "$DRAIN"
+    sleep 1
     sed 's/^/== victim./' "$W/live.client.out"
     kill "$LHOLDER" 2>/dev/null
 
@@ -351,9 +377,15 @@ else bad "the bypass could not write the ring: $(line injkey.table)"; fi
 if grep -q "^== rootvictim.keysgot .*7 111" "$OUT"; then
     bad "INVERTED CONTROL FAILED: the injected key reached the window's owner"
 else ok "and the owner never receives it: the ring it wrote is not the channel"; fi
-if grep -q "^== after.keys.*open=-1" "$OUT"; then
+# THE REFUSAL IS ON TWO LINES because the probe's own stdout and the library's
+# named diagnostic on stderr are merged by `as`.  Both are asserted: a refusal
+# that does not SAY which window and why is a refusal a person has to guess at.
+if grep -q "^== after\.keys\..*open=-1" "$OUT"; then
     ok "and a third process cannot read that window's keys at all: refused"
 else bad "a non-owner still opened another window's keys: $(line after.keys)"; fi
+if grep -q "does not own window 2, so it cannot read its keystrokes" "$OUT"; then
+    ok "and it is refused BY NAME, not with a silent zero-byte read"
+else bad "the refusal did not name the window: $(line after.keys)"; fi
 
 note ""
 note "AND WHY NO FILE MODE CLOSES IT: same uid attacks same uid."
@@ -368,6 +400,9 @@ if has sameuid.inj "wrote=1"; then
 else bad "the same-uid injection did not write: $(line sameuid.inj)"; fi
 # INVERTED.  This used to read the injected key back and call it "two uid-1001
 # apps, no gate".  The mapping it wrote is no longer the delivery path.
+if grep -q "^== sameuid\.keys\..*open=-1" "$OUT"; then
+    ok "a uid-1001 non-owner asking for them through the protocol is refused"
+else bad "a non-owner read the victim's keys through the protocol: $(line sameuid.keys)"; fi
 if grep -q "^== victim.keysgot .*9 222" "$OUT"; then
     bad "INVERTED CONTROL FAILED: the same-uid injection reached the victim"
 else ok "and the victim never receives it -- the ring it wrote is dead storage"; fi

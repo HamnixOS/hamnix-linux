@@ -187,7 +187,7 @@ def do_read(path: Ptr[char]) -> int32:
     return 0
 
 
-def hold_open(wid: int64):
+def hold_open(wid: int64, flag: Ptr[char]):
     # STAY ALIVE, holding the window.  A window whose owner has exited is not a
     # window -- user/linux-wsys.c reaps one whose pid is gone, as devwsys does
     # when the dying process's fid closes -- so a caller that needs the window
@@ -203,6 +203,14 @@ def hold_open(wid: int64):
     # any more: it has to be asked of the victim, which is what this drain is.
     # That is a strictly more truthful witness than the one it replaces, where
     # a separate root process read the victim's ring and reported on its behalf.
+    # AND IT DOES NOT DRAIN UNTIL IT IS TOLD TO, which is not a convenience.
+    # A drain is destructive: it moves the ring's r past the bytes.  With the
+    # holder draining every 100 ms, the keylogger attack this gate exists to
+    # measure has nothing left to read by the time it runs -- so the gate went
+    # GREEN WITH THE CHANGE REVERTED, reporting "the keystrokes are not there"
+    # about a hole that was wide open, because the witness had eaten the
+    # evidence.  It waits for <flag> to exist, and wsys_bypass.sh creates that
+    # file only after every attack has been driven.
     ws: Array[4, int32]
     kfd: int32 = -1
     if wid >= 2:
@@ -213,7 +221,16 @@ def hold_open(wid: int64):
         puts("\n")
     j: int32 = 0
     while j < 600:
-        if kfd >= 0:
+        drain: int32 = 1
+        if flag != cast[Ptr[char]](0):
+            ffd: int32 = sys_open(flag)
+            if ffd < 0:
+                drain = 0
+            else:
+                sys_close(ffd)
+        if kfd >= 0 and drain == 0:
+            sys_waitfds(&ws[0], 0, 100)
+        elif kfd >= 0:
             ws[0] = kfd
             sys_waitfds(&ws[0], 1, 100)
             n: int64 = sys_read(kfd, &rbuf[0], 255)
@@ -231,7 +248,7 @@ def hold_open(wid: int64):
         j = j + 1
 
 
-def do_client(hold: int32) -> int32:
+def do_client(hold: int32, hold_flag: Ptr[char]) -> int32:
     ctl: Ptr[char] = "/dev/wsys/ctl"
     puts("client")
     nw: Ptr[uint8] = "newwindow"
@@ -290,7 +307,7 @@ def do_client(hold: int32) -> int32:
     if r1 < 0 or r2 < 0 or r3 < 0:
         return 1
     if hold != 0:
-        hold_open(wid)
+        hold_open(wid, hold_flag)
     return 0
 
 
@@ -311,7 +328,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         h: int32 = 0
         if argc > 2:
             h = 1
-        return do_client(h)
+        # client hold [drain-flag-path]: with a flag path, the holder keeps its
+        # keys fd open but reads NOTHING until that file exists.  See hold_open.
+        fl: Ptr[char] = cast[Ptr[char]](0)
+        if argc > 3:
+            fl = cast[Ptr[char]](argv[3])
+        return do_client(h, fl)
     if streq(cmd, ch) == 1:
         if argc < 4:
             puts("usage: wsys_uidgate chrome <path> <text>\n")
