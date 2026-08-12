@@ -60,6 +60,22 @@ set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
 
+# The desktop stack writes FIXED, HOST-GLOBAL names whatever this script does
+# about its own $WORK: hampanelscene writes /tmp/hamnix-panel.{health,fault},
+# /tmp/hamnix-panel-drop and /tmp/hamnix-notif.log; hamdesktop writes
+# /tmp/hamdesktop-wp.status and /tmp/.hamdesktop.src. Those names are compiled
+# into the programs under test, so no care taken here can move them, and a
+# concurrent run -- another agent's, or a person's live desktop on this
+# machine -- reads exactly those files. tests/linux/private_ns.sh records what
+# that cost the day a gate was found writing /tmp/hamnix-panel.conf. This call
+# puts everything below inside a mount namespace where /tmp, /dev/shm and /srv
+# are this run's alone; it execs, and does not return.
+#
+# NOTE for a KEEP=1 post-mortem: $WORK is inside that private /tmp and goes
+# with it. Use priv_ns_keep to copy anything you want to outlive the run.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
+
 WORK="${MOUSE_WORK:-$(mktemp -d -p "${TMPDIR:-/tmp}" mousechrome.XXXXXX)}"
 mkdir -p "$WORK"
 KEEP="${MOUSE_KEEP:-0}"
