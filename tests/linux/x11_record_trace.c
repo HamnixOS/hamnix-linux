@@ -165,9 +165,84 @@ static int event_mask_value(unsigned vmask, const unsigned char *vals,
     return 1;
 }
 
+/* ---- what the server DELIVERED, and to whom -------------------------------
+ *
+ * The request half above answers "what did Steam ask for". This half answers
+ * the question that actually decides the bug: WHEN A WHEEL NOTCH HAPPENS,
+ * WHAT DOES THE SERVER PUT ON STEAM'S CONNECTION? A client can select for an
+ * event and still not act on it, and it can act on one it never selected via
+ * a grab -- only the delivered stream separates "Steam was not told" from
+ * "Steam was told and did nothing".
+ *
+ * RECORD hands events over as 32 bytes. That is the whole of a core event and
+ * only the header of an XI2 GenericEvent, so the valuators of an XI_Motion
+ * are NOT visible here. They do not need to be: the measurement holds the
+ * pointer COMPLETELY STILL and then wheels, so every XI_Motion delivered
+ * during that burst is a scroll and nothing else -- the same reasoning
+ * tests/linux/vm_wheel_reaches.sh uses on wsysd's pointer counter.
+ */
+static const char *core_evname(int t)
+{
+    switch (t) {
+    case ButtonPress:   return "ButtonPress";
+    case ButtonRelease: return "ButtonRelease";
+    case MotionNotify:  return "MotionNotify";
+    case EnterNotify:   return "EnterNotify";
+    case LeaveNotify:   return "LeaveNotify";
+    default:            return "core?";
+    }
+}
+
+static void on_event(XRecordInterceptData *d)
+{
+    const unsigned char *p = (const unsigned char *)d->data;
+    if (d->data_len * 4 < 32) return;
+    int type = p[0] & 0x7f;
+    int sent = (p[0] & 0x80) ? 1 : 0;
+    /* Two kinds arrive on this path and confusing them would answer the wrong
+     * question. A DEVICE event is the raw one, before delivery: it has no
+     * recipient and no window, and `id_base` is 0. A DELIVERED event is the
+     * one a particular client actually got, with that client's id_base and
+     * the window it was delivered on. "the wheel reached the server" is the
+     * first; "Steam was told about the wheel" is only ever the second. */
+    int devlevel = (d->id_base == 0);
+    const char *tag = devlevel ? "DEV" : "GOT";
+
+    if (type == GenericEvent) {
+        int ext = p[1];
+        unsigned evtype = u16(p + 8), dev = u16(p + 10);
+        unsigned detail = u32(p + 16), win = u32(p + 24);
+        if (ext != xi_opcode) return;
+        const char *n = xi_evname((int)evtype);
+        printf("%8.3f cl=0x%08lx %s XI2 %s dev=%u detail=%u win=0x%x%s\n",
+               now(), (unsigned long)d->id_base, tag, n ? n : "?", dev, detail,
+               win, sent ? " (SendEvent)" : "");
+        return;
+    }
+    if (type == ButtonPress || type == ButtonRelease || type == MotionNotify ||
+        type == EnterNotify || type == LeaveNotify) {
+        printf("%8.3f cl=0x%08lx %s %s detail=%u win=0x%x%s\n", now(),
+               (unsigned long)d->id_base, tag, core_evname(type), p[1],
+               u32(p + 12), sent ? " (SendEvent)" : "");
+    }
+}
+
 static void on_data(XPointer closure, XRecordInterceptData *d)
 {
     (void)closure;
+    /* RECTRACE_RAW=1 prints the category and first bytes of everything that
+     * arrives. It exists because the delivered-event half of this file was
+     * silent for a run in which the client it was watching DID receive the
+     * events -- and a silent tracer and a client that got nothing are the
+     * same log. */
+    if (getenv("RECTRACE_RAW")) {
+        const unsigned char *q = (const unsigned char *)d->data;
+        printf("%8.3f RAW cat=%d len=%u bytes=%02x %02x %02x %02x\n", now(),
+               d->category, (unsigned)d->data_len,
+               d->data_len ? q[0] : 0, d->data_len ? q[1] : 0,
+               d->data_len ? q[2] : 0, d->data_len ? q[3] : 0);
+    }
+    if (d->category == XRecordFromServer) { on_event(d); goto out; }
     if (d->category != XRecordFromClient) goto out;
     if (d->client_swapped) {
         /* Every client in this session is the same endianness as the server;
@@ -299,8 +374,9 @@ int main(int argc, char **argv)
      * four core opcodes is a few hundred bytes a second, where "all core
      * requests" in a session with a live CEF is a firehose that changes the
      * timing of the thing being measured. */
-    XRecordRange *rr[3];
-    for (int i = 0; i < 3; i++) {
+#define NRANGE 5
+    XRecordRange *rr[NRANGE];
+    for (int i = 0; i < NRANGE; i++) {
         rr[i] = XRecordAllocRange();
         if (!rr[i]) { fprintf(stderr, "rectrace: out of memory\n"); return 2; }
     }
@@ -312,9 +388,30 @@ int main(int argc, char **argv)
     rr[2]->ext_requests.ext_major.last  = (unsigned char)xi_opcode;
     rr[2]->ext_requests.ext_minor.first = 0;
     rr[2]->ext_requests.ext_minor.last  = 255;
+    /* Delivered events: the pointer ones and GenericEvent, which is how every
+     * XI2 event arrives. Not Expose, not PropertyNotify -- a CEF session
+     * repaints constantly and a firehose through this process would change the
+     * timing of the thing being measured.
+     *
+     * ONE CONTIGUOUS RANGE, 4..35, AND NOT TWO. This was written first as
+     * `delivered_events 4..6` in one XRecordRange and `35..35` in another --
+     * the tight selection, since 7..34 is Enter/Leave/Expose/Property noise.
+     * Against Xvfb that recorded NOTHING AT ALL while the client being watched
+     * was demonstrably receiving XI_Motion and buttons 4 and 5 (its own log
+     * said so in the same run). Merged into one range it works. A tracer that
+     * is silent and a client that got nothing are the same log, so the
+     * control that caught this -- the watched client printing what it
+     * received -- is part of tests/linux/x11_record_trace_selftest.sh and not
+     * an anecdote. */
+    rr[3]->delivered_events.first = ButtonPress;      /* 4 */
+    rr[3]->delivered_events.last  = GenericEvent;     /* 35 */
+    if (!getenv("RECTRACE_NODEV")) {
+        rr[4]->device_events.first = ButtonPress;
+        rr[4]->device_events.last  = GenericEvent;
+    }
 
     XRecordClientSpec cs = XRecordAllClients;
-    XRecordContext rc = XRecordCreateContext(ctl, 0, &cs, 1, rr, 3);
+    XRecordContext rc = XRecordCreateContext(ctl, 0, &cs, 1, rr, NRANGE);
     if (!rc) {
         fprintf(stderr, "rectrace: XRecordCreateContext failed\n");
         return 5;
