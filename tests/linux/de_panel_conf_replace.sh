@@ -73,11 +73,9 @@
 # /etc/panel.conf; it returns ONE fd and every line after it — `_cfg_changed`,
 # `_load_config`, `_reload_panels` — is shared. The host running this gate has
 # no writable /etc/panel.conf, so the replacement is performed on the override
-# path. Its CONTENT is etc/panel.conf's two `panel ... end` blocks verbatim,
-# so the layout under test is the shipped one — but written out without the
-# shipped file's comment header, for the reason recorded at panel_conf() below
-# (the header alone overruns `_load_config`'s 2047-byte read, so a copy of the
-# file as shipped is never parsed at all).
+# path. Its CONTENT is now `etc/panel.conf` ITSELF, copied byte for byte,
+# comment header and all — see panel_conf() below for why it could not be
+# until the streaming reader landed.
 #
 # Entirely offscreen (HAMFB_FILE + a file of evdev records): no VM, no display,
 # no GPU, about half a minute. The software Vulkan ICD is forced because wsysd
@@ -212,43 +210,30 @@ click() {   # click <x> <y> -- move, settle, press, hold, release
 # "the file appeared" and "the file was replaced" are different events, and
 # the machine measurement was the second one.
 #
-# The BLOCKS are etc/panel.conf's, verbatim -- the shipped MATE two-panel
-# layout -- but the file is written here rather than copied, WITHOUT the
-# shipped file's 2.4 KB comment header. `_load_config` reads at most 2047
-# bytes; etc/panel.conf is 3120 bytes and its first `panel` line does not
-# begin until byte ~2450, so a copy of it parses to zero panels and the panel
-# silently falls back to `_default_config`. (Measured here: with the file
-# copied, the bars came up in a colour that is not the `color #d4d0c8` the
-# file asks for.) That is a real and separate defect -- an edit to the shipped
-# /etc/panel.conf does nothing at all -- and this gate must not sit on top of
-# it, because a config that is never parsed cannot be replaced under anyone.
+# This is `etc/panel.conf` ITSELF, copied verbatim -- comment header and all.
+#
+# It could not be, until the streaming reader landed. `_load_config` used to
+# read at most 2047 bytes; etc/panel.conf is 3120 bytes and its first `panel`
+# line does not begin until byte 2834, so a copy of the file as shipped parsed
+# to ZERO panels and the panel silently fell back to `_default_config` --
+# measured here at the time: with the file copied, the bars came up in a
+# colour that is not the `color #d4d0c8` the file asks for. So this gate wrote
+# the same two blocks out by hand, WITHOUT the header, because a config that
+# is never parsed cannot be replaced under anyone. `_load_config` now streams
+# the file in chunks and parses it a line at a time, with no size ceiling, so
+# the shipped bytes work and the hand-written copy is gone. The colour
+# assertions below are now measuring the shipped file's own `color` line;
+# tests/linux/de_panel_conf_shipped.sh is the gate that exists for that
+# question specifically.
+SHIPPED_CONF="$PROJ_ROOT/etc/panel.conf"
 panel_conf() {   # panel_conf <marker> [one]  -- the config, with a marker line
     echo "# $1"
-    cat <<'EOF'
-panel top
-  edge top
-  size 26
-  color #d4d0c8
-  font normal
-  widget menu
-  widget launcher /bin/hamtermscene Terminal
-  widget spacer
-  widget tray
-  widget sysmon
-  widget clock
-end
-EOF
-    [ "${2:-}" = one ] && return 0
-    cat <<'EOF'
-panel bottom
-  edge bottom
-  size 26
-  color #d4d0c8
-  font normal
-  widget tasks
-  widget pager
-end
-EOF
+    if [ "${2:-}" = one ]; then
+        # the shipped file with its SECOND `panel ... end` block deleted
+        sed '/^panel bottom$/,/^end$/d' "$SHIPPED_CONF"
+    else
+        cat "$SHIPPED_CONF"
+    fi
 }
 panel_conf "as installed" >"$CONF"
 
