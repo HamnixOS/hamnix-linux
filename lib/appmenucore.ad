@@ -484,6 +484,13 @@ def _amc_cat_icon_name(code: int32) -> Ptr[uint8]:
     if code == AMC_SETTINGS:
         t: Ptr[uint8] = "preferences-system"
         return t
+    # AMC_MULTIMEDIA ("Sound & Video") had NO entry here, so the one category
+    # row a person sees beside seven real pictures was the anonymous page --
+    # measured in the shipped menu's own screenshot. It is a category about
+    # sound and video; it gets the media glyph.
+    if code == AMC_MULTIMEDIA:
+        v: Ptr[uint8] = "multimedia-video-player"
+        return v
     e: Ptr[uint8] = ""
     return e
 
