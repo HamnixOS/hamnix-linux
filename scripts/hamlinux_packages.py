@@ -132,7 +132,21 @@ SYS_CMDS = "hlinstall haminstallui nsrun reboot halt poweroff install".split()
 # /bin, this one puts it in a package so `hpm update` can ever fix it.
 DESKTOP_CMDS = ("wsysd wsyswl xbridge hamdesktop hampanelscene hamtermscene "
                 "hameditscene hamsettings hamfm hamUI hamUId xsnarfd "
-                "hamimgscene hamappmenu").split()
+                "hamimgscene hamappmenu "
+                # THE APPLICATIONS THE MENU LISTS. Every program named by an
+                # Exec= line in etc/hamde/apps/*.desktop (HAMDE_APPS below).
+                # Three of them were already here; the other 23 were in the
+                # tree, in the run sweep and in a shipped launcher, and in no
+                # image and no package -- so the Applications menu could only
+                # ever have offered three rows. See the matching block in
+                # scripts/hamlinux_image.sh, and tests/linux/
+                # de_appmenu_installed.sh, which fails if a launcher and this
+                # list ever disagree again.
+                "ham2048scene hamaudioscene hambrowse hamcalcscene "
+                "hamcalscene hamchessscene hamctl hamfmscene hamgamedemo "
+                "hamgamesnake haminput hamlogscene hamminescene hammonscene "
+                "hamnotesscene hamsheet hamshotui hamslides hamsnakescene "
+                "hamsoftware hamtetrisscene hamvideoscene hamwrite").split()
 
 
 # --------------------------------------------------------------------------
@@ -253,6 +267,21 @@ MAN_PAGES = glob_files(["etc/man/*.md"], "usr/share/man")
 # because the launchers name the desktop's own programs. /home/live is NOT
 # shipped: see the exclusion list in tests/linux/channel_covers_image.sh.
 SKEL_FILES = tree_files("etc/skel", "etc/skel")
+
+# /etc/hamde/apps -- THE APPLICATIONS MENU'S DATA. Every menu in this desktop
+# (hamappmenu's Brisk menu, hampanelscene's dropdown, hamde) is data-driven
+# from these *.desktop launchers, and until this line the image did not stage
+# them and no package carried them, so every machine ran on its menu's
+# compiled-in FALLBACK list -- which names programs the image does not build.
+# Both halves are needed and neither is sufficient: scripts/hamlinux_image.sh
+# puts them in the initramfs, this list puts them in a package so a machine
+# installed from 255.one can ever receive a new launcher (or a fix to one).
+# tests/linux/channel_covers_image.sh fails if either stops.
+#
+# apps-optional/ is NOT here: each of those launchers ships with the optional
+# package that carries its program (scripts/build_packages.py), which is the
+# invariant that keeps a listed app and an installed app the same set.
+HAMDE_APPS = tree_files("etc/hamde/apps", "etc/hamde/apps")
 
 # --------------------------------------------------------------------------
 # Component packages: name -> (description, [binaries], [extra files as
@@ -415,7 +444,7 @@ COMPONENTS = {
          # The shim the application menu runs a distribution's program
          # through, so a .desktop file in Debian or Alpine gets a display to
          # draw on. /etc/rc.distros copies it INTO each tree at boot.
-         ("etc/de-ns-run.linux", "etc/de-ns-run")] + SKEL_FILES,
+         ("etc/de-ns-run.linux", "etc/de-ns-run")] + SKEL_FILES + HAMDE_APPS,
         ["hamnix-init>=1", "hamnix-hamsh>=1"]),
 }
 
