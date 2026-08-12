@@ -245,34 +245,42 @@ def _dd_scan() -> int32:
     return added
 
 
-# Fallback set when /etc/hamde/apps is empty. THIS LIST IS WRITTEN IN CODE and
-# was therefore the one part of the menu that could drift out of step with the
-# image's APPS list with nothing failing -- which is exactly what happened:
-# eight of its eleven rows named a program no image builds, and it was reached
-# on EVERY machine because /etc/hamde/apps was never staged at all. Both halves
-# are fixed (scripts/hamlinux_image.sh stages the launchers); this one stays
-# because a stripped image is still a case, and every row of it now goes
-# through the same installed-probe the catalogue scan does.
-def _seed_one(name: Ptr[uint8], prog: Ptr[uint8], cats: Ptr[uint8], gl: uint8):
-    if _dd_installed(prog) == 0:
-        _dd_say_missing(name, prog)
-        return
-    amc_add(name, prog, cats, gl)
-
-
+# Fallback set when /etc/hamde/apps is empty.
+#
+# THIS LIST IS WRITTEN IN CODE, so it is the one part of the menu that can
+# drift out of step with what the image builds while nothing fails -- and it
+# had: FIVE of its eleven rows named a program no image builds
+# (/bin/calculator, /bin/hamterm, /bin/hamedit, /bin/hamview, and /bin/hamfm,
+# which is the TUI file manager, not the desktop one). It was reached on EVERY
+# machine, because /etc/hamde/apps was never staged at all, so those were the
+# rows a person actually clicked, and clicking one did nothing whatsoever.
+# Every name below is now a program scripts/hamlinux_image.sh builds and
+# scripts/hamlinux_packages.py ships, and /bin/hamfm in particular is gone:
+# the DESKTOP file manager is /bin/hamfmscene, which is what the shipped
+# files.desktop has always said. (The TUI froze a real desktop from this row
+# -- see the input loop in user/hamfm.ad.)
+#
+# WHY THIS LIST IS **NOT** RUN THROUGH _dd_installed the way the catalogue
+# scan above is. Its whole job is that the DE is never menu-less; a probe that
+# can empty it defeats the only reason it exists, and the case it runs in --
+# no catalogue at all -- is by definition a root nobody staged, where an
+# absent /bin/X says as much about the root as about the program. The
+# guarantee for these rows is made at the CLICK instead, where it costs
+# nothing and can still be honest: hampanelscene's _launch refuses a program
+# that is not there BY NAME rather than forking a child that dies in execve.
 def _seed_fallback():
     amc_reset()
-    _seed_one("Calculator", "/bin/calculator", "Utility;", 67)
-    _seed_one("Terminal", "/bin/hamterm", "System;TerminalEmulator;", 84)
-    _seed_one("Files", "/bin/hamfm", "System;FileManager;", 70)
-    _seed_one("Text Editor", "/bin/hamedit", "Utility;TextEditor;", 69)
-    _seed_one("Image Viewer", "/bin/hamview", "Graphics;Viewer;", 86)
-    _seed_one("Web Browser", "/bin/hambrowse", "Network;WebBrowser;", 87)
-    _seed_one("System Monitor", "/bin/hammonscene", "System;Monitor;", 77)
-    _seed_one("Package Manager", "/bin/hpm", "System;PackageManager;", 80)
-    _seed_one("Control Center", "/bin/hamctl", "Settings;", 67)
-    _seed_one("Video Player", "/bin/hamvideoscene", "AudioVideo;Video;Player;", 86)
-    _seed_one("Audio Player", "/bin/hamaudioscene", "AudioVideo;Audio;Player;", 65)
+    amc_add("Calculator", "/bin/hamcalcscene", "Utility;", 67)
+    amc_add("Terminal", "/bin/hamtermscene", "System;TerminalEmulator;", 84)
+    amc_add("Files", "/bin/hamfmscene", "System;FileManager;", 70)
+    amc_add("Text Editor", "/bin/hameditscene", "Utility;TextEditor;", 69)
+    amc_add("Image Viewer", "/bin/hamimgscene", "Graphics;Viewer;", 86)
+    amc_add("Web Browser", "/bin/hambrowse", "Network;WebBrowser;", 87)
+    amc_add("System Monitor", "/bin/hammonscene", "System;Monitor;", 77)
+    amc_add("Package Manager", "/bin/hpm", "System;PackageManager;", 80)
+    amc_add("Control Center", "/bin/hamctl", "Settings;", 67)
+    amc_add("Video Player", "/bin/hamvideoscene", "AudioVideo;Video;Player;", 86)
+    amc_add("Audio Player", "/bin/hamaudioscene", "AudioVideo;Audio;Player;", 65)
 
 
 def _build_catalogue():

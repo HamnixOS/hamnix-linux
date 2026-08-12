@@ -2148,31 +2148,27 @@ def _report_missing(name: Ptr[uint8], prog: Ptr[uint8]):
     _writeall(1, cast[Ptr[uint8]]("\n"))
 
 
-# _seed_one, but only if the program is really on this machine. The fallback
-# below is the one place a program name is written in CODE rather than read
-# from a launcher file, so it is the one place that can drift out of step with
-# the image's APPS list without anything failing -- and it did, for eight of
-# its eleven rows.
-def _seed_if_installed(name: Ptr[uint8], prog: Ptr[uint8], cat: int32):
-    if _prog_installed(prog) == 0:
-        _report_missing(name, prog)
-        return
-    _seed_one(name, prog, cat)
-
-
+# WHY THIS LIST IS **NOT** RUN THROUGH _prog_installed the way the catalogue
+# scan is. Its whole job is that the DE is never menu-less; a probe that can
+# empty it defeats the only reason it exists, and the case it runs in -- no
+# catalogue at all -- is by definition a root nobody staged, where an absent
+# /bin/X says as much about the root as about the program. These rows are made
+# honest at the CLICK instead: _launch below refuses a program that is not
+# there BY NAME. (Every name here IS built by scripts/hamlinux_image.sh; this
+# panel's list, unlike hamappmenu's, had not drifted.)
 def _seed_fallback():
-    _seed_if_installed(cast[Ptr[uint8]]("Terminal"),       cast[Ptr[uint8]]("/bin/hamtermscene"), 3)
-    _seed_if_installed(cast[Ptr[uint8]]("Files"),          cast[Ptr[uint8]]("/bin/hamfmscene"),   0)
-    _seed_if_installed(cast[Ptr[uint8]]("Web Browser"),    cast[Ptr[uint8]]("/bin/hambrowse"),    1)
-    _seed_if_installed(cast[Ptr[uint8]]("Calculator"),     cast[Ptr[uint8]]("/bin/hamcalcscene"), 0)
-    _seed_if_installed(cast[Ptr[uint8]]("Editor"),         cast[Ptr[uint8]]("/bin/hameditscene"), 0)
-    _seed_if_installed(cast[Ptr[uint8]]("Control Center"), cast[Ptr[uint8]]("/bin/hamctl"),       4)
-    _seed_if_installed(cast[Ptr[uint8]]("System Monitor"), cast[Ptr[uint8]]("/bin/hammonscene"),  3)
-    _seed_if_installed(cast[Ptr[uint8]]("2048"),           cast[Ptr[uint8]]("/bin/ham2048scene"), 2)
+    _seed_one(cast[Ptr[uint8]]("Terminal"),       cast[Ptr[uint8]]("/bin/hamtermscene"), 3)
+    _seed_one(cast[Ptr[uint8]]("Files"),          cast[Ptr[uint8]]("/bin/hamfmscene"),   0)
+    _seed_one(cast[Ptr[uint8]]("Web Browser"),    cast[Ptr[uint8]]("/bin/hambrowse"),    1)
+    _seed_one(cast[Ptr[uint8]]("Calculator"),     cast[Ptr[uint8]]("/bin/hamcalcscene"), 0)
+    _seed_one(cast[Ptr[uint8]]("Editor"),         cast[Ptr[uint8]]("/bin/hameditscene"), 0)
+    _seed_one(cast[Ptr[uint8]]("Control Center"), cast[Ptr[uint8]]("/bin/hamctl"),       4)
+    _seed_one(cast[Ptr[uint8]]("System Monitor"), cast[Ptr[uint8]]("/bin/hammonscene"),  3)
+    _seed_one(cast[Ptr[uint8]]("2048"),           cast[Ptr[uint8]]("/bin/ham2048scene"), 2)
     # The installer launcher is a LIVE-medium-only entry — never on an
     # installed system (matches installer.desktop's X-Hamnix-LiveOnly=true).
     if _am_is_live() != 0:
-        _seed_if_installed(cast[Ptr[uint8]]("Install Hamnix"), cast[Ptr[uint8]]("/bin/haminstallui"), 3)
+        _seed_one(cast[Ptr[uint8]]("Install Hamnix"), cast[Ptr[uint8]]("/bin/haminstallui"), 3)
 
 
 # Build "<dir>/<name>" into _am_path (NUL-terminated).

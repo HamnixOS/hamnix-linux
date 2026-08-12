@@ -52,13 +52,38 @@ echo "[idlecpu] work dir: $WORK"
 # `ps` calls INTERVAL apart. The banners are what the host lines its own
 # sampling window up with, so the two measurements cover the same seconds.
 #
-# TWO PHASES, because the bare desktop is not the case a person is in.
+# THREE PHASES, because the bare desktop is not the case a person is in.
 #   A  the desktop as rc.5 leaves it -- backdrop, panel, the Wayland servers.
 #   B  the same, with ONE TERMINAL OPEN, which is what anybody actually has on
 #      screen. It is a separate phase because it caught a separate defect that
 #      phase A cannot see: the shell inside the terminal sat at its prompt with
 #      nobody typing and burned 105% of a core, while every process phase A
 #      knows about was already at 0:00.
+#   C  A PROGRAM LAUNCHED FROM THE APPLICATIONS MENU, which is the whole point
+#      of having a menu and which this gate did not do. It measured the
+#      desktop as rc.5 leaves it and one terminal that rc-side line opened;
+#      nothing here had ever come off the menu, and a defect that arrives only
+#      that way was therefore out of its reach. One did: `hamfm`, the console
+#      TUI file manager, was on the menu (the fallback catalogue's "Files" row
+#      named /bin/hamfm while the shipped files.desktop names /bin/hamfmscene),
+#      and launching it FROZE A REAL DESKTOP -- state R, 2:02 of CPU, the
+#      screen stopped repainting, later clicks moved 0 pixels and the panel
+#      clock stopped. Its input loop answered "no byte ready yet" with
+#      sys_yield, which on a machine where nobody is typing into it is a spin.
+#      Two runs in four froze, and the discriminator between the frozen runs
+#      and the healthy ones was ONE `ps` line: R with 2:02 versus S with 0:00.
+#      That is this gate's own instrument, pointed at a case it was not
+#      pointed at.
+#
+#      IT IS LAUNCHED THROUGH `/dev/wsys/appmenu/launch`, the queue the menu
+#      writes and the panel reads, and BY ITS PATH -- not by clicking the row,
+#      because the row is gone: the catalogue is staged now and the shipped
+#      launcher names the windowed file manager. A gate that drove the click
+#      would be measuring which programs the menu happens to list today, and
+#      would go quietly green the moment one moved. What has to stay true is
+#      that a program the menu CAN launch does not spin, so the program is
+#      named here, and tests/linux/de_appmenu_installed.sh is what keeps the
+#      menu's rows and the machine's programs the same set.
 #
 # THE REAL rc.boot, not a stand-in. An earlier draft of this gate sourced only
 # /etc/rc.d/rc.5, which skips the distribution binds -- and the per-distribution
@@ -90,6 +115,17 @@ sleep $INTERVAL
 echo '[idlecpu] B T1 BEGIN'
 ps
 echo '[idlecpu] B T1 END'
+
+# Phase C: THE CONSOLE TUI THE MENU USED TO OFFER. See the header.
+echo '/bin/hamfm' > '/dev/wsys/appmenu/launch'
+sleep 10
+echo '[idlecpu] C T0 BEGIN'
+ps
+echo '[idlecpu] C T0 END'
+sleep $INTERVAL
+echo '[idlecpu] C T1 BEGIN'
+ps
+echo '[idlecpu] C T1 END'
 echo '[idlecpu] DONE'
 RC
 
@@ -99,7 +135,7 @@ HAMLINUX_RC="$WORK/rc.boot" scripts/hamlinux_image.sh > "$WORK/build.log" 2>&1 |
 
 BOOTLOG="$WORK/boot.log"
 : > "$BOOTLOG"
-RUNTIME=$(( SETTLE + 2 * INTERVAL + 140 ))
+RUNTIME=$(( SETTLE + 3 * INTERVAL + 160 ))
 echo "[idlecpu] booting (up to ${RUNTIME}s)"
 # No -display, no VNC: an idle desktop is the subject, and a VNC client
 # attaching would itself generate the pointer traffic this is measuring the
@@ -141,7 +177,7 @@ await() {     # await <banner> <seconds> -- wait for a line in the boot log
 # measurements cover the same seconds. Sampling starts at the END of the T0
 # `ps` (the listing itself costs CPU and is not part of "idle") and stops at
 # the START of the T1 one.
-declare -A HA HB
+declare -A HA HB HC
 await '[idlecpu] A T0 END'   $((SETTLE + 120))  || true
 HA[0]="$(cputicks "$QPID")"; HA[t0]="$(date +%s.%N)"
 await '[idlecpu] A T1 BEGIN' $((INTERVAL + 90)) || true
@@ -150,6 +186,10 @@ await '[idlecpu] B T0 END'   $((INTERVAL + 120)) || true
 HB[0]="$(cputicks "$QPID")"; HB[t0]="$(date +%s.%N)"
 await '[idlecpu] B T1 BEGIN' $((INTERVAL + 90)) || true
 HB[1]="$(cputicks "$QPID")"; HB[t1]="$(date +%s.%N)"
+await '[idlecpu] C T0 END'   $((INTERVAL + 120)) || true
+HC[0]="$(cputicks "$QPID")"; HC[t0]="$(date +%s.%N)"
+await '[idlecpu] C T1 BEGIN' $((INTERVAL + 90)) || true
+HC[1]="$(cputicks "$QPID")"; HC[t1]="$(date +%s.%N)"
 
 wait $RUNNER 2>/dev/null
 # The runner owns the qemu; when it is gone so is the VM. Never pkill by
@@ -247,6 +287,27 @@ if grep -aq 'hamtermscene' "$WORK/ps-B-1.txt" 2>/dev/null; then
 else
     say "[B terminal open] the terminal really is running" 0
 fi
+
+echo
+echo "=== C: a program launched from the menu's own queue, ${INTERVAL}s ==="
+host_arm "C menu launch" "${HC[0]:-}" "${HC[1]:-}" "${HC[t0]:-0}" "${HC[t1]:-0}"
+guest_arm C "C menu launch"
+
+# The same trap as phase B, and it is the ONE that matters here: a hamfm that
+# never started would make this phase a third copy of phase A and pass for the
+# reason the defect existed.
+if grep -aq 'hamfm' "$WORK/ps-C-1.txt" 2>/dev/null; then
+    say "[C menu launch] the launched program really is running" 1
+else
+    say "[C menu launch] the launched program really is running" 0
+fi
+
+# AND ITS STATE, said out loud. On the real boot that found this, the whole
+# difference between a working desktop and a frozen one was this column: R
+# with 2:02 of cpu froze it, S with 0:00 did not. The cpu budget above is the
+# assertion; this is the line a person reads.
+fmstate="$(awk '$5 ~ /hamfm/ { print $3, $4 }' "$WORK/ps-C-1.txt" 2>/dev/null | head -1)"
+[ -n "$fmstate" ] && echo "    hamfm is in state ${fmstate% *} with ${fmstate#* } of cpu"
 
 echo
 if [ $fail -eq 0 ]; then echo "idlecpu: ALL PASS"; else echo "idlecpu: SOME FAILED"; fi
