@@ -3283,6 +3283,75 @@ chroot/fixture root they made.
 Everything under `qemu`/VM control writes inside the guest and is private by
 construction.
 
+### The Applications menu is Brisk-shaped, and it now SHIPS
+
+The machine's owner asked for MATE's Brisk menu: a category submenu like the
+panel's `Debian apps >`, a search box that filters as you type, and a
+Favourites section at the top showing what has been launched recently.
+
+**Nearly all of it was already written and reached nobody.**
+`user/hamappmenu.ad` and the pure model behind it, `lib/appmenucore.ad`, have
+the search row, the recency section and one hover fly-out per category.
+hamappmenu was in neither `scripts/hamlinux_image.sh`'s `APPS` nor
+`DESKTOP_CMDS` in `scripts/hamlinux_packages.py`, so `/bin/hamappmenu` existed
+on no machine, `hampanelscene._appmenu_available()` returned 0 on every boot,
+and the Applications button silently used the panel's own flat dropdown. That
+is NORTH_STAR.md's worst bug shape twice over: a program in the tree and in no
+ship vehicle, and a feature drawn correctly that could not run. Both lists now
+carry it; `tests/linux/channel_covers_image.sh` **8 PASS / 0 FAIL** over a
+freshly staged image root and a freshly built channel, with
+`hamnix-desktop-*/files/bin/hamappmenu` in the tarball.
+
+**And one thing genuinely did not work.** The menu is a separate process
+spawned per click and killed on dismiss (`_am_close`), so `amc_mark_launch`
+recorded the launch in module state microseconds before `sys_exit`. The
+Favourites section was structurally incapable of ever holding anything: it laid
+out, it rendered, and it was empty on every open, forever. It is now persisted
+to **`$HOME/.hamde/favourites`**, resolved through `lib/homedir.ad` — the
+user's own home, NOT a fixed `/tmp` name; `tests/linux/private_ns.sh` records
+what one of those cost two agents. `lib/appmenucore.ad` gained the read-back
+accessors (`amc_recent_prog`/`_len`) its own comment had already promised and
+nothing could use. The section is labelled **Favourites** and holds the recency
+list, which is the one thing the owner asked for, not two.
+
+**The panel still degrades.** Absence was already handled. Present-but-broken
+was not: a menu that starts and cannot get a window printed to a closed stderr
+and died, and the button answered a click with nothing. hamappmenu now writes
+`$HOME/.hamde/appmenu.fault` on window-allocation failure and removes it on
+success; `_appmenu_available()` re-checks it on every call and falls back to
+the dropdown the panel draws itself, saying so by name.
+
+`tests/linux/de_appmenu_brisk.sh`, **17 PASS / 0 FAIL**, offscreen, private
+namespace. Every click is synthetic evdev and **the search box is typed into
+with real EV_KEY scancodes** (KEY_C/A/L, KEY_BACKSPACE) routed by wsysd's own
+keymap to the focused window — the filter assertion is that the menu card stops
+covering the wallpaper where its 6th row was, measured pixel for pixel against
+a photograph of that rectangle taken before the menu existed (100% covered
+before, 0% after). Same ring-rule guard as `de_mouse_chrome.sh`: nothing in the
+file names an event, pointer or keys ring.
+
+**Revert arm, run:** with `lib/appmenucore.ad`, `user/hamappmenu.ad` and
+`user/hampanelscene.ad` restored, **14 PASS / 3 FAIL** — nothing persisted, a
+fresh menu shows no Favourites section (row 1 is 0% header and 77% category
+button, unchanged from the run with no history), and the menu that cannot open
+a window exits 1 leaving no marker.
+
+Two things the gate learned the hard way, both written into it: the failure
+injection has to make **all three** of `shm_attach`'s segment candidates
+(`$HAMWSYS`, `/dev/shm/hamnix-wsys`, `/tmp/hamnix-wsys`) unopenable — a
+directory at each, since `open(2)` on one is EISDIR even for a namespace root
+with CAP_DAC_OVERRIDE — because the first attempt let the menu build itself a
+private window system nothing composites and hang for four minutes; and
+`lib/homedir.ad` resolves to `/root` under the private namespace's mapped root,
+so the gate mounts a fresh tmpfs there rather than measure a write that could
+only fail.
+
+Green alongside it, unchanged: `de_mouse_chrome.sh` 13 (measured against the
+PACKAGED bytes by `channel_runs_desktop.sh`), `de_appmenu_band.sh` 11,
+`de_focus_dismiss.sh` 14, `de_panel_conf_replace.sh` 17,
+`de_panel_conf_shipped.sh` 15, `wsys_desktop_z.sh` 12, `gates_are_private.sh`
+3.
+
 ### Running it
 
 ```
