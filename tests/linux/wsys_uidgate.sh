@@ -29,6 +29,27 @@ set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && cd .. && pwd)"
 cd "$PROJ_ROOT"
 
+# WHY THIS GATE DOES *NOT* USE tests/linux/private_ns.sh
+# ======================================================
+# Every other host-side wsys gate now re-execs itself inside a private mount
+# namespace so that its writes cannot reach the machine (the reason is written
+# up in that file). This one must not, and the reason is its SUBJECT.
+#
+# The namespace is only obtainable via `unshare --map-root-user` --
+# `--map-current-user` leaves the process with CapEff 0, measured -- so inside
+# it geteuid() is 0. user/linux-wsys.c branches on exactly that, at :1207 (a
+# euid-0 caller may attach to a segment it does not own) and at :1843 (the uid
+# asking IS geteuid()). A gate whose whole question is "which uid may open
+# which window" cannot be run by a process pretending to be root: it would
+# still print its passes, and they would be about the wrong uid. That is the
+# success-shaped answer NORTH_STAR.md names.
+#
+# It already takes the care it can: every arm sets $HAMWSYS to a path under
+# its own $W, and seg_check below refuses the shm_attach fallback to /dev/shm
+# and /tmp rather than letting a private window system pass for the real one.
+# What remains is that wsysd's own writes land in this machine's namespace.
+# Run it alone, or in the VM, which is what its own SKIP path suggests.
+
 fail=0
 note() { printf '%s\n' "$*"; }
 ok()   { printf '  ok   %s\n' "$*"; }
