@@ -642,6 +642,39 @@ barh() {   # barh <log> <marker>
                    inb && NF >= 6 && $3 == 0 && $6 == 100 {print $5; exit}' \
         "$1" | tr -d '\r'
 }
+# AND WHETHER ANY OF IT IS ON THE SCREEN. Field 8 of the ctl line is `visible`
+# (user/linux-wsys.c snap_win_ctl: "<wid> <x> <y> <w> <h> <z> <decorate>
+# <visible> <proto> …"), and until this was added NOTHING in this file read it.
+#
+# THAT WAS NOT A THEORETICAL HOLE. Measured offscreen on the real desktop
+# (tree wsysd + hamdesktop + hampanelscene, this branch): open the Applications
+# menu, then set `visible 0` on all three windows -- which is the state a
+# withdrawn window is left in, geometry and enumeration intact -- and the ctl
+# block reads
+#
+#   2 0 0 1280 800  -1 0 0 1 82 …      (the wallpaper)
+#   3 0 0 1280 206 100 0 0 1 49 …      (the top bar, GROWN, invisible)
+#   4 0 774 1280 26 100 0 0 1 45 …     (the taskbar)
+#
+# while the framebuffer is 100.0% one flat colour: the compositor's clear
+# colour, no wallpaper, no panel, no menu card, nothing but the cursor. The
+# verdict below, run verbatim over that log, printed
+#
+#   lupd: PASS THE UPDATED MACHINE RUNS THE NEWER CODE: a real click on the
+#   Applications button opened the menu (the panel window grew 26 -> 206 px)
+#
+# about a machine whose screen is BLANK. Height alone is a proxy for "the menu
+# opened" and it survives the desktop disappearing, which is exactly the
+# success-shaped answer NORTH_STAR.md forbids. It is a proxy for the same
+# reason it was chosen -- it is what the guest can print without a display --
+# so the fix is not to drop it but to demand the OTHER field the same line
+# already carries. This can only ever turn a PASS into a FAIL.
+barvis() {   # barvis <log> <marker> -- the top bar's `visible` flag
+    awk -v m="$2" 'index($0, m) {inb=1; next}
+                   inb && index($0, "WINS-END") {exit}
+                   inb && NF >= 8 && $3 == 0 && $6 == 100 {print $8; exit}' \
+        "$1" | tr -d '\r'
+}
 statefield() {   # statefield <log> <marker> <field>
     grep -aA1 -F "$2" "$1" | tail -1 | tr -d '\r' |
         awk -v f="$3" '{for (i = 1; i < NF; i++) if ($i == f) print $(i+1)}'
@@ -755,8 +788,13 @@ P3WINS="$(statefield "$LOG" '[lupd] p3 STATE-BEFORE:' windows)"
 P3LIST="$(awk 'index($0, "[lupd] p3 WINS-BEFORE") {inb = 1; next}
                inb && index($0, "WINS-END") {exit}
                inb && NF >= 6 && $1 ~ /^[0-9]+$/ {printf "(%s) ", $0}' "$LOG" | tr -d '\r')"
-if [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ]; then
-    echo "lupd: PASS THE UPDATED MACHINE RUNS THE NEWER CODE: a real click on the Applications button opened the menu (the panel window grew $B3BEFORE -> $B3AFTER px)"
+B3VIS="$(barvis "$LOG" '[lupd] p3 WINS-AFTER')"
+if [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ] &&
+   [ "${B3VIS:-0}" = 1 ]; then
+    echo "lupd: PASS THE UPDATED MACHINE RUNS THE NEWER CODE: a real click on the Applications button opened the menu (the panel window grew $B3BEFORE -> $B3AFTER px, and it is visible)"
+elif [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ]; then
+    echo "lupd: FAIL THE MENU OPENED ONTO A SCREEN NOBODY CAN SEE: the panel window grew $B3BEFORE -> $B3AFTER px, so the click was routed and the panel reacted, but the top bar's own ctl line says visible='${B3VIS:-absent}'. A withdrawn window keeps its geometry and its place in the window table; it is simply not composited. Windows present: [${P3LIST:-none}]. The person in front of this machine has no desktop."
+    fail=1
 elif [ -z "$B3BEFORE" ]; then
     echo "lupd: FAIL THE UPDATE LANDED AND THE DESKTOP DID NOT COME UP. The bytes arrived (see the digest above) and the compositor is running with ${P3WINS:-?} windows, but NONE of them is the top bar (a full-width window at y=0, z=100), so there is no Applications button to click. Windows present: [${P3LIST:-none}]. What the channel is serving is not a working desktop."
     fail=1
