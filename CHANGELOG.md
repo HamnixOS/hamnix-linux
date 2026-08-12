@@ -20,6 +20,19 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
+### The Applications menu no longer downgrades itself permanently after an update
+
+If you clicked Applications after a window-system update, the menu could not
+open — correctly, and it now tells you so. But it also recorded that the menu
+program was **broken**, and that record sat on your disk and **survived the
+reboot**. From then on the Applications button quietly used an older, plainer
+dropdown, forever. The restart that fixed everything else did not fix this one,
+and because the older dropdown does open, nothing looked wrong.
+
+The program now knows the difference between "I was refused because the window
+system changed underneath me" and "I am broken", because it asks its own
+experience instead of reading a note left on disk.
+
 ### X programs work again — including the browser
 
 Anything that runs through X — Firefox above all — stopped the instant it
