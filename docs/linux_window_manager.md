@@ -850,7 +850,103 @@ agents planting into `distro.ext4` at once destroy each other's runs silently.
   means either halving the per-connection window budget this pass just doubled
   or taking the device's window table to 256.
 
+  **CLOSED, TWICE OVER — see §8d.** `MAXCONN` went to 16 (table to 256), and
+  has since gone to **32** with the table at **512** for the case 16 could not
+  hold: two Firefoxes and two namespaces' Xwayland.
+
+## 8d. Two browsers — and the ceiling that was really in the way
+
+`MAXCONN` 16 did not hold two browsers, and HANDOFF named it as the next
+ceiling on the arithmetic 8 + 8 + 2 = 18. Two of those numbers were measured
+and one was guessed. Driven, with the real programs
+(`tests/linux/wsyswl_two_browsers.sh`, 24 PASS, offscreen):
+
+| program | Wayland connections |
+|--|--|
+| `firefox-esr` | **8** — content, GPU and utility processes |
+| `chromium` | **2** — browser + GPU process |
+| `Xwayland` | **1** per namespace, rootful or rootless, whatever is behind it |
+
+So Firefox + Chromium is **ten**, and would have fitted. The case that does not
+is the one a namespaced distribution makes ordinary: a Firefox in the native
+root and a Firefox inside `enter debian { … }` — really 8 + 8 — and then the
+two namespaces' Xwayland are 17 and 18.
+
+### The memory was never being spent on anything
+
+`MAXWIN >= MAXCONN * WINPERCONN` takes 32 connections to 512 rows, which the
+previous pass measured at **36.21 MiB resident** and refused on that number.
+The measurement was right and its cause was not the table. `shm_attach` ran
+
+```c
+memset(shm, 0, sizeof *shm);
+```
+
+over a segment `ftruncate(2)` had just handed it out of a **fresh tmpfs file** —
+bytes the kernel had already promised read as zero and had allocated nothing
+for. The memset's whole effect was to fault in and dirty every page of a window
+table with no windows in it. Removed (see *the zeroes we do not write* in
+`user/linux-wsys.c`), the table becomes what the paint pool beside it already
+was: address space, with residency proportional to the windows that exist.
+
+| | apparent | resident, no windows open |
+|--|--|--|
+| 256 rows, `MAXCONN` 16, before | 18.17 MiB | **18,608 KiB** |
+| 256 rows, `MAXCONN` 16, after | 18.17 MiB | **1,024 KiB** |
+| 512 rows, `MAXCONN` 32 | 36.21 MiB | **2,048 KiB** |
+| 512 rows, three browsers and two namespaces running | 36.21 MiB | **2,252 KiB** |
+
+A row holding a window still costs its 74,164 bytes. The ~4 KiB-a-row floor is
+`win_find` and the `/dev/wsys/windows` reader scanning for `used`, which is the
+first word of a row — one page of every row touched by a scan. 4 KiB against
+74 KiB, an 18x reduction and not an infinite one.
+
+A **shared pool** of rows with a per-connection cap was the alternative and was
+rejected: it trades an invariant that is arithmetic and checkable from source
+for a policy whose answer to exhaustion is that a client's guaranteed budget
+stops being guaranteed and starts depending on its neighbours.
+
+### `DEVTAB_MAX` — the fifth ceiling written down twice, and the real one
+
+Raising `MAXCONN` and then measuring instead of trusting a green suite found
+that 32 clients gave `conns 32` and **`windows_high_water 16`**.
+`user/linux-syscalls.c`'s per-process synthetic-device table was **64** entries
+and `wsyswl` holds four per window — `<wid>/draw/ctl`, `keys`, `pointer`,
+`event` — so **sixteen windows was the ceiling of the whole machine**, with 240
+rows of the window table free. `MAXWIN >= MAXCONN * WINPERCONN` had been
+arithmetic over an unreachable number since it was written.
+
+It is the worst-behaved of the five (`BB_SLOTS` 3, `BB_SLOTS` 8, `wsysd`'s own
+array at 32, `waitset` at 16, this) because **it fails as somebody else's
+limit**: what a person sees is *no wsys window could be opened for this
+surface*, which sends them to the one table that has room.
+
+* `DEVTAB_MAX` is **2112**, derived — 4 files per window × `WSYS_MAX_WINDOWS`
+  512 + 64 — and `wsyswl_conn_ceiling.sh` re-derives it from both files.
+* Exhaustion **names itself** on stderr, with the constant and the file to
+  edit, and `win_open`'s device refusal gets its own counter,
+  `newwindow_refused`.
+* `devtab_find` is called on every read, write, lseek, close and dup, and
+  scanned the whole table on a **miss** — the common case, since most fds are
+  ordinary files. It is an `fd -> slot` index now, so the table is *cheaper on
+  the hot path than the 64-entry one it replaces* as well as 32× larger. The
+  map is a hint, always re-validated against the slot's own `used`/`fd`, which
+  is what makes stale entries safe to leave behind on close.
+
+### The segment
+
+`WSYS_VERSION` 6 → 7. `struct wwin` is byte-for-byte unchanged and every field
+of `struct wshm` before `win[]` is frozen, so a v6 and a v7 build agree about
+where windows 0..255 are and disagree only about how many follow. A v6 binary
+on a v7 segment maps the first 19,052,956 bytes of a 37,972,380-byte file,
+re-inits what it mapped, and cannot reach rows 256..511 — its array bound is
+compiled in — and the next v7 attacher punches the whole segment before
+anything reads a row.
+
 ### How to run it
+
+The compositor is told which display it manages, by name, from outside the
+namespace — the same way `xsnarfd` is:
 
 The compositor is told which display it manages, by name, from outside the
 namespace — the same way `xsnarfd` is:

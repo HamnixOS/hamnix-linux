@@ -345,7 +345,14 @@ if command -v weston-simple-shm >/dev/null; then
     else
         bad "only $HW of $WANT windows were created; ${NOWIN:-?} surfaces were dropped for want of a window"
     fi
-    if [ "${NEWWIN:-0}" = 0 ]; then
+    # THE COUNTER MUST EXIST, not merely read zero. An absent counter and a
+    # counter reading 0 are the same empty string to `st`, so a build without
+    # this counter at all -- every build before it was added -- would have
+    # passed this line. Caught by running this file against a reverted tree,
+    # which is the only reason it is written this way.
+    if [ -z "${NEWWIN:-}" ]; then
+        bad "the server publishes no newwindow_refused counter at all -- 'the device refused a window' and 'this build cannot tell you' must not look alike"
+    elif [ "$NEWWIN" = 0 ]; then
         ok "newwindow_refused is 0 -- the device never turned a window down, so the ceiling that is left is a real one"
     else
         bad "newwindow_refused is $NEWWIN: the device refused a window, which at 16 meant the RUNTIME's file table and not this device"
