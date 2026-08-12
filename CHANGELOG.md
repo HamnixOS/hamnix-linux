@@ -20,7 +20,29 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-*(nothing right now — 1.0.20 carries everything that had landed.)*
+### The desktop now SAYS a restart is needed, instead of just not opening
+
+1.0.20 shipped the safe half of this: after a window-system update your desktop
+survives whole, and anything you start afterwards declines to open rather than
+wiping the screen. But the explanation only reached the console, so on screen it
+looked like the click did nothing at all.
+
+Now an amber card appears under the panel: **"The window system was updated.
+Restart before opening new apps. Windows already open are safe. Click this
+notice to dismiss it."** Clicking it dismisses it.
+
+The notice cannot appear unless a real version refusal happened — the mark that
+raises it is written in exactly one place, inside the same function that prints
+the refusal, past the same guard. A notice that fired when nothing was refused
+would be worse than no notice.
+
+Measured on a real UEFI+ext4 disk, asserted on pixels rather than a log line:
+the card's colour fills 82% of its rectangle when raised and 0% before and after
+dismissal. The refusal logic itself is unchanged.
+
+**One limit worth stating plainly:** updating *from* the version that shipped
+this cannot show the notice, because the panel that survives an update is the
+old one. The first update this helps is the one after it.
 
 ## 1.0.20
 
