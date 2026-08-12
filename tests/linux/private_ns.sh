@@ -218,9 +218,34 @@ priv_ns_reexec() {
     # this falls back to the one-id map and SAYS which one it got, because a
     # gate whose client needs a second id must be able to tell the two cases
     # apart rather than read a failure as a finding.
-    local mapargs=(--map-root-user)
+    #
+    # NESTING IS THE SECOND CASE. /etc/subuid is about the HOST's user, and
+    # inside a namespace `id -un` is root, which has no line in it -- so
+    # --map-auto fails for a gate re-exec'd from inside another namespace (the
+    # proof gates run their experiments that way). But a process that is root
+    # in the namespace it is leaving holds CAP_SETUID there, and may therefore
+    # write a child's id map directly for every id it already owns. So the
+    # fallback MIRRORS the current /proc/self/uid_map and gid_map: each range
+    # this namespace has, mapped to itself in the child. Nothing is gained and
+    # nothing is lost -- which is the point.
+    local mapargs=() mirror=() inner outer count
     if unshare --user --map-root-user --map-auto --mount true 2>/dev/null; then
-        mapargs+=(--map-auto)
+        mapargs=(--map-root-user --map-auto)
+    else
+        while read -r inner outer count; do
+            [ -n "${count:-}" ] || continue
+            mirror+=(--map-users="$inner:$inner:$count")
+        done </proc/self/uid_map
+        while read -r inner outer count; do
+            [ -n "${count:-}" ] || continue
+            mirror+=(--map-groups="$inner:$inner:$count")
+        done </proc/self/gid_map
+        if [ "${#mirror[@]}" -gt 2 ] && \
+           unshare --user "${mirror[@]}" --mount true 2>/dev/null; then
+            mapargs=("${mirror[@]}")
+        else
+            mapargs=(--map-root-user)
+        fi
     fi
     exec unshare --user "${mapargs[@]}" --mount -- \
         /usr/bin/env PRIV_NS_ACTIVE=1 \

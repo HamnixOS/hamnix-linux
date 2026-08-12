@@ -91,11 +91,21 @@ cd "$PROJ_ROOT"
 
 # THE MACHINE THIS RUNS ON IS NOT SCRATCH.
 #
-# THE MOST VALUABLE ONE: scripts/hamlinux_packages.py runs this gate before it writes
-# index.json, so it runs on every publish, and it sets no HAMWSYS at all -- it takes
-# linux-wsys.c's /srv, then the /dev/shm/hamnix-wsys fallback, which this machine's
-# /dev/shm is holding right now. Its own work directory is deliberately under build/
-# and not /tmp (see the note above), so the fresh tmpfs cannot take it away.
+# It runs on EVERY PUBLISH -- scripts/hamlinux_packages.py runs it before it writes
+# index.json -- which is why it is isolated even though its exposure turned out to
+# be smaller than the record claimed. tests/linux/gates_are_private.sh used to say
+# this gate "sets no HAMWSYS at all -- it takes linux-wsys.c's /srv, then the
+# /dev/shm/hamnix-wsys fallback". THAT WAS WRONG, and it was measured wrong: this
+# gate starts no compositor itself, it hands the unpacked binaries to
+# tests/linux/de_mouse_chrome.sh, which pins HAMWSYS, HAMWSYS_BB, HAMWSYS_IMG and
+# HAMFB_FILE into its own $WORK (:146-150) and is itself already isolated. A witness
+# desktop on the DEFAULT segment, run beside this gate with the isolation switched
+# OFF, saw its window table unchanged -- the contamination the record predicted does
+# not happen. Isolated anyway, because "the delegate happens to pin its segment" is a
+# property of the delegate that this gate does not control.
+#
+# Its own work directory is deliberately under build/ and not /tmp (see the note
+# above), so the fresh tmpfs cannot take it away.
 #
 # The names that matter are compiled into the binaries, not written here, so no
 # care taken in this script can move them; the containment is the namespace.
