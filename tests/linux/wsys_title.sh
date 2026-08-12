@@ -184,7 +184,13 @@ nonbg() { python3 "$NONBGPY" "$HAMFB_FILE" "$FBW" "$1" "$2" "$3" "$4" "$5"; }
 #           differs from the bar), so `ingap` has a denominator.
 #   ingap   pixels INSIDE that span that are exactly the bar colour -- the
 #           counter-assertion to `black`: not merely "no black" but "the bar,
-#           positively, in the gaps".
+#           positively, in the gaps". SAID PLAINLY: this one PASSES on the
+#           defect (47% of the span was still bar colour with a black box
+#           round every letter), and a threshold tuned until it did not would
+#           be a threshold tuned to this font at this size. It is here so that
+#           "no pixel is #000000" cannot be satisfied by painting the gaps
+#           some third colour; `darker` and `black` are the two that
+#           discriminate, and the reverted run below shows which is which.
 #   darkest the darkest colour in the band, reported so a failure names what
 #           the letters are actually sitting on.
 GAPPY="$WORK/gap.py"
@@ -412,8 +418,13 @@ info "the lightest pixel in the band is #$LIGHT (the chrome's ink is #f0f0f5)"
 echo "title: === 2b. AND BETWEEN THE LETTERS: the bar, not a black box"
 # ---------------------------------------------------------------------------
 # The gate's hole and the defect's shape. Everything above asks about the ink;
-# this asks about the gaps. Reverted, the run above is unchanged and this says
-# "1173 pixels are darker than the bar, darkest #000000".
+# this asks about the gaps. With the fix reverted every assertion above is
+# still PASS, byte for byte, and this section says:
+#
+#   the focused bar (#5577dd): 432 px darker than the bar, 182 pure black,
+#       53px ink span holding 400 bar-coloured px, darkest #000000
+#   the unfocused bar (#404040): 100 px darker than the bar, 72 pure black,
+#       27px ink span holding 205 bar-coloured px, darkest #000000
 gaps_are_bar "the focused bar" $TX $BANDY $TW $BANDH "$BAR"
 
 # ---------------------------------------------------------------------------
