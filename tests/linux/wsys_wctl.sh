@@ -132,6 +132,10 @@ WCTLRC="$(printf '%s' "$OUT" | sed -n 's/.*wctlrc=\(-\{0,1\}[0-9]\{1,\}\).*/\1/p
 CTL="$(printf '%s' "$OUT" | sed -n 's/.*ctl=\[\([^]]*\)\].*/\1/p')"
 POOL="$(printf '%s' "$OUT" | sed -n 's/.*pool=\[\([^]]*\)\].*/\1/p')"
 PROTO="$(printf '%s' "$CTL" | awk '{print $9}')"
+# Field 10 is scene_gen -- user/linux-wsys.c documents the ctl line as
+#   "<wid> <x> <y> <w> <h> <z> <decorate> <visible> <proto> <scene_gen>
+#    <backbuffer_gen> <image_gen>"
+SGEN="$(printf '%s' "$CTL" | awk '{print $10}')"
 SLOTS="$(printf '%s' "$POOL" | sed -n 's/^slots \([0-9]\{1,\}\)\/.*/\1/p')"
 
 # THE WRITE SUCCEEDS IN BOTH WORLDS -- reported, never asserted on alone.
@@ -147,6 +151,35 @@ else
     bad "THE NEGOTIATION NEVER LANDED: <wid>/ctl reports proto=${PROTO:-?}, not 2."\
         "hamui believes it is a v2 client and the window system has not heard of it."\
         "(ctl: $CTL)"
+fi
+
+# NEGOTIATING v2 MUST NOT COUNT AS DAMAGE, and this is a POSITIVE statement
+# about the thing itself rather than an inference from a path that happens to
+# paint.
+#
+# The wctl work first shipped a `v->scene_gen++` inside the `version` verb,
+# justified in a comment as a damage event -- which reads perfectly reasonably,
+# and is how it will be reintroduced if nothing here stops it. It is not
+# harmless: a v2 window's scene read is a 0-byte SUCCESS only while scene_gen
+# is 0, and becomes an EPERM refusal once it moves, so user/wsysd.ad's
+# paint_window() bails on the scene read BEFORE it ever reaches
+# paint_backbuffer. The window is negotiated, the pool has a slot, and nothing
+# is drawn.
+#
+# WHY THIS AND NOT THE PAINT ASSERTION BELOW. The paint one is real and stays,
+# but it did NOT fail reliably on the defective tree -- a packaged browser
+# painted 30,867 pixels with the bug present. This reads the counter the defect
+# moves, so it fails EVERY time on a tree carrying it and never on one that is
+# not. `strings`, sizes and symbols cannot see a deleted statement; a file the
+# window system publishes can.
+if [ "${SGEN:-}" = "0" ]; then
+    ok "AND NEGOTIATING v2 IS NOT DAMAGE: ctl reports scene_gen=0, so the v2 scene read stays a 0-byte success and paint_window reaches the backbuffer"
+else
+    bad "NEGOTIATING v2 BUMPED scene_gen TO ${SGEN:-?}: a v2 window's scene read"\
+        "is a 0-byte success only while scene_gen is 0, so user/wsysd.ad's"\
+        "paint_window() will bail on the scene read before paint_backbuffer and"\
+        "the window will never be drawn. Look for a scene_gen++ in the wctl"\
+        "version verb in user/linux-wsys.c. (ctl: $CTL)"
 fi
 
 # THE POOL IS READ AFTER A BLIT, and the proto above BEFORE one -- see the
