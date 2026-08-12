@@ -16,7 +16,7 @@
 set -uo pipefail
 ROOT=/home/david/hamnix-linux/.claude/worktrees/agent-ad4474044a63d6c8a
 cd "$ROOT"
-BIN=/home/david/.hamnix-build/vk-present-readback/bin
+BIN="${FPS_BIN_DIR:-/home/david/.hamnix-build/vk-present-readback/bin}"
 ICD=/usr/share/vulkan/icd.d/nvidia_icd.json
 GEOM="${GEOM:-1280x800}"
 SETTLE="${SETTLE:-6}"
