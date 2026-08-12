@@ -157,10 +157,22 @@ echo 'rc.de-user: namespace ready'
 #
 # WHAT IS STILL TRUE. The window table itself is still world-writable and has
 # to be, so a bypasser can still retitle another client's window, scribble its
-# scene or inject into its key ring. That one is not closeable with a file
-# mode: it needs a mapping per owner-uid, or the window table moving behind an
-# RPC to wsysd. wsys_bypass.sh asserts it as a measurement rather than leaving
-# it as a caveat, so the day it is fixed the test will say so.
+# scene or inject into its key ring -- wsys_bypass.sh now drives all three as
+# measurements, read back through the protocol, so the day any of them closes
+# the test says so.
+#
+# And which of the two recorded fixes actually closes it, now measured rather
+# than left open: NOT a mapping per owner-uid. This line is the reason -- it
+# drops the WHOLE session to uid 1001, so the terminal, the browser and a
+# malicious download are all uid 1001, and Unix file permissions cannot tell
+# two processes of one uid apart. A per-uid mapping would only re-draw the
+# root-vs-live boundary the 0644 chrome segment already draws; it does nothing
+# about one uid-1001 app spoofing another, which is the attack a real desktop
+# faces. wsys_bypass.sh's same-uid case proves it lands. The only fix that
+# distinguishes two same-uid processes is the window table moving behind an RPC
+# to wsysd, which authenticates each request's peer pid against the window's
+# owner -- a subsystem, not an edit, and THE SPLIT in user/linux-wsys.c records
+# why a partial version (a title-only RPC) is unsound and must not be shipped.
 echo 'rc.de-user: dropping the session to regular user live (uid 1001)'
 setuid 1001
 

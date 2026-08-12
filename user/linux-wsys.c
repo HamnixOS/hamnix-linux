@@ -832,13 +832,59 @@ static char chrome_path[576];
  * retitle another client's window, scribble its scene, inject into its key
  * ring — and the same is true of the THIRD mapping, /srv/wsys.bb, which holds
  * the v2 backbuffers and is 0666 for exactly the same reason: a client of any
- * uid has to blit its own pixels into it.  Neither is closeable while one
- * shared mapping has to be writable by every uid; it needs either a mapping
- * per owner-uid or an RPC compositor, and both are a different change from
- * this one.  What IS closed is the system
- * chrome: after this, a bypasser cannot lock the screen, queue a spawn, post a
- * notification, drive the app menu, or lie about the display geometry, because
- * the kernel refuses it PROT_WRITE on the file those live in.
+ * uid has to blit its own pixels into it.  tests/linux/wsys_bypass.sh now
+ * drives ALL THREE of those attacks as measurements, each read back through
+ * the protocol, not just the retitle.
+ *
+ * AND WHICH OF THE TWO RECORDED FIXES ACTUALLY CLOSES IT — the measurement
+ * that decides it, because the answer was NOT the neutral "either would do"
+ * this comment used to carry.  The two candidates were "a mapping per
+ * owner-uid" and "the table behind an RPC to wsysd":
+ *
+ *   A MAPPING PER OWNER-UID DOES NOT CLOSE THE ATTACK THAT MATTERS.
+ *   /etc/rc.de-user drops the WHOLE session to uid 1001 — the terminal, the
+ *   browser, and a malicious download are all uid 1001 (only wsysd and the
+ *   system chrome stay root).  Unix file permissions are uid-granular: the
+ *   kernel cannot tell two processes of one uid apart, so no file mode and no
+ *   per-uid segment can stop one uid-1001 program from rewriting another
+ *   uid-1001 program's row.  wsys_bypass.sh's same-uid case proves it — a
+ *   uid-1001 attacker injects a key into a uid-1001 victim's ring, find-by-wid,
+ *   separate pid.  All a per-uid split would buy is the root-vs-live boundary
+ *   the 0644 chrome segment ALREADY draws, at the cost of every cross-uid
+ *   reader (the panel taskbar reads every window's title) needing an
+ *   aggregation step.  It is not the fix.
+ *
+ *   ONLY AN RPC AUTHORITY CAN.  The one thing that distinguishes two same-uid
+ *   processes is a server that reads each request's peer credentials
+ *   (SO_PEERCRED gives the sender's pid) and checks them against the window's
+ *   owner — which is exactly what devwsys gets for free, because there the
+ *   table is KERNEL memory and the protocol is the only way in.  Ported, that
+ *   means wsysd owning the window table in private memory and every mutation
+ *   arriving as an authenticated message.
+ *
+ * WHY IT IS NOT DONE IN THIS PASS, and why a partial version would be worse
+ * than the documented hole.  Two things make it a subsystem, not an edit:
+ *   (1) the input/commit HOT PATH.  A client writes its own scene and reads
+ *       its input rings thousands of times a second through shared memory with
+ *       a futex wake (see `inputgen`); a round-trip to wsysd on each would put
+ *       the compositor on every client's per-frame and per-keystroke path.  A
+ *       sound design is a HYBRID — identity and lifecycle (create, own, title,
+ *       geometry, z) authenticated through the channel; per-frame pixels and
+ *       rings still in shared memory but in a region the authority hands out
+ *       at create time — which is more than a mechanical move.
+ *   (2) a title-only RPC is UNSOUND, which rules out the tempting small start.
+ *       wsysd would authenticate "set window W's title" by comparing the
+ *       sender pid to win[W].pid — but win[W].pid lives in this same 0666
+ *       table and is itself spoofable, so the check is only as trustworthy as
+ *       the ownership record, and moving THAT into the authority is moving the
+ *       whole table.  It is all of it or none, and half of it is a gate that
+ *       looks shut and is not.
+ *
+ * So this pass lands the measurement and this design and does NOT half-build
+ * the access control.  What IS closed, and by the kernel rather than by an if,
+ * is the system chrome: a bypasser cannot lock the screen, queue a spawn, post
+ * a notification, drive the app menu, or lie about the display geometry,
+ * because the kernel refuses it PROT_WRITE on the 0644 file those live in.
  * tests/linux/wsys_bypass.sh measures both halves of that sentence.
  * ================================================================== */
 static int chrome_attach(void)
@@ -1458,10 +1504,13 @@ static struct wwin *win_alloc(int32_t pid)
  * then the thing that turns a would-be SIGSEGV on a read-only page into an
  * EPERM the caller can print.  For the WINDOW TABLE, which has to stay
  * world-writable or an unprivileged session is blind, these checks are still
- * the only gate there is: a bypasser can retitle another client's window or
- * scribble its scene, and closing that needs a mapping per owner-uid or an RPC
- * compositor.  Named here so it is not mistaken for solved -- the same reason
- * the limit it replaces was named in etc/rc.de-user.
+ * the only gate there is: a bypasser can retitle another client's window,
+ * scribble its scene or inject into its key ring, and — as THE SPLIT's "WHAT
+ * IS STILL NOT CLOSED" now records from measurement — closing that needs the
+ * table behind an RPC to wsysd, NOT a mapping per owner-uid (the whole session
+ * is one uid, so a per-uid mapping separates nothing that matters).  Named
+ * here so it is not mistaken for solved -- the same reason the limit it
+ * replaces was named in etc/rc.de-user.
  *
  * FAIL CLOSED.  If the segment owner could not be established (no fstat, no
  * attach) hostowner() answers 0, which refuses chrome verbs rather than
