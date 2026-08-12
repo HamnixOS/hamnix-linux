@@ -900,8 +900,26 @@ def base_module_install_hook(pkg, staged, kver, depname):
         # exiting 0 about it.
         "cat '%s' '%s' > '%s.new'" % (depname, dep, dep),
         "mv '%s.new' '%s'" % (dep, dep),
-        "echo '[%s] %d modules refreshed; %s put in front of the machine's "
-        "table'" % (pkg, len(staged), depname),
+        # NO APOSTROPHE. This line used to read "...in front of the machine's
+        # table", and hamsh takes a single quote inside a single-quoted string
+        # as the CLOSING quote: the rest of the file became one unterminated
+        # token, `lex_line` failed, and NOTHING IN THE HOOK RAN -- not the cat,
+        # not the mv. Worse, the `\nexit\n` hpm appends to every hook wrapper
+        # for exactly this eventuality was swallowed by the same unterminated
+        # quote, so the spawned hamsh dropped to its interactive prompt on a
+        # stdin nobody was feeding and `hpm update` NEVER RETURNED. Measured on
+        # a real installed disk (tests/linux/installed_update_modules.sh):
+        #
+        #   hpm: extracted 35 files
+        #   hpm: running hook install.hamsh
+        #   hamsh: lexical error (unterminated quote or token-limit exceeded)
+        #   hamsh$          <- pid 1's update, wedged until the host killed it
+        #
+        # The check in write_pkg below now refuses to publish any hook with an
+        # odd number of quotes on a line, so this cannot be reintroduced by
+        # typing an ordinary English possessive into a message.
+        "echo '[%s] %d modules refreshed; %s is now in front of the table "
+        "this machine had'" % (pkg, len(staged), depname),
         "exit 0",
         "",
     ]
@@ -1845,6 +1863,30 @@ def write_pkg(outdir, name, version, description, files, depends,
             if inside.startswith("bin/"):
                 os.chmod(dest, 0o755)
         for hook_name, body in sorted((hooks or {}).items()):
+            # A HOOK THAT DOES NOT LEX WEDGES THE MACHINE THAT INSTALLS IT.
+            # hamsh has no escape inside a single-quoted string, so one stray
+            # apostrophe makes the rest of the file a single unterminated
+            # token: lex_line fails, NOTHING in the hook runs, and the
+            # `\nexit\n` hpm appends to the wrapper is swallowed with it -- so
+            # the spawned shell falls through to its interactive REPL on a
+            # stdin nobody is feeding and `hpm update` never returns. That is
+            # not a package that installs badly; it is a package that stops
+            # the machine, and it shipped: hamnix-drivers-base 1.0.13 said
+            # "in front of the machine's table" in an echo.
+            #
+            # Refusing here is the same shape as the closure and duplicate
+            # refusals below: a build error nobody sees beats an update that
+            # hangs on every machine that takes it.
+            for lineno, line in enumerate(body.splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if line.count("'") % 2:
+                    raise SystemExit(
+                        "hamlinux_packages: %s's %s line %d has an odd number "
+                        "of single quotes, so hamsh cannot lex it and the "
+                        "hook would wedge every machine that installs this "
+                        "package:\n    %s"
+                        % (name, hook_name, lineno, line))
             hpath = os.path.join(top, hook_name)
             with open(hpath, "w") as fh:
                 fh.write(body)

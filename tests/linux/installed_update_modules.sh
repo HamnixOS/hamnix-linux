@@ -290,11 +290,40 @@ fi
 # =========================================================================
 # 3. The image root: 8021q ON THE DISK and WITHHELD from the table.
 # =========================================================================
+# WHY THE MODULE UNDER TEST IS STAGED "EXTRA" AND NOT BOOT-LOADED.
+# linuxinit loads /etc/modules by ABSOLUTE PATH before it switches to the real
+# root -- so it is the INITRAMFS's copy of that file that governs an installed
+# machine's boot, and a module listed there is in the kernel before any test
+# runs. (Measured: the first version of this gate deleted vfat.ko from the disk
+# and still found `vfat 24576 0 - Live` in /proc/modules, loaded off the
+# initramfs.) Resolving a NAME was therefore never exercised for any module in
+# the image's boot list, which is every module hamnix-drivers-base carries.
+#
+# So the image is built with $MOD taken OUT of the boot list and staged through
+# HAMLINUX_MODULES_EXTRA instead: on disk, in modules.dep, loaded by nothing.
+# The list is READ from scripts/hamlinux_image.sh rather than copied here, so a
+# driver added to the image cannot silently drop out of this run.
+WANTMODS="$(python3 - <<'PY'
+import importlib.util, os
+spec = importlib.util.spec_from_file_location(
+    "hp", os.path.join(os.getcwd(), "scripts/hamlinux_packages.py"))
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(" ".join(m.image_want_modules()))
+PY
+)"
+case " $WANTMODS " in
+    *" $MOD "*) ;;
+    *) echo "FAIL: $MOD is not in the image's boot module list, so this gate" >&2
+       echo "      is not measuring a module hamnix-drivers-base carries." >&2
+       exit 1 ;;
+esac
+BOOTMODS="$(printf '%s\n' $WANTMODS | grep -vx "$MOD" | tr '\n' ' ')"
 if [ "${HAMLINUX_MODUPD_REUSE:-0}" = 1 ] && [ -f "$IMG/initramfs.cpio.gz" ]; then
     say "reusing the staged image root (HAMLINUX_MODUPD_REUSE=1)"
 else
-    say "staging the image root ($LATE on disk, withheld from modules.dep)"
-    HAMLINUX_JOBS="${HAMLINUX_JOBS:-4}" HAMLINUX_MODULES_LATE="$LATE" \
+    say "staging the image root ($MOD available but NOT boot-loaded; $LATE on disk, withheld from modules.dep)"
+    HAMLINUX_JOBS="${HAMLINUX_JOBS:-4}" HAMLINUX_MODULES="$BOOTMODS" \
+    HAMLINUX_MODULES_EXTRA="$MOD" HAMLINUX_MODULES_LATE="$LATE" \
         nice -n 15 scripts/hamlinux_image.sh >"$WORK/image.log" 2>&1 || {
         echo "FAIL image build"; tail -20 "$WORK/image.log"; exit 1; }
 fi
@@ -478,13 +507,17 @@ say "the original-install channel is served at $BASE (pid $HTTPD)"
 # the shipped table exists to repair. Both are files the distribution does not
 # own -- scripts/hamlinux_packages.py excludes them for exactly that reason.
 mkdir -p "$EXTRA$GDIR" "$EXTRA/etc"
-grep -v '/kernel/fs/fat/' "$IROOT/etc/modules" > "$EXTRA/etc/modules"
-if [ "$(grep -c . "$EXTRA/etc/modules")" -lt 20 ] ||
-   grep -q '/kernel/fs/fat/' "$EXTRA/etc/modules"; then
-    bad "could not build an /etc/modules without the fat pair"
+# The boot list, as the IMAGE wrote it -- this gate does not edit it, it asked
+# for an image built without $MOD in it. Checked, because if $MOD were in there
+# the boot would load it off the initramfs and boot 3 would prove nothing.
+if grep -q "/$MOD\.ko\$\|/$DEPMOD_\.ko\$" "$IROOT/etc/modules"; then
+    bad "the image's /etc/modules still lists $MOD or $DEPMOD_ -- the boot would load them and modprobe would be untested"
 else
-    ok "the machine's /etc/modules lists $(grep -c . "$EXTRA/etc/modules") modules and NEITHER $MOD nor $DEPMOD_ -- so only modprobe can load them"
+    ok "the image's /etc/modules lists $(grep -c . "$IROOT/etc/modules") modules and NEITHER $MOD nor $DEPMOD_ -- so only modprobe can load them"
 fi
+for k in "$KO" "$KODEP"; do
+    [ -f "$IROOT$k" ] || bad "$k is not staged in the image at all -- the machine would have nothing to lose"
+done
 STALE="kernel/fs/fat/$DEPMOD_-STALE-NOT-HERE.ko"
 sed "s|^kernel/fs/fat/$MOD\.ko: .*|kernel/fs/fat/$MOD.ko: $STALE|" \
     "$IROOT$DEPTBL" > "$EXTRA$DEPTBL"
@@ -786,10 +819,14 @@ for m in "$MOD" "$DEPMOD_" "$LATE"; do
     fi
 done
 P2KOLS="$(sect p2 KOLS-BEFORE)"
-if printf '%s\n' "$P2KOLS" | grep -q "$KO\$"; then
-    bad "$KO is still on the disk before the update -- the deletion did not take"
+# `ls` NAMES THE FILE IT COULD NOT OPEN, so "the path appears in the output" is
+# satisfied by the failure as well as by the listing -- the first version of
+# this check read `ls: open failed: <path>` as the file being present. Ask for
+# the refusal instead.
+if printf '%s\n' "$P2KOLS" | grep -qi "failed.*$KO\|no such.*$KO"; then
+    ok "$KO is NOT on the disk before the update: $(printf '%s\n' "$P2KOLS" | grep -i "$KO" | head -1)"
 else
-    ok "$KO is NOT on the disk before the update ($(printf '%s\n' "$P2KOLS" | grep -i 'no such\|open failed\|cannot' | head -1))"
+    bad "$KO is still on the disk before the update -- the deletion did not take: $(printf '%s\n' "$P2KOLS" | grep -i "$KO" | head -1)"
 fi
 P2MISS="$(sect p2 MISS)"
 if printf '%s\n' "$P2MISS" | grep -q 'miss status: 0'; then
