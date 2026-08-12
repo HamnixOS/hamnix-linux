@@ -1064,7 +1064,11 @@ def hamscene_icon_sheet(x: int32, y: int32, w: int32, h: int32):
 def hamscene_icon_slides(x: int32, y: int32, w: int32, h: int32):
     slide: Ptr[uint8] = cast[Ptr[uint8]]("#e8710a")
     barc: Ptr[uint8] = cast[Ptr[uint8]]("#ffffff")
-    stand: Ptr[uint8] = cast[Ptr[uint8]]("#5d4037")
+    # The stand is LIGHT, not the wood colour it started as: the desktop
+    # backdrop is a dark blue gradient and a dark brown tripod on it is
+    # invisible at 44x38 -- measured by looking at the render, which is how
+    # the owner will judge this.
+    stand: Ptr[uint8] = cast[Ptr[uint8]]("#cfd8dc")
     edge: Ptr[uint8] = cast[Ptr[uint8]]("#a0522d")
     bx: int32 = x + w / 10
     bw: int32 = (w * 4) / 5
