@@ -2579,6 +2579,18 @@ which stashes nothing on an already-committed change and exits happy),
 `de_panel_conf_replace.sh` scores **11 PASS / 6 FAIL** inside the namespace —
 the same score it scored before it was isolated.
 
+**And it refuses to come back.** `tests/linux/gates_are_private.sh` is the same
+shape as `channel_covers_image.sh`'s packaging rule: a host-side gate that
+starts the window system either isolates itself, or is named in that file's
+`EXEMPT` table **with a reason** — an unlisted one FAILS, with the two lines
+it needs printed in the failure. A stale exemption (a file that no longer
+exists, or one since converted) fails too, so the list cannot quietly become
+where unfinished things go to be forgotten. Both arms were demonstrated: a
+planted unisolated gate scores 2/1, an exemption pointing at a deleted file
+scores 1/2. It compiles nothing and runs in about a second, and it prints how
+many exemptions are still only `NOT YET CONVERTED` so the green is never
+mistaken for "all of them are private".
+
 #### The survey: every host-side gate, and whether it is private
 
 Isolated (verified at the score they held before): `de_panel_conf_replace` 17,
