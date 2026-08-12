@@ -276,8 +276,41 @@ ctlbuf:   Array[256, uint8]
 scenebuf: Array[16384, uint8]
 numbuf:   Array[24, uint8]
 inbuf:    Array[256, uint8]
-waitset:  Array[4, int32]
 inpath:   Array[256, uint8]            # HAMWSYSD_INPUT, see open_inputs
+
+# --- the wait set: WHAT WAKES THE COMPOSITOR --------------------------
+# This array was `Array[4, int32]`, was never written, and was passed with
+# nfds LITERALLY 0. So the main loop was a fixed 16 ms sleep that no input
+# could cut short, and input-to-pixel latency was measured at p50 8.9 ms /
+# p95 16.1 (tests/linux/de_fps_latency.sh, 150 trials) against a composite
+# that costs 0.6 ms and a pointer-only frame that costs 5 us. 93% of what a
+# person felt was this line.
+#
+# THE BOUND. One slot per input device (MAX_INPUT is 12 -- open_inputs scans
+# /dev/input/event0..15 and stops at 12) plus one for stdin, which is the only
+# keyboard a serial boot has. 13 rounded to 16, and 16 is checked against
+# sys_waitfds's own WAITFDS_MAX of 64 with room to spare; nothing here scales
+# with the number of CLIENTS, so this does not move when MAXCONN does.
+#
+# WHAT IS NOT IN IT, STATED RATHER THAN WORKED AROUND. A CLIENT REPAINT
+# CANNOT WAKE THIS LOOP. wsysd learns that a window changed by re-reading
+# /dev/wsys/<wid>/ctl and comparing a signature (frame_signature below), and
+# a snapshot file under /dev/wsys is "ready" by definition -- sys_waitfds
+# counts it ready without sleeping, which would turn this park into a spin.
+# The /dev/wsys thing that CAN be waited on is a per-window event RING, and
+# putting one in this set would be strictly worse than the tick it replaced:
+# a set holding a ring sleeps in the futex on `inputgen` and caps its poll at
+# 20 ms (user/linux-syscalls.c says so at length), and an evdev fd cannot
+# futex-wake anything -- so mixing the two would make INPUT wait up to 20 ms
+# instead of waking the loop at once. This set is therefore ALL ORDINARY FDS,
+# which is the one shape sys_waitfds answers with a single uncapped poll(2).
+# Client repaints keep the 16 ms fallback below, and that is a real remaining
+# cost: a window that redraws still waits up to a tick to be composited.
+WAITSET_CAP: uint64 = 16
+WAIT_FALLBACK_MS: int64 = 16           # the fallback tick, not the pacer
+waitset:  Array[16, int32]
+n_wait:   uint64 = 0
+probefd:  Array[1, int32]
 
 fb_fd: int32 = -1
 fbctl_fd: int32 = -1                   # persistent write fd to /dev/fbctl
@@ -2586,6 +2619,68 @@ def pump_keyboard():
         i = i + 1
 
 
+# --- building the wait set ------------------------------------------
+# AN FD GOES IN THE WAIT SET ONLY IF IT IS PROVED IT CAN PARK ON IT, and the
+# proof is run against the real sys_waitfds rather than reasoned about from
+# the path name. The failure being guarded is specific and this tree has paid
+# for it twice at one remove: poll(2) reports SOME descriptors readable
+# always, whatever is or is not pending -- /dev/null does (every offscreen
+# gate runs `wsysd </dev/null`, so stdin is exactly this), and so does a
+# regular file that has been read to its end. Putting one of those in the set
+# does not make the compositor faster; it makes the park return instantly,
+# for ever, and the loop becomes a busy spin that burns a core AND reports a
+# flattering latency while doing it.
+#
+# So: drain every input source, then ask for a ZERO-timeout wait on the one
+# fd. A drained fd that still answers "ready" is answering about itself and
+# not about any input, and it is left out. Three consecutive rounds are
+# required before an fd is written off, because a genuine event arriving in
+# the microseconds between the drain and the probe would otherwise disable a
+# real device permanently; a 125 Hz mouse cannot be ready on three
+# back-to-back probes, and the cost of being wrong in this direction is only
+# the old 16 ms tick.
+def fd_is_waitable(fd: int32) -> int32:
+    t: int32 = 0
+    while t < 3:
+        pump_input()
+        pump_keyboard()
+        probefd[0] = fd
+        if sys_waitfds(&probefd[0], 1, 0) <= 0:
+            return 1
+        t = t + 1
+    return 0
+
+
+def build_waitset():
+    n_wait = 0
+    nlie: int32 = 0
+    d: uint64 = 0
+    while d < n_input:
+        if n_wait < WAITSET_CAP and fd_is_waitable(in_fd[d]) != 0:
+            waitset[n_wait] = in_fd[d]
+            n_wait = n_wait + 1
+        else:
+            nlie = nlie + 1
+        d = d + 1
+    # stdin last: a serial console has no evdev node at all and is the only
+    # keyboard a headless boot has (pump_keyboard). Under `</dev/null` the
+    # probe above rejects it, which is the common case for the gates.
+    if n_wait < WAITSET_CAP and fd_is_waitable(0) != 0:
+        waitset[n_wait] = 0
+        n_wait = n_wait + 1
+    else:
+        nlie = nlie + 1
+    puts(1, "wsysd: wait set ")
+    putd(1, cast[int32](n_wait))
+    puts(1, " fds wake this loop, ")
+    putd(1, nlie)
+    puts(1, " always-ready and excluded; fallback tick ")
+    putd(1, cast[int32](WAIT_FALLBACK_MS))
+    puts(1, " ms\n")
+    if n_wait == 0:
+        puts(1, "wsysd: NOTHING can wake this loop -- it is the 16 ms tick\n")
+
+
 # --- the cursor -----------------------------------------------------
 # THE AUTHENTIC left_ptr, built the way devwsys.ad builds it.
 #
@@ -3014,6 +3109,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         open_inputs()
     ptr_x = scr_w / 2
     ptr_y = scr_h / 2
+    build_waitset()
 
     idle: uint64 = 0
     while 1 == 1:
@@ -3047,7 +3143,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         else:
             idle = idle + 1
         publish_state()
-        # Sleep to the next frame. nfds=0 makes this a plain timed wait --
-        # the compositor must not spin, or an idle desktop costs a core.
-        sys_waitfds(&waitset[0], 0, 16)
+        # PARK UNTIL INPUT ARRIVES, or until the fallback tick lapses. The
+        # timeout is what still catches a client repaint (nothing under
+        # /dev/wsys can wake this set -- see the wait-set note at the top of
+        # the file); the fds are what make a keystroke or a mouse move a wake
+        # rather than a wait for the next tick. n_wait is 0 only if every fd
+        # was rejected as always-ready, and then this is the old plain sleep,
+        # which is the right thing to degrade to.
+        sys_waitfds(&waitset[0], n_wait, WAIT_FALLBACK_MS)
     return 0
