@@ -365,8 +365,69 @@ same failure this project exists to beat.
   with the second block sed-deleted, so there is no second hand-maintained
   copy of the layout either). Still **17 PASS**.
 
+  The same audit found the **write** side of that file was worse than the read
+  side: `_save_config` serializes at most `50 + MAX_PANELS(4) * (81 +
+  MAX_WIDGETS(12) * 106 + 4)` = **5478 bytes** into an `Array[2048]`, and while
+  `_sb_emit` clamped, the bare `_save_buf[p] = 10` newline stores and the
+  `_u64_to_dec` calls did not — `p` climbed past the array, a BSS overrun
+  rather than a truncation. That bound IS compile-time (unlike the read side),
+  so a fixed buffer is the right shape there; it is now `SAVE_CAP` 8192 with
+  every store bounds-checked, and a serialization that reaches the cap is
+  refused by name rather than written. Gate assertion 10 proves the maximal
+  panel set the bound is computed from is a reachable config.
+
   `etc/panel.conf`'s CONTENT is unchanged, so the channel's byte-compare of
   shared `/etc` files is unaffected and no new binary ships.
+
+* **THE SAME DEFECT, IN FOUR MORE SHIPPED `/etc` FILES.** Swept while fixing
+  the above; **NOT fixed**, recorded here so the next person does not have to
+  find them again. Each is a file this tree ships, documents, and reads
+  through a fixed buffer, and in the first two the shipped file *already* does
+  not fit:
+
+  1. **`/etc/hpm/trusted.pub` — 718 bytes, read through 512.** Reader:
+     `user/hpm.ad:2021` `_set_trusted_key_path()`, loop at `:2031`
+     (`while total < 512`), buffer `tkey_file_buf` (512). The 64-hex key token
+     begins at **byte 653**, past the ceiling, so the read captures only the
+     11-line comment header and `hpm --trusted-key=/etc/hpm/trusted.pub` dies
+     with *"malformed trusted-key file (want 64 hex chars)"* on a perfectly
+     well-formed file. **Rotating the trust root through the shipped,
+     documented mechanism is impossible.** This is the panel.conf defect with
+     a security consequence, and it is the one to fix first.
+  2. **`/etc/hpm/local-trusted.pub` — 1054 bytes, same 512-byte reader**, key
+     token at byte 989. Same failure, twice the margin. Only the compiled-in
+     copy at `user/hpm.ad:1984` works.
+  3. **`/etc/rc.boot` — 15918 bytes into a 16384-byte ceiling (97.2% full).**
+     `user/hamsh.ad` `_run_rc_path()` (`:17872`, read loop `:17886`,
+     `rc_buf` 16384): on overflow the loop **just breaks, with no diagnostic
+     of any kind**. 467 more bytes — one added comment paragraph — cuts the
+     file's last line, which is `source /etc/rc.boot.full`, so the entire
+     boot recipe would silently never run and the box would come up on the
+     cpio fallback looking fine. Same ceiling, same silence:
+     `etc/rc.de-user.linux` 13267 B (81%), `etc/install.hamsh` 12850 B (78%),
+     `etc/rc.boot.full` 12255 B (75%, via `builtin_source`'s `src_buf`).
+  4. **`/etc/services.d/hamde.svc` — 3186 bytes into 4096 (78%).**
+     `user/hamsh.ad:14914` `_svc_read_def_file()`, `svc_def_buf`
+     (`SVC_DEF_BUF_MAX` 4096) — and `_svc_persist_enabled` (`:14232`)
+     **re-writes the file from that same buffer**, so an `enable`/`disable`
+     on an over-4K def would destroy the tail of the file on disk.
+  5. **`/etc/distros` (from `etc/distros.linux`, 1426 B) — a SINGLE unlooped
+     `sys_read(fd, &_dm_buf[0], 2047)`** at `user/hampanelscene.ad:2144`
+     `_load_distros()`. Only 621 bytes of headroom, and with no accumulate
+     loop a short read truncates at any size. The rows are at the END of the
+     file behind ~1300 bytes of header, so a truncation drops the
+     distributions out of the Applications menu — silently. Deliberately left
+     alone here so this change stayed one defect wide; it is in the file the
+     fix above already touches, and `_cfg_chunk`/`_cfg_parse_line` are right
+     there to reuse.
+
+  Cleared in the same sweep (no finding): `etc/passwd`/`shadow`/`group`
+  (readers all ≥4096 or line-based), `etc/man/*.md` and `etc/motd` (already
+  stream), `etc/hpm/channels` (16 KiB cap), the `.desktop` files (max 266 B
+  into 2047), and a long tail of files under `etc/` that are shipped and
+  documented but have **no reader anywhere in the tree** (`etc/services`,
+  `etc/protocols`, `etc/hosts`, `etc/fstab`, `etc/inittab`, `etc/os-release`,
+  … — and `etc/desktop.icons`, whose own header already admits it).
 
 * ~~**A package install hook could wedge `hpm update` forever.**~~ **BOUNDED
   NOW, IN THE PARENT — but read "what this cannot help" below before believing
