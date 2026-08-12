@@ -49,6 +49,12 @@
 # for the same reason (docs/steam_namespace.md §11 -- the shared file that bit).
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
+# REAP WHAT YOU START. This gate had no trap at all: everything it launched in
+# the background survived any exit that was not the happy one -- an assertion
+# that bailed early, a `timeout`, a ^C. tests/linux/reap.sh keeps a file-backed
+# registry of this run's own children and kills them on every path out.
+. tests/linux/reap.sh
+reap_on_exit
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  PASS  $*"; }
@@ -157,6 +163,7 @@ echo "J $J_BEFORE / $($SS read)"
 
 # --- the bridge, from here on ---------------------------------------------
 Xvfb ":$DPY" -screen 0 320x240x24 -nolisten tcp >>"$OUT/xvfb.log" 2>&1 &
+reap_add $!
 XVFB=$!
 i=0
 while [ $i -lt 60 ]; do
@@ -167,6 +174,7 @@ done
 [ $i -lt 60 ] || { echo "NOXSERVER"; exit 91; }
 
 "$BR" "$XSOCK" ser >"$OUT/xsnarfd.log" 2>&1 &
+reap_add $!
 BRPID=$!
 sleep 2
 

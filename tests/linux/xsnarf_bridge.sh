@@ -31,6 +31,12 @@
 # memory by definition.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
+# REAP WHAT YOU START. This gate had no trap at all: everything it launched in
+# the background survived any exit that was not the happy one -- an assertion
+# that bailed early, a `timeout`, a ^C. tests/linux/reap.sh keeps a file-backed
+# registry of this run's own children and kills them on every path out.
+. tests/linux/reap.sh
+reap_on_exit
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  PASS  $*"; }
@@ -78,6 +84,7 @@ XSOCK="/tmp/.X11-unix/X$DPY"
 
 start_x() {
     Xvfb ":$DPY" -screen 0 640x480x24 -nolisten tcp >>"$OUT/xvfb.log" 2>&1 &
+    reap_add $!
     XVFB=$!
     i=0
     while [ $i -lt 60 ]; do
@@ -92,6 +99,7 @@ start_x() {
 XCLIPS=""
 xown() { # xown <selection> <text>
     printf '%s' "$2" | xclip -i -selection "$1" &
+    reap_add $!
     XCLIPS="$XCLIPS $!"
     sleep 0.7
 }
@@ -99,6 +107,7 @@ paste_x() { xclip -o -selection "$1" 2>&1; }
 
 start_x || { echo "NOXSERVER"; exit 91; }
 "$BR" "$XSOCK" test >"$OUT/xsnarfd.log" 2>&1 &
+reap_add $!
 BRPID=$!
 sleep 1.5
 
@@ -148,6 +157,7 @@ done
 # --- 6. The 64 KiB cap: truncate LOUDLY, never silently ------------------
 awk 'BEGIN{s="";while(length(s)<70000)s=s "x";printf "%s", substr(s,1,70000)}' > "$OUT/big70k"
 xclip -i -selection clipboard < "$OUT/big70k" &
+reap_add $!
 XCLIPS="$XCLIPS $!"
 sleep 2
 echo "K $("$PA" 0 | awk '{print $1, $2, $3, length($4)}')"
@@ -162,6 +172,7 @@ echo "K $("$PA" 0 | awk '{print $1, $2, $3, length($4)}')"
 sleep 0.8
 awk 'BEGIN{s="";while(length(s)<1000)s=s "y"; for(i=0;i<2000;i++) printf "%s", s}' > "$OUT/big2m"
 xclip -i -selection clipboard < "$OUT/big2m" &
+reap_add $!
 XCLIPS="$XCLIPS $!"
 sleep 3
 echo "L $("$PA" 0)"

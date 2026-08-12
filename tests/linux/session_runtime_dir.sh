@@ -34,6 +34,12 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+# REAP WHAT YOU START. This gate had no trap at all: everything it launched in
+# the background survived any exit that was not the happy one -- an assertion
+# that bailed early, a `timeout`, a ^C. tests/linux/reap.sh keeps a file-backed
+# registry of this run's own children and kills them on every path out.
+. tests/linux/reap.sh
+reap_on_exit
 
 WAIT="${1:-150}"
 WORK="build/sessionrt"; mkdir -p "$WORK"
@@ -124,6 +130,7 @@ if command -v dbus-daemon >/dev/null 2>&1; then
     rm -f /run/dbus/system_bus_socket /run/dbus/pid 2>/dev/null
     command -v dbus-uuidgen >/dev/null 2>&1 && dbus-uuidgen --ensure 2>/dev/null
     dbus-daemon --system --nofork --print-address >/tmp/sessionrt-dbus.log 2>&1 &
+    reap_add $!
     i=0
     while [ $i -lt 40 ]; do
         [ -S /run/dbus/system_bus_socket ] && break

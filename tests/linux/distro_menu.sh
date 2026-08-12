@@ -27,6 +27,12 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+# REAP WHAT YOU START. This gate had no trap at all: everything it launched in
+# the background survived any exit that was not the happy one -- an assertion
+# that bailed early, a `timeout`, a ^C. tests/linux/reap.sh keeps a file-backed
+# registry of this run's own children and kills them on every path out.
+. tests/linux/reap.sh
+reap_on_exit
 
 export HAMLINUX_VNC="${HAMLINUX_VNC:-none}"
 export HAMLINUX_DISTRO_RO="${HAMLINUX_DISTRO_RO:-1}"
@@ -198,6 +204,7 @@ BOOTSECS="${HAMLINUX_DMENU_SECS:-330}"
 ( sleep $((BOOTSECS + 10)) ) | timeout $((BOOTSECS + 5)) \
     scripts/hamlinux_vm.sh script --timeout "$BOOTSECS" \
     >"$WORK/boot.log" 2>&1 &
+reap_add $!
 QEMU=$!
 mon() { printf '%s\n' "$@" | socat - UNIX-CONNECT:"$SOCK" >/dev/null 2>&1; }
 for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.2; done

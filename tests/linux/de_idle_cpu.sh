@@ -32,6 +32,12 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+# REAP WHAT YOU START. This gate had no trap at all: everything it launched in
+# the background survived any exit that was not the happy one -- an assertion
+# that bailed early, a `timeout`, a ^C. tests/linux/reap.sh keeps a file-backed
+# registry of this run's own children and kills them on every path out.
+. tests/linux/reap.sh
+reap_on_exit
 
 INTERVAL="${IDLE_INTERVAL:-20}"     # the measured window, seconds
 SETTLE="${IDLE_SETTLE:-45}"         # boot + DE bring-up before measuring
@@ -100,6 +106,7 @@ echo "[idlecpu] booting (up to ${RUNTIME}s)"
 # absence of.
 ( sleep "$RUNTIME" ) | HAMLINUX_VNC=none HAMLINUX_DISTRO_RO=1 \
     scripts/hamlinux_vm.sh script --timeout "$RUNTIME" > "$BOOTLOG" 2>&1 &
+reap_add $!
 RUNNER=$!
 
 # Find the qemu child. `scripts/hamlinux_vm.sh` execs into timeout which execs

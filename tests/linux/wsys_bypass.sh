@@ -53,6 +53,7 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+. tests/linux/reap.sh
 
 fail=0
 note() { printf '%s\n' "$*"; }
@@ -67,9 +68,26 @@ if [ "${1:-}" = "--inner" ]; then
     export HAMWSYS="$W/seg"
     rm -f "$HAMWSYS" "$HAMWSYS".bb "$HAMWSYS".chrome
 
+    reap_track "$W/reaped.inner"
+    reap_on_exit
+
     as() { local u="$1"; shift
         if [ "$u" = 0 ]; then "$@" 2>&1
         else setpriv --reuid="$u" --regid="$u" --clear-groups "$@" 2>&1; fi; }
+
+    # BACKGROUNDING A SHELL FUNCTION LOSES THE PROCESS YOU WANTED.
+    # `as 0 "$PROBE" client hold &` forks a subshell to run the function, and
+    # the function then forks AGAIN to run the probe -- so $! is the WRAPPER.
+    # `kill "$HOLDER"` killed the wrapper and ORPHANED the probe onto init,
+    # where it sat for ever. This gate left exactly two wsys_uidgate processes
+    # behind on every single run, and still printed "PASS wsys_bypass": the
+    # namespace here is `unshare -U`, a USER namespace with no pid namespace,
+    # so nothing collects the orphans. `exec` inside the subshell makes the
+    # backgrounded process the probe itself, so $! names what we mean to kill.
+    as_bg() { local u="$1"; shift
+        if [ "$u" = 0 ]; then ( exec "$@" ) &
+        else ( exec setpriv --reuid="$u" --regid="$u" --clear-groups "$@" ) & fi
+        reap_add $!; }
 
     # 1. The host owner brings the window system up through the protocol,
     #    exactly as rc.5 does: root, before anything drops.  One window (whose
@@ -83,7 +101,7 @@ if [ "${1:-}" = "--inner" ]; then
     # something has to still be holding it -- otherwise the bypass has nothing
     # to overwrite and the read-back has nothing to read, and this gate would
     # be measuring a window that no longer exists.
-    as 0 "$PROBE" client hold >"$W/root.client.out" 2>&1 &
+    as_bg 0 "$PROBE" client hold >"$W/root.client.out" 2>&1
     HOLDER=$!
     for _ in $(seq 1 50); do
         grep -q 'commit=' "$W/root.client.out" 2>/dev/null && break
@@ -149,7 +167,7 @@ if [ "${1:-}" = "--inner" ]; then
     #     mapping can gate this.  Here it is, measured: a uid-1001 holder's
     #     window, and a SEPARATE uid-1001 process injecting a key into it.
     echo "-- same-uid: a uid-1001 attacker against a uid-1001 victim"
-    as 1001 "$PROBE" client hold >"$W/live.client.out" 2>&1 &
+    as_bg 1001 "$PROBE" client hold >"$W/live.client.out" 2>&1
     LHOLDER=$!
     for _ in $(seq 1 50); do
         grep -q 'commit=' "$W/live.client.out" 2>/dev/null && break
@@ -209,11 +227,8 @@ fi
 
 # ---- outer half ----------------------------------------------------------
 W="$(mktemp -d "${TMPDIR:-/tmp}/wsysbypass.XXXXXX")"
-trap 'rm -rf "$W"' EXIT
-# A bare EXIT trap does not run when the shell is killed by a signal, so a
-# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
-# Re-exit on those, which makes the EXIT trap above run on every path out.
-trap 'exit 130' INT TERM HUP
+reap_on_exit_cleanup() { rm -rf "$W"; }
+reap_on_exit reap_on_exit_cleanup
 # 1777 for the same reason wsys_uidgate.sh needs it: two uids create files in
 # here, and /srv on a real boot is 1777 too -- which is what makes
 # fs.protected_regular relevant to both segments in the first place.

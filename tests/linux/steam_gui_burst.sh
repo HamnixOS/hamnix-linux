@@ -16,6 +16,12 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+# REAP WHAT YOU START. This gate had no trap at all: everything it launched in
+# the background survived any exit that was not the happy one -- an assertion
+# that bailed early, a `timeout`, a ^C. tests/linux/reap.sh keeps a file-backed
+# registry of this run's own children and kills them on every path out.
+. tests/linux/reap.sh
+reap_on_exit
 
 OUTDIR="${1:-build/steamprobe/burst}"
 FROM="${2:-50}"
@@ -32,6 +38,7 @@ rm -f "$SOCK"
 LIMIT=$((TO + 25))
 ( sleep "$LIMIT" ) | timeout "$LIMIT" \
     scripts/hamlinux_vm.sh script --timeout $((LIMIT - 5)) >"$OUTDIR/boot.log" 2>&1 &
+reap_add $!
 QEMU=$!
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.2; done
 

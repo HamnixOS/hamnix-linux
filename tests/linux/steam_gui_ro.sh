@@ -27,6 +27,12 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+# REAP WHAT YOU START. This gate had no trap at all: everything it launched in
+# the background survived any exit that was not the happy one -- an assertion
+# that bailed early, a `timeout`, a ^C. tests/linux/reap.sh keeps a file-backed
+# registry of this run's own children and kills them on every path out.
+. tests/linux/reap.sh
+reap_on_exit
 
 NSCMD="${1:?usage: steam_gui_ro.sh <ns-command> [out.png] [seconds]}"
 OUT="${2:-build/steamro/gui.png}"
@@ -111,6 +117,7 @@ rm -f "$SOCK" "$PPM"
 echo "[gui] booting; screendump at ${WAIT}s"
 ( sleep $((WAIT + 25)) ) | timeout $((WAIT + 20)) \
     scripts/hamlinux_vm.sh script --timeout $((WAIT + 15)) > "$LOG" 2>&1 &
+reap_add $!
 QEMU=$!
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.2; done
 sleep "$WAIT"
