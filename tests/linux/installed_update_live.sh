@@ -392,6 +392,16 @@ echo '[lupd] p1 dhcpc status:' \$status
 # The install that gives this machine its history. It comes from the local
 # channel at $OLDVER, signed, with the key staged in /etc/hpm -- the same path
 # a machine installed from any channel takes.
+#
+# THE REFRESH IS NOT DECORATION. \`hpm install\` reads a CACHED index and says
+# "hpm: no cached index; run \`hpm refresh\` first" if there is none -- measured,
+# on the first run of this gate, where the install exited 1 and the machine
+# reached boot 2 still carrying the image's own compositor. That would have
+# made boot 2's control ("the old desktop does NOT react") fail, which is the
+# gate telling the truth about a broken setup rather than proceeding.
+echo '[lupd] p1 refresh the original-install channel'
+hpm --repo=$BASE --trusted-key=/etc/hpm/test-trusted.pub refresh
+echo '[lupd] p1 refresh status:' \$status
 echo '[lupd] p1 install $PKG from the original-install channel'
 hpm --repo=$BASE --trusted-key=/etc/hpm/test-trusted.pub install $PKG
 echo '[lupd] p1 install status:' \$status
@@ -497,12 +507,21 @@ _wins p3 AFTER
 cat <<'RC'
 date
 echo '[lupd] PHASE3 DONE'
+# END THE MACHINE RATHER THAN LEAVING pid 1 ON A PROMPT. Phases 1 and 2 end by
+# restarting; this one has nothing after it, and hamsh falling through to read
+# the console held the VM for the whole remaining budget -- four minutes of a
+# machine somebody else is using, per run.
+reboot
 RC
 } > "$WORK/rc.phase3"
 
 cp "$WORK/rc.phase2" "$EXTRA/etc/rc.phase2"
 cp "$WORK/rc.phase3" "$EXTRA/etc/rc.phase3"
-RC1_MD5="$(md5sum "$WORK/rc.phase1" | cut -d' ' -f1)"
+# THE DIGEST OF THE rc THAT IS RUNNING WHEN hpm RUNS, which is phase 2's --
+# boot 1 ends by copying it over /etc/rc.boot. The first version of this file
+# asserted phase 1's digest and went red on a machine where hpm had behaved
+# perfectly, which is the expensive kind of red: it pointed at hpm.
+RC2_MD5="$(md5sum "$WORK/rc.phase2" | cut -d' ' -f1)"
 
 # =========================================================================
 # 7. Install a disk.
@@ -525,6 +544,7 @@ DISK_SUM_BEFORE="$(md5sum "$DISK" | cut -d' ' -f1)"
 # the shortcut that let a completely missing input path go unnoticed for the
 # life of this port (see tests/linux/de_mouse_chrome.sh).
 APPBTN_X=40; APPBTN_Y=13
+SCREEN_W=1280; SCREEN_H=800     # only ever used as the fallback below
 
 boot() {   # boot <logfile> <seconds> <click:0|1>
     local log="$1" secs="$2" doclick="$3"
@@ -545,18 +565,33 @@ boot() {   # boot <logfile> <seconds> <click:0|1>
             # backdrop window (z -1) is the display. QMP's absolute axes are a
             # 0..32767 range across it, which is the same normalisation wsysd's
             # pump_input undoes on the other side.
+            #
+            # AND IT FALLS BACK TO THE SIZE AN EARLIER BOOT REPORTED, because a
+            # boot with NO WINDOWS AT ALL has no backdrop to read -- and that is
+            # exactly the boot where the click matters most. Without the
+            # fallback this gate skips the click and then reports "nothing was
+            # clicked", which is a true sentence about the test and a false
+            # one about the machine. The click still goes in; the compositor's
+            # pointer counter still answers; and "the desktop has no windows"
+            # gets to be the finding rather than being hidden behind a mouse
+            # that was never moved.
             local back sw sh
             back="$(grep -a -A1 'WINS-BEFORE' "$log" | tail -1 | tr -d '\r')"
             set -- $back
-            sw="${4:-0}"; sh="${5:-0}"
+            sw="${4:-}"; sh="${5:-}"
+            case "$sw" in ''|*[!0-9]*) sw=0 ;; esac
+            case "$sh" in ''|*[!0-9]*) sh=0 ;; esac
             if [ "$sw" -gt 0 ] && [ "$sh" -gt 0 ]; then
-                sleep 3
-                python3 tests/linux/qmp_click.py "$QMP" "$sw" "$sh" \
-                    "$APPBTN_X" "$APPBTN_Y" >>"$log.click" 2>&1 \
-                    || echo "[lupd] the QMP click itself failed; see $log.click"
+                SCREEN_W="$sw"; SCREEN_H="$sh"
             else
-                echo "[lupd] could not read the screen size from the guest ('$back')"
+                sw="$SCREEN_W"; sh="$SCREEN_H"
+                echo "[lupd] this boot printed no window to read the screen size from" \
+                     "('$back') -- clicking at the ${sw}x${sh} an earlier boot reported"
             fi
+            sleep 3
+            python3 tests/linux/qmp_click.py "$QMP" "$sw" "$sh" \
+                "$APPBTN_X" "$APPBTN_Y" >>"$log.click" 2>&1 \
+                || echo "[lupd] the QMP click itself failed; see $log.click"
         fi
     fi
     wait "$VM" 2>/dev/null
@@ -612,6 +647,7 @@ echo "--- boot 1: the machine gets the desktop it was installed with"
 LOG="$WORK/boot1.log"
 check "the installed root came online"        'rc\.boot: hamnix-linux \(installed\)'
 check "dhcpc took a lease"                    '\[lupd\] p1 dhcpc status: 0'
+check "the original-install channel refreshed" '\[lupd\] p1 refresh status: 0'
 check "the original install exited 0"         '\[lupd\] p1 install status: 0'
 after "and it recorded $PKG at $OLDVER"       '[lupd] p1 list:' "$PKG[^0-9]*$OLDVER"
 after "the compositor on disk is the PRE-FIX one" '[lupd] p1 md5 of' "$OLD_MD5"
@@ -654,8 +690,13 @@ else
     check "a bare 'hpm refresh' TRUSTS the real repository" '\[lupd\] p2 refresh status: 0'
     check "and it was the real repository"          "hpm: (fetching channel|refreshed index from) .*255\.one"
     check "a bare 'hpm update' exited 0"            '\[lupd\] p2 update status: 0'
-    after "hpm named the upgrade $OLDVER -> $LIVEVER" '[lupd] p2 ----- hpm update' \
-          "$PKG.*$OLDVER.*$LIVEVER"
+    # hpm's own account of what it did. Not `after`: hpm upgrades every
+    # installed package and the line for this one is a dozen lines down.
+    check "hpm named the upgrade $OLDVER -> $LIVEVER" \
+          "hpm: upgrading $PKG $OLDVER -> $LIVEVER"
+    check "and hpm verified the tarball it was sent" 'hpm: SHA-256 verified'
+    check "hpm refused to take the machine's boot script" \
+          "hpm: keeping this machine's own /etc/rc\.boot"
     after "the version moved to the live one"       '[lupd] p2 list after update:' \
           "$PKG[^0-9]*$LIVEVER"
     # THE BYTES, WHICH NO INDEX FIELD CAN SATISFY.
@@ -663,7 +704,7 @@ else
           '[lupd] p2 md5 of /bin/wsysd after update:' "$LIVE_MD5"
 fi
 after "hpm left the machine's own /etc/rc.boot alone" \
-      '[lupd] p2 md5 of /etc/rc.boot after hpm ran:' "$RC1_MD5"
+      '[lupd] p2 md5 of /etc/rc.boot after hpm ran:' "$RC2_MD5"
 check "phase 2 reached the end"                 '\[lupd\] PHASE2 DONE'
 check "the machine restarted itself again"      'reboot: Restarting system'
 
@@ -687,10 +728,19 @@ else
     echo "lupd: FAIL nothing was clicked in boot 3: pointer counter '$P3P_BEFORE' -> '$P3P_AFTER'"; fail=1
 fi
 # ===== THE SENTENCE THIS WHOLE FILE EXISTS FOR =====
+# Three outcomes, and they are three different sentences. A gate that collapsed
+# "the panel did not grow" and "there is no panel" into one line would report a
+# desktop that does not exist as a desktop that ignored a click, which is the
+# wrong bug on the wrong day.
+P3WINS="$(grep -aA1 -F '[lupd] p3 STATE-BEFORE:' "$LOG" | tail -1 | tr -d '\r' |
+          awk '{for (i = 1; i < NF; i++) if ($i == "windows") print $(i+1)}')"
 if [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ]; then
     echo "lupd: PASS THE UPDATED MACHINE RUNS THE NEWER CODE: a real click on the Applications button opened the menu (the panel window grew $B3BEFORE -> $B3AFTER px)"
+elif [ -z "$B3BEFORE" ]; then
+    echo "lupd: FAIL THE UPDATE LANDED AND THE DESKTOP DID NOT COME UP. The bytes arrived (see the digest above) and the compositor is running, but it has ${P3WINS:-?} windows: no wallpaper, no panel, no Applications button to click. What the channel is serving is not a working desktop."
+    fail=1
 else
-    echo "lupd: FAIL THE UPDATED MACHINE IS STILL RUNNING THE OLD DESKTOP: after a real click the panel window is ${B3AFTER:-unknown} px, not more than ${B3BEFORE:-unknown}. The work published to the channel did not reach this machine, or did not take effect."
+    echo "lupd: FAIL THE UPDATED MACHINE IS STILL RUNNING THE OLD DESKTOP: after a real click the panel window is ${B3AFTER:-unknown} px, not more than $B3BEFORE. The work published to the channel did not reach this machine, or did not take effect."
     fail=1
 fi
 check "phase 3 reached the end"                 '\[lupd\] PHASE3 DONE'
