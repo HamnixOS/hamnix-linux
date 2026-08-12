@@ -81,6 +81,12 @@ extern def sys_get_jiffies() -> uint64
 extern def sys_yield() -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> int32
+# Both used only by THE "RESTART BEFORE OPENING APPS" NOTICE below:
+# sys_fd_size makes "has the refusal marker grown" one fstat rather than a
+# read of a file whose length we do not control, and sys_getenv resolves
+# $HAMWSYS so the panel watches the SAME segment the refusing client marked.
+extern def sys_fd_size(fd: int32) -> int64
+extern def sys_getenv(name: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64
 from lib.p9 import spawn, spawn_detached, p9_listdir, p9_note
 from lib.homedir import hd_resolve_home
 from lib.dropplace import dp_panel_insert_index, dp_panel_insert_boundary
@@ -3799,6 +3805,13 @@ def _emit_panel(bar: int64, btime: uint64):
         _compute_addlet_box(bar)
         ctxm_choice_draw(cast[int32](addlet_box_x), cast[int32](addlet_box_y),
                          -1)
+    # THE UPDATE NOTICE, LAST, so it is on top of every popup above it. It is
+    # the one thing on this panel that is not a menu the person opened, and a
+    # dropdown drawn over the sentence explaining why that dropdown is empty
+    # would be the original defect with an extra step. _handle_click tests it
+    # FIRST for the matching reason.
+    if notice_on != 0 and notice_panel == cur_panel_idx:
+        _notice_draw(bar)
 
 
 # Label for context-menu row `ri` given the active ctx_kind.
@@ -4598,6 +4611,203 @@ def _drain_launch_queues():
         cast[Ptr[char]]("/dev/wsys/appmenu/launch"), _appmenu_launch_last_serial)
 
 
+# ---- THE "RESTART BEFORE OPENING APPS" NOTICE ----------------------
+# WHAT A PERSON SEES WHEN THE WINDOW SYSTEM IS UPDATED UNDER THEM.
+#
+# user/linux-wsys.c bumps WSYS_VERSION when the shape of /srv/wsys changes,
+# and shm_attach() REFUSES to attach a new-version program to a LIVE
+# old-version segment rather than wiping the desktop somebody is sitting in
+# front of (see A LIVE SESSION IS NOT A LEFTOVER there). That refusal is the
+# safety property and nothing here may weaken it. But it was measured on a
+# real installed machine at 7 -> 8 (tests/linux/installed_update_wsysver.sh)
+# and what the PERSON got was: click Applications, the panel logs the click,
+# the spawned hamappmenu refuses correctly and dies -- and the screen does
+# not change. The five explaining lines go to stderr, which on this image is
+# the serial console. A correct refusal and a broken button look identical.
+#
+# WHY THE PANEL DRAWS IT. The refused program cannot draw; that is what being
+# refused means. The processes that CAN draw are the ones that attached
+# before the update -- wsysd and this panel. wsysd owns no window and has
+# never drawn a text card; the panel already owns a keyed, growing window
+# with roundrect+glyph popups and a click-to-dismiss path, so the notice is
+# ~80 lines here and would be new machinery there.
+#
+# WHY IT CANNOT LIE. The marker is written in exactly one place in the whole
+# tree: inside seg_refuse_message() in user/linux-wsys.c, past its
+# once-per-process guard, so the mark and the five stderr lines have one
+# condition between them. Nothing else opens the path. Deliberately NOT
+# reused for this: $HOME/.hamde/appmenu.fault, which the panel already reads
+# (_appmenu_faulted) -- it means "the menu did not get a window", which a
+# crash, a missing font or an out-of-wids condition all satisfy, and a notice
+# telling somebody to reboot because their text editor segfaulted is worse
+# than no notice at all.
+#
+# WHY IT CANNOT GO STALE. The marker lives beside the segment in /srv, which
+# linuxinit mounts as tmpfs and which is made fresh every boot. The notice's
+# advice is RESTART, so the evidence for it must not outlive the restart that
+# fixes it -- and it cannot: the file is gone before the panel that would
+# read it exists.
+#
+# THE SERIAL is the marker's SIZE. The C side appends one short line per
+# refusing process and never rewrites, so size only grows; `notice_ack` is
+# the offset already shown-and-dismissed. Same shape as the DE launch queues
+# above, and it means dismissing cannot be undone by the next poll while a
+# genuinely NEW refusal still re-raises the notice.
+#
+# WHAT IT DOES NOT REPLACE. scripts/hamlinux_packages.py's hamnix-desktop
+# install hook already prints the same warning to the TERMINAL somebody typed
+# `hpm update` into, and it reaches the update that needs it, which nothing in
+# this file can. The two are for different people: that one is for whoever ran
+# the update, this one is for whoever walks up to the machine afterwards and
+# clicks Applications. Neither is a substitute for the other.
+#
+# NOT PRIMED AT STARTUP, unlike _peek_launch_serial. A panel that starts and
+# finds a marker is a panel in a session that still needs restarting -- the
+# condition is still true, so the honest answer is to show it.
+NOTICE_W: int64 = 340
+NOTICE_H: int64 = 86
+notice_on: int32 = 0
+notice_panel: uint64 = 0
+notice_ack: int64 = 0
+notice_box_x: int64 = 0
+notice_box_y: int64 = 0
+_notice_path: Array[600, uint8]
+_notice_path_ready: int32 = 0
+
+
+# "<segment>.refused", resolved once, the same way user/linux-wsys.c derives
+# it: $HAMWSYS if set, else /srv/wsys. A harness pointed at another segment
+# watches THAT one and cannot show a notice about somebody else's desktop.
+def _notice_resolve_path():
+    if _notice_path_ready != 0:
+        return
+    _notice_path_ready = 1
+    n: int64 = sys_getenv(cast[Ptr[char]]("HAMWSYS"), &_notice_path[0], 560)
+    p: uint64 = 0
+    if n > 0:
+        p = cast[uint64](n)
+    else:
+        d: Ptr[uint8] = cast[Ptr[uint8]]("/srv/wsys")
+        i: uint64 = 0
+        while d[i] != 0:
+            _notice_path[p] = d[i]
+            p = p + 1
+            i = i + 1
+    s: Ptr[uint8] = cast[Ptr[uint8]](".refused")
+    j: uint64 = 0
+    while s[j] != 0:
+        _notice_path[p] = s[j]
+        p = p + 1
+        j = j + 1
+    _notice_path[p] = 0
+
+
+# The panel carrying the Applications button is the one that gets the notice
+# -- it is the button the person pressed and got nothing from. A layout with
+# no menu widget at all falls back to panel 0 so the notice is never
+# addressed to a panel that does not exist.
+def _notice_first_menu_panel() -> uint64:
+    pi: uint64 = 0
+    while pi < n_panels:
+        b: uint64 = 0
+        while b < p_nwidg[pi]:
+            if p_wkind[pi * MAX_WIDGETS + b] == WK_MENU:
+                return pi
+            b = b + 1
+        pi = pi + 1
+    return 0
+
+
+# One open + fstat + close per tick. Returns 1 only on the transition to
+# showing, which is the caller's cue to re-apply panel geometry (the window
+# has to grow to hold the card).
+def _notice_poll() -> int32:
+    if notice_on != 0:
+        return 0
+    _notice_resolve_path()
+    fd: int32 = sys_open(cast[Ptr[char]](&_notice_path[0]))
+    if fd < 0:
+        return 0
+    sz: int64 = sys_fd_size(fd)
+    sys_close(fd)
+    if sz <= notice_ack:
+        return 0
+    notice_on = 1
+    notice_panel = _notice_first_menu_panel()
+    return 1
+
+
+# Window-local box, same convention as _compute_menu_box: on a top bar the
+# card hangs below the bar, on a bottom bar it sits above it.
+def _notice_box(bar: int64):
+    if cur_horiz != 0:
+        notice_box_x = 8
+        if cur_edge == EDGE_BOTTOM:
+            notice_box_y = 0
+        else:
+            notice_box_y = bar + cur_thick
+    else:
+        if cur_edge == EDGE_LEFT:
+            notice_box_x = bar + cur_thick
+        else:
+            notice_box_x = bar - NOTICE_W
+        notice_box_y = 8
+
+
+def _notice_hit(x: int64, y: int64, bar: int64) -> int32:
+    if notice_on == 0:
+        return 0
+    if notice_panel != cur_panel_idx:
+        return 0
+    _notice_box(bar)
+    if x < notice_box_x or x >= notice_box_x + NOTICE_W:
+        return 0
+    if y < notice_box_y or y >= notice_box_y + NOTICE_H:
+        return 0
+    return 1
+
+
+# Dismiss: acknowledge every byte of the marker that exists RIGHT NOW, so a
+# refusal that has already happened stays dismissed and a refusal that has
+# not happened yet still raises the card again.
+def _notice_dismiss():
+    _notice_resolve_path()
+    fd: int32 = sys_open(cast[Ptr[char]](&_notice_path[0]))
+    if fd >= 0:
+        sz: int64 = sys_fd_size(fd)
+        if sz > notice_ack:
+            notice_ack = sz
+        sys_close(fd)
+    notice_on = 0
+
+
+# Amber, because every other card this panel draws is grey-on-white and this
+# one is the only one that is telling the person the machine is in a state
+# they have to act on. The colours are also what the gate's screendump
+# assertion counts, so they are deliberately not a shade already on screen.
+def _notice_draw(bar: int64):
+    _notice_box(bar)
+    nx: int32 = cast[int32](notice_box_x)
+    ny: int32 = cast[int32](notice_box_y)
+    hamscene_roundrect(nx, ny, cast[int32](NOTICE_W), cast[int32](NOTICE_H), 8,
+                       cast[Ptr[uint8]]("#b06a00"))
+    hamscene_roundrect(nx + 2, ny + 2, cast[int32](NOTICE_W) - 4,
+                       cast[int32](NOTICE_H) - 4, 6,
+                       cast[Ptr[uint8]]("#ffe9b0"))
+    _glyphs(notice_box_x + 12, notice_box_y + 10,
+            cast[Ptr[uint8]]("The window system was updated."),
+            cast[Ptr[uint8]]("#000000"), 1)
+    _glyphs(notice_box_x + 12, notice_box_y + 30,
+            cast[Ptr[uint8]]("Restart before opening new apps."),
+            cast[Ptr[uint8]]("#202020"), cur_bold)
+    _glyphs(notice_box_x + 12, notice_box_y + 48,
+            cast[Ptr[uint8]]("Windows already open are safe."),
+            cast[Ptr[uint8]]("#202020"), cur_bold)
+    _glyphs(notice_box_x + 12, notice_box_y + 68,
+            cast[Ptr[uint8]]("Click this notice to dismiss it."),
+            cast[Ptr[uint8]]("#7a5a10"), 0)
+
+
 # --- Drag-from-menu launcher drop (#327; was #283) ------------------
 # hamappmenu writes an app's `<exec> <label>\n` to /tmp/hamnix-panel-drop when
 # the user DRAGS an app entry out of the Applications menu (a plain click still
@@ -4745,6 +4955,14 @@ def _handle_menu_hover(x: int64, y: int64, bar: int64) -> int32:
 # may launch/raise. Returns 1 if a redraw is needed. Uses the layout + the
 # bar/menu-box coords computed in the last emit.
 def _handle_click(x: int64, y: int64, bar: int64) -> int32:
+    # THE UPDATE NOTICE IS TESTED FIRST because it is DRAWN LAST (see the end
+    # of _emit_panel): the card sits over the top-left corner where the Apps
+    # dropdown also opens, and a hit test in draw order would let a click land
+    # on a menu row the person cannot see. Clicking the card dismisses it and
+    # consumes the click -- it does not also launch whatever is underneath.
+    if _notice_hit(x, y, bar) != 0:
+        _notice_dismiss()
+        return 1
     # dropdown open?
     if menu_open != 0 and menu_slot >= 0:
         _compute_menu_box(bar)
@@ -5227,6 +5445,17 @@ def _panel_grow_px(pi: uint64, horiz: int32) -> int64:
             cg = CTX_W
         if cg > g:
             g = cg
+    # The update notice is a popup too, and it is the one the person did not
+    # ask for -- so it takes the max alongside the others rather than
+    # replacing them: a dropdown opened while the notice is up must still fit.
+    if notice_on != 0 and notice_panel == pi:
+        ng: int64 = 0
+        if horiz != 0:
+            ng = NOTICE_H
+        else:
+            ng = NOTICE_W
+        if ng > g:
+            g = ng
     # The add-applet chooser dialog needs the most room of all.
     if addlet_open != 0 and addlet_panel == pi:
         ag: int64 = 0
@@ -5342,6 +5571,7 @@ def _drain_events(pi: uint64, sw: int64, sh: int64) -> int32:
     pre_menu: int32 = pw_menu[pi]
     pre_ctx_open: int32 = ctx_open
     pre_addlet_open: int32 = addlet_open
+    pre_notice: int32 = notice_on
     pre_ctx_h: int64 = 0
     if ctx_open != 0 and ctx_panel == pi:
         pre_ctx_h = ctx_box_h()
@@ -5494,7 +5724,8 @@ def _drain_events(pi: uint64, sw: int64, sh: int64) -> int32:
     if ctx_open != 0 and ctx_panel == pi:
         cur_ctx_h = ctx_box_h()
     if menu_open != pre_menu or ctx_open != pre_ctx_open \
-            or cur_ctx_h != pre_ctx_h or addlet_open != pre_addlet_open:
+            or cur_ctx_h != pre_ctx_h or addlet_open != pre_addlet_open \
+            or notice_on != pre_notice:
         _apply_panel_geometry(pi, sw, sh)
         need_redraw = 1
     return need_redraw
@@ -5973,6 +6204,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # clients. hamUId's retired present loop used to do this; the panel
         # is the live scene client that now owns it.
         _drain_launch_queues()
+        # Has anything been REFUSED by the window system since we last said
+        # so? One open + fstat + close. On the transition to showing, every
+        # panel's geometry is re-applied because the one carrying the notice
+        # has to grow to hold the card.
+        if _notice_poll() != 0:
+            pi = 0
+            while pi < n_panels:
+                _apply_panel_geometry(pi, sw, sh)
+                pi = pi + 1
+            any_redraw = 1
         # #327: the drag-from-menu launcher drop is committed on the button
         # RELEASE inside _drain_events (at the drop point), not here.
         if _drain_notifications() != 0:
