@@ -351,8 +351,13 @@ struct wwin {
      * counter a compositor polls to learn that a window has a new frame -- and
      * it says nothing about what the frame contains.  It stays in the table for
      * the same reason the geometry does: /dev/wsys/wctl publishes it, and every
-     * reader of that file wants it.  It is world-writable and therefore a HINT:
-     * a liar can only cause a repaint of bytes it still cannot read. */
+     * reader of that file wants it.  It is world-writable and therefore a HINT,
+     * and what a liar can do with it is bounded and already on the residue
+     * list: raising it causes a repaint of bytes it still cannot read, and
+     * zeroing it makes the scene read empty (see the open path) so the window
+     * paints blank.  That is CORRUPTION, which THE SPLIT says plainly is not
+     * closed by any of this and needs tier 1 -- the same attacker could
+     * already destroy the row outright. */
     uint32_t scene_len_dead;
     uint32_t scene_gen;                       /* ++ on every commit */
     uint32_t stage_len_dead;
@@ -3852,6 +3857,20 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
          * table is a number an attacker picks for a buffer it cannot see. */
         if (f->leaf == HAMWSYS_WIN_SCENE) {
             struct wpix *p = pix_get(f->wid, owns_wid(f->wid));
+            /* A WINDOW THAT HAS NEVER COMMITTED READS EMPTY, AND THAT IS THE
+             * TRUTH RATHER THAN A SOFTENED REFUSAL.  scene_gen is 0 until the
+             * first commit; a v2 window never commits at all, because it
+             * renders its own surface and submits blits.  So without this a
+             * BROWSER, A VIDEO AND EVERY ROOTLESS X CLIENT WOULD STOP BEING
+             * PAINTED -- user/wsysd.ad's paint_window slurps <wid>/scene for
+             * every window before it looks at the protocol, and `if (n < 0)
+             * return 0` bails before it ever reaches paint_backbuffer.  A v2
+             * window's scene read has always been a 0-byte success and it
+             * still is.  A refusal is reserved for the case that really is
+             * one: a window that HAS published a frame this process cannot
+             * fetch. */
+            if (!p && !for_write && v->scene_gen == 0)
+                return snap_set(f, NULL, 0);
             if (!p) {
                 /* A REFUSAL, SAID BY NAME.  Serving an empty scene here would
                  * be a window that paints nothing and a read that succeeds --
