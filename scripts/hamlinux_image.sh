@@ -762,6 +762,24 @@ fi
 # Directory ENTRIES for ./home come from the first archive (0:0, 0755): the
 # parent of the homes is the system's, only the homes themselves are the
 # users'.
+# --- /version -------------------------------------------------------------
+# The one-line identity of this system, as a PLAIN FILE AT THE ROOT of the
+# initramfs. That is exactly what it is on the Hamnix line
+# (scripts/build_initramfs.py: ("/version", b"Hamnix bare-metal kernel, ...")),
+# and it is read by user/init.S and user/hello.ad, the smallest end-to-end
+# case on the box: open /version, read it, print it. Nothing in this port had
+# ever created the name, so that read failed on every run since the port began
+# and hello.ad skipped it in silence and exited 0 -- its header's claim to
+# "prove the VFS path is reachable" was never tested. The name exists now and
+# hello.ad exits non-zero when it cannot read it.
+#
+# The string is DERIVED, not asserted: the kernel release is the one actually
+# staged beside this initramfs, and the userland revision is this checkout.
+HL_REV="$(git -C "$PROJ_ROOT" describe --always --dirty 2>/dev/null || echo unknown)"
+printf 'hamnix-linux -- Adder userland on Linux %s, initramfs boot (%s)\n' \
+    "${KVER:-unknown}" "$HL_REV" > "$ROOT/version"
+chmod 644 "$ROOT/version"
+
 echo "[image] packing initramfs"
 CPIO="$OUT/initramfs.cpio"
 : > "$CPIO"
