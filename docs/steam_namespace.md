@@ -929,6 +929,80 @@ from "the whole input stack" to "`wsyswl`'s axis emission as seen by Xwayland
 22.1.9", by measurement rather than by argument, and the gate's own blind
 spot is now named.
 
+### 12.2b THE VERSION WAS NOT IT, AND THE WHEEL NOW MOVES REAL PIXELS IN A VM
+
+**Both candidates §12.2a left standing are dead, by measurement.**
+
+**1. Xwayland 22.1.9 behaves exactly like 24.1.6.** `scripts/ns_xwayland.sh`
+lifts the namespace's own `/usr/bin/Xwayland` out of `build/image/distro.ext4`
+with `debugfs` together with its `DT_NEEDED` closure and runs it through that
+image's own loader and libraries. No mount, no loop device, no root, no write
+to the shared image; about 16 MB and a second. (`debugfs dump` does not follow
+symlinks and every soname in a Debian lib dir is one, so links are chased off
+`stat`, and the extraction is verified by running `Xwayland -version` rather
+than assumed — a closure one library short yields a wrapper that exists and
+cannot run.) `tests/linux/wsyswl_wheel.sh` now runs every assertion against
+both servers:
+
+```
+wheel: ===== arm: namespace (…/ns-xwayland/Xwayland) on :87
+wheel: PASS [namespace] … Xwayland Version 22.1.9 (12201009) is on it at :87
+wheel: PASS [namespace] four notches produced exactly four button-5 presses
+…
+wheel: ===== arm: host (/usr/bin/Xwayland) on :88
+wheel: PASS [host] … Xwayland Version 24.1.6 (12401006) is on it at :88
+wheel: 30 passed, 0 failed
+```
+
+**2. And a blind spot found on the way, which was the better hypothesis and is
+also not it.** The gate only ever asked `xev`, and `xev` reads **core** X
+events. Chromium — the whole of Steam's user interface, and Firefox's fallback
+— does not: it calls `XISelectEvents` and reads the wheel off an XInput2
+**scroll valuator**. Those are two paths out of one X server fed by one
+`wl_pointer.axis` and one can be dead while the other is perfect, which would
+have explained "green gate, dead Steam" exactly.
+`tests/linux/xi2_scroll_probe.c` asks it: a second client, its own window, its
+own pixel, in the same run. **The valuator moves, on both servers, with the
+sign right in both directions.**
+
+**3. THE STRETCH NOTHING MEASURED, AND IT WORKS.** `wsyswl_wheel.sh` is the
+compositor half on the dev host; `vm_wheel_reaches.sh` is QEMU's half into
+`wsysd`. They meet in the middle and nothing covered the join: QEMU's evdev
+node → `wsysd` → `wsyswl` → the namespace's *own* Xwayland → an X client, all
+inside one VM. `tests/linux/vm_wheel_client.sh` is that, in ~4 minutes, with no
+Steam and no CEF — two programs out of the namespace's own `/usr/bin`:
+
+```
+vmwc: PASS CONTROL: a QEMU pointer MOVE reaches the X client in the namespace (4 MotionNotify)
+vmwc: INFO MotionNotify 4 -> 14, button-5 presses 0 -> 6, button-4 0 -> 4
+vmwc: PASS SIX WHEEL-DOWN NOTCHES REACH THE X CLIENT AS BUTTON 5 in a real VM (0 -> 6)
+vmwc: PASS and four wheel-UP notches reach it as button 4 (0 -> 4)
+vmwc: INFO pixels changed in 48x330+10+40 of 15840: up 415, back down 415, net 0
+vmwc: PASS EIGHT WHEEL-UP NOTCHES MOVED THE PIXELS OF A REAL PROGRAM: 415 of 15840 changed
+vmwc: PASS CONTROL: eight notches back DOWN moved them again (415 of 15840)
+vmwc: PASS and the screen RETURNED to where it started (0 of 15840 differ)
+vmwc: 9 passed, 0 failed
+```
+
+The reversal is the control, and it is stronger than the scrollbar drag that
+§12.2 used: a repaint, a cursor blink or a clock ticking can make two
+screendumps differ, and nothing but content that really scrolls and really
+scrolls back makes A≠B, B≠C **and** A=C.
+
+**Two ways that file answered a success-shaped zero before it answered the
+truth, both kept in its comments.** Its first diff rectangle was 400x240 over
+the *blank* right-hand side of the terminal — `seq 1 3000` writes four-digit
+numbers in the leftmost ~45 pixels — and read `0 of 96000` while the terminal
+behind it scrolled perfectly. And its first wheel direction was **down**, at a
+terminal already sitting at the bottom of its scrollback: a correctly working
+wheel with nowhere to go, reading identically to a dead one.
+
+**WHAT THIS DOES NOT SAY.** Steam has not been re-measured. What is now proven
+is the whole compositor chain, end to end, to a real client's pixels, in the
+real VM, on the Xwayland that actually ships. Whether Steam's CEF scrolls is a
+separate measurement and nobody has taken it since these fixes landed — say so
+rather than assume it, in either direction.
+
 ### 12.3 Two things seen in passing that are NOT the blocker
 
 * **`wsyswl` printed `DROPPING FRAMES -- the wl_buffer has no shm mapping`

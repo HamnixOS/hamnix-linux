@@ -4800,7 +4800,13 @@ def handle_ptr_line(c: uint64, i: uint64, surf: uint32, at: uint64, n: uint64):
         # axis_source before both. The dev host's Xwayland does not care and
         # accepted the wrong order; the version in the Debian namespace is
         # 22.1.9 and there is no reason to find out the hard way which of them
-        # a client is talking to.
+        # a client is talking to. (SINCE MEASURED, and written down so the
+        # question is not reopened: tests/linux/wsyswl_wheel.sh now runs an arm
+        # against the namespace's own 22.1.9, lifted out of the image by
+        # scripts/ns_xwayland.sh, and the two versions behave IDENTICALLY here
+        # -- on the core button 4/5 path and on the XInput2 smooth-scroll
+        # valuator that Chromium reads. The order is still right; it was just
+        # not the thing that was broken.)
         if pv >= 5:
             send_ptr_axis_source(cast[uint32](ptr), AXIS_SOURCE_WHEEL)
             send_ptr_axis_discrete(cast[uint32](ptr), AXIS_VERTICAL, v)
