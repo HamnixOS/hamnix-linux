@@ -3495,11 +3495,39 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
         shm->gen++;
         return;
     }
+    /* "hide [0|1]" / "show [0|1]" -- AND THE ARGUMENT IS NOT OPTIONAL TO READ.
+     *
+     * MEASURED, on the published desktop, and it is why `hpm update` left a
+     * machine with no panel and no taskbar.  `hide` used to ignore everything
+     * after the verb and set visible = 0 unconditionally.  But
+     * user/hampanelscene.ad's _set_window_hidden -- the ONLY writer of this
+     * verb in the tree -- spells BOTH directions through it, "hide 1" to
+     * withdraw a pooled window and "hide 0" to put it back on screen, and its
+     * config-reload path (_reload_panels) writes "hide 0" to EVERY panel
+     * window it is about to redraw.  So every reload of /etc/panel.conf --
+     * which is what an `hpm update` that ships a new panel config performs,
+     * underneath a running panel -- read as "hide" and withdrew the top panel
+     * and the taskbar.  The panel process stayed alive, kept looping, kept
+     * logging "config reload applied: 2 panel(s)", and owned two invisible
+     * windows: alive to anything counting processes, and a desktop with no
+     * panel to the person in front of it.  Offscreen repro:
+     * tests/linux/de_panel_reload_windows.sh.
+     *
+     * A bare "hide" (no argument) still means hide, and a bare "show" still
+     * means show, so a client that has never passed an argument is unaffected:
+     * take_int answers -1 when there is no number, which is the "no argument"
+     * case, not 0. */
     if (n >= 4 && !strncmp(s, "hide", 4)) {
-        wr(WR_ATTR, n); v->visible = 0; shm->gen++; return;
+        wr(WR_ATTR, n);
+        p = 4; int32_t hv = take_int(s, &p, n);
+        v->visible = (hv == 0) ? 1 : 0;
+        shm->gen++; return;
     }
     if (n >= 4 && !strncmp(s, "show", 4)) {
-        wr(WR_ATTR, n); v->visible = 1; shm->gen++; return;
+        wr(WR_ATTR, n);
+        p = 4; int32_t sv = take_int(s, &p, n);
+        v->visible = (sv == 0) ? 0 : 1;
+        shm->gen++; return;
     }
     if (n >= 1 && s[0] == 'z') {
         wr(WR_GEOM, n);
