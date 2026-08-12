@@ -58,6 +58,7 @@ extern def hvk_available() -> int32
 extern def hvk_device_name(buf: Ptr[uint8], cap: int32) -> int32
 extern def hvk_device_type() -> int32
 extern def hvk_frame_is_device_local() -> int32
+extern def hvk_frame_is_host_cached() -> int32
 extern def hvk_frame_create(w: int32, h: int32, bgra: int32) -> uint64
 extern def hvk_frame_base() -> uint64
 extern def hvk_frame_width() -> int32
@@ -138,6 +139,15 @@ def vk_linux_frame_device_local() -> int32:
     # 1 iff the mapped frame is ALSO device-local memory. 0 means the shader
     # writes it across the host bus; see the header.
     return hvk_frame_is_device_local()
+
+
+def vk_linux_frame_host_cached() -> int32:
+    # 1 iff the mapped frame is HOST_CACHED, i.e. iff the CPU can READ the
+    # composite at ordinary RAM speed. For a compositor this is the number that
+    # matters and device-local is not: measured on an RTX 3090, memcpy of the
+    # 4 MiB composite out of a device-local (BAR) frame is 88 ms and out of a
+    # host-cached one is 0.22 ms. A 0 here means every present pays the bus.
+    return hvk_frame_is_host_cached()
 
 
 def vk_linux_frame_create(w: int32, h: int32, bgra: int32) -> uint64:

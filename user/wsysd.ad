@@ -104,10 +104,26 @@
 # off (that is how a machine with a GPU that turns out to be slower, or a
 # driver that misbehaves, is recovered without a rebuild).
 #
-# ZERO COPY. vk_linux_frame_alloc() returns the mapped address of the
-# GPU-resident frame, and THE COMPOSITE IS BOUND TO IT (comp_base, below).
-# So a routed frame costs no upload and no readback: the shader writes the
-# same bytes present() then hands to /dev/fb. The router in lib/vk/vk_2d.ad
+# ZERO COPY, AND WHY IT IS NOT THE SAME THING AS FAST.
+# vk_linux_frame_alloc() returns the mapped address of the GPU frame, and THE
+# COMPOSITE IS BOUND TO IT (comp_base, below). So a routed frame costs no
+# upload and no readback: the shader writes the same bytes present() then hands
+# to /dev/fb.
+#
+# That binding was measured 13x SLOWER than the software rasterizer, and the
+# reason was WHERE the frame lived, not that it was shared. It was allocated
+# DEVICE_LOCAL, which on a discrete card with no resizable BAR is the PCIe BAR
+# aperture: host-mappable, so nothing failed or warned, and uncached, so the
+# CPU read it at 0.05 GB/s. present_rows() write(2)s the whole composite to
+# /dev/fb and cursor_save_under() reads it directly -- a compositor reads its
+# own composite EVERY frame -- so 0.16 ms of copy became 67 ms of bus.
+#
+# The frame is now placed in HOST_CACHED memory. The shader's writes cross
+# PCIe instead, which is the trade, and it is a good one because it is not
+# symmetric: a GPU write across PCIe is POSTED and the device does not stall on
+# it, while a CPU read of VRAM is a synchronous round trip. Measured on an
+# RTX 3090, the same 4 MiB copy-out: 88.0 ms device-local, 0.22 ms host-cached.
+# The startup line says which one this machine got; the router in lib/vk/vk_2d.ad
 # is armed only for that one surface, which is why the full-screen backdrop
 # (the window that rasterizes STRAIGHT into the composite, and the bulk of
 # the pixels in a real session) is what reaches the device, while a small
@@ -134,6 +150,7 @@ from lib.vk.vk_core import vk_set_backend, vk_linux_frame_alloc, \
     VK_BACKEND_LINUX, VK_BACKEND_SW, VK_SUCCESS
 from lib.vk.vk_linux import vk_linux_device_name, vk_linux_device_type, \
     vk_linux_device_is_silicon, vk_linux_frame_device_local, \
+    vk_linux_frame_host_cached, \
     vk_linux_frame_begin, vk_linux_frame_end, vk_linux_frame_sync, \
     vk_linux_fill_rect, vk_linux_roundrect, vk_linux_line, \
     vk_linux_blit, vk_linux_glyph, \
@@ -829,6 +846,8 @@ vk_armed:      int32 = 0        # the device is up AND we chose to use it
 vk_forced:     int32 = 0        # 1 = armed by override, -1 = refused by override
 vk_zero_copy:  int32 = 0        # the composite IS the GPU frame
 vk_devlocal:   int32 = 0        # ... and that frame is device-local memory
+vk_hostcached: int32 = 0        # ... and the CPU can READ it at RAM speed,
+                                # which is the one that decides present's cost
 vk_frames_gpu: int32 = 0        # frames the device actually rasterized
 vkname:        Array[256, uint8]
 
@@ -900,6 +919,7 @@ def vk_arm():
     comp_base = fb
     vk_zero_copy = 1
     vk_devlocal = vk_linux_frame_device_local()
+    vk_hostcached = vk_linux_frame_host_cached()
     vk_armed = 1
     if sil == 0:
         vk_forced = 1
@@ -911,16 +931,25 @@ def vk_arm():
     putd(1, sil)
     puts(1, ", zero-copy 1, device-local ")
     putd(1, vk_devlocal)
+    puts(1, ", host-cached ")
+    putd(1, vk_hostcached)
     puts(1, ")")
     if vk_forced == 1:
         puts(1, " [forced on by HAMNIX_WSYSD_VK; NOT the default here]")
     puts(1, "\n")
-    if vk_devlocal == 0:
-        # docs/hambrowse_gpu_render.md: on a discrete GPU with no resizable
-        # BAR the shader reaches this frame over PCIe and a 17x win collapses
-        # to ~1.1x. Say it rather than let a later measurement be a surprise.
-        puts(1, "wsysd: vk WARNING the GPU frame is NOT device-local")
-        puts(1, " -- the shader reaches it across the host bus\n")
+    if vk_hostcached == 0 and vk_devlocal != 0:
+        # THIS is the configuration that measured 13x slower than software, and
+        # for two years it printed as the GOOD one. present_rows() and the
+        # cursor save-under read the composite from the CPU every frame, and
+        # out of a device-local mapping on a discrete card that read is 88 ms
+        # per 4 MiB. Say so, loudly, because the old warning fired on exactly
+        # the opposite condition and this arrangement went unremarked.
+        puts(2, "wsysd: vk WARNING the GPU frame is device-local and NOT")
+        puts(2, " host-cached -- every present reads it back across PCIe;")
+        puts(2, " expect ~88 ms/frame. Set HAMNIX_VK_FRAME_MEM=cached.\n")
+    if vk_hostcached == 0 and vk_devlocal == 0:
+        puts(2, "wsysd: vk WARNING the GPU frame is neither device-local nor")
+        puts(2, " host-cached -- uncached host memory, ~10 ms/frame to read\n")
 
 
 # ---- the five op hooks lib/vk/vk_2d.ad calls ------------------------------
@@ -2906,6 +2935,10 @@ def run_bench(n: int32):
     putd(1, vk_zero_copy)
     puts(1, " device_local ")
     putd(1, vk_devlocal)
+    # The placement is in the bench line because it is the single largest term
+    # in `present` and a sweep that cannot see it cannot explain its own graph.
+    puts(1, " host_cached ")
+    putd(1, vk_hostcached)
     puts(1, "\n")
     if vk_frames_gpu > 0:
         g: uint64 = cast[uint64](vk_frames_gpu)

@@ -1086,6 +1086,16 @@ int32_t hvk_device_type(void) { return (int32_t)g_devtype; }
  * CPU. Callers should treat 0 as "measure before trusting". */
 int32_t hvk_frame_is_device_local(void) { return g_fdevlocal ? 1 : 0; }
 
+/* 1 iff the frame landed in HOST_CACHED memory -- i.e. iff the CPU can read
+ * the composite at ordinary RAM speed. This is the number that decides whether
+ * present_rows() costs 0.2 ms or 88 ms, so it is reported separately from
+ * device-local rather than inferred from it: on this card the two are mutually
+ * exclusive, and the one that matters for a compositor is THIS one. */
+int32_t hvk_frame_is_host_cached(void)
+{
+    return (g_fflags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? 1 : 0;
+}
+
 /* Create (or resize) the GPU-resident frame and return its mapped address, or
  * 0. The pointer is stable until the next size change: hand it to the vk color
  * image / compositor shadow and the whole path is copy-free. `bgra` selects
@@ -1102,10 +1112,31 @@ uint64_t hvk_frame_create(int32_t w, int32_t h, int32_t bgra)
     if (g_fmem) { p_vkFreeMemory(g_dev, g_fmem, 0); g_fmem = 0; }
     void* m = 0;
     VkDeviceSize sz = (VkDeviceSize)w * (VkDeviceSize)h * 4u;
-    if (make_storage_buffer(sz, 1, &g_fbuf, &g_fmem, &m, &g_fdevlocal)) {
+    /* THE PLACEMENT DECISION, and it is not the obvious one.
+     *
+     * This buffer used to ask for DEVICE_LOCAL unconditionally, on the
+     * reasoning that the shader should reach the frame at device speed. On a
+     * discrete card with no resizable BAR that lands it in the 256 MiB BAR
+     * aperture, which IS host-mappable -- so nothing fails, nothing warns, and
+     * every CPU read of the composite becomes an uncached PCIe round trip.
+     * wsysd reads the whole composite every frame, because present_rows()
+     * write(2)s it to /dev/fb and the cursor save-under reads it directly, so
+     * that decision cost 67 ms per frame and made the GPU path 13x SLOWER than
+     * the software rasterizer. See the placement table above
+     * make_storage_buffer for the measured 393x.
+     *
+     * The frame is therefore placed HOST_CACHED by default. The shader's
+     * writes then cross PCIe, but a GPU write across PCIe is POSTED -- it is
+     * fire-and-forget and the device does not stall on it -- whereas a CPU
+     * read of VRAM is a synchronous round trip with no prefetch. The two
+     * directions are not symmetric, and that asymmetry is the whole fix. */
+    hvk_tunables();
+    if (make_storage_buffer(sz, g_frame_place, &g_fbuf, &g_fmem, &m,
+                            &g_fdevlocal)) {
         g_fw = g_fh = 0;
         return 0;
     }
+    g_fflags = g_last_place_flags;
     g_fmap = (uint8_t*)m;
     g_fw = w;
     g_fh = h;

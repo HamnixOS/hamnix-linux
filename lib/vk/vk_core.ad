@@ -124,6 +124,7 @@ from lib.vk.vk_linux import (
     vk_linux_fill_rect, vk_linux_roundrect, vk_linux_line,
     vk_linux_blit, vk_linux_glyph,
     vk_linux_device_is_silicon, vk_linux_frame_device_local,
+    vk_linux_frame_host_cached,
     vk_linux_last_submit_us,
 )
 
@@ -1254,13 +1255,25 @@ def vk_linux_raster_enabled() -> int32:
 
 def vk_linux_frame_alloc(w: uint64, h: uint64, bgra: int32) -> uint64:
     # THE ZERO-COPY ENTRY POINT for the compositor. Allocate the frame from
-    # the GPU (host-visible, device-resident where the hardware allows) and
-    # bind the vk color image / DE shadow to the address it returns. When the
-    # render target IS this buffer, a routed frame costs no upload and no
-    # readback; when it is not, the router still works but pays one full-frame
-    # copy out per frame — at 1280x800 that copy is 4 MiB, which is more than
-    # the whole software rasterization budget, so the copy-free binding is the
-    # difference between a win and a loss. Returns 0 if the backend is absent.
+    # the GPU (host-visible, in HOST_CACHED memory by default) and bind the vk
+    # color image / DE shadow to the address it returns. When the render target
+    # IS this buffer, a routed frame costs no upload and no readback; when it
+    # is not, the router still works but pays one full-frame copy out per frame
+    # — at 1280x800 that copy is 4 MiB, which is more than the whole software
+    # rasterization budget. Returns 0 if the backend is absent.
+    #
+    # ZERO COPY IS NOT THE SAME THING AS CHEAP, and that mistake cost this
+    # project 67 ms a frame. This buffer used to be allocated DEVICE_LOCAL, so
+    # the binding really was copy-free — and the composite lived in the PCIe
+    # BAR, where the CPU reads it at 0.05 GB/s. A compositor reads its own
+    # composite every single frame (present, and the cursor save-under), so
+    # "no copy" bought one avoided upload and sold an 88 ms uncached read.
+    # Placement is now HOST_CACHED; see user/linux-vk.c's placement table, and
+    # ask vk_linux_frame_host_cached() what you actually got.
+    #
+    # `bgra` = 1 selects B8G8R8A8 store order. It is NOT a placement flag,
+    # despite being the third argument next to two sizes — passing 0 there
+    # paints the desktop with red and blue swapped.
     if vk_linux_backend_available() == 0:
         return 0
     return vk_linux_frame_create(cast[int32](w), cast[int32](h), bgra)
