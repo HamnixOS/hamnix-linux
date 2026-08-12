@@ -1286,14 +1286,43 @@ same failure this project exists to beat.
   `win[].pid`. The memfd is sealed `F_SEAL_SHRINK|GROW|SEAL` before it is ever
   passed, and the receiver re-checks the seals — a receiver that maps a file the
   sender can shrink takes SIGBUS, and the receiver here paints the whole screen.
-  **ON A CLOCK, NOT ON A COMMIT COUNT**, and the first draft had the hole a
-  person would meet on an ordinary day: a compositor that RESTARTS gets a
-  window's descriptor only when that window commits again, and a window sitting
-  still never commits again — so the desktop would come back with the wallpaper
-  painted and the person's terminal a blank rectangle, for ever, with nothing on
-  stderr. Every owned window is now offered every 500 ms while unheld and
-  re-announced every 3 s, driven from every wsys call (an idle client still
-  drains its rings on its 250 ms park), gated on one vDSO `clock_gettime`.
+  **ON THE PARK, AND THAT TOOK FOUR TRIES — every one of them a signal
+  delivered to something that had stopped listening, and every one found by ONE
+  gate.** `tests/linux/wsys_image.sh` is the only gate whose client **draws once
+  and stops**: `hamimgscene` uploads its photograph, commits, parks. Every other
+  gate's client keeps drawing, so every other gate was **green over three
+  defects stacked on each other** while the screen was empty.
+  *(a)* A commit COUNT was the first draft, and a window sitting still never
+  commits again — so a compositor that started late or restarted would leave it
+  blank for ever. Replaced by a clock: every owned window offered every 500 ms
+  while unheld, re-announced every 3 s, gated on one vDSO `clock_gettime`.
+  *(b)* But driving that clock **from wsys calls covers a client that is drawing
+  and misses the one that has stopped** — a parked application makes no wsys
+  call again, and `wsysd` only binds the rendezvous when it first reads a
+  foreign scene, which needs a window to exist, so late binding is the ORDINARY
+  case. `sys_waitfds` is where every such program is: not somewhere convenient,
+  the one call a client doing nothing at all still makes (`hamwsys_tick`).
+  *(c)* **AND THE TWO SIDES DEADLOCKED.** `wsysd` repaints when the frame
+  signature moves, reads a scene only when it repaints, and drained the listener
+  only when it read a scene — so a descriptor arriving after the frame in which
+  the window was refused is never accepted, nothing changes, nothing repaints,
+  nothing drains. Measured: the client's second hand-up **connected and
+  succeeded** and the compositor never accepted it. The park breaks the cycle
+  because the park is the one thing both sides do while idle.
+  *(d)* **And then the counter bumped was not the one anybody watches.**
+  `shm->gen++` on install moved a number `user/wsysd.ad`'s `frame_signature()`
+  does not hash — it is an FNV over the WINDOWS (geometry, z, title,
+  `scene_gen`, `bbgen`, `imggen`) and `shm->gen` is not in it at all. It is the
+  ROW's `scene_gen`, which is also right on its meaning: the row was advertising
+  a frame that could not be fetched and now advertises one that can.
+  **AND THE OTHER THING ONE GATE CAUGHT: a v2 window NEVER COMMITS A SCENE.**
+  It renders its own surface and submits blits, so its scene read has always
+  been a 0-byte success — and the hand-up turned that into a named refusal,
+  which `paint_window` bails on (`if (n < 0) return 0`) **before it ever reaches
+  `paint_backbuffer`**. Every browser, video and rootless X client would have
+  stopped being painted by a confidentiality change to a path none of them use.
+  A refusal is now reserved for the case that really is one: a window that HAS
+  published a frame (`scene_gen > 0`) this process cannot fetch.
   **`WSYS_VERSION` 7 → 8**, the second bump where the layouts agree completely
   and only the MEANING differs. **What it costs a running desktop is now "the
   new program fails", not "the desktop dies"**: A LIVE SESSION IS NOT A LEFTOVER
@@ -1347,12 +1376,22 @@ same failure this project exists to beat.
   sparse segment outside its own temp directory on every run, and its
   `rm -f "$HAMWSYS".bb` removed a file nothing had ever made.
   Green with it: `wsys_uidgate`, `wsys_keychan`, `wsys_write_census` 10,
-  `wsys_title` **29**, `de_mouse_chrome` 13, `de_focus_dismiss` 14,
-  `wsys_desktop_z` 12, `de_icons_distinct` 15, `de_appmenu_brisk` 17,
-  `wsyswl_conn_ceiling` 30 — and `wsys_title`'s 29 are the end-to-end proof that
-  a real compositor still paints real client windows, because every one of them
-  is a pixel count in the framebuffer downstream of a display list that now
-  arrives over this channel.
+  `wsys_title` **29**, `wsys_image` **8**, `wsys_keyed` 8, `wsys_cover` 7,
+  `de_mouse_chrome` 13, `de_focus_dismiss` 14, `wsys_desktop_z` 12,
+  `de_icons_distinct` 15, `de_appmenu_brisk` 17, `de_idle_cpu` 9,
+  `wsyswl_conn_ceiling` 30, `wsyswl_ceiling` 11, `wsyswl_rootless` 37.
+  **THE END-TO-END PROOF IS THE PIXEL GATES, NOT THE BYPASS GATE.**
+  `wsys_title`'s 29 and `wsyswl_ceiling`'s 36 painted windows are counts of
+  framebuffer pixels downstream of a display list that now arrives over this
+  channel; they are what would go red if the hand-up did not work, and
+  `wsys_bypass.sh` would not. And all of those except `wsys_image` are ALSO
+  green on the reverted library — they are regression guards, not evidence for
+  the change, and the evidence for the change is `hostowner.pixgrab`'s
+  `fds=2` against the reverted run's `fds=0`.
+  `tests/linux/channel_covers_image.sh` was NOT run: it needs
+  `build/image/root`, which this worktree has never built, and this pass adds no
+  binary and changes no package file list (only the hamnix-desktop hook's
+  message text), so it has nothing here to catch. Run it before publishing.
 
 * **THE KEYLOGGER IS CLOSED: a window's keystrokes are not in the shared
   segment any more.** This was the whole of attack 4 — a uid-1001 process opened
