@@ -131,6 +131,21 @@ def main():
             time.sleep(0.25)
             q.send([{'type': 'btn', 'data': {'down': False, 'button': 'left'}}])
         print('%s %d,%d -> abs %d,%d' % (op, x, y, ax, ay))
+    elif op in ('press', 'release'):
+        q.send([{'type': 'btn',
+                 'data': {'down': op == 'press', 'button': 'left'}}])
+        print(op)
+    elif op == 'wheel':
+        # QEMU delivers wheel-up/wheel-down as BUTTON events on its own bus
+        # and its virtio-input device turns them into EV_REL/REL_WHEEL, which
+        # is the branch `wsysd`'s pump_input accumulates into ptr_dz.
+        which = 'wheel-up' if sys.argv[3] in ('up', '1') else 'wheel-down'
+        n = int(sys.argv[4]) if len(sys.argv) > 4 else 3
+        for _ in range(n):
+            q.send([{'type': 'btn', 'data': {'down': True, 'button': which}}])
+            q.send([{'type': 'btn', 'data': {'down': False, 'button': which}}])
+            time.sleep(0.15)
+        print('wheel %s x%d' % (which, n))
     elif op == 'type':
         text = sys.argv[3]
         for ch in text:
