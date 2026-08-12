@@ -28,7 +28,7 @@ rather than argued:
 | Input | every `/dev/input/event*`, decoded in the compositor, routed to the focused window in window-local coordinates — **and the DE chrome actually reacts to a mouse, which for the whole port before this it did not.** This row read exactly as it does now while the Applications button, the desktop icons and every panel control were completely dead to a click: the compositor routed to `<wid>/pointer` and the chrome reads `<wid>/event`, and nothing bridged them. That is the warning this row now carries — "input is routed" was a true sentence about a desktop nobody could use. Proven from the evdev end by `tests/linux/de_mouse_chrome.sh` (13 PASS), which is forbidden to write a ring by hand and asserts that about itself, because writing the ring by hand as host owner is precisely what every earlier gate did and precisely why this went unseen. **Focus lines are still not emitted at all** (no `f in`/`f out`), so clicking away does not dismiss an open menu — see the running list. |
 | Desktop | `hamdesktop` + `hampanelscene`, unmodified. Launch a terminal from the menu, type in it, get output. |
 | Session | `login` → `/dev/auth` (real `/etc/shadow` + `crypt_r`) → `setuid 1001`. The session is unprivileged; the compositor and chrome are not. |
-| Access control | devwsys's uid gate is ported: `live` cannot drive system-chrome ctl verbs, and can still map and draw its own window. `tests/linux/wsys_uidgate.sh`. The chrome state lives in a SECOND segment, `/srv/wsys.chrome`, 0644 and host-owner-owned, so for chrome the file mode is the gate and the kernel enforces it against programs that skip the protocol. `tests/linux/wsys_bypass.sh`. |
+| Access control | devwsys's uid gate is ported: `live` cannot drive system-chrome ctl verbs, and can still map and draw its own window. `tests/linux/wsys_uidgate.sh`. The chrome state lives in a SECOND segment, `/srv/wsys.chrome`, 0644 and host-owner-owned, so for chrome the file mode is the gate and the kernel enforces it against programs that skip the protocol. `tests/linux/wsys_bypass.sh` (42 ok). **AND ONE OF THE USER'S OWN PROGRAMS CAN NO LONGER READ ANOTHER'S KEYSTROKES**, which no file mode could ever have fixed — see the running list. |
 | Networking | `/net` as a file tree, TCP/UDP/ICMP, TLS, `announce`/`accept` across process boundaries, and DHCP (`user/dhcpc.ad`) |
 | Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1. **The update loop is proven end to end**: install at 1.0.2 from the live repo, a newer build lands, `hpm update`, the upgraded binary still runs. No re-image anywhere in it. |
 | Wayland | `user/wsyswl.ad`, a Wayland compositor in Adder. Firefox runs as a native Wayland client with its menus as separate windows; XWayland carries X11 clients. |
@@ -821,6 +821,96 @@ same failure this project exists to beat.
   refuted as a rule — on the fills frame the shipped batching is 20% slower
   than one dispatch per op, because a batch pads its grid to the max over its
   entries.
+* **THE KEYLOGGER IS CLOSED: a window's keystrokes are not in the shared
+  segment any more.** This was the whole of attack 4 — a uid-1001 process opened
+  `/srv/wsys` `O_RDONLY`, mapped it `PROT_READ` and read a uid-1001 victim's
+  typing out of its `keys` ring without moving `r` or `w`, so the victim received
+  every keystroke normally and could not tell. No file mode could close it: the
+  table must stay world-READABLE because `/dev/wsys/windows` is the panel
+  taskbar's input. **The bytes left the mapping.** A window's keystrokes now
+  travel as datagrams to a per-window ABSTRACT `AF_UNIX` address that the OWNER
+  binds at `newwindow`, and the ring in `struct wwin` is dead storage.
+  **THE RECORDED FIX WAS WRONG, AND IT WAS MEASURED BEFORE IT WAS BUILT ON.**
+  THE SPLIT's tier 2 said "a memfd has no name in the filesystem, so there is no
+  path for a bypasser to open ... the only construction that closes attack 4".
+  **`/proc/<pid>/fd/<n>` is a path**, it is openable by any process of the same
+  uid, and same-uid is the entire threat model — measured: `open=3`, `mmap
+  PROT_READ`, `1 PASSWORD31337` read straight back out of the victim's memfd.
+  Built as recorded, tier 2 would have moved the keylogger one directory deeper
+  and called it shut. A socket has the property the memfd was believed to have:
+  a socket inode **cannot be opened through `/proc` at all** (ENXIO), so the only
+  way to receive what is sent to a bound address is to BE the process that bound
+  it. It is also what NORTH_STAR asks for in as many words — *what crosses a
+  process boundary is a NAME or a NUMBER, never a descriptor* — where
+  `SCM_RIGHTS` is exactly a descriptor.
+  **WHO MAY DELIVER A KEYSTROKE IS THE KERNEL'S ANSWER, not a field in a
+  world-writable table.** Abstract sockets have no mode and the name is derived
+  from public facts (the segment's `st_dev`/`st_ino` and the wid), so anybody can
+  address one. The RECEIVER drops every datagram the kernel did not stamp
+  (`SO_PASSCRED`/`SCM_CREDENTIALS`) with the segment owner's uid — root on a real
+  boot. **That closes attack 3 for this ring as well, against a SAME-UID
+  attacker**, which is the case no file mode can reach. Nothing in the path reads
+  `win[].pid`, which is why this is not the "title-only RPC" THE SPLIT rules out
+  as unsound: the spoofable ownership record is not consulted at all.
+  **FIRST BINDER WINS AND A LOSER FAILS LOUDLY.** `bind` on a taken abstract name
+  is `EADDRINUSE` and there is no unlink, so the owner's claim cannot be taken
+  from it — but an attacker may pre-bind future wids, since `next_wid` is
+  readable. Then `newwindow` FAILS BY NAME on stderr and no window is created: a
+  silent keylogger becomes a loud denial of service, and denial of service by a
+  same-uid process was already free (residue (c): anyone may exhaust the table).
+  **`WSYS_VERSION` 6 → 7**, and this is the first bump where `struct wshm` and
+  `struct wwin` are BYTE-FOR-BYTE unchanged and only the MEANING differs — which
+  is precisely the case the counter exists for. A v6 binary in a v7 session would
+  find a well-formed table, write a keystroke into the dead ring and deliver it
+  to nobody, and a v6 client would park on that ring for ever reporting no
+  keyboard: a silent half-share. It re-initialises instead, which costs the
+  previous session's windows — loud — and is what a live `hpm update` of the
+  window system has always meant. **No new binary and no package-channel
+  change**: the channel is code in `user/linux-wsys.c`, which every wsys program
+  already links.
+  **WHAT AN ATTACKER CAN STILL DO**, named rather than left to be found: SCRAPE
+  another window's committed scene and backbuffer, ENUMERATE every row's wid,
+  pid, geometry and title, and CORRUPT any of it — attacks 1 and 2 are untouched
+  and their positive controls still pass. One ring of five moved, and it is the
+  one that carries passwords. `pointer`/`event`/`text`/`cmd` are unchanged; the
+  mechanism is one call per ring away if that judgement ever stops holding.
+  **AND THE ONE NOTHING IN USERLAND CAN CLOSE:** `/proc/sys/kernel/yama/
+  ptrace_scope` is **0** on the dev host and is set NOWHERE in this tree, so a
+  same-uid attacker can `PTRACE_ATTACH` the victim and read its memory directly —
+  past this, past a memfd, past anything. `PR_SET_DUMPABLE(0)` in the victim
+  refuses it (measured), and so does `ptrace_scope 1` in `linuxinit`. That is a
+  boot-policy decision and it is named here rather than taken.
+  **THE GATES.** `tests/linux/wsys_bypass.sh` is **42 ok**, and the three
+  controls that closed are **INVERTED, not deleted** — the snooper still runs
+  unchanged, still maps the table read-only, still finds the row and still
+  scrapes the scene, and now asserts the password is NOT there. It drives a new
+  attack too (`keysend`), from BOTH uids, because a refusal with no matching
+  success proves only that the address was wrong. Reverted to the pre-change
+  library it is **33 ok / 8 FAIL**. `tests/linux/wsys_keychan.sh` (**17 ok**, no
+  VM, seconds) is the memfd finding and the kernel facts, kept as a measurement.
+  **THE GATE CAUGHT ITSELF, twice, and both were the same shape.** The victim now
+  drains its own ring — it has to, since only the owner can receive — and a drain
+  is DESTRUCTIVE: with the witness draining every 100 ms the snooper had nothing
+  left to read, and the gate went **GREEN ON THE REVERTED RUN**, reporting that
+  the keystrokes were not in the mapping about a hole that was wide open. The
+  holders now read nothing until the harness sets a drain flag, after every
+  attack has been driven. Two orderings had the same defect: one reader was
+  consuming the answer to another assertion's question. And the *first* reverted
+  run was not a revert at all — `git stash push` on an already-committed change
+  stashes nothing and exits happy.
+  **`tests/linux/input_probe.sh` changed shape rather than being weakened**: it
+  drove real evdev records through `wsysd` and then asked a SEPARATE process what
+  had been routed to wid 2. That question has no honest answer from a stranger
+  now, so the window's OWNER reports its own keys and the pointer reader is
+  unchanged. It is the end-to-end proof the desktop still works: real evdev →
+  `route_key` → datagram → the owner's socket, `KEY_A` arriving as ASCII 97.
+  Green with it: `wsys_uidgate`, `wsys_title` 23, `wsys_keyed` 8,
+  `de_mouse_chrome` 13, `de_focus_dismiss` 14, `wsys_desktop_z` 12,
+  `wsys_close_button` 10, `wlsnarf_bridge` 35, `wsys_write_census` 10,
+  `wsyswl_conn_ceiling` 27, `wsyswl_wheel` 16 (the documented `distro.ext4` skip),
+  and `de_idle_cpu` ALL PASS with a terminal open — which is the one that would
+  have caught a park turned into a spin.
+
 * **The wsys window table is still world-writable, though the chrome is not.**
   `/dev/wsys` was one 0666 segment, so a program that mmapped `/srv/wsys`
   directly bypassed the uid gate entirely — measured: as uid 1001 it
@@ -833,7 +923,9 @@ same failure this project exists to beat.
   must stay 0666 or an unprivileged client cannot map its own window: a
   bypasser can still retitle another client's window or scribble its scene.
   **AND A FOURTH ATTACK, WHICH NEEDS NO WRITE AT ALL, so no file mode and no
-  write-side authority can close it.** The three attacks the gate already drove
+  write-side authority can close it.** (ITS KEYSTROKE HALF IS NOW CLOSED — see
+  the entry above; what follows is the finding as it stood, and the scene and the
+  row still leak exactly as described.) The three attacks the gate already drove
   are integrity and each needs `PROT_WRITE`; the table must also stay
   world-*readable*, because `/dev/wsys/windows` is the panel taskbar's input.
   That alone is enough: measured, a uid-1001 process opens the table

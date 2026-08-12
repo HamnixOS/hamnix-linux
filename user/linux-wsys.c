@@ -898,13 +898,18 @@ static char chrome_path[576];
  * PROT_WRITE — which is why the 0644 chrome segment stops them dead.  The
  * fourth is CONFIDENTIALITY and needs nothing but O_RDONLY:
  *
- *     KEYLOG     the bytes between another window's `keys` ring r and w are
- *                that window's keystrokes.  wsys_bypass.sh's `snoop` reads a
- *                uid-1001 victim's typing out of a uid-1001 attacker, WITHOUT
- *                moving r or w, so the victim receives every keystroke normally
- *                and has no way to notice.  Measured, not argued.
- *     SCRAPE     another window's committed `scene` is what is drawn inside it.
- *     ENUMERATE  every row's wid, pid, geometry and title.
+ *     KEYLOG     CLOSED.  The bytes between another window's `keys` ring r and
+ *                w USED to be that window's keystrokes, and wsys_bypass.sh's
+ *                `snoop` read a uid-1001 victim's typing out of a uid-1001
+ *                attacker without moving r or w.  Keystrokes are not in this
+ *                mapping any more — THE KEYSTROKE CHANNEL, below — and the ring
+ *                is dead storage.  The snooper is unchanged and still runs; its
+ *                assertion is INVERTED, not deleted, so the day anything puts
+ *                keystrokes back in the segment the gate says so.
+ *     SCRAPE     STILL OPEN.  Another window's committed `scene` is what is
+ *                drawn inside it.  This is the rest of tier 2.
+ *     ENUMERATE  STILL OPEN, and unfixable while the taskbar reads this table:
+ *                every row's wid, pid, geometry and title.
  *
  * And the table HAS to stay world-readable: /dev/wsys/windows is the panel
  * taskbar's input (user/hampanelscene.ad:_refresh_windows), and a uid-1001
@@ -971,16 +976,39 @@ static char chrome_path[576];
  *     below: the ownership record itself is in the tier the attacker cannot
  *     write, so the check is worth something.  15 writes a session.
  *
- *   TIER 2 — PER-WINDOW PRIVATE memory, one memfd per window, created by wsysd
- *     at `newwindow` and passed to the creating client over SCM_RIGHTS.  scene,
- *     stage, the five rings, the v2 backbuffer, the named images.  A memfd has
- *     no name in the filesystem, so there is no path for a bypasser to open:
- *     this is the only construction that closes attack 4, because it is the
- *     only one where a non-owner cannot MAP the bytes at all.  wsysd keeps
- *     every fd (it composites, and it writes routed input into the rings); the
- *     owner keeps its own.  Nothing on this tier ever touches the RPC — the
- *     34.6/s above, and the megabytes/s a browser adds, stay exactly as fast as
- *     they are today.
+ *   TIER 2 — PER-WINDOW PRIVATE memory.  scene, stage, the rings, the v2
+ *     backbuffer, the named images: bytes a non-owner must not be able to map.
+ *     Nothing on this tier ever touches the RPC — the 34.6/s above, and the
+ *     megabytes/s a browser adds, stay exactly as fast as they are today.
+ *
+ *     THE KEYS RING IS DONE, and NOT the way the next paragraph used to say.
+ *     It is a per-window abstract AF_UNIX datagram address the owner binds, with
+ *     delivery authorised by the kernel's SCM_CREDENTIALS stamp.  See THE
+ *     KEYSTROKE CHANNEL further down this file for the construction, and
+ *     tests/linux/wsys_keychan.sh for the measurement.
+ *
+ *     WHAT THIS PARAGRAPH USED TO SAY, AND WHY IT WAS WRONG, kept because the
+ *     error is instructive and would otherwise be made again: "one memfd per
+ *     window, created by wsysd at `newwindow` and passed to the creating client
+ *     over SCM_RIGHTS.  A memfd has no name in the filesystem, so there is no
+ *     path for a bypasser to open: this is the only construction that closes
+ *     attack 4."  /proc/<pid>/fd/<n> IS a path.  It is openable by any process
+ *     of the same uid, and same-uid is the entire threat model.  Measured:
+ *     open=3, mmap PROT_READ, `1 PASSWORD31337` read straight back out of the
+ *     victim's memfd.  Built as recorded, tier 2 would have moved the keylogger
+ *     one directory deeper and called it closed.  It was an argument that had
+ *     never been run, in a file whose own rule is that a measurement is worth
+ *     more than one.
+ *
+ *     WHAT REMAINS OF TIER 2 — the scene, the stage, the backbuffer and the
+ *     images.  Those are BYTES A COMPOSITOR MUST READ AT FRAME RATE, so they
+ *     cannot be datagrams and a memfd really is the right shape for them.  The
+ *     missing piece is therefore the /proc remedy, and it is measured and
+ *     waiting in the same gate: prctl(PR_SET_DUMPABLE, 0) in every window
+ *     owner turns that open into EACCES, makes /proc/<pid>/fd unlistable, and
+ *     refuses ptrace as well.  It is a per-process property, so it belongs with
+ *     whatever hands the memfd out, and it costs core dumps and same-uid
+ *     debugging of DE clients — which is a decision, not a detail.
  *
  *   TIER 3 — /srv/wsys.chrome, 0644, unchanged.  Already correct.
  *
@@ -1006,9 +1034,28 @@ static char chrome_path[576];
  *      construction.  "No screen scraping" is NOT what tier 2 buys; "no reading
  *      another client's window" is.
  *
- * WHY IT IS STILL NOT BUILT IN THIS PASS.  Not the hot path — that turned out
- * to be affordable, and this comment used to say otherwise on no evidence.  The
- * blockers are the ones the measurement exposed rather than removed:
+ * WHY TIER 1 IS STILL NOT BUILT, and how the keys ring got past all three of
+ * these blockers without it.  Not the hot path — that turned out to be
+ * affordable, and this comment used to say otherwise on no evidence.
+ *
+ * WHAT THE KEYSTROKE CHANNEL DID INSTEAD OF WAITING FOR TIER 1, because the
+ * three blockers below are real and it went around every one of them rather
+ * than through: it needs NO daemon (the owner binds its own address and the
+ * only sender is the compositor that already writes the ring), NO new binary
+ * (it is code in this file, which every wsys program already links), and NO
+ * field removed from struct wwin (the ring stays as dead storage, so the layout
+ * is byte-for-byte frozen).  What it does need is a version bump, for the one
+ * reason a version counter exists: the layouts agree and the MEANING does not.
+ *
+ * AND IT IS NOT THE "TITLE-ONLY RPC" THE LAST PARAGRAPH BELOW RULES OUT, which
+ * is worth being precise about because the shape looks similar.  That is unsound
+ * because it authenticates against win[W].pid, a field in this 0666 table that
+ * the attacker can rewrite.  NOTHING in the keystroke channel reads win[].pid:
+ * the receiver is established by who holds the kernel's bind, and the sender by
+ * the kernel's credential stamp.  The spoofable ownership record is not in the
+ * path, so the check is worth what it claims to be worth.
+ *
+ * The blockers that remain, for TIER 1 and for the rest of tier 2:
  *   (1) TIER 2 IS AN ATTACH REWRITE, NOT A MOVE.  Today every process mmaps one
  *       named file and is done; afterwards it must connect to a daemon and be
  *       HANDED its window before it can draw a pixel.  Twenty test scripts in
@@ -1042,8 +1089,16 @@ static char chrome_path[576];
  *   moving tier 1, and tier 1 without tier 2 leaves the keylogger.  It is all
  *   of it or none, and half of it is a gate that looks shut and is not.
  *
- * So this pass lands the measurement and this design and does NOT half-build
- * the access control.  What IS closed, and by the kernel rather than by an if,
+ * WHAT THE PASS THAT BUILT THE KEYSTROKE CHANNEL LEFT OPEN, said plainly so it
+ * is not mistaken for the whole of tier 2: a same-uid attacker can still scrape
+ * another window's committed scene and its backbuffer, still enumerate every
+ * row, and still corrupt any of it (attacks 1 and 2 are untouched and their
+ * controls still pass).  What it can no longer do is read what is TYPED into
+ * another window, or put a keystroke into one.  That is one ring of five, and it
+ * is the one that carries passwords.
+ *
+ * So the earlier pass landed the measurement and this design and did NOT
+ * half-build the access control.  What IS closed, and by the kernel rather than by an if,
  * is the system chrome: a bypasser cannot lock the screen, queue a spawn, post
  * a notification, drive the app menu, or lie about the display geometry,
  * because the kernel refuses it PROT_WRITE on the 0644 file those live in.

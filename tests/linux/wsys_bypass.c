@@ -69,18 +69,29 @@
  * every write behind an authenticated RPC -- closes all three integrity attacks
  * and NOT ONE of these:
  *
- *   KEYLOG      read the bytes between another window's `keys` ring r and w.
- *               Those are that window's keystrokes: its password, as typed.
- *   SCRAPE      read another window's committed `scene`, which is what is on
- *               the screen inside it.
- *   ENUMERATE   read every row's wid, pid, geometry and title.
- *
- * That is why THE SPLIT's "all of it or none" is not rhetoric: the only thing
- * that closes these is per-window memory a non-owner cannot map at all, handed
- * out by the authority at window creation -- not a mode, not a gate, not an RPC
- * in front of a shared table.
+ *   KEYLOG      CLOSED.  It used to read the bytes between another window's
+ *               `keys` ring r and w -- that window's password, as typed.  Those
+ *               bytes are not in this mapping any more (THE KEYSTROKE CHANNEL in
+ *               user/linux-wsys.c) and the ring is dead storage.  This mode is
+ *               UNCHANGED and still runs: the harness's assertion is INVERTED,
+ *               so the day anything puts keystrokes back in the segment it says
+ *               so rather than quietly passing.
+ *   SCRAPE      STILL OPEN.  Another window's committed `scene`, which is what
+ *               is on the screen inside it.
+ *   ENUMERATE   STILL OPEN.  Every row's wid, pid, geometry and title.
  *
  *   wsys_bypass snoop <path> <wid=N|title-run> [tag]
+ *
+ * A FOURTH MODE, `keysend`, drives the attack the fix invites.  The channel that
+ * replaced the keys ring is an ABSTRACT AF_UNIX address; abstract sockets carry
+ * no file mode and the name is derived from public facts, so anybody can compute
+ * it and anybody can sendto() it.  What refuses an attacker is the KERNEL's
+ * SCM_CREDENTIALS stamp on each datagram, checked by the receiver against the
+ * segment's owner.  The mode is run from BOTH uids by the harness, because a
+ * refusal measured without a matching success proves only that the address was
+ * wrong.
+ *
+ *   wsys_bypass keysend <path> <wid> <line> [tag]
  */
 #define _GNU_SOURCE
 #include <errno.h>
