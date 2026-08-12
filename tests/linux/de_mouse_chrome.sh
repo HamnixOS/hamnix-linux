@@ -129,7 +129,15 @@ for t in wsysd:user/wsysd.ad \
          hampanelscene:user/hampanelscene.ad \
          wsys_poke:tests/linux/wsys_poke.ad; do
     name="${t%%:*}"; src="${t#*:}"
-    if [ -n "$BINDIR" ] && [ "$name" != wsys_poke ] && [ -f "$BINDIR/$name" ]; then
+    if [ -n "$BINDIR" ] && [ "$name" != wsys_poke ]; then
+        # A binary MOUSE_BIN_DIR does not hold used to fall through and get
+        # compiled from this tree. That is the one substitution this hook must
+        # never make: the caller asked about SOMEBODY ELSE'S bytes, and quietly
+        # answering about the working tree's is a success-shaped answer to a
+        # different question. Refuse by name instead.
+        [ -f "$BINDIR/$name" ] || {
+            bad "MOUSE_BIN_DIR=$BINDIR does not contain $name -- refusing to substitute a fresh build for the binary you asked about"
+            done_report; exit 1; }
         cp "$BINDIR/$name" "$WORK/$name.elf"; chmod +x "$WORK/$name.elf"
         continue
     fi

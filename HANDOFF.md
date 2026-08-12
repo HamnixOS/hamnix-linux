@@ -1460,6 +1460,79 @@ Green alongside it, unchanged: `de_mouse_chrome.sh` 13, `de_appmenu_band.sh`
 `pump_input`: **12 PASS / 1 FAIL**, and the one that fails is the single-read
 click — which is why that assertion is in the file rather than assumed.
 
+### And the gate THE SHIPPED BYTES got — `tests/linux/channel_runs_desktop.sh`
+
+**9 PASS / 0 FAIL against the 1.0.11 channel, 20 s, offscreen, no VM.**
+
+The object-cache fix (563b0d96) closed the cause of the 1.0.10 mixed build.
+This closes the hole that let it reach users, stated by the agent who found
+it: *"every gate here builds from source through `hamlinux_build.sh`, so THE
+ARTEFACT THAT SHIPS IS THE ONE ARTEFACT NOTHING RUNS."*
+
+It takes the `.tar.gz` files under `build/repo/linux/packages/`, unpacks the
+binaries out of them and runs those:
+
+| Tier | What |
+|--|--|
+| Integrity | every needed package unpacks; **all 98** index entries hash to the bytes on disk, so what runs below is what an installed machine receives |
+| The desktop | `wsysd` + `hamdesktop` + `hampanelscene` from the tarballs, driven through `de_mouse_chrome.sh`'s `MOUSE_BIN_DIR` hook — **13/13** under a synthetic evdev mouse |
+| The floor | packaged `hamsh` sources an rc (PID 1 has something to exec); packaged `hpm` prints its verbs (the machine can still receive the NEXT fix); 8 packaged coreutils asserted on their real ANSWER, not exit 0 |
+| The rule | the file greps itself for `hamlinux_build.sh` and fails if a future edit lets it compile anything it asserts on |
+
+**Scope, and what is left out on purpose.** Not the other ~90 per-command
+packages: the channel carries `halt`, `poweroff`, `reboot`, `rm`, `kill`,
+`insmod`, `login`, `passwd`, `dhcpc`, `ntpd`, and executing those on the build
+host is an incident, not a test. The defect class is *shared-input staleness*,
+and the programs above link every backend between them, so a stale `lib/` or
+`linux-*.c` surfaces here. Not a VM either — `HAMFB_FILE` and
+`HAMWSYSD_INPUT` compose the whole desktop offscreen in 20 s, and 20 s is what
+lets it sit in the publish path instead of a checklist.
+
+**Where it sits: inside `scripts/hamlinux_packages.py`, BEFORE `index.json` is
+written.** A channel that fails it has no index, so nothing can install from
+it — the same shape as the duplicate-name and dangling-dependency refusals.
+`--no-desktop-gate` exists, prints a paragraph saying what it is giving up,
+and is used nowhere in this tree.
+
+**The revert arm — the 1.0.10 mixture, rebuilt and packaged.** `b3ecfb71`
+(19:03) is the commit: `WSYS_VERSION` 5 → 6 and `WSYS_MAX_WINDOWS` 128 → 256
+in `user/linux-wsys.c`. So `hamdesktop` and `hampanelscene` were rebuilt at
+`b3ecfb71^` and dropped into the `hamnix-desktop` tarball beside the current
+`wsysd`, with the index's `sha256` and `size` corrected — exactly what
+shipped, and exactly as verifiable.
+
+```
+chanrun: PASS all 98 packages in index.json hash to the bytes on disk -- what runs below is what an installed machine would receive
+chanrun: PASS wsysd, hamdesktop, hampanelscene, hamsh and hpm came out of the channel's tarballs (nothing was compiled)
+chanrun: PASS the desktop under test was the PACKAGED wsysd/hamdesktop/hampanelscene, not a fresh build
+chanrun: FAIL THE PACKAGED DESKTOP IS BROKEN: de_mouse_chrome.sh scores 2 PASS / 1 FAIL against the bytes in this channel -- and these are the bytes 'hpm update' would install.
+chanrun:      FAIL no full-width top bar -- there is no Applications button to click
+
+chanrun: 8 passed, 1 failed
+```
+
+Exit status 1. And the control, on that same reconstructed channel:
+
+```
+$ tests/linux/channel_covers_image.sh build/image/root <the 1.0.10 mixture>
+image /bin: 94    channel /bin: 98
+PASS: every binary in the image is carried by a package (94 checked)
+4 passed, 0 failed
+```
+
+The name gate is green on a channel that ships a desktop mapping no windows.
+That is the hole, measured.
+
+**And end to end through the packager.** Planting the two stale objects in
+`build/repo-obj` — literally what the old one-input cache did — the packager
+built all 98 packages, ran the gate, refused, and wrote **no `index.json`**
+(exit 1, `ls` of the channel shows `packages` and nothing else).
+
+One correction the arm forced, in `de_mouse_chrome.sh`: a binary
+`MOUSE_BIN_DIR` did not hold used to fall through and be **compiled from the
+tree**. That is a success-shaped answer to a different question — the caller
+asked about somebody else's bytes. It now fails by name.
+
 ### And the gate THE UPDATE PATH got — `tests/linux/installed_update_live.sh`
 
 The other half of NORTH_STAR.md's permanent rule. `channel_covers_image.sh`

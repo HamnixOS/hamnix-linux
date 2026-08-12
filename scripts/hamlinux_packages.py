@@ -32,6 +32,12 @@ so `hpm install hamnix-base` resolves the whole distribution.
 Usage:
     scripts/hamlinux_packages.py [--out build/repo] [--version 1.0.0]
                                  [--channel linux] [--base-url https://255.one/]
+                                 [--no-desktop-gate]
+
+Before it writes the index it UNPACKS THE TARBALLS IT JUST WROTE AND RUNS THEM
+(tests/linux/channel_runs_desktop.sh): the desktop under a synthetic mouse, the
+shell, hpm, the coreutils.  A channel whose binaries do not work gets no index
+and therefore installs nowhere.  --no-desktop-gate skips it, loudly.
 
 There is NO --sign here, though this line used to advertise one. Signing is a
 separate step over the finished index, because the key does not live in the
@@ -1305,6 +1311,14 @@ def main():
     ap.add_argument("--version", default="1.0.0")
     ap.add_argument("--channel", default="linux")
     ap.add_argument("--base-url", default="https://255.one/")
+    # The escape hatch is deliberately unattractive and deliberately loud. It
+    # exists for a channel built on a host with no python3/vulkan to compose an
+    # offscreen desktop on -- not for "this is taking a while". Nothing in this
+    # tree passes it.
+    ap.add_argument("--no-desktop-gate", action="store_true",
+                    help="do NOT run the packaged binaries before writing the "
+                         "index (tests/linux/channel_runs_desktop.sh). Writes "
+                         "an index on the strength of names and hashes alone.")
     args = ap.parse_args()
 
     out = os.path.join(ROOT, args.out, args.channel)
@@ -1452,6 +1466,47 @@ def main():
             "would install-fail at the user's prompt instead of failing here.\n"
             "Fix the build that dropped them, or drop the dependency too."
             % (len(dangling), "\n    ".join(dangling)))
+
+    # THE PACKAGED BYTES ARE RUN, and the index is not written until they have
+    # been. Every guard above this line -- the duplicate name, the dependency
+    # closure, the sha256 the index will carry, and
+    # tests/linux/channel_covers_image.sh outside this file -- is about NAMES
+    # and NUMBERS. All of them passed for hamnix-desktop 1.0.10, which shipped
+    # a wsysd from 19:17 beside clients from 18:25 (see newest_shared_input)
+    # and put a desktop mapping NO WINDOWS on a machine that ran `hpm update`.
+    # Measured here: tests/linux/channel_covers_image.sh scores 4 PASS / 0 FAIL
+    # against a reconstruction of that channel, and every sha256 in its index
+    # matches the bytes on disk. They were the wrong bytes, consistently.
+    #
+    # So the gate that closes it cannot be another check on the manifest. It
+    # unpacks the tarballs and RUNS the programs -- the desktop under a
+    # synthetic mouse, the shell, hpm itself, and the coreutils -- and it must
+    # sit HERE rather than in a publish checklist, for the same reason the two
+    # guards above do: a gate a person has to remember is a gate that shipped
+    # 1.0.10 while every automated check said `done`.
+    #
+    # It runs BEFORE index.json is written, so a channel that fails it has no
+    # index and nothing can install from it. MEASURED: 20 s.
+    if not args.no_desktop_gate:
+        gate = os.path.join(ROOT, "tests/linux/channel_runs_desktop.sh")
+        print("\nrunning the packaged desktop (tests/linux/channel_runs_desktop.sh)")
+        sys.stdout.flush()   # the gate writes to this fd; keep the log in order
+        env = dict(os.environ, CHANRUN_NO_INDEX="1")
+        rc = subprocess.call([gate, out], cwd=ROOT, env=env)
+        if rc != 0:
+            raise SystemExit(
+                "\nREFUSING TO PUBLISH: the binaries in this channel do not "
+                "work.\nThe tarballs under %s were unpacked and run, and the "
+                "run above says what failed. No index.json was written, so "
+                "nothing can install from this channel.\nThis is the check "
+                "hamnix-desktop 1.0.10 did not have: every name was present, "
+                "every hash matched, and the desktop mapped no windows."
+                % pkgdir)
+    else:
+        print("\n*** --no-desktop-gate: the packaged binaries were NOT RUN. "
+              "This index is being written on the strength of names and "
+              "hashes alone, which is exactly what hamnix-desktop 1.0.10 "
+              "shipped on. ***")
 
     index = {
         "schema": 1,
