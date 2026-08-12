@@ -99,6 +99,44 @@ JAIL="$PROJ_ROOT/tests/linux/runsweep_jail.sh"
 FCAP_PLAIN="${RUNSWEEP_FCAP:-262144}"
 FCAP_WSYS="${RUNSWEEP_FCAP_WSYS:-6291456}"
 
+# AND IT IS CHECKED, NOT REMEMBERED. The cap has been wrong twice, both times
+# because a CONSTANT MOVED and a comment did not, and the second time it cost
+# fifty rows. So the requirement is re-derived from user/linux-wsys.c here,
+# before anything runs, and a cap that no longer covers the pool is a fatal
+# error naming both numbers rather than a sweep full of dead compositors.
+#
+# BB_HDR_BYTES is `sizeof(struct bbshm)` rounded up to BB_ALIGN and cannot be
+# read out of the source, so 1 MiB is added instead -- comfortably more than
+# the header can be at any plausible slot count, and the pixel pages are what
+# the size is made of anyway.
+wsys_pool_bytes() {
+    awk '
+        /^#define WSYS_MAX_WINDOWS/ { n = $3 }
+        /^#define BB_W  / { w = $3 }
+        /^#define BB_H  / { h = $3 }
+        /^#define BB_ALIGN / { a = $0; gsub(/[^0-9]/, "", a); a = a + 0 }
+        END {
+            if (n == 0 || w == 0 || h == 0 || a == 0) { print 0; exit }
+            page = int((w * h * 4 + a - 1) / a) * a
+            print 1048576 + n * 2 * page
+        }' "$PROJ_ROOT/user/linux-wsys.c"
+}
+POOL_BYTES="$(wsys_pool_bytes)"
+if [ "${POOL_BYTES:-0}" -gt 0 ]; then
+    POOL_BLOCKS=$(( (POOL_BYTES + 1023) / 1024 ))
+    if [ "$FCAP_WSYS" -lt "$POOL_BLOCKS" ]; then
+        echo "[runsweep] FATAL: the windowed-row file cap is smaller than the window system's backbuffer pool." >&2
+        echo "[runsweep]   cap  $FCAP_WSYS blocks ($((FCAP_WSYS / 1024)) MiB)" >&2
+        echo "[runsweep]   pool $POOL_BLOCKS blocks ($((POOL_BLOCKS / 1024)) MiB), derived from" >&2
+        echo "[runsweep]        WSYS_MAX_WINDOWS / BB_W / BB_H / BB_ALIGN in user/linux-wsys.c" >&2
+        echo "[runsweep]   wsysd's ftruncate(2) would be refused EFBIG and the kernel would kill" >&2
+        echo "[runsweep]   it with SIGXFSZ AFTER it published a screen geometry, and every GUI" >&2
+        echo "[runsweep]   row would be measured against no compositor. That has happened twice;" >&2
+        echo "[runsweep]   raise RUNSWEEP_FCAP_WSYS rather than reading fifty broken programs." >&2
+        exit 2
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # THE COMPOSITOR
 # ---------------------------------------------------------------------------
