@@ -289,11 +289,21 @@ fi
 # THE VERSION STRINGS carry the wsys version they were built at, and a trailing
 # ordinal so that they still SORT when two of them share a wsys version -- which
 # is exactly the forced-stale case above, where the package version has to move
-# while the window system does not. 0.x.y, never 1.x.y, so a tarball from this
-# gate can never be mistaken for a release.
-BASEVER="0.$BASEWSYS.1"
-NEWVER="${HAMLINUX_WV_NEWVER:-0.$NEWWSYS.2}"
-NEXTVER="0.$NEXTWSYS.3"
+# while the window system does not.
+#
+# THE MAJOR IS 77 AND IT IS NOT DECORATION. The first scheme here was 0.<wsys>.<n>,
+# chosen so a gate tarball could never be mistaken for a 1.0.x release, and it
+# does not work: scripts/hamlinux_packages.py writes every dependency as
+# `<name>>=1`, so hamnix-base requires `hamnix-init>=1` and 0.7.1 does not
+# satisfy it. Measured, on the first run of this section -- `hpm: no candidate
+# for hamnix-init`, install status 1, nothing installed, and a machine that
+# then ran the whole gate on the IMAGE's binaries instead of the baseline's.
+# So the major has to be >= 1, and 77 is chosen because it is far above any
+# release this project will cut and instantly recognisable in a log as a
+# number nobody released.
+BASEVER="77.$BASEWSYS.1"
+NEWVER="${HAMLINUX_WV_NEWVER:-77.$NEWWSYS.2}"
+NEXTVER="77.$NEXTWSYS.3"
 REPO0="${HAMLINUX_WV_REPO0:-$WORK/repo-baseline}"
 REPO="${HAMLINUX_WV_REPO:-$WORK/repo-tree}"
 REPO2="${HAMLINUX_WV_REPO2:-$WORK/repo-next}"
@@ -890,6 +900,28 @@ boot() {   # boot <logfile> <seconds> <marker>...
 
 say "boot 1 of 3: install the BASELINE system, wsys v$BASEWSYS (up to ${WAIT1}s)"
 boot "$WORK/boot1.log" "$WAIT1"
+# STOP HERE IF PHASE 1 DID NOT LAND. Boots 2 and 3 are twenty minutes of
+# measuring the wrong machine: if `hpm install` failed, the disk is still
+# carrying the binaries scripts/hamlinux_image.sh staged -- THIS TREE's -- so
+# STAGE A's desktop comes up and answers a click, `hpm update` exits 0 having
+# moved nothing, and a reader has to get all the way to the md5 lines to find
+# out that none of it was about the baseline. That is exactly what the first
+# run of this section did. A gate that cannot check must not spend the time
+# pretending to, and must not print another PASS.
+if ! grep -aq '\[wv\] p1 install status: 0' "$WORK/boot1.log"; then
+    echo "wv: FAIL THE BASELINE NEVER INSTALLED, so there is no machine under test here: everything below would be measuring the binaries the image staged, which are THIS TREE's, against this tree. Boots 2 and 3 are not being run. What the guest said:"
+    grep -aE '^hpm:|^\[wv\] p1 ' "$WORK/boot1.log" | tr -d '\r' | tail -20 | sed 's/^/        /'
+    echo "wv: 0 passed, 1 failed"
+    exit 1
+fi
+if ! grep -aA3 -F '[wv] p1 md5 of /bin/wsysd' "$WORK/boot1.log" | grep -aq "$BASE_MD5"; then
+    echo "wv: FAIL THE INSTALLED COMPOSITOR IS NOT THE BASELINE ONE (wanted md5 $BASE_MD5, wsys v$BASEWSYS): the install reported success and left something else on the disk. Boots 2 and 3 are not being run."
+    grep -aA3 -F '[wv] p1 md5 of /bin/wsysd' "$WORK/boot1.log" | tr -d '\r' | sed 's/^/        /'
+    echo "wv: 0 passed, 1 failed"
+    exit 1
+fi
+say "boot 1 landed: the machine is at $BASEVER, wsys v$BASEWSYS, md5 $BASE_MD5"
+
 say "boot 2 of 3: the live update, in three stages (up to ${WAIT2}s)"
 boot "$WORK/boot2.log" "$WAIT2" A B C
 if [ "$STAGE_E" = 1 ]; then
