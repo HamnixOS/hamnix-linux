@@ -25,8 +25,18 @@ unset HAMFB_FILE           # a real display, not a file
 echo "=== arming watchdog (${WD}s) and starting wsysd on the display"
 ./kms_watchdog.sh "$WD" "$BIN/wsysd" >"$W/wsysd.log" 2>&1 &
 WDPID=$!
-sleep 10
-if ! grep -q "SCANOUT armed" "$W/wsysd.log"; then
+# POLL for the arm rather than sleeping a guessed interval. A fixed sleep
+# raced the log: the script declared "scanout did not arm", exited, and left a
+# wsysd holding DRM MASTER on the display with no clients -- which then blocked
+# the NEXT run with EPERM until its watchdog fired. The watchdog did its job;
+# the harness should not have needed it to.
+armed=0
+for _ in $(seq 1 60); do
+    if grep -q "SCANOUT armed" "$W/wsysd.log"; then armed=1; break; fi
+    kill -0 "$WDPID" 2>/dev/null || break
+    sleep 1
+done
+if [ "$armed" != 1 ]; then
     echo "!!! scanout did not arm:"; sed 's/^/   /' "$W/wsysd.log" | head -20
     wait "$WDPID" 2>/dev/null; rm -rf "$W"; exit 1
 fi
