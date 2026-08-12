@@ -149,8 +149,11 @@ elif mode == 'sums':
     frame = sum(v for k,v in agg.items() if k in FRAME)
     other = sum(v for k,v in agg.items() if k in OTHER)
     unk   = sum(v for k,v in agg.items() if k not in LIFE|FRAME|OTHER)
-    print("%d %d %d %d %.3f %.3f" % (life, frame, other, unk,
-                                     life/wall, frame/wall))
+    # The pointer count comes out too: it is the one category that proves the
+    # synthetic mouse actually reached a client, and assertion 0 needs it.
+    print("%d %d %d %d %.3f %.3f %d" % (life, frame, other, unk,
+                                        life/wall, frame/wall,
+                                        agg.get("pointer", 0)))
 PY
 
 # ---- build ----------------------------------------------------------------
@@ -264,7 +267,7 @@ info "----- phase A: the desktop as rc.5 leaves it, IDLE for ${IDLE_SECS}s -----
 sleep "$IDLE_SECS"
 snapshot "$WORK/snap.idle"
 delta_py "$WORK/snap.bringup" "$WORK/snap.idle" report "$IDLE_SECS"
-read -r A_LIFE A_FRAME A_OTHER A_UNK A_LRATE A_FRATE < <(
+read -r A_LIFE A_FRAME A_OTHER A_UNK A_LRATE A_FRATE A_POINTER < <(
     delta_py "$WORK/snap.bringup" "$WORK/snap.idle" sums "$IDLE_SECS")
 
 # ---- PHASE B: a person using it ------------------------------------------
@@ -283,7 +286,7 @@ BUSY_WALL="$(python3 -c "import sys;print(round(float(sys.argv[2])-float(sys.arg
              "$BUSY_START" "$(date +%s.%N)")"
 snapshot "$WORK/snap.busy"
 delta_py "$WORK/snap.idle" "$WORK/snap.busy" report "$BUSY_WALL"
-read -r B_LIFE B_FRAME B_OTHER B_UNK B_LRATE B_FRATE < <(
+read -r B_LIFE B_FRAME B_OTHER B_UNK B_LRATE B_FRATE B_POINTER < <(
     delta_py "$WORK/snap.idle" "$WORK/snap.busy" sums "$BUSY_WALL")
 
 # ---- and the whole session, bring-up included ----------------------------
@@ -297,6 +300,32 @@ echo "census:   phase B (mouse, ${BUSY_WALL}s): lifecycle $B_LIFE ($B_LRATE/s)  
 echo "census:"
 
 # ---- the assertions -------------------------------------------------------
+# 0. THE GATE MUST NOT PASS ON ZEROS, and this assertion exists because the
+#    first draft of this file DID.  Run with the census instrument reverted out
+#    of user/linux-wsys.c the whole gate came back "7 passed, 0 failed" with
+#    every category empty: the ratio assertion divided 0 per-frame by 0
+#    lifecycle, took the "no lifecycle writes at all" sentinel, and reported
+#    999999:1.  A measurement gate that is green when it measured NOTHING is
+#    the exact success-shaped answer NORTH_STAR.md names, and it would have
+#    stayed green through any future change that broke the instrument.  So the
+#    denominator is checked before anything is concluded from it.
+CENSUS_FILES="$(ls -1 "$CDIR" 2>/dev/null | grep -c '^wr\.')"
+if [ "${CENSUS_FILES:-0}" -ge 3 ]; then
+    ok "the census produced a file per process ($CENSUS_FILES of them)"
+else
+    bad "the census produced $CENSUS_FILES files -- the instrument is not in this build, and every number below would be a zero dressed as an answer"
+fi
+if [ "${A_FRAME:-0}" -gt 0 ] && [ "${B_FRAME:-0}" -gt 0 ]; then
+    ok "both phases recorded per-frame traffic (idle $A_FRAME, mouse $B_FRAME)"
+else
+    bad "a phase recorded NO per-frame writes at all (idle $A_FRAME, mouse $B_FRAME) -- a desktop that writes nothing is a desktop that is not running, or an instrument that is not counting"
+fi
+if [ "${B_POINTER:-0}" -gt 0 ]; then
+    ok "the synthetic mouse reached a window's rings ($B_POINTER pointer writes)"
+else
+    bad "no pointer write was counted under a moving mouse -- the census is not seeing the hot path it exists to size"
+fi
+
 if [ "${A_UNK:-0}" = 0 ] && [ "${B_UNK:-0}" = 0 ]; then
     ok "every counted category is classified LIFECYCLE, PER-FRAME or other"
 else
@@ -304,7 +333,10 @@ else
 fi
 
 # 1. lopsided, which is the property the hybrid rests on.
-RATIO="$(python3 -c "import sys;l=int(sys.argv[1]);f=int(sys.argv[2]);print(999999 if l==0 else f//l)" \
+# No sentinel for f==0: a ratio computed from no per-frame traffic at all is
+# not a large ratio, it is an absent measurement, and assertion 0 above has
+# already said so.  0/0 reports 0 and fails this, which is the honest answer.
+RATIO="$(python3 -c "import sys;l=int(sys.argv[1]);f=int(sys.argv[2]);print(0 if f==0 else (999999 if l==0 else f//l))" \
          "$B_LIFE" "$B_FRAME")"
 if [ "$RATIO" -ge "$RATIO_MIN" ]; then
     ok "under a mouse, per-frame writes outnumber lifecycle writes ${RATIO}:1 (>= ${RATIO_MIN}:1)"
