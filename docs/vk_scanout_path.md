@@ -227,6 +227,51 @@ That is well past the ~2.9x this document predicted, because the prediction
 assumed `rast` stayed on the CPU; routing the backdrop to the device removed
 it too.
 
+### 3c. On the combined tree (wake-on-input + scanout), and a correction
+
+The tick fix landed separately (`sys_waitfds(&waitset[0], n_wait,
+WAIT_FALLBACK_MS)`, `waitset` actually filled). Measured on the combined tree
+with **one instrument for both paths** — wsysd's own `dt_us`-timed counters,
+since the shipped harnesses cannot see a scanned-out frame:
+
+| | fallback | drag fps | phases | submit | period |
+|---|---|---|---|---|---|
+| software 1280x800 | 16 ms | 38–53 | 2.3 ms | — | 18.8 ms |
+| scanout 1920x1080 | 16 ms | **52** | 0.29 ms | 2.5 ms | 19.2 ms |
+| software 1280x800 | 2 ms | **221** | 2.3 ms | — | 4.5 ms |
+| scanout 1920x1080 | 2 ms | **211** | 0.23 ms | 2.5 ms | 4.7 ms |
+
+**A correction to §3b, which overstated the win.** The device submit and fence
+wait is in *none* of the phase counters: `vkc_end()` runs after `t_rast` stops
+accumulating and before `present()`. So a scanout frame whose phases sum to
+0.29 ms actually costs `0.29 + submit_us` ≈ **2.8 ms**, not 0.29 ms. The
+periods only close arithmetically once that is included — 2.8 + 16.4 ≈ 19.2,
+and 2.8 + 2 ≈ 4.7 — which is how the omission was caught.
+
+So the corrected picture is: **scanout at 1920x1080 costs about what software
+costs at 1280x800** (2.8 ms vs 2.3 ms per frame, for 2x the pixels), and the
+two land within 5% of each other on frame rate at any given tick.
+
+**Where the drag rate actually goes.** The loop overhead outside
+`paint_frame()` is negligible — `scan_us 42`, `pub_us 6`, ~1 iteration per
+frame. The period is simply **frame cost + fallback tick**. At the shipped
+16 ms fallback the tick is 85% of it, which is why an 8x cheaper frame bought
+38 → 52 fps and no more. Drop the fallback to 2 ms and the same scanout
+desktop runs at **211 fps**.
+
+**And the reason the tick still bites is that a drag is not input.**
+`build_waitset()` admits input fds; a window moving is a *client*-initiated
+change committed through a ctl file, and there is no fd for "a client changed
+something". So wake-on-input fixed input latency (p50 0.91 ms) and left
+client-driven repaint paced by the fallback. That is the next constraint, and
+it is not a graphics problem.
+
+**The new frame cost is the submit round-trip, not the drawing.** 2.5 ms of a
+2.8 ms scanout frame is `vkc_end()` — record, submit, fence-wait — against
+31.7 µs of actual GPU time for a full-screen frame in the standalone demo. The
+device is not busy; the round-trip is. That, not rasterization, is where the
+next graphics win is.
+
 ### But the frame RATE barely moved, and that is the honest headline
 
 Derived from the same counters: **50.4 fps at 1920x1080**, against the

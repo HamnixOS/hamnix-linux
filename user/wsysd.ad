@@ -196,6 +196,13 @@ t_copy:   uint64 = 0                  # window image -> screen composite
 t_bb:     uint64 = 0                  # v2 backbuffer read + copy
 t_cur:    uint64 = 0                  # cursor
 t_pres:   uint64 = 0                  # write the composite to /dev/fb
+# NOTE, and it cost a wrong conclusion once: the DEVICE SUBMIT AND FENCE WAIT
+# is in none of these phases. On the device-compositing path vkc_end() -- the
+# submit and the wait for it -- runs after t_rast has stopped accumulating and
+# before present(), so a frame whose phases sum to 0.29 ms actually costs
+# 0.29 + submit_us. On the scanout path submit_us is ~2.5 ms and the phases are
+# ~0.3 ms, so reading the phase table alone understates the frame by 10x. The
+# bench line prints submit_us next to them for exactly this reason; add it.
 # THE READBACK, SPLIT OUT OF `present` BY ITSELF.
 #
 # `present` is open + lseek + the write loop + close + flip, and the claim that
@@ -208,6 +215,13 @@ t_pres:   uint64 = 0                  # write the composite to /dev/fb
 #
 # If t_pres_w is NOT ~all of t_pres, the diagnosis is wrong and the syscall
 # overhead or the flip is the story instead. That is the point of splitting it.
+# THE LOOP ITSELF, outside paint_frame(). At a 2 ms fallback both the software
+# and the scanout paths land at ~210-220 fps -- a 4.7 ms period -- while the
+# frame costs 2.3 ms and 0.23 ms respectively. So most of the period is
+# NEITHER the compositor NOR the tick, and nothing measured it.
+t_scan:   uint64 = 0                  # scan_windows + pick_focus
+t_pub:    uint64 = 0                  # publish_state
+t_loop_n: uint64 = 0                  # loop iterations
 t_pres_w: uint64 = 0
 b_pres_w: uint64 = 0
 n_pres_w: uint64 = 0                  # write loop entries (not syscalls)
@@ -2178,6 +2192,16 @@ def bench_live_dump():
     putd(2, vk_frames_gpu)
     puts(2, " refused ")
     putd(2, cast[int32](vk_refused))
+    if t_loop_n > 0:
+        puts(2, " | iters ")
+        putd(2, cast[int32](t_loop_n))
+        puts(2, " scan_us ")
+        putd(2, cast[int32](t_scan / t_loop_n))
+        puts(2, " pub_us ")
+        putd(2, cast[int32](t_pub / t_loop_n))
+    t_scan = 0
+    t_pub = 0
+    t_loop_n = 0
     # EXACT RATE, not one derived by dividing a dump count by a wall clock the
     # caller guessed at. My first scanout rate was computed that way and was
     # wrong by more than 3x, because startup time landed inside the divisor.
@@ -3711,8 +3735,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # routing a click needs the geometry to hit-test against. Draining
         # first meant the very first keystroke after launch was delivered
         # against an empty window table and silently dropped.
+        tl0: uint64 = 0
+        if bench_on != 0:
+            tl0 = now_us()
         scan_windows()
         pick_focus()
+        if bench_on != 0:
+            t_scan = t_scan + (now_us() - tl0)
+            t_loop_n = t_loop_n + 1
         pump_input()
         pump_keyboard()
         deliver_pointer()
@@ -3744,7 +3774,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             idle = 0
         else:
             idle = idle + 1
+        if bench_on != 0:
+            tl0 = now_us()
         publish_state()
+        if bench_on != 0:
+            t_pub = t_pub + (now_us() - tl0)
         # PARK UNTIL INPUT ARRIVES, or until the fallback tick lapses. The
         # timeout is what still catches a client repaint (nothing under
         # /dev/wsys can wake this set -- see the wait-set note at the top of
