@@ -2829,6 +2829,16 @@ static int keychan_ready(int32_t wid)
  *   behalf.  An attacker with its own socket code can still take it -- see the
  *   residue below.
  *
+ *   ONLY A LONG-LIVED LISTENER EVER RECEIVES ANYTHING, and that is a property
+ *   of the design rather than an accident of it.  The hand-up is the CLIENT's
+ *   action, taken on its own clock; a process that binds the address, drains an
+ *   empty queue and exits has given nobody a chance to hand it anything.  So a
+ *   compositor is a process that STAYS -- which wsysd is -- and there is no
+ *   one-shot "read another window's scene" tool, by construction.  Nothing in
+ *   this tree wanted one: every other reader of <wid>/scene in the tree reads
+ *   its OWN window.  It is also, incidentally, what stops a hit-and-run
+ *   attacker: taking the name for a moment yields an empty queue.
+ *
  *   THE HAND-UP IS ON A CLOCK, NOT ON A COMMIT COUNT -- see pix_tick below for
  *   the hole that distinction closes and why it is not a detail.  Every window
  *   this process owns is offered every PIX_RETRY_MS while nobody holds it and
