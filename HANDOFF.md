@@ -968,6 +968,24 @@ the shape is more reusable than the fix. They are NOT open work.
   COUNT and the SIGN in both directions, because a wheel that scrolls
   backwards works and is wrong, which is worse than a dead one: nothing about
   it looks broken.
+  **AND THE FIX IS NOT SUFFICIENT, which is said here rather than left to be
+  discovered.** With the patched `wsyswl` in the image (verified by md5
+  against the staged `/bin/wsyswl`) a second full Steam run, back on the store
+  front page, wheeled over it and got **the same `IDENTICAL (0 of 564400 px)`**
+  as before. So `wl_pointer.axis` was missing AND something else on the VM
+  path also drops the wheel; closing one hole did not open the pipe. It is not
+  `wsysd`'s routing or `wsyswl`'s translation — those are precisely what the
+  offscreen gate exercises, against a real Xwayland, and they pass. The one
+  thing that differs between the passing arm and the failing arm is everything
+  UPSTREAM of `/dev/input`: a file of evdev records in one, QEMU's
+  `virtio-tablet-pci` in the other. `tests/linux/vm_wheel_reaches.sh` is
+  written and splits exactly that — `wsysd`'s own `pointer` counter across a
+  wheel burst with the cursor held still, with a plain move as the control in
+  the same run. If it rises the remaining drop is ours; if it is flat the
+  wheel never reaches the guest and §12.2's fix is a claim about real
+  hardware rather than about this VM. **That run had not finished when this
+  was written**, and `docs/steam_namespace.md` §12.2a says so in the same
+  words.
 * **(SOLVED — kept because the shape is the lesson) Steam's login window is on
   the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
   `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X

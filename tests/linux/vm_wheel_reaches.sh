@@ -60,7 +60,20 @@ mkdir /dev/shm
 bind '#t' /dev/shm
 source '/etc/rc.d/rc.5'
 sleep 3
-echo '[vmwheel] the desktop is up; the console is now interactive'
+echo '[vmwheel] the desktop is up'
+# THE STATE GOES ON THE SERIAL LINE BY ITSELF, and the console is not used at
+# all. Two reasons, both measured: hamsh's console line editor echoes about
+# one character per second here, and worse, it only ADVANCES when more input
+# arrives -- on an idle system a typed line stalls half-finished for ever.
+# `while 1 { }` is a parse error in hamsh; `for` over a fixed word list is
+# the loop that works, and 40 iterations at 5 s is longer than this run.
+spawn detached {
+    for i in a b c d e f g h i j k l m n o p q r s t u v w x y z 1 2 3 4 5 6 7 8 9 0 A B C D {
+        echo -n 'VMWHEEL '
+        cat /dev/wsys/wsysd/state
+        sleep 5
+    }
+}
 RC
 
 if [ "${VMW_SKIP_BUILD:-0}" = 1 ] && [ -f "$IMG/initramfs.cpio.gz" ]; then
@@ -71,61 +84,51 @@ else
         bad "image build"; tail -20 "$WORK/build.log"; exit 1; }
 fi
 
-FIFO="$WORK/console.in"
-rm -f "$QMP" "$LOG" "$FIFO"
-mkfifo "$FIFO"
-sleep infinity > "$FIFO" &
-HOLD=$!
-( timeout 420 scripts/hamlinux_vm.sh script -qmp "unix:$QMP,server,nowait" \
-    < "$FIFO" > "$LOG" 2>&1 ) &
+rm -f "$QMP" "$LOG"
+( timeout 600 scripts/hamlinux_vm.sh script -qmp "unix:$QMP,server,nowait" \
+    </dev/null > "$LOG" 2>&1 ) &
 VM=$!
 cleanup() {
     python3 tests/linux/qmp_input.py "$QMP" quit >/dev/null 2>&1
-    sleep 1; kill "$VM" "$HOLD" 2>/dev/null; sleep 1; kill -9 "$VM" 2>/dev/null
+    sleep 1; kill "$VM" 2>/dev/null; sleep 1; kill -9 "$VM" 2>/dev/null
 }
 trap cleanup EXIT
 for _ in $(seq 1 150); do [ -S "$QMP" ] && break; sleep 0.2; done
 [ -S "$QMP" ] || { bad "the VM never opened its QMP socket"; exit 1; }
 
 Q() { python3 tests/linux/qmp_input.py "$QMP" "$@" >/dev/null 2>&1; }
-# Ask the compositor for its state, at the console. THE CONSOLE IS QUIET in
-# this run -- there is no Steam writing to the same serial line -- which is
-# exactly why this run does not need the fifo-typing workaround
-# docs/steam_namespace.md §12.3 describes.
-#
-# AND IT WAITS FOR A NEW ANSWER, not for a number of seconds. hamsh's console
-# line editor echoes about one character per second here, so a 25-character
-# command takes half a minute to be READ, let alone run -- a fixed sleep read
-# the PREVIOUS answer back and would have reported every counter unchanged,
-# which is the exact shape of the failure this file exists to rule out.
-nstates() { grep -ac 'focus .* pointer ' "$LOG" 2>/dev/null | head -1; }
-ask() {
+# WAIT FOR A NEW LINE, never for a number of seconds. rc.boot publishes the
+# state every 5 s on the serial console by itself -- nothing is typed at the
+# guest, because hamsh's line editor echoes about one character per second
+# here and, worse, only advances when more input arrives, so on an idle
+# system a typed line stalls half-finished for ever (measured; the first two
+# attempts at this file died there). A fixed sleep would read the PREVIOUS
+# answer back and report every counter unchanged, which is the exact shape of
+# the failure this file exists to rule out. Two fresh lines, so the one being
+# read was published entirely after the events were sent.
+nstates() { grep -ac VMWHEEL "$LOG" 2>/dev/null | head -1; }
+settle() {
     local before; before="$(nstates)"
-    printf 'cat /dev/wsys/wsysd/state\n' > "$FIFO"
     for _ in $(seq 1 60); do
-        [ "$(nstates)" -gt "$before" ] && return 0
+        [ "$(nstates)" -gt $((before + 1)) ] && return 0
         sleep 2
     done
     return 1
 }
-ptrcount() { sed -n 's/.*pointer \([0-9]*\) .*/\1/p' "$LOG" | tail -1; }
+ptrcount() { sed -n 's/.*VMWHEEL .*pointer \([0-9]*\) .*/\1/p' "$LOG" | tail -1; }
 
-for _ in $(seq 1 40); do
-    grep -aq 'the console is now interactive' "$LOG" && break; sleep 3
-done
-sleep 5
-ask
+for _ in $(seq 1 80); do [ -n "$(ptrcount)" ] && break; sleep 3; done
 P0="$(ptrcount)"
 if [ -z "$P0" ]; then
     bad "wsysd never published a state line -- the desktop did not come up"
     tail -25 "$LOG"; exit 1
 fi
-ok "the desktop is up and publishing (pointer $P0)"
+ok "the desktop is up and publishing its own state (pointer $P0)"
 
 # ---- CONTROL: a plain MOVE ----------------------------------------------
 Q move 400 300 1280 800; sleep 1
-Q move 600 500 1280 800; sleep 2
-ask
+Q move 600 500 1280 800
+settle
 P1="$(ptrcount)"
 if [ "${P1:-0}" -gt "${P0:-0}" ]; then
     ok "CONTROL: a QEMU pointer MOVE reaches wsysd (pointer $P0 -> $P1)"
@@ -136,14 +139,14 @@ fi
 
 # ---- THE WHEEL, with the cursor held still ------------------------------
 Q wheel down 10; sleep 2
-Q wheel up 10; sleep 2
-ask
+Q wheel up 10
+settle
 P2="$(ptrcount)"
 if [ "${P2:-0}" -gt "${P1:-0}" ]; then
     ok "TWENTY WHEEL EVENTS REACH wsysd with the cursor still (pointer $P1 -> $P2) -- QEMU's virtio-tablet does deliver REL_WHEEL, so a wheel that does nothing is ours"
 else
     bad "QEMU's wheel never reaches wsysd (pointer $P1 -> ${P2:-?} across 20 events, cursor still). The virtio-tablet is not delivering REL_WHEEL to this guest -- nothing between /dev/input and the client can be blamed for a scroll that does not happen in a VM"
 fi
-info "last state line: $(grep -a 'focus .* pointer ' "$LOG" | tail -1)"
+info "last state line: $(grep -a VMWHEEL "$LOG" | tail -1)"
 echo "vmwheel: $pass passed, $fail failed"
 [ "$fail" = 0 ]

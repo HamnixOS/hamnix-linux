@@ -857,6 +857,54 @@ four button-5 presses) and the **sign** in both directions, because a wheel
 that scrolls backwards works and is wrong, which is worse than a dead one:
 nothing about it looks broken.
 
+### 12.2a AND THE FIX IS NOT SUFFICIENT — Steam still does not scroll
+
+**This is written down because the alternative is a success-shaped answer.**
+The gate above is real: it fails without the fix and passes with it, against
+a real Xwayland. The fix is in the image — the staged `/bin/wsyswl` md5-matches
+the patched build. And a second full Steam run, all the way back to the store
+front page, wheeled over it:
+
+```
+diff 830x680+214+80: IDENTICAL (0 of 564400 px)
+```
+
+**Byte for byte the same zero as before the fix.** So `wl_pointer.axis` was
+missing AND something else on the VM path also drops the wheel. Closing one
+hole did not open the pipe.
+
+**Where the remaining hole is NOT.** Not in `wsysd`'s routing or `wsyswl`'s
+translation: those are exactly what the offscreen gate exercises end to end,
+with a real Xwayland, and they work. The difference between the arm that
+passes and the arm that fails is **everything upstream of `/dev/input`** —
+the gate writes evdev records into a file, and the VM has QEMU's
+`virtio-tablet-pci` writing them into a device node.
+
+**So the next measurement is named rather than guessed, and it is written:**
+`tests/linux/vm_wheel_reaches.sh` boots the desktop alone (no Steam, no
+namespace) and reads `wsysd`'s own `/dev/wsys/wsysd/state`. Its `pointer`
+field counts `deliver_pointer` calls, and `deliver_pointer` returns early
+unless something changed **including a non-zero `ptr_dz`** — so with the
+cursor held still, a rise across a wheel burst means the wheel reached the
+compositor and a flat count means it never arrived on any evdev node it has
+open. A plain move, on the same devices and through the same counter, is the
+control in the same run. That splits the remaining question in two and only
+one half is ours:
+
+* `pointer` rises → QEMU delivers `REL_WHEEL`, and the drop is between
+  `wsysd`'s `pump_input` and the client, in this tree.
+* `pointer` is flat → QEMU's `virtio-tablet` is not delivering the wheel to
+  this guest at all (`wheel-axis=on` is its default, and that is the property
+  to check first), and nothing in this tree can be blamed for a scroll that
+  does not happen in a VM. **A real machine's mouse would still be fixed by
+  §12.2 and the gate would still be the proof of it** — but that would have
+  to be said as a claim about hardware, not about this VM.
+
+**That run had not finished when this was written.** The honest state is:
+one real defect found and fixed with a gate that fails on revert, and the
+user-visible symptom that found it still present, with the next measurement
+named and built.
+
 ### 12.3 Two things seen in passing that are NOT the blocker
 
 * **`wsyswl` printed `DROPPING FRAMES -- the wl_buffer has no shm mapping`
