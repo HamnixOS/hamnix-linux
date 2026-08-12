@@ -1964,7 +1964,29 @@ _am_path:    Array[160, uint8]
 
 # Distribution-table scratch. Top-level BSS, not frame locals: this compiler
 # puts a large frame array nowhere useful.
-_dm_buf:   Array[2048, uint8]     # /etc/distros, read whole
+#
+# THE DEFECT THIS SHAPE REMOVES, and it is the panel config's twice over.
+# /etc/distros used to be read by ONE UNLOOPED `sys_read(fd, &_dm_buf[0],
+# 2047)` into a 2048-byte buffer. The shipped table (etc/distros.linux) is
+# 1426 bytes of which ~1300 is the comment header that documents the format,
+# so the three rows that matter — `default`, `debian`, `alpine` — live in the
+# last hundred bytes, and 621 bytes of headroom stood between them and an
+# Applications menu with no distributions in it. Worse than the margin: a
+# SHORT READ is legal for any read(2), at any size, and with no accumulate
+# loop a short read truncates the table silently — the rows are at the END,
+# so what a short read costs is exactly the distributions.
+#
+# So the file is not held in memory at all. It is READ IN CHUNKS (through
+# _cfg_chunk, the config parser's own 4 KiB chunk — the two parses never run
+# inside one another) and parsed A LINE AT A TIME, with the read looped until
+# EOF. The table now has NO SIZE CEILING; the only bound left is ONE LINE,
+# which is a real bound on the grammar (`<name> <source>`, both short) and is
+# REPORTED rather than swallowed when it is crossed.
+DM_LINE_MAX: uint64 = 512
+_dm_line:  Array[512, uint8]      # one row of /etc/distros
+_dm_bytes: uint64 = 0             # bytes read on the last load
+_dm_lines: uint64 = 0             # lines seen on the last load
+_dm_long:  uint64 = 0             # rows longer than DM_LINE_MAX (cut)
 _dm_list:  Array[1024, uint8]     # the /n/<name> presence probe's listing
 _dm_path:  Array[160, uint8]      # "/n/<name>/usr/share/applications"
 _dm_label: Array[48, uint8]       # "<Name> apps" — the parent row's text
@@ -2109,11 +2131,11 @@ def _dm_is_space(c: uint8) -> int32:
     return 0
 
 
-# Is _dm_buf[s..e) exactly the literal `lit`?
+# Is _dm_line[s..e) exactly the literal `lit`?
 def _dm_tok_eq(s: uint64, e: uint64, lit: Ptr[uint8]) -> int32:
     k: uint64 = 0
     while s + k < e and lit[k] != 0:
-        if _dm_buf[s + k] != lit[k]:
+        if _dm_line[s + k] != lit[k]:
             return 0
         k = k + 1
     if s + k == e and lit[k] == 0:
@@ -2154,7 +2176,7 @@ def _dm_present(i: uint64) -> int32:
     return 1
 
 
-# Record _dm_buf[s..e) as a section name.
+# Record _dm_line[s..e) as a section name.
 def _dm_add(s: uint64, e: uint64):
     if dm_count >= DM_MAX:
         return
@@ -2163,7 +2185,7 @@ def _dm_add(s: uint64, e: uint64):
         n = DM_NAME_CAP - 1
     k: uint64 = 0
     while k < n:
-        dm_name[dm_count][k] = _dm_buf[s + k]
+        dm_name[dm_count][k] = _dm_line[s + k]
         k = k + 1
     dm_name[dm_count][n] = 0
     dm_name_len[dm_count] = n
@@ -2176,49 +2198,109 @@ def _dm_add(s: uint64, e: uint64):
 # of the other rows (docs/linux_distro_namespaces.md §2.2), so listing it
 # would put Debian in the menu twice under two names — which is the same
 # class of confidently-wrong answer as entering the wrong distribution.
+def _dm_parse_line(le: uint64):
+    # One row of /etc/distros, newline already stripped, in _dm_line[0..le).
+    if dm_count >= DM_MAX:
+        return
+    # '#' starts a comment; the row is what precedes it.
+    c: uint64 = 0
+    while c < le and _dm_line[c] != 35:
+        c = c + 1
+    # first token = the name
+    s: uint64 = 0
+    while s < c and _dm_is_space(_dm_line[s]) != 0:
+        s = s + 1
+    t: uint64 = s
+    while t < c and _dm_is_space(_dm_line[t]) == 0:
+        t = t + 1
+    # a row needs a SECOND token (the source) to be a row at all
+    u: uint64 = t
+    while u < c and _dm_is_space(_dm_line[u]) != 0:
+        u = u + 1
+    if t > s and u < c and _dm_tok_eq(s, t, cast[Ptr[uint8]]("default")) == 0:
+        _dm_add(s, t)
+        if _dm_present(dm_count - 1) == 0:
+            # Described but not attached. Say which, once, on the panel
+            # log: a distribution silently missing from the menu is how
+            # someone spends an hour looking for an app that was never
+            # mounted.
+            _writeall(1, cast[Ptr[uint8]]("[panel] distribution not attached at /n/: "))
+            _writeall(1, &dm_name[dm_count - 1][0])
+            _writeall(1, cast[Ptr[uint8]]("\n"))
+            dm_count = dm_count - 1
+
+
+def _dm_say(head: Ptr[uint8], n: uint64, tail: Ptr[uint8]):
+    _writeall(1, cast[Ptr[uint8]]("[panel] /etc/distros: "))
+    _writeall(1, head)
+    nd: uint64 = _u64_to_dec(n, &_cfg_dnum[0])
+    sys_write(1, &_cfg_dnum[0], nd)
+    _writeall(1, tail)
+
+
 def _load_distros():
     dm_count = 0
+    _dm_bytes = 0
+    _dm_lines = 0
+    _dm_long = 0
     fd: int32 = sys_open(cast[Ptr[char]]("/etc/distros"))
     if fd < 0:
         _writeall(1, cast[Ptr[uint8]]("[panel] no /etc/distros: no distribution sections\n"))
         return
-    n: int64 = sys_read(fd, &_dm_buf[0], 2047)
+    ll:   uint64 = 0                       # bytes buffered for this row
+    over: int32  = 0                       # this row overran DM_LINE_MAX
+    while 1 == 1:
+        r: int64 = sys_read(fd, &_cfg_chunk[0], CFG_CHUNK)
+        if r <= 0:
+            break
+        _dm_bytes = _dm_bytes + cast[uint64](r)
+        got: uint64 = cast[uint64](r)
+        k: uint64 = 0
+        while k < got:
+            ch: uint8 = _cfg_chunk[k]
+            k = k + 1
+            if ch == 10:
+                _dm_lines = _dm_lines + 1
+                if over != 0:
+                    _dm_long = _dm_long + 1
+                else:
+                    _dm_parse_line(ll)
+                ll = 0
+                over = 0
+            elif ll < DM_LINE_MAX:
+                _dm_line[ll] = ch
+                ll = ll + 1
+            else:
+                over = 1
     sys_close(fd)
-    if n <= 0:
-        return
-    cap: uint64 = cast[uint64](n)
-    i: uint64 = 0
-    while i < cap and dm_count < DM_MAX:
-        e: uint64 = i
-        while e < cap and _dm_buf[e] != 10:
-            e = e + 1
-        # '#' starts a comment; the row is what precedes it.
-        c: uint64 = i
-        while c < e and _dm_buf[c] != 35:
-            c = c + 1
-        # first token = the name
-        s: uint64 = i
-        while s < c and _dm_is_space(_dm_buf[s]) != 0:
-            s = s + 1
-        t: uint64 = s
-        while t < c and _dm_is_space(_dm_buf[t]) == 0:
-            t = t + 1
-        # a row needs a SECOND token (the source) to be a row at all
-        u: uint64 = t
-        while u < c and _dm_is_space(_dm_buf[u]) != 0:
-            u = u + 1
-        if t > s and u < c and _dm_tok_eq(s, t, cast[Ptr[uint8]]("default")) == 0:
-            _dm_add(s, t)
-            if _dm_present(dm_count - 1) == 0:
-                # Described but not attached. Say which, once, on the panel
-                # log: a distribution silently missing from the menu is how
-                # someone spends an hour looking for an app that was never
-                # mounted.
-                _writeall(1, cast[Ptr[uint8]]("[panel] distribution not attached at /n/: "))
-                _writeall(1, &dm_name[dm_count - 1][0])
-                _writeall(1, cast[Ptr[uint8]]("\n"))
-                dm_count = dm_count - 1
-        i = e + 1
+    if ll > 0 or over != 0:                # a last row with no trailing \n
+        _dm_lines = _dm_lines + 1
+        if over != 0:
+            _dm_long = _dm_long + 1
+        else:
+            _dm_parse_line(ll)
+    if _dm_long > 0:
+        # A cut row is never parsed at all — half a name is a different
+        # distribution, and entering the wrong one is the failure this whole
+        # table exists to prevent.
+        _dm_say(cast[Ptr[uint8]]("TRUNCATED -- "), _dm_long,
+                cast[Ptr[uint8]](" row(s) are longer than the 512-byte line limit and were NOT parsed\n"))
+    # ALWAYS say how much was read, whatever the outcome. "there is no table",
+    # "the table was read and names nothing that is here", and "the table was
+    # cut short" are three different answers, and a byte count is what tells
+    # them apart from a log.
+    _writeall(1, cast[Ptr[uint8]]("[panel] /etc/distros: "))
+    nb: uint64 = _u64_to_dec(_dm_bytes, &_cfg_dnum[0])
+    sys_write(1, &_cfg_dnum[0], nb)
+    _writeall(1, cast[Ptr[uint8]](" byte(s), "))
+    nl2: uint64 = _u64_to_dec(_dm_lines, &_cfg_dnum[0])
+    sys_write(1, &_cfg_dnum[0], nl2)
+    _writeall(1, cast[Ptr[uint8]](" line(s), "))
+    nc: uint64 = _u64_to_dec(dm_count, &_cfg_dnum[0])
+    sys_write(1, &_cfg_dnum[0], nc)
+    _writeall(1, cast[Ptr[uint8]](" attached distribution(s)\n"))
+    if dm_count == 0:
+        _writeall(1, cast[Ptr[uint8]]("[panel] /etc/distros: no attached distribution -- the Applications menu will have no distribution sections\n"))
 
 
 # The parent row's label, "<Name> apps", into _dm_label. The name is the
