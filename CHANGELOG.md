@@ -12,6 +12,34 @@ because the number is the deliverable.
 
 ---
 
+## Unreleased
+
+Landed in the tree, NOT yet on an installed machine. This section exists
+because of the invariant above: work that has landed but not shipped is
+exactly the state in which "we fixed that" and "you have that fix" quietly
+stop meaning the same thing, so the gap is written down rather than carried
+in someone's head.
+
+- **Clicking away dismisses an open menu.** The compositor emitted no focus
+  lines at all, so no window was ever told it lost focus and the Applications
+  menu closed only by clicking its button a second time. `f in`/`f out` now go
+  out on the window's own event ring, in the reference implementation's order:
+  the loser is told before the winner, and both before the pointer line for
+  the very click that moved focus — so a client never sees the press before
+  the message explaining it.
+- **The clipboard stopped polling.** There was no way to ask "has the
+  clipboard changed?", so both bridges re-read the entire clipboard four times
+  a second forever and compared bytes. There is now a serial per buffer, and
+  the file that reports it is a real kernel watch, so a bridge sleeps until
+  something actually happens: **4.99 → 0.49 wakes/s** measured on the X
+  bridge, by sampling voluntary context switches over a stated 10-second
+  interval.
+  The Wayland half was **measured and refused**: that compositor's loop runs
+  at 16 ms for input regardless, so the serial saves it exactly zero wakes —
+  0.04% of one core at the worst constructible clipboard size — while making a
+  non-bumping writer take 2 s instead of 128 ms to be noticed. It still polls
+  by content, with the table of numbers next to the code.
+
 ## 1.0.10
 
 The first release whose index is checked for dependency closure before it is
