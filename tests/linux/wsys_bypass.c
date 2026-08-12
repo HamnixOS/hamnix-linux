@@ -91,7 +91,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 /* ---- the mirror, tracking user/linux-wsys.c exactly --------------------- */
@@ -195,6 +197,53 @@ static int inject_key(const char *tag, const char *path,
     return 0;
 }
 
+/* keysend <path> <wid> <line> [tag]: the attack the KEYSTROKE CHANNEL invites.
+ *
+ * The keys ring left the segment, so a bypasser can no longer read or write it
+ * -- but the channel that replaced it is an ABSTRACT AF_UNIX address, abstract
+ * sockets carry no file mode, and its name is derived from public facts (the
+ * segment's st_dev/st_ino and the wid).  So anybody can compute it and anybody
+ * can sendto() it.  This mode is that program, and it exists so the gate can
+ * prove the check is the KERNEL's SCM_CREDENTIALS stamp on the datagram and not
+ * the obscurity of the address:
+ *
+ *   run as the HOST OWNER  the victim receives the line   (the positive control
+ *                          that the address is right and the channel is real)
+ *   run as any other uid   the victim receives nothing    (the boundary)
+ *
+ * It links no runtime and knows no protocol, exactly like the modes above. */
+static int keysend(const char *tag, const char *path, const char *widarg,
+                   const char *line)
+{
+    printf("== %s", tag);
+
+    struct stat st;
+    if (stat(path, &st) != 0) { printf(" stat=-%d\n", errno); return 0; }
+
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    a.sun_path[0] = '\0';
+    int n = snprintf(a.sun_path + 1, sizeof a.sun_path - 1,
+                     "hamnix-wsys/%llu.%llu/%d/keys",
+                     (unsigned long long)st.st_dev,
+                     (unsigned long long)st.st_ino, atoi(widarg));
+    printf(" uid=%d addr=[%s]", (int)getuid(), a.sun_path + 1);
+    socklen_t alen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+
+    int s = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (s < 0) { printf(" socket=-%d sent=0\n", errno); return 0; }
+
+    char buf[256];
+    int ln = snprintf(buf, sizeof buf, "%s\n", line);
+    ssize_t w = sendto(s, buf, (size_t)ln, 0, (struct sockaddr *)&a, alen);
+    printf(" sendto=%zd", w);
+    if (w < 0) printf(" errno=%d", errno);
+    printf(" sent=%d\n", w > 0 ? 1 : 0);
+    close(s);
+    return 0;
+}
+
 /* Print a byte run with the framing characters made visible, so a ring's
  * contents survive being read out of a shell variable by the harness. */
 static void put_run(const uint8_t *b, size_t n)
@@ -278,6 +327,11 @@ int main(int argc, char **argv)
     /* snoop <path> <victim> [tag] */
     if (argc >= 4 && strcmp(argv[1], "snoop") == 0)
         return snoop(argc >= 5 ? argv[4] : "snoop.table", argv[2], argv[3]);
+
+    /* keysend <path> <wid> <line> [tag] */
+    if (argc >= 5 && strcmp(argv[1], "keysend") == 0)
+        return keysend(argc >= 6 ? argv[5] : "keysend", argv[2], argv[3],
+                       argv[4]);
 
     /* injkey <path> <victim-title> <keyline> [tag] */
     if (argc >= 5 && strcmp(argv[1], "injkey") == 0)
