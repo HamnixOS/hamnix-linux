@@ -1534,7 +1534,31 @@ int32_t sys_rfork(int32_t flags)
 int32_t sys_execve_env(const char *path, char *const argv[],
                        char *const envp[])
 {
-    execve(path, argv, envp);
+    /* A NULL envp means INHERIT, and it used to mean EMPTY.
+     *
+     * sys_execve one screen up states the model in as many words -- "the
+     * Hamnix form inherits the environment rather than taking an envp" -- and
+     * lib/p9.ad's spawn() hands this function whatever its caller passed,
+     * which for most callers is 0 because they have nothing to change. Passing
+     * that 0 to execve(2) verbatim gave the child an EMPTY environment, so a
+     * spawned program lost every HAM* variable that tells this line's runtime
+     * where its shared state lives.
+     *
+     * MEASURED, and it is why user/httpd.ad could not serve one request here:
+     * the master accepted a connection, spawned /bin/httpd_worker with
+     * `execve(..., NULL)`, and the worker -- with no HAMNET in its
+     * environment -- fell down user/linux-net.c's candidate list to a
+     * DIFFERENT /net segment from its master's. It then looked up the
+     * connection number it had been handed in a table that did not contain it
+     * and answered the client nothing. Neither process said a word: the master
+     * had accepted, the worker had started, and the two were simply in
+     * different worlds.
+     *
+     * On the bare-metal lane the environment is not how anything finds /net,
+     * so this could only ever have shown up here -- the same structural blind
+     * spot that hid the accept defect. */
+    extern char **environ;
+    execve(path, argv, envp ? envp : environ);
     return -(int32_t)errno;
 }
 
