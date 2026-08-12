@@ -177,8 +177,16 @@ The clipboard finding that fell out of it is in the HONESTLY BROKEN list below.
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
 
-* **THE `hamnix-desktop` PACKAGE ON https://255.one/ RIGHT NOW IS A MIXED
-  BUILD, AND A MACHINE THAT UPDATES TO IT LOSES ITS DESKTOP.** Measured, on an
+* **`hamnix-desktop` 1.0.10 IS A MIXED BUILD AND A MACHINE THAT TOOK IT LOST
+  ITS DESKTOP. RECOVERED — 1.0.11 IS LIVE, AND `hpm update` IS MEASURED TO
+  BRING SUCH A MACHINE BACK** (`tests/linux/installed_recover_broken.sh`,
+  **34 PASS / 0 FAIL**; the section on it below has the transcript). 1.0.10's
+  bytes are STILL SERVED, deliberately — they were not swapped under the same
+  version number, because a machine that already believes it has 1.0.10 would
+  never fetch a silently corrected one. What follows is the account of the
+  defect, and it is kept because the *cause* is the interesting part.
+
+  Measured, on an
   installed disk, by `tests/linux/installed_update_live.sh`: after a bare
   `hpm update` and a reboot there is **no top bar and so no Applications
   button**, and it is not even deterministic — two runs of the same disk gave
@@ -1655,6 +1663,107 @@ behaved perfectly; and it read `pointer 0 → 0` on the zero-window boot as
 "nothing was clicked" while the QMP transcript showed the click accepted —
 `pointer` counts events routed TO A WINDOW, so `curframes` is the witness
 there.
+
+### And the gate THE RECOVERY got — `tests/linux/installed_recover_broken.sh`
+
+**34 PASS / 0 FAIL. A machine that installed the BROKEN 1.0.10 runs
+`hpm update` and comes back to a desktop that answers a real mouse.**
+
+That claim had never been tested. 1.0.11 was published as the repair and
+1.0.10's bytes were deliberately left on the channel (a machine that already
+believes it has 1.0.10 would never fetch a silently corrected 1.0.10), so the
+only question that matters to a person who took the bad update is whether the
+ordinary command gets them out — and everything about it was plausible rather
+than measured.
+
+**Nothing is reconstructed here.** `installed_update_live.sh` builds its "old"
+machine by reverting one line of `user/wsysd.ad`, which is the right
+instrument for the defect *it* models. This gate installs **the genuine
+published `hamnix-desktop-1.0.10.tar.gz` off 255.one**, with `hamnix-init` and
+`hamnix-hamsh` at 1.0.10 beside it and each package's own `PKGINFO` as its
+metadata. Only the *index* is rebuilt, because the channel keeps one index and
+it has moved on; the tarballs are byte-for-byte what a person received, signed
+and SHA-256-verified into the guest the same way a real install is.
+
+**The failure half is asserted first and is allowed to refute the diagnosis.**
+If 1.0.10 had come up working, the gate would go red on the spot and say the
+premise did not hold, rather than letting a green recovery stand on it. It did
+not come up working:
+
+```
+[rcvr] p2 WINS-BEFORE
+cat: cannot open /dev/wsys/2/ctl: No such file or directory
+cat: cannot open /dev/wsys/3/ctl: No such file or directory
+cat: cannot open /dev/wsys/4/ctl: No such file or directory
+[rcvr] p2 STATE-BEFORE:
+focus 0 windows 0 inputs 3 keys 0 pointer 0 frames 125 curframes 0
+52e8b468b425492067b339bc7017b868  /bin/wsysd
+d662b390fcce48adfb2a3515bfc5c970  /bin/hampanelscene
+9d7b27b4fa985dc0f766550ddbb04bc4  /bin/hamdesktop
+```
+
+`rc.5` had said `compositor started`, `panel started`, `desktop up` — and
+`windows 0`. All three digests are the ones the HOST computed from the
+tarballs 255.one served. The QMP click went in and `curframes 0 → 1` is the
+witness that it arrived (`pointer` cannot speak on a boot with no windows).
+
+**Then the recovery, on the same disk, nothing rebuilt:**
+
+```
+hpm: refreshed index from https://255.one/ (98 packages across 1 channels, 52100 bytes)
+hpm: upgrading hamnix-desktop 1.0.10 -> 1.0.11
+hpm: SHA-256 verified
+hpm: keeping this machine's own /etc/rc.boot
+hpm: update done (upgraded=3 pinned=0)
+399df78a040b28d63bca38cc20263802  /bin/wsysd
+80eabd3cd2730cdb27d972e866ddc470  /bin/hampanelscene
+42812c3c0af475e025e67fdcf19c0b2f  /bin/hamdesktop
+
+[rcvr] p3 WINS-BEFORE          [rcvr] p3 WINS-AFTER
+2 0 0 1280 800 -1 …            2 0 0 1280 800 -1 …
+3 0 0 1280  26 100 …           3 0 0 1280 250 100 …
+4 0 774 1280 26 100 …          4 0 774 1280 26 100 …
+focus 0 windows 3 pointer 0    focus 3 windows 3 pointer 3
+```
+
+**The top bar is back and a REAL pointer opens it: 26 px → 250 px**, with
+`pointer 0 → 3` proving the click was routed to a window. All three digests
+are the published 1.0.11 ones, and they survive the reboot — no index field
+can satisfy that.
+
+**Both halves are driven by QMP `input-send-event` on the guest's
+`virtio-tablet-pci`.** Nothing in this file writes a wsys ring by hand; doing
+that as the host owner is why a completely unclickable desktop went unnoticed
+for the life of the port.
+
+**Confirmed offscreen first, in seconds, on the published bytes alone** —
+`MOUSE_BIN_DIR` against the unpacked tarballs: 1.0.10 is **2 PASS / 1 FAIL**
+(`no full-width top bar — there is no Applications button to click`), 1.0.11
+is **13 PASS / 0 FAIL** (panel 26 → 206 px under an evdev click). The VM arm
+is what makes it a statement about an installed disk.
+
+**No version is hard-coded against the live repository.** The current one is
+read from `index.json` at run time; the known-broken one is the variable
+`BROKENVER` (`HAMLINUX_RECOVER_BROKENVER`, default 1.0.10) because it is an
+historical fact, not a claim about what is current. If the channel stops
+serving 1.0.10's tarballs, or has nothing newer than it, the gate stops and
+says which — it never substitutes a locally built lookalike, which would
+answer a different question in the same shape.
+
+**The did-not-update arm runs, and it goes red.** `HAMLINUX_RECOVER_NOUPDATE=1`
+does everything except `hpm update`: **23 PASS / 1 FAIL, exit 1**, the FAIL
+being the one sentence the file exists for. It also produced the OTHER
+breakage shape on its own — boot 3 came up `windows 2`,
+`(2 0 0 1280 800 -1 …)` the wallpaper and `(3 0 774 1280 26 100 …)` the BOTTOM
+taskbar, top bar absent — so both shapes HANDOFF records for 1.0.10 turned up
+across the two runs of this gate, from the published bytes, unprompted.
+
+That arm's first run also printed a false sentence on top of a correct red:
+the boot-3 verdict opened *"THE UPDATE LANDED AND THE DESKTOP DID NOT COME
+BACK. The bytes arrived…"* in the arm where no update was run and no bytes
+arrived. The premise now follows the arm. A red for the right reason worded
+as a red for the wrong one is still the failure this project keeps paying
+for.
 
 ### Running it
 
