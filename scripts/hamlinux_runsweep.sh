@@ -231,6 +231,15 @@ for l in /lib/x86_64-linux-gnu/libnss_{files,dns}.so.2; do
 done
 
 cp -a etc/. "$BASE/etc/"
+# /version, the same plain root file scripts/hamlinux_image.sh puts in the
+# initramfs (and the same name Hamnix's own build_initramfs.py plants). It is
+# staged here for the same reason the manual pages are: `hello` opens it and
+# prints it, and a root that does not carry it makes the sweep measure its own
+# staging instead of the program.
+printf 'hamnix-linux -- Adder userland on Linux %s, run sweep (%s)\n' \
+    "$(uname -r)" \
+    "$(git -C "$PROJ_ROOT" describe --always --dirty 2>/dev/null || echo unknown)" \
+    > "$BASE/version"
 # The manual pages, staged EXACTLY where scripts/hamlinux_image.sh puts them.
 # Without this the sweep was not measuring `help` and `man`, it was measuring
 # its own staging: both walk /usr/share/man/, both found an empty tree, and
@@ -332,6 +341,34 @@ if [ -f "$RECIPES" ]; then
         c="${rest%%$'\t'*}";    rest="${rest#*$'\t'}"
         a="${rest%%$'\t'*}";    rest="${rest#*$'\t'}"
         s="${rest%%$'\t'*}";    cl="${rest#*$'\t'}"
+        # THE ARGV COLUMN IS CHECKED BEFORE ANYTHING RUNS, and a bad one is
+        # fatal to the whole sweep rather than to one row.
+        #
+        # A bare `-` is the STDIN column's sentinel. Pasted here it is a
+        # literal argument, and that has now bitten this table three times:
+        # `mktemp -`, `route -` and `pr -` each answered CORRECTLY to a
+        # question nobody meant to ask and were scored as broken programs;
+        # 47 more rows carried it silently. A BLANK column is the same slip
+        # from the other side -- it is exactly what a collapsed tab looks
+        # like, the bug that once fed `wc` its own description.
+        #
+        # Neither can be told apart from a deliberate choice by looking at
+        # the row, so neither is allowed to BE one. "No arguments" has one
+        # spelling, `EMPTY`, and a row that really wants a lone dash writes
+        # %DASH. Fixing the 47 rows would have left the fourth time to
+        # happen; this is what stops it.
+        case "$a" in
+            "")  echo "[runsweep] FATAL $RECIPES: row '$n' has a BLANK argv column." >&2
+                 echo "[runsweep]   Write EMPTY for no arguments (a blank column is" >&2
+                 echo "[runsweep]   indistinguishable from a collapsed tab)." >&2
+                 exit 2 ;;
+            -)   echo "[runsweep] FATAL $RECIPES: row '$n' has a bare '-' argv column." >&2
+                 echo "[runsweep]   '-' is the STDIN column's sentinel; here it is a" >&2
+                 echo "[runsweep]   literal argument. Write EMPTY for no arguments, or" >&2
+                 echo "[runsweep]   %DASH if a lone dash is genuinely wanted." >&2
+                 exit 2 ;;
+            EMPTY) a="" ;;
+        esac
         CLASS[$n]="$c"; ARGV[$n]="$a"; STDIN[$n]="$s"; CLAIM[$n]="$cl"
     done < "$RECIPES"
 fi
@@ -573,6 +610,11 @@ run_one() {
     argv="${argv//%HMJV//work/tests/fixtures/videos/test.hmjv}"
     argv="${argv//%BMP24//work/fix24.bmp}"
     argv="${argv//%BMP32//work/fix32.bmp}"
+    # A LONE DASH, spelled out loud. The recipes loader rejects a bare `-` in
+    # the argv column because that is always the stdin sentinel arriving in
+    # the wrong place; a row that really means "pass the program a `-`" says
+    # so here and is then visibly deliberate in the table.
+    argv="${argv//%DASH/-}"
     local -a av=()
     [ -n "$argv" ] && read -r -a av <<< "$argv"
 
