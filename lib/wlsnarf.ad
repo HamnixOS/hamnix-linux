@@ -1,0 +1,259 @@
+# lib/wlsnarf.ad — the /dev/snarf half of the Wayland clipboard bridge.
+#
+# THERE ARE THREE CLIPBOARDS ON THIS LINE AND THERE MUST BE ONE.
+#
+#   /dev/snarf            the Hamnix clipboard, a served device
+#                         (user/linux-snarf.c). Copy and paste between Hamnix
+#                         programs go through it.
+#   X selections          bridged by user/xsnarfd.ad, an X selection OWNER,
+#                         one per distribution namespace.
+#   wl_data_device        the Wayland-native clipboard. Firefox in the Debian
+#                         namespace is a NATIVE WAYLAND CLIENT, not an X one,
+#                         so this is the clipboard a user actually meets --
+#                         and it was unbridged, silently, while the same copy
+#                         out of an X application worked.
+#
+# This module is the part of the third bridge that has nothing to do with
+# Wayland: reading and writing the device, holding the cache the change
+# detector compares against, and deciding whether a mime type is one the
+# bridge can honestly deliver. It is a separate file because user/wsyswl.ad is
+# 4 000 lines of compositor and none of this is compositor -- the same reason
+# user/xsnarfd.ad is a separate process from the X server it talks to.
+#
+# WHY THE COMPOSITOR AND NOT A SEPARATE PROCESS. In X anyone can own a
+# selection, so the bridge could be an ordinary client (xsnarfd). Wayland is
+# not like that: wl_data_device is implemented BY the compositor, the
+# compositor tracks the current selection, and a client asking to paste is
+# handed a pipe by the compositor. There is no seat at that table for an
+# outside process -- the protocols that would give one
+# (wlr-data-control-unstable-v1, ext-data-control-v1) would themselves have to
+# be implemented by the compositor first. So the wire lives in user/wsyswl.ad
+# and everything that can leave it lives here.
+#
+# THE ANTI-PING-PONG INVARIANT IS `wlsn_put`, and it is the same one
+# user/xsnarfd.ad §6.1 records: the cache is updated BEFORE the device is
+# written, so the next poll does not see the bridge's own write as a
+# Hamnix-side change and go re-announcing a selection at the client that just
+# handed it over. Both bridges share /dev/snarf and both converge on CONTENT,
+# so a copy in Firefox reaching an xterm goes Wayland -> /dev/snarf -> X and
+# stops there rather than ringing.
+#
+# WHAT IS NOT HERE: PRIMARY. Core Wayland has no middle-click selection --
+# that is zwp_primary_selection_device_manager_v1, a separate protocol this
+# compositor does not advertise. /dev/snarf.primary is therefore bridged to X
+# and NOT to Wayland, which is said out loud in docs/linux_clipboard.md rather
+# than left for someone to discover by middle-clicking in Firefox.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+
+# The device's cap, and it is the device that enforces it (lib/devsnarf.ad,
+# user/linux-snarf.c). Repeated here so the bridge can truncate LOUDLY on the
+# way in rather than hand over 70 000 bytes and let 65 536 of them arrive with
+# nobody saying which.
+WLSN_MAX: uint64 = 65536
+
+# Top-level BSS, never frame locals: an Adder frame local is not a place to
+# put 64 KiB on this line.
+wlsn_dev:   Array[65600, uint8]     # what a read of the device just returned
+wlsn_cache: Array[65600, uint8]     # what the bridge believes is on it
+wlsn_mime:  Array[256, uint8]
+
+wlsn_cache_len: uint64 = 0
+wlsn_have:      int32  = 0          # the device answered at least once
+
+
+def wlsn_slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def wlsn_eq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    if a[i] != b[i]:
+        return 0
+    return 1
+
+
+def wlsn_copy(dst: Ptr[uint8], src: Ptr[uint8], n: uint64):
+    i: uint64 = 0
+    while i < n:
+        dst[i] = src[i]
+        i = i + 1
+
+
+def wlsn_same(a: Ptr[uint8], alen: uint64, b: Ptr[uint8], blen: uint64) -> int32:
+    if alen != blen:
+        return 0
+    i: uint64 = 0
+    while i < alen:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    return 1
+
+
+# --- the device -------------------------------------------------------
+
+# Read the whole clipboard into wlsn_dev. -1 means the device is NOT SERVED in
+# this process, which is the honest answer when the compositor is run somewhere
+# the Hamnix runtime does not serve it, and is reported by name rather than
+# treated as "the clipboard is empty".
+def wlsn_read_dev() -> int64:
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/snarf"))
+    if fd < 0:
+        return -1
+    got: uint64 = 0
+    while got < WLSN_MAX:
+        n: int64 = sys_read(fd, &wlsn_dev[got], WLSN_MAX - got)
+        if n <= 0:
+            break
+        got = got + cast[uint64](n)
+    sys_close(fd)
+    return cast[int64](got)
+
+
+# Is /dev/snarf served here at all? Called once at startup so a compositor
+# with no clipboard says so on its own log instead of going quietly one-way.
+def wlsn_present() -> int32:
+    if wlsn_read_dev() < 0:
+        return 0
+    return 1
+
+
+# The 4 Hz change detector. 1 = /dev/snarf now holds something other than what
+# the bridge last saw, and the cache has been brought up to date, so the caller
+# should announce a new selection to its Wayland clients.
+#
+# BY CONTENT, NOT BY A SERIAL, and that is a known limitation rather than a
+# choice: `struct snarfshm` has magic and version and no generation counter, so
+# there is nothing cheap to compare and nothing to park on. It is the same
+# limitation user/xsnarfd.ad records at §6.5, with the same two-line request
+# written down there, and closing it would fix both bridges at once.
+def wlsn_poll() -> int32:
+    n: int64 = wlsn_read_dev()
+    if n < 0:
+        return 0
+    ln: uint64 = cast[uint64](n)
+    if wlsn_have == 1:
+        if wlsn_same(&wlsn_dev[0], ln, &wlsn_cache[0], wlsn_cache_len) == 1:
+            return 0
+    wlsn_copy(&wlsn_cache[0], &wlsn_dev[0], ln)
+    wlsn_cache_len = ln
+    wlsn_have = 1
+    return 1
+
+
+# Put bytes ON the clipboard, having come from a Wayland client. Returns 0 if
+# the device refused, which the caller must SAY -- a copy that reported success
+# and went nowhere is the exact failure this whole file exists to end.
+def wlsn_put(src: Ptr[uint8], n: uint64) -> int32:
+    # THE CACHE FIRST. See the header: this ordering is the whole reason the
+    # two bridges converge instead of ringing.
+    ln: uint64 = n
+    if ln > WLSN_MAX:
+        ln = WLSN_MAX
+    wlsn_copy(&wlsn_cache[0], src, ln)
+    wlsn_cache_len = ln
+    wlsn_have = 1
+    fd: int32 = sys_open_write(cast[Ptr[char]]("/dev/snarf"))
+    if fd < 0:
+        return 0
+    # A single write at offset 0 REPLACES, and a 0-byte write CLEARS: the
+    # device's rule (lib/devsnarf.ad), which is why an empty Wayland selection
+    # can be mirrored faithfully instead of leaving the old text behind.
+    if ln == 0:
+        sys_write(fd, src, 0)
+        sys_close(fd)
+        return 1
+    done: uint64 = 0
+    while done < ln:
+        k: int64 = sys_write(fd, &src[done], ln - done)
+        if k <= 0:
+            sys_close(fd)
+            return 0
+        done = done + cast[uint64](k)
+    sys_close(fd)
+    return 1
+
+
+def wlsn_ptr() -> Ptr[uint8]:
+    return &wlsn_cache[0]
+
+
+def wlsn_len() -> uint64:
+    return wlsn_cache_len
+
+
+# --- mime types -------------------------------------------------------
+#
+# DO NOT ADVERTISE WHAT YOU CANNOT DELIVER. The clipboard holds bytes with no
+# declared encoding; every Hamnix program that writes it (lib/hamtextbox.ad,
+# lib/htermsel.ad) writes UTF-8. So the honest set is the UTF-8 text names and
+# nothing else:
+#
+#   text/plain;charset=utf-8   what GTK, Qt, Firefox and Xwayland all ask for
+#   text/plain                 the toolkit-neutral fallback
+#   UTF8_STRING                Xwayland's name for the X atom of the same bytes
+#   TEXT                       ditto, and ICCCM says an owner that chose UTF-8
+#                              answers TEXT with UTF-8
+#
+# NOT `STRING`, which in X means Latin-1: user/xsnarfd.ad answers it because an
+# X paster may ask for nothing else and a wrong encoding beats no paste, but
+# there is no such forced choice here and offering it would be a claim about
+# an encoding these bytes do not carry. NOT text/html, NOT image/*: a Wayland
+# client that offers only those gets a refusal that names the types it offered.
+
+WLSN_M_UTF8:  int32 = 1
+WLSN_M_PLAIN: int32 = 2
+WLSN_M_USTR:  int32 = 4
+WLSN_M_TEXT:  int32 = 8
+
+# Which of the four this mime string is, or 0 for "not one we deliver".
+def wlsn_mime_bit(m: Ptr[uint8]) -> int32:
+    if wlsn_eq(m, "text/plain;charset=utf-8") == 1:
+        return WLSN_M_UTF8
+    if wlsn_eq(m, "text/plain;charset=UTF-8") == 1:
+        return WLSN_M_UTF8
+    if wlsn_eq(m, "text/plain") == 1:
+        return WLSN_M_PLAIN
+    if wlsn_eq(m, "UTF8_STRING") == 1:
+        return WLSN_M_USTR
+    if wlsn_eq(m, "TEXT") == 1:
+        return WLSN_M_TEXT
+    return 0
+
+
+# The mime the bridge should ASK a source for, given everything it offered.
+# Preference order is the order above: the most specific true statement first.
+# 0 = it offered nothing this bridge can carry, and the caller must refuse
+# loudly rather than set the clipboard to nothing.
+def wlsn_pick(bits: int32) -> int32:
+    if bits & WLSN_M_UTF8 != 0:
+        return WLSN_M_UTF8
+    if bits & WLSN_M_PLAIN != 0:
+        return WLSN_M_PLAIN
+    if bits & WLSN_M_USTR != 0:
+        return WLSN_M_USTR
+    if bits & WLSN_M_TEXT != 0:
+        return WLSN_M_TEXT
+    return 0
+
+
+def wlsn_mime_name(bit: int32) -> Ptr[uint8]:
+    if bit == WLSN_M_UTF8:
+        return "text/plain;charset=utf-8"
+    if bit == WLSN_M_PLAIN:
+        return "text/plain"
+    if bit == WLSN_M_USTR:
+        return "UTF8_STRING"
+    return "TEXT"

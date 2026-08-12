@@ -53,15 +53,27 @@
 # wl_shm_pool + wl_buffer, xdg_wm_base + xdg_surface + xdg_toplevel +
 # xdg_positioner + xdg_popup, wl_seat + wl_pointer + wl_keyboard with a real
 # XKB keymap over a memfd, wl_output + zxdg_output_manager_v1, wp_viewporter,
-# and wl_data_device_manager and wl_subcompositor as far as their object
-# graphs (GTK will not create a seat without the first; Firefox aborts without
-# the second).
+# wl_data_device_manager WITH A REAL CLIPBOARD BEHIND IT (see "the Wayland
+# clipboard" below), and wl_subcompositor as far as its object graph (Firefox
+# aborts without it).
 #
-# The last three exist because Firefox asks for them and stops if they are
-# missing; each one is commented where it is implemented. The rule this file
-# learned the hard way is that a Wayland client does not report a compositor
-# gap, it just goes quiet -- see the frame-callback table and
-# send_toplevel_configure for two separate ways that happened.
+# wl_data_device_manager USED TO BE AN OBJECT GRAPH AND NOTHING ELSE, and it
+# is worth saying so because it is exactly the failure NORTH_STAR.md names.
+# GTK will not create a seat without the manager, so it was advertised at
+# version 3 to satisfy the handshake -- and then create_data_source and
+# get_data_device minted an object apiece, every offer and set_selection fell
+# off the end of dispatch into the silent-consume branch, and no data_offer or
+# selection event was ever sent to anybody. A Wayland client copying got
+# `paste 0 0` on the Hamnix side; a Wayland client pasting got no selection at
+# all; neither printed a word. Since Firefox in a distribution namespace is a
+# NATIVE Wayland client, that was the clipboard most users would actually
+# meet, while the same copy out of an X application worked through
+# user/xsnarfd.ad. It is bridged now, to the same /dev/snarf, so there is one
+# clipboard and not three.
+#
+# The rule this file learned the hard way is that a Wayland client does not
+# report a compositor gap, it just goes quiet -- see the frame-callback table
+# and send_toplevel_configure for two separate ways that happened.
 #
 # Not here, and each one is a decision rather than an oversight:
 #   * DAMAGE IS IGNORED. Every commit blits the whole surface. Honouring
@@ -107,6 +119,7 @@ extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_wsys_free(wid: int32) -> int32
+extern def sys_pipe(fds: Ptr[int32]) -> int32
 extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
 extern def sys_exit(code: uint64)
 
@@ -130,6 +143,15 @@ extern def sys_getenv(name: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64
 # Wayland client at once -- and, through Xwayland, for every X11 client -- so
 # getting it wrong here is that bug multiplied by the whole distribution.
 from lib.hamscreen import hamscreen_dims_or_fail
+
+# THE THIRD CLIPBOARD. /dev/snarf is the Hamnix clipboard and user/xsnarfd.ad
+# bridges the X selections to it; wl_data_device was the one left over, and it
+# is the one Firefox uses. Everything about it that is not Wayland wire lives
+# in lib/wlsnarf.ad -- the device I/O, the change detector, the mime rules and
+# the anti-ping-pong invariant.
+from lib.wlsnarf import wlsn_present, wlsn_poll, wlsn_put, wlsn_ptr, wlsn_len, \
+                        wlsn_mime_bit, wlsn_pick, wlsn_mime_name, \
+                        wlsn_slen, WLSN_MAX
 
 
 # --- protocol constants ---------------------------------------------
@@ -259,6 +281,41 @@ conn_pointer: Array[8, int32]
 conn_keyboard: Array[8, int32]
 conn_xdg_wm: Array[8, int32]
 conn_output: Array[8, int32]           # the client's wl_output object, for enter
+
+# --- THE WAYLAND CLIPBOARD ---------------------------------------------
+# wl_data_device is implemented BY the compositor -- see lib/wlsnarf.ad for
+# why that means this cannot be a separate process the way user/xsnarfd.ad is.
+conn_ddev:  Array[8, int32]            # the client's wl_data_device, 0 = none
+conn_offer: Array[8, int32]            # the wl_data_offer WE last made it
+
+# A wl_data_offer is an object the SERVER creates, so its id comes out of the
+# server half of the id space (0xff000000 and up) and cannot live in the
+# per-connection object table, which is indexed by a dense client id below
+# MAXOBJ. There is exactly one live offer per connection -- announcing a new
+# selection retires the old one -- so conn_offer IS the table.
+DOFF_BASE: uint32 = 0xff000000
+doff_next: uint32 = 0
+
+# Which client owns the selection right now, or -1 for "the Hamnix side does".
+# It is only used to keep the bridge from announcing a client's own bytes back
+# at it; every paste, including that client's, is answered out of /dev/snarf.
+sel_conn: int32 = -1
+
+# An in-flight pull: the compositor asked a wl_data_source for its bytes and
+# is reading the pipe. ASYNCHRONOUS ON PURPOSE. The obvious version reads the
+# pipe to EOF right there in set_selection, and that is a compositor that
+# stops painting for as long as a client takes to answer -- a client which,
+# being a client, may take for ever or never answer at all. The whole desktop
+# would hang on a copy.
+pull_fd:    int32  = -1
+pull_conn:  int32  = -1
+pull_got:   uint64 = 0
+pull_over:  uint64 = 0                 # bytes past the cap, for the loud drop
+pull_ticks: int32  = 0
+PULL_TICKS_MAX: int32 = 180            # 180 * 16 ms = about 3 s
+pullbuf: Array[65600, uint8]
+mimebuf: Array[256, uint8]
+pipebuf: Array[2, int32]
 
 TITLE_CAP: uint64 = 48
 conn_title: Array[384, uint8]          # 8 * 48
@@ -3718,8 +3775,316 @@ def do_viewporter(c: uint64, opcode: uint32, args: Ptr[uint8], arglen: uint64):
                 obj_a[oidx(c, vid)] = cast[int32](ru32(args, 4))
 
 
+# --- the Wayland clipboard --------------------------------------------
+#
+# ONE CLIPBOARD, and this is the third road into it. /dev/snarf is the
+# clipboard (user/linux-snarf.c); user/xsnarfd.ad bridges the X selections to
+# it, one bridge per distribution; and this bridges wl_data_device. The reason
+# the third one matters more than it sounds is that FIREFOX IN THE DEBIAN
+# NAMESPACE IS A NATIVE WAYLAND CLIENT. Copying a URL out of it reached
+# nothing before this, while the same copy out of an X application worked --
+# and a user cannot tell which toolkit an application uses, so the whole thing
+# read as "the clipboard works sometimes".
+#
+# THE MODEL, and why it is not X's. In X a selection has an OWNER and a paster
+# asks that owner to convert it, which is why the bridge over there had to be
+# a client that owns selections. Wayland inverts it: a client offers a
+# wl_data_source, the COMPOSITOR tracks the current selection, and a client
+# that wants to paste is handed a PIPE by the compositor. So there is no
+# outside process that could do this job, and it lives here.
+#
+# THE SHAPE IN ONE PARAGRAPH. When a client sets a selection, the compositor
+# immediately asks its source for the bytes over a pipe and puts them in
+# /dev/snarf -- so the clipboard's single copy of the truth is the device, not
+# a client that may exit. Every paste, from any client, is then answered out
+# of /dev/snarf rather than forwarded to the owner. That is what makes it ONE
+# clipboard rather than two that agree: a Wayland client pasting after the
+# owning Firefox tab closed still gets the text, and text that arrived from an
+# xterm through xsnarfd is offered to Wayland clients on exactly the same
+# footing as text that came from a Wayland client.
+#
+# WHAT THAT COSTS, said plainly: a non-text offer is not carried. A client
+# that copies an image and offers image/png and nothing else is REFUSED, by
+# name, on the log -- rather than the compositor advertising image/png to the
+# next client and having nothing to put down the pipe.
+
+
+# A Wayland string argument at `at` in a request body, into `dst`.
+def clip_arg_str(args: Ptr[uint8], arglen: uint64, at: uint64,
+                 dst: Ptr[uint8], cap: uint64) -> uint64:
+    if at + 4 > arglen:
+        dst[0] = 0
+        return arglen
+    n: uint64 = cast[uint64](ru32(args, at))
+    p: uint64 = at + 4
+    i: uint64 = 0
+    while i + 1 < n and i + 1 < cap and p + i < arglen:
+        dst[i] = args[p + i]
+        i = i + 1
+    dst[i] = 0
+    pad: uint64 = (n + 3) / 4 * 4
+    return p + pad
+
+
+def send_data_offer(ddev: uint32, offer: uint32):
+    s: uint64 = emit_begin(ddev)
+    o_u32(offer)
+    emit_end(s, 0)
+
+
+def send_offer_mime(offer: uint32, mime: Ptr[uint8]):
+    s: uint64 = emit_begin(offer)
+    o_cstr(mime)
+    emit_end(s, 0)
+
+
+def send_selection(ddev: uint32, offer: uint32):
+    s: uint64 = emit_begin(ddev)
+    o_u32(offer)
+    emit_end(s, 5)
+
+
+def send_source_send(src: uint32, mime: Ptr[uint8]):
+    s: uint64 = emit_begin(src)
+    o_cstr(mime)
+    emit_end(s, 1)
+
+
+def send_source_cancelled(src: uint32):
+    s: uint64 = emit_begin(src)
+    emit_end(s, 2)
+
+
+# Announce the CURRENT contents of /dev/snarf to one connection as a fresh
+# wl_data_offer. Callers must have flushed anything already staged: `out` is
+# one buffer for the whole server and this sends it to a specific client.
+def clip_announce_to(c: uint64):
+    dd: int32 = conn_ddev[c]
+    if dd <= 0:
+        return
+    doff_next = doff_next + 1
+    off: uint32 = DOFF_BASE + doff_next
+    conn_offer[c] = cast[int32](off)
+    send_data_offer(cast[uint32](dd), off)
+    # EXACTLY WHAT lib/wlsnarf.ad SAYS IT CAN DELIVER, in preference order.
+    # Advertising a type this compositor cannot answer is the same class of
+    # defect as a device path with no server behind it, and user/xsnarfd.ad
+    # refuses TIMESTAMP for the identical reason.
+    send_offer_mime(off, "text/plain;charset=utf-8")
+    send_offer_mime(off, "text/plain")
+    send_offer_mime(off, "UTF8_STRING")
+    send_offer_mime(off, "TEXT")
+    send_selection(cast[uint32](dd), off)
+    flush(conn_fd[c])
+
+
+# ... to every client that has a wl_data_device, optionally skipping one.
+#
+# THE PROTOCOL SAYS "the client with keyboard focus" AND THIS SAYS "everyone",
+# which is a deliberate simplification and is written down rather than
+# implied. A client that is not focused has no reason to act on a selection
+# and every toolkit simply records the latest offer; the alternative --
+# withholding the clipboard until focus arrives -- is how a paste into a
+# window that was never clicked returns nothing with no error. Skipping the
+# connection that just gave us the bytes is not politeness: announcing an
+# offer back at the owner is how a toolkit concludes it LOST the selection.
+def clip_announce_all(skip: int32):
+    i: uint64 = 0
+    while i < MAXCONN:
+        if conn_inuse[i] != 0 and conn_ddev[i] > 0:
+            if cast[int32](i) != skip:
+                clip_announce_to(i)
+        i = i + 1
+
+
+# A client asked to paste: wl_data_offer.receive(mime, fd).
+def clip_offer_receive(c: uint64, args: Ptr[uint8], arglen: uint64):
+    clip_arg_str(args, arglen, 0, &mimebuf[0], 256)
+    fd: int32 = fdq_pop(c)
+    if fd < 0:
+        puts(2, "wsyswl: clipboard: a paste arrived with NO descriptor; ignored\n")
+        return
+    if wlsn_mime_bit(&mimebuf[0]) == 0:
+        # REFUSED, AND SAID. Closing the fd is what the protocol gives a
+        # compositor to say no with -- the client sees end-of-file and an
+        # empty paste -- so the name of the type nobody could deliver is
+        # printed here or it exists nowhere.
+        puts(2, "wsyswl: clipboard: REFUSED a paste asking for ")
+        puts(2, &mimebuf[0])
+        puts(2, " -- this bridge delivers UTF-8 text only\n")
+        sys_close(fd)
+        return
+    n: uint64 = wlsn_len()
+    # A BLOCKING WRITE, AND IT IS BOUNDED BY CONSTRUCTION. The cap is 64 KiB
+    # (SNARF_MAX) and a pipe's default capacity is 64 KiB, so a full clipboard
+    # fits without a reader having read a byte and this cannot park the
+    # compositor. A client that hands over something with a smaller buffer and
+    # then does not read it could; that is the one case, and it is named here
+    # rather than discovered.
+    done: uint64 = 0
+    while done < n:
+        k: int64 = sys_write(fd, &wlsn_ptr()[done], n - done)
+        if k <= 0:
+            break
+        done = done + cast[uint64](k)
+    sys_close(fd)
+
+
+# --- pulling a client's bytes into /dev/snarf -------------------------
+
+def clip_pull_abort(why: Ptr[uint8]):
+    if pull_fd >= 0:
+        sys_close(pull_fd)
+    pull_fd = -1
+    pull_conn = -1
+    pull_got = 0
+    pull_over = 0
+    puts(2, "wsyswl: clipboard: ")
+    puts(2, why)
+    puts(2, " -- /dev/snarf is UNCHANGED\n")
+
+
+def clip_pull_finish():
+    n: uint64 = pull_got
+    over: uint64 = pull_over
+    src: int32 = pull_conn
+    sys_close(pull_fd)
+    pull_fd = -1
+    pull_conn = -1
+    pull_got = 0
+    pull_over = 0
+    if over > 0:
+        # TRUNCATED LOUDLY AND BY SIZE, the same rule /dev/snarf applies to a
+        # 70 000-byte write from a Hamnix program and user/xsnarfd.ad applies
+        # to an oversized X selection.
+        puts(2, "wsyswl: clipboard: a Wayland client offered more than the 64 KiB clipboard: TRUNCATED, ")
+        putd(2, cast[int32](over))
+        puts(2, " bytes dropped\n")
+    if wlsn_put(&pullbuf[0], n) == 0:
+        puts(2, "wsyswl: clipboard: could not write /dev/snarf -- is this compositor running where the Hamnix runtime serves it?\n")
+        return
+    puts(1, "wsyswl: clipboard: Wayland -> /dev/snarf, ")
+    putd(1, cast[int32](n))
+    puts(1, " bytes\n")
+    # Everyone ELSE now sees it. The owner is skipped for the reason
+    # clip_announce_all gives, and xsnarfd's 4 Hz poll of the device carries
+    # the same bytes on to the X side of every namespace.
+    clip_announce_all(src)
+
+
+# One non-blocking step of an in-flight pull, called every 16 ms frame.
+def clip_pull_step():
+    if pull_fd < 0:
+        return
+    while 1 == 1:
+        room: uint64 = WLSN_MAX - pull_got
+        if room == 0:
+            # Past the cap: keep draining so the client's write completes and
+            # it does not sit blocked on a pipe for ever, but count what is
+            # being thrown away so the truncation can be named.
+            n2: int64 = sys_read_nb(pull_fd, &mimebuf[0], 256)
+            if n2 > 0:
+                pull_over = pull_over + cast[uint64](n2)
+                continue
+            if n2 < 0:
+                clip_pull_finish()
+            return
+        n: int64 = sys_read_nb(pull_fd, &pullbuf[pull_got], room)
+        if n > 0:
+            pull_got = pull_got + cast[uint64](n)
+            continue
+        if n < 0:                       # sys_read_nb: negative is TRUE EOF
+            clip_pull_finish()
+            return
+        break                           # 0 = nothing yet; come back next frame
+    pull_ticks = pull_ticks + 1
+    if pull_ticks > PULL_TICKS_MAX:
+        clip_pull_abort("a Wayland client never answered for the bytes it offered")
+
+
+# wl_data_device.set_selection(source, serial)
+def clip_set_selection(c: uint64, args: Ptr[uint8], arglen: uint64):
+    if arglen < 4:
+        return
+    src: uint32 = ru32(args, 0)
+    if src == 0:
+        # THE SELECTION IS GIVEN UP, AND THE CLIPBOARD IS NOT CLEARED. That is
+        # the choice every clipboard manager makes and the one user/xsnarfd.ad
+        # already made for X (§6.5): the alternative is that closing the
+        # window you copied from empties the clipboard, which no one expects.
+        if sel_conn == cast[int32](c):
+            sel_conn = -1
+            puts(1, "wsyswl: clipboard: a Wayland client gave up the selection; /dev/snarf keeps what it had\n")
+        return
+    if obj_get_type(c, src) != T_DATA_SOURCE:
+        return
+    bits: int32 = obj_a[oidx(c, src)]
+    pick: int32 = wlsn_pick(bits)
+    if pick == 0:
+        # NOTHING WE CAN CARRY. Refuse by name and tell the client, which is
+        # what wl_data_source.cancelled is for -- a source left believing it
+        # owns a selection the compositor dropped is the silent half of this.
+        puts(2, "wsyswl: clipboard: a Wayland client offered the selection in NO type this bridge can deliver (it wants UTF-8 text); REFUSED, /dev/snarf is unchanged\n")
+        flush(conn_fd[c])
+        send_source_cancelled(src)
+        flush(conn_fd[c])
+        return
+    if pull_fd >= 0:
+        clip_pull_abort("a second copy arrived before the first was answered")
+    if sys_pipe(&pipebuf[0]) != 0:
+        puts(2, "wsyswl: clipboard: pipe(2) failed; the copy is LOST\n")
+        return
+    sel_conn = cast[int32](c)
+    pull_conn = cast[int32](c)
+    pull_fd = pipebuf[0]
+    pull_got = 0
+    pull_over = 0
+    pull_ticks = 0
+    # The write end rides out WITH the event, the way the keymap memfd does:
+    # the client's recvmsg has to see them together or it has a mime type and
+    # no descriptor. flush() closes it afterwards, which is what makes the
+    # read end reach EOF when the client is done.
+    flush(conn_fd[c])
+    out_fd = pipebuf[1]
+    send_source_send(src, wlsn_mime_name(pick))
+    flush(conn_fd[c])
+
+
+# The 4 Hz poll of /dev/snarf: has the HAMNIX side (or the X side, through
+# user/xsnarfd.ad, which writes the same device) copied something new?
+def clip_tick():
+    if wlsn_poll() == 1:
+        puts(1, "wsyswl: clipboard: /dev/snarf -> Wayland, ")
+        putd(1, cast[int32](wlsn_len()))
+        puts(1, " bytes\n")
+        sel_conn = -1
+        clip_announce_all(-1)
+
+
+def clip_conn_reset(c: uint64):
+    conn_ddev[c] = 0
+    conn_offer[c] = 0
+    if sel_conn == cast[int32](c):
+        sel_conn = -1
+    if pull_conn == cast[int32](c):
+        clip_pull_abort("the client that owned the selection went away mid-copy")
+
+
 def dispatch(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
              arglen: uint64):
+    # A wl_data_offer is an object THIS SERVER created, so its id is in the
+    # server half of the id space and cannot be looked up in the per-connection
+    # object table. It is matched by id, before anything else.
+    if obj >= DOFF_BASE:
+        if opcode == 1:                          # receive(mime, fd)
+            clip_offer_receive(c, args, arglen)
+        elif opcode == 2:                        # destroy
+            if conn_offer[c] == cast[int32](obj):
+                conn_offer[c] = 0
+        # accept / finish / set_actions: consumed. This compositor carries a
+        # selection, not a drag, so there is no action to negotiate.
+        flush(conn_fd[c])
+        return
     otype: int32 = obj_get_type(c, obj)
     fd: int32 = conn_fd[c]
     if obj == DISPLAY_ID:
@@ -3826,12 +4191,42 @@ def dispatch(c: uint64, obj: uint32, opcode: uint32, args: Ptr[uint8],
         if opcode == 0:
             free_obj(c, obj)
     elif otype == T_DDM:
-        if opcode == 0:
+        if opcode == 0:                          # create_data_source(id)
             if arglen >= 4:
-                new_obj(c, ru32(args, 0), T_DATA_SOURCE)
-        elif opcode == 1:
+                sid: uint32 = ru32(args, 0)
+                new_obj(c, sid, T_DATA_SOURCE)
+                obj_a[oidx(c, sid)] = 0          # the mime types it offers
+        elif opcode == 1:                        # get_data_device(id, seat)
             if arglen >= 4:
-                new_obj(c, ru32(args, 0), T_DATA_DEVICE)
+                did: uint32 = ru32(args, 0)
+                new_obj(c, did, T_DATA_DEVICE)
+                conn_ddev[c] = cast[int32](did)
+                # A CLIENT THAT ARRIVES AFTER THE COPY MUST STILL SEE IT.
+                # Without this, whatever is on the clipboard is announced only
+                # on the next change, so the first paste of every newly
+                # started program returns nothing -- and returns it silently.
+                flush(conn_fd[c])
+                if wlsn_len() > 0:
+                    clip_announce_to(c)
+    elif otype == T_DATA_SOURCE:
+        if opcode == 0:                          # offer(mime_type)
+            clip_arg_str(args, arglen, 0, &mimebuf[0], 256)
+            b: int32 = wlsn_mime_bit(&mimebuf[0])
+            obj_a[oidx(c, obj)] = obj_a[oidx(c, obj)] | b
+        elif opcode == 1:                        # destroy
+            free_obj(c, obj)
+        # set_actions is v3 drag-and-drop; this compositor carries selections.
+    elif otype == T_DATA_DEVICE:
+        if opcode == 1:                          # set_selection(source, serial)
+            clip_set_selection(c, args, arglen)
+        elif opcode == 2:                        # release
+            if conn_ddev[c] == cast[int32](obj):
+                conn_ddev[c] = 0
+            free_obj(c, obj)
+        # start_drag (opcode 0) is drag-and-drop, which this compositor does
+        # not carry: there is no drag on a wsys desktop to carry it to. It is
+        # consumed rather than answered, and NOT advertised as working
+        # anywhere -- docs/linux_clipboard.md §7.4 says so by name.
     elif otype == T_BUFFER:
         if opcode == 0:
             map_unref(c, obj_g[oidx(c, obj)])
@@ -3869,6 +4264,7 @@ def conn_reset(c: uint64):
     conn_xdg_wm[c] = 0
     conn_output[c] = 0
     conn_title_len[c] = 0
+    clip_conn_reset(c)
     fc_drop_conn(c)
     fdq_head[c] = 0
     fdq_tail[c] = 0
@@ -3905,6 +4301,7 @@ def conn_free(c: uint64):
         obj_type[oi] = T_NONE
         i = i + 1
     fc_drop_conn(c)
+    clip_conn_reset(c)
     while fdq_head[c] != fdq_tail[c]:
         sys_close(fdq_pop(c))
     i = 0
@@ -4672,6 +5069,23 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     puts(1, "\n")
     puts(1, "wsyswl: point a client at it with WAYLAND_DISPLAY=wayland-0\n")
 
+    # PROVE THE HAMNIX HALF BEFORE ADVERTISING THE WAYLAND ONE. This
+    # compositor has always advertised wl_data_device_manager, because GTK
+    # will not make a seat without it -- and for the whole port it advertised
+    # it over nothing at all: every set_selection was dropped and no selection
+    # event was ever sent, in silence. If /dev/snarf is not served in this
+    # process the same silence is back, so it is named here, once, on the log
+    # that the machine's owner reads.
+    if wlsn_present() == 0:
+        puts(2, "wsyswl: WARNING /dev/snarf is NOT served in this process.\n")
+        puts(2, "wsyswl: wl_data_device_manager is still advertised (a client\n")
+        puts(2, "wsyswl: that cannot bind it will not start), but there is NO\n")
+        puts(2, "wsyswl: clipboard behind it -- copy and paste between Wayland\n")
+        puts(2, "wsyswl: clients and Hamnix programs will do nothing.\n")
+    else:
+        wlsn_poll()                     # prime the cache; do not announce it
+        puts(1, "wsyswl: clipboard bridged to /dev/snarf (wl_data_device)\n")
+
     while 1 == 1:
         nfd: uint64 = 0
         waitset[0] = listen_fd
@@ -4688,7 +5102,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         if xfd >= 0 and nfd < 16:
             waitset[nfd] = xfd
             nfd = nfd + 1
+        # An in-flight clipboard pull is a real pipe, so it can be PARKED ON
+        # rather than spun on: the HANDOFF IDLE CENSUS is what this line is
+        # for. Without it a copy would still work -- clip_pull_step runs on
+        # the 16 ms frame either way -- but the wait would end 16 ms late.
+        if pull_fd >= 0 and nfd < 16:
+            waitset[nfd] = pull_fd
+            nfd = nfd + 1
         sys_waitfds(&waitset[0], nfd, 16)
+        clip_pull_step()
         xwm_pump()
         conn_accept()
         i = 0
@@ -4704,6 +5126,13 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # Twice a second, not every 16 ms frame: this is a file rewritten in
         # full and the point of it was to be cheaper than a log.
         tick = tick + 1
+        # FOUR TIMES A SECOND, the same rate user/xsnarfd.ad polls at and for
+        # the same reason: struct snarfshm has no generation counter, so a
+        # change on the Hamnix side can only be found by comparing bytes.
+        # docs/linux_clipboard.md §6.5 has the two-line request that would
+        # retire both polls at once.
+        if tick % 8 == 0:
+            clip_tick()
         if tick >= 32:
             tick = 0
             publish_state()
