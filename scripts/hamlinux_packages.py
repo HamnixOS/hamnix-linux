@@ -454,6 +454,67 @@ COMPONENT_HOOKS = {
         "exit 0",
         "",
     ])},
+    # ------------------------------------------------------------------
+    # hamnix-desktop -- SAY, IN THE TERMINAL THE PERSON IS LOOKING AT, THAT
+    # THEIR RUNNING SESSION IS NOW A DEAD SESSION.
+    # ------------------------------------------------------------------
+    # The window system's shared segment carries a version counter
+    # (WSYS_VERSION in user/linux-wsys.c). When it moves -- 6 -> 7 moved the
+    # window table to 512 rows AND took the keystrokes out of the segment --
+    # the FIRST program built against the new one that attaches to a running
+    # session's segment RE-INITIALISES IT. The running desktop's window table
+    # is emptied: the windows go, the panel goes with them, and every process
+    # still holding a window is talking to a table with no row for it.
+    #
+    # MEASURED, on a real installed UEFI+ext4 disk, by
+    # tests/linux/installed_update_wsysver.sh: the machine is left showing the
+    # compositor's flat backdrop and NOTHING ELSE. No panel, no Applications
+    # button, no window. The pointer still reaches the compositor and the
+    # keyboard still reaches it, and both have nowhere to go. Nothing on the
+    # machine recovers it; a reboot does.
+    #
+    # AND NOTHING TOLD THE PERSON. hpm printed its upgrade lines and exited 0,
+    # the desktop kept working for exactly as long as they did not open
+    # anything, and then the screen emptied. That is the failure shape
+    # NORTH_STAR.md names by name: the gap answering with silence instead of
+    # the truth.
+    #
+    # THIS HOOK CANNOT PREVENT IT, and it is important to be exact about why:
+    # the code that would have to hold its fire is the OLD compositor, which is
+    # already on the person's disk and cannot be changed by anything shipped
+    # after it. What a hook CAN do is put the sentence where the person is
+    # looking -- the terminal they typed `hpm update` into -- and it reaches
+    # THIS update, because hpm runs the hook out of the NEW tarball with the
+    # OLD hpm. A change in user/hpm.ad or user/wsysd.ad would not: it would
+    # only help the update after the one that needs it.
+    #
+    # The condition is the segment's existence, `ls /srv/wsys`. /srv is tmpfs
+    # and made fresh every boot, so the file exists exactly when a window
+    # system has been brought up on this boot. It is a plain path -- only
+    # /dev/wsys is intercepted by the wsys backend (classify() in
+    # user/linux-wsys.c) -- so this test cannot itself be the attach that
+    # empties the table.
+    "hamnix-desktop": {"install.hamsh": "\n".join([
+        "# hamnix-desktop -- install hook. See COMPONENT_HOOKS in",
+        "# scripts/hamlinux_packages.py for the measurement behind this.",
+        "ls '/srv/wsys' > /dev/null",
+        "if $status == 0 {",
+        "    echo ''",
+        "    echo 'hamnix-desktop: THE WINDOW SYSTEM WAS REPLACED WHILE A "
+        "SESSION IS RUNNING.'",
+        "    echo 'hamnix-desktop: The desktop on your screen belongs to the "
+        "OLD window system,'",
+        "    echo 'hamnix-desktop: and the two cannot share one session. The "
+        "next application you'",
+        "    echo 'hamnix-desktop: open will EMPTY THE DESKTOP -- windows, "
+        "panel and all -- and'",
+        "    echo 'hamnix-desktop: nothing but a reboot brings it back.'",
+        "    echo 'hamnix-desktop: REBOOT NOW, before you open anything else.'",
+        "    echo ''",
+        "}",
+        "exit 0",
+        "",
+    ])},
 }
 
 
