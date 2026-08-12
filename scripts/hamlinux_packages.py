@@ -53,9 +53,11 @@ import gzip
 import hashlib
 import json
 import lzma
+import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -126,6 +128,89 @@ DESKTOP_CMDS = ("wsysd wsyswl xbridge hamdesktop hampanelscene hamtermscene "
                 "hameditscene hamsettings hamfm hamUI hamUId xsnarfd "
                 "hamimgscene").split()
 
+
+# --------------------------------------------------------------------------
+# The files that are not programs
+# --------------------------------------------------------------------------
+# THE GATE LOOKED AT /bin AND NOTHING ELSE, AND SO DID EVERYONE READING IT.
+# Measured on the published 1.0.12 channel: 154 files were in the staged image
+# root and in no package. TWO of them were /bin binaries -- the two the gate
+# checked, both already justified by name. The other 152 were in directories
+# nothing had ever compared: 34 kernel modules (ext4, jbd2, vfat, the nls
+# tables, virtio_blk, virtio_net, virtio_input, evdev, overlay, squashfs,
+# loop, and the whole snd-hda stack), the dependency table modprobe was just
+# made to depend on, the 21 manual pages `man` and `help` read, the 23 Adder
+# runtime sources without which the on-box compiler cannot LINK, /etc/skel
+# (every desktop launcher a new account gets), /etc/users/*.ns, ten static
+# /etc files including /etc/profile and /etc/os-release, the sound aplay
+# plays, and /init itself -- the program the kernel executes on an installed
+# machine.
+#
+# Same shape as every earlier one: the image had them because the image is
+# built from the tree, `hpm update` could never refresh them, and nothing
+# failed. tests/linux/channel_covers_image.sh now walks the WHOLE image root,
+# so the lists below are checked rather than believed.
+
+def tree_files(reldir, install_prefix):
+    """Every file under `reldir` (repo-relative), as extras entries that
+    install under `install_prefix`. Directories are recreated by hpm from the
+    file paths, so nothing here has to name one."""
+    out = []
+    base = os.path.join(ROOT, reldir)
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, base)
+            out.append((os.path.relpath(full, ROOT),
+                        "%s/%s" % (install_prefix, rel)))
+    return out
+
+
+def glob_files(patterns, install_prefix):
+    """Extras entries for repo-relative globs, installed flat under
+    `install_prefix` by basename -- the way scripts/hamlinux_image.sh stages
+    them (`install -m644 user/linux-*.c "$ROOT/usr/share/adder/"`)."""
+    out, seen = [], set()
+    for pat in patterns:
+        for host in sorted(glob.glob(os.path.join(ROOT, pat))):
+            if not os.path.isfile(host):
+                continue
+            rel = os.path.relpath(host, ROOT)
+            inside = "%s/%s" % (install_prefix, os.path.basename(host))
+            if inside in seen:
+                continue
+            seen.add(inside)
+            out.append((rel, inside))
+    return out
+
+
+# The Adder runtime, as SOURCE. /bin/ac compiles a .ad on the box and then has
+# to LINK it, and scripts/ac-link.sh discovers the object list from whatever is
+# present in /usr/share/adder -- so without these files `ac hello.ad` gets
+# through the compiler and dies at the linker with undefined symbols. The image
+# stages them (hamlinux_image.sh, beside host_ac); no package carried them, so
+# an installed machine could never receive a fix to the runtime its own
+# compiler links against.
+ADDER_SHARE = glob_files(
+    ["user/linux-runtime.S", "user/linux-*.c", "user/linux-*.h",
+     "user/syscall_nums.h", "scripts/adder_llvm_runtime.c",
+     "scripts/ac-link.sh", "tests/linux/hello.ad"],
+    "usr/share/adder")
+
+# The manual pages. hamsh's `man` and `help` read /usr/share/man/*.md (see
+# user/hamsh.ad's discovery index, which walks that directory). The image
+# stages etc/man/*.md there; nothing shipped them, so `man ls` on an installed
+# machine was frozen at whatever the install medium happened to carry.
+MAN_PAGES = glob_files(["etc/man/*.md"], "usr/share/man")
+
+# /etc/skel -- the skeleton a new account is given: the Desktop launchers
+# hamdesktop draws, and the starter documents. It belongs with the desktop,
+# because the launchers name the desktop's own programs. /home/live is NOT
+# shipped: see the exclusion list in tests/linux/channel_covers_image.sh.
+SKEL_FILES = tree_files("etc/skel", "etc/skel")
+
+# --------------------------------------------------------------------------
 # Component packages: name -> (description, [binaries], [extra files as
 # (source-path-in-repo, install-path)], [depends])
 COMPONENTS = {
@@ -181,7 +266,42 @@ COMPONENTS = {
          ("etc/passwd", "etc/passwd"),
          ("etc/group", "etc/group"),
          ("etc/hostname", "etc/hostname"),
-         ("etc/hosts", "etc/hosts")],
+         ("etc/hosts", "etc/hosts"),
+         # The rest of the static /etc the image stages (hamlinux_image.sh's
+         # `for f in hostname hosts passwd group issue motd ... host.conf`).
+         # Every one of these was in the image and in no package: a fix to
+         # /etc/profile, to the network databases, or to what /etc/os-release
+         # calls this system could never reach an installed machine.
+         # THESE ARE SHIPPED FILES, NOT CONFFILES. hpm has one rule for a
+         # file a machine may have edited -- _is_machine_owned, which today
+         # names etc/rc.boot alone -- so an update REPLACES each of these.
+         # That is the right trade for files whose content is the
+         # distribution's answer rather than the operator's (what
+         # /etc/os-release calls this system, the port numbers in
+         # /etc/services), and it is the wrong one for a file an operator is
+         # invited to edit -- which is why /etc/distros is excluded rather
+         # than shipped. If /etc/profile ever becomes a file people edit, it
+         # belongs in _is_machine_owned, not in a list here.
+         #
+         # NOT here, deliberately, and each named with its reason in
+         # tests/linux/channel_covers_image.sh: etc/shadow (the machine's own
+         # password hashes), etc/resolv.conf (dhcpc writes it), etc/hpm/
+         # *.pub (the trust roots that authenticate this very channel) and
+         # etc/distros + everything generated from it.
+         ("etc/issue", "etc/issue"),
+         ("etc/motd", "etc/motd"),
+         ("etc/os-release", "etc/os-release"),
+         ("etc/lsb-release", "etc/lsb-release"),
+         ("etc/debian_version", "etc/debian_version"),
+         ("etc/profile", "etc/profile"),
+         ("etc/services", "etc/services"),
+         ("etc/protocols", "etc/protocols"),
+         ("etc/networks", "etc/networks"),
+         ("etc/host.conf", "etc/host.conf"),
+         # The per-user namespace recipes hamsh sources for a regular-user
+         # shell (/etc/users/<user>.ns, falling back to default.ns).
+         ("etc/users/default.ns", "etc/users/default.ns"),
+         ("etc/users/live.ns.linux", "etc/users/live.ns")],
         []),
     "hamnix-hamsh": (
         "hamnix-linux shell -- /bin/hamsh",
@@ -205,18 +325,71 @@ COMPONENTS = {
         "installer and system tools -- hlinstall, haminstallui, nsrun, reboot",
         [(c, "bin/" + c) for c in SYS_CMDS], [], ["hamnix-init>=1"]),
     "hamnix-adder": (
-        "the Adder compiler driver -- `ac foo.ad -o foo` on the box",
-        [("ac", "bin/ac")], [], ["hamnix-init>=1"]),
+        "the Adder compiler driver -- `ac foo.ad -o foo` on the box, with the "
+        "runtime sources in /usr/share/adder that ac-link.sh links against",
+        [("ac", "bin/ac")], ADDER_SHARE, ["hamnix-init>=1"]),
     "hamnix-audio": (
         "hamnix-linux audio userland -- playtone, aplay, arecord, clients of "
-        "/dev/audio",
+        "/dev/audio, and /usr/share/sounds/test.wav to play",
         [(c, "bin/" + c) for c in AUDIO_CMDS], [], ["hamnix-init>=1"]),
+    "hamnix-man": (
+        "the manual pages -- /usr/share/man/*.md, which hamsh's `man` and "
+        "`help` read. Without them `help` reports its own index missing.",
+        [], MAN_PAGES, ["hamnix-init>=1"]),
     "hamnix-desktop": (
-        "hamnix-linux desktop -- the scene compositor and the DE clients",
+        "hamnix-linux desktop -- the scene compositor, the DE clients, and "
+        "/etc/skel (the launchers and starter documents a new account gets)",
         [(c, "bin/" + c) for c in DESKTOP_CMDS],
         [("etc/panel.conf", "etc/panel.conf"),
-         ("etc/desktop.icons", "etc/desktop.icons")],
+         ("etc/desktop.icons", "etc/desktop.icons"),
+         # The shim the application menu runs a distribution's program
+         # through, so a .desktop file in Debian or Alpine gets a display to
+         # draw on. /etc/rc.distros copies it INTO each tree at boot.
+         ("etc/de-ns-run.linux", "etc/de-ns-run")] + SKEL_FILES,
         ["hamnix-init>=1", "hamnix-hamsh>=1"]),
+}
+
+
+# Install hooks for the component packages above. Kept beside COMPONENTS
+# rather than inside it so the tuple shape (and every reader of it) is
+# unchanged; main() looks a package up here after it has built its file list.
+#
+# /init IS NOT A PACKAGE FILE, AND THAT IS NOT AN OMISSION. It is the program
+# the kernel executes -- user/hlinstall.ad copies it to the target beside the
+# rest of the root (`copy_file("/init", "/n/target/init")`) -- and it is
+# byte-identical to /bin/linuxinit. Shipping it as a FILE would have hpm open
+# it for writing while it is the running PID 1's text image, and Linux answers
+# ETXTBSY: the install would fail on every machine that is up, which is every
+# machine anyone would run `hpm update` on. Unlinking first and copying gives
+# the same update without that fault -- the running PID 1 keeps the inode it
+# is executing, and the next boot gets the new one.
+#
+# Measured, not assumed: the two lines were run under the PACKAGED hamsh with
+# the PACKAGED rm and cp, over an /init holding different bytes from
+# /bin/linuxinit, and the copy landed.
+#
+# WHAT IT DOES ON AN INSTALL TO A FRESH DISK: nothing that matters. hpm runs
+# every hook by spawning the LIVE /bin/hamsh (user/hpm.ad, _run_hook), so on a
+# `hlinstall`-style install the files go to the target and this hook copies the
+# live /bin/linuxinit onto the live /init -- the same bytes it already has. The
+# target's /init is written by user/hlinstall.ad, which copies it explicitly.
+COMPONENT_HOOKS = {
+    "hamnix-init": {"install.hamsh": "\n".join([
+        "# hamnix-init -- install hook.",
+        "#",
+        "# Refresh /init, the program the kernel executes. It is the same",
+        "# bytes as /bin/linuxinit, which this package has just laid down.",
+        "# It is copied rather than shipped because a package FILE at /init",
+        "# would be opened for writing on the running PID 1's text image ->",
+        "# ETXTBSY -> a failed install on any machine that is up. rm unlinks",
+        "# the name (the running process keeps its inode); cp makes a new one.",
+        "rm '/init'",
+        "cp '/bin/linuxinit' '/init'",
+        "echo '[hamnix-init] /init refreshed from /bin/linuxinit -- the next "
+        "boot runs it'",
+        "exit 0",
+        "",
+    ])},
 }
 
 
@@ -545,6 +718,247 @@ def firmware_files(patterns, exclude=()):
     return out
 
 
+def image_want_modules():
+    """The module NAMES scripts/hamlinux_image.sh stages into the image.
+
+    PARSED OUT OF THAT SCRIPT, not copied here. The list is the image's, and a
+    second copy of it in this file would drift the first time somebody added a
+    driver -- silently, and in exactly the direction that leaves a module in
+    the image and in no package. Refuses rather than guessing if the
+    assignment is not where it expects: an empty list would make the package
+    below ship nothing and the coverage gate name twenty files, which is loud,
+    but a WRONG list would ship the wrong modules quietly.
+    """
+    path = os.path.join(ROOT, "scripts/hamlinux_image.sh")
+    with open(path) as fh:
+        text = fh.read()
+    m = re.search(r'^WANT_MODULES="\$\{HAMLINUX_MODULES:-([^}"]*)\}"',
+                  text, re.M)
+    if not m:
+        raise SystemExit(
+            "hamlinux_packages: cannot find WANT_MODULES in %s -- refusing to "
+            "guess which modules the image stages" % path)
+    return m.group(1).split()
+
+
+def drm_core_modules(kver):
+    """The shared DRM/KMS core: everything the i915 and nouveau chains need
+    EXCEPT the hardware driver itself. hamnix-drivers-drm owns these files, so
+    the base module package below must not also claim them -- two packages
+    owning one path means `hpm remove` on either takes the file away from the
+    other."""
+    chains = [c for c in (modprobe_chain(kver, "i915"),
+                          modprobe_chain(kver, "nouveau")) if c]
+    if not chains:
+        return []
+    return merge_chains([c[:-1] for c in chains])
+
+
+def base_module_install_hook(pkg, staged, kver, depname):
+    """The install.hamsh for hamnix-drivers-base.
+
+    IT DOES NOT TOUCH /etc/modules, AND THAT IS A MEASUREMENT. linuxinit reads
+    that file with ONE 8192-byte read and ignores the rest. The image writes
+    2338 bytes of it (36 absolute .ko paths); appending these thirty-four
+    again is ~2.2 KiB PER INSTALL, and `hpm update` is a remove followed by an
+    install, so three updates would push the tail of the boot list past 8192
+    bytes and
+    linuxinit would silently stop loading the modules at the end of it --
+    which on this list is the sound stack, and then ext4 as the file grew
+    further. A silent truncation of the boot's module list is precisely the
+    failure shape this project refuses. It does not need the append either:
+    these modules are the ones the IMAGE stages and lists, every installed
+    machine got that list from the image (user/hlinstall.ad copies the live
+    root), and this package replaces the very same canonical paths.
+
+    WHAT IT DOES DO is merge the dependency table, and the direction matters:
+
+        cat modules.dep.base modules.dep > modules.dep.new
+        mv  modules.dep.new modules.dep
+
+    PREPEND, not append, and nothing is replaced. user/modprobe.ad's find_line
+    returns the FIRST line whose basename matches, so the package's fresh
+    lines win over whatever the machine's depmod wrote, while every line a
+    driver package appended (hamnix-drivers-drm, -gpu-intel, -gpu-nouveau all
+    do `echo '<line>' >> modules.dep` from their own hooks) survives verbatim
+    after them and is still found for the modules THIS package does not name.
+    That is the append-package-meets-replace-package case made correct rather
+    than plausible: no package replaces the table, and the one that ships a
+    base copy puts it in front instead of on top.
+
+    Verified with the packaged binaries, not reasoned about: this exact pair
+    of lines was run under the packaged hamsh with the packaged cat and mv,
+    over a table carrying appended drm.ko/i915.ko lines and a stale base line,
+    and produced the fresh line first, the stale one shadowed and the driver
+    lines intact. (cat also keeps going past a file that is not there, so a
+    machine with NO table at all ends up with this one rather than nothing.)
+
+    ON AN INSTALL TO A FRESH DISK the files land on the target and this hook,
+    like every hpm hook, runs against the LIVE root (user/hpm.ad's _run_hook
+    spawns the live /bin/hamsh) -- so it prepends the installing machine's own
+    table with the same lines it already has, which is a no-op, and the
+    target's table arrives with the rest of the root that hlinstall copies.
+
+    THE ONE THING THAT GROWS: each install prepends the base table again, so
+    modules.dep gains the size of that table (2680 bytes for the thirty-four
+    modules here, printed in this package's description at build time) per
+    update, against user/modprobe.ad's 256 KiB DEP_CAP -- around 95 updates of
+    headroom on a machine whose table starts at the image's 2765 bytes. The
+    overflow is LOUD:
+    read_dep_file returns -2 and modprobe says the table is too big for the
+    buffer rather than reporting a module missing. The durable fix is a
+    modprobe that reads a modules.dep.d directory; it is not in this change.
+    """
+    dep = "/lib/modules/%s/modules.dep" % kver
+    lines = [
+        "# %s -- install hook." % pkg,
+        "#",
+        "# 1. gunzip anything that had to ship compressed (hpm unpacks in a",
+        "#    4 MiB / 8 MiB RAM buffer; finit_module(flags=0) will not take a",
+        "#    compressed module).",
+        "# 2. put this package's dependency lines IN FRONT of the machine's",
+        "#    table. Prepend, never replace: modprobe takes the first",
+        "#    matching line, so these win, and the lines the GPU driver",
+        "#    packages appended to the end of that table are still there and",
+        "#    still found. Nothing here edits /etc/modules -- read the",
+        "#    docstring in scripts/hamlinux_packages.py for the 8192-byte",
+        "#    reason.",
+        "",
+        "echo '[%s] refreshing the base kernel modules'" % pkg,
+    ]
+    for _host, _inside, canonical, big in staged:
+        if big:
+            lines.append("gzip -d '%s.gz'" % canonical)
+    lines += [
+        # The redirect target is quoted for the same reason the driver hooks
+        # quote theirs: a machine installed before the hamsh fix splits a BARE
+        # word at the '+' in 6.12.85+deb13-amd64 and writes somewhere else,
+        # exiting 0 about it.
+        "cat '%s' '%s' > '%s.new'" % (depname, dep, dep),
+        "mv '%s.new' '%s'" % (dep, dep),
+        "echo '[%s] %d modules refreshed; %s put in front of the machine's "
+        "table'" % (pkg, len(staged), depname),
+        "exit 0",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def base_module_remove_hook(pkg):
+    return "\n".join([
+        "# %s -- remove hook." % pkg,
+        "# hpm deletes the files this package installed. It does NOT put the",
+        "# machine's dependency table back the way it was, because the lines",
+        "# this package prepended are indistinguishable from the ones depmod",
+        "# wrote at image build time -- they are the same lines. They are",
+        "# harmless: a modules.dep line naming a .ko that is not there makes",
+        "# modprobe say so, by name, when somebody asks for that module.",
+        "echo '[%s] NOTE: the base modules are gone; /etc/modules and'" % pkg,
+        "echo '[%s] modules.dep still name them. Boot will warn per missing'"
+        % pkg,
+        "echo '[%s] module and carry on. Reinstall this package to undo.'"
+        % pkg,
+        "exit 0",
+        "",
+    ])
+
+
+def build_base_module_package(pkgdir, version, entries, skipped):
+    """hamnix-drivers-base -- the kernel modules the IMAGE boots with.
+
+    Thirty-four modules were in the image and in no package on the published
+    1.0.12 channel: ext4, jbd2, mbcache, crc16, crc32c, vfat + fat + the nls
+    tables, virtio_blk, virtio_net + net_failover + failover, virtio_input,
+    virtio_dma_buf, virtio-gpu, drm_shmem_helper, evdev, overlay, squashfs,
+    loop, and the whole snd-hda stack. An installed machine could never
+    receive a fix to the module that mounts its ROOT FILESYSTEM, and nothing
+    said so. Only drm.ko and drm_kms_helper.ko were carried by anything, by
+    hamnix-drivers-drm -- which is why that package's set is subtracted here:
+    two packages owning one path means `hpm remove` on either takes the file
+    away from the other.
+    """
+    kver = kernel_version()
+    if kver is None or not os.path.exists(MODPROBE):
+        skipped.append("hamnix-drivers-base (no modprobe or /lib/modules "
+                       "on this host)")
+        return
+    names = image_want_modules()
+    chains, unresolved = [], []
+    for n in names:
+        chain = modprobe_chain(kver, n)
+        if chain:
+            chains.append(chain)
+        else:
+            unresolved.append(n)
+    if unresolved:
+        # The image cannot stage what modprobe cannot resolve either, so this
+        # is not a coverage hole -- but say it out loud rather than shipping a
+        # shorter list than the name of this package implies.
+        skipped.append("hamnix-drivers-base: modprobe resolved nothing for %s "
+                       "(the image does not stage them either)"
+                       % " ".join(unresolved))
+    if not chains:
+        skipped.append("hamnix-drivers-base (modprobe resolved nothing)")
+        return
+
+    core = set(drm_core_modules(kver))
+    mine = [ko for ko in merge_chains(chains) if ko not in core]
+    if not mine:
+        skipped.append("hamnix-drivers-base (every module is already in "
+                       "hamnix-drivers-drm)")
+        return
+
+    workdir = tempfile.mkdtemp(prefix="hambase-")
+    try:
+        staged = stage_modules(kver, mine, workdir)
+        deps = dep_lines(kver, staged)
+        if not deps:
+            skipped.append("hamnix-drivers-base (this host has no modules.dep "
+                           "to copy the dependency lines from)")
+            return
+        depname = "/lib/modules/%s/modules.dep.base" % kver
+        inside = depname.lstrip("/")
+        host = os.path.join(workdir, inside)
+        os.makedirs(os.path.dirname(host), exist_ok=True)
+        body = "\n".join(deps) + "\n"
+        with open(host, "w") as fh:
+            fh.write(body)
+        # THE TABLE IS SHIPPED UNDER ITS OWN NAME, not as modules.dep. The
+        # canonical table is machine state: depmod generated it over the
+        # modules THAT MACHINE has, and three driver packages append to it. A
+        # package file at that path would be deleted-then-rewritten by hpm on
+        # every upgrade, taking the appended driver lines with it -- the
+        # machine would keep i915.ko on disk and lose the only line that lets
+        # `modprobe i915` name it. So the package owns modules.dep.base and
+        # the hook merges. tests/linux/channel_covers_image.sh records
+        # modules.dep as a named exclusion for this reason and checks that
+        # this file is in the channel.
+        files = [(h, i) for h, i, _c, _b in staged] + [(host, inside)]
+        needs_gzip = any(b for _h, _i, _c, b in staged)
+        entries.append(write_pkg(
+            pkgdir, "hamnix-drivers-base", version,
+            "The kernel modules hamnix-linux BOOTS with, for %s: ext4 and "
+            "jbd2, vfat/fat and the nls tables, overlay, squashfs, loop, the "
+            "virtio block, net and input drivers, evdev, and the snd-hda "
+            "sound stack. These are the modules the image stages; this "
+            "package is how an INSTALLED machine receives a fix to them. It "
+            "does not change /etc/modules (the machine already lists them); "
+            "it refreshes the files and puts its dependency lines in front of "
+            "the machine's modules.dep. %d modules, %d bytes of table."
+            % (kver, len(staged), len(body)),
+            files,
+            ["hamnix-init>=1"] + (["hamnix-gzip>=1"] if needs_gzip else []),
+            hooks={"install.hamsh": base_module_install_hook(
+                       "hamnix-drivers-base", staged, kver, depname),
+                   "remove.hamsh": base_module_remove_hook(
+                       "hamnix-drivers-base")},
+            extra_info=["license: GPL-2.0", "homepage: https://kernel.org/"]))
+        print("  hamnix-drivers-base (%d modules + %d dependency lines, %s)"
+              % (len(staged), len(deps), kver))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def build_driver_packages(pkgdir, version, entries, skipped, vk_built=None):
     """The GPU packages. Everything is resolved against the BUILD HOST's
     /lib/modules and /lib/firmware, so the channel only ever offers drivers
@@ -571,8 +985,9 @@ def build_driver_packages(pkgdir, version, entries, skipped, vk_built=None):
     # The shared DRM/KMS core: everything both chains need EXCEPT the
     # hardware driver itself. Packaged separately because it is ~4 MiB that
     # Intel and Nvidia machines both want, and because hpm's per-package RAM
-    # cap leaves no room to duplicate it.
-    core = merge_chains([c[:-1] for c in (i915, nouveau) if c])
+    # cap leaves no room to duplicate it. hamnix-drivers-base subtracts this
+    # same set (drm_core_modules) so no two packages own one .ko path.
+    core = drm_core_modules(kver)
     workdir = tempfile.mkdtemp(prefix="hamgpu-")
     try:
         core_staged = stage_modules(kver, core, workdir)
@@ -1198,6 +1613,34 @@ def build_vulkan_packages(pkgdir, version, entries, skipped):
     return built
 
 
+def synth_test_wav(workdir):
+    """/usr/share/sounds/test.wav -- the same half second of 660 Hz stereo
+    s16le that scripts/hamlinux_image.sh synthesises into the image, by the
+    same arithmetic, so the package and the image carry identical bytes.
+
+    It is generated rather than committed for the reason the image script
+    gives (96 KB nobody has to review), and it is PACKAGED because `aplay`
+    without it is a program with nothing to play: the image had the sound, the
+    channel did not, and an installed machine's only audio sample could never
+    be replaced.
+    """
+    rate, chans, secs, freq, amp = 48000, 2, 0.5, 660.0, 11000
+    n = int(rate * secs)
+    frames = bytearray()
+    for i in range(n):
+        v = int(amp * math.sin(2.0 * math.pi * freq * i / rate))
+        frames += struct.pack("<h", v) * chans
+    data = bytes(frames)
+    hdr = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
+           + struct.pack("<IHHIIHH", 16, 1, chans, rate,
+                         rate * chans * 2, chans * 2, 16)
+           + b"data" + struct.pack("<I", len(data)))
+    path = os.path.join(workdir, "test.wav")
+    with open(path, "wb") as fh:
+        fh.write(hdr + data)
+    return path
+
+
 def pkg_name_for(cmd):
     """docs/packages.md: underscores become hyphens in the PACKAGE name; the
     installed binary keeps its own filename."""
@@ -1425,6 +1868,11 @@ def main():
     entries = []
     skipped = []
 
+    # The files this script generates rather than copies out of the tree.
+    gendir = tempfile.mkdtemp(prefix="hamgen-")
+    generated = {"hamnix-audio": [(synth_test_wav(gendir),
+                                   "usr/share/sounds/test.wav")]}
+
     # Components first: they carry the boot files everything else needs.
     for name, (desc, bins, extras, deps) in COMPONENTS.items():
         files = []
@@ -1442,7 +1890,15 @@ def main():
             host = os.path.join(ROOT, src)
             if os.path.exists(host):
                 files.append((host, inside))
-        entries.append(write_pkg(pkgdir, name, args.version, desc, files, deps))
+            else:
+                # A named extra that is not in the tree is a file this package
+                # PROMISES and does not carry. Silence here is how a config
+                # file leaves the channel without anyone noticing; the
+                # coverage gate would then blame the image.
+                skipped.append("%s: %s is not in the tree" % (name, src))
+        files.extend(generated.get(name, []))
+        entries.append(write_pkg(pkgdir, name, args.version, desc, files, deps,
+                                 hooks=COMPONENT_HOOKS.get(name)))
         print("  %s (%d files)" % (name, len(files)))
 
     # The GPU stack, userspace first: the kernel driver packages declare a
@@ -1453,6 +1909,13 @@ def main():
     # GPU drivers. Not in hamnix-base: which one a machine wants depends on
     # the machine, and installing the wrong one wastes 10 MiB of RAM disk.
     build_driver_packages(pkgdir, args.version, entries, skipped, vk_built)
+
+    # The modules the image itself boots with -- ext4, the virtio drivers,
+    # sound. These ARE in hamnix-base: every machine has them already (the
+    # image staged them and the installer copied them), and a machine that
+    # cannot update the driver that mounts its root filesystem is the exact
+    # gap the invariant exists to close.
+    build_base_module_package(pkgdir, args.version, entries, skipped)
 
     # vkprobe -- the diagnostic that answers "is the GPU stack real?" from
     # inside the Hamnix root. It is the same program that proved this path
@@ -1491,12 +1954,24 @@ def main():
         pkgdir, "hamnix-coreutils", args.version,
         "hamnix-linux core userland -- pulls in every per-command package",
         [], sorted(cmd_pkgs)))
+    # hamnix-base pulls in the manual pages and the boot modules too. Both are
+    # conditional on having been BUILT: the closure check below refuses an
+    # index whose flagship package names something the channel does not carry,
+    # and a host with no /lib/modules cannot produce hamnix-drivers-base.
+    built_names = {e["name"] for e in entries}
+    base_deps = ["hamnix-init>=1", "hamnix-hamsh>=1", "hamnix-coreutils>=1",
+                 "hamnix-net>=1", "hpm>=1", "hamnix-desktop>=1"]
+    for optional in ("hamnix-man", "hamnix-drivers-base"):
+        if optional in built_names:
+            base_deps.append(optional + ">=1")
+        else:
+            skipped.append("%s missing from hamnix-base (it did not build)"
+                           % optional)
     entries.append(write_pkg(
         pkgdir, "hamnix-base", args.version,
         "hamnix-linux base system -- init, shell, coreutils, networking, "
-        "package manager and desktop",
-        [], ["hamnix-init>=1", "hamnix-hamsh>=1", "hamnix-coreutils>=1",
-             "hamnix-net>=1", "hpm>=1", "hamnix-desktop>=1"]))
+        "package manager, desktop, manual pages and the boot kernel modules",
+        [], base_deps))
 
     for e in entries:
         e["channel"] = args.channel
