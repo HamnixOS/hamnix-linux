@@ -36,11 +36,30 @@ mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,home,mnt,boot,lib,lib64,va
 # The applications that go in /bin. Kept to things that build AND run today
 # (measured -- see HANDOFF.md §5); the point of the image is to boot, not to be
 # complete. `hamsh` is the important one: it is PID 1 after linuxinit execs it.
+#
+# `rmdir` AND `file` WERE IN THIS LIST AND HAVE NEVER EXISTED. Both have been
+# named here since the first boot commit (d8853529) and neither user/rmdir.ad
+# nor user/file.ad was ever written, so every build of this image has printed
+#
+#     [image] not included: rmdir(no source) file(no source)
+#
+# and every machine built from it has had no `rmdir` and no `file`. The list
+# said, one line above, that it is "kept to things that build AND run today",
+# so it contradicted itself on every run -- which is the kind of small lie that
+# makes the honest lines beside it worth less.
+#
+# They are removed rather than stubbed. Nothing in the tree calls either one:
+# no rc script, no install hook, no package. So this is a name with nothing
+# behind it, not a script shelling out to a missing binary, and the fix is to
+# stop promising it. To bring `rmdir` back, write user/rmdir.ad (rmdir(2) is
+# reachable -- `rm` already unlinks) and put the name back in this list;
+# hamlinux_packages.py's COREUTILS is where it would also need to go to reach
+# an installed machine.
 APPS=(
     hamsh
-    ls cat echo cp mv rm mkdir rmdir ln touch pwd
+    ls cat echo cp mv rm mkdir ln touch pwd
     grep sed sort uniq head tail wc cut tr
-    find du df stat tree file
+    find du df stat tree
     date sleep true false yes seq basename dirname
     # `id` and `whoami` earn their place twice over now that the DE session
     # runs as a different uid from the console: they are how a person checks
