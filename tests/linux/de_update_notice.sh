@@ -55,6 +55,11 @@
 #   8. a click ON it takes the rectangle back to empty.
 #   9. and the desktop still works afterwards: the Applications button still
 #      opens the panel's dropdown.
+#  10. A SECOND refusal, after the first was dismissed, RAISES IT AGAIN --
+#      and the marker GREW rather than being rewritten, which is what makes
+#      its size usable as a serial. "Dismissed" and "nothing was refused" are
+#      different states inside the panel and have to stay different: waving
+#      the card away must not silence the NEXT program that refuses.
 #
 # 3 and 8 are the instrument check. If the colour or the rectangle were wrong
 # EVERY reading would be 0 and 6 would FAIL — there is no way for a broken
@@ -294,6 +299,35 @@ if [ "$MENU" -ge 20 ]; then
     ok "THE DESKTOP IS NOT WEDGED: after the notice, the Applications button still opens the panel's dropdown (${MENU}% of the menu column is the card colour)"
 else
     bad "after the notice the Applications button no longer opens anything (${MENU}%)"
+fi
+
+# ---- 10. A SECOND REFUSAL RAISES IT AGAIN --------------------------------
+# THE PATH THIS EXERCISES, AND WHY IT NEEDED ITS OWN ASSERTION. Dismissing
+# does not delete the marker -- it records the marker's SIZE as the offset
+# already answered for (`notice_ack`). So "dismissed" and "no refusal has
+# happened" are different states inside the panel, and the whole design rests
+# on them staying different: a person who waves the card away must not be
+# told again about the SAME refusal, and must still be told about the NEXT
+# one. Both halves are now measured -- 7 above is the first (a click that is
+# not on the card leaves the count alone) and this is the second.
+#
+# It is also the only assertion here that runs against a marker file that is
+# ALREADY NON-EMPTY, which is the state every real machine is in after the
+# first program refuses. Everything above it started from nothing.
+SZ1="$(wc -c <"$HAMWSYS.refused" 2>/dev/null || echo 0)"
+"$WORK/poke9.elf" "/dev/wsys/windows" >"$WORK/poke9b.out" 2>"$WORK/poke9b.err"
+SZ2="$(wc -c <"$HAMWSYS.refused" 2>/dev/null || echo 0)"
+if [ "$SZ2" -gt "$SZ1" ]; then
+    ok "the second refusal appended to the marker rather than rewriting it ($SZ1 -> $SZ2 bytes), which is what makes the size a serial"
+else
+    bad "the second refusal did not grow the marker ($SZ1 -> $SZ2 bytes): a dismissed notice can never come back, because the panel compares the size against what it already answered for"
+fi
+sleep 3
+AGAIN="$(colourpct $NX $NY $NW $NH $FACE)"
+if [ "$AGAIN" -ge 40 ]; then
+    ok "A SECOND REFUSAL RAISES THE NOTICE AGAIN: the rectangle is back to ${AGAIN}% #$FACE after a dismissal took it to ${GONE}%"
+else
+    bad "after being dismissed once the notice never came back (${AGAIN}%): the machine tells a person about the first program that refused and stays silent about every one after it"
 fi
 
 done_report
