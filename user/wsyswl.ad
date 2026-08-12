@@ -568,9 +568,9 @@ def str_copy(dst: Ptr[uint8], s: Ptr[uint8], cap: uint64) -> uint64:
 # spans the namespace boundary (§6 of docs/steam_namespace.md). Reading a
 # server's own state with `cat` is how the wsysd bug before this one was
 # caught; `/dev/wsys/wsysd/state` is the precedent.
-NSTAT: uint64 = 28
-stat_n:    Array[28, int32]
-stat_said: Array[28, int32]
+NSTAT: uint64 = 29
+stat_n:    Array[29, int32]
+stat_said: Array[29, int32]
 stat_dirty: int32 = 1
 
 S_COMMIT:   uint64 = 0          # buffers actually blitted to a window
@@ -621,6 +621,13 @@ S_CLOSEKILL: uint64 = 25        # ... a client that could not be asked, killed
 # ConfigureNotify the client is waiting for.
 S_XCONF:    uint64 = 26         # a move/resize pushed back to an X client
 S_ORFOLLOW: uint64 = 27         # an override-redirect child moved with parent
+# A WHOLE CLIENT REFUSED, which is the most severe thing in this list and was
+# the only one with no counter: MAXCONN is the ceiling on INDEPENDENT clients,
+# so hitting it does not cost a window, it costs a program. It said so on
+# stderr and nowhere a test could read it -- and it is close: Firefox ALONE
+# reaches conns 8 with its content and GPU processes, measured, which is
+# MAXCONN exactly. A namespace's Xwayland arriving next is the ninth.
+S_CONNFULL: uint64 = 28         # a client was refused: MAXCONN
 
 statepath: Array[256, uint8]
 
@@ -3897,7 +3904,8 @@ def conn_accept():
             # server can carry, and independence is what the per-connection
             # tables above are for -- so refusing a connection is refusing a
             # whole client, not one window. Say so, and count it.
-            puts(2, "wsyswl: too many clients -- raise MAXCONN\n")
+            drop(S_CONNFULL,
+                 "a whole client was refused -- MAXCONN is full, raise MAXCONN")
 
 
 # Drain one client's socket and run every complete message in it.
@@ -4446,6 +4454,7 @@ def publish_state():
     st_kv(fd, "close_killed", S_CLOSEKILL)
     st_kv(fd, "x_configure_pushed", S_XCONF)
     st_kv(fd, "or_children_followed", S_ORFOLLOW)
+    st_kv(fd, "conn_refused", S_CONNFULL)
     # THE LIMITS, SPLIT BY WHOSE THEY ARE. A reader cannot tell what any of the
     # counters above mean without knowing which of these is shared and which is
     # not, and the first three passes of the Steam investigation are what a
