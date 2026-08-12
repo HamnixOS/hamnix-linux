@@ -8,7 +8,8 @@
 #   hamfm owns the raw console exactly like vi: when hamsh (or the hamUId
 #   desktop daemon) spawns it, fd 0/1/2 are bound to the raw console with
 #   NO kernel line-cooking and NO echo. It reads one keystroke at a time
-#   off fd 0 with sys_read_nb + sys_yield and repaints the whole screen
+#   off fd 0 with sys_read_nb and PARKS in sys_waitfds between them
+#   (never sys_yield: see the main loop), repainting the whole screen
 #   with ANSI escapes on every state change. Arrow keys arrive a byte at
 #   a time (ESC '[' A/B) and are reassembled by a tiny state machine.
 #
@@ -41,8 +42,12 @@ extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
-extern def sys_yield() -> int32
 extern def sys_getcwd(buf: Ptr[uint8], count: uint64) -> int64
+# THE PARK. sys_waitfds(fds, nfds, timeout_ms) sleeps until one of `fds` has
+# something to read or the timeout expires -- the same primitive every scene
+# client in this tree parks on (lib/hamsceneloop.ad, lib/hamui.ad). See the
+# main loop for what it replaced and what that cost.
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 from lib.p9 import p9_listdir, p9_chan_dir_mode
 
 
@@ -640,13 +645,43 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     write_cstr(1, cast[Ptr[uint8]]("\x1b[2J\x1b[H"))
     redraw()
 
+    # ---- THE INPUT LOOP, AND WHY IT PARKS ---------------------------
+    # This loop used to be `if n == 0: sys_yield(); continue`, and that one
+    # line FROZE A REAL DESKTOP. Measured on a booted machine: hamfm launched
+    # from the Applications menu came up in state R with 2:02 of CPU, the
+    # screen stopped changing, later clicks moved 0 pixels and the panel clock
+    # stopped. A TUI has nothing to draw between keystrokes, so on a machine
+    # where nobody is typing into it -- which is EVERY machine, since the
+    # desktop launched it with the graphical session in front of the console
+    # -- `sys_read_nb` answered "nothing yet" for ever and the yield turned
+    # that into a full core at a spin. It is the 27th instance of the shape
+    # HANDOFF.md's IDLE CENSUS lists, and the census missed it because the run
+    # sweep exits hamfm before it reaches this loop.
+    #
+    # It PARKS instead: sys_waitfds sleeps on fd 0 until a byte is there. A
+    # keystroke wakes it immediately, so an interactive hamfm is no slower
+    # (strictly faster than a round-robin yield), and an unattended one costs
+    # nothing at all. The timeout is a bounded fallback for a backing channel
+    # sys_waitfds cannot register for a wakeup on; there is no work to do on
+    # a timeout wake, so it is long.
+    #
+    # WHY PARK RATHER THAN EXIT ON "NO TERMINAL". It exits already when there
+    # IS no terminal: sys_read_nb returns a NEGATIVE on true end-of-input
+    # (user/linux-syscalls.c is explicit that 0 means "no byte yet" and never
+    # EOF), so stdin on /dev/null, or on a closed pipe, breaks the loop below
+    # on the first pass. What it cannot tell apart is "no terminal" from "a
+    # terminal nobody is typing into" -- an inherited console fd answers
+    # EAGAIN in both cases -- and guessing wrong there would kill a working
+    # interactive session. Park is the answer that is correct in every case.
     rb: Array[1, uint8]
+    wfds: Array[1, int32]
+    wfds[0] = 0
     while running != 0:
         n: int64 = sys_read_nb(0, &rb[0], 1)
         if n < 0:
             break
         if n == 0:
-            sys_yield()
+            sys_waitfds(&wfds[0], 1, 1000)
             continue
         feed_byte(rb[0])
         if running != 0:

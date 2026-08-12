@@ -154,6 +154,52 @@ def _dd_is_live() -> int32:
     return 0
 
 
+# ====================================================================
+# A MENU ENTRY WHOSE PROGRAM IS NOT INSTALLED IS NOT AN ENTRY
+# ====================================================================
+# Found on a real boot. /etc/hamde/apps was staged on no machine at all, so
+# this menu always ran on the _seed_fallback list below -- and counted against
+# the image's APPS, NINE of its ELEVEN rows named a program /bin did not
+# contain: only /bin/hamfm and /bin/hpm were there. Clicking any of the other
+# nine wrote its path to /dev/wsys/appmenu/launch, the panel forked, execve
+# failed in the child, and the screen never changed. The menu was advertising
+# applications this distribution did not have.
+#
+# The row is DROPPED and NAMED rather than greyed out: a name that exists
+# nowhere in the distribution is a packaging fault, not an app you could go
+# and install, and a disabled row for it would still be an advertisement.
+# The naming is what keeps it from being silent -- one line on stdout per
+# launcher that lost its program, the shape hamdesktop uses for icon-unknown.
+# The panel refuses the launch by name too (hampanelscene _launch), so the
+# race between this scan and a click cannot answer with silence either.
+#
+# The probe lives here and in hampanelscene rather than in lib/desktopentry.ad
+# -- which owns the Exec parse -- because that module is deliberately
+# extern-free and dual-target and cannot open a file.
+def _dd_installed(prog: Ptr[uint8]) -> int32:
+    if prog[0] == 0:
+        return 0
+    fd: int32 = sys_open(cast[Ptr[char]](prog))
+    if fd < 0:
+        return 0
+    sys_close(fd)
+    return 1
+
+
+def _dd_say_missing(name: Ptr[uint8], prog: Ptr[uint8]):
+    n: uint64 = 0
+    while name[n] != 0:
+        n = n + 1
+    p: uint64 = 0
+    while prog[p] != 0:
+        p = p + 1
+    sys_write(1, cast[Ptr[uint8]]("[appmenu] appmenu-missing "), 26)
+    sys_write(1, name, n)
+    sys_write(1, cast[Ptr[uint8]](" "), 1)
+    sys_write(1, prog, p)
+    sys_write(1, cast[Ptr[uint8]]("\n"), 1)
+
+
 # Scan the catalogue directory into the core model. Returns app count added.
 def _dd_scan() -> int32:
     amc_reset()
@@ -187,21 +233,48 @@ def _dd_scan() -> int32:
                         # the live medium ONLY, never on an installed system.
                         if desktop_liveonly() == 0 or _dd_is_live() != 0:
                             np: Ptr[uint8] = desktop_name_ptr()
-                            amc_add(np, desktop_prog_ptr(), desktop_cats_ptr(),
-                                    _dd_glyph(np))
-                            added = added + 1
+                            # A launcher whose program is not on this machine
+                            # is not a menu row -- see _dd_installed above.
+                            if _dd_installed(desktop_prog_ptr()) == 0:
+                                _dd_say_missing(np, desktop_prog_ptr())
+                            else:
+                                amc_add(np, desktop_prog_ptr(),
+                                        desktop_cats_ptr(), _dd_glyph(np))
+                                added = added + 1
         i = e + 1
     return added
 
 
-# Fallback set when /etc/hamde/apps is empty (matches the shipped native apps).
+# Fallback set when /etc/hamde/apps is empty.
+#
+# THIS LIST IS WRITTEN IN CODE, so it is the one part of the menu that can
+# drift out of step with what the image builds while nothing fails -- and it
+# had: FIVE of its eleven rows named a program no image builds
+# (/bin/calculator, /bin/hamterm, /bin/hamedit, /bin/hamview, and /bin/hamfm,
+# which is the TUI file manager, not the desktop one). It was reached on EVERY
+# machine, because /etc/hamde/apps was never staged at all, so those were the
+# rows a person actually clicked, and clicking one did nothing whatsoever.
+# Every name below is now a program scripts/hamlinux_image.sh builds and
+# scripts/hamlinux_packages.py ships, and /bin/hamfm in particular is gone:
+# the DESKTOP file manager is /bin/hamfmscene, which is what the shipped
+# files.desktop has always said. (The TUI froze a real desktop from this row
+# -- see the input loop in user/hamfm.ad.)
+#
+# WHY THIS LIST IS **NOT** RUN THROUGH _dd_installed the way the catalogue
+# scan above is. Its whole job is that the DE is never menu-less; a probe that
+# can empty it defeats the only reason it exists, and the case it runs in --
+# no catalogue at all -- is by definition a root nobody staged, where an
+# absent /bin/X says as much about the root as about the program. The
+# guarantee for these rows is made at the CLICK instead, where it costs
+# nothing and can still be honest: hampanelscene's _launch refuses a program
+# that is not there BY NAME rather than forking a child that dies in execve.
 def _seed_fallback():
     amc_reset()
-    amc_add("Calculator", "/bin/calculator", "Utility;", 67)
-    amc_add("Terminal", "/bin/hamterm", "System;TerminalEmulator;", 84)
-    amc_add("Files", "/bin/hamfm", "System;FileManager;", 70)
-    amc_add("Text Editor", "/bin/hamedit", "Utility;TextEditor;", 69)
-    amc_add("Image Viewer", "/bin/hamview", "Graphics;Viewer;", 86)
+    amc_add("Calculator", "/bin/hamcalcscene", "Utility;", 67)
+    amc_add("Terminal", "/bin/hamtermscene", "System;TerminalEmulator;", 84)
+    amc_add("Files", "/bin/hamfmscene", "System;FileManager;", 70)
+    amc_add("Text Editor", "/bin/hameditscene", "Utility;TextEditor;", 69)
+    amc_add("Image Viewer", "/bin/hamimgscene", "Graphics;Viewer;", 86)
     amc_add("Web Browser", "/bin/hambrowse", "Network;WebBrowser;", 87)
     amc_add("System Monitor", "/bin/hammonscene", "System;Monitor;", 77)
     amc_add("Package Manager", "/bin/hpm", "System;PackageManager;", 80)

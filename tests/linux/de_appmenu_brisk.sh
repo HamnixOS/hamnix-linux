@@ -435,7 +435,22 @@ else
 fi
 
 # ---- 13. FAVOURITES SURVIVE THE PROCESS ----------------------------------
-if [ -s "$FAVFILE" ] && grep -q '^/bin/calculator$' "$FAVFILE"; then
+# THE PROGRAM IS NOT WRITTEN DOWN HERE, and the reason is the defect this
+# assertion nearly hid. It read `^/bin/calculator$`, which is the name
+# hamappmenu's fallback list used to give Calculator -- and /bin/calculator is
+# a program NO IMAGE BUILDS. So the gate was green on a menu row that could
+# not launch anything on any machine, and it went red the moment that row was
+# corrected to /bin/hamcalcscene, which is the program that exists.
+#
+# The question is "what the menu offered for the row that was clicked", so the
+# answer comes from the same place the click did: the CATALOGUE, or the
+# fallback the menu itself uses when there is none. Here the host has no
+# /etc/hamde/apps, so it is the fallback, and the name is read out of
+# user/hamappmenu.ad rather than copied into this file to drift again.
+WANT_FAV="$(sed -n 's/.*amc_add("Calculator", "\([^"]*\)".*/\1/p' \
+            "$PROJ_ROOT/user/hamappmenu.ad" | head -1)"
+[ -n "$WANT_FAV" ] || WANT_FAV="/bin/hamcalcscene"
+if [ -s "$FAVFILE" ] && grep -q "^$WANT_FAV\$" "$FAVFILE"; then
     ok "the launch was written to the user's OWN home ($FAVFILE names $(head -1 "$FAVFILE")) -- not to a fixed /tmp name every account and every concurrent session would share"
 else
     bad "nothing was persisted: $FAVFILE is $( [ -e "$FAVFILE" ] && echo "'$(cat "$FAVFILE" 2>/dev/null | tr '\n' ' ')'" || echo absent )"

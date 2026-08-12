@@ -2093,13 +2093,82 @@ def _am_is_live() -> int32:
     return 0
 
 
+# ====================================================================
+# A MENU ENTRY WHOSE PROGRAM IS NOT INSTALLED IS NOT AN ENTRY
+# ====================================================================
+# Found on a real boot. /etc/hamde/apps was staged on no machine at all, so
+# every menu ran on a list compiled into it, and hamappmenu's list had drifted
+# badly: counted against the image's APPS, NINE of its ELEVEN rows named a
+# program /bin did not contain (only /bin/hamfm and /bin/hpm were there).
+# A person clicked one and NOTHING HAPPENED, because the failure is invisible
+# from this side: fork(2) succeeds, execve(2) fails in the CHILD, and the
+# child dies silently -- so the panel logged `[panel] launched /bin/hamview`
+# and the screen never changed. That is exactly the shape NORTH_STAR.md is
+# about, the gap answering something success-shaped instead of the truth.
+#
+# This panel's own fallback had NOT drifted; what it needs is the rule for the
+# CATALOGUE, which is what every machine reads now that /etc/hamde/apps is
+# staged, and which can go stale in the other direction (a launcher shipped
+# for a program a particular image does not build).
+#
+# WHY HIDE RATHER THAN GREY OUT. A disabled row is the right answer when the
+# program is a thing you could get (an optional package you have not installed
+# yet); it is the wrong answer for a name that exists nowhere in the
+# distribution, because it advertises an application this system does not
+# have. Every name reachable here is the second kind: the catalogue is
+# /etc/hamde/apps, one file per SHIPPED app, and a launcher whose program is
+# absent means the two disagree -- a packaging fault, not a user choice. So
+# the row is dropped from the menu AND NAMED, on the panel's own stdout, in
+# the same shape hamdesktop reports an unknown icon:
+#
+#     [panel] appmenu-missing <Name> <prog>
+#
+# Silence in either direction is what this is fixing: a person sees only rows
+# that work, and whoever is looking at the boot log sees which launcher lost
+# its program and which one.
+#
+# WHY THE PROBE IS NOT IN lib/desktopentry.ad, where the Exec parse lives:
+# that module is deliberately extern-free and dual-target (it links into the
+# host unit tests unchanged), so it cannot open a file. The probe is one
+# sys_open per launcher, at startup, and hamappmenu carries the same three
+# lines for the same reason.
+#
+# NOT APPLIED TO A DISTRIBUTION'S ENTRIES. A `/n/debian/...` launcher names a
+# program inside that namespace, which this process cannot see and must not
+# judge: those rows are scanned with force_cat >= 0 and pass through untested.
+def _prog_installed(prog: Ptr[uint8]) -> int32:
+    if prog[0] == 0:
+        return 0
+    fd: int32 = sys_open(cast[Ptr[char]](prog))
+    if fd < 0:
+        return 0
+    sys_close(fd)
+    return 1
+
+
+def _report_missing(name: Ptr[uint8], prog: Ptr[uint8]):
+    _writeall(1, cast[Ptr[uint8]]("[panel] appmenu-missing "))
+    _writeall(1, name)
+    _writeall(1, cast[Ptr[uint8]](" "))
+    _writeall(1, prog)
+    _writeall(1, cast[Ptr[uint8]]("\n"))
+
+
+# WHY THIS LIST IS **NOT** RUN THROUGH _prog_installed the way the catalogue
+# scan is. Its whole job is that the DE is never menu-less; a probe that can
+# empty it defeats the only reason it exists, and the case it runs in -- no
+# catalogue at all -- is by definition a root nobody staged, where an absent
+# /bin/X says as much about the root as about the program. These rows are made
+# honest at the CLICK instead: _launch below refuses a program that is not
+# there BY NAME. (Every name here IS built by scripts/hamlinux_image.sh; this
+# panel's list, unlike hamappmenu's, had not drifted.)
 def _seed_fallback():
     _seed_one(cast[Ptr[uint8]]("Terminal"),       cast[Ptr[uint8]]("/bin/hamtermscene"), 3)
     _seed_one(cast[Ptr[uint8]]("Files"),          cast[Ptr[uint8]]("/bin/hamfmscene"),   0)
     _seed_one(cast[Ptr[uint8]]("Web Browser"),    cast[Ptr[uint8]]("/bin/hambrowse"),    1)
     _seed_one(cast[Ptr[uint8]]("Calculator"),     cast[Ptr[uint8]]("/bin/hamcalcscene"), 0)
     _seed_one(cast[Ptr[uint8]]("Editor"),         cast[Ptr[uint8]]("/bin/hameditscene"), 0)
-    _seed_one(cast[Ptr[uint8]]("Control Center"),  cast[Ptr[uint8]]("/bin/hamctl"),       4)
+    _seed_one(cast[Ptr[uint8]]("Control Center"), cast[Ptr[uint8]]("/bin/hamctl"),       4)
     _seed_one(cast[Ptr[uint8]]("System Monitor"), cast[Ptr[uint8]]("/bin/hammonscene"),  3)
     _seed_one(cast[Ptr[uint8]]("2048"),           cast[Ptr[uint8]]("/bin/ham2048scene"), 2)
     # The installer launcher is a LIVE-medium-only entry — never on an
@@ -2399,9 +2468,18 @@ def _scan_apps_dir(dir: Ptr[uint8], force_cat: int32) -> uint64:
                                     desktop_prog_ptr(), desktop_prog_len(),
                                     cat, desktop_terminal())
                         else:
-                            _am_add(desktop_name_ptr(), desktop_name_len(),
-                                    desktop_prog_ptr(), desktop_prog_len(),
-                                    cat, desktop_terminal())
+                            # NATIVE entry: the Exec names a program in THIS
+                            # root, so it can be checked, and must be -- see
+                            # _prog_installed above. A launcher whose program
+                            # is absent is dropped and named, never drawn as a
+                            # row that does nothing when clicked.
+                            if _prog_installed(desktop_prog_ptr()) == 0:
+                                _report_missing(desktop_name_ptr(),
+                                                desktop_prog_ptr())
+                            else:
+                                _am_add(desktop_name_ptr(), desktop_name_len(),
+                                        desktop_prog_ptr(), desktop_prog_len(),
+                                        cat, desktop_terminal())
         i = e + 1
     added = am_count - start
     return added
@@ -3821,6 +3899,19 @@ last_launched_pid: int32 = 0
 def _launch(prog: Ptr[char]):
     launch_argv[0] = cast[uint64](prog)
     launch_argv[1] = 0
+    # THE SECOND HALF OF THE MISSING-PROGRAM ANSWER. The scan above keeps a
+    # dead launcher out of the menu, but a click can still reach a name that
+    # has gone since (a package removed under a running session, a launch
+    # queued by hand on /dev/wsys/appmenu/launch). spawn_detached CANNOT tell
+    # us: fork(2) succeeds and it is execve(2) in the child that fails, so the
+    # call returns a perfectly good pid for a program that never ran and the
+    # line below would report `launched`. Probe first, and fail BY NAME.
+    if _prog_installed(cast[Ptr[uint8]](prog)) == 0:
+        last_launched_pid = -1
+        _writeall(1, cast[Ptr[uint8]]("[panel] LAUNCH FAILED "))
+        _writeall(1, cast[Ptr[uint8]](prog))
+        _writeall(1, cast[Ptr[uint8]](": not installed\n"))
+        return
     # DETACHED: the panel never wait4s its launched apps, so a plain spawn
     # would leak each one as an un-reapable zombie (a still-live parent makes
     # reap_orphan_zombies skip it) — the app menu eventually hit fork-EAGAIN
@@ -3867,6 +3958,14 @@ def _launch_line(line: Ptr[uint8]):
     launch_argv[n] = 0
     if n == 1:
         _launch(cast[Ptr[char]](line))                   # no args: unchanged
+        return
+    # Same probe as _launch(): a bad path here would spawn a child that dies in
+    # execve and still report "launched".
+    if _prog_installed(line) == 0:
+        last_launched_pid = -1
+        _writeall(1, cast[Ptr[uint8]]("[panel] LAUNCH FAILED "))
+        _writeall(1, line)
+        _writeall(1, cast[Ptr[uint8]](": not installed\n"))
         return
     pid: int32 = spawn_detached(cast[Ptr[char]](line), &launch_argv[0], -2, -2,
                                 cast[Ptr[uint64]](0))

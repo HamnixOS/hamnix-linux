@@ -327,7 +327,13 @@ while IFS= read -r rel; do
     ETCN=$((ETCN + 1))
     cmp -s "$src" "$IMG/$rel" || printf '%s\n' "$rel" >> "$TMP/etcdiff"
 done < <(grep '^etc/' "$TMP/chan")
-NDIFF=$(grep -c . "$TMP/etcdiff" 2>/dev/null || echo 0)
+# `grep -c . file` on a missing file PRINTS 0 and EXITS 1, so the obvious
+# `$(grep -c . f || echo 0)` produced the two-line string "0\n0", and
+# `[ "0\n0" -gt 0 ]` is not false -- it is an ERROR ("integer expression
+# expected", exit 2), which fell through to the PASS branch. The comparison
+# was therefore decided by a shell error every time it was clean, which is
+# this project's own worst shape in a gate: a pass that is not an answer.
+NDIFF=$( [ -s "$TMP/etcdiff" ] && grep -c . "$TMP/etcdiff" || echo 0 )
 if [ "$ETCN" -lt 5 ]; then
     bad "only $ETCN /etc files were found in both the image and the channel -- this comparison is not measuring anything"
 elif [ "$NDIFF" -gt 0 ]; then

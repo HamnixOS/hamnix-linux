@@ -3604,9 +3604,11 @@ had before the fix. Same click, same hand: no window at (8,28), 0% search field,
 Three things came out of the real boot that no offscreen gate could have seen,
 all reported rather than hidden:
 
-- **`/etc/hamde/apps` is on NO hamnix-linux machine.** `scripts/hamlinux_image.sh`
+- **`/etc/hamde/apps` is on NO hamnix-linux machine.** (**FIXED** — see the
+  next section; it was three faults deep, not the one line it reads as.)
+  `scripts/hamlinux_image.sh`
   stages `/etc` with `for f in … hamde …; do [ -f "etc/$f" ] && install …`, and
-  `etc/hamde` is a **directory**, so `[ -f ]` is false and the 27 shipped
+  `etc/hamde` is a **directory**, so `[ -f ]` is false and the 26 shipped
   `.desktop` launchers never land. Both menus therefore run off hamappmenu's
   built-in `_seed_fallback()` list, **8 of whose 11 entries name programs that
   are not installed** (`/bin/calculator`, `/bin/hamterm`, `/bin/hamedit`, …).
@@ -3614,7 +3616,8 @@ all reported rather than hidden:
   same shape as the bug above it, one level further out: the feature ships, and
   the DATA it needs does not.
 - **Two runs in four froze after launching from the menu**, and the same
-  measurement told the two cases apart every time. The fallback list's Files is
+  measurement told the two cases apart every time. (**FIXED** — hamfm parks;
+  see the next section for the sampled numbers with and without the change.) The fallback list's Files is
   `/bin/hamfm`, the TUI (the shipped `files.desktop` says `/bin/hamfmscene`,
   which is not on the image either). When it lands in state **R with 2:02 of
   CPU** — 100% of a core, a TUI with no terminal — the screen stops changing:
@@ -3632,6 +3635,140 @@ PACKAGED bytes by `channel_runs_desktop.sh`), `de_appmenu_band.sh` 11,
 `de_panel_conf_shipped.sh` 15, `wsys_desktop_z.sh` 12, `gates_are_private.sh`
 3.
 
+### The menu lists applications that are on the machine, and hamfm no longer
+### freezes the desktop
+
+Both defects the real boot above reported are fixed, and the first of them was
+**three faults deep**, not the one line it was reported as.
+
+**1. `/etc/hamde/apps` was on no machine.** `scripts/hamlinux_image.sh` staged
+`/etc` by iterating a list and testing `[ -f "etc/$f" ]`; the list contained
+`hamde`, a **directory**, for which `-f` is false. Staging it is one line. It
+is not the fix:
+
+- **The channel has to carry the launchers**, or `tests/linux/channel_covers_image.sh`
+  goes red — it walks the whole image root, and a file in the initramfs and in
+  no package is a file an installed machine can never receive a fix to. Checked
+  by running it, not by reading it.
+- **The programs have to exist.** Of the 26 launchers' `Exec` targets, exactly
+  **THREE** were in the image's `APPS` — `hamtermscene`, `hameditscene`,
+  `haminstallui`. A correctly staged catalogue and nothing else would have
+  produced a **three-row** Applications menu on a distribution with 26 desktop
+  applications in its tree, every one of which builds (`hamlinux_sweep.sh`: 363
+  of 363) and every one of which the run sweep already drives. All 23 are in
+  the image now.
+- **And they did not fit in a package.** Put into `hamnix-desktop`,
+  `scripts/hamlinux_packages.py` **refused to publish it**: *tar.gz 7,431,064 B
+  / cap 4,194,304, inflated 16,220,160 B / cap 8,388,608* — hpm unpacks
+  entirely in RAM through two fixed arrays. So it is **one package per
+  application** (`hamnix-app-<cmd>`, generated from the launcher files), a
+  `hamnix-apps` metapackage in `hamnix-base`'s closure, and **each package
+  carries the launcher beside the program it launches**. That pairing is worth
+  more than the size fix: the defect this whole pass is about is a launcher and
+  its program living in different places with one of them missing, and paired
+  in one package it cannot happen — `hpm remove hamnix-app-hamchessscene` takes
+  the chess program and the chess row off the menu together.
+
+**2. The menu is honest about what it lists.** A launcher whose program is not
+on the machine is **dropped from the menu AND NAMED** on the panel's own
+stdout as `appmenu-missing <Name> <prog>` — the shape `hamdesktop` already uses
+for `icon-unknown`. Hidden rather than greyed out, deliberately: a disabled row
+is the right answer for an optional package you could go and install, and the
+wrong one for a name that exists nowhere in the distribution, which is a
+packaging fault and not a user choice. **The click is guarded too**, because
+the scan cannot be the whole answer — `spawn_detached` FORKS, so `fork(2)`
+succeeds, `execve(2)` fails in the child, and the panel used to log
+`[panel] launched /bin/hamview` for a program that never ran. It now refuses
+by name: `[panel] LAUNCH FAILED <prog>: not installed`. Distribution launchers
+are NOT judged — they name programs inside a namespace this process cannot see.
+
+The compiled-in fallback lists are corrected rather than probed, and the reason
+is written down where they are: a probe that can empty the fallback defeats the
+only thing it is for (the DE is never menu-less), and the case it runs in is by
+definition a root nobody staged. Those rows are made honest at the click. Five
+of hamappmenu's eleven were wrong — including **`/bin/hamfm`, the console TUI**,
+where the shipped `files.desktop` has always said `/bin/hamfmscene`.
+
+**3. `hamfm` parks instead of spinning.** `if n == 0: sys_yield(); continue` —
+a TUI has nothing to draw between keystrokes, so on a machine where nobody is
+typing into it (every machine, since the desktop launched it behind a graphical
+session) `sys_read_nb` answers *nothing yet* for ever and the yield turns that
+into a full core. It is the **27th** instance of THE IDLE CENSUS shape, and the
+census missed it because the run sweep exits `hamfm` before it reaches that
+loop. It parks in `sys_waitfds` on fd 0. **Park and not exit-on-no-terminal**:
+it already exits when there is no terminal (`sys_read_nb` returns a negative on
+true EOF), and an inherited console fd cannot tell *no terminal* from *a
+terminal nobody is typing into* — guessing there would kill a working session.
+
+**THE GATES, and what they measure that nothing did before.**
+
+- `tests/linux/de_appmenu_installed.sh` — **10 PASS**. Reads the STAGED IMAGE
+  ROOT, not the repository (the whole defect was that the tree had 26 launchers
+  and every machine had zero, so a gate that counts the tree agrees with the
+  defect), then BOOTS it with one launcher's program deliberately removed. The
+  panel reports **24** entries — 26 launchers, minus the live-only installer on
+  a non-installer boot, minus the one whose program is gone — names it
+  (`appmenu-missing Chess /bin/hamchessscene`), and refuses
+  `/bin/nosuchprogram` by name. **Reverted: 2 PASS / 10 FAIL** — 26 of 26
+  launchers absent from the image, 23 of 26 naming a program it does not build,
+  the menu at **8** entries, nothing named, and `[panel] launched
+  /bin/nosuchprogram` printed for a program that does not exist.
+- `tests/linux/de_idle_cpu.sh` — **phase C**, and this gate needed it: it
+  measured the desktop as rc.5 leaves it and one terminal its own rc line
+  opened. **Nothing in it had ever come off the menu**, which is the point of
+  having one, so a defect arriving only that way was out of its reach. Phase C
+  launches through `/dev/wsys/appmenu/launch`, the queue the menu writes and
+  the panel reads. **ALL PASS**: host QEMU 6.5% / 7.1% / **7.2%**, hamfm in
+  state **S with 0:00**. **With `user/hamfm.ad` reverted: SOME FAILED** —
+  `hamfm R 20.0s -> 100.0% of one cpu`, host QEMU **102.7%**, with phases A and
+  B unchanged at 6.3% and 9.4%. CPU is a delta of `TIME` over a stated window
+  on the guest and of `/proc/<qemu>/stat` on the host; `ps` pcpu is a lifetime
+  average and is not used.
+
+**TWO GATES WERE GREEN ON THE WRONG ANSWER, and both are the reason to check.**
+`de_appmenu_brisk.sh` asserted the favourites file names `/bin/calculator` — a
+program **no image builds** — so it was green about a menu row that could not
+launch anything anywhere, and went red the moment the row was corrected. It
+reads the expected program out of `user/hamappmenu.ad` now. And
+`channel_covers_image.sh` computed its `/etc` difference count as
+`$(grep -c . f || echo 0)`, and `grep -c .` on a **missing** file prints `0`
+and exits `1`, so on the clean path the variable was the two-line string
+`0\n0` and `[ "0\n0" -gt 0 ]` was not false but an **error** — which fell
+through to the PASS branch. That comparison was decided by a shell error every
+time it was clean.
+
+`de_appmenu_realboot.sh`'s `LAUNCH_PROG` was the literal `/bin/hamfm`, so its
+one launch was simultaneously the thing under test and the thing breaking the
+test. It is read out of `files.desktop`.
+
+**THE SCREENSHOT**, which is what the owner asked for:
+`docs/screenshots/linux/appmenu-installed-apps.png` and
+`-flyout.png`, taken by `scripts/hamlinux_shot_appmenu.sh` — a real boot, a
+real pointer on the Applications button over QMP `input-send-event`, and the
+QEMU screendump of the scanned-out surface. Seven categories including
+**Office** and **Sound & Video**, which the fallback list never had, and an
+Accessories fly-out listing Calculator, Screenshot, Editor, Notes and Files.
+
+**AND A THIRD GATE WAS ABOUT TO GO SOFT-GREEN, in the same family.**
+`de_appmenu_realboot.sh`'s `panelwin()` selected the panel's window with
+`$5 < 400` — a bound put there to keep the desktop backdrop (also full-width
+and top-anchored, at 1280x800) out of the answer, when the ARM OLD panel grew
+to ~206 px to hold the flat dropdown. With the catalogue staged that dropdown
+holds 25 rows and the panel grows to **580**, so the filter stopped matching,
+`panelwin` returned nothing, and the assertion reading it **degraded to an
+INFO line**: 16 PASS became 15 *with nothing red*. The height is the answer,
+so it must not be in the question; the backdrop is excluded by its Z (-1 by
+construction) instead. **16 PASS / 0 FAIL**, and its favourites file names
+`/bin/hamfmscene` — the WINDOWED file manager, which is what a click reaches
+now.
+
+Green alongside: `de_appmenu_realboot.sh` **16**, `de_appmenu_brisk.sh` **17**,
+`de_icons_distinct.sh` **15**, `de_mouse_chrome.sh` **13**,
+`channel_covers_image.sh` **8** (331 image files, 804 channel files, 41
+excluded by name), `gates_are_private.sh` **3**, and the channel builds
+**124 packages** with `channel_runs_desktop.sh` and
+`channel_compiles_adder.sh` green inside it.
+
 ### Running it
 
 ```
@@ -3643,6 +3780,7 @@ scripts/hamlinux_distro.sh         # the Debian namespace (Firefox lives here)
 scripts/hamlinux_alpine.sh         # the Alpine namespace (HAMLINUX_ALPINE_GUI=0 for 26 MiB)
 scripts/hamlinux_packages.py       # build the `linux` hpm channel
 scripts/hamlinux_shot.sh out.png   # boot and screendump in one command
+scripts/hamlinux_shot_appmenu.sh <imgdir> out.png   # ... with the Applications menu OPEN
 tests/linux/*.sh, tests/linux/*_probe.ad
 ```
 

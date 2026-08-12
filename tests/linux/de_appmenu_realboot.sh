@@ -78,12 +78,15 @@
 # out of those runs and are reported here rather than hidden:
 #   * `ls` given a REGULAR FILE prints its CONTENTS (450 KB of ELF on the
 #     serial console, three times, from a probe that said `ls -l`).
-#   * /etc/hamde/apps is on NO machine -- hamlinux_image.sh stages /etc by
+#   * /etc/hamde/apps was on NO machine -- hamlinux_image.sh staged /etc by
 #     `[ -f "etc/$f" ]` over a list containing the DIRECTORY `hamde` -- so both
-#     menus fall back to a built-in list whose entries are stale.
+#     menus fell back to a built-in list whose entries were stale. FIXED, and
+#     with a gate of its own: tests/linux/de_appmenu_installed.sh.
 #   * one of those stale entries, Files -> /bin/hamfm (the TUI; the shipped
-#     .desktop says /bin/hamfmscene), spins at 100% of a core when launched
-#     with no terminal and the desktop stops repainting.
+#     .desktop says /bin/hamfmscene), spun at 100% of a core when launched
+#     with no terminal and the desktop stopped repainting. FIXED: hamfm parks
+#     (user/hamfm.ad), and tests/linux/de_idle_cpu.sh phase C measures a
+#     menu-launched program's cpu, which nothing did before.
 #
 # THE MEASUREMENT MUST NOT BE THE THING IT MEASURES
 # =================================================
@@ -158,15 +161,34 @@ SEARCH_CLICK_X=$((MX + 120)); SEARCH_CLICK_Y=$((MY + 10))
 APPROW_X=$((MX + 110)); APPROW_Y=$((MY + 2 * ROWH + 10))
 SCREEN_W=1280; SCREEN_H=800
 
-# THE APP THIS GATE LAUNCHES, and why it is Files and not Calculator. The menu
-# on an installed machine is built by hamappmenu's _seed_fallback() (see the
-# FINDING at the end of this file), and of the eleven entries in it, "Files" is
-# one of the three whose program is actually ON the machine. A launch of a
-# program that is not there would still write the favourites file -- so
-# choosing it would have made the Favourites assertion pass while proving
-# nothing about launching.
+# THE APP THIS GATE LAUNCHES, and why it is Files. The reason has changed, and
+# BOTH halves of it are worth keeping because between them they are this
+# gate's whole finding.
+#
+# WHAT IT USED TO BE: the menu on an installed machine was built by
+# hamappmenu's _seed_fallback(), because /etc/hamde/apps was staged on no
+# machine at all; of that list's eleven entries "Files" was one of only THREE
+# whose program was on the machine, and a launch of a program that is not
+# there would still write the favourites file, so any other choice would have
+# made the Favourites assertion pass while proving nothing about launching.
+#
+# WHAT IT IS NOW: /etc/hamde/apps IS staged (scripts/hamlinux_image.sh) and
+# every launcher's program is on the machine (tests/linux/
+# de_appmenu_installed.sh), so any row would do. Files stays because the two
+# arms below are already tuned to where it sits and to `fil` as a search term.
+#
+# BUT THE PROGRAM IS NOT WRITTEN DOWN, and this is the second half of the
+# finding. It read `/bin/hamfm`, which is the CONSOLE TUI file manager -- the
+# fallback's name for that row -- while the shipped files.desktop has always
+# said `/bin/hamfmscene`, the windowed one. Launching the TUI with no terminal
+# is what FROZE this gate's own runs (see THE FREEZE in the report below), so
+# the literal here was simultaneously the thing under test and the thing
+# breaking the test. It is read out of the launcher the machine will actually
+# use, so it cannot be one thing here and another on the disk again.
 SEARCH_TEXT=fil
-LAUNCH_PROG=/bin/hamfm
+LAUNCH_PROG="$(sed -n 's/^Exec=//p' "$PROJ_ROOT/etc/hamde/apps/files.desktop" \
+               2>/dev/null | head -1 | awk '{print $1}')"
+[ -n "$LAUNCH_PROG" ] || LAUNCH_PROG=/bin/hamfmscene
 
 # ===========================================================================
 # THE GUEST SIDE. Two rc scripts, staged onto the disk before it is made.
@@ -526,10 +548,27 @@ menuwin() {   # menuwin <log> <tag>
         i&&$2==mx&&$3==my&&$4==ww{print $1; exit}' "$1" | tr -d '\r'
 }
 # THE PANEL: the full-width bar at the top of the screen. Prints "wid height".
+# panelwin <log> <tag> -> "<wid> <height>" for the TOP panel's own window.
+#
+# THE HEIGHT IS THE ANSWER, SO IT MUST NOT BE IN THE QUESTION. This used to
+# select `$5 < 400`, a bound put there to keep the desktop backdrop (also
+# full-width and top-anchored, at 1280x800) out of the answer -- and the ARM
+# OLD panel, whose whole point is that it GROWS to hold the flat dropdown, was
+# ~206 px at the time. With the /etc/hamde/apps catalogue actually staged the
+# dropdown holds 25 rows instead of the fallback's 8 and the panel grows to
+# **580**, so the filter stopped matching, `panelwin` returned nothing, and the
+# assertion that reads it degraded to an INFO line: 16 PASS became 15 with
+# NOTHING RED. A gate that quietly stops asking a question is the shape this
+# tree exists to beat, and a measurement filtered by the value it is measuring
+# will do it again at the next size.
+#
+# The backdrop is excluded by what actually distinguishes it -- its Z. The
+# backdrop sits at z -1 (below everything, by construction: it is the
+# wallpaper); the panels are at 100. Fields are `wid x y w h z ...`.
 panelwin() {   # panelwin <log> <tag>
     awk -v m="WINS-$2" -v sw="$SCREEN_W" '
         index($0,m){i=1;next} i&&index($0,"WINS-END"){exit}
-        i&&$3==0&&$4==sw&&$5<400{print $1, $5; exit}' "$1" | tr -d '\r'
+        i&&$2==0&&$3==0&&$4==sw&&$6>=0{print $1, $5; exit}' "$1" | tr -d '\r'
 }
 favfile() {   # favfile <log> <tag>
     awk -v m="FAV-$2:" 'index($0,m){i=1;next} i&&index($0,"FAV-END"){exit}
@@ -709,6 +748,19 @@ fi
 # file does instead is print the numbers every run, so the next person sees
 # which of the two they got and which state hamfm was in.
 #
+# THAT SPIN IS FIXED, IN BOTH OF ITS CAUSES, and this block is deliberately
+# left as a MEASUREMENT rather than being turned into an assertion now that it
+# would pass -- an intermittent that has been seen twice does not become a
+# guarantee because two runs went the other way.
+#   * hamfm's input loop answered "no byte ready yet" with sys_yield, which on
+#     a machine where nobody is typing into it is a full core at a spin. It
+#     PARKS in sys_waitfds now (user/hamfm.ad), and tests/linux/de_idle_cpu.sh
+#     phase C launches it through the menu's own queue and measures the cpu.
+#   * and it was only REACHABLE from the menu because /etc/hamde/apps was
+#     staged on no machine, so the row said /bin/hamfm where the shipped
+#     files.desktop says /bin/hamfmscene. LAUNCH_PROG above is read out of
+#     that launcher now, so this arm launches what a person's click would.
+#
 # The prose that WOULD have been wrong here is worth recording: an earlier
 # version of this block asserted the freeze in fixed text, and the very next
 # run printed that text above numbers saying the opposite.
@@ -731,10 +783,13 @@ echo "    line above and nothing else: when hamfm is in state R with ~2:02 of"
 echo "    CPU the screen stops changing (0 px, 0 px, one spawn, no window, the"
 echo "    clock stopped); when it is in state S with 0:00 the menu reopens on"
 echo "    the 2nd click and toggles shut on the 3rd. Four runs, four times that"
-echo "    correlation held. $LAUNCH_PROG is the TUI file manager and it is in"
-echo "    this menu only because /etc/hamde/apps is not on the machine"
-echo "    (FINDING 1) and hamappmenu's built-in fallback names it, where the"
-echo "    SHIPPED etc/hamde/apps/files.desktop says Exec=/bin/hamfmscene."
+echo "    correlation held. The TUI (/bin/hamfm) was in this menu only because"
+echo "    /etc/hamde/apps was on no machine (FINDING 1) and the fallback named"
+echo "    it; this run launches $LAUNCH_PROG, read from files.desktop. hamfm"
+echo "    also parks instead of spinning now (user/hamfm.ad), so both halves"
+echo "    of that correlation are closed -- the numbers above are still"
+echo "    printed rather than asserted: an intermittent seen twice does not"
+echo "    become a guarantee because two runs went the other way."
 
 # ---- 7. THE ARM THAT MUST FAIL ------------------------------------------
 # Everything above, asked of the same disk with the binary moved aside. If any
@@ -789,19 +844,23 @@ fi
 # Reported, not failed: it is a separate defect with a separate cause, and a
 # gate that goes red for somebody else's bug stops being read.
 echo
-echo "--- FINDING (not a failure of this gate)"
-echo "    scripts/hamlinux_image.sh stages /etc by a list of FILES:"
+echo "--- FINDING 1, NOW FIXED -- kept because the guest is still asked"
+echo "    scripts/hamlinux_image.sh staged /etc by a list of FILES:"
 echo "      for f in hostname hosts passwd ... hamde ...; do [ -f \"etc/\$f\" ] && install ...; done"
-echo "    etc/hamde is a DIRECTORY, so [ -f ] is false and /etc/hamde/apps --"
-echo "    the 27 .desktop launchers -- is on NO hamnix-linux machine. Both menus"
-echo "    therefore fall back to hamappmenu's built-in _seed_fallback() list, in"
-echo "    which 8 of the 11 entries name programs that are not installed"
-echo "    (/bin/calculator, /bin/hamterm, /bin/hamedit, /bin/hamview,"
-echo "    /bin/hambrowse, /bin/hammonscene, /bin/hamctl, /bin/hamvideoscene,"
-echo "    /bin/hamaudioscene). What the guest found:"
+echo "    etc/hamde is a DIRECTORY, so [ -f ] was false and /etc/hamde/apps --"
+echo "    the 26 .desktop launchers -- was on NO hamnix-linux machine. Both"
+echo "    menus fell back to a list compiled into them, in which 5 of 11"
+echo "    entries named programs no image builds (/bin/calculator,"
+echo "    /bin/hamterm, /bin/hamedit, /bin/hamview, /bin/hamfm) -- rows that"
+echo "    did nothing at all when a person clicked them."
+echo "    The catalogue is staged now, its 23 remaining programs are built and"
+echo "    packaged, and a launcher whose program is absent is dropped from the"
+echo "    menu AND NAMED (appmenu-missing). tests/linux/de_appmenu_installed.sh"
+echo "    is the gate; what THIS guest found is printed rather than assumed:"
 echo "      $(awk -v m="CATALOGUE-NEW:" 'index($0,m){i=1;next} i&&NF>0{print;exit}' "$WORK/boot.new.log" | tr -d '\r')"
-echo "    Clicking one of those eight is a menu entry that does nothing. This"
-echo "    gate launches Files (/bin/hamfm), one of the three that are real."
+echo "    (an EMPTY line there means the catalogue is still missing on this"
+echo "     machine, and every row below it came from the fallback.)"
+echo "    This gate launches Files -> $LAUNCH_PROG, read from files.desktop."
 echo
 echo "--- FINDING 2 (not a failure of this gate)"
 echo "    \`ls\` GIVEN A REGULAR FILE PRINTS ITS CONTENTS. The first run of this"

@@ -134,6 +134,30 @@ GUI_APPS=(
     # broken -- every other image client drew a hole and exited 0.  It is 40 KB
     # and it is the reproduction.
     hamimgscene
+    # ---- THE APPLICATIONS THE MENU LISTS -----------------------------------
+    # THE OTHER HALF OF /etc/hamde/apps. Staging the 26 shipped launchers (see
+    # the /etc block below) is only honest if the programs they name are here:
+    # of those 26 Exec targets, exactly THREE were in the list above --
+    # hamtermscene, hameditscene, haminstallui -- so a correctly staged
+    # catalogue would have produced a three-row Applications menu on a
+    # distribution that has 26 desktop applications in its tree, all 26 of
+    # which BUILD (scripts/hamlinux_sweep.sh: 363 of 363) and all 26 of which
+    # the run sweep already drives (tests/linux/runsweep_recipes.tsv).
+    #
+    # They were never excluded on purpose; the launcher file and the APPS list
+    # are two places an application has to be named and nothing compared them.
+    # tests/linux/de_appmenu_installed.sh compares them now, in both
+    # directions, so a launcher without a program and a program the channel
+    # does not carry both fail by name instead of turning into a menu row that
+    # does nothing when clicked.
+    #
+    # As with hamappmenu, BOTH lists are needed: this one puts them in /bin,
+    # DESKTOP_APPS in scripts/hamlinux_packages.py puts them in a package, and
+    # tests/linux/channel_covers_image.sh fails if either is missing.
+    ham2048scene hamaudioscene hambrowse hamcalcscene hamcalscene
+    hamchessscene hamctl hamfmscene hamgamedemo hamgamesnake haminput
+    hamlogscene hamminescene hammonscene hamnotesscene hamsheet hamshotui
+    hamslides hamsnakescene hamsoftware hamtetrisscene hamvideoscene hamwrite
 )
 APPS+=("${GUI_APPS[@]}")
 
@@ -261,10 +285,39 @@ fi
 # for stdin, which is not reproducible.
 install -m644 "${HAMLINUX_RC:-etc/rc.boot.linux}" "$ROOT/etc/rc.boot"
 for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
-         hamde os-release lsb-release debian_version profile resolv.conf \
+         os-release lsb-release debian_version profile resolv.conf \
          services protocols networks host.conf; do
     [ -f "etc/$f" ] && install -m644 "etc/$f" "$ROOT/etc/$f"
 done
+
+# THE APPLICATIONS MENU'S DATA. `hamde` used to sit in the loop above, and the
+# loop tests `[ -f "etc/$f" ]` -- FALSE for a directory. So the 26 shipped
+# launchers were never staged on ANY machine, every menu found
+# /etc/hamde/apps empty, and both the Brisk menu and the panel's dropdown fell
+# back to their compiled-in lists -- lists naming /bin/calculator,
+# /bin/hamterm, /bin/hamedit, /bin/hamview, /bin/hambrowse, /bin/hammonscene,
+# /bin/hamctl, /bin/hamvideoscene and /bin/hamaudioscene, none of which the
+# image's APPS above builds. Clicking one of those rows did nothing at all.
+# Same shape as the bug that hid the menu itself: the feature ships, the data
+# it needs does not.
+#
+# apps-optional/ is deliberately NOT staged: those launchers belong to the
+# optional packages that carry them (scripts/build_packages.py installs each
+# one with its program), and staging a launcher whose program is in no package
+# would recreate the very defect above.
+#
+# It is only half a fix on its own -- a file in the image and in no package is
+# a file an installed machine can never receive a fix to (NORTH_STAR.md), so
+# HAMDE_APPS in scripts/hamlinux_packages.py carries the same files and
+# tests/linux/channel_covers_image.sh fails if it stops.
+if [ -d etc/hamde/apps ]; then
+    mkdir -p "$ROOT/etc/hamde/apps"
+    for f in etc/hamde/apps/*.desktop; do
+        [ -f "$f" ] || continue
+        install -m644 "$f" "$ROOT/etc/hamde/apps/$(basename "$f")"
+    done
+    echo "[image] staged $(ls "$ROOT/etc/hamde/apps" | wc -l) application launchers"
+fi
 # The distribution namespaces. /etc/distros maps a NAME to the medium behind
 # it, and `bind '#distro/alpine' /n/alpine` reads it -- so a second (or fifth)
 # distribution is a line in a file, not a recompile. See etc/distros.linux.
