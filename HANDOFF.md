@@ -1653,6 +1653,32 @@ single entry:
   or the focus line would fight the toggle that already worked. Gated by
   `tests/linux/de_focus_dismiss.sh` (14 PASS).
 
+* **A `wl_pointer.motion` THE POINTER NEVER MADE, and the PROBE that agreed
+  with it for four passes.** `wsysd` writes a pointer line for every input
+  event, including one carrying nothing but a wheel delta with the cursor
+  standing still, and `wsyswl` answered each of those with a
+  `wl_pointer.motion` at the coordinates the pointer already had. Xwayland
+  routes `wl_pointer.axis` to the slave device `xwayland-relative-pointer` and
+  `wl_pointer.motion` to `xwayland-pointer`, so a notch became
+  `motion(6) -> axis(7) -> motion(6)` and the X master had to switch slaves
+  twice per notch. Every switch is an `XI_DeviceChanged`, and a smooth-scroll
+  client keeps a per-device valuator baseline it must DROP on that event —
+  Chromium does — so every scroll motion was a first motion and every delta was
+  zero. Steam's store page moved **0 of 564400 pixels** for four passes while
+  an `xterm` in the same session scrolled 471 px, because `xterm` reads core
+  button 4/5, which none of this touches. It is 97.41% and a clean reversal now
+  (`docs/steam_namespace.md` §12.2d).
+
+  **The success-shaped part is not the motion, it is the instrument.**
+  `tests/linux/xi2_scroll_probe.c` was written specifically to be the client
+  Steam is — the Chromium-shaped one that reads a scroll VALUATOR rather than
+  button 4/5 — and it reported the wheel healthy on both Xwayland versions, 30
+  PASS, through the entire bug. It never selected `XI_DeviceChanged`, so it
+  accumulated straight across the device change that was resetting the real
+  browser on every notch. Three passes of measurement below the X server were
+  spent on the strength of that green. **When a stand-in for a program
+  disagrees with the program, doubt the stand-in first.**
+
 None of these failed loudly. Three were found only by tracing, one only by
 running `strace` **as PID 1**, and one only after publishing the compositor's
 own state as a file (`/dev/wsys/wsysd/state`) so it could be `cat`-ed from

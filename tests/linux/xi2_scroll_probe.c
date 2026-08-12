@@ -44,7 +44,7 @@ static double last[MAXDEV][MAXVAL];
  * control pass the wheel's assertion. */
 static int is_scroll[MAXDEV][MAXVAL];
 
-static void learn_devices(Display *dpy)
+static void learn_devices(Display *dpy, int announce)
 {
     int ndev = 0;
     XIDeviceInfo *info = XIQueryDevice(dpy, XIAllDevices, &ndev);
@@ -57,10 +57,11 @@ static void learn_devices(Display *dpy)
             XIScrollClassInfo *s = (XIScrollClassInfo *)info[i].classes[c];
             if (s->number >= 0 && s->number < MAXVAL) {
                 is_scroll[id][s->number] = 1;
-                printf("XI2 have-scroll-valuator dev %d valuator %d type %s\n",
-                       id, s->number,
-                       s->scroll_type == XIScrollTypeVertical ? "vertical"
-                                                              : "horizontal");
+                if (announce)
+                    printf("XI2 have-scroll-valuator dev %d valuator %d type %s\n",
+                           id, s->number,
+                           s->scroll_type == XIScrollTypeVertical ? "vertical"
+                                                                  : "horizontal");
             }
         }
     }
@@ -89,7 +90,7 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("XI2 version %d.%d\n", major, minor);
-    learn_devices(dpy);
+    learn_devices(dpy, 1);
 
     /* ITS OWN WINDOW, and the XI2 selection is on THAT -- not on the root.
      * This is the shape Chromium uses, and it is not interchangeable with a
@@ -112,6 +113,7 @@ int main(int argc, char **argv)
     XISetMask(mask, XI_ButtonPress);
     XISetMask(mask, XI_ButtonRelease);
     XISetMask(mask, XI_Enter);
+    XISetMask(mask, XI_DeviceChanged);
     XIEventMask em = { .deviceid = XIAllMasterDevices,
                        .mask_len = sizeof mask, .mask = mask };
     XISelectEvents(dpy, w, &em, 1);
@@ -133,7 +135,31 @@ int main(int argc, char **argv)
         if (ck->type != GenericEvent || ck->extension != xi_op) continue;
         if (!XGetEventData(dpy, ck)) continue;
 
-        if (ck->evtype == XI_Enter) {
+        if (ck->evtype == XI_DeviceChanged) {
+            /* WHAT CHROMIUM DOES, AND THE ONE WAY THIS PROBE WAS NOT SHAPED
+             * LIKE IT. A scroll valuator is a running total, so a client that
+             * reads the wheel off it keeps a baseline PER DEVICE -- and must
+             * throw that baseline away when the device changes, because the
+             * new device's valuator has nothing to do with the old one's.
+             * Chromium's DeviceDataManagerX11 does exactly that on
+             * XI_DeviceChanged.
+             *
+             * Without this, the probe reported a perfectly healthy wheel
+             * through the whole of the bug in docs/steam_namespace.md §12.2d
+             * -- an XI_DeviceChanged before EVERY scroll motion, which reset
+             * a real browser's baseline every time and made every delta zero,
+             * while this file quietly kept accumulating across the change and
+             * printed scrolls Steam never saw. A probe that ignores an event
+             * the program it stands in for acts on is not a model of that
+             * program. */
+            XIDeviceChangedEvent *de = ck->data;
+            int sid = de->sourceid;
+            printf("XI2 devicechanged dev %d source %d reason %d\n",
+                   de->deviceid, sid, de->reason);
+            if (sid >= 0 && sid < MAXDEV)
+                for (int i = 0; i < MAXVAL; i++) have[sid][i] = 0;
+            learn_devices(dpy, 0);
+        } else if (ck->evtype == XI_Enter) {
             printf("XI2 enter\n");
         } else if (ck->evtype == XI_ButtonPress) {
             XIDeviceEvent *de = ck->data;

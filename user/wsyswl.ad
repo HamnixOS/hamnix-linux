@@ -571,6 +571,12 @@ w_conn: Array[256, int32]
 w_surf: Array[256, int32]
 w_btn:  Array[256, int32]               # last pointer button mask seen
 w_in:   Array[256, int32]               # pointer has entered this surface
+# THE LAST SURFACE-LOCAL POINTER POSITION ACTUALLY SENT, so a line that only
+# carries a wheel delta does not send a wl_pointer.motion the pointer did not
+# make. See handle_ptr_line: that spurious motion is what kept Steam from
+# scrolling (docs/steam_namespace.md 12.2d).
+w_ptx:  Array[256, int32]
+w_pty:  Array[256, int32]
 w_focus: Array[256, int32]              # keyboard focus is on this surface
 w_x:    Array[256, int32]               # where this window was placed, so a
 w_y:    Array[256, int32]               # popup can be placed against it
@@ -1631,6 +1637,8 @@ def win_open(c: uint64, surf: uint32, w: int32, h: int32,
     w_surf[n_win] = cast[int32](surf)
     w_btn[n_win] = 0
     w_in[n_win] = 0
+    w_ptx[n_win] = -1000000
+    w_pty[n_win] = -1000000
     w_focus[n_win] = 0
     w_x[n_win] = x
     w_y[n_win] = y
@@ -1671,6 +1679,8 @@ def win_close(wid: int32):
         w_surf[k] = w_surf[k + 1]
         w_btn[k] = w_btn[k + 1]
         w_in[k] = w_in[k + 1]
+        w_ptx[k] = w_ptx[k + 1]
+        w_pty[k] = w_pty[k + 1]
         w_focus[k] = w_focus[k + 1]
         w_x[k] = w_x[k + 1]
         w_y[k] = w_y[k + 1]
@@ -4783,8 +4793,46 @@ def handle_ptr_line(c: uint64, i: uint64, surf: uint32, at: uint64, n: uint64):
         serial = serial + 1
         send_ptr_enter(cast[uint32](ptr), serial, surf, x, y)
         w_in[i] = 1
+        w_ptx[i] = x
+        w_pty[i] = y
     evt_time = evt_time + 4
-    send_ptr_motion(cast[uint32](ptr), evt_time, x, y)
+    # ONLY WHEN THE POINTER ACTUALLY MOVED, AND THIS IS THE WHOLE OF WHY STEAM
+    # DID NOT SCROLL (docs/steam_namespace.md §12.2d).
+    #
+    # wsysd writes a pointer line for every input event, including one that
+    # carries nothing but a REL_WHEEL delta with the cursor standing still.
+    # This used to answer every such line with a wl_pointer.motion at the
+    # coordinates the pointer already had. That looks harmless and is not,
+    # because of what Xwayland does with the two events:
+    #
+    #   wl_pointer.axis    -> the slave device `xwayland-relative-pointer`
+    #   wl_pointer.motion  -> the slave device `xwayland-pointer`
+    #
+    # so a notch became  motion(dev 6) -> axis(dev 7) -> motion(dev 6)  and the
+    # X master pointer had to SWITCH SLAVES twice per notch. Every switch is an
+    # XI_DeviceChanged, delivered to every XI2 client that selected it --
+    # measured in the namespace's own Xwayland 22.1.9, one XI_DeviceChanged
+    # immediately BEFORE the XI_Motion carrying the scroll valuator, on every
+    # single notch.
+    #
+    # A smooth-scroll client reads the wheel as the DIFFERENCE between
+    # successive values of a scroll valuator, so it must keep a baseline per
+    # device -- and it must drop that baseline when the device changes, because
+    # the new device's valuator has nothing to do with the old one's.
+    # Chromium (which is Steam's whole UI, and Firefox's XI2 path) does exactly
+    # that. With a DeviceChanged before every scroll motion the baseline was
+    # dropped every time, every motion was a first motion, and every delta was
+    # zero. tests/linux/xi2_scroll_probe.c has the same rule in its own
+    # comments -- "the first report of a valuator establishes a baseline and is
+    # not a scroll" -- which is why that probe saw the valuator move and Steam
+    # never scrolled a pixel: the probe does not listen for XI_DeviceChanged.
+    #
+    # Sending a motion the pointer did not make was always wrong. It cost four
+    # passes to find because everything it broke was two servers downstream.
+    if x != w_ptx[i] or y != w_pty[i]:
+        send_ptr_motion(cast[uint32](ptr), evt_time, x, y)
+        w_ptx[i] = x
+        w_pty[i] = y
     btn_edges(c, i, surf, btn)
     if dz != 0:
         # THE SIGN IS INVERTED ON PURPOSE. evdev REL_WHEEL is positive away
