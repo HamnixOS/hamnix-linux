@@ -1360,220 +1360,332 @@ def _legacy_panel() -> uint64:
 # (or shell) write to /etc/panel.conf was silently dropped and the panel
 # never saw a change. Settings now writes the override in /tmp, which the
 # panel reads + live-polls. (Mirrors how the wallpaper already lands in /tmp.)
+# Which file _open_config actually opened. Kept so every diagnostic below can
+# name THE FILE it is talking about: "unparseable" is useless to the person
+# holding the editor unless it says which of the two paths it read.
+CFGSRC_NONE: int32 = 0
+CFGSRC_TMP:  int32 = 1
+CFGSRC_ETC:  int32 = 2
+_cfg_src: int32 = 0
+
+
+def _cfg_src_name() -> Ptr[uint8]:
+    if _cfg_src == CFGSRC_TMP:
+        return cast[Ptr[uint8]]("/tmp/hamnix-panel.conf")
+    return cast[Ptr[uint8]]("/etc/panel.conf")
+
+
 def _open_config() -> int32:
     fd: int32 = sys_open(cast[Ptr[char]]("/tmp/hamnix-panel.conf"))
     if fd >= 0:
+        _cfg_src = CFGSRC_TMP
         return fd
-    return sys_open(cast[Ptr[char]]("/etc/panel.conf"))
+    fd = sys_open(cast[Ptr[char]]("/etc/panel.conf"))
+    if fd >= 0:
+        _cfg_src = CFGSRC_ETC
+    else:
+        _cfg_src = CFGSRC_NONE
+    return fd
 
 
-_cfg_buf: Array[2048, uint8]
+# ---- saying so -----------------------------------------------------------
+# A config that cannot be read must SAY SO, by name, on stderr. NORTH_STAR.md:
+# "a thing that cannot work here fails loudly and by name. A default is never
+# a substitute for an answer." Falling back to _default_config is fine —
+# falling back SILENTLY is the bug, and it is the bug that hid this one,
+# because the fallback happens to render very nearly the same layout.
+_cfg_dnum: Array[24, uint8]
+
+
+def _cfg_say(head: Ptr[uint8], n: uint64, tail: Ptr[uint8]):
+    _writeall(2, cast[Ptr[uint8]]("hampanelscene: "))
+    _writeall(2, _cfg_src_name())
+    _writeall(2, cast[Ptr[uint8]](": "))
+    _writeall(2, head)
+    nd: uint64 = _u64_to_dec(n, &_cfg_dnum[0])
+    sys_write(2, &_cfg_dnum[0], nd)
+    _writeall(2, tail)
+
+
+# ---- the reader ----------------------------------------------------------
+# THE DEFECT THIS SHAPE REMOVES. This used to be "read the whole file into a
+# 2047-byte buffer, then split it into lines". etc/panel.conf is 3120 bytes
+# and its first `panel` directive does not begin until byte 2834 — the entire
+# read landed INSIDE the comment header that documents the format, the file
+# parsed to ZERO panels, and the panel silently fell back to _default_config.
+# Editing the documented configuration file did nothing at all, and nothing
+# said so. The only visible tell was that the bars came up in a colour that is
+# not the `color #d4d0c8` the file asks for.
+#
+# A BIGGER FIXED BUFFER IS THE SAME DEFECT AT A LARGER SIZE. This tree has
+# been bitten by exactly that at 16 KiB (hook output), 8 KiB (/etc/modules)
+# and 8 KiB (`tail`). So the file is not held in memory at all: it is READ IN
+# CHUNKS and parsed A LINE AT A TIME. The config now has NO SIZE CEILING —
+# a 3 KB file, a 300 KB file, and a file with a 10,000-line comment header all
+# parse identically. The only bound left is the length of ONE LINE, which is a
+# real bound on the grammar (the longest legal directive is a
+# `widget launcher <exec> <label>`, and LEXEC_SZ + LLABEL_SZ is 88), it is
+# generous at 512, and overrunning it is REPORTED rather than swallowed.
+CFG_CHUNK:    uint64 = 4096
+CFG_LINE_MAX: uint64 = 512
+
+_cfg_chunk: Array[4096, uint8]
+_cfg_line:  Array[512, uint8]
+
+# Parser state. `_cfg_cur` was a local of _load_config when the parse ran as
+# one loop over one whole-file buffer; a line-at-a-time parser has to carry
+# the open `panel` block across calls, so it lives here.
+_cfg_cur:   uint64 = 4                 # == MAX_PANELS -> "no open block"
+_cfg_bytes: uint64 = 0                 # bytes read on the last parse
+_cfg_lines: uint64 = 0                 # lines seen on the last parse
+_cfg_long:  uint64 = 0                 # lines that overran CFG_LINE_MAX
+
+
+def _cfg_parse_line(le: uint64):
+    # One config line, already stripped of its newline, in _cfg_line[0..le).
+    p: uint64 = 0
+    while p < le and (_cfg_line[p] == 32 or _cfg_line[p] == 9):
+        p = p + 1
+    if p >= le or _cfg_line[p] == 35:               # blank or '#'
+        return
+    w0s: uint64 = p
+    while p < le and _cfg_line[p] != 32 and _cfg_line[p] != 9:
+        p = p + 1
+    w0e: uint64 = p
+    while p < le and (_cfg_line[p] == 32 or _cfg_line[p] == 9):
+        p = p + 1
+    w1s: uint64 = p
+    while p < le and _cfg_line[p] != 32 and _cfg_line[p] != 9:
+        p = p + 1
+    w1e: uint64 = p
+
+    # --- new block form ---------------------------------------
+    if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("panel")) != 0:
+        _cfg_cur = _begin_panel(EDGE_TOP)
+        return
+    if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("end")) != 0:
+        _cfg_cur = MAX_PANELS
+        return
+    if _cfg_cur < n_panels:
+        cur_panel: uint64 = _cfg_cur
+        if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("edge")) != 0:
+            ek: int32 = _edge_kind(&_cfg_line[0], w1s, w1e)
+            if ek >= 0:
+                p_edge[cur_panel] = ek
+                # adopt the matching default thickness for the new
+                # orientation unless a size line overrides it later
+                if ek == EDGE_LEFT or ek == EDGE_RIGHT:
+                    p_size[cur_panel] = PANEL_DEF_V
+                else:
+                    p_size[cur_panel] = PANEL_DEF_H
+            return
+        if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("color")) != 0:
+            if w1e > w1s:
+                _copy_color(&_cfg_line[0], w1s, w1e, p_color_ptr(cur_panel))
+            return
+        if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("size")) != 0:
+            sz: int64 = _parse_i64(&_cfg_line[0], w1s, w1e)
+            if sz > 0:
+                p_size[cur_panel] = sz
+            return
+        if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("font")) != 0:
+            if _word_eq(&_cfg_line[0], w1s, w1e, cast[Ptr[uint8]]("bold")) != 0:
+                p_bold[cur_panel] = 1
+            else:
+                p_bold[cur_panel] = 0
+            return
+        if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("widget")) != 0:
+            # `widget launcher <exec> <label>` — a launcher carries two
+            # extra tokens (Exec path + label) so it is parsed here, not via
+            # _widget_kind (which maps a single keyword to a kind).
+            if _word_eq(&_cfg_line[0], w1s, w1e,
+                        cast[Ptr[uint8]]("launcher")) != 0:
+                lq: uint64 = w1e
+                while lq < le and (_cfg_line[lq] == 32 or _cfg_line[lq] == 9):
+                    lq = lq + 1
+                exs: uint64 = lq
+                while lq < le and _cfg_line[lq] != 32 and _cfg_line[lq] != 9:
+                    lq = lq + 1
+                exe: uint64 = lq
+                while lq < le and (_cfg_line[lq] == 32 or _cfg_line[lq] == 9):
+                    lq = lq + 1
+                lbs: uint64 = lq
+                while lq < le and _cfg_line[lq] != 32 and _cfg_line[lq] != 9:
+                    lq = lq + 1
+                lbe: uint64 = lq
+                if exe > exs:
+                    exbuf: Array[64, uint8]
+                    lbbuf: Array[24, uint8]
+                    _copy_tok(&_cfg_line[0], exs, exe, &exbuf[0], 64)
+                    if lbe > lbs:
+                        _copy_tok(&_cfg_line[0], lbs, lbe, &lbbuf[0], 24)
+                    else:
+                        lbbuf[0] = 63              # '?'
+                        lbbuf[1] = 0
+                    _add_launcher(cur_panel, &exbuf[0], &lbbuf[0])
+                return
+            wk: int32 = _widget_kind(&_cfg_line[0], w1s, w1e)
+            if wk >= 0:
+                # Optional `x <n>` suffix pins the widget at a flow-axis
+                # coordinate (bug 3). Scan the rest of the line for it.
+                wpin: int64 = -1
+                q: uint64 = w1e
+                while q < le and (_cfg_line[q] == 32 or _cfg_line[q] == 9):
+                    q = q + 1
+                w2s: uint64 = q
+                while q < le and _cfg_line[q] != 32 and _cfg_line[q] != 9:
+                    q = q + 1
+                w2e: uint64 = q
+                if _word_eq(&_cfg_line[0], w2s, w2e, cast[Ptr[uint8]]("x")) != 0:
+                    while q < le and (_cfg_line[q] == 32 or _cfg_line[q] == 9):
+                        q = q + 1
+                    w3s: uint64 = q
+                    while q < le and _cfg_line[q] != 32 and _cfg_line[q] != 9:
+                        q = q + 1
+                    if q > w3s:
+                        wpin = _parse_i64(&_cfg_line[0], w3s, q)
+                _add_widget_pin(cur_panel, wk, wpin)
+            return
+        # unknown key inside a block: ignore
+        return
+
+    # --- legacy bare lines (outside any block) ----------------
+    if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("position")) != 0:
+        ek2: int32 = _edge_kind(&_cfg_line[0], w1s, w1e)
+        if ek2 == EDGE_BOTTOM:
+            _legacy_edge = EDGE_BOTTOM
+        elif ek2 == EDGE_LEFT:
+            _legacy_edge = EDGE_LEFT
+        elif ek2 == EDGE_RIGHT:
+            _legacy_edge = EDGE_RIGHT
+        else:
+            _legacy_edge = EDGE_TOP
+        # if the legacy panel already exists, retro-apply the edge
+        if _legacy_seen != 0:
+            p_edge[_legacy_idx] = _legacy_edge
+            if _legacy_edge == EDGE_LEFT or _legacy_edge == EDGE_RIGHT:
+                p_size[_legacy_idx] = PANEL_DEF_V
+            else:
+                p_size[_legacy_idx] = PANEL_DEF_H
+        return
+    sidew: int32 = -1
+    if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("left")) != 0:
+        sidew = 0
+    if _word_eq(&_cfg_line[0], w0s, w0e, cast[Ptr[uint8]]("right")) != 0:
+        sidew = 1
+    if sidew >= 0 and w1e > w1s:
+        wk2: int32 = _widget_kind(&_cfg_line[0], w1s, w1e)
+        if wk2 >= 0:
+            lp: uint64 = _legacy_panel()
+            if lp < n_panels:
+                # A bare `right <w>` widget that follows the elastic
+                # taskbar packs to the far edge; we encode that by making
+                # the widget order menu/tasks(left) ... sysmon/clock and
+                # relying on the renderer's right-align of trailing fixed
+                # widgets. Insert in source order; `right` widgets simply
+                # come after `left` ones in the list.
+                _add_widget(lp, wk2)
+    # unknown bare line: ignore
+
+
 def _load_config():
     # Parse the active panel config into the panel set. Supports the new
     # `panel ... end` blocks AND the legacy `position`/`left`/`right` bare
     # lines (which build one implicit panel). On ANY failure fall back to the
-    # built-in default single top panel.
+    # built-in default — LOUDLY, naming the file and what went wrong.
     n_panels = 0
     _legacy_seen = 0
     _legacy_edge = EDGE_TOP
-    cur_panel: uint64 = MAX_PANELS         # MAX_PANELS = "no open block"
+    _cfg_cur = MAX_PANELS                  # MAX_PANELS = "no open block"
+    _cfg_bytes = 0
+    _cfg_lines = 0
+    _cfg_long = 0
     fd: int32 = _open_config()
     if fd < 0:
+        _cfg_say(cast[Ptr[uint8]]("cannot open it, and neither config path exists ("),
+                 0,
+                 cast[Ptr[uint8]](" bytes read) -- using the built-in default layout\n"))
         _default_config()
         return
-    total: uint64 = 0
-    while total < 2047:
-        r: int64 = sys_read(fd, &_cfg_buf[total], 2047 - total)
+    ll:   uint64 = 0                       # bytes buffered for this line
+    over: int32  = 0                       # this line overran CFG_LINE_MAX
+    while 1 == 1:
+        r: int64 = sys_read(fd, &_cfg_chunk[0], CFG_CHUNK)
         if r <= 0:
             break
-        total = total + cast[uint64](r)
-    sys_close(fd)
-    i: uint64 = 0
-    while i < total:
-        ls: uint64 = i
-        while i < total and _cfg_buf[i] != 10:
-            i = i + 1
-        le: uint64 = i
-        if i < total:
-            i = i + 1
-        p: uint64 = ls
-        while p < le and (_cfg_buf[p] == 32 or _cfg_buf[p] == 9):
-            p = p + 1
-        if p >= le or _cfg_buf[p] == 35:               # blank or '#'
-            continue
-        w0s: uint64 = p
-        while p < le and _cfg_buf[p] != 32 and _cfg_buf[p] != 9:
-            p = p + 1
-        w0e: uint64 = p
-        while p < le and (_cfg_buf[p] == 32 or _cfg_buf[p] == 9):
-            p = p + 1
-        w1s: uint64 = p
-        while p < le and _cfg_buf[p] != 32 and _cfg_buf[p] != 9:
-            p = p + 1
-        w1e: uint64 = p
-
-        # --- new block form ---------------------------------------
-        if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("panel")) != 0:
-            cur_panel = _begin_panel(EDGE_TOP)
-            continue
-        if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("end")) != 0:
-            cur_panel = MAX_PANELS
-            continue
-        if cur_panel < n_panels:
-            if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("edge")) != 0:
-                ek: int32 = _edge_kind(&_cfg_buf[0], w1s, w1e)
-                if ek >= 0:
-                    p_edge[cur_panel] = ek
-                    # adopt the matching default thickness for the new
-                    # orientation unless a size line overrides it later
-                    if ek == EDGE_LEFT or ek == EDGE_RIGHT:
-                        p_size[cur_panel] = PANEL_DEF_V
-                    else:
-                        p_size[cur_panel] = PANEL_DEF_H
-                continue
-            if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("color")) != 0:
-                if w1e > w1s:
-                    _copy_color(&_cfg_buf[0], w1s, w1e, p_color_ptr(cur_panel))
-                continue
-            if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("size")) != 0:
-                sz: int64 = _parse_i64(&_cfg_buf[0], w1s, w1e)
-                if sz > 0:
-                    p_size[cur_panel] = sz
-                continue
-            if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("font")) != 0:
-                if _word_eq(&_cfg_buf[0], w1s, w1e, cast[Ptr[uint8]]("bold")) != 0:
-                    p_bold[cur_panel] = 1
-                else:
-                    p_bold[cur_panel] = 0
-                continue
-            if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("widget")) != 0:
-                # `widget launcher <exec> <label>` — a launcher carries two
-                # extra tokens (Exec path + label) so it is parsed here, not via
-                # _widget_kind (which maps a single keyword to a kind).
-                if _word_eq(&_cfg_buf[0], w1s, w1e,
-                            cast[Ptr[uint8]]("launcher")) != 0:
-                    lq: uint64 = w1e
-                    while lq < le and (_cfg_buf[lq] == 32 or _cfg_buf[lq] == 9):
-                        lq = lq + 1
-                    exs: uint64 = lq
-                    while lq < le and _cfg_buf[lq] != 32 and _cfg_buf[lq] != 9:
-                        lq = lq + 1
-                    exe: uint64 = lq
-                    while lq < le and (_cfg_buf[lq] == 32 or _cfg_buf[lq] == 9):
-                        lq = lq + 1
-                    lbs: uint64 = lq
-                    while lq < le and _cfg_buf[lq] != 32 and _cfg_buf[lq] != 9:
-                        lq = lq + 1
-                    lbe: uint64 = lq
-                    if exe > exs:
-                        exbuf: Array[64, uint8]
-                        lbbuf: Array[24, uint8]
-                        _copy_tok(&_cfg_buf[0], exs, exe, &exbuf[0], 64)
-                        if lbe > lbs:
-                            _copy_tok(&_cfg_buf[0], lbs, lbe, &lbbuf[0], 24)
-                        else:
-                            lbbuf[0] = 63              # '?'
-                            lbbuf[1] = 0
-                        _add_launcher(cur_panel, &exbuf[0], &lbbuf[0])
-                    continue
-                wk: int32 = _widget_kind(&_cfg_buf[0], w1s, w1e)
-                if wk >= 0:
-                    # Optional `x <n>` suffix pins the widget at a flow-axis
-                    # coordinate (bug 3). Scan the rest of the line for it.
-                    wpin: int64 = -1
-                    q: uint64 = w1e
-                    while q < le and (_cfg_buf[q] == 32 or _cfg_buf[q] == 9):
-                        q = q + 1
-                    w2s: uint64 = q
-                    while q < le and _cfg_buf[q] != 32 and _cfg_buf[q] != 9:
-                        q = q + 1
-                    w2e: uint64 = q
-                    if _word_eq(&_cfg_buf[0], w2s, w2e, cast[Ptr[uint8]]("x")) != 0:
-                        while q < le and (_cfg_buf[q] == 32 or _cfg_buf[q] == 9):
-                            q = q + 1
-                        w3s: uint64 = q
-                        while q < le and _cfg_buf[q] != 32 and _cfg_buf[q] != 9:
-                            q = q + 1
-                        if q > w3s:
-                            wpin = _parse_i64(&_cfg_buf[0], w3s, q)
-                    _add_widget_pin(cur_panel, wk, wpin)
-                continue
-            # unknown key inside a block: ignore
-            continue
-
-        # --- legacy bare lines (outside any block) ----------------
-        if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("position")) != 0:
-            ek2: int32 = _edge_kind(&_cfg_buf[0], w1s, w1e)
-            if ek2 == EDGE_BOTTOM:
-                _legacy_edge = EDGE_BOTTOM
-            elif ek2 == EDGE_LEFT:
-                _legacy_edge = EDGE_LEFT
-            elif ek2 == EDGE_RIGHT:
-                _legacy_edge = EDGE_RIGHT
+        _cfg_bytes = _cfg_bytes + cast[uint64](r)
+        got: uint64 = cast[uint64](r)
+        k: uint64 = 0
+        while k < got:
+            c: uint8 = _cfg_chunk[k]
+            k = k + 1
+            if c == 10:
+                _cfg_lines = _cfg_lines + 1
+                if over != 0:
+                    _cfg_long = _cfg_long + 1
+                _cfg_parse_line(ll)
+                ll = 0
+                over = 0
+            elif ll < CFG_LINE_MAX:
+                _cfg_line[ll] = c
+                ll = ll + 1
             else:
-                _legacy_edge = EDGE_TOP
-            # if the legacy panel already exists, retro-apply the edge
-            if _legacy_seen != 0:
-                p_edge[_legacy_idx] = _legacy_edge
-                if _legacy_edge == EDGE_LEFT or _legacy_edge == EDGE_RIGHT:
-                    p_size[_legacy_idx] = PANEL_DEF_V
-                else:
-                    p_size[_legacy_idx] = PANEL_DEF_H
-            continue
-        sidew: int32 = -1
-        if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("left")) != 0:
-            sidew = 0
-        if _word_eq(&_cfg_buf[0], w0s, w0e, cast[Ptr[uint8]]("right")) != 0:
-            sidew = 1
-        if sidew >= 0 and w1e > w1s:
-            wk2: int32 = _widget_kind(&_cfg_buf[0], w1s, w1e)
-            if wk2 >= 0:
-                lp: uint64 = _legacy_panel()
-                if lp < n_panels:
-                    # A bare `right <w>` widget that follows the elastic
-                    # taskbar packs to the far edge; we encode that by making
-                    # the widget order menu/tasks(left) ... sysmon/clock and
-                    # relying on the renderer's right-align of trailing fixed
-                    # widgets. Insert in source order; `right` widgets simply
-                    # come after `left` ones in the list.
-                    _add_widget(lp, wk2)
-        # unknown bare line: ignore
+                over = 1
+    sys_close(fd)
+    if ll > 0 or over != 0:                # a last line with no trailing \n
+        _cfg_lines = _cfg_lines + 1
+        if over != 0:
+            _cfg_long = _cfg_long + 1
+        _cfg_parse_line(ll)
+    if _cfg_long > 0:
+        _cfg_say(cast[Ptr[uint8]]("TRUNCATED -- "),
+                 _cfg_long,
+                 cast[Ptr[uint8]](" line(s) are longer than the 512-byte line limit and were cut; those directives are NOT what the file says\n"))
     if n_panels == 0:
+        # The file exists and was read to the end, and described no panel.
+        # Say the size, so "there is no file" and "the file says nothing I
+        # understand" cannot be mistaken for one another.
+        _cfg_say(cast[Ptr[uint8]]("parsed 0 panels from "),
+                 _cfg_bytes,
+                 cast[Ptr[uint8]](" byte(s) -- using the built-in default layout INSTEAD of this file\n"))
         _default_config()
+        return
+    _cfg_say(cast[Ptr[uint8]]("honoured, "),
+             n_panels,
+             cast[Ptr[uint8]](" panel(s)\n"))
 
 
-# Live config re-read (snapshot-compare; no mtime exposed to userland).
-_cfg_snap: Array[2048, uint8]
-_cfg_snap_len: uint64 = 0xffffffffffffffff
-_cfg_scan: Array[2048, uint8]
+# Live config re-read. STREAMING, like the parse: the whole file is hashed a
+# chunk at a time (FNV-1a 64) and compared against the last hash + length, so
+# there is no snapshot buffer and therefore no size at which a change stops
+# being noticed. The old code compared the first 2047 bytes, which for the
+# shipped file meant it compared nothing but the comment header — an edit to
+# the directives at the END of etc/panel.conf did not even register as a
+# CHANGE, let alone get parsed.
+_cfg_snap_len:  uint64 = 0xffffffffffffffff     # "never primed"
+_cfg_snap_hash: uint64 = 0
+
+
 def _cfg_changed() -> int32:
     fd: int32 = _open_config()
     total: uint64 = 0
+    h: uint64 = 0xcbf29ce484222325
     if fd >= 0:
-        while total < 2047:
-            r: int64 = sys_read(fd, &_cfg_scan[total], 2047 - total)
+        while 1 == 1:
+            r: int64 = sys_read(fd, &_cfg_chunk[0], CFG_CHUNK)
             if r <= 0:
                 break
-            total = total + cast[uint64](r)
+            got: uint64 = cast[uint64](r)
+            k: uint64 = 0
+            while k < got:
+                h = (h ^ cast[uint64](_cfg_chunk[k])) * 0x100000001b3
+                k = k + 1
+            total = total + got
         sys_close(fd)
-    same: int32 = 1
-    if total != _cfg_snap_len:
-        same = 0
-    else:
-        i: uint64 = 0
-        while i < total:
-            if _cfg_scan[i] != _cfg_snap[i]:
-                same = 0
-                i = total
-            else:
-                i = i + 1
-    if same != 0:
+    if total == _cfg_snap_len and h == _cfg_snap_hash:
         return 0
-    j: uint64 = 0
-    while j < total:
-        _cfg_snap[j] = _cfg_scan[j]
-        j = j + 1
     _cfg_snap_len = total
+    _cfg_snap_hash = h
     return 1
 
 
@@ -1607,14 +1719,51 @@ def _kind_word(k: int32) -> Ptr[uint8]:
     return cast[Ptr[uint8]]("menu")
 
 
-_save_buf: Array[2048, uint8]
+# The WRITE side of the same file, and the other half of the same audit.
+#
+# Unlike the READ side, what _save_config emits is BOUNDED at compile time by
+# the panel model, so a fixed buffer is the right shape here — but it has to
+# be big enough to hold the bound, and 2048 was not. Worst case, exactly:
+#
+#   file header                                                     50
+#   per panel  "panel pN\n" 9 + edge 14 + size 28 + color 16 + font 14 = 81
+#   per widget "  widget launcher " 18 + LEXEC_SZ 63 + " " + LLABEL_SZ 23
+#              + "\n"                                              = 106
+#   per panel  81 + MAX_WIDGETS(12) * 106 + "end\n" 4              = 1357
+#   total      50 + MAX_PANELS(4) * 1357                           = 5478
+#
+# At 2048 a panel set carrying launchers ran off the end: _sb_emit clamped,
+# but the bare `_save_buf[p] = 10` newline stores and _u64_to_dec did not, and
+# `p` kept climbing past the array — a BSS overrun, not a truncation. 8192
+# covers the bound with 2.7 KB of margin, every store is bounds-checked
+# through _sb_byte, and a serialization that somehow still hits the cap is
+# REFUSED rather than written: half a config on disk is a config the panel
+# then reads back and obeys.
+SAVE_CAP: uint64 = 8192
+_save_buf: Array[8192, uint8]
+
+
+def _sb_byte(p: uint64, c: uint8) -> uint64:
+    if p + 1 >= SAVE_CAP:
+        return p
+    _save_buf[p] = c
+    return p + 1
+
+
 def _sb_emit(p: uint64, s: Ptr[uint8]) -> uint64:
     k: uint64 = 0
-    while s[k] != 0 and p < 2047:
+    while s[k] != 0 and p + 1 < SAVE_CAP:
         _save_buf[p] = s[k]
         p = p + 1
         k = k + 1
     return p
+
+
+def _sb_dec(p: uint64, v: uint64) -> uint64:
+    # _u64_to_dec writes up to 20 digits; only call it with room for them.
+    if p + 24 >= SAVE_CAP:
+        return p
+    return p + _u64_to_dec(v, &_save_buf[p])
 
 
 # Serialize the live panel set to /tmp/hamnix-panel.conf in the EXACT
@@ -1629,28 +1778,23 @@ def _save_config():
     pi: uint64 = 0
     while pi < n_panels:
         p = _sb_emit(p, cast[Ptr[uint8]]("panel p"))
-        p = p + _u64_to_dec(pi, &_save_buf[p])
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_dec(p, pi)
+        p = _sb_byte(p, 10)
         p = _sb_emit(p, cast[Ptr[uint8]]("  edge "))
         p = _sb_emit(p, _edge_word(p_edge[pi]))
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_byte(p, 10)
         p = _sb_emit(p, cast[Ptr[uint8]]("  size "))
-        p = p + _u64_to_dec(cast[uint64](p_size[pi]), &_save_buf[p])
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_dec(p, cast[uint64](p_size[pi]))
+        p = _sb_byte(p, 10)
         p = _sb_emit(p, cast[Ptr[uint8]]("  color "))
         p = _sb_emit(p, p_color_ptr(pi))
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_byte(p, 10)
         p = _sb_emit(p, cast[Ptr[uint8]]("  font "))
         if p_bold[pi] != 0:
             p = _sb_emit(p, cast[Ptr[uint8]]("bold"))
         else:
             p = _sb_emit(p, cast[Ptr[uint8]]("normal"))
-        _save_buf[p] = 10
-        p = p + 1
+        p = _sb_byte(p, 10)
         nw: uint64 = p_nwidg[pi]
         a: uint64 = 0
         while a < nw:
@@ -1668,12 +1812,21 @@ def _save_config():
                 pin: int64 = p_wx_pin[gslot]
                 if pin >= 0:
                     p = _sb_emit(p, cast[Ptr[uint8]](" x "))
-                    p = p + _u64_to_dec(cast[uint64](pin), &_save_buf[p])
-            _save_buf[p] = 10
-            p = p + 1
+                    p = _sb_dec(p, cast[uint64](pin))
+            p = _sb_byte(p, 10)
             a = a + 1
         p = _sb_emit(p, cast[Ptr[uint8]]("end\n"))
         pi = pi + 1
+    if p + 32 >= SAVE_CAP:
+        # Unreachable given the bound computed at SAVE_CAP — which is exactly
+        # why it must say so rather than write. A HALF config is worse than no
+        # config: the panel reads its own write back on the next tick and
+        # obeys whatever survived the cut.
+        _cfg_src = CFGSRC_TMP
+        _cfg_say(cast[Ptr[uint8]]("REFUSING TO SAVE -- the serialized panel set needs at least "),
+                 p,
+                 cast[Ptr[uint8]](" bytes and the buffer is 8192; your edit is NOT on disk\n"))
+        return
     fd: int32 = sys_open_write(cast[Ptr[char]]("/tmp/hamnix-panel.conf"))
     if fd >= 0:
         sys_write(fd, &_save_buf[0], p)
