@@ -55,6 +55,21 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+
+# ISOLATE FIRST, before anything creates a file. This gate writes
+# /tmp/hamnix-panel.conf, which is NOT scratch: user/hampanelscene.ad reads it
+# in preference to the shipped /etc/panel.conf, so it is the live configuration
+# override of every desktop on this machine. An earlier gate wrote the real one
+# and cost two agents their conclusions -- the incident is written up in
+# tests/linux/private_ns.sh. Everything below this line runs in a mount
+# namespace whose /tmp, /dev/shm and /srv belong to this run alone; the call
+# execs and does not return.
+#
+# reap.sh is sourced AFTER it, deliberately: its registry defaults to a mktemp
+# under /tmp, and a registry made before the tmpfs lands on /tmp is a registry
+# this gate can no longer see.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 . tests/linux/reap.sh
 
 WORK="${PANELSHIP_WORK:-$(mktemp -d -p "${TMPDIR:-/tmp}" panelship.XXXXXX)}"
