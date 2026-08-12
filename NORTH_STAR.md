@@ -77,3 +77,29 @@ argument — including an argument made by the person writing this file.
   before anyone noticed.
 - `https://255.one/` is the package repository, served from `HamnixOS/packages`
   (GitHub Pages). Publishing there is authorized.
+- **WORK DONE HERE MUST BE UPDATABLE ON AN INSTALLED MACHINE.** Stated by the
+  machine's owner as a permanent rule: *"changes that we create here will end
+  up in the package repository and be able to be updated on — that's something
+  going forward must always be true."*
+
+  A program in the initramfs but in no package is a program a person who
+  INSTALLED this distribution can never receive a fix to. The live image gets
+  it, because the image is built from the tree; `hpm update` on their disk gets
+  nothing, forever, and nothing tells them so. This is the project's worst bug
+  shape — the gap answers with silence instead of the truth — and it has landed
+  three times: the audio clients when audio first shipped, the whole desktop
+  when a double-link dropped `wsysd`, and seven binaries (including `halt`,
+  `poweroff` and the week-old X clipboard bridge) found the day the gate below
+  was written.
+
+  It is enforced, not promised:
+  - `tests/linux/channel_covers_image.sh` compares the image's `/bin` against
+    the file lists inside the built package tarballs. An omission must be
+    named in that file's `HOST_ONLY` list *with a reason*; an unlisted one
+    fails.
+  - `scripts/hamlinux_packages.py` refuses to write an index in which any
+    declared dependency names a package the channel does not carry, so a
+    dropped package cannot leave `hamnix-base` uninstallable.
+
+  Run the gate before publishing. "The build said done" is not evidence — it
+  said `done` every one of the three times.

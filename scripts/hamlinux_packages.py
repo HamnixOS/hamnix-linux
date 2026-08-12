@@ -31,7 +31,14 @@ so `hpm install hamnix-base` resolves the whole distribution.
 
 Usage:
     scripts/hamlinux_packages.py [--out build/repo] [--version 1.0.0]
-                                 [--sign KEYFILE]
+                                 [--channel linux] [--base-url https://255.one/]
+
+There is NO --sign here, though this line used to advertise one. Signing is a
+separate step over the finished index, because the key does not live in the
+tree and must not be reachable from a build:
+
+    python3 scripts/hpm_sign.py sign <out>/index.json \\
+        ~/.hamnix_keys/repo.sec <out>/index.json.sig
 """
 
 import argparse
@@ -41,6 +48,7 @@ import hashlib
 import json
 import lzma
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -64,6 +72,13 @@ COREUTILS = """
     more less bc cal
     ascii awk cmp column comm diff
 """.split()
+# `install` (install(1), the file-copy-with-modes tool) is NOT in the list
+# above even though it belongs there by nature. pkg_name_for('install') is
+# `hamnix-install`, which is already the name of the INSTALLER component, and
+# two packages with one name overwrite each other's tarball -- see the
+# duplicate-name guard near the end of this file for what that cost. It rides
+# in SYS_CMDS instead, which ships it and keeps it updatable without minting a
+# colliding name or renaming a package installed machines already carry.
 
 NET_CMDS = "ifconfig route ping host curl wget dhcpc ntpd".split()
 
@@ -92,10 +107,18 @@ MOD_CMDS = "insmod lsmod modprobe rmmod".split()
 
 # Bringing a machine up and putting a system on it: the installer (CLI and
 # the GUI wizard), the namespace launcher, and reboot.
-SYS_CMDS = "hlinstall haminstallui nsrun reboot".split()
+# `halt` and `poweroff` were in the IMAGE and not in the CHANNEL, which meant
+# an installed machine could never receive a fix to the two commands that turn
+# it off. Same silent shape as the audio note above: nothing failed at build
+# time, the programs simply were not there to update.
+SYS_CMDS = "hlinstall haminstallui nsrun reboot halt poweroff install".split()
 
+# xsnarfd is the X clipboard bridge and hamimgscene is the image viewer. Both
+# ship in the image; neither was in the channel until the coverage gate below
+# was written and named them.
 DESKTOP_CMDS = ("wsysd wsyswl xbridge hamdesktop hampanelscene hamtermscene "
-                "hameditscene hamsettings hamfm hamUI hamUId").split()
+                "hameditscene hamsettings hamfm hamUI hamUId xsnarfd "
+                "hamimgscene").split()
 
 # Component packages: name -> (description, [binaries], [extra files as
 # (source-path-in-repo, install-path)], [depends])
@@ -1313,6 +1336,67 @@ def main():
 
     for e in entries:
         e["channel"] = args.channel
+
+    # THE DEPENDENCY CLOSURE IS CHECKED, not asserted. Every `skipped` package
+    # above is a DROP, and a drop is silent in the worst possible way: the
+    # package that wanted it keeps its dependency line, so the index ships a
+    # requirement naming something the channel does not carry. hamnix-base is
+    # the one that matters -- it declares hamnix-desktop>=1 unconditionally, so
+    # the build that silently lost wsysd (see the note above build_one) wrote
+    # an index whose flagship package COULD NOT INSTALL, and said `done`.
+    #
+    # The failure had to travel all the way to a user's prompt to be seen. The
+    # docstring at the top of this file claims `hpm install hamnix-base`
+    # resolves the whole distribution; until now nothing measured it, and a
+    # claim nothing measures is the shape every bug in this tree has worn.
+    #
+    # So: resolve it here, and refuse to write an index that cannot. Refusing
+    # is the honest answer -- publishing a channel with a dangling dependency
+    # replaces a build error nobody sees with an install error every user sees.
+    # NO TWO PACKAGES MAY SHARE A NAME. A package's tarball path is derived
+    # from name+version, so a duplicate name does not merely confuse the
+    # index -- the SECOND package's bytes OVERWRITE the first's on disk, and
+    # the first entry keeps the sha256 it computed before the overwrite. The
+    # index then advertises a checksum for bytes that no longer exist, so the
+    # download either fails its hash check or silently installs the wrong
+    # package's contents.
+    #
+    # This is not hypothetical. Adding `install` to COREUTILS collided with
+    # the `hamnix-install` COMPONENT (the installer: hlinstall, haminstallui,
+    # nsrun, reboot, halt, poweroff): the one-file coreutils package landed on
+    # top of it, and six system programs -- including the two that turn the
+    # machine off -- vanished from the channel while the build printed nothing
+    # but a package count that had gone UP. It was caught by
+    # tests/linux/channel_covers_image.sh, not by anything here.
+    dupes = {}
+    for e in entries:
+        dupes.setdefault(e["name"], []).append(e)
+    collided = sorted(n for n, es in dupes.items() if len(es) > 1)
+    if collided:
+        raise SystemExit(
+            "REFUSING TO PUBLISH: %d package name(s) used twice: %s\n"
+            "Two packages with one name overwrite each other's tarball, and "
+            "the loser's sha256 in the index then describes bytes that are no "
+            "longer on disk. Rename one -- note that pkg_name_for('foo') is "
+            "'hamnix-foo', so a COREUTILS entry can collide with a COMPONENT."
+            % (len(collided), " ".join(collided)))
+
+    have = set(e["name"] for e in entries)
+    dangling = []
+    for e in entries:
+        for dep in e.get("depends", []):
+            dep_name = re.split(r"[<>=!]", dep, 1)[0].strip()
+            if dep_name and dep_name not in have:
+                dangling.append("%s requires %s" % (e["name"], dep))
+    if dangling:
+        raise SystemExit(
+            "REFUSING TO PUBLISH: %d dependency/ies name a package this "
+            "channel does not carry:\n    %s\n"
+            "Those packages were dropped above (see 'not packaged'), but the "
+            "packages depending on them kept the requirement, so the index "
+            "would install-fail at the user's prompt instead of failing here.\n"
+            "Fix the build that dropped them, or drop the dependency too."
+            % (len(dangling), "\n    ".join(dangling)))
 
     index = {
         "schema": 1,
