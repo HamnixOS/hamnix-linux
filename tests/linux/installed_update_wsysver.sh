@@ -827,11 +827,49 @@ stage_hand() {   # stage_hand <tag>
 # (8, 26, 340, 86). NOTICE_IN_* is the same box inset past the 2px border and
 # the 8px corner radius, so a rounded corner's antialiasing cannot dilute the
 # flat-fill measurement.
-NOTICE_X=8;  NOTICE_Y=26;  NOTICE_W=340; NOTICE_H=86
-NOTICE_IN_X=14; NOTICE_IN_Y=32; NOTICE_IN_W=328; NOTICE_IN_H=74
+# DERIVED, NOT TYPED. The card's size comes out of user/hampanelscene.ad, so
+# this cannot quietly drift away from what the panel draws -- the same rule
+# tests/linux/de_update_notice.sh follows.
+NOTICE_W="$(sed -n 's/^NOTICE_W:[[:space:]]*int64[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' user/hampanelscene.ad | head -1)"
+NOTICE_H="$(sed -n 's/^NOTICE_H:[[:space:]]*int64[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' user/hampanelscene.ad | head -1)"
+PANEL_THICK="$(sed -n 's/^[[:space:]]*size[[:space:]]\+\([0-9]\+\).*/\1/p' etc/panel.conf | head -1)"
+[ -n "$NOTICE_W" ] && [ -n "$NOTICE_H" ] && [ -n "$PANEL_THICK" ] || {
+    echo "FAIL: cannot read NOTICE_W/NOTICE_H out of user/hampanelscene.ad or the panel thickness out of etc/panel.conf -- every rectangle below would be a guess" >&2
+    exit 1; }
+NOTICE_X=8;  NOTICE_Y=$PANEL_THICK
+NOTICE_IN_X=$((NOTICE_X + 6)); NOTICE_IN_Y=$((NOTICE_Y + 6))
+NOTICE_IN_W=$((NOTICE_W - 12)); NOTICE_IN_H=$((NOTICE_H - 12))
 NOTICE_FACE=ffe9b0                    # the card's inset face colour
 NOTICE_CX=$((NOTICE_X + NOTICE_W / 2))
 NOTICE_CY=$((NOTICE_Y + NOTICE_H / 2))
+
+# THE TASKBAR'S BOX -- THE ONE THAT MUST STAY EMPTY.
+#
+# etc/panel.conf ships TWO panels: `panel top` with `widget menu` and `panel
+# bottom` with the window list. user/hampanelscene.ad draws the card under
+#
+#     if notice_on != 0 and notice_panel == cur_panel_idx:
+#
+# so ONE panel gets it -- the one carrying the Applications button
+# (_notice_first_menu_panel). Every notice assertion ever written, here and
+# offscreen, measured only the panel that SHOULD have the card, and every
+# offscreen case ran a SOLO panel where that guard is unreachable by
+# construction: with one panel every index matches. Delete the guard and all
+# of them still pass, while the shipped image runs two panels and the person
+# would get the same notice twice.
+#
+# A bottom bar puts its card ABOVE itself: the window sits at
+# oy = screen_h - (thick + grow) and the card at window-local y = 0.
+NOTICE_BOT_X=$NOTICE_X
+NOTICE_BOT_Y=$((SCREEN_H - PANEL_THICK - NOTICE_H))
+# HAMLINUX_WV_TWOPANEL_AIM=top PROVES THE NEGATIVE CAN FAIL, the same way
+# NOTICE_TWOPANEL_AIM does offscreen: it aims the must-stay-empty box at the
+# panel that legitimately HAS the card, without touching the machine. An
+# assertion about a box that is empty in every world is worth nothing.
+if [ "${HAMLINUX_WV_TWOPANEL_AIM:-}" = top ]; then
+    NOTICE_BOT_Y=$NOTICE_Y
+fi
+NOTICE_BOT_IN_X=$((NOTICE_BOT_X + 6)); NOTICE_BOT_IN_Y=$((NOTICE_BOT_Y + 6))
 
 # THE HAND FOR STAGE E, which asks different questions from A-D's and so does
 # NOT reuse stage_hand:
@@ -1360,6 +1398,19 @@ facepct() {   # facepct <shot-basename> -- % of the notice rect that is the card
     pp pct "$f" "$NOTICE_FACE" "$NOTICE_IN_X" "$NOTICE_IN_Y" \
         "$NOTICE_IN_W" "$NOTICE_IN_H" | grep -aE '^[0-9]+$' | head -1
 }
+botpct() {    # botpct <shot-basename> -- the same, of the TASKBAR's box
+    local f="$SHOT/$1.ppm"
+    [ -f "$f" ] || { echo ""; return; }
+    pp pct "$f" "$NOTICE_FACE" "$NOTICE_BOT_IN_X" "$NOTICE_BOT_IN_Y" \
+        "$NOTICE_IN_W" "$NOTICE_IN_H" | grep -aE '^[0-9]+$' | head -1
+}
+# panels <log> <tag> -- one line per PANEL-shaped window in that stage's table:
+# full screen width, z 100, undecorated. Prints "<y> <h> <visible>" each.
+panels() {
+    awk -v m="WINS-$2" -v w="$SCREEN_W" '
+        index($0,m){i=1;next} i&&index($0,"WINS-END"){exit}
+        i&&NF>=8&&$1~/^[0-9]+$/&&$4==w&&$6==100&&$7==0{print $3, $5, $8}' "$1" | tr -d '\r'
+}
 FD3="$(facepct D-3-menu)"      # same rect, same session, before v$NEXTWSYS existed
 FE2="$(facepct E-2-idle)"      # after the update, before any click
 FE3="$(facepct E-3-click1)"    # after the FIRST Applications click (see notice_hand)
@@ -1446,6 +1497,51 @@ if [ -n "$EWIN" ] && [ "$EWIN" = "$DWIN" ]; then
     echo "wv: PASS the window table is the same before and after the second update and the notice: $EWIN"
 else
     echo "wv: NOTE the window table moved between STAGE D and STAGE E -- D: ${DWIN:-(none)} / E: ${EWIN:-(none)}"
+fi
+# =====================================================================
+# TWO PANELS, ONE CARD -- on the machine that actually ships.
+# =====================================================================
+# The precondition FIRST, because without it the negative is vacuous: a box
+# that is empty because there is no second panel proves nothing at all. Both
+# panels are found by SHAPE (full width, z 100, undecorated) rather than by
+# wid, because the wids move between runs -- the top panel was wid 3 in one
+# run of this gate and wid 2 in the next.
+EPANELS="$(panels "$WORK/boot3.log" E)"
+ETOP="$(printf '%s\n' "$EPANELS" | awk '$1 == 0 {print; exit}')"
+EBOT="$(printf '%s\n' "$EPANELS" | awk '$1 > 0 {print; exit}')"
+if [ -n "$ETOP" ] && [ -n "$EBOT" ] && [ "$(echo $EBOT | cut -d' ' -f3)" = 1 ]; then
+    echo "wv: PASS THERE REALLY ARE TWO PANELS TO TELL APART at STAGE E: a top bar at y=0 ($ETOP: y h visible) and a visible taskbar below it ($EBOT) -- so the box that must stay empty belongs to a panel that exists"
+else
+    echo "wv: FAIL STAGE E did not have two visible panels (top='${ETOP:-none}' bottom='${EBOT:-none}'), so 'the taskbar's box is empty' would be true for the wrong reason and measure nothing. All of etc/panel.conf's panels: [${EPANELS:-none}]"
+    fail=1
+fi
+BD3="$(botpct D-3-menu)"
+BE4="$(botpct E-4-click2)"
+echo "wv: NOTE the TASKBAR's notice box (${NOTICE_IN_W}x${NOTICE_IN_H}+${NOTICE_BOT_IN_X}+${NOTICE_BOT_IN_Y}) is #$NOTICE_FACE at: D-3-menu ${BD3:-?}%, E-4-click2 ${BE4:-?}%"
+if [ -n "$BD3" ] && [ "$BD3" -le 1 ]; then
+    echo "wv: PASS the taskbar's box is empty at STAGE D too (${BD3}%), where nothing had been refused -- so the reading below is about the guard and not about a box that is always dark"
+elif [ -n "$BD3" ]; then
+    echo "wv: FAIL the taskbar's box is already ${BD3}% #$NOTICE_FACE at STAGE D, before anything was refused"
+    fail=1
+fi
+if [ -n "$BE4" ] && [ -n "$FE4" ] && [ "$FE4" -ge 40 ] && [ "$BE4" -le 1 ]; then
+    echo "wv: PASS THE NOTICE GOES TO ONE PANEL, NOT EVERY PANEL: with the card at ${FE4}% on the bar carrying the Applications button, the taskbar's own box is ${BE4}%. On the shipped two-panel layout the person is told once."
+elif [ -n "$BE4" ]; then
+    echo "wv: FAIL the card is ALSO on the taskbar (${BE4}% #$NOTICE_FACE at ${NOTICE_BOT_IN_X},${NOTICE_BOT_IN_Y}): every panel is drawing it, so a person on the shipped layout gets the same notice twice and the \`notice_panel == cur_panel_idx\` guard in _emit_panel is not doing anything."
+    fail=1
+fi
+# AND THE SAME QUESTION ASKED OF THE GEOMETRY, which is independent evidence:
+# a panel that draws the card has to GROW to hold it (_panel_grow_px), so the
+# menu panel's window is taller than its bar and the taskbar's is not. This
+# comes out of the window table the guest already prints, so it cannot be
+# satisfied by anything the framebuffer does.
+ETOPH="$(echo $ETOP | cut -d' ' -f2)"; EBOTH="$(echo $EBOT | cut -d' ' -f2)"
+if [ -n "$ETOPH" ] && [ -n "$EBOTH" ] &&
+   [ "$ETOPH" -gt "$PANEL_THICK" ] && [ "$EBOTH" = "$PANEL_THICK" ]; then
+    echo "wv: PASS AND THE WINDOWS AGREE WITH THE PIXELS: the menu panel grew to ${ETOPH}px to hold the card (bar is $PANEL_THICK) and the taskbar is still ${EBOTH}px -- only one panel reserved room for a notice"
+else
+    echo "wv: FAIL the panel geometry does not match one card: menu panel ${ETOPH:-?}px, taskbar ${EBOTH:-?}px, bar $PANEL_THICK. A taskbar that grew reserved room for a notice it should not draw; a menu panel that did not cannot be showing one."
+    fail=1
 fi
 pp png "$SHOT/E-4-click2.ppm" "$SHOT/E-4-click2.png" >/dev/null 2>&1
 pp png "$SHOT/E-6-dismissed.ppm" "$SHOT/E-6-dismissed.png" >/dev/null 2>&1
