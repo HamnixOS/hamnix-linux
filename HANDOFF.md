@@ -1049,6 +1049,46 @@ the shape is more reusable than the fix. They are NOT open work.
   arm that runs against 22.1.9, because a gate that only ever tests a newer
   server than the distribution ships has a blind spot exactly the size of this
   bug. `docs/steam_namespace.md` §12.2a carries all three measurements.
+  **THE ARM WAS BUILT, AND 22.1.9 WAS NOT THE DIFFERENCE.**
+  `scripts/ns_xwayland.sh` lifts the namespace's own Xwayland out of
+  `build/image/distro.ext4` with `debugfs` — no mount, no loop device, no root,
+  no write to the shared image, ~16 MB and about a second — with its
+  `DT_NEEDED` closure, and runs it through that image's own loader and
+  libraries. `wsyswl_wheel.sh` now runs **every** assertion against both, and
+  **22.1.9 and 24.1.6 behave identically**, on the core path *and* on the
+  XInput2 smooth-scroll path. A second blind spot was found while looking:
+  the gate only ever asked `xev`, which reads **core** X events, while
+  Chromium — the whole of Steam's UI and Firefox's fallback — reads the wheel
+  off an XInput2 **scroll valuator**, a different path out of the same server
+  that can be dead while button 4/5 is perfect.
+  `tests/linux/xi2_scroll_probe.c` is a second client asking that question in
+  the same run. Both paths are green on both servers: **30 PASS**, and with
+  the axis emission stashed the namespace arm is **9 PASS / 7 FAIL** with both
+  controls still passing.
+* **(FIXED, AND NOW PROVEN IN PIXELS IN A VM) The wheel scrolls a real program
+  in the Debian namespace.** The stretch neither existing wheel test covered —
+  QEMU's evdev node → `wsysd` → `wsyswl` → the namespace's *own* Xwayland
+  22.1.9 → an X client, all inside one VM — is now
+  `tests/linux/vm_wheel_client.sh`, ~4 minutes, no Steam and no CEF. Two
+  programs out of the namespace's own `/usr/bin`, asked the two questions that
+  are not the same question. `xev -root`: **six wheel-down notches arrive as
+  exactly six button-5 presses and four up as exactly four button-4**, with a
+  QEMU pointer MOVE as the control in the same log (4 → 14 `MotionNotify`).
+  `xterm` with 3000 lines of scrollback, measured off QEMU's own screendump:
+  **eight wheel-up notches changed 415 of 15840 pixels, eight back down changed
+  415 again, and the net difference is 0** — the reversal is a stronger control
+  than a scrollbar drag, because noise can make two screendumps differ and
+  nothing but real scrolling makes A≠B, B≠C and A=C. **9 PASS.**
+  Two traps this file fell into and now documents, both of which produced the
+  exact zero the bug produces: the first diff rectangle was over the *blank*
+  right-hand side of the terminal (`seq` writes four-digit numbers in the
+  leftmost ~45 px) and read `0 of 96000` while the terminal scrolled perfectly;
+  and the first wheel direction was **down**, on a terminal already sitting at
+  the bottom of its scrollback, i.e. a working wheel with nowhere to go.
+  **What this does NOT say: Steam was not re-measured.** The compositor chain
+  is now proven end to end to a real client's pixels in the real VM; whether
+  Steam's CEF scrolls is a separate measurement and nobody has taken it since
+  the fixes landed.
 * **(SOLVED — kept because the shape is the lesson) Steam's login window is on
   the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
   `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X
