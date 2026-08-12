@@ -20,18 +20,81 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-- **The packaged bytes are unpacked and RUN before an index is written.**
-  `tests/linux/channel_runs_desktop.sh` takes the built `.tar.gz` files apart
-  and runs what is inside them — the desktop under a synthetic mouse, the
-  shell, `hpm`, the coreutils asserted on real answers rather than exit 0. It
-  compiles nothing it asserts on and proves that by grepping itself. The
-  packaging script refuses to write `index.json` if it fails, so a channel
-  whose binaries do not work installs nowhere.
-  This exists because of 1.0.10 below. Every other check passed on that
-  release: the names were all present, the hashes all matched the bytes
-  served, the dependency closure resolved. Nothing ran the binaries, because
-  every gate in this tree builds from source — so the artefact that shipped
-  was the one artefact nothing executed.
+*(nothing right now — 1.0.12 carries everything that had landed.)*
+
+## 1.0.12
+
+**The first release the build refuses to publish unless the packaged binaries
+run.** `tests/linux/channel_runs_desktop.sh` takes the built archives apart and
+runs what is inside them — the desktop under a synthetic mouse, the shell, the
+package manager, the coreutils checked on real answers rather than exit 0. It
+compiles nothing it asserts on, and proves that by inspecting itself. The
+packaging script will not write an index if it fails, so a channel whose
+binaries do not work installs nowhere.
+
+This exists because of 1.0.10 below, where every other check passed: the names
+were all present, the hashes all matched the bytes served, the dependency
+closure resolved. Nothing ran the binaries, because every test in this tree
+builds from source — so the thing that shipped was the one thing nothing had
+executed. 1.0.11 was checked this way by hand; from 1.0.12 the build enforces
+it.
+
+### Things that did not work at all, and now do
+
+- **`modprobe` can resolve a module name.** No `modules.dep` was generated
+  anywhere on this distribution, and `modprobe`'s default path pointed at
+  `/lib/modules/modules.dep` — no kernel release in it, a path nothing has
+  ever written, so the default could only ever fail. On a stock kernel every
+  graphics, filesystem and network driver is a module, so on real hardware
+  this was the difference between a working machine and a black screen.
+  The table is now generated at image build time by running `depmod` over the
+  staged tree — it reads the modules' own symbol tables, so it describes the
+  modules this image *has* rather than the thousands the build host has. A
+  driver package that arrives later by `hpm install` appends its own lines
+  from its install hook, so a module installed after the image was built is
+  resolvable too. Proved on a module with real dependencies, loaded leaf-first
+  and verified out of the kernel's own list — not on a leaf, which would pass
+  without a dependency table at all.
+- **`passwd` could not change a password. For anyone. Ever.** The authentication
+  device served no "set password" operation at all. It does now: `$6$` hashing
+  with a 16-character random salt, written through a temporary file with the
+  right mode, synced, and renamed into place, and permitted only for the host
+  owner or for your own account. The result of a password change is kept
+  separate from the result of an identity check, so one can never be mistaken
+  for the other.
+- **`lsmod` was a lie.** It printed one hard-coded fake row on every machine
+  and exited 0. It is the tool you would use to check whether a `modprobe`
+  worked, so it would have certified a `modprobe` that loaded nothing. It now
+  reads the kernel's own list.
+- **`pgrep` matched nothing, ever.** It opened a process-table file that
+  exists on Hamnix's own kernel and not on Linux, so it failed for every
+  pattern. Its output is now byte-identical to the standard `pgrep`.
+
+### The shell silently wrote to the wrong file
+
+- **A redirect whose target contained `+` was truncated at the `+`.**
+  `echo X >> /path/a+b/f.txt` wrote to `/path/a`, left the named file
+  untouched, passed the rest as an argument, and exited 0. The tokeniser
+  splits a bare word at `+`; the argument path had rejoined those pieces for a
+  long time and the four redirect-target sites had not. **Every Debian kernel
+  release has a `+` in its name**, so this was every append into
+  `/lib/modules/<release>/`.
+
+### Measured, and not what anyone expected
+
+- **50 of the run sweep's failures were one broken harness, not fifty broken
+  programs.** The sweep's file-size limit was smaller than the window system's
+  backbuffer pool, which is allocated lazily — so the compositor passed the
+  readiness check and was killed by the kernel moments later, and every
+  windowed program was scored against a window system that was no longer
+  running. The score was **253/329**, not the 301 the docs claimed; it is now
+  **306/329**. The limit is now derived from the source rather than written
+  down, and the harness reports its OWN failure instead of blaming the
+  program. 23 remain, each named with its reason, and nothing was
+  reclassified to look healthier.
+- **The 23 programs recorded as each burning a whole CPU core are fixed** —
+  all 50 painting clients now measure 0.0 s of CPU across a 15-second run.
+  This is the first sweep since the fix that could see it.
 
 ## 1.0.11
 
