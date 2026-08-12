@@ -20,7 +20,60 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-*(nothing right now — 1.0.17 carries everything that had landed.)*
+*(nothing right now — 1.0.18 carries everything that had landed.)*
+
+## 1.0.18
+
+### Read this before updating, if a desktop is running
+
+**This update costs you the panel once, and a reboot brings it back.** That
+sentence is measured on a real installed machine, not assumed.
+
+Updating replaces the window system underneath a session that is already
+running. Two things follow, and both are now safe rather than silent:
+
+- **Your desktop survives the update.** Until this release, the first
+  application you opened afterwards wiped the screen to a blank slab — your
+  windows, the panel, and your own terminal, gone, with the compositor still
+  running and repainting nothing. It also still owned the display, so the text
+  console was not behind it: on a physical machine the only thing left was the
+  power button. Now a program that meets a session belonging to the *previous*
+  window system **refuses to attach, changes nothing, and says so**:
+  *"REFUSING to attach: it is a LIVE window-system session of version 6 and
+  this program is version 7. Attaching would erase every window on that
+  desktop, so nothing has been changed. REBOOT and start this program again."*
+  The desktop keeps working; only the newly-started program fails.
+- **The panel disappears the moment the update finishes**, and this one cannot
+  be fixed from inside the update. The cause was a window-system command whose
+  argument was never read, so "show this window" was executed as "hide it" —
+  and the panel issues exactly that whenever its configuration changes, which
+  updating does. It is fixed here, but the fix arrives as a file on disk while
+  the *running* panel is still the old program. So the update carrying the
+  repair is the last one to suffer it. After a reboot the panel and taskbar
+  are back — asserted, not hoped.
+
+A message printed during the update tells you to reboot before opening
+anything else.
+
+### Also in this release
+
+- **The trust root can be rotated.** The documented override for the key that
+  authenticates every package read the file into a fixed 512-byte buffer,
+  while the key file this project ships is 718 bytes with its key at byte 653
+  — so the mechanism failed on a well-formed file and the trust root could not
+  be replaced at all. It now streams, with no size limit, and a key file it
+  cannot use says which file and why, and **refuses to fall back** to the
+  built-in key.
+- **The desktop's configuration file is read.** `/etc/panel.conf` is 3,120
+  bytes and was read into 2,048 — the cut landed inside the comment header, so
+  it parsed to nothing and a built-in default was drawn instead. Editing the
+  documented file did nothing at all. It now streams line by line, and a file
+  that cannot be parsed says so instead of falling back in silence.
+- Two build-time defects that could ship wrong binaries with every check
+  passing: the packaging cache keyed objects on timestamps, so two source
+  trees built in one place could cross-link; and the test that runs the
+  packaged desktop could be blinded by its own sandbox and blame the packages.
+  Both fixed, both with tests that fail if the fix is removed.
 
 ## 1.0.17
 
