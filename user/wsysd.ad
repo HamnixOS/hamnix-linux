@@ -209,6 +209,38 @@ b_pres_w: uint64 = 0
 n_pres_w: uint64 = 0                  # write loop entries (not syscalls)
 
 
+# ---- THE LIVE PHASE BREAKDOWN, and why -bench could not produce it --------
+# `wsysd -bench N` composites with NO WINDOWS: it is a standalone arm that
+# scans an empty window table, so paint_window() never runs, the vk router is
+# never armed (it is armed inside paint_window for the full-screen backdrop)
+# and the device rasterizes nothing. Every -bench number is therefore about
+# clear + present and says nothing about a frame with windows in it.
+#
+# A DRAG is the opposite: every frame is a full repaint of a real window set.
+# So the one measurement that could explain a drag gap is exactly the one
+# -bench cannot make, and the gap went unexplained for that reason.
+#
+# HAMNIX_WSYSD_BENCH_LIVE=N turns the same counters on in the LIVE loop and
+# dumps them to stderr every N full frames, then resets. It changes no pixels
+# and costs two clock_gettime calls per phase, which is what -bench already
+# pays.
+bench_live_every: int32 = 0
+bench_live_n:     int32 = 0
+bench_live_seq:   int32 = 0
+
+
+def env_int(name: Ptr[char]) -> int32:
+    v: Ptr[uint8] = getenv(name)
+    if cast[uint64](v) == 0:
+        return 0
+    n: int32 = 0
+    i: uint64 = 0
+    while v[i] >= 48 and v[i] <= 57:
+        n = n * 10 + cast[int32](v[i] - 48)
+        i = i + 1
+    return n
+
+
 def now_us() -> uint64:
     ts_scratch[0] = 0
     ts_scratch[1] = 0
@@ -1829,6 +1861,57 @@ def cursor_only_frame() -> int32:
     return y1 - y0
 
 
+
+# One line per bench_live_every FULL frames, to stderr, then reset. Every
+# figure is microseconds PER FULL FRAME over that window.
+def bench_live_dump():
+    d: uint64 = cast[uint64](bench_live_n)
+    if d == 0:
+        return
+    bench_live_seq = bench_live_seq + 1
+    puts(2, "benchlive: seq ")
+    putd(2, bench_live_seq)
+    puts(2, " frames ")
+    putd(2, bench_live_n)
+    puts(2, " windows ")
+    putd(2, cast[int32](n_win))
+    puts(2, " | clear ")
+    putd(2, cast[int32](t_clear / d))
+    puts(2, " scene ")
+    putd(2, cast[int32](t_scene / d))
+    puts(2, " rast ")
+    putd(2, cast[int32](t_rast / d))
+    puts(2, " copy ")
+    putd(2, cast[int32](t_copy / d))
+    puts(2, " backbuf ")
+    putd(2, cast[int32](t_bb / d))
+    puts(2, " cursor ")
+    putd(2, cast[int32](t_cur / d))
+    puts(2, " present ")
+    putd(2, cast[int32](t_pres / d))
+    puts(2, " writeback ")
+    if n_pres_w > 0:
+        putd(2, cast[int32](t_pres_w / n_pres_w))
+    else:
+        putd(2, 0)
+    puts(2, " | gpu_frames ")
+    putd(2, vk_frames_gpu)
+    puts(2, " submit_us ")
+    putd(2, cast[int32](vk_linux_last_submit_us()))
+    puts(2, "\n")
+    t_clear = 0
+    t_scene = 0
+    t_rast = 0
+    t_copy = 0
+    t_bb = 0
+    t_cur = 0
+    t_pres = 0
+    t_pres_w = 0
+    b_pres_w = 0
+    n_pres_w = 0
+    bench_live_n = 0
+
+
 def paint_frame():
     t0: uint64 = 0
     if bench_on != 0:
@@ -3069,6 +3152,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # that differs between the two configurations.
     vk_arm()
 
+    # The live phase breakdown. Off unless asked for; see bench_live_dump.
+    bench_live_every = env_int(cast[Ptr[char]]("HAMNIX_WSYSD_BENCH_LIVE"))
+    if bench_live_every > 0:
+        bench_on = 1
+        puts(2, "benchlive: on, dumping every ")
+        putd(2, bench_live_every)
+        puts(2, " full frames\n")
+
     keymap_init()
     cursor_init()
     # Named input sources override the scan. That is how the input decode is
@@ -3120,6 +3211,10 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             paint_frame()
             n_frames = n_frames + 1
             idle = 0
+            if bench_live_every > 0:
+                bench_live_n = bench_live_n + 1
+                if bench_live_n >= bench_live_every:
+                    bench_live_dump()
         elif csig != last_csig:
             # Only the pointer moved: restore what the cursor covered, stamp it
             # at the new place, and push just those rows. No window is read,
