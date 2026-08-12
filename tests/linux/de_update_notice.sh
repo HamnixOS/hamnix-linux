@@ -68,6 +68,12 @@
 #  12. CONTROL for 11: a menu that was NOT refused does not take the
 #      suppressing branch, so the fix is conditional and a genuinely broken
 #      menu still gets written down.
+#  13. A MARKER FROM A PREVIOUS BOOT IS IGNORED, and one from THIS boot is
+#      not. The notice's advice is RESTART, so its evidence must not outlive
+#      the restart -- and "/srv is tmpfs" is not a safe way to guarantee that
+#      (see the reachability note at the section itself). Asked both ways,
+#      because only the pair discriminates: a reader that ignored everything
+#      would pass the first half alone.
 #
 # 3 and 8 are the instrument check. If the colour or the rectangle were wrong
 # EVERY reading would be 0 and 6 would FAIL — there is no way for a broken
@@ -611,6 +617,98 @@ if [ "$BP_PCT" -le 5 ]; then
     ok "AND ONLY THAT PANEL: the taskbar's own box is ${BP_PCT}% #$FACE -- the notice is drawn once, not once per panel"
 else
     bad "the card is ALSO on the taskbar (${BP_PCT}% #$FACE at ${BP_X},${BP_Y}): every panel is drawing it. On the shipped two-panel layout the person gets the same notice twice, and the \`notice_panel == cur_panel_idx\` guard in _emit_panel is not doing anything."
+fi
+
+# ---- 13. THE MARKER MUST NOT OUTLIVE THE REBOOT IT ASKS FOR --------------
+# WHY THIS IS NOT HYPOTHETICAL. The marker's liveness used to rest entirely on
+# /srv being tmpfs, which is not something the window system controls:
+#
+#   * linuxinit's `bind '#s' /srv` goes through bind_or_warn -- it WARNS AND
+#     CONTINUES -- and scripts/hamlinux_disk.sh creates a real /srv directory
+#     on the ext4 root, so a boot where that bind fails runs with a /srv that
+#     remembers. Eight other rc scripts bind it too, with the same exposure.
+#   * a host run as root with no $HAMWSYS lands on an ordinary /srv, which on
+#     any Linux box is a directory on the root filesystem.
+#
+# In either case the desktop would tell somebody to restart a session they had
+# already restarted -- the same shape as the appmenu.fault defect above, where
+# a flag outlived the reboot it asked for.
+#
+# So the marker carries the kernel's boot id and the panel ignores any line
+# stamped with a different one. This asks that BOTH ways round, on a marker
+# this test writes by hand, because a reader that ignored every marker would
+# pass the stale half on its own and fail nobody.
+info "a marker from a previous boot, and one from this boot, on the same panel"
+BOOT_NOW="$(tr -d '\n' </proc/sys/kernel/random/boot_id 2>/dev/null)"
+if [ -z "$BOOT_NOW" ]; then
+    bad "cannot read /proc/sys/kernel/random/boot_id on this host, so neither half of the staleness check can be asked"
+else
+    kill "$PANEL_PID" 2>/dev/null; sleep 0.5; kill -9 "$PANEL_PID" 2>/dev/null
+    cat >/tmp/hamnix-panel.conf <<'CONF'
+panel solo
+  edge top
+  size 26
+  widget menu
+  widget clock
+end
+CONF
+    # A marker naming a boot that is not this one. Same shape as a real line,
+    # so only the boot id can be what makes the difference.
+    # NOTICE_STALE_AIM=fresh PROVES THE STALE HALF CAN FAIL, the same way
+    # NOTICE_TWOPANEL_AIM does: it stamps the "previous boot" marker with THIS
+    # boot's id, so the panel must show it and the assertion must go red. An
+    # assertion satisfied by a marker no reader would ever accept is worth
+    # nothing.
+    STALE_BOOT=00000000-0000-0000-0000-000000000000
+    if [ "${NOTICE_STALE_AIM:-}" = fresh ]; then
+        STALE_BOOT="$BOOT_NOW"
+        info "NOTICE_STALE_AIM=fresh: the 'previous boot' marker carries THIS boot's id; the stale half below MUST fail"
+    fi
+    printf 'refused live=8 mine=9 pid=1 boot=%s\n' "$STALE_BOOT" \
+        >"$HAMWSYS.refused"
+    "$WORK/hampanelscene.elf" </dev/null >"$WORK/panel_stale.log" 2>&1 &
+    PANEL_PID=$!; PIDS="$PIDS $PANEL_PID"
+    # AN EMPTY BOX IS NOT A DECISION UNTIL THE PANEL HAS MADE ONE. A panel that
+    # has not finished starting draws nothing either, and would satisfy a bare
+    # "the box is dark" exactly as well as the behaviour under test. So this
+    # waits for the panel to SAY what it did -- the same line a person would be
+    # pointed at -- and scores the pixels and that sentence together. Without
+    # this the strongest assertion in the section would be the one most easily
+    # satisfied by nothing happening yet.
+    STALE_T0=$SECONDS
+    while :; do
+        grep -aq 'previous boot' "$WORK/panel_stale.log" && break
+        [ $((SECONDS - STALE_T0)) -ge 20 ] && break
+        sleep 0.25
+    done
+    STALE_SAID="$(grep -ac 'previous boot' "$WORK/panel_stale.log")"
+    sleep 2
+    STALE_PCT="$(colourpct $NX $NY $NW $NH "$FACE")"
+    if [ "$STALE_PCT" -le 5 ] && [ "$STALE_SAID" -ge 1 ]; then
+        ok "A MARKER FROM A PREVIOUS BOOT RAISES NOTHING: the panel read it, said so, and the box is ${STALE_PCT}% #$FACE after $((SECONDS - STALE_T0))s -- the notice cannot outlive the restart it asks for, even where /srv remembers"
+    elif [ "$STALE_PCT" -gt 5 ]; then
+        # ORDER MATTERS HERE, and the first version had it wrong: a lit box was
+        # reported as "the panel had not decided anything yet", because a panel
+        # that legitimately SHOWS the notice also legitimately never logs the
+        # stale line. Under the red-proof that produced a correct FAIL with an
+        # incorrect reason, which is its own kind of wrong answer. A lit box is
+        # the notice being raised whatever the log says; only a DARK box with
+        # no decision behind it is a measurement of nothing.
+        bad "a marker stamped with another boot still raised the notice (${STALE_PCT}%): on any machine whose /srv is not tmpfs the desktop tells a person to restart a session they have already restarted"
+    else
+        bad "the box is ${STALE_PCT}% but the panel never said it had found a stale marker -- it had not decided anything yet, so this assertion measured nothing"
+    fi
+    # AND THE OTHER WAY, which is what stops the above being satisfied by a
+    # reader that ignores everything: the same line, this boot's id.
+    printf 'refused live=8 mine=9 pid=1 boot=%s\n' "$BOOT_NOW" >>"$HAMWSYS.refused"
+    FRESH_PCT="$(await_notice $((NX)) $((NY)) $NW $NH 40)"
+    if [ "$FRESH_PCT" -ge 40 ]; then
+        ok "AND A MARKER FROM THIS BOOT STILL RAISES IT: ${FRESH_PCT}% #$FACE after ${AWAIT_S}s -- the staleness test discriminates rather than silencing"
+    else
+        bad "a marker stamped with THIS boot raised nothing (${FRESH_PCT}%): the staleness check is silencing every notice, not just the stale ones"
+        info "  panel said: $(grep -a 'previous boot' "$WORK/panel_stale.log" | tail -1)"
+    fi
+    rm -f /tmp/hamnix-panel.conf
 fi
 
 done_report
