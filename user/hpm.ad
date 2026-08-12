@@ -5967,6 +5967,17 @@ def _run_hook(staging_root: Ptr[uint8], hook_name: Ptr[uint8],
         write_str(2, " exited non-zero (")
         write_dec_u64(2, cast[uint64](code))
         write_str(2, ")\n")
+        # Say the CONSEQUENCE, not just the number. A hook that fails to LEX
+        # exits non-zero having run NOTHING (hamsh names the file and the
+        # line just above this on the same console), and the reader's next
+        # question is always "so is the package installed or not?". It is
+        # not: the caller turns this -1 into a failed install and hpm never
+        # prints `installed <pkg>`.
+        write_str(2, "hpm: ")
+        write_str(2, pkg_name)
+        write_str(2, " is NOT correctly installed: its files were unpacked but its ")
+        write_str(2, hook_name)
+        write_str(2, " did not succeed.\n")
         return -1
     return 0
 
@@ -7444,8 +7455,33 @@ def _compose_staged(dst: Ptr[uint8], dcap: uint64,
     return 0
 
 
+# THE BOUND ON AN ON-BOX COMPILE, AND WHERE THE NUMBER COMES FROM.
+#
+# 100 Hz jiffies, so 90000 == 15 minutes.
+#
+# This is the SAME CLASS of defect as the hook wedge above -- hpm waiting
+# forever on a process it spawned -- and it was deliberately left standing
+# when the hooks were bounded, because a compile is not a file copy and no
+# bound followed from the hook measurements. So here is its own measurement,
+# taken with this tree's own compiler on this host:
+#
+#     host_ac on user/hamUId.ad (31,217 lines, the LARGEST Adder program
+#     in the tree)                                       0.80 s
+#     the same file, whole pipeline, compile + link      8.9 s
+#
+# A source package's build is one such compile per recipe line. 15 minutes is
+# ~100x the largest single compile+link this tree contains, on a host with no
+# other load -- i.e. it still allows an installed machine that is an order of
+# magnitude slower, compiling something several times larger, to finish
+# comfortably. Like HOOK_TIMEOUT_CS it bounds a WEDGE, not a performance
+# budget: a compiler that has been running for a quarter of an hour on one
+# file has stopped compiling and started waiting on something, and hpm has no
+# business waiting with it forever.
+CC_TIMEOUT_CS: uint64 = 90000
+
+
 # Spawn /bin/adder_cc <src_full> <out_full> and wait. Returns 0 on a
-# zero exit, -1 otherwise.
+# zero exit, -1 otherwise. THE WAIT IS BOUNDED -- see CC_TIMEOUT_CS.
 def _spawn_adder_cc(src_full: Ptr[uint8], out_full: Ptr[uint8]) -> int32:
     # Make sure the destination directory (files/<...>'s parent) exists.
     _dirname_mkdir_p(out_full)
@@ -7453,14 +7489,85 @@ def _spawn_adder_cc(src_full: Ptr[uint8], out_full: Ptr[uint8]) -> int32:
     cc_argv_buf[1] = cast[uint64](src_full)
     cc_argv_buf[2] = cast[uint64](out_full)
     cc_argv_buf[3] = 0
+    # Stdin at /dev/null, for the same reason a hook gets it: a compiler has
+    # no business reading hpm's standard input, and anything it spawns that
+    # DOES read (a shell in a link recipe, a prompt) then sees EOF instead of
+    # parking on a console nobody is typing at.
+    cc_sin: int32 = 0
+    devnull: int32 = sys_open(cast[Ptr[char]]("/dev/null"))
+    if devnull >= 0 and devnull < 16:
+        cc_sin = devnull
+    else:
+        write_str(2, "hpm: WARNING: cannot put /dev/null on the stdin of the on-box compiler; it runs on hpm's own stdin and is bounded only by the timeout\n")
     pid: int32 = spawn(cast[Ptr[char]](_adder_cc_path()),
-                           &cc_argv_buf[0], 0, 1, cast[Ptr[uint64]](0))
+                           &cc_argv_buf[0], cc_sin, 1, cast[Ptr[uint64]](0))
+    if devnull >= 0:
+        sys_close(devnull)
     if pid < 0:
         write_str(2, "hpm: cannot spawn the on-box Adder compiler (")
         write_str(2, _adder_cc_path())
         write_str(2, ")\n")
         return -1
-    code: int64 = sys_waitpid(pid)
+    # The same bounded poll the hook wait uses: sys_waitpid_jc is
+    # non-blocking by contract and sys_waitfds(nfds == 0) is the sleep
+    # between polls (it also releases the fd-namespace spawn gate the
+    # blocking sys_waitpid would have released). hook_wait_status /
+    # hook_park_fds are reused deliberately -- hpm runs exactly one child at
+    # a time, and a second copy of the same two words would be two things to
+    # keep in step.
+    start: uint64 = sys_get_jiffies()
+    code: int64 = 0
+    timed_out: int32 = 0
+    while True:
+        hook_wait_status[0] = 0
+        wr: int64 = sys_waitpid_jc(pid, &hook_wait_status[0])
+        if wr < 0:
+            write_str(2, "hpm: cannot wait for the on-box compiler (pid ")
+            write_dec_u64(2, cast[uint64](pid))
+            write_str(2, " unwaitable); the compile's result is UNKNOWN\n")
+            return -1
+        if wr > 0 and (hook_wait_status[0] & 255) == HOOK_WAIT_EXITED:
+            code = hook_wait_status[0] >> 8
+            break
+        # Elapsed-delta rather than an absolute deadline, so a tick wrap
+        # cannot turn the bound into an early kill.
+        if sys_get_jiffies() - start >= CC_TIMEOUT_CS:
+            timed_out = 1
+            break
+        sys_waitfds(&hook_park_fds[0], 0, 25)
+
+    if timed_out != 0:
+        write_str(2, "hpm: the on-box compile of ")
+        write_str(2, src_full)
+        write_str(2, " ran longer than ")
+        write_dec_u64(2, CC_TIMEOUT_CS / 100)
+        write_str(2, " seconds and was KILLED (pid ")
+        write_dec_u64(2, cast[uint64](pid))
+        write_str(2, ").\n")
+        write_str(2, "hpm: this package is NOT installed: its source was staged but the compiler never finished.\n")
+        p9_note(pid, cast[Ptr[uint8]]("kill"))
+        rstart: uint64 = sys_get_jiffies()
+        reaped: int32 = 0
+        while sys_get_jiffies() - rstart < HOOK_REAP_CS:
+            hook_wait_status[0] = 0
+            wr2: int64 = sys_waitpid_jc(pid, &hook_wait_status[0])
+            if wr2 < 0:
+                reaped = 1
+                break
+            if wr2 > 0 and (hook_wait_status[0] & 255) == HOOK_WAIT_EXITED:
+                reaped = 1
+                break
+            sys_waitfds(&hook_park_fds[0], 0, 25)
+        if reaped == 0:
+            # One unbounded wait is what this removes; do not add a second
+            # one to tidy up after it.
+            write_str(2, "hpm: compiler process ")
+            write_dec_u64(2, cast[uint64](pid))
+            write_str(2, " did not die within ")
+            write_dec_u64(2, HOOK_REAP_CS / 100)
+            write_str(2, "s of the kill note; leaving it unreaped rather than blocking this install forever\n")
+        return -1
+
     if code != 0:
         write_str(2, "hpm: on-box compile failed (adder_cc exit ")
         write_dec_u64(2, cast[uint64](code))

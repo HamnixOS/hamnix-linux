@@ -43,6 +43,12 @@ from lib.p9 import (
     P9_PIPE_PIN_W, P9_PIPE_PIN_R, P9_PIPE_PIN_RA, P9_PIPE_PIN_RB,
 )
 extern def sys_waitpid(pid: int32) -> int64
+# Who am I? Used for ONE decision, and a load-bearing one: what to do when a
+# sourced script fails to LEX. A lexical error is fatal to the script either
+# way (see _run_source_inner), but PID 1 must not exit on it — an init that
+# exits panics the kernel, and "no boot" is a worse answer than "a shell you
+# can repair the rc from". See main()'s rcrc == 3 arm.
+extern def sys_getpid() -> int32
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
@@ -630,6 +636,26 @@ def _is_word_char(c: uint8) -> int32:
 # or on token-array overflow (a too-large logical input). Declared
 # before _emit_tok so the overflow store below resolves cleanly.
 lex_error: int32 = 0
+# WHERE it went wrong, and WHAT went wrong — so the report can name a line
+# instead of handing a person a whole file and a shrug. lex_errline is the
+# line the offending construct STARTED on (an unterminated quote is only
+# detected at end of input, and the end of the file is not the interesting
+# place); lex_errwhat is one of LEXERR_*.
+lex_errline: int32 = 0
+lex_errwhat: int32 = 0
+LEXERR_QUOTE:  int32 = 1        # a ' or " (or f-string) never closed
+LEXERR_BRACE:  int32 = 2        # a ${ }, $( ), or `{ } never closed
+LEXERR_TOKMAX: int32 = 3        # more tokens than TOK_MAX — input too large
+
+
+def _lex_fail(what: int32, line: int32):
+    # First failure wins: everything after an unterminated quote is the
+    # runaway token's fault, so a later complaint is noise.
+    if lex_error != 0:
+        return
+    lex_error = 1
+    lex_errwhat = what
+    lex_errline = line
 
 
 def _prev_tok_is_value() -> int32:
@@ -658,7 +684,7 @@ def _emit_tok(kind: int32, sref: uint64, ival: int64):
         # dropping the tail of the input (which used to truncate the
         # closing `}` / TK_EOF of a large sourced script and abort it
         # with a spurious "empty command"). lex_line surfaces this.
-        lex_error = 1
+        _lex_fail(LEXERR_TOKMAX, _lex_line_no)
         # IDLE-CPU HANG FIX: force the LAST token slot to TK_EOF so the
         # parser always sees a terminator. Otherwise the dropped trailing
         # TK_EOF leaves tok_kind[TOK_MAX-1] as a non-EOF token; pk_advance()
@@ -728,6 +754,8 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
     # TK_EOF is always appended.
     tok_count = 0
     lex_error = 0
+    lex_errline = 0
+    lex_errwhat = 0
     _lex_saw_sep = 1                          # first token is never "glued"
     _ind_sp = 1                               # reset the indent stack
     _ind_stack[0] = 0
@@ -957,6 +985,7 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
         if c == 102 and p + 1 < n and \
                 (buf[p + 1] == 34 or buf[p + 1] == 39):      # f"  or  f'
             fq: uint8 = buf[p + 1]                           # the quote char
+            fline: int32 = _lex_line_no                      # where it OPENED
             fesc: int32 = 0
             if fq == 34:                                     # f"…" honours escapes
                 fesc = 1
@@ -983,7 +1012,7 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
                     wl = wl + 1
                 p = p + 1
             if fterm == 0:
-                lex_error = 1
+                _lex_fail(LEXERR_QUOTE, fline)
             fsref: uint64 = str_intern_n(&lex_word[0], wl)
             _emit_tok(TK_FSTR, fsref, 0)
             continue
@@ -1135,6 +1164,7 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
         # double-quoted string (interpolating handled at eval)
         if c == 34:                          # '"'
             wl: uint64 = 0
+            qline: int32 = _lex_line_no      # where the quote OPENED
             p = p + 1
             term: int32 = 0
             while p < n:
@@ -1157,7 +1187,7 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
                     wl = wl + 1
                 p = p + 1
             if term == 0:
-                lex_error = 1
+                _lex_fail(LEXERR_QUOTE, qline)
             sref: uint64 = str_intern_n(&lex_word[0], wl)
             # TK_STR with tok_int=1 means "interpolating" (double quote)
             _emit_tok(TK_STR, sref, 1)
@@ -1165,6 +1195,7 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
         # single-quoted string (literal, no interpolation)
         if c == 39:                          # '\''
             wl: uint64 = 0
+            qline: int32 = _lex_line_no      # where the quote OPENED
             p = p + 1
             term: int32 = 0
             while p < n:
@@ -1178,7 +1209,7 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
                     wl = wl + 1
                 p = p + 1
             if term == 0:
-                lex_error = 1
+                _lex_fail(LEXERR_QUOTE, qline)
             sref: uint64 = str_intern_n(&lex_word[0], wl)
             _emit_tok(TK_STR, sref, 0)       # tok_int=0: non-interpolating
             continue
@@ -1187,7 +1218,7 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
             if p + 1 < n and buf[p + 1] == 123:        # '${'
                 close: uint64 = _scan_balanced(buf, n, p + 1, 123, 125)
                 if close >= n:
-                    lex_error = 1
+                    _lex_fail(LEXERR_BRACE, _lex_line_no)
                     p = n
                     continue
                 # interned slice = chars between { and }
@@ -1207,7 +1238,7 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
             if p + 1 < n and buf[p + 1] == 40:          # '$('
                 pclose: uint64 = _scan_balanced(buf, n, p + 1, 40, 41)
                 if pclose >= n:
-                    lex_error = 1
+                    _lex_fail(LEXERR_BRACE, _lex_line_no)
                     p = n
                     continue
                 pinner: uint64 = p + 2
@@ -1241,7 +1272,7 @@ def lex_line(buf: Ptr[uint8], n: uint64) -> int32:
             if p + 1 < n and buf[p + 1] == 123:
                 close: uint64 = _scan_balanced(buf, n, p + 1, 123, 125)
                 if close >= n:
-                    lex_error = 1
+                    _lex_fail(LEXERR_BRACE, _lex_line_no)
                     p = n
                     continue
                 inner: uint64 = p + 2
@@ -10912,7 +10943,19 @@ def builtin_source(argc: int32) -> int32:
             break
     sys_close(fd)
     if total > 0:
+        prev_name: Ptr[uint8] = lex_src_name
+        lex_src_name = cast[Ptr[uint8]](path)
+        lex_fatal = 0
         run_source(&src_buf[0], total)
+        fatal: int32 = lex_fatal
+        lex_fatal = 0
+        lex_src_name = prev_name
+        # A sourced file that did not lex ran NOTHING; `source` says so with
+        # a non-zero status rather than letting the caller carry on as
+        # though the file had taken effect.
+        if fatal != 0:
+            errstr_set("source: file did not lex; nothing in it ran")
+            return 1
     return 0
 
 
@@ -14288,7 +14331,12 @@ def _svc_source_path(path: Ptr[char]) -> int32:
             break
     sys_close(fd)
     if total > 0:
+        prev_name: Ptr[uint8] = lex_src_name
+        lex_src_name = cast[Ptr[uint8]](path)
+        lex_fatal = 0
         run_source(&src_buf[0], total)
+        lex_fatal = 0
+        lex_src_name = prev_name
     return 0
 
 
@@ -16013,6 +16061,57 @@ def _phys_is_blank(buf: Ptr[uint8], n: uint64) -> int32:
     return 1
 
 
+# A LEXICAL ERROR IS FATAL TO THE SCRIPT IT IS IN.
+#
+# It used to be a printed line and nothing else: run_source said `hamsh:
+# lexical error (unterminated quote or token-limit exceeded)` and returned 0,
+# so `hamsh <script>` exited 0 for a script of which NOTHING had run. A whole
+# sourced file is ONE logical input to lex_line — a runaway quote on line 3
+# swallows the rest of the file, tokenizes nothing usable, and the parser is
+# never even reached. That is not a partial run; it is no run at all. hpm
+# then printed `installed <pkg>` for a package whose install hook did nothing
+# (measured: hamnix-drivers-base 1.0.13, whose hook contained `the machine's
+# table` inside a single-quoted string). NORTH_STAR names that shape: a gap
+# must never answer something success-shaped instead of the truth.
+#
+# So: the script does not run, hamsh says so naming the FILE and the LINE the
+# construct opened on, and the shell exits non-zero. What each CALLER does
+# with that non-zero is the caller's business, and that is where boot safety
+# lives:
+#   * hpm treats it as an install failure (user/hpm.ad, _run_hook — a
+#     non-zero hook exit already fails the install by name).
+#   * PID 1 must NOT die on it. main()'s rcrc == 3 arm says so loudly and
+#     falls through to the console REPL: a machine you can log into and
+#     repair the rc on. An init that exits panics the kernel, and "no boot"
+#     is a worse answer than "a rescue shell".
+# The invariant: a lex failure is never silent, never reported as success,
+# and never costs you the machine.
+#
+# lex_fatal is the flag the script paths read. It is NOT the interactive
+# path's business — at a prompt a mistyped quote reprompts, exactly as before.
+lex_fatal: int32 = 0
+# The name of the text being run, for the report. "-" is the interactive
+# prompt / an anonymous buffer; the sourcing paths set it to the file's path
+# and restore the previous value (sourcing nests: rc.boot sources the
+# sysroot's rc.boot).
+lex_src_name: Ptr[uint8] = "-"
+
+
+def _report_lex_error():
+    write_cstr1("hamsh: ")
+    write_cstr1(lex_src_name)
+    write_cstr1(":")
+    write_cstr1(render_int(cast[int64](lex_errline)))
+    write_cstr1(": lexical error: ")
+    if lex_errwhat == LEXERR_QUOTE:
+        write_cstr1("a quote opened here is never closed")
+    elif lex_errwhat == LEXERR_BRACE:
+        write_cstr1("a ${ } / $( ) / `{ } substitution opened here is never closed")
+    else:
+        write_cstr1("too many tokens for one input (token limit exceeded)")
+    write_cstr1("\n")
+
+
 # run_source RE-ENTERS itself: the `source FILE` builtin (and the service
 # loader's _svc_source_path) call it from INSIDE an executing AST, so at
 # depth > 1 the caller's nodes/values are live in evaluator locals that the
@@ -16047,7 +16146,15 @@ def _run_source_inner(buf: Ptr[uint8], n: uint64) -> int32:
     # never leak into an unrelated statement.
     rt_fault_clear()
     if lex_line(buf, n) < 0:
-        write_cstr1("hamsh: lexical error (unterminated quote or token-limit exceeded)\n")
+        _report_lex_error()
+        # The whole input lexed as one unit, so NOTHING in it ran. Say that
+        # too — "lexical error" alone leaves a reader guessing how much of
+        # their script took effect.
+        write_cstr1("hamsh: ")
+        write_cstr1(lex_src_name)
+        write_cstr1(": NOT RUN -- a script whose text cannot be lexed is not executed at all\n")
+        lex_fatal = 1
+        eval_status = 1
         return 0
     prog: int32 = parse_program()
     if ps_error != 0:
@@ -17615,6 +17722,33 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # would wedge here forever).
         if rcrc == 2:
             return cast[int32](eval_status)
+        # THE SCRIPT FAILED TO LEX. None of it ran (_run_source_inner has
+        # already named the file and the line). What happens next depends
+        # entirely on WHO WE ARE, and this is the only place in hamsh that
+        # asks:
+        #
+        #   PID 1 — the boot rc. Exiting here is a kernel panic and an
+        #   unbootable machine; the rc is a file on a disk a person can fix
+        #   IF they can get a shell. So: say it loudly, and fall through to
+        #   the interactive console REPL below, which is the rescue shell.
+        #   The namespace is whatever linuxinit built (/proc, /dev, /srv and
+        #   the root switch) — enough to read and edit the rc.
+        #
+        #   Anyone else — an hpm install hook, `hamsh script`, a service
+        #   loader. Exit NON-ZERO. The caller asked for a script to be run,
+        #   the script did not run, and the honest answer is a failure, not
+        #   a shell it never asked for on a stdin nobody is feeding.
+        if rcrc == 3:
+            if sys_getpid() == 1:
+                write_cstr1("hamsh: PID 1: THE BOOT RC DID NOT RUN.\n")
+                write_cstr1("hamsh: PID 1: ")
+                write_cstr1(cast[Ptr[uint8]](rc_path))
+                write_cstr1(" could not be lexed, so none of it took effect: no\n")
+                write_cstr1("hamsh: PID 1: namespace recipe, no services, no login. This machine is\n")
+                write_cstr1("hamsh: PID 1: in a RESCUE SHELL on the console. Fix the line named above\n")
+                write_cstr1("hamsh: PID 1: (a quote that is never closed is the usual cause) and reboot.\n")
+            else:
+                return 1
         # TEMP_DEBUG_HAMSH_BRINGUP — boot rc finished (success or
         # silently-absent fallthrough); about to enter interactive loop.
         _dbg_stage(cast[Ptr[uint8]]("[hamsh:stage-06] rc-done\n"))
@@ -17742,7 +17876,8 @@ def _run_rc_path(path: Ptr[char]) -> int32:
     # propagate the unwind out of main() — used by `hamsh <script>`
     # forms like hpm hooks to exit after the script rather than
     # dropping into an interactive REPL the caller's stdin is probably
-    # not feeding).
+    # not feeding), and 3 if the file FAILED TO LEX — in which case none
+    # of it ran and the caller must not pretend otherwise.
     fd: int32 = sys_open(path)
     if fd < 0:
         return 0
@@ -17756,7 +17891,16 @@ def _run_rc_path(path: Ptr[char]) -> int32:
             break
     sys_close(fd)
     if total > 0:
-        if run_source(&rc_buf[0], total) != 0:
+        prev_name: Ptr[uint8] = lex_src_name
+        lex_src_name = cast[Ptr[uint8]](path)
+        lex_fatal = 0
+        r: int32 = run_source(&rc_buf[0], total)
+        fatal: int32 = lex_fatal
+        lex_fatal = 0
+        lex_src_name = prev_name
+        if fatal != 0:
+            return 3
+        if r != 0:
             return 2
     return 1
 
