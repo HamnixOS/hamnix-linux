@@ -2,6 +2,18 @@
 # tests/linux/wsys_wctl.sh — DOES A hamui APP'S v2 NEGOTIATION REACH THE
 # WINDOW SYSTEM AT ALL?
 #
+# THIS GATE IS ABOUT ONE RUN IN FOUR RED ON A HEALTHY TREE, AND THAT IS NOT
+# THIS GATE'S SUBJECT. It launches `fillwin` in the background just before the
+# negotiation probe, so a SECOND v2 window is live -- which is the precondition
+# for a separately-reported defect: a v2 window opened after another v2 window
+# sometimes never comes up, and when it does not, EVERY leaf of it fails to
+# open with ENOENT and its ctl reads empty. The scene_gen assertion below now
+# names that case instead of blaming scene_gen for it. If you are here because
+# a release run went red: RE-RUN IT FIRST. A red that reproduces is a finding;
+# a single red is most likely that defect. (Measured while red-proofing the
+# scene_gen assertion: red then green on consecutive runs of an unmodified
+# tree.)
+#
 # THE DEFECT THIS EXISTS FOR, and it is the project's canonical failure shape:
 # a gap that answers something SUCCESS-SHAPED instead of the truth.
 #
@@ -172,7 +184,22 @@ fi
 # moves, so it fails EVERY time on a tree carrying it and never on one that is
 # not. `strings`, sizes and symbols cannot see a deleted statement; a file the
 # window system publishes can.
-if [ "${SGEN:-}" = "0" ]; then
+if [ -z "${CTL:-}" ]; then
+    # DO NOT BLAME scene_gen FOR AN UNREADABLE ctl. This gate runs `fillwin` in
+    # the background before this probe, so a SECOND v2 window is live -- and
+    # "a v2 window after another one is sometimes never painted" is a real,
+    # separately-reported defect (see the note above the fillwin launch). When
+    # it fires, every leaf of this window fails to open and ctl comes back
+    # empty. Measured while red-proofing this assertion: a build carrying the
+    # scene_gen++ reads `proto 2, scene_gen 1` with ctl perfectly readable when
+    # run alone, and reads NOTHING when run behind that other defect. Saying
+    # "scene_gen is ?" there would point the next person at the wrong bug.
+    bad "the window's ctl could not be read at all, so scene_gen cannot be"\
+        "checked. That is NOT the scene_gen defect: it is the separately"\
+        "reported one where a v2 window opened after another v2 window never"\
+        "comes up. Re-run; if it persists, that defect has stopped being"\
+        "intermittent."
+elif [ "${SGEN:-}" = "0" ]; then
     ok "AND NEGOTIATING v2 IS NOT DAMAGE: ctl reports scene_gen=0, so the v2 scene read stays a 0-byte success and paint_window reaches the backbuffer"
 else
     bad "NEGOTIATING v2 BUMPED scene_gen TO ${SGEN:-?}: a v2 window's scene read"\
