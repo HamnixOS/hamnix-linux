@@ -895,26 +895,39 @@ pointer  2 -> 22     twenty wheel events, cursor STILL
 cursor. **Everything upstream of `/dev/wsys/<wid>/pointer` is ruled out, and
 the remaining hole is ours.**
 
-**What is left, stated as the narrow thing it now is.** The line reaches the
-ring and the client does not scroll, while the identical code path with a
-different Xwayland does. The two candidates, in order:
+**What is left, stated as the narrow thing it now is.** The routed line
+reaches the ring and the client does not scroll, while the identical code
+path with a *different* Xwayland does. Two candidates were named. One of them
+has since been **tested and eliminated**:
 
-1. **Xwayland's version.** The passing arm is the dev host's Xwayland (trixie,
-   24.x); the failing arm is the namespace's **22.1.9** (bookworm). If 22.1.9
-   will not turn this `axis` into button 4/5, the gate is measuring a newer
-   server than the distribution ships and should be made to run both.
-2. **Event order inside the frame.** `wl_pointer.axis_discrete` is emitted
-   *after* its `axis` event here; the protocol says it should precede it. The
-   host's Xwayland does not care. A stricter one would.
+1. **Event order inside the frame — TRIED, AND IT IS NOT THIS.**
+   `wl_pointer.axis_discrete` was being emitted *after* its `axis` event; the
+   protocol says it "shall be sent before the corresponding
+   wl_pointer.axis event". That was wrong and is now fixed (the gate is still
+   10 PASS with the corrected order). A **third** full Steam boot, staged
+   binary timestamped after the source change, navigated back to the store
+   front page (124587 distinct colours in the page rectangle — it is loaded)
+   and wheeled over it:
+   ```
+   diff 830x680+214+80: IDENTICAL (0 of 564400 px)
+   ```
+   The order was a real protocol violation worth fixing on its own. It is not
+   what is stopping the scroll.
+2. **Xwayland's version — the one still standing.** The passing arm is the dev
+   host's Xwayland (trixie, 24.x); the failing arm is the namespace's
+   **22.1.9** (bookworm). The gate is therefore measuring a *newer* server
+   than this distribution ships, which is a gap in the gate as much as a
+   hypothesis about the bug: **the next thing to do is make
+   `wsyswl_wheel.sh` run against 22.1.9** — the namespace has one, so the arm
+   can be added — and only then look further up.
 
-Neither is guessed at further in this pass, because the measurement that
-would settle it is a third boot and the one above is what was worth the time.
-
-**The honest state:** one real defect found and fixed with a gate that fails
-on revert, the user-visible symptom that found it still present in the VM,
-and the search space for what is left narrowed from "the whole input stack"
-to "`wsyswl`'s axis emission against Xwayland 22.1.9" by a measurement rather
-than by an argument.
+**The honest state after three Steam boots:** two real defects found in
+`wsyswl` (no `wl_pointer.axis` at all; `axis_discrete` in the wrong order),
+both fixed, with a gate that fails on revert — and the user-visible symptom
+that found them **still present in the VM**. The search space is narrowed
+from "the whole input stack" to "`wsyswl`'s axis emission as seen by Xwayland
+22.1.9", by measurement rather than by argument, and the gate's own blind
+spot is now named.
 
 ### 12.3 Two things seen in passing that are NOT the blocker
 

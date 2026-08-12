@@ -981,11 +981,22 @@ the shape is more reusable than the fix. They are NOT open work.
   `virtio-tablet-pci` in the other. `tests/linux/vm_wheel_reaches.sh` is
   written and splits exactly that — `wsysd`'s own `pointer` counter across a
   wheel burst with the cursor held still, with a plain move as the control in
-  the same run. If it rises the remaining drop is ours; if it is flat the
-  wheel never reaches the guest and §12.2's fix is a claim about real
-  hardware rather than about this VM. **That run had not finished when this
-  was written**, and `docs/steam_namespace.md` §12.2a says so in the same
-  words.
+  the same run. **It ran: `pointer 0 → 2` for two moves, then `2 → 22` for
+  twenty wheel events with the cursor STILL.** Exactly twenty. So QEMU's
+  `virtio-tablet-pci` does deliver `EV_REL`/`REL_WHEEL`, `pump_input`
+  accumulates it, `deliver_pointer` fires and `route_pointer` writes the `'s'`
+  line — **everything upstream of `/dev/wsys/<wid>/pointer` is ruled out and
+  the remaining drop is in this tree.** A SECOND defect was found and fixed
+  there on the strength of that (`wl_pointer.axis_discrete` was being sent
+  *after* its `axis` event; the protocol says before), and a **third** Steam
+  boot still got `IDENTICAL (0 of 564400 px)` from the wheel on a loaded store
+  page. So: two real compositor defects fixed, gate green and failing on
+  revert, symptom still present. The one candidate left is that the gate uses
+  the dev host's Xwayland (trixie, 24.x) while the namespace ships **22.1.9**
+  — which makes the next step concrete and small: give `wsyswl_wheel.sh` an
+  arm that runs against 22.1.9, because a gate that only ever tests a newer
+  server than the distribution ships has a blind spot exactly the size of this
+  bug. `docs/steam_namespace.md` §12.2a carries all three measurements.
 * **(SOLVED — kept because the shape is the lesson) Steam's login window is on
   the Hamnix desktop.** `build/steamprobe/steam_login_maxmap64.png`. It was
   `MAXMAP`: `wsyswl` gave each connection **16** wl_shm mappings and Steam's X
