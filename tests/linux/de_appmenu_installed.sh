@@ -154,34 +154,46 @@ fi
 # built tarballs, and will fail on anything this misses.
 echo
 echo "=== 3. the package lists name them too ==="
+# The package script itself is asked, rather than grepped: it OWNS the
+# mapping (per-app packages are generated from these very launcher files, and
+# three launchers live in the components that already carry their programs).
+# A grep would have to re-implement that and would then agree with itself.
 PKG=scripts/hamlinux_packages.py
-if grep -q 'HAMDE_APPS' "$PKG" && grep -q 'HAMDE_APPS' <(grep -A2 'SKEL_FILES + HAMDE_APPS' "$PKG" || true); then
-    ok "scripts/hamlinux_packages.py carries etc/hamde/apps in a package (HAMDE_APPS)"
-else
-    bad "no package carries etc/hamde/apps -- an installed machine could never receive a new launcher or a fix to one"
-fi
-# The command lists are several (DESKTOP_CMDS, SYS_CMDS, NET_CMDS, ...) and
-# which one a program belongs to is a packaging decision, not this gate's
-# business -- haminstallui is the installer's, not the desktop's. What this
-# asks is only whether SOME list names it.
-python3 - "$PKG" > "$WORK/pkgcmds.txt" <<'PY'
-import re, sys
+python3 - "$PKG" > "$WORK/pkgmap.txt" 2>"$WORK/pkgmap.err" <<'PY'
+import importlib.util, os, re, sys
+spec = importlib.util.spec_from_file_location("hp", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+# every launcher a package carries, and every program a package carries
+launchers, progs = set(), set()
+for cmd, launcher, _n, _c in m.desktop_apps():
+    launchers.add(launcher); progs.add(cmd)
+for f, home in m.DESKTOP_APP_HOMES.items():
+    launchers.add(f)
 src = open(sys.argv[1]).read()
-names = set()
-for m in re.finditer(r'^[A-Z_]*CMDS\s*=\s*\(?(.*?)\)?\.split\(\)', src, re.S | re.M):
-    for s in re.findall(r'"([^"]*)"', m.group(1)):
-        names.update(s.split())
-print("\n".join(sorted(names)))
+for mm in re.finditer(r'^[A-Z_]*CMDS\s*=\s*\(?(.*?)\)?\.split\(\)', src, re.S | re.M):
+    for s in re.findall(r'"([^"]*)"', mm.group(1)):
+        progs.update(s.split())
+for x in sorted(launchers): print("launcher", x)
+for x in sorted(progs):     print("prog", x)
 PY
-unpkg=()
+if [ -s "$WORK/pkgmap.txt" ]; then
+    nl=$(grep -c '^launcher ' "$WORK/pkgmap.txt")
+    ok "scripts/hamlinux_packages.py places all $nl launchers in packages (one per application, beside the program it launches)"
+else
+    bad "could not ask scripts/hamlinux_packages.py which launchers it packages"; cat "$WORK/pkgmap.err" >&2
+fi
+unpkg=(); unlnch=()
 for b in "${CATALOGUE[@]}"; do
     cmd="$(basename "$(exec_prog "etc/hamde/apps/$b")")"
-    grep -qx "$cmd" "$WORK/pkgcmds.txt" || unpkg+=("$cmd")
+    grep -qx "prog $cmd" "$WORK/pkgmap.txt"  || unpkg+=("$cmd")
+    grep -qx "launcher $b" "$WORK/pkgmap.txt" || unlnch+=("$b")
 done
-if [ "${#unpkg[@]}" = 0 ]; then
-    ok "every launcher's program is named in one of scripts/hamlinux_packages.py's command lists ($(wc -l < "$WORK/pkgcmds.txt") programs in all)"
+if [ "${#unpkg[@]}" = 0 ] && [ "${#unlnch[@]}" = 0 ]; then
+    ok "every launcher AND every program it names is carried by some package"
 else
-    bad "${#unpkg[@]} launcher programs are in the image and in no package: ${unpkg[*]}. tests/linux/channel_covers_image.sh will fail on these too; they are named here because THIS is where they became menu rows."
+    [ "${#unpkg[@]}" = 0 ] || bad "${#unpkg[@]} launcher programs are in the image and in no package: ${unpkg[*]}"
+    [ "${#unlnch[@]}" = 0 ] || bad "${#unlnch[@]} launchers are in the image and in no package: ${unlnch[*]} -- an installed machine could never receive them, so its menu would be whatever its install medium happened to carry, for ever"
 fi
 
 if [ "${APPMENU_INST_NOBOOT:-0}" = 1 ]; then
@@ -277,12 +289,31 @@ fi
 # THE COUNT THE PANEL ITSELF REPORTS. One entry short of the catalogue, and
 # short by exactly the one whose program was removed.
 ENTRIES="$(grep -a 'appmenu entries:' "$WORK/boot.txt" | tail -1 | sed 's/.*entries: *//' | tr -dc '0-9')"
-WANT=$((NCAT - 1))
-info "the panel reports [panel] appmenu entries: ${ENTRIES:-<none>} (catalogue $NCAT, one program removed)"
+# THE EXPECTED COUNT IS DERIVED, NOT WRITTEN DOWN, and the first run of this
+# gate is why: it expected NCAT-1 and got NCAT-2, because a launcher marked
+# `X-Hamnix-LiveOnly=true` (the installer's) is correctly absent from a boot
+# that is not an installer medium -- a SECOND, legitimate reason for a row not
+# to be there. A hard-coded number would have been "fixed" by lowering it,
+# which would then have hidden a genuinely dropped app for ever.
+NLIVE="$(grep -l 'X-Hamnix-LiveOnly=true' etc/hamde/apps/*.desktop 2>/dev/null | wc -l)"
+WANT=$((NCAT - NLIVE - 1))
+info "the panel reports [panel] appmenu entries: ${ENTRIES:-<none>}  (catalogue $NCAT, minus $NLIVE live-only launcher(s) on a non-installer boot, minus the 1 whose program was removed = $WANT)"
 if [ "$ENTRIES" = "$WANT" ]; then
     ok "the menu lists $WANT entries -- every launcher whose program is installed, and not the one whose is not"
 else
-    bad "the menu lists ${ENTRIES:-<none>} entries; $WANT were expected ($NCAT launchers, one of them with no program). A count EQUAL to $NCAT means a row that does nothing when clicked; a smaller one means something else was dropped."
+    bad "the menu lists ${ENTRIES:-<none>} entries; $WANT were expected. A count of $((NCAT - NLIVE)) means a row that does nothing when a person clicks it; a smaller one means something else was dropped, and the appmenu-missing lines below say what."
+    grep -a 'appmenu-missing' "$WORK/boot.txt" | sort -u | sed 's/^/    /'
+fi
+
+# EXACTLY ONE launcher was dropped for a missing program, and it is the one
+# whose program this gate removed. Two gaps that cancel out would satisfy the
+# count above on their own.
+NMISS="$(grep -a 'appmenu-missing' "$WORK/boot.txt" | sort -u | wc -l)"
+if [ "$NMISS" = 1 ]; then
+    ok "exactly one launcher was dropped for a missing program, so the count above is not two errors cancelling"
+else
+    bad "$NMISS distinct launchers were dropped for a missing program; exactly 1 was removed by this gate"
+    grep -a 'appmenu-missing' "$WORK/boot.txt" | sort -u | sed 's/^/    /'
 fi
 
 # AND IT SAID SO. A row dropped in silence is the same shape as the bug.

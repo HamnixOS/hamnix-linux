@@ -132,21 +132,7 @@ SYS_CMDS = "hlinstall haminstallui nsrun reboot halt poweroff install".split()
 # /bin, this one puts it in a package so `hpm update` can ever fix it.
 DESKTOP_CMDS = ("wsysd wsyswl xbridge hamdesktop hampanelscene hamtermscene "
                 "hameditscene hamsettings hamfm hamUI hamUId xsnarfd "
-                "hamimgscene hamappmenu "
-                # THE APPLICATIONS THE MENU LISTS. Every program named by an
-                # Exec= line in etc/hamde/apps/*.desktop (HAMDE_APPS below).
-                # Three of them were already here; the other 23 were in the
-                # tree, in the run sweep and in a shipped launcher, and in no
-                # image and no package -- so the Applications menu could only
-                # ever have offered three rows. See the matching block in
-                # scripts/hamlinux_image.sh, and tests/linux/
-                # de_appmenu_installed.sh, which fails if a launcher and this
-                # list ever disagree again.
-                "ham2048scene hamaudioscene hambrowse hamcalcscene "
-                "hamcalscene hamchessscene hamctl hamfmscene hamgamedemo "
-                "hamgamesnake haminput hamlogscene hamminescene hammonscene "
-                "hamnotesscene hamsheet hamshotui hamslides hamsnakescene "
-                "hamsoftware hamtetrisscene hamvideoscene hamwrite").split()
+                "hamimgscene hamappmenu").split()
 
 
 # --------------------------------------------------------------------------
@@ -268,20 +254,79 @@ MAN_PAGES = glob_files(["etc/man/*.md"], "usr/share/man")
 # shipped: see the exclusion list in tests/linux/channel_covers_image.sh.
 SKEL_FILES = tree_files("etc/skel", "etc/skel")
 
-# /etc/hamde/apps -- THE APPLICATIONS MENU'S DATA. Every menu in this desktop
-# (hamappmenu's Brisk menu, hampanelscene's dropdown, hamde) is data-driven
-# from these *.desktop launchers, and until this line the image did not stage
-# them and no package carried them, so every machine ran on its menu's
-# compiled-in FALLBACK list -- which names programs the image does not build.
-# Both halves are needed and neither is sufficient: scripts/hamlinux_image.sh
-# puts them in the initramfs, this list puts them in a package so a machine
-# installed from 255.one can ever receive a new launcher (or a fix to one).
-# tests/linux/channel_covers_image.sh fails if either stops.
+# --------------------------------------------------------------------------
+# /etc/hamde/apps -- THE APPLICATIONS MENU'S DATA, AND THE PROGRAMS IT NAMES
+# --------------------------------------------------------------------------
+# Every menu in this desktop (hamappmenu's Brisk menu, hampanelscene's
+# dropdown, hamde) is data-driven from these *.desktop launchers. Until this
+# block, NO PACKAGE CARRIED THEM AT ALL and the image did not stage them
+# either, so every machine ran on its menu's compiled-in fallback list -- a
+# list naming programs the image does not build. See
+# tests/linux/de_appmenu_installed.sh.
+#
+# ONE PACKAGE PER APPLICATION, CARRYING THE LAUNCHER AND THE PROGRAM TOGETHER.
+# That pairing is the whole point, and it is structural rather than a rule
+# somebody has to remember: the defect this is fixing is exactly a launcher
+# and its program being in different places and one of them being missing.
+# With them in one package, a machine cannot have the row without the program
+# it launches, and `hpm remove` cannot leave the row behind.
+#
+# It is also what the sizes force, which is worth recording rather than
+# discovering again. Putting all 23 into hamnix-desktop produced a package
+# hpm CANNOT INSTALL and hamlinux_packages refused to publish it -- 7,431,064
+# B gzipped against TARBALL_CAP 4 MiB and 16,220,160 B inflated against
+# TAR_CAP 8 MiB (user/hpm.ad unpacks entirely in RAM through two fixed
+# arrays). The refusal is the same shape as every other one in this file: a
+# repository that offers an uninstallable package is a lie. One package per
+# app is the same answer the coreutils already use, and `hamnix-apps` is the
+# metapackage that pulls the set in, exactly as `hamnix-coreutils` does.
 #
 # apps-optional/ is NOT here: each of those launchers ships with the optional
-# package that carries its program (scripts/build_packages.py), which is the
-# invariant that keeps a listed app and an installed app the same set.
-HAMDE_APPS = tree_files("etc/hamde/apps", "etc/hamde/apps")
+# package that carries its program (scripts/build_packages.py) -- the same
+# invariant, arrived at independently.
+#
+# THREE LAUNCHERS ARE NOT IN THIS TABLE, because their programs already ship
+# in another package and the pairing rule sends the launcher after the
+# program, not the other way round:
+#   terminal.desktop  -> hamtermscene, editor.desktop -> hameditscene, both
+#                        in hamnix-desktop (they are the DE's own chrome apps)
+#   installer.desktop -> haminstallui, in hamnix-install
+# They are named in those components' extras below.
+DESKTOP_APP_HOMES = {          # launcher -> the package that already has its program
+    "terminal.desktop":  "hamnix-desktop",
+    "editor.desktop":    "hamnix-desktop",
+    "installer.desktop": "hamnix-install",
+}
+
+
+def desktop_apps():
+    """[(cmd, launcher-basename, Name, Comment)] for every launcher whose
+    program needs a package of its own. Derived from the FILES, so adding an
+    application is still dropping a .desktop file."""
+    out = []
+    d = os.path.join(ROOT, "etc/hamde/apps")
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".desktop") or fn in DESKTOP_APP_HOMES:
+            continue
+        name = comment = ""
+        prog = None
+        for line in open(os.path.join(d, fn)):
+            line = line.rstrip("\n")
+            if line.startswith("Exec=") and prog is None:
+                prog = line[5:].split()[0]
+            elif line.startswith("Name=") and not name:
+                name = line[5:]
+            elif line.startswith("Comment=") and not comment:
+                comment = line[8:]
+        if prog:
+            out.append((os.path.basename(prog), fn, name or fn, comment))
+    return out
+
+
+def launchers_for(pkg):
+    """Launcher entries this component owns outright (see DESKTOP_APP_HOMES)."""
+    return [("etc/hamde/apps/" + f, "etc/hamde/apps/" + f)
+            for f, home in sorted(DESKTOP_APP_HOMES.items()) if home == pkg]
 
 # --------------------------------------------------------------------------
 # Component packages: name -> (description, [binaries], [extra files as
@@ -421,7 +466,8 @@ COMPONENTS = {
         [(c, "bin/" + c) for c in MOD_CMDS], [], ["hamnix-init>=1"]),
     "hamnix-install": (
         "installer and system tools -- hlinstall, haminstallui, nsrun, reboot",
-        [(c, "bin/" + c) for c in SYS_CMDS], [], ["hamnix-init>=1"]),
+        [(c, "bin/" + c) for c in SYS_CMDS],
+        launchers_for("hamnix-install"), ["hamnix-init>=1"]),
     "hamnix-adder": (
         "the Adder toolchain -- `ac foo.ad -o foo` on the box: the driver "
         "(/bin/ac), the compiler it execs (/bin/host_ac, static), and the "
@@ -444,7 +490,8 @@ COMPONENTS = {
          # The shim the application menu runs a distribution's program
          # through, so a .desktop file in Debian or Alpine gets a display to
          # draw on. /etc/rc.distros copies it INTO each tree at boot.
-         ("etc/de-ns-run.linux", "etc/de-ns-run")] + SKEL_FILES + HAMDE_APPS,
+         ("etc/de-ns-run.linux", "etc/de-ns-run")] + SKEL_FILES
+        + launchers_for("hamnix-desktop"),
         ["hamnix-init>=1", "hamnix-hamsh>=1"]),
 }
 
@@ -2171,6 +2218,30 @@ def main():
     else:
         skipped.append("hamnix-vkprobe (did not build)")
 
+    # ONE PACKAGE PER DESKTOP APPLICATION, each carrying its program AND the
+    # .desktop launcher that puts it on the Applications menu. See
+    # DESKTOP_APP_HOMES above for why they are paired and why they are not one
+    # package. A launcher whose program did not build is DROPPED WITH IT --
+    # `skipped` is what the closure check below refuses an index over, and a
+    # row on a menu with nothing behind it is the defect this whole block
+    # exists to close.
+    app_pkgs = []
+    for cmd, launcher, name, comment in desktop_apps():
+        elf = build_one(cmd, objdir)
+        if not elf:
+            skipped.append("hamnix-app-%s (%s did not build)" % (cmd, cmd))
+            continue
+        desc = "%s -- %s" % (name, comment) if comment else name
+        entries.append(write_pkg(
+            pkgdir, "hamnix-app-" + cmd, args.version,
+            desc + " (/bin/%s, and the launcher that lists it in the "
+                   "Applications menu)" % cmd,
+            [(elf, "bin/" + cmd),
+             (os.path.join(ROOT, "etc/hamde/apps", launcher),
+              "etc/hamde/apps/" + launcher)],
+            ["hamnix-desktop>=1"]))
+        app_pkgs.append("hamnix-app-" + cmd)
+
     # One package per command.
     cmd_pkgs = []
     for cmd in COREUTILS:
@@ -2189,13 +2260,30 @@ def main():
         pkgdir, "hamnix-coreutils", args.version,
         "hamnix-linux core userland -- pulls in every per-command package",
         [], sorted(cmd_pkgs)))
+    # The application set, the same shape as hamnix-coreutils: what it carries
+    # is the closure. `hpm remove hamnix-app-hamchess` takes the chess program
+    # and the chess row off the menu together, which is the property the
+    # per-app split was for.
+    entries.append(write_pkg(
+        pkgdir, "hamnix-apps", args.version,
+        "hamnix-linux desktop applications -- pulls in every per-application "
+        "package, each carrying its program and the launcher that lists it in "
+        "the Applications menu",
+        [], sorted(app_pkgs) + ["hamnix-desktop>=1"]))
     # hamnix-base pulls in the manual pages and the boot modules too. Both are
     # conditional on having been BUILT: the closure check below refuses an
     # index whose flagship package names something the channel does not carry,
     # and a host with no /lib/modules cannot produce hamnix-drivers-base.
     built_names = {e["name"] for e in entries}
+    # hamnix-apps is in here for the reason NORTH_STAR.md's invariant is about:
+    # a machine installed with `hpm install hamnix-base` gets the desktop, and
+    # a desktop whose Applications menu has three rows on it is not the
+    # distribution this tree builds. It is in the closure-checked list below
+    # like every other dependency, so a channel that failed to build one of
+    # the app packages has no index rather than a menu with a hole in it.
     base_deps = ["hamnix-init>=1", "hamnix-hamsh>=1", "hamnix-coreutils>=1",
-                 "hamnix-net>=1", "hpm>=1", "hamnix-desktop>=1"]
+                 "hamnix-net>=1", "hpm>=1", "hamnix-desktop>=1",
+                 "hamnix-apps>=1"]
     for optional in ("hamnix-man", "hamnix-drivers-base"):
         if optional in built_names:
             base_deps.append(optional + ">=1")
