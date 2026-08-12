@@ -1,0 +1,642 @@
+# tests/linux/wlclip.ad — a NATIVE WAYLAND CLIENT that copies and pastes.
+#
+# The oracle for the wl_data_device half of the clipboard. It exists because
+# the thing that had to be measured has no stand-in on this host:
+#
+#   * `wl-copy` / `wl-paste` (wl-clipboard) are NOT INSTALLED here, and were
+#     checked for by name before this file was written. A gate that quietly
+#     skipped its own subject would be the success-shaped failure
+#     NORTH_STAR.md is about.
+#   * Xwayland IS installed and IS a native Wayland client with a real
+#     wl_data_device — and tests/linux/wlsnarf_bridge.sh uses it as the
+#     third-party arm — but Xwayland answers only what the X selection code
+#     inside it chooses to ask for. It cannot be told "offer this mime and no
+#     other", "offer NOTHING you can deliver", or "ask for a type the
+#     compositor does not have". Those are the arms that prove the compositor
+#     REFUSES rather than lies, and they need a client under test control.
+#
+# So this speaks the Wayland wire protocol by hand, exactly as user/xsnarfd.ad
+# speaks X11 by hand and for the same reason: libwayland-client would make this
+# a foreign binary, and a foreign binary cannot open /dev/snarf. Here the
+# binding constraint is milder -- this client never touches /dev/snarf, it is
+# the OTHER side -- but the wire is small and writing it out means the test
+# depends on nothing that is not in this repository.
+#
+#   wlclip <wayland-socket> copy <text>       own the selection with <text>,
+#                                             then serve every send. STAYS
+#                                             ALIVE, like `xclip -i` does.
+#   wlclip <wayland-socket> copyfile <path>   ditto, from a file (the cap arm)
+#   wlclip <wayland-socket> copybare <text>   set a selection offering a mime
+#                                             this compositor cannot deliver
+#                                             (application/x-nonsense). The
+#                                             negative control.
+#   wlclip <wayland-socket> copynull          set_selection(NULL) -- give the
+#                                             selection up
+#   wlclip <wayland-socket> paste [mime]      print `wlpaste <len> <text>`
+#   wlclip <wayland-socket> mimes             print the offered mime list
+#
+# ADDER QUIRKS THIS FILE OBEYS: no adjacent string-literal concatenation;
+# every buffer is a top-level BSS array and not a frame local; a string literal
+# assigned INTO a global array comes out NULL, so paths are copied byte-wise.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_unix_connect(path: Ptr[char]) -> int32
+extern def sys_scm_recv(fd: int32, buf: Ptr[uint8], cap: uint64,
+                        fds: Ptr[int32], maxfds: int32,
+                        nfds: Ptr[int32]) -> int64
+extern def sys_scm_send(fd: int32, buf: Ptr[uint8], n: uint64,
+                        passfd: int32) -> int64
+extern def sys_pipe(fds: Ptr[int32]) -> int32
+extern def sys_exit(code: uint64)
+
+SNARF_MAX: uint64 = 65536
+
+# The wl_display object is always id 1; a client allocates from 2 up. These are
+# fixed rather than allocated because this client creates a known, small set.
+ID_DISPLAY:  uint32 = 1
+ID_REGISTRY: uint32 = 2
+ID_SEAT:     uint32 = 3
+ID_DDM:      uint32 = 4
+ID_DDEV:     uint32 = 5
+ID_SRC:      uint32 = 6
+ID_SYNC:     uint32 = 7
+
+# ---------------------------------------------------------------- buffers
+out:      Array[8192, uint8]
+inbuf:    Array[16384, uint8]
+acc:      Array[131072, uint8]       # partial wire messages accumulate here
+payload:  Array[65600, uint8]        # what we copy, or what we pasted
+mimebuf:  Array[256, uint8]          # the mime of the send/offer being parsed
+wantmime: Array[256, uint8]          # the mime `paste` asks for
+mimelist: Array[2048, uint8]         # every mime the offer advertised
+sockpath: Array[512, uint8]
+argbuf:   Array[512, uint8]
+numbuf:   Array[24, uint8]
+waitset:  Array[4, int32]
+recvfds:  Array[8, int32]
+nrecv:    Array[2, int32]
+pipefds:  Array[2, int32]
+
+out_pos:   uint64 = 0
+acc_len:   uint64 = 0
+plen:      uint64 = 0
+mimelist_len: uint64 = 0
+
+wfd:        int32 = -1
+seat_name:  uint32 = 0
+seat_ver:   uint32 = 0
+ddm_name:   uint32 = 0
+ddm_ver:    uint32 = 0
+have_seat:  int32 = 0
+have_ddm:   int32 = 0
+sync_done:  int32 = 0
+
+offer_id:   uint32 = 0        # the CURRENT wl_data_offer the server made
+sel_offer:  uint32 = 0        # the one wl_data_device.selection named
+got_sel:    int32 = 0
+sends:      int32 = 0
+cancelled:  int32 = 0
+
+# ---------------------------------------------------------------- basics
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: uint64):
+    n: uint64 = 0
+    x: uint64 = v
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def say(s: Ptr[uint8]):
+    puts(1, "[wlclip] ")
+    puts(1, s)
+
+
+def sayerr(s: Ptr[uint8]):
+    puts(2, "[wlclip] ")
+    puts(2, s)
+
+
+def copy_bytes(dst: Ptr[uint8], src: Ptr[uint8], n: uint64):
+    i: uint64 = 0
+    while i < n:
+        dst[i] = src[i]
+        i = i + 1
+
+
+def streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    if a[i] != b[i]:
+        return 0
+    return 1
+
+
+def put32(buf: Ptr[uint8], at: uint64, v: uint32):
+    buf[at] = cast[uint8](v & 0xff)
+    buf[at + 1] = cast[uint8]((v >> 8) & 0xff)
+    buf[at + 2] = cast[uint8]((v >> 16) & 0xff)
+    buf[at + 3] = cast[uint8]((v >> 24) & 0xff)
+
+
+def get32(buf: Ptr[uint8], at: uint64) -> uint32:
+    v: uint32 = cast[uint32](buf[at])
+    v = v | (cast[uint32](buf[at + 1]) << 8)
+    v = v | (cast[uint32](buf[at + 2]) << 16)
+    v = v | (cast[uint32](buf[at + 3]) << 24)
+    return v
+
+
+# ---------------------------------------------------------------- the wire
+#
+# A Wayland message is: u32 object id, then u32 (size<<16 | opcode), where size
+# COUNTS THE HEADER. A string is u32 length INCLUDING its NUL, the bytes, then
+# zero padding to a 4-byte boundary. That padding is not decoration: a parser
+# that omits it desynchronises for good, which is the failure mode this whole
+# tree keeps meeting in other protocols.
+
+def msg_begin(obj: uint32) -> uint64:
+    start: uint64 = out_pos
+    put32(&out[0], start, obj)
+    put32(&out[0], start + 4, 0)
+    out_pos = start + 8
+    return start
+
+
+def msg_end(start: uint64, opcode: uint32):
+    size: uint32 = cast[uint32](out_pos - start)
+    put32(&out[0], start + 4, (size << 16) | (opcode & 0xffff))
+
+
+def arg_u32(v: uint32):
+    put32(&out[0], out_pos, v)
+    out_pos = out_pos + 4
+
+
+def arg_str(s: Ptr[uint8]):
+    n: uint64 = slen(s) + 1                    # the NUL is part of the length
+    put32(&out[0], out_pos, cast[uint32](n))
+    out_pos = out_pos + 4
+    i: uint64 = 0
+    while i < n:
+        out[out_pos + i] = s[i]
+        i = i + 1
+    out_pos = out_pos + n
+    while out_pos % 4 != 0:
+        out[out_pos] = 0
+        out_pos = out_pos + 1
+
+
+def flushw(passfd: int32):
+    if out_pos == 0 and passfd < 0:
+        return
+    sys_scm_send(wfd, &out[0], out_pos, passfd)
+    out_pos = 0
+
+
+# ---------------------------------------------------------------- requests
+
+def req_get_registry():
+    s: uint64 = msg_begin(ID_DISPLAY)
+    arg_u32(ID_REGISTRY)
+    msg_end(s, 1)
+
+
+def req_sync(cb: uint32):
+    sync_done = 0
+    s: uint64 = msg_begin(ID_DISPLAY)
+    arg_u32(cb)
+    msg_end(s, 0)
+
+
+def req_bind(name: uint32, iface: Ptr[uint8], ver: uint32, newid: uint32):
+    s: uint64 = msg_begin(ID_REGISTRY)
+    arg_u32(name)
+    arg_str(iface)
+    arg_u32(ver)
+    arg_u32(newid)
+    msg_end(s, 0)
+
+
+def req_get_data_device():
+    s: uint64 = msg_begin(ID_DDM)
+    arg_u32(ID_DDEV)
+    arg_u32(ID_SEAT)
+    msg_end(s, 1)
+
+
+def req_create_source():
+    s: uint64 = msg_begin(ID_DDM)
+    arg_u32(ID_SRC)
+    msg_end(s, 0)
+
+
+def req_source_offer(mime: Ptr[uint8]):
+    s: uint64 = msg_begin(ID_SRC)
+    arg_str(mime)
+    msg_end(s, 0)
+
+
+def req_set_selection(src: uint32):
+    s: uint64 = msg_begin(ID_DDEV)
+    arg_u32(src)
+    arg_u32(1)                                  # serial -- this server ignores it
+    msg_end(s, 1)
+
+
+def req_offer_receive(offer: uint32, mime: Ptr[uint8], fd: int32):
+    s: uint64 = msg_begin(offer)
+    arg_str(mime)
+    msg_end(s, 1)
+    flushw(fd)
+
+
+# ---------------------------------------------------------------- events
+
+# Pull one string argument out of an event body at `at`, into `dst`.
+# Returns the offset just past it (padding included).
+def read_str(body: Ptr[uint8], at: uint64, dst: Ptr[uint8], cap: uint64) -> uint64:
+    n: uint64 = cast[uint64](get32(body, at))
+    p: uint64 = at + 4
+    i: uint64 = 0
+    while i + 1 < n and i + 1 < cap:
+        dst[i] = body[p + i]
+        i = i + 1
+    dst[i] = 0
+    pad: uint64 = n
+    while pad % 4 != 0:
+        pad = pad + 1
+    return p + pad
+
+
+def handle_source_send(body: Ptr[uint8], blen: uint64, fd: int32):
+    read_str(body, 0, &mimebuf[0], 256)
+    if fd < 0:
+        sayerr("wl_data_source.send arrived with NO descriptor\n")
+        return
+    done: uint64 = 0
+    while done < plen:
+        k: int64 = sys_write(fd, &payload[done], plen - done)
+        if k <= 0:
+            break
+        done = done + cast[uint64](k)
+    sys_close(fd)
+    sends = sends + 1
+    say("served ")
+    putd(1, done)
+    puts(1, " bytes as ")
+    puts(1, &mimebuf[0])
+    puts(1, "\n")
+
+
+def handle_msg(obj: uint32, opcode: uint32, body: Ptr[uint8], blen: uint64,
+               fd: int32) -> int32:
+    if obj == ID_DISPLAY:
+        if opcode == 0:                          # wl_display.error
+            sayerr("wl_display.error from the compositor\n")
+            return -1
+        return 0
+    if obj == ID_SYNC and opcode == 0:
+        sync_done = 1
+        return 0
+    if obj == ID_REGISTRY and opcode == 0:       # global(name, iface, version)
+        nm: uint32 = get32(body, 0)
+        p: uint64 = read_str(body, 4, &mimebuf[0], 256)
+        vr: uint32 = get32(body, p)
+        if streq(&mimebuf[0], "wl_seat") == 1:
+            seat_name = nm
+            seat_ver = vr
+            have_seat = 1
+        if streq(&mimebuf[0], "wl_data_device_manager") == 1:
+            ddm_name = nm
+            ddm_ver = vr
+            have_ddm = 1
+        return 0
+    if obj == ID_SRC:
+        if opcode == 1:                          # send(mime, fd)
+            handle_source_send(body, blen, fd)
+            return 0
+        if opcode == 2:                          # cancelled
+            cancelled = cancelled + 1
+            say("the compositor CANCELLED our data source\n")
+            return 0
+        return 0
+    if obj == ID_DDEV:
+        if opcode == 0:                          # data_offer(new_id)
+            offer_id = get32(body, 0)
+            mimelist_len = 0
+            mimelist[0] = 0
+            return 0
+        if opcode == 5:                          # selection(id)
+            sel_offer = get32(body, 0)
+            got_sel = 1
+            return 0
+        return 0
+    if offer_id != 0 and obj == offer_id and opcode == 0:   # wl_data_offer.offer
+        read_str(body, 0, &mimebuf[0], 256)
+        n: uint64 = slen(&mimebuf[0])
+        if mimelist_len + n + 2 < 2048:
+            if mimelist_len > 0:
+                mimelist[mimelist_len] = 32
+                mimelist_len = mimelist_len + 1
+            copy_bytes(&mimelist[mimelist_len], &mimebuf[0], n)
+            mimelist_len = mimelist_len + n
+            mimelist[mimelist_len] = 0
+        return 0
+    return 0
+
+
+# One non-blocking recvmsg, then every COMPLETE message in the accumulator.
+# Returns -1 when the compositor has hung up.
+def pump() -> int32:
+    n: int64 = sys_scm_recv(wfd, &inbuf[0], 16384, &recvfds[0], 8, &nrecv[0])
+    if n < 0:
+        return -1
+    fd: int32 = -1
+    if nrecv[0] > 0:
+        fd = recvfds[0]
+    if n > 0:
+        if acc_len + cast[uint64](n) <= 131072:
+            copy_bytes(&acc[acc_len], &inbuf[0], cast[uint64](n))
+            acc_len = acc_len + cast[uint64](n)
+        else:
+            sayerr("the event accumulator overflowed\n")
+            return -1
+    p: uint64 = 0
+    while acc_len - p >= 8:
+        obj: uint32 = get32(&acc[0], p)
+        w: uint32 = get32(&acc[0], p + 4)
+        size: uint64 = cast[uint64](w >> 16)
+        if size < 8 or p + size > acc_len:
+            break
+        # THE DESCRIPTOR BELONGS TO THE FIRST MESSAGE OF THE BURST THAT
+        # CARRIED IT, which is the same rule user/wsyswl.ad learned on the
+        # receiving side: the kernel attaches ancillary data to the first byte
+        # of the sendmsg, not to the message inside the stream that wanted it.
+        if handle_msg(obj, w & 0xffff, &acc[p + 8], size - 8, fd) < 0:
+            return -1
+        fd = -1
+        p = p + size
+    if p > 0:
+        i: uint64 = 0
+        while p + i < acc_len:
+            acc[i] = acc[p + i]
+            i = i + 1
+        acc_len = acc_len - p
+    return 0
+
+
+# Pump until `sync_done`, or `ms` milliseconds go by. 0 = the roundtrip never
+# came back, which on this wire means the compositor is not answering at all.
+def roundtrip(ms: int64) -> int32:
+    req_sync(ID_SYNC)
+    flushw(-1)
+    waited: int64 = 0
+    while waited < ms:
+        if pump() < 0:
+            return 0
+        if sync_done == 1:
+            return 1
+        waitset[0] = wfd
+        sys_waitfds(&waitset[0], 1, 20)
+        waited = waited + 20
+    return 0
+
+
+# ---------------------------------------------------------------- setup
+
+def connect_and_bind(path: Ptr[uint8]) -> int32:
+    wfd = sys_unix_connect(cast[Ptr[char]](path))
+    if wfd < 0:
+        sayerr("cannot connect to the Wayland socket at ")
+        puts(2, path)
+        puts(2, "\n")
+        return 0
+    req_get_registry()
+    if roundtrip(3000) == 0:
+        sayerr("the compositor never answered wl_display.sync\n")
+        return 0
+    if have_ddm == 0:
+        # NAMED, not defaulted. A compositor that does not advertise the
+        # manager has no Wayland clipboard at all and that is the answer.
+        sayerr("this compositor does not advertise wl_data_device_manager\n")
+        return 0
+    if have_seat == 0:
+        sayerr("this compositor does not advertise wl_seat\n")
+        return 0
+    v: uint32 = ddm_ver
+    if v > 3:
+        v = 3
+    req_bind(ddm_name, "wl_data_device_manager", v, ID_DDM)
+    sv: uint32 = seat_ver
+    if sv > 5:
+        sv = 5
+    req_bind(seat_name, "wl_seat", sv, ID_SEAT)
+    req_get_data_device()
+    flushw(-1)
+    if roundtrip(3000) == 0:
+        sayerr("the compositor stopped answering after get_data_device\n")
+        return 0
+    return 1
+
+
+# ---------------------------------------------------------------- modes
+
+def do_copy(bare: int32) -> int32:
+    req_create_source()
+    if bare == 1:
+        # A TYPE THIS COMPOSITOR CANNOT DELIVER, AND NOTHING ELSE. The point
+        # of this arm is that the answer must be a refusal that says so, not a
+        # clipboard quietly set to nothing.
+        req_source_offer("application/x-nonsense")
+    else:
+        req_source_offer("text/plain;charset=utf-8")
+        req_source_offer("text/plain")
+    req_set_selection(ID_SRC)
+    flushw(-1)
+    say("set_selection with ")
+    putd(1, plen)
+    puts(1, " bytes\n")
+    # STAY ALIVE AND SERVE, the way `xclip -i` does: a data source that exits
+    # is a selection nobody can read, and the test reaps this by pid.
+    while 1 == 1:
+        if pump() < 0:
+            say("the compositor closed the connection\n")
+            return 0
+        waitset[0] = wfd
+        sys_waitfds(&waitset[0], 1, 200)
+    return 0
+
+
+def do_copynull() -> int32:
+    req_set_selection(0)
+    flushw(-1)
+    say("set_selection(NULL) -- the Wayland side owns nothing now\n")
+    roundtrip(1000)
+    return 1
+
+
+def do_paste() -> int32:
+    # The selection may already have been announced during setup; if not, wait
+    # for it. Either way there is a bounded, LOUD end to the waiting.
+    waited: int64 = 0
+    while waited < 3000 and got_sel == 0:
+        if pump() < 0:
+            sayerr("the compositor closed the connection\n")
+            return 0
+        waitset[0] = wfd
+        sys_waitfds(&waitset[0], 1, 20)
+        waited = waited + 20
+    if got_sel == 0:
+        puts(1, "wlpaste NOSELECTION\n")
+        return 0
+    if sel_offer == 0:
+        puts(1, "wlpaste EMPTY\n")
+        return 0
+    if sys_pipe(&pipefds[0]) != 0:
+        sayerr("pipe(2) failed\n")
+        return 0
+    req_offer_receive(sel_offer, &wantmime[0], pipefds[1])
+    sys_close(pipefds[1])
+    got: uint64 = 0
+    while got < SNARF_MAX:
+        k: int64 = sys_read(pipefds[0], &payload[got], SNARF_MAX - got)
+        if k <= 0:
+            break
+        got = got + cast[uint64](k)
+    sys_close(pipefds[0])
+    payload[got] = 0
+    puts(1, "wlpaste ")
+    putd(1, got)
+    puts(1, " ")
+    sys_write(1, &payload[0], got)
+    puts(1, "\n")
+    return 1
+
+
+def do_mimes() -> int32:
+    waited: int64 = 0
+    while waited < 3000 and got_sel == 0:
+        if pump() < 0:
+            return 0
+        waitset[0] = wfd
+        sys_waitfds(&waitset[0], 1, 20)
+        waited = waited + 20
+    puts(1, "wlmimes ")
+    if mimelist_len == 0:
+        puts(1, "NONE")
+    else:
+        sys_write(1, &mimelist[0], mimelist_len)
+    puts(1, "\n")
+    return 1
+
+
+# ---------------------------------------------------------------- main
+
+def usage():
+    puts(2, "usage: wlclip <wayland-socket> copy|copyfile|copybare|copynull|paste|mimes [arg]\n")
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 3:
+        usage()
+        return 2
+    i: uint64 = 0
+    src: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
+    while src[i] != 0 and i < 500:
+        sockpath[i] = src[i]
+        i = i + 1
+    sockpath[i] = 0
+    mode: Ptr[uint8] = cast[Ptr[uint8]](argv[2])
+
+    # The mime `paste` asks for, defaulting to the one every toolkit uses.
+    j: uint64 = 0
+    dflt: Ptr[uint8] = "text/plain;charset=utf-8"
+    while dflt[j] != 0:
+        wantmime[j] = dflt[j]
+        j = j + 1
+    wantmime[j] = 0
+
+    plen = 0
+    if streq(mode, "copy") == 1 or streq(mode, "copybare") == 1:
+        if argc < 4:
+            usage()
+            return 2
+        a: Ptr[uint8] = cast[Ptr[uint8]](argv[3])
+        k: uint64 = 0
+        while a[k] != 0 and k < SNARF_MAX:
+            payload[k] = a[k]
+            k = k + 1
+        plen = k
+    elif streq(mode, "copyfile") == 1:
+        if argc < 4:
+            usage()
+            return 2
+        f: int32 = sys_open(cast[Ptr[char]](argv[3]))
+        if f < 0:
+            sayerr("cannot open the file to copy\n")
+            return 1
+        got: uint64 = 0
+        while got < SNARF_MAX:
+            n: int64 = sys_read(f, &payload[got], SNARF_MAX - got)
+            if n <= 0:
+                break
+            got = got + cast[uint64](n)
+        sys_close(f)
+        plen = got
+    elif streq(mode, "paste") == 1:
+        if argc >= 4:
+            b: Ptr[uint8] = cast[Ptr[uint8]](argv[3])
+            m: uint64 = 0
+            while b[m] != 0 and m < 250:
+                wantmime[m] = b[m]
+                m = m + 1
+            wantmime[m] = 0
+
+    if connect_and_bind(&sockpath[0]) == 0:
+        return 1
+
+    if streq(mode, "copy") == 1 or streq(mode, "copyfile") == 1:
+        do_copy(0)
+        return 0
+    if streq(mode, "copybare") == 1:
+        do_copy(1)
+        return 0
+    if streq(mode, "copynull") == 1:
+        do_copynull()
+        return 0
+    if streq(mode, "paste") == 1:
+        if do_paste() == 1:
+            return 0
+        return 1
+    if streq(mode, "mimes") == 1:
+        do_mimes()
+        return 0
+    usage()
+    return 2
