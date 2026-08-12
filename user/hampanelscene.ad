@@ -3805,6 +3805,13 @@ def _emit_panel(bar: int64, btime: uint64):
         _compute_addlet_box(bar)
         ctxm_choice_draw(cast[int32](addlet_box_x), cast[int32](addlet_box_y),
                          -1)
+    # THE UPDATE NOTICE, LAST, so it is on top of every popup above it. It is
+    # the one thing on this panel that is not a menu the person opened, and a
+    # dropdown drawn over the sentence explaining why that dropdown is empty
+    # would be the original defect with an extra step. _handle_click tests it
+    # FIRST for the matching reason.
+    if notice_on != 0 and notice_panel == cur_panel_idx:
+        _notice_draw(bar)
 
 
 # Label for context-menu row `ri` given the active ctx_kind.
@@ -4941,6 +4948,14 @@ def _handle_menu_hover(x: int64, y: int64, bar: int64) -> int32:
 # may launch/raise. Returns 1 if a redraw is needed. Uses the layout + the
 # bar/menu-box coords computed in the last emit.
 def _handle_click(x: int64, y: int64, bar: int64) -> int32:
+    # THE UPDATE NOTICE IS TESTED FIRST because it is DRAWN LAST (see the end
+    # of _emit_panel): the card sits over the top-left corner where the Apps
+    # dropdown also opens, and a hit test in draw order would let a click land
+    # on a menu row the person cannot see. Clicking the card dismisses it and
+    # consumes the click -- it does not also launch whatever is underneath.
+    if _notice_hit(x, y, bar) != 0:
+        _notice_dismiss()
+        return 1
     # dropdown open?
     if menu_open != 0 and menu_slot >= 0:
         _compute_menu_box(bar)
@@ -5423,6 +5438,17 @@ def _panel_grow_px(pi: uint64, horiz: int32) -> int64:
             cg = CTX_W
         if cg > g:
             g = cg
+    # The update notice is a popup too, and it is the one the person did not
+    # ask for -- so it takes the max alongside the others rather than
+    # replacing them: a dropdown opened while the notice is up must still fit.
+    if notice_on != 0 and notice_panel == pi:
+        ng: int64 = 0
+        if horiz != 0:
+            ng = NOTICE_H
+        else:
+            ng = NOTICE_W
+        if ng > g:
+            g = ng
     # The add-applet chooser dialog needs the most room of all.
     if addlet_open != 0 and addlet_panel == pi:
         ag: int64 = 0
@@ -5538,6 +5564,7 @@ def _drain_events(pi: uint64, sw: int64, sh: int64) -> int32:
     pre_menu: int32 = pw_menu[pi]
     pre_ctx_open: int32 = ctx_open
     pre_addlet_open: int32 = addlet_open
+    pre_notice: int32 = notice_on
     pre_ctx_h: int64 = 0
     if ctx_open != 0 and ctx_panel == pi:
         pre_ctx_h = ctx_box_h()
@@ -5690,7 +5717,8 @@ def _drain_events(pi: uint64, sw: int64, sh: int64) -> int32:
     if ctx_open != 0 and ctx_panel == pi:
         cur_ctx_h = ctx_box_h()
     if menu_open != pre_menu or ctx_open != pre_ctx_open \
-            or cur_ctx_h != pre_ctx_h or addlet_open != pre_addlet_open:
+            or cur_ctx_h != pre_ctx_h or addlet_open != pre_addlet_open \
+            or notice_on != pre_notice:
         _apply_panel_geometry(pi, sw, sh)
         need_redraw = 1
     return need_redraw
@@ -6169,6 +6197,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # clients. hamUId's retired present loop used to do this; the panel
         # is the live scene client that now owns it.
         _drain_launch_queues()
+        # Has anything been REFUSED by the window system since we last said
+        # so? One open + fstat + close. On the transition to showing, every
+        # panel's geometry is re-applied because the one carrying the notice
+        # has to grow to hold the card.
+        if _notice_poll() != 0:
+            pi = 0
+            while pi < n_panels:
+                _apply_panel_geometry(pi, sw, sh)
+                pi = pi + 1
+            any_redraw = 1
         # #327: the drag-from-menu launcher drop is committed on the button
         # RELEASE inside _drain_events (at the drop point), not here.
         if _drain_notifications() != 0:
