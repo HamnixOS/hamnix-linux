@@ -1488,8 +1488,10 @@ static int shm_attach(void)
      * one that can.  The segment is a shared IPC rendezvous in a 1777 tmpfs --
      * 0666 is its correct mode, the same as /dev/shm.  Per-window authority is
      * NOT a file-mode question: devwsys gates the system-chrome ctl verbs on
-     * uid separately, and THE UID GATE section below is that gate, ported. */
-    if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
+     * uid separately, and THE UID GATE section below is that gate, ported.
+     *
+     * IT HAPPENS AFTER THE REFUSAL BELOW, not before it -- see NOTHING IS DONE
+     * TO THE FILE BEFORE THE DECISION. */
 
     struct stat st;
     if (fstat(fd, &st) < 0) { int e = errno; close(fd); errno = e; return -1; }
@@ -1509,11 +1511,6 @@ static int shm_attach(void)
     seg_dev = st.st_dev;
     seg_ino = st.st_ino;
     seg_id_known = 1;
-    if ((uint64_t)st.st_size < sizeof(struct wshm)) {
-        if (ftruncate(fd, (off_t)sizeof(struct wshm)) < 0) {
-            int e = errno; close(fd); errno = e; return -1;
-        }
-    }
     /* Read the header BEFORE mapping, because the decision "does this segment
      * need re-initialising" now changes what we do to the FILE and not only to
      * the mapping. */
@@ -1549,6 +1546,27 @@ static int shm_attach(void)
         seg_path[0] = '\0';
         errno = EPROTO;
         return -1;
+    }
+
+    /* NOTHING IS DONE TO THE FILE BEFORE THE DECISION, and this ordering was
+     * WRONG in the first version of this pass -- caught by the gate, in the one
+     * number the gate exists to read.
+     *
+     * The chmod and this ftruncate used to sit above the header read, where
+     * they had always been.  So a v7 binary meeting a live v6 session GREW THE
+     * FILE from 19,052,956 to 37,972,380 bytes and only then refused.  The
+     * desktop survived -- the header and every row were untouched, the screen
+     * was pixel-identical, the four windows were still there -- and
+     * installed_update_wsysver.sh still said FAIL, because the size of /srv/wsys
+     * is how that gate knows WHICH WINDOW SYSTEM A SESSION IS, and a refusal
+     * that resizes the segment has destroyed exactly that.  It also made the
+     * refusal's own words false: "nothing has been changed" was not true of the
+     * file.  Two costs, one cause, and the fix is an ordering. */
+    if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
+    if (old_size < (off_t)sizeof(struct wshm)) {
+        if (ftruncate(fd, (off_t)sizeof(struct wshm)) < 0) {
+            int e = errno; close(fd); errno = e; return -1;
+        }
     }
     /* THE ZEROES WE DO NOT WRITE — see WSYS_MAX_WINDOWS above for the number
      * this buys.  A re-init used to be `memset(shm, 0, sizeof *shm)`, and on a
