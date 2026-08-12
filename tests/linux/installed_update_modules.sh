@@ -43,16 +43,20 @@
 # Then the machine is put into the two states that make the questions
 # answerable, and both are states a real machine reaches:
 #
-#   A. vfat.ko AND fat.ko ARE DELETED from the disk, and the two of them are
-#      taken out of /etc/modules. That is a machine that lost a driver -- and
-#      on the 1.0.12 channel it could NEVER get it back, because no package
-#      carried the file. Taking them out of /etc/modules is what makes the
-#      question modprobe's: linuxinit loads /etc/modules by ABSOLUTE PATH at
-#      boot, so a module listed there is in the kernel before any test runs and
-#      resolving its NAME was never exercised. /etc/modules is the operator's
-#      file (hamnix-drivers-base deliberately does not touch it -- see the
-#      8192-byte note in scripts/hamlinux_packages.py), so this is a supported
-#      state, not a broken one.
+#   A. vfat.ko AND fat.ko ARE DELETED from the disk. That is a machine that
+#      lost a driver -- and on the 1.0.12 channel it could NEVER get it back,
+#      because no package carried the file.
+#
+#      The image is built with vfat OUT of the boot list and staged through
+#      HAMLINUX_MODULES_EXTRA instead (on disk, in modules.dep, loaded by
+#      nothing), and that is not decoration. linuxinit loads /etc/modules by
+#      ABSOLUTE PATH before it switches to the real root, so it is the
+#      INITRAMFS's copy that governs an installed boot: the first version of
+#      this gate deleted vfat.ko from the DISK and still found
+#      `vfat 24576 0 - Live` in /proc/modules. Every module in the image's boot
+#      list -- which is every module hamnix-drivers-base carries -- is in the
+#      kernel before any test runs, so resolving its NAME had never been
+#      exercised on an installed machine at all.
 #
 #   B. THE MACHINE'S OWN modules.dep IS STALE ABOUT vfat: its line reads
 #      `kernel/fs/fat/vfat.ko: kernel/fs/fat/fat-STALE-NOT-HERE.ko`. That is
