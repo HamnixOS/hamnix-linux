@@ -1879,6 +1879,103 @@ def route_pointer_event(wid: int32, lx: int32, ly: int32,
     write_path(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0])
 
 
+# --- FOCUS IS AN EVENT, NOT JUST A VARIABLE ---------------------------
+#
+# THE DEFECT THIS FIXES. `focus_wid` was a private variable of this
+# compositor. It decided which window got keys and which titlebar was drawn
+# active, and it was NEVER TOLD TO ANYONE. Hamnix's devwsys pushes `f in\n` /
+# `f out\n` onto the per-window EVENT ring on every focus change
+# (`_wsys_set_focus` -> `_wsys_evt_emit_focus`,
+# `~/Hamnix/sys/src/9/port/devwsys.ad:12399`); this port emitted no `f` line
+# at all. The visible consequence, in the first ten seconds of using the
+# desktop: `user/hampanelscene.ad` ALREADY parses `f out` and closes its
+# Applications dropdown on it (`_drain_events`, the `102 32` branch) -- so the
+# dismiss-by-clicking-away path was fully written on the client side and had
+# nothing to trigger it. An open menu could only be closed by hitting the same
+# button a second time. Clicking the wallpaper, or any other window, left it
+# hanging over the desktop.
+#
+# THE LINE SHAPE IS HAMNIX'S, byte for byte: `f in\n` when a window GAINS
+# focus, `f out\n` when it LOSES it. No wid on the line -- the ring is already
+# per-window, so the recipient is the addressee. Same ring as the `m` pointer
+# lines, which is the whole point: a client reading one file sees focus and
+# pointer IN ORDER against each other.
+#
+# THE ORDER THIS GUARANTEES, and how. `pump_input` -> `deliver_pointer` ->
+# `set_focus` all run on wsysd's single thread, and every write here is a
+# synchronous open/write/close on /dev/wsys. So for one focus change from A
+# to B, in this exact order and with no interleaving possible:
+#     1. `f out` is written to A's ring and has RETURNED,
+#     2. `focus_wid` becomes B,
+#     3. `f in` is written to B's ring,
+#     4. only THEN does the caller emit the `m <x> <y> <buttons> <dz>` line
+#        for the very press that moved the focus (deliver_pointer sets focus
+#        before it routes, exactly as devwsys's router does -- focus first,
+#        `_wsys_evt_emit_pointer` after).
+# A client therefore never sees the press that raised it before the `f in`
+# that explains it, and the losing window's `f out` is never delivered after
+# the gaining window has already been told it won. Matching devwsys's
+# ordering is the default here and there is no reason to deviate.
+#
+# WHAT "FOCUS MOVED AWAY" MEANS, in the three cases that differ:
+#   * CLICK ON THE WALLPAPER. hamdesktop's backdrop is a real window with a
+#     real wid, so this is an ordinary focus change: the panel gets `f out`,
+#     the desktop gets `f in`, the dropdown closes.
+#   * CLICK ON ANOTHER WINDOW. Identical mechanism; the only difference is
+#     which wid gains.
+#   * CLICK ON THE MENU'S OWN PARENT (the Applications button). In this port
+#     the dropdown is NOT a separate override-redirect window -- the panel
+#     GROWS ITS OWN WINDOW to host the card (`_toggle_appmenu`, and the
+#     window-height change is what tests/linux/de_mouse_chrome.sh measures).
+#     So the click lands on the already-focused window, `set_focus` sees
+#     `wid == focus_wid` and returns having emitted NOTHING, and the press is
+#     routed as a plain `m` line to the panel's own toggle. That is what keeps
+#     the click-the-button-again dismiss working: a spurious `f out`/`f in`
+#     pair here would close the menu on the focus line and then re-open it on
+#     the press, or vice versa, depending on which the panel processed last.
+#     The equality gate is load-bearing, not an optimisation.
+# A press on bare backdrop with NO window under it drops focus to 0: the
+# loser gets `f out` and nobody gains, which is devwsys's `_wsys_set_focus(0)`
+# on `pressed == 1 and target == 0`.
+def route_focus_event(wid: int32, gained: int32):
+    # "f in\n" / "f out\n" on /dev/wsys/<wid>/event. wid 0 is "nobody" and
+    # wid 1 is the root/foreground, neither of which has a client ring.
+    if wid < 2:
+        return
+    winpath(wid, "event")
+    ctlbuf[0] = 102                                      # 'f'
+    ctlbuf[1] = 32
+    i: uint64 = 2
+    if gained != 0:
+        ctlbuf[2] = 105                                  # 'i'
+        ctlbuf[3] = 110                                  # 'n'
+        i = 4
+    else:
+        ctlbuf[2] = 111                                  # 'o'
+        ctlbuf[3] = 117                                  # 'u'
+        ctlbuf[4] = 116                                  # 't'
+        i = 5
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    write_path(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0])
+
+
+def set_focus(wid: int32):
+    # The ONE place focus_wid changes. See the comment above for the order
+    # this guarantees and why the no-change early return is load-bearing.
+    if wid == focus_wid:
+        return
+    old: int32 = focus_wid
+    # Only tell a window it lost focus if it is still THERE. A window that was
+    # destroyed while focused (the close box, a client exit) has no ring to
+    # write to, and pick_focus reassigns focus straight afterwards.
+    if old >= 2 and win_index(old) >= 0:
+        route_focus_event(old, 0)
+    focus_wid = wid
+    if wid >= 2:
+        route_focus_event(wid, 1)
+
+
 def route_pointer(wid: int32, kind: uint8, lx: int32, ly: int32,
                   btn: int32, dz: int32):
     # "<type> <x> <y> <buttons> <dz>\n" with x,y already mapped to WINDOW-LOCAL
@@ -2149,6 +2246,13 @@ def deliver_pointer():
         return
     wid: int32 = window_at(ptr_x, ptr_y)
     if wid < 2:
+        # A PRESS ON BARE BACKDROP -- no window under the cursor at all --
+        # drops focus to "nobody", so whatever held it gets `f out` and can
+        # self-dismiss. devwsys does exactly this (`if pressed == 1 and
+        # target == 0: _wsys_set_focus(0)`). Without it, a click on a part of
+        # the screen no window covers left an open dropdown hanging.
+        if ptr_edge > 0:
+            set_focus(0)
         ptr_moved = 0
         ptr_edge = 0
         ptr_dz = 0
@@ -2177,7 +2281,11 @@ def deliver_pointer():
         # the behaviour every one of these apps was written against.
         if wid != focus_wid:
             raise_window(wid)
-            focus_wid = wid
+            # set_focus, not `focus_wid = wid`: the window that is losing
+            # focus has to be TOLD. It emits `f out` to the loser and `f in`
+            # to wid, both BEFORE the route_pointer_event below puts this
+            # press's `m` line on wid's ring -- the same order devwsys uses.
+            set_focus(wid)
     elif ptr_edge < 0:
         kind = 117                                       # 'u' button up
     elif ptr_dz != 0:
@@ -2679,7 +2787,12 @@ def pick_focus():
         if win_id[i] > highest_wid:
             highest_wid = win_id[i]
             if win_vis[i] != 0 and win_dec[i] != 0 and win_z[i] < 100:
-                focus_wid = win_id[i]
+                # A NEW window taking focus is a focus CHANGE like any other:
+                # the previously focused window gets `f out`. That is what
+                # makes launching a terminal from the Applications menu
+                # dismiss the menu, instead of leaving the card floating over
+                # the window it just opened.
+                set_focus(win_id[i])
         i = i + 1
 
     # Otherwise focus is CLICK-driven (deliver_pointer sets it), so all that
@@ -2695,7 +2808,10 @@ def pick_focus():
                 bestz = win_z[i]
                 best = win_id[i]
         i = i + 1
-    focus_wid = best
+    # The focused window went away. Its ring is gone with it (set_focus skips
+    # a loser that win_index can no longer find), so this only ever emits the
+    # `f in` to whoever inherits.
+    set_focus(best)
 
 
 # ====================================================================
