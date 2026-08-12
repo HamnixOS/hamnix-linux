@@ -1877,6 +1877,30 @@ def write_pkg(outdir, name, version, description, files, depends,
             # Refusing here is the same shape as the closure and duplicate
             # refusals below: a build error nobody sees beats an update that
             # hangs on every machine that takes it.
+            # AND A HOOK OVER 16 KiB IS SILENTLY TRUNCATED, which manufactures
+            # the very fault the loop below catches. hamsh's `rc_buf` and
+            # hpm's `hook_body_buf` are both Array[16384]: a longer hook is
+            # cut with nothing said, and measured, a 37,895-byte script of 500
+            # appends ran 217 of them and then fed the severed tail to the
+            # shell as a command. Worse, if the cut lands inside a quoted
+            # string it creates an unterminated quote OUT OF A HOOK THIS CHECK
+            # WOULD HAVE PASSED -- the balance is correct in the file and
+            # wrong in the 16 KiB the machine actually reads.
+            #
+            # Nothing ships close to it today: the largest published hook is
+            # hamnix-drivers-drm at 4,921 bytes, 30% of the ceiling. But these
+            # hooks are ONE LINE PER MODULE and one per dependency edge, so
+            # the margin is a package's worth of driver, not a design bound.
+            # Refuse at the limit rather than discover it on a machine.
+            if len(body.encode("utf-8")) >= 16384:
+                raise SystemExit(
+                    "hamlinux_packages: %s's %s is %d bytes, at or over the "
+                    "16384-byte ceiling in hamsh's rc_buf and hpm's "
+                    "hook_body_buf. It would be TRUNCATED with nothing said, "
+                    "and a cut inside a quoted string manufactures an "
+                    "unterminated quote that wedges the machine installing "
+                    "it. Split the hook or shorten what it emits."
+                    % (name, hook_name, len(body.encode("utf-8"))))
             for lineno, line in enumerate(body.splitlines(), 1):
                 if line.lstrip().startswith("#"):
                     continue
