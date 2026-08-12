@@ -3577,11 +3577,26 @@ static void bbup_install(int32_t wid, int fd)
         return;
     }
     bbmap_n++;
-    if (shm) {
-        struct wwin *v = win_find(wid);
-        if (v) v->scene_gen++;
-        shm->gen++;
-    }
+    /* DO NOT TOUCH scene_gen HERE, AND THIS IS THE WHOLE PAINT PATH OF EVERY
+     * BROWSER.  pix_install bumps it because a v1 window's new display list is
+     * only visible through that counter.  Doing the same for a v2 window is a
+     * SILENT KILL: the scene open path (HAMWSYS_WIN_SCENE, above) serves a v2
+     * window's scene as a 0-byte SUCCESS only while `scene_gen == 0` -- that is
+     * the line whose comment says, in as many words, that without it "A BROWSER,
+     * A VIDEO AND EVERY ROOTLESS X CLIENT WOULD STOP BEING PAINTED", because
+     * user/wsysd.ad's paint_window slurps <wid>/scene for every window and
+     * `if n < 0: return 0` bails before it ever reaches paint_backbuffer.  A v2
+     * client never commits a scene, so its scene_gen is 0 for ever; bumping it
+     * here turned that 0-byte success into an EPERM refusal and the window was
+     * never painted again.  Measured: a fill client that commits no scene
+     * painted 0 pixels with the bump and its full blit without it.
+     *
+     * NOTHING IS LOST BY LEAVING IT ALONE.  The repaint this needs to trigger
+     * comes from the BACKBUFFER GEN, which is already in wsysd's frame
+     * signature (field 11 of the window ctl, snap_win_ctl above): it reads 0
+     * while no memfd is held and the client's real gen the moment one is
+     * installed, so accepting a hand-up moves the signature by itself. */
+    if (shm) shm->gen++;
 }
 
 static void bbup_drain(void)

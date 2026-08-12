@@ -347,13 +347,11 @@ def do_fillwin(w: int32, h: int32) -> int32:
     poke(cast[Ptr[char]](&pbuf[0]), cast[Ptr[uint8]]("geometry 0 0 200 120"))
     winpath(wid, cast[Ptr[uint8]]("ctl"))
     poke(cast[Ptr[char]](&pbuf[0]), cast[Ptr[uint8]]("visible 1"))
-    # Commit a (near-empty) scene so the compositor's scene read succeeds -- a
-    # real v2 client does this too; without it paint_window bails on the scene
-    # read before it reaches the backbuffer path.
-    winpath(wid, cast[Ptr[uint8]]("scene"))
-    poke(cast[Ptr[char]](&pbuf[0]), cast[Ptr[uint8]]("rect 0 0 1 1 0x000000"))
-    winpath(wid, cast[Ptr[uint8]]("ctl"))
-    poke(cast[Ptr[char]](&pbuf[0]), cast[Ptr[uint8]]("commit"))
+    # NO SCENE, NO COMMIT -- and that is the point.  This is the shape of a REAL
+    # v2 client (a browser, a video, a rootless X toplevel): it renders its own
+    # surface and submits blits, and never writes a display list at all, so its
+    # scene_gen stays 0 for ever.  A window that committed a scene here would
+    # paint through the v1 hand-up and would NOT test the thing that matters.
     winpath(wid, cast[Ptr[uint8]]("draw/ctl"))
     fd: int32 = sys_open_write(cast[Ptr[char]](&pbuf[0]))
     puts(" draw=")
