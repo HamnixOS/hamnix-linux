@@ -301,6 +301,21 @@ if [ "${HAMLINUX_LIVEUPD_REUSE:-0}" = 1 ] && [ -f "$REPO/linux/index.json" ]; th
     say "reusing the local channel at $OLDVER (HAMLINUX_LIVEUPD_REUSE=1)"
 else
     say "building the local channel at $OLDVER (the machine's original install)"
+    # BUILT INTO AN EMPTY DIRECTORY, ALWAYS. Building over a channel left by an
+    # earlier run of this gate produces one that will not publish: the packager
+    # rebuilds the tarballs and its own acceptance gate then reports
+    #
+    #   FAIL: hamnix-adder tarball sha256 <a> != index.json's <b>
+    #         -- the bytes tested are not the bytes served
+    #   REFUSING TO PUBLISH: the Adder toolchain in this channel cannot compile
+    #
+    # and no index.json is written, so this gate dies before its first boot with
+    # a message about the Adder toolchain that has nothing to do with what it
+    # was asked. Measured twice today, on the second and third runs into the
+    # same work directory; the first run into a fresh one was clean. Explicit
+    # reuse still short-circuits above, which is the case that WANTS the old
+    # bytes.
+    rm -rf "$REPO"; mkdir -p "$REPO"
     scripts/hamlinux_packages.py --out "$REPO" --version "$OLDVER" \
         --channel linux --base-url "$BASE" >"$WORK/repo.log" 2>&1 || {
         echo "FAIL channel build"; tail -20 "$WORK/repo.log"; exit 1; }
