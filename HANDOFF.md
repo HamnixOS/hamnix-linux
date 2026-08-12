@@ -359,6 +359,39 @@ same failure this project exists to beat.
   saying the compositor may not present faster than a panel can show. That cap
   is the obvious next question and it is NOT answered here.
 
+* **A VERTICAL PANEL IS ACCEPTED BY THE CONFIG AND NEVER APPEARS ON SCREEN.**
+  `tests/linux/de_panel_conf_shipped.sh` is 14 PASS / 1 FAIL, and it fails the
+  same way with `user/wsysd.ad` and `user/linux-syscalls.c` reverted to
+  `4b50eae2`, so it is nobody's regression -- but "pre-existing" is not
+  "fine", and what is actually broken is now known rather than guessed. Its
+  section 10 writes four panels, one per edge, and the panel agrees in its own
+  log: `honoured, 4 panel(s)` and `config reload applied: 4 panel(s)`. The
+  COMPOSITED SCREEN at that moment (the gate's own `maxc.raw`, scanned pixel
+  by pixel) holds only the two HORIZONTAL ones: rows 0..55 and the bottom 56
+  rows are panel grey `#eceef2`, the left and right edges are wallpaper
+  `#284470` for at least 64 px in, and there is **not one `#ff00ff` pixel in
+  the whole 1280x800 frame** -- the colour the gate gave the left panel
+  precisely so it could not be confused with anything else. So `edge left` and
+  `edge right` parse, count, and produce no pixels. The gate's assertion is
+  right and its message ("the maximal panel set did not come up") points at
+  the config, which is the one part that works.
+
+* **wsyswl STOPS THE MOMENT Xwayland CONNECTS, AND THAT IS WHY
+  `wsys_close_button` IS 2 PASS / 1 FAIL.** Also unchanged at `4b50eae2`.
+  Xwayland starts, creates `/tmp/.X11-unix/X88`, and connects as a Wayland
+  client -- `wsyswl: client connected` is the last line its log ever gets.
+  `publish_state()` is called unconditionally from the main loop every 32
+  ticks (about twice a second), and the state file's mtime FROZE at that
+  instant and did not move again in 26 s of watching, with `conns 0` and
+  `xwm_connected 0` still in it. So the loop stops making progress when the
+  first Wayland client arrives, and `xwm_connect()` -- which is retried from
+  that same loop -- never runs. **WHAT I DID NOT ESTABLISH**: whether the loop
+  HANGS or the process DIES. The gate runs in a private namespace where the
+  pid is not visible from outside, and the standalone reproduction I wrote was
+  invalid (wsyswl exits early with `FATAL: no screen geometry` unless wsysd
+  published one first, which the gate does and my repro did not). That is the
+  next hour's work, not this pass's.
+
 * **THE VULKAN/GPU COMPOSITOR PATH IS 13x SLOWER THAN THE SOFTWARE ONE, AND
   NO MACHINE HAS EVER RUN IT.** The image stages only the venus ICD, which
   enumerates nothing, so `vk_set_backend(VK_BACKEND_LINUX)` fails and every
