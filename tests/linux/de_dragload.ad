@@ -38,6 +38,10 @@ extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int6
 pathbuf: Array[256, uint8]
 line:    Array[2048, uint8]
 numbuf:  Array[24, uint8]
+# THE WHOLE SCENE IN ONE BUFFER, because it has to be written in one open.
+# See the note above the scene build in main(): a second open(2) of `scene`
+# does not append, it starts a fresh frame.
+scenebuf: Array[8192, uint8]
 waitset: Array[4, int32]
 wid:     int32 = 0
 
@@ -185,29 +189,51 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # THE CONTENT. A body fill, a lighter header band, and `rows` rows of
     # glyphs -- an empty rectangle would make the full path look far cheaper
     # than any window a person actually has open.
-    n = emit_str(&line[0], 0, "fill 0 0 ")
-    n = emit_int(&line[0], n, ww)
-    line[n] = 32
-    n = emit_int(&line[0], n + 1, wh)
-    n = emit_str(&line[0], n, " #101820")
-    line[n] = 10
-    win_write("scene", &line[0], n + 1)
+    # ONE OPEN, ONE WRITE, ONE FRAME -- and this is the whole reason every
+    # drag number ever measured on this port was of an EMPTY window.
+    #
+    # This used to call win_write("scene", ...) once per line, and win_write
+    # does a fresh sys_open_write every time. Opening `scene` for writing
+    # STARTS A NEW FRAME (user/linux-wsys.c): it resets the staging buffer
+    # rather than appending to it. So of the body fill, the header band and
+    # the eight text rows, only the LAST ONE survived to commit -- a single
+    # `text` line, which covers no rows at all.
+    #
+    # wsysd said so on every run, and it was read as a compositor complaint
+    # rather than as this program's bug:
+    #
+    #   wsysd: window 3 paints 480x0 of its 480x320 window -- 320 rows reach
+    #          the screen as the compositor's clear colour.
+    #
+    # 480x0. The "full-frame load" that de_fps_latency.sh, de_fps_gpu.sh,
+    # scanout_desktop.sh, drag_why.sh and cap_power_ab.sh have all been
+    # measuring was a moving rectangle of the compositor's CLEAR COLOUR, so
+    # every per-frame cost attributed to rasterization is a FLOOR, not the
+    # cost of a window a person would have open.
+    n = emit_str(&scenebuf[0], 0, "fill 0 0 ")
+    n = emit_int(&scenebuf[0], n, ww)
+    scenebuf[n] = 32
+    n = emit_int(&scenebuf[0], n + 1, wh)
+    n = emit_str(&scenebuf[0], n, " #101820")
+    scenebuf[n] = 10
+    n = n + 1
 
-    n = emit_str(&line[0], 0, "fill 0 0 ")
-    n = emit_int(&line[0], n, ww)
-    n = emit_str(&line[0], n, " 28 #1b2a3a")
-    line[n] = 10
-    win_write("scene", &line[0], n + 1)
+    n = emit_str(&scenebuf[0], n, "fill 0 0 ")
+    n = emit_int(&scenebuf[0], n, ww)
+    n = emit_str(&scenebuf[0], n, " 28 #1b2a3a")
+    scenebuf[n] = 10
+    n = n + 1
 
     r: int32 = 0
     while r < rows:
-        n = emit_str(&line[0], 0, "text 12 ")
-        n = emit_int(&line[0], n, 40 + r * 18)
-        n = emit_str(&line[0], n, " 14 #d8dee9 the quick brown fox jumps ")
-        n = emit_int(&line[0], n, r)
-        line[n] = 10
-        win_write("scene", &line[0], n + 1)
+        n = emit_str(&scenebuf[0], n, "text 12 ")
+        n = emit_int(&scenebuf[0], n, 40 + r * 18)
+        n = emit_str(&scenebuf[0], n, " 14 #d8dee9 the quick brown fox jumps ")
+        n = emit_int(&scenebuf[0], n, r)
+        scenebuf[n] = 10
+        n = n + 1
         r = r + 1
+    win_write("scene", &scenebuf[0], n)
     win_write("ctl", cast[Ptr[uint8]]("commit\n"), 7)
 
     # THE DRAG. One `geometry` write per iteration, no sleep: the ctl file is
