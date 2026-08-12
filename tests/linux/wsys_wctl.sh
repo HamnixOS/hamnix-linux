@@ -124,10 +124,17 @@ else
         "(ctl: $CTL)"
 fi
 
+# THE POOL IS READ AFTER A BLIT, and the proto above BEFORE one -- see the
+# probe. A slot is claimed lazily on the first blit (Hamnix keeps the
+# backbuffer in the client; the slot pool is this port's own construct), so a
+# window that negotiates and never draws legitimately has none. Reading proto
+# before the blit is what keeps this gate honest: a 'B' record opts a window
+# into v2 by itself, so a blit first would turn proto=2 green on a tree where
+# the negotiation still went nowhere.
 if [ -n "${SLOTS:-}" ] && [ "$SLOTS" -ge 1 ] 2>/dev/null; then
-    ok "and a backbuffer was actually claimed for it: $POOL"
+    ok "and once it blits, a backbuffer IS claimed for it: $POOL"
 else
-    bad "and NO backbuffer was ever claimed: ${POOL:-<unreadable>}."\
+    bad "and NO backbuffer was claimed even after a blit: ${POOL:-<unreadable>}."\
         "The per-window memfd confidentiality work protects a path nothing reaches."
 fi
 

@@ -459,6 +459,14 @@ def do_wctlv2() -> int32:
                 j = j + 1
             sys_write(1, &rbuf[0], cast[uint64](n2))
             puts("]")
+    # NOW, AND ONLY NOW, BLIT.  The proto= above is read BEFORE any blit on
+    # purpose: a 'B' record on draw/ctl opts a window into v2 by itself, so a
+    # blit before that read would set proto=2 even on a tree where the wctl
+    # negotiation goes nowhere -- the gate would pass for the wrong reason.
+    # The pool is only meaningful after a blit, because a slot is claimed
+    # lazily on the first one (a v2 window that never draws has no pixels, and
+    # claiming one of 512 slots for it would waste it).
+    blit_secret(wid, cast[Ptr[uint8]]("WCTLV2"))
     pfd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/pool"))
     if pfd >= 0:
         n3: int64 = sys_read(pfd, &rbuf[0], 255)
