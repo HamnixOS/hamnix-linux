@@ -404,7 +404,13 @@ static int bb_attach(void)
     int e = errno;
     if (m == MAP_FAILED) { close(fd); errno = e; return -1; }
     bb = (struct bbshm *)m;
-    bb_fd = fd;                        /* kept open for bb_page's mappings */
+    /* KEPT OPEN, and close-on-exec.  bb_page maps a slot's pages on demand
+     * and needs the descriptor for the life of the process; it used to be
+     * closed here because one mmap covered everything.  CLOEXEC because a
+     * program this one spawns has no business inheriting it -- every client
+     * of this device opens the segment for itself, by name. */
+    bb_fd = fd;
+    fcntl(bb_fd, F_SETFD, FD_CLOEXEC);
     /* The magic carries the slot count, so a segment laid out by a build with
      * a different BB_SLOTS is re-initialised rather than half-believed: the
      * pixel pages are addressed by slot index, and two builds that disagree
