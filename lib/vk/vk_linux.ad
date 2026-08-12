@@ -59,6 +59,9 @@ extern def hvk_device_name(buf: Ptr[uint8], cap: int32) -> int32
 extern def hvk_device_type() -> int32
 extern def hvk_frame_is_device_local() -> int32
 extern def hvk_frame_is_host_cached() -> int32
+extern def hvk_frame_create_scanout(w: int32, h: int32, bgra: int32) -> int32
+extern def hvk_can_export_dmabuf() -> int32
+extern def hvk_frame_is_scanout() -> int32
 extern def hvk_frame_create(w: int32, h: int32, bgra: int32) -> uint64
 extern def hvk_frame_base() -> uint64
 extern def hvk_frame_width() -> int32
@@ -142,6 +145,23 @@ def vk_linux_frame_device_local() -> int32:
     # 1 iff the mapped frame is ALSO device-local memory. 0 means the shader
     # writes it across the host bus; see the header.
     return hvk_frame_is_device_local()
+
+
+def vk_linux_frame_scanout_alloc(w: int32, h: int32, bgra: int32) -> int32:
+    # Allocate the frame in device-local VRAM, exportable and NOT host-mapped,
+    # and return its dmabuf fd (>= 0) for DRM to import. Negative on failure:
+    # -1 no device, -2 no export extensions, -3 allocation, -4 the driver
+    # refused the export. There is no CPU pointer to this frame by design --
+    # everything that touches the composite must be a device op.
+    return hvk_frame_create_scanout(w, h, bgra)
+
+
+def vk_linux_can_export() -> int32:
+    return hvk_can_export_dmabuf()
+
+
+def vk_linux_frame_is_scanout() -> int32:
+    return hvk_frame_is_scanout()
 
 
 def vk_linux_frame_host_cached() -> int32:

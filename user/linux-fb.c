@@ -601,6 +601,52 @@ fail:
 
 int hamfb_is_scanout(void) { return fb.scanout ? 1 : 0; }
 
+/* The mode a scanout buffer would have to be, WITHOUT taking master or
+ * touching anything. The caller has to allocate the GPU buffer before it can
+ * attach it, and the buffer has to be exactly one of the connector's
+ * advertised modes -- so it needs the geometry first. Connector enumeration
+ * needs no master, which is what makes this safe to call at startup on a
+ * machine whose console is live. Returns 0 and fills w/h, or -1. */
+int hamfb_probe_mode(uint32_t *w, uint32_t *h)
+{
+    const char *path = getenv("HAMFB_CARD");
+    if (!path || !*path) path = "/dev/dri/card0";
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -1;
+    int rc = -1;
+    struct drm_mode_card_res res;
+    memset(&res, 0, sizeof res);
+    if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) goto out;
+    if (!res.count_connectors) goto out;
+    uint32_t *conns = calloc(res.count_connectors, sizeof(uint32_t));
+    if (!conns) goto out;
+    res.connector_id_ptr = (uint64_t)(uintptr_t)conns;
+    res.count_fbs = res.count_crtcs = res.count_encoders = 0;
+    if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) == 0) {
+        for (uint32_t i = 0; i < res.count_connectors && rc; i++) {
+            struct drm_mode_get_connector c;
+            memset(&c, 0, sizeof c);
+            c.connector_id = conns[i];
+            if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) < 0) continue;
+            if (c.connection != 1 || !c.count_modes) continue;
+            struct drm_mode_modeinfo *ms = calloc(c.count_modes, sizeof *ms);
+            if (!ms) continue;
+            c.modes_ptr = (uint64_t)(uintptr_t)ms;
+            c.encoders_ptr = c.props_ptr = c.prop_values_ptr = 0;
+            c.count_encoders = c.count_props = 0;
+            if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c) == 0 && c.count_modes) {
+                *w = ms[0].hdisplay; *h = ms[0].vdisplay;
+                rc = 0;
+            }
+            free(ms);
+        }
+    }
+    free(conns);
+out:
+    close(fd);
+    return rc;
+}
+
 static int fb_init(void)
 {
     if (fb.ready)

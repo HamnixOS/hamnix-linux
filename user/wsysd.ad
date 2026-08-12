@@ -150,7 +150,8 @@ from lib.vk.vk_core import vk_set_backend, vk_linux_frame_alloc, \
     VK_BACKEND_LINUX, VK_BACKEND_SW, VK_SUCCESS
 from lib.vk.vk_linux import vk_linux_device_name, vk_linux_device_type, \
     vk_linux_device_is_silicon, vk_linux_frame_device_local, \
-    vk_linux_frame_host_cached, \
+    vk_linux_frame_host_cached, vk_linux_frame_scanout_alloc, \
+    vk_linux_can_export, \
     vk_linux_frame_begin, vk_linux_frame_end, vk_linux_frame_sync, \
     vk_linux_fill_rect, vk_linux_roundrect, vk_linux_line, \
     vk_linux_blit, vk_linux_blit_native, vk_linux_glyph, \
@@ -168,6 +169,9 @@ extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int6
 extern def sys_get_jiffies() -> uint64
 extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
 extern def sys_exit(code: uint64)
+extern def hamfb_attach_scanout(dmabuf_fd: int32, w: uint32, h: uint32,
+                                pitch: uint32) -> int32
+extern def hamfb_probe_mode(w: Ptr[uint32], h: Ptr[uint32]) -> int32
 # glibc's own getenv. This lane links glibc dynamically (HANDOFF §7.4), so the
 # environment is right there and needs no syscall of its own; the only two
 # variables read here are the backend overrides.
@@ -921,6 +925,8 @@ vk_devcomp:    int32 = 0
 # of paint_frame is one device frame, and the inner begin/end must not close
 # it out from under the outer one.
 vk_frame_depth: int32 = 0
+# 1 = the display is scanning out our GPU buffer; present() is a no-op.
+vk_scanout:     int32 = 0
 vk_frames_gpu: int32 = 0        # frames the device actually rasterized
 vkname:        Array[256, uint8]
 
@@ -951,6 +957,84 @@ def vk_say_sw(why: Ptr[uint8]):
 
 
 # Decide, bind and log. Called once, after read_screen(), before any frame.
+probe_wh: Array[2, uint32]
+
+
+# ====================================================================
+# SCANOUT ARMING, and the reason it is this paranoid
+# ====================================================================
+# Returns 1 if the display is now scanning out a GPU buffer. On ANY failure it
+# returns 0 having changed nothing, and the caller carries on down the
+# ordinary /dev/fb path.
+#
+# THIS TAKES DRM MASTER, and on nvidia-drm, MEASURED, both the CRTC restore
+# and DROP_MASTER hang afterwards -- the console has only ever come back
+# because the PROCESS DIED and the kernel dropped master with the fd. So:
+#
+#   * it is opt-in and a normal boot cannot reach it (HAMNIX_WSYSD_SCANOUT=1);
+#   * it REFUSES unless HAMNIX_WSYSD_SCANOUT_SUPERVISED=1 is also set, which
+#     is the caller asserting that something is armed to kill this process.
+#     tests/linux/kms_watchdog.sh is that something and is proven to fire
+#     (tests/linux/hangmaster.c is the proof). A compositor that takes the
+#     display on a machine whose console is the same device, with nothing able
+#     to kill it, is a machine with no picture and no console.
+#
+# The order is forced: the buffer must exist before it can be attached, and it
+# must be exactly one of the connector's advertised modes, so the mode is
+# probed FIRST (which needs no master) and the frame allocated to fit it.
+def vk_arm_scanout() -> int32:
+    if env_flag(cast[Ptr[char]]("HAMNIX_WSYSD_SCANOUT")) != 1:
+        return 0
+    if env_flag(cast[Ptr[char]]("HAMNIX_WSYSD_SCANOUT_SUPERVISED")) != 1:
+        puts(2, "wsysd: scanout REFUSED -- HAMNIX_WSYSD_SCANOUT=1 without\n")
+        puts(2, "wsysd: HAMNIX_WSYSD_SCANOUT_SUPERVISED=1. This path takes DRM\n")
+        puts(2, "wsysd: master, and on nvidia-drm DROP_MASTER hangs afterwards:\n")
+        puts(2, "wsysd: the console comes back only when this process DIES.\n")
+        puts(2, "wsysd: Run it under tests/linux/kms_watchdog.sh.\n")
+        return 0
+    if vk_set_backend(VK_BACKEND_LINUX) != VK_SUCCESS:
+        puts(2, "wsysd: scanout: no usable Vulkan device\n")
+        return 0
+    if vk_linux_can_export() == 0:
+        puts(2, "wsysd: scanout: this driver cannot export a dmabuf\n")
+        return 0
+    probe_wh[0] = 0
+    probe_wh[1] = 0
+    if hamfb_probe_mode(&probe_wh[0], &probe_wh[1]) != 0:
+        puts(2, "wsysd: scanout: no connected connector with a mode\n")
+        return 0
+    w: int32 = cast[int32](probe_wh[0])
+    h: int32 = cast[int32](probe_wh[1])
+    if w <= 0 or h <= 0:
+        return 0
+    if cast[uint64](w) * cast[uint64](h) > MAX_PIXELS:
+        puts(2, "wsysd: scanout: the display mode is larger than MAX_PIXELS\n")
+        return 0
+    fd: int32 = vk_linux_frame_scanout_alloc(w, h, 1)
+    if fd < 0:
+        puts(2, "wsysd: scanout: the GPU frame could not be exported\n")
+        return 0
+    if hamfb_attach_scanout(fd, cast[uint32](w), cast[uint32](h),
+                            cast[uint32](w * 4)) != 0:
+        puts(2, "wsysd: scanout: DRM would not take the buffer\n")
+        return 0
+    scr_w = w
+    scr_h = h
+    scr_pitch = w * 4
+    # THERE IS NO CPU POINTER TO THE COMPOSITE. comp_base stays 0 and device
+    # compositing is not optional here -- every one of the five write sites
+    # would otherwise dereference it.
+    comp_base = 0
+    vk_devcomp = 1
+    vk_armed = 1
+    vk_zero_copy = 1
+    vk_devlocal = 1
+    vk_scanout = 1
+    puts(1, "wsysd: SCANOUT armed -- the display reads GPU VRAM directly; the\n")
+    puts(1, "wsysd: composite is never copied and /dev/fb is never written.\n")
+    return 1
+
+
 def vk_arm():
     comp_base = cast[uint64](&composite[0])
     ov: int32 = env_flag(cast[Ptr[char]]("HAMNIX_WSYSD_VK"))
@@ -1775,6 +1859,16 @@ def paint_window(i: uint64) -> int32:
 # works in (user/linux-fb.c turns a byte range into an exact row range), so a
 # partial present is both cheaper HERE and a smaller flush THERE.
 def present_rows(y0: int32, y1: int32):
+    # SITE 5 of 5, and the one the whole exercise was for. On the scanout path
+    # the pixels are ALREADY where the display reads them: the CRTC and the
+    # compute shader address the same VRAM. There is nothing to copy, nothing
+    # to write to /dev/fb -- which would return EOPNOTSUPP anyway -- and no
+    # flip, because there is a single buffer.
+    #
+    # This is the 66,602 us that started the investigation, and 155 us after
+    # the placement fix, becoming zero.
+    if vk_scanout != 0:
+        return
     a: int32 = y0
     b: int32 = y1
     if a < 0:
@@ -3268,8 +3362,15 @@ def is_bench_flag(s: Ptr[uint8]) -> int32:
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     puts(1, "wsysd: scene compositor starting\n")
-    if read_screen() != 0:
-        return 1
+    # SCANOUT IS DECIDED BEFORE THE GEOMETRY IS READ, and the order is forced.
+    # Reading /dev/fb's geometry initialises the framebuffer, which on a real
+    # display means creating a dumb buffer and taking DRM master -- after
+    # which there is no attaching a GPU buffer to anything. So the mode is
+    # probed (no master), the GPU frame is allocated to fit it, and the
+    # display is attached to that; only then does /dev/fb exist at all.
+    if vk_arm_scanout() == 0:
+        if read_screen() != 0:
+            return 1
     puts(1, "wsysd: screen ")
     putd(1, scr_w)
     puts(1, "x")
@@ -3291,8 +3392,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
     # Choose the rasterization backend and, if it is the GPU, bind the
     # composite to the GPU frame. After this line comp_base is the only thing
-    # that differs between the two configurations.
-    vk_arm()
+    # that differs between the two configurations. Skipped entirely when
+    # scanout already armed: it would reallocate the frame as a host-mapped
+    # one and hand the display's buffer back to the allocator.
+    if vk_scanout == 0:
+        vk_arm()
 
     # The live phase breakdown. Off unless asked for; see bench_live_dump.
     bench_live_every = env_int(cast[Ptr[char]]("HAMNIX_WSYSD_BENCH_LIVE"))
