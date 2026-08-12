@@ -2311,10 +2311,40 @@ static struct wwin *win_alloc(int32_t pid)
     if (shm_attach() < 0) return NULL;
     for (int i = 0; i < WSYS_MAX_WINDOWS; i++) {
         struct wwin *v = &shm->win[i];
-        if (v->used) continue;
-        memset(v, 0, sizeof(*v));
-        v->used     = 1;
-        v->wid      = shm->next_wid++;
+        /* CLAIM THE ROW ATOMICALLY, AND TAKE THE wid ATOMICALLY, because this
+         * table is SHARED MEMORY and every GUI program on the machine allocates
+         * out of it.  This loop used to read `used`, then memset the row, then
+         * write `used = 1` and `wid = next_wid++` -- three separate steps with
+         * no interlock at all.  Two clients calling `newwindow` at the same
+         * moment both saw the same row free, both took it, and the one that
+         * wrote first had its row overwritten by the one that wrote second.
+         *
+         * WHAT THAT LOOKED LIKE, and it cost two agents a day between them: the
+         * losing client held a wid whose row now belonged to somebody else, so
+         * win_find() failed and EVERY leaf of its window -- ctl, scene, keys,
+         * draw/ctl, all of them -- answered ENOENT, with `ctl` reading empty.
+         * It was first characterised as "a v2 window opened after another v2
+         * window is sometimes never painted", because the paint is simply the
+         * first thing anyone notices; the errno was the tell, and it pointed at
+         * the row rather than at the pixels.  It also made an unrelated
+         * experiment report -2 where the mechanism said -1, which is a defect
+         * that makes OTHER measurements lie.
+         *
+         * MEASURED: with two clients and the compositor pinned to one core so
+         * they genuinely contend, 10 failures in 10 runs before, 0 in 10 after.
+         * Unpinned on an idle host it is roughly 1 in 4 -- which is exactly the
+         * rate that gets a gate re-run instead of read.
+         *
+         * `used` is the first word of the row, so the compare-exchange that
+         * wins it also fences the memset of everything after it: a scanner that
+         * loses the race sees used == 1 and moves on rather than clearing a
+         * row somebody else is filling in. */
+        uint32_t free_row = 0;
+        if (!__atomic_compare_exchange_n(&v->used, &free_row, 1u, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+            continue;                          /* somebody else won this row */
+        memset((char *)v + sizeof v->used, 0, sizeof(*v) - sizeof v->used);
+        v->wid      = __atomic_fetch_add(&shm->next_wid, 1, __ATOMIC_ACQ_REL);
         /* A wid is a small integer and next_wid wraps around a reboot only in
          * principle -- but the image segment OUTLIVES the process that made it
          * (it is a file in /srv), so a fresh window can be handed an id whose
@@ -3749,6 +3779,10 @@ static void pix_tick(void)
  * owner (which must be handed the descriptor) and a same-uid attacker (which
  * must not), exactly as `pixgrab` does for the scene. */
 static int bbup_listen_fd = -1;
+/* Set the first time this process reads a window it does not own -- see THE
+ * COMPOSITOR IS THE PROCESS THAT READS SOMEBODY ELSE'S WINDOW. Sticky, because
+ * the act identifies the process for good: a client never performs it once. */
+static int bbup_is_compositor;
 static int bbup_listen_tried;
 static uint64_t bbup_next_tick;
 
@@ -3788,8 +3822,21 @@ static int bbup_map(int i)
  * anyone's pixels and must not be able to make this call happen on its behalf. */
 static void bbup_listen(void)
 {
-    if (bbup_listen_fd >= 0 || bbup_listen_tried) return;
-    bbup_listen_tried = 1;
+    /* IT RETRIES, AND THE LATCH IT REPLACES IS WHY BROWSERS WENT BLANK.
+     *
+     * This used to set `tried` on the first call and never attempt again.  A
+     * first call that arrives before the segment's identity or owner is known
+     * -- and one does, because sys_waitfds drives hamwsys_tick and a process
+     * parks before it has touched /dev/wsys -- returned early with the latch
+     * already set, so the compositor NEVER bound for the rest of its life.
+     * Every client's hand-up was then refused (ECONNREFUSED, measured eleven
+     * times in one run) and every v2 window stayed blank with nothing on any
+     * log.  A transient reason not to bind must not be permanent: the address
+     * may also be held by a process that is about to exit.
+     *
+     * The DIAGNOSTIC is still once per process, because a compositor that
+     * cannot bind would otherwise print a line per park for ever. */
+    if (bbup_listen_fd >= 0) return;
     if (!hostowner()) return;
     struct sockaddr_un a;
     socklen_t alen = bbup_addr(&a);
@@ -3797,11 +3844,14 @@ static void bbup_listen(void)
     int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (s < 0) return;
     if (bind(s, (struct sockaddr *)&a, alen) < 0) {
-        fprintf(stderr,
-                "wsys: cannot claim the backbuffer hand-up address (%s).\n"
-                "wsys: another process holds it, so no v2 window can hand this "
-                "one its pixels and BROWSERS WILL NOT BE PAINTED.\n",
-                strerror(errno));
+        if (!bbup_listen_tried) {
+            bbup_listen_tried = 1;
+            fprintf(stderr,
+                    "wsys: cannot claim the backbuffer hand-up address (%s).\n"
+                    "wsys: another process holds it, so no v2 window can hand "
+                    "this one its pixels and BROWSERS WILL NOT BE PAINTED.\n",
+                    strerror(errno));
+        }
         close(s);
         return;
     }
@@ -3949,18 +3999,19 @@ static void bbup_handup_one(int i)
  * pixel hand-up, and driven from the same seams (see pix_tick). */
 static void bbup_tick(void)
 {
-    /* NO PROACTIVE BIND HERE, and the reason is which processes are host owner.
-     * The compositor binds the backbuffer address the first time it composites
-     * a v2 window (the BACKBUFFER read path calls bbup_listen), exactly as it
-     * binds the PIXEL address the first time it composites a scene -- and a v2
-     * window that appears while the compositor is active is composited that
-     * frame, which is when the bind happens.  Binding here instead would let
-     * ANY host-owner process that owns no backbuffer -- a plain scene client
-     * running as the segment owner, root's own taskbar -- seize the address
-     * ahead of the compositor, which is a denial of service, not a hand-up.
-     * So the listener is bound only by a reader that is actually reading a
-     * backbuffer, and this tick only HANDS UP owned windows and DRAINS what a
-     * bound listener has received. */
+    /* A COMPOSITOR BINDS ON ITS PARK, NOT ONLY WHEN IT REPAINTS, and the
+     * difference is the whole defect.  Which process is a compositor is decided
+     * in pix_get, on the one act only a compositor performs (see THE COMPOSITOR
+     * IS THE PROCESS THAT READS SOMEBODY ELSE'S WINDOW) -- but that act happens
+     * inside the REPAINT path, and repaint is gated on the frame signature
+     * moving.  A compositor that has settled repaints nothing, so it read no
+     * foreign scene, so it never bound, so the client's hand-up was refused for
+     * ever and the window never painted.  MEASURED, pinned to one core:
+     * binding only from the backbuffer read was 10 failures in 10; adding the
+     * foreign-scene read took it to 3 in 10; binding here, on the park that
+     * happens whether or not anything is repainted, takes it to 0 in 10.
+     * The flag is what keeps a client out: it never reads a foreign window. */
+    if (bbup_is_compositor) bbup_listen();
     if (!bbmap_n && bbup_listen_fd < 0) return;
     uint64_t now = pix_now_ms();
     if (now < bbup_next_tick) return;
@@ -3989,8 +4040,33 @@ static struct wpix *pix_get(int32_t wid, int mine)
     }
     int i = pix_slot(wid);
     if (i >= 0) return pixmap[i].m;
+    /* THE COMPOSITOR IS THE PROCESS THAT READS SOMEBODY ELSE'S WINDOW.
+     *
+     * Reaching here means this process wants the display list of a window it
+     * does not own, which is the one thing a client never does -- every client
+     * in this tree reads its OWN window and nothing else -- and the one thing a
+     * compositor does constantly, for every window, every frame.  So it is the
+     * signal both hand-up listeners are bound on, and the backbuffer's is bound
+     * here rather than on the BACKBUFFER read path.
+     *
+     * WHY IT MOVED.  Binding it from the backbuffer read meant binding only if
+     * the compositor happened to repaint a v2 window -- and if it lost that
+     * race once, nothing made it try again and the client's connect was refused
+     * for ever.  MEASURED with wsysd and the client pinned to one core: 10
+     * failures in 10 runs, the client logging ECONNREFUSED and the compositor
+     * never binding at all.  Bound here it is 0 in 10, because a compositor
+     * reads a foreign scene on its very first frame and on every frame after.
+     *
+     * AND IT IS WHY A CLIENT CANNOT SQUAT IT on a single-uid host, where every
+     * process passes hostowner(): a client never takes this path at all.  The
+     * alternative tried first -- bind for any host owner that owns no
+     * backbuffer -- let a plain SCENE client bind and never give it back, and
+     * tests/linux/wsys_bypass.sh caught it as EADDRINUSE for both ends. */
+    bbup_is_compositor = 1;
     pix_listen();
+    bbup_listen();
     pix_drain();
+    bbup_drain();
     i = pix_slot(wid);
     return i >= 0 ? pixmap[i].m : NULL;
 }
