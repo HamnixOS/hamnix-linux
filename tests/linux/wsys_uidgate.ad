@@ -392,6 +392,90 @@ def do_fillwin(w: int32, h: int32) -> int32:
     return 0
 
 
+# THE hamui v2 NEGOTIATION, byte for byte as lib/hamui.ad performs it.
+#
+# hamui_set_protocol_v2_dims() opens /dev/wsys/<wid>/wctl and writes
+# "version 2\n" (lib/hamui.ad, _h_build_wsys_path(win_wid, "wctl")).  This mode
+# does exactly that and then asks the WINDOW SYSTEM what it made of it:
+#
+#   wctlrc=   the write's return -- hamui treats >= 0 as success and sets
+#             h_v2_active = 1, believing it is a v2 client from then on
+#   proto=    field 9 of <wid>/ctl -- what the window system actually thinks
+#   pool=     /dev/wsys/pool -- whether a backbuffer slot was ever claimed
+#
+# The three together are what tell a real negotiation from a write that
+# succeeded into a buffer nobody reads.  A gate asserting only on wctlrc would
+# pass today, which is the whole point of printing the other two.
+def do_wctlv2() -> int32:
+    ctl: Ptr[char] = "/dev/wsys/ctl"
+    puts("wctlv2")
+    poke(ctl, cast[Ptr[uint8]]("newwindow"))
+    wid: int64 = -1
+    rfd: int32 = sys_open(ctl)
+    if rfd >= 0:
+        k: int64 = sys_read(rfd, &rbuf[0], 255)
+        sys_close(rfd)
+        v: int64 = 0
+        seen: int32 = 0
+        i: uint64 = 0
+        while i < cast[uint64](k):
+            c: uint8 = rbuf[i]
+            if c >= 48 and c <= 57:
+                v = v * 10 + cast[int64](c - 48)
+                seen = 1
+            elif seen != 0:
+                break
+            i = i + 1
+        if seen != 0:
+            wid = v
+    puts(" wid=")
+    puti(wid)
+    if wid < 2:
+        puts("\n")
+        return 1
+    winpath(wid, cast[Ptr[uint8]]("ctl"))
+    poke(cast[Ptr[char]](&pbuf[0]), cast[Ptr[uint8]]("geometry 0 0 64 32"))
+    winpath(wid, cast[Ptr[uint8]]("ctl"))
+    poke(cast[Ptr[char]](&pbuf[0]), cast[Ptr[uint8]]("visible 1"))
+
+    # THE NEGOTIATION ITSELF -- the one line hamui writes.
+    winpath(wid, cast[Ptr[uint8]]("wctl"))
+    rc: int64 = poke(cast[Ptr[char]](&pbuf[0]), cast[Ptr[uint8]]("version 2"))
+    puts(" wctlrc=")
+    puti(rc)
+
+    # WHAT THE WINDOW SYSTEM ACTUALLY DID, read back through the protocol.
+    winpath(wid, cast[Ptr[uint8]]("ctl"))
+    cfd: int32 = sys_open(cast[Ptr[char]](&pbuf[0]))
+    if cfd >= 0:
+        n2: int64 = sys_read(cfd, &rbuf[0], 255)
+        sys_close(cfd)
+        if n2 > 0:
+            puts(" ctl=[")
+            j: uint64 = 0
+            while j < cast[uint64](n2):
+                if rbuf[j] == 10:
+                    rbuf[j] = 124
+                j = j + 1
+            sys_write(1, &rbuf[0], cast[uint64](n2))
+            puts("]")
+    pfd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/pool"))
+    if pfd >= 0:
+        n3: int64 = sys_read(pfd, &rbuf[0], 255)
+        sys_close(pfd)
+        if n3 > 0:
+            puts(" pool=[")
+            j2: uint64 = 0
+            while j2 < cast[uint64](n3):
+                if rbuf[j2] == 10:
+                    rbuf[j2] = 124
+                j2 = j2 + 1
+            sys_write(1, &rbuf[0], cast[uint64](n3))
+            puts("]")
+    puts("\n")
+    return 0
+
+
 def do_client(hold: int32, hold_flag: Ptr[char], needle: Ptr[uint8]) -> int32:
     ctl: Ptr[char] = "/dev/wsys/ctl"
     puts("client")
@@ -491,6 +575,9 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     fw: Ptr[uint8] = "fillwin"
     if streq(cmd, fw) == 1:
         return do_fillwin(16, 8)
+    wv: Ptr[uint8] = "wctlv2"
+    if streq(cmd, wv) == 1:
+        return do_wctlv2()
     if streq(cmd, ch) == 1:
         if argc < 4:
             puts("usage: wsys_uidgate chrome <path> <text>\n")
