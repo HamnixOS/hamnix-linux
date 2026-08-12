@@ -20,4 +20,17 @@ int64_t  hamfb_read_pixels(uint64_t offset, uint8_t *buf, uint64_t count);
 int64_t  hamfb_ctl(const uint8_t *buf, uint64_t count);
 uint64_t hamfb_size(void);
 
+/* SCANOUT. Import a GPU dmabuf, make a framebuffer of it and set a mode, so
+ * the display reads the memory the GPU rasterizes into and nothing is ever
+ * copied. After this succeeds hamfb_write() FAILS with EOPNOTSUPP -- there is
+ * no mapping to write into, by construction.
+ *
+ * The caller MUST be supervised by something that can kill it: on nvidia-drm,
+ * measured, both the CRTC restore and DROP_MASTER hang after a modeset, and
+ * the console only comes back when the process dies and the kernel drops
+ * master with the fd. See user/linux-fb.c and tests/linux/kms_watchdog.sh. */
+int      hamfb_attach_scanout(int dmabuf_fd, uint32_t w, uint32_t h,
+                              uint32_t pitch);
+int      hamfb_is_scanout(void);
+
 #endif
