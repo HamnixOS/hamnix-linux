@@ -43,6 +43,7 @@ from lib.hamui import (
     hamui_init, hamscene_begin, hamscene_commit,
 )
 from lib.p9 import p9_listdir
+from lib.homedir import hd_resolve_home
 from lib.desktopentry import (
     desktop_parse, desktop_name_ptr, desktop_name_len,
     desktop_prog_ptr, desktop_cats_ptr, desktop_name_is_entry,
@@ -59,6 +60,7 @@ from lib.appmenucore import (
     amc_child_w, amc_child_h, amc_app_prog, amc_app_prog_len,
     amc_app_name, amc_app_glyph, amc_app_cat, amc_build_scene_win,
     amc_focus_out_dismiss, amc_press_edge,
+    amc_recent_count, amc_recent_prog, amc_recent_prog_len,
     AMC_ROW_SEARCH, AMC_ROW_HEADER, AMC_ROW_APP, AMC_ROW_CATBTN, AMC_ROW_H,
     AMC_CHILD_W,
 )
@@ -71,6 +73,8 @@ extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 extern def sys_yield() -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_mkdir(path: Ptr[char]) -> int32
+extern def sys_unlink(path: Ptr[char]) -> int32
 
 # Wait set for the event-loop park. Top-level BSS, not a frame local.
 _am_wait: Array[4, int32]
@@ -210,6 +214,193 @@ def _build_catalogue():
     added: int32 = _dd_scan()
     if added <= 0:
         _seed_fallback()
+
+
+# ====================================================================
+# FAVOURITES — the recency list, PERSISTED, IN THE USER'S OWN HOME
+# ====================================================================
+# WHY THIS FILE HAS TO EXIST AT ALL. This program is spawned fresh on every
+# click of the Applications button and calls sys_exit the moment you launch
+# something or click away (_am_close). lib/appmenucore's recency list is
+# module state in THIS process, so the "Favourites" section at the top of the
+# menu was structurally incapable of ever holding anything: the one call that
+# fills it, amc_mark_launch, ran microseconds before the process died. The
+# section rendered correctly and was always empty, which is exactly the
+# success-shaped answer NORTH_STAR.md is about -- the feature was present,
+# drawn, and could not work.
+#
+# WHERE IT LIVES, AND WHY NOT /tmp. **$HOME/.hamde/favourites**, resolved
+# through lib/homedir.ad's hd_resolve_home ($HOME -> /etc/passwd by uid ->
+# /home/live) -- the SAME chain hamdesktop and hamfm use to find the desktop
+# directory, so the menu's idea of "the user" cannot drift from theirs.
+#
+# It is emphatically NOT a fixed /tmp name. tests/linux/private_ns.sh records
+# what one of those costs: hampanelscene reads /tmp/hamnix-panel.conf in
+# preference to the shipped /etc/panel.conf, a gate wrote it once, and another
+# agent's concurrent run watched its top bar disappear and reported a defect
+# that did not exist. One gate's scratch file cost two agents' conclusions.
+# A per-user recency list under a fixed host-global name would be the same
+# shape with a longer fuse: every account on the machine, and every concurrent
+# offscreen desktop, sharing one launch history and overwriting each other's.
+# Per-user state belongs under the user's home. It also then travels with the
+# account, survives a reboot, and is backed up by whatever backs up $HOME.
+#
+# THE FILE FORMAT is one absolute program path per line, MOST RECENT FIRST --
+# the order amc_recent_prog() hands them out in. Reload replays them OLDEST
+# FIRST through amc_mark_launch, which rebuilds the identical order (the same
+# dedup-and-promote the live list uses), so a round trip is a fixed point.
+# A path that is no longer in the catalogue is dropped by _amc_recent_app at
+# layout time, so an uninstalled app quietly stops appearing rather than
+# leaving a row that launches nothing.
+_fav_home: Array[160, uint8]
+_fav_dir:  Array[192, uint8]
+_fav_file: Array[224, uint8]
+_fav_fault: Array[224, uint8]
+_fav_buf:  Array[1024, uint8]
+_fav_off:  Array[16, uint64]           # line start/end pairs, at most 8 lines
+_fav_have: int32 = 0                   # 1 once the paths below are built
+
+
+def _fav_append(dst: Ptr[uint8], at: uint64, s: Ptr[uint8],
+                cap: uint64) -> uint64:
+    p: uint64 = at
+    k: uint64 = 0
+    while s[k] != 0 and p + 1 < cap:
+        dst[p] = s[k]
+        p = p + 1
+        k = k + 1
+    dst[p] = 0
+    return p
+
+
+# Build $HOME/.hamde, $HOME/.hamde/favourites and $HOME/.hamde/appmenu.fault.
+# Returns 1 when a usable home was resolved. A string literal assigned INTO a
+# global array comes out NULL on this backend, so every literal here is passed
+# at the CALL SITE (_fav_append), never stored.
+def _fav_paths() -> int32:
+    if _fav_have != 0:
+        return 1
+    hn: uint64 = hd_resolve_home(&_fav_home[0], 160)
+    if hn == 0:
+        return 0
+    d: uint64 = 0
+    while d < hn and d < 191:
+        _fav_dir[d] = _fav_home[d]
+        d = d + 1
+    _fav_dir[d] = 0
+    d = _fav_append(&_fav_dir[0], d, "/.hamde", 192)
+    f: uint64 = 0
+    while f < d and f < 223:
+        _fav_file[f] = _fav_dir[f]
+        _fav_fault[f] = _fav_dir[f]
+        f = f + 1
+    _fav_file[f] = 0
+    _fav_fault[f] = 0
+    _fav_append(&_fav_file[0], f, "/favourites", 224)
+    _fav_append(&_fav_fault[0], f, "/appmenu.fault", 224)
+    _fav_have = 1
+    return 1
+
+
+# Replay the stored list into the live model. Called AFTER the catalogue is
+# built (an entry only becomes a visible row if its prog is still in it).
+def _fav_load():
+    if _fav_paths() == 0:
+        return
+    fd: int32 = sys_open(cast[Ptr[char]](&_fav_file[0]))
+    if fd < 0:
+        return
+    n: int64 = sys_read(fd, &_fav_buf[0], 1023)
+    sys_close(fd)
+    if n <= 0:
+        return
+    cap: uint64 = cast[uint64](n)
+    nl: uint64 = 0
+    i: uint64 = 0
+    while i < cap and nl < 8:
+        while i < cap and (_fav_buf[i] == 10 or _fav_buf[i] == 13):
+            i = i + 1
+        if i >= cap:
+            break
+        s: uint64 = i
+        while i < cap and _fav_buf[i] != 10 and _fav_buf[i] != 13:
+            i = i + 1
+        if i > s:
+            _fav_off[nl * 2] = s
+            _fav_off[nl * 2 + 1] = i
+            nl = nl + 1
+    # NUL-terminate every line in place, then replay OLDEST FIRST so
+    # amc_mark_launch's promote-to-front rebuilds the stored order exactly.
+    j: uint64 = 0
+    while j < nl:
+        e: uint64 = _fav_off[j * 2 + 1]
+        if e < 1024:
+            _fav_buf[e] = 0
+        j = j + 1
+    j = nl
+    while j > 0:
+        j = j - 1
+        amc_mark_launch(&_fav_buf[_fav_off[j * 2]])
+
+
+# Write the live list back out, most recent first. Called on every launch,
+# just before the menu closes.
+def _fav_save():
+    if _fav_paths() == 0:
+        return
+    sys_mkdir(cast[Ptr[char]](&_fav_dir[0]))     # may already exist; harmless
+    fd: int32 = sys_open_write(cast[Ptr[char]](&_fav_file[0]))
+    if fd < 0:
+        return
+    p: uint64 = 0
+    r: uint64 = 0
+    rc: uint64 = amc_recent_count()
+    while r < rc and p + 100 < 1024:
+        sp: Ptr[uint8] = amc_recent_prog(r)
+        sl: uint64 = amc_recent_prog_len(r)
+        k: uint64 = 0
+        while k < sl and p + 1 < 1024:
+            _fav_buf[p] = sp[k]
+            p = p + 1
+            k = k + 1
+        _fav_buf[p] = 10
+        p = p + 1
+        r = r + 1
+    if p > 0:
+        sys_write(fd, &_fav_buf[0], p)
+    sys_close(fd)
+
+
+# --- THE PANEL'S FALLBACK SIGNAL -------------------------------------
+# hampanelscene points its Applications button at /bin/hamappmenu when that
+# file exists, and at its OWN in-panel dropdown when it does not. That covers
+# the menu being ABSENT. It does not cover the menu being PRESENT and unable
+# to open a window -- the compositor's table full, /dev/wsys unreachable in
+# this namespace -- in which case the button spawns a process that prints to a
+# closed stdout and dies, and NOTHING APPEARS. A button that answers a click
+# with nothing at all is the shape this tree keeps paying for.
+#
+# So the failure is written down where the panel can see it, under the same
+# per-user directory as the favourites (never a fixed /tmp name), and the
+# panel treats its presence as "use your own dropdown, and say so". The file
+# is REMOVED the moment a window is successfully allocated, so one bad start
+# does not demote the menu forever.
+def _fav_fault_set():
+    if _fav_paths() == 0:
+        return
+    sys_mkdir(cast[Ptr[char]](&_fav_dir[0]))
+    fd: int32 = sys_open_write(cast[Ptr[char]](&_fav_fault[0]))
+    if fd < 0:
+        return
+    m: Ptr[uint8] = "newwindow\n"
+    sys_write(fd, m, 10)
+    sys_close(fd)
+
+
+def _fav_fault_clear():
+    if _fav_paths() == 0:
+        return
+    sys_unlink(cast[Ptr[char]](&_fav_fault[0]))
 
 
 # ====================================================================
@@ -920,6 +1111,10 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # the compositor snapshot for wire-protocol compat.
     _build_catalogue()
     _read_appmenu_snapshot()
+    # FAVOURITES, before the layout: the top section is built from the recency
+    # list, and the list has to be back in memory before amc_layout() decides
+    # whether there is a section to lay out at all.
+    _fav_load()
     amc_layout()
 
     # Size the window to the laid-out content (clamped). The BOX is box_w wide;
@@ -946,9 +1141,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if wid < 2:
         wid = _am_newwindow()
         if wid < 2:
+            # Say it where the PANEL can read it, not only on a stderr that a
+            # detached spawn has already closed: the Applications button must
+            # fall back to the panel's own dropdown rather than answer the
+            # click with nothing. See _fav_fault_set.
+            _fav_fault_set()
             _puts(2, "hamappmenu: newwindow alloc failed\n")
             return 1
         _am_place_window(wid, 8, 28)
+    _fav_fault_clear()
 
     # SCENE-FILE DE: no v2 protocol negotiation / window binding. We publish a
     # scene display list (hamscene_commit) exactly like the panel and every
@@ -970,11 +1171,13 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             # A fly-out click: rc-100000 is the chosen APP INDEX.
             aidx: uint64 = cast[uint64](rc - 100000)
             amc_mark_launch(amc_app_prog(aidx))
+            _fav_save()
             _emit_launch_path(amc_app_prog(aidx), amc_app_prog_len(aidx))
             _am_close(0)
         elif rc >= 0:
             urc: uint64 = cast[uint64](rc)
             amc_mark_launch(amc_row_prog(urc))
+            _fav_save()
             _emit_launch_path(amc_row_prog(urc), amc_row_prog_len(urc))
             _am_close(0)
         elif rc == -2:
@@ -987,6 +1190,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             if arow >= 0:
                 ur2: uint64 = cast[uint64](arow)
                 amc_mark_launch(amc_row_prog(ur2))
+                _fav_save()
                 _emit_launch_path(amc_row_prog(ur2), amc_row_prog_len(ur2))
                 _am_close(0)
         elif krc == 1:

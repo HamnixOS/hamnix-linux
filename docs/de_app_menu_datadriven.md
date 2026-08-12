@@ -123,9 +123,28 @@ populated and the discover→bind→launch path is exercised on a stock image.
   and launches the parsed `Exec` — native apps directly, Linux apps via
   `_launch_linux` → `enter linux`. Falls back to a built-in native set if
   the native dir is empty; the Linux section is additive.
-- **`user/hamappmenu.ad`** — the v2 cascading menu. Scans the dir
-  (`_seed_catalogue` → `_dd_scan`), grouping apps into category flyouts,
-  then appends the Run/Lock/Log Out session verbs. Legacy-table fallback.
+- **`user/hamappmenu.ad`** — the Brisk-shaped Applications menu the panel's
+  Applications button spawns (`/bin/hamappmenu -self`), and the one a person
+  actually sees on a shipped machine. Scans the dir (`_dd_scan`) into
+  `lib/appmenucore.ad`, which lays out a SEARCH row, a **Favourites** section
+  (the recency list) and one CATBTN parent per category with a hover fly-out.
+  Built-in fallback set when the dir is empty.
+
+  **Favourites are persisted to `$HOME/.hamde/favourites`**, one absolute
+  program path per line, most recent first, resolved through
+  `lib/homedir.ad` — the menu is a separate process per open, so without this
+  the section could never hold anything. NOT a fixed `/tmp` name: per-user
+  state belongs under the user's home (see `tests/linux/private_ns.sh`).
+  `$HOME/.hamde/appmenu.fault` is the other file in that directory: hamappmenu
+  writes it when it cannot open a window and removes it when it can, and
+  `hampanelscene._appmenu_available()` honours it by falling back to the
+  panel's own dropdown.
+
+  It is in `scripts/hamlinux_image.sh`'s `APPS` and in `DESKTOP_CMDS` in
+  `scripts/hamlinux_packages.py`. Both are required and
+  `tests/linux/channel_covers_image.sh` enforces it — for most of the port it
+  was in neither, so the Applications button pointed at a file that did not
+  exist on any machine.
 - **`user/hamde.ad`** — the hamui-toolkit panel. Registers one menu item
   per `.desktop` file; the event loop maps the clicked item to its
   `Exec`. Fallback set retained.
@@ -142,6 +161,11 @@ populated and the discover→bind→launch path is exercised on a stock image.
 - `scripts/test_de_scene_render.sh` (KVM/OVMF) — boots the DE, opens the
   Applications menu, and asserts the dropdown exposes app rows
   (`Terminal`/`Files`), which now come from the `.desktop` catalogue.
+- `tests/linux/de_appmenu_brisk.sh` (17 PASS, offscreen, private namespace) —
+  drives the shipped menu with synthetic evdev: a real mouse opens a category
+  fly-out, real EV_KEY scancodes type into the search box and the card is
+  measured to STOP COVERING the wallpaper where its filtered-away rows were,
+  and a launched app reappears under Favourites in a FRESHLY SPAWNED menu.
 
 ## Adding an app
 

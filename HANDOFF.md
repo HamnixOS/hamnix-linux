@@ -24,7 +24,7 @@ rather than argued:
 | Display | `/dev/fb` on fbdev AND on raw DRM/KMS, double-buffered with `MODE_PAGE_FLIP` — 481 flips, `stalled=0`. `flip` is a `/dev/fbctl` verb; double buffering arms lazily, so a program that never flips runs the old path untouched. |
 | Windows | `/dev/wsys`, the port of `devwsys.ad`, in shared memory. Both protocols: the v1 scene display list and the v2 blit surface, plus the `'I'` named-image tier (a scene client can draw a real photograph without converting its window to a blit surface). The screen size is published at `/dev/wsys/screen`. |
 | Compositor | `user/wsysd.ad`. A 1724-op frame at 1280×800 costs **625 µs**, down from 5503; a pointer-only frame costs **5 µs**, down from 6543. Pixel-identical to the pre-optimisation code at three geometries. |
-| Window titles | **Every window on the desktop has its name on its title bar, and until this it had none.** Not "the title was missing" — the device has held one per window since the port began (`user/linux-wsys.c`, the `title` ctl verb, 64 bytes) and publishes the set at `/dev/wsys/windows`, which is where the panel's taskbar has been reading it all along; `wsysd` drew the bar and painted no text on it, so three terminals open were three identical grey bars. **NO NEW FONT.** The title is a one-line `hamscene` display list (`glyphs`, the same builder every DE client uses) rasterized by the same `lib/hamui_host.ad` this compositor already rasterizes every window with — the same DejaVu Sans at the same 14px through the same anti-aliased TrueType path — onto a title-bar-sized surface presented **keyed**, so the gradient shows between the letters instead of a black box. It is measured with `htb_text_width()`, the one place in the tree that owns that advance sum, and ellipsised to fit. **THE TITLE IS UNTRUSTED AND IS TREATED AS SUCH**: the window table is `/srv/wsys`, mode 0666, and `linux-wsys.c` says in as many words that any uid can retitle any window. A hostile title cannot inject a draw op (`_hs_emit_str` maps `"` and newline to a space, and every byte outside printable ASCII is drawn as `.`), and cannot overrun — the measurement decides where the text is CUT, the surface decides where the ink can REACH, and the two bounds are independent because one of them is arithmetic. What it CAN still do is put 63 bytes of its choosing on another client's bar: it can lie about which window is which, which needs a per-uid mapping or an RPC compositor, exactly as for the scene and the key ring. `tests/linux/wsys_title.sh` (**23 PASS**, offscreen, under a minute): every assertion is a pixel count in a rectangle derived from the window's own geometry, with an **empty-title control on the same window in the same run** — and with the change reverted the gate is **16 PASS, 7 FAIL**. One of its assertions was itself success-shaped on the first revert run and was fixed: two blank bars compared by colour "differ" the moment one is focused and the other is not, so the two-window test compares the INK MASK, not the pixels. `hamui_host_uncovered_rows()` is deliberately NOT the instrument — it unions the fill and blit rects only, glyph ink is stamped through the coverage-mask op, and `tests/linux/wsys_cover.sh` already pins that ("a window with only text in it is reported uncovered"); the clip is proven on framebuffer pixels instead. |
+| Window titles | **Every window on the desktop has its name on its title bar, and until this it had none.** Not "the title was missing" — the device has held one per window since the port began (`user/linux-wsys.c`, the `title` ctl verb, 64 bytes) and publishes the set at `/dev/wsys/windows`, which is where the panel's taskbar has been reading it all along; `wsysd` drew the bar and painted no text on it, so three terminals open were three identical grey bars. **NO NEW FONT.** The title is a one-line `hamscene` display list (`glyphs`, the same builder every DE client uses) rasterized by the same `lib/hamui_host.ad` this compositor already rasterizes every window with — the same DejaVu Sans at the same 14px through the same anti-aliased TrueType path — onto a title-bar-sized surface presented **blended**, so the bar colour shows between the letters instead of a black box. **IT SAID THAT BEFORE AND IT WAS FALSE**, and the machine's owner found it in a screenshot: `#f0f0f5` ink at full strength, correct to the byte, sitting in a black box on a `#5577dd` bar, with a 23-PASS gate agreeing. The surface WAS keyed and the clear WAS transparent; `vk2d_raster_cov_mask`'s opaque fast path forced alpha 255 across each glyph's whole BOUNDING BOX, cov==0 cells included -- its comment states the assumption ("same value the composite target holds"), which is true of every target but a keyed one -- so every unpainted cell inside a letter was declared painted, and painted black. A FOURTH silent layer of `e0df2d4a`'s three, one deeper. Fixed with `vk2d_raster_cov_mask_over` (straight-alpha source-over that keeps the destination's alpha byte; over an opaque destination it reduces exactly to the old formula, so nothing that was right moved), `host_keyed` in `lib/hamui_host.ad` set from the clear it just performed, and a mode-2 present -- because `keyed` is the wrong present for anti-aliased text even once the alpha byte is honest: all-or-nothing writes a 1/255-coverage edge pixel as full ink. It is measured with `htb_text_width()`, the one place in the tree that owns that advance sum, and ellipsised to fit. **THE TITLE IS UNTRUSTED AND IS TREATED AS SUCH**: the window table is `/srv/wsys`, mode 0666, and `linux-wsys.c` says in as many words that any uid can retitle any window. A hostile title cannot inject a draw op (`_hs_emit_str` maps `"` and newline to a space, and every byte outside printable ASCII is drawn as `.`), and cannot overrun — the measurement decides where the text is CUT, the surface decides where the ink can REACH, and the two bounds are independent because one of them is arithmetic. What it CAN still do is put 63 bytes of its choosing on another client's bar: it can lie about which window is which, which needs a per-uid mapping or an RPC compositor, exactly as for the scene and the key ring. `tests/linux/wsys_title.sh` (**29 PASS**, offscreen, under a minute): every assertion is a pixel count in a rectangle derived from the window's own geometry, with an **empty-title control on the same window in the same run** — and with the change reverted the gate is **16 PASS, 7 FAIL**. One of its assertions was itself success-shaped on the first revert run and was fixed: two blank bars compared by colour "differ" the moment one is focused and the other is not, so the two-window test compares the INK MASK, not the pixels. `hamui_host_uncovered_rows()` is deliberately NOT the instrument — it unions the fill and blit rects only, glyph ink is stamped through the coverage-mask op, and `tests/linux/wsys_cover.sh` already pins that ("a window with only text in it is reported uncovered"); the clip is proven on framebuffer pixels instead. **AND THE GATE'S OWN HOLE WAS THE DEFECT'S SHAPE**: all 23 assertions were about the INK -- how much of it, how light the lightest pixel is, whether two bars carry different amounts -- and none looked at the pixels the letters do NOT cover. Six more now do, on the focused bar (`#5577dd`) and the unfocused one (`#404040`): nothing in the band is darker than the bar, not one pixel of it is `#000000`, and the bar is positively there across the ink's span. Reverted, the original 23 are unchanged and those say `432 px darker than the bar, 182 pure black, darkest #000000`. |
 | Input | every `/dev/input/event*`, decoded in the compositor, routed to the focused window in window-local coordinates — **and the DE chrome actually reacts to a mouse, which for the whole port before this it did not.** This row read exactly as it does now while the Applications button, the desktop icons and every panel control were completely dead to a click: the compositor routed to `<wid>/pointer` and the chrome reads `<wid>/event`, and nothing bridged them. That is the warning this row now carries — "input is routed" was a true sentence about a desktop nobody could use. Proven from the evdev end by `tests/linux/de_mouse_chrome.sh` (13 PASS), which is forbidden to write a ring by hand and asserts that about itself, because writing the ring by hand as host owner is precisely what every earlier gate did and precisely why this went unseen. **Focus lines are still not emitted at all** (no `f in`/`f out`), so clicking away does not dismiss an open menu — see the running list. |
 | Desktop | `hamdesktop` + `hampanelscene`, unmodified. Launch a terminal from the menu, type in it, get output. |
 | Desktop icons | **Every application on the desktop draws its own picture, and the ones that cannot say which one.** The owner reported it as *"a lot of the icons are missing images"*; nothing was missing from disk, and there is no icon asset on disk to miss. Every icon in this desktop is vector code in `lib/hamscene.ad` — a freedesktop `Icon=` name resolved to a glyph CODE by `hamscene_icon_code()` — and that function answered `HS_ICON_FILE`, the anonymous white page, for every name it had not been taught, which is the SAME answer it gives an app that asked for the generic page. So Spreadsheet, Presentation, Word Processor, Video Player and Audio Player drew five copies of one picture; Log Viewer and System Monitor, Notes and Editor, Software and Install Hamnix each drew one picture between two apps because the two `.desktop` files literally named the same `Icon=`. **It drew successfully, and every gate stayed green** — 15 icons rendering as 9 pictures. **20 new glyphs, no new file:** office, media, log, package, sticky-note, mouse, palette, clock, units, maths, markdown, book and one per game, each composed from the existing `fill`/`line`/`roundrect`/`stroke` verbs, so the channel-coverage invariant is satisfied by construction (`channel_covers_image.sh` **8 PASS**; zero files added to the image). **AND THE SILENT FALLBACK IS GONE**: `hamscene_icon_known()` tells *"this app wanted the page"* apart from *"nobody taught me this name"*, and `hamdesktop` publishes every miss as an `icon-unknown <name>` line in `/tmp/.hamdesktop.src`. `tests/linux/de_icons_distinct.sh` (**15 PASS**, offscreen, no VM, ~40 s) composes the real desktop against a `~/Desktop` it owns (a bind-mounted `/etc/passwd` in its private namespace — left alone, `_desk_dir()` found `/home/david/Desktop` and measured the person's own screenshots, which is what its first run reported), reads hamdesktop's own icon table for the cells, and fingerprints every 44×38 icon box **with the wallpaper subtracted**. That subtraction is the gate: the first version compared raw rectangles and scored **15 PASS on the unfixed tree**, because the backdrop is a gradient and two byte-identical page glyphs on different scanlines differ in 34% of their pixels. With the change reverted it is **7 PASS / 8 FAIL** — *"15 icons render as only 9 distinct pictures"*, naming the groups. **A pre-existing truncation fell out of it:** the scene-budget stress set gave all 32 cells the CHEAPEST glyph, so `test_de_desktop_label_budget_host.sh` was measuring the labels honestly and the drawing not at all; it asked for 64 glyph runs when a complete render is 128, got **105**, and called it *all label glyph runs emitted* — six labels were being dropped off the tail of the shared 16 KiB display list, in the exact regression that file exists to catch, with the file green. The stress set now cycles every `HS_ICON_*`, `WP_ICON_RESERVE` is 12288, and the whole 128 fits at 15387 bytes. |
@@ -3283,6 +3283,75 @@ chroot/fixture root they made.
 
 Everything under `qemu`/VM control writes inside the guest and is private by
 construction.
+
+### The Applications menu is Brisk-shaped, and it now SHIPS
+
+The machine's owner asked for MATE's Brisk menu: a category submenu like the
+panel's `Debian apps >`, a search box that filters as you type, and a
+Favourites section at the top showing what has been launched recently.
+
+**Nearly all of it was already written and reached nobody.**
+`user/hamappmenu.ad` and the pure model behind it, `lib/appmenucore.ad`, have
+the search row, the recency section and one hover fly-out per category.
+hamappmenu was in neither `scripts/hamlinux_image.sh`'s `APPS` nor
+`DESKTOP_CMDS` in `scripts/hamlinux_packages.py`, so `/bin/hamappmenu` existed
+on no machine, `hampanelscene._appmenu_available()` returned 0 on every boot,
+and the Applications button silently used the panel's own flat dropdown. That
+is NORTH_STAR.md's worst bug shape twice over: a program in the tree and in no
+ship vehicle, and a feature drawn correctly that could not run. Both lists now
+carry it; `tests/linux/channel_covers_image.sh` **8 PASS / 0 FAIL** over a
+freshly staged image root and a freshly built channel, with
+`hamnix-desktop-*/files/bin/hamappmenu` in the tarball.
+
+**And one thing genuinely did not work.** The menu is a separate process
+spawned per click and killed on dismiss (`_am_close`), so `amc_mark_launch`
+recorded the launch in module state microseconds before `sys_exit`. The
+Favourites section was structurally incapable of ever holding anything: it laid
+out, it rendered, and it was empty on every open, forever. It is now persisted
+to **`$HOME/.hamde/favourites`**, resolved through `lib/homedir.ad` — the
+user's own home, NOT a fixed `/tmp` name; `tests/linux/private_ns.sh` records
+what one of those cost two agents. `lib/appmenucore.ad` gained the read-back
+accessors (`amc_recent_prog`/`_len`) its own comment had already promised and
+nothing could use. The section is labelled **Favourites** and holds the recency
+list, which is the one thing the owner asked for, not two.
+
+**The panel still degrades.** Absence was already handled. Present-but-broken
+was not: a menu that starts and cannot get a window printed to a closed stderr
+and died, and the button answered a click with nothing. hamappmenu now writes
+`$HOME/.hamde/appmenu.fault` on window-allocation failure and removes it on
+success; `_appmenu_available()` re-checks it on every call and falls back to
+the dropdown the panel draws itself, saying so by name.
+
+`tests/linux/de_appmenu_brisk.sh`, **17 PASS / 0 FAIL**, offscreen, private
+namespace. Every click is synthetic evdev and **the search box is typed into
+with real EV_KEY scancodes** (KEY_C/A/L, KEY_BACKSPACE) routed by wsysd's own
+keymap to the focused window — the filter assertion is that the menu card stops
+covering the wallpaper where its 6th row was, measured pixel for pixel against
+a photograph of that rectangle taken before the menu existed (100% covered
+before, 0% after). Same ring-rule guard as `de_mouse_chrome.sh`: nothing in the
+file names an event, pointer or keys ring.
+
+**Revert arm, run:** with `lib/appmenucore.ad`, `user/hamappmenu.ad` and
+`user/hampanelscene.ad` restored, **14 PASS / 3 FAIL** — nothing persisted, a
+fresh menu shows no Favourites section (row 1 is 0% header and 77% category
+button, unchanged from the run with no history), and the menu that cannot open
+a window exits 1 leaving no marker.
+
+Two things the gate learned the hard way, both written into it: the failure
+injection has to make **all three** of `shm_attach`'s segment candidates
+(`$HAMWSYS`, `/dev/shm/hamnix-wsys`, `/tmp/hamnix-wsys`) unopenable — a
+directory at each, since `open(2)` on one is EISDIR even for a namespace root
+with CAP_DAC_OVERRIDE — because the first attempt let the menu build itself a
+private window system nothing composites and hang for four minutes; and
+`lib/homedir.ad` resolves to `/root` under the private namespace's mapped root,
+so the gate mounts a fresh tmpfs there rather than measure a write that could
+only fail.
+
+Green alongside it, unchanged: `de_mouse_chrome.sh` 13 (measured against the
+PACKAGED bytes by `channel_runs_desktop.sh`), `de_appmenu_band.sh` 11,
+`de_focus_dismiss.sh` 14, `de_panel_conf_replace.sh` 17,
+`de_panel_conf_shipped.sh` 15, `wsys_desktop_z.sh` 12, `gates_are_private.sh`
+3.
 
 ### Running it
 

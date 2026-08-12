@@ -692,6 +692,119 @@ def vk2d_raster_cov_mask(color_base: uint64, img_w: uint64, img_h: uint64,
         row = row + 1
 
 
+# THE SAME COVERAGE STAMP, ONTO A SURFACE THAT MAY BE TRANSPARENT.
+#
+# WHY IT EXISTS, and it is the fourth layer of the same defect the `keyed`
+# work found three of. vk2d_raster_cov_mask's opaque fast path above writes
+#
+#     cast[Ptr[uint8]](o + 3)[0] = 255
+#
+# for EVERY cell of the glyph's bounding box, cov==0 included, and says so in
+# its own comment: "the alpha byte the skip used to leave is written 255, same
+# value the composite target holds". That is true of every opaque target and
+# false of exactly one: the ALPHA-KEYED surface hamui_host_set_clear_alpha(0)
+# opens. There, cov==0 means "no ink here, let what is behind show through",
+# and stamping alpha 255 into it declares the transparent black of the clear
+# to be PAINTED BLACK. wsysd's title bar is the case that found it: the name
+# was rasterized into a bar-sized keyed surface precisely so the bar colour
+# would show between the letters, and every glyph arrived in a black box the
+# size of its bounding box, with each layer reporting success.
+#
+# AND THE COLOUR, not just the alpha byte. A partial-coverage edge blended
+# with (src*a + dst*(255-a))/255 against a dst whose alpha is 0 is blending
+# toward BLACK -- premultiplied output, which the compositor's source-over
+# present then multiplies by alpha a second time. So this op composites in
+# STRAIGHT (non-premultiplied) alpha, which is what the surface's consumer
+# (user/wsysd.ad's blit_window_image_mode) reads it as:
+#
+#     a_out = a_s + a_d*(1 - a_s)
+#     c_out = (c_s*a_s + c_d*a_d*(1 - a_s)) / a_out
+#
+# Over an opaque destination (a_d == 255) this reduces EXACTLY to the formula
+# above with a_out == 255, so nothing that was already right moves; over the
+# transparent clear (a_d == 0) it leaves c_out == c_s and a_out == a_s, which
+# is an anti-aliased edge that blends against the title bar instead of a dark
+# fringe that blends against nothing.
+#
+# A SEPARATE FUNCTION, not a flag on the old one, for the reason
+# vk2d_raster_clear_rect_a is separate: the opaque loop above is the shape
+# codegen.ad's try_vectorize_glyph matches, it is the DE's whole text path,
+# and it must not grow a per-pixel destination-alpha branch. The caller knows
+# which surface it is drawing into -- lib/hamui_host.ad knows because it is
+# the one that asked for the transparent clear.
+#
+# NEVER ROUTED to the device, same reason as vk2d_raster_clear_rect_a: the
+# alpha byte is the entire point and what the device does with it is not ours
+# to assume. A keyed window cannot take the routed/direct path anyway
+# (user/wsysd.ad's paint_window guards on exactly that).
+def vk2d_raster_cov_mask_over(color_base: uint64, img_w: uint64, img_h: uint64,
+                              cov_base: uint64, cov_w: int64, cov_h: int64,
+                              dx: int64, dy: int64, rgba: uint32):
+    if color_base == 0 or cov_base == 0 or cov_w <= 0 or cov_h <= 0:
+        return
+    r: uint8 = cast[uint8]((rgba >> 24) & 0xFF)
+    g: uint8 = cast[uint8]((rgba >> 16) & 0xFF)
+    b: uint8 = cast[uint8]((rgba >> 8) & 0xFF)
+    ca: uint32 = rgba & 0xFF
+    if ca == 0:
+        return
+    if _vk2d_bgra != 0:
+        rb_t: uint8 = r
+        r = b
+        b = rb_t
+    iw: int64 = cast[int64](img_w)
+    ih: int64 = cast[int64](img_h)
+    row0: int64 = 0
+    if dy < 0:
+        row0 = 0 - dy
+    row1: int64 = cov_h
+    if dy + cov_h > ih:
+        row1 = ih - dy
+    col0: int64 = 0
+    if dx < 0:
+        col0 = 0 - dx
+    col1: int64 = cov_w
+    if dx + cov_w > iw:
+        col1 = iw - dx
+    r32: uint32 = cast[uint32](r)
+    g32: uint32 = cast[uint32](g)
+    b32: uint32 = cast[uint32](b)
+    row: int64 = row0
+    while row < row1:
+        coff: uint64 = cov_base + cast[uint64](row * cov_w + col0)
+        o: uint64 = color_base + (cast[uint64](dy + row) * img_w
+                                  + cast[uint64](dx + col0)) * 4
+        col: int64 = col0
+        while col < col1:
+            cov: uint32 = cast[uint32](cast[Ptr[uint8]](coff)[0])
+            if cov != 0:
+                a_s: uint32 = cov * ca / 255
+                if a_s != 0:
+                    if a_s >= 255:
+                        cast[Ptr[uint8]](o)[0] = cast[uint8](r32)
+                        cast[Ptr[uint8]](o + 1)[0] = cast[uint8](g32)
+                        cast[Ptr[uint8]](o + 2)[0] = cast[uint8](b32)
+                        cast[Ptr[uint8]](o + 3)[0] = 255
+                    else:
+                        ia: uint32 = 255 - a_s
+                        d_a: uint32 = cast[uint32](cast[Ptr[uint8]](o + 3)[0])
+                        # The destination's contribution, already scaled by the
+                        # source's transparency: a_d*(1 - a_s).
+                        dw: uint32 = d_a * ia / 255
+                        oa: uint32 = a_s + dw
+                        dr: uint32 = cast[uint32](cast[Ptr[uint8]](o)[0])
+                        dg: uint32 = cast[uint32](cast[Ptr[uint8]](o + 1)[0])
+                        db: uint32 = cast[uint32](cast[Ptr[uint8]](o + 2)[0])
+                        cast[Ptr[uint8]](o)[0] = cast[uint8]((r32 * a_s + dr * dw) / oa)
+                        cast[Ptr[uint8]](o + 1)[0] = cast[uint8]((g32 * a_s + dg * dw) / oa)
+                        cast[Ptr[uint8]](o + 2)[0] = cast[uint8]((b32 * a_s + db * dw) / oa)
+                        cast[Ptr[uint8]](o + 3)[0] = cast[uint8](oa)
+            coff = coff + 1
+            o = o + 4
+            col = col + 1
+        row = row + 1
+
+
 # --- rounded-rect fill (anti-aliased corners) ----------------------
 #
 # The modern (KDE-ish) button/card/tile primitive hamSDL's sdl_fill_round_rect
