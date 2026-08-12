@@ -349,6 +349,10 @@ cleanup() {
     [ -n "${VM:-}" ] && kill "$VM" 2>/dev/null
 }
 trap cleanup EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 sleep 1
 curl -fsS "http://127.0.0.1:$PORT/linux/index.json" >/dev/null || {
     echo "FAIL: the local channel is not being served"; exit 1; }

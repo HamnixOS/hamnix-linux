@@ -54,14 +54,13 @@ ok()   { echo "keyed: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "keyed: FAIL $*"; fail=$((fail+1)); }
 info() { echo "keyed: INFO $*"; }
 
-WSYSDPID=""; HOLDERS=""
-cleanup() {
-    for p in $HOLDERS $WSYSDPID; do kill "$p" 2>/dev/null; done
-    sleep 0.3
-    for p in $HOLDERS $WSYSDPID; do kill -9 "$p" 2>/dev/null; done
-    [ "$KEEP" = 1 ] || rm -rf "$WORK"
-}
-trap cleanup EXIT
+# A file-backed registry, because `hold` below is called as `A="$(hold a)"` and
+# a command substitution is a subshell: a $HOLDERS variable assigned in there
+# is gone by the time the trap reads it. See tests/linux/reap.sh.
+. tests/linux/reap.sh
+reap_track "$WORK/reaped"
+cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
+reap_on_exit cleanup
 
 for t in wsysd:user/wsysd.ad wsys_poke:tests/linux/wsys_poke.ad \
          wsys_hold:tests/linux/wsys_hold.ad; do
@@ -84,11 +83,10 @@ export HAMWSYSD_INPUT="$WORK/input.evdev"
 # while every command returns 0. tests/linux/wsys_hold.ad is one process that
 # makes the window, stays alive, and obeys a script file as the test appends
 # to it.
-HOLDERS=""
 hold() {    # hold <name> -> prints the wid; $WORK/<name>.script drives it
     : >"$WORK/$1.script"
     "$WORK/wsys_hold.elf" "$WORK/$1.script" >"$WORK/$1.wid" 2>"$WORK/$1.err" &
-    HOLDERS="$HOLDERS $!"
+    reap_add $!
     for _ in $(seq 1 40); do [ -s "$WORK/$1.wid" ] && break; sleep 0.1; done
     tr -d '\n' <"$WORK/$1.wid"
 }
@@ -104,7 +102,7 @@ PY
 }
 
 "$WORK/wsysd.elf" </dev/null >"$WORK/wsysd.log" 2>&1 &
-WSYSDPID=$!
+WSYSDPID=$!; reap_add "$WSYSDPID"
 for _ in $(seq 1 60); do [ -s "$HAMFB_FILE" ] && break; sleep 0.1; done
 [ -s "$HAMFB_FILE" ] || { bad "wsysd never produced a framebuffer"; cat "$WORK/wsysd.log"; exit 1; }
 

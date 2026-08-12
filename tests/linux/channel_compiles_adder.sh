@@ -120,6 +120,10 @@ CHROOT="${CHROOT:-$(command -v chroot)}"
 W="$(mktemp -d "${TMPDIR:-/tmp}/acchan.XXXXXX")"
 cleanup() { [ -n "${ACCHAN_KEEP:-}" ] || rm -rf "$W"; }
 trap cleanup EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 
 # ---------------------------------------------------------------------------
 # 1. UNPACK THE TOOLCHAIN OUT OF THE CHANNEL. Nothing is copied from the tree.

@@ -57,6 +57,10 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 
 # -- the repo: a signed index, signed by scripts/hpm_sign.py with a key we
 #    mint here, so the test owns both halves and needs no secret from anywhere.

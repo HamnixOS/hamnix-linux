@@ -18,6 +18,10 @@ cd "$PROJ_ROOT"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 export HAMWSYS="$WORK/wsys.shm"
 export HAMFB_FILE="$WORK/fb.raw"
 export HAMFB_GEOM=800x600

@@ -93,6 +93,10 @@ fi
 BIN="${WSYS_UIDGATE_BIN:-}"
 W="$(mktemp -d "${TMPDIR:-/tmp}/wsysgate.XXXXXX")"
 trap 'rm -rf "$W"' EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 # 1777, not 755: three different uids each create their own segment in here,
 # and a uid that cannot create $HAMWSYS falls back to /dev/shm -- which both
 # leaks a file and makes the test measure a private window system instead of

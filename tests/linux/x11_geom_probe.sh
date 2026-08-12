@@ -51,6 +51,10 @@ cleanup() {
 }
 XCLIENTS=""; XWPID=""; WLPID=""; WSYSDPID=""
 trap cleanup EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 
 command -v Xwayland >/dev/null || { echo "need Xwayland on the host" >&2; exit 1; }
 command -v xdpyinfo >/dev/null || { echo "need xdpyinfo on the host" >&2; exit 1; }

@@ -39,6 +39,10 @@ WORK="${HAMLINUX_TAIL_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/tail_file.XXXXXX")}"
 KEEP="${HAMLINUX_TAIL_KEEP:-0}"
 cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
 trap cleanup EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  ok   %s\n' "$*"; }

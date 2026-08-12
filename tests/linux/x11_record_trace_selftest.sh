@@ -56,6 +56,10 @@ XV=$!
 TR=""; PR=""
 cleanup() { kill $PR $TR $XV 2>/dev/null; wait $XV 2>/dev/null; }
 trap cleanup EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 for _ in $(seq 1 40); do
     DISPLAY="$DPY" xdpyinfo >/dev/null 2>&1 && break
     sleep 0.25

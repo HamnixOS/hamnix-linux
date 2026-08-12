@@ -69,14 +69,15 @@ ok()   { echo "title: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "title: FAIL $*"; fail=$((fail+1)); }
 info() { echo "title: INFO $*"; }
 
-WSYSDPID=""; HOLDERS=""
-cleanup() {
-    for p in $HOLDERS $WSYSDPID; do kill "$p" 2>/dev/null; done
-    sleep 0.3
-    for p in $HOLDERS $WSYSDPID; do kill -9 "$p" 2>/dev/null; done
-    [ "$KEEP" = 1 ] || rm -rf "$WORK"
-}
-trap cleanup EXIT
+# Every process this gate starts is registered in a FILE, not a variable:
+# `hold` below is called as `A="$(hold a)"`, and a command substitution is a
+# subshell, so an assignment to a $HOLDERS variable there is thrown away when
+# the subshell exits. That is exactly what this gate used to do, and it leaked
+# all three holders on the SUCCESS path, every run. See tests/linux/reap.sh.
+. tests/linux/reap.sh
+reap_track "$WORK/reaped"
+cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
+reap_on_exit cleanup
 
 command -v python3 >/dev/null || { echo "need python3 on the host" >&2; exit 1; }
 
@@ -179,7 +180,7 @@ inksum() { python3 "$MASKPY" "$HAMFB_FILE" "$FBW" "$1" "$2" "$3" "$4" "$5"; }
 export HAMWSYSD_INPUT="$WORK/input.evdev"
 
 "$WORK/wsysd.elf" </dev/null >"$WORK/wsysd.log" 2>&1 &
-WSYSDPID=$!
+WSYSDPID=$!; reap_add "$WSYSDPID"
 for _ in $(seq 1 60); do [ -s "$HAMFB_FILE" ] && break; sleep 0.1; done
 [ -s "$HAMFB_FILE" ] || { bad "wsysd never produced a framebuffer"; cat "$WORK/wsysd.log"; exit 1; }
 
@@ -197,7 +198,7 @@ sleep 0.6
 hold() {    # hold <name> -> prints the wid; $WORK/<name>.script drives it
     : >"$WORK/$1.script"
     "$WORK/wsys_hold.elf" "$WORK/$1.script" >"$WORK/$1.wid" 2>"$WORK/$1.err" &
-    HOLDERS="$HOLDERS $!"
+    reap_add $!
     for _ in $(seq 1 40); do [ -s "$WORK/$1.wid" ] && break; sleep 0.1; done
     tr -d '\n' <"$WORK/$1.wid"
 }

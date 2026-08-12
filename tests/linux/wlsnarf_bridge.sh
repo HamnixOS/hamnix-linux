@@ -113,6 +113,10 @@ KIDS=""
 reap() { for p in $KIDS; do kill "$p" 2>/dev/null; done; sleep 0.4
          for p in $KIDS; do kill -9 "$p" 2>/dev/null; done; }
 trap reap EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 
 "$WSYSD" </dev/null >"$OUT/wsysd.log" 2>&1 &
 KIDS="$KIDS $!"

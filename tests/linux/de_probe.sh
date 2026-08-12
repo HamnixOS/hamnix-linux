@@ -24,6 +24,10 @@ command -v socat >/dev/null || { echo "need socat" >&2; exit 1; }
 
 WORK="${DE_PROBE_WORK:-$(mktemp -d)}"; mkdir -p "$WORK"; echo "[de_probe] work dir: $WORK"
 trap 'pkill -f "qemu.*hamnix-de-probe" 2>/dev/null' EXIT
+# A bare EXIT trap does not run when the shell is killed by a signal, so a
+# gate stopped by `timeout` (TERM) or ^C (INT) skipped its cleanup entirely.
+# Re-exit on those, which makes the EXIT trap above run on every path out.
+trap 'exit 130' INT TERM HUP
 SOCK=build/image/de_probe.mon
 
 cat > "$WORK/rc.boot" <<'RC'
