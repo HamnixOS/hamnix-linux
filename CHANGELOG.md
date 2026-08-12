@@ -20,7 +20,48 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-*(nothing right now — 1.0.16 carries everything that had landed.)*
+*(nothing right now — 1.0.17 carries everything that had landed.)*
+
+## 1.0.17
+
+### A script that cannot be read is no longer run, and no longer lies about it
+
+A file the shell cannot parse — one stray apostrophe is enough, since there is
+no escape inside a quoted string — used to fail almost silently: a single
+unnamed line, no file, no line number, and no statement that the script had
+not run. Now it names the file and **the line the quote opened on** (not the
+end of the file, where the failure is merely detected), says plainly that the
+script was not executed at all, and fails.
+
+Two things follow from that, and the second is the one that matters:
+
+- **The package manager no longer reports a package installed when its install
+  script did nothing.** It names the package and the script, says the files
+  were unpacked but the script did not succeed, and the package's name never
+  reaches the installed list — so the machine will not believe it on the next
+  update.
+- **Your machine still boots.** This was measured on a real boot before
+  anything was changed: a boot script that fails to parse already dropped to a
+  usable console shell, and it still does — now with a rescue banner that says
+  what happened. An init that exits is a kernel panic, so it does not exit.
+
+The compiler the package manager runs for source packages is also bounded now
+(15 minutes against a measured worst case of 9 seconds), so it cannot hang an
+update either.
+
+### Under the hood
+
+A survey of what the window system's shared table actually costs found that
+**writes to it are overwhelmingly per-frame, not structural** — 15 structural
+writes in a whole session against hundreds per second of drawing. That matters
+because the reason recorded for not putting access control on that table was
+that it would slow the drawing path, and the measurement says it would not.
+
+What does block it is worse than what was on file, and it is written down now
+rather than discovered later: the table has to stay readable by everyone,
+because the taskbar reads it — so one of your own programs can read another's
+keystrokes without writing anything at all. The design that closes it is
+recorded in full; it is not built yet, and this release does not claim it is.
 
 ## 1.0.16
 
