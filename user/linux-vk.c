@@ -1692,7 +1692,9 @@ static int32_t batch_table(int32_t first, int32_t cnt)
 int32_t hvk_frame_sync(void)
 {
     hvk_tunables();
-    if (!hvk_available() || !g_fmap) return -1;
+    /* As in hvk_frame_begin: a SCANOUT frame has no CPU mapping, and testing
+     * for one here silently produced zero frames and an empty error string. */
+    if (!hvk_available() || (!g_fmap && !g_fexported)) return -1;
     if (g_nops == 0) return g_frame_err;
     uint64_t t0 = now_us();
 
