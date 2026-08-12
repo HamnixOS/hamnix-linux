@@ -4922,3 +4922,27 @@ bash scripts/ci_run_gate.sh scripts/test_track_boot_armed.sh
 # an already-EOF stdin the gate passes against fully reverted code. Reverted:
 # 5 PASS / 5 FAIL. Host-only (no QEMU); ~85 s.
 bash tests/linux/hpm_hook_bounded.sh
+
+# --- a lex error is fatal, and PID 1 still gets a shell (added 2026-08-12) --
+# The half the hook gate deliberately left open. A sourced file is ONE logical
+# input to hamsh's lexer, so a runaway quote means NOTHING in the script ran --
+# and hamsh answered that by printing one unnamed line and EXITING 0, so `hpm`
+# said `installed <pkg>` for a package whose hook had done nothing. hamsh now
+# names the file and the line the quote OPENED on, says the script was not run,
+# and exits non-zero; hpm turns that into a named install failure and the
+# package never reaches installed.json. PID 1 is the exception that makes it
+# safe: it cannot exit (that is a kernel panic), so it says so loudly and falls
+# through to the console REPL -- a rescue shell. This gate proves both halves,
+# and the second one IN A REAL BOOT: a private image whose /etc/rc.boot carries
+# the field's own apostrophe, booted under QEMU, driven over the serial console
+# after the boot settles. hamsh and hpm are both given an OPEN, silent stdin,
+# because an already-EOF stdin grants the fix for free. 17 PASS / 0 FAIL;
+# reverted (user/hamsh.ad + user/hpm.ad at their parent commit) 8 PASS / 9 FAIL
+# -- 1,2,3 (hamsh hangs on an open stdin and names nothing), 6,7,8,9 (hpm says
+# `installed lexfixture-quote@1.0.0` and writes it to installed.json), and
+# 11,12 (the booted machine's only word about its unreadable rc is one unnamed
+# `hamsh: lexical error` line). 13-16 pass BOTH WAYS and that is the point: the
+# fall-through to a console shell is not new, so this change costs no machine.
+# ~7 min with the image staged;
+# LEXGATE_SKIP_BOOT=1 runs the host half alone in ~2 min.
+bash tests/linux/lex_error_fatal.sh

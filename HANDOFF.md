@@ -346,32 +346,93 @@ same failure this project exists to beat.
   next bad hook *before* it takes this `hpm`. It protects machines from the
   hook **after** the one that carries it, and nothing else.
 
-* **OPEN QUESTION, deliberately not decided: should a lexical error be FATAL to
-  `hamsh` when it sources a script?**
+* ~~**OPEN QUESTION: should a lexical error be FATAL to `hamsh` when it sources
+  a script?**~~ **DECIDED AND DONE. YES — and PID 1 still gets a shell.**
 
-  Today it is not. `run_source` reports `hamsh: lexical error (unterminated
-  quote or token-limit exceeded)` and carries on, so the runaway-quote hook
-  **exits 0** and `hpm` reports `installed hooktest-quote@1.0.0` for a package
-  whose hook **ran nothing** — measured, and printed (not asserted) by
-  `tests/linux/hpm_hook_bounded.sh`. The machine no longer hangs; it is still
-  told a half-done install succeeded, which is exactly the success-shaped
-  answer NORTH_STAR names.
+  It used to be a printed line and nothing else, so `hamsh <script>` exited 0
+  for a script of which **nothing had run**, and `hpm` printed
+  `installed hooktest-quote@1.0.0` for a package whose hook did nothing. A
+  sourced file is ONE logical input to `lex_line`: a runaway quote on line 3
+  swallows the rest of the file, the parser is never reached, and not even the
+  lines *before* the bad quote execute. That is not a partial run; it is no
+  run at all, and answering it with 0 is the success-shaped answer NORTH_STAR
+  names.
 
-  **It needs deciding on its own** because the same code path is how PID 1
-  sources `/etc/rc.boot`. Making a lex error fatal changes what the machine
-  does when the boot rc fails to lex: the difference between booting to a
-  degraded shell and not booting at all. That is a availability decision about
-  the installed machine, not a package-manager decision, and it should not ride
-  in on a hook fix. Whoever takes it should also decide whether `hpm` should
-  treat "the hook produced a lexical error" as an install failure independently
-  of the shell's exit status.
+  **A lexical error is now fatal to the script it is in.** `hamsh` names the
+  file and **the line the construct OPENED on** (an unterminated quote is only
+  *detected* at end of file, which is not the interesting place), says
+  `NOT RUN -- a script whose text cannot be lexed is not executed at all`, and
+  exits non-zero. `_run_rc_path` has a new return code 3 for it.
 
-  **And one unbounded wait is deliberately left standing:** `_spawn_adder_cc`
-  in `user/hpm.ad` still calls the blocking `sys_waitpid` on the on-box Adder
-  compiler for a source package. That one is not the same shape — a compile can
-  legitimately run for minutes, and no bound follows from the hook measurements
-  above — but it is the same *class*, and if source packages become common it
-  wants its own answer.
+  **What each CALLER does with that non-zero is where the availability
+  decision actually lives**, and that is what made this its own decision:
+
+  - `hpm` needed no new policy — a non-zero hook exit was already an install
+    failure. It now says the consequence out loud as well as the exit code:
+    `lexfixture-quote is NOT correctly installed: its files were unpacked but
+    its install.hamsh did not succeed`. No `installed <pkg>` line, non-zero
+    exit, and the package never reaches `installed.json`.
+  - **PID 1 does NOT die on it.** `hamsh` *is* PID 1 (linuxinit execs it), so
+    there is no parent left to catch an exit and an exit is a kernel panic. It
+    asks `sys_getpid()` in exactly one place, prints a rescue banner naming the
+    file and line, and falls through to the console REPL it already falls into.
+    **Measured in a real boot**, not argued: an image whose `/etc/rc.boot`
+    carries the field's own apostrophe prints
+    `hamsh: /etc/rc.boot:4: lexical error: a quote opened here is never closed`
+    followed by `PID 1: ... in a RESCUE SHELL on the console`, and then
+    `echo` and `cat /version` typed at the serial console both answer. No
+    panic. Before this change the same machine reached the same shell **saying
+    almost nothing** — one unnamed `hamsh: lexical error` line, no file, no
+    line number, no statement that the rc had not run — which is why the arm
+    exists even though the fall-through itself is not new.
+
+  The invariant: **a lex failure is never silent, never reported as success,
+  and never costs you the machine.**
+
+  Gated by **`tests/linux/lex_error_fatal.sh` — 17 PASS / 0 FAIL**, both halves
+  in one file, the second one a real QEMU boot of an image staged from the
+  tree. **With `user/hamsh.ad` and `user/hpm.ad` reverted to their parent
+  commit it is 8 PASS / 9 FAIL** — 1/2/3 (hamsh hangs on an open stdin, names
+  nothing), 6/7/8/9 (`hpm: installed lexfixture-quote@1.0.0`, and the name goes
+  into `installed.json`), 11/12 (the booted machine's whole account of its
+  unreadable rc is one `hamsh: lexical error (unterminated quote or token-limit
+  exceeded)`). **13–16 pass BOTH ways, and that is the point**: falling through
+  to the console shell is not new behaviour, so nothing here costs a machine.
+  Like the hook gate it hands `hamsh` and `hpm` an **open, silent stdin**
+  (a pipe with a live writer that never writes; a held-open fifo on fd 9),
+  because a harness at EOF grants the fix for free. It also matches the
+  console's answers as **whole lines after ANSI stripping** — hamsh's line
+  editor echoes what is typed at it, so a substring match would go green on the
+  echo of a command the shell never ran.
+
+  **FOUND WHILE DOING IT, AND IT IS THE SOFT-GREEN SHAPE AGAIN:**
+  `tests/linux/hpm_hook_bounded.sh`'s assertions 1 and 2 were measuring
+  nothing. Its fixture wrote the runaway-quote wrapper to
+  `dirname(out)/../quote.exec` — which lands in `$R` — while both assertions
+  open `$W/quote.exec`. **hamsh was handed a file that did not exist**, said
+  `boot rc ... not found`, fell into its REPL, and hung on an open stdin /
+  exited on `/dev/null` exactly as the real wrapper would have. Both went
+  green for years of runs without the bad quote ever being lexed. It surfaced
+  only because the new diagnostic was *missing* from output that claimed to be
+  about it. Fixed: the fixture takes `$W` as an argument, assertion 1 now
+  refuses a `not found` as evidence and asserts the new behaviour (report and
+  exit non-zero, never a hang), and assertion 2 uses a well-formed hook with
+  no `exit` — because a script that does not lex no longer reaches the REPL at
+  all, so it can no longer be the thing that proves the REPL exits on EOF.
+  Still 10 PASS, now for the stated reasons.
+
+* ~~**One unbounded wait is deliberately left standing: `_spawn_adder_cc`.**~~
+  **BOUNDED NOW, same shape as the hook wait.** `user/hpm.ad`'s on-box compile
+  polls `sys_waitpid_jc` against a deadline, kills on expiry, bounds the reap,
+  and on expiry names the source file it was compiling and says the package is
+  NOT installed; its stdin is `/dev/null` for the same reason a hook's is. **The bound is 15 minutes and it is measured, not
+  argued**: `host_ac` on `user/hamUId.ad` — 31,217 lines, the largest Adder
+  program in the tree — takes **0.80 s**, and **8.9 s** for the whole
+  compile+link. 15 min is ~100× that, so it bounds a wedge without being a
+  performance budget. It is not covered by a gate of its own: reproducing a
+  compiler that hangs needs a fixture source package with a wedging compiler
+  behind `/bin/adder_cc`, which is a bigger job than the change, and it is
+  named here rather than pretended about.
 
   Two more things `tests/linux/hpm_hook_bounded.sh` measured on the way, both
   in `hamsh` and neither touched here: a counting loop exhausts the value arena
