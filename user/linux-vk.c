@@ -76,6 +76,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>          /* close(), for the exported dmabuf fd */
 
 #include "linux-vk-spv.h"
 
@@ -289,6 +290,26 @@ typedef struct {
     uint32_t memoryHeapCount; VkMemoryHeap memoryHeaps[16];
 } VkPhysicalDeviceMemoryProperties;
 
+/* VK_MAX_EXTENSION_NAME_SIZE is 256 and the struct is name + specVersion. */
+typedef struct { char extensionName[256]; uint32_t specVersion; }
+    VkExtensionProperties;
+
+/* ---- external memory (dmabuf export), all from VK_KHR_external_memory_fd
+ * and VK_EXT_external_memory_dma_buf. Hand-declared like everything else
+ * here; the sType numbers are the extension-assigned ones. ---- */
+#define ST_EXTERNAL_MEMORY_BUFFER_CREATE_INFO 1000072000
+#define ST_EXPORT_MEMORY_ALLOCATE_INFO        1000072002
+#define ST_MEMORY_GET_FD_INFO_KHR             1000074002
+#define VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT 0x200
+
+typedef struct { uint32_t sType; const void* pNext; uint32_t handleTypes; }
+    VkExternalMemoryBufferCreateInfo;
+typedef struct { uint32_t sType; const void* pNext; uint32_t handleTypes; }
+    VkExportMemoryAllocateInfo;
+typedef struct { uint32_t sType; const void* pNext;
+                 VkDeviceMemory memory; uint32_t handleType; }
+    VkMemoryGetFdInfoKHR;
+
 typedef struct {
     uint32_t sType; const void* pNext; VkFlags flags;
     VkDeviceSize size; VkFlags usage; uint32_t sharingMode;
@@ -352,6 +373,9 @@ VKFN(void,     vkGetPhysicalDeviceProperties, (VkPhysicalDevice, VkPhysicalDevic
 VKFN(void,     vkGetPhysicalDeviceQueueFamilyProperties, (VkPhysicalDevice, uint32_t*, VkQueueFamilyProperties*));
 VKFN(void,     vkGetPhysicalDeviceMemoryProperties, (VkPhysicalDevice, VkPhysicalDeviceMemoryProperties*));
 VKFN(VkResult, vkCreateDevice, (VkPhysicalDevice, const VkDeviceCreateInfo*, const void*, VkDevice*));
+VKFN(VkResult, vkEnumerateDeviceExtensionProperties, (VkPhysicalDevice, const char*, uint32_t*, VkExtensionProperties*));
+VKFN(void*, vkGetDeviceProcAddr, (VkDevice, const char*));
+VKFN(VkResult, vkGetMemoryFdKHR, (VkDevice, const VkMemoryGetFdInfoKHR*, int*));
 VKFN(void,     vkDestroyDevice, (VkDevice, const void*));
 VKFN(void,     vkGetDeviceQueue, (VkDevice, uint32_t, uint32_t, VkQueue*));
 VKFN(VkResult, vkCreateBuffer, (VkDevice, const VkBufferCreateInfo*, const void*, VkBuffer*));
@@ -446,6 +470,9 @@ static int32_t       g_fbgra;
 static int           g_fdevlocal;
 static VkFlags       g_last_place_flags;   /* set by make_storage_buffer */
 static VkFlags       g_fflags;             /* ...captured for the frame */
+static int           g_can_export;         /* the 3 dmabuf extensions are on */
+static int           g_fexported;          /* the frame is an exportable alloc */
+static int           g_fdmabuf = -1;       /* its dmabuf fd, once exported */
 
 /* the source arena (binding 1): blit pixels + glyph coverage, grows on demand */
 static VkBuffer       g_abuf;
@@ -680,6 +707,8 @@ static int load_loader(void)
     BIND(vkGetPhysicalDeviceQueueFamilyProperties);
     BIND(vkGetPhysicalDeviceMemoryProperties);
     BIND(vkCreateDevice); BIND(vkDestroyDevice); BIND(vkGetDeviceQueue);
+    BIND(vkEnumerateDeviceExtensionProperties);
+    BIND(vkGetDeviceProcAddr);
     BIND(vkCreateBuffer); BIND(vkDestroyBuffer); BIND(vkGetBufferMemoryRequirements);
     BIND(vkAllocateMemory); BIND(vkFreeMemory); BIND(vkBindBufferMemory);
     BIND(vkMapMemory); BIND(vkUnmapMemory);
@@ -1018,8 +1047,63 @@ static int hvk_bringup(void)
     dci.sType = ST_DEVICE_CREATE_INFO;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    VKCK(p_vkCreateDevice(g_phys, &dci, 0, &g_dev));
+    /* THE EXPORT EXTENSIONS, enabled iff the driver advertises all three.
+     *
+     * They cost nothing when unused and they are the difference between a
+     * composite that has to be COPIED to the display and one the display can
+     * SCAN OUT where it lies. Enabled here, at device creation, because that
+     * is the only place it can be done -- a device created without them
+     * cannot export later, and the failure then looks like "the driver cannot
+     * export" rather than "we did not ask".
+     *
+     * Best-effort by design: a driver without them (or a software ICD) simply
+     * gets g_can_export = 0 and every scanout entry point below refuses in a
+     * way the caller can report. */
+    const char* wanted[3] = { "VK_KHR_external_memory",
+                              "VK_KHR_external_memory_fd",
+                              "VK_EXT_external_memory_dma_buf" };
+    if (p_vkEnumerateDeviceExtensionProperties) {
+        uint32_t en = 0;
+        p_vkEnumerateDeviceExtensionProperties(g_phys, 0, &en, 0);
+        if (en > 0 && en < 4096) {
+            VkExtensionProperties* ep =
+                (VkExtensionProperties*)calloc(en, sizeof *ep);
+            if (ep) {
+                p_vkEnumerateDeviceExtensionProperties(g_phys, 0, &en, ep);
+                int found = 0;
+                for (uint32_t i = 0; i < en; i++)
+                    for (int k = 0; k < 3; k++)
+                        if (!strcmp(ep[i].extensionName, wanted[k])) found++;
+                if (found >= 3) g_can_export = 1;
+                free(ep);
+            }
+        }
+    }
+    if (g_can_export) {
+        dci.enabledExtensionCount = 3;
+        dci.ppEnabledExtensionNames = wanted;
+    }
+    if (p_vkCreateDevice(g_phys, &dci, 0, &g_dev) != VK_SUCCESS) {
+        /* If the only difference was the extensions, retry without them
+         * rather than lose the whole backend over an optional feature. */
+        if (!g_can_export) return hvk_fail("vkCreateDevice failed");
+        g_can_export = 0;
+        dci.enabledExtensionCount = 0;
+        dci.ppEnabledExtensionNames = 0;
+        VKCK(p_vkCreateDevice(g_phys, &dci, 0, &g_dev));
+    }
     p_vkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
+    /* RESOLVED THROUGH THE DEVICE, NOT dlsym. libvulkan.so.1 does NOT export
+     * vkGetMemoryFdKHR as a dynamic symbol -- dlsym returns NULL for it on
+     * this loader -- so a dlsym probe reports "this driver cannot export
+     * dmabufs" about a driver that advertises all three extensions and
+     * exports them perfectly well. Extension entry points come from
+     * vkGetDeviceProcAddr. */
+    if (g_can_export) {
+        *(void**)(&p_vkGetMemoryFdKHR) =
+            p_vkGetDeviceProcAddr(g_dev, "vkGetMemoryFdKHR");
+        if (!p_vkGetMemoryFdKHR) g_can_export = 0;
+    }
     memset(&g_memprops, 0, sizeof g_memprops);
     p_vkGetPhysicalDeviceMemoryProperties(g_phys, &g_memprops);
 
@@ -1148,6 +1232,107 @@ uint64_t hvk_frame_create(int32_t w, int32_t h, int32_t bgra)
     return (uint64_t)(uintptr_t)g_fmap;
 }
 
+/* ==================================================================
+ * THE SCANOUT FRAME: a composite the display engine reads directly
+ * ==================================================================
+ * Everything above is about how expensive it is to get the composite from
+ * where the GPU wrote it to where the display can read it. This is the path
+ * where that question does not arise, because they are the same memory.
+ *
+ * The frame is allocated DEVICE-LOCAL and EXPORTABLE and is deliberately NOT
+ * host-mapped -- no BAR, no bus, no CPU pointer to be tempted by. Its dmabuf
+ * fd goes to DRM, which imports it (PRIME_FD_TO_HANDLE) and makes a
+ * framebuffer object of it (ADDFB2); from then on the compute shader
+ * rasterizes into VRAM and the CRTC scans that same VRAM out. Nothing crosses
+ * PCIe toward the CPU, ever, so the 88 ms readback is not reduced, it is
+ * ABSENT -- and so is the 4 MiB write(2), and so is /dev/fb.
+ *
+ * The cost of that is that the CPU can no longer touch the composite, which
+ * is a real constraint and not a detail: wsysd's cursor save-under and its
+ * software fallback for un-encodable ops both read and write comp_base
+ * directly. A compositor on this path has to do those on the device too.
+ *
+ * hvk_frame_is_scanout() reports 0 unless every step succeeded, so a caller
+ * cannot mistake a partial bring-up for a working one.
+ */
+int32_t hvk_can_export_dmabuf(void) { return g_can_export && p_vkGetMemoryFdKHR ? 1 : 0; }
+int32_t hvk_frame_is_scanout(void)  { return (g_fexported && g_fdmabuf >= 0) ? 1 : 0; }
+
+/* Create the frame as a device-local, exportable, UNMAPPED buffer and export
+ * a dmabuf fd for it. Returns the fd (>= 0), or a negative error:
+ *   -1 no device, -2 the export extensions are not available,
+ *   -3 allocation failed, -4 the driver refused the export.
+ * The fd is owned by this module and closed on the next frame create. */
+int32_t hvk_frame_create_scanout(int32_t w, int32_t h, int32_t bgra)
+{
+    if (!hvk_available()) return -1;
+    if (!hvk_can_export_dmabuf()) return -2;
+    if (w <= 0 || h <= 0) return -1;
+    g_fbgra = bgra ? 1 : 0;
+    p_vkDeviceWaitIdle(g_dev);
+    if (g_fdmabuf >= 0) { close(g_fdmabuf); g_fdmabuf = -1; }
+    if (g_fmap) { p_vkUnmapMemory(g_dev, g_fmem); g_fmap = 0; }
+    if (g_fbuf) { p_vkDestroyBuffer(g_dev, g_fbuf, 0); g_fbuf = 0; }
+    if (g_fmem) { p_vkFreeMemory(g_dev, g_fmem, 0); g_fmem = 0; }
+    g_fexported = 0;
+    VkDeviceSize sz = (VkDeviceSize)w * (VkDeviceSize)h * 4u;
+
+    VkExternalMemoryBufferCreateInfo ext;
+    memset(&ext, 0, sizeof ext);
+    ext.sType = ST_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+    ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkBufferCreateInfo bc;
+    memset(&bc, 0, sizeof bc);
+    bc.sType = ST_BUFFER_CREATE_INFO;
+    bc.pNext = &ext;
+    bc.size = sz;
+    bc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+             | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bc.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (p_vkCreateBuffer(g_dev, &bc, 0, &g_fbuf) != VK_SUCCESS)
+        return hvk_fail("scanout: vkCreateBuffer(exportable) failed"), -3;
+    VkMemoryRequirements mr;
+    memset(&mr, 0, sizeof mr);
+    p_vkGetBufferMemoryRequirements(g_dev, g_fbuf, &mr);
+    /* DEVICE_LOCAL only -- not host-visible. This is real VRAM, the fast kind,
+     * the kind the shader and the display controller both reach at full
+     * speed and the CPU cannot reach at all. */
+    int mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mt < 0) return hvk_fail("scanout: no device-local memory type"), -3;
+    VkExportMemoryAllocateInfo eai;
+    memset(&eai, 0, sizeof eai);
+    eai.sType = ST_EXPORT_MEMORY_ALLOCATE_INFO;
+    eai.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    VkMemoryAllocateInfo ai;
+    memset(&ai, 0, sizeof ai);
+    ai.sType = ST_MEMORY_ALLOCATE_INFO;
+    ai.pNext = &eai;
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = (uint32_t)mt;
+    if (p_vkAllocateMemory(g_dev, &ai, 0, &g_fmem) != VK_SUCCESS)
+        return hvk_fail("scanout: vkAllocateMemory(exportable) failed"), -3;
+    if (p_vkBindBufferMemory(g_dev, g_fbuf, g_fmem, 0) != VK_SUCCESS)
+        return hvk_fail("scanout: vkBindBufferMemory failed"), -3;
+
+    VkMemoryGetFdInfoKHR gi;
+    memset(&gi, 0, sizeof gi);
+    gi.sType = ST_MEMORY_GET_FD_INFO_KHR;
+    gi.memory = g_fmem;
+    gi.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    int fd = -1;
+    if (p_vkGetMemoryFdKHR(g_dev, &gi, &fd) != VK_SUCCESS || fd < 0)
+        return hvk_fail("scanout: vkGetMemoryFdKHR refused the export"), -4;
+
+    g_fmap = 0;                 /* THERE IS NO CPU POINTER. On purpose. */
+    g_fw = w; g_fh = h;
+    g_fdevlocal = 1;
+    g_fflags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    g_fexported = 1;
+    g_fdmabuf = fd;
+    if (rebind_descriptors()) return -3;
+    return fd;
+}
+
 uint64_t hvk_frame_base(void) { return (uint64_t)(uintptr_t)g_fmap; }
 int32_t  hvk_frame_width(void)  { return g_fw; }
 int32_t  hvk_frame_height(void) { return g_fh; }
@@ -1156,7 +1341,9 @@ int32_t  hvk_frame_height(void) { return g_fh; }
  * intervening hvk_frame_sync) submits them. */
 int32_t hvk_frame_begin(void)
 {
-    if (!hvk_available() || !g_fmap) return -1;
+    /* A SCANOUT frame has no CPU mapping by design, so "is there a frame?"
+     * cannot be spelled `g_fmap` any more. */
+    if (!hvk_available() || (!g_fmap && !g_fexported)) return -1;
     g_nops = 0;
     g_ause = 0;
     g_ncov = 0;
