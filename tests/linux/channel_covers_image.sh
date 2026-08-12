@@ -37,6 +37,33 @@
 #     the program the kernel executes. The gate passed every one of those
 #     days: it was looking one directory over.
 #
+# AND ONCE BY AN EXCLUSION WHOSE REASON WAS FALSE -- the fifth shape, and the
+# one this table has to be read for. `bin/host_ac` sat in the list above with
+# the reason "the Adder compiler built for the BUILD HOST's libc ... the
+# shippable compiler is `ac`, which IS packaged." Both halves were wrong:
+#
+#   * /bin/ac is a DRIVER, not a compiler. It execs /bin/host_ac (a hard-coded
+#     path in user/ac.ad) to turn foo.ad into LLVM IR. Measured by deleting
+#     host_ac from a staged root and running the real ac binary:
+#         ac: cannot run /bin/host_ac
+#         ac: hello.ad: the Adder compiler could not translate this program
+#     exit 10, no binary. So "ac IS packaged" bought an installed machine
+#     nothing at all -- and HANDOFF.md §0 listed "compiles Adder on the box"
+#     as a MEASURED capability of this distribution the whole time.
+#   * host_ac is not linked against the build host's libc. readelf: no
+#     .dynamic section, no INTERP, "not a dynamic executable". It is the one
+#     binary in /bin that needs no libc. `ac` is the one with NEEDED
+#     libssl.so.3, libcrypto.so.3, libcrypt.so.1, libc.so.6 -- the exclusion
+#     kept the static file out on a dynamic-linking worry that applied only to
+#     the file it let through.
+#
+# host_ac is now carried by hamnix-adder (ADDER_COMPILER in
+# scripts/hamlinux_packages.py) and the exclusion is gone. The lesson is about
+# this table, not about that file: A REASON IN THIS LIST IS A CLAIM, and an
+# unmeasured claim here is indistinguishable from the silent drop the gate
+# exists to catch -- it just has prose in front of it. What the channel does
+# for the toolchain is now RUN, not asserted: tests/linux/channel_compiles_adder.sh.
+#
 # WHAT THIS MEASURES NOW: EVERY regular file under the staged image root,
 # against every install path carried by any package tarball in the built
 # channel. Not the build logs, not the package COUNT -- the actual file lists,
@@ -76,7 +103,6 @@ bad()  { FAIL=$((FAIL+1)); echo "FAIL: $*"; }
 # either a measurement or a mechanism somebody can go and read.
 # ---------------------------------------------------------------------------
 EXCLUSIONS=$(cat <<'EOF'
-bin/host_ac	the Adder compiler built for the BUILD HOST's libc, used to compile the tree. A build tool that happens to be staged; the shippable compiler is `ac`, which IS packaged. Shipping host_ac would hand an installed machine a binary linked against a libc that is not necessarily its own.
 bin/audiolife	an audio stream LIFETIME scenario driver: a test fixture, not a program a user runs. It is in the image because the audio tests run inside the image.
 init	SHIPPED, BUT BY A HOOK, and the hook is checked below. /init is byte-identical to /bin/linuxinit (which hamnix-init packages) and is what the kernel executes on an installed machine. A package FILE at /init would be opened for writing on the running PID 1's text image -- ETXTBSY -- so the install would fail on every machine that is up. hamnix-init's install.hamsh unlinks it and copies /bin/linuxinit over it instead.
 etc/modules	the machine's BOOT MODULE LIST, and an append target. linuxinit walks it in file order, and every driver package's install hook appends its own modules to it. A package that shipped this file would replace it, silently un-listing the GPU driver an installed machine had added. It also has a hard 8192-byte ceiling (linuxinit reads it with ONE read), which repeated package appends would blow. The FILES it names are packaged -- hamnix-drivers-base and hamnix-drivers-*.

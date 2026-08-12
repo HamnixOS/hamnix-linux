@@ -198,6 +198,44 @@ ADDER_SHARE = glob_files(
      "scripts/ac-link.sh", "tests/linux/hello.ad"],
     "usr/share/adder")
 
+# THE ADDER COMPILER ITSELF. /bin/ac is a DRIVER, not a compiler: it execs
+# /bin/host_ac to turn foo.ad into LLVM IR and then runs the link recipe in the
+# Debian namespace (user/ac.ad's header, and the hard-coded "/bin/host_ac" in
+# its spawn). So a machine with `ac` and no `host_ac` has no compiler at all.
+#
+# THIS PACKAGE SHIPPED WITHOUT IT, AND THE CHANNEL SHOWS IT. Measured against
+# the published channel at https://255.one/linux/ on 2026-08-11:
+# hamnix-adder-1.0.12.tar.gz (sha256 d22ce377e5bd..., 79974 B, the bytes the
+# index advertises) contains exactly two entries -- PKGINFO and files/bin/ac.
+# A machine installed from that channel therefore gets the driver and neither
+# the compiler nor the runtime sources, and `ac hello.ad` on it answers:
+#
+#     ac: cannot run /bin/host_ac
+#     ac: hello.ad: the Adder compiler could not translate this program
+#
+# (exit 10, no binary written -- measured, tests/linux/channel_compiles_adder.sh).
+# HANDOFF.md §0 lists "compiles Adder on the box" as a measured capability of
+# this distribution; for an INSTALLED machine it was not true.
+#
+# WHY IT IS SAFE TO SHIP, against the reason it was excluded for. The exclusion
+# in tests/linux/channel_covers_image.sh said host_ac was "linked against a
+# libc that is not necessarily its own". That is backwards, and readelf says so:
+#
+#     host_ac: no .dynamic section, no INTERP -- "not a dynamic executable"
+#     ac:      NEEDED libssl.so.3, libcrypto.so.3, libcrypt.so.1, libc.so.6
+#
+# host_ac is the ONE binary in /bin that depends on no libc at all; `ac`, which
+# was packaged the whole time, is the one that carries the host-libc coupling.
+# scripts/hamlinux_image.sh says the same thing where it stages the file:
+# "host_ac is ALREADY a static Linux ELF, so it is just another /bin binary."
+#
+# It is an `extras` entry rather than a `bins` entry because it is not built
+# from a user/<cmd>.ad by build_one(): host_ac cannot emit a host-Linux binary,
+# so it is a first-class FILE in the tree (built by the Python seed into
+# build/cutover/) rather than a build product of this script. write_pkg chmods
+# anything installed under bin/ to 0755, so it lands executable.
+ADDER_COMPILER = [("build/cutover/host_ac.elf", "bin/host_ac")]
+
 # The manual pages. hamsh's `man` and `help` read /usr/share/man/*.md (see
 # user/hamsh.ad's discovery index, which walks that directory). The image
 # stages etc/man/*.md there; nothing shipped them, so `man ls` on an installed
@@ -325,9 +363,10 @@ COMPONENTS = {
         "installer and system tools -- hlinstall, haminstallui, nsrun, reboot",
         [(c, "bin/" + c) for c in SYS_CMDS], [], ["hamnix-init>=1"]),
     "hamnix-adder": (
-        "the Adder compiler driver -- `ac foo.ad -o foo` on the box, with the "
+        "the Adder toolchain -- `ac foo.ad -o foo` on the box: the driver "
+        "(/bin/ac), the compiler it execs (/bin/host_ac, static), and the "
         "runtime sources in /usr/share/adder that ac-link.sh links against",
-        [("ac", "bin/ac")], ADDER_SHARE, ["hamnix-init>=1"]),
+        [("ac", "bin/ac")], ADDER_COMPILER + ADDER_SHARE, ["hamnix-init>=1"]),
     "hamnix-audio": (
         "hamnix-linux audio userland -- playtone, aplay, arecord, clients of "
         "/dev/audio, and /usr/share/sounds/test.wav to play",
