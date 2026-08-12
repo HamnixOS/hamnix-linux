@@ -226,8 +226,10 @@ AD
 # reason). Missing is a finding, but not one that stops the measurement.
 if [ -f "$R/usr/share/adder/hello.ad" ]; then
     ok "the package carries a sample program (/usr/share/adder/hello.ad)"
-elif [ "$OMIT" = share ] || [ "$OMIT" = "" ]; then
-    [ "$OMIT" = share ] || bad "hamnix-adder carries no /usr/share/adder/hello.ad -- the sample an operator is told to compile is not there"
+elif [ -n "$OMIT" ]; then
+    echo "note: no sample program, but ACCHAN_OMIT=$OMIT removed it on purpose"
+else
+    bad "hamnix-adder carries no /usr/share/adder/hello.ad -- the sample an operator is told to compile is not there"
 fi
 
 # ---------------------------------------------------------------------------
