@@ -13,10 +13,21 @@
 #
 # WHAT IT ASSERTS (host, via the Python seed compiler — no QEMU):
 #   hamdesktop --scene-dump <file> --stress --wall builds the WORST case —
-#   MAX_ICONS icons whose labels all wrap onto two lines, over a wallpaper
+#   MAX_ICONS icons, one per HS_ICON_* glyph so the DRAWING is stressed too,
+#   whose labels all wrap onto two lines, over a wallpaper
 #   whose every mosaic cell is a different colour (no run-coalescing) — and
 #     * the display list stays inside HAMSCENE_CAP (16384), and
-#     * EVERY label line is present: 2 glyph runs x 2 lines x 16 icons = 64.
+#     * EVERY label line is present: 2 glyph runs x 2 lines x MAX_ICONS (32)
+#       = 128.
+#
+# THE FLOOR WAS 64, AND 64 WAS HALF THE ANSWER. MAX_ICONS has been 32 since
+# the shipped launcher set outgrew 16, so a complete stress render is 128 glyph
+# runs; this gate asked for 64 and got 105, and reported that as "all label
+# glyph runs emitted". 23 runs -- six labels -- were being dropped off the tail
+# of the display list, in the exact regression this file exists to catch, with
+# the file green. Raising hamdesktop's WP_ICON_RESERVE to 12288 (the mosaic
+# stops earlier; any unpainted rows show the kernel backdrop, and the icons
+# survive) makes the full 128 fit, so the floor is now the whole number.
 #
 # SKIPS CLEANLY when the Python seed compiler is unavailable.
 #
@@ -34,7 +45,7 @@ cd "$PROJ_ROOT"
 
 OUT="build/host/de_label_budget"
 CAP=16384
-WANT_RUNS=64
+WANT_RUNS=128
 
 python3 -c 'import compiler.adder' >/dev/null 2>&1 || {
     echo "[labelbudget] SKIP: Python seed compiler unavailable" >&2; exit 0; }

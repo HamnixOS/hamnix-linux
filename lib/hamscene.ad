@@ -626,6 +626,10 @@ HS_ICON_UNITS: int32 = 28      # accessories-units        (HamConvert)
 HS_ICON_MATH: int32 = 29       # accessories-math         (HamMath)
 HS_ICON_MARKDOWN: int32 = 30   # text-markdown            (HamMark)
 HS_ICON_BOOK: int32 = 31       # multimedia-audiobook     (Audiobook)
+# One past the last code. A caller that wants to exercise EVERY glyph (the
+# desktop's worst-case scene-budget stress set does) walks 0..HS_ICON_COUNT-1;
+# keep this in step when a glyph is added, or the new one goes unmeasured.
+HS_ICON_COUNT: int32 = 32
 
 
 # NUL-terminated string equality (small, local — hamscene stays extern-free).
@@ -1062,8 +1066,8 @@ def hamscene_icon_slides(x: int32, y: int32, w: int32, h: int32):
     barc: Ptr[uint8] = cast[Ptr[uint8]]("#ffffff")
     stand: Ptr[uint8] = cast[Ptr[uint8]]("#5d4037")
     edge: Ptr[uint8] = cast[Ptr[uint8]]("#a0522d")
-    bx: int32 = x + w / 8
-    bw: int32 = (w * 3) / 4
+    bx: int32 = x + w / 10
+    bw: int32 = (w * 4) / 5
     bh: int32 = (h * 5) / 8
     hamscene_fill(bx, y + 2, bw, bh, slide)
     hamscene_stroke(bx, y + 2, bw, bh, 1, edge)

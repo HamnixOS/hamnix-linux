@@ -77,7 +77,8 @@ from lib.hamui import hamscene_begin, hamscene_fill, hamscene_rect, \
     hamscene_glyphs, hamscene_glyphs_bold, hamscene_line, \
     hamscene_roundrect, \
     hamscene_icon_folder, hamscene_icon_file, hamscene_commit, \
-    hamscene_icon_draw, hamscene_icon_code, hamscene_icon_known
+    hamscene_icon_draw, hamscene_icon_code, hamscene_icon_known, \
+    HS_ICON_COUNT
 from lib.hamfmcore import fmc_set_cur_path, fmc_mkdir, \
     fmc_load_dir, fmc_refresh_if_changed, fmc_num_entries, \
     fmc_has_up_entry, fmc_entry_is_dir, fmc_entry_name_copy, \
@@ -616,8 +617,8 @@ def _wp_color_str(r: uint8, g: uint8, b: uint8, out: Ptr[uint8]):
 # The icon+label layer of a FULL launcher set (16 icons, two-line labels) costs
 # ~7 KB even with the cheap two-run labels, so the mosaic must stop well before
 # the list is full: reserve HALF the list for the icons.
-WP_ICON_RESERVE: uint64 = 9216
-WP_SCENE_BUDGET: uint64 = 7168           # = 16384 - 9216 (literal: native/bare-metal globals need an integer initializer, not a BinaryExpr)
+WP_ICON_RESERVE: uint64 = 12288
+WP_SCENE_BUDGET: uint64 = 4096           # = 16384 - 12288 (literal: native/bare-metal globals need an integer initializer, not a BinaryExpr)
 
 # Host test hook: synthesize the WORST-CASE wallpaper — every mosaic cell a
 # different colour, so emit_wallpaper's run-coalescing never fires and the
@@ -992,6 +993,16 @@ def _load_defaults():
 # That is the tightest case for the shared display list, so a gate can prove
 # every label still gets emitted (the "icons render with no text under them"
 # regression). The live desktop never takes this path.
+#
+# AND THE ICONS ARE THE REAL ONES, cycling through EVERY HS_ICON_* glyph.
+# This set used to give all 32 cells the generic page glyph, which is one of
+# the CHEAPEST display lists in lib/hamscene.ad — so "worst case" measured the
+# labels honestly and the icons not at all. The moment the office, media, log
+# and game glyphs landed (each a dozen or two primitives where the page is
+# eleven) the thing the gate was protecting could overflow with the gate still
+# green, and an overflow drops the TAIL of the list: the last icons and their
+# labels, silently. A stress set that does not stress the drawing is the
+# success-shaped answer again, one layer down.
 stress_label: Array[24, uint8]
 def _load_stress_icons():
     n_icons = 0
@@ -1007,7 +1018,7 @@ def _load_stress_icons():
         stress_label[i] = 0
         _add_icon(&stress_label[0], i, 0,
                   cast[Ptr[uint8]]("/bin/true"), 9, -1, -1,
-                  hamscene_icon_code(cast[Ptr[uint8]]("")))
+                  cast[int32](k) % HS_ICON_COUNT)
         k = k + 1
 
 

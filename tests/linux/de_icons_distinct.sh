@@ -223,8 +223,23 @@ EMPTY_X=900
 MEASURE="$WORK/measure.py"
 cat >"$MEASURE" <<'PY'
 # Reads the framebuffer + hamdesktop's icon table; writes two TSVs:
-#   icons.tsv  label  ncolours  pct-differing-from-bare-wallpaper  fingerprint
-#   pairs.tsv  labelA labelB  pct-of-pixels-that-differ
+#   icons.tsv  label  ncolours  pct-painted  fingerprint  pct-differs-from-self
+#   pairs.tsv  labelA labelB  pct-of-the-GLYPH-that-differs
+#
+# THE BACKGROUND HAD TO GO, and finding that out is the reason this comment
+# exists. The first version of this file compared the raw 44x38 rectangles.
+# It scored 15 PASS ON THE UNFIXED TREE: the desktop wallpaper is a vertical
+# gradient, the generic page glyph covers only the middle two thirds of its
+# box, and so two icons that were byte-for-byte THE SAME PICTURE differed in
+# 34% of their pixels -- entirely in the margins, entirely because they sit on
+# different scanlines. A gate that cannot fail is not a gate, and that one was
+# measuring the wallpaper.
+#
+# So every rect is NORMALISED against the bare wallpaper at its own scanlines
+# (a rectangle of the same shape taken from an empty part of the desktop):
+# a pixel equal to its background becomes None. What is left is the GLYPH, in
+# a form that no longer knows which row it was drawn on -- two copies of one
+# picture at different heights normalise to identical arrays and compare 0%.
 import sys, hashlib
 W, H = int(sys.argv[1]), int(sys.argv[2])
 DX, DY, IW, IH, EX = (int(v) for v in sys.argv[3:8])
@@ -247,6 +262,13 @@ def rect(buf, x, y):
             px.append(buf[o:o+3])
     return px
 
+def glyph(buf, x, y):
+    """The rect with its own background subtracted -- see the note above."""
+    r = rect(buf, x, y)
+    bare = rect(buf, EX, y)
+    return [None if k < len(bare) and p == bare[k] else p
+            for k, p in enumerate(r)]
+
 def pctdiff(a, b):
     n = min(len(a), len(b))
     if n == 0:
@@ -256,13 +278,13 @@ def pctdiff(a, b):
 table = []
 with open(outdir + '/icons.tsv', 'w') as f:
     for label, x, y in icons:
-        r = rect(d, x, y)
-        bare = rect(d, EX, y)                    # same scanlines, no icon
-        fp = hashlib.md5(b''.join(r)).hexdigest()[:12]
-        self2 = pctdiff(r, rect(d2, x, y))       # the negative control
-        f.write('%s\t%d\t%d\t%s\t%d\n'
-                % (label, len(set(r)), pctdiff(r, bare), fp, self2))
-        table.append((label, r))
+        g = glyph(d, x, y)
+        painted = sum(1 for p in g if p is not None) * 100 // max(1, len(g))
+        ncol = len(set(p for p in g if p is not None))
+        fp = hashlib.md5(repr(g).encode()).hexdigest()[:12]
+        self2 = pctdiff(g, glyph(d2, x, y))      # the negative control
+        f.write('%s\t%d\t%d\t%s\t%d\n' % (label, ncol, painted, fp, self2))
+        table.append((label, g))
 
 with open(outdir + '/pairs.tsv', 'w') as f:
     for i in range(len(table)):
@@ -278,10 +300,10 @@ python3 "$MEASURE" "$FBW" "$FBH" "$ICON_DX" "$ICON_DY" "$ICON_W" "$ICON_H" \
     done_report; exit 1; }
 
 # ---- 4. SOMETHING WAS ACTUALLY PAINTED -----------------------------------
-BLANK=$(awk -F'\t' '$3 < 25 { print $1 " (" $3 "% differs from bare wallpaper)" }' \
+BLANK=$(awk -F'\t' '$3 < 25 { print $1 " (" $3 "% of its box painted)" }' \
         "$WORK/icons.tsv")
 if [ -z "$BLANK" ]; then
-    ok "every icon painted over the wallpaper it sits on"
+    ok "every icon painted over at least a quarter of the box it was given"
 else
     bad "these icons barely changed the pixels they cover -- they drew nothing:"
     printf '%s\n' "$BLANK" | sed 's/^/deicons:      /'
