@@ -1559,6 +1559,32 @@ x_atom_allow:   uint32 = 0
 x_atom_netname: uint32 = 0
 x_atom_protocols: uint32 = 0
 x_atom_delete:    uint32 = 0
+# EWMH. Not decoration: a toolkit asks these questions before it decides how
+# big to open, whether it is already maximised, and whether there is a window
+# manager at all -- and until now this compositor answered exactly as a screen
+# with NO window manager does, which is what §8b said and what
+# hamnix_x11session.sh had to skip its window-manager check for.
+x_atom_supported:  uint32 = 0
+x_atom_wmcheck:    uint32 = 0
+x_atom_active:     uint32 = 0
+x_atom_clientlist: uint32 = 0
+x_atom_clientstk:  uint32 = 0
+x_atom_wmstate:    uint32 = 0
+x_atom_wmname:     uint32 = 0            # _NET_WM_NAME again, for the check
+x_atom_workarea:   uint32 = 0
+x_atom_desktopgeo: uint32 = 0
+x_atom_viewport:   uint32 = 0
+x_atom_ndesktops:  uint32 = 0
+x_atom_curdesktop: uint32 = 0
+x_atom_wmwindowtype: uint32 = 0
+x_atom_wintype_normal: uint32 = 0
+x_atom_wintype_dialog: uint32 = 0
+x_atom_wmstate_max_h: uint32 = 0
+x_atom_wmstate_max_v: uint32 = 0
+x_atom_wmstate_focused: uint32 = 0
+x_atom_utf8:       uint32 = 0
+x_check_win:       uint32 = 0            # the _NET_SUPPORTING_WM_CHECK window
+x_ewmh_seen:       int32 = 0             # the client list we last published
 x_prop_fmt: int32 = 0
 x_prop_n:   uint32 = 0
 xerr_seq:   uint32 = 0
@@ -1968,6 +1994,234 @@ def x_composite_redirect() -> int32:
     xreq[8] = 1                                 # update = Manual
     x_send(12)
     return 1
+
+
+# --- EWMH ------------------------------------------------------------
+#
+# WHAT A TOOLKIT ACTUALLY ASKS, and what it did before this. GTK and Qt read
+# _NET_SUPPORTED to find out what the window manager can do, _NET_WM_STATE to
+# find out whether they are already maximised, _NET_WORKAREA to find out how
+# much of the screen they may use, and _NET_SUPPORTING_WM_CHECK to find out
+# whether there is a window manager at ALL. This compositor answered nothing,
+# which is not "answered badly" -- it is byte-for-byte the answer a bare X
+# screen gives, so a toolkit correctly concluded there was no window manager
+# and laid itself out accordingly. `jwm` publishes 66 of these atoms, and the
+# difference between rootless and jwm as a default is partly this list.
+#
+# ONLY WHAT IS TRUE IS ADVERTISED. _NET_SUPPORTED lists the properties below
+# and nothing else: an EWMH hint claimed and not honoured is worse than one
+# absent, because absent is a fact a client can act on. There is no
+# _NET_WM_STATE_FULLSCREEN here, no _NET_MOVERESIZE_WINDOW and no
+# _NET_WM_STATE_HIDDEN, because this compositor does not do those things yet.
+def x_prop32(win: uint32, prop: uint32, ptype: uint32, vals: Ptr[int32],
+             n: uint64):
+    if prop == 0 or win == 0:
+        return
+    total: uint64 = 24 + n * 4
+    if total > 1000:
+        return
+    xzero(total)
+    xreq[0] = 18                                # ChangeProperty
+    xreq[1] = 0                                 # mode = Replace
+    xput16(&xreq[0], 2, cast[uint32](total / 4))
+    put_le32(&xreq[0], 4, cast[int32](win))
+    put_le32(&xreq[0], 8, cast[int32](prop))
+    put_le32(&xreq[0], 12, cast[int32](ptype))
+    xreq[16] = 32                               # format
+    put_le32(&xreq[0], 20, cast[int32](n))
+    i: uint64 = 0
+    while i < n:
+        put_le32(&xreq[0], 24 + i * 4, vals[i])
+        i = i + 1
+    x_send(total)
+
+
+def x_prop_str(win: uint32, prop: uint32, ptype: uint32, str_: Ptr[uint8]):
+    if prop == 0 or win == 0:
+        return
+    n: uint64 = slen(str_)
+    total: uint64 = 24 + (n + 3) / 4 * 4
+    if total > 1000:
+        return
+    xzero(total)
+    xreq[0] = 18
+    xreq[1] = 0
+    xput16(&xreq[0], 2, cast[uint32](total / 4))
+    put_le32(&xreq[0], 4, cast[int32](win))
+    put_le32(&xreq[0], 8, cast[int32](prop))
+    put_le32(&xreq[0], 12, cast[int32](ptype))
+    xreq[16] = 8                                # format: bytes
+    put_le32(&xreq[0], 20, cast[int32](n))
+    i: uint64 = 0
+    while i < n:
+        xreq[24 + i] = str_[i]
+        i = i + 1
+    x_send(total)
+
+
+# THE CHECK WINDOW. _NET_SUPPORTING_WM_CHECK must point at a window that
+# exists, is never destroyed, and carries the same property pointing at
+# ITSELF plus the window manager's _NET_WM_NAME. A client that finds the
+# property on the root and then cannot read it back on the window it names
+# concludes -- correctly -- that a window manager published its hints and
+# then died, which docs/linux_window_manager.md §4 records matchbox doing.
+def x_make_check_window() -> uint32:
+    w: uint32 = x_resbase | 1
+    xzero(32)
+    xreq[0] = 1                                 # CreateWindow
+    xreq[1] = 0                                 # depth = CopyFromParent
+    xput16(&xreq[0], 2, 8)
+    put_le32(&xreq[0], 4, cast[int32](w))
+    put_le32(&xreq[0], 8, cast[int32](x_root))
+    xput16(&xreq[0], 12, 0)                     # x
+    xput16(&xreq[0], 14, 0)                     # y
+    xput16(&xreq[0], 16, 1)                     # width
+    xput16(&xreq[0], 18, 1)                     # height
+    xput16(&xreq[0], 20, 0)                     # border width
+    xput16(&xreq[0], 22, 2)                     # class = InputOnly
+    put_le32(&xreq[0], 24, 0)                   # visual = CopyFromParent
+    put_le32(&xreq[0], 28, 0)                   # value-mask = none
+    x_send(32)
+    return w
+
+
+ewmh_vals: Array[64, int32]
+
+
+def x_ewmh_init():
+    x_atom_supported  = x_intern("_NET_SUPPORTED")
+    x_atom_wmcheck    = x_intern("_NET_SUPPORTING_WM_CHECK")
+    x_atom_active     = x_intern("_NET_ACTIVE_WINDOW")
+    x_atom_clientlist = x_intern("_NET_CLIENT_LIST")
+    x_atom_clientstk  = x_intern("_NET_CLIENT_LIST_STACKING")
+    x_atom_wmstate    = x_intern("_NET_WM_STATE")
+    x_atom_workarea   = x_intern("_NET_WORKAREA")
+    x_atom_desktopgeo = x_intern("_NET_DESKTOP_GEOMETRY")
+    x_atom_viewport   = x_intern("_NET_DESKTOP_VIEWPORT")
+    x_atom_ndesktops  = x_intern("_NET_NUMBER_OF_DESKTOPS")
+    x_atom_curdesktop = x_intern("_NET_CURRENT_DESKTOP")
+    x_atom_wmwindowtype = x_intern("_NET_WM_WINDOW_TYPE")
+    x_atom_wintype_normal = x_intern("_NET_WM_WINDOW_TYPE_NORMAL")
+    x_atom_wintype_dialog = x_intern("_NET_WM_WINDOW_TYPE_DIALOG")
+    x_atom_wmstate_max_h = x_intern("_NET_WM_STATE_MAXIMIZED_HORZ")
+    x_atom_wmstate_max_v = x_intern("_NET_WM_STATE_MAXIMIZED_VERT")
+    x_atom_wmstate_focused = x_intern("_NET_WM_STATE_FOCUSED")
+    x_atom_utf8       = x_intern("UTF8_STRING")
+
+    x_check_win = x_make_check_window()
+    # The check window names itself and carries the WM's name, which is what
+    # a client reads to find out WHICH window manager it is talking to.
+    ewmh_vals[0] = cast[int32](x_check_win)
+    x_prop32(x_check_win, x_atom_wmcheck, 33, &ewmh_vals[0], 1)   # 33 = WINDOW
+    x_prop32(x_root, x_atom_wmcheck, 33, &ewmh_vals[0], 1)
+    x_prop_str(x_check_win, x_atom_netname, x_atom_utf8, "wsyswl")
+
+    n: uint64 = 0
+    ewmh_vals[n] = cast[int32](x_atom_supported)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_wmcheck)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_active)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_clientlist)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_clientstk)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_wmstate)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_workarea)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_desktopgeo)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_viewport)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_ndesktops)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_curdesktop)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_netname)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_wmwindowtype)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_wintype_normal)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_wintype_dialog)
+    n = n + 1
+    ewmh_vals[n] = cast[int32](x_atom_wmstate_focused)
+    n = n + 1
+    x_prop32(x_root, x_atom_supported, 4, &ewmh_vals[0], n)   # 4 = ATOM
+
+    # ONE DESKTOP, and it is the whole screen. There is no workspace switcher
+    # on this desktop; saying so is a fact, and a client that reads
+    # _NET_WORKAREA gets the real geometry rather than the 640x480 an
+    # unanswered question leaves it guessing at.
+    ewmh_vals[0] = 1
+    x_prop32(x_root, x_atom_ndesktops, 6, &ewmh_vals[0], 1)       # 6 = CARDINAL
+    ewmh_vals[0] = 0
+    x_prop32(x_root, x_atom_curdesktop, 6, &ewmh_vals[0], 1)
+    ewmh_vals[0] = 0
+    ewmh_vals[1] = 0
+    x_prop32(x_root, x_atom_viewport, 6, &ewmh_vals[0], 2)
+    ewmh_vals[0] = scr_w
+    ewmh_vals[1] = scr_h
+    x_prop32(x_root, x_atom_desktopgeo, 6, &ewmh_vals[0], 2)
+    # THE WORKAREA IS NOT THE SCREEN. wsysd's decoration takes a title bar and
+    # a one-pixel frame out of every window, so a client handed the whole
+    # display loses its own chrome off the bottom edge -- which is the same
+    # arithmetic MAX_INSET_W/H already does for xdg_toplevel.configure. The
+    # two answers have to agree or a maximised X client and a maximised
+    # Wayland client are different sizes on the same desktop.
+    ewmh_vals[0] = 0
+    ewmh_vals[1] = 0
+    ewmh_vals[2] = MAX_W
+    ewmh_vals[3] = MAX_H
+    x_prop32(x_root, x_atom_workarea, 6, &ewmh_vals[0], 4)
+
+
+# _NET_CLIENT_LIST and _NET_ACTIVE_WINDOW, republished whenever the set of
+# managed windows changes. A taskbar, a pager and `wmctrl -l` all read the
+# first; the second is what "which window has the keyboard" means to a
+# toolkit. Republished on a CHANGE only -- a property write per frame is a
+# round trip per frame to an X server, and this loop is the compositor's.
+def x_ewmh_publish():
+    if x_atom_clientlist == 0 or xfd < 0:
+        return
+    n: uint64 = 0
+    i: uint64 = 0
+    while i < n_xw and n < 64:
+        if xw_map[i] != 0 and xw_or[i] == 0:
+            ewmh_vals[n] = xw_win[i]
+            n = n + 1
+        i = i + 1
+    # A cheap signature of the list, so an unchanged set costs nothing.
+    sig: int32 = cast[int32](n)
+    k: uint64 = 0
+    while k < n:
+        sig = sig * 31 + ewmh_vals[k]
+        k = k + 1
+    if sig == x_ewmh_seen:
+        return
+    x_ewmh_seen = sig
+    x_prop32(x_root, x_atom_clientlist, 33, &ewmh_vals[0], n)
+    # STACKING ORDER IS BOTTOM-TO-TOP and this list is neither: wsysd owns z
+    # and this compositor does not read it back. Publishing the same order
+    # under both names would be a claim about stacking that is not measured,
+    # so _NET_CLIENT_LIST_STACKING carries the same set -- which is what the
+    # spec requires of the SET -- and its order is not to be trusted. Said
+    # here rather than left for a pager author to discover.
+    x_prop32(x_root, x_atom_clientstk, 33, &ewmh_vals[0], n)
+
+
+def x_ewmh_active(win: int32):
+    if x_atom_active == 0 or xfd < 0:
+        return
+    ewmh_vals[0] = win
+    x_prop32(x_root, x_atom_active, 33, &ewmh_vals[0], 1)
+    # _NET_WM_STATE_FOCUSED on the window itself, which is what a toolkit
+    # reads to draw its own active/inactive chrome.
+    if win != 0:
+        ewmh_vals[0] = cast[int32](x_atom_wmstate_focused)
+        x_prop32(cast[uint32](win), x_atom_wmstate, 4, &ewmh_vals[0], 1)
 
 
 def xwm_find(win: int32) -> int32:
@@ -2382,17 +2636,24 @@ def xwm_event():
             xwm_read_protocols(i2)
             xwm_read_transient(i2)
             xwm_attach_or(i2)
+            # _NET_WM_STATE exists on every managed window from the moment it
+            # is mapped, even when it is empty: a toolkit asking "am I
+            # maximised" must be able to tell "no" from "nobody answered".
+            x_prop32(cast[uint32](win), x_atom_wmstate, 4, &ewmh_vals[0], 0)
+            x_ewmh_publish()
     elif t == 18:                                # UnmapNotify
         win = cast[int32](ru32(&xin[0], 8))
         s = xwm_find(win)
         if s >= 0:
             xw_map[cast[uint64](s)] = 0
             xwm_unpair(cast[uint64](s))
+            x_ewmh_publish()
     elif t == 17:                                # DestroyNotify
         win = cast[int32](ru32(&xin[0], 8))
         s = xwm_find(win)
         if s >= 0:
             xwm_del(cast[uint64](s))
+            x_ewmh_publish()
     elif t == 22:                                # ConfigureNotify
         win = cast[int32](ru32(&xin[0], 8))
         s = xwm_find(win)
@@ -2528,6 +2789,7 @@ def xwm_connect() -> int32:
         puts(2, "wsyswl: could not intern WL_SURFACE_SERIAL -- this X server is not an Xwayland\n")
         x_drop_conn()
         return 0
+    x_ewmh_init()
     if x_composite_redirect() == 0:
         puts(2, "wsyswl: this X server has no Composite extension, so nothing on it can be\n")
         puts(2, "wsyswl: redirected -- Xwayland will make no wl_surface for any X window and\n")
@@ -4003,6 +4265,14 @@ def drain_window(i: uint64):
                 serial = serial + 1
                 send_kbd_enter(cast[uint32](kbd), serial, surf)
                 w_focus[i] = 1
+            # _NET_ACTIVE_WINDOW, for an X window. wsysd owns focus and this
+            # is where the compositor finds out about it: a window that is
+            # being given keys is the window that has the keyboard. A toolkit
+            # reads this to draw its own active chrome, and a taskbar reads it
+            # to know which entry to light.
+            si2: uint64 = oidx(c, surf)
+            if obj_type[si2] == T_SURFACE and obj_e[si2] > 0:
+                x_ewmh_active(obj_e[si2])
         s = 0
         k = 0
         while k < cast[uint64](got):
