@@ -70,128 +70,220 @@ OPTLVL="${HAMLINUX_OPT:--O2}"
 OUT_DIR="$(dirname "$OUT_ELF")"
 mkdir -p "$OUT_DIR"
 
-# The Linux link runtime is two objects, assembled/compiled once and cached:
-#
-#   user/linux-runtime.S   the freestanding half — the entry points that are a
-#                          single raw `syscall`. -DADDER_HOSTED suppresses its
-#                          _start (crt1.o owns that here) and the definitions
-#                          the hosted half overrides.
-#   user/linux-syscalls.c  the hosted half — everything needing errno, wait4,
-#                          poll or the resolver. See its header comment.
-RT_OBJ="$OUT_DIR/.linux-runtime.o"
-if [ ! -f "$RT_OBJ" ] || [ user/linux-runtime.S -nt "$RT_OBJ" ]; then
-    "$CLANG" -c -x assembler-with-cpp -DADDER_HOSTED -Iuser \
-        user/linux-runtime.S -o "$RT_OBJ" || {
-        echo "[hamlinux] ERROR: could not assemble user/linux-runtime.S" >&2
-        exit 1
-    }
-fi
-SC_OBJ="$OUT_DIR/.linux-syscalls.o"
-if [ ! -f "$SC_OBJ" ] || [ user/linux-syscalls.c -nt "$SC_OBJ" ] \
-        || [ user/linux-fb.h -nt "$SC_OBJ" ] \
-        || [ user/linux-wsys.h -nt "$SC_OBJ" ] \
-        || [ user/linux-fdns.h -nt "$SC_OBJ" ] \
-        || [ user/linux-net.h -nt "$SC_OBJ" ] \
-        || [ user/linux-auth.h -nt "$SC_OBJ" ] \
-        || [ user/linux-snarf.h -nt "$SC_OBJ" ]; then
-    "$CLANG" -O2 -Iuser -c user/linux-syscalls.c -o "$SC_OBJ" || {
-        echo "[hamlinux] ERROR: could not compile user/linux-syscalls.c" >&2
-        exit 1
-    }
-fi
-# The DRM/KMS framebuffer behind /dev/fb (HANDOFF §4.4).
-FB_OBJ="$OUT_DIR/.linux-fb.o"
-if [ ! -f "$FB_OBJ" ] || [ user/linux-fb.c -nt "$FB_OBJ" ] \
-        || [ user/linux-fb.h -nt "$FB_OBJ" ]; then
-    "$CLANG" -O2 -Iuser -c user/linux-fb.c -o "$FB_OBJ" || {
-        echo "[hamlinux] ERROR: could not compile user/linux-fb.c" >&2
-        exit 1
-    }
-fi
-
-# /dev/wsys, the window system device (the port of devwsys.ad).
-WS_OBJ="$OUT_DIR/.linux-wsys.o"
-if [ ! -f "$WS_OBJ" ] || [ user/linux-wsys.c -nt "$WS_OBJ" ] \
-        || [ user/linux-wsys.h -nt "$WS_OBJ" ]; then
-    "$CLANG" -O2 -Iuser -c user/linux-wsys.c -o "$WS_OBJ" || {
-        echo "[hamlinux] ERROR: could not compile user/linux-wsys.c" >&2
-        exit 1
-    }
-fi
-
-# /fd, the Plan 9 file-descriptor name space (HANDOFF §7.1).
-FD_OBJ="$OUT_DIR/.linux-fdns.o"
-if [ ! -f "$FD_OBJ" ] || [ user/linux-fdns.c -nt "$FD_OBJ" ] \
-        || [ user/linux-fdns.h -nt "$FD_OBJ" ]; then
-    "$CLANG" -O2 -Iuser -c user/linux-fdns.c -o "$FD_OBJ" || {
-        echo "[hamlinux] ERROR: could not compile user/linux-fdns.c" >&2
-        exit 1
-    }
-fi
-
-# /net, the Plan 9 network file tree (HANDOFF §3). TLS is OpenSSL when the
-# host has the headers; without it a `tls` ctl verb is an ERROR rather than a
-# silent plaintext connection, which would send credentials in the clear.
-NET_OBJ="$OUT_DIR/.linux-net.o"
+# /net's TLS. OpenSSL when the host has the headers; without it a `tls` ctl
+# verb is an ERROR rather than a silent plaintext connection, which would send
+# credentials in the clear. Decided here because it is part of the CACHE KEY
+# below as well as the link line.
 TLSFLAGS=""
 TLSLIBS=""
 if [ -f /usr/include/openssl/ssl.h ]; then
     TLSFLAGS="-DHAMNIX_TLS"
     TLSLIBS="-lssl -lcrypto"
 fi
-if [ ! -f "$NET_OBJ" ] || [ user/linux-net.c -nt "$NET_OBJ" ] \
-        || [ user/linux-net.h -nt "$NET_OBJ" ]; then
-    "$CLANG" -O2 -Iuser $TLSFLAGS -c user/linux-net.c -o "$NET_OBJ" || {
-        echo "[hamlinux] ERROR: could not compile user/linux-net.c" >&2
+
+# ===========================================================================
+# THE RUNTIME OBJECT CACHE — KEYED ON CONTENT, NEVER ON mtime
+# ===========================================================================
+# The eight objects below (linux-runtime.S and the seven device servers) are
+# the same bytes for every program in the tree, so they are compiled once and
+# cached. WHERE they are cached and HOW they are invalidated is the whole
+# subject of this block, because getting it wrong is a shipped-defect
+# mechanism this project has already paid for twice.
+#
+# WHAT IT USED TO DO, AND WHAT THAT COST
+# --------------------------------------
+# It cached them as `$OUT_DIR/.linux-wsys.o` &c — one fixed name per object,
+# in the OUTPUT directory — and rebuilt one when its `.c` was NEWER than the
+# object:
+#
+#     [ ! -f "$WS_OBJ" ] || [ user/linux-wsys.c -nt "$WS_OBJ" ]
+#
+# Both halves are wrong, and they compound.
+#
+#   * The NAME does not mention the source tree. Two checkouts that build into
+#     one output directory — two agents' worktrees, a bisect, a gate handed
+#     `$WORK` — share one `.linux-wsys.o`, so the FIRST tree's window system
+#     is linked into the SECOND tree's binaries. Every name matches, every
+#     hash matches, every dependency resolves, and the program does the wrong
+#     thing. That is exactly the shape NORTH_STAR.md forbids: a success-shaped
+#     answer instead of the truth.
+#
+#   * mtime does not mean "different content", in either direction. Two files
+#     can share an mtime to the nanosecond. A checkout gives OLD content a NEW
+#     mtime — `git checkout <older-rev>` routinely does, which is how a stale
+#     object survives a revert. And `-nt` is false when the timestamps are
+#     equal, so a fast edit inside one filesystem timestamp tick is missed.
+#
+# It has bitten twice, in both lanes. hamnix-desktop 1.0.10 shipped a desktop
+# that mapped no windows because a stale cached object was PACKAGED — the
+# packager lane, since fixed by `newest_shared_input()` in
+# scripts/hamlinux_packages.py. And an agent building a negative control got a
+# `wsysd` reporting wsys segment version **5** out of a v7 tree, because
+# another tree had been built into the same directory first — this lane, which
+# is the one being fixed here.
+#
+# WHAT IT DOES NOW
+# ----------------
+# The object's NAME CONTAINS THE HASH OF ITS INPUTS. Two trees whose
+# linux-wsys.c differ ask for two different filenames, so they cannot collide
+# however hard they share a directory; two trees whose linux-wsys.c is
+# byte-identical ask for the same filename and SHOULD share it. Sharing stops
+# being a hazard and becomes the point.
+#
+# The key has two halves, so that editing one device server does not recompile
+# the other seven:
+#
+#   <src>  sha256 of that object's own source (.c or .S).
+#   <env>  sha256 of everything shared: every user/linux-*.h, the TLS flag,
+#          THIS SCRIPT, and the compiler's identity. Headers are keyed as a
+#          set rather than per-object because the exact include graph is not
+#          knowable before the compile, and over-invalidating is the safe
+#          direction: a header edit rebuilds all eight, which is correct and
+#          rare.
+#
+# The compiler's identity is its path, size and mtime. That is a heuristic —
+# but it is a heuristic about a BINARY THIS TREE DOES NOT OWN, not about the
+# source under test, and `clang --version` costs 15 ms on every one of the 366
+# builds a sweep does. The tree's own content is hashed, always.
+#
+# Objects are compiled to a temp name and RENAMED INTO PLACE. rename(2) within
+# a directory is atomic, so four parallel workers (HAMLINUX_JOBS) racing on
+# the same cache entry produce a complete object or no object, never a half
+# written one that links.
+#
+# HAMLINUX_OBJ_CACHE puts the cache somewhere other than the output directory
+# — now a safe thing to do, and worth it for a shared build box. Unset, the
+# behaviour is what it always was: objects live beside the binaries.
+# ===========================================================================
+command -v sha256sum >/dev/null 2>&1 || {
+    # Falling back to mtime here would be the failure this block exists to
+    # prevent, arrived at quietly. Refuse by name instead.
+    echo "[hamlinux] ERROR: no sha256sum on PATH — the runtime object cache is keyed on content and there is no mtime fallback (that is the bug). Install coreutils." >&2
+    exit 1
+}
+
+OBJ_DIR="${HAMLINUX_OBJ_CACHE:-$OUT_DIR}"
+mkdir -p "$OBJ_DIR" || { echo "[hamlinux] ERROR: cannot create object cache $OBJ_DIR" >&2; exit 1; }
+
+# The runtime sources. linux-audio.c is OPTIONAL at this point in its life:
+# the .c is not in the tree on every branch, and a build script that cannot
+# run without a file that may not exist is a build script that breaks a clean
+# checkout. It broke exactly that way once — the audio stanza was committed
+# while user/linux-audio.c was still untracked, so a fresh worktree of the
+# mainline could not compile ANY program. Guarded rather than assumed.
+RT_SRCS=(user/linux-runtime.S user/linux-syscalls.c user/linux-fb.c \
+         user/linux-wsys.c user/linux-fdns.c user/linux-net.c \
+         user/linux-auth.c user/linux-snarf.c)
+[ -f user/linux-audio.c ] && RT_SRCS+=(user/linux-audio.c)
+
+# One sha256sum pass over every runtime source: nine digests, one process.
+declare -A SRC_SHA=()
+while read -r _h _f; do SRC_SHA["$_f"]="${_h:0:16}"; done < <(sha256sum "${RT_SRCS[@]}")
+for _f in "${RT_SRCS[@]}"; do
+    [ -n "${SRC_SHA[$_f]:-}" ] || {
+        echo "[hamlinux] ERROR: could not hash $_f — refusing to build against an unkeyed runtime source" >&2
         exit 1
     }
-fi
+done
 
+# The shared half of the key. `hamlinux-objcache-v1` is a salt: bump it to
+# invalidate every cached object in every directory at once, should the
+# meaning of a key ever have to change.
+ENV_SHA="$( { printf '%s\n' hamlinux-objcache-v1 "$CLANG" "$TLSFLAGS"
+              stat -Lc '%n %s %Y' "$(command -v "$CLANG")" 2>/dev/null
+              cat user/linux-*.h "${BASH_SOURCE[0]}"
+            } | sha256sum )"
+ENV_SHA="${ENV_SHA:0:16}"
+[ ${#ENV_SHA} = 16 ] || { echo "[hamlinux] ERROR: could not compute the runtime cache key" >&2; exit 1; }
+
+CACHE_MISSED=0
+# rt_obj <src> [extra clang args…] — put the path of the cached object for
+# <src> in $RT_OBJ_PATH, compiling it first if this exact content has not been
+# compiled into this cache yet.
+#
+# It ASSIGNS rather than echoes on purpose. `X=$(rt_obj …)` forks a subshell,
+# and nine of those on the warm path — the path every one of the ~366 builds
+# in a sweep takes — cost more than the hashing does. Same reason there is no
+# `basename` here and no per-object `touch`: the warm path forks four
+# processes in total (two sha256sum, a stat, a cat), and everything else is
+# builtins.
+RT_OBJ_PATH=""
+rt_obj() {
+    local src="$1"; shift
+    local base="${src##*/}"; base="${base%.*}"
+    RT_OBJ_PATH="$OBJ_DIR/.$base.${SRC_SHA[$src]}-$ENV_SHA.o"
+    [ -f "$RT_OBJ_PATH" ] && return 0
+    CACHE_MISSED=1
+    local tmp="$RT_OBJ_PATH.tmp.$$"
+    if ! "$CLANG" "$@" -Iuser -c "$src" -o "$tmp" >&2; then
+        rm -f "$tmp"
+        echo "[hamlinux] ERROR: could not compile $src" >&2
+        return 1
+    fi
+    mv -f "$tmp" "$RT_OBJ_PATH" || { rm -f "$tmp"; return 1; }
+}
+
+#   user/linux-runtime.S   the freestanding half — the entry points that are a
+#                          single raw `syscall`. -DADDER_HOSTED suppresses its
+#                          _start (crt1.o owns that here) and the definitions
+#                          the hosted half overrides.
+rt_obj user/linux-runtime.S -x assembler-with-cpp -DADDER_HOSTED || exit 1
+RT_OBJ="$RT_OBJ_PATH"
+#   user/linux-syscalls.c  the hosted half — everything needing errno, wait4,
+#                          poll or the resolver. See its header comment.
+rt_obj user/linux-syscalls.c -O2 || exit 1
+SC_OBJ="$RT_OBJ_PATH"
+# The DRM/KMS framebuffer behind /dev/fb (HANDOFF §4.4).
+rt_obj user/linux-fb.c -O2 || exit 1
+FB_OBJ="$RT_OBJ_PATH"
+# /dev/wsys, the window system device (the port of devwsys.ad).
+rt_obj user/linux-wsys.c -O2 || exit 1
+WS_OBJ="$RT_OBJ_PATH"
+# /fd, the Plan 9 file-descriptor name space (HANDOFF §7.1).
+rt_obj user/linux-fdns.c -O2 || exit 1
+FD_OBJ="$RT_OBJ_PATH"
+# /net, the Plan 9 network file tree (HANDOFF §3).
+rt_obj user/linux-net.c -O2 $TLSFLAGS || exit 1
+NET_OBJ="$RT_OBJ_PATH"
 # /dev/auth, the credential device. -lcrypt for the SHA-512 verify.
-AU_OBJ="$OUT_DIR/.linux-auth.o"
-if [ ! -f "$AU_OBJ" ] || [ user/linux-auth.c -nt "$AU_OBJ" ] \
-        || [ user/linux-auth.h -nt "$AU_OBJ" ]; then
-    "$CLANG" -O2 -Iuser -c user/linux-auth.c -o "$AU_OBJ" || {
-        echo "[hamlinux] ERROR: could not compile user/linux-auth.c" >&2
-        exit 1
-    }
-fi
-
+rt_obj user/linux-auth.c -O2 || exit 1
+AU_OBJ="$RT_OBJ_PATH"
 # /dev/snarf and /dev/snarf.primary -- the clipboard device, the port of
 # Hamnix's sys/src/9/port/devsnarf.ad onto a shared segment. NOT optional and
-# NOT guarded like the audio stanza below: every program in the tree links the
+# NOT guarded like the audio stanza: every program in the tree links the
 # runtime, lib/hamtextbox.ad and lib/htermsel.ad reach these two paths by name,
 # and a missing object here is an undefined reference at link time rather than
 # a program that builds and silently cannot paste.
-SN_OBJ="$OUT_DIR/.linux-snarf.o"
-if [ ! -f "$SN_OBJ" ] || [ user/linux-snarf.c -nt "$SN_OBJ" ] \
-        || [ user/linux-snarf.h -nt "$SN_OBJ" ]; then
-    "$CLANG" -O2 -Iuser -c user/linux-snarf.c -o "$SN_OBJ" || {
-        echo "[hamlinux] ERROR: could not compile user/linux-snarf.c" >&2
-        exit 1
-    }
-fi
-
+rt_obj user/linux-snarf.c -O2 || exit 1
+SN_OBJ="$RT_OBJ_PATH"
 # /dev/audio, /dev/audioctl and /dev/audioin -- the port of Hamnix's
 # drivers/audio/audio_cdev.ad onto ALSA. It talks to /dev/snd/pcmC*D*p through
 # the kernel's own PCM ioctls, so there is no libasound to link and nothing
 # extra for the initramfs to carry.
-# The audio device server is OPTIONAL at this point in its life: the .c is not
-# in the tree yet on every branch, and a build script that cannot run without
-# a file that may not exist is a build script that breaks a clean checkout.
-# It broke exactly that way once -- this block was committed while
-# user/linux-audio.c was still untracked, so a fresh worktree of the mainline
-# could not compile ANY program. Guarded rather than assumed.
 AUD_OBJ=""
 if [ -f user/linux-audio.c ]; then
-    AUD_OBJ="$OUT_DIR/.linux-audio.o"
-    if [ ! -f "$AUD_OBJ" ] || [ user/linux-audio.c -nt "$AUD_OBJ" ] \
-            || [ user/linux-audio.h -nt "$AUD_OBJ" ]; then
-        "$CLANG" -O2 -Iuser -c user/linux-audio.c -o "$AUD_OBJ" || {
-            echo "[hamlinux] ERROR: could not compile user/linux-audio.c" >&2
-            exit 1
-        }
-    fi
+    rt_obj user/linux-audio.c -O2 || exit 1
+    AUD_OBJ="$RT_OBJ_PATH"
+fi
+
+# Content keys never expire, so entries accumulate as the tree changes. Both
+# halves of this run ONLY on the cold path — a warm build must not pay for
+# either.
+#
+#   `touch` refreshes the objects this build used, so the prune below cannot
+#   reach an entry that is in active service. It is one process for all nine,
+#   and it is here rather than in rt_obj for that reason.
+#
+#   The prune is by AGE, not by "not the current key", so nothing a concurrent
+#   link is reading can go away underneath it — a week-old object is not one
+#   another worker has open. The pattern also collects the old fixed-name
+#   objects (`.linux-wsys.o`) this block replaced, which are unreferenced now
+#   and are precisely the dangerous ones.
+if [ "$CACHE_MISSED" = 1 ]; then
+    touch "$RT_OBJ" "$SC_OBJ" "$FB_OBJ" "$WS_OBJ" "$FD_OBJ" "$NET_OBJ" \
+          "$AU_OBJ" "$SN_OBJ" ${AUD_OBJ:+"$AUD_OBJ"} 2>/dev/null
+    find "$OBJ_DIR" -maxdepth 1 -name '.linux-*.o' -type f \
+         -mtime +"${HAMLINUX_OBJ_CACHE_DAYS:-7}" -delete 2>/dev/null
 fi
 
 LL="${OUT_ELF%.elf}.ll"

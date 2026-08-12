@@ -2492,14 +2492,49 @@ Scores, all measured: published 1.0.17 **13/0**; current tree **13/0**;
 the top bar. With the fix reverted, the published bytes go back to
 **2 PASS / 1 FAIL, `no full-width top bar`**.
 
-**Found on the way, still live:** `scripts/hamlinux_build.sh` caches its
-`.linux-*.o` objects **in the output directory** and invalidates them on the
-`.c` file's mtime. Building two different trees into one output directory
-therefore links the *first* tree's wsys backend into the second tree's
-binaries, silently — which is the 1.0.10 mechanism, in the gate lane rather
-than the packager lane. It bit the first attempt at the negative control above
-(a "current" `wsysd` that came out v5). Separate output directories per tree,
-or key the cache on content.
+**Found on the way, and now FIXED:** `scripts/hamlinux_build.sh` cached its
+`.linux-*.o` objects **in the output directory**, one fixed name per object,
+and invalidated them on the `.c` file's mtime. Building two different trees
+into one output directory therefore linked the *first* tree's wsys backend
+into the second tree's binaries, silently — the 1.0.10 mechanism, in the gate
+lane rather than the packager lane, and the more dangerous of the two now that
+agents work in parallel worktrees. It bit the first attempt at the negative
+control above (a "current" `wsysd` that came out v5).
+
+**The object's name now contains the sha256 of its inputs** — its own source,
+plus a shared digest over every `user/linux-*.h`, the TLS flag, the build
+script and the compiler's identity. Content, not mtime and not a path:
+mtime cannot be the key (two files can share one; a checkout hands old content
+a new timestamp; `-nt` is false on a tie), and a *path* key would have been
+correct here while making every worktree recompile the runtime forever. Two
+trees whose `linux-wsys.c` differ ask for two different filenames and cannot
+collide however hard they share a directory; two trees whose sources are
+byte-identical ask for the same filename and **share** it. Objects are renamed
+into place, so four parallel workers cannot link a half-written one, and a
+missing `sha256sum` is a loud refusal rather than a quiet fall back to mtime.
+`HAMLINUX_OBJ_CACHE` can put the cache outside the output directory.
+
+`tests/linux/build_obj_cache.sh`, **9 PASS**, offscreen, ~90 s. Two symlink
+farms over the checkout differing in ONE FILE — `user/linux-wsys.c`, with
+`#define WSYS_VERSION` moved down by two — the second backdated so the first
+tree's object is newer than it (the ordinary case of two worktrees, where the
+one checked out first builds second). Both build into one directory; then the
+second tree's compositor is RUN and the version it stamped into the segment is
+read with a 24-byte file read that attaches to nothing. **With the fix
+reverted: 4 PASS / 4 FAIL, and the v7 tree's binary stamps v5.** Two
+assertions that went green in that arm for reasons of their own are labelled
+as what they are — one a discriminator against an *alternating* cache, one an
+INFO because "no new object appeared" cannot be asked of a cache with one
+entry per name.
+
+**Cost, measured, both directions.** Warm path (the object already cached, the
+path all ~366 builds of a sweep take): **0.1807 s → 0.1915 s per build**, mean
+of three alternating rounds of 20 — **+10.8 ms, +6.0%**, which is two
+`sha256sum`s, a `stat` and a `cat`. Cold full channel build, everything
+rebuilt: **129.6 s → 128.1 s**, i.e. no measurable difference at all; both
+produced 100 packages and a written index. The first version cost +46 ms
+because it forked nine subshells and nine `basename`s on the warm path; the
+hashing was never the expensive part, the processes were.
 
 Every click is synthetic evdev — 24-byte `struct input_event` records appended
 to `HAMWSYSD_INPUT`, parsed by `wsysd`'s own `pump_input` — and every assertion
