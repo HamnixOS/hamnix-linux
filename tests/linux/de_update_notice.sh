@@ -68,6 +68,14 @@
 #  12. CONTROL for 11: a menu that was NOT refused does not take the
 #      suppressing branch, so the fix is conditional and a genuinely broken
 #      menu still gets written down.
+#  13. THE OTHER EDGE. Everything above is a TOP panel, because that is what
+#      the image ships. _notice_box() also has a bottom/left/right arm and
+#      untested geometry is not geometry -- so the panel is restarted on a
+#      BOTTOM bar and the notice has to appear in the bottom-anchored
+#      rectangle and NOT in the top one. Both halves matter: a notice drawn
+#      at a hardcoded y would pass the first and fail the second.
+#      (left/right are NOT asserted here and the reason is measured, not
+#      assumed -- see the end of this file.)
 #
 # 3 and 8 are the instrument check. If the colour or the rectangle were wrong
 # EVERY reading would be 0 and 6 would FAIL — there is no way for a broken
@@ -238,7 +246,8 @@ for _ in $(seq 1 60); do [ -s "$HAMFB_FILE" ] && break; sleep 0.1; done
 PIDS="$PIDS $!"
 sleep 3
 "$WORK/hampanelscene.elf" </dev/null >"$WORK/hampanelscene.log" 2>&1 &
-PIDS="$PIDS $!"
+PANEL_PID=$!
+PIDS="$PIDS $PANEL_PID"
 sleep 4
 
 # ---- 3. CONTROL ----------------------------------------------------------
@@ -408,5 +417,99 @@ elif grep -q 'NOT leaving a fault' "$WORK/appmenuctrl.err"; then
 else
     ok "CONTROL: a menu that was NOT refused did not take the fault-suppressing branch, so the suppression is conditional on the refusal and the panel's fallback is intact for a genuinely broken menu"
 fi
+
+# ---- 13. THE NOTICE ON A BOTTOM PANEL ------------------------------------
+# WHY THIS IS A SEPARATE PASS AND NOT A PARAMETER: the panel reads its config
+# once per tick from /tmp/hamnix-panel.conf (the writable runtime override
+# that takes precedence over /etc/panel.conf -- and /tmp here is this run's
+# own, shadowed by private_ns.sh, so nothing on the host is touched). Moving
+# a live panel to the other edge is a config reload, which is a different
+# code path from starting on that edge; starting on it is the one the notice
+# geometry has never been asked about.
+info "restarting the panel on a BOTTOM bar to ask the same question of the other arm of _notice_box()"
+cat >/tmp/hamnix-panel.conf <<'CONF'
+panel
+  edge bottom
+  size 26
+  widget menu
+  widget tasks
+  widget clock
+end
+CONF
+# The bottom bar's window is placed at oy = screen_h - (thick + grow) and the
+# card sits at window-local y = 0, so on screen it is the same 340x86 box
+# lifted to just above the bar. Inset past border and corner radius, as above.
+BNX=14; BNY=$((FBH - 26 - 86 + 6)); BNW=328; BNH=74
+
+# Stop only the panel we started, by the pid we recorded, and start a new one.
+kill "$PANEL_PID" 2>/dev/null
+sleep 1
+"$WORK/hampanelscene.elf" </dev/null >"$WORK/hampanelscene-bottom.log" 2>&1 &
+PANEL_PID=$!
+PIDS="$PIDS $PANEL_PID"
+sleep 5
+
+# NO BEFORE/AFTER DELTA HERE, and the reason is a design decision made
+# earlier in this branch rather than an omission: the marker is not deleted by
+# a dismissal and a freshly started panel does NOT prime its acknowledged
+# offset, because a panel that starts and finds a marker is a panel in a
+# session that still needs restarting. So this panel raises the notice the
+# moment it comes up, which is correct and leaves nothing to measure a rise
+# against. The discriminating question is WHERE, and it is answered by asking
+# the SAME frame two questions with opposite required answers.
+"$WORK/poke9.elf" "/dev/wsys/windows" >/dev/null 2>"$WORK/poke9c.err"
+sleep 3
+BOT_AFTER="$(colourpct $BNX $BNY $BNW $BNH $FACE)"
+TOP_AFTER="$(colourpct $NX $NY $NW $NH $FACE)"
+if ! grep -q 'REFUSING to attach' "$WORK/poke9c.err"; then
+    bad "the bottom-panel arm was never given a refusal to react to, so it measures nothing"
+elif [ "$BOT_AFTER" -ge 40 ]; then
+    ok "THE NOTICE FOLLOWS THE BAR: on a BOTTOM panel it is in the bottom-anchored rectangle (${BOT_AFTER}% #$FACE at y=$BNY)"
+else
+    bad "on a BOTTOM panel the notice is not where the bar is (${BOT_AFTER}% #$FACE at y=$BNY): _notice_box()'s EDGE_BOTTOM arm is wrong"
+fi
+if [ "$TOP_AFTER" -le 1 ]; then
+    ok "and it is NOT still drawn at the top (${TOP_AFTER}% there): the card is placed from the bar, not from a hardcoded y"
+else
+    bad "the notice is ALSO at the top (${TOP_AFTER}%) with a bottom panel: the geometry is hardcoded and only looked right because the image ships a top bar"
+fi
+
+# LEFT/RIGHT ARE MEASURED AND REPORTED, NOT SCORED -- and the measurement is
+# not what the standing diagnosis says.
+#
+# This tree carries a diagnosed defect that `edge left` / `edge right` parse
+# and then paint NOTHING AT ALL. Asked here, offscreen, through the writable
+# runtime override, a vertical panel PAINTS: the bar column comes back as the
+# panel's own base colour and the notice lands where _notice_box()'s vertical
+# arm puts it. So whatever the vertical defect is, it is not in the path this
+# harness walks -- the remaining candidates are the /etc/panel.conf route
+# (this uses /tmp/hamnix-panel.conf, which takes precedence) and a real boot,
+# where rc.5 starts the panel with a namespace and a uid this does not.
+#
+# It stays UNSCORED because the panel's vertical layout is not this file's
+# subject and is somebody else's defect; a red here would be red for a reason
+# that has nothing to do with the notice. The numbers are printed so whoever
+# fixes it has this reading beside them instead of rediscovering it.
+cat >/tmp/hamnix-panel.conf <<'CONF'
+panel
+  edge left
+  size 56
+  widget menu
+  widget tasks
+  widget clock
+end
+CONF
+kill "$PANEL_PID" 2>/dev/null
+sleep 1
+"$WORK/hampanelscene.elf" </dev/null >"$WORK/hampanelscene-left.log" 2>&1 &
+PANEL_PID=$!
+PIDS="$PIDS $PANEL_PID"
+sleep 5
+"$WORK/poke9.elf" "/dev/wsys/windows" >/dev/null 2>&1
+sleep 3
+LEFT_BAR="$(colourpct 0 100 56 400 eceef2)"
+LEFT_NOTE="$(colourpct 62 14 328 74 $FACE)"
+info "VERTICAL, measured and NOT scored: with \`edge left\` the bar column reads ${LEFT_BAR}% of the panel base colour #eceef2 and the notice rectangle reads ${LEFT_NOTE}% #$FACE -- i.e. THIS path paints. The standing diagnosis that vertical panels paint nothing does not reproduce here, so it lives somewhere this harness does not walk: the /etc/panel.conf route, or a real boot's namespace and uid."
+rm -f /tmp/hamnix-panel.conf
 
 done_report
