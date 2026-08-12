@@ -60,6 +60,56 @@
 #   exercise the shared runtime -- lib/*.ad and the user/linux-*.c device
 #   backends -- from PACKAGED bytes rather than fresh ones.
 #
+# WHAT THIS GATE DOES NOT COVER, AND CANNOT COVER TODAY: THE v2 BACKBUFFER.
+# ========================================================================
+# Everything this file runs is a v1 SCENE client. wsysd, hamdesktop and
+# hampanelscene contain ZERO `version 2` opt-ins between them (grep -c: 0, 0,
+# 0), so no v2 window is ever created here, no backbuffer memfd is ever handed
+# up, and the v2 blit path is not exercised by any assertion below.
+#
+# THAT MATTERS BECAUSE v2 IS WHAT A BROWSER, A VIDEO AND A BRIDGED X CLIENT
+# ARE, and because the v2 backbuffer is where each window's PIXELS live -- a
+# per-window memfd handed to the compositor (THE BACKBUFFER MEMFD in
+# user/linux-wsys.c). A regression in that path -- pixels not painted, or worse,
+# pixels readable by another process -- would pass every assertion in this file.
+# It is covered instead by tests/linux/wsys_bypass.sh, which BUILDS FROM SOURCE.
+# So the two halves do not currently meet: this gate runs packaged bytes and
+# never reaches v2; the v2 gate reaches v2 and never runs packaged bytes.
+#
+# WHY IT WAS NOT SIMPLY ADDED HERE. Three routes were tried and measured:
+#   (a) A PACKAGED hamui APP (hambrowse is in the channel as
+#       hamnix-app-hambrowse). It calls hamui_set_protocol_v2_dims()
+#       unconditionally at startup -- and on hamnix-linux that call ALWAYS
+#       FAILS, because lib/hamui.ad writes `version 2` to /dev/wsys/<wid>/wctl
+#       and this port implements no `wctl` leaf (see classify() in
+#       user/linux-wsys.c: ctl, scene, keys, pointer, event, text, cmd,
+#       draw/ctl, backbuffer, draw/images -- no wctl). The client then falls
+#       back to the v1 markup path exactly as its own comment says it will, so
+#       the failure is SILENT. MEASURED against the packaged browser on a
+#       file:// page: the window came up with proto=1 and /dev/wsys/pool read
+#       `slots 0/512`. Every hamui app on Linux is in this position.
+#   (b) PACKAGED COREUTILS driving the wire protocol directly (`cp` a 'B' blit
+#       + 'D' publish record onto /dev/wsys/<wid>/draw/ctl). The bytes are only
+#       data, so this would still have been packaged programs under test. It
+#       cannot work: a window's owner must STAY ALIVE, and cp exits. MEASURED:
+#       `cp newwindow /dev/wsys/ctl` returns 0 and the row is already gone from
+#       /dev/wsys/windows on the very next read -- win_reap_dead reaps a window
+#       whose owner pid is gone. No packaged coreutil both owns a window and
+#       lives long enough to blit into it.
+#   (c) THE REAL v2 CLIENTS IN THE CHANNEL, wsyswl and xbridge, which DO write
+#       `version 2` to the correct `ctl` leaf. Both are bridges: neither maps a
+#       window until a Wayland or X client connects to it, so exercising them
+#       needs Xwayland (or an X client) present and running -- which is
+#       tests/linux/wsyswl_rootless.sh's job, and is far past this gate's 20 s
+#       budget.
+#
+# So the honest state is: covering v2 from packaged bytes needs a real v2
+# client in the image that can be started headlessly and held. Fixing (a) --
+# giving this port a `wctl` leaf, or pointing lib/hamui.ad at `ctl` -- would
+# ALSO make every hamui app a real v2 client here and would make this coverage
+# a two-line addition below. That is a change to the window system, not to a
+# test, so it is named here rather than smuggled in.
+#
 # WHAT IT DELIBERATELY DOES NOT RUN, and why:
 #   * The other ~90 per-command packages. Three reasons, in order of weight.
 #     (a) SAFETY: the channel contains `halt`, `poweroff`, `reboot`, `rm`,
