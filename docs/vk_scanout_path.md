@@ -354,6 +354,30 @@ taking the wake rate down to the paint rate would put a capped drag near
 **2.3%** rather than 7.0% — a larger saving than the entire remaining paint
 cost. Not implemented yet.
 
+**Idle, measured on this path rather than argued.** Idle was previously
+claimed to be structurally unaffected by the cap; that was reasoning, and this
+is the measurement, same harness, same session shape, three samples each:
+
+| arm | idle CPU, median of 3 × 10 s | samples |
+|---|---|---|
+| cap ON, 60 Hz | **0.6%** | 0.6 0.6 0.6 |
+| cap OFF | **0.5%** | 1.1 0.5 0.5 |
+
+The reasoning was right — 0.5% against 0.6% is inside the noise of the
+quantity, which is why three samples are taken — and both sit far under the
+5% idle budget `tests/linux/idle_gate.sh` enforces.
+
+**And this is the fact that makes the wake fixable.** Idle costs 0.6% while a
+capped *drag* costs 7.0%, of which 5.2 is wake. So the ~860 wakes/s are not a
+free-running tick — an idle compositor barely wakes at all. They are
+**client-driven**: `de_dragload` commits window moves far faster than 60 Hz and
+each commit wakes the compositor through `shm->gen` (§3d). That is exactly the
+kind of wake that coalesces, which is why "skip the drain and rescan while a
+frame is owed, and sleep the remainder" should work: the commits keep arriving,
+but only one rescan per painted frame is needed. Neither arm produced a single
+`benchlive` dump at idle, because a dump needs 200 full frames and an idle
+desktop paints none — the absence is the confirmation.
+
 **`submit_us` is a COLD-PIPELINE artefact — do not optimise it.** From the
 same three arms:
 

@@ -86,7 +86,7 @@ wait_master_free() {   # POLL. A fixed sleep is what raced the last two runs.
 # ---- ONE ARM --------------------------------------------------------------
 # $1 tag, $2 extra env for wsysd ("" or HAMNIX_WSYSD_NOCAP=1)
 run_arm() {
-    local tag="$1" extra="${2:-}"
+    local tag="$1" extra="${2:-}" NODRAG="${3:-0}"
     local W="$WORKROOT/arm-$tag.$$"
     rm -rf "$W"; mkdir -p "$W"
     echo
@@ -134,26 +134,36 @@ run_arm() {
 
     "$BIN/hamdesktop" </dev/null >"$W/d.log" 2>&1 & local DP=$!; reap_add "$DP"
     sleep 3
-    "$BIN/de_dragload" 480 320 160 340 300 8 >"$W/g.log" 2>&1 & local GP=$!
-    reap_add "$GP"
+    # LOAD is the drag, unless this arm is the IDLE gate. Idle was previously
+    # argued to be structurally unaffected by the cap rather than measured on
+    # this path, and an argument is not a measurement.
+    local GP=""
+    if [ "$NODRAG" != 1 ]; then
+        "$BIN/de_dragload" 480 320 160 340 300 8 >"$W/g.log" 2>&1 & GP=$!
+        reap_add "$GP"
+    fi
     sleep 3
     # Mark where the drag begins, so the frame/wake rates below are taken from
     # dumps produced UNDER THE DRAG and not from the quiet start-up.
     local MARK; MARK="$(grep -c '^benchlive: seq' "$W/wsysd.log" || true)"
 
-    echo "cap_ab: wsysd CPU across the drag, pid from the watchdog's pidfile"
+    local LOADNAME="drag"; [ "$NODRAG" = 1 ] && LOADNAME="IDLE (no drag load)"
+    echo "cap_ab: wsysd CPU across the $LOADNAME, pid from the watchdog's pidfile"
     SECS="$PSECS" REPS="$PREPS" CPUPROBE_OUT="$W/cpu.txt" \
         "$ROOT/tests/linux/cpuprobe.sh" "$WPID" --verify "$BIN/wsysd" \
         --label "$tag" 2>&1 | sed 's/^/cap_ab:   /'
 
-    kill "$GP" "$DP" 2>/dev/null; sleep 0.5; kill -9 "$GP" "$DP" 2>/dev/null
+    kill $GP "$DP" 2>/dev/null; sleep 0.5; kill -9 $GP "$DP" 2>/dev/null
     # END THE ARM BY KILLING wsysd, so master is released NOW. The watchdog is
     # the backstop; letting it fire is not the normal way out and is what put
     # the next arm's start-up inside the previous arm's master hold.
     kill -9 "$WPID" 2>/dev/null
     wait "$WDPID" 2>/dev/null
 
-    echo "cap_ab: benchlive dumps under the drag (${EVERY} full frames each):"
+    # On an IDLE arm there are usually NO dumps at all, because a dump needs
+    # $EVERY full frames and an idle desktop paints none. That absence is the
+    # confirmation, not a hole in the instrument.
+    echo "cap_ab: benchlive dumps under the $LOADNAME (${EVERY} full frames each):"
     grep '^benchlive: seq' "$W/wsysd.log" | tail -n "+$((MARK+1))" \
         | tail -6 | sed 's/^/cap_ab:   /'
     # fps AND WAKE RATE, both derived from the dump's OWN dt_us, so neither
@@ -193,6 +203,8 @@ for a in $ARMS; do
         capON)  run_arm capON  ""                              ; A=$ARM_OK ;;
         capOFF) run_arm capOFF "HAMNIX_WSYSD_NOCAP=1"          ; B=$ARM_OK ;;
         cap30)  run_arm cap30  "HAMNIX_WSYSD_CAP_US=33333"     ; C=$ARM_OK; C_RAN=1 ;;
+        idleON)  run_arm idleON  ""                     1 ;;
+        idleOFF) run_arm idleOFF "HAMNIX_WSYSD_NOCAP=1" 1 ;;
     esac
 done
 echo
