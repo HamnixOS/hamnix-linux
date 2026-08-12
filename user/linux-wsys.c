@@ -3673,29 +3673,18 @@ static void bbup_handup_one(int i)
  * pixel hand-up, and driven from the same seams (see pix_tick). */
 static void bbup_tick(void)
 {
-    /* THE COMPOSITOR BINDS PROACTIVELY, and this is not optional -- it is what
-     * the scene listener gets for free and the backbuffer one does not.  wsysd
-     * binds the PIXEL address the first time it composites the ever-present
-     * desktop scene, so it is always listening by the time any client hands up.
-     * The backbuffer address, bound only on a foreign BACKBUFFER read, would
-     * never bind for the FIRST v2 window if the compositor were idle-parked:
-     * it repaints on a gen change, reads a backbuffer only when it repaints,
-     * and would bind only when it read one -- so the hand-up that would MAKE it
-     * repaint never has anywhere to land.  A pure compositor (a process that
-     * owns no backbuffers of its own) therefore binds here, on its idle park,
-     * and its bbup_drain below then accepts the hand-up, bumps the window's
-     * gen, and the repaint follows.  This is the exact deadlock pix_tick's
-     * own comment describes, closed the same way: on the seam both sides share.
-     *
-     * A client never reaches the bind (bbup_listen is hostowner-gated, and on a
-     * real boot a client is not the host owner); the `have_own` guard keeps it
-     * out on a single-uid host too, where every process would otherwise pass
-     * that gate and a client could seize the address ahead of the compositor. */
-    int have_own = 0;
-    for (int i = 0; i < bbmap_n; i++)
-        if (bbmap[i].own) { have_own = 1; break; }
-    if (!have_own) bbup_listen();
-
+    /* NO PROACTIVE BIND HERE, and the reason is which processes are host owner.
+     * The compositor binds the backbuffer address the first time it composites
+     * a v2 window (the BACKBUFFER read path calls bbup_listen), exactly as it
+     * binds the PIXEL address the first time it composites a scene -- and a v2
+     * window that appears while the compositor is active is composited that
+     * frame, which is when the bind happens.  Binding here instead would let
+     * ANY host-owner process that owns no backbuffer -- a plain scene client
+     * running as the segment owner, root's own taskbar -- seize the address
+     * ahead of the compositor, which is a denial of service, not a hand-up.
+     * So the listener is bound only by a reader that is actually reading a
+     * backbuffer, and this tick only HANDS UP owned windows and DRAINS what a
+     * bound listener has received. */
     if (!bbmap_n && bbup_listen_fd < 0) return;
     uint64_t now = pix_now_ms();
     if (now < bbup_next_tick) return;
