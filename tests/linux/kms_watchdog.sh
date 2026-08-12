@@ -22,6 +22,12 @@ SECS="$1"; shift
 
 "$@" &
 CHILD=$!
+# THE PID OF THE PROCESS WE ACTUALLY STARTED, written down rather than
+# searched for later. pgrep matching a wrapper's command line -- this script's
+# own, whose argv contains "./bin/wsysd" -- has now produced four wrong
+# measurements on this project, the last of which reported a busy compositor
+# as "0.0% of a core" because it measured a sleeping bash.
+[ -n "${WATCHDOG_PIDFILE:-}" ] && printf '%s' "$CHILD" > "$WATCHDOG_PIDFILE"
 
 ( # the watchdog itself
   end=$(( SECONDS + SECS ))

@@ -23,7 +23,7 @@ export HAMNIX_WSYSD_BENCH_LIVE="$EVERY"
 unset HAMFB_FILE           # a real display, not a file
 
 echo "=== arming watchdog (${WD}s) and starting wsysd on the display"
-env ${SCANOUT_EXTRA_ENV:-} ./kms_watchdog.sh "$WD" "$BIN/wsysd" >"$W/wsysd.log" 2>&1 &
+WATCHDOG_PIDFILE="$W/wsysd.pid" env ${SCANOUT_EXTRA_ENV:-} ./kms_watchdog.sh "$WD" "$BIN/wsysd" >"$W/wsysd.log" 2>&1 &
 WDPID=$!
 # POLL for the arm rather than sleeping a guessed interval. A fixed sleep
 # raced the log: the script declared "scanout did not arm", exited, and left a
@@ -45,15 +45,17 @@ grep -E "SCANOUT armed|present cap" "$W/wsysd.log" | sed 's/^/   /'
 "$BIN/hamdesktop" </dev/null >/dev/null 2>&1 & DP=$!
 sleep 3
 "$BIN/de_dragload" 480 320 160 340 300 8 >/dev/null 2>&1 & GP=$!
-# wsysd's CPU across the drag, from /proc, because the cap's justification is
-# power and the frame rate alone cannot show it.
-WPID="$(pgrep -f "bin/wsysd" | head -1)"
-HZ=$(getconf CLK_TCK)
-J0=$(awk '{print $14+$15}' "/proc/$WPID/stat" 2>/dev/null); T0=$(date +%s.%N)
-sleep "$SECS"
-J1=$(awk '{print $14+$15}' "/proc/$WPID/stat" 2>/dev/null); T1=$(date +%s.%N)
-if [ -n "${J0:-}" ] && [ -n "${J1:-}" ]; then
-    echo "=== wsysd CPU during the drag: $(python3 -c "print(f'{100.0*($J1-$J0)/$HZ/($T1-$T0):.1f}')")% of a core"
+# wsysd's CPU across the drag, from the pid the WATCHDOG WROTE DOWN -- not
+# from a name search, which last time matched the watchdog shell and reported
+# a rendering compositor as 0.0% of a core. --verify re-checks /proc/pid/exe
+# before any number is produced.
+WPID="$(cat "$W/wsysd.pid" 2>/dev/null || true)"
+if [ -n "$WPID" ]; then
+    SECS=$((SECS/3)) REPS=3 ./cpuprobe.sh "$WPID" \
+        --verify "$(cd "$BIN" && pwd)/wsysd" --label "drag" || true
+else
+    echo "=== no wsysd pid recorded; refusing to guess"
+    sleep "$SECS"
 fi
 
 kill "$GP" "$DP" 2>/dev/null; sleep 0.5; kill -9 "$GP" "$DP" 2>/dev/null
