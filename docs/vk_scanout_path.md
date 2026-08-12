@@ -272,6 +272,16 @@ it is not a graphics problem.
 device is not busy; the round-trip is. That, not rasterization, is where the
 next graphics win is.
 
+> **CORRECTION — do not act on the sentence above without reading §3e.** That
+> 2.5 ms is a COLD PIPELINE, not work. Measured across three cap settings:
+> back-to-back frames submit in **0.55 ms**, while a 16 ms gap and a 33 ms gap
+> both cost **2.6 ms**. It is bimodal in the gap, not proportional to it — so
+> it is not a queue draining or a cost that scales with anything. Under a cap
+> the compositor is *always* cold by construction, which means the 2 ms is the
+> cap's own doing and `vkc_end()` is not where the win is. The measurements in
+> this section were taken uncapped, where the claim was reasonable; it stopped
+> being true when the cap landed.
+
 ### 3d. With the client wake: the frame rate finally moves
 
 `build_waitset()` admitted input fds only, so a *client*-initiated change --
@@ -352,7 +362,71 @@ before the drain or the `poll(2)` are counted at all.
 while a frame is owed and sleeping the remainder targets the 5.2 points;
 taking the wake rate down to the paint rate would put a capped drag near
 **2.3%** rather than 7.0% — a larger saving than the entire remaining paint
-cost. Not implemented yet.
+cost.
+
+### 3f. The wake fix, and where the prediction missed
+
+Implemented as: **while a frame is owed, park without the client-wake fd.**
+`waitset[0]` is the client wake and only the client wake, so the park passes
+the tail `waitset[1..]` — every evdev fd plus stdin. The rescan and the
+republish are deferred; **input is not**. `wait_ms_now()` already parks only
+until the frame boundary when `paint_defer` is set, so the owed frame lands on
+time even if the client falls silent immediately after publishing.
+
+Same harness, same session shape, three samples and the median, `SCANOUT
+armed` on every arm:
+
+| arm | fps | wakes/s | CPU before | CPU after | after samples |
+|---|---|---|---|---|---|
+| cap ON, 60 Hz | 57.4 → 58.5 | 861 → **118** | 7.0% | **3.5%** | 3.6 3.5 3.4 |
+| cap 30 Hz | 29.5 → 29.2 | 907 → **88** | 6.5% | **2.2%** | 2.3 2.0 2.2 |
+| cap OFF (control) | 908.2 → 907.7 | 920 → 920 | 35.7% | 34.5% | 34.5 35.4 34.5 |
+
+**The wake fell 86% and the frame rate did not move.** capOFF is the control
+and did not move either, which is the check that this touches only the
+deferral window: with `frame_us <= 0` no frame is ever owed and the park is
+the old one exactly.
+
+**THE PREDICTION MISSED, AND THE MISS IS INFORMATIVE.** §3e predicted ~2.3%;
+the measurement is 3.5%. The model was fitted to three arms that all sat at
+~900 wakes/s, so it had no way to separate a **fixed floor** from the wake
+term and folded the floor into `b`. With the wake removed the floor is
+exposed, and it is the idle cost — 0.6%, measured independently in §3e.
+Refitting on before/after pairs at the same cap (paints constant, wakes
+differing by ~750) gives **47–52 µs per wake**, close to the original 61 µs,
+and a floor of **0.61%** that matches idle almost exactly. So the corrected
+decomposition of the capped 3.5% is roughly **0.6 floor + 2.3 paint + 0.6
+wake** — the wake is now the *smallest* of the three, which is what the change
+was for.
+
+The model still over-predicts the uncapped arm (40.8% against 34.5% measured),
+and that is the `submit_us` bimodality above: uncapped frames run back to back
+and are 4.7x cheaper to submit, so cost-per-paint is not one constant across
+capped and uncapped arms. A single linear model cannot span both, and it
+should not be used to.
+
+**Latency did not regress**, checked on the offscreen software path with the
+cap *forced* (`HAMNIX_WSYSD_CAP_US`) — without the force, offscreen `frame_us`
+is 0, no frame is ever owed, and the harness would exercise none of the
+changed code while reporting a clean bill of health:
+
+| | pre-fix | post-fix |
+|---|---|---|
+| input→pixel p50 | 1.04 ms | **0.90 ms** |
+| p95 | 7.52 ms | **4.55 ms** |
+| max | 18.20 ms | **16.80 ms** |
+
+**Idle held** at 0.5% capped (0.5 0.5 0.5). And the cursor-only path improved
+too: 16.7% → **8.1%** at 250 ev/s under a forced cap — worth stating because
+`de_fps_latency.sh`'s own single-sample CPU column reported that same
+comparison as 4.0% → 16.6%, i.e. **backwards**. Three samples with `cpuprobe`
+on a pid taken from the process we started reversed the sign of the result.
+That column is a lifetime-average-adjacent single sample and should not be
+used for conclusions.
+
+Correctness is gated by `tests/linux/wake_coalesce_stale.sh`, which checks
+pixels rather than rates: live during the drag, converged after the client
+goes silent, and client-driven repaint still working after a deferral episode.
 
 **Idle, measured on this path rather than argued.** Idle was previously
 claimed to be structurally unaffected by the cap; that was reasoning, and this

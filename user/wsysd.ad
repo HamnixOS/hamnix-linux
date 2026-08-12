@@ -3910,6 +3910,19 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             n_capped = n_capped + 1
             idle = 0
         else:
+            # NOTHING IS PENDING, SO NOTHING IS OWED. Clearing paint_defer here
+            # is not tidiness; without it the flag latches. A cursor that moved
+            # and moved back inside one frame interval takes the defer branch
+            # and then finds csig == last_csig on the next iteration, so no
+            # paint branch ever runs to clear it -- and wait_ms_now() returns 0
+            # once the interval has lapsed with a frame still "owed", which is
+            # poll(2) with a zero timeout, i.e. a spin at 100% of a core with
+            # an idle desktop on screen. It survived only because paint_defer
+            # was otherwise always cleared by the paint it implied. It now also
+            # decides whether the client wake is in the park set below, so a
+            # latched flag would silently disconnect client-driven repaint for
+            # the rest of the process's life.
+            paint_defer = 0
             idle = idle + 1
         if bench_on != 0:
             tl0 = now_us()
@@ -3923,5 +3936,45 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # rather than a wait for the next tick. n_wait is 0 only if every fd
         # was rejected as always-ready, and then this is the old plain sleep,
         # which is the right thing to degrade to.
-        sys_waitfds(&waitset[0], n_wait, wait_ms_now())
+        #
+        # WHILE A FRAME IS OWED, PARK WITHOUT THE CLIENT WAKE -- and this is
+        # where the cap's missing saving is.
+        #
+        # MEASURED, BOTH ARMS ON THE DISPLAY IN ONE SESSION: capping the paint
+        # did NOT cap the wake. 908 fps -> 57 fps, but 920 wakes/s -> 861, a 6%
+        # fall against a 94% fall in painting. CPU fell 5.1x where the frame
+        # rate fell 15.8x, and the gap is this loop waking ~860 times a second
+        # to drain, rescan (scan_us 29) and re-park WITHOUT PAINTING. A forced
+        # 30 Hz arm confirmed the residue is not the paint: halving the paint
+        # again saved 0.5 points of 7.0. See docs/vk_scanout_path.md §3e.
+        #
+        # The wake is CLIENT-driven, not a tick -- an idle desktop costs 0.6%,
+        # so if it were a tick idle would cost the same 5.2 points. A dragging
+        # client commits far faster than the refresh and every commit pokes the
+        # wake socket. Once a frame is already owed, those pokes carry NO NEW
+        # INSTRUCTION: the repaint is already scheduled, scan_windows() at the
+        # boundary will read whatever the client has published by then, and
+        # last_sig is deliberately left stale so the change cannot be lost.
+        # So we sleep the remainder instead of being told 850 more times.
+        #
+        # THIS DEFERS THE RESCAN AND THE REPUBLISH. IT DOES NOT DEFER INPUT.
+        # waitset[0] is the client wake and ONLY the client wake (build_waitset
+        # puts it there first); waitset[1..] is every evdev fd plus stdin. It
+        # is the tail that is passed here, so a keystroke or a mouse move still
+        # wakes this loop instantly with a frame owed, still runs pump_input()
+        # and deliver_pointer(), and still publishes -- which is what the
+        # 0.28 ms input-to-pixel result depends on, and it is why the slice
+        # starts at 1 rather than the set being emptied.
+        #
+        # Nothing goes stale: wait_ms_now() already returns the time left to
+        # the frame boundary whenever paint_defer is set, so the owed frame is
+        # painted on time even if the client falls silent immediately after
+        # publishing. And nothing backs up: wake_poke() is MSG_DONTWAIT and
+        # ignores failure, so pokes that arrive while we are not listening are
+        # dropped by the kernel rather than queued -- which is correct, because
+        # one poke and a thousand mean the same thing, "re-read the segment".
+        if paint_defer != 0 and wake_fd >= 0 and n_wait > 1:
+            sys_waitfds(&waitset[1], n_wait - 1, wait_ms_now())
+        else:
+            sys_waitfds(&waitset[0], n_wait, wait_ms_now())
     return 0
