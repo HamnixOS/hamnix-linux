@@ -601,6 +601,39 @@ fail:
 
 int hamfb_is_scanout(void) { return fb.scanout ? 1 : 0; }
 
+/* THE DISPLAY'S OWN FRAME TIME, in microseconds, or 0 for "do not pace".
+ *
+ * The compositor uses this to stop rendering faster than the screen can show.
+ * It is read from the mode that was actually set rather than from a constant,
+ * because a constant is a second notion of frame time and the two would drift
+ * apart the first time anyone ran a 144 Hz panel.
+ *
+ * ZERO IS RETURNED DELIBERATELY IN THREE CASES, and each matters:
+ *   - HAMFB_FILE (offscreen): every gate in tests/linux measures the
+ *     compositor through a plain file, and a rate limiter there would mean the
+ *     recorded fps numbers stopped describing the compositor and started
+ *     describing the limiter. They must stay comparable with the numbers
+ *     already banked.
+ *   - fbdev: there is no mode structure to read a refresh out of, so pacing
+ *     would be pacing to a guess.
+ *   - a mode that reports neither a vrefresh nor a usable clock.
+ *
+ * Some drivers leave vrefresh at 0 and expect it to be derived, so the clock
+ * (in kHz) over the total pixel count is the fallback before giving up. */
+int32_t hamfb_frame_us(void)
+{
+    if (!fb.ready || fb.offscreen || fb.is_fbdev) return 0;
+    if (fb.mode.vrefresh > 0)
+        return (int32_t)(1000000u / fb.mode.vrefresh);
+    uint64_t total = (uint64_t)fb.mode.htotal * (uint64_t)fb.mode.vtotal;
+    if (fb.mode.clock > 0 && total > 0) {
+        /* clock is in kHz: us/frame = total_pixels / (clock * 1000) * 1e6 */
+        uint64_t us = total * 1000ull / (uint64_t)fb.mode.clock;
+        if (us > 0 && us < 1000000ull) return (int32_t)us;
+    }
+    return 0;
+}
+
 /* The mode a scanout buffer would have to be, WITHOUT taking master or
  * touching anything. The caller has to allocate the GPU buffer before it can
  * attach it, and the buffer has to be exactly one of the connector's

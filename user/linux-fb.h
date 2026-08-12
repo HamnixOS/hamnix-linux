@@ -32,6 +32,9 @@ uint64_t hamfb_size(void);
 int      hamfb_attach_scanout(int dmabuf_fd, uint32_t w, uint32_t h,
                               uint32_t pitch);
 int      hamfb_is_scanout(void);
+/* Microseconds per displayed frame, from the mode actually set, or 0 meaning
+ * "do not pace" -- offscreen (HAMFB_FILE), fbdev, or no usable timing. */
+int32_t  hamfb_frame_us(void);
 /* The geometry a scanout buffer must have. Takes no master, sets no mode. */
 int      hamfb_probe_mode(uint32_t *w, uint32_t *h);
 
