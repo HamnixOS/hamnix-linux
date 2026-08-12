@@ -466,11 +466,29 @@ COMPONENT_HOOKS = {
     # ------------------------------------------------------------------
     # The window system's shared segment carries a version counter
     # (WSYS_VERSION in user/linux-wsys.c). When it moves -- 6 -> 7 moved the
-    # window table to 512 rows AND took the keystrokes out of the segment --
-    # the FIRST program built against the new one that attaches to a running
-    # session's segment RE-INITIALISES IT. The running desktop's window table
-    # is emptied: the windows go, the panel goes with them, and every process
-    # still holding a window is talking to a table with no row for it.
+    # window table to 512 rows AND took the keystrokes out of the segment;
+    # 7 -> 8 took the v1 DISPLAY LIST out of it -- the running session and the
+    # newly installed binaries no longer agree about what the bytes mean.
+    #
+    # WHAT HAPPENS HAS CHANGED SINCE THIS TEXT WAS FIRST WRITTEN, and the
+    # message below has been rewritten to match rather than left to be
+    # comforting. It used to be: the FIRST program built against the new
+    # version that attaches to a running session's segment RE-INITIALISES IT,
+    # emptying the desktop -- windows, panel and all. That is what
+    # tests/linux/installed_update_wsysver.sh measured for 6 -> 7 and it is why
+    # this hook exists.
+    #
+    # A LIVE SESSION IS NOT A LEFTOVER (user/linux-wsys.c, above shm_attach)
+    # ships IN version 7, so from 7 onwards the new binary REFUSES to attach to
+    # a segment some live process still holds a window in: it says so by name on
+    # stderr and changes nothing. The running desktop survives whole. What fails
+    # is every newly started program -- which is to say, from the moment the
+    # update lands, NOTHING NEW OPENS until the machine is rebooted.
+    #
+    # Both of those need a reboot and neither of them is silent any more, but
+    # they are DIFFERENT THINGS TO BE TOLD, and telling a person their desktop
+    # is about to empty when it is not is the same class of error as telling
+    # them nothing.
     #
     # MEASURED, on a real installed UEFI+ext4 disk, by
     # tests/linux/installed_update_wsysver.sh: the machine is left showing the
@@ -520,12 +538,16 @@ COMPONENT_HOOKS = {
         "right now, it'",
         "echo 'hamnix-desktop: belongs to the OLD window system, and the two "
         "cannot share one'",
-        "echo 'hamnix-desktop: session. The next application you open will "
-        "EMPTY THE DESKTOP --'",
-        "echo 'hamnix-desktop: your windows, the panel and all -- and nothing "
-        "but a reboot'",
-        "echo 'hamnix-desktop: brings it back.'",
-        "echo 'hamnix-desktop: REBOOT NOW, before you open anything else.'",
+        "echo 'hamnix-desktop: session. Your windows and your panel are safe "
+        "and will keep'",
+        "echo 'hamnix-desktop: working -- but from now until you reboot, "
+        "NOTHING NEW WILL OPEN.'",
+        "echo 'hamnix-desktop: Every program you start will refuse the running "
+        "session by name'",
+        "echo 'hamnix-desktop: and exit. (If this machine is older still, the "
+        "desktop empties'",
+        "echo 'hamnix-desktop: instead, and a reboot is the only way back.)'",
+        "echo 'hamnix-desktop: REBOOT WHEN YOU CAN. Finish what is open first.'",
         "echo ''",
         "exit 0",
         "",

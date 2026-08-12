@@ -1030,8 +1030,15 @@ static char chrome_path[576];
  *                is dead storage.  The snooper is unchanged and still runs; its
  *                assertion is INVERTED, not deleted, so the day anything puts
  *                keystrokes back in the segment the gate says so.
- *     SCRAPE     STILL OPEN.  Another window's committed `scene` is what is
- *                drawn inside it.  This is the rest of tier 2.
+ *     SCRAPE     HALF CLOSED, AND WHICH HALF DECIDES WHICH WINDOWS.  The v1
+ *                committed `scene` -- the TEXT of what is drawn inside a
+ *                window -- left this mapping for a per-window memfd: THE PIXEL
+ *                HAND-UP, below.  The v2 BACKBUFFER did not, and a v2 window
+ *                is what a browser, a video and a bridged X client are.  So a
+ *                hamUI application's screen contents are private on this
+ *                machine and FIREFOX'S ARE NOT.  wsys_bypass.sh drives the
+ *                backbuffer scrape as a POSITIVE control on every green run so
+ *                that nobody reads this paragraph as "the pixels are safe".
  *     ENUMERATE  STILL OPEN, and unfixable while the taskbar reads this table:
  *                every row's wid, pid, geometry and title.
  *
@@ -1124,7 +1131,17 @@ static char chrome_path[576];
  *     never been run, in a file whose own rule is that a measurement is worth
  *     more than one.
  *
- *     WHAT REMAINS OF TIER 2 — the scene, the stage, the backbuffer and the
+ *     WHAT REMAINS OF TIER 2 IS NOW THE BACKBUFFER AND THE IMAGES.  The scene
+ *     and the stage are done (THE PIXEL HAND-UP).  What is left is left for a
+ *     reason that is about the POOL and not about the construction: /srv/wsys.bb
+ *     is a shared slot table, page-mapped on demand and accounted centrally in
+ *     one header every client reads (`/dev/wsys/pool`), and /srv/wsys.img is a
+ *     shared name-keyed store.  Splitting either into per-window memfds is a
+ *     rewrite of the allocator, not a change of where a pointer points.  The
+ *     paragraph below is the original text and its reasoning still holds for
+ *     those two.
+ *
+ *     [ORIGINAL] the scene, the stage, the backbuffer and the
  *     images.  Those are BYTES A COMPOSITOR MUST READ AT FRAME RATE, so they
  *     cannot be datagrams and a memfd really is the right shape for them.  The
  *     missing piece is therefore the /proc remedy, and it is measured and
@@ -1133,6 +1150,18 @@ static char chrome_path[576];
  *     refuses ptrace as well.  It is a per-process property, so it belongs with
  *     whatever hands the memfd out, and it costs core dumps and same-uid
  *     debugging of DE clients — which is a decision, not a detail.
+ *
+ *     AND IT HAS SINCE BEEN BUILT, FOR THE SCENE AND THE STAGE, WITH NO
+ *     AUTHORITY AT ALL -- THE PIXEL HAND-UP, below.  Everything the three
+ *     blockers at the foot of this comment demand followed from having the
+ *     authority CREATE the memfd and hand it DOWN to a client, which needs the
+ *     recipient proved to be the window's owner, which needs an ownership
+ *     record the attacker cannot write.  Handing UP needs none of it:
+ *     memfd_create is unprivileged, the client makes its own, and the only
+ *     question left is who else may have it -- answered by the kernel, on the
+ *     SENDER's side, with SO_PEERCRED against the segment's owner.  So the
+ *     paragraph below is right that the decision unblocked the construction,
+ *     and wrong that the construction needed tier 1.  Read the two together.
  *
  *     THAT DECISION HAS SINCE BEEN TAKEN, AND IT UNBLOCKS THIS.  owner_harden()
  *     further down calls PR_SET_DUMPABLE(0) from keychan_bind, so every window
@@ -1146,10 +1175,13 @@ static char chrome_path[576];
  *     process.  That is tier 1, which is a daemon, a new binary, a
  *     package-channel change and a segment at a new path; blockers (1)-(3)
  *     below are unchanged.
- *     DO NOT READ THAT AS "THE PIXELS ARE SAFE NOW".  They are in the 0666
- *     mapping, any process on the machine reads them, and wsys_bypass.sh's
- *     `sameuid.snoop` prints the victim's committed scene on every green run
- *     precisely so that nobody can come to believe otherwise.
+ *     DO NOT READ THAT AS "THE PIXELS ARE SAFE NOW".  The v1 DISPLAY LIST is
+ *     out of the 0666 mapping and the v2 PIXELS are not.  `sameuid.snoop` now
+ *     asserts the display list is absent (an INVERTED control, not a deleted
+ *     one -- it still reads scene_len and the scene bytes at the same offsets),
+ *     and `sameuid.bb` scrapes the v2 backbuffer store as a POSITIVE control on
+ *     every green run, precisely so that nobody can come to believe otherwise
+ *     about the half that is still open.
  *
  *   TIER 3 — /srv/wsys.chrome, 0644, unchanged.  Already correct.
  *
@@ -1195,6 +1227,24 @@ static char chrome_path[576];
  * the receiver is established by who holds the kernel's bind, and the sender by
  * the kernel's credential stamp.  The spoofable ownership record is not in the
  * path, so the check is worth what it claims to be worth.
+ *
+ * THE THREE BLOCKERS BELOW WERE ABOUT A DAEMON, AND ALL THREE WENT AROUND THE
+ * SAME WAY THE KEYSTROKE CHANNEL DID -- twice now, which is worth reading as a
+ * pattern rather than as two lucky escapes.  Each of them follows from the
+ * authority OWNING the per-window memory and handing it DOWN.  Reversed, they
+ * evaporate: (1) there is no attach rewrite, because the client still mmaps the
+ * one named file and additionally makes a memfd of its own, so a gate with no
+ * compositor alive runs exactly as it always did -- wsys_uidgate.sh and
+ * wsys_bypass.sh both still drive a client with nothing else running; (2) there
+ * is no new binary and no package-channel change, because the code is in this
+ * file, which every wsys program already links; (3) no field is removed, because
+ * the vacated bytes stay as dead storage and struct wwin is byte-for-byte
+ * frozen, so there is no new path and no old binary memsetting a live table.
+ * What is left of them is what genuinely still needs an authority: TIER 1
+ * itself, which is INTEGRITY -- who may write a row -- and which no hand-up can
+ * reach, because the thing being protected is the shared record and not a
+ * client's private bytes.  The text below is the original and is kept for
+ * that.
  *
  * The blockers that remain, for TIER 1 and for the rest of tier 2:
  *   (1) TIER 2 IS AN ATTACH REWRITE, NOT A MOVE.  Today every process mmaps one

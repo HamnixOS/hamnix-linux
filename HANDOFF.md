@@ -29,7 +29,7 @@ rather than argued:
 | Desktop | `hamdesktop` + `hampanelscene`, unmodified. Launch a terminal from the menu, type in it, get output. |
 | Desktop icons | **Every application on the desktop draws its own picture, and the ones that cannot say which one.** The owner reported it as *"a lot of the icons are missing images"*; nothing was missing from disk, and there is no icon asset on disk to miss. Every icon in this desktop is vector code in `lib/hamscene.ad` — a freedesktop `Icon=` name resolved to a glyph CODE by `hamscene_icon_code()` — and that function answered `HS_ICON_FILE`, the anonymous white page, for every name it had not been taught, which is the SAME answer it gives an app that asked for the generic page. So Spreadsheet, Presentation, Word Processor, Video Player and Audio Player drew five copies of one picture; Log Viewer and System Monitor, Notes and Editor, Software and Install Hamnix each drew one picture between two apps because the two `.desktop` files literally named the same `Icon=`. **It drew successfully, and every gate stayed green** — 15 icons rendering as 9 pictures. **20 new glyphs, no new file:** office, media, log, package, sticky-note, mouse, palette, clock, units, maths, markdown, book and one per game, each composed from the existing `fill`/`line`/`roundrect`/`stroke` verbs, so the channel-coverage invariant is satisfied by construction (`channel_covers_image.sh` **8 PASS**; zero files added to the image). **AND THE SILENT FALLBACK IS GONE**: `hamscene_icon_known()` tells *"this app wanted the page"* apart from *"nobody taught me this name"*, and `hamdesktop` publishes every miss as an `icon-unknown <name>` line in `/tmp/.hamdesktop.src`. `tests/linux/de_icons_distinct.sh` (**15 PASS**, offscreen, no VM, ~40 s) composes the real desktop against a `~/Desktop` it owns (a bind-mounted `/etc/passwd` in its private namespace — left alone, `_desk_dir()` found `/home/david/Desktop` and measured the person's own screenshots, which is what its first run reported), reads hamdesktop's own icon table for the cells, and fingerprints every 44×38 icon box **with the wallpaper subtracted**. That subtraction is the gate: the first version compared raw rectangles and scored **15 PASS on the unfixed tree**, because the backdrop is a gradient and two byte-identical page glyphs on different scanlines differ in 34% of their pixels. With the change reverted it is **7 PASS / 8 FAIL** — *"15 icons render as only 9 distinct pictures"*, naming the groups. **A pre-existing truncation fell out of it:** the scene-budget stress set gave all 32 cells the CHEAPEST glyph, so `test_de_desktop_label_budget_host.sh` was measuring the labels honestly and the drawing not at all; it asked for 64 glyph runs when a complete render is 128, got **105**, and called it *all label glyph runs emitted* — six labels were being dropped off the tail of the shared 16 KiB display list, in the exact regression that file exists to catch, with the file green. The stress set now cycles every `HS_ICON_*`, `WP_ICON_RESERVE` is 12288, and the whole 128 fits at 15387 bytes. |
 | Session | `login` → `/dev/auth` (real `/etc/shadow` + `crypt_r`) → `setuid 1001`. The session is unprivileged; the compositor and chrome are not. |
-| Access control | devwsys's uid gate is ported: `live` cannot drive system-chrome ctl verbs, and can still map and draw its own window. `tests/linux/wsys_uidgate.sh`. The chrome state lives in a SECOND segment, `/srv/wsys.chrome`, 0644 and host-owner-owned, so for chrome the file mode is the gate and the kernel enforces it against programs that skip the protocol. `tests/linux/wsys_bypass.sh` (42 ok). **AND ONE OF THE USER'S OWN PROGRAMS CAN NO LONGER READ ANOTHER'S KEYSTROKES**, which no file mode could ever have fixed — see the running list. |
+| Access control | devwsys's uid gate is ported: `live` cannot drive system-chrome ctl verbs, and can still map and draw its own window. `tests/linux/wsys_uidgate.sh`. The chrome state lives in a SECOND segment, `/srv/wsys.chrome`, 0644 and host-owner-owned, so for chrome the file mode is the gate and the kernel enforces it against programs that skip the protocol. `tests/linux/wsys_bypass.sh` (**60 ok**). **AND ONE OF THE USER'S OWN PROGRAMS CAN NO LONGER READ ANOTHER'S KEYSTROKES, NOR WHAT IS DRAWN INSIDE A hamUI WINDOW** — neither of which any file mode could ever have fixed. The keystrokes went to a per-window socket and the v1 display list to a per-window memfd handed UP to the compositor, neither of them needing the tier-1 authority both were recorded as blocked on. What is still readable by anything on the machine: every v2 window's PIXELS (so Firefox's screen, not a hamUI app's) and every row's identity. See the running list. |
 | Networking | `/net` as a file tree, TCP/UDP/ICMP, TLS, `announce`/`accept` across process boundaries, and DHCP (`user/dhcpc.ad`) |
 | Packages | `hpm` installs the whole distribution from `https://255.one/linux/` over TLS, including replacing `/bin/hamsh` while it is PID 1. **The update loop is proven end to end**: install at 1.0.2 from the live repo, a newer build lands, `hpm update`, the upgraded binary still runs. No re-image anywhere in it. |
 | Wayland | `user/wsyswl.ad`, a Wayland compositor in Adder. Firefox runs as a native Wayland client with its menus as separate windows; XWayland carries X11 clients. |
@@ -1242,6 +1242,117 @@ same failure this project exists to beat.
   row, and CORRUPT any of it. That is THE SPLIT's tier 2 remainder and it needs
   the tier-1 authority — a daemon, a new binary, a package-channel change and a
   segment at a new path — not another pass over this file.
+  **THAT LAST SENTENCE WAS WRONG ABOUT THE SCENE, AND THE NEXT ENTRY IS WHY.**
+  It needed no daemon, no new binary and no new path.
+
+* **THE PIXEL HAND-UP: a window's v1 DISPLAY LIST is not in the shared segment
+  either, and it needed NO TIER-1 AUTHORITY — which is the finding, not the
+  feature.** SCRAPE's scene half is closed. A uid-1001 process could open
+  `/srv/wsys` `O_RDONLY`, map it `PROT_READ` and read another window's committed
+  display list, and that is not a picture but TEXT: the scene grammar's `glyphs`
+  op carries the string it draws, so scraping a terminal's scene is reading its
+  screen letter for letter, with no write and nothing for the victim to notice.
+  Measured, on the reverted run: `scene=[rect 0 0 40 20 0x334455]` out of a
+  uid-1001 victim's row. Each window's scene and stage now live in a per-window
+  **memfd its OWNER creates**; `win[].scene`/`stage` are dead storage and
+  `struct wwin` is byte-for-byte what 6 and 7 had.
+  **WHY A MEMFD IS ALLOWED TO BE THE ANSWER NOW.** The recorded design was
+  disproved by measurement — `/proc/<pid>/fd/<n>` IS a path — and what changed
+  since is the machine, not the argument: `PR_SET_DUMPABLE(0)` in every window
+  owner and `kernel.yama.ptrace_scope=1` from PID 1, against which the same
+  probe measures `open=-13` and `ptrace=-1`.
+  **AND WHY IT NEEDED NO AUTHORITY, which is the part that transfers.** Every
+  one of THE SPLIT's three blockers follows from the authority CREATING the
+  memfd and handing it DOWN, which needs the recipient proved to be the window's
+  owner — and the only ownership record is `win[].pid`, in the 0666 table, which
+  is exactly why THE SPLIT rules that shape unsound. **Handing UP needs no
+  ownership record at all**: `memfd_create` is unprivileged, the bytes start in
+  the one process definitionally entitled to them, and the only question left is
+  who ELSE may have them. The kernel answers it. So: no attach rewrite (the
+  client still mmaps the one named file and additionally makes a memfd, and both
+  compositorless gates still run), no new binary and no package-channel change
+  (the code is in `user/linux-wsys.c`, which every wsys program already links),
+  and no field removed (`struct wwin` frozen, no new path, no old binary
+  memsetting a live table). Same three blockers, same escape, second time.
+  **THE SENDER CHECKS, AND THAT IS NOT THE KEYSTROKE CHANNEL'S RULE COPIED.**
+  The rendezvous is an abstract `AF_UNIX` `SOCK_SEQPACKET` listener the
+  compositor binds. An abstract name has no mode, so a *receiver-checks*
+  construction — which is CORRECT for keystrokes — would here let a uid-1001
+  attacker bind first and be handed every client's display list: strictly worse
+  than the hole being closed, reached by copying a construction that is right in
+  the other direction. Which end holds the secret decides which end checks. The
+  client `connect`s, reads `SO_PEERCRED` for the listener, and passes the
+  descriptor only if the kernel says it is the segment's owner. Nothing reads
+  `win[].pid`. The memfd is sealed `F_SEAL_SHRINK|GROW|SEAL` before it is ever
+  passed, and the receiver re-checks the seals — a receiver that maps a file the
+  sender can shrink takes SIGBUS, and the receiver here paints the whole screen.
+  **ON A CLOCK, NOT ON A COMMIT COUNT**, and the first draft had the hole a
+  person would meet on an ordinary day: a compositor that RESTARTS gets a
+  window's descriptor only when that window commits again, and a window sitting
+  still never commits again — so the desktop would come back with the wallpaper
+  painted and the person's terminal a blank rectangle, for ever, with nothing on
+  stderr. Every owned window is now offered every 500 ms while unheld and
+  re-announced every 3 s, driven from every wsys call (an idle client still
+  drains its rings on its 250 ms park), gated on one vDSO `clock_gettime`.
+  **`WSYS_VERSION` 7 → 8**, the second bump where the layouts agree completely
+  and only the MEANING differs. **What it costs a running desktop is now "the
+  new program fails", not "the desktop dies"**: A LIVE SESSION IS NOT A LEFTOVER
+  shipped in v7, so a v8 binary meeting a live v7 session refuses to attach and
+  changes nothing — and `scripts/hamlinux_packages.py`'s `hpm update` warning
+  **was rewritten because it had become FALSE**: it still told the person their
+  desktop was about to empty, and what actually happens now is that their
+  windows survive and nothing new opens until they reboot. Telling someone the
+  wrong true-shaped thing is the same class of error as telling them nothing.
+  **WHAT AN ATTACKER CAN STILL DO**, and the first one decides which windows
+  this protects: **the v2 BACKBUFFER is untouched**. `/srv/wsys.bb` is a third
+  0666 mapping holding every v2 window's pixels, and a v2 window is what a
+  browser, a video and a rootless Xwayland are — so **a hamUI application's
+  screen contents are private on this machine and FIREFOX'S ARE NOT**, and
+  nothing about looking at the two windows says which is which. The named images
+  (`/srv/wsys.img`) likewise. Both are left because they are a POOL rewrite —
+  shared slots, page-mapped on demand, centrally accounted in a header every
+  client reads — and not a change of where a pointer points. ENUMERATION is
+  unchanged and unfixable while `/dev/wsys/windows` is the taskbar's input.
+  CORRUPTION is not closed and is not made worse: an attacker can no longer
+  write another window's display list, but it can still take the listener's name
+  and it can still retitle, move, hide and destroy any row — integrity needs
+  tier 1 and always did. And **DENIAL OF SERVICE BY NAME-SQUATTING**: a same-uid
+  attacker that binds the rendezvous before `wsysd` makes `wsysd`'s bind
+  `EADDRINUSE` and no v1 window is painted at all. Loud, both on stderr and on
+  the screen, and the same trade the keystroke channel made — but the blast
+  radius is bigger, one window there and every v1 window here.
+  **THE GATES.** `tests/linux/wsys_bypass.sh` **47 ok → 60 ok**. Two controls
+  are **INVERTED, not deleted**: attack 2's bypasser still opens the 0666 table
+  read/write, still maps it `PROT_WRITE` and still searches it — those
+  assertions must keep passing — and now asserts the display list is NOT there
+  and that a scribble never reaches the protocol; `snoop` still reads
+  `scene_len` and the scene bytes at the same offsets, so `scenelen=0 scene=[]`
+  is a measurement and not an absent one. A NEW attack, `pixgrab`, is driven
+  from BOTH uids under the rule `keysend` established — a refusal with no
+  matching success proves only that the address was wrong:
+  `sameuid.pixgrab uid=1001 bound=1 fds=0` against
+  `hostowner.pixgrab uid=0 bound=1 gotwid=2 scenelen=24 scene=[rect 0 0 40 20
+  0x334455] fds=2`. The attacker CAN take the name and not one client hands it
+  anything, and the client says so BY NAME on stderr. A NEW positive control,
+  `bbscrape`, scrapes the v2 backbuffer store on every green run so the open
+  half cannot be believed shut — and it is exact about what it proves: this gate
+  drives no v2 client, so its `found=0` means nothing blitted, not that the
+  store is private. **With `user/linux-wsys.c` reverted it is 52 PASS / 8 FAIL**,
+  including `sameuid.snoop` printing the victim's committed scene and
+  `hostowner.pixgrab` coming back `fds=0` — the assertion that catches a fix
+  whose refusal was only ever an unreachable address.
+  **AND THE GATE'S OWN ISOLATION BUG, found by needing the backbuffer store to
+  exist**: `HAMWSYS_BB` was never set, so `bb_attach` fell past the unwritable
+  `/srv` to the HOST's `/dev/shm/hamnix-wsys-bb` — this gate created an 8.5 GB
+  sparse segment outside its own temp directory on every run, and its
+  `rm -f "$HAMWSYS".bb` removed a file nothing had ever made.
+  Green with it: `wsys_uidgate`, `wsys_keychan`, `wsys_write_census` 10,
+  `wsys_title` **29**, `de_mouse_chrome` 13, `de_focus_dismiss` 14,
+  `wsys_desktop_z` 12, `de_icons_distinct` 15, `de_appmenu_brisk` 17,
+  `wsyswl_conn_ceiling` 30 — and `wsys_title`'s 29 are the end-to-end proof that
+  a real compositor still paints real client windows, because every one of them
+  is a pixel count in the framebuffer downstream of a display list that now
+  arrives over this channel.
 
 * **THE KEYLOGGER IS CLOSED: a window's keystrokes are not in the shared
   segment any more.** This was the whole of attack 4 — a uid-1001 process opened
