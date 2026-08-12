@@ -272,6 +272,17 @@ COMPONENTS = {
          # Every one of these was in the image and in no package: a fix to
          # /etc/profile, to the network databases, or to what /etc/os-release
          # calls this system could never reach an installed machine.
+         # THESE ARE SHIPPED FILES, NOT CONFFILES. hpm has one rule for a
+         # file a machine may have edited -- _is_machine_owned, which today
+         # names etc/rc.boot alone -- so an update REPLACES each of these.
+         # That is the right trade for files whose content is the
+         # distribution's answer rather than the operator's (what
+         # /etc/os-release calls this system, the port numbers in
+         # /etc/services), and it is the wrong one for a file an operator is
+         # invited to edit -- which is why /etc/distros is excluded rather
+         # than shipped. If /etc/profile ever becomes a file people edit, it
+         # belongs in _is_machine_owned, not in a list here.
+         #
          # NOT here, deliberately, and each named with its reason in
          # tests/linux/channel_covers_image.sh: etc/shadow (the machine's own
          # password hashes), etc/resolv.conf (dhcpc writes it), etc/hpm/
