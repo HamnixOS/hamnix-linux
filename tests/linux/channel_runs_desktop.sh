@@ -282,6 +282,13 @@ if [ -n "$missing_pkg" ]; then
 fi
 ok "every package this gate runs is present in the channel and unpacks"
 
+# The browser is unpacked OPPORTUNISTICALLY rather than being added to NEEDED
+# above: a channel without it is a smaller channel, not a broken one, and this
+# gate refusing over that would be a new reason to fail that nobody asked for.
+# The v2 arm below says so when it is absent instead of assuming it is there.
+BROWTGZ="$(ls "$CHAN"/packages/hamnix-app-hambrowse-*.tar.gz 2>/dev/null | head -1)"
+[ -n "$BROWTGZ" ] && tar xzf "$BROWTGZ" -C "$UNPACK" 2>/dev/null
+
 # Flatten the unpacked bin/ trees into one directory. Nothing is compiled.
 find "$UNPACK" -path '*/files/bin/*' -type f -exec cp {} "$BIN/" \; 2>/dev/null
 chmod +x "$BIN"/* 2>/dev/null
@@ -451,7 +458,90 @@ if grep -vE '^[[:space:]]*#' "${BASH_SOURCE[0]}" \
         | grep -q 'hamlinux_build\.sh'; then
     bad "THIS GATE BUILDS FROM SOURCE -- it no longer proves anything about the bytes in the channel"
 else
-    ok "nothing in this file compiles anything: hamlinux_build.sh is never invoked here, so every assertion above is about the channel's own bytes"
+    # =========================================================================
+# TIER 3 -- A PACKAGED v2 CLIENT PUTS PIXELS ON THE SCREEN.
+# =========================================================================
+# THE GAP THIS CLOSES IS NAMED IN THIS FILE'S OWN HEADER, route (a): the
+# packaged browser was tried, and its v2 negotiation "NEVER REACHES THE WINDOW
+# SYSTEM, in the worst possible way: it SUCCEEDS", because this port had no
+# `wctl` leaf. The header says fixing that "would ALSO make every hamui app a
+# real v2 client here and would make this coverage a two-line addition below".
+# The leaf exists now, so this is that addition.
+#
+# AND IT IS THE ONLY HONEST TEST OF THE BLIT FIX, for a reason worth keeping:
+# /dev/wsys is implemented IN-PROCESS -- user/linux-syscalls.c's sys_write
+# hands a /dev/wsys fd to hamwsys_write in the CALLING process, and
+# user/linux-wsys.c is linked into every binary. So a client's blit to
+# <wid>/draw/ctl is accepted or refused by THE CLIENT'S OWN COPY of that code,
+# never by wsysd. Pointing a freshly built probe at a packaged compositor would
+# prove nothing: the probe's own copy would do the accepting and it has the fix
+# by construction. The binary that must carry it is the packaged CLIENT.
+#
+# There is also NO DATUM TO READ for it. The fix did not enlarge the staging
+# buffer -- `hamwsys_write_inner.carry` is still exactly 1048576 bytes in a
+# fixed binary -- because complete records no longer pass through it at all. A
+# size read answers PASS on a broken build. Behaviour is the whole instrument.
+if [ -x "$BIN/hambrowse" ]; then
+    PAGE="$WORK/page.html"
+    cat >"$PAGE" <<'HTML'
+<html><body bgcolor="#ffffff"><h1>packaged</h1>
+<p>a v2 blit larger than a megabyte reached the screen</p></body></html>
+HTML
+    BROWFB="$WORK/browfb.raw"
+    (
+      export HAMWSYS="$WORK/bwsys" HAMWSYS_BB="$WORK/bbb" HAMWSYS_IMG="$WORK/bimg"
+      export HAMFB_FILE="$BROWFB" HAMFB_GEOM=1280x800
+      : >"$WORK/binput.evdev"; export HAMWSYSD_INPUT="$WORK/binput.evdev"
+      mkdir -p "$WORK/bnoicd"; export VK_ICD_FILENAMES="$WORK/bnoicd/none.json"
+      "$BIN/wsysd" </dev/null >"$WORK/bwsysd.log" 2>&1 &
+      echo $! >"$WORK/bwsysd.pid"
+      for _ in $(seq 1 60); do [ -s "$BROWFB" ] && break; sleep 0.1; done
+      "$BIN/hambrowse" "file://$PAGE" </dev/null >"$WORK/bbrowse.log" 2>&1 &
+      echo $! >"$WORK/bbrowse.pid"
+      # POLL for the pixels rather than sleeping for them: what is being timed
+      # is another process painting, and a fixed sleep is a guess about it.
+      python3 - "$BROWFB" <<'PY'
+import sys, time
+W, H = 1280, 800
+path = sys.argv[1]
+def white():
+    raw = open(path, 'rb').read()
+    n = 0
+    for y in range(0, H, 4):
+        for x in range(0, W, 4):
+            o = (y * W + x) * 4
+            if raw[o] > 240 and raw[o+1] > 240 and raw[o+2] > 240:
+                n += 1
+    return n
+deadline = time.time() + 25
+best = 0
+while time.time() < deadline:
+    n = white()
+    best = max(best, n)
+    if n > 500:
+        print(n)
+        sys.exit(0)
+    time.sleep(0.5)
+print(best)
+sys.exit(1)
+PY
+    ) >"$WORK/brow.out" 2>&1
+    BROWRC=$?
+    for f in "$WORK/bbrowse.pid" "$WORK/bwsysd.pid"; do
+        [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null
+    done
+    WHITE="$(tail -1 "$WORK/brow.out" 2>/dev/null)"
+    case "$WHITE" in ''|*[!0-9]*) WHITE=0;; esac
+    if [ "$BROWRC" = 0 ]; then
+        ok "A PACKAGED v2 CLIENT PAINTS: the channel's own hambrowse put $WHITE white pixels of a page on the framebuffer -- so its blit, which its OWN linked copy of the window system accepts, was not refused for being bigger than the staging buffer"
+    else
+        bad "the packaged browser painted nothing ($WHITE white pixels): a v2 blit bigger than ~512x512 is being refused by these bytes, which is every browser window. See tests/linux/wsys_wctl.sh's full-sized blit assertion."
+    fi
+else
+    info "no hambrowse in this channel -- the packaged-v2-client arm did not run"
+fi
+
+ok "nothing in this file compiles anything: hamlinux_build.sh is never invoked here, so every assertion above is about the channel's own bytes"
 fi
 
 report

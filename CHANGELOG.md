@@ -20,6 +20,71 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
+### Web pages render, instead of a blank grey rectangle
+
+Open a page in the browser and you now see the page. Until now you got a flat
+dark grey rectangle where the content should be — the window, the chrome and
+the scrollbars all present, and nothing drawn inside.
+
+**This never worked on this port.** It is not something that broke and was put
+back: no window using the newer, faster hand-off path had ever put a frame on
+this system's screen if it was bigger than about 512x512 pixels.
+
+The reason is a size. A program using that path composes a whole frame and
+hands it over in ONE piece — for an 880x600 window that is 2,112,018 bytes —
+and the receiving side copied every hand-off into a 1 MiB staging buffer first
+and rejected anything that did not fit. So the frame was refused outright,
+nothing was ever stored for that window, and the compositor drew its
+"this window has not painted yet" colour. Which is exactly what you saw, every
+time, for as long as this port has existed.
+
+Measured with the same script against the same tree, with only the fix between
+the two runs: **51,542 white pixels where there had been none**, plus the page
+text and the browser's own greys.
+
+The desktop's own applications were never affected — they use a different,
+older path, which is why everything else has always drawn.
+
+### Every desktop application was quietly refusing the fast path
+
+Applications on this system ask the window system for a newer, faster way of
+handing over what they have drawn. The request was written to a file the window
+system did not implement — and the write **succeeded anyway**, because unknown
+names were being routed to a generic buffer that accepts anything and does
+nothing.
+
+So every application asked, was told yes, and believed for the rest of its life
+that it had the fast path, while its window carried the old one. Nothing looked
+wrong from either side: the program had a success, the window system had a
+window, and the two disagreed silently. There was no message to notice, because
+nothing failed.
+
+The control file is now real, and it is the one the original system defines —
+with its own commands and its own permission rule, which is what lets an
+application started by the desktop under a different account opt in at all. A
+program that asks for the new path now gets it or is told it did not.
+
+**This did not, on its own, make the browser draw** — it was one of two things
+that had to be true, and the other is the entry above. Reaching the fast path
+was necessary and not sufficient: the frames were then refused for being too
+big. Both are fixed in this release.
+
+### Dragging a window no longer costs five times the power it needs to
+
+The compositor now presents at the display's refresh rate instead of as fast as
+it can. Dragging a window used to run the machine at **35.7% of a CPU core**
+producing 908 frames a second, of which a 60 Hz screen can show 60. It is
+**7.0% of a core** at 57.4 frames a second now.
+
+Measured on a real display in one session with one binary, both settings, with
+the probe proven against a known 50% load in the same run.
+
+**The saving is smaller than the frame rate suggests, and that is written down
+rather than rounded away:** the frame rate falls 15.8x and the CPU falls 5.1x.
+The difference is a cost the cap does not touch — the compositor still *wakes*
+about as often (920 to 861 times a second), it simply paints far less. What is
+left is being woken, not painting, and capping the frame rate cannot help it.
+
 ### The Applications menu no longer downgrades itself permanently after an update
 
 If you clicked Applications after a window-system update, the menu could not
