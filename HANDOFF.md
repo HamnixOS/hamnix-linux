@@ -366,6 +366,20 @@ same failure this project exists to beat.
   treat "the hook produced a lexical error" as an install failure independently
   of the shell's exit status.
 
+  **And one unbounded wait is deliberately left standing:** `_spawn_adder_cc`
+  in `user/hpm.ad` still calls the blocking `sys_waitpid` on the on-box Adder
+  compiler for a source package. That one is not the same shape — a compile can
+  legitimately run for minutes, and no bound follows from the hook measurements
+  above — but it is the same *class*, and if source packages become common it
+  wants its own answer.
+
+  Two more things `tests/linux/hpm_hook_bounded.sh` measured on the way, both
+  in `hamsh` and neither touched here: a counting loop exhausts the value arena
+  after 16384 live cells (`hamsh: uncaught exception: value arena exhausted
+  (VAL_MAX=16384 live cells) — split the loop`), so an accidentally infinite
+  hamsh loop self-terminates rather than spinning — which is why the gate's
+  "hangs for another reason" fixture blocks in `open(2)` on a fifo instead.
+
 * **FOUND WHILE FIXING THE ABOVE, NOT FIXED: a hook longer than 16 KiB is
   SILENTLY TRUNCATED, and the cut can land inside a quote.**
 
