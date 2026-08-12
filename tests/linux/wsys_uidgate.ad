@@ -248,7 +248,70 @@ def hold_open(wid: int64, flag: Ptr[char]):
         j = j + 1
 
 
-def do_client(hold: int32, hold_flag: Ptr[char]) -> int32:
+# Store an int32 little-endian into wbuf at offset o.
+def put_le32(o: uint64, v: int32):
+    u: uint32 = cast[uint32](v)
+    wbuf[o]     = cast[uint8](u & 255)
+    wbuf[o + 1] = cast[uint8]((u >> 8) & 255)
+    wbuf[o + 2] = cast[uint8]((u >> 16) & 255)
+    wbuf[o + 3] = cast[uint8]((u >> 24) & 255)
+
+
+# BLIT DISTINCTIVE PIXELS INTO THE WINDOW'S v2 BACKBUFFER, then publish them.
+#
+# This is what a browser (or any v2 client) does: it renders its own surface
+# and hands the compositor the pixels through /dev/wsys/<wid>/draw/ctl.  The
+# gate uses it to put a KNOWN byte string on the screen of a real window so a
+# separate same-uid process can try to recover it -- see wsys_bypass bbscrape.
+# The needle is copied verbatim into the RGBA pixels (fmt=1 is a straight byte
+# copy in bb_blit), so the exact bytes typed here are the exact bytes that end
+# up in the backbuffer store.
+def blit_secret(wid: int64, needle: Ptr[uint8]):
+    # A small opaque surface, 32x6 RGBA8888 = 768 payload bytes.
+    ww: int32 = 32
+    hh: int32 = 6
+    # The window's geometry has to match, or bb_blit clips to the old size.
+    winpath(wid, cast[Ptr[uint8]]("ctl"))
+    g: Ptr[uint8] = "geometry 0 0 32 6"
+    poke(cast[Ptr[char]](&pbuf[0]), g)
+    puts(" geom")
+
+    winpath(wid, cast[Ptr[uint8]]("draw/ctl"))
+    fd: int32 = sys_open_write(cast[Ptr[char]](&pbuf[0]))
+    puts(" draw=")
+    puti(cast[int64](fd))
+    if fd < 0:
+        return
+
+    # 'B' x0 y0 x1 y1 fmt <pixels>
+    wbuf[0] = 66                      # 'B'
+    put_le32(1, 0)
+    put_le32(5, 0)
+    put_le32(9, ww)
+    put_le32(13, hh)
+    wbuf[17] = 1                      # fmt = RGBA8888, a straight byte copy
+    npx: uint64 = cast[uint64](ww) * cast[uint64](hh) * 4
+    nl: uint64 = slen(needle)
+    if nl == 0:
+        nl = 1
+    i: uint64 = 0
+    while i < npx:
+        wbuf[18 + i] = needle[i % nl]
+        i = i + 1
+    sys_write(fd, &wbuf[0], 18 + npx)
+
+    # 'D' x0 y0 x1 y1 -- publish (flip the page the compositor reads).
+    wbuf[0] = 68                      # 'D'
+    put_le32(1, 0)
+    put_le32(5, 0)
+    put_le32(9, ww)
+    put_le32(13, hh)
+    sys_write(fd, &wbuf[0], 17)
+    sys_close(fd)
+    puts(" blit=1")
+
+
+def do_client(hold: int32, hold_flag: Ptr[char], needle: Ptr[uint8]) -> int32:
     ctl: Ptr[char] = "/dev/wsys/ctl"
     puts("client")
     nw: Ptr[uint8] = "newwindow"
@@ -306,6 +369,11 @@ def do_client(hold: int32, hold_flag: Ptr[char]) -> int32:
     puts("\n")
     if r1 < 0 or r2 < 0 or r3 < 0:
         return 1
+    # With a needle, ALSO render a v2 backbuffer with known pixels -- this is
+    # the browser-shaped window whose contents the backbuffer scrape targets.
+    if needle != cast[Ptr[uint8]](0):
+        blit_secret(wid, needle)
+        puts("\n")
     if hold != 0:
         hold_open(wid, hold_flag)
     return 0
@@ -333,7 +401,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         fl: Ptr[char] = cast[Ptr[char]](0)
         if argc > 3:
             fl = cast[Ptr[char]](argv[3])
-        return do_client(h, fl)
+        # client hold [drain-flag] [blit-needle]: with a needle, the window also
+        # renders a v2 backbuffer whose pixels are that needle, verbatim.
+        nd: Ptr[uint8] = cast[Ptr[uint8]](0)
+        if argc > 4:
+            nd = cast[Ptr[uint8]](argv[4])
+        return do_client(h, fl, nd)
     if streq(cmd, ch) == 1:
         if argc < 4:
             puts("usage: wsys_uidgate chrome <path> <text>\n")
