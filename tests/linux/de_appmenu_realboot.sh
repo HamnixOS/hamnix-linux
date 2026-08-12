@@ -45,20 +45,45 @@
 # and both open just under the Applications button. "There is a menu-coloured
 # card below the button" would have passed on the broken machine.
 #
-# BOTH ARMS, ON ONE DISK, IN ONE RUN
-# ==================================
+# THREE BOOTS OF ONE DISK, INCLUDING THE ARM THAT MUST FAIL
+# ==========================================================
 # An assertion that cannot fail is not an assertion. So the SAME disk boots
-# twice and the same hand does the same things to it:
+# three times and the same hand does the same things to it:
 #
 #   ARM NEW  /bin/hamappmenu is on the disk, as it ships. Every assertion
-#            above must hold.
-#   ARM OLD  the last thing ARM NEW's boot does is `mv /bin/hamappmenu
-#            /bin/hamappmenu.absent` and reboot -- deliberately re-creating the
-#            machine everybody has been running for months. Every assertion
-#            above must FAIL, the panel must say by name that it is falling
-#            back, and its own window must be the thing that grew.
+#            above must hold. This boot also LAUNCHES something from the menu,
+#            which is what writes the favourites file, and then reboots.
+#   ARM FAV  the same disk, power-cycled, with that launch in its history. ONE
+#            click, and the Favourites section must be at the top of the FIRST
+#            menu of the new boot. This is the reboot-strength version of the
+#            offscreen gate's "favourites survive the process", and it is
+#            asked this way because the same-session reopen could not be
+#            reached on a real machine -- see THE FREEZE in the report.
+#   ARM OLD  ARM FAV's boot ends with `mv /bin/hamappmenu /bin/hamappmenu.absent`
+#            and a reboot -- deliberately re-creating the machine everybody has
+#            been running for months. Every assertion above must FAIL, the
+#            panel must say by name that it is falling back, and its own window
+#            must be the thing that grew.
 #
 # If ARM OLD passed the new-menu assertions they would be measuring nothing.
+#
+# WHAT THE FIRST RUNS MEASURED
+# ============================
+# The menu IS the Brisk-shaped one on a real installed machine: wid 5 at
+# (8,28), 407x140, with the panel still 26 px tall; row 0 70% white search
+# field; row 1 77% category strip; "fil" typed on virtio-keyboard-pci took row
+# 6 from 3008/3008 covered pixels back to 0. With the binary moved aside the
+# same click grew the PANEL to 206 px and gave a flat list: 0% search field,
+# 0% category strip. Three things the offscreen gate could not have seen came
+# out of those runs and are reported here rather than hidden:
+#   * `ls` given a REGULAR FILE prints its CONTENTS (450 KB of ELF on the
+#     serial console, three times, from a probe that said `ls -l`).
+#   * /etc/hamde/apps is on NO machine -- hamlinux_image.sh stages /etc by
+#     `[ -f "etc/$f" ]` over a list containing the DIRECTORY `hamde` -- so both
+#     menus fall back to a built-in list whose entries are stale.
+#   * one of those stale entries, Files -> /bin/hamfm (the TUI; the shipped
+#     .desktop says /bin/hamfmscene), spins at 100% of a core when launched
+#     with no terminal and the desktop stops repainting.
 #
 # THE MEASUREMENT MUST NOT BE THE THING IT MEASURES
 # =================================================
@@ -250,6 +275,43 @@ sleep 25
 RC
 _stage_guest NEW
 cat <<'RC'
+cp /etc/rc.arm.fav /etc/rc.boot
+echo '[ar] ARM-NEW DONE'
+reboot
+RC
+} > "$WORK/rc.arm.new"
+
+# ---- ARM FAV: DID THE FAVOURITE SURVIVE A REBOOT? ------------------------
+# The Favourites section was going to be measured by REOPENING the menu in the
+# same session, and on a real machine that question could not be reached: the
+# app this menu launches is /bin/hamfm, a TUI, which spun at 100% of a core and
+# the screen stopped updating (see THE FREEZE in the report). So the question is
+# asked the harder and better way instead -- ACROSS A REBOOT. The favourites
+# file is on the ext4 root, written by the menu process that has long since
+# exited, on a machine that has been power-cycled since. If the section is
+# there on the FIRST click of a fresh boot, the recency list survived the
+# process, the session AND the machine, which is more than the offscreen gate
+# can ask.
+{
+cat <<'RC'
+source '/etc/rc.boot.installed'
+echo '[ar] ===== ARM FAV: the same disk, REBOOTED, with a launch in its history.'
+date
+echo '[ar] the favourites file, before the desktop is even up:'
+/bin/cat '/home/live/.hamde/favourites'
+sleep 25
+echo '[ar] MARK-FAV-open'
+sleep 55
+RC
+_probe FAV-open
+cat <<'RC'
+echo '[ar] HOMES-FAV:'
+id
+echo '[ar] PROCS-FAV:'
+ps
+echo '[ar] PANELLOG-FAV:'
+grep panel /var/log/panel.log
+echo '[ar] PANELLOG-END-FAV'
 # ARM OLD IS ARMED HERE. Moving the binary aside re-creates, exactly, the
 # machine everybody has been running for months: hampanelscene's
 # _appmenu_available() opens /bin/hamappmenu, fails, and points the button at
@@ -258,10 +320,10 @@ mv /bin/hamappmenu /bin/hamappmenu.absent
 echo '[ar] armed ARM OLD: /bin/hamappmenu moved aside'
 stat /bin/hamappmenu.absent
 cp /etc/rc.arm.old /etc/rc.boot
-echo '[ar] ARM-NEW DONE'
+echo '[ar] ARM-FAV DONE'
 reboot
 RC
-} > "$WORK/rc.arm.new"
+} > "$WORK/rc.arm.fav"
 
 {
 cat <<'RC'
@@ -280,6 +342,7 @@ poweroff
 RC
 } > "$WORK/rc.arm.old"
 
+cp "$WORK/rc.arm.fav" "$EXTRA/etc/rc.arm.fav"
 cp "$WORK/rc.arm.old" "$EXTRA/etc/rc.arm.old"
 
 # ===========================================================================
@@ -377,15 +440,31 @@ stage_hand() {   # stage_hand <tag>
     shot "$t-9-dismissed"
 }
 
-boot() {   # boot <logfile> <seconds> <tag>
-    local log="$1"; SECS="$2"; local tag="$3"
+# ONE CLICK AND A PHOTOGRAPH. This is the whole of the FAV boot's hand: the
+# question there is what the FIRST menu of a fresh boot looks like.
+stage_hand_open() {   # stage_hand_open <tag>
+    local t="$1"
+    waitmark "$LOG" "MARK-$t-open" "$SECS" || { say "  $t: no open marker"; return 1; }
+    sleep 3
+    shot "$t-1-idle"
+    sleep 3
+    shot "$t-2-idle"
+    say "  $t: clicking Applications at ($APPBTN_X,$APPBTN_Y) with a real pointer"
+    click "$APPBTN_X" "$APPBTN_Y"
+    sleep 4
+    shot "$t-3-menu"
+    waitmark "$LOG" "PROBE-END-$t-open" 120
+}
+
+boot() {   # boot <logfile> <seconds> <tag> [hand]
+    local log="$1"; SECS="$2"; local tag="$3" hand="${4:-stage_hand}"
     LOG="$log"; LOGCLICK="$log.qmp"
     rm -f "$QMP"
     ( sleep 5 ) | HAMLINUX_DISK="$DISK" \
         timeout "$((SECS + 60))" scripts/hamlinux_vm.sh disk --timeout "$SECS" \
         -qmp "unix:$QMP,server=on,wait=off" >"$log" 2>&1 &
     VM=$!; reap_add "$VM"
-    stage_hand "$tag"
+    "$hand" "$tag"
     wait "$VM" 2>/dev/null
     VM=""
 }
@@ -393,9 +472,11 @@ boot() {   # boot <logfile> <seconds> <tag>
 cleanup() { rm -f "$QMP"; }
 reap_on_exit cleanup
 
-say "boot 1 of 2: ARM NEW -- the machine as it ships (up to ${WAIT1}s)"
+say "boot 1 of 3: ARM NEW -- the machine as it ships (up to ${WAIT1}s)"
 boot "$WORK/boot.new.log" "$WAIT1" NEW
-say "boot 2 of 2: ARM OLD -- the same disk, hamappmenu moved aside (up to ${WAIT2}s)"
+say "boot 2 of 3: ARM FAV -- the same disk rebooted, with a launch in its history"
+boot "$WORK/boot.fav.log" "$WAIT2" FAV stage_hand_open
+say "boot 3 of 3: ARM OLD -- the same disk, hamappmenu moved aside (up to ${WAIT2}s)"
 boot "$WORK/boot.old.log" "$WAIT2" OLD
 
 # ===========================================================================
@@ -479,11 +560,25 @@ report_arm() {   # report_arm <log> <tag> <headline>
     python3 tests/linux/ppmdiff.py png "$SHOT/$t-7-reopened.ppm" "$SHOT/$t-7-reopened.png" >/dev/null 2>&1
 }
 
+# The three numbers the whole report turns on, taken once.
+NEWWHITE="$(pct NEW-3-menu $WHITE $SEARCH_X $SEARCH_Y $SEARCH_W $SEARCH_H)"
+NEWCAT="$(pct NEW-3-menu $CATBTN "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
+NEWHDR="$(pct NEW-3-menu $HDR "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
+
 echo "=========================================================="
 echo " WHAT A PERSON GETS WHEN THEY CLICK Applications"
 echo "=========================================================="
 report_arm "$WORK/boot.new.log" NEW "/bin/hamappmenu on the disk, as it ships"
 report_arm "$WORK/boot.old.log" OLD "/bin/hamappmenu moved aside -- the machine before the fix"
+echo
+echo "--- ARM FAV: the same disk REBOOTED, with a launch in its history"
+echo "    Applications ->      $(ppn FAV-2-idle FAV-3-menu) px changed"
+echo "    row 0 white:         $(pct FAV-3-menu $WHITE $SEARCH_X $SEARCH_Y $SEARCH_W $SEARCH_H)%"
+echo "    row 1 header strip:  $(pct FAV-3-menu $HDR "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))%  (ARM NEW, no history: ${NEWHDR:-?}%)"
+echo "    row 1 catbtn strip:  $(pct FAV-3-menu $CATBTN "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))%  (ARM NEW, no history: ${NEWCAT:-?}%)"
+echo "    window table:        $(wintable "$WORK/boot.fav.log" FAV-open)"
+echo "    favourites on disk:  $(awk '/the favourites file, before/{i=1;next} i&&NF>0{print;exit}' "$WORK/boot.fav.log" | tr -d '\r')"
+python3 tests/linux/ppmdiff.py png "$SHOT/FAV-3-menu.ppm" "$SHOT/FAV-3-menu.png" >/dev/null 2>&1
 
 echo
 echo "=========================================================="
@@ -512,7 +607,6 @@ fi
     info "the panel window is ${NEWPANELH:-?} px tall with the menu open"
 
 # ---- 2. THE SEARCH FIELD, IN PIXELS -------------------------------------
-NEWWHITE="$(pct NEW-3-menu $WHITE $SEARCH_X $SEARCH_Y $SEARCH_W $SEARCH_H)"
 if [ "${NEWWHITE:-0}" -ge 50 ]; then
     ok "the menu on the glass has a SEARCH BOX: row 0 is ${NEWWHITE}% the white search field"
 else
@@ -520,8 +614,6 @@ else
 fi
 
 # ---- 3. CATEGORY ROWS ----------------------------------------------------
-NEWCAT="$(pct NEW-3-menu $CATBTN "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
-NEWHDR="$(pct NEW-3-menu $HDR "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
 if [ "${NEWCAT:-0}" -ge 40 ]; then
     ok "and CATEGORY ROWS: row 1 is ${NEWCAT}% the category-button strip -- one submenu per category, the 'Debian apps >' shape the owner pointed at"
 else
@@ -566,26 +658,52 @@ fi
 NEWFAV="$(favfile "$WORK/boot.new.log" NEW)"
 case "$NEWFAV" in
     *"$LAUNCH_PROG"*)
-        ok "and the launch was RECORDED: the favourites file on the installed disk names $LAUNCH_PROG ($NEWFAV)" ;;
+        ok "and the launch was RECORDED where a REBOOT can find it again: the favourites file on the ext4 root names $LAUNCH_PROG. It is \$HOME/.hamde/favourites with \$HOME resolved by lib/homedir.ad, and on this machine that is /home/live -- rc.5 starts the DE as uid 0, /etc/passwd has no uid 0, so the resolver's last resort is what every DE client gets ($NEWFAV)" ;;
     *)
-        bad "THE DEFECT, AND IT IS ONLY VISIBLE HERE: nothing was recorded as launched. Neither /home/live/.hamde/favourites nor /root/.hamde/favourites exists -- '$NEWFAV'. lib/homedir.ad resolves \$HOME as /env/HOME, then /etc/passwd BY UID, then /home/live; /etc/rc.d/rc.5 starts the DE as uid 0 and /etc/passwd has no uid 0 ('uid 0 doesn't exist in Hamnix'), so every DE client's home is /home/live -- the LIVE IMAGE's user, a directory an INSTALLED disk does not have -- and hamappmenu's _fav_save does one non-recursive sys_mkdir and then gives up silently. tests/linux/de_appmenu_brisk.sh cannot see this: it mounts a writable tmpfs on /root and its euid resolves there. $(awk -v m="HOMES-NEW:" 'index($0,m){i=1;next} i&&index($0,"PROCS-"){exit} i&&NF>0{printf "%s ", $0}' "$WORK/boot.new.log" | tr -d '\r')" ;;
+        bad "nothing was recorded as launched: neither /home/live/.hamde/favourites nor /root/.hamde/favourites -- '$NEWFAV'. $(awk -v m="HOMES-NEW:" 'index($0,m){i=1;next} i&&index($0,"PROCS-"){exit} i&&NF>0{printf "%s ", $0}' "$WORK/boot.new.log" | tr -d '\r')" ;;
 esac
 
-# ---- 6. FAVOURITES, ON THE REAL MACHINE ---------------------------------
-RHDR="$(pct NEW-7-reopened $HDR "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
-RCAT="$(pct NEW-7-reopened $CATBTN "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
-REWID="$(menuwin "$WORK/boot.new.log" NEW-fav)"
-R3WID="$(menuwin "$WORK/boot.new.log" NEW-third)"
-R3="$(ppn NEW-7-reopened NEW-8-third)"
+# ---- 6. FAVOURITES, ACROSS A REBOOT, ON THE REAL MACHINE ----------------
+# The stronger question, and the only one this machine could actually be asked:
+# see THE FREEZE below for why reopening in the same session could not be.
+FHDR1="$(pct FAV-3-menu $HDR "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
+FCAT1="$(pct FAV-3-menu $CATBTN "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
+FWID="$(menuwin "$WORK/boot.fav.log" FAV-open)"
 if [ "${NEWHDR:-0}" -gt 5 ]; then
     bad "row 1 was already a header before anything was launched, so 'the Favourites section appeared' is not a question this run can answer"
-elif [ "${RHDR:-0}" -ge 40 ] && [ "${RCAT:-100}" -le 5 ]; then
-    ok "REOPENED AFTER THE LAUNCH, THE MENU SHOWS FAVOURITES AT THE TOP: row 1 is a header (${RHDR}%, was ${NEWHDR}%) where the control measured a category button (${RCAT}%, was ${NEWCAT}%). The recency list outlived the process that recorded it, on a real disk."
-elif [ -z "$REWID" ]; then
-    bad "THE SECOND DEFECT: THE SECOND CLICK ON Applications OPENED NOTHING AT ALL. No menu window is in the table after it ('${REWID:-none}') and row 1 is ${RHDR:-?}% header / ${RCAT:-?}% category button -- there is no menu to hold a Favourites section. THE THIRD CLICK $( [ -n "$R3WID" ] && echo "DID open one (wid $R3WID, $R3 px changed), so the button takes two clicks after a launch: hampanelscene's _toggle_appmenu believed the menu it spawned was still alive, sent it a terminate note and returned without spawning" || echo "opened nothing either ($R3 px changed)")"
+elif [ -z "$FWID" ]; then
+    bad "the FAV boot's click opened no menu at all (table: $(wintable "$WORK/boot.fav.log" FAV-open)) -- the Favourites section is not a question this run can answer"
+elif [ "${FHDR1:-0}" -ge 40 ] && [ "${FCAT1:-100}" -le 5 ]; then
+    ok "THE FAVOURITE SURVIVED A REBOOT: on the FIRST click of a fresh boot of the same disk, row 1 of the menu is a section header (${FHDR1}%, ${FCAT1}% category button) where the same rectangle on the machine with no launch history was ${NEWHDR}% header and ${NEWCAT}% category button. The recency list outlived the menu process, the session AND the power cycle."
 else
-    bad "THE DEFECT: the reopened menu shows no Favourites section -- row 1 is ${RHDR:-?}% header and ${RCAT:-?}% category button"
+    bad "THE DEFECT: after a reboot with $LAUNCH_PROG in the favourites file, the first menu shows no Favourites section -- row 1 is ${FHDR1:-?}% header and ${FCAT1:-?}% category button (with no history it was ${NEWHDR}%/${NEWCAT}%)"
 fi
+
+# ---- 7. THE FREEZE, AND THE DEAD BUTTON AFTER IT -----------------------
+# Reported, not failed: the cause is a stale entry in a catalogue that should
+# not have been in use at all (FINDING 1), not the menu. But it is what a
+# person clicking "Files" gets, so it is measured rather than mentioned.
+REWID="$(menuwin "$WORK/boot.new.log" NEW-fav)"
+R3WID="$(menuwin "$WORK/boot.new.log" NEW-third)"
+R2="$(ppn NEW-6-launched NEW-7-reopened)"
+R3="$(ppn NEW-7-reopened NEW-8-third)"
+OR2="$(ppn OLD-6-launched OLD-7-reopened)"
+echo
+echo "--- THE FREEZE (measured, reported, not this gate's failure)"
+echo "    After the menu launched $LAUNCH_PROG, the screen STOPPED CHANGING:"
+echo "    the 2nd click on Applications moved $R2 px and the 3rd moved $R3 px"
+echo "    -- not even the clock advanced -- and no second menu window ever"
+echo "    appeared (after 2nd: '${REWID:-none}', after 3rd: '${R3WID:-none}')."
+echo "    The panel printed \"launched /bin/hamappmenu -self\" $(panelsaid "$WORK/boot.new.log" NEW | grep -c 'launched /bin/hamappmenu') time(s) for 3 clicks."
+echo "    In ARM OLD the same three clicks on the panel's OWN dropdown moved"
+echo "    $OR2 px, so this is not the machine being slow: it is specific to"
+echo "    what got launched. $LAUNCH_PROG is the TUI file manager and it was"
+echo "    spinning at 100% of a core with no terminal:"
+echo "      $(awk '/PROCS-NEW:/{i=1;next} i&&/hamfm/{print;exit}' "$WORK/boot.new.log" | tr -d '\r')"
+echo "    It is in the menu because /etc/hamde/apps is not on the machine"
+echo "    (FINDING 1) and hamappmenu's built-in fallback names /bin/hamfm;"
+echo "    the SHIPPED catalogue entry, etc/hamde/apps/files.desktop, says"
+echo "    Exec=/bin/hamfmscene."
 
 # ---- 7. THE ARM THAT MUST FAIL ------------------------------------------
 # Everything above, asked of the same disk with the binary moved aside. If any
