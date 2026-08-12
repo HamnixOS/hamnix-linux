@@ -1134,36 +1134,69 @@ def describe(cmd):
 # initramfs with NO COMPOSITOR for hours (069f7c1f). This was the third copy.
 # One place knows: the build script.
 
+_NEWEST_SHARED_INPUT = None
+
+
+def newest_shared_input():
+    """The mtime of the most recently modified thing EVERY program here links
+    against: lib/*.ad, user/linux-*.c and their headers, and the build script
+    itself. Computed once.
+
+    This exists because the cache below used to stat exactly ONE input,
+    user/<cmd>.ad, AND THAT SHIPPED A BROKEN DESKTOP. hamnix-desktop 1.0.10
+    went to https://255.one/ with a wsysd compiled at 19:17 beside a
+    hampanelscene and a hamdesktop compiled at 18:25, while user/linux-wsys.c
+    -- the wsys backend all three link -- had been modified at 19:54. Every
+    package NAME was present, every sha256 matched the bytes served, the
+    dependency closure resolved, and the machine that ran `hpm update` came up
+    with a desktop mapping NO WINDOWS AT ALL. Measured on a real installed disk
+    by tests/linux/installed_update_live.sh.
+
+    Note what could NOT have caught it. channel_covers_image.sh compares NAMES,
+    and every name was there. The index checks compare hashes to the bytes on
+    disk, and those agreed -- they were the wrong bytes, consistently. And no
+    gate in this tree runs these objects at all, because every test builds from
+    source through hamlinux_build.sh; the artefact that actually ships was the
+    one artefact nothing executed.
+
+    The cost of correctness is real and is accepted deliberately: touching
+    anything under lib/ now rebuilds all 98 packages. That is the right trade.
+    The machine's owner made it a standing invariant that work done here must
+    reach the package repository and be updatable, and a cache that can publish
+    a stale binary does not merely risk that invariant -- it breaks it while
+    every other check reports success."""
+    global _NEWEST_SHARED_INPUT
+    if _NEWEST_SHARED_INPUT is not None:
+        return _NEWEST_SHARED_INPUT
+    newest = 0.0
+    pats = [os.path.join(ROOT, "lib", "*.ad"),
+            os.path.join(ROOT, "lib", "*", "*.ad"),
+            os.path.join(ROOT, "user", "*.c"),
+            os.path.join(ROOT, "user", "*.h"),
+            os.path.join(ROOT, "user", "*.S")]
+    files = [f for p in pats for f in glob.glob(p)]
+    files.append(os.path.join(ROOT, "scripts/hamlinux_build.sh"))
+    for f in files:
+        try:
+            newest = max(newest, os.path.getmtime(f))
+        except OSError:
+            pass
+    _NEWEST_SHARED_INPUT = newest
+    return newest
+
+
 def build_one(cmd, objdir):
     """Build user/<cmd>.ad through the Linux lane. Returns the ELF path or
-    None. Reuses an existing artefact so a rebuild of the channel is cheap.
-
-    KNOWN HAZARD, MEASURED, NOT YET FIXED -- read before trusting this cache.
-    The staleness check below stats ONE input: user/<cmd>.ad. It does not stat
-    lib/*.ad, user/linux-*.c, or the compiler. So an edit under lib/ or to a
-    user/linux-*.c backend invalidates NOTHING here and the previous object is
-    published.
-
-    That has already shipped. hamnix-desktop 1.0.10 on https://255.one/ carries
-    a wsysd built at 19:17 beside a hampanelscene and a hamdesktop built at
-    18:25, with user/linux-wsys.c -- the wsys backend all three link --
-    modified at 19:54; the three published binaries are byte-identical to the
-    objects still in build/repo-obj. A machine that runs `hpm update` gets a
-    desktop that maps NO WINDOWS AT ALL (`cat /dev/wsys/wsysd/state` ->
-    `windows 0`), measured on an installed disk by
-    tests/linux/installed_update_live.sh and reproduced offscreen in seconds
-    with `MOUSE_BIN_DIR=<published bin> tests/linux/de_mouse_chrome.sh`.
-
-    Nothing in this tree RUNS these objects -- every gate builds from source
-    through hamlinux_build.sh -- so the artefact that actually ships is the one
-    artefact nothing tests, and channel_covers_image.sh cannot see it because
-    it compares NAMES and every name is present. Until this stats every input,
-    `rm -rf build/repo-obj` before publishing."""
+    None. Reuses an existing artefact only when that artefact is newer than
+    EVERY input it was built from -- its own source and every shared input (see
+    newest_shared_input, and read it: the one-input version of this check
+    published a desktop that mapped no windows)."""
     src = os.path.join(ROOT, "user", cmd + ".ad")
     if not os.path.exists(src):
         return None
     out = os.path.join(objdir, cmd + ".elf")
-    if os.path.exists(out) and os.path.getmtime(out) > os.path.getmtime(src):
+    newest_src = max(os.path.getmtime(src), newest_shared_input())
+    if os.path.exists(out) and os.path.getmtime(out) > newest_src:
         return out
     rc = subprocess.call(
         [os.path.join(ROOT, "scripts/hamlinux_build.sh"), src, out],
