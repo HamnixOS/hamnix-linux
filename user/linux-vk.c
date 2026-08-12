@@ -143,6 +143,7 @@ typedef uint64_t VkQueryPool;
 #define VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT  0x1
 #define VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT  0x2
 #define VK_MEMORY_PROPERTY_HOST_COHERENT_BIT 0x4
+#define VK_MEMORY_PROPERTY_HOST_CACHED_BIT   0x8
 
 #define VK_BUFFER_USAGE_TRANSFER_SRC_BIT   0x1
 #define VK_BUFFER_USAGE_TRANSFER_DST_BIT   0x2
@@ -443,6 +444,8 @@ static uint8_t*      g_fmap;
 static int32_t       g_fw, g_fh;
 static int32_t       g_fbgra;
 static int           g_fdevlocal;
+static VkFlags       g_last_place_flags;   /* set by make_storage_buffer */
+static VkFlags       g_fflags;             /* ...captured for the frame */
 
 /* the source arena (binding 1): blit pixels + glyph coverage, grows on demand */
 static VkBuffer       g_abuf;
@@ -573,6 +576,20 @@ static int32_t g_no_covcache;
  * Pixels are unaffected either way, which is what makes it a lever. */
 static int32_t g_arena_devlocal;
 
+/* THE FOURTH LEVER, and the one nobody had ever pulled — where the FRAME
+ * lives. See the placement table above make_storage_buffer(). The frame's
+ * placement was not a lever at all before this: hvk_frame_create() passed a
+ * hardcoded 1 and got the BAR every time.
+ *
+ *   HAMNIX_VK_FRAME_MEM=cached    HOST_CACHED system RAM (the default)
+ *                       coherent  HOST_VISIBLE|HOST_COHERENT (uncached/WC)
+ *                       device    DEVICE_LOCAL|HOST_VISIBLE (the BAR — what
+ *                                 every measurement before this one used)
+ *
+ * `device` is kept precisely so the 13x-slower configuration stays
+ * reproducible: a fix whose predecessor cannot be re-run is a claim. */
+static int32_t g_frame_place = -1;
+
 static void hvk_tunables(void)
 {
     if (g_batch_max >= 0) return;
@@ -586,6 +603,14 @@ static void hvk_tunables(void)
     g_no_covcache = (s && s[0] && s[0] != '0') ? 1 : 0;
     s = getenv("HAMNIX_VK_ARENA_DEVLOCAL");
     g_arena_devlocal = (s && s[0] && s[0] != '0') ? 1 : 0;
+    g_frame_place = HVK_PLACE_HOST_CACHED;
+    s = getenv("HAMNIX_VK_FRAME_MEM");
+    if (s && s[0]) {
+        if (s[0] == 'd')      g_frame_place = HVK_PLACE_DEVICE_FIRST;
+        else if (s[0] == 'o') g_frame_place = HVK_PLACE_HOST_COHERENT;
+        else if (s[0] == 'c' && s[1] == 'o') g_frame_place = HVK_PLACE_HOST_COHERENT;
+        else                  g_frame_place = HVK_PLACE_HOST_CACHED;
+    }
 }
 
 static int hvk_fail(const char* why)
@@ -702,7 +727,35 @@ static const uint32_t* load_spv(size_t* nbytes, uint32_t** owned)
     return hvk_spv_vk2d_raster;
 }
 
-static int make_storage_buffer(VkDeviceSize sz, int prefer_device_local,
+/* WHERE A MAPPED BUFFER LIVES, AND WHY IT IS THE WHOLE PERFORMANCE STORY.
+ *
+ * Every buffer here is host-mapped, so every one of them has a CPU access
+ * pattern, and on a discrete GPU the placement decides that access's cost by
+ * two to three ORDERS OF MAGNITUDE. Measured on this RTX 3090 (proprietary
+ * ICD), memcpy of the 4 MiB 1280x800 composite OUT of each placement:
+ *
+ *   DEVICE_LOCAL|HOST_VISIBLE  (the BAR)     88.0 ms   0.05 GB/s
+ *   HOST_VISIBLE|HOST_COHERENT (uncached)    10.7 ms   0.38 GB/s
+ *   HOST_VISIBLE|HOST_COHERENT|HOST_CACHED    0.22 ms  18.3 GB/s
+ *   ordinary malloc'd RAM, for scale          0.16 ms  25.6 GB/s
+ *
+ * A CPU read of the BAR is 393x slower than a CPU read of cached host RAM and
+ * is not far off the cost of reading it over a network. So the rule is:
+ *
+ *   DEVICE_FIRST   the CPU only ever WRITES it, and the shader reads it hot
+ *                  (the source arena: writes to WC memory are posted and
+ *                  cheap, and g_ashadow already keeps CPU reads off the bus)
+ *   HOST_CACHED    the CPU READS it every frame (the composite: the shader's
+ *                  writes cross PCIe once, posted, while present_rows' read
+ *                  becomes an ordinary cached load)
+ *
+ * There is no placement that is best for both, which is the actual shape of
+ * this problem — see hvk_frame_create. */
+#define HVK_PLACE_HOST_COHERENT 0   /* HOST_VISIBLE|HOST_COHERENT, uncached  */
+#define HVK_PLACE_DEVICE_FIRST  1   /* DEVICE_LOCAL|HOST_VISIBLE if it exists */
+#define HVK_PLACE_HOST_CACHED   2   /* ...|HOST_CACHED if it exists           */
+
+static int make_storage_buffer(VkDeviceSize sz, int place,
                                VkBuffer* buf, VkDeviceMemory* mem,
                                void** map, int* got_device_local)
 {
@@ -719,19 +772,33 @@ static int make_storage_buffer(VkDeviceSize sz, int prefer_device_local,
     p_vkGetBufferMemoryRequirements(g_dev, *buf, &mr);
     int mt = -1;
     if (got_device_local) *got_device_local = 0;
-    if (prefer_device_local) {
+    if (place == HVK_PLACE_DEVICE_FIRST) {
         /* Resizable-BAR / integrated / software ICDs give us memory that is
          * BOTH device-local and host-mappable: the shader writes at full
-         * device speed AND the compositor reads the frame with no copy. */
+         * device speed AND the compositor reads the frame with no copy.
+         * On a discrete card WITHOUT ReBAR this is the 256 MiB BAR aperture,
+         * which is host-mappable and catastrophic to read -- see the table. */
         mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
                       | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         if (mt >= 0 && got_device_local) *got_device_local = 1;
+    } else if (place == HVK_PLACE_HOST_CACHED) {
+        mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                      | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        /* A device-local type that is ALSO host-cached is the best of both and
+         * exists on integrated parts; the search above finds it there because
+         * find_mem takes the first type matching all the requested bits and
+         * integrated parts mark their single host heap device-local. */
     }
     if (mt < 0)
         mt = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (mt < 0) return hvk_fail("no host-visible coherent memory type");
+    if (got_device_local && (g_memprops.memoryTypes[mt].propertyFlags
+                             & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+        *got_device_local = 1;
+    g_last_place_flags = g_memprops.memoryTypes[mt].propertyFlags;
     VkMemoryAllocateInfo ai;
     memset(&ai, 0, sizeof ai);
     ai.sType = ST_MEMORY_ALLOCATE_INFO;
