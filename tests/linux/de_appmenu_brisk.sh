@@ -463,12 +463,35 @@ sleep 1
 # cannot get a window. Here that is forced by pointing it at a wsys segment
 # under a directory that does not exist, so /dev/wsys is unreachable. It must
 # leave the fault marker the panel reads.
+#
+# THE INJECTION HAS TO CLOSE ALL THREE DOORS, and it took two attempts to
+# learn which they are. Pointing HAMWSYS at a path under a directory that does
+# not exist does NOTHING: `shm_attach` in user/linux-wsys.c tries THREE
+# candidates in order -- $HAMWSYS, /dev/shm/hamnix-wsys, /tmp/hamnix-wsys --
+# and creates the segment at the first one it can open. Measured on the first
+# run of this gate: the menu fell through to /dev/shm, made itself a fresh
+# empty window system, printed "HAMAPPMENU ready", and sat there forever on a
+# session nothing composites. The gate hung for four minutes.
+#
+# That fall-through is deliberate and linux-wsys.c argues for it at length, so
+# the injection has to respect it: a DIRECTORY at each of the three candidate
+# paths. open(2) on a directory is EISDIR for every caller -- including a
+# namespace root holding CAP_DAC_OVERRIDE, so there is no permission to bypass
+# -- and there is no fourth candidate to fall through to. Inside this gate's
+# private namespace /dev/shm and /tmp are its own tmpfs, so nothing on the host
+# is touched and all three vanish with the namespace.
+#
+# `timeout` is belt and braces. A gate that hangs answers nothing.
 rm -f "$FAULTFILE"
-( export HAMWSYS="$WORK/nodir/wsys.shm"
-  export HAMWSYS_BB="$WORK/nodir/wsys.bb"
-  export HAMWSYS_IMG="$WORK/nodir/wsys.img"
-  "$WORK/hamappmenu.elf" -self </dev/null >"$WORK/menu.fault.log" 2>&1 )
+mkdir -p "$WORK/isdir/wsys.shm" "$WORK/isdir/wsys.bb" "$WORK/isdir/wsys.img" \
+         /dev/shm/hamnix-wsys /tmp/hamnix-wsys
+( export HAMWSYS="$WORK/isdir/wsys.shm"
+  export HAMWSYS_BB="$WORK/isdir/wsys.bb"
+  export HAMWSYS_IMG="$WORK/isdir/wsys.img"
+  timeout 20 "$WORK/hamappmenu.elf" -self </dev/null \
+      >"$WORK/menu.fault.log" 2>&1 )
 rc=$?
+rmdir /dev/shm/hamnix-wsys /tmp/hamnix-wsys 2>/dev/null
 if [ -f "$FAULTFILE" ] && [ "$rc" != 0 ]; then
     ok "a menu that cannot open a window exits $rc and leaves $FAULTFILE -- the signal hampanelscene's _appmenu_available reads to fall back to the dropdown it draws itself, instead of a button that answers a click with nothing"
 else
