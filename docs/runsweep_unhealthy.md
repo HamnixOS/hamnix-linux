@@ -51,7 +51,7 @@ and the file-size cap twice.
 ## THE CAP, because it is the most recent and the largest
 
 Measured 2026-08-11 on `port/tier1-syscalls`: **50 of the sweep's 88 windowed
-rows** scored `UP_NO_WINDOW` and `PAINTED` had fallen from 51 to 2. None of
+rows** scored `UP_NO_WINDOW` and `PAINTED` had fallen to 2. None of
 those fifty programs was broken. `wsysd`'s `ftruncate(2)` of the v2 backbuffer
 pool was refused `EFBIG` by the harness's own `ulimit -f` and the kernel killed
 it with `SIGXFSZ`, *after* it had passed the readiness gate — the pool is
@@ -71,6 +71,22 @@ Fixed two ways, because a number in a comment is what went stale:
   cap the sweep says so instead of blaming fifty programs.
 
 ---
+
+## The measurement this file was written from
+
+Full sweep, both ends, on `port/tier1-syscalls` at base `836b2c8c`, preserved
+at `/home/david/.hamnix-build/sweep-a6145486/{BEFORE,AFTER}/`:
+
+| | before | after |
+|--|--|--|
+| SCORE | 253 / 329 | **306 / 329** |
+| `PAINTED` | 2 | 50 of 88 windowed rows |
+| `UP_NO_WINDOW` | 50 | 0 |
+| `EXIT_NONZERO` | 23 | 20 |
+| `TIMEOUT` | 3 | 3 |
+| run phase | 308 s | 996 s |
+
+The 23 rows below are the whole of what is left.
 
 ## The list
 

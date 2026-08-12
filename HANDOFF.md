@@ -759,7 +759,10 @@ numbers, and the real panel's own `--scene-dump` asserted to cover its resting
 bar. The measure is a per-row **union** and therefore conservative: it never
 accuses a scene that is fine, and an interior hole with paint either side of
 it on one row is not reported. Said out loud rather than left to be found.
-* The run-sweep score is **297 healthy / 328 runnable**, re-measured end to
+* [SUPERSEDED — the score below, and the 301/328 further down, were both taken
+  while the harness was killing the compositor. The measured figure is
+  **306 / 329**; see THE COMPOSITOR HAD STOPPED COMING UP, below.]
+  The run-sweep score is **297 healthy / 328 runnable**, re-measured end to
   end (`/home/david/.hamnix-build/sweep-a74b5560/{BEFORE,AFTER}/`), and the
   interesting part is the run BEFORE the fixes: **265 / 329, row for row
   IDENTICAL to the sweep taken forty commits earlier.** Nothing moved. The
@@ -820,6 +823,78 @@ it on one row is not reported. Said out loud rather than left to be found.
   nice control, and five scene clients that want a compositor the sweep does
   not run (`hamlock`, `hampanelscene`, `hamshotui`, `hamtoast`, `wsyswl`).
   **That last one is done — see THE SWEEP HAS A COMPOSITOR NOW, below.**
+
+#### THE COMPOSITOR HAD STOPPED COMING UP, AND FIFTY ROWS WORE IT
+
+**The 301 / 328 above is stale, and the reason is worth more than the
+number.** Re-measured end to end on `port/tier1-syscalls`
+(`/home/david/.hamnix-build/sweep-a6145486/{BEFORE,AFTER}/`, base
+`836b2c8c`):
+
+| | before | after |
+|--|--|--|
+| SCORE | **253 / 329** | **306 / 329** |
+| `PAINTED` | 2 | **50** of 88 windowed rows |
+| `UP_NO_WINDOW` | 50 | **0** |
+| run phase | 308 s | 996 s |
+
+Nothing had regressed in the desktop. **`wsysd` was being killed by the
+harness before any client could map a window.** The v2 backbuffer pool is a
+SPARSE FILE and `ulimit -f` bounds the OFFSET a process may write; jail_run's
+cap was 256 MiB, set when the comment beside it read "BB_SLOTS(8) x 2 x
+1920x1080x4 = 132 MB". `BB_SLOTS` is `WSYS_MAX_WINDOWS`, which has since gone
+8 → 64 → 128 → 256 (the last for `wsyswl`'s MAXCONN), so `BB_FILE_BYTES` is
+**4,261,478,400** — sixteen times the cap. `ftruncate(2)` was refused `EFBIG`
+and the kernel killed the compositor with `SIGXFSZ`, *after* it had printed
+`wsysd: screen 1280x800` and passed the readiness gate, because the pool is
+allocated lazily on the first window. A/B, same binary, `/bin/hamclock`:
+`ulimit -f 262144` → wsys.bb 0 bytes, `wins 0`; `6291456` → wsys.bb
+4,261,478,400 bytes (**22,856 KiB of actual blocks — it is sparse**),
+`fbpx 52117`, `PAINTED`.
+
+**This is the third time this cap has manufactured a failure out of a working
+program, and the first two were fixed by writing a bigger number in a
+comment.** So it is not a number any more:
+
+* two caps — the pool-sized one for rows that run a compositor, 256 MiB for
+  everything else, because `yes` writes real bytes onto a real disk;
+* the requirement is **re-derived from `user/linux-wsys.c`** at startup and a
+  cap that no longer covers the pool is a FATAL error naming both figures;
+* `tests/linux/runsweep_jail.sh` reports `HARNESS_FAIL` if the compositor is
+  not alive when the program finishes — "the program was measured against no
+  window system, so this row is the harness's failure and not the
+  program's".
+
+**And the census is clean.** With the compositor up, all fifty painting
+clients read **0.0 s of cpu in a 15 s run** — the 23 that each burned a full
+core are fixed, and this is the first sweep since that could see it. What is
+left in that list is the four programs whose job is to burn cpu
+(`preempt_hog`, `wakelat_hog`, `nice_lo`, `memhog`).
+
+Three more rows moved, each for its own reason:
+
+* **`pgrep` opened `/proc/tasks`**, the Hamnix kernel's single-file process
+  table, which does not exist here — so it failed for every pattern, every
+  time. It walks `/proc`'s pid directories now (`/proc/tasks` first, so the
+  binary still works on the other kernel) and its output is byte-identical to
+  procps' `pgrep` for the same pattern, 32 pids.
+* **`/dev/auth` serves `setpass`**, so `passwd` can change a password at all;
+  it could not, for anybody, ever. Faithful port of `_au_setpass`, gated
+  hostowner-or-self, `tests/linux/auth_setpass.sh` (8 PASS, half of it the
+  gate). The sweep's `passwd` row now exits 0 **and its overlay diff contains
+  `etc/shadow`** — the proof it did the work rather than reporting it.
+* **`memhog`'s recipe asked for 16 BYTES.** Its header says bare = bytes; the
+  claim column said "N MiB". A 4 KiB allocation cannot move MemFree out of the
+  noise, so the residency guard fired and a correct program was scored broken.
+
+**The 23 that are left are named, with a reason each and which of four kinds
+they are, in `docs/runsweep_unhealthy.md`** — real gaps this port owes
+(`chvt`, `loadkeys`, `hfw`, `oopsread`, `initctl`, `service`, `nsrun`,
+`umdf_host`, `modprobe`), hardware and privilege the harness withholds on
+purpose (the four audio rows, `nice_hi`/`nice_demo`/`wakelat`/`sysirqprobe`,
+`dmesg`, `insmod`/`rmmod`, `ac`), and two X11 bridges that want an Xvfb.
+**None of them was moved out of the failing column to raise the score**, and
+that file says why in each case.
 
 #### THE SWEEP HAS A COMPOSITOR NOW, and a quarter of the desktop spins
 
