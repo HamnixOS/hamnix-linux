@@ -1923,8 +1923,49 @@ allow_unsigned:   int32 = 0
 SIG_FETCH_CAP:    uint64 = 65536
 sig_hex_buf:      Array[65536, uint8]
 sig_raw_buf:      Array[64, uint8]
-# Scratch for reading a --trusted-key file.
-tkey_file_buf:    Array[512, uint8]
+# ---- the --trusted-key reader -------------------------------------------
+# THE DEFECT THIS SHAPE REMOVES. This was "read the file into a 512-byte
+# buffer, then scan that buffer for the first bare token". MEASURED on this
+# tree: etc/hpm/trusted.pub is 718 bytes and its 64-hex key token does not
+# begin until byte 653; etc/hpm/local-trusted.pub is 1054 bytes with its token
+# at byte 989. BOTH shipped files are mostly the comment header that documents
+# the format, so the whole read landed inside that header and
+#
+#     hpm --trusted-key=etc/hpm/trusted.pub
+#
+# died with "malformed trusted-key file" on a file this project SHIPS for
+# exactly that purpose. The consequence is not cosmetic: --trusted-key is the
+# documented way to ROTATE the trust root that authenticates every package
+# this distribution installs. If the compiled-in key ever has to be replaced
+# -- the single reason an override exists at all -- the documented path did
+# not work.
+#
+# A BIGGER FIXED BUFFER IS THE SAME DEFECT AT A LARGER SIZE. This tree has
+# four scars from precisely that: a 2047-byte panel config that swallowed
+# etc/panel.conf whole, this 512-byte key buffer, an 8192-byte /etc/modules
+# ceiling, and a `tail` that read only the first 8 KiB. So the file is never
+# held whole: it is READ IN CHUNKS and parsed A LINE AT A TIME. A key file now
+# has NO SIZE CEILING -- 718 bytes, 1054 bytes, and the same key behind a
+# 64 KiB comment header all parse identically. The one bound left is the
+# length of ONE LINE, which is a real bound on the grammar (the token is 64
+# hex characters), it is generous at 512, and overrunning it is REPORTED
+# rather than swallowed.
+#
+# AND EVERY FAILURE IS LOUD AND NAMES THE FILE. Silently falling back to the
+# compiled-in root is the worst outcome available on this path -- the operator
+# asks for key A, gets key B, and installs packages under a trust root they
+# believe they replaced. It is the security equivalent of the panel quietly
+# drawing its built-in default. So every exit below either installs the key
+# the file names or returns non-zero, main() returns on non-zero, and each
+# message says WHICH FILE and WHAT WAS WRONG.
+TKEY_CHUNK:    uint64 = 4096
+TKEY_LINE_MAX: uint64 = 512
+tkey_chunk:   Array[4096, uint8]
+tkey_line:    Array[512, uint8]
+# The decode target. A token is decoded into SCRATCH and copied into
+# trusted_pub only once 32 whole bytes are in hand, so a half-decoded token
+# can never leave the live trust root part-old and part-new.
+tkey_scratch: Array[32, uint8]
 
 
 def _hexval(c: uint8) -> int32:
@@ -1987,59 +2028,136 @@ def _load_local_trusted_pub():
     local_trusted_pub_set = 1
 
 
-# Parse a trusted-key file's contents (skip '#' comment lines, take the
-# first bare 64-hex-char token) into trusted_pub. Returns 0 on success.
-def _set_trusted_key_from_buf(buf: Ptr[uint8], blen: uint64) -> int32:
-    i: uint64 = 0
-    while i < blen:
-        # Skip leading whitespace on the line.
-        while i < blen and (buf[i] == 32 or buf[i] == 9):
-            i = i + 1
-        if i >= blen:
-            break
-        if buf[i] == 10 or buf[i] == 13:
-            i = i + 1
-            continue
-        if buf[i] == 35:                     # '#': comment line
-            while i < blen and buf[i] != 10:
-                i = i + 1
-            continue
-        # A bare token: find its end.
-        start: uint64 = i
-        while i < blen and buf[i] != 10 and buf[i] != 13 \
-                and buf[i] != 32 and buf[i] != 9:
-            i = i + 1
-        toklen: uint64 = i - start
-        if _hex_decode(cast[Ptr[uint8]](cast[uint64](buf) + start), toklen,
-                       &trusted_pub[0], 32) != 32:
-            return 1
-        trusted_pub_set = 1
+# Every diagnostic on this path opens the same way, so it cannot be written
+# any other way by accident: the words "--trusted-key" and THE PATH.
+def _tkey_head(path: Ptr[uint8]):
+    write_str(2, "hpm: --trusted-key ")
+    write_str(2, path)
+    write_str(2, ": ")
+
+
+# One line of a trusted-key file, already stripped of its newline, in
+# tkey_line[0..le). Returns 1 if it carried the key (now installed), 0 if it
+# was blank or a comment, -1 if it carried a token that is not a key.
+def _tkey_parse_line(path: Ptr[uint8], le: uint64, lineno: uint64) -> int32:
+    p: uint64 = 0
+    while p < le and (tkey_line[p] == 32 or tkey_line[p] == 9
+                      or tkey_line[p] == 13):
+        p = p + 1
+    if p >= le or tkey_line[p] == 35:            # blank line, or '#' comment
         return 0
+    start: uint64 = p
+    while p < le and tkey_line[p] != 32 and tkey_line[p] != 9 \
+            and tkey_line[p] != 13:
+        p = p + 1
+    toklen: uint64 = p - start
+    # Decode into scratch, NOT into the live trust root: _hex_decode writes as
+    # it goes, so decoding straight into trusted_pub would leave it half
+    # overwritten on a token that turns out to be malformed.
+    if _hex_decode(cast[Ptr[uint8]](cast[uint64](&tkey_line[0]) + start),
+                   toklen, &tkey_scratch[0], 32) != 32:
+        _tkey_head(path)
+        write_str(2, "line ")
+        write_dec_u64(2, lineno)
+        write_str(2, " is not an Ed25519 public key -- want exactly 64 hex "
+                     "characters, this token is ")
+        write_dec_u64(2, toklen)
+        write_str(2, ". NOT falling back to the built-in trust root.\n")
+        return -1
+    i: uint64 = 0
+    while i < 32:
+        trusted_pub[i] = tkey_scratch[i]
+        i = i + 1
+    trusted_pub_set = 1
     return 1
 
 
-# Load a --trusted-key=<path> file from disk into the trust root.
+# Load a --trusted-key=<path> file from disk into the trust root. STREAMING:
+# TKEY_CHUNK bytes at a time, parsed one line at a time, so the file's SIZE
+# is not a parameter of whether its key is found. See the block comment at
+# TKEY_CHUNK for why that is the shape and not a larger buffer.
 def _set_trusted_key_path(path: Ptr[uint8]) -> int32:
     fd: int32 = sys_open(cast[Ptr[char]](path))
     if fd < 0:
-        write_str(2, "hpm: cannot open trusted-key file: ")
-        write_str(2, path)
-        write_str(2, "\n")
+        _tkey_head(path)
+        write_str(2, "cannot open it. NOT falling back to the built-in trust "
+                     "root -- the key you asked for is the key that must be "
+                     "used.\n")
         return 1
-    total: uint64 = 0
-    while total < 512:
-        r: int64 = sys_read(fd, &tkey_file_buf[total], 512 - total)
+    total: uint64 = 0                  # bytes read
+    lines: uint64 = 0                  # lines seen
+    long_lines: uint64 = 0             # lines past TKEY_LINE_MAX
+    state: int32 = 0                   # 0 = still looking, 1 = found, -1 = bad
+    ll:   uint64 = 0                   # bytes buffered for this line
+    over: int32  = 0                   # this line overran TKEY_LINE_MAX
+    while 1 == 1:
+        r: int64 = sys_read(fd, &tkey_chunk[0], TKEY_CHUNK)
         if r < 0:
             sys_close(fd)
+            _tkey_head(path)
+            write_str(2, "read failed after ")
+            write_dec_u64(2, total)
+            write_str(2, " byte(s). NOT falling back to the built-in trust "
+                         "root.\n")
             return 1
         if r == 0:
             break
         total = total + cast[uint64](r)
+        got: uint64 = cast[uint64](r)
+        k: uint64 = 0
+        while k < got:
+            c: uint8 = tkey_chunk[k]
+            k = k + 1
+            if c == 10:
+                lines = lines + 1
+                if over != 0:
+                    # A TRUNCATED line is never parsed. Half of a token is not
+                    # a token, and acting on one is how a cut line comes to
+                    # mean something the file does not say.
+                    long_lines = long_lines + 1
+                elif state == 0:
+                    state = _tkey_parse_line(path, ll, lines)
+                ll = 0
+                over = 0
+            elif ll < TKEY_LINE_MAX:
+                tkey_line[ll] = c
+                ll = ll + 1
+            else:
+                over = 1
     sys_close(fd)
-    if _set_trusted_key_from_buf(&tkey_file_buf[0], total) != 0:
-        write_str(2, "hpm: malformed trusted-key file (want 64 hex chars)\n")
+    if ll > 0 or over != 0:                 # a last line with no trailing \n
+        lines = lines + 1
+        if over != 0:
+            long_lines = long_lines + 1
+        elif state == 0:
+            state = _tkey_parse_line(path, ll, lines)
+    if long_lines > 0:
+        _tkey_head(path)
+        write_dec_u64(2, long_lines)
+        write_str(2, " line(s) are longer than the 512-byte line limit and "
+                     "were NOT parsed -- a key on one of them was not read.\n")
+    if state < 0:
+        return 1                            # already named, with its line
+    if state == 0:
+        _tkey_head(path)
+        write_str(2, "no key in it -- read ")
+        write_dec_u64(2, total)
+        write_str(2, " byte(s) over ")
+        write_dec_u64(2, lines)
+        write_str(2, " line(s) to end of file and found no bare 64-hex token. "
+                     "NOT falling back to the built-in trust root.\n")
         return 1
     user_trusted_key_set = 1
+    # Say which root is in force. An override of the thing that authenticates
+    # every package is not something to perform silently, and a rotation that
+    # WORKED should be as visible as one that did not.
+    write_str(1, "hpm: trust root taken from ")
+    write_str(1, path)
+    write_str(1, " (")
+    write_dec_u64(1, total)
+    write_str(1, " bytes, ")
+    write_dec_u64(1, lines)
+    write_str(1, " lines)\n")
     return 0
 
 
@@ -8692,8 +8810,13 @@ Flags:\n\
 \n\
 Security: `refresh`/`update` verify a detached Ed25519 signature\n\
 (index.json.sig) over each channel's index.json against the trust root\n\
-(built-in, or --trusted-key / /etc/hpm/trusted.pub) before trusting any\n\
-package hash. A bad or missing signature aborts unless --allow-unsigned.\n"
+before trusting any package hash. The trust root is COMPILED IN (so it\n\
+cannot be swapped by editing a file on disk); /etc/hpm/trusted.pub holds\n\
+the same 32 bytes for inspection and is NOT read automatically -- pass it\n\
+to --trusted-key to use a file. --trusted-key is also how the root is\n\
+ROTATED; a key file it cannot use is named on stderr and hpm stops, never\n\
+falling back to the built-in root.\n\
+A bad or missing signature aborts unless --allow-unsigned.\n"
     write_str(2, s)
     return 2
 
