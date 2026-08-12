@@ -189,7 +189,9 @@ mkdir -p "$TMPDIR"
 
 WAIT1="${1:-900}"
 WAIT2="${2:-1500}"
-WAIT3="${3:-480}"
+# Boot 3 carries STAGE D and then a SECOND live update plus STAGE E, so its
+# ceiling is no longer the 480s that covered D alone.
+WAIT3="${3:-900}"
 PKG=hamnix-desktop
 BIN=/bin/wsysd
 CHANNEL_URL="${HAMLINUX_WV_URL:-https://255.one/linux/index.json}"
@@ -323,6 +325,133 @@ sleep 1
 curl -fsS "http://127.0.0.1:$PORT/linux/index.json" >/dev/null || {
     echo "FAIL: the local channel is not being served" >&2; exit 1; }
 say "this tree's channel is served at $BASE (pid $HTTPD)"
+
+# =========================================================================
+# 2b. A SECOND CHANNEL, ONE WINDOW-SYSTEM VERSION FURTHER ON — and the
+#     arithmetic that forces it to exist.
+# =========================================================================
+# STAGE E asks what a PERSON SEES when a program is refused.  Stages A-D
+# already proved the refusal is correct and safe; the open finding they left
+# is that a correct refusal and a dead button are the same picture.
+#
+# The notice is drawn by the PANEL, because the panel is one of the two
+# processes that survive an update still holding the screen (see THE "RESTART
+# BEFORE OPENING APPS" NOTICE in user/hampanelscene.ad).  And that is exactly
+# why it cannot be measured at $LIVEVER -> $NEWVER: the panel that survives
+# THAT update is the PUBLISHED one, built before this code existed.  No change
+# made in this tree can put a notice on a screen owned by a binary that
+# shipped last month.  It is arithmetic, not an omission, and it is true of
+# every mechanism that could have been chosen here -- an exit-status watcher,
+# a stderr reader, a compositor-side check -- because all of them run in the
+# survivor.
+#
+# So the notice becomes measurable one bump later, and STAGE E IS THAT BUMP:
+# a second channel at $NEXTVER whose ONLY difference from $NEWVER is
+# WSYS_VERSION, built from a symlink farm over this tree (the pattern is
+# tests/linux/build_obj_cache.sh's mktree, and it is safe against the shared
+# object cache because rt_obj's cache key is the hash of the SOURCE).  Boot 3
+# comes up on $NEWVER -- this tree, notice code and all -- and then updates to
+# $NEXTVER, so BOTH sides of the update are this tree and the survivor is a
+# panel that knows what a refusal marker is.
+#
+# It is a separate repo root served on a separate port precisely so it cannot
+# reach stages A-D: boot 2's `hpm update` must still land on $NEWVER and see
+# exactly the 7 -> 8 world those witnesses were taken in.
+NEXTWSYS=$((NEWWSYS + 1))
+NEXTVER="$(NEWVER="$NEWVER" python3 <<'PY'
+import os
+a, b, c = (int(x) for x in os.environ["NEWVER"].split("."))
+print("%d.%d.%d" % (a, b, c + 1))
+PY
+)"
+REPO2="${HAMLINUX_WV_REPO2:-$WORK/repo-v$NEXTWSYS}"
+TREE9="$WORK/tree-v$NEXTWSYS"
+NEXT_TAR="$REPO2/linux/packages/$PKG-$NEXTVER.tar.gz"
+STAGE_E=0
+STAGE_E_WHY=""
+
+# mktree <dir> <wsys-version> -- a symlink farm over $PROJ_ROOT whose only
+# real file is user/linux-wsys.c, with WSYS_VERSION set to <wsys-version>.
+# Lifted verbatim from tests/linux/build_obj_cache.sh so the two gates cannot
+# drift apart about what "the same tree at a different version" means.
+mktree() {
+    local dir="$1" ver="$2" e
+    mkdir -p "$dir/user"
+    for e in "$PROJ_ROOT"/* "$PROJ_ROOT"/.[!.]*; do
+        [ -e "$e" ] || continue
+        case "${e##*/}" in user) continue ;; esac
+        ln -sfn "$e" "$dir/${e##*/}"
+    done
+    for e in "$PROJ_ROOT"/user/*; do
+        ln -sfn "$e" "$dir/user/${e##*/}"
+    done
+    rm -f "$dir/user/linux-wsys.c"
+    sed "s/^\(#define[[:space:]]\+WSYS_VERSION[[:space:]]\+\)[0-9]\+/\1$ver/" \
+        "$PROJ_ROOT/user/linux-wsys.c" > "$dir/user/linux-wsys.c"
+    grep -q "^#define[[:space:]]\+WSYS_VERSION[[:space:]]\+$ver\$" "$dir/user/linux-wsys.c"
+}
+
+prepare_v9() {
+    if [ -f "$NEXT_TAR" ] && [ "${HAMLINUX_WV_REUSE:-0}" = 1 ]; then
+        say "reusing $NEXT_TAR (HAMLINUX_WV_REUSE=1)"
+    else
+        say "staging a v$NEXTWSYS tree and building $PKG $NEXTVER (this takes a few minutes)"
+        rm -rf "$TREE9"
+        mktree "$TREE9" "$NEXTWSYS" || {
+            STAGE_E_WHY="could not stage a v$NEXTWSYS symlink farm"; return 1; }
+        rm -rf "$REPO2"; mkdir -p "$REPO2"
+        ( cd "$TREE9" && nice -n 15 python3 scripts/hamlinux_packages.py \
+            --out "$REPO2" --version "$NEXTVER" --channel linux \
+            --base-url "http://10.0.2.2:9999/" ) >"$WORK/build-v$NEXTWSYS.log" 2>&1 || {
+            STAGE_E_WHY="the v$NEXTWSYS channel did not build (see $WORK/build-v$NEXTWSYS.log)"
+            return 1; }
+    fi
+    [ -f "$NEXT_TAR" ] || { STAGE_E_WHY="no $NEXT_TAR after the build"; return 1; }
+    # THE BUILD ACTUALLY DIFFERS, read off the bytes rather than assumed. If
+    # the farm had silently compiled $PROJ_ROOT's linux-wsys.c the two wsysd
+    # binaries would be identical and stage E would be measuring a version
+    # bump that never happened -- the exact shape of trap this gate exists to
+    # avoid.
+    rm -rf "$WORK/nextunpack"; mkdir -p "$WORK/nextunpack"
+    tar xzf "$NEXT_TAR" -C "$WORK/nextunpack" || {
+        STAGE_E_WHY="the v$NEXTWSYS tarball did not unpack"; return 1; }
+    NEXT_MD5="$(md5sum "$WORK/nextunpack/$PKG-$NEXTVER/files$BIN" | cut -d' ' -f1)"
+    [ "$NEXT_MD5" != "$NEW_MD5" ] || {
+        STAGE_E_WHY="the v$NEXTWSYS $BIN is byte-identical to the v$NEWWSYS one"
+        return 1; }
+    PORT2="$(python3 - <<'PY'
+import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
+PY
+)"
+    BASE2="http://10.0.2.2:$PORT2/"
+    python3 - "$REPO2/linux/index.json" "$BASE2" <<'PY' || {
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["url"] = sys.argv[2]
+with open(sys.argv[1], "w") as fh:
+    json.dump(d, fh, indent=2); fh.write("\n")
+PY
+        STAGE_E_WHY="could not re-point the v$NEXTWSYS index"; return 1; }
+    # The SAME key as the $NEWVER channel, so the disk carries one pubkey.
+    python3 scripts/hpm_sign.py sign "$REPO2/linux/index.json" "$WORK/wv.sec" \
+        "$REPO2/linux/index.json.sig" || {
+        STAGE_E_WHY="could not sign the v$NEXTWSYS index"; return 1; }
+    python3 -m http.server "$PORT2" --bind 127.0.0.1 --directory "$REPO2" \
+        >"$WORK/http-v$NEXTWSYS.log" 2>&1 &
+    HTTPD2=$!; reap_add "$HTTPD2"
+    sleep 1
+    curl -fsS "http://127.0.0.1:$PORT2/linux/index.json" >/dev/null || {
+        STAGE_E_WHY="the v$NEXTWSYS channel is not being served"; return 1; }
+    say "the v$NEXTWSYS channel ($PKG $NEXTVER, $BIN md5 $NEXT_MD5) is served at $BASE2 (pid $HTTPD2)"
+    return 0
+}
+
+if prepare_v9; then
+    STAGE_E=1
+else
+    say "STAGE E will NOT run: $STAGE_E_WHY"
+fi
 
 cleanup() { rm -f "$QMP"; }
 reap_on_exit cleanup
@@ -548,6 +677,45 @@ echo '[wv] MARK-D'
 sleep 60
 RC
 _probe D /bin/cat
+# ---- STAGE E: the same desktop, updated AGAIN, and what the person sees ----
+# Everything above D is untouched. This appends a SECOND live update to the
+# session boot 3 just proved healthy -- v$NEWWSYS -> v$NEXTWSYS -- so that
+# this time the panel holding the screen is one that carries the notice code.
+# The click on Applications then spawns a v$NEXTWSYS hamappmenu into a live
+# v$NEWWSYS segment: refused, exactly as at stage C, and the question is
+# whether the SCREEN says so.
+#
+# /probe-cat8 is stashed BEFORE the update for the same reason /probe-cat was
+# at phase 1: after it, /bin/cat is v$NEXTWSYS and reading /dev/wsys with it
+# would be refused too. Stashing it is also the cheapest possible witness that
+# the update really landed.
+if [ "$STAGE_E" = 1 ]; then
+cat <<RC
+echo '[wv] p3 stashing the v$NEWWSYS cat as /probe-cat8 before the second update'
+cp /bin/cat /probe-cat8
+echo '[wv] p3 updating again, to $NEXTVER (wsys v$NEXTWSYS)'
+hpm --repo='$BASE2' --trusted-key='/etc/hpm/wv-trusted.pub' refresh
+hpm --repo='$BASE2' --trusted-key='/etc/hpm/wv-trusted.pub' update
+echo '[wv] p3 list after the second update:'
+hpm list
+echo '[wv] p3 md5 of $BIN after the second update:'
+md5sum $BIN
+echo '[wv] p3 the refusal marker before any click:'
+ls -l /srv
+sleep 4
+echo '[wv] MARK-E'
+sleep 75
+echo '[wv] REFUSE-E:'
+/bin/cat '/dev/wsys/windows'
+echo '[wv] p3 refuse status:' \$status
+echo '[wv] REFUSE-END-E'
+echo '[wv] MARKER-E:'
+ls -l /srv
+/probe-cat8 '/srv/wsys.refused'
+echo '[wv] MARKER-END-E'
+RC
+_probe E /probe-cat8
+fi
 cat <<'RC'
 date
 echo '[wv] PHASE3 DONE'
@@ -600,6 +768,48 @@ stage_hand() {   # stage_hand <tag>
     shot "$t-5-typed"
 }
 
+# THE NOTICE RECTANGLE, in screen pixels, and where the numbers come from.
+# user/hampanelscene.ad puts the card at window-local (8, bar + cur_thick)
+# with NOTICE_W x NOTICE_H = 340 x 86; the top panel's window origin is (0,0)
+# and its bar is PANEL_H = 26 tall with bar = 0, so on screen that is
+# (8, 26, 340, 86). NOTICE_IN_* is the same box inset past the 2px border and
+# the 8px corner radius, so a rounded corner's antialiasing cannot dilute the
+# flat-fill measurement.
+NOTICE_X=8;  NOTICE_Y=26;  NOTICE_W=340; NOTICE_H=86
+NOTICE_IN_X=14; NOTICE_IN_Y=32; NOTICE_IN_W=328; NOTICE_IN_H=74
+NOTICE_FACE=ffe9b0                    # the card's inset face colour
+NOTICE_CX=$((NOTICE_X + NOTICE_W / 2))
+NOTICE_CY=$((NOTICE_Y + NOTICE_H / 2))
+
+# THE HAND FOR STAGE E, which asks three different questions from A-D's and so
+# does NOT reuse stage_hand:
+#   1,2  the noise floor, and the screen with no notice on it yet
+#   3    click Applications -> the spawn is refused -> is there a notice?
+#   4    click somewhere FAR from the notice -> is it still there (i.e. it is
+#        not a one-frame flash) and is the desktop still taking clicks?
+#   5    click the notice itself -> is it gone?
+#   6    type -> does the keyboard still reach the terminal, i.e. dismissing
+#        the notice did not wedge the session
+notice_hand() {   # notice_hand <tag>
+    local t="$1"
+    sleep 3
+    shot "$t-1-idle"
+    sleep 3
+    shot "$t-2-idle"
+    Q click "$APPBTN_X" "$APPBTN_Y" "$SCREEN_W" "$SCREEN_H"
+    sleep 4
+    shot "$t-3-menu"
+    Q click "$NEUTRAL_X" "$NEUTRAL_Y" "$SCREEN_W" "$SCREEN_H"
+    sleep 3
+    shot "$t-4-elsewhere"
+    Q click "$NOTICE_CX" "$NOTICE_CY" "$SCREEN_W" "$SCREEN_H"
+    sleep 3
+    shot "$t-5-dismissed"
+    Q type "wsysprobe"
+    sleep 3
+    shot "$t-6-typed"
+}
+
 waitmark() {   # waitmark <log> <marker> <deadline-seconds>
     local i=0
     while [ "$i" -lt "$(( $3 * 2 ))" ]; do
@@ -622,7 +832,7 @@ boot() {   # boot <logfile> <seconds> <marker>...
     for m in "$@"; do
         if waitmark "$log" "MARK-$m" "$secs"; then
             say "  stage $m: the guest is ready; taking the screen and the mouse"
-            stage_hand "$m"
+            if [ "$m" = E ]; then notice_hand "$m"; else stage_hand "$m"; fi
         else
             say "  stage $m: the marker never came"
         fi
@@ -635,8 +845,13 @@ say "boot 1 of 3: install the published system (up to ${WAIT1}s)"
 boot "$WORK/boot1.log" "$WAIT1"
 say "boot 2 of 3: the live update, in three stages (up to ${WAIT2}s)"
 boot "$WORK/boot2.log" "$WAIT2" A B C
-say "boot 3 of 3: is the machine healthy after a reboot (up to ${WAIT3}s)"
-boot "$WORK/boot3.log" "$WAIT3" D
+if [ "$STAGE_E" = 1 ]; then
+    say "boot 3 of 3: healthy after a reboot, then updated AGAIN to v$NEXTWSYS (up to ${WAIT3}s)"
+    boot "$WORK/boot3.log" "$WAIT3" D E
+else
+    say "boot 3 of 3: is the machine healthy after a reboot (up to ${WAIT3}s)"
+    boot "$WORK/boot3.log" "$WAIT3" D
+fi
 
 # =========================================================================
 # 6. What happened.
@@ -1002,6 +1217,129 @@ else
     fail=1
 fi
 check "phase 3 reached the end" '\[wv\] PHASE3 DONE' "$WORK/boot3.log"
+
+# =========================================================================
+# 9. STAGE E — DOES THE PERSON AT THE SCREEN GET TOLD?
+# =========================================================================
+# The finding this stage closes: at 7 -> 8 the refusal was correct, safe and
+# INVISIBLE. Applications was clicked, the panel logged the click, hamappmenu
+# refused by name -- on stderr, which is the serial console -- and the screen
+# did not change. "I clicked and nothing happened" is what a correct refusal
+# looked like.
+#
+# The witness is PIXELS, not a log line, because a log line is exactly what
+# the machine already had and exactly what nobody saw. And it is a pixel
+# measurement that cannot answer success-shaped by accident:
+#
+#   * it counts ONE EXACT COLOUR (#$NOTICE_FACE, the notice card's face) inside
+#     ONE FIXED RECTANGLE, so a menu, a window, a toast or a wallpaper cannot
+#     satisfy it -- nothing else on this desktop is that colour;
+#   * it is asked FOUR TIMES of the same rectangle in one session and has to
+#     come back EMPTY, FULL, FULL, EMPTY. A single "it changed" could be a
+#     repaint; absent -> present -> still present -> absent could not;
+#   * the EMPTY reads are the instrument check. If the colour string or the
+#     rectangle were wrong every read would be 0 and this block would FAIL,
+#     not pass. There is no way for a broken measurement here to score.
+#
+# Deliberately NOT used as the witness: the size of anything. At this bump
+# struct wshm is byte-identical in both directions, and a size assertion would
+# answer PASS while measuring nothing -- the trap this gate has already been
+# caught by once.
+echo
+if [ "$STAGE_E" != 1 ]; then
+    echo "wv: FINDING STAGE E WAS NOT MEASURED AT ALL: $STAGE_E_WHY. Nothing below was asked, and no PASS in this run says anything about what a person sees after an update."
+else
+facepct() {   # facepct <shot-basename> -- % of the notice rect that is the card
+    local f="$SHOT/$1.ppm"
+    [ -f "$f" ] || { echo ""; return; }
+    pp pct "$f" "$NOTICE_FACE" "$NOTICE_IN_X" "$NOTICE_IN_Y" \
+        "$NOTICE_IN_W" "$NOTICE_IN_H" | grep -aE '^[0-9]+$' | head -1
+}
+FD3="$(facepct D-3-menu)"      # same rect, same session, before v$NEXTWSYS existed
+FE2="$(facepct E-2-idle)"      # after the update, before the click
+FE3="$(facepct E-3-menu)"      # after clicking Applications
+FE4="$(facepct E-4-elsewhere)" # after clicking far away from the notice
+FE5="$(facepct E-5-dismissed)" # after clicking the notice itself
+echo "wv: NOTE the notice rectangle (${NOTICE_IN_W}x${NOTICE_IN_H}+${NOTICE_IN_X}+${NOTICE_IN_Y}) is #$NOTICE_FACE at: D-3-menu ${FD3:-?}%, E-2-idle ${FE2:-?}%, E-3-menu ${FE3:-?}%, E-4-elsewhere ${FE4:-?}%, E-5-dismissed ${FE5:-?}%"
+for v in "$FD3" "$FE2" "$FE3" "$FE4" "$FE5"; do
+    [ -n "$v" ] || { echo "wv: FAIL STAGE E could not measure the notice rectangle at all -- a screendump is missing, so every judgement below would be about an absent picture rather than an empty one"; fail=1; break; }
+done
+if [ -n "$FD3" ] && [ "$FD3" -le 1 ]; then
+    echo "wv: PASS THE INSTRUMENT READS EMPTY WHEN NOTHING WAS REFUSED: at STAGE D -- same session, same rectangle, one click on Applications, no v$NEXTWSYS package on the machine yet -- the notice colour covers ${FD3}% of it"
+elif [ -n "$FD3" ]; then
+    echo "wv: FAIL a notice was already on the screen at STAGE D (${FD3}%), where nothing had been refused. A notice that appears when nothing was refused is worse than no notice."
+    fail=1
+fi
+if [ -n "$FE3" ] && [ -n "$FD3" ] && [ "$FE3" -ge 40 ] && [ "$FE3" -gt "$FD3" ]; then
+    echo "wv: PASS THE PERSON IS TOLD: after the update to v$NEXTWSYS, one real click on the Applications button put a notice on the screen -- the notice colour goes ${FD3}% -> ${FE3}% of the same rectangle. The click no longer does nothing."
+elif [ -n "$FE3" ]; then
+    echo "wv: FAIL after the update the click on Applications still left the screen unchanged: the notice rectangle is ${FE3}% #$NOTICE_FACE. This is the original finding, unfixed."
+    fail=1
+fi
+if [ -n "$FE4" ] && [ "$FE4" -ge 40 ]; then
+    echo "wv: PASS THE NOTICE STAYS UP: a click at ($NEUTRAL_X,$NEUTRAL_Y), far from it, left it at ${FE4}% -- it is a notice a person can read, not a one-frame flash tied to the button"
+elif [ -n "$FE4" ]; then
+    echo "wv: FAIL the notice vanished on a click somewhere else (${FE4}%): a person who looks away has lost the only thing that told them what to do"
+    fail=1
+fi
+if [ -n "$FE5" ] && [ "$FE5" -le 1 ]; then
+    echo "wv: PASS THE NOTICE IS DISMISSIBLE: a click on the card itself took it back to ${FE5}% -- it is not something the person is stuck with"
+elif [ -n "$FE5" ]; then
+    echo "wv: FAIL the notice would not go away when clicked (${FE5}%): it is now the thing covering the desktop"
+    fail=1
+fi
+# NOT WEDGED. Dismissing the notice must leave a working session behind, and
+# "working" is asked of the keyboard, which the notice never touched: typing
+# into the terminal that has focus has to change the screen.
+EN="$(ppn "$SHOT/E-1-idle.ppm" "$SHOT/E-2-idle.ppm")"
+ET="$(ppn "$SHOT/E-5-dismissed.ppm" "$SHOT/E-6-typed.ppm")"
+if [ -n "$EN" ] && [ -n "$ET" ] && [ "$ET" -gt $((EN + 500)) ]; then
+    echo "wv: PASS THE DESKTOP IS NOT WEDGED: after the notice was dismissed, typing still reached the focused terminal ($ET px changed against a $EN px noise floor)"
+else
+    echo "wv: FAIL after dismissing the notice the keyboard changed ${ET:-?} px against a ${EN:-?} px noise floor -- the session did not survive its own notice"
+    fail=1
+fi
+# THE REFUSAL ITSELF MUST NOT HAVE MOVED. The notice is cosmetic on top of the
+# safety property; if adding it weakened the refusal the gate must say so here
+# and not be satisfied by a pretty card.
+REFE="$(sed -n '/\[wv\] REFUSE-E:/,/\[wv\] REFUSE-END-E/p' "$WORK/boot3.log" | tr -d '\r')"
+if printf '%s\n' "$REFE" | grep -aq 'REFUSING to attach'; then
+    echo "wv: PASS THE REFUSAL IS INTACT at v$NEWWSYS -> v$NEXTWSYS: a v$NEXTWSYS binary meeting the live v$NEWWSYS session still refused by name"
+    printf '%s\n' "$REFE" | grep -a '^wsys:' | head -3 | sed 's/^/        /'
+else
+    echo "wv: FAIL a v$NEXTWSYS binary did NOT refuse the live v$NEWWSYS session. The notice must never be bought with the refusal."
+    fail=1
+fi
+ESEG="$(segsize "$WORK/boot3.log" E)"
+if [ "$ESEG" = "$SEG_BYTES" ]; then
+    echo "wv: PASS the running session's segment is untouched across the second update and the notice ($ESEG bytes)"
+else
+    echo "wv: FAIL /srv/wsys is ${ESEG:-?} bytes at STAGE E, wanted $SEG_BYTES: something resized the live segment"
+    fail=1
+fi
+# WHAT THE MARKER ACTUALLY SAYS. The pixels above are the answer to the
+# question; this is the one line of corroboration that the pixels came from a
+# REAL refusal and not from some other path into the same drawing code -- the
+# marker names the two versions, and they are read from the source, never
+# typed here.
+MK="$(sed -n '/\[wv\] MARKER-E:/,/\[wv\] MARKER-END-E/p' "$WORK/boot3.log" | tr -d '\r')"
+if printf '%s\n' "$MK" | grep -aq "refused live=$NEWWSYS mine=$NEXTWSYS"; then
+    echo "wv: PASS THE NOTICE CAME FROM A REAL REFUSAL: /srv/wsys.refused names the pair the refusal was about -- live=$NEWWSYS, mine=$NEXTWSYS"
+else
+    echo "wv: FAIL /srv/wsys.refused does not carry 'refused live=$NEWWSYS mine=$NEXTWSYS'; whatever drew the card, it was not this."
+    printf '%s\n' "$MK" | sed 's/^/        /' | head -8
+    fail=1
+fi
+EWIN="$(wins "$WORK/boot3.log" E)"; DWIN="$(wins "$WORK/boot3.log" D)"
+if [ -n "$EWIN" ] && [ "$EWIN" = "$DWIN" ]; then
+    echo "wv: PASS the window table is the same before and after the second update and the notice: $EWIN"
+else
+    echo "wv: NOTE the window table moved between STAGE D and STAGE E -- D: ${DWIN:-(none)} / E: ${EWIN:-(none)}"
+fi
+pp png "$SHOT/E-3-menu.ppm" "$SHOT/E-3-menu.png" >/dev/null 2>&1
+pp png "$SHOT/E-5-dismissed.ppm" "$SHOT/E-5-dismissed.png" >/dev/null 2>&1
+echo "wv: NOTE the notice as a person sees it: $SHOT/E-3-menu.png (and dismissed: $SHOT/E-5-dismissed.png)"
+fi
 
 echo
 echo "(logs: $WORK/boot{1,2,3}.log; screendumps + PNGs: $SHOT)"

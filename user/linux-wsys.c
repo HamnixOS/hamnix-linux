@@ -1523,12 +1523,78 @@ static int shm_seg_is_live(int fd, off_t size)
     return 0;
 }
 
+/* THE REFUSAL MARKER — how a person at the SCREEN gets told.
+ * ---------------------------------------------------------
+ * stderr is the serial console.  A person sitting in front of the desktop
+ * never sees it, and the measured consequence (installed_update_wsysver.sh,
+ * 7 -> 8, STAGE C) is that they click Applications, the panel logs the click,
+ * the spawned program refuses correctly and dies, and NOTHING ON SCREEN SAYS
+ * WHY.  A correct, safe refusal is indistinguishable from a broken button.
+ *
+ * The program that was refused cannot draw -- that is what being refused
+ * means.  So it leaves a mark, and a process that DID attach before the
+ * update (the panel) reads the mark and draws.  This is the single writer:
+ *
+ *   * It is inside seg_refuse_message, past the once-per-process guard, so
+ *     the mark and the words have EXACTLY one condition between them.  There
+ *     is no second caller and no other code in the tree that opens this path;
+ *     a mark exists if and only if a real version refusal happened.  A notice
+ *     that appears when nothing was refused would be worse than no notice, so
+ *     the marker is deliberately not a general-purpose "something failed"
+ *     channel -- $HOME/.hamde/appmenu.fault already is one, and it cannot
+ *     tell a version refusal from a crash.
+ *   * The path is DERIVED from the segment that refused (seg_path +
+ *     ".refused"), the same way chrome_path is derived, so a harness pointed
+ *     at another segment by $HAMWSYS marks that one and cannot leak a notice
+ *     into somebody else's desktop.
+ *   * It APPENDS.  The reader's serial is the file's size, which only ever
+ *     grows, so "has there been a refusal I have not shown" is one fstat and
+ *     an acknowledged byte offset -- the same shape as the DE launch queues.
+ *     One short line per refusing process (the guard above bounds it).
+ *   * It lives in /srv, which linuxinit mounts as tmpfs and which is made
+ *     fresh every boot.  The notice's advice is REBOOT, so the evidence for
+ *     the notice must not survive the reboot that fixes it.  It cannot: the
+ *     file is gone before the panel that would read it has started.
+ *   * O_CREAT comes SECOND, for the fs.protected_regular reason written out
+ *     at length in shm_attach: /srv is 1777 and the marker may already belong
+ *     to another uid.  Opening the existing file first means a client that
+ *     cannot create it still gets to append to it.
+ *   * It is entirely best-effort and errno-neutral.  The refusal is the
+ *     safety property; the notice is cosmetic on top of it, and nothing about
+ *     failing to write this file may change what the caller does. */
+static void seg_refuse_mark(const char *path, uint32_t theirs)
+{
+    int saved = errno;
+    char mpath[600];
+    char line[256];
+    if (!path || !*path) goto out;
+    if (snprintf(mpath, sizeof mpath, "%s.refused", path) >= (int)sizeof mpath)
+        goto out;
+    int fd = open(mpath, O_WRONLY | O_APPEND);
+    if (fd < 0)
+        fd = open(mpath, O_WRONLY | O_APPEND | O_CREAT, 0666);
+    if (fd < 0) goto out;
+    if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
+    int n = snprintf(line, sizeof line, "refused live=%u mine=%u pid=%ld\n",
+                     (unsigned)theirs, (unsigned)WSYS_VERSION, (long)getpid());
+    if (n > 0 && n < (int)sizeof line) {
+        ssize_t w = write(fd, line, (size_t)n);
+        (void)w;
+    }
+    close(fd);
+out:
+    errno = saved;
+}
+
 /* SAY IT, ONCE, BY NAME, ON STDERR.  A program that silently fails to draw is
  * the failure shape this tree keeps paying for, so the refusal is never left
  * to the caller's errno handling -- EPROTO out of an open(2) of a file under
  * /dev/wsys is not a sentence anybody can act on.  Once per process: a client
  * that retries the attach in a loop must not turn the explanation into a
- * scroll. */
+ * scroll.
+ *
+ * ...and once on the SCREEN, via seg_refuse_mark above, because stderr here is
+ * the serial console and the person is not reading it. */
 static void seg_refuse_message(const char *path, uint32_t theirs)
 {
     static int said;
@@ -1542,6 +1608,7 @@ static void seg_refuse_message(const char *path, uint32_t theirs)
         "wsys:   REBOOT (or restart the session) and start this program again.\n",
         path && *path ? path : "the window system segment",
         (unsigned)theirs, (unsigned)WSYS_VERSION);
+    seg_refuse_mark(path, theirs);
 }
 
 static int shm_attach(void)
