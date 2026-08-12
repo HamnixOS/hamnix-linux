@@ -106,7 +106,31 @@ echo "[disk] root filesystem: $(du -h "$ROOTFS" | cut -f1)"
 # One PE binary carrying the kernel, its command line and the initramfs. The
 # stub is the kernel's own EFI entry point, so no bootloader is installed.
 CMDLINE="$STAGE/cmdline.txt"
-printf 'console=tty0 console=ttyS0,115200 root=/dev/vda2 rw panic=-1 loglevel=4' > "$CMDLINE"
+# THE COMMAND LINE IS NOT UNIVERSAL, AND SAYING SO IS THE POINT.
+#
+# `root=/dev/vda2` names the VIRTIO disk. That device exists in QEMU and on no
+# physical machine on earth: a USB stick is /dev/sda, an NVMe root is
+# /dev/nvme0n1p2. This image was booted on a real laptop and got as far as the
+# EFI stub and then a blinking cursor, and the comment in user/linuxinit.ad
+# beside the root switch said "the device comes from the kernel's own command
+# line, so one image boots any machine" -- true of the MECHANISM, false of the
+# STRING this script bakes into it, which is exactly the shape of untrue
+# sentence this tree keeps getting caught by.
+#
+# `console=tty0` also assumes a framebuffer console comes up. On the laptop it
+# did not, so init's own first line never appeared and a boot that may have got
+# quite far was indistinguishable from one that died in the stub. Nothing here
+# printed before fbcon, so there was nothing to read.
+#
+# HAMLINUX_CMDLINE overrides the whole string, which is how a diagnostic image
+# gets built without editing this file. The default keeps the VM's root because
+# `scripts/hamlinux_vm.sh disk` is what runs constantly; real-hardware media
+# should pass its own, and the honest fix -- teaching the root switch to resolve
+# PARTUUID= so one image really does boot any machine -- is its own piece of
+# work, named in HANDOFF.md rather than hidden behind this default.
+DEFAULT_CMDLINE='console=tty0 console=ttyS0,115200 root=/dev/vda2 rw panic=-1 loglevel=4'
+printf '%s' "${HAMLINUX_CMDLINE:-$DEFAULT_CMDLINE}" > "$CMDLINE"
+echo "[disk] cmdline: $(cat "$CMDLINE")"
 STUB=/usr/lib/systemd/boot/efi/linuxx64.efi.stub
 UKI="$STAGE/BOOTX64.EFI"
 if [ -f "$STUB" ]; then
