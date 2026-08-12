@@ -800,6 +800,35 @@ test. The name is already set on the wsys window and already correct; what is
 missing is a glyph run in `paint_window`'s decoration, next to the close box
 this pass did add.
 
+### The two real clients, re-run
+
+Neither had been run against this path since stage one, and everything in
+this pass touches the device and the compositor that both of them go through:
+`WSYS_VERSION` went to 5, the backbuffer segment was re-laid-out, `wsysd`'s
+window table doubled twice, and `lib/vk/vk_2d.ad`'s source-over now composes
+the alpha channel. So both were run, and both render.
+
+**Firefox**, the native Wayland client, offscreen against `wsyswl`:
+`docs/screenshots/linux/rootless-stage2-firefox-wayland.png` — full chrome,
+tab strip, address bar, content, in a decorated Hamnix window with a close
+button on it. 1550 backbuffer generations, every drop counter 0.
+
+It also produced the number in "what is still not built" below: **`conns 8`,
+`conns_high_water 8`**. Firefox alone is `MAXCONN`.
+
+**Steam**, in the Debian namespace, in the VM:
+`docs/screenshots/linux/rootless-stage2-steam-login.png` — "Sign in to Steam"
+with the logo, both fields, the button, the QR code and the links, on the
+desktop with the panel above it and the taskbar below.
+`xwininfo` says `700x440+290+180`, `IsViewable`. Rootful, which is the arm
+Steam uses and which this pass leaves alone by construction.
+
+That run used `tests/linux/steam_gui_ro.sh`, which is `steam_gui_run.sh`'s
+measurement **without writing to the shared namespace image**: no `debugfs`,
+`HAMLINUX_DISTRO_RO=1`, and the session scripts appended to the initramfs as a
+second cpio segment. `build/` is not isolated by a git worktree, and two
+agents planting into `distro.ext4` at once destroy each other's runs silently.
+
 ### What is still not built
 
 * **Resize by dragging an edge.** `wsysd` has a close button now and no move
