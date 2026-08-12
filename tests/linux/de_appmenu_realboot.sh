@@ -169,10 +169,20 @@ echo '[ar] PROBE-END-$1'
 W
 }
 
-# The three moments the host's hand pauses at. The guest sleeps a fixed time
+# The four moments the host's hand pauses at. The guest sleeps a fixed time
 # after each marker (long enough for the hand) and then reads the table WITH
 # THE MENU STILL OPEN; the host waits for PROBE-END before it moves on, so the
 # two stay in step in both directions.
+#
+# THE FAVOURITES FILE IS LOOKED FOR IN BOTH PLACES, and that is not hedging.
+# lib/homedir.ad resolves $HOME as /env/HOME, then /etc/passwd BY UID, then
+# /home/live. The DE on this line is started by /etc/rc.d/rc.5 as PID 1's
+# uid -- 0 -- and /etc/passwd says in as many words that "uid 0 doesn't exist
+# in Hamnix", so the passwd lookup misses and every DE client's home is
+# /home/live: the LIVE IMAGE's user, a directory an installed disk does not
+# have. Printing both is what turns "the favourites file is missing" into
+# "the favourites file is missing HERE and absent THERE", which is the
+# difference between a symptom and a cause.
 _stage_guest() {   # _stage_guest <tag>
     cat <<W
 echo '[ar] MARK-$1-open'
@@ -186,15 +196,31 @@ W
     _probe "$1-search"
     cat <<W
 echo '[ar] MARK-$1-fav'
-sleep 75
+sleep 80
 echo '[ar] FAV-$1:'
+/bin/cat '/home/live/.hamde/favourites'
 /bin/cat '/root/.hamde/favourites'
 echo '[ar] FAV-END-$1'
 W
     _probe "$1-fav"
     cat <<W
+echo '[ar] MARK-$1-third'
+sleep 45
+W
+    _probe "$1-third"
+    cat <<W
+echo '[ar] HOMES-$1:'
+id
+stat /home/live
+stat /root
+stat /root/.hamde
+echo '[ar] PROCS-$1:'
+ps
 echo '[ar] PANELLOG-$1:'
-tail -30 /var/log/panel.log
+# grep, not tail: the app this gate launches (/bin/hamfm) is a TUI and its
+# curses output goes to the panel's stdout, which IS /var/log/panel.log -- a
+# tail of that file is a screenful of escape sequences and no panel lines.
+grep panel /var/log/panel.log
 echo '[ar] PANELLOG-END-$1'
 echo '[ar] BINS-$1:'
 stat /bin/hamappmenu
@@ -325,10 +351,30 @@ stage_hand() {   # stage_hand <tag>
     click "$APPBTN_X" "$APPBTN_Y"
     sleep 5
     shot "$t-7-reopened"
+    # THE PROBE COMES BEFORE THE DISMISS, so the window table is read while
+    # whatever the second click opened is still up. The first run of this gate
+    # dismissed first and could then only say that nothing was there AFTER a
+    # dismissing click -- which is not the same statement.
+    waitmark "$LOG" "PROBE-END-$t-fav" 120
+
+    # THE THIRD CLICK. hampanelscene's _toggle_appmenu, when it believes the
+    # menu it spawned is still alive, sends it a `terminate` note and RETURNS
+    # WITHOUT SPAWNING ONE. So "the second click opened nothing" has two very
+    # different causes -- a stale liveness belief (the second click closed a
+    # menu that had already closed itself, and a THIRD click opens one) versus
+    # a menu that cannot start a second time at all -- and a third click is
+    # what tells them apart. Neither would have been visible offscreen, where
+    # the gate spawns the menu itself and the panel's toggle never runs.
+    waitmark "$LOG" "MARK-$t-third" "$SECS" || return 1
+    sleep 2
+    say "  $t: clicking Applications a THIRD time"
+    click "$APPBTN_X" "$APPBTN_Y"
+    sleep 5
+    shot "$t-8-third"
+    waitmark "$LOG" "PROBE-END-$t-third" 120
     click "$NEUTRAL_X" "$NEUTRAL_Y"
     sleep 3
-    shot "$t-8-dismissed"
-    waitmark "$LOG" "PROBE-END-$t-fav" 120
+    shot "$t-9-dismissed"
 }
 
 boot() {   # boot <logfile> <seconds> <tag>
@@ -354,7 +400,12 @@ boot "$WORK/boot.old.log" "$WAIT2" OLD
 
 # ===========================================================================
 # WHAT THE SCREEN AND THE WINDOW TABLE SAY.
+#
+# LC_ALL=C for the readers below: the serial log is a BYTE stream with a boot
+# console in it, awk in a UTF-8 locale calls that "invalid multibyte data" and
+# prints a warning per line per pass, which buries the report in noise.
 # ===========================================================================
+export LC_ALL=C
 pct() {   # pct <shot> <rrggbb> <x> <y> <w> <h>
     local s="$1"; shift
     local c="$1"; shift
@@ -392,6 +443,16 @@ favfile() {   # favfile <log> <tag>
     awk -v m="FAV-$2:" 'index($0,m){i=1;next} i&&index($0,"FAV-END"){exit}
                         i&&NF>0{printf "%s ", $0}' "$1" | tr -d '\r'
 }
+# WHAT THE PANEL ITSELF SAID. Its stdout is /var/log/panel.log INSIDE the
+# guest, not the serial console, so this reads the section the guest grepped
+# out of that file for us -- not the boot log, which never had those lines in
+# it. (The first run of this gate asserted against the boot log and reported
+# "the panel did not say it was using /bin/hamappmenu" when the panel had said
+# exactly that, in a file the assertion was not looking at.)
+panelsaid() {   # panelsaid <log> <tag>
+    awk -v m="PANELLOG-$2:" 'index($0,m){i=1;next} i&&index($0,"PANELLOG-END"){exit}
+                             i&&index($0,"[panel]"){print}' "$1" | tr -d '\r'
+}
 
 report_arm() {   # report_arm <log> <tag> <headline>
     local L="$1" t="$2"
@@ -402,11 +463,18 @@ report_arm() {   # report_arm <log> <tag> <headline>
     echo "    row 0 white:         $(pct "$t-3-menu" $WHITE $SEARCH_X $SEARCH_Y $SEARCH_W $SEARCH_H)% of ${SEARCH_W}x${SEARCH_H}+${SEARCH_X}+${SEARCH_Y} is the search field"
     echo "    row 1 catbtn strip:  $(pct "$t-3-menu" $CATBTN "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))%"
     echo "    row 1 header strip:  $(pct "$t-3-menu" $HDR "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))% (open) / $(pct "$t-7-reopened" $HDR "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))% (reopened after a launch)"
+    echo "    2nd click ->         $(ppn "$t-6-launched" "$t-7-reopened") px changed (reopen after the launch)"
+    echo "    3rd click ->         $(ppn "$t-7-reopened" "$t-8-third") px changed"
     echo "    window table (open): $(wintable "$L" "$t-open")"
-    echo "    menu's own window:   ${_MW:-$(menuwin "$L" "$t-open")}   panel: $(panelwin "$L" "$t-open")"
+    echo "    window table (2nd):  $(wintable "$L" "$t-fav")"
+    echo "    window table (3rd):  $(wintable "$L" "$t-third")"
+    echo "    menu's own window:   open '$(menuwin "$L" "$t-open")' / after 2nd click '$(menuwin "$L" "$t-fav")' / after 3rd '$(menuwin "$L" "$t-third")'"
+    echo "    panel window:        $(panelwin "$L" "$t-open") (open)"
     echo "    favourites file:     $(favfile "$L" "$t")"
-    echo "    the panel said:      $(grep -a 'Applications button ->\|could not open a window\|launched /bin/hamappmenu' "$L" | tr -d '\r' | sort -u | tr '\n' '|')"
+    echo "    homes:               $(awk -v m="HOMES-$t:" 'index($0,m){i=1;next} i&&index($0,"PROCS-"){exit} i&&NF>0{printf "%s ", $0}' "$L" | tr -d '\r')"
+    echo "    the panel said:      $(panelsaid "$L" "$t" | sort | uniq -c | tr '\n' '|')"
     python3 tests/linux/ppmdiff.py png "$SHOT/$t-3-menu.ppm" "$SHOT/$t-3-menu.png" >/dev/null 2>&1
+    python3 tests/linux/ppmdiff.py png "$SHOT/$t-8-third.ppm" "$SHOT/$t-8-third.png" >/dev/null 2>&1
     python3 tests/linux/ppmdiff.py png "$SHOT/$t-5-filtered.ppm" "$SHOT/$t-5-filtered.png" >/dev/null 2>&1
     python3 tests/linux/ppmdiff.py png "$SHOT/$t-7-reopened.ppm" "$SHOT/$t-7-reopened.png" >/dev/null 2>&1
 }
@@ -485,21 +553,36 @@ else
 fi
 
 # ---- 5. A CLICK THAT LAUNCHES -------------------------------------------
+# The launch is measured twice, because the two halves fail separately: the
+# menu CLOSED (its card is off the glass and its window is out of the table),
+# and the launch was RECORDED (the favourites file). On this machine the first
+# is true and the second is not.
+LCLOSE="$(ppn NEW-1-idle NEW-6-launched "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
+if [ "${LCLOSE:-$TOTAL}" -le $((TOTAL / 20)) ] && [ -z "$(menuwin "$WORK/boot.new.log" NEW-fav)" ]; then
+    ok "a real click on the filtered row CLOSED the menu: row 1 is back to bare wallpaper ($LCLOSE of $TOTAL px differ) and the menu's window is gone from the table"
+else
+    bad "after clicking the app row the menu is still on the screen ($LCLOSE of $TOTAL px of row 1 still differ from the bare desktop)"
+fi
 NEWFAV="$(favfile "$WORK/boot.new.log" NEW)"
 case "$NEWFAV" in
     *"$LAUNCH_PROG"*)
-        ok "a real click on the filtered row LAUNCHED it: /root/.hamde/favourites on the installed disk now names $LAUNCH_PROG ($NEWFAV)" ;;
+        ok "and the launch was RECORDED: the favourites file on the installed disk names $LAUNCH_PROG ($NEWFAV)" ;;
     *)
-        bad "nothing was recorded as launched: /root/.hamde/favourites is '${NEWFAV:-absent}'" ;;
+        bad "THE DEFECT, AND IT IS ONLY VISIBLE HERE: nothing was recorded as launched. Neither /home/live/.hamde/favourites nor /root/.hamde/favourites exists -- '$NEWFAV'. lib/homedir.ad resolves \$HOME as /env/HOME, then /etc/passwd BY UID, then /home/live; /etc/rc.d/rc.5 starts the DE as uid 0 and /etc/passwd has no uid 0 ('uid 0 doesn't exist in Hamnix'), so every DE client's home is /home/live -- the LIVE IMAGE's user, a directory an INSTALLED disk does not have -- and hamappmenu's _fav_save does one non-recursive sys_mkdir and then gives up silently. tests/linux/de_appmenu_brisk.sh cannot see this: it mounts a writable tmpfs on /root and its euid resolves there. $(awk -v m="HOMES-NEW:" 'index($0,m){i=1;next} i&&index($0,"PROCS-"){exit} i&&NF>0{printf "%s ", $0}' "$WORK/boot.new.log" | tr -d '\r')" ;;
 esac
 
 # ---- 6. FAVOURITES, ON THE REAL MACHINE ---------------------------------
 RHDR="$(pct NEW-7-reopened $HDR "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
 RCAT="$(pct NEW-7-reopened $CATBTN "$ROWX" "$R1Y" "$ROWW" $((ROWH - 4)))"
+REWID="$(menuwin "$WORK/boot.new.log" NEW-fav)"
+R3WID="$(menuwin "$WORK/boot.new.log" NEW-third)"
+R3="$(ppn NEW-7-reopened NEW-8-third)"
 if [ "${NEWHDR:-0}" -gt 5 ]; then
     bad "row 1 was already a header before anything was launched, so 'the Favourites section appeared' is not a question this run can answer"
 elif [ "${RHDR:-0}" -ge 40 ] && [ "${RCAT:-100}" -le 5 ]; then
     ok "REOPENED AFTER THE LAUNCH, THE MENU SHOWS FAVOURITES AT THE TOP: row 1 is a header (${RHDR}%, was ${NEWHDR}%) where the control measured a category button (${RCAT}%, was ${NEWCAT}%). The recency list outlived the process that recorded it, on a real disk."
+elif [ -z "$REWID" ]; then
+    bad "THE SECOND DEFECT: THE SECOND CLICK ON Applications OPENED NOTHING AT ALL. No menu window is in the table after it ('${REWID:-none}') and row 1 is ${RHDR:-?}% header / ${RCAT:-?}% category button -- there is no menu to hold a Favourites section. THE THIRD CLICK $( [ -n "$R3WID" ] && echo "DID open one (wid $R3WID, $R3 px changed), so the button takes two clicks after a launch: hampanelscene's _toggle_appmenu believed the menu it spawned was still alive, sent it a terminate note and returned without spawning" || echo "opened nothing either ($R3 px changed)")"
 else
     bad "THE DEFECT: the reopened menu shows no Favourites section -- row 1 is ${RHDR:-?}% header and ${RCAT:-?}% category button"
 fi
@@ -524,16 +607,22 @@ if [ "${OLDCLICK:-0}" -gt 5000 ] && [ "${OLDPANELH:-0}" -gt 100 ]; then
 else
     info "ARM OLD: the click changed ${OLDCLICK:-?} px and the panel window is ${OLDPANELH:-?} px tall"
 fi
-if grep -aq "no /bin/hamappmenu; Applications button -> the panel's own dropdown" "$WORK/boot.old.log"; then
+if panelsaid "$WORK/boot.old.log" OLD | grep -q "no /bin/hamappmenu; Applications button -> the panel's own dropdown"; then
     ok "and the panel SAID SO BY NAME in ARM OLD: \"no /bin/hamappmenu; Applications button -> the panel's own dropdown\""
 else
-    bad "ARM OLD: the panel never said which menu it was using"
+    bad "ARM OLD: the panel never said which menu it was using: $(panelsaid "$WORK/boot.old.log" OLD | tr '\n' '|')"
 fi
-if grep -aq "Applications button -> /bin/hamappmenu" "$WORK/boot.new.log"; then
+if panelsaid "$WORK/boot.new.log" NEW | grep -q "Applications button -> /bin/hamappmenu"; then
     ok "and in ARM NEW it said the other thing: \"[panel] Applications button -> /bin/hamappmenu\""
 else
-    bad "ARM NEW: the panel did not report pointing the button at /bin/hamappmenu"
+    bad "ARM NEW: the panel did not report pointing the button at /bin/hamappmenu: $(panelsaid "$WORK/boot.new.log" NEW | tr '\n' '|')"
 fi
+# HOW MANY TIMES DID IT SAY IT LAUNCHED ONE? This is the number that separates
+# "the panel spawned a menu that never appeared" from "the panel never spawned
+# a second menu at all", and it is the reason the claim in that log line is not
+# evidence of a menu: it is printed on the spawn, not on a window.
+SPAWNS="$(panelsaid "$WORK/boot.new.log" NEW | grep -c 'launched /bin/hamappmenu')"
+info "the panel printed \"launched /bin/hamappmenu -self\" $SPAWNS time(s) in ARM NEW, against 3 clicks on the button and $( [ -n "$NEWWID" ] && echo 1 || echo 0 )+$( [ -n "$REWID" ] && echo 1 || echo 0 )+$( [ -n "$R3WID" ] && echo 1 || echo 0 ) menu windows that actually appeared -- which is exactly why that line is not evidence"
 
 # ---- 8. THE RULE THIS GATE KEEPS ----------------------------------------
 # Same rule as tests/linux/de_mouse_chrome.sh assertion 12 and
@@ -557,10 +646,19 @@ echo "      for f in hostname hosts passwd ... hamde ...; do [ -f \"etc/\$f\" ] 
 echo "    etc/hamde is a DIRECTORY, so [ -f ] is false and /etc/hamde/apps --"
 echo "    the 27 .desktop launchers -- is on NO hamnix-linux machine. Both menus"
 echo "    therefore fall back to hamappmenu's built-in _seed_fallback() list, in"
-echo "    which 8 of the 11 entries name programs that are not installed:"
-echo "      $(grep -a 'BINS-NEW' -A4 "$WORK/boot.new.log" | tr -d '\r' | head -4 | tr '\n' '|')"
+echo "    which 8 of the 11 entries name programs that are not installed"
+echo "    (/bin/calculator, /bin/hamterm, /bin/hamedit, /bin/hamview,"
+echo "    /bin/hambrowse, /bin/hammonscene, /bin/hamctl, /bin/hamvideoscene,"
+echo "    /bin/hamaudioscene). What the guest found:"
+echo "      $(awk -v m="CATALOGUE-NEW:" 'index($0,m){i=1;next} i&&NF>0{printf "%s ", $0} i&&n++>3{exit}' "$WORK/boot.new.log" | tr -d '\r')"
 echo "    Clicking one of those eight is a menu entry that does nothing. This"
 echo "    gate launches Files (/bin/hamfm), one of the three that are real."
+echo
+echo "--- FINDING 2 (not a failure of this gate)"
+echo "    \`ls\` GIVEN A REGULAR FILE PRINTS ITS CONTENTS. The first run of this"
+echo "    gate used \`ls -l /bin/hamappmenu\` as a probe and put 450 KB of ELF on"
+echo "    the serial console, three times. Measured on the host with the image's"
+echo "    own binary: build/image/root/bin/ls -l <file> cats the file, exit 0."
 
 echo
 echo "realboot: $pass passed, $fail failed"
