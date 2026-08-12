@@ -20,7 +20,35 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-*(nothing right now — 1.0.13 carries everything that had landed.)*
+*(nothing right now — 1.0.14 carries everything that had landed.)*
+
+## 1.0.14
+
+**`ac` could not compile anything on a machine built from this channel, and
+the reason it couldn't was a mistake in the rule meant to prevent exactly
+that.** `/bin/ac` is a driver: it hands the work to `/bin/host_ac`. The
+package carried `ac` and **nothing else** — a driver with no compiler — so
+`ac hello.ad` on an updated machine failed with `cannot run /bin/host_ac`.
+This project's own notes list "compiles Adder on the box" as a measured
+capability; it was true of a machine installed from the image, and false of
+every machine built from the package repository.
+
+`host_ac` had been excluded from the channel on the written grounds that it
+was "built for the build host's libc, while the shippable compiler is `ac`".
+Both halves were backwards, and it is checkable in one command: `host_ac` has
+no interpreter and no library dependencies at all — the one binary here that
+needs no libc — while `ac`, the one that did ship, depends on four libraries.
+The exclusion is deleted rather than reworded.
+
+The package grows from 80 KB to 585 KB, which is 14% of the package manager's
+archive limit and 27% of its in-memory unpack limit — measured, because `hpm`
+unpacks in RAM.
+
+A new check runs before any index is written: it unpacks the toolchain **out
+of the built archive**, stages a root containing those files and nothing else,
+compiles a program with it, and **runs the result**, comparing what it prints.
+Exiting 0 with no binary, and producing a binary that does not run, are both
+failures.
 
 ## 1.0.13
 
