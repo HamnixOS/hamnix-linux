@@ -4213,6 +4213,18 @@ int64_t sys_umdf_dma_alloc(uint64_t len, uint64_t *out_phys)
  *   extern def sys_wsys_alloc(pid: uint64) -> int32
  *   extern def sys_wsys_free(wid: int32) -> int32 */
 int32_t sys_wsys_alloc(uint64_t pid) { return rc32(hamwsys_alloc(pid)); }
+
+/*   extern def sys_wsys_was_refused() -> int32
+ *
+ * 1 when THIS process was turned away by the window system's version refusal.
+ * A client that could not get a window needs to tell "the running session is
+ * older than I am, and a restart fixes it" from "I am broken", because those
+ * two want opposite things written down: the first is about the machine and
+ * clears itself at the reboot it asks for, the second is about the program and
+ * should persist. user/hamappmenu.ad wrote the second for the first and cost
+ * the Applications button permanently, across reboots -- measured by
+ * tests/linux/installed_update_wsysver.sh at STAGE D. */
+int32_t sys_wsys_was_refused(void) { return (int32_t)hamwsys_was_refused(); }
 int32_t sys_wsys_free(int32_t wid)   { return rc32(hamwsys_free(wid)); }
 
 /* GPU presentation of a window frame. Unimplemented on purpose: the scene

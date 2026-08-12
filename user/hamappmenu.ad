@@ -74,6 +74,9 @@ extern def sys_close(fd: int32) -> int32
 extern def sys_yield() -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_mkdir(path: Ptr[char]) -> int32
+# 1 when the WINDOW SYSTEM turned this process away because the running
+# session is an older WSYS_VERSION than this binary. See _fav_fault_set.
+extern def sys_wsys_was_refused() -> int32
 extern def sys_unlink(path: Ptr[char]) -> int32
 
 # Wait set for the event-loop park. Top-level BSS, not a frame local.
@@ -458,7 +461,33 @@ def _fav_save():
 # panel treats its presence as "use your own dropdown, and say so". The file
 # is REMOVED the moment a window is successfully allocated, so one bad start
 # does not demote the menu forever.
+# THE FAULT FILE MEANS "THIS PROGRAM IS BROKEN", AND A VERSION REFUSAL IS NOT
+# THAT. The panel reads $HOME/.hamde/appmenu.fault and, having seen it once,
+# routes the Applications button to its own legacy dropdown for the rest of
+# its life (_appmenu_faulted / _appmenu_available in user/hampanelscene.ad).
+# That is the right answer for a menu that cannot open a window because it is
+# broken. It is the WRONG answer for a menu that was correctly REFUSED by
+# user/linux-wsys.c because the running session is an older WSYS_VERSION --
+# there the program is fine, the SESSION is old, and the fix is the restart
+# the refusal asks for.
+#
+# MEASURED, on a real disk, by tests/linux/installed_update_wsysver.sh: the
+# desktop is updated, the Applications button spawns this program, it refuses
+# correctly and writes the fault -- and the fault OUTLIVES THE REBOOT, because
+# it is in $HOME on the ext4 root. So after the restart that fixes everything
+# else, the machine comes up healthy and the categorised Applications menu is
+# gone for good, replaced by the flat dropdown, with nothing anywhere saying
+# why. The reboot the refusal promises would fix it did not fix it.
+#
+# The two cases are told apart by THIS PROCESS'S OWN EXPERIENCE -- the flag is
+# set inside the refusal itself (seg_refuse_message in user/linux-wsys.c) and
+# by nothing else -- and not by looking for a file some other process wrote.
+# A refused start writes nothing: the panel keeps the button, this bump's cost
+# stays "no menu until you restart", and the restart really is the whole of it.
 def _fav_fault_set():
+    if sys_wsys_was_refused() != 0:
+        _puts(2, "hamappmenu: refused by the window system (the session predates this build); NOT leaving a fault -- a restart is the fix, and the Applications button must survive it\n")
+        return
     if _fav_paths() == 0:
         return
     sys_mkdir(cast[Ptr[char]](&_fav_dir[0]))

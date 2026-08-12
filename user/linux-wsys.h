@@ -93,6 +93,12 @@ void     hamwsys_wake_drain(void);
 
 int      hamwsys_is_ring(const struct hamwsys_file *f);
 int      hamwsys_ring_ready(const struct hamwsys_file *f);
+
+/* Did THIS process get turned away by the version refusal in shm_attach?
+ * Its own experience, not a file another process wrote -- see
+ * seg_refused_here in linux-wsys.c. Exported to Adder as
+ *   extern def sys_wsys_was_refused() -> int32 */
+int      hamwsys_was_refused(void);
 uint32_t hamwsys_input_gen(void);
 int      hamwsys_input_wait(uint32_t seen, int64_t timeout_ms);
 

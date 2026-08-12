@@ -1719,9 +1719,21 @@ out:
  *
  * ...and once on the SCREEN, via seg_refuse_mark above, because stderr here is
  * the serial console and the person is not reading it. */
+/* WAS THIS PROCESS REFUSED FOR THE VERSION? Set by seg_refuse_message below
+ * and by nothing else, so it is this process's own experience and not a
+ * conclusion drawn from a file another process wrote.  hamwsys_was_refused()
+ * is how a CLIENT tells "the window system turned me away because the session
+ * is older than I am" from "I am broken" -- see user/hamappmenu.ad, where
+ * writing the wrong one of those two into $HOME/.hamde/appmenu.fault cost the
+ * Applications button permanently, across reboots. */
+static int seg_refused_here;
+
+int hamwsys_was_refused(void) { return seg_refused_here; }
+
 static void seg_refuse_message(const char *path, uint32_t theirs)
 {
     static int said;
+    seg_refused_here = 1;
     if (said) return;
     said = 1;
     fprintf(stderr,
