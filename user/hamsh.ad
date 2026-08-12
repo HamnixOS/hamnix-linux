@@ -12008,20 +12008,41 @@ def _run_and_capture(cmdnode: int32) -> uint64:
         argc = 0
     if argc > 0:
         cmd: Ptr[uint8] = cast[Ptr[uint8]](argv_ptr[0])
-        rc_b: int32 = run_builtin(cmd, argc)
-        if rc_b >= 0:
-            # A BUILTIN ran IN THIS PROCESS, so its output went to the
-            # shell's own stdout and the capture pipe got nothing: the
-            # substitution silently yields the empty string, AND the text
-            # lands on the console instead of in the variable. `{ echo x }`
-            # is the obvious case and it is not obscure. Naming it is not a
-            # fix -- the fix is to fork the builtin the way
-            # _run_builtin_in_pipeline already does -- but a wrong answer
-            # that says so is worth much more than one that does not.
-            write_str(2, "hamsh: command substitution of the BUILTIN ")
-            sys_write(2, cmd, cstr_len(cmd))
-            write_str(2, " is not captured (its output went to stdout)\n")
-        if rc_b < 0:
+        # A BUILTIN IS A CAPTURE STAGE, SO IT IS FORKED — the same answer,
+        # and the same function, as a builtin that is a PIPELINE stage.
+        #
+        # It used to be run in-process, by calling run_builtin() here and
+        # asking afterwards whether it had been one. Two things were wrong
+        # with that and only one of them was reported. The verb's writes go
+        # to the SHELL's own console-backed fd 1, so `x = `{ echo hi }`
+        # printed "hi" on the terminal and gave x the empty string; and
+        # asking run_builtin() is asking by RUNNING, so the answer arrives
+        # after the damage. This named itself on fd 2 and left the gap open.
+        #
+        # _run_builtin_in_pipeline is exactly the machinery required and it
+        # is already here: it pins the write end's refcount before the fork
+        # (so the shell's read cannot see writers == 0 and take instant
+        # EOF), forks RFPROC|RFFDG|RFNAMEG, has the CHILD bind the pipe at
+        # its own /fd/1 and route integer fd 1 through that name, applies
+        # any redirect on the stage in the child, and with do_wait == 0
+        # returns a PID — which is precisely what the drain-and-waitpid
+        # below wants. `_builtin_dispatch_kind_check` is the predicate that
+        # answers WITHOUT running, which is why the decision can be made
+        # before anything happens.
+        #
+        # The consequence is the POSIX one and it is correct: the builtin
+        # runs in a subshell, so `` `{ cd /x } `` does not move the shell.
+        # A substitution is a value, not a statement; capturing one has
+        # never been how you change the shell's state.
+        if _builtin_dispatch_kind_check(cmd) != 0:
+            pid = _run_builtin_in_pipeline(cmdnode, cmd, argc, -1, slot, 0)
+            if pid < 0:
+                # _run_builtin_in_pipeline already reported the fork
+                # failure by name; the substitution is the empty string.
+                write_str(2, "hamsh: command substitution of the BUILTIN ")
+                sys_write(2, cmd, cstr_len(cmd))
+                write_str(2, " could not be forked; capture is empty\n")
+        else:
             pid = spawn_resolved(cmd, cast[Ptr[uint64]](&argv_ptr[0]))
             if pid >= 0:
                 sys_fdbind(pid, 1, DEVFD_PIPE_W, slot)

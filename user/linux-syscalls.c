@@ -2453,8 +2453,45 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
             if (left <= 0) return 0;
         }
         /* An ordinary fd mixed in with a ring cannot be futex-woken, so cap
-         * the sleep and re-poll it. Mixing is rare (nothing in the tree does it
-         * today); the cap keeps it correct rather than fast. */
+         * the sleep and re-poll it. The cap keeps it correct rather than fast.
+         *
+         * "Mixing is rare (nothing in the tree does it today)" is what this
+         * comment used to say, and that was wrong when it was written:
+         * user/hamterm.ad line 498 calls lib/hamui.ad's hamui_wait with its
+         * shell-stdout pipe as an `extra` fd, so an open DE terminal is
+         * exactly this path -- two /dev/wsys rings plus one ordinary fd, a
+         * 50 ms park. The cap turns that park into three (20 + 20 + 10), so
+         * an idle terminal wakes ~60 times a second where it needs to wake
+         * ~20.
+         *
+         * WHAT THAT COSTS, measured rather than argued, on this host:
+         *
+         *   the two arms of this loop, 20 s each, from /proc/self/stat
+         *     cap at 20 ms   59.7 wakes/s   0.010 s cpu   0.050% of one core
+         *     one poll       20.0 wakes/s   0.000 s cpu   0.000% of one core
+         *   one wake (a futex_wait that times out + a 0 ms poll), 200000 of
+         *   them back to back: 3.9 us, so the 40 extra wakes/s are
+         *     0.016% of one core, for one program, while it is open.
+         *
+         * (`ps pcpu` cannot see any of this: it is a LIFETIME average, and it
+         * has misreported this tree twice. /proc/<pid>/stat sampled either
+         * side of a fixed wall interval is the measurement.)
+         *
+         * THE RECORDED FIX IS AN EVENTFD MIRRORING `inputgen`, so the rings
+         * and the ordinary fds go into ONE poll(2) and the cap disappears.
+         * It is the right fix and it is NOT done here, because the write side
+         * of it belongs to the WAKER -- hamwsys_input_notify() in
+         * user/linux-wsys.c, which bumps inputgen and FUTEX_WAKEs it -- and
+         * that file is not this pass's to change.
+         *
+         * The substitute that fits entirely in this file is a reader-side
+         * helper THREAD per process that futex-waits on inputgen and writes
+         * an eventfd. Deliberately not done: it buys 0.016% of a core and
+         * pays a permanent extra thread plus a hand-rolled wake protocol on
+         * the KEYSTROKE path -- the path whose latency was the ~0.5 s echo
+         * lag lib/hamui.ad's header is about, and the one
+         * tests/linux/de_probe.sh types real keys through QEMU to guard. A
+         * fifty-thousandth of a core is not worth putting a new race there. */
         if (npoll && (left < 0 || left > 20)) left = 20;
         hamwsys_input_wait(seen, left);
     }

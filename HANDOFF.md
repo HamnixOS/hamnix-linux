@@ -199,14 +199,84 @@ same failure this project exists to beat.
   processes could claim the same free record**, now a compare-and-swap; and
   **`wc` ignored its FILE operands** and blocked on stdin, the fourth member
   of the `head`/`cksum`/`md5sum` family. `tests/linux/fdns_pipe.sh` (7 PASS,
-  host, seconds) and `tests/linux/pipelines.sh` (12 PASS, in a boot).
+  host, seconds) and `tests/linux/pipelines.sh` (**13 PASS**, in a boot).
   `tests/linux/installed_update.sh`'s `md5sum < FILE` workaround is
   `cat FILE | md5sum` again.
-  **Still open:** `` `{ … }` `` command substitution of a **BUILTIN** runs it
-  in-process, so its output goes to the shell's own stdout and the capture
-  gets nothing — `` `{ echo x } `` yields the empty string. It now says so by
-  name and the gate asserts that it does; the fix is to fork the stage the way
-  `_run_builtin_in_pipeline` already does.
+  **And the last piece is closed too: `` `{ … }` `` of a BUILTIN is FORKED
+  now.** It used to run in-process, so its output went to the shell's own
+  console-backed fd 1 — `` `{ echo x } `` printed `x` on the terminal and
+  yielded the empty string. It said so by name and the gate asserted that it
+  said so, which is honest and still broken. `_run_builtin_in_pipeline` was
+  already exactly the machinery required (pin the write end before the fork,
+  `RFPROC|RFFDG|RFNAMEG`, child binds the pipe at its own `/fd/1`, `do_wait 0`
+  returns a PID), so the capture path now calls it, and the decision is made
+  by `_builtin_dispatch_kind_check` — a predicate — instead of by RUNNING the
+  verb and asking afterwards. Measured in a boot: `pipegate: bcapture ` with
+  a stray `inner` on the console, before; `pipegate: bcapture inner` and no
+  console leak, after. The gate asserts both halves, because a capture that
+  read the right bytes *while the text was also on the console* would be the
+  old bug wearing the new answer. POSIX's consequence comes with it and is
+  correct: the builtin runs in a subshell, so `` `{ cd /x } `` does not move
+  the shell.
+
+* **A MIXED WAIT SET STILL CAPS AT 20 ms, AND HERE IS WHAT THAT COSTS.**
+  `sys_waitfds` cannot put a futex and a `poll(2)` into one syscall, so when a
+  caller mixes a `/dev/wsys` ring with an ordinary fd it caps the sleep at
+  20 ms and re-runs the poll. The comment in `user/linux-syscalls.c` said
+  "nothing in the tree does it today" and that was wrong when it was written:
+  `user/hamterm.ad` line 498 hands `lib/hamui.ad`'s `hamui_wait` its
+  shell-stdout pipe, so **an open DE terminal is exactly this path** — two
+  rings plus one ordinary fd, a 50 ms park turned into 20 + 20 + 10, waking
+  ~60 times a second where it needs to wake ~20.
+  **Measured, both arms of that inner loop, 20 s each, `/proc/self/stat`
+  either side of a fixed wall interval** (not `ps pcpu` — that is a lifetime
+  average and has misreported this tree twice): the cap 59.7 wakes/s and
+  0.010 s of cpu, **0.050% of one core**; a single poll over the whole set
+  20.0 wakes/s and 0.000 s. One wake — a `futex_wait` that times out plus a
+  0 ms poll, 200 000 of them back to back — is **3.9 µs**, so the 40 extra
+  wakes/s are **0.016% of one core**, for one program, while it is open.
+  **The recorded fix is an eventfd mirroring the `inputgen` word**, so the
+  whole set goes into one `poll` and the cap disappears. It is the right fix
+  and it is deliberately NOT done yet, for a reason worth writing down: the
+  write side belongs to the WAKER, `hamwsys_input_notify()` in
+  `user/linux-wsys.c`, and the substitute that avoids that file — a
+  reader-side helper thread per process futex-waiting and writing an
+  eventfd — buys 0.016% of a core and pays a permanent extra thread plus a
+  hand-rolled wake protocol **on the keystroke path**, the one whose latency
+  was the ~0.5 s echo lag and the one `tests/linux/de_probe.sh` types real
+  keys through QEMU to guard. The number is in the code beside the cap so the
+  next reader does not have to re-derive it.
+
+* **`user/hello.ad` claimed to prove the VFS path and never once tested it.
+  NOW FIXED.** Its header says it opens `/version`, reads it and prints it,
+  "so we've proved the VFS path is reachable". Nothing in hamnix-linux ever
+  created `/version`, and the read sat behind a bare `if fd >= 0:` with no
+  else — so for the whole life of the port the open failed, the read was
+  skipped in silence, and the program printed its banner and exited 0. A
+  banner is not evidence about a filesystem. `/version` is now a plain file at
+  the root of the initramfs, exactly what it is on the Hamnix line
+  (`scripts/build_initramfs.py`), with the kernel release and the userland
+  revision **derived** rather than asserted; and `hello` reports by name and
+  exits 1 when it cannot open it, and again when the open succeeds and the
+  read delivers nothing. Before/after through the run sweep: `EXIT_NONZERO`
+  with `cannot open /version -- the VFS path this program exists to prove is
+  UNPROVEN`, then `RAN` printing
+  `hamnix-linux -- Adder userland on Linux 6.12.85+deb13-amd64`.
+
+* **The run sweep's argv column had ONE spelling for a mistake and none for
+  the truth. NOW THE OTHER WAY ROUND.** 47 recipes carried a literal `-` in
+  the argv column — the STDIN column's sentinel, passed to the program as a
+  real argument. It had already been found and fixed three times (`mktemp -`,
+  `route -`, `pr -`) by editing the rows and leaving the shape alone, so it
+  happened again: most of the GUI clients plus `md5sum`, `more`, `nl`, `od`,
+  `rev`, `ps`, `pwd`, `nproc`, `lsmod` and `hamsh`. `md5sum` was being scored
+  `EXIT_NONZERO` for it (`md5sum: cannot open -`) and is `RAN` with a real
+  digest now. So: no-arguments is spelled `EMPTY` and that is the only
+  spelling (all 193 rows that meant it say it), the loader **rejects** a blank
+  column and a bare `-` by row name before anything runs, and a row that
+  genuinely wants a lone dash writes `%DASH`. A blank column is not merely
+  sloppy — it is what a collapsed tab looks like, the bug that once fed `wc`
+  its own description.
 
 * **The Hamnix clipboard and the namespace clipboard were two clipboards.
   NOW BRIDGED — `user/xsnarfd.ad`.** `/dev/snarf` is served
