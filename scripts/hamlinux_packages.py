@@ -242,6 +242,30 @@ ADDER_SHARE = glob_files(
 # anything installed under bin/ to 0755, so it lands executable.
 ADDER_COMPILER = [("build/cutover/host_ac.elf", "bin/host_ac")]
 
+# ---------------------------------------------------------------------------
+# EXTRAS THAT MAY LEGITIMATELY BE ABSENT -- and nothing else may be.
+# ---------------------------------------------------------------------------
+# A named `extras` source that is not in the tree is a file a package PROMISES
+# and does not carry, and until now it was recorded in `skipped` and packaged
+# anyway. That is how hamnix-adder came out of this script with `ac` and no
+# `host_ac`: the package was present, its hash matched, and the machine that
+# installed it had a compiler driver with no compiler. The toolchain gate at
+# the end caught it four minutes later -- which is the gate working -- but the
+# fact was knowable at copy time, and every other refusal in this file was
+# learned by shipping the failure once.
+#
+# So a missing extra is now a REFUSAL. If a source may genuinely be absent, it
+# needs an entry here WITH A REASON, because "sometimes it is not there" is
+# exactly the sentence that hid the missing compiler.
+#
+# Keys are the repo-relative source path as written in the component's extras
+# list; values are why absence is acceptable. Empty today, deliberately: every
+# extras entry in this file is either a literal path that is always in the tree
+# or comes from glob_files()/tree_files(), which only ever name files they have
+# already found on disk.
+EXTRAS_MAY_BE_ABSENT = {}
+
+
 # The manual pages. hamsh's `man` and `help` read /usr/share/man/*.md (see
 # user/hamsh.ad's discovery index, which walks that directory). The image
 # stages etc/man/*.md there; nothing shipped them, so `man ls` on an installed
@@ -2178,6 +2202,7 @@ def main():
                                    "usr/share/sounds/test.wav")]}
 
     # Components first: they carry the boot files everything else needs.
+    missing_extras = []
     for name, (desc, bins, extras, deps) in COMPONENTS.items():
         files = []
         ok = True
@@ -2194,16 +2219,42 @@ def main():
             host = os.path.join(ROOT, src)
             if os.path.exists(host):
                 files.append((host, inside))
+            elif src in EXTRAS_MAY_BE_ABSENT:
+                skipped.append("%s: %s absent (%s)"
+                               % (name, src, EXTRAS_MAY_BE_ABSENT[src]))
             else:
                 # A named extra that is not in the tree is a file this package
                 # PROMISES and does not carry. Silence here is how a config
                 # file leaves the channel without anyone noticing; the
-                # coverage gate would then blame the image.
-                skipped.append("%s: %s is not in the tree" % (name, src))
+                # coverage gate would then blame the image. It is collected
+                # and refused below rather than skipped -- see
+                # EXTRAS_MAY_BE_ABSENT.
+                missing_extras.append((name, src, os.path.join("ROOT", src)))
         files.extend(generated.get(name, []))
         entries.append(write_pkg(pkgdir, name, args.version, desc, files, deps,
                                  hooks=COMPONENT_HOOKS.get(name)))
         print("  %s (%d files)" % (name, len(files)))
+
+    # A PROMISE A PACKAGE CANNOT KEEP IS NOT A WARNING.
+    #
+    # This fires before the GPU stack, the drivers, the index and the desktop
+    # gate, so the message a person sees names the missing FILE rather than the
+    # symptom it causes several minutes later in a program that could not run.
+    if missing_extras:
+        lines = "\n".join("    %s promises %s -- not in the tree"
+                           % (n, src) for n, src, _ in missing_extras)
+        raise SystemExit(
+            "\nREFUSING TO PUBLISH: %d named file(s) that package(s) promise "
+            "are not in this tree:\n%s\n"
+            "Each is an `extras` entry in this script. Either the file is "
+            "meant to exist and something upstream of this build did not "
+            "produce it (a fresh worktree with no build/ directory is the "
+            "usual cause -- build/cutover/host_ac.elf is the one that has "
+            "shipped a compiler driver with no compiler before), or its "
+            "absence is legitimate and belongs in EXTRAS_MAY_BE_ABSENT with a "
+            "reason. No index.json was written, so nothing can install from "
+            "this channel."
+            % (len(missing_extras), lines))
 
     # The GPU stack, userspace first: the kernel driver packages declare a
     # dependency on the matching ICD, so the userspace half has to be built
