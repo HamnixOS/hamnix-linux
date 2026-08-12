@@ -64,9 +64,11 @@
 #     `-device virtio-keyboard-pci`. A desktop that is up and ignores the
 #     keyboard is a FAILURE, not a pass -- and it is exactly the shape a v6
 #     client parked on the now-dead keys ring would produce.
-#   * THE SEGMENT'S SIZE. `ls -l /srv` -- 19,052,956 bytes is a v6 window
-#     table, 37,972,380 a v7 one. That is sizeof(struct wshm); no index field
-#     and no hpm database edit can fake it.
+#   * THE SEGMENT'S SIZE. `ls -l /srv` -- 19,052,956 bytes is a 256-row window
+#     table, 37,972,380 a 512-row one. That is sizeof(struct wshm); no index
+#     field and no hpm database edit can fake it. (At 6 -> 7 that number WAS
+#     the version. At 7 -> 8 it is not -- see THE SECOND BUMP below, which is
+#     where this gate's version witness now comes from.)
 #   * THE COMPOSITOR'S AND THE PANEL'S OWN LOGS, /var/log/{wsysd,panel,
 #     hamdesktop}.log, tailed at the end of every stage.
 #
@@ -124,6 +126,14 @@
 # clicks at B, the STAGE C CLICK cannot pass either, so the evidence that the
 # session survived C is the segment, the pixels and the window table -- none of
 # which depends on the panel answering.
+#
+# AT 7 -> 8 THAT DEFECT DID NOT REPRODUCE, and the paragraph above is kept as
+# history rather than rewritten because it is what the 6 -> 7 run measured.
+# The 1.0.19 -> 1.0.20 run: the STAGE B click moved 31,762 px against a 113 px
+# noise floor, the panel and the taskbar were `visible` 1 at A and at B, and the
+# panel logged two config reloads and survived them.  So the STAGE C click is
+# no longer excused by B -- see WHY THE CLICK AT C CAN LEGITIMATELY DO NOTHING,
+# which replaces the excuse with two measurements.
 #
 # =========================================================================
 # THE SECOND BUMP THIS GATE HAS MEASURED: 7 -> 8, AND WHY IT NEEDED A NEW SET
@@ -780,10 +790,33 @@ fi
 
 CWIN="$(statefield "$WORK/boot2.log" C windows)"
 BWIN="$(statefield "$WORK/boot2.log" B windows)"
+# WHY THE CLICK AT C CAN LEGITIMATELY DO NOTHING, and why that must be told
+# apart from a dead panel rather than excused in a sentence.
+#
+# The Applications button is not a menu. It SPAWNS one -- /bin/hamappmenu --
+# and after the update that binary is this tree's, so it meets the running
+# session, refuses, and never maps a window. The panel is the pre-update
+# process and answers perfectly; the person sees the button react and no menu.
+# So a C click that moves few pixels is EXPECTED at a version bump, and the
+# evidence for that is the panel's own log (it recorded the click and the
+# spawn) plus the refusal the spawned program printed. If those are absent,
+# something else is wrong and it is reported as exactly that.
+#
+# The previous pass excused this line with "STAGE B does not answer either".
+# At 7 -> 8 STAGE B DID answer (31,762 px against a 113 px noise floor), so
+# that excuse would have been a stale sentence standing in for a measurement.
+CCLICK_LOGGED=0
+grep -aA30 -F "DELOG-C panel:" "$WORK/boot2.log" | tr -d '\r' |
+    grep -aq 'Applications button ->' && CCLICK_LOGGED=1
+CSPAWN_REFUSED=0
+sed -n '/\[wv\] MARK-C/,/\[wv\] REFUSE-C:/p' "$WORK/boot2.log" | tr -d '\r' |
+    grep -aq 'REFUSING to attach' && CSPAWN_REFUSED=1
 if answered C; then
     echo "wv: PASS STAGE C the desktop still answers the mouse after an app was opened"
+elif [ "$CCLICK_LOGGED" = 1 ] && [ "$CSPAWN_REFUSED" = 1 ]; then
+    echo "wv: FINDING STAGE C the click IS answered -- the panel logged the button and spawned /bin/hamappmenu -- but the menu never appears, because the spawned binary is the new one and it refuses the running session BY NAME. Nothing on the SCREEN says so; the words are on stderr. That is this bump's whole cost to a person, and it is the designed one."
 else
-    echo "wv: FINDING STAGE C the desktop does not answer the mouse after an app is opened. The compositor reports ${CWIN:-?} windows. NOT scored: STAGE B does not answer either, before any version bump -- see WHAT THIS FILE DELIBERATELY DOES NOT FAIL ON."
+    echo "wv: FINDING STAGE C the desktop does not answer the mouse after an app is opened, and NOT because a spawned program refused: the panel logged the click=${CCLICK_LOGGED}, a refusal followed=${CSPAWN_REFUSED}. The compositor reports ${CWIN:-?} windows."
 fi
 
 # =========================================================================
@@ -856,15 +889,34 @@ else
     fail=1
 fi
 
-# WHAT THE PERSON WHO CLICKED ACTUALLY GOT.  The refusal above was driven from
-# the console, where its stderr is on the screen. The app the DE launched is
-# the case that matters and its stderr goes wherever the panel's spawn sends
-# it, so this reports -- it does not score -- whether the words reached any log
-# a person could be pointed at.
+# WHAT THE PERSON WHO CLICKED ACTUALLY GOT, and this one IS scored.
+#
+# The refusal checked above was driven from the console by this gate. The case
+# that decides whether a person is told anything is the app the DE LAUNCHED
+# ITSELF -- the terminal off /dev/wsys/run/launch, which is the path a click on
+# the Applications menu takes. "Fails with the named refusal" and "fails" are
+# different sentences to put in a release note, and only one of them is
+# acceptable: a program that declines to draw without a word is the
+# success-shaped silence NORTH_STAR.md forbids, in a smaller box.
+if sed -n '/\[wv\] PROBE-END-B/,/\[wv\] MARK-C/p' "$WORK/boot2.log" | tr -d '\r' |
+        grep -aq 'REFUSING to attach'; then
+    echo "wv: PASS THE APP THE DESKTOP LAUNCHED FAILED BY NAME, not silently:"
+    sed -n '/\[wv\] PROBE-END-B/,/\[wv\] MARK-C/p' "$WORK/boot2.log" | tr -d '\r' |
+        grep -aE '^wsys:|FAIL newwindow|newwindow alloc failed' | sed 's/^/        /' | head -8
+else
+    echo "wv: FAIL the app the desktop launched at STAGE C failed WITHOUT the refusal -- this is everything it said:"
+    sed -n '/\[wv\] PROBE-END-B/,/\[wv\] MARK-C/p' "$WORK/boot2.log" | tr -d '\r' |
+        grep -av '^\[panelbeacon\]' | tail -8 | sed 's/^/        /'
+    fail=1
+fi
+
 echo "wv: NOTE what the launched app's refusal reached, between the update and STAGE C:"
-sed -n '/\[wv\] MARK-B/,/\[wv\] PROBE-END-C/p' "$WORK/boot2.log" | tr -d '\r' |
+# The range STOPS at REFUSE-C, which is where this gate deliberately runs the
+# new binary on the console; including it would let the gate's own evidence
+# answer a question about what the PERSON got.
+sed -n '/\[wv\] MARK-B/,/\[wv\] REFUSE-C:/p' "$WORK/boot2.log" | tr -d '\r' |
     grep -a 'REFUSING to attach' | head -3 | sed 's/^/        /'
-sed -n '/\[wv\] MARK-B/,/\[wv\] PROBE-END-C/p' "$WORK/boot2.log" | tr -d '\r' |
+sed -n '/\[wv\] MARK-B/,/\[wv\] REFUSE-C:/p' "$WORK/boot2.log" | tr -d '\r' |
     grep -aq 'REFUSING to attach' ||
     echo "        (nothing: the program the person launched failed without a word reaching the console or the DE logs)"
 
