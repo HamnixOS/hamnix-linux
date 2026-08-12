@@ -232,6 +232,10 @@ LK
     # measurement about input.
     cat > "$STAGE/etc/ssw-ff.sh" <<'FF'
 #!/bin/sh
+# NOTHING IS REDIRECTED TO A FILE. The first version of this sent Firefox's
+# output to /tmp/ff.log inside the namespace, Firefox never drew a window, and
+# the only way to read the reason was a console command -- which is the one
+# thing this harness cannot do reliably. Everything goes to the serial console.
 export DISPLAY=:0
 export MOZ_ENABLE_WAYLAND=0
 _u=$(id -u 2>/dev/null || echo 0)
@@ -240,8 +244,22 @@ export XDG_RUNTIME_DIR
 HOME=/home/live
 [ -d "$HOME" ] || HOME=/root
 export HOME
-echo "ssw-ff: HOME=$HOME XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DISPLAY=$DISPLAY"
-exec /usr/bin/firefox --new-window file:///etc/services > /tmp/ff.log 2>&1
+echo "ssw-ff: uid=$_u HOME=$HOME XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DISPLAY=$DISPLAY"
+if : > "$HOME/.ssw-probe" 2>/dev/null; then
+    echo "ssw-ff: $HOME is writable"; rm -f "$HOME/.ssw-probe"
+else
+    echo "ssw-ff: WARNING $HOME is NOT writable by uid $_u; Firefox needs a profile directory"
+fi
+mkdir -p /tmp/ffprof 2>/dev/null
+echo "ssw-ff: /usr/bin/firefox is:"
+cat /usr/bin/firefox 2>&1 | sed 's/^/ssw-ff:   /'
+echo "ssw-ff: starting firefox"
+# -profile with a fresh directory, because a profile lock left by an earlier
+# run makes Firefox exit with a dialog nobody can click. -no-remote so it
+# never tries to hand the URL to an instance that is not there.
+/usr/bin/firefox -no-remote -profile /tmp/ffprof --new-window file:///etc/services 2>&1 |
+    sed 's/^/ssw-ff: /'
+echo "ssw-ff: firefox exited $?"
 FF
 
     ( cd "$STAGE" && find etc -print0 | cpio -0 -o -H newc --quiet ) | gzip \
