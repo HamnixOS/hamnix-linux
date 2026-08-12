@@ -116,7 +116,12 @@
 # ADDER QUIRKS HONOURED: big buffers are top-level BSS arrays, no adjacent
 # string-literal concatenation, string literals are passed at the call site.
 
-from lib.hamscene import hamscene_load
+from lib.hamscene import hamscene_load, hamscene_begin, hamscene_glyphs
+# The title bar's text is measured with the SAME per-glyph advances it is
+# drawn with. lib/hamtextbox.ad exists to be the one place that owns that sum
+# (its own header says so); a second copy of it here is how a caret and a
+# clip end up disagreeing with the glyphs by a few pixels each.
+from lib.hamtextbox import htb_text_width
 from lib.hamui_host import hamui_host_begin, hamui_host_begin_into, \
     hamui_host_rasterize, hamui_host_set_bgra, \
     hamui_host_row_base, hamui_host_width, hamui_host_height, \
@@ -224,6 +229,37 @@ win_proto: Array[128, int32]
 win_keyed: Array[128, int32]
 win_blend: Array[128, int32]
 n_win:   uint64 = 0
+
+# --- window titles ----------------------------------------------------
+# EVERY window on this desktop had a title bar and NONE of them had a name on
+# it, for the whole life of this compositor. Three terminals were three
+# identical grey bars. The title was never missing -- the device has held it
+# per window since the port began (user/linux-wsys.c, `title` on <wid>/ctl,
+# capped at 64 bytes) and publishes it; nothing here read it.
+#
+# WHERE IT IS READ FROM, and why not <wid>/ctl. /dev/wsys/<wid>/ctl is a fixed
+# vector of integers parsed positionally with take_int, and a title contains
+# spaces: appending it would make the field after it unparseable and there is
+# no field after it to hide behind. /dev/wsys/windows is the file the device
+# already publishes for exactly this -- "<wid> <title>\n" per VISIBLE,
+# DECORATED window, which is precisely the set that has a title bar -- and it
+# is what hampanelscene's taskbar already reads. One read per frame for the
+# whole set, not one per window.
+#
+# IT IS UNTRUSTED INPUT AND IS TREATED AS SUCH. The window table lives in
+# /srv/wsys, segment A, mode 0666, and it has to: an unprivileged session must
+# be able to map its own windows. user/linux-wsys.c says so in as many words
+# above chrome_attach() -- "a bypasser can retitle another client's window".
+# So any uid on this machine can put any 63 bytes it likes on any window's
+# title bar, including this one's. Everything that bounds what that can do is
+# in title_build() and title_draw() below, and is stated there.
+WSYSD_TITLE_CAP: uint64 = 64
+win_title: Array[8192, uint8]          # MAX_WIN * WSYSD_TITLE_CAP
+winsbuf:   Array[10496, uint8]         # /dev/wsys/windows: 128 * (64 + 18)
+# The sanitized run actually drawn: the title's 63 bytes plus room for an
+# ellipsis and a NUL. NOT a frame local -- a buffer this size on the stack is
+# the shape that has broken this tree before.
+titlebuf:  Array[80, uint8]
 
 # --- scratch ----------------------------------------------------------
 pathbuf:  Array[128, uint8]
@@ -569,6 +605,53 @@ def scan_windows():
             if live == 0:
                 forget_window_images(imgc_wid[c])
         c = c + 1
+    # AFTER the z-sort, and keyed by wid rather than by slot. The sort above
+    # permutes every parallel array by hand; a title array swapped in that
+    # chain is one more line to forget, and forgetting it would put one
+    # window's name on another window's bar -- which is worse than no name at
+    # all, because it is confidently wrong. Loading by wid afterwards cannot
+    # have that bug.
+    scan_titles()
+
+
+# Fill win_title[] from /dev/wsys/windows, the device's published
+# "<wid> <title>\n" list. Every slot is cleared first: a window that has no
+# title, or that this read did not mention, must come back with an EMPTY
+# name, not the name of whoever held that slot last.
+def scan_titles():
+    i: uint64 = 0
+    while i < n_win:
+        win_title[i * WSYSD_TITLE_CAP] = 0
+        i = i + 1
+    n: int64 = slurp(cast[Ptr[char]]("/dev/wsys/windows"), &winsbuf[0], 10496)
+    if n <= 0:
+        return
+    cap: uint64 = cast[uint64](n)
+    p: uint64 = 0
+    while p < cap:
+        # "<wid> <title>\n". take_int stops at the space; the rest of the line
+        # up to the newline is the title, verbatim -- it is sanitized where it
+        # is DRAWN, not here, so that what wsysd holds is what the device said.
+        pos: Array[1, uint64]
+        pos[0] = p
+        wid: int32 = take_int(&winsbuf[0], &pos[0], cap)
+        q: uint64 = pos[0]
+        if q < cap and winsbuf[q] == 32:
+            q = q + 1
+        slot: int64 = -1
+        if wid > 0:
+            slot = win_index(wid)
+        k: uint64 = 0
+        while q < cap and winsbuf[q] != 10:
+            if slot >= 0 and k < WSYSD_TITLE_CAP - 1:
+                win_title[cast[uint64](slot) * WSYSD_TITLE_CAP + k] = winsbuf[q]
+                k = k + 1
+            q = q + 1
+        if slot >= 0:
+            win_title[cast[uint64](slot) * WSYSD_TITLE_CAP + k] = 0
+        p = q
+        if p < cap:
+            p = p + 1
 
 
 def frame_signature() -> uint64:
@@ -596,6 +679,22 @@ def frame_signature() -> uint64:
             h = h ^ cast[uint64](cast[uint32](vals[k]))
             h = h * 1099511628211
             k = k + 1
+        # THE TITLE IS PART OF WHAT THE SCREEN LOOKS LIKE, so it has to be in
+        # here. `title Foo` moves nothing, resizes nothing and commits no
+        # scene: it bumps the device's gen and NOTHING ELSE in this hash. A
+        # retitle would have been read, stored, and never painted until some
+        # unrelated change happened to force a frame -- a title that updates
+        # when you wiggle the mouse is a worse bug than one that never
+        # updates, because it looks intermittent.
+        t: uint64 = 0
+        while t < WSYSD_TITLE_CAP:
+            c: uint8 = win_title[i * WSYSD_TITLE_CAP + t]
+            h = h ^ cast[uint64](c)
+            h = h * 1099511628211
+            if c == 0:
+                t = WSYSD_TITLE_CAP
+            else:
+                t = t + 1
         i = i + 1
     h = h ^ cast[uint64](n_win)
     h = h * 1099511628211
@@ -1414,6 +1513,11 @@ def paint_window(i: uint64) -> int32:
         fill_rect(ox + w, oy, 1, h, top)
         fill_rect(ox - 1, oy + h, w + 2, 1, top)
         draw_close_box(ox, oy, w)
+        # LAST, so the name is over the bar and never under the close box --
+        # and before the client's own scene is loaded into hamscene_buf below,
+        # which is the only ordering constraint: the title borrows that buffer
+        # for one line and this window's display list is still in scenebuf.
+        title_draw(i, ox, oy, w)
 
     # A v2 window renders its OWN pixels and submits them as blits. The scene
     # grammar is a text display list capped at 16 KiB: it can express a widget
@@ -1777,6 +1881,131 @@ def draw_close_box(ox: int32, oy: int32, w: int32):
         fill_rect(cb_x + k, cb_y + k, 1, 1, 16777215)
         fill_rect(cb_x + CLOSE_SZ - 1 - k, cb_y + k, 1, 1, 16777215)
         k = k + 1
+
+
+# ====================================================================
+# THE TITLE ON THE TITLE BAR
+# ====================================================================
+# Left inset of the text from the window's left edge, and the gap kept clear
+# between the end of the text and the close box. TITLE_TOP is where the 16px
+# text cell sits in the 22px bar; the `glyphs` verb is CELL-anchored (its
+# baseline is y+12, lib/hamui_host.ad:_draw_text), which is the same
+# anchoring every hamUI app's own text uses, so the title sits on the bar
+# exactly the way a label sits in a window.
+TITLE_PAD:  int32 = 5
+TITLE_GAP:  int32 = 5
+TITLE_TOP:  int32 = 3
+
+# The widest run of text window `i` is allowed to put on its bar, in pixels.
+# THIS IS THE CLIP, and it is computed from the SAME numbers draw_close_box
+# uses -- close_box_at() is called here rather than the arithmetic repeated,
+# because a title that runs under the close button and a close button drawn
+# where the title is are the same bug with two spellings.
+def title_avail_w(ox: int32, oy: int32, w: int32) -> int32:
+    right: int32 = ox + w - 3
+    if w >= CLOSE_SZ * 3:
+        close_box_at(ox, oy, w)
+        right = cb_x - TITLE_GAP
+    return right - (ox + TITLE_PAD)
+
+
+# Build the run to draw into titlebuf and return its length, or 0 for nothing.
+#
+# WHAT A HOSTILE TITLE CANNOT DO, and this is the whole of it:
+#
+#  * IT CANNOT INJECT A DRAW OP. The run goes through hamscene_glyphs(), whose
+#    _hs_emit_str maps `"` and newline to a space, so no byte of it can leave
+#    the quoted token and become a `fill` or an `image` verb. That is the
+#    library's guarantee, not this function's; this function ALSO maps every
+#    byte outside printable ASCII to '.', so a run of control bytes is shown
+#    as dots rather than fed to a glyph rasterizer as a codepoint.
+#  * IT CANNOT BE WIDER THAN THE BAR. Measured with htb_text_width(), which
+#    sums the SAME per-glyph advances lib/hamui_host.ad's _blit_glyph_prop
+#    draws with (lib/hamtextbox.ad exists to be the one place that owns that
+#    sum), and ellipsised down until it fits.
+#  * AND IF THAT MEASUREMENT WERE WRONG IT STILL COULD NOT OVERRUN, because
+#    title_draw() rasterizes into a surface exactly `avail` pixels wide and
+#    blits exactly that surface. The measurement decides where the text is
+#    CUT; the surface decides where the ink can REACH. Two independent
+#    bounds, because one of them is arithmetic and arithmetic is what gets
+#    this wrong.
+#
+# What a hostile title CAN do is put 63 bytes of its choosing, in the chrome's
+# own colour, on another client's title bar -- it can lie about which window
+# is which. That is not fixable here: it needs a per-uid window-table mapping
+# or an RPC compositor (user/linux-wsys.c names the same limit for the scene
+# and the key ring). Sanitizing bytes does not make a 0666 table trustworthy
+# and this comment is not pretending it does.
+def title_build(i: uint64, avail: int32) -> uint64:
+    src: uint64 = i * WSYSD_TITLE_CAP
+    n: uint64 = 0
+    while n < WSYSD_TITLE_CAP - 1 and win_title[src + n] != 0:
+        c: uint8 = win_title[src + n]
+        if c < 32 or c > 126:
+            c = 46                             # '.' -- shown, never obeyed
+        titlebuf[n] = c
+        n = n + 1
+    titlebuf[n] = 0
+    if n == 0:
+        return 0
+    if htb_text_width(&titlebuf[0], n) <= avail:
+        return n
+    # Too wide: ellipsise. Drop bytes off the end until the run PLUS the three
+    # dots fits. If not even the dots fit, draw nothing -- three dots jammed
+    # against a close button say less than an empty bar does.
+    ew: int32 = htb_text_width(cast[Ptr[uint8]]("..."), 3)
+    if ew > avail:
+        return 0
+    keep: uint64 = n
+    while keep > 0 and htb_text_width(&titlebuf[0], keep) + ew > avail:
+        keep = keep - 1
+    titlebuf[keep] = 46
+    titlebuf[keep + 1] = 46
+    titlebuf[keep + 2] = 46
+    titlebuf[keep + 3] = 0
+    return keep + 3
+
+
+# Paint window `i`'s name on its title bar.
+#
+# HOW, and deliberately NOT with a font of its own. The text is a one-line
+# hamscene display list (`glyphs x y "..." #RRGGBB`, built by the same
+# lib/hamscene.ad builders every DE client uses) rasterized by the same
+# lib/hamui_host.ad this compositor already rasterizes every window with --
+# which means the same DejaVu Sans face at the same 14px through the same
+# anti-aliased TrueType path, so the name on the bar is the same text the app
+# draws inside it. There is no second font system in this file and there must
+# not be one.
+#
+# The surface is TITLE-BAR SIZED and presented KEYED, not opaque: the clear
+# that opens the rasterize leaves alpha 0 (hamui_host_set_clear_alpha), every
+# glyph leaves 0xFF, and blit_window_image_mode(mode 1) writes only the
+# non-zero ones -- so the gradient and the bevel painted a moment ago show
+# between the letters instead of being replaced by a black box. That is the
+# same mechanism the panel's dropdown and the cursor sprite already use.
+#
+# ON hamui_host_uncovered_rows(). It is not the instrument for this layer and
+# saying so is more useful than a green number: it unions the destination
+# rects of the FILL and BLIT helpers only (lib/hamui_host.ad's _host_cov_add
+# call sites), and glyph ink is stamped through vk2d_raster_cov_mask, which is
+# not one of them. It would report every row of the title surface uncovered no
+# matter what was drawn -- which is also why report_uncovered() below exempts
+# keyed presents: a keyed surface is SUPPOSED to be mostly unpainted. The
+# clip is proven on framebuffer pixels instead, in tests/linux/wsys_title.sh.
+def title_draw(i: uint64, ox: int32, oy: int32, w: int32):
+    avail: int32 = title_avail_w(ox, oy, w)
+    if avail < 8:
+        return
+    n: uint64 = title_build(i, avail)
+    if n == 0:
+        return
+    hamscene_begin()
+    hamscene_glyphs(0, TITLE_TOP, &titlebuf[0], "#F0F0F5")
+    hamui_host_set_clear_alpha(0)
+    hamui_host_begin(avail, TITLEBAR_H)
+    hamui_host_rasterize()
+    blit_window_image_mode(ox + TITLE_PAD, oy - TITLEBAR_H, avail,
+                           TITLEBAR_H, 1)
 
 
 # 1 = (x, y) in screen coordinates is inside window i's close button.
