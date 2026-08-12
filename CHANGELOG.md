@@ -20,6 +20,40 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
+- **The packaged bytes are unpacked and RUN before an index is written.**
+  `tests/linux/channel_runs_desktop.sh` takes the built `.tar.gz` files apart
+  and runs what is inside them — the desktop under a synthetic mouse, the
+  shell, `hpm`, the coreutils asserted on real answers rather than exit 0. It
+  compiles nothing it asserts on and proves that by grepping itself. The
+  packaging script refuses to write `index.json` if it fails, so a channel
+  whose binaries do not work installs nowhere.
+  This exists because of 1.0.10 below. Every other check passed on that
+  release: the names were all present, the hashes all matched the bytes
+  served, the dependency closure resolved. Nothing ran the binaries, because
+  every gate in this tree builds from source — so the artefact that shipped
+  was the one artefact nothing executed.
+
+## 1.0.11
+
+**Recovers a machine that took 1.0.10.** If you installed or updated to
+1.0.10, `hpm update` brings the desktop back.
+
+**Measured this release, and worth knowing before you judge what runs here:**
+Steam, in a Debian namespace, is driven far past its login window. Typing puts
+text in its username field and masks a password; hovering repaints the field;
+"Create a Free Account" opens a second window carrying a live captcha; the
+Browse menu drops down with store artwork; the real store front page loads;
+dragging the scrollbar scrolls it; and a search for a game returns titles with
+prices and cover art. Every one of those events entered through the same path
+a person's mouse and keyboard use — no test wrote a window-system ring by
+hand. What does NOT work is the scroll wheel (above). No Steam account was
+used, so the library, downloads and launching a game remain unmeasured and are
+not claimed.
+
+1.0.10's bytes were deliberately left as published rather than corrected under
+the same version number: a machine that already believes it has 1.0.10 would
+never fetch a silently fixed one, so the fix has to arrive as a new version.
+
 - **Clicking away dismisses an open menu.** The compositor emitted no focus
   lines at all, so no window was ever told it lost focus and the Applications
   menu closed only by clicking its button a second time. `f in`/`f out` now go
@@ -39,8 +73,32 @@ in someone's head.
   0.04% of one core at the worst constructible clipboard size — while making a
   non-bumping writer take 2 s instead of 128 ms to be noticed. It still polls
   by content, with the table of numbers next to the code.
+- **The scroll wheel exists.** `wsysd` had plumbed the whole wheel — the evdev
+  event, the delta, the fifth field of the routed pointer line — and the
+  Wayland server's pointer parser read four fields and stopped at the fifth.
+  So every Wayland and X client behind this compositor has had a **dead scroll
+  wheel for the entire life of the port**, Firefox included. `wl_pointer.axis`
+  is now sent, and `axis_discrete` precedes it as the protocol requires.
+  **NOT a complete fix, stated rather than glossed:** Steam inside a
+  distribution namespace still does not scroll, across three full boots with
+  the shipped binary verified against the source change. Everything upstream
+  of the window's pointer file is eliminated by measurement — the compositor's
+  own counter advances by exactly twenty for twenty wheel notches with the
+  cursor held still. The remaining suspect is a version difference: the test
+  runs against the host's Xwayland 24.x while the namespace ships 22.1.9.
 
 ## 1.0.10
+
+> **BROKEN — do not install this version.** `hamnix-desktop` 1.0.10 shipped a
+> mixed build: a compositor compiled at 19:17 beside desktop and panel clients
+> compiled at 18:25, with the window-system backend all three link modified at
+> 19:54. A machine that installs or updates to it comes up with a desktop that
+> maps **no windows at all**. Update to 1.0.11, which recovers it.
+>
+> The cause was an object cache that compared each artefact only against its
+> own `.ad` source, so an edit to a shared library or backend invalidated
+> nothing. Fixed, and the gate described under Unreleased now runs the
+> packaged binaries before any index is written.
 
 The first release whose index is checked for dependency closure before it is
 written (see "the channel refuses itself" below), and the first with a signed
