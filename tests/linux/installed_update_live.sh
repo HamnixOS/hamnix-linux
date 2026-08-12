@@ -743,12 +743,18 @@ mouse_arrived "$LOG" '[lupd] p3 STATE-BEFORE:' '[lupd] p3 STATE-AFTER:' \
 # "the panel did not grow" and "there is no panel" into one line would report a
 # desktop that does not exist as a desktop that ignored a click, which is the
 # wrong bug on the wrong day.
-P3WINS="$(grep -aA1 -F '[lupd] p3 STATE-BEFORE:' "$LOG" | tail -1 | tr -d '\r' |
-          awk '{for (i = 1; i < NF; i++) if ($i == "windows") print $(i+1)}')"
+P3WINS="$(statefield "$LOG" '[lupd] p3 STATE-BEFORE:' windows)"
+# WHAT THE COMPOSITOR DOES HAVE, quoted, because "no top bar" and "no desktop"
+# are different sentences and the published clients have produced both across
+# runs: once zero windows, once the panel's BOTTOM taskbar and the wallpaper
+# with the top bar -- the one carrying the Applications button -- simply absent.
+P3LIST="$(awk 'index($0, "[lupd] p3 WINS-BEFORE") {inb = 1; next}
+               inb && index($0, "WINS-END") {exit}
+               inb && NF >= 6 && $1 ~ /^[0-9]+$/ {printf "(%s) ", $0}' "$LOG" | tr -d '\r')"
 if [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ]; then
     echo "lupd: PASS THE UPDATED MACHINE RUNS THE NEWER CODE: a real click on the Applications button opened the menu (the panel window grew $B3BEFORE -> $B3AFTER px)"
 elif [ -z "$B3BEFORE" ]; then
-    echo "lupd: FAIL THE UPDATE LANDED AND THE DESKTOP DID NOT COME UP. The bytes arrived (see the digest above) and the compositor is running, but it has ${P3WINS:-?} windows: no wallpaper, no panel, no Applications button to click. What the channel is serving is not a working desktop."
+    echo "lupd: FAIL THE UPDATE LANDED AND THE DESKTOP DID NOT COME UP. The bytes arrived (see the digest above) and the compositor is running with ${P3WINS:-?} windows, but NONE of them is the top bar (a full-width window at y=0, z=100), so there is no Applications button to click. Windows present: [${P3LIST:-none}]. What the channel is serving is not a working desktop."
     fail=1
 else
     echo "lupd: FAIL THE UPDATED MACHINE IS STILL RUNNING THE OLD DESKTOP: after a real click the panel window is ${B3AFTER:-unknown} px, not more than $B3BEFORE. The work published to the channel did not reach this machine, or did not take effect."

@@ -180,9 +180,12 @@ same failure this project exists to beat.
 * **THE `hamnix-desktop` PACKAGE ON https://255.one/ RIGHT NOW IS A MIXED
   BUILD, AND A MACHINE THAT UPDATES TO IT LOSES ITS DESKTOP.** Measured, on an
   installed disk, by `tests/linux/installed_update_live.sh`: after a bare
-  `hpm update` and a reboot the compositor is running and
-  `cat /dev/wsys/wsysd/state` says **`windows 0`** — no wallpaper, no panel, no
-  Applications button. Reproduced offscreen on the host in seconds: swap only
+  `hpm update` and a reboot there is **no top bar and so no Applications
+  button**, and it is not even deterministic — two runs of the same disk gave
+  `windows 0` (nothing came up at all) and `windows 2`
+  (`2 0 774 1280 26 100 …` the panel's BOTTOM taskbar and
+  `3 0 0 1280 800 -1 …` the wallpaper; the top bar simply absent). Reproduced
+  offscreen on the host in seconds: swap only
   the published `hampanelscene` into `tests/linux/de_mouse_chrome.sh`
   (`MOUSE_BIN_DIR=`) and the top bar disappears (13 PASS → 2 PASS / 1 FAIL),
   and the framebuffer's top band goes from the panel's `#ecEEf2` to the empty
@@ -1390,7 +1393,13 @@ No version number is written down against the live repository — publishing
 | A bare `hpm refresh` | **status 0** against `https://255.one/` — the shipped `/etc/hpm/trusted.pub` verifies the published `index.json.sig`, so the `--allow-unsigned` NOTE in `installed_update.sh` is closed |
 | A bare `hpm update` | `upgrading hamnix-desktop 1.0.0 -> 1.0.10`, `SHA-256 verified`, `upgraded=3`, and `keeping this machine's own /etc/rc.boot` |
 | The bytes | guest `md5sum /bin/wsysd` = **`52e8b468…`** = the digest the HOST computed from the tarball 255.one served. Survives the reboot. No index field can satisfy that |
-| Boot 3, the point of the whole file | **`windows 0`.** The update landed and the desktop did not come up — see the first bullet under *What is HONESTLY BROKEN*. The delivery path works; what is being delivered does not |
+| Boot 3, the point of the whole file | **no top bar.** The update landed and the desktop did not come up — see the first bullet under *What is HONESTLY BROKEN*. The delivery path works; what is being delivered does not |
+
+Run the no-update arm and it is **21 PASS / 1 FAIL**, the FAIL being the one
+sentence the file exists for: *"THE UPDATED MACHINE IS STILL RUNNING THE OLD
+DESKTOP: after a real click the panel window is 26 px, not more than 26"* —
+with the pointer proven delivered (`0 → 3` routed events) and the desktop
+proven up (3 windows). Exit status 1.
 
 **The did-not-update arm runs.** `HAMLINUX_LIVEUPD_NOUPDATE=1` does everything
 except `hpm update`, so the green is a statement about the update having
