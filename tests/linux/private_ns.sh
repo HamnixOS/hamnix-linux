@@ -196,7 +196,33 @@ priv_ns_reexec() {
         *) [ -d "$xdg" ] && targets+=("$xdg=0700") ;;
     esac
 
-    exec unshare --user --map-root-user --mount -- \
+    # THE ID MAP IS PART OF THE FIDELITY, AND IT WAS MEASURED.
+    #
+    # `--map-root-user` alone maps exactly one id: 0 -> the invoking user.
+    # Every OTHER uid and gid is unmapped, and a program that touches one gets
+    # EINVAL. That is not theoretical -- tests/linux/wsyswl_rootless.sh drives
+    # two `xterm`s as its X clients, and inside the one-id namespace each one
+    # printed
+    #
+    #     xterm: Cannot chown /dev/pts/7 to 0,5: Invalid argument
+    #
+    # and DIED, because gid 5 (tty) is not in the map. The gate then reported
+    # "the X root has 1 children", "windows_high_water is 1" and "/dev/wsys
+    # lists 0 application windows" -- four FAILs that were the namespace's,
+    # about a compositor that had done nothing wrong. An isolation that makes
+    # a gate lie about its subject is not an improvement.
+    #
+    # So when the host has subordinate id ranges (/etc/subuid, /etc/subgid)
+    # and the setuid newuidmap/newgidmap helpers, `--map-auto` maps 65535 more
+    # ids beside root, gid 5 among them, and xterm lives. Where they are absent
+    # this falls back to the one-id map and SAYS which one it got, because a
+    # gate whose client needs a second id must be able to tell the two cases
+    # apart rather than read a failure as a finding.
+    local mapargs=(--map-root-user)
+    if unshare --user --map-root-user --map-auto --mount true 2>/dev/null; then
+        mapargs+=(--map-auto)
+    fi
+    exec unshare --user "${mapargs[@]}" --mount -- \
         /usr/bin/env PRIV_NS_ACTIVE=1 \
         bash -c '
             prog="$1"; shift
@@ -263,7 +289,10 @@ priv_ns_describe() {
     local dev xdev x="${XDG_RUNTIME_DIR:-<unset>}"
     dev="$(awk '$5 == "/tmp" { d = $3 } END { print d }' /proc/self/mountinfo)"
     xdev="$(awk -v want="$x" '$5 == want { d = $3 } END { print d }' /proc/self/mountinfo)"
-    echo "isolated: /tmp, /dev/shm, /srv and \$XDG_RUNTIME_DIR ($x${xdev:+, dev $xdev}) are private tmpfs of this run alone (/tmp is dev $dev in this mount namespace; the host's /tmp is untouched and unreadable from here)"
+    local idmap="one id only (root); a program needing a second uid/gid gets EINVAL"
+    [ "$(wc -l </proc/self/gid_map 2>/dev/null)" -gt 1 ] && \
+        idmap="root plus a subordinate range, so gid 5 (tty) and friends exist"
+    echo "isolated: /tmp, /dev/shm, /srv and \$XDG_RUNTIME_DIR ($x${xdev:+, dev $xdev}) are private tmpfs of this run alone (/tmp is dev $dev in this mount namespace; the host's /tmp is untouched and unreadable from here); id map: $idmap"
 }
 
 # priv_ns_keep <dir> -- a host-visible directory that OUTLIVES the namespace.
