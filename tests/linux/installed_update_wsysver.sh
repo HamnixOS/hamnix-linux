@@ -255,6 +255,24 @@ sys.exit(0 if key(os.environ["NEWVER"]) > key(os.environ["LIVEVER"]) else 1)
 PY
     echo "FAIL: $NEWVER does not sort above the published $LIVEVER" >&2; exit 1; }
 say "published: $PKG $LIVEVER. This tree will be offered as $NEWVER."
+# THE PRECONDITION STAGES A-D HAVE, STATED WHERE IT CAN BE READ.
+#
+# Stages A-D measure what a WINDOW-SYSTEM VERSION BUMP does to a running
+# desktop, so they need the published channel to be BELOW this tree's
+# WSYS_VERSION. That was true when they were written (published v7, tree v8)
+# and it stops being true the moment this tree's version ships: after that,
+# published == tree, `hpm update` moves no version, and there is nothing for a
+# refusal to refuse. Nothing here can detect that in advance without running
+# the published compositor on this host, which this gate deliberately does not
+# do -- so it is said out loud instead, and the C-stage assertions below fail
+# by name if it has happened (SEGVER comes back empty, "no refusal" is FAIL).
+#
+# STAGE E IS NOT AFFECTED. It builds BOTH sides itself, one WSYS_VERSION
+# apart, so it measures a real bump in every run whatever the channel has
+# moved to -- which is also the reason it is the stage that can say anything
+# about what the person SEES.
+say "NOTE: stages A-D assume the published channel is BELOW this tree's wsys v$NEWWSYS."
+say "      If $LIVEVER already carries v$NEWWSYS there is no bump for them to see; STAGE E builds its own."
 
 LIVE_URL="$(PKG="$PKG" python3 - "$WORK/live-index.json" <<'PY'
 import json, os, sys
