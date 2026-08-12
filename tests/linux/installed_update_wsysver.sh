@@ -410,8 +410,14 @@ mktree() {
 }
 
 prepare_v9() {
-    if [ -f "$NEXT_TAR" ] && [ "${HAMLINUX_WV_REUSE:-0}" = 1 ]; then
-        say "reusing $NEXT_TAR (HAMLINUX_WV_REUSE=1)"
+    # REUSED WHENEVER IT IS THERE, and NOT gated on HAMLINUX_WV_REUSE -- that
+    # flag also reuses the DISK, and the disk cannot be reused: phase 3 leaves
+    # /etc/rc.boot as rc.phase3, so a second run of the same image would boot
+    # phase 3 forever. The $NEWVER tarball beside it is treated the same way
+    # (§1 only requires it to exist), so a re-run costs three boots and not a
+    # second hundred-package build. Delete $REPO2 to force a rebuild.
+    if [ -f "$NEXT_TAR" ]; then
+        say "reusing $NEXT_TAR"
     else
         say "staging a v$NEXTWSYS tree and building $PKG $NEXTVER (this takes a few minutes)"
         rm -rf "$TREE9"
@@ -799,15 +805,32 @@ NOTICE_FACE=ffe9b0                    # the card's inset face colour
 NOTICE_CX=$((NOTICE_X + NOTICE_W / 2))
 NOTICE_CY=$((NOTICE_Y + NOTICE_H / 2))
 
-# THE HAND FOR STAGE E, which asks three different questions from A-D's and so
-# does NOT reuse stage_hand:
+# THE HAND FOR STAGE E, which asks different questions from A-D's and so does
+# NOT reuse stage_hand:
 #   1,2  the noise floor, and the screen with no notice on it yet
-#   3    click Applications -> the spawn is refused -> is there a notice?
-#   4    click somewhere FAR from the notice -> is it still there (i.e. it is
-#        not a one-frame flash) and is the desktop still taking clicks?
-#   5    click the notice itself -> is it gone?
-#   6    type -> does the keyboard still reach the terminal, i.e. dismissing
-#        the notice did not wedge the session
+#   3    click Applications
+#   4    CLICK IT AGAIN -- and this is not belt-and-braces, it is the whole
+#        reason this hand exists. The Applications button is a TOGGLE over a
+#        pid: user/hampanelscene.ad's _toggle_appmenu sends `terminate` to a
+#        LIVE hamappmenu and only launches when there is none. STAGE D's hand
+#        opened the menu and left it open -- measured, in the panel's own log:
+#        `launched /bin/hamappmenu -self` at D and NOTHING at E -- so the first
+#        run of this gate clicked Applications at STAGE E and the panel
+#        correctly closed a menu instead of starting a program. No spawn, no
+#        refusal, no notice, and a FAIL that was about the hand and not about
+#        the machine. Two clicks reach a launch from EITHER state: if D left a
+#        menu up, click 3 closes it and click 4 launches; if it did not, click
+#        3 launches (and is refused, so no window appears to be closed) and
+#        click 4 launches again. The notice is asserted at 4.
+#   5    click somewhere FAR from the notice -> is it still there, i.e. not a
+#        one-frame flash?
+#   6    click the notice itself -> is it gone?
+#   7    click Applications once more -> the panel still answers, i.e.
+#        dismissing the notice did not wedge the desktop. NOT a typing test:
+#        the dismissing click lands on the PANEL's window, so the panel now
+#        holds focus and keystrokes no longer reach the terminal. That is the
+#        ordinary consequence of clicking a panel and it would have made a
+#        keyboard assertion here measure the wrong thing.
 notice_hand() {   # notice_hand <tag>
     local t="$1"
     sleep 3
@@ -816,16 +839,19 @@ notice_hand() {   # notice_hand <tag>
     shot "$t-2-idle"
     Q click "$APPBTN_X" "$APPBTN_Y" "$SCREEN_W" "$SCREEN_H"
     sleep 4
-    shot "$t-3-menu"
+    shot "$t-3-click1"
+    Q click "$APPBTN_X" "$APPBTN_Y" "$SCREEN_W" "$SCREEN_H"
+    sleep 4
+    shot "$t-4-click2"
     Q click "$NEUTRAL_X" "$NEUTRAL_Y" "$SCREEN_W" "$SCREEN_H"
     sleep 3
-    shot "$t-4-elsewhere"
+    shot "$t-5-elsewhere"
     Q click "$NOTICE_CX" "$NOTICE_CY" "$SCREEN_W" "$SCREEN_H"
     sleep 3
-    shot "$t-5-dismissed"
-    Q type "wsysprobe"
+    shot "$t-6-dismissed"
+    Q click "$APPBTN_X" "$APPBTN_Y" "$SCREEN_W" "$SCREEN_H"
     sleep 3
-    shot "$t-6-typed"
+    shot "$t-7-alive"
 }
 
 waitmark() {   # waitmark <log> <marker> <deadline-seconds>
@@ -1274,12 +1300,14 @@ facepct() {   # facepct <shot-basename> -- % of the notice rect that is the card
         "$NOTICE_IN_W" "$NOTICE_IN_H" | grep -aE '^[0-9]+$' | head -1
 }
 FD3="$(facepct D-3-menu)"      # same rect, same session, before v$NEXTWSYS existed
-FE2="$(facepct E-2-idle)"      # after the update, before the click
-FE3="$(facepct E-3-menu)"      # after clicking Applications
-FE4="$(facepct E-4-elsewhere)" # after clicking far away from the notice
-FE5="$(facepct E-5-dismissed)" # after clicking the notice itself
-echo "wv: NOTE the notice rectangle (${NOTICE_IN_W}x${NOTICE_IN_H}+${NOTICE_IN_X}+${NOTICE_IN_Y}) is #$NOTICE_FACE at: D-3-menu ${FD3:-?}%, E-2-idle ${FE2:-?}%, E-3-menu ${FE3:-?}%, E-4-elsewhere ${FE4:-?}%, E-5-dismissed ${FE5:-?}%"
-for v in "$FD3" "$FE2" "$FE3" "$FE4" "$FE5"; do
+FE2="$(facepct E-2-idle)"      # after the update, before any click
+FE3="$(facepct E-3-click1)"    # after the FIRST Applications click (see notice_hand)
+FE4="$(facepct E-4-click2)"    # after the second -- a launch has certainly happened
+FE5="$(facepct E-5-elsewhere)" # after clicking far away from the notice
+FE6="$(facepct E-6-dismissed)" # after clicking the notice itself
+echo "wv: NOTE the notice rectangle (${NOTICE_IN_W}x${NOTICE_IN_H}+${NOTICE_IN_X}+${NOTICE_IN_Y}) is #$NOTICE_FACE at: D-3-menu ${FD3:-?}%, E-2-idle ${FE2:-?}%, E-3-click1 ${FE3:-?}%, E-4-click2 ${FE4:-?}%, E-5-elsewhere ${FE5:-?}%, E-6-dismissed ${FE6:-?}%"
+echo "wv: NOTE E-3-click1 is NOT scored: the Applications button is a toggle over a pid, so whether the FIRST click launches anything depends on whether STAGE D left a menu open. E-4-click2 is the one a launch has certainly happened by."
+for v in "$FD3" "$FE2" "$FE3" "$FE4" "$FE5" "$FE6"; do
     [ -n "$v" ] || { echo "wv: FAIL STAGE E could not measure the notice rectangle at all -- a screendump is missing, so every judgement below would be about an absent picture rather than an empty one"; fail=1; break; }
 done
 if [ -n "$FD3" ] && [ "$FD3" -le 1 ]; then
@@ -1288,33 +1316,37 @@ elif [ -n "$FD3" ]; then
     echo "wv: FAIL a notice was already on the screen at STAGE D (${FD3}%), where nothing had been refused. A notice that appears when nothing was refused is worse than no notice."
     fail=1
 fi
-if [ -n "$FE3" ] && [ -n "$FD3" ] && [ "$FE3" -ge 40 ] && [ "$FE3" -gt "$FD3" ]; then
-    echo "wv: PASS THE PERSON IS TOLD: after the update to v$NEXTWSYS, one real click on the Applications button put a notice on the screen -- the notice colour goes ${FD3}% -> ${FE3}% of the same rectangle. The click no longer does nothing."
-elif [ -n "$FE3" ]; then
-    echo "wv: FAIL after the update the click on Applications still left the screen unchanged: the notice rectangle is ${FE3}% #$NOTICE_FACE. This is the original finding, unfixed."
-    fail=1
-fi
-if [ -n "$FE4" ] && [ "$FE4" -ge 40 ]; then
-    echo "wv: PASS THE NOTICE STAYS UP: a click at ($NEUTRAL_X,$NEUTRAL_Y), far from it, left it at ${FE4}% -- it is a notice a person can read, not a one-frame flash tied to the button"
+if [ -n "$FE4" ] && [ -n "$FD3" ] && [ "$FE4" -ge 40 ] && [ "$FE4" -gt "$FD3" ]; then
+    echo "wv: PASS THE PERSON IS TOLD: after the update to v$NEXTWSYS, real clicks on the Applications button put a notice on the screen -- the notice colour goes ${FD3}% (STAGE D) -> ${FE4}% of the same rectangle. The click no longer does nothing."
 elif [ -n "$FE4" ]; then
-    echo "wv: FAIL the notice vanished on a click somewhere else (${FE4}%): a person who looks away has lost the only thing that told them what to do"
+    echo "wv: FAIL after the update the click on Applications still left the screen unchanged: the notice rectangle is ${FE4}% #$NOTICE_FACE. This is the original finding, unfixed."
     fail=1
 fi
-if [ -n "$FE5" ] && [ "$FE5" -le 1 ]; then
-    echo "wv: PASS THE NOTICE IS DISMISSIBLE: a click on the card itself took it back to ${FE5}% -- it is not something the person is stuck with"
+if [ -n "$FE5" ] && [ "$FE5" -ge 40 ]; then
+    echo "wv: PASS THE NOTICE STAYS UP: a click at ($NEUTRAL_X,$NEUTRAL_Y), far from it, left it at ${FE5}% -- it is a notice a person can read, not a one-frame flash tied to the button"
 elif [ -n "$FE5" ]; then
-    echo "wv: FAIL the notice would not go away when clicked (${FE5}%): it is now the thing covering the desktop"
+    echo "wv: FAIL the notice vanished on a click somewhere else (${FE5}%): a person who looks away has lost the only thing that told them what to do"
     fail=1
 fi
-# NOT WEDGED. Dismissing the notice must leave a working session behind, and
-# "working" is asked of the keyboard, which the notice never touched: typing
-# into the terminal that has focus has to change the screen.
+if [ -n "$FE6" ] && [ "$FE6" -le 1 ]; then
+    echo "wv: PASS THE NOTICE IS DISMISSIBLE: a click on the card itself took it back to ${FE6}% -- it is not something the person is stuck with"
+elif [ -n "$FE6" ]; then
+    echo "wv: FAIL the notice would not go away when clicked (${FE6}%): it is now the thing covering the desktop"
+    fail=1
+fi
+# NOT WEDGED, asked of the CLICK PATH rather than the keyboard. The dismissing
+# click lands on the panel's own window, so the panel now holds focus and
+# keystrokes stop reaching the terminal -- that is what clicking a panel does,
+# and a keyboard assertion here would have measured it and called it a wedge.
+# What must still be true is that the panel keeps answering the mouse after
+# drawing and withdrawing a notice: one more click on Applications has to
+# change the screen by more than the run's own noise floor.
 EN="$(ppn "$SHOT/E-1-idle.ppm" "$SHOT/E-2-idle.ppm")"
-ET="$(ppn "$SHOT/E-5-dismissed.ppm" "$SHOT/E-6-typed.ppm")"
-if [ -n "$EN" ] && [ -n "$ET" ] && [ "$ET" -gt $((EN + 500)) ]; then
-    echo "wv: PASS THE DESKTOP IS NOT WEDGED: after the notice was dismissed, typing still reached the focused terminal ($ET px changed against a $EN px noise floor)"
+EA="$(ppn "$SHOT/E-6-dismissed.ppm" "$SHOT/E-7-alive.ppm")"
+if [ -n "$EN" ] && [ -n "$EA" ] && [ "$EA" -gt $((EN * 5 + 500)) ]; then
+    echo "wv: PASS THE DESKTOP IS NOT WEDGED: after the notice was drawn and dismissed, the Applications button still answers -- one more click changed $EA px against a $EN px noise floor"
 else
-    echo "wv: FAIL after dismissing the notice the keyboard changed ${ET:-?} px against a ${EN:-?} px noise floor -- the session did not survive its own notice"
+    echo "wv: FAIL after the notice was dismissed a click on Applications changed ${EA:-?} px against a ${EN:-?} px noise floor -- the panel stopped answering the mouse"
     fail=1
 fi
 # THE REFUSAL ITSELF MUST NOT HAVE MOVED. The notice is cosmetic on top of the
@@ -1354,9 +1386,9 @@ if [ -n "$EWIN" ] && [ "$EWIN" = "$DWIN" ]; then
 else
     echo "wv: NOTE the window table moved between STAGE D and STAGE E -- D: ${DWIN:-(none)} / E: ${EWIN:-(none)}"
 fi
-pp png "$SHOT/E-3-menu.ppm" "$SHOT/E-3-menu.png" >/dev/null 2>&1
-pp png "$SHOT/E-5-dismissed.ppm" "$SHOT/E-5-dismissed.png" >/dev/null 2>&1
-echo "wv: NOTE the notice as a person sees it: $SHOT/E-3-menu.png (and dismissed: $SHOT/E-5-dismissed.png)"
+pp png "$SHOT/E-4-click2.ppm" "$SHOT/E-4-click2.png" >/dev/null 2>&1
+pp png "$SHOT/E-6-dismissed.ppm" "$SHOT/E-6-dismissed.png" >/dev/null 2>&1
+echo "wv: NOTE the notice as a person sees it: $SHOT/E-4-click2.png (and dismissed: $SHOT/E-6-dismissed.png)"
 fi
 
 echo
