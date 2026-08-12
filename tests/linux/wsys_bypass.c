@@ -76,11 +76,39 @@
  *               UNCHANGED and still runs: the harness's assertion is INVERTED,
  *               so the day anything puts keystrokes back in the segment it says
  *               so rather than quietly passing.
- *   SCRAPE      STILL OPEN.  Another window's committed `scene`, which is what
- *               is on the screen inside it.
+ *   SCRAPE      CLOSED FOR THE v1 DISPLAY LIST, OPEN FOR THE v2 PIXELS.  The
+ *               committed `scene` -- the text of what is drawn inside a window
+ *               -- left this mapping for a per-window memfd (THE PIXEL HAND-UP
+ *               in user/linux-wsys.c), and this mode is UNCHANGED and still
+ *               reads it out of the row: the harness's assertion is INVERTED,
+ *               so the day anything puts a display list back in the segment it
+ *               says so.  /srv/wsys.bb, which holds every v2 window's PIXELS
+ *               and is what a browser and a bridged X client draw into, is
+ *               untouched -- see the `bbscrape` mode.
  *   ENUMERATE   STILL OPEN.  Every row's wid, pid, geometry and title.
  *
  *   wsys_bypass snoop <path> <wid=N|title-run> [tag]
+ *
+ * A SIXTH MODE, `bbscrape`, is the POSITIVE control that keeps the half of
+ * SCRAPE that is still open from being believed shut.  The v1 display list is
+ * out of the shared mapping; the v2 BACKBUFFER is not, and a v2 window is what
+ * a browser, a video and a rootless Xwayland are.  So on a machine where a
+ * hamUI application's screen contents are private, Firefox's are readable by
+ * anything on the box, and nothing about looking at the two windows says which
+ * is which.  This mode measures that: open /srv/wsys.bb O_RDONLY as the
+ * attacker, map it PROT_READ, and report the mode, the size and whether the
+ * mapping was obtained.
+ *
+ *   IT IS EXACT ABOUT WHAT IT PROVES.  It proves the v2 pixel store is a
+ *   world-readable shared mapping an unprivileged process holds -- which is
+ *   the whole of the exposure -- and it does NOT drive a v2 client, so it does
+ *   not print a victim's pixels the way `snoop` used to print a victim's
+ *   scene.  `needle=` is searched and reported for the day this gate grows a
+ *   blit client; a found=0 today means nothing has blitted, not that the store
+ *   is private.  Saying that here is cheaper than someone concluding the wrong
+ *   thing from a zero.
+ *
+ *   wsys_bypass bbscrape <bbpath> <needle> [tag]
  *
  * A FOURTH MODE, `keysend`, drives the attack the fix invites.  The channel that
  * replaced the keys ring is an ABSTRACT AF_UNIX address; abstract sockets carry
@@ -117,6 +145,12 @@
  *              else -1.  Driven LAST because an attach STOPS the victim.
  *
  *   wsys_bypass peek <path> <wid=N> <needle> [tag]
+ *
+ * A SEVENTH MODE, `pixgrab`, drives the attack THE PIXEL HAND-UP invites, and
+ * it is documented at the function itself because the argument for why it
+ * fails is the argument for why the hand-up is built the way it is.
+ *
+ *   wsys_bypass pixgrab <path> <ms> [tag]
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -133,6 +167,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ---- the mirror, tracking user/linux-wsys.c exactly --------------------- */
@@ -285,6 +320,157 @@ static int keysend(const char *tag, const char *path, const char *widarg,
 
 /* Print a byte run with the framing characters made visible, so a ring's
  * contents survive being read out of a shell variable by the harness. */
+static void put_run(const uint8_t *b, size_t n);
+
+/* pixgrab <path> <ms> [tag]: BIND THE PIXEL HAND-UP ADDRESS AND SEE WHAT
+ * ARRIVES.  This is the attack THE PIXEL HAND-UP invites, and it is the one
+ * that decides whether that construction is sound at all.
+ *
+ * The v1 display list left the segment for a per-window memfd the owner hands
+ * to the compositor over an ABSTRACT AF_UNIX rendezvous.  An abstract name
+ * carries no file mode and this one is derived from public facts -- the
+ * segment's st_dev/st_ino -- so ANYBODY can compute it and anybody can bind
+ * it.  If the receiver were the one doing the checking, as it is for the
+ * keystroke channel, a uid-1001 attacker that got here first would be handed
+ * every client's display list: a strictly worse hole than the one being
+ * closed, reached by copying a construction that is correct in the other
+ * direction.  What refuses it is that THE SENDER checks -- getsockopt
+ * SO_PEERCRED on the connection it just made, against the segment's owner.
+ *
+ * Run from BOTH uids by the harness, for the reason keysend is: a refusal
+ * measured without a matching success proves only that the address was wrong.
+ *   uid 1001  the attacker.  bind SUCCEEDS -- nothing can stop it -- and no
+ *             descriptor may ever arrive.
+ *   uid 0     the segment owner, i.e. what wsysd is on a real boot.  The same
+ *             program, the same address, and the display lists MUST arrive.
+ *
+ * Reports bound=, fds= (descriptors received) and scene=[...] read straight
+ * out of the first memfd handed over, which is the compromise itself and not a
+ * proxy for it. */
+struct m_wpix {
+    uint32_t magic, version;
+    int32_t  wid;
+    uint32_t scene_len;
+    uint32_t stage_len;
+    uint32_t gen;
+    uint8_t  scene[WSYS_SCENE_CAP];
+    uint8_t  stage[WSYS_SCENE_CAP];
+};
+
+static int pixgrab(const char *tag, const char *path, int ms)
+{
+    printf("== %s", tag);
+
+    struct stat st;
+    if (stat(path, &st) != 0) { printf(" stat=-%d\n", errno); return 0; }
+
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    a.sun_path[0] = '\0';
+    int n = snprintf(a.sun_path + 1, sizeof a.sun_path - 1,
+                     "hamnix-wsys/%llu.%llu/pixels",
+                     (unsigned long long)st.st_dev,
+                     (unsigned long long)st.st_ino);
+    socklen_t alen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+    printf(" uid=%d addr=[%s]", (int)getuid(), a.sun_path + 1);
+
+    /* SOCK_NONBLOCK, and it is not a detail: the accept loop below polls, so a
+     * BLOCKING listener makes a run that receives nothing hang for ever instead
+     * of printing the zero that is the whole measurement.  It did, once. */
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK, 0);
+    if (s < 0) { printf(" socket=-%d bound=0 fds=0\n", errno); return 0; }
+    if (bind(s, (struct sockaddr *)&a, alen) < 0) {
+        printf(" bind=-%d bound=0 fds=0\n", errno);
+        close(s);
+        return 0;
+    }
+    if (listen(s, 64) < 0) { printf(" listen=-%d bound=0 fds=0\n", errno);
+                             close(s); return 0; }
+    printf(" bound=1");
+
+    /* Non-blocking accept in a poll loop rather than a blocking one, so a run
+     * that receives nothing still terminates and still prints its zero. */
+    int got = 0, shown = 0;
+    for (int waited = 0; waited < ms; waited += 50) {
+        struct timespec ts = { 0, 50 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+        for (;;) {
+            int c = accept4(s, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+            if (c < 0) break;
+            int32_t wid = 0, fd = -1;
+            char cbuf[CMSG_SPACE(sizeof(int))];
+            struct iovec io = { &wid, sizeof wid };
+            struct msghdr m;
+            memset(&m, 0, sizeof m);
+            m.msg_iov = &io; m.msg_iovlen = 1;
+            m.msg_control = cbuf; m.msg_controllen = sizeof cbuf;
+            struct timespec t2 = { 0, 50 * 1000 * 1000 };
+            nanosleep(&t2, NULL);
+            ssize_t r = recvmsg(c, &m, MSG_DONTWAIT);
+            if (r == (ssize_t)sizeof wid)
+                for (struct cmsghdr *cm = CMSG_FIRSTHDR(&m); cm;
+                     cm = CMSG_NXTHDR(&m, cm))
+                    if (cm->cmsg_level == SOL_SOCKET
+                        && cm->cmsg_type == SCM_RIGHTS)
+                        memcpy(&fd, CMSG_DATA(cm), sizeof fd);
+            close(c);
+            if (fd < 0) continue;
+            got++;
+            if (!shown) {
+                struct m_wpix *p = mmap(NULL, sizeof *p, PROT_READ,
+                                        MAP_SHARED, fd, 0);
+                if (p != MAP_FAILED) {
+                    uint32_t sl = p->scene_len;
+                    if (sl > WSYS_SCENE_CAP) sl = WSYS_SCENE_CAP;
+                    printf(" gotwid=%d scenelen=%u scene=[", p->wid, sl);
+                    put_run(p->scene, sl);
+                    fputs("]", stdout);
+                    shown = 1;
+                    munmap(p, sizeof *p);
+                }
+            }
+            close(fd);
+        }
+    }
+    printf(" fds=%d\n", got);
+    close(s);
+    return 0;
+}
+
+/* bbscrape <bbpath> <needle> [tag]: the half of SCRAPE that is STILL OPEN.
+ * See the header.  O_RDONLY and PROT_READ throughout, like `snoop`, because
+ * that is the finding: no write access is needed to read a v2 window's pixels
+ * out of a third 0666 mapping that has to stay world-readable for the same
+ * reason the window table does -- a client of any uid blits its own pixels
+ * into it. */
+static int bbscrape(const char *tag, const char *path, const char *needle)
+{
+    printf("== %s", tag);
+
+    struct stat st;
+    if (stat(path, &st) != 0) { printf(" stat=-%d mapped=0 found=0\n", errno);
+                                return 0; }
+    printf(" mode=0%o uid=%d size=%lld", (unsigned)(st.st_mode & 07777),
+           (int)st.st_uid, (long long)st.st_size);
+
+    int fd = open(path, O_RDONLY);
+    printf(" open_ro=%d", fd >= 0 ? fd : -errno);
+    if (fd < 0) { printf(" ro=1 mapped=0 found=0\n"); return 0; }
+
+    size_t len = (size_t)st.st_size;
+    void  *m   = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
+    printf(" mmap_ro=%s", m == MAP_FAILED ? "FAIL" : "0");
+    if (m == MAP_FAILED) { printf(" ro=1 mapped=0 found=0\n"); close(fd);
+                           return 0; }
+
+    int found = needle && *needle && memmem(m, len, needle, strlen(needle));
+    printf(" ro=1 mapped=1 found=%d\n", found);
+    munmap(m, len);
+    close(fd);
+    return 0;
+}
+
 static void put_run(const uint8_t *b, size_t n)
 {
     for (size_t i = 0; i < n && i < 256; i++) {
@@ -475,6 +661,15 @@ int main(int argc, char **argv)
     /* peek <path> <wid=N> <needle> [tag] */
     if (argc >= 5 && strcmp(argv[1], "peek") == 0)
         return peek(argc >= 6 ? argv[5] : "peek", argv[2], argv[3], argv[4]);
+
+    /* bbscrape <bbpath> <needle> [tag] */
+    if (argc >= 4 && strcmp(argv[1], "bbscrape") == 0)
+        return bbscrape(argc >= 5 ? argv[4] : "bbscrape", argv[2], argv[3]);
+
+    /* pixgrab <path> <ms> [tag] */
+    if (argc >= 4 && strcmp(argv[1], "pixgrab") == 0)
+        return pixgrab(argc >= 5 ? argv[4] : "pixgrab", argv[2],
+                       atoi(argv[3]));
 
     /* snoop <path> <victim> [tag] */
     if (argc >= 4 && strcmp(argv[1], "snoop") == 0)

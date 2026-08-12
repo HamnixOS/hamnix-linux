@@ -86,6 +86,23 @@ int      hamwsys_ring_ready(const struct hamwsys_file *f);
 uint32_t hamwsys_input_gen(void);
 int      hamwsys_input_wait(uint32_t seen, int64_t timeout_ms);
 
+/* THE PIXEL HAND-UP'S HEARTBEAT, and it belongs on the PARK.
+ *
+ * A window's display list lives in a memfd its owner hands to the compositor
+ * (THE PIXEL HAND-UP in user/linux-wsys.c), and the hand-up is the client's
+ * own action.  Driving it from the wsys calls a client makes covers a client
+ * that is drawing and MISSES THE ONE THAT HAS STOPPED -- an application that
+ * paints its window once and then parks makes no wsys call ever again, so a
+ * compositor that binds after it (or restarts) would never be handed that
+ * window and would paint a blank rectangle for ever with nothing on stderr.
+ * Measured: hamimgscene draws one photograph and parks, and it was blank.
+ *
+ * sys_waitfds is where every such program is.  That is the property being
+ * used -- not "somewhere convenient", but the one call a client that is doing
+ * nothing at all still makes.  It is gated on a monotonic clock read inside,
+ * and returns immediately in a process that owns no window. */
+void     hamwsys_tick(void);
+
 /* The two syscalls hamUI uses to bind a spawned task to a window. */
 int32_t hamwsys_alloc(uint64_t pid);
 int32_t hamwsys_free(int32_t wid);

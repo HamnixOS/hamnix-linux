@@ -2467,6 +2467,13 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
      * fires the boot chime once and may never spawn again, so "reap at every
      * fork" alone would leave that zombie forever. See RFNOWAIT above. */
     reap_detached();
+    /* AND IT IS WHERE A WINDOW THAT HAS STOPPED DRAWING OFFERS ITS PIXELS.
+     * Same argument, one layer up: an application that paints once and parks
+     * makes no wsys call again, so the pixel hand-up driven from those calls
+     * would never reach it and its window would be blank for ever under a
+     * compositor that started or restarted afterwards.  hamimgscene is exactly
+     * that program and it WAS blank.  See hamwsys_tick in user/linux-wsys.h. */
+    hamwsys_tick();
     if (nfds > WAITFDS_MAX) {
         errno = EINVAL;
         return -1;

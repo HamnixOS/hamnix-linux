@@ -74,6 +74,17 @@ if [ "${1:-}" = "--inner" ]; then
     PROBE="$W/wsys_uidgate"        # the /dev/wsys PROTOCOL probe
     BYP="$W/wsys_bypass"           # the program that skips the protocol
     export HAMWSYS="$W/seg"
+    # HAMWSYS_BB, EXPLICITLY, and this line is a bug fix as well as a
+    # prerequisite.  The v2 backbuffer store is NOT named from $HAMWSYS the way
+    # the chrome segment is -- bb_attach has its own candidate list, and with
+    # this unset it falls through /srv (unwritable here) to the HOST's
+    # /dev/shm/hamnix-wsys-bb, which every other gate that sets it avoids.  So
+    # this gate has been creating a shared segment outside its own temp
+    # directory on every run, and the `rm -f "$HAMWSYS".bb` below has been
+    # removing a file nothing ever created.  It is also what makes the v2
+    # scrape below MEASURABLE: a store this gate cannot name is a store it
+    # cannot honestly report as open.
+    export HAMWSYS_BB="$HAMWSYS.bb"
     rm -f "$HAMWSYS" "$HAMWSYS".bb "$HAMWSYS".chrome
 
     # FROM $W, NOT FROM THE TREE. The inner half is a COPY of this file at
@@ -164,6 +175,24 @@ if [ "${1:-}" = "--inner" ]; then
     as 1001 "$BYP" bypass.table  "$HAMWSYS" 'uidgate probe' 'PWNEDBYPASSER'
     as 1001 "$BYP" bypass.chrome "$HAMWSYS".chrome  'CHROMEMARK' 'BYPASSEDXX'
     as 1001 "$BYP" bypass.scene  "$HAMWSYS" '0x334455' '0xDEAD99'
+    #      AND THE HALF OF SCRAPE THAT IS STILL OPEN, driven as a POSITIVE
+    #      control on every green run.  The v1 display list left the segment for
+    #      a per-window memfd; /srv/wsys.bb, which holds every v2 window's
+    #      PIXELS -- a browser, a video, a bridged X client -- did not.  So a
+    #      hamUI application's screen contents are private on this machine and
+    #      FIREFOX'S ARE NOT, and nothing about the two windows says which is
+    #      which.  The day that closes, this assertion is what says so.
+    #      THE STORE IS CREATED LAZILY, so it has to be made to exist before it
+    #      can be measured -- a stat of a file that is not there would have
+    #      reported "no backbuffer store" about a segment every v2 client on a
+    #      real desktop is sharing.  A 17-byte 'D' (damage/publish) record on
+    #      the window's draw ctl is the smallest thing that flips a window to
+    #      protocol 2 and allocates its slot; the rectangle in it is never read
+    #      because the surface has nothing started, so this creates the store
+    #      and draws nothing.
+    as 0 "$PROBE" chrome /dev/wsys/2/draw/ctl 'D000000000000000' \
+        | sed 's/^/== bbmake./'
+    as 1001 "$BYP" bbscrape "$HAMWSYS".bb 'NOTHINGBLITTEDINTHISGATE' sameuid.bb
 
     # 3. What the PROTOCOL sees afterwards.  This is what makes step 2 mean
     #    something: a write into a mapping that nothing reads back is not a
@@ -279,6 +308,42 @@ if [ "${1:-}" = "--inner" ]; then
     sleep 1
     sed 's/^/== victim./' "$W/live.client.out"
 
+    # 3b'. THE ATTACK THE PIXEL HAND-UP INVITES, and its matching success.
+    #
+    #      The display list left the segment for a per-window memfd the OWNER
+    #      hands to the compositor over an ABSTRACT AF_UNIX rendezvous.  An
+    #      abstract name has no file mode and this one is derived from public
+    #      facts, so anybody can bind it -- and if the RECEIVER were the one
+    #      checking credentials, as it is for the keystroke channel, a uid-1001
+    #      attacker that got there first would be handed every client's display
+    #      list.  That is a strictly WORSE hole than the one being closed,
+    #      reached by copying a construction that is right in the other
+    #      direction.  What refuses it is that THE SENDER checks: getsockopt
+    #      SO_PEERCRED on the connection it just made, against the segment's
+    #      owner.
+    #
+    #      BOTH DIRECTIONS, for the reason keysend is driven from both uids: a
+    #      refusal measured without a matching success proves only that the
+    #      address was wrong.  The uid-0 run is what wsysd is on a real boot and
+    #      it MUST receive a display list; the uid-1001 run is the attacker and
+    #      MUST receive nothing.  The attacker runs FIRST, so that the success
+    #      cannot be mistaken for something the refusal left behind.
+    #
+    #      IT IS HERE AND NOT WITH THE OTHER ATTACKS because a hand-up is the
+    #      CLIENT's action on the client's own clock, driven from the wsys calls
+    #      it makes -- and the holders make none at all until the drain flag
+    #      above lets them read their own rings.  Before that line they are
+    #      parked in sys_waitfds and would hand nothing to anybody, attacker or
+    #      compositor, which would make the refusal below pass for a reason that
+    #      has nothing to do with the check under test.
+    echo "-- the pixel hand-up rendezvous, from both uids"
+    as 1001 "$BYP" pixgrab "$HAMWSYS" 2500 sameuid.pixgrab
+    as 0    "$BYP" pixgrab "$HAMWSYS" 2500 hostowner.pixgrab
+    # The client says on stderr that it refused a stranger the descriptor.  Its
+    # output was already printed above under `victim.`, before any of this ran,
+    # so it is re-read here.
+    sed 's/^/== pixvictim./' "$W/live.client.out"
+
     # 3c. ATTACK 5 OF 5 -- PEEK, and it is the one that walks THROUGH attack 4's
     #     fix.  The keystrokes left the mapping, so the snooper above finds
     #     nothing; but the VICTIM still has them in its own address space, and on
@@ -376,13 +441,56 @@ if has after.table "PWNEDBYPASSER"; then
 else bad "the overwrite did not reach the protocol: $(line after.table)"; fi
 
 note "  attack 2 of 4 -- SCRIBBLE another client's committed scene:"
-if has bypass.scene "found=1"; then ok "a bypasser finds the published scene"
-else bad "the bypass never found the scene: $(line bypass.scene)"; fi
-if has bypass.scene "wrote=1"; then ok "and overwrites a colour in the display list"
-else bad "the bypass could not write the scene: $(line bypass.scene)"; fi
+note "  (CLOSED, and the controls below are INVERTED rather than deleted, the"
+note "   same way attack 3's were.  The bypasser is UNCHANGED: it still maps the"
+note "   0666 table read/write, still searches it for the victim's committed"
+note "   display list, and the assertion that it MAPPED the table must keep"
+note "   passing.  What changed is that the display list is not in the mapping"
+note "   at all -- it lives in a per-window memfd the owner hands to the"
+note "   compositor, THE PIXEL HAND-UP in user/linux-wsys.c -- so there is"
+note "   nothing there to find and nothing there to scribble.)"
+if has bypass.scene "open_rdwr=[0-9]"; then
+    ok "a bypasser still opens the 0666 table read/write"
+else bad "the bypass could not open the table; the control is broken: $(line bypass.scene)"; fi
+if has bypass.scene "mmap_rw=0"; then
+    ok "and still maps it MAP_SHARED PROT_WRITE"
+else bad "the bypass could not map the table; the control is broken: $(line bypass.scene)"; fi
+if has bypass.scene "found=1"; then
+    bad "INVERTED CONTROL FAILED: the committed display list is back in the"\
+        "0666 mapping: $(line bypass.scene)"
+else ok "AND THE COMMITTED DISPLAY LIST IS NOT THERE: the needle the victim"\
+       "drew is not in the table (was: found, and overwritten)"; fi
 if has after.scene "0xDEAD99"; then
-    ok "the protocol reads the scribbled scene back through <wid>/scene"
-else bad "the scribble did not reach the protocol: $(line after.scene)"; fi
+    bad "INVERTED CONTROL FAILED: a scribble into the table reached the"\
+        "protocol through <wid>/scene: $(line after.scene)"
+else ok "and nothing a bypasser writes there reaches the protocol"; fi
+# A REFUSAL THAT NAMES THE WINDOW, not a silent zero-byte read -- the same
+# standard the keys refusal is held to.  A read that succeeded and returned
+# nothing would be this tree's own worst bug shape.
+if grep -q "neither owns window 2 nor holds its display list" "$OUT"; then
+    ok "and a process that holds neither is refused BY NAME, not with an empty read"
+else bad "the scene read did not name its refusal: $(line after.scene)"; fi
+
+note ""
+note "  AND THE HALF OF SCRAPE THAT IS STILL OPEN (a positive control):"
+note "  (the v1 display list left the segment; /srv/wsys.bb, which holds every"
+note "   v2 window's PIXELS -- a browser, a video, a rootless Xwayland -- did"
+note "   not.  A hamUI app's screen contents are private on this machine and"
+note "   FIREFOX'S ARE NOT, and nothing about the two windows says which is"
+note "   which.  This runs on every green run so nobody can come to believe"
+note "   otherwise.)"
+if has sameuid.bb "mode=0666"; then
+    ok "STILL OPEN: the v2 backbuffer store is 0666"
+else bad "the backbuffer segment's mode was not read: $(line sameuid.bb)"; fi
+if has sameuid.bb "ro=1"; then
+    ok "and the scrape asked for no write access: O_RDONLY, PROT_READ"
+else bad "the backbuffer scrape did not run read-only: $(line sameuid.bb)"; fi
+if has sameuid.bb "mapped=1"; then
+    ok "STILL OPEN: a uid-1001 attacker holds every v2 window's pixels in a"\
+       "shared mapping (what it proves is the exposure, not a victim's pixels:"\
+       "this gate drives no v2 client, so found=0 means nothing blitted)"
+else bad "the attacker could not map the v2 backbuffer store -- if that is a"\
+        "fix it is an unmeasured one: $(line sameuid.bb)"; fi
 
 note "  attack 3 of 4 -- INJECT a key into another client's ring:"
 note "  (CLOSED, and the control below is INVERTED rather than deleted.  The"
@@ -452,7 +560,49 @@ if grep -q "^== victim.keysgot .*9 333" "$OUT"; then
 else ok "and the uid-1001 one is dropped, unstamped, by the receiving kernel"; fi
 
 note ""
-note "attack 4 of 4 -- SNOOP: read the victim's keystrokes and screen, O_RDONLY."
+note "attack 6 of 6 -- PIXGRAB: bind the pixel hand-up address and be handed"
+note "the desktop's display lists."
+note "(the attack the new channel invites, and the one that decides whether it"
+note " is sound.  The rendezvous is an ABSTRACT AF_UNIX name with no file mode,"
+note " derived from public facts, so ANYBODY can bind it -- and a receiver-checks"
+note " construction, which is exactly what the keystroke channel correctly uses,"
+note " would here hand every client's screen to whoever bound it first.  Which"
+note " end holds the secret decides which end checks: THE SENDER checks, with"
+note " SO_PEERCRED on the connection it just made.)"
+if has sameuid.pixgrab "bound=1"; then
+    ok "a uid-1001 attacker CAN take the address -- nothing can stop it"
+else bad "the attacker never bound the address, so its zero below proves"\
+        "nothing: $(line sameuid.pixgrab)"; fi
+if has sameuid.pixgrab "fds=0"; then
+    ok "AND NOT ONE CLIENT HANDS IT A DESCRIPTOR: fds=0, no display list"
+else bad "CONTROL FAILED: a uid-1001 attacker was handed a window's display"\
+        "list: $(line sameuid.pixgrab)"; fi
+if has sameuid.pixgrab "scene=\["; then
+    bad "CONTROL FAILED: the attacker read a victim's display list:"\
+        "$(line sameuid.pixgrab)"
+else ok "and there is nothing to read: no scene came back at all"; fi
+if grep -q "pixel hand-up address is held by uid" "$OUT"; then
+    ok "and the client SAYS SO, by name, on stderr -- a refusal nobody sees is"\
+       "how a desktop stops painting for no stated reason"
+else bad "the client refused silently: no named diagnostic in the run"; fi
+# THE MATCHING SUCCESS.  A refusal with no matching success proves only that
+# the address was wrong -- the rule keysend is driven under, applied here.
+if has hostowner.pixgrab "bound=1"; then
+    ok "the SEGMENT OWNER (what wsysd is on a real boot) binds the same address"
+else bad "the host owner could not bind: $(line hostowner.pixgrab)"; fi
+if grep -q "^== hostowner.pixgrab .* fds=[1-9]" "$OUT"; then
+    ok "and IS handed the descriptors: the same program, the same address, and"\
+       "the only difference is who the kernel says is listening"
+else bad "the host owner was handed nothing, so the refusal above proves only"\
+        "that the address was wrong: $(line hostowner.pixgrab)"; fi
+if has hostowner.pixgrab "rect 0 0 40 20"; then
+    ok "and reads the victim's committed display list out of the memfd -- which"\
+       "is the desktop working, the same bytes wsysd composites"
+else bad "the host owner got a descriptor with no display list in it:"\
+        "$(line hostowner.pixgrab)"; fi
+
+note ""
+note "attack 4 of 6 -- SNOOP: read the victim's keystrokes and screen, O_RDONLY."
 note "(THE KEYLOGGER IS CLOSED.  The snooper is UNCHANGED and still runs -- it"
 note " still opens the table O_RDONLY, still maps it PROT_READ, still finds the"
 note " victim's row and still scrapes its scene and its identity.  Only the"
@@ -469,10 +619,21 @@ else bad "the snooper could not find the victim: $(line sameuid.snoop)"; fi
 if has sameuid.snoop "PASSWORD31337"; then
     bad "INVERTED CONTROL FAILED: the victim's password is still in the mapping"
 else ok "AND THE KEYSTROKES ARE NOT THERE: no password in the table (was: read)"; fi
+# THE SECOND INVERSION, and it is this pass's.  This assertion used to read
+# "STILL OPEN: its committed scene -- what is drawn inside that window", and it
+# passed.  The display list is not in the mapping any more.  The snooper is
+# UNCHANGED: it still reads scene_len and the scene bytes out of the row at the
+# same offsets, which is why `scenelen=0 scene=[]` is a measurement and not an
+# absence of one.
 if has sameuid.snoop "rect 0 0 40 20"; then
-    ok "STILL OPEN: its committed scene -- what is drawn inside that window"
-else bad "the victim's scene was not readable -- that is not this pass's claim,"\
-        "and a silent extra win is a measurement nobody made: $(line sameuid.snoop)"; fi
+    bad "INVERTED CONTROL FAILED: the victim's committed display list is still"\
+        "in the mapping: $(line sameuid.snoop)"
+else ok "AND ITS COMMITTED DISPLAY LIST IS NOT THERE either: the row's scene is"\
+       "empty (was: 'rect 0 0 40 20 0x334455', what is drawn inside that window)"; fi
+if has sameuid.snoop "scenelen=0"; then
+    ok "and it reads the length as 0 from the same offset it always read it"
+else bad "the snooper did not read the scene length, so scene=[] proves"\
+        "nothing about where the bytes went: $(line sameuid.snoop)"; fi
 if has sameuid.snoop "pid="; then
     ok "STILL OPEN: its wid, pid, geometry and title -- the table enumerates"
 else bad "the row did not enumerate: $(line sameuid.snoop)"; fi
