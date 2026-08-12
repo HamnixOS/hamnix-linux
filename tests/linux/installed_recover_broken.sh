@@ -632,6 +632,27 @@ barh() {   # barh <log> <marker>
                    inb && NF >= 6 && $3 == 0 && $6 == 100 {print $5; exit}' \
         "$1" | tr -d '\r'
 }
+# AND WHETHER ANY OF IT IS ON THE SCREEN. Field 8 of the ctl line is `visible`
+# (user/linux-wsys.c snap_win_ctl: "<wid> <x> <y> <w> <h> <z> <decorate>
+# <visible> <proto> …"), and until this was added neither this file nor
+# tests/linux/installed_update_live.sh read it. Height alone cannot tell a
+# working desktop from a WITHDRAWN one: a withdrawn window keeps its geometry
+# and its place in the window table and is simply not composited.
+#
+# That is not hypothetical here -- it is the shape of the defect this file is
+# named after. Measured offscreen on the real desktop: open the Applications
+# menu, set `visible 0`, and the ctl block reads `3 0 0 1280 206 100 0 0 1 …`
+# -- the bar GROWN, 26 -> 206 -- while the framebuffer is 100.0% the
+# compositor's clear colour. The height verdict, run verbatim over that log,
+# said "a real click on the Applications button opened the menu" about a blank
+# screen. Demanding the other field the same line already carries can only ever
+# turn a PASS into a FAIL.
+barvis() {   # barvis <log> <marker> -- the top bar's `visible` flag
+    awk -v m="$2" 'index($0, m) {inb=1; next}
+                   inb && index($0, "WINS-END") {exit}
+                   inb && NF >= 8 && $3 == 0 && $6 == 100 {print $8; exit}' \
+        "$1" | tr -d '\r'
+}
 statefield() {   # statefield <log> <marker> <field>
     grep -aA1 -F "$2" "$1" | tail -1 | tr -d '\r' |
         awk -v f="$3" '{for (i = 1; i < NF; i++) if ($i == f) print $(i+1)}'
@@ -701,6 +722,13 @@ if [ -z "$B2BEFORE" ]; then
 elif [ "${B2AFTER:-0}" = "$B2BEFORE" ]; then
     echo "rcvr: PASS THE PUBLISHED $BROKENVER IS BROKEN ON THIS MACHINE: a top bar exists but a real click on the Applications button did not move it (panel still $B2AFTER px)"
     BROKE_REPRODUCED=1
+elif [ "$(barvis "$LOG" '[rcvr] p2 WINS-AFTER')" != 1 ]; then
+    # The panel reacted and NOTHING IS ON THE SCREEN. Without this arm the
+    # `else` below would call a blank display "a desktop that works" and refuse
+    # to go on -- a red for the wrong reason, on the run where the diagnosis is
+    # right.
+    echo "rcvr: PASS THE PUBLISHED $BROKENVER IS BROKEN ON THIS MACHINE: the panel window grew $B2BEFORE -> $B2AFTER px, so the click was routed, but the top bar's ctl line says visible='$(barvis "$LOG" '[rcvr] p2 WINS-AFTER')' -- the menu opened onto a screen nobody can see"
+    BROKE_REPRODUCED=1
 else
     echo "rcvr: FAIL THE KNOWN-BROKEN PUBLISHED $BROKENVER CAME UP WORKING IN THIS RUN: a real click grew the panel window $B2BEFORE -> $B2AFTER px, which is a desktop that works. This gate's premise -- that $BROKENVER leaves a machine without a desktop -- is not what this machine did, and the recovery half below would prove nothing on top of it. THE DIAGNOSIS IS WRONG, OR THE BYTES ON THE CHANNEL ARE NOT THE BYTES THAT WERE PUBLISHED. That is the finding; nothing is worked around."
     fail=1
@@ -765,8 +793,13 @@ mouse_arrived "$LOG" '[rcvr] p3 STATE-BEFORE:' '[rcvr] p3 STATE-AFTER:' "$P3WHAT
 # Three outcomes, three different sentences. A gate that collapsed "the panel
 # did not grow" and "there is no panel" into one line would report a desktop
 # that does not exist as a desktop that ignored a click.
-if [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ]; then
-    echo "rcvr: PASS A MACHINE THAT INSTALLED THE BROKEN $BROKENVER RAN \`hpm update\` AND CAME BACK: a real click on the Applications button opened the menu (the panel window grew $B3BEFORE -> $B3AFTER px)"
+B3VIS="$(barvis "$LOG" '[rcvr] p3 WINS-AFTER')"
+if [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ] &&
+   [ "${B3VIS:-0}" = 1 ]; then
+    echo "rcvr: PASS A MACHINE THAT INSTALLED THE BROKEN $BROKENVER RAN \`hpm update\` AND CAME BACK: a real click on the Applications button opened the menu (the panel window grew $B3BEFORE -> $B3AFTER px, and it is visible)"
+elif [ -n "$B3BEFORE" ] && [ -n "$B3AFTER" ] && [ "$B3AFTER" -gt "$B3BEFORE" ]; then
+    echo "rcvr: FAIL $P3PREMISE: the panel window grew $B3BEFORE -> $B3AFTER px, so the click was routed and the panel reacted, but the top bar's own ctl line says visible='${B3VIS:-absent}' -- the menu opened onto a screen nobody can see. Windows present: [${B3LIST:-none}].$([ "$NOUPD" = 1 ] || printf ' `hpm update` DOES NOT RECOVER A MACHINE THAT TOOK %s.' "$BROKENVER")"
+    fail=1
 elif [ -z "$B3BEFORE" ]; then
     echo "rcvr: FAIL $P3PREMISE: the compositor is running with ${B3WINS:-?} windows, but NONE of them is the top bar (a window at y=0, z=100), so there is no Applications button to click. Windows present: [${B3LIST:-none}].$([ "$NOUPD" = 1 ] || printf ' `hpm update` DOES NOT RECOVER A MACHINE THAT TOOK %s.' "$BROKENVER")"
     fail=1
