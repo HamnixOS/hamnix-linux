@@ -377,22 +377,26 @@ pack_initramfs() {   # pack_initramfs <rootdir> <out.cpio.gz>
     rm -f "$cpio"
 }
 
-boot_with_rc() {   # boot_with_rc <rcfile> <logfile> <bootdir>
-    local rc="$1" log="$2" bootdir="$3"
+boot_with_rc() {   # boot_with_rc <rcfile> <logfile> <bootdir> [vm-seconds]
+    local rc="$1" log="$2" bootdir="$3" secs="${4:-120}"
     rm -rf "$bootdir"; mkdir -p "$bootdir"
     cp "$IMG/vmlinuz" "$bootdir/vmlinuz"
     install -m644 "$rc" "$IMG/root/etc/rc.boot"
     pack_initramfs "$IMG/root" "$bootdir/initramfs.cpio.gz"
-    # Feed the console AFTER the boot has settled, twice, so a slow boot
-    # does not read as a dead shell.
-    ( sleep 30
+    # Feed the console AFTER the boot has settled, and space the commands out,
+    # so a slow boot does not read as a dead shell. The FULL rc (the control
+    # below) brings up the whole desktop and its console is much busier than
+    # the rescue shell's, so it gets a longer deadline rather than a tighter
+    # schedule -- a control that flakes teaches the wrong lesson.
+    ( sleep 40
       echo "echo lexgate-console-alive-1"
-      sleep 6
+      sleep 10
       echo "echo lexgate-console-alive-2"
-      sleep 6
+      sleep 10
       echo "cat /version"
-      sleep 8 ) | HAMLINUX_IMAGE_DIR="$bootdir" HAMLINUX_VNC=none \
-        timeout 130 scripts/hamlinux_vm.sh script --timeout 120 > "$log" 2>&1
+      sleep 10 ) | HAMLINUX_IMAGE_DIR="$bootdir" HAMLINUX_VNC=none \
+        timeout "$((secs + 15))" scripts/hamlinux_vm.sh script --timeout "$secs" \
+        > "$log" 2>&1
     # THE LINE-EDITOR ECHOES WHAT IS TYPED AT IT, so a plain `grep marker`
     # would match hamsh REDRAWING the command line and pass without the shell
     # ever executing anything. Strip \r, NULs and ANSI escapes, and match the
@@ -404,7 +408,7 @@ boot_with_rc() {   # boot_with_rc <rcfile> <logfile> <bootdir>
 }
 
 echo "[lexgate] booting a machine whose /etc/rc.boot does not lex"
-boot_with_rc "$W/rc.broken" "$W/boot_broken.log" "$W/boot_broken"
+boot_with_rc "$W/rc.broken" "$W/boot_broken.log" "$W/boot_broken" 140
 B="$W/boot_broken.log.txt"
 
 if grep -q 'lexical error' "$B" && grep -q '/etc/rc.boot:4' "$B"; then
@@ -450,12 +454,27 @@ fi
 
 # THE CONTROL BOOT: the same image with the tree's real rc still boots.
 echo "[lexgate] control: the same image with the tree's own rc.boot"
-boot_with_rc "etc/rc.boot.linux" "$W/boot_good.log" "$W/boot_good"
+boot_with_rc "etc/rc.boot.linux" "$W/boot_good.log" "$W/boot_good" 200
 G="$W/boot_good.log.txt"
-if grep -qx 'lexgate-console-alive-1' "$G" && ! grep -q 'lexical error' "$G"; then
-    ok "(17) control: an ordinary boot is unaffected -- no lexical error, console answers"
+# WHAT THIS CONTROL ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. It asserts
+# that a good rc still RUNS ALL THE WAY THROUGH and reaches the interactive
+# shell with no lexical error and no panic. It does NOT assert on typed input:
+# measured, the full rc brings up the compositor, panel and desktop, and their
+# output interleaves with the console editor's echo badly enough that a typed
+# line arrives mangled (`echo lexgate-consecho lexgate-console-alive-...`).
+# That is a property of a busy serial console, not of anything under test
+# here, and the console-answers claim is already made -- on the rescue shell,
+# where it matters -- by assertions 13 and 14.
+if grep -q 'lexical error' "$G"; then
+    bad "(17) an ordinary boot now reports a lexical error"
+    grep -a 'lexical error' "$G" | head -3
+elif grep -qi 'Kernel panic' "$G"; then
+    bad "(17) an ordinary boot now panics"
+elif grep -q 'rc.boot: handing off to an interactive shell' "$G" \
+     && grep -q 'loop-enter' "$G"; then
+    ok "(17) control: an ordinary boot is unaffected -- the whole rc runs, no lexical error, no panic, and it reaches the interactive shell"
 else
-    bad "(17) an ordinary boot regressed"
+    bad "(17) an ordinary boot did not finish its rc"
     tail -25 "$G"
 fi
 
