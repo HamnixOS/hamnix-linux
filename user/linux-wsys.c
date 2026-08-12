@@ -2833,6 +2833,109 @@ static void owner_harden(void)
 
 #define KEYCHAN_MAX  WSYS_MAX_WINDOWS
 
+/* ==================================================================
+ * THE CLIENT WAKE, and why it is a socket and not a futex
+ * ==================================================================
+ * A window MOVING is a client-initiated change: de_dragload writes
+ * "geometry x y w h" to <wid>/ctl, ctl_window mutates shared memory and bumps
+ * shm->gen, and NOTHING in the kernel changes. The compositor therefore could
+ * not be woken by it and re-read the segment on its fallback tick instead --
+ * measured, that tick was 85% of a drag frame's period, and dropping it from
+ * 16 ms to 2 ms took the same scanout desktop from 52 to 211 fps. The frame
+ * was never the constraint; the pacing was.
+ *
+ * THE OBVIOUS FIX IS ALREADY REFUTED. Putting a /dev/wsys ring in the
+ * compositor's wait set makes sys_waitfds sleep in FUTEX_WAIT on `inputgen`,
+ * and an evdev fd is a character device that cannot futex-wake anything -- so
+ * the mixed case degrades to poll-with-a-20 ms-cap, strictly worse than the
+ * 16 ms tick it would replace. See user/linux-syscalls.c's ring branch.
+ *
+ * So the wake has to be an ORDINARY POLLABLE OBJECT, which keeps sys_waitfds
+ * on its single uncapped poll(2) arm and composes with evdev by construction.
+ * It is an abstract AF_UNIX SOCK_DGRAM, exactly as keychan below already does
+ * for keystrokes: the compositor binds a name derived from the segment's
+ * identity, and any process that publishes a change sends one byte to it.
+ *
+ * AND IT GENERALISES, which is the point. The compositor now has ONE wait set
+ * with three reasons to wake: input fds, this socket for client changes, and
+ * -- when double buffering lands -- the DRM fd for flip completion. Three
+ * mechanisms would have been three ways to get the pacing wrong.
+ *
+ * IDLE IS THE RISK, not correctness. A wake per ctl WRITE would fire on writes
+ * that publish nothing. This fires only when shm->gen actually moved, which is
+ * the segment's own definition of "a published change", and the compositor's
+ * frame_signature() gate still decides whether that change is worth a repaint.
+ */
+static int  wake_rx = -1;             /* bound; only in the compositor */
+static int  wake_tx = -1;             /* send side, one per process */
+
+static socklen_t wake_addr(struct sockaddr_un *a)
+{
+    if (!seg_id_known) return 0;
+    memset(a, 0, sizeof *a);
+    a->sun_family = AF_UNIX;
+    a->sun_path[0] = '\0';                     /* abstract */
+    int n = snprintf(a->sun_path + 1, sizeof a->sun_path - 1,
+                     "hamnix-wsys/%llu.%llu/wake",
+                     (unsigned long long)seg_dev, (unsigned long long)seg_ino);
+    if (n <= 0 || (size_t)n >= sizeof a->sun_path - 1) return 0;
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+}
+
+/* Bind the wake channel and return a pollable fd, or -1. The compositor calls
+ * this once and appends the fd to its wait set. Idempotent. */
+int hamwsys_wake_listen(void)
+{
+    if (wake_rx >= 0) return wake_rx;
+    struct sockaddr_un a;
+    socklen_t alen = wake_addr(&a);
+    if (!alen) return -1;
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    if (bind(fd, (struct sockaddr *)&a, alen) < 0) { close(fd); return -1; }
+    wake_rx = fd;
+    return wake_rx;
+}
+
+/* Throw away everything queued. One byte and a thousand mean the same thing --
+ * "re-read the segment" -- and a datagram socket left unread stays readable,
+ * which would turn the compositor's park into a spin. */
+void hamwsys_wake_drain(void)
+{
+    if (wake_rx < 0) return;
+    uint8_t b[256];
+    while (recv(wake_rx, b, sizeof b, MSG_DONTWAIT) > 0) { }
+}
+
+/* Tell the compositor that something published. Never blocks, never fails
+ * loudly: if nobody has bound the name there is no compositor to wake, which
+ * is not an error. */
+static void wake_poke(void)
+{
+    /* DO NOT WAKE YOURSELF, and this is not an optimisation.
+     *
+     * wake_rx >= 0 means THIS process is the one that bound the wake channel,
+     * i.e. it is the compositor. The compositor writes /dev/wsys itself every
+     * single iteration -- publish_state() -- and that write bumps shm->gen.
+     * Poking on it made wsysd wake itself the instant it parked, for ever: the
+     * idle gate measured 100.06% of a core on an otherwise idle desktop, which
+     * is precisely the regression the gate exists to catch and precisely the
+     * one this mechanism was most likely to cause.
+     *
+     * A compositor never needs telling about its own publish: it re-reads the
+     * segment at the top of every iteration regardless. */
+    if (wake_rx >= 0) return;
+    struct sockaddr_un a;
+    socklen_t alen = wake_addr(&a);
+    if (!alen) return;
+    if (wake_tx < 0) {
+        wake_tx = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        if (wake_tx < 0) return;
+    }
+    uint8_t one = 1;
+    (void)sendto(wake_tx, &one, 1, MSG_DONTWAIT, (struct sockaddr *)&a, alen);
+}
+
 static struct { int32_t wid; int fd; } keychan[KEYCHAN_MAX];
 static int  keychan_n;
 static int  keychan_out = -1;                 /* the send side, one per proc */
@@ -5010,7 +5113,34 @@ static void ctl_window(struct wwin *v, const char *s, size_t n)
      * newer client sent a verb this kernel does not know. */
 }
 
+/* The real body; hamwsys_write wraps it to notice a published change. */
+static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
+                                   uint64_t n);
+
+/* ONE CHOKE POINT, not thirty call sites.
+ *
+ * shm->gen++ appears in about thirty places -- ctl_window, commit, the image
+ * and backbuffer publishes, focus changes. Poking the wake at each would be
+ * thirty chances to miss one, and a missed one is a window that moves and does
+ * not repaint until the fallback tick, which is exactly the bug being fixed
+ * and would look like an intermittent stutter.
+ *
+ * Every one of them is reached through a write to a /dev/wsys leaf, so the
+ * generation counter is sampled here, once, on either side of the write. If it
+ * moved, something published and the compositor is told. If it did not, the
+ * write changed nothing observable and no wake is sent -- which is what keeps
+ * an idle desktop idle. */
 int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
+{
+    uint32_t before = shm ? __atomic_load_n(&shm->gen, __ATOMIC_ACQUIRE) : 0;
+    int64_t r = hamwsys_write_inner(f, buf, n);
+    if (shm && __atomic_load_n(&shm->gen, __ATOMIC_ACQUIRE) != before)
+        wake_poke();
+    return r;
+}
+
+static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
+                                   uint64_t n)
 {
     if (!shm) { errno = EIO; return -EIO; }
 

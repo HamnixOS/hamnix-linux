@@ -81,6 +81,16 @@ void    hamwsys_close(struct hamwsys_file *f);
  * /dev/wsys descriptor is a descriptor on /dev/null, so poll(2) calls it
  * readable instantly and always; without this seam every parking event loop
  * on the system is a busy spin.  See THE PARK in user/linux-wsys.c. */
+/* THE CLIENT WAKE. hamwsys_wake_listen() binds an abstract AF_UNIX datagram
+ * name derived from the segment and returns a POLLABLE fd; any process that
+ * publishes a change (shm->gen moves) sends a byte to it. The compositor
+ * appends the fd to its ordinary wait set, which keeps sys_waitfds on its
+ * single uncapped poll(2) arm -- a /dev/wsys ring in that set would instead
+ * force a FUTEX_WAIT that an evdev fd can never wake. Drain it on every wake:
+ * an unread datagram stays readable and would turn the park into a spin. */
+int      hamwsys_wake_listen(void);
+void     hamwsys_wake_drain(void);
+
 int      hamwsys_is_ring(const struct hamwsys_file *f);
 int      hamwsys_ring_ready(const struct hamwsys_file *f);
 uint32_t hamwsys_input_gen(void);
