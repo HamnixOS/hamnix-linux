@@ -31,7 +31,17 @@ def write_str(fd: int32, s: Ptr[uint8]):
 def main() -> int32:
     fd: int32 = sys_open("/proc/kmsg")
     if fd < 0:
-        write_str(2, "dmesg: cannot open /proc/kmsg\n")
+        # TWO FAILURES WORE ONE MESSAGE, and they are not the same fact.
+        # "cannot open /proc/kmsg" reads as "this kernel has no printk
+        # ring", which on Linux is false: /proc/kmsg is there and reading
+        # it needs CAP_SYSLOG in the INITIAL user namespace. Measured --
+        # `unshare -rm` then `head -c 20 /proc/kmsg` is EACCES, and the
+        # file is present and mode 0400. A user told the log does not
+        # exist goes looking for the wrong thing.
+        if fd == -13:                             # EACCES
+            write_str(2, "dmesg: /proc/kmsg is there and this process may not read it -- the kernel log needs CAP_SYSLOG in the initial user namespace (run it as root, outside a user namespace). NOTHING was printed.\n")
+        else:
+            write_str(2, "dmesg: cannot open /proc/kmsg -- this kernel publishes no printk ring buffer under that name. NOTHING was printed.\n")
         return 1
     buf: Array[256, uint8]
     while True:
