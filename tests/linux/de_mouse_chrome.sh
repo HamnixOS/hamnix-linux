@@ -325,6 +325,40 @@ if grep -q "input from $WORK/input.evdev only" "$WORK/wsysd.log"; then
 else
     bad "wsysd did not honour HAMWSYSD_INPUT -- it may be reading this host's keyboard"
 fi
+# IS THIS COMPOSITOR WOKEN BY INPUT, OR IS IT STILL TICKING?  One more grep of
+# the log already open above, and it closes a hole that was measured rather
+# than supposed: every assertion in this file passes identically whether wsysd
+# sleeps in poll(2) on a wait set or spins on the 16 ms fallback tick, because
+# the mouse gets answered either way -- just later.  So input-to-pixel latency
+# could regress from 0.33 ms back to ~9 ms, which is the whole of the
+# wake-on-input work, and this gate would stay green and say nothing.
+#
+# wsysd states it itself at startup (user/wsysd.ad's build_waitset):
+#     "wsysd: wait set N fds wake this loop, M always-ready and excluded; ..."
+#     "wsysd: NOTHING can wake this loop -- it is the 16 ms tick"   (when N == 0)
+# The second line is the regression, by name, so it is failed on directly; the
+# first is required to be present AND to carry a non-zero N, so that a build
+# which stops printing either line cannot pass by silence.
+#
+# IT IS ASSERTED HERE AND NOT IN A LATENCY NUMBER on purpose: this gate has no
+# clock accurate enough to tell 0.33 ms from 9 ms through a synthetic mouse, and
+# a timing assertion on a shared build host would flake. The compositor's own
+# statement about its own loop is the cheap, stable witness.
+WAKELINE="$(grep -m1 'wake this loop' "$WORK/wsysd.log" 2>/dev/null || true)"
+NWAKE="$(printf '%s' "$WAKELINE" | sed -n 's/.*wait set \([0-9][0-9]*\) fds wake this loop.*/\1/p')"
+if grep -q 'NOTHING can wake this loop' "$WORK/wsysd.log"; then
+    bad "THE COMPOSITOR IS NOT WOKEN BY INPUT -- it fell back to the 16 ms tick:"\
+        "$(grep -m1 'NOTHING can wake this loop' "$WORK/wsysd.log")."\
+        "Input-to-pixel latency regresses to a tick period; the mouse still"\
+        "works, which is why nothing else in this file notices."
+elif [ -n "$NWAKE" ] && [ "$NWAKE" -ge 1 ] 2>/dev/null; then
+    ok "the compositor is WOKEN BY INPUT, not ticking: $WAKELINE"
+else
+    bad "wsysd did not say whether anything can wake its loop -- this gate cannot"\
+        "tell a woken compositor from a ticking one, so the wake-on-input work is"\
+        "unmeasured here. Expected a 'wait set N fds wake this loop' line; got:"\
+        "${WAKELINE:-(no such line)}"
+fi
 
 # CHECKPOINT 1 of 3 -- the session's wsys version, stated out loud, read off
 # the segment file by a program that is not a wsys client. Everything below is
