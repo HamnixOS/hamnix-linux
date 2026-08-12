@@ -1,0 +1,240 @@
+# tests/linux/de_dragload.ad — A WINDOW THAT IS BEING DRAGGED, FOREVER.
+#
+#   de_dragload <w> <h> <x0> <y0> <span> <text_rows>
+#
+# WHY THIS EXISTS. tests/linux/de_fps_latency.sh needs a load that forces
+# wsysd down its FULL frame path, not the cheap cursor-only one. Moving the
+# mouse does not do it: wsysd has a save-under for the pointer sprite
+# (cursor_only_frame, ~5 us) precisely so that pointer motion does NOT
+# re-rasterize anything. Only a change to the WINDOW SET does — win_x, win_y,
+# win_gen and the rest are what frame_signature() hashes — and then the
+# compositor clears the desktop, re-reads and re-rasterizes every window's
+# scene, copies each into the composite, and writes the whole screen.
+#
+# Dragging a window across a populated desktop is the most expensive thing an
+# ordinary session does. This program is that, with the hand taken out: it
+# owns a window, commits a scene into it ONCE (a filled body plus `text_rows`
+# rows of glyphs, so the re-rasterization has real work and is not an empty
+# rectangle), and then walks the window back and forth across `span` pixels as
+# fast as the ctl file will take it.
+#
+# WHAT IT IS NOT. It is not a person's hand on a mouse: a real drag arrives
+# through wsysd's pointer routing, and the window's owner then writes exactly
+# this ctl verb. This starts at that second step. The compositor's work — the
+# thing being measured — is identical either way, and everything upstream of
+# the ctl write is measured separately by the latency half of the gate.
+#
+# tests/linux/wsys_hold.ad is the general form of this and cannot be used:
+# it re-reads its script on a 100 ms timer, which is 6 moves a second, and the
+# question here is what happens at 60.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+pathbuf: Array[256, uint8]
+line:    Array[2048, uint8]
+numbuf:  Array[24, uint8]
+waitset: Array[4, int32]
+wid:     int32 = 0
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    if v == 0:
+        buf[at] = 48
+        return at + 1
+    x: int32 = v
+    i: uint64 = at
+    if x < 0:
+        buf[i] = 45
+        i = i + 1
+        x = 0 - x
+    n: uint64 = 0
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = numbuf[n]
+        i = i + 1
+    return i
+
+
+def emit_str(buf: Ptr[uint8], at: uint64, s: Ptr[uint8]) -> uint64:
+    i: uint64 = at
+    k: uint64 = 0
+    while s[k] != 0:
+        buf[i] = s[k]
+        i = i + 1
+        k = k + 1
+    return i
+
+
+def winpath(leaf: Ptr[uint8]):
+    i: uint64 = emit_str(&pathbuf[0], 0, "/dev/wsys/")
+    i = emit_int(&pathbuf[0], i, wid)
+    pathbuf[i] = 47
+    i = emit_str(&pathbuf[0], i + 1, leaf)
+    pathbuf[i] = 0
+
+
+def write_path(path: Ptr[char], data: Ptr[uint8], n: uint64) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    sys_write(fd, data, n)
+    sys_close(fd)
+    return 0
+
+
+def win_write(leaf: Ptr[uint8], data: Ptr[uint8], n: uint64) -> int32:
+    winpath(leaf)
+    return write_path(cast[Ptr[char]](&pathbuf[0]), data, n)
+
+
+def newwindow() -> int32:
+    if write_path(cast[Ptr[char]]("/dev/wsys/ctl"),
+                  cast[Ptr[uint8]]("newwindow\n"), 10) != 0:
+        return -1
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if fd < 0:
+        return -1
+    n: int64 = sys_read(fd, &line[0], 32)
+    sys_close(fd)
+    if n <= 0:
+        return -1
+    v: int32 = 0
+    i: uint64 = 0
+    while i < cast[uint64](n) and line[i] >= 48 and line[i] <= 57:
+        v = v * 10 + cast[int32](line[i]) - 48
+        i = i + 1
+    return v
+
+
+def take_int(s: Ptr[uint8], dflt: int32) -> int32:
+    if s == cast[Ptr[uint8]](0):
+        return dflt
+    v: int32 = 0
+    i: uint64 = 0
+    while s[i] >= 48 and s[i] <= 57:
+        v = v * 10 + cast[int32](s[i]) - 48
+        i = i + 1
+    if i == 0:
+        return dflt
+    return v
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    ww: int32 = 480
+    wh: int32 = 320
+    x0: int32 = 120
+    y0: int32 = 160
+    span: int32 = 240
+    rows: int32 = 8
+    if argc > 1:
+        ww = take_int(cast[Ptr[uint8]](argv[1]), ww)
+    if argc > 2:
+        wh = take_int(cast[Ptr[uint8]](argv[2]), wh)
+    if argc > 3:
+        x0 = take_int(cast[Ptr[uint8]](argv[3]), x0)
+    if argc > 4:
+        y0 = take_int(cast[Ptr[uint8]](argv[4]), y0)
+    if argc > 5:
+        span = take_int(cast[Ptr[uint8]](argv[5]), span)
+    if argc > 6:
+        rows = take_int(cast[Ptr[uint8]](argv[6]), rows)
+
+    wid = newwindow()
+    if wid < 2:
+        puts(2, "de_dragload: newwindow refused\n")
+        return 1
+    n: uint64 = emit_int(&line[0], 0, wid)
+    line[n] = 10
+    sys_write(1, &line[0], n + 1)
+
+    # Geometry, decoration (a title bar is part of what a dragged window
+    # costs the compositor), and a z above the wallpaper.
+    n = emit_str(&line[0], 0, "geometry ")
+    n = emit_int(&line[0], n, x0)
+    line[n] = 32
+    n = emit_int(&line[0], n + 1, y0)
+    line[n] = 32
+    n = emit_int(&line[0], n + 1, ww)
+    line[n] = 32
+    n = emit_int(&line[0], n + 1, wh)
+    line[n] = 10
+    win_write("ctl", &line[0], n + 1)
+    win_write("ctl", cast[Ptr[uint8]]("decorate 1\n"), 11)
+    win_write("ctl", cast[Ptr[uint8]]("z 5\n"), 4)
+
+    # THE CONTENT. A body fill, a lighter header band, and `rows` rows of
+    # glyphs -- an empty rectangle would make the full path look far cheaper
+    # than any window a person actually has open.
+    n = emit_str(&line[0], 0, "fill 0 0 ")
+    n = emit_int(&line[0], n, ww)
+    line[n] = 32
+    n = emit_int(&line[0], n + 1, wh)
+    n = emit_str(&line[0], n, " #101820")
+    line[n] = 10
+    win_write("scene", &line[0], n + 1)
+
+    n = emit_str(&line[0], 0, "fill 0 0 ")
+    n = emit_int(&line[0], n, ww)
+    n = emit_str(&line[0], n, " 28 #1b2a3a")
+    line[n] = 10
+    win_write("scene", &line[0], n + 1)
+
+    r: int32 = 0
+    while r < rows:
+        n = emit_str(&line[0], 0, "text 12 ")
+        n = emit_int(&line[0], n, 40 + r * 18)
+        n = emit_str(&line[0], n, " 14 #d8dee9 the quick brown fox jumps ")
+        n = emit_int(&line[0], n, r)
+        line[n] = 10
+        win_write("scene", &line[0], n + 1)
+        r = r + 1
+    win_write("ctl", cast[Ptr[uint8]]("commit\n"), 7)
+
+    # THE DRAG. One `geometry` write per iteration, no sleep: the ctl file is
+    # the only thing pacing this, so the compositor is what limits the rate,
+    # which is the point.
+    x: int32 = x0
+    dx: int32 = 4
+    while 1 == 1:
+        x = x + dx
+        if x > x0 + span:
+            dx = 0 - dx
+            x = x0 + span
+        if x < x0:
+            dx = 0 - dx
+            x = x0
+        n = emit_str(&line[0], 0, "geometry ")
+        n = emit_int(&line[0], n, x)
+        line[n] = 32
+        n = emit_int(&line[0], n + 1, y0)
+        line[n] = 32
+        n = emit_int(&line[0], n + 1, ww)
+        line[n] = 32
+        n = emit_int(&line[0], n + 1, wh)
+        line[n] = 10
+        win_write("ctl", &line[0], n + 1)
+        # A yield, not a rest: 1 ms is far below the compositor's 16 ms tick,
+        # so the window is always at a new place when the frame gate looks,
+        # and this process is not a busy-loop next to the thing being timed.
+        sys_waitfds(&waitset[0], 0, 1)
+    return 0

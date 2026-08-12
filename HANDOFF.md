@@ -23,7 +23,7 @@ rather than argued:
 | Installed boot | UEFI → a unified kernel image on an ESP → PID 1 → `bind '#sysroot' /` → the real ext4 root. Files written on one boot are there on the next. |
 | Display | `/dev/fb` on fbdev AND on raw DRM/KMS, double-buffered with `MODE_PAGE_FLIP` — 481 flips, `stalled=0`. `flip` is a `/dev/fbctl` verb; double buffering arms lazily, so a program that never flips runs the old path untouched. |
 | Windows | `/dev/wsys`, the port of `devwsys.ad`, in shared memory. Both protocols: the v1 scene display list and the v2 blit surface, plus the `'I'` named-image tier (a scene client can draw a real photograph without converting its window to a blit surface). The screen size is published at `/dev/wsys/screen`. |
-| Compositor | `user/wsysd.ad`. A 1724-op frame at 1280×800 costs **625 µs**, down from 5503; a pointer-only frame costs **5 µs**, down from 6543. Pixel-identical to the pre-optimisation code at three geometries. |
+| Compositor | `user/wsysd.ad`. A 1724-op frame at 1280x800 costs **625 us**, down from 5503; a pointer-only frame costs **5 us**, down from 6543. Pixel-identical to the pre-optimisation code at three geometries. **AND THE DESKTOP NOW HAS A FRAME RATE AND A LATENCY, MEASURED RATHER THAN DIVIDED OUT OF THOSE** (`tests/linux/de_fps_latency.sh`, offscreen at 1280x800 on the SOFTWARE path -- the only one any shipped image has ever run): **61 fps** with the pointer moving at 250 ev/s (the cursor-only path, wsysd at 1.7% cpu), **52 fps** with a decorated 480x320 text window dragging across a 4-window desktop (every frame a full repaint, 15% cpu), **0 frames idle** from the compositor and the wallpaper, and **3.1 frames/s idle** from the panel -- which is exactly `hampanelscene`'s `SAMPLE_TICKS(20) * 16 ms = 320 ms` sysmon resample and nothing else, at 1.2% cpu. Input-to-pixel **p50 8.9 ms, p95 16.1 ms, max 18.7 ms** over 150 trials. **THE CEILING IS THE LOOP, NOT THE RASTERIZER.** `main` ends in `sys_waitfds(&waitset[0], 0, 16)` with nfds LITERALLY 0 -- `waitset` is declared and never filled -- so the compositor is a fixed 16 ms tick that no input can wake early. That caps the rate at 1000/(16 + frame_ms) ~= 60 and makes the latency ~uniform 0..16 ms plus the frame: the 625 us work is why 52-61 fps is reached, and the tick is what stops it going higher. **Filling `waitset` with the input fds is the single largest remaining win on how the desktop FEELS**, and it would halve the median. The gate refuses to report anything until its instrument passes a selftest (a deliberately SIGSTOPped compositor must MEASURE as stopped), and it keeps its own first, WRONG answer on the page as a control: a constant 80 ms settle is exactly five ticks, phase-locked the probe, and reported **p50 1.0 ms** -- one lucky phase repeated, 8x too good. |
 | Window titles | **Every window on the desktop has its name on its title bar, and until this it had none.** Not "the title was missing" — the device has held one per window since the port began (`user/linux-wsys.c`, the `title` ctl verb, 64 bytes) and publishes the set at `/dev/wsys/windows`, which is where the panel's taskbar has been reading it all along; `wsysd` drew the bar and painted no text on it, so three terminals open were three identical grey bars. **NO NEW FONT.** The title is a one-line `hamscene` display list (`glyphs`, the same builder every DE client uses) rasterized by the same `lib/hamui_host.ad` this compositor already rasterizes every window with — the same DejaVu Sans at the same 14px through the same anti-aliased TrueType path — onto a title-bar-sized surface presented **blended**, so the bar colour shows between the letters instead of a black box. **IT SAID THAT BEFORE AND IT WAS FALSE**, and the machine's owner found it in a screenshot: `#f0f0f5` ink at full strength, correct to the byte, sitting in a black box on a `#5577dd` bar, with a 23-PASS gate agreeing. The surface WAS keyed and the clear WAS transparent; `vk2d_raster_cov_mask`'s opaque fast path forced alpha 255 across each glyph's whole BOUNDING BOX, cov==0 cells included -- its comment states the assumption ("same value the composite target holds"), which is true of every target but a keyed one -- so every unpainted cell inside a letter was declared painted, and painted black. A FOURTH silent layer of `e0df2d4a`'s three, one deeper. Fixed with `vk2d_raster_cov_mask_over` (straight-alpha source-over that keeps the destination's alpha byte; over an opaque destination it reduces exactly to the old formula, so nothing that was right moved), `host_keyed` in `lib/hamui_host.ad` set from the clear it just performed, and a mode-2 present -- because `keyed` is the wrong present for anti-aliased text even once the alpha byte is honest: all-or-nothing writes a 1/255-coverage edge pixel as full ink. It is measured with `htb_text_width()`, the one place in the tree that owns that advance sum, and ellipsised to fit. **THE TITLE IS UNTRUSTED AND IS TREATED AS SUCH**: the window table is `/srv/wsys`, mode 0666, and `linux-wsys.c` says in as many words that any uid can retitle any window. A hostile title cannot inject a draw op (`_hs_emit_str` maps `"` and newline to a space, and every byte outside printable ASCII is drawn as `.`), and cannot overrun — the measurement decides where the text is CUT, the surface decides where the ink can REACH, and the two bounds are independent because one of them is arithmetic. What it CAN still do is put 63 bytes of its choosing on another client's bar: it can lie about which window is which, which needs a per-uid mapping or an RPC compositor, exactly as for the scene and the key ring. `tests/linux/wsys_title.sh` (**29 PASS**, offscreen, under a minute): every assertion is a pixel count in a rectangle derived from the window's own geometry, with an **empty-title control on the same window in the same run** — and with the change reverted the gate is **16 PASS, 7 FAIL**. One of its assertions was itself success-shaped on the first revert run and was fixed: two blank bars compared by colour "differ" the moment one is focused and the other is not, so the two-window test compares the INK MASK, not the pixels. `hamui_host_uncovered_rows()` is deliberately NOT the instrument — it unions the fill and blit rects only, glyph ink is stamped through the coverage-mask op, and `tests/linux/wsys_cover.sh` already pins that ("a window with only text in it is reported uncovered"); the clip is proven on framebuffer pixels instead. **AND THE GATE'S OWN HOLE WAS THE DEFECT'S SHAPE**: all 23 assertions were about the INK -- how much of it, how light the lightest pixel is, whether two bars carry different amounts -- and none looked at the pixels the letters do NOT cover. Six more now do, on the focused bar (`#5577dd`) and the unfocused one (`#404040`): nothing in the band is darker than the bar, not one pixel of it is `#000000`, and the bar is positively there across the ink's span. Reverted, the original 23 are unchanged and those say `432 px darker than the bar, 182 pure black, darkest #000000`. |
 | Input | every `/dev/input/event*`, decoded in the compositor, routed to the focused window in window-local coordinates — **and the DE chrome actually reacts to a mouse, which for the whole port before this it did not.** This row read exactly as it does now while the Applications button, the desktop icons and every panel control were completely dead to a click: the compositor routed to `<wid>/pointer` and the chrome reads `<wid>/event`, and nothing bridged them. That is the warning this row now carries — "input is routed" was a true sentence about a desktop nobody could use. Proven from the evdev end by `tests/linux/de_mouse_chrome.sh` (13 PASS), which is forbidden to write a ring by hand and asserts that about itself, because writing the ring by hand as host owner is precisely what every earlier gate did and precisely why this went unseen. **Focus lines are still not emitted at all** (no `f in`/`f out`), so clicking away does not dismiss an open menu — see the running list. |
 | Desktop | `hamdesktop` + `hampanelscene`, unmodified. Launch a terminal from the menu, type in it, get output. |
@@ -278,6 +278,75 @@ clients, the dropped desktop and the seven binaries.
 
 Kept here deliberately, because a handoff that lists only successes is the
 same failure this project exists to beat.
+
+* **THE COMPOSITOR CANNOT BE WOKEN BY INPUT, AND THAT IS HALF THE LATENCY A
+  PERSON FEELS.** `user/wsysd.ad`'s main loop ends in
+
+      sys_waitfds(&waitset[0], 0, 16)
+
+  with nfds LITERALLY 0. `waitset: Array[4, int32]` is declared at the top of
+  the file and never written. So the compositor is a fixed 16 ms tick: it
+  wakes, scans the window table, drains whatever evdev records arrived,
+  presents at most one frame, and sleeps 16 ms again, whatever happened. An
+  input that lands 1 ms after a tick waits 15 ms for the next one.
+
+  Measured (`tests/linux/de_fps_latency.sh`, 150 trials, offscreen, software
+  path): input-to-pixel **p50 8.9 ms, p95 16.1 ms, max 18.7 ms** — the shape
+  of a uniform 0..16 ms wait plus a frame, which is exactly what a fixed tick
+  with no wakeup produces. The frame itself is 0.6 ms and a pointer-only frame
+  is 5 us, so **93% of the median is the loop not being woken**. Filling
+  `waitset` with the input fds — which `sys_waitfds` already supports, and
+  which `user/hampanelscene.ad` already does with its own event fds — should
+  roughly halve the median and cut the tail to the frame time. It is the
+  single largest remaining win on how the desktop FEELS, and it is not a
+  rasterizer problem.
+
+* **THE VULKAN/GPU COMPOSITOR PATH IS 13x SLOWER THAN THE SOFTWARE ONE, AND
+  NO MACHINE HAS EVER RUN IT.** The image stages only the venus ICD, which
+  enumerates nothing, so `vk_set_backend(VK_BACKEND_LINUX)` fails and every
+  desktop anyone has run has been on `vk_2d`. Forced on with the nvidia ICD
+  (`tests/linux/de_fps_gpu.sh`, RTX 3090, `zero-copy 1, device-local 1` — the
+  configuration `vk_arm()` treats as the good one): **7.5 fps** with the
+  pointer, **4.1 fps** dragging, input-to-pixel **p50 84 ms**, and wsysd at
+  **76% of a core WHILE IDLE**. `wsysd -bench 60` puts all of it in one place:
+
+      software   us/frame total   679   clear 477  cursor   1  present   157
+      GPU        us/frame total 66036   clear 531  cursor  99  present 67492
+
+  `clear` — the part the device does — is the same. The 430x is `present`,
+  i.e. `present_rows()`: the CPU reading the composite and `write(2)`ing it to
+  /dev/fb. That follows directly from the zero-copy binding `comp_base = fb`,
+  which puts the composite in device-local VRAM: every frame then drags 4 MiB
+  back across PCIe uncached. A compositor whose last step is a CPU copy-out
+  cannot hold its composite in device memory — either the present moves onto
+  the device, or the composite stays in host memory and the device writes into
+  it. Until one of those, the GPU path must not be enabled by default, and the
+  fallback it never takes is the fast one.
+
+* **THERE IS NO FAIR fps COMPARISON AGAINST MATE, AND THE REASON IS THE
+  INSTRUMENT, NOT THE DESKTOPS.** `tests/linux/de_fps_mate.sh` stands MATE
+  1.26 up on Xvfb at the same 1280x800 with the same stride and drives both
+  with the same shared probe (`tests/linux/fb_change_probe.py`), calibrated
+  on our side against wsysd's own presented-frame counter to 2%. Sweeping the
+  sampler 8x:
+
+      sampler      125 Hz   250 Hz   500 Hz   1000 Hz     8x sweep
+      ours           52.4     54.2     54.8      53.0        1.01x
+      MATE           14.6     30.8     69.6     138.4        9.48x
+
+  Ours is flat — a rate. MATE's tracks the sampler one for one — saturation:
+  X draws incrementally with no frame boundary and no present, so during a
+  drag its shadow buffer is in flux at every sample and there is no frame rate
+  in it to extract. Two more things are not comparable and are measured rather
+  than assumed: **MATE's pointer is not in the framebuffer at all** (200
+  moves/s produce 0.1 changes/s, because Xvfb's sprite is not in the shadow
+  buffer, while ours is composited into the buffer wsysd presents), so the
+  input-to-pixel figure has no MATE counterpart and is deliberately left
+  unmeasured rather than re-based on a different stimulus; and MATE's input is
+  XTEST straight into the X event queue, skipping evdev and libinput, which is
+  a handicap in ITS favour. **What IS comparable is idle, and it is a tie**:
+  ours 3.2 changes/s, MATE 3.0-3.3, both a panel applet resampling, neither
+  spinning. So: our numbers stand alone, on purpose.
 
 * ~~**`hpm update` left the desktop with NO PANEL AND NO TASKBAR.**~~ **FIXED,
   and gated offscreen.**
