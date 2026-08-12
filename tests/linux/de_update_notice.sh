@@ -144,6 +144,22 @@ print(0 if tot == 0 else hit * 100 // tot)
 PY
 colourpct() { python3 "$FRAC_PY" "$FBW" "$FBH" "$1" "$2" "$3" "$4" "$HAMFB_FILE" "$5"; }
 
+# Poll a rectangle until it reaches `want`% of the notice face, or NOTICE_WAIT_S
+# passes. Echoes the final percentage; sets AWAIT_S to how long it waited, so a
+# PASS can say so and a future slowdown is visible instead of absorbed.
+AWAIT_S=0
+await_notice() {
+    local x="$1" y="$2" w="$3" h="$4" want="$5" t0=$SECONDS pct=0
+    while :; do
+        pct="$(colourpct "$x" "$y" "$w" "$h" "$FACE")"
+        [ "$pct" -ge "$want" ] && break
+        [ $((SECONDS - t0)) -ge "${NOTICE_WAIT_S:-20}" ] && break
+        sleep 0.25
+    done
+    AWAIT_S=$((SECONDS - t0))
+    echo "$pct"
+}
+
 # THE NOTICE RECTANGLE, and where the numbers come from: user/hampanelscene.ad
 # puts the card at window-local (8, bar + cur_thick), NOTICE_W x NOTICE_H =
 # 340 x 86, and the top panel's window origin is (0,0) with a PANEL_H = 26 bar
@@ -238,7 +254,8 @@ for _ in $(seq 1 60); do [ -s "$HAMFB_FILE" ] && break; sleep 0.1; done
 PIDS="$PIDS $!"
 sleep 3
 "$WORK/hampanelscene.elf" </dev/null >"$WORK/hampanelscene.log" 2>&1 &
-PIDS="$PIDS $!"
+PANEL_PID=$!
+PIDS="$PIDS $PANEL_PID"
 sleep 4
 
 # ---- 3. CONTROL ----------------------------------------------------------
@@ -271,10 +288,16 @@ else
 fi
 
 # ---- 6. THE FIX ----------------------------------------------------------
-sleep 3
-AFTER="$(colourpct $NX $NY $NW $NH $FACE)"
+# WAIT FOR THE PIXELS, NOT FOR A FIXED INTERVAL. `sleep 3` was here, and a
+# sleep is a guess about somebody else's scheduling: too short and the gate
+# reports a defect that is not there (which cost this tree several passes in
+# de_panel_conf_shipped, where an assertion fired one line after a config was
+# PARSED and blamed the config for pixels that had not been drawn yet), too
+# long and it hides a slowdown. This polls the thing it is asserting, prints
+# how long it took, and gives up at a stated deadline.
+AFTER="$(await_notice "$NX" "$NY" "$NW" "$NH" 40)"
 if [ "$AFTER" -ge 40 ] && [ "$AFTER" -gt "$BEFORE" ]; then
-    ok "THE PERSON IS TOLD: the notice rectangle went ${BEFORE}% -> ${AFTER}% #$FACE on a real refusal"
+    ok "THE PERSON IS TOLD: the notice rectangle went ${BEFORE}% -> ${AFTER}% #$FACE on a real refusal (after ${AWAIT_S}s)"
 else
     bad "no notice appeared: the rectangle is ${AFTER}% #$FACE (control ${BEFORE}%). A correct refusal is still an invisible one."
 fi
@@ -408,5 +431,106 @@ elif grep -q 'NOT leaving a fault' "$WORK/appmenuctrl.err"; then
 else
     ok "CONTROL: a menu that was NOT refused did not take the fault-suppressing branch, so the suppression is conditional on the refusal and the panel's fallback is intact for a genuinely broken menu"
 fi
+
+# ---- 9. THE THREE EDGES NOBODY HAD MEASURED ------------------------------
+# Everything above is a TOP panel, because that is the shipped default and it
+# is where the notice was developed. user/hampanelscene.ad's _notice_box and
+# _panel_grow_px both branch on the edge -- a bottom bar puts the card ABOVE
+# itself, a left bar puts it to its RIGHT, a right bar puts it to its LEFT, and
+# the window has to grow along a different axis for each. All of that was
+# written and none of it was ever run.
+#
+# THE BOX IS DERIVED, NOT TYPED. Each edge's rectangle comes from the same
+# constants the panel uses (PANEL thickness, NOTICE_W, NOTICE_H, the screen
+# size), read out of the source below, so this cannot quietly drift away from
+# what the panel draws. Inset past the 2px border and 8px radius, as above.
+NOTICE_W_SRC="$(sed -n 's/^NOTICE_W:[[:space:]]*int64[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' user/hampanelscene.ad | head -1)"
+NOTICE_H_SRC="$(sed -n 's/^NOTICE_H:[[:space:]]*int64[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' user/hampanelscene.ad | head -1)"
+info "the card is ${NOTICE_W_SRC}x${NOTICE_H_SRC}, read from user/hampanelscene.ad"
+
+edge_probe() {
+    # $1 edge, $2 bar thickness, and the expected card origin in $EX/$EY
+    local edge="$1" thick="$2"
+    case "$edge" in
+        bottom) EX=8;                                   EY=$((FBH - thick - NOTICE_H_SRC));;
+        left)   EX=$thick;                              EY=8;;
+        right)  EX=$((FBW - thick - NOTICE_W_SRC));     EY=8;;
+        *)      EX=8;                                   EY=$thick;;
+    esac
+}
+
+for E in bottom left right; do
+    # One thickness for all four edges, set explicitly in the config, so the
+    # expected box below is arithmetic and not a guess about a default (the
+    # panel's own defaults differ: 26 horizontal, 56 vertical).
+    THICK=26
+    cat >/tmp/hamnix-panel.conf <<EOF
+panel solo
+  edge $E
+  size $THICK
+  widget menu
+  widget clock
+end
+EOF
+    # A FRESH panel with the marker already on disk is the same condition a
+    # running panel sees when the refusal happens: notice_ack starts at 0 and
+    # the marker is bigger. It needs no second refusing binary, and the marker
+    # under test is the real one section 4 left behind.
+    kill "$PANEL_PID" 2>/dev/null; sleep 0.5; kill -9 "$PANEL_PID" 2>/dev/null
+    edge_probe "$E" "$THICK"
+    # NOTICE_EDGE_NUDGE displaces the box this gate LOOKS in, without touching
+    # the panel. It is how the assertion is proved able to fail: a card that
+    # did NOT follow the bar to this edge is a card that is not where the
+    # panel's own constants say it is, and nudging the box is that condition
+    # with nothing else changed.
+    #
+    # IT NUDGES TOWARD THE SCREEN CENTRE, and that is not decoration. Nudging
+    # a fixed direction pushed the RIGHT panel's box off the right of the
+    # screen, where the clipped remainder was still 80% card and the check
+    # PASSED -- a red-proof that proved nothing, in a gate about a card being
+    # in the wrong place. Toward the centre the box always stays on screen.
+    NUDGE=${NOTICE_EDGE_NUDGE:-0}
+    if [ "$NUDGE" -ne 0 ]; then
+        if [ "$EX" -lt $((FBW / 2)) ]; then EX=$((EX + NUDGE)); else EX=$((EX - NUDGE)); fi
+        if [ "$EY" -lt $((FBH / 2)) ]; then EY=$((EY + NUDGE)); else EY=$((EY - NUDGE)); fi
+    fi
+    # AND THE BOX MUST BE ON THE SCREEN. colourpct counts what it can read, so
+    # a box hanging off an edge answers about the part that is left -- which is
+    # how the off-screen nudge above read 80%. An expectation that does not fit
+    # on the display is a broken expectation, and it says so here rather than
+    # returning a percentage that means something else.
+    if [ "$EX" -lt 0 ] || [ "$EY" -lt 0 ] ||
+       [ $((EX + NOTICE_W_SRC)) -gt "$FBW" ] || [ $((EY + NOTICE_H_SRC)) -gt "$FBH" ]; then
+        bad "the expected card box for '$E' (${EX},${EY} ${NOTICE_W_SRC}x${NOTICE_H_SRC}) does not fit on a ${FBW}x${FBH} screen -- no percentage from it would mean anything"
+        continue
+    fi
+    # EACH EDGE PROVES ITS OWN BOX EMPTY FIRST, so a card left in the
+    # framebuffer by the PREVIOUS panel cannot be counted as this one's. The
+    # boxes happen to be disjoint in this order, and relying on that is exactly
+    # the kind of luck that makes a gate quietly stop measuring: a top panel's
+    # card (8,26 340x86) and a left panel's (26,8) overlap heavily, so the day
+    # somebody reorders this loop the assertion would pass on a stale frame.
+    EMPTY_T0=$SECONDS
+    while :; do
+        EPRE="$(colourpct $((EX + 6)) $((EY + 6)) $((NOTICE_W_SRC - 12)) $((NOTICE_H_SRC - 12)) "$FACE")"
+        [ "$EPRE" -le 5 ] && break
+        [ $((SECONDS - EMPTY_T0)) -ge 15 ] && break
+        sleep 0.25
+    done
+    if [ "$EPRE" -le 5 ]; then
+        ok "CONTROL for '$E': with the panel stopped, its notice box is ${EPRE}% #$FACE, so what follows is this panel's card and not a leftover"
+    else
+        bad "CONTROL for '$E': the box at ${EX},${EY} is already ${EPRE}% #$FACE with no panel running -- the measurement below would be reading a stale frame"
+    fi
+    "$WORK/hampanelscene.elf" </dev/null >"$WORK/panel_$E.log" 2>&1 &
+    PANEL_PID=$!; PIDS="$PIDS $PANEL_PID"
+    EPCT="$(await_notice $((EX + 6)) $((EY + 6)) $((NOTICE_W_SRC - 12)) $((NOTICE_H_SRC - 12)) 40)"
+    if [ "$EPCT" -ge 40 ]; then
+        ok "THE NOTICE REACHES AN '$E' PANEL: ${EPCT}% #$FACE at ${EX},${EY} after ${AWAIT_S}s -- the card follows the bar to that edge"
+    else
+        bad "on an '$E' panel the notice is ${EPCT}% #$FACE at the box the panel's own constants put it in (${EX},${EY} ${NOTICE_W_SRC}x${NOTICE_H_SRC}). The refusal and the marker are unchanged from the top-panel case above, so what differs is the edge."
+        info "  that panel's window: $("$WORK/wsys_poke.elf" /dev/wsys/2/ctl 2>/dev/null | tr -d '\n')"
+    fi
+done
 
 done_report
