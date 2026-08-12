@@ -342,6 +342,70 @@ def merge_chains(chains):
     return out
 
 
+def host_dep_table(kver):
+    """The build host's own modules.dep, as {relative .ko path: [dep paths]}.
+
+    depmod wrote it; it is derived from the ELF symbol tables of the modules
+    themselves, and it is already TRANSITIVELY FLATTENED with the most
+    dependent module first -- which is exactly the format user/modprobe.ad
+    parses. Compression suffixes are stripped from both sides because the
+    modules this channel installs are decompressed (the kernel's
+    finit_module(2) is called with flags=0 and will not take a compressed
+    module), so the paths in the table must name the files that exist.
+    """
+    path = "/lib/modules/%s/modules.dep" % kver
+    table = {}
+    if not os.path.exists(path):
+        return table
+
+    def strip(p):
+        for ext in (".xz", ".gz", ".zst"):
+            if p.endswith(ext):
+                return p[:-len(ext)]
+        return p
+
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            mod, _, deps = line.partition(":")
+            table[strip(mod.strip())] = [strip(d) for d in deps.split()]
+    return table
+
+
+def dep_lines(kver, staged):
+    """The modules.dep lines a package must add for the modules it installs.
+
+    WHY A PACKAGE CARRIES THESE AT ALL. The image's modules.dep is generated
+    by depmod at IMAGE BUILD TIME (scripts/hamlinux_image.sh) over the modules
+    the image stages. It is therefore stale the instant a package installs a
+    .ko the image never had -- which is precisely what these GPU driver
+    packages do. Without this, `hpm install hamnix-drivers-gpu-intel` would put
+    i915.ko on the disk and `modprobe i915` would answer "not found": the
+    module present, the name unresolvable, and nothing saying why. So the
+    package ships the lines and its install hook appends them, exactly as it
+    already appends to /etc/modules.
+
+    Returns [] if the host has no table to copy from, and the caller must
+    treat that as a refusal rather than shipping a package whose modules
+    modprobe cannot name.
+    """
+    table = host_dep_table(kver)
+    if not table:
+        return []
+    prefix = "/lib/modules/%s/" % kver
+    out = []
+    for _host, _inside, canonical, _big in staged:
+        rel = canonical[len(prefix):]
+        if rel not in table:
+            raise SystemExit(
+                "hamlinux_packages: %s is not in the host's modules.dep; "
+                "refusing to ship a module modprobe could not resolve" % rel)
+        out.append("%s: %s" % (rel, " ".join(table[rel])))
+    return out
+
+
 def stage_modules(kver, kos, workdir):
     """Decompress each .ko.xz into `workdir` under its /lib/modules-relative
     path, gzipping the ones too big for hpm's in-RAM unpack.
@@ -376,7 +440,7 @@ def stage_modules(kver, kos, workdir):
     return staged
 
 
-def module_install_hook(pkg, staged, note):
+def module_install_hook(pkg, staged, note, deps=(), kver=None):
     """The install.hamsh that makes the modules take effect on the next boot.
 
     Deliberately written in the smallest possible slice of hamsh -- literal
@@ -387,18 +451,23 @@ def module_install_hook(pkg, staged, note):
     lines = [
         "# %s -- install hook." % pkg,
         "#",
-        "# Two jobs:",
+        "# Three jobs:",
         "#   1. gunzip the modules that had to ship compressed (hpm unpacks",
         "#      in a 4 MiB / 8 MiB RAM buffer; linuxinit's finit_module call",
         "#      passes flags=0, so the kernel needs them uncompressed on disk).",
         "#   2. append them, IN DEPENDENCY ORDER, to /etc/modules, which the",
         "#      Adder PID 1 walks at boot.",
+        "#   3. append their modules.dep lines to the machine's dependency",
+        "#      table, so `modprobe <name>` can RESOLVE them. The image's table",
+        "#      was written by depmod when the image was built and knows",
+        "#      nothing about a module installed afterwards; without this the",
+        "#      .ko would be on the disk and modprobe would say 'not found'.",
         "#",
         "# Appending is unconditional: hpm refuses to install a package that is",
         "# already installed, so this runs once per install, and a duplicate",
         "# line would be harmless anyway (sys_init_module maps EEXIST to",
-        "# success). `hpm remove` does NOT take the lines back out -- see",
-        "# remove.hamsh.",
+        "# success, and modprobe takes the first matching modules.dep line).",
+        "# `hpm remove` does NOT take the lines back out -- see remove.hamsh.",
         "",
         "echo '[%s] enabling %s'" % (pkg, note),
     ]
@@ -407,6 +476,12 @@ def module_install_hook(pkg, staged, note):
             lines.append("gzip -d '%s.gz'" % canonical)
     for _host, _inside, canonical, _big in staged:
         lines.append("echo '%s' >> /etc/modules" % canonical)
+    if deps and kver:
+        depfile = "/lib/modules/%s/modules.dep" % kver
+        for dl in deps:
+            lines.append("echo '%s' >> %s" % (dl, depfile))
+        lines.append("echo '[%s] %d modules.dep line%s appended to %s'"
+                     % (pkg, len(deps), "" if len(deps) == 1 else "s", depfile))
     lines += [
         "echo '[%s] %d module%s added to /etc/modules; loaded on the next "
         "boot'" % (pkg, len(staged), "" if len(staged) == 1 else "s"),
@@ -493,7 +568,8 @@ def build_driver_packages(pkgdir, version, entries, skipped, vk_built=None):
             [(h, i) for h, i, _c, _b in core_staged],
             ["hamnix-init>=1", "hamnix-gzip>=1"],
             hooks={"install.hamsh": module_install_hook(
-                       "hamnix-drivers-drm", core_staged, "the DRM/KMS core"),
+                       "hamnix-drivers-drm", core_staged, "the DRM/KMS core",
+                       dep_lines(kver, core_staged), kver),
                    "remove.hamsh": module_remove_hook(
                        "hamnix-drivers-drm", core_staged)},
             extra_info=["license: GPL-2.0", "homepage: https://kernel.org/"]))
@@ -556,7 +632,8 @@ def build_driver_packages(pkgdir, version, entries, skipped, vk_built=None):
                 + vk_dep("anv"),
                 hooks={"install.hamsh": module_install_hook(
                            "hamnix-drivers-gpu-intel", i915_staged,
-                           "Intel i915 graphics"),
+                           "Intel i915 graphics",
+                           dep_lines(kver, i915_staged), kver),
                        "remove.hamsh": module_remove_hook(
                            "hamnix-drivers-gpu-intel", i915_staged)},
                 extra_info=["license: GPL-2.0",
@@ -610,7 +687,8 @@ def build_driver_packages(pkgdir, version, entries, skipped, vk_built=None):
                 + vk_dep("nvk"),
                 hooks={"install.hamsh": module_install_hook(
                            "hamnix-drivers-gpu-nouveau", nv_staged,
-                           "Nouveau (open-source Nvidia) graphics"),
+                           "Nouveau (open-source Nvidia) graphics",
+                           dep_lines(kver, nv_staged), kver),
                        "remove.hamsh": module_remove_hook(
                            "hamnix-drivers-gpu-nouveau", nv_staged)},
                 extra_info=["license: MIT/GPL-2.0",

@@ -574,8 +574,10 @@ MODPROBE=/usr/sbin/modprobe
 # devtmpfs never publishes /dev/snd/pcmC0D0p and user/linux-audio.c's
 # /dev/audio has nothing to open. snd-hda-codec-generic is listed BEFORE
 # snd-hda-intel deliberately -- the controller normally pulls its codec driver
-# in with request_module(), and PID 1 here loads modules by absolute path with
-# no modules.dep to resolve against, so an autoload would quietly not happen
+# in with request_module(), and PID 1 here loads modules by absolute path and
+# resolves nothing -- there is a modules.dep now, but the kernel's
+# request_module() reaches for /sbin/modprobe, which is not what this root
+# calls it -- so an autoload would quietly not happen
 # and the card would enumerate with no PCM device at all. Loading the codec
 # first makes that impossible. virtio_snd rides along so an image booted
 # against `-device virtio-sound-pci` finds a card too.
@@ -602,6 +604,88 @@ if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
         done
     done
     echo "[image] staged $(grep -c . "$ROOT/etc/modules" 2>/dev/null || echo 0) kernel modules for $KVER"
+
+    # --- modules AVAILABLE to modprobe but NOT loaded at boot -------------
+    # The list above is "what this machine loads before it has a shell".
+    # That is not the same question as "what drivers are on the disk for
+    # modprobe to reach for", and conflating them is why there was no way to
+    # ship a module without also booting it. A driver staged here is on disk
+    # and in modules.dep; nothing loads it until somebody types modprobe.
+    for m in ${HAMLINUX_MODULES_EXTRA:-}; do
+        "$MODPROBE" --dry-run --show-depends -S "$KVER" "$m" 2>/dev/null \
+        | awk '/^insmod /{print $2}' | while read -r ko; do
+            [ -f "$ko" ] || continue
+            rel="${ko#/lib/modules/$KVER/}"
+            out="$ROOT/lib/modules/$KVER/${rel%.xz}"
+            mkdir -p "$(dirname "$out")"
+            [ -f "$out" ] && continue
+            case "$ko" in
+                *.xz) xz -dc "$ko" > "$out" ;;
+                *)    cp -L "$ko" "$out" ;;
+            esac
+        done
+    done
+    [ -n "${HAMLINUX_MODULES_EXTRA:-}" ] && \
+        echo "[image] staged extra (not boot-loaded): ${HAMLINUX_MODULES_EXTRA}"
+
+    # --- modules.dep, WHICH IS WHAT MAKES modprobe A REAL COMMAND ---------
+    # Before this, no modules.dep was generated anywhere on this port
+    # (docs/runsweep_unhealthy.md named it as a real gap), so `modprobe NAME`
+    # could not resolve a name to a file at all and `insmod /abs/path.ko` --
+    # which resolves no dependencies -- was the only thing that worked. On a
+    # stock Debian kernel every graphics, filesystem and network driver is a
+    # module, so on REAL HARDWARE that is the difference between a working
+    # machine and a black screen.
+    #
+    # The table is the BUILD HOST's `depmod` run over the tree we just staged,
+    # which is exactly what a normal distribution does at install time. depmod
+    # reads the ELF symbol tables of the .ko files themselves, so it is not
+    # taking our word for the dependencies -- and it is run against $ROOT, so
+    # the table describes THE MODULES THIS IMAGE ACTUALLY HAS rather than the
+    # ~4000 the build host has.
+    #
+    # Sorted, because depmod emits in hash-table order and an initramfs whose
+    # bytes change for no reason defeats every "did the image change?" check.
+    #
+    # Only modules.dep is kept. depmod also writes modules.alias/.symbols and
+    # four .bin indexes; nothing on this port reads them, and a stale binary
+    # index that nothing maintains is a thing to be misled by later.
+    #
+    # ON AN INSTALLED MACHINE: user/hlinstall.ad copies the live root onto the
+    # disk, so this file travels with the .ko files it describes -- the same
+    # way /etc/modules and the modules themselves do. Modules that arrive
+    # LATER, by `hpm install`, are not in it: those packages append their own
+    # lines from their install hook (scripts/hamlinux_packages.py,
+    # module_install_hook). If neither happened, modprobe says so by name and
+    # exits non-zero rather than resolving to nothing.
+    DEPMOD=""
+    for d in /sbin/depmod /usr/sbin/depmod; do [ -x "$d" ] && DEPMOD="$d" && break; done
+    if [ -n "$DEPMOD" ]; then
+        # The three "could not open modules.order/.builtin" warnings are
+        # expected and harmless: those files describe the BUILD of a kernel
+        # tree, and we are describing a staged subset of one.
+        "$DEPMOD" -b "$ROOT" "$KVER" 2>/dev/null || true
+        DEPF="$ROOT/lib/modules/$KVER/modules.dep"
+        if [ -s "$DEPF" ]; then
+            sort -o "$DEPF" "$DEPF"
+            rm -f "$ROOT/lib/modules/$KVER"/modules.*.bin \
+                  "$ROOT/lib/modules/$KVER"/modules.alias \
+                  "$ROOT/lib/modules/$KVER"/modules.symbols \
+                  "$ROOT/lib/modules/$KVER"/modules.devname \
+                  "$ROOT/lib/modules/$KVER"/modules.softdep \
+                  "$ROOT/lib/modules/$KVER"/modules.weakdep
+            echo "[image] modules.dep: $(grep -c . "$DEPF") modules, $(wc -c < "$DEPF") bytes — modprobe can resolve by name"
+        else
+            # Do NOT leave a zero-byte file behind: modprobe would read it,
+            # find nothing and report every module missing. An absent file
+            # makes it say "cannot read modules.dep", which is the truth.
+            rm -f "$DEPF"
+            echo "[image] depmod produced no modules.dep — modprobe will refuse by name" >&2
+        fi
+    else
+        echo "[image] no depmod on this host — NO modules.dep; modprobe will refuse" >&2
+        echo "[image] (install the kmod package). insmod by path still works." >&2
+    fi
 else
     echo "[image] no modprobe or /lib/modules/$KVER — image will have no drivers" >&2
 fi
