@@ -180,7 +180,7 @@ same failure this project exists to beat.
 * **`hamnix-desktop` 1.0.10 IS A MIXED BUILD AND A MACHINE THAT TOOK IT LOST
   ITS DESKTOP. RECOVERED — 1.0.11 IS LIVE, AND `hpm update` IS MEASURED TO
   BRING SUCH A MACHINE BACK** (`tests/linux/installed_recover_broken.sh`,
-  **31 PASS / 0 FAIL**; the section on it below has the transcript). 1.0.10's
+  **34 PASS / 0 FAIL**; the section on it below has the transcript). 1.0.10's
   bytes are STILL SERVED, deliberately — they were not swapped under the same
   version number, because a machine that already believes it has 1.0.10 would
   never fetch a silently corrected one. What follows is the account of the
@@ -1591,7 +1591,7 @@ there.
 
 ### And the gate THE RECOVERY got — `tests/linux/installed_recover_broken.sh`
 
-**31 PASS / 0 FAIL. A machine that installed the BROKEN 1.0.10 runs
+**34 PASS / 0 FAIL. A machine that installed the BROKEN 1.0.10 runs
 `hpm update` and comes back to a desktop that answers a real mouse.**
 
 That claim had never been tested. 1.0.11 was published as the repair and
