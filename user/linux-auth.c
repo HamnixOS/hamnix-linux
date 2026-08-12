@@ -244,10 +244,19 @@ static int shadow_setpass(const char *name, const char *hash)
     int replaced = 0, werr = 0;
     while (fgets(line, sizeof line, f)) {
         if (!replaced && !strncmp(line, name, nl) && line[nl] == ':') {
-            /* name:HASH:rest... -- rewrite only the middle field. */
+            /* name:HASH:rest... -- rewrite only the middle field.
+             *
+             * A line with NO second colon is a two-field line, which no
+             * /etc/shadow this port ships or Linux writes actually has. It
+             * still must not gain a field it did not have: printing
+             * "name:hash:" there would invent one, and a shadow file whose
+             * field count changed under a program is exactly the kind of
+             * quiet damage this whole path is written to avoid. */
             char *h = line + nl + 1;
             char *rest = strchr(h, ':');
-            if (fprintf(t, "%s:%s:%s", name, hash, rest ? rest + 1 : "\n") < 0)
+            int w = rest ? fprintf(t, "%s:%s:%s", name, hash, rest + 1)
+                         : fprintf(t, "%s:%s\n", name, hash);
+            if (w < 0)
                 werr = 1;
             replaced = 1;
         } else if (fputs(line, t) == EOF) {
