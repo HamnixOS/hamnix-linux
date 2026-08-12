@@ -308,7 +308,144 @@ them, are what the optimisations above were measured against. Current:
 `wsysd -bench N` prints the same counters for a real compositor frame
 (`ops/frame`, `dispatch/frame`, `batched/frame`, `barriers/frame`).
 
+## First: the DE does NOT use this backend today
+
+Ask this before reading any number below, because it changes what they mean.
+**The desktop runs on the software rasteriser (`vk_2d`) on every machine this
+tree currently produces.** Not "sometimes", not "unless a GPU is present" —
+today, everywhere. Three independent reasons, each sufficient on its own:
+
+1. **The shipped image carries one ICD, and it is venus.**
+   `scripts/hamlinux_image.sh:789` — `VK_MODE="${HAMLINUX_VULKAN:-venus}"`.
+   The built initramfs contains exactly `libvulkan.so.1`,
+   `libvulkan_virtio.so` and `usr/share/vulkan/icd.d/virtio_icd.json`, and
+   nothing else Vulkan.
+2. **Venus enumerates nothing on this host's plain virtio-gpu**, so
+   `vk_set_backend(VK_BACKEND_LINUX)` refuses and `wsysd` prints
+   `vk backend SOFTWARE -- no usable Vulkan device (Vulkan loader found no
+   physical device)` (`user/wsysd.ad:872`).
+3. **Even where an ICD does come up, `vk_arm` disarms on a CPU ICD by
+   design** (`user/wsysd.ad:880`) — a conformant software ICD is refused
+   because `vk_2d` is 2.3–2.9× faster there. So a `HAMLINUX_VULKAN=lavapipe`
+   image is *also* on the software path.
+
+Nothing in `tests/linux/` asserts on that `wsysd: vk backend …` line at all, so
+which path the desktop took has never been gated either way.
+
+**This is why the 33 ms below is "do not switch yet", not "we shipped something
+slow."** No user has ever run the frame that was slow. It also means the fix in
+this section is not a user-visible speedup today; it is the removal of the
+thing that would have made turning the GPU path on a *regression*.
+
+One caveat on transfer: the measurement uses this host's **proprietary NVIDIA
+ICD**, which the distribution does not ship. An installed machine with this
+card would reach it through **NVK** (`hamnix-vulkan-nvk`, pulled in by
+`hamnix-drivers-gpu-nvidia`). The defect found below is a property of *discrete
+GPU memory* — mapped device memory is uncached on any of them — so it
+transfers; the absolute microseconds do not.
+
+## Measured on real silicon, and the 33 ms was not the GPU
+
+**Date: 2026-08. Device: NVIDIA GeForce RTX 3090, driver 550.163.01, Vulkan
+1.3.277, `VkPhysicalDeviceType` 2, `/usr/share/vulkan/icd.d/nvidia_icd.json`,
+offscreen with the desktop running beside it, with the machine owner's
+consent.** Everything below this heading supersedes the lavapipe conclusions in
+the two sections that follow it, which are kept because being wrong in public
+is how the levers got tested at all.
+
+The first run said `GPU 8× faster on fills, 7.4× SLOWER on the text frame`.
+That second number is the interesting one, and **it was not a measurement of
+the GPU.** `GPU_US` was wall clock around `frame_begin … frame_end`, which
+cannot tell the device being slow from the *host* being slow with the device
+idle. So the backend now reports the split, and the split is the whole answer:
+
+```
+BENCH_DE_TEXT_1280x800  GPU_US 32722   record_us 52   wait_us 535   gpu_us 428
+```
+
+- `gpu_us` — the **device's own clock**, `VK_QUERY_TYPE_TIMESTAMP` from
+  `TOP_OF_PIPE` at the head of the command buffer to `BOTTOM_OF_PIPE` at its
+  tail, scaled by `VkPhysicalDeviceLimits::timestampPeriod`: **428 µs.**
+- `record_us` + `wait_us` — CPU building the command buffer, then CPU blocked
+  on the fence: **587 µs together.**
+- `GPU_US` — the whole frame: **32,722 µs.**
+
+**32.1 ms of that frame was never submitted to anything.** It was the host,
+inside the frame body, before a single command was recorded. The RTX 3090 does
+this frame in 428 µs — 3 µs more than it spends on the *fills* frame that was
+called "8× faster".
+
+### Where the 32 ms went: a cache that confirmed itself across the bus
+
+`hvk_glyph`'s per-frame coverage cache keys on a hash of the coverage bytes and
+then **confirms the hit byte for byte** before trusting it — deliberately, and
+that confirmation must stay: a hash collision there paints one letter with
+another letter's shape, which is exactly the plausible-wrong-answer shape this
+tree keeps being bitten by.
+
+It confirmed against `g_amap` — **the mapped Vulkan buffer**.
+
+On lavapipe that buffer is ordinary cached RAM and the compare is free, which
+is why this shipped and why every gate in the tree stayed green. On a discrete
+GPU it is uncached, write-combined host memory: writes stream, but every *load*
+is a bus round trip of order 100 ns rather than an L1 hit. 1,679 cache hits ×
+~192 words × ~100 ns is the 32 ms, and the frame stayed byte-perfect the whole
+time.
+
+The fix is a host-side mirror of the arena (`g_ashadow`), written in lockstep
+from the same source bytes and confirmed against instead. Same comparison, same
+collision safety, no bus.
+
+| | wall | device clock | vs software |
+|--|--|--|--|
+| DE+text, before | 32,722 µs | 428 µs | **7.4× slower** |
+| DE+text, after | 1,166 µs | 428 µs | **3.8× faster** |
+
+**28×, byte-identical at every lever setting.**
+
+### All three "device-independent levers" are now refuted on hardware
+
+This is the part worth carrying forward, because the project quoted these
+counters as predictors for the life of the backend.
+
+| lever | what it does to the counters | what it did to the frame |
+|--|--|--|
+| `MAX_BATCH` 1 → 1024 | dispatches 1,724 → 15 (115×) | 2.6% (per-dispatch cost here is 517 ns, vs lavapipe's 17,700 ns) |
+| `NO_COVCACHE=1` | staged words 41,808 → 364,176 (8.7× **more**) | **41× faster** before the fix, and still ~30% faster after it |
+| `ARENA_DEVLOCAL=1` (new) | nothing; pixel-neutral | **5× worse** (164 ms) |
+
+That last row is what *named* the cause. Asking for a `DEVICE_LOCAL |
+HOST_VISIBLE` arena moved the CPU's readback from write-combined system memory
+to VRAM across the PCIe BAR, and the frame got five times slower — the cost
+tracked how far the **CPU's read** had to travel, which is not a fact about
+dispatches, staging volume, or the shader.
+
+The residual: `NO_COVCACHE` is still ~30% faster than the fixed cache on this
+device (805 µs vs 1,166 µs), so the coverage cache is *still* net-negative
+here — the FNV hash plus the linear scan now cost more than the staging they
+save, because staging into write-combined memory is nearly free. That is a
+recorded observation, not a fix; on a bus-limited device the trade flips back.
+
+### The gate that would have caught it
+
+`scripts/bench_vk_linux_device.sh` now enforces a **host-overhead ceiling**:
+wall clock may not exceed 10× the device's own clock for any frame at any lever
+setting. Before the fix the DE+text frame sat at **76.4×**; after it, at 2.7×,
+and fills at 1.2×.
+
+It is a ceiling on a bug shape, not a performance target. The shape is
+specific: *the backend doing work on the CPU that the device is waiting on,
+while every pixel stays correct.* A CPU ICD passes it trivially (`dev_us`
+tracks the wall clock because llvmpipe **is** the host), which is precisely why
+`scripts/test_vk_linux.sh` could never have caught this and why this script
+exists. When a device reports no usable timestamp the bench says the ceiling
+**could not be checked** — an unrun gate, not a passed one.
+
 ## Do those counters predict anything? Measured, and the answer is "one of them"
+
+> **Superseded on hardware.** The section above measured all three levers on an
+> RTX 3090. Keep reading for how they behave on lavapipe; do not quote the
+> conclusions as properties of the backend.
 
 The paragraph above was an argument, not a measurement: the counters were
 *asserted* to be device-independent and *assumed* to be the right levers.
@@ -455,8 +592,21 @@ $ tests/linux/vk_icd_survey.sh
 [icdsurvey] lvp_icd.json             DEVICE type 4  llvmpipe (LLVM 19.1.7, 256 bits)
 [icdsurvey] nvidia_icd.json: NOT RUN (reaches the GPU through /dev/nvidiactl)
 [icdsurvey] <every other ICD>        no-device (... -> VkResult -3)
-[icdsurvey] CPU-ONLY — correctness is gateable, performance is not
+[icdsurvey] UNDETERMINED — every ICD this survey RAN is a CPU rasterizer,
+[icdsurvey]   but it did not run: nvidia_icd.json
 ```
+
+> **That last line used to read `CPU-ONLY — correctness is gateable,
+> performance is not`, and it was wrong in the most expensive way available.**
+> The survey skips `nvidia_icd.json` *by design*, and then summarised as
+> though the skip had been a result. The sentence was quoted for months as a
+> fact about this machine's hardware; it was a fact about this script's own
+> `for` loop. The RTX 3090 was reachable the entire time — see
+> [§ measured on real silicon](#measured-on-real-silicon-and-the-33-ms-was-not-the-gpu).
+> The verdict is now `UNDETERMINED` whenever any ICD went unrun, because a
+> survey may report *"I did not look"* and may never report *"there is nothing
+> there"* on the strength of not having looked. This is the fourth time in this
+> project an instrument created or hid the effect it was measuring.
 
 | ICD | result |
 |--|--|

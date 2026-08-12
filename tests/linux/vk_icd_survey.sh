@@ -21,10 +21,16 @@
 #   SILICON   a real GPU is reachable -> run scripts/bench_vk_linux_device.sh
 #             against that ICD; the last big unknown in the graphics stack is
 #             one command away.
-#   CPU-ONLY  the only Vulkan here is a CPU rasterizer. Correctness can be
-#             gated (scripts/test_vk_linux.sh); performance cannot be measured.
+#   CPU-ONLY  EVERY ICD on this host was run and every one is a CPU
+#             rasterizer. Correctness can be gated (scripts/test_vk_linux.sh);
+#             performance cannot be measured.
 #   NONE      no Vulkan at all; the backend will refuse and stay software,
 #             which is the behaviour scripts/test_vk_linux.sh asserts.
+#   UNDETERMINED
+#             some ICD was NOT RUN (nvidia_icd.json always is not), so nothing
+#             here is a statement about this machine's hardware. See the note
+#             above the summary — this verdict exists because the old script
+#             printed CPU-ONLY on a box with an RTX 3090 in it.
 #
 # This is a SURVEY, not a gate: it exits 0 whatever it finds. The finding is
 # the output.
@@ -98,11 +104,14 @@ for c in /sys/class/drm/card*; do
 done
 
 best=none
+skipped=""
+nskipped=0
 for J in /usr/share/vulkan/icd.d/*.json; do
     b="$(basename "$J")"
     case "$b" in
         nvidia_icd.json)
             echo "[icdsurvey] $b: NOT RUN (reaches the GPU through /dev/nvidiactl)"
+            skipped="$skipped $b"; nskipped=$((nskipped+1))
             continue;;
     esac
     out="$(unshare -Urm --map-root-user /bin/sh -c \
@@ -114,9 +123,42 @@ for J in /usr/share/vulkan/icd.d/*.json; do
     esac
 done
 
+# THE SUMMARY MUST DESCRIBE WHAT WAS RUN, NOT WHAT IS PLUGGED IN.
+#
+# This line used to read `CPU-ONLY — correctness is gateable, performance is
+# not` on a machine with an RTX 3090 in it, because the survey SKIPS
+# nvidia_icd.json by design and then summarised as though the skip had been a
+# result. That sentence was quoted for months as a fact about the hardware and
+# it was a fact about this script's own for-loop. The GPU was reachable the
+# whole time; the 33 ms text frame that went unexplained until it was finally
+# measured was one command away.
+#
+# So: any ICD that was not run makes the verdict UNDETERMINED, by name. A
+# survey may report "I did not look"; it may never report "there is nothing
+# there" on the strength of not having looked.
 case "$best" in
   silicon) echo "[icdsurvey] SILICON — run: scripts/bench_vk_linux_device.sh with that ICD";;
-  cpu)     echo "[icdsurvey] CPU-ONLY — correctness is gateable, performance is not";;
-  *)       echo "[icdsurvey] NONE — the backend will refuse and stay software";;
+  cpu)
+    if [ "$nskipped" -gt 0 ]; then
+        echo "[icdsurvey] UNDETERMINED — every ICD this survey RAN is a CPU"
+        echo "[icdsurvey]   rasterizer, but it did not run:$skipped"
+        echo "[icdsurvey]   This says nothing about whether this machine has a"
+        echo "[icdsurvey]   GPU. To find out, with the machine owner's consent:"
+        for s in $skipped; do
+            echo "[icdsurvey]     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/$s \\"
+            echo "[icdsurvey]         scripts/bench_vk_linux_device.sh"
+        done
+    else
+        echo "[icdsurvey] CPU-ONLY — every ICD on this host was run and every"
+        echo "[icdsurvey]   one is a CPU rasterizer: correctness is gateable,"
+        echo "[icdsurvey]   performance is not"
+    fi;;
+  *)
+    if [ "$nskipped" -gt 0 ]; then
+        echo "[icdsurvey] UNDETERMINED — no ICD this survey RAN produced a"
+        echo "[icdsurvey]   device, and it did not run:$skipped"
+    else
+        echo "[icdsurvey] NONE — the backend will refuse and stay software"
+    fi;;
 esac
 exit 0

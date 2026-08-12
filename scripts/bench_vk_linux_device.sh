@@ -57,9 +57,16 @@ if echo "$HDR" | grep -q '^VK_DEVICE_IS_SILICON 0'; then
 fi
 
 fail=0
-printf '\n%-18s %-8s %7s %7s %6s %6s %5s %8s %s\n' \
-    lever frame gpu_us sw_us disp bars staged reuse identical
+# HOST_X is the column this bench was missing, and the reason it once reported
+# "the GPU is 7.4x slower" about a frame the GPU finished in 428 us: the wall
+# clock alone cannot separate the device being slow from the HOST being slow
+# with the device idle. host_x = wall / device-clock. See THE HOST-OVERHEAD
+# CEILING below.
+printf '\n%-18s %-8s %7s %7s %7s %6s %6s %6s %5s %8s %s\n' \
+    lever frame wall_us dev_us sw_us host_x disp bars staged reuse identical
 
+worst_host_x=0
+worst_lever=""
 # one run -> one row per frame; identity is asserted, not reported
 row() {
     local lbl="$1"; shift
@@ -70,10 +77,21 @@ row() {
             echo "FAIL: $k was NOT byte-identical at $lbl"; fail=1; }
         # shellcheck disable=SC2086
         set -- $(echo "$out" | grep "^$k GPU_US")
-        [ $# -ge 19 ] || continue
-        printf '%-18s %-8s %7s %7s %6s %6s %5s %8s %s\n' \
+        [ $# -ge 27 ] || continue
+        local wall="$3" sw="$5" dev="${25}" hx="-"
+        # dev_us 0 means this device reports no usable timestamp. Then host_x
+        # is "-", never a number -- an unmeasured ratio must not print as one.
+        if [ "${dev:-0}" -gt 0 ]; then
+            hx=$(( wall * 10 / dev ))
+            hx="$((hx/10)).$((hx%10))"
+            if [ "$((wall * 10 / dev))" -gt "$worst_host_x" ]; then
+                worst_host_x="$((wall * 10 / dev))"
+                worst_lever="$lbl/$(echo "$k" | sed 's/BENCH_//;s/_1280x800//')"
+            fi
+        fi
+        printf '%-18s %-8s %7s %7s %7s %6s %6s %6s %5s %8s %s\n' \
             "$lbl" "$(echo "$k" | sed 's/BENCH_//;s/_1280x800//')" \
-            "$3" "$5" "${11}" "${15}" "${17}" "${19}" ok
+            "$wall" "$dev" "$sw" "$hx" "${11}" "${15}" "${17}" "${19}" ok
     done
 }
 
@@ -105,5 +123,45 @@ if [ -n "${U1:-}" ] && [ -n "${U2:-}" ] && [ "${D1:-0}" -gt "${D2:-0}" ]; then
     echo "[bench] (lavapipe answered 17700 ns; that is the comparison, not the target)"
 fi
 
+# --- THE HOST-OVERHEAD CEILING -------------------------------------------
+# This is a GATE, not a report, and it exists because of a specific measured
+# bug. The glyph coverage cache confirmed a hash hit by reading its candidate
+# back out of the MAPPED VULKAN BUFFER. On lavapipe that buffer is ordinary
+# cached RAM, so the whole software gate ran green for the life of the
+# backend. On an RTX 3090 it is uncached write-combined memory and the same
+# loop cost 32.3 ms of HOST time per frame while the device worked for 0.43 ms
+# -- a host_x of 76. The frame was byte-perfect throughout, so every
+# correctness gate in the tree passed it.
+#
+# The rule that catches that class: a backend whose whole purpose is to hand
+# work to the device must not burn an order of magnitude more time on the host
+# than the device spends doing the work. 10x is deliberately loose -- FILLS
+# sits at 1.2 and DE+text at 2.7 -- because this is a ceiling on a bug shape,
+# not a performance target to tune against.
+#
+# On a CPU ICD dev_us tracks the wall clock (llvmpipe IS the host), so this
+# passes trivially there, which is exactly why the software gate could never
+# have caught it. It needs real silicon; that is what this script is for.
+HOST_X_CEILING=100      # tenths, i.e. 10.0x
+if [ "$worst_host_x" -gt 0 ]; then
+    echo
+    echo "[bench] WORST HOST OVERHEAD: $((worst_host_x/10)).$((worst_host_x%10))x" \
+         "wall vs device clock, at $worst_lever"
+    if [ "$worst_host_x" -gt "$HOST_X_CEILING" ]; then
+        echo "FAIL: the host spent $((worst_host_x/10)).$((worst_host_x%10))x" \
+             "the device's own time at $worst_lever (ceiling" \
+             "$((HOST_X_CEILING/10)).$((HOST_X_CEILING%10))x)."
+        echo "      The frame is still byte-identical -- this is the backend"
+        echo "      doing work on the CPU that the device is waiting on."
+        fail=1
+    fi
+else
+    echo
+    echo "[bench] NOTE: this device reports no usable timestamp query, so the"
+    echo "[bench]       host-overhead ceiling could NOT be checked. That is an"
+    echo "[bench]       unrun gate, not a passed one."
+fi
+
 [ "$fail" -eq 0 ] || { echo "BENCH_VK_LINUX FAIL"; exit 1; }
-echo "BENCH_VK_LINUX PASS (byte-identical at every lever setting)"
+echo "BENCH_VK_LINUX PASS (byte-identical at every lever setting;" \
+     "host overhead within ceiling)"
