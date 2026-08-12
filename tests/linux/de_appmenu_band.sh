@@ -49,10 +49,13 @@
 #   2. the menu is opened THE WAY A PERSON OPENS IT -- a pointer event on the
 #      Applications button, written into the panel window's own event ring
 #      (`/dev/wsys/<wid>/event`, which the host owner may write; this is the
-#      same driver tests/linux/distro_menu.sh uses, and it is used here for the
-#      same reason: wsysd routes real pointer input to `<wid>/pointer` and
-#      NOTHING in this port feeds `<wid>/event`, so the panel cannot be driven
-#      by evdev at all -- see THE INPUT GAP at the bottom of this file).
+#      same driver tests/linux/distro_menu.sh uses). A real mouse now reaches
+#      the panel too -- `wsysd` routes the pointer onto the event ring since
+#      the fix gated by tests/linux/de_mouse_chrome.sh -- but this file keeps
+#      the ring write on purpose: what it measures is the menu's GEOMETRY and
+#      the keyed present under it, and a poke is the shortest path to an open
+#      menu. de_mouse_chrome.sh is the file that owns the input question, and
+#      it is forbidden from taking this shortcut.
 #   3. the panel window GREW to the full width of the display -- the shape of
 #      the report, asserted rather than assumed.
 #   4. the wallpaper to the right of the menu card is BYTE-IDENTICAL to the
@@ -329,17 +332,22 @@ else
     bad "keyed 1 did not restore the application ($got% of its rect)"
 fi
 
-# ---- THE INPUT GAP, named rather than hidden -----------------------------
-# This gate drives the menu by writing the panel's event ring, and that is not
-# only a convenience. user/wsysd.ad routes real pointer input to
-# `/dev/wsys/<wid>/pointer`; `user/hampanelscene.ad` and `user/hamdesktop.ad`
-# read `/dev/wsys/<wid>/event`, and NOTHING in this port ever writes a pointer
-# line to an event ring -- measured, with a window whose owner drains neither:
-# after a full click the `pointer` ring holds `m/d/m/u` lines and the `event`
-# ring is empty. So the DE chrome cannot be clicked with a mouse on this line;
-# only a host-owner write to the event ring moves it. That is a separate defect
-# from the one this file gates and it is NOT fixed here, but a reader who finds
-# this test poking a ring instead of moving a cursor deserves to know why.
-info "the menu is opened by writing the panel's event ring: wsysd routes pointer input to <wid>/pointer and nothing feeds <wid>/event (see THE INPUT GAP in this file)"
+# ---- THE INPUT GAP, named rather than hidden, and now CLOSED -------------
+# This gate drives the menu by writing the panel's event ring. When it was
+# written that was not only a convenience: user/wsysd.ad routed real pointer
+# input to `/dev/wsys/<wid>/pointer` alone, `user/hampanelscene.ad` and
+# `user/hamdesktop.ad` read `/dev/wsys/<wid>/event`, and NOTHING in this port
+# ever wrote a pointer line to an event ring -- measured, with a window whose
+# owner drained neither: after a full evdev click the `pointer` ring held its
+# lines and the `event` ring was EMPTY. The DE chrome could not be clicked with
+# a mouse at all, and no gate said so, because every gate that drives the
+# chrome pokes the ring exactly like this one.
+#
+# `wsysd`'s `route_pointer_event` closes it: the routed line goes on the EVENT
+# ring in devwsys's shape (`m <x> <y> <buttons> <dz>`), and `pointer` is still
+# written for lib/hamui.ad. tests/linux/de_mouse_chrome.sh is the gate, and it
+# is the one file here that may not poke a ring -- every click in it is
+# synthetic evdev into the compositor.
+info "the menu is opened by writing the panel's event ring; a real mouse also reaches it now -- see tests/linux/de_mouse_chrome.sh"
 
 done_report

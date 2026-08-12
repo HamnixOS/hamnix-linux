@@ -1814,6 +1814,64 @@ def route_key(code: int32):
     write_path(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0])
 
 
+# THE ROUTED POINTER GOES ON THE **EVENT** RING. THAT IS THE CANONICAL ONE.
+#
+# THE DEFECT THIS FIXES. `deliver_pointer` used to write the routed line to
+# `/dev/wsys/<wid>/pointer` and to nothing else. `lib/hamui.ad` reads that
+# file, so every ordinary hamUI application was fine -- but the two programs a
+# person actually points at, `user/hampanelscene.ad` (the panel, the
+# Applications menu, the taskbar) and `user/hamdesktop.ad` (the wallpaper and
+# the icons), read `/dev/wsys/<wid>/event`, and NOTHING in this port ever
+# wrote a pointer line to an event ring. Measured with a window whose owner
+# drained neither ring: after a full evdev click `pointer` held its line and
+# `event` was EMPTY. The DE chrome could not be clicked with a mouse at all.
+# Every gate that drives the chrome (tests/linux/distro_menu.sh,
+# tests/linux/de_appmenu_band.sh) wrote the event ring BY HAND as host owner,
+# which is exactly why none of them noticed.
+#
+# WHICH RING IS CANONICAL, and why it is this one. Hamnix answers it: its
+# router (`~/Hamnix/sys/src/9/port/devwsys.ad`, `_wsys_route_common` ->
+# `_wsys_evt_emit_pointer`, line 12384) pushes the window-local pointer line
+# onto the EVENT ring and only there. The pointer ring still exists in devwsys
+# but nothing routes into it -- `~/Hamnix/user/hamappmenu.ad:415` says so in
+# as many words: "read the MODERN per-window /event ring, not the legacy
+# /pointer ... the old userland compositor is retired, so /pointer is now
+# DEAD". Matching Hamnix's shape is this line's default and there is no reason
+# to deviate: the event ring is also the only one that can carry the 'f'
+# focus and 'r' resize lines a chrome program needs interleaved with pointer
+# lines IN ORDER, and it is the ring every scene client in user/ already
+# drains. So `event` is canonical.
+#
+# `pointer` is still written, unchanged, because on THIS line it is not dead:
+# `lib/hamui.ad` reads it (`_h_poll_pointer`) and every hamUI application in
+# user/ inherits that. Retiring it is Hamnix's migration, not this fix's, and
+# doing it here would break every hamUI window in the image to fix the chrome.
+#
+# THE LINE SHAPE ON THE EVENT RING IS HAMNIX'S, NOT THIS PORT'S. devwsys emits
+# `m <x> <y> <buttons> <dz>\n` for motion, press, release AND scroll alike --
+# the TYPE byte is always 'm' and the button STATE lives in the bitmap, which
+# is what `hampanelscene`'s edge detector is written against (it derives a
+# press from `bv & (bv ^ prev_bv)`). Forwarding this port's d/u/s type bytes
+# would be a second protocol that no client in the tree parses.
+def route_pointer_event(wid: int32, lx: int32, ly: int32,
+                        btn: int32, dz: int32):
+    if wid < 2:
+        return
+    winpath(wid, "event")
+    ctlbuf[0] = 109                                      # 'm', always
+    ctlbuf[1] = 32
+    i: uint64 = emit_int(&ctlbuf[0], 2, lx)
+    ctlbuf[i] = 32
+    i = emit_int(&ctlbuf[0], i + 1, ly)
+    ctlbuf[i] = 32
+    i = emit_int(&ctlbuf[0], i + 1, btn)
+    ctlbuf[i] = 32
+    i = emit_int(&ctlbuf[0], i + 1, dz)
+    ctlbuf[i] = 10
+    ctlbuf[i + 1] = 0
+    write_path(cast[Ptr[char]](&pathbuf[0]), &ctlbuf[0])
+
+
 def route_pointer(wid: int32, kind: uint8, lx: int32, ly: int32,
                   btn: int32, dz: int32):
     # "<type> <x> <y> <buttons> <dz>\n" with x,y already mapped to WINDOW-LOCAL
@@ -2118,6 +2176,10 @@ def deliver_pointer():
     elif ptr_dz != 0:
         kind = 115                                       # 's' scroll
     route_pointer(wid, kind, lx, ly, ptr_btn, ptr_dz)
+    # ...and the CANONICAL ring, which is what the panel and the desktop read.
+    # See route_pointer_event: without this line the DE chrome is inert under a
+    # real mouse.
+    route_pointer_event(wid, lx, ly, ptr_btn, ptr_dz)
     n_ptr = n_ptr + 1
     ptr_moved = 0
     ptr_edge = 0
@@ -2321,6 +2383,21 @@ def pump_input():
             eval_: int32 = le32(&evbuf[0], i + 20)
             if etype == 1:                               # EV_KEY
                 if ecode >= 272 and ecode <= 274:
+                    # A BUTTON EDGE FLUSHES THE ONE BEFORE IT. This loop
+                    # drains every record the node has pending, and the frame
+                    # loop only calls deliver_pointer() once afterwards -- so
+                    # a press and its release read in the SAME pass used to
+                    # collapse into a single 'u' with buttons 0, and the
+                    # press was never delivered at all. Measured: seven evdev
+                    # records written in one go (move, down, up) left the
+                    # window's ring holding exactly `u 80 110 0 0`. A client
+                    # that derives a click from the button BITMAP -- which is
+                    # what hampanelscene does, and what devwsys's shape asks
+                    # of it -- can never see that click. devwsys routes each
+                    # event as it arrives; this is that, at the granularity
+                    # this poll loop has.
+                    if ptr_edge != 0:
+                        deliver_pointer()
                     handle_button(ecode, eval_)
                 else:
                     handle_key(ecode, eval_)
