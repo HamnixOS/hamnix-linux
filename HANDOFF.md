@@ -41,7 +41,7 @@ rather than argued:
 | Distributions | **Two, at once, on the live boot AND on an installed disk.** `#distro/<name>` is a parameterised subtree server; `/etc/distros` maps a name to a medium **by ext4 volume label**, so which disk is `/dev/vda` cannot silently decide which distribution you entered. `enter alpine { … }` (musl, 3.24.1) and `enter debian { … }` (glibc, 12.15) both work in ONE boot from the console AND as uid 1001 — `tests/linux/two_namespaces.sh`, with a negative control that `/etc/alpine-release` is invisible inside Debian. An unprivileged process cannot open a block device to read a label, so `bind` falls back to the mount point the boot already posted the server at: **the name is what crosses the privilege boundary.** Alpine costs **26 MiB** without graphics, 333 MiB with; Debian is 4.5 GiB. Each has its own section in the DE application menu, named for it, driven from `/etc/distros` rather than from a compiled-in path. `etc/rc.boot.installed` sources the same generated `/etc/rc.distros` the live boot does, so `enter alpine` and `enter debian` survive a reboot into an installed system -- `tests/linux/installed_distros.sh`, the boot nobody had ever run. `docs/linux_distro_namespaces.md`. |
 | Audio | `/dev/audio`, `/dev/audioctl`, `/dev/audioin` on intel-hda, ported from Hamnix's `audio_cdev.ad` + `hda.ad`. Proven by FFT on a WAV captured out of QEMU: 1000.28 Hz, 444.57 Hz and a 660.90 Hz sine, right durations, square-wave harmonics. `arecord` delivers 97.4% of a 48 kHz stereo second. **It MIXES**: an ALSA substream has one writer, so `/srv/audio` is a shared mix ring and a detached pump owns the card — two programs playing two tones appear in ONE capture as both frequencies, summed (rms 1.42× solo), and a writer at a third of real time interrupts the other in 0 of 65 windows. `docs/linux_audio_mixer.md`. |
 | Shutdown | **An installed machine can be turned off, and the filesystems are flushed on the way down.** `/dev/reboot` is served (`user/linux-syscalls.c`), ported from Hamnix's `DEV_REBOOT` cdev with its protocol intact — first token, three verbs `poweroff` / `reboot` / `halt`, reads are EOF. A recognised verb is `sync(2)` then `reboot(2)`. Until this landed nothing served the name, so `reboot`, `poweroff`, `halt` and `init 0` / `init 6` all died on the open and **every restart of an installed machine was the equivalent of pulling the plug** — it survived only because ext4 has a journal. An installed disk now writes to `/etc` and reboots **in the same breath with no sleep**, and the next boot is running the rc the last one wrote: `tests/linux/reboot_device.sh`, 37 PASS, `reboot: Restarting system` in 13 s and `reboot: Power down` in 11 s. `poweroff` and `halt` were not in the image at all and now are. uid 1001 gets EPERM and every client reports it **by name**; the desktop's Power Off works because `hamsessui` is spawned by the root chrome. `docs/linux_installed_update.md` §2c. |
-| Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. |
+| Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. **This was true of the IMAGE and false of the CHANNEL, and the headline above said "measured" for eleven versions.** `/bin/ac` is a driver, not a compiler — it execs the hard-coded `/bin/host_ac` — and the published `hamnix-adder-1.0.12.tar.gz` (sha256 `d22ce377e5bd…`, exactly what the index advertised) contained **two entries**: `PKGINFO` and `files/bin/ac`. No compiler, no runtime sources. On a machine installed from 255.one, `ac hello.ad` answered `ac: cannot run /bin/host_ac`, exit 10, no binary — so for exactly the machines NORTH_STAR's invariant is about, the capability did not exist. `host_ac` had been excluded from the channel by name, with the reason "built for the BUILD HOST's libc … the shippable compiler is `ac`, which IS packaged"; `readelf` refutes both halves — `host_ac` has no `.dynamic` section and no `INTERP` ("not a dynamic executable"), while `ac`, the one that shipped, is the one carrying `NEEDED libssl.so.3 libcrypto.so.3 libcrypt.so.1 libc.so.6`. `hamnix-adder` now carries the compiler (79974 B → 585056 B) and the exclusion is deleted. It is enforced where it cannot be skipped: `tests/linux/channel_compiles_adder.sh` unpacks the toolchain out of the channel tarballs, stages a root whose `/bin` is those files and nothing else, runs the real `ac` through its real `rfork` + binds + `bind '#distro' /`, and **runs the ELF that comes out** — 8 PASS / 0 FAIL, 3 s, and `scripts/hamlinux_packages.py` runs it before it writes `index.json`. Against the published 1.0.12 bytes it scores 2 PASS / **3 FAIL**. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
 | Build | **Every application in `user/` builds through the LLVM lane** — 363 of 363, with 4 of the 367 files being LIBRARY MODULES that have no `main` and are not applications. `scripts/hamlinux_sweep.sh` computes and prints that headline next to its own definition; nothing is hand-derived. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
 | Idle | **An idle desktop is idle.** It was not: with nothing open, no input and nothing running, the host's QEMU sat at **203.6%** of one cpu and `hamdesktop`, `hampanelscene` and PID 1 each burned 11 s in a 20 s window, in state R. Now **6.8%** with the bare desktop and **7.3%** with a terminal open, every process at `0:00`, no zombies. Five separate causes, all the same shape and all invisible to every functional gate — see THE IDLE CENSUS below. And an idle desktop is not the only thing that has to be idle: **an idle APPLICATION does too**, and 26 of them each burned a full core with every gate green. The run sweep's `cpu` column found them; all 26 are now at 0.1 s of cpu in a 16.7 s run and pixel-identical. `tests/linux/de_idle_cpu.sh`, `scripts/hamlinux_runsweep.sh`. |
@@ -1658,6 +1658,55 @@ running `strace` **as PID 1**, and one only after publishing the compositor's
 own state as a file (`/dev/wsys/wsysd/state`) so it could be `cat`-ed from
 inside a misbehaving desktop. When something here does not work, assume a call
 is lying before you assume it is broken.
+
+### And the variant that is not on that list: the program was loud, and nobody ran it
+
+`hamnix-adder-1.0.12` was published carrying **one file**, `files/bin/ac`.
+`/bin/ac` is a driver that execs the hard-coded `/bin/host_ac`, so on a machine
+installed from 255.one the distribution's compiler did not exist. Type
+`ac hello.ad` on it and it says, correctly and by name:
+
+```
+ac: cannot run /bin/host_ac
+ac: hello.ad: the Adder compiler could not translate this program
+```
+
+Exit 10, no binary. **`ac` did everything right.** It did not exit 0, it did not
+write an empty file, it named the missing thing. It is on this page anyway,
+because the lesson is one step further out than the list above: *a program that
+fails loudly is worth nothing if no gate ever runs it.* Every automated check
+passed and had to — the package built, its sha256 matched its bytes, its
+dependency resolved, the file it claimed to carry was really in it, and
+`channel_covers_image.sh` found `bin/host_ac` **named in its exclusion table
+with a reason in front of it**.
+
+That reason was the actual defect, and it was wrong in both halves: it said
+`host_ac` was "built for the BUILD HOST's libc" (`readelf`: no `.dynamic`
+section, no `INTERP` — it is the one binary in `/bin` that needs no libc, while
+`ac`, which shipped, is the one with `NEEDED libssl.so.3 libcrypto.so.3
+libcrypt.so.1 libc.so.6`), and that "the shippable compiler is `ac`, which IS
+packaged" (`ac` is not a compiler). So:
+
+* **A reason in an exclusion table is a claim, not a measurement**, and an
+  unmeasured claim there is indistinguishable from the silent drop the gate
+  exists to catch — it just has prose in front of it. Both of the exclusions
+  that assert a MECHANISM (`/init`, `modules.dep`) are checked by reading the
+  built tarballs; the ones that assert a PROPERTY OF THE FILE were not checked
+  by anything until this.
+* **The image is not the machine.** Every existing `ac` test — `ac_host.sh`,
+  `ac_ns_host.sh` — stages the toolchain out of the tree, where `host_ac` has
+  always sat. Both passed throughout. The question "does the CHANNEL carry a
+  working toolchain" had no test at all, and it is the only version of the
+  question NORTH_STAR's invariant is about.
+
+Closed by `tests/linux/channel_compiles_adder.sh` (**8 PASS / 0 FAIL**, 3 s),
+which unpacks `hamnix-adder` out of the built channel, stages a root whose
+`/bin` is those files **and nothing else**, runs the real `ac` through its real
+`rfork` + three binds under `/n` + `bind '#distro' /`, and then RUNS the ELF
+and compares its stdout — exit 0 having written nothing, and a binary that does
+not run, are both failures. `scripts/hamlinux_packages.py` runs it before it
+writes `index.json`, so a channel whose compiler does not work has no index.
+Against the published 1.0.12 bytes it scores **2 PASS / 3 FAIL**.
 
 ### The gate the last two of those got
 
