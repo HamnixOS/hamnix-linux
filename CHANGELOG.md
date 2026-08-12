@@ -20,7 +20,22 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-*(nothing right now — 1.0.12 carries everything that had landed.)*
+- **`tail FILE` never opened the file.** It checked whether its first argument
+  began with `-` and then read **standard input** regardless. At a console,
+  where stdin is a terminal that never reaches end-of-file, `tail somefile`
+  waited on the keyboard forever and took the shell with it. The quieter half
+  is the worse one: in a script, where stdin is already at end-of-file, the
+  same bug printed **nothing and exited 0** — so anything that probed a file
+  with `tail` concluded it was empty. `head` had been given its file operand
+  months ago and its own comments describe this exact bug; `tail` was never
+  given the same treatment, and it now runs as the control proving the
+  difference.
+  A second wrong answer was underneath it: the old code read the **first**
+  8 KiB and tailed that, so on any file over 8 KiB it returned promptly with
+  the wrong lines and said nothing. It now keeps a trailing window and seeks
+  to it, so a gigabyte log costs one seek. A line too large to fit is dropped
+  with a reason on stderr and a non-zero exit, rather than printed as though
+  it were whole.
 
 ## 1.0.12
 
