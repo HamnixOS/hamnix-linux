@@ -101,6 +101,39 @@ struct netshm {
 
 static struct netshm *shm;
 
+/* THE ANSWER TO `accept` HAS TO SURVIVE THE fd IT WAS WRITTEN TO.
+ *
+ * Plan 9's accept answers the NEW connection number on the ctl file, and
+ * user/net9.ad's net_accept does the dance the natural way: open ctl for
+ * WRITE, write "accept", CLOSE it (an fd opened for writing cannot be read
+ * back), reopen ctl for READ, and read the number. This implementation kept
+ * that answer in the OPEN FILE's snapshot -- so the close threw it away and
+ * the reopen re-armed the snapshot with the listener's OWN number.
+ *
+ * What that produced was not an error. net_accept returned the LISTENER's
+ * connection number, its caller opened /net/tcp/<listener>/data, and the first
+ * read came back ENOTCONN from the listening socket. Measured with strace on
+ * user/x11/x11srv.ad: `accept(5) = 6` and then `read(5, ..., 12) = -1 ENOTCONN`
+ * -- it accepted a client and then read from the socket it accepts on. Every
+ * Adder server that takes a connection through net_accept on this line was
+ * broken this way, and what each of them printed was its own local guess
+ * ("[x11srv] setup read failed"), never the cause.
+ *
+ * So the pending answer lives HERE, per connection, for one read. It is
+ * process-local deliberately: the write and the read are the same process's
+ * two opens, and `struct connrec` is in a SHARED segment whose layout other
+ * builds agree on -- putting it there would change that layout for a value
+ * that no other process has any business seeing. */
+static int pending_accept[MAX_CONN];
+static int pending_accept_init;
+
+static void pending_accept_setup(void)
+{
+    if (pending_accept_init) return;
+    for (int i = 0; i < MAX_CONN; i++) pending_accept[i] = -1;
+    pending_accept_init = 1;
+}
+
 /* Defined with the interface-configuration code near the bottom; needed up
  * here so a broadcast can name the interface it goes out of. */
 static const char *default_iface(void);
@@ -453,7 +486,14 @@ static int64_t ctl_verb(int n, struct connrec *c, const char *s, size_t len)
         /* Plan 9's accept answers the NEW connection number on the ctl file
          * you wrote it to -- user/net9.ad:329 reads it straight back. The
          * number is what crosses to httpd_worker, which then opens
-         * /net/tcp/<n>/data by name. */
+         * /net/tcp/<n>/data by name.
+         *
+         * It is ALSO left pending on the listener, because net9.ad reads it
+         * back through a DIFFERENT fd (it must close the write fd first).
+         * See pending_accept above. */
+        pending_accept_setup();
+        if (n >= 0 && n < MAX_CONN)
+            pending_accept[n] = nn;
         return (int64_t)nn;
     }
     if (len >= 3 && !strncmp(s, "tls", 3)) {
@@ -503,6 +543,16 @@ int hamnet_open(const char *path, int for_write, struct hamnet_file *f)
     }
     case HAMNET_CTL:
         if (!conn_at(f->conn)) { errno = ENOENT; return -1; }
+        /* A pending `accept` answer is handed to the FIRST reader and then
+         * cleared, which is exactly the one open net_accept makes after
+         * closing the fd it wrote to. Every other open of a ctl file goes on
+         * answering that connection's own number. */
+        pending_accept_setup();
+        if (f->conn >= 0 && f->conn < MAX_CONN && pending_accept[f->conn] >= 0) {
+            int pend = pending_accept[f->conn];
+            pending_accept[f->conn] = -1;
+            return snap_num(f, pend);
+        }
         return snap_num(f, f->conn);
     case HAMNET_DATA: {
         struct connrec *c = conn_at(f->conn);
