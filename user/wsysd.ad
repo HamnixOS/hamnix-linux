@@ -169,6 +169,8 @@ extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int6
 extern def sys_get_jiffies() -> uint64
 extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
 extern def sys_exit(code: uint64)
+extern def hamwsys_wake_listen() -> int32
+extern def hamwsys_wake_drain()
 extern def hamfb_attach_scanout(dmabuf_fd: int32, w: uint32, h: uint32,
                                 pitch: uint32) -> int32
 extern def hamfb_probe_mode(w: Ptr[uint32], h: Ptr[uint32]) -> int32
@@ -3172,9 +3174,23 @@ def fd_is_waitable(fd: int32) -> int32:
     return 0
 
 
+wake_fd: int32 = -1
+
+
 def build_waitset():
     n_wait = 0
     nlie: int32 = 0
+    # THE CLIENT WAKE, first in the set because it is the one that was missing.
+    # Input fds cover a hand on a mouse; they do not cover a window MOVING,
+    # which is a client writing <wid>/ctl and no kernel state changing at all.
+    # Measured, that gap left client-driven repaint riding the fallback tick,
+    # which was 85% of a drag frame's period. This is an ordinary pollable
+    # socket, so the set stays on sys_waitfds' single uncapped poll(2) arm --
+    # a /dev/wsys ring here would force a FUTEX_WAIT that no evdev fd can wake.
+    wake_fd = hamwsys_wake_listen()
+    if wake_fd >= 0 and n_wait < WAITSET_CAP:
+        waitset[n_wait] = wake_fd
+        n_wait = n_wait + 1
     d: uint64 = 0
     while d < n_input:
         if n_wait < WAITSET_CAP and fd_is_waitable(in_fd[d]) != 0:
@@ -3195,6 +3211,8 @@ def build_waitset():
     putd(1, cast[int32](n_wait))
     puts(1, " fds wake this loop, ")
     putd(1, nlie)
+    if wake_fd >= 0:
+        puts(1, " (one of them is the client wake)")
     puts(1, " always-ready and excluded; fallback tick ")
     putd(1, cast[int32](WAIT_FALLBACK_MS))
     puts(1, " ms\n")
@@ -3738,6 +3756,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         tl0: uint64 = 0
         if bench_on != 0:
             tl0 = now_us()
+        # Drain the client wake BEFORE reading the segment. A datagram left
+        # unread stays readable, so poll would return instantly for ever and
+        # the park would become a spin -- the exact idle regression this
+        # mechanism is most likely to cause. Draining first also means a change
+        # published while we were awake is not lost: the bytes are discarded,
+        # but scan_windows() below re-reads the segment either way, and the
+        # frame_signature() gate decides whether it was worth a repaint.
+        hamwsys_wake_drain()
         scan_windows()
         pick_focus()
         if bench_on != 0:
