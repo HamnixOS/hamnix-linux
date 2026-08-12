@@ -27,6 +27,17 @@
 #      its bar is 100% the bar's own colour. Nothing is there.
 #   2. THE TITLE. The same window, same geometry, `title Terminal`: the same
 #      band now has ink in it, and the ink is the chrome's ink colour.
+#   2b. AND THE GAPS BETWEEN THE LETTERS, which is what this gate MISSED and
+#      the machine's owner found in a screenshot. Assertions 1, 2 and 4 are
+#      all about the INK -- how much of it there is, how light it is, whether
+#      two bars carry different amounts. None of them looks at the pixels the
+#      letters do not cover, and those were BLACK: the title's keyed surface
+#      declared each glyph's whole bounding box painted, so #f0f0f5 ink at
+#      full strength sat in a black box on a #5577dd bar and every count above
+#      was correct. Now: nothing in the band is darker than the bar, no pixel
+#      of it is #000000, and the bar's own colour positively fills the gaps --
+#      asserted on the FOCUSED bar (#5577dd) and the UNFOCUSED one (#404040),
+#      because a bug that keyed on one colour would answer for one of them.
 #   3. AND ONLY THERE. The 5px gap kept clear before the close box is still
 #      100% bar colour, the close box is still the close box, the row above
 #      the bar and the backdrop beyond the window's right edge are still 100%
@@ -146,6 +157,88 @@ for j in range(y, y + h):
 print(n)
 PY
 nonbg() { python3 "$NONBGPY" "$HAMFB_FILE" "$FBW" "$1" "$2" "$3" "$4" "$5"; }
+
+# THE GAPS BETWEEN THE LETTERS, which is where this gate had a hole exactly
+# the shape of the defect it was written for.
+#
+# Every assertion above and below counts pixels that DIFFER from the bar, or
+# reads the LIGHTEST pixel present. Both are questions about the INK. The
+# title was rasterized into a bar-sized keyed surface precisely so the bar
+# colour would show BETWEEN the letters -- and it did not: each glyph arrived
+# in a black box the size of its bounding box, #f0f0f5 ink at full strength
+# sitting on #000000, and every assertion here passed. The owner found it in a
+# screenshot. So:
+#
+#   gapstat <x> <y> <w> <h> <bar>
+#     -> "<darker> <black> <span> <ingap> <darkest>"
+#
+#   darker  pixels in the band DARKER than the bar in any channel. The title
+#           ink (#f0f0f5) is lighter than either bar colour in every channel,
+#           and source-over between two colours is monotone per channel, so
+#           every pixel of correctly composited text is >= the bar. ONE pixel
+#           darker than the bar is a pixel that was composited against
+#           something that is not the bar -- which is the whole bug.
+#   black   pixels that are exactly #000000: the colour of the transparent
+#           clear the title surface opens with, i.e. the box itself.
+#   span    width of the ink's horizontal extent (first to last column that
+#           differs from the bar), so `ingap` has a denominator.
+#   ingap   pixels INSIDE that span that are exactly the bar colour -- the
+#           counter-assertion to `black`: not merely "no black" but "the bar,
+#           positively, in the gaps".
+#   darkest the darkest colour in the band, reported so a failure names what
+#           the letters are actually sitting on.
+GAPPY="$WORK/gap.py"
+cat >"$GAPPY" <<'PY'
+import sys
+f, W, x, y, w, h, bar = (sys.argv[1], int(sys.argv[2]), int(sys.argv[3]),
+                         int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6]),
+                         sys.argv[7])
+br, bg, bb = (int(bar[0:2], 16), int(bar[2:4], 16), int(bar[4:6], 16))
+d = open(f, 'rb').read()
+px = {}
+for j in range(y, y + h):
+    for i in range(x, x + w):
+        o = (j * W + i) * 4
+        if o + 3 > len(d):
+            continue
+        px[(i, j)] = (d[o+2], d[o+1], d[o])
+darker = sum(1 for (r, g, b) in px.values() if r < br or g < bg or b < bb)
+black = sum(1 for v in px.values() if v == (0, 0, 0))
+cols = sorted({i for (i, j), v in px.items() if v != (br, bg, bb)})
+if cols:
+    x0, x1 = cols[0], cols[-1]
+    span = x1 - x0 + 1
+    ingap = sum(1 for (i, j), v in px.items()
+                if x0 <= i <= x1 and v == (br, bg, bb))
+else:
+    span, ingap = 0, 0
+dk = min(px.values(), key=lambda v: (v[0] + v[1] + v[2])) if px else (0, 0, 0)
+print(darker, black, span, ingap, '%02x%02x%02x' % dk)
+PY
+gapstat() { python3 "$GAPPY" "$HAMFB_FILE" "$FBW" "$1" "$2" "$3" "$4" "$5"; }
+
+# gaps_are_bar <label> <x> <y> <w> <h> <bar> -- the three assertions above,
+# run identically on the FOCUSED bar (#5577dd) and the UNFOCUSED one
+# (#404040), because a key colour that happened to match one of them would
+# answer correctly for that one and black for the other.
+gaps_are_bar() {
+    local what="$1" gx="$2" gy="$3" gw="$4" gh="$5" gbar="$6"
+    local s; s="$(gapstat "$gx" "$gy" "$gw" "$gh" "$gbar")"
+    local dk bl sp ig dark
+    dk="$(echo "$s" | cut -d' ' -f1)"; bl="$(echo "$s" | cut -d' ' -f2)"
+    sp="$(echo "$s" | cut -d' ' -f3)"; ig="$(echo "$s" | cut -d' ' -f4)"
+    dark="$(echo "$s" | cut -d' ' -f5)"
+    info "$what (#$gbar): $dk px darker than the bar, $bl pure black, ${sp}px ink span holding $ig bar-coloured px, darkest #$dark"
+    [ "$dk" = 0 ] \
+        && ok "$what: NOTHING in the band is darker than the bar -- the darkest pixel IS the bar (#$dark)" \
+        || bad "$what: $dk pixels are darker than the bar (darkest #$dark) -- the text is composited against something that is not the bar"
+    [ "$bl" = 0 ] \
+        && ok "$what: and not one pixel of the title band is #000000" \
+        || bad "$what: $bl pixels of the title band are pure black -- the letters are sitting in a black box"
+    [ "${ig:-0}" -ge $((sp * gh / 4)) ] \
+        && ok "$what: the gaps between the letters are the bar itself ($ig of $((sp * gh)) px across the ink span)" \
+        || bad "$what: only $ig of $((sp * gh)) px inside the ink span are #$gbar -- the bar does not show between the letters"
+}
 
 # A fingerprint of a rectangle, so "these two bars say different things" is a
 # question with an answer that does not depend on knowing the font.
@@ -316,6 +409,14 @@ info "the lightest pixel in the band is #$LIGHT (the chrome's ink is #f0f0f5)"
     || bad "the lightest pixel is #$LIGHT, not the #f0f0f5 the code says it paints"
 
 # ---------------------------------------------------------------------------
+echo "title: === 2b. AND BETWEEN THE LETTERS: the bar, not a black box"
+# ---------------------------------------------------------------------------
+# The gate's hole and the defect's shape. Everything above asks about the ink;
+# this asks about the gaps. Reverted, the run above is unchanged and this says
+# "1173 pixels are darker than the bar, darkest #000000".
+gaps_are_bar "the focused bar" $TX $BANDY $TW $BANDH "$BAR"
+
+# ---------------------------------------------------------------------------
 echo "title: === 3. AND ONLY THERE: nothing outside the band moved"
 # ---------------------------------------------------------------------------
 GAP="$(nonbg $((CBX - TITLE_GAP)) $BARY $TITLE_GAP $TITLEBAR_H "$BAR")"
@@ -372,6 +473,11 @@ info "wid $B's bar is #$BBAR with $BINK ink pixels"
 [ "$BINK" -ge 40 ] \
     && ok "the second window's title is painted too ($BINK pixels)" \
     || bad "the second window's bar is empty ($BINK pixels)"
+# AND THE UNFOCUSED BAR'S GAPS TOO. #404040, not #5577dd: a present that
+# keyed on one particular colour, or a bar whose gaps happen to be dark, would
+# be caught here and not there.
+gaps_are_bar "the unfocused bar" $((BX + TITLE_PAD)) $BANDY $TW $BANDH "$BBAR"
+
 BSUM="$(rectsum $((BX + TITLE_PAD)) $BANDY $TW $BANDH)"
 AMASK="$(inksum $TX $BANDY $TW $BANDH "$BAR")"
 BMASK="$(inksum $((BX + TITLE_PAD)) $BANDY $TW $BANDH "$BBAR")"
