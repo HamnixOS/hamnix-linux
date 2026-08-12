@@ -20,6 +20,33 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
+*(nothing right now — 1.0.13 carries everything that had landed.)*
+
+## 1.0.13
+
+**152 files could never have been updated on your machine, and nobody could
+see it.** The gate that enforces "everything we build here reaches the package
+repository" compared the image's `/bin` and nothing else. Every other directory
+was invisible to it, and it passed cleanly the whole time.
+
+What was in the image and in no package: **34 kernel modules** — `ext4`,
+`vfat`, `virtio_blk`, `virtio_net`, `evdev`, `overlay`, `squashfs`, `loop`,
+the NLS tables and the entire `snd-hda` sound stack; the **`modules.dep`
+table** `modprobe` had just been made to depend on; the **23 Adder runtime
+sources** `ac` links against; **21 manual pages**; `/etc/skel`, `/etc/profile`
+and nine other static `/etc` files; the test sound; and **`/init`, the program
+the kernel executes**. Installing from the image always worked, because the
+installer copies the live root — so this only ever hurt the machines that
+updated, which is the entire point of the rule.
+
+Two new packages carry the modules and the manual pages, and the module list
+is parsed out of the image build so the two cannot drift apart. The gate now
+walks **every regular file** in the image root; an omission has to be listed by
+name with a reason, and a listed exclusion that is no longer in the image is
+reported too, so the list cannot quietly rot. Two exclusions claim "this ships
+another way" — the gate now **reads the archives to check that claim** rather
+than believing it.
+
 - **`tail FILE` never opened the file.** It checked whether its first argument
   began with `-` and then read **standard input** regardless. At a console,
   where stdin is a terminal that never reaches end-of-file, `tail somefile`
