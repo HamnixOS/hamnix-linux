@@ -231,6 +231,28 @@ n_pres_w: uint64 = 0                  # write loop entries (not syscalls)
 bench_live_every: int32 = 0
 bench_live_n:     int32 = 0
 bench_live_seq:   int32 = 0
+bench_live_t0:    uint64 = 0          # wall clock at the last dump
+
+# INPUT -> PRESENT, MEASURED INSIDE THE COMPOSITOR.
+#
+# The two shipped harnesses measure input->pixel by watching the framebuffer
+# FILE change. On the scanout path there is no file -- the pixels go straight
+# to VRAM the display reads -- so those harnesses cannot see a frame at all and
+# reported nothing rather than something wrong. This is the replacement: wsysd
+# timestamps the first input event it consumes after a present, and again when
+# the frame carrying it has been submitted.
+#
+# WHAT IT IS AND IS NOT. It is input-read to frame-submitted, in process. It
+# does NOT include the scanout hardware's own latency to photons, which is
+# bounded by the refresh interval and which nothing here can see. It is
+# therefore comparable BETWEEN the two paths -- which is the question -- and is
+# not an absolute photon latency. Measured the same way on both, so the
+# comparison is fair even though the absolute number is optimistic.
+LAT_CAP: uint64 = 256
+lat_ring:    Array[256, uint32]       # microseconds
+lat_n:       uint64 = 0               # samples this window
+lat_pending: uint64 = 0               # us at which the waiting input arrived
+lat_sort:    Array[256, uint32]
 
 
 def env_int(name: Ptr[char]) -> int32:
@@ -1174,12 +1196,41 @@ def vk_arm():
 # Each returns 0 if the device recorded the op. A non-zero return means vk_2d
 # must run its own CPU loop over the same pixels, so the device is synced
 # first: the frame is host-mapped, so that costs one fence and no transfer.
+# THE DEVICE REFUSED AN OP, AND ON THE SCANOUT PATH THAT MEANS A LOST DRAWING.
+#
+# When a hook returns non-zero, vk_2d runs its own CPU loop over the surface it
+# was pointed at. Normally that surface IS the composite, so the fallback is
+# correct and invisible. On the SCANOUT path it is not: rast_target() hands the
+# router a host array precisely because the composite has no CPU address, so a
+# CPU fallback writes pixels into memory the display will never read. The
+# drawing is silently dropped.
+#
+# "It has not happened yet" is not a detector, and a path that can silently
+# drop drawing is what produces bug reports nobody can reproduce. So every
+# refusal is counted, and on the scanout path the FIRST one says so loudly and
+# names the consequence. The count is reported by the bench lines whether or
+# not it is zero -- a zero that is never printed cannot be distinguished from a
+# counter nobody wired up.
+vk_refused:      uint64 = 0
+vk_refused_said: int32 = 0
+
+
+def _rt_refused() -> int32:
+    vk_refused = vk_refused + 1
+    if vk_scanout != 0 and vk_refused_said == 0:
+        vk_refused_said = 1
+        puts(2, "wsysd: WARNING the device refused an op on the SCANOUT path;")
+        puts(2, " vk_2d's CPU fallback writes a host array the display never")
+        puts(2, " reads, so that drawing is LOST. This frame is incomplete.\n")
+    return -1
+
+
 def _rt_fill(op: int32, x: int64, y: int64, w: int64, h: int64,
              rgba: uint32) -> int32:
     if vk_linux_fill_rect(op, cast[int32](x), cast[int32](y),
                           cast[int32](w), cast[int32](h), rgba) != 0:
         vk_linux_frame_sync()
-        return -1
+        return _rt_refused()
     return 0
 
 
@@ -1189,7 +1240,7 @@ def _rt_roundrect(x: int64, y: int64, w: int64, h: int64, rad: int64,
                           cast[int32](h), cast[int32](rad), corners,
                           rgba) != 0:
         vk_linux_frame_sync()
-        return -1
+        return _rt_refused()
     return 0
 
 
@@ -1198,7 +1249,7 @@ def _rt_line(x1: int64, y1: int64, x2: int64, y2: int64, thick: int64,
     if vk_linux_line(cast[int32](x1), cast[int32](y1), cast[int32](x2),
                      cast[int32](y2), cast[int32](thick), rgba) != 0:
         vk_linux_frame_sync()
-        return -1
+        return _rt_refused()
     return 0
 
 
@@ -1210,7 +1261,7 @@ def _rt_blit(src_base: uint64, src_w: uint64, src_h: uint64,
                      cast[int32](dh), cast[int32](sx), cast[int32](sy),
                      cast[int32](sw), cast[int32](sh)) != 0:
         vk_linux_frame_sync()
-        return -1
+        return _rt_refused()
     return 0
 
 
@@ -1219,7 +1270,7 @@ def _rt_cov(cov_base: uint64, cov_w: int64, cov_h: int64,
     if vk_linux_glyph(cov_base, cast[int32](cov_w), cast[int32](cov_h),
                       cast[int32](dx), cast[int32](dy), rgba) != 0:
         vk_linux_frame_sync()
-        return -1
+        return _rt_refused()
     return 0
 
 
@@ -2125,6 +2176,45 @@ def bench_live_dump():
         putd(2, 0)
     puts(2, " | gpu_frames ")
     putd(2, vk_frames_gpu)
+    puts(2, " refused ")
+    putd(2, cast[int32](vk_refused))
+    # EXACT RATE, not one derived by dividing a dump count by a wall clock the
+    # caller guessed at. My first scanout rate was computed that way and was
+    # wrong by more than 3x, because startup time landed inside the divisor.
+    tnow: uint64 = now_us()
+    if bench_live_t0 > 0:
+        dt: uint64 = tnow - bench_live_t0
+        puts(2, " | dt_us ")
+        putd(2, cast[int32](dt))
+        puts(2, " fps ")
+        if dt > 0:
+            putd(2, cast[int32](d * 1000000 / dt))
+    bench_live_t0 = tnow
+    # INPUT -> FRAME SUBMITTED, from inside the compositor, so it can be
+    # measured on the scanout path where no framebuffer file exists.
+    if lat_n > 0:
+        k: uint64 = 0
+        while k < lat_n:
+            lat_sort[k] = lat_ring[k]
+            k = k + 1
+        a: uint64 = 1
+        while a < lat_n:
+            v: uint32 = lat_sort[a]
+            b: int64 = cast[int64](a) - 1
+            while b >= 0 and lat_sort[cast[uint64](b)] > v:
+                lat_sort[cast[uint64](b) + 1] = lat_sort[cast[uint64](b)]
+                b = b - 1
+            lat_sort[cast[uint64](b) + 1] = v
+            a = a + 1
+        puts(2, " | lat_n ")
+        putd(2, cast[int32](lat_n))
+        puts(2, " p50_us ")
+        putd(2, cast[int32](lat_sort[lat_n / 2]))
+        puts(2, " p95_us ")
+        putd(2, cast[int32](lat_sort[(lat_n * 95) / 100]))
+        puts(2, " max_us ")
+        putd(2, cast[int32](lat_sort[lat_n - 1]))
+    lat_n = 0 
     puts(2, " submit_us ")
     putd(2, cast[int32](vk_linux_last_submit_us()))
     puts(2, "\n")
@@ -2139,6 +2229,14 @@ def bench_live_dump():
     b_pres_w = 0
     n_pres_w = 0
     bench_live_n = 0
+
+
+def bench_live_tick():
+    if bench_live_every <= 0:
+        return
+    bench_live_n = bench_live_n + 1
+    if bench_live_n >= bench_live_every:
+        bench_live_dump()
 
 
 def paint_frame():
@@ -2887,6 +2985,47 @@ def le32(b: Ptr[uint8], at: uint64) -> int32:
          | (cast[int32](b[at + 2]) << 16) | (cast[int32](b[at + 3]) << 24)
 
 
+# CLOCK_REALTIME, because that is the clock evdev stamps events with by
+# default. now_us() is CLOCK_MONOTONIC and mixing the two produces a number
+# that is not a duration at all.
+def now_us_real() -> uint64:
+    ts_scratch[0] = 0
+    ts_scratch[1] = 0
+    if sys_clock_gettime(0, &ts_scratch[0]) != 0:
+        return 0
+    return ts_scratch[0] * 1000000 + ts_scratch[1] / 1000
+
+
+def lat_mark_input(ev_us: uint64):
+    # THE EVENT'S OWN TIMESTAMP, not the moment we got round to reading it.
+    #
+    # The first version stamped now_us() here, and its selftest caught it: with
+    # the compositor SIGSTOPped for 120 ms the reported max was 9.5 ms, because
+    # a stopped process is not reading input, so the clock only started once it
+    # RESUMED. It measured how long wsysd took AFTER noticing, which is exactly
+    # the latency a user does not care about, and it hid every stall.
+    #
+    # First input since the last present starts the clock; later events in the
+    # same batch ride the same frame and must not restart it, or a burst would
+    # measure only its last event and flatter the result.
+    if lat_pending == 0 and ev_us > 0:
+        lat_pending = ev_us
+
+
+def lat_record():
+    if lat_pending == 0:
+        return
+    tnow: uint64 = now_us_real()
+    if tnow <= lat_pending:
+        lat_pending = 0
+        return
+    dt: uint64 = tnow - lat_pending
+    lat_pending = 0
+    if lat_n < LAT_CAP:
+        lat_ring[lat_n] = cast[uint32](dt)
+        lat_n = lat_n + 1
+
+
 def pump_input():
     d: uint64 = 0
     while d < n_input:
@@ -2897,6 +3036,10 @@ def pump_input():
         if n <= 0:
             d = d + 1
             continue
+        # struct input_event begins with a timeval: tv_sec then tv_usec, both
+        # 64-bit on this ABI. That is the event's own arrival time.
+        evs: Ptr[uint64] = cast[Ptr[uint64]](&evbuf[0])
+        lat_mark_input(evs[0] * 1000000 + evs[1])
         i: uint64 = 0
         while i + 24 <= cast[uint64](n):
             # struct input_event: 16 bytes of timeval, then type, code, value.
@@ -3423,6 +3566,10 @@ def run_bench(n: int32):
     # in `present` and a sweep that cannot see it cannot explain its own graph.
     puts(1, " host_cached ")
     putd(1, vk_hostcached)
+    # Printed even when zero: a counter nobody wired up and a counter that is
+    # genuinely zero look identical if the line is conditional.
+    puts(1, " refused_ops ")
+    putd(1, cast[int32](vk_refused))
     puts(1, "\n")
     if vk_frames_gpu > 0:
         g: uint64 = cast[uint64](vk_frames_gpu)
@@ -3575,18 +3722,23 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             last_sig = sig
             last_csig = csig
             paint_frame()
+            lat_record()
             n_frames = n_frames + 1
             idle = 0
-            if bench_live_every > 0:
-                bench_live_n = bench_live_n + 1
-                if bench_live_n >= bench_live_every:
-                    bench_live_dump()
+            bench_live_tick()
         elif csig != last_csig and vk_devcomp == 0:
             # Only the pointer moved: restore what the cursor covered, stamp it
             # at the new place, and push just those rows. No window is read,
             # rasterized or copied.
             last_csig = csig
             cursor_only_frame()
+            lat_record()
+            # A CURSOR-ONLY FRAME IS STILL A PRESENTED FRAME. Counting only
+            # full frames meant that under pointer motion -- the case the
+            # latency number exists to measure -- the dump almost never fired,
+            # the sample ring was reset before it was ever printed, and a
+            # deliberate 120 ms stall did not appear in the output at all.
+            bench_live_tick()
             n_frames = n_frames + 1
             n_curframes = n_curframes + 1
             idle = 0

@@ -625,6 +625,31 @@ static int32_t g_arena_devlocal;
  * reproducible: a fix whose predecessor cannot be re-run is a claim. */
 static int32_t g_frame_place = -1;
 
+/* FAULT INJECTION, and why it is in the shipping file.
+ *
+ * The compositor's scanout path can silently LOSE drawing if the device
+ * refuses an op: vk_2d then runs its CPU fallback over a surface the display
+ * does not read. wsysd counts those refusals -- but a counter that has only
+ * ever read zero has not been shown to count anything, which on this project
+ * has been wrong five separate times.
+ *
+ * HAMNIX_VK_REFUSE_EVERY=N makes every Nth recorded op refuse, exactly as a
+ * genuinely unencodable one would, so the detector can be seen firing. It is
+ * off unless the variable is set, it changes nothing when unset, and it is the
+ * only way to test the failure path without waiting for a real refusal that
+ * may not occur for months. */
+static int32_t g_refuse_every;
+static uint64_t g_refuse_seen;
+static void hvk_tunables(void);
+
+static int refuse_now(void)
+{
+    hvk_tunables();
+    if (g_refuse_every <= 0) return 0;
+    g_refuse_seen++;
+    return (g_refuse_seen % (uint64_t)g_refuse_every) == 0;
+}
+
 static void hvk_tunables(void)
 {
     if (g_batch_max >= 0) return;
@@ -639,6 +664,8 @@ static void hvk_tunables(void)
     s = getenv("HAMNIX_VK_ARENA_DEVLOCAL");
     g_arena_devlocal = (s && s[0] && s[0] != '0') ? 1 : 0;
     g_frame_place = HVK_PLACE_HOST_CACHED;
+    s = getenv("HAMNIX_VK_REFUSE_EVERY");
+    g_refuse_every = (s && s[0]) ? (int32_t)strtol(s, 0, 10) : 0;
     s = getenv("HAMNIX_VK_FRAME_MEM");
     if (s && s[0]) {
         if (s[0] == 'd')      g_frame_place = HVK_PLACE_DEVICE_FIRST;
@@ -1446,6 +1473,7 @@ int32_t hvk_fill_rect(int32_t op, int32_t x, int32_t y, int32_t w, int32_t h,
                       uint32_t rgba)
 {
     if (!g_in_frame) return -1;
+    if (refuse_now()) return -1;
     if (w <= 0 || h <= 0) return 0;
     if (op == OP_FILL_ALPHA && (rgba & 0xFF) == 0) return 0;
     if (op == OP_FILL_ALPHA && (rgba & 0xFF) == 0xFF) op = OP_FILL;
@@ -1467,6 +1495,7 @@ int32_t hvk_roundrect(int32_t x, int32_t y, int32_t w, int32_t h,
                       int32_t rad, int32_t corners, uint32_t rgba)
 {
     if (!g_in_frame) return -1;
+    if (refuse_now()) return -1;
     if (w <= 0 || h <= 0 || (rgba & 0xFF) == 0) return 0;
     int32_t rr = rad;
     if (rr < 0) rr = 0;
@@ -1499,6 +1528,7 @@ int32_t hvk_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2,
                  int32_t thick, uint32_t rgba)
 {
     if (!g_in_frame) return -1;
+    if (refuse_now()) return -1;
     PushC pc;
     memset(&pc, 0, sizeof pc);
     pc.op = OP_LINE;
@@ -1570,6 +1600,7 @@ int32_t hvk_blit(uint64_t src_base, int32_t src_w, int32_t src_h,
                  int32_t sx, int32_t sy, int32_t sw, int32_t sh)
 {
     if (!g_in_frame) return -1;
+    if (refuse_now()) return -1;
     if (!src_base || src_w <= 0 || src_h <= 0) return 0;
     int32_t rsx = sx, rsy = sy, rsw = sw, rsh = sh;
     if (rsw <= 0) rsw = src_w;
@@ -1618,6 +1649,7 @@ int32_t hvk_glyph(uint64_t cov_base, int32_t cov_w, int32_t cov_h,
                   int32_t dx, int32_t dy, uint32_t rgba)
 {
     if (!g_in_frame) return -1;
+    if (refuse_now()) return -1;
     if (!cov_base || cov_w <= 0 || cov_h <= 0 || (rgba & 0xFF) == 0) return 0;
     int32_t x0 = dx < 0 ? 0 : dx, y0 = dy < 0 ? 0 : dy;
     int32_t x1 = dx + cov_w > g_fw ? g_fw : dx + cov_w;
