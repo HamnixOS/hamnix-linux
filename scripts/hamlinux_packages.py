@@ -2117,6 +2117,40 @@ def main():
               "hashes alone, which is exactly what hamnix-desktop 1.0.10 "
               "shipped on. ***")
 
+    # AND THE TOOLCHAIN, for the same reason and in the same place.
+    #
+    # hamnix-adder 1.0.12 was published carrying one file, files/bin/ac -- the
+    # DRIVER, without /bin/host_ac which it execs and without the runtime
+    # sources it links against. `ac hello.ad` on a machine installed from that
+    # channel answers "ac: cannot run /bin/host_ac", exit 10, no binary, while
+    # HANDOFF.md §0 lists "compiles Adder on the box" as a measured capability.
+    #
+    # Every check in this file passed it, and had to: the package built, its
+    # hash matched its bytes, its dependency resolved, and the one file it
+    # carried was genuinely in it. The coverage gate saw host_ac named in an
+    # exclusion table with a reason in front of it, and a reason is not a
+    # measurement -- that reason turned out to be false in both halves.
+    #
+    # So this runs the toolchain instead: it unpacks hamnix-adder, stages a
+    # root whose /bin is the tarball's files and nothing else, runs the real
+    # /bin/ac through its real namespace hop, and RUNS what comes out.
+    # MEASURED: 3 s. It SKIPs (exit 0) on a host with no unprivileged user
+    # namespaces, no chroot or no clang -- said out loud when it happens,
+    # because a skip in the publish path is a check that did not run.
+    gate = os.path.join(ROOT, "tests/linux/channel_compiles_adder.sh")
+    print("\nrunning the packaged Adder toolchain "
+          "(tests/linux/channel_compiles_adder.sh)")
+    sys.stdout.flush()
+    rc = subprocess.call([gate, out], cwd=ROOT)
+    if rc != 0:
+        raise SystemExit(
+            "\nREFUSING TO PUBLISH: the Adder toolchain in this channel "
+            "cannot compile a program.\nThe run above says which piece is "
+            "missing. No index.json was written, so nothing can install from "
+            "this channel.\nThis is the check hamnix-adder 1.0.12 did not "
+            "have: the package was present, its hash matched, and it "
+            "contained a compiler driver with no compiler.")
+
     index = {
         "schema": 1,
         "repo": "HamnixOS/packages",

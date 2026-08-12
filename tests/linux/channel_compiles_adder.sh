@@ -194,18 +194,40 @@ case "$OMIT" in
 esac
 [ -n "$OMIT" ] && echo && echo "NEGATIVE CONTROL: removed '$OMIT' from the staged machine"
 
-# The program to compile comes out of the package too -- hamnix-adder ships
-# /usr/share/adder/hello.ad precisely so the first thing an operator types
-# works. If the package stopped carrying it, that is a finding, not a reason to
-# reach into the tree.
+# THE PROGRAM TO COMPILE IS WRITTEN HERE, not taken from the package and not
+# taken from the tree. It is an INPUT, not part of the toolchain, so writing it
+# inline costs nothing -- and it means a channel that carries no hello.ad still
+# gets its compiler exercised. That matters: the published 1.0.12 channel
+# carried neither, and a gate that stopped at "nothing to compile" would have
+# reported the smaller of the two findings and never reached the real one.
+#
+# It calls sys_write, so it does not link against the SSA prelude alone -- it
+# needs the Linux syscall runtime (linux-runtime.S + linux-syscalls.c), which is
+# exactly the part `ac` has to find in /usr/share/adder on the box. A program
+# that only returned an exit code would link with the runtime sources missing
+# and this whole gate would go green on a machine that cannot build anything.
+cat > "$R/work/hello.ad" <<'AD'
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+def main() -> int32:
+    s: Ptr[uint8] = "hello from adder, compiled on hamnix-linux\n"
+    sys_write(1, s, slen(s))
+    return 0
+AD
+
+# Separately: the package is SUPPOSED to carry a sample, so the first thing a
+# curious operator types works (scripts/hamlinux_image.sh stages it for that
+# reason). Missing is a finding, but not one that stops the measurement.
 if [ -f "$R/usr/share/adder/hello.ad" ]; then
-    cp "$R/usr/share/adder/hello.ad" "$R/work/hello.ad"
-    ok "the package carries a program to compile (/usr/share/adder/hello.ad)"
-elif [ "$OMIT" = share ]; then
-    cp tests/linux/hello.ad "$R/work/hello.ad"   # the control removed it on purpose
-else
-    bad "hamnix-adder carries no /usr/share/adder/hello.ad -- nothing to compile"
-    finish
+    ok "the package carries a sample program (/usr/share/adder/hello.ad)"
+elif [ "$OMIT" = share ] || [ "$OMIT" = "" ]; then
+    [ "$OMIT" = share ] || bad "hamnix-adder carries no /usr/share/adder/hello.ad -- the sample an operator is told to compile is not there"
 fi
 
 # ---------------------------------------------------------------------------
