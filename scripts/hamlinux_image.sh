@@ -628,6 +628,43 @@ if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
     [ -n "${HAMLINUX_MODULES_EXTRA:-}" ] && \
         echo "[image] staged extra (not boot-loaded): ${HAMLINUX_MODULES_EXTRA}"
 
+    # --- modules ON DISK but deliberately NOT IN THE TABLE ----------------
+    # This is the state a machine is in AFTER `hpm install` lands a driver
+    # package: the .ko files are there, and modules.dep -- generated when the
+    # image was built -- has never heard of them. It is the case the driver
+    # packages' install hooks exist to repair, so it has to be constructible
+    # or that repair is untestable.
+    #
+    # It is staged BEFORE depmod runs and then subtracted from the table
+    # afterwards, rather than simply copied in later, so the files are exactly
+    # what depmod would have described had it been asked -- the test is about
+    # the TABLE being incomplete, not about the files being different.
+    #
+    # This existed only in tests/linux/modprobe_deps.sh, which passed
+    # HAMLINUX_MODULES_LATE to this script -- and this script read no such
+    # variable, in any commit. So the module was never staged, phase 2's
+    # "8021q.ko is on the disk" could not hold, and the gate scored 27/5 the
+    # first time it was run outside the worktree that reported 32/0. The gate
+    # was measuring a feature that did not exist.
+    LATE_KOS=""
+    for m in ${HAMLINUX_MODULES_LATE:-}; do
+        "$MODPROBE" --dry-run --show-depends -S "$KVER" "$m" 2>/dev/null \
+        | awk '/^insmod /{print $2}' | while read -r ko; do
+            [ -f "$ko" ] || continue
+            rel="${ko#/lib/modules/$KVER/}"
+            out="$ROOT/lib/modules/$KVER/${rel%.xz}"
+            mkdir -p "$(dirname "$out")"
+            [ -f "$out" ] && continue
+            case "$ko" in
+                *.xz) xz -dc "$ko" > "$out" ;;
+                *)    cp -L "$ko" "$out" ;;
+            esac
+        done
+        LATE_KOS="$LATE_KOS $m"
+    done
+    [ -n "${HAMLINUX_MODULES_LATE:-}" ] && \
+        echo "[image] staged late (on disk, WITHHELD from modules.dep):${LATE_KOS}"
+
     # --- modules.dep, WHICH IS WHAT MAKES modprobe A REAL COMMAND ---------
     # Before this, no modules.dep was generated anywhere on this port
     # (docs/runsweep_unhealthy.md named it as a real gap), so `modprobe NAME`
@@ -668,6 +705,20 @@ if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
         DEPF="$ROOT/lib/modules/$KVER/modules.dep"
         if [ -s "$DEPF" ]; then
             sort -o "$DEPF" "$DEPF"
+            # WITHHOLD the late modules from the table. depmod has just
+            # described every .ko under $ROOT, including the ones staged as
+            # "on disk but unknown to modprobe", so the rows it wrote for them
+            # are removed here -- leaving precisely the post-`hpm install`
+            # state a driver package's hook has to repair. The line is matched
+            # by its leading path, so a module whose NAME appears as another
+            # module's dependency keeps that mention (which is the point: the
+            # dependency is what makes the resolution non-trivial).
+            for m in ${HAMLINUX_MODULES_LATE:-}; do
+                before=$(grep -c . "$DEPF")
+                grep -v "^[^:]*/${m}\.ko:" "$DEPF" > "$DEPF.tmp" && mv "$DEPF.tmp" "$DEPF"
+                after=$(grep -c . "$DEPF")
+                echo "[image] withheld $m from modules.dep ($before -> $after rows) -- the post-install state"
+            done
             rm -f "$ROOT/lib/modules/$KVER"/modules.*.bin \
                   "$ROOT/lib/modules/$KVER"/modules.alias \
                   "$ROOT/lib/modules/$KVER"/modules.symbols \
