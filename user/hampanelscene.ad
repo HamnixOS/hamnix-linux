@@ -2096,14 +2096,20 @@ def _am_is_live() -> int32:
 # ====================================================================
 # A MENU ENTRY WHOSE PROGRAM IS NOT INSTALLED IS NOT AN ENTRY
 # ====================================================================
-# Measured on a real boot: the menu listed eleven applications and eight of
-# them named a program no image builds -- /bin/calculator, /bin/hamterm,
-# /bin/hamedit, /bin/hamview, /bin/hambrowse, /bin/hammonscene, /bin/hamctl,
-# /bin/hamvideoscene, /bin/hamaudioscene. A person clicked one and NOTHING
-# HAPPENED: fork(2) succeeds, execve(2) fails in the child, and the child dies
-# silently, so the panel logged `[panel] launched /bin/hamview` and the screen
-# never changed. That is exactly the shape NORTH_STAR.md is about -- the gap
-# answered something success-shaped instead of the truth.
+# Found on a real boot. /etc/hamde/apps was staged on no machine at all, so
+# every menu ran on a list compiled into it, and hamappmenu's list had drifted
+# badly: counted against the image's APPS, NINE of its ELEVEN rows named a
+# program /bin did not contain (only /bin/hamfm and /bin/hpm were there).
+# A person clicked one and NOTHING HAPPENED, because the failure is invisible
+# from this side: fork(2) succeeds, execve(2) fails in the CHILD, and the
+# child dies silently -- so the panel logged `[panel] launched /bin/hamview`
+# and the screen never changed. That is exactly the shape NORTH_STAR.md is
+# about, the gap answering something success-shaped instead of the truth.
+#
+# This panel's own fallback had NOT drifted; what it needs is the rule for the
+# CATALOGUE, which is what every machine reads now that /etc/hamde/apps is
+# staged, and which can go stale in the other direction (a launcher shipped
+# for a program a particular image does not build).
 #
 # WHY HIDE RATHER THAN GREY OUT. A disabled row is the right answer when the
 # program is a thing you could get (an optional package you have not installed
