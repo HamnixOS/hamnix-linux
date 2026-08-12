@@ -92,11 +92,14 @@
  * 5 doubles WSYS_MAX_WINDOWS and adds `wmdelete` to struct wwin, which moves
  * every field after it and every window after the first.
  * 6 doubles WSYS_MAX_WINDOWS again, 128 -> 256, for user/wsyswl.ad's MAXCONN
- * 16.  struct wwin is BYTE-FOR-BYTE UNCHANGED and so is every field of struct
- * wshm that precedes win[], so a v5 and a v6 build agree about where window
- * 0..127 are and disagree only about how many there are after them.  The
- * version still has to move, and this is what each direction does -- checked
- * by running it, in tests/linux/wsyswl_conn_ceiling.sh, not reasoned about:
+ * 16.  7 doubles it a third time, 256 -> 512, for MAXCONN 32 -- TWO BROWSERS.
+ * struct wwin is BYTE-FOR-BYTE UNCHANGED at 6 and at 7, and so is every field
+ * of struct wshm that precedes win[], so a v5, a v6 and a v7 build agree about
+ * where window 0..127 are and disagree only about how many there are after
+ * them.  The version still has to move, and this is what each direction does
+ * -- checked by running it, in tests/linux/wsyswl_conn_ceiling.sh, not
+ * reasoned about (the paragraphs below are written for 5-meets-6; 6-meets-7 is
+ * the same arithmetic with 19,052,956 in place of 9,593,244):
  *
  *   A v6 BUILD MEETING A v5 SEGMENT.  st_size (9,593,244) is smaller than its
  *   own sizeof (19,052,956), so it ftruncates the file up, maps the whole
@@ -121,7 +124,7 @@
  * means two builds in one session; the ONLY other way is a live `hpm update`
  * of the window system underneath a running desktop, which re-initialises
  * that desktop's window table by design and always has. */
-#define WSYS_VERSION      6
+#define WSYS_VERSION      7
 /* SIXTY-FOUR, NOT THIRTY-TWO, and the reason is rootless Xwayland.
  *
  * A ROOTFUL X session is one wl_surface and therefore ONE row in this table
@@ -150,16 +153,44 @@
  * turned tests/linux/wsyswl_ceiling.sh red -- twelve X clients on one
  * Xwayland are twelve windows on ONE connection.
  *
- * WHAT IT COSTS, and it is RESIDENT and not address space, which is the
- * opposite of the BB_SLOTS story below and must not be confused with it:
- * shm_attach memsets the whole of struct wshm on first attach, so every page
- * is touched and stays touched.  sizeof(struct wshm) is 19,052,956 bytes --
- * 18.17 MiB, where 128 rows was 9,593,244 (9.15 MiB).  Measured with
- * du(1) on the segment file, not computed: the test prints both.  That is
- * the whole price of the ceiling, it is paid once for the machine and shared
- * by every client, and it is why MAXCONN is 16 and not 32 -- 32 would need
- * 512 rows and 36.21 MiB resident on every boot of every machine. */
-#define WSYS_MAX_WINDOWS  256
+ * FIVE HUNDRED AND TWELVE, AND THE INTERESTING PART IS THAT IT IS CHEAPER
+ * THAN 256 WAS.
+ *
+ * MAXCONN 16 did not fit TWO browsers -- Firefox's measured appetite is 8
+ * connections, so 8 + 8 + a namespace's Xwayland or two is 18 or 19, and a
+ * client past the ceiling loses a WHOLE PROGRAM.  MAXCONN is 32 now and the
+ * no-starvation invariant makes this 32 * 16 = 512.
+ *
+ * The previous pass refused exactly this and named the reason: "512 rows and
+ * 36.21 MiB resident on every boot of every machine".  That number was true
+ * and its CAUSE was not the table.  It was one line in shm_attach:
+ *
+ *     memset(shm, 0, sizeof *shm);
+ *
+ * run on a segment that had just been ftruncate(2)d out of a fresh tmpfs file
+ * -- i.e. on bytes the kernel had ALREADY promised read as zero and for which
+ * it had allocated nothing.  The memset's entire effect was to fault in and
+ * dirty all 4,650 pages of a window table with no windows in it.  Delete it
+ * (see THE ZEROES WE DO NOT WRITE in shm_attach) and the table becomes what
+ * the BB_SLOTS pool below already was: ADDRESS SPACE, with residency
+ * proportional to the windows that exist.
+ *
+ * MEASURED WITH du(1), by the test, not computed here.  256 rows, 16
+ * connections, no windows: 18,608 KiB before, 1,024 KiB after.  512 rows and
+ * 32 connections: 36.32 MiB of address space and about 2 MiB resident -- HALF
+ * of what half the table cost yesterday.  A window that is actually opened
+ * still costs its 74,425 bytes, which is the honest price and the one that
+ * scales with what a person is doing rather than with a constant.
+ *
+ * WHERE THE ~2 MiB FLOOR COMES FROM, since it is not zero: win_find and the
+ * /dev/wsys/windows and pool readers scan the table linearly for `used`, and
+ * `used` is the first word of a row, so every row's FIRST PAGE is faulted in
+ * by a scan even when the row is empty.  512 rows * 4 KiB = 2,048 KiB.  That
+ * is 4 KiB per row where it was 74 KiB, an 18x reduction, and it is a floor
+ * that can be removed later by moving the used-bitmap out of the rows -- which
+ * would move struct wshm's prefix and is therefore a separate version and a
+ * separate pass, not something to do quietly here. */
+#define WSYS_MAX_WINDOWS  512
 #define WSYS_SCENE_CAP    16384              /* = lib/hamscene.ad HAMSCENE_CAP */
 #define WSYS_RING_CAP     8192
 #define WSYS_TITLE_CAP    64
@@ -318,9 +349,11 @@ static int            chrome_rw;              /* the kernel let us map it W   */
  * the thing that runs out first.  The ceiling a user meets is the window
  * table, which is a number the device can state.
  *
- * WHAT THAT COSTS, exactly, because 64 screen-sized double-buffered surfaces
- * sounds like a gigabyte and is not.  It is a gigabyte of ADDRESS SPACE in a
- * mapping of a sparse file, and the resident cost is the sum of the windows'
+ * WHAT THAT COSTS, exactly, because 512 screen-sized double-buffered surfaces
+ * sounds like eight gigabytes and is not.  It is eight gigabytes of ADDRESS
+ * SPACE in a sparse file that is never mapped whole -- BB_HDR_BYTES is the
+ * only mapping any process makes up front, and it is 64 KiB -- and the
+ * resident cost is the sum of the windows'
  * OWN areas: bb_fit and bb_blit touch w*h*4 bytes and never BB_BYTES, and
  * the segment's initialiser zeroes the headers and not the pixels.  Twelve
  * 186x110 xterms are 12 * 82 KiB of real memory, not 12 * 16 MiB.  Getting
@@ -1166,10 +1199,44 @@ static int shm_attach(void)
      * hardcoded 0. */
     seg_owner = st.st_uid;
     seg_owner_known = 1;
+    /* THE SIZE BEFORE WE TOUCHED IT.  This is the whole of THE ZEROES WE DO
+     * NOT WRITE below: every byte at or past it is a byte ftruncate(2) has
+     * just promised reads as zero and that no page has been allocated for. */
+    off_t old_size = st.st_size;
     if ((uint64_t)st.st_size < sizeof(struct wshm)) {
         if (ftruncate(fd, (off_t)sizeof(struct wshm)) < 0) {
             int e = errno; close(fd); errno = e; return -1;
         }
+    }
+    /* Read the header BEFORE mapping, because the decision "does this segment
+     * need re-initialising" now changes what we do to the FILE and not only to
+     * the mapping. */
+    uint32_t hdr[2] = { 0, 0 };
+    int need_init = 1;
+    if (old_size >= (off_t)sizeof hdr && pread(fd, hdr, sizeof hdr, 0) == (ssize_t)sizeof hdr)
+        need_init = (hdr[0] != WSYS_MAGIC || hdr[1] != WSYS_VERSION);
+    /* THE ZEROES WE DO NOT WRITE — see WSYS_MAX_WINDOWS above for the number
+     * this buys.  A re-init used to be `memset(shm, 0, sizeof *shm)`, and on a
+     * FRESH segment every one of those bytes was already zero: the memset's
+     * only effect was to fault in and dirty all 4,650 (now 9,299) pages of a
+     * table nobody had a window in yet.  Now:
+     *   - a segment we just created (old_size 0) needs no clearing at all;
+     *   - a segment that pre-existed and disagrees is cleared by PUNCHING A
+     *     HOLE, which both zeroes it and gives the pages back — strictly more
+     *     than memset did, since memset leaves them allocated;
+     *   - and only if the kernel will not punch (not tmpfs) do we fall back to
+     *     writing zeros, and then only over the bytes that actually existed
+     *     before our ftruncate, because the rest are already zero by POSIX.
+     * The mismatch case is rare by construction: /srv is tmpfs and made fresh
+     * every boot, so meeting a foreign segment means two builds in one
+     * session. */
+    int cleared = 0;
+    if (need_init && old_size > 0) {
+        if (fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                      0, (off_t)sizeof(struct wshm)) == 0)
+            cleared = 1;
+    } else if (need_init) {
+        cleared = 1;                           /* ftruncate already zeroed it */
     }
     void *m = mmap(NULL, sizeof(struct wshm), PROT_READ | PROT_WRITE,
                    MAP_SHARED, fd, 0);
@@ -1181,7 +1248,9 @@ static int shm_attach(void)
     if (shm->magic != WSYS_MAGIC || shm->version != WSYS_VERSION) {
         /* First attacher initialises.  A fresh tmpfs file is all zeroes, so
          * this is the only place the defaults are set. */
-        memset(shm, 0, sizeof(*shm));
+        if (!cleared)
+            memset(shm, 0, old_size > (off_t)sizeof(struct wshm)
+                           ? sizeof(struct wshm) : (size_t)old_size);
         shm->magic    = WSYS_MAGIC;
         shm->version  = WSYS_VERSION;
         shm->next_wid = 2;                     /* 0 invalid, 1 = foreground */

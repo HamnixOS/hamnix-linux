@@ -44,10 +44,15 @@
 #      still connected afterwards, `conns` is unchanged, and a slot freed
 #      after a refusal is reusable -- a full table must be a full table, not
 #      a broken one.
-#   5. THE SEGMENT. MAXCONN * WINPERCONN is the window table, the window
-#      table is `struct wshm`, and `struct wshm` is memset WHOLE on first
-#      attach -- so it is RESIDENT memory and the test reports du(1) on it
-#      rather than an estimate.
+#   5. THE SEGMENT, and this section now asserts the OPPOSITE of what it did.
+#      MAXCONN * WINPERCONN is the window table and the window table is
+#      `struct wshm`, which used to be memset WHOLE on first attach -- so a
+#      row cost 74 KiB of RESIDENT memory whether or not anything had a window
+#      in it, and that is the single number that kept MAXCONN at 16 and TWO
+#      BROWSERS off this desktop. The memset was writing zeros over a fresh
+#      tmpfs file's already-zero bytes. It is gone; the table is sparse; the
+#      test measures with du(1) and requires sparseness, so the old behaviour
+#      now FAILS here rather than passing.
 #
 # Offscreen throughout: HAMFB_FILE, no VM, no display, about a minute.
 set -uo pipefail
@@ -136,6 +141,17 @@ if [ "${MAXCONN:-0}" -ge 10 ]; then
     ok "MAXCONN $MAXCONN holds Firefox (8) + debian's Xwayland + alpine's Xwayland = 10"
 else
     bad "MAXCONN $MAXCONN cannot hold the workload NORTH_STAR names: 8 + 1 + 1 = 10"
+fi
+# TWO BROWSERS, which is where 16 ran out and is the ceiling this pass moved.
+# Every number here is measured by tests/linux/wsyswl_two_browsers.sh next
+# door, not assumed: a Firefox is 8 connections, and `enter debian { firefox }`
+# beside the native one is a SECOND 8 -- 16 with nothing else on the desktop,
+# and then debian's and alpine's Xwayland are 17 and 18. Sixteen refused the
+# seventeenth ENTIRELY, which costs a whole program.
+if [ "${MAXCONN:-0}" -ge 18 ]; then
+    ok "MAXCONN $MAXCONN holds TWO browsers (8 + 8, measured) + two namespaces' Xwayland = 18"
+else
+    bad "MAXCONN $MAXCONN cannot hold two browsers and two namespaces: 8 + 8 + 1 + 1 = 18 -- the 17th client loses its whole program, not a window"
 fi
 
 # NO CONNECTION MAY BE STARVED BY ANOTHER'S APPETITE. This is arithmetic, not
@@ -423,17 +439,38 @@ fi
 echo "connc: === 6. the price"
 SEGSZ=$(stat -c %s "$HAMWSYS" 2>/dev/null || echo 0)
 SEGRES=$(du -k "$HAMWSYS" 2>/dev/null | awk '{print $1}')
-info "the window table /srv/wsys is $SEGSZ bytes on disk and $SEGRES KiB RESIDENT ($MAXWIN rows)"
-# struct wshm is memset whole by the first attacher, so the file is not
-# sparse: allocated must match apparent, or the row cost being reported is
-# not the row cost being paid.
-if [ "${SEGRES:-0}" -ge $((SEGSZ / 1024 - 64)) ]; then
-    ok "the window table is fully resident ($SEGRES KiB of $((SEGSZ / 1024)) KiB) -- the cost reported is the cost paid"
-else
-    bad "the segment is $SEGSZ bytes but only $SEGRES KiB is allocated; the residency claim in linux-wsys.c is wrong"
-fi
+info "the window table /srv/wsys is $SEGSZ bytes of ADDRESS SPACE and $SEGRES KiB RESIDENT ($MAXWIN rows, no windows open)"
+# THIS ASSERTION IS THE OPPOSITE OF THE ONE IT REPLACES, and that inversion is
+# the whole of this pass. It used to read "the window table is fully resident
+# ... the cost reported is the cost paid", because shm_attach memset the whole
+# of struct wshm over a segment ftruncate(2) had just given it out of a fresh
+# tmpfs file -- writing zeros onto bytes that were already zero, and faulting
+# in 18 MiB of window table with no windows in it. That memset is gone (see
+# THE ZEROES WE DO NOT WRITE in user/linux-wsys.c) and the table is now what
+# the paint pool beside it always was: sparse.
+#
+# It is asserted as a RATIO and not as an absolute, so the next person to
+# double MAXWIN does not have to edit this line -- which is exactly what the
+# old assertion forced.
 ROW=$(( SEGSZ > 0 && MAXWIN > 0 ? SEGSZ / MAXWIN : 0 ))
-info "that is about $ROW bytes per window row, and it is why MAXCONN is $MAXCONN and not 32"
+if [ "${SEGRES:-0}" -lt $((SEGSZ / 1024 / 4)) ]; then
+    ok "the window table is SPARSE: $SEGRES KiB resident of $((SEGSZ / 1024)) KiB mapped -- a row nobody has a window in is not paid for"
+else
+    bad "the window table is $SEGRES KiB resident of $((SEGSZ / 1024)) KiB: it is being faulted in whole, so MAXWIN costs memory instead of address space"
+fi
+# AND THE FLOOR IS NAMED, because it is not zero and pretending it were would
+# be the success-shaped answer. win_find and the /dev/wsys/windows reader scan
+# the table linearly for `used`, which is the first word of a row, so a scan
+# touches ONE PAGE of every row whether or not it holds a window. That is
+# 4 KiB a row against 74,425 -- an 18x reduction, not an infinite one.
+FLOOR_K=$(( MAXWIN * 8 ))
+if [ "${SEGRES:-0}" -le "$FLOOR_K" ]; then
+    ok "an empty table costs $SEGRES KiB, at or under the 4 KiB-a-row scan floor ($MAXWIN rows, ceiling asserted at $FLOOR_K KiB)"
+else
+    bad "an empty table costs $SEGRES KiB, more than $FLOOR_K KiB -- something is touching more of a row than its first page"
+fi
+info "a row is $ROW bytes when a window is actually in it, and about 4096 when it is not"
+info "before this pass: $MAXWIN rows would have been $(( MAXWIN * ROW / 1048576 )) MiB RESIDENT on every boot, which is why MAXCONN was 16"
 if [ -f "$HAMWSYS_BB" ]; then
     BBSZ=$(stat -c %s "$HAMWSYS_BB")
     BBRES=$(du -k "$HAMWSYS_BB" | awk '{print $1}')
