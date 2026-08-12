@@ -82,6 +82,7 @@ extern def sys_yield() -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> int32
 from lib.p9 import spawn, spawn_detached, p9_listdir, p9_note
+from lib.homedir import hd_resolve_home
 from lib.dropplace import dp_panel_insert_index, dp_panel_insert_boundary
 from lib.desktopentry import (
     desktop_parse, desktop_name_ptr, desktop_name_len,
@@ -4097,7 +4098,60 @@ def _launch_appmenu():
 # claim of a launch with no window is precisely the success-shaped answer this
 # tree keeps being bitten by, so the button now falls back to the dropdown the
 # panel draws itself, and says once which one it is using.
+#
+# AND THE OTHER HALF: PRESENT IS NOT THE SAME AS WORKING. Once hamappmenu
+# ships (it is in scripts/hamlinux_image.sh's APPS and in DESKTOP_CMDS now, so
+# the `fd >= 0` branch below is the one every real machine takes), the
+# remaining way for this button to answer a click with NOTHING is a menu that
+# starts and cannot get a window -- the compositor's table full, /dev/wsys
+# unreachable in the spawned namespace. It then prints to a stderr a detached
+# spawn has already closed and dies, and the screen does not change.
+#
+# So hamappmenu writes $HOME/.hamde/appmenu.fault when its window allocation
+# fails and REMOVES it the moment one succeeds (user/hamappmenu.ad's
+# _fav_fault_set / _fav_fault_clear), and this function honours it: the button
+# goes back to the dropdown the panel draws itself, and says so by name. It is
+# re-checked on EVERY call while the menu is believed good, not cached with
+# the first answer -- a menu that broke after the panel started is exactly the
+# case a cached "present" would answer success-shaped forever.
+#
+# NOT a fixed /tmp name, deliberately: see the header of hamappmenu's
+# favourites store, and tests/linux/private_ns.sh for what one of those cost.
 _appmenu_present: int32 = -1
+_am_fault_path: Array[224, uint8]
+_am_fault_have: int32 = 0
+_am_fault_home: Array[160, uint8]
+def _am_fault_build() -> int32:
+    if _am_fault_have != 0:
+        return 1
+    hn: uint64 = hd_resolve_home(&_am_fault_home[0], 160)
+    if hn == 0:
+        return 0
+    p: uint64 = 0
+    while p < hn and p < 200:
+        _am_fault_path[p] = _am_fault_home[p]
+        p = p + 1
+    sfx: Ptr[uint8] = cast[Ptr[uint8]]("/.hamde/appmenu.fault")
+    k: uint64 = 0
+    while sfx[k] != 0 and p < 223:
+        _am_fault_path[p] = sfx[k]
+        p = p + 1
+        k = k + 1
+    _am_fault_path[p] = 0
+    _am_fault_have = 1
+    return 1
+
+
+def _appmenu_faulted() -> int32:
+    if _am_fault_build() == 0:
+        return 0
+    fd: int32 = sys_open(cast[Ptr[char]](&_am_fault_path[0]))
+    if fd < 0:
+        return 0
+    sys_close(fd)
+    return 1
+
+
 def _appmenu_available() -> int32:
     if _appmenu_present < 0:
         fd: int32 = sys_open(cast[Ptr[char]]("/bin/hamappmenu"))
@@ -4108,6 +4162,9 @@ def _appmenu_available() -> int32:
         else:
             _appmenu_present = 0
             _writeall(1, cast[Ptr[uint8]]("[panel] no /bin/hamappmenu; Applications button -> the panel's own dropdown\n"))
+    if _appmenu_present == 1 and _appmenu_faulted() != 0:
+        _appmenu_present = 0
+        _writeall(1, cast[Ptr[uint8]]("[panel] /bin/hamappmenu could not open a window (it left appmenu.fault); Applications button -> the panel's own dropdown\n"))
     return _appmenu_present
 
 
