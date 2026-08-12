@@ -351,7 +351,32 @@ COMPONENTS = {
     "hpm": (
         "Hamnix package manager (hpm), built for the Linux line",
         [("hpm", "bin/hpm")],
-        [("etc/hpm/channels", "etc/hpm/channels")],
+        # THE LINUX CHANNEL'S FILE, NOT THE NATIVE ONE. This line used to read
+        # ("etc/hpm/channels", "etc/hpm/channels") -- and etc/hpm/channels is
+        # the NATIVE line's subscription list, whose single entry is `main`.
+        # scripts/hamlinux_image.sh stages etc/hpm/channels.LINUX (whose entry
+        # is `linux`) at that path for exactly the reason the header of this
+        # file gives: main holds Hamnix NATIVE binaries and linux holds the
+        # same userland built against the Linux kernel.
+        #
+        # So `hpm install hamnix-base` -- the flagship package, which declares
+        # hpm>=1 -- REWROTE the machine's subscription to `main`, and every
+        # `hpm refresh` and `hpm update` after it went to
+        # https://255.one/main/, found no index.json.sig there, and aborted:
+        #
+        #   hpm: fetching channel main from https://255.one/main/
+        #   hpm: https://255.one/main/index.json.sig: HTTP 404, not 200 OK
+        #   hpm: refresh: aborting - untrusted index for channel main
+        #
+        # A machine that installed this distribution was cut off from its own
+        # repository by the act of installing from it, permanently, and
+        # nothing said so. Measured on a real installed disk by
+        # tests/linux/installed_update_modules.sh, which is where it surfaced.
+        # tests/linux/channel_covers_image.sh compared NAMES; both files are
+        # called etc/hpm/channels, so it saw nothing -- the "right NAMES are
+        # not the right BYTES" shape NORTH_STAR.md already names. That gate now
+        # compares the BYTES of every /etc file a package and the image share.
+        [("etc/hpm/channels.linux", "etc/hpm/channels")],
         ["hamnix-init>=1"]),
     "hamnix-auth": (
         "identity -- login, su, passwd, whoami; clients of /dev/auth",
