@@ -101,6 +101,7 @@ typedef uint64_t VkPipelineLayout;
 typedef uint64_t VkPipeline;
 typedef uint64_t VkPipelineCache;
 typedef uint64_t VkDescriptorPool;
+typedef uint64_t VkQueryPool;
 
 #define VK_SUCCESS 0
 #define VK_TRUE    1
@@ -125,6 +126,13 @@ typedef uint64_t VkDescriptorPool;
 #define ST_DESCRIPTOR_SET_ALLOCATE_INFO        34
 #define ST_WRITE_DESCRIPTOR_SET                35
 #define ST_MEMORY_BARRIER                      46
+#define ST_QUERY_POOL_CREATE_INFO              11
+
+#define VK_QUERY_TYPE_TIMESTAMP                2
+#define VK_QUERY_RESULT_64_BIT                 0x1
+#define VK_QUERY_RESULT_WAIT_BIT               0x2
+#define VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT      0x1
+#define VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT   0x2000
 
 #define VK_SHARING_MODE_EXCLUSIVE            0
 #define VK_COMMAND_BUFFER_LEVEL_PRIMARY      0
@@ -168,6 +176,73 @@ typedef struct {
     uint32_t enabledExtensionCount; const char* const* ppEnabledExtensionNames;
 } VkInstanceCreateInfo;
 
+/* VkPhysicalDeviceLimits, declared as far as timestampPeriod and no further.
+ * We need exactly one field out of it — the nanoseconds a GPU timestamp tick
+ * is worth — and a wrong offset here would not crash, it would print a
+ * confident wrong duration, which is the failure shape this tree keeps being
+ * bitten by. So hvk_timestamp_period() VALIDATES the layout against three
+ * limits whose values are known-shaped on every conformant device before it
+ * trusts the period, and refuses (returns 0) rather than guess. */
+typedef struct {
+    uint32_t maxImageDimension1D, maxImageDimension2D, maxImageDimension3D;
+    uint32_t maxImageDimensionCube, maxImageArrayLayers, maxTexelBufferElements;
+    uint32_t maxUniformBufferRange, maxStorageBufferRange, maxPushConstantsSize;
+    uint32_t maxMemoryAllocationCount, maxSamplerAllocationCount;
+    VkDeviceSize bufferImageGranularity, sparseAddressSpaceSize;
+    uint32_t maxBoundDescriptorSets;
+    uint32_t maxPerStageDescriptorSamplers, maxPerStageDescriptorUniformBuffers;
+    uint32_t maxPerStageDescriptorStorageBuffers, maxPerStageDescriptorSampledImages;
+    uint32_t maxPerStageDescriptorStorageImages, maxPerStageDescriptorInputAttachments;
+    uint32_t maxPerStageResources;
+    uint32_t maxDescriptorSetSamplers, maxDescriptorSetUniformBuffers;
+    uint32_t maxDescriptorSetUniformBuffersDynamic, maxDescriptorSetStorageBuffers;
+    uint32_t maxDescriptorSetStorageBuffersDynamic, maxDescriptorSetSampledImages;
+    uint32_t maxDescriptorSetStorageImages, maxDescriptorSetInputAttachments;
+    uint32_t maxVertexInputAttributes, maxVertexInputBindings;
+    uint32_t maxVertexInputAttributeOffset, maxVertexInputBindingStride;
+    uint32_t maxVertexOutputComponents;
+    uint32_t maxTessellationGenerationLevel, maxTessellationPatchSize;
+    uint32_t maxTessellationControlPerVertexInputComponents;
+    uint32_t maxTessellationControlPerVertexOutputComponents;
+    uint32_t maxTessellationControlPerPatchOutputComponents;
+    uint32_t maxTessellationControlTotalOutputComponents;
+    uint32_t maxTessellationEvaluationInputComponents;
+    uint32_t maxTessellationEvaluationOutputComponents;
+    uint32_t maxGeometryShaderInvocations, maxGeometryInputComponents;
+    uint32_t maxGeometryOutputComponents, maxGeometryOutputVertices;
+    uint32_t maxGeometryTotalOutputComponents;
+    uint32_t maxFragmentInputComponents, maxFragmentOutputAttachments;
+    uint32_t maxFragmentDualSrcAttachments, maxFragmentCombinedOutputResources;
+    uint32_t maxComputeSharedMemorySize;
+    uint32_t maxComputeWorkGroupCount[3];
+    uint32_t maxComputeWorkGroupInvocations;
+    uint32_t maxComputeWorkGroupSize[3];
+    uint32_t subPixelPrecisionBits, subTexelPrecisionBits, mipmapPrecisionBits;
+    uint32_t maxDrawIndexedIndexValue, maxDrawIndirectCount;
+    float    maxSamplerLodBias, maxSamplerAnisotropy;
+    uint32_t maxViewports, maxViewportDimensions[2];
+    float    viewportBoundsRange[2];
+    uint32_t viewportSubPixelBits;
+    size_t   minMemoryMapAlignment;
+    VkDeviceSize minTexelBufferOffsetAlignment, minUniformBufferOffsetAlignment;
+    VkDeviceSize minStorageBufferOffsetAlignment;
+    int32_t  minTexelOffset; uint32_t maxTexelOffset;
+    int32_t  minTexelGatherOffset; uint32_t maxTexelGatherOffset;
+    float    minInterpolationOffset, maxInterpolationOffset;
+    uint32_t subPixelInterpolationOffsetBits;
+    uint32_t maxFramebufferWidth, maxFramebufferHeight, maxFramebufferLayers;
+    VkFlags  framebufferColorSampleCounts, framebufferDepthSampleCounts;
+    VkFlags  framebufferStencilSampleCounts, framebufferNoAttachmentsSampleCounts;
+    uint32_t maxColorAttachments;
+    VkFlags  sampledImageColorSampleCounts, sampledImageIntegerSampleCounts;
+    VkFlags  sampledImageDepthSampleCounts, sampledImageStencilSampleCounts;
+    VkFlags  storageImageSampleCounts;
+    uint32_t maxSampleMaskWords;
+    VkBool32 timestampComputeAndGraphics;
+    float    timestampPeriod;
+    /* ...and 24 more fields we do not read. */
+} VkPhysicalDeviceLimitsHead;
+
 /* Only the head is read by us. The driver writes limits + sparseProperties on
  * past deviceName (real size ~824 bytes), so the tail padding is MANDATORY —
  * without it vkGetPhysicalDeviceProperties smashes the caller's stack. */
@@ -176,6 +251,7 @@ typedef struct {
     uint32_t deviceType;
     char     deviceName[256];
     uint8_t  pipelineCacheUUID[16];
+    VkPhysicalDeviceLimitsHead limits;
     uint8_t  _pad[1024];
 } VkPhysicalDeviceProperties;
 
@@ -183,6 +259,11 @@ typedef struct {
     VkFlags queueFlags; uint32_t queueCount; uint32_t timestampValidBits;
     VkExtent3D minImageTransferGranularity;
 } VkQueueFamilyProperties;
+
+typedef struct {
+    uint32_t sType; const void* pNext; VkFlags flags;
+    uint32_t queryType; uint32_t queryCount; VkFlags pipelineStatistics;
+} VkQueryPoolCreateInfo;
 
 typedef struct {
     uint32_t sType; const void* pNext; VkFlags flags;
@@ -308,6 +389,12 @@ VKFN(void,     vkCmdBindPipeline, (VkCommandBuffer, uint32_t, VkPipeline));
 VKFN(void,     vkCmdBindDescriptorSets, (VkCommandBuffer, uint32_t, VkPipelineLayout, uint32_t, uint32_t, const VkDescriptorSet*, uint32_t, const uint32_t*));
 VKFN(void,     vkCmdPushConstants, (VkCommandBuffer, VkPipelineLayout, VkFlags, uint32_t, uint32_t, const void*));
 VKFN(void,     vkCmdDispatch, (VkCommandBuffer, uint32_t, uint32_t, uint32_t));
+VKFN(VkResult, vkCreateQueryPool, (VkDevice, const VkQueryPoolCreateInfo*, const void*, VkQueryPool*));
+VKFN(void,     vkDestroyQueryPool, (VkDevice, VkQueryPool, const void*));
+VKFN(void,     vkCmdResetQueryPool, (VkCommandBuffer, VkQueryPool, uint32_t, uint32_t));
+VKFN(void,     vkCmdWriteTimestamp, (VkCommandBuffer, VkFlags, VkQueryPool, uint32_t));
+VKFN(VkResult, vkGetQueryPoolResults, (VkDevice, VkQueryPool, uint32_t, uint32_t,
+                                       size_t, void*, VkDeviceSize, VkFlags));
 #undef VKFN
 
 /* ============================ module state =============================== */
@@ -361,8 +448,28 @@ static int           g_fdevlocal;
 static VkBuffer       g_abuf;
 static VkDeviceMemory g_amem;
 static uint32_t*      g_amap;
+/* HOST-SIDE MIRROR OF THE ARENA, and the reason it exists.
+ *
+ * g_amap points at MAPPED DEVICE-VISIBLE memory. Writing it is cheap (the CPU
+ * write-combines and the store never stalls), but READING it is not: on a
+ * discrete GPU that mapping is uncached — write-combined system memory, or
+ * VRAM across the PCIe BAR — and every load is a bus round trip of order 100
+ * ns instead of an L1 hit.
+ *
+ * The glyph coverage cache used to confirm a hash hit by comparing the
+ * candidate byte for byte against g_amap. That confirmation is not optional --
+ * a collision there paints one letter with another letter's shape -- but it
+ * does not have to read the DEVICE's copy. This is an ordinary-RAM mirror
+ * written in lockstep from the same source bytes, so the comparison is the
+ * identical comparison against the identical bytes, with no bus in it.
+ *
+ * MEASURED, RTX 3090, the 1280x800 DE+text frame: confirming against g_amap
+ * cost 32.3 ms of CPU per frame while the GPU did 0.43 ms of work. Against
+ * this mirror the same frame is 0.8 ms. Nothing about the pixels changes. */
+static uint32_t*      g_ashadow;
 static VkDeviceSize   g_acap;
 static uint32_t       g_ause;         /* uints consumed this frame */
+static int            g_adevlocal;    /* the arena landed in device memory */
 
 static PushC    g_ops[HVK_MAXOPS];
 static uint32_t g_grp[HVK_MAXOPS][2];
@@ -416,6 +523,27 @@ static uint64_t g_stat_last_us, g_stat_arena_bytes, g_stat_batched;
 static uint64_t g_stat_staged;      /* uints written into the source arena */
 static uint64_t g_stat_covreuse;    /* glyphs that reused a staged mask */
 
+/* --- WHERE THE FRAME'S MICROSECONDS ACTUALLY WENT -------------------------
+ * g_stat_last_us is wall clock around record + submit + wait, so on its own
+ * it cannot tell "the GPU executed for 33 ms" from "we blocked for 33 ms
+ * waiting for a driver that had not started yet". Those have opposite fixes,
+ * so the split is measured rather than argued:
+ *
+ *   record_us  CPU inside vkCmd* recording the command buffer
+ *   wait_us    CPU inside vkQueueSubmit + vkWaitForFences (idle if the GPU
+ *              is the one working)
+ *   gpu_ns     the DEVICE's own clock between a TOP_OF_PIPE timestamp at the
+ *              head of the command buffer and a BOTTOM_OF_PIPE one at its
+ *              tail, converted with VkPhysicalDeviceLimits::timestampPeriod.
+ *
+ * gpu_ns is 0, never a guess, when the queue family reports no valid
+ * timestamp bits or the limits layout does not validate. */
+static uint64_t g_stat_record_us, g_stat_wait_us, g_stat_gpu_ns;
+static VkQueryPool g_qpool;
+static uint32_t    g_ts_valid_bits;
+static float       g_ts_period;      /* ns per tick; 0 = not trustworthy */
+static int         g_ts_warned;
+
 /* --- the measurement levers -------------------------------------------
  * dispatches, barriers and staged words are the device-INDEPENDENT numbers
  * this backend is tuned against, and a number is only shown to predict
@@ -437,6 +565,13 @@ static uint64_t g_stat_covreuse;    /* glyphs that reused a staged mask */
  * conclusions -- see docs/vk_linux_backend.md. */
 static int32_t g_batch_max = -1;    /* <0: env not read yet */
 static int32_t g_no_covcache;
+/* THE THIRD LEVER — where the source arena LIVES. binding 1 is read by the
+ * shader once per invocation for the batch-table fields and once per PIXEL
+ * for a glyph's coverage byte, so on a discrete GPU a plain HOST_VISIBLE
+ * arena puts that read across PCIe. =1 asks for DEVICE_LOCAL|HOST_VISIBLE
+ * (the same memory type the frame already gets on this card) instead.
+ * Pixels are unaffected either way, which is what makes it a lever. */
+static int32_t g_arena_devlocal;
 
 static void hvk_tunables(void)
 {
@@ -449,6 +584,8 @@ static void hvk_tunables(void)
     }
     s = getenv("HAMNIX_VK_NO_COVCACHE");
     g_no_covcache = (s && s[0] && s[0] != '0') ? 1 : 0;
+    s = getenv("HAMNIX_VK_ARENA_DEVLOCAL");
+    g_arena_devlocal = (s && s[0] && s[0] != '0') ? 1 : 0;
 }
 
 static int hvk_fail(const char* why)
@@ -526,6 +663,9 @@ static int load_loader(void)
     BIND(vkAllocateDescriptorSets); BIND(vkUpdateDescriptorSets);
     BIND(vkCmdBindPipeline); BIND(vkCmdBindDescriptorSets);
     BIND(vkCmdPushConstants); BIND(vkCmdDispatch);
+    BIND(vkCreateQueryPool); BIND(vkDestroyQueryPool);
+    BIND(vkCmdResetQueryPool); BIND(vkCmdWriteTimestamp);
+    BIND(vkGetQueryPoolResults);
 #undef BIND
     return 0;
 }
@@ -713,19 +853,21 @@ static int ensure_arena(VkDeviceSize want)
      * precisely the plausible-wrong-answer failure this codebase keeps
      * getting bitten by. */
     uint32_t keep = g_ause;
-    void* saved = 0;
-    if (keep && g_amap) {
-        saved = malloc((size_t)keep * 4u);
-        if (!saved) return hvk_fail("out of memory growing the source arena");
-        memcpy(saved, g_amap, (size_t)keep * 4u);
-    }
+    /* The words already staged this frame are carried across from the MIRROR,
+     * not read back out of the device mapping -- same bytes, no bus. */
+    uint32_t* nshadow = (uint32_t*)malloc((size_t)sz);
+    if (!nshadow) return hvk_fail("out of memory growing the source arena");
+    if (keep && g_ashadow) memcpy(nshadow, g_ashadow, (size_t)keep * 4u);
     if (g_amap) { p_vkUnmapMemory(g_dev, g_amem); g_amap = 0; }
     if (g_abuf) { p_vkDestroyBuffer(g_dev, g_abuf, 0); g_abuf = 0; }
     if (g_amem) { p_vkFreeMemory(g_dev, g_amem, 0); g_amem = 0; }
     void* m = 0;
-    if (make_storage_buffer(sz, 0, &g_abuf, &g_amem, &m, 0)) { free(saved); return -1; }
+    if (make_storage_buffer(sz, g_arena_devlocal, &g_abuf, &g_amem, &m,
+                            &g_adevlocal)) { free(nshadow); return -1; }
     g_amap = (uint32_t*)m;
-    if (saved) { memcpy(g_amap, saved, (size_t)keep * 4u); free(saved); }
+    if (keep) memcpy(g_amap, nshadow, (size_t)keep * 4u);
+    free(g_ashadow);
+    g_ashadow = nshadow;
     g_acap = sz;
     g_stat_arena_bytes = (uint64_t)sz;
     return rebind_descriptors();
@@ -768,6 +910,16 @@ static int hvk_bringup(void)
         p_vkGetPhysicalDeviceProperties(g_phys, &pr);
         snprintf(g_devname, sizeof g_devname, "%s", pr.deviceName);
         g_devtype = pr.deviceType;
+        /* VALIDATE THE LIMITS LAYOUT BEFORE BELIEVING timestampPeriod. Vulkan
+         * mandates each of these three minimums, so a struct whose fields had
+         * slid would fail at least one; a period we cannot vouch for is
+         * reported as "no GPU clock" rather than as a number. */
+        const VkPhysicalDeviceLimitsHead* L = &pr.limits;
+        if (L->maxPushConstantsSize >= 128 &&
+            L->maxComputeWorkGroupInvocations >= 128 &&
+            L->maxImageDimension2D >= 4096 &&
+            L->timestampPeriod > 0.0f && L->timestampPeriod < 1000000.0f)
+            g_ts_period = L->timestampPeriod;
     }
 
     uint32_t qn = 0;
@@ -781,6 +933,7 @@ static int hvk_bringup(void)
         if (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { qfam = (int)i; break; }
     if (qfam < 0) return hvk_fail("no compute-capable queue family");
     g_qfam = (uint32_t)qfam;
+    g_ts_valid_bits = qf[qfam].timestampValidBits;
 
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci;
@@ -809,6 +962,23 @@ static int hvk_bringup(void)
     fci.sType = ST_FENCE_CREATE_INFO;
     VKCK(p_vkCreateFence(g_dev, &fci, 0, &g_fence));
 
+    /* Two timestamps, head and tail of the command buffer. Only created when
+     * the queue can actually carry them, so hvk_stat_gpu_ns() staying 0 means
+     * "this device has no usable GPU clock", not "the frame took no time". */
+    if (g_ts_valid_bits > 0 && g_ts_period > 0.0f) {
+        VkQueryPoolCreateInfo qpi;
+        memset(&qpi, 0, sizeof qpi);
+        qpi.sType = ST_QUERY_POOL_CREATE_INFO;
+        qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpi.queryCount = 2;
+        if (p_vkCreateQueryPool(g_dev, &qpi, 0, &g_qpool) != VK_SUCCESS)
+            g_qpool = 0;
+    }
+    if (getenv("HAMNIX_VK_VERBOSE"))
+        fprintf(stderr, "[linux-vk] timestampValidBits=%u period=%g qpool=%d\n",
+                g_ts_valid_bits, (double)g_ts_period, g_qpool ? 1 : 0);
+
+    hvk_tunables();
     if (build_pipeline()) return -1;
     if (ensure_arena(HVK_ARENA_MIN)) return -1;
     g_err[0] = 0;
@@ -1065,6 +1235,7 @@ static int32_t arena_put(const void* src, uint32_t words)
     if (ensure_arena((VkDeviceSize)(g_ause + words) * 4u)) { g_frame_err = -1; return -1; }
     uint32_t off = g_ause;
     memcpy(g_amap + off, src, (size_t)words * 4u);
+    memcpy(g_ashadow + off, src, (size_t)words * 4u);
     g_ause += words;
     g_stat_staged += words;
     return (int32_t)off;
@@ -1150,7 +1321,9 @@ int32_t hvk_glyph(uint64_t cov_base, int32_t cov_w, int32_t cov_h,
         for (int32_t k = 0; k < g_ncov; k++) {
             if (g_cov[k].hash != hsh || g_cov[k].w != cov_w || g_cov[k].h != cov_h)
                 continue;
-            const uint32_t* have = g_amap + g_cov[k].off;
+            /* The MIRROR, never g_amap: identical bytes, ordinary cached RAM.
+             * See the g_ashadow comment -- this one line was 32 ms a frame. */
+            const uint32_t* have = g_ashadow + g_cov[k].off;
             uint32_t i = 0;
             while (i < words && have[i] == (uint32_t)cov[i]) i++;
             if (i == words) { off = g_cov[k].off; g_stat_covreuse++; break; }
@@ -1162,7 +1335,11 @@ int32_t hvk_glyph(uint64_t cov_base, int32_t cov_w, int32_t cov_h,
             return -1;
         }
         off = (int32_t)g_ause;
-        for (uint32_t i = 0; i < words; i++) g_amap[off + i] = cov[i];
+        for (uint32_t i = 0; i < words; i++) {
+            uint32_t v = cov[i];
+            g_amap[off + i] = v;
+            g_ashadow[off + i] = v;
+        }
         g_ause += words;
         g_stat_staged += words;
         if (!g_no_covcache && g_ncov < HVK_COV_CACHE) {
@@ -1194,9 +1371,11 @@ static int32_t batch_table(int32_t first, int32_t cnt)
     uint32_t words = (uint32_t)cnt * HVK_BATCH_STRIDE;
     if (ensure_arena((VkDeviceSize)(g_ause + words) * 4u)) return -1;
     uint32_t off = g_ause;
+    /* Built in the MIRROR (cached RAM) and copied out in one streaming pass,
+     * rather than 24 scattered stores straight into the device mapping. */
     for (int32_t n = 0; n < cnt; n++) {
         const PushC* o = &g_ops[first + n];
-        uint32_t* e = g_amap + off + (uint32_t)n * HVK_BATCH_STRIDE;
+        uint32_t* e = g_ashadow + off + (uint32_t)n * HVK_BATCH_STRIDE;
         e[0]  = (uint32_t)o->op;    e[1]  = (uint32_t)o->bx;
         e[2]  = (uint32_t)o->by;    e[3]  = (uint32_t)o->dispw;
         e[4]  = (uint32_t)o->disph; e[5]  = o->rgba;
@@ -1211,6 +1390,7 @@ static int32_t batch_table(int32_t first, int32_t cnt)
         e[22] = (uint32_t)o->mask_off;
         e[23] = 0;
     }
+    memcpy(g_amap + off, g_ashadow + off, (size_t)words * 4u);
     g_ause += words;
     g_stat_staged += words;
     return (int32_t)off;
@@ -1249,6 +1429,10 @@ int32_t hvk_frame_sync(void)
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VKCK(p_vkBeginCommandBuffer(cb, &bi));
 
+    if (g_qpool) {
+        p_vkCmdResetQueryPool(cb, g_qpool, 0, 2);
+        p_vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qpool, 0);
+    }
     p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_pipe);
     p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_playout,
                               0, 1, &g_dset, 0, 0);
@@ -1313,7 +1497,10 @@ int32_t hvk_frame_sync(void)
         }
         i = gend;
     }
+    if (g_qpool)
+        p_vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qpool, 1);
     VKCK(p_vkEndCommandBuffer(cb));
+    uint64_t t_rec = now_us();
 
     VkSubmitInfo si;
     memset(&si, 0, sizeof si);
@@ -1324,8 +1511,45 @@ int32_t hvk_frame_sync(void)
     VKCK(p_vkQueueSubmit(g_queue, 1, &si, g_fence));
     VKCK(p_vkWaitForFences(g_dev, 1, &g_fence, VK_TRUE, ~0ull));
 
+    uint64_t t_end = now_us();
+    g_stat_record_us = t_rec - t0;
+    g_stat_wait_us = t_end - t_rec;
+    /* The fence is already signalled, so this reads back two already-written
+     * queries and never blocks. A tick count is masked to the bits the queue
+     * says are valid before it is scaled. */
+    g_stat_gpu_ns = 0;
+    if (g_qpool) {
+        uint64_t ts[2] = { 0, 0 };
+        VkResult qr = p_vkGetQueryPoolResults(g_dev, g_qpool, 0, 2, sizeof ts, ts,
+                                    sizeof(uint64_t),
+                                    VK_QUERY_RESULT_64_BIT
+                                    | VK_QUERY_RESULT_WAIT_BIT);
+        /* A query pool we created, on a queue that advertised valid timestamp
+         * bits, that then hands back two zeroes is a BROKEN INSTRUMENT, not a
+         * device without a clock -- and it would print as "gpu_us 0", which
+         * reads like a free frame. It was exactly this: the pool was created
+         * with the wrong queryType and every timestamp silently wrote nothing.
+         * Say so once, by name, rather than let a zero be quoted. */
+        if (qr == VK_SUCCESS && ts[0] == 0 && ts[1] == 0 && !g_ts_warned) {
+            g_ts_warned = 1;
+            fprintf(stderr, "[linux-vk] WARNING: timestamp queries returned "
+                    "0/0 on a queue advertising %u valid bits -- the GPU clock "
+                    "reading is NOT trustworthy and gpu_ns stays 0\n",
+                    g_ts_valid_bits);
+        }
+        if (getenv("HAMNIX_VK_VERBOSE"))
+            fprintf(stderr, "[linux-vk] qr=%d ts0=%llu ts1=%llu\n", (int)qr,
+                    (unsigned long long)ts[0], (unsigned long long)ts[1]);
+        if (qr == VK_SUCCESS) {
+            uint64_t mask = g_ts_valid_bits >= 64 ? ~0ull
+                                                  : ((1ull << g_ts_valid_bits) - 1);
+            uint64_t d = (ts[1] & mask) - (ts[0] & mask);
+            d &= mask;
+            g_stat_gpu_ns = (uint64_t)((double)d * (double)g_ts_period);
+        }
+    }
     g_stat_submits++;
-    g_stat_last_us = now_us() - t0;
+    g_stat_last_us = t_end - t0;
     g_nops = 0;
     g_ause = 0;               /* staged sources are consumed by the submit */
     g_ncov = 0;               /* ...and so are the coverage masks in them */
@@ -1360,4 +1584,11 @@ uint64_t hvk_stat_arena_bytes(void) { return g_stat_arena_bytes; }
  * and the one number that says whether the glyph cache is doing anything. */
 uint64_t hvk_stat_staged(void)      { return g_stat_staged; }
 uint64_t hvk_stat_cov_reuse(void)   { return g_stat_covreuse; }
+/* The last submit split three ways. gpu_ns is the DEVICE's own clock; 0 means
+ * this device has no usable timestamp, never "it was instant". */
+uint64_t hvk_stat_record_us(void)   { return g_stat_record_us; }
+uint64_t hvk_stat_wait_us(void)     { return g_stat_wait_us; }
+uint64_t hvk_stat_gpu_ns(void)      { return g_stat_gpu_ns; }
+/* 1 iff the source arena (binding 1) lives in device-local memory. */
+int32_t  hvk_arena_is_device_local(void) { return g_adevlocal ? 1 : 0; }
 int32_t  hvk_pending_ops(void)      { return g_nops; }

@@ -1155,8 +1155,40 @@ same failure this project exists to beat.
   `user/wsyswl.ad`, `user/wsysd.ad`, `user/xsnarfd.ad` and one Linux-ABI test
   — programs `scripts/build_user.sh` does not build at all.
 
-* **The GPU backend has never been measured on a real GPU, and on this
-  machine it cannot be.** It is proven correct and proven to install; every
+* **SUPERSEDED — THE GPU BACKEND HAS NOW BEEN MEASURED ON A REAL GPU, and the
+  claim below that "on this machine it cannot be" was FALSE THE WHOLE TIME.**
+  The desktop runs on the HOST offscreen (`HAMFB_FILE`), not only in a VM, so
+  `/dev/nvidiactl` was always reachable beside the owner's running session —
+  no reboot, no `modeset=1`, no VM. What made it look impossible was
+  `vk_icd_survey.sh` printing `CPU-ONLY` about a for-loop that skipped
+  `nvidia_icd.json` (see the running list). With the owner's consent:
+  **RTX 3090, driver 550.163.01, `VK_ICD_FILENAMES=…/nvidia_icd.json
+  scripts/bench_vk_linux_device.sh`, byte-identical at all 26 lever settings.**
+  The findings, in `docs/vk_linux_backend.md` § *Measured on real silicon*:
+  - **The DE does not use this backend today and never has on a shipped
+    image** — one ICD is staged and it is venus
+    (`hamlinux_image.sh:789`), venus enumerates nothing here, and `vk_arm`
+    disarms on a CPU ICD by design. So this was always "do not switch yet",
+    never "we shipped something slow".
+  - The DE+text frame's **33 ms was 428 µs of GPU and 32.1 ms of our own CPU**
+    reading the mapped Vulkan buffer back across the bus. Fixed (28×,
+    byte-identical): **1,166 µs, and 3.8× FASTER than the software
+    rasterizer** where it had measured 7.4× slower.
+  - **All three "device-independent levers" quoted below are refuted on
+    hardware.** Dispatch count moves this frame 2.6% (per-dispatch cost is
+    **528 ns** here, not lavapipe's 17,700). `staged_words` is
+    anti-correlated: 8.7× MORE staging was 41× faster. Arena residency
+    (`HAMNIX_VK_ARENA_DEVLOCAL=1`, new) made it 5× WORSE — which is what named
+    the cause, because the cost tracked how far the **CPU's read** travelled.
+  - New gate: a **host-overhead ceiling** (wall ≤ 10× the device's own clock).
+    The bug sat at 76.4×; a CPU ICD passes it trivially, which is why
+    `test_vk_linux.sh` could never have caught it.
+
+  The rest of this bullet is kept as written for the history of how the wall
+  was believed. It is no longer the state.
+
+  ~~**The GPU backend has never been measured on a real GPU, and on this
+  machine it cannot be.**~~ It is proven correct and proven to install; every
   microsecond quoted anywhere is lavapipe's, where it is 2.3–2.9× *slower*
   than the hand-tuned software rasterizer, which is why the default is gated
   on the device being silicon. What is now *established* rather than assumed
@@ -2567,6 +2599,40 @@ single entry:
   browser on every notch. Three passes of measurement below the X server were
   spent on the strength of that green. **When a stand-in for a program
   disagrees with the program, doubt the stand-in first.**
+
+* **A SURVEY THAT REPORTED ITS OWN `for` LOOP AS A FACT ABOUT THE HARDWARE, and
+  the 33 ms it hid for months.** `tests/linux/vk_icd_survey.sh` skips
+  `nvidia_icd.json` **by design** — that ICD reaches the GPU through
+  `/dev/nvidiactl`, which the survey's `tmpfs`-over-`/dev/dri` masking does not
+  cover, and the card belongs to the machine's owner. Having skipped it, the
+  script then summarised: `CPU-ONLY — correctness is gateable, performance is
+  not`. On a box with an **RTX 3090** in it. That sentence was quoted for
+  months, in this file and in `docs/vk_linux_backend.md`, as the reason the
+  Vulkan backend could never be measured on real silicon. It was never a
+  statement about the machine; the GPU was one command away the whole time.
+  Fixed: any unrun ICD now yields `UNDETERMINED`, naming what was skipped and
+  printing the command that would settle it. **A survey may report "I did not
+  look"; it may never report "there is nothing there" on the strength of not
+  having looked.**
+
+  **And what it was hiding was itself an instrument.** Run at last, the bench
+  said `GPU 8× faster on fills, 7.4× SLOWER on the DE+text frame` — and that
+  second number was not a measurement of the GPU either. `GPU_US` was wall
+  clock around the frame, which cannot tell *the device is slow* from *the host
+  is slow with the device idle*. Asked for its own clock
+  (`VK_QUERY_TYPE_TIMESTAMP`), the RTX 3090 answered **428 µs** for a frame
+  that took **32,722 µs**. 32.1 ms of it was never submitted to anything.
+  The cause was one line: the glyph coverage cache confirmed a hash hit byte
+  for byte — correctly, that confirmation must stay — **against the mapped
+  Vulkan buffer**, which is cached RAM on lavapipe and uncached
+  write-combined memory on a discrete GPU. A host-side mirror took the frame to
+  1,166 µs, byte-identical, and turned 7.4× slower into 3.8× faster.
+  Gated now by a **host-overhead ceiling** in
+  `scripts/bench_vk_linux_device.sh` (wall ≤ 10× the device's own clock; the
+  bug sat at 76.4×), which a CPU ICD passes trivially — which is exactly why
+  the software gate could never have caught it.
+  **Third instrument on this page after `xi2_scroll_probe.c` and the 1.0.10
+  control. Suspect the instrument.**
 
 None of these failed loudly. Three were found only by tracing, one only by
 running `strace` **as PID 1**, and one only after publishing the compositor's

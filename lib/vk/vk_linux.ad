@@ -86,6 +86,10 @@ extern def hvk_stat_barriers() -> int32
 extern def hvk_stat_batched() -> uint64
 extern def hvk_stat_staged() -> uint64
 extern def hvk_stat_cov_reuse() -> uint64
+extern def hvk_stat_record_us() -> uint64
+extern def hvk_stat_wait_us() -> uint64
+extern def hvk_stat_gpu_ns() -> uint64
+extern def hvk_arena_is_device_local() -> int32
 extern def hvk_pending_ops() -> int32
 
 
@@ -261,6 +265,34 @@ def vk_linux_cov_reuse() -> uint64:
     # expanded into the arena again. A page of text is a few hundred distinct
     # SHAPES drawn thousands of times.
     return hvk_stat_cov_reuse()
+
+
+def vk_linux_record_us() -> uint64:
+    # CPU microseconds spent RECORDING the last submit's command buffer. With
+    # wait_us and gpu_ns this is what separates "our own code is slow" from
+    # "the device is slow" from "we are blocked on a device that is idle" --
+    # three findings with three different fixes, which a single wall-clock
+    # number cannot tell apart.
+    return hvk_stat_record_us()
+
+
+def vk_linux_wait_us() -> uint64:
+    # CPU microseconds inside vkQueueSubmit + vkWaitForFences.
+    return hvk_stat_wait_us()
+
+
+def vk_linux_gpu_ns() -> uint64:
+    # The DEVICE's own clock across the last submitted command buffer, from a
+    # TOP_OF_PIPE timestamp to a BOTTOM_OF_PIPE one. 0 means this device has no
+    # usable timestamp query -- NEVER "the frame took no time".
+    return hvk_stat_gpu_ns()
+
+
+def vk_linux_arena_device_local() -> int32:
+    # 1 iff the source arena (the buffer the shader reads glyph coverage and
+    # blit pixels out of) is device-local. 0 on a discrete GPU means every one
+    # of those reads crosses PCIe.
+    return hvk_arena_is_device_local()
 
 
 def vk_linux_pending_ops() -> int32:

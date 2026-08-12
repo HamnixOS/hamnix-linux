@@ -41,6 +41,8 @@ from lib.vk.vk_linux import (
     vk_linux_last_submit_us, vk_linux_dispatches, vk_linux_barriers,
     vk_linux_batched_ops, vk_linux_ops, vk_linux_staged_words,
     vk_linux_cov_reuse,
+    vk_linux_record_us, vk_linux_wait_us, vk_linux_gpu_ns,
+    vk_linux_arena_device_local,
 )
 
 SCENE_W: uint64 = 96
@@ -337,6 +339,9 @@ def _bench_pair(with_text: int32, gbase: uint64, label: Ptr[uint8]) -> int32:
     emit_mode = EMIT_GPU
     emit_base = gbase
     gpu_best: uint64 = 0xFFFFFFFFFFFFFFFF
+    best_rec: uint64 = 0
+    best_wait: uint64 = 0
+    best_gpu_ns: uint64 = 0
     # Snapshot the running counters so what gets printed is PER FRAME. These
     # are the only numbers in this gate that mean the same thing on llvmpipe
     # and on silicon -- an op is an op and a dispatch is a dispatch -- so they
@@ -364,6 +369,12 @@ def _bench_pair(with_text: int32, gbase: uint64, label: Ptr[uint8]) -> int32:
             return -1
         if dt < gpu_best:
             gpu_best = dt
+            # ...and the SPLIT of that same fastest frame, so record/wait/gpu
+            # and GPU_US always describe one identical submit rather than three
+            # different ones averaged into a story.
+            best_rec = vk_linux_record_us()
+            best_wait = vk_linux_wait_us()
+            best_gpu_ns = vk_linux_gpu_ns()
         it = it + 1
     nops: uint64 = (vk_linux_ops() - ops0) / 20
     ndisp: uint64 = (vk_linux_dispatches() - disp0) / 20
@@ -409,6 +420,18 @@ def _bench_pair(with_text: int32, gbase: uint64, label: Ptr[uint8]) -> int32:
     _o_dec(nstaged)
     _o_str(cast[Ptr[uint8]](" cov_reuse "))
     _o_dec(nreuse)
+    # The three-way split of the SAME fastest frame. record_us is our own CPU
+    # building the command buffer; wait_us is the CPU blocked on the fence;
+    # gpu_us is the device's OWN clock across the command buffer. gpu_us 0
+    # means this device reports no usable timestamp, not a free frame.
+    _o_str(cast[Ptr[uint8]](" record_us "))
+    _o_dec(best_rec)
+    _o_str(cast[Ptr[uint8]](" wait_us "))
+    _o_dec(best_wait)
+    _o_str(cast[Ptr[uint8]](" gpu_us "))
+    _o_dec(best_gpu_ns / 1000)
+    _o_str(cast[Ptr[uint8]](" arena_devlocal "))
+    _o_dec(cast[uint64](vk_linux_arena_device_local()))
     _o_ch(10)
     _o_flush()
     return 0
