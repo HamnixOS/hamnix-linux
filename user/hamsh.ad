@@ -14421,63 +14421,118 @@ def svc_stop(idx: int32) -> int32:
 # the declarative /etc/services.d/<name>.svc file so the choice
 # survives a reboot when the root is writable (a no-op on a read-only
 # cpio root — the in-memory flag still takes effect this session).
+#
+# THIS WAS NOT A READ BUG, IT WAS A DATA-LOSS BUG, and the difference is
+# the whole reason this function is the way it is now. It read the file
+# through `svc_def_buf` (`Array[4096]`, overflow path a bare `break`) and
+# then `sys_open_write`'d THE SAME PATH — which truncates — and re-emitted
+# the file FROM THAT BUFFER. So `svc enable <name>` on a definition longer
+# than 4096 bytes did not merely mis-read it: it DESTROYED everything past
+# byte 4096 on disk. Measured, on a 5088-byte definition, before the fix:
+#
+#     size before=5088 after=4098   (lost 990 bytes)
+#     tail marker still present: 0
+#     uid: line still present:   0
+#     last line: `# doc line 0040 yyyyyyyyyyyyyyyyyyyyyyyyybenabled: yes`
+#
+# — the cut landed mid-line, so the appended flag was glued onto the tail
+# of a COMMENT, where the parser (which stops a line at the first '#')
+# cannot see it. `svc enable` therefore destroyed 990 bytes of the file AND
+# did not persist the enable it was destroying them for. Both silently:
+# nothing was printed, and the exit status was 0.
+#
+# The read is now `_script_load` — the whole file, at any size, or nothing
+# at all. If it cannot be had whole, the rewrite is REFUSED and said out
+# loud, because a truncating write is a far worse answer than an unpersisted
+# flag. There is no `rename(2)` in either runtime, so the truncate-and-write
+# window cannot be made atomic here; what is fixed is that the bytes written
+# back are the bytes that were there.
+#
+# The stale `enabled:` line is also replaced IN PLACE rather than dropped
+# and re-appended, and a file with no trailing newline gets one, so the
+# rewrite can no longer weld the flag onto another line.
 
 def _svc_persist_enabled(idx: int32):
-    # Best-effort rewrite of /etc/services.d/<name>.svc with the
-    # current svc_enabled flag stamped into an `enabled:` line. We
-    # re-read the existing file, drop any existing enabled: line, and
-    # append the new one. Silent on any failure (read-only root, etc.).
     if idx < 0:
         return
     u: uint64 = cast[uint64](idx)
     path_buf: Array[128, uint8]
     _svc_path_compose(_svc_name_at(u), "/etc/services.d/", ".svc",
                       &path_buf[0], 128)
-    total: int64 = _svc_read_def_file(cast[Ptr[char]](&path_buf[0]))
-    if total < 0:
-        # Not a .svc-managed service (e.g. legacy /etc/svc/*.hamsh) —
-        # nothing to persist. The in-memory flag still applies.
+    base: Ptr[uint8] = _script_load(cast[Ptr[char]](&path_buf[0]), 2)
+    if cast[uint64](base) == 0:
+        if sl_err == 2:
+            # We could not hold the file. DO NOT OPEN IT FOR WRITING.
+            write_cstr1("hamsh: svc: ")
+            write_cstr1(&path_buf[0])
+            write_cstr1(": cannot be read whole (")
+            write_cstr1(render_int(cast[int64](sl_len)))
+            write_cstr1(" byte(s) read), so it was NOT rewritten.\n")
+            write_cstr1("hamsh: svc: the enabled flag applies this session only -- rewriting\n")
+            write_cstr1("hamsh: svc: from a partial read would have deleted the rest of the file.\n")
+        # Otherwise: not a .svc-managed service (e.g. legacy
+        # /etc/svc/*.hamsh) — nothing to persist. The in-memory flag
+        # still applies.
         return
+    n: uint64 = sl_len
     wfd: int32 = sys_open_write(cast[Ptr[char]](&path_buf[0]))
     if wfd < 0:
+        _script_release(base, 2)
         return
-    # Re-emit every line except a prior `enabled:` line.
+    # Re-emit every line, substituting the fresh value into the FIRST
+    # `enabled:` line; append one only if the file had none.
+    wrote_flag: int32 = 0
+    last_nl: int32 = 1                 # did the emitted text end in '\n'?
     p: uint64 = 0
-    n: uint64 = cast[uint64](total)
     while p < n:
         e: uint64 = p
-        while e < n and svc_def_buf[e] != 10:
+        while e < n and base[e] != 10:
             e = e + 1
-        # Detect a leading `enabled` key (skip leading whitespace).
+        # Detect a leading `enabled` key (skip leading whitespace, then
+        # compare the key token up to ':' — comparing the whole slice
+        # would be defeated by the value part).
         s: uint64 = p
-        while s < e and (svc_def_buf[s] == 32 or svc_def_buf[s] == 9):
+        while s < e and (base[s] == 32 or base[s] == 9):
             s = s + 1
-        is_enabled_line: int32 = _svc_key_eq(&svc_def_buf[0], s, e, "enabled")
-        # _svc_key_eq compares the whole slice; the value part defeats
-        # it, so instead check just the key token up to ':'.
         col: int64 = -1
         cs: uint64 = s
         while cs < e:
-            if svc_def_buf[cs] == 58:        # ':'
+            if base[cs] == 58:               # ':'
                 col = cast[int64](cs)
                 break
             cs = cs + 1
-        is_enabled_line = 0
+        is_enabled_line: int32 = 0
         if col >= 0:
-            is_enabled_line = _svc_key_eq(&svc_def_buf[0], s,
-                                          cast[uint64](col), "enabled")
-        if is_enabled_line == 0:
-            sys_write(wfd, &svc_def_buf[p], e - p + 1)   # incl newline
-        if e < n:
-            p = e + 1
+            is_enabled_line = _svc_key_eq(base, s, cast[uint64](col),
+                                          "enabled")
+        if is_enabled_line != 0 and wrote_flag == 0:
+            if svc_enabled[u] != 0:
+                sys_write(wfd, "enabled: yes\n", 13)
+            else:
+                sys_write(wfd, "enabled: no\n", 12)
+            wrote_flag = 1
+            last_nl = 1
+        elif is_enabled_line == 0:
+            # `e` is the newline, or n when the last line has none. Write
+            # the newline only when there IS one — `e - p + 1` used to run
+            # one byte past the buffer on a file with no final newline.
+            if e < n:
+                sys_write(wfd, &base[p], e - p + 1)
+                last_nl = 1
+            else:
+                sys_write(wfd, &base[p], e - p)
+                last_nl = 0
+        p = e + 1
+    if wrote_flag == 0:
+        # No `enabled:` line in the file: append one, on a line of its own.
+        if last_nl == 0:
+            sys_write(wfd, "\n", 1)
+        if svc_enabled[u] != 0:
+            sys_write(wfd, "enabled: yes\n", 13)
         else:
-            p = e
-    # Append the fresh enabled line.
-    if svc_enabled[u] != 0:
-        sys_write(wfd, "enabled: yes\n", 13)
-    else:
-        sys_write(wfd, "enabled: no\n", 12)
+            sys_write(wfd, "enabled: no\n", 12)
     sys_close(wfd)
+    _script_release(base, 2)
 
 
 def svc_enable(idx: int32, on: int32) -> int32:
@@ -14884,11 +14939,11 @@ def sys_waitpid_nb(pid: int32) -> int64:
 #   - Optional keys: restart (always|on-failure|never), backoff_ms,
 #     backoff_max_ms, description.
 
-# Read buffer for the def file. 4 KiB is well above the brief's
-# example (~7 short lines); if a file overflows, the parser truncates
-# it and svc_def_load errs out with "file too long".
-SVC_DEF_BUF_MAX:  uint64 = 4096
-svc_def_buf:      Array[4096, uint8]
+# The def file is read through _script_load (stage 2) — WHOLE, at any size,
+# or not at all. It used to have a 4 KiB buffer whose overflow path was a
+# bare `break`, with /etc/services.d/hamde.svc at 3186 bytes (78% of it),
+# and _svc_persist_enabled wrote the file back OUT of that buffer. See the
+# comment on that function: this was the data-loss one.
 
 # Per-parse scratch fields. Each entry is NUL-terminated; an empty
 # string for a required field surfaces as the validation error.
@@ -15021,8 +15076,8 @@ def _svc_apply_runlevel(buf: Ptr[uint8], lo: uint64, hi: uint64):
         svc_pf_runlevel = mask
 
 
-def _svc_parse_buf(n: uint64) -> int32:
-    # Walk svc_def_buf[0..n), one line at a time. Returns 0 on success
+def _svc_parse_buf(base: Ptr[uint8], n: uint64) -> int32:
+    # Walk base[0..n), one line at a time. Returns 0 on success
     # (required fields present), -1 on a missing-required diagnostic
     # (errstr set).
     _svc_pf_reset()
@@ -15030,14 +15085,14 @@ def _svc_parse_buf(n: uint64) -> int32:
     while p < n:
         # Find end of line.
         e: uint64 = p
-        while e < n and svc_def_buf[e] != 10:
+        while e < n and base[e] != 10:
             e = e + 1
         # Trim a trailing CR if present.
         line_hi: uint64 = e
         # Strip a leading '#' comment by treating it as line end.
         scan: uint64 = p
         while scan < e:
-            if svc_def_buf[scan] == 35:    # '#'
+            if base[scan] == 35:    # '#'
                 line_hi = scan
                 break
             scan = scan + 1
@@ -15045,7 +15100,7 @@ def _svc_parse_buf(n: uint64) -> int32:
         col: int64 = -1
         scan = p
         while scan < line_hi:
-            if svc_def_buf[scan] == 58:    # ':'
+            if base[scan] == 58:    # ':'
                 col = cast[int64](scan)
                 break
             scan = scan + 1
@@ -15054,7 +15109,6 @@ def _svc_parse_buf(n: uint64) -> int32:
             key_hi: uint64 = cast[uint64](col)
             val_lo: uint64 = cast[uint64](col) + 1
             val_hi: uint64 = line_hi
-            base: Ptr[uint8] = &svc_def_buf[0]
             if _svc_key_eq(base, key_lo, key_hi, "name") != 0:
                 _svc_trim_copy(&svc_pf_name[0], 64, base, val_lo, val_hi)
             elif _svc_key_eq(base, key_lo, key_hi, "ns") != 0:
@@ -15112,24 +15166,13 @@ def _svc_path_compose(name: Ptr[uint8], prefix: Ptr[uint8],
     out[i] = 0
 
 
-def _svc_read_def_file(path: Ptr[char]) -> int64:
-    # Read a definition file into svc_def_buf. Returns the byte count on
-    # success, -1 if the file can't be opened. The caller validates a
-    # zero-length read separately.
-    fd: int32 = sys_open(path)
-    if fd < 0:
-        return -1
-    total: uint64 = 0
-    while True:
-        n: int64 = sys_read(fd, &svc_def_buf[total],
-                            SVC_DEF_BUF_MAX - total)
-        if n <= 0:
-            break
-        total = total + cast[uint64](n)
-        if total >= SVC_DEF_BUF_MAX:
-            break
-    sys_close(fd)
-    return cast[int64](total)
+def _svc_read_def_file(path: Ptr[char]) -> Ptr[uint8]:
+    # Load a definition file WHOLE (stage 2). Returns a pointer to it with
+    # sl_len set, or 0 — with sl_err saying whether the file was absent (1)
+    # or could not be held entire (2). A partially-read definition is never
+    # returned: it would parse as a DIFFERENT service, or as one missing
+    # required keys, depending only on where the cut fell.
+    return _script_load(path, 2)
 
 
 def svc_def_load(name: Ptr[uint8]) -> int32:
@@ -15144,19 +15187,32 @@ def svc_def_load(name: Ptr[uint8]) -> int32:
     # success, -1 on not-found / parse error (errstr set).
     path_buf: Array[128, uint8]
     _svc_path_compose(name, "/etc/services.d/", ".svc", &path_buf[0], 128)
-    total: int64 = _svc_read_def_file(cast[Ptr[char]](&path_buf[0]))
-    if total < 0:
+    base: Ptr[uint8] = _svc_read_def_file(cast[Ptr[char]](&path_buf[0]))
+    if cast[uint64](base) == 0 and sl_err == 1:
         # Fall back to the legacy /etc/svc/<name>.hamsh location.
         _svc_path_compose(name, "/etc/svc/", ".hamsh", &path_buf[0], 128)
-        total = _svc_read_def_file(cast[Ptr[char]](&path_buf[0]))
-        if total < 0:
-            errstr_set("svc: no such service definition")
+        base = _svc_read_def_file(cast[Ptr[char]](&path_buf[0]))
+    if cast[uint64](base) == 0:
+        if sl_err == 2:
+            write_cstr1("hamsh: svc: ")
+            write_cstr1(&path_buf[0])
+            write_cstr1(": cannot be read whole (")
+            write_cstr1(render_int(cast[int64](sl_len)))
+            write_cstr1(" byte(s) read) -- NOT registered. A definition read in part\n")
+            write_cstr1("hamsh: svc: describes a different service than the file does.\n")
+            errstr_set("svc: definition too large to read whole")
             return -1
+        errstr_set("svc: no such service definition")
+        return -1
+    total: uint64 = sl_len
     if total == 0:
+        _script_release(base, 2)
         errstr_set("svc: empty definition file")
         return -1
-    if _svc_parse_buf(cast[uint64](total)) < 0:
+    if _svc_parse_buf(base, total) < 0:
+        _script_release(base, 2)
         return -1
+    _script_release(base, 2)
     return svc_register(&svc_pf_name[0], &svc_pf_ns[0],
                         &svc_pf_exec[0], svc_pf_restart,
                         svc_pf_backoff, svc_pf_backoff_x,
