@@ -1457,6 +1457,428 @@ sys_timerfd_settime:
     .size sys_timerfd_settime, .-sys_timerfd_settime
 
 
+/* =====================================================================
+ * The hosted lane's late arrivals, in the shape THIS kernel offers.
+ * =====================================================================
+ *
+ * NORTH_STAR.md keeps the Plan 9 vocabulary "not decoratively" because
+ * that property is what lets one userland run on either kernel. Six
+ * entry points were added to the HOSTED runtime (user/linux-syscalls.c)
+ * to fix real bugs on the Linux line and never got a native counterpart,
+ * so eight programs -- cp, hpm, insmod, modprobe, rmmod, uname, nice_hi,
+ * nice_lo -- stopped linking here. A userland that builds against only
+ * one of the two kernels has lost the thing the shape was for.
+ *
+ * These are NOT stubs-shaped-like-success. Where this kernel can do the
+ * thing, it does it (sys_chmod over wstat(5), sys_init_module over the
+ * L1 .ko loader, get/setpriority over SYS_NICE). Where it genuinely
+ * cannot, the wrapper returns -1 rather than a plausible default, and
+ * the caller's existing "I did not get an answer" arm runs -- because a
+ * gap must never answer something success-shaped instead of the truth.
+ *
+ * NOT TESTED ON THE NATIVE KERNEL. This repository has no Hamnix kernel
+ * in it and cannot boot the native target; everything below was written
+ * against the frozen reference at ~/Hamnix (arch/x86/kernel/syscall.ad,
+ * sys/src/9/port/sysfile.ad, fs/vfs.ad, mm/vma.ad) and is verified only
+ * to ASSEMBLE and LINK. Every number and every struct offset below cites
+ * the reference file it came from so the next reader can re-check it
+ * without re-deriving it.
+ */
+
+    /* --- sys_uname(buf, cap) -> int64 --------------------------------
+     * THIS KERNEL HAS NO UTSNAME. There is no syscall on the native
+     * Hamnix ABI that reports a sysname / machine / release triple --
+     * the 0..24 and 256..32x number blocks in arch/x86/kernel/syscall.ad
+     * contain nothing of the kind.
+     *
+     * So the answer is -1, not a manufactured string. user/uname.ad
+     * already has exactly this arm and says why:
+     *
+     *     # No utsname to ask: say the one thing that is certainly true
+     *     # rather than inventing a version.
+     *     sys_write(1, "Hamnix\n", 7)
+     *
+     * A wrapper here that synthesised "Hamnix x86_64 1.0" would be the
+     * fixed string uname.ad was rewritten to stop printing -- a version
+     * number invented by userland for a kernel that never reported one.
+     * The native lane therefore prints a SHORTER answer than the hosted
+     * lane, and every byte of it is true. */
+    .globl sys_uname
+    .type sys_uname, @function
+sys_uname:
+    movq    $-1, %rax
+    ret
+    .size sys_uname, .-sys_uname
+
+
+    /* --- sys_stat_mode(path) -> int32 ---------------------------------
+     * THIS KERNEL DOES NOT REPORT PER-FILE MODES, so this returns -1.
+     *
+     * It looks like SYS_STAT_P9 (261) should serve: its Dir record does
+     * carry a `mode` field at offset 21 (sys/src/9/port/sysfile.ad's
+     * _write_dir_record). But every stat hook in that file HARD-CODES
+     * it -- _stat_hook_cpio, _stat_hook_tmpfs and _stat_hook_ext4 all
+     * emit 0644 for a plain file and DMDIR|0755 for a directory, and
+     * _stat_hook_ext4 does so even though the real i_mode is sitting in
+     * the inode it just read. Reporting that 0644 as "the file's mode"
+     * would be a measurement of nothing.
+     *
+     * And it would be the ORIGINAL BUG, pointed the other way. cp's
+     * caller is
+     *
+     *     m: int32 = sys_stat_mode(src)
+     *     if m >= 0:
+     *         sys_chmod(dst, cast[uint32](m))
+     *
+     * so a confident 0644 makes `cp /bin/hamsh /n/disk/bin/hamsh` chmod
+     * the destination NON-EXECUTABLE. Native Hamnix would not notice (it
+     * enforces no exec bit -- which is precisely why the omission never
+     * showed there), but the ext4 image it just wrote is the one the
+     * Linux lane boots, and an unexecutable /bin/hamsh is the "Attempted
+     * to kill init" panic that started all of this.
+     *
+     * -1 makes cp skip the chmod: on this kernel it carries no mode
+     * because this kernel has no mode to carry. See the note in
+     * user/cp.ad. If a later Hamnix teaches the stat hooks to report the
+     * inode's real mode, this becomes the four instructions that read
+     * the u32 at Dir+21 and mask 07777. */
+    .globl sys_stat_mode
+    .type sys_stat_mode, @function
+sys_stat_mode:
+    movl    $-1, %eax
+    ret
+    .size sys_stat_mode, .-sys_stat_mode
+
+
+    /* --- sys_chmod(path, mode) -> int32 -------------------------------
+     * REAL, over Plan 9 wstat(5). chmod is not a Plan 9 primitive; the
+     * mode is one field of a Dir record handed to SYS_WSTAT (266), and
+     * sys/src/9/port/sysfile.ad::_apply_wstat routes a non-sentinel
+     * `mode` through fs/vfs.ad::vfs_chmod. That persists i_mode on ext4
+     * (ext4_read_inode / ext4_inode_set_mode / ext4_write_inode) and is
+     * a documented no-op success on tmpfs and cpio, which have no per-
+     * inode mode storage -- the same shape Linux's tmpfs has.
+     *
+     * WRITE-ONLY ON THIS KERNEL. sys_stat_mode above cannot read the
+     * result back, so nothing here can verify itself. That asymmetry is
+     * the kernel's, not this wrapper's.
+     *
+     * THE MODE FIELD IS A UNIX i_mode, INCLUDING THE TYPE BITS.
+     * vfs_chmod passes the low 16 bits STRAIGHT to ext4_inode_set_mode,
+     * which writes i_mode raw -- no type-bit preservation. The kernel's
+     * own wstat_apply_selftest proves the convention: it stamps 0x81A4
+     * (S_IFREG|0644), wstats 0x8180, and asserts the inode reads back
+     * 0x8180. Handing that path a bare 0755 would therefore write
+     * i_mode=0x01ED and turn a regular file into a type-0 inode. So we
+     * stat the path first PURELY to learn its type (the QTDIR/DMDIR bit
+     * is the one thing the stat hooks report honestly) and OR in
+     * S_IFDIR/S_IFREG. A path we cannot stat is -1, not a guess.
+     *
+     * Dir record, all fields at their "do not change" sentinel except
+     * mode (offsets from sysfile.ad::_write_dir_record / _apply_wstat):
+     *      0..1  size = reclen-2 = 47      2..3  type
+     *      4..7  dev                       8     qid.type
+     *      9..12 qid.vers                 13..20 qid.path
+     *     21..24 mode      <-- the only honoured field
+     *     25..28 atime = ~0   29..32 mtime = ~0 (WSTAT_SENTINEL_U32)
+     *     33..40 length = ~0            (WSTAT_SENTINEL_U64)
+     *     41..48 name/uid/gid/muid counted-string lengths, all 0
+     * = 49 bytes, the minimum _apply_wstat accepts. */
+    .globl sys_chmod
+    .type sys_chmod, @function
+sys_chmod:
+    pushq   %rbx
+    pushq   %r12
+    movq    %rdi, %rbx                      /* path */
+    movl    %esi, %r12d                     /* requested perm bits */
+    /* Stat for the TYPE bit only. */
+    leaq    _rt_dir_stat_buf(%rip), %rsi
+    movq    $560, %rdx                      /* kernel stage cap */
+    movq    $261, %rax                      /* SYS_STAT_P9 */
+    syscall
+    cmpq    $25, %rax                       /* need bytes 21..24 */
+    jl      .Lchmod_err
+    leaq    _rt_dir_stat_buf(%rip), %rsi
+    movl    21(%rsi), %eax                  /* Plan 9 mode */
+    movl    $0x8000, %ecx                   /* S_IFREG */
+    testl   $0x80000000, %eax               /* DMDIR */
+    jz      .Lchmod_type_done
+    movl    $0x4000, %ecx                   /* S_IFDIR */
+.Lchmod_type_done:
+    andl    $0xFFF, %r12d                   /* 07777 */
+    orl     %ecx, %r12d                     /* i_mode = type | perm */
+    /* Build the 49-byte all-sentinel Dir record. */
+    leaq    _rt_dir_wstat_buf(%rip), %rdi
+    movq    $0, 0(%rdi)
+    movq    $0, 8(%rdi)
+    movq    $0, 16(%rdi)
+    movq    $0, 24(%rdi)
+    movq    $0, 32(%rdi)
+    movq    $0, 40(%rdi)
+    movq    $0, 48(%rdi)                    /* buffer is 64 B; 48..55 spare */
+    movw    $47, 0(%rdi)                    /* size = reclen - 2 */
+    movl    %r12d, 21(%rdi)                 /* mode (honoured) */
+    movl    $0xFFFFFFFF, 25(%rdi)           /* atime sentinel */
+    movl    $0xFFFFFFFF, 29(%rdi)           /* mtime sentinel */
+    movq    $-1, 33(%rdi)                   /* length sentinel */
+    movq    %rdi, %rsi
+    movq    %rbx, %rdi
+    movq    $49, %rdx
+    movq    $266, %rax                      /* SYS_WSTAT */
+    syscall
+    popq    %r12
+    popq    %rbx
+    ret
+.Lchmod_err:
+    movl    $-1, %eax
+    popq    %r12
+    popq    %rbx
+    ret
+    .size sys_chmod, .-sys_chmod
+
+
+    /* --- sys_init_module(path, params) -> int32 -----------------------
+     * REAL, over the L1 .ko loader (SYS_INIT_MODULE = 175).
+     *
+     * The two lanes disagree about what "load a module" takes. Linux
+     * grew finit_module(2), so the hosted runtime takes a PATH and the
+     * kernel reads the descriptor. This kernel only has the older
+     * init_module(2) shape -- a0 = image pointer, a1 = size, a2 = param
+     * string (arch/x86/kernel/syscall.ad's SYS_INIT_MODULE arm, which
+     * range-checks the image with access_ok(a0, a1) and hands it to
+     * kmod_linux_load_hook_sys). The extern def has to stay identical on
+     * both lanes or the shape is gone, so the ADAPTER lives here: stat
+     * for the size, map an anonymous buffer, read the file into it, and
+     * make the call the kernel actually offers.
+     *
+     * This replaces the inline asm that user/insmod.ad and user/rmmod.ad
+     * used to carry (reloading args from -8(%rbp)/-16(%rbp), the native
+     * backend's frame layout) -- which read a frame that does not exist
+     * under the LLVM lane and handed the kernel three garbage arguments.
+     * One wrapper, one frame convention, both lanes.
+     *
+     * The buffer is mmap'd, not a .bss array: user/insmod.ad's static
+     * 1 MiB `data` would become 1 MiB of .bss in EVERY native binary
+     * (runtime.o is linked into all ~250 of them). mm/vma.ad's
+     * _vma_alloc_locked allocates the backing pages EAGERLY, so the
+     * read loop below writes present pages and no fault can occur
+     * inside the kernel's later identity-mapped read of the image.
+     *
+     * Returns the module slot id (>= 1) or -1. insmod/modprobe test
+     * `rc < 0`; the slot id is what rmmod needs (see sys_delete_module).
+     */
+    .globl sys_init_module
+    .type sys_init_module, @function
+sys_init_module:
+    pushq   %rbx
+    pushq   %r12
+    pushq   %r13
+    pushq   %r14
+    pushq   %r15
+    movq    %rdi, %r12                      /* path */
+    movq    %rsi, %r13                      /* params */
+    /* Size, from the Dir record's length field at offset 33. */
+    leaq    _rt_dir_stat_buf(%rip), %rsi
+    movq    $560, %rdx
+    movq    $261, %rax                      /* SYS_STAT_P9 */
+    syscall
+    cmpq    $41, %rax                       /* need bytes 33..40 */
+    jl      .Linitmod_err
+    leaq    _rt_dir_stat_buf(%rip), %rsi
+    movq    33(%rsi), %r14                  /* .ko size */
+    testq   %r14, %r14
+    jz      .Linitmod_err                   /* a 0-byte module is not one */
+    movq    $0x4000000, %rax                /* 64 MiB sanity ceiling */
+    cmpq    %rax, %r14
+    ja      .Linitmod_err
+    /* Anonymous RW image buffer. mm/vma.ad: VMA_PROT_READ|WRITE = 3,
+     * VMA_MAP_PRIVATE|VMA_MAP_ANONYMOUS = 0x02|0x20. */
+    xorq    %rdi, %rdi
+    movq    %r14, %rsi
+    movq    $3, %rdx
+    movq    $0x22, %r10
+    movq    $-1, %r8
+    xorq    %r9, %r9
+    movq    $302, %rax                      /* SYS_MMAP */
+    syscall
+    testq   %rax, %rax
+    js      .Linitmod_err
+    movq    %rax, %r15                      /* image base */
+    movq    %r12, %rdi
+    movq    $5, %rax                        /* SYS_OPEN */
+    syscall
+    testq   %rax, %rax
+    js      .Linitmod_unmap
+    movq    %rax, %rbx                      /* fd */
+    xorq    %r12, %r12                      /* bytes read so far */
+.Linitmod_read:
+    cmpq    %r14, %r12
+    jae     .Linitmod_close
+    movq    %rbx, %rdi
+    leaq    (%r15,%r12), %rsi
+    movq    %r14, %rdx
+    subq    %r12, %rdx
+    movq    $6, %rax                        /* SYS_READ */
+    syscall
+    testq   %rax, %rax
+    jle     .Linitmod_close                 /* EOF or error: stop short */
+    addq    %rax, %r12
+    jmp     .Linitmod_read
+.Linitmod_close:
+    movq    %rbx, %rdi
+    movq    $7, %rax                        /* SYS_CLOSE */
+    syscall
+    testq   %r12, %r12
+    jz      .Linitmod_unmap                 /* read nothing -> fail loudly */
+    movq    %r15, %rdi                      /* image */
+    movq    %r12, %rsi                      /* size ACTUALLY read */
+    movq    %r13, %rdx                      /* params */
+    movq    $175, %rax                      /* SYS_INIT_MODULE */
+    syscall
+    movq    %rax, %rbx                      /* slot id / -errno */
+    movq    %r15, %rdi
+    movq    %r14, %rsi
+    movq    $304, %rax                      /* SYS_MUNMAP */
+    syscall
+    movl    %ebx, %eax
+    jmp     .Linitmod_out
+.Linitmod_unmap:
+    movq    %r15, %rdi
+    movq    %r14, %rsi
+    movq    $304, %rax                      /* SYS_MUNMAP */
+    syscall
+.Linitmod_err:
+    movl    $-1, %eax
+.Linitmod_out:
+    popq    %r15
+    popq    %r14
+    popq    %r13
+    popq    %r12
+    popq    %rbx
+    ret
+    .size sys_init_module, .-sys_init_module
+
+
+    /* --- sys_delete_module(name, flags) -> int32 ----------------------
+     * REAL, over SYS_DELETE_MODULE (176) -- but this kernel unloads BY
+     * SLOT ID, not by name. Its own comment says so: "For L1 we ignore
+     * `name` (no /proc/modules name index yet) and treat a0 as the slot
+     * id returned by SYS_INIT_MODULE."
+     *
+     * Linux's delete_module(2) reads a0 as a STRING. Passing this kernel
+     * the pointer would have it unload whichever slot the pointer's
+     * numeric value happened to land on -- the mirror image of the bug
+     * user/rmmod.ad's header records, where the old native convention
+     * cast a slot integer to a pointer and Linux dereferenced the
+     * number 7. So we DECODE: an all-digits name is the slot, anything
+     * else is -1.
+     *
+     * `rmmod hello` therefore fails on this kernel, and rmmod prints
+     * "rmmod: cannot unload hello" -- which is the truth (there is no
+     * name index to look it up in), by name, instead of unloading some
+     * other module. `rmmod 1` works, which is the interface the native
+     * rmmod always had. */
+    .globl sys_delete_module
+    .type sys_delete_module, @function
+sys_delete_module:
+    testq   %rdi, %rdi
+    jz      .Ldelmod_err
+    cmpb    $0, (%rdi)
+    je      .Ldelmod_err                    /* empty name is not a slot */
+    xorl    %eax, %eax                      /* accumulator */
+.Ldelmod_digit:
+    movzbl  (%rdi), %edx
+    testb   %dl, %dl
+    jz      .Ldelmod_call
+    subl    $48, %edx                       /* '0' */
+    cmpl    $9, %edx
+    ja      .Ldelmod_err                    /* not a slot id */
+    imull   $10, %eax, %eax
+    addl    %edx, %eax
+    incq    %rdi
+    jmp     .Ldelmod_digit
+.Ldelmod_call:
+    movslq  %eax, %rdi                      /* slot */
+    xorq    %rsi, %rsi                      /* flags: kernel ignores them */
+    movq    $176, %rax                      /* SYS_DELETE_MODULE */
+    syscall
+    ret
+.Ldelmod_err:
+    movl    $-1, %eax
+    ret
+    .size sys_delete_module, .-sys_delete_module
+
+
+    /* --- setpriority(which, who, prio) -> int32 -----------------------
+     * --- getpriority(which, who)       -> int32 -----------------------
+     * REAL, over SYS_NICE (311). These two carry libc's names rather
+     * than sys_* because lib/hamnice.ad declares them that way (the
+     * hosted lane resolves them in libc); the pair is what makes
+     * nice_hi / nice_lo link.
+     *
+     * SYS_NICE is SELF-ONLY: "set or get the calling task's nice value",
+     * a1 == 1 -> GET, otherwise SET. It has no target argument at all.
+     * PRIO_PROCESS is 0 (lib/hamnice.ad's HN_PRIO_PROCESS) and who == 0
+     * means "me", which is the only call lib/hamnice.ad makes -- so
+     * that one maps exactly. ANY OTHER (which, who) is -1: this kernel
+     * cannot re-nice another process through this syscall, and
+     * answering 0 would be a re-nice that never happened.
+     *
+     * setpriority returns 0 on success like the POSIX call, NOT the
+     * resulting nice -- lib/hamnice.ad deliberately ignores this return
+     * and reads the level back with getpriority instead, because "the
+     * ONLY way to be sure the level took is to read it". The clamp to
+     * [-20,+19] lives in the kernel's sched_set_nice, so an out-of-range
+     * request comes back from that read-back as the clamped value and
+     * hamnice_set_or_fail reports asked-vs-got and returns 0. */
+    .globl setpriority
+    .type setpriority, @function
+setpriority:
+    testl   %edi, %edi                      /* which == PRIO_PROCESS? */
+    jnz     .Lprio_err
+    testl   %esi, %esi                      /* who == 0 (self)? */
+    jnz     .Lprio_err
+    movslq  %edx, %rdi                      /* nice */
+    xorq    %rsi, %rsi                      /* op 0 = SET */
+    movq    $311, %rax                      /* SYS_NICE */
+    syscall
+    xorl    %eax, %eax
+    ret
+.Lprio_err:
+    movl    $-1, %eax
+    ret
+    .size setpriority, .-setpriority
+
+    .globl getpriority
+    .type getpriority, @function
+getpriority:
+    testl   %edi, %edi
+    jnz     .Lprio_err
+    testl   %esi, %esi
+    jnz     .Lprio_err
+    xorq    %rdi, %rdi                      /* ignored by the GET arm */
+    movq    $1, %rsi                        /* op 1 = GET */
+    movq    $311, %rax                      /* SYS_NICE */
+    syscall
+    ret
+    .size getpriority, .-getpriority
+
+
+    /* Scratch for the two Dir-record users above. .bss, so this costs
+     * every native binary 624 bytes of address space and no file bytes.
+     * Single-threaded use only: both callers fill the buffer and make
+     * the syscall with no yield in between. 560 is the kernel's own
+     * staging cap for SYS_STAT_P9 (syscall.ad clamps nbuf to it). */
+    .section .bss
+    .align 16
+_rt_dir_stat_buf:
+    .skip 560
+_rt_dir_wstat_buf:
+    .skip 64
+
+    .section .text, "ax"
+
+
     /* --- syscall6(nr, a0, a1, a2, a3, a4, a5) -> int64 ---------------
      * Generic 6-arg syscall trampoline. SysV passes nr in %rdi, a0..a5
      * in %rsi/%rdx/%rcx/%r8/%r9/[stack]; the kernel syscall ABI wants

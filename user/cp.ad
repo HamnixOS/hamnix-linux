@@ -156,6 +156,16 @@ def copy_file(src: Ptr[char], dst: Ptr[char]) -> int32:
     # enforces the execute bit, `cp -r` of a root produced a /bin/hamsh that
     # could not be exec'd, and the installed disk panicked with "Attempted to
     # kill init" -- the file present, the right size, and unusable.
+    #
+    # ON THE NATIVE KERNEL THIS DOES NOTHING, AND THAT IS THE HONEST ANSWER.
+    # Native Hamnix has no stat hook that reports a real mode -- every one of
+    # them hard-codes 0644 for a file, including the ext4 hook, which does it
+    # holding the inode whose i_mode it just read. So user/runtime.S's
+    # sys_stat_mode returns -1 there and the `m >= 0` guard skips the chmod:
+    # this copy carries no mode because that kernel has no mode to carry.
+    # A confident 0644 would be worse than nothing -- it would chmod the
+    # destination NON-EXECUTABLE, and the ext4 image native `cp` writes is the
+    # one the Linux line boots.
     m: int32 = sys_stat_mode(src)
     if m >= 0:
         sys_chmod(dst, cast[uint32](m))

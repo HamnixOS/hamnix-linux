@@ -102,8 +102,12 @@ def px(x, y):
     b, g, r = raw[o], raw[o+1], raw[o+2]      # /dev/fb is XRGB8888
     return r, g, b
 
-# hamimgscene's window is 640x480 at the compositor's default (120,90), and it
-# is undecorated, so window (wx,wy) is screen (120+wx, 90+wy).
+# hamimgscene's window is 320x260 at (120,90) -- the size IT states with a
+# `geometry` verb, which is exactly the rectangle it paints. It used to state
+# nothing and take the compositor's 640x480 default, so everything outside
+# 320x260 reached the screen as unpainted black; tests/linux/wsys_cover.sh is
+# the gate on that. It is undecorated, so window (wx,wy) is screen
+# (120+wx, 90+wy) either way and every check below is unchanged.
 OX, OY = 120, 90
 def near(p, r, g, b, tol=60):
     return abs(p[0]-r) <= tol and abs(p[1]-g) <= tol and abs(p[2]-b) <= tol
