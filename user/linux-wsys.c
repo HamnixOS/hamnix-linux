@@ -833,8 +833,29 @@ static char chrome_path[576];
  * ring — and the same is true of the THIRD mapping, /srv/wsys.bb, which holds
  * the v2 backbuffers and is 0666 for exactly the same reason: a client of any
  * uid has to blit its own pixels into it.  tests/linux/wsys_bypass.sh now
- * drives ALL THREE of those attacks as measurements, each read back through
+ * drives ALL FOUR of those attacks as measurements, each read back through
  * the protocol, not just the retitle.
+ *
+ * AND THE FOURTH IS READ-ONLY, which is the finding that decides the shape of
+ * any fix.  The first three are INTEGRITY and every one of them needs
+ * PROT_WRITE — which is why the 0644 chrome segment stops them dead.  The
+ * fourth is CONFIDENTIALITY and needs nothing but O_RDONLY:
+ *
+ *     KEYLOG     the bytes between another window's `keys` ring r and w are
+ *                that window's keystrokes.  wsys_bypass.sh's `snoop` reads a
+ *                uid-1001 victim's typing out of a uid-1001 attacker, WITHOUT
+ *                moving r or w, so the victim receives every keystroke normally
+ *                and has no way to notice.  Measured, not argued.
+ *     SCRAPE     another window's committed `scene` is what is drawn inside it.
+ *     ENUMERATE  every row's wid, pid, geometry and title.
+ *
+ * And the table HAS to stay world-readable: /dev/wsys/windows is the panel
+ * taskbar's input (user/hampanelscene.ad:_refresh_windows), and a uid-1001
+ * client reads the geometry root published.  So the cheapest fix that survives
+ * a first reading of this comment — keep ONE table, drop it to 0644, put every
+ * write behind an authenticated RPC — closes attacks 1-3 and NOT ONE of these.
+ * A keylogger between two of the user's own applications is untouched by it.
+ * That is the difference between a boundary and a gate that looks shut.
  *
  * AND WHICH OF THE TWO RECORDED FIXES ACTUALLY CLOSES IT — the measurement
  * that decides it, because the answer was NOT the neutral "either would do"
@@ -862,23 +883,107 @@ static char chrome_path[576];
  *   means wsysd owning the window table in private memory and every mutation
  *   arriving as an authenticated message.
  *
- * WHY IT IS NOT DONE IN THIS PASS, and why a partial version would be worse
- * than the documented hole.  Two things make it a subsystem, not an edit:
- *   (1) the input/commit HOT PATH.  A client writes its own scene and reads
- *       its input rings thousands of times a second through shared memory with
- *       a futex wake (see `inputgen`); a round-trip to wsysd on each would put
- *       the compositor on every client's per-frame and per-keystroke path.  A
- *       sound design is a HYBRID — identity and lifecycle (create, own, title,
- *       geometry, z) authenticated through the channel; per-frame pixels and
- *       rings still in shared memory but in a region the authority hands out
- *       at create time — which is more than a mechanical move.
- *   (2) a title-only RPC is UNSOUND, which rules out the tempting small start.
- *       wsysd would authenticate "set window W's title" by comparing the
- *       sender pid to win[W].pid — but win[W].pid lives in this same 0666
- *       table and is itself spoofable, so the check is only as trustworthy as
- *       the ownership record, and moving THAT into the authority is moving the
- *       whole table.  It is all of it or none, and half of it is a gate that
- *       looks shut and is not.
+ * THE HOT PATH, MEASURED, because the hybrid's whole premise is that the split
+ * is lopsided and that was an argument until tests/linux/wsys_write_census.sh
+ * turned it into a number.  Every mutation of either segment is counted at the
+ * one choke point all of them pass through (THE WRITE CENSUS, further down this
+ * file), off a real offscreen desktop — wsysd + hamdesktop + hampanelscene:
+ *
+ *     whole session, bring-up included:  15 LIFECYCLE WRITES, TOTAL.
+ *                                        3 newwindow, 6 geometry, 5 attr,
+ *                                        1 focus.  Not per second.  Total.
+ *     idle, 10 s                         0 lifecycle    130 per-frame (13.0/s)
+ *     under a mouse, 12.6 s              1 lifecycle    435 per-frame (34.6/s)
+ *
+ * 435:1 on this desktop, and that is the FLOOR: the census sees no v2 blits at
+ * all here, and a browser or a Steam session pushes megabytes of them a second
+ * down the same path.  So an RPC on the lifecycle half is affordable by two
+ * orders of magnitude, and an idle desktop would leave the authority asleep —
+ * which on a laptop is the number that decides whether this ships at all (see
+ * tests/linux/de_idle_cpu.sh for why that sentence is not decorative here).
+ *
+ * THE BOUNDARY, field by field, so the next pass does not have to re-derive it.
+ * THREE tiers, not two, and the third is the one attack 4 forces:
+ *
+ *   TIER 1 — the public INDEX.  /srv/wsys, dropped to 0644 owned by the host
+ *     owner.  wid, owner pid, x/y/w/h, z, title, decorate/visible/pinned/
+ *     keyed/blend/wmdelete/proto, focus_wid, next_wid, desktop, gen, inputgen.
+ *     Everybody reads it — the taskbar, the compositor, /dev/wsys/self.  NOBODY
+ *     writes it but wsysd, and wsysd writes it only after SO_PEERCRED says the
+ *     sender's pid is the row's owner.  That is the answer to the unsoundness
+ *     below: the ownership record itself is in the tier the attacker cannot
+ *     write, so the check is worth something.  15 writes a session.
+ *
+ *   TIER 2 — PER-WINDOW PRIVATE memory, one memfd per window, created by wsysd
+ *     at `newwindow` and passed to the creating client over SCM_RIGHTS.  scene,
+ *     stage, the five rings, the v2 backbuffer, the named images.  A memfd has
+ *     no name in the filesystem, so there is no path for a bypasser to open:
+ *     this is the only construction that closes attack 4, because it is the
+ *     only one where a non-owner cannot MAP the bytes at all.  wsysd keeps
+ *     every fd (it composites, and it writes routed input into the rings); the
+ *     owner keeps its own.  Nothing on this tier ever touches the RPC — the
+ *     34.6/s above, and the megabytes/s a browser adds, stay exactly as fast as
+ *     they are today.
+ *
+ *   TIER 3 — /srv/wsys.chrome, 0644, unchanged.  Already correct.
+ *
+ * WHAT AN ATTACKER CAN STILL DO AFTERWARDS, named rather than left for someone
+ * to discover, because a fix whose residue is undocumented is the same failure
+ * as a hole that is:
+ *   a. ENUMERATE.  Tier 1 stays world-readable, so every window's wid, pid,
+ *      geometry and TITLE is still readable by any process on the machine.
+ *      This is not fixable while /dev/wsys/windows is the taskbar's input, and
+ *      a title is on screen anyway.  Only the keystrokes and the pixels move.
+ *   b. SPOOF ITS OWN WINDOW.  A client may set its own title to "Firefox — Sign
+ *      in" and draw a convincing login form, and it is the legitimate owner of
+ *      every byte it needs to do so.  No ownership check can reach this; only
+ *      trusted chrome the compositor draws and a client cannot (devwsys's
+ *      `decorate` is where that would live) can, and this design does not
+ *      attempt it.
+ *   c. EXHAUST.  `newwindow` is open to every uid by devwsys's own rule, so any
+ *      process can take all WSYS_MAX_WINDOWS rows and starve the desktop.  An
+ *      authority makes a per-peer quota POSSIBLE for the first time; it does
+ *      not impose one, and this design does not add it.
+ *   d. WATCH THE COMPOSITOR'S OWN SURFACES.  Anything the compositor publishes
+ *      for everyone (the wallpaper sink, a screenshot path) is still public by
+ *      construction.  "No screen scraping" is NOT what tier 2 buys; "no reading
+ *      another client's window" is.
+ *
+ * WHY IT IS STILL NOT BUILT IN THIS PASS.  Not the hot path — that turned out
+ * to be affordable, and this comment used to say otherwise on no evidence.  The
+ * blockers are the ones the measurement exposed rather than removed:
+ *   (1) TIER 2 IS AN ATTACH REWRITE, NOT A MOVE.  Today every process mmaps one
+ *       named file and is done; afterwards it must connect to a daemon and be
+ *       HANDED its window before it can draw a pixel.  Twenty test scripts in
+ *       tests/linux set $HAMWSYS and TWO of them never run a compositor at
+ *       all — and the two are wsys_uidgate.sh and wsys_bypass.sh, the gates on
+ *       this very boundary, which prove what they prove precisely by driving a
+ *       client with nothing else alive.  They need an answer that is not "start
+ *       a daemon first", and so does every single-program `hamlinux_build.sh`
+ *       run a person does by hand.
+ *   (2) A NEW ROOT DAEMON is a new binary, and NORTH_STAR.md's standing
+ *       invariant makes that a package-channel change (scripts/hamlinux_packages.py
+ *       plus tests/linux/channel_covers_image.sh), not a file.
+ *   (3) THE SEGMENT LAYOUT CHANGE CANNOT USE THE APPEND-AND-FREEZE RULE this
+ *       file has used for every previous version bump.  Tier 2 REMOVES scene,
+ *       stage and the rings from struct wwin, so the prefix is not frozen and
+ *       static assertions cannot save it.  And the version counter's own
+ *       remedy — re-initialise — is actively dangerous here: an OLD binary
+ *       arriving in a NEW session (which a package channel makes ordinary, and
+ *       which is exactly what `hpm update` of half the desktop looks like)
+ *       would map the new table, read a version it does not know, and MEMSET
+ *       THE RUNNING SESSION'S WINDOW TABLE.  So tier 1 has to live at a NEW
+ *       PATH — /srv/wsys2 — and an old binary must find /srv/wsys absent and
+ *       fail loudly by name.  That is a decision about the whole distribution,
+ *       not about this file.
+ *
+ *   And the one that has not changed: A TITLE-ONLY RPC IS UNSOUND, which rules
+ *   out the tempting small start.  wsysd would authenticate "set window W's
+ *   title" by comparing the sender pid to win[W].pid — but win[W].pid lives in
+ *   this same 0666 table and is itself spoofable, so the check is only as
+ *   trustworthy as the ownership record.  Moving THAT into the authority is
+ *   moving tier 1, and tier 1 without tier 2 leaves the keylogger.  It is all
+ *   of it or none, and half of it is a gate that looks shut and is not.
  *
  * So this pass lands the measurement and this design and does NOT half-build
  * the access control.  What IS closed, and by the kernel rather than by an if,
