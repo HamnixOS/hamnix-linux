@@ -181,12 +181,37 @@ echo "cap_ab: reports a KNOWN one correctly."
 SECS=5 REPS=3 "$ROOT/tests/linux/cpuprobe.sh" --selftest 2>&1 | sed 's/^/cap_ab:   /'
 
 ARM_OK=0
-run_arm capON  ""                        ; A=$ARM_OK
-run_arm capOFF "HAMNIX_WSYSD_NOCAP=1"    ; B=$ARM_OK
+# The third arm, cap30, is not decoration. If the compositor's cost were the
+# PAINT, halving the paint again (60 Hz -> 30 Hz) would roughly halve what is
+# left. If the cost is the WAKE -- which runs at ~860/s regardless of the cap
+# -- then cap30 costs almost exactly what cap60 costs, and that is the whole
+# finding stated as a prediction that can fail.
+ARMS="${ARMS:-capON capOFF cap30}"
+A=0; B=0; C=0; C_RAN=0
+for a in $ARMS; do
+    case "$a" in
+        capON)  run_arm capON  ""                              ; A=$ARM_OK ;;
+        capOFF) run_arm capOFF "HAMNIX_WSYSD_NOCAP=1"          ; B=$ARM_OK ;;
+        cap30)  run_arm cap30  "HAMNIX_WSYSD_CAP_US=33333"     ; C=$ARM_OK; C_RAN=1 ;;
+    esac
+done
 echo
-echo "cap_ab: arms that genuinely armed scanout: capON=$A capOFF=$B"
-[ "$A" = 1 ] && [ "$B" = 1 ] || {
-    echo "cap_ab: the comparison is STILL OWED -- an arm did not run on the display path."
-    exit 1; }
+echo "cap_ab: arms that genuinely armed scanout: capON=$A capOFF=$B$([ "$C_RAN" = 1 ] && echo " cap30=$C")"
+# Demand that every arm ACTUALLY ASKED FOR armed scanout -- not a fixed pair.
+# ARMS=cap30 alone is a legitimate single-arm run, and reporting "the
+# comparison is still owed" for it would be a false alarm of exactly the kind
+# this file exists to avoid.
+bad=0
+for a in $ARMS; do
+    case "$a" in
+        capON)  [ "$A" = 1 ] || bad=1 ;;
+        capOFF) [ "$B" = 1 ] || bad=1 ;;
+        cap30)  [ "$C" = 1 ] || bad=1 ;;
+    esac
+done
+if [ "$bad" = 1 ]; then
+    echo "cap_ab: the comparison is STILL OWED -- a requested arm did not run on the display path."
+    exit 1
+fi
 wait_master_free >/dev/null 2>&1 || true
 echo "cap_ab: done; master released."
