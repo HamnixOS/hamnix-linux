@@ -81,8 +81,7 @@ baseline:
 The idle burn was the same defect: an idle desktop still presents, and every
 present was 67 ms of uncached reads. It was never a busy-wait.
 
-**Still slower than software: drag, 39.5 vs 52 fps.** Not investigated. Flagged,
-not explained.
+**Still slower than software: drag, 39.5 vs 53.2 fps.** Explained in §3a.
 
 The software path was re-run in the same session to confirm it did not move:
 `tests/linux/de_fps_latency.sh` gives 61.2 fps pointer, 53.2 fps drag, p50
@@ -100,6 +99,55 @@ does not make it faster, and it cannot: at parity the frame is dominated by
 work both paths do identically.
 
 ---
+
+## 3a. Why drag is still slower: the shader now rasterizes across PCIe
+
+`wsysd -bench` composites with **no windows** — `paint_window()` never runs, so
+the vk router (armed inside it for the full-screen backdrop) is never armed and
+the device rasterizes nothing. A drag is the opposite: a full repaint of a real
+window set every frame. The measurement that could explain the drag gap was
+exactly the one `-bench` cannot make, which is why it went unexplained.
+
+`HAMNIX_WSYSD_BENCH_LIVE=N` turns the same per-phase counters on in the live
+loop. Real desktop, 4 windows, a window dragging, 1280x800, **us per full
+frame**:
+
+| | scene | rast | submit | copy | cursor | present |
+|---|---|---|---|---|---|---|
+| software | 730 | 6600 | — | 540 | 7 | 850 |
+| GPU, host-cached | 900 | 7500 | **6300** | 650 | 8 | 950 |
+| GPU, device-local | 230 | 2370 | **2095** | 290 | 210 | **157000** |
+
+Read the `submit` column. The same shader, the same ops, the same frame:
+**2.1 ms into device-local VRAM, 6.3 ms into host memory.** The GPU is 3x
+faster than the CPU at rasterizing a desktop frame (2.1 ms vs 6.6 ms) — but
+only when the target is device-local. Put the frame in host memory and the
+shader reaches it across PCIe on every op, and the device ends up costing what
+the CPU costs.
+
+**So the drag gap is the other half of the placement fix.** It moved the PCIe
+crossing off the CPU's read and onto the GPU's write. For pointer frames and
+latency that is a huge win, because those barely rasterize. For a full-frame
+repaint the GPU's write is as expensive as the CPU's entire rasterize, and the
+advantage cancels. There is no placement good for both: device-local costs
+157 ms of present, host-cached costs 4.3 ms of extra rasterize.
+
+This is the strongest argument for scanout, because scanout is the only
+configuration where **both** terms are cheap: device-local rasterize (2.1 ms)
+*and* no present at all. On these numbers a scanout drag frame would be about
+`230 + 2370 + 290 + 210 = 3.1 ms` against software's 8.7 ms — roughly **2.9x**,
+not 50x, because scene reading, window copy and the cursor are CPU work that
+scanout does not touch. **That is the honest ceiling for a real desktop frame**,
+as against the 12,870 fps delivery-cost ceiling in §3.
+
+**What this does not explain.** The instrumented phases sum to 8.7 ms
+(software) vs 10.0 ms (GPU) — 15%. The measured rates differ by 35%. So about
+half the gap is *outside* `paint_frame()`. Unmeasured candidates:
+`scan_windows()`, `pump_input()`, `publish_state()`, `report_uncovered()`, and
+the interaction between a longer frame and the fixed `sys_waitfds(…, 0, 16)`
+tick. Also unexplained: `scene` and `copy` are *faster* on the device-local arm
+(230/290) than the host-cached arm (900/650), and both are pure CPU work on
+memory that is not the frame.
 
 ## 3. The ceiling, measured rather than scoped
 
@@ -164,7 +212,36 @@ is entirely on the Hamnix side.
 `VK_KHR_external_memory`, `VK_KHR_external_memory_fd` and
 `VK_EXT_external_memory_dma_buf` when advertised.
 
-**`user/linux-fb.c`** — the work. It currently owns the display: it creates
+### Status: what is built, and what is deliberately NOT
+
+**Built and committed on this branch:**
+- `hvk_frame_create_scanout()` / `hvk_can_export_dmabuf()` /
+  `hvk_frame_is_scanout()`, and the device is created with the three export
+  extensions when advertised.
+- `hamfb_attach_scanout(fd, w, h, pitch)` in `user/linux-fb.c` — import,
+  `ADDFB2`, modeset — with `hamfb_write()` returning `EOPNOTSUPP` once
+  attached. `linux-fb.c` is part of every binary's runtime, so **no fd has to
+  cross a process boundary** and `/dev/fbctl` needs no new verb after all.
+  That resolves the open question in the previous revision of this document.
+
+**Deliberately not built: the compositor rewrite, and wsysd does not arm any
+of this.** `comp_base` would become 0, and five sites write the composite from
+the CPU by construction: `fill_rect` (via `clear_desktop`), `put_px` (via
+`paint_cursor`), `blit_window_image_mode`, `cursor_save_under` /
+`cursor_restore_under`, and the software fallback in `paint_window` when
+`vk_route_end()` fails. Each has a device equivalent already present in the
+backend (`hvk_fill_rect`, `hvk_blit`), and the cursor save-under would simply
+be dropped in favour of always-full frames — at 3.1 ms a frame that is
+affordable.
+
+I stopped short of it on purpose. A half-converted compositor holds DRM master
+while dereferencing a NULL `comp_base`, on a machine whose console is the same
+device and whose only proven recovery is process death, with the owner sitting
+at that console. The remaining work is mechanical but must be done and tested
+as one piece, not left partially armed. Nothing in this branch takes master
+unless a test binary is run explicitly.
+
+**`user/linux-fb.c`** — the remaining display-side work. It currently owns the display: it creates
 *dumb buffers* (`drm_make_buf`: `CREATE_DUMB` → `ADDFB` → `MAP_DUMB`), sets the
 mode, and page-flips between two of them, with `/dev/fb` writes landing in the
 mapped back buffer. What changes, by function:
@@ -258,6 +335,31 @@ on shipping a scanout compositor, not a footnote.
 **Not persisted deliberately:** `nvidia-drm.modeset=1` was set by a module
 reload, not by `/etc/modprobe.d` or the kernel cmdline, so a reboot restores
 `modeset=N`. That reboot is the rollback; keep it working.
+
+### Would atomic modesetting avoid the hangs? Undetermined.
+
+Atomic is **available** — `tests/linux/atomiccap.c`, capability probe only, no
+master taken and no commit performed:
+
+```
+  UNIVERSAL_PLANES       -> ACCEPTED
+  ATOMIC                 -> ACCEPTED
+  ASPECT_RATIO           -> ACCEPTED
+  WRITEBACK_CONN         -> ACCEPTED
+  DRM_CAP_PRIME          -> 0x1 (import; Vulkan does the export)
+  ASYNC_PAGE_FLIP        -> 256
+```
+
+So the atomic path is on the table on this driver, and universal planes means
+the cursor could become a real plane rather than composited pixels.
+
+**Whether atomic avoids either hang is UNDETERMINED.** Establishing it requires
+a real atomic commit — building a property blob for the mode, setting
+CRTC/connector/plane properties, committing, and then testing whether an atomic
+disable-commit and `DROP_MASTER` return. I did not do that, and I am not
+willing to infer it from the capability bit: "the driver accepts the client
+cap" and "the driver's atomic teardown does not hang" are different claims, and
+this project has been bitten by exactly that kind of substitution before.
 
 ---
 
