@@ -4698,6 +4698,121 @@ start a nested Xwayland on a private display (`:71`–`:74`, `:82`–`:87`), and
 `wsyswl_shared_fate` and `wsyswl_stall` want the real one. Skipping the whole
 prefix on the strength of the name costs five working gates.
 
+#### THE THIRD SWEEP — the offscreen gates at `fee1912f`, and two classifier errors
+
+An offscreen-only sweep ran at the tip to cover the five product commits of
+2026-08-13. Logs live under `/home/david/.hamnix-build/regress-tip-af16/`, not
+in this tree. Its classification was re-derived from scratch rather than taken
+from the inventory above, and **the inventory was wrong in both directions**.
+
+**THE `/dev/dri` KEY MISSES THE THREE MOST DANGEROUS GATES.** The inventory
+records that the previous sweep's classifier keyed on `qemu` and missed 39 gates
+reaching a VM through `hamlinux_image.sh`. There is a *second* miss of the same
+shape on the display side, and it is worse: `scanout_desktop.sh`,
+`scanout_try.sh` and `cap_power_ab.sh` name `/dev/dri` **zero times**. They take
+the card through
+
+```
+export HAMNIX_WSYSD_SCANOUT=1 HAMNIX_WSYSD_SCANOUT_SUPERVISED=1
+unset HAMFB_FILE           # a real display, not a file
+```
+
+so a `/dev/dri`-keyed classifier calls all three offscreen — which is how two of
+them got run by accident and one fired a 45-second watchdog. **Classify on
+`HAMNIX_WSYSD_SCANOUT|unset HAMFB_FILE|kms_watchdog\.sh|hangmaster` as well.**
+The grep is known to work: other gates *do* name `/dev/dri` and are found by it.
+Note `scanout_refuse.sh` sets `HAMNIX_WSYSD_SCANOUT=1` **without** the
+supervision flag and keeps `HAMFB_FILE` — it is the negative control, and it is
+safe: its whole assertion is that scanout refuses.
+
+**TWO GATES ARE MARKED VM-NEEDING THAT NEVER BOOT ONE.** `gates_are_private.sh`
+matches only because line 62 *greps for the string* `qemu-system`;
+`channel_covers_image.sh` only does `[ -d "$IMG" ]` and prints a message naming
+`hamlinux_image.sh`. Follow a reference **only from an exec or source position on
+a non-comment line** — the naive closure otherwise reaches 459 files, because
+`scripts/` cross-references itself in prose.
+
+**THERE ARE SIX HELPERS, NOT FOUR.** Besides `reap.sh`, `private_ns.sh`,
+`hamnix_x11session.sh` and `cpuprobe.sh`, two more take arguments and are not
+gates: `kms_watchdog.sh` (`usage: kms_watchdog.sh <seconds> <cmd> [args...]`,
+exits 2) and `runsweep_jail.sh` (`$1: unbound variable` at line 85 — it is *the
+inside of one smoke test*, run by `scripts/hamlinux_runsweep.sh` with four
+positional arguments plus a program). The inventory lists `runsweep_jail` as
+display-blocked; it is not, its `/dev/dri` mentions are comments describing what
+is **absent** inside the jail, and it runs on `HAMFB_FILE`. A runner that globs
+`*.sh` scores both as failures.
+
+**THE TWO CHANNEL GATES ARE A PREREQUISITE, NOT A RESULT.** A fresh worktree has
+no `build/repo/linux`, so `channel_compiles_adder.sh` and
+`channel_runs_desktop.sh` both exit 1 with `no channel at build/repo/linux`
+before asserting anything. These two enforce the owner's standing rule that
+everything built here reaches the package repository, so that red must never be
+left as the answer. `python3 scripts/hamlinux_packages.py --out build/repo
+--channel linux` stages it in one step and builds **no VM** — every
+`hamlinux_image.sh` in that file is a comment or a path it *parses*, and it has
+no `--sign` and no upload. With the channel staged (126 packages) both are green:
+**8/0** and **10/0**.
+
+#### THE THIRD SWEEP'S RESULT — 80 offscreen gates at `fee1912f`, and NO new red
+
+**74 green, 6 red, and not one of the six is a regression from this week's five
+product commits.** Every red was run at a control export of `ad2dd409` — the
+first parent of `ee62e0fc`, which is the earliest of the five merges, so it
+predates all of them — rather than assumed. Where the 141 scripts went:
+
+```
+tests/linux/*.sh                                       141
+  helpers, not gates                                     6
+  need a VM (left to the serial VM lane)                37
+  display-blocked                                       15
+  never run: take DRM master on the owner's live card    3
+  ATTEMPTED OFFSCREEN                                   80
+    green (exit status 0)                               74
+    red                                                  6
+```
+
+**THE SIX REDS, ALL PRE-EXISTING OR PREREQUISITE:**
+
+* **`wsys_srv_mutate` — FLAKY AT BOTH ENDS WHEN THIS SWEEP RAN, and it nearly
+  went in as a false
+  regression.** First sample: red at the tip (6/1, *"the server did not see the
+  routed write at all"*), green at the control (7/0). That pairing is exactly
+  what a new regression looks like. It is not one. A second sample at each end
+  gave **red at the tip on a DIFFERENT assertion** (*"the routed arm painted
+  FEWER full frames, 547 vs 550"* — a frame-rate comparison) and **red at the
+  control on the FIRST assertion**. Four samples, three different outcomes, and
+  the routed-write failure appears at both commits. **One sample per end would
+  have named an innocent commit.**
+* **`wsys_srv_transport` — pre-existing, and the tip is BETTER than the control**:
+  16 passed / 1 failed at `fee1912f` against **15 passed / 2 failed** at
+  `ad2dd409`. Both failing assertions are latency/CPU budgets (`934 us` and
+  `1806 us` at p50, `1.8462 us` per routed message). The socket-name arm HANDOFF
+  records as fixed is green.
+* **`wsyswl_two_browsers` — 12 PASS / 11 FAIL at BOTH ends**, every failure
+  naming `firefox-esr` and `0 connections`. The standing fact above is confirmed
+  at this tip: it is the host, not the tree.
+* **`input_probe` — red at both ends with byte-identical output.** Confirms the
+  standing fact; read the exit status, not the `ALL PASS`.
+* **`gates_are_private` — red at both ends, but it IMPROVED ENORMOUSLY: 2/17 at
+  the control, 2/1 at the tip.** The three offenders the second sweep named are
+  fixed. The one remaining was `wsys_srv_ceiling.sh`, added by `44412d29` and
+  reaching the tip through `1fd21377`, the connection-ceiling merge, with no
+  `priv_ns_reexec`. **THAT IS NOW FIXED TOO, at `727d88ab`** — isolation added
+  and the gate re-run to confirm it still scores 12 passed / 0 failed both ways,
+  and `gates_are_private` verified back at **3 passed / 0 failed** over 63
+  host-side gates. It is recorded here because of how it got in: **a gate added
+  alongside a fix is not covered by the guards, since nothing re-runs them after
+  a merge.** Run `gates_are_private.sh` after merging anything that adds a gate.
+* **`channel_covers_image` — NO VERDICT, prerequisite.** It needs
+  `build/image/root`, which only `hamlinux_image.sh` makes, and this sweep was
+  forbidden to build one.
+
+**THE PERFORMANCE NUMBERS ABOVE ARE VERDICTS, NOT MEASUREMENTS.** The host ran
+at loadavg **2.4–5.0** for the whole sweep with another agent booting VMs. Every
+latency and frame-count figure quoted here is **NOT ATTRIBUTABLE**; only the
+pass/fail sense of them is being reported. `wsys_srv_mutate`'s second failure
+was itself a 0.5% frame-count difference on that host.
+
 #### Four standing facts about gates — none new, none previously written down
 
 * **`input_probe.sh` prints `ALL PASS` two lines above its own `FAIL`.**
