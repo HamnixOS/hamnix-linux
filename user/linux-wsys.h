@@ -157,6 +157,13 @@ enum {
     WSRV_CONN_MAX = 64,            /* concurrent clients the server holds    */
 
     WSRV_F_REPLY  = 1,             /* set: the caller is blocked on a reply  */
+    /* STAGE 5.  Set on the HELLO of a connection that was INHERITED rather
+     * than dialled (HAMWSYS_SRV_FD).  It costs the connection hostowner() for
+     * ever, because SO_PEERCRED still names the process that dialled: a
+     * descriptor handed down from a host-owner toolkit would otherwise carry
+     * host-owner power to whatever it was handed to.  A client can only ever
+     * declare itself adopted, so the flag can lose privilege, never gain it. */
+    WSRV_F_ADOPT  = 2,
 
     WSRV_OP_HELLO = 1,             /* blocks: version handshake              */
     WSRV_OP_NOP   = 2,             /* fire-and-forget: the mutation shape    */
@@ -251,6 +258,30 @@ int      hamwsys_srv_attack_local(int victim_wid);
  * printed, against the 851 us frame-loop tail stage 1 measured.  Exported as
  *   extern def sys_wsys_srv_readlat(n: int32) -> int32 */
 int      hamwsys_srv_readlat(int nsamples);
+
+/* STAGE 5 — HANDING THE CONNECTION TO A SPAWNED TASK.
+ *
+ * A routed mutation must now arrive on the connection that holds the window's
+ * row, so a program spawned INTO somebody else's window is refused unless the
+ * spawner hands it that connection.  Call with 1 immediately before the spawn
+ * and 0 immediately after: in between, this process's server connection is
+ * inheritable and named in HAMWSYS_SRV_FD.  Returns 0 if there is a connection
+ * to inherit, -1 if there is not (flag unset, no server, dial refused) -- in
+ * which case the child behaves exactly as it does today.
+ *
+ * AFTER any privilege drop, never before: SO_PEERCRED is sampled at connect(2)
+ * and the connection carries the dialling process's uid wherever it goes.
+ * Exported to Adder as
+ *   extern def sys_wsys_srv_handoff(on: int32) -> int32 */
+int      hamwsys_srv_handoff(int on);
+
+/* Stage 5's gate driver: hold a window's connection and spawn `self` twice --
+ * once WITHOUT the handoff and once WITH it -- so both arms of the property
+ * are measured in one process.  Returns a failure count.  Exported as
+ *   extern def sys_wsys_srv_conngate(wid: int32, selfpath: Ptr[char],
+ *                                   uidgate: Ptr[char]) -> int32 */
+int      hamwsys_srv_conngate(int wid, const char *self,
+                              const char *uidgate);
 
 /* Did THIS process get turned away by the version refusal in shm_attach?
  * Its own experience, not a file another process wrote -- see

@@ -76,6 +76,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
+#include <sys/wait.h>          /* stage 5's gate driver waits for its children */
 #include <linux/futex.h>
 #include <time.h>
 #include <unistd.h>
@@ -2524,19 +2525,41 @@ static int     sink_is_launch_queue(const char *name);            /* below */
  * dispatch, and the server is single-threaded, so the window it is set in is
  * one message long.
  */
+/* STAGE 5 ADDS TWO FIELDS, AND THEY ARE WHAT MAKES THE CAPABILITY NARROWER
+ * THAN DESCENT.  `cid` names the CONNECTION the operation arrived on -- the
+ * thing a process can only obtain by dialling the server itself or by being
+ * handed the descriptor -- and `adopted` records that this connection was
+ * inherited rather than dialled, which costs it hostowner() (see
+ * WHY AN ADOPTED CONNECTION IS NOT THE HOST OWNER, at srv_dispatch's HELLO). */
 static struct {
-    int   active;
-    uid_t uid;
-    pid_t pid;
+    int      active;
+    uid_t    uid;
+    pid_t    pid;
+    uint64_t cid;
+    int      adopted;
 } srv_caller;
 
+static void srv_as_caller_full(uid_t uid, pid_t pid, uint64_t cid, int adopted)
+{
+    srv_caller.active = 1; srv_caller.uid = uid; srv_caller.pid = pid;
+    srv_caller.cid = cid; srv_caller.adopted = adopted;
+}
 static void srv_as_caller(uid_t uid, pid_t pid)
-{ srv_caller.active = 1; srv_caller.uid = uid; srv_caller.pid = pid; }
+{ srv_as_caller_full(uid, pid, 0, 0); }
 static void srv_as_self(void)
-{ srv_caller.active = 0; }
+{ srv_caller.active = 0; srv_caller.cid = 0; srv_caller.adopted = 0; }
 
 static int hostowner(void)
 {
+    /* AN ADOPTED CONNECTION CANNOT BE THE HOST OWNER, and that is a deliberate
+     * one-way loss.  SO_PEERCRED is fixed at connect(2), so a descriptor handed
+     * down from a host-owner process carries the HOST OWNER's uid however far
+     * it travels -- and without this line a toolkit that dialled before
+     * dropping privilege would hand every spawned application the chrome verbs
+     * the whole uid gate exists to withhold.  A client can only ever declare
+     * itself adopted, never un-declare it, so the flag can lose privilege and
+     * cannot gain any. */
+    if (srv_caller.active && srv_caller.adopted) return 0;
     uid_t me = srv_caller.active ? srv_caller.uid : geteuid();
     if (me == 0) return 1;                     /* root owns the box */
     if (!seg_owner_known) return 0;            /* FAIL CLOSED */
@@ -2570,9 +2593,20 @@ static pid_t proc_ppid(pid_t pid)
     return (pid_t)strtol(p, NULL, 10);
 }
 
+/* Does the connection this operation arrived on hold window `wid`?  Defined
+ * with the server, below; declared here because owns_wid() is the one place
+ * the question is asked.  Returns 0 for an unrouted caller. */
+static int srv_caller_holds_wid(int wid);
+
 /* devwsys's _wsys_caller_owns_wid: does the caller's parent-pid chain reach
- * the wid's stamped owner?  Depth-bounded exactly as devwsys bounds it. */
-static int owns_wid(int wid)
+ * the wid's stamped owner?  Depth-bounded exactly as devwsys bounds it.
+ *
+ * THIS IS THE UNROUTED RULE AND IT IS UNCHANGED.  It is also still the rule the
+ * ENUMERATION policy asks (srd_enum_tier), because "do you own a window" is a
+ * question about a process and not about a descriptor, and stage 4's 9/0 gate
+ * is written against exactly that.  What stage 5 changes is the rule for a
+ * routed MUTATION -- see owns_wid() immediately below. */
+static int owns_wid_ancestry(int wid)
 {
     struct wwin *v = win_find(wid);
     if (!v || v->pid == 0) return 0;
@@ -2589,6 +2623,115 @@ static int owns_wid(int wid)
         p = q;
     }
     return 0;
+}
+
+/* ==================================================================
+ * STAGE 5 — THE CONNECTION IS THE CAPABILITY
+ * ==================================================================
+ * WHAT WAS WRONG, MEASURED BY STAGE 3a AND PRICED BY STAGE 4: the walk above
+ * compares pids and NEVER LOOKS AT A uid, so a uid-1002 child of a uid-0
+ * window owner drove that window (owns_wid=1, write accepted).  Every
+ * application the desktop spawns is a descendant of the desktop, so every
+ * application could retitle, move, raise or destroy any window owned by the
+ * compositor, the panel, or any of its own ancestors, regardless of uid.
+ *
+ * NARROWING THE WALK IS OFF THE TABLE and two stages said so: hamUI spawns a
+ * task INTO a window and stamps the parent's pid, so an exact-pid match would
+ * leave every toolkit-spawned task unable to drive the window it was spawned
+ * into.  /etc/rc.de-user makes that concrete -- every DE window is
+ * `/bin/hamsh /etc/rc.de-user <prog>`, the wid is stamped against hamsh, and
+ * the program that draws is hamsh's CHILD.
+ *
+ * SO THE WALK IS NOT NARROWED; IT STOPS BEING THE ONLY QUESTION ASKED.  For a
+ * ROUTED mutation the question becomes "did this arrive on the connection that
+ * holds the row", and a descendant inherits the right to drive the window it
+ * was spawned into only when the spawner HANDS IT THE DESCRIPTOR -- which is
+ * exactly the moment the spawner means to.  A descriptor cannot be walked to;
+ * it has to be given.
+ *
+ * A row is held by a connection in one of two ways, and both are facts the
+ * kernel supplies rather than claims a client makes:
+ *
+ *   1. `newwindow` arrives on a connection and returns the wid: the allocating
+ *      connection holds it from birth.
+ *   2. The DE's on-behalf path (`alloc <pid>`, hamUId) stamps a row against a
+ *      pid before that process has connected at all, so there is no connection
+ *      to record.  That row is CLAIMED by the first connection whose
+ *      SO_PEERCRED pid is exactly the stamped pid.  A handed-down descriptor
+ *      still carries the pid of the process that dialled, so the toolkit
+ *      claims and the child it handed to inherits the claim -- one connection,
+ *      one holder, no walk.
+ *
+ * THE BINDING IS SERVER-PRIVATE AND NOT IN THE SEGMENT, which is what lets
+ * this land with WSYS_VERSION still 8: struct wshm and struct wwin are
+ * byte-for-byte unchanged, so no client's mapping moves.
+ *
+ * A ROW IS REUSED, so a binding names the row's identity as well as its
+ * holder: a stale binding whose wid or stamped pid no longer matches the row
+ * in front of it is not a holder, it is a dead entry, and the row is free to
+ * be claimed again.  Without that, wid reuse would hand a new window to the
+ * connection that held the old one.
+ */
+struct srv_own { int32_t wid; int32_t pid; uint64_t cid; };
+static struct srv_own srv_own_tab[WSYS_MAX_WINDOWS];
+static uint64_t srv_n_claim, srv_n_connrefuse;
+
+/* The row's binding slot, or NULL.  Keyed by ROW INDEX and not by wid: a wid
+ * is a monotonically increasing integer with no bound, a row index is one of
+ * WSYS_MAX_WINDOWS. */
+static struct srv_own *srv_own_of(struct wwin *v)
+{
+    if (!shm || !v) return NULL;
+    size_t i = (size_t)(v - shm->win);
+    if (i >= WSYS_MAX_WINDOWS) return NULL;
+    return &srv_own_tab[i];
+}
+
+static int srv_own_live(const struct srv_own *o, const struct wwin *v)
+{ return o->cid != 0 && o->wid == v->wid && o->pid == v->pid; }
+
+/* Record `cid` as the holder of the row.  Called at a routed `newwindow` (the
+ * allocating connection) and on a claim. */
+static void srv_own_bind(struct wwin *v, uint64_t cid)
+{
+    struct srv_own *o = srv_own_of(v);
+    if (!o) return;
+    o->wid = v->wid; o->pid = v->pid; o->cid = cid;
+}
+
+static int srv_caller_holds_wid(int wid)
+{
+    if (!srv_caller.active || !srv_caller.cid) return 0;
+    struct wwin *v = win_find(wid);
+    if (!v) return 0;
+    struct srv_own *o = srv_own_of(v);
+    if (!o) return 0;
+    if (srv_own_live(o, v)) return o->cid == srv_caller.cid;
+    /* Unheld (or held by a dead entry from a previous tenant of this row).
+     * THE CLAIM IS AN EXACT PID MATCH AND NOTHING ELSE -- no walk, no uid
+     * comparison, no name.  This is the on-behalf path's only way in. */
+    if (v->pid != 0 && (pid_t)v->pid == srv_caller.pid) {
+        srv_own_bind(v, srv_caller.cid);
+        srv_n_claim++;
+        return 1;
+    }
+    return 0;
+}
+
+/* THE ONE QUESTION, ASKED IN TWO WORLDS.
+ *
+ * Unrouted -- the in-process path, every shipped binary today -- this is the
+ * ppid walk, byte-for-byte the behaviour of every stage before this one.  The
+ * mediator inherits the rule when the server is off, and that is what keeps
+ * the red arm of every identity gate meaningful.
+ *
+ * Routed, it is the connection.  Note what is NOT here: a fallback to the walk
+ * when the connection does not hold the row.  A capability that can be reached
+ * by descent as well as by handoff is the old capability with extra steps. */
+static int owns_wid(int wid)
+{
+    if (srv_caller.active) return srv_caller_holds_wid(wid);
+    return owns_wid_ancestry(wid);
 }
 
 static int deny(void)
@@ -3144,7 +3287,16 @@ struct wsrv_conn {
     pid_t    pid;
     uint32_t version;      /* 0 until HELLO */
     uint64_t nreq;
+    /* STAGE 5.  `cid` is this connection's identity for the lifetime of the
+     * server -- a monotonic counter and NOT the array index, because
+     * srv_conn_drop() compacts the array and an index would name a different
+     * client the moment somebody exits.  `adopted` is set by a HELLO carrying
+     * WSRV_F_ADOPT: this descriptor was inherited, not dialled. */
+    uint64_t cid;
+    int      adopted;
 };
+
+static uint64_t srv_next_cid = 1;
 
 static int  srv_is_server = 0;   /* this process is wsysd; never dial yourself */
 static int  srv_lfd = -1;        /* the listening SOCK_SEQPACKET              */
@@ -3287,6 +3439,15 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
     case WSRV_OP_HELLO: {
         uint32_t theirs = (h->len >= 4) ? *(const uint32_t *)pay : 0;
         c->version = theirs;
+        /* WHY AN ADOPTED CONNECTION IS NOT THE HOST OWNER.  A client that
+         * inherited this descriptor says so here, and the flag is STICKY: once
+         * set it is never cleared, so a second HELLO cannot wash it off.  It
+         * can only ever cost the connection privilege (hostowner() answers 0
+         * for it), never grant any, which is why taking the client's word for
+         * it is safe -- lying gains nothing.  It exists because SO_PEERCRED is
+         * fixed at connect(2): a descriptor dialled by a host-owner toolkit
+         * carries the host owner's uid to every process it is handed to. */
+        if (h->flags & WSRV_F_ADOPT) c->adopted = 1;
         if (theirs != WSYS_VERSION) {
             /* REFUSE, LOUDLY.  This is where the version bump of stage 4 will
              * do its work; today no shipped client speaks the protocol at all,
@@ -3317,11 +3478,12 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
     }
     case WSRV_OP_STAT: {
         srv_n_stat++;
-        char b[256];
+        char b[320];
         int n = snprintf(b, sizeof b,
                          "conns %llu live %d msgs %llu nop %llu ping %llu "
                          "stat %llu bad %llu bytes %llu write %llu "
-                         "newwin %llu refused %llu\n",
+                         "newwin %llu refused %llu claim %llu "
+                         "connrefused %llu\n",
                          (unsigned long long)srv_n_accept, srv_nconn,
                          (unsigned long long)srv_n_msg,
                          (unsigned long long)srv_n_nop,
@@ -3331,7 +3493,9 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
                          (unsigned long long)srv_n_bytes,
                          (unsigned long long)srv_n_write,
                          (unsigned long long)srv_n_newwin,
-                         (unsigned long long)srv_n_refused);
+                         (unsigned long long)srv_n_refused,
+                         (unsigned long long)srv_n_claim,
+                         (unsigned long long)srv_n_connrefuse);
         if (n < 0) n = 0;
         srv_reply(c->fd, h->tag, n, b, (uint32_t)n);
         return;
@@ -3363,7 +3527,7 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
             return;
         }
         srv_n_write++;
-        srv_as_caller(c->uid, c->pid);
+        srv_as_caller_full(c->uid, c->pid, c->cid, c->adopted);
         /* WHAT THE TWO PREDICATES ACTUALLY ANSWER, ON THE SERVER, ABOUT THE
          * CALLER.  Stage 2 flagged owns_wid()'s ppid walk as the sharp edge and
          * could not check it: a single-uid gate's "stranger" IS the host owner,
@@ -3374,20 +3538,34 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
          * inside, where the caller identity is installed.  Off unless asked
          * for: this is one fprintf per routed mutation and a drag makes ~800 a
          * second. */
+        /* BOTH ANSWERS, BECAUSE THE CONTRAST IS THE FINDING.  `owns_wid` is
+         * now the connection question and `ancestry` is the walk that used to
+         * be the whole of it; a line reading ancestry=1 owns_wid=0 is a
+         * descendant that would have been granted before stage 5 and is
+         * refused now, and there is no other way to see that from outside. */
         if (srv_trace()) {
             struct wwin *tv = (kind == HAMWSYS_WIN_CTL) ? win_find(h->wid)
                                                         : NULL;
-            fprintf(stderr, "wsrvtrace: caller uid=%u pid=%ld -> wid=%d "
-                            "ownerpid=%d hostowner=%d owns_wid=%d\n",
-                    (unsigned)c->uid, (long)c->pid, (int)h->wid,
-                    tv ? (int)tv->pid : -1, hostowner(),
-                    kind == HAMWSYS_WIN_CTL ? owns_wid(h->wid) : -1);
+            fprintf(stderr, "wsrvtrace: caller uid=%u pid=%ld cid=%llu%s -> "
+                            "wid=%d ownerpid=%d hostowner=%d owns_wid=%d "
+                            "ancestry=%d\n",
+                    (unsigned)c->uid, (long)c->pid,
+                    (unsigned long long)c->cid, c->adopted ? " adopted" : "",
+                    (int)h->wid, tv ? (int)tv->pid : -1, hostowner(),
+                    kind == HAMWSYS_WIN_CTL ? owns_wid(h->wid) : -1,
+                    kind == HAMWSYS_WIN_CTL ? owns_wid_ancestry(h->wid) : -1);
         }
         int64_t rc = -EPERM;
         if (kind == HAMWSYS_WIN_CTL && !win_find(h->wid)) {
             rc = -ENOENT;
         } else if (kind == HAMWSYS_WIN_CTL
                    && !hostowner() && !owns_wid(h->wid)) {
+            /* COUNTED SEPARATELY WHEN THE WALK WOULD HAVE SAID YES, because
+             * that number is the whole of what stage 5 changed: it is the
+             * mutations that descent used to carry and a descriptor no longer
+             * does.  A gate cannot tell "the new rule refused something" from
+             * "nothing was attempted" without it. */
+            if (owns_wid_ancestry(h->wid)) srv_n_connrefuse++;
             /* THE GATE AT OPEN, kept.  hamwsys_open refuses this before any
              * mutation happens and hamwsys_write refuses it again, because a
              * descriptor can outlive the privilege that opened it.  A routed
@@ -3437,8 +3615,14 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
          * So the client binds its own after this returns, which is what
          * hamwsys_alloc already does for a DE-spawned child. */
         srv_n_newwin++;
-        srv_as_caller(c->uid, c->pid);
+        srv_as_caller_full(c->uid, c->pid, c->cid, c->adopted);
         struct wwin *v = win_alloc((int32_t)c->pid);
+        /* THE ROW IS BOUND TO THE CONNECTION THAT ASKED FOR IT, here, at the
+         * one moment the server knows who allocated it.  This is stage 5's
+         * first of the two ways a row acquires a holder; the other is the
+         * exact-pid claim in srv_caller_holds_wid(), for rows the DE stamps
+         * on a process's behalf before it has connected. */
+        if (v) srv_own_bind(v, c->cid);
         srv_as_self();
         int32_t wid = v ? v->wid : -1;
         if (v) shm->gen++;
@@ -3484,6 +3668,7 @@ int hamwsys_srv_service(void)
                     memset(c, 0, sizeof *c);
                     c->fd = cfd; c->uid = uc.uid; c->gid = uc.gid;
                     c->pid = uc.pid;
+                    c->cid = srv_next_cid++;
                     struct epoll_event e = { .events = EPOLLIN,
                                              .data.fd = cfd };
                     if (epoll_ctl(srv_ep, EPOLL_CTL_ADD, cfd, &e) < 0) {
@@ -3640,8 +3825,17 @@ static int srd_enum_tier(uid_t uid, pid_t pid, int *by_hostowner)
          * up in the list" would deny the taskbar its own list.  The question
          * is "do you own a window", and the window table is where that is
          * answered. */
+        /* owns_wid_ancestry() AND NOT owns_wid(), and the difference is stage
+         * 5.  A routed MUTATION must arrive on the connection that holds the
+         * row -- a descriptor, handed over deliberately.  ENUMERATION asks a
+         * different question: "does this process own a window", which is what
+         * stage 4's policy is stated in and what its 9/0 gate measures.  The
+         * read server is a separate process and its connections are separate
+         * connections, so it holds no bindings at all; asking the mutation
+         * question here would deny the panel its own window list and answer
+         * EMPTY to every client on the desktop. */
         for (int i = 0; i < WSYS_MAX_WINDOWS && tier == SRD_ENUM_EMPTY; i++)
-            if (shm->win[i].used && owns_wid(shm->win[i].wid))
+            if (shm->win[i].used && owns_wid_ancestry(shm->win[i].wid))
                 tier = SRD_ENUM_FULL;
     }
     srv_as_self();
@@ -3783,6 +3977,7 @@ static void srd_serve(void)
                     memset(c, 0, sizeof *c);
                     c->fd = cfd; c->uid = uc.uid; c->gid = uc.gid;
                     c->pid = uc.pid;
+                    c->cid = srv_next_cid++;
                     struct epoll_event e = { .events = EPOLLIN,
                                              .data.fd = cfd };
                     if (epoll_ctl(srd_ep, EPOLL_CTL_ADD, cfd, &e) < 0) {
@@ -3895,6 +4090,9 @@ static uint32_t srv_tag    = 0;
 /* Defined below srv_call, which it uses; declared here because srv_dial needs
  * it while the connection exists but is not yet blessed. */
 static int srv_call_locked_hello(uint32_t *mine, uint32_t *theirs, int64_t *rc);
+static int srv_call_on(int fd, uint16_t op, uint16_t xflags, int32_t wid,
+                       const void *pay, uint32_t len, void *out, uint32_t outcap,
+                       uint32_t *outlen, int64_t *rc);
 
 /* Dial the server, once per process.  Returns the connection or -1.
  *
@@ -3905,11 +4103,83 @@ static int srv_call_locked_hello(uint32_t *mine, uint32_t *theirs, int64_t *rc);
  * paying for.  When the in-process path is removed in stage 4 this becomes a
  * hard refusal, and the WSYS_VERSION bump is what makes an old client refuse
  * rather than mmap the segment and bypass the mediator entirely. */
+/* THE INHERITED CONNECTION, AND WHY IT IS AN ENVIRONMENT VARIABLE.
+ *
+ * Stage 5's rule is that a routed mutation must arrive on the connection that
+ * holds the window's row, so a process spawned INTO somebody else's window has
+ * exactly one way in: be handed that connection.  A connected SOCK_SEQPACKET
+ * descriptor survives fork(2) and execve(2) once FD_CLOEXEC is off, and its
+ * SO_PEERCRED stays that of the process that dialled -- which is precisely the
+ * property wanted, because that process is the one the row is stamped against.
+ *
+ * The number travels in HAMWSYS_SRV_FD because execve replaces everything else
+ * about the child: argv belongs to the program, and a spawner that had to
+ * rewrite its child's argv could not hand a connection to a program it did not
+ * write.  The environment is the one channel every spawn path in this tree
+ * already carries (/etc/rc.de-user hands HAMNIX_DE_PROG down the same way).
+ *
+ * THE ADOPTION IS ONE GENERATION, AND THAT IS THE POINT.  An adopting process
+ * immediately sets FD_CLOEXEC and unsets the variable, so the capability stops
+ * with it unless it deliberately hands it on again.  Inheritance that
+ * propagated by itself would be the ancestry walk rebuilt out of descriptors.
+ */
+static int srv_adopt_inherited(void)
+{
+    const char *e = getenv("HAMWSYS_SRV_FD");
+    if (!e || !e[0]) return -1;
+    char *end = NULL;
+    long v = strtol(e, &end, 10);
+    unsetenv("HAMWSYS_SRV_FD");
+    if (!end || *end || v < 0 || v > 1024 * 1024) return -1;
+    int fd = (int)v;
+    /* IT MUST BE A CONNECTED SEQPACKET SOCKET, checked and not assumed.  A
+     * stale number names whatever descriptor the process happens to have at
+     * that index -- a log file, the framebuffer -- and writing the protocol
+     * into it would corrupt an unrelated file while looking like a dialled
+     * connection. */
+    int type = 0; socklen_t tl = sizeof type;
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tl) < 0
+        || type != SOCK_SEQPACKET) {
+        fprintf(stderr, "wsys: HAMWSYS_SRV_FD=%d is not a connected server "
+                        "socket (%s): dialling instead.\n",
+                fd, strerror(errno));
+        return -1;
+    }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+}
+
 static int srv_dial(void)
 {
     if (srv_fd >= 0) return srv_fd;
     if (!srv_enabled() || srv_is_server || srv_tried) return -1;
     srv_tried = 1;
+
+    /* BEFORE seg_id_known, deliberately: an inherited connection is already
+     * connected to the right server, so it needs no segment identity to find
+     * one.  A handed-down descriptor is also the only way a process that never
+     * attaches the segment could speak to the server at all. */
+    int inh = srv_adopt_inherited();
+    if (inh >= 0) {
+        srv_fd = inh;
+        uint32_t mine = WSYS_VERSION, theirs = 0;
+        int64_t rc = 0;
+        uint32_t got = 0;
+        /* WSRV_F_ADOPT: tells the server this connection was inherited, which
+         * costs it hostowner() for ever.  See hostowner(). */
+        if (srv_call_on(srv_fd, WSRV_OP_HELLO, WSRV_F_ADOPT, 0,
+                        &mine, sizeof mine, &theirs, sizeof theirs,
+                        &got, &rc) < 0 || rc < 0) {
+            fprintf(stderr, "wsys: the inherited server connection did not "
+                            "answer HELLO (server speaks %u, this client %u) "
+                            "-- using the in-process path.\n",
+                    (unsigned)theirs, (unsigned)WSYS_VERSION);
+            close(srv_fd);
+            srv_fd = -1;
+            return -1;
+        }
+        return srv_fd;
+    }
     if (!seg_id_known) return -1;
 
     struct sockaddr_un a;
@@ -3941,6 +4211,50 @@ static int srv_dial(void)
         return -1;
     }
     return srv_fd;
+}
+
+/* ==================================================================
+ * THE HANDOFF — the toolkit's half of stage 5
+ * ==================================================================
+ * A spawner that owns a window and is about to run a program INTO it calls
+ * this with `on` non-zero, spawns, and calls it again with zero.  Between the
+ * two calls the server connection is inheritable and named in the
+ * environment, so the child adopts it in srv_dial() and its mutations arrive
+ * on the connection that holds the row.
+ *
+ * IT DIALS IF IT HAS TO, and that is what makes it usable from a process that
+ * has never touched /dev/wsys -- /bin/hamsh, which is what every DE window is
+ * stamped against, opens no window file at all.  A hand-off from a process
+ * with no connection would otherwise silently hand nothing over and the child
+ * would be refused, which is the success-shaped failure this tree refuses.
+ *
+ * CALL IT AFTER DROPPING PRIVILEGE, NOT BEFORE, and this is the sharp edge of
+ * the whole mechanism: SO_PEERCRED is sampled at connect(2), so a connection
+ * dialled while still the host owner carries the host owner's uid into every
+ * process it is handed to.  The WSRV_F_ADOPT flag the child sends means the
+ * server refuses hostowner() on an adopted connection, so the damage is capped
+ * at the row itself rather than the whole chrome surface -- but the connection
+ * still ACTS FOR the dialling process's window, so the ordering is a
+ * requirement and not a preference.
+ *
+ * Returns 0 if the child will inherit a connection, -1 if there is nothing to
+ * hand over (no server, flag unset, dial refused).  The caller may spawn
+ * either way; -1 means the child gets what it gets today. */
+int hamwsys_srv_handoff(int on)
+{
+    if (!on) {
+        unsetenv("HAMWSYS_SRV_FD");
+        if (srv_fd >= 0) fcntl(srv_fd, F_SETFD, FD_CLOEXEC);
+        return 0;
+    }
+    if (!srv_enabled() || srv_is_server) return -1;
+    if (srv_fd < 0 && shm_attach() < 0) return -1;
+    if (srv_dial() < 0) return -1;
+    if (fcntl(srv_fd, F_SETFD, 0) < 0) return -1;
+    char n[16];
+    snprintf(n, sizeof n, "%d", srv_fd);
+    if (setenv("HAMWSYS_SRV_FD", n, 1) < 0) return -1;
+    return 0;
 }
 
 /* Send one message.  `flags` carries WSRV_F_REPLY when the caller will block.
@@ -4587,6 +4901,180 @@ int hamwsys_srv_attack_local(int victim_wid)
     printf("wsrvlo: the unrouted write LANDED (rc %lld). No mediator was "
            "present: the store was the attacker's own.\n", (long long)rc);
     return 0;
+}
+
+/* ==================================================================
+ * STAGE 5'S GATE DRIVER — BOTH ARMS, ONE PROCESS, ONE WINDOW
+ * ==================================================================
+ * The property is a PAIR and neither half means anything alone: a descendant
+ * that was NOT handed the connection must be refused, and one that WAS must
+ * succeed.  A gate with only the refusal is equally green against a server
+ * that refuses everything (which would break every desktop); a gate with only
+ * the acceptance is green against a server that checks nothing, which is what
+ * stage 3a measured and what this exists to change.
+ *
+ * This runs in the process the window is stamped against -- the toolkit's
+ * position -- and spawns the SAME program twice with the SAME argument.  The
+ * only difference between the two children is the handoff, so nothing else can
+ * explain a difference in the answer.
+ *
+ * The child reports 0 for REFUSED and 1 for ACCEPTED (hamwsys_srv_mutate_
+ * selftest's contract), so the expected pair is 0 then 1.
+ *
+ * ONE CONNECTION, TWO PROCESSES, AND THEY DO NOT OVERLAP: the parent waits for
+ * each child before doing anything else on the socket.  Replies are matched by
+ * tag and tags are per-process counters, so a parent and an adopted child
+ * issuing blocking calls AT THE SAME TIME could each consume the other's
+ * reply.  A toolkit that hands its connection to a child it does not wait for
+ * has to keep that in mind; the handoff is a capability transfer, not a
+ * multiplexer. */
+static int conngate_spawn(const char *self, int wid, int hand, const char *tag)
+{
+    char widbuf[16];
+    snprintf(widbuf, sizeof widbuf, "%d", wid);
+    if (hand) {
+        if (hamwsys_srv_handoff(1) < 0) {
+            printf("wsrvcg: FAIL nothing to hand over for %s -- the holder has "
+                   "no server connection, so the arm would measure a missing "
+                   "connection rather than a refused one\n", tag);
+            return -2;
+        }
+    }
+    fflush(stdout);
+    pid_t p = fork();
+    if (p == 0) {
+        execl(self, self, "mutate", widbuf, (char *)NULL);
+        _exit(127);
+    }
+    int st = 0;
+    if (p < 0 || waitpid(p, &st, 0) < 0) { if (hand) hamwsys_srv_handoff(0);
+                                           return -1; }
+    if (hand) hamwsys_srv_handoff(0);
+    if (!WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+/* Spawn `prog` as an ORDINARY UNROUTED CLIENT of this window: a plain child,
+ * no handoff, HAMWSYS_SERVER removed from its environment.  This is the red
+ * arm and it must SUCCEED -- it is the ancestry rule the mediator inherits
+ * when the server is off, and if it ever stops working the refusal in the
+ * routed arm stops being attributable to the mediator. */
+static int conngate_unrouted(const char *prog, int wid)
+{
+    char path[64];
+    snprintf(path, sizeof path, "/dev/wsys/%d/ctl", wid);
+    fflush(stdout);
+    pid_t p = fork();
+    if (p == 0) {
+        unsetenv("HAMWSYS_SERVER");
+        unsetenv("HAMWSYS_SRV_FD");
+        execl(prog, prog, "chrome", path, "title DESC-UNROUTED",
+              (char *)NULL);
+        _exit(127);
+    }
+    int st = 0;
+    if (p < 0 || waitpid(p, &st, 0) < 0 || !WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+/* THE WINDOW THIS PROCESS WAS SPAWNED INTO, waited for rather than assumed.
+ * hamUId spawns the child FIRST and stamps the row a moment later, so an empty
+ * answer on the first look is a race and not a verdict -- lib/hamwid.ad waits
+ * two seconds for exactly this reason and this is the same handshake.  EXACT
+ * PID, no walk: this is asking "which row names me", not "which row may I
+ * reach". */
+static int conngate_wait_for_wid(void)
+{
+    /* AND FOR THE ROW TO BE SET UP, not merely to exist.  The spawner stamps
+     * the row and then decorates and titles it, and a holder that started its
+     * arms in between would race the gate's own baseline read -- which showed
+     * up as a baseline that already carried the LAST arm's title.  Waiting for
+     * the title is waiting for the same fact lib/hamwid.ad waits for: the
+     * window is ready, not merely allocated. */
+    for (int t = 0; t < 60; t++) {
+        if (shm) {
+            for (int i = 0; i < WSYS_MAX_WINDOWS; i++)
+                if (shm->win[i].used && shm->win[i].pid == (int32_t)getpid()
+                    && shm->win[i].title[0])
+                    return shm->win[i].wid;
+        }
+        struct timespec ts = { 0, 100 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    return -1;
+}
+
+int hamwsys_srv_conngate(int wid, const char *self, const char *uidgate)
+{
+    int fails = 0;
+    if (!srv_enabled()) {
+        printf("wsrvcg: FAIL HAMWSYS_SERVER is not set in the holder\n");
+        return 1;
+    }
+    if (shm_attach() < 0) {
+        printf("wsrvcg: FAIL the holder cannot attach the segment\n");
+        return 1;
+    }
+    if (wid <= 0) {
+        wid = conngate_wait_for_wid();
+        printf("wsrvcg: the row stamped against pid %ld is wid %d\n",
+               (long)getpid(), wid);
+        if (wid < 2) {
+            printf("wsrvcg: FAIL no window was ever stamped against this "
+                   "process -- refusing to measure a gate against a window "
+                   "that does not exist\n");
+            return 1;
+        }
+    }
+    /* THE RED ARM FIRST, and the order is deliberate: it runs before this
+     * process has any connection at all, so nothing about the routed arms can
+     * have set it up. */
+    if (uidgate && uidgate[0]) {
+        int u = conngate_unrouted(uidgate, wid);
+        printf("wsrvcg: UNROUTED descendant (a plain child, no server in its "
+               "environment): exit %d -- %s\n", u,
+               u == 0 ? "the write LANDED, which is the rule this mediator "
+                        "inherits and MUST still hold"
+                      : "REFUSED, and that makes every routed arm below "
+                        "unattributable");
+        if (u != 0) fails++;
+    }
+    if (srv_dial() < 0) {
+        printf("wsrvcg: FAIL the holder could not dial the server\n");
+        return 1;
+    }
+    /* THE HOLDER DRIVES ITS OWN WINDOW FIRST, and it is not a formality: it is
+     * what makes the connection the row's holder on the DE's on-behalf path,
+     * where the row was stamped against this pid before this process existed
+     * as a client.  It is also the arm that would catch a server that refuses
+     * everything. */
+    const char own[] = "title HOLDER-OWN-TITLE";
+    uint16_t flags = (uint16_t)(WSRV_LEAF_WIN_CTL << WSRV_LEAF_SHIFT);
+    srv_send(WSRV_OP_WRITE, flags, wid, ++srv_tag, own,
+             (uint32_t)(sizeof own - 1));
+    char st[384]; uint32_t got = 0; int64_t rc = 0;
+    if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) >= 0) {
+        st[got] = 0;
+        printf("wsrvcg: holder pid %ld wid %d; server after the holder's own "
+               "write: %s", (long)getpid(), wid, st);
+    }
+
+    int plain = conngate_spawn(self, wid, 0, "the un-handed child");
+    printf("wsrvcg: child WITHOUT the connection: %s (exit %d)\n",
+           plain == 0 ? "REFUSED" : plain == 1 ? "ACCEPTED" : "INDETERMINATE",
+           plain);
+    int handed = conngate_spawn(self, wid, 1, "the handed child");
+    printf("wsrvcg: child WITH the connection: %s (exit %d)\n",
+           handed == 0 ? "REFUSED" : handed == 1 ? "ACCEPTED" : "INDETERMINATE",
+           handed);
+    if (plain != 0) fails++;
+    if (handed != 1) fails++;
+    if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) >= 0) {
+        st[got] = 0;
+        printf("wsrvcg: server counters at the end: %s", st);
+    }
+    printf("wsrvcg: %d failures\n", fails);
+    return fails;
 }
 
 /* STAGE 4'S INSTRUMENT: WHAT A ROUTED READ COSTS, AGAINST 851 us.

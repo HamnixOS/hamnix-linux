@@ -554,7 +554,12 @@ else
         note "WHAT IT COSTS, STATED PLAINLY, because it is a policy the enumeration work in stage 3 has to price: any process the desktop spawns is a descendant of the desktop, so every application can retitle, move, raise or destroy any window owned by the compositor, the panel, or any of its own ancestors -- regardless of uid, and now with the mediator's blessing rather than merely without its knowledge. A capability handed out at newwindow, which the design already proposes for enumeration, is the shape that replaces it. It is NOT in this stage."
     elif [ "$DOW" = 0 ] && [ "$DE" = 0 ] \
          && printf '%s' "$DA" | grep -q 'HOLDER-OWN-TITLE'; then
-        ok "a uid-1002 CHILD of the window's owner is refused (owns_wid=0, write refused, title unchanged) -- the walk is stricter than the handoff expected, and all three signals agree"
+        ok "a uid-1002 CHILD of the window's owner is REFUSED on the routed path (owns_wid=0, write refused, title unchanged) and all three signals agree. THIS IS STAGE 5 AND NOT A SURPRISE: a routed mutation must now arrive on the connection that HOLDS the row, so a descendant that was not handed the descriptor no longer inherits the window. The pair that proves it -- handed and un-handed, same binary, same window -- is tests/linux/wsys_srv_connown.sh; this arm is the half of it that lives here because this is where the walk was measured."
+        if printf '%s' "$(f armP.desc.un.after)" | grep -q 'DESC-UNROUTED'; then
+            ok "and the UNROUTED path still grants the same descendant the same window (title became \"$(f armP.desc.un.after)\") -- the ancestry rule is untouched where there is no mediator, which is what keeps the routed refusal above attributable to the mediator"
+        else
+            bad "the unrouted path did NOT grant the descendant (title \"$(f armP.desc.un.after)\") -- the in-process rule has changed, and the routed refusal above is then unattributable"
+        fi
     else
         bad "descendant arm INCONSISTENT: owns_wid=$DOW, probe exit=$DE (0=refused, 1=accepted), title \"$DA\". These must agree; refusing to pick one."
     fi
