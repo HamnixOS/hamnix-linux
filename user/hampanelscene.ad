@@ -6209,6 +6209,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     _pl_flush()
     sysmon_tick: uint64 = 0
     SAMPLE_TICKS: uint64 = 20
+    # HZ=100, so 32 jiffies = 320 ms -- the cadence SAMPLE_TICKS used to mean
+    # when the park was fixed at 16 ms. Kept identical on purpose: this change
+    # is about the loop's idle cost, not about how often the graph samples.
+    SM_PERIOD_JIF: uint64 = 32
+    sm_next_jif: uint64 = sys_get_jiffies() + SM_PERIOD_JIF
     cfg_tick: uint64 = 0
     # Poll the panel config EVERY loop iteration (was every 8). A Settings
     # widget Move/Up/Down/Add/Del writes /tmp/hamnix-panel.conf and the panel
@@ -6216,6 +6221,38 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # extra click). Combined with the short park timeout below the reload lands
     # within ~one frame of the Settings write.
     CFG_TICKS: uint64 = 1
+
+    # ---- THE IDLE BACKOFF ------------------------------------------------
+    #
+    # MEASURED: an idle panel cost 1.7% of a core -- MORE than the compositor
+    # it draws on (1.1%) -- and performed 1016 /dev/wsys operations a second
+    # against about 6/s of actual work. Every iteration re-reads and hashes
+    # /etc/panel.conf, re-reads /dev/wsys/windows, and drains two sinks; at a
+    # 16 ms park that is ~111 times a second, for ever, on a desktop nobody is
+    # touching.
+    #
+    # THE PARK TIMEOUT IS THE WHOLE COST, and that was checked rather than
+    # assumed: rebuilding with the timeout at 100 ms took the same idle panel
+    # to 0.1% of a core and 160 ops/s. So the wait is working correctly and the
+    # tick was simply far shorter than anything the panel needs.
+    #
+    # But 16 ms is not arbitrary either -- it is there so a Settings widget
+    # reorder, which writes a config file and pokes NO event fd, appears
+    # without a second click. Polled state (the config file, the window list,
+    # the notification bus) has nothing to wake on, so lengthening the park
+    # lengthens exactly those reactions.
+    #
+    # So: park SHORT while anything is happening and LONG only once nothing
+    # has happened for half a second. Interaction is never slowed, because the
+    # first change resets it to the fast park -- and real events do not depend
+    # on this at all, since the /event fds are in the wait set and wake the
+    # loop instantly in either mode. What gets slower is polled state, and
+    # only after the desktop has been completely still for 500 ms.
+    PARK_FAST: int64 = 16          # the old timeout, used whenever anything moved
+    PARK_IDLE: int64 = 100         # after IDLE_AFTER quiet iterations
+    IDLE_AFTER: uint64 = 32        # 32 x 16 ms ~= 0.5 s of complete stillness
+    quiet_iters: uint64 = 0
+    park_ms: int64 = PARK_FAST
 
     while True:
         any_redraw: int32 = 0
@@ -6335,12 +6372,29 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
         sod: uint64 = _now_secs_of_day(btime)
         minute: uint64 = sod / 60
+        # EVERYTHING SET SO FAR IS AN EXTERNAL CHANGE -- a config write, a
+        # window appearing, a notification, a workspace switch, a real event.
+        # What follows are the panel's own TIMERS, and they must not count as
+        # "the desktop is in use": the clock ticking and the sysmon graph
+        # scrolling are the panel refreshing itself, and if they reset the idle
+        # backoff it can never engage. That is exactly what happened on the
+        # first attempt -- CPU fell 1.7% -> 0.6% but ops/s did not move at all,
+        # because the 320 ms sysmon resample was retriggering the fast park
+        # before 0.5 s of quiet could ever accumulate.
+        ext_change: int32 = any_redraw
+
         if minute != last_minute:
             any_redraw = 1
 
-        sysmon_tick = sysmon_tick + 1
-        if sysmon_tick >= SAMPLE_TICKS:
-            sysmon_tick = 0
+        # WALL-CLOCK, NOT AN ITERATION COUNT. This was `sysmon_tick >= 20`,
+        # i.e. 20 x 16 ms = 320 ms -- correct only while the park is exactly
+        # 16 ms. With an adaptive park the same 20 iterations become 2 s, which
+        # would silently slow the rolling graph rather than the loop; the
+        # history ring advances once per interval, so the graph would still
+        # look plausible and be wrong. Tied to the clock instead, it is 320 ms
+        # whatever the park is doing.
+        if sys_get_jiffies() >= sm_next_jif:
+            sm_next_jif = sys_get_jiffies() + SM_PERIOD_JIF
             # Advance the CPU/mem delta readers ONCE and push a history sample
             # so the applet's rolling graph scrolls with real data.
             _sm_sample()
@@ -6353,6 +6407,20 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 pi = pi + 1
             last_minute = minute
             last_win_hash = win_hash
+
+        # ANYTHING REDRAWN MEANS THE DESKTOP IS IN USE: go back to the fast
+        # park at once, so the iteration AFTER a change is as responsive as it
+        # ever was. Only an unbroken run of nothing-happening earns the long
+        # one. This is deliberately keyed on any_redraw rather than on input:
+        # a Settings write, a new window and a notification all set it, and
+        # those are exactly the polled reactions the long park would delay.
+        if ext_change != 0:
+            quiet_iters = 0
+            park_ms = PARK_FAST
+        else:
+            quiet_iters = quiet_iters + 1
+            if quiet_iters >= IDLE_AFTER:
+                park_ms = PARK_IDLE
 
         # Park (instead of busy-spinning sys_yield) until a panel event
         # arrives or the resample cadence (~30ms) lapses. Opening the
@@ -6377,14 +6445,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             # there is nothing to be woken by, i.e. the branch that most needs
             # a real sleep. nfds 0 makes sys_waitfds a plain timed wait at the
             # same 30 ms.
-            sys_waitfds(&_wait_efds[0], 0, 30)
+            sys_waitfds(&_wait_efds[0], 0, park_ms)
         else:
             # ~16ms timeout: long enough that an idle panel sits near 0% CPU
             # (it still wakes instantly on input via waitfds_notify), short
             # enough that a Settings config write (which doesn't poke our event
             # fds) is picked up by the per-iteration _cfg_changed poll within
             # one frame — so a widget reorder shows on the LIVE panel at once.
-            sys_waitfds(&_wait_efds[0], nwf, 16)
+            sys_waitfds(&_wait_efds[0], nwf, park_ms)
             wi: uint64 = 0
             while wi < nwf:
                 sys_close(_wait_efds[wi])
