@@ -752,7 +752,11 @@ if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
             fi
         done
     done
-    echo "[image] staged $(grep -c . "$ROOT/etc/modules" 2>/dev/null || echo 0) kernel modules for $KVER"
+    # `|| true`, not `|| echo 0`: grep -c already printed the count (it prints
+    # "0" and exits 1 when there is none), so `echo 0` appended a SECOND line
+    # and split this message across two lines. Cosmetic here -- nothing
+    # compares the value -- but the same idiom is a live defect elsewhere.
+    echo "[image] staged $(grep -c . "$ROOT/etc/modules" 2>/dev/null || true) kernel modules for $KVER"
 
     # --- modules AVAILABLE to modprobe but NOT loaded at boot -------------
     # The list above is "what this machine loads before it has a shell".

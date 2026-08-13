@@ -398,7 +398,39 @@ gl_survivors=0
 gl_cycles=0
 gl_nowindow=0
 
-mapped_count() { grep -ac '\[devwsys\] window .* mapped' "$LOG" 2>/dev/null || echo 0; }
+# mapped_count — how many windows the log says have ever been mapped.
+#
+# THE DEFECT THIS REPLACES. `grep -c` PRINTS THE COUNT AND EXITS 1 when the
+# count is zero, so `... || echo 0` appended a SECOND line and the value was
+# the two-line string "0\n0". Every `[ "$(mapped_count)" -le "$before" ]`
+# below then failed with rc=2 -- `integer expression expected`, an ERROR, not
+# a false -- and `if` skips a branch whose condition errored. The no-window
+# finding could therefore NEVER FIRE IN THE ONE CASE IT WAS WRITTEN FOR: a
+# launch that maps nothing, i.e. zero mapped windows, i.e. exactly the input
+# that produced "0\n0".
+#
+# rc 0 and rc 1 both mean grep READ THE LOG and printed a count on stdout.
+# rc >= 2 means it could not read the log at all, and a census that cannot
+# read its input must SAY SO -- answering "0 windows" there is success-shaped
+# and false. We answer -1: a clean integer (so no comparison errors again)
+# that lands on the LOUD side of both `-gt` and `-le` below, and we drop a
+# flag file because mapped_count runs inside `$( )` and a variable set in a
+# subshell would never reach the verdict.
+MAPPED_UNREADABLE="$OUT_DIR/mapped_count_unreadable"
+mapped_count() {
+    local n rc
+    n=$(grep -ac '\[devwsys\] window .* mapped' "$LOG" 2>/dev/null); rc=$?
+    if [ "$rc" -ge 2 ] || [ -z "$n" ]; then
+        # Warn once, not once per poll: this runs several times a second for
+        # the whole 30 s launch window, for every launch, for hours.
+        [ -e "$MAPPED_UNREADABLE" ] || \
+            echo "$TAG   LOAD: CANNOT READ '$LOG' (grep rc=$rc) -- the mapped-window count is UNKNOWN, not zero" >&2
+        : > "$MAPPED_UNREADABLE"
+        printf '%s\n' -1
+        return 2
+    fi
+    printf '%s\n' "$n"
+}
 
 # gap_load_cycle — open GAP_LOAD_PER_CYCLE apps, then close every one of them
 # and CONFIRM the exit. Returns non-zero only if the guest died.
@@ -514,6 +546,9 @@ done
 if [ "$GAP_LOAD" = "1" ]; then
     echo "$TAG LOAD PHASE TOTALS: cycles=$gl_cycles launched=$gl_launched closed=$gl_closed survivors=$gl_survivors no-window=$gl_nowindow"
     echo "$gl_cycles $gl_launched $gl_closed $gl_survivors $gl_nowindow" > "$OUT_DIR/gap_load_totals.txt"
+    if [ -e "$MAPPED_UNREADABLE" ]; then
+        say_fail "the load phase could not read the serial log at least once, so its window counts are UNKNOWN — the no-window total below is a FLOOR, not a measurement, and this census cannot claim the launch path kept working"
+    fi
     if [ "$gl_nowindow" -gt 0 ]; then
         say_fail "the gap's load phase had $gl_nowindow launch(es) map NO window — a launch path that stops working over hours is a silent cap, which is fatal to months of uptime whether or not a frame leaked"
     fi
