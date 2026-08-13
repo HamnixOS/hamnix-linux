@@ -716,3 +716,370 @@ to fit.
 and not an observation. A client repaint is 3 ops ≈ 19 µs sequential, about 5%
 of it. If measured cost exceeds that, the fire-and-forget rule above is the
 first thing to check, not the last.
+
+# Stage 7 — THE ENFORCEMENT, SCOPED. Nothing here is built, and the version is still 8
+
+Every stage above carried the same sentence: *`WSYS_VERSION` stays 8, the bump
+is the enforcement, and it goes last.* Nobody had worked out what "last"
+requires. This section is that scope. **It changes no code and bumps nothing.**
+
+Where this section and the six above disagree, this one was written by reading
+`user/linux-wsys.c` and by running a probe against a live mediator; the
+paragraphs above were written from the plan. Three of the disagreements are
+findings and are marked as such.
+
+## 7.1 What is still served in process when `HAMWSYS_SERVER=1` — from the code
+
+Stage 6 says "no mutation a routed client makes is still performed in process".
+**That is true of three leaves and the enum in `user/linux-wsys.h` has
+nineteen.** `srv_route_write()`
+carries exactly `ctl`, `wid/ctl`, `wid/scene`; `srv_route_read()` carries
+exactly `windows`, `screen`, `pool`; `newwindow` goes through `srv_newwindow()`.
+Everything else in `hamwsys_write_inner()` and in `hamwsys_open()`'s snapshot
+arms runs in the client, out of the client's own mapping, with the mediator
+running and idle.
+
+| leaf | write | read |
+|---|---|---|
+| `ctl` | **routed** (`newwindow` blocking) | in process (`snap_ctl`: this process's own last wid) |
+| `wid/ctl` | **routed** | **in process** — `snap_win_ctl`, 14 fields, any wid, no check |
+| `wid/scene` | **routed** | in process, and correctly: `pix_get` needs the handed-up memfd |
+| `windows` / `screen` / `pool` | n/a | **routed** |
+| `self` | n/a | in process — answers only about the caller |
+| `dir` (`/dev/wsys`, `/dev/wsys/<wid>`) | n/a | **in process — lists every used row's wid** |
+| `wid/wctl` | **in process** — `version` / `focus` / `move` / `resize` | **in process** — the live rect of any window |
+| `wid/pointer`, `wid/event`, `wid/text`, `wid/cmd` | in process — `ring_write` into the row | **in process — `ring_read` DRAINS the row** |
+| `wid/keys` | in process, but off the segment (keystroke channel, `SCM_CREDENTIALS`) | refused to a non-owner, by name |
+| `wid/draw/ctl`, `wid/backbuffer` | in process — the v2 blit, `/srv/wsys.bb` | in process — the per-window memfd |
+| `wid/draw/images`, `wid/draw/image/<n>` | n/a (read-only) | in process — any window's named images, out of `/srv/wsys.img` |
+| sinks | in process; `0644` chrome vs `0666` public is the only gate | in process |
+
+### Measured, with the mediator live and the enumeration policy working
+
+`unshare -U` with three ids, `wsysd` as 1001 with `HAMWSYS_SERVER=1` and a read
+server forked, a victim at 1001 owning window 2, an attacker at **1002 owning
+nothing**, and `HAMWSYS_SERVER=1` on **every** arm — so nothing below is the
+unrouted control, it is all the routed configuration. Two runs, identical.
+
+The two arms that make the rest readable, first:
+
+    ctrlenum   routed `windows` for the attacker:   (empty)
+    hostenum   routed `windows` for the host owner: 2 VICTIM-ENUM-TITLE
+
+The policy is live and the instrument can produce a non-empty answer. Then:
+
+| arm | the attacker got |
+|---|---|
+| `cat /dev/wsys` | `ctl self windows screen pool 2` — **window 2, enumerated** |
+| `cat /dev/wsys/2/ctl` | `2 100 100 300 200 5 1 1 1 0 0 0 0 0` — the victim's geometry, z, proto and three frame counters |
+| `cat /dev/wsys/2/wctl` | `100 100 300 200 click` |
+| `cat /dev/wsys/2/keys` | `EPERM`, said by name — the negative control |
+
+**THE ENUMERATION POLICY STAGE 4 LANDED IS BYPASSED BY `ls`.** The routed
+`windows` read correctly answers EMPTY to that process, and `snap_dir()` hands
+it every used row's wid one path component up, out of shared memory, on the
+same run. `wid/ctl` and `wid/wctl` then answer geometry for each of them with
+no check of any kind. What the routed read withholds is the **title**, and only
+the title. That is not what section 4 above claims it bought.
+
+The mutation arms of the same probe were **refused** — the attacker's
+`title`, `move 777 888` and `resize 640 480` all left the victim untouched.
+That is the honest result and it is not a defence: `wid/wctl`'s write arm calls
+`hostowner()` and `owns_wid()`, the same two predicates stage 3a took from
+REFUSE to ALLOW **with one assignment to `srv_caller.uid`** in the attacker's
+own address space. An unrouted mutation is refused to a client that asks
+politely and granted to one that does not.
+
+The ring arm is the one that needs no modified client at all. The attacker
+wrote `INJECTED-BY-1002` into window 2's `event` ring (refused) and then
+**read the ring** — and got back
+
+    geometry 100 100 300 200 f in
+
+which is the compositor's own event to the victim, removed from the victim's
+queue by a process of another uid that owns nothing. `ring_read` is a **drain**.
+There is no read check on `pointer`, `event`, `text` or `cmd`; `keys` is the
+only ring with one, and it has one because it is no longer in the segment.
+
+### What must be true, then
+
+Sorted by whether it changes what an attacker can do, not by how much code it is.
+
+**(1) The client must stop mapping the segment read-write. Everything else is
+downstream of this and nothing else substitutes for it.** `shm_attach()` ends
+in `mmap(..., PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)` on a file it has just
+`fchmod`ed to `0666`, and `/srv/wsys.bb` is the same. Every gate's red arm and
+all four attacks in `wsys_bypass.sh` are that mapping; none of them calls a
+function in this file. Routing every remaining leaf and leaving the mapping is a
+mediator with a door beside it. **The three tiers at THE SPLIT in
+`user/linux-wsys.c` are the design for this, and its blockers (1)–(3) are
+unchanged and are the real cost of stage 7.**
+
+**(2) Routing `open` is the precondition for (1), and no stage has touched it.**
+Almost every arm of `hamwsys_open()` starts with `win_find(f->wid)`, which is a
+walk of the mapped table. A client with no mapping cannot open a leaf, so
+existence, `wid/ctl`'s 14 fields, `wid/wctl`'s rect and the directory must
+become server answers before the mapping can go. **This is the largest single
+piece of unbuilt work in stage 7 and it is not in the plan above at all.**
+
+**(3) Four rings need what `keys` already has.** `pointer`, `event`, `text`,
+`cmd`: a per-window kernel-authenticated channel, not an RPC — they are the
+34.6/s per-frame half of the census and a round trip per event is the one shape
+the measurement says not to build. `keys` is the worked example: no daemon, no
+new binary, no field removed, and a version bump for the meaning change.
+
+**(4) `wid/wctl` must be routed, or the mediator gates one of two spellings.**
+`move`/`resize` on another window is the same act as the `geometry` verb on
+`wid/ctl`, which stage 2 routed. This file already argues, about the wallpaper
+sink, that "a gate on only one of the two spellings is not a gate".
+
+**(5) Every fallback to the in-process path must become a refusal.** They are,
+by name: a failed `srv_dial()`; `srv_adopt_inherited()` rejecting the inherited
+descriptor; `srv_route_write()` returning 0 on `srv_fd < 0`, on `n >
+WSRV_MAXPAY`, and on a failed `srv_send()`; `srv_newwindow()` returning −2;
+`srv_route_read()` on a failed `srv_rdial()` and on an unanswered call; and the
+server closing the 65th connection (`srv_nconn >= WSRV_CONN_MAX`), which the
+client sees as a dial failure. The code says so already, at `srv_dial`: *"When
+the in-process path is removed in stage 4 this becomes a hard refusal."*
+
+**(6) `srv_enabled()` must go, not flip.** While the boundary is an environment
+variable, `env -u HAMWSYS_SERVER` is the bypass and it needs no attacker.
+
+### What is genuinely fine unmediated, and why
+
+- **`self`.** It reports only a row whose `pid` is the caller or its parent. A
+  process that rewrote the table to make `self` lie would be lying to itself.
+- **`keys`.** Off the segment since v8; sender authorised by the kernel's
+  credential stamp, receiver by who holds the bind. The model for (3).
+- **`wid/scene` reads.** The bytes are in a per-window memfd; a non-owner gets
+  `EPERM` from `pix_get`, and the owner is `PR_SET_DUMPABLE(0)`.
+- **The pixels — and they must stay out.** 12 s of a real drag: 9899 control
+  writes, **0** `wid/backbuffer` writes. This is why the whole boundary is
+  0.1–0.5% of a core and not a megabyte a frame.
+- **`screen` and `pool`** — routed already, and carrying no policy on purpose.
+
+**A ring the client drains for itself is not the same as a row it can rewrite —
+and none of these four rings is that ring.** `event`, `pointer`, `text` and
+`cmd` are written by the compositor and read by the owner, so an unmediated
+read is a *steal* and an unmediated write is *synthesised input*. The distinction
+the brief asks for lands on `keys`, which is a ring and is already closed, and
+on `self`, which is not a ring at all.
+
+## 7.2 What breaks at the bump, and for whom
+
+**124 packages in the channel, of which 92 carry Hamnix programs — and every
+program links this file.** `scripts/hamlinux_build.sh` compiles
+`user/linux-wsys.c` into `RT_SRCS` unconditionally, for every binary, and
+`scripts/hamlinux_packages.py` ships one package per program — `hamnix-cat`,
+`hamnix-ls`, `hamnix-true`. `/bin/true` is a window-system client at a version.
+(The other 32 are firmware, kernel modules and Vulkan libraries and carry no
+Hamnix binary; they are the only packages a wsys bump does not touch.)
+
+`hpm update` upgrades every installed, **non-pinned** package and aborts the
+closure on the first failure. So the mixed system arrives three ways: a pinned
+package, an aborted closure, and any binary that did not come from a package.
+
+**THE ENFORCEMENT BEGINS AT THE REBOOT, NOT AT THE UPDATE, and that is the
+sentence to plan around.** Immediately after `hpm update`:
+
+- every process that was already running keeps its v8 mapping and keeps full
+  shared-memory access — the compositor, both panels, every open app;
+- every process started *after* it is v9 and `shm_attach()` refuses: the header
+  says 8, `shm_seg_is_live()` says a row is held, so it prints by name, appends
+  `refused live=8 mine=9 pid=… boot=<boot-id>` to `/srv/wsys.refused`, sets
+  `hamwsys_was_refused()`, changes not one byte, and returns `EPROTO`;
+- the panel — a survivor, therefore v8 — draws the restart notice on a real
+  click, which is what STAGE E of `installed_update_wsysver.sh` measures.
+
+So between the update and the restart the desktop is **usable and closed**: it
+keeps compositing and cannot open anything. **It is also, for that whole window,
+a system with no boundary at all**, because the survivors are exactly the
+processes that still hold the segment. That is not a degraded boundary, and the
+release note has to say so in those words: *the security property starts at the
+reboot.*
+
+**A PINNED v8 PACKAGE IS PERMANENTLY BROKEN AFTER THE REBOOT, AND THE REFUSAL
+TELLS THE PERSON THE WRONG THING.** After the restart the live segment is v9
+and a pinned v8 `/bin/cat` refuses with
+
+> REBOOT (or restart the session) and start this program again.
+
+which is true when the *program* is newer than the session and false when the
+*session* is newer than the program — and `seg_refuse_message()` cannot
+currently tell the two apart, though it has both numbers in its hand. **Stage 7
+must branch that message on `theirs > mine`** and say "this program is older
+than the running window system; update it (`hpm update <pkg>`) or unpin it."
+Cheap, and it is the difference between a fixable machine and a mysterious one.
+
+**AND `/srv/wsys` MUST NOT SIMPLY STOP EXISTING.** If stage 7 follows blocker
+(3) and moves the authority's table to a new path, then a v8 straggler finds no
+`/srv/wsys`, **creates one**, initialises it, and runs a private window system
+that composites nothing — a silent success, which is the failure shape this
+tree exists to refuse. **It is not a hypothetical: that exact failure has been
+measured twice** and both write-ups are in `shm_attach()` — "allocated window
+ids nobody composites and drew into a screen that does not exist, with no error
+anywhere". `shm_attach()` tries three candidates (`shm_path()`, then
+`/dev/shm/hamnix-wsys`, then `/tmp/hamnix-wsys`) and creates at the first one it
+can, so an absent `/srv/wsys` does not stop a straggler, it only relocates it.
+
+The v9 `wsysd` must therefore keep a **refusal stub** at `/srv/wsys`, and the
+stub has two non-obvious requirements, both from the code:
+
+- **It must be openable `O_RDWR` by an ordinary client** (`0666`), or the
+  straggler's open fails and it falls through to candidate 2 and creates its own
+  segment there. A `0600` stub is worse than none.
+- **It must read as LIVE, which means it must contain at least one `used` row
+  whose `pid` is a running process** — `shm_seg_is_live()` scans for exactly
+  that and answers 0 otherwise. A v9-stamped stub *with no rows* reads DEAD, and
+  a v8 straggler then RE-INITIALISES it in place and runs its private desktop in
+  the very file that was supposed to stop it. The stub therefore holds one row
+  stamped against `wsysd`'s own pid and nothing else.
+
+The refusal is terminal once a candidate is opened — it does not fall through to
+candidates 2 and 3 — so one correct stub is sufficient. This is a distribution
+decision, it needs its own arm in `installed_update_wsysver.sh`, and it is not
+optional.
+
+### The 8 → 9 rehearsal
+
+**It needed no new gate.** `installed_update_wsysver.sh` reads `WSYS_VERSION`
+out of `user/linux-wsys.c`, builds three private channels at N−1, N and N+1
+from symlink farms, and its **STAGE E already is the 8 → 9 update**: a live v8
+desktop, `hpm update` to a v9 channel, real QMP clicks on Applications, and
+assertions that the v9 binary refused by name, that `/srv/wsys` is unresized,
+that the window table is unchanged, and that `/srv/wsys.refused` carries
+`refused live=8 mine=9`.
+
+REHEARSAL_RESULT_PLACEHOLDER
+
+## 7.3 What it costs — and the budget has no term for the thing that changes
+
+The measured shape holds: `budget(ops) = 0.34% of a core + 1.80 µs × ops`, both
+terms asserted separately by `wsys_srv_transport.sh`, and routing a drag
+measured *cheaper* than not routing it (99.80% → 53.30% of a core at 43% more
+frames) because `srv_service` drains every queued message in one iteration where
+the unrouted path woke the loop per publish.
+
+**The whole-desktop case does not break that, and the reason is worth stating:
+the fixed term is a WAKE, and a wake is per-loop-iteration, not per-client.**
+N clients' messages coalesce into the same drain, so the fixed term does not
+multiply — and the unrouted arm gets *worse* with N, because N clients poke the
+wake channel N times. The routed win should therefore **grow** with the number
+of clients. **That is a prediction from the mechanism, not a measurement, and
+stage 7 must not quote it as one.**
+
+**What the budget has no name for is the CONNECTION**, and a desktop is where
+connections stop being one:
+
+- `WSRV_CONN_MAX = 64`, on the mutation socket *and* separately on the read
+  server. The 65th client is `close(cfd)`'d, which today means it silently
+  falls back to the unmediated path and after 7.1(5) means it cannot draw at
+  all. A DE spawns each app as `/bin/hamsh /etc/rc.de-user <prog>`, so an app
+  costs a connection for hamsh and one for the program unless the handoff
+  adopts — **64 is a desktop-wide app limit and nothing measures it.**
+- The one-time dial is 742 µs in one run, ~100 µs in the others, per process.
+  At login that is once per DE component; at `hpm update` scale it is nothing.
+  It is reported apart in the read-latency gate and belongs in the budget as a
+  third term rather than folded into a per-message figure.
+- `srv_service` linearly scans `srv_conn[]` to find the connection for each
+  ready descriptor. 64 compares per message is negligible; it is named so that
+  raising the ceiling is understood to be cheap.
+- The read server measured **0 ticks** at idle and under a drag — with **one**
+  client. `snap_windows()` walks the table per read, so read-server CPU is
+  (clients × poll rate × rows) and every one of those three numbers is bigger
+  on a desktop.
+
+**So the honest answer to "does the whole-desktop case change the picture": the
+two-term budget's *form* survives and its *constants* have never been measured
+above one client.** Stage 7 needs one new arm before it can claim otherwise:
+`wsys_srv_transport.sh` driven by **N probes at once** (N = 2, 8, 32, 64) at a
+fixed total ops/s, asserting that the fixed term does not scale with N and that
+the 65th client is REFUSED rather than served in process.
+
+## 7.4 What has to be deleted, and how the gates survive losing their red arms
+
+**"Remove the in-process path" is the wrong name for it, and the wrong name is
+dangerous here.** `hamwsys_write_inner()` is what a routed mutation *becomes*
+inside `wsysd`, with `srv_as_caller()` installed. It is not going anywhere. What
+is deleted is **the client's entry into it**: the fallbacks in 7.1(5), the
+`srv_enabled()` flag, and the mapping. The device implementation and the client
+transport separate; they do not merge and nothing is dropped.
+
+That is also what breaks the gates, and precisely:
+
+- **61 gates set `$HAMWSYS`. Six of them never start a `wsysd`** —
+  `wsys_bypass.sh`, `wsys_uidgate.sh`, `wsys_v2_handup_rate.sh`,
+  `lat_null_control.sh`, `net_accept_servers.sh`, `x11_stream_resync.sh`.
+  (The blocker note at THE SPLIT says "twenty test scripts … and TWO"; the
+  denominator has moved to sixty-one, and the **two it names are still exactly
+  the two that matter** — the other four set `$HAMWSYS` to isolate a segment
+  and never name a `/dev/wsys` path, so they are collateral rather than
+  subject. The note's judgement has aged better than its arithmetic.) After the
+  bump a client with no compositor cannot open `/dev/wsys` at all, so
+  `wsys_bypass.sh` and `wsys_uidgate.sh` — the two gates on this very boundary
+  — stop being able to run their subject at all.
+- **Six gates assert an unrouted success as a scored arm**: `wsys_enum_policy`,
+  `wsys_srv_identity`, `wsys_srv_mutate`, `wsys_srv_scene`, `wsys_srv_connown`,
+  `wsys_srv_transport`. Every one of those red arms is a client reaching the
+  segment past a live mediator, which is exactly the thing being deleted.
+
+**The restructuring, and it is not "delete the red arms".** A gate that is green
+in every configuration is equally green against a server that checks nothing —
+that sentence is in three of these files and it does not stop being true when
+the property lands. The red arms have to be *relocated*, not retired:
+
+1. **The bypass moves out of the client and into a purpose-built one.**
+   `tests/linux/wsys_bypass.c` already is that program: it opens the segment by
+   path and mmaps it, calling nothing in `linux-wsys.c`. Post-bump it keeps
+   working **only if there is still something to open** — so it becomes the
+   gate on the refusal stub (7.2) and its assertions **invert**, exactly as the
+   keylog arm already did: it must now find the table absent, or present and
+   `0600`/empty, and it must say so by reading the same offsets it used to
+   scrape. An inverted control is evidence; a deleted one is not.
+2. **The pairs get their red arm from a v8 CLIENT, not from a flag.** The
+   `installed_update_wsysver.sh` machinery already builds a whole channel at an
+   arbitrary `WSYS_VERSION` from a symlink farm — so a stage-7 gate can build a
+   **v8 `cat`** and a **v9 `wsysd`**, run them against one segment, and get a
+   genuine red/green pair whose red arm is a real old binary rather than an
+   environment variable. That is a better red arm than the current one: it is
+   the artefact the property actually has to defeat.
+3. **The six compositor-less gates get a compositor, or say why not.** Five of
+   them are cheap to give one. `wsys_uidgate.sh` is the hard case — it exists to
+   prove what a client can do with *nothing else alive* — and its honest
+   post-bump form is "a client with nothing else alive can do nothing", which is
+   a one-line assertion and a real one.
+4. **Nothing lands until 1 and 2 are green in the pre-bump tree.** They can both
+   be written and run today, against v8, with the in-process path still there:
+   the v8-client/v9-server pair reproduces on the current tree by construction.
+   Building them first is what keeps the project from gaining the property and
+   losing the proof in the same commit.
+
+## 7.5 The order of work
+
+Each step is separately committable and separately red-gateable; the bump is
+still last and is now step 8 of 8.
+
+1. Branch `seg_refuse_message()` on which side is older (7.2). One function, no
+   protocol change, immediately useful — it is already the wrong advice today
+   for anyone who pins.
+2. Write the v8-client / v9-server gate (7.4 §2) and the multi-client budget arm
+   (7.3). Both run on the current tree.
+3. Route `wid/wctl` (7.1 §4). Smallest remaining mutation, red arm available.
+4. Route `open`/existence and the three read leaves that answer the enumeration
+   question — `dir`, `wid/ctl`, `wid/wctl` reads — under stage 4's tier rule
+   (7.1 §2). This is the big one, and `wsys_enum_policy.sh` gets three new arms
+   that are red today, as this section's probe shows.
+5. Move `pointer`/`event`/`text`/`cmd` to per-window channels on the `keys`
+   construction (7.1 §3).
+6. Tier 2's remainder — `/srv/wsys.bb` and `/srv/wsys.img` — which is an
+   allocator rewrite, not a change of where a pointer points.
+7. Delete the fallbacks and `srv_enabled()` (7.1 §5, §6); stop mapping the
+   segment in clients; stand up the refusal stub (7.2).
+8. `WSYS_VERSION` 8 → 9, in the same commit as step 7 and never before it —
+   until the old path is gone the bump refuses clients for a boundary that is
+   not yet enforced.
+
+**Steps 4, 5 and 6 are the tier-1/tier-2 work whose blockers (1)–(3) have been
+recorded in `user/linux-wsys.c` since before this server existed and are still
+unresolved.** The six stages above did not go around them; they built the
+transport and the policy that tier 1 will need. Stage 7 is where they are paid.
