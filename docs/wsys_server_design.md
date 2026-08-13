@@ -1010,11 +1010,14 @@ That is also what breaks the gates, and precisely:
 - **61 gates set `$HAMWSYS`. Six of them never start a `wsysd`** —
   `wsys_bypass.sh`, `wsys_uidgate.sh`, `wsys_v2_handup_rate.sh`,
   `lat_null_control.sh`, `net_accept_servers.sh`, `x11_stream_resync.sh`.
-  (The blocker note at THE SPLIT says "twenty test scripts … and TWO"; it was
-  written when that was true. The two it names *are* still in the list, and the
-  list is now six of sixty-one.) After the bump a client with no compositor
-  cannot open `/dev/wsys` at all, so those six stop measuring what they measure
-  — including the two gates on this very boundary.
+  (The blocker note at THE SPLIT says "twenty test scripts … and TWO"; the
+  denominator has moved to sixty-one, and the **two it names are still exactly
+  the two that matter** — the other four set `$HAMWSYS` to isolate a segment
+  and never name a `/dev/wsys` path, so they are collateral rather than
+  subject. The note's judgement has aged better than its arithmetic.) After the
+  bump a client with no compositor cannot open `/dev/wsys` at all, so
+  `wsys_bypass.sh` and `wsys_uidgate.sh` — the two gates on this very boundary
+  — stop being able to run their subject at all.
 - **Six gates assert an unrouted success as a scored arm**: `wsys_enum_policy`,
   `wsys_srv_identity`, `wsys_srv_mutate`, `wsys_srv_scene`, `wsys_srv_connown`,
   `wsys_srv_transport`. Every one of those red arms is a client reaching the
