@@ -620,8 +620,19 @@ def p9_listdir(path: Ptr[char], buf: Ptr[uint8], count: uint64) -> int64:
     # the exact same "NAME\n"-packed format the retired SYS_LISTDIR
     # used to return, so existing callers' parsing stays byte-identical
     # without any format conversion in this wrapper. Returns the bytes
-    # written into `buf` (>= 0), or -1 on error (path doesn't exist,
-    # isn't a directory, or read failed).
+    # written into `buf` (>= 0), or -1 on error (path doesn't exist or the
+    # read failed).
+    #
+    # IT DOES NOT REJECT A NON-DIRECTORY, and this comment used to claim it
+    # did -- "or isn't a directory" -- which is a lie that cost `ls` most of
+    # this project. open()+read() SUCCEED on a regular file, so the bytes
+    # returned are the FILE'S CONTENTS and the non-negative length is
+    # indistinguishable from a listing. `ls foo.txt` therefore printed the
+    # file and exited 0. Callers that must tell the two apart ask p9_is_dir()
+    # BEFORE calling this -- user/find.ad does (its bug #146), and user/ls.ad
+    # now does. The check is not added here because several callers pass a
+    # path they have already established is a directory, and a second stat per
+    # call would be a syscall none of them needs.
     fd: int32 = sys_open(path)
     if fd < 0:
         return -1
