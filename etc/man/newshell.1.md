@@ -31,7 +31,7 @@ The canonical privileged user is `hostowner`. Package install
 ## EXAMPLES
 
     newshell hostowner
-    newshell hostowner -c 'hpm install ed'
+    newshell hostowner -c 'hpm install hamnix-vi'
 
 ## SEE ALSO
 

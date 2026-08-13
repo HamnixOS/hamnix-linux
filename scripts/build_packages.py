@@ -265,9 +265,38 @@ def _tar_gz(pkg_root: Path, out_path: Path) -> tuple[str, int]:
 # ---------------------------------------------------------------------
 # File mappings — per-package
 # ---------------------------------------------------------------------
-# Each spec resolves to a `files/` layout. Sources are project-relative;
-# missing sources are reported via _say and skipped (the package still
-# emits — useful for slim/CI builds where e.g. busybox isn't compiled).
+# Each spec resolves to a `files/` layout. Sources are project-relative.
+#
+# A NAMED SOURCE THAT IS NOT IN THE TREE IS A REFUSAL, NOT A WARNING.
+# Until 2026-08-13 a missing source was reported via _say and skipped, and
+# the package emitted anyway — "useful for slim/CI builds where e.g. busybox
+# isn't compiled". What it was actually useful for is shipping two broken
+# packages out of this file:
+#
+#   * hamnix-ed. COREUTILS_BINS named `ed`, user/ed.ad has never existed, so
+#     the package was published with an EMPTY files/ directory and an entry
+#     in index.json. etc/man/hpm.1.md used `hpm install ed` as its worked
+#     example, so the documented first thing a person installs from 255.one
+#     installed nothing and said it succeeded.
+#   * hamnix-desktop-core. hampanelscene and hamappmenu do not link in the
+#     native lane (they reach for sys_getenv/sys_fd_size — 7 refs — and
+#     sys_wsys_was_refused — 2 refs — which the native runtime does not
+#     have; both build clean through the Linux lane). The packager staged
+#     the other 17 binaries, printed `skipped 2 missing source(s)`, and
+#     built a desktop with NO PANEL AND NO APPLICATIONS MENU.
+#   * the five hamnix-drivers-* packages, in any tree without a
+#     kernel-modules/ directory — which is EVERY tree this repository has,
+#     because kernel-modules/*.ko is committed in the native line, not
+#     here. MEASURED: 16 absent .ko sources, 5 packages emitted with 0
+#     files. `hpm install hamnix-drivers-block-nvme` succeeded and
+#     installed no NVMe driver. Nobody had noticed, because the only
+#     evidence was five `skipped N missing source(s)` lines in a 200-line
+#     build log.
+#
+# Both were knowable at copy time. This is the same refusal, learned the
+# same way, as EXTRAS_MAY_BE_ABSENT in scripts/hamlinux_packages.py, which
+# was added after hamnix-adder shipped a compiler driver with no compiler.
+# See _preflight_sources() below.
 
 def _add_user_bin(file_map: list[tuple[Path, str]], stem: str,
                   target_subpath: str = "bin") -> None:
@@ -381,7 +410,21 @@ COREUTILS_BINS = (
     "cp", "crond", "crontab", "csplit", "cut", "date", "df", "diff",
     "dircolors", "dirname",
     "distrofs", "dmesg",
-    "du", "echo", "ed", "env_show", "expr", "false", "find", "free",
+    # `ed` is NOT here. It was, from the first version of this tuple, and
+    # user/ed.ad has never existed in this repository — so hamnix-ed was
+    # published to 255.one with an empty files/ directory and an entry in
+    # index.json for as long as the channel has existed. Nothing invokes
+    # ed: no rc script, no .desktop launcher, no service, no other .ad.
+    # The only two references were the WORKED EXAMPLES in etc/man/hpm.1.md
+    # and etc/man/newshell.1.md (`hpm install ed`), i.e. the documented
+    # first package a new user installs was the one that installed
+    # nothing — and it named `ed` rather than `hamnix-ed`, so it could not
+    # have resolved even if the package had contents. Both now name
+    # hamnix-vi, which exists and carries a binary. Removing the name is
+    # the honest change: writing an ed(1) is a feature, not a packaging
+    # fix, and until someone writes user/ed.ad _preflight_sources()
+    # refuses to build a channel that offers one.
+    "du", "echo", "env_show", "expr", "false", "find", "free",
     "getty", "grep", "halt", "hamwd", "head", "hostname", "id",
     "insmod", "kill", "less", "ln", "login", "ls", "lsblk", "lsmod",
     "md5sum", "memhog",
@@ -1381,11 +1424,17 @@ PACKAGE_SPECS.append({
 # Generic spec-driven package builder
 # ---------------------------------------------------------------------
 
-def _build_spec(spec: dict) -> dict | None:
+def _build_spec(spec: dict) -> dict:
     """Build the tarball for a PACKAGE_SPECS entry.
 
-    Returns the index.json entry dict, or None if the package was
-    skipped (no files staged AND it's not a metapackage).
+    Always returns the index.json entry dict. It never returns None —
+    the docstring claimed it skipped a package with no files staged and
+    nothing in the body ever did, which is why hamnix-ed was published
+    with an empty files/ directory rather than skipped. A package now
+    reaches this function only after _preflight_sources() has confirmed
+    every source it names is in the tree, so `n_files == 0` here means
+    `files_fn` named nothing at all: a METAPACKAGE (`lambda: []`), which
+    carries its meaning in `depends`.
     """
     pkg_name = spec["name"]
     pkg_dirname = f"{pkg_name}-{PKG_VERSION}"
@@ -1405,10 +1454,19 @@ def _build_spec(spec: dict) -> dict | None:
         total_bytes += _copy_file(src, files_root / rel)
         n_files += 1
 
+    # Belt and braces. _preflight_sources() has already refused this whole
+    # run if any named source is absent, so reaching here means something
+    # bypassed it (a spec built outside PACKAGE_SPECS, a files_fn that is
+    # not deterministic, a file deleted mid-run). It is still a package
+    # that would ship short, so it is still a refusal — never a _say.
     if skipped:
-        _say(f"{pkg_name}: skipped {len(skipped)} missing source(s) "
-             f"(first 3: {', '.join(skipped[:3])}"
-             f"{'…' if len(skipped) > 3 else ''})")
+        raise SystemExit(
+            f"\nREFUSING TO BUILD {pkg_name}: {len(skipped)} named "
+            f"source(s) absent at staging time and NOT caught by "
+            f"_preflight_sources():\n"
+            + "\n".join(f"    {s}" for s in skipped)
+            + "\nThe preflight and the staging loop disagree about what "
+              "this package's files_fn names; fix that before publishing.\n")
 
     target = spec.get("target", "#hamnix-system")
     description = spec["description"]
@@ -1787,6 +1845,99 @@ def build_linux_debian_12() -> dict | None:
 
 
 # ---------------------------------------------------------------------
+# SOURCES THAT MAY LEGITIMATELY BE ABSENT — and nothing else may be.
+# ---------------------------------------------------------------------
+# Keys are the repo-relative source path exactly as a files_fn names it;
+# values are WHY absence is acceptable. Empty today, deliberately: every
+# source in this file is either a first-class file in the tree or a build
+# product this script exists to package. "Sometimes it is not there" is the
+# sentence that shipped an empty hamnix-ed and a desktop with no panel, so
+# an entry here has to say which build produces the file and why a channel
+# without it is still worth publishing.
+#
+# In particular kernel-modules/*.ko does NOT belong here. A tree without it
+# cannot build the hamnix-drivers-* packages, and a driver package with no
+# .ko is a machine that installs a disk driver and gets none. Build the
+# modules, or drop those specs from the run — do not excuse them.
+SOURCES_MAY_BE_ABSENT: dict[str, str] = {}
+
+
+def _preflight_sources() -> None:
+    """Refuse to build a channel whose packages promise files they lack.
+
+    Runs BEFORE anything is written, so a refusal leaves no tarballs and no
+    index behind — there is nothing half-published to clean up. Two shapes,
+    reported separately because the fix is different:
+
+      * NO SOURCE IN THE TREE — a packaged name with nothing behind it.
+        Nothing can ever build it; the name is the bug. (`ed`.)
+      * SOURCE PRESENT, BUILD PRODUCT ABSENT — the compile or the link
+        failed and the packager was about to paper over it. The BUILD is
+        the bug. (hampanelscene, hamappmenu.)
+    """
+    no_source: list[tuple[str, str, str]] = []   # pkg, src, .ad path
+    not_built: list[tuple[str, str]] = []        # pkg, src
+    allowed: list[str] = []
+
+    for spec in PACKAGE_SPECS:
+        for src, _rel in spec["files_fn"]():
+            rel = (str(src.relative_to(HERE)) if src.is_relative_to(HERE)
+                   else str(src))
+            # build/user/<stem>.elf comes from user/<stem>.ad. Checked
+            # FIRST and WITHOUT looking at the ELF: a stale build/user
+            # artefact left behind by an earlier build outlives its
+            # deleted source, and that is precisely the drift that would
+            # otherwise make a sourceless package name look healthy.
+            if src.parent == USER_DIR and src.suffix == ".elf":
+                ad = HERE / "user" / f"{src.stem}.ad"
+                if not ad.is_file():
+                    no_source.append((spec["name"], rel,
+                                      str(ad.relative_to(HERE))))
+                    continue
+            if src.is_file():
+                continue
+            if rel in SOURCES_MAY_BE_ABSENT:
+                allowed.append(f"{spec['name']}: {rel} "
+                               f"({SOURCES_MAY_BE_ABSENT[rel]})")
+                continue
+            not_built.append((spec["name"], rel))
+
+    for line in allowed:
+        _say(f"source absent by declaration — {line}")
+
+    if not no_source and not not_built:
+        return
+
+    parts: list[str] = []
+    if no_source:
+        parts.append(
+            "%d package(s) name a binary WITH NO SOURCE IN THIS TREE:\n%s\n"
+            "  Nothing can build these. Either delete the name from its "
+            "*_BINS tuple / spec (and anything that documents or invokes it "
+            "— etc/man/*.md, etc/hamde/apps/*.desktop, rc scripts), or write "
+            "the source."
+            % (len(no_source),
+               "\n".join(f"    {p} promises {s} — {ad} does not exist"
+                         for p, s, ad in no_source)))
+    if not_built:
+        parts.append(
+            "%d package(s) name a file that IS NOT IN THIS TREE:\n%s\n"
+            "  For build/user/*.elf the source exists, so the compile or the "
+            "link FAILED and this script was about to publish the package "
+            "without it. Fix the build, or — if the absence is genuinely "
+            "legitimate — record it in SOURCES_MAY_BE_ABSENT with a reason."
+            % (len(not_built),
+               "\n".join(f"    {p} promises {s}" for p, s in not_built)))
+
+    raise SystemExit(
+        "\nREFUSING TO BUILD: a package that promises a file and does not "
+        "carry it is a lie the channel repeats to every machine that "
+        "installs it.\n\n" + "\n\n".join(parts) +
+        "\n\nNo tarball and no index.json were written, so nothing can "
+        "install from this channel.\n")
+
+
+# ---------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------
 
@@ -1795,6 +1946,9 @@ def main() -> int:
         raise SystemExit(
             "[build_packages] build/ missing — run scripts/build_iso.sh "
             "first to produce the artifacts this script repackages.")
+    # Before ANY output is written: every file every package promises has to
+    # be in the tree. See _preflight_sources().
+    _preflight_sources()
     PACKAGES_OUT.mkdir(parents=True, exist_ok=True)
     # Channel subdirs: main/ holds every first-party / free package;
     # non-free/ and non-free-firmware/ exist as placeholders so `hpm
@@ -1832,9 +1986,7 @@ def main() -> int:
 
     # Build the component packages first (per PACKAGE_SPECS order).
     for spec in PACKAGE_SPECS:
-        entry = _build_spec(spec)
-        if entry is not None:
-            entries.append(entry)
+        entries.append(_build_spec(spec))
 
     # Then the bootloader (target=#esp) and the Debian distro.
     entries.append(build_hamnix_bootloader())
