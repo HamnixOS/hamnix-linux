@@ -139,36 +139,45 @@ mis-read:
   coefficients are what need a quiet host, and the gate now says so itself.**
   Correctness arms — transport, flag-unset refusal, byte-identical `windows`,
   zero backbuffer writes — are load-insensitive and stay meaningful either way.
-* **THE SHELL'S SPAWN PATH IS WIRED, AND THE FIRST ROUTED SPAWN FOUND A REAL
-  DEFECT — IN THE WIRING, NOT IN THE SERVER.** `_spawn_at()` in
-  `user/hamsh.ad` now calls `sys_wsys_srv_handoff(1)` before the launch and
-  `(0)` after, and copies `HAMWSYS_SRV_FD` into the child's `envp` — which is
-  needed because **`_build_envp()` builds from hamsh's own exported-variable
-  table, not the C `environ`**, so the runtime's `setenv()` is invisible to a
-  spawned child without it. That is the non-obvious half of the change.
-  **It does not work yet, and the cause is named:**
-
-  | reader, against the same live routed server | result |
-  |---|---|
-  | `cat /dev/wsys/screen` spawned by bash | `1280 800`, rc 0 |
-  | `cat /dev/wsys/screen` spawned by hamsh | **cannot open: ENXIO** |
-
-  The routed *read* path is fine — the direct arm proves it.
-  `srv_adopt_inherited()` is reached **before `seg_id_known`, deliberately**,
-  because a handed connection needs no segment identity to find its server; so
-  a child that adopts one **never attaches the segment**, and
-  `/dev/wsys/screen` needs the chrome mapping locally (`chrome_attach()`,
-  *ENXIO WHEN UNANNOUNCED* in `user/linux-wsys.c`). **The adoption is built
-  for a process that speaks only the protocol, and `cat` is not one.** So
-  handing the connection to every external command is not just the policy
-  widening the design anticipated — it breaks ordinary commands. The fix is
-  either a selective handoff (only a spawn *into* a window the shell owns) or
-  an adopting child that attaches the segment too; **that is a design pass and
-  was deliberately not made by loosening anything to get a desktop up.**
-* **What IS verified: the inert paths.** Flag unset, and flag set with no
-  server (handoff returns -1 and says so), both spawn and redirect exactly as
-  before — `hamsh` is unchanged for every shipped configuration, which is what
-  `HAMWSYS_SERVER` being unset everywhere means today.
+* **THE SPAWN-PATH WIRING IS WITHDRAWN, AND THE FINDING THAT JUSTIFIED IT WAS
+  AN ARTIFACT — THIS CORRECTS THE ENTRY THAT WAS HERE.** The previous pass
+  reported "handing the connection breaks ordinary commands", on the strength
+  of `cat /dev/wsys/screen` giving ENXIO spawned by hamsh and `1280 800`
+  spawned by bash against the same live server. **That comparison varied two
+  things: the spawner AND the environment.** `_build_envp()` builds a child's
+  `envp` from hamsh's *own* exported table, which holds only `PATH` and `HOME`
+  — so the hamsh-spawned `cat` was looking for `/srv/wsys`, not the harness
+  segment, and was never talking to the server under test at all. **With the
+  environments matched, all three arms read `1280 800`.** There was no ENXIO
+  and nothing was broken.
+* **WHAT THE CORRECTED CONTROL FOUND INSTEAD: the handoff cannot work through
+  this spawn path at all, and neither side is at fault.**
+  `sys_wsys_srv_handoff(1)` publishes the connection by clearing `FD_CLOEXEC`
+  and naming the descriptor in `HAMWSYS_SRV_FD`, because a connected
+  `SOCK_SEQPACKET` survives `fork` and `execve`. But `lib/p9.ad`'s
+  `_spawn_flags` calls **`p9_closefrom(3)`** in the child immediately before
+  `execve`, closing every fd from 3 to 63 — the CLEAN-FD contract, whose own
+  comment gives the reason: *"a spawned file server never sees the launcher's
+  other channels"*. **The descriptor is closed by design a moment before the
+  program meant to inherit it starts.** Measured: the child prints
+  `HAMWSYS_SRV_FD=3 is not a connected server socket (Bad file descriptor):
+  dialling instead`, dials its own connection, and **works**. So the wiring
+  bought nothing and would cost one spurious warning per command with the flag
+  on; it has been taken back out, with the analysis left at the call site.
+* **Three ways out, none taken, because each is a real decision:** (1) exempt
+  one named descriptor from `p9_closefrom` — narrow and auditable, but it
+  re-opens exactly the door that contract closed; (2) pass the connection with
+  `SCM_RIGHTS` after exec, so nothing has to survive it and the contract stays
+  whole; (3) hand nothing and let every client dial for itself — which is what
+  happens today, and the measurement shows it already works, leaving only
+  *"write into a window I do not own"* unsolved.
+* **A SEPARATE BLOCKER FOR ANY ROUTED BOOT, worth more than the handoff
+  question.** hamsh does not pass its own environment on: a child gets exactly
+  `PATH=/bin:/sbin:/usr/bin` and `HOME=/`, and **not** the ambient `PATH`.
+  So **`HAMWSYS_SERVER=1` cannot reach the desktop by exporting it** — the rc
+  must set and `export` it in hamsh's own table, or every DE program starts
+  unrouted while the compositor serves. Any future routed-boot attempt that
+  skips this will measure an unrouted desktop and believe it is routed.
 * **The offscreen DE harness has a trap worth knowing before the next
   attempt.** `wsysd`, `hamdesktop` and `hampanelscene` all come up offscreen
   and the panel beacon fires, but **`/dev/wsys/windows` reads 0 bytes even
