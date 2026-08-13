@@ -2,17 +2,19 @@
 # tests/linux/wsys_wctl.sh — DOES A hamui APP'S v2 NEGOTIATION REACH THE
 # WINDOW SYSTEM AT ALL?
 #
-# THIS GATE IS ABOUT ONE RUN IN FOUR RED ON A HEALTHY TREE, AND THAT IS NOT
-# THIS GATE'S SUBJECT. It launches `fillwin` in the background just before the
-# negotiation probe, so a SECOND v2 window is live -- which is the precondition
-# for a separately-reported defect: a v2 window opened after another v2 window
-# sometimes never comes up, and when it does not, EVERY leaf of it fails to
-# open with ENOENT and its ctl reads empty. The scene_gen assertion below now
-# names that case instead of blaming scene_gen for it. If you are here because
-# a release run went red: RE-RUN IT FIRST. A red that reproduces is a finding;
-# a single red is most likely that defect. (Measured while red-proofing the
-# scene_gen assertion: red then green on consecutive runs of an unmodified
-# tree.)
+# IT USED TO BE ABOUT ONE RUN IN FOUR RED ON A HEALTHY TREE, AND IT IS NOT ANY
+# MORE. The cause was a race in win_alloc: two clients calling `newwindow` at
+# the same moment could claim the same row, so the loser held a wid whose row
+# belonged to someone else and EVERY leaf of it answered ENOENT with an empty
+# ctl. This gate launches `fillwin` in the background just before the
+# negotiation probe, which is exactly two clients at once, so it met that race
+# more often than anything else in the tree. Fixed (compare-exchange on `used`,
+# atomic fetch-add for the wid); measured 5/5 across eight runs after.
+#
+# The "re-run first, a single red is probably that defect" warning that stood
+# here is REMOVED WITH THE FIX rather than before it: a warning that outlives
+# its cause teaches people to ignore reds, which is worse than never having
+# written it. A red here is a finding again.
 #
 # THE DEFECT THIS EXISTS FOR, and it is the project's canonical failure shape:
 # a gap that answers something SUCCESS-SHAPED instead of the truth.
@@ -129,12 +131,16 @@ for _ in $(seq 1 80); do [ -s "$HAMFB_FILE" ] && break; sleep 0.1; done
 # THE PAINT CLIENT STARTS FIRST, AND THE ORDER IS A CORRECTION.
 # This gate used to run wctlv2 (which blits and then EXITS) before the paint
 # check, so the paint check ran with a dead v2 window already in the table --
-# and it failed about one run in four. Measured: with a single v2 client the
-# paint succeeds 8/8; preceded by an orphaned v2 window it fails intermittently.
-# That intermittency is a REAL defect (a v2 window after a dead one is
-# sometimes never painted) and is reported separately -- it is not this gate's
-# subject, and a gate that is red a quarter of the time trains people to re-run
-# it until it is green, which is how a real failure gets waved through.
+# and it failed about one run in four. Measured at the time: with a single v2
+# client the paint succeeded 8/8; preceded by an orphaned v2 window it failed
+# intermittently.
+#
+# THAT INTERMITTENCY WAS A REAL DEFECT AND IT IS NOW FIXED: win_alloc raced, so
+# two clients calling `newwindow` at the same moment could claim the same row
+# and the loser held a wid whose row belonged to someone else. The order below
+# is kept anyway -- it is the honest order for what this gate asks, and it is
+# also the arrangement that met the race most reliably, so it is worth keeping
+# pointed at that code.
 "$BIN/probe" fillwin >"$W/fill.out" 2>&1 &
 reap_add $!
 
@@ -185,20 +191,24 @@ fi
 # not. `strings`, sizes and symbols cannot see a deleted statement; a file the
 # window system publishes can.
 if [ -z "${CTL:-}" ]; then
-    # DO NOT BLAME scene_gen FOR AN UNREADABLE ctl. This gate runs `fillwin` in
-    # the background before this probe, so a SECOND v2 window is live -- and
-    # "a v2 window after another one is sometimes never painted" is a real,
-    # separately-reported defect (see the note above the fillwin launch). When
-    # it fires, every leaf of this window fails to open and ctl comes back
-    # empty. Measured while red-proofing this assertion: a build carrying the
-    # scene_gen++ reads `proto 2, scene_gen 1` with ctl perfectly readable when
-    # run alone, and reads NOTHING when run behind that other defect. Saying
-    # "scene_gen is ?" there would point the next person at the wrong bug.
-    bad "the window's ctl could not be read at all, so scene_gen cannot be"\
-        "checked. That is NOT the scene_gen defect: it is the separately"\
-        "reported one where a v2 window opened after another v2 window never"\
-        "comes up. Re-run; if it persists, that defect has stopped being"\
-        "intermittent."
+    # DO NOT BLAME scene_gen FOR AN UNREADABLE ctl -- THEY ARE TWO DIFFERENT
+    # DEFECTS AND THEY LOOK IDENTICAL FROM OUTSIDE.
+    #
+    # A build carrying the scene_gen++ reads `proto 2, scene_gen 1` with ctl
+    # perfectly readable. A window whose ROW was taken by another client reads
+    # NOTHING -- every leaf ENOENT, ctl empty -- because win_find cannot match
+    # its wid. Measured both ways while red-proofing this assertion.
+    #
+    # That second case was the win_alloc race, which is fixed; this branch is
+    # kept because it is the shape any future row-ownership bug will take, and
+    # because printing "scene_gen is ?" for it would send the next person after
+    # entirely the wrong code.
+    bad "the window's ctl could not be read AT ALL, so scene_gen could not be"\
+        "checked -- and this is NOT the scene_gen defect. An empty ctl means"\
+        "win_find could not match this wid, i.e. the window's ROW is not the"\
+        "one this client thinks it holds. That was the win_alloc race (fixed:"\
+        "compare-exchange on `used`, atomic fetch-add for the wid). If it is"\
+        "back, it is back in row ownership and not in the version verb."
 elif [ "${SGEN:-}" = "0" ]; then
     ok "AND NEGOTIATING v2 IS NOT DAMAGE: ctl reports scene_gen=0, so the v2 scene read stays a 0-byte success and paint_window reaches the backbuffer"
 else
