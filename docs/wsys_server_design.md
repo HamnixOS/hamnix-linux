@@ -531,6 +531,53 @@ is off by default and nothing ships with it on; the flag-unset path is verified
 by a second compositor with the flag nowhere in its environment, in both this
 gate and the identity gate.
 
+## What stage 6 measured — the scene, and the frame boundary is the whole problem
+
+`tests/linux/wsys_srv_scene.sh`, **8 passed, 0 failed**. `WSYS_VERSION` stays 8.
+`/dev/wsys/<wid>/scene` is now routed, so **no mutation a routed client makes
+is still performed in process**.
+
+The leaf is different from every other one because it has **per-open state**:
+opening the scene for writing STARTS A NEW FRAME and every write after that
+appends. So the boundary is **carried** (`WSRV_F_NEWFRAME` on the first write
+after the open, plus a zero-length message at the open itself so an open with
+no write still starts the frame) rather than inferred, and the flag lives in
+`struct hamwsys_file` because a client may hold two scenes open at once.
+
+The bytes land where they always did — the window's handed-up memfd, which the
+compositor already maps read-write — so routing changes **who writes**, not what
+is written. The trap avoided: `pix_get(wid, 0)` and never `pix_get(wid,
+owns_wid(wid))`; `mine` would make wsysd invent a second memfd for a window
+whose pixels have not been handed up, and the compositor would then paint the
+empty one it invented while the client drew into its own. That case is
+`-EAGAIN` and the client retries next frame.
+
+**THE ARM THAT MATTERS IS THE PAINT, NOT THE REFUSAL.**
+
+| | |
+|---|---|
+| unrouted frame 1 | red in the middle — the instrument proven able to answer non-blank first |
+| **routed frame 1** | **the same red, same pixel: the display list crossed the boundary and reached the SCREEN** |
+| frame 2 (60×60 blue corner) | the red is **gone** on both paths, and the blue is there |
+| attacker (uid 1002, owns nothing) | routed scene write **refused**, and its magenta is not on the screen |
+| routed vs unrouted | every sampled pixel identical |
+
+**Negative control, run:** make `srv_scene_write` ignore `WSRV_F_NEWFRAME` → 8/0
+becomes **6 passed, 2 failed**, and *every other arm stays green*, including the
+refusal and both frame-1 paints. That is why this gate reads a pixel that is
+supposed to have **gone away**: the defect is invisible to every other kind of
+assertion, and it is the one that made an empty window look full.
+
+**A connection must not outlive the identity that dialled it** —
+`srv_redial_if_uid_changed()` re-dials when the effective uid moves, because
+`SO_PEERCRED` is sampled at `connect(2)`. Adopted connections are exempt (not
+ours to replace). **This is UNPROVEN**: the arm written for it went green for
+the wrong reason (`ENOENT` from `win_find` before the permission check) and its
+negative control did not flip, so the arm was removed rather than quoted. The
+probe verb (`wsys_srv_probe drop <wid> <uid>`) is left in place; what it needs
+is a window that certainly exists at the moment of the write and a server-side
+trace naming the uid the connection was accepted with.
+
 ## Budget to hold it to
 
 From the census, at 6.2 µs sequential / 2.2 µs pipelined:
