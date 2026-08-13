@@ -5373,13 +5373,23 @@ def resolve_screen() -> int32:
         MAX_W = 320
     if MAX_H < 240:
         MAX_H = 240
-    # ...AND NOT BIGGER THAN A WINDOW CAN BE. "Maximised" is an instruction
-    # this server gives a client, and on a 2400- or 2560-wide screen it used
-    # to be an instruction to become a size no window on this system can
-    # paint at -- which is to say an instruction to disappear. The client is
-    # told a size it can actually render into, and the difference is stated
-    # rather than absorbed: a desktop whose maximised windows do not fill the
-    # screen has to be readable as this and not as a layout bug.
+    return 1
+
+
+# ...AND NOT BIGGER THAN A WINDOW CAN BE. "Maximised" is an instruction this
+# server gives a client, and on a 2400- or 2560-wide screen it used to be an
+# instruction to become a size no window on this system can paint at -- which
+# is to say an instruction to disappear. The client is told a size it can
+# actually render into, and the difference is stated rather than absorbed: a
+# desktop whose maximised windows do not fill the screen has to be readable as
+# this and not as a layout bug.
+#
+# SEPARATE FROM resolve_screen ON PURPOSE. resolve_screen BLOCKS while the
+# compositor starts (lib/hamscreen.ad retries for seconds); resolve_maxsurface
+# does not, so the screen has to be resolved first and this applied after
+# both. Doing the maximum surface first would have turned "wsyswl started
+# before wsysd" from a wait into a refusal.
+def clamp_maximised():
     if dev_max_w > 0 and MAX_W > dev_max_w:
         puts(2, "wsyswl: the screen is ")
         putd(2, scr_w)
@@ -5402,7 +5412,6 @@ def resolve_screen() -> int32:
         putd(2, MAX_H)
         puts(2, "\n")
         MAX_H = dev_max_h
-    return 1
 
 
 # HOW BIG MAY A WINDOW BE? The device knows and now says so; this reads it.
@@ -5684,17 +5693,19 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # BEFORE the socket exists. A client that connects and binds wl_output in
     # the same breath must not be able to catch a zero.
     #
-    # The maximum surface comes FIRST, because resolve_screen() uses it: what
-    # a maximised client is told must not exceed what a window may be.
+    # The SCREEN first, because that call is the one that waits for the
+    # compositor to exist. Then how big a window may be, then the size a
+    # maximised client is told -- which depends on both.
+    if resolve_screen() == 0:
+        return 1
     if resolve_maxsurface() == 0:
         return 1
+    clamp_maximised()
     puts(1, "wsyswl: a window may be at most ")
     putd(1, dev_max_w)
     puts(1, "x")
     putd(1, dev_max_h)
     puts(1, " (/dev/wsys/pool)\n")
-    if resolve_screen() == 0:
-        return 1
     puts(1, "wsyswl: screen ")
     putd(1, scr_w)
     puts(1, "x")
