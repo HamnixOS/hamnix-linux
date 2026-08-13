@@ -2664,23 +2664,63 @@ static int srv_caller_holds_wid(int wid);
  * question about a process and not about a descriptor, and stage 4's 9/0 gate
  * is written against exactly that.  What stage 5 changes is the rule for a
  * routed MUTATION -- see owns_wid() immediately below. */
+/* THE WALK DOES NOT STOP EARLY, AND STAGE 10b HAD TO MEASURE THAT TO BELIEVE
+ * IT MATTERED.  This function used to `return 0` the instant win_find() came
+ * back NULL, and `return 1` the instant the chain reached the owner.  Both
+ * early exits are a TIMING CHANNEL the moment this predicate becomes a SERVED
+ * answer, because then the caller can time it:
+ *
+ *   MEASURED, uid 1002 owning nothing, 200 routed write opens per arm, three
+ *   repetitions, on the tree before this change --
+ *       live wid:  93, 96, 118 us per refused open
+ *       dead wid:  47, 46,  44 us per refused open
+ *   -- a 2x separation, from a path whose errno and exit code are byte for
+ *   byte identical.  THE EXISTENCE OF THE WINDOW WAS READABLE WITH A
+ *   STOPWATCH.  The cost is proc_ppid(): a live wid makes the walk run and
+ *   read up to eight /proc/<pid>/stat files, and a dead wid made it run zero
+ *   times.
+ *
+ * THIS IS NOT NEW TO THE WRITE OPEN.  Stage 10 routed nine READ opens onto
+ * exactly this predicate (WSRV_LEAF_EXISTS), so the same stopwatch worked on
+ * `cat /dev/wsys/<wid>/scene` from the day that landed.  The comment at the
+ * server's existence arm -- "a refused caller never reaches win_find()" -- is
+ * true of that arm and MISLEADING, because the permission question it asks
+ * first calls win_find() ITSELF, right here, and then decides whether to do
+ * any work based on the answer.
+ *
+ * SO THE WALK IS UNCONDITIONAL AND ITS LENGTH DEPENDS ON THE CALLER ONLY.  It
+ * runs to the bound or to the top of the caller's own process chain whichever
+ * comes first, and records a hit rather than returning on one; a missing
+ * window is simply an owner pid nothing can match.  What a caller can now time
+ * is the depth of ITS OWN ancestry, which it already knows.
+ *
+ * THE PRICE, said plainly: a GRANT that used to stop at depth 0 or 1 now walks
+ * the whole chain.  That is at most eight /proc/<pid>/stat reads, once per
+ * (process, window) for the life of the process -- the existence answer is
+ * cached by the client -- and it is paid to remove a channel that no errno
+ * change can close. */
 static int owns_wid_ancestry(int wid)
 {
     struct wwin *v = win_find(wid);
-    if (!v || v->pid == 0) return 0;
+    int32_t owner = (v && v->pid != 0) ? v->pid : 0;
     /* The ppid walk starts at the CALLER, not at us.  Started at wsysd it
      * would answer "does wsysd's ancestry reach this window's owner", which
      * for a DE-spawned client is often YES -- wsysd is frequently the
      * ancestor of the very programs it would be mediating.  That is not a
      * near miss; it is a check that grants everything. */
     pid_t p = srv_caller.active ? srv_caller.pid : getpid();
+    int hit = 0;
     for (int depth = 0; depth < 8; depth++) {
-        if ((int32_t)p == v->pid) return 1;
+        /* `owner` is 0 for a window that does not exist or was never stamped,
+         * and a pid is never 0 here (p comes from getpid() or SO_PEERCRED and
+         * the walk stops at q <= 0), so an absent window matches nothing
+         * without the comparison having to know that. */
+        if (owner != 0 && (int32_t)p == owner) hit = 1;
         pid_t q = proc_ppid(p);
         if (q <= 0 || q == p) break;
         p = q;
     }
-    return 0;
+    return hit;
 }
 
 /* ==================================================================
@@ -4136,7 +4176,7 @@ static int srd_enum_tier(uid_t uid, pid_t pid, int *by_hostowner)
  * answered them out of a zeroed f->wid would report on window 0 -- which is no
  * window -- for every caller. */
 static int srd_answer(struct wsrv_conn *c, int leaf, int32_t wid,
-                      struct hamwsys_file *f)
+                      uint16_t flags, struct hamwsys_file *f)
 {
     memset(f, 0, sizeof *f);
     f->wid = wid;
@@ -4270,13 +4310,30 @@ static int srd_answer(struct wsrv_conn *c, int leaf, int32_t wid,
         /* THE ORDER MATTERS AND IT IS THE CHEAP ONE FIRST BY ACCIDENT ONLY:
          * the permission question is asked before the existence question, so a
          * refused caller never reaches win_find() and the answer it gets does
-         * not depend on the table at all. */
+         * not depend on the table at all.
+         *
+         * STAGE 10b CORRECTS THAT LAST CLAUSE, AND IT WAS MEASURED WRONG BY 2x.
+         * `allow` above is not free of the table: owns_wid_ancestry() calls
+         * win_find() ITSELF and then decided, on the answer, whether to walk
+         * /proc at all.  So this line was true of the ENOENT and false of the
+         * clock -- a refused caller's request took ~93 us for a live wid and
+         * ~46 us for a dead one, which is the same existence bit read with a
+         * stopwatch.  The fix is in owns_wid_ancestry(), where the early exits
+         * were; see the measurement recorded there. */
         int there = allow && win_find(f->wid) != NULL;
+        /* THE OPEN IS NAMED, and stage 10b needed it to be.  A read open and a
+         * write open of the same leaf produced one identical line, so counting
+         * crossings could not attribute them -- and a gate that cannot say
+         * WHICH open crossed cannot tell a routed write open from the routed
+         * read open sitting next to it in the same process.  The flag is
+         * carried for this and decides nothing. */
         if (srv_trace())
             fprintf(stderr, "wsrvtrace: read caller uid=%u pid=%ld -> "
-                            "leaf=exists wid=%d hostowner=%d ancestry=%d "
-                            "tier=n/a -> %s\n",
-                    (unsigned)c->uid, (long)c->pid, (int)f->wid, host, own,
+                            "leaf=exists open=%s wid=%d hostowner=%d "
+                            "ancestry=%d tier=n/a -> %s\n",
+                    (unsigned)c->uid, (long)c->pid,
+                    (flags & WSRV_F_FORWRITE) ? "write" : "read",
+                    (int)f->wid, host, own,
                     there ? "FULL" : "EMPTY");
         srd_n_exist++;
         if (!there) { srd_n_empty++; return -ENOENT; }
@@ -4381,7 +4438,7 @@ static void srd_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
         srd_n_read++;
         int leaf = (h->flags >> WSRV_LEAF_SHIFT) & 0xff;
         struct hamwsys_file f;
-        int rc = srd_answer(c, leaf, h->wid, &f);
+        int rc = srd_answer(c, leaf, h->wid, h->flags, &f);
         if (rc < 0) {
             srd_n_bad++;
             free(f.snap);
@@ -5470,7 +5527,7 @@ static void srv_exists_remember(int32_t wid)
  * that ANSWERED AND REFUSED -- including the connection ceiling -- fails
  * closed, because turning a server-side refusal into a fallback is how a
  * mediator becomes a door beside itself. */
-static int srv_route_exists(int32_t wid)
+static int srv_route_exists(int32_t wid, int for_write)
 {
     if (!srv_enabled() || srv_is_server) return 0;
     if (wid <= 0) return 0;                    /* not a per-window path */
@@ -5488,8 +5545,15 @@ static int srv_route_exists(int32_t wid)
     uint8_t back[8];
     uint32_t got = 0;
     int64_t rc = 0;
-    if (srv_call_on(srv_rfd, WSRV_OP_READ,
-                    (uint16_t)(WSRV_LEAF_EXISTS << WSRV_LEAF_SHIFT), wid,
+    /* THE FLAG NAMES THE OPEN AND NOTHING ELSE.  The server's answer does not
+     * depend on it -- see WSRV_F_FORWRITE -- and it must not, because the two
+     * predicates being the same set is the entire argument for asking this
+     * question on the write path.  It is carried so the trace can attribute a
+     * crossing to a write open, which is the only way a gate outside the
+     * process can tell that the write open was routed at all. */
+    uint16_t fl = (uint16_t)(WSRV_LEAF_EXISTS << WSRV_LEAF_SHIFT);
+    if (for_write) fl |= WSRV_F_FORWRITE;
+    if (srv_call_on(srv_rfd, WSRV_OP_READ, fl, wid,
                     NULL, 0, back, sizeof back, &got, &rc) < 0) {
         fprintf(stderr, "wsys: the read server did not answer the existence of "
                         "window %d (%s); falling back to the unmediated "
@@ -8080,23 +8144,65 @@ static int snap_dir(struct hamwsys_file *f) { return snap_dir_tier(f, 1); }
  * routes the QUESTION, not the data, and pix_get, bb_find, snap_win_ctl and the
  * rings all read the mapping afterwards exactly as they did.
  *
- * ROUTED ONLY FOR A READ, AND THAT IS A SCOPE DECISION RATHER THAN AN OVERSIGHT.
- * A write open is already refused to a non-owner two hundred lines below by
- * `hostowner() || owns_wid()`, and owns_wid() is since stage 5 the CONNECTION
- * question while this routes the ANCESTRY one -- so routing existence on the
- * write path could refuse a process that was legitimately HANDED a descriptor
- * for a window it does not descend from, which is a broken desktop rather than
- * a policy.  The write path's ENOENT-versus-EPERM is a genuine remaining
- * oracle; it is named in the report and it is not closed here. */
+ * STAGE 10b — ROUTED FOR A WRITE TOO, AND STAGE 10'S REASON FOR NOT DOING SO
+ * WAS WRONG.  What stood here said: "A write open is already refused to a
+ * non-owner by `hostowner() || owns_wid()`, and owns_wid() is since stage 5 the
+ * CONNECTION question while this routes the ANCESTRY one -- so routing
+ * existence on the write path could refuse a process that was legitimately
+ * HANDED a descriptor for a window it does not descend from."
+ *
+ * THE TWO SETS ARE THE SAME SET AT THIS SITE, and it is not an argument, it is
+ * a definition three hundred lines up:
+ *
+ *     static int owns_wid(int wid)
+ *     {
+ *         if (srv_caller.active) return srv_caller_holds_wid(wid);
+ *         return owns_wid_ancestry(wid);
+ *     }
+ *
+ * `srv_caller.active` is set by srv_as_caller()/srv_as_caller_full() and by
+ * nothing else, and both are called only from a server dispatching a request.
+ * hamwsys_open() is never on that path: the mutation server services a routed
+ * write with hamwsys_write_inner(), which opens nothing.  So in the client --
+ * which is the only place a write open happens -- `owns_wid()` evaluates
+ * `owns_wid_ancestry()`, the identical function this routes.  The connection
+ * question is asked at WSRV_OP_WRITE, in the server, and stays there.
+ *
+ * SO THE STAGE-5 CASE CANNOT BE BROKEN BY THIS, because it was never admitted
+ * here: a process handed a descriptor for a window it does not descend from
+ * has ancestry 0, so the local gate ALREADY refuses its write open with EPERM,
+ * routed or not.  Its capability is a routed MUTATION, which does not open.
+ * What changes is the errno on a refusal, which is the whole oracle.
+ *
+ * AND THE TWO-STEP ORACLE IS CLOSED BY open_deny() BELOW: if the server ever
+ * granted this wid and the local rule then refused, "EPERM" would say the
+ * window is there just as surely as the old code did.  That case is
+ * unreachable by the paragraph above; it is answered ENOENT anyway, because a
+ * boundary that depends on two predicates staying equal should not also
+ * announce it when they do not. */
 static struct wwin *open_win(struct hamwsys_file *f)
 {
-    if (!f->write) {
-        int r = srv_route_exists(f->wid);
-        if (r < 0) return NULL;                /* the server's refusal, errno set */
-    }
+    int r = srv_route_exists(f->wid, f->write);
+    if (r < 0) return NULL;                    /* the server's refusal, errno set */
     struct wwin *v = win_find(f->wid);
     if (!v) errno = ENOENT;
     return v;
+}
+
+/* The write open's refusal, AFTER open_win() has already been through the
+ * server.  See the paragraph above: a served YES followed by a local EPERM is
+ * the enumeration channel with one extra hop in it, so when the server granted
+ * this wid to this process the refusal is the same ENOENT an absent window
+ * gets.  Unrouted -- no server, which is every shipped binary today and every
+ * red arm of every gate -- nothing was granted, srv_exists_cached() is 0, and
+ * this is deny() exactly as before. */
+static int open_deny(int32_t wid)
+{
+    if (srv_enabled() && !srv_is_server && srv_exists_cached(wid)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return deny();
 }
 
 /* ------------------------------------------------------------------ *
@@ -8143,20 +8249,22 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
          * and non-hostowner is denied: a process may control its OWN window,
          * not another's.  The system-wide /dev/wsys/ctl stays hostowner-only. */
         case HAMWSYS_WIN_WCTL:
-            /* STILL win_find, AND STAGE 10 SAYS SO OUT LOUD.  This is the one
-             * existence check `open` routing deliberately does not take: the
-             * rule two lines down is owns_wid(), the CONNECTION question stage
-             * 5 introduced, while the served answer is owns_wid_ancestry().
-             * They are not the same set, and a process HANDED a descriptor for
-             * a window it does not descend from is exactly the case stage 5
-             * built -- routing existence here would refuse it before the rule
-             * that is supposed to admit it ever ran.  The ENOENT/EPERM split
-             * that survives here is a real remaining oracle on the WRITE path;
-             * closing it needs the served answer to be asked in the connection
-             * question's terms, which is the read server holding bindings it
-             * deliberately does not hold. */
-            if (!win_find(f->wid)) { errno = ENOENT; return -1; }
-            if (!hostowner() && !owns_wid(f->wid)) return deny();
+            /* STAGE 10b: SERVED, and stage 10's note that it could not be is
+             * corrected in full at open_win().  The short of it: `owns_wid()`
+             * on this line is `owns_wid_ancestry()`, because srv_caller.active
+             * is only ever set inside a server dispatching a request and
+             * hamwsys_open() never runs there.  The local gate and the served
+             * predicate are the same set about the same process, so this
+             * routes without moving the boundary a single caller -- it moves
+             * only the errno, which is what was leaking.
+             *
+             * MEASURED BEFORE, uid 1002 owning nothing, opening for WRITE:
+             *     /dev/wsys/<live>/ctl  -> EPERM   ("Operation not permitted")
+             *     /dev/wsys/<dead>/ctl  -> ENOENT
+             * -- the same enumeration channel stage 10 closed on the read
+             * half, one flag of open(2) away. */
+            if (!open_win(f)) return -1;
+            if (!hostowner() && !owns_wid(f->wid)) return open_deny(f->wid);
             break;
         case HAMWSYS_SINK:
             if (!sink_write_allowed(f->name)) return deny();

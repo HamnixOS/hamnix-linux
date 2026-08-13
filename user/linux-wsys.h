@@ -213,6 +213,16 @@ enum {
      * display list ends and the next begins, and a guess there is a window
      * that paints last frame's contents for ever. */
     WSRV_F_NEWFRAME = 4,
+    /* STAGE 10b.  Set on a WSRV_LEAF_EXISTS question asked for a WRITE open.
+     * IT CHANGES NO ANSWER -- the predicate is the same one either way, and it
+     * must be, since that identity is the whole argument for routing the write
+     * open at all (see WSRV_LEAF_EXISTS below).  It exists so the SERVER'S
+     * TRACE can say which open crossed: read and write opens of the same leaf
+     * are otherwise one indistinguishable line, and a gate outside the process
+     * then cannot tell "the write open was routed" from "the read open next to
+     * it was".  This device has now paid twice for a trace that could not
+     * attribute what it counted. */
+    WSRV_F_FORWRITE = 8,
 
     WSRV_OP_HELLO = 1,             /* blocks: version handshake              */
     WSRV_OP_NOP   = 2,             /* fire-and-forget: the mutation shape    */
@@ -347,7 +357,39 @@ enum {
      * comes into existence after a probe is not remembered as absent.  The
      * cached YES is not a bypass: win_find() still runs behind it, so a window
      * destroyed after the grant is still ENOENT, and the cache is dropped
-     * whenever the process's uid changes. */
+     * whenever the process's uid changes.
+     *
+     * STAGE 10b — AND IT ANSWERS THE WRITE OPEN TOO, WHICH STAGE 10 SAID IT
+     * COULD NOT.  Stage 10 routed the READ opens only, and recorded the reason
+     * in this file and in the design doc: "the rule two lines below the write
+     * open is owns_wid() -- the CONNECTION question stage 5 introduced -- while
+     * the served answer is owns_wid_ancestry(); they are not the same set."
+     *
+     * THAT WAS WRONG, AND THE CORRECTION IS ONE LINE OF THIS FILE'S OWN CODE.
+     * `owns_wid()` is `srv_caller.active ? srv_caller_holds_wid(wid) :
+     * owns_wid_ancestry(wid)`, and `srv_caller.active` is set ONLY by
+     * srv_as_caller()/srv_as_caller_full(), which are called ONLY inside a
+     * server dispatching a request.  hamwsys_open() never runs there -- the
+     * mutation server services a routed write by calling
+     * hamwsys_write_inner(), not by opening anything.  So at the write open,
+     * in the client, `owns_wid(wid)` IS `owns_wid_ancestry(wid)`: the same
+     * function, not merely a similar rule.  The connection question is asked
+     * at WSRV_OP_WRITE in the server, where the binding lives, and that is
+     * untouched.
+     *
+     * The consequence is that the write open's local gate --
+     * `hostowner() || owns_wid(wid)` -- and this served predicate --
+     * `hostowner() || owns_wid_ancestry(wid)` -- are THE SAME SET about THE
+     * SAME PROCESS.  Routing existence there therefore changes no admission:
+     * every caller the local rule would refuse, the server refuses first, and
+     * every caller the server grants, the local rule then admits.  What
+     * changes is only which refusal a stranger sees, and that is the oracle.
+     *
+     * AND IT CANNOT REBUILD THE ORACLE IN TWO STEPS.  "Server says exists,
+     * local rule then says EPERM" would be the same channel with an extra
+     * hop; it is unreachable by the argument above, and made unreachable in
+     * fact by open_deny(), which answers ENOENT rather than EPERM whenever the
+     * server granted this wid to this process. */
     WSRV_LEAF_EXISTS  = 9,         /* "does <wid> exist, and may I have it"  */
 };
 

@@ -1,0 +1,89 @@
+# tests/linux/wsys_wopen.ad — OPEN A PATH FOR WRITING AND PRINT THE RAW rc.
+#
+#   wsys_wopen <path> [<path> ...]      ->  "WOPEN <rc> <path>\n" per argument
+#
+# WHY THIS EXISTS AND `cat` DOES NOT SUFFICE. Stage 10 routed the READ opens of
+# nine per-window leaves, and its gate probes them with `cat`, which opens
+# O_RDONLY. The oracle stage 10b closes is on the OTHER flag of open(2): a
+# stranger opening /dev/wsys/<wid>/ctl FOR WRITING got EPERM on a live window
+# and ENOENT on a dead one, so the errno enumerated the window table exactly as
+# `cat`'s exit code did one flag over. Nothing in this tree opens an arbitrary
+# path write-only and reports what happened, so nothing could measure it.
+#
+# THE rc IS THE WHOLE POINT, AND IT IS THE ERRNO. sys_open_write returns
+# rc32(open(...)), and rc32 is `r < 0 ? -errno : r` (user/linux-syscalls.c) --
+# so a refusal comes back as -1 for EPERM and -2 for ENOENT, ON THE SAME
+# NUMBER LINE as a success. A probe that only reported "it failed" would read
+# IDENTICALLY on the broken tree and the fixed one, which is the trap
+# wsys_srv_open.sh's own `slurp` pair fell into and had to record rather than
+# score. This one cannot: EPERM and ENOENT are different integers.
+#
+# It writes NOTHING. Opening is the whole act being measured, and a write would
+# add a second refusal with its own errno on top of the one under test.
+#
+# NOTE THAT OPENING FOR WRITING IS NOT FREE OF EFFECT and that is deliberate:
+# hamwsys_open's own comment says a write open already MUTATES (a sink is
+# truncated, a scene's staging buffer is reset). The gate only ever points this
+# at a window the probing uid must not be allowed to touch, so every open it
+# makes is supposed to fail; the arms that must succeed are made from a process
+# that owns its window.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+
+numbuf: Array[24, uint8]
+outbuf: Array[64, uint8]
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    if v == 0:
+        buf[at] = 48
+        return at + 1
+    x: int32 = v
+    i: uint64 = at
+    if x < 0:
+        buf[i] = 45
+        i = i + 1
+        x = 0 - x
+    n: uint64 = 0
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = numbuf[n]
+        i = i + 1
+    return i
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        puts(2, "usage: wsys_wopen <path> [<path> ...]\n")
+        return 2
+    i: int32 = 1
+    while i < argc:
+        p: Ptr[char] = cast[Ptr[char]](argv[i])
+        fd: int32 = sys_open_write(p)
+        puts(1, "WOPEN ")
+        m: uint64 = emit_int(&outbuf[0], 0, fd)
+        outbuf[m] = 32
+        sys_write(1, &outbuf[0], m + 1)
+        puts(1, cast[Ptr[uint8]](p))
+        puts(1, "\n")
+        if fd >= 0:
+            sys_close(fd)
+        i = i + 1
+    return 0
