@@ -4733,6 +4733,62 @@ left as the answer. `python3 scripts/hamlinux_packages.py --out build/repo
 no `--sign` and no upload. With the channel staged (126 packages) both are green:
 **8/0** and **10/0**.
 
+#### THE THIRD SWEEP'S RESULT — 80 offscreen gates at `fee1912f`, and NO new red
+
+**74 green, 6 red, and not one of the six is a regression from this week's five
+product commits.** Every red was run at a control export of `ad2dd409` — the
+first parent of `ee62e0fc`, which is the earliest of the five merges, so it
+predates all of them — rather than assumed. Where the 141 scripts went:
+
+```
+tests/linux/*.sh                                       141
+  helpers, not gates                                     6
+  need a VM (left to the serial VM lane)                37
+  display-blocked                                       15
+  never run: take DRM master on the owner's live card    3
+  ATTEMPTED OFFSCREEN                                   80
+    green (exit status 0)                               74
+    red                                                  6
+```
+
+**THE SIX REDS, ALL PRE-EXISTING OR PREREQUISITE:**
+
+* **`wsys_srv_mutate` — FLAKY AT BOTH ENDS, and it nearly went in as a false
+  regression.** First sample: red at the tip (6/1, *"the server did not see the
+  routed write at all"*), green at the control (7/0). That pairing is exactly
+  what a new regression looks like. It is not one. A second sample at each end
+  gave **red at the tip on a DIFFERENT assertion** (*"the routed arm painted
+  FEWER full frames, 547 vs 550"* — a frame-rate comparison) and **red at the
+  control on the FIRST assertion**. Four samples, three different outcomes, and
+  the routed-write failure appears at both commits. **One sample per end would
+  have named an innocent commit.**
+* **`wsys_srv_transport` — pre-existing, and the tip is BETTER than the control**:
+  16 passed / 1 failed at `fee1912f` against **15 passed / 2 failed** at
+  `ad2dd409`. Both failing assertions are latency/CPU budgets (`934 us` and
+  `1806 us` at p50, `1.8462 us` per routed message). The socket-name arm HANDOFF
+  records as fixed is green.
+* **`wsyswl_two_browsers` — 12 PASS / 11 FAIL at BOTH ends**, every failure
+  naming `firefox-esr` and `0 connections`. The standing fact above is confirmed
+  at this tip: it is the host, not the tree.
+* **`input_probe` — red at both ends with byte-identical output.** Confirms the
+  standing fact; read the exit status, not the `ALL PASS`.
+* **`gates_are_private` — red at both ends, but it IMPROVED ENORMOUSLY: 2/17 at
+  the control, 2/1 at the tip.** The three offenders the second sweep named are
+  fixed. **The one remaining is `wsys_srv_ceiling.sh`, and it IS new** — added by
+  `44412d29`, which reached the tip through **`1fd21377`, the connection-ceiling
+  merge** — with no `priv_ns_reexec`. The gate's red status is not new; this
+  offender is. Two lines after `cd "$PROJ_ROOT"` fix it, and it must be re-run
+  afterwards to confirm it still scores 12/0.
+* **`channel_covers_image` — NO VERDICT, prerequisite.** It needs
+  `build/image/root`, which only `hamlinux_image.sh` makes, and this sweep was
+  forbidden to build one.
+
+**THE PERFORMANCE NUMBERS ABOVE ARE VERDICTS, NOT MEASUREMENTS.** The host ran
+at loadavg **2.4–5.0** for the whole sweep with another agent booting VMs. Every
+latency and frame-count figure quoted here is **NOT ATTRIBUTABLE**; only the
+pass/fail sense of them is being reported. `wsys_srv_mutate`'s second failure
+was itself a 0.5% frame-count difference on that host.
+
 #### Four standing facts about gates — none new, none previously written down
 
 * **`input_probe.sh` prints `ALL PASS` two lines above its own `FAIL`.**
