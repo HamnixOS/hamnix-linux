@@ -65,6 +65,15 @@ labels it is given — the wording of the question is identical. And the
 downloaded image is **not** 197.6 MiB smaller: the file is provisioned at a
 fixed 12 GiB and that is a separate lever nothing here moves.
 
+**AND `hpm update` CANNOT DELIVER THIS ONE.** The change is a line in
+`scripts/hamlinux_distro.sh`, which builds the Debian medium — it is not a
+file in the image root and not a file in any package, so no gate that
+compares the two can see it and no installed machine receives it by updating.
+It arrives only with a freshly built distribution medium. That is a property
+of the thing being fixed rather than a mistake here, and it is written down
+because the other entries in this section *are* deliverable and a reader
+would reasonably assume this one is too.
+
 ### An idle panel cost more CPU than the compositor drawing it
 
 With nothing open and nobody touching the machine, the panel spent **1.7% of a
@@ -85,9 +94,19 @@ instantaneous, and it is one constant if the trade is judged wrong.
 
 ### `ssh` and `sshd` trusted lengths the other end chose, including before login
 
-Both are installed by `hpm install hamnix-base`. Five places took a size or an
-offset straight off the wire and used it without checking it against the packet
-that carried it.
+**Neither is on any machine, and this entry used to say they were.** It read
+"Both are installed by `hpm install hamnix-base`". They are not: `ssh` and
+`sshd` are in no package in the channel and in no `/bin` in the image —
+checked by listing every file in all 125 tarballs of a built 1.0.23 channel
+and every file in the image root, with a name that IS there (`ls`, `wsysd`,
+`hampanelscene`) used first to prove the search finds things. `hamnix-net`
+carries eight programs and none of them is `ssh`. So the fix below is real,
+it is in the tree, and **there is nobody it can reach** until these two are
+packaged. It is listed here rather than removed because the defect is real
+and the gap is the thing worth writing down.
+
+Five places took a size or an offset straight off the wire and used it without
+checking it against the packet that carried it.
 
 **One of them is reachable before authentication.** A peer that had done
 nothing but negotiate a connection could send a length near four billion and
@@ -108,6 +127,9 @@ listening to reach. And the first pass fixed one arm of a two-arm defect and
 missed the other, which is the reason the second pass exists.
 
 ### The web server answered a too-large request by guessing at it
+
+**Same gap as the entry above:** `httpd` and `httpd_worker` are in no package
+and in no image `/bin` either, so nothing here reaches a machine yet.
 
 `httpd` reads a request into an 8 KiB buffer. Headers that did not fit were
 parsed **as though they were the whole request**, with the remainder left
@@ -131,6 +153,33 @@ it drew last.
 
 100 bytes worked. 16,383 worked. 16,384, the producer's own maximum, did not.
 The receiving buffer is one byte larger now.
+
+### The drivers that read your disk and your keyboard could never be updated
+
+An installed machine gets its SATA, NVMe, USB and keyboard drivers from the
+image it was installed from, and **no package carried any of them**, so a fix
+to the module that reads your root disk could never reach a machine that had
+already been installed. Twenty files: `ahci`, `libahci`, `libata`; `nvme`,
+`nvme-core`, `nvme-auth`; `sd_mod`, `scsi_mod`, `scsi_common`; `usb-storage`,
+`uas`, `usbcore`, `usb-common`, the two EHCI and two XHCI host-controller
+drivers; and `hid`, `hid-generic`, `usbhid`.
+
+Nothing failed while this was true. The build printed one line saying those
+modules were "not packaged" and gave a reason — *the image does not stage them
+either* — and that reason was **false**: the image stages every one of them.
+The build script names them in a shell variable and the shell expands it; the
+packager read that line with a text search and got the variable's *name*,
+which no module is called. A build that says "not packaged" and explains why
+looks exactly like a build that is fine.
+
+They are packaged now, as `hamnix-drivers-hw`, and `hpm install hamnix-base`
+pulls it in. They needed a package of their own: all of them together are
+13.1 MB unpacked against the 8 MiB `hpm` can unpack in memory, so until this
+split existed they could not have been shipped at all.
+
+This is new since 1.0.22 — the hardware driver list was added after that
+release went out — so it is a hole this candidate would have shipped rather
+than one that has been there.
 
 ### Landed and deliberately NOT listed above
 
