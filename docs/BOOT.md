@@ -1,5 +1,11 @@
 # Booting Hamnix
 
+> **SCOPE — THIS IS THE Hamnix 1.0 BOOT DOCUMENT, copied wholesale** (see
+> `README.md` § Layout). Its "tested-on / known-working" table, including the
+> Intel NUC row, is about **Hamnix 1.0's own kernel**, not about hamnix-linux.
+> **hamnix-linux has never been booted on a physical machine**; it is exercised
+> under QEMU and offscreen on the host. See `README.md` § Status.
+
 Hamnix is **UEFI-only**. There is no BIOS/GRUB/El-Torito/hybrid-MBR path
 anymore; legacy boot was dropped.
 

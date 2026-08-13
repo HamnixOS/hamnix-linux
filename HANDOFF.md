@@ -13,6 +13,76 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### THE SHORT VERSION, AS OF 1.0.22 — read this before the table
+
+**The published release is 1.0.22**, and publication was verified as served
+rather than assumed: the live index at `https://255.one/` reports 1.0.22 across
+all 124 packages, `hamnix-desktop-1.0.22.tar.gz` fetched from the site hashes to
+the sha256 the index names, and the index signature verifies against the key
+installed machines already trust. Much of the table below still cites 1.0.20,
+because that is the version those runs were made against; the numbers stand, the
+version in them is history. **`CHANGELOG.md` is the authority on what a person
+gets, and its `Unreleased` section is the authority on what they do not yet.**
+
+**Six things have landed since the 1.0.22 candidate and are NOT on the channel.**
+They are written up for a person in `CHANGELOG.md` § Unreleased and are only
+listed here so a fresh session knows the gap exists: `ls` on a plain file
+printed its contents; the Steam consent dialog never drew and cost 197.6 MiB to
+not draw; an idle panel cost more CPU than the compositor; four unbounded
+peer-chosen lengths in `ssh`/`sshd`, **one of them reachable before
+authentication**; `httpd_worker` parsing an oversized header as a complete one;
+and a display list of exactly 16,384 bytes losing its last operation. Two of
+those merged the same hour 1.0.22 published and on the wrong side of the cut —
+**ancestry, not timestamps, is what places a commit relative to a release here**
+(`git rev-list <rc-tip> | grep <sha>`).
+
+**REAL HARDWARE IS UNTESTED. VM and hybrid development are primary; native
+install is in progress.** Nothing in this file is a bare-metal claim: "on a real
+disk" throughout §0 means a real ext4/UEFI install inside QEMU, and the GPU
+measured on real silicon is the *developer's host* GPU reached in hybrid mode,
+not a GPU on a machine this system booted. `docs/REAL_HARDWARE.md`,
+`docs/BOOT.md` and `docs/manual/` record real-hardware boots of **Hamnix 1.0's
+own kernel** and were copied wholesale; each now carries a banner saying so.
+
+### THE WINDOW SYSTEM IS BECOMING A FILE SERVER — where that stands
+
+Four passes of it are in the tree (design, transport, mutations, caller
+identity). **All of it is inert unless `HAMWSYS_SERVER=1`, and nothing sets
+that**, so it changes nothing for a person yet and has no changelog entry.
+`docs/wsys_server_design.md` is the design and the running record;
+`docs/wsys_server_cost.md` is what it costs. What a fresh session must not
+mis-read:
+
+* **`WSYS_VERSION` is still 8 and the in-process path is still there**, so **the
+  boundary is NOT enforced**: a client that does not speak the protocol bypasses
+  the mediator entirely. That is the *state of the tree today*, not a historical
+  note. **The version bump IS the enforcement and it goes LAST** — bumping it
+  before the old path is gone would refuse clients for a boundary that is not
+  yet being applied.
+* **The caller identity is PROVEN, red-unrouted / green-routed**
+  (`tests/linux/wsys_srv_identity.sh`, **15 PASS / 0 FAIL**, three real uids out
+  of `/etc/subuid`). Unrouted, uid 1002 renamed uid 1001's window and *that is
+  correct* — an in-process check reads an identity supplied by the process being
+  asked about, and the gate demonstrates it costs **one assignment** to flip.
+  Routed, the mediator refused it. A gate green in every configuration is
+  equally green against a server that checks nothing, which is why the red arm
+  is the argument.
+* **`owns_wid()` grants every DESCENDANT, and this is inherited rather than
+  introduced.** The walk compares pids and never looks at a uid, so every
+  application the desktop spawns may retitle, move, raise or destroy any window
+  owned by the compositor, the panel or any of its own ancestors, **regardless
+  of uid** — now with the mediator's blessing rather than merely without its
+  knowledge. It is devwsys's own rule (hamUI spawns a task *into* a window);
+  tightening it to an exact pid match would break every hamUI-spawned task. The
+  capability-at-`newwindow` the design proposes is the replacement, and it is a
+  **stage-3 policy decision, not a stage-3a one**.
+* **Routing made the compositor CHEAPER, not dearer** — routing a drag measured
+  46.5% of a core cheaper at 43% more frames — which is the opposite of what the
+  plan predicted, so treat the design document's *predictions* as superseded by
+  its *measurements* wherever the two appear together.
+* Not routed yet: `wid/scene`, reads, the enumeration policy, and the version
+  bump.
+
 **hamnix-linux boots to a desktop, installs itself, updates from 255.one, and
 compiles Adder on the box.** Concretely, all of the following are measured
 rather than argued:
@@ -54,7 +124,7 @@ rather than argued:
 | Shutdown | **An installed machine can be turned off, and the filesystems are flushed on the way down.** `/dev/reboot` is served (`user/linux-syscalls.c`), ported from Hamnix's `DEV_REBOOT` cdev with its protocol intact — first token, three verbs `poweroff` / `reboot` / `halt`, reads are EOF. A recognised verb is `sync(2)` then `reboot(2)`. Until this landed nothing served the name, so `reboot`, `poweroff`, `halt` and `init 0` / `init 6` all died on the open and **every restart of an installed machine was the equivalent of pulling the plug** — it survived only because ext4 has a journal. An installed disk now writes to `/etc` and reboots **in the same breath with no sleep**, and the next boot is running the rc the last one wrote: `tests/linux/reboot_device.sh`, 37 PASS, `reboot: Restarting system` in 13 s and `reboot: Power down` in 11 s. `poweroff` and `halt` were not in the image at all and now are. uid 1001 gets EPERM and every client reports it **by name**; the desktop's Power Off works because `hamsessui` is spawned by the root chrome. `docs/linux_installed_update.md` §2c. |
 | Compiler | `ac foo.ad -o foo` on the box: `host_ac` natively, then clang inside the Debian namespace. **This was true of the IMAGE and false of the CHANNEL, and the headline above said "measured" for eleven versions.** `/bin/ac` is a driver, not a compiler — it execs the hard-coded `/bin/host_ac` — and the published `hamnix-adder-1.0.12.tar.gz` (sha256 `d22ce377e5bd…`, exactly what the index advertised) contained **two entries**: `PKGINFO` and `files/bin/ac`. No compiler, no runtime sources. On a machine installed from 255.one, `ac hello.ad` answered `ac: cannot run /bin/host_ac`, exit 10, no binary — so for exactly the machines NORTH_STAR's invariant is about, the capability did not exist. `host_ac` had been excluded from the channel by name, with the reason "built for the BUILD HOST's libc … the shippable compiler is `ac`, which IS packaged"; `readelf` refutes both halves — `host_ac` has no `.dynamic` section and no `INTERP` ("not a dynamic executable"), while `ac`, the one that shipped, is the one carrying `NEEDED libssl.so.3 libcrypto.so.3 libcrypt.so.1 libc.so.6`. `hamnix-adder` now carries the compiler (79974 B → 585056 B) and the exclusion is deleted. It is enforced where it cannot be skipped: `tests/linux/channel_compiles_adder.sh` unpacks the toolchain out of the channel tarballs, stages a root whose `/bin` is those files and nothing else, runs the real `ac` through its real `rfork` + binds + `bind '#distro' /`, and **runs the ELF that comes out** — 8 PASS / 0 FAIL, 3 s, and `scripts/hamlinux_packages.py` runs it before it writes `index.json`. Against the published 1.0.12 bytes it scores 2 PASS / **3 FAIL**. |
 | GPU | The Vulkan userspace (loader + venus/ANV/NVK/RADV/lavapipe) installs into the **Hamnix root** by hpm — no namespace entry. `vk_core` has a real Vulkan backend (`lib/vk/vk_linux.ad` + `user/linux-vk.c`), byte-identical to the software rasterizer, armed by default on real silicon. |
-| Build | **Every application in `user/` builds through the LLVM lane** — 363 of 363, with 4 of the 367 files being LIBRARY MODULES that have no `main` and are not applications. `scripts/hamlinux_sweep.sh` computes and prints that headline next to its own definition; nothing is hand-derived. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. |
+| Build | **Every application in `user/` builds through the LLVM lane** — 363 of 363, with 4 of the 367 files being LIBRARY MODULES that have no `main` and are not applications. `scripts/hamlinux_sweep.sh` computes and prints that headline next to its own definition; nothing is hand-derived. `scripts/hamlinux_build.sh` knows the per-program extra objects (`wsysd` needs the Vulkan shim), so every build path links, not just the image's. **THE DENOMINATOR HAS MOVED SINCE THAT SWEEP AND THE NUMBER IS NOT RE-RUN HERE:** `user/` holds **368** `.ad` files today, **364** of which define a `main` (still 4 libraries), so **one application has been added that this sweep never saw**. `README.md` says 364 applications, which is the current count; 363 of 363 is the last measured pass and is left as measured rather than quietly incremented, because "it builds" is a claim only a run can make. Re-run `scripts/hamlinux_sweep.sh` before quoting either number. |
 | Idle | **An idle desktop is idle.** It was not: with nothing open, no input and nothing running, the host's QEMU sat at **203.6%** of one cpu and `hamdesktop`, `hampanelscene` and PID 1 each burned 11 s in a 20 s window, in state R. Now **6.8%** with the bare desktop and **7.3%** with a terminal open, every process at `0:00`, no zombies. Five separate causes, all the same shape and all invisible to every functional gate — see THE IDLE CENSUS below. And an idle desktop is not the only thing that has to be idle: **an idle APPLICATION does too**, and 26 of them each burned a full core with every gate green. The run sweep's `cpu` column found them; all 26 are now at 0.1 s of cpu in a 16.7 s run and pixel-identical. `tests/linux/de_idle_cpu.sh`, `scripts/hamlinux_runsweep.sh`. |
 
 #### THE IDLE CENSUS, and why nothing caught it

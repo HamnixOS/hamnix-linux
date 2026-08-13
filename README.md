@@ -46,7 +46,10 @@ wrong picture:**
 - **Real hardware is untested.** No claim is made about booting a physical
   machine: not the installer on real disks, not real GPUs, not Wi-Fi, not
   suspend. The drivers come from Linux, which is the point of the port, but
-  nobody has sat in front of it on bare metal.
+  nobody has sat in front of it on bare metal. (The Vulkan backend *has* been
+  measured against a real discrete GPU — but on the developer's host, in the
+  hybrid mode above, not on a machine this system booted. That is a different
+  claim and is not this one.)
 - **Native install is in progress.** A machine can install and update itself
   from the channel; the path from bare firmware to that state is not finished.
 
@@ -106,6 +109,11 @@ about 30 of the ~48 `sys_*` entry points onto real Linux syscalls. The remaining
 They were kept rather than pruned because the build glue and the design
 documents are needed, and hand-separating ~1800 scripts would have silently
 dropped things. Pruning them is legitimate early work.
+
+**Nothing in `docs/` overrides the Status section above.** Several of those
+copied documents — `docs/REAL_HARDWARE.md`, `docs/BOOT.md`, `docs/manual/` —
+record real-hardware boots and an installer workflow, and every one of them is
+about **Hamnix 1.0's own kernel**, not this port. Each now says so at the top.
 
 ## Licence
 

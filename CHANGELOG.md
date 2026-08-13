@@ -20,7 +20,128 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
-Nothing at present: everything below is on the channel.
+Everything below this heading and above `## 1.0.22` is in the tree and is
+**not** on `https://255.one/`. The 1.0.22 candidate is the tree at the commit
+that published it; each item here was merged after that commit, checked by
+ancestry rather than by date, because two of them landed the same hour the
+release did and on the other side of the cut.
+
+### `ls` on a plain file printed the file's CONTENTS
+
+`ls notes.txt` printed the text of `notes.txt`. It has done that for the whole
+life of this port. It now prints the name, and `ls -l notes.txt` prints one
+long-format line — the same line the directory listing would show for that
+file, byte for byte.
+
+Both paths reached the file with open-then-read, and on a regular file both of
+those succeed, so the bytes that came back *were the file* and nothing
+distinguished that from a listing. The library routine underneath carried a
+comment promising it returned an error when the path "isn't a directory", and
+**it contained no such check** — which is why nobody looked there.
+
+The eleven other programs that share that routine were checked rather than
+assumed: `du` and `find` on a plain file were both already correct, because
+they ask what the path is before opening it. `ls` was the only one that fell in.
+
+### The Steam consent dialog never actually drew — and cost 197.6 MiB to not draw
+
+Debian's `steam` asks you to agree before it installs Valve's software. On the
+image as shipped, **that box never appeared**: the program drawing it died
+inside GTK while loading its own icon, `steam` read the missing answer as "no",
+printed `Installation cancelled` and stopped. So the prompt was a dead end
+rather than a question, which is precisely the outcome it exists to prevent.
+
+It is drawn by a smaller program now and it comes up. The one it replaced
+dragged an entire browser engine into the image to render a yes/no box, needed
+by nothing else installed: the Debian namespace goes from **2254.7 MiB to
+2057.1 MiB occupied — 197.6 MiB** — and from 619 packages to 565. On the host's
+disk that is 1.95 GiB down to 1.82 GiB.
+
+**The honest limits.** This was proven by running the real `/usr/games/steam`
+in a test harness with a scanned-out framebuffer, and **not** in a booted VM;
+that the old one aborts is a harness finding reported as such. The buttons
+read OK/Cancel rather than Install/Cancel, because the replacement ignores the
+labels it is given — the wording of the question is identical. And the
+downloaded image is **not** 197.6 MiB smaller: the file is provisioned at a
+fixed 12 GiB and that is a separate lever nothing here moves.
+
+### An idle panel cost more CPU than the compositor drawing it
+
+With nothing open and nobody touching the machine, the panel spent **1.7% of a
+core** against the compositor's 1.1%, and made **1016 window-system calls a
+second** to do about six calls' worth of work — re-reading its config file, the
+window list and two notification sinks about 111 times a second, for ever.
+
+It now waits longer between those checks once the desktop has been completely
+still for half a second: **0.3% of a core and 176 calls a second**. Anything
+with something to wake on — a keystroke, a click, a new window, a notification
+— is unaffected, because those arrive on descriptors the loop already sleeps on.
+
+**What it costs, measured rather than waved away:** things the panel can only
+*notice by looking* now take about twice as long to appear. A window opening
+while the panel is idle reaches the taskbar in **40 ms rather than 19 ms**
+(worst seen 69 ms). That is still under the ~100 ms a person reads as
+instantaneous, and it is one constant if the trade is judged wrong.
+
+### `ssh` and `sshd` trusted lengths the other end chose, including before login
+
+Both are installed by `hpm install hamnix-base`. Five places took a size or an
+offset straight off the wire and used it without checking it against the packet
+that carried it.
+
+**One of them is reachable before authentication.** A peer that had done
+nothing but negotiate a connection could send a length near four billion and
+make `sshd` read about four gigabytes past the end of an 8 KiB buffer. Two more
+would let a hostile *server* make your own `ssh` client read its own memory out
+onto your terminal, and one let an authenticated peer push a similar read into
+a shell's input.
+
+Every peer-chosen field is now bounded against the actual packet length before
+it is used — not against the size of the array it lands in, since reading 8000
+bytes out of a 40-byte packet is wrong even when it stays inside the buffer.
+
+**The honest limits.** None of this was found by anything misbehaving; it was
+found by looking for the shape, and nothing is known to have exploited it.
+`sshd` is not started for you — it ships as a service definition you have to
+turn on — so on a default machine the pre-authentication one has nothing
+listening to reach. And the first pass fixed one arm of a two-arm defect and
+missed the other, which is the reason the second pass exists.
+
+### The web server answered a too-large request by guessing at it
+
+`httpd` reads a request into an 8 KiB buffer. Headers that did not fit were
+parsed **as though they were the whole request**, with the remainder left
+unread on the connection — there was no way for it to tell that case apart from
+the legitimate "the client sent headers and hung up". It now answers **431
+Request Header Fields Too Large**, naming the 8192-byte limit.
+
+The same buffer bounded the body, and a CGI script was handed the
+`Content-Length` the *client claimed* rather than the number of bytes it was
+actually going to get. The script is now told the real number, and a request
+promising more body than fits is refused with **413 Payload Too Large** instead
+of being silently short-fed.
+
+### A window whose drawing was exactly 16,384 bytes lost its last instruction
+
+A program hands the compositor a display list, and the largest one it is
+allowed to send is 16,384 bytes. At exactly that size — and only exactly that
+size — the compositor read 16,383 of them and dropped the final drawing
+operation, with no error anywhere: the window simply came up missing whatever
+it drew last.
+
+100 bytes worked. 16,383 worked. 16,384, the producer's own maximum, did not.
+The receiving buffer is one byte larger now.
+
+### Landed and deliberately NOT listed above
+
+`/dev/wsys` is being turned into a real file server with a boundary a program
+cannot talk its way past. Three stages of it are in the tree, and **all of it
+is inert unless `HAMWSYS_SERVER=1` is set, which nothing sets.** A person using
+the machine cannot tell it is there, so it is not a changelog entry yet; it
+becomes one when the version bump that removes the old path lands, and that
+bump is the last step rather than the first. `HANDOFF.md` §0 and
+`docs/wsys_server_design.md` carry where it stands, including what is proven
+and what is not.
 
 ## 1.0.22 — 2026-08-12
 
