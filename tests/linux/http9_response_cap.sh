@@ -74,6 +74,10 @@ trap 'exit 130' INT TERM HUP
 
 ok()   { echo "[http9_cap] PASS $*"; PASS=$((PASS + 1)); }
 bad()  { echo "[http9_cap] FAIL $*"; FAIL=$((FAIL + 1)); }
+# An empty read is not a measurement. See tests/linux/gate_read.sh; used by the
+# http_prepend_head arm, which parsed the probe's line with `sed` scripts that
+# ECHOED THE WHOLE LINE when the field was absent.
+. tests/linux/gate_read.sh
 
 # ---- build ------------------------------------------------------------
 build_one() {
@@ -193,10 +197,35 @@ expect "chunked body, no Content-Length, decoded" \
 for pair in "$U/tiny 4096" "$U/n/100000 200000"; do
     set -- $pair
     raw="$("$PROBE" "$1" "$2" raw 2>/dev/null | tr -d '\r' | tr '\n' ' ')"
-    hdrlen="$(sed 's/.*HDRLEN=\([0-9]*\).*/\1/' <<< "$raw")"
-    bodylen="$(sed 's/.*BODYLEN=\([0-9]*\).*/\1/' <<< "$raw")"
-    rawlen="$(sed 's/.*RAW=\([0-9]*\).*/\1/' <<< "$raw")"
-    if [ -n "$rawlen" ] && [ "$rawlen" = "$((hdrlen + bodylen))" ]; then
+    # `sed 's/.*RAW=\([0-9]*\).*/\1/'` WITHOUT -n AND WITHOUT /p PRINTS THE
+    # WHOLE LINE WHEN THE PATTERN DOES NOT MATCH, so a probe that could not
+    # connect -- no HDRLEN=, no BODYLEN=, no RAW= anywhere in its output --
+    # did not give three empty strings, it gave three copies of its own error
+    # text. Measured, all three outcomes, on the real block:
+    #   raw empty              -> bad "RAW=  !=   +  ": an invented FAIL against
+    #                             http_prepend_head, on no evidence at all;
+    #   raw "RC=-6 STATUS=200" -> `$(( hdrlen + bodylen ))` is a SYNTAX ERROR,
+    #                             which aborts the loop body: SIX assertions
+    #                             silently do not run and the file still
+    #                             reports "N passed, 0 failed";
+    #   raw "connection refused"
+    #                          -> `$(( ))` treats the words as variables, and
+    #                             `set -u` KILLS THE WHOLE GATE mid-run.
+    # It is also an injection: `$(( RC=-1 ... ))` assigns RC from probe output.
+    # -n plus /p makes a miss an EMPTY string, and the empty string is then
+    # refused by name rather than defaulted into a verdict.
+    hdrlen="$(sed -n 's/.*HDRLEN=\([0-9]*\).*/\1/p' <<< "$raw")"
+    bodylen="$(sed -n 's/.*BODYLEN=\([0-9]*\).*/\1/p' <<< "$raw")"
+    rawlen="$(sed -n 's/.*RAW=\([0-9]*\).*/\1/p' <<< "$raw")"
+    if ! gate_nonempty "the raw probe's HDRLEN/BODYLEN/RAW for $1 (raw: '$raw')" \
+                       "$hdrlen$bodylen$rawlen" \
+       || ! gate_fields "all three of HDRLEN, BODYLEN and RAW for $1 (raw: '$raw')" 3 \
+                        "$hdrlen $bodylen $rawlen"; then
+        continue    # the probe did not report; whether the shift reassembled
+                    # the response is not a question this iteration can answer,
+                    # and the two expects below would compare against '' too
+    fi
+    if [ "$rawlen" = "$((hdrlen + bodylen))" ]; then
         ok "http_prepend_head($1): RAW=$rawlen = HDRLEN $hdrlen + BODYLEN $bodylen"
     else
         bad "http_prepend_head($1): RAW=$rawlen != $hdrlen + $bodylen"
