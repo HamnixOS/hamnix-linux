@@ -1,0 +1,163 @@
+# tests/test_slurp_cap.ad — a file of EXACTLY the buffer size must arrive whole.
+#
+# user/wsysd.ad's `slurp` reads a window's committed display list. It used to
+# be called as
+#
+#     n = slurp(path, &scenebuf[0], 16384)        scenebuf: Array[16384]
+#
+# and slurp's loop is `while total < cap - 1` with `out[total] = 0` after it:
+# it reads at most cap - 1 bytes and spends the last one on a NUL. The
+# PRODUCER's maximum is WSYS_SCENE_CAP = 16384 (user/linux-wsys.c), so a
+# display list of exactly 16384 bytes came back as 16383 -- and a scene is a
+# line-oriented grammar, so the byte lost is the end of the last op. Silently:
+# no flag, no error, a short read indistinguishable from a complete one.
+#
+# THE FIX IS AT THE CALLER, NOT IN slurp: the buffer is now 16385 so slurp has
+# room for its NUL. slurp's contract is coherent and its five other callers
+# rely on the terminator; the defect was asking it for room it had already
+# promised to spend.
+#
+# THE BOUNDARY IS THE WHOLE TEST. A case written from the code rather than the
+# spec tends to check a small size and a huge one and miss 16384 EXACTLY,
+# which is the only size at which this is visible -- 100 and 16383 both passed
+# while it was broken. The assertion is on the RETURNED COUNT, not on "it
+# worked".
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+
+# The PRODUCER's maximum display list (WSYS_SCENE_CAP in user/linux-wsys.c)
+# and the buffer wsysd must hand slurp to carry one whole. The +1 is slurp's
+# NUL: it reads at most cap - 1, so a buffer sized at exactly the producer's
+# maximum loses the last byte. That was the defect.
+SCENE_MAX: uint64 = 16384
+CAP: uint64 = 16385
+
+passed: int32 = 0
+failed: int32 = 0
+outbuf: Array[32, uint8]
+scratch: Array[20000, uint8]
+readbuf: Array[20000, uint8]
+
+
+def puts(s: Ptr[uint8]):
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    sys_write(1, s, n)
+
+
+def putd(v: int64):
+    neg: int32 = 0
+    x: uint64 = 0
+    if v < 0:
+        neg = 1
+        x = cast[uint64](0 - v)
+    else:
+        x = cast[uint64](v)
+    n: uint64 = 0
+    if x == 0:
+        outbuf[0] = 48
+        n = 1
+    else:
+        while x > 0:
+            outbuf[n] = cast[uint8](48 + (x % 10))
+            n = n + 1
+            x = x / 10
+        i: uint64 = 0
+        j: uint64 = n - 1
+        while i < j:
+            t: uint8 = outbuf[i]
+            outbuf[i] = outbuf[j]
+            outbuf[j] = t
+            i = i + 1
+            j = j - 1
+    if neg != 0:
+        sys_write(1, cast[Ptr[uint8]]("-"), 1)
+    sys_write(1, &outbuf[0], n)
+
+
+def ok(m: Ptr[uint8]):
+    passed = passed + 1
+    puts("  ok   ")
+    puts(m)
+    puts("\n")
+
+
+def bad(m: Ptr[uint8]):
+    failed = failed + 1
+    puts("  FAIL ")
+    puts(m)
+    puts("\n")
+
+
+# The function under test, byte-for-byte as user/wsysd.ad defines it.
+def slurp(path: Ptr[char], out: Ptr[uint8], cap: uint64) -> int64:
+    fd: int32 = sys_open(path)
+    if fd < 0:
+        return -1
+    total: uint64 = 0
+    while total < cap - 1:
+        k: int64 = sys_read(fd, &out[total], cap - 1 - total)
+        if k <= 0:
+            break
+        total = total + cast[uint64](k)
+    sys_close(fd)
+    out[total] = 0
+    return cast[int64](total)
+
+
+def write_file(path: Ptr[char], n: uint64) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    i: uint64 = 0
+    while i < n:
+        scratch[i] = 65 + cast[uint8](i % 26)
+        i = i + 1
+    sys_write(fd, &scratch[0], n)
+    sys_close(fd)
+    return 0
+
+
+def check(path: Ptr[char], n: uint64, label: Ptr[uint8]):
+    if write_file(path, n) != 0:
+        bad("could not write the fixture")
+        return
+    got: int64 = slurp(path, &readbuf[0], CAP)
+    if got == cast[int64](n):
+        ok(label)
+    else:
+        bad(label)
+        puts("         wrote ")
+        putd(cast[int64](n))
+        puts(" bytes, slurp returned ")
+        putd(got)
+        puts("\n")
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    puts("== slurp: a file of exactly the buffer size must arrive whole\n")
+    # Below the maximum: never in doubt, included so a total failure is visible.
+    check(cast[Ptr[char]]("/tmp/_slurp_small"), 100,
+          cast[Ptr[uint8]]("a 100-byte scene reads back as 100 bytes"))
+    # One below the producer's maximum.
+    check(cast[Ptr[char]]("/tmp/_slurp_capm1"), SCENE_MAX - 1,
+          cast[Ptr[uint8]]("a 16383-byte scene reads back as 16383 bytes"))
+    # EXACTLY the producer's maximum -- the only size at which the off-by-one
+    # is visible, and the case a test written from the code rather than the
+    # spec does not think to write. With the buffer sized at 16384 (what wsysd
+    # used to pass) this returns 16383 and the last op is silently lost.
+    check(cast[Ptr[char]]("/tmp/_slurp_cap"), SCENE_MAX,
+          cast[Ptr[uint8]]("a 16384-byte scene -- EXACTLY the producer's maximum -- reads back WHOLE"))
+    puts("slurp_cap: ")
+    putd(cast[int64](passed))
+    puts(" passed, ")
+    putd(cast[int64](failed))
+    puts(" failed\n")
+    if failed != 0:
+        return 1
+    return 0

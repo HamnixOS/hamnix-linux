@@ -55,6 +55,34 @@
 # rules above and the same shape of result: bytes taken, and a flag saying the
 # peer sent more than fits.
 #
+# WHAT THESE HELPERS ARE FOR, AND WHAT THEY ARE NOT FOR. Read this before
+# reaching for peerframe_line in a new caller; it has a range, and it is
+# narrower than the rules above.
+#
+#   FOR: a handful of frames or lines ONCE PER CONNECTION -- an ssh
+#   identification exchange, a protocol banner, a setup reply. The reads here
+#   are unbuffered: _pf_read_exact issues a sys_read per call, and
+#   peerframe_line calls it ONE BYTE AT A TIME because a delimiter can only be
+#   found by looking at each byte as it arrives.
+#
+#   NOT FOR: a block-oriented reader on a hot path. MEASURED AGAINST A REAL
+#   SECOND CALLER -- user/httpd_worker.ad, whose header block is up to 8 KiB --
+#   peerframe_line would turn one request into about eight thousand syscalls.
+#   httpd_worker reads in blocks and scans, and it was left doing that: the
+#   three rules above were applied to it directly instead. THE RULES TRANSFER;
+#   THIS CODE DOES NOT.
+#
+#   Also not for a length-prefixed frame whose length is not declared up front:
+#   peerframe_take needs the count before it reads, so a delimiter-framed
+#   protocol like HTTP cannot use it at all.
+#
+# WHAT WOULD MAKE IT GENERAL, if anyone wants that: a buffered reader
+# underneath -- fill a scratch block with one sys_read, scan it for the
+# delimiter, and keep the remainder for the next call. That is a real
+# improvement and deliberately not done here, because the one caller that
+# needed it did not need the speed and inventing an abstraction for a second
+# caller before meeting one is how libraries acquire the wrong shape.
+#
 # WHAT THIS FILE DOES NOT COVER, stated so nobody assumes it does:
 #
 #   * A WRAPPED STREAM. These take a raw fd and use sys_read. A site reading

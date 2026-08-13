@@ -1257,9 +1257,18 @@ def _bridge_session(want_status: Ptr[int32]) -> int32:
             elif mt == SSH_MSG_CHANNEL_EXTENDED_DATA:
                 # stderr (data_type_code uint32 then string). Route to
                 # our stderr (fd 2).
-                edlen: uint32 = _get_u32(&pkt_in[0], 9)
-                sys_write(2, cast[Ptr[uint8]](&pkt_in[13]),
-                          cast[uint64](edlen))
+                # THE SAME DEFECT AS CHANNEL_DATA, AND I MISSED IT ON THE
+                # FIRST PASS: the string length at offset 9 was handed
+                # straight to sys_write, so a hostile server could make this
+                # client read past pkt_in and dump it to the user's terminal.
+                # Fixing one arm of a two-arm defect is how a class survives.
+                edl: Array[1, uint64]
+                if _field_at(&pkt_in[0], cast[uint64](9), pkt_in_len[0],
+                             &edl[0]) != 0:
+                    _log("[ssh] EXTENDED_DATA length runs past the packet -- dropping\n")
+                    edl[0] = 0
+                if edl[0] > 0:
+                    sys_write(2, cast[Ptr[uint8]](&pkt_in[13]), edl[0])
             elif mt == SSH_MSG_CHANNEL_WINDOW_ADJUST:
                 add: uint32 = _get_u32(&pkt_in[0], 5)
                 chan_remote_win[0] = chan_remote_win[0] + cast[uint64](add)
