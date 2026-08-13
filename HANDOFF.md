@@ -274,11 +274,31 @@ about the new one is believed; then the new one (text on screen,
 has, which must print the identifier it wanted, every partition it found with
 both identifiers, and the words "running FROM RAM".
 
+The INSTALLER path was driven end to end in a VM as well: live medium built
+with `HAMLINUX_INSTALLER=1`, a blank 3 GiB target, `install --auto /dev/vdb`,
+and the disk it left behind booted on its own under OVMF through the
+`BOOTX64.EFI` the installer copied — `sysroot: root=PARTUUID=3bb3061b-... is
+/dev/vda2`, `rc.boot: hamnix-linux (installed)`, `rc.boot: up`. The GUID was
+read back off the image on the HOST with `sgdisk`, not taken from the
+installer's own report.
+
+**The known wart, stated rather than found later:** the installed disk and the
+medium it came from carry the SAME partition GUID, because the installer gives
+the target the identity the boot image it copies already names. The resolver
+therefore walks every disk and says so when a second one answers — measured
+with both attached: *"/dev/vda2 answers to the same identifier as /dev/vdb2.
+The FIRST one is being mounted"*. The clean fix is `hlinstall` choosing a fresh
+GUID and overwriting those 36 bytes inside the copied `BOOTX64.EFI` (same
+length, so a byte replacement, not a PE edit).
+
 **NOT PROVEN: any of this on physical hardware.** QEMU's OVMF hands over an EFI
 framebuffer the way a laptop's firmware does, and that is the mechanism under
-test, but the laptop in the story has not been booted again. What can be said
-is that the three things that would have stopped it are gone and that the next
-attempt produces evidence instead of a cursor.
+test, but the laptop in the story has not been booted again. Nor is there any
+evidence about a real machine's own GPU: the image carries no `i915`,
+`amdgpu` or `nouveau`, so the desktop on a laptop would be relying on efifb
+through `/dev/fb0`, which nothing here has watched happen. What can be said is
+that the three things that would have stopped the boot are gone and that the
+next attempt produces evidence instead of a cursor.
 
 ### The coverage gate looked at `/bin`. 152 files lived one directory over.
 
