@@ -646,6 +646,86 @@ def do_client(hold: int32, hold_flag: Ptr[char], needle: Ptr[uint8]) -> int32:
     return 0
 
 
+# OWNRING -- the GREEN arm's witness: a window's OWN owner reading its OWN
+# event / pointer / text / cmd rings.
+#
+# tests/linux/wsys_ringown.sh drives it, and the parking in the middle is not a
+# convenience.  A ring is only worth reading once the compositor has put
+# something in it, and the compositor cannot address the window until this
+# process has printed the wid it was given -- so the order has to be allocate,
+# ANNOUNCE, park, then drain.  Without the park this would read four empty
+# rings and report `n=0`, which is indistinguishable from a refusal that
+# returned nothing, and "a read that succeeds and returns nothing" is the
+# failure shape this whole device is written against.
+#
+# The park is BOUNDED (60 s).  A harness that never creates the flag ends the
+# run with empty reads rather than hanging the gate for ever.
+def do_ownring(flag: Ptr[char]) -> int32:
+    ctl: Ptr[char] = "/dev/wsys/ctl"
+    puts("ownring")
+    nw: Ptr[uint8] = "newwindow"
+    rc: int64 = poke(ctl, nw)
+    puts(" newwindow=")
+    puti(rc)
+
+    # The assigned wid, read back exactly as do_client does it (a SECOND open).
+    wid: int64 = -1
+    rfd: int32 = sys_open(ctl)
+    if rfd >= 0:
+        k: int64 = sys_read(rfd, &rbuf[0], 255)
+        sys_close(rfd)
+        if k > 0:
+            v: int64 = 0
+            seen: int32 = 0
+            i: uint64 = 0
+            while i < cast[uint64](k):
+                c: uint8 = rbuf[i]
+                if c >= 48 and c <= 57:
+                    v = v * 10 + cast[int64](c - 48)
+                    seen = 1
+                else:
+                    if seen != 0:
+                        break
+                i = i + 1
+            if seen != 0:
+                wid = v
+    puts(" wid=")
+    puti(wid)
+    puts("\n")
+    if wid < 2:
+        return 1
+
+    ws: Array[4, int32]
+    j: int32 = 0
+    while j < 600:
+        ffd: int32 = sys_open(flag)
+        if ffd >= 0:
+            sys_close(ffd)
+            break
+        sys_waitfds(&ws[0], 0, 100)
+        j = j + 1
+
+    ev: Ptr[uint8] = "event"
+    winpath(wid, ev)
+    puts("ownring.event ")
+    r1: int32 = do_read(cast[Ptr[char]](&pbuf[0]))
+    pt: Ptr[uint8] = "pointer"
+    winpath(wid, pt)
+    puts("ownring.pointer ")
+    r2: int32 = do_read(cast[Ptr[char]](&pbuf[0]))
+    tx: Ptr[uint8] = "text"
+    winpath(wid, tx)
+    puts("ownring.text ")
+    r3: int32 = do_read(cast[Ptr[char]](&pbuf[0]))
+    cd: Ptr[uint8] = "cmd"
+    winpath(wid, cd)
+    puts("ownring.cmd ")
+    r4: int32 = do_read(cast[Ptr[char]](&pbuf[0]))
+    if r1 != 0 or r2 != 0 or r3 != 0 or r4 != 0:
+        return 1
+    return 0
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if argc < 2:
         puts("usage: wsys_uidgate chrome <path> <text> | client [hold] | read <path>\n")
@@ -674,6 +754,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         if argc > 4:
             nd = cast[Ptr[uint8]](argv[4])
         return do_client(h, fl, nd)
+    orn: Ptr[uint8] = "ownring"
+    if streq(cmd, orn) == 1:
+        if argc < 3:
+            puts("usage: wsys_uidgate ownring <flag>\n")
+            return 2
+        return do_ownring(cast[Ptr[char]](argv[2]))
     fw: Ptr[uint8] = "fillwin"
     if streq(cmd, fw) == 1:
         return do_fillwin(16, 8)

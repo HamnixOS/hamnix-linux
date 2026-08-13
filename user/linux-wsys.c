@@ -2780,6 +2780,97 @@ static int deny(void)
     return -1;
 }
 
+/* ==================================================================
+ * THE FOUR RINGS THAT HAD NO OWNER CHECK AT ALL
+ * ==================================================================
+ * MEASURED, NOT SUSPECTED: with the mediator live and the read server forked,
+ * an attacker at uid 1002 owning no window opened /dev/wsys/<victim>/event and
+ * was handed the compositor's own `geometry 100 100 300 200` out of another
+ * uid's queue.  ring_read() asked nothing of anybody on pointer / event / text
+ * / cmd, and hamwsys_open's WIN_* arm fell through to `win_find` and a bare
+ * `return 0`.  `keys` was the only ring with a check, and only because it is
+ * no longer in the shared segment at all -- so the one ring that was moved got
+ * a gate and the four that stayed behind did not.
+ *
+ * WHAT THESE RINGS CARRY, which is why this is confidentiality and not tidiness:
+ * `event` is the compositor's narration of the window -- geometry, focus in/out,
+ * close requests; `pointer` is every cursor position and button state over that
+ * window; `text` is committed text input; `cmd` is the /dev/cons routing channel
+ * (see user/hamUI.ad:19).  Reading another window's `pointer` is following the
+ * user's mouse across somebody else's application, and reading its `text` is a
+ * keylogger by the back door of the one channel the keystroke split did not move.
+ *
+ * THE PREDICATE IS `hostowner() || owns_wid(wid)`, AND IT IS DELIBERATELY THE
+ * ONE ALREADY IN THIS FILE.  It is byte-for-byte the gate hamwsys_open applies
+ * to WRITING these same four rings (the for_write arm above), the gate on
+ * <wid>/wctl, and the gate quoted at <wid>/draw/ctl.  Two facts make it the
+ * right one here rather than a new mechanism:
+ *
+ *   - IT ADMITS THE COMPOSITOR, which is not optional.  wsysd writes every one
+ *     of these rings for windows it does not own -- route_pointer_event and
+ *     route_focus_event in user/wsysd.ad open /dev/wsys/<wid>/event and
+ *     /dev/wsys/<wid>/pointer for any focused wid -- and it passes the write
+ *     gate today as the HOST OWNER, because /dev/wsys is the file /srv/wsys and
+ *     wsysd created it.  A read gate built on the same predicate admits it by
+ *     exactly the same fact, and no second notion of "privileged" is invented.
+ *   - IT REFUSES AN UNRELATED uid, because hostowner() is `me == seg_owner` and
+ *     owns_wid() bottoms out in a parent-pid walk that a process spawned outside
+ *     the victim's descent cannot satisfy.
+ *
+ * AND `owns_wid()` STILL NEVER COMPARES A uid -- READ THIS BEFORE TRUSTING IT.
+ * That is a real gap and it is NOT closed here.  A uid-1002 DESCENDANT of the
+ * window's owner still passes, exactly as stage 5 records at THE CONNECTION IS
+ * THE CAPABILITY, and on a real desktop every application is a descendant of
+ * the compositor.  It is not closed here for a reason that is structural rather
+ * than an omission: struct wwin records `int32_t pid` and NO uid at all, and
+ * the struct is byte-for-byte what versions 6 and 7 had -- adding an owner uid
+ * to it changes sizeof(struct wwin) and costs a WSYS_VERSION bump, which THE
+ * SPLIT records as the thing this file cannot survive.  So the uid the window
+ * belongs to is not a fact this code has; the only identity in the row is a pid.
+ * Narrowing the walk instead is off the table for the reason stage 5 gives:
+ * /etc/rc.de-user makes every DE window `/bin/hamsh /etc/rc.de-user <prog>` and
+ * stamps the wid against hamsh, so an exact-pid match would leave every
+ * toolkit-spawned task unable to read the rings of the window it draws into.
+ *
+ * AND THIS CHECK IS ADVISORY, WHICH IS THE HONEST WORD FOR IT.  Every client
+ * maps the segment directly -- tests/linux/wsys_bypass.sh drives a program that
+ * does exactly that and asserts it SUCCEEDS -- so an attacker that skips the
+ * protocol reads these rings out of the mapping and no `if` written in this file
+ * is in its way.  Nor are these four leaves routed: srv_route_read carries
+ * SCREEN, POOL and WINDOWS and nothing else, so there is no server-side copy of
+ * this question to ask.  What this binds is a client that goes through the file
+ * protocol, which is every program in this tree -- the same scope, and the same
+ * limit, that WHAT THIS GATE IS AND IS NOT states for the uid gate above. */
+static int ring_leaf_is_owned(int leaf)
+{
+    return leaf == HAMWSYS_WIN_POINTER || leaf == HAMWSYS_WIN_EVENT
+        || leaf == HAMWSYS_WIN_TEXT    || leaf == HAMWSYS_WIN_CMD;
+}
+
+static const char *ring_leaf_word(int leaf)
+{
+    return leaf == HAMWSYS_WIN_POINTER ? "pointer"
+         : leaf == HAMWSYS_WIN_EVENT   ? "event"
+         : leaf == HAMWSYS_WIN_TEXT    ? "text" : "cmd";
+}
+
+/* 1 to serve the read, 0 to refuse it with EPERM already set.  REFUSED BY NAME,
+ * for the reason the keys refusal is: a read that succeeded and returned zero
+ * bytes would say "nothing has happened in this window" to a caller with no way
+ * to tell that apart from the truth, and that is this tree's own worst bug
+ * shape -- a surface that lies rather than one that errors. */
+static int ring_read_allowed(int wid, int leaf)
+{
+    if (!ring_leaf_is_owned(leaf)) return 1;
+    if (hostowner() || owns_wid(wid)) return 1;
+    fprintf(stderr,
+            "wsys: /dev/wsys/%d/%s: this process does not own window %d, so it "
+            "cannot read its %s ring.\n",
+            wid, ring_leaf_word(leaf), wid, ring_leaf_word(leaf));
+    errno = EPERM;
+    return 0;
+}
+
 /* The verbs devwsys parses BEFORE its hostowner gate.  `s`/`n` is one ctl
  * line; only the leading token is compared. */
 static int ctl_verb_is_ungated(const char *s, size_t n)
@@ -7302,6 +7393,11 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     case HAMWSYS_WIN_CMD: {
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -1; }
+        /* THE OWNER CHECK THE FOUR RINGS NEVER HAD -- see THE FOUR RINGS THAT
+         * HAD NO OWNER CHECK AT ALL.  At the open, beside the keys refusal
+         * above and mirroring the for_write arm at the top of this function,
+         * so that a refused reader never gets a descriptor at all. */
+        if (!for_write && !ring_read_allowed(f->wid, f->leaf)) return -1;
         /* Opening the scene for writing starts a fresh frame — the client
          * writes the whole display list, then publishes it with `commit`.
          * IN THE MEMFD, NOT IN THE SEGMENT: see THE PIXEL HAND-UP.  The
@@ -7448,6 +7544,15 @@ int64_t hamwsys_read(struct hamwsys_file *f, uint8_t *buf, uint64_t cap)
     case HAMWSYS_WIN_CMD:     v = win_find(f->wid); if (v) q = &v->cmd;     break;
     default: break;
     }
+    /* AND AGAIN AT THE READ, for the reason hamwsys_write states for the write
+     * side: a descriptor can outlive the privilege that opened it -- an fd
+     * inherited across /etc/rc.de-user's setuid is the case in the tree.  The
+     * open-time check is what refuses the stranger; this one is what stops a
+     * descriptor opened before a privilege drop from draining the ring after
+     * it.  ring_read() DESTROYS what it returns (it moves r past the bytes), so
+     * a late check that merely discarded the buffer would still have eaten the
+     * owner's events -- the refusal has to come before the drain. */
+    if (q && !ring_read_allowed(f->wid, f->leaf)) return -1;
     if (q)
         return (int64_t)ring_read(q, buf, cap);
 
