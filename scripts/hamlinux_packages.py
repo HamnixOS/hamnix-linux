@@ -980,8 +980,22 @@ def firmware_files(patterns, exclude=()):
     return out
 
 
-def image_want_modules():
-    """The module NAMES scripts/hamlinux_image.sh stages into the image.
+def image_module_groups():
+    """The module NAMES scripts/hamlinux_image.sh stages, GROUPED BY SOURCE.
+
+    Returns [(label, [names])]: ("base", the names written inline in
+    WANT_MODULES) followed by one group per shell variable that line
+    interpolates, labelled after the variable ($HW_MODULES -> "hw").
+
+    THE GROUPING IS NOT COSMETIC -- IT IS WHAT KEEPS EACH PACKAGE UNDER hpm's
+    CEILING. hpm unpacks in RAM: 4 MiB per .tar.gz and 8 MiB inflated. All
+    twenty-four names in one package is 13,139,881 bytes inflated, which
+    write_pkg refuses outright ("too big for hpm to install"), so the twenty
+    hardware .ko files could not be shipped at all in one lump. Split by the
+    boundary the image script itself already draws, they are 34 modules /
+    7,267,437 B and 20 modules / 5,872,444 B -- two packages, both under the
+    cap, with ZERO files in common (measured, not assumed: two packages owning
+    one path means `hpm remove` on either takes the file away from the other).
 
     PARSED OUT OF THAT SCRIPT, not copied here. The list is the image's, and a
     second copy of it in this file would drift the first time somebody added a
@@ -990,6 +1004,32 @@ def image_want_modules():
     assignment is not where it expects: an empty list would make the package
     below ship nothing and the coverage gate name twenty files, which is loud,
     but a WRONG list would ship the wrong modules quietly.
+
+    A SHELL VARIABLE IN THAT LIST IS EXPANDED, AND NOT EXPANDING IT COST
+    TWENTY FILES. The image script writes
+
+        HW_MODULES="nvme ahci sd_mod usb-storage uas xhci_pci ehci_pci \\
+                    usbhid hid-generic"
+        WANT_MODULES="${HAMLINUX_MODULES:-... $HW_MODULES ...}"
+
+    and the SHELL expands `$HW_MODULES`, so the image stages nvme, ahci,
+    sd_mod, usb-storage, uas, the two USB host controllers and the two HID
+    drivers -- twenty .ko files -- while this parse returned the literal
+    token `$HW_MODULES`, which modprobe cannot resolve. The nine names then
+    fell into the `unresolved` branch of build_base_module_package, whose
+    note says "the image cannot stage what modprobe cannot resolve either,
+    so this is not a coverage hole". THAT SENTENCE WAS FALSE: the image
+    stages them by a different mechanism. Measured by
+    tests/linux/channel_covers_image.sh, which went 7 PASS / 20 FAIL naming
+    every one of those files -- the drivers that read an NVMe or SATA root
+    disk and the ones that make a USB keyboard work, in the image and in no
+    package, on exactly the real hardware this port is being aimed at.
+
+    So simple `NAME="..."` assignments earlier in the same file are
+    substituted, and a `$NAME` this file cannot resolve is a REFUSAL rather
+    than a token passed downstream: an unresolvable name reaching modprobe
+    is indistinguishable from a module that genuinely does not exist, which
+    is the silence that hid this.
     """
     path = os.path.join(ROOT, "scripts/hamlinux_image.sh")
     with open(path) as fh:
@@ -1000,7 +1040,35 @@ def image_want_modules():
         raise SystemExit(
             "hamlinux_packages: cannot find WANT_MODULES in %s -- refusing to "
             "guess which modules the image stages" % path)
-    return m.group(1).split()
+    # Every plain `NAME="value"` assignment in the script, for substitution.
+    assigns = dict(re.findall(r'^([A-Za-z_][A-Za-z0-9_]*)="([^"$]*)"$',
+                              text, re.M))
+    groups = []                       # [(label, [names])], in source order
+    inline = []
+    for tok in m.group(1).split():
+        if not tok.startswith("$"):
+            inline.append(tok)
+            continue
+        var = tok[1:].strip("{}")
+        if var not in assigns:
+            raise SystemExit(
+                "hamlinux_packages: WANT_MODULES in %s references %s, which "
+                "this file cannot resolve -- refusing to package a module "
+                "list that does not match the one the image stages"
+                % (path, tok))
+        label = var.lower()
+        if label.endswith("_modules"):
+            label = label[: -len("_modules")]
+        groups.append((label, assigns[var].split()))
+    return [("base", inline)] + groups
+
+
+def image_want_modules():
+    """Every module name the image stages, flattened. See image_module_groups."""
+    names = []
+    for _label, ns in image_module_groups():
+        names.extend(ns)
+    return names
 
 
 def drm_core_modules(kver):
@@ -1156,13 +1224,47 @@ def build_base_module_package(pkgdir, version, entries, skipped):
     hamnix-drivers-drm -- which is why that package's set is subtracted here:
     two packages owning one path means `hpm remove` on either takes the file
     away from the other.
+
+    ONE PACKAGE PER GROUP, BECAUSE ONE PACKAGE DOES NOT FIT. image_module_groups
+    returns the image's list split at the boundary the image script itself
+    draws, and each group becomes its own package -- hamnix-drivers-base for
+    the inline names, hamnix-drivers-<label> for each interpolated variable.
+    All twenty-four names together are 13.1 MB inflated against hpm's 8 MiB
+    in-RAM ceiling, so the twenty real-hardware .ko files (nvme, ahci, sd_mod,
+    the USB stack, the HID stack) could not be carried at all until this split
+    existed; they were in the image and in no package, and
+    tests/linux/channel_covers_image.sh named every one of them.
+
+    NO FILE IS IN TWO PACKAGES. Each group's set has the DRM core subtracted
+    (hamnix-drivers-drm owns those) and everything an earlier group already
+    claimed subtracted too, so `hpm remove` on one cannot take a file the
+    other installed.
+
+    Returns the package names it built, so hamnix-base can depend on all of
+    them rather than on a hard-coded one.
     """
     kver = kernel_version()
     if kver is None or not os.path.exists(MODPROBE):
         skipped.append("hamnix-drivers-base (no modprobe or /lib/modules "
                        "on this host)")
-        return
-    names = image_want_modules()
+        return []
+    core = set(drm_core_modules(kver))
+    claimed = set(core)
+    built = []
+    for label, names in image_module_groups():
+        pkg = ("hamnix-drivers-base" if label == "base"
+               else "hamnix-drivers-" + label)
+        if _build_one_module_package(pkgdir, version, entries, skipped,
+                                     kver, pkg, label, names, claimed):
+            built.append(pkg)
+    return built
+
+
+def _build_one_module_package(pkgdir, version, entries, skipped,
+                              kver, pkg, label, names, claimed):
+    """One module package. `claimed` is the set of .ko paths already owned by
+    another package; it is READ and then EXTENDED, so no two packages in a
+    channel can own the same file."""
     chains, unresolved = [], []
     for n in names:
         chain = modprobe_chain(kver, n)
@@ -1174,29 +1276,28 @@ def build_base_module_package(pkgdir, version, entries, skipped):
         # The image cannot stage what modprobe cannot resolve either, so this
         # is not a coverage hole -- but say it out loud rather than shipping a
         # shorter list than the name of this package implies.
-        skipped.append("hamnix-drivers-base: modprobe resolved nothing for %s "
+        skipped.append("%s: modprobe resolved nothing for %s "
                        "(the image does not stage them either)"
-                       % " ".join(unresolved))
+                       % (pkg, " ".join(unresolved)))
     if not chains:
-        skipped.append("hamnix-drivers-base (modprobe resolved nothing)")
-        return
+        skipped.append("%s (modprobe resolved nothing)" % pkg)
+        return False
 
-    core = set(drm_core_modules(kver))
-    mine = [ko for ko in merge_chains(chains) if ko not in core]
+    mine = [ko for ko in merge_chains(chains) if ko not in claimed]
     if not mine:
-        skipped.append("hamnix-drivers-base (every module is already in "
-                       "hamnix-drivers-drm)")
-        return
+        skipped.append("%s (every module is already in another package)" % pkg)
+        return False
+    claimed.update(mine)
 
     workdir = tempfile.mkdtemp(prefix="hambase-")
     try:
         staged = stage_modules(kver, mine, workdir)
         deps = dep_lines(kver, staged)
         if not deps:
-            skipped.append("hamnix-drivers-base (this host has no modules.dep "
-                           "to copy the dependency lines from)")
-            return
-        depname = "/lib/modules/%s/modules.dep.base" % kver
+            skipped.append("%s (this host has no modules.dep "
+                           "to copy the dependency lines from)" % pkg)
+            return False
+        depname = "/lib/modules/%s/modules.dep.%s" % (kver, label)
         inside = depname.lstrip("/")
         host = os.path.join(workdir, inside)
         os.makedirs(os.path.dirname(host), exist_ok=True)
@@ -1216,25 +1317,23 @@ def build_base_module_package(pkgdir, version, entries, skipped):
         files = [(h, i) for h, i, _c, _b in staged] + [(host, inside)]
         needs_gzip = any(b for _h, _i, _c, b in staged)
         entries.append(write_pkg(
-            pkgdir, "hamnix-drivers-base", version,
-            "The kernel modules hamnix-linux BOOTS with, for %s: ext4 and "
-            "jbd2, vfat/fat and the nls tables, overlay, squashfs, loop, the "
-            "virtio block, net and input drivers, evdev, and the snd-hda "
-            "sound stack. These are the modules the image stages; this "
-            "package is how an INSTALLED machine receives a fix to them. It "
-            "does not change /etc/modules (the machine already lists them); "
-            "it refreshes the files and puts its dependency lines in front of "
-            "the machine's modules.dep. %d modules, %d bytes of table."
-            % (kver, len(staged), len(body)),
+            pkgdir, pkg, version,
+            "Kernel modules the hamnix-linux image stages, for %s (%s set). "
+            "These are the modules the image boots with; this package is how "
+            "an INSTALLED machine receives a fix to them. It does not change "
+            "/etc/modules (the machine already lists them); it refreshes the "
+            "files and puts its dependency lines in front of the machine's "
+            "modules.dep. %d modules, %d bytes of table."
+            % (kver, label, len(staged), len(body)),
             files,
             ["hamnix-init>=1"] + (["hamnix-gzip>=1"] if needs_gzip else []),
             hooks={"install.hamsh": base_module_install_hook(
-                       "hamnix-drivers-base", staged, kver, depname),
-                   "remove.hamsh": base_module_remove_hook(
-                       "hamnix-drivers-base")},
+                       pkg, staged, kver, depname),
+                   "remove.hamsh": base_module_remove_hook(pkg)},
             extra_info=["license: GPL-2.0", "homepage: https://kernel.org/"]))
-        print("  hamnix-drivers-base (%d modules + %d dependency lines, %s)"
-              % (len(staged), len(deps), kver))
+        print("  %s (%d modules + %d dependency lines, %s)"
+              % (pkg, len(staged), len(deps), kver))
+        return True
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -2270,7 +2369,8 @@ def main():
     # image staged them and the installer copied them), and a machine that
     # cannot update the driver that mounts its root filesystem is the exact
     # gap the invariant exists to close.
-    build_base_module_package(pkgdir, args.version, entries, skipped)
+    module_pkgs = build_base_module_package(pkgdir, args.version, entries,
+                                            skipped)
 
     # vkprobe -- the diagnostic that answers "is the GPU stack real?" from
     # inside the Hamnix root. It is the same program that proved this path
@@ -2357,7 +2457,13 @@ def main():
     base_deps = ["hamnix-init>=1", "hamnix-hamsh>=1", "hamnix-coreutils>=1",
                  "hamnix-net>=1", "hpm>=1", "hamnix-desktop>=1",
                  "hamnix-apps>=1"]
-    for optional in ("hamnix-man", "hamnix-drivers-base"):
+    # EVERY module package, not a hard-coded one. The hardware set is its own
+    # package now (see build_base_module_package: one package per group,
+    # because all of them together exceed hpm's 8 MiB in-RAM ceiling), and a
+    # hard-coded "hamnix-drivers-base" here would have left the nvme/ahci/USB
+    # /HID modules in the channel and out of the flagship package -- reachable
+    # only by somebody who knew to type its name.
+    for optional in ["hamnix-man"] + sorted(module_pkgs):
         if optional in built_names:
             base_deps.append(optional + ">=1")
         else:
