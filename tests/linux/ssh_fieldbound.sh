@@ -50,18 +50,30 @@
 # copy ever differs by more than that single `def main` line, the gate fails
 # instead of testing something that is not what ships.
 #
-# PROVEN RED (2026-08-12), against the real user/sshd.ad in a worktree:
-#   * `_field_at` deleted           -> "user/sshd.ad no longer defines
-#                                       _field_at" (assertion 1), exit 1.
-#   * the wrap check weakened to
-#     `if off + 4 + ln > limit + 4096` -> the fixture builds and runs, and
-#                                       reports 4 passed / 2 failed:
-#                                       "one byte past the end was accepted --
-#                                       off by one" and "a length past the
-#                                       packet was accepted because it fit the
-#                                       array". Gate exit 1.
-#   * `-1` returns changed to `0`   -> 1 passed / 5 failed.
-# The real file is unchanged in the commit that lands this.
+# PROVEN RED (2026-08-12) by breaking the real user/sshd.ad in a worktree and
+# running this gate against it. Three mutations, three different reds:
+#
+#   * `_field_at` DELETED (the whole def) -> assertion 1: "user/sshd.ad no
+#     longer defines _field_at (found 0 definitions)", gate 0 passed / 1
+#     failed, exit 1. And the grep is only the readable half: with assertion 1
+#     bypassed the BUILD fails too --
+#         /usr/bin/ld: undefined reference to `_field_at'
+#         clang-19: error: linker command failed with exit code 1
+#     which is the proof the fixture is bound to the shipped symbol and not to
+#     a copy of it.
+#
+#   * THE BOUND WEAKENED: `if off + 4 + ln > limit:` -> `> limit + 4096:`.
+#     Builds, runs, and the fixture reports 5 passed / 1 failed --
+#     "one byte past the end was accepted -- off by one". Gate 4/4, exit 1.
+#     (Only one case moves: the separate `ln > limit` check still catches the
+#     100-byte and 0xFFFFFFFF lengths. One is enough; it is the boundary.)
+#
+#   * EVERY `return -1` IN THE PREDICATE CHANGED TO `return 0` (it accepts
+#     everything): fixture 2 passed / 4 failed, including "0xFFFFFFFF was
+#     ACCEPTED -- this is the pre-auth read". Gate 4/4, exit 1.
+#
+# The real user/sshd.ad is unchanged in the commit that lands this; the
+# mutations were reverted with `git checkout` after each measurement.
 #
 # WHY THE ARITHMETIC AND NOT A CRAFTED PACKET. Every `_field_at` call site sits
 # behind key exchange, and the USERAUTH ones behind an authenticated session --

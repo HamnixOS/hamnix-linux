@@ -4946,3 +4946,36 @@ bash tests/linux/hpm_hook_bounded.sh
 # ~7 min with the image staged;
 # LEXGATE_SKIP_BOOT=1 runs the host half alone in ~2 min.
 bash tests/linux/lex_error_fatal.sh
+
+# --- the servers that ACCEPT on this line, driven end to end (added 2026-08-12)
+# Every Adder server that takes a connection had its coverage on the BARE-METAL
+# lane, so when `accept` handed back the LISTENER here -- `accept(5)=6` then
+# `read(5)=ENOTCONN`, fixed in user/linux-net.c -- nothing on this lane
+# noticed. This gate brings u_server and sshd up inside a PRIVATE USER+NET
+# NAMESPACE (it touches no port of the machine it runs on; sshd's port is the
+# literal 22) and drives one full exchange through each: u_server's exact
+# response, sshd's identification exchange and KEXINIT, and the injection the
+# 255-byte banner clamp allowed -- a 255-byte line followed immediately by
+# "SSH-", which used to be read as TWO lines with the second accepted as the
+# peer's identification string. The padding length IS the test: 300 bytes
+# passes against the broken server. 5 PASS / 0 FAIL measured; against a pre-fix
+# sshd the injection arm reports "the server DROPPED the connection". Skips
+# with 0/0 where an unprivileged user gets no netns. No QEMU; ~2 min.
+bash tests/linux/net_accept_servers.sh
+
+# --- the pre-auth bound in sshd, compiled from the sshd that ships (2026-08-12)
+# user/sshd.ad's USERAUTH parse walked `p = p + 4 + len` with `len` straight
+# from the packet, so a peer sending a length near 0xFFFFFFFF moved the next
+# read ~4 GB past pkt_in BEFORE AUTHENTICATION. `_field_at` is the check that
+# now sits at every such advance. Its test, tests/test_ssh_fieldbound.ad,
+# reported 6/6 -- while RE-DECLARING _field_at in its own body and running the
+# copy, and while being registered nowhere. Both are fixed: the fixture imports
+# the real symbol, and this script builds it in a mirror of the tree whose only
+# edited file is an sshd.ad copy that differs from the shipped one in ONE line
+# (its `main`, which cannot be linked twice) -- asserted by diff before the gate
+# will report anything. Proven red three ways against a broken user/sshd.ad:
+# predicate deleted -> named failure AND an undefined-reference link error;
+# bound weakened by 4096 -> "one byte past the end was accepted"; every
+# `return -1` turned into `return 0` -> "0xFFFFFFFF was ACCEPTED". 8 PASS / 0
+# FAIL. No QEMU, no network, no namespace; ~1 min cold, seconds warm.
+bash tests/linux/ssh_fieldbound.sh
