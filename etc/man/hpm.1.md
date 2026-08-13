@@ -62,8 +62,8 @@ scope and remain prebuilt.
 
     hpm refresh
     hpm search editor
-    hpm show ed
-    newshell hostowner -c 'hpm install ed'
+    hpm show hamnix-vi
+    newshell hostowner -c 'hpm install hamnix-vi'
     # source package: compiled on-box from .ad source at install time
     newshell hostowner -c 'hpm install hello-src'
 
