@@ -162,6 +162,13 @@ there.
 **AND THE BUDGET HAS NO FIXED TERM IN IT, WHICH IS WHY ONE ARM IS RED.**
 Measured CPU added to `wsysd`, three 40 s samples each, `/proc/<pid>/stat`:
 
+> **THIS ARM IS NO LONGER RED, AND NOT BECAUSE THE NUMBER WAS MOVED TO FIT.**
+> Stage 2 answered the question the red arm was holding open (see *Routing
+> made the compositor cheaper* below), and the budget has since been re-derived
+> in the shape the cost actually has — a fixed term plus a marginal one. See
+> **The budget, re-derived** near the end of this document. The measurement in
+> this table stands as taken.
+
 | rate (delivered, verified) | measured | budget | |
 |---|---|---|---|
 | 192 ops/s | **0.27%** | 0.12% | **over** |
@@ -446,6 +453,11 @@ written down rather than assumed.
 
 ## Budget to hold it to
 
+**THE BUDGET BELOW IS SUPERSEDED. It was the wrong SHAPE, which is a stronger
+statement than "it was too tight", and the replacement is two numbers rather
+than three.** It is kept here because the reasoning that produced it is the
+thing to avoid repeating.
+
 From the census, at 6.2 µs sequential / 2.2 µs pipelined:
 
 | load | ops/s | added CPU |
@@ -453,6 +465,57 @@ From the census, at 6.2 µs sequential / 2.2 µs pipelined:
 | idle | 192 | **0.12%** of a core |
 | drag, mouse-paced | 618 | 0.38% |
 | worst measured | 2050 | 1.27% |
+
+Every figure there is `ops/s × per-op`: 0.12/192, 0.38/618 and 1.27/2050 are
+all 6.2e-4. **The budget therefore passes through the origin — it asserts that
+mediating nothing costs nothing** — and the measured cost does not, because a
+*wake* does not depend on the rate.
+
+### The budget, re-derived — a fixed term and a marginal one
+
+    budget(ops) = FIXED_BUDGET + MARGINAL_BUDGET × ops
+                = 0.34% of a core  +  1.80 µs per routed message
+
+| load | ops/s | budget | was |
+|---|---|---|---|
+| wake-only | 100 | 0.36% | — |
+| idle | 192 | 0.37% | 0.12% |
+| drag, mouse-paced | 618 | 0.45% | 0.38% |
+| worst measured | 2050 | **0.71%** | 1.27% |
+
+**This is not a blanket loosening.** At the worst measured load the new budget
+is 0.71% where the old one was 1.27% — the shape change *tightens* the arm
+that had the most slack while making the idle arm expressible at all. Only the
+192 arm moves outward, and it moves because the old figure was below what the
+instrument can resolve: at `CLK_TCK=100` over 40 s windows one tick is 0.025%
+of a core, the delta is a difference of two medians, and the run-to-run spread
+on that difference is ±0.05–0.08% — **comparable to the entire 0.12% budget.
+The old number was not merely missed, it was never testable.**
+
+`tests/linux/wsys_srv_transport.sh` asserts **both terms separately**, because
+a single percentage per rate cannot tell *the wake got dearer* from *messages
+got dearer*, and those have different fixes. It also drives a **100 ops/s**
+arm, which exists to measure the fixed term almost directly rather than
+extrapolate it: the pacer emits at least one message per 10 ms slice at any
+rate ≥ 100/s, so 100/s is the cheapest load that still wakes `wsysd` 100 times
+a second, and its marginal part (100 × 1.35 µs = 0.0135%) is half a tick. That
+matters because the intercept of a fit through noisy points is the
+worst-determined thing in it — across the runs on record the marginal term
+held at 1.076 / 1.350 / 1.346 µs while the fitted intercept wandered
+0.25 / 0.19 / 0.12, slope and intercept trading off exactly as a fit's do.
+
+**Why the idle arm may now pass, stated plainly, because it was left red on
+purpose and that must not be quietly undone.** Stage 1 refused to widen it
+because widening would have hidden a question: the synthetic load *adds* a
+wake, where a real routed mutation *replaces* a shared-memory write that
+already poked the wake channel. **Stage 2 answered it** — the same real
+dragging client cost a median 99.80% of a core unrouted and 53.30% routed,
+46.5 points of a core cheaper at 43% more frames, because `srv_service` drains
+every queued message in one iteration where the unrouted path woke the loop
+per publish. Mediation coalesces by construction. So the fixed term this
+synthetic NOP measures is an **upper bound that real traffic does not pay**.
+The arm passes because the question closed, not because the number was moved
+to fit.
 
 **Input-to-pixel is ~0.3 ms and is now a published claim**, so it is a budget
 and not an observation. A client repaint is 3 ops ≈ 19 µs sequential, about 5%
