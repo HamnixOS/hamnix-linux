@@ -4541,6 +4541,10 @@ int32_t sys_wsys_srv_readlat(int32_t n)
  *   extern def sys_wsys_srv_handoff(on: int32) -> int32
  *   extern def sys_wsys_srv_conngate(wid: int32, selfpath: Ptr[char],
  *                                   uidgate: Ptr[char]) -> int32 */
+int32_t sys_wsys_srv_dropwrite(int32_t wid, int32_t to_uid)
+{ return (int32_t)hamwsys_srv_dropwrite((int)wid, (int)to_uid); }
+int32_t sys_wsys_srv_scene(int32_t victim_wid)
+{ return (int32_t)hamwsys_srv_scene_selftest((int)victim_wid); }
 int32_t sys_wsys_srv_handoff(int32_t on)
 { return (int32_t)hamwsys_srv_handoff((int)on); }
 int32_t sys_wsys_srv_conngate(int32_t wid, const char *selfpath,

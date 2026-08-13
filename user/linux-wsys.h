@@ -72,6 +72,12 @@ struct hamwsys_file {
     uint8_t *snap;       /* snapshot-once read image (malloc'd), or NULL   */
     uint64_t snaplen;
     char     name[64];   /* HAMWSYS_SINK: the path below /dev/wsys/        */
+    /* STAGE 6, and it is PER-OPEN because the thing it records is: opening
+     * <wid>/scene for writing STARTS A FRAME.  A routed client sends that fact
+     * with its first write instead of clearing the display list itself, and a
+     * client may hold two scenes open at once, so a global would start the
+     * wrong window's frame. */
+    int      srv_newframe;
 };
 
 int     hamwsys_kind(const char *path);
@@ -164,6 +170,11 @@ enum {
      * host-owner power to whatever it was handed to.  A client can only ever
      * declare itself adopted, so the flag can lose privilege, never gain it. */
     WSRV_F_ADOPT  = 2,
+    /* Set on a scene write that BEGINS a frame -- the wire form of `open the
+     * scene for writing`.  Without it the server would have to guess where one
+     * display list ends and the next begins, and a guess there is a window
+     * that paints last frame's contents for ever. */
+    WSRV_F_NEWFRAME = 4,
 
     WSRV_OP_HELLO = 1,             /* blocks: version handshake              */
     WSRV_OP_NOP   = 2,             /* fire-and-forget: the mutation shape    */
@@ -221,6 +232,15 @@ enum {
     WSRV_LEAF_WINDOWS = 3,         /* /dev/wsys/windows  — AND A POLICY      */
     WSRV_LEAF_SCREEN  = 4,         /* /dev/wsys/screen                       */
     WSRV_LEAF_POOL    = 5,         /* /dev/wsys/pool                         */
+    /* STAGE 6 — the last unrouted mutation.  /dev/wsys/<wid>/scene is the one
+     * leaf with PER-OPEN STATE: opening it for writing STARTS A NEW FRAME
+     * rather than appending to the old one, and getting that wrong is the
+     * defect that made an empty window look full for the life of a test file.
+     * So the frame boundary is carried in the message (WSRV_F_NEWFRAME) rather
+     * than inferred, and the open sends one of its own with no payload -- an
+     * open that resets and a write that appends are two different acts and the
+     * wire says which is which. */
+    WSRV_LEAF_WIN_SCENE = 6,       /* /dev/wsys/<wid>/scene                  */
 };
 
 /* THE SERVER SIDE. wsysd calls claim() before it touches /dev/wsys at all --
@@ -280,6 +300,13 @@ int      hamwsys_srv_handoff(int on);
  * are measured in one process.  Returns a failure count.  Exported as
  *   extern def sys_wsys_srv_conngate(wid: int32, selfpath: Ptr[char],
  *                                   uidgate: Ptr[char]) -> int32 */
+/* Stage 6's scene probe: a routed display-list write past the local check.
+ *   extern def sys_wsys_srv_scene(victim_wid: int32) -> int32 */
+int      hamwsys_srv_scene_selftest(int victim_wid);
+/* Dial privileged, drop uid, then write: the arm that proves a connection
+ * does not outlive the identity that made it.
+ *   extern def sys_wsys_srv_dropwrite(wid: int32, to_uid: int32) -> int32 */
+int      hamwsys_srv_dropwrite(int victim_wid, int to_uid);
 int      hamwsys_srv_conngate(int wid, const char *self,
                               const char *uidgate);
 
