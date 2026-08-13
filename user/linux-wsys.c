@@ -4353,9 +4353,24 @@ static int srv_send_on(int fd, uint16_t op, uint16_t flags, int32_t wid,
  * that never paints; everything else still goes to the frame loop, and the
  * unadorned names below mean "the frame loop's connection" so that no
  * existing call site had to be re-read to be trusted. */
+static void srv_redial_if_uid_changed(void);
+
 static int srv_send(uint16_t op, uint16_t flags, int32_t wid, uint32_t tag,
                     const void *pay, uint32_t len)
 {
+    /* THE RE-DIAL BELONGS HERE AND NOWHERE HIGHER, and a gate is what moved
+     * it.  It used to sit in srv_route_write() -- the client's ordinary write
+     * path -- which a process that skips the local check simply does not call.
+     * tests/linux/wsys_srv_identity.sh's arm D dialled as a host owner,
+     * dropped to uid 1002, sent the message straight down the socket, AND THE
+     * MEDIATOR ACCEPTED IT: the title changed to PWNED-BY-A-STRANGER.  A check
+     * that only runs on the path an honest client takes is advice.  This is the
+     * one funnel every routed message goes through, so the identity is
+     * re-sampled for all of them.
+     *
+     * No recursion: srv_dial()'s own HELLO goes through srv_call_on ->
+     * srv_send_on and never reaches this wrapper. */
+    srv_redial_if_uid_changed();
     return srv_send_on(srv_fd, op, flags, wid, tag, pay, len);
 }
 
@@ -4495,7 +4510,6 @@ static int srv_route_write(const struct hamwsys_file *f, const uint8_t *buf,
      * the frame boundary with no display list behind it yet -- and dropping it
      * here would mean a client that opens, writes nothing and commits publishes
      * the PREVIOUS frame instead of an empty one. */
-    if (srv_fd >= 0) srv_redial_if_uid_changed();
     if (srv_fd < 0 || n > WSRV_MAXPAY) return 0;
     if (n == 0 && !(f->leaf == HAMWSYS_WIN_SCENE && f->srv_newframe)) return 0;
     int leaf;

@@ -575,15 +575,35 @@ refusal and both frame-1 paints. That is why this gate reads a pixel that is
 supposed to have **gone away**: the defect is invisible to every other kind of
 assertion, and it is the one that made an empty window look full.
 
-**A connection must not outlive the identity that dialled it** —
-`srv_redial_if_uid_changed()` re-dials when the effective uid moves, because
-`SO_PEERCRED` is sampled at `connect(2)`. Adopted connections are exempt (not
-ours to replace). **This is UNPROVEN**: the arm written for it went green for
-the wrong reason (`ENOENT` from `win_find` before the permission check) and its
-negative control did not flip, so the arm was removed rather than quoted. The
-probe verb (`wsys_srv_probe drop <wid> <uid>`) is left in place; what it needs
-is a window that certainly exists at the moment of the write and a server-side
-trace naming the uid the connection was accepted with.
+**A connection must not outlive the identity that dialled it — PROVEN, and
+proving it found a real defect.** `tests/linux/wsys_srv_identity.sh` is now
+**17 passed, 0 failed**; arm D dials as a host owner (inner uid 0), drops to
+uid 1002 and writes to uid 1001's window, scored on **the uid the server
+accepted the connection with**, taken from the server's own trace, and refusing
+to score at all on an `ENOENT` — because that is how the FIRST version of this
+arm passed while measuring nothing (its holder had exited, so `win_find`
+answered before the permission check; it was deleted rather than quoted).
+
+The second attempt was **red on its first run**: `srv_redial_if_uid_changed()`
+was hooked into `srv_route_write()`, the client's ordinary write path, which a
+process that skips the local check never calls — so the mediator accepted the
+write and the victim's title read `PWNED-BY-A-STRANGER`. **A check that only
+runs on the path an honest client takes is advice.** The hook moved to
+`srv_send()`, the one funnel every routed message passes through.
+
+| | |
+|---|---|
+| with the fix | server accepts the connection as **uid 1002**, write REFUSED, title still the arm's own baseline |
+| without it (control) | server answers for **uid 0**, and the write **lands** — 17/0 → **15 passed, 2 failed** |
+
+Adopted connections are exempt and that is deliberate: an inherited connection
+is the capability a spawner handed over, it already answers `hostowner()` = 0,
+and re-dialling would silently lose the window the process was spawned into.
+
+**This unblocks the DE wiring**: the six lines at hamsh's `spawn_launch` no
+longer depend on hamsh never spawning before `setuid 1001`, because a stale
+identity is now noticed at the next message rather than carried for the life of
+the process.
 
 ## Budget to hold it to
 
