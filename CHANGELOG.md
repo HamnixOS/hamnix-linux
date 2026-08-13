@@ -269,10 +269,14 @@ written plan for the rest and a rehearsal of the version bump that ends it, and
 
 Two things are worth stating plainly for whoever reads this later, because both
 were measured rather than assumed. The boundary is **not** closed yet: of the
-nineteen files under `/dev/wsys`, three are routed through the server for
-writing and three for reading, and the privacy it buys today amounts to a
-window's **title** and nothing else — another program can still list the
-windows, read their geometry and drain their event queues. And the rehearsal of
+nineteen files under `/dev/wsys`, four are routed through the server for writing
+and six for reading. What that buys has grown past a window's title: another
+program on the machine can no longer **read your windows' geometry, list the
+windows that exist, or drain their event queues** — all three were measured
+open, and all three now refuse. What it does **not** yet buy is the thing under
+all of it: a program can still map the shared segment directly and read
+everything, so the boundary binds a program that asks politely and not one that
+does not. That is the next step and it is a large one. And the rehearsal of
 the bump showed the update **refuses rather than wipes** — the session survives
 untouched, byte for byte, and the person is told why — but only if the panel
 they are already running is new enough to know how to tell them.
