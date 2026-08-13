@@ -102,9 +102,11 @@ Order of work, each with its own gate, all offscreen:
 
 Stage 1 is built: `hamwsys_srv_{claim,listen,service}` in `user/linux-wsys.c`,
 serviced from `wsysd`'s loop, dialled from `hamwsys_open`, all behind
-`HAMWSYS_SERVER=1`. Gate: `tests/linux/wsys_srv_transport.sh`, seen red first.
+`HAMWSYS_SERVER=1`. Gate: `tests/linux/wsys_srv_transport.sh`, seen red first
+(2 failed), now **13 passed, 1 failed** — the one being the budget finding
+below, left red on purpose.
 
-Two things held, and one did not.
+Two things held, and two did not.
 
 **Fire-and-forget held, and better than costed.** 1.18–1.99 µs per op on the
 send side, under a dragging load, against the 2.3 µs the census saturates at.
@@ -117,31 +119,66 @@ client: 9899 control writes, **0 backbuffer writes**.
 `wsys_rtt_probe.c` measured a dedicated server thread whose only job was to
 read the socket. This server is serviced from the compositor's frame loop, so
 a blocking request waits for `wsysd` to come round — and when `wsysd` is
-rasterizing a drag, "come round" means *after this frame*:
+rasterizing, "come round" means *after this frame*. The tail is therefore the
+compositor's frame cost, not the socket's:
 
-| | p50 | p90 | max |
+| load | p50 | p90 | max |
 |---|---|---|---|
-| idle | 46 µs | 47 µs | 74 µs |
-| under a dragging client | 32 µs | 789 µs | **851 µs** |
+| idle | 22–46 µs | 45–47 µs | 68–74 µs |
+| light drag (300×200, 60 px span) | 27 µs | 47–71 µs | 65–598 µs |
+| heavy drag (480×320, 300 px span, 8 text rows) | 32 µs | 789 µs | **851 µs** |
 
 851 µs is nearly **three times the whole published 0.3 ms input-to-pixel
-budget**, for one operation. The distribution is bimodal, not noisy: requests
-either catch an idle loop (~27 µs) or wait out a frame (~800 µs).
+budget**, for one operation. The distribution is bimodal, not noisy: a request
+either catches an idle loop (~27 µs) or waits out a frame (600–850 µs). The
+median is safe and the tail is not, which is exactly the shape a median-only
+measurement would have hidden — the gate prints all 33 samples.
 
 This does not affect stage 2 — mutations do not wait. It is a hard constraint
 on **stage 3**, where reads are routed:
 
 - `newwindow` and `wctl` version negotiation happen once per window. They can
-  afford 851 µs and the user cannot perceive it.
-- A taskbar re-reading `/dev/wsys/windows`, and the enumeration policy that
-  the red gate exists for, **cannot**. Routing that read through the frame
-  loop would put up to a frame of stall on the one operation the boundary was
-  built to mediate.
+  afford 851 µs and nobody can perceive it.
+- A taskbar re-reading `/dev/wsys/windows`, and the enumeration policy the red
+  gate exists for, **cannot**. Routing that read through the frame loop would
+  put up to a frame of stall on the one operation the whole boundary was built
+  to mediate.
 
 So stage 3 must service requests off the frame loop — a servicing thread, or
 answering reads from a snapshot the loop publishes — and 851 µs is the number
 it has to beat. That decision was not in this plan; the measurement put it
 there.
+
+**AND THE BUDGET HAS NO FIXED TERM IN IT, WHICH IS WHY ONE ARM IS RED.**
+Measured CPU added to `wsysd`, three 40 s samples each, `/proc/<pid>/stat`:
+
+| rate (delivered, verified) | measured | budget | |
+|---|---|---|---|
+| 192 ops/s | **0.27%** | 0.12% | **over** |
+| 618 ops/s | 0.29% | 0.38% | within |
+| 2050 ops/s | 0.47% | 1.27% | within |
+
+Ten times the rate costs under twice the CPU. Decomposed over the three rates:
+
+    marginal   1.076 µs of CPU per message
+    fixed      0.25% of a core, independent of the rate
+
+The marginal figure matches the 1.18 µs fire-and-forget cost measured
+independently from the sending end. The load paces in 10 ms slices, so all
+three arms wake the compositor the same 100 times a second: **the fixed term
+is the wake**, and a wake is a whole `wsysd` loop iteration. The round-trip
+number above is that same cost seen from the other end.
+
+The budget in the table below is `ops/s × per-op`. It has no fixed term, so no
+amount of making messages cheaper reaches it.
+
+**This synthetic load over-attributes, and stage 2 is where that is settled.**
+A `NOP` adds a wake to a `wsysd` that had no other reason to wake. A real
+routed mutation *replaces* a shared-memory write that already pokes the
+client-wake channel and already wakes `wsysd` — one wake, not two. Whether
+mediation *adds* a wake or *moves* one is the difference between 0.22% and
+almost nothing, and it cannot be answered before a real operation is routed.
+The gate stays red on it rather than being widened to fit.
 
 ## Budget to hold it to
 
