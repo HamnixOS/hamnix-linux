@@ -7,146 +7,139 @@
 # gigabytes past pkt_in -- BEFORE AUTHENTICATION. _field_at is the check that
 # now sits at every one of those advances.
 #
-# This exercises the predicate itself rather than a live handshake: sshd
-# announces port 22 through the Hamnix /net tree, so standing one up to take a
-# crafted packet is not a cheap experiment (that is stated in the fix's commit
-# too). What CAN be tested exhaustively and cheaply is the arithmetic, which is
-# where this class of bug actually lives -- an off-by-one or an unchecked wrap
-# here is the whole defect.
+# IT TESTS THE REAL PREDICATE. The first version of this file DECLARED ITS OWN
+# `_field_at`, byte-for-byte, with a comment promising it matched user/sshd.ad.
+# That is not a gate: delete the real function and the copy still returns 0 on
+# every case, so the gate stays green while the pre-auth read comes back. This
+# file now imports the function from user/sshd.ad, so the bytes under test are
+# the bytes that ship -- deleting `_field_at` fails the BUILD, and weakening it
+# fails an assertion. See the header of tests/linux/ssh_fieldbound.sh for how
+# the import is made to link (sshd is an application: it has its own `main`).
+#
+# It exercises the predicate directly rather than through a live handshake
+# because every _field_at call site in sshd sits behind key exchange and, for
+# the USERAUTH ones, behind an authenticated session -- the packets are
+# encrypted, so no crafted-packet probe reaches the arithmetic. The arithmetic
+# is where this class of bug lives: an off-by-one or an unchecked wrap here is
+# the whole defect.
+
+from user.sshd import _field_at
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 
-passed: int32 = 0
-failed: int32 = 0
-outbuf: Array[32, uint8]
-pkt: Array[64, uint8]
+# Every name below is module-private (leading underscore) BECAUSE this file is
+# merged with user/sshd.ad and everything it imports -- lib.ssh, lib.ec,
+# lib.ecdsa, user.net9, lib.p9. A public name that collides with one of theirs
+# is a hard compile error.
+_sfb_passed: int32 = 0
+_sfb_failed: int32 = 0
+_sfb_outbuf: Array[32, uint8]
+_sfb_pkt: Array[64, uint8]
 
 
-def _get_u32(buf: Ptr[uint8], off: uint64) -> uint32:
-    b0: uint32 = cast[uint32](buf[off + 0])
-    b1: uint32 = cast[uint32](buf[off + 1])
-    b2: uint32 = cast[uint32](buf[off + 2])
-    b3: uint32 = cast[uint32](buf[off + 3])
-    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-
-
-# The predicate under test, byte-for-byte as user/sshd.ad defines it.
-def _field_at(buf: Ptr[uint8], off: uint64, limit: uint64,
-              out_len: Ptr[uint64]) -> int32:
-    if off + 4 > limit:
-        return -1
-    ln: uint64 = cast[uint64](_get_u32(buf, off))
-    if ln > limit:
-        return -1
-    if off + 4 + ln > limit:
-        return -1
-    out_len[0] = ln
-    return 0
-
-
-def puts(s: Ptr[uint8]):
+def _sfb_puts(s: Ptr[uint8]):
     n: uint64 = 0
     while s[n] != 0:
         n = n + 1
     sys_write(1, s, n)
 
 
-def putd(v: int64):
+def _sfb_putd(v: int64):
     x: uint64 = cast[uint64](v)
     n: uint64 = 0
     if x == 0:
-        outbuf[0] = 48
+        _sfb_outbuf[0] = 48
         n = 1
     else:
         while x > 0:
-            outbuf[n] = cast[uint8](48 + (x % 10))
+            _sfb_outbuf[n] = cast[uint8](48 + (x % 10))
             n = n + 1
             x = x / 10
         i: uint64 = 0
         j: uint64 = n - 1
         while i < j:
-            t: uint8 = outbuf[i]
-            outbuf[i] = outbuf[j]
-            outbuf[j] = t
+            t: uint8 = _sfb_outbuf[i]
+            _sfb_outbuf[i] = _sfb_outbuf[j]
+            _sfb_outbuf[j] = t
             i = i + 1
             j = j - 1
-    sys_write(1, &outbuf[0], n)
+    sys_write(1, &_sfb_outbuf[0], n)
 
 
-def ok(m: Ptr[uint8]):
-    passed = passed + 1
-    puts("  ok   ")
-    puts(m)
-    puts("\n")
+def _sfb_ok(m: Ptr[uint8]):
+    _sfb_passed = _sfb_passed + 1
+    _sfb_puts("  ok   ")
+    _sfb_puts(m)
+    _sfb_puts("\n")
 
 
-def bad(m: Ptr[uint8]):
-    failed = failed + 1
-    puts("  FAIL ")
-    puts(m)
-    puts("\n")
+def _sfb_bad(m: Ptr[uint8]):
+    _sfb_failed = _sfb_failed + 1
+    _sfb_puts("  FAIL ")
+    _sfb_puts(m)
+    _sfb_puts("\n")
 
 
-def set_len(off: uint64, v: uint32):
-    pkt[off + 0] = cast[uint8]((v >> 24) & 255)
-    pkt[off + 1] = cast[uint8]((v >> 16) & 255)
-    pkt[off + 2] = cast[uint8]((v >> 8) & 255)
-    pkt[off + 3] = cast[uint8](v & 255)
+def _sfb_set_len(off: uint64, v: uint32):
+    _sfb_pkt[off + 0] = cast[uint8]((v >> 24) & 255)
+    _sfb_pkt[off + 1] = cast[uint8]((v >> 16) & 255)
+    _sfb_pkt[off + 2] = cast[uint8]((v >> 8) & 255)
+    _sfb_pkt[off + 3] = cast[uint8](v & 255)
 
 
-def main(argc: int32, argv: Ptr[uint64]) -> int32:
-    puts("== _field_at: a peer's length may never reach past the packet\n")
+def main() -> int32:
+    _sfb_puts("== _field_at: a peer's length may never reach past the packet\n")
     got: Array[1, uint64]
 
     # THE ATTACK: the length that walked p four gigabytes past an 8192-byte
     # array. limit is a realistic small payload.
-    set_len(1, 0xFFFFFFFF)
-    if _field_at(&pkt[0], 1, 40, &got[0]) != 0:
-        ok("0xFFFFFFFF at offset 1 of a 40-byte packet is REFUSED")
+    _sfb_set_len(1, 0xFFFFFFFF)
+    if _field_at(&_sfb_pkt[0], 1, 40, &got[0]) != 0:
+        _sfb_ok("0xFFFFFFFF at offset 1 of a 40-byte packet is REFUSED")
     else:
-        bad("0xFFFFFFFF was ACCEPTED -- this is the pre-auth read")
+        _sfb_bad("0xFFFFFFFF was ACCEPTED -- this is the pre-auth read")
 
     # Just past the end by one byte: the off-by-one this class lives in.
     # Offset 1 + the 4 length bytes + 35 body bytes == 40 exactly.
-    set_len(1, 35)
-    if _field_at(&pkt[0], 1, 40, &got[0]) == 0 and got[0] == 35:
-        ok("a field that exactly fills the packet is accepted (1 + 4 + 35 = 40)")
+    _sfb_set_len(1, 35)
+    if _field_at(&_sfb_pkt[0], 1, 40, &got[0]) == 0 and got[0] == 35:
+        _sfb_ok("a field that exactly fills the packet is accepted (1 + 4 + 35 = 40)")
     else:
-        bad("the exactly-fitting field was refused -- the bound is one too tight")
-    set_len(1, 36)
-    if _field_at(&pkt[0], 1, 40, &got[0]) != 0:
-        ok("and one byte more is refused -- the boundary is exact")
+        _sfb_bad("the exactly-fitting field was refused -- the bound is one too tight")
+    _sfb_set_len(1, 36)
+    if _field_at(&_sfb_pkt[0], 1, 40, &got[0]) != 0:
+        _sfb_ok("and one byte more is refused -- the boundary is exact")
     else:
-        bad("one byte past the end was accepted -- off by one")
+        _sfb_bad("one byte past the end was accepted -- off by one")
 
     # A length that fits the array but NOT the packet. The array is the last
     # line of defence, not the bound: reading 8000 bytes out of a 40-byte
     # packet is wrong even though it stays inside pkt_in.
-    set_len(1, 100)
-    if _field_at(&pkt[0], 1, 40, &got[0]) != 0:
-        ok("a length inside the ARRAY but past the PACKET is refused")
+    _sfb_set_len(1, 100)
+    if _field_at(&_sfb_pkt[0], 1, 40, &got[0]) != 0:
+        _sfb_ok("a length inside the ARRAY but past the PACKET is refused")
     else:
-        bad("a length past the packet was accepted because it fit the array")
+        _sfb_bad("a length past the packet was accepted because it fit the array")
 
     # The length prefix itself must fit before it is read.
-    set_len(0, 4)
-    if _field_at(&pkt[0], 38, 40, &got[0]) != 0:
-        ok("a length prefix that itself runs past the packet is refused")
+    _sfb_set_len(0, 4)
+    if _field_at(&_sfb_pkt[0], 38, 40, &got[0]) != 0:
+        _sfb_ok("a length prefix that itself runs past the packet is refused")
     else:
-        bad("read a length prefix that was not fully inside the packet")
+        _sfb_bad("read a length prefix that was not fully inside the packet")
 
     # An empty field is legitimate and must be accepted.
-    set_len(1, 0)
-    if _field_at(&pkt[0], 1, 40, &got[0]) == 0 and got[0] == 0:
-        ok("a zero-length field is accepted (an empty SSH string is legal)")
+    _sfb_set_len(1, 0)
+    if _field_at(&_sfb_pkt[0], 1, 40, &got[0]) == 0 and got[0] == 0:
+        _sfb_ok("a zero-length field is accepted (an empty SSH string is legal)")
     else:
-        bad("a zero-length field was refused")
+        _sfb_bad("a zero-length field was refused")
 
-    puts("ssh_fieldbound: ")
-    putd(cast[int64](passed))
-    puts(" passed, ")
-    putd(cast[int64](failed))
-    puts(" failed\n")
-    if failed != 0:
+    _sfb_puts("ssh_fieldbound: ")
+    _sfb_putd(cast[int64](_sfb_passed))
+    _sfb_puts(" passed, ")
+    _sfb_putd(cast[int64](_sfb_failed))
+    _sfb_puts(" failed\n")
+    if _sfb_failed != 0:
         return 1
     return 0
