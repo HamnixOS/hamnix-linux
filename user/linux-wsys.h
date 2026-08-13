@@ -71,6 +71,20 @@ struct hamwsys_file {
     uint64_t off;        /* read cursor into `snap`, or write cursor       */
     uint8_t *snap;       /* snapshot-once read image (malloc'd), or NULL   */
     uint64_t snaplen;
+    /* DRAW/CTL REASSEMBLY, per descriptor.  A client may split one draw
+     * record across write(2) calls; the remainder waits here for the rest.
+     * Grown on demand and capped at WSYS_CARRY_CAP (linux-wsys.c) -- it was a
+     * fixed 1 MiB array smaller than one frame of the largest window this
+     * build supports, which refused every split blit over that size.
+     *
+     * PER DESCRIPTOR and not per process, which is the second half of the same
+     * fix: as a file-scope static it was shared by every window a process
+     * owned, so two windows part-way through a record spliced their bytes
+     * together.  user/wsyswl.ad holds one draw/ctl fd per window and is
+     * exactly that shape. */
+    uint8_t *carry;      /* reassembly buffer (malloc'd), or NULL          */
+    uint64_t carrycap;   /* bytes allocated at `carry`                     */
+    uint64_t carried;    /* bytes of a partial record held there           */
     char     name[64];   /* HAMWSYS_SINK: the path below /dev/wsys/        */
     /* STAGE 6, and it is PER-OPEN because the thing it records is: opening
      * <wid>/scene for writing STARTS A FRAME.  A routed client sends that fact

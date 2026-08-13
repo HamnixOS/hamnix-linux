@@ -514,6 +514,32 @@ static int            chrome_rw;              /* the kernel let us map it W   */
 #define BB_H       1080
 #define BB_BYTES   ((size_t)BB_W * BB_H * 4)
 
+/* THE LARGEST DRAW RECORD THIS DEVICE WILL EVER REASSEMBLE, and it is derived
+ * rather than picked.
+ *
+ * draw/ctl's arm holds an incomplete record in a per-descriptor buffer until
+ * the rest of it arrives (see THE REASSEMBLY BUFFER there).  That buffer used
+ * to be a fixed 1 MiB array, and 1 MiB is not a bound that anything in this
+ * file implies -- it was smaller than a single frame of the largest window the
+ * same file defines, which is the whole of the defect the buffer has now been
+ * caught in twice.  The bound that IS implied is this one:
+ *
+ *   'B' blit    18 + (x1-x0)*(y1-y0)*4, and a rect wider than BB_W or taller
+ *               than BB_H cannot be shown at all -- bb_blit clips every pixel
+ *               outside the window, and no window exceeds BB_W x BB_H.  So the
+ *               largest USEFUL blit is 18 + BB_BYTES = 8,294,418 bytes.
+ *   'I' image   2 + 31 + 9 + WSYS_IMG_MAX_W*WSYS_IMG_MAX_H*4 = 262,186.
+ *   'C' cursor  18 + a sprite whose declared size this arm does NOT bound --
+ *               it only skips the payload, never reads it, so the cap below
+ *               is what bounds it, and a sprite past the cap is refused
+ *               loudly.  Real ones are 32x32.
+ *   'D' damage  17.
+ *
+ * The blit dominates, so the cap is the blit's, and it moves when BB_W/BB_H
+ * move because it is written in terms of them.  Anything past it is refused
+ * LOUDLY -- a frame that is dropped must never be answered success-shaped. */
+#define WSYS_CARRY_CAP  ((uint64_t)(18 + BB_BYTES))
+
 /* DOUBLE BUFFERED, and it has to be.
  *
  * With one page the compositor reads the surface while the client is writing
@@ -8034,6 +8060,34 @@ static void opc_note(int leaf, int kind)
 static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                                    uint64_t n);
 
+/* GROW THE DRAW/CTL REASSEMBLY BUFFER to hold at least `want` bytes.  0 on
+ * success, -1 if the allocation failed -- and a failure here is REPORTED by
+ * every caller, never absorbed.  See THE REASSEMBLY BUFFER in the DRAWCTL arm
+ * of hamwsys_write_inner for what this replaced and why.
+ *
+ * The caller checks `want` against WSYS_CARRY_CAP first; this one asserts it
+ * again rather than trusting that, because the two callers are far apart and
+ * an unchecked one would be an unbounded allocation driven by a number the
+ * client chose.
+ *
+ * Doubling from 64 KiB: a client that streams a full 1920x1080 frame in 4 KiB
+ * pieces reaches 8 MiB in eight reallocs rather than two thousand, and a
+ * client that only ever sends small records never allocates more than 64 KiB.
+ * The buffer is freed with the descriptor in hamwsys_close. */
+static int carry_reserve(struct hamwsys_file *f, uint64_t want)
+{
+    if (want > WSYS_CARRY_CAP) return -1;
+    if (want <= f->carrycap) return 0;
+    uint64_t cap = f->carrycap ? f->carrycap : (uint64_t)65536;
+    while (cap < want) cap *= 2;
+    if (cap > WSYS_CARRY_CAP) cap = WSYS_CARRY_CAP;
+    uint8_t *p = realloc(f->carry, (size_t)cap);
+    if (!p) return -1;
+    f->carry = p;
+    f->carrycap = cap;
+    return 0;
+}
+
 /* ONE CHOKE POINT, not thirty call sites.
  *
  * shm->gen++ appears in about thirty places -- ctl_window, commit, the image
@@ -8251,62 +8305,93 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -ENOENT; }
         if (!hostowner() && !owns_wid(f->wid)) { errno = EPERM; return -EPERM; }
-        /* A client may split a record across write(2) calls, so an incomplete
+        /* THE REASSEMBLY BUFFER.
+         *
+         * A client may split a record across write(2) calls, so an incomplete
          * one is CARRIED rather than dropped -- a torn blit would be a band of
          * garbage across the window, which is exactly the kind of failure that
-         * looks like a driver bug and is not. */
-        static uint8_t carry[1 << 20];
-        static uint64_t carried;
-
-        /* A WHOLE RECORD IS READ STRAIGHT OUT OF THE CALLER'S BUFFER, and that
+         * looks like a driver bug and is not.
+         *
+         * A WHOLE RECORD IS READ STRAIGHT OUT OF THE CALLER'S BUFFER, and that
          * is not an optimisation -- it is what makes a real window blittable.
          *
-         * This used to copy every write into `carry` first and refuse anything
-         * that did not fit it: `if (carried + n > sizeof carry) return
-         * -EMSGSIZE`.  carry is 1 MiB, and lib/hamui.ad's hamui_v2_commit_rect
-         * composes the whole 'B' header plus the full RGBA payload into one
-         * scratch buffer and issues ONE write of it.  For an 880x600 browser
-         * window that is 2,112,018 bytes, so EVERY blit from EVERY v2 window
-         * bigger than about 512x512 was refused outright -- MEASURED: the
-         * write returned -90 (EMSGSIZE), the backbuffer stayed empty, the
-         * window painted nothing, and the client's own return check is the
-         * only place it was ever mentioned.  A browser is exactly such a
-         * window, which is why the v2 path had never carried a real one.
+         * This used to copy every write into the buffer first and refuse
+         * anything that did not fit it: `if (carried + n > sizeof carry)
+         * return -EMSGSIZE`, against a fixed `static uint8_t carry[1 << 20]`.
+         * lib/hamui.ad's hamui_v2_commit_rect composes the whole 'B' header
+         * plus the full RGBA payload into one scratch buffer and issues ONE
+         * write of it.  For an 880x600 browser window that is 2,112,018 bytes,
+         * so EVERY blit from EVERY v2 window bigger than about 512x512 was
+         * refused outright -- MEASURED: the write returned -90 (EMSGSIZE), the
+         * backbuffer stayed empty, the window painted nothing, and the client's
+         * own return check is the only place it was ever mentioned.  A browser
+         * is exactly such a window, which is why the v2 path had never carried
+         * a real one.
          *
-         * The carry buffer exists for a client that SPLITS a record across
-         * write(2) calls, which is a different case and still handled: a
-         * partial remainder is copied out at the end.  What is gone is the
-         * requirement that a COMPLETE record fit in it. */
+         * THAT FIX ROUTED COMPLETE RECORDS AROUND THE BUFFER AND LEFT THE
+         * BUFFER AT 1 MiB, which left the identical defect standing in the
+         * SPLIT case -- the case the buffer exists for.  MEASURED, with
+         * tests/linux/wsys_chunkblit.sh: a 1024x768 blit written as an 18-byte
+         * header plus 768 row writes of 4096 bytes was accepted up to
+         * 1,044,498 bytes and then refused with -90 at row 255, where
+         * 18 + 256*4096 crosses 1048576.  513 of the 768 writes were refused
+         * and the window painted BLACK -- not a partial picture, nothing at
+         * all, because a record that never completes is never applied.
+         *
+         * So the buffer is no longer a fixed array.  It is grown on demand up
+         * to WSYS_CARRY_CAP, which is DERIVED from the largest record this
+         * device can act on (18 + BB_BYTES; see its definition) rather than
+         * picked, and it is per-descriptor rather than a file-scope static --
+         * see struct hamwsys_file in linux-wsys.h for why that half matters.
+         * Past the cap the refusal is still loud, because the cap is now a
+         * bound the rest of the file implies and crossing it means the client
+         * is describing something that could not be drawn anyway. */
         const uint8_t *rec;
         uint64_t reclen;
-        if (carried == 0) {
+        if (f->carried == 0) {
             rec = buf;                         /* nothing pending: parse in place */
             reclen = n;
         } else {
-            if (carried + n > sizeof carry) {
-                /* A SPLIT record larger than the carry buffer.  Rare and now
-                 * loud: the silent version of this is what hid the whole
-                 * defect above. */
+            uint64_t want = f->carried + n;
+            if (want > WSYS_CARRY_CAP) {
+                /* A SPLIT record larger than anything this device could draw.
+                 * Loud: the silent version of this is what hid the defect
+                 * above, twice. */
                 static int said;
                 if (!said) {
                     said = 1;
                     fprintf(stderr,
                             "wsys: /dev/wsys/%d/draw/ctl: a draw record split "
-                            "across writes exceeds the %zu-byte reassembly "
-                            "buffer (%llu pending + %llu now).\n"
-                            "wsys:   The frame is dropped.  Write a complete "
-                            "record in one write(2) and any size is accepted.\n",
-                            (int)f->wid, sizeof carry,
-                            (unsigned long long)carried, (unsigned long long)n);
+                            "across writes exceeds the %llu-byte reassembly "
+                            "cap (%llu pending + %llu now).\n"
+                            "wsys:   The frame is dropped.  The cap is one "
+                            "full %dx%d frame; a record bigger than that "
+                            "describes pixels no window can show.\n",
+                            (int)f->wid, (unsigned long long)WSYS_CARRY_CAP,
+                            (unsigned long long)f->carried,
+                            (unsigned long long)n, BB_W, BB_H);
                 }
-                carried = 0;
+                f->carried = 0;
                 errno = EMSGSIZE;
                 return -EMSGSIZE;
             }
-            memcpy(carry + carried, buf, (size_t)n);
-            carried += n;
-            rec = carry;
-            reclen = carried;
+            if (carry_reserve(f, want) < 0) {
+                /* Out of memory is a REFUSAL and says so.  Reporting the
+                 * write as accepted here would drop the frame silently, which
+                 * is the one answer this file exists to never give. */
+                fprintf(stderr,
+                        "wsys: /dev/wsys/%d/draw/ctl: cannot grow the "
+                        "reassembly buffer to %llu bytes -- out of memory. "
+                        "The frame is dropped.\n",
+                        (int)f->wid, (unsigned long long)want);
+                f->carried = 0;
+                errno = ENOMEM;
+                return -ENOMEM;
+            }
+            memcpy(f->carry + f->carried, buf, (size_t)n);
+            f->carried = want;
+            rec = f->carry;
+            reclen = f->carried;
         }
 
         uint64_t i = 0;
@@ -8318,6 +8403,42 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                  * arm of hamwsys_open.  A blit is the client saying it renders
                  * its own surface; opening the file is not. */
                 if (v->proto != 2) { v->proto = 2; shm->gen++; }
+                /* THE DECLARED RECT IS CHECKED BEFORE THE PAYLOAD IS WAITED
+                 * FOR, which is the same thing the 'I' arm below does and for
+                 * the same reason: an oversized record would otherwise sit in
+                 * the reassembly buffer accumulating megabytes and be told
+                 * EMSGSIZE about the wrong thing much later.
+                 *
+                 * It is also what makes WSYS_CARRY_CAP a real bound rather
+                 * than a hope.  bb_fit clamps every window to BB_W x BB_H and
+                 * bb_blit clips every pixel outside it, so a rect larger than
+                 * that cannot put a single pixel on the screen -- and
+                 * bb_blit's `need` is (x1-x0)*(y1-y0)*bpp with nothing
+                 * bounding it, a product that WRAPS uint64 for a large enough
+                 * rect and would then pass its own `n < 18 + need` length
+                 * check on a short buffer.  Refusing the rect here is what
+                 * stops a client's arithmetic from choosing how far bb_blit
+                 * reads. */
+                if (reclen - i >= 18) {
+                    int64_t bx0 = le32(rec + i + 1),  by0 = le32(rec + i + 5);
+                    int64_t bx1 = le32(rec + i + 9),  by1 = le32(rec + i + 13);
+                    if (bx1 - bx0 > BB_W || by1 - by0 > BB_H) {
+                        static int said_rect;
+                        if (!said_rect) {
+                            said_rect = 1;
+                            fprintf(stderr,
+                                    "wsys: /dev/wsys/%d/draw/ctl: a blit rect "
+                                    "of %lldx%lld is larger than the %dx%d "
+                                    "maximum surface -- refused, not "
+                                    "buffered.\n",
+                                    (int)f->wid, (long long)(bx1 - bx0),
+                                    (long long)(by1 - by0), BB_W, BB_H);
+                        }
+                        f->carried = 0;
+                        errno = EMSGSIZE;
+                        return -EMSGSIZE;
+                    }
+                }
                 used = bb_blit(v, rec + i, reclen - i);
                 if (used) wr(WR_BLIT, used);
             } else if (verb == 'D') {
@@ -8365,7 +8486,7 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                 if (reclen - i < 2) break;
                 uint64_t nlen = rec[i + 1];
                 if (nlen == 0 || nlen >= WSYS_IMG_NAME_CAP) {
-                    carried = 0; errno = EINVAL; return -EINVAL;
+                    f->carried = 0; errno = EINVAL; return -EINVAL;
                 }
                 uint64_t hdr = 2 + nlen + 9;
                 if (reclen - i < hdr) break;
@@ -8374,20 +8495,20 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                 uint8_t ifmt = rec[i + 2 + nlen + 8];
                 int ibpp = (ifmt == 3) ? 1 : (ifmt == 1 || ifmt == 2) ? 4 : 0;
                 if (iw <= 0 || ih <= 0 || !ibpp) {
-                    carried = 0; errno = EINVAL; return -EINVAL;
+                    f->carried = 0; errno = EINVAL; return -EINVAL;
                 }
                 if (iw > WSYS_IMG_MAX_W || ih > WSYS_IMG_MAX_H) {
                     /* Refused BEFORE the payload is waited for: an oversized
                      * image would otherwise sit in the carry buffer until it
                      * overflowed, and the client would be told EMSGSIZE about
                      * the wrong thing several megabytes later. */
-                    carried = 0; errno = EMSGSIZE; return -EMSGSIZE;
+                    f->carried = 0; errno = EMSGSIZE; return -EMSGSIZE;
                 }
                 uint64_t ipix = (uint64_t)iw * (uint64_t)ih * (uint64_t)ibpp;
                 if (reclen - i < hdr + ipix) break;
                 int rc = img_store(v->wid, (const char *)rec + i + 2, nlen,
                                    iw, ih, ifmt, rec + i + hdr);
-                if (rc < 0) { carried = 0; errno = -rc; return rc; }
+                if (rc < 0) { f->carried = 0; errno = -rc; return rc; }
                 /* The scene display list naming this image is byte-identical
                  * frame to frame, so a damage diff over the scene text alone
                  * would call a re-uploaded video frame "nothing to paint".
@@ -8400,24 +8521,53 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
             } else {
                 /* Not a verb we know. Resynchronising by scanning would invent
                  * a frame out of noise, so drop what is buffered and say so. */
-                carried = 0;
+                f->carried = 0;
                 errno = EINVAL;
                 return -EINVAL;
             }
             if (used == 0) break;      /* incomplete: wait for more */
             i += used;
         }
-        /* Whatever is left is a PARTIAL record: keep it for the next write.
-         * It has to fit the reassembly buffer -- a partial larger than that is
-         * the loud case above on the next call. */
+        /* Whatever is left is a PARTIAL record: keep it for the next write. */
         uint64_t left = reclen - i;
-        if (left > sizeof carry) {
-            carried = 0;
+        if (left > WSYS_CARRY_CAP) {
+            /* One write carrying a partial record bigger than any drawable
+             * frame.  This used to be a bare `return -EMSGSIZE` with nothing
+             * said, which is the quiet half of the same defect. */
+            static int said_left;
+            if (!said_left) {
+                said_left = 1;
+                fprintf(stderr,
+                        "wsys: /dev/wsys/%d/draw/ctl: a partial draw record of "
+                        "%llu bytes exceeds the %llu-byte reassembly cap. "
+                        "The frame is dropped.\n",
+                        (int)f->wid, (unsigned long long)left,
+                        (unsigned long long)WSYS_CARRY_CAP);
+            }
+            f->carried = 0;
             errno = EMSGSIZE;
             return -EMSGSIZE;
         }
-        if (left) memmove(carry, rec + i, (size_t)left);
-        carried = left;
+        if (left) {
+            if (rec == f->carry) {
+                /* It came out of this buffer, so it already fits it.  No
+                 * carry_reserve call here on purpose: a realloc would move
+                 * `rec` out from under the memmove. */
+                memmove(f->carry, f->carry + i, (size_t)left);
+            } else if (carry_reserve(f, left) < 0) {
+                fprintf(stderr,
+                        "wsys: /dev/wsys/%d/draw/ctl: cannot hold a %llu-byte "
+                        "partial record -- out of memory. The frame is "
+                        "dropped.\n",
+                        (int)f->wid, (unsigned long long)left);
+                f->carried = 0;
+                errno = ENOMEM;
+                return -ENOMEM;
+            } else {
+                memcpy(f->carry, rec + i, (size_t)left);
+            }
+        }
+        f->carried = left;
         return (int64_t)n;
     }
     case HAMWSYS_SINK: {
@@ -8448,6 +8598,12 @@ void hamwsys_close(struct hamwsys_file *f)
     free(f->snap);
     f->snap = NULL;
     f->snaplen = 0;
+    /* The reassembly buffer dies with the descriptor.  Anything still in it
+     * is half a draw record whose other half is never coming. */
+    free(f->carry);
+    f->carry = NULL;
+    f->carrycap = 0;
+    f->carried = 0;
 }
 
 /* ------------------------------------------------------------------ *
