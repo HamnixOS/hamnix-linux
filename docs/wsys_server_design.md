@@ -731,7 +731,8 @@ findings and are marked as such.
 ## 7.1 What is still served in process when `HAMWSYS_SERVER=1` — from the code
 
 Stage 6 says "no mutation a routed client makes is still performed in process".
-**That is true of three leaves and the file has eighteen.** `srv_route_write()`
+**That is true of three leaves and the enum in `user/linux-wsys.h` has
+nineteen.** `srv_route_write()`
 carries exactly `ctl`, `wid/ctl`, `wid/scene`; `srv_route_read()` carries
 exactly `windows`, `screen`, `pool`; `newwindow` goes through `srv_newwindow()`.
 Everything else in `hamwsys_write_inner()` and in `hamwsys_open()`'s snapshot
@@ -809,7 +810,7 @@ downstream of this and nothing else substitutes for it.** `shm_attach()` ends
 in `mmap(..., PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)` on a file it has just
 `fchmod`ed to `0666`, and `/srv/wsys.bb` is the same. Every gate's red arm and
 all four attacks in `wsys_bypass.sh` are that mapping; none of them calls a
-function in this file. Routing eighteen leaves and leaving the mapping is a
+function in this file. Routing every remaining leaf and leaving the mapping is a
 mediator with a door beside it. **The three tiers at THE SPLIT in
 `user/linux-wsys.c` are the design for this, and its blockers (1)–(3) are
 unchanged and are the real cost of stage 7.**
@@ -911,11 +912,30 @@ Cheap, and it is the difference between a fixable machine and a mysterious one.
 (3) and moves the authority's table to a new path, then a v8 straggler finds no
 `/srv/wsys`, **creates one**, initialises it, and runs a private window system
 that composites nothing — a silent success, which is the failure shape this
-tree exists to refuse. The v9 `wsysd` must therefore keep a **refusal stub** at
-`/srv/wsys`: a live, correctly-sized, v9-stamped segment with no rows, whose
-only job is to make an old binary take the refusal path it already has. That is
-a distribution decision, it needs its own arm in `installed_update_wsysver.sh`,
-and it is not optional.
+tree exists to refuse. **It is not a hypothetical: that exact failure has been
+measured twice** and both write-ups are in `shm_attach()` — "allocated window
+ids nobody composites and drew into a screen that does not exist, with no error
+anywhere". `shm_attach()` tries three candidates (`shm_path()`, then
+`/dev/shm/hamnix-wsys`, then `/tmp/hamnix-wsys`) and creates at the first one it
+can, so an absent `/srv/wsys` does not stop a straggler, it only relocates it.
+
+The v9 `wsysd` must therefore keep a **refusal stub** at `/srv/wsys`, and the
+stub has two non-obvious requirements, both from the code:
+
+- **It must be openable `O_RDWR` by an ordinary client** (`0666`), or the
+  straggler's open fails and it falls through to candidate 2 and creates its own
+  segment there. A `0600` stub is worse than none.
+- **It must read as LIVE, which means it must contain at least one `used` row
+  whose `pid` is a running process** — `shm_seg_is_live()` scans for exactly
+  that and answers 0 otherwise. A v9-stamped stub *with no rows* reads DEAD, and
+  a v8 straggler then RE-INITIALISES it in place and runs its private desktop in
+  the very file that was supposed to stop it. The stub therefore holds one row
+  stamped against `wsysd`'s own pid and nothing else.
+
+The refusal is terminal once a candidate is opened — it does not fall through to
+candidates 2 and 3 — so one correct stub is sufficient. This is a distribution
+decision, it needs its own arm in `installed_update_wsysver.sh`, and it is not
+optional.
 
 ### The 8 → 9 rehearsal
 
