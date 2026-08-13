@@ -3726,7 +3726,15 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
         int kind = (leaf == WSRV_LEAF_WIN_CTL)   ? HAMWSYS_WIN_CTL
                  : (leaf == WSRV_LEAF_CTL)       ? HAMWSYS_CTL
                  : (leaf == WSRV_LEAF_WIN_SCENE) ? HAMWSYS_WIN_SCENE
+                 : (leaf == WSRV_LEAF_WIN_WCTL)  ? HAMWSYS_WIN_WCTL
                  : 0;
+        /* THE TWO PER-WINDOW LEAVES TAKE THE SAME RULE, and they must: wctl's
+         * `move`/`resize` and wid/ctl's `geometry` are the same act under two
+         * names, so a check on one of them is not a check.  hamwsys_open and
+         * hamwsys_write_inner already give them one predicate in process
+         * (`hostowner() || owns_wid()`); this is that predicate asked about the
+         * caller instead of about wsysd. */
+        int perwin = (kind == HAMWSYS_WIN_CTL || kind == HAMWSYS_WIN_WCTL);
         if (!kind) {
             srv_n_bad++;
             srv_err(c->fd, h->op, -EINVAL);
@@ -3750,24 +3758,22 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
          * descendant that would have been granted before stage 5 and is
          * refused now, and there is no other way to see that from outside. */
         if (srv_trace()) {
-            struct wwin *tv = (kind == HAMWSYS_WIN_CTL) ? win_find(h->wid)
-                                                        : NULL;
+            struct wwin *tv = perwin ? win_find(h->wid) : NULL;
             fprintf(stderr, "wsrvtrace: caller uid=%u pid=%ld cid=%llu%s -> "
                             "wid=%d ownerpid=%d hostowner=%d owns_wid=%d "
                             "ancestry=%d\n",
                     (unsigned)c->uid, (long)c->pid,
                     (unsigned long long)c->cid, c->adopted ? " adopted" : "",
                     (int)h->wid, tv ? (int)tv->pid : -1, hostowner(),
-                    kind == HAMWSYS_WIN_CTL ? owns_wid(h->wid) : -1,
-                    kind == HAMWSYS_WIN_CTL ? owns_wid_ancestry(h->wid) : -1);
+                    perwin ? owns_wid(h->wid) : -1,
+                    perwin ? owns_wid_ancestry(h->wid) : -1);
         }
         int64_t rc = -EPERM;
         if (kind == HAMWSYS_WIN_SCENE) {
             rc = srv_scene_write(h, pay);
-        } else if (kind == HAMWSYS_WIN_CTL && !win_find(h->wid)) {
+        } else if (perwin && !win_find(h->wid)) {
             rc = -ENOENT;
-        } else if (kind == HAMWSYS_WIN_CTL
-                   && !hostowner() && !owns_wid(h->wid)) {
+        } else if (perwin && !hostowner() && !owns_wid(h->wid)) {
             /* COUNTED SEPARATELY WHEN THE WALK WOULD HAVE SAID YES, because
              * that number is the whole of what stage 5 changed: it is the
              * mutations that descent used to carry and a descriptor no longer
@@ -4786,14 +4792,63 @@ static void srv_client_tick(void)
  * the caller's kernel-supplied credentials, and it is what survives stage 4
  * when the in-process path and the client's mapping both go.
  */
+/* WHICH `wctl` VERB IS THIS, AND HOW MUST IT TRAVEL?
+ *
+ * Returns 1 if the write is routable and sets *blocking, 0 if it must be left
+ * to the in-process path.  The leading-token parse is the SAME one
+ * hamwsys_write_inner's HAMWSYS_WIN_WCTL arm makes -- skip blanks, take one
+ * token -- because two parsers that disagree about what a write says are two
+ * different files, and this one decides which path the write takes.
+ *
+ * wctl is one verb per write (unlike wid/ctl, which is line-oriented), so
+ * there is exactly one answer per message and no line loop here.
+ *
+ * `version` BLOCKS.  Everything else in this device that returns no data is
+ * fire-and-forget, and this is the one exception, for a reason recorded at
+ * WSRV_LEAF_WIN_WCTL in linux-wsys.h: the client acts on the return value of
+ * that write.  hamui_set_protocol_v2_dims sets h_v2_active on it, and an
+ * application that believes it is v2 while the compositor paints it as v0 is
+ * the failure this whole file exists to refuse.
+ *
+ * AN UNKNOWN VERB IS NOT ROUTED.  wctl is a closed set: `wibble` is -EINVAL
+ * and changes nothing, and the in-process path already answers that without a
+ * round trip.  Routed fire-and-forget it would answer SUCCESS to a typo, which
+ * is the same defect as the version one wearing different clothes. */
+static int srv_wctl_verb(const uint8_t *buf, uint64_t n, int *blocking)
+{
+    const char *s = (const char *)buf;
+    size_t ln = (size_t)n;
+    while (ln && (s[ln - 1] == '\n' || s[ln - 1] == '\r')) ln--;
+    size_t p = 0;
+    while (p < ln && (s[p] == ' ' || s[p] == '\t')) p++;
+    size_t vs = p;
+    while (p < ln && s[p] != ' ' && s[p] != '\t') p++;
+    size_t vlen = p - vs;
+    *blocking = 0;
+    if (vlen == 7 && !strncmp(s + vs, "version", 7)) { *blocking = 1; return 1; }
+    if (vlen == 5 && !strncmp(s + vs, "focus",  5)) return 1;
+    if (vlen == 6 && !strncmp(s + vs, "resize", 6)) return 1;
+    if (vlen == 4 && !strncmp(s + vs, "move",   4)) return 1;
+    return 0;
+}
+
 static int srv_route_write(const struct hamwsys_file *f, const uint8_t *buf,
-                           uint64_t n)
+                           uint64_t n, int64_t *rcout)
 {
     /* A ZERO-LENGTH MESSAGE IS MEANINGFUL FOR EXACTLY ONE LEAF.  Everywhere
      * else an empty write is nothing to route; on `scene` it is the OPEN --
      * the frame boundary with no display list behind it yet -- and dropping it
      * here would mean a client that opens, writes nothing and commits publishes
-     * the PREVIOUS frame instead of an empty one. */
+     * the PREVIOUS frame instead of an empty one.
+     *
+     * CHECKED FOR wctl RATHER THAN ASSUMED: an empty wctl write returns 0 from
+     * the in-process arm after its own ENOENT/EPERM checks and touches
+     * nothing, so leaving it here changes no outcome and costs no message.
+     *
+     * `*rcout` IS THE WRITE'S RETURN VALUE when this returns 1.  For every
+     * fire-and-forget leaf that is the byte count, because the send is the
+     * whole of what happened; for `wctl version` it is the SERVER'S answer.
+     * See srv_wctl_verb below for why one verb is not like the others. */
     if (srv_fd < 0 || n > WSRV_MAXPAY) return 0;
     if (n == 0 && !(f->leaf == HAMWSYS_WIN_SCENE && f->srv_newframe)) return 0;
     int leaf;
@@ -4801,6 +4856,7 @@ static int srv_route_write(const struct hamwsys_file *f, const uint8_t *buf,
     case HAMWSYS_CTL:       leaf = WSRV_LEAF_CTL;       break;
     case HAMWSYS_WIN_CTL:   leaf = WSRV_LEAF_WIN_CTL;   break;
     case HAMWSYS_WIN_SCENE: leaf = WSRV_LEAF_WIN_SCENE; break;
+    case HAMWSYS_WIN_WCTL:  leaf = WSRV_LEAF_WIN_WCTL;  break;
     default: return 0;
     }
     /* NEWWINDOW IS NOT ROUTED HERE, and must not be: it returns data, and it
@@ -4819,8 +4875,43 @@ static int srv_route_write(const struct hamwsys_file *f, const uint8_t *buf,
         flags |= WSRV_F_NEWFRAME;
         ((struct hamwsys_file *)f)->srv_newframe = 0;
     }
+    if (leaf == WSRV_LEAF_WIN_WCTL) {
+        int blocking = 0;
+        if (!srv_wctl_verb(buf, n, &blocking)) return 0;
+        if (blocking) {
+            /* THE IDENTITY RE-SAMPLE HAS TO BE ASKED FOR HERE.  srv_send()
+             * carries it for every fire-and-forget message, but srv_call_on()
+             * reaches srv_send_on() directly (so that srv_dial's own HELLO
+             * cannot recurse), and a blocking mutation that skipped it would
+             * be exactly the hole stage 6's arm D found: a connection dialled
+             * before a setuid still answering for the uid that dialled it.
+             * srv_newwindow -- the only other blocking mutation -- does the
+             * same thing for the same reason. */
+            srv_redial_if_uid_changed();
+            if (srv_fd < 0) return 0;
+            uint32_t got = 0;
+            int64_t rc = 0;
+            if (srv_call_on(srv_fd, WSRV_OP_WRITE, flags, f->wid, buf,
+                            (uint32_t)n, NULL, 0, &got, &rc) < 0) {
+                fprintf(stderr, "wsys: the server did not answer a routed "
+                                "`wctl version` for window %d (%s); falling "
+                                "back to the in-process path.\n",
+                        (int)f->wid, strerror(errno));
+                return 0;
+            }
+            /* THE SERVER'S ANSWER IS THE WRITE'S ANSWER, and that is the
+             * entire reason this verb blocks.  A refusal reaches the caller as
+             * a short write with errno set, exactly as the unrouted path
+             * returns it, so a client that checks its write still learns the
+             * truth. */
+            if (rc < 0) errno = (int)-rc;
+            if (rcout) *rcout = rc;
+            return 1;
+        }
+    }
     if (srv_send(WSRV_OP_WRITE, flags, f->wid, ++srv_tag, buf, (uint32_t)n) < 0)
         return 0;                     /* the socket broke; fall back, loudly */
+    if (rcout) *rcout = (int64_t)n;
     return 1;
 }
 
@@ -5347,6 +5438,126 @@ int hamwsys_srv_scene_selftest(int victim_wid)
     }
     printf("wsrvsc: the mediator ACCEPTED it (refused %llu -> %llu)\n",
            (unsigned long long)r0, (unsigned long long)r1);
+    return 1;
+}
+
+/* STAGE 8: THE SAME ATTACK, ON wctl.  A routed `move` for a window this
+ * process does not hold, sent PAST the local check exactly as the ctl and
+ * scene probes send theirs.
+ *
+ * IT IS SENT AS A BLOCKING CALL, and that is not a stylistic difference: it is
+ * the only way to score a refusal on one message without racing a dragging
+ * client's own ~800 writes/s through the same counters.  The ctl probe reads
+ * `write` and `refused` around a fire-and-forget send and asserts +1 on each,
+ * which is the arm stage 4 recorded flaking for exactly that reason.  Here the
+ * server's own rc for THIS message comes back on the wire, so the verdict does
+ * not depend on the counters moving by one -- the counters are still printed,
+ * because they are what proves the message ARRIVED.
+ *
+ * Returns 0 for REFUSED and 1 for ACCEPTED, the contract the other two probes
+ * use: whether a refusal is the right answer depends on what the gate
+ * arranged, and this process cannot know that. */
+int hamwsys_srv_wctl_selftest(int victim_wid, int local)
+{
+    /* THE ARM THAT MUST SUCCEED, and it is the same act minus the boundary.
+     * hamwsys_srv_attack_local makes this argument at length for `title` on
+     * wid/ctl; it is repeated here on wctl's own verb because a refusal gate
+     * that is green in every configuration is equally green against a server
+     * that checks nothing.  One assignment to the identity the in-process
+     * check reads, then hamwsys_write_inner in the attacker's own address
+     * space.  Returns 0 if the write LANDED, 1 if it did not. */
+    if (local) {
+        if (shm_attach() < 0) {
+            printf("wsrvwc: FAIL cannot attach the segment\n");
+            return 1;
+        }
+        struct wwin *lv = win_find(victim_wid);
+        if (!lv) {
+            printf("wsrvwc: FAIL window %d does not exist -- an attack on "
+                   "nothing is not a measurement\n", victim_wid);
+            return 1;
+        }
+        printf("wsrvwc: attacker uid %u pid %ld; window %d owner pid %d; the "
+               "in-process check says hostowner=%d owns_wid=%d -- i.e. "
+               "REFUSE\n", (unsigned)geteuid(), (long)getpid(), victim_wid,
+               (int)lv->pid, hostowner(), owns_wid(victim_wid));
+        srv_as_caller(seg_owner_known ? seg_owner : (uid_t)0, getpid());
+        printf("wsrvwc: after ONE assignment to that identity the SAME check "
+               "says hostowner=%d owns_wid=%d -- i.e. ALLOW\n",
+               hostowner(), owns_wid(victim_wid));
+        const char lverb[] = "move 777 888";
+        struct hamwsys_file lf;
+        memset(&lf, 0, sizeof lf);
+        lf.leaf = HAMWSYS_WIN_WCTL;
+        lf.wid = victim_wid;
+        lf.write = 1;
+        errno = 0;
+        int64_t lrc = hamwsys_write_inner(&lf, (const uint8_t *)lverb,
+                                          (uint32_t)(sizeof lverb - 1));
+        srv_as_self();
+        if (lrc < 0) {
+            printf("wsrvwc: the UNROUTED wctl move was refused (rc %lld) -- "
+                   "which means something other than the permission gate "
+                   "stopped it, because the gate was skipped\n",
+                   (long long)lrc);
+            return 1;
+        }
+        if (shm) shm->gen++;
+        printf("wsrvwc: the UNROUTED wctl move LANDED (rc %lld) and window %d "
+               "is now at 777,888. No mediator was present: the store was the "
+               "attacker's own.\n", (long long)lrc, victim_wid);
+        return 0;
+    }
+    if (!srv_enabled() || srv_fd < 0) {
+        fprintf(stderr, "wsrv: no connection to a server.\n");
+        return 1;
+    }
+    char st[512]; uint32_t got = 0; int64_t src = 0;
+    if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &src) < 0) {
+        printf("wsrvwc: FAIL could not read the server's counters\n");
+        return 1;
+    }
+    st[got] = 0;
+    uint64_t w0 = srv_stat_field(st, "write");
+    const char verb[] = "move 777 888";
+    uint16_t flags = (uint16_t)(WSRV_LEAF_WIN_WCTL << WSRV_LEAF_SHIFT);
+    uint32_t wgot = 0;
+    int64_t wrc = 0;
+    if (srv_call_on(srv_fd, WSRV_OP_WRITE, flags, victim_wid,
+                    verb, (uint32_t)(sizeof verb - 1),
+                    NULL, 0, &wgot, &wrc) < 0) {
+        printf("wsrvwc: FAIL the server never answered the routed wctl write "
+               "(%s) -- no verdict is scored on a message that may not have "
+               "arrived\n", strerror(errno));
+        return 1;
+    }
+    got = 0; src = 0;
+    if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &src) < 0) {
+        printf("wsrvwc: FAIL could not read the server's counters back\n");
+        return 1;
+    }
+    st[got] = 0;
+    uint64_t w1 = srv_stat_field(st, "write");
+    printf("wsrvwc: a window-less process sent a routed `move 777 888` for "
+           "window %d\n", victim_wid);
+    printf("wsrvwc: server counters: %s", st);
+    if (w1 == w0) {
+        printf("wsrvwc: FAIL the server did not count the routed wctl write "
+               "at all (write %llu -> %llu); an rc below would be about "
+               "nothing.\n", (unsigned long long)w0, (unsigned long long)w1);
+        return 1;
+    }
+    printf("wsrvwc: the server received it (write %llu -> %llu)\n",
+           (unsigned long long)w0, (unsigned long long)w1);
+    printf("wsrvwc: caller uid %u pid %ld; segment owner uid %u\n",
+           (unsigned)geteuid(), (long)getpid(),
+           (unsigned)(seg_owner_known ? seg_owner : (uid_t)-1));
+    if (wrc < 0) {
+        printf("wsrvwc: the mediator REFUSED it (rc %d, %s)\n",
+               (int)wrc, strerror((int)-wrc));
+        return 0;
+    }
+    printf("wsrvwc: the mediator ACCEPTED it (rc %d)\n", (int)wrc);
     return 1;
 }
 
@@ -7656,7 +7867,7 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
                  * still starts the frame, exactly as the in-process path does. */
                 if (srv_fd >= 0 && srv_enabled() && !srv_is_server) {
                     f->srv_newframe = 1;
-                    (void)srv_route_write(f, NULL, 0);
+                    (void)srv_route_write(f, NULL, 0, NULL);
                 } else {
                     p->stage_len = 0;
                 }
@@ -8543,7 +8754,14 @@ int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
      * that a routed write does not also poke the wake channel: the message
      * itself is what wakes the compositor, and doing both would be the added
      * wake that stage 1's cost measurement was unable to rule out. */
-    if (f && srv_route_write(f, buf, n)) return (int64_t)n;
+    /* THE ROUTED WRITE'S OWN RETURN VALUE, not an assumed success.  It is the
+     * byte count for every fire-and-forget leaf -- the send IS the operation --
+     * and the server's rc for `wctl version`, the one routed verb whose caller
+     * acts on the answer. */
+    if (f) {
+        int64_t rr = (int64_t)n;
+        if (srv_route_write(f, buf, n, &rr)) return rr;
+    }
     uint32_t before = shm ? __atomic_load_n(&shm->gen, __ATOMIC_ACQUIRE) : 0;
     int64_t r = hamwsys_write_inner(f, buf, n);
     if (shm && __atomic_load_n(&shm->gen, __ATOMIC_ACQUIRE) != before)
@@ -8617,7 +8835,19 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
      * as though it were the truth.  resize/move here go through exactly the
      * state the ctl `geometry` verb sets -- one rect, one authority -- and
      * bb_resize follows it so a v2 client's backbuffer is not left cut to the
-     * size it opened at. */
+     * size it opened at.
+     *
+     * AND THAT bb_resize IS A NO-OP WHEN THIS RUNS IN THE SERVER, which is a
+     * property of the leaf and not a defect introduced by routing it.  `bbmap`
+     * is per-PROCESS and bb_resize returns early unless this process OWNS the
+     * memfd (`!bbmap[i].own`), so a routed `resize` re-fits nothing in the
+     * client that asked for it.  The identical thing is already true of the
+     * `geometry` verb stage 2 routed -- ctl_window calls the same bb_resize --
+     * so this is INHERITED from the other spelling rather than new here, and
+     * the self-heal is the same one: bb_for(create=1, v->w, v->h) on the next
+     * blit re-fits the memfd, so the two are out of step for at most one
+     * frame.  Written down because "the routed path skipped a call" is exactly
+     * the kind of difference a pixel gate can see and a byte count cannot. */
     case HAMWSYS_WIN_WCTL: {
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -ENOENT; }
