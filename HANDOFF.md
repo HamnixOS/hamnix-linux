@@ -4661,6 +4661,62 @@ string* `qemu-system`, and `channel_covers_image.sh` only tests for a directory.
 Both run offscreen. A classifier that reads exec positions rather than any
 mention of a name gets all of these right.
 
+#### THE VM GATES HAVE NOW BEEN RUN — and the channel invariant HOLDS
+
+All fifteen VM gates the second sweep recorded as unrun were attempted, none
+skipped for time, against an image built from the tree in an empty `build/` and
+a locally staged 126-package channel. **Nothing was published, signed or
+pushed.** Logs live under `/home/david/.hamnix-build/vmgates-ac5fd228/logs/`;
+they are not tracked here, for the same reason the sweep logs are not.
+
+**Twelve are real gates with a verdict: 8 green, 4 red. Three are not gates at
+all and two assert nothing** — which is itself the finding, since all five were
+being counted as unrun coverage:
+
+* `steam_gui_run`, `steam_gui_ro`, `steam_login_drive` are **helpers that want
+  arguments**. `steam_login_drive.sh` invoked bare **BLOCKS FOREVER** on a FIFO
+  with no reader — killed at 21 minutes, zero-byte log, no VM ever started.
+  Proved with `timeout 5` → rc 124.
+* `alpine_gui_run` and `steam_gui_burst` assert nothing. `steam_gui_burst`'s 16
+  all-black frames are **not a finding** — its own header says another script
+  must stage the rc first, and that one cannot run bare.
+
+**THE OWNER'S PERMANENT INVARIANT IS MEASURED.** `channel_covers_image` 8/0,
+`channel_runs_desktop` 10/0, `channel_compiles_adder` 8/0 — every file the image
+ships is carried by a package or excluded with a stated reason, all 69 `/etc`
+files the channel carries are byte-identical to the image's, and a channel-built
+machine compiles Adder. `installed_update_live` then proved it end to end: a real
+ext4/UEFI disk installed at 1.0.0, `hpm update` with no flags against the real
+`255.one`, landing the published 1.0.22 bytes, surviving a reboot, and **a real
+click opening the Applications menu**. `installed_update_wsysver` 37/0 and
+`installed_distros` 12/0 (it had been blocked for want of an Alpine medium).
+
+**Three of the four reds are GATE defects, each disproved from the gate's own
+log** — worth reading before trusting any of these three again:
+
+* `installed_update_modules:854` greps `ls` output for `failed|no such`, but
+  **this tree's `ls` says `cannot access`** (`user/ls.ad:186`). The failure
+  message quotes its own disproof.
+* `installed_update_modules:1002` missed a `grep -F` because a compositor
+  message was spliced **mid-line** into the shared serial console. The thing it
+  was checking for had worked.
+* `installed_recover_broken:796` decides "the menu opened" by **the top bar
+  growing taller**. It no longer does — the menu is its own window now, and the
+  same run's window dump shows it at (8,28) 407×160, visible. **`hpm update`
+  does recover a machine that took a bad publish**; this gate cannot go green on
+  a correct tree, and it is the only coverage of that recovery.
+
+**The two product reds that stand:** `vm_wheel_client` — `xev -root` sees no
+button 4/5 inside the VM while xterm in the same run scrolls 413 px up and back
+reversibly, which is inverted from what its own header describes; and
+`steam_probe_run` — no PulseAudio server socket at `/run/pulse/native`, with the
+32-bit client and all of `/dev/snd` present.
+
+**Unasserted and worth someone's attention:** `alpine_gui_run`'s console shows
+`wsyswl: cannot listen on /n/alpine/run/wayland-0` **at boot**, before the gate
+starts its own bridge by hand and succeeds. A boot-time bring-up failure that no
+assertion covers.
+
 **THE FIRST THING YOU WILL HIT, AND IT IS NOT IN ANY DOCUMENT.** A fresh
 worktree has no checked-out `adder` submodule and no
 `build/cutover/host_ac.elf`, so **every `.ad`-building gate fails instantly
