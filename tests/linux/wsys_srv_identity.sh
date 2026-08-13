@@ -66,6 +66,26 @@
 # and every one would be about the wrong uid. So: `unshare -U --map-users` with
 # three ids out of /etc/subuid, and every path under the gate's own temp dir.
 #
+# ARM D'S NEGATIVE CONTROL, RUN, AND THE FIRST VERSION OF THIS ARM WAS DELETED
+# ============================================================================
+# Delete the srv_redial_if_uid_changed() call from srv_send() in
+# user/linux-wsys.c and this file goes from 17 passed / 0 failed to 15 passed /
+# 2 failed:
+#
+#   FAIL the server answered for uid 0 -- the connection outlived the identity
+#   FAIL the dropped-privilege write LANDED on the victim's title
+#
+# THAT PAIR IS THE SECOND ATTEMPT AT THIS ARM. The first was written against
+# arm P's forking holder, which EXITS: win_reap_dead() destroyed the window, so
+# the routed write was refused by win_find() with ENOENT BEFORE the permission
+# check, the arm was green, and disabling the fix did not change it. It was
+# deleted rather than quoted. The second attempt found a real defect on its
+# first run -- the re-dial was hooked into srv_route_write(), the client's
+# ordinary write path, which a process that skips the local check never calls,
+# so the mediator ACCEPTED the write and the title said PWNED-BY-A-STRANGER.
+# The hook moved to srv_send(), the one funnel every routed message passes
+# through. A check that only runs on the path an honest client takes is advice.
+#
 # THE NEGATIVE CONTROL, RUN ONCE BY HAND AND WRITTEN DOWN HERE
 # ============================================================
 # A gate is worth what it can fail. Deleting the single line
@@ -251,6 +271,31 @@ if [ "${1:-}" = "--inner" ]; then
         >"$W/armH.out" 2>&1
     echo "== armH.exit $?"
     sed 's/^/== armH: /' "$W/armH.out"
+
+    # ---- ARM D: A CONNECTION MUST NOT OUTLIVE THE IDENTITY THAT DIALLED IT.
+    # SO_PEERCRED is sampled at connect(2) and never again, so a process that
+    # dials while privileged and drops afterwards would keep being answered for
+    # the uid it dialled as. Inner uid 0 is a host owner here, so WITHOUT the
+    # client's re-dial this write is accepted by hostowner() long after the
+    # process stopped being one.
+    #
+    # IT RUNS HERE, AND THE PLACEMENT IS THE WHOLE FIX TO THIS ARM. The first
+    # attempt used the forking holder of arm P, which EXITS -- win_reap_dead()
+    # then destroyed its window, so the routed write was refused with ENOENT by
+    # win_find() BEFORE the permission check, the arm was green, and disabling
+    # the re-dial did not change it. The victim below is wsys_hold and is still
+    # running, so the permission check is the thing being exercised.
+    # A TITLE OF ITS OWN FIRST. armH is the HOST OWNER writing
+    # PWNED-BY-A-STRANGER and being allowed, correctly, so without this the
+    # "title unchanged" check below compares against a title an earlier arm
+    # legitimately set and reports a landing that never happened.
+    settitle DROP-BASELINE
+    echo "== drop.before $(titleof)"
+    as 0 env HAMWSYS_SERVER=1 "$BIN/wsys_srv_probe" drop "$VWID" 1002 \
+        >"$W/drop.out" 2>&1
+    echo "== drop.exit $?"
+    sed 's/^/== drop: /' "$W/drop.out"
+    echo "== drop.after $(titleof)"
 
     # ==================================================================
     # ARM P: WHAT owns_wid() ACTUALLY ANSWERS -- THE PPID WALK, ISOLATED.
@@ -563,6 +608,37 @@ else
     else
         bad "descendant arm INCONSISTENT: owns_wid=$DOW, probe exit=$DE (0=refused, 1=accepted), title \"$DA\". These must agree; refusing to pick one."
     fi
+fi
+
+# ---------- ARM D: the connection against the identity -------------------
+note "a connection must not outlive the identity that dialled it -- dial as a HOST OWNER (inner uid 0), drop to uid 1002, then write to uid 1001's window:"
+grep '^== drop:' "$OUTF" | sed 's/^== drop: /srvid|      /'
+DPID2="$(sed -n 's/^== drop: wsrvmu: caller uid [0-9]* pid \([0-9]*\).*/\1/p' \
+         "$OUTF" | head -1)"
+TDROP="$(grep "^== trace wsrvtrace: caller uid=[0-9]* pid=${DPID2:-x} " "$OUTF" \
+         | grep "wid=$VWID" | head -1)"
+DUID="$(printf '%s' "$TDROP" | sed -n 's/.*caller uid=\([0-9]*\).*/\1/p')"
+if grep -q '^== drop: .*did not see the routed write' "$OUTF"; then
+    bad "the server never received the drop probe's write -- nothing can be concluded from a refusal count that never moved"
+elif grep -q 'refused op 6: No such file or directory' "$W/drop.out" 2>/dev/null \
+     || grep -q '^== drop: .*ENOENT' "$OUTF"; then
+    bad "the drop probe's write was refused with ENOENT -- win_find() answered before the permission check, so this arm would be green whatever the identity was. That is exactly how the first version of this arm passed without measuring anything."
+elif [ -z "$DPID2" ] || [ -z "$TDROP" ]; then
+    bad "no server trace line for the drop probe (pid ${DPID2:-unknown}) on wid $VWID -- the uid the connection was ACCEPTED WITH is unmeasured, and the refusal alone cannot be attributed"
+elif [ "$DUID" = 1002 ] \
+     && grep -q '^== drop: wsrvmu: the mediator REFUSED it' "$OUTF"; then
+    ok "THE SERVER ACCEPTED THE CONNECTION AS uid $DUID, not as the uid 0 that dialled it: the client noticed its euid had moved and re-dialled, and the write was then REFUSED on the identity it actually holds. Trace: $(printf '%s' "$TDROP" | sed 's/^== trace //')"
+elif [ "$DUID" = 0 ]; then
+    bad "the server answered for uid 0 -- the connection outlived the identity that made it, so a shell that spawns anything before /etc/rc.de-user's setuid keeps host-owner power for the life of the process (and hands it on with every handoff)"
+else
+    bad "drop arm INCONSISTENT: server saw uid '$DUID', probe reported $(grep -m1 '^== drop: wsrvmu: the mediator' "$OUTF" | sed 's/^== drop: //')"
+fi
+if ! printf '%s' "$(f drop.before)" | grep -q 'DROP-BASELINE'; then
+    bad "the drop arm's own baseline title never took ($(f drop.before)) -- 'unchanged' below would be two blanks agreeing"
+elif printf '%s' "$(f drop.after)" | grep -q 'PWNED-BY-A-STRANGER'; then
+    bad "the dropped-privilege write LANDED on the victim's title ($(f drop.after)) -- the refusal above was reported and the mutation happened anyway"
+else
+    ok "and the victim's title is still the baseline this arm set ($(f drop.after)) -- the refusal is a state fact, not only a counter"
 fi
 
 T1001="$(grep '^== trace wsrvtrace: caller uid=1001' "$OUTF" | head -1)"
