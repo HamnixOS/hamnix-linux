@@ -138,6 +138,9 @@ frame_out: Array[8260, uint8]
 # server's KEXINIT (I_S), needed verbatim for the exchange hash.
 i_c_buf: Array[2048, uint8]
 i_c_len: Array[1, uint64]
+# See the note in user/sshd.ad: _recv_packet accepts up to 8192 bytes and this
+# holds 2048, so the limit is named and checked rather than implied.
+I_BUF_CAP: uint64 = 2048
 i_s_buf: Array[2048, uint8]
 i_s_len: Array[1, uint64]
 
@@ -1409,6 +1412,15 @@ def _run_client() -> int32:
         return -1
     if pkt_in_len[0] < 1 or pkt_in[0] != SSH_MSG_KEXINIT:
         _log("[ssh] expected KEXINIT\n")
+        sys_close(fd)
+        return -1
+    # REFUSED AT THE LIMIT, NOT TRUNCATED -- the same defect as the server's
+    # copy of I_C, in the other direction: a server's KEXINIT longer than 2048
+    # bytes was memcpy'd into this 2048-byte buffer with no check, so a hostile
+    # or merely algorithm-rich server overran it. The exchange hash needs I_S
+    # verbatim, so a prefix is not an option either.
+    if pkt_in_len[0] > I_BUF_CAP:
+        _log("[ssh] the server's KEXINIT does not fit the exchange-hash buffer -- refusing rather than overrunning it or hashing a prefix\n")
         sys_close(fd)
         return -1
     _memcpy(&i_s_buf[0], &pkt_in[0], pkt_in_len[0])
