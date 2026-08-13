@@ -69,10 +69,16 @@ for i, a in enumerate(alive):
         first_refused = i + 1
         break
 
-print("tried %d kept %d first_refused %s"
-      % (want, sum(1 for a in alive if a), first_refused), flush=True)
-for i, a in enumerate(alive):
-    print("conn %d %s" % (i + 1, "KEPT" if a else "REFUSED"), flush=True)
+# The caller reads this through `grep -m1`, which closes the pipe on the first
+# match; without this the per-connection detail below raises BrokenPipeError
+# and paints a working measurement's log with a traceback.
+try:
+    print("tried %d kept %d first_refused %s"
+          % (want, sum(1 for a in alive if a), first_refused), flush=True)
+    for i, a in enumerate(alive):
+        print("conn %d %s" % (i + 1, "KEPT" if a else "REFUSED"), flush=True)
+except BrokenPipeError:
+    os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 
 if hold_path:
     with open(hold_path, "w") as f:

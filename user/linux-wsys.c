@@ -1795,13 +1795,24 @@ static void seg_boot_id(char *out, size_t cap)
     if (buf[0]) snprintf(out, cap, "%s", buf);
 }
 
-static void seg_refuse_mark(const char *path, uint32_t theirs)
+/* APPEND ONE LINE TO <seg>.refused.  Split out of seg_refuse_mark so that the
+ * CONNECTION refusal can be recorded in the same file, by the same rules, for
+ * the same reader -- see srv_conn_refuse_note.  Two files would mean two
+ * places to look for "the window system turned this process away", and the
+ * panel's notice path only knows about one of them.
+ *
+ * The three properties the caller depends on are all here and none of them is
+ * incidental: O_CREAT comes SECOND (/srv is 1777 and the marker may already
+ * belong to another uid, so a client that cannot CREATE it still gets to
+ * APPEND to it); the line carries the boot id, so a reader can tell a refusal
+ * that happened in THIS boot from one that outlived a restart; and the whole
+ * thing is best-effort and errno-neutral, because the refusal is the safety
+ * property and the notice is cosmetic on top of it. */
+static void seg_refuse_append(const char *path, const char *line)
 {
     int saved = errno;
     char mpath[600];
-    char line[256];
-    char boot[64];
-    if (!path || !*path) goto out;
+    if (!path || !*path || !line || !*line) goto out;
     if (snprintf(mpath, sizeof mpath, "%s.refused", path) >= (int)sizeof mpath)
         goto out;
     int fd = open(mpath, O_WRONLY | O_APPEND);
@@ -1809,17 +1820,24 @@ static void seg_refuse_mark(const char *path, uint32_t theirs)
         fd = open(mpath, O_WRONLY | O_APPEND | O_CREAT, 0666);
     if (fd < 0) goto out;
     if (fchmod(fd, 0666) < 0) { /* not the creator; mode already correct */ }
+    ssize_t w = write(fd, line, strlen(line));
+    (void)w;
+    close(fd);
+out:
+    errno = saved;
+}
+
+static void seg_refuse_mark(const char *path, uint32_t theirs)
+{
+    int saved = errno;
+    char line[256];
+    char boot[64];
     seg_boot_id(boot, sizeof boot);
     int n = snprintf(line, sizeof line,
                      "refused live=%u mine=%u pid=%ld boot=%s\n",
                      (unsigned)theirs, (unsigned)WSYS_VERSION, (long)getpid(),
                      boot);
-    if (n > 0 && n < (int)sizeof line) {
-        ssize_t w = write(fd, line, (size_t)n);
-        (void)w;
-    }
-    close(fd);
-out:
+    if (n > 0 && n < (int)sizeof line) seg_refuse_append(path, line);
     errno = saved;
 }
 
@@ -2715,6 +2733,33 @@ static int owns_wid_ancestry(int wid)
 struct srv_own { int32_t wid; int32_t pid; uint64_t cid; };
 static struct srv_own srv_own_tab[WSYS_MAX_WINDOWS];
 static uint64_t srv_n_claim, srv_n_connrefuse;
+
+/* CONNECTIONS TURNED AWAY AT WSRV_CONN_MAX, and it is NOT srv_n_connrefuse
+ * above however alike the two names read.  srv_n_connrefuse is stage 5's
+ * count of MUTATIONS that ancestry would have allowed and a descriptor did
+ * not -- a decision about a message on a connection that exists.  This is the
+ * count of clients that never got a connection at all, and until it existed
+ * the server recorded NOTHING about the one condition it alone can see:
+ * tests/linux/wsys_srv_ceiling.sh drove six refusals past the ceiling and
+ * read `connrefused 0` out of the STAT block afterwards, because that field
+ * was answering a different question.  Kept separate for both sockets,
+ * because their ceilings are separate. */
+static uint64_t srv_n_capref, srd_n_capref;
+
+/* SAY IT ONCE PER SERVER, NOT ONCE PER REFUSAL.  A desktop that has run out
+ * of connections has a client retrying, and a line per attempt would turn the
+ * one diagnosis anybody needs into a scroll that hides it.  The COUNTER keeps
+ * the full total; this is the sentence that tells a reader where to look. */
+static void srv_cap_refused(const char *sockname, uint64_t n)
+{
+    if (n != 1) return;
+    fprintf(stderr, "wsys: the connection limit is reached on '%s' "
+                    "(WSRV_CONN_MAX=%d): refusing a client. Every further "
+                    "client on this socket falls back to the UNMEDIATED "
+                    "in-process path; the running total is `capref` in the "
+                    "STAT block.\n",
+            sockname, (int)WSRV_CONN_MAX);
+}
 
 /* The row's binding slot, or NULL.  Keyed by ROW INDEX and not by wid: a wid
  * is a monotonically increasing integer with no bound, a row index is one of
@@ -3625,12 +3670,22 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
     }
     case WSRV_OP_STAT: {
         srv_n_stat++;
-        char b[384];
+        /* 512 and not 384: sixteen %llu at their full width plus the names is
+         * 420 characters, and snprintf would have TRUNCATED -- silently
+         * dropping the newest field, which is the one a reader added it to
+         * see. */
+        char b[512];
         int n = snprintf(b, sizeof b,
                          "conns %llu live %d msgs %llu nop %llu ping %llu "
                          "stat %llu bad %llu bytes %llu write %llu "
                          "newwin %llu refused %llu claim %llu "
-                         "connrefused %llu scene %llu frame %llu\n",
+                         /* capref IS APPENDED, NOT INSERTED.  Readers are
+                          * srv_stat_field() by name, but the field order is
+                          * what a person reading a gate's log compares
+                          * between two runs, and a new field in the middle
+                          * makes every stored line look different. */
+                         "connrefused %llu scene %llu frame %llu "
+                         "capref %llu\n",
                          (unsigned long long)srv_n_accept, srv_nconn,
                          (unsigned long long)srv_n_msg,
                          (unsigned long long)srv_n_nop,
@@ -3644,7 +3699,8 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
                          (unsigned long long)srv_n_claim,
                          (unsigned long long)srv_n_connrefuse,
                          (unsigned long long)srv_n_scene,
-                         (unsigned long long)srv_n_frame);
+                         (unsigned long long)srv_n_frame,
+                         (unsigned long long)srv_n_capref);
         if (n < 0) n = 0;
         srv_reply(c->fd, h->tag, n, b, (uint32_t)n);
         return;
@@ -3810,7 +3866,15 @@ int hamwsys_srv_service(void)
                     int cfd = accept4(srv_lfd, NULL, NULL,
                                       SOCK_NONBLOCK | SOCK_CLOEXEC);
                     if (cfd < 0) break;
-                    if (srv_nconn >= WSRV_CONN_MAX) { close(cfd); continue; }
+                    /* THE CEILING, AND IT IS NO LONGER A CLOSED DESCRIPTOR
+                     * AND NOTHING ELSE.  close(cfd) alone left the one
+                     * process that KNOWS the table is full saying nothing at
+                     * all, while the client it turned away went quietly back
+                     * to the unmediated path.  Counted always, said once. */
+                    if (srv_nconn >= WSRV_CONN_MAX) {
+                        srv_cap_refused("srv", ++srv_n_capref);
+                        close(cfd); continue;
+                    }
                     /* WHO IS CALLING, taken from the kernel and not from the
                      * message.  This is the entire point of having a mediator:
                      * SO_PEERCRED is the one fact about a client that the
@@ -4123,7 +4187,16 @@ static void srd_serve(void)
                     int cfd = accept4(srd_lfd, NULL, NULL,
                                       SOCK_NONBLOCK | SOCK_CLOEXEC);
                     if (cfd < 0) break;
-                    if (srd_nconn >= WSRV_CONN_MAX) { close(cfd); continue; }
+                    /* The read server's ceiling is SEPARATE from the mutation
+                     * socket's -- a desktop has two budgets, not one -- and
+                     * refusing here is the more expensive of the two, because
+                     * the client that falls back reads the window table out
+                     * of shared memory and snap_windows() answers everybody
+                     * IN FULL.  See srv_route_read. */
+                    if (srd_nconn >= WSRV_CONN_MAX) {
+                        srv_cap_refused("rd", ++srd_n_capref);
+                        close(cfd); continue;
+                    }
                     /* SO_PEERCRED, at accept, exactly as the mutation server
                      * takes it -- the one fact a client cannot forge, and the
                      * only thing the enumeration policy above is allowed to
@@ -4258,6 +4331,68 @@ static uint32_t srv_tag    = 0;
 static uid_t    srv_dial_uid;
 static int      srv_fd_adopted;
 
+/* THE SERVER WAS THERE AND TURNED THIS PROCESS AWAY, which is a different
+ * fact from "nothing is serving" and used to be reported as a third thing
+ * that is true of neither.
+ *
+ * WHY THE OLD MESSAGE WAS WRONG, because the mechanism is not obvious.  Both
+ * listeners are `listen(fd, 32)`, so a client dialling a server whose table
+ * is full CONNECTS SUCCESSFULLY -- the kernel queues it in the backlog and
+ * connect(2) returns 0.  The accept-and-close happens afterwards, inside the
+ * server's loop.  So the failure surfaces as a RESET DURING HELLO, and the
+ * dial path treated an unanswered HELLO as a version disagreement: it printed
+ * "the server ... speaks version 0, this client speaks 8" with `theirs` still
+ * the zero it was initialised to.  There was no disagreement.  Both sides
+ * spoke 8 and the table was full.
+ *
+ * That sent every reader at WSYS_VERSION -- the one number in this file that
+ * costs 92 of 124 packages to change -- for a fault that is WSRV_CONN_MAX, a
+ * process-static array in wsysd that is in no shared struct and costs a
+ * recompile.  tests/linux/wsys_srv_ceiling.sh asserts on the TEXT for that
+ * reason: a wrong explanation is not a smaller defect than no explanation.
+ *
+ * The two cases are cleanly separable and this is where they separate:
+ *   connect(2) FAILED          -> nothing is serving this segment.  Fall back;
+ *                                 many gates run HAMWSYS_SERVER=1 with no
+ *                                 wsysd and must keep working.
+ *   connect(2) SUCCEEDED, HELLO unanswered
+ *                              -> a server is there and refused us.  Say so,
+ *                                 record it, and on the READ socket REFUSE
+ *                                 rather than fall back. */
+static int      srv_rd_cap_refused;
+
+static void srv_conn_refuse_note(const char *sockname, int *once)
+{
+    int saved = errno;
+    if (!*once) {
+        *once = 1;
+        fprintf(stderr,
+                "wsys: the server for segment %llu.%llu is at its connection "
+                "limit (WSRV_CONN_MAX=%d) and refused this process on '%s'. "
+                "This is NOT a version disagreement -- both sides speak %u. "
+                "%s\n",
+                (unsigned long long)seg_dev, (unsigned long long)seg_ino,
+                (int)WSRV_CONN_MAX, sockname, (unsigned)WSYS_VERSION,
+                sockname[0] == 'r'
+                  ? "The window list is REFUSED rather than answered from "
+                    "shared memory, because falling back there would hand a "
+                    "caller the full table the mediator had just denied it."
+                  : "This process is using the in-process path, which is NOT "
+                    "mediated.");
+    }
+    /* ...AND ONCE WHERE THE SYSTEM CAN SEE IT.  stderr on a DE-spawned
+     * program is a log nobody opens; <seg>.refused is the file the version
+     * refusal already writes and the panel's notice path already reads, so
+     * one reader finds both kinds of turning-away in one place. */
+    char line[256], boot[64];
+    seg_boot_id(boot, sizeof boot);
+    int n = snprintf(line, sizeof line,
+                     "connrefused sock=%s cap=%d pid=%ld boot=%s\n",
+                     sockname, (int)WSRV_CONN_MAX, (long)getpid(), boot);
+    if (n > 0 && n < (int)sizeof line) seg_refuse_append(seg_path, line);
+    errno = saved;
+}
+
 /* Defined below srv_call, which it uses; declared here because srv_dial needs
  * it while the connection exists but is not yet blessed. */
 static int srv_call_locked_hello(uint32_t *mine, uint32_t *theirs, int64_t *rc);
@@ -4375,7 +4510,21 @@ static int srv_dial(void)
 
     uint32_t mine = WSYS_VERSION, theirs = 0;
     int64_t rc = 0;
-    if (srv_call_locked_hello(&mine, &theirs, &rc) < 0 || rc < 0) {
+    /* TWO FAILURES, TWO SENTENCES.  `< 0` is "no reply came back at all",
+     * which after a SUCCESSFUL connect(2) means the server accepted us and
+     * closed -- the connection ceiling.  `rc < 0` is the server ANSWERING with
+     * a refusal, which is the version case and the only one that may name a
+     * version.  Collapsing them printed "speaks version 0" at a server that
+     * speaks 8. */
+    int hello = srv_call_locked_hello(&mine, &theirs, &rc);
+    if (hello < 0) {
+        static int said;
+        srv_conn_refuse_note("srv", &said);
+        close(srv_fd);
+        srv_fd = -1;
+        return -1;
+    }
+    if (rc < 0) {
         fprintf(stderr, "wsys: the server for segment %llu.%llu speaks version "
                         "%u, this client speaks %u -- refusing the connection "
                         "and using the in-process path.\n",
@@ -4733,8 +4882,20 @@ static int srv_rdial(void)
     }
     uint32_t mine = WSYS_VERSION, theirs = 0, got = 0;
     int64_t rc = 0;
-    if (srv_call_on(fd, WSRV_OP_HELLO, 0, 0, &mine, sizeof mine,
-                    &theirs, sizeof theirs, &got, &rc) < 0 || rc < 0) {
+    /* The same split as srv_dial, and it matters MORE here.  On the mutation
+     * socket an unmediated client writes what hamwsys_write's local check
+     * already lets it write; on this one, falling back runs snap_windows()
+     * out of shared memory, and snap_windows() answers EVERYBODY IN FULL. */
+    int hello = srv_call_on(fd, WSRV_OP_HELLO, 0, 0, &mine, sizeof mine,
+                            &theirs, sizeof theirs, &got, &rc);
+    if (hello < 0) {
+        static int said;
+        srv_rd_cap_refused = 1;
+        srv_conn_refuse_note("rd", &said);
+        close(fd);
+        return -1;
+    }
+    if (rc < 0) {
         fprintf(stderr, "wsys: the read server for segment %llu.%llu speaks "
                         "version %u, this client speaks %u -- refusing it and "
                         "reading the segment directly.\n",
@@ -4768,7 +4929,33 @@ static int srv_route_read(struct hamwsys_file *f)
     default: return 0;
     }
     if (!srv_enabled() || srv_is_server) return 0;
-    if (srv_rdial() < 0) return 0;
+    if (srv_rdial() < 0) {
+        /* A CONNECTION REFUSED AT THE CEILING IS A SERVER-SIDE REFUSAL, and
+         * this function already says what must happen to those -- twenty
+         * lines below, about the other way of reaching the same place: "A
+         * NEGATIVE rc IS THE SERVER'S REFUSAL AND MUST NOT FALL BACK ...
+         * Falling back to the in-process read here would answer it from
+         * shared memory and turn every server-side refusal into a bypass."
+         *
+         * MEASURED, that was not a lapse but a PRIVILEGE GAIN, and it needed
+         * no attacker: srd_enum_tier() answers EMPTY to a process that owns
+         * no window, snap_windows() answers everybody with the whole table,
+         * and 64 connect(2) calls were the whole of the exploit.
+         * tests/linux/wsys_srv_ceiling.sh drives it: uid 1002 owning nothing
+         * read 0 bytes with room in the table and the victim's full row with
+         * the table full.
+         *
+         * ONLY THIS CASE FAILS CLOSED, and the distinction is the point.  If
+         * connect(2) itself failed there is no server, srv_rd_cap_refused is
+         * 0, and the in-process read is the ONLY read -- gates run
+         * HAMWSYS_SERVER=1 with no wsysd and tests/linux/wsys_enum_policy.sh's
+         * unrouted arm depends on the full list still arriving there.  A
+         * server that answered and refused is a decision; a server that is
+         * absent is not. */
+        if (srv_rd_cap_refused) { errno = ECONNREFUSED; f->snap = NULL;
+                                  f->snaplen = 0; return -1; }
+        return 0;
+    }
     static uint8_t back[WSRV_MAXPAY];
     uint32_t got = 0;
     int64_t rc = 0;
@@ -4894,7 +5081,7 @@ int hamwsys_srv_selftest(void)
      * discard every message and this test would report the fastest possible
      * result. */
     {
-        char st[256]; uint32_t got = 0; int64_t rc = 0;
+        char st[512]; uint32_t got = 0; int64_t rc = 0;
         uint64_t before = 0, after = 0;
         if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) < 0) {
             printf("wsrvst: FAIL could not read the server's counters\n");
@@ -4947,7 +5134,7 @@ int hamwsys_srv_selftest(void)
      * back as an unsolicited tag-0 frame rather than vanishing, because that
      * is how a refused mutation will reach a client that did not wait. */
     {
-        char st[256]; uint32_t got = 0; int64_t rc = 0;
+        char st[512]; uint32_t got = 0; int64_t rc = 0;
         uint64_t bad0, bad1;
         if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) >= 0) {
             st[got] = 0; bad0 = srv_stat_field(st, "bad");
@@ -4991,7 +5178,7 @@ int hamwsys_srv_mutate_selftest(int victim_wid)
         fprintf(stderr, "wsrv: no connection to a server.\n");
         return 1;
     }
-    char st[320]; uint32_t got = 0; int64_t rc = 0;
+    char st[512]; uint32_t got = 0; int64_t rc = 0;
     uint64_t r0, r1, w0, w1;
     if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) < 0) {
         printf("wsrvmu: FAIL could not read the server's counters\n");
@@ -5098,7 +5285,7 @@ int hamwsys_srv_scene_selftest(int victim_wid)
         fprintf(stderr, "wsrv: no connection to a server.\n");
         return 1;
     }
-    char st[384]; uint32_t got = 0; int64_t rc = 0;
+    char st[512]; uint32_t got = 0; int64_t rc = 0;
     if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) < 0) {
         printf("wsrvsc: FAIL could not read the server's counters\n");
         return 1;
@@ -5383,7 +5570,7 @@ int hamwsys_srv_conngate(int wid, const char *self, const char *uidgate)
     uint16_t flags = (uint16_t)(WSRV_LEAF_WIN_CTL << WSRV_LEAF_SHIFT);
     srv_send(WSRV_OP_WRITE, flags, wid, ++srv_tag, own,
              (uint32_t)(sizeof own - 1));
-    char st[384]; uint32_t got = 0; int64_t rc = 0;
+    char st[512]; uint32_t got = 0; int64_t rc = 0;
     if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) >= 0) {
         st[got] = 0;
         printf("wsrvcg: holder pid %ld wid %d; server after the holder's own "
