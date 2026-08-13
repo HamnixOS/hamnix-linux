@@ -1,0 +1,273 @@
+# tests/linux/wsys_chunkblit.ad -- a v2 client that SPLITS one big blit across
+# many small write(2) calls.
+#
+# WHY THIS EXISTS
+# ---------------
+# user/linux-wsys.c's draw/ctl arm has a reassembly buffer, `carry`, for a
+# client that does not deliver a whole draw record in one write. Earlier this
+# month a 2,112,018-byte one-shot blit was found to be REFUSED because it did
+# not fit that 1 MiB buffer -- no v2 window bigger than about 512x512 had ever
+# painted. The fix routed COMPLETE records around the buffer entirely and left
+# the buffer at 1 MiB.
+#
+# So the one-shot case is fixed and the SPLIT case is not: a client that writes
+# the same blit in chunks still accumulates it in `carry` and still hits the
+# same 1 MiB wall. This client is that client. It is not a synthetic shape --
+# user/wsyswl.ad ships a header write and a payload write per row, which is the
+# same two-write record; it only survives because its rows are capped at 8 KiB.
+#
+# WHAT IT DRAWS
+# -------------
+# A 1024x768 window, undecorated, at the origin, blitted as ONE 'B' record of
+# 18 + 3,145,728 bytes delivered as an 18-byte header write followed by 768
+# writes of 4096 bytes -- one row per write. The payload is three horizontal
+# bands:
+#
+#     rows   0..255   red     -- the only rows that fit inside 1 MiB of carry
+#     rows 256..511   green   -- past the wall
+#     rows 512..767   blue    -- well past it
+#
+# The bands are placed at the wall on purpose. 1 MiB of carry is 1048576 bytes
+# and the record's header is 18, so row 255 is the last row that could ever be
+# buffered. A build that paints red and nothing else, or nothing at all, has
+# the bug; a build that paints all three bands does not.
+#
+# It prints one line per outcome so the failure is legible without a
+# framebuffer, and the shell gate reads the PIXELS anyway -- every layer here
+# has answered success while drawing nothing before.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+WIN_W:      int32  = 1024
+WIN_H:      int32  = 768
+CHUNK:      uint64 = 4096                 # exactly one 1024px RGBA row
+FMT_RGBA:   uint8  = 1
+
+pathbuf: Array[128, uint8]
+rbuf:    Array[64, uint8]
+numbuf:  Array[24, uint8]
+hdrbuf:  Array[32, uint8]
+rowbuf:  Array[4096, uint8]
+waitset: Array[4, int32]
+my_wid:  int32 = 0
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: int32):
+    x: int32 = v
+    if x < 0:
+        sys_write(fd, cast[Ptr[uint8]]("-"), 1)
+        x = 0 - x
+    n: uint64 = 0
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
+    d: Array[12, uint8]
+    n: uint64 = 0
+    x: int32 = v
+    i: uint64 = at
+    if x == 0:
+        d[0] = 48
+        n = 1
+    while x > 0:
+        d[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = d[n]
+        i = i + 1
+    return i
+
+
+def winpath(wid: int32, leaf: Ptr[uint8]):
+    i: uint64 = 0
+    p: Ptr[uint8] = "/dev/wsys/"
+    k: uint64 = 0
+    while p[k] != 0:
+        pathbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&pathbuf[0], i, wid)
+    pathbuf[i] = 47
+    i = i + 1
+    k = 0
+    while leaf[k] != 0:
+        pathbuf[i] = leaf[k]
+        i = i + 1
+        k = k + 1
+    pathbuf[i] = 0
+
+
+def write_path(path: Ptr[char], data: Ptr[uint8]) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    sys_write(fd, data, slen(data))
+    sys_close(fd)
+    return 0
+
+
+def win_ctl(verb: Ptr[uint8]):
+    winpath(my_wid, "ctl")
+    write_path(cast[Ptr[char]](&pathbuf[0]), verb)
+
+
+def alloc_window() -> int32:
+    if write_path(cast[Ptr[char]]("/dev/wsys/ctl"),
+                  cast[Ptr[uint8]]("newwindow\n")) != 0:
+        return -1
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if fd < 0:
+        return -1
+    n: int64 = sys_read(fd, &rbuf[0], 32)
+    sys_close(fd)
+    if n <= 0:
+        return -1
+    v: int32 = 0
+    i: uint64 = 0
+    while i < cast[uint64](n) and rbuf[i] >= 48 and rbuf[i] <= 57:
+        v = v * 10 + cast[int32](rbuf[i]) - 48
+        i = i + 1
+    if v < 2:
+        return -1
+    return v
+
+
+def put_le32(buf: Ptr[uint8], at: uint64, v: int32):
+    u: uint32 = cast[uint32](v)
+    buf[at]     = cast[uint8](u % 256)
+    buf[at + 1] = cast[uint8]((u / 256) % 256)
+    buf[at + 2] = cast[uint8]((u / 65536) % 256)
+    buf[at + 3] = cast[uint8]((u / 16777216) % 256)
+
+
+# Fill rowbuf with the band colour for row y. RGBA8888: R,G,B,A in that order.
+def fill_row(y: int32):
+    r: uint8 = 220
+    g: uint8 = 40
+    b: uint8 = 40
+    if y >= 512:
+        r = 40
+        g = 70
+        b = 200
+    elif y >= 256:
+        r = 40
+        g = 200
+        b = 60
+    i: uint64 = 0
+    while i < CHUNK:
+        rowbuf[i]     = r
+        rowbuf[i + 1] = g
+        rowbuf[i + 2] = b
+        rowbuf[i + 3] = 255
+        i = i + 4
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    my_wid = alloc_window()
+    if my_wid < 2:
+        puts(2, "wsys_chunkblit: FATAL no window\n")
+        return 1
+    win_ctl(cast[Ptr[uint8]]("geometry 0 0 1024 768\n"))
+    win_ctl(cast[Ptr[uint8]]("decorate 0\n"))
+    win_ctl(cast[Ptr[uint8]]("z 5\n"))
+    win_ctl(cast[Ptr[uint8]]("version 2\n"))
+    win_ctl(cast[Ptr[uint8]]("title chunkblit\n"))
+
+    winpath(my_wid, "draw/ctl")
+    dfd: int32 = sys_open_write(cast[Ptr[char]](&pathbuf[0]))
+    if dfd < 0:
+        puts(2, "wsys_chunkblit: FATAL cannot open draw/ctl\n")
+        return 1
+
+    # THE HEADER, ALONE. This is the write that arms the reassembly buffer:
+    # 18 bytes of a record that needs 3,145,746, so linux-wsys.c must hold it
+    # and wait. Everything after this lands in `carry`.
+    hdrbuf[0] = 66                                       # 'B'
+    put_le32(&hdrbuf[0], 1, 0)
+    put_le32(&hdrbuf[0], 5, 0)
+    put_le32(&hdrbuf[0], 9, WIN_W)
+    put_le32(&hdrbuf[0], 13, WIN_H)
+    hdrbuf[17] = FMT_RGBA
+    nh: int64 = sys_write(dfd, &hdrbuf[0], 18)
+    puts(1, "wsys_chunkblit: header write -> ")
+    putd(1, cast[int32](nh))
+    puts(1, "\n")
+
+    # THE PAYLOAD, ONE ROW PER write(2).
+    y:        int32 = 0
+    bad:      int32 = 0
+    firstbad: int32 = -1
+    firstrc:  int32 = 0
+    while y < WIN_H:
+        fill_row(y)
+        k: int64 = sys_write(dfd, &rowbuf[0], CHUNK)
+        if k < 0:
+            bad = bad + 1
+            if firstbad < 0:
+                firstbad = y
+                firstrc = cast[int32](k)
+        y = y + 1
+
+    puts(1, "wsys_chunkblit: rows=768 refused=")
+    putd(1, bad)
+    puts(1, " first_refused_row=")
+    putd(1, firstbad)
+    puts(1, " rc=")
+    putd(1, firstrc)
+    puts(1, "\n")
+
+    # PUBLISH.
+    hdrbuf[0] = 68                                       # 'D'
+    put_le32(&hdrbuf[0], 1, 0)
+    put_le32(&hdrbuf[0], 5, 0)
+    put_le32(&hdrbuf[0], 9, WIN_W)
+    put_le32(&hdrbuf[0], 13, WIN_H)
+    nd: int64 = sys_write(dfd, &hdrbuf[0], 17)
+    puts(1, "wsys_chunkblit: publish write -> ")
+    putd(1, cast[int32](nd))
+    puts(1, "\n")
+    sys_close(dfd)
+
+    if bad == 0:
+        puts(1, "wsys_chunkblit: OK every chunk accepted\n")
+    else:
+        puts(1, "wsys_chunkblit: REFUSED the split record did not fit\n")
+
+    # Stay alive: a window whose owner has exited is not a window, so the
+    # compositor would have nothing to composite by the time the gate looks.
+    live: int32 = 0
+    if argc > 1:
+        live = 300
+    j: int32 = 0
+    while j < live:
+        sys_waitfds(&waitset[0], 0, 100)
+        j = j + 1
+    return 0
