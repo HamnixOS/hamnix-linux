@@ -387,6 +387,102 @@ sys_lseek:
     .size sys_lseek, .-sys_lseek
 
 
+    /* --- sys_fd_size(fd) -> int64 -----------------------------------
+     * The size of an open fd. user/hampanelscene.ad asks it once per
+     * tick of THE "RESTART BEFORE OPENING APPS" NOTICE, to tell "the
+     * refusal marker grew" from "it did not" without reading a file
+     * whose length it does not control.
+     *
+     * The hosted lane (user/linux-syscalls.c) answers with fstat. This
+     * kernel has NO fstat-shaped syscall and NO SYS_FD_SIZE — the
+     * number space in /home/david/Hamnix/arch/x86/kernel/syscall.ad
+     * has no such entry — so this is NOT a stub with a number: it is
+     * the same question asked through SYS_LSEEK, which vfs_lseek
+     * answers for a regular-file chan from the file's own length
+     * (SEEK_END, whence 2). Save the cursor, seek to the end, put the
+     * cursor back: the caller's position is unchanged, which matters
+     * because hampanelscene reads the same fd right afterwards.
+     *
+     * Any lseek failure (a stream fd answers ESPIPE/EINVAL) comes back
+     * as -1, the hosted lane's "cannot tell" — never a size that was
+     * never measured.
+     *
+     * fd and the saved cursor live on the STACK, not in %r8/%r9/%r10:
+     * those are syscall ARGUMENT registers in this ABI, and nothing in
+     * this tree promises the kernel entry path leaves them alone. The
+     * stack is the one thing a syscall provably does not touch.
+     *
+     * The register/stack logic here is MEASURED, not merely reasoned:
+     * this routine was assembled with the ONE substitution of Linux's
+     * lseek number (8) for SYS_LSEEK (9) and run against a real 11-byte
+     * file with the cursor parked at 5. It returned 11, left the cursor
+     * at 5, and returned -1 for both a pipe end and a closed fd. That
+     * exercises every branch except the number itself, which is read off
+     * the kernel's own table rather than chosen. */
+    .globl sys_fd_size
+    .type sys_fd_size, @function
+sys_fd_size:
+    pushq   %rbx                    /* callee-saved: we borrow it for fd */
+    movl    %edi, %ebx              /* keep fd across the three calls */
+    xorq    %rsi, %rsi              /* offset = 0 */
+    movq    $1, %rdx                /* SEEK_CUR */
+    movq    $9, %rax                /* SYS_LSEEK */
+    syscall
+    testq   %rax, %rax
+    js      .Lfdsz_err              /* not seekable -> cannot tell */
+    pushq   %rax                    /* saved cursor */
+    movl    %ebx, %edi
+    xorq    %rsi, %rsi
+    movq    $2, %rdx                /* SEEK_END */
+    movq    $9, %rax
+    syscall
+    testq   %rax, %rax
+    js      .Lfdsz_err2
+    pushq   %rax                    /* the size */
+    movl    %ebx, %edi              /* restore the caller's cursor */
+    movq    8(%rsp), %rsi
+    xorq    %rdx, %rdx              /* SEEK_SET */
+    movq    $9, %rax
+    syscall
+    popq    %rax                    /* the size */
+    addq    $8, %rsp                /* drop the saved cursor */
+    popq    %rbx
+    ret
+.Lfdsz_err2:
+    addq    $8, %rsp                /* drop the saved cursor */
+.Lfdsz_err:
+    movq    $-1, %rax
+    popq    %rbx
+    ret
+    .size sys_fd_size, .-sys_fd_size
+
+
+    /* --- sys_getenv(name, buf, cap) -> int64 ------------------------
+     * The hosted lane's contract (user/linux-syscalls.c): the length
+     * written, or -1 when the variable is UNSET — a distinction the
+     * caller needs, because unset and set-to-empty want different
+     * behaviour.
+     *
+     * ON THIS KERNEL EVERY VARIABLE IS UNSET, and that is a fact about
+     * the ABI, not a placeholder. A native task is entered with
+     * %rdi=argc and %rsi=argv and NOTHING ELSE — see _start above; the
+     * 2-arg sys_execve stub in this file zeroes %rdx precisely because
+     * the native form carries NO envp, and the kernel has no
+     * SYS_GETENV to ask instead. So -1 is the measured truth here, and
+     * user/hampanelscene.ad's $HAMWSYS lookup correctly falls back to
+     * /srv/wsys.
+     *
+     * If a native environment ever exists, this becomes a real
+     * syscall; until then answering 0 (or writing a made-up value into
+     * buf) would be a variable that was never set. */
+    .globl sys_getenv
+    .type sys_getenv, @function
+sys_getenv:
+    movq    $-1, %rax
+    ret
+    .size sys_getenv, .-sys_getenv
+
+
     /* --- sys_get_jiffies() -> uint64 --------------------------------- */
     .globl sys_get_jiffies
     .type sys_get_jiffies, @function
@@ -991,6 +1087,46 @@ sys_wsys_free:
     syscall
     ret
     .size sys_wsys_free, .-sys_wsys_free
+
+
+    /* --- sys_wsys_was_refused() -> int32 ----------------------------
+     * "Did the window system turn THIS process away because the
+     * running session is an older WSYS_VERSION than this binary?"
+     * user/hamappmenu.ad asks before writing a permanent fault marker:
+     * a refused start must not leave "this program is broken" behind,
+     * because the fault outlives the reboot that would have fixed it
+     * (measured by tests/linux/installed_update_wsysver.sh, STAGE D).
+     *
+     * THIS ANSWER IS 0 AND IT IS NOT A PLACEHOLDER. The question only
+     * has a yes on the hosted lane: WSYS_VERSION, the /srv/wsys
+     * segment handshake and the seg_refuse_message that sets the flag
+     * ALL live in user/linux-wsys.c. This kernel's window system is
+     * the wid table behind SYS_WSYS_ALLOC/FREE above; it has no
+     * version handshake, so nothing here can refuse a client for being
+     * newer than the session, and "no such refusal happened" is true
+     * by construction rather than by assumption.
+     *
+     * NO SYSCALL NUMBER IS INVENTED FOR IT. There is no
+     * SYS_WSYS_WAS_REFUSED in the kernel's number space
+     * (/home/david/Hamnix/arch/x86/kernel/syscall.ad; 293/294 above,
+     * highest allocated 324) — a stub carrying any number at all would
+     * link and then dispatch to somebody else's syscall, which is
+     * exactly the failure this project is built to refuse: an answer
+     * that is success-shaped instead of true.
+     *
+     * WHY 0 AND NOT -1 ("don't know"). The caller tests != 0, so a -1
+     * would mean "assume refused" and would SUPPRESS the fault marker
+     * for a program that really is broken on this lane — losing a real
+     * diagnosis to protect against a refusal that cannot occur here. 0
+     * leaves the native lane behaving exactly as it did before the
+     * extern existed. When the native wsys grows a version handshake,
+     * this becomes a real syscall and the number goes here. */
+    .globl sys_wsys_was_refused
+    .type sys_wsys_was_refused, @function
+sys_wsys_was_refused:
+    xorl    %eax, %eax
+    ret
+    .size sys_wsys_was_refused, .-sys_wsys_was_refused
 
 
     /* --- sys_vk_window_frame(wid, reserved, frame) -> int64 ---------
