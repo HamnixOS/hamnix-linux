@@ -184,7 +184,20 @@ fi
 # OUTER HALF
 # ======================================================================
 cd "$PROJ"
-OUT="${SRV_WORK:-/home/david/.hamnix-build/wsrv-s4}"
+# PER-RUN BY DEFAULT: $BIN is "$OUT/bin". The old fixed default was
+# .../wsrv-s4 -- THE SAME PATH wsys_srv_readlat.sh defaulted to, so those two
+# gates overwrote each other's binaries even when only one agent was running
+# them. SRV_WORK pins it, which is what makes SRV_REBUILD=0 below useful.
+SCRATCH_BASE="${SRV_SCRATCH_BASE:-/home/david/.hamnix-build}"
+if [ -n "${SRV_WORK:-}" ]; then
+    OUT="$SRV_WORK"; OUT_EPHEMERAL=0
+    mkdir -p "$OUT" || { echo "enumpol: FAIL cannot make $OUT"; exit 2; }
+else
+    mkdir -p "$SCRATCH_BASE" || { echo "enumpol: FAIL cannot make $SCRATCH_BASE"; exit 2; }
+    OUT="$(mktemp -d "$SCRATCH_BASE/wsrv-enumpol.XXXXXX")" || {
+        echo "enumpol: FAIL cannot make a scratch dir under $SCRATCH_BASE"; exit 2; }
+    OUT_EPHEMERAL=1
+fi
 BIN="$OUT/bin"; mkdir -p "$BIN"
 
 for c in "${ADDER_HOST_AC:-}" "$PROJ/build/cutover/host_ac_llvm.elf" \
@@ -211,7 +224,7 @@ grep -q "^$(id -un):" /etc/subuid 2>/dev/null || {
 SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/enumpol.XXXXXX")"
-trap 'rm -rf "$W"' EXIT
+trap 'rm -rf "$W"; [ "${OUT_EPHEMERAL:-0}" = 1 ] && rm -rf "$OUT"' EXIT
 trap 'exit 130' INT TERM HUP
 chmod 1777 "$W"
 mkdir -p "$W/bin"; cp "$BIN"/wsysd "$BIN"/cat "$BIN"/wsys_hold "$W/bin/"

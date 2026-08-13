@@ -159,13 +159,27 @@ same method:
 | drag, mouse-paced | 0.38% | 0.14% |
 | drag, free-running | 1.27% | 0.45% |
 
-**So the hybrid is no longer necessary.** The case for mediating only the
-mutations rested on an idle desktop costing 0.63% of a core to mediate —
-roughly doubling the cost of doing nothing. At 0.12% that argument is gone:
-**mediating everything now costs about a tenth of a percent of a core at idle
-and stays under 1.3% on the worst load measured.** A single uniform boundary
-is both cheaper to reason about and cheaper than the split design would have
-been before the poll loop was fixed.
+> **THIS ARITHMETIC IS THE WRONG SHAPE, and the figures it produced have been
+> superseded.** Every entry is `ops/s × per-op`, so the projection passes
+> through the origin and has no term for the cost of *being* mediated. Stage 1
+> measured the real cost at three rates and found one: a rate-independent
+> **wake**, which at the idle rate is most of the bill. The per-message figure
+> was also pessimistic by ~5x — 6.2 µs projected against 1.08–1.35 µs measured
+> — so the two errors point in opposite directions and the totals look more
+> nearly right than the model is. The budget is now stated as a fixed term
+> plus a marginal one; see **The budget, re-derived** in
+> `docs/wsys_server_design.md`.
+
+**So the hybrid is no longer necessary, and this conclusion SURVIVED the
+projection above being wrong** — it is now carried by measurement rather than
+by arithmetic. The case for mediating only the mutations rested on an idle
+desktop costing 0.63% of a core to mediate, roughly doubling the cost of doing
+nothing. That argument is gone: driven at the census rates and measured on
+`wsysd`'s own `/proc/<pid>/stat`, **mediating everything costs 0.19% of a core
+at the idle rate and 0.42% at the worst load measured** — where the projection
+said 0.12% and 1.27%, wrong in both directions. A single uniform boundary is
+both cheaper to reason about and cheaper than the split design would have been
+before the poll loop was fixed.
 
 **The cost of that**, stated rather than buried: polled state — the window
 list, the config file, the notification bus — has nothing to wake on, so its

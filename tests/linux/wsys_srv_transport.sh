@@ -31,11 +31,15 @@
 #      and 3 must not break, so it is measured here rather than assumed: a
 #      real dragging client's op census must show ZERO backbuffer writes while
 #      showing plenty of other traffic.
-#   E. THE COST, against the budget in the design: 0.12% of a core at idle,
-#      0.38% on a mouse-paced drag, 1.27% at the worst measured load. Three
-#      samples, median, every sample printed, /proc/<pid>/stat deltas over a
-#      fixed interval -- never `ps pcpu`, which is a lifetime average and
-#      would report an idle server that spun for its first second as idle.
+#   E. THE COST, against a budget with A FIXED TERM AND A MARGINAL ONE rather
+#      than the single percentage per rate the design carried. The design's
+#      figures (0.12% at idle, 0.38% on a drag, 1.27% at the worst load) were
+#      `ops/s x per-op` and so passed through the origin; the measured cost
+#      does not, because the WAKE does not depend on the rate. Four rates,
+#      three samples each, median, every sample printed, /proc/<pid>/stat
+#      deltas over a fixed interval -- never `ps pcpu`, which is a lifetime
+#      average and would report an idle server that spun for its first second
+#      as idle. See THE BUDGET, RE-DERIVED below for the whole argument.
 #
 # Offscreen, software, no ICD, private namespace. The owner's desktop is
 # running and this must not touch it.
@@ -52,12 +56,35 @@ priv_ns_reexec "$@"
 # The work directory is deliberately NOT under /tmp: priv_ns_reexec has just
 # replaced /tmp with a fresh tmpfs, and a build that landed there would be
 # gone. It is also not under the source tree, which is read-only here.
-OUT="${SRV_WORK:-/home/david/.hamnix-build/wsrv-s1}"
+# THE DEFAULT IS PER-RUN, and that is not tidiness. It used to be the single
+# fixed path /home/david/.hamnix-build/wsrv-s1, and $BIN below is "$OUT/bin":
+# two agents running this gate at the same time COMPILED INTO THE SAME bin/,
+# each overwriting the wsysd the other was about to measure. $W was already
+# per-run, which made the collision look handled when the part that mattered
+# -- the binaries under test -- was shared.
+#
+# SRV_WORK still pins it, which is how you reuse a build across runs instead
+# of paying for the compile again.
+SCRATCH_BASE="${SRV_SCRATCH_BASE:-/home/david/.hamnix-build}"
+if [ -n "${SRV_WORK:-}" ]; then
+    OUT="$SRV_WORK"; OUT_EPHEMERAL=0
+    mkdir -p "$OUT" || { echo "srvtr: FAIL cannot make $OUT"; exit 1; }
+else
+    mkdir -p "$SCRATCH_BASE" || { echo "srvtr: FAIL cannot make $SCRATCH_BASE"; exit 1; }
+    OUT="$(mktemp -d "$SCRATCH_BASE/wsrv-s1.XXXXXX")" || {
+        echo "srvtr: FAIL cannot make a scratch dir under $SCRATCH_BASE"; exit 1; }
+    OUT_EPHEMERAL=1
+fi
 W="$OUT/run.$$"
 mkdir -p "$W" || { echo "srvtr: FAIL cannot make $W"; exit 1; }
 reap_track "$W/reaped"
 KEEP="${SRV_KEEP:-0}"
-cleanup(){ [ "$KEEP" = 1 ] || rm -rf "$W"; }
+cleanup(){
+    [ "$KEEP" = 1 ] && return 0
+    rm -rf "$W"
+    [ "$OUT_EPHEMERAL" = 1 ] && rm -rf "$OUT"
+    return 0
+}
 reap_on_exit cleanup
 
 pass=0; fail=0
@@ -151,6 +178,12 @@ fi
 ok "with the flag unset the probe cannot reach a server (rc=$RC_OFF) -- a success below will mean the transport, and not the probe"
 
 # ------- C(i). No socket is bound when the flag is unset.
+# INDEPENDENTLY CONFIRMED, and worth recording because the two observations
+# bound the problem: this defect was found twice on the same day, by two agents
+# who each saw it from a different side. One counted 21 foreign names bound
+# during a single run; the other watched this arm go red while its own
+# segment had NO srv name at all and three foreign ones were bound. Same
+# cause, and the fix below is the one that landed.
 # SCOPED TO THIS RUN'S SEGMENT, and that is not tidiness. The abstract name is
 # "hamnix-wsys/<dev>.<ino>/srv" and /proc/net/unix IS HOST-WIDE: a wildcard here
 # reads every wsysd on the machine, so any other gate, agent or leftover
@@ -217,6 +250,24 @@ cpu_pct(){ # cpu_pct <pid> <seconds> -> percent of one core, 2 decimals
 }
 median3(){ printf '%s\n' "$1" "$2" "$3" | sort -g | sed -n 2p; }
 
+# EVERY CPU SAMPLE CARRIES THE HOST CONDITIONS IT WAS TAKEN UNDER, because on
+# this machine those conditions move the answer more than the code does. The
+# same assertion, same gate, same tree region has read 0.27% contended, 0.22%
+# contended, and 0.17% at loadavg ~1.5 -- a third of the apparent overage was
+# OTHER AGENTS, not mediation. A percentage printed without the load it was
+# taken at is not reproducible and should not be quoted.
+#
+# srv= counts bound hamnix-wsys/<dev>.<ino>/srv names host-wide. Exactly ONE is
+# ours whenever our server is up, so srv>1 means somebody else's compositor was
+# running while this number was taken and the number is NOT ATTRIBUTABLE.
+host_cond(){
+    local l s
+    l="$(awk '{print $1}' /proc/loadavg)"
+    s="$(grep -ac 'hamnix-wsys/[0-9.]*/srv' /proc/net/unix 2>/dev/null || echo 0)"
+    printf '%s %s\n' "$l" "$s" >>"$W/hostcond"     # read by the verdict at the end
+    printf 'load %s srv %s' "$l" "$s"
+}
+
 # within_budget <delta> <budget> <label>. A delta smaller than one tick is
 # reported as "below what this instrument can resolve" rather than as a pass:
 # saying 0.00% when the instrument's floor is 0.025% is a claim the run did
@@ -239,13 +290,30 @@ measure_idle(){ # measure_idle <tag> [env...] -> echoes "s1 s2 s3 median"
     local p s1 s2 s3
     p="$(start_wsysd "$tag" "$@")"
     sleep 2                      # let the first frame and the mode probe settle
-    s1="$(cpu_pct "$p" "$WIN")"; s2="$(cpu_pct "$p" "$WIN")"; s3="$(cpu_pct "$p" "$WIN")"
+    s1="$(cpu_pct "$p" "$WIN")"; echo "srvtr:      [$tag] sample 1: $s1% of a core ($(host_cond))" >&2
+    s2="$(cpu_pct "$p" "$WIN")"; echo "srvtr:      [$tag] sample 2: $s2% of a core ($(host_cond))" >&2
+    s3="$(cpu_pct "$p" "$WIN")"; echo "srvtr:      [$tag] sample 3: $s3% of a core ($(host_cond))" >&2
     stop_wsysd "$p"
     echo "$s1 $s2 $s3 $(median3 "$s1" "$s2" "$s3")"
 }
 
+# THE BASELINE IS TAKEN ONCE, AND EVERY DELTA BELOW IS AGAINST IT. That is a
+# KNOWN SYSTEMATIC ERROR and it is recorded here rather than left to be
+# rediscovered: the last arm is measured about twelve minutes after this one,
+# and THE DELTA DOES NOT CANCEL HOST DRIFT because its two terms are minutes
+# apart. Seen directly, in one run's own per-sample conditions: this baseline
+# was sampled at loadavg 0.81-1.31 and the driven arms that were differenced
+# against it at 1.68-2.38, and every delta came out 0.06-0.08 points higher
+# than the same arms measured in a run whose load did not drift (0.17 -> 0.25
+# at 100 ops/s).
+#
+# Interleaving a fresh flag-off baseline with each arm would remove it, at the
+# cost of doubling the wall time of the whole section. Until that is done, a
+# rising loadavg across the samples printed below means the deltas are an
+# UPPER BOUND, and the verdict at the end of this file says when that happened.
 read -r O1 O2 O3 OMED <<<"$(measure_idle idle_off)"
 note "idle CPU, HAMWSYS_SERVER unset: samples $O1% $O2% $O3% -> median $OMED% of a core"
+note "the baseline above is differenced against EVERY arm below, the last of them about twelve minutes from now -- watch the per-sample loadavg for drift"
 
 # ==================================================================
 # B. THE TRANSPORT, WITH THE FLAG SET.
@@ -376,16 +444,92 @@ fi
 read -r N1 N2 N3 NMED <<<"$(measure_idle idle_on HAMWSYS_SERVER=1)"
 note "idle CPU, HAMWSYS_SERVER=1:    samples $N1% $N2% $N3% -> median $NMED% of a core"
 DELTA="$(awk -v a="$OMED" -v b="$NMED" 'BEGIN{printf "%.2f", b-a}')"
-note "idle delta attributable to the server: $DELTA% of a core (budget 0.12%)"
-within_budget "$DELTA" 0.12 "idle"
+# THIS ARM HAS NO CLIENT, so it has neither a wake nor a message and neither
+# term of the budget below applies to it. What it asserts is narrower and worth
+# asserting on its own: that merely ENABLING the server -- binding the socket
+# and carrying the extra fd in the wait set -- costs nothing when nobody has
+# dialled it. The allowance is a noise floor, about five instrument ticks, and
+# not a derived figure; the sub-quantum rule keeps it from being read as a pass
+# it did not earn.
+IDLE_BUDGET="${SRVTR_IDLE_BUDGET:-0.12}"
+note "idle delta attributable to the server: $DELTA% of a core (allowance $IDLE_BUDGET%, no client connected)"
+within_budget "$DELTA" "$IDLE_BUDGET" "idle"
+
+# ==================================================================
+# THE BUDGET, RE-DERIVED -- and why it is two numbers and not one
+# ==================================================================
+# THE OLD BUDGET WAS THE WRONG SHAPE, and that is a stronger statement than
+# "it was too tight". It came from the census as `ops/s x per-op`: at 6.2 us
+# sequential, 192 x 6.2 us = 0.12% of a core, and likewise 0.38% and 1.27%.
+# Every figure in it is a straight multiple of the rate -- 0.12/192, 0.38/618
+# and 1.27/2050 are all 6.2e-4 -- SO THE BUDGET PASSES THROUGH THE ORIGIN. It
+# asserts that mediating nothing costs nothing.
+#
+# Mediation does not work that way. Stage 1 measured the cost at three rates
+# and found a term that does not depend on the rate at all: THE WAKE. The load
+# paces in 10 ms slices, so every arm at or above 100 ops/s wakes wsysd the
+# same 100 times a second, and a wake is a whole loop iteration. At the idle
+# rate the wake is most of the bill, so the 192 ops/s arm could not pass
+# however cheap messages became.
+#
+# STAGE 1 LEFT THAT ARM RED ON PURPOSE rather than widen it, and said so in
+# those words, because widening it would have hidden a real question: the
+# synthetic load ADDS a wake, where a real routed mutation REPLACES a
+# shared-memory write that already poked the wake channel. Add-a-wake against
+# move-a-wake could not be settled until a real op was routed.
+#
+# STAGE 2 ROUTED THE MUTATIONS AND SETTLED IT, and the answer was better than
+# move-a-wake: the same real dragging client cost a median 99.80% of a core
+# unrouted and 53.30% routed -- 46.5 POINTS OF A CORE CHEAPER, at 43% more
+# frames -- because srv_service drains every queued message in one iteration
+# where the unrouted path woke the loop per publish. MEDIATION COALESCES BY
+# CONSTRUCTION.
+#
+# So the fixed term this synthetic NOP measures is an UPPER BOUND that real
+# traffic does not pay. That is the honest reason the 192 arm may now pass:
+# not that the budget was widened to fit, but that the question the red arm
+# was holding open has been answered, and the budget is now written in the
+# shape the cost actually has:
+#
+#     budget(ops) = FIXED_BUDGET + MARGINAL_BUDGET x ops
+#
+# BOTH TERMS ARE ASSERTED SEPARATELY below, so a dearer wake cannot be hidden
+# by cheaper messages or the other way round -- which a single percentage per
+# rate could not distinguish, and which is the failure the old shape allowed.
+#
+# The two numbers are overridable so that this gate's own ability to fail can
+# be demonstrated on real measured data rather than argued.
+FIXED_BUDGET="${SRVTR_FIXED_BUDGET:-0.34}"       # % of a core, rate-independent
+MARGINAL_BUDGET="${SRVTR_MARGINAL_BUDGET:-1.80}" # us of CPU per routed message
+
+budget_for(){ # budget_for <ops/s> -> % of a core
+    # m us/message is m/10000 % of a core per op/s: 1 op/s costing m us of CPU
+    # per second is m/1e6 of a core, and a percent is another factor of 100.
+    awk -v f="$FIXED_BUDGET" -v m="$MARGINAL_BUDGET" -v o="$1" \
+        'BEGIN{printf "%.2f", f + m*o/10000.0}'
+}
+note "budget: ${FIXED_BUDGET}% of a core fixed + ${MARGINAL_BUDGET} us per message"
+note "        => $(budget_for 100)% at 100/s, $(budget_for 192)% at 192/s, $(budget_for 618)% at 618/s, $(budget_for 2050)% at 2050/s"
 
 # Driven: the census rate for an idle desktop is 192 ops/s; a mouse-paced drag
 # is 618/s; the worst measured load is 2050/s. Drive each and read the SERVER's
 # CPU, which is where mediation is paid. The client's own cost is not the
 # question -- the client already pays for the write it makes today.
+#
+# 100 ops/s IS ADDED AND IT IS NOT A FOURTH DATA POINT FOR ITS OWN SAKE. The
+# pacer emits at least one message per 10 ms slice at any rate >= 100/s, so
+# 100/s is the CHEAPEST LOAD THAT STILL WAKES wsysd 100 times a second: its
+# cost is the fixed term plus 100 x marginal, and 100 x 1.35 us is 0.0135% of
+# a core -- half an instrument tick. It therefore MEASURES THE WAKE ALMOST
+# DIRECTLY instead of extrapolating it back from 192, which matters because
+# the intercept of a fit through three noisy points is the worst-determined
+# thing in it: across the three runs on record the marginal term held at
+# 1.076 / 1.350 / 1.346 us while the fitted intercept wandered 0.25 / 0.19 /
+# 0.12, the two trading off against each other exactly as a fit's slope and
+# intercept do.
 drive(){ # drive <ops/s> <budget%> <label>
     local ops="$1" budget="$2" label="$3"
-    local p s1 s2 s3 med d dp i out=""
+    local p s1 s2 s3 med d dp i out="" one=""
     p="$(start_wsysd "drive$ops" HAMWSYS_SERVER=1)"
     sleep 2
     for i in 1 2 3; do
@@ -393,7 +537,13 @@ drive(){ # drive <ops/s> <budget%> <label>
             >>"$W/sustain.$ops.out" 2>>"$W/sustain.$ops.err" &
         dp=$!; reap_add "$dp"
         sleep 1
-        out="$out $(cpu_pct "$p" "$WIN")"
+        one="$(cpu_pct "$p" "$WIN")"
+        out="$out $one"
+        # THE CONDITIONS WITH THE SAMPLE, not after all three and not in a
+        # separate log: a reader must be able to see WHICH sample was taken
+        # under what, because that is how the 0.27 / 0.22 / 0.17 spread on this
+        # very assertion was finally explained.
+        echo "srvtr:      [$label] sample $i: $one% of a core ($(host_cond))"
         wait "$dp" 2>/dev/null
     done
     read -r s1 s2 s3 <<<"$out"
@@ -406,31 +556,104 @@ drive(){ # drive <ops/s> <budget%> <label>
     DRIVE_DELTA="$d"                          # read by the decomposition below
 }
 DRIVE_DELTA=0
-drive 192  0.12 "idle-rate traffic";     D192="$DRIVE_DELTA"
-drive 618  0.38 "mouse-paced drag";      D618="$DRIVE_DELTA"
-drive 2050 1.27 "worst measured load";   D2050="$DRIVE_DELTA"
+drive 100  "$(budget_for 100)"  "wake-only traffic";   D100="$DRIVE_DELTA"
+drive 192  "$(budget_for 192)"  "idle-rate traffic";   D192="$DRIVE_DELTA"
+drive 618  "$(budget_for 618)"  "mouse-paced drag";    D618="$DRIVE_DELTA"
+drive 2050 "$(budget_for 2050)" "worst measured load"; D2050="$DRIVE_DELTA"
 
 # ==================================================================
 # E(iii). WHERE THE COST ACTUALLY IS -- fixed against marginal.
 # ==================================================================
-# Three rates over a 10x span decompose the cost into a per-message part and a
+# Four rates over a 20x span decompose the cost into a per-message part and a
 # part that does not depend on the rate at all. That decomposition is the
 # whole finding: the design's budget was ops/s times a per-op cost, which has
 # no fixed term in it, so if the fixed term is large the budget is wrong in a
 # way no amount of making messages cheaper can fix.
 #
-# The load generator paces in 10 ms slices, so ALL THREE ARMS WAKE THE
-# COMPOSITOR THE SAME NUMBER OF TIMES -- 100 a second. Anything that scales
-# with the rate is the message; anything that does not is the wake.
-note "cost decomposition, from the three rates:"
-awk -v a="$D192" -v b="$D618" -v c="$D2050" -v q="$QUANT" 'BEGIN{
-    m = (c - a) / (2050 - 192);              # % of a core per op/s
-    fixed = a - m * 192;
+# The load generator paces in 10 ms slices, so EVERY ARM WAKES THE COMPOSITOR
+# THE SAME NUMBER OF TIMES -- 100 a second. Anything that scales with the rate
+# is the message; anything that does not is the wake.
+#
+# The slope is taken over 100 -> 2050, the longest lever available, and the
+# fixed term is then read at the 100 ops/s arm rather than extrapolated back
+# from 192: a shorter extrapolation is a smaller error, and at 100 ops/s the
+# marginal part is half an instrument tick.
+note "cost decomposition, from the four rates:"
+DECOMP="$(awk -v z="$D100" -v a="$D192" -v b="$D618" -v c="$D2050" -v q="$QUANT" 'BEGIN{
+    m = (c - z) / (2050 - 100);              # % of a core per op/s
+    fixed = z - m * 100;
     printf "srvtr: ....   marginal: %.3f us of CPU per message\n", m*10000;
     printf "srvtr: ....   fixed:    %.2f%% of a core, independent of the rate\n", fixed;
-    printf "srvtr: ....   (samples %.2f%% at 192, %.2f%% at 618, %.2f%% at 2050 ops/s;\n", a, b, c;
+    printf "srvtr: ....   (samples %.2f%% at 100, %.2f%% at 192, %.2f%% at 618, %.2f%% at 2050 ops/s;\n", z, a, b, c;
     printf "srvtr: ....    instrument resolution %.3f%%)\n", q;
+    printf "MEASURED %.4f %.4f\n", m*10000, fixed;
+}')"
+printf '%s\n' "$DECOMP" | grep -v '^MEASURED '
+MARGINAL_US="$(printf '%s\n' "$DECOMP" | awk '/^MEASURED /{print $2}')"
+FIXED_PCT="$(printf '%s\n' "$DECOMP" | awk '/^MEASURED /{print $3}')"
+
+# AND NOW ASSERT BOTH TERMS, which is the point of decomposing at all. A single
+# percentage per rate cannot tell "the wake got dearer" from "messages got
+# dearer", and those have different fixes: the wake is a loop iteration and the
+# message is the transport. Either one regressing turns this gate red on its
+# own.
+#
+# THE INSTRUMENT MUST BE ABLE TO SEE THE TERM IT IS JUDGING. The fixed term is
+# a difference of medians and the marginal term is a slope over a difference of
+# medians; a value under one tick is not a measurement, and is reported as
+# unresolvable rather than as a pass -- the same rule the per-rate check uses.
+if awk -v x="$FIXED_PCT" -v y="$FIXED_BUDGET" 'BEGIN{exit !(x <= y)}'; then
+    if awk -v x="$FIXED_PCT" -v q="$QUANT" 'BEGIN{exit !(x < q)}'; then
+        ok "the fixed term is below this instrument's resolution ($QUANT% of a core); it is under the $FIXED_BUDGET% allowance, and that is all that can be claimed"
+    else
+        ok "the WAKE costs $FIXED_PCT% of a core, within the $FIXED_BUDGET% fixed allowance"
+    fi
+else
+    bad "the WAKE costs $FIXED_PCT% of a core, over the $FIXED_BUDGET% fixed allowance -- a loop iteration got dearer, and no cheaper message reaches this"
+fi
+if awk -v x="$MARGINAL_US" -v y="$MARGINAL_BUDGET" 'BEGIN{exit !(x <= y)}'; then
+    ok "a routed MESSAGE costs $MARGINAL_US us of CPU, within the $MARGINAL_BUDGET us marginal allowance"
+else
+    bad "a routed MESSAGE costs $MARGINAL_US us of CPU, over the $MARGINAL_BUDGET us marginal allowance -- the transport got dearer per message"
+fi
+
+# WHAT WOULD IT TAKE TO TURN THIS RED? Printed, not asserted, because a budget
+# nothing can exceed is not a budget and the reader is entitled to check that
+# this one can be exceeded without running the experiment.
+awk -v f="$FIXED_PCT" -v fb="$FIXED_BUDGET" -v m="$MARGINAL_US" -v mb="$MARGINAL_BUDGET" 'BEGIN{
+    printf "srvtr: ....   headroom: the wake may grow %.2f%% of a core (x%.2f) ", fb-f, (f>0? fb/f : 0);
+    printf "and a message %.3f us (x%.2f) before this gate goes red\n", mb-m, (m>0? mb/m : 0);
 }'
+
+# ==================================================================
+# ARE THESE PERCENTAGES ATTRIBUTABLE AT ALL?
+# ==================================================================
+# This is printed LAST and deliberately loudly, because the failure it guards
+# against is a run that looks authoritative and is not. On this host the same
+# assertion has read 0.27%, 0.22% and 0.17% purely with how busy the machine
+# was, so a number taken beside another agent's compositor says more about the
+# neighbours than about the mediator. It is NOT a pass/fail arm: the
+# correctness arms above are unaffected by load and stay meaningful either way.
+if [ -s "$W/hostcond" ]; then
+    # THE VERDICT IS ABOUT CONTENTION, NOT ABOUT COMPANY. What corrupts these
+    # numbers is other processes taking the CPU, and that is what loadavg
+    # measures. A foreign compositor merely BEING bound does not: this gate
+    # reads wsysd's OWN /proc/<pid>/stat, so an idle neighbour -- and leaked
+    # idle wsysd processes from other sessions do accumulate on this box, seen
+    # at 0.0-0.3% of a core and hours old -- cannot inflate it. A BUSY
+    # neighbour can, and shows up in the loadavg. So the srv count is reported
+    # as context and the loadavg decides.
+    awk '{ if ($1+0 > maxl) maxl=$1+0; if ($2+0 > maxs) maxs=$2+0; n++ }
+         END{
+           printf "srvtr: .... host during the CPU samples: %d samples, peak loadavg %.2f, peak bound srv names %d (ours is one of them)\n", n, maxl, maxs;
+           if (maxl > 2.5)
+               printf "srvtr: .... NOT ATTRIBUTABLE: peak loadavg %.2f. On this host the same assertion has read 0.27%% contended against 0.17%% quiet -- RE-TAKE THESE QUIET before quoting them.\n", maxl;
+           else if (maxl > 2.0)
+               printf "srvtr: .... SUSPECT: peak loadavg %.2f exceeded 2.0. Treat the percentages as an UPPER BOUND and re-take them quieter.\n", maxl;
+           else
+               printf "srvtr: .... ATTRIBUTABLE: peak loadavg %.2f, under 2.0 throughout.\n", maxl;
+         }' "$W/hostcond"
+fi
 
 echo "srvtr: $pass passed, $fail failed"
 [ "$fail" = 0 ]

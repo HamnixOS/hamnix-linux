@@ -44,6 +44,15 @@ not a GPU on a machine this system booted. `docs/REAL_HARDWARE.md`,
 `docs/BOOT.md` and `docs/manual/` record real-hardware boots of **Hamnix 1.0's
 own kernel** and were copied wholesale; each now carries a banner saying so.
 
+**BEFORE YOU RUN A SINGLE GATE, BOOTSTRAP THE COMPILER.** A fresh worktree has
+no `adder` submodule and no `build/cutover/host_ac.elf`, and every
+`.ad`-building gate then fails instantly with "no host_ac.elf" — which looks
+like 40 broken gates and is one missing prerequisite. `git submodule update
+--init`, then `. scripts/_adder_cc.sh && adder_cc_bootstrap`; about two
+minutes. The full inventory of `tests/linux/` — which gates need a VM, which
+want the owner's display, and which of them lie in their summary line — is
+under **THE GATE INVENTORY** at the end of this section.
+
 ### THE WINDOW SYSTEM IS BECOMING A FILE SERVER — where that stands
 
 Four passes of it are in the tree (design, transport, mutations, caller
@@ -89,6 +98,47 @@ mis-read:
   46.5% of a core cheaper at 43% more frames — which is the opposite of what the
   plan predicted, so treat the design document's *predictions* as superseded by
   its *measurements* wherever the two appear together.
+* **THE TRANSPORT BUDGET IS SETTLED, AND THE RED ARM WAS NOT WIDENED AWAY.**
+  `wsys_srv_transport.sh` is **17 PASS / 0 FAIL**. Stage 1 deliberately left
+  one arm red — *"widening the budget to fit would have hidden the question"* —
+  and the question was whether the synthetic load over-attributes, because it
+  **adds** a wake where a real routed mutation **replaces** one. Stage 2
+  answered it (routing a real drag was 46.5 points of a core *cheaper*, and
+  mediation coalesces by construction), so the synthetic fixed term is an
+  **upper bound real traffic does not pay**. Only then was the budget
+  re-derived — and it was the **shape** that was wrong, not just the value:
+  the old figures were `ops/s × per-op` (0.12/192, 0.38/618, 1.27/2050 are all
+  6.2e-4), so **the budget passed through the origin** while the real cost has
+  a rate-independent *wake* in it. It is now **0.34% of a core + 1.80 µs per
+  message**, with both terms asserted separately so a dearer wake cannot hide
+  behind cheaper messages. **This is not a blanket loosening: at the worst
+  measured load the budget went 1.27% → 0.71%.** Measured on a quiet host
+  (loadavg 1.0–1.9), three 40 s samples per arm, every sample printed:
+  **0.17%** at 100 ops/s, **0.19%** at 192, **0.22%** at 618, **0.42%** at
+  2050 → **fixed 0.157%, marginal 1.282 µs**. A **100 ops/s** arm was added
+  and it is the methodological point: the pacer emits ≥1 message per 10 ms
+  slice at any rate ≥ 100/s, so 100/s is the cheapest load that still wakes
+  `wsysd` 100 times a second and therefore **measures the wake almost directly
+  instead of extrapolating an intercept** — which matters because across the
+  runs on record the marginal term held at 1.076/1.350/1.346/1.282 µs while
+  the fitted intercept wandered 0.25/0.19/0.12/0.157. **The old 0.12% was
+  never testable**: one tick is 0.025% of a core, the delta is a difference of
+  two medians, and its run-to-run spread is ±0.05–0.08% — comparable to the
+  whole budget.
+* **AND THE BIGGEST SINGLE LESSON OF THAT PASS IS ABOUT THE MACHINE, NOT THE
+  MEDIATOR.** The same assertion has read **0.27%** (stage 1, contended),
+  **0.22%** (the sweep, contended) and **0.17–0.19%** at loadavg ~1.5 — two
+  agents measuring independently and agreeing. **About a third of the apparent
+  overage was other agents on this box.** Three sessions run gates here at
+  once, so a percentage quoted without the load it was taken at is not
+  reproducible. `wsys_srv_transport.sh` now prints the loadavg **and the count
+  of bound compositors** beside every CPU sample and ends with an explicit
+  `ATTRIBUTABLE` / `SUSPECT` / `NOT ATTRIBUTABLE` verdict on its own numbers.
+  The budget's *allowances* are set to envelope every run on record including
+  the contended ones, so they hold on a busy machine; **the measured
+  coefficients are what need a quiet host, and the gate now says so itself.**
+  Correctness arms — transport, flag-unset refusal, byte-identical `windows`,
+  zero backbuffer writes — are load-insensitive and stay meaningful either way.
 * Not routed yet: `wid/scene`, reads, the enumeration policy, and the version
   bump.
 
@@ -4432,6 +4482,100 @@ tests/linux/*.sh, tests/linux/*_probe.ad
 Host packages this needs, beyond the original list: `mmdebstrap`,
 `dosfstools`, `e2fsprogs`, `gdisk`, `parted`, `mtools`, `systemd-boot-efi`,
 `ovmf`, `socat`.
+
+### THE GATE INVENTORY — what is in `tests/linux/`, and what it takes to run it
+
+Written down here for the first time. A suite sweep ran 50 gates and produced
+this; none of it existed in the tree. The counts below were re-derived at
+`9e893e58` and the classification is mechanical, so it can be re-taken:
+
+```
+tests/linux/*.sh                                                    128
+  helpers, not gates                                                  4
+  need a VM (invoke qemu-system / hamlinux_image.sh / hamlinux_disk.sh)  41
+  display-blocked (touch /dev/dri/card0, /dev/fb0, DISPLAY=:0, xdotool) 10
+  run offscreen                                                       73
+```
+
+**THE FIRST THING YOU WILL HIT, AND IT IS NOT IN ANY DOCUMENT.** A fresh
+worktree has no checked-out `adder` submodule and no
+`build/cutover/host_ac.elf`, so **every `.ad`-building gate fails instantly
+with "no host_ac.elf"** — which reads like a broken gate and is a missing
+prerequisite. Two minutes fixes it:
+
+```
+git submodule update --init
+. scripts/_adder_cc.sh && adder_cc_bootstrap
+```
+
+**The 4 helpers are not gates and must not be counted as passes or failures:**
+`reap.sh`, `private_ns.sh` and `hamnix_x11session.sh` are *sourced* by other
+gates; `cpuprobe.sh` takes a `<pid>` argument and prints usage without one.
+A runner that globs `*.sh` will "run" all four and learn nothing.
+
+**The 41 VM gates are SLOW, NOT BLOCKED.** KVM is present on this host and
+they do run here: `tests/linux/pipelines.sh` built an image, booted it, and
+returned **13 PASS / 0 FAIL in 355 s**. Budget 10–25 minutes each and do not
+mistake the wait for a failure.
+
+**The 10 display-blocked gates** — these want the owner's real display, and
+the owner's desktop is up, so they are the ones to leave alone:
+`de_fps_gpu`, `de_fps_mate`, `hamnix_xdiag`, `runsweep_jail`,
+`steam_consent_dialog`, `steam_look`, `steam_probe`, `wsyswl_shared_fate`,
+`wsyswl_stall`, `x11_record_trace_selftest`.
+
+Two more, `steam_scroll_why.sh` and `xsnarf_ondevice.sh`, touch the display
+*and* boot a VM; they are counted in the 41 above, not the 10.
+
+**MOST `wsyswl_*` GATES ARE NOT DISPLAY-BLOCKED, despite the name.** They
+start a nested Xwayland on a private display (`:71`–`:74`, `:82`–`:87`), and
+`wsyswl_ceiling`, `wsyswl_conn_ceiling`, `wsyswl_rootless`,
+`wsyswl_two_browsers` and `wsyswl_wheel` all run offscreen. Only
+`wsyswl_shared_fate` and `wsyswl_stall` want the real one. Skipping the whole
+prefix on the strength of the name costs five working gates.
+
+#### Four standing facts about gates — none new, none previously written down
+
+* **`input_probe.sh` prints `ALL PASS` two lines above its own `FAIL`.**
+  Pre-existing, and confirmed unchanged at the control `b87174c3`. The two
+  lines have different authors: the gate `cat`s `reader.log`, and the reader
+  (`input_reader.ad`, which prints `ALL PASS` when its own checks pass) is
+  reporting on the pointer ring. The gate's *own* assertion — that `KEY_A`
+  arrived as ASCII 97 in the client's log — runs afterwards and is what
+  prints `FAIL`. **The `ALL PASS` is the inner probe's verdict, not the
+  gate's.** Read the exit status, not the loudest line.
+* **`wsyswl_two_browsers.sh` is 12 PASS / 11 FAIL, and it is THE HOST, NOT
+  THE TREE.** `firefox-esr` aborts at startup on a GTK icon assertion,
+  byte-identically at the control. Nothing in this repository will fix it.
+* **`x11_geom_probe.sh` flakes under host load** — Chromium dies with a trace
+  trap. It has **no retry**, and passed 9/0 on a re-run. A single red from it
+  is not evidence.
+* **The `wsys_srv_*` gates used to share their scratch directory** and now
+  default to a per-run `mktemp -d`; `SRV_WORK` still pins it. Two of them,
+  `wsys_srv_readlat.sh` and `wsys_enum_policy.sh`, defaulted to the **same**
+  path and clobbered each other with only one agent running.
+* **AND THE SAME MISTAKE WAS IN AN ASSERTION, WHERE IT WAS WORSE.**
+  `wsys_srv_transport.sh` asked whether a server socket was bound by grepping
+  `/proc/net/unix` for `hamnix-wsys/.*/srv` — every `wsysd` on the host, not
+  its own. The abstract name is deliberately per-segment
+  (`hamnix-wsys/<st_dev>.<st_ino>/srv`) precisely so a gate's private window
+  system cannot be confused with the owner's desktop, and the gate discarded
+  that. **It fails in both directions and one of them is silent**: the
+  flag-unset arm goes red against a correct tree, and the flag-set arm goes
+  **green on another agent's socket**, certifying a transport this run never
+  bound. Found by running it while another agent ran the same gate — three
+  foreign `/srv` names were bound while this run's segment had none. Both
+  checks now derive the name from their own segment with `stat -c '%d.%i'`.
+
+**MEASURE ON A QUIET HOST.** The sweep found a gate failing purely because
+another agent was running an 8-way LLVM build; the same gate gave 7 PASS /
+0 FAIL solo at load 0.65. Gate any timing run on `loadavg < 2.0`.
+
+**AND BEWARE THE RUNNER, NOT ONLY THE GATES.** The sweep's own runner let the
+gates inherit stdin from the list file it was reading, and **they ate 21 of 33
+entries while it reported success** — 0 failures because 0 gates ran. Redirect
+stdin from `/dev/null` for every gate you launch, and check that the number of
+gates that reported is the number you asked for.
 
 ---
 
