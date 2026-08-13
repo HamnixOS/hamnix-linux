@@ -78,6 +78,13 @@ windows to an ordinary client and the full list only to a holder of the
 taskbar capability. That is the first thing the boundary buys that no amount
 of care in the current design could.
 
+> **The taskbar-capability half of that paragraph turned out to be false, and
+> stage 4 says why: nothing in `SO_PEERCRED` distinguishes the panel from any
+> other DE application.** The rule actually landed is *the full list to the
+> host owner and to any caller that owns a window*. See **What stage 4
+> measured** below; this paragraph is left as written because the gate was
+> written against it.
+
 The same absence produced the same-uid pixel scrape and `win_alloc` racing two
 clients onto one row. One mediator closes all three.
 
@@ -94,9 +101,12 @@ Order of work, each with its own gate, all offscreen:
 2. Mutations first (`ctl`, `wid/ctl`, `wid/scene`) — where the privilege
    questions live.
 3. Reads, including the enumeration policy that turns the red gate green.
+   **Done — and it needed a second process; see stage 4 below.**
 4. Remove the in-process path and bump `WSYS_VERSION`. **The bump is the last
    step, not the first**: until the old path is gone the bump would refuse
-   clients for a boundary that is not yet enforced.
+   clients for a boundary that is not yet enforced. **Still not done, and it
+   is the whole of the enforcement: every gate's red arm above is a client
+   mapping the segment past a live mediator.**
 
 ## What stage 1 measured, and the one place this plan was wrong
 
@@ -307,6 +317,132 @@ Not routed: `wid/scene` (per-open staging state; reopening starts a new frame,
 so it needs handle tracking across open/write/close — and 1 write per 12 s of
 a drag against 9790 for `wid/ctl`). No reads, no enumeration policy, no
 version bump.
+
+## What stage 4 measured — the reads, and the policy that is weaker than this document promised
+
+`tests/linux/wsys_enum_policy.sh`, **9 passed, 0 failed** — the gate that had
+been red since it was written. `tests/linux/wsys_srv_readlat.sh`, **7 passed,
+0 failed**. `WSYS_VERSION` stays 8.
+
+**THE 851 µs TAIL IS OFF THE READ PATH, AND IT COST A SECOND PROCESS.** wsysd
+forks a read server at `listen()` on a second abstract name (`.../rd`). It
+inherits the MAP_SHARED segment, never rasterizes, and blocks in
+`epoll_wait(-1)`; it answers `READ`, `HELLO` and `STAT` and refuses everything
+else with `-ENOSYS`, because two writers to the window table would give up the
+same-iteration ordering stage 2 bought. It dies with its parent
+(`PR_SET_PDEATHSIG` plus a `getppid()` recheck) and closes every inherited
+descriptor, so no stray reference keeps a DRM file description alive.
+
+Both arms in **one run, one compositor, one drag**, because a number from
+another day on another machine is not a control:
+
+| arm | p50 | p90 | max |
+|---|---|---|---|
+| frame loop (`PING` on `.../srv`) | 1640 µs | 1818 µs | **1946 µs** |
+| read server (`READ` on `.../rd`) | 12 µs | 32 µs | **79 µs** |
+
+Three runs each, medians of the per-run maxima. The frame-loop arm is a
+**control and the gate fails if it is fast** — a quick one would mean the
+compositor was idle and the read arm's speed would be unattributable. This
+machine's frame loop is slower than the one stage 1 measured (1946 against
+851), which makes the comparison more conservative, not less.
+
+**The extra process costs nothing when nobody is asking.** `/proc/<pid>/stat`,
+three 20 s windows each: the read server accumulated **0 ticks** at idle and 0
+under a full drag — under the 0.05% of a core the instrument can resolve —
+while wsysd went 0.35% → 84.35%. It is blocked in `epoll_wait(-1)` and a
+process that is not scheduled costs nothing.
+
+**Regressions checked, not assumed.** `wsys_srv_transport.sh` **13/1** — the
+same one arm stage 1 left red on purpose. `wsys_srv_identity.sh` **15/0**.
+`wsys_uidgate.sh` PASS, `wsys_wctl.sh` **6/0**. `wsys_srv_mutate.sh` is
+**7/0** on this branch but flakes on two arms on this machine — the routed
+write's `w1 == w0 + 1` assertion races the drag client's own ~800 writes/s,
+and the frame-count arm asserts `routed >= unrouted` on counts that are now
+statistically equal (543 vs 544, on a machine where stage 2 measured 139 vs
+97). **Said honestly: four runs on this branch gave 7/0, 7/0, 6/1 (the counter
+arm) and 6/1 (the frame arm); two runs of binaries rebuilt from stage 3a gave
+7/0 and 7/0. That is not enough to call the flake pre-existing** — it is
+enough to say both mechanisms are load-dependent comparisons that do not
+involve the read path, since stage 4 adds nothing to the mutation socket and
+moves reads into a different process entirely.
+
+**The one-time dial is reported apart rather than averaged away.** The first
+routed read in a process pays connect + version handshake: 742 µs in one run,
+~100 in the others. It is printed on its own line and excluded from the
+percentiles, because folding a once-per-process cost into a per-read
+percentile flatters or damns the wrong thing depending on the sample count.
+
+**THE ENUMERATION POLICY IS NOT THE ONE THIS DOCUMENT PROMISED, and the
+difference is the finding.** Above, this file says enumeration "can return the
+caller's own windows to an ordinary client and the full list only to a holder
+of the taskbar capability". **It cannot, on any fact `SO_PEERCRED` can see.**
+The panel is spawned through `/bin/hamsh /etc/rc.de-user /bin/hampanelscene`
+and so is every DE application; that rc ends in `setuid 1001`. The taskbar and
+a text editor arrive at the socket with the same uid, the same gid, and an
+ancestry that meets at the same process. A rule that claimed to separate them
+would be reading something the client chose — an argv, an environment
+variable, a name — and that is advice, not a boundary, which is the whole
+finding of stage 3a.
+
+So the line is drawn where an unforgeable fact actually falls:
+
+> **The full window list goes to the host owner and to any caller that already
+> owns a window. Everyone else gets an EMPTY list — not an error, because "no
+> windows" withholds the existence of the window system and `EPERM` advertises
+> it.**
+
+Permits: the compositor, the panel, every application, every toolkit task.
+The taskbar keeps working with **no change to how it is spawned and nothing
+granted to it that is not equally granted to every other program with a window
+on the screen** — which is the point of stating the rule this way rather than
+special-casing it. Denies: every process with no window — a script, a `cat`, a
+background daemon, a compromised non-graphical service.
+
+**A person may reasonably call that too weak**, and they would be pointing at
+a real gap: any app on the desktop still learns every window's title. The
+mechanism that closes it is a **dedicated group on the panel's spawn** —
+peercred carries the gid, `/etc/group` records the grant, nothing is invented
+— and that is a change to how the distro starts the panel, not a change to
+this server. **It is not made here.**
+
+The gate is red-unrouted / green-routed, in the shape stage 3a established:
+
+| | result |
+|---|---|
+| unrouted, uid 1002, owns nothing | `2 VICTIM-ENUM-TITLE` — **it works, and it must** |
+| routed, same process, same uid, same file | empty; `wsrvtrace: enum caller uid=1002 pid=230934 -> hostowner=0 tier=EMPTY` |
+
+And the arm that keeps it honest, because the cheap fake is to answer on uid
+alone (which passes a red/green pair **and breaks the taskbar**): a **uid-1002
+process that owns a window** gets the full list through the same server that
+just refused a window-less uid-1002 process. **Negative control:** deleting the
+one `srv_as_caller(uid, pid)` line from `srd_enum_tier` takes the file from
+9/0 to **6 passed, 3 failed**, including the central arm; the red arm stays
+green, correctly, because it never touches the server.
+
+Routed: `windows`, `screen`, `pool`. `screen` and `pool` carry **no policy on
+purpose** — neither names another client, and withholding them would break
+every client's layout and blind the only diagnostic an exhausted backbuffer
+pool has. Not routed: `self` (it already answers only about the caller),
+`ctl` reads, the event rings, and `wid/scene`.
+
+**THE ANCESTRY RULE IS LEFT AS IT IS, AND HERE IS THE ARGUMENT.** Stage 3a
+priced it: every application the desktop spawns may retitle, move, raise or
+destroy any window owned by the compositor, the panel, or any of its own
+ancestors, regardless of uid, because `owns_wid()` walks pids and never looks
+at a uid. Tightening it to an exact pid match breaks every toolkit-spawned
+task, so that is not on the table. The recommendation is **not to narrow the
+walk but to stop the walk being the only question asked**: the window row
+already stores the pid it was stamped against, and `newwindow` is already
+routed and already blocking, so the server could record the connection that
+allocated a row and require a mutation to arrive **on that connection** — a
+descendant would then inherit the right to drive the window it was spawned
+into only if the toolkit hands it the connection, which is exactly the moment
+the toolkit means to. That is a change to `newwindow`'s contract and to
+hamUI's spawn path, it needs its own red gate, and **it is not made here**.
+Until it is, the ancestry rule stands, inherited rather than widened, and
+written down rather than assumed.
 
 ## Budget to hold it to
 
