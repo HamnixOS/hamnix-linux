@@ -169,6 +169,13 @@ fi
 # EXEMPT from private_ns.sh for that reason. That is a gate of its own and it
 # is the next piece of work, not a line to bolt on here.
 #
+# THAT GATE NOW EXISTS: tests/linux/wsys_srv_identity.sh, 15 passed 0 failed.
+# It runs the same attack from uid 1002 against uid 1001's window twice --
+# unrouted, where it SUCCEEDS, and routed, where the mediator refuses it -- and
+# reads both permission answers out of the server from inside srv_as_caller().
+# The skip below is still correct and still prints, because THIS file cannot
+# make that assertion; it is no longer the whole story.
+#
 # What is asserted instead is the identity the server would decide on, read
 # back from the server itself. If the caller is the host owner, an acceptance
 # is CORRECT and this says so rather than scoring a false PASS; the real
@@ -177,7 +184,7 @@ SEGUID="$(stat -c %u "$HAMWSYS" 2>/dev/null || echo -1)"
 MYUID="$(id -u)"
 note "the segment is owned by uid $SEGUID; this gate runs as uid $MYUID"
 if [ "$SEGUID" = "$MYUID" ] || [ "$MYUID" = 0 ]; then
-    note "SKIPPED, AND NOT SILENTLY: the caller IS the host owner, so devwsys's own rule permits it to write any window and a refusal here would be the mediator being STRICTER than the path it replaces. Proving the caller identity is used needs a second uid -- see the 'unshare -U --map-users' recipe in tests/linux/wsys_bypass.sh. Until that gate exists, THE CALLER-IDENTITY PROPERTY IS UNPROVEN, and no PASS in this file should be read as covering it."
+    note "SKIPPED, AND NOT SILENTLY: the caller IS the host owner, so devwsys's own rule permits it to write any window and a refusal here would be the mediator being STRICTER than the path it replaces. Proving the caller identity is used needs a second uid. NO PASS IN THIS FILE COVERS IT -- tests/linux/wsys_srv_identity.sh does, with unshare -U --map-users, and is the file to run and to quote for that property."
 else
     TITLE_BEFORE="$("$BIN/cat" /dev/wsys/windows 2>/dev/null | grep "^${VWID} " | head -1)"
     HAMWSYS_SERVER=1 "$BIN/wsys_srv_probe" mutate "$VWID" >"$W/attack.out" 2>&1
