@@ -125,6 +125,20 @@ mis-read:
   never testable**: one tick is 0.025% of a core, the delta is a difference of
   two medians, and its run-to-run spread is ±0.05–0.08% — comparable to the
   whole budget.
+* **AND THE BIGGEST SINGLE LESSON OF THAT PASS IS ABOUT THE MACHINE, NOT THE
+  MEDIATOR.** The same assertion has read **0.27%** (stage 1, contended),
+  **0.22%** (the sweep, contended) and **0.17–0.19%** at loadavg ~1.5 — two
+  agents measuring independently and agreeing. **About a third of the apparent
+  overage was other agents on this box.** Three sessions run gates here at
+  once, so a percentage quoted without the load it was taken at is not
+  reproducible. `wsys_srv_transport.sh` now prints the loadavg **and the count
+  of bound compositors** beside every CPU sample and ends with an explicit
+  `ATTRIBUTABLE` / `SUSPECT` / `NOT ATTRIBUTABLE` verdict on its own numbers.
+  The budget's *allowances* are set to envelope every run on record including
+  the contended ones, so they hold on a busy machine; **the measured
+  coefficients are what need a quiet host, and the gate now says so itself.**
+  Correctness arms — transport, flag-unset refusal, byte-identical `windows`,
+  zero backbuffer writes — are load-insensitive and stay meaningful either way.
 * Not routed yet: `wid/scene`, reads, the enumeration policy, and the version
   bump.
 

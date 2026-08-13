@@ -560,6 +560,22 @@ mediating nothing costs nothing** — and the measured cost does not, because a
 
 ### The budget, re-derived — a fixed term and a marginal one
 
+**THE FORM IS THE DURABLE PART; THE CONSTANTS ARE MACHINE-DEPENDENT AND MUST BE
+RE-TAKEN QUIET.** This is not a hedge — it is the single most useful thing
+measured this pass. The same assertion, same gate, same tree region has read
+**0.27%** (stage 1, contended), **0.22%** (the sweep, contended) and
+**0.17–0.19%** at loadavg ~1.5. *A third of the apparent overage was other
+agents on this machine, not mediation.* A percentage quoted without the load
+it was taken at is not reproducible, so `wsys_srv_transport.sh` now prints the
+loadavg and the number of bound compositors beside **every** CPU sample, and
+ends with an explicit `ATTRIBUTABLE` / `SUSPECT` / `NOT ATTRIBUTABLE` verdict
+on its own figures.
+
+The allowances below are set to **envelope every measurement on record**,
+including the contended ones, which is why they survive the machine being
+busy; the *measured* coefficients underneath them are the part that needs a
+quiet host.
+
     budget(ops) = FIXED_BUDGET + MARGINAL_BUDGET × ops
                 = 0.34% of a core  +  1.80 µs per routed message
 
