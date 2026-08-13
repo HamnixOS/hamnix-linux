@@ -527,7 +527,10 @@ static int            chrome_rw;              /* the kernel let us map it W   */
  *               outside the window, and no window exceeds BB_W x BB_H.  So the
  *               largest USEFUL blit is 18 + BB_BYTES = 8,294,418 bytes.
  *   'I' image   2 + 31 + 9 + WSYS_IMG_MAX_W*WSYS_IMG_MAX_H*4 = 262,186.
- *   'C' cursor  18 + a sprite the compositor caps far below either.
+ *   'C' cursor  18 + a sprite whose declared size this arm does NOT bound --
+ *               it only skips the payload, never reads it, so the cap below
+ *               is what bounds it, and a sprite past the cap is refused
+ *               loudly.  Real ones are 32x32.
  *   'D' damage  17.
  *
  * The blit dominates, so the cap is the blit's, and it moves when BB_W/BB_H
@@ -5837,6 +5840,42 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                  * arm of hamwsys_open.  A blit is the client saying it renders
                  * its own surface; opening the file is not. */
                 if (v->proto != 2) { v->proto = 2; shm->gen++; }
+                /* THE DECLARED RECT IS CHECKED BEFORE THE PAYLOAD IS WAITED
+                 * FOR, which is the same thing the 'I' arm below does and for
+                 * the same reason: an oversized record would otherwise sit in
+                 * the reassembly buffer accumulating megabytes and be told
+                 * EMSGSIZE about the wrong thing much later.
+                 *
+                 * It is also what makes WSYS_CARRY_CAP a real bound rather
+                 * than a hope.  bb_fit clamps every window to BB_W x BB_H and
+                 * bb_blit clips every pixel outside it, so a rect larger than
+                 * that cannot put a single pixel on the screen -- and
+                 * bb_blit's `need` is (x1-x0)*(y1-y0)*bpp with nothing
+                 * bounding it, a product that WRAPS uint64 for a large enough
+                 * rect and would then pass its own `n < 18 + need` length
+                 * check on a short buffer.  Refusing the rect here is what
+                 * stops a client's arithmetic from choosing how far bb_blit
+                 * reads. */
+                if (reclen - i >= 18) {
+                    int64_t bx0 = le32(rec + i + 1),  by0 = le32(rec + i + 5);
+                    int64_t bx1 = le32(rec + i + 9),  by1 = le32(rec + i + 13);
+                    if (bx1 - bx0 > BB_W || by1 - by0 > BB_H) {
+                        static int said_rect;
+                        if (!said_rect) {
+                            said_rect = 1;
+                            fprintf(stderr,
+                                    "wsys: /dev/wsys/%d/draw/ctl: a blit rect "
+                                    "of %lldx%lld is larger than the %dx%d "
+                                    "maximum surface -- refused, not "
+                                    "buffered.\n",
+                                    (int)f->wid, (long long)(bx1 - bx0),
+                                    (long long)(by1 - by0), BB_W, BB_H);
+                        }
+                        f->carried = 0;
+                        errno = EMSGSIZE;
+                        return -EMSGSIZE;
+                    }
+                }
                 used = bb_blit(v, rec + i, reclen - i);
                 if (used) wr(WR_BLIT, used);
             } else if (verb == 'D') {
