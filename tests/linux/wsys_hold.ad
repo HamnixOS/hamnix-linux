@@ -36,7 +36,7 @@ extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int6
 
 pathbuf: Array[256, uint8]
 line:    Array[2048, uint8]
-filebuf: Array[16384, uint8]
+filebuf: Array[8388608, uint8]
 numbuf:  Array[24, uint8]
 outbuf:  Array[32, uint8]
 waitset: Array[4, int32]
@@ -175,6 +175,15 @@ def do_line(at: uint64, end: uint64):
         write_path(cast[Ptr[char]](&pathbuf[0]),
                    cast[Ptr[uint8]]("commit\n"), 7)
         return
+    # `qwctl <verb>` -- the same write with NO print. It exists for the cost
+    # arm: three write(2)s of accounting per mutation would be added to both
+    # arms equally and would dilute the very difference being measured, and a
+    # drag is tens of thousands of moves.
+    if starts(at, end, "qwctl ") != 0:
+        n6: uint64 = take(at + 6, end)
+        winpath("wctl")
+        write_path(cast[Ptr[char]](&pathbuf[0]), &line[0], n6)
+        return
     if starts(at, end, "wctl ") != 0:
         n5: uint64 = take(at + 5, end)
         winpath("wctl")
@@ -216,8 +225,8 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         fd: int32 = sys_open(cast[Ptr[char]](argv[1]))
         if fd >= 0:
             total: uint64 = 0
-            while total < 16383:
-                k: int64 = sys_read(fd, &filebuf[total], 16383 - total)
+            while total < 8388607:
+                k: int64 = sys_read(fd, &filebuf[total], 8388607 - total)
                 if k <= 0:
                     total = total
                     break
