@@ -11,6 +11,22 @@
 #
 # Offscreen. No DRM, no master.
 set -uo pipefail
+# PRIVATE NAMESPACE FIRST, and sourced by ABSOLUTE PATH because this script cds
+# to its build directory and never to the tree it lives in. "Offscreen. No DRM,
+# no master." above is true and is about the DISPLAY; the filesystem is a
+# separate question. wsysd's names are compiled into it (/srv/wsys,
+# /dev/shm/hamnix-wsys, /tmp/hamnix-wsys) and hamdesktop's are too
+# (/tmp/hamdesktop-wp.status, /tmp/.hamdesktop.src) -- the table is in
+# tests/linux/private_ns.sh -- and this machine's own live desktop holds them.
+#
+# It has to go ABOVE the cd, because priv_ns_reexec re-execs this script and
+# resolves it relative to the directory it was invoked from. Nothing here
+# asserts about a uid, so the helper's one fidelity cost (euid 0 inside) touches
+# nothing; the build directory is under $HOME/.hamnix-build, which the helper
+# does not shadow, so ./bin is still there afterwards.
+PRIVNS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$PRIVNS_HOME/private_ns.sh"
+priv_ns_reexec "$@"
 cd /home/david/.hamnix-build/vk-present-readback
 BIN="${BIN:-./bin}"
 W="$(mktemp -d -p . lat.XXXXXX)"
@@ -41,6 +57,7 @@ PY
 INJ=$!
 
 sleep 10
+echo "=== $(priv_ns_describe)"
 echo "=== healthy (no interference):"
 grep "lat_n" "$W/bench.log" | tail -3 | sed 's/.*| lat_n/   lat_n/'
 

@@ -18,6 +18,24 @@
 set -uo pipefail
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ"
+# PRIVATE NAMESPACE FIRST -- before reap.sh (whose registry defaults to a mktemp
+# under /tmp, and a registry made before the tmpfs lands on /tmp is one this
+# script can no longer see) and before $W. "The display belongs to the machine
+# owner" above is about the DISPLAY and is true; the filesystem is a separate
+# question and the answer was no. wsysd's names are compiled into it
+# (/srv/wsys, /dev/shm/hamnix-wsys, /tmp/hamnix-wsys), hamdesktop's and
+# hampanelscene's are too (/tmp/hamdesktop-wp.status, /tmp/.hamdesktop.src,
+# /tmp/hamnix-panel.health, /tmp/hamnix-notif.log) -- the table is in
+# tests/linux/private_ns.sh -- and this machine's own live desktop holds every
+# one of them.
+#
+# THIS SCRIPT ASSERTS NOTHING, so there is no verdict line to preserve; what has
+# to survive is the REGIME of the six loads it measures. Isolation costs it
+# nothing it uses: it starts no process as a second uid, $BIN stays under
+# $HOME/.hamnix-build (which the helper does not shadow) and the tmpfs over /tmp
+# is the same 16 GB RAM-backed filesystem the run used before.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 . tests/linux/reap.sh
 BIN="${FPS_BIN_DIR:-/home/david/.hamnix-build/cap-power-ab/bin}"
 SECS="${SECS:-10}"
@@ -84,6 +102,7 @@ since_mark() {   # since_mark <file> -> the lines added since mark_all
 
 echo "census: each figure is the MEDIAN of the per-second series over ${SECS}s,"
 echo "census: per client; the worst 10 ms burst is the max across the window."
+echo "census: $(priv_ns_describe)"
 echo
 
 mark_all; sleep "$SECS"

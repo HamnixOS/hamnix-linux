@@ -14,6 +14,24 @@
 #
 # Offscreen only: /dev/fb is a plain file. No DRM, no master, no modeset.
 set -uo pipefail
+# PRIVATE NAMESPACE FIRST, and sourced by ABSOLUTE PATH because this script's
+# $ROOT is not the tree it lives in. "Offscreen only: /dev/fb is a plain file.
+# No DRM, no master, no modeset." above is true and is about the DISPLAY; the
+# filesystem is a separate question. wsysd's names are compiled into it
+# (/srv/wsys, /dev/shm/hamnix-wsys, /tmp/hamnix-wsys) and hamdesktop's are too
+# (/tmp/hamdesktop-wp.status, /tmp/.hamdesktop.src) -- the table is in
+# tests/linux/private_ns.sh -- and this machine's own live desktop holds them.
+#
+# DETERMINISM IS THIS GATE'S WHOLE ARGUMENT, which is why hampanelscene is not
+# started: anything that changes a pixel between the two captures is a false
+# difference. A concurrent process reaching a shared segment is exactly that,
+# so a private tmpfs is part of the determinism and not merely tidiness.
+# Nothing here asserts about a uid; $O and $BIN stay under $HOME/.hamnix-build,
+# which the helper does not shadow, so the two captures still land where the
+# comparer reads them.
+PRIVNS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$PRIVNS_HOME/private_ns.sh"
+priv_ns_reexec "$@"
 ROOT=/home/david/hamnix-linux/.claude/worktrees/agent-ad4474044a63d6c8a
 cd "$ROOT"
 BIN="${FPS_BIN_DIR:-/home/david/.hamnix-build/vk-present-readback/bin}"
@@ -52,6 +70,7 @@ cap() {  # label  icd  extra-env...   -> writes $OUT
     rm -rf "$W"
 }
 
+echo "   [pixcmp] $(priv_ns_describe)"
 O=/home/david/.hamnix-build/vk-present-readback
 NOICD="$(mktemp -d -p "$O" ni.XXXXXX)"; mkdir -p "$NOICD/noicd"
 cap "software" "$NOICD/noicd/none.json" "$O/fb_sw.raw"
