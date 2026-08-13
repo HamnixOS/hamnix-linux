@@ -125,6 +125,52 @@
 #                  same boundary, as mkfs.ext4 above.  clang is a Debian binary
 #                  whichever directory it is copied into, so it lives with the
 #                  other Debian binaries rather than being renamed native.
+#
+#                  WHY THERE ARE THREE COPIES OF LLVM IN HERE, 494.6 MiB and
+#                  the largest single thing in the image -- a question that
+#                  went unanswered long enough to look like waste. It is not.
+#                  Each copy has a different reverse-dependency root, read out
+#                  of the image's own /var/lib/dpkg/status:
+#
+#                    libllvm14   104.9 MiB  <- clang -> clang-14. THE COMPILER.
+#                                This is `ac`'s second half. Debian's
+#                                unversioned `clang` metapackage in bookworm
+#                                is 14, so asking for `clang` asks for this.
+#                    libllvm15   111.9 MiB  <- libgl1-mesa-dri:amd64,
+#                                mesa-vulkan-drivers:amd64. MESA'S SHADER
+#                                COMPILER: llvmpipe and radeonsi JIT shaders
+#                                through LLVM, and it is a hard Depends.
+#                                Without it there is no software GL at all,
+#                                which is the path with no GPU.
+#                    libllvm15   122.0 MiB  <- libgl1-mesa-dri:i386,
+#                    (i386)      mesa-vulkan-drivers:i386. THE SAME THING FOR
+#                                32-BIT, which exists because Steam's
+#                                bootstrap is a 32-bit ELF and its games are
+#                                32-bit clients of the 32-bit Mesa.
+#
+#                  So: one compiler and two graphics drivers, and the two 15s
+#                  are different architectures of the same library and cannot
+#                  share a file. Nothing here is a duplicate of anything else,
+#                  and removing any of the three removes a capability the
+#                  image is supposed to have. THE VERSION SKEW IS DEBIAN'S,
+#                  not ours: bookworm's Mesa links LLVM 15 and bookworm's
+#                  default clang is 14.
+#
+#                  THE ONE COLLAPSE THAT EXISTS, priced and NOT taken: asking
+#                  for `clang-15` instead of `clang` would put the compiler on
+#                  the libllvm15 Mesa already installs, retiring libllvm14.
+#                  By bookworm's own Installed-Size fields that removes
+#                  219,518 KiB and adds 178,973 KiB -- a net 39.6 MiB, not the
+#                  104.9 it looks like, because libclang-common-15-dev is
+#                  68 MiB against 14's 20 and drags in libc6-i386 and
+#                  lib32stdc++6 (a 32-bit glibc, for multilib). 39.6 MiB to
+#                  move off Debian's default compiler and onto a version
+#                  nothing else in this project is tested against is a bad
+#                  trade, and it is written down here so it does not have to
+#                  be rediscovered. scripts/ac-link.sh would find clang-15 --
+#                  it probes clang, clang-19, clang-16, clang-15, clang-14 --
+#                  so the blocker is judgement, not plumbing.
+#
 #                  It costs about 300 MB on THIS volume (clang + libclang-cpp +
 #                  libllvm + libc6-dev + binutils), and it is baked in rather
 #                  than left to `apt install` because a machine that needs a
@@ -172,51 +218,70 @@ if [ "$I386" = 1 ]; then
     # does not install Recommends, and every one of these is a library Steam
     # dlopen()s for graphics or input rather than an optional extra.
     #
-    # ZENITY IS NOT DEAD CODE, and it is 133 MiB.  It carried "121 MiB of dead
-    # code" on the standing list for a long time; both halves of that were
-    # checked with scripts/hamlinux_distro_audit.sh and the source, and the
-    # honest answer is that the SIZE was roughly right and DEAD was wrong.
+    # yad, NOT zenity -- THE CONSENT DIALOG, WITHOUT A BROWSER ENGINE.
     #
-    #   WHAT CALLS IT.  /usr/games/steam -- the shell script this very package
-    #   installs -- runs `zenity --question` to get consent before installing
-    #   proprietary software, and it does so exactly when its four `needed`
-    #   paths under $STEAMDIR are missing:
+    #   WHAT ASKS FOR IT.  /usr/games/steam -- the shell script steam-installer
+    #   itself installs -- asks for consent before installing proprietary
+    #   software, and it does so exactly when its four `needed` paths under
+    #   $STEAMDIR are missing:
     #
     #       for needed in steam.sh ubuntu12_32/steam \
     #                     ubuntu12_32/steam-runtime/run.sh setup.sh
     #           [ -x "$STEAMDIR/$needed" ] || new_installation=yes
     #       if [ -n "$new_installation" ]; then ... "$zenityish" --question ...
     #
-    #   /usr/local/bin/hamnix-steam pre-stages exactly those four paths, so the
-    #   INTENDED path never reaches the dialog.  A person who runs
-    #   /usr/games/steam directly, or whose $HOME differs from the one the
-    #   wrapper staged into, does reach it -- and with no zenity the script
-    #   falls back to `yad`, and with neither it prints "Installation
-    #   cancelled" and exits 1.  A grep of OUR tree could never have found any
-    #   of this: the caller is a Debian shell script inside the namespace.
+    #   and $zenityish is chosen by that script, not by us -- READ OUT OF THE
+    #   IMAGE, because the version in circulation has no third branch at all:
     #
-    #   WHAT IT COSTS, two numbers because they answer different questions.
-    #   zenity itself is 167 KiB.  The CORE is 133 MiB -- the browser engine
-    #   behind it: libwebkit2gtk-4.1-0 (90.4 MiB), libjavascriptcoregtk-4.1-0
-    #   (31.2) and zenity-common (11.2), each of which NOTHING ELSE INSTALLED
-    #   DEPENDS ON, measured.  The FULL transitive set that nothing else needs
-    #   is 195 MiB, the rest being WebKit's own media and spell-check
-    #   dependencies -- libflite1 (26.9, a speech synthesiser), the gstreamer
-    #   plugin sets, hunspell and friends.  133 is the number to defend; 195
-    #   is what a removal would actually recover.  libgtk-3-0 is in NEITHER:
+    #       if command -v zenity >/dev/null; then zenityish=zenity
+    #       else zenityish=yad; fi
+    #       if ! "$zenityish" --question --title=... ; then
+    #           echo "steam: Installation cancelled" >&2; exit 1
+    #
+    #   So yad is not a fallback the script tests for -- it is what the script
+    #   RUNS when zenity is absent, and if yad is absent too the failed exec
+    #   falls straight into "Installation cancelled".  Installing neither is a
+    #   dead end a person meets once with no explanation.  A grep of OUR tree
+    #   could never have found any of this: the caller is a Debian shell
+    #   script in here, which is why tests/linux/steam_consent_dialog.sh runs
+    #   the real one out of the real image rather than reasoning about it.
+    #
+    #   WHY IT IS REACHED AT ALL.  /usr/local/bin/hamnix-steam pre-stages
+    #   exactly those four paths, so the INTENDED path never sees the dialog.
+    #   A person who runs /usr/games/steam directly, or whose $HOME differs
+    #   from the one the wrapper staged into, does -- which is why this is a
+    #   swap and not a deletion.
+    #
+    #   WHAT THE SWAP RETURNED, measured with scripts/hamlinux_distro_audit.sh
+    #   on two real images built from this script, before and after:
+    #   2254.7 MiB occupied -> 2057.1 MiB, 197.6 MiB less software, 619
+    #   packages -> 565.  The FILE is 12.00 GiB either way and always will be
+    #   (see below).  zenity is 167 KiB and drags
+    #   a WEB BROWSER in behind it: libwebkit2gtk-4.1-0 (90.4 MiB),
+    #   libjavascriptcoregtk-4.1-0 (31.2), zenity-common (11.2) -- 133 MiB of
+    #   core that nothing else installed depended on -- plus WebKit's media
+    #   and spell-check tail (libflite1, a 26.9 MiB speech synthesiser; the
+    #   gstreamer plugin sets; hunspell) for 195 MiB of private closure.  yad
+    #   is 570 KiB against GTK alone.  libgtk-3-0 is in neither number:
     #   firefox-esr needs it and it stays whatever happens here.
     #
-    #   THE CHEAP FIX, NOT TAKEN HERE BECAUSE IT REBUILDS A 12 GB ARTEFACT:
-    #   /usr/games/steam already names `yad` as its fallback, and yad in
-    #   bookworm is 570 kB against GTK alone -- no WebKit.  Swapping
-    #   zenity -> yad on this line keeps the prompt working through a path the
-    #   caller already supports and returns 133-195 MiB.  It needs a distro
-    #   rebuild and a run of the Steam path to confirm, which is its own pass.
+    #   AND THE OLD DIALOG WAS NOT WELL: run the gate against the previous
+    #   image and zenity does not draw at all -- it aborts inside GTK trying
+    #   to load the icon it was asked for, and steam prints "Installation
+    #   cancelled".  That was seen in the gate's harness, not in a booted VM,
+    #   so it is reported rather than claimed; yad rendered in the identical
+    #   harness.  It is a reason to prefer the smaller program, not the
+    #   reason: the size is the reason.
     #
-    #   AND IT IS NOT THE BIGGEST THING IN HERE.  LLVM/clang is 494.6 MiB
-    #   across three copies (libllvm15 i386 + amd64, libllvm14 amd64) and
-    #   firefox-esr is 270.7 MiB.  zenity's engine is THIRD.
-    PKGS="$PKGS,steam-installer,zenity,xdg-utils,bubblewrap,\
+    #   IT IS NOT THE BIGGEST THING IN HERE, and the two bigger ones are not
+    #   bugs.  LLVM/clang is 494.6 MiB in three copies -- libllvm15:amd64 for
+    #   Mesa, libllvm15:i386 for the 32-bit Mesa Steam runs on, libllvm14 for
+    #   clang -- and every one of them is load-bearing; see the `clang` note
+    #   at the top of this file.  firefox-esr is 270.7 MiB and is the north
+    #   star.  The largest number of all is not software: the FILE is
+    #   provisioned at 12 GiB and 10 of that is empty space for Steam's
+    #   client and a game, which no package change moves.
+    PKGS="$PKGS,steam-installer,yad,xdg-utils,bubblewrap,\
 pulseaudio,libasound2-plugins,\
 mesa-utils:i386,vulkan-tools:i386,mesa-utils-bin,\
 libgl1:i386,libgl1-mesa-dri:i386,libglx-mesa0:i386,libegl1:i386,libgbm1:i386,\
