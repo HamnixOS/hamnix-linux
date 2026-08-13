@@ -2,6 +2,14 @@
 #
 #   wsys_poke <path> <text>    write "<text>\n"
 #   wsys_poke <path>           read it and print what came back
+#   wsys_poke -t <path>        OPEN FOR WRITING AND CLOSE WITHOUT WRITING
+#
+# `-t` is `> file` with no body, and it exists because nothing else in the tree
+# could reach that path: /dev/wsys is served inside hamnix processes, so a host
+# shell's `: > /dev/wsys/post` gets ENOENT from the real filesystem and proves
+# nothing. It is the only way to test that opening a sink for writing still
+# EMPTIES it -- which stopped being automatic when the truncate moved out of
+# hamwsys_open and into hamwsys_close (see SINK STAGING in user/linux-wsys.h).
 #
 # Small on purpose: it is the thing that lets a shell script drive the window
 # system the way a DE component would, so a test can say "a launch request was
@@ -29,9 +37,20 @@ def puts(fd: int32, s: Ptr[uint8]):
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if argc < 2:
-        puts(2, "usage: wsys_poke <path> [text] | wsys_poke -new\n")
+        puts(2, "usage: wsys_poke <path> [text] | wsys_poke -new | wsys_poke -t <path>\n")
         return 2
     path: Ptr[char] = cast[Ptr[char]](argv[1])
+    # `-t <path>`: the truncating open, with no write at all.
+    if path[0] == 45 and path[1] == 116:                 # "-t"
+        if argc < 3:
+            puts(2, "usage: wsys_poke -t <path>\n")
+            return 2
+        tfd: int32 = sys_open_write(cast[Ptr[char]](argv[2]))
+        if tfd < 0:
+            puts(2, "wsys_poke: cannot open for writing\n")
+            return 1
+        sys_close(tfd)
+        return 0
     # `-new` PRINTS THE WID OF A WINDOW IT JUST CREATED, and it has to be ONE
     # process because the second half of the newwindow handshake is remembered
     # PER PROCESS (user/linux-wsys.c's last_new -- deliberately, so two clients

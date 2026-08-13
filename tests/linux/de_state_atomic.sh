@@ -202,5 +202,31 @@ else
     bad "$SHORT of $N reads came back without the last field -- the body itself is being assembled in pieces, which is a different defect from the empty read"
 fi
 
+# ---- 7. THE REGRESSION THE FIX COULD HAVE CAUSED -------------------------
+# The truncate did not disappear, it MOVED: out of hamwsys_open, where it was
+# a window held open until somebody wrote, and into hamwsys_close, where it is
+# one store. So `> /dev/wsys/foo` with no write must still empty the sink --
+# and if it silently stopped doing so, every DE component that clears a sink
+# that way would be reading a stale message forever, which is a worse bug than
+# the one this file fixes and would not show up in any count above.
+#
+# `wsys_poke -t` is the only way to reach that path: /dev/wsys is served inside
+# hamnix processes, so a host shell's `: > /dev/wsys/post` gets ENOENT from the
+# real filesystem and would pass this assertion without testing anything.
+TSINK=/dev/wsys/de-state-atomic-trunc
+"$WORK/wsys_poke.elf" "$TSINK" 'a body that must not survive' >/dev/null 2>&1
+BEFORE="$("$WORK/wsys_poke.elf" "$TSINK" 2>/dev/null)"
+if [ -n "${BEFORE//[[:space:]]/}" ]; then
+    "$WORK/wsys_poke.elf" -t "$TSINK" >/dev/null 2>&1
+    AFTER="$("$WORK/wsys_poke.elf" "$TSINK" 2>/dev/null)"
+    if [ -z "${AFTER//[[:space:]]/}" ]; then
+        ok "NO REGRESSION: opening a sink for writing and closing without writing still EMPTIES it (the truncate moved to close, it did not vanish)"
+    else
+        bad "a sink opened for writing and closed without a write kept its body ('$AFTER') -- the truncate was lost when it moved out of hamwsys_open, so every component that clears a sink this way now reads a stale message forever"
+    fi
+else
+    bad "could not stage a body in $TSINK to truncate (read back '$BEFORE') -- assertion 7 did not test anything"
+fi
+
 echo
 done_report
