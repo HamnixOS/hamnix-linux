@@ -1161,6 +1161,143 @@ papered over.**
   in the tree that reads a window's ctl with a fresh `cat` pays it once per
   read.
 
+## What stage 10 measured — `open`, and the refusal that named what it refused
+
+**THE FINDING, and it corrects the table in 7.1 as well as the sentence in
+7.5(4) that scoped this stage.** 7.5(4) says the leaves stage 9 did not reach
+"still learn a window exists from `win_find()` on the mapped table", and reads
+as an unpaid precondition with no attacker behind it. It is not: those leaves
+were an *active enumeration channel*, and reading them was never necessary.
+Every one of them refuses a stranger — the ring check from `0f80d3e5`, the
+`keys` channel, the scene memfd — **and every one of those refusals names the
+window it is refusing.** Measured on the pre-stage-10 tree, uid 1002 owning
+nothing, victim window 2 at uid 1001, `HAMWSYS_SERVER=1` on the arm:
+
+| the snooper asked | it got |
+|---|---|
+| `cat /dev/wsys/2/draw/images` | **rc 0** — no output, but it OPENED |
+| `cat /dev/wsys/1002/draw/images` | `ENOENT` |
+| `cat /dev/wsys/2/scene` | `EPERM`, *"this process neither owns window 2 nor holds its display list"* |
+| `cat /dev/wsys/1002/scene` | `ENOENT` |
+| `cat /dev/wsys/2/pointer` | `EPERM`, *"does not own window 2 … pointer ring"* |
+| `cat /dev/wsys/2/keys` | `EPERM`, *"cannot read its keystrokes"* |
+| `cat /dev/wsys/1002/{pointer,keys}` | `ENOENT` |
+
+**The door was shut and the doorway was still measurable.** The exit code of
+`cat` enumerates the window table from the same process the routed `windows`
+read answers EMPTY, on the same run — which is stage 4's defect surviving in a
+fourth spelling after stage 9 closed the third.
+
+**WHAT IS ROUTED.** `WSRV_LEAF_EXISTS` — a leaf that is not a file. The answer
+is a return code and no payload: 0 is "it is there and you may have it",
+`-ENOENT` is no, and it is *the same* `-ENOENT` a caller gets for a wid that
+never existed, so the two cannot be separated from outside. The predicate is
+reused, not reinvented: `hostowner() || owns_wid_ancestry(wid)`, stage 9's
+per-window rule. `hamwsys_open`'s READ arms for `scene`, `pointer`, `event`,
+`text`, `cmd`, `keys`, `draw/images`, `draw/image/<n>` and `backbuffer` now ask
+it instead of `win_find()`.
+
+**WHAT IS NOT, and it is a decision rather than an omission.** The **WRITE**
+open still asks `win_find()`. The rule two lines below it is `owns_wid()` — the
+CONNECTION question stage 5 introduced — while the served answer is
+`owns_wid_ancestry()`. They are not the same set, and a process **handed** a
+descriptor for a window it does not descend from is exactly the case stage 5
+built; routing existence there would refuse it before the rule meant to admit
+it ever ran. **The write path's `ENOENT`-versus-`EPERM` is therefore a real
+remaining oracle**, and closing it needs the served answer asked in the
+connection question's terms — which is the read server holding bindings it
+deliberately does not hold.
+
+**THE COST, AND THE ANSWER TO "WHAT DOES THIS DO TO CONNECTION ACCOUNTING" —
+AND THE STANDING CLAIM IT CORRECTS.**
+
+*"A real desktop holds zero read connections; no component performs a routed
+read" WAS NEVER TRUE, and the reason nobody knew is a defect in the instrument
+that was supposed to say so.* `wsys_srv_deboot.sh`'s census walks
+`/proc/<pid>/fd` looking for the peer inode of each server-side socket and
+**`break`ed out of the fd loop on the first match**. A process holding BOTH
+connections was therefore counted once, as whichever descriptor the kernel
+listed first — always the mutation one, dialled earlier and given the lower
+number. So the gate printed *"0 hold a READ connection"* for desktops in which
+`hampanelscene` had been reading `/dev/wsys/windows` over the read socket since
+**stage 4**: its own trace shows that process making the routed enum call
+repeatedly on the same run the census called it absent. The `break` is removed
+and the comment at that line records what it cost.
+
+Measured directly out of `/proc/<pid>/fd` on a routed desktop with stage 10 in:
+`hamdesktop` holds **fd 3 on the mutation socket and fd 4 on the read socket at
+the same instant**.
+
+**What stage 10 actually adds is four calls.** With `HAMWSYS_SRV_TRACE=1` over a
+whole boot — compositor, desktop, panel, Applications menu — plus an 8 s window
+drag, the read server logged **exactly four `leaf=exists` questions**:
+`hamdesktop` for wid 2, `hampanelscene` for wids 3 and 4, `hamappmenu` for
+wid 5. `de_dragload` asked **none** — it only writes. That is the cache doing
+what it was built for: one round trip per (process, window) for the life of the
+process, against a `hamdesktop` that reopens its `/event` file *on every pass of
+its main loop*.
+
+In connections: **one read connection per process that opens a per-window read
+leaf**, which is the same set that already held one for `windows`, plus
+`hamdesktop` and `hamappmenu`. Three on a bare desktop. `wsysd` is not among
+them (`srv_is_server` never routes). Against `WSRV_CONN_MAX = 64` that is not
+close — but it does move the read socket from "one or two processes" to "one per
+GUI process", so the ceiling becomes reachable by **opening applications**
+rather than only by an attacker's 64 `connect(2)` calls, and
+`wsys_srv_ceiling.sh`'s subject stops being hypothetical. Raising it is a
+recompile of a process-static array in `wsysd` and costs no version bump.
+
+**AND THE PER-FRAME COST IS ZERO BY CONSTRUCTION, WHICH IS THE ONLY REASON THIS
+IS AFFORDABLE.** Every application in this tree reopens its own `/keys` and
+`/event` on a loop; a round trip per open is exactly the shape 7.1(3) says not
+to build. So the client **caches a YES and never a NO**: one round trip per
+(process, window) for the life of the process, and a refusal re-asked every
+time so a window created after a probe is not remembered as absent. The cached
+YES grants nothing — `win_find()` still runs behind it, so a destroyed window is
+still `ENOENT` — and it is dropped whole when the process's uid changes.
+
+**A DEFECT OF STAGE 4's TRANSPORT, FOUND WHILE ROUTING THIS AND FIXED HERE.**
+`srv_redial_if_uid_changed()` has protected the MUTATION socket since stage 3a.
+**The READ socket had nothing.** `SO_PEERCRED` is sampled at `connect(2)`, so a
+connection dialled before `/etc/rc.de-user`'s `setuid 1001` carries the dialling
+uid into every read decision afterwards — and on this socket that is the wrong
+*direction*, because the early dialler is the privileged one. It mattered less
+while the dial happened at the first routed READ and a write-only program never
+dialled at all; stage 10 asks this socket a question at every per-window open,
+so the window between dialling and dropping privilege is now real.
+`srv_rdial_if_uid_changed()` closes it and takes the existence cache with it.
+
+**THE GATE: `tests/linux/wsys_srv_open.sh`, 53 passed / 0 failed, and it scored
+30 / 24 on the tree it was written against.** Every arm is a **pair** — the same
+leaf on a window that exists and on one that does not, from the same process —
+because a gate that only asked "is the snooper refused" would have passed on the
+old code: every one of these leaves already refused to hand over data. What
+leaked was *which* refusal, and only a comparison sees that. The read server's
+trace names the leaf (`leaf=exists`) and the crossings are counted scoped to
+each client's own pid, which is the trap that caught stage 8's gate.
+
+### What stage 10 did NOT do
+
+* **No `WSYS_VERSION` bump, and the mapping is still there.** Every attack in
+  `tests/linux/wsys_bypass.sh` is an `mmap` and none of them calls this code.
+  What this buys is the **precondition** 7.1(2) names, not the boundary.
+* **The WRITE open is not routed** — see above; it is the remaining half of
+  7.1(2).
+* **`draw/image/<n>`'s own existence is still local.** Once the window is
+  granted, `img_find()` decides whether a *named image* exists out of the mapped
+  image store. That is a narrower oracle (it needs a window you already own)
+  and it was not closed.
+* **The latency of an existence call was not measured separately.** It is a
+  `WSRV_OP_READ` round trip on the read socket, which stage 4 measured at a
+  different payload; whether the no-payload case differs was not established.
+* **The four existence calls are a BOOT number, not a session number.** They
+  were counted over a boot plus an 8 s drag with four windows on screen. What a
+  desktop that opens and closes applications for an hour costs was not measured,
+  and the cache's eviction (16 wids, oldest first) was never exercised.
+* **The `exists` STAT counter was not read back by any gate.** It exists on the
+  read server's `WSRV_OP_STAT` line; the crossings were counted from the trace
+  instead.
+
 ## Budget to hold it to
 
 **THE BUDGET BELOW IS SUPERSEDED. It was the wrong SHAPE, which is a stronger
@@ -1817,6 +1954,14 @@ still last and is now step 8 of 8.
    still learn a window exists from `win_find()` on the mapped table, so this
    step is the attribute half only and the mapping-removal precondition is
    still unpaid.
+   **AND THE OTHER HALF IS DONE FOR READS — stage 10,
+   `tests/linux/wsys_srv_open.sh`, 53 passed / 0 failed.** One correction to
+   the sentence immediately above: those leaves were not merely an unpaid
+   precondition, they were an ACTIVE enumeration channel, because each of them
+   refuses a stranger with a message that NAMES THE WINDOW — so `cat`'s exit
+   code separated a live wid from a dead one without reading a byte. See *What
+   stage 10 measured* below for the table. The WRITE open is still
+   `win_find()`, on purpose and for a reason recorded there.
 5. Move `pointer`/`event`/`text`/`cmd` to per-window channels on the `keys`
    construction (7.1 §3).
 6. Tier 2's remainder — `/srv/wsys.bb` and `/srv/wsys.img` — which is an
