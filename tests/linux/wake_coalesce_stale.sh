@@ -24,6 +24,18 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+# PRIVATE NAMESPACE FIRST -- before reap.sh (whose registry defaults to a mktemp
+# under /tmp, and a registry made before the tmpfs lands on /tmp is one this gate
+# can no longer see) and before $W. "This cannot touch the display" above is
+# true and is about the DISPLAY; the filesystem is a separate question. wsysd's
+# names are compiled into it (/srv/wsys, /dev/shm/hamnix-wsys, /tmp/hamnix-wsys)
+# and hamdesktop's are too (/tmp/hamdesktop-wp.status, /tmp/.hamdesktop.src) --
+# the table is in tests/linux/private_ns.sh, and this machine's own desktop holds
+# those names right now. Nothing here asserts about a uid, so the helper's one
+# fidelity cost (euid 0 inside) touches nothing this gate claims; $BIN stays
+# under $HOME/.hamnix-build, which the helper does not shadow.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 . tests/linux/reap.sh
 
 BIN="${FPS_BIN_DIR:-/home/david/.hamnix-build/cap-power-ab/bin}"
@@ -32,6 +44,7 @@ reap_track "$W/reaped"
 pass=0; fail=0
 ok()  { echo "stale: PASS $*"; pass=$((pass+1)); }
 bad() { echo "stale: FAIL $*"; fail=$((fail+1)); }
+echo "stale: .... $(priv_ns_describe)"
 cleanup() { rm -rf "$W"; }
 reap_on_exit cleanup
 

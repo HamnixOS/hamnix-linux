@@ -161,6 +161,18 @@ if [ "${1:-}" = "--inner" ]; then
 fi
 
 cd "$PROJ"
+# PRIVATE NAMESPACE FIRST -- before $W, before the build, before anything under
+# /tmp exists. wsysd's names are compiled into it (/srv/wsys, /dev/shm/hamnix-wsys,
+# /tmp/hamnix-wsys; see the table in tests/linux/private_ns.sh), so a run of this
+# gate beside a live desktop is a collision and not an untidiness.
+#
+# THE HELPER'S ONE FIDELITY COST DOES NOT REACH THIS GATE. priv_ns_reexec makes
+# geteuid() 0 in the OUTER shell, and this gate's outer half asserts nothing about
+# a uid: every arm runs in the INNER namespace it builds for itself, where wsysd
+# is 1001 and the attacker is 1002 exactly as before. What did need fixing is
+# where those two ids come from -- see the two-case selection below.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 OUT="${SRV_WORK:-/home/david/.hamnix-build/wsrv-s6}"
 BIN="$OUT/bin"; mkdir -p "$BIN"
 
@@ -181,9 +193,46 @@ done
 
 command -v unshare >/dev/null || { echo "srvsc: SKIP no unshare(1)"; exit 0; }
 command -v setpriv >/dev/null || { echo "srvsc: SKIP no setpriv(1)"; exit 0; }
-grep -q "^$(id -un):" /etc/subuid 2>/dev/null || {
-    echo "srvsc: SKIP no /etc/subuid range for $(id -un)"; exit 0; }
-SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
+
+# WHERE THE SECOND AND THIRD UID COME FROM -- TWO CASES, AND THE SECOND ONE IS
+# WHAT LETS THIS GATE BE ISOLATED AT ALL. Written up at length in
+# tests/linux/wsys_enum_policy.sh; the short form:
+#
+# On a bare host they are subordinate ids out of /etc/subuid for the invoking
+# user, as they always were. Inside private_ns.sh's namespace `id -un` is root,
+# /etc/subuid HAS NO root LINE, and reading only that file would make this gate
+# SKIP -- scoring 0 arms while exiting green, which is the wsys_bypass.sh
+# failure mode and would have been an exemption in disguise.
+#
+# But a process that is root in a user namespace holding a mapped RANGE already
+# owns ids 1001 and 1002 and may map them to themselves in a child, needing no
+# /etc/subuid and no setuid helper. THE TEST IS THE MAPPING ITSELF, not a read
+# of /proc/self/uid_map: on a bare host that file is the initial
+# `0 0 4294967295`, which "contains" 1001 and 1002 while an unprivileged process
+# may map neither, so a range read would turn a clean SKIP on a subuid-less host
+# into "FAIL namespace run rc=1" -- a gate reporting a defect it did not find.
+#
+# Either way the INNER ids are 0, 1001 and 1002 and every assertion below is
+# about those, so which outer ids back them changes nothing this gate claims.
+SUB=""
+if grep -q "^$(id -un):" /etc/subuid 2>/dev/null \
+   && grep -q "^$(id -un):" /etc/subgid 2>/dev/null; then
+    SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
+    IDSRC="/etc/subuid range $SUB for $(id -un)"
+elif unshare -U \
+        --map-users=0:"$(id -u)":1      --map-groups=0:"$(id -g)":1 \
+        --map-users=1001:1001:1         --map-groups=1001:1001:1 \
+        --map-users=1002:1002:1         --map-groups=1002:1002:1 \
+        true 2>/dev/null; then
+    SUB=1001
+    IDSRC="ids 1001/1002 are already this namespace's own (mapped to themselves; no /etc/subuid needed)"
+else
+    echo "srvsc: SKIP no /etc/subuid range for $(id -un), and this namespace does"
+    echo "srvsc: SKIP not already own uids 1001 and 1002; run this in the VM"
+    exit 0
+fi
+note "$(priv_ns_describe)"
+note "the two extra uids: $IDSRC"
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/wsrvsc.XXXXXX")"
 trap 'rm -rf "$W"' EXIT

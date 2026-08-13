@@ -13,6 +13,17 @@
 set -uo pipefail
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ"
+# PRIVATE NAMESPACE FIRST -- before reap.sh (whose registry defaults to a mktemp
+# under /tmp) and before $W. "Offscreen" above is about the DISPLAY and is true;
+# it says nothing about the filesystem. wsysd's names are compiled into it --
+# /srv/wsys, /dev/shm/hamnix-wsys, /tmp/hamnix-wsys -- and while this gate does
+# export HAMWSYS/HAMWSYS_BB into its own $W, bb_attach's fallback list still
+# reaches /srv and /dev/shm, and a live desktop on this machine holds those
+# names. Nothing here asserts about a uid, so the helper's one fidelity cost
+# (euid 0 inside) touches nothing this gate claims; $BIN stays under
+# $HOME/.hamnix-build, which the helper does not shadow.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 . tests/linux/reap.sh
 BIN="${FPS_BIN_DIR:-/home/david/.hamnix-build/cap-power-ab/bin}"
 W="$(mktemp -d -p "${TMPDIR:-/tmp}" opc.XXXXXX)"
@@ -30,6 +41,7 @@ bad(){ echo "opcount: FAIL $*"; fail=$((fail+1)); }
 # is under-reporting" and "wid/ctl opens () != writes ()", both of them
 # defects named against an instrument nobody had looked at.
 . tests/linux/gate_read.sh
+echo "opcount: .... $(priv_ns_describe)"
 
 mkdir -p "$W/noicd"
 export HAMWSYS="$W/s" HAMWSYS_BB="$W/b" HAMWSYS_IMG="$W/i"

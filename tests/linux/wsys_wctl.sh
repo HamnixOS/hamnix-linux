@@ -79,6 +79,18 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+# PRIVATE NAMESPACE FIRST -- before reap.sh, before $W, before the build.
+# "Entirely offscreen" above is about the DISPLAY and is true; the filesystem is
+# a separate question. wsysd's names are compiled into it -- /srv/wsys,
+# /dev/shm/hamnix-wsys, /tmp/hamnix-wsys (see the table in
+# tests/linux/private_ns.sh) -- and this machine's own desktop holds them right
+# now. Nothing here asserts about a uid, so the helper's one fidelity cost
+# (euid 0 inside) touches nothing this gate claims; $WORK stays under
+# $HOME/.hamnix-build, which the helper does not shadow, so a pinned
+# WSYS_WCTL_BIN_DIR still finds its binaries. The mirror assertion below reads
+# lib/hamui.ad out of the TREE, which the namespace does not shadow either.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$*"; }
@@ -104,6 +116,7 @@ if [ -z "${WSYS_WCTL_BIN_DIR:-}" ]; then
 fi
 
 echo "== does a hamui app's v2 negotiation reach the window system?"
+info "$(priv_ns_describe)"
 
 # 0. THE MIRROR ASSERTION -- the probe below writes `version 2` to <wid>/wctl
 #    because that is what lib/hamui.ad does. If that stops being true, this

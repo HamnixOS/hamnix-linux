@@ -9,6 +9,23 @@
 #
 # Offscreen only: /dev/fb is a plain file, input is a file of evdev records.
 set -uo pipefail
+# PRIVATE NAMESPACE FIRST, and sourced by ABSOLUTE PATH because this script's
+# $ROOT is not the tree it lives in. "Offscreen only" above is true and is about
+# the DISPLAY; the filesystem is a separate question. wsysd's names are compiled
+# into it (/srv/wsys, /dev/shm/hamnix-wsys, /tmp/hamnix-wsys) and hamdesktop's
+# and hampanelscene's are too (/tmp/hamdesktop-wp.status, /tmp/.hamdesktop.src,
+# /tmp/hamnix-panel.health) -- the table is in tests/linux/private_ns.sh -- and
+# this machine's own live desktop holds every one of them.
+#
+# THIS SCRIPT RUNS THREE ARMS BACK TO BACK AND COMPARES THEM, so contamination
+# here is not untidiness: a segment one arm leaves behind is load the next arm
+# measures, and the whole file exists to attribute a per-phase difference
+# between the arms. It costs the GPU nothing -- the namespace shadows /tmp,
+# /dev/shm and /srv and not /dev/dri or the ICD, measured in
+# tests/linux/pixcmp.sh, whose GPU arm still finds the RTX 3090 inside it.
+PRIVNS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$PRIVNS_HOME/private_ns.sh"
+priv_ns_reexec "$@"
 ROOT=/home/david/hamnix-linux/.claude/worktrees/agent-ad4474044a63d6c8a
 cd "$ROOT"
 BIN="${BIN:-/home/david/.hamnix-build/vk-present-readback/bin}"
@@ -45,6 +62,7 @@ run() {  # label  icd
     echo "   (workdir kept: $W)"
 }
 
+echo "=== $(priv_ns_describe)"
 W0="$(mktemp -d -p /home/david/.hamnix-build/vk-present-readback noicd.XXXXXX)"
 mkdir -p "$W0/noicd"
 run "SOFTWARE" "$W0/noicd/none.json"

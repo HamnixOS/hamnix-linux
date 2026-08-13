@@ -12,6 +12,22 @@
 #
 # PASS/FAIL, not informational: this is a gate.
 set -uo pipefail
+# PRIVATE NAMESPACE FIRST, and sourced by ABSOLUTE PATH because this script's
+# $ROOT is not the tree it lives in. wsysd's names are compiled into it
+# (/srv/wsys, /dev/shm/hamnix-wsys, /tmp/hamnix-wsys) and hamdesktop's and
+# hampanelscene's are too (/tmp/hamdesktop-wp.status, /tmp/.hamdesktop.src,
+# /tmp/hamnix-panel.health) -- the table is in tests/linux/private_ns.sh -- and
+# this machine's own live desktop holds every one of them.
+#
+# IT MATTERS MORE HERE THAN ALMOST ANYWHERE, because what this gate measures is
+# a CPU PERCENTAGE at rest. A stray desktop process attaching to a segment this
+# run left in /dev/shm is not a tidiness problem, it is load, and load is the
+# measurement. Nothing here asserts about a uid, so the helper's one fidelity
+# cost (euid 0 inside) touches nothing; $BIN and $W stay under
+# $HOME/.hamnix-build, which the helper does not shadow.
+PRIVNS_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$PRIVNS_HOME/private_ns.sh"
+priv_ns_reexec "$@"
 ROOT=/home/david/hamnix-linux/.claude/worktrees/agent-ad4474044a63d6c8a
 cd "$ROOT"
 BIN="${BIN:-/home/david/.hamnix-build/vk-present-readback/bin}"
@@ -20,6 +36,7 @@ REPS="${REPS:-3}"       # a single sample at this level is noise, see below
 LIMIT_PCT="${LIMIT_PCT:-5}"          # idle budget for wsysd, per cent of a core
 LABEL="${LABEL:-idle}"
 
+echo "idle_gate: $(priv_ns_describe)"
 W="$(mktemp -d -p /home/david/.hamnix-build/vk-present-readback ig.XXXXXX)"
 mkdir -p "$W/noicd"
 export HAMWSYS="$W/s" HAMWSYS_BB="$W/b" HAMWSYS_IMG="$W/i"
