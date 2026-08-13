@@ -236,6 +236,17 @@ def emit_dec(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
 # Before this, the installed disk inherited whatever random GUID sgdisk chose
 # and the copied UKI went looking for the BUILD HOST's partition, which no
 # installed machine has.
+#
+# THE COST OF DOING IT THIS WAY ROUND, said here rather than discovered later:
+# the installed disk and the medium it was installed from now carry the SAME
+# partition GUID, so a machine booted with the USB stick still plugged in has
+# two partitions answering to one name. user/linux-syscalls.c's resolver walks
+# every disk for exactly this reason and says so by name when it finds a
+# second, and it mounts the first. The clean fix is for this program to choose
+# a FRESH guid and rewrite the 36 bytes of it inside the copied BOOTX64.EFI --
+# the string is the same length, so it is a byte replacement rather than a PE
+# edit -- and that is the next piece of work here, not something this one
+# quietly pretends to have done.
 partuuid_buf: Array[64, uint8]
 
 

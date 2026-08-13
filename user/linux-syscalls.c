@@ -3394,9 +3394,16 @@ static int scan_partitions(const char *want_partuuid, const char *want_uuid,
                        "'#sys' /sys` done?\n", strerror(errno));
         return 0;
     }
+    /* EVERY disk is walked even after a match, and that is deliberate. An
+     * installed machine and the USB stick it was installed from carry the SAME
+     * partition GUID -- user/hlinstall.ad gives the target the identity the
+     * boot image it copies already names, because it cannot rewrite a PE
+     * section -- so "two partitions answer to this name" is a real, reachable
+     * state, and picking the first one silently is how a machine boots off the
+     * stick still in its side and nobody can tell. */
     int hit = 0, seen = 0;
     struct dirent *de;
-    while (!hit && (de = readdir(d))) {
+    while ((de = readdir(d))) {
         if (de->d_name[0] == '.') continue;
         char pdir[512];
         snprintf(pdir, sizeof pdir, "/sys/block/%s", de->d_name);
@@ -3423,14 +3430,19 @@ static int scan_partitions(const char *want_partuuid, const char *want_uuid,
                 bootmsg(3, "sysroot:   %-16s PARTUUID=%s UUID=%s\n", dev,
                         have_pu ? pu : "(no GPT entry)",
                         have_fu ? fu : "(no ext4 superblock)");
-            if (want_partuuid && have_pu && !strcasecmp(pu, want_partuuid)) {
-                snprintf(out, outn, "%s", dev);
-                hit = 1;
-            } else if (want_uuid && have_fu && !strcasecmp(fu, want_uuid)) {
-                snprintf(out, outn, "%s", dev);
-                hit = 1;
+            int match = (want_partuuid && have_pu
+                         && !strcasecmp(pu, want_partuuid))
+                     || (want_uuid && have_fu && !strcasecmp(fu, want_uuid));
+            if (match) {
+                if (!hit)
+                    snprintf(out, outn, "%s", dev);
+                else
+                    bootmsg(3, "sysroot: WARNING: %s answers to the same "
+                               "identifier as %s. The FIRST one is being "
+                               "mounted; if the wrong system comes up, that is "
+                               "why -- unplug the other disk.\n", dev, out);
+                hit++;
             }
-            if (hit && !report) break;
         }
         closedir(pd);
     }
