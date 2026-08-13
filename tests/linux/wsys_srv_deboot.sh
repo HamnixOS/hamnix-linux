@@ -187,7 +187,18 @@ for pid in os.listdir('/proc'):
                 comm = '?'
             for k in want[ino]:
                 found.append((k, int(pid), comm, fd))
-            break
+            # NO `break` HERE, AND THE BREAK THAT WAS HERE MADE THIS GATE LIE.
+            # It stopped at the FIRST matching descriptor in a process, so a
+            # client holding BOTH a mutation connection and a read connection
+            # was counted once, as whichever fd number the kernel listed first
+            # -- always the mutation one, dialled earlier and given the lower
+            # number. This gate therefore reported "0 processes hold a READ
+            # connection" for a desktop in which hamdesktop held fd 3 on the
+            # srv socket and fd 4 on the rd socket at the same instant,
+            # measured directly out of /proc/<pid>/fd. It read as a fact about
+            # the desktop ("no component performs a routed read") and it was a
+            # fact about this loop. Found while routing `open`, whose whole
+            # cost question is how many read connections a desktop holds.
 for k, pid, comm, fd in sorted(found, key=lambda r: (r[0], r[1])):
     print('%s %d %s fd=%s' % (k, pid, comm, fd))
 PY

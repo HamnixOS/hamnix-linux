@@ -314,6 +314,41 @@ enum {
      * leaves: 0 means /dev/wsys itself, non-zero means /dev/wsys/<wid>, and
      * the two answers are different sets of names. */
     WSRV_LEAF_DIR     = 8,         /* /dev/wsys, /dev/wsys/<wid> — directory */
+    /* STAGE 10 — EXISTENCE ITSELF, AND IT IS NOT A FILE.  Every other leaf in
+     * this enum names something a caller can read; this one names the QUESTION
+     * every arm of hamwsys_open() asks before it reads anything, and asks today
+     * of the mapped window table: `win_find(f->wid)`.
+     *
+     * docs/wsys_server_design.md §7.1(2): "A client with no mapping cannot open
+     * a leaf, so existence ... must become a server answer before the mapping
+     * can go.  This is the largest single piece of unbuilt work in stage 7."
+     * Stage 9 routed the three leaves that REPORT attributes; the leaves that
+     * report none -- scene, the four rings, keys, backbuffer, draw/images,
+     * draw/image/<n> -- still learn a window exists from the table, and the
+     * ENOENT they answer for an absent wid is itself the fact stage 9 is
+     * withholding one path component away.  Measured, unrouted, uid 1002
+     * owning nothing: `cat /dev/wsys/<victim>/draw/images` SUCCEEDS on a live
+     * window and is ENOENT on a dead one, so the exit code alone enumerates
+     * the table.
+     *
+     * THE ANSWER IS A RETURN CODE AND NOT A PAYLOAD: rc 0 means "that window
+     * exists and you may have it", -ENOENT means "no", and there is nothing to
+     * copy.  The predicate is the per-window rule stage 9 established --
+     * `hostowner() || owns_wid_ancestry(wid)` -- because that is what
+     * <wid>/ctl and <wid>/wctl already answer to, and a device that answered
+     * "does it exist" to a looser rule than "what is it" would be a gate on
+     * one of two spellings, which this file has now refused to build three
+     * times.
+     *
+     * THE CLIENT CACHES A YES AND NEVER A NO, and that is what keeps this off
+     * the per-frame path.  A grant is one round trip per (process, window) for
+     * the life of the process -- an application opens its own /keys and /event
+     * every frame -- while a refusal is re-asked every time, so a window that
+     * comes into existence after a probe is not remembered as absent.  The
+     * cached YES is not a bypass: win_find() still runs behind it, so a window
+     * destroyed after the grant is still ENOENT, and the cache is dropped
+     * whenever the process's uid changes. */
+    WSRV_LEAF_EXISTS  = 9,         /* "does <wid> exist, and may I have it"  */
 };
 
 /* THE SERVER SIDE. wsysd calls claim() before it touches /dev/wsys at all --
