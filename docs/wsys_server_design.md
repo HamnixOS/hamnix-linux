@@ -1030,14 +1030,36 @@ is `srv_is_server`, so it never dials. **The leaves stage 9 routed are read by
 tools, not by the desktop — which is the same thing as saying the callers it now
 refuses are exactly the callers it meant to refuse.**
 
-**THE COST NUMBERS FROM THAT RUN ARE NOT ATTRIBUTABLE AND PART OF THE NOISE WAS
-MINE.** The gate's own verdict is `NOT ATTRIBUTABLE: peak loadavg 3.95`, and the
-unrouted arm was sampled at loadavg 2.86 with 2 bound wsys servers against the
-routed arm's 3.95 with 6 — because this stage's own negative-control gate runs
-were on the host during the routed half. Recorded rather than quoted: 264/283/307
-fps unrouted against 256/257/246 routed, input-to-pixel p50 0.40 ms against 0.47,
-p95 0.60 against 0.59. **These do not separate routing from the neighbours and
-must be re-taken quiet before anyone believes them.**
+**THE GATE WAS RUN TWICE — before and after the reap fix below — AND IS 19/0
+BOTH TIMES.** The second run is the one to read: the first was taken with this
+stage's own negative-control gate runs on the host, so its unrouted arm sat at
+loadavg 2.86 and its routed arm at 3.95, which is contamination I caused.
+
+**AND NEITHER RUN CAN MEASURE THIS STAGE'S COST AT ALL, WHICH IS THE HONEST
+THING TO SAY ABOUT BOTH TABLES.** The desktop holds ZERO read connections, so
+not one routed read happens in either arm: every fps difference below is stage
+2–8's mutation routing being re-measured, not stage 9's. **The cost of a routed
+attribute read was not measured on this desktop because this desktop does not
+perform one.** What would have to be measured is a tool — a `cat` of a window's
+`ctl` — and stage 7 already priced that shape (~2 ms idle, 6–7 ms against a
+saturated compositor) without re-taking it here.
+
+Recorded rather than quoted, second run, gate verdict `NOT ATTRIBUTABLE: peak
+loadavg 2.98`:
+
+| ~330 fps | unrouted | routed | Δ |
+|---|---|---|---|
+| pointer only | 333.5 | 315.7 | −17.8 |
+| window drag | 334.6 | 323.5 | −11.1 |
+| drag + pointer | 333.1 | 282.5 | −50.6 |
+
+`wsysd` sits at 99.7–99.9% of a core in every arm of both runs, so the CPU
+column cannot discriminate. Input-to-pixel is indistinguishable: p50 0.35 ms
+against 0.36, mean 0.36 against 0.37, p95 0.43 against 0.45, max 0.51 against
+0.54. **The fps column disagrees with stage 7's own two runs, which disagreed
+with each other on the SIGN at a smaller magnitude (±13 fps), so the −50.6 is
+not offered as a finding — the run-to-run spread on this measurement has always
+exceeded the arm-to-arm one, and nothing here changes that.**
 
 **A DEFECT THIS STAGE INTRODUCED AND CAUGHT BY READING, WHICH IS THE MOST
 PORTABLE THING HERE.** `snap_dir()` — the in-process answer for `/dev/wsys` —
@@ -1063,6 +1085,26 @@ that field is wsysd, which never routes, and no shipped client reads its own
 `<wid>/ctl` at all. If one ever does, the fix is for the client to keep the
 in-process answer for its OWN window, and **not** for the server to invent a
 memfd it does not hold, which is the `pix_get(wid, 0)` trap stage 6 recorded.
+
+**REGRESSIONS, RUN RATHER THAN ASSUMED.** `wsys_enum_policy.sh` **9/0** (stage
+4's policy, the leaf next door to the three routed here), `wsys_srv_readlat.sh`
+**7/0** (the read path's latency, the one gate that would notice the read server
+getting slower), `wsys_srv_wctl.sh` **18/0**, `wsys_wctl.sh` **6/0**,
+`wsys_srv_identity.sh` **17/0**, `wsys_srv_connown.sh` **10/0**,
+`wsys_srv_scene.sh` **8/0**.
+
+`gates_are_private.sh` is **2 passed, 1 failed**, and **the failure is not this
+stage's**: it names `tests/linux/wsys_srv_ceiling.sh` (added by commit
+`44412d29`) as starting the window system without isolating itself. Checked by
+running the base tree's own copy of the gate against the base tree — **it fails
+there too**, so the "3 passed / 0 failed" this stage was briefed with is out of
+date rather than broken here. `wsys_srv_attrread.sh` isolates through
+`priv_ns_reexec` and is not among the flagged. `wsys_srv_ceiling.sh` itself was
+**NOT run** — it is the gate on the read path's fail-closed ceiling and is
+therefore the one most worth running against this change, but running an
+unisolated window-system gate on this host is what that failure is warning
+about. **That is a hole in this stage's evidence and it is named rather than
+papered over.**
 
 ### What stage 9 did NOT do
 
