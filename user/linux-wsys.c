@@ -3393,6 +3393,15 @@ static void sink_publish(struct wsink *s, const uint8_t *body, uint64_t n);
 static int snap_windows(struct hamwsys_file *f);
 static int snap_screen(struct hamwsys_file *f);
 static int snap_pool(struct hamwsys_file *f);
+/* Stage 9's three.  snap_win_ctl needs the row it is reporting on, so it takes
+ * one; snap_dir reads f->wid to tell /dev/wsys from /dev/wsys/<wid>.  There is
+ * no snap_wctl: the live-rect answer is built inline in hamwsys_open, so the
+ * read server calls a small extractor (srd_wctl) that formats the same five
+ * fields from the same row. */
+static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v);
+static int snap_win_wctl(struct hamwsys_file *f, const struct wwin *v);
+static int snap_dir_tier(struct hamwsys_file *f, int list_wids);
+static int snap_dir(struct hamwsys_file *f);
 
 /* Stage 4's read server, forked by hamwsys_srv_listen below it. */
 static void srd_fork(void);
@@ -3996,6 +4005,24 @@ int hamwsys_srv_service(void)
  * which is the success-shaped failure this tree refuses everywhere else.
  */
 
+/* THIS PROCESS IS THE READ SERVER, AND IT EXISTS BECAUSE STAGE 9 ROUTED THE
+ * DIRECTORY.  This file's header for the read server says what it may not do,
+ * and the list is short on purpose: it answers READ, HELLO and STAT, and "two
+ * writers to the window table would put the ordering guarantee stage 2 bought
+ * back into doubt for no gain."
+ *
+ * `snap_dir()` -- the in-process answer for /dev/wsys -- OPENS WITH
+ * win_reap_dead(), which clears `used` on every row whose owner has exited,
+ * bumps shm->gen, releases pixel/backbuffer/image slots and drops keystroke
+ * binds.  In a client that is a self-serving tidy-up of the caller's own view.
+ * In the READ SERVER it is a second writer to the window table, reached BY AN
+ * ARBITRARY CLIENT'S READ -- so `cat /dev/wsys` from any process on the box
+ * would destroy rows in a process that is explicitly forbidden to mutate, and
+ * would do it from the one socket whose default arm is `-ENOSYS`.  Found while
+ * routing the leaf rather than after; the reap stays with the compositor, which
+ * does it every frame in scan_windows anyway, so nothing is lost but the
+ * second writer. */
+static int  srd_is_child = 0;
 static int  srd_lfd = -1;
 static int  srd_ep  = -1;
 static struct wsrv_conn srd_conn[WSRV_CONN_MAX];
@@ -4096,10 +4123,18 @@ static int srd_enum_tier(uid_t uid, pid_t pid, int *by_hostowner)
 }
 
 /* One read, answered.  Returns the negative errno, or 0 with the answer in
- * *f (which the caller frees). */
-static int srd_answer(struct wsrv_conn *c, int leaf, struct hamwsys_file *f)
+ * *f (which the caller frees).
+ *
+ * `wid` COMES OFF THE WIRE AND IS NOT OPTIONAL SINCE STAGE 9.  The three
+ * leaves stage 4 routed are all singular files and ignored it; wid/ctl,
+ * wid/wctl and the directory all address a particular row, and a server that
+ * answered them out of a zeroed f->wid would report on window 0 -- which is no
+ * window -- for every caller. */
+static int srd_answer(struct wsrv_conn *c, int leaf, int32_t wid,
+                      struct hamwsys_file *f)
 {
     memset(f, 0, sizeof *f);
+    f->wid = wid;
     errno = 0;
     switch (leaf) {
     case WSRV_LEAF_WINDOWS: {
@@ -4130,6 +4165,126 @@ static int srd_answer(struct wsrv_conn *c, int leaf, struct hamwsys_file *f)
         return snap_screen(f) < 0 ? (errno ? -errno : -EIO) : 0;
     case WSRV_LEAF_POOL:
         return snap_pool(f) < 0 ? (errno ? -errno : -EIO) : 0;
+
+    /* ==================================================================
+     * STAGE 9 — THE ATTRIBUTE READS, AND THE RULE IS THE LEAF'S SHAPE
+     * ==================================================================
+     * `windows` was never the only way to learn which windows exist, and
+     * §7.1 of docs/wsys_server_design.md measured the other three with the
+     * policy live and working:
+     *
+     *     cat /dev/wsys        -> ctl self windows screen pool 2
+     *     cat /dev/wsys/2/ctl  -> 2 100 100 300 200 5 1 1 1 0 0 0 0 0
+     *     cat /dev/wsys/2/wctl -> 100 100 300 200 click
+     *
+     * from a uid-1002 process owning nothing, against a uid-1001 victim, on
+     * the same run on which the routed `windows` read answered that same
+     * process EMPTY.  WHAT STAGE 4 WITHHELD WAS THE TITLE AND ONLY THE TITLE.
+     *
+     * TWO RULES, AND THE SPLIT IS NOT A COMPROMISE -- IT IS THE SHAPE OF THE
+     * QUESTION EACH LEAF ASKS.
+     *
+     *   /dev/wsys, /dev/wsys/<wid>   THE ENUMERATION TIER (srd_enum_tier).
+     *       A directory is a question about the SET, and `windows` is the same
+     *       question under another name -- so it takes the same answer, or the
+     *       policy is a gate on one of two spellings, which this file has twice
+     *       refused to build (the wallpaper sink; `wctl move` against `ctl
+     *       geometry`).  There is no per-window rule to apply here: the caller
+     *       has not named a window, it is asking which ones there are.
+     *
+     *   <wid>/ctl, <wid>/wctl        hostowner() || owns_wid_ancestry(wid).
+     *       These name ONE window, and the rule is the one their own WRITE arms
+     *       already apply -- hamwsys_open's for_write gate and
+     *       hamwsys_write_inner's wctl arm are both `hostowner() ||
+     *       owns_wid()` -- and the one the four rings took in
+     *       THE FOUR RINGS THAT HAD NO OWNER CHECK AT ALL.  A leaf whose read
+     *       and write answer to different rules is two policies wearing one
+     *       path.
+     *
+     * owns_wid_ancestry() AND NOT owns_wid(), for srd_enum_tier's own reason:
+     * since stage 5 owns_wid() is the CONNECTION question, and the read server
+     * is a separate process holding no bindings, so it would answer 0 for every
+     * caller on the desktop.  "Does this process own this window" is the
+     * question a read can be gated on here, and the walk is what answers it.
+     *
+     * THE PER-WINDOW RULE IS THE TIGHTER ONE AND IT WAS MEASURED FREE, WHICH
+     * CORRECTS THE OBVIOUS WORRY.  The fear is that it denies the panel and the
+     * compositor attributes of windows they do not own -- which is their job.
+     * Swept: the ONLY reader of a foreign <wid>/ctl in the tree is
+     * user/wsysd.ad's load_window(), called from scan_windows() for every wid
+     * in the directory, and wsysd is srv_is_server (it never routes) and is the
+     * host owner besides, so it is admitted by the first clause exactly as it
+     * is admitted by the write gate today.  hampanelscene's taskbar reads
+     * /dev/wsys/windows and never a foreign <wid>/ctl; lib/hamui.ad, hamUId,
+     * hamdesktop and hamappmenu open these two leaves WRITE-ONLY.  Nothing on
+     * the desktop needs another window's geometry, so nothing pays for this.
+     *
+     * ENOENT AND NOT EPERM, restating stage 4's reason: "there is no such
+     * window" withholds the existence of the window system and EPERM
+     * advertises it.  It is also what an unrouted reader gets for a wid that
+     * really is absent, so a prober cannot separate the two.
+     *
+     * WHAT THIS STILL DOES NOT BUY, said here because no gate can say it: the
+     * TITLE is still handed to every window owner by `windows`, so an
+     * application still learns that a window called "Bank" exists.  Closing
+     * that is the dedicated group on the panel's spawn that stage 4 scoped and
+     * did not build.  What this closes is the process that owns NOTHING -- the
+     * `cat`, the script, the background daemon, the compromised non-graphical
+     * service -- and, for the two per-window leaves, every application on the
+     * desktop as well.
+     */
+    case WSRV_LEAF_WIN_CTL:
+    case WSRV_LEAF_WIN_WCTL:
+    case WSRV_LEAF_DIR: {
+        int kind = (leaf == WSRV_LEAF_WIN_CTL)  ? HAMWSYS_WIN_CTL
+                 : (leaf == WSRV_LEAF_WIN_WCTL) ? HAMWSYS_WIN_WCTL
+                 : HAMWSYS_DIR;
+        int host = 0, allow, own = -1, tier = -1;
+        if (kind == HAMWSYS_DIR) {
+            tier  = srd_enum_tier(c->uid, c->pid, &host);
+            allow = (tier == SRD_ENUM_FULL);
+        } else {
+            /* The caller is installed for the same reason srd_enum_tier
+             * installs it: asked without this, hostowner() and the walk would
+             * both answer about the READ SERVER -- which runs as the segment's
+             * owner and is an ancestor of half the desktop, so every check
+             * would say yes and the mediator would be a rubber stamp. */
+            srv_as_caller(c->uid, c->pid);
+            host  = hostowner();
+            own   = owns_wid_ancestry(f->wid);
+            allow = host || own;
+            srv_as_self();
+        }
+        if (srv_trace())
+            fprintf(stderr, "wsrvtrace: read caller uid=%u pid=%ld -> "
+                            "leaf=%s wid=%d hostowner=%d ancestry=%d tier=%s "
+                            "-> %s\n",
+                    (unsigned)c->uid, (long)c->pid, opc_leafname(kind),
+                    (int)f->wid, host, own,
+                    tier < 0 ? "n/a" : (tier == SRD_ENUM_FULL ? "FULL" : "EMPTY"),
+                    allow ? "FULL" : "EMPTY");
+        if (!allow) {
+            srd_n_empty++;
+            /* THE ROOT DIRECTORY IS THE ONE THAT STILL ANSWERS, and it must:
+             * /dev/wsys is a directory, and a reader that cannot list it at all
+             * cannot reach `windows` -- the very file whose empty answer is how
+             * this policy says no.  So the fixed names stay and the WIDS GO,
+             * which is the shape `windows` already has: the caller learns a
+             * window system is there (it opened the device) and learns nothing
+             * about who is using it. */
+            if (kind == HAMWSYS_DIR && f->wid == 0)
+                return snap_dir_tier(f, 0) < 0 ? (errno ? -errno : -EIO) : 0;
+            return -ENOENT;
+        }
+        srd_n_full++;
+        if (kind == HAMWSYS_DIR)
+            return snap_dir(f) < 0 ? (errno ? -errno : -EIO) : 0;
+        struct wwin *v = win_find(f->wid);
+        if (!v) return -ENOENT;
+        if (kind == HAMWSYS_WIN_WCTL)
+            return snap_win_wctl(f, v) < 0 ? (errno ? -errno : -EIO) : 0;
+        return snap_win_ctl(f, v) < 0 ? (errno ? -errno : -EIO) : 0;
+    }
     default:
         return -EINVAL;
     }
@@ -4174,7 +4329,7 @@ static void srd_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
         srd_n_read++;
         int leaf = (h->flags >> WSRV_LEAF_SHIFT) & 0xff;
         struct hamwsys_file f;
-        int rc = srd_answer(c, leaf, &f);
+        int rc = srd_answer(c, leaf, h->wid, &f);
         if (rc < 0) {
             srd_n_bad++;
             free(f.snap);
@@ -4321,6 +4476,10 @@ static void srd_fork(void)
     }
 
     /* ---- the child ---- */
+    /* SET BEFORE ANYTHING ELSE, because it is what keeps this process a READER.
+     * See srd_is_child's declaration: stage 9 routes the directory, and the
+     * directory's in-process answer REAPS DEAD WINDOWS. */
+    srd_is_child = 1;
     srd_lfd = fd;
     srd_ep  = ep;
     srv_lfd = -1;                    /* the frame loop's socket is not ours */
@@ -5060,6 +5219,12 @@ static int srv_route_read(struct hamwsys_file *f)
     case HAMWSYS_WINDOWS: leaf = WSRV_LEAF_WINDOWS; break;
     case HAMWSYS_SCREEN:  leaf = WSRV_LEAF_SCREEN;  break;
     case HAMWSYS_POOL:    leaf = WSRV_LEAF_POOL;    break;
+    /* STAGE 9.  The three leaves that answered "which windows exist, and what
+     * are they" in process, with no check of any kind, while the routed
+     * `windows` read next door was refusing the same caller. */
+    case HAMWSYS_WIN_CTL:  leaf = WSRV_LEAF_WIN_CTL;  break;
+    case HAMWSYS_WIN_WCTL: leaf = WSRV_LEAF_WIN_WCTL; break;
+    case HAMWSYS_DIR:      leaf = WSRV_LEAF_DIR;      break;
     default: return 0;
     }
     if (!srv_enabled() || srv_is_server) return 0;
@@ -7591,6 +7756,19 @@ static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v)
      * the frame clock exactly as a late scene hand-up does.  It does NOT listen
      * here: a client reading its OWN ctl must never try to become the
      * compositor (which on a single-uid host it otherwise could). */
+    /* STAGE 9 ROUTES THIS READ, AND FIELD 11 IS THE ONE FIELD THAT IS NOT THE
+     * SAME ANSWER FROM THE SERVER.  bbmap is PER PROCESS, so the read server
+     * -- which never holds a window's memfd -- reports 0 here where the owner
+     * or the compositor would report its own gen.  Written down rather than
+     * hidden, and it costs nothing measurable today for a reason that is a
+     * sweep and not a hope: the only reader of this field in the tree is
+     * user/wsysd.ad's load_window(), and wsysd is srv_is_server so its read is
+     * never routed.  No shipped client reads its own <wid>/ctl at all -- every
+     * other site in user/*.ad and lib/*.ad opens this leaf write-only.  If one
+     * ever does, this is the field that will be stale and the fix is for the
+     * client to keep the in-process answer for its OWN window rather than for
+     * the server to invent a memfd it does not hold (see the pix_get(wid, 0)
+     * trap stage 6 recorded). */
     int bslot = bb_find(v->wid);
     int32_t bgen = (bslot >= 0 && bbmap[bslot].hdr) ? (int32_t)bbmap[bslot].hdr->gen : 0;
     int32_t igen = 0;
@@ -7611,7 +7789,33 @@ static int snap_win_ctl(struct hamwsys_file *f, struct wwin *v)
     return snap_set(f, b, n);
 }
 
-static int snap_dir(struct hamwsys_file *f)
+/* /dev/wsys/<wid>/wctl's READ answer: the window AS IT IS COMPOSITED RIGHT
+ * NOW, "<x> <y> <w> <h> <focus>\n".  A function rather than four lines inline
+ * in hamwsys_open because stage 9 routes this read, so the read server has to
+ * produce the identical bytes -- and this device has already paid, twice, for
+ * gating or formatting one spelling of a thing and not the other. */
+static int snap_win_wctl(struct hamwsys_file *f, const struct wwin *v)
+{
+    uint8_t b[96];
+    uint64_t n = put_int(b, 0, v->x);
+    b[n++] = ' '; n = put_int(b, n, v->y);
+    b[n++] = ' '; n = put_int(b, n, v->w);
+    b[n++] = ' '; n = put_int(b, n, v->h);
+    b[n++] = ' ';
+    const char *fm = win_focus_sloppy(v) ? "sloppy" : "click";
+    while (*fm) b[n++] = (uint8_t)*fm++;
+    b[n++] = '\n';
+    return snap_set(f, b, n);
+}
+
+/* `list_wids` IS STAGE 9'S ENUMERATION TIER, REACHING THE DIRECTORY.  The
+ * routed `windows` read has answered a window-less caller EMPTY since stage 4
+ * -- and `cat /dev/wsys` handed the same caller every used row's wid one path
+ * component up, out of shared memory, on the same run (docs 7.1).  A caller in
+ * the EMPTY tier gets the FIXED NAMES ONLY: it can still open `windows` (and
+ * be told nothing), still read `screen` and `pool` (which name no client), and
+ * learns not one wid.  Every in-process caller passes 1, exactly as before. */
+static int snap_dir_tier(struct hamwsys_file *f, int list_wids)
 {
     /* The runtime's directory reads are a packed "NAME\n" stream — the same
      * shape sys_open on a real directory produces (see linux-syscalls.c's
@@ -7620,13 +7824,17 @@ static int snap_dir(struct hamwsys_file *f)
     uint8_t buf[WSYS_MAX_WINDOWS * 8 + 256];
     uint64_t n = 0;
     if (f->wid == 0) {
-        win_reap_dead();           /* the compositor must not paint a dead one */
+        /* NOT IN THE READ SERVER -- see srd_is_child, which carries the whole
+         * argument.  win_reap_dead() WRITES the window table, and this function
+         * is now reachable from an arbitrary client's routed read. */
+        if (!srd_is_child)
+            win_reap_dead();       /* the compositor must not paint a dead one */
         const char *fixed[] = { "ctl", "self", "windows", "screen", "pool" };
         for (unsigned i = 0; i < sizeof fixed / sizeof fixed[0]; i++) {
             for (const char *c = fixed[i]; *c; c++) buf[n++] = (uint8_t)*c;
             buf[n++] = '\n';
         }
-        for (int i = 0; i < WSYS_MAX_WINDOWS; i++) {
+        for (int i = 0; list_wids && i < WSYS_MAX_WINDOWS; i++) {
             if (!shm->win[i].used) continue;
             n = put_int(buf, n, shm->win[i].wid);
             buf[n++] = '\n';
@@ -7642,6 +7850,8 @@ static int snap_dir(struct hamwsys_file *f)
     }
     return snap_set(f, buf, n);
 }
+
+static int snap_dir(struct hamwsys_file *f) { return snap_dir_tier(f, 1); }
 
 /* ------------------------------------------------------------------ *
  * open / read / write / close
@@ -7819,23 +8029,28 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
      * WORSE THAN ONE THAT ERRORS."  Reads are unrestricted, as they are there,
      * so a compositor can poll the line whoever spawned the client. */
     case HAMWSYS_WIN_WCTL: {
+        /* ROUTED BEFORE win_find, AND THE ORDER IS THE POINT.  win_find is a
+         * walk of the mapped table, so answering ENOENT from it first would
+         * tell a caller in the EMPTY tier whether the window exists -- which
+         * is the one bit this leaf is being routed to withhold. */
+        if (!for_write) { int r = srv_route_read(f); if (r) return r > 0 ? 0 : -1; }
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -1; }
         if (for_write) return 0;               /* verbs handled in the write */
-        uint8_t b[96];
-        uint64_t n = put_int(b, 0, v->x);
-        b[n++] = ' '; n = put_int(b, n, v->y);
-        b[n++] = ' '; n = put_int(b, n, v->w);
-        b[n++] = ' '; n = put_int(b, n, v->h);
-        b[n++] = ' ';
-        const char *fm = win_focus_sloppy(v) ? "sloppy" : "click";
-        while (*fm) b[n++] = (uint8_t)*fm++;
-        b[n++] = '\n';
-        return snap_set(f, b, n);
+        return snap_win_wctl(f, v);
     }
     case HAMWSYS_WIN_CTL: case HAMWSYS_WIN_SCENE: case HAMWSYS_WIN_KEYS:
     case HAMWSYS_WIN_POINTER: case HAMWSYS_WIN_EVENT: case HAMWSYS_WIN_TEXT:
     case HAMWSYS_WIN_CMD: {
+        /* STAGE 9, AND ONLY wid/ctl OF THESE SEVEN.  The four rings are
+         * closed by ring_read_allowed() below and keys is closed by name
+         * above; scene reads out of a per-window memfd the server does not
+         * hold.  wid/ctl was the one with no check at all, and it is routed
+         * BEFORE win_find for the reason spelled out at wctl: the ENOENT is
+         * itself the fact being withheld. */
+        if (f->leaf == HAMWSYS_WIN_CTL && !for_write) {
+            int r = srv_route_read(f); if (r) return r > 0 ? 0 : -1;
+        }
         struct wwin *v = win_find(f->wid);
         if (!v) { errno = ENOENT; return -1; }
         /* THE OWNER CHECK THE FOUR RINGS NEVER HAD -- see THE FOUR RINGS THAT
@@ -7930,7 +8145,14 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
         return for_write ? 0 : snap_windows(f);
     case HAMWSYS_SELF:    return for_write ? 0 : snap_self(f);
     case HAMWSYS_CTL:     return for_write ? 0 : snap_ctl(f);
-    case HAMWSYS_DIR:     return snap_dir(f);
+    case HAMWSYS_DIR:
+        /* STAGE 9 -- AND THIS IS THE LEAF THAT BYPASSED STAGE 4's POLICY.
+         * `cat /dev/wsys` lists every used row's wid, one path component above
+         * the `windows` file whose routed read was already answering the same
+         * caller EMPTY.  Routed, the EMPTY tier gets the fixed names and no
+         * wids; /dev/wsys/<wid> gets ENOENT. */
+        if (!for_write) { int r = srv_route_read(f); if (r) return r > 0 ? 0 : -1; }
+        return snap_dir(f);
     case HAMWSYS_SINK: {
         errno = 0;
         struct wsink *s = sink_find(f->name, for_write);

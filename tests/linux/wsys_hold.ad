@@ -167,6 +167,32 @@ def do_line(at: uint64, end: uint64):
             sys_close(lf)
         puts(1, ">LIST\n")
         return
+    # `slurp <path>` -- READ AN ARBITRARY /dev/wsys PATH FROM A PROCESS THAT
+    # OWNS A WINDOW, and print it between markers. Same reason `list` exists,
+    # one leaf wider: stage 9 routes the ATTRIBUTE reads (wid/ctl, wid/wctl and
+    # the directory) on stage 4's enumeration tier, so proving the rule is
+    # "owns a window" and not "is the host owner's uid" needs a reader at a
+    # NON-owner uid holding a window -- and `cat` holds none. It takes a whole
+    # path rather than a leaf because the window it reads is deliberately
+    # SOMEBODY ELSE'S: that is the case the panel and the compositor are.
+    if starts(at, end, "slurp ") != 0:
+        ns: uint64 = take(at + 6, end)
+        # take() appends a newline; a path must not carry one.
+        if ns > 0:
+            line[ns - 1] = 0
+        puts(1, "SLURP<")
+        sf: int32 = sys_open(cast[Ptr[char]](&line[0]))
+        if sf >= 0:
+            while 1 == 1:
+                k5: int64 = sys_read(sf, &pathbuf[0], 240)
+                if k5 <= 0:
+                    break
+                sys_write(1, &pathbuf[0], cast[uint64](k5))
+            sys_close(sf)
+        else:
+            puts(1, "OPENFAIL")
+        puts(1, ">SLURP\n")
+        return
     if starts(at, end, "scene ") != 0:
         n: uint64 = take(at + 6, end)
         winpath("scene")
