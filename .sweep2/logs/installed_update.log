@@ -1,0 +1,135 @@
+[iupd] the 'newer build' will be 1.0.23 (derived from the live repository's 1.0.22)
+[iupd] staging the image root
+[iupd] building the local channel at 1.0.23 (this is the 'newer build')
+[iupd] stamping the new hamnix-diff-1.0.23 with hamnix-update-1786617934-945202-30436
+[iupd] the published /bin/diff is cksum '2406463379 231088'
+[iupd] the published /bin/diff is md5 4aeb1334ba7e310b9c4fdbe0dccebded; the stamp stream is md5 c72c335d2e70f15d9a74d59f61774739
+[iupd] signed the local channel; the guest gets /etc/hpm/test-trusted.pub
+[iupd] local channel served at http://10.0.2.2:46563/ (pid 958337)
+[iupd] building an installed disk (phase-1 rc, phase-2 staged alongside it)
+[iupd] boot 1 of 2: install + update, through UEFI (up to 900s)
+[iupd] boot 2 of 2: the reboot (up to 600s)
+
+rc.boot: hamnix-linux (installed)
+rc.boot: network configured
+rc.boot: up
+[iupd] ===== PHASE 1: an installed machine updates itself: honoured, 2 panel(s)
+[iupd] dhcpc status: 0
+[iupd] address after dhcpc:
+[iupd] before-install /bin/diff:
+[iupd] before-install status: 1
+[iupd] probe: resolve 255.one
+[iupd] probe host status: 0
+[iupd] refresh from the real repository, no flags
+[iupd] plain refresh status: 0
+[iupd] refresh from the real repository, --allow-unsigned
+[iupd] refresh status: 0
+[iupd] install hamnix-diff
+[iupd] install status: 0
+[iupd] installed list:
+[iupd] p1 run the freshly installed binary (same files -> 0):
+[iupd] p1 diff-same status: 0
+[iupd] p1 run it again (different files -> 1, with output):
+[iupd] p1 diff-diff status: 1
+[iupd] ----- a newer build is published; update against it
+[iupd] update status: 0
+[iupd] list after update:
+[iupd] p1 cksum of /bin/diff after update:
+[iupd] p1 the stamp the new build carried:
+[iupd] p1 stamp status: 0
+[iupd] p1 run the UPGRADED binary (different files -> 1):
+[iupd] p1 upgraded diff status: 1
+[iupd] p1 stat of /etc/rc.boot after hpm ran:
+[iupd] p1 md5 of /etc/rc.boot after hpm ran:
+[iupd] p1 md5 of the binary the update installed:
+[iupd] p1 md5 of a stream:
+[iupd] p1 cksum with a file operand:
+[iupd] p1 head with a file operand:
+[iupd] PHASE1 DONE
+[iupd] PHASE1 SETTLED
+[iupd] p1 armed the next boot
+[iupd] p1 can this machine restart itself?
+
+rc.boot: hamnix-linux (installed)
+rc.boot: network configured
+rc.boot: up
+[iupd] ===== PHASE 2: the same disk, booted again, nothing rebuilt
+[iupd] p2 list:
+[iupd] p2 list status: 0
+[iupd] p2 cksum of /bin/diff:
+[iupd] p2 the stamp:
+[iupd] p2 stamp status: 0
+[iupd] p2 run the upgraded binary (same files -> 0):wsys: /dev/wsys/4/scene: this process neither owns window 4 nor holds its display list, so it cannot read it.
+[iupd] p2 diff-same status: 0
+[iupd] p2 run it again (different -> 1):
+[iupd] p2 diff-diff status: 1
+[iupd] p2 root refresh status: 0
+[iupd] p2 --- as the session user (uid 1001)
+[iupd] u1001 list:
+[iupd] u1001 list status: 0
+[iupd] u1001 run the upgraded binary:
+[iupd] u1001 diff status: 1
+[iupd] u1001 read the stamp:
+[iupd] u1001 stamp status: 0
+[iupd] u1001 refresh (root already made /tmp/hpm this boot):
+[iupd] u1001 refresh status: 0
+[iupd] u1001 search:
+[iupd] u1001 search status: 0
+[iupd] u1001 install (must be refused, by name):
+[iupd] u1001 install status: 1
+[iupd] u1001 did it write /bin anyway?
+[iupd] u1001 /bin/awk status: 1
+[iupd] PHASE2 DONE
+
+--- boot 1: an installed machine installs and updates itself
+iupd: PASS the installed root came online
+iupd: PASS dhcpc took a lease on the installed boot
+iupd: PASS dhcpc's address is the DHCP one  -> 'eth0  inet 10.0.2.15  netmask 255.255.255.0  (dhcp)'
+iupd: PASS the image did not already ship /bin/diff
+iupd: PASS the installed machine resolves 255.one
+iupd: PASS hpm refresh reached https://255.one/
+iupd: PASS  a bare 'hpm refresh' trusts https://255.one/
+iupd: PASS refresh exited 0 with --allow-unsigned
+iupd: PASS the real repository answered with packages
+iupd: PASS hpm install exited 0
+iupd: PASS the installed version is the published one  -> 'hamnix-diff  1.0.22  #hamnix-system'
+iupd: PASS the fresh install RUNS and says 'same'
+iupd: PASS the fresh install RUNS and says 'differ'
+iupd: PASS hpm update exited 0
+iupd: PASS the version MOVED to 1.0.23  -> 'hamnix-diff  1.0.23  #hamnix-system'
+iupd: PASS the bytes on disk are the bytes published  -> '2406463379 231088'
+iupd: PASS the edit landed: the stamp minted by THIS run  -> 'hamnix-update-1786617934-945202-30436'
+iupd: PASS the UPGRADED binary still runs
+iupd: PASS hpm left the machine's own /etc/rc.boot alone  -> 'abbd84396dcc1a5ece4b378d5d89de6d  /etc/rc.boot'
+iupd: PASS and it is not the initramfs rc wearing that name
+iupd: PASS md5sum agrees with GNU md5sum on a 150 KB file  -> '4aeb1334ba7e310b9c4fdbe0dccebded  /bin/diff'
+iupd: PASS md5sum agrees with GNU md5sum on a stream  -> 'c72c335d2e70f15d9a74d59f61774739  -'
+iupd: PASS cksum takes a FILE operand  -> '2406463379 231088 /bin/diff'
+iupd: PASS head takes a FILE operand instead of blocking on stdin  -> '# /etc/rc.boot.installed — the boot rc for an INSTALLED hamnix-linux system.'
+iupd: PASS phase 1 reached the end
+iupd: PASS the write to /etc landed (next boot armed)
+iupd: PASS the installed machine restarted ITSELF
+iupd: PASS and it was not the old missing-device fault
+
+--- boot 2: the same disk, booted again
+iupd: PASS the machine booted again after the update
+iupd: PASS it ran the rc phase 1 wrote (the /etc write persisted)
+iupd: PASS the version survived the reboot  -> 'hamnix-diff  1.0.23  #hamnix-system'
+iupd: PASS the BYTES survived the reboot  -> '2406463379 231088'
+iupd: PASS the stamp survived the reboot  -> 'hamnix-update-1786617934-945202-30436'
+iupd: PASS the upgraded binary runs after a reboot (same -> 0)
+iupd: PASS the upgraded binary runs after a reboot (differ -> 1)
+
+--- boot 2, as the desktop user (uid 1001)
+iupd: PASS uid 1001 can list what root installed  -> 'hamnix-diff  1.0.23  #hamnix-system'
+iupd: PASS uid 1001 can RUN the upgraded binary
+iupd: PASS uid 1001 can read the file the update installed into /etc  -> 'hamnix-update-1786617934-945202-30436'
+iupd: PASS uid 1001 can refresh through a root-made /tmp/hpm
+iupd: PASS uid 1001 can search the index
+iupd: PASS uid 1001 is REFUSED an install, by name
+iupd: PASS and nothing landed in /bin from it
+iupd: PASS phase 2 reached the end
+
+iupd: PASS the disk image changed on disk (3218c19920dc90c7db67ba5bfab44d54 -> e3132a96a007832b3a85fe3d17e46b7c)
+
+(logs: build/installedupd/boot1.log build/installedupd/boot2.log; channel: build/installedupd/repo; stamp: hamnix-update-1786617934-945202-30436)

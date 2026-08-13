@@ -1,0 +1,118 @@
+[alpine] fetching https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0 59 3611k   59 2157k    0     0  5823k      0 --:--:-- --:--:-- --:--:-- 5814k100 3611k  100 3611k    0     0  7506k      0 --:--:-- --:--:-- --:--:-- 7493k
+[alpine] alpine-minirootfs-3.24.1-x86_64.tar.gz sha256 OK
+[alpine] bootstrapping Alpine v3.24 (3.24.1) into build/image/alpine.ext4 (2G)
+[alpine] GUI set: xwayland xkeyboard-config xeyes xclock xdpyinfo xprop font-dejavu jwm xterm
+[alpine] apk add xwayland xkeyboard-config xeyes xclock xdpyinfo xprop font-dejavu jwm xterm
+( 1/90) Installing libexpat (2.8.2-r0)
+( 2/90) Installing brotli-libs (1.2.0-r1)
+( 3/90) Installing libbz2 (1.0.8-r6)
+( 4/90) Installing libpng (1.6.58-r1)
+( 5/90) Installing freetype (2.14.3-r0)
+( 6/90) Installing fontconfig (2.17.1-r1)
+( 7/90) Installing encodings (1.1.0-r0)
+( 8/90) Installing libfontenc (1.1.9-r0)
+( 9/90) Installing mkfontscale (1.2.4-r0)
+(10/90) Installing font-dejavu (2.37-r6)
+(11/90) Installing libxau (1.0.12-r0)
+(12/90) Installing libmd (1.2.0-r0)
+(13/90) Installing libbsd (0.12.2-r0)
+(14/90) Installing libxdmcp (1.1.5-r1)
+(15/90) Installing libxcb (1.17.0-r2)
+(16/90) Installing libx11 (1.8.13-r0)
+(17/90) Installing libxext (1.3.7-r0)
+(18/90) Installing libxrender (0.9.12-r0)
+(19/90) Installing libxft (2.3.9-r0)
+(20/90) Installing libxinerama (1.1.6-r0)
+(21/90) Installing libice (1.1.2-r0)
+(22/90) Installing libuuid (2.42.1-r0)
+(23/90) Installing libsm (1.2.6-r0)
+(24/90) Installing libxt (1.3.1-r0)
+(25/90) Installing libxmu (1.3.1-r0)
+(26/90) Installing libxpm (3.5.19-r0)
+(27/90) Installing pixman (0.46.4-r0)
+(28/90) Installing cairo (1.18.4-r1)
+(29/90) Installing libffi (3.5.2-r1)
+(30/90) Installing libintl (1.0-r0)
+(31/90) Installing libeconf (0.8.3-r0)
+(32/90) Installing libblkid (2.42.1-r0)
+(33/90) Installing libmount (2.42.1-r0)
+(34/90) Installing pcre2 (10.47-r1)
+(35/90) Installing glib (2.88.1-r1)
+(36/90) Installing libjpeg-turbo (3.1.3-r0)
+(37/90) Installing fribidi (1.0.16-r3)
+(38/90) Installing graphite2 (1.3.14-r6)
+(39/90) Installing harfbuzz (13.2.1-r0)
+(40/90) Installing pango (1.57.1-r0)
+(41/90) Installing libdav1d (1.5.3-r0)
+(42/90) Installing libgcc (15.2.0-r5)
+(43/90) Installing pkgconf (2.5.1-r0)
+(44/90) Installing libstdc++ (15.2.0-r5)
+(45/90) Installing xz-libs (5.8.3-r0)
+(46/90) Installing libxml2 (2.13.9-r2)
+(47/90) Installing shared-mime-info (2.4-r7)
+(48/90) Installing libcap2 (2.78-r0)
+(49/90) Installing bubblewrap (0.11.2-r0)
+(50/90) Installing lcms2 (2.19-r0)
+(51/90) Installing libseccomp (2.6.0-r2)
+(52/90) Installing libglycin (2.1.5-r0)
+  Executing libglycin-2.1.5-r0.post-install
+  * glycin loaders got split into their individual subpackages.
+  * By default, only glycin-image-rs & glycin-svg are installed.
+  * Additional loader subpackages are glycin-heif, glycin-jxl & glycin-raw.
+  * 
+  * To install all available loaders, install glycin-loaders-all.
+  * 
+  * Also the glycin-thumbnailer got subpackaged and isn't installed by default.
+(53/90) Installing glycin-image-rs (2.1.5-r0)
+(54/90) Installing glycin-svg (2.1.5-r0)
+(55/90) Installing gdk-pixbuf (2.44.7-r1)
+(56/90) Installing librsvg (2.62.3-r0)
+(57/90) Installing jwm (2.4.6-r2)
+(58/90) Installing libxaw (1.0.16-r1)
+(59/90) Installing libxkbfile (1.2.0-r0)
+(60/90) Installing xclock (1.1.1-r0)
+(61/90) Installing libxi (1.8.3-r0)
+(62/90) Installing libxtst (1.2.5-r0)
+(63/90) Installing xdpyinfo (1.4.0-r0)
+(64/90) Installing xeyes (1.3.1-r0)
+(65/90) Installing xkeyboard-config (2.47-r0)
+(66/90) Installing xprop (1.2.8-r0)
+(67/90) Installing ncurses-terminfo-base (6.6_p20260516-r0)
+(68/90) Installing libncursesw (6.6_p20260516-r0)
+(69/90) Installing xterm (410-r0)
+(70/90) Installing xorg-server-common (21.1.24-r0)
+(71/90) Installing xkbcomp (1.5.0-r0)
+(72/90) Installing zstd-libs (1.5.7-r2)
+(73/90) Installing llvm22-libs (22.1.3-r0)
+(74/90) Installing spirv-tools (1.4.341.0-r0)
+(75/90) Installing hwdata-pci (0.408-r0)
+(76/90) Installing libpciaccess (0.19-r0)
+(77/90) Installing libdrm (2.4.134-r0)
+(78/90) Installing libelf (0.195-r0)
+(79/90) Installing libxshmfence (1.3.3-r0)
+(80/90) Installing mesa (26.1.6-r0)
+(81/90) Installing libxxf86vm (1.1.7-r0)
+(82/90) Installing mesa-gl (26.1.6-r0)
+(83/90) Installing libxfont2 (2.0.8-r0)
+(84/90) Installing libepoxy (1.5.10-r1)
+(85/90) Installing mesa-gbm (26.1.6-r0)
+(86/90) Installing libtirpc-conf (1.3.5-r1)
+(87/90) Installing libtirpc-nokrb (1.3.5-r1)
+(88/90) Installing wayland-libs-client (1.25.0-r0)
+(89/90) Installing libxcvt (0.1.3-r0)
+(90/90) Installing xwayland (24.1.13-r0)
+Executing busybox-1.37.0-r31.trigger
+Executing fontconfig-2.17.1-r1.trigger
+Executing mkfontscale-1.2.4-r0.trigger
+Executing glib-2.88.1-r1.trigger
+Executing shared-mime-info-2.4-r7.trigger
+Executing gdk-pixbuf-2.44.7-r1.trigger
+OK: 297.9 MiB in 106 packages
+[alpine] done: build/image/alpine.ext4
+[alpine] volume label: hamnix-alpine   (that is the NAME /etc/distros resolves)
+[alpine] rootfs tree: 306 MiB   image on disk: 370 MiB (sparse, apparent 2G)
+  attach it: scripts/hamlinux_vm.sh (picks it up automatically)
+  enter it:  enter alpine { cat /etc/alpine-release }

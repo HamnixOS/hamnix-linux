@@ -1,1 +1,33 @@
 [audio_mix] staging an image with that rc
+[audio_mix] booting, capturing the codec output to build/audio/mix.wav
+rc.boot: audio mix gate
+[audio_mix] PHASE 0: 1 kHz alone (the negative control)
+[playtone] played 1000 Hz square wave, 72000 frames
+[playtone] played 1000 Hz square wave, 72000 frames
+[audio_mix] PHASE 1: 1 kHz and 300 Hz, two pids, at once
+[1] 158
+[2] 159
+[playtone] played 300 Hz square wave, 144000 frames
+[playtone] played 300 Hz square wave, 144000 frames
+[playtone] played 1000 Hz square wave, 144000 frames
+[playtone] played 1000 Hz square wave, 144000 frames
+[audio_mix] device says:
+loaded 0 cap 1048576 master 100 streams 100 100 100 100 mute 0 space 122880 pos 2494464 mixed 303 hush 217 nogain 0
+[audio_mix] PHASE 2: the same 1 kHz beside a writer at a third of real time
+[3] 163
+[4] 164
+[playtone] played 1000 Hz square wave, 144000 frames
+[playtone] played 1000 Hz square wave, 144000 frames
+[playtone] played 300 Hz square wave, 72000 frames
+[playtone] played 300 Hz square wave, 72000 frames
+[audio_mix] DONE
+[audio_mix] capture: 2 ch, 44100 Hz, 23.591 s
+[audio_mix] 3 non-silent phase(s): 0.23-1.74 s, 5.97-9.16 s, 14.90-17.91 s
+[audio_mix] phase 0 (1 kHz alone): 1000 Hz 0.645 of rms, 300 Hz 0.000, rms 11832
+[audio_mix] phase 1 (both):        1000 Hz 0.454 of rms, 300 Hz 0.454, rms 16818
+[audio_mix] phase 1: the two fundamentals are within 1.0x of each other
+[audio_mix] phase 1: rms 16818 against 11832 solo (1.42x); a real sum is ~1.41x, one winner is 1.0x, a halving mixer is 0.71x
+[audio_mix] phase 2 (fast+slow):   1000 Hz 0.520 of rms, 300 Hz 0.008
+[audio_mix] phase 2: power in the 300 Hz band is 0.21272 of the total, against 0.00000 in phase 0 where nothing played it (8138908x)
+[audio_mix] phase 2: 0 of 65 40 ms windows have the 1 kHz band below a quarter of its median
+[audio_mix] PASS: two processes playing two different tones appear in ONE capture as BOTH frequencies, summed rather than switched, and a writer running at a third of real time does not interrupt the other.

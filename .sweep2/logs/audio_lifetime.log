@@ -1,1 +1,38 @@
 [audio_lifetime] staging an image with that rc
+[audio_lifetime] booting, capturing the codec output to build/audio/lifetime.wav
+rc.boot: audio lifetime gate
+[audiolife] SCENARIO start
+[audiolife] SCENARIO start
+[audiolife] D clip 1000 Hz (direct staged, 3.0 s) start
+[audiolife] D clip 1000 Hz (direct staged, 3.0 s) start
+[audiolife] D clip started; process EXITING
+[audiolife] D clip started; process EXITING
+[audiolife] MARK sym2a (D is gone: its 3.0 s clip must NOT repeat)
+[audiolife] MARK sym2a (D is gone: its 3.0 s clip must NOT repeat)
+[audiolife] E raw effect 300 Hz (no reset, no start) start
+[audiolife] E raw effect 300 Hz (no reset, no start) start
+[audiolife] E raw effect done; process EXITING
+[audiolife] E raw effect done; process EXITING
+[audiolife] MARK sym1 (E must sound as 300 Hz, not as D's tail)
+[audiolife] MARK sym1 (E must sound as 300 Hz, not as D's tail)
+[audiolife] MARK sym3 (music + effects must MIX)
+[audiolife] MARK sym3 (music + effects must MIX)
+[audiolife] C music 1500 Hz start
+[audiolife] C music 1500 Hz start
+[audiolife] B sfx 300 Hz start
+[audiolife] B sfx 300 Hz start
+[audiolife] B sfx done (exiting WITHOUT drain)
+[audiolife] B sfx done (exiting WITHOUT drain)
+[audiolife] C music done
+[audiolife] C music done
+[audiolife] SCENARIO done
+[audio_lifetime] capture: 2 ch, 44100 Hz, 15.431 s
+[audio_lifetime] 3 non-silent segment(s):
+[audio_lifetime]     0.23-  3.24 s (3.003 s) rms 11826  1000 0.833  1500 0.000  300 0.000
+[audio_lifetime]     5.93-  6.08 s (0.155 s) rms 11762  1000 0.000  1500 0.033  300 0.818
+[audio_lifetime]     8.79- 12.79 s (4.001 s) rms 12886  1000 0.000  1500 0.767  300 0.075
+[audio_lifetime] D: one 1000 Hz clip of 3.003 s (asked for 3.000)
+[audio_lifetime] E: 0.155 s at 5.93 s -- 300 Hz 0.818 of the power, 1000 Hz 0.000
+[audio_lifetime] C+B: 4.001 s of music -- 1500 Hz 0.767 of the power, 300 Hz 0.075, rms 12886
+[audio_lifetime] C+B: 0.65 s of 300 Hz inside the music, against the 0.60 s phase B wrote; from 0.70 s to 1.30 s of a 4.00 s window
+[audio_lifetime] PASS: audiolife's scenario does on the Linux kernel what it does on Hamnix -- a staged clip plays once and stops, a raw write with no ctl sounds as itself and not as the last clip's tail, and a second program's effects are HEARD INSIDE another program's music.

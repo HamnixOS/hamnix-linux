@@ -1,0 +1,104 @@
+sweep2: the final counts, the one new red, and the eleven gates that never ran
+
+Branch cut from 9e893e58 (tip of port/tier1-syscalls at the time; the tip has
+since moved to 12147fe0, which this sweep does NOT describe). Control for every
+red is b87174c344bbc542374323d7d996affff480c511, exported with git archive into
+.sweep2/control and bootstrapped there.
+
+94 distinct gates attempted, 84 produced a PASS/FAIL verdict: 78 passed, 6
+failed. Ten attempts produced no verdict and none of them is a silent failure:
+
+  private_ns.sh        a sourced library, not a gate (empty log)
+  cpuprobe.sh          a helper: "usage: cpuprobe.sh <pid>"
+  vk_icd_survey.sh     prints UNDETERMINED by design
+  drag_one, drag_why, lat_null_control, panel_reaction, wsys_op_census
+                       measurement scripts; they assert nothing
+  two_namespaces.sh, installed_distros.sh
+                       refused to start: "no alpine image"
+
+Every gate ran with stdin from /dev/null, and the chain writes one line per
+gate whether it passes, fails or times out. The counts above are read from that
+file and from the gates' own logs, not from a runner's summary. Independently
+of those summaries, .sweep2/finalscan.sh greps every log for failure assertions
+and finds failures in exactly five: de_probe, distro_menu, gates_are_private,
+pixcmp, wsys_srv_transport. It returns non-empty, so its silence on the other
+89 logs is a result rather than a broken instrument. Nothing printed ALL PASS
+above a FAIL.
+
+THE ONE NEW RED.
+
+  gates_are_private.sh   tip     2 passed / 15 failed
+                         control 2 passed / 12 failed
+
+The three in the difference are wsys_enum_policy.sh, wsys_srv_identity.sh and
+wsys_srv_readlat.sh -- added since the control, each starting the window system
+on the host without priv_ns_reexec, so each writes /tmp/hamnix-*,
+/dev/shm/hamnix-* or /srv/* under names a concurrent run and the owner's own
+desktop read. Not fixed here: other agents hold those files, and the gate
+prints its own two-line remedy.
+
+THE OTHER FIVE REDS ARE PRE-EXISTING, ENVIRONMENTAL, OR MINE.
+
+  pixcmp.sh        under 8 load threads: tip 2 FAIL / 5, control 2 FAIL / 5.
+                   A pre-existing race between the device composite and the
+                   readback. Solo it passes at both ends, which is how it
+                   nearly got written up as a regression.
+  de_probe.sh      the same single assertion fails at both ends ("the typed
+                   keys reach the focused window"). Pre-existing.
+  distro_menu.sh   environmental. With no distro medium: 8 PASS / 11 FAIL.
+                   With distro.ext4 staged in: 14 PASS / 5 FAIL, every
+                   survivor an Alpine assertion. The gate is byte-identical
+                   to the control.
+  wsys_srv_transport.sh  12 passed / 2 failed: the known budget arm (0.27% of
+                   a core against 0.12%), and an arm that CANNOT be isolated
+                   on a shared host -- it asserts no abstract socket named
+                   hamnix-wsys/*/srv is bound, and /proc/net/unix shows other
+                   agents' compositors live in that namespace. SRV_WORK does
+                   not reach the abstract namespace.
+  scanout_desktop.sh  should never have been run; see below.
+
+TWO REDS THAT WERE MY HARNESS, NOW GREEN. de_appmenu_installed.sh went 5/1 to
+11/0 and de_appmenu_brisk.sh 0/1 to 17/0. The first: a TMPDIR long enough to
+push a QEMU monitor socket past the 108-byte sun_path limit. The second is
+sharper -- those gates priv_ns_reexec into a PRIVATE /tmp, so any host TMPDIR
+set from outside simply is not there once the gate re-execs. TMPDIR is now
+unset entirely.
+
+WHAT I GOT WRONG. The first classifier keyed on "qemu" and missed that 39
+gates reach a VM through scripts/hamlinux_image.sh, so a four-way pool briefly
+ran concurrent image builds into one build/image; it was killed inside three
+minutes and nothing from it is counted twice. The same gap let
+scanout_desktop.sh and scanout_try.sh run, and they take DRM master on the
+owner's card -- scanout_desktop fired its 45s watchdog to kill the process and
+give the console back. Those two and cap_power_ab.sh, which arms the same
+path, are now recorded as display-blocked beside the ten named in the brief.
+
+PREREQUISITES THIS SWEEP BUILT, so the next one does not pay for them:
+build/repo/linux (scripts/hamlinux_packages.py), build/image/distro.ext4
+(reflinked, 2.0G actual), and build/image/alpine.ext4 (370 MiB, built with
+scripts/hamlinux_alpine.sh after installed_distros refused). The Alpine medium
+arrived too late to re-run the three gates it unblocks; they are listed as
+unrun below rather than claimed.
+
+UNRUN, WITH REASONS -- 11 VM gates and 13 display gates:
+
+  needs the display, deliberately not run (the owner's desktop is up):
+    de_fps_gpu, de_fps_mate, hamnix_xdiag, runsweep_jail,
+    steam_consent_dialog, steam_look, steam_probe, wsyswl_shared_fate,
+    wsyswl_stall, x11_record_trace_selftest, hamnix_x11session,
+    steam_scroll_why, xsnarf_ondevice
+    and now also scanout_desktop, scanout_try, cap_power_ab
+  needs a VM, out of time (10-25 min each, run serially because they all
+  build one shared build/image):
+    installed_update_live, installed_update_modules, installed_update_wsysver,
+    installed_recover_broken, channel_compiles_adder, channel_covers_image,
+    vm_wheel_reaches, vm_wheel_client, wsyswl_wheel, alpine_gui_run,
+    steam_probe_run, steam_gui_run, steam_gui_ro, steam_gui_burst,
+    steam_login_drive
+  needs a re-run now that alpine.ext4 exists:
+    two_namespaces, installed_distros, distro_menu (its 5 Alpine assertions)
+
+Perf-sensitive gates ran serially behind a loadavg < 2.0 gate, logged per gate;
+they landed at 1.45-1.99, i.e. AT the threshold rather than under it, so their
+absolute numbers deserve less weight than their verdicts. Three other agents
+built and booted VMs alongside this run throughout.

@@ -93,3 +93,7 @@ de_appmenu_realboot rc=0 secs=635
 de_idle_cpu rc=0 secs=458
 audio_tone rc=0 secs=305
 audio_capture rc=0 secs=298
+audio_mix rc=0 secs=356
+audio_lifetime rc=0 secs=384
+installed_distros rc=1 secs=0
+installed_update rc=0 secs=919

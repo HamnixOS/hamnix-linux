@@ -1,0 +1,64 @@
+sweep2: the coverage the first sweep ran out of time for, with the counts read from the logs
+
+Cut from 9e893e58 (tip of port/tier1-syscalls at the time). Control for every
+red is b87174c344bbc542374323d7d996affff480c511, exported with git archive into
+.sweep2/control and bootstrapped there, so no tree was disturbed to take it.
+
+93 distinct gates attempted, 85 produced a PASS/FAIL verdict. The eight that
+did not are not gates and are named in the report: private_ns.sh is a sourced
+library, cpuprobe.sh is a helper that wants a pid, vk_icd_survey.sh prints
+UNDETERMINED by design, and drag_one, drag_why, lat_null_control,
+panel_reaction and wsys_op_census emit measurements with no assertion. Every
+gate ran with stdin redirected from /dev/null and the chain echoes one line per
+gate whether it passes, fails or times out; the counts above come from that
+file rather than from any runner's own summary.
+
+ONE NEW RED, and it is a count rather than a gate.
+
+  gates_are_private.sh   tip 2 passed / 15 failed
+                         control 2 passed / 12 failed
+
+The three gates in the difference are wsys_enum_policy.sh,
+wsys_srv_identity.sh and wsys_srv_readlat.sh -- all added since the control,
+all starting the window system on the host without priv_ns_reexec. Not fixed
+here: other agents hold those files, and the gate prints the two-line remedy
+itself.
+
+THE REST OF THE REDS REPRODUCE AT THE CONTROL OR ARE MINE.
+
+  pixcmp.sh        under 8 load threads: tip 2 FAIL / 5, control 2 FAIL / 5.
+                   Pre-existing race between the device composite and the
+                   readback. Solo it passes at both, which is how it nearly
+                   got reported as a regression.
+  de_probe.sh      identical single failure at both ends ("the typed keys
+                   reach the focused window"). Pre-existing.
+  distro_menu.sh   a missing prerequisite, not a defect: build/image/
+                   alpine.ext4 does not exist anywhere on this host. With
+                   distro.ext4 staged in it went 8 PASS / 11 FAIL to
+                   14 PASS / 5 FAIL, and every survivor is an Alpine
+                   assertion. The gate is byte-identical to the control.
+  two_namespaces.sh  same cause, stated by the gate: "no alpine image".
+  de_appmenu_installed.sh, de_appmenu_brisk.sh
+                   both were MY harness. A long TMPDIR pushed a QEMU monitor
+                   socket past the 108-byte sun_path limit; unsetting TMPDIR
+                   fixed the first, and the second needed it unset entirely
+                   because priv_ns_reexec gives the gate a private /tmp that
+                   the host path is not inside. Both pass now: 11/0 and 17/0.
+  wsys_srv_transport.sh  the known budget arm, plus a second arm that cannot
+                   be isolated on a shared host: it asserts no abstract
+                   socket named hamnix-wsys/*/srv is bound, and
+                   /proc/net/unix shows other agents' compositors live in
+                   that namespace. SRV_WORK does not reach it.
+
+TWO THINGS AGAINST MYSELF. The first classifier keyed on "qemu" and missed
+that 39 gates reach a VM through scripts/hamlinux_image.sh, so a four-way pool
+briefly ran concurrent image builds; it was killed inside three minutes and
+nothing from it is counted. The same gap let scanout_desktop.sh and
+scanout_try.sh run, and they take DRM master on the owner's card --
+scanout_desktop fired its 45s watchdog to give the console back. Those two and
+cap_power_ab.sh are now on the do-not-run list beside the ten display-blocked
+gates.
+
+Perf-sensitive gates ran serially behind a loadavg < 2.0 gate, logged per gate;
+they landed at 1.45-1.99, which is at the threshold rather than under it, so
+the absolute numbers in those logs deserve less weight than their verdicts.

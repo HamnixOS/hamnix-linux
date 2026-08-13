@@ -1,0 +1,8 @@
+[lupd] asking https://255.one/linux/index.json what it serves
+[lupd] the live channel serves hamnix-desktop 1.0.22; this machine will be installed at 1.0.0
+[lupd] fetching https://255.one/linux/packages/hamnix-desktop-1.0.22.tar.gz
+[lupd] the /bin/wsysd the live channel serves is md5 94eee7c18daab29d9cea561235113d5f (560872 bytes)
+[lupd] staging the image root
+[lupd] reconstructing the pre-fix compositor (the route_pointer_event call reverted)
+[lupd] the pre-fix /bin/wsysd is md5 95c6ad8363e3122191daccdbce2e14f2
+[lupd] building the local channel at 1.0.0 (the machine's original install)
