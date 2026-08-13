@@ -1,5 +1,16 @@
 # What "N of 367 build" means, and the eight that did not
 
+> **RE-TAKEN 2026-08-12: 368 files, 4 libraries, 364 of 364 applications
+> built, 0 failures.** Every number below is from the run that established the
+> METHOD and is left at its own date; the method is what this document is for.
+> To re-take: `scripts/hamlinux_sweep.sh <outdir>` and read the `BUILD SCORE`
+> line — it prints the count it ATTEMPTED beside the count that built, so a
+> sweep that built nothing cannot read as a sweep that found nothing wrong.
+> (Verified on that run by a negative control: a deliberately broken `.ad` put
+> through `scripts/hamlinux_build.sh` exits 10 with `parse error at line 2`, so
+> the instrument can produce a failure and the 0 is a measurement, not a
+> silence.)
+
 `HANDOFF.md` §0 has carried a build count for the LLVM lane since the port
 started. Its most recent form was:
 
