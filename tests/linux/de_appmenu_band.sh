@@ -107,6 +107,11 @@ export HAMFB_GEOM="$GEOM"
     export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 
 pass=0; fail=0
+# An empty read is not a measurement. See tests/linux/gate_read.sh: the ctl
+# read below took ${5:-0} as the panel's height, so a ctl line that could not
+# be read at all printed "the menu never opened" and killed the run.
+. tests/linux/gate_read.sh
+
 ok()   { echo "appband: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "appband: FAIL $*"; fail=$((fail+1)); }
 info() { echo "appband: INFO $*"; }
@@ -277,8 +282,14 @@ menuclick 0
 sleep 2
 snap open
 
-set -- $(winctl "$PANEL")
-GROWNW="${4:-0}"; GROWNH="${5:-0}"
+CTL="$(winctl "$PANEL")"
+if ! gate_fields "the panel window's ctl line (/dev/wsys/$PANEL/ctl) after the menu click" 5 "$CTL"; then
+    info "the panel's size could not be read, so 'did the menu open' is not a question this run can answer, and nothing below it is either"
+    sed 's/^/appband:      /' "$WORK/hampanelscene.log"
+    done_report; exit 1
+fi
+set -- $CTL
+GROWNW="$4"; GROWNH="$5"
 if [ "$GROWNW" = "$FBW" ] && [ "$GROWNH" -gt "$PANELH" ]; then
     ok "the Applications menu opened and the panel window GREW to ${GROWNW}x${GROWNH} -- the full width of the display, the shape of the report"
 else

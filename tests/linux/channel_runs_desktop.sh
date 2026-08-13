@@ -316,9 +316,18 @@ for e in idx.get("packages", []):
 print("SUMMARY %d %d" % (checked, bad))
 PY
 )"
-    set -- $(echo "$HASHOUT" | sed -n 's/^SUMMARY //p')
-    NCHECK="${1:-0}"; NBAD="${2:-1}"
-    if [ "$NCHECK" -lt 20 ]; then
+    # The python above ALWAYS prints a SUMMARY line when it completes, so an
+    # absent SUMMARY means it did not complete -- a traceback, a missing
+    # interpreter, a killed process. `${1:-0}` turned that into the verdict
+    # "only 0 index entries carried a file+sha256", which names a defect in
+    # the INDEX on the evidence of a python that never ran.
+    SUMMARY="$(echo "$HASHOUT" | sed -n 's/^SUMMARY //p')"
+    set -- $SUMMARY
+    NCHECK="${1:-}"; NBAD="${2:-}"
+    if [ -z "$NCHECK" ] || [ -z "$NBAD" ]; then
+        bad "UNREADABLE -- the index cross-check printed no SUMMARY line, so it did not finish. Nothing is being said here about index.json:"
+        echo "$HASHOUT" | tail -20 | sed 's/^/chanrun:      /'
+    elif [ "$NCHECK" -lt 20 ]; then
         bad "only $NCHECK index entries carried a file+sha256 -- this gate cannot say the bytes it is about to run are the published ones"
     elif [ "$NBAD" = 0 ]; then
         ok "all $NCHECK packages in index.json hash to the bytes on disk -- what runs below is what an installed machine would receive"

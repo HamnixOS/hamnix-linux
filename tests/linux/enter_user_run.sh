@@ -68,4 +68,19 @@ echo
 P=$(grep -c '^enteruser: PASS' "$WORK/boot.log")
 F=$(grep -c '^enteruser: FAIL' "$WORK/boot.log")
 echo "[enteruser] PASS $P  FAIL $F   (full log: $WORK/boot.log)"
+# NO EVIDENCE IS NOT A PASS. `[ "$F" = 0 ]` on its own passed a boot in which
+# the probe never ran at all: the presence check above is satisfied by
+# `[enteruser] --- as root (uid 0)`, which rc.boot echoes ITSELF before
+# `enter debian` is reached, and the debugfs plant that puts the probe into
+# the image is `>/dev/null 2>&1`, so a plant that failed is invisible. P=0
+# F=0 then exited 0 -- a clean pass over a probe that produced nothing.
+# tests/linux/enter_user.sh makes three assertions and rc.boot runs it twice,
+# as root and as uid 1001, so a working run cannot report fewer than one.
+if [ "$((P + F))" = 0 ]; then
+    echo "[enteruser] UNREADABLE -- the in-namespace probe reported neither PASS nor FAIL:"
+    echo "[enteruser]   /usr/local/bin/enter_user did not run, or did not reach its first"
+    echo "[enteruser]   assertion. This run did not observe 'enter' at all; it is NOT a pass."
+    tail -30 "$WORK/boot.log"
+    exit 1
+fi
 [ "$F" = 0 ]
