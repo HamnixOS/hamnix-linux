@@ -130,3 +130,46 @@ only the mutations is nearly free.**
   measurement of it, not a diagnosis of its code.
 - No server was built. These are the costs a server *would* pay, not a
   measurement of one.
+
+
+---
+
+## Update: the poll loop is gone, and it changes the recommendation
+
+`hampanelscene` parked for 16 ms unconditionally, which is where its ~1000
+idle ops/s came from. It is now adaptive — 16 ms while anything is happening,
+100 ms after half a second of stillness — and its idle CPU fell from **1.7% of
+a core to 0.3%** (it cost more than the compositor it draws on). Census re-run,
+same method:
+
+| load | client ops/s before | after |
+|---|---|---|
+| **idle** | 1016 | **192** (panel 176, desktop 16) |
+| pointer, 250 ev/s | 1992 | 1172 |
+| drag, mouse-paced | 1514 | **618** |
+| drag, free-running | 2930 | 2050 |
+| app start | 1838 | 1832 (the app itself, unchanged) |
+
+**Re-doing the arithmetic at 6.2 µs of added cost per op:**
+
+| load | added CPU, sequential | pipelined |
+|---|---|---|
+| **idle** | **0.12% of a core** (was 0.63%) | 0.04% |
+| pointer | 0.73% | 0.26% |
+| drag, mouse-paced | 0.38% | 0.14% |
+| drag, free-running | 1.27% | 0.45% |
+
+**So the hybrid is no longer necessary.** The case for mediating only the
+mutations rested on an idle desktop costing 0.63% of a core to mediate —
+roughly doubling the cost of doing nothing. At 0.12% that argument is gone:
+**mediating everything now costs about a tenth of a percent of a core at idle
+and stays under 1.3% on the worst load measured.** A single uniform boundary
+is both cheaper to reason about and cheaper than the split design would have
+been before the poll loop was fixed.
+
+**The cost of that**, stated rather than buried: polled state — the window
+list, the config file, the notification bus — has nothing to wake on, so its
+reaction roughly doubles once the panel has backed off. Measured on the
+panel's own pixels, a window appearing in the taskbar goes from p50 18.7 ms
+(max 20.2) to p50 40.2 ms (max 68.7). That is under the ~100 ms a person reads
+as instant, and `PARK_IDLE` is the single knob if the trade is judged wrong.
