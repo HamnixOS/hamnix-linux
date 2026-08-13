@@ -1391,8 +1391,19 @@ def paint_backbuffer(i: uint64) -> int32:
     oy: int32 = win_y[i]
     y: int32 = 0
     rowbytes: uint64 = cast[uint64](w) * 4
+    # THE ROW BUFFER IS 1920 PIXELS AND SO IS THE BACKBUFFER, BUT THE WINDOW
+    # TABLE IS NOT. `geometry` accepts any positive width, so a window can be
+    # 2048 wide in the table while user/linux-wsys.c's bb_fit has cut its
+    # pixels to BB_W. This loop used to read `rowbytes` bytes -- correctly
+    # capped -- and then walk x from 0 to the WINDOW's width, indexing
+    # bbrow[x*4] up to 512 bytes PAST THE END of a 7680-byte array and painting
+    # whatever was there over the desktop. An out-of-bounds read that reaches
+    # the screen. `cols` is what was actually read, and the loop stops there;
+    # the window's own limit is announced by the server that chose it
+    # (user/wsyswl.ad), so this does not say it a second time per frame.
     if rowbytes > BBROW_CAP:
         rowbytes = BBROW_CAP
+    cols: int32 = cast[int32](rowbytes / 4)
     while y < h:
         got: uint64 = 0
         while got < rowbytes:
@@ -1403,7 +1414,7 @@ def paint_backbuffer(i: uint64) -> int32:
         if got < rowbytes:
             break
         x: int32 = 0
-        while x < w:
+        while x < cols:
             o: uint64 = cast[uint64](x) * 4
             r: uint32 = cast[uint32](bbrow[o])
             g: uint32 = cast[uint32](bbrow[o + 1])

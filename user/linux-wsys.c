@@ -863,6 +863,18 @@ static void bb_pool_release(int32_t wid)
             bb->slot[i].used = 0;
 }
 
+/* THE SIZE A BACKBUFFER WILL ACTUALLY BE, given the size that was asked for.
+ *
+ * These exist because bb_for compared the size ASKED FOR against the size
+ * STORED, and for any window wider than BB_W those two can never be equal:
+ * bb_fit clamps on the way in, so a 2046-wide window stored 1920 and bb_for
+ * saw 1920 != 2046 on EVERY BLIT.  Every blit therefore re-fit the memfd,
+ * and bb_fit clears it -- so the window was wiped between one row and the
+ * next and nothing was ever on the screen.  A comparison has to be made
+ * between two numbers of the same kind. */
+static int bb_clamp_w(int w) { return w > 0 && w <= BB_W ? w : BB_W; }
+static int bb_clamp_h(int h) { return h > 0 && h <= BB_H ? h : BB_H; }
+
 /* Fit a window's memfd to a size, clearing it.  A resize means the client is
  * about to redraw, and a stretched copy of the old frame in the meantime is a
  * worse answer than a blank one it immediately overwrites. */
@@ -872,8 +884,8 @@ static void bb_fit(int i, int w, int h)
     if (!hd) return;
     /* THE OLD SIZE MATTERS, because the clear has to cover it. */
     size_t was = (size_t)hd->w * hd->h * 4;
-    hd->w = w > 0 && w <= BB_W ? w : BB_W;
-    hd->h = h > 0 && h <= BB_H ? h : BB_H;
+    hd->w = bb_clamp_w(w);
+    hd->h = bb_clamp_h(h);
     hd->started = 0;
     /* CLEAR THE PIXELS THIS WINDOW CAN ACTUALLY SHOW, not BB_BYTES.  Rows are
      * packed at the window's width (see bb_blit), so its pixels are w*h*4
@@ -948,7 +960,8 @@ static int bb_for(int wid, int create, int w, int h)
     int i = bb_find(wid);
     if (i >= 0) {
         if (create && bbmap[i].own && w > 0 && h > 0
-            && (bbmap[i].hdr->w != w || bbmap[i].hdr->h != h)) {
+            && (bbmap[i].hdr->w != bb_clamp_w(w)
+                || bbmap[i].hdr->h != bb_clamp_h(h))) {
             bb_once(&bb_warn_refit, "a backbuffer's size did not match its "
                     "window's -- re-fitting", wid, bbmap[i].hdr->w,
                     bbmap[i].hdr->h, w);
@@ -973,7 +986,8 @@ static void bb_resize(int wid, int w, int h)
     if (w <= 0 || h <= 0) return;
     int i = bb_find(wid);
     if (i < 0 || !bbmap[i].own) return;
-    if (bbmap[i].hdr->w == w && bbmap[i].hdr->h == h) return;
+    if (bbmap[i].hdr->w == bb_clamp_w(w) && bbmap[i].hdr->h == bb_clamp_h(h))
+        return;
     bb_fit(i, w, h);
     bb_pool_claim(wid, w, h);
 }
@@ -6954,6 +6968,23 @@ static int snap_pool(struct hamwsys_file *f)
     n = put_int(b, n, bb->full_w);
     b[n++] = 'x';
     n = put_int(b, n, bb->full_h);
+    /* THE DEVICE STATES ITS OWN CEILING, because until it did, everybody who
+     * needed the number had their own copy of it and one of them was wrong.
+     *
+     * BB_W x BB_H is the largest surface anything in this system can put on a
+     * screen: bb_fit cuts a window to it, bb_blit clips every pixel outside
+     * it, and the draw/ctl arm REFUSES a blit rect wider or taller than it.
+     * user/wsyswl.ad used to cap a blit row at a hardcoded 8192 bytes -- 2048
+     * columns, a number derived from nothing -- so a window between 1921 and
+     * 2048 columns wide sent rects this device refuses, and since that write's
+     * return value was ignored the window painted NOTHING, for ever, silently.
+     * A server cannot draw inside a limit it has to guess, so the limit is
+     * published here and read rather than assumed. */
+    k = " maxsurface ";
+    while (*k) b[n++] = (uint8_t)*k++;
+    n = put_int(b, n, BB_W);
+    b[n++] = 'x';
+    n = put_int(b, n, BB_H);
     b[n++] = '\n';
     return snap_set(f, b, n);
 }
