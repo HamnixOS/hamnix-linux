@@ -163,6 +163,33 @@ enum {
     WSRV_OP_PING  = 3,             /* blocks: the interrogative shape        */
     WSRV_OP_STAT  = 4,             /* blocks: the server's own counters      */
     WSRV_OP_ERR   = 5,             /* server -> client, tag 0, unsolicited   */
+
+    /* STAGE 2 — THE MUTATIONS, which is where the privilege questions live.
+     *
+     * WRITE is one message for one write to /dev/wsys/ctl or
+     * /dev/wsys/<wid>/ctl: open, write, close, all of it, because NEITHER OF
+     * THOSE LEAVES HAS PER-OPEN STATE.  The census says open and write come
+     * in pairs there (9791 opens, 9790 writes in 12 s of a drag), so the
+     * one-shot form is not a shortcut -- it is the shape the traffic already
+     * has, and it keeps a mutation at one message instead of three.
+     *
+     * `wid` names the window; `flags`' low bits carry the leaf, because a
+     * message that did not say which file it was writing would be a mediator
+     * that has to guess.
+     *
+     * NEWWIN BLOCKS, and it is the only mutation that does.  It returns data
+     * -- the wid -- so there is nothing to be gained by not waiting.  Routing
+     * it is also what makes win_alloc's race STRUCTURALLY impossible rather
+     * than merely fixed; see THE RACE THAT ROUTING RETIRES at win_alloc.
+     */
+    WSRV_OP_WRITE  = 6,            /* fire-and-forget: one ctl/wid-ctl write */
+    WSRV_OP_NEWWIN = 7,            /* blocks: allocate a row, return the wid */
+
+    /* Which leaf a WSRV_OP_WRITE addresses.  Carried in `flags` above
+     * WSRV_F_REPLY. */
+    WSRV_LEAF_SHIFT = 8,
+    WSRV_LEAF_CTL     = 1,         /* /dev/wsys/ctl                          */
+    WSRV_LEAF_WIN_CTL = 2,         /* /dev/wsys/<wid>/ctl                    */
 };
 
 /* THE SERVER SIDE. wsysd calls claim() before it touches /dev/wsys at all --
@@ -188,6 +215,7 @@ int      hamwsys_srv_service(void);
  *   extern def sys_wsys_srv_selftest() -> int32
  *   extern def sys_wsys_srv_sustain(ops_per_sec: int32, secs: int32) -> int32 */
 int      hamwsys_srv_selftest(void);
+int      hamwsys_srv_mutate_selftest(int victim_wid);
 int      hamwsys_srv_sustain(int ops_per_sec, int secs);
 
 /* Did THIS process get turned away by the version refusal in shm_attach?

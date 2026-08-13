@@ -32,6 +32,7 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 extern def sys_wsys_srv_selftest() -> int32
 extern def sys_wsys_srv_sustain(ops_per_sec: int32, secs: int32) -> int32
+extern def sys_wsys_srv_mutate(victim_wid: int32) -> int32
 
 numbuf: Array[24, uint8]
 rbuf:   Array[256, uint8]
@@ -89,6 +90,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         return 1
     sys_read(fd, &rbuf[0], 255)
     sys_close(fd)
+
+    # `mutate <wid>` -- send a routed write for a window this process does
+    # not own, PAST the in-process check, and ask the server whether it
+    # refused. Driven from here rather than from an ordinary client because an
+    # ordinary client's write is refused locally before it reaches a socket,
+    # and a gate driven that way would be green whether or not the mediator
+    # checks anything.
+    if argc > 2 and cast[Ptr[uint8]](argv[1])[0] == 109:
+        return sys_wsys_srv_mutate(arg_int(cast[Ptr[uint8]](argv[2])))
 
     if argc > 3 and cast[Ptr[uint8]](argv[1])[0] == 115:
         ops: int32 = arg_int(cast[Ptr[uint8]](argv[2]))
