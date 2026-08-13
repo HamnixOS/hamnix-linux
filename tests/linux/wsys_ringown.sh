@@ -230,6 +230,25 @@ if [ "${1:-}" = "--inner" ]; then
 fi
 
 # ---- outer half ----------------------------------------------------------
+# PRIVATE NAMESPACE FIRST -- before $W, before reap.sh, before the build.
+# It goes HERE and not beside the `cd` at the head of the file because the inner
+# half above is a COPY of this script run as `inner.sh --inner $W` from inside
+# the uid namespace: a priv_ns_reexec before that branch would run in the copy
+# too, where PRIV_NS_ACTIVE=1 is already exported and the assertion would then
+# refuse a /tmp that legitimately contains this run's own $W.
+#
+# The isolation matters even though this gate is careful with $HAMWSYS: bb_attach
+# has its own candidate list, the inner half sets HAMWSYS_BB precisely because
+# without it the fallback reaches the HOST's /dev/shm/hamnix-wsys-bb, and /srv is
+# on that list too. A tmpfs over /tmp, /dev/shm and /srv removes the fallback
+# rather than relying on every future edit to keep remembering it.
+#
+# THE HELPER'S ONE FIDELITY COST DOES NOT REACH THIS GATE: priv_ns_reexec makes
+# geteuid() 0 in the OUTER shell, and every arm here runs in the INNER namespace
+# this file builds for itself, where the compositor is 0, the victim is 1001 and
+# the attacker is 1002 exactly as before.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 W="$(mktemp -d "${TMPDIR:-/tmp}/wsysringown.XXXXXX")"
 . tests/linux/reap.sh
 reap_on_exit_cleanup() { rm -rf "$W"; }
@@ -254,10 +273,46 @@ cp tests/linux/reap.sh "$W/reap.sh"
 
 command -v unshare >/dev/null || { echo "SKIP: no unshare(1)"; exit 0; }
 command -v setpriv >/dev/null || { echo "SKIP: no setpriv(1)"; exit 0; }
-grep -q "^$(id -un):" /etc/subuid 2>/dev/null || {
-    echo "SKIP: no /etc/subuid range for $(id -un); run this in the VM instead"
-    exit 0; }
-SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
+
+# WHERE THE VICTIM'S AND THE ATTACKER'S UID COME FROM -- TWO CASES, AND THE
+# SECOND ONE IS WHAT LETS THIS GATE BE ISOLATED AT ALL. Written up at length in
+# tests/linux/wsys_enum_policy.sh; the short form:
+#
+# On a bare host they are subordinate ids out of /etc/subuid for the invoking
+# user, as they always were. Inside private_ns.sh's namespace `id -un` is root,
+# /etc/subuid HAS NO root LINE, and reading only that file would make this gate
+# SKIP -- scoring 0 arms while exiting green, which is the wsys_bypass.sh
+# failure mode and would have been an exemption in disguise.
+#
+# But a process that is root in a user namespace holding a mapped RANGE already
+# owns ids 1001 and 1002 and may map them to themselves in a child, needing no
+# /etc/subuid and no setuid helper. THE TEST IS THE MAPPING ITSELF, not a read
+# of /proc/self/uid_map: on a bare host that file is the initial
+# `0 0 4294967295`, which "contains" 1001 and 1002 while an unprivileged process
+# may map neither, so a range read would turn a clean SKIP on a subuid-less host
+# into a hard failure -- a gate reporting a defect it did not find.
+#
+# Either way the INNER ids are 0, 1001 and 1002 and every assertion below is
+# about those, so which outer ids back them changes nothing this gate claims.
+SUB=""
+if grep -q "^$(id -un):" /etc/subuid 2>/dev/null \
+   && grep -q "^$(id -un):" /etc/subgid 2>/dev/null; then
+    SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
+    IDSRC="/etc/subuid range $SUB for $(id -un)"
+elif unshare -U \
+        --map-users=0:"$(id -u)":1      --map-groups=0:"$(id -g)":1 \
+        --map-users=1001:1001:1         --map-groups=1001:1001:1 \
+        --map-users=1002:1002:1         --map-groups=1002:1002:1 \
+        true 2>/dev/null; then
+    SUB=1001
+    IDSRC="ids 1001/1002 are already this namespace's own (mapped to themselves; no /etc/subuid needed)"
+else
+    echo "SKIP: no /etc/subuid range for $(id -un), and this namespace does not"
+    echo "SKIP: already own uids 1001 and 1002; run this in the VM instead"
+    exit 0
+fi
+note "$(priv_ns_describe)"
+note "the victim's and the attacker's uid: $IDSRC"
 OUT="$W/out.txt"
 unshare -U \
     --map-users=0:"$(id -u)":1      --map-groups=0:"$(id -g)":1 \
