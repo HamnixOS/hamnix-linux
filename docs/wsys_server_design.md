@@ -144,6 +144,38 @@ either catches an idle loop (~27 µs) or waits out a frame (600–850 µs). The
 median is safe and the tail is not, which is exactly the shape a median-only
 measurement would have hidden — the gate prints all 33 samples.
 
+**THE BIMODALITY IS NOW MEASURED, AND THE TWO MODES DO NOT OVERLAP AT ALL.**
+1980 blocking round trips — three runs of 20 repetitions × 33 samples, one
+`wsysd`, one `de_dragload` light drag, on a host at loadavg 0.6–1.6:
+
+| mode | share | p50 | extremes |
+|---|---|---|---|
+| fast (catches an idle loop) | 81–86% | **28 µs** in all three runs | min 10, max **122** |
+| slow (waits out a frame) | 14–19% | 873–901 µs | min **667**, max 1534 |
+
+**The gap 122–667 µs contains ZERO of the 1980 samples.** That has a direct
+consequence for gating: `wsys_srv_transport.sh` used to assert
+`RTT_P50 <= 300 µs`, and 300 sits in the middle of that empty gap, so every
+threshold from ~130 to ~660 classifies the data identically. The assertion
+reduced to *fewer than half the samples waited*. It passes with room on a quiet
+host (14–19% slow) and the offscreen sweep recorded it **red at p50 934 µs and
+1806 µs** — the fraction had crossed 50% because the host was at loadavg
+2.4–5.0, not because the tree changed. **A statistic that swings 30× on host
+load is measuring the host**, and that arm now asserts the fast mode (150 µs,
+derived) and merely records the slow one. See B(iii) in the gate.
+
+**One thing here is still UNCONFIRMED and must not be quoted as measured.** The
+explanation above — the slow mode *is* one frame period — was not reproduced.
+An attempt to measure the frame period in the same run via
+`HAMNIX_WSYSD_BENCH_LIVE` returned ~170 kHz, which cannot be an 850 µs frame;
+offscreen with no present cap and a barely-populated desktop, that counter is
+not measuring the drag's frame cost. Two facts sit against the simple version
+of the story: the slow mode is **tightly clustered** (p10 783, p50 873, p90
+930) rather than spread uniformly over `[0, T]` as a wait for a periodic event
+would be, and its floor is a hard 667 µs. A fixed ~870 µs stall and a frame
+wait are different mechanisms with different fixes, and **which one this is
+remains open.**
+
 This does not affect stage 2 — mutations do not wait. It is a hard constraint
 on **stage 3**, where reads are routed:
 
@@ -1600,8 +1632,46 @@ the fixed term is a WAKE, and a wake is per-loop-iteration, not per-client.**
 N clients' messages coalesce into the same drain, so the fixed term does not
 multiply — and the unrouted arm gets *worse* with N, because N clients poke the
 wake channel N times. The routed win should therefore **grow** with the number
-of clients. **That is a prediction from the mechanism, not a measurement, and
-stage 7 must not quote it as one.**
+of clients. ~~That is a prediction from the mechanism, not a measurement, and
+stage 7 must not quote it as one.~~
+
+> **THE PREDICTION HAS NOW BEEN MEASURED AND IT IS WRONG. The "fixed" term is
+> PER-CLIENT.** It was only ever fitted at **one client**, where a per-client
+> cost and a rate-independent one are indistinguishable. Vary the client count
+> and they separate. Two sweeps, three reps each, a fresh baseline taken
+> immediately before every arm so host drift cannot masquerade as a client-count
+> effect, host at loadavg **0.51–0.72** throughout:
+>
+> | sweep | arm | samples (% of a core) | median delta |
+> |---|---|---|---|
+> | A (100 ops/s **per client**) | N=1 | 0.20 0.15 0.25 | **0.200%** |
+> | | N=2 | 0.35 0.25 0.40 | **0.350%** |
+> | | N=4 | 1.25 0.90 1.80 | **1.250%** |
+> | | N=8 | 2.80 2.65 3.10 | **2.800%** |
+> | B (**2000 ops/s total**, split N ways) | N=1 × 2000/s | 0.40 0.50 0.50 | **0.450%** |
+> | | N=8 × 250/s | 2.75 2.85 3.30 | **2.850%** |
+>
+> **Sweep B is the decisive pair: the same 2000 messages a second cost 6.3× more
+> arriving on eight connections than on one.** The marginal term is constant by
+> construction there, so the difference is entirely per-client. The slope is
+> **0.371%/client** from A's 1→8 lever and **0.343%/client** from B's — two
+> independent levers agreeing, and B's holds the message rate fixed.
+>
+> So the shape is `budget(ops, N) ≈ PERCLIENT × N + MARGINAL × ops`. Against the
+> budget as written the eight-client arms are **5.8× and 4.1× over**.
+>
+> **The mechanism, reasoned from the code and NOT measured:** `hamwsys_srv_service`
+> does not do O(1) work per wake. Per ready connection it runs a **linear scan**
+> over `srv_conn` to map the fd back to an index, then `recv()`s until `EAGAIN` —
+> so a wake with N ready clients costs O(N) syscalls and O(N²) comparisons, not
+> one drain. Messages coalesce; **connections do not**.
+>
+> **What this projects to is the number a desktop has to answer for:** at
+> `WSRV_CONN_MAX = 64` clients, 0.343%/client is **~22% of a core merely to hold
+> the connections**, before any of them asks for anything.
+> `tests/linux/wsys_srv_transport.sh` E(iv) now drives eight clients and scores
+> them, so the blind spot is closed at N=8 — but only at N=8, and a
+> worse-than-linear growth beyond that would not be caught until it arrived.
 
 **What the budget has no name for is the CONNECTION**, and a desktop is where
 connections stop being one:
