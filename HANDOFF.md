@@ -67,15 +67,24 @@ mis-read:
   Routed, the mediator refused it. A gate green in every configuration is
   equally green against a server that checks nothing, which is why the red arm
   is the argument.
-* **`owns_wid()` grants every DESCENDANT, and this is inherited rather than
-  introduced.** The walk compares pids and never looks at a uid, so every
-  application the desktop spawns may retitle, move, raise or destroy any window
-  owned by the compositor, the panel or any of its own ancestors, **regardless
-  of uid** — now with the mediator's blessing rather than merely without its
-  knowledge. It is devwsys's own rule (hamUI spawns a task *into* a window);
-  tightening it to an exact pid match would break every hamUI-spawned task. The
-  capability-at-`newwindow` the design proposes is the replacement, and it is a
-  **stage-3 policy decision, not a stage-3a one**.
+* **`owns_wid()`'s WALK grants every DESCENDANT, and that is still true on the
+  UNROUTED path — which is every shipped binary.** The walk compares pids and
+  never looks at a uid, so with no mediator every application the desktop spawns
+  may retitle, move, raise or destroy any window owned by the compositor, the
+  panel or any of its own ancestors, **regardless of uid**. It is devwsys's own
+  rule (hamUI spawns a task *into* a window) and tightening it to an exact pid
+  match would break every hamUI-spawned task, so it is **not** narrowed.
+* **ROUTED, the connection is the capability** (`tests/linux/wsys_srv_connown.sh`,
+  **10 PASS / 0 FAIL**). A routed mutation must arrive on the connection that
+  HOLDS the row — bound at `newwindow`, or claimed by an exact `SO_PEERCRED` pid
+  match for hamUId's on-behalf `alloc <pid>` path. A descendant inherits the
+  window only if the spawner hands it the descriptor (`hamwsys_srv_handoff`,
+  `HAMWSYS_SRV_FD`, one generation). Both arms measured: un-handed child
+  REFUSED, the same child handed ACCEPTED, and the unrouted child still LANDS.
+  **The DE spawn path does not call the handoff yet** — `/etc/rc.de-user` runs
+  the real program as a CHILD of the hamsh the wid is stamped against, so with
+  `HAMWSYS_SERVER=1` a DE app would be refused its own window until hamUId or
+  hamsh calls it, **after** the `setuid 1001`. Nothing sets the flag.
 * **Routing made the compositor CHEAPER, not dearer** — routing a drag measured
   46.5% of a core cheaper at 43% more frames — which is the opposite of what the
   plan predicted, so treat the design document's *predictions* as superseded by
