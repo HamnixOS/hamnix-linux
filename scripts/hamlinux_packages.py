@@ -2367,6 +2367,22 @@ def main():
 
     out = os.path.join(ROOT, args.out, args.channel)
     pkgdir = os.path.join(out, "packages")
+    # THIS CACHE IS SHARED, AND A GATE CAN POISON IT WITH ITS OWN TREE.
+    # tests/linux/installed_update_wsysver.sh builds three private channels
+    # from symlink farms whose `build` reaches back into THIS root, so its
+    # packager runs write objects here. Measured: a channel built right after
+    # that gate carried a wsysd and an sshd whose symbols read
+    # `_home_david__hamnix_build_..._wsysver_tree_next_user_wsysd__` -- the
+    # farm's path, baked into every module-private name, because the Adder
+    # front end mangles by the path it compiled.
+    #
+    # THE BYTES WERE STILL RIGHT, and that was checked rather than assumed:
+    # the farm symlinks every source except user/linux-wsys.c, the cache is
+    # keyed by content, and the contaminated channel's wsysd attached a
+    # segment made by this tree's wsysd WITHOUT the version refusal that a
+    # WSYS_VERSION mismatch produces. So the damage is to PROVENANCE, not to
+    # behaviour -- but provenance is what "the bytes tested are the bytes
+    # served" rests on, and a publish should start from an empty cache.
     objdir = os.path.join(ROOT, "build/repo-obj")
     os.makedirs(pkgdir, exist_ok=True)
     os.makedirs(objdir, exist_ok=True)
