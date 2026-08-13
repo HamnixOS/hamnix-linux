@@ -202,6 +202,35 @@ This is new since 1.0.22 — the hardware driver list was added after that
 release went out — so it is a hole this candidate would have shipped rather
 than one that has been there.
 
+### Opening enough windows let a program read what it had been refused
+
+The window system is being moved behind a server that decides who may see what.
+One of its rules is that a program which owns no window is told nothing about
+anyone else's windows — it asks, and it gets an empty answer.
+
+That rule could be turned off by **anyone, without any special access, using no
+tools**. The server accepts a limited number of connections at once. Once that
+number is reached, the next program was quietly handed back the old,
+unsupervised path — the one where it reads the window list directly and **the
+list answers everybody in full**. Measured: a program owning nothing got zero
+bytes normally, and another user's window title once enough connections were
+held open.
+
+Reaching that state took no attack and no unusual privilege. It is fixed: a
+program that is refused a connection is now refused the answer too, rather than
+being handed a way around it.
+
+Two things found alongside it are worth naming, because both would have cost
+somebody a wasted day. The message printed in that situation **blamed a version
+mismatch that did not exist** — both sides agreed, and the number in the message
+was a field nobody had filled in — which would have pointed anyone debugging it
+at a system-wide upgrade instead of a one-line limit. And the design note
+describing this case said the connection would fail; it does not fail, it
+succeeds and is closed afterwards, which is why nobody had noticed the fallback.
+
+None of this affects a normal session — a whole desktop uses five connections
+out of sixty-four.
+
 ### A window painted in pieces stopped painting at 1 MiB — and painted NOTHING
 
 A program that draws a window by sending it a row at a time, rather than all at

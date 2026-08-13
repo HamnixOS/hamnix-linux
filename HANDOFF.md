@@ -24,7 +24,7 @@ because that is the version those runs were made against; the numbers stand, the
 version in them is history. **`CHANGELOG.md` is the authority on what a person
 gets, and its `Unreleased` section is the authority on what they do not yet.**
 
-**Eight things have landed since the 1.0.22 candidate and are NOT on the
+**Nine things have landed since the 1.0.22 candidate and are NOT on the
 channel.** They are written up for a person in `CHANGELOG.md` § Unreleased and
 are only listed here so a fresh session knows the gap exists: `ls` on a plain
 file printed its contents; the Steam consent dialog never drew and cost
@@ -33,8 +33,9 @@ unbounded peer-chosen lengths in `ssh`/`sshd`, **one of them reachable before
 authentication**; `httpd_worker` parsing an oversized header as a complete one;
 a display list of exactly 16,384 bytes losing its last operation; **five
 `hamnix-drivers-*` packages published with zero files in them, so installing
-the driver for your own disk succeeded and installed nothing**; and a window
-drawn in pieces painting nothing at all past 1 MiB. Two of
+the driver for your own disk succeeded and installed nothing**; a window
+drawn in pieces painting nothing at all past 1 MiB; and **opening enough windows
+letting a program read the window list it had just been refused**. Two of
 those merged the same hour 1.0.22 published and on the wrong side of the cut —
 **ancestry, not timestamps, is what places a commit relative to a release here**
 (`git rev-list <rc-tip> | grep <sha>`).
