@@ -152,6 +152,12 @@ export HAMFB_GEOM="$GEOM"
     export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 
 pass=0; fail=0
+# An empty read is not a measurement. See tests/linux/gate_read.sh: the ctl
+# reads below used to take ${5:-0} as the panel's height, so a ctl line that
+# could not be read at all printed "THE DEFECT ... the chrome never saw the
+# click" about a panel this run never managed to look at.
+. tests/linux/gate_read.sh
+
 ok()   { echo "mouse: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "mouse: FAIL $*"; fail=$((fail+1)); }
 info() { echo "mouse: INFO $*"; }
@@ -504,9 +510,14 @@ fi
 # ---- 4+5. THE APPLICATIONS BUTTON, CLICKED WITH A MOUSE ------------------
 click "$APPBTN_X" "$APPBTN_Y"
 snap open
-set -- $(winctl "$PANEL")
-GROWNW="${4:-0}"; GROWNH="${5:-0}"
-if [ "$GROWNW" = "$FBW" ] && [ "$GROWNH" -gt "$PANELH" ]; then
+CTL="$(winctl "$PANEL")"
+GROWNW=""; GROWNH=""
+if gate_fields "the panel window's ctl line (/dev/wsys/$PANEL/ctl) after the Applications click" 5 "$CTL"; then
+    set -- $CTL; GROWNW="$4"; GROWNH="$5"
+fi
+if [ -z "$GROWNH" ]; then
+    :   # gate_fields named the failed read; do not answer this from a default
+elif [ "$GROWNW" = "$FBW" ] && [ "$GROWNH" -gt "$PANELH" ]; then
     ok "an EVDEV CLICK on the Applications button opened the menu: the panel window grew ${PANELH} -> ${GROWNH} px tall"
 else
     bad "THE DEFECT: after a full evdev click on the Applications button the panel window is still ${GROWNW}x${GROWNH} -- the chrome never saw the click"
@@ -522,12 +533,17 @@ fi
 # ---- 6. AND CLICKED AGAIN, WHICH MUST CLOSE IT ---------------------------
 click "$APPBTN_X" "$APPBTN_Y"
 snap closed
-set -- $(winctl "$PANEL")
-BACKH="${5:-0}"
+CTL="$(winctl "$PANEL")"
+BACKH=""
+if gate_fields "the panel window's ctl line (/dev/wsys/$PANEL/ctl) after the second click" 5 "$CTL"; then
+    set -- $CTL; BACKH="$5"
+fi
 # "it is back to 26 px" is ALSO true of a panel that never grew, which is the
 # reverted state this file exists to catch -- so the open is a precondition of
 # the close, not a separate question.
-if [ "$GROWNH" -le "$PANELH" ]; then
+if [ -z "$BACKH" ] || [ -z "$GROWNH" ]; then
+    :   # a read failed and gate_fields said which; this is not answerable
+elif [ "$GROWNH" -le "$PANELH" ]; then
     bad "the menu never opened, so 'the second click closed it' is not a question this run can answer"
 elif [ "$BACKH" = "$PANELH" ]; then
     ok "a second evdev click on the same button closed the menu again (the panel window is back to ${BACKH} px)"
@@ -535,7 +551,9 @@ else
     bad "the second click did not close the menu -- the panel window is ${BACKH} px tall, not ${PANELH}. One click that cannot be undone is a stuck panel, not a routed click"
 fi
 got="$(colourpct 4 "$CARD_Y" $((CARDW - 8)) "$CARD_H" "$WORK/closed.raw" "$BODYCOL")"
-if [ "$GROWNH" -le "$PANELH" ]; then
+if [ -z "$GROWNH" ]; then
+    :   # the open's own ctl read failed; gate_fields already named it
+elif [ "$GROWNH" -le "$PANELH" ]; then
     bad "the card was never painted, so 'the card is gone' is not a question this run can answer"
 elif [ "$got" -le 5 ]; then
     ok "and the card is gone from the framebuffer ($got% of the column is the dropdown body)"
@@ -579,9 +597,14 @@ fi
 ev "move:$APPBTN_X:$APPBTN_Y" "down" "up"
 sleep 2
 snap fastopen
-set -- $(winctl "$PANEL")
-FASTH="${5:-0}"
-if [ "$FASTH" -gt "$PANELH" ]; then
+CTL="$(winctl "$PANEL")"
+FASTH=""
+if gate_fields "the panel window's ctl line (/dev/wsys/$PANEL/ctl) after the single-read click" 5 "$CTL"; then
+    set -- $CTL; FASTH="$5"
+fi
+if [ -z "$FASTH" ]; then
+    :   # gate_fields named the failed read
+elif [ "$FASTH" -gt "$PANELH" ]; then
     ok "a click whose move/press/release arrive in ONE evdev read still opens the menu (the panel grew to $FASTH px)"
 else
     bad "a click delivered in a single evdev read was LOST: the panel window is still $FASTH px tall -- the press and release were folded into one event and the press edge never reached the panel"
