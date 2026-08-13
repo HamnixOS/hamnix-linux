@@ -65,6 +65,29 @@
 #      agents run VM gates on this host and a percentage quoted without the
 #      load it was taken at is not reproducible.
 #
+# THE NEGATIVE CONTROL, RUN AND WRITTEN DOWN. Set `*blocking = 0` for
+# `version` in srv_wctl_verb -- one character, keeping the routing, keeping the
+# permission check, keeping everything else -- and this file goes from
+# 18 passed / 0 failed to 17 passed / 1 failed:
+#
+#   FAIL ROUTED `version 9` returned 10 -- a REFUSED version write reported
+#        SUCCESS to its caller.
+#
+# EVERY OTHER ARM STAYS GREEN, including both pixel comparisons, all four
+# live-rect readings, `version 2` succeeding, proto reading 2, and the refusal
+# pair. That is the point of the version arm: the defect it exists to catch is
+# invisible to every other kind of assertion in this file, and it is the defect
+# that made every application silently not-v2 once already.
+#
+# AND A SECOND CONTROL THAT DOES **NOT** GO RED, RECORDED BECAUSE IT CORRECTS A
+# NATURAL READING OF THE CODE: dropping `wid/wctl` from the server's own
+# ownership pre-check does not change any refusal here, because
+# hamwsys_write_inner's wctl arm makes the same two checks and, under
+# srv_as_caller, makes them about the caller. The mediation is
+# srv_as_caller_full() and nothing else -- exactly as stage 2 said of the first
+# leaf. The pre-check earns its place on the connrefused counter, not on the
+# refusal.
+#
 # Offscreen (HAMFB_FILE), software, no ICD. /dev/dri is untouched.
 # WSYS_VERSION stays 8.
 set -uo pipefail
@@ -192,6 +215,16 @@ if [ "${1:-}" = "--inner" ]; then
         echo "wctl version 2" >>"$W/script.$tag"; sleep 1.0
         echo "== $tag.ctl $(rd "/dev/wsys/$wid/ctl")"
         grep -h '^WCTL ' "$W/hold.$tag.out" | sed "s/^/== $tag.wctlrc /"
+
+        # ---- WHO ROUTED WHAT, COUNTED RATHER THAN ASSUMED --------------
+        # Every arm above is driven through the client's ordinary write path,
+        # so an arm that stopped routing wctl entirely would still be green:
+        # the outcomes would match because BOTH paths would be the in-process
+        # one. The server's own trace names the leaf, and it is scoped to the
+        # CLIENT'S pid because the attacker below sends a routed wctl of its
+        # own. Counted BEFORE the attack for the same reason.
+        echo "== $tag.wctltrace $(grep -c "pid=$HP .*leaf=wid/wctl" \
+              "$W/wsysd.$tag.log" 2>/dev/null || true)"
 
         # ---- THE RED/GREEN PAIR ---------------------------------------
         if [ "$clientflag" = on ]; then
@@ -453,6 +486,22 @@ if [ "$up" = 2 ] && [ "$rp" = 2 ]; then
     ok "and the WINDOW ROW agrees: proto is 2 on both arms after the routed negotiation, so the success was applied and not merely reported (unrouted [$(f unrouted.ctl)], routed [$(f routed.ctl)])"
 else
     bad "proto is $up unrouted and $rp routed after \`version 2\`: the routed write reported success and the row does not show it -- a write that succeeded into a sink"
+fi
+
+# ---------- 4b. THE WRITES ACTUALLY CROSSED ------------------------------
+# Without this, a build that routed NOTHING would pass every arm above: both
+# arms would take the in-process path and agree with each other perfectly.
+UT="$(f unrouted.wctltrace)"; RT="$(f routed.wctltrace)"
+note "routed wctl mutations seen by the server from the client's own pid: unrouted $UT, routed $RT (move, resize, focus, version 9, version 2 -- \`wibble\` is deliberately not routed)"
+if [ "${RT:-0}" -ge 5 ] 2>/dev/null; then
+    ok "the ROUTED arm's wctl writes really crossed the boundary: $RT of them are in the server's own trace, named by leaf. Every equality arm above is therefore comparing a mediated path against an unmediated one and not two copies of the same one."
+else
+    bad "the server's trace shows only ${RT:-0} routed wctl mutations from the client -- the equality arms above are comparing the in-process path with itself and prove nothing"
+fi
+if [ "${UT:-1}" = 0 ]; then
+    ok "and the UNROUTED arm sent none ($UT) -- it is the control it claims to be"
+else
+    bad "the unrouted arm routed $UT wctl mutations; the two arms are not the two paths"
 fi
 
 # ---------- 5. RED-UNROUTED / GREEN-ROUTED -------------------------------

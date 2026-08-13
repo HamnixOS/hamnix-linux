@@ -3481,6 +3481,12 @@ static uint64_t srv_next_cid = 1;
 static int  srv_is_server = 0;   /* this process is wsysd; never dial yourself */
 static int  srv_lfd = -1;        /* the listening SOCK_SEQPACKET              */
 static int  srv_ep  = -1;        /* the epoll fd handed to wsysd's wait set   */
+/* The leaf's name, for the trace.  Defined with the op census far below; it is
+ * declared here because "which leaf did that mutation address" is a question
+ * only the trace can answer and the answer is what tells a routed wctl write
+ * from a routed ctl one from outside the process. */
+static const char *opc_leafname(int l);
+
 static struct wsrv_conn srv_conn[WSRV_CONN_MAX];
 static int  srv_nconn = 0;
 
@@ -3730,10 +3736,20 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
                  : 0;
         /* THE TWO PER-WINDOW LEAVES TAKE THE SAME RULE, and they must: wctl's
          * `move`/`resize` and wid/ctl's `geometry` are the same act under two
-         * names, so a check on one of them is not a check.  hamwsys_open and
-         * hamwsys_write_inner already give them one predicate in process
-         * (`hostowner() || owns_wid()`); this is that predicate asked about the
-         * caller instead of about wsysd. */
+         * names, so a check on one of them is not a check.
+         *
+         * AND THIS PRE-CHECK IS NOT WHAT REFUSES -- SAID PLAINLY, BECAUSE THE
+         * OPPOSITE IS EASY TO BELIEVE.  Both leaves' arms in
+         * hamwsys_write_inner open with the same two lines (`win_find` ->
+         * ENOENT, `!hostowner() && !owns_wid` -> EPERM), and under
+         * srv_as_caller they are already answered about the caller: deleting
+         * this branch changes no refusal.  What it is actually for is the
+         * counter below -- srv_n_connrefuse, stage 5's "the descriptor rule
+         * refused something the walk would have granted" -- and making the
+         * decision ONCE, before anything is touched, since a routed write is
+         * the open and the write at the same moment.  THE MEDIATION IS
+         * srv_as_caller_full() ABOVE AND NOTHING ELSE; that is as true of this
+         * leaf as stage 2 said it was of the first one. */
         int perwin = (kind == HAMWSYS_WIN_CTL || kind == HAMWSYS_WIN_WCTL);
         if (!kind) {
             srv_n_bad++;
@@ -3759,11 +3775,18 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
          * refused now, and there is no other way to see that from outside. */
         if (srv_trace()) {
             struct wwin *tv = perwin ? win_find(h->wid) : NULL;
+            /* THE LEAF IS NAMED, and it was not before.  Four leaves now cross
+             * this line and `wid/ctl geometry` and `wid/wctl move` are the same
+             * act under two names -- so a trace that does not say which one it
+             * carried cannot answer "did this client route its wctl writes, or
+             * only its ctl ones", which is the question a gate has to ask from
+             * outside the process. */
             fprintf(stderr, "wsrvtrace: caller uid=%u pid=%ld cid=%llu%s -> "
-                            "wid=%d ownerpid=%d hostowner=%d owns_wid=%d "
-                            "ancestry=%d\n",
+                            "leaf=%s wid=%d ownerpid=%d hostowner=%d "
+                            "owns_wid=%d ancestry=%d\n",
                     (unsigned)c->uid, (long)c->pid,
                     (unsigned long long)c->cid, c->adopted ? " adopted" : "",
+                    opc_leafname(kind),
                     (int)h->wid, tv ? (int)tv->pid : -1, hostowner(),
                     perwin ? owns_wid(h->wid) : -1,
                     perwin ? owns_wid_ancestry(h->wid) : -1);
