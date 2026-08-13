@@ -97,7 +97,16 @@ done_report() { echo "deboot: $pass passed, $fail failed"; [ "$fail" = 0 ]; }
 
 : >"$WORK/hostcond"
 hostload() { awk '{print $1}' /proc/loadavg; }
-srvnames() { grep -ac 'hamnix-wsys/[0-9.]*/srv' /proc/net/unix 2>/dev/null || echo 0; }
+# `grep -c` PRINTS 0 AND EXITS 1 ON NO MATCH, so `|| echo 0` does not supply a
+# default -- it APPENDS one, and the result is the two-line string "0\n0". That
+# is the common case here (no wsys server bound is the normal state of this
+# host), and it put a stray extra line into $WORK/hostcond, inflating the
+# sample count the verdict at the end reports and adding a phantom sample with
+# loadavg 0. Elsewhere in the tree the same idiom is worse: `[ "0\n0" -le 0 ]`
+# is not false, it is a TEST ERROR with rc=2, and the refusal branch behind it
+# never runs. Assign, then default only a genuinely empty read (a missing
+# /proc/net/unix, where grep exits 2 having printed nothing).
+srvnames() { local n; n="$(grep -ac 'hamnix-wsys/[0-9.]*/srv' /proc/net/unix 2>/dev/null)"; echo "${n:-0}"; }
 # EVERY CPU SAMPLE CARRIES THE CONDITIONS IT WAS TAKEN UNDER. Same rule and
 # same thresholds as tests/linux/wsys_srv_transport.sh, deliberately: two
 # gates disagreeing about when a number is quotable would be worse than

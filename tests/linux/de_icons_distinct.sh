@@ -191,7 +191,15 @@ fi
 # that is not the live image, which this host is not. Both counts are named so
 # neither reading is a guess.
 NICON=$(grep -c '^icon ' "$SRC")
-NLIVE=$(grep -lix 'X-Hamnix-LiveOnly=true' "$DESKHOME/Desktop"/*.desktop 2>/dev/null | wc -l)
+# `grep -lix` was this file's own reading and it DISAGREED with the one in
+# de_appmenu_installed.sh, which counts the same key with `grep -l`. Neither
+# matched lib/desktopentry.ad, the code that really hides these launchers, and
+# a trailing space or CR in a .desktop file made the two diverge and FABRICATE
+# an icon-count defect here -- "the desktop drew N icons for N+1 launchers",
+# said about the desktop, caused by whitespace in a text file. One shared
+# reading now, derived from the parser; see tests/linux/desktop_liveonly.sh.
+. tests/linux/desktop_liveonly.sh
+NLIVE=$(desktop_liveonly_count "$DESKHOME/Desktop"/*.desktop)
 NEXP=$((NDESK - NLIVE))
 if [ "$NICON" = "$NEXP" ]; then
     ok "one icon per launcher the desktop should show ($NICON of $NDESK, $NLIVE live-medium-only entry hidden)"

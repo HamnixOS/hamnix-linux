@@ -307,7 +307,13 @@ ENTRIES="$(grep -a 'appmenu entries:' "$WORK/boot.txt" | tail -1 | sed 's/.*entr
 # that is not an installer medium -- a SECOND, legitimate reason for a row not
 # to be there. A hard-coded number would have been "fixed" by lowering it,
 # which would then have hidden a genuinely dropped app for ever.
-NLIVE="$(grep -l 'X-Hamnix-LiveOnly=true' etc/hamde/apps/*.desktop 2>/dev/null | wc -l)"
+# The substring `grep -l` here and the `grep -lix` in de_icons_distinct.sh:194
+# were two different answers to the same question, and both feed arithmetic, so
+# the disagreement surfaced as a fabricated app-count defect rather than as a
+# disagreement. One shared reading now, derived from what lib/desktopentry.ad
+# actually does; see tests/linux/desktop_liveonly.sh.
+. tests/linux/desktop_liveonly.sh
+NLIVE="$(desktop_liveonly_count etc/hamde/apps/*.desktop)"
 WANT=$((NCAT - NLIVE - 1))
 info "the panel reports [panel] appmenu entries: ${ENTRIES:-<none>}  (catalogue $NCAT, minus $NLIVE live-only launcher(s) on a non-installer boot, minus the 1 whose program was removed = $WANT)"
 if [ "$ENTRIES" = "$WANT" ]; then

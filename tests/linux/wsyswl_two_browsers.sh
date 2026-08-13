@@ -92,6 +92,9 @@ pass=0; fail=0
 ok()   { echo "twobr: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "twobr: FAIL $*"; fail=$((fail+1)); }
 info() { echo "twobr: INFO $*"; }
+# An empty read is not a measurement. See tests/linux/gate_read.sh; used at the
+# MAXCONN=16 control in section 5.
+. tests/linux/gate_read.sh
 
 # REAP EVERYTHING. A browser is a process TREE and killing the launcher leaves
 # the content and GPU processes holding their connections; a gate that leaks
@@ -415,10 +418,29 @@ for _ in $(seq 1 60); do [ -S "$W2/wayland-0" ] && break; sleep 0.1; done
 STATE="$W2/wsyswl-state"
 export XDG_RUNTIME_DIR="$W2" WAYLAND_DISPLAY=wayland-0
 sleep 1
-if [ "$(sed -n 's/.*[ ]MAXCONN=\([0-9]*\).*/\1/p' "$STATE" 2>/dev/null | tail -1)" = 16 ]; then
+# An empty read is not a measurement -- see tests/linux/gate_read.sh. THE WAIT
+# ABOVE IS FOR THE SOCKET, AND THE SOCKET IS NOT THE STATE FILE. wsyswl writes
+# `limits shared MAXCONN=<n>` only when it dumps its stats, and it dumps them
+# when something makes them dirty; a server that has just started and has no
+# clients yet may not have written the file at all. `sed ... 2>/dev/null` on a
+# missing file is the empty string, "" is not 16, and the gate said "the
+# control server does not report MAXCONN=16" -- a defect named against a build
+# whose state file it had not managed to read. So POLL for the line, and if it
+# never comes, say which read failed instead of what the server does.
+C_MAXCONN=""
+for _ in $(seq 1 "${TWOBR_MAXCONN_WAIT:-60}"); do   # half-seconds; the demo shortens it
+    C_MAXCONN="$(sed -n 's/.*[ ]MAXCONN=\([0-9]*\).*/\1/p' "$STATE" 2>/dev/null | tail -1)"
+    [ -n "$C_MAXCONN" ] && break
+    sleep 0.5
+done
+if ! gate_nonempty "the control server's own ceiling, from '$STATE' (no 'MAXCONN=<n>' written in 30s)" "$C_MAXCONN"; then
+    :   # gate_nonempty named the read; whether the control really carries the
+        # ceiling is unanswered, and the sections below are measuring an
+        # UNCONFIRMED build -- which is why this leaves a FAIL behind it.
+elif [ "$C_MAXCONN" = 16 ]; then
     ok "the control server states its own ceiling: MAXCONN=16"
 else
-    bad "the control server does not report MAXCONN=16"
+    bad "the control server reports MAXCONN=$C_MAXCONN, not 16 -- the one number this control was built to change did not change"
 fi
 
 # THE SAME WORKLOAD, IN THE SAME ORDER AS A REAL SESSION: the namespaces come

@@ -77,6 +77,17 @@ pass=0; fail=0
 ok()   { echo "shfate: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "shfate: FAIL $*"; fail=$((fail+1)); }
 info() { echo "shfate: INFO $*"; }
+# An empty read is not a measurement. See tests/linux/gate_read.sh. st() seds
+# $STATE with 2>/dev/null and NOTHING IN THIS FILE EVER PROVES $STATE EXISTS --
+# the startup guard at line 120 checks the SOCKET, and the compositor writes
+# its state file only when a counter moves. So every `st <name>` can come back
+# empty for a reason that has nothing to do with the property under test, and
+# `${CONNS:-0}` / `${COMMITS_AFTER:-0}` turned that into "got none" and into
+# "THE PROPERTY FAILED ... that is the Steam symptom" -- this file's headline
+# claim, stated in the negative, about counters it had not read. The fix at
+# line 356 below already does this by hand for map_alloc_failed; these helpers
+# do it by name everywhere else.
+. tests/linux/gate_read.sh
 
 KIDS=""; XWPID=""; XWPID2=""; WLPID=""; WSYSDPID=""
 cleanup() {
@@ -170,10 +181,13 @@ NXWIN=$(xwininfo -root -children 2>/dev/null | grep -cE '^ +0x')
 CONNS=$(st conns)
 WINHI=$(st windows_high_water)
 info "$NXWIN X windows on the root; wsyswl says conns=$CONNS windows_high_water=$WINHI"
-if [ "${CONNS:-0}" = 1 ]; then
+if ! gate_nonempty "wsyswl's own conns counter (no 'conns <n>' line in $STATE)" "$CONNS"; then
+    :   # gate_nonempty named the read. "got none" was a sentence about the X
+        # session; an unwritten state file is a sentence about this gate.
+elif [ "$CONNS" = 1 ]; then
     ok "five X clients are ONE Wayland connection -- every per-connection limit is shared between all of them"
 else
-    bad "expected exactly 1 connection for a rootful X session, got ${CONNS:-none}"
+    bad "expected exactly 1 connection for a rootful X session, got $CONNS"
 fi
 if [ "${WINHI:-0}" = 1 ]; then
     ok "and ONE wsys window: the whole X screen, window manager and all, is one surface"
@@ -341,7 +355,13 @@ info "after the move under load: X says the victim is $GEOM_NOW; commits ${COMMI
 # THE OCCLUSION-PROOF MEASUREMENT, and the strongest one: the compositor is
 # still ACCEPTING this session's buffers. A commit count that stops moving is
 # the Steam symptom itself -- `commits 3` against `commits 506`.
-if [ "${COMMITS_AFTER:-0}" -gt "${COMMITS_BEFORE:-0}" ]; then
+if ! gate_nonempty "the commit counter before the move (no 'commits <n>' line in $STATE)" "$COMMITS_BEFORE" \
+   || ! gate_nonempty "the commit counter after the move (no 'commits <n>' line in $STATE)" "$COMMITS_AFTER"; then
+    :   # THE STRONGEST CLAIM IN THIS FILE MAY NOT BE MADE FROM AN EMPTY READ,
+        # in either direction. "commits stopped at  once other clients filled
+        # the server -- that is the Steam symptom" names the exact production
+        # bug the file exists to rule out, on the evidence of two empty strings.
+elif [ "$COMMITS_AFTER" -gt "$COMMITS_BEFORE" ]; then
     ok "THE PROPERTY: other clients filling the server and being refused did NOT stop this X session ($COMMITS_BEFORE -> $COMMITS_AFTER commits accepted)"
 else
     bad "THE PROPERTY FAILED: commits stopped at ${COMMITS_BEFORE} once other clients filled the server -- that is the Steam symptom"

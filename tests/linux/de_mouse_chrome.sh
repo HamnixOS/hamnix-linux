@@ -635,5 +635,10 @@ else
     ok "every click in this file came from the evdev end: nothing here names an event, pointer or keys ring, whatever program it might have used to do it"
 fi
 
-info "clicks delivered: $(grep -c . "$WORK/input.evdev" 2>/dev/null || echo '?') evdev bytes at $(stat -c%s "$WORK/input.evdev") total"
+# `grep -c` prints 0 AND exits 1 on no match, so `|| echo '?'` appended a
+# second line and this sentence read "clicks delivered: 0<newline>? evdev bytes"
+# -- an info line, so nothing was decided by it, but it is the same idiom that
+# elsewhere makes `[ "$X" -le 0 ]` a rc=2 test error and skips a refusal.
+EVLINES="$(grep -c . "$WORK/input.evdev" 2>/dev/null)"
+info "clicks delivered: ${EVLINES:-<unreadable>} evdev bytes at $(stat -c%s "$WORK/input.evdev") total"
 done_report
