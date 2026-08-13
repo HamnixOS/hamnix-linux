@@ -13,52 +13,60 @@
 #
 # It runs offscreen (HAMFB_FILE), so it never touches the host's display.
 #
-# THE KEY HALF OF THIS GATE IS RED, DETERMINISTICALLY, AND IT IS NOT FLAKE.
+# THIS GATE WAS RED FOR ITS KEY HALF, DETERMINISTICALLY, AND IT IS GREEN NOW.
 # ========================================================================
-# Characterised but NOT fixed -- written down because the next person should
-# start where this stopped rather than at the beginning. 3 runs out of 3:
+# Kept in full because the WRONG diagnosis it carried is the useful part.
+#
+# WHAT IT LOOKED LIKE, 3 runs out of 3:
 #
 #     ok   pointer is window-local (50 50)
 #     ok   left press arrived as 'd ... 1'
 #     FAIL key events reached the window (the owner's own log)
 #
-# WHAT IS PROVEN GOOD, each measured, not reasoned:
-#   * The POINTER half passes off the SAME evdev file, so the decode, the
-#     device read, the window lookup and the local-coordinate mapping all work.
-#   * FOCUS IS CORRECT. wsysd's own published state says `focus 2` -- the
-#     click did raise the client's window, so route_key's `focus_wid < 2`
-#     early return is not being taken.
-#   * THE COMPOSITOR ROUTED THE KEYSTROKE. The same state line says `keys 1`:
-#     handle_key decoded KEY_A, kmap turned it into 'a', and route_key ran.
-#   * THE CLIENT'S KEYSTROKE CHANNEL EXISTS AND IS BOUND BY THE CLIENT. The
-#     abstract socket `@hamnix-wsys/<dev>.<ino>/2/keys` is present as a bound
-#     u_dgr for the run's own segment. (Checked twice: the first check used a
-#     truncating `head -5` and reported it ABSENT, which was wrong.)
-#   * THE UIDS AGREE, so keychan_recv's SCM_CREDENTIALS test should accept:
-#     inside the private namespace the shell, the segment owner and both
-#     processes are uid 0, and seg_owner is fstat'ed at attach by the creator
-#     too, so seg_owner_known is set.
-#   * The segment's (dev,ino) -- which is what NAMES the channel -- is
-#     identical before and after wsysd attaches, so sender and receiver derive
-#     the same abstract name.
+# WHAT THE PREVIOUS PASS CONCLUDED, and it was wrong in its first clause: "the
+# compositor is NOT at fault -- wsysd's published state says `focus 2` and
+# `keys 1`, so route_key ran; the client's channel is bound; the uids agree;
+# SO THE LOSS IS BETWEEN wsysd's sendto AND THE OWNER'S read." Every fact in
+# that list was true. The inference was not, and the reason is worth keeping:
+# `focus 2` and `keys 1` were read from a state line published LATER IN THE
+# RUN. `keys 1` counts what handle_key DECODED, not what route_key delivered,
+# and `focus 2` was true by the time it was read and false when it mattered.
+# A counter that says a stage was entered is not a witness that it completed.
 #
-# SO THE LOSS IS BETWEEN wsysd's sendto AND THE OWNER'S read, AND THAT IS AS
-# FAR AS THIS PASS GOT. Not isolated: whether the datagram is never sent, or
-# sent and dropped by keychan_recv's credential test, or received and returned
-# as zero bytes. Polling the socket's Recv-Q every 50 ms for 3 s never caught
-# it nonzero, which does NOT settle it -- the owner's own 100 ms read tick
-# could drain it between samples. The next step is to make the owner report a
-# zero-length read distinctly from no read at all; today they are the same
-# silence, which is exactly the shape of failure this tree keeps paying for.
+# WHAT IT ACTUALLY WAS, measured three ways (see the fix commit on
+# user/wsysd.ad):
+#   * strace of both processes: the client BINDS its channel and calls recvmsg
+#     every 100 ms getting EAGAIN; wsysd issues exactly ONE sendto in the whole
+#     run and it is the wake datagram. NEVER SENT -- which excludes both of the
+#     other two candidates (credentials, zero-length read) outright.
+#   * a debug line inside keychan_send and inside hamwsys_write's
+#     HAMWSYS_WIN_KEYS branch: neither ever printed.
+#   * a debug line at the top of route_key: `route_key code=97 focus=0`. The
+#     decode was always right. `route_key`'s first line is
+#     `if focus_wid < 2: return`.
 #
-# WHAT THIS IS NOT: it is not the private namespace (fc82e535) by any evidence
-# gathered here, and it is not a build or harness limit -- the pointer half of
-# the same run passes. tests/linux/wsys_keychan.sh being green does NOT cover
-# it: that gate "compiles one C file and links nothing from this tree" and
-# measures KERNEL properties (abstract namespace, SCM_CREDENTIALS, first-binder
-# -wins), not this tree's channel. As far as this pass can tell, THIS FILE IS
-# THE ONLY END-TO-END PROOF THAT A KEYSTROKE REACHES A WINDOW, and it is red,
-# so the property is currently UNPROVEN rather than merely untested.
+# focus was 0 because `fd_is_waitable` -- the wait-set probe -- calls
+# pump_input() and pump_keyboard() to reach quiescence, and it runs from
+# build_waitset() BEFORE the main loop, so before the first scan_windows().
+# The probe swallowed this gate's entire evdev file against an empty window
+# table. The POINTER survived because motion and button edges are accumulated
+# STATE that deliver_pointer routes later; a key is routed immediately and had
+# nowhere to wait. That asymmetry is the whole reason this looked like a
+# transport bug for two passes.
+#
+# WHAT THIS GATE PROVES AND WHAT IT DOES NOT. It proves a keystroke travels
+# evdev record -> decode -> route -> keystroke channel -> the owning window's
+# own read, in this tree's own code. tests/linux/wsys_keychan.sh does NOT
+# cover that: it compiles one C file, links nothing from this tree, and
+# measures KERNEL properties (abstract namespace, SCM_CREDENTIALS,
+# first-binder-wins).
+#
+# It does NOT prove WHICH window a keystroke reaches. Measured: with the
+# click-ordering half of the fix removed, this gate still passes 1 of 1, since
+# one window plus wsysd's startup focus fallback makes the answer right
+# whether or not the click was applied first. tests/linux/input_focus_key.sh
+# is the gate for that half, and it catches exactly that removal -- with the
+# key delivered to the WRONG WINDOW, not merely lost.
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
