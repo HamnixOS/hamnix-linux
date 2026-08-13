@@ -263,7 +263,12 @@ median3(){ printf '%s\n' "$1" "$2" "$3" | sort -g | sed -n 2p; }
 host_cond(){
     local l s
     l="$(awk '{print $1}' /proc/loadavg)"
-    s="$(grep -ac 'hamnix-wsys/[0-9.]*/srv' /proc/net/unix 2>/dev/null || echo 0)"
+    # `grep -c` PRINTS 0 AND EXITS 1 on no match, so `|| echo 0` APPENDS a
+    # second line rather than supplying a default: the value was "0\n0"
+    # whenever no wsys server was bound, which is this host's normal state. It
+    # put a stray line into $W/hostcond and inflated the sample count the
+    # verdict below reports. Same wording as wsys_srv_deboot.sh:100 on purpose.
+    s="$(grep -ac 'hamnix-wsys/[0-9.]*/srv' /proc/net/unix 2>/dev/null)"; s="${s:-0}"
     printf '%s %s\n' "$l" "$s" >>"$W/hostcond"     # read by the verdict at the end
     printf 'load %s srv %s' "$l" "$s"
 }
