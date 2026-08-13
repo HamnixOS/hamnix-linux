@@ -4535,6 +4535,17 @@ int32_t sys_wsys_srv_attack_local(int32_t victim_wid)
  *   extern def sys_wsys_srv_readlat(n: int32) -> int32 */
 int32_t sys_wsys_srv_readlat(int32_t n)
 { return (int32_t)hamwsys_srv_readlat((int)n); }
+/* STAGE 5.  The handoff is a real API a toolkit calls around a spawn (see
+ * hamwsys_srv_handoff in user/linux-wsys.h); conngate is the gate driver that
+ * measures both arms of the property from the holder's own process.
+ *   extern def sys_wsys_srv_handoff(on: int32) -> int32
+ *   extern def sys_wsys_srv_conngate(wid: int32, selfpath: Ptr[char],
+ *                                   uidgate: Ptr[char]) -> int32 */
+int32_t sys_wsys_srv_handoff(int32_t on)
+{ return (int32_t)hamwsys_srv_handoff((int)on); }
+int32_t sys_wsys_srv_conngate(int32_t wid, const char *selfpath,
+                              const char *uidgate)
+{ return (int32_t)hamwsys_srv_conngate((int)wid, selfpath, uidgate); }
 
 /* GPU presentation of a window frame. Unimplemented on purpose: the scene
  * compositor rasterizes in software (lib/hamui_host.ad's vk2d raster ops), so

@@ -177,40 +177,27 @@ if [ "$RC_OFF" = 0 ]; then
 fi
 ok "with the flag unset the probe cannot reach a server (rc=$RC_OFF) -- a success below will mean the transport, and not the probe"
 
-# THE SERVER'S NAME IS PER-SEGMENT AND THIS CHECK MUST BE TOO.
-# ==================================================================
-# srv_addr_named() builds "hamnix-wsys/<st_dev>.<st_ino>/srv" from THIS run's
-# segment, and the comment on it says why: so that a gate's private window
-# system and the machine owner's desktop cannot find each other. Both checks
-# below threw that away and grepped /proc/net/unix for `hamnix-wsys/.*/srv`,
-# WHICH MATCHES EVERY wsysd ON THE HOST.
-#
-# That is not hypothetical and it is not symmetric. Another agent running this
-# same gate on this same box makes the flag-unset check below FAIL against a
-# tree that is perfectly correct -- and, far worse, makes the flag-SET check
-# further down PASS ON SOMEBODY ELSE'S SOCKET, reporting that the server bound
-# its name in a run where this server bound nothing. A success-shaped failure,
-# in the check whose whole job is to prove the transport exists.
-#
-# MEASURED, NOT SUPPOSED: while this was found, three foreign
-# `hamnix-wsys/<dev>.<ino>/srv` names were bound on this host and this run's
-# own segment had none -- and the old grep called that a bound server.
-srv_socket_bound(){    # 0 = THIS run's name is bound, 1 = it is not, 2 = cannot tell
-    local id
-    [ -e "$HAMWSYS" ] || return 2
-    id="$(stat -c '%d.%i' "$HAMWSYS" 2>/dev/null)" || return 2
-    [ -n "$id" ] || return 2
-    grep -q "hamnix-wsys/$id/srv" /proc/net/unix 2>/dev/null
-}
-
 # ------- C(i). No socket is bound when the flag is unset.
-srv_socket_bound; RC_SOCK=$?
-if [ "$RC_SOCK" = 2 ]; then
-    bad "cannot tell whether a server socket is bound: no segment at $HAMWSYS to derive the name from"
-elif [ "$RC_SOCK" = 0 ]; then
-    bad "this run's own abstract socket is bound with HAMWSYS_SERVER unset -- the flag does not gate the server"
+# INDEPENDENTLY CONFIRMED, and worth recording because the two observations
+# bound the problem: this defect was found twice on the same day, by two agents
+# who each saw it from a different side. One counted 21 foreign names bound
+# during a single run; the other watched this arm go red while its own
+# segment had NO srv name at all and three foreign ones were bound. Same
+# cause, and the fix below is the one that landed.
+# SCOPED TO THIS RUN'S SEGMENT, and that is not tidiness. The abstract name is
+# "hamnix-wsys/<dev>.<ino>/srv" and /proc/net/unix IS HOST-WIDE: a wildcard here
+# reads every wsysd on the machine, so any other gate, agent or leftover
+# compositor serving ITS OWN segment failed this arm and the failure said "the
+# flag does not gate the server". Observed: 21 such names bound by other
+# processes during one run. The segment this gate created is the only one whose
+# absence proves anything about the flag.
+SEGNAME="$(stat -c '%d.%i' "$HAMWSYS" 2>/dev/null || echo none)"
+if [ "$SEGNAME" = none ]; then
+    bad "cannot identify this run's segment ($HAMWSYS), so 'no socket is bound' cannot be told from 'no socket was looked for'"
+elif grep -q "hamnix-wsys/$SEGNAME/srv" /proc/net/unix 2>/dev/null; then
+    bad "an abstract socket named hamnix-wsys/$SEGNAME/srv is bound with HAMWSYS_SERVER unset -- the flag does not gate the server"
 else
-    ok "no server socket is bound with the flag unset (checked THIS segment's name, not every wsysd on the host)"
+    ok "no server socket is bound for this run's segment ($SEGNAME) with the flag unset"
 fi
 
 # ------- C(ii). Record what /dev/wsys answers, to compare against later.
@@ -303,15 +290,14 @@ if ! [ -s "$HAMFB_FILE" ]; then
 fi
 ok "wsysd runs with HAMWSYS_SERVER=1"
 
-# THIS ONE IS THE DANGEROUS DIRECTION: matched loosely, it passes on another
-# agent's socket and certifies a transport this run never bound.
-srv_socket_bound; RC_SOCK=$?
-if [ "$RC_SOCK" = 2 ]; then
-    bad "cannot tell whether the server bound its name: no segment at $HAMWSYS to derive it from"
-elif [ "$RC_SOCK" = 0 ]; then
-    ok "the server bound THIS SEGMENT's abstract name, hamnix-wsys/$(stat -c '%d.%i' "$HAMWSYS")/srv (visible in /proc/net/unix)"
+# SCOPED, for the same reason the unset arm above is: a wildcard over host-wide
+# /proc/net/unix would be GREEN because of somebody else's compositor, which is
+# the worse direction of the same mistake.
+SEGNAME="$(stat -c '%d.%i' "$HAMWSYS" 2>/dev/null || echo none)"
+if [ "$SEGNAME" != none ] && grep -q "hamnix-wsys/$SEGNAME/srv" /proc/net/unix 2>/dev/null; then
+    ok "the server bound the abstract name for THIS run's segment ($SEGNAME), visible in /proc/net/unix"
 else
-    bad "HAMWSYS_SERVER=1 but this segment's own srv socket is not bound -- there is nothing to dial"
+    bad "HAMWSYS_SERVER=1 but no hamnix-wsys/$SEGNAME/srv socket is bound -- there is nothing to dial"
 fi
 
 HAMWSYS_SERVER=1 "$BIN/wsys_srv_probe" >"$W/probe.on.out" 2>"$W/probe.on.err"
