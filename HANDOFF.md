@@ -24,9 +24,12 @@ because that is the version those runs were made against; the numbers stand, the
 version in them is history. **`CHANGELOG.md` is the authority on what a person
 gets, and its `Unreleased` section is the authority on what they do not yet.**
 
-**Nine things have landed since the 1.0.22 candidate and are NOT on the
+**Ten things have landed since the 1.0.22 candidate and are NOT on the
 channel.** They are written up for a person in `CHANGELOG.md` § Unreleased and
-are only listed here so a fresh session knows the gap exists: `ls` on a plain
+are only listed here so a fresh session knows the gap exists — **the tenth is
+the one to read first: the first keys typed after the desktop came up were
+thrown away, and a key typed straight after a click could land in the wrong
+window.** Then: `ls` on a plain
 file printed its contents; the Steam consent dialog never drew and cost
 197.6 MiB to not draw; an idle panel cost more CPU than the compositor; four
 unbounded peer-chosen lengths in `ssh`/`sshd`, **one of them reachable before
