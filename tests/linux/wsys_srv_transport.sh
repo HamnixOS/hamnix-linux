@@ -151,10 +151,20 @@ fi
 ok "with the flag unset the probe cannot reach a server (rc=$RC_OFF) -- a success below will mean the transport, and not the probe"
 
 # ------- C(i). No socket is bound when the flag is unset.
-if grep -q 'hamnix-wsys/.*/srv' /proc/net/unix 2>/dev/null; then
-    bad "an abstract socket named hamnix-wsys/*/srv is bound with HAMWSYS_SERVER unset -- the flag does not gate the server"
+# SCOPED TO THIS RUN'S SEGMENT, and that is not tidiness. The abstract name is
+# "hamnix-wsys/<dev>.<ino>/srv" and /proc/net/unix IS HOST-WIDE: a wildcard here
+# reads every wsysd on the machine, so any other gate, agent or leftover
+# compositor serving ITS OWN segment failed this arm and the failure said "the
+# flag does not gate the server". Observed: 21 such names bound by other
+# processes during one run. The segment this gate created is the only one whose
+# absence proves anything about the flag.
+SEGNAME="$(stat -c '%d.%i' "$HAMWSYS" 2>/dev/null || echo none)"
+if [ "$SEGNAME" = none ]; then
+    bad "cannot identify this run's segment ($HAMWSYS), so 'no socket is bound' cannot be told from 'no socket was looked for'"
+elif grep -q "hamnix-wsys/$SEGNAME/srv" /proc/net/unix 2>/dev/null; then
+    bad "an abstract socket named hamnix-wsys/$SEGNAME/srv is bound with HAMWSYS_SERVER unset -- the flag does not gate the server"
 else
-    ok "no server socket is bound with the flag unset"
+    ok "no server socket is bound for this run's segment ($SEGNAME) with the flag unset"
 fi
 
 # ------- C(ii). Record what /dev/wsys answers, to compare against later.
@@ -247,10 +257,14 @@ if ! [ -s "$HAMFB_FILE" ]; then
 fi
 ok "wsysd runs with HAMWSYS_SERVER=1"
 
-if grep -q 'hamnix-wsys/.*/srv' /proc/net/unix 2>/dev/null; then
-    ok "the server bound its abstract name (visible in /proc/net/unix)"
+# SCOPED, for the same reason the unset arm above is: a wildcard over host-wide
+# /proc/net/unix would be GREEN because of somebody else's compositor, which is
+# the worse direction of the same mistake.
+SEGNAME="$(stat -c '%d.%i' "$HAMWSYS" 2>/dev/null || echo none)"
+if [ "$SEGNAME" != none ] && grep -q "hamnix-wsys/$SEGNAME/srv" /proc/net/unix 2>/dev/null; then
+    ok "the server bound the abstract name for THIS run's segment ($SEGNAME), visible in /proc/net/unix"
 else
-    bad "HAMWSYS_SERVER=1 but no hamnix-wsys/*/srv socket is bound -- there is nothing to dial"
+    bad "HAMWSYS_SERVER=1 but no hamnix-wsys/$SEGNAME/srv socket is bound -- there is nothing to dial"
 fi
 
 HAMWSYS_SERVER=1 "$BIN/wsys_srv_probe" >"$W/probe.on.out" 2>"$W/probe.on.err"

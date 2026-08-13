@@ -3623,6 +3623,13 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
          * exact-pid claim in srv_caller_holds_wid(), for rows the DE stamps
          * on a process's behalf before it has connected. */
         if (v) srv_own_bind(v, c->cid);
+        /* A WINDOW ALLOCATED OVER AN ADOPTED CONNECTION IS STAMPED AGAINST THE
+         * PROCESS THAT DIALLED, not the one that asked, because `c->pid` is
+         * SO_PEERCRED and SO_PEERCRED does not follow a descriptor.  It is a
+         * wart and it is not a hole: the row is held by the connection either
+         * way, /dev/wsys/self answers "creator pid or ancestor" so the caller
+         * still resolves it, and the alternative -- trusting a pid the client
+         * sent -- is the one thing a mediator may never do. */
         srv_as_self();
         int32_t wid = v ? v->wid : -1;
         if (v) shm->gen++;
