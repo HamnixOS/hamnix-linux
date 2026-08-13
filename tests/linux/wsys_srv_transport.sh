@@ -250,6 +250,24 @@ cpu_pct(){ # cpu_pct <pid> <seconds> -> percent of one core, 2 decimals
 }
 median3(){ printf '%s\n' "$1" "$2" "$3" | sort -g | sed -n 2p; }
 
+# EVERY CPU SAMPLE CARRIES THE HOST CONDITIONS IT WAS TAKEN UNDER, because on
+# this machine those conditions move the answer more than the code does. The
+# same assertion, same gate, same tree region has read 0.27% contended, 0.22%
+# contended, and 0.17% at loadavg ~1.5 -- a third of the apparent overage was
+# OTHER AGENTS, not mediation. A percentage printed without the load it was
+# taken at is not reproducible and should not be quoted.
+#
+# srv= counts bound hamnix-wsys/<dev>.<ino>/srv names host-wide. Exactly ONE is
+# ours whenever our server is up, so srv>1 means somebody else's compositor was
+# running while this number was taken and the number is NOT ATTRIBUTABLE.
+host_cond(){
+    local l s
+    l="$(awk '{print $1}' /proc/loadavg)"
+    s="$(grep -ac 'hamnix-wsys/[0-9.]*/srv' /proc/net/unix 2>/dev/null || echo 0)"
+    printf '%s %s\n' "$l" "$s" >>"$W/hostcond"     # read by the verdict at the end
+    printf 'load %s srv %s' "$l" "$s"
+}
+
 # within_budget <delta> <budget> <label>. A delta smaller than one tick is
 # reported as "below what this instrument can resolve" rather than as a pass:
 # saying 0.00% when the instrument's floor is 0.025% is a claim the run did
@@ -272,7 +290,9 @@ measure_idle(){ # measure_idle <tag> [env...] -> echoes "s1 s2 s3 median"
     local p s1 s2 s3
     p="$(start_wsysd "$tag" "$@")"
     sleep 2                      # let the first frame and the mode probe settle
-    s1="$(cpu_pct "$p" "$WIN")"; s2="$(cpu_pct "$p" "$WIN")"; s3="$(cpu_pct "$p" "$WIN")"
+    s1="$(cpu_pct "$p" "$WIN")"; echo "srvtr:      [$tag] sample 1: $s1% of a core ($(host_cond))" >&2
+    s2="$(cpu_pct "$p" "$WIN")"; echo "srvtr:      [$tag] sample 2: $s2% of a core ($(host_cond))" >&2
+    s3="$(cpu_pct "$p" "$WIN")"; echo "srvtr:      [$tag] sample 3: $s3% of a core ($(host_cond))" >&2
     stop_wsysd "$p"
     echo "$s1 $s2 $s3 $(median3 "$s1" "$s2" "$s3")"
 }
@@ -494,7 +514,7 @@ note "        => $(budget_for 100)% at 100/s, $(budget_for 192)% at 192/s, $(bud
 # intercept do.
 drive(){ # drive <ops/s> <budget%> <label>
     local ops="$1" budget="$2" label="$3"
-    local p s1 s2 s3 med d dp i out=""
+    local p s1 s2 s3 med d dp i out="" one=""
     p="$(start_wsysd "drive$ops" HAMWSYS_SERVER=1)"
     sleep 2
     for i in 1 2 3; do
@@ -502,7 +522,13 @@ drive(){ # drive <ops/s> <budget%> <label>
             >>"$W/sustain.$ops.out" 2>>"$W/sustain.$ops.err" &
         dp=$!; reap_add "$dp"
         sleep 1
-        out="$out $(cpu_pct "$p" "$WIN")"
+        one="$(cpu_pct "$p" "$WIN")"
+        out="$out $one"
+        # THE CONDITIONS WITH THE SAMPLE, not after all three and not in a
+        # separate log: a reader must be able to see WHICH sample was taken
+        # under what, because that is how the 0.27 / 0.22 / 0.17 spread on this
+        # very assertion was finally explained.
+        echo "srvtr:      [$label] sample $i: $one% of a core ($(host_cond))"
         wait "$dp" 2>/dev/null
     done
     read -r s1 s2 s3 <<<"$out"
@@ -583,6 +609,28 @@ awk -v f="$FIXED_PCT" -v fb="$FIXED_BUDGET" -v m="$MARGINAL_US" -v mb="$MARGINAL
     printf "srvtr: ....   headroom: the wake may grow %.2f%% of a core (x%.2f) ", fb-f, (f>0? fb/f : 0);
     printf "and a message %.3f us (x%.2f) before this gate goes red\n", mb-m, (m>0? mb/m : 0);
 }'
+
+# ==================================================================
+# ARE THESE PERCENTAGES ATTRIBUTABLE AT ALL?
+# ==================================================================
+# This is printed LAST and deliberately loudly, because the failure it guards
+# against is a run that looks authoritative and is not. On this host the same
+# assertion has read 0.27%, 0.22% and 0.17% purely with how busy the machine
+# was, so a number taken beside another agent's compositor says more about the
+# neighbours than about the mediator. It is NOT a pass/fail arm: the
+# correctness arms above are unaffected by load and stay meaningful either way.
+if [ -s "$W/hostcond" ]; then
+    awk '{ if ($1+0 > maxl) maxl=$1+0; if ($2+0 > maxs) maxs=$2+0; n++ }
+         END{
+           printf "srvtr: .... host during the CPU samples: %d samples, peak loadavg %.2f, peak bound srv names %d\n", n, maxl, maxs;
+           if (maxs > 1)
+               printf "srvtr: .... NOT ATTRIBUTABLE: another compositor was bound while these were taken. The percentages above describe this machine, not this tree -- RE-TAKE THEM QUIET.\n";
+           else if (maxl > 2.0)
+               printf "srvtr: .... SUSPECT: peak loadavg %.2f exceeded 2.0. Treat the percentages as an upper bound and re-take them quieter.\n", maxl;
+           else
+               printf "srvtr: .... ATTRIBUTABLE: no foreign compositor, peak loadavg %.2f under 2.0.\n", maxl;
+         }' "$W/hostcond"
+fi
 
 echo "srvtr: $pass passed, $fail failed"
 [ "$fail" = 0 ]
