@@ -887,7 +887,7 @@ upper bound on the per-mutation cost and not a measurement of it.
 * **The `wid/wctl` READ is untouched.** A uid-1002 process owning nothing
   still reads any window's live rect out of shared memory — the probe in 7.1
   measured exactly that and it is unchanged. It belongs to 7.5 step 4 with the
-  directory listing and `wid/ctl`'s read.
+  directory listing and `wid/ctl`'s read. **Done in stage 9, below.**
 * **No `WSYS_VERSION` bump**, no fallback removed, and the segment is still
   mapped read-write by every client. Everything above is a mediator a
   non-participating client walks past.
@@ -899,6 +899,193 @@ upper bound on the per-mutation cost and not a measurement of it.
   re-fits it either way, which is the same "out of step for at most one frame"
   the function's own comment describes. Written down rather than left to be
   rediscovered.
+
+## What stage 9 measured — the ATTRIBUTE READS, and the rule is the leaf's shape
+
+`tests/linux/wsys_srv_attrread.sh`, **30 passed, 0 failed**. `WSYS_VERSION`
+stays 8. `srv_route_read()` now carries `wid/ctl`, `wid/wctl` and the
+**directory** as well as `windows`, `screen` and `pool`. This is 7.5 step 4's
+read half; `open`/existence in general is not done and is discussed below.
+
+**THE GAP §7.1 MEASURED IS CLOSED, AND IT IS REPRODUCED HERE FIRST.** Same
+shape as §7.1's probe — `unshare -U`, wsysd as 1001, a victim at 1001 owning
+window 2, an attacker at 1002 owning nothing — with the enumeration policy live
+and answering that attacker EMPTY on `windows` throughout:
+
+| the attacker's read | unrouted | routed |
+|---|---|---|
+| `cat /dev/wsys/2/ctl` | `2 137 241 353 179 5 1 1 1 0 0 0 0 0` | **`ENOENT`** |
+| `cat /dev/wsys/2/wctl` | `137 241 353 179 click` | **`ENOENT`** |
+| `cat /dev/wsys` | `ctl self windows screen pool 2` | **`ctl self windows screen pool`** |
+| `cat /dev/wsys/2` | `ctl scene keys pointer event text cmd draw/images` | **`ENOENT`** |
+| `cat /dev/wsys/windows` | `2 VICTIM-…` | (empty) — stage 4, unregressed |
+
+**TWO RULES, AND THE SPLIT IS THE SHAPE OF THE QUESTION RATHER THAN A
+COMPROMISE.** A directory asks which windows there *are* — a question about the
+SET, and `windows` is the same question under another name — so `/dev/wsys` and
+`/dev/wsys/<wid>` take **stage 4's enumeration tier**. `<wid>/ctl` and
+`<wid>/wctl` name ONE window, so they take the rule their own WRITE arms
+already apply and the four rings took in commit `0f80d3e5`: **`hostowner() ||
+owns_wid_ancestry(wid)`**. A leaf whose read and write answer to different
+rules is two policies wearing one path.
+
+`owns_wid_ancestry()` and **not** `owns_wid()`, for `srd_enum_tier`'s own
+recorded reason: since stage 5 `owns_wid()` is the CONNECTION question, and the
+read server holds no bindings, so it would answer 0 for every caller on the
+desktop.
+
+**I EXPECTED TO HAVE TO LEAVE GEOMETRY PUBLIC FOR THE PANEL, AND THE
+MEASUREMENT SAYS OTHERWISE.** The brief this stage was written from allowed for
+the honest answer being "the compositor and the taskbar legitimately read
+attributes of windows they do not own, so this must stay public". A sweep of
+every read-open of these two leaves in the tree says it does not:
+
+- the **only** reader of a foreign `<wid>/ctl` anywhere is `user/wsysd.ad`'s
+  `load_window()`, called from `scan_windows()` for every wid in the directory
+  — and wsysd is `srv_is_server` (it never routes) and is the host owner
+  besides, so it is admitted by the first clause exactly as the write gate
+  admits it today;
+- `hampanelscene`'s taskbar reads `/dev/wsys/windows` and **never** a foreign
+  `<wid>/ctl` — `_raise_focus`, `_set_window_hidden` and `_reload_panels` all
+  open it `sys_open_write`;
+- `lib/hamui.ad`, `user/hamUId.ad`, `hamdesktop` and `hamappmenu` open both
+  leaves **write-only**;
+- the only `<wid>/ctl` read by a client of its own window in the tree is
+  `tests/linux/wsys_uidgate.ad`, a gate binary.
+
+So the tighter per-window rule costs the desktop nothing, and taking the
+enumeration tier for all four leaves would have been a weaker boundary bought
+for nobody. **That is a correction to the brief, made from a sweep rather than
+from taste.**
+
+**THE ARM THAT SEPARATES THE TWO RULES IS ONE PROCESS.** A uid-1002 client
+owning window 3, against a uid-1001 victim owning window 2 — so `hostowner()`
+answers 0 throughout and cannot short-circuit anything:
+
+| its read | result |
+|---|---|
+| the victim's `wid/ctl` | **REFUSED** — `ancestry=0 -> EMPTY` |
+| the victim's `wid/wctl` | **REFUSED** |
+| its OWN `wid/ctl` | `3 611 97 222 144 5 1 1 1 0 0 0 0 0` — `ancestry=1 -> FULL` |
+| its OWN `wid/wctl` | `611 97 222 144 click` |
+| the DIRECTORY | `ctl self windows screen pool 2 3` — `tier=FULL` |
+
+A blanket allow and a blanket deny each go red on half of that, and a uid-only
+policy goes red on the last row.
+
+**ENOENT AND NOT EPERM**, restating stage 4: "there is no such window"
+withholds the existence of the window system where `EPERM` advertises it — and
+it is what an absent wid answers anyway, so a prober cannot separate the two.
+**The root directory still answers**, with the fixed names and not one wid: a
+reader that cannot list `/dev/wsys` cannot open `windows`, which is where the
+policy is supposed to say no.
+
+**THE HOLE STAGE 8's GATE FOUND IN ITSELF IS DESIGNED OUT OF THIS ONE FROM THE
+START.** Every arm runs through the client's ordinary read path, so a build
+that routed **nothing** would pass the lot. The read server's trace therefore
+names the leaf, and the crossings are counted **scoped to each client's own
+pid**, which the client reports itself before `exec`:
+
+    routed    wid/ctl 1   wid/wctl 1   dir 1
+    unrouted  wid/ctl 0   wid/wctl 0   dir 0
+
+**EQUALITY, MEASURED**: for a permitted caller the routed answer is
+BYTE-IDENTICAL to the unrouted one on all three leaves. Routing changes who may
+read, not what is read.
+
+**TWO NEGATIVE CONTROLS, BOTH RUN.**
+
+| control | effect |
+|---|---|
+| delete the `srv_as_caller(c->uid, c->pid)` in the per-window branch | 30/0 → **25 passed, 5 failed** — the four per-window arms and the "grant is per-caller" arm. The directory arms stay green, correctly: that call site is `srd_enum_tier`'s and was untouched. |
+| `snap_dir_tier(f, 0)` → `(f, 1)` in the refusal branch — one character, keeping the routing and the tier decision | 30/0 → **29 passed, 1 failed**, the one being the directory. Every other arm stays green, which is why the directory needs an arm of its own. |
+
+**THE DESKTOP STILL COMES UP, AND IT IS THE SAME SCREEN.**
+`tests/linux/wsys_srv_deboot.sh`, **19 passed, 0 failed**, offscreen, one set of
+binaries, arms alternated in one session:
+
+| | unrouted | routed |
+|---|---|---|
+| wallpaper (`hamdesktop`) | wid 2, 1280x800 | **the same** |
+| both panels | wid 3 and wid 4, 1280x26 | **the same** |
+| Applications menu | wid 5 at (8,28), **407x140** | **the same** |
+| a window drag | wid 6, 480x320, moving | **the same** |
+| mutations crossing in 8 s | — | 7840, each via `srv_as_caller()` |
+
+**AND THE FOUR WINDOWS' `ctl` LINES ARE BYTE-IDENTICAL BETWEEN THE ARMS, WHICH
+IS THIS STAGE'S OWN EQUALITY RESULT ON A REAL DESKTOP RATHER THAN A SYNTHETIC
+CLIENT** — the gate's reader is a fresh `cat` that inherits `HAMWSYS_SERVER=1`
+in the routed arm, so those four reads went through the read server:
+
+    routed   wid 2 ctl: 2 0 0 1280 800 -1 0 1 1 82 0 0 0 0
+             wid 5 ctl: 5 8 28 407 140 14 0 1 1 2 0 0 1 0
+    unrouted the same two lines, character for character
+
+**AND THE DESKTOP STILL HOLDS NO READ CONNECTION AT ALL** — 4 mutation
+connections, one per window-owning program, and **0 read connections**, counted
+per process from `/proc`. Stage 7 found that and it is unchanged by routing
+three more read leaves: no DE program reads `windows`, `screen`, `pool`,
+`<wid>/ctl`, `<wid>/wctl` or the directory. The compositor reads all of them and
+is `srv_is_server`, so it never dials. **The leaves stage 9 routed are read by
+tools, not by the desktop — which is the same thing as saying the callers it now
+refuses are exactly the callers it meant to refuse.**
+
+**THE COST NUMBERS FROM THAT RUN ARE NOT ATTRIBUTABLE AND PART OF THE NOISE WAS
+MINE.** The gate's own verdict is `NOT ATTRIBUTABLE: peak loadavg 3.95`, and the
+unrouted arm was sampled at loadavg 2.86 with 2 bound wsys servers against the
+routed arm's 3.95 with 6 — because this stage's own negative-control gate runs
+were on the host during the routed half. Recorded rather than quoted: 264/283/307
+fps unrouted against 256/257/246 routed, input-to-pixel p50 0.40 ms against 0.47,
+p95 0.60 against 0.59. **These do not separate routing from the neighbours and
+must be re-taken quiet before anyone believes them.**
+
+**A DEFECT THIS STAGE INTRODUCED AND CAUGHT BY READING, WHICH IS THE MOST
+PORTABLE THING HERE.** `snap_dir()` — the in-process answer for `/dev/wsys` —
+opens with `win_reap_dead()`, which clears `used` on every row whose owner has
+exited, bumps `shm->gen`, and releases pixel, backbuffer, image and keystroke
+resources. In a client that is a self-serving tidy-up of the caller's own view.
+Routed, it ran **in the read server**, reached **by an arbitrary client's read**
+— so `cat /dev/wsys` from any process on the box would have destroyed rows in
+the one process this design explicitly forbids to write the window table, from
+the one socket whose default arm is `-ENOSYS`. **Routing a read leaf can smuggle
+a write across if the in-process answer had a side effect, and this one did.**
+Fixed by an `srd_is_child` flag that suppresses the reap in the read server; the
+compositor reaps every frame in `scan_windows` anyway, so nothing is lost but
+the second writer. **No gate arm covers it** — it was found by reading the read
+server's own "what it may not do" list against the function being routed, and
+that is stated rather than dressed up as a measurement.
+
+**ONE FIDELITY DIFFERENCE, FOUND AND WRITTEN DOWN RATHER THAN LEFT TO BE
+REDISCOVERED.** Field 11 of `<wid>/ctl` is the BACKBUFFER GEN and `bbmap` is
+per-process, so the read server reports 0 where a memfd holder would report its
+own. It costs nothing today for the same sweep given above — the only reader of
+that field is wsysd, which never routes, and no shipped client reads its own
+`<wid>/ctl` at all. If one ever does, the fix is for the client to keep the
+in-process answer for its OWN window, and **not** for the server to invent a
+memfd it does not hold, which is the `pix_get(wid, 0)` trap stage 6 recorded.
+
+### What stage 9 did NOT do
+
+* **No `WSYS_VERSION` bump**, no fallback removed, and the segment is still
+  mapped read-write by every client. Every number above is of a mediator a
+  non-participating client walks past — which is exactly what the red arm is.
+* **`open`/existence in general is NOT routed**, so 7.1(2) is only partly paid.
+  `hamwsys_open`'s other arms still start with `win_find()` out of the mapped
+  table: `backbuffer`, `draw/images`, `draw/image/<n>`, `scene` and the four
+  rings all learn a window exists from shared memory. What this stage routes is
+  the three leaves that *report attributes*, plus the directory.
+* **The TITLE is still handed to every window owner** by `windows`, so an
+  application still learns that a window called "Bank" exists. Closing that is
+  the dedicated group on the panel's spawn that stage 4 scoped and did not
+  build, and it is unchanged by this stage.
+* **`self` and `ctl` reads are untouched** — both already answer only about the
+  caller.
+* **A short-lived reader now pays the dial.** `cat /dev/wsys/<wid>/ctl` from a
+  fresh process is a connect + HELLO + one request where it used to be a walk
+  of a mapped table. Stage 7 priced that shape at ~2 ms idle and 6–7 ms against
+  a saturated compositor; it was **not** re-measured here, and every shell gate
+  in the tree that reads a window's ctl with a fresh `cat` pays it once per
+  read.
 
 ## Budget to hold it to
 
@@ -1037,12 +1224,12 @@ running and idle.
 | leaf | write | read |
 |---|---|---|
 | `ctl` | **routed** (`newwindow` blocking) | in process (`snap_ctl`: this process's own last wid) |
-| `wid/ctl` | **routed** | **in process** — `snap_win_ctl`, 14 fields, any wid, no check |
+| `wid/ctl` | **routed** | **ROUTED — stage 9.** Was: in process, `snap_win_ctl`, 14 fields, any wid, no check |
 | `wid/scene` | **routed** | in process, and correctly: `pix_get` needs the handed-up memfd |
 | `windows` / `screen` / `pool` | n/a | **routed** |
 | `self` | n/a | in process — answers only about the caller |
-| `dir` (`/dev/wsys`, `/dev/wsys/<wid>`) | n/a | **in process — lists every used row's wid** |
-| `wid/wctl` | **routed** — see stage 8 (`version` blocks; an unknown verb is left in process) | **in process** — the live rect of any window |
+| `dir` (`/dev/wsys`, `/dev/wsys/<wid>`) | n/a | **ROUTED — stage 9.** Was: in process, listing every used row's wid |
+| `wid/wctl` | **routed** — see stage 8 (`version` blocks; an unknown verb is left in process) | **ROUTED — stage 9.** Was: in process, the live rect of any window |
 | `wid/pointer`, `wid/event`, `wid/text`, `wid/cmd` | in process — `ring_write` into the row | **in process — `ring_read` DRAINS the row** |
 | `wid/keys` | in process, but off the segment (keystroke channel, `SCM_CREDENTIALS`) | refused to a non-owner, by name |
 | `wid/draw/ctl`, `wid/backbuffer` | in process — the v2 blit, `/srv/wsys.bb` | in process — the per-window memfd |
@@ -1076,6 +1263,12 @@ it every used row's wid one path component up, out of shared memory, on the
 same run. `wid/ctl` and `wid/wctl` then answer geometry for each of them with
 no check of any kind. What the routed read withholds is the **title**, and only
 the title. That is not what section 4 above claims it bought.
+
+> **CLOSED — stage 9.** All four rows of that table are now routed and the
+> attacker gets `ENOENT` on `2/ctl`, `2/wctl` and `/dev/wsys/2`, and a
+> `/dev/wsys` listing with the fixed names and no wids. The measurement above
+> is left as taken, because it is the red arm the new gate reproduces. **The
+> ring row is unchanged and was closed separately** (commit `0f80d3e5`).
 
 The mutation arms of the same probe were **refused** — the attacker's
 `title`, `move 777 888` and `resize 640 480` all left the victim untouched.
@@ -1130,9 +1323,11 @@ sink, that "a gate on only one of the two spellings is not a gate".
 
 > **DONE — see *What stage 8 measured* below.** The WRITE arm is routed, with
 > one exception each way: `version` blocks because its caller acts on the
-> answer, and an unknown verb is left in process on purpose. The **read** arm
-> of `wid/wctl` is untouched and is still part of 7.1(2)'s unbuilt work — a
-> uid-1002 process owning nothing still reads any window's live rect.
+> answer, and an unknown verb is left in process on purpose.
+> **AND THE READ ARM IS DONE TOO — stage 9**, on the same predicate as the
+> write (`hostowner() || owns_wid_ancestry(wid)`), so this leaf no longer
+> answers to two rules under one path. What remains of 7.1(2) is
+> `open`/existence for the leaves that report no attributes.
 
 **(5) Every fallback to the in-process path must become a refusal.** They are,
 by name: a failed `srv_dial()`; `srv_adopt_inherited()` rejecting the inherited
@@ -1497,6 +1692,19 @@ still last and is now step 8 of 8.
    question — `dir`, `wid/ctl`, `wid/wctl` reads — under stage 4's tier rule
    (7.1 §2). This is the big one, and `wsys_enum_policy.sh` gets three new arms
    that are red today, as this section's probe shows.
+   **THE THREE READ LEAVES ARE DONE — stage 9,
+   `tests/linux/wsys_srv_attrread.sh`, 30 passed / 0 failed** (a gate of its
+   own rather than three arms bolted onto `wsys_enum_policy.sh`, which is
+   unchanged and still 9/0, matching the one-gate-per-stage shape the five
+   stages before it took). **Two corrections to this step as written.** It is
+   not one rule but two: a DIRECTORY is a question about the SET and takes the
+   tier, while `<wid>/ctl` and `<wid>/wctl` name ONE window and take
+   `hostowner() || owns_wid_ancestry(wid)` — the rule their own write arms
+   already apply. And `open`/existence **in general is still not routed**:
+   `backbuffer`, `draw/images`, `draw/image/<n>`, `scene` and the four rings
+   still learn a window exists from `win_find()` on the mapped table, so this
+   step is the attribute half only and the mapping-removal precondition is
+   still unpaid.
 5. Move `pointer`/`event`/`text`/`cmd` to per-window channels on the `keys`
    construction (7.1 §3).
 6. Tier 2's remainder — `/srv/wsys.bb` and `/srv/wsys.img` — which is an

@@ -4005,6 +4005,24 @@ int hamwsys_srv_service(void)
  * which is the success-shaped failure this tree refuses everywhere else.
  */
 
+/* THIS PROCESS IS THE READ SERVER, AND IT EXISTS BECAUSE STAGE 9 ROUTED THE
+ * DIRECTORY.  This file's header for the read server says what it may not do,
+ * and the list is short on purpose: it answers READ, HELLO and STAT, and "two
+ * writers to the window table would put the ordering guarantee stage 2 bought
+ * back into doubt for no gain."
+ *
+ * `snap_dir()` -- the in-process answer for /dev/wsys -- OPENS WITH
+ * win_reap_dead(), which clears `used` on every row whose owner has exited,
+ * bumps shm->gen, releases pixel/backbuffer/image slots and drops keystroke
+ * binds.  In a client that is a self-serving tidy-up of the caller's own view.
+ * In the READ SERVER it is a second writer to the window table, reached BY AN
+ * ARBITRARY CLIENT'S READ -- so `cat /dev/wsys` from any process on the box
+ * would destroy rows in a process that is explicitly forbidden to mutate, and
+ * would do it from the one socket whose default arm is `-ENOSYS`.  Found while
+ * routing the leaf rather than after; the reap stays with the compositor, which
+ * does it every frame in scan_windows anyway, so nothing is lost but the
+ * second writer. */
+static int  srd_is_child = 0;
 static int  srd_lfd = -1;
 static int  srd_ep  = -1;
 static struct wsrv_conn srd_conn[WSRV_CONN_MAX];
@@ -4458,6 +4476,10 @@ static void srd_fork(void)
     }
 
     /* ---- the child ---- */
+    /* SET BEFORE ANYTHING ELSE, because it is what keeps this process a READER.
+     * See srd_is_child's declaration: stage 9 routes the directory, and the
+     * directory's in-process answer REAPS DEAD WINDOWS. */
+    srd_is_child = 1;
     srd_lfd = fd;
     srd_ep  = ep;
     srv_lfd = -1;                    /* the frame loop's socket is not ours */
@@ -7802,7 +7824,11 @@ static int snap_dir_tier(struct hamwsys_file *f, int list_wids)
     uint8_t buf[WSYS_MAX_WINDOWS * 8 + 256];
     uint64_t n = 0;
     if (f->wid == 0) {
-        win_reap_dead();           /* the compositor must not paint a dead one */
+        /* NOT IN THE READ SERVER -- see srd_is_child, which carries the whole
+         * argument.  win_reap_dead() WRITES the window table, and this function
+         * is now reachable from an arbitrary client's routed read. */
+        if (!srd_is_child)
+            win_reap_dead();       /* the compositor must not paint a dead one */
         const char *fixed[] = { "ctl", "self", "windows", "screen", "pool" };
         for (unsigned i = 0; i < sizeof fixed / sizeof fixed[0]; i++) {
             for (const char *c = fixed[i]; *c; c++) buf[n++] = (uint8_t)*c;
