@@ -3141,6 +3141,23 @@ def pump_input():
                         deliver_pointer()
                     handle_button(ecode, eval_)
                 else:
+                    # A KEY FLUSHES A PENDING BUTTON EDGE, for the same reason
+                    # a button edge flushes the one before it, and for one
+                    # more: deliver_pointer is the ONLY thing that moves focus
+                    # (click-to-focus; see pick_focus), and route_key drops
+                    # anything that arrives while focus_wid < 2.
+                    #
+                    # This loop drains every record the node has pending in a
+                    # single pass, so a click and the keystrokes typed straight
+                    # after it are routinely in the SAME pass. Without this
+                    # flush the press is still sitting in ptr_edge when the key
+                    # is routed, focus is still whatever it was before the
+                    # click, and the keystrokes go to the old window or to
+                    # nobody. devwsys has the right order by construction --
+                    # it routes each event as it arrives; this is that, at the
+                    # granularity this poll loop has.
+                    if ptr_edge != 0:
+                        deliver_pointer()
                     handle_key(ecode, eval_)
             elif etype == 2:                             # EV_REL
                 if ecode == 0:
@@ -3916,6 +3933,35 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         open_inputs()
     ptr_x = scr_w / 2
     ptr_y = scr_h / 2
+    # THE WINDOW TABLE MUST EXIST BEFORE ANYTHING DRAINS INPUT, AND
+    # build_waitset() DRAINS INPUT.
+    #
+    # This is the same defect the main loop below already names -- "draining
+    # first meant the very first keystroke after launch was delivered against
+    # an empty window table and silently dropped" -- and the fix there (scan
+    # BEFORE pump) did not reach the one drain that happens OUTSIDE the loop.
+    # `fd_is_waitable` calls `pump_input()` and `pump_keyboard()` up to three
+    # times per fd, on purpose: an evdev node with events already pending polls
+    # ready no matter what, so the probe has to reach quiescence before it can
+    # tell "wakes this loop" from "always ready". That drain runs here, before
+    # the first scan_windows(), so n_win is 0 and focus_wid is 0.
+    #
+    # A POINTER SURVIVES THAT AND A KEYSTROKE DOES NOT, which is why the
+    # symptom looked like a transport bug and was not. Pointer motion and
+    # button edges are ACCUMULATED STATE (ptr_x/ptr_y/ptr_edge) that
+    # deliver_pointer routes later, when the table is up; a key is routed
+    # IMMEDIATELY by route_key, whose first line is `if focus_wid < 2: return`.
+    # So every keystroke pending on the device at startup was decoded, counted
+    # in n_keys, and thrown away.
+    #
+    # MEASURED, with a debug line in route_key and another around this call:
+    # `route_key 97 0` printed BETWEEN the entry to build_waitset and the wait
+    # set's own message, and the matching `set_focus 0 -> 2` came afterwards,
+    # from the first loop iteration. tests/linux/input_probe.sh feeds wsysd a
+    # FILE of evdev records, so the probe swallowed the entire file and the key
+    # half of that gate had never once passed.
+    scan_windows()
+    pick_focus()
     build_waitset()
 
     idle: uint64 = 0
