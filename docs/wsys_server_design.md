@@ -444,6 +444,81 @@ hamUI's spawn path, it needs its own red gate, and **it is not made here**.
 Until it is, the ancestry rule stands, inherited rather than widened, and
 written down rather than assumed.
 
+## What stage 5 changed — the connection is the capability, and the walk is still there
+
+`tests/linux/wsys_srv_connown.sh`, **10 passed, 0 failed**. `WSYS_VERSION`
+stays 8 and `struct wshm`/`struct wwin` are byte-for-byte unchanged.
+
+Stage 4 recommended this and did not do it: **not to narrow the walk but to
+stop the walk being the only question asked.** That is what landed.
+
+**The rule, for a ROUTED mutation only:**
+
+> `hostowner()` as before, or **the operation arrived on the connection that
+> holds the window's row**. The parent-pid walk is not asked.
+
+A row acquires a holder in one of two ways, both facts the kernel supplies:
+
+1. **`newwindow`** binds the allocating connection, at the one moment the
+   server knows who allocated it.
+2. **`alloc <pid>`** — hamUId's on-behalf path, the one *every DE window* is
+   created through — has no connection at allocation time, because the process
+   it names has not connected yet. That row is **claimed by the first
+   connection whose `SO_PEERCRED` pid is exactly the stamped pid**. No walk, no
+   uid comparison.
+
+**The handoff is the toolkit's half**, `hamwsys_srv_handoff()`: it dials if it
+has to, clears `FD_CLOEXEC` and names the descriptor in `HAMWSYS_SRV_FD`. The
+adopting child immediately sets `FD_CLOEXEC` and unsets the variable, **so the
+capability travels exactly one generation** — inheritance that propagated by
+itself would be the ancestry walk rebuilt out of descriptors. A handed
+descriptor still carries the *dialling* process's `SO_PEERCRED`, which is why
+the child needs no claim of its own: the connection is already the holder.
+
+**BOTH ARMS, IN ONE PROCESS, DIFFERING IN ONE RESPECT.** Holder and both
+children are uid 1002 against a segment owned by 1001, so `hostowner()` answers
+0 throughout and cannot short-circuit anything:
+
+| arm | result |
+|---|---|
+| child **without** the connection | `REFUSED` — `hostowner=0 owns_wid=0 ancestry=1` |
+| the **same** child **with** it | `ACCEPTED` |
+| the same child, **unrouted** | the write **LANDS** — the inherited rule, untouched |
+
+The trace prints both answers per routed mutation, because `ancestry=1
+owns_wid=0` **is** the narrowing and there is no way to see it from outside.
+The server also counts `claim` and `connrefused`, so "the new rule refused
+something the walk would have granted" is a number rather than a claim.
+
+**Negative control, run:** make `owns_wid()` call `owns_wid_ancestry()`
+unconditionally — the one line this stage consists of — and the gate goes 10/0
+→ **6 passed, 4 failed**. The red arm and the handed arm stay green, correctly.
+
+**AN ADOPTED CONNECTION IS NOT THE HOST OWNER**, and this is the sharp edge of
+the mechanism. `SO_PEERCRED` is sampled at `connect(2)`, so a descriptor
+dialled by a host-owner toolkit carries the host owner's uid wherever it is
+handed. The adopting client declares itself with `WSRV_F_ADOPT` in its HELLO
+and `hostowner()` answers 0 for that connection for ever — a flag a client can
+only ever use to *lose* privilege. **The toolkit must still hand off after
+dropping privilege, not before**: the connection acts for the dialling
+process's window either way.
+
+**Enumeration deliberately still asks the WALK** (`owns_wid_ancestry`). "Do you
+own a window" is a question about a process, not about a descriptor; the read
+server is a separate process holding no bindings, and asking the mutation
+question there would answer EMPTY to every client on the desktop. Stage 4's
+policy and its 9/0 gate are unchanged.
+
+**WHAT IS NOT DONE, AND IT IS THE NEXT PIECE OF WORK.** The DE's own spawn path
+does not call the handoff. `/etc/rc.de-user` spawns every DE window as
+`/bin/hamsh /etc/rc.de-user <prog>`, the wid is stamped against **hamsh**, and
+the rc runs the real program as hamsh's **child** — so with `HAMWSYS_SERVER=1`
+a DE application would be refused its own window until hamUId or hamsh calls
+`sys_wsys_srv_handoff` around that spawn, **after** the `setuid 1001`. The flag
+is off by default and nothing ships with it on; the flag-unset path is verified
+by a second compositor with the flag nowhere in its environment, in both this
+gate and the identity gate.
+
 ## Budget to hold it to
 
 From the census, at 6.2 µs sequential / 2.2 µs pipelined:
