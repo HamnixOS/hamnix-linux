@@ -171,6 +171,51 @@ if [ "$I386" = 1 ]; then
     # the 32-bit closure.  The rest are steam-libs' Recommends -- mmdebstrap
     # does not install Recommends, and every one of these is a library Steam
     # dlopen()s for graphics or input rather than an optional extra.
+    #
+    # ZENITY IS NOT DEAD CODE, and it is 133 MiB.  It carried "121 MiB of dead
+    # code" on the standing list for a long time; both halves of that were
+    # checked with scripts/hamlinux_distro_audit.sh and the source, and the
+    # honest answer is that the SIZE was roughly right and DEAD was wrong.
+    #
+    #   WHAT CALLS IT.  /usr/games/steam -- the shell script this very package
+    #   installs -- runs `zenity --question` to get consent before installing
+    #   proprietary software, and it does so exactly when its four `needed`
+    #   paths under $STEAMDIR are missing:
+    #
+    #       for needed in steam.sh ubuntu12_32/steam \
+    #                     ubuntu12_32/steam-runtime/run.sh setup.sh
+    #           [ -x "$STEAMDIR/$needed" ] || new_installation=yes
+    #       if [ -n "$new_installation" ]; then ... "$zenityish" --question ...
+    #
+    #   /usr/local/bin/hamnix-steam pre-stages exactly those four paths, so the
+    #   INTENDED path never reaches the dialog.  A person who runs
+    #   /usr/games/steam directly, or whose $HOME differs from the one the
+    #   wrapper staged into, does reach it -- and with no zenity the script
+    #   falls back to `yad`, and with neither it prints "Installation
+    #   cancelled" and exits 1.  A grep of OUR tree could never have found any
+    #   of this: the caller is a Debian shell script inside the namespace.
+    #
+    #   WHAT IT COSTS, two numbers because they answer different questions.
+    #   zenity itself is 167 KiB.  The CORE is 133 MiB -- the browser engine
+    #   behind it: libwebkit2gtk-4.1-0 (90.4 MiB), libjavascriptcoregtk-4.1-0
+    #   (31.2) and zenity-common (11.2), each of which NOTHING ELSE INSTALLED
+    #   DEPENDS ON, measured.  The FULL transitive set that nothing else needs
+    #   is 195 MiB, the rest being WebKit's own media and spell-check
+    #   dependencies -- libflite1 (26.9, a speech synthesiser), the gstreamer
+    #   plugin sets, hunspell and friends.  133 is the number to defend; 195
+    #   is what a removal would actually recover.  libgtk-3-0 is in NEITHER:
+    #   firefox-esr needs it and it stays whatever happens here.
+    #
+    #   THE CHEAP FIX, NOT TAKEN HERE BECAUSE IT REBUILDS A 12 GB ARTEFACT:
+    #   /usr/games/steam already names `yad` as its fallback, and yad in
+    #   bookworm is 570 kB against GTK alone -- no WebKit.  Swapping
+    #   zenity -> yad on this line keeps the prompt working through a path the
+    #   caller already supports and returns 133-195 MiB.  It needs a distro
+    #   rebuild and a run of the Steam path to confirm, which is its own pass.
+    #
+    #   AND IT IS NOT THE BIGGEST THING IN HERE.  LLVM/clang is 494.6 MiB
+    #   across three copies (libllvm15 i386 + amd64, libllvm14 amd64) and
+    #   firefox-esr is 270.7 MiB.  zenity's engine is THIRD.
     PKGS="$PKGS,steam-installer,zenity,xdg-utils,bubblewrap,\
 pulseaudio,libasound2-plugins,\
 mesa-utils:i386,vulkan-tools:i386,mesa-utils-bin,\
