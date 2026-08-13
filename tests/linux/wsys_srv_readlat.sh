@@ -43,6 +43,17 @@
 set -uo pipefail
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ"
+# PRIVATE NAMESPACE FIRST -- before reap.sh, before $W, before the build.
+# wsysd writes /srv/wsys, /dev/shm/hamnix-wsys and /tmp/hamnix-wsys under names
+# compiled into it (see the table in private_ns.sh), so a run of this gate on a
+# machine with a live desktop is a run that can be attached to by, and can
+# corrupt, that desktop. Nothing this gate measures is a uid or an ownership
+# fact -- both arms are LATENCY from one process against one compositor -- so
+# the helper's one fidelity cost (euid 0 inside) touches nothing here. $OUT
+# stays under $HOME/.hamnix-build, which the helper does not shadow, so a
+# pinned SRV_WORK and SRV_REBUILD=0 still find yesterday's binaries.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 . tests/linux/reap.sh
 
 # PER-RUN BY DEFAULT: $BIN is "$OUT/bin", and a fixed default meant two
@@ -80,6 +91,7 @@ pass=0; fail=0
 ok()   { printf 'rdlat: PASS %s\n' "$*"; pass=$((pass+1)); }
 bad()  { printf 'rdlat: FAIL %s\n' "$*"; fail=$((fail+1)); }
 note() { printf 'rdlat: .... %s\n' "$*"; }
+note "$(priv_ns_describe)"
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/rdlat.XXXXXX")"
 reap_track "$W/reaped"
