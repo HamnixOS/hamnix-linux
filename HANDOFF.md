@@ -4641,6 +4641,26 @@ exist so the next sweep does not pay for them: `build/repo/linux`,
 `loadavg < 2.0` gate and landed at 1.45–1.99 — at the threshold, not under it,
 with three other agents booting VMs throughout.
 
+#### CLASSIFYING A GATE BY `/dev/dri` MISSES THE THREE THAT TAKE YOUR DISPLAY
+
+The obvious way to find the gates that will seize the owner's screen is to grep
+for `/dev/dri`. **It does not work, and it fails in the dangerous direction.**
+Verified here: `scanout_desktop.sh`, `scanout_try.sh` and `cap_power_ab.sh`
+mention `/dev/dri` **zero times** — they take the display by setting
+`HAMNIX_WSYSD_SCANOUT=1` and unsetting `HAMFB_FILE`, and the DRM open happens
+inside the compositor they start. Other gates *do* name `/dev/dri`, so the grep
+itself is fine; it is simply blind to the three that matter. **Classify on
+`HAMNIX_WSYSD_SCANOUT` and `unset HAMFB_FILE` as well.** This is a second,
+independent miss from the `qemu`-keyed one recorded above — that one let two of
+these gates run by accident and one had to fire a 45-second watchdog to give the
+console back.
+
+The same exercise found the inventory wrong in the harmless direction twice:
+`gates_are_private.sh` is marked VM-needing only because line 62 *greps for the
+string* `qemu-system`, and `channel_covers_image.sh` only tests for a directory.
+Both run offscreen. A classifier that reads exec positions rather than any
+mention of a name gets all of these right.
+
 **THE FIRST THING YOU WILL HIT, AND IT IS NOT IN ANY DOCUMENT.** A fresh
 worktree has no checked-out `adder` submodule and no
 `build/cutover/host_ac.elf`, so **every `.ad`-building gate fails instantly
