@@ -185,11 +185,35 @@ enum {
     WSRV_OP_WRITE  = 6,            /* fire-and-forget: one ctl/wid-ctl write */
     WSRV_OP_NEWWIN = 7,            /* blocks: allocate a row, return the wid */
 
-    /* Which leaf a WSRV_OP_WRITE addresses.  Carried in `flags` above
-     * WSRV_F_REPLY. */
+    /* STAGE 4 — THE READS, AND THE ONE OPERATION THAT CANNOT BE SERVICED
+     * FROM THE FRAME LOOP.
+     *
+     * READ blocks by nature: it returns the bytes.  Stage 1 measured what
+     * blocking costs against a server serviced from wsysd's frame loop --
+     * p50 32 us, but a p90 of 789 us and a max of 851, because a request that
+     * arrives while the compositor is rasterizing waits out the frame.  851
+     * us is nearly three times the whole published 0.3 ms input-to-pixel
+     * budget, for one operation, and a taskbar re-reading /dev/wsys/windows
+     * would pay it on every refresh.
+     *
+     * So READ IS NOT SERVED BY THE FRAME LOOP AT ALL.  wsysd forks a read
+     * server at listen(), on its own abstract name (".../rd"), which does
+     * nothing but block in epoll_wait and answer interrogative requests out
+     * of the same MAP_SHARED segment.  It never rasterizes, so there is no
+     * frame for a read to wait out.  Mutations stay on the frame-loop socket,
+     * where stage 2 measured routing making the compositor CHEAPER precisely
+     * because the loop coalesces them.
+     */
+    WSRV_OP_READ   = 8,            /* blocks: one snapshot of a read-only leaf */
+
+    /* Which leaf a WSRV_OP_WRITE or WSRV_OP_READ addresses.  Carried in
+     * `flags` above WSRV_F_REPLY. */
     WSRV_LEAF_SHIFT = 8,
     WSRV_LEAF_CTL     = 1,         /* /dev/wsys/ctl                          */
     WSRV_LEAF_WIN_CTL = 2,         /* /dev/wsys/<wid>/ctl                    */
+    WSRV_LEAF_WINDOWS = 3,         /* /dev/wsys/windows  — AND A POLICY      */
+    WSRV_LEAF_SCREEN  = 4,         /* /dev/wsys/screen                       */
+    WSRV_LEAF_POOL    = 5,         /* /dev/wsys/pool                         */
 };
 
 /* THE SERVER SIDE. wsysd calls claim() before it touches /dev/wsys at all --
@@ -209,6 +233,11 @@ void     hamwsys_srv_claim(void);
 int      hamwsys_srv_listen(void);
 int      hamwsys_srv_service(void);
 
+/* THE READ SERVER IS FORKED BY listen() AND HAS NO ENTRY POINT HERE, on
+ * purpose.  A hamwsys_srv_read_service() the Adder side had to call would put
+ * reads back on the frame loop -- the exact 851 us tail the split exists to
+ * remove.  The only thing wsysd does about it is exist. */
+
 /* THE CLIENT SIDE, for the stage-1 gate. Returns the number of failures, so
  * zero is the only pass and a stub cannot pass by resolving. Exported to
  * Adder as
@@ -218,6 +247,10 @@ int      hamwsys_srv_selftest(void);
 int      hamwsys_srv_mutate_selftest(int victim_wid);
 int      hamwsys_srv_sustain(int ops_per_sec, int secs);
 int      hamwsys_srv_attack_local(int victim_wid);
+/* Stage 4's instrument: N routed reads of /dev/wsys/windows, every sample
+ * printed, against the 851 us frame-loop tail stage 1 measured.  Exported as
+ *   extern def sys_wsys_srv_readlat(n: int32) -> int32 */
+int      hamwsys_srv_readlat(int nsamples);
 
 /* Did THIS process get turned away by the version refusal in shm_attach?
  * Its own experience, not a file another process wrote -- see

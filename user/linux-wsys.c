@@ -3063,6 +3063,17 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                                    uint64_t n);
 static struct wwin *win_alloc(int32_t pid);
 
+/* The three read-only leaves stage 4 routes.  Each one builds its answer into
+ * f->snap; the read server sends that buffer and frees it.  Declared here for
+ * the same reason hamwsys_write_inner is: the server is written above the
+ * device, because it is the thing that decides who may reach the device. */
+static int snap_windows(struct hamwsys_file *f);
+static int snap_screen(struct hamwsys_file *f);
+static int snap_pool(struct hamwsys_file *f);
+
+/* Stage 4's read server, forked by hamwsys_srv_listen below it. */
+static void srd_fork(void);
+
 /* The wire.  Both ends are the same object file, so these structures are a
  * contract with the GATE rather than an ABI across a version boundary — but
  * the gate checks them, so they are written down in linux-wsys.h too. */
@@ -3087,17 +3098,41 @@ struct wsrv_rep {
  * desktop — cannot find each other's server.  Deriving it independently would
  * be a second way to answer "which window system is this", and two answers to
  * that question is how a gate ends up talking to the machine owner's desktop. */
-static socklen_t srv_addr(struct sockaddr_un *a)
+static socklen_t srv_addr_named(struct sockaddr_un *a, const char *leafname)
 {
     if (!seg_id_known) return 0;
     memset(a, 0, sizeof *a);
     a->sun_family = AF_UNIX;
     a->sun_path[0] = '\0';                     /* abstract */
     int n = snprintf(a->sun_path + 1, sizeof a->sun_path - 1,
-                     "hamnix-wsys/%llu.%llu/srv",
-                     (unsigned long long)seg_dev, (unsigned long long)seg_ino);
+                     "hamnix-wsys/%llu.%llu/%s",
+                     (unsigned long long)seg_dev, (unsigned long long)seg_ino,
+                     leafname);
     if (n <= 0 || (size_t)n >= sizeof a->sun_path - 1) return 0;
     return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+}
+
+/* TWO NAMES, ONE SEGMENT, AND THE SPLIT IS THE WHOLE OF STAGE 4.
+ *
+ *   ".../srv"  the frame loop's socket.  Mutations.  Serviced once per wsysd
+ *              iteration, which is what lets a burst of them coalesce into
+ *              one scan -- measured, that made a routed drag 46.5% of a core
+ *              CHEAPER than the unrouted one.
+ *   ".../rd"   the read server's socket, in a forked child that never paints.
+ *              Reads block by nature, and a blocking request on ".../srv"
+ *              waits out whatever frame is in progress: p90 789 us, max 851.
+ *
+ * A single socket cannot have both properties.  Two names is the honest way
+ * to say so, and it means a client that never reads never opens the second
+ * one. */
+static socklen_t srv_addr(struct sockaddr_un *a)
+{
+    return srv_addr_named(a, "srv");
+}
+
+static socklen_t srd_addr(struct sockaddr_un *a)
+{
+    return srv_addr_named(a, "rd");
 }
 
 /* ---------------------------------------------------------------- server -- */
@@ -3197,8 +3232,14 @@ int hamwsys_srv_listen(void)
     }
     srv_lfd = fd;
     fprintf(stderr, "wsys: serving /dev/wsys for segment %llu.%llu "
-                    "(HAMWSYS_SERVER=1; stage 1, no operation is routed yet)\n",
+                    "(HAMWSYS_SERVER=1; mutations on this loop, reads in a "
+                    "forked read server)\n",
             (unsigned long long)seg_dev, (unsigned long long)seg_ino);
+    /* AFTER the frame loop's socket is bound and listening, and that order is
+     * forced: srd_fork() closes every inherited descriptor in the child, so a
+     * fork before this bind would be a child that races the parent for the
+     * ".../srv" name it is not supposed to hold. */
+    srd_fork();
     return srv_ep;
 }
 
@@ -3483,6 +3524,368 @@ int hamwsys_srv_service(void)
     return handled;
 }
 
+/* ==================================================================
+ * STAGE 4 — THE READ SERVER, AND THE ENUMERATION POLICY
+ * ==================================================================
+ * WHY THIS IS A SEPARATE PROCESS AND NOT ANOTHER CASE IN srv_dispatch.
+ *
+ * Stage 1 measured a blocking request against the frame-loop server under a
+ * heavy drag: p50 32 us, p90 789 us, max 851 us.  The distribution is bimodal
+ * and not noisy -- a request either catches an idle loop (~27 us) or waits out
+ * a frame.  851 us is nearly three times the whole published 0.3 ms
+ * input-to-pixel budget, for one operation.  Mutations do not care, because
+ * they do not wait.  READS ARE NOTHING BUT WAITING: the caller wants the
+ * bytes.  Putting /dev/wsys/windows on the frame-loop socket would charge the
+ * taskbar up to a frame on every refresh, and the taskbar is the one client
+ * the whole enumeration policy exists for.
+ *
+ * So wsysd forks a child at listen() whose entire job is to block in
+ * epoll_wait and answer reads.  It has the segment mapped MAP_SHARED (it
+ * inherited the mapping across the fork), so it answers from the same window
+ * table the compositor is writing -- which is EXACTLY what every in-process
+ * client does today, no more and no less.  It never rasterizes, so there is
+ * no frame for a read to wait out, and its latency is the socket's.
+ *
+ * WHAT IT MAY NOT DO, and the list is short on purpose: it answers
+ * WSRV_OP_READ, WSRV_OP_HELLO and WSRV_OP_STAT and nothing else.  A mutation
+ * arriving here is -ENOSYS.  Two processes writing the window table would put
+ * the ordering guarantee stage 2 bought -- a mutation is visible to the
+ * scan_windows() of the SAME iteration -- back into doubt for no gain.
+ *
+ * IT DIES WITH ITS PARENT.  PR_SET_PDEATHSIG(SIGKILL) plus a recheck of
+ * getppid() after setting it, because a parent that exits between the fork
+ * and the prctl would otherwise leave a read server serving a segment nobody
+ * composites -- a window system that answers questions and paints nothing,
+ * which is the success-shaped failure this tree refuses everywhere else.
+ */
+
+static int  srd_lfd = -1;
+static int  srd_ep  = -1;
+static struct wsrv_conn srd_conn[WSRV_CONN_MAX];
+static int  srd_nconn = 0;
+static pid_t srd_pid = -1;              /* in the PARENT: the child's pid    */
+
+/* The read server's counters, readable with WSRV_OP_STAT on its own socket.
+ * `full` and `empty` are the policy's two outcomes, and they are here for the
+ * same reason `refused` is on the mutation side: a policy that never denies
+ * anything and no policy at all are the same thing from outside, and a gate
+ * cannot tell them apart without a number. */
+static uint64_t srd_n_accept, srd_n_read, srd_n_full, srd_n_empty, srd_n_bad;
+
+/* ------------------------------------------------------------------ *
+ * THE ENUMERATION POLICY.  This is the decision, not the mechanism.
+ * ------------------------------------------------------------------ *
+ * THE RULE, in one sentence: a caller gets the whole window list if it is the
+ * host owner or if it already owns at least one window in this window system,
+ * and otherwise it gets an EMPTY list.
+ *
+ * WHAT IT PERMITS.  The compositor, and anything running as the uid that owns
+ * the segment.  The panel, every application, every toolkit task -- anything
+ * that has called newwindow, or is descended from something that did.  Those
+ * callers see every window's id and title, exactly as they do today.  The
+ * taskbar therefore keeps working with no change to how it is spawned, no new
+ * flag, and nothing granted to it that is not equally granted to every other
+ * program with a window on the screen.
+ *
+ * WHAT IT DENIES.  Every process that has no window: a shell script, a
+ * `cat`, a background daemon, a compromised non-graphical service, anything
+ * that wandered into the namespace where /dev/wsys is reachable.  Those get
+ * an empty list rather than an error, because "there is nothing here for you"
+ * is the truthful answer and ENOENT/EPERM would tell a prober that a window
+ * system exists and it is merely not allowed -- which is the fact worth
+ * withholding.
+ *
+ * WHAT IT DOES NOT DO, SAID PLAINLY BECAUSE THE DESIGN DOC PROMISED MORE.
+ * docs/wsys_server_design.md says enumeration "can return the caller's own
+ * windows to an ordinary client and the full list only to a holder of the
+ * taskbar capability".  THAT IS NOT WHAT THIS IS, and it cannot be built on
+ * what SO_PEERCRED can see today.  The panel is spawned by the compositor
+ * through `/bin/hamsh /etc/rc.de-user /bin/hampanelscene`, and so is every
+ * DE application; that rc ends in `setuid 1001`, so the taskbar and a
+ * text editor arrive at this socket with the SAME uid, the SAME gid and an
+ * ancestry that meets at the same process.  There is no fact in
+ * SO_PEERCRED that separates them.  A rule that claimed to would be reading
+ * something the client chose -- an argv, an environment variable, a name --
+ * and that is advice, not a boundary, which is the whole finding of stage 3a.
+ *
+ * So the line is drawn where an unforgeable fact actually falls: HAVING A
+ * WINDOW.  A person may reasonably say that is too weak, and they would be
+ * pointing at a real gap -- any app on the desktop still learns every
+ * window's title.  The mechanism that would close it is a dedicated group on
+ * the panel's spawn (peercred carries the gid, /etc/group records the grant,
+ * and nothing has to be invented), and that is a change to how the distro
+ * starts the panel, not a change to this server.  It is NOT made here, and
+ * the taskbar is NOT quietly privileged in the meantime: it passes this rule
+ * on exactly the same footing as every other window owner.
+ */
+enum { SRD_ENUM_EMPTY = 0, SRD_ENUM_FULL = 1 };
+
+static int srd_enum_tier(uid_t uid, pid_t pid, int *by_hostowner)
+{
+    int tier = SRD_ENUM_EMPTY, host = 0;
+    if (!shm) { if (by_hostowner) *by_hostowner = 0; return SRD_ENUM_EMPTY; }
+    /* The caller is installed for the same reason a routed mutation installs
+     * it: owns_wid() walks the CALLER's ancestry and hostowner() reads the
+     * CALLER's uid, and asked without this they would both answer about the
+     * read server -- which runs as the segment's owner and would therefore
+     * grant everything to everybody. */
+    srv_as_caller(uid, pid);
+    host = hostowner();
+    if (host) {
+        tier = SRD_ENUM_FULL;
+    } else {
+        /* EVERY USED ROW, not only the enumerable ones.  A panel's own window
+         * is visible but NOT decorated, and snap_windows() skips undecorated
+         * windows -- so a policy that asked "do you own something that shows
+         * up in the list" would deny the taskbar its own list.  The question
+         * is "do you own a window", and the window table is where that is
+         * answered. */
+        for (int i = 0; i < WSYS_MAX_WINDOWS && tier == SRD_ENUM_EMPTY; i++)
+            if (shm->win[i].used && owns_wid(shm->win[i].wid))
+                tier = SRD_ENUM_FULL;
+    }
+    srv_as_self();
+    if (by_hostowner) *by_hostowner = host;
+    return tier;
+}
+
+/* One read, answered.  Returns the negative errno, or 0 with the answer in
+ * *f (which the caller frees). */
+static int srd_answer(struct wsrv_conn *c, int leaf, struct hamwsys_file *f)
+{
+    memset(f, 0, sizeof *f);
+    errno = 0;
+    switch (leaf) {
+    case WSRV_LEAF_WINDOWS: {
+        int host = 0;
+        int tier = srd_enum_tier(c->uid, c->pid, &host);
+        if (srv_trace())
+            fprintf(stderr, "wsrvtrace: enum caller uid=%u pid=%ld -> "
+                            "hostowner=%d tier=%s\n",
+                    (unsigned)c->uid, (long)c->pid, host,
+                    tier == SRD_ENUM_FULL ? "FULL" : "EMPTY");
+        if (tier != SRD_ENUM_FULL) {
+            srd_n_empty++;
+            /* An empty answer, not a refusal.  See WHAT IT DENIES above. */
+            f->snap = NULL; f->snaplen = 0;
+            return 0;
+        }
+        srd_n_full++;
+        return snap_windows(f) < 0 ? (errno ? -errno : -EIO) : 0;
+    }
+    /* screen and pool carry NO policy, and that is a decision rather than an
+     * omission.  `screen` is the mode the compositor published and every
+     * client must lay itself out against it; `pool` is the device reporting
+     * how many backbuffer slots are left, which is what a program diagnosing
+     * its own blank window reads.  Neither names another client or says
+     * anything about one.  Withholding them would break layout and blind the
+     * one diagnostic that exists for an exhausted pool, and buy nothing. */
+    case WSRV_LEAF_SCREEN:
+        return snap_screen(f) < 0 ? (errno ? -errno : -EIO) : 0;
+    case WSRV_LEAF_POOL:
+        return snap_pool(f) < 0 ? (errno ? -errno : -EIO) : 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+static void srd_conn_drop(int i)
+{
+    if (srd_ep >= 0) epoll_ctl(srd_ep, EPOLL_CTL_DEL, srd_conn[i].fd, NULL);
+    close(srd_conn[i].fd);
+    srd_conn[i] = srd_conn[--srd_nconn];
+}
+
+static void srd_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
+                         const uint8_t *pay)
+{
+    c->nreq++;
+    int want_reply = (h->flags & WSRV_F_REPLY) != 0;
+    switch (h->op) {
+    case WSRV_OP_HELLO: {
+        uint32_t theirs = (h->len >= 4) ? *(const uint32_t *)pay : 0;
+        uint32_t mine = WSYS_VERSION;
+        c->version = theirs;
+        srv_reply(c->fd, h->tag, theirs == WSYS_VERSION ? 0 : -EPROTO,
+                  &mine, sizeof mine);
+        return;
+    }
+    case WSRV_OP_STAT: {
+        char b[192];
+        int n = snprintf(b, sizeof b,
+                         "rd conns %llu live %d reads %llu full %llu "
+                         "empty %llu bad %llu\n",
+                         (unsigned long long)srd_n_accept, srd_nconn,
+                         (unsigned long long)srd_n_read,
+                         (unsigned long long)srd_n_full,
+                         (unsigned long long)srd_n_empty,
+                         (unsigned long long)srd_n_bad);
+        if (n < 0) n = 0;
+        srv_reply(c->fd, h->tag, n, b, (uint32_t)n);
+        return;
+    }
+    case WSRV_OP_READ: {
+        srd_n_read++;
+        int leaf = (h->flags >> WSRV_LEAF_SHIFT) & 0xff;
+        struct hamwsys_file f;
+        int rc = srd_answer(c, leaf, &f);
+        if (rc < 0) {
+            srd_n_bad++;
+            free(f.snap);
+            srv_reply(c->fd, h->tag, (int32_t)rc, NULL, 0);
+            return;
+        }
+        uint32_t n = (uint32_t)f.snaplen;
+        if (n > WSRV_MAXPAY) n = WSRV_MAXPAY;
+        srv_reply(c->fd, h->tag, (int32_t)n, f.snap, n);
+        free(f.snap);
+        return;
+    }
+    default:
+        /* A MUTATION SENT HERE IS REFUSED, NOT FORWARDED.  See WHAT IT MAY
+         * NOT DO above: two writers to the window table would give up the
+         * same-iteration ordering stage 2 measured, and a read server that
+         * quietly grew a write path is how a boundary stops being one. */
+        srd_n_bad++;
+        if (want_reply) srv_reply(c->fd, h->tag, -ENOSYS, NULL, 0);
+        return;
+    }
+}
+
+/* The child's whole life.  Never returns. */
+static void srd_serve(void) __attribute__((noreturn));
+static void srd_serve(void)
+{
+    for (;;) {
+        struct epoll_event ev[WSRV_CONN_MAX + 1];
+        /* A REAL BLOCK, and it is the entire point of this process.  The
+         * frame-loop server polls with a 0 ms timeout because it has a frame
+         * to get back to; this one has nothing else to do, so a request wakes
+         * it immediately instead of at the next frame boundary. */
+        int n = epoll_wait(srd_ep, ev, (int)(sizeof ev / sizeof ev[0]), -1);
+        if (n < 0) { if (errno == EINTR) continue; _exit(0); }
+        for (int i = 0; i < n; i++) {
+            if (ev[i].data.fd == srd_lfd) {
+                for (;;) {
+                    int cfd = accept4(srd_lfd, NULL, NULL,
+                                      SOCK_NONBLOCK | SOCK_CLOEXEC);
+                    if (cfd < 0) break;
+                    if (srd_nconn >= WSRV_CONN_MAX) { close(cfd); continue; }
+                    /* SO_PEERCRED, at accept, exactly as the mutation server
+                     * takes it -- the one fact a client cannot forge, and the
+                     * only thing the enumeration policy above is allowed to
+                     * be decided on. */
+                    struct ucred uc;
+                    socklen_t ul = sizeof uc;
+                    memset(&uc, 0, sizeof uc);
+                    (void)getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &uc, &ul);
+                    struct wsrv_conn *c = &srd_conn[srd_nconn++];
+                    memset(c, 0, sizeof *c);
+                    c->fd = cfd; c->uid = uc.uid; c->gid = uc.gid;
+                    c->pid = uc.pid;
+                    struct epoll_event e = { .events = EPOLLIN,
+                                             .data.fd = cfd };
+                    if (epoll_ctl(srd_ep, EPOLL_CTL_ADD, cfd, &e) < 0) {
+                        close(cfd); srd_nconn--; continue;
+                    }
+                    srd_n_accept++;
+                }
+                continue;
+            }
+            int k = -1;
+            for (int j = 0; j < srd_nconn; j++)
+                if (srd_conn[j].fd == ev[i].data.fd) { k = j; break; }
+            if (k < 0) continue;
+            for (;;) {
+                uint8_t buf[sizeof(struct wsrv_hdr) + WSRV_MAXPAY];
+                ssize_t r = recv(srd_conn[k].fd, buf, sizeof buf, MSG_DONTWAIT);
+                if (r < 0) break;
+                if (r == 0) { srd_conn_drop(k); break; }
+                if ((size_t)r < sizeof(struct wsrv_hdr)) { srd_n_bad++; continue; }
+                struct wsrv_hdr h;
+                memcpy(&h, buf, sizeof h);
+                if (h.magic != WSRV_MAGIC_RQ || h.len > WSRV_MAXPAY
+                    || (size_t)r != sizeof h + h.len) { srd_n_bad++; continue; }
+                srd_dispatch(&srd_conn[k], &h, buf + sizeof h);
+            }
+        }
+    }
+}
+
+/* Fork the read server.  Called from hamwsys_srv_listen, in wsysd, once. */
+static void srd_fork(void)
+{
+    if (srd_pid > 0 || !seg_id_known) return;
+
+    struct sockaddr_un a;
+    socklen_t alen = srd_addr(&a);
+    if (!alen) return;
+    /* THE SOCKET IS BOUND IN THE PARENT, BEFORE THE FORK, so that a bind
+     * failure -- another wsysd already serving this segment -- is reported by
+     * the process that can still say something useful, and so that a client
+     * dialling immediately after listen() returns cannot find the name
+     * missing.  A child that bound it after being scheduled would leave a
+     * window in which the read name does not exist and every client silently
+     * fell back to the unmediated in-process read. */
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) return;
+    if (bind(fd, (struct sockaddr *)&a, alen) < 0 || listen(fd, 32) < 0) {
+        fprintf(stderr, "wsys: cannot serve READS for segment %llu.%llu (%s): "
+                        "every client will read the segment directly, which is "
+                        "NOT mediated.\n",
+                (unsigned long long)seg_dev, (unsigned long long)seg_ino,
+                strerror(errno));
+        close(fd);
+        return;
+    }
+    int ep = epoll_create1(EPOLL_CLOEXEC);
+    if (ep < 0) { close(fd); return; }
+    struct epoll_event e = { .events = EPOLLIN, .data.fd = fd };
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &e) < 0) { close(ep); close(fd); return; }
+
+    fflush(NULL);                              /* no doubled stdio in the child */
+    pid_t p = fork();
+    if (p < 0) {
+        fprintf(stderr, "wsys: cannot fork the read server (%s): reads stay "
+                        "unmediated.\n", strerror(errno));
+        close(ep); close(fd);
+        return;
+    }
+    if (p > 0) {
+        /* The parent keeps NEITHER.  Holding the listening socket open in the
+         * compositor would leave the read name bound after the child died,
+         * with nothing behind it -- clients would connect and hang. */
+        close(ep); close(fd);
+        srd_pid = p;
+        fprintf(stderr, "wsys: read server pid %ld serving /dev/wsys reads for "
+                        "segment %llu.%llu, OFF the frame loop\n",
+                (long)p, (unsigned long long)seg_dev,
+                (unsigned long long)seg_ino);
+        return;
+    }
+
+    /* ---- the child ---- */
+    srd_lfd = fd;
+    srd_ep  = ep;
+    srv_lfd = -1;                    /* the frame loop's socket is not ours */
+    srv_ep  = -1;
+    srd_nconn = 0;
+    /* DIE WITH THE COMPOSITOR.  Then re-check: if wsysd exited between the
+     * fork and this prctl, the signal has already been missed and getppid()
+     * is 1 -- a read server outliving the window system it answers about
+     * would keep the name bound and answer questions about a segment nobody
+     * paints. */
+    prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+    if (getppid() == 1) _exit(0);
+    /* EVERY INHERITED DESCRIPTOR GOES.  wsysd holds /dev/fb, possibly a DRM
+     * master fd, evdev nodes, client pipes and the frame-loop listener; this
+     * process needs none of them and a stray reference to a DRM file
+     * description would keep master alive past the compositor's own exit. */
+    for (int i = 3; i < 4096; i++)
+        if (i != srd_lfd && i != srd_ep) close(i);
+    srd_serve();
+}
+
 /* ---------------------------------------------------------------- client -- */
 
 static int      srv_fd     = -1;
@@ -3542,10 +3945,10 @@ static int srv_dial(void)
 
 /* Send one message.  `flags` carries WSRV_F_REPLY when the caller will block.
  * Returns 0, or -1 with errno. */
-static int srv_send(uint16_t op, uint16_t flags, int32_t wid, uint32_t tag,
-                    const void *pay, uint32_t len)
+static int srv_send_on(int fd, uint16_t op, uint16_t flags, int32_t wid,
+                       uint32_t tag, const void *pay, uint32_t len)
 {
-    if (srv_fd < 0 || len > WSRV_MAXPAY) { errno = EINVAL; return -1; }
+    if (fd < 0 || len > WSRV_MAXPAY) { errno = EINVAL; return -1; }
     struct wsrv_hdr h = { WSRV_MAGIC_RQ, op, flags, tag, wid, len };
     struct iovec iov[2];
     iov[0].iov_base = &h; iov[0].iov_len = sizeof h;
@@ -3554,8 +3957,19 @@ static int srv_send(uint16_t op, uint16_t flags, int32_t wid, uint32_t tag,
     memset(&m, 0, sizeof m);
     m.msg_iov = iov;
     m.msg_iovlen = len ? 2 : 1;
-    ssize_t r = sendmsg(srv_fd, &m, MSG_NOSIGNAL);
+    ssize_t r = sendmsg(fd, &m, MSG_NOSIGNAL);
     return r < 0 ? -1 : 0;
+}
+
+/* THE FD IS A PARAMETER BECAUSE THERE ARE TWO SERVERS, not because anything
+ * is configurable.  Stage 4 puts reads on a second connection to a process
+ * that never paints; everything else still goes to the frame loop, and the
+ * unadorned names below mean "the frame loop's connection" so that no
+ * existing call site had to be re-read to be trusted. */
+static int srv_send(uint16_t op, uint16_t flags, int32_t wid, uint32_t tag,
+                    const void *pay, uint32_t len)
+{
+    return srv_send_on(srv_fd, op, flags, wid, tag, pay, len);
 }
 
 /* FIRE AND FORGET, and this is the measurement talking rather than taste.
@@ -3585,16 +3999,16 @@ static int srv_post(uint16_t op, int32_t wid, const void *pay, uint32_t len)
  * for, which is what makes fire-and-forget safe to mix with blocking calls on
  * one connection: an out-of-band error (tag 0) arriving mid-wait is reported
  * and stepped over rather than mistaken for the answer. */
-static int srv_wait(uint32_t tag, void *out, uint32_t outcap, uint32_t *outlen,
-                    int64_t *rc, int timeout_ms)
+static int srv_wait_on(int fd, uint32_t tag, void *out, uint32_t outcap,
+                       uint32_t *outlen, int64_t *rc, int timeout_ms)
 {
     uint8_t buf[sizeof(struct wsrv_rep) + WSRV_MAXPAY];
     for (;;) {
-        struct pollfd p = { srv_fd, POLLIN, 0 };
+        struct pollfd p = { fd, POLLIN, 0 };
         int pr = poll(&p, 1, timeout_ms);
         if (pr == 0) { errno = ETIMEDOUT; return -1; }
         if (pr < 0) { if (errno == EINTR) continue; return -1; }
-        ssize_t r = recv(srv_fd, buf, sizeof buf, 0);
+        ssize_t r = recv(fd, buf, sizeof buf, 0);
         if (r <= 0) { errno = r == 0 ? ECONNRESET : errno; return -1; }
         if ((size_t)r < sizeof(struct wsrv_rep)) continue;
         struct wsrv_rep rep;
@@ -3622,18 +4036,26 @@ static int srv_wait(uint32_t tag, void *out, uint32_t outcap, uint32_t *outlen,
     }
 }
 
-static int srv_call(uint16_t op, int32_t wid, const void *pay, uint32_t len,
-                    void *out, uint32_t outcap, uint32_t *outlen, int64_t *rc)
+static int srv_call_on(int fd, uint16_t op, uint16_t xflags, int32_t wid,
+                       const void *pay, uint32_t len, void *out,
+                       uint32_t outcap, uint32_t *outlen, int64_t *rc)
 {
-    if (srv_fd < 0) { errno = ENOTCONN; return -1; }
+    if (fd < 0) { errno = ENOTCONN; return -1; }
     uint32_t tag = ++srv_tag;
     if (tag == 0) tag = ++srv_tag;             /* 0 is reserved for OOB errors */
-    if (srv_send(op, WSRV_F_REPLY, wid, tag, pay, len) < 0) return -1;
+    if (srv_send_on(fd, op, (uint16_t)(WSRV_F_REPLY | xflags), wid, tag,
+                    pay, len) < 0) return -1;
     /* A BOUNDED WAIT, not an unbounded one.  A wedged compositor must produce
      * a diagnosable timeout rather than a client that hangs for ever with
      * nothing on stderr — the failure shape this device fights everywhere
      * else. */
-    return srv_wait(tag, out, outcap, outlen, rc, 5000);
+    return srv_wait_on(fd, tag, out, outcap, outlen, rc, 5000);
+}
+
+static int srv_call(uint16_t op, int32_t wid, const void *pay, uint32_t len,
+                    void *out, uint32_t outcap, uint32_t *outlen, int64_t *rc)
+{
+    return srv_call_on(srv_fd, op, 0, wid, pay, len, out, outcap, outlen, rc);
 }
 
 /* HELLO has to exist before srv_call is usable, because srv_dial calls it
@@ -3716,6 +4138,110 @@ static int32_t srv_newwindow(void)
     }
     if (rc < 0 || got != sizeof wid || wid < 0) { errno = -rc ? (int)-rc : ENOSPC; return -1; }
     return wid;
+}
+
+/* ==================================================================
+ * STAGE 4 — ROUTING THE READS
+ * ==================================================================
+ * A SECOND CONNECTION, DIALLED LAZILY.  Most clients never read any of these
+ * three files: a terminal creates a window, writes ctl and draws.  The panel
+ * reads /dev/wsys/windows a few times a second and every v2 client reads
+ * /dev/wsys/screen once at startup.  So the read connection is opened on the
+ * first routed read and not at hamwsys_open, which keeps a process that only
+ * ever writes at exactly one socket, as stage 1 measured it.
+ */
+static int      srv_rfd    = -1;
+static int      srv_rtried = 0;
+
+static int srv_rdial(void)
+{
+    if (srv_rfd >= 0) return srv_rfd;
+    if (!srv_enabled() || srv_is_server || srv_rtried) return -1;
+    srv_rtried = 1;
+    if (!seg_id_known) return -1;
+    struct sockaddr_un a;
+    socklen_t alen = srd_addr(&a);
+    if (!alen) return -1;
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    if (connect(fd, (struct sockaddr *)&a, alen) < 0) {
+        /* SAID OUT LOUD, then fallen back from, exactly as srv_dial does.
+         * During development both paths exist; a silent fallback here would
+         * mean an unmediated enumeration that looks identical to a mediated
+         * one, which is the failure shape this whole boundary is about. */
+        fprintf(stderr, "wsys: HAMWSYS_SERVER=1 but nothing is serving READS "
+                        "for segment %llu.%llu (%s): this process is reading "
+                        "the segment directly, which is NOT mediated.\n",
+                (unsigned long long)seg_dev, (unsigned long long)seg_ino,
+                strerror(errno));
+        close(fd);
+        return -1;
+    }
+    uint32_t mine = WSYS_VERSION, theirs = 0, got = 0;
+    int64_t rc = 0;
+    if (srv_call_on(fd, WSRV_OP_HELLO, 0, 0, &mine, sizeof mine,
+                    &theirs, sizeof theirs, &got, &rc) < 0 || rc < 0) {
+        fprintf(stderr, "wsys: the read server for segment %llu.%llu speaks "
+                        "version %u, this client speaks %u -- refusing it and "
+                        "reading the segment directly.\n",
+                (unsigned long long)seg_dev, (unsigned long long)seg_ino,
+                (unsigned)theirs, (unsigned)WSYS_VERSION);
+        close(fd);
+        return -1;
+    }
+    srv_rfd = fd;
+    return srv_rfd;
+}
+
+/* Answer one read from the server, into f->snap.  Returns 1 if the server
+ * answered and f is filled, -1 if the server REFUSED and the open must fail
+ * with errno already set, and 0 if the caller should take the in-process path.
+ *
+ * AN EMPTY ANSWER IS AN ANSWER, and this is the line the enumeration policy
+ * lives or dies on.  A window-less caller gets zero bytes back and this
+ * returns 1, so hamwsys_open reports an empty /dev/wsys/windows.  Returning 0
+ * here for an empty reply would fall through to snap_windows() and hand the
+ * caller the full list from shared memory -- a policy that denies nothing
+ * while every counter says it refused.  `rc` is the byte count the server
+ * decided on, so 0 is distinguishable from "no reply at all" (-1). */
+static int srv_route_read(struct hamwsys_file *f)
+{
+    int leaf;
+    switch (f->leaf) {
+    case HAMWSYS_WINDOWS: leaf = WSRV_LEAF_WINDOWS; break;
+    case HAMWSYS_SCREEN:  leaf = WSRV_LEAF_SCREEN;  break;
+    case HAMWSYS_POOL:    leaf = WSRV_LEAF_POOL;    break;
+    default: return 0;
+    }
+    if (!srv_enabled() || srv_is_server) return 0;
+    if (srv_rdial() < 0) return 0;
+    static uint8_t back[WSRV_MAXPAY];
+    uint32_t got = 0;
+    int64_t rc = 0;
+    if (srv_call_on(srv_rfd, WSRV_OP_READ,
+                    (uint16_t)(leaf << WSRV_LEAF_SHIFT), f->wid, NULL, 0,
+                    back, sizeof back, &got, &rc) < 0) {
+        fprintf(stderr, "wsys: the read server did not answer (%s); falling "
+                        "back to the unmediated in-process read.\n",
+                strerror(errno));
+        close(srv_rfd); srv_rfd = -1;
+        return 0;
+    }
+    /* A NEGATIVE rc IS THE SERVER'S REFUSAL AND MUST NOT FALL BACK.  ENXIO
+     * from `screen` means the compositor has not published a geometry yet --
+     * a real answer that the client end of hamscreen.ad waits on.  Falling
+     * back to the in-process read here would answer it from shared memory and
+     * turn every server-side refusal into a bypass. */
+    if (rc < 0) { errno = (int)-rc; f->snap = NULL; f->snaplen = 0; return -1; }
+    f->snap = NULL;
+    f->snaplen = 0;
+    if (got) {
+        f->snap = (uint8_t *)malloc(got);
+        if (!f->snap) { errno = ENOMEM; return -1; }
+        memcpy(f->snap, back, got);
+        f->snaplen = got;
+    }
+    return 1;
 }
 
 /* ------------------------------------------------------- the stage-1 gate -- */
@@ -4061,6 +4587,79 @@ int hamwsys_srv_attack_local(int victim_wid)
     printf("wsrvlo: the unrouted write LANDED (rc %lld). No mediator was "
            "present: the store was the attacker's own.\n", (long long)rc);
     return 0;
+}
+
+/* STAGE 4'S INSTRUMENT: WHAT A ROUTED READ COSTS, AGAINST 851 us.
+ *
+ * Stage 1 measured the frame-loop server's blocking round trip under a heavy
+ * drag and got p50 32 us / p90 789 us / max 851 us -- bimodal, because a
+ * request either catches an idle loop or waits out a frame.  This is the same
+ * measurement of the same shape of operation (blocking, returns data) against
+ * the READ server, which is a separate process that never paints.  It must be
+ * run under the SAME drag load or it is measuring a different question.
+ *
+ * EVERY SAMPLE IS PRINTED.  The number to beat is a MAX, and a median-only
+ * report is precisely what would have hidden the thing stage 1 found.
+ *
+ * IT ALSO ASSERTS THE READ IS REAL.  A read server that answered zero bytes to
+ * everything would be the fastest possible one, and this would report a
+ * triumph.  So the caller is a window owner (the gate arranges that) and a
+ * zero-length answer is counted and reported as a failure rather than timed. */
+int hamwsys_srv_readlat(int nsamples)
+{
+    if (!srv_enabled()) {
+        fprintf(stderr, "wsrvrl: HAMWSYS_SERVER is not 1; nothing is routed.\n");
+        return 1;
+    }
+    if (nsamples <= 0 || nsamples > 512) nsamples = 33;
+    if (srv_rdial() < 0) {
+        fprintf(stderr, "wsrvrl: no connection to a READ server.\n");
+        return 1;
+    }
+    uint64_t *s = (uint64_t *)malloc((size_t)nsamples * sizeof *s);
+    if (!s) return 1;
+    int n = 0, empty = 0, fails = 0;
+    uint64_t bytes = 0;
+    for (int i = 0; i < nsamples; i++) {
+        struct hamwsys_file f;
+        memset(&f, 0, sizeof f);
+        f.leaf = HAMWSYS_WINDOWS;
+        uint64_t t0 = srv_now_us();
+        int r = srv_route_read(&f);
+        uint64_t dt = srv_now_us() - t0;
+        if (r <= 0) { fails++; free(f.snap); continue; }
+        if (f.snaplen == 0) empty++;
+        bytes += f.snaplen;
+        free(f.snap);
+        s[n++] = dt;
+        printf("wsrvrl: sample %d %llu us %llu bytes\n",
+               i, (unsigned long long)dt, (unsigned long long)f.snaplen);
+    }
+    if (n == 0) {
+        printf("wsrvrl: FAIL not one routed read completed\n");
+        free(s);
+        return 1;
+    }
+    for (int i = 1; i < n; i++) {
+        uint64_t v = s[i]; int j = i - 1;
+        while (j >= 0 && s[j] > v) { s[j + 1] = s[j]; j--; }
+        s[j + 1] = v;
+    }
+    printf("wsrvrl: routed /dev/wsys/windows read, %d samples: min %llu  "
+           "p50 %llu  p90 %llu  max %llu us\n", n,
+           (unsigned long long)s[0], (unsigned long long)s[n / 2],
+           (unsigned long long)s[(n * 9) / 10],
+           (unsigned long long)s[n - 1]);
+    printf("wsrvrl: bytes %llu across %d reads, %d empty, %d failed\n",
+           (unsigned long long)bytes, n, empty, fails);
+    if (empty == n) {
+        printf("wsrvrl: FAIL every routed read came back EMPTY -- a server "
+               "that answers nothing is the fastest possible one, and these "
+               "times would be of nothing\n");
+        fails++;
+    }
+    free(s);
+    return fails;
 }
 
 int hamwsys_srv_sustain(int ops_per_sec, int secs)
@@ -5941,14 +6540,26 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
          * global ctl, which is the compositor's to write; a second writable
          * spelling of the same state is how two sources of truth start. */
         if (for_write) { errno = EACCES; return -1; }
+        { int r = srv_route_read(f); if (r) return r > 0 ? 0 : -1; }
         return snap_screen(f);
     case HAMWSYS_POOL:
         /* Read-only for the same reason `screen` is: this is the device
          * reporting its own storage, and a writable spelling of it would be a
          * second source of truth for how many windows can be painted. */
         if (for_write) { errno = EACCES; return -1; }
+        { int r = srv_route_read(f); if (r) return r > 0 ? 0 : -1; }
         return snap_pool(f);
-    case HAMWSYS_WINDOWS: return for_write ? 0 : snap_windows(f);
+    case HAMWSYS_WINDOWS:
+        /* STAGE 4'S POINT OF THE WHOLE EXERCISE.  Served, "which windows
+         * exist" is a question somebody ANSWERS, so it can be answered
+         * differently for different callers -- see THE ENUMERATION POLICY at
+         * srd_enum_tier.  Unrouted (HAMWSYS_SERVER unset, or no read server)
+         * it is snap_windows() out of shared memory, exactly as before, and
+         * tests/linux/wsys_enum_policy.sh asserts that this arm still hands a
+         * window-less `cat` the full list -- because a gate whose red arm has
+         * quietly gone green proves nothing about the green one. */
+        if (!for_write) { int r = srv_route_read(f); if (r) return r > 0 ? 0 : -1; }
+        return for_write ? 0 : snap_windows(f);
     case HAMWSYS_SELF:    return for_write ? 0 : snap_self(f);
     case HAMWSYS_CTL:     return for_write ? 0 : snap_ctl(f);
     case HAMWSYS_DIR:     return snap_dir(f);
