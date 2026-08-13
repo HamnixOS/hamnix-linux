@@ -55,12 +55,37 @@ under **THE GATE INVENTORY** at the end of this section.
 
 ### THE WINDOW SYSTEM IS BECOMING A FILE SERVER — where that stands
 
-Four passes of it are in the tree (design, transport, mutations, caller
-identity). **All of it is inert unless `HAMWSYS_SERVER=1`, and nothing sets
-that**, so it changes nothing for a person yet and has no changelog entry.
+Seven passes of it are in the tree (design, transport, mutations, caller
+identity, connection ownership, the scene, and now a booted desktop). **All of
+it is inert unless `HAMWSYS_SERVER=1`, and nothing sets that**, so it changes
+nothing for a person yet and has no changelog entry.
 `docs/wsys_server_design.md` is the design and the running record;
 `docs/wsys_server_cost.md` is what it costs. What a fresh session must not
 mis-read:
+
+* **THE DESKTOP HAS NOW BEEN BOOTED ROUTED, AND IT COMES UP**
+  (`tests/linux/wsys_srv_deboot.sh`, **52 PASS / 0 FAIL**, twice). Offscreen:
+  wallpaper, **both** panels, the Applications menu in its own window at (8,28)
+  407 px wide, and a window being dragged — same geometry in both arms. Routing
+  is **counted per process** from `/proc` (peer socket inode of every
+  ESTABLISHED connection to `@hamnix-wsys/<dev>.<ino>/srv`), never inferred
+  from having exported a variable, because **`HAMWSYS_SERVER=1` does not reach
+  a hamsh-spawned program** — `_build_envp()` gives a child `PATH` and `HOME`
+  and nothing else, and a run that assumes otherwise measures an unrouted
+  desktop and believes it is routed. Answer: **four processes, one per
+  window-owning program, and not one more**; the control arm holds zero;
+  **not one client holds a READ connection at all.** 7914 mutations crossed
+  the boundary in 8 s of a drag, from the server's own trace.
+* **WHAT IT COSTS: at load, less than this host's noise. At idle, +15–27% more
+  frames.** Two full runs disagree on the *sign* of the frame-rate delta
+  (−13.0 fps and +5.5 fps out of ~330), both **NOT ATTRIBUTABLE** at peak
+  loadavg 3.3; `wsysd` is at 99.7–99.9% of a core in **both** arms so the CPU
+  column cannot discriminate; input-to-pixel is indistinguishable through p95.
+  The reproducible costs are an idle desktop presenting 30 frames/10 s against
+  26, at +0.2 points of a core, and a **short-lived** client paying **6.1 ms
+  against 2.1 ms** to read against a saturated compositor, because it must dial
+  first. **Nothing here has been booted with the compositor and the
+  applications at different uids**, so the mediator refused nothing.
 
 * **`WSYS_VERSION` is still 8 and the in-process path is still there**, so **the
   boundary is NOT enforced**: a client that does not speak the protocol bypasses

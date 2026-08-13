@@ -605,6 +605,173 @@ longer depend on hamsh never spawning before `setuid 1001`, because a stale
 identity is now noticed at the next message rather than carried for the life of
 the process.
 
+## What stage 7 measured — THE DESKTOP, BOOTED ROUTED, AND WHAT IT COSTS
+
+`tests/linux/wsys_srv_deboot.sh`, **52 passed, 0 failed**, twice. `WSYS_VERSION`
+stays 8. Every stage above proved itself with a purpose-built client; this is
+the first time the mediator has carried a desktop.
+
+**IT COMES UP, AND THE SCREEN IS THE SAME SCREEN.** Offscreen, one set of
+binaries, arms alternated rep by rep in one session:
+
+| | unrouted | routed |
+|---|---|---|
+| wallpaper + icons (`hamdesktop`) | wid 2, 1280x800 | **the same** |
+| **both** panels (`hampanelscene`) | wid 3 and wid 4, 1280x26 | **the same** |
+| Applications menu (`hamappmenu -self`) | wid 5 at (8,28), **407x140** | **the same** |
+| a window drag (`de_dragload`) | wid 6, 480x320 with text, moving | **the same** |
+
+407 wide at (8,28) is `de_appmenu_brisk.sh`'s discriminator between the
+Brisk-shaped menu in its own window and the panel's own in-panel dropdown, and
+it is used here for the same reason: "a menu-coloured card appeared" passes on
+the broken one.
+
+**WHO IS ROUTED IS COUNTED, NOT INFERRED, AND THAT IS THE POINT OF THE FILE.**
+`HAMWSYS_SERVER=1` in a shell does not reach a hamsh-spawned program —
+`_build_envp()` gives a child `PATH` and `HOME` and nothing else — so a run
+that exports the variable and assumes measures an unrouted desktop and believes
+it is routed. Instead every ESTABLISHED connection to
+`@hamnix-wsys/<dev>.<ino>/{srv,rd}` is listed, its **peer socket inode**
+resolved to a pid through `/proc/<pid>/fd` (the client end of an AF_UNIX
+connection has no address, so `/proc` is the only place the association
+exists):
+
+    srv <pid> hamdesktop      fd=3
+    srv <pid> hampanelscene   fd=3
+    srv <pid> hamappmenu      fd=3
+    srv <pid> de_dragload     fd=3
+
+**Four processes, one per window-owning program, and not one more.** wsysd
+holds none of its own — `hamwsys_srv_claim()` is why. The control arm runs the
+same census and finds **zero**, which is what makes it a control.
+
+That answers the standing policy question with a measurement rather than a
+reading of the source: **no process holds a connection it has no business
+with.** And a second thing falls out that nobody asked: **not one client holds
+a READ connection.** The whole desktop — compositor, wallpaper, two panels,
+menu, a dragging client — performs no routed read at all, so the second process
+stage 4 forked to keep the 851 µs tail off the read path serves nothing on a
+real session. It costs nothing (stage 4 measured 0 ticks), but its
+justification is now a leaf that this desktop does not read.
+
+**AND THE TRAFFIC ACTUALLY CROSSES — a held connection is not a routed
+desktop.** A client could dial, negotiate a version, and then do every mutation
+in process, and the census above would look identical. From the server's own
+trace, 8 s of a drag:
+
+    7499  de_dragload      hostowner=1 owns_wid=1 ancestry=1
+     254  hampanelscene    (164 of them wid=-1, the /dev/wsys/ctl leaf)
+     249  hamdesktop
+       6  hamappmenu
+    ----
+    7914 mutations in 8 s, every one through srv_as_caller()
+
+**THE COST, AND THE HONEST ANSWER IS THAT IT IS BELOW THIS HOST'S NOISE.** Two
+full runs, three reps each, both 52/0, both **NOT ATTRIBUTABLE** by the gate's
+own verdict (peak loadavg 3.34 and 3.44; other agents' compositors were bound
+throughout, 7 wsys server names at peak):
+
+| load, ~330 fps | run A | run B |
+|---|---|---|
+| pointer only | **+5.5 fps** | **−13.0 fps** |
+| window drag | +0.2 | −13.4 |
+| drag + pointer | +3.7 | −6.5 |
+
+**The two runs do not agree on the SIGN.** The spread is −4% to +1.7% of the
+frame rate, and the run-to-run difference is larger than the arm-to-arm one.
+Stage 2's 46.5-points-of-a-core saving is not reproduced here and neither is a
+loss: *on this host, at this load, routing the desktop is not measurable in
+frames.* Quoting either run alone would be quoting the neighbours.
+
+`wsysd` sits at **99.7–99.9% of a core in BOTH arms** under all three loads, so
+the CPU column cannot discriminate at all and the gate says so in the output
+rather than printing a difference of two saturated numbers.
+
+Input-to-pixel, 90 trials per arm per rep, medians of the per-run percentiles:
+
+| | p50 | mean | p95 | max |
+|---|---|---|---|---|
+| unrouted | 0.36 ms | 0.39 | 0.45 | 1.33 |
+| routed | 0.34 ms | 0.37 | 0.44 | **2.21** |
+
+Indistinguishable through p95. The maximum is worse routed in both runs (2.21
+against 1.33; 4.10 against 2.75) — one sample in ninety, and the honest reading
+is that the tail is noisy in both arms rather than that routing costs 0.9 ms.
+
+**THE ONE CONSISTENT COST IS AT IDLE, AND IT IS SMALL.** Frames presented in
+10 s with nothing touching the desktop, three samples per arm per run:
+
+| | unrouted | routed |
+|---|---|---|
+| run A | 26, 26, 27 | 34, 32 |
+| run B | 26, 26, 27 | 27, 31, 30 |
+| run C | 26 | 30 |
+| wsysd cpu | 1.2–1.3% | 1.4–1.6% |
+
+**+15% to +27% more frames on an idle desktop, and +0.2 points of a core.** The
+unrouted figure is the panel's 320 ms sysmon resample and nothing else (3.1/s =
+31 in 10 s, `de_fps_latency.sh` derives it from the source). Routed, something
+presents four to six more. That is the only difference either run reproduces,
+and it is not yet attributed to a line.
+
+**A SHORT-LIVED CLIENT PAYS FOR THE DIAL, AND ON A BUSY DESKTOP IT IS 3x.**
+200 fresh `cat /dev/wsys/wsysd/state` processes per arm, each paying connect +
+HELLO before it can answer:
+
+| | p50 | p90 | max |
+|---|---|---|---|
+| unrouted, idle | 2.0 / 2.0 ms | 2.5 / 2.1 | 3.7 / 2.4 |
+| routed, idle | 2.1 / 2.2 ms | 2.8 / 2.4 | 5.6 / 3.6 |
+| unrouted, dragging | 2.1 / 2.2 ms | 2.3 / 2.4 | 3.0 / 3.1 |
+| **routed, dragging** | **6.1 / 6.8 ms** | **7.1 / 8.0** | **9.4 / 14.7** |
+
+(two independent runs, `a / b`; the arm is now in the gate)
+
+Idle it is free. Against a saturated compositor the dial waits for the frame
+loop, which is stage 1's 851 µs finding showing up in the one place a desktop
+actually meets it: a script or a `ps`-like tool that runs, reads and exits.
+
+**AND THE MEASUREMENT FOUND A DEFECT IN THE INSTRUMENT, WHICH IS THE MOST
+PORTABLE THING HERE.** A routed arm reported *"idle: 10.0 s with NO input —
+−173 frames presented"*. A negative count of presentations is a broken reading,
+not a slow desktop. `/dev/wsys/wsysd/state` is rewritten in place and a reader
+landing mid-rewrite gets an **empty body with exit status 0** — 1-in-200 on an
+unrouted dragging desktop, 4-in-200 on a routed idle one, i.e. **in both arms,
+a property of the file**. `de_fps_driver.py`'s `read_state` returned `{}` for
+that and every caller then wrote `s.get('frames', 0)`, so one torn read became
+a frame delta of minus the whole counter (−173) or plus it (+212, which was
+briefly read as an eightfold idle regression). It is fixed by retrying and by
+saying so out loud when retrying fails, because *a default of zero on a missing
+counter is what lets an unreadable instrument produce a confident number.*
+`de_fps_latency.sh`, `de_fps_gpu.sh` and `de_fps_mate.sh` all drive that file.
+
+### What stage 7 did NOT do, stated so the next pass does not re-read it as done
+
+* **No `WSYS_VERSION` bump, and the boundary is still not enforced.** Every
+  number above is of a mediator that a non-participating client can walk past.
+* **The mediator refused NOTHING on this desktop, and it could not have.**
+  Offscreen, every client is the segment's host owner, so `hostowner()` answers
+  1 before any other question is asked. The refusal arms live in
+  `wsys_srv_identity.sh` and `wsys_srv_connown.sh`, where a second uid exists.
+  **A routed desktop where the compositor and the applications are different
+  uids has still not been booted**, and that is where `owns_wid()` would
+  actually be asked.
+* **No `hamUId`, and therefore not `/bin/hamsh /etc/rc.de-user <prog>`** — the
+  spawn path every window of an *installed* desktop is created through, in
+  which the wid is stamped against hamsh and the program runs as hamsh's child.
+  Stage 5 named that as the next piece of work and it is still that. The
+  clients here self-allocate through `newwindow`, which binds their own
+  connection, so they take the easy path through the stage-5 rule.
+* **No terminal.** `hamtermscene` spawns `/bin/hamsh --no-echo /etc/rc.de-user`
+  and its window dies with that shell; neither path exists on a developer's
+  host. It exits in **both** arms, which is what makes that a harness limit and
+  not a routing result — staging a `/bin` and an `/etc` for it was attempted,
+  and the assembled `/etc` broke the host's own tooling before it reached the
+  question.
+* **The numbers are NOT ATTRIBUTABLE and the gate says so.** Both runs peaked
+  over loadavg 3.3 with other agents' compositors bound. The correctness arms
+  do not depend on load; the percentages do.
+
 ## Budget to hold it to
 
 **THE BUDGET BELOW IS SUPERSEDED. It was the wrong SHAPE, which is a stronger

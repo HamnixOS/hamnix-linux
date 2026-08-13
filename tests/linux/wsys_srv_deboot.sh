@@ -475,6 +475,69 @@ trace_arm() {
     for p in $pids; do kill -9 "$p" 2>/dev/null; done; sleep 1
 }
 
+# ---- WHAT A SHORT-LIVED CLIENT PAYS ---------------------------------------
+# The percentiles above are of LONG-LIVED clients, which dial once and then
+# amortise it over a whole session. A desktop is also full of programs that
+# start, read one thing and exit -- a script, a status tool, this gate's own
+# `cat`. Routed, each of those pays connect + HELLO before it can answer, and
+# stage 1 measured that a blocking request on the mutation socket waits for
+# whatever frame is in progress. This is that cost where a desktop actually
+# meets it.
+#
+# It also found the torn read that `de_fps_driver.py` now retries: /dev/wsys/
+# wsysd/state is rewritten in place, and a reader landing mid-rewrite gets an
+# EMPTY body with exit status 0 -- in BOTH arms, so it is a property of the
+# file. That is counted here rather than smoothed over.
+dial_arm() {   # dial_arm <label> <routed> <busy>
+    # Split, not one `local` line: with `set -u`, referring to `lab` in a later
+    # assignment on the SAME `local` is an unbound variable.
+    local lab="$1"; local routed="$2"; local busy="$3"
+    local A="$WORK/dial.$lab"
+    rm -rf "$A"; mkdir -p "$A/noicd"
+    export HAMWSYS="$A/seg" HAMWSYS_BB="$A/seg.bb" HAMWSYS_IMG="$A/img"
+    export HAMFB_FILE="$A/fb.raw" HAMFB_GEOM="$GEOM"
+    : >"$A/in"; export HAMWSYSD_INPUT="$A/in"
+    export VK_ICD_FILENAMES="$A/noicd/none.json" HAMLINUX_VNC=none
+    if [ "$routed" = 1 ]; then export HAMWSYS_SERVER=1; else unset HAMWSYS_SERVER; fi
+    local pids i
+    "$BINDIR/wsysd" </dev/null >"$A/wsysd.log" 2>&1 & pids=$!; reap_add $!
+    for i in $(seq 1 100); do [ -s "$A/fb.raw" ] && break; sleep 0.1; done
+    "$BINDIR/hamdesktop"    </dev/null >"$A/d.log" 2>&1 & reap_add $!; pids="$pids $!"
+    sleep 3
+    "$BINDIR/hampanelscene" </dev/null >"$A/p.log" 2>&1 & reap_add $!; pids="$pids $!"
+    sleep 4
+    if [ "$busy" = 1 ]; then
+        "$BINDIR/de_dragload" 480 320 120 200 300 8 >"$A/drag.wid" 2>/dev/null &
+        reap_add $!; pids="$pids $!"
+        sleep 2
+    fi
+    printf 'deboot: INFO   %-18s (%s) ' "$lab" "$(cond)"
+    python3 - "$BINDIR/cat" <<'PY'
+import subprocess, sys, time
+cat = sys.argv[1]
+times, empty = [], 0
+for _ in range(200):
+    t0 = time.monotonic()
+    try:
+        p = subprocess.run([cat, '/dev/wsys/wsysd/state'],
+                           capture_output=True, timeout=10)
+        dt = (time.monotonic() - t0) * 1000.0
+        f = p.stdout.decode(errors='replace').split()
+        if 'frames' not in f:
+            empty += 1
+    except subprocess.TimeoutExpired:
+        dt = 10000.0
+        empty += 1
+    times.append(dt)
+    time.sleep(0.02)
+times.sort()
+def q(p): return times[min(len(times) - 1, int(p / 100.0 * (len(times) - 1)))]
+print('n=200 torn=%d  p50 %.1f  p90 %.1f  max %.1f ms' % (empty, q(50), q(90), times[-1]))
+PY
+    local p; for p in $pids; do kill "$p" 2>/dev/null; done; sleep 1
+    for p in $pids; do kill -9 "$p" 2>/dev/null; done; sleep 1
+}
+
 # ---- run -------------------------------------------------------------------
 : >"$WORK/arms.tsv"
 for rep in $(seq 1 "$REPS"); do
@@ -483,6 +546,14 @@ for rep in $(seq 1 "$REPS"); do
     head2 "rep $rep -- ROUTED (HAMWSYS_SERVER=1 for the compositor and every client)"
     arm routed 1 "$rep" || true
 done
+
+head2 "WHAT A SHORT-LIVED CLIENT PAYS -- 200 fresh readers per arm"
+info "each one is a whole process that starts, reads /dev/wsys/wsysd/state and exits;"
+info "routed, it must connect and negotiate a version first."
+dial_arm unrouted-idle 0 0 || true
+dial_arm routed-idle   1 0 || true
+dial_arm unrouted-drag 0 1 || true
+dial_arm routed-drag   1 1 || true
 
 head2 "DOES TRAFFIC ACTUALLY CROSS, AND WHOSE"
 trace_arm || true
