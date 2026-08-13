@@ -100,15 +100,6 @@ extern def sys_fdbind(pid: int32, fdnum: int32, kind: int32,
 # for an sshd-spawned hamsh).
 extern def sys_fdslot_kind(pid: int32, fdnum: int32) -> int32
 extern def sys_fdslot_arg(pid: int32, fdnum: int32) -> int32
-# STAGE 5: hand this shell's /dev/wsys server connection to the task it is
-# about to launch. Inert with HAMWSYS_SERVER unset -- it returns -1 and the
-# child behaves exactly as it does today. See user/linux-wsys.h.
-extern def sys_wsys_srv_handoff(on: int32) -> int32
-# Read one variable out of THIS process's C environment. hamsh keeps its own
-# exported-environment table and builds envp from that, so a setenv() done
-# inside the runtime is invisible to a spawned child unless it is copied
-# across; this is how the handoff's fd number is collected.
-extern def sys_getenv(name: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64
 extern def sys_pipechan() -> int32
 extern def sys_openchan(path: Ptr[char], write: int32) -> int32
 # HAMSH §13: an opaque per-Pgrp namespace identity. A live handle
@@ -8804,16 +8795,7 @@ def _build_path(prefix: Ptr[uint8], cmd: Ptr[uint8]):
 # envp staging for spawn() — children inherit /env through it.
 ENVP_STRIDE:  uint64 = 224
 envp_strs:    Array[7168, uint8]   # 32 * 224
-# 32 exported variables + the stage-5 HAMWSYS_SRV_FD entry + the NUL terminator.
-# It was ENV_MAX + 1 exactly, so appending anything overran it.
-envp_ptrs:    Array[34, uint64]
-# The handoff entry lives HERE and not in the env table env_set() writes.
-# The descriptor is valid for exactly ONE spawn -- handoff(0) puts FD_CLOEXEC
-# back on it the moment the child is launched -- so a copy left in the shell's
-# exported environment would offer a stale number to every later child. Every
-# such child would probe it, find it is not a connected seqpacket socket, and
-# print a warning before dialling properly: safe, and noise that means nothing.
-srv_fd_env:   Array[64, uint8]
+envp_ptrs:    Array[33, uint64]
 
 
 def _build_envp() -> Ptr[uint64]:
@@ -8869,39 +8851,6 @@ sr_in_pipe:  int32 = -1
 sr_out_pipe: int32 = -1
 
 
-def _envp_add_srv_fd(envp: Ptr[uint64]) -> int32:
-    # Append "HAMWSYS_SRV_FD=<n>" to the envp _build_envp has just produced.
-    # Returns 1 if an entry was added.
-    #
-    # The environment is the channel because execve replaces everything else:
-    # argv belongs to the program, so a spawner that had to rewrite its child's
-    # argv could not hand a connection to a program it did not write.
-    v: Array[24, uint8]
-    if sys_getenv(cast[Ptr[char]]("HAMWSYS_SRV_FD"), &v[0], 24) <= 0:
-        return 0
-    nm: Ptr[uint8] = cast[Ptr[uint8]]("HAMWSYS_SRV_FD=")
-    o: uint64 = 0
-    while nm[o] != 0 and o + 1 < 64:
-        srv_fd_env[o] = nm[o]
-        o = o + 1
-    k: uint64 = 0
-    while v[k] != 0 and o + 1 < 64:
-        srv_fd_env[o] = v[k]
-        o = o + 1
-        k = k + 1
-    srv_fd_env[o] = 0
-    n: uint64 = 0
-    while envp[n] != 0:
-        n = n + 1
-    # 34 slots: refuse rather than overrun if all 32 exports are in use and
-    # something else has already appended.
-    if n + 1 >= 34:
-        return 0
-    envp[n] = cast[uint64](&srv_fd_env[0])
-    envp[n + 1] = 0
-    return 1
-
-
 def _spawn_at(path: Ptr[char], argv: Ptr[uint64],
               envp: Ptr[uint64]) -> int32:
     # Launch `path`. A PIPELINE STAGE goes through spawn_pipeline_stage,
@@ -8913,58 +8862,44 @@ def _spawn_at(path: Ptr[char], argv: Ptr[uint64],
     # CONSOLE and the pipe never receives a byte. See lib/p9.ad's
     # spawn_pipeline_stage header. The caller has already pinned the pipe
     # ends' refcounts at P9_PIPE_PIN_W / P9_PIPE_PIN_R.
-    # STAGE 5 -- THE HANDOFF, on either side of the launch.
+    # STAGE 5'S HANDOFF WAS WIRED HERE AND HAS BEEN TAKEN BACK OUT. It cannot
+    # work through this spawn path, and the reason is not a bug in either side:
     #
-    # A routed mutation must arrive on the connection that holds the window's
-    # row, so a task spawned INTO a window it did not create is refused unless
-    # the spawner hands it that connection. This is the choke point: every
-    # resolved command and every pipeline stage passes through here.
+    #   * sys_wsys_srv_handoff(1) publishes the server connection by clearing
+    #     FD_CLOEXEC and naming the descriptor in HAMWSYS_SRV_FD, because a
+    #     connected SOCK_SEQPACKET survives fork(2) and execve(2).
+    #   * lib/p9.ad's _spawn_flags calls p9_closefrom(3) in the child, right
+    #     before execve, and closes EVERY fd from 3 to 63. That is the CLEAN-FD
+    #     contract, and its comment states the point: "a spawned file server
+    #     never sees the launcher's other channels".
     #
-    # handoff(1) returns -1 when there is nothing to hand -- flag unset, no
-    # server, dial refused -- and then nothing below changes, which is what
-    # keeps behaviour identical with HAMWSYS_SERVER unset.
+    # So the descriptor is closed by design a moment before the program that
+    # was meant to inherit it starts. Measured, with the environments matched:
+    # the child prints "HAMWSYS_SRV_FD=3 is not a connected server socket (Bad
+    # file descriptor): dialling instead", then dials its own connection and
+    # WORKS. Wiring it here therefore buys nothing and costs one spurious
+    # warning per command once the flag is on.
     #
-    # AFTER any privilege drop and never before: SO_PEERCRED is sampled at
-    # connect(2), so the connection carries the dialling process's uid wherever
-    # it goes. hamsh does not drop privilege between here and the spawn.
-    # MEASURED AND NOT YET RIGHT -- READ THIS BEFORE TURNING THE FLAG ON.
-    # Handing the connection to EVERY external command is not merely the
-    # policy widening the design anticipated; it BREAKS ORDINARY COMMANDS.
-    # Against a live routed server:
+    # Three ways out, none of them taken here because each is a real decision:
+    #   1. exempt one named descriptor from p9_closefrom -- narrow and
+    #      auditable, but it re-opens precisely the door that contract closed;
+    #   2. pass the connection with SCM_RIGHTS after exec, so nothing has to
+    #      survive it and the contract stays whole;
+    #   3. hand nothing, and let every client dial for itself -- which is what
+    #      happens today and what the measurement above shows already works,
+    #      leaving only "write into a window I do not own" unsolved.
     #
-    #   cat /dev/wsys/screen  spawned by bash   -> "1280 800", rc 0
-    #   cat /dev/wsys/screen  spawned by hamsh  -> cannot open: ENXIO
-    #
-    # The cause is not the routed read path -- the direct arm above proves
-    # that works. srv_adopt_inherited() is reached BEFORE seg_id_known, on
-    # purpose, because a handed connection needs no segment identity to find
-    # its server; so a child that adopts one never attaches the segment, and
-    # /dev/wsys/screen requires the CHROME mapping locally (chrome_attach(),
-    # user/linux-wsys.c, ENXIO WHEN UNANNOUNCED). The adoption is built for a
-    # process that speaks only the protocol, and `cat` is not one.
-    #
-    # So the handoff belongs on a spawn INTO a window this shell owns, not on
-    # every spawn. Deciding which -- or making an adopting child attach the
-    # segment too -- is a design pass, and DELIBERATELY NOT MADE HERE by
-    # loosening something to get a desktop up. It is inert today
-    # (HAMWSYS_SERVER is unset everywhere) and both inert paths are verified:
-    # flag unset, and flag set with no server, both spawn exactly as before.
-    hand: int32 = sys_wsys_srv_handoff(1)
-    if hand >= 0:
-        _envp_add_srv_fd(envp)
-    pid: int32 = -1
+    # AND NOTE WHICH PROBLEM IS *NOT* IN THAT LIST. An earlier pass reported
+    # this as "the handoff breaks ordinary commands" on the strength of `cat
+    # /dev/wsys/screen` giving ENXIO under hamsh and "1280 800" under bash.
+    # That comparison varied TWO things: the spawner AND the environment --
+    # _build_envp below builds a child's envp from hamsh's OWN table, which
+    # holds only PATH and HOME, so that child was looking for /srv/wsys and was
+    # never talking to the server under test. With the environment matched the
+    # ENXIO is gone. The handoff is inert, not harmful.
     if sr_in_pipe >= 0 or sr_out_pipe >= 0:
-        pid = spawn_pipeline_stage(path, argv, sr_in_pipe, sr_out_pipe, envp)
-    else:
-        pid = spawn(path, argv, SPAWN_STDIO_NS, SPAWN_STDIO_NS, envp)
-    # UNCONDITIONALLY, and on the failure path too: handoff(0) puts FD_CLOEXEC
-    # back on the shell's own connection and clears the variable from the
-    # runtime environment. Leaving it inheritable would hand the connection to
-    # every later child by accident, which is the ancestry rule rebuilt out of
-    # descriptors -- the exact thing stage 5 removed.
-    if hand >= 0:
-        sys_wsys_srv_handoff(0)
-    return pid
+        return spawn_pipeline_stage(path, argv, sr_in_pipe, sr_out_pipe, envp)
+    return spawn(path, argv, SPAWN_STDIO_NS, SPAWN_STDIO_NS, envp)
 
 
 def spawn_resolved(cmd: Ptr[uint8], argv: Ptr[uint64]) -> int32:
