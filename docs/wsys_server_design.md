@@ -1267,6 +1267,27 @@ dialled at all; stage 10 asks this socket a question at every per-window open,
 so the window between dialling and dropping privilege is now real.
 `srv_rdial_if_uid_changed()` closes it and takes the existence cache with it.
 
+**THE DESKTOP STILL COMES UP, AND IT COST NOTHING MEASURABLE.**
+`wsys_srv_deboot.sh` is **36 passed / 0 failed** with stage 10 in, both panels
+and the Applications menu up in both arms, and — for the first time in these
+runs — its own attribution verdict is **ATTRIBUTABLE** (peak loadavg 1.63,
+under 2.0 throughout) rather than the usual "RE-TAKE THESE QUIET". Over two
+interleaved reps:
+
+| | unrouted | routed |
+|---|---|---|
+| drag + pointer, fps | 332.9 / 336.2 | 332.7 / 331.9 |
+| `wsysd` CPU under that load | 99.7% | 99.7% |
+| input→pixel p50 / p95 (ms) | 0.34 / 0.54 · 0.34 / 0.53 | 0.35 / 0.50 · 0.35 / 0.49 |
+| a fresh `cat` of the state sink, drag, p50 (ms) | 2.1 | 6.1 |
+
+The last row is **not** this stage: it is stage 4's dial-plus-HELLO on a
+short-lived reader, unchanged, and it was 6.4 ms on the run before this one.
+The regression gates around it are unmoved: `wsys_srv_attrread.sh` 30/0,
+`wsys_enum_policy.sh` 9/0, `wsys_srv_ceiling.sh` 12/0, `wsys_bypass.sh` PASS,
+`gates_are_private.sh` 3/0. `scripts/build_user.sh` ends "all 278 Adder
+programs compiled OK" with no ERROR line.
+
 **THE GATE: `tests/linux/wsys_srv_open.sh`, 53 passed / 0 failed, and it scored
 30 / 24 on the tree it was written against.** Every arm is a **pair** — the same
 leaf on a window that exists and on one that does not, from the same process —
