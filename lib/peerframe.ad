@@ -1,0 +1,169 @@
+# lib/peerframe.ad — THE PEER DOES NOT DECIDE THE SIZE OF YOUR BUFFER.
+#
+# WHY THIS FILE EXISTS. One defect shape has been found five times in this
+# tree, in five unrelated protocols, and every instance failed far from its
+# cause and said nothing at the limit:
+#
+#   4096 vs a modern Xwayland's 8268-byte setup reply (user/wsyswl.ad) --
+#        every X client froze;
+#   4092 vs an X11 request that may be 262140 bytes (user/x11srv.ad) --
+#        the connection desynchronised permanently;
+#   255  vs an ssh pre-identification banner line (user/sshd.ad) --
+#        the peer could choose where its own data was framed;
+#   504  vs an X setup reply in two X clients -- alive only because the
+#        peer they happen to talk to is small;
+#   1 MiB vs a 2,112,018-byte blit (user/linux-wsys.c) -- no v2 window
+#        larger than about 512x512 had ever painted on this port.
+#
+# The last was a fixed POLICY (copy-then-check) rather than a fixed buffer,
+# which is why hunting the shape finds what hunting the symptom does not.
+#
+# THE THREE RULES, which are what every one of those sites got wrong. They are
+# not new: they are what the parts of this tree that already work do, and this
+# file only makes them callable.
+#
+#   1. THE BUFFER'S CAPACITY IS THE AUTHORITY, NEVER THE PEER'S NUMBER.
+#      Parse using the count of bytes you ACTUALLY read, never the length the
+#      peer declared. lib/9p/9p.ad's decoders already state this as a contract:
+#      "-1 truncated input (size field promises bytes the caller hasn't
+#      supplied)" -- they are handed (buf, len) and refuse when the size field
+#      runs past len. That single clause is what prevents the misparse, and it
+#      is the clause all five broken sites were missing.
+#
+#   2. WHAT DOES NOT FIT IS DRAINED, NOT ABANDONED.
+#      A length-prefixed stream stays in sync only if every byte the peer
+#      announced is consumed. user/xsnarfd.ad already does this: it takes what
+#      fits, sets a truncation flag, and drains the remainder through a 1 KiB
+#      sink. x11srv did not, and one oversized request desynchronised the
+#      connection for good -- every later reply was read from the middle of an
+#      earlier one.
+#
+#   3. SAY IT AT THE LIMIT, BY NAME.
+#      Every one of the five failed at a distance from its cause: a frozen X
+#      client, a blank browser, a KEX failure naming neither side. A refusal at
+#      the limit that names the buffer and both numbers costs one line and is
+#      the difference between a minute and a day. user/xsnarfd.ad again:
+#      "this X server's maximum request is too small for the clipboard;
+#      refusing rather than sending a truncated one".
+#
+# TWO HELPERS AND NOT ONE, AND THE REASON IS HONEST RATHER THAN TIDY. A
+# length-prefixed frame and a delimiter-terminated line cannot share a reader:
+# one knows how many bytes to consume before it reads them and the other only
+# discovers the end by finding it. Forcing them together would mean a helper
+# that takes a length OR a delimiter and ignores half its arguments, which is
+# how an interface stops being read. So there are two, and they share the three
+# rules above and the same shape of result: bytes taken, and a flag saying the
+# peer sent more than fits.
+#
+# WHAT THIS FILE DOES NOT COVER, stated so nobody assumes it does:
+#
+#   * A WRAPPED STREAM. These take a raw fd and use sys_read. A site reading
+#     through TLS, a decompressor, or its own buffering layer cannot call them
+#     -- it must apply the three rules itself. lib/9p/9p.ad's decode contract
+#     is the model for those: pass the parser what you HAVE, not what you were
+#     promised.
+#   * THE C BACKENDS. user/linux-*.c cannot import an .ad module. The same
+#     three rules apply there and the fix in user/linux-wsys.c's draw/ctl path
+#     is what they look like in C: a complete record is parsed in place out of
+#     the caller's buffer, and only a genuinely split remainder is copied into
+#     a bounded reassembly buffer.
+#   * A PROTOCOL THAT GENUINELY BOUNDS THE PEER. Where the peer cannot exceed
+#     the buffer, no helper is needed -- but the bound must be CITED at the
+#     declaration, not assumed. 9P is the example to copy: it NEGOTIATES msize
+#     at mount, so user/distrofs.ad's 131072-byte buffer is exactly the msize
+#     it advertised in Rversion, and the peer is contractually bound.
+
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+
+# The drain sink. One kilobyte, reused: the bytes are being thrown away, so the
+# only thing that matters is that they are consumed from the stream.
+PEERFRAME_SINK_CAP: uint64 = 1024
+_pf_sink: Array[1024, uint8]
+
+
+def _pf_read_exact(fd: int32, buf: Ptr[uint8], n: uint64) -> int32:
+    # Read exactly n bytes. 0 on success, -1 if the peer went away. A short
+    # read is not an error on a stream socket -- it is the ordinary case -- so
+    # this loops rather than trusting one call, which is its own small instance
+    # of the same lesson.
+    got: uint64 = 0
+    while got < n:
+        k: int64 = sys_read(fd, cast[Ptr[uint8]](cast[uint64](buf) + got), n - got)
+        if k <= 0:
+            return -1
+        got = got + cast[uint64](k)
+    return 0
+
+
+def peerframe_drain(fd: int32, n: uint64) -> int32:
+    # Consume and discard exactly n bytes. THIS IS RULE 2. Skipping it is what
+    # turns one oversized frame into a permanently desynchronised connection.
+    left: uint64 = n
+    while left > 0:
+        chunk: uint64 = left
+        if chunk > PEERFRAME_SINK_CAP:
+            chunk = PEERFRAME_SINK_CAP
+        if _pf_read_exact(fd, &_pf_sink[0], chunk) != 0:
+            return -1
+        left = left - chunk
+    return 0
+
+
+def peerframe_take(fd: int32, buf: Ptr[uint8], cap: uint64, declared: uint64,
+                   out_taken: Ptr[uint64], out_over: Ptr[int32]) -> int32:
+    # A LENGTH-PREFIXED FRAME whose length the peer chose.
+    #
+    #   out_taken  how many bytes are in `buf` -- THE ONLY NUMBER THE CALLER
+    #              MAY PARSE WITH. Never parse with `declared`.
+    #   out_over   1 if the peer sent more than fits. The frame in `buf` is a
+    #              PREFIX of a larger one; a caller that cannot act on a prefix
+    #              must refuse it rather than parse it (rule 1).
+    #
+    # Returns 0 on success, -1 if the peer went away. The stream is left
+    # correctly positioned at the start of the next frame in BOTH cases where
+    # it returns 0 -- that is the whole point of the drain.
+    taken: uint64 = declared
+    over: int32 = 0
+    if taken > cap:
+        taken = cap
+        over = 1
+    out_taken[0] = taken
+    out_over[0] = over
+    if taken > 0:
+        if _pf_read_exact(fd, buf, taken) != 0:
+            return -1
+    if declared > taken:
+        if peerframe_drain(fd, declared - taken) != 0:
+            return -1
+    return 0
+
+
+def peerframe_line(fd: int32, buf: Ptr[uint8], cap: uint64, delim: uint8,
+                   out_len: Ptr[uint64], out_over: Ptr[int32]) -> int32:
+    # A DELIMITER-TERMINATED LINE whose length the peer chose.
+    #
+    # The whole line is consumed to `delim` however long it is; at most `cap`
+    # bytes are kept. out_over is 1 when the line was longer than cap, and an
+    # over-long line MUST NOT be accepted as a frame -- user/sshd.ad records
+    # what happens when it is: the remainder of one physical line gets treated
+    # as the start of the next, so the peer chooses where its own data is
+    # framed. There is no NUL terminator written here; out_len is the length.
+    #
+    # Returns 0 on success, -1 if the peer went away before the delimiter.
+    n: uint64 = 0
+    over: int32 = 0
+    c: Array[1, uint8]
+    while True:
+        if _pf_read_exact(fd, &c[0], 1) != 0:
+            return -1
+        if c[0] == delim:
+            break
+        if n < cap:
+            buf[n] = c[0]
+            n = n + 1
+        else:
+            over = 1
+    out_len[0] = n
+    out_over[0] = over
+    return 0
