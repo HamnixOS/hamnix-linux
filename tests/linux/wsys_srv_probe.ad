@@ -38,6 +38,7 @@ extern def sys_wsys_alloc(pid: uint64) -> int32
 extern def sys_wsys_srv_readlat(n: int32) -> int32
 extern def sys_wsys_srv_scene(victim_wid: int32) -> int32
 extern def sys_wsys_srv_dropwrite(wid: int32, to_uid: int32) -> int32
+extern def sys_wsys_srv_wctl(victim_wid: int32, local: int32) -> int32
 extern def sys_wsys_srv_conngate(wid: int32, selfpath: Ptr[char],
                                  uidgate: Ptr[char]) -> int32
 
@@ -140,6 +141,20 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # taken by `sustain`, so the verb is capital 'S' (83).
     if argc > 2 and cast[Ptr[uint8]](argv[1])[0] == 83:
         return sys_wsys_srv_scene(arg_int(cast[Ptr[uint8]](argv[2])))
+
+    # `Wctl <wid>` -- STAGE 8. A routed `move` on /dev/wsys/<wid>/wctl for a
+    # window this process does not hold, sent past the local check. Capital 'W'
+    # (87) because lower-case letters are taken and because this file's verbs
+    # are matched on their first byte alone.
+    # A third argument of 1 runs THE ARM THAT MUST SUCCEED instead: the same
+    # `move 777 888` with no server in it, one assignment to the identity the
+    # in-process check reads. Red-unrouted / green-routed is the whole case for
+    # the boundary; either half alone is unfalsifiable.
+    if argc > 2 and cast[Ptr[uint8]](argv[1])[0] == 87:
+        lo: int32 = 0
+        if argc > 3:
+            lo = arg_int(cast[Ptr[uint8]](argv[3]))
+        return sys_wsys_srv_wctl(arg_int(cast[Ptr[uint8]](argv[2])), lo)
 
     # `readlat <n>` -- STAGE 4. Time <n> routed reads of /dev/wsys/windows and
     # print EVERY sample. The number it is measured against is stage 1's max of

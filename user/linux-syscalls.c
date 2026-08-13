@@ -4545,6 +4545,12 @@ int32_t sys_wsys_srv_dropwrite(int32_t wid, int32_t to_uid)
 { return (int32_t)hamwsys_srv_dropwrite((int)wid, (int)to_uid); }
 int32_t sys_wsys_srv_scene(int32_t victim_wid)
 { return (int32_t)hamwsys_srv_scene_selftest((int)victim_wid); }
+/* STAGE 8's wctl probe.  Same shape as the scene one, scored on the server's
+ * rc for one blocking message rather than on a counter delta -- a drag makes
+ * ~800 writes a second through the same counters.
+ *   extern def sys_wsys_srv_wctl(victim_wid: int32, local: int32) -> int32 */
+int32_t sys_wsys_srv_wctl(int32_t victim_wid, int32_t local)
+{ return (int32_t)hamwsys_srv_wctl_selftest((int)victim_wid, (int)local); }
 int32_t sys_wsys_srv_handoff(int32_t on)
 { return (int32_t)hamwsys_srv_handoff((int)on); }
 int32_t sys_wsys_srv_conngate(int32_t wid, const char *selfpath,

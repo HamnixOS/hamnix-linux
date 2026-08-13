@@ -18,6 +18,12 @@
 #   ctl <verb>      -> /dev/wsys/<wid>/ctl
 #   gctl <verb>     -> /dev/wsys/ctl
 #   scene <line>    -> /dev/wsys/<wid>/scene, then `commit`
+#   wctl <verb>     -> /dev/wsys/<wid>/wctl, AND PRINTS THE WRITE'S RETURN
+#                      VALUE as `WCTL <rc> <verb>`. The return value is the
+#                      point: `version` is the one wctl verb whose caller acts
+#                      on it (lib/hamui.ad sets h_v2_active on `n >= 0`), so a
+#                      routed path that reported success for a refusal would be
+#                      invisible to a test that only looked at the window.
 #
 # Anything else is ignored, so a blank line or a comment costs nothing.
 
@@ -30,8 +36,9 @@ extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int6
 
 pathbuf: Array[256, uint8]
 line:    Array[2048, uint8]
-filebuf: Array[16384, uint8]
+filebuf: Array[8388608, uint8]
 numbuf:  Array[24, uint8]
+outbuf:  Array[32, uint8]
 waitset: Array[4, int32]
 wid:     int32 = 0
 
@@ -168,6 +175,29 @@ def do_line(at: uint64, end: uint64):
         write_path(cast[Ptr[char]](&pathbuf[0]),
                    cast[Ptr[uint8]]("commit\n"), 7)
         return
+    # `qwctl <verb>` -- the same write with NO print. It exists for the cost
+    # arm: three write(2)s of accounting per mutation would be added to both
+    # arms equally and would dilute the very difference being measured, and a
+    # drag is tens of thousands of moves.
+    if starts(at, end, "qwctl ") != 0:
+        n6: uint64 = take(at + 6, end)
+        winpath("wctl")
+        write_path(cast[Ptr[char]](&pathbuf[0]), &line[0], n6)
+        return
+    if starts(at, end, "wctl ") != 0:
+        n5: uint64 = take(at + 5, end)
+        winpath("wctl")
+        fd5: int32 = sys_open_write(cast[Ptr[char]](&pathbuf[0]))
+        rc5: int64 = -1
+        if fd5 >= 0:
+            rc5 = sys_write(fd5, &line[0], n5)
+            sys_close(fd5)
+        puts(1, "WCTL ")
+        m5: uint64 = emit_int(&outbuf[0], 0, cast[int32](rc5))
+        outbuf[m5] = 32
+        sys_write(1, &outbuf[0], m5 + 1)
+        sys_write(1, &line[0], n5)
+        return
     if starts(at, end, "gctl ") != 0:
         n2: uint64 = take(at + 5, end)
         write_path(cast[Ptr[char]]("/dev/wsys/ctl"), &line[0], n2)
@@ -195,8 +225,8 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         fd: int32 = sys_open(cast[Ptr[char]](argv[1]))
         if fd >= 0:
             total: uint64 = 0
-            while total < 16383:
-                k: int64 = sys_read(fd, &filebuf[total], 16383 - total)
+            while total < 8388607:
+                k: int64 = sys_read(fd, &filebuf[total], 8388607 - total)
                 if k <= 0:
                     total = total
                     break

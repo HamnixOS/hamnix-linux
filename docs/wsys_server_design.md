@@ -772,6 +772,134 @@ counter is what lets an unreadable instrument produce a confident number.*
   over loadavg 3.3 with other agents' compositors bound. The correctness arms
   do not depend on load; the percentages do.
 
+## What stage 8 measured — `wid/wctl`, and the verb whose CALLER ACTS ON THE ANSWER
+
+`tests/linux/wsys_srv_wctl.sh`, **18 passed, 0 failed**. `WSYS_VERSION` stays
+8. `/dev/wsys/<wid>/wctl`'s **write** arm is routed; its read arm is not, and
+7.1(2) still owns that.
+
+This was listed in 7.5 as "the smallest remaining mutation". **It is not, and
+the reason is the finding.** Every leaf routed before it is fire-and-forget by
+construction, because nothing a client does depends on the answer. `wctl` has
+four verbs and one of them is a **negotiation**:
+
+```
+    n: int64 = sys_write(fd, msg, _h_strlen(msg))   # "version 2\n"
+    if n < 0:
+        return -1
+    h_v2_active = 1
+```
+
+That is `lib/hamui.ad`'s `hamui_set_protocol_v2_dims`, and it is every hamui
+application's entire protocol decision. Routed fire-and-forget, the write
+returns the byte count whatever the server decided — so **every application
+would set `h_v2_active` on a refusal** and draw into a backbuffer the
+compositor was not reading. That is the defect this project has already paid
+for once, in the other direction, and rebuilding it inside the mediator would
+have been invisible to every other assertion.
+
+So the rule this leaf lands is **per verb, not per leaf**:
+
+| verb | how it travels | why |
+|---|---|---|
+| `move`, `resize`, `focus` | fire-and-forget | the shape every other mutation takes; the caller acts on nothing |
+| `version` | **BLOCKS (`WSRV_F_REPLY`), and the server's rc IS the write's return value** | the caller acts on the answer. Once per window, which is the case stage 1 measured as affordable at its 851 µs tail |
+| anything else | **NOT ROUTED AT ALL** | `wctl` is a closed set that answers `-EINVAL` and touches nothing; the in-process path already refuses it without a round trip, and fire-and-forget it would have answered SUCCESS to a typo |
+
+**THE GATE COMPARES OUTCOMES, NOT THE ABSENCE OF A CRASH.** One set of
+binaries, arms differing only in `HAMWSYS_SERVER` on the *client*:
+
+| | unrouted | routed |
+|---|---|---|
+| live rect after `move` | `600 400 300 220 click` | **the same** |
+| after `resize` | `600 400 120 90 click` | **the same** |
+| after `focus sloppy` | `600 400 120 90 sloppy` | **the same** |
+| the red window's pixels | leaves (230,180), appears at (630,430), gone from (800,550) after the resize | **every sampled pixel identical** |
+| `version 9` | `-22` | **`-22`** |
+| `wibble` | `-22` | **`-22`** |
+| `version 2` | `10`, row reads proto 2 | **`10`, row reads proto 2** |
+
+The move is to a **non-overlapping** rect on purpose: a 60 px nudge leaves
+every sampled pixel inside both rects and measures nothing. The unrouted arm
+is required to move and shrink on the framebuffer first, so an "identical" is
+a reading rather than two blank screens agreeing.
+
+**AND THE GATE HAD A HOLE OF ITS OWN, WHICH IS THE MOST PORTABLE THING HERE.**
+Every arm above is driven through the client's ordinary write path, so a build
+that routed **nothing** would have passed all of them: both arms would take the
+in-process path and agree perfectly. *"Routing changes nothing a person can
+see"* and *"nothing was routed"* produce the same green. The server's trace
+therefore now **names the leaf** — four leaves cross that line and `wid/ctl
+geometry` and `wid/wctl move` are the same act under two names — and two arms
+count it, scoped to the client's own pid:
+
+    routed    5 wctl mutations in the server's trace (move, resize, focus,
+              version 9, version 2)
+    unrouted  0
+
+`wibble` is absent, so the "unknown verbs are not routed" rule is visible from
+outside the process for the first time.
+
+**Negative control, run:** set `*blocking = 0` for `version` in
+`srv_wctl_verb` — one character, keeping the routing and the permission check
+— and the file goes 18/0 → **17 passed, 1 failed**, the one being
+`ROUTED version 9 returned 10`. Every other arm stays green, including both
+pixel comparisons, all four live-rect readings and the refusal pair.
+
+**A SECOND CONTROL THAT DID NOT GO RED, AND IT CORRECTS THE OBVIOUS READING OF
+THE NEW CODE.** Dropping `wid/wctl` from the server's own ownership pre-check
+in `srv_dispatch` changes **no refusal**: `hamwsys_write_inner`'s wctl arm
+opens with the same `win_find` → `ENOENT` and `!hostowner() && !owns_wid()` →
+`EPERM`, and under `srv_as_caller` those are already answered about the caller.
+The pre-check earns its place on stage 5's `connrefused` counter and on
+deciding once before anything is touched. **The mediation is
+`srv_as_caller_full()` and nothing else** — as true of this leaf as stage 2
+said it was of the first.
+
+**RED-UNROUTED / GREEN-ROUTED, on this leaf's own verb**, both uid 1002
+against a segment owned by 1001:
+
+| | |
+|---|---|
+| routed, past the local check | `the mediator REFUSED it (rc -1, EPERM)`; the rect still reads `600 400` |
+| unrouted, one assignment to `srv_caller.uid` | `hostowner=0 owns_wid=0 -- i.e. REFUSE`, then `hostowner=1 -- i.e. ALLOW`, and the move **LANDED**: the rect reads `777 888` |
+
+**THE COST, AND IT IS BELOW THIS HOST'S NOISE.** A drag is a stream of moves,
+so this is the hottest leaf yet routed. 40 000 `wctl move` writes per sample,
+three samples per arm, alternated, every one printed:
+
+| | wall ms | `wsysd` ticks | client ticks |
+|---|---|---|---|
+| unrouted | 384 / 454 / 448 | 25 / 26 / 24 | 24 / 27 / 23 |
+| routed | 433 / 427 / 426 | 25 / 23 / 28 | 24 / 23 / 26 |
+
+11.2 µs/move unrouted against 10.7 routed (0.95×) on this run; an earlier run
+of the same gate read 13.3 against 12.2 (0.92×). **NOT ATTRIBUTABLE, and the
+gate says so in its own output**: peak loadavg 4.31, with other agents' VM
+gates on the host throughout. The direction agrees with stage 2's coalescing
+finding on both runs and is **not** offered as a confirmation of it — the
+run-to-run spread is larger than the arm-to-arm one, exactly as stage 7 found.
+The wall figure also includes the driver's own per-line parsing, so it is an
+upper bound on the per-mutation cost and not a measurement of it.
+
+### What stage 8 did NOT do
+
+* **The `wid/wctl` READ is untouched.** A uid-1002 process owning nothing
+  still reads any window's live rect out of shared memory — the probe in 7.1
+  measured exactly that and it is unchanged. It belongs to 7.5 step 4 with the
+  directory listing and `wid/ctl`'s read.
+* **No `WSYS_VERSION` bump**, no fallback removed, and the segment is still
+  mapped read-write by every client. Everything above is a mediator a
+  non-participating client walks past.
+* **`bb_resize()` IS A NO-OP WHEN A ROUTED `resize` RUNS IT**, because `bbmap`
+  is per-process and it returns early unless this process owns the memfd. The
+  identical thing is already true of the routed `geometry` verb — `ctl_window`
+  calls the same function — so it is **inherited from the other spelling, not
+  introduced here**, and `bb_for(create=1, v->w, v->h)` on the next blit
+  re-fits it either way, which is the same "out of step for at most one frame"
+  the function's own comment describes. Written down rather than left to be
+  rediscovered.
+
 ## Budget to hold it to
 
 **THE BUDGET BELOW IS SUPERSEDED. It was the wrong SHAPE, which is a stronger
@@ -914,7 +1042,7 @@ running and idle.
 | `windows` / `screen` / `pool` | n/a | **routed** |
 | `self` | n/a | in process — answers only about the caller |
 | `dir` (`/dev/wsys`, `/dev/wsys/<wid>`) | n/a | **in process — lists every used row's wid** |
-| `wid/wctl` | **in process** — `version` / `focus` / `move` / `resize` | **in process** — the live rect of any window |
+| `wid/wctl` | **routed** — see stage 8 (`version` blocks; an unknown verb is left in process) | **in process** — the live rect of any window |
 | `wid/pointer`, `wid/event`, `wid/text`, `wid/cmd` | in process — `ring_write` into the row | **in process — `ring_read` DRAINS the row** |
 | `wid/keys` | in process, but off the segment (keystroke channel, `SCM_CREDENTIALS`) | refused to a non-owner, by name |
 | `wid/draw/ctl`, `wid/backbuffer` | in process — the v2 blit, `/srv/wsys.bb` | in process — the per-window memfd |
@@ -999,6 +1127,12 @@ new binary, no field removed, and a version bump for the meaning change.
 `move`/`resize` on another window is the same act as the `geometry` verb on
 `wid/ctl`, which stage 2 routed. This file already argues, about the wallpaper
 sink, that "a gate on only one of the two spellings is not a gate".
+
+> **DONE — see *What stage 8 measured* below.** The WRITE arm is routed, with
+> one exception each way: `version` blocks because its caller acts on the
+> answer, and an unknown verb is left in process on purpose. The **read** arm
+> of `wid/wctl` is untouched and is still part of 7.1(2)'s unbuilt work — a
+> uid-1002 process owning nothing still reads any window's live rect.
 
 **(5) Every fallback to the in-process path must become a refusal.** They are,
 by name: a failed `srv_dial()`; `srv_adopt_inherited()` rejecting the inherited
@@ -1356,6 +1490,9 @@ still last and is now step 8 of 8.
 2. Write the v8-client / v9-server gate (7.4 §2) and the multi-client budget arm
    (7.3). Both run on the current tree.
 3. Route `wid/wctl` (7.1 §4). Smallest remaining mutation, red arm available.
+   **DONE — stage 8, `tests/linux/wsys_srv_wctl.sh`, 18 passed / 0 failed.**
+   It was not the smallest: it is the first leaf with a verb whose CALLER ACTS
+   ON THE ANSWER, and that turned out to be the whole of the work.
 4. Route `open`/existence and the three read leaves that answer the enumeration
    question — `dir`, `wid/ctl`, `wid/wctl` reads — under stage 4's tier rule
    (7.1 §2). This is the big one, and `wsys_enum_policy.sh` gets three new arms

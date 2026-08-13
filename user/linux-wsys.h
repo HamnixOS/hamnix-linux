@@ -279,6 +279,29 @@ enum {
      * open that resets and a write that appends are two different acts and the
      * wire says which is which. */
     WSRV_LEAF_WIN_SCENE = 6,       /* /dev/wsys/<wid>/scene                  */
+    /* STAGE 8 — the other spelling of `geometry`.  /dev/wsys/<wid>/wctl takes
+     * move/resize/focus/version, and move/resize on somebody else's window is
+     * the SAME ACT as the `geometry` verb stage 2 routed on wid/ctl: a gate on
+     * only one of two spellings is not a gate.
+     *
+     * ITS VERBS DO NOT ALL TRAVEL THE SAME WAY, and that is the whole of what
+     * is different about this leaf.  move/resize/focus are fire-and-forget like
+     * every other mutation.  `version` IS NOT: it is a negotiation whose ANSWER
+     * the client acts on -- lib/hamui.ad's hamui_set_protocol_v2_dims sets
+     * h_v2_active only `if n >= 0` on that very write -- so a fire-and-forget
+     * `version` would report success for a refusal and every application would
+     * silently believe it was v2 while the compositor painted it as v0.  That
+     * is the most expensive bug this project has had, and it is the one shape
+     * a routed leaf must not reintroduce.  So `version` alone carries
+     * WSRV_F_REPLY and the server's rc is the write's return value.  It costs
+     * one round trip ONCE PER WINDOW, which is the case stage 1 measured as
+     * affordable at 851 us.
+     *
+     * An UNKNOWN verb is deliberately not routed at all: wctl is a closed set
+     * that answers -EINVAL, and the in-process path refuses it without
+     * touching the window, so routing it would buy a round trip to reach the
+     * same refusal -- or, fire-and-forget, would turn a typo into a success. */
+    WSRV_LEAF_WIN_WCTL = 7,        /* /dev/wsys/<wid>/wctl                   */
 };
 
 /* THE SERVER SIDE. wsysd calls claim() before it touches /dev/wsys at all --
@@ -341,6 +364,10 @@ int      hamwsys_srv_handoff(int on);
 /* Stage 6's scene probe: a routed display-list write past the local check.
  *   extern def sys_wsys_srv_scene(victim_wid: int32) -> int32 */
 int      hamwsys_srv_scene_selftest(int victim_wid);
+/* Stage 8's wctl probe: a routed `move` past the local check, scored on the
+ * server's own rc for that one message rather than on a counter delta.
+ *   extern def sys_wsys_srv_wctl(victim_wid: int32, local: int32) -> int32 */
+int      hamwsys_srv_wctl_selftest(int victim_wid, int local);
 /* Dial privileged, drop uid, then write: the arm that proves a connection
  * does not outlive the identity that made it.
  *   extern def sys_wsys_srv_dropwrite(wid: int32, to_uid: int32) -> int32 */
