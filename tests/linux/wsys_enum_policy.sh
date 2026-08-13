@@ -35,8 +35,14 @@
 # granted the list correctly and the gate would report the policy absent when
 # it was present. This is the same trap that made stage 2's first identity
 # result wrong, written up in tests/linux/wsys_srv_identity.sh. So: `unshare -U
-# --map-users` with three ids out of /etc/subuid, wsysd as 1001 (which is what
-# MAKES 1001 the host owner), the victim as 1001 and the snooper as 1002.
+# --map-users` with three ids, wsysd as 1001 (which is what MAKES 1001 the host
+# owner), the victim as 1001 and the snooper as 1002.
+#
+# The three ids come out of /etc/subuid on a bare host, and out of THIS
+# NAMESPACE'S OWN MAP when the gate runs inside private_ns.sh's isolation --
+# where `id -un` is root and /etc/subuid has no root line. The two-case
+# selection is at the foot of the outer half, with the reason it is a mapping
+# ATTEMPT rather than a read of /proc/self/uid_map.
 #
 # THE POLICY, AND THE ARM THAT KEEPS IT HONEST
 # ============================================
@@ -184,6 +190,18 @@ fi
 # OUTER HALF
 # ======================================================================
 cd "$PROJ"
+# PRIVATE NAMESPACE FIRST. wsysd's names are compiled into it -- /srv/wsys,
+# /dev/shm/hamnix-wsys, /tmp/hamnix-wsys -- so a run of this gate beside a live
+# desktop is a collision, not an untidiness (tests/linux/private_ns.sh).
+#
+# THE HELPER'S FIDELITY COST DOES NOT REACH THIS GATE, and that is the whole
+# reason it can be isolated when wsys_uidgate.sh cannot. priv_ns_reexec makes
+# geteuid() 0 in the OUTER shell, and this gate's outer half asserts nothing
+# about a uid: every arm runs in the INNER namespace it builds for itself,
+# where wsysd is 1001, the victim is 1001 and the snooper is 1002 exactly as
+# before. What did need fixing is where those ids come from -- see below.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 # PER-RUN BY DEFAULT: $BIN is "$OUT/bin". The old fixed default was
 # .../wsrv-s4 -- THE SAME PATH wsys_srv_readlat.sh defaulted to, so those two
 # gates overwrote each other's binaries even when only one agent was running
@@ -218,10 +236,52 @@ done
 
 command -v unshare >/dev/null || { echo "enumpol: SKIP no unshare(1)"; exit 0; }
 command -v setpriv >/dev/null || { echo "enumpol: SKIP no setpriv(1)"; exit 0; }
-grep -q "^$(id -un):" /etc/subuid 2>/dev/null || {
-    echo "enumpol: SKIP no /etc/subuid range for $(id -un); run this in the VM"
-    exit 0; }
-SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
+
+# WHERE THE SECOND AND THIRD UID COME FROM -- TWO CASES, AND THE SECOND ONE IS
+# WHAT LETS THIS GATE BE ISOLATED AT ALL.
+#
+# On a bare host they are subordinate ids out of /etc/subuid for the invoking
+# user, as they always were. Inside private_ns.sh's namespace `id -un` is root,
+# /etc/subuid HAS NO root LINE, and reading only that file would make this gate
+# SKIP -- scoring 0 arms while exiting green. That is precisely how
+# wsys_bypass.sh came to be exempt from the isolation rule (47 PASS became 0,
+# measured), and it would have been this gate's answer too.
+#
+# But a process that is root in a user namespace holding a mapped RANGE already
+# owns ids 1001 and 1002 and may map them to themselves in a child, needing no
+# /etc/subuid and no setuid helper -- the same reasoning private_ns.sh uses when
+# it mirrors /proc/self/uid_map for a nested re-exec. Measured inside: a nested
+# `unshare -U --map-users=1001:1001:1 --map-users=1002:1002:1` succeeds and
+# `setpriv --reuid=1001` / `--reuid=1002` reach two real, distinct uids.
+#
+# Either way the INNER ids are 0, 1001 and 1002 and every assertion below is
+# about those, so which outer ids back them changes nothing this gate claims.
+SUB=""
+if grep -q "^$(id -un):" /etc/subuid 2>/dev/null \
+   && grep -q "^$(id -un):" /etc/subgid 2>/dev/null; then
+    SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
+    IDSRC="/etc/subuid range $SUB for $(id -un)"
+elif unshare -U \
+        --map-users=0:"$(id -u)":1      --map-groups=0:"$(id -g)":1 \
+        --map-users=1001:1001:1         --map-groups=1001:1001:1 \
+        --map-users=1002:1002:1         --map-groups=1002:1002:1 \
+        true 2>/dev/null; then
+    # Already ours in this namespace: map them to themselves. THE TEST IS THE
+    # MAPPING ITSELF, not a range read out of /proc/self/uid_map -- on a bare
+    # host that file is the initial `0 0 4294967295`, which "contains" 1001 and
+    # 1002 while an unprivileged process may map neither. Reading it would turn
+    # a host with no /etc/subuid from a clean SKIP into "FAIL namespace run
+    # rc=1", which is a gate reporting a defect it did not find.
+    SUB=1001
+    IDSRC="ids 1001/1002 are already this namespace's own (mapped to themselves; no /etc/subuid needed)"
+else
+    echo "enumpol: SKIP no /etc/subuid range for $(id -un), and this namespace does"
+    echo "enumpol: SKIP not already own uids 1001 and 1002; run this in the VM"
+    exit 0
+fi
+
+note "$(priv_ns_describe)"
+note "the two extra uids: $IDSRC"
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/enumpol.XXXXXX")"
 trap 'rm -rf "$W"; [ "${OUT_EPHEMERAL:-0}" = 1 ] && rm -rf "$OUT"' EXIT
