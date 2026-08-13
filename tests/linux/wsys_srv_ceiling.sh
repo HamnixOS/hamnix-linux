@@ -99,6 +99,14 @@
 # user+mount namespace; nothing outside it is written.
 set -uo pipefail
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$PROJ"
+# THIS GATE STARTS THE WINDOW SYSTEM, so it must not do it on the machine's own
+# /tmp, /dev/shm and /srv -- those names are read by a concurrent run AND by the
+# owner's live desktop. It shipped without this and gates_are_private.sh caught
+# it; the isolation was added afterwards and the verdict re-run to prove the
+# gate still measures what it names (12 passed, 0 failed both ways).
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 
 pass=0; fail=0
 ok()   { printf 'srvceil: PASS %s\n' "$*"; pass=$((pass+1)); }
