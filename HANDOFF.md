@@ -47,6 +47,19 @@ not a GPU on a machine this system booted. `docs/REAL_HARDWARE.md`,
 `docs/BOOT.md` and `docs/manual/` record real-hardware boots of **Hamnix 1.0's
 own kernel** and were copied wholesale; each now carries a banner saying so.
 
+**BEFORE YOU READ A LINE OF CODE, CHECK WHAT YOUR WORKTREE IS.** A fresh agent
+worktree has twice now been created at `b87174c3` while the live branch was 81
+and 84 commits further on. Run `git log -1` first, and if it is not the tip,
+branch from `origin/port/tier1-syscalls` instead. This is not a formality: one
+agent that skipped it reported "there is no `srv_route_write` in this tree",
+which was **true of its tree and false of the branch** — it had read a file
+predating seven stages of work, and its 254-line patch then **merged clean**,
+which is the dangerous case and not the safe one. What made that merge
+acceptable was checking that the region it rewrote was byte-identical between
+its base and the tip; that check is the price of a stale base, and it is
+cheaper to just not have one. A second agent hit the same worktree, ran
+`git log -1`, found it, and rebranched — costing nothing.
+
 **BEFORE YOU RUN A SINGLE GATE, BOOTSTRAP THE COMPILER.** A fresh worktree has
 no `adder` submodule and no `build/cutover/host_ac.elf`, and every
 `.ad`-building gate then fails instantly with "no host_ac.elf" — which looks
