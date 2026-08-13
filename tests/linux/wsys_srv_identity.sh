@@ -369,7 +369,20 @@ fi
 # OUTER HALF
 # ======================================================================
 cd "$PROJ"
-OUT="${SRV_WORK:-/home/david/.hamnix-build/wsrv-s3}"
+# PER-RUN BY DEFAULT: $BIN is "$OUT/bin", and a fixed default meant two
+# concurrent agents compiled into the same bin/ and copied each other's
+# half-written binaries into their namespaces. SRV_WORK pins it to reuse a
+# build.
+SCRATCH_BASE="${SRV_SCRATCH_BASE:-/home/david/.hamnix-build}"
+if [ -n "${SRV_WORK:-}" ]; then
+    OUT="$SRV_WORK"; OUT_EPHEMERAL=0
+    mkdir -p "$OUT" || { echo "srvid: FAIL cannot make $OUT"; exit 1; }
+else
+    mkdir -p "$SCRATCH_BASE" || { echo "srvid: FAIL cannot make $SCRATCH_BASE"; exit 1; }
+    OUT="$(mktemp -d "$SCRATCH_BASE/wsrv-s3.XXXXXX")" || {
+        echo "srvid: FAIL cannot make a scratch dir under $SCRATCH_BASE"; exit 1; }
+    OUT_EPHEMERAL=1
+fi
 BIN="$OUT/bin"; mkdir -p "$BIN"
 
 for c in "${ADDER_HOST_AC:-}" "$PROJ/build/cutover/host_ac_llvm.elf" \
@@ -398,7 +411,7 @@ grep -q "^$(id -un):" /etc/subuid 2>/dev/null || {
 SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/wsrvid.XXXXXX")"
-trap 'rm -rf "$W"' EXIT
+trap 'rm -rf "$W"; [ "${OUT_EPHEMERAL:-0}" = 1 ] && rm -rf "$OUT"' EXIT
 trap 'exit 130' INT TERM HUP
 # 1777: three uids each create files in here. A uid that cannot create
 # $HAMWSYS falls back to /dev/shm, which both leaks a file and makes every arm

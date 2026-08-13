@@ -45,7 +45,20 @@ PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ"
 . tests/linux/reap.sh
 
-OUT="${SRV_WORK:-/home/david/.hamnix-build/wsrv-s4}"
+# PER-RUN BY DEFAULT: $BIN is "$OUT/bin", and a fixed default meant two
+# concurrent agents compiled into the same bin/ and measured each other's
+# wsysd. SRV_WORK pins it -- which is also how SRV_REBUILD=0 below becomes
+# useful, since a per-run dir never has a previous build to reuse.
+SCRATCH_BASE="${SRV_SCRATCH_BASE:-/home/david/.hamnix-build}"
+if [ -n "${SRV_WORK:-}" ]; then
+    OUT="$SRV_WORK"; OUT_EPHEMERAL=0
+    mkdir -p "$OUT" || { echo "rdlat: FAIL cannot make $OUT"; exit 2; }
+else
+    mkdir -p "$SCRATCH_BASE" || { echo "rdlat: FAIL cannot make $SCRATCH_BASE"; exit 2; }
+    OUT="$(mktemp -d "$SCRATCH_BASE/wsrv-s4.XXXXXX")" || {
+        echo "rdlat: FAIL cannot make a scratch dir under $SCRATCH_BASE"; exit 2; }
+    OUT_EPHEMERAL=1
+fi
 BIN="$OUT/bin"; mkdir -p "$BIN"
 for c in "${ADDER_HOST_AC:-}" "$PROJ/build/cutover/host_ac_llvm.elf" \
          "$PROJ/build/cutover/host_ac.elf" \
@@ -70,7 +83,7 @@ note() { printf 'rdlat: .... %s\n' "$*"; }
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/rdlat.XXXXXX")"
 reap_track "$W/reaped"
-cleanup(){ rm -rf "$W"; }
+cleanup(){ rm -rf "$W"; [ "${OUT_EPHEMERAL:-0}" = 1 ] && rm -rf "$OUT"; return 0; }
 reap_on_exit cleanup
 
 mkdir -p "$W/noicd"

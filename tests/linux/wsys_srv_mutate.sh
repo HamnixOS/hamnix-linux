@@ -43,11 +43,28 @@ cd "$PROJ"
 priv_ns_reexec "$@"
 . tests/linux/reap.sh
 
-OUT="${SRV_WORK:-/home/david/.hamnix-build/wsrv-s2}"
+# PER-RUN BY DEFAULT: $BIN below is "$OUT/bin", so a fixed default meant two
+# concurrent agents compiled into the same bin/ and measured each other's
+# binaries. SRV_WORK pins it to reuse a build.
+SCRATCH_BASE="${SRV_SCRATCH_BASE:-/home/david/.hamnix-build}"
+if [ -n "${SRV_WORK:-}" ]; then
+    OUT="$SRV_WORK"; OUT_EPHEMERAL=0
+    mkdir -p "$OUT" || { echo "srvmu: FAIL cannot make $OUT"; exit 1; }
+else
+    mkdir -p "$SCRATCH_BASE" || { echo "srvmu: FAIL cannot make $SCRATCH_BASE"; exit 1; }
+    OUT="$(mktemp -d "$SCRATCH_BASE/wsrv-s2.XXXXXX")" || {
+        echo "srvmu: FAIL cannot make a scratch dir under $SCRATCH_BASE"; exit 1; }
+    OUT_EPHEMERAL=1
+fi
 W="$OUT/run.$$"
 mkdir -p "$W" || { echo "srvmu: FAIL cannot make $W"; exit 1; }
 reap_track "$W/reaped"
-cleanup(){ [ "${SRV_KEEP:-0}" = 1 ] || rm -rf "$W"; }
+cleanup(){
+    [ "${SRV_KEEP:-0}" = 1 ] && return 0
+    rm -rf "$W"
+    [ "$OUT_EPHEMERAL" = 1 ] && rm -rf "$OUT"
+    return 0
+}
 reap_on_exit cleanup
 
 pass=0; fail=0

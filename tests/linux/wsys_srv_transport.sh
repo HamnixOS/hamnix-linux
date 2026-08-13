@@ -52,12 +52,35 @@ priv_ns_reexec "$@"
 # The work directory is deliberately NOT under /tmp: priv_ns_reexec has just
 # replaced /tmp with a fresh tmpfs, and a build that landed there would be
 # gone. It is also not under the source tree, which is read-only here.
-OUT="${SRV_WORK:-/home/david/.hamnix-build/wsrv-s1}"
+# THE DEFAULT IS PER-RUN, and that is not tidiness. It used to be the single
+# fixed path /home/david/.hamnix-build/wsrv-s1, and $BIN below is "$OUT/bin":
+# two agents running this gate at the same time COMPILED INTO THE SAME bin/,
+# each overwriting the wsysd the other was about to measure. $W was already
+# per-run, which made the collision look handled when the part that mattered
+# -- the binaries under test -- was shared.
+#
+# SRV_WORK still pins it, which is how you reuse a build across runs instead
+# of paying for the compile again.
+SCRATCH_BASE="${SRV_SCRATCH_BASE:-/home/david/.hamnix-build}"
+if [ -n "${SRV_WORK:-}" ]; then
+    OUT="$SRV_WORK"; OUT_EPHEMERAL=0
+    mkdir -p "$OUT" || { echo "srvtr: FAIL cannot make $OUT"; exit 1; }
+else
+    mkdir -p "$SCRATCH_BASE" || { echo "srvtr: FAIL cannot make $SCRATCH_BASE"; exit 1; }
+    OUT="$(mktemp -d "$SCRATCH_BASE/wsrv-s1.XXXXXX")" || {
+        echo "srvtr: FAIL cannot make a scratch dir under $SCRATCH_BASE"; exit 1; }
+    OUT_EPHEMERAL=1
+fi
 W="$OUT/run.$$"
 mkdir -p "$W" || { echo "srvtr: FAIL cannot make $W"; exit 1; }
 reap_track "$W/reaped"
 KEEP="${SRV_KEEP:-0}"
-cleanup(){ [ "$KEEP" = 1 ] || rm -rf "$W"; }
+cleanup(){
+    [ "$KEEP" = 1 ] && return 0
+    rm -rf "$W"
+    [ "$OUT_EPHEMERAL" = 1 ] && rm -rf "$OUT"
+    return 0
+}
 reap_on_exit cleanup
 
 pass=0; fail=0
