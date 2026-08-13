@@ -261,11 +261,31 @@ def read_request(cfd: int32) -> int32:
     if req_total == 0:
         return -1
     if hdr_end == 0:
-        # No terminator seen — tolerate a header-only request that the
-        # peer closed after; treat the whole buffer as headers.
+        # NO TERMINATOR. Two very different situations used to land here and
+        # be treated alike: a peer that sent a short header block and closed
+        # (legitimate, and what the old comment described), and a peer whose
+        # HEADERS ARE LARGER THAN THE BUFFER. The second was parsed AS IF
+        # COMPLETE, with the rest of the request still unread in the socket --
+        # a truncated frame treated as a whole one, which is the same shape as
+        # the http9 defect that silently broke every signature check this
+        # repository ever made.
+        #
+        # The two ARE distinguishable, and the buffer being full is what tells
+        # them apart: the read loop stops at REQ_CAP - 1, so a full buffer with
+        # no terminator means the peer had more to say. That is refused at the
+        # limit, by name (the caller sends 431), instead of guessed at.
+        if req_total >= REQ_CAP - 1:
+            return -2
         hdr_end = req_total
     body_off = hdr_end
     body_len = req_total - hdr_end
+    # THE BODY WE HAVE IS THE BODY WE HAVE. A Content-Length larger than the
+    # bytes actually read means the request was cut off by the buffer; the CGI
+    # script must not be told a number the pipe will never deliver. Refused
+    # (413) rather than silently short-fed -- see the CONTENT_LENGTH note in
+    # the CGI env below.
+    if content_len > body_len:
+        return -3
     return 0
 
 
@@ -514,7 +534,14 @@ def serve_cgi(cfd: int32, server_name: Ptr[uint8]) -> int32:
     cgi_argv[0] = cast[uint64](&fs_buf[0])
     off: uint64 = 0
     clstr: Array[24, uint8]
-    _u64_to_str(content_len, &clstr[0])
+    # THE BYTES THE SCRIPT WILL ACTUALLY GET, NOT THE NUMBER THE PEER CLAIMED.
+    # This used to render `content_len` -- the Content-Length header, chosen by
+    # the peer -- while the body actually written to the CGI pipe below is
+    # `body_len`, bounded by REQ_CAP. A script that trusts CONTENT_LENGTH was
+    # therefore told to expect bytes that would never arrive. The two can no
+    # longer disagree (read_request refuses content_len > body_len above), and
+    # this renders the real count so they cannot drift apart again.
+    _u64_to_str(body_len, &clstr[0])
     off = _cgi_put_env(off, 1, "REQUEST_METHOD", &method_buf[0])
     off = _cgi_put_env(off, 2, "QUERY_STRING", &query_buf[0])
     off = _cgi_put_env(off, 3, "CONTENT_LENGTH", &clstr[0])
@@ -592,7 +619,21 @@ def serve_cgi(cfd: int32, server_name: Ptr[uint8]) -> int32:
 # Serve one request on connection fd cfd. Closes nothing — caller owns
 # the fd lifetime.
 def serve(cfd: int32):
-    if read_request(cfd) != 0:
+    rr: int32 = read_request(cfd)
+    if rr == -2:
+        # Headers larger than REQ_CAP. Say which limit was hit rather than
+        # letting a truncated header block be parsed as a whole one.
+        log_line("?", "(headers too large)", 431)
+        send_error(cfd, 431, "Request Header Fields Too Large",
+                   "<html><body><h1>431 Request Header Fields Too Large</h1>\n<p>The request headers did not fit this server's 8192-byte request buffer.</p></body></html>\n")
+        return
+    if rr == -3:
+        # Content-Length promised more body than arrived.
+        log_line("?", "(body truncated by the request buffer)", 413)
+        send_error(cfd, 413, "Payload Too Large",
+                   "<html><body><h1>413 Payload Too Large</h1>\n<p>Content-Length exceeded the bytes that fit this server's 8192-byte request buffer.</p></body></html>\n")
+        return
+    if rr != 0:
         return
     rc: int32 = parse_request()
     if rc == -1:
