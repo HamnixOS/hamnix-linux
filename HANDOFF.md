@@ -4586,6 +4586,60 @@ tests/linux/*.sh                                                    128
   run offscreen                                                       73
 ```
 
+#### THE SECOND SWEEP — 94 gates attempted at `9e893e58`, 84 verdicts, 78 pass
+
+A second sweep went after the coverage the first ran out of time for. **Its
+logs are NOT in this repository** — 99 of them, plus the harness, live on the
+branch `work/suite-sweep-2` (`56d09abc`), deliberately unmerged: no sweep
+directory has ever been tracked here, and 134 scratch files do not belong in a
+6,938-file tree. What is worth keeping is below. Every red was run against a
+control export of `b87174c3`, so "new" below means new relative to that.
+
+**The ten non-verdicts are all accounted for and none is a silent failure**:
+`private_ns.sh` is a sourced library, `cpuprobe.sh` is a helper wanting a pid,
+`vk_icd_survey.sh` prints `UNDETERMINED` by design, five more assert nothing at
+all, and two refused to start for want of an Alpine image. Independently of
+each gate's own summary line, a scan of all 99 logs for failure assertions
+found them in exactly five files — and it returns non-empty, so its silence
+elsewhere is a result rather than a broken grep.
+
+**THE ONE NEW RED IS `gates_are_private.sh`, 2 passed / 15 failed against 2/12
+on the control.** The three in the difference — `wsys_enum_policy.sh`,
+`wsys_srv_identity.sh`, `wsys_srv_readlat.sh` — start the window system without
+`priv_ns_reexec`. I verified all three myself against a positive control of 42
+gates that do have it. This is not tidiness: an unisolated gate writes
+`/tmp/hamnix-*`, `/dev/shm/hamnix-*` and `/srv/*` under names **a concurrent run
+and this machine's own desktop read**.
+
+The other five reds are pre-existing, environmental, or the sweep's own:
+`pixcmp` fails 2 of 5 under load **at both ends**; `de_probe` fails the same
+single assertion at both ends; `distro_menu` improved to 14/5 once a `distro.ext4`
+was staged and every survivor is an Alpine assertion; `wsys_srv_transport` is the
+known budget arm plus one that **cannot be isolated on a shared host** — it
+asserts no abstract `hamnix-wsys/*/srv` socket is bound, and `/proc/net/unix`
+shows other agents' compositors in that namespace. Two more were the harness
+itself and are now green: a long `TMPDIR` pushed a QEMU monitor socket past the
+108-byte `sun_path` limit, and those gates re-exec into a **private** `/tmp`, so
+a host `TMPDIR` set from outside is not there afterwards.
+
+**WHAT THE SWEEP GOT WRONG, AND IT IS THE USEFUL PART.** Its classifier keyed on
+`qemu` and missed that **39 gates reach a VM through `scripts/hamlinux_image.sh`**,
+so a four-way pool briefly ran concurrent image builds into one `build/image`.
+The same gap let `scanout_desktop.sh` and `scanout_try.sh` run, and **those take
+DRM master on the owner's card**; one fired a 45-second watchdog to give the
+console back. Add those two and `cap_power_ab.sh` to the display-blocked list —
+13, not 10.
+
+**Unrun and listed as unrun, not claimed:** 15 VM gates (10–25 min each, serial
+because they share one `build/image`), 16 display gates, and the three an Alpine
+medium unblocks — the medium was built too late to use. Prerequisites that now
+exist so the next sweep does not pay for them: `build/repo/linux`,
+`build/image/distro.ext4`, and a 370 MiB `build/image/alpine.ext4`.
+
+**Treat the perf numbers as weaker than their verdicts.** They ran behind a
+`loadavg < 2.0` gate and landed at 1.45–1.99 — at the threshold, not under it,
+with three other agents booting VMs throughout.
+
 **THE FIRST THING YOU WILL HIT, AND IT IS NOT IN ANY DOCUMENT.** A fresh
 worktree has no checked-out `adder` submodule and no
 `build/cutover/host_ac.elf`, so **every `.ad`-building gate fails instantly
