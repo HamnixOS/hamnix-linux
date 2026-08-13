@@ -137,6 +137,11 @@ ok()   { echo "realboot: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "realboot: FAIL $*"; fail=$((fail+1)); }
 info() { echo "realboot: INFO $*"; }
 say()  { echo "[ar] $*"; }
+# An empty read is not a measurement. See tests/linux/gate_read.sh: question 1
+# below took ${NEWPANELH:-0} against 40, and panelwin() prints NOTHING when no
+# row in the window table matches, so "there is no panel window at all" came
+# out as the PASS "the PANEL's own window stayed a bar".
+. tests/linux/gate_read.sh
 
 [ -f "$IMG/vmlinuz" ] || { echo "no image; run scripts/hamlinux_image.sh" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "need python3" >&2; exit 1; }
@@ -652,9 +657,14 @@ if [ -n "$NEWWID" ]; then
 else
     bad "NO SEPARATE MENU WINDOW on a real boot. The window table with the menu open was: $(wintable "$WORK/boot.new.log" NEW-open)"
 fi
-[ "${NEWPANELH:-0}" -le 40 ] 2>/dev/null &&
-    ok "and the PANEL's own window stayed a bar ($NEWPANELH px tall) -- the flat in-panel dropdown, which grows it past 200, is not what opened" ||
+if ! gate_fields "the PANEL's own row (wid and height) in the window table with the menu open -- WINS-NEW-open in $WORK/boot.new.log" 2 "$NEWPANEL"; then
+    :   # gate_fields named the failed read: panelwin() matched no row at all,
+        # and a panel window nobody found is not a panel window that stayed a bar
+elif [ "$NEWPANELH" -le 40 ] 2>/dev/null; then
+    ok "and the PANEL's own window stayed a bar ($NEWPANELH px tall) -- the flat in-panel dropdown, which grows it past 200, is not what opened"
+else
     info "the panel window is ${NEWPANELH:-?} px tall with the menu open"
+fi
 
 # ---- 2. THE SEARCH FIELD, IN PIXELS -------------------------------------
 if [ "${NEWWHITE:-0}" -ge 50 ]; then

@@ -74,6 +74,12 @@ pass=0; fail=0
 ok()   { echo "appmenu-inst: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "appmenu-inst: FAIL $*"; fail=$((fail+1)); }
 info() { echo "appmenu-inst: INFO $*"; }
+# An empty read is not a measurement. See tests/linux/gate_read.sh: the
+# launcher-count assertion below was an UNCONDITIONAL ok on a grep -c, so a
+# pkgmap that listed programs and not one launcher -- the exact shape of
+# "desktop_apps() returned nothing" -- scored a PASS reading "places all 0
+# launchers in packages".
+. tests/linux/gate_read.sh
 
 # The launcher whose program section 4 removes. It is a real shipped app with
 # no other role in this gate, and it is named ONCE here so the assertions and
@@ -179,7 +185,13 @@ for x in sorted(progs):     print("prog", x)
 PY
 if [ -s "$WORK/pkgmap.txt" ]; then
     nl=$(grep -c '^launcher ' "$WORK/pkgmap.txt")
-    ok "scripts/hamlinux_packages.py places all $nl launchers in packages (one per application, beside the program it launches)"
+    # A pkgmap with no launcher line in it is not a packaging success: -s only
+    # says the python printed SOMETHING, and it prints programs too.
+    if [ "${nl:-0}" -gt 0 ]; then
+        ok "scripts/hamlinux_packages.py places all $nl launchers in packages (one per application, beside the program it launches)"
+    else
+        bad "scripts/hamlinux_packages.py named ZERO launchers ($WORK/pkgmap.txt has no 'launcher ' line) -- which launchers it packages is not a question this run can answer"
+    fi
 else
     bad "could not ask scripts/hamlinux_packages.py which launchers it packages"; cat "$WORK/pkgmap.err" >&2
 fi

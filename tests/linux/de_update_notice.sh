@@ -452,6 +452,16 @@ fi
 # what the panel draws. Inset past the 2px border and 8px radius, as above.
 NOTICE_W_SRC="$(sed -n 's/^NOTICE_W:[[:space:]]*int64[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' user/hampanelscene.ad | head -1)"
 NOTICE_H_SRC="$(sed -n 's/^NOTICE_H:[[:space:]]*int64[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' user/hampanelscene.ad | head -1)"
+# A sed that does not match prints NOTHING, and bash reads an empty operand
+# inside $(( )) as 0 -- so an unparsed constant made every rectangle below
+# 12 px WIDE AND HIGH IN THE NEGATIVE, the colour percentages came back
+# meaningless, and edge_probe reported that the panel puts its notice in the
+# wrong place. That verdict would have been about this sed, not about the
+# panel. The sibling gate installed_update_wsysver.sh:836 already refuses
+# here for exactly this reason; this file did not.
+[ -n "$NOTICE_W_SRC" ] && [ -n "$NOTICE_H_SRC" ] || {
+    bad "UNREADABLE -- cannot read NOTICE_W/NOTICE_H out of user/hampanelscene.ad (got '$NOTICE_W_SRC'/'$NOTICE_H_SRC'). Every rectangle below would be a guess, and every colour percentage measured in it would be a verdict about this sed"
+    done_report; exit 1; }
 info "the card is ${NOTICE_W_SRC}x${NOTICE_H_SRC}, read from user/hampanelscene.ad"
 
 edge_probe() {

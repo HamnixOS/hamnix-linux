@@ -101,6 +101,12 @@ export HAMFB_GEOM="$GEOM"
     export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 
 pass=0; fail=0
+# An empty read is not a measurement: gate_fields / gate_nonempty. See the
+# header of tests/linux/gate_read.sh -- assertion 8 in this very file used to
+# print "wsysd reports focus on wid none" when the state file could not be
+# read at all, which named a defect in wsysd on the evidence of nothing.
+. tests/linux/gate_read.sh
+
 ok()   { echo "focus: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "focus: FAIL $*"; fail=$((fail+1)); }
 info() { echo "focus: INFO $*"; }
@@ -158,7 +164,13 @@ ok "the compositor, the desktop and the panel all build"
 winctl()  { "$WORK/wsys_poke.elf" "/dev/wsys/$1/ctl" 2>/dev/null; }
 wstate()  { "$WORK/wsys_poke.elf" "/dev/wsys/wsysd/state" 2>/dev/null; }
 # `focus <wid> windows N inputs N ...` -> the wid.
-focuswid() { set -- $(wstate); echo "${2:-none}"; }
+#
+# This used to end `echo "${2:-none}"`, and that default WAS A VERDICT: a
+# state file that could not be read at all printed "focus is none", and
+# assertions 8 and 11 below reported that wsysd had focus on the wrong window.
+# An empty read now yields an empty string, and each caller must ask
+# gate_nonempty before it is allowed to draw a conclusion from it.
+focuswid() { set -- $(wstate); echo "${2:-}"; }
 
 # ---- THE MOUSE -----------------------------------------------------------
 : >"$WORK/input.evdev"
@@ -256,8 +268,14 @@ fi
 # ---- 6+7+8. OPEN THE MENU WITH A MOUSE -----------------------------------
 click "$APPBTN_X" "$APPBTN_Y"
 snap open
-set -- $(winctl "$PANEL")
-GROWNH="${5:-0}"
+CTL="$(winctl "$PANEL")"
+if ! gate_fields "the panel window's ctl line (/dev/wsys/$PANEL/ctl) after the Applications click" 5 "$CTL"; then
+    info "the panel's height could not be read, so 'did the menu open' is not a question this run can answer. Nothing below this line is measurable either"
+    sed 's/^/focus:      /' "$WORK/hampanelscene.log" | tail -20
+    done_report; exit 1
+fi
+set -- $CTL
+GROWNH="$5"
 if [ "$GROWNH" -gt "$PANELH" ]; then
     ok "an EVDEV CLICK on the Applications button opened the menu (the panel window grew ${PANELH} -> ${GROWNH} px tall)"
 else
@@ -272,7 +290,9 @@ else
     bad "the card column is only $got% of the dropdown body colour -- nothing was drawn"
 fi
 FOCUS_OPEN="$(focuswid)"
-if [ "$FOCUS_OPEN" = "$PANEL" ]; then
+if ! gate_nonempty "wsysd's published state file (/dev/wsys/wsysd/state), read for the focused wid with the menu open" "$FOCUS_OPEN"; then
+    :
+elif [ "$FOCUS_OPEN" = "$PANEL" ]; then
     ok "and wsysd reports focus on the panel (wid $FOCUS_OPEN) -- the menu is open on the FOCUSED window, which is the precondition for a focus-out to dismiss it"
 else
     bad "wsysd reports focus on wid $FOCUS_OPEN, not the panel ($PANEL) -- 'clicking away moves focus off the panel' is not a question this run can answer"
@@ -287,12 +307,18 @@ AWAY_Y=$((GROWNH + (FBH - GROWNH) / 2))
 info "clicking the wallpaper at ($AWAY_X, $AWAY_Y) -- inside backdrop wid $BACKDROP, ${AWAY_Y} px is below the grown panel's ${GROWNH}"
 click "$AWAY_X" "$AWAY_Y"
 snap away
-set -- $(winctl "$PANEL")
-AWAYH="${5:-0}"
-if [ "$AWAYH" = "$PANELH" ]; then
-    ok "THE FIX: an EVDEV CLICK ON THE WALLPAPER closed the menu (the panel window is back to ${AWAYH} px, the bare bar)"
-else
-    bad "THE DEFECT: after clicking the wallpaper the panel window is still ${AWAYH} px tall, not ${PANELH} -- the open menu is still hanging over the desktop. wsysd told nobody that focus moved"
+CTL="$(winctl "$PANEL")"
+# AWAYH="" means the read failed, NOT that the panel is 0 px tall. It used to
+# mean the second: `${5:-0}` made an unreadable ctl line print THE DEFECT,
+# naming a bug in wsysd's focus reporting on the strength of an empty string.
+AWAYH=""
+if gate_fields "the panel window's ctl line (/dev/wsys/$PANEL/ctl) after the wallpaper click" 5 "$CTL"; then
+    set -- $CTL; AWAYH="$5"
+    if [ "$AWAYH" = "$PANELH" ]; then
+        ok "THE FIX: an EVDEV CLICK ON THE WALLPAPER closed the menu (the panel window is back to ${AWAYH} px, the bare bar)"
+    else
+        bad "THE DEFECT: after clicking the wallpaper the panel window is still ${AWAYH} px tall, not ${PANELH} -- the open menu is still hanging over the desktop. wsysd told nobody that focus moved"
+    fi
 fi
 got="$(colourpct 4 "$CARD_Y" $((CARDW - 8)) "$CARD_H" "$WORK/away.raw" "$BODYCOL")"
 if [ "$got" -le 5 ]; then
@@ -308,7 +334,9 @@ fi
 # green: focus landed on the window that was actually clicked, or the panel
 # died / the click was swallowed and the short window means nothing.
 FOCUS_AWAY="$(focuswid)"
-if [ "$FOCUS_AWAY" = "$BACKDROP" ]; then
+if ! gate_nonempty "wsysd's published state file (/dev/wsys/wsysd/state), read for the focused wid after the wallpaper click" "$FOCUS_AWAY"; then
+    :
+elif [ "$FOCUS_AWAY" = "$BACKDROP" ]; then
     ok "wsysd's own state moved focus panel($PANEL) -> backdrop($BACKDROP): the click landed on the window we aimed at (this is true with or without the fix -- knowing and not saying was the whole defect)"
 else
     bad "wsysd reports focus on wid $FOCUS_AWAY after the wallpaper click, not the backdrop ($BACKDROP) -- the click did not land where this run thinks it did, so assertion 9 is measuring something else"
@@ -320,9 +348,16 @@ fi
 # with the fix reverted the menu is still open here, so this click is the
 # ordinary toggle closing it and "did it re-open" is not a question.
 click "$APPBTN_X" "$APPBTN_Y"
-set -- $(winctl "$PANEL")
-REOPENH="${5:-0}"
-if [ "$AWAYH" != "$PANELH" ]; then
+CTL="$(winctl "$PANEL")"
+REOPENH=""
+if gate_fields "the panel window's ctl line (/dev/wsys/$PANEL/ctl) after re-clicking the Applications button" 5 "$CTL"; then
+    set -- $CTL; REOPENH="$5"
+fi
+if [ -z "$REOPENH" ]; then
+    :   # gate_fields already said which read failed; do not answer 12 from it
+elif [ -z "$AWAYH" ]; then
+    info "the away-click's own result could not be read, so 'is the panel still live afterwards' is not a question this run can answer (the panel is ${REOPENH} px now, with nothing to compare it to)"
+elif [ "$AWAYH" != "$PANELH" ]; then
     info "the away-click did not dismiss the menu, so 'is the panel still live afterwards' is not a question this run can answer (the click above just toggled the still-open menu shut: ${REOPENH} px)"
 elif [ "$REOPENH" -gt "$PANELH" ]; then
     ok "the panel is still live after the away-click: the Applications button RE-OPENS the menu (grew to ${REOPENH} px)"
@@ -336,9 +371,16 @@ fi
 # spurious `f out`/`f in` pair would fight the toggle.
 click "$APPBTN_X" "$APPBTN_Y"
 snap toggled
-set -- $(winctl "$PANEL")
-TOGGLEDH="${5:-0}"
-if [ "$AWAYH" != "$PANELH" ] || [ "$REOPENH" -le "$PANELH" ]; then
+CTL="$(winctl "$PANEL")"
+TOGGLEDH=""
+if gate_fields "the panel window's ctl line (/dev/wsys/$PANEL/ctl) after the toggle click" 5 "$CTL"; then
+    set -- $CTL; TOGGLEDH="$5"
+fi
+if [ -z "$TOGGLEDH" ]; then
+    :   # gate_fields already said which read failed
+elif [ -z "$AWAYH" ] || [ -z "$REOPENH" ]; then
+    info "an earlier read failed, so 'the button still closes it' has no established starting point this run (panel is ${TOGGLEDH} px)"
+elif [ "$AWAYH" != "$PANELH" ] || [ "$REOPENH" -le "$PANELH" ]; then
     info "the menu never re-opened, so 'the button still closes it' is not a question this run can answer (panel is ${TOGGLEDH} px)"
 elif [ "$TOGGLEDH" = "$PANELH" ]; then
     ok "and clicking the menu's OWN PARENT -- the Applications button, on the already-focused panel -- still closes it (back to ${TOGGLEDH} px): no focus event is emitted when focus does not change"

@@ -90,4 +90,16 @@ P=$(grep -c '^steamprobe: PASS' "$WORK/boot.log")
 F=$(grep -c '^steamprobe: FAIL' "$WORK/boot.log")
 S=$(grep -c '^steamprobe: SKIP' "$WORK/boot.log")
 echo "[steamprobe] PASS $P  FAIL $F  SKIP $S   (full log: $WORK/boot.log)"
+# NO EVIDENCE IS NOT A PASS -- the same hole enter_user_run.sh had. The
+# presence check above accepts `^\[steamprobe\]`, which this script's own rc
+# echoes before the probe is invoked, and the debugfs plant is silenced with
+# `>/dev/null 2>&1`, so a probe that was never planted and never ran gives
+# P=0 F=0 S=0 and `[ "$F" = 0 ]` exits 0 over nothing at all.
+if [ "$((P + F + S))" = 0 ]; then
+    echo "[steamprobe] UNREADABLE -- the in-namespace probe reported neither PASS, FAIL nor SKIP:"
+    echo "[steamprobe]   it did not run, or did not reach its first assertion. This run did"
+    echo "[steamprobe]   not observe the namespace; it is NOT a pass."
+    tail -30 "$WORK/boot.log"
+    exit 1
+fi
 [ "$F" = 0 ]

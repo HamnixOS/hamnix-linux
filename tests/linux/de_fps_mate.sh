@@ -281,6 +281,14 @@ for _ in $(seq 1 60); do
     [ "$(xdotool search --onlyvisible --class . 2>/dev/null | wc -l)" -ge 8 ] && break
     sleep 1
 done
+# The instrument before the measurement: xlsclients not being INSTALLED gives
+# a suppressed stderr, an empty stdout and a count of 0, which is
+# indistinguishable from a MATE that failed to start -- and the branch below
+# reported the second, then killed the run. A missing host tool is not a
+# statement about MATE.
+command -v xlsclients >/dev/null 2>&1 || {
+    bad "UNREADABLE -- xlsclients is not installed on this host, so 'how many X clients did MATE start' cannot be asked at all. This run did not observe MATE; it failed to look"
+    done_report; exit 1; }
 NCLIENT="$(xlsclients 2>/dev/null | wc -l)"
 if [ "${NCLIENT:-0}" -ge 4 ]; then
     ok "MATE is up: $NCLIENT X clients -- $(xlsclients 2>/dev/null | awk '{print $2}' | tr '\n' ' ')"

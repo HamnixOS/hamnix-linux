@@ -97,6 +97,12 @@ CONF=/tmp/hamnix-panel.conf
 SHIPPED="$PROJ_ROOT/etc/panel.conf"
 
 pass=0; fail=0
+# An empty read is not a measurement. See the header of tests/linux/gate_read.sh:
+# vis_of below used to end ${8:-x}, so assertion 13 could print "the shipped
+# file no longer paints its own colour ... visible top=x" about two windows
+# this run never managed to read.
+. tests/linux/gate_read.sh
+
 ok()   { echo "panelship: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "panelship: FAIL $*"; fail=$((fail+1)); }
 info() { echo "panelship: INFO $*"; }
@@ -177,8 +183,13 @@ done
 ok "the compositor, the desktop and the panel all build"
 
 winctl() { "$WORK/wsys_poke.elf" "/dev/wsys/$1/ctl" 2>/dev/null; }
-vis_of() { set -- $(winctl "$1"); echo "${8:-x}"; }
-h_of()   { set -- $(winctl "$1"); echo "${5:-0}"; }
+# Field 8 of the ctl line is `visible`, field 5 the height. These used to
+# default to x / 0 on a ctl line that did not come back, and those defaults
+# WERE VERDICTS -- "visible top=x" reads as a withdrawn window when it only
+# means the read failed. An unreadable line now yields the EMPTY STRING and
+# the caller asks gate_nonempty before it draws any conclusion.
+vis_of() { set -- $(winctl "$1"); echo "${8:-}"; }
+h_of()   { set -- $(winctl "$1"); echo "${5:-}"; }
 
 # ---- 3. THE SHIPPED FILE, VERBATIM ---------------------------------------
 cp "$SHIPPED" "$CONF"
@@ -407,7 +418,11 @@ done
 t_back="$(topstrip "$WORK/back.raw" "$BARCOL")"
 b_back="$(botstrip "$WORK/back.raw" "$BARCOL")"
 tv="$(vis_of "$TOPBAR")"; bv="$(vis_of "$BOTBAR")"
-if [ "$t_back" -ge 60 ] && [ "$b_back" -ge 60 ] && [ "$tv" = 1 ] && [ "$bv" = 1 ]; then
+if ! gate_nonempty "the top panel's visible field (/dev/wsys/$TOPBAR/ctl) after the round trip" "$tv"; then
+    :
+elif ! gate_nonempty "the taskbar's visible field (/dev/wsys/$BOTBAR/ctl) after the round trip" "$bv"; then
+    :
+elif [ "$t_back" -ge 60 ] && [ "$b_back" -ge 60 ] && [ "$tv" = 1 ] && [ "$bv" = 1 ]; then
     ok "putting etc/panel.conf back restores #$BARCOL on both bars (top ${t_back}%, taskbar ${b_back}%) with both windows still visible (top=$tv taskbar=$bv) -- honoured, dropped and honoured again, all live"
 else
     bad "the shipped file no longer paints its own colour after the round trip (top ${t_back}%, taskbar ${b_back}%, visible top=$tv taskbar=$bv)"

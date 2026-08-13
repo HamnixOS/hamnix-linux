@@ -131,6 +131,12 @@ export HAMWSYSD_INPUT="$WORK/input.evdev"
 CONF=/tmp/hamnix-panel.conf
 
 pass=0; fail=0
+# An empty read is not a measurement. See the header of tests/linux/gate_read.sh:
+# vis_of below used to end ${8:-x}, so a ctl line that could not be read at all
+# printed "THE DEFECT: the top panel's window went visible 1 -> x ... the
+# desktop has no panel" -- a defect named on the evidence of a failed read.
+. tests/linux/gate_read.sh
+
 ok()   { echo "panelconf: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "panelconf: FAIL $*"; fail=$((fail+1)); }
 info() { echo "panelconf: INFO $*"; }
@@ -216,10 +222,16 @@ fi
 
 winctl() { "$WORK/wsys_poke.elf" "/dev/wsys/$1/ctl" 2>/dev/null; }
 # Field 8 of the ctl line is `visible` (user/linux-wsys.c snap_win_ctl).
-vis_of() { set -- $(winctl "$1"); echo "${8:-x}"; }
-w_of()   { set -- $(winctl "$1"); echo "${4:-0}"; }
-h_of()   { set -- $(winctl "$1"); echo "${5:-0}"; }
-y_of()   { set -- $(winctl "$1"); echo "${3:-0}"; }
+#
+# These used to default to x / 0 on a ctl line that did not come back, and
+# those defaults WERE VERDICTS: "visible 1 -> x", or a height of 0 that is not
+# greater than $TOPH so "the Applications button does not work". An unreadable
+# line now yields the EMPTY STRING, and every caller asks gate_nonempty about
+# it by name and SKIPS the assertion rather than answering it from a default.
+vis_of() { set -- $(winctl "$1"); echo "${8:-}"; }
+w_of()   { set -- $(winctl "$1"); echo "${4:-}"; }
+h_of()   { set -- $(winctl "$1"); echo "${5:-}"; }
+y_of()   { set -- $(winctl "$1"); echo "${3:-}"; }
 
 # ---- the mouse: synthetic evdev, byte for byte what /dev/input/eventN gives -
 EVDEV_PY="$WORK/evdev.py"
@@ -322,10 +334,15 @@ else
     sed 's/^/panelconf:      /' "$WORK/panel.log" | tail -20
     done_report; exit 1
 fi
-if [ "$(vis_of "$TOPBAR")" = 1 ] && [ "$(vis_of "$BOTBAR")" = 1 ]; then
+tvis0="$(vis_of "$TOPBAR")"; bvis0="$(vis_of "$BOTBAR")"
+if ! gate_nonempty "the top panel's visible field (/dev/wsys/$TOPBAR/ctl), read for the control" "$tvis0"; then
+    :
+elif ! gate_nonempty "the taskbar's visible field (/dev/wsys/$BOTBAR/ctl), read for the control" "$bvis0"; then
+    :
+elif [ "$tvis0" = 1 ] && [ "$bvis0" = 1 ]; then
     ok "control: both panel windows report visible=1 before anything touches the config"
 else
-    bad "control: a panel window is already invisible before the config was touched (top=$(vis_of "$TOPBAR") bottom=$(vis_of "$BOTBAR"))"
+    bad "control: a panel window is already invisible before the config was touched (top=$tvis0 bottom=$bvis0)"
 fi
 
 # The panel bar's own background colour, from etc/panel.conf (`color #d4d0c8`).
@@ -358,7 +375,10 @@ click "$APPBTN_X" "$APPBTN_Y"
 snap ctlopen
 CTLGROWN="$(h_of "$TOPBAR")"
 ctlcard="$(colourpct 4 "$CARD_Y" $((CARDW - 8)) "$CARD_H" "$WORK/ctlopen.raw" "$BODYCOL")"
-if [ "$CTLGROWN" -gt "$TOPH" ] && [ "$ctlcard" -ge 60 ]; then
+if ! gate_nonempty "the top panel's height (/dev/wsys/$TOPBAR/ctl) after the control click" "$CTLGROWN"; then
+    info "the panel's height could not be read, so 'does the Applications button work before the config is touched' is not a question this run can answer -- and nothing below it is either"
+    done_report; exit 1
+elif [ "$CTLGROWN" -gt "$TOPH" ] && [ "$ctlcard" -ge 60 ]; then
     ok "control: an evdev click on the Applications button opens the menu (${TOPH} -> ${CTLGROWN} px, card ${ctlcard}% painted)"
 else
     bad "control: the Applications button does not work BEFORE the config is touched (${CTLGROWN} px, card ${ctlcard}%) -- nothing below can be answered"
@@ -410,17 +430,23 @@ fi
 sleep 1
 snap afterunlink
 tvis="$(vis_of "$TOPBAR")"; bvis="$(vis_of "$BOTBAR")"; dvis="$(vis_of "$BACKDROP")"
-if [ "$tvis" = 1 ]; then
+if ! gate_nonempty "the top panel's visible field (/dev/wsys/$TOPBAR/ctl) after the replacement" "$tvis"; then
+    :
+elif [ "$tvis" = 1 ]; then
     ok "the TOP PANEL still has its window on screen after the replacement (visible=$tvis)"
 else
     bad "THE DEFECT: the top panel's window went visible 1 -> $tvis when its config was replaced. The process is still alive and still logging reloads; the desktop has no panel"
 fi
-if [ "$bvis" = 1 ]; then
+if ! gate_nonempty "the taskbar's visible field (/dev/wsys/$BOTBAR/ctl) after the replacement" "$bvis"; then
+    :
+elif [ "$bvis" = 1 ]; then
     ok "the TASKBAR still has its window on screen after the replacement (visible=$bvis)"
 else
     bad "THE DEFECT: the taskbar's window went visible 1 -> $bvis when the config was replaced"
 fi
-if [ "$dvis" = 1 ]; then
+if ! gate_nonempty "the backdrop's visible field (/dev/wsys/$BACKDROP/ctl) after the replacement" "$dvis"; then
+    :
+elif [ "$dvis" = 1 ]; then
     ok "the BACKDROP is untouched (visible=$dvis) -- hamdesktop never writes the verb this defect is in, so 'the wallpaper survived' is the expected shape, not a reprieve"
 else
     bad "the backdrop ALSO went visible=$dvis -- then this is not the panel's bug and the cause above is wrong"
@@ -438,7 +464,9 @@ click "$APPBTN_X" "$APPBTN_Y"
 snap afteropen
 GROWN="$(h_of "$TOPBAR")"
 card="$(colourpct 4 "$CARD_Y" $((CARDW - 8)) "$CARD_H" "$WORK/afteropen.raw" "$BODYCOL")"
-if [ "$GROWN" -gt "$TOPH" ] && [ "$card" -ge 60 ]; then
+if ! gate_nonempty "the top panel's height (/dev/wsys/$TOPBAR/ctl) after the post-replacement click" "$GROWN"; then
+    :
+elif [ "$GROWN" -gt "$TOPH" ] && [ "$card" -ge 60 ]; then
     ok "a real click on the Applications button AFTER the replacement still opens the menu (${TOPH} -> ${GROWN} px, card ${card}% painted)"
 else
     bad "THE DEFECT: after the replacement a real click on the Applications button leaves the panel ${GROWN} px tall with the card ${card}% painted -- on the machine this changed 234 pixels, the mouse cursor and nothing else"
@@ -455,7 +483,11 @@ replace_in_place 2
 if await_reload "$before"; then
     sleep 1
     tvis2="$(vis_of "$TOPBAR")"; bvis2="$(vis_of "$BOTBAR")"
-    if [ "$tvis2" = 1 ] && [ "$bvis2" = 1 ]; then
+    if ! gate_nonempty "the top panel's visible field (/dev/wsys/$TOPBAR/ctl) after the in-place rewrite" "$tvis2"; then
+        :
+    elif ! gate_nonempty "the taskbar's visible field (/dev/wsys/$BOTBAR/ctl) after the in-place rewrite" "$bvis2"; then
+        :
+    elif [ "$tvis2" = 1 ] && [ "$bvis2" = 1 ]; then
         ok "an IN-PLACE rewrite (same inode, no unlink) also leaves both windows on screen (top=$tvis2 taskbar=$bvis2) -- the trigger is the reload, and the unlink is not part of it"
     else
         bad "THE DEFECT reproduces through an in-place rewrite too (top=$tvis2 taskbar=$bvis2) -- so it is the reload, not the unlink"
@@ -475,7 +507,9 @@ if await_reload "$before"; then
     snap onepanel
     bvis3="$(vis_of "$BOTBAR")"
     botfill3="$(colourpct "$BOTSTRIP_X" $((BOTY + 2)) "$BOTSTRIP_W" $((BOTH - 4)) "$WORK/onepanel.raw" "$BARCOL")"
-    if [ "$bvis3" = 0 ] && [ "$botfill3" -le 5 ]; then
+    if ! gate_nonempty "the taskbar's visible field (/dev/wsys/$BOTBAR/ctl) under the one-panel config" "$bvis3"; then
+        :
+    elif [ "$bvis3" = 0 ] && [ "$botfill3" -le 5 ]; then
         ok "a config that drops to ONE panel still WITHDRAWS the taskbar window (visible=$bvis3, ${botfill3}% of the bar colour left in the band)"
     else
         bad "the surplus panel window was not withdrawn (visible=$bvis3, ${botfill3}% of the bar colour still painted) -- a dead bar is left on screen swallowing clicks"
@@ -490,7 +524,9 @@ if await_reload "$before"; then
     snap twoback
     bvis4="$(vis_of "$BOTBAR")"
     botfill4="$(colourpct "$BOTSTRIP_X" $((BOTY + 2)) "$BOTSTRIP_W" $((BOTH - 4)) "$WORK/twoback.raw" "$BARCOL")"
-    if [ "$bvis4" = 1 ] && [ "$botfill4" -ge 60 ]; then
+    if ! gate_nonempty "the taskbar's visible field (/dev/wsys/$BOTBAR/ctl) after the second panel came back" "$bvis4"; then
+        :
+    elif [ "$bvis4" = 1 ] && [ "$botfill4" -ge 60 ]; then
         ok "and putting the second panel back brings the taskbar window back (visible=$bvis4, ${botfill4}% repainted) -- withdraw and restore are both live"
     else
         bad "the withdrawn taskbar never came back (visible=$bvis4, ${botfill4}% painted) -- a pooled window that can be hidden and not shown is the same defect wearing the other hat"
