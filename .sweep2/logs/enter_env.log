@@ -1,0 +1,42 @@
+[envx] staging an image with that rc
+[envx] planted /etc/envprobe.rc as a second cpio segment
+[envx] booting (up to 150s)
+
+[envx] --- A: the SAME hamsh, across enter, as root
+[envx] A-BEGIN
+HOME=/envx-sentinel-home
+HAMNIX_ENVPROBE=envx-crossed
+WAYLAND_DISPLAY=envx-sentinel-wl
+XDG_RUNTIME_DIR=/envx-sentinel-run
+[envx] A-END
+[envx] --- B: across an exec into a NEW hamsh, as root
+[envx] B-BEGIN
+[envx] B1 new-hamsh sees HAMNIX_ENVPROBE= 
+[envx] B2 new-hamsh sees WAYLAND_DISPLAY= 
+[envx] B3 new-hamsh, across enter:
+[envx] B-END
+[envx] --- C: the same two questions at uid 1001
+[envx] C-BEGIN
+HOME=/envx-sentinel-home
+HAMNIX_ENVPROBE=envx-crossed
+WAYLAND_DISPLAY=envx-sentinel-wl
+XDG_RUNTIME_DIR=/envx-sentinel-run
+[envx] C-END
+[envx] D-BEGIN
+[envx] B1 new-hamsh sees HAMNIX_ENVPROBE= 
+[envx] B2 new-hamsh sees WAYLAND_DISPLAY= 
+[envx] B3 new-hamsh, across enter:
+[envx] D-END
+[envx] DONE
+
+envx: PASS the boot reached DONE
+envx: PASS enter carries an exported variable (root)
+envx: PASS enter carries WAYLAND_DISPLAY (root)
+envx: PASS enter carries XDG_RUNTIME_DIR (root)
+envx: PASS enter carries HOME (root)
+envx: PASS enter carries an exported variable (uid 1001)
+envx: PASS enter carries WAYLAND_DISPLAY (uid 1001)
+envx: PASS a fresh hamsh does NOT inherit it -- the drop is the exec, not the enter
+envx: PASS the sentinel is gone by the time the new hamsh enters -- it never
+envx:      reached that hamsh at all, so enter had nothing to carry
+(full log: build/enterenv/boot.log)

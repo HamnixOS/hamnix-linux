@@ -1,0 +1,38 @@
+[hsig] building a private image (log: build/hpmsigvm/build.log)
+[hsig] booting (up to 300s)
+
+    [hsig] channels:
+    [hsig] --- hpm refresh, NO FLAGS, against the real repo
+    hpm: fetching channel linux from https://255.one/linux/
+    hpm:   (124 packages)
+    hpm: refreshed index from https://255.one/ (124 packages across 1 channels, 68180 bytes)
+    [hsig] refresh status: 0
+    [hsig] --- hpm install, NO FLAGS
+    hpm: resolved 2 package(s):
+    hpm:   installing hamnix-init@1.0.22
+    hpm: SHA-256 verified
+    hpm: keeping this machine's own /etc/rc.boot
+    hpm: extracted 22 files
+    hpm: running hook install.hamsh
+    hpm: installed hamnix-init@1.0.22
+    hpm:   installing hamnix-diff@1.0.22
+    hpm: SHA-256 verified
+    hpm: extracted 1 files
+    hpm: installed hamnix-diff@1.0.22
+    [hsig] install status: 0
+    [hsig] --- the installed program runs (identical files, expect 0):
+    [hsig] run status: 0
+    [hsig] --- and differing files (expect 1):
+    [hsig] diff status: 1
+    [hsig] DONE
+
+hsig: PASS the boot reached the end
+hsig: PASS refresh loaded a real index from 255.one
+hsig: PASS refresh exited 0
+hsig: PASS the install completed
+hsig: PASS the installed program ran (identical -> 0)
+hsig: PASS and it really compared (differing -> 1)
+hsig: PASS no --allow-unsigned warning anywhere
+hsig: PASS the repo was never called unsigned
+hsig: PASS nothing aborted for an untrusted index
+(full log: build/hpmsigvm/boot.log)

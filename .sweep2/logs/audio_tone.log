@@ -1,0 +1,25 @@
+[audio_tone] staging an image with that rc
+[audio_tone] booting, capturing the codec output to build/audio/capture.wav
+rc.boot: audio tone gate
+[audio_tone] /dev/snd:
+controlC0
+hwC0D0
+pcmC0D0c
+pcmC0D0p
+timer
+[playtone] played 1000 Hz square wave, 48000 frames
+[playtone] played 1000 Hz square wave, 48000 frames
+[audio_tone] tone 1 status: 0
+[playtone] played 440 Hz square wave, 24000 frames
+[playtone] played 440 Hz square wave, 24000 frames
+[audio_tone] tone 2 status: 0
+[audio_tone] aplay status: 0
+[audio_tone] device says:
+loaded 0 cap 1048576 master 100 streams 100 100 100 100 mute 0 space 122880 pos 1355776 mixed 56 hush 82 nogain 0
+[audio_tone] DONE
+[audio_tone] capture: 2 ch, 44100 Hz, 8.686 s
+[audio_tone] 3 non-silent segment(s)
+[audio_tone]   seg 1: 1.0027 s  f0 1000.28 Hz  rms 11816  peak 12000
+[audio_tone]   seg 2: 0.5039 s  f0 444.57 Hz  rms 11879  peak 12000
+[audio_tone]   seg 3: 0.5088 s  f0 660.32 Hz  rms 7705  peak 10996
+[audio_tone] PASS: every tone asked for is in the capture, at the right frequency, for the right length, with a square wave's harmonics.

@@ -1,0 +1,127 @@
+rdlat: PASS the read server is up: wsys: read server pid 520024 serving /dev/wsys reads for segment 66306.68175398, OFF the frame loop
+rdlat: PASS a heavy drag client owns window 2 and is running -- both arms are measured under load, not at idle
+rdlat: .... ---- run 1 ----
+rdlat: .... FRAME LOOP  wsrvst: blocking round trip, 33 samples: min 27  p50 28  p90 769  max 836 us
+rdlat|      sample 0 1373 us 7 bytes  (INCLUDES THE ONE-TIME DIAL)
+rdlat|      sample 1 66 us 7 bytes
+rdlat|      sample 2 45 us 7 bytes
+rdlat|      sample 3 11 us 7 bytes
+rdlat|      sample 4 19 us 7 bytes
+rdlat|      sample 5 20 us 7 bytes
+rdlat|      sample 6 21 us 7 bytes
+rdlat|      sample 7 10 us 7 bytes
+rdlat|      sample 8 10 us 7 bytes
+rdlat|      sample 9 10 us 7 bytes
+rdlat|      sample 10 10 us 7 bytes
+rdlat|      sample 11 9 us 7 bytes
+rdlat|      sample 12 9 us 7 bytes
+rdlat|      sample 13 10 us 7 bytes
+rdlat|      sample 14 9 us 7 bytes
+rdlat|      sample 15 10 us 7 bytes
+rdlat|      sample 16 9 us 7 bytes
+rdlat|      sample 17 9 us 7 bytes
+rdlat|      sample 18 9 us 7 bytes
+rdlat|      sample 19 10 us 7 bytes
+rdlat|      sample 20 9 us 7 bytes
+rdlat|      sample 21 10 us 7 bytes
+rdlat|      sample 22 9 us 7 bytes
+rdlat|      sample 23 10 us 7 bytes
+rdlat|      sample 24 9 us 7 bytes
+rdlat|      sample 25 9 us 7 bytes
+rdlat|      sample 26 9 us 7 bytes
+rdlat|      sample 27 9 us 7 bytes
+rdlat|      sample 28 9 us 7 bytes
+rdlat|      sample 29 9 us 7 bytes
+rdlat|      sample 30 9 us 7 bytes
+rdlat|      sample 31 10 us 7 bytes
+rdlat|      sample 32 9 us 7 bytes
+rdlat: .... READ SERVER wsrvrl: routed /dev/wsys/windows read, 32 samples (the dial excluded): min 9  p50 10  p90 20  max 66 us
+rdlat: .... READ SERVER wsrvrl: bytes 231 across 33 reads, 0 empty, 0 failed
+rdlat: .... READ SERVER wsrvrl: first read 1373 us -- ONCE PER PROCESS, and it is the dial (connect + version handshake), not the read
+rdlat: .... ---- run 2 ----
+rdlat: .... FRAME LOOP  wsrvst: blocking round trip, 33 samples: min 13  p50 28  p90 787  max 861 us
+rdlat|      sample 0 79 us 7 bytes  (INCLUDES THE ONE-TIME DIAL)
+rdlat|      sample 1 64 us 7 bytes
+rdlat|      sample 2 62 us 7 bytes
+rdlat|      sample 3 44 us 7 bytes
+rdlat|      sample 4 17 us 7 bytes
+rdlat|      sample 5 10 us 7 bytes
+rdlat|      sample 6 10 us 7 bytes
+rdlat|      sample 7 10 us 7 bytes
+rdlat|      sample 8 10 us 7 bytes
+rdlat|      sample 9 9 us 7 bytes
+rdlat|      sample 10 9 us 7 bytes
+rdlat|      sample 11 10 us 7 bytes
+rdlat|      sample 12 9 us 7 bytes
+rdlat|      sample 13 9 us 7 bytes
+rdlat|      sample 14 8 us 7 bytes
+rdlat|      sample 15 9 us 7 bytes
+rdlat|      sample 16 9 us 7 bytes
+rdlat|      sample 17 10 us 7 bytes
+rdlat|      sample 18 9 us 7 bytes
+rdlat|      sample 19 9 us 7 bytes
+rdlat|      sample 20 9 us 7 bytes
+rdlat|      sample 21 9 us 7 bytes
+rdlat|      sample 22 9 us 7 bytes
+rdlat|      sample 23 9 us 7 bytes
+rdlat|      sample 24 8 us 7 bytes
+rdlat|      sample 25 9 us 7 bytes
+rdlat|      sample 26 9 us 7 bytes
+rdlat|      sample 27 10 us 7 bytes
+rdlat|      sample 28 10 us 7 bytes
+rdlat|      sample 29 9 us 7 bytes
+rdlat|      sample 30 9 us 7 bytes
+rdlat|      sample 31 9 us 7 bytes
+rdlat|      sample 32 9 us 7 bytes
+rdlat: .... READ SERVER wsrvrl: routed /dev/wsys/windows read, 32 samples (the dial excluded): min 8  p50 9  p90 17  max 64 us
+rdlat: .... READ SERVER wsrvrl: bytes 231 across 33 reads, 0 empty, 0 failed
+rdlat: .... READ SERVER wsrvrl: first read 79 us -- ONCE PER PROCESS, and it is the dial (connect + version handshake), not the read
+rdlat: .... ---- run 3 ----
+rdlat: .... FRAME LOOP  wsrvst: blocking round trip, 33 samples: min 12  p50 29  p90 821  max 857 us
+rdlat|      sample 0 77 us 7 bytes  (INCLUDES THE ONE-TIME DIAL)
+rdlat|      sample 1 65 us 7 bytes
+rdlat|      sample 2 63 us 7 bytes
+rdlat|      sample 3 44 us 7 bytes
+rdlat|      sample 4 11 us 7 bytes
+rdlat|      sample 5 10 us 7 bytes
+rdlat|      sample 6 10 us 7 bytes
+rdlat|      sample 7 10 us 7 bytes
+rdlat|      sample 8 10 us 7 bytes
+rdlat|      sample 9 9 us 7 bytes
+rdlat|      sample 10 9 us 7 bytes
+rdlat|      sample 11 10 us 7 bytes
+rdlat|      sample 12 9 us 7 bytes
+rdlat|      sample 13 9 us 7 bytes
+rdlat|      sample 14 9 us 7 bytes
+rdlat|      sample 15 9 us 7 bytes
+rdlat|      sample 16 10 us 7 bytes
+rdlat|      sample 17 9 us 7 bytes
+rdlat|      sample 18 10 us 7 bytes
+rdlat|      sample 19 9 us 7 bytes
+rdlat|      sample 20 9 us 7 bytes
+rdlat|      sample 21 9 us 7 bytes
+rdlat|      sample 22 9 us 7 bytes
+rdlat|      sample 23 9 us 7 bytes
+rdlat|      sample 24 9 us 7 bytes
+rdlat|      sample 25 9 us 7 bytes
+rdlat|      sample 26 10 us 7 bytes
+rdlat|      sample 27 9 us 7 bytes
+rdlat|      sample 28 9 us 7 bytes
+rdlat|      sample 29 9 us 7 bytes
+rdlat|      sample 30 9 us 7 bytes
+rdlat|      sample 31 9 us 7 bytes
+rdlat|      sample 32 8 us 7 bytes
+rdlat: .... READ SERVER wsrvrl: routed /dev/wsys/windows read, 32 samples (the dial excluded): min 8  p50 9  p90 11  max 65 us
+rdlat: .... READ SERVER wsrvrl: bytes 231 across 33 reads, 0 empty, 0 failed
+rdlat: .... READ SERVER wsrvrl: first read 77 us -- ONCE PER PROCESS, and it is the dial (connect + version handshake), not the read
+rdlat: .... frame-loop max, three runs: 836 861 857 -> median 857 us
+rdlat: .... read-server max, three runs: 66 64 65 -> median 65 us
+rdlat: .... read-server p50 9 us, p90 17 us (medians of three)
+rdlat: .... read-server FIRST read (the once-per-process dial), three runs: 1373 79 77 -> median 79 us
+rdlat: PASS the FRAME-LOOP arm still shows the tail stage 1 found: max 857 us under this drag. That is the control -- a fast frame-loop arm would mean the compositor was idle and the read arm's speed would be unattributable.
+rdlat: PASS a routed read's WORST sample is 65 us, against the 851 us stage 1 measured for a blocking request on the frame loop -- the frame-loop tail is off the read path
+rdlat: PASS and it beats the frame-loop arm measured in the SAME run under the SAME load (65 us against 857 us), which is the only comparison that controls for this machine
+rdlat: .... the dial is a REAL cost and it is reported apart rather than averaged into the percentiles above: 79 us, once per process, on the first routed read
+rdlat: PASS the once-per-process dial is 79 us -- bounded, and paid once rather than per read
+rdlat: PASS p90 is 17 us -- a taskbar refresh fits inside the 0.3 ms published input-to-pixel budget nine times in ten, which it could not when the read waited out a frame
+rdlat: 7 passed, 0 failed

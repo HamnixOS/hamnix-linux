@@ -1,0 +1,7 @@
+   wsysd: vk backend GPU -- NVIDIA GeForce RTX 3090 (VkPhysicalDeviceType 2, silicon 1, zero-copy 1, device-local 0, host-cached 1)
+   benchlive: seq 1100 frames 10 windows 4 | clear 0 scene 252 rast 2382 copy 157 backbuf 0 cursor 2 present 540 writeback 532 | gpu_frames 10983 refused 0 capped 0 | iters 10 scan_us 55 pub_us 9 | dt_us 34672 fps 288 submit_us 2064
+   benchlive: seq 1101 frames 10 windows 4 | clear 0 scene 241 rast 2305 copy 157 backbuf 0 cursor 2 present 482 writeback 475 | gpu_frames 10993 refused 0 capped 0 | iters 10 scan_us 52 pub_us 9 | dt_us 33254 fps 300 submit_us 2248
+   benchlive: seq 1102 frames 10 windows 4 | clear 0 scene 240 rast 2349 copy 162 backbuf 0 cursor 2 present 539 writeback 531 | gpu_frames 11003 refused 0 capped 0 | iters 10 scan_us 52 pub_us 9 | dt_us 34231 fps 292 submit_us 2144
+   benchlive: seq 1103 frames 10 windows 4 | clear 0 scene 257 rast 2342 copy 156 backbuf 0 cursor 2 present 520 writeback 513 | gpu_frames 11013 refused 0 capped 0 | iters 10 scan_us 51 pub_us 10 | dt_us 34144 fps 292 submit_us 2005
+   benchlive: seq 1104 frames 10 windows 4 | clear 0 scene 267 rast 2476 copy 172 backbuf 0 cursor 2 present 549 writeback 541 | gpu_frames 11023 refused 0 capped 0 | iters 10 scan_us 54 pub_us 10 | dt_us 36091 fps 277 submit_us 2222
+   kept: /home/david/.hamnix-build/vk-present-readback/d1.79cDVY

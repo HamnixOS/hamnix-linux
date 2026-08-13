@@ -1,0 +1,129 @@
+[ar] building the installed disk (UEFI + ESP + ext4)
+[ar] boot 1 of 3: ARM NEW -- the machine as it ships (up to 600s)
+[ar]   NEW: clicking Applications at (40,13) with a real pointer
+[ar]   NEW: typing 'fil' on the real keyboard
+[ar]   NEW: clicking the filtered app row at (118,78)
+[ar]   NEW: clicking Applications again -- does the launch show up in Favourites
+[ar]   NEW: clicking Applications a THIRD time
+[ar] boot 2 of 3: ARM FAV -- the same disk rebooted, with a launch in its history
+[ar]   FAV: clicking Applications at (40,13) with a real pointer
+[ar] boot 3 of 3: ARM OLD -- the same disk, hamappmenu moved aside (up to 600s)
+[ar]   OLD: clicking Applications at (40,13) with a real pointer
+[ar]   OLD: typing 'fil' on the real keyboard
+[ar]   OLD: clicking the filtered app row at (118,78)
+[ar]   OLD: clicking Applications again -- does the launch show up in Favourites
+[ar]   OLD: clicking Applications a THIRD time
+==========================================================
+ WHAT A PERSON GETS WHEN THEY CLICK Applications
+==========================================================
+
+--- ARM NEW: /bin/hamappmenu on the disk, as it ships
+    idle -> idle:        55 px changed (the noise floor)
+    Applications ->      35858 px changed
+    row 0 white:         70% of 204x16+10+30 is the search field
+    row 1 catbtn strip:  77%
+    row 1 header strip:  0% (open) / 85% (reopened after a launch)
+    2nd click ->         51990 px changed (reopen after the launch)
+    3rd click ->         42246 px changed
+    window table (open): (2 0 0 1280 800 -1 0 1 1 87 0 0 0 0) (3 0 0 1280 26 100 0 1 1 206 0 0 1 0) (4 0 774 1280 26 100 0 1 1 204 0 0 1 0) (5 8 28 407 160 14 0 1 1 2 0 0 1 0) 
+    window table (2nd):  (2 0 0 1280 800 -1 0 1 1 95 0 0 0 0) (3 0 0 1280 26 100 0 1 1 549 0 0 1 0) (4 0 774 1280 26 100 0 1 1 544 0 0 1 0) (6 760 430 320 280 6 1 1 1 3 0 0 0 0) (7 8 28 407 200 14 0 1 1 2 0 0 1 0) 
+    window table (3rd):  (2 0 0 1280 800 -1 0 1 1 98 0 0 0 0) (3 0 0 1280 26 100 0 1 1 663 0 0 1 0) (4 0 774 1280 26 100 0 1 1 657 0 0 1 0) (6 760 430 320 280 6 1 1 1 3 0 0 0 0) 
+    menu's own window:   open '5' / after 2nd click '7' / after 3rd ''
+    panel window:        3 26 (open)
+    favourites file:     /bin/hamfmscene cat: cannot open /root/.hamde/favourites: No such file or directory 
+    homes:               uid=0 gid=0 groups=0   File: /home/live   Size: 44            directory   File: /root   Size: 0            directory stat: cannot stat /root/.hamde: No such file or directory 
+    the panel said:            1 [panel] /etc/distros: 1426 byte(s), 29 line(s), 1 attached distribution(s)|      1 [panel] Applications button -> /bin/hamappmenu|      1 [panel] appmenu entries: 28|      1 [panel] distribution not attached at /n/: alpine|      1 [panel] distro section debian: 3 apps|      2 [panel] launched /bin/hamappmenu -self|      1 [panel] launched /bin/hamfmscene|      1 [panel] scene windows ready|
+
+--- ARM OLD: /bin/hamappmenu moved aside -- the machine before the fix
+    idle -> idle:        0 px changed (the noise floor)
+    Applications ->      80519 px changed
+    row 0 white:         0% of 204x16+10+30 is the search field
+    row 1 catbtn strip:  0%
+    row 1 header strip:  0% (open) / 0% (reopened after a launch)
+    2nd click ->         80402 px changed (reopen after the launch)
+    3rd click ->         80349 px changed
+    window table (open): (2 0 0 1280 800 -1 0 1 1 87 0 0 0 0) (3 0 0 1280 602 100 0 1 1 205 0 0 1 0) (4 0 774 1280 26 100 0 1 1 203 0 0 1 0) 
+    window table (2nd):  (2 0 0 1280 800 -1 0 1 1 96 0 0 0 0) (3 0 0 1280 602 100 0 1 1 549 0 0 1 0) (4 0 774 1280 26 100 0 1 1 543 0 0 1 0) (5 610 110 188 300 6 1 1 1 2 0 0 0 0) 
+    window table (3rd):  (2 0 0 1280 800 -1 0 1 1 99 0 0 0 0) (3 0 0 1280 26 100 0 1 1 664 0 0 1 0) (4 0 774 1280 26 100 0 1 1 657 0 0 1 0) (5 610 110 188 300 6 1 1 1 2 0 0 0 0) 
+    menu's own window:   open '' / after 2nd click '' / after 3rd ''
+    panel window:        3 602 (open)
+    favourites file:     /bin/hamfmscene cat: cannot open /root/.hamde/favourites: No such file or directory 
+    homes:               uid=0 gid=0 groups=0   File: /home/live   Size: 44            directory   File: /root   Size: 0            directory stat: cannot stat /root/.hamde: No such file or directory 
+    the panel said:            1 [panel] /etc/distros: 1426 byte(s), 29 line(s), 1 attached distribution(s)|      1 [panel] appmenu entries: 28|      1 [panel] distribution not attached at /n/: alpine|      1 [panel] distro section debian: 3 apps|      1 [panel] launched /bin/hamcalcscene|      1 [panel] no /bin/hamappmenu; Applications button -> the panel's own dropdown|      1 [panel] scene windows ready|
+
+--- ARM FAV: the same disk REBOOTED, with a launch in its history
+    Applications ->      44352 px changed
+    row 0 white:         70%
+    row 1 header strip:  85%  (ARM NEW, no history: 0%)
+    row 1 catbtn strip:  0%  (ARM NEW, no history: 77%)
+    window table:        (2 0 0 1280 800 -1 0 1 1 87 0 0 0 0) (3 0 0 1280 26 100 0 1 1 206 0 0 1 0) (4 0 774 1280 26 100 0 1 1 204 0 0 1 0) (5 8 28 407 200 14 0 1 1 2 0 0 1 0) 
+    favourites on disk:  aplay: cannot open input
+
+==========================================================
+ THE QUESTIONS
+==========================================================
+realboot: PASS the installed root came online off a UEFI disk (ESP -> unified kernel image -> PID 1 -> bind '#sysroot' /)
+realboot: PASS A NEW WINDOW APPEARED when Applications was clicked on a real boot: wid 5 at (8,28), 407 px wide -- the 208 px menu box plus the 200 px category fly-out band. The panel did not merely grow: it is still 26 px tall. 5 8 28 407 160 14 0 1 1 2 0 0 1 0
+realboot: PASS and the PANEL's own window stayed a bar (26 px tall) -- the flat in-panel dropdown, which grows it past 200, is not what opened
+realboot: PASS the menu on the glass has a SEARCH BOX: row 0 is 70% the white search field
+realboot: PASS and CATEGORY ROWS: row 1 is 77% the category-button strip -- one submenu per category, the 'Debian apps >' shape the owner pointed at
+realboot: PASS CONTROL: with no launch history there is NO Favourites header in row 1 (0%) -- assertion 6 cannot be satisfied by a header that was always there
+realboot: PASS TYPING 'fil' ON THE REAL KEYBOARD (virtio-keyboard-pci, over QMP) FILTERED THE LIST: row 6 went from 3008 of 3008 px covering the wallpaper to 0 -- the card actually shrank back to bare desktop
+realboot: PASS and the filtered result is GROUPED, MATE-style: row 1 is a section header (82%) and the category buttons are gone (0%, was 77%)
+realboot: PASS a real click on the filtered row CLOSED the menu: row 1 of its card is back to bare wallpaper (0 of 3008 px differ from the desktop photographed before any menu existed)
+realboot: PASS and the launch was RECORDED where a REBOOT can find it again: the favourites file on the ext4 root names /bin/hamfmscene. It is $HOME/.hamde/favourites with $HOME resolved by lib/homedir.ad, and on this machine that is /home/live -- rc.5 starts the DE as uid 0, /etc/passwd has no uid 0, so the resolver's last resort is what every DE client gets (/bin/hamfmscene cat: cannot open /root/.hamde/favourites: No such file or directory )
+realboot: PASS THE FAVOURITE SURVIVED A REBOOT: on the FIRST click of a fresh boot of the same disk, row 1 of the menu is a section header (85%, 0% category button) where the same rectangle on the machine with no launch history was 0% header and 77% category button. The recency list outlived the menu process, the session AND the power cycle.
+
+--- REOPENING THE MENU IN THE SAME SESSION, AFTER A LAUNCH (measured, not asserted)
+    2nd click on Applications: 51990 px changed, menu window '7'
+    3rd click on Applications: 42246 px changed, menu window 'none'
+    the panel logged 2 spawn(s) of /bin/hamappmenu for 3 clicks
+    ARM OLD, same three clicks on the panel's own dropdown: 80402 px
+    the launched program at the end of the boot:
+      198     0            S  0:00     hamfmscene
+    TWO RUNS IN FOUR FROZE HERE, and the two cases are told apart by the
+    line above and nothing else: when hamfm is in state R with ~2:02 of
+    CPU the screen stops changing (0 px, 0 px, one spawn, no window, the
+    clock stopped); when it is in state S with 0:00 the menu reopens on
+    the 2nd click and toggles shut on the 3rd. Four runs, four times that
+    correlation held. The TUI (/bin/hamfm) was in this menu only because
+    /etc/hamde/apps was on no machine (FINDING 1) and the fallback named
+    it; this run launches /bin/hamfmscene, read from files.desktop. hamfm
+    also parks instead of spinning now (user/hamfm.ad), so both halves
+    of that correlation are closed -- the numbers above are still
+    printed rather than asserted: an intermittent seen twice does not
+    become a guarantee because two runs went the other way.
+
+realboot: PASS THE FAILING ARM FAILS: with /bin/hamappmenu moved aside the same click opened NO window at (8,28) [table: (2 0 0 1280 800 -1 0 1 1 87 0 0 0 0) (3 0 0 1280 602 100 0 1 1 205 0 0 1 0) (4 0 774 1280 26 100 0 1 1 203 0 0 1 0) ], row 0 is 0% search-field white (was 70%) and row 1 is 0% category strip (was 77%). The three assertions above can tell the two menus apart.
+realboot: PASS and what a person got INSTEAD is visible and identified: the click changed 80519 px and the PANEL'S OWN window grew to 602 px tall (it is 26 px in ARM NEW) -- the flat in-panel dropdown, drawn inside the panel window
+realboot: PASS and the panel SAID SO BY NAME in ARM OLD: "no /bin/hamappmenu; Applications button -> the panel's own dropdown"
+realboot: PASS and in ARM NEW it said the other thing: "[panel] Applications button -> /bin/hamappmenu"
+realboot: INFO the panel printed "launched /bin/hamappmenu -self" 2 time(s) in ARM NEW, against 3 clicks on the button and 1+1+0 menu windows that actually appeared -- which is exactly why that line is not evidence
+realboot: PASS every click and every keystroke in this file left the host over QMP input-send-event: nothing here names an event, pointer or keys ring
+
+--- FINDING 1, NOW FIXED -- kept because the guest is still asked
+    scripts/hamlinux_image.sh staged /etc by a list of FILES:
+      for f in hostname hosts passwd ... hamde ...; do [ -f "etc/$f" ] && install ...; done
+    etc/hamde is a DIRECTORY, so [ -f ] was false and /etc/hamde/apps --
+    the 26 .desktop launchers -- was on NO hamnix-linux machine. Both
+    menus fell back to a list compiled into them, in which 5 of 11
+    entries named programs no image builds (/bin/calculator,
+    /bin/hamterm, /bin/hamedit, /bin/hamview, /bin/hamfm) -- rows that
+    did nothing at all when a person clicked them.
+    The catalogue is staged now, its 23 remaining programs are built and
+    packaged, and a launcher whose program is absent is dropped from the
+    menu AND NAMED (appmenu-missing). tests/linux/de_appmenu_installed.sh
+    is the gate; what THIS guest found is printed rather than assumed:
+        File: /etc/hamde
+    (an EMPTY line there means the catalogue is still missing on this
+     machine, and every row below it came from the fallback.)
+    This gate launches Files -> /bin/hamfmscene, read from files.desktop.
+
+--- FINDING 2 (not a failure of this gate)
+    `ls` GIVEN A REGULAR FILE PRINTS ITS CONTENTS. The first run of this
+    gate used `ls -l /bin/hamappmenu` as a probe and put 450 KB of ELF on
+    the serial console, three times. Measured on the host with the image's
+    own binary: build/image/root/bin/ls -l <file> cats the file, exit 0.
+
+realboot: 16 passed, 0 failed
+(logs: /home/david/.hamnix-build/appmenu-realboot/boot.{new,old}.log; screendumps + PNGs: /home/david/.hamnix-build/appmenu-realboot/shots)

@@ -1,0 +1,4 @@
+enteruser: PASS this is Debian 13.4
+enteruser: INFO uid=1000 user=david root=ok
+enteruser: PASS unshare -U (CLONE_NEWUSER) from inside the namespace
+enteruser: PASS bwrap --unshare-user builds a container

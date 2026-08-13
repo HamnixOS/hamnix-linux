@@ -1,0 +1,13 @@
+[snarf-dev] staging an image with that rc ...
+[snarf-dev] booting (up to 45s) ...
+
+[snarf-dev] assertions
+  PASS  root: cat /dev/snarf reads back what the shell wrote
+  PASS  root: /dev/snarf.primary is a SECOND buffer
+  PASS  the PRIMARY write did not touch the CLIPBOARD
+  PASS  the uid-1001 SESSION reads what root copied
+  PASS  and copies back into the root-owned segment
+  PASS  /srv/snarf exists and is 0666 (not the umask's 0644)
+
+[snarf-dev] SUMMARY passes=6 fails=0
+[snarf-dev] RESULT: PASS

@@ -1,0 +1,21 @@
+  ok   user/sshd.ad defines _field_at, and this gate compiles THAT definition
+  ok   the fixture IMPORTS it (it does not carry a copy)
+  ok   the compiled sshd differs from the shipped one in ONE line: its 'main'
+[sshfb] building tests/test_ssh_fieldbound.ad against the real user/sshd.ad -> /home/david/.hamnix-build/ssh_fieldbound.6b80d30d5b7f/ssh_fieldbound.elf
+  ok   the fixture links against user/sshd.ad's own _field_at
+[sshfb] --- fixture output ---
+== _field_at: a peer's length may never reach past the packet
+  ok   0xFFFFFFFF at offset 1 of a 40-byte packet is REFUSED
+  ok   a field that exactly fills the packet is accepted (1 + 4 + 35 = 40)
+  ok   and one byte more is refused -- the boundary is exact
+  ok   a length inside the ARRAY but past the PACKET is refused
+  ok   a length prefix that itself runs past the packet is refused
+  ok   a zero-length field is accepted (an empty SSH string is legal)
+ssh_fieldbound: 6 passed, 0 failed
+[sshfb] --- end output ---
+  ok   no assertion in the fixture failed
+  ok   all 6 bound cases ran (0xFFFFFFFF, exact fit, +1, past-packet,
+  --        truncated prefix, empty field)
+  ok   the fixture exited 0
+  ok   and said so itself: 6 passed, 0 failed
+ssh_fieldbound gate: 8 passed, 0 failed

@@ -1,0 +1,15 @@
+[de_probe] work dir: /tmp/claude-1000/sw2c/tmp.XEHjz9Ddx5
+ok   a terminal opens from the DE launch queue
+ok   its shell starts through the /fd pipe names
+FAIL the typed keys reach the focused window
+ok   the screen was scanned out
+--- serial, last DE lines:
+    [rc.5] clipboard bridge for debian
+    [rc.5] wayland server for alpine
+    [rc.5] clipboard bridge for alpinehampanelscene: /etc/panel.conf: honoured, 2 panel(s)
+    [rc.5] desktop up
+    [hamterm] hamsh spawned
+    [hamsh:stage-06] rc-done
+    [hamsh:stage-07] loop-enter
+    hamsh$ [hamsh:stage-08] ed-readline-first
+SOME FAILED

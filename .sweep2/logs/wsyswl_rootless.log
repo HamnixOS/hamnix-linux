@@ -1,0 +1,62 @@
+rless: INFO isolated: /tmp, /dev/shm, /srv and $XDG_RUNTIME_DIR (/run/user/1000, dev 0:79) are private tmpfs of this run alone (/tmp is dev 0:75 in this mount namespace; the host's /tmp is untouched and unreadable from here); id map: root plus a subordinate range, so gid 5 (tty) and friends exist
+rless: PASS the compositor, the Wayland server, the desktop, the panel and the window probe all build
+rless: PASS hamdesktop mapped its full-screen backdrop (wid 2) -- there is a desktop here
+rless: PASS hampanelscene mapped its bar at y 0, height 26, z 100
+rless: PASS wsyswl is listening, and was told to manage the X display at /tmp/.X11-unix/X84
+rless: === 0. is xwayland_shell_v1 advertised, and only when it is backed?
+rless: PASS with an XWM, xwayland_shell_v1 IS advertised
+rless: PASS without an XWM, xwayland_shell_v1 is NOT advertised (the rootful path is untouched)
+rless: PASS the rootful compositor still advertises xdg_wm_base, wl_shm and the rest
+rless: === 1. two X clients on ONE rootless Xwayland
+rless: PASS the compositor's window manager has the X display
+rless: PASS the X root has 3 mapped children -- the window manager maps what it redirects
+rless: INFO xwl_managed 3  xwl_paired 2  windows_high_water 2  conns 1
+rless: INFO commits 4  drop_xwl_unpaired 0  xwm_refused 0
+rless: PASS the XWM has both X windows on its books
+rless: PASS both X windows were associated with a wl_surface
+rless: PASS windows_high_water is 2: an X toplevel is its own wsys window
+rless: PASS no frame was thrown away for want of an association
+rless: PASS the XWM refused nothing
+rless: PASS and it is still ONE Wayland connection -- rootless buys addressability, not fate
+rless: === 2. two wids under /dev/wsys, and can wsysd move one of them?
+rless: PASS /dev/wsys lists 2 application windows for one X display: wids 5 6
+rless: INFO wid 5 at 60,60 188x112   wid 6 at 400,60 188x112
+rless: PASS the two windows have different geometry -- they are two windows, not two names for one
+rless: INFO wid 5 is 97% alpha / 0% beta;  wid 6 is 0% alpha / 97% beta
+rless: PASS both windows' pixels are on the Hamnix framebuffer, in their own colours
+rless: PASS the compositor moved wid 5 to 280,240
+rless: PASS and wid 6 did not move with it -- THE POINT OF THE WHOLE CHANGE
+rless: INFO the X server says 'alpha' is at 280,240; x_configure_pushed 3
+rless: PASS the X client was TOLD where the desktop put it -- X and wsys agree on 280,240
+rless: PASS and the compositor counts the pushes it made (3)
+rless: INFO after the move: 97% of the new rectangle is the moved window's colour,
+rless: INFO                 97% of the old rectangle is still the other window's colour
+rless: PASS the moved window's PIXELS followed it
+rless: PASS the other window's pixels are exactly where they were
+rless: === 2b. is an X window from the namespace a window ON THE DESKTOP?
+rless: INFO the X window's rectangle: 0% its colour on the bare desktop, 97% with the client up
+rless: PASS the X window is composited OVER the wallpaper, not under it
+rless: PASS the wallpaper is still there beside the X windows (100% unchanged)
+rless: INFO an X window straddling the bar: 0% of the bar is the window, 98% of it clear of the bar
+rless: PASS the panel is drawn OVER an X window that overlaps it, and the window elsewhere is untouched
+rless: INFO /dev/wsys/windows says: 5 alpha|6 beta|
+rless: PASS both X windows are in the taskbar list, under the names their X clients set
+rless: === 2c. does this screen have a window manager, as far as X is concerned?
+rless: INFO _NET_SUPPORTED lists 16 atoms
+rless: PASS _NET_SUPPORTED is published with 16 atoms
+rless: INFO check window 0x200001 names 0x200001 and calls itself "wsyswl"
+rless: PASS the check window exists and points back at itself -- a LIVE window manager
+rless: PASS and it names itself: wsyswl
+rless: INFO _NET_WORKAREA is 0, 0, 1160, 700
+rless: PASS _NET_WORKAREA answers, so a client asking how big the desktop is gets a number
+rless: INFO _NET_CLIENT_LIST has 2 windows
+rless: PASS _NET_CLIENT_LIST carries both X windows -- a taskbar could list them
+rless: === 3. the control -- the same two clients on a ROOTFUL Xwayland
+rless: INFO the rootful display's two clients added 1 wsys window(s)
+rless: PASS rootful: two X clients are ONE wsys window -- the thing rootless fixes, measured
+rless: PASS and two X SERVERS are two connections (2) -- independence is bought per server
+rless: === 4. can one X display exhaust something another client needs?
+rless: PASS MAXWIN 512 >= MAXCONN 32 * WINPERCONN 16
+rless: INFO an X display may therefore have at most WINPERCONN=16 toplevels on screen at once
+rless: PASS and the paint pool behind it is readable: slots 3/512 exhausted 0 last_refused 0 0x0
+rless: 37 passed, 0 failed

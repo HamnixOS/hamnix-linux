@@ -1,0 +1,36 @@
+updnotice: INFO this tree is wsys v8; the refusing probe will be v9
+updnotice: PASS the compositor, the desktop and the panel all build
+updnotice: PASS a v9 probe built, and it differs from the v8 one
+updnotice: PASS CONTROL: with nothing refused, the notice rectangle is 0% #ffe9b0
+updnotice: PASS no refusal marker exists yet
+updnotice: PASS THE REFUSAL IS INTACT: the v9 binary refused the live v8 session by name
+        wsys: REFUSING to attach to /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/updnotice.4tt1j7/wsys.shm: it is a LIVE window-system session of
+        wsys:   version 8 and this program is version 9.  Attaching would erase
+        wsys:   every window on that desktop, so nothing has been changed.
+        wsys: The window system was updated underneath the running session.
+        wsys:   REBOOT (or restart the session) and start this program again.
+updnotice: PASS the marker names the pair the refusal was about: refused live=8 mine=9 pid=413248 boot=9efb8f1a-3e12-4285-9208-db375d79f26d
+updnotice: PASS THE PERSON IS TOLD: the notice rectangle went 0% -> 82% #ffe9b0 on a real refusal (after 0s)
+updnotice: PASS a click at (900,600), far from it, left the notice up (82%)
+updnotice: PASS THE NOTICE IS DISMISSIBLE: a click on the card took the rectangle to 0%
+updnotice: PASS THE DESKTOP IS NOT WEDGED: after the notice, the Applications button still opens the panel's dropdown (84% of the menu column is the card colour)
+updnotice: PASS the second refusal appended to the marker rather than rewriting it (75 -> 150 bytes), which is what makes the size a serial
+updnotice: PASS A SECOND REFUSAL RAISES THE NOTICE AGAIN: the rectangle is back to 82% #ffe9b0 after a dismissal took it to 0%
+updnotice: PASS the v9 Applications menu was refused by the live v8 session
+updnotice: PASS A REFUSED MENU LEAVES NO FAULT: the refusal is about the SESSION, not the program, so the Applications button survives the restart that fixes it
+updnotice: PASS CONTROL: a menu that was NOT refused did not take the fault-suppressing branch, so the suppression is conditional on the refusal and the panel's fallback is intact for a genuinely broken menu
+updnotice: INFO the card is 340x86, read from user/hampanelscene.ad
+updnotice: PASS CONTROL for 'bottom': with the panel stopped, its notice box is 0% #ffe9b0, so what follows is this panel's card and not a leftover
+updnotice: PASS THE NOTICE REACHES AN 'bottom' PANEL: 82% #ffe9b0 at 8,688 after 0s -- the card follows the bar to that edge
+updnotice: PASS CONTROL for 'left': with the panel stopped, its notice box is 0% #ffe9b0, so what follows is this panel's card and not a leftover
+updnotice: PASS THE NOTICE REACHES AN 'left' PANEL: 82% #ffe9b0 at 26,8 after 0s -- the card follows the bar to that edge
+updnotice: PASS CONTROL for 'right': with the panel stopped, its notice box is 0% #ffe9b0, so what follows is this panel's card and not a leftover
+updnotice: PASS THE NOTICE REACHES AN 'right' PANEL: 82% #ffe9b0 at 914,8 after 0s -- the card follows the bar to that edge
+updnotice: INFO two panels -- a top bar with the Applications button and a bottom taskbar without it
+updnotice: PASS CONTROL for the two-panel case: with no panel running both boxes are empty (top 0%, bottom 0%)
+updnotice: PASS THE CARD GOES TO THE PANEL WITH THE APPLICATIONS BUTTON: 82% #ffe9b0 at 8,26 after 0s
+updnotice: PASS AND ONLY THAT PANEL: the taskbar's own box is 0% #ffe9b0 -- the notice is drawn once, not once per panel
+updnotice: INFO a marker from a previous boot, and one from this boot, on the same panel
+updnotice: PASS A MARKER FROM A PREVIOUS BOOT RAISES NOTHING: the panel read it, said so, and the box is 0% #ffe9b0 after 2s -- the notice cannot outlive the restart it asks for, even where /srv remembers
+updnotice: PASS AND A MARKER FROM THIS BOOT STILL RAISES IT: 82% #ffe9b0 after 0s -- the staleness test discriminates rather than silencing
+updnotice: 26 passed, 0 failed

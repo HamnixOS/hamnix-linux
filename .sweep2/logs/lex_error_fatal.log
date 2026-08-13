@@ -1,0 +1,28 @@
+[lexgate] building hpm + hamsh for the Linux line -> /home/david/.hamnix-build/lex_error_fatal.6b80d30d5b7f
+fixture: 2 packages
+[lexgate] ================================================
+[lexgate] PART 1 -- hamsh itself, on the exact wrapper hpm writes
+  ok   (1) hamsh EXITS NON-ZERO (1) on a script that does not lex -- on an OPEN stdin, in 30s
+  ok   (2) it names the file AND the line the quote opened on: /home/david/.hamnix-build/lex_error_fatal.6b80d30d5b7f/quote.exec:3: lexical error: a quote opened here is never closed
+  ok   (3) and it says the script was NOT RUN -- and indeed not even the line BEFORE the bad quote executed
+  ok   (4) control: a well-formed script still runs and still exits 0
+[lexgate] PART 2 -- hpm, installing from a file:// repository
+  ok   (5) the fixture repository refreshes (2 packages)
+  ok   (6) hpm does NOT report the package installed, and EXITS NON-ZERO (__RC__=1)
+  ok   (7) it fails BY NAME: the hook and the package are both named, and hpm says the package is NOT correctly installed
+  ok   (8) and the CAUSE is on the same console with a line number: /tmp/hpm/staging/lexfixture-quote-1.0.0/install.hamsh.exec:3: lexical error: a quote opened here is never closed
+  ok   (9) and installed.json does not list it: a package whose hook did not run is not an installed package
+  ok   (10) control: an ordinary package still installs and its hook still runs
+[lexgate] PART 3 -- a real boot whose /etc/rc.boot does not lex
+[lexgate] staging a private image (this takes a few minutes)
+[lexgate] booting a machine whose /etc/rc.boot does not lex
+  ok   (11) the machine SAYS SO, naming the file and the line: /etc/rc.boot:4: lexical error: a quote opened here is never closed
+  ok   (12) and it says what state the machine is in: PID 1 announces a RESCUE SHELL rather than leaving a person to infer it
+  ok   (13) THE MACHINE IS STILL USABLE: the console shell RAN both commands typed at it after the failed rc (their output, not the editor's echo of them, is on a line of its own)
+  ok   (14) and it can still READ THE DISK from that shell (cat /version answered) -- enough to repair the rc
+  ok   (15) and nothing in the rc ran, not even the lines before the bad quote
+  ok   (16) no kernel panic: PID 1 did not exit
+[lexgate] control: the same image with the tree's own rc.boot
+  ok   (17) control: an ordinary boot is unaffected -- the whole rc runs, no lexical error, no panic, and it reaches the interactive shell
+[lexgate] ================================================
+[lexgate] PASS 17  FAIL 0

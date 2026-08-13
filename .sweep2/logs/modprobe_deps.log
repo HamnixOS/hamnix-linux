@@ -1,0 +1,42 @@
+[moddep] staging an image (bridge STAGED but NOT boot-loaded; 8021q on disk but NOT in the table) in /home/david/.hamnix-build/modprobe-deps/image
+[moddep] [image] staged late (on disk, WITHHELD from modules.dep): 8021q
+[moddep] [image] withheld 8021q from modules.dep (62 -> 61 rows) -- the post-install state
+[moddep] [image] modules.dep: 61 modules, 5076 bytes — modprobe can resolve by name
+PASS: the image carries 6.12.85+deb13-amd64/modules.dep (61 modules)
+PASS: bridge's line names both of its dependencies: kernel/net/bridge/bridge.ko: kernel/net/802/stp.ko kernel/net/llc/llc.ko
+PASS: bridge is NOT in /etc/modules -- nothing but modprobe can put it in the kernel
+[moddep] booting (ceiling 240s)
+[moddep] boot log: /home/david/.hamnix-build/modprobe-deps/boot.log (572 lines)
+PASS: the guest ran to completion
+PASS: /proc/modules is readable and lists 56 modules before the test
+PASS: llc is not in the kernel before modprobe runs
+PASS: stp is not in the kernel before modprobe runs
+PASS: bridge is not in the kernel before modprobe runs
+[moddep] modprobe loaded, in order: llc stp bridge 
+PASS: loaded leaf-first: llc, stp, bridge
+PASS: modprobe exited 0
+PASS: llc IS IN THE KERNEL afterwards (/proc/modules): llc 16384 2 bridge,stp, Live 0xffffffffc0c0d000
+PASS: stp IS IN THE KERNEL afterwards (/proc/modules): stp 12288 1 bridge, Live 0xffffffffc0ccf000
+PASS: bridge IS IN THE KERNEL afterwards (/proc/modules): bridge 389120 0 - Live 0xffffffffc0d24000
+PASS: the kernel records stp as a USER of llc -- the dependency is real: llc 16384 2 bridge,stp, Live 0xffffffffc0c0d000
+PASS: lsmod shows llc
+PASS: lsmod shows stp
+PASS: lsmod shows bridge
+PASS: lsmod prints no fabricated row
+PASS: modprobe nosuchmodule exits non-zero
+PASS: and names the table it consulted: modprobe: module not found in /lib/modules/6.12.85+deb13-amd64/modules.dep: nosuchmodule
+PASS: modprobe with a missing modules.dep exits non-zero
+PASS: and says which file it could not read
+PASS: an UNQUOTED >> into /lib/modules/<release>/ lands (the '+' in the release used to eat it)
+PASS: 8021q.ko IS on the image's disk
+PASS: 8021q is NOT in the build-time modules.dep -- exactly the post-hpm-install state
+PASS: modprobe 8021q exits non-zero while the table does not describe it
+PASS: and it names the cause instead of implying the driver does not exist
+PASS: 8021q is not in the kernel before the hook lines are appended
+[moddep] after the hook lines, modprobe loaded: llc mrp stp garp 8021q 
+PASS: modprobe 8021q exits 0 once the package's own dependency lines are in the table
+PASS: garp IS IN THE KERNEL (/proc/modules): garp 16384 1 8021q, Live 0xffffffffc0cd5000
+PASS: mrp IS IN THE KERNEL (/proc/modules): mrp 20480 1 8021q, Live 0xffffffffc0cc8000
+PASS: 8021q IS IN THE KERNEL (/proc/modules): 8021q 53248 0 - Live 0xffffffffc0d1c000
+
+32 passed, 0 failed

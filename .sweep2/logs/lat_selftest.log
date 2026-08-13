@@ -1,0 +1,11 @@
+=== healthy (no interference):
+   lat_n 40 p50_us 76 p95_us 88 max_us 95 submit_us 0
+   lat_n 39 p50_us 76 p95_us 122 max_us 128 submit_us 0
+   lat_n 39 p50_us 75 p95_us 110 max_us 117 submit_us 0
+=== now SIGSTOPping wsysd 120 ms at a time -- the number MUST rise:
+   lat_n 39 p50_us 76 p95_us 122 max_us 128 submit_us 0
+   lat_n 39 p50_us 75 p95_us 110 max_us 117 submit_us 0
+   lat_n 40 p50_us 259761 p95_us 261063 max_us 378647 submit_us 0
+=== worst max_us seen across the run: 378647
+lat_selftest: PASS the instrument reported a >=100 ms frame when the
+lat_selftest:      compositor was deliberately stopped for 120 ms.

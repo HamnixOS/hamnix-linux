@@ -1,0 +1,29 @@
+[appmenu-inst] work dir: /tmp/claude-1000/sw2/appmenuinst.sOK1My
+appmenu-inst: INFO the tree ships 26 launchers in etc/hamde/apps
+
+=== 1. the staged image root ===
+[appmenu-inst] staging an image (this builds the whole userland)
+appmenu-inst: PASS all 26 launchers are staged at /etc/hamde/apps on the image (26 found)
+appmenu-inst: PASS apps-optional is NOT staged (its launchers ship with the packages that carry their programs)
+
+=== 2. the programs those launchers name ===
+appmenu-inst: PASS every one of the 26 launchers names a program that is in the image's /bin
+
+=== 3. the package lists name them too ===
+appmenu-inst: PASS scripts/hamlinux_packages.py places all 26 launchers in packages (one per application, beside the program it launches)
+appmenu-inst: PASS every launcher AND every program it names is carried by some package
+
+=== 4. the menu the panel builds on a real boot ===
+appmenu-inst: INFO the launcher under test is hamchess.desktop (Chess -> /bin/hamchessscene)
+[appmenu-inst] staging the boot image
+appmenu-inst: INFO removed /bin/hamchessscene from the boot root and repacked (27M)
+[appmenu-inst] booting (up to 150s)
+appmenu-inst: PASS the machine booted to a desktop and read its panel log back
+appmenu-inst: PASS the booted machine has all 26 launchers under /etc/hamde/apps
+appmenu-inst: INFO the panel reports [panel] appmenu entries: 24  (catalogue 26, minus 1 live-only launcher(s) on a non-installer boot, minus the 1 whose program was removed = 24)
+appmenu-inst: PASS the menu lists 24 entries -- every launcher whose program is installed, and not the one whose is not
+appmenu-inst: PASS exactly one launcher was dropped for a missing program, so the count above is not two errors cancelling
+appmenu-inst: PASS the panel named the launcher it dropped: appmenu-missing Chess /bin/hamchessscene
+appmenu-inst: PASS a launch of a program that is not installed is refused BY NAME, not reported as launched
+
+appmenu-inst: 11 passed, 0 failed

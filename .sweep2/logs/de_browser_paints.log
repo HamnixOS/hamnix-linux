@@ -1,0 +1,7 @@
+== does the browser put a page on the screen?
+  info page-background pixels in the framebuffer: 463989
+  ok   THE BROWSER PAINTS: 463989 page-background pixels reached the framebuffer
+  ok   and the compositor does not claim it paints nothing -- no scene-coverage warning for a window whose pixels come from its backbuffer
+
+de_browser_paints: 2 passed, 0 failed
+PASS de_browser_paints

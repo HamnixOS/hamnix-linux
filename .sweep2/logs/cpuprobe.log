@@ -1,0 +1,1 @@
+/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/tests/linux/cpuprobe.sh: line 75: 1: usage: cpuprobe.sh <pid> [--verify exe] [--label X]

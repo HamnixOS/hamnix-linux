@@ -1,0 +1,13 @@
+de_fps_gpu.sh
+de_fps_mate.sh
+hamnix_x11session.sh
+hamnix_xdiag.sh
+runsweep_jail.sh
+steam_consent_dialog.sh
+steam_look.sh
+steam_probe.sh
+steam_scroll_why.sh
+wsyswl_shared_fate.sh
+wsyswl_stall.sh
+x11_record_trace_selftest.sh
+xsnarf_ondevice.sh

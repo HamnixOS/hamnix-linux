@@ -1,0 +1,15 @@
+[hpmsig] building user/hpm.ad -> build/hpmsig/hpm.elf
+[hpmsig] check 1: 640-byte header block + a 129-byte signature, no flags
+[hpmsig] PASS: signed index accepted through a CDN-sized header block
+[hpmsig] check 2: a 4 KiB header block still verifies
+[hpmsig] PASS: signed index accepted through a 4 KiB header block
+[hpmsig] check 3: tampered index
+[hpmsig] PASS: tampered index refused, and named as an invalid signature
+[hpmsig] check 4: no index.json.sig at all (404 + a 9 KB error page)
+[hpmsig] PASS: unsigned repo named accurately (404), and --allow-unsigned advised
+[hpmsig] PASS: --allow-unsigned still refreshes an unsigned repo, loudly
+[hpmsig] check 5: the signature fetch fails (HTTP 500)
+[hpmsig] PASS: a 500 on index.json.sig is reported as a failed fetch, not as unsigned
+[hpmsig] check 6: the server is gone entirely
+[hpmsig] PASS: an unreachable server fails loudly: not 'unsigned', not a 0-package success
+[hpmsig] ---- 7 PASS, 0 FAIL ----

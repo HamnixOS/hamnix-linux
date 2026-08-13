@@ -1,0 +1,64 @@
+private: INFO 53 host-side gates start the window system: 34 isolated, 4 exempt by name, 15 neither
+private: FAIL tests/linux/cap_power_ab.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/de_browser_paints.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/drag_one.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/drag_why.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/idle_gate.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/lat_selftest.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/opcount_selftest.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/pixcmp.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/scanout_desktop.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/wake_coalesce_stale.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/wsys_enum_policy.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/wsys_op_census.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/wsys_srv_identity.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/wsys_srv_readlat.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: FAIL tests/linux/wsys_wctl.sh starts the window system on this host and does NOT isolate itself. It will write /tmp/hamnix-*, /dev/shm/hamnix-* or /srv/* under names a concurrent run and this machine's own desktop READ -- see tests/linux/private_ns.sh. Add, right after cd "$PROJ_ROOT":
+private:            . tests/linux/private_ns.sh
+private:            priv_ns_reexec "$@"
+private:      and re-run it to confirm it still scores what it scored. If it genuinely must not be isolated, name it in EXEMPT in this file with the reason.
+private: PASS every exemption still names a real gate that is still unisolated, and still gives a reason
+private: PASS tests/linux/private_ns.sh is present and defines priv_ns_reexec
+private: 2 passed, 15 failed

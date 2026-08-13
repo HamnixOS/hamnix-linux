@@ -1,0 +1,9 @@
+[audio_capture] staging an image with that rc
+[audio_capture] booting on -audiodev none (silence in, correctly timed)
+rc.boot: audio capture gate
+[arecord] captured 188340 bytes in 1000 ms
+[arecord] captured 188340 bytes in 1000 ms
+[audio_capture] arecord status: 0
+[audio_capture] DONE
+[audio_capture] captured 188340 bytes in 1000 ms (98.1% of the 192000 a 48 kHz stereo s16le second is worth)
+[audio_capture] PASS: the capture substream runs and delivers frames at the configured rate. Their CONTENT is silence, because QEMU's only host-free input backend is silence -- see the header.

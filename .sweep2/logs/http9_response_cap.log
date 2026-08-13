@@ -1,0 +1,36 @@
+[http9_cap] (1/4) building curl / wget / the cap probe for the host ...
+[http9_cap] PASS built curl, wget and the cap probe over unchanged http9/net9
+[http9_cap] (2/4) starting the header-padding server ...
+[http9_cap] PASS server header block measured at 642 bytes (python's http.server sends 203)
+[http9_cap] (3/4) http9 cap contract ...
+[http9_cap] PASS cap=512 for a 129-byte resource behind 642 bytes of headers -> RC=0 STATUS=200 BODYLEN=129
+[http9_cap] PASS cap=129 for a 129-byte body (exact fit) -> RC=0 STATUS=200 BODYLEN=129
+[http9_cap] PASS cap=128 for a 129-byte body (one short) -> RC=-6 STATUS=200 BODYLEN=128
+[http9_cap] PASS cap=512 against a 9 KB 404 page still reports the status -> RC=-6 STATUS=404
+[http9_cap] PASS the head is readable after a -6 -> CTYPE=text/html
+[http9_cap] PASS cap=262144 body=262144 (hambrowse's image cap, exact) -> RC=0 STATUS=200 BODYLEN=262144
+[http9_cap] PASS cap=262144 body=262145 (one over) -> RC=-6 STATUS=200
+[http9_cap] PASS a 302 behind a 20 KB body still follows into a 1 KB buffer -> RC=0 STATUS=200 BODYLEN=129
+[http9_cap] PASS chunked body, no Content-Length, decoded -> RC=0 STATUS=200 BODYLEN=50000
+[http9_cap] PASS http_prepend_head(http://127.0.0.1:37055/tiny): RAW=771 = HDRLEN 642 + BODYLEN 129
+[http9_cap] PASS http_prepend_head(http://127.0.0.1:37055/tiny) puts the status line in front -> RAW0=HTTP/1.1 200 OK
+[http9_cap] PASS http_prepend_head(http://127.0.0.1:37055/tiny) moved the body intact -> TAILMATCH=1
+[http9_cap] PASS http_prepend_head(http://127.0.0.1:37055/n/100000): RAW=100645 = HDRLEN 645 + BODYLEN 100000
+[http9_cap] PASS http_prepend_head(http://127.0.0.1:37055/n/100000) puts the status line in front -> RAW0=HTTP/1.1 200 OK
+[http9_cap] PASS http_prepend_head(http://127.0.0.1:37055/n/100000) moved the body intact -> TAILMATCH=1
+[http9_cap] (4/4) curl / wget ...
+[http9_cap] PASS curl fetched 3000000 bytes whole (rc=0)
+[http9_cap] PASS wget saved 3000000 bytes whole (rc=0)
+[http9_cap] PASS curl's and wget's last 64 bytes agree (content, not just length)
+[http9_cap] PASS curl on an over-cap body: exit 23, names HTTP 200 and the size
+[http9_cap] PASS curl does NOT call an over-cap body a transport error
+[http9_cap] PASS curl still wrote the 8388608 bytes that fit
+[http9_cap] PASS wget on an over-cap body: exit 9, says INCOMPLETE and names HTTP 200
+[http9_cap] PASS curl fetched the 129-byte resource behind 642 bytes of headers
+[http9_cap] PASS curl -i prints the status line, the headers and the body
+[http9_cap] PASS curl on a 404 exits 22 and names the status
+[http9_cap] (bonus) the original incident, against the live repo ...
+[http9_cap] PASS 512-byte buffer fetches the live 129-byte signature (HDRLEN=662 off GitHub Pages)
+[http9_cap] PASS a live missing signature is a 404, not a bare failure -> RC=-6 STATUS=404
+[http9_cap] ---- 29 PASS, 0 FAIL ----
+[http9_cap] PASS

@@ -1,0 +1,113 @@
+srvid|  == starting wsysd as uid 1001, HAMWSYS_SERVER=1, TRACE=1
+srvid|  == segowner 1001
+srvid|  == victimwid 2
+srvid|  == baseline 2 VICTIM-OWN-TITLE
+srvid|  == armC.unrouted chrome open=-1 write=-1 exit=1
+srvid|  == armC.after 2 VICTIM-OWN-TITLE
+srvid|  == armC.routed chrome open=-1 write=-1 exit=1
+srvid|  == armC.routed.after 2 VICTIM-OWN-TITLE
+srvid|  == armR.exit 0
+srvid|  == armR: wsrvlo: attacker uid 1002 pid 462992; window 2 owner pid 462958; segment owner uid 1001
+srvid|  == armR: wsrvlo: the in-process check says hostowner=0 owns_wid=0 -- i.e. REFUSE
+srvid|  == armR: wsrvlo: after one assignment to the identity the check reads, the SAME check says hostowner=1 owns_wid=0 -- i.e. ALLOW
+srvid|  == armR: wsrvlo: the unrouted write LANDED (rc 25). No mediator was present: the store was the attacker's own.
+srvid|  == armR.after 2 PWNED-BY-A-STRANGER
+srvid|  == reset 2 VICTIM-OWN-TITLE
+srvid|  == armG.exit 0
+srvid|  == armG: wsys: the server refused op 6: Operation not permitted
+srvid|  == armG: wsrvmu: a window-less process sent a routed `title` for window 2
+srvid|  == armG: wsrvmu: server counters: conns 3 live 2 msgs 10 nop 0 ping 0 stat 2 bad 0 bytes 94 write 4 newwin 1 refused 1
+srvid|  == armG: wsrvmu: the server received it (write 3 -> 4), so a refusal below is a decision and not a lost message
+srvid|  == armG: wsrvmu: caller uid 1002 pid 463013; segment owner uid 1001
+srvid|  == armG: wsrvmu: the mediator REFUSED it (refused 0 -> 1)
+srvid|  == armG.after 2 VICTIM-OWN-TITLE
+srvid|  == armO.after 2 OWNER-RENAMED-IT
+srvid|  == armH.exit 1
+srvid|  == armH: wsrvmu: a window-less process sent a routed `title` for window 2
+srvid|  == armH: wsrvmu: server counters: conns 4 live 2 msgs 15 nop 0 ping 0 stat 4 bad 0 bytes 146 write 6 newwin 1 refused 1
+srvid|  == armH: wsrvmu: the server received it (write 5 -> 6), so a refusal below is a decision and not a lost message
+srvid|  == armH: wsrvmu: caller uid 1001 pid 463027; segment owner uid 1001
+srvid|  == armH: wsrvmu: the mediator ACCEPTED it (refused 1 -> 1)
+srvid|  == armP.holderpid 463029
+srvid|  == armP.wid 3
+srvid|  == armP.decorate chrome open=3 write=23 exit=0
+srvid|  == armP.decorate2 chrome open=3 write=11 exit=0
+srvid|  == armP.baseline 3 HOLDER-OWN-TITLE
+srvid|  == armP.sib.exit 0
+srvid|  == armP.sib: wsys: the server refused op 6: Operation not permitted
+srvid|  == armP.sib: wsrvmu: a window-less process sent a routed `title` for window 3
+srvid|  == armP.sib: wsrvmu: server counters: conns 5 live 2 msgs 19 nop 0 ping 0 stat 6 bad 0 bytes 175 write 7 newwin 1 refused 2
+srvid|  == armP.sib: wsrvmu: the server received it (write 6 -> 7), so a refusal below is a decision and not a lost message
+srvid|  == armP.sib: wsrvmu: caller uid 1002 pid 463050; segment owner uid 1001
+srvid|  == armP.sib: wsrvmu: the mediator REFUSED it (refused 1 -> 2)
+srvid|  == armP.sib.after 3 HOLDER-OWN-TITLE
+srvid|  == armP.desc.un.exit 0
+srvid|  == armP.desc.un: chrome open=3 write=20
+srvid|  == armP.desc.un.after 3 DESC-UNROUTED
+srvid|  == armP.desc.exit 1
+srvid|  == armP.desc: wsrvmu: a window-less process sent a routed `title` for window 3
+srvid|  == armP.desc: wsrvmu: server counters: conns 6 live 2 msgs 23 nop 0 ping 0 stat 8 bad 0 bytes 204 write 8 newwin 1 refused 2
+srvid|  == armP.desc: wsrvmu: the server received it (write 7 -> 8), so a refusal below is a decision and not a lost message
+srvid|  == armP.desc: wsrvmu: caller uid 1002 pid 463076; segment owner uid 1001
+srvid|  == armP.desc: wsrvmu: the mediator ACCEPTED it (refused 2 -> 2)
+srvid|  == armP.desc.after 3 PWNED-BY-A-STRANGER
+srvid|  == off.begin
+srvid|  == off.wid 2
+srvid|  == off.title 2 OFF-PATH-TITLE
+srvid|  == off.stranger chrome open=-1 write=-1 exit=1
+srvid|  == off.after 2 OFF-PATH-TITLE
+srvid|  == trace wsrvtrace: caller uid=1001 pid=462958 -> wid=2 ownerpid=462958 hostowner=1 owns_wid=1
+srvid|  == trace wsrvtrace: caller uid=1001 pid=462958 -> wid=2 ownerpid=462958 hostowner=1 owns_wid=1
+srvid|  == trace wsrvtrace: caller uid=1001 pid=462958 -> wid=2 ownerpid=462958 hostowner=1 owns_wid=1
+srvid|  == trace wsrvtrace: caller uid=1002 pid=463013 -> wid=2 ownerpid=462958 hostowner=0 owns_wid=0
+srvid|  == trace wsrvtrace: caller uid=1001 pid=462958 -> wid=2 ownerpid=462958 hostowner=1 owns_wid=1
+srvid|  == trace wsrvtrace: caller uid=1001 pid=463027 -> wid=2 ownerpid=462958 hostowner=1 owns_wid=0
+srvid|  == trace wsrvtrace: caller uid=1002 pid=463050 -> wid=3 ownerpid=463029 hostowner=0 owns_wid=0
+srvid|  == trace wsrvtrace: caller uid=1002 pid=463076 -> wid=3 ownerpid=463029 hostowner=0 owns_wid=1
+srvid|  == done
+srvid: .... segment owner uid 1001 (this is what hostowner() reads); victim window 2 owned by uid 1001; attacker is uid 1002
+srvid: PASS the host owner is uid 1001 and the attacker is a different uid -- the two identities that decide every arm below are genuinely different
+srvid: PASS the title instrument reads back a title the victim set ("2 VICTIM-OWN-TITLE") -- an 'unchanged' below is a comparison and not two blanks
+srvid: .... control -- an ORDINARY non-owner client, using the protocol as written:
+srvid: PASS an ordinary non-owner client is refused on the unrouted path (title still "2 VICTIM-OWN-TITLE")
+srvid: PASS an ordinary non-owner client is refused on the routed path too
+srvid: .... BOTH of those are green, and that is exactly why they prove nothing on their own: the refusal came from code inside the ATTACKER. Arms R and G are the ones that separate a check from an enforced check.
+srvid: .... RED ARM -- the same uid, the same window, the local check skipped, no server in the write path:
+srvid|      wsrvlo: attacker uid 1002 pid 462992; window 2 owner pid 462958; segment owner uid 1001
+srvid|      wsrvlo: the in-process check says hostowner=0 owns_wid=0 -- i.e. REFUSE
+srvid|      wsrvlo: after one assignment to the identity the check reads, the SAME check says hostowner=1 owns_wid=0 -- i.e. ALLOW
+srvid|      wsrvlo: the unrouted write LANDED (rc 25). No mediator was present: the store was the attacker's own.
+srvid: PASS UNROUTED: uid 1002 renamed uid 1001's window -> "2 PWNED-BY-A-STRANGER". THE ATTACK WORKS. This is the arm that must succeed, and it did: the write was the attacker's own store into a MAP_SHARED segment, with a live mediator standing next to it and unable to see it. That is the hole WSYS_VERSION 8 -> 9 exists to close.
+srvid: .... GREEN ARM -- the identical mutation, routed, from the same uid 1002:
+srvid|      wsys: the server refused op 6: Operation not permitted
+srvid|      wsrvmu: a window-less process sent a routed `title` for window 2
+srvid|      wsrvmu: server counters: conns 3 live 2 msgs 10 nop 0 ping 0 stat 2 bad 0 bytes 94 write 4 newwin 1 refused 1
+srvid|      wsrvmu: the server received it (write 3 -> 4), so a refusal below is a decision and not a lost message
+srvid|      wsrvmu: caller uid 1002 pid 463013; segment owner uid 1001
+srvid|      wsrvmu: the mediator REFUSED it (refused 0 -> 1)
+srvid: PASS ROUTED: the mediator REFUSED the identical write from the identical uid, and the title is unchanged ("2 VICTIM-OWN-TITLE"). The refusal, in the server's own words: wsrvmu: the mediator REFUSED it (refused 0 -> 1)
+srvid: .... the mediator must not simply refuse everything -- two arms that must be ALLOWED:
+srvid: PASS the window's own owner (uid 1001) renamed it through the routed path
+srvid: PASS the HOST OWNER (uid 1001) is still permitted to write a window it does not own -- devwsys's own rule, unchanged. A refusal here would be the mediator being STRICTER than the path it replaces.
+srvid: .... what the two predicates ANSWER, printed by the server from inside srv_as_caller():
+srvid|      wsrvtrace: caller uid=1001 pid=462958 -> wid=2 ownerpid=462958 hostowner=1 owns_wid=1
+srvid|      wsrvtrace: caller uid=1001 pid=463027 -> wid=2 ownerpid=462958 hostowner=1 owns_wid=0
+srvid|      wsrvtrace: caller uid=1002 pid=463013 -> wid=2 ownerpid=462958 hostowner=0 owns_wid=0
+srvid|      wsrvtrace: caller uid=1002 pid=463050 -> wid=3 ownerpid=463029 hostowner=0 owns_wid=0
+srvid|      wsrvtrace: caller uid=1002 pid=463076 -> wid=3 ownerpid=463029 hostowner=0 owns_wid=1
+srvid: .... for the attacker (uid 1002): hostowner=0 owns_wid=0
+srvid: PASS BOTH predicates answered 0 for the attacker, so the refusal was decided by owns_wid() and not short-circuited by hostowner() -- the ppid walk stage 2 flagged was actually reached and actually said no
+srvid: .... the sharp edge -- owns_wid() is a PARENT-PID WALK, and this is what it answers for two uid-1002 callers that differ only in descent:
+srvid: .... window 3 is owned by pid 463029, a uid-0 process; both callers below are uid 1002
+srvid: PASS a uid-1002 caller NOT descended from the window's owner is refused (owns_wid answered no)
+srvid: .... wsrvtrace: caller uid=1002 pid=463076 -> wid=3 ownerpid=463029 hostowner=0 owns_wid=1
+srvid: PASS MEASURED, AND IT IS THE ANSWER THE HANDOFF EXPECTED: a uid-1002 process that is merely a CHILD of the window's owner is GRANTED -- owns_wid=1, the write was accepted, and the title became "3 PWNED-BY-A-STRANGER". The walk compares pids and never looks at a uid, so it crossed a uid boundary (owner is uid 0) as well as a process one.
+srvid: PASS and the UNROUTED path grants the same descendant the same window (title became "3 DESC-UNROUTED") -- so this is the rule the mediator INHERITED, measured on both paths, not one it introduced
+srvid: .... THIS IS NOT A ROUTING REGRESSION AND MUST NOT BE 'FIXED' HERE. It is devwsys's own rule, ported: hamUI spawns a task INTO a window and stamps the parent's pid, and snap_self() answers 'creator pid OR ANCESTOR' for exactly that reason. Tightening it to an exact pid match would make every hamUI-spawned task unable to drive the window it was spawned into. What the mediator changes is WHERE the walk runs, not what it decides -- and the routed answer is now identical to the unrouted one, which is what stage 2 was required to deliver.
+srvid: .... WHAT IT COSTS, STATED PLAINLY, because it is a policy the enumeration work in stage 3 has to price: any process the desktop spawns is a descendant of the desktop, so every application can retitle, move, raise or destroy any window owned by the compositor, the panel, or any of its own ancestors -- regardless of uid, and now with the mediator's blessing rather than merely without its knowledge. A capability handed out at newwindow, which the design already proposes for enumeration, is the shape that replaces it. It is NOT in this stage.
+srvid: .... for the owner (uid 1001): wsrvtrace: caller uid=1001 pid=462958 -> wid=2 ownerpid=462958 hostowner=1 owns_wid=1
+srvid: PASS the server also traced the legitimate caller, so the two answers above are a contrast and not the only line it can print
+srvid: .... HAMWSYS_SERVER unset everywhere -- verified, not assumed:
+srvid: PASS with the flag unset a client still maps and titles a window ("2 OFF-PATH-TITLE")
+srvid: PASS with the flag unset an ordinary non-owner is still refused ("2 OFF-PATH-TITLE")
+srvid: 15 passed, 0 failed

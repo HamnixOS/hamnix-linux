@@ -1,0 +1,9 @@
+PASS pipe: the reader sees EOF when the writer closes
+PASS pipe: a writer that finishes first still delivers its bytes
+PASS pipe: 1 MiB crosses and both ends finish
+PASS pipe: the writer sees EPIPE when the reader leaves early
+PASS pipe: the creator can read its own pipe to EOF ({ cmd })
+PASS pipe: a three-stage pipeline ends
+PASS pipe: 200 pipes on a 64-slot table
+
+7 PASS, 0 FAIL

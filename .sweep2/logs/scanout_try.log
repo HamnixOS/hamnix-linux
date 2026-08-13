@@ -1,0 +1,11 @@
+   wsysd: scene compositor starting
+   wsysd: scanout: DRM would not take the buffer
+   hamfb: /dev/fb0 (fbdev) 1920x1080 pitch=7680 size=8294400
+   wsysd: screen 1920x1080
+   wsysd: vk backend GPU -- NVIDIA GeForce RTX 3090 (VkPhysicalDeviceType 2, silicon 1, zero-copy 1, device-local 0, host-cached 1)
+   wsysd: present cap OFF -- offscreen, fbdev, or no usable mode timing
+   wsysd: input from ./st.QtfIx5/in only
+   wsysd: wait set 2 fds wake this loop, 1 (one of them is the client wake) always-ready and excluded; fallback tick 16 ms
+   watchdog: FIRED after 25s -- killing pid 425779; the fd closes,
+   watchdog: the kernel drops master and fbcon comes back.
+   ./kms_watchdog.sh: line 46: 425779 Killed                  "$@"

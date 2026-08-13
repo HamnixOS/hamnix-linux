@@ -1,0 +1,211 @@
+-- setup, as the host owner (inner uid 0)
+== root.client open=3 newwindow=10 wid=2 title open=3=20 scene open=6=24 commit open=6=7
+== root. keysopen=6
+== root.chrome open=3 write=11
+== root.chrome open=3 write=16
+== root.chrome open=3 write=11
+== ls -rw-rw-rw- 1 root root 37972380 Aug 13 00:17 /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/wsysbypass.tnd1t9/seg
+== ls -rw-r--r-- 1 root root   133524 Aug 13 00:17 /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/wsysbypass.tnd1t9/seg.chrome
+-- the bypass, as live (inner uid 1001)
+== bypass.table mode=0666 uid=0 size=37972380 open_rdwr=3 mmap_rw=0 open_ro=skip mmap_ro=skip found=1 wrote=1
+== bypass.chrome mode=0644 uid=0 size=133524 open_rdwr=-13 mmap_rw=skip open_ro=3 mmap_ro=0 mprotect_w=FAIL found=1 wrote=0
+== bypass.scene mode=0666 uid=0 size=37972380 open_rdwr=3 mmap_rw=0 open_ro=skip mmap_ro=skip found=0 wrote=0
+== bbmake.chrome open=3 write=17
+== sameuid.bb mode=0666 uid=0 size=65536 open_ro=3 mmap_ro=0 ro=1 mapped=1 found=0
+-- the protocol's view afterwards
+== after.table.read open=3 n=16 [2 PWNEDBYPASSER|]
+== after.chrome.read open=3 n=11 [CHROMEMARK|]
+== after.scene.readwsys: /dev/wsys/2/scene: this process neither owns window 2 nor holds its display list, so it cannot read it.
+== after.scene. open=-1
+== after.keys.readwsys: /dev/wsys/2/keys: this process does not own window 2, so it cannot read its keystrokes.
+== after.keys. open=-1
+== live.screen.read open=3 n=9 [1280 800|]
+== live.chromeread.read open=3 n=11 [CHROMEMARK|]
+== live.client open=3 newwindow=10 wid=3 title open=3=20 scene open=6=24 commit open=6=7
+-- same-uid: a uid-1001 attacker against a uid-1001 victim
+== live.hold.client open=3 newwindow=10 wid=4 title open=3=20 scene open=6=24 commit open=6=7
+== live.hold. open=6 geom draw=6 blit=1
+== live.hold. keysopen=6
+== sameuid.bbreal mode=0666 uid=0 size=65536 open_ro=3 mmap_ro=0 ro=1 mapped=1 found=0
+== sameuid.keys.readwsys: /dev/wsys/4/keys: this process does not own window 4, so it cannot read its keystrokes.
+== sameuid.keys. open=-1
+== sameuid.inj mode=0666 uid=0 open_rdwr=3 mmap_rw=0 found=1 wid=4 pid=438017 wrote=1
+== sameuid.keysend uid=1001 addr=[hamnix-wsys/66306.67666714/4/keys] sendto=6 sent=1
+== hostowner.keysend uid=0 addr=[hamnix-wsys/66306.67666714/4/keys] sendto=6 sent=1
+-- same-uid: reading the victim's keystrokes, O_RDONLY
+== sameuid.typed.chrome open=3 write=16
+== sameuid.snoop mode=0666 uid=0 open_ro=3 mmap_ro=0 ro=1 found=1 wid=4 pid=438017 geom=0,0,32,6 title=[uidgate probe] scenelen=0 scene=[] keyn=6 keys=[9 222\n]
+== injkey.table mode=0666 uid=0 open_rdwr=3 mmap_rw=0 found=1 wid=2 pid=437675 wrote=1
+== victim.client open=3 newwindow=10 wid=4 title open=3=20 scene open=6=24 commit open=6=7
+== victim. open=6 geom draw=6 blit=1
+== victim. keysopen=6
+== victim.keysgot [9 444|1 PASSWORD31337|]
+-- the pixel hand-up rendezvous, from both uids
+== sameuid.pixgrab uid=1001 addr=[hamnix-wsys/66306.67666714/pixels] bound=1 fds=0
+== hostowner.pixgrab uid=0 addr=[hamnix-wsys/66306.67666714/pixels] bound=1 gotwid=2 scenelen=24 scene=[rect 0 0 40 20 0x334455\n] fds=2
+== pixvictim.client open=3 newwindow=10 wid=4 title open=3=20 scene open=6=24 commit open=6=7
+== pixvictim. open=6 geom draw=6 blit=1
+== pixvictim. keysopen=6
+== pixvictim.keysgot [9 444|1 PASSWORD31337|]
+== pixvictim.wsys: the pixel hand-up address is held by uid 1001, not by this window system's owner (uid 0).
+== pixvictim.wsys: no window's display list will be handed to it; windows will not be painted until that is fixed.
+== bbgrab.attacker uid=1001 addr=[hamnix-wsys/66306.67666714/backbuffer] bound=1 fds=0 found=0
+== bbgrab.owner uid=0 addr=[hamnix-wsys/66306.67666714/backbuffer] bound=1 fds=1 found=1
+== sameuid.peek pid=438017 found=1 mem=-13 maps=-13 secret=0 enumerable=0 ptrace=-1
+-- wallpaper, ungated in BOTH spellings
+== wp.ctl.chrome open=3 write=17
+== wp.afterctl.read open=3 n=16 [wallpaper /a.ppm]
+== wp.file.chrome open=3 write=7
+== wp.afterfile.read open=3 n=7 [WPFILE|]
+== rootvictim.client open=3 newwindow=10 wid=2 title open=3=20 scene open=6=24 commit open=6=7
+== rootvictim. keysopen=6
+== rootvictim.wsys: the pixel hand-up address is held by uid 1001, not by this window system's owner (uid 0).
+== rootvictim.wsys: no window's display list will be handed to it; windows will not be painted until that is fixed.
+
+the file modes, which after the split ARE the access control:
+  ok   window table is 0666
+  ok   chrome segment is 0644
+  ok   chrome segment is owned by the host owner
+
+THE HOLE, still open on the window table (the positive control):
+  attack 1 of 4 -- RETITLE another client's window:
+  ok   a bypasser maps the real window table
+  ok   and overwrites a window title in it
+  ok   the protocol reads the overwritten title back -- a real compromise
+  attack 2 of 4 -- SCRIBBLE another client's committed scene:
+  (CLOSED, and the controls below are INVERTED rather than deleted, the
+   same way attack 3's were.  The bypasser is UNCHANGED: it still maps the
+   0666 table read/write, still searches it for the victim's committed
+   display list, and the assertion that it MAPPED the table must keep
+   passing.  What changed is that the display list is not in the mapping
+   at all -- it lives in a per-window memfd the owner hands to the
+   compositor, THE PIXEL HAND-UP in user/linux-wsys.c -- so there is
+   nothing there to find and nothing there to scribble.)
+  ok   a bypasser still opens the 0666 table read/write
+  ok   and still maps it MAP_SHARED PROT_WRITE
+  ok   AND THE COMMITTED DISPLAY LIST IS NOT THERE: the needle the victim drew is not in the table (was: found, and overwritten)
+  ok   and nothing a bypasser writes there reaches the protocol
+  ok   and a process that holds neither is refused BY NAME, not with an empty read
+
+  AND THE HALF OF SCRAPE THAT IS STILL OPEN (a positive control):
+  (the v1 display list left the segment; /srv/wsys.bb, which holds every
+   v2 window's PIXELS -- a browser, a video, a rootless Xwayland -- did
+   not.  A hamUI app's screen contents are private on this machine and
+   FIREFOX'S ARE NOT, and nothing about the two windows says which is
+   which.  This runs on every green run so nobody can come to believe
+   otherwise.)
+  ok   STILL OPEN: the v2 backbuffer store is 0666
+  ok   and the scrape asked for no write access: O_RDONLY, PROT_READ
+  (the store is still a shared mapping an attacker can open; what
+   decides the fix is whether a victim's PIXELS come back through it,
+   which the real scrape below measures)
+
+  THE REAL BACKBUFFER SCRAPE -- a victim's actual pixels, recovered by a
+  same-uid process (this is the finding, driven end to end):
+  (the victim rendered a v2 backbuffer whose pixels are BACKBUFFERSECRET
+   31337; a SEPARATE uid-1001 process then opened the store O_RDONLY and
+   searched it.  found=1 is the victim's screen contents in the attacker's
+   hands -- Firefox's pixels read by name.  The instrument is proven by the
+   POSITIVE CONTROL: the compositor's own hand-up read below recovers the
+   SAME bytes, so a found=0 for the attacker is a closed store, not a
+   window that never painted.)
+  ok   the compositor (segment owner) recovers the victim's pixels: the window really painted BACKBUFFERSECRET31337, so the attacker's result is meaningful
+  ok   CLOSED: a same-uid attacker recovers NO pixel content from the store
+  ok   and the attacker's hand-up grab is refused too: no pixels by that route either
+  attack 3 of 4 -- INJECT a key into another client's ring:
+  (CLOSED, and the control below is INVERTED rather than deleted.  The
+   bypasser still maps the table, still finds the row and still writes the
+   ring -- the first three assertions are unchanged and must keep passing,
+   because the day they stop the test has stopped measuring anything.  What
+   changed is that the ring is DEAD STORAGE: keystrokes are delivered over
+   a channel that is not in the mapping at all, so the write lands in bytes
+   nothing reads.  THE SPLIT: attack 4 of 4 forced this and attack 3 is
+   closed by the same construction, for the keys ring.)
+  ok   a bypasser locates the victim's window row
+  ok   and it is the right row (wid 2), by its own read-back
+  ok   and pokes a key line into its keys ring
+  ok   and the owner never receives it: the ring it wrote is not the channel
+  ok   and a third process cannot read that window's keys at all: refused
+  ok   and it is refused BY NAME, not with a silent zero-byte read
+
+AND WHY NO FILE MODE CLOSES IT: same uid attacks same uid.
+(the measurement that rejects a mapping-per-owner-uid: on a real
+ desktop attacker and victim are both uid 1001, and the kernel
+ cannot tell two processes of one uid apart.)
+  ok   a uid-1001 victim holds a window: == live.hold.client open=3 newwindow=10 wid=4 title open=3=20 scene open=6=24 commit open=6=7
+  ok   a SEPARATE uid-1001 process injects into it -- no uid boundary to cross
+  ok   a uid-1001 non-owner asking for them through the protocol is refused
+  ok   and the victim never receives it -- the ring it wrote is dead storage
+
+and the channel that replaced it is not open by default either:
+(an abstract socket has no file mode and its name is public, so the
+ attacker CAN address it; what refuses it is the kernel's credential
+ stamp on the datagram, which is why both directions are driven.)
+  ok   a uid-1001 attacker computes the address and the sendto SUCCEEDS
+  ok   so does the host owner's, byte for byte the same program and address
+  ok   and ONLY the host owner's line arrives: SCM_CREDENTIALS, not obscurity
+  ok   and the uid-1001 one is dropped, unstamped, by the receiving kernel
+
+attack 6 of 6 -- PIXGRAB: bind the pixel hand-up address and be handed
+the desktop's display lists.
+(the attack the new channel invites, and the one that decides whether it
+ is sound.  The rendezvous is an ABSTRACT AF_UNIX name with no file mode,
+ derived from public facts, so ANYBODY can bind it -- and a receiver-checks
+ construction, which is exactly what the keystroke channel correctly uses,
+ would here hand every client's screen to whoever bound it first.  Which
+ end holds the secret decides which end checks: THE SENDER checks, with
+ SO_PEERCRED on the connection it just made.)
+  ok   a uid-1001 attacker CAN take the address -- nothing can stop it
+  ok   AND NOT ONE CLIENT HANDS IT A DESCRIPTOR: fds=0, no display list
+  ok   and there is nothing to read: no scene came back at all
+  ok   and the client SAYS SO, by name, on stderr -- a refusal nobody sees is how a desktop stops painting for no stated reason
+  ok   the SEGMENT OWNER (what wsysd is on a real boot) binds the same address
+  ok   and IS handed the descriptors: the same program, the same address, and the only difference is who the kernel says is listening
+  ok   and reads the victim's committed display list out of the memfd -- which is the desktop working, the same bytes wsysd composites
+
+attack 4 of 6 -- SNOOP: read the victim's keystrokes and screen, O_RDONLY.
+(THE KEYLOGGER IS CLOSED.  The snooper is UNCHANGED and still runs -- it
+ still opens the table O_RDONLY, still maps it PROT_READ, still finds the
+ victim's row and still scrapes its scene and its identity.  Only the
+ keystrokes are gone from the mapping, so this is the one control that
+ inverts and the three around it that must NOT.)
+  ok   the snooper never asked for write access: O_RDONLY, PROT_READ
+  ok   and it locates the victim's row anyway
+  ok   AND THE KEYSTROKES ARE NOT THERE: no password in the table (was: read)
+  ok   AND ITS COMMITTED DISPLAY LIST IS NOT THERE either: the row's scene is empty (was: 'rect 0 0 40 20 0x334455', what is drawn inside that window)
+  ok   and it reads the length as 0 from the same offset it always read it
+  ok   STILL OPEN: its wid, pid, geometry and title -- the table enumerates
+  ok   and the victim DOES receive what was typed at it -- delivery still works
+
+attack 5 of 5 -- PEEK: the owner's PID out of the table, then its MEMORY.
+(this attack is NEW, and it is the one that walked through attack 4's fix:
+ the keystrokes are not in the mapping any more, but the VICTIM still has
+ them, and /proc/<pid>/mem is readable by any same-uid process whose target
+ is DUMPABLE -- no ptrace call, no stop, nothing to notice.  What refuses it
+ is prctl(PR_SET_DUMPABLE, 0) in every window owner, in keychan_bind.)
+  ok   the attacker still reads the victim's pid straight out of the 0666 table
+  ok   and is refused the victim's memory: /proc/<pid>/mem EACCES (was: an fd)
+  ok   so the typed password is NOT scraped out of the owner's address space
+  ok   and /proc/<pid>/fd is not listable, so its descriptors are not inventory
+  ok   and PTRACE_ATTACH is refused (here by PR_SET_DUMPABLE; on a real boot by kernel.yama.ptrace_scope=1 as well -- tests/linux/ptrace_scope_boot.sh)
+
+THE HOLE, CLOSED on the chrome segment -- by the kernel, not by an if:
+  ok   open(O_RDWR) refused, EACCES
+  ok   no writable mapping to be had
+  ok   mprotect(PROT_WRITE) on the read-only mapping refused too
+  ok   nothing was written
+  ok   the chrome state is intact afterwards
+
+and the session is NOT blind, which is the failure worse than the hole:
+  ok   a non-owner maps the chrome PROT_READ and sees what the owner published
+  ok   live reads /dev/wsys/screen: 1280 800
+  ok   live reads a chrome sink
+  ok   live still maps and draws its own window
+
+wallpaper is ungated in both spellings, as devwsys has it:
+  ok   live writes `wallpaper` on /dev/wsys/ctl
+  ok   and it lands in the wallpaper sink
+  ok   live writes /dev/wsys/wallpaper directly
+  ok   and it lands in the SAME sink
+
+PASS wsys_bypass

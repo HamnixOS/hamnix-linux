@@ -1,0 +1,7 @@
+   [software] wsysd: vk backend SOFTWARE -- no usable Vulkan device (p_vkCreateInstance(&ici, 0, &g_inst) -> VkResult -9)
+   [gpu-devcomp] wsysd: vk backend GPU -- NVIDIA GeForce RTX 3090 (VkPhysicalDeviceType 2, silicon 1, zero-copy 1, device-local 0, host-cached 1)
+   [gpu-devcomp] wsysd: vk devcomp ON -- the composite is written ONLY by the device; the cursor save-under is off and every frame is full
+pixcmp: 11679 of 1024000 pixels differ as whole words (1.141%)
+pixcmp: 0 differ in R,G or B  <-- THIS is the gate
+pixcmp: 11679 differ ONLY in the undefined X byte of XRGB8888
+pixcmp: PASS every displayed colour matches the software rasterizer

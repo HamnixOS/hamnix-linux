@@ -1,0 +1,19 @@
+[enteruser] planting the in-namespace probe
+[enteruser] staging an image with that rc
+[enteruser] booting (up to 120s)
+
+[enteruser] --- as root (uid 0)
+enteruser: PASS this is Debian 12.15
+enteruser: INFO uid=0 user=root root=ok
+enteruser: PASS unshare -U (CLONE_NEWUSER) from inside the namespace
+enteruser: PASS bwrap --unshare-user builds a container
+[enteruser] --- root enter status: 0
+[enteruser] --- as the session user (uid 1001)
+enteruser: PASS this is Debian 12.15
+enteruser: INFO uid=1001 user=live root=ok
+enteruser: PASS unshare -U (CLONE_NEWUSER) from inside the namespace
+enteruser: PASS bwrap --unshare-user builds a container
+[enteruser] --- uid 1001 enter status: 0
+[enteruser] DONE
+
+[enteruser] PASS 6  FAIL 0   (full log: build/enteruser/boot.log)

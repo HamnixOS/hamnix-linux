@@ -1,0 +1,17 @@
+[hook-bounded] building hpm + hamsh for the Linux line -> /home/david/.hamnix-build/hpm_hook_bounded.6b80d30d5b7f
+fixture: 3 packages
+[hook-bounded] ================================================
+[hook-bounded] the mechanism: hamsh on the exact wrapper hpm writes
+  ok   (1) the runaway-quote wrapper on an OPEN stdin does not wedge: hamsh reports the lexical error and exits 1 in 12s
+  ok   (2) hamsh's REPL DOES exit on EOF: a hook with no `exit`, stdin /dev/null, reaches loop-enter and exits in 0s (rc=0)
+  ok   (3) control: a well-formed hook still runs and exits 0
+[hook-bounded] hpm, installing from a file:// repository
+  ok   (4) the fixture repository refreshes (3 packages)
+  ok   (5) hpm install hooktest-quote TERMINATES (0s) -- the runaway-quote hook is no longer a wedge
+  ok   (6) and the EOF exit is what did it, not the deadline: the hook ended in 0s, not at the 60 s bound, and hpm raised no /dev/null warning
+  ok   (7) hpm install hooktest-hang TERMINATES (60s) -- the wait on a hook is bounded
+  ok   (8) it fails BY NAME: 'hook install.hamsh of package hooktest-hang ran longer than 60 seconds and was KILLED'
+  ok   (9) and the install FAILS: a timed-out hook is a failed install, not a success, and hpm says the files are on disk but the hook did not finish
+  ok   (10) control: an ordinary package still installs and its hook still runs
+[hook-bounded] ================================================
+[hook-bounded] PASS 10  FAIL 0

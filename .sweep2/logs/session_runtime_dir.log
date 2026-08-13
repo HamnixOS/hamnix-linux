@@ -1,0 +1,22 @@
+[sessionrt] staging an image with that rc and the probe
+[sessionrt] booting (up to 150s)
+
+[sessionrt] --- what root staged in the debian /run
+[sessionrt] --- as the session user (uid 1001), inside debian
+sessionrt: INFO uid 1001, XDG_RUNTIME_DIR=/run/user/1001
+sessionrt: PASS XDG_RUNTIME_DIR is a per-user directory (/run/user/1001)
+sessionrt: INFO drwx------ 2 live live 4096 Aug 13 09:14 /run/user/1001
+sessionrt: PASS /run/user/1001 is owned by uid 1001
+sessionrt: PASS uid 1001 CREATED a file in its runtime directory (/run/user/1001/.sessionrt.163)
+sessionrt: PASS uid 1001 created a subdirectory in its runtime directory
+sessionrt: INFO /run/user/1001/wayland-0 -> ../../wayland-0
+sessionrt: PASS the wayland-0 name in /run/user/1001 is a link to the real socket
+sessionrt: PASS the hamnix-screen geometry name is linked too
+sessionrt: INFO drwxr-xr-x 2 live live 4096 Aug 13 09:14 /run/dbus
+sessionrt: PASS uid 1001 can write /run/dbus (dbus-daemon --system can bind its socket)
+sessionrt: PASS the system bus came up AS UID 1001 and answered GetId
+sessionrt: PROBE-DONE
+[sessionrt] --- probe status: 0
+[sessionrt] DONE
+
+[sessionrt] PASS 8  FAIL 0   (full log: build/sessionrt/boot.log)

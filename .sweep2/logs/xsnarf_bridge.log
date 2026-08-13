@@ -1,0 +1,107 @@
+[xsnarf] building the bridge and the two probes ...
+[xsnarf] built
+[xsnarf] running Xvfb + the bridge in a private mount namespace ...
+build/xsnarf/body.sh: 15: reap_add: not found
+build/xsnarf/body.sh: 38: reap_add: not found
+BEGIN
+A CLIP-FROM-HAMNIX
+B TARGETS UTF8_STRING STRING TEXT 
+C Error: target TIMESTAMP not available
+build/xsnarf/body.sh: 30: reap_add: not found
+D paste 0 17 CLIP-FROM-XCLIENT
+E PRIM-FROM-HAMNIX
+F CLIP-FROM-XCLIENT
+build/xsnarf/body.sh: 30: reap_add: not found
+G paste 1 17 PRIM-FROM-XCLIENT
+H paste 0 17 CLIP-FROM-XCLIENT
+build/xsnarf/body.sh: 30: reap_add: not found
+I paste 0 11 XCLIENT-ONE
+build/xsnarf/body.sh: 30: reap_add: not found
+J paste 0 11 XCLIENT-TWO
+R1h HAM-ROUND-1
+build/xsnarf/body.sh: 30: reap_add: not found
+R1x paste 0 9 X-ROUND-1
+R2h HAM-ROUND-2
+build/xsnarf/body.sh: 30: reap_add: not found
+R2x paste 0 9 X-ROUND-2
+R3h HAM-ROUND-3
+build/xsnarf/body.sh: 30: reap_add: not found
+R3x paste 0 9 X-ROUND-3
+R4h HAM-ROUND-4
+build/xsnarf/body.sh: 30: reap_add: not found
+R4x paste 0 9 X-ROUND-4
+build/xsnarf/body.sh: 88: reap_add: not found
+K paste 0 65536 65536
+build/xsnarf/body.sh: 103: reap_add: not found
+L paste 0 15 BEFORE-THE-INCR
+X connection to :77 broken (explicit kill or server shutdown).
+X connection to :77 broken (explicit kill or server shutdown).
+build/xsnarf/body.sh: 15: reap_add: not found
+M SURVIVES-A-RESTART
+build/xsnarf/body.sh: 30: reap_add: not found
+N paste 0 17 AFTER-THE-RESTART
+O alive
+END
+X connection to :77 broken (explicit kill or server shutdown).
+
+[xsnarf] --- the bridge's own log ---
+[xsnarfd test] bridging /tmp/.X11-unix/X77 <-> /dev/snarf
+[xsnarfd test] parking on /dev/snarf.serial; reconciling by content every 2 s
+[xsnarfd test] connected: root window 0x935, resource base 0x2097152, max request 262140 bytes
+[xsnarfd test] Hamnix -> X: owning CLIPBOARD with 16 bytes
+[xsnarfd test] X -> Hamnix: 17 bytes into /dev/snarf
+[xsnarfd test] Hamnix -> X: owning PRIMARY with 16 bytes
+[xsnarfd test] X -> Hamnix: 17 bytes into /dev/snarf.primary
+[xsnarfd test] X -> Hamnix: 11 bytes into /dev/snarf
+[xsnarfd test] X -> Hamnix: 11 bytes into /dev/snarf
+[xsnarfd test] Hamnix -> X: owning CLIPBOARD with 11 bytes
+[xsnarfd test] X -> Hamnix: 9 bytes into /dev/snarf
+[xsnarfd test] Hamnix -> X: owning CLIPBOARD with 11 bytes
+[xsnarfd test] X -> Hamnix: 9 bytes into /dev/snarf
+[xsnarfd test] Hamnix -> X: owning CLIPBOARD with 11 bytes
+[xsnarfd test] X -> Hamnix: 9 bytes into /dev/snarf
+[xsnarfd test] Hamnix -> X: owning CLIPBOARD with 11 bytes
+[xsnarfd test] X -> Hamnix: 9 bytes into /dev/snarf
+[xsnarfd test] the X selection is larger than the 64 KiB clipboard: TRUNCATED, 4464 bytes dropped
+[xsnarfd test] X -> Hamnix: 65536 bytes into /dev/snarf
+[xsnarfd test] Hamnix -> X: owning CLIPBOARD with 15 bytes
+[xsnarfd test] the X selection is an INCR (incremental) transfer, which this bridge does not receive; the Hamnix clipboard is UNCHANGED
+[xsnarfd test] Hamnix -> X: owning CLIPBOARD with 18 bytes
+[xsnarfd test] the X selection lost its owner; keeping the last content
+[xsnarfd test] the X connection went away; redialling
+[xsnarfd test] no X setup reply
+[xsnarfd test] no X server at that socket yet; retrying every second
+[xsnarfd test] connected: root window 0x935, resource base 0x2097152, max request 262140 bytes
+[xsnarfd test] Hamnix -> X: owning CLIPBOARD with 18 bytes
+[xsnarfd test] Hamnix -> X: owning PRIMARY with 17 bytes
+[xsnarfd test] X -> Hamnix: 17 bytes into /dev/snarf
+
+[xsnarf] assertions
+  PASS  an X client pastes what the Hamnix editor copied
+  PASS  TARGETS lists exactly what the bridge answers
+  PASS  a target it does not answer is REFUSED
+  PASS  the Hamnix terminal pastes what an X client copied
+  PASS  PRIMARY reaches X
+  PASS  CLIPBOARD is untouched by the PRIMARY copy
+  PASS  PRIMARY comes back from X
+  PASS  CLIPBOARD still independent after the PRIMARY pull
+  PASS  a handover between two OTHER X clients is seen (1)
+  PASS  a handover between two OTHER X clients is seen (2)
+  PASS  round 1: X pastes the Hamnix copy
+  PASS  round 1: Hamnix pastes the X copy
+  PASS  round 2: X pastes the Hamnix copy
+  PASS  round 2: Hamnix pastes the X copy
+  PASS  round 3: X pastes the Hamnix copy
+  PASS  round 3: Hamnix pastes the X copy
+  PASS  round 4: X pastes the Hamnix copy
+  PASS  round 4: Hamnix pastes the X copy
+  PASS  a 70 000-byte X selection lands as 65 536
+  PASS  and the truncation is said out loud
+  PASS  an INCR transfer leaves the clipboard ALONE
+  PASS  and the INCR refusal is said out loud
+  PASS  the bridge redials a restarted X server
+  PASS  and bridges the new server both ways
+  PASS  the bridge is still alive at the end
+
+[xsnarf] passes=25 fails=0
+[xsnarf] PASS

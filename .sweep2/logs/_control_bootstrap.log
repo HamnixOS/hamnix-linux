@@ -1,0 +1,9 @@
+[adder_cc] bootstrap: building build/cutover/host_ac.elf via the Python seed
+[concat] wrote build/cutover/host_compiler.ad (1706805 bytes, 40933 lines)
+Compiling 1 modules...
+  build/cutover/host_compiler.ad
+/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/control/build/cutover/host_compiler.ad:19233:5: warning: 'uint64' narrowed to 'uint32' without a cast (initialising 'n') [narrowing-assign]
+19233 |     n: uint32 = nd_num[at]                   # compile-time element count N
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Compiled to build/cutover/host_ac.elf
+[adder_cc] bootstrap OK: 1270968 bytes

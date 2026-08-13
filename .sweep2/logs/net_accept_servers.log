@@ -1,0 +1,9 @@
+nasrv: PASS the servers build
+nasrv: PASS u_server took a connection and returned its exact response (b'hamnix-userserver-ok\n')
+nasrv: PASS sshd took a connection, exchanged identification strings and sent KEXINIT -- first binary packet: 180 declared, 184 received, msg type 20
+nasrv: PASS a 255-byte banner line with "SSH-" starting at byte 256 is skipped WHOLE -- the peer could not smuggle an identification string past the line framing, and the stream is still in sync
+nasrv: PASS and the server SAYS so, rather than skipping it silently
+nasrv: INFO httpd is deliberately not driven here -- it cannot serve on this line
+nasrv: INFO until the spawn/fd-ownership conflict in its worker model is resolved.
+nasrv: INFO See this file's header and HANDOFF.
+nasrv: 5 passed, 0 failed

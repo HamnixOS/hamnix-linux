@@ -1,0 +1,24 @@
+panelconf: INFO isolated: /tmp, /dev/shm, /srv and $XDG_RUNTIME_DIR (/run/user/1000, dev 0:71) are private tmpfs of this run alone (/tmp is dev 0:57 in this mount namespace; the host's /tmp is untouched and unreadable from here); id map: root plus a subordinate range, so gid 5 (tty) and friends exist
+panelconf: PASS the compositor, the desktop and the panel all build
+panelconf: PASS wsysd took its input from the test's evdev file and opened no real device
+panelconf: PASS control: a backdrop (wid 2), a top panel (wid 3, 26px) and a taskbar (wid 4, 26px at y=774) are on screen
+panelconf: PASS control: both panel windows report visible=1 before anything touches the config
+panelconf: PASS control: both bars are PAINTED in the framebuffer (top 81%, taskbar 81% of the bar colour)
+panelconf: PASS control: with no click yet the menu card is not drawn (0% of the card column is the dropdown body)
+panelconf: PASS control: an evdev click on the Applications button opens the menu (26 -> 206 px, card 87% painted)
+panelconf: PASS the panel picked up the replaced config (1 reload(s) logged)
+panelconf: PASS the TOP PANEL still has its window on screen after the replacement (visible=1)
+panelconf: PASS the TASKBAR still has its window on screen after the replacement (visible=1)
+panelconf: PASS the BACKDROP is untouched (visible=1) -- hamdesktop never writes the verb this defect is in, so 'the wallpaper survived' is the expected shape, not a reprieve
+panelconf: PASS and both bars are still PAINTED (top 81%, taskbar 81%) -- pixels, not a flag
+panelconf: PASS a real click on the Applications button AFTER the replacement still opens the menu (26 -> 206 px, card 87% painted)
+panelconf: PASS an IN-PLACE rewrite (same inode, no unlink) also leaves both windows on screen (top=1 taskbar=1) -- the trigger is the reload, and the unlink is not part of it
+panelconf: PASS a config that drops to ONE panel still WITHDRAWS the taskbar window (visible=0, 0% of the bar colour left in the band)
+panelconf: PASS and putting the second panel back brings the taskbar window back (visible=1, 81% repainted) -- withdraw and restore are both live
+panelconf: PASS every click in this file came from the evdev end: nothing here writes an event, pointer or keys ring
+panelconf: INFO reloads applied: 4; panel log tail:
+panelconf:      [panel] config reload applied: 2 panel(s)
+panelconf:      [panel] config reload applied: 2 panel(s)
+panelconf:      [panel] config reload applied: 1 panel(s)
+panelconf:      [panel] config reload applied: 2 panel(s)
+panelconf: 17 passed, 0 failed

@@ -1,0 +1,12 @@
+--- HAMNIX_WSYSD_SCANOUT=1 with NO supervision assertion:
+wsysd: scene compositor starting
+wsysd: scanout REFUSED -- HAMNIX_WSYSD_SCANOUT=1 without
+wsysd: HAMNIX_WSYSD_SCANOUT_SUPERVISED=1. This path takes DRM
+wsysd: master, and on nvidia-drm DROP_MASTER hangs afterwards:
+wsysd: the console comes back only when this process DIES.
+wsysd: Run it under tests/linux/kms_watchdog.sh.
+wsysd: screen 1280x800
+wsysd: vk backend GPU -- NVIDIA GeForce RTX 3090 (VkPhysicalDeviceType 2, silicon 1, zero-copy 1, device-local 0, host-cached 1)
+--- no scanout requested at all (the default, must be unchanged):
+wsysd: vk backend GPU -- NVIDIA GeForce RTX 3090 (VkPhysicalDeviceType 2, silicon 1, zero-copy 1, device-local 0, host-cached 1)
+bench: writeback us/frame 220 (96% of present) bytes/frame 4096000 MB/s 18618

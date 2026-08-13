@@ -1,0 +1,16 @@
+census: each figure is the MEDIAN of the per-second series over 10s,
+census: per client; the worst 10 ms burst is the max across the window.
+
+census: 1 idle                        192 ops/s total  [ desk=16 panel=176 ]  worst 10ms burst 24 ops (=2400/s)
+census: 1 idle (+compositor)         1053 ops/s total  [ wsysd=1053 ]  worst 10ms burst 47 ops (=4700/s)
+census: 2 pointer 250 ev/s           1192 ops/s total  [ desk=1016 panel=176 ]  worst 10ms burst 24 ops (=2400/s)
+census: 2 pointer (+compositor)      5200 ops/s total  [ wsysd=5200 ]  worst 10ms burst 126 ops (=12600/s)
+/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/tests/linux/wsys_op_census.sh: line 56: 445375 Killed                  ( end=$(( SECONDS + SECS + 2 )); while [ "$SECONDS" -lt "$end" ]; do
+    kill -STOP "$GP" 2> /dev/null; sleep 0.0075; kill -CONT "$GP" 2> /dev/null; sleep 0.0005;
+done )
+census: 3 drag, mouse-paced           610 ops/s total  [ drag=408 desk=16 panel=186 ]  worst 10ms burst 25 ops (=2500/s)
+census: 4 drag, free-running         2046 ops/s total  [ drag2=1836 desk=16 panel=194 ]  worst 10ms burst 32 ops (=3200/s)
+census: 4 drag free (+compositor)   15565 ops/s total  [ wsysd=15565 ]  worst 10ms burst 200 ops (=20000/s)
+census: 5 app start (first 3s)       1846 ops/s total  [ app=1846 ]  worst 10ms burst 32 ops (=3200/s)
+
+census: host load: 2.69 2.29 1.74 6/1126 449926

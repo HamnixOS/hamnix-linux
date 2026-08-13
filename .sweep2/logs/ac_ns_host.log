@@ -1,0 +1,21 @@
+[1/3] build user/ac.ad through the Linux lane
+[2/3] ac hello.ad -o hello, inside the namespace
+[ac] host_ac --backend=llvm /tmp/hello.ad
+[ac] clang, inside the Debian namespace
+[ac] cc linux-runtime.S
+[ac] cc adder_llvm_runtime.c
+[ac] cc linux-audio.c
+[ac] cc linux-auth.c
+[ac] cc linux-fb.c
+[ac] cc linux-fdns.c
+[ac] cc linux-net.c
+[ac] cc linux-snarf.c
+[ac] cc linux-syscalls.c
+[ac] cc linux-vk.c
+[ac] cc linux-vkhost.c
+[ac] cc linux-wsys.c
+[ac] link out.elf
+[ac] wrote /tmp/hello
+[3/3] run what it produced
+PASS: /bin/ac compiled and linked hello.ad across the namespace, and it
+      printed: hello from adder, compiled on hamnix-linux

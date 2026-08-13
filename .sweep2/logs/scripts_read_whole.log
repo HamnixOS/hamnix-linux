@@ -1,0 +1,47 @@
+[rcwhole] building hamsh -> /home/david/.hamnix-build/scripts_read_whole.6b80d30d5b7f
+[rcwhole] hamsh under test: /home/david/.hamnix-build/scripts_read_whole.6b80d30d5b7f/hamsh.elf
+[rcwhole] ================================================
+[rcwhole] SECTION 0 -- what the shipped files measure TODAY
+  --   etc/rc.boot                   15918 bytes   97% of the 16384-byte buffer it used to have
+  --   etc/rc.boot.linux              9435 bytes   57% of the 16384-byte buffer it used to have
+  --   etc/rc.boot.full              12255 bytes   74% of the 16384-byte buffer it used to have
+  --   etc/rc.de-user.linux          13267 bytes   80% of the 16384-byte buffer it used to have
+  --   etc/install.hamsh             12850 bytes   78% of the 16384-byte buffer it used to have
+  --   etc/services.d/hamde.svc       3186 bytes   77% of the 4096-byte buffer it used to have
+[rcwhole] SECTION 1 -- the read has NO CEILING (a ladder, not a number)
+  ok   (1.20000) a 19549-byte script runs HEAD AND TAIL (rc=0)
+  ok   (1.65536) a 64549-byte script runs HEAD AND TAIL (rc=0)
+  ok   (1.262144) a 261049-byte script runs HEAD AND TAIL (rc=0)
+  ok   (1.1048576) a 1048549-byte script runs HEAD AND TAIL (rc=0)
+  ok   (1.4194304) a 4194049-byte script runs HEAD AND TAIL (rc=0)
+  ok   (1.tok) the ONE bound left (TOK_MAX, 4096 tokens) is LOUD: named, nothing ran, non-zero exit
+  ok   (1.source) a 300 KB rc that SOURCES a 300 KB file runs all three markers -- both readers, nested
+[rcwhole] SECTION 2 -- when it CANNOT be read whole, nothing runs and it says so
+  ok   (2.1) it says so BY NAME: /home/david/.hamnix-build/scripts_read_whole.6b80d30d5b7f/huge.hamsh: CANNOT BE READ WHOLE -- 524288 byte(s) read and no memory for the rest.
+  ok   (2.2) and it says the CONSEQUENCE -- NOT RUN, none of it took effect
+  ok   (2.3) and NOT EVEN THE FIRST LINE ran: the file was refused, not truncated
+  ok   (2.4) and hamsh exits non-zero (1) rather than reporting success
+[rcwhole] SECTION 3 -- `svc enable` does not eat the file
+  --   bigsvc.svc: 5096 bytes before, 5097 after
+  ok   (3.1) the file did not shrink (5096 -> 5097; +1 is 'no' becoming 'yes')
+  ok   (3.2) the last line of the file is still there
+  ok   (3.3) and so is the `uid: 1234` directive that lived past byte 4096
+  ok   (3.4) the enable PERSISTED, on a line of its own where the parser can see it
+  ok   (3.5) and the definition registered without a spurious missing-key error
+[rcwhole] SECTION 4 -- A REAL BOOT, with a real rc far past every buffer
+[rcwhole] staging a private image (this takes a few minutes)
+[rcwhole] guest /bin/hamsh <- /home/david/.hamnix-build/scripts_read_whole.6b80d30d5b7f/hamsh.elf
+rc.big: 209540 bytes, last shipped statement kept: source '/etc/rc.d/rc.5'
+  --   209540 bytes of /etc/rc.boot (the shipped one is 9435)
+[rcwhole] booting a machine whose /etc/rc.boot is 209540 bytes
+  ok   (4.1) the machine booted and the FIRST half of its rc ran
+  ok   (4.2) AND THE TAIL RAN: a 200 KB /etc/rc.boot was read WHOLE by PID 1
+  ok   (4.3) and the statement past the padding took effect (the graphical runlevel is in the log)
+  ok   (4.4) no refusal: the rc fitted in memory rather than being refused
+  ok   (4.5) no lexical error: the whole 200 KB tokenized inside TOK_MAX
+  ok   (4.6) no kernel panic
+  ok   (4.7) and the console still answers a typed command
+[rcwhole] control: the same image with the tree's own rc.boot.linux
+  ok   (4.8) control: the unpadded shipped rc still boots to the interactive shell
+[rcwhole] ================================================
+[rcwhole] PASS 24  FAIL 0

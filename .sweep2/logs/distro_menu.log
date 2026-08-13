@@ -1,0 +1,77 @@
+/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/tests/linux/distro_menu.sh: line 76: glyphs: command not found
+/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/tests/linux/distro_menu.sh: command substitution: line 76: syntax error near unexpected token `<'
+/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/tests/linux/distro_menu.sh: command substitution: line 76: `/bin/hamsh /etc/rc.de-ns/<name> <prog>'
+/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/tests/linux/distro_menu.sh: line 76: enter: command not found
+/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/tests/linux/distro_menu.sh: line 76: NAME: unbound variable
+[dmenu] staging an image with that rc
+[dmenu] planted /bin/wsys_poke as a second cpio segment
+build/distromenu/shot-menu.png  1280x800
+build/distromenu/shot-first.png  1280x800
+build/distromenu/shot-second.png  1280x800
+build/distromenu/shot-launched.png  1280x800
+
+[rc.5] hamnix-linux graphical runlevel
+[rc.5] compositor started
+[rc.5] desktop backdrop started
+[rc.5] panel started
+[rc.5] wayland server for debian
+[rc.5] clipboard bridge for debian
+[rc.5] wayland server for alpine
+[rc.5] clipboard bridge for alpine
+[rc.5] desktop up
+[dmenu] --- the panel log (its own count of what it found)
+[panel] distribution not attached at /n/: alpine
+[panel] /etc/distros: 1426 byte(s), 29 line(s), 1 attached distribution(s)
+[panel] appmenu entries: 28
+[panel] distro section debian: 3 apps
+[panel] scene windows ready
+[dmenu] --- the window ids wsysd handed out
+[dmenu] --- what each distribution actually offers
+[dmenu] click the Applications button
+[dmenu] ring 3 after the click (empty = drained by the panel):
+[dmenu] ring 4 after the click:
+[dmenu] hover the FIRST distribution section
+[dmenu] SCENE-FIRST-BEGIN
+[dmenu] SCENE-FIRST-END
+[dmenu] hover the SECOND distribution section
+[dmenu] SCENE-SECOND-BEGIN
+[dmenu] SCENE-SECOND-END
+[dmenu] LAUNCHRC-BEGIN
+[dmenu] LAUNCHRC-MID
+[dmenu] LAUNCHRC-END
+[dmenu] re-hover the FIRST distribution section, then CLICK its first app
+[dmenu] CLICKED
+[dmenu] DENSRUNLOG-BEGIN
+[dmenu] DENSRUNLOG-END
+[dmenu] DONE
+
+dmenu: PASS the desktop came up
+dmenu: PASS the panel found a debian section
+dmenu: FAIL the panel found an alpine section   (no line matching /\[panel\] distro section alpine: [0-9]/)
+dmenu: NOTE the alpine medium offers ? launchers
+dmenu: PASS the boot got to the end
+dmenu: PASS the panel saw distribution namespaces
+dmenu: PASS screendump menu (build/distromenu/shot-menu.png)
+dmenu: PASS screendump first (build/distromenu/shot-first.png)
+dmenu: PASS screendump second (build/distromenu/shot-second.png)
+dmenu: FAIL the Debian fly-out drew no Debian-only app
+dmenu: FAIL Alpine offers no launchers and the panel did not say so
+dmenu: PASS Debian's apps are NOT in the Alpine fly-out
+dmenu: FAIL /etc/rc.de-ns/alpine did not reach the Alpine root
+dmenu: PASS /etc/rc.de-ns/debian reached the Debian root (ran its /etc/de-ns-run on /usr/bin/dpkg)
+dmenu: PASS clicking a fly-out row launched '/usr/bin/dpkg' in the debian namespace
+dmenu: PASS /etc/de-ns-run ran inside the namespace and said so
+dmenu:      de-ns-run: wayland socket srw-rw-rw- 1 nobody nogroup 0 Aug 13 09:44 /run/user/1001/wayland-0
+dmenu:      de-ns-run: runtime dir /run/user/1001 is WRITABLE by uid 1001: created /run/user/1001/.de-ns-run-probe.196
+dmenu:      de-ns-run:   (drwx------ 2 live live 4096 Aug 13 09:45 /run/user/1001)
+dmenu:      de-ns-run: /run/dbus is writable by uid 1001; the system bus can be started here
+dmenu:      de-ns-run: X screen 1280x800
+dmenu:      de-ns-run: Xwayland up after 1 polls
+dmenu:      de-ns-run: started jwm
+dmenu:      de-ns-run: exec /usr/bin/dpkg
+dmenu:      de-ns-run: /usr/bin/dpkg exited 2
+dmenu: PASS screendump of the launched app (build/distromenu/shot-launched.png)
+dmenu: PASS the namespace Wayland socket is mode 0666 (connect(2) needs write)
+dmenu: PASS the launched app got a display and was exec'd into it
+dmenu: FAIL the two named parent rows are not both drawn
+(full log: build/distromenu/boot.log)

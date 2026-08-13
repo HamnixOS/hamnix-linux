@@ -1,0 +1,34 @@
+deicons: INFO /etc/passwd in this namespace puts uid 0's home at /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/deicons.Mbir2Z/home
+deicons: INFO the shipped desktop is 16 launchers, copied into /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/deicons.Mbir2Z/home/Desktop
+deicons: PASS the compositor and the desktop both build
+deicons: PASS wsysd took its input from the test's evdev file and opened no real device
+deicons: PASS hamdesktop published its icon table and built the grid from THIS gate's /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/deicons.Mbir2Z/home/Desktop
+deicons: PASS one icon per launcher the desktop should show (15 of 16, 1 live-medium-only entry hidden)
+deicons: PASS every shipped Icon= name resolved to a real glyph -- no silent fallbacks
+deicons: PASS every icon painted over at least a quarter of the box it was given
+deicons: PASS every icon carries at least 4 distinct colours -- none is a plain rectangle
+deicons: PASS all 15 desktop icons are DIFFERENT PICTURES (15 distinct fingerprints)
+deicons: PASS even the most similar pair on the desktop differs in 30% of its pixels (Text Editor vs Word Processor)
+deicons: PASS Spreadsheet and Presentation are different pictures (72% of their pixels differ)
+deicons: PASS Word Processor and Video Player are different pictures (72% of their pixels differ)
+deicons: PASS Audio Player and Video Player are different pictures (66% of their pixels differ)
+deicons: PASS Text Editor and Notes are different pictures (76% of their pixels differ)
+deicons: PASS Log Viewer and System Monitor are different pictures (75% of their pixels differ)
+deicons: PASS NEGATIVE CONTROL: every icon compared with itself across two frames is <=2% different -- the metric above is measuring the drawing, not noise
+deicons: INFO the icon table:
+deicons:      Audio Player	5	66	83f908eb16d1	0
+deicons:      Calculator	5	75	3b8bd7fc6233	0
+deicons:      Calendar	5	68	148b0335a5ac	0
+deicons:      Control Center	7	36	4d03d79ff38e	0
+deicons:      Text Editor	5	65	97a32a735bba	0
+deicons:      Files	4	89	a665de71c8dd	0
+deicons:      Spreadsheet	5	75	e40df1270735	0
+deicons:      Presentation	4	50	ccc15dae5c07	0
+deicons:      Word Processor	4	65	031f1dbbd0b1	0
+deicons:      Log Viewer	7	75	366ae593765a	0
+deicons:      Notes	4	69	a27b1c83a570	0
+deicons:      Software	4	69	ce66b29250da	0
+deicons:      System Monitor	4	58	9ed3113eabef	0
+deicons:      Terminal	7	79	cf8f31b6842b	0
+deicons:      Video Player	4	55	8acb1f73ee9c	0
+deicons: 15 passed, 0 failed

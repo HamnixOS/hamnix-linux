@@ -1,0 +1,15 @@
+[ptracegate] PART 1 -- is Yama on the kernel this image ships?
+  --   the image ships 6.12.85+deb13-amd64 (scripts/hamlinux_image.sh takes the newest /boot/vmlinuz-*)
+  --   this host is running 6.12.85+deb13-amd64
+  ok   (1) /proc/sys/kernel/yama/ptrace_scope exists, so the Yama LSM is built in and enabled -- current value 0
+  ok   (2) and it is the SAME kernel the guest boots, so this is a fact about the guest and not only about the build host
+[ptracegate] PART 2 -- the attack itself, on the dev host (the control)
+  == ptraceprobe uid=1000 scope=0 dumpable=1 victim=670914 attach=0 errno=0
+  ok   (3) with ptrace_scope=0 a SIBLING process attaches to its sibling and reads it: the attack is real and the probe works
+[ptracegate] PART 3 -- a real boot: linuxinit as PID 1, and the same probe
+[ptracegate] staging a private image (this takes a few minutes)
+  ok   (4) PID 1 set it AND read it back, and says so on the console: linuxinit: kernel.yama.ptrace_scope = 1 — a same-uid PTRACE_ATTACH by a non-ancestor is refused
+  ok   (5) and the booted machine reads 1 out of /proc/sys/kernel/yama/ptrace_scope
+  ok   (6) and the SAME binary that attached on the host is REFUSED inside the boot: == ptraceprobe uid=1001 scope=1 dumpable=1 victim=147 attach=-1 errno=1
+[ptracegate] ================================================
+[ptracegate] PASS 6  FAIL 0   (console log: /home/david/.hamnix-build/ptrace_scope_boot.6b80d30d5b7f/boot.log.txt)

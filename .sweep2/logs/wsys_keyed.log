@@ -1,0 +1,16 @@
+keyed: PASS the compositor, the window probe and the window holder build
+keyed: PASS the backdrop is on the screen (wid 2, green)
+keyed: === 1. the control: an ordinary window blits its whole rect
+keyed: INFO unkeyed band: painted part ff00ff, unpainted part 000000
+keyed: PASS the part the scene painted is the scene's colour
+keyed: PASS and the part it did NOT paint is BLACK -- the reported bug, reproduced
+keyed: === 2. and with the verb the client has been writing all along
+keyed: INFO keyed band: painted part ff00ff, unpainted part 00a000
+keyed: PASS the painted part is unchanged
+keyed: PASS and the desktop shows THROUGH the part the panel did not paint
+keyed: === 3. and it is not sticky: keyed 0 puts the black band back
+keyed: PASS keyed 0 is opaque again (000000)
+keyed: === 4. blend: does a scrim dim the desktop or cover it?
+keyed: INFO a #00000066 scrim over #00a000 reads 006000
+keyed: PASS the desktop is DIMMED and still there -- source-over, not a cover
+keyed: 8 passed, 0 failed

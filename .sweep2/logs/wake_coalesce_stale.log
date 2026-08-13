@@ -1,0 +1,7 @@
+stale:   wsysd: present cap FORCED to 16666 us/frame by HAMNIX_WSYSD_CAP_US
+stale: PASS the drag moved the screen (A != M1), so the load is real
+stale: PASS the screen stayed LIVE through the drag (M1 != M2) -- deferred frames are still being painted
+stale: PASS the screen CONVERGED after the client went silent (B == C) -- a coalesced frame is late, not lost, and the loop is not still repainting
+stale: PASS client-driven repaint still works after a deferral episode (C != D) -- paint_defer is not latching
+stale: PASS and the screen returned to the same settled desktop again (B == E)
+stale: 5 passed, 0 failed

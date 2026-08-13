@@ -1,0 +1,50 @@
+== memfd_samuid uid=1000 victim=442254 fd=3 open=3 mmap=0 enumerable=1 ptrace=0 secret=1
+== memfd_nodump uid=1000 victim=442255 fd=3 open=-13 enumerable=0 ptrace=-1 secret=0
+== sock_noproc passcred=0 bind1=0 bind2=-1 bind2_eaddrinuse=1 procopen=-6 procopen_enxio=1
+== sock_cred recv=16 cred=1 sender_pid=442256 sender_uid=1000 sender_is_child=1 my_uid=1000
+
+THE RECORDED DESIGN'S HOLE: a memfd DOES have a path.
+  ok   a same-uid process opens another's memfd through /proc/<pid>/fd
+  ok   AND READS THE PLAINTEXT OUT OF IT: SCM_RIGHTS alone closes nothing
+  ok   and it does not even have to guess the number: /proc/<pid>/fd lists them
+
+THE REMEDY A memfd NEEDS, measured now because tier 2's other half needs it:
+  ok   against PR_SET_DUMPABLE(0) the same open is refused, EACCES
+  ok   and nothing leaks
+  ok   and /proc/<pid>/fd is not enumerable either
+  ok   and ptrace is refused too -- which is the OTHER way same-uid memory leaks
+
+WHY THE KEYS RING IS A SOCKET: it has the property the memfd was believed
+to have, and the two facts the access control is built out of.
+  ok   a socket cannot be opened through /proc/<pid>/fd at all
+  ok   and the kernel says so by name: ENXIO, not a permission accident
+  ok   an abstract name binds
+  ok   and a SECOND bind of it is EADDRINUSE: first binder wins, no unlink
+  ok   SO_PASSCRED is accepted on it
+  ok   and every datagram arrives with SCM_CREDENTIALS attached
+  ok   carrying the KERNEL's answer for the sender's pid, which it cannot forge
+
+AND THE ONE THIS FILE CANNOT CLOSE, WHICH IS NOW CLOSED SOMEWHERE ELSE:
+  /proc/sys/kernel/yama/ptrace_scope = 0 on this DEV HOST.
+  A same-uid attacker PTRACE_ATTACHes the victim and reads its memory
+  directly -- no userland mechanism prevents that, and every window
+  system on Linux has the same exposure.  It is a DISTRIBUTION setting,
+  and user/linuxinit.ad now sets kernel.yama.ptrace_scope=1 as PID 1
+  and reads it back.  It is NOT set on this dev host (that would be a
+  change to somebody's working machine, and ptrace_scope is not
+  namespaced, so no unprivileged harness can set it either), which is
+  why the ptrace=0 above is still the honest reading HERE and why the
+  measurement of the setting lives in a real boot:
+      tests/linux/ptrace_scope_boot.sh   -- 6 assertions, one of them
+      this exact attack run on this host (attach SUCCEEDS, scope 0)
+      and inside a boot of this tree (REFUSED, scope 1).
+
+AND THE REMEDY MEASURED ABOVE IS NOW APPLIED, not just available:
+  prctl(PR_SET_DUMPABLE, 0) is called by owner_harden() in
+  user/linux-wsys.c's keychan_bind, so every window owner has it.
+  Driven against a REAL window owner as attack 5 of 5 in
+  tests/linux/wsys_bypass.sh, where the same-uid attacker takes the
+  victim's pid out of the world-readable table and is then refused
+  /proc/<pid>/mem, /proc/<pid>/fd and PTRACE_ATTACH.
+
+PASS wsys_keychan

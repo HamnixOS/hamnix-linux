@@ -1,0 +1,36 @@
+rlpriv: PASS the witness desktop -- compositor, desktop and panel -- builds once and is shared by both experiments
+rlpriv: INFO running the isolated experiment (a live desktop, and wsyswl_rootless.sh beside it)
+rlpriv:      A bars top=3 bottom=4
+rlpriv:      A witness-up 1
+rlpriv:      A before xsockets 0
+rlpriv:      A before vis 1 1
+rlpriv:      A before botfill 81
+rlpriv:      A gate rc 0
+rlpriv:      A gate score rless: 37 passed, 0 failed
+rlpriv:      A peak xsockets 0
+rlpriv:      A after xsockets 0
+rlpriv:      A after vis 1 1
+rlpriv:      A after botfill 81
+rlpriv:      A marker intact
+rlpriv: PASS the witness desktop came up beside the gate with its own compositor and its own two bars
+rlpriv: PASS through a full run of wsyswl_rootless.sh the witness's /tmp/.hamdesktop.src still says the witness owns it -- the gate's hamdesktop wrote a different file of that name
+rlpriv: PASS and /tmp/.X11-unix never gained a socket AT ANY POINT WHILE THE GATE RAN (peak 0, from 0) -- its Xwayland bound a display number in a directory that was not this one's
+rlpriv: PASS the witness's panel windows never moved off screen (visible 1 1 -> 1 1)
+rlpriv: PASS and in PIXELS its taskbar is painted before and after (81% -> 81% of the bar colour) -- the framebuffer, not a flag
+rlpriv: INFO running the negative control (HAMTEST_NO_PRIVNS=1: the gate is told to share)
+rlpriv:      B bars top=3 bottom=4
+rlpriv:      B witness-up 1
+rlpriv:      B before xsockets 0
+rlpriv:      B before vis 1 1
+rlpriv:      B before botfill 81
+rlpriv:      B gate rc 0
+rlpriv:      B gate score rless: 37 passed, 0 failed
+rlpriv:      B peak xsockets 2
+rlpriv:      B after xsockets 0
+rlpriv:      B after vis 1 1
+rlpriv:      B after botfill 81
+rlpriv:      B marker gone
+rlpriv: PASS CALIBRATION: with the isolation off the same gate reaches the same witness BOTH WAYS -- it overwrote /tmp/.hamdesktop.src (marker gone) and its X server appeared in the witness's /tmp/.X11-unix (0 -> peak 2) -- so both assertions above are measured with instruments that can feel this
+rlpriv: PASS and nothing either experiment wrote reached this machine: neither this run's stamp nor its marker is in the host's /tmp, and no rless scratch directory was left there -- including from the control run, whose whole job was to contaminate
+rlpriv: INFO note: 2 desktop-owned name(s) are in this machine's /tmp and were not written by this run -- some other process on this host owns the desktop's real runtime state, which is what the gate used to be writing into
+rlpriv: 8 passed, 0 failed

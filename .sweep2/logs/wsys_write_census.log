@@ -1,0 +1,55 @@
+census: PASS the compositor, the desktop and the panel all build
+census: PASS with HAMWSYS_WRSTAT unset the census writes nothing at all
+census: PASS a real session is up: 3 windows mapped
+census: INFO ----- phase A: the desktop as rc.5 leaves it, IDLE for 10s -----
+  category          count    per sec          bytes
+  chrome              627       62.7          41834   other
+  scene                49        4.9          75080   FRAME
+  commit               49        4.9          75080   FRAME
+  proc hamdesktop       pid 454360  writes 2
+  proc hampanelscene    pid 454390  writes 96
+  proc wsysd            pid 454331  writes 627
+census: INFO ----- phase B: a synthetic mouse, 12s -----
+  category          count    per sec          bytes
+  chrome              857       70.7          59212   other
+  event               132       10.9           1841   FRAME
+  pointer             131       10.8           1836   FRAME
+  scene                68        5.6         170169   FRAME
+  commit               68        5.6         170169   FRAME
+  focus                 1        0.1              7   LIFE 
+  proc hamdesktop       pid 454360  writes 12
+  proc hampanelscene    pid 454390  writes 124
+  proc wsysd            pid 454331  writes 1121
+census: INFO ----- the whole session, bring-up included -----
+census:   category          count    per sec          bytes
+census:   chrome             1903      156.9         128690   other
+census:   scene               220       18.1         524883   FRAME
+census:   commit              220       18.1         524883   FRAME
+census:   event               132       10.9           1841   FRAME
+census:   pointer             131       10.8           1836   FRAME
+census:   geometry              6        0.5             85   LIFE 
+census:   attr                  5        0.4             44   LIFE 
+census:   newwindow             3        0.2             27   LIFE 
+census:   focus                 1        0.1              7   LIFE 
+census:   proc hamdesktop       pid 454360  writes 180
+census:   proc hampanelscene    pid 454390  writes 274
+census:   proc wsysd            pid 454331  writes 2167
+census:
+census: THE SPLIT, MEASURED
+census:   phase A (idle, 10s):  lifecycle 0 (0.000/s)   per-frame 98 (9.800/s)
+census:   phase B (mouse, 12.129s): lifecycle 1 (0.082/s)   per-frame 399 (32.896/s)
+census:
+census: PASS the census produced a file per process (3 of them)
+census: PASS both phases recorded per-frame traffic (idle 98, mouse 399)
+census: PASS the synthetic mouse reached a window's rings (131 pointer writes)
+census: PASS every counted category is classified LIFECYCLE, PER-FRAME or other
+census: PASS under a mouse, per-frame writes outnumber lifecycle writes 399:1 (>= 20:1)
+census: PASS the lifecycle rate under a mouse is 0.082/s (<= 50/s): one authority can serve it
+census: PASS an IDLE desktop makes 0 lifecycle writes in 10s (0.000/s): an authority sleeps
+census:
+census: WHAT THIS DOES NOT MEASURE, stated so nobody reads it as more
+census: than it is: one desktop, no browser and no Xwayland. wsyswl
+census: spends a window row per X toplevel, so a Steam session's
+census: LIFECYCLE rate is higher than anything here -- bounded by
+census: MAXCONN*WINPERCONN = 256 windows, each created once.
+census: 10 passed, 0 failed

@@ -1,0 +1,21 @@
+x11rs: PASS the X server builds
+x11rs: PASS the server is listening
+x11rs:      setup ok, 120 bytes of additional data
+x11rs:      first  GetGeometry: reply, seq 1
+x11rs:      sent an oversized request: declared 8004 bytes (buffer is 4096)
+x11rs:      drained 32 bytes of server response to it
+x11rs:      second GetGeometry: reply, seq 3
+x11rs:      VERDICT: IN SYNC -- the server drained the excess and kept serving
+x11rs: PASS the connection HANDSHAKE COMPLETES -- net_accept handed back the accepted connection and not the listening socket
+x11rs: PASS a normal request gets a well-formed reply
+x11rs: PASS the stream SURVIVES an oversized request: the reply after it still carries the right sequence number, so the excess was drained rather than left to be read as the next request's header
+x11rs: INFO server log:
+x11rs:      [x11srv] request loop done
+x11rs:      [x11srv] warn: cannot open wsys ctl
+x11rs:      wsys: /dev/wsys/1/draw/x11fb/fb: no such per-window file.
+x11rs:      wsys:   A window's files are a fixed set (ctl, wctl, scene, keys, pointer, event,
+x11rs:      wsys:   text, cmd, draw/ctl, draw/images, draw/image/<name>, backbuffer).
+x11rs:      wsys:   This used to be accepted as a named buffer and silently reach nothing.
+x11rs:      [x11srv] warn: cannot open wsys fb
+x11rs:      [x11srv] PASS
+x11rs: 5 passed, 0 failed

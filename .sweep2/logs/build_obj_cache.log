@@ -1,0 +1,11 @@
+objcache: INFO this tree is wsys v8; the decoy tree will be v6
+objcache: PASS the two trees differ in exactly one file (user/linux-wsys.c, v6 vs v8) and tree C is byte-identical to tree B
+objcache: PASS both trees built wsysd into one shared output directory (/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/objcache.OyMGin/shared)
+objcache: PASS the decoy compositor really is different -- it stamped the segment v6
+objcache: PASS the binary built from the v8 tree stamped the segment v8 -- it carries ITS OWN tree's window system, though a v6 tree was built into the same directory first
+objcache: PASS discriminator: rebuilding the v6 tree after the v8 tree still gives it v6, so the trees are not simply taking turns evicting each other
+objcache: PASS the shared directory holds 2 distinct linux-wsys objects -- the two trees asked for two different filenames and could not collide
+objcache: PASS no runtime object is cached under an unkeyed name
+objcache: PASS a third tree with byte-identical sources at a different path added no new object (2) -- identical content SHARES the cache, so keeping trees apart costs no rebuilds
+objcache: PASS and the shared object was the right one -- the third tree's compositor stamped v8
+objcache: 9 passed, 0 failed

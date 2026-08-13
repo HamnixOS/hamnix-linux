@@ -1,0 +1,18 @@
+close: PASS the compositor, the Wayland server and the window probe all build
+close: PASS wsysd took its pointer from the test's evdev stream and opened no real input device
+close: PASS two decorated X windows are on the desktop: wids 2 3
+close: INFO wid 2 at 80,120 342x202;  wid 3 at 700,120 342x202
+close: === 1. is the close button painted where it is clickable?
+close: INFO wid 2's close box should be at 405,102 14x14
+close: INFO 91% of that rectangle is the close button's colour
+close: PASS the close button is painted at exactly the coordinates the hit test uses
+close: === 2. the negative: the rest of the title bar is not a button
+close: PASS a click on the left of the title bar left the client running
+close: === 3. the button
+close: INFO close_requested 0 -> 1, close_killed 0
+close: PASS the client was ASKED to close (WM_DELETE_WINDOW), not killed
+close: PASS the X client EXITED -- the process, not just its window record
+close: PASS and the other window's client is untouched
+close: PASS and wid 2 is gone from /dev/wsys
+close: PASS wid 3 is still there
+close: 10 passed, 0 failed

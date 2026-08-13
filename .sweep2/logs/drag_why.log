@@ -1,0 +1,19 @@
+=== SOFTWARE
+   wsysd: vk backend SOFTWARE -- no usable Vulkan device (p_vkCreateInstance(&ici, 0, &g_inst) -> VkResult -9)
+   --- last 4 live dumps (us per FULL frame) ---
+   benchlive: seq 78 frames 60 windows 4 | clear 0 scene 195 rast 1693 copy 123 backbuf 0 cursor 1 present 246 writeback 241 | gpu_frames 0 refused 0 capped 0 | iters 60 scan_us 37 pub_us 6 | dt_us 140799 fps 426 submit_us 0
+   benchlive: seq 79 frames 60 windows 4 | clear 0 scene 200 rast 1720 copy 129 backbuf 0 cursor 1 present 259 writeback 254 | gpu_frames 0 refused 0 capped 0 | iters 60 scan_us 41 pub_us 6 | dt_us 144246 fps 415 submit_us 0
+   benchlive: seq 80 frames 60 windows 4 | clear 0 scene 206 rast 1812 copy 135 backbuf 0 cursor 1 present 288 writeback 283 | gpu_frames 0 refused 0 capped 0 | iters 60 scan_us 41 pub_us 7 | dt_us 152418 fps 393 submit_us 0
+   benchlive: seq 81 frames 60 windows 4 | clear 0 scene 194 rast 1686 copy 127 backbuf 0 cursor 1 present 225 writeback 220 | gpu_frames 0 refused 0 capped 0 | iters 60 scan_us 37 pub_us 6 | dt_us 139434 fps 430 submit_us 0
+   (workdir kept: /home/david/.hamnix-build/vk-present-readback/dw.yaSHIM)
+=== GPU (host-cached frame)
+   wsysd: vk backend GPU -- NVIDIA GeForce RTX 3090 (VkPhysicalDeviceType 2, silicon 1, zero-copy 1, device-local 0, host-cached 1)
+   --- last 4 live dumps (us per FULL frame) ---
+   benchlive: seq 72 frames 60 windows 4 | clear 0 scene 247 rast 1923 copy 144 backbuf 0 cursor 2 present 373 writeback 367 | gpu_frames 4304 refused 0 capped 0 | iters 62 scan_us 49 pub_us 8 | dt_us 170203 fps 352 submit_us 1686
+   benchlive: seq 73 frames 60 windows 4 | clear 0 scene 281 rast 2145 copy 189 backbuf 0 cursor 2 present 381 writeback 374 | gpu_frames 4364 refused 0 capped 0 | iters 60 scan_us 55 pub_us 9 | dt_us 187973 fps 319 submit_us 1671
+   benchlive: seq 74 frames 60 windows 4 | clear 0 scene 260 rast 1963 copy 162 backbuf 0 cursor 2 present 365 writeback 359 | gpu_frames 4424 refused 0 capped 0 | iters 60 scan_us 51 pub_us 9 | dt_us 172571 fps 347 submit_us 1649
+   benchlive: seq 75 frames 60 windows 4 | clear 0 scene 314 rast 1985 copy 206 backbuf 0 cursor 2 present 370 writeback 362 | gpu_frames 4484 refused 0 capped 0 | iters 61 scan_us 59 pub_us 12 | dt_us 182572 fps 328 submit_us 1779
+   (workdir kept: /home/david/.hamnix-build/vk-present-readback/dw.Tci4eB)
+=== GPU (device-local frame -- the OLD placement)
+   --- last 4 live dumps (us per FULL frame) ---
+   (workdir kept: /home/david/.hamnix-build/vk-present-readback/dw.BN6zTJ)

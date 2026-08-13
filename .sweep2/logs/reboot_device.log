@@ -1,0 +1,96 @@
+[rbdev] staging a live image with the protocol rc
+[rbdev] live boot (up to 180s)
+[rbdev] building an installed disk (boot-1 rc, boot-2 rc staged alongside)
+[rbdev] disk boot 1 of 2: write + reboot (up to 240s)
+[rbdev] disk boot 2 of 2: the stamp + poweroff (up to 240s)
+
+rc.boot: hamnix-linux starting
+rc.boot: kernel is Linux; userland is Adder
+rc.boot: handing off to an interactive shell
+rc.boot: network configured
+[rbdev] ===== LIVE: the /dev/reboot protocol
+[rbdev] live cat /dev/reboot (must terminate, no output):
+[rbdev] live cat status: 0
+[rbdev] live STILL HERE after the cat
+[rbdev] live unknown-verb status: 0
+[rbdev] live STILL HERE after an unknown verb
+[rbdev] live rebootx status: 1
+[rbdev] live --- dropping to uid 1001, the session user
+[rbdev] u1001 poweroff:
+[rbdev] u1001 poweroff status: 1
+[rbdev] u1001 STILL HERE after poweroff
+[rbdev] u1001 reboot:
+reboot: requested reboot
+reboot: reboot did not take
+[rbdev] u1001 reboot status: 1
+[rbdev] u1001 STILL HERE after reboot
+[rbdev] u1001 halt:
+[rbdev] u1001 halt status: 1
+[rbdev] u1001 STILL HERE after halt
+[rbdev] LIVE DONE
+
+rc.boot: hamnix-linux (installed)
+rc.boot: network configured
+rc.boot: up
+[rbdev] ===== DISK BOOT 1: write, then reboot in the same breath
+[rbdev] d1 wrote the stamp:
+[rbdev] d1 stamp status: 0
+[rbdev] d1 armed the next boot
+[rbdev] d1 rebooting NOW with nothing flushed but the device
+reboot: requested reboot
+
+rc.boot: hamnix-linux (installed)
+rc.boot: network configured
+rc.boot: up
+[rbdev] ===== DISK BOOT 2: the same disk, nothing rebuilt
+[rbdev] d2 the stamp written one instant before the reset:
+[rbdev] d2 stamp status: 0
+[rbdev] d2 DISK DONE
+[rbdev] d2 powering offaplay: cannot open input
+
+--- the live boot: the ported protocol
+rbdev: PASS the live image booted
+rbdev: PASS a read of /dev/reboot terminates (EOF, not a wedge)
+rbdev: PASS   ... and the machine is still running after it
+rbdev: PASS an unknown verb is accepted and ignored
+rbdev: PASS   ... and the machine is still running after it
+rbdev: PASS /dev/rebootx is not claimed by a prefix match
+
+--- the live boot, as the desktop user (uid 1001)
+rbdev: PASS the session really is uid 1001  -> 'uid=1001(live) gid=1001(live) groups=1001(live)'
+rbdev: PASS uid 1001 is refused a poweroff, by name
+rbdev: PASS uid 1001's poweroff exits non-zero
+rbdev: PASS   ... and the machine is still running
+rbdev: PASS uid 1001 is refused a reboot, by name
+rbdev: PASS uid 1001's reboot exits non-zero
+rbdev: PASS   ... and the machine is still running
+rbdev: PASS uid 1001 is refused a halt, by name
+rbdev: PASS uid 1001's halt exits non-zero
+rbdev: PASS   ... and the machine is still running
+rbdev: PASS the refusal is NOT the old 'cannot open' fault
+rbdev: PASS the live arm reached the end
+
+--- disk boot 1: an installed machine restarts itself
+rbdev: PASS the installed root came online
+rbdev: PASS the stamp was written to the ext4 root  -> 'rbstamp-714799-1786612880'
+rbdev: PASS the next boot was armed
+rbdev: PASS the machine asked to restart
+rbdev: PASS the kernel restarted the system
+rbdev: PASS pid 1 did not simply die instead
+rbdev: PASS the reboot was not a no-op
+rbdev: PASS and it was not the old open failure
+rbdev: PASS the machine stopped on its own, well inside the budget (6s of 240s)
+
+--- disk boot 2: what survived a reboot with nothing flushed but sync(2)
+rbdev: PASS the machine booted again
+rbdev: PASS it is running the rc boot 1 wrote one instant before the reset
+rbdev: PASS the stamp survived the reboot  -> 'rbstamp-714799-1786612880'
+rbdev: PASS the stamp read exited 0
+rbdev: PASS boot 2 reached the end
+rbdev: PASS the machine asked to power off
+rbdev: PASS the kernel powered the machine down
+rbdev: PASS the poweroff was not a no-op
+rbdev: PASS pid 1 did not simply die instead
+rbdev: PASS QEMU exited because the GUEST powered off (5s of 240s)
+
+(logs: build/rebootdev/live.log build/rebootdev/disk1.log build/rebootdev/disk2.log; stamp: rbstamp-714799-1786612880)

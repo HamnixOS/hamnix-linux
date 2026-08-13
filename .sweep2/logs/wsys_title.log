@@ -1,0 +1,45 @@
+title: PASS the compositor and the window holder build
+title: PASS the backdrop is on the screen (wid 2, green)
+title: INFO wid 3: bar y=198..219, text band 205,201 373x16
+title: INFO the title bar's colour is #5577dd (720 1 5577dd 720)
+title: PASS the strip above the text cell is one flat colour (#5577dd) -- a usable background
+title: === 1. THE CONTROL: an empty title leaves the band untouched
+title: INFO with no title, 0 of 5968 band pixels differ from the bar colour
+title: PASS an empty title paints NOTHING on the bar -- the band is 100% #5577dd
+title: === 2. THE TITLE: the name appears, in ink, in that same band
+title: INFO with 'Terminal', 266 of 5968 band pixels differ from the bar colour
+title: PASS the title is PAINTED: 266 non-background pixels where there were 0
+title: PASS and the band's pixels changed (4559ce460d3076a4 -> b08da512feed20a2)
+title: INFO the lightest pixel in the band is #f0f0f5 (the chrome's ink is #f0f0f5)
+title: PASS the ink is the compositor's title ink, at full strength
+title: === 2b. AND BETWEEN THE LETTERS: the bar, not a black box
+title: INFO the focused bar (#5577dd): 0 px darker than the bar, 0 pure black, 53px ink span holding 582 bar-coloured px, darkest #5577dd
+title: PASS the focused bar: NOTHING in the band is darker than the bar -- the darkest pixel IS the bar (#5577dd)
+title: PASS the focused bar: and not one pixel of the title band is #000000
+title: PASS the focused bar: the gaps between the letters are the bar itself (582 of 848 px across the ink span)
+title: === 3. AND ONLY THERE: nothing outside the band moved
+title: PASS the 5px gap before the close box is 100% bar colour
+title: PASS the close button is intact (91% its own colour)
+title: PASS the 3 rows above the title bar are 100% backdrop
+title: PASS the 60px of backdrop right of the window is untouched
+title: PASS and the backdrop left of the window is untouched
+title: === 4. TWO WINDOWS, TWO NAMES -- the whole point
+title: INFO wid 4's bar is #404040 with 155 ink pixels
+title: PASS the second window's title is painted too (155 pixels)
+title: INFO the unfocused bar (#404040): 0 px darker than the bar, 0 pure black, 27px ink span holding 277 bar-coloured px, darkest #404040
+title: PASS the unfocused bar: NOTHING in the band is darker than the bar -- the darkest pixel IS the bar (#404040)
+title: PASS the unfocused bar: and not one pixel of the title band is #000000
+title: PASS the unfocused bar: the gaps between the letters are the bar itself (277 of 432 px across the ink span)
+title: PASS 'Terminal' and 'Files' put DIFFERENT ink on their bars (0091744171b890f4 vs ad82ad30777cca99)
+title: === 5. A RETITLE REPAINTS, with nothing else changed
+title: PASS changing ONLY the title changed the bar (b08da512feed20a2 -> e4b130a2cae592a1)
+title: === 6. A HOSTILE TITLE (the table is 0666: any uid can set this)
+title: PASS 63 W's are ellipsised: the close-box gap is still 100% bar colour
+title: PASS and nothing escaped past the window's right edge
+title: PASS nor above the bar, nor down into the client area
+title: PASS and it is still SHOWN, clipped rather than dropped (2292 pixels)
+title: PASS a title carrying a quote and a fill verb painted NO rectangle anywhere
+title: PASS and it stayed inside its band like any other title
+title: PASS a title of control bytes and an ANSI escape stayed inside its band
+title: PASS wid 4's title bar is byte-identical through every hostile title on wid 3
+title: 29 passed, 0 failed

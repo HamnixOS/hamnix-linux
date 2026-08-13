@@ -1,0 +1,52 @@
+connc: === 1. the numbers, and whether the three files agree
+connc: INFO MAXCONN=32 WINPERCONN=16 MAXWIN=512 FCPERCONN=32 FCMAX=1024 MAXOBJ=1024
+connc: INFO WAITSET=35 WAITFDS_MAX=64 wsysd MAX_WIN=512 device WSYS_MAX_WINDOWS=512 version=8
+connc: PASS MAXCONN is 32 -- more than the 8 Firefox reaches by itself
+connc: PASS MAXCONN 32 holds Firefox (8) + debian's Xwayland + alpine's Xwayland = 10
+connc: PASS MAXCONN 32 holds TWO browsers (8 + 8, measured) + two namespaces' Xwayland = 18
+connc: PASS MAXWIN 512 >= MAXCONN 32 * WINPERCONN 16 -- every connection is guaranteed its whole window budget
+connc: PASS FCMAX 1024 >= MAXCONN 32 * FCPERCONN 32 -- a busy client cannot silence another's initial-draw callback
+connc: PASS the window table is one number in three files: wsyswl MAXWIN = wsysd MAX_WIN = WSYS_MAX_WINDOWS = 512
+connc: INFO DEVTAB_MAX=2112, and wsyswl needs 4 per window * 512 = 2048
+connc: PASS DEVTAB_MAX 2112 >= 4 files per window * 512 windows = 2048 -- the window table is REACHABLE, not just declared
+connc: PASS WAITSET 35 >= 1 listener + MAXCONN 32 + xwm + clipboard = 35
+connc: PASS WAITSET 35 <= WAITFDS_MAX 64 -- sys_waitfds will accept the set instead of returning EINVAL
+connc: PASS the connection loop that fills the poll set is bounded by WAITSET
+connc: PASS the listen backlog is MAXCONN + 16, so a burst of clients past the ceiling each reach accept(2) and are refused BY NAME
+connc: === 1b. every per-connection array is exactly MAXCONN * its stride
+connc:      35 per-connection arrays checked against MAXCONN=32, 0 wrong
+connc:      per-connection cost 55320 bytes (54.02 KiB); 32 connections = 1729 KiB of BSS
+connc: PASS every per-connection array is sized MAXCONN * its stride
+connc: === 2. build
+connc: PASS wsysd, wsyswl and the connection probe all build
+connc: INFO wsyswl BSS is 4162432 bytes (4064 KiB) at MAXCONN=32
+connc: === 3. MAXCONN clients at once, and every one of them accepted
+connc: PASS the running server states its own ceiling: limits shared MAXCONN=32
+connc: PASS all 32 clients were accepted at once (the ceiling really is 32, not a number in a comment)
+connc: PASS the server agrees: conns 32, conns_high_water 32
+connc: PASS nothing was refused at or below the ceiling (conn_refused 0)
+connc: === 4. four MORE clients, which must be refused BY NAME
+connc: PASS all 32 holders are still running, so the table really is full when the next client arrives
+connc: INFO past the ceiling: 4 refused, 0 dropped in silence, 0 accepted, 0 never reached accept(2), 0 other
+connc: PASS every client past the ceiling reached accept(2) -- none was bounced by a short listen queue before the server could speak
+connc: PASS all 4 clients past the ceiling were REFUSED -- not accepted into a table that is full
+connc: PASS the refused client was told, on the wire: "wsyswl: connection table full (MAXCONN=32) -- this client was refused, not one of its windows"
+connc: PASS wl_display.error code 2 (no_memory) -- the protocol's own word for a resource that ran out
+connc: PASS the message names the limit AND its value, so the reader knows which number to raise
+connc: PASS conn_refused counted every one of them (4) -- diagnosable from a file after the fact
+connc: PASS the server said so on its own stderr as well
+connc: === 5. what the overflow did to the clients that were already there
+connc: PASS all 32 clients that were already connected are still connected -- a refusal costs the client refused and nobody else
+connc: PASS conns is still 32 after 4 refusals -- the refusals did not consume, leak or corrupt a slot
+connc: === 5b. free one slot and try again
+connc: INFO after killing one holder: conns 31
+connc: PASS a client accepted into the slot the dead one freed -- exhaustion is a state, not damage
+connc: === 6. the price
+connc: INFO the window table /srv/wsys is 37972380 bytes of ADDRESS SPACE and 4 KiB RESIDENT (512 rows, no windows open)
+connc: PASS the window table is SPARSE: 4 KiB resident of 37082 KiB mapped -- a row nobody has a window in is not paid for
+connc: PASS an empty table costs 4 KiB, at or under the 4 KiB-a-row scan floor (512 rows, ceiling asserted at 4096 KiB)
+connc: INFO a row is 74164 bytes when a window is actually in it, and about 4096 when it is not
+connc: INFO before this pass: 512 rows would have been 36 MiB RESIDENT on every boot, which is why MAXCONN was 16
+connc: INFO the paint pool /srv/wsys.bb was never created -- no client here asked to paint, which is the point: these are connections, not windows
+connc: ---------------------------------------------
+connc: PASS 30  FAIL 0

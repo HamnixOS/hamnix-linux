@@ -1,0 +1,23 @@
+[snarfser] building the bridge and the probes ...
+[snarfser] built
+[snarfser] running (about half a minute) ...
+  PASS  a fresh segment starts both counters at 0
+  PASS  a copy bumps the CLIPBOARD counter
+  PASS  the SAME BYTES again bump it too (content polling cannot see this)
+  PASS  a PRIMARY copy moves only the PRIMARY counter
+  PASS  an open of /dev/snarf.serial for WRITING is refused
+  PASS  the segment is 131120 bytes (131096 of v1, then the counters and the poke)
+  PASS  a park on /dev/snarf.serial is WOKEN by another process's copy
+  PASS  and woken by the WRITE, not by the 6 s budget expiring (1001 < 3000)
+  PASS  and not before the writer ran, so it really did sleep (1001 >= 500)
+  PASS  a park with nobody writing is NOT woken -- the control
+  PASS  a 131096-byte v1 mapping still lands in the CLIPBOARD the toolkit reads
+  PASS  and an old client's write moves NO counter (both serial 3 1)
+  PASS  xsnarfd idle wake rate sampled over 10003 ms: 0.49 wakes/s (5 wakes)
+  PASS  xsnarfd idles BELOW 1.5 wakes/s (the 200 ms poll could not: it floors at 5) (49 < 150)
+  PASS  a copy made while the bridge was parked reaches the X selection
+  PASS  a writer too old to bump the serial STILL converges, by reconcile
+  PASS  and it converged with no counter having moved at all (both serial 4 1)
+
+[snarfser] passes=17 fails=0
+[snarfser] PASS

@@ -1,0 +1,31 @@
+[idlecpu] work dir: /home/david/.hamnix-build/idlecpu.b64zNx
+[idlecpu] staging an image
+[idlecpu] booting (up to 265s)
+[idlecpu] qemu pid 893248
+
+=== A: the desktop as rc.5 leaves it, 20s ===
+  [A idle desktop] qemu cpu 6.0% of one cpu (2 vCPUs => 200% is both pegged)
+idlecpu: PASS [A idle desktop] host QEMU under 60% of a cpu (got 6.0%)
+idlecpu: PASS [A idle desktop] the guest reported ps at both ends of the window
+idlecpu: PASS [A idle desktop] no process burns more than 25% of a cpu
+idlecpu: PASS [A idle desktop] no zombie processes
+
+=== B: the same desktop with one terminal open, 20s ===
+  [B terminal open] qemu cpu 7.4% of one cpu (2 vCPUs => 200% is both pegged)
+idlecpu: PASS [B terminal open] host QEMU under 60% of a cpu (got 7.4%)
+idlecpu: PASS [B terminal open] the guest reported ps at both ends of the window
+idlecpu: PASS [B terminal open] no process burns more than 25% of a cpu
+idlecpu: PASS [B terminal open] no zombie processes
+idlecpu: PASS [B terminal open] the terminal really is running
+
+=== C: a program launched from the menu's own queue, 20s ===
+  [C menu launch] qemu cpu 6.9% of one cpu (2 vCPUs => 200% is both pegged)
+idlecpu: PASS [C menu launch] host QEMU under 60% of a cpu (got 6.9%)
+idlecpu: PASS [C menu launch] the guest reported ps at both ends of the window
+    174    wsysd            S     1.0s ->    5.0% of one cpu
+idlecpu: PASS [C menu launch] no process burns more than 25% of a cpu
+idlecpu: PASS [C menu launch] no zombie processes
+idlecpu: PASS [C menu launch] the launched program really is running
+    hamfm is in state S with 0:00 of cpu
+
+idlecpu: ALL PASS

@@ -1,0 +1,17 @@
+[pipegate] staging an image with that rc
+[pipegate] booting (up to 120s)
+PASS the boot ran every pipeline to the end
+PASS echo hi | cat -> 'hi'
+PASS cat F | wc -c agrees with wc -c F (1892 bytes)
+PASS cat F | md5sum agrees with md5sum F (5705e3c0d0044b724281f9bcc7520d3a)
+PASS cat F | cksum agrees with cksum F (2064939059 1892)
+PASS cat F | sort | wc -l -> 500 lines
+PASS cat F | head -2 answered (the writer took the close)
+PASS echo > FILE then cat FILE round-trips
+PASS `{ cat FILE }` capture returned its output
+PASS `{ echo inner }` capture of a BUILTIN returned its output
+PASS no 'BUILTIN is not captured' diagnosis -- the builtin was forked
+PASS 70 pipelines in one boot, on a 64-slot fd table
+PASS a pipeline still works after 70 of them
+
+[pipegate] 13 PASS  0 FAIL   (full log: build/pipelines/boot.log)

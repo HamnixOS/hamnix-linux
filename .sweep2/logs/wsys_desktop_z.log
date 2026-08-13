@@ -1,0 +1,21 @@
+wsysz: PASS the compositor, the desktop, the panel and the probe client all build
+wsysz: PASS hamdesktop mapped a full-screen undecorated backdrop (wid 2)
+wsysz: PASS hampanelscene mapped a full-width bar at y 0, height 26, z 100
+wsysz: PASS both applications mapped a window (wid 5, wid 6)
+wsysz: INFO the application's rectangle: 0% its own colour with only the desktop up, 100% with it up
+wsysz: PASS the application's window is composited OVER the desktop backdrop (100% of its rectangle is its own pixels)
+wsysz: PASS the backdrop is still there beside the window (100% unchanged)
+wsysz: INFO z: backdrop -1, appD (asked for the floor) 0, appA 6, panel 100; appD's rectangle is 100% its own colour
+wsysz: PASS the backdrop's z (-1) is below even a window asking for the floor (0) -- it is PINNED, not merely early
+wsysz: PASS a window at the lowest z it can ask for is still ON TOP of the backdrop (100%)
+wsysz: INFO a window straddling the bar: 0% of the bar is the window's colour, 100% of the window clear of it
+wsysz: PASS the panel is drawn OVER an ordinary window that overlaps it, and the window elsewhere is untouched
+wsysz: INFO after a click on the desktop: backdrop z -1, the application's rectangle 100% its own colour
+wsysz: PASS a click on the desktop did NOT bury the application (a pinned backdrop never raises)
+wsysz: INFO the overlap starts 0% appA / 100% appB
+wsysz: INFO after raise appA the overlap is 100% appA; after raise appB it is 100% appB
+wsysz: PASS a raise brings the raised window to the FRONT, and it works in both directions
+wsysz: INFO after the window closed: 0% of its area is still its colour, 100% is back to the bare desktop
+wsysz: PASS a closed window's pixels left the screen and the desktop came back underneath
+wsysz: INFO screenshot /home/david/.hamnix-build/testkeep/wsysz.440820/desktop.png (1280x800)
+wsysz: 12 passed, 0 failed

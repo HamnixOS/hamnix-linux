@@ -1,0 +1,18 @@
+mouse: PASS the compositor, the desktop, the panel and the ctl probe all build
+mouse: PASS wsysd took its input from the test's evdev file and opened no real device
+mouse: PASS the compositor is WOKEN BY INPUT, not ticking: wsysd: wait set 2 fds wake this loop, 1 (one of them is the client wake) always-ready and excluded; fallback tick 16 ms
+mouse: INFO the session under test is wsys v8 next=2 focus=0 desktop=0 gen=9 bytes=37972380
+mouse: INFO the probe left the session alone (still v8, next_wid 5 -> 5) -- it is version-matched to the bytes under test, so every FAIL below is about THEM
+mouse: PASS hampanelscene mapped a full-width top bar (wid 3, height 26)
+mouse: PASS control: with no click yet, the menu card is not drawn (0% of the column is the dropdown body)
+mouse: PASS control: with no click yet, the first desktop icon carries no selection highlight (0%)
+mouse: PASS an EVDEV CLICK on the Applications button opened the menu: the panel window grew 26 -> 206 px tall
+mouse: PASS and the menu is PAINTED in the framebuffer (87% of the card column is the dropdown body)
+mouse: PASS a second evdev click on the same button closed the menu again (the panel window is back to 26 px)
+mouse: PASS and the card is gone from the framebuffer (0% of the column is the dropdown body)
+mouse: PASS an EVDEV CLICK on the first desktop icon SELECTED it (59% of the cell is hamdesktop's selection fill)
+mouse: PASS clicking the SECOND icon moved the selection (cell 2 is 65% selected, cell 1 back to 0%) -- the highlight follows the mouse, it was not painted at startup
+mouse: PASS a click whose move/press/release arrive in ONE evdev read still opens the menu (the panel grew to 206 px)
+mouse: PASS every click in this file came from the evdev end: nothing here names an event, pointer or keys ring, whatever program it might have used to do it
+mouse: INFO clicks delivered: 45 evdev bytes at 840 total
+mouse: 14 passed, 0 failed

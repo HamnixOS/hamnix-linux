@@ -1,0 +1,33 @@
+isogate: PASS the compositor, the desktop and the panel build once and are shared by the witness and the gate
+isogate: INFO running the isolated experiment (a live desktop, and the gate beside it)
+isogate:      A bars top=3 bottom=4
+isogate:      A witness-up 1
+isogate:      A before vis 1 1
+isogate:      A before botfill 81
+isogate:      A before reloads 0
+isogate:      A gate rc 0
+isogate:      A gate score panelconf: 17 passed, 0 failed
+isogate:      A after vis 1 1
+isogate:      A after botfill 81
+isogate:      A after reloads 0
+isogate:      A marker intact
+isogate: PASS the witness desktop came up beside the gate with its own compositor and its own two bars
+isogate: PASS through a full run of de_panel_conf_replace.sh the witness's panel windows never moved off screen (visible 1 1 -> 1 1)
+isogate: PASS and in PIXELS the witness's taskbar is painted before and after (81% -> 81% of the bar colour) -- not a flag, the framebuffer
+isogate: PASS the witness logged NO further config reload (0 -> 0) and its own config file still says it owns it -- the gate's four replacements were invisible to it
+isogate: INFO running the negative control (HAMTEST_NO_PRIVNS=1: the gate is told to share)
+isogate:      B bars top=3 bottom=4
+isogate:      B witness-up 1
+isogate:      B before vis 1 1
+isogate:      B before botfill 81
+isogate:      B before reloads 0
+isogate:      B gate rc 0
+isogate:      B gate score panelconf: 17 passed, 0 failed
+isogate:      B after vis 1 1
+isogate:      B after botfill 0
+isogate:      B after reloads 7
+isogate:      B marker gone
+isogate: PASS CALIBRATION: with the isolation off the same gate DOES reach the same witness (reloads 0 -> 7, config marker gone, windows 1 1 -> 1 1) -- so the four assertions above are measured with an instrument that can feel this
+isogate: PASS and nothing either experiment wrote reached this machine: none of the desktop's nine fixed host names carries this run's tag, and no panelconf scratch directory was left in the host's /tmp -- including from the control run whose whole job was to contaminate
+isogate: INFO note: 2 desktop-owned name(s) are present in this machine's /tmp and were not written by this run -- some other process on this host is writing the desktop's real runtime state
+isogate: 7 passed, 0 failed

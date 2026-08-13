@@ -1,0 +1,25 @@
+panelship: PASS the shipped etc/panel.conf is 3120 bytes and its first `panel` directive begins at byte 2834 -- past the 2047-byte read that used to swallow this file whole
+panelship: PASS and it asks for `color #d4d0c8` -- the colour that is the measurement below
+panelship: PASS the compositor, the desktop and the panel all build
+panelship: PASS the active config is etc/panel.conf byte-for-byte (3120 bytes, comment header and all) -- not a header-less copy of its directives
+panelship: PASS wsysd took its input from the test's evdev file and opened no real device
+panelship: PASS the window table holds a backdrop (wid 2), a top panel (wid 3, 26px) and a taskbar (wid 4, 26px at y=774)
+panelship: PASS THE SHIPPED FILE IS HONOURED: both bars are painted in the #d4d0c8 the file itself asks for (top 81%, taskbar 81%) -- the config was read past byte 2834
+panelship: PASS and NOT the #eceef2 of the built-in fallback (0% of the top strip) -- the two paths are distinguishable, so the assertion above means something
+panelship: PASS the SAME directives behind a 65010-byte comment header still reach the bar (top 81%, taskbar 81%) -- the reader has no size ceiling, so this is not a bigger fixed buffer wearing the fix's hat
+panelship: PASS editing ONLY the `color` lines (all of them past byte 2834) repaints the bar #b0c4de within seconds (81%) -- the live re-read compares the whole file, not its comment header
+panelship: PASS the maximal panel set (4 panels x 12 launcher widgets, 5478 bytes serialized) is honoured and its VERTICAL panel is painted (96% of the left band is #ff00ff, after 0 s)
+panelship: PASS a config that describes no panel is announced BY NAME and by size: hampanelscene: /tmp/hamnix-panel.conf: parsed 0 panels from 2834 byte(s) -- using the built-in default layout INSTEAD of this file
+panelship: PASS and the fallback it announced is the one actually on screen: the top bar is 81% #eceef2 -- the message and the pixels agree
+panelship: PASS a line past the reader's line limit is announced BY NAME: hampanelscene: /tmp/hamnix-panel.conf: TRUNCATED -- 1 line(s) are longer than the 512-byte line limit and were cut; those directives are NOT what the file says
+panelship: PASS putting etc/panel.conf back restores #d4d0c8 on both bars (top 81%, taskbar 81%) with both windows still visible (top=1 taskbar=1) -- honoured, dropped and honoured again, all live
+panelship: INFO what the panel said about its config:
+panelship:      hampanelscene: /tmp/hamnix-panel.conf: honoured, 2 panel(s)
+panelship:      hampanelscene: /tmp/hamnix-panel.conf: honoured, 2 panel(s)
+panelship:      hampanelscene: /tmp/hamnix-panel.conf: honoured, 4 panel(s)
+panelship:      hampanelscene: /tmp/hamnix-panel.conf: parsed 0 panels from 2834 byte(s) -- using the built-in default layout INSTEAD of this file
+panelship:      hampanelscene: /tmp/hamnix-panel.conf: parsed 0 panels from 53 byte(s) -- using the built-in default layout INSTEAD of this file
+panelship:      hampanelscene: /tmp/hamnix-panel.conf: TRUNCATED -- 1 line(s) are longer than the 512-byte line limit and were cut; those directives are NOT what the file says
+panelship:      hampanelscene: /tmp/hamnix-panel.conf: honoured, 2 panel(s)
+panelship:      hampanelscene: /tmp/hamnix-panel.conf: honoured, 2 panel(s)
+panelship: 15 passed, 0 failed

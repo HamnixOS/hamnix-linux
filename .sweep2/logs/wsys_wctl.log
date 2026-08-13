@@ -1,0 +1,13 @@
+== does a hamui app's v2 negotiation reach the window system?
+  ok   lib/hamui.ad still negotiates on <wid>/wctl, so the probe mirrors a real hamui app
+     wctlv2 open=3 wid=3 open=3 open=3 open=3 wctlrc=10 ctl=[3 0 0 64 32 5 0 1 2 0 0 0 0 0|] open=3 geom draw=3 blit=1 pool=[slots 2/512 exhausted 0 last_refused 0 0x0|]
+  info the negotiation write returned 10 -- hamui takes this as success and sets h_v2_active=1
+  ok   THE WINDOW SYSTEM HONOURED IT: <wid>/ctl reports proto=2 (ctl: 3 0 0 64 32 5 0 1 2 0 0 0 0 0|)
+  ok   AND NEGOTIATING v2 IS NOT DAMAGE: ctl reports scene_gen=0, so the v2 scene read stays a 0-byte success and paint_window reaches the backbuffer
+  ok   and once it blits, a backbuffer IS claimed for it: slots 2/512 exhausted 0 last_refused 0 0x0|
+  ok   AND THE COMPOSITOR PAINTS IT: 128 pixels of the v2 window's own colour reached the framebuffer
+     bigblit open=3 wid=4 open=3 open=3 draw=3 bytes=2112018 wrote=2112018
+  ok   a FULL-SIZED blit is accepted whole: 2112018 bytes in one write(2)
+
+wsys_wctl: 6 passed, 0 failed
+PASS wsys_wctl

@@ -1,0 +1,23 @@
+srvmu: .... CPU instrument: /proc/<pid>/stat, CLK_TCK=100, 40s windows -> one tick = 0.025% of a core
+srvmu: PASS a client mapped window 2 with newwindow routed through the server
+srvmu:      wsrvst: server counters: conns 2 live 2 msgs 3972 nop 256 ping 33 stat 2 bad 0 bytes 93391 write 3678 newwin 1 refused 0
+srvmu: PASS the server executed 3678 routed ctl writes and 1 routed newwindows for a real dragging client -- the mutations are mediated, not merely reachable
+srvmu:      wsys: the server refused op 6: No such file or directory
+srvmu:      wsrvmu: a window-less process sent a routed `title` for window 9999
+srvmu:      wsrvmu: server counters: conns 3 live 2 msgs 3987 nop 256 ping 33 stat 6 bad 1 bytes 93620 write 3687 newwin 1 refused 1
+srvmu:      wsrvmu: the server received it (write 3686 -> 3687), so a refusal below is a decision and not a lost message
+srvmu:      wsrvmu: caller uid 0 pid 512037; segment owner uid 0
+srvmu:      wsrvmu: the mediator REFUSED it (refused 0 -> 1)
+srvmu: PASS a routed write for a window that does not exist is refused, and the probe proved the message ARRIVED first
+srvmu: .... the segment is owned by uid 0; this gate runs as uid 0
+srvmu: .... SKIPPED, AND NOT SILENTLY: the caller IS the host owner, so devwsys's own rule permits it to write any window and a refusal here would be the mediator being STRICTER than the path it replaces. Proving the caller identity is used needs a second uid. NO PASS IN THIS FILE COVERS IT -- tests/linux/wsys_srv_identity.sh does, with unshare -U --map-users, and is the file to run and to quote for that property.
+srvmu: PASS /dev/wsys/windows is byte-identical routed and unrouted (7 bytes, non-empty)
+srvmu: .... wsysd CPU, real drag, flag UNSET: samples 75.28% 85.25% 77.65% -> median 77.65%
+srvmu: .... wsysd CPU, real drag, ROUTED:     samples 55.73% 60.62% 63.35% -> median 60.62%
+srvmu: .... cost of mediating a real drag: -17.03% of a core (budget for a mouse-paced drag: 0.38%)
+srvmu: PASS the unrouted baseline is non-zero (77.65%), so the difference below is a comparison and not a division by nothing
+srvmu: PASS mediating a real drag is CHEAPER than not mediating it, by 17.03% of a core. That is a claim in its own right and not merely 'within the 0.38% budget' -- see the verdict below.
+srvmu: .... VERDICT: MOVE-A-WAKE, AND MORE. Routing a real drag made the compositor 17.03%% of a core CHEAPER, well outside the 0.025%% the instrument can resolve. Stage 1's 0.27%% at 192 synthetic ops/s was the synthetic NOP ADDING a wake that a real routed mutation replaces -- and routing also lets the server drain many mutations per wake and apply them BEFORE scan_windows in the same iteration, where the unrouted path woke the loop per publish. This wants its own gate before it is quoted.
+srvmu: .... full frames painted during the drag (units of 200): unrouted 540, routed 557
+srvmu: PASS the routed arm painted at least as many full frames as the unrouted one (557 vs 540 x200) -- the CPU saving is not the compositor doing less
+srvmu: 7 passed, 0 failed

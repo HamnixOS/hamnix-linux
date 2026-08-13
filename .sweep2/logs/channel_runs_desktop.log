@@ -1,0 +1,15 @@
+chanrun: PASS every package this gate runs is present in the channel and unpacks
+chanrun: PASS all 124 packages in index.json hash to the bytes on disk -- what runs below is what an installed machine would receive
+chanrun: PASS wsysd, hamdesktop, hampanelscene, hamsh, hpm and the ctl probe cat came out of the channel's tarballs (nothing was compiled)
+chanrun: INFO 26 binaries unpacked into /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/chanrun/chanrun.6WyPiW/bin
+chanrun: INFO running the packaged desktop under tests/linux/de_mouse_chrome.sh (offscreen)
+chanrun: PASS the desktop under test was the PACKAGED wsysd/hamdesktop/hampanelscene, not a fresh build
+chanrun: PASS THE PACKAGED DESKTOP WORKS: 14/14 under a synthetic mouse -- windows mapped, the top bar is there, the Applications menu opens and paints, and the desktop icons take a selection
+chanrun: INFO full desktop log: /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/chanrun/chanrun.6WyPiW/de_mouse_chrome.log (CHANRUN_KEEP=1 to keep it)
+chanrun: PASS the packaged hamsh runs and sources an rc script -- PID 1 has something to exec
+chanrun: PASS the packaged hpm runs and knows its own verbs -- an installed machine can still receive the NEXT fix
+chanrun: PASS 8/8 packaged coreutils produced the right ANSWER (not merely exit 0) -- the shared Adder runtime in these bytes works
+chanrun: PASS A PACKAGED v2 CLIENT PAINTS: the channel's own hambrowse put 30862 white pixels of a page on the framebuffer -- so its blit, which its OWN linked copy of the window system accepts, was not refused for being bigger than the staging buffer
+chanrun: PASS nothing in this file compiles anything: hamlinux_build.sh is never invoked here, so every assertion above is about the channel's own bytes
+
+chanrun: 10 passed, 0 failed   (channel: /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/build/repo/linux)

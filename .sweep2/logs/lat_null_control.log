@@ -1,0 +1,8 @@
+the SAME compositor measured under both labels, interleaved:
+  binempty  rep1  min   0.22  p50   0.32  mean   0.36  p95   0.51  max   1.73  ms
+  bin       rep1  min   0.25  p50   0.33  mean   0.34  p95   0.40  max   0.70  ms
+  binempty  rep2  min   0.29  p50   0.34  mean   0.37  p95   0.46  max   2.15  ms
+  bin       rep2  min   0.28  p50   0.34  mean   0.34  p95   0.41  max   0.61  ms
+  binempty  rep3  min   0.26  p50   0.32  mean   0.35  p95   0.41  max   1.92  ms
+  bin       rep3  min   0.29  p50   0.33  mean   0.33  p95   0.39  max   0.49  ms
+host load: 1.49 2.88 2.47 3/1113 470569

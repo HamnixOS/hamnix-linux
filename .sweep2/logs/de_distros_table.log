@@ -1,0 +1,15 @@
+distros: INFO isolated: /tmp, /dev/shm, /srv and $XDG_RUNTIME_DIR (/run/user/1000, dev 0:79) are private tmpfs of this run alone (/tmp is dev 0:75 in this mount namespace; the host's /tmp is untouched and unreadable from here); id map: root plus a subordinate range, so gid 5 (tty) and friends exist
+distros: INFO etc/distros.linux is 1426 bytes; its first real row begins at byte 1336
+distros: PASS (0) the shipped table's rows are behind a 1336-byte header -- a truncated read of this file loses the distributions, not the comments
+distros: INFO panel under test: /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/distros.10b6KO/hampanelscene.elf
+distros: PASS (0b) this run has its own /etc (the host's is bind-mounted aside and symlinked back; only /etc/distros is the fixture)
+distros: PASS (1) the shipped 1426-byte table parses its rows: 2 row(s), debian and alpine both named
+distros: PASS (1b) and the panel says how much it read: /etc/distros: 1426 byte(s), 29 line(s), 0 attached distribution(s)
+distros: PASS (2.65536) the same rows behind a 65536-byte header (66946 bytes total) still parse
+distros: PASS (2.307200) the same rows behind a 307200-byte header (308626 bytes total) still parse
+distros: INFO fifo halves: 1200 bytes then 226
+distros: PASS (3) a table delivered in two short reads is still read to the end: 2 row(s)
+distros: PASS (4) an over-long row is reported: /etc/distros: TRUNCATED -- 1 row(s) are longer than the 512-byte line limit and were NOT parsed
+distros: PASS (4b) and the cut row was not parsed at all: half a name is never taken for a name
+distros: PASS (5) control: with no table at all the panel says so, and 'absent' still reads differently from 'empty'
+distros: 10 passed, 0 failed

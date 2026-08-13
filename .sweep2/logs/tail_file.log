@@ -1,0 +1,50 @@
+  ok   built user/tail.ad and user/head.ad through the Linux lane
+modules.dep fixture taken from /lib/modules/6.12.43+deb13-amd64/modules.dep
+
+== the hang itself, reproduced in the shape the console has
+  ok   stdin is a live-but-silent fifo: tail FILE answers from the FILE and exits
+
+== tail FILE — the case that wedged the shell
+  ok   tail modules.dep: matches GNU tail (exit 0, 9 lines)
+  ok   tail 20lines: matches GNU tail (exit 0, 9 lines)
+  ok   tail 3lines (fewer than 10): matches GNU tail (exit 0, 2 lines)
+  ok   tail no-final-newline: matches GNU tail (exit 0, 2 lines)
+  ok   tail one line, no newline: matches GNU tail (exit 0, 0 lines)
+  ok   tail one line: matches GNU tail (exit 0, 0 lines)
+  ok   tail a lone newline: matches GNU tail (exit 0, 0 lines)
+  ok   tail empty file: matches GNU tail (exit 0, 0 lines)
+
+== -N
+  ok   tail -1 20lines: matches GNU tail (exit 0, 0 lines)
+  ok   tail -5 20lines: matches GNU tail (exit 0, 4 lines)
+  ok   tail -99 20lines: matches GNU tail (exit 0, 19 lines)
+  ok   tail -0 20lines: matches GNU tail (exit 0, 0 lines)
+  ok   tail -1 no-final-newline: matches GNU tail (exit 0, 0 lines)
+  ok   tail -1 empty: matches GNU tail (exit 0, 0 lines)
+
+== larger than the internal window
+  ok   tail big (~40 KB): matches GNU tail (exit 0, 9 lines)
+  ok   tail huge (~300 KB): matches GNU tail (exit 0, 9 lines)
+  ok   tail -3 huge: matches GNU tail (exit 0, 2 lines)
+  ok   tail -200 huge: matches GNU tail (exit 0, 199 lines)
+
+== several FILEs (the ==> NAME <== banner)
+  ok   tail 3lines 20lines: matches GNU tail (exit 0, 15 lines)
+  ok   tail -2 over three FILEs: banners and lines match GNU tail -n 2
+
+== stdin still works
+  ok   pipe: cat FILE | tail matches GNU tail
+  ok   pipe: 300 KB through a pipe matches GNU tail -4
+  ok   explicit '-' operand reads stdin, matches GNU tail
+
+== failure is by name, not by silence
+  ok   missing file: exit 1 and stderr names it
+  ok   line larger than the window: exit 1, no fragment, stderr says why
+
+== head, the control (already has the FILE operand)
+  ok   head 20lines: matches GNU head
+  ok   head -3 20lines: matches GNU head
+  ok   head no-final-newline: matches GNU head
+  ok   head modules.dep: matches GNU head
+
+tail_file.sh: 31 PASS / 0 FAIL

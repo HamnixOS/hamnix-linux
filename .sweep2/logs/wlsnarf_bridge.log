@@ -1,0 +1,102 @@
+[wlsnarf] NOTE: no wl-copy/wl-paste on this host -- tests/linux/wlclip.ad
+[wlsnarf] is the Wayland client, and Xwayland is the third-party arm.
+[wlsnarf] building the compositor, the Wayland server, the X bridge and the probes ...
+[wlsnarf] built
+[wlsnarf] running the compositor, the Wayland server and two X servers in a private mount namespace ...
+BEGIN
+A paste 0 11 WL-COPY-ONE
+A2 wlpaste 11 WL-COPY-ONE
+A3 paste 0 11 WL-COPY-ONE
+B wlpaste 12 HAM-COPY-ONE
+C wlmimes text/plain;charset=utf-8 text/plain UTF8_STRING TEXT
+D wlpaste 0 
+E paste 0 12 HAM-COPY-ONE
+F wlpaste 19 LATE-JOINER-SEES-IT
+G paste 0 65536 65536
+G2 wlpaste 65536 65536
+H paste 0 21 STILL-HERE-AFTERWARDS
+I wlpaste 21 STILL-HERE-AFTERWARDS
+R1w wlpaste 11 HAM-ROUND-1
+R1h paste 0 10 WL-ROUND-1
+R2w wlpaste 11 HAM-ROUND-2
+R2h paste 0 10 WL-ROUND-2
+R3w wlpaste 11 HAM-ROUND-3
+R3h paste 0 10 WL-ROUND-3
+R4w wlpaste 11 HAM-ROUND-4
+R4h paste 0 10 WL-ROUND-4
+J WAYLAND-TO-X
+K wlpaste 12 X-TO-WAYLAND
+L paste 0 12 X-TO-WAYLAND
+M up
+N paste 0 24 BEFORE-THE-XWAYLAND-COPY
+O paste 0 22 WITH-XWAYLAND-ATTACHED
+O2 wlpaste 21 STILL-REACHES-WAYLAND
+P alive
+Q wlpaste 17 THE-VERY-LAST-ONE
+END
+X connection to :81 broken (explicit kill or server shutdown).
+
+[wlsnarf] --- the compositor's own clipboard log ---
+wsyswl: clipboard bridged to /dev/snarf (wl_data_device)
+wsyswl: clipboard: Wayland -> /dev/snarf, 11 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 12 bytes
+wsyswl: clipboard: REFUSED a paste asking for image/png -- this bridge delivers UTF-8 text only
+wsyswl: clipboard: a Wayland client offered the selection in NO type this bridge can deliver (it wants UTF-8 text); REFUSED, /dev/snarf is unchanged
+wsyswl: clipboard: /dev/snarf -> Wayland, 19 bytes
+wsyswl: clipboard: a Wayland client offered more than the 64 KiB clipboard: TRUNCATED, 4464 bytes dropped
+wsyswl: clipboard: Wayland -> /dev/snarf, 65536 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 21 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 11 bytes
+wsyswl: clipboard: Wayland -> /dev/snarf, 10 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 11 bytes
+wsyswl: clipboard: Wayland -> /dev/snarf, 10 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 11 bytes
+wsyswl: clipboard: Wayland -> /dev/snarf, 10 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 11 bytes
+wsyswl: clipboard: Wayland -> /dev/snarf, 10 bytes
+wsyswl: clipboard: Wayland -> /dev/snarf, 12 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 12 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 24 bytes
+wsyswl: clipboard: Wayland -> /dev/snarf, 22 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 21 bytes
+wsyswl: clipboard: /dev/snarf -> Wayland, 17 bytes
+
+[wlsnarf] assertions
+  PASS  the compositor says it bridged the clipboard
+  PASS  a Hamnix program pastes what a Wayland client copied
+  PASS  the clipboard survives the client that copied EXITING (Wayland side)
+  PASS  ... and the Hamnix side too
+  PASS  a Wayland client pastes what a Hamnix program copied
+  PASS  it offers exactly the four types it can deliver
+  PASS  and STRING is NOT among them (it means Latin-1)
+  PASS  a paste asking for a type it does not have gets nothing
+  PASS  ... and the refusal names the type
+  PASS  a source offering NO deliverable type leaves the clipboard alone
+  PASS  ... and that refusal is said out loud
+  PASS  ... and the client is TOLD it lost the source
+  PASS  a client that connects after the copy still sees it
+  PASS  a 70 000-byte Wayland copy lands as exactly 65 536
+  PASS  ... and a full 64 KiB clipboard comes back out through the pipe
+  PASS  ... and the truncation is said out loud, by size
+  PASS  set_selection(NULL) does not empty /dev/snarf
+  PASS  ... and a Wayland client can still paste it
+  PASS  round 1: Wayland pastes the Hamnix copy
+  PASS  round 1: Hamnix pastes the Wayland copy
+  PASS  round 2: Wayland pastes the Hamnix copy
+  PASS  round 2: Hamnix pastes the Wayland copy
+  PASS  round 3: Wayland pastes the Hamnix copy
+  PASS  round 3: Hamnix pastes the Wayland copy
+  PASS  round 4: Wayland pastes the Hamnix copy
+  PASS  round 4: Hamnix pastes the Wayland copy
+  PASS  an X client pastes what a WAYLAND client copied
+  PASS  a Wayland client pastes what an X client copied
+  PASS  ... and the Hamnix side has the same bytes
+  PASS  Xwayland came up as a client of this compositor
+  PASS  a rootful Xwayland does NOT bridge its X selection (xsnarfd's job)
+  PASS  the bridge still works with Xwayland attached (Wayland -> Hamnix)
+  PASS  ... and Hamnix -> Wayland too
+  PASS  the compositor is still alive after all of it
+  PASS  ... and still bridging
+
+[wlsnarf] passes=35 fails=0
+[wlsnarf] PASS

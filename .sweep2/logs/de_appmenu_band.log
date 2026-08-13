@@ -1,0 +1,13 @@
+appband: PASS the compositor, the desktop, the panel and the probe client all build
+appband: PASS wsysd took its input from the test's evdev file and opened no real device
+appband: PASS hampanelscene mapped a full-width top bar (wid 3, height 26)
+appband: PASS the probe application is on screen before the menu opens (100% of its rect)
+appband: PASS the Applications menu opened and the panel window GREW to 1280x206 -- the full width of the display, the shape of the report
+appband: PASS the menu card is painted and opaque (88% of its column is the dropdown body)
+appband: PASS the desktop shows through the grown band: 100% of the wallpaper right of the menu is unchanged
+appband: PASS the application under the grown band is still on screen (100% of its rect)
+appband: PASS control: with keyed 0 the same band buries the application (0% of its rect left) -- the assertions above have teeth
+appband: PASS control: with keyed 0 the wallpaper right of the menu is gone (0% unchanged)
+appband: PASS keyed 1 brings the application back through the band (100% of its rect)
+appband: INFO the menu is opened by writing the panel's event ring; a real mouse also reaches it now -- see tests/linux/de_mouse_chrome.sh
+appband: 11 passed, 0 failed

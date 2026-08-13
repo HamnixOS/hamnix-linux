@@ -1,0 +1,16 @@
+[icdsurvey] DRM devices on this host (from sysfs; no device is opened):
+[icdsurvey]   card0: driver nvidia, 4 KMS connector(s)
+[icdsurvey] gfxstream_vk_icd.json    no-device (vkEnumeratePhysicalDevices -> VkResult -3)
+[icdsurvey] intel_hasvk_icd.json     no-device (vkEnumeratePhysicalDevices -> VkResult -3)
+[icdsurvey] intel_icd.json           no-device (vkEnumeratePhysicalDevices -> VkResult -3)
+[icdsurvey] lvp_icd.json             DEVICE type 4  llvmpipe (LLVM 19.1.7, 256 bits)
+[icdsurvey] nouveau_icd.json         no-device (vkEnumeratePhysicalDevices -> VkResult -3)
+[icdsurvey] nvidia_icd.json: NOT RUN (reaches the GPU through /dev/nvidiactl)
+[icdsurvey] radeon_icd.json          no-device (vkEnumeratePhysicalDevices -> VkResult -3)
+[icdsurvey] virtio_icd.json          no-device (vkEnumeratePhysicalDevices -> VkResult -3)
+[icdsurvey] UNDETERMINED — every ICD this survey RAN is a CPU
+[icdsurvey]   rasterizer, but it did not run: nvidia_icd.json
+[icdsurvey]   This says nothing about whether this machine has a
+[icdsurvey]   GPU. To find out, with the machine owner's consent:
+[icdsurvey]     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+[icdsurvey]         scripts/bench_vk_linux_device.sh

@@ -1,0 +1,11 @@
+[auth_setpass] building passwd and su
+PASS: root set live's password; the hash is a fresh $6$ and it changed
+PASS: every other /etc/shadow line is byte-identical
+PASS: /etc/shadow is still mode 0600
+PASS: the aging field is untouched
+PASS: the NEW password authenticates through /dev/auth
+PASS: the OLD password no longer authenticates
+PASS: uid 1001 could NOT set dave's password (the gate held)
+PASS: uid 1001 set its OWN password (the self case is allowed)
+
+[auth_setpass] 8 PASS, 0 FAIL, 0 SKIP

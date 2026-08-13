@@ -1,0 +1,2 @@
+pinned core 11, SOLO=0: 0 failures in 10 runs
+PASS wsys_v2_handup_rate (10/10 v2 windows painted under contention)

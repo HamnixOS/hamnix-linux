@@ -1,0 +1,17 @@
+focus: PASS the compositor, the desktop and the panel all build
+focus: PASS wsysd took its input from the test's evdev file and opened no real device
+focus: PASS hampanelscene mapped a full-width top bar (wid 3, height 26)
+focus: PASS hamdesktop mapped a full-screen backdrop (wid 2, 1280x800 at y=0) -- there is a WALLPAPER to click away onto
+focus: PASS control: with no click yet, the menu card is not drawn (0% of the card column is the dropdown body)
+focus: PASS an EVDEV CLICK on the Applications button opened the menu (the panel window grew 26 -> 206 px tall)
+focus: PASS and the menu is PAINTED in the framebuffer (87% of the card column is the dropdown body)
+focus: PASS and wsysd reports focus on the panel (wid 3) -- the menu is open on the FOCUSED window, which is the precondition for a focus-out to dismiss it
+focus: INFO clicking the wallpaper at (960, 503) -- inside backdrop wid 2, 503 px is below the grown panel's 206
+focus: PASS THE FIX: an EVDEV CLICK ON THE WALLPAPER closed the menu (the panel window is back to 26 px, the bare bar)
+focus: PASS and the card is GONE from the framebuffer (0% of the card column is the dropdown body)
+focus: PASS wsysd's own state moved focus panel(3) -> backdrop(2): the click landed on the window we aimed at (this is true with or without the fix -- knowing and not saying was the whole defect)
+focus: PASS the panel is still live after the away-click: the Applications button RE-OPENS the menu (grew to 206 px)
+focus: PASS and clicking the menu's OWN PARENT -- the Applications button, on the already-focused panel -- still closes it (back to 26 px): no focus event is emitted when focus does not change
+focus: PASS every click in this file came from the evdev end: nothing here writes an event, pointer or keys ring
+focus: INFO evdev delivered: 672 bytes
+focus: 14 passed, 0 failed

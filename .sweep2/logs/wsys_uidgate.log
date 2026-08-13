@@ -1,0 +1,68 @@
+== armA.root.chrome chrome open=3 write=9 exit=0
+== seg[/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/wsysgate.AmQlws/segA] present
+== armA.root.client client open=3 newwindow=10 wid=2 title open=3=20 scene open=6=24 commit open=6=7 exit=0
+== armA.live.ctl[lock 1 0] chrome open=3 write=-1 exit=1
+== armA.live.ctl[run 1 /bin/hamsh] chrome open=3 write=-1 exit=1
+== armA.live.ctl[notif 1 255 hi] chrome open=3 write=-1 exit=1
+== armA.live.ctl[appmenu x] chrome open=3 write=-1 exit=1
+== armA.live.ctl[setapp 2 /bin/x] chrome open=3 write=-1 exit=1
+== armA.live.ctl[ws 2] chrome open=3 write=-1 exit=1
+== armA.live.ctl[kbd 1] chrome open=3 write=-1 exit=1
+== armA.live.ctl[screen 1 1] chrome open=3 write=-1 exit=1
+== armA.live.ctl[free 2] chrome open=3 write=-1 exit=1
+== armA.live.sink[/dev/wsys/lock] chrome open=-1 write=-1 exit=1
+== armA.live.sink[/dev/wsys/notif] chrome open=-1 write=-1 exit=1
+== armA.live.sink[/dev/wsys/cycler/show] chrome open=-1 write=-1 exit=1
+== armA.live.sink[/dev/wsys/appmenu] chrome open=-1 write=-1 exit=1
+== armA.live.sink[/dev/wsys/wsysd/state] chrome open=-1 write=-1 exit=1
+== armA.live.sink[/dev/wsys/2/ctl] chrome open=-1 write=-1 exit=1
+== armA.live.sink[/dev/wsys/2/scene] chrome open=-1 write=-1 exit=1
+== armA.live.sink[/dev/wsys/2/keys] chrome open=-1 write=-1 exit=1
+== armA.live.sink[/dev/wsys/2/draw/ctl] chrome open=-1 write=-1 exit=1
+== armA.live.open[/dev/wsys/appmenu/launch] chrome open=3 write=8 exit=0
+== armA.live.open[/dev/wsys/run/launch] chrome open=3 write=8 exit=0
+== armA.live.open[/dev/wsys/post] chrome open=3 write=8 exit=0
+== armA.live.open[/dev/wsys/lock/verify] chrome open=3 write=8 exit=0
+== armA.live.client client open=3 newwindow=10 wid=3 title open=3=20 scene open=6=24 commit open=6=7 exit=0
+== armB.owner.chrome chrome open=3 write=9 exit=0
+== seg[/home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/wsysgate.AmQlws/segB] present
+== armB.owner.client client open=3 newwindow=10 wid=2 title open=3=20 scene open=6=24 commit open=6=7 exit=0
+== armB.other.chrome chrome open=3 write=-1 exit=1
+== armB.other.client client open=3 newwindow=10 wid=3 title open=3=20 scene open=6=24 commit open=6=7 exit=0
+chrome verbs, refused to a non-owner uid (the hole, closed):
+  ok   ctl lock 1 0
+  ok   ctl run 1 /bin/hamsh
+  ok   ctl notif 1 255 hi
+  ok   ctl appmenu x
+  ok   ctl setapp 2 /bin/x
+  ok   ctl ws 2
+  ok   ctl kbd 1
+  ok   ctl screen 1 1
+  ok   ctl free 2
+  ok   write /dev/wsys/lock
+  ok   write /dev/wsys/notif
+  ok   write /dev/wsys/cycler/show
+  ok   write /dev/wsys/appmenu
+  ok   write /dev/wsys/wsysd/state
+  ok   write /dev/wsys/2/ctl
+  ok   write /dev/wsys/2/scene
+  ok   write /dev/wsys/2/keys
+  ok   write /dev/wsys/2/draw/ctl
+client->compositor channels devwsys leaves open to any uid:
+  ok   write /dev/wsys/appmenu/launch
+  ok   write /dev/wsys/run/launch
+  ok   write /dev/wsys/post
+  ok   write /dev/wsys/lock/verify
+the segment under test is the named one, not a private fallback:
+  ok   both segments created at $HAMWSYS
+  ok   armA.root.client/armA.live.client share one segment (wid 2 vs 3)
+  ok   armB.owner.client/armB.other.client share one segment (wid 2 vs 3)
+the DE must still work:
+  ok   root drives chrome
+  ok   root maps+draws
+  ok   live maps+draws its own window
+  ok   segment owner (non-root) drives chrome
+  ok   segment owner maps+draws
+  ok   a third uid is refused chrome
+  ok   a third uid still maps+draws its own window
+PASS wsys_uidgate

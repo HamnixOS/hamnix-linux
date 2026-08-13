@@ -1,0 +1,33 @@
+enumpol|  == starting wsysd as uid 1001, HAMWSYS_SERVER=1, TRACE=1
+enumpol|  == segowner 1001
+enumpol|  == readserver wsys: read server pid 462673 serving /dev/wsys reads for segment 66306.67667363, OFF the frame loop
+enumpol|  == victimwid 2
+enumpol|  == baseline 2 VICTIM-ENUM-TITLE 
+enumpol|  == red 2 VICTIM-ENUM-TITLE 
+enumpol|  == green 
+enumpol|  == hostrouted 2 VICTIM-ENUM-TITLE 
+enumpol|  == attackerwid 3
+enumpol|  == owner1002 2 VICTIM-ENUM-TITLE 
+enumpol|  == owner1002raw 3|LIST<2 VICTIM-ENUM-TITLE|3 ATTACKER-OWN-WINDOW|>LIST|
+enumpol|  == green2 
+enumpol|  == traceempty 2
+enumpol|  == tracefull 2
+enumpol|  == trace wsrvtrace: enum caller uid=1002 pid=462727 -> hostowner=0 tier=EMPTY
+enumpol|  == trace wsrvtrace: enum caller uid=1001 pid=462734 -> hostowner=1 tier=FULL
+enumpol|  == trace wsrvtrace: enum caller uid=1002 pid=462737 -> hostowner=0 tier=FULL
+enumpol|  == trace wsrvtrace: enum caller uid=1002 pid=462777 -> hostowner=0 tier=EMPTY
+enumpol: .... segment owner uid 1001 (this is the host owner the policy grants); victim window 2 owned by uid 1001; the snooper is uid 1002 and owns nothing
+enumpol: PASS the host owner is uid 1001 and the snooper is a different uid -- the two identities every arm below turns on are genuinely different
+enumpol: PASS wsysd forked a read server OFF the frame loop: wsys: read server pid 462673 serving /dev/wsys reads for segment 66306.67667363, OFF the frame loop
+enumpol: PASS the enumeration instrument reads back a real window list ("2 VICTIM-ENUM-TITLE ") -- an 'empty' below is a comparison and not two blanks
+enumpol: .... RED ARM -- uid 1002, owns no window, HAMWSYS_SERVER unset, reading the same file:
+enumpol: PASS UNROUTED: a window-less uid-1002 process enumerated uid 1001's window -> "2 VICTIM-ENUM-TITLE ". IT WORKS, AND IT IS SUPPOSED TO: the read was the snooper's own linked-in code answering from a MAP_SHARED segment, with a live mediator standing next to it and unable to see it. That is the hole WSYS_VERSION 8 -> 9 exists to close, and it is why the bump is the enforcement rather than a consequence of it.
+enumpol: .... GREEN ARM -- the identical process, the identical uid, the identical file, routed:
+enumpol: PASS ROUTED: the read server answered a window-less uid-1002 caller with an EMPTY list. In the server's own words: wsrvtrace: enum caller uid=1002 pid=462727 -> hostowner=0 tier=EMPTY
+enumpol: .... the read server must not be a blanket empty -- two arms that must be ANSWERED:
+enumpol: PASS the host owner's routed read returned the full list ("2 VICTIM-ENUM-TITLE ") -- the empty answer above was a decision, not a broken read
+enumpol: .... and the arm that separates 'owns a window' from 'is the host owner's uid': uid 1002 now owns window 3 and reads the list from inside that process --
+enumpol: PASS a uid-1002 process THAT OWNS A WINDOW got the full list through the same server -> "2 VICTIM-ENUM-TITLE ". The rule is ownership, not uid: a policy that answered on uid alone would be red here and would have broken the taskbar on a real desktop, where the panel is not the host owner.
+enumpol: PASS and the window-LESS uid-1002 process still sees nothing while a uid-1002 window exists -- the grant is per-caller, not per-uid
+enumpol: PASS the read server decided both ways in this run (2 EMPTY, 2 FULL) -- a policy that only ever reaches one branch is indistinguishable from a constant
+enumpol: 9 passed, 0 failed

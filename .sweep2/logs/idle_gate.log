@@ -1,0 +1,3 @@
+idle_gate[idle]: wsysd used 1.20% of a core (median of 3 x 10s at rest; samples: 1.20 1.20 1.20) (utime+stime from /proc/470913/stat, not ps pcpu)
+   wsysd: wait set 2 fds wake this loop, 1 (one of them is the client wake) always-ready and excluded; fallback tick 16 ms
+idle_gate[idle]: PASS (budget 5%)

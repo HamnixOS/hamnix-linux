@@ -1,0 +1,20 @@
+brisk: INFO the account under test has a private writable home at /root
+brisk: PASS the compositor, the desktop, the panel, the Applications menu and the ctl probe all build
+brisk: PASS wsysd took its input from this test's evdev file and opened no real device on this host
+brisk: PASS hampanelscene mapped a full-width top bar (wid 3, height 26) -- this is a desktop session, not a bare compositor
+brisk: PASS hamappmenu mapped its OWN window at (8,28), 407x140 -- the 208 px menu box plus the 200 px category fly-out band, not the panel's window
+brisk: PASS the menu card is PAINTED and row 0 is the white SEARCH FIELD (70% of it is the field colour)
+brisk: PASS the rows under the search box are CATEGORY BUTTONS (77% of row 1 is the category-button strip) -- one submenu per category, the shape the panel's 'Debian apps >' has
+brisk: PASS CONTROL: with no launch history there is NO Favourites header in row 1 (0% header strip) -- assertion 13 cannot be satisfied by a header that was always there
+brisk: PASS HOVERING a category with a real mouse opened its FLY-OUT to the right of the box (79% of the fly-out band is menu card) and lit the parent button (56% accent)
+brisk: PASS before typing, the menu card covers the wallpaper down to row 6 (100% of that rectangle differs from the bare desktop)
+brisk: PASS TYPING 'cal' AS REAL EVDEV KEYSTROKES FILTERED THE LIST: row 6 is back to the bare wallpaper, pixel for pixel (100% different before, 0% after) -- the menu card actually shrank
+brisk: PASS and the filtered result is GROUPED, MATE-style: row 1 is now a section header (82%) and the category buttons are gone (0%, was 77%)
+brisk: PASS three real BACKSPACE keystrokes restored the whole list (row 6 covered again at 100%, row 1 back to a category button at 76%) -- a filter that cannot be undone would be a stuck menu
+brisk: PASS a real click on the app row LAUNCHED it and the menu closed -- its card is gone from the framebuffer, the wallpaper is back pixel for pixel
+brisk: PASS the launch was written to the user's OWN home (/root/.hamde/favourites names /bin/hamcalcscene) -- not to a fixed /tmp name every account and every concurrent session would share
+brisk: PASS A FRESHLY SPAWNED MENU SHOWS THE FAVOURITES SECTION AT THE TOP: row 1 is a header (85%, was 0% before the launch) where assertion 7 measured a category button (0%, was 77%). The recency list outlived the process that recorded it.
+brisk: PASS a menu that cannot open a window exits 1 and leaves /root/.hamde/appmenu.fault -- the signal hampanelscene's _appmenu_available reads to fall back to the dropdown it draws itself, instead of a button that answers a click with nothing
+brisk: PASS every click and every keystroke in this file came from the evdev end: nothing here names an event, pointer or keys ring
+brisk: INFO input delivered: 1272 bytes of evdev records
+brisk: 17 passed, 0 failed

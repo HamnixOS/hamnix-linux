@@ -1,0 +1,60 @@
+[snarf] building the two probes ...
+[snarf] probes built
+[snarf] running in a private mount namespace with a tmpfs over /dev ...
+BEGIN
+A copy 0 1 25
+B paste 0 25 CLIPBOARD-FROM-HAMTEXTBOX
+C copy 1 1 23
+D paste 1 23 PRIMARY-FROM-HAMTEXTBOX
+E paste 0 25 CLIPBOARD-FROM-HAMTEXTBOX
+F copy 0 1 5
+G paste 0 5 short
+H paste 1 23 PRIMARY-FROM-HAMTEXTBOX
+I copy 0 1 0
+J paste 0 0
+K paste 1 23 PRIMARY-FROM-HAMTEXTBOX
+L copy 0 1 70000
+M paste 0 65536 65536
+N none
+O null,
+END
+
+[snarf] assertions
+  PASS  copy through hamtextbox reports success
+  PASS  paste in ANOTHER process, through htermsel
+  PASS  copy to PRIMARY reports success
+  PASS  PRIMARY pastes its own text
+  PASS  CLIPBOARD unchanged by the PRIMARY write
+  PASS  a shorter copy REPLACES (shrinks)
+  PASS  no tail of the longer text survives
+  PASS  PRIMARY still independent after the shrink
+  PASS  a 0-byte write is accepted
+  PASS  a 0-byte write CLEARS the CLIPBOARD
+  PASS  clearing CLIPBOARD leaves PRIMARY alone
+  PASS  a 70000-byte copy reports count consumed
+  PASS  and is TRUNCATED at the 64 KiB cap
+  PASS  NOTHING was created under /dev
+  PASS  /dev holds ONLY the null the devtab needs
+
+[snarf] arm 2: root copies, uid 1001 pastes, and back
+P copy 0 1 16
+Q 0:0 666
+R paste 0 16 FROM-ROOT-CHROME
+S copy 0 1 17
+T paste 0 17 FROM-LIVE-SESSION
+  PASS  the chrome (root) copies
+  PASS  the segment is 0666, not the umask's 0644
+  PASS  the uid-1001 SESSION pastes the chrome's text
+  PASS  the session copies back into a root-owned segment
+  PASS  and the chrome pastes what the session copied
+
+[snarf] arm 3: the shell redirect, hamnix cat, and the foreign binary
+U paste 0 21 hello-from-the-shell
+V hello-from-the-shell
+W No such file or directory
+  PASS  echo > /dev/snarf lands BOTH chunks (Defect 2)
+  PASS  hamnix cat /dev/snarf prints it
+  PASS  a FOREIGN binary does not see the device
+
+[snarf] SUMMARY passes=23 fails=0
+[snarf] RESULT: PASS

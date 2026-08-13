@@ -1,0 +1,69 @@
+defps: INFO host: Intel(R) Core(TM) i7-8086K CPU @ 4.00GHz
+defps: INFO host: 12 cpus, load 1.91 2.53 2.44 at start
+defps: INFO host: busiest other processes right now:
+defps: INFO   103745   python            48.0% cpu
+defps: INFO   3435307  claude            12.0% cpu
+defps: PASS the compositor, the desktop and the panel build
+defps: PASS the rendering path under test is the SOFTWARE rasterizer: vk backend SOFTWARE -- no usable Vulkan device (p_vkCreateInstance(&ici, 0, &g_inst) -> VkResult -9)
+defps: PASS input comes from this gate's evdev file and no device of this host's
+
+defps: ---- idle, attributed ----------------------------------------
+defps: INFO (a) compositor alone, no clients:
+defps: INFO     idle: 5.0 s with NO input -- 0 frames presented, wsysd cpu 0.20% (utime+stime from /proc/481727/stat over the interval, not ps pcpu)
+defps: PASS an EMPTY compositor presents 0 frames in 5 s -- wsysd itself paints on change, not on a clock
+defps: INFO (b) + hamdesktop (wallpaper and icons):
+defps: INFO     idle: 5.0 s with NO input -- 0 frames presented, wsysd cpu 0.40% (utime+stime from /proc/481727/stat over the interval, not ps pcpu)
+defps: INFO (c) + hampanelscene (the top bar) -- THE SHIPPED DESKTOP:
+defps: INFO     idle: 10.0 s with NO input -- 27 frames presented, wsysd cpu 1.10% (utime+stime from /proc/481727/stat over the interval, not ps pcpu)
+defps: INFO attribution: bare 0/5s, +desktop 0/5s, +panel 27/10s.
+defps: INFO              expected: user/hampanelscene.ad resamples sysmon every
+defps: INFO              SAMPLE_TICKS(20) * 16 ms = 320 ms and repaints the panel,
+defps: INFO              = 3.13 frames/s = 31 frames in 10 s. The clock's own
+defps: INFO              minute rollover adds one frame a MINUTE, not a second.
+defps: PASS the shipped idle desktop presents 27 frames in 10 s -- 3.1/s, which is the panel's 320 ms sysmon resample and nothing else; the compositor and the wallpaper present ZERO
+defps: INFO the desktop is up: focus 0 windows 3 inputs 1 keys 0 pointer 0 frames 120 curframes 0
+defps: PASS the load is a REAL desktop: 3 windows mapped (wallpaper+icons, panel)
+
+defps: ---- instrument selftest ------------------------------------
+selftest: PASS  no-input   the pixel watcher did not fire in 1.5 s with nothing injected
+selftest: PASS  fires      5/5 injected moves produced a pixel change (p50 0.32 ms)
+selftest: PASS  stopped    wsysd SIGSTOPped 100 ms -> measured min 100.5 ms, p50 100.5 ms (the slowdown shows up)
+selftest: PASS  stopped    wsysd SIGSTOPped 250 ms -> measured min 250.5 ms, p50 250.5 ms (the slowdown shows up)
+selftest: PASS  counting   20 distinct pointer moves spaced 50 ms apart advanced the presented-frame counter by 23
+defps: PASS the instrument passed its own selftests (it does not fire on its own; a deliberately stopped compositor measures as stopped; the frame counter counts presentations)
+
+defps: ---- sustained fps, stated load ------------------------------
+defps: INFO load A: pointer moving continuously at 250 events/s over the live
+defps: INFO         desktop (3 windows). This is the CURSOR-ONLY path -- wsysd's
+defps: INFO         save-under means a pointer move re-rasterizes nothing.
+A pointer only                  256.3 fps   (2564 presented in 10.00 s; 64 full + 2500 cursor-only)   input 250 ev/s   wsysd cpu 4.3% (median of 3; samples: 4.2 4.3 4.5)
+defps: PASS a full-frame load is on the desktop: wid 5, a decorated 480x320 window with text, moving continuously
+
+defps: INFO load B: that window dragging, and NO pointer motion. Every frame here is
+defps: INFO         a full repaint: clear, re-rasterize 4 windows' scenes, copy each
+defps: INFO         into the composite, write the whole 3 MiB screen.
+B window drag                   419.4 fps   (3911 presented in 10.02 s; 3911 full + 0 cursor-only)   input 0 ev/s   wsysd cpu 99.9% (median of 3; samples: 99.8 99.9 99.9)
+
+defps: INFO load C: both at once -- a window being dragged while the pointer moves,
+defps: INFO         which is what dragging a window with a mouse actually is.
+C drag + pointer                417.0 fps   (4154 presented in 10.00 s; 4142 full + 12 cursor-only)   input 250 ev/s   wsysd cpu 99.8% (median of 3; samples: 99.8 99.8 100.0)
+defps: INFO ceiling: the loop's own 16 ms sleep caps all three at 1000/(16+frame_ms)
+defps: INFO          ~= 60 fps. A number at that ceiling means the RASTERIZER is no
+defps: INFO          longer what limits the desktop; the tick is.
+
+defps: ---- input-to-pixel latency ----------------------------------
+defps: INFO clock starts at the last instruction before the write(2) that makes the
+defps: INFO evdev record visible; stops when the framebuffer bytes where the pointer
+defps: INFO is going have changed. 120 trials, on a quiet desktop.
+input->pixel           n=120  lost=0   min   0.21  p50   0.31  mean   0.35  p95   0.52  max   1.50  ms
+defps: INFO for scale: 16 ms is one tick of wsysd's poll loop. A mean near half of
+defps: INFO that is the loop's own SAMPLING DELAY, not the rasterizer -- the frame
+defps: INFO itself costs 0.6 ms and the pointer-only frame 5 us.
+
+defps: INFO control: the SAME probe with the jitter removed, which phase-locks it to
+defps: INFO          the compositor's tick. If this comes back much smaller than the
+defps: INFO          line above, that gap is the artefact, not a speedup.
+phase-locked (WRONG)   n=41   lost=0   min   0.27  p50   0.31  mean   0.34  p95   0.48  max   0.53  ms
+
+defps: INFO host: load 1.70 2.15 2.31 at end
+defps: 8 passed, 0 failed

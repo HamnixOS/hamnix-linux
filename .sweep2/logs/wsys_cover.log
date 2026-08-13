@@ -1,0 +1,8 @@
+wsyscov: PASS scene_raster_host builds
+wsyscov: PASS a scene that fills its window is not accused -- scene_raster_host: COVERS 320x260
+wsyscov: PASS a full-window roundrect covers its window -- scene_raster_host: COVERS 400x300
+wsyscov: PASS hamimgscene's old 320x260-in-640x480 is caught, with both sizes named -- scene_raster_host: UNCOVERED 480 of 480 rows -- the scene covers 320x260 of a 640x480 window; the rest reaches the screen as unpainted black
+wsyscov: PASS the panel dropdown's full-width grown band is caught -- scene_raster_host: UNCOVERED 224 of 250 rows -- the scene covers 136x250 of a 1280x250 window; the rest reaches the screen as unpainted black
+wsyscov: PASS a window with only text in it is reported uncovered -- scene_raster_host: UNCOVERED 100 of 100 rows -- the scene covers 200x0 of a 200x100 window; the rest reaches the screen as unpainted black
+wsyscov: PASS the real panel bar covers its resting 800x26 window -- scene_raster_host: COVERS 800x26
+wsyscov: 7 passed, 0 failed

@@ -1,0 +1,33 @@
+tkey: PASS etc/hpm/trusted.pub is 718 bytes and its key token begins at byte 653 -- past the 512-byte read that used to swallow this file whole
+tkey: PASS etc/hpm/local-trusted.pub is 1054 bytes and its key token begins at byte 989 -- past the 512-byte read that used to swallow this file whole
+tkey: PASS the compiled-in production root and etc/hpm/trusted.pub are the same 32 bytes (67d38b2c47886c95...)
+tkey: PASS the compiled-in LOCAL root and etc/hpm/local-trusted.pub are the same 32 bytes (ef17a867f9c2c000...)
+tkey: INFO building user/hpm.ad -> /home/david/.hamnix-build/tkeygate/hpm.elf
+tkey: PASS etc/hpm/trusted.pub is READ VERBATIM (718 bytes, key at byte 653): hpm: trust root taken from /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/etc/hpm/trusted.pub (718 bytes, 12 lines)
+tkey: PASS and the key it read is USED: an index NOT signed by that root is refused as an invalid signature, not waved through
+tkey: PASS etc/hpm/local-trusted.pub is READ VERBATIM too (1054 bytes, key at byte 989) and used
+tkey: PASS a key behind etc/hpm/trusted.pub's OWN 653-byte header verifies the index and refreshes with no other flag
+tkey: PASS and the same behind etc/hpm/local-trusted.pub's 989-byte header
+tkey: PASS and a PACKAGE signed under that key installs end to end -- /home/david/.hamnix-build/tkeygate/root/var/lib/tkey-hello-greet carries the bytes the tarball did
+tkey: PASS THE SHIPPED FILE, UNMODIFIED, AUTHENTICATES A REAL INDEX: etc/hpm/local-trusted.pub (1054 bytes verbatim) verifies an index signed with scripts/hpm_local_key.seed
+tkey: PASS and etc/hpm/trusted.pub refuses that same index -- the two shipped roots are distinguishable, so the assertion above means something
+tkey: PASS the SAME key behind a 68555-byte comment header (token at byte 68490) still verifies -- the reader has no size ceiling, so this is not a bigger fixed buffer wearing the fix's hat
+tkey: PASS a key file that does not exist is REFUSED BY NAME (rc=1): hpm: --trusted-key /home/david/.hamnix-build/tkeygate/bad/nosuchfile.pub: cannot open it. NOT falling back to the built-in trust root -- the key you asked for is the key that must be used.
+tkey: PASS an EMPTY key file is REFUSED BY NAME (rc=1): hpm: --trusted-key /home/david/.hamnix-build/tkeygate/bad/empty.pub: no key in it -- read 0 byte(s) over 0 line(s) to end of file and found no bare 64-hex token. NOT falling back to the built-in trust root.
+tkey: PASS a key file that is all comment is REFUSED BY NAME (rc=1): hpm: --trusted-key /home/david/.hamnix-build/tkeygate/bad/commentonly.pub: no key in it -- read 28 byte(s) over 1 line(s) to end of file and found no bare 64-hex token. NOT falling back to the built-in trust root.
+tkey: PASS etc/hpm/trusted.pub TRUNCATED to its first 400 bytes is REFUSED BY NAME (rc=1): hpm: --trusted-key /home/david/.hamnix-build/tkeygate/bad/truncated.pub: no key in it -- read 400 byte(s) over 7 line(s) to end of file and found no bare 64-hex token. NOT falling back to the built-in trust root.
+tkey: PASS a token that is 8 hex characters, not 64 is REFUSED BY NAME (rc=1): hpm: --trusted-key /home/david/.hamnix-build/tkeygate/bad/shorttoken.pub: line 1 is not an Ed25519 public key -- want exactly 64 hex characters, this token is 8. NOT falling back to the built-in trust root.
+tkey: PASS a 64-character token that is not hex is REFUSED BY NAME (rc=1): hpm: --trusted-key /home/david/.hamnix-build/tkeygate/bad/nothex.pub: line 1 is not an Ed25519 public key -- want exactly 64 hex characters, this token is 64. NOT falling back to the built-in trust root.
+tkey: PASS a key file with a 900-character line is REFUSED BY NAME (rc=1): hpm: --trusted-key /home/david/.hamnix-build/tkeygate/bad/longline.pub: 1 line(s) are longer than the 512-byte line limit and were NOT parsed -- a key on one of them was not read.
+tkey: PASS and the over-long line is reported AS SUCH, not merely as a missing key: hpm: --trusted-key /home/david/.hamnix-build/tkeygate/bad/longline.pub: 1 line(s) are longer than the 512-byte line limit and were NOT parsed -- a key on one of them was not read.
+tkey: PASS a key file whose last line has NO trailing newline is accepted -- the streaming reader does not lose the final line
+tkey: PASS a DIFFERENT (well-formed) key refuses this index as an invalid signature
+tkey: PASS and with no already-authenticated index in the cache, a package signed by a key the operator does not trust does NOT install (rc=1, nothing on disk)
+tkey: INFO for the record: after a GOOD refresh, install under a different --trusted-key succeeds from the per-user cache -- `refresh` is the trust decision, `install` verifies sha256 against the index it already authenticated (apt's model)
+tkey: PASS an index tampered with after signing is still refused, under a key read out of a header-carrying file
+tkey: PASS the LIVE published https://255.one/linux/index.json verifies against etc/hpm/trusted.pub (66895 bytes of index, 129 of signature)
+tkey: PASS AND THE COMPILED-IN ROOT STILL VERIFIES IT WITH NO FLAGS: the real published index refreshes clean
+tkey: PASS and one flipped byte of that real index is caught with no flags
+tkey: INFO the reader's own account of itself, from the last successful load:
+tkey:      hpm: trust root taken from /home/david/.hamnix-build/tkeygate/huge.pub (68555 bytes, 1201 lines)
+tkey: 28 passed, 0 failed

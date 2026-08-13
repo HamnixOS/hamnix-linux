@@ -1,0 +1,5 @@
+opcount: PASS the counter emits a per-second series when asked (5 seconds)
+opcount: PASS it reports a LARGE rate when one exists: peak 1861 ops/s on a free-running drag
+opcount: PASS opens track writes on wid/ctl (4609 vs 4608, delta 1 <= 1 for the op in flight at SIGKILL), which is what open+write+close per line must produce
+opcount: PASS it is silent and inert unless HAMWSYS_OPCOUNT is set
+opcount: 4 passed, 0 failed

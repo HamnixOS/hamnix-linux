@@ -1,0 +1,10 @@
+wsysimg: PASS wsysd and hamimgscene both build
+wsysimg: PASS hamimgscene uploaded its image and committed without a refusal
+wsysimg: PASS the named-image segment holds an image called 'logo'
+wsysimg: PASS natural 32x32: red border, top-left -- rgb(220, 40, 40) at (271,125)
+wsysimg: PASS natural 32x32: blue field -- rgb(40, 70, 200) at (280,140)
+wsysimg: PASS scaled 128x128: red border, top-left -- rgb(220, 40, 40) at (274,186)
+wsysimg: PASS scaled 128x128: blue field -- rgb(40, 70, 200) at (320,250)
+wsysimg: PASS scaled 128x128: green diagonal -- rgb(40, 200, 60) at (334,246)
+wsysimg: INFO screenshot /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/tmp/wsysimg.JXCeJV/shot.png (1280x800)
+wsysimg: 8 passed, 0 failed

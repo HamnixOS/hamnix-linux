@@ -1,0 +1,107 @@
+  hamnix-init (23 files)
+  hamnix-hamsh (1 files)
+  hamnix-net (8 files)
+  hpm (2 files)
+  hamnix-auth (4 files)
+  hamnix-modules (4 files)
+  hamnix-install (8 files)
+  hamnix-adder (25 files)
+  hamnix-audio (4 files)
+  hamnix-man (21 files)
+  hamnix-desktop (39 files)
+  hamnix-vulkan (loader + 24 shared libraries, 5.9 MiB)
+  hamnix-vulkan-llvm (6 files, 15 part packages)
+  hamnix-vulkan-anv (2 files, 2 part packages)
+  hamnix-vulkan-lavapipe (2 files, 0 part packages)
+  hamnix-vulkan-nvk (3 files, 0 part packages)
+  hamnix-vulkan-radv (3 files, 0 part packages)
+  hamnix-vulkan-venus (2 files, 0 part packages)
+  hamnix-drivers-drm (16 modules, 6.12.85+deb13-amd64)
+  hamnix-firmware-i915-dmc (21 files)
+  hamnix-firmware-i915-guc (24 files)
+  hamnix-drivers-gpu-intel (i915 + 2 firmware packages)
+  hamnix-firmware-nouveau (407 files)
+  hamnix-drivers-gpu-nouveau (nouveau + 1 firmware packages)
+  hamnix-drivers-gpu-nvidia (refusal package -- installs nothing)
+  hamnix-drivers-base (34 modules + 34 dependency lines, 6.12.85+deb13-amd64)
+  hamnix-vkprobe
+
+running the packaged desktop (tests/linux/channel_runs_desktop.sh)
+chanrun: PASS every package this gate runs is present in the channel and unpacks
+chanrun: INFO no index.json yet (invoked before the index is written) -- the sha256 cross-check is NOT part of this run's score
+chanrun: PASS wsysd, hamdesktop, hampanelscene, hamsh, hpm and the ctl probe cat came out of the channel's tarballs (nothing was compiled)
+chanrun: INFO 26 binaries unpacked into /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/build/chanrun/chanrun.M6Y1f6/bin
+chanrun: INFO running the packaged desktop under tests/linux/de_mouse_chrome.sh (offscreen)
+chanrun: PASS the desktop under test was the PACKAGED wsysd/hamdesktop/hampanelscene, not a fresh build
+chanrun: PASS THE PACKAGED DESKTOP WORKS: 14/14 under a synthetic mouse -- windows mapped, the top bar is there, the Applications menu opens and paints, and the desktop icons take a selection
+chanrun: INFO full desktop log: /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/build/chanrun/chanrun.M6Y1f6/de_mouse_chrome.log (CHANRUN_KEEP=1 to keep it)
+chanrun: PASS the packaged hamsh runs and sources an rc script -- PID 1 has something to exec
+chanrun: PASS the packaged hpm runs and knows its own verbs -- an installed machine can still receive the NEXT fix
+chanrun: PASS 8/8 packaged coreutils produced the right ANSWER (not merely exit 0) -- the shared Adder runtime in these bytes works
+chanrun: PASS A PACKAGED v2 CLIENT PAINTS: the channel's own hambrowse put 30858 white pixels of a page on the framebuffer -- so its blit, which its OWN linked copy of the window system accepts, was not refused for being bigger than the staging buffer
+chanrun: PASS nothing in this file compiles anything: hamlinux_build.sh is never invoked here, so every assertion above is about the channel's own bytes
+
+chanrun: 9 passed, 0 failed   (channel: /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/build/repo/linux)
+
+running the packaged Adder toolchain (tests/linux/channel_compiles_adder.sh)
+PASS: the channel carries hamnix-adder-1.0.0.tar.gz
+note: no index.json in /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/build/repo/linux (packager did not reach it); testing the tarballs as built
+
+hamnix-adder carries:
+  bin/ac
+  bin/host_ac
+  usr/share/adder/ac-link.sh
+  usr/share/adder/adder_llvm_runtime.c
+  usr/share/adder/hello.ad
+  usr/share/adder/linux-audio.c
+  usr/share/adder/linux-audio.h
+  usr/share/adder/linux-auth.c
+  usr/share/adder/linux-auth.h
+  usr/share/adder/linux-fb.c
+  usr/share/adder/linux-fb.h
+  usr/share/adder/linux-fdns.c
+  usr/share/adder/linux-fdns.h
+  usr/share/adder/linux-net.c
+  usr/share/adder/linux-net.h
+  usr/share/adder/linux-runtime.S
+  usr/share/adder/linux-snarf.c
+  usr/share/adder/linux-snarf.h
+  usr/share/adder/linux-syscalls.c
+  usr/share/adder/linux-vk.c
+  usr/share/adder/linux-vkhost.c
+  usr/share/adder/linux-vk-spv.h
+  usr/share/adder/linux-wsys.c
+  usr/share/adder/linux-wsys.h
+  usr/share/adder/syscall_nums.h
+PASS: the package carries a sample program (/usr/share/adder/hello.ad)
+PASS: /bin/ac came out of the tarball executable (755)
+
+[1/2] ac /work/hello.ad -o /work/hello   (real binary, real rfork+bind, channel bytes)
+    [ac] host_ac --backend=llvm /work/hello.ad
+    [ac] clang, inside the Debian namespace
+    [ac] cc linux-runtime.S
+    [ac] cc adder_llvm_runtime.c
+    [ac] cc linux-audio.c
+    [ac] cc linux-auth.c
+    [ac] cc linux-fb.c
+    [ac] cc linux-fdns.c
+    [ac] cc linux-net.c
+    [ac] cc linux-snarf.c
+    [ac] cc linux-syscalls.c
+    [ac] cc linux-vk.c
+    [ac] cc linux-vkhost.c
+    [ac] cc linux-wsys.c
+    [ac] link out.elf
+    [ac] wrote /work/hello
+PASS: ac exited 0
+PASS: ac wrote a binary (300800 bytes)
+
+[2/2] run what it produced
+    program said: [hello from adder, compiled on hamnix-linux]
+PASS: THE PROGRAM RAN AND PRINTED THE RIGHT THING -- a channel-built machine compiles Adder
+PASS: the rule: this gate compiled nothing it asserts on -- the toolchain came out of hamnix-adder-1.0.0.tar.gz
+
+7 passed, 0 failed
+
+124 packages -> /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/build/repo/linux
+not packaged (1): hamnix-drivers-base: modprobe resolved nothing for $HW_MODULES (the image does not stage them either)

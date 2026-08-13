@@ -1,0 +1,64 @@
+srvtr: .... compiler: /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/build/cutover/host_ac.elf
+srvtr: .... built wsysd, wsys_srv_probe, cat and de_dragload from this tree into /home/david/hamnix-linux/.claude/worktrees/agent-af0dd6dc5d5f2a8ab/.sweep2/srvwork/wsys_srv_transport/bin
+srvtr: PASS wsysd runs with HAMWSYS_SERVER unset
+srvtr:      wsrv: HAMWSYS_SERVER is not 1, so this build's /dev/wsys is implemented in-process and there is nothing to dial.
+srvtr: PASS with the flag unset the probe cannot reach a server (rc=1) -- a success below will mean the transport, and not the probe
+srvtr: FAIL an abstract socket named hamnix-wsys/*/srv is bound with HAMWSYS_SERVER unset -- the flag does not gate the server
+srvtr: .... CPU instrument: /proc/<pid>/stat utime+stime, CLK_TCK=100, 40s windows -> one tick = 0.025% of a core
+srvtr: .... idle CPU, HAMWSYS_SERVER unset: samples 0.33% 0.33% 0.30% -> median 0.33% of a core
+srvtr: PASS wsysd runs with HAMWSYS_SERVER=1
+srvtr: PASS the server bound its abstract name (visible in /proc/net/unix)
+srvtr:      wsrvprobe: 0 failures
+srvtr:      wsrvst: connected, both ends speak wsys version 8
+srvtr:      wsrvst: blocking round trip, 33 samples: min 16  p50 23  p90 49  max 70 us
+srvtr:      wsrvst: every sample, us: 16 22 22 22 23 23 23 23 23 23 23 23 23 23 23 23 23 23 23 23 23 23 24 24 30 36 45 47 49 49 50 55 70
+srvtr:      wsrvst: fire-and-forget: 256 sent in 287 us (1.12 us/op, send side only)
+srvtr:      wsrvst: the server's own counter: nop 0 -> 256 (delta 256, sent 256)
+srvtr:      wsrvst: server counters: conns 1 live 1 msgs 292 nop 256 ping 33 stat 2 bad 0 bytes 1490 write 0 newwin 0 refused 0
+srvtr:      wsrvst: an unknown fire-and-forget op was refused out of band (bad 0 -> 1)
+srvtr:      wsys: the server refused op 9999: Function not implemented
+srvtr: PASS the transport works: handshake, blocking round trip, and a fire-and-forget burst the SERVER confirms it received
+srvtr:      wsrvst: blocking round trip, 33 samples: min 16  p50 27  p90 70  max 667 us
+srvtr:      wsrvst: every sample, us: 16 27 27 27 27 27 27 27 27 27 27 27 27 27 27 27 27 27 27 28 28 28 28 29 33 42 42 50 67 70 652 655 667
+srvtr:      wsrvst: fire-and-forget: 256 sent in 316 us (1.23 us/op, send side only)
+srvtr: PASS under a dragging load a fire-and-forget op costs 1.23 us, at or under the 2.3 us the census saturates at -- the rule that mutations do not wait is what holds the budget
+srvtr: PASS under a dragging load a BLOCKING request is 27 us at p50, within the 0.3 ms input-to-pixel budget
+srvtr: .... RECORDED FOR STAGE 3, not asserted: the blocking tail reaches 667 us under a dragging load, because a request serviced from the frame loop waits for the frame. newwindow and version negotiation happen once per window and can afford it; a taskbar re-reading /dev/wsys/windows cannot. Servicing requests off the frame loop is stage 3's problem and this is the number it has to beat.
+srvtr: PASS /dev/wsys/windows is byte-identical with the flag set and unset (7 bytes, non-empty)
+srvtr:      opcount:    ctl                open 2 read 1 write 1
+srvtr:      opcount:    wid/ctl            open 7246 read 0 write 7245
+srvtr:      opcount:    wid/scene          open 1 read 0 write 1
+srvtr:      opcount:    ctl                open 2 read 1 write 1
+srvtr:      opcount:    wid/ctl            open 8148 read 0 write 8147
+srvtr:      opcount:    wid/scene          open 1 read 0 write 1
+srvtr:      opcount:    ctl                open 2 read 1 write 1
+srvtr:      opcount:    wid/ctl            open 9046 read 0 write 9045
+srvtr:      opcount:    wid/scene          open 1 read 0 write 1
+srvtr:      opcount:    ctl                open 2 read 1 write 1
+srvtr:      opcount:    wid/ctl            open 9942 read 0 write 9941
+srvtr:      opcount:    wid/scene          open 1 read 0 write 1
+srvtr: PASS 12 s of a dragging client: 9943 control writes and 0 backbuffer writes. Pixels do not cross -- verified, not assumed.
+srvtr: .... idle CPU, HAMWSYS_SERVER=1:    samples 0.35% 0.35% 0.38% -> median 0.35% of a core
+srvtr: .... idle delta attributable to the server: 0.02% of a core (budget 0.12%)
+srvtr: PASS idle mediation is below this instrument's resolution (0.025% of a core); it is under the 0.12% budget, and 0.12% is all that can be claimed
+srvtr:      wsrvsu: 8256 ops in 43000080 us (192 ops/s asked, 192 delivered)
+srvtr:      wsrvsu: 8256 ops in 43000087 us (192 ops/s asked, 192 delivered)
+srvtr:      wsrvsu: 8256 ops in 43000083 us (192 ops/s asked, 192 delivered)
+srvtr: .... idle-rate traffic (192 ops/s): samples 0.60% 0.53% 0.68% -> median 0.60%, delta over the flag-off idle baseline 0.27% (budget 0.12%)
+srvtr: FAIL idle-rate traffic mediation costs 0.27% of a core, over the 0.12% budget
+srvtr:      wsrvsu: 26574 ops in 43000085 us (618 ops/s asked, 618 delivered)
+srvtr:      wsrvsu: 26574 ops in 43000086 us (618 ops/s asked, 618 delivered)
+srvtr:      wsrvsu: 26574 ops in 43000084 us (618 ops/s asked, 618 delivered)
+srvtr: .... mouse-paced drag (618 ops/s): samples 0.65% 0.62% 0.62% -> median 0.62%, delta over the flag-off idle baseline 0.29% (budget 0.38%)
+srvtr: PASS mouse-paced drag mediation costs 0.29% of a core, within the 0.38% budget
+srvtr:      wsrvsu: 88150 ops in 43000085 us (2050 ops/s asked, 2050 delivered)
+srvtr:      wsrvsu: 88150 ops in 43000084 us (2050 ops/s asked, 2050 delivered)
+srvtr:      wsrvsu: 88150 ops in 43000083 us (2050 ops/s asked, 2050 delivered)
+srvtr: .... worst measured load (2050 ops/s): samples 0.75% 0.75% 0.75% -> median 0.75%, delta over the flag-off idle baseline 0.42% (budget 1.27%)
+srvtr: PASS worst measured load mediation costs 0.42% of a core, within the 1.27% budget
+srvtr: .... cost decomposition, from the three rates:
+srvtr: ....   marginal: 0.807 us of CPU per message
+srvtr: ....   fixed:    0.25% of a core, independent of the rate
+srvtr: ....   (samples 0.27% at 192, 0.29% at 618, 0.42% at 2050 ops/s;
+srvtr: ....    instrument resolution 0.025%)
+srvtr: 12 passed, 2 failed

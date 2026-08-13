@@ -1,0 +1,26 @@
+evlat: INFO host: Intel(R) Core(TM) i7-8086K CPU @ 4.00GHz
+evlat: INFO host: 12 cpus, load 1.87 2.55 2.40
+evlat: PASS the compositor builds
+evlat: PASS the probe builds
+evlat: INFO why not a real evdev node, checked rather than asserted:
+evlat: INFO   uinput-check: created /dev/input/event13 (mode 0660 uid 65534 gid 65534) -- NOT readable by this user: udev puts no uaccess ACL on a virtual device, so wsysd could not open it either
+evlat: PASS the compositor's input arrived on a character special file (/dev/pts/2) -- the poll(2) fd class a real evdev node uses, not the regular-file class the other gates use
+evlat: PASS wsysd honoured HAMWSYSD_INPUT and opened no device of this host's
+evlat: PASS the character device is IN the wait set (wait set 2 fds wake this loop, 1 (one of them is the client wake) always-ready and excluded; fallback tick 16 ms)
+evlat: INFO input-to-pixel over the character device: n=60 lost=0 skipped=0 min 0.22 p50 0.27 mean 0.27 p95 0.30 max 0.36 ms
+
+evlat: PASS the pixel watcher does not fire on its own (1.5 s, nothing injected)
+evlat: PASS a compositor SIGSTOPped 100 ms MEASURES 100.33 ms -- the probe can report WORSE than the truth, not only better
+evlat: PASS a compositor SIGSTOPped 250 ms MEASURES 250.39 ms -- the probe can report WORSE than the truth, not only better
+
+evlat: INFO control: the same probe with the jitter removed. A constant settle that
+evlat: INFO          happens to be a whole number of ticks measures ONE phase over
+evlat: INFO          and over; against a tick that reads 8x too good or, as easily,
+evlat: INFO          too bad. Against a loop with no tick the two agree.
+evlat: INFO un-jittered: n=30 lost=0 skipped=0 min 0.22 p50 0.30 mean 0.30 p95 0.34 max 0.45 ms
+
+evlat: INFO idle over 20 s with nothing injected: 0.35% of one core, 62.1 parks/s (from /proc/477347/stat and /status, not ps pcpu)
+evlat: PASS the park on a character device is a real sleep: 0.35% of one core at idle
+evlat: PASS it goes round 62.1 times a second at idle, which is its fallback tick and not a spin
+
+evlat: 10 passed, 0 failed

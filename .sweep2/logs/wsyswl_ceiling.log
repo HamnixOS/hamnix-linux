@@ -1,0 +1,31 @@
+ceil: PASS the compositor, the Wayland server and the window probe all build
+ceil: PASS the compositor's window manager has the X display
+ceil: === 1. 12 X clients on one rootless Xwayland
+ceil: INFO the X root has 13 mapped children
+ceil: PASS all 12 X clients mapped a toplevel
+ceil: INFO xwl_managed 13
+ceil: INFO xwl_paired 12
+ceil: INFO windows_high_water 12
+ceil: INFO conns 1
+ceil: INFO commits 24
+ceil: INFO drop_xwl_unpaired 0
+ceil: INFO window_budget_full 0
+ceil: INFO xwm_refused 0
+ceil: INFO /dev/wsys/pool: slots 12/512 exhausted 0 last_refused 0 0x0
+ceil: === 2. how many are Hamnix windows, and are they PAINTED?
+ceil: PASS /dev/wsys lists 12 application windows for 12 X clients
+ceil: INFO 12 of 12 windows are painted with their own client's colour; 0 are blank
+ceil: PASS all 12 X windows are on the framebuffer at once, each in its own colour
+ceil: === 3. is the ceiling READABLE, or is it a blank window?
+ceil: PASS /dev/wsys/pool answers: slots 12/512 exhausted 0 last_refused 0 0x0
+ceil: INFO parsed: used 12 of 512, exhaustions 0
+ceil: PASS the pool has 512 slots, which is more than the 12 windows on screen
+ceil: PASS and it reports ZERO exhaustions -- no window went unpainted in silence
+ceil: === 4. what does a pool this size actually cost?
+ceil: INFO the backbuffer segment is 0 MiB long and 16 KiB allocated
+ceil: PASS 12 slots in use cost 16 KiB of real memory, not 192 MiB
+ceil: === 5. more than sixteen windows, which is where DEVTAB_MAX was
+ceil: INFO 24 one-window clients: windows_high_water 36, drop_no_window 0, newwindow_refused 0
+ceil: PASS all 24 windows exist at once -- past the sixteen DEVTAB_MAX silently allowed
+ceil: PASS newwindow_refused is 0 -- the device never turned a window down, so the ceiling that is left is a real one
+ceil: 11 passed, 0 failed

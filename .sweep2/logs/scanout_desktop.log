@@ -1,0 +1,14 @@
+=== arming watchdog (45s) and starting wsysd on the display
+!!! scanout did not arm:
+   wsysd: scene compositor starting
+   wsysd: scanout: DRM would not take the buffer
+   hamfb: /dev/fb0 (fbdev) 1920x1080 pitch=7680 size=8294400
+   wsysd: screen 1920x1080
+   wsysd: vk backend GPU -- NVIDIA GeForce RTX 3090 (VkPhysicalDeviceType 2, silicon 1, zero-copy 1, device-local 0, host-cached 1)
+   wsysd: present cap OFF -- offscreen, fbdev, or no usable mode timing
+   benchlive: on, dumping every 60 full frames
+   wsysd: input from ./so.NYyLce/in only
+   wsysd: wait set 2 fds wake this loop, 1 (one of them is the client wake) always-ready and excluded; fallback tick 16 ms
+   watchdog: FIRED after 45s -- killing pid 421570; the fd closes,
+   watchdog: the kernel drops master and fbcon comes back.
+   ./kms_watchdog.sh: line 46: 421570 Killed                  "$@"

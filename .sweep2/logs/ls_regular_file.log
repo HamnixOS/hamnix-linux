@@ -1,0 +1,11 @@
+== ls on a regular file prints its name, not its contents
+  ok   ls foo.txt prints 'foo.txt'
+  ok   ls -l foo.txt prints one long-format line naming the file: -rw-rw-r-- 1000 33	foo.txt
+  ok   the long line reflects the FILE'S OWN mode (600: -rw------- 1000 1 / 755: -rwxr-xr-x 1000 1)
+  ok   and it is byte-identical to the directory listing's line for the same file
+  ok   CONTROL: ls on a directory still lists its entries
+  ok   CONTROL: ls -l on a directory still lists its entries
+  ok   CONTROL: a missing path is an error (rc=1), not a silent success
+
+ls_regular_file: 7 passed, 0 failed
+PASS ls_regular_file
