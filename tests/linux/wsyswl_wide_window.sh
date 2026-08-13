@@ -53,6 +53,14 @@
 #      is past BB_W, and has to still be visible there.  That is wsysd's
 #      over-read, asked as pixels.
 #
+# NOT ASKED HERE, AND NOW ASKED NEXT DOOR.  This gate's client is an X client
+# through Xwayland, and its screen is 820 tall, so it can say nothing about a
+# NATIVE Wayland client over BB_W or about the HEIGHT axis at all -- wsysd's
+# MAX_PIXELS forbids one screen being both over 1920 wide and over 1080 tall.
+# tests/linux/wsyswl_wide_native.sh measures both, in two runs, with a client
+# that speaks the Wayland wire itself.  Both were the SAME defect: measured
+# against the pre-fix binaries, a 700x1600 native window painted 0% of itself.
+#
 # NOT asserted, because it was measured and is NOT affected: hamdesktop's
 # full-screen backdrop paints correctly on a 2400-wide screen.  It is a SCENE
 # window, not a v2 blit window, and none of the four defects above is on the

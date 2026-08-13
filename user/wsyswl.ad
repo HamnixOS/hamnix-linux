@@ -103,7 +103,17 @@
 # runs against it (`Xwayland -shm -noreset`, software pixman, no GL) and X11
 # clients -- xeyes, xclock, xsetroot -- render inside its window. Firefox runs
 # as a NATIVE Wayland client with MOZ_ENABLE_WAYLAND=1 and paints its full
-# chrome. INPUT has now been driven end to end by writing the /keys and
+# chrome. A NATIVE CLIENT BIGGER THAN THE DEVICE'S CEILING has now been
+# measured on both axes rather than reasoned about: 2100x600 on a 2400x820
+# screen and 700x1600 on a 1000x2000 one each paint the part that fits, name
+# the cut in the right unit, and put nothing past the limit -- and against the
+# binaries from before the clip existed, each painted 0% of itself
+# (tests/linux/wsyswl_wide_native.sh). Note WHICH clients can reach that case:
+# NOT one that maximises, because clamp_maximised below has already cut MAX_W
+# and MAX_H to the device's ceiling and set_fullscreen is answered with the
+# same pair -- only a client that picks its own size and ignores the configure,
+# which is Xwayland on behalf of an X window, or a client written to do it.
+# INPUT has now been driven end to end by writing the /keys and
 # /pointer rings directly (see tests/linux/wsys_poke.ad): a client receives
 # wl_pointer enter/motion/button and wl_keyboard enter/key.
 #
@@ -3472,10 +3482,23 @@ def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
             putd(2, width - dev_max_w)
             puts(2, " are NOT drawn (BB_W in user/linux-wsys.c)\n")
         cols = dev_max_w
-    # And the same for the bottom edge: bb_blit clips a row whose y is past
-    # the window's height and says nothing, so rows below the device's maximum
-    # were being copied, written and thrown away -- silently, and at the cost
-    # of a write(2) each.
+    # And the same for the bottom edge -- AND THIS COMMENT USED TO UNDERSTATE
+    # IT, which is worth keeping because the understatement is the interesting
+    # part. It said the rows past dev_max_h were "copied, written and thrown
+    # away, at the cost of a write(2) each", reasoning that bb_blit clips a row
+    # whose y is past the backbuffer's height and says nothing. That is true of
+    # bb_blit and it was NOT the outcome.
+    #
+    # MEASURED, on the binaries from the commit before this clip existed
+    # (tests/linux/wsyswl_wide_native.sh, height phase, a 700x1600 native
+    # Wayland client on a 1000x2000 screen): THE WINDOW PAINTED 0% OF ITSELF,
+    # top included. The reason is on the OTHER side of the wire -- bb_for
+    # compared the height ASKED FOR against the height STORED, bb_fit had
+    # already clamped the stored one to BB_H, so 1080 != 1600 on every blit,
+    # every blit re-fit the memfd, and bb_fit CLEARS it. The device even said
+    # so: "a backbuffer's size did not match its window's -- re-fitting
+    # (4 700 1080 700)". The height axis was the same defect as the width axis,
+    # not a lesser one, and the row that survived was the last one written.
     rows: int32 = height
     if rows > dev_max_h:
         if said_tall == 0:
