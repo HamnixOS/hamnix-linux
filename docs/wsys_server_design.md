@@ -223,6 +223,86 @@ get with `unshare -U --map-users`. **That is the next piece of work.** What is
 asserted at any uid is that a routed write for a window that does not exist is
 refused, with the message first proven to have arrived.
 
+## What stage 3a measured — the caller identity, proven, and what it costs
+
+`tests/linux/wsys_srv_identity.sh`, **15 passed, 0 failed**. `unshare -U
+--map-users` with three ids out of `/etc/subuid`, as `wsys_uidgate.sh` and
+`wsys_bypass.sh` already do: wsysd runs as 1001 so **1001 is the host owner**,
+the victim owns the window, the attacker is **1002**. `WSYS_VERSION` stays 8.
+
+**The pair is the argument, not the refusal.** Same uid, same window, same
+mutation, twice:
+
+| | result |
+|---|---|
+| unrouted | uid 1002 renamed uid 1001's window. **It worked, and it is supposed to.** |
+| routed | `wsrvmu: the mediator REFUSED it (refused 0 -> 1)`, title unchanged, message proven to have arrived first (`write 3 -> 4`) |
+
+A gate that is green in every configuration is equally green against a server
+that checks nothing. Red-unrouted / green-routed is the whole case for the
+boundary's existence.
+
+**And the red arm costs one assignment.** `hostowner()` reads
+`srv_caller.uid` — a plain global, because a routed operation must be able to
+install the caller it acts for. In wsysd that global comes from `SO_PEERCRED`;
+in a *client* it is a variable in the attacker's own address space:
+
+    the in-process check says hostowner=0 owns_wid=0 -- i.e. REFUSE
+    after one assignment to the identity the check reads, the SAME check says
+    hostowner=1 owns_wid=0 -- i.e. ALLOW
+    the unrouted write LANDED
+
+An unmediated check does not *become* weak when attacked. It was never anything
+but advice, because the identity it asks about is supplied by the process being
+asked about. That is the argument for the version bump restated as a
+measurement.
+
+**WHAT `owns_wid()` ACTUALLY ANSWERS, AND STAGE 2 GUESSED THE SHAPE RIGHT.**
+`HAMWSYS_SRV_TRACE=1` prints both predicates from *inside* `srv_as_caller()`,
+because from outside "owns_wid said no" and "hostowner said yes first" are
+indistinguishable and are opposite findings. For the attacker: `hostowner=0
+owns_wid=0` — the refusal was **decided by the ppid walk**, not short-circuited
+past it. Then the walk isolated, with `hostowner()` out of the way: a window
+stamped by `alloc` against a uid-0 process that can still fork, and two uid-1002
+callers differing only in descent.
+
+| caller | `owns_wid` | outcome |
+|---|---|---|
+| not descended from the owner | 0 | refused |
+| **a child of the owner** | **1** | **accepted** |
+
+**A uid-1002 process wrote a uid-0 process's window because it was descended
+from it.** The walk compares pids and never looks at a uid at all.
+
+It is **not a routing regression and is not weakened here**: the gate measures
+the *unrouted* path granting the same descendant the same window, so the rule is
+inherited, not introduced — which is exactly what stage 2 was required to
+deliver. It is devwsys's rule: hamUI spawns a task *into* a window and stamps
+the parent's pid, and `snap_self` answers "creator pid OR ANCESTOR" for that
+reason. Tightening it to an exact pid match would leave every hamUI-spawned task
+unable to drive the window it was spawned into.
+
+**What it costs, priced rather than apologised for:** every application the
+desktop spawns is a descendant of the desktop, so every application may
+retitle, move, raise or destroy any window owned by the compositor, the panel,
+or any of its own ancestors, **regardless of uid** — and now with the
+mediator's blessing rather than merely without its knowledge. The
+capability-at-`newwindow` this design already proposes for enumeration is the
+shape that replaces it. **It is a stage-3 policy decision, not a stage-3a
+one**, and it is the second thing (after the 851 µs read tail) that the
+measurement rather than the plan put on stage 3's list.
+
+**The negative control**, because a gate is worth what it can fail: deleting
+the single `srv_as_caller()` line takes the file from 15/0 to **10 passed, 4
+failed**, including the central arm. The red arm stays green throughout —
+correctly, it never touches the server — which is why it is not evidence on its
+own.
+
+Still true and still not hidden: `WSYS_VERSION` is 8 and the in-process path is
+still there, so **a client that does not speak the protocol still bypasses the
+mediator entirely**. That is the red arm, and it is the state of the tree
+today, not a historical re-enactment.
+
 Not routed: `wid/scene` (per-open staging state; reopening starts a new frame,
 so it needs handle tracking across open/write/close — and 1 write per 12 s of
 a drag against 9790 for `wid/ctl`). No reads, no enumeration policy, no
