@@ -154,6 +154,36 @@ fi
 # ANY uid. It proves the server looks at the message rather than executing it
 # on trust -- which is not the same as proving it looks at the CALLER, and 2b
 # is where that is faced honestly.
+#
+# THIS ARM STRADDLES TOO, FOR A REASON THAT IS NOT THIS FILE'S TO FIX, and it
+# is written down here so the next person does not spend a day rediscovering
+# it. Measured: 1 red in 4 consecutive end-to-end runs, on a tree with no
+# relevant change.
+#
+#     srvmu: FAIL the server never received the routed write for a nonexistent
+#            window ... (write 3713 -> 3715)
+#
+# THE ARRIVAL PROOF IS AN EQUALITY ON A GLOBAL COUNTER. srv_mutate_probe() in
+# user/linux-wsys.c reads the server's `write` total, sends one routed write,
+# reads the total back, and requires EXACTLY w1 == w0 + 1. But the arm-1
+# dragging client is STILL ALIVE at this point -- it is not killed until after
+# 2b, deliberately, because the enumeration below has to be read while it
+# lives -- and with HAMWSYS_SERVER=1 every one of its ~900 ctl writes a second
+# increments that same total. Across the four runs the counter moved by 9, 9,
+# 12 and 17 between arm 1's stat and this one, so a client write landing
+# inside the probe's own two-call window is a coin toss, not a rarity, and
+# when it lands w1 is w0 + 2 and the probe reports the message as NEVER
+# ARRIVED. It did arrive: `refused` went 2 -> 3 in the same run, which is the
+# refusal this arm exists to observe.
+#
+# So the red is an instrument fault and the property it tests was true. The
+# honest repair is in the PROBE, not here -- it should witness arrival by the
+# delta in `refused` (which only refusals move, and the legitimate client's
+# writes are never refused), or by a per-connection counter, instead of by an
+# equality on a total that another process is driving. That is a change to
+# user/linux-wsys.c, which another branch is editing, so this pass diagnoses it
+# and does not touch it. NOT FIXED, AND NOT SILENCED: this arm can still go red
+# on a busy host, and when it does, `refused` advancing by one is the tell.
 HAMWSYS_SERVER=1 "$BIN/wsys_srv_probe" mutate 9999 >"$W/attack.ghost" 2>&1
 GRC=$?
 sed 's/^/srvmu:      /' "$W/attack.ghost"
@@ -297,21 +327,110 @@ awk -v d="$DELTA" -v q="$QUANT" 'BEGIN{
 }'
 
 # ==================================================================
-# 5. CHEAPER MUST NOT MEAN DOING LESS. This is the assertion that keeps arm 4
-# honest, and without it a 17% CPU saving and a compositor that quietly
-# stopped painting are the same number. wsysd dumps a line per 200 full
-# frames with HAMNIX_WSYSD_BENCH_LIVE set, so the count of those lines is a
-# frame count in units of 200 -- comparable between the two arms, which is
-# all that is needed.
-FOFF=$(grep -c '^benchlive: seq' "$W/wsysd.dragoff.log" 2>/dev/null || echo 0)
-FON=$(grep -c '^benchlive: seq' "$W/wsysd.dragon.log" 2>/dev/null || echo 0)
+# 5. CHEAPER MUST NOT MEAN DOING LESS -- TO THE PRECISION THIS INSTRUMENT
+#    ACTUALLY HAS, WHICH IS NOT THE PRECISION IT USED TO ASSERT.
+# ==================================================================
+# The assertion that keeps arm 4 honest: without it a CPU saving and a
+# compositor that quietly stopped painting are the same number. wsysd dumps a
+# line per 200 full frames with HAMNIX_WSYSD_BENCH_LIVE set, so the count of
+# those lines is a frame count in units of 200.
+#
+# THIS ASSERTION USED TO BE `FON >= FOFF`, WITH NO MARGIN AT ALL, AND IT HAD
+# BECOME A COIN FLIP. Recorded here because the number below is otherwise
+# indistinguishable from a threshold loosened until the gate went green.
+#
+# WHY THE ZERO MARGIN WAS RIGHT WHEN IT WAS WRITTEN. At 17929c2a the two arms
+# were not close: the unrouted arm was SATURATED at 99.8% of a core and
+# painted 97 x200, the routed arm painted 139 x200 on 53.3%. A bare `>=`
+# across a 43% gap is a perfectly good assertion. That gap has since closed --
+# both arms now paint ~550 x200 at ~80% of a core -- and the operator that was
+# reading a 43% difference started reading nothing but noise. Nobody loosened
+# anything; the system moved out from under the threshold.
+#
+# THE MEASUREMENT, 20 PAIRED REPETITIONS, ARM ORDER ALTERNATED BETWEEN REPS SO
+# A HOST-LOAD DRIFT COULD NOT BE READ AS A ROUTING EFFECT. Same binaries, same
+# 123 s window, this file's own arm 4 reproduced. FOFF / FON, in units of 200:
+#
+#   550/550  553/549  552/549  551/549  549/550  535/552  548/549  551/548
+#   541/547  523/535  551/548  548/549  548/553  552/555  554/557  550/550
+#   537/552  553/548  554/554  548/554
+#
+#   unrouted 523..554, mean 547.4      routed 535..557, mean 549.9
+#   paired delta (FON-FOFF): min -5, max +17, mean +2.50, median +1, sd 6.17
+#   i.e. the routed arm is, if anything, marginally AHEAD (+0.46% of the mean),
+#   and the run-to-run sd of the delta is 1.13% of the mean.
+#
+#   `FON >= FOFF` on those 20 pairs: 14 PASS, 6 FAIL. A 30% red rate on a
+#   property that is TRUE.
+#
+# WHY THE NOISE IS THIS BIG, which is the part that makes 10% a derivation and
+# not a shrug. Offscreen there is no present cap -- wsysd says so on startup,
+# "present cap OFF -- offscreen, fbdev, or no usable mode timing" -- so the
+# compositor paints every signature change as fast as the machine will let it,
+# measured at 75-86% of a core. The count is therefore a CPU THROUGHPUT
+# measurement on a host shared with other work, not a property of routing. It
+# moves when the host moves: the two lowest unrouted samples above (523, 535)
+# were taken while a concurrent build pushed the 1-minute load average from
+# 1.9 to 2.5, and they are 4.5% and 2.3% below the mean of the same arm.
+#
+# THE TOLERANCE, DERIVED:
+#   * 3 sd of the measured paired delta ............... 3 x 1.13% = 3.4%
+#   * worst single-arm excursion actually observed
+#     (523 against that arm's mean of 547.4) .......... 4.5%
+#   * take the larger, 4.5%, and double it for headroom against a host busier
+#     than the one this was measured on ............... 9%  -> 10%
+# 10% is ~8.9 sd of the measured delta, so a green run is green because the
+# arms agree, not because the bar was lowered to meet them.
+#
+# AND THE REASON A BUSY HOST DOES NOT BREAK IT, which is the one thing the 20
+# quiet repetitions above could not show. Four end-to-end runs of THIS FILE,
+# taken while the host was carrying other agents' builds, unrouted/routed:
+#
+#     522/516   500/546   507/544   424/480
+#
+# The excursions are far bigger than the quiet run's (424 is 22% below the
+# quiet mean) and they are ASYMMETRIC -- three of the four move the comparison
+# in the SAFE direction. Arm 4 says why, in the same runs: the unrouted arm is
+# SATURATED (98.05%, 98.08%, 98.92%, 99.72% of a core) while the routed arm
+# has headroom (85.38%, 85.67%, 86.20%, 97.92%). A saturated loop is the one
+# that loses frames when the host takes CPU away, and it is the DENOMINATOR
+# here. So host load pushes FON/FOFF UP, and the failing direction is reached
+# only on a quiet host where the two arms are equal and noise picks the sign --
+# which is exactly the 20-repetition distribution the tolerance is derived
+# from. The worst routed-below-unrouted ratio in all 24 measurements is
+# -1.15%, against a 10% bar.
+#
+# WHAT THIS GATE CAN AND CANNOT SAY NOW, stated plainly rather than left for a
+# reader to discover: it CANNOT see a frame-rate regression smaller than 10%.
+# It can still see the one it exists for -- the founding measurement's own
+# difference was 43%, and a compositor that "quietly stopped painting" is not
+# a 5% effect. If a sub-10% regression ever needs proving, this single-shot
+# comparison is the wrong instrument for it and repetition is the fix, not a
+# tighter number here: at sd 1.13%, resolving 5% at 3 sd needs ~5 paired reps.
+FRAME_TOL_PCT=10
+# grep -c prints "0" and EXITS 1 when there is no match, so the old
+# `|| echo 0` appended a SECOND zero and made $FOFF the two-line string "0\n0",
+# which every [ ] test below then rejected as a non-integer. The guard that
+# matters is the -le 0 check, which is kept.
+FOFF=$(grep -c '^benchlive: seq' "$W/wsysd.dragoff.log" 2>/dev/null); FOFF="${FOFF:-0}"
+FON=$(grep -c '^benchlive: seq' "$W/wsysd.dragon.log" 2>/dev/null); FON="${FON:-0}"
 note "full frames painted during the drag (units of 200): unrouted $FOFF, routed $FON"
 if [ "$FOFF" -le 0 ]; then
     bad "the unrouted arm painted no countable frames -- the frame instrument is not looking, so 'routing paints as many' would be unprovable"
-elif [ "$FON" -ge "$FOFF" ]; then
-    ok "the routed arm painted at least as many full frames as the unrouted one ($FON vs $FOFF x200) -- the CPU saving is not the compositor doing less"
 else
-    bad "the routed arm painted FEWER full frames ($FON vs $FOFF x200). The CPU saving is a frame rate drop wearing a saving's clothes."
+    FPCT="$(awk -v a="$FOFF" -v b="$FON" 'BEGIN{printf "%+.2f", (b-a)*100.0/a}')"
+    note "routed vs unrouted frame count: $FPCT% (tolerance -${FRAME_TOL_PCT}%, derived from a measured sd of 1.13% -- see the header)"
+    if [ "$FON" -ge "$FOFF" ]; then
+        ok "the routed arm painted at least as many full frames as the unrouted one ($FON vs $FOFF x200, $FPCT%) -- the CPU saving is not the compositor doing less"
+    elif awk -v a="$FOFF" -v b="$FON" -v t="$FRAME_TOL_PCT" \
+            'BEGIN{exit !(b >= a*(100.0-t)/100.0)}'; then
+        # NOT SCORED AS "as many", because it is not. It is "not fewer by more
+        # than this instrument can resolve", which is a weaker claim and is
+        # printed as one.
+        ok "the routed arm painted $FPCT% fewer full frames than the unrouted one ($FON vs $FOFF x200) -- within the ${FRAME_TOL_PCT}% this single-shot comparison can resolve, so it is not evidence of the compositor doing less. It is also not evidence that it is doing MORE."
+    else
+        bad "the routed arm painted FEWER full frames ($FON vs $FOFF x200, $FPCT%), beyond the ${FRAME_TOL_PCT}% tolerance. The CPU saving is a frame rate drop wearing a saving's clothes."
+    fi
 fi
 
 echo "srvmu: $pass passed, $fail failed"
