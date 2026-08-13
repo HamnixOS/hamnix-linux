@@ -180,6 +180,54 @@ mediation *adds* a wake or *moves* one is the difference between 0.22% and
 almost nothing, and it cannot be answered before a real operation is routed.
 The gate stays red on it rather than being widened to fit.
 
+## What stage 2 measured — and the synthetic budget arm is now explained
+
+Stage 2 routes `/dev/wsys/ctl` and `/dev/wsys/<wid>/ctl` writes as one
+fire-and-forget message each, with `newwindow` blocking because it returns the
+wid. Gate: `tests/linux/wsys_srv_mutate.sh`, **7 passed, 0 failed**.
+
+**The mediation is `srv_as_caller()`, and nothing else.** A routed operation
+runs with the client's `SO_PEERCRED` installed, so `hostowner()` and
+`owns_wid()` answer about the caller. Without it wsysd — the host owner —
+would grant every write and the boundary would be strictly *worse* than none,
+silently, with every existing gate green.
+
+**Routing a drag made the compositor faster, not slower.** Same real dragging
+client, wsysd's CPU, three samples each:
+
+| | samples | median |
+|---|---|---|
+| unrouted | 93.90 / 99.90 / 99.80 | **99.80%** of a core |
+| routed | 75.50 / 52.90 / 53.30 | **53.30%** |
+
+46.5% of a core cheaper — and **43% more frames painted** (139×200 against
+97×200), which the gate asserts, because otherwise a compositor that quietly
+stopped painting and a real saving are the same number. The unrouted arm was
+saturated.
+
+So stage 1's unattributable 0.27% at 192 synthetic ops/s **was the synthetic
+NOP**: it added a wake to a compositor that had no other reason to wake. A
+real routed mutation replaces a shared-memory write that already poked the
+wake channel — and beyond that, messages queue and `srv_service` drains all
+pending ones in a single iteration before `scan_windows`, where the unrouted
+path woke the loop once per publish and rescanned each time. Mediation does
+not merely move the wake; it coalesces by construction.
+
+**THE CALLER-IDENTITY PROPERTY IS STILL UNPROVEN, and the gate says so.** The
+first run reported `FAIL a stranger renamed window 2` — and that FAIL was
+wrong. devwsys's rule is that the host owner may write any window; an
+offscreen gate runs as one uid, so the "stranger" *is* the host owner and the
+mediator was reproducing the in-process rule exactly. Proving the check uses
+the caller needs a **second uid**, as `wsys_uidgate.sh` and `wsys_bypass.sh`
+get with `unshare -U --map-users`. **That is the next piece of work.** What is
+asserted at any uid is that a routed write for a window that does not exist is
+refused, with the message first proven to have arrived.
+
+Not routed: `wid/scene` (per-open staging state; reopening starts a new frame,
+so it needs handle tracking across open/write/close — and 1 write per 12 s of
+a drag against 9790 for `wid/ctl`). No reads, no enumeration policy, no
+version bump.
+
 ## Budget to hold it to
 
 From the census, at 6.2 µs sequential / 2.2 µs pipelined:

@@ -2307,6 +2307,31 @@ static int win_focus_sloppy(const struct wwin *v)
     return v && v->focus_mode == 1;
 }
 
+/* THE RACE THAT ROUTING RETIRES — AND WHY THE ATOMICS BELOW MUST STAY.
+ *
+ * From stage 2 of docs/wsys_server_design.md, `newwindow` is routed: the
+ * client asks wsysd, wsysd calls this, and one process allocates every row.
+ * A single allocator makes the race below STRUCTURALLY IMPOSSIBLE rather than
+ * merely fixed -- there is no second claimant to lose to.
+ *
+ * IT DOES NOT MAKE THE COMPARE-EXCHANGE REDUNDANT, and the order of events is
+ * the reason.  Do not remove it.
+ *
+ *   * The routing is behind HAMWSYS_SERVER=1.  With the flag unset -- which
+ *     is every shipped binary today, and every binary until stage 4 lands --
+ *     this is still called concurrently by every GUI program on the machine.
+ *   * Even after stage 4, hamwsys_alloc() reaches this from hamUI when it
+ *     stamps a wid against a spawned child's pid, in the DE's process and not
+ *     in wsysd's.
+ *   * A shipped 1.0.22 client mmaps this segment and allocates out of it with
+ *     no idea a server exists.  That is precisely why the WSYS_VERSION bump
+ *     is the enforcement and goes last; until it lands, an old client is a
+ *     second allocator by definition.
+ *
+ * So routing removes the race for CLIENTS THAT ROUTE, and the interlock is
+ * what covers everybody else.  Measured before it existed: 10 failures in 10
+ * runs with two contending clients, 0 in 10 after.
+ */
 static struct wwin *win_alloc(int32_t pid)
 {
     if (shm_attach() < 0) return NULL;
@@ -2474,9 +2499,45 @@ static struct wwin *win_alloc(int32_t pid)
 static int32_t take_int(const char *s, size_t *p, size_t n);      /* below */
 static int     sink_is_launch_queue(const char *name);            /* below */
 
+/* ==================================================================
+ * WHO IS ASKING — and it stops being "us" the moment there is a server
+ * ==================================================================
+ * hostowner() and owns_wid() below are devwsys's two permission questions,
+ * and until stage 2 of docs/wsys_server_design.md they could only ever be
+ * asked about THIS process, because the code asking them was linked into the
+ * process being asked about.  That is the whole defect the file server exists
+ * to fix: there was no mediator, so there was nowhere a policy could live.
+ *
+ * When wsysd executes a routed operation it is acting FOR SOMEBODY ELSE, and
+ * geteuid()/getpid() would answer about wsysd.  wsysd runs as the host owner,
+ * so every check would return "yes" and the mediator would be a rubber stamp
+ * that grants more than the in-process path did -- a boundary that makes
+ * things WORSE, silently, while every gate passes.
+ *
+ * So a routed operation runs with the CALLER installed here, taken from
+ * SO_PEERCRED at accept: the one fact about a client that the client cannot
+ * forge.  It is a plain global rather than a parameter because these two
+ * predicates are reached from about thirty verb sites through ctl_global and
+ * ctl_window, and threading an identity through all of them would be thirty
+ * chances to miss one -- and a missed one is a check that silently answers
+ * about the server.  srv_as_caller()/srv_as_self() bracket exactly one
+ * dispatch, and the server is single-threaded, so the window it is set in is
+ * one message long.
+ */
+static struct {
+    int   active;
+    uid_t uid;
+    pid_t pid;
+} srv_caller;
+
+static void srv_as_caller(uid_t uid, pid_t pid)
+{ srv_caller.active = 1; srv_caller.uid = uid; srv_caller.pid = pid; }
+static void srv_as_self(void)
+{ srv_caller.active = 0; }
+
 static int hostowner(void)
 {
-    uid_t me = geteuid();
+    uid_t me = srv_caller.active ? srv_caller.uid : geteuid();
     if (me == 0) return 1;                     /* root owns the box */
     if (!seg_owner_known) return 0;            /* FAIL CLOSED */
     return me == seg_owner;
@@ -2515,7 +2576,12 @@ static int owns_wid(int wid)
 {
     struct wwin *v = win_find(wid);
     if (!v || v->pid == 0) return 0;
-    pid_t p = getpid();
+    /* The ppid walk starts at the CALLER, not at us.  Started at wsysd it
+     * would answer "does wsysd's ancestry reach this window's owner", which
+     * for a DE-spawned client is often YES -- wsysd is frequently the
+     * ancestor of the very programs it would be mediating.  That is not a
+     * near miss; it is a check that grants everything. */
+    pid_t p = srv_caller.active ? srv_caller.pid : getpid();
     for (int depth = 0; depth < 8; depth++) {
         if ((int32_t)p == v->pid) return 1;
         pid_t q = proc_ppid(p);
@@ -2977,6 +3043,13 @@ static int srv_enabled(void)
     return srv_flag;
 }
 
+/* The in-process write, which is what a routed mutation ultimately becomes --
+ * with the CALLER installed as the identity its permission checks are asked
+ * about.  Defined far below; reached from srv_dispatch. */
+static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
+                                   uint64_t n);
+static struct wwin *win_alloc(int32_t pid);
+
 /* The wire.  Both ends are the same object file, so these structures are a
  * contract with the GATE rather than an ABI across a version boundary — but
  * the gate checks them, so they are written down in linux-wsys.h too. */
@@ -3039,6 +3112,10 @@ static int  srv_nconn = 0;
  * everything as working. */
 static uint64_t srv_n_accept, srv_n_msg, srv_n_nop, srv_n_ping, srv_n_stat;
 static uint64_t srv_n_bad, srv_n_bytes;
+/* Stage 2's counters.  `refused` is the one worth having: a mediator that
+ * never refuses anything is indistinguishable from no mediator, and a gate
+ * cannot tell those apart without a number to read. */
+static uint64_t srv_n_write, srv_n_newwin, srv_n_refused;
 
 void hamwsys_srv_claim(void)
 {
@@ -3189,16 +3266,110 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
         char b[256];
         int n = snprintf(b, sizeof b,
                          "conns %llu live %d msgs %llu nop %llu ping %llu "
-                         "stat %llu bad %llu bytes %llu\n",
+                         "stat %llu bad %llu bytes %llu write %llu "
+                         "newwin %llu refused %llu\n",
                          (unsigned long long)srv_n_accept, srv_nconn,
                          (unsigned long long)srv_n_msg,
                          (unsigned long long)srv_n_nop,
                          (unsigned long long)srv_n_ping,
                          (unsigned long long)srv_n_stat,
                          (unsigned long long)srv_n_bad,
-                         (unsigned long long)srv_n_bytes);
+                         (unsigned long long)srv_n_bytes,
+                         (unsigned long long)srv_n_write,
+                         (unsigned long long)srv_n_newwin,
+                         (unsigned long long)srv_n_refused);
         if (n < 0) n = 0;
         srv_reply(c->fd, h->tag, n, b, (uint32_t)n);
+        return;
+    }
+    case WSRV_OP_WRITE: {
+        /* THE MUTATION PATH, AND THE ONLY LINE IN IT THAT MATTERS IS
+         * srv_as_caller().
+         *
+         * Everything else here is the ordinary in-process write -- the same
+         * hamwsys_write_inner every client has always called.  What makes it
+         * MEDIATION rather than a proxy is that the two permission questions
+         * it asks inside (hostowner, owns_wid) are answered about the process
+         * on the other end of this socket, from credentials the kernel
+         * supplied, instead of about wsysd.  Without that line wsysd -- which
+         * runs as the host owner -- would grant every write, and the boundary
+         * would be strictly WORSE than no boundary while every gate passed.
+         *
+         * srv_as_self() runs on every exit path, including the refusals.  A
+         * caller identity left installed would be inherited by the
+         * compositor's own next write to /dev/wsys, which it makes every
+         * frame. */
+        int leaf = (h->flags >> WSRV_LEAF_SHIFT) & 0xff;
+        int kind = (leaf == WSRV_LEAF_WIN_CTL) ? HAMWSYS_WIN_CTL
+                 : (leaf == WSRV_LEAF_CTL)     ? HAMWSYS_CTL
+                 : 0;
+        if (!kind) {
+            srv_n_bad++;
+            srv_err(c->fd, h->op, -EINVAL);
+            return;
+        }
+        srv_n_write++;
+        srv_as_caller(c->uid, c->pid);
+        int64_t rc = -EPERM;
+        if (kind == HAMWSYS_WIN_CTL && !win_find(h->wid)) {
+            rc = -ENOENT;
+        } else if (kind == HAMWSYS_WIN_CTL
+                   && !hostowner() && !owns_wid(h->wid)) {
+            /* THE GATE AT OPEN, kept.  hamwsys_open refuses this before any
+             * mutation happens and hamwsys_write refuses it again, because a
+             * descriptor can outlive the privilege that opened it.  A routed
+             * write is one message and therefore both moments at once, so the
+             * check is made once, here, before anything is touched. */
+            rc = -EPERM;
+        } else {
+            struct hamwsys_file f;
+            memset(&f, 0, sizeof f);
+            f.leaf = kind;
+            f.wid = h->wid;
+            f.write = 1;
+            errno = 0;
+            uint32_t before = shm ? __atomic_load_n(&shm->gen, __ATOMIC_ACQUIRE)
+                                  : 0;
+            rc = hamwsys_write_inner(&f, pay, h->len);
+            /* NO wake_poke() HERE, AND THAT IS THE ANSWER TO THE COST
+             * QUESTION STAGE 1 LEFT OPEN.  wake_poke is suppressed inside the
+             * compositor anyway (it re-reads the segment every iteration), so
+             * a routed mutation costs ONE wake -- the epoll wake that
+             * delivered this message -- where the in-process path also cost
+             * one, the client's poke of the wake channel.  Mediation MOVES a
+             * wake; it does not add one.  tests/linux/wsys_srv_mutate.sh
+             * measures whether that is true rather than asserting it. */
+            (void)before;
+        }
+        srv_as_self();
+        if (rc < 0) {
+            srv_n_refused++;
+            if (want_reply) srv_reply(c->fd, h->tag, (int32_t)rc, NULL, 0);
+            else            srv_err(c->fd, h->op, (int32_t)rc);
+        } else if (want_reply) {
+            srv_reply(c->fd, h->tag, (int32_t)rc, NULL, 0);
+        }
+        return;
+    }
+    case WSRV_OP_NEWWIN: {
+        /* THE ROW IS ALLOCATED HERE AND THE KEYSTROKE CHANNEL IS NOT, and the
+         * split is forced by what each thing IS.
+         *
+         * A row is shared state, so one allocator is what makes two clients
+         * unable to collide (see THE RACE THAT ROUTING RETIRES at win_alloc).
+         * A keystroke channel is an abstract socket BOUND BY THE PROCESS THAT
+         * WILL READ IT; bound here it would be held by wsysd, and the window's
+         * real owner would come up looking perfectly normal and be deaf to the
+         * keyboard for ever -- the success-shaped failure this tree refuses.
+         * So the client binds its own after this returns, which is what
+         * hamwsys_alloc already does for a DE-spawned child. */
+        srv_n_newwin++;
+        srv_as_caller(c->uid, c->pid);
+        struct wwin *v = win_alloc((int32_t)c->pid);
+        srv_as_self();
+        int32_t wid = v ? v->wid : -1;
+        if (v) shm->gen++;
+        srv_reply(c->fd, h->tag, wid >= 0 ? 0 : -ENOSPC, &wid, sizeof wid);
         return;
     }
     default:
@@ -3456,6 +3627,65 @@ static void srv_client_tick(void)
     (void)srv_dial();
 }
 
+/* ==================================================================
+ * STAGE 2 — ROUTING THE MUTATIONS
+ * ==================================================================
+ * Returns 1 if this write was handed to the server, 0 if the caller should
+ * take the in-process path.  Never returns a failure: a refused mutation
+ * comes back OUT OF BAND, on the connection the client is already draining,
+ * because waiting for a yes/no is the expensive pattern -- 6.30 us one at a
+ * time against 2.31 us at a burst of 16 -- and a mutation that returns no
+ * data has nothing to wait for.
+ *
+ * WHY THE CLIENT STILL CHECKS PERMISSION LOCALLY DURING STAGE 2, and why
+ * that is not the mediator being decorative.  Both paths exist while the flag
+ * is a development switch, so the in-process check is still real code with
+ * the segment still mapped; leaving it in place means routing changes no
+ * behaviour, which is the property every stage before the last one has to
+ * hold.  The server's check is the AUTHORITATIVE one -- it is answered about
+ * the caller's kernel-supplied credentials, and it is what survives stage 4
+ * when the in-process path and the client's mapping both go.
+ */
+static int srv_route_write(const struct hamwsys_file *f, const uint8_t *buf,
+                           uint64_t n)
+{
+    if (srv_fd < 0 || n == 0 || n > WSRV_MAXPAY) return 0;
+    int leaf;
+    switch (f->leaf) {
+    case HAMWSYS_CTL:     leaf = WSRV_LEAF_CTL;     break;
+    case HAMWSYS_WIN_CTL: leaf = WSRV_LEAF_WIN_CTL; break;
+    default: return 0;
+    }
+    /* NEWWINDOW IS NOT ROUTED HERE, and must not be: it returns data, and it
+     * has to bind a keystroke channel IN THIS PROCESS.  It goes through
+     * srv_newwindow below instead.  Checked on the leading token of the first
+     * line, because a ctl write may carry several verbs. */
+    if (leaf == WSRV_LEAF_CTL && n >= 9 && !memcmp(buf, "newwindow", 9))
+        return 0;
+    uint16_t flags = (uint16_t)(leaf << WSRV_LEAF_SHIFT);
+    if (srv_send(WSRV_OP_WRITE, flags, f->wid, ++srv_tag, buf, (uint32_t)n) < 0)
+        return 0;                     /* the socket broke; fall back, loudly */
+    return 1;
+}
+
+/* `newwindow`, and the only mutation that waits.  Returns the wid, or -1 with
+ * errno set, or -2 meaning "not routed, do it in process". */
+static int32_t srv_newwindow(void)
+{
+    if (srv_fd < 0) return -2;
+    int32_t wid = -1;
+    uint32_t got = 0;
+    int64_t rc = 0;
+    if (srv_call(WSRV_OP_NEWWIN, 0, NULL, 0, &wid, sizeof wid, &got, &rc) < 0) {
+        fprintf(stderr, "wsys: the server did not answer newwindow (%s); "
+                        "falling back to the in-process path.\n",
+                strerror(errno));
+        return -2;
+    }
+    if (rc < 0 || got != sizeof wid || wid < 0) { errno = -rc ? (int)-rc : ENOSPC; return -1; }
+    return wid;
+}
+
 /* ------------------------------------------------------- the stage-1 gate -- */
 
 static uint64_t srv_now_us(void)
@@ -3627,6 +3857,87 @@ int hamwsys_srv_selftest(void)
         }
     }
     return fails;
+}
+
+/* THE ASSERTION STAGE 2 EXISTS FOR: can a process that owns nothing mutate
+ * somebody else's window?
+ *
+ * It has to be driven from HERE and not from an ordinary client, and that is
+ * the interesting part.  An ordinary client's write to a foreign wid is
+ * refused by the in-process check before it ever reaches a socket -- so a
+ * gate driven that way would be green whether or not the server checks
+ * anything at all, which is the same as having no gate.  This sends the
+ * routed message DIRECTLY, past the local check, which is exactly what a
+ * hostile client would do once it knew the protocol.  What is left to refuse
+ * it is the mediator, and nothing else.
+ *
+ * Returns a failure count. */
+int hamwsys_srv_mutate_selftest(int victim_wid)
+{
+    int fails = 0;
+    if (!srv_enabled() || srv_fd < 0) {
+        fprintf(stderr, "wsrv: no connection to a server.\n");
+        return 1;
+    }
+    char st[320]; uint32_t got = 0; int64_t rc = 0;
+    uint64_t r0, r1, w0, w1;
+    if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) < 0) {
+        printf("wsrvmu: FAIL could not read the server's counters\n");
+        return 1;
+    }
+    st[got] = 0;
+    r0 = srv_stat_field(st, "refused");
+    w0 = srv_stat_field(st, "write");
+
+    /* A ROUTED WRITE THIS PROCESS HAS NO RIGHT TO MAKE.  It owns no window at
+     * all; `victim_wid` belongs to somebody else. */
+    const char verb[] = "title PWNED-BY-A-STRANGER";
+    uint16_t flags = (uint16_t)(WSRV_LEAF_WIN_CTL << WSRV_LEAF_SHIFT);
+    srv_send(WSRV_OP_WRITE, flags, victim_wid, ++srv_tag,
+             verb, (uint32_t)(sizeof verb - 1));
+
+    /* Ordered after it on the same SEQPACKET connection, so the server has
+     * necessarily processed the write before it answers this. */
+    if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) < 0) {
+        printf("wsrvmu: FAIL could not read the server's counters back\n");
+        return 1;
+    }
+    st[got] = 0;
+    r1 = srv_stat_field(st, "refused");
+    w1 = srv_stat_field(st, "write");
+
+    printf("wsrvmu: a window-less process sent a routed `title` for window %d\n",
+           victim_wid);
+    printf("wsrvmu: server counters: %s", st);
+    if (w1 != w0 + 1) {
+        printf("wsrvmu: FAIL the server did not see the routed write at all "
+               "(write %llu -> %llu). A refusal count of zero would mean "
+               "nothing if the message never arrived.\n",
+               (unsigned long long)w0, (unsigned long long)w1);
+        return fails + 1;
+    }
+    printf("wsrvmu: the server received it (write %llu -> %llu), so a refusal "
+           "below is a decision and not a lost message\n",
+           (unsigned long long)w0, (unsigned long long)w1);
+    /* THE CALLER DECIDES WHAT THIS MEANS, NOT THIS FUNCTION.  Whether a
+     * refusal is the right answer depends on the caller's uid against the
+     * segment's owner -- devwsys's rule is that the host owner may write
+     * anything -- and this process cannot know what the gate arranged.  So it
+     * reports what happened, with the two identities that decide it, and
+     * returns 0 for REFUSED and 1 for ACCEPTED.  A function that decided for
+     * itself would have to guess, and a gate built on a guess is worse than
+     * no gate. */
+    printf("wsrvmu: caller uid %u pid %ld; segment owner uid %u\n",
+           (unsigned)geteuid(), (long)getpid(),
+           (unsigned)(seg_owner_known ? seg_owner : (uid_t)-1));
+    if (r1 == r0 + 1) {
+        printf("wsrvmu: the mediator REFUSED it (refused %llu -> %llu)\n",
+               (unsigned long long)r0, (unsigned long long)r1);
+        return fails;
+    }
+    printf("wsrvmu: the mediator ACCEPTED it (refused %llu -> %llu)\n",
+           (unsigned long long)r0, (unsigned long long)r1);
+    return fails + 1;
 }
 
 int hamwsys_srv_sustain(int ops_per_sec, int secs)
@@ -5763,7 +6074,22 @@ static int ctl_global(const char *s, size_t n)
     size_t p = 0;
     if (n >= 9 && !strncmp(s, "newwindow", 9)) {
         wr(WR_NEWWIN, n);
-        struct wwin *v = win_alloc((int32_t)getpid());
+        /* ROUTED, WHEN THERE IS A SERVER.  The row comes back from the one
+         * allocator; the keystroke channel is bound below, in THIS process,
+         * because whoever binds it is whoever reads it.  See THE RACE THAT
+         * ROUTING RETIRES at win_alloc for why one allocator is worth more
+         * than the compare-exchange it makes redundant. */
+        struct wwin *v;
+        int32_t rwid = srv_newwindow();
+        if (rwid == -2) {
+            v = win_alloc((int32_t)getpid());
+        } else if (rwid < 0) {
+            last_new = -1;
+            return -1;
+        } else {
+            v = win_find(rwid);
+            if (!v) { last_new = -1; errno = EIO; return -1; }
+        }
         /* CLAIM THE KEYSTROKES BEFORE THE WINDOW EXISTS TO ANYONE ELSE.
          * `newwindow` stamps the CALLER as the owner, so the process running
          * this line is the one that will read this window's keys -- bind here
@@ -6220,6 +6546,14 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
 int64_t hamwsys_write(struct hamwsys_file *f, const uint8_t *buf, uint64_t n)
 {
     opc_note(f ? f->leaf : 0, 2);
+    /* STAGE 2: hand the mutation to the mediator if there is one.  Inert with
+     * HAMWSYS_SERVER unset (srv_fd stays -1), and it returns 0 for every leaf
+     * it does not carry, so the in-process path below is untouched for
+     * everything else.  It is HERE rather than inside hamwsys_write_inner so
+     * that a routed write does not also poke the wake channel: the message
+     * itself is what wakes the compositor, and doing both would be the added
+     * wake that stage 1's cost measurement was unable to rule out. */
+    if (f && srv_route_write(f, buf, n)) return (int64_t)n;
     uint32_t before = shm ? __atomic_load_n(&shm->gen, __ATOMIC_ACQUIRE) : 0;
     int64_t r = hamwsys_write_inner(f, buf, n);
     if (shm && __atomic_load_n(&shm->gen, __ATOMIC_ACQUIRE) != before)

@@ -4258,6 +4258,8 @@ int32_t sys_wsys_free(int32_t wid)   { return rc32(hamwsys_free(wid)); }
  *   extern def sys_wsys_srv_selftest() -> int32
  *   extern def sys_wsys_srv_sustain(ops_per_sec: int32, secs: int32) -> int32 */
 int32_t sys_wsys_srv_selftest(void) { return (int32_t)hamwsys_srv_selftest(); }
+int32_t sys_wsys_srv_mutate(int32_t victim_wid)
+{ return (int32_t)hamwsys_srv_mutate_selftest((int)victim_wid); }
 int32_t sys_wsys_srv_sustain(int32_t ops_per_sec, int32_t secs)
 { return (int32_t)hamwsys_srv_sustain((int)ops_per_sec, (int)secs); }
 
