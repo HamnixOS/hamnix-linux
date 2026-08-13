@@ -202,9 +202,26 @@ Measured with `du -m` on this host, all images sparse:
 
 | namespace | rootfs tree | image on disk | apparent |
 |--|--|--|--|
-| Debian bookworm, amd64+i386, Steam+clang | — | **4.5 GiB** | 12 GiB |
+| Debian bookworm, amd64+i386, Steam+clang | — | **1.95 GiB** | 12 GiB |
 | Alpine 3.24.1 + `HAMLINUX_ALPINE_GUI=1` | 273 MiB | **337 MiB** | 2 GiB |
 | Alpine 3.24.1 + `HAMLINUX_ALPINE_GUI=0` | 9 MiB | **26 MiB** | 512 MiB |
+
+The Debian row used to say 4.5 GiB. Re-measured with
+`scripts/hamlinux_distro_audit.sh`: the filesystem holds **2.20 GiB** of
+software and **1.95 GiB** of blocks are allocated on the host — 82% of the
+provisioned filesystem is empty, and 10 GiB of the "apparent" column is
+nothing at all.
+
+**The apparent column is not a download.** Nothing published contains any of
+these images: `255.one` serves `hpm` `.tar.gz` packages, and the installer
+medium carries a busybox-minimal live tree built by
+`scripts/build_rootfs_img.py`. If the Debian image *were* published, the
+transfer would be **559.5 MiB** (`zstd -12` of the whole 12 GiB file), of
+which the 10 GiB of hole accounts for **0.3 MiB — 0.06%**. Shrinking the
+provisioned size is therefore not a saving; measured the other way, a copy
+resized down to its 3.44 GiB minimum compresses 263 KiB smaller (0.045%) and
+can no longer hold a game. Take both numbers again with
+`HAMLINUX_AUDIT_DOWNLOAD=1 scripts/hamlinux_distro_audit.sh`.
 
 The GUI set is `xwayland xkeyboard-config xeyes xclock xdpyinfo font-dejavu`.
 Its 264 MiB is

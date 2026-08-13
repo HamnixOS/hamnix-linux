@@ -204,3 +204,213 @@ print("=== 32-BIT DUPLICATION (what Steam costs in second copies) ===")
 print("  %d i386 packages, %.1f MiB (%.1f%% of the content)" %
       (len(i386), mib(sum(size(p) for p in i386)), 100.0*sum(size(p) for p in i386)/total))
 PY
+
+# ---- 3. IS THE 32-BIT HALF LOAD-BEARING? ---------------------------------
+# The section above prices the second copies; this one asks whether anything
+# in there is reachable only by a path nothing takes.  It answers with three
+# statements that are NOT ours -- Debian's steam-libs Depends, Debian's
+# steam-libs Recommends, and Valve's own steamdeps.txt out of the bootstrap
+# tarball staged in the image -- so "load-bearing" is a citation rather than
+# an opinion.  Everything an i386 package is reached from is computed from
+# the image's own Depends graph, arch-qualified: a dependency of an i386
+# package resolves to :i386 unless it names another arch, which is what makes
+# libllvm15:i386 (122 MiB, the single largest 32-bit item) attach to
+# libgl1-mesa-dri:i386 rather than look like a stray second copy.
+DETAIL="${HAMLINUX_AUDIT_I386_DETAIL:-0}" \
+DISTRO_SH="$PROJ_ROOT/scripts/hamlinux_distro.sh" \
+python3 - "$WORK/status" <<'PY'
+import collections, os, re, sys
+
+blocks = open(sys.argv[1], encoding="utf8", errors="replace").read().split("\n\n")
+pkgs = {}
+for blk in blocks:
+    if not blk.strip():
+        continue
+    f, key = {}, None
+    for line in blk.split("\n"):
+        if line[:1] in (" ", "\t"):
+            if key:
+                f[key] += " " + line.strip()
+            continue
+        if ":" in line:
+            key, _, v = line.partition(":")
+            key = key.strip(); f[key] = v.strip()
+    if f.get("Package"):
+        pkgs[(f["Package"], f.get("Architecture", ""))] = f
+
+byname = collections.defaultdict(list)
+for (n, a) in pkgs:
+    byname[n].append(a)
+provides = collections.defaultdict(list)
+for (n, a), f in pkgs.items():
+    for p in f.get("Provides", "").split(","):
+        p = p.strip()
+        if p:
+            provides[p.split("(")[0].strip().split(":")[0]].append((n, a))
+
+def resolve(dep, from_arch):
+    d = dep.strip().split("(")[0].strip()
+    if not d:
+        return []
+    arch = None
+    if ":" in d:
+        d, arch = d.split(":", 1)
+        if arch == "any":
+            arch = None
+    if arch:
+        return [(d, arch)] if (d, arch) in pkgs else []
+    for a in (from_arch, "all", "amd64"):
+        if (d, a) in pkgs:
+            return [(d, a)]
+    if d in byname:
+        return [(d, byname[d][0])]
+    if d in provides:
+        pr = [c for c in provides[d] if c[1] in (from_arch, "all")] or provides[d]
+        return [pr[0]]
+    return []
+
+def deps_of(key):
+    res = []
+    for fld in ("Depends", "Pre-Depends"):
+        for clause in pkgs[key].get(fld, "").split(","):
+            if not clause.strip():
+                continue
+            got = []
+            for alt in clause.split("|"):
+                got = resolve(alt, key[1])
+                if got:
+                    break
+            res.extend(got)
+    return res
+
+edges = {k: deps_of(k) for k in pkgs}
+
+# The roots: what hamlinux_distro.sh asks for BY NAME, arch qualifier kept.
+src = open(os.environ["DISTRO_SH"]).read()
+rootkeys, missing = set(), []
+for m in re.finditer(r'PKGS="([^"]*)"', src, re.S):
+    for p in m.group(1).replace("\\\n", "").split(","):
+        p = p.strip()
+        if not p or p.startswith("$"):
+            continue
+        if ":" in p:
+            n, a = p.split(":", 1)
+            (rootkeys.add((n, a)) if (n, a) in pkgs else missing.append(p))
+        else:
+            for a in ("amd64", "all"):
+                if (p, a) in pkgs:
+                    rootkeys.add((p, a)); break
+            else:
+                missing.append(p)
+
+def size(k):
+    return int(pkgs[k].get("Installed-Size", "0") or 0)
+
+def closure(seeds):
+    seen, stack = set(), list(seeds)
+    while stack:
+        k = stack.pop()
+        if k in seen or k not in pkgs:
+            continue
+        seen.add(k)
+        stack.extend(edges.get(k, []))
+    return seen
+
+i386 = sorted(k for k in pkgs if k[1] == "i386")
+tot = sum(size(k) for k in i386) / 1024.0
+print()
+print("=== IS THE 32-BIT HALF LOAD-BEARING? ===")
+if missing:
+    print("  (named but not installed: %s)" % " ".join(missing))
+
+# a) Debian's own answer: steam-installer's transitive Depends.
+steam = [k for k in pkgs if k[0].startswith("steam")]
+sclos = closure(steam)
+si = [k for k in sclos if k[1] == "i386"]
+print("  Debian's own closure (steam-installer Depends*) : %6.1f MiB, %3d pkgs"
+      % (sum(size(k) for k in si) / 1024.0, len(si)))
+
+# b) what is left over, and whether anyone declared it.
+sl = pkgs.get(("steam-libs", "i386"), {})
+declared = set()
+for fld in ("Depends", "Recommends"):
+    for clause in sl.get(fld, "").split(","):
+        for alt in clause.split("|"):
+            n = alt.strip().split("(")[0].strip().split(":")[0]
+            if n:
+                declared.add(n)
+# Valve's own steamdeps.txt, i386 section, from the staged bootstrap tarball.
+declared |= {"libgl1-mesa-dri", "libgl1-mesa-glx", "libc6"}
+i386_roots = sorted(k for k in rootkeys if k[1] == "i386")
+elective = [k for k in i386_roots if k[0] not in declared]
+keep = closure([r for r in rootkeys if r not in set(elective)])
+gone = [k for k in i386 if k not in keep]
+gmb = sum(size(k) for k in gone) / 1024.0
+print("  declared by Debian steam-libs or Valve steamdeps : %6.1f MiB, %3d pkgs"
+      % (tot - gmb, len(i386) - len(gone)))
+print("  OURS, declared by neither                        : %6.1f MiB, %3d pkgs  (%.1f%%)"
+      % (gmb, len(gone), 100.0 * gmb / tot if tot else 0))
+print("    roots: %s" % " ".join(sorted(e[0] for e in elective)))
+print("    drops: %s" % " ".join(sorted(g[0] for g in gone)))
+print("  (mesa-utils:i386 and vulkan-tools:i386 are inside that residue and are")
+print("   NOT spare: tests/linux/steam_probe.sh runs glxgears and vulkaninfo to")
+print("   prove the 32-bit stack resolves at all.)")
+
+if os.environ.get("DETAIL") == "1":
+    rootreach = {}
+    for r in sorted(rootkeys):
+        for k in closure([r]):
+            rootreach.setdefault(k, set()).add(r)
+    print()
+    print("  --- every i386 package and the named root(s) that reach it ---")
+    for k in sorted(i386, key=lambda k: -size(k)):
+        rs = sorted(rootreach.get(k, []))
+        print("  %-30s %8.1f MiB  <- %s"
+              % (k[0], size(k) / 1024.0,
+                 ",".join("%s:%s" % r for r in rs) or "*** NOTHING NAMED REACHES THIS ***"))
+PY
+
+# ---- 4. WHAT A DOWNLOAD ACTUALLY COSTS -----------------------------------
+# The number everyone argues about is the provisioned one, and it is the only
+# number nobody ever transfers.  This measures the artefact instead of the
+# hole: the image through a real compressor, and -- separately -- the same
+# compressor fed exactly as many zero bytes as this filesystem has free
+# blocks, which is the share of that download the PROVISIONING is responsible
+# for.  Measured rather than asserted, because "zeros compress away" is the
+# kind of claim that is true until a format change makes it not.
+#
+# It reads 12 GiB through four cores and takes about half a minute, so it is
+# opt-in: HAMLINUX_AUDIT_DOWNLOAD=1.  Still never writes anything -- the
+# compressor's output goes to `wc -c`, not to a file.
+if [ "${HAMLINUX_AUDIT_DOWNLOAD:-0}" = 1 ]; then
+    echo
+    echo "=== WHAT A DOWNLOAD WOULD COST ==="
+    if ! command -v zstd >/dev/null 2>&1; then
+        echo "  (need zstd to measure this)"
+    else
+        ZL="${HAMLINUX_AUDIT_ZLEVEL:-12}"
+        ZT="${HAMLINUX_AUDIT_ZTHREADS:-4}"
+        CMP="$(zstd -T"$ZT" -"$ZL" -c "$IMG" 2>/dev/null | wc -c)"
+        FREEB="$(awk -F: '/^Free blocks:/{gsub(/ /,"",$2);print $2}' "$WORK/sb")"
+        BSZ="$(awk -F: '/^Block size:/{gsub(/ /,"",$2);print $2}' "$WORK/sb")"
+        HOLE=0
+        if [ -n "$FREEB" ] && [ -n "$BSZ" ]; then
+            HOLE="$(head -c "$((FREEB * BSZ))" /dev/zero | zstd -T"$ZT" -"$ZL" -c 2>/dev/null | wc -c)"
+        fi
+        python3 - "$(stat -c%s "$IMG")" "$CMP" "$HOLE" "$ZL" <<'PY'
+import sys
+raw, cmp_, hole, zl = (int(x) for x in sys.argv[1:5])
+print("  provisioned file        : %8.2f GiB" % (raw / 2**30))
+print("  zstd -%-2d                : %8.1f MiB   <- what a person would transfer" % (zl, cmp_ / 2**20))
+print("  of which the empty space: %8.1f MiB   (%.2f%% of the download)"
+      % (hole / 2**20, 100.0 * hole / cmp_ if cmp_ else 0))
+print()
+print("  So the provisioned size is not a download cost: shrinking the file to fit")
+print("  its contents would return %.0f KiB of a %.0f MiB transfer."
+      % (hole / 1024.0, cmp_ / 2**20))
+PY
+    fi
+    echo "  (and nothing published contains this file at all -- 255.one serves hpm"
+    echo "   .tar.gz packages, and the installer medium carries a busybox-minimal"
+    echo "   live tree built by scripts/build_rootfs_img.py, not this image.)"
+fi
