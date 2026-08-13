@@ -27,8 +27,9 @@ extern def sys_getcwd(buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
+extern def sys_stat_p9(path: Ptr[char], buf: Ptr[uint8], nbuf: uint64) -> int64
 from lib.p9 import (
-    p9_listdir, p9_chan_dir_mode, p9_dir_decode_at,
+    p9_listdir, p9_chan_dir_mode, p9_dir_decode_at, p9_is_dir,
     DIR_CUR_NAME, DIR_CUR_NAME_LEN,
     DIR_CUR_UID, DIR_CUR_UID_LEN,
     DIR_CUR_MODE, DIR_CUR_LENGTH, DIR_CUR_QTYPE,
@@ -75,6 +76,7 @@ def write_dec(fd: int32, v: uint64):
 
 # BSS scratch buffers — Adder quirks: module-scope BSS only.
 ls_buf: Array[65536, uint8]   # LISTBUF
+ls_statbuf: Array[560, uint8]     # a full 9P stat record for one operand
 ls_modebuf: Array[12, uint8]
 
 
@@ -172,6 +174,76 @@ def ls_long(target: Ptr[char]) -> int32:
     return 0
 
 
+def ls_one(target: Ptr[char], long_mode: int32) -> int32:
+    # A NON-DIRECTORY OPERAND: print the NAME, which is what both POSIX and
+    # Plan 9 do, and one long-format line under -l.  Never the contents.
+    #
+    # The path is OPENED first purely as the existence check -- `ls nosuch`
+    # must stay a loud non-zero, and this is the one place left that can tell
+    # "a plain file" from "no such path" (p9_is_dir answers 0 for both).
+    fd: int32 = sys_open(target)
+    if fd < 0:
+        write_str(2, "ls: cannot access: ")
+        write_str(2, cast[Ptr[uint8]](target))
+        write_str(2, "\n")
+        return 1
+    sys_close(fd)
+    if long_mode != 0:
+        # Same columns as the directory long listing so the two are readable
+        # together: <mode> <uid> <size>\t<name>.  The mode/uid/size come from
+        # the 9P stat record rather than from a second, different source.
+        n: int64 = sys_stat_p9(target, cast[Ptr[uint8]](&ls_statbuf[0]), 560)
+        if n >= 43:
+            # THE FULL 9P STAT WIRE LAYOUT, offset by offset, because getting
+            # this wrong is silent: a mode read from the wrong place renders a
+            # plausible string for EVERY file. Measured when it was wrong --
+            # 644, 600, 755 and 444 all printed "-rwxr-xrw-".
+            #
+            #   0  size[2]      4  dev[4]       9  qid.vers[4]   21 mode[4]
+            #   2  type[2]      8  qid.type[1] 13  qid.path[8]   25 atime[4]
+            #  29  mtime[4]    33  length[8]   41  name[s]  then uid[s] ...
+            #
+            # This is the layout lib/p9.ad's p9_is_dir documents (qid.type at
+            # 8), NOT the compact record p9_dir_decode_at parses.
+            md: uint32 = cast[uint32](ls_statbuf[21]) \
+                       | (cast[uint32](ls_statbuf[22]) << 8) \
+                       | (cast[uint32](ls_statbuf[23]) << 16) \
+                       | (cast[uint32](ls_statbuf[24]) << 24)
+            ln: uint64 = 0
+            k: uint64 = 0
+            while k < 8:
+                ln = ln | (cast[uint64](ls_statbuf[33 + k]) << cast[uint64](k * 8))
+                k = k + 1
+            render_mode(ls_statbuf[8], md, cast[Ptr[uint8]](&ls_modebuf[0]))
+            sys_write(1, &ls_modebuf[0], 10)
+            sys_write(1, " ", 1)
+            # uid is the SECOND variable-length string: name[s] first, so its
+            # offset depends on the name's length. Printing "-" instead would
+            # have been a second column that never matches the directory
+            # listing's, which is the format this is meant to line up with.
+            nml: uint64 = cast[uint64](ls_statbuf[41]) \
+                        | (cast[uint64](ls_statbuf[42]) << 8)
+            uoff: uint64 = 43 + nml
+            if uoff + 2 <= cast[uint64](n):
+                ul: uint64 = cast[uint64](ls_statbuf[uoff]) \
+                           | (cast[uint64](ls_statbuf[uoff + 1]) << 8)
+                if ul > 0 and uoff + 2 + ul <= cast[uint64](n):
+                    sys_write(1, &ls_statbuf[uoff + 2], ul)
+                else:
+                    sys_write(1, "-", 1)
+            else:
+                sys_write(1, "-", 1)
+            sys_write(1, " ", 1)
+            write_dec(1, ln)
+            sys_write(1, "\t", 1)
+        else:
+            # Stat did not come back; still name the file rather than nothing.
+            write_str(2, "ls: stat failed, printing the name only\n")
+    write_str(1, cast[Ptr[uint8]](target))
+    sys_write(1, "\n", 1)
+    return 0
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # Args: optionally "-l", followed by an optional target path.
     long_mode: int32 = 0
@@ -191,6 +263,30 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         cn: int64 = sys_getcwd(&cwd_buf[0], 256)
         if cn > 0:
             target = cast[Ptr[char]](&cwd_buf[0])
+    # IS IT A DIRECTORY AT ALL?  ASKED, RATHER THAN ASSUMED.
+    #
+    # `ls foo.txt` used to print the FILE'S CONTENTS and exit 0, and so did
+    # `ls -l foo.txt`.  The reason is that both paths below reach the target
+    # through open()+read(): on a regular file both succeed, so the bytes read
+    # ARE the file and a non-negative return is indistinguishable from a
+    # directory listing.  p9_listdir's own comment claims it returns -1 when
+    # the path "isn't a directory"; it contains no such check.
+    #
+    # THE TREE ALREADY KNEW THE ANSWER.  user/find.ad's header records the
+    # identical bug and its fix -- "the descend decision is made by
+    # sys_stat_p9 -> qid.type QTDIR, NOT by a p9_listdir success ... (the bug
+    # #146 fixed)" -- and lib/p9.ad exports p9_is_dir() for exactly this,
+    # carrying its own note on why p9_listdir cannot answer it.  `ls` simply
+    # never asked.  This is that question, asked once, before either path.
+    #
+    # A MISSING PATH IS STILL AN ERROR, and that is why this does not report
+    # "not a directory" on a p9_is_dir() of 0: p9_is_dir cannot tell a plain
+    # file from a path that does not exist (both are 0), so a non-directory
+    # falls through to the name-printing path, which OPENS the target and
+    # fails loudly if it is not there.  One question here, the existence check
+    # where it already was.
+    if p9_is_dir(target) == 0:
+        return ls_one(target, long_mode)
     if long_mode != 0:
         return ls_long(target)
     # Plain ls: line-stream path, unchanged.
