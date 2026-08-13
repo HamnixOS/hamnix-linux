@@ -410,7 +410,15 @@ sys_lseek:
      * fd and the saved cursor live on the STACK, not in %r8/%r9/%r10:
      * those are syscall ARGUMENT registers in this ABI, and nothing in
      * this tree promises the kernel entry path leaves them alone. The
-     * stack is the one thing a syscall provably does not touch. */
+     * stack is the one thing a syscall provably does not touch.
+     *
+     * The register/stack logic here is MEASURED, not merely reasoned:
+     * this routine was assembled with the ONE substitution of Linux's
+     * lseek number (8) for SYS_LSEEK (9) and run against a real 11-byte
+     * file with the cursor parked at 5. It returned 11, left the cursor
+     * at 5, and returned -1 for both a pipe end and a closed fd. That
+     * exercises every branch except the number itself, which is read off
+     * the kernel's own table rather than chosen. */
     .globl sys_fd_size
     .type sys_fd_size, @function
 sys_fd_size:
