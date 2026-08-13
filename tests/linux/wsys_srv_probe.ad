@@ -35,6 +35,7 @@ extern def sys_wsys_srv_sustain(ops_per_sec: int32, secs: int32) -> int32
 extern def sys_wsys_srv_mutate(victim_wid: int32) -> int32
 extern def sys_wsys_srv_attack_local(victim_wid: int32) -> int32
 extern def sys_wsys_alloc(pid: uint64) -> int32
+extern def sys_wsys_srv_readlat(n: int32) -> int32
 
 numbuf: Array[24, uint8]
 rbuf:   Array[256, uint8]
@@ -123,6 +124,13 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         if w < 2:
             return 1
         return 0
+
+    # `readlat <n>` -- STAGE 4. Time <n> routed reads of /dev/wsys/windows and
+    # print EVERY sample. The number it is measured against is stage 1's max of
+    # 851 us on the FRAME-LOOP server, so this must be run under the same drag
+    # load or the two are not comparable. 'r' is 114.
+    if argc > 2 and cast[Ptr[uint8]](argv[1])[0] == 114:
+        return sys_wsys_srv_readlat(arg_int(cast[Ptr[uint8]](argv[2])))
 
     if argc > 3 and cast[Ptr[uint8]](argv[1])[0] == 115:
         ops: int32 = arg_int(cast[Ptr[uint8]](argv[2]))

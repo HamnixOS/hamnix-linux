@@ -141,6 +141,25 @@ def take(from_: uint64, end: uint64) -> uint64:
 
 
 def do_line(at: uint64, end: uint64):
+    # `list` -- READ /dev/wsys/windows FROM A PROCESS THAT OWNS A WINDOW, and
+    # print it between markers so a shell can cut it out of this program's
+    # stdout. It exists for stage 4's enumeration policy and for one arm of it
+    # that nothing else can supply: the rule is "a caller that owns a window
+    # sees the list", so proving it is not secretly "a caller of the host
+    # owner's uid sees the list" needs a reader at a NON-owner uid that holds
+    # a window -- and every other reader in this tree (`cat`) holds none.
+    if starts(at, end, "list") != 0:
+        puts(1, "LIST<")
+        lf: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/windows"))
+        if lf >= 0:
+            while 1 == 1:
+                k4: int64 = sys_read(lf, &line[0], 2040)
+                if k4 <= 0:
+                    break
+                sys_write(1, &line[0], cast[uint64](k4))
+            sys_close(lf)
+        puts(1, ">LIST\n")
+        return
     if starts(at, end, "scene ") != 0:
         n: uint64 = take(at + 6, end)
         winpath("scene")

@@ -4529,6 +4529,12 @@ int32_t sys_wsys_srv_sustain(int32_t ops_per_sec, int32_t secs)
  * in it, which is the arm that MUST succeed.  See hamwsys_srv_attack_local. */
 int32_t sys_wsys_srv_attack_local(int32_t victim_wid)
 { return (int32_t)hamwsys_srv_attack_local((int)victim_wid); }
+/* Stage 4's read latency instrument.  Every sample printed, because the number
+ * it exists to beat -- 851 us -- was a MAX and a median-only measurement is
+ * exactly what would have hidden it.
+ *   extern def sys_wsys_srv_readlat(n: int32) -> int32 */
+int32_t sys_wsys_srv_readlat(int32_t n)
+{ return (int32_t)hamwsys_srv_readlat((int)n); }
 
 /* GPU presentation of a window frame. Unimplemented on purpose: the scene
  * compositor rasterizes in software (lib/hamui_host.ad's vk2d raster ops), so
