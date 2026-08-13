@@ -48,15 +48,21 @@
 # THE HOLE IS NARROWED, NOT CLOSED, and docs/wsys_server_design.md's stage 4
 # names the mapping as the precondition for closing it.
 #
-# AND ONE MORE THING IT DOES NOT CLOSE, asserted here so nobody has to discover
-# it: owns_wid() NEVER COMPARES A uid.  A uid-1002 DESCENDANT of the window's
-# owner still passes, exactly as stage 5 records -- and on a real desktop every
-# application is a descendant of the compositor.  It is not closed here because
-# struct wwin records `int32_t pid` and no uid at all, and the struct is
-# byte-for-byte what versions 6 and 7 had: an owner-uid field changes
-# sizeof(struct wwin) and costs a WSYS_VERSION bump.  The last assertion in this
-# file DRIVES that residual rather than describing it, so the day it changes,
-# this gate says so.
+# AND ONE MORE THING IT DOES NOT CLOSE: owns_wid() NEVER COMPARES A uid.  A
+# uid-1002 DESCENDANT of the window's owner still passes, exactly as stage 5
+# records -- and on a real desktop every application is a descendant of the
+# compositor.  It is not closed here because struct wwin records `int32_t pid`
+# and no uid at all, and the struct is byte-for-byte what versions 6 and 7 had:
+# an owner-uid field changes sizeof(struct wwin) and costs a WSYS_VERSION bump.
+#
+# THAT RESIDUAL IS NOT MEASURED BY THIS GATE, and the run prints so rather than
+# letting a PASS imply otherwise.  It cannot be: a wid is stamped against the
+# process that called `newwindow`, and the probe never forks, so every uid-1002
+# process this harness can build is a SIBLING of the victim and not a
+# descendant of it.  Driving it needs the DE's on-behalf path (`alloc <pid>` on
+# ctl, which stamps a row against a shell that CAN spawn), and that is a
+# separate gate.  Claiming it here would be describing a hole and calling it a
+# measurement.
 #
 # HOW THE UIDS ARE GOT WITHOUT ROOT.  The three-id `unshare -U` shape that
 # tests/linux/wsys_uidgate.sh and wsys_enum_policy.sh already use: inner 0 (the
