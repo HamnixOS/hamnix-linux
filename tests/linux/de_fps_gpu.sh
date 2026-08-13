@@ -117,6 +117,13 @@ ok()   { echo "gpupath: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "gpupath: FAIL $*"; fail=$((fail+1)); }
 info() { echo "gpupath: INFO $*"; }
 skip() { echo "gpupath: SKIP $*"; }
+# An empty read is not a measurement. See tests/linux/gate_read.sh: the
+# present-versus-clear gate below took ${GPU_PRE:-0} and ${GPU_CLR:-1}, so a
+# bench that printed no per-frame breakdown at all -- renamed field, changed
+# format, a run that died mid-frame -- made 0 > 10 false and printed the PASS
+# "the readback is gone: present us against the CPU path's us", with the
+# numbers blank in the sentence.
+. tests/linux/gate_read.sh
 cleanup() { reap_all; [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
 reap_on_exit cleanup
 done_report() { echo "gpupath: $pass passed, $fail failed"; [ "$fail" = 0 ]; }
@@ -170,7 +177,11 @@ GPU_WB="$(sed -n 's/.*writeback us\/frame \([0-9]*\).*/\1/p' "$WORK/bench_gpu.tx
 SW_WB="$(sed -n 's/.*writeback us\/frame \([0-9]*\).*/\1/p' "$WORK/bench_sw.txt" | head -1)"
 GPU_HC="$(sed -n 's/.*host_cached \([0-9]*\).*/\1/p' "$WORK/bench_gpu.txt" | head -1)"
 info "writeback (the sys_write loop alone): SW ${SW_WB}us -> GPU ${GPU_WB}us; frame host_cached ${GPU_HC}"
-if [ "${GPU_PRE:-0}" -gt "$(( ${GPU_CLR:-1} * 10 ))" ]; then
+if ! gate_nonempty "the GPU bench's per-frame 'present' us ($WORK/bench_gpu.txt)" "$GPU_PRE" ||
+   ! gate_nonempty "the GPU bench's per-frame 'clear' us ($WORK/bench_gpu.txt)" "$GPU_CLR"; then
+    :   # gate_nonempty named the field; "present did not dominate" is not
+        # something a run that read no present at all is entitled to say
+elif [ "$GPU_PRE" -gt "$(( GPU_CLR * 10 ))" ]; then
     bad "REGRESSION: present is ${GPU_PRE}us against clear ${GPU_CLR}us, i.e. the composite is behind the bus again. The writeback alone is ${GPU_WB}us against software's ${SW_WB}us. Check the frame's placement: host_cached is ${GPU_HC} and must be 1. See docs/vk_scanout_path.md."
 else
     ok "the readback is gone: present ${GPU_PRE}us against the CPU path's ${SW_PRE}us, writeback ${GPU_WB}us against ${SW_WB}us, and clear (what the device does) ${GPU_CLR}us against ${SW_CLR}us"

@@ -92,6 +92,25 @@ pass=0; fail=0
 ok()   { echo "connc: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "connc: FAIL $*"; fail=$((fail+1)); }
 info() { echo "connc: INFO $*"; }
+# An empty read is not a measurement. See tests/linux/gate_read.sh: the
+# arithmetic in section 1 compares constants scraped out of the source with
+# sed, and an operand that could not be scraped -- a constant renamed, written
+# in hex, or written as an expression -- is 0 inside $(( )). That collapses the
+# THRESHOLD to zero on the right of a -ge, so "MAXWIN >= MAXCONN * WINPERCONN"
+# passed on three numbers nobody had read. Section 6's floor did the same with
+# an unreadable du.
+. tests/linux/gate_read.sh
+
+# nums_read <what> <NAME>... -- true when every named constant was actually
+# scraped out of the source. On failure it names each one that was not, so the
+# assertion is SKIPPED rather than answered from a zero.
+nums_read() {
+    local what="$1" v rc=0; shift
+    for v in "$@"; do
+        gate_nonempty "$v, read out of the source for '$what'" "${!v}" || rc=1
+    done
+    return $rc
+}
 
 KIDS=""; WLPID=""; WSYSDPID=""
 cleanup() {
@@ -174,12 +193,16 @@ fi
 # NO CONNECTION MAY BE STARVED BY ANOTHER'S APPETITE. This is arithmetic, not
 # intention, and it is what forced the window table to 256 when MAXCONN went
 # to 16 -- see the note on WINPERCONN in user/wsyswl.ad.
-if [ "${MAXWIN:-0}" -ge $((MAXCONN * WINPERCONN)) ]; then
+if ! nums_read "every connection is guaranteed its whole window budget" MAXWIN MAXCONN WINPERCONN; then
+    :   # an unread WINPERCONN makes the right-hand side 0 and passes anything
+elif [ "${MAXWIN:-0}" -ge $((MAXCONN * WINPERCONN)) ]; then
     ok "MAXWIN $MAXWIN >= MAXCONN $MAXCONN * WINPERCONN $WINPERCONN -- every connection is guaranteed its whole window budget"
 else
     bad "MAXWIN $MAXWIN < MAXCONN * WINPERCONN ($((MAXCONN * WINPERCONN))) -- a window budget another client can eat is not a budget"
 fi
-if [ "${FCMAX:-0}" -ge $((MAXCONN * FCPERCONN)) ]; then
+if ! nums_read "a busy client cannot silence another's initial-draw callback" FCMAX MAXCONN FCPERCONN; then
+    :   # likewise: an unread FCPERCONN would make this a comparison with zero
+elif [ "${FCMAX:-0}" -ge $((MAXCONN * FCPERCONN)) ]; then
     ok "FCMAX $FCMAX >= MAXCONN $MAXCONN * FCPERCONN $FCPERCONN -- a busy client cannot silence another's initial-draw callback"
 else
     bad "FCMAX $FCMAX < MAXCONN * FCPERCONN ($((MAXCONN * FCPERCONN)))"
@@ -189,7 +212,9 @@ fi
 # window table and the Wayland server's MAXWIN are ONE number in three files.
 # When they last disagreed the symptom was a window that existed, was listed,
 # and was never painted.
-if [ "$MAXWIN" = "$WSYSD_MAXWIN" ] && [ "$MAXWIN" = "$DEV_MAXWIN" ]; then
+if ! nums_read "the window table is one number in three files" MAXWIN WSYSD_MAXWIN DEV_MAXWIN; then
+    :   # three constants that were all unreadable are all equal to each other
+elif [ "$MAXWIN" = "$WSYSD_MAXWIN" ] && [ "$MAXWIN" = "$DEV_MAXWIN" ]; then
     ok "the window table is one number in three files: wsyswl MAXWIN = wsysd MAX_WIN = WSYS_MAX_WINDOWS = $MAXWIN"
 else
     bad "window table disagreement: wsyswl MAXWIN=$MAXWIN wsysd MAX_WIN=$WSYSD_MAXWIN device WSYS_MAX_WINDOWS=$DEV_MAXWIN -- the smallest wins and the windows past it are never painted"
@@ -207,7 +232,11 @@ fi
 DEVTAB_MAX="$(cnum user/linux-syscalls.c DEVTAB_MAX)"
 NEED_DEVTAB=$((4 * DEV_MAXWIN))
 info "DEVTAB_MAX=$DEVTAB_MAX, and wsyswl needs 4 per window * $DEV_MAXWIN = $NEED_DEVTAB"
-if [ "${DEVTAB_MAX:-0}" -ge "$NEED_DEVTAB" ]; then
+# DEVTAB_MAX is read here rather than up with the others, so it is NOT in the
+# -n loop above; and with DEV_MAXWIN unread the need is 0, which anything meets.
+if ! nums_read "the window table is REACHABLE, not just declared" DEVTAB_MAX DEV_MAXWIN; then
+    :   # gate_nonempty named the constant; 0 >= 0 is not evidence of headroom
+elif [ "${DEVTAB_MAX:-0}" -ge "$NEED_DEVTAB" ]; then
     ok "DEVTAB_MAX $DEVTAB_MAX >= 4 files per window * $DEV_MAXWIN windows = $NEED_DEVTAB -- the window table is REACHABLE, not just declared"
 else
     bad "DEVTAB_MAX $DEVTAB_MAX < $NEED_DEVTAB: the real window ceiling is $((DEVTAB_MAX / 4)), not $DEV_MAXWIN, and hitting it is reported as a WINDOW SYSTEM failure with the window table nearly empty"
@@ -222,7 +251,9 @@ if [ "${WAITSET:-0}" -ge "$NEED_WS" ]; then
 else
     bad "WAITSET $WAITSET < $NEED_WS -- the event loop writes past its poll set every pass"
 fi
-if [ "${WAITSET:-0}" -le "${WAITFDS_MAX:-64}" ]; then
+if ! nums_read "sys_waitfds will accept the set instead of returning EINVAL" WAITSET WAITFDS_MAX; then
+    :   # an unread WAITSET is 0, and 0 is under every ceiling there is
+elif [ "${WAITSET:-0}" -le "${WAITFDS_MAX:-64}" ]; then
     ok "WAITSET $WAITSET <= WAITFDS_MAX $WAITFDS_MAX -- sys_waitfds will accept the set instead of returning EINVAL"
 else
     bad "WAITSET $WAITSET > WAITFDS_MAX $WAITFDS_MAX -- every wait returns EINVAL and the compositor spins"
@@ -499,7 +530,13 @@ fi
 # touches ONE PAGE of every row whether or not it holds a window. That is
 # 4 KiB a row against 74,425 -- an 18x reduction, not an infinite one.
 FLOOR_K=$(( MAXWIN * 8 ))
-if [ "${SEGRES:-0}" -le "$FLOOR_K" ]; then
+# The residency assertion above degrades to a FAIL when /srv/wsys is missing
+# (0 is not < 0), but this one is a ceiling, and an unread du is under every
+# ceiling: it used to print "an empty table costs  KiB" with the number blank.
+if ! gate_nonempty "the window table's resident size (du -k $HAMWSYS)" "$SEGRES"; then
+    :   # gate_nonempty named the failed read; a table nobody could stat has
+        # no measured cost to compare against the scan floor
+elif [ "$SEGRES" -le "$FLOOR_K" ]; then
     ok "an empty table costs $SEGRES KiB, at or under the 4 KiB-a-row scan floor ($MAXWIN rows, ceiling asserted at $FLOOR_K KiB)"
 else
     bad "an empty table costs $SEGRES KiB, more than $FLOOR_K KiB -- something is touching more of a row than its first page"

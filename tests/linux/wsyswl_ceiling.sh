@@ -69,6 +69,12 @@ pass=0; fail=0
 ok()   { echo "ceil: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "ceil: FAIL $*"; fail=$((fail+1)); }
 info() { echo "ceil: INFO $*"; }
+# An empty read is not a measurement. See tests/linux/gate_read.sh: the pool
+# cost assertion in section 4 below took `stat ... || echo 0` as ALLOC, so a
+# run in which NO CLIENT EVER PAINTED -- and therefore never created the
+# backbuffer at all -- printed the PASS "N slots in use cost 0 KiB of real
+# memory" about a pool it had not looked at.
+. tests/linux/gate_read.sh
 
 KIDS=""; XWPID=""; WLPID=""; WSYSDPID=""
 cleanup() {
@@ -308,16 +314,26 @@ fi
 #    and not in the file's length, which is enormous on purpose.
 # ---------------------------------------------------------------------------
 echo "ceil: === 4. what does a pool this size actually cost?"
-LEN="$(stat -c %s "$HAMWSYS_BB" 2>/dev/null || echo 0)"
-ALLOC=$(( $(stat -c %b "$HAMWSYS_BB" 2>/dev/null || echo 0) * 512 ))
-info "the backbuffer segment is $((LEN / 1024 / 1024)) MiB long and $((ALLOC / 1024)) KiB allocated"
-# Twelve 186x110 windows, double buffered, is about 1 MiB of real pixels.
-# Ten megabytes is a generous ceiling that a screen-sized-per-slot pool
-# (12 * 16 MiB = 192 MiB) could not come near.
-if [ "$ALLOC" -lt $((10 * 1024 * 1024)) ]; then
-    ok "$N slots in use cost $((ALLOC / 1024)) KiB of real memory, not $((N * 16)) MiB"
+# The pool file is created by the first client that actually PAINTS -- i.e. by
+# the very thing being sized here. wsyswl_conn_ceiling.sh:509 guards the same
+# read with a file test for the same reason; there its absence is expected and
+# an info, here it means the run never painted and the cost is unmeasured.
+LEN="$(stat -c %s "$HAMWSYS_BB" 2>/dev/null)"
+BLK="$(stat -c %b "$HAMWSYS_BB" 2>/dev/null)"
+if ! gate_nonempty "the paint pool's allocated block count (stat %b $HAMWSYS_BB, a file that exists only once a client has PAINTED)" "$BLK"; then
+    :   # gate_nonempty named the failed read; a pool that was never created
+        # has no cost, and 0 KiB is not the answer to "what does it cost"
 else
-    bad "$N windows allocated $((ALLOC / 1024 / 1024)) MiB -- a slot still costs a whole screen"
+    ALLOC=$(( BLK * 512 ))
+    info "the backbuffer segment is $((LEN / 1024 / 1024)) MiB long and $((ALLOC / 1024)) KiB allocated"
+    # Twelve 186x110 windows, double buffered, is about 1 MiB of real pixels.
+    # Ten megabytes is a generous ceiling that a screen-sized-per-slot pool
+    # (12 * 16 MiB = 192 MiB) could not come near.
+    if [ "$ALLOC" -lt $((10 * 1024 * 1024)) ]; then
+        ok "$N slots in use cost $((ALLOC / 1024)) KiB of real memory, not $((N * 16)) MiB"
+    else
+        bad "$N windows allocated $((ALLOC / 1024 / 1024)) MiB -- a slot still costs a whole screen"
+    fi
 fi
 
 if grep -c 'BACKBUFFER' "$WORK/wsysd.log" "$WORK/wsyswl.log" 2>/dev/null | grep -qv ':0$'; then

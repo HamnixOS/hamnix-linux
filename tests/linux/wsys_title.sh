@@ -92,6 +92,12 @@ pass=0; fail=0
 ok()   { echo "title: PASS $*"; pass=$((pass+1)); }
 bad()  { echo "title: FAIL $*"; fail=$((fail+1)); }
 info() { echo "title: INFO $*"; }
+# An empty read is not a measurement. See tests/linux/gate_read.sh: the third
+# assertion in gaps_are_bar below took ${ig:-0} against $((sp * gh / 4)), so a
+# gapstat that printed nothing at all -- no python3, no framebuffer file, a
+# traceback -- made that 0 >= 0 and printed the PASS "the gaps between the
+# letters are the bar itself" about a band this run never sampled.
+. tests/linux/gate_read.sh
 
 # Every process this gate starts is registered in a FILE, not a variable:
 # `hold` below is called as `A="$(hold a)"`, and a command substitution is a
@@ -230,6 +236,9 @@ gapstat() { python3 "$GAPPY" "$HAMFB_FILE" "$FBW" "$1" "$2" "$3" "$4" "$5"; }
 gaps_are_bar() {
     local what="$1" gx="$2" gy="$3" gw="$4" gh="$5" gbar="$6"
     local s; s="$(gapstat "$gx" "$gy" "$gw" "$gh" "$gbar")"
+    # gapstat prints five fields or it did not run. All three assertions below
+    # are about numbers in that line; none of them is answerable without it.
+    gate_fields "gapstat's five numbers for $what (#$gbar) over ${gw}x${gh} at ($gx,$gy)" 5 "$s" || return 0
     local dk bl sp ig dark
     dk="$(echo "$s" | cut -d' ' -f1)"; bl="$(echo "$s" | cut -d' ' -f2)"
     sp="$(echo "$s" | cut -d' ' -f3)"; ig="$(echo "$s" | cut -d' ' -f4)"
