@@ -144,6 +144,38 @@ either catches an idle loop (~27 µs) or waits out a frame (600–850 µs). The
 median is safe and the tail is not, which is exactly the shape a median-only
 measurement would have hidden — the gate prints all 33 samples.
 
+**THE BIMODALITY IS NOW MEASURED, AND THE TWO MODES DO NOT OVERLAP AT ALL.**
+1980 blocking round trips — three runs of 20 repetitions × 33 samples, one
+`wsysd`, one `de_dragload` light drag, on a host at loadavg 0.6–1.6:
+
+| mode | share | p50 | extremes |
+|---|---|---|---|
+| fast (catches an idle loop) | 81–86% | **28 µs** in all three runs | min 10, max **122** |
+| slow (waits out a frame) | 14–19% | 873–901 µs | min **667**, max 1534 |
+
+**The gap 122–667 µs contains ZERO of the 1980 samples.** That has a direct
+consequence for gating: `wsys_srv_transport.sh` used to assert
+`RTT_P50 <= 300 µs`, and 300 sits in the middle of that empty gap, so every
+threshold from ~130 to ~660 classifies the data identically. The assertion
+reduced to *fewer than half the samples waited*. It passes with room on a quiet
+host (14–19% slow) and the offscreen sweep recorded it **red at p50 934 µs and
+1806 µs** — the fraction had crossed 50% because the host was at loadavg
+2.4–5.0, not because the tree changed. **A statistic that swings 30× on host
+load is measuring the host**, and that arm now asserts the fast mode (150 µs,
+derived) and merely records the slow one. See B(iii) in the gate.
+
+**One thing here is still UNCONFIRMED and must not be quoted as measured.** The
+explanation above — the slow mode *is* one frame period — was not reproduced.
+An attempt to measure the frame period in the same run via
+`HAMNIX_WSYSD_BENCH_LIVE` returned ~170 kHz, which cannot be an 850 µs frame;
+offscreen with no present cap and a barely-populated desktop, that counter is
+not measuring the drag's frame cost. Two facts sit against the simple version
+of the story: the slow mode is **tightly clustered** (p10 783, p50 873, p90
+930) rather than spread uniformly over `[0, T]` as a wait for a periodic event
+would be, and its floor is a hard 667 µs. A fixed ~870 µs stall and a frame
+wait are different mechanisms with different fixes, and **which one this is
+remains open.**
+
 This does not affect stage 2 — mutations do not wait. It is a hard constraint
 on **stage 3**, where reads are routed:
 
