@@ -86,6 +86,30 @@ struct hamwsys_file {
     uint64_t carrycap;   /* bytes allocated at `carry`                     */
     uint64_t carried;    /* bytes of a partial record held there           */
     char     name[64];   /* HAMWSYS_SINK: the path below /dev/wsys/        */
+    /* SINK STAGING -- WHY A SINK IS NO LONGER TRUNCATED ON OPEN.
+     * Opening a sink for writing used to set the shared `len` to 0 and let
+     * the body arrive in a later write(2).  Between those two syscalls the
+     * sink WAS EMPTY to every reader, and a reader landing there got a
+     * zero-length body with exit status 0 -- measured at 25 in 100000 tight
+     * reads of /dev/wsys/wsysd/state on a live desktop.  That is this
+     * project's defining failure shape (a gap answering something
+     * success-shaped) pointed straight at the instruments: one such read
+     * became a frame delta of plus-or-minus a whole counter in the FPS
+     * driver, and reads as "focus is none" in de_focus_dismiss.sh.
+     *
+     * So the body is assembled HERE, in the writer's own memory, and the
+     * shared sink is overwritten only once the whole body is in hand.  A
+     * reader now sees the whole previous version or the whole new one.
+     *
+     * Grown on demand and capped at WSYS_SINK_CAP -- the same shape as
+     * `carry` above, and capped at the SINK'S OWN capacity rather than at
+     * some number picked here, so there is no fixed buffer for a peer to
+     * outgrow: anything the sink cannot hold could not have been published
+     * either way. */
+    uint8_t *stage;      /* HAMWSYS_SINK write: the body being assembled   */
+    uint64_t stagecap;   /* bytes allocated at `stage`                     */
+    uint64_t stagelen;   /* bytes of the body assembled so far             */
+    int      staged;     /* opened for writing: publish even if never written */
     /* STAGE 6, and it is PER-OPEN because the thing it records is: opening
      * <wid>/scene for writing STARTS A FRAME.  A routed client sends that fact
      * with its first write instead of clearing the display list itself, and a
