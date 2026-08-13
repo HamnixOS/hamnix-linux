@@ -69,6 +69,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <poll.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -2952,6 +2953,721 @@ static void owner_harden(void)
                 strerror(errno));
 }
 
+/* ==================================================================
+ * THE MEDIATOR'S TRANSPORT — STAGE 1 OF docs/wsys_server_design.md
+ * ==================================================================
+ * The design and the work order are in user/linux-wsys.h.  This is the code.
+ * Nothing below runs unless HAMWSYS_SERVER=1 is in the environment, and NO
+ * /dev/wsys operation is routed over it yet: stage 1 is a transport that
+ * works and changes no behaviour.  Mutations are stage 2, reads and the
+ * enumeration policy stage 3, the WSYS_VERSION bump stage 4 and last.
+ *
+ * ONE FLAG READ, CACHED.  getenv on every open would be a syscall-free string
+ * search on every /dev/wsys operation on the system for the sake of a
+ * development switch.
+ */
+static int srv_flag = -1;
+
+static int srv_enabled(void)
+{
+    if (srv_flag < 0) {
+        const char *e = getenv("HAMWSYS_SERVER");
+        srv_flag = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return srv_flag;
+}
+
+/* The wire.  Both ends are the same object file, so these structures are a
+ * contract with the GATE rather than an ABI across a version boundary — but
+ * the gate checks them, so they are written down in linux-wsys.h too. */
+struct wsrv_hdr {
+    uint32_t magic;
+    uint16_t op;
+    uint16_t flags;
+    uint32_t tag;
+    int32_t  wid;
+    uint32_t len;
+};
+struct wsrv_rep {
+    uint32_t magic;
+    uint32_t tag;
+    int32_t  rc;
+    uint32_t len;
+};
+
+/* THE NAME IS DERIVED FROM THE SEGMENT, exactly as the client wake above is.
+ * A window system is identified by the (dev, ino) of its shared segment, so
+ * two window systems on one host — a gate's private one and the owner's real
+ * desktop — cannot find each other's server.  Deriving it independently would
+ * be a second way to answer "which window system is this", and two answers to
+ * that question is how a gate ends up talking to the machine owner's desktop. */
+static socklen_t srv_addr(struct sockaddr_un *a)
+{
+    if (!seg_id_known) return 0;
+    memset(a, 0, sizeof *a);
+    a->sun_family = AF_UNIX;
+    a->sun_path[0] = '\0';                     /* abstract */
+    int n = snprintf(a->sun_path + 1, sizeof a->sun_path - 1,
+                     "hamnix-wsys/%llu.%llu/srv",
+                     (unsigned long long)seg_dev, (unsigned long long)seg_ino);
+    if (n <= 0 || (size_t)n >= sizeof a->sun_path - 1) return 0;
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+}
+
+/* ---------------------------------------------------------------- server -- */
+
+struct wsrv_conn {
+    int      fd;
+    uid_t    uid;
+    gid_t    gid;
+    pid_t    pid;
+    uint32_t version;      /* 0 until HELLO */
+    uint64_t nreq;
+};
+
+static int  srv_is_server = 0;   /* this process is wsysd; never dial yourself */
+static int  srv_lfd = -1;        /* the listening SOCK_SEQPACKET              */
+static int  srv_ep  = -1;        /* the epoll fd handed to wsysd's wait set   */
+static struct wsrv_conn srv_conn[WSRV_CONN_MAX];
+static int  srv_nconn = 0;
+
+/* The counters a client can read back with WSRV_OP_STAT.  They exist for one
+ * reason and it is not curiosity: a fire-and-forget message that is delivered
+ * and one that is silently dropped are INDISTINGUISHABLE FROM THE SENDING
+ * END.  Asking the far side how many it received is the only way to tell them
+ * apart, and without it the stage-1 gate would report a transport that drops
+ * everything as working. */
+static uint64_t srv_n_accept, srv_n_msg, srv_n_nop, srv_n_ping, srv_n_stat;
+static uint64_t srv_n_bad, srv_n_bytes;
+
+void hamwsys_srv_claim(void)
+{
+    /* CALLED BEFORE wsysd TOUCHES /dev/wsys AT ALL, and that ordering is the
+     * whole reason this is a separate call from listen().  wsysd is a client
+     * of its own device — it opens /dev/wsys/screen, /dev/wsys/windows and
+     * every window's scene on every frame — so without this it would dial
+     * itself on its first open and then block waiting for a reply from the
+     * loop it has not entered yet.  listen() cannot do the job: it needs the
+     * segment's identity, which means attaching the segment, which is not
+     * something to force before wsysd has read the screen geometry. */
+    srv_is_server = 1;
+}
+
+static void srv_conn_drop(int i)
+{
+    if (srv_ep >= 0) epoll_ctl(srv_ep, EPOLL_CTL_DEL, srv_conn[i].fd, NULL);
+    close(srv_conn[i].fd);
+    srv_conn[i] = srv_conn[--srv_nconn];
+}
+
+int hamwsys_srv_listen(void)
+{
+    if (!srv_enabled()) return -1;
+    if (srv_ep >= 0) return srv_ep;
+    if (shm_attach() < 0) return -1;
+
+    struct sockaddr_un a;
+    socklen_t alen = srv_addr(&a);
+    if (!alen) return -1;
+
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        fprintf(stderr, "wsys: server socket: %s\n", strerror(errno));
+        return -1;
+    }
+    if (bind(fd, (struct sockaddr *)&a, alen) < 0) {
+        /* SAY IT BY NAME.  EADDRINUSE here means another wsysd already serves
+         * this segment, which is a real and diagnosable condition; silently
+         * running without a server would leave every client falling back to
+         * the in-process path with nothing on stderr. */
+        fprintf(stderr, "wsys: cannot bind the server name for segment "
+                        "%llu.%llu: %s\n",
+                (unsigned long long)seg_dev, (unsigned long long)seg_ino,
+                strerror(errno));
+        close(fd);
+        return -1;
+    }
+    if (listen(fd, 32) < 0) {
+        fprintf(stderr, "wsys: server listen: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    /* AN EPOLL FD, NOT THE LISTENING SOCKET, and that is what makes this fit
+     * in wsysd's wait set at all.  build_waitset runs ONCE; the set of live
+     * connections changes every time a client starts or exits.  One epoll fd
+     * standing for the listener and every connection means the wait set never
+     * has to be rebuilt, and the Adder side never learns how many clients
+     * there are. */
+    srv_ep = epoll_create1(EPOLL_CLOEXEC);
+    if (srv_ep < 0) { close(fd); return -1; }
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = fd };
+    if (epoll_ctl(srv_ep, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        close(srv_ep); srv_ep = -1; close(fd); return -1;
+    }
+    srv_lfd = fd;
+    fprintf(stderr, "wsys: serving /dev/wsys for segment %llu.%llu "
+                    "(HAMWSYS_SERVER=1; stage 1, no operation is routed yet)\n",
+            (unsigned long long)seg_dev, (unsigned long long)seg_ino);
+    return srv_ep;
+}
+
+/* Send one reply.  MSG_DONTWAIT throughout: a client that has stopped reading
+ * must not be able to wedge the compositor, and a compositor that blocks on a
+ * client's socket buffer is a desktop that stops painting because one program
+ * stopped listening. */
+static void srv_reply(int fd, uint32_t tag, int32_t rc,
+                      const void *pay, uint32_t len)
+{
+    struct wsrv_rep r = { WSRV_MAGIC_RP, tag, rc, len };
+    struct iovec iov[2];
+    iov[0].iov_base = &r;   iov[0].iov_len = sizeof r;
+    iov[1].iov_base = (void *)pay; iov[1].iov_len = len;
+    struct msghdr m;
+    memset(&m, 0, sizeof m);
+    m.msg_iov = iov;
+    m.msg_iovlen = len ? 2 : 1;
+    (void)sendmsg(fd, &m, MSG_DONTWAIT | MSG_NOSIGNAL);
+}
+
+/* THE OUT-OF-BAND ERROR, tag 0.  The design's first rule is that every
+ * mutation returning no data is fire-and-forget, because strict request-reply
+ * is the expensive pattern (6.30 us one at a time against 2.31 us at a burst
+ * of 16).  A fire-and-forget mutation that is refused still has to tell
+ * somebody, so it tells them here, on the connection the client is already
+ * draining.  Stage 1's only user is an unknown fire-and-forget op — which is
+ * exactly the shape stage 2 needs and means the mechanism is exercised rather
+ * than merely written. */
+static void srv_err(int fd, uint16_t op, int32_t rc)
+{
+    struct { uint16_t op; int32_t rc; } body = { op, rc };
+    srv_reply(fd, 0, WSRV_OP_ERR, &body, (uint32_t)sizeof body);
+}
+
+static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
+                         const uint8_t *pay)
+{
+    srv_n_msg++;
+    srv_n_bytes += h->len;
+    c->nreq++;
+    int want_reply = (h->flags & WSRV_F_REPLY) != 0;
+
+    switch (h->op) {
+    case WSRV_OP_HELLO: {
+        uint32_t theirs = (h->len >= 4) ? *(const uint32_t *)pay : 0;
+        c->version = theirs;
+        if (theirs != WSYS_VERSION) {
+            /* REFUSE, LOUDLY.  This is where the version bump of stage 4 will
+             * do its work; today no shipped client speaks the protocol at all,
+             * so this only ever fires for a probe built against another tree. */
+            fprintf(stderr, "wsys: client pid %ld speaks wsys version %u, this "
+                            "server speaks %u -- refused.\n",
+                    (long)c->pid, (unsigned)theirs, (unsigned)WSYS_VERSION);
+            uint32_t mine = WSYS_VERSION;
+            srv_reply(c->fd, h->tag, -EPROTO, &mine, sizeof mine);
+            return;
+        }
+        uint32_t mine = WSYS_VERSION;
+        srv_reply(c->fd, h->tag, 0, &mine, sizeof mine);
+        return;
+    }
+    case WSRV_OP_NOP:
+        /* The stage-1 stand-in for a mutation: it returns no data, so it is
+         * fire-and-forget and the client does not wait.  It travels the same
+         * path a real ctl write will in stage 2. */
+        srv_n_nop++;
+        if (want_reply) srv_reply(c->fd, h->tag, 0, NULL, 0);
+        return;
+    case WSRV_OP_PING: {
+        srv_n_ping++;
+        uint32_t n = h->len > WSRV_MAXPAY ? WSRV_MAXPAY : h->len;
+        srv_reply(c->fd, h->tag, (int32_t)n, pay, n);
+        return;
+    }
+    case WSRV_OP_STAT: {
+        srv_n_stat++;
+        char b[256];
+        int n = snprintf(b, sizeof b,
+                         "conns %llu live %d msgs %llu nop %llu ping %llu "
+                         "stat %llu bad %llu bytes %llu\n",
+                         (unsigned long long)srv_n_accept, srv_nconn,
+                         (unsigned long long)srv_n_msg,
+                         (unsigned long long)srv_n_nop,
+                         (unsigned long long)srv_n_ping,
+                         (unsigned long long)srv_n_stat,
+                         (unsigned long long)srv_n_bad,
+                         (unsigned long long)srv_n_bytes);
+        if (n < 0) n = 0;
+        srv_reply(c->fd, h->tag, n, b, (uint32_t)n);
+        return;
+    }
+    default:
+        srv_n_bad++;
+        if (want_reply) srv_reply(c->fd, h->tag, -ENOSYS, NULL, 0);
+        else            srv_err(c->fd, h->op, -ENOSYS);
+        return;
+    }
+}
+
+int hamwsys_srv_service(void)
+{
+    if (srv_ep < 0) return 0;
+    int handled = 0;
+    struct epoll_event ev[WSRV_CONN_MAX + 1];
+    for (;;) {
+        int n = epoll_wait(srv_ep, ev, (int)(sizeof ev / sizeof ev[0]), 0);
+        if (n <= 0) break;
+        for (int i = 0; i < n; i++) {
+            if (ev[i].data.fd == srv_lfd) {
+                for (;;) {
+                    int cfd = accept4(srv_lfd, NULL, NULL,
+                                      SOCK_NONBLOCK | SOCK_CLOEXEC);
+                    if (cfd < 0) break;
+                    if (srv_nconn >= WSRV_CONN_MAX) { close(cfd); continue; }
+                    /* WHO IS CALLING, taken from the kernel and not from the
+                     * message.  This is the entire point of having a mediator:
+                     * SO_PEERCRED is the one fact about a client that the
+                     * client cannot forge, and it is what stage 3's
+                     * enumeration policy — "your own windows, unless you hold
+                     * the taskbar capability" — will be decided on.  It is
+                     * captured now because capturing it later would mean
+                     * trusting a pid the client sent. */
+                    struct ucred uc;
+                    socklen_t ul = sizeof uc;
+                    memset(&uc, 0, sizeof uc);
+                    (void)getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &uc, &ul);
+                    struct wsrv_conn *c = &srv_conn[srv_nconn++];
+                    memset(c, 0, sizeof *c);
+                    c->fd = cfd; c->uid = uc.uid; c->gid = uc.gid;
+                    c->pid = uc.pid;
+                    struct epoll_event e = { .events = EPOLLIN,
+                                             .data.fd = cfd };
+                    if (epoll_ctl(srv_ep, EPOLL_CTL_ADD, cfd, &e) < 0) {
+                        close(cfd); srv_nconn--; continue;
+                    }
+                    srv_n_accept++;
+                }
+                continue;
+            }
+            int k = -1;
+            for (int j = 0; j < srv_nconn; j++)
+                if (srv_conn[j].fd == ev[i].data.fd) { k = j; break; }
+            if (k < 0) continue;
+            for (;;) {
+                uint8_t buf[sizeof(struct wsrv_hdr) + WSRV_MAXPAY];
+                ssize_t r = recv(srv_conn[k].fd, buf, sizeof buf, MSG_DONTWAIT);
+                if (r < 0) break;                      /* EAGAIN: drained */
+                /* ZERO IS EOF, NOT AN EMPTY MESSAGE.  On SOCK_SEQPACKET the
+                 * two are told apart only by knowing that no message this
+                 * protocol sends is shorter than its header — which is why
+                 * the header is mandatory and never elided. */
+                if (r == 0) { srv_conn_drop(k); break; }
+                if ((size_t)r < sizeof(struct wsrv_hdr)) { srv_n_bad++; continue; }
+                struct wsrv_hdr h;
+                memcpy(&h, buf, sizeof h);
+                if (h.magic != WSRV_MAGIC_RQ
+                    || h.len > WSRV_MAXPAY
+                    || (size_t)r != sizeof h + h.len) {
+                    srv_n_bad++;
+                    continue;
+                }
+                srv_dispatch(&srv_conn[k], &h, buf + sizeof h);
+                handled++;
+            }
+        }
+        if (n < (int)(sizeof ev / sizeof ev[0])) break;
+    }
+    return handled;
+}
+
+/* ---------------------------------------------------------------- client -- */
+
+static int      srv_fd     = -1;
+static int      srv_tried  = 0;
+static uint32_t srv_tag    = 0;
+
+/* Defined below srv_call, which it uses; declared here because srv_dial needs
+ * it while the connection exists but is not yet blessed. */
+static int srv_call_locked_hello(uint32_t *mine, uint32_t *theirs, int64_t *rc);
+
+/* Dial the server, once per process.  Returns the connection or -1.
+ *
+ * A FAILED DIAL IS SAID OUT LOUD AND THEN FALLEN BACK FROM.  During stage 1
+ * both paths exist by design, so falling back to the in-process path is
+ * correct — but doing it silently would mean a mis-set flag looks exactly
+ * like a working boundary, which is the failure shape this project keeps
+ * paying for.  When the in-process path is removed in stage 4 this becomes a
+ * hard refusal, and the WSYS_VERSION bump is what makes an old client refuse
+ * rather than mmap the segment and bypass the mediator entirely. */
+static int srv_dial(void)
+{
+    if (srv_fd >= 0) return srv_fd;
+    if (!srv_enabled() || srv_is_server || srv_tried) return -1;
+    srv_tried = 1;
+    if (!seg_id_known) return -1;
+
+    struct sockaddr_un a;
+    socklen_t alen = srv_addr(&a);
+    if (!alen) return -1;
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    if (connect(fd, (struct sockaddr *)&a, alen) < 0) {
+        fprintf(stderr, "wsys: HAMWSYS_SERVER=1 but nothing is serving segment "
+                        "%llu.%llu (%s): this process is using the in-process "
+                        "path, which is NOT mediated.\n",
+                (unsigned long long)seg_dev, (unsigned long long)seg_ino,
+                strerror(errno));
+        close(fd);
+        return -1;
+    }
+    srv_fd = fd;
+
+    uint32_t mine = WSYS_VERSION, theirs = 0;
+    int64_t rc = 0;
+    if (srv_call_locked_hello(&mine, &theirs, &rc) < 0 || rc < 0) {
+        fprintf(stderr, "wsys: the server for segment %llu.%llu speaks version "
+                        "%u, this client speaks %u -- refusing the connection "
+                        "and using the in-process path.\n",
+                (unsigned long long)seg_dev, (unsigned long long)seg_ino,
+                (unsigned)theirs, (unsigned)WSYS_VERSION);
+        close(srv_fd);
+        srv_fd = -1;
+        return -1;
+    }
+    return srv_fd;
+}
+
+/* Send one message.  `flags` carries WSRV_F_REPLY when the caller will block.
+ * Returns 0, or -1 with errno. */
+static int srv_send(uint16_t op, uint16_t flags, int32_t wid, uint32_t tag,
+                    const void *pay, uint32_t len)
+{
+    if (srv_fd < 0 || len > WSRV_MAXPAY) { errno = EINVAL; return -1; }
+    struct wsrv_hdr h = { WSRV_MAGIC_RQ, op, flags, tag, wid, len };
+    struct iovec iov[2];
+    iov[0].iov_base = &h; iov[0].iov_len = sizeof h;
+    iov[1].iov_base = (void *)pay; iov[1].iov_len = len;
+    struct msghdr m;
+    memset(&m, 0, sizeof m);
+    m.msg_iov = iov;
+    m.msg_iovlen = len ? 2 : 1;
+    ssize_t r = sendmsg(srv_fd, &m, MSG_NOSIGNAL);
+    return r < 0 ? -1 : 0;
+}
+
+/* FIRE AND FORGET, and this is the measurement talking rather than taste.
+ * Per-op cost falls 6.30 us one-at-a-time -> 3.14 at 4 -> 2.31 at 16 ->
+ * 2.37 at 64 (tests/linux/wsys_rtt_probe.c).  It is the WAITING that costs,
+ * not the volume, so anything that returns no data does not wait.  A client
+ * repaint is 3 ops; at 2.3 us that is 7 us of a 0.3 ms input-to-pixel budget
+ * instead of 19 us. */
+/* THE SEND BLOCKS IF THE SERVER FALLS BEHIND, and that is a choice, not an
+ * oversight.  MSG_DONTWAIT here would turn a full socket buffer into a
+ * SILENTLY DISCARDED MUTATION -- a window that does not move, with nothing on
+ * anyone's stderr, which is the failure shape this device fights everywhere
+ * else.  Blocking makes the pressure visible as a stalled client instead.
+ * Measured, the pressure does not arise at any rate this system produces: 256
+ * back-to-back sends drain in 509 us with none lost, and the sustained arm
+ * runs 2050 ops/s -- the worst load ever measured here -- through a default
+ * SO_RCVBUF that holds thousands of these messages.  Stage 2 owns the
+ * question of what to do if that ever stops being true; today it would be a
+ * mechanism guarding against a condition that has not been observed. */
+static int srv_post(uint16_t op, int32_t wid, const void *pay, uint32_t len)
+{
+    if (srv_fd < 0) return -1;
+    return srv_send(op, 0, wid, ++srv_tag, pay, len);
+}
+
+/* Block for one reply.  Discards anything that is not the reply being waited
+ * for, which is what makes fire-and-forget safe to mix with blocking calls on
+ * one connection: an out-of-band error (tag 0) arriving mid-wait is reported
+ * and stepped over rather than mistaken for the answer. */
+static int srv_wait(uint32_t tag, void *out, uint32_t outcap, uint32_t *outlen,
+                    int64_t *rc, int timeout_ms)
+{
+    uint8_t buf[sizeof(struct wsrv_rep) + WSRV_MAXPAY];
+    for (;;) {
+        struct pollfd p = { srv_fd, POLLIN, 0 };
+        int pr = poll(&p, 1, timeout_ms);
+        if (pr == 0) { errno = ETIMEDOUT; return -1; }
+        if (pr < 0) { if (errno == EINTR) continue; return -1; }
+        ssize_t r = recv(srv_fd, buf, sizeof buf, 0);
+        if (r <= 0) { errno = r == 0 ? ECONNRESET : errno; return -1; }
+        if ((size_t)r < sizeof(struct wsrv_rep)) continue;
+        struct wsrv_rep rep;
+        memcpy(&rep, buf, sizeof rep);
+        if (rep.magic != WSRV_MAGIC_RP) continue;
+        if (rep.tag == 0) {
+            /* An out-of-band error for a fire-and-forget message.  Stage 2
+             * routes these to the client's own event ring, which it is
+             * already draining; stage 1 has no event to attach them to, so
+             * they are said on stderr rather than dropped. */
+            struct { uint16_t op; int32_t rc; } b = { 0, 0 };
+            if ((size_t)r >= sizeof rep + sizeof b)
+                memcpy(&b, buf + sizeof rep, sizeof b);
+            fprintf(stderr, "wsys: the server refused op %u: %s\n",
+                    (unsigned)b.op, strerror(b.rc < 0 ? -b.rc : b.rc));
+            continue;
+        }
+        if (rep.tag != tag) continue;          /* a stale reply; step over it */
+        uint32_t n = rep.len;
+        if (n > outcap) n = outcap;
+        if (out && n) memcpy(out, buf + sizeof rep, n);
+        if (outlen) *outlen = n;
+        if (rc) *rc = rep.rc;
+        return 0;
+    }
+}
+
+static int srv_call(uint16_t op, int32_t wid, const void *pay, uint32_t len,
+                    void *out, uint32_t outcap, uint32_t *outlen, int64_t *rc)
+{
+    if (srv_fd < 0) { errno = ENOTCONN; return -1; }
+    uint32_t tag = ++srv_tag;
+    if (tag == 0) tag = ++srv_tag;             /* 0 is reserved for OOB errors */
+    if (srv_send(op, WSRV_F_REPLY, wid, tag, pay, len) < 0) return -1;
+    /* A BOUNDED WAIT, not an unbounded one.  A wedged compositor must produce
+     * a diagnosable timeout rather than a client that hangs for ever with
+     * nothing on stderr — the failure shape this device fights everywhere
+     * else. */
+    return srv_wait(tag, out, outcap, outlen, rc, 5000);
+}
+
+/* HELLO has to exist before srv_call is usable, because srv_dial calls it
+ * while srv_fd is set but the connection is not yet blessed. */
+static int srv_call_locked_hello(uint32_t *mine, uint32_t *theirs, int64_t *rc)
+{
+    uint32_t got = 0;
+    if (srv_call(WSRV_OP_HELLO, 0, mine, sizeof *mine,
+                 theirs, sizeof *theirs, &got, rc) < 0) {
+        fprintf(stderr, "wsys: the server did not answer the version "
+                        "handshake (%s).\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+/* THE CLIENT'S DIAL POINT.  Called from hamwsys_open, after shm_attach: a
+ * process that never touches the window system never opens a socket to it,
+ * and a process that does gets exactly one connection for its lifetime. */
+static void srv_client_tick(void)
+{
+    if (!srv_enabled() || srv_is_server || srv_fd >= 0 || srv_tried) return;
+    (void)srv_dial();
+}
+
+/* ------------------------------------------------------- the stage-1 gate -- */
+
+static uint64_t srv_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
+}
+
+/* Pull "nop <n>" out of a WSRV_OP_STAT reply. */
+static uint64_t srv_stat_field(const char *s, const char *key)
+{
+    const char *p = strstr(s, key);
+    if (!p) return 0;
+    p += strlen(key);
+    while (*p == ' ') p++;
+    uint64_t v = 0;
+    while (*p >= '0' && *p <= '9') v = v * 10 + (uint64_t)(*p++ - '0');
+    return v;
+}
+
+int hamwsys_srv_selftest(void)
+{
+    int fails = 0;
+    if (!srv_enabled()) {
+        fprintf(stderr, "wsrv: HAMWSYS_SERVER is not 1, so this build's "
+                        "/dev/wsys is implemented in-process and there is "
+                        "nothing to dial.\n");
+        return 1;
+    }
+    if (srv_fd < 0) {
+        fprintf(stderr, "wsrv: no connection to a server.\n");
+        return 1;
+    }
+    printf("wsrvst: connected, both ends speak wsys version %u\n",
+           (unsigned)WSYS_VERSION);
+
+    /* 1. THE BLOCKING SHAPE, AND IT IS THE NUMBER THAT MATTERS MOST.
+     *
+     * tests/linux/wsys_rtt_probe.c measured 6.30 us for a sequential round
+     * trip against a DEDICATED server thread that does nothing but read the
+     * socket.  This server is not that: it is serviced from the compositor's
+     * frame loop, so a blocking request waits for wsysd to come round -- and
+     * that is a cost the design's 6.30 us does not contain.  Three samples
+     * would not show the shape of it, so this takes 33 and reports the
+     * distribution: the tail is the part a 0.3 ms input-to-pixel budget has
+     * to survive, and a median alone would hide it. */
+    {
+        const char payload[] = "wctl version 2";
+        char back[64];
+        enum { NS = 33 };
+        uint64_t s[NS];
+        int n = 0;
+        for (int i = 0; i < NS; i++) {
+            uint32_t got = 0; int64_t rc = 0;
+            uint64_t t0 = srv_now_us();
+            int r = srv_call(WSRV_OP_PING, 0, payload, sizeof payload - 1,
+                             back, sizeof back, &got, &rc);
+            s[n++] = srv_now_us() - t0;
+            if (r < 0 || rc != (int64_t)(sizeof payload - 1)
+                || got != sizeof payload - 1
+                || memcmp(back, payload, got) != 0) {
+                printf("wsrvst: FAIL the blocking round trip did not come back "
+                       "intact (r=%d rc=%lld got=%u)\n",
+                       r, (long long)rc, (unsigned)got);
+                fails++;
+                break;
+            }
+        }
+        for (int i = 1; i < n; i++) {            /* insertion sort, n is 33 */
+            uint64_t v = s[i]; int j = i - 1;
+            while (j >= 0 && s[j] > v) { s[j + 1] = s[j]; j--; }
+            s[j + 1] = v;
+        }
+        if (n > 0) {
+            printf("wsrvst: blocking round trip, %d samples: min %llu  "
+                   "p50 %llu  p90 %llu  max %llu us\n", n,
+                   (unsigned long long)s[0],
+                   (unsigned long long)s[n / 2],
+                   (unsigned long long)s[(n * 9) / 10],
+                   (unsigned long long)s[n - 1]);
+            printf("wsrvst: every sample, us:");
+            for (int i = 0; i < n; i++)
+                printf(" %llu", (unsigned long long)s[i]);
+            printf("\n");
+        }
+    }
+
+    /* 2. THE FIRE-AND-FORGET SHAPE, AND THE ONLY HONEST WAY TO CHECK IT.
+     *
+     * A dropped fire-and-forget message and a delivered one look identical
+     * from here.  So the server's own counter is read before and after, and
+     * the difference is the assertion.  Without this the transport could
+     * discard every message and this test would report the fastest possible
+     * result. */
+    {
+        char st[256]; uint32_t got = 0; int64_t rc = 0;
+        uint64_t before = 0, after = 0;
+        if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) < 0) {
+            printf("wsrvst: FAIL could not read the server's counters\n");
+            return fails + 1;
+        }
+        st[got] = 0;
+        before = srv_stat_field(st, "nop");
+
+        const int BURST = 256;
+        uint64_t t0 = srv_now_us();
+        int sent = 0;
+        for (int i = 0; i < BURST; i++)
+            if (srv_post(WSRV_OP_NOP, 0, &i, sizeof i) == 0) sent++;
+        uint64_t dt = srv_now_us() - t0;
+
+        if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) < 0) {
+            printf("wsrvst: FAIL could not read the server's counters back\n");
+            return fails + 1;
+        }
+        st[got] = 0;
+        after = srv_stat_field(st, "nop");
+        printf("wsrvst: fire-and-forget: %d sent in %llu us (%.2f us/op, "
+               "send side only)\n", sent, (unsigned long long)dt,
+               sent ? (double)dt / sent : 0.0);
+        printf("wsrvst: the server's own counter: nop %llu -> %llu "
+               "(delta %llu, sent %d)\n", (unsigned long long)before,
+               (unsigned long long)after,
+               (unsigned long long)(after - before), sent);
+        if (sent != BURST) {
+            printf("wsrvst: FAIL only %d of %d fire-and-forget sends "
+                   "succeeded\n", sent, BURST);
+            fails++;
+        }
+        /* The STAT round trip is ordered after the burst on the same
+         * SEQPACKET connection, so the server has necessarily seen every
+         * message before it answers: this is an exact equality, not a
+         * tolerance.  A tolerance here would quietly accept a transport that
+         * loses some. */
+        if ((uint64_t)sent != after - before) {
+            printf("wsrvst: FAIL the server received %llu of %d fire-and-forget "
+                   "messages. They are being dropped, and the sending end "
+                   "cannot see that.\n",
+                   (unsigned long long)(after - before), sent);
+            fails++;
+        }
+        printf("wsrvst: server counters: %s", st);
+    }
+
+    /* 3. THE OUT-OF-BAND ERROR PATH.  An unknown fire-and-forget op must come
+     * back as an unsolicited tag-0 frame rather than vanishing, because that
+     * is how a refused mutation will reach a client that did not wait. */
+    {
+        char st[256]; uint32_t got = 0; int64_t rc = 0;
+        uint64_t bad0, bad1;
+        if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) >= 0) {
+            st[got] = 0; bad0 = srv_stat_field(st, "bad");
+            srv_post(9999, 0, NULL, 0);
+            if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1,
+                         &got, &rc) >= 0) {
+                st[got] = 0; bad1 = srv_stat_field(st, "bad");
+                if (bad1 == bad0 + 1)
+                    printf("wsrvst: an unknown fire-and-forget op was refused "
+                           "out of band (bad %llu -> %llu)\n",
+                           (unsigned long long)bad0, (unsigned long long)bad1);
+                else {
+                    printf("wsrvst: FAIL an unknown op was not counted as "
+                           "refused (bad %llu -> %llu)\n",
+                           (unsigned long long)bad0, (unsigned long long)bad1);
+                    fails++;
+                }
+            }
+        }
+    }
+    return fails;
+}
+
+int hamwsys_srv_sustain(int ops_per_sec, int secs)
+{
+    if (!srv_enabled() || srv_fd < 0) {
+        fprintf(stderr, "wsrv: no connection to a server.\n");
+        return 1;
+    }
+    if (ops_per_sec <= 0 || secs <= 0) return 1;
+    /* Paced in 10 ms slices, which is the window the op census measures bursts
+     * in: ops clumped inside 10 ms are the ones that would serialise against
+     * each other rather than spreading across a 16 ms frame.
+     *
+     * THE QUOTA IS CARRIED, NOT ROUNDED, and the first cut got that wrong.
+     * `ops_per_sec / 100` is integer division: 192 ops/s asked became 1 per
+     * slice and 100 ops/s DELIVERED, and the CPU cost of a rate 48% below the
+     * one named was then compared against that rate's budget. The rates in
+     * this design (192, 618, 2050) are none of them multiples of 100, so the
+     * error was present in every arm and largest in the tightest one. */
+    uint64_t t0 = srv_now_us(), sent = 0;
+    uint64_t end = t0 + (uint64_t)secs * 1000000u;
+    uint64_t slice = 0, owed = 0;
+    for (;;) {
+        uint64_t now = srv_now_us();
+        if (now >= end) break;
+        uint64_t due = t0 + slice * 10000u;
+        if (now < due) { usleep((useconds_t)(due - now)); continue; }
+        slice++;
+        owed += (uint64_t)ops_per_sec;         /* per second... */
+        uint64_t n = owed / 100;               /* ...spent 100 slices a second */
+        owed -= n * 100;
+        for (uint64_t i = 0; i < n; i++)
+            if (srv_post(WSRV_OP_NOP, 0, &i, sizeof i) == 0) sent++;
+    }
+    uint64_t dt = srv_now_us() - t0;
+    printf("wsrvsu: %llu ops in %llu us (%.0f ops/s asked, %.0f delivered)\n",
+           (unsigned long long)sent, (unsigned long long)dt,
+           (double)ops_per_sec, dt ? (double)sent * 1000000.0 / dt : 0.0);
+    return 0;
+}
+
 #define KEYCHAN_MAX  WSYS_MAX_WINDOWS
 
 /* ==================================================================
@@ -4556,6 +5272,15 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
     if (classify(path, f) == HAMWSYS_NONE) { errno = ENODEV; return -1; }
     opc_note(f->leaf, 0);
     if (shm_attach() < 0) return -1;
+    /* THE CLIENT'S DIAL, and nothing more than the dial.  Stage 1 routes no
+     * operation over the server (see THE MEDIATOR'S TRANSPORT in
+     * linux-wsys.h), so this establishes the connection and the version
+     * handshake and then gets out of the way.  It is here rather than in
+     * shm_attach because attaching is what wsysd does to SERVE, and opening
+     * is what a client does to USE -- and only the second should dial.  Inert
+     * unless HAMWSYS_SERVER=1; the first call in a process is the only one
+     * that does any work. */
+    srv_client_tick();
     f->write = for_write;
     f->off = 0;
     pix_tick();                                /* see hamwsys_read */

@@ -4251,6 +4251,16 @@ int32_t sys_wsys_alloc(uint64_t pid) { return rc32(hamwsys_alloc(pid)); }
 int32_t sys_wsys_was_refused(void) { return (int32_t)hamwsys_was_refused(); }
 int32_t sys_wsys_free(int32_t wid)   { return rc32(hamwsys_free(wid)); }
 
+/* THE MEDIATOR'S TRANSPORT, driven from a test program rather than from an
+ * environment variable inside the client path.  See THE MEDIATOR'S TRANSPORT
+ * in user/linux-wsys.h.  Both return a FAILURE COUNT, so zero is the only
+ * pass; tests/linux/wsys_srv_probe.ad is the only caller.
+ *   extern def sys_wsys_srv_selftest() -> int32
+ *   extern def sys_wsys_srv_sustain(ops_per_sec: int32, secs: int32) -> int32 */
+int32_t sys_wsys_srv_selftest(void) { return (int32_t)hamwsys_srv_selftest(); }
+int32_t sys_wsys_srv_sustain(int32_t ops_per_sec, int32_t secs)
+{ return (int32_t)hamwsys_srv_sustain((int)ops_per_sec, (int)secs); }
+
 /* GPU presentation of a window frame. Unimplemented on purpose: the scene
  * compositor rasterizes in software (lib/hamui_host.ad's vk2d raster ops), so
  * nothing on this line needs a device-side frame yet.

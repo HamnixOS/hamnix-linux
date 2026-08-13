@@ -98,6 +98,98 @@ void     hamwsys_wake_drain(void);
 int      hamwsys_is_ring(const struct hamwsys_file *f);
 int      hamwsys_ring_ready(const struct hamwsys_file *f);
 
+/* ==================================================================
+ * THE MEDIATOR'S TRANSPORT — STAGE 1 OF docs/wsys_server_design.md
+ * ==================================================================
+ * Everything below is INERT unless HAMWSYS_SERVER=1 is in the environment.
+ * With the flag unset hamwsys_srv_listen() returns -1 before it touches a
+ * socket or the segment, no client ever connects, and every /dev/wsys
+ * operation takes exactly the in-process path it takes today. That is the
+ * whole acceptance criterion for this stage: a transport that works and
+ * changes nothing.
+ *
+ * WHY A TRANSPORT AT ALL. /dev/wsys is implemented IN-PROCESS: the window
+ * system is linked into every client, so a client's write is its own code
+ * touching shared memory. There is no mediator inside the object, which is
+ * why a same-uid process can read another window's pixels, why win_alloc can
+ * race two clients onto one row, and why enumeration is open by design --
+ * the reader's own linked-in code answers from shared memory, so there is
+ * nowhere a policy could live. tests/linux/wsys_enum_policy.sh states that as
+ * a red gate. A server process is the mediator Plan 9 gets from its kernel.
+ *
+ * THE SHAPE, WHICH CAME FROM MEASUREMENT AND NOT FROM TASTE
+ * (tests/linux/wsys_rtt_probe.c, docs/wsys_server_cost.md):
+ *
+ *   Strict request-reply is the expensive pattern, not volume. Per-op cost
+ *   falls 6.30 us one-at-a-time -> 3.14 at 4 -> 2.31 at 16 -> 2.37 at 64.
+ *   So EVERY MUTATION THAT RETURNS NO DATA IS FIRE-AND-FORGET: the client
+ *   writes and does not wait, and errors come back out of band on the event
+ *   ring it is already draining (WSRV_OP_ERR below, tag 0). Only genuinely
+ *   interrogative operations block -- newwindow, wctl version negotiation,
+ *   and reads.
+ *
+ * PIXELS DO NOT CROSS. Per-window memfds are handed up from the owner
+ * (THE PIXEL HAND-UP in linux-wsys.c) and stay there. That property is what
+ * makes the boundary cost 0.12% of a core instead of megabytes a frame, and
+ * it is verified rather than assumed: tests/linux/wsys_srv_transport.sh
+ * re-runs the write census and requires zero backbuffer bytes.
+ *
+ * SOCK_SEQPACKET on an abstract name derived from the segment's (dev, ino) --
+ * the same naming the client wake above already uses, so there is exactly one
+ * way to find this window system. One message is one packet; there is no
+ * framing to get wrong and no partial read to resynchronise from.
+ *
+ * WHAT STAGE 1 DOES NOT DO. No /dev/wsys operation is routed over this yet.
+ * Mutations are stage 2, reads and the enumeration policy stage 3, and the
+ * WSYS_VERSION bump is stage 4 and LAST -- the bump is what makes a
+ * pre-server client refuse rather than silently mmap the segment and bypass
+ * the mediator, so bumping before the in-process path is gone would refuse
+ * clients on behalf of a boundary that is not yet enforced.
+ */
+
+/* Wire constants. Both sides are the same object file, so this is
+ * documentation and a probe's contract rather than an ABI -- but the probe
+ * checks it, so it is written down. */
+enum {
+    WSRV_MAGIC_RQ = 0x51525357u,   /* "WSRQ" */
+    WSRV_MAGIC_RP = 0x50525357u,   /* "WSRP" */
+    WSRV_MAXPAY   = 65536,         /* a scene is <=16 KiB; this is headroom  */
+    WSRV_CONN_MAX = 64,            /* concurrent clients the server holds    */
+
+    WSRV_F_REPLY  = 1,             /* set: the caller is blocked on a reply  */
+
+    WSRV_OP_HELLO = 1,             /* blocks: version handshake              */
+    WSRV_OP_NOP   = 2,             /* fire-and-forget: the mutation shape    */
+    WSRV_OP_PING  = 3,             /* blocks: the interrogative shape        */
+    WSRV_OP_STAT  = 4,             /* blocks: the server's own counters      */
+    WSRV_OP_ERR   = 5,             /* server -> client, tag 0, unsolicited   */
+};
+
+/* THE SERVER SIDE. wsysd calls claim() before it touches /dev/wsys at all --
+ * it is a client of its own device and must never dial itself -- then
+ * listen() once from build_waitset, and service() once per loop iteration.
+ *
+ * listen() returns an EPOLL fd, not the listening socket. The set of live
+ * connections changes as clients come and go; wsysd's wait set is built once.
+ * One epoll fd standing for all of them means the wait set never has to be
+ * rebuilt and the Adder side never learns how many clients there are.
+ *
+ * service() is non-blocking and must be called on EVERY wake, including wakes
+ * it did not cause: an unread packet stays readable, and an unserviced epoll
+ * fd would turn the compositor's park into a spin -- the same trap
+ * hamwsys_wake_drain exists for. */
+void     hamwsys_srv_claim(void);
+int      hamwsys_srv_listen(void);
+int      hamwsys_srv_service(void);
+
+/* THE CLIENT SIDE, for the stage-1 gate. Returns the number of failures, so
+ * zero is the only pass and a stub cannot pass by resolving. Exported to
+ * Adder as
+ *   extern def sys_wsys_srv_selftest() -> int32
+ *   extern def sys_wsys_srv_sustain(ops_per_sec: int32, secs: int32) -> int32 */
+int      hamwsys_srv_selftest(void);
+int      hamwsys_srv_sustain(int ops_per_sec, int secs);
+
 /* Did THIS process get turned away by the version refusal in shm_attach?
  * Its own experience, not a file another process wrote -- see
  * seg_refused_here in linux-wsys.c. Exported to Adder as
