@@ -339,6 +339,30 @@ serial: uint32 = 0
 scr_w: int32 = 0
 scr_h: int32 = 0
 
+# THE LARGEST SURFACE THIS SYSTEM CAN PUT ON A SCREEN, read out of
+# /dev/wsys/pool at startup. NOT a copy of BB_W/BB_H from user/linux-wsys.c
+# and not a default: resolve_maxsurface() refuses to serve without it, for the
+# same reason resolve_screen() refuses to serve without a screen size.
+#
+# WHAT THIS REPLACES, because the number it replaces was invented. The blit
+# loop used to cap a row at `rowbuf`'s 8192 bytes -- 2048 columns -- and go on
+# silently. 2048 is not the device's limit and never was: the device's limit
+# is BB_W, 1920, which it now states. A window between 1921 and 2048 columns
+# wide therefore sent the device a rect it REFUSES (draw/ctl returns EMSGSIZE
+# for a rect wider than BB_W), and this server ignored that write's return
+# value -- so the window painted nothing at all, for ever, and the only line
+# anywhere was one the device printed once. A 2048-wide xterm on a 2400-wide
+# screen was a black rectangle; so was hamdesktop's own backdrop. Measured,
+# tests/linux/wsyswl_wide_window.sh.
+dev_max_w: int32 = 0
+dev_max_h: int32 = 0
+# Said ONCE per reason, not once per frame: a 60fps client would otherwise
+# write two lines per frame for as long as it ran.
+said_wide: int32 = 0
+said_tall: int32 = 0
+said_refused: int32 = 0
+poolbuf: Array[256, uint8]
+
 conn_inuse: Array[32, int32]
 conn_fd:    Array[32, int32]
 conn_reg:   Array[32, int32]
@@ -514,6 +538,14 @@ out:     Array[8192, uint8]
 out_pos: uint64 = 0
 out_fd:  int32 = -1                    # fd to pass with the next flush, or -1
 
+# ONE ROW OF A BLIT, and its size is a bound that is CHECKED rather than
+# assumed. 8192 bytes holds 2048 columns, comfortably more than the device's
+# BB_W of 1920 -- but "comfortably more" is what the old code believed too,
+# while capping rows at 2048 and sending the device rects it refuses.
+# resolve_maxsurface() now compares this cap against the device's stated
+# maximum surface width at startup and refuses to serve if this is the smaller
+# one, so the two numbers can never drift apart in silence again.
+ROWBUF_CAP: uint64 = 8192              # >= dev_max_w * 4, checked at startup
 rowbuf:  Array[8192, uint8]
 blithdr: Array[32, uint8]
 pathbuf: Array[256, uint8]
@@ -3415,13 +3447,51 @@ def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
         return
     dfd: int32 = w_draw[cast[uint64](slot)]
 
-    rowbytes: uint64 = cast[uint64](width) * 4
-    if rowbytes > 8192:
-        rowbytes = 8192
-    cols: int32 = cast[int32](rowbytes / 4)
+    # HOW MUCH OF THIS SURFACE CAN ACTUALLY BE SHOWN, and SAY SO when it is
+    # not all of it.
+    #
+    # The cut is the device's, not this buffer's: dev_max_w x dev_max_h comes
+    # from /dev/wsys/pool (BB_W x BB_H in user/linux-wsys.c). Sending more than
+    # that is not "a bit too much" -- the draw/ctl arm REFUSES a rect wider
+    # than BB_W outright, so a row of 2048 columns on a 1920-column device puts
+    # ZERO pixels on the screen rather than 1920 of them. Clipping to the
+    # device's own width is what turns a black window into a window with a
+    # missing right edge, which is a far better failure and still not a good
+    # one -- so it is announced, once, with both numbers in the line.
+    cols: int32 = width
+    if cols > dev_max_w:
+        if said_wide == 0:
+            said_wide = 1
+            puts(2, "wsyswl: a surface is ")
+            putd(2, width)
+            puts(2, " columns wide and no window on this system may exceed ")
+            putd(2, dev_max_w)
+            puts(2, " -- only the left ")
+            putd(2, dev_max_w)
+            puts(2, " columns of every row are sent; the right ")
+            putd(2, width - dev_max_w)
+            puts(2, " are NOT drawn (BB_W in user/linux-wsys.c)\n")
+        cols = dev_max_w
+    # And the same for the bottom edge: bb_blit clips a row whose y is past
+    # the window's height and says nothing, so rows below the device's maximum
+    # were being copied, written and thrown away -- silently, and at the cost
+    # of a write(2) each.
+    rows: int32 = height
+    if rows > dev_max_h:
+        if said_tall == 0:
+            said_tall = 1
+            puts(2, "wsyswl: a surface is ")
+            putd(2, height)
+            puts(2, " rows tall and no window on this system may exceed ")
+            putd(2, dev_max_h)
+            puts(2, " -- the bottom ")
+            putd(2, height - dev_max_h)
+            puts(2, " rows are NOT drawn (BB_H in user/linux-wsys.c)\n")
+        rows = dev_max_h
+    rowbytes: uint64 = cast[uint64](cols) * 4
     src: Ptr[uint8] = cast[Ptr[uint8]](base)
     y: int32 = 0
-    while y < height:
+    while y < rows:
         pos: uint64 = cast[uint64](offset) \
                     + cast[uint64](y) * cast[uint64](stride)
         if pos + rowbytes > maplen:
@@ -3429,7 +3499,7 @@ def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
             # it is too, so the rest of the window is simply not sent -- which
             # is a HALF-DRAWN window, not a missing one, and worth its own name.
             drop(S_SHORT, "a buffer row past the end of the shm mapping -- window cut short")
-            y = height
+            y = rows
         else:
             i: uint64 = 0
             while i < rowbytes:
@@ -3451,15 +3521,42 @@ def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
             put_le32(&blithdr[0], 9, cols)
             put_le32(&blithdr[0], 13, y + 1)
             blithdr[17] = FMT_BGRA8888
-            sys_write(dfd, &blithdr[0], 18)
-            sys_write(dfd, &rowbuf[0], rowbytes)
-            hit(S_ROWS)
-            y = y + 1
+            # AND LOOK AT WHAT THE DEVICE SAID. This return value was thrown
+            # away, and that is the half of the defect that made it invisible:
+            # /dev/wsys refuses an over-large blit rect with EMSGSIZE and
+            # prints one line, and this server -- the process that chose the
+            # rect -- carried on writing refused rows for the life of the
+            # client with nothing to show for it. A write this server does not
+            # look at is a frame it cannot know it lost.
+            wh: int64 = sys_write(dfd, &blithdr[0], 18)
+            wr: int64 = 0
+            if wh == 18:
+                wr = sys_write(dfd, &rowbuf[0], rowbytes)
+            if wh != 18 or wr != cast[int64](rowbytes):
+                if said_refused == 0:
+                    said_refused = 1
+                    puts(2, "wsyswl: /dev/wsys refused a blit row of ")
+                    putd(2, cols)
+                    puts(2, " columns for a ")
+                    putd(2, width)
+                    puts(2, "x")
+                    putd(2, height)
+                    puts(2, " surface (header ")
+                    putd(2, cast[int32](wh))
+                    puts(2, ", payload ")
+                    putd(2, cast[int32](wr))
+                    puts(2, " of ")
+                    putd(2, cast[int32](rowbytes))
+                    puts(2, ") -- this window is NOT being drawn\n")
+                y = rows
+            else:
+                hit(S_ROWS)
+                y = y + 1
     blithdr[0] = 68                                      # 'D', publish
     put_le32(&blithdr[0], 1, 0)
     put_le32(&blithdr[0], 5, 0)
     put_le32(&blithdr[0], 9, cols)
-    put_le32(&blithdr[0], 13, height)
+    put_le32(&blithdr[0], 13, rows)
     sys_write(dfd, &blithdr[0], 17)
     hit(S_COMMIT)
     if verbose != 0:
@@ -5276,6 +5373,116 @@ def resolve_screen() -> int32:
         MAX_W = 320
     if MAX_H < 240:
         MAX_H = 240
+    # ...AND NOT BIGGER THAN A WINDOW CAN BE. "Maximised" is an instruction
+    # this server gives a client, and on a 2400- or 2560-wide screen it used
+    # to be an instruction to become a size no window on this system can
+    # paint at -- which is to say an instruction to disappear. The client is
+    # told a size it can actually render into, and the difference is stated
+    # rather than absorbed: a desktop whose maximised windows do not fill the
+    # screen has to be readable as this and not as a layout bug.
+    if dev_max_w > 0 and MAX_W > dev_max_w:
+        puts(2, "wsyswl: the screen is ")
+        putd(2, scr_w)
+        puts(2, " wide but no window may exceed ")
+        putd(2, dev_max_w)
+        puts(2, " -- a maximised client is told ")
+        putd(2, dev_max_w)
+        puts(2, ", not ")
+        putd(2, MAX_W)
+        puts(2, "\n")
+        MAX_W = dev_max_w
+    if dev_max_h > 0 and MAX_H > dev_max_h:
+        puts(2, "wsyswl: the screen is ")
+        putd(2, scr_h)
+        puts(2, " tall but no window may exceed ")
+        putd(2, dev_max_h)
+        puts(2, " -- a maximised client is told ")
+        putd(2, dev_max_h)
+        puts(2, ", not ")
+        putd(2, MAX_H)
+        puts(2, "\n")
+        MAX_H = dev_max_h
+    return 1
+
+
+# HOW BIG MAY A WINDOW BE? The device knows and now says so; this reads it.
+#
+# There is no fallback and no default, deliberately, and the reason is the
+# whole of the bug above: the last number that stood in for this one was
+# 8192/4 = 2048 columns, which was the size of a buffer rather than a fact
+# about anything, and it was wrong by 128 columns in the direction that makes
+# every affected window blank. /dev/wsys is served IN THIS PROCESS by
+# user/linux-wsys.c -- the same build -- so `maxsurface` is not a field that
+# can be missing across a version boundary. If it is missing, something is
+# wrong that a guess would hide.
+def resolve_maxsurface() -> int32:
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/pool"))
+    if fd < 0:
+        puts(2, "wsyswl: /dev/wsys/pool cannot be opened -- this server "
+                "cannot learn how big a window may be, and will not guess\n")
+        return 0
+    n: int64 = sys_read(fd, &poolbuf[0], 255)
+    sys_close(fd)
+    if n <= 0:
+        puts(2, "wsyswl: /dev/wsys/pool is empty -- no maximum surface\n")
+        return 0
+    ln: uint64 = cast[uint64](n)
+    poolbuf[ln] = 0
+    # Find "maxsurface " and take "<w>x<h>" after it.
+    i: uint64 = 0
+    at: int64 = -1
+    while i + 11 <= ln:
+        if poolbuf[i] == 109 and poolbuf[i + 1] == 97 \
+                and poolbuf[i + 2] == 120 and poolbuf[i + 3] == 115 \
+                and poolbuf[i + 4] == 117 and poolbuf[i + 5] == 114 \
+                and poolbuf[i + 6] == 102 and poolbuf[i + 7] == 97 \
+                and poolbuf[i + 8] == 99 and poolbuf[i + 9] == 101 \
+                and poolbuf[i + 10] == 32:
+            at = cast[int64](i) + 11
+            i = ln
+        else:
+            i = i + 1
+    if at < 0:
+        puts(2, "wsyswl: /dev/wsys/pool does not state a `maxsurface` -- the "
+                "device and this server disagree about what they are\n")
+        return 0
+    j: uint64 = cast[uint64](at)
+    w: int32 = 0
+    while j < ln and poolbuf[j] >= 48 and poolbuf[j] <= 57:
+        w = w * 10 + cast[int32](poolbuf[j]) - 48
+        j = j + 1
+    if j >= ln or poolbuf[j] != 120:                     # 'x'
+        puts(2, "wsyswl: /dev/wsys/pool's `maxsurface` is not <w>x<h>\n")
+        return 0
+    j = j + 1
+    h: int32 = 0
+    while j < ln and poolbuf[j] >= 48 and poolbuf[j] <= 57:
+        h = h * 10 + cast[int32](poolbuf[j]) - 48
+        j = j + 1
+    if w < 1 or h < 1:
+        puts(2, "wsyswl: /dev/wsys/pool states a maximum surface of ")
+        putd(2, w)
+        puts(2, "x")
+        putd(2, h)
+        puts(2, ", which is not a size\n")
+        return 0
+    # AND THE BUFFER HAS TO BE ABLE TO HOLD ONE OF ITS ROWS. This is the check
+    # that would have caught the original defect at startup instead of on a
+    # user's screen: a fixed buffer meeting a peer that outgrew it is a
+    # documented pattern in this tree, and the answer is to compare the two
+    # numbers out loud rather than to clip to the smaller one in silence.
+    if cast[uint64](w) * 4 > ROWBUF_CAP:
+        puts(2, "wsyswl: the device's maximum surface is ")
+        putd(2, w)
+        puts(2, " columns -- ")
+        putd(2, w * 4)
+        puts(2, " bytes a row -- and this server's row buffer holds only ")
+        putd(2, cast[int32](ROWBUF_CAP))
+        puts(2, ". Raise rowbuf/ROWBUF_CAP in user/wsyswl.ad to at least "
+                "BB_W*4 from user/linux-wsys.c.\n")
+        return 0
+    dev_max_w = w
+    dev_max_h = h
     return 1
 
 
@@ -5476,6 +5683,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
     # BEFORE the socket exists. A client that connects and binds wl_output in
     # the same breath must not be able to catch a zero.
+    #
+    # The maximum surface comes FIRST, because resolve_screen() uses it: what
+    # a maximised client is told must not exceed what a window may be.
+    if resolve_maxsurface() == 0:
+        return 1
+    puts(1, "wsyswl: a window may be at most ")
+    putd(1, dev_max_w)
+    puts(1, "x")
+    putd(1, dev_max_h)
+    puts(1, " (/dev/wsys/pool)\n")
     if resolve_screen() == 0:
         return 1
     puts(1, "wsyswl: screen ")
