@@ -154,6 +154,36 @@ fi
 # ANY uid. It proves the server looks at the message rather than executing it
 # on trust -- which is not the same as proving it looks at the CALLER, and 2b
 # is where that is faced honestly.
+#
+# THIS ARM STRADDLES TOO, FOR A REASON THAT IS NOT THIS FILE'S TO FIX, and it
+# is written down here so the next person does not spend a day rediscovering
+# it. Measured: 1 red in 4 consecutive end-to-end runs, on a tree with no
+# relevant change.
+#
+#     srvmu: FAIL the server never received the routed write for a nonexistent
+#            window ... (write 3713 -> 3715)
+#
+# THE ARRIVAL PROOF IS AN EQUALITY ON A GLOBAL COUNTER. srv_mutate_probe() in
+# user/linux-wsys.c reads the server's `write` total, sends one routed write,
+# reads the total back, and requires EXACTLY w1 == w0 + 1. But the arm-1
+# dragging client is STILL ALIVE at this point -- it is not killed until after
+# 2b, deliberately, because the enumeration below has to be read while it
+# lives -- and with HAMWSYS_SERVER=1 every one of its ~900 ctl writes a second
+# increments that same total. Across the four runs the counter moved by 9, 9,
+# 12 and 17 between arm 1's stat and this one, so a client write landing
+# inside the probe's own two-call window is a coin toss, not a rarity, and
+# when it lands w1 is w0 + 2 and the probe reports the message as NEVER
+# ARRIVED. It did arrive: `refused` went 2 -> 3 in the same run, which is the
+# refusal this arm exists to observe.
+#
+# So the red is an instrument fault and the property it tests was true. The
+# honest repair is in the PROBE, not here -- it should witness arrival by the
+# delta in `refused` (which only refusals move, and the legitimate client's
+# writes are never refused), or by a per-connection counter, instead of by an
+# equality on a total that another process is driving. That is a change to
+# user/linux-wsys.c, which another branch is editing, so this pass diagnoses it
+# and does not touch it. NOT FIXED, AND NOT SILENCED: this arm can still go red
+# on a busy host, and when it does, `refused` advancing by one is the tell.
 HAMWSYS_SERVER=1 "$BIN/wsys_srv_probe" mutate 9999 >"$W/attack.ghost" 2>&1
 GRC=$?
 sed 's/^/srvmu:      /' "$W/attack.ghost"
@@ -351,6 +381,24 @@ awk -v d="$DELTA" -v q="$QUANT" 'BEGIN{
 #     than the one this was measured on ............... 9%  -> 10%
 # 10% is ~8.9 sd of the measured delta, so a green run is green because the
 # arms agree, not because the bar was lowered to meet them.
+#
+# AND THE REASON A BUSY HOST DOES NOT BREAK IT, which is the one thing the 20
+# quiet repetitions above could not show. Four end-to-end runs of THIS FILE,
+# taken while the host was carrying other agents' builds, unrouted/routed:
+#
+#     522/516   500/546   507/544   424/480
+#
+# The excursions are far bigger than the quiet run's (424 is 22% below the
+# quiet mean) and they are ASYMMETRIC -- three of the four move the comparison
+# in the SAFE direction. Arm 4 says why, in the same runs: the unrouted arm is
+# SATURATED (98.05%, 98.08%, 98.92%, 99.72% of a core) while the routed arm
+# has headroom (85.38%, 85.67%, 86.20%, 97.92%). A saturated loop is the one
+# that loses frames when the host takes CPU away, and it is the DENOMINATOR
+# here. So host load pushes FON/FOFF UP, and the failing direction is reached
+# only on a quiet host where the two arms are equal and noise picks the sign --
+# which is exactly the 20-repetition distribution the tolerance is derived
+# from. The worst routed-below-unrouted ratio in all 24 measurements is
+# -1.15%, against a 10% bar.
 #
 # WHAT THIS GATE CAN AND CANNOT SAY NOW, stated plainly rather than left for a
 # reader to discover: it CANNOT see a frame-rate regression smaller than 10%.
