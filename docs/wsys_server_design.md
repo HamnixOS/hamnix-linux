@@ -950,7 +950,68 @@ assertions that the v9 binary refused by name, that `/srv/wsys` is unresized,
 that the window table is unchanged, and that `/srv/wsys.refused` carries
 `refused live=8 mine=9`.
 
-REHEARSAL_RESULT_PLACEHOLDER
+**RUN, AND IT IS GREEN: 37 PASS / 0 FAIL, one FINDING, three boots.** Machine
+installed whole at 77.7.1 (wsys v7), updated live to 77.8.2 (v8), rebooted,
+updated live again to 77.9.3 (v9). Three channels built here from symlink
+farms, three distinct compositors — `9a219bf3…` (v7), `8f5c0b6a…` (v8),
+`1bb71cc7…` (v9) — so every assertion below was asked of a boundary that
+existed.
+
+**The 8 → 9 half, which is the one this section needed:**
+
+| | |
+|---|---|
+| the refusal | a v9 binary met the live v8 session and **refused by name**: *"REFUSING to attach to /srv/wsys: it is a LIVE window-system session of version 8 and this program is version 9"* |
+| the segment | **37,972,380 bytes before and after** the second update and the notice — not resized, not truncated, not one byte written |
+| the marker | `/srv/wsys.refused` carries **`refused live=8 mine=9`**, so the notice came from a real refusal and not from something else that drew a card |
+| the person | the notice rectangle goes **0% (STAGE D, nothing refused yet) → 82% (STAGE E, after real clicks on Applications)** |
+| it stays | a click at (900,600), far from the card, left it at **82%** — a notice, not a one-frame flash |
+| it clears | a click on the card took it back to **0%** |
+| not wedged | one more click on Applications moved **31,227 px against a 277 px noise floor** |
+| one panel, not both | card at 82% on the bar that carries the button; the **taskbar's own box is 0%**, and the window table agrees — the menu panel grew 26 → 112 px to hold it, the taskbar stayed 26 |
+
+**The 7 → 8 half reproduced the designed behaviour and is the control**: the
+screen stayed a desktop (1461 distinct colours against the 3 of the slab this
+gate photographed before the refusal existed), 45,406 px differed from stage B
+out of 1,024,000, the window count was 4 at B and 4 at C, the leftover control
+re-initialised and ping-ponged its four md5s correctly, and the reboot came up
+on the new compositor with both panels back.
+
+**THE FINDING, AND IT IS THE SHAPE OF THE COST:** at STAGE C the click *is*
+answered — the panel logs the button and spawns `/bin/hamappmenu` — and the menu
+never appears, because the spawned binary is the new one and it refuses the
+running session. **Nothing on the screen says so; the words are on stderr.**
+That is not a defect of the refusal, it is the arithmetic this gate already
+documents: the panel that survives 7 → 8 was built before the notice existed,
+and no change made in a tree can put a notice on a screen owned by a binary
+that shipped before it. At 8 → 9 the surviving panel *does* have the notice, and
+the 0% → 82% above is that same person being told. **So the release note for
+the bump has to say: the person is told only if the panel they are running
+already knows how.**
+
+**WHAT THIS REHEARSAL DOES NOT PROVE, said plainly.** The v9 channel is this
+tree with one integer changed. The in-process path is still in it, both sides
+still map the segment, and `HAMWSYS_SERVER` is still unset. **So what was
+measured is the refusal MACHINERY — that 8 → 9 refuses rather than wipes, and
+that a person sees why — and not the boundary.** Stage 7's real v9 is a
+different artefact and this gate will need the arms in 7.2 (the refusal stub)
+and 7.4 (a v8 client against a v9 server) before it can say anything about
+enforcement. It is the right rehearsal for the *update*, and it is cheap: with
+the three channels cached it is one disk build and three boots.
+
+**TWO THINGS THE NEXT PERSON TO RUN IT SHOULD KNOW**, both paid for here:
+
+- **A STALE `build/image` FAILS THIS GATE IN A WAY IT CANNOT DIAGNOSE.** The
+  only precondition is `[ -f build/image/vmlinuz ]`. An image staged before
+  `b45cb69f` ("name the root by its partition GUID") does not switch root when
+  this tree's `hamlinux_disk.sh` writes `root=PARTUUID=` — so the machine boots
+  the *initramfs* rc, prints "handing off to an interactive shell", never runs
+  phase 1, and the gate correctly refuses with `THE BASELINE NEVER INSTALLED`
+  after paying for three channel builds. **Rebuild the image from the tree under
+  test first.** A cheap fix would be for the gate to compare
+  `build/image/vmlinuz`'s mtime against `HEAD`'s commit date and say so.
+- **It prints no final tally line on the green path** — only on the early-exit
+  ones. The 37/0 above is counted from `^wv: PASS` / `^wv: FAIL`.
 
 ## 7.3 What it costs — and the budget has no term for the thing that changes
 
