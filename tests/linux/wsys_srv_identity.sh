@@ -56,15 +56,29 @@
 # uid/pid and the window's owner pid, from inside srv_as_caller(). The arms
 # below assert on those lines rather than inferring them.
 #
-# HOW THE UIDS ARE GOT WITHOUT ROOT, and why this gate is exempt from
-# private_ns.sh: the same reasoning as tests/linux/wsys_uidgate.sh and
-# tests/linux/wsys_bypass.sh, written up at length in the first of those. The
-# namespace is only obtainable via `unshare --map-root-user`, inside which
-# geteuid() is 0 -- and user/linux-wsys.c's hostowner() returns 1 for uid 0
-# unconditionally. A gate whose whole question is WHICH UID may write WHICH
-# window cannot be run by a process pretending to be root: every arm would pass
-# and every one would be about the wrong uid. So: `unshare -U --map-users` with
-# three ids out of /etc/subuid, and every path under the gate's own temp dir.
+# HOW THE UIDS ARE GOT WITHOUT ROOT -- AND WHY THIS GATE IS *NOT* EXEMPT FROM
+# private_ns.sh, THOUGH IT SAID IT WAS
+# ==============================================================================
+# The reasoning that made wsys_uidgate.sh exempt is real: the helper's namespace
+# is only obtainable via `unshare --map-root-user`, inside which geteuid() is 0,
+# and user/linux-wsys.c's hostowner() returns 1 for uid 0 unconditionally. A
+# gate whose whole question is WHICH UID may write WHICH window cannot be run by
+# a process pretending to be root.
+#
+# IT DOES NOT REACH THIS GATE, and this header used to claim it did. wsys_uidgate
+# makes its assertions AS the invoking process. This one makes none: every arm
+# runs inside a `unshare -U --map-users` namespace of its own, as inner uid 0,
+# 1001 or 1002. Whether the OUTER shell is uid 1000 or a namespace's uid 0
+# changes nothing any assertion here reads -- the segment is still owned by inner
+# 1001, the attacker is still inner 1002, and hostowner() still answers about
+# those. Measured: 17 passed / 0 failed on both sides of the change, arm for arm.
+#
+# So: `unshare -U --map-users` with three ids, and every path under the gate's
+# own temp dir. The ids come out of /etc/subuid on a bare host and out of THIS
+# NAMESPACE'S OWN MAP when the gate runs inside private_ns.sh -- where `id -un`
+# is root and /etc/subuid has no root line, which without the second case would
+# have made this gate SKIP, score nothing, and exit green. The selection is at
+# the foot of the outer half.
 #
 # ARM D'S NEGATIVE CONTROL, RUN, AND THE FIRST VERSION OF THIS ARM WAS DELETED
 # ============================================================================
@@ -414,6 +428,15 @@ fi
 # OUTER HALF
 # ======================================================================
 cd "$PROJ"
+# PRIVATE NAMESPACE FIRST. wsysd's names are compiled into it -- /srv/wsys,
+# /dev/shm/hamnix-wsys, /tmp/hamnix-wsys -- so a run of this gate beside a live
+# desktop is a collision, not an untidiness (tests/linux/private_ns.sh). It goes
+# before $W and before anything under ${TMPDIR:-/tmp}: the helper re-EXECS this
+# script, and a path taken from the host's /tmp is not there afterwards.
+# See the header for why the uid caveat that exempts wsys_uidgate.sh does not
+# reach this gate.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 # PER-RUN BY DEFAULT: $BIN is "$OUT/bin", and a fixed default meant two
 # concurrent agents compiled into the same bin/ and copied each other's
 # half-written binaries into their namespaces. SRV_WORK pins it to reuse a
@@ -450,10 +473,48 @@ done
 
 command -v unshare >/dev/null || { echo "srvid: SKIP no unshare(1)"; exit 0; }
 command -v setpriv >/dev/null || { echo "srvid: SKIP no setpriv(1)"; exit 0; }
-grep -q "^$(id -un):" /etc/subuid 2>/dev/null || {
-    echo "srvid: SKIP no /etc/subuid range for $(id -un); run this in the VM"
-    exit 0; }
-SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
+# WHERE THE SECOND AND THIRD UID COME FROM -- TWO CASES, AND THE SECOND ONE IS
+# WHAT LETS THIS GATE BE ISOLATED AT ALL.
+#
+# On a bare host they are subordinate ids out of /etc/subuid for the invoking
+# user, as they always were. Inside private_ns.sh's namespace `id -un` is root,
+# /etc/subuid HAS NO root LINE, and reading only that file would make this gate
+# SKIP -- scoring 0 arms while exiting green, which is exactly the
+# success-shaped answer the tree refuses.
+#
+# But a process that is root in a user namespace holding a mapped RANGE already
+# owns ids 1001 and 1002 and may map them to themselves in a child, needing no
+# /etc/subuid and no setuid helper -- the same trick private_ns.sh uses when it
+# mirrors /proc/self/uid_map for a nested re-exec. Measured inside: the nested
+# unshare succeeds and `setpriv --reuid=1001` / `--reuid=1002` reach two real,
+# distinct uids.
+#
+# THE SECOND CASE TESTS ITSELF BY DOING THE MAPPING, and does not read
+# /proc/self/uid_map: on a bare host with no /etc/subuid that file reads
+# `0 0 4294967295`, which "contains" 1001 and 1002 while an unprivileged
+# process may map neither. A range read would turn a clean SKIP into
+# "FAIL namespace run rc=1" -- a gate reporting a defect it did not find.
+#
+# Either way the INNER ids are 0, 1001 and 1002, which is all any arm reads.
+SUB=""
+if grep -q "^$(id -un):" /etc/subuid 2>/dev/null \
+   && grep -q "^$(id -un):" /etc/subgid 2>/dev/null; then
+    SUB="$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)"
+    IDSRC="/etc/subuid range $SUB for $(id -un)"
+elif unshare -U \
+        --map-users=0:"$(id -u)":1      --map-groups=0:"$(id -g)":1 \
+        --map-users=1001:1001:1         --map-groups=1001:1001:1 \
+        --map-users=1002:1002:1         --map-groups=1002:1002:1 \
+        true 2>/dev/null; then
+    SUB=1001
+    IDSRC="ids 1001/1002 are already this namespace's own (mapped to themselves; no /etc/subuid needed)"
+else
+    echo "srvid: SKIP no /etc/subuid range for $(id -un), and this namespace does"
+    echo "srvid: SKIP not already own uids 1001 and 1002; run this in the VM"
+    exit 0
+fi
+note "$(priv_ns_describe)"
+note "the two extra uids: $IDSRC"
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/wsrvid.XXXXXX")"
 trap 'rm -rf "$W"; [ "${OUT_EPHEMERAL:-0}" = 1 ] && rm -rf "$OUT"' EXIT
