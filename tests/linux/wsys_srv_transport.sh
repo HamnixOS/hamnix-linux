@@ -620,15 +620,23 @@ awk -v f="$FIXED_PCT" -v fb="$FIXED_BUDGET" -v m="$MARGINAL_US" -v mb="$MARGINAL
 # neighbours than about the mediator. It is NOT a pass/fail arm: the
 # correctness arms above are unaffected by load and stay meaningful either way.
 if [ -s "$W/hostcond" ]; then
+    # THE VERDICT IS ABOUT CONTENTION, NOT ABOUT COMPANY. What corrupts these
+    # numbers is other processes taking the CPU, and that is what loadavg
+    # measures. A foreign compositor merely BEING bound does not: this gate
+    # reads wsysd's OWN /proc/<pid>/stat, so an idle neighbour -- and leaked
+    # idle wsysd processes from other sessions do accumulate on this box, seen
+    # at 0.0-0.3% of a core and hours old -- cannot inflate it. A BUSY
+    # neighbour can, and shows up in the loadavg. So the srv count is reported
+    # as context and the loadavg decides.
     awk '{ if ($1+0 > maxl) maxl=$1+0; if ($2+0 > maxs) maxs=$2+0; n++ }
          END{
-           printf "srvtr: .... host during the CPU samples: %d samples, peak loadavg %.2f, peak bound srv names %d\n", n, maxl, maxs;
-           if (maxs > 1)
-               printf "srvtr: .... NOT ATTRIBUTABLE: another compositor was bound while these were taken. The percentages above describe this machine, not this tree -- RE-TAKE THEM QUIET.\n";
+           printf "srvtr: .... host during the CPU samples: %d samples, peak loadavg %.2f, peak bound srv names %d (ours is one of them)\n", n, maxl, maxs;
+           if (maxl > 2.5)
+               printf "srvtr: .... NOT ATTRIBUTABLE: peak loadavg %.2f. On this host the same assertion has read 0.27%% contended against 0.17%% quiet -- RE-TAKE THESE QUIET before quoting them.\n", maxl;
            else if (maxl > 2.0)
-               printf "srvtr: .... SUSPECT: peak loadavg %.2f exceeded 2.0. Treat the percentages as an upper bound and re-take them quieter.\n", maxl;
+               printf "srvtr: .... SUSPECT: peak loadavg %.2f exceeded 2.0. Treat the percentages as an UPPER BOUND and re-take them quieter.\n", maxl;
            else
-               printf "srvtr: .... ATTRIBUTABLE: no foreign compositor, peak loadavg %.2f under 2.0.\n", maxl;
+               printf "srvtr: .... ATTRIBUTABLE: peak loadavg %.2f, under 2.0 throughout.\n", maxl;
          }' "$W/hostcond"
 fi
 
