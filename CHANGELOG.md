@@ -202,11 +202,53 @@ This is new since 1.0.22 — the hardware driver list was added after that
 release went out — so it is a hole this candidate would have shipped rather
 than one that has been there.
 
+### A window painted in pieces stopped painting at 1 MiB — and painted NOTHING
+
+A program that draws a window by sending it a row at a time, rather than all at
+once, was cut off once the picture passed one megabyte. It did not draw a
+partial picture. **It drew nothing at all**, because a drawing that is never
+finished is never applied — so the window stayed black, and the program was
+told its writes had succeeded.
+
+This is the second half of a bug fixed earlier this month, where a two-megabyte
+drawing sent in one piece was refused and no window larger than about 512×512
+had ever painted. That fix stopped sending whole drawings through the
+reassembly buffer; **it never made the buffer bigger**. Anything still sent in
+pieces kept hitting the same one-megabyte wall. Measured before the fix on a
+1024×768 window sent as 768 rows: 513 of the 768 rows were refused, the first
+at row 255 — exactly where the total crossed 1,048,576 bytes — and all three
+colour bands read back black, including the band that fitted.
+
+The buffer now grows as needed, up to the largest drawing a window can hold,
+and every refusal says so out loud instead of returning a quiet error nobody
+prints. A second fault was found in the same place: **one buffer was shared by
+every window a program owned**, so two windows drawn at once could splice their
+pixels into each other. It is now one per window. A third: an oversized
+rectangle's byte count could overflow and wrap past its own bounds check, so
+the size is now refused before the pixels are read.
+
+No program shipped on the image hits the size limit today — the one that draws
+in pieces caps its rows well under it — so this is a fix to a floor nobody had
+stood on yet rather than a defect anyone reported.
+
 ### Landed and deliberately NOT listed above
 
 `/dev/wsys` is being turned into a real file server with a boundary a program
-cannot talk its way past. Three stages of it are in the tree, and **all of it
-is inert unless `HAMWSYS_SERVER=1` is set, which nothing sets.** A person using
+cannot talk its way past. Seven stages of it are in the tree, along with a
+written plan for the rest and a rehearsal of the version bump that ends it, and
+**all of it is inert unless `HAMWSYS_SERVER=1` is set, which nothing sets.**
+
+Two things are worth stating plainly for whoever reads this later, because both
+were measured rather than assumed. The boundary is **not** closed yet: of the
+nineteen files under `/dev/wsys`, three are routed through the server for
+writing and three for reading, and the privacy it buys today amounts to a
+window's **title** and nothing else — another program can still list the
+windows, read their geometry and drain their event queues. And the rehearsal of
+the bump showed the update **refuses rather than wipes** — the session survives
+untouched, byte for byte, and the person is told why — but only if the panel
+they are already running is new enough to know how to tell them.
+
+A person using
 the machine cannot tell it is there, so it is not a changelog entry yet; it
 becomes one when the version bump that removes the old path lands, and that
 bump is the last step rather than the first. `HANDOFF.md` §0 and
