@@ -172,6 +172,12 @@ frame_out: Array[8260, uint8]
 
 # KEXINIT payloads — the exact bytes of our KEXINIT (I_S) and the
 # client's KEXINIT (I_C), needed verbatim for the exchange hash.
+# I_BUF_CAP IS A LIMIT ON A PEER-SIZED THING, so it is named and checked
+# rather than left as a literal beside a memcpy. A KEXINIT is as long as the
+# peer's algorithm lists make it; _recv_packet accepts a packet up to 8192
+# bytes (see the `pkt_len > 8192` guards), so the peer can hand us four times
+# what these hold.
+I_BUF_CAP: uint64 = 2048
 i_s_buf: Array[2048, uint8]
 i_s_len: Array[1, uint64]
 i_c_buf: Array[2048, uint8]
@@ -2155,6 +2161,26 @@ def _serve_one() -> int32:
         _log("[sshd] expected KEXINIT\n")
         return -1
     # Stash the client's KEXINIT payload verbatim for the exchange hash.
+    #
+    # REFUSED AT THE LIMIT, NOT TRUNCATED, and this copy used to be neither.
+    # `pkt_in_len` is whatever _recv_packet accepted -- up to 8190 bytes -- and
+    # it was memcpy'd straight into this 2048-byte buffer with nothing between
+    # the two numbers. A peer that sends a KEXINIT longer than 2048 bytes
+    # therefore wrote up to six kilobytes past the end of i_c_buf, BEFORE
+    # AUTHENTICATION: KEXINIT is the first packet after the version exchange,
+    # so any peer that can open a TCP connection could reach it. It is not only
+    # an attack, either -- a KEXINIT is as long as the peer's algorithm lists
+    # make it, so an ordinary client offering many algorithms and host-key
+    # types can exceed 2048 on its own.
+    #
+    # AND IT REFUSES RATHER THAN TAKING A PREFIX, which is the one place the
+    # usual cap-and-drain answer is wrong: the exchange hash is computed over
+    # I_C VERBATIM, so a truncated copy would not overflow and would instead
+    # produce a hash neither side agrees on -- KEX would fail later, naming
+    # neither this buffer nor this packet. Saying it here costs one line.
+    if pkt_in_len[0] > I_BUF_CAP:
+        _log("[sshd] the client's KEXINIT does not fit the exchange-hash buffer -- refusing the connection rather than overrunning it or hashing a prefix\n")
+        return -1
     _memcpy(&i_c_buf[0], &pkt_in[0], pkt_in_len[0])
     i_c_len[0] = pkt_in_len[0]
     _log("[sshd] received KEXINIT\n")
