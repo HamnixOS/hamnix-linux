@@ -1,5 +1,17 @@
 # Installing and booting Hamnix on real x86_64 hardware
 
+> **SCOPE, READ FIRST — THIS DOCUMENT IS NOT ABOUT hamnix-linux.** It is one of
+> the Hamnix 1.0 design documents this repository copied wholesale (see
+> `README.md` § Layout), and every hardware boot it records — the Intel Skull
+> Canyon NUC, the Asus i5-4210U — is **Hamnix 1.0's own from-scratch kernel**
+> (`hamnix-kernel.elf`, the native NVMe and xHCI drivers, `enter linux { … }`),
+> not the Linux-kernel port this tree builds.
+>
+> **hamnix-linux has never been booted on a physical machine.** Not the
+> installer on real disks, not real GPUs, not Wi-Fi, not suspend. VM and hybrid
+> development are primary; native install is in progress. `README.md` § Status
+> is the authority on that and this file does not amend it.
+
 This document is the practical, mechanical guide for putting the Hamnix
 disk image on a USB stick, booting it on real x86_64 hardware, and
 reporting what worked + what didn't.

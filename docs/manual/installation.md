@@ -3,6 +3,11 @@
 This page walks you from a downloaded Hamnix image to a running, installed
 system on your own disk.
 
+> **SCOPE — this is Hamnix 1.0's installer, not hamnix-linux's.** hamnix-linux
+> installs from a package channel (`hpm refresh https://255.one/`), and **it has
+> not been booted on a physical machine**: put it in a virtual machine, not on a
+> disk you care about. See `README.md` § Status.
+
 ## What you get to install from
 
 Hamnix ships as a **single UEFI installer image**: `build/hamnix-installer.img`.

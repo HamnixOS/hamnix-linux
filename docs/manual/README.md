@@ -1,5 +1,11 @@
 # Welcome to Hamnix
 
+> **SCOPE — this manual is Hamnix 1.0's**, copied into this repository wholesale
+> (see `README.md` § Layout). hamnix-linux is the Linux-kernel sibling; it
+> installs and updates from `https://255.one/` with `hpm` rather than from the
+> installer image described here, and it **has never been booted on a physical
+> machine**. Where the two disagree, `README.md` § Status is the authority.
+
 Hamnix is a small, self-contained operating system with a friendly graphical
 desktop. It boots straight to a MATE-style desktop — an Applications menu in the
 top-left, a panel with a clock, virtual workspaces, and a set of built-in apps
