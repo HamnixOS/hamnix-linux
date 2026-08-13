@@ -345,7 +345,16 @@ fi
 # started, connected and was then turned away is this gate's SUBJECT and must
 # stay a FAIL.
 if [ "$FF_OK" = 0 ]; then
-    FF_WHY="$(grep -m1 -E 'Gtk:ERROR|Bail out!|mozalloc_abort|Unrecognized image file format|pixbuf loaders or the mime database' "$WORK/ff-a.log" 2>/dev/null)"
+    # -a IS LOAD-BEARING AND WAS BOUGHT WITH A WRONG ANSWER. Firefox's log has a
+    # NUL byte in it, so grep calls the file BINARY, prints "Binary file matches"
+    # to stderr instead of the line, and $(...) is THE EMPTY STRING -- while the
+    # abort it was looking for is sitting there in plain text. The first run of
+    # this very branch therefore took the `no client-side abort` path and printed
+    # a FAIL immediately above a tail(1) of the abort it had just failed to see.
+    # An empty read invented a verdict inside the code written to stop exactly
+    # that. tests/linux/gate_read.sh is the standing lesson; this is its newest
+    # instance.
+    FF_WHY="$(grep -a -m1 -E 'Gtk:ERROR|Bail out!|mozalloc_abort|Unrecognized image file format|pixbuf loaders or the mime database' "$WORK/ff-a.log" 2>/dev/null)"
     if [ -n "$FF_WHY" ]; then
         skip "firefox-esr IS INSTALLED ($("$FF" --version 2>/dev/null)) BUT CANNOT START ON THIS HOST, and it died before opening any Wayland connection, so nothing below it measures the compositor:"
         skip "    $FF_WHY"
@@ -651,8 +660,12 @@ fi
 # AND IT MUST STILL FAIL BY NAME. The regression this tree paid for once was a
 # refused client printing `No wl_shm global`, blaming a feature that is
 # present. The refusal has to name the limit and its value, at 16 as at 32.
-CMSG="$(grep -m1 'connection table full' "$W2/wsyswl.err" 2>/dev/null)"
-if grep -q "too many clients -- raise MAXCONN" "$W2/wsyswl.err"; then
+# -a here for the same reason as section 1: a single NUL anywhere in the
+# compositor's stderr would make grep silent, and a silent grep on this line
+# invents the FAIL "the control's stderr says nothing about a refused client"
+# against a server that said it perfectly well.
+CMSG="$(grep -a -m1 'connection table full' "$W2/wsyswl.err" 2>/dev/null)"
+if grep -a -q "too many clients -- raise MAXCONN" "$W2/wsyswl.err"; then
     ok "the control refuses BY NAME on its own stderr, not in silence"
 else
     bad "the control's stderr says nothing about a refused client"
