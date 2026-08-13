@@ -1,0 +1,157 @@
+# tests/linux/wsys_hammer.ad — READ A /dev/wsys FILE N TIMES AND COUNT THE TORN ONES.
+#
+# WHY THIS IS A PROGRAM AND NOT A SHELL LOOP
+# ==========================================
+# The defect it measures is a race with a window of a few microseconds: wsysd's
+# publish_state() opens /dev/wsys/wsysd/state for writing (which sets the
+# sink's len to 0) and writes the body in a SECOND syscall. A reader that opens
+# between the two gets an EMPTY body and exit status 0.
+#
+# `wsys_poke` reads once per process, so hammering with it costs a fork+exec
+# per sample: 200 samples is already seconds, and 200 samples of a 1-in-200
+# event is a coin flip. This reads in-process, so N can be 100000 and the
+# answer stops being luck.
+#
+# It classifies every read rather than only counting the empties, because
+# "empty" and "short" are different defects: an empty body means the reader
+# landed in the truncate window, a SHORT body would mean the body itself is
+# assembled in pieces. Reporting them separately is what lets the fix be
+# checked against the right one.
+#
+#   wsys_hammer <path> <n> [needle]
+#
+# prints:  hammer: reads <n> good <g> empty <e> short <s>
+# exit 0 always — the COUNT is the measurement; the caller decides the verdict.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+
+buf:  Array[8192, uint8]
+obuf: Array[256, uint8]
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+# Decimal, into obuf at `at`. Returns the new offset.
+def emit_u(at: uint64, v: uint64) -> uint64:
+    if v == 0:
+        obuf[at] = 48
+        return at + 1
+    d: Array[24, uint8]
+    n: uint64 = 0
+    while v > 0:
+        d[n] = cast[uint8](48 + cast[int32](v % 10))
+        v = v / 10
+        n = n + 1
+    i: uint64 = at
+    while n > 0:
+        n = n - 1
+        obuf[i] = d[n]
+        i = i + 1
+    return i
+
+
+def emit_s(at: uint64, s: Ptr[uint8]) -> uint64:
+    k: uint64 = 0
+    while s[k] != 0:
+        obuf[at] = s[k]
+        at = at + 1
+        k = k + 1
+    return at
+
+
+# Does buf[0..n) contain the NUL-terminated needle?
+def contains(n: uint64, needle: Ptr[uint8]) -> int32:
+    m: uint64 = slen(needle)
+    if m == 0:
+        return 1
+    if n < m:
+        return 0
+    i: uint64 = 0
+    while i + m <= n:
+        j: uint64 = 0
+        while j < m and buf[i + j] == needle[j]:
+            j = j + 1
+        if j == m:
+            return 1
+        i = i + 1
+    return 0
+
+
+def take_u(s: Ptr[uint8]) -> uint64:
+    v: uint64 = 0
+    i: uint64 = 0
+    while s[i] >= 48 and s[i] <= 57:
+        v = v * 10 + cast[uint64](cast[int32](s[i]) - 48)
+        i = i + 1
+    return v
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 3:
+        puts(2, "usage: wsys_hammer <path> <n> [needle]\n")
+        return 2
+    path: Ptr[char] = cast[Ptr[char]](argv[1])
+    n: uint64 = take_u(cast[Ptr[uint8]](argv[2]))
+    if n == 0:
+        puts(2, "wsys_hammer: n must be > 0\n")
+        return 2
+    # The needle is what makes a body WHOLE. Default "frames" is the last
+    # field publish_state() emits before the newline, so a body containing it
+    # is a body that was published in one piece.
+    needle: Ptr[uint8] = cast[Ptr[uint8]]("frames")
+    if argc >= 4:
+        needle = cast[Ptr[uint8]](argv[3])
+
+    good:  uint64 = 0
+    empty: uint64 = 0
+    short: uint64 = 0
+    openf: uint64 = 0
+
+    i: uint64 = 0
+    while i < n:
+        fd: int32 = sys_open(path)
+        if fd < 0:
+            openf = openf + 1
+            i = i + 1
+            continue
+        total: uint64 = 0
+        while total < 8191:
+            k: int64 = sys_read(fd, &buf[total], 8191 - total)
+            if k <= 0:
+                break
+            total = total + cast[uint64](k)
+        sys_close(fd)
+        if total == 0:
+            empty = empty + 1
+        elif contains(total, needle) == 0:
+            short = short + 1
+        else:
+            good = good + 1
+        i = i + 1
+
+    o: uint64 = 0
+    o = emit_s(o, "hammer: reads ")
+    o = emit_u(o, n)
+    o = emit_s(o, " good ")
+    o = emit_u(o, good)
+    o = emit_s(o, " empty ")
+    o = emit_u(o, empty)
+    o = emit_s(o, " short ")
+    o = emit_u(o, short)
+    o = emit_s(o, " openfail ")
+    o = emit_u(o, openf)
+    obuf[o] = 10
+    sys_write(1, &obuf[0], o + 1)
+    return 0

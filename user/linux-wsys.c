@@ -3231,6 +3231,10 @@ static int srv_trace(void)
 static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
                                    uint64_t n);
 static struct wwin *win_alloc(int32_t pid);
+/* The sink staging pair, defined beside carry_reserve whose shape they share:
+ * a sink body is assembled in the writer's own memory and published whole. */
+static int  sink_stage_reserve(struct hamwsys_file *f, uint64_t want);
+static void sink_publish(struct wsink *s, const uint8_t *body, uint64_t n);
 
 /* The three read-only leaves stage 4 routes.  Each one builds its answer into
  * f->snap; the read server sends that buffer and frees it.  Declared here for
@@ -7369,21 +7373,52 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
              * no slot left" are different facts and the caller must be able to
              * tell them apart. */
             if (!s) { if (!errno) errno = ENOSPC; return -1; }
-            s->len = 0;                        /* open-for-write truncates */
+            /* THE TRUNCATE THAT USED TO BE HERE IS THE TORN READ.
+             * `s->len = 0;` published an EMPTY sink to every reader for the
+             * whole gap between this open(2) and the write(2) that follows
+             * it -- microseconds, but wsysd republishes its state file every
+             * frame, and a reader hammering it caught the gap 25 times in
+             * 100000 (tests/linux/de_state_atomic.sh).  Truncation is now
+             * STAGED: the descriptor starts a fresh body, and the shared sink
+             * keeps its previous contents until a whole new one replaces it.
+             *
+             * `staged` is what preserves `> /dev/wsys/foo` with no write at
+             * all still emptying the sink -- see hamwsys_close, where that
+             * lands as a single store rather than as a window. */
+            f->stagelen = 0;
+            f->staged = 1;
             return 0;
         }
         if (!s) return snap_set(f, NULL, 0);   /* never written: empty, not ENOENT */
-        if (sink_is_launch_queue(f->name)) {
-            uint8_t t[WSYS_SINK_CAP + 16];
-            uint64_t n = put_int(t, 0, (int32_t)s->serial);
-            t[n++] = ' ';
-            uint32_t k = s->len;
+        /* THE READER'S HALF OF THE ATOMIC PUBLISH.  sink_publish stores the
+         * body, then the length, then bumps `serial` with a release.  Sample
+         * serial on either side of the copy: if it moved, a writer published
+         * underneath us and the bytes in hand may be half of each version, so
+         * take them again.  Identical in shape to the shm->gen sampling that
+         * brackets hamwsys_write.
+         *
+         * BOUNDED, and the bound is not a formality: a writer that republishes
+         * faster than this loop can copy must not hang a reader forever.  On
+         * giving up we fall through with the last copy taken, which is what
+         * this code did unconditionally before -- so the worst case is exactly
+         * today's behaviour, never worse. */
+        uint8_t t[WSYS_SINK_CAP + 16];
+        uint64_t n = 0;
+        int lq = sink_is_launch_queue(f->name);
+        for (int try = 0; try < 64; try++) {
+            uint32_t s0 = __atomic_load_n(&s->serial, __ATOMIC_ACQUIRE);
+            n = 0;
+            if (lq) {
+                n = put_int(t, 0, (int32_t)s0);
+                t[n++] = ' ';
+            }
+            uint32_t k = __atomic_load_n(&s->len, __ATOMIC_ACQUIRE);
             if (k > WSYS_SINK_CAP) k = WSYS_SINK_CAP;
             memcpy(t + n, s->b, k);
             n += k;
-            return snap_set(f, t, n);
+            if (__atomic_load_n(&s->serial, __ATOMIC_ACQUIRE) == s0) break;
         }
-        return snap_set(f, s->b, s->len);
+        return snap_set(f, t, n);
     }
     default: errno = ENODEV; return -1;
     }
@@ -7764,8 +7799,16 @@ static int ctl_global(const char *s, size_t n)
     struct wsink *sk = sink_find(nm, 1);
     if (!sk) { if (!errno) errno = ENOSPC; return -1; }
     uint32_t cp = (uint32_t)(n > WSYS_SINK_CAP ? WSYS_SINK_CAP : n);
-    memcpy(sk->b, s, cp);
-    sk->len = cp;
+    /* Through sink_publish like every other publisher, for two reasons.  It
+     * shrinks-then-copies-then-stores so the reader's retry loop can see that
+     * this happened; and it bumps `serial`, which this path did NOT do while
+     * claiming the field means "++ per write".  That omission was already
+     * visible where it matters: two identical `launch` verbs written to
+     * /dev/wsys/ctl changed the body to the same bytes and left the serial
+     * alone, so the launch-queue reader -- whose whole job is to notice a NEW
+     * request -- had nothing to notice.  The direct-sink spelling of the same
+     * act always did bump it. */
+    sink_publish(sk, (const uint8_t *)s, cp);
     shm->gen++;
     return 0;
 }
@@ -8086,6 +8129,52 @@ static int carry_reserve(struct hamwsys_file *f, uint64_t want)
     f->carry = p;
     f->carrycap = cap;
     return 0;
+}
+
+/* The staging buffer a sink's body is assembled in, same shape as carry_reserve
+ * above.  Capped at WSYS_SINK_CAP because that is the sink's own capacity: a
+ * body this refuses could not have been published by any route, so the cap is
+ * DERIVED rather than picked, and there is nothing here for a peer to outgrow.
+ * Freed with the descriptor in hamwsys_close. */
+static int sink_stage_reserve(struct hamwsys_file *f, uint64_t want)
+{
+    if (want > WSYS_SINK_CAP) return -1;
+    if (want <= f->stagecap) return 0;
+    uint64_t cap = f->stagecap ? f->stagecap : (uint64_t)256;
+    while (cap < want) cap *= 2;
+    if (cap > WSYS_SINK_CAP) cap = WSYS_SINK_CAP;
+    uint8_t *p = realloc(f->stage, (size_t)cap);
+    if (!p) return -1;
+    f->stage = p;
+    f->stagecap = cap;
+    return 0;
+}
+
+/* PUBLISH A WHOLE BODY, so a reader sees all of it or none of the change.
+ *
+ * The store order is the contract, and it is the reader's half in snap_set's
+ * retry loop (see HAMWSYS_SINK in hamwsys_open) that closes it:
+ *
+ *   1. shrink `len` FIRST if the new body is shorter, so no reader is ever
+ *      pointed at bytes past the end of what is about to be there;
+ *   2. copy the body;
+ *   3. store the final `len`;
+ *   4. bump `serial` LAST, with a release, so a reader that sampled serial
+ *      before its copy and again after can tell that steps 1-3 happened
+ *      underneath it and read again.
+ *
+ * `serial` keeps its existing meaning exactly -- one increment per write(2),
+ * 0 still means "nothing yet" -- so the launch-queue readers that print it as
+ * a token are unaffected.  It simply also serves as the sequence number,
+ * which is the same trick shm->gen already plays for window-table writers in
+ * hamwsys_write. */
+static void sink_publish(struct wsink *s, const uint8_t *body, uint64_t n)
+{
+    if (n > WSYS_SINK_CAP) n = WSYS_SINK_CAP;
+    if (n < s->len) __atomic_store_n(&s->len, (uint32_t)n, __ATOMIC_RELEASE);
+    if (n && body) memcpy(s->b, body, (size_t)n);
+    __atomic_store_n(&s->len, (uint32_t)n, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&s->serial, 1, __ATOMIC_RELEASE);
 }
 
 /* ONE CHOKE POINT, not thirty call sites.
@@ -8576,11 +8665,20 @@ static int64_t hamwsys_write_inner(struct hamwsys_file *f, const uint8_t *buf,
         wr(sink_is_public(f->name) ? WR_SINK : WR_CHROME, n);
         struct wsink *s = sink_find(f->name, 1);
         if (!s) { int e = errno ? errno : ENOSPC; errno = e; return -e; }
-        uint64_t room = WSYS_SINK_CAP - s->len;
+        /* ASSEMBLE, THEN PUBLISH.  The append is into this descriptor's own
+         * staging buffer, so a sink written across several write(2) calls is
+         * still only ever visible to a reader as a COMPLETE body -- the one
+         * before this open, or the one built so far.  It is never visible as
+         * the empty string, which is what the truncate-on-open produced. */
+        uint64_t room = WSYS_SINK_CAP - f->stagelen;
         uint64_t k = n < room ? n : room;
-        memcpy(s->b + s->len, buf, (size_t)k);
-        s->len += (uint32_t)k;
-        s->serial++;                           /* 0 means "nothing yet" */
+        if (k && sink_stage_reserve(f, f->stagelen + k) < 0) {
+            errno = ENOMEM; return -ENOMEM;
+        }
+        if (k) memcpy(f->stage + f->stagelen, buf, (size_t)k);
+        f->stagelen += k;
+        f->staged = 1;
+        sink_publish(s, f->stage, f->stagelen);
         shm->gen++;
         return (int64_t)n;                     /* short writes are not the
                                                   caller's problem here */
@@ -8604,6 +8702,20 @@ void hamwsys_close(struct hamwsys_file *f)
     f->carry = NULL;
     f->carrycap = 0;
     f->carried = 0;
+    /* TRUNCATE-WITH-NO-WRITE, kept working and made atomic.
+     * `> /dev/wsys/foo` (or any open-for-write closed without a write) still
+     * empties the sink -- but as ONE store at close, not as a window that
+     * opens at open(2) and stays open until somebody gets around to writing.
+     * A reader either sees the old body or sees it gone. */
+    if (f->staged && f->stagelen == 0 && f->leaf == HAMWSYS_SINK && shm) {
+        struct wsink *s = sink_find(f->name, 0);
+        if (s && s->len) { sink_publish(s, NULL, 0); shm->gen++; }
+    }
+    f->staged = 0;
+    free(f->stage);
+    f->stage = NULL;
+    f->stagecap = 0;
+    f->stagelen = 0;
 }
 
 /* ------------------------------------------------------------------ *
