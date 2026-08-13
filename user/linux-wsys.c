@@ -4110,6 +4110,18 @@ static void srd_fork(void)
 static int      srv_fd     = -1;
 static int      srv_tried  = 0;
 static uint32_t srv_tag    = 0;
+/* THE uid THE CONNECTION WAS DIALLED AS, and why it has to be remembered.
+ *
+ * SO_PEERCRED IS SAMPLED AT connect(2) AND NEVER AGAIN.  A process that dials
+ * the server and THEN drops privilege keeps a connection the mediator still
+ * answers for its OLD uid -- so a shell that spawned one external command
+ * before /etc/rc.de-user reaches `setuid 1001` would go on acting as the host
+ * owner for the life of the process, and everything it handed that connection
+ * to would inherit that.  Capping it at the row (WSRV_F_ADOPT) is not the fix;
+ * noticing is.  A connection that was INHERITED is exempt: it is the capability
+ * this process was handed, and re-dialling would throw it away. */
+static uid_t    srv_dial_uid;
+static int      srv_fd_adopted;
 
 /* Defined below srv_call, which it uses; declared here because srv_dial needs
  * it while the connection exists but is not yet blessed. */
@@ -4186,6 +4198,8 @@ static int srv_dial(void)
     int inh = srv_adopt_inherited();
     if (inh >= 0) {
         srv_fd = inh;
+        srv_fd_adopted = 1;
+        srv_dial_uid = geteuid();
         uint32_t mine = WSYS_VERSION, theirs = 0;
         int64_t rc = 0;
         uint32_t got = 0;
@@ -4221,6 +4235,8 @@ static int srv_dial(void)
         return -1;
     }
     srv_fd = fd;
+    srv_fd_adopted = 0;
+    srv_dial_uid = geteuid();
 
     uint32_t mine = WSYS_VERSION, theirs = 0;
     int64_t rc = 0;
@@ -4235,6 +4251,37 @@ static int srv_dial(void)
         return -1;
     }
     return srv_fd;
+}
+
+/* A CONNECTION IS ONLY GOOD FOR THE uid THAT DIALLED IT.
+ *
+ * Called at the top of every routed operation.  If this process's effective
+ * uid has changed since the dial, the cached connection is stale in the one
+ * way that matters -- the server would keep answering for the identity we no
+ * longer have -- so it is dropped and dialled again, and the new connection
+ * carries the credentials we actually hold now.
+ *
+ * geteuid(2) per routed operation is the cost, and it is affordable at the
+ * worst rate this system has ever produced: 2050 ops/s against a syscall that
+ * does not leave the kernel's own task struct.  The alternative -- checking
+ * only at the handoff -- would leave every ordinary write after a privilege
+ * drop acting for the old uid, which is the same hole seen from one step back.
+ *
+ * AN ADOPTED CONNECTION IS NEVER RE-DIALLED: it is not ours to replace.  It is
+ * the capability a spawner handed us, it already answers hostowner() = 0, and
+ * dialling our own would silently lose the window we were spawned into. */
+static void srv_redial_if_uid_changed(void)
+{
+    if (srv_fd < 0 || srv_fd_adopted) return;
+    if (geteuid() == srv_dial_uid) return;
+    fprintf(stderr, "wsys: this process dialled the window server as uid %ld "
+                    "and is now uid %ld; re-dialling so the mediator answers "
+                    "for the identity it actually has.\n",
+            (long)srv_dial_uid, (long)geteuid());
+    close(srv_fd);
+    srv_fd = -1;
+    srv_tried = 0;
+    (void)srv_dial();
 }
 
 /* ==================================================================
@@ -4274,6 +4321,8 @@ int hamwsys_srv_handoff(int on)
     if (!srv_enabled() || srv_is_server) return -1;
     if (srv_fd < 0 && shm_attach() < 0) return -1;
     if (srv_dial() < 0) return -1;
+    srv_redial_if_uid_changed();
+    if (srv_fd < 0) return -1;
     if (fcntl(srv_fd, F_SETFD, 0) < 0) return -1;
     char n[16];
     snprintf(n, sizeof n, "%d", srv_fd);
@@ -4446,6 +4495,7 @@ static int srv_route_write(const struct hamwsys_file *f, const uint8_t *buf,
      * the frame boundary with no display list behind it yet -- and dropping it
      * here would mean a client that opens, writes nothing and commits publishes
      * the PREVIOUS frame instead of an empty one. */
+    if (srv_fd >= 0) srv_redial_if_uid_changed();
     if (srv_fd < 0 || n > WSRV_MAXPAY) return 0;
     if (n == 0 && !(f->leaf == HAMWSYS_WIN_SCENE && f->srv_newframe)) return 0;
     int leaf;
@@ -4480,6 +4530,7 @@ static int srv_route_write(const struct hamwsys_file *f, const uint8_t *buf,
  * errno set, or -2 meaning "not routed, do it in process". */
 static int32_t srv_newwindow(void)
 {
+    if (srv_fd >= 0) srv_redial_if_uid_changed();
     if (srv_fd < 0) return -2;
     int32_t wid = -1;
     uint32_t got = 0;
@@ -4850,6 +4901,38 @@ int hamwsys_srv_mutate_selftest(int victim_wid)
     printf("wsrvmu: the mediator ACCEPTED it (refused %llu -> %llu)\n",
            (unsigned long long)r0, (unsigned long long)r1);
     return fails + 1;
+}
+
+/* THE PRIVILEGE DROP, WHICH IS THE OTHER WAY A CONNECTION OUTLIVES ITS
+ * IDENTITY.  Dial while privileged, drop to `to_uid`, then send a routed
+ * mutation for a window this process does not own.
+ *
+ * WITHOUT srv_redial_if_uid_changed() THIS IS ACCEPTED, and that is the whole
+ * point of the arm: SO_PEERCRED is sampled at connect(2), so the mediator
+ * keeps answering for the uid that dialled however long ago it dropped.  It is
+ * not a hypothetical -- /etc/rc.de-user reaches `setuid 1001` only after hamsh
+ * has had the chance to spawn, and hamsh is what every DE window is stamped
+ * against.  Returns hamwsys_srv_mutate_selftest's contract: 0 REFUSED,
+ * 1 ACCEPTED. */
+int hamwsys_srv_dropwrite(int victim_wid, int to_uid)
+{
+    if (!srv_enabled()) {
+        printf("wsrvdr: FAIL HAMWSYS_SERVER is not set\n");
+        return 1;
+    }
+    if (srv_dial() < 0) {
+        printf("wsrvdr: FAIL could not dial the server while privileged\n");
+        return 1;
+    }
+    printf("wsrvdr: dialled as uid %u\n", (unsigned)geteuid());
+    if (setuid((uid_t)to_uid) < 0) {
+        printf("wsrvdr: FAIL could not drop to uid %d: %s\n",
+               to_uid, strerror(errno));
+        return 1;
+    }
+    printf("wsrvdr: now uid %u, sending a routed write for window %d\n",
+           (unsigned)geteuid(), victim_wid);
+    return hamwsys_srv_mutate_selftest(victim_wid);
 }
 
 /* STAGE 6: THE SAME ATTACK, ON THE SCENE.  A routed display-list write for a

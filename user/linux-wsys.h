@@ -303,6 +303,10 @@ int      hamwsys_srv_handoff(int on);
 /* Stage 6's scene probe: a routed display-list write past the local check.
  *   extern def sys_wsys_srv_scene(victim_wid: int32) -> int32 */
 int      hamwsys_srv_scene_selftest(int victim_wid);
+/* Dial privileged, drop uid, then write: the arm that proves a connection
+ * does not outlive the identity that made it.
+ *   extern def sys_wsys_srv_dropwrite(wid: int32, to_uid: int32) -> int32 */
+int      hamwsys_srv_dropwrite(int victim_wid, int to_uid);
 int      hamwsys_srv_conngate(int wid, const char *self,
                               const char *uidgate);
 

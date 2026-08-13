@@ -37,6 +37,7 @@ extern def sys_wsys_srv_attack_local(victim_wid: int32) -> int32
 extern def sys_wsys_alloc(pid: uint64) -> int32
 extern def sys_wsys_srv_readlat(n: int32) -> int32
 extern def sys_wsys_srv_scene(victim_wid: int32) -> int32
+extern def sys_wsys_srv_dropwrite(wid: int32, to_uid: int32) -> int32
 extern def sys_wsys_srv_conngate(wid: int32, selfpath: Ptr[char],
                                  uidgate: Ptr[char]) -> int32
 
@@ -127,6 +128,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         if w < 2:
             return 1
         return 0
+
+    # `drop <wid> <uid>` -- dial while privileged, drop to <uid>, then send a
+    # routed write. 'd' is 100.
+    if argc > 3 and cast[Ptr[uint8]](argv[1])[0] == 100:
+        return sys_wsys_srv_dropwrite(arg_int(cast[Ptr[uint8]](argv[2])),
+                                      arg_int(cast[Ptr[uint8]](argv[3])))
 
     # `Scene <wid>` -- STAGE 6. A routed SCENE write for a window this
     # process does not hold, sent past the local check. 's' is already
