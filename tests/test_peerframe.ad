@@ -1,0 +1,180 @@
+# tests/test_peerframe.ad — the property the five broken sites did not have:
+# AFTER AN OVERSIZED FRAME, THE STREAM IS STILL FRAMED.
+#
+# Every assertion here is about what the NEXT read returns, because that is
+# where the real defects showed up. x11srv's 4092-byte buffer did not corrupt
+# the oversized request -- it desynchronised the connection, so every later
+# reply was read out of the middle of an earlier one. sshd's 255-byte line did
+# not lose the banner -- it let the remainder of one physical line be taken as
+# the start of the next. In both, the frame that broke was not the one that
+# was too big; it was the one after it.
+#
+# Driven over a real pipe with a real writer, so the reads are real short
+# reads, not a simulation of them.
+
+from lib.peerframe import peerframe_take, peerframe_line, peerframe_drain
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_pipe(fds: Ptr[int32]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_rfork(flags: int32) -> int32
+extern def sys_exit(code: uint64)
+
+RFPROC: int32 = 0x001
+RFFDG:  int32 = 0x004
+
+passed: int32 = 0
+failed: int32 = 0
+outbuf: Array[64, uint8]
+
+# The frames the writer sends: an OVERSIZED one, then a small one that must
+# still arrive intact. `wbuf` is the writer's scratch.
+wbuf: Array[4096, uint8]
+rbuf: Array[64, uint8]
+
+
+def puts(s: Ptr[uint8]):
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    sys_write(1, s, n)
+
+
+def putd(v: int64):
+    neg: int32 = 0
+    x: uint64 = 0
+    if v < 0:
+        neg = 1
+        x = cast[uint64](0 - v)
+    else:
+        x = cast[uint64](v)
+    n: uint64 = 0
+    if x == 0:
+        outbuf[0] = 48
+        n = 1
+    else:
+        while x > 0:
+            outbuf[n] = cast[uint8](48 + (x % 10))
+            n = n + 1
+            x = x / 10
+        i: uint64 = 0
+        j: uint64 = n - 1
+        while i < j:
+            t: uint8 = outbuf[i]
+            outbuf[i] = outbuf[j]
+            outbuf[j] = t
+            i = i + 1
+            j = j - 1
+    if neg != 0:
+        sys_write(1, cast[Ptr[uint8]]("-"), 1)
+    sys_write(1, &outbuf[0], n)
+
+
+def ok(m: Ptr[uint8]):
+    passed = passed + 1
+    puts("  ok   ")
+    puts(m)
+    puts("\n")
+
+
+def bad(m: Ptr[uint8]):
+    failed = failed + 1
+    puts("  FAIL ")
+    puts(m)
+    puts("\n")
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    puts("== peerframe: an oversized frame must not desynchronise the stream\n")
+
+    # ---- length-prefixed ------------------------------------------------
+    # The writer sends a 3000-byte frame (declared 3000), then the 5 bytes
+    # "NEXT!". The reader's buffer is 64. If the remainder is not drained, the
+    # follow-on read returns the middle of the big frame instead of "NEXT!".
+    fds: Array[2, int32]
+    if sys_pipe(&fds[0]) != 0:
+        puts("  FAIL could not make a pipe\n")
+        return 1
+    pid: int32 = sys_rfork(RFPROC | RFFDG)
+    if pid == 0:
+        sys_close(fds[0])
+        i: uint64 = 0
+        while i < 3000:
+            wbuf[i] = 65                       # 'A'
+            i = i + 1
+        sys_write(fds[1], &wbuf[0], 3000)
+        sys_write(fds[1], cast[Ptr[uint8]]("NEXT!"), 5)
+        sys_close(fds[1])
+        sys_exit(0)
+    sys_close(fds[1])
+
+    taken: Array[1, uint64]
+    over:  Array[1, int32]
+    rc: int32 = peerframe_take(fds[0], &rbuf[0], 64, 3000, &taken[0], &over[0])
+    if rc != 0:
+        bad("peerframe_take failed on a live pipe")
+    else:
+        if taken[0] == 64:
+            ok("it takes exactly what fits, not what the peer declared")
+        else:
+            bad("it did not cap the take at the buffer size")
+        if over[0] == 1:
+            ok("and it FLAGS that the peer sent more than fits")
+        else:
+            bad("it did not flag the truncation -- rule 3")
+        # THE ASSERTION THAT MATTERS: the next frame must be intact.
+        n2: int64 = sys_read(fds[0], &rbuf[0], 5)
+        if n2 == 5 and rbuf[0] == 78 and rbuf[1] == 69 and rbuf[2] == 88 \
+           and rbuf[3] == 84 and rbuf[4] == 33:
+            ok("AND THE NEXT FRAME IS STILL THE NEXT FRAME: the remainder was drained, so the stream did not desynchronise")
+        else:
+            bad("THE STREAM DESYNCHRONISED: the read after an oversized frame did not return the following frame -- this is the x11srv defect")
+    sys_close(fds[0])
+
+    # ---- delimiter-terminated -------------------------------------------
+    # A 900-byte banner line, then "SSH-2.0-ok\n". The reader keeps 64. If the
+    # over-long line is not consumed WHOLE, its tail is taken as the next line.
+    if sys_pipe(&fds[0]) != 0:
+        puts("  FAIL could not make a second pipe\n")
+        return 1
+    pid2: int32 = sys_rfork(RFPROC | RFFDG)
+    if pid2 == 0:
+        sys_close(fds[0])
+        i2: uint64 = 0
+        while i2 < 900:
+            wbuf[i2] = 66                      # 'B'
+            i2 = i2 + 1
+        wbuf[900] = 10                         # LF
+        sys_write(fds[1], &wbuf[0], 901)
+        sys_write(fds[1], cast[Ptr[uint8]]("SSH-2.0-ok\n"), 11)
+        sys_close(fds[1])
+        sys_exit(0)
+    sys_close(fds[1])
+
+    ln: Array[1, uint64]
+    lover: Array[1, int32]
+    rc2: int32 = peerframe_line(fds[0], &rbuf[0], 64, 10, &ln[0], &lover[0])
+    if rc2 != 0:
+        bad("peerframe_line failed on a live pipe")
+    else:
+        if lover[0] == 1:
+            ok("an over-long line is reported as over-long, not silently cut")
+        else:
+            bad("an over-long line was not flagged -- the caller would accept a prefix as a whole line")
+        rc3: int32 = peerframe_line(fds[0], &rbuf[0], 64, 10, &ln[0], &lover[0])
+        if rc3 == 0 and ln[0] == 10 and lover[0] == 0 and rbuf[0] == 83 \
+           and rbuf[1] == 83 and rbuf[2] == 72 and rbuf[3] == 45:
+            ok("AND THE NEXT LINE IS STILL THE NEXT LINE: the over-long one was consumed to its delimiter, so its tail could not be framed as a line of its own -- this is the sshd defect")
+        else:
+            bad("THE TAIL OF THE OVER-LONG LINE WAS FRAMED AS A NEW LINE: the peer chose where its own data began")
+    sys_close(fds[0])
+
+    puts("peerframe: ")
+    putd(cast[int64](passed))
+    puts(" passed, ")
+    putd(cast[int64](failed))
+    puts(" failed\n")
+    if failed != 0:
+        return 1
+    return 0
