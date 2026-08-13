@@ -509,6 +509,18 @@ server is a separate process holding no bindings, and asking the mutation
 question there would answer EMPTY to every client on the desktop. Stage 4's
 policy and its 9/0 gate are unchanged.
 
+**WHERE THE HANDOFF WOULD GO, SCOPED BUT NOT WRITTEN.** hamsh has one choke
+point for external commands — `spawn_launch()` in `user/hamsh.ad`, which every
+resolved command and every pipeline stage passes through — so the wiring is
+`sys_wsys_srv_handoff(1)` before it and `(0)` after, six lines. **The trap is
+the dial, not the spawn**: the connection is cached per process and
+`SO_PEERCRED` is sampled at `connect(2)`, so if hamsh spawns any external
+command *before* `/etc/rc.de-user` reaches `setuid 1001`, it dials as the host
+owner and every later handoff carries that connection. `WSRV_F_ADOPT` caps the
+damage at the row (an adopted connection is never the host owner), but the next
+stage should re-dial when the effective uid has changed since the dial rather
+than rely on that cap.
+
 **WHAT IS NOT DONE, AND IT IS THE NEXT PIECE OF WORK.** The DE's own spawn path
 does not call the handoff. `/etc/rc.de-user` spawns every DE window as
 `/bin/hamsh /etc/rc.de-user <prog>`, the wid is stamped against **hamsh**, and
