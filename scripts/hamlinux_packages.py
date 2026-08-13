@@ -990,6 +990,32 @@ def image_want_modules():
     assignment is not where it expects: an empty list would make the package
     below ship nothing and the coverage gate name twenty files, which is loud,
     but a WRONG list would ship the wrong modules quietly.
+
+    A SHELL VARIABLE IN THAT LIST IS EXPANDED, AND NOT EXPANDING IT COST
+    TWENTY FILES. The image script writes
+
+        HW_MODULES="nvme ahci sd_mod usb-storage uas xhci_pci ehci_pci \\
+                    usbhid hid-generic"
+        WANT_MODULES="${HAMLINUX_MODULES:-... $HW_MODULES ...}"
+
+    and the SHELL expands `$HW_MODULES`, so the image stages nvme, ahci,
+    sd_mod, usb-storage, uas, the two USB host controllers and the two HID
+    drivers -- twenty .ko files -- while this parse returned the literal
+    token `$HW_MODULES`, which modprobe cannot resolve. The nine names then
+    fell into the `unresolved` branch of build_base_module_package, whose
+    note says "the image cannot stage what modprobe cannot resolve either,
+    so this is not a coverage hole". THAT SENTENCE WAS FALSE: the image
+    stages them by a different mechanism. Measured by
+    tests/linux/channel_covers_image.sh, which went 7 PASS / 20 FAIL naming
+    every one of those files -- the drivers that read an NVMe or SATA root
+    disk and the ones that make a USB keyboard work, in the image and in no
+    package, on exactly the real hardware this port is being aimed at.
+
+    So simple `NAME="..."` assignments earlier in the same file are
+    substituted, and a `$NAME` this file cannot resolve is a REFUSAL rather
+    than a token passed downstream: an unresolvable name reaching modprobe
+    is indistinguishable from a module that genuinely does not exist, which
+    is the silence that hid this.
     """
     path = os.path.join(ROOT, "scripts/hamlinux_image.sh")
     with open(path) as fh:
@@ -1000,7 +1026,23 @@ def image_want_modules():
         raise SystemExit(
             "hamlinux_packages: cannot find WANT_MODULES in %s -- refusing to "
             "guess which modules the image stages" % path)
-    return m.group(1).split()
+    # Every plain `NAME="value"` assignment in the script, for substitution.
+    assigns = dict(re.findall(r'^([A-Za-z_][A-Za-z0-9_]*)="([^"$]*)"$',
+                              text, re.M))
+    names = []
+    for tok in m.group(1).split():
+        if not tok.startswith("$"):
+            names.append(tok)
+            continue
+        var = tok[1:].strip("{}")
+        if var not in assigns:
+            raise SystemExit(
+                "hamlinux_packages: WANT_MODULES in %s references %s, which "
+                "this file cannot resolve -- refusing to package a module "
+                "list that does not match the one the image stages"
+                % (path, tok))
+        names.extend(assigns[var].split())
+    return names
 
 
 def drm_core_modules(kver):
