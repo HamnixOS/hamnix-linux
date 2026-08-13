@@ -1208,6 +1208,17 @@ remaining oracle**, and closing it needs the served answer asked in the
 connection question's terms — which is the read server holding bindings it
 deliberately does not hold.
 
+> **STAGE 10b CORRECTS THE PARAGRAPH ABOVE. The two sets are the SAME SET at
+> that site, and this is a definition rather than an argument.** `owns_wid()`
+> is `srv_caller.active ? srv_caller_holds_wid(wid) : owns_wid_ancestry(wid)`,
+> and `srv_caller.active` is set by `srv_as_caller()`/`srv_as_caller_full()`
+> and by nothing else — both of which are called only inside a server
+> dispatching a request. `hamwsys_open()` never runs there: the mutation server
+> services a routed write with `hamwsys_write_inner()`, which opens nothing. So
+> **in the client, which is the only place a write open happens, `owns_wid()`
+> evaluates `owns_wid_ancestry()`** — the identical function. See *What stage
+> 10b measured*.
+
 **THE COST, AND THE ANSWER TO "WHAT DOES THIS DO TO CONNECTION ACCOUNTING" —
 AND THE STANDING CLAIM IT CORRECTS.**
 
@@ -1303,7 +1314,15 @@ each client's own pid, which is the trap that caught stage 8's gate.
   `tests/linux/wsys_bypass.sh` is an `mmap` and none of them calls this code.
   What this buys is the **precondition** 7.1(2) names, not the boundary.
 * **The WRITE open is not routed** — see above; it is the remaining half of
-  7.1(2).
+  7.1(2). **DONE IN STAGE 10b, and the reason given for not doing it was
+  wrong**; see *What stage 10b measured*.
+* **The timing of the served answer was never looked at, and it was a channel.**
+  Stage 10b measured a refused existence call at **93 us for a live wid and
+  46 us for a dead one** through a byte-identical `ENOENT`, because
+  `owns_wid_ancestry()` returned the instant `win_find()` came back NULL and so
+  did no `/proc` walk at all for an absent window. That is stage 10's oracle,
+  not stage 10b's: the same predicate has stood behind these nine READ opens
+  since 7d24ef3c.
 * **`draw/image/<n>`'s own existence is still local.** Once the window is
   granted, `img_find()` decides whether a *named image* exists out of the mapped
   image store. That is a narrower oracle (it needs a window you already own)
@@ -1318,6 +1337,149 @@ each client's own pid, which is the trap that caught stage 8's gate.
 * **The `exists` STAT counter was not read back by any gate.** It exists on the
   read server's `WSRV_OP_STAT` line; the crossings were counted from the trace
   instead.
+
+## What stage 10b measured — the WRITE open, and a channel no errno could close
+
+**THE PREMISE STAGE 10 STOPPED ON WAS FALSE, AND ONE FUNCTION IN
+`user/linux-wsys.c` IS THE WHOLE CORRECTION.**
+
+```c
+static int owns_wid(int wid)
+{
+    if (srv_caller.active) return srv_caller_holds_wid(wid);
+    return owns_wid_ancestry(wid);
+}
+```
+
+`srv_caller.active` is set by `srv_as_caller()` / `srv_as_caller_full()` **and
+by nothing else**, and both are called only inside a server dispatching a
+request. `hamwsys_open()` is never on that path — the mutation server services
+a routed write by calling `hamwsys_write_inner()`, which opens nothing. So at
+the write open, in the client, **`owns_wid()` IS `owns_wid_ancestry()`: the same
+function, not a similar rule.** The connection question is asked at
+`WSRV_OP_WRITE`, in the server, where the binding lives, and it is untouched.
+
+**THE CONSEQUENCE IS THAT ROUTING MOVES NO CALLER.** The write open's local gate
+(`hostowner() || owns_wid(wid)`) and the served predicate
+(`hostowner() || owns_wid_ancestry(wid)`) are the same set about the same
+process. Everyone the local rule refuses, the server refuses first; everyone the
+server grants, the local rule then admits. **Only the errno changes** — and the
+errno was the leak.
+
+**AND THE STAGE-5 CASE CANNOT BE BROKEN BY IT, BECAUSE IT WAS NEVER ADMITTED
+HERE.** A process handed a descriptor for a window it does not descend from has
+ancestry 0, so `!hostowner() && !owns_wid()` already refused its write open,
+routed or not. Stronger: `srv_adopt_inherited()` takes the connection out of
+`HAMWSYS_SRV_FD` across fork/exec, so an adopting process is **always a
+descendant of the dialler**, and a window allocated over an adopted connection
+is stamped against the dialler's pid (`WSRV_OP_NEWWIN` says so in as many
+words). *The non-descendant handoff stage 10 protected has no way to exist in
+this tree.* `wsys_srv_connown.sh` is 10 / 0 unchanged — its handed child is a
+CHILD, so ancestry is 1 for it and the connection rule at `WSRV_OP_WRITE`
+decides it, exactly where it always did.
+
+### What was leaking — the read half's oracle, one flag of `open(2)` over
+
+Measured, uid 1002 owning nothing, **opening for WRITING** (the rc of
+`sys_open_write`, which is `-errno`):
+
+| probe | before | after |
+|---|---|---|
+| `/dev/wsys/<live>/ctl` | `-1` (EPERM) | `-2` |
+| `/dev/wsys/<dead>/ctl` | `-2` (ENOENT) | `-2` |
+
+and the same pair for `wctl`, `scene`, `keys`, `pointer`, `event`, `text`,
+`cmd`, `draw/ctl` and `backbuffer`. Ten leaves; all ten now identical.
+`draw/images` and `draw/image/<n>` are deliberately not in the list: they refuse
+a write with `EACCES` **before** any existence question, live or dead, so they
+are a constant and never were an oracle on this path.
+
+### THE TIMING ORACLE, AND IT IS OLDER THAN THIS STAGE
+
+With the errno closed, the new gate timed 200 refused write opens per arm:
+
+| | live wid | dead wid |
+|---|---|---|
+| before | 93, 96, 118 µs/open | 47, 46, 44 µs/open |
+| after | 82–84 µs/open | 82–84 µs/open (worst \|Δ\| 8 % over five reps) |
+
+`owns_wid_ancestry()` returned the instant `win_find()` came back NULL, so a
+**dead** wid cost zero `/proc/<pid>/stat` reads and a **live** one cost up to
+eight. **The existence bit was readable with a stopwatch through a byte-identical
+`ENOENT`.**
+
+**IT IS NOT STAGE 10b's DEFECT.** Stage 10 put this same predicate behind nine
+READ opens, so the same stopwatch worked on `cat /dev/wsys/<wid>/scene` from the
+day 7d24ef3c landed. And the line that hid it is stage 10's own comment at the
+server's existence arm — *"a refused caller never reaches `win_find()`"* — which
+is true of the arm and false of the clock, because `allow` is computed by
+`owns_wid_ancestry()`, which calls `win_find()` **itself** and then decides how
+much work to do on the answer. That comment is corrected at the line.
+
+**The walk is now unconditional**: it records a hit instead of returning on one,
+and runs to the depth bound or the top of the CALLER's own chain — a property of
+the caller, which the caller already knows, and not of the target. The price is
+that a grant which used to stop at depth 0 now walks the chain: at most eight
+`/proc` reads, **once per (process, window)**, since the client caches the YES.
+
+### What is new on the wire, and what it decides
+
+`WSRV_F_FORWRITE` — **nothing**. The server's answer does not depend on it and
+must not, since the two predicates being one set is the entire argument. It is
+carried so the trace can say `open=write`, because a read open and a write open
+of the same leaf were one indistinguishable line, and a crossing count that
+cannot say *which* open it counted cannot prove the write open was routed at
+all. Measured in the gate run: **2425 write-open crossings, 0 read-open
+crossings, in the same log.**
+
+`open_deny()` is belt and braces and says so. "Server says exists, local rule
+then says EPERM" is the same channel with an extra hop; it is unreachable by the
+argument above, and is answered `ENOENT` anyway — a boundary resting on two
+predicates staying equal should not also announce it when they do not.
+
+### The gate — `tests/linux/wsys_srv_wopen.sh`, 68 passed / 0 failed
+
+Every arm is a **pair**, live wid against dead wid, for the reason
+`wsys_srv_open.sh` records: a gate that only asked "is the snooper refused"
+passes on the old code, because every one of these leaves already refused. The
+instrument is new (`tests/linux/wsys_wopen.ad`) and exists because nothing in
+the tree opened an arbitrary path write-only and reported **the errno** —
+`slurp` prints `OPENFAIL` for every failure, which is why `wsys_srv_open.sh` had
+to *record* rather than *score* its own owner-side pair. Crossings are counted
+from the server's trace scoped to each client's pid **and** to `open=write`, and
+both branches of the served policy are reached in the run (1223 EMPTY, 2 FULL).
+
+**One arm of it was wrong first and the correction is at the line**: a uid-1002
+`wsys_wopen` opening its own uid's window was scored as a grant. It is not one
+and must not be — `wsys_wopen` is a child of the inner shell, not of
+`wsys_hold`, so its ancestry reaches neither window. **The rule is about the
+PROCESS, never the uid.** It is now a three-way sameness arm, and the grants are
+made from inside the processes that actually own the windows.
+
+### What stage 10b did NOT do
+
+* **No `WSYS_VERSION` bump and the mapping is untouched.** Same as stage 10:
+  every attack in `tests/linux/wsys_bypass.sh` is an `mmap` and none of them
+  calls this code.
+* **The timing arm is a shell wall clock over 200 opens.** A FAIL from it is
+  real; a PASS **bounds** the channel rather than eliminating it. Nothing here
+  can see a difference below run-to-run noise.
+* **`win_find()`'s own early return survives.** A live wid's table scan is
+  shorter than a dead one's by some tens of nanoseconds of memory compare —
+  three orders below what any instrument here or any round trip on this path can
+  resolve, and in the OPPOSITE direction to the channel just closed. It is
+  recorded, not fixed.
+* **The cost of the unconditional walk on a real desktop's boot was not
+  separately profiled.** `wsys_srv_deboot.sh` is 36 / 0 with both panels and the
+  menu, but its frame numbers sit inside noise at peak loadavg 4.25 and it says
+  so itself.
+* **A process that forks AFTER dialling is judged by its parent's pid**, because
+  `SO_PEERCRED` is sampled at `connect(2)`. Its own local walk could therefore
+  differ from the served one by one generation at the depth bound. Pre-existing
+  since stage 10, unexercised by any gate, and unmeasured.
+* **Write opens now dial the read server**, so a process that only ever writes
+  holds a read connection it did not before. The 64-connection ceiling moves
+  again in the direction stage 10 already named; how far was not counted.
 
 ## Budget to hold it to
 
@@ -1981,8 +2143,17 @@ still last and is now step 8 of 8.
    precondition, they were an ACTIVE enumeration channel, because each of them
    refuses a stranger with a message that NAMES THE WINDOW — so `cat`'s exit
    code separated a live wid from a dead one without reading a byte. See *What
-   stage 10 measured* below for the table. The WRITE open is still
-   `win_find()`, on purpose and for a reason recorded there.
+   stage 10 measured* below for the table.
+   **AND THE WRITE OPEN IS DONE TOO — stage 10b,
+   `tests/linux/wsys_srv_wopen.sh`, 68 passed / 0 failed.** Stage 10 recorded
+   that it could not be routed because the local rule was the CONNECTION
+   question and the served answer was ANCESTRY; that was wrong, because
+   `owns_wid()` only asks the connection question when `srv_caller.active`, and
+   that is set only inside a server, which `hamwsys_open()` never is. Ten leaves
+   (`ctl`, `wctl`, `scene`, `keys`, `pointer`, `event`, `text`, `cmd`,
+   `draw/ctl`, `backbuffer`) went from `-1`/`-2` to `-2`/`-2`, and a TIMING
+   channel older than the stage was found and closed on the way. See *What
+   stage 10b measured*.
 5. Move `pointer`/`event`/`text`/`cmd` to per-window channels on the `keys`
    construction (7.1 §3).
 6. Tier 2's remainder — `/srv/wsys.bb` and `/srv/wsys.img` — which is an
