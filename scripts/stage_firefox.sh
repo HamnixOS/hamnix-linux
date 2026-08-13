@@ -281,7 +281,11 @@ PY
         # paths make every loader dlopen from its real /usr/lib location.
         "$QL" "$ROOTFS/$PIXBUF_REL/loaders/"*.so 2>/dev/null \
           | sed "s|$ROOTFS/|/|g" > "$ROOTFS/$PIXBUF_REL/loaders.cache"
-        echo "[stage-ff] wrote gdk-pixbuf loaders.cache ($(grep -c '\.so' "$ROOTFS/$PIXBUF_REL/loaders.cache" || echo 0) loaders)"
+        # `|| true`, not `|| echo 0`: grep -c prints "0" and exits 1 when the
+        # cache lists no loaders, so `echo 0` appended a SECOND line and split
+        # this message in two. The cache file is written immediately above, so
+        # it always exists and grep always prints a count. Cosmetic only.
+        echo "[stage-ff] wrote gdk-pixbuf loaders.cache ($(grep -c '\.so' "$ROOTFS/$PIXBUF_REL/loaders.cache" || true) loaders)"
     else
         echo "[stage-ff] WARNING: gdk-pixbuf-query-loaders absent; no loaders.cache (icons may not decode)."
     fi

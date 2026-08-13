@@ -181,7 +181,10 @@ fi
 load_ok=0
 if grep -E -q "\[modprobe\] kmod_linux_load OK" "$LOG"; then
     load_ok=1
-    n_ok=$(grep -cE "\[modprobe\] kmod_linux_load OK" "$LOG" || echo 0)
+    # `|| echo 0` would append a SECOND line ("0\n0") -- it is DEAD ONLY
+    # because the `grep -E -q` above proves a match exists, so grep -c cannot
+    # return 0/exit 1 here. Delete or widen that guard and this goes live.
+    n_ok=$(grep -cE "\[modprobe\] kmod_linux_load OK" "$LOG" || true)
     echo "[test_xhci_ko] OK: $n_ok kmod_linux_load OK lines"
 fi
 if [ "$load_ok" -ne 1 ]; then

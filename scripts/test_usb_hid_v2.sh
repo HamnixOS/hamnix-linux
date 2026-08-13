@@ -162,7 +162,15 @@ fi
 # count the modules_dep kmod_linux_load lines; the dep chain produces
 # 5 loads total for the xhci_pci side (usbcore + xhci-hcd + xhci_pci
 # + hid + usbhid), so an "at least 5 loads" check covers both modules.
-n_md_loads=$(grep -cE "^\[[0-9]+\] \[modules_dep\] kmod_linux_load [0-9]+ bytes" "$LOG" || echo 0)
+# `grep -c` PRINTS "0" AND EXITS 1 on no match, so `|| echo 0` made this the
+# two-line string "0\n0" and the `-ge` below errored with rc=2 rather than
+# comparing. THIS ONE HAPPENED TO REACH THE RIGHT VERDICT: an errored `if` is
+# skipped, so the else/MISS branch ran, which is what zero loads deserves --
+# but only by luck of the operator. Written `-lt 5` with the branches swapped,
+# the identical bug would have reported OK on zero loads. It also printed
+# "only 0\n0 modules_dep loads" across two lines and a bash error on stderr.
+n_md_loads=$(grep -cE "^\[[0-9]+\] \[modules_dep\] kmod_linux_load [0-9]+ bytes" "$LOG" || true)
+n_md_loads="${n_md_loads:-0}"
 if [ "$n_md_loads" -ge 5 ]; then
     echo "[test_usb_hid_v2] OK: $n_md_loads modules_dep kmod_linux_load events (hid + usbhid loaded)"
 else

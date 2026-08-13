@@ -303,14 +303,21 @@ rung_c=0
 # committed" marker is ALREADY in the log — detect a NEW commit (count INCREASE),
 # not the marker's mere presence. In rootful mode the root re-commits the SAME
 # wid, so a fresh commit == the X app drew into the screen.
-pre_commits=$(grep -acF "$COMMIT_MARKER" "$LOG" 2>/dev/null || echo 0)
+# grep -c PRINTS "0" AND EXITS 1 when nothing matches, so `|| echo 0` made
+# this the two-line string "0\n0" and the `-gt` below then errored with rc=2
+# ("integer expression expected") instead of comparing -- which turned the
+# wait loop into a plain RENDER_WAIT-second sleep that could never break, and
+# left the NOTE line printing a garbled two-line count. `|| true` keeps the
+# count grep already printed; the `:-0` covers the log being unreadable
+# (rc>=2, nothing on stdout).
+pre_commits=$(grep -acF "$COMMIT_MARKER" "$LOG" 2>/dev/null || true); pre_commits="${pre_commits:-0}"
 # Fill the root red (a settle newline first so hamsh has a clean prompt).
 printf '\n' >&3; sleep 1; send "$APP_CMD"
 echo "$TAG (c) xsetroot launched; waiting up to ${RENDER_WAIT}s for a NEW root-surface commit (red fill)..."
 post_commits="$pre_commits"
 for _i in $(seq 1 "$RENDER_WAIT"); do
     kill -0 "$QEMU_PID" 2>/dev/null || break
-    post_commits=$(grep -acF "$COMMIT_MARKER" "$LOG" 2>/dev/null || echo 0)
+    post_commits=$(grep -acF "$COMMIT_MARKER" "$LOG" 2>/dev/null || true); post_commits="${post_commits:-0}"
     [ "$post_commits" -gt "$pre_commits" ] && break
     sleep 1
 done
