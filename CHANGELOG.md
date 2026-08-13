@@ -202,6 +202,27 @@ This is new since 1.0.22 — the hardware driver list was added after that
 release went out — so it is a hole this candidate would have shipped rather
 than one that has been there.
 
+### The first keys you typed after the desktop came up went nowhere
+
+If you started typing quickly enough — before the desktop had finished looking
+at its own window list — **the letters were thrown away.** Not delayed, not
+mistyped: read from the keyboard and discarded, because at that instant the
+system did not yet believe any window existed to give them to.
+
+The mouse did not have the problem, and that is why it took so long to find. A
+mouse position is *remembered* and handed over whenever the window is ready; a
+keystroke is passed along the instant it arrives and has nowhere to wait. The
+same drain of the same keyboard file lost every key and kept every click.
+
+Fixing that uncovered a second fault underneath it, which is the worse of the
+two: when you clicked one window and immediately typed, **the letter could be
+delivered to a different window than the one you clicked** — the click and the
+keys arrive together, and the click had not yet been acted on. That is typing
+into the wrong program, and there was no test in this project that could have
+noticed: the existing one uses a single window, where the answer is right by
+accident. There is now one with two windows that checks the clicked window got
+the letter *and the other got nothing*.
+
 ### Opening enough windows let a program read what it had been refused
 
 The window system is being moved behind a server that decides who may see what.
