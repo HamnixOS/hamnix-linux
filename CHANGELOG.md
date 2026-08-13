@@ -20,6 +20,15 @@ exactly the state in which "we fixed that" and "you have that fix" quietly
 stop meaning the same thing, so the gap is written down rather than carried
 in someone's head.
 
+Nothing at present: everything below is on the channel.
+
+## 1.0.22 — 2026-08-12
+
+Published to <https://255.one/> and verified as served: the index reports
+1.0.22 across all 124 packages, `hamnix-desktop-1.0.22.tar.gz` fetched from
+the site hashes to the sha256 the index names, and the index signature
+verifies against the same key installed machines already trust.
+
 ### Web pages render, instead of a blank grey rectangle
 
 Open a page in the browser and you now see the page. Until now you got a flat
@@ -60,8 +69,9 @@ the first step before either finished the third. They ended up holding the same
 window, and the one that lost found every part of its own window missing: the
 system had no record matching what it was holding.
 
-**This is not a regression.** It is present in 1.0.20 and 1.0.21, and it is
-the reason the internal check for this area failed about one run in four —
+**This is not a regression.** It has been there since this port had a window
+system — 1.0.20 has it too — and it is the reason the internal check for this
+area failed about one run in four —
 which is how it was finally caught, because a test that fails a quarter of the
 time trains people to run it again rather than look.
 
@@ -213,13 +223,11 @@ dismissal. The refusal logic itself is unchanged.
 this cannot show the notice, because the panel that survives an update is the
 old one. The first update this helps is the one after it.
 
-## 1.0.20
-
 ### The "restart needed" notice no longer outlives the restart
 
-1.0.21 added an amber card telling you the window system was updated and that
-you should restart before opening new applications. On most machines it
-disappeared when you did.
+The amber card above tells you the window system was updated and that you
+should restart before opening new applications. On most machines it
+disappears when you do.
 
 On a machine installed to a real disk it could come back after the reboot — the
 note that raises it was being kept on disk rather than in memory, so the reboot
@@ -232,8 +240,11 @@ raises the card; a note from a previous boot is ignored, because whatever it was
 warning about has already been dealt with by the restart that happened in
 between.
 
-**Also not a regression** in the sense that matters: the notice itself is new in
-1.0.21, so this is a fault in a feature most people will not have seen yet.
+**Not a regression:** the notice itself is new in this release, so this was a
+fault in a feature that had not reached anyone yet — it is fixed in the same
+release that introduces it.
+
+## 1.0.20
 
 ### Before you update, if a desktop is running
 
