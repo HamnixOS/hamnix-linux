@@ -36,6 +36,8 @@ extern def sys_wsys_srv_mutate(victim_wid: int32) -> int32
 extern def sys_wsys_srv_attack_local(victim_wid: int32) -> int32
 extern def sys_wsys_alloc(pid: uint64) -> int32
 extern def sys_wsys_srv_readlat(n: int32) -> int32
+extern def sys_wsys_srv_conngate(wid: int32, selfpath: Ptr[char],
+                                 uidgate: Ptr[char]) -> int32
 
 numbuf: Array[24, uint8]
 rbuf:   Array[256, uint8]
@@ -131,6 +133,20 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # load or the two are not comparable. 'r' is 114.
     if argc > 2 and cast[Ptr[uint8]](argv[1])[0] == 114:
         return sys_wsys_srv_readlat(arg_int(cast[Ptr[uint8]](argv[2])))
+
+    # `conngate <wid>` -- STAGE 5, and it is BOTH ARMS IN ONE PROCESS. This
+    # runs as the process the window is stamped against (the toolkit's
+    # position) and spawns THIS SAME BINARY twice against the same wid: once
+    # without the server connection and once having handed it over. The only
+    # difference between the two children is the handoff, so nothing else can
+    # explain a difference in the answer. 'c' is 99; argv[0] is the path to
+    # re-exec, which is why it is passed rather than assumed.
+    if argc > 2 and cast[Ptr[uint8]](argv[1])[0] == 99:
+        ug: Ptr[char] = cast[Ptr[char]]("")
+        if argc > 3:
+            ug = cast[Ptr[char]](argv[3])
+        return sys_wsys_srv_conngate(arg_int(cast[Ptr[uint8]](argv[2])),
+                                     cast[Ptr[char]](argv[0]), ug)
 
     if argc > 3 and cast[Ptr[uint8]](argv[1])[0] == 115:
         ops: int32 = arg_int(cast[Ptr[uint8]](argv[2]))
