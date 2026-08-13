@@ -139,10 +139,49 @@ PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJ_ROOT"
 
 OUT="${1:-build/image/distro.ext4}"
-# 6G was the pre-multiarch size and it does not fit any more: the i386 Mesa
-# alone is most of a gigabyte.  The file is SPARSE, so this costs nothing on
-# the host until it is written to.
-SIZE="${2:-12G}"
+# 12 GiB, AND THAT IS THE ANSWER TO "12 GB, WHY?": IT IS NOT A DOWNLOAD.
+#
+# 6G was the pre-multiarch size and it does not fit any more -- the i386 Mesa
+# alone is most of a gigabyte -- but the reason to leave it at 12 is not that
+# 12 is needed today, it is that the number costs almost nothing to carry and
+# the alternative fails in the worst possible way.  Measured, not argued
+# (scripts/hamlinux_distro_audit.sh, HAMLINUX_AUDIT_DOWNLOAD=1):
+#
+#   provisioned file           12.00 GiB    what `ls -l` says
+#   occupied by software        2.20 GiB    what is actually in there
+#   blocks on the host disk     1.95 GiB    it is sparse; this is the real cost
+#   zstd -12 of the whole file  559.5 MiB   what a person would transfer
+#   ...of which the empty space   0.3 MiB   0.06% of that transfer
+#
+# (taken on a pre-yad-swap image -- 619 packages, 2.20 GiB occupied.  The
+# swap below takes the occupied figure to 2.06 GiB and the transfer down with
+# it; it does not move the provisioned one, which is the whole point.)
+#
+# So the 10 GiB of hole costs 318 KiB in a 559 MiB transfer and zero bytes on
+# the host until something writes to it.  Shrinking it was measured the other
+# way too: a COPY of this image, e2fsck'd and `resize2fs -M`'d down to
+# 3.44 GiB, compresses to 586,403,034 bytes against 586,672,510 for the 12 GiB
+# original -- a 263 KiB saving, 0.045%, for a filesystem that can then no
+# longer hold a game.
+#
+# AND NOTHING SHIPS THIS FILE.  255.one serves hpm .tar.gz packages; the
+# installer medium carries a busybox-minimal live tree built by
+# scripts/build_rootfs_img.py, not this image (scripts/build_installer_img.sh
+# stage 5).  build/image/distro.ext4 is a DEVELOPER artefact, attached as a
+# second QEMU disk by scripts/hamlinux_vm.sh and gitignored.  Nobody has ever
+# downloaded 12 GB of anything from this project.
+#
+# WHAT THE HEADROOM IS FOR.  This is a namespace a person installs things
+# into: `apt install`, and Steam unpacking a ~300 MB client and then a game.
+# ext4 in a sparse file already IS grow-on-demand -- blocks are allocated when
+# first written -- and a raw virtio disk cannot be grown from inside the
+# guest, so "resize at install time" has nothing to resize: the artefact is
+# never installed.  A too-small image that fills up is strictly worse than a
+# large sparse one: it fails as ENOSPC in the middle of a download.
+#
+# Set HAMLINUX_DISTRO_SIZE (or pass $2) on a host that cannot spare the
+# apparent size -- some filesystems and some backup tools do not do holes.
+SIZE="${2:-${HAMLINUX_DISTRO_SIZE:-12G}}"
 SUITE="${3:-bookworm}"
 MIRROR="${HAMLINUX_MIRROR:-http://deb.debian.org/debian}"
 # Set HAMLINUX_I386=0 for the old single-architecture image (no Steam).
@@ -171,6 +210,33 @@ if [ "$I386" = 1 ]; then
     # the 32-bit closure.  The rest are steam-libs' Recommends -- mmdebstrap
     # does not install Recommends, and every one of these is a library Steam
     # dlopen()s for graphics or input rather than an optional extra.
+    #
+    # WHAT THE 32-BIT HALF COSTS, AND WHO ASKED FOR IT.  298.4 MiB across 105
+    # i386 packages -- the largest real item in the image after Firefox -- and
+    # it is Steam's price, not slack.  Attributed against the image's own
+    # Depends graph by scripts/hamlinux_distro_audit.sh, arch-qualified:
+    #
+    #   236.1 MiB / 58 pkgs   steam-installer's own transitive Depends
+    #   287.9 MiB / 96 pkgs   declared by Debian steam-libs (Depends or
+    #                         Recommends) or by Valve's steamdeps.txt
+    #    10.4 MiB /  9 pkgs   ours, declared by neither  (3.5%)
+    #
+    # The single biggest 32-bit item is libllvm15:i386 at 122.0 MiB, and it is
+    # not a stray second copy of anything: libgl1-mesa-dri:i386 hard-Depends
+    # it, and libgl1-mesa-dri:i386 is named BOTH by Debian's steam-libs
+    # Depends and by Valve's own steamdeps.txt ("i386 dependencies for Steam
+    # itself"), read out of the bootstrap tarball staged above.  With libicu72
+    # and libz3-4 behind it that one root is 181.7 MiB -- 61% of the 32-bit
+    # total -- and the only way to not pay it is to not run a 32-bit client.
+    #
+    # THE 10.4 MiB RESIDUE IS NOT DEAD EITHER, it is just ours to defend:
+    # libnss3 + libnspr4 + libsqlite3-0 (6.4) for the client's embedded
+    # browser, mesa-utils + libgles2 + mesa-utils-bin (2.4) and vulkan-tools
+    # (1.5) because tests/linux/steam_probe.sh runs glxgears and vulkaninfo to
+    # prove the 32-bit stack resolves at all, libxtst6 and libxcomposite1
+    # (0.1).  Deleting the lot would return 3.5% of the 32-bit cost and take a
+    # gate with it.  Re-take the numbers with:
+    #   HAMLINUX_AUDIT_I386_DETAIL=1 scripts/hamlinux_distro_audit.sh
     #
     # ZENITY IS NOT DEAD CODE, and it is 133 MiB.  It carried "121 MiB of dead
     # code" on the standing list for a long time; both halves of that were
