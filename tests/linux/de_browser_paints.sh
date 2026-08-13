@@ -42,6 +42,17 @@
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
+# PRIVATE NAMESPACE FIRST -- before reap.sh, before $W, before the build.
+# "Entirely offscreen" above is about the DISPLAY, and it is true; it is not a
+# statement about the filesystem. wsysd's names are compiled into it -- /srv/wsys,
+# /dev/shm/hamnix-wsys, /tmp/hamnix-wsys -- and hambrowse is a desktop client, so
+# a run of this beside the machine's own live desktop shares names with it (the
+# table is in tests/linux/private_ns.sh). Nothing here asserts about a uid, so
+# the helper's one fidelity cost (euid 0 inside) touches nothing this gate
+# claims; $WORK stays under $HOME/.hamnix-build, which the helper does not
+# shadow, so a pinned BROWSER_PAINTS_BIN_DIR still finds its binaries.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$*"; }
@@ -67,6 +78,7 @@ if [ -z "${BROWSER_PAINTS_BIN_DIR:-}" ]; then
 fi
 
 echo "== does the browser put a page on the screen?"
+info "$(priv_ns_describe)"
 
 export HAMWSYS="$W/seg" HAMWSYS_BB="$W/bb" HAMWSYS_IMG="$W/img"
 export HAMFB_FILE="$W/fb" HAMFB_GEOM=1280x800
