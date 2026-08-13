@@ -1005,9 +1005,45 @@ by name: a failed `srv_dial()`; `srv_adopt_inherited()` rejecting the inherited
 descriptor; `srv_route_write()` returning 0 on `srv_fd < 0`, on `n >
 WSRV_MAXPAY`, and on a failed `srv_send()`; `srv_newwindow()` returning −2;
 `srv_route_read()` on a failed `srv_rdial()` and on an unanswered call; and the
-server closing the 65th connection (`srv_nconn >= WSRV_CONN_MAX`), which the
-client sees as a dial failure. The code says so already, at `srv_dial`: *"When
-the in-process path is removed in stage 4 this becomes a hard refusal."*
+server closing the 65th connection (`srv_nconn >= WSRV_CONN_MAX`). The code says
+so already, at `srv_dial`: *"When the in-process path is removed in stage 4 this
+becomes a hard refusal."*
+
+**Two corrections to that last one, both measured by
+`tests/linux/wsys_srv_ceiling.sh`, and the first is why the second happened.**
+
+*This paragraph used to say the 65th client "sees a dial failure". IT DOES
+NOT.* Both listeners are `listen(fd, 32)`, so `connect(2)` **succeeds** into the
+backlog and returns 0; the `accept`-and-`close` happens afterwards, inside the
+server's loop. The failure therefore surfaces as a **reset during HELLO** — and
+`srv_dial`/`srv_rdial` could not tell that from a server that answered with a
+version they do not speak, so both printed the version sentence with `theirs`
+still 0: *"the server ... speaks version 0, this client speaks 8"*. There was no
+disagreement. That aimed every reader at `WSYS_VERSION`, which costs 92 of 124
+packages, for a fault that is `WSRV_CONN_MAX` — a process-static array in
+`wsysd`, in no shared struct, whose value costs a recompile. **The fallback was
+never silent; it was misattributed, which is worse.** The two cases are now two
+sentences, both recorded to `<seg>.refused` beside the version refusal, and the
+server counts them as `capref` in the STAT block and names the ceiling on its
+own stderr. `connrefused` in that block is **not** this: it is stage 5's count
+of mutations ancestry would have allowed and a descriptor did not, and it read 0
+through six refusals.
+
+*And on the READ socket the fallback was not a lapse but a privilege gain, so
+it is already gone.* `srd_enum_tier()` answers EMPTY to a process that owns no
+window; falling back runs `snap_windows()` out of shared memory, **which answers
+everybody in full**. Measured end to end: uid 1002 owning nothing read 0 bytes
+with room in the read table and the victim's whole row with 64 connections held.
+Sixty-four `connect(2)` calls, no attack code and no privilege. `srv_route_read`
+already forbade exactly this twenty lines above the fallback — *"turn every
+server-side refusal into a bypass"* — and a connection refused at the ceiling
+**is** a server-side refusal. It now fails closed with `ECONNREFUSED`, but only
+when a server answered and refused: a server that is *absent* still falls back,
+because gates run `HAMWSYS_SERVER=1` with no `wsysd` and `wsys_enum_policy.sh`'s
+unrouted arm depends on the full list still arriving there. **The mutation
+fallback stays**, loud and recorded, because failing it alone would take down
+applications while `env -u HAMWSYS_SERVER` and the read-write mapping sit beside
+it untouched — closed to honest clients and open to hostile ones.
 
 **(6) `srv_enabled()` must go, not flip.** While the boundary is an environment
 variable, `env -u HAMWSYS_SERVER` is the bypass and it needs no attacker.
@@ -1200,11 +1236,38 @@ stage 7 must not quote it as one.**
 connections stop being one:
 
 - `WSRV_CONN_MAX = 64`, on the mutation socket *and* separately on the read
-  server. The 65th client is `close(cfd)`'d, which today means it silently
-  falls back to the unmediated path and after 7.1(5) means it cannot draw at
-  all. A DE spawns each app as `/bin/hamsh /etc/rc.de-user <prog>`, so an app
-  costs a connection for hamsh and one for the program unless the handoff
-  adopts — **64 is a desktop-wide app limit and nothing measures it.**
+  server — **two budgets, not one**, and `tests/linux/wsys_srv_ceiling.sh`
+  asserts both: 70 dials at `.../rd` keep 64 and refuse #65. The 65th client is
+  `close(cfd)`'d; after 7.1(5) it cannot draw at all, and today it falls back
+  to the unmediated path **loudly and recorded** rather than silently — see the
+  correction in 7.1(5) above, and note that the read socket's fallback is gone
+  entirely because it was handing out the window list.
+
+  **The number is now measured, and it is not the binding constraint.** A
+  routed desktop boot — `wsysd` + `hamdesktop` + `hampanelscene` +
+  `hamappmenu -self` + a continuously dragging decorated window — holds **five
+  connections, all on the mutation socket, one per window-owning program, and
+  zero on the read socket**, censused through `ss -xp` for the ESTABLISHED
+  server-side rows and `/proc/<pid>/fd` to resolve each peer inode to a pid
+  (the client end of an AF_UNIX connection has no address, so `/proc` is the
+  only place that association exists). One connection per program, so 64 is
+  reached at about 64 window-owning programs on a boot shaped like this one.
+
+  **What that measurement does NOT cover, and it is the half that could halve
+  the ceiling.** This boot does not go through `hamUId`, so it does not spawn
+  anything as `/bin/hamsh /etc/rc.de-user <prog>` — the path every window of an
+  *installed* desktop is created through, where an app costs a connection for
+  `hamsh` **and** one for the program unless the handoff adopts. The gate says
+  so rather than extrapolating. Until an installed-desktop census exists, the
+  honest statement is: **one connection per window-owning program measured, an
+  unmeasured factor of up to two on the installed spawn path, and 64 therefore
+  between ~32 and ~64 programs.**
+
+  Raising it, if that is ever wanted, is **a recompile and not a version bump**:
+  `WSRV_CONN_MAX` sizes `srv_conn[]`, `srd_conn[]` and two stack `epoll_event`
+  arrays, all process-static in `wsysd`, and appears in no shared-segment
+  struct — the `_Static_assert`s that freeze `struct wshm`'s prefix do not
+  mention it.
 - The one-time dial is 742 µs in one run, ~100 µs in the others, per process.
   At login that is once per DE component; at `hpm update` scale it is nothing.
   It is reported apart in the read-latency gate and belongs in the budget as a
