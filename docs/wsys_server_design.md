@@ -586,6 +586,31 @@ quiet host.
 | drag, mouse-paced | 618 | 0.45% | 0.38% |
 | worst measured | 2050 | **0.71%** | 1.27% |
 
+**Two runs of it, and the difference between them is the argument for the
+allowances being where they are.** Both are **17 PASS / 0 FAIL**; both are the
+same tree; they differ only in what else the machine was doing.
+
+| ops/s | quiet run | drifting run |
+|---|---|---|
+| 100 | 0.17% | 0.25% |
+| 192 | 0.19% | 0.30% |
+| 618 | 0.22% | 0.35% |
+| 2050 | 0.42% | 0.43% |
+| **fixed** | **0.157%** | **0.241%** |
+| **marginal** | **1.282 µs** | **0.923 µs** |
+
+The second run *started* at loadavg 0.65 — the quietest of the session — and
+still produced the higher figures, because **the load rose after the baseline
+was taken**: the flag-off baseline was sampled at 0.81–1.31 and the arms
+differenced against it at 1.68–2.38. The delta does not cancel host drift, its
+two terms being minutes apart. Note also the fixed and marginal terms moving in
+*opposite* directions between the two runs — the same slope/intercept trade-off
+that makes the extrapolated intercept untrustworthy and the 100 ops/s arm worth
+having.
+
+**The allowances hold across both**, which is the property they were chosen
+for. The measured coefficients are what a quiet host is needed to pin down.
+
 **This is not a blanket loosening.** At the worst measured load the new budget
 is 0.71% where the old one was 1.27% — the shape change *tightens* the arm
 that had the most slack while making the idle arm expressible at all. Only the

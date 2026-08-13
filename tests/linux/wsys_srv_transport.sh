@@ -297,8 +297,23 @@ measure_idle(){ # measure_idle <tag> [env...] -> echoes "s1 s2 s3 median"
     echo "$s1 $s2 $s3 $(median3 "$s1" "$s2" "$s3")"
 }
 
+# THE BASELINE IS TAKEN ONCE, AND EVERY DELTA BELOW IS AGAINST IT. That is a
+# KNOWN SYSTEMATIC ERROR and it is recorded here rather than left to be
+# rediscovered: the last arm is measured about twelve minutes after this one,
+# and THE DELTA DOES NOT CANCEL HOST DRIFT because its two terms are minutes
+# apart. Seen directly, in one run's own per-sample conditions: this baseline
+# was sampled at loadavg 0.81-1.31 and the driven arms that were differenced
+# against it at 1.68-2.38, and every delta came out 0.06-0.08 points higher
+# than the same arms measured in a run whose load did not drift (0.17 -> 0.25
+# at 100 ops/s).
+#
+# Interleaving a fresh flag-off baseline with each arm would remove it, at the
+# cost of doubling the wall time of the whole section. Until that is done, a
+# rising loadavg across the samples printed below means the deltas are an
+# UPPER BOUND, and the verdict at the end of this file says when that happened.
 read -r O1 O2 O3 OMED <<<"$(measure_idle idle_off)"
 note "idle CPU, HAMWSYS_SERVER unset: samples $O1% $O2% $O3% -> median $OMED% of a core"
+note "the baseline above is differenced against EVERY arm below, the last of them about twelve minutes from now -- watch the per-sample loadavg for drift"
 
 # ==================================================================
 # B. THE TRANSPORT, WITH THE FLAG SET.
