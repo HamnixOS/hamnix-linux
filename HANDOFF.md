@@ -139,6 +139,45 @@ mis-read:
   coefficients are what need a quiet host, and the gate now says so itself.**
   Correctness arms — transport, flag-unset refusal, byte-identical `windows`,
   zero backbuffer writes — are load-insensitive and stay meaningful either way.
+* **THE SHELL'S SPAWN PATH IS WIRED, AND THE FIRST ROUTED SPAWN FOUND A REAL
+  DEFECT — IN THE WIRING, NOT IN THE SERVER.** `_spawn_at()` in
+  `user/hamsh.ad` now calls `sys_wsys_srv_handoff(1)` before the launch and
+  `(0)` after, and copies `HAMWSYS_SRV_FD` into the child's `envp` — which is
+  needed because **`_build_envp()` builds from hamsh's own exported-variable
+  table, not the C `environ`**, so the runtime's `setenv()` is invisible to a
+  spawned child without it. That is the non-obvious half of the change.
+  **It does not work yet, and the cause is named:**
+
+  | reader, against the same live routed server | result |
+  |---|---|
+  | `cat /dev/wsys/screen` spawned by bash | `1280 800`, rc 0 |
+  | `cat /dev/wsys/screen` spawned by hamsh | **cannot open: ENXIO** |
+
+  The routed *read* path is fine — the direct arm proves it.
+  `srv_adopt_inherited()` is reached **before `seg_id_known`, deliberately**,
+  because a handed connection needs no segment identity to find its server; so
+  a child that adopts one **never attaches the segment**, and
+  `/dev/wsys/screen` needs the chrome mapping locally (`chrome_attach()`,
+  *ENXIO WHEN UNANNOUNCED* in `user/linux-wsys.c`). **The adoption is built
+  for a process that speaks only the protocol, and `cat` is not one.** So
+  handing the connection to every external command is not just the policy
+  widening the design anticipated — it breaks ordinary commands. The fix is
+  either a selective handoff (only a spawn *into* a window the shell owns) or
+  an adopting child that attaches the segment too; **that is a design pass and
+  was deliberately not made by loosening anything to get a desktop up.**
+* **What IS verified: the inert paths.** Flag unset, and flag set with no
+  server (handoff returns -1 and says so), both spawn and redirect exactly as
+  before — `hamsh` is unchanged for every shipped configuration, which is what
+  `HAMWSYS_SERVER` being unset everywhere means today.
+* **The offscreen DE harness has a trap worth knowing before the next
+  attempt.** `wsysd`, `hamdesktop` and `hampanelscene` all come up offscreen
+  and the panel beacon fires, but **`/dev/wsys/windows` reads 0 bytes even
+  unrouted** — the working DE gates (`de_appmenu_brisk.sh`) enumerate by
+  per-window `/dev/wsys/<wid>/ctl`, not by that file, so do the same.
+  And a chrome started from an rc that hamsh *finishes* dies with the shell:
+  the background jobs do not outlive it, which reads exactly like "the desktop
+  failed to start". `hamsh`'s redirect itself is fine — a foreground external
+  command writes its file correctly.
 * Not routed yet: `wid/scene`, reads, the enumeration policy, and the version
   bump.
 
