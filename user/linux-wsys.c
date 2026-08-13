@@ -2952,6 +2952,33 @@ static void owner_harden(void)
                 strerror(errno));
 }
 
+/* ==================================================================
+ * THE MEDIATOR'S TRANSPORT — STAGE 1.  See linux-wsys.h for the design and
+ * docs/wsys_server_design.md for the work order it comes from.
+ *
+ * STUB.  This commit lands the gate and the seam it asserts against, and
+ * nothing else, so that the gate can be seen RED before it is made green.  A
+ * test that has never failed is not a gate.
+ * ================================================================== */
+void hamwsys_srv_claim(void)   { }
+int  hamwsys_srv_listen(void)  { return -1; }
+int  hamwsys_srv_service(void) { return 0; }
+
+int hamwsys_srv_selftest(void)
+{
+    fprintf(stderr, "wsrv: there is no transport in this build -- /dev/wsys "
+                    "is implemented in-process, so there is nothing to dial "
+                    "and nowhere a policy could live.\n");
+    return 1;
+}
+
+int hamwsys_srv_sustain(int ops_per_sec, int secs)
+{
+    (void)ops_per_sec; (void)secs;
+    fprintf(stderr, "wsrv: there is no transport in this build.\n");
+    return 1;
+}
+
 #define KEYCHAN_MAX  WSYS_MAX_WINDOWS
 
 /* ==================================================================

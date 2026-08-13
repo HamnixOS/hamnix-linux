@@ -1,0 +1,102 @@
+# tests/linux/wsys_srv_probe.ad — DRIVE THE MEDIATOR'S TRANSPORT.
+#
+# Stage 1 of docs/wsys_server_design.md routes NO /dev/wsys operation over the
+# server yet, on purpose. So there is nothing an ordinary program does that
+# would exercise the transport, and the alternative -- a hidden environment
+# variable inside the client path that makes production code run a self test --
+# would put test scaffolding in every shipped binary's hot path. This program
+# is the driver instead: it opens /dev/wsys the way any client does, which is
+# what makes the client dial the server, and then asks the transport to prove
+# itself.
+#
+# THE PROOF IT ASKS FOR, and why each half is needed:
+#   * a blocking round trip (WSRV_OP_PING) -- the interrogative shape;
+#   * a burst of fire-and-forget messages (WSRV_OP_NOP) followed by a blocking
+#     read of the SERVER'S OWN COUNTERS (WSRV_OP_STAT). A fire-and-forget send
+#     that is silently dropped and one that is delivered look identical from
+#     the sending end. Asking the far side how many it received is the only
+#     way to tell them apart, and without it this program would report a
+#     transport that drops everything as working.
+#
+# Exit code is the failure count, so a stub cannot pass by resolving.
+#
+# Usage:
+#   wsys_srv_probe                     selftest only
+#   wsys_srv_probe sustain <ops> <s>   drive <ops>/s for <s> seconds, so the
+#                                      CPU cost of mediation can be measured
+#                                      against the budget from the outside.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+extern def sys_wsys_srv_selftest() -> int32
+extern def sys_wsys_srv_sustain(ops_per_sec: int32, secs: int32) -> int32
+
+numbuf: Array[24, uint8]
+rbuf:   Array[256, uint8]
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, slen(s))
+
+
+def putd(fd: int32, v: int32):
+    if v < 0:
+        puts(fd, "-")
+        putd(fd, 0 - v)
+        return
+    n: uint64 = 0
+    x: int32 = v
+    if x == 0:
+        numbuf[0] = 48
+        n = 1
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    i: uint64 = n
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &numbuf[i], 1)
+
+
+def arg_int(s: Ptr[uint8]) -> int32:
+    v: int32 = 0
+    i: uint64 = 0
+    while s[i] >= 48 and s[i] <= 57:
+        v = v * 10 + cast[int32](s[i]) - 48
+        i = i + 1
+    return v
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    # OPEN /dev/wsys FIRST, AS ANY CLIENT WOULD. The client end of the
+    # transport is dialled from hamwsys_open, after the segment is attached --
+    # a process that never touches the window system never opens a socket to
+    # it. Skipping this would test the transport from a process the transport
+    # would never have connected, which is not the thing being asserted.
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/screen"))
+    if fd < 0:
+        puts(1, "wsrvprobe: FAIL cannot open /dev/wsys/screen\n")
+        return 1
+    sys_read(fd, &rbuf[0], 255)
+    sys_close(fd)
+
+    if argc > 3 and cast[Ptr[uint8]](argv[1])[0] == 115:
+        ops: int32 = arg_int(cast[Ptr[uint8]](argv[2]))
+        secs: int32 = arg_int(cast[Ptr[uint8]](argv[3]))
+        return sys_wsys_srv_sustain(ops, secs)
+
+    f: int32 = sys_wsys_srv_selftest()
+    puts(1, "wsrvprobe: ")
+    putd(1, f)
+    puts(1, " failures\n")
+    return f
