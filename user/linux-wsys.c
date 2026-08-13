@@ -4619,7 +4619,7 @@ int hamwsys_srv_readlat(int nsamples)
     uint64_t *s = (uint64_t *)malloc((size_t)nsamples * sizeof *s);
     if (!s) return 1;
     int n = 0, empty = 0, fails = 0;
-    uint64_t bytes = 0;
+    uint64_t bytes = 0, first = 0;
     for (int i = 0; i < nsamples; i++) {
         struct hamwsys_file f;
         memset(&f, 0, sizeof f);
@@ -4631,10 +4631,24 @@ int hamwsys_srv_readlat(int nsamples)
         if (f.snaplen == 0) empty++;
         bytes += f.snaplen;
         free(f.snap);
+        printf("wsrvrl: sample %d %llu us %llu bytes%s\n",
+               i, (unsigned long long)dt, (unsigned long long)f.snaplen,
+               n == 0 && i == 0 ? "  (INCLUDES THE ONE-TIME DIAL)" : "");
+        /* THE FIRST SAMPLE IS NOT LIKE THE OTHERS AND IS REPORTED APART.
+         * srv_route_read dials the read server on the first call -- connect,
+         * a version handshake, and a reply -- so sample 0 is that whole
+         * conversation and every later one is a round trip on an open
+         * connection.  Measured, it is the difference between ~14 us and up to
+         * a millisecond.  Folding it into the distribution would put a
+         * once-per-process cost into a per-read percentile, which flatters or
+         * damns the wrong thing depending on the sample count.  It is a real
+         * cost and it is printed; it is just not a read. */
+        if (i == 0) { first = dt; continue; }
         s[n++] = dt;
-        printf("wsrvrl: sample %d %llu us %llu bytes\n",
-               i, (unsigned long long)dt, (unsigned long long)f.snaplen);
     }
+    printf("wsrvrl: first read %llu us -- ONCE PER PROCESS, and it is the "
+           "dial (connect + version handshake), not the read\n",
+           (unsigned long long)first);
     if (n == 0) {
         printf("wsrvrl: FAIL not one routed read completed\n");
         free(s);
@@ -4645,14 +4659,14 @@ int hamwsys_srv_readlat(int nsamples)
         while (j >= 0 && s[j] > v) { s[j + 1] = s[j]; j--; }
         s[j + 1] = v;
     }
-    printf("wsrvrl: routed /dev/wsys/windows read, %d samples: min %llu  "
-           "p50 %llu  p90 %llu  max %llu us\n", n,
+    printf("wsrvrl: routed /dev/wsys/windows read, %d samples (the dial "
+           "excluded): min %llu  p50 %llu  p90 %llu  max %llu us\n", n,
            (unsigned long long)s[0], (unsigned long long)s[n / 2],
            (unsigned long long)s[(n * 9) / 10],
            (unsigned long long)s[n - 1]);
     printf("wsrvrl: bytes %llu across %d reads, %d empty, %d failed\n",
-           (unsigned long long)bytes, n, empty, fails);
-    if (empty == n) {
+           (unsigned long long)bytes, n + 1, empty, fails);
+    if (empty >= n) {
         printf("wsrvrl: FAIL every routed read came back EMPTY -- a server "
                "that answers nothing is the fastest possible one, and these "
                "times would be of nothing\n");
