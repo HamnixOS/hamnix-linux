@@ -94,16 +94,22 @@ instantaneous, and it is one constant if the trade is judged wrong.
 
 ### `ssh` and `sshd` trusted lengths the other end chose, including before login
 
-**Neither is on any machine, and this entry used to say they were.** It read
-"Both are installed by `hpm install hamnix-base`". They are not: `ssh` and
-`sshd` are in no package in the channel and in no `/bin` in the image —
-checked by listing every file in all 125 tarballs of a built 1.0.23 channel
-and every file in the image root, with a name that IS there (`ls`, `wsysd`,
-`hampanelscene`) used first to prove the search finds things. `hamnix-net`
-carries eight programs and none of them is `ssh`. So the fix below is real,
-it is in the tree, and **there is nobody it can reach** until these two are
-packaged. It is listed here rather than removed because the defect is real
-and the gap is the thing worth writing down.
+**They are on a machine now, and until this release neither was.** This entry
+used to open "Both are installed by `hpm install hamnix-base`", which was
+false: `ssh` and `sshd` were in no package and in no `/bin`, so a fix to a
+read a stranger could trigger *before logging in* reached nobody at all.
+
+`ssh` now comes with `hpm install hamnix-base`, in `hamnix-net` beside `curl`
+and `ping`. **`sshd` is a separate package you have to ask for** —
+`hpm install hamnix-svc-sshd` — and installing it does not start it; that is
+`svc start sshd`. A machine does not begin listening on port 22 because
+somebody wanted a desktop.
+
+Proven by running the packaged programs against each other rather than by
+reading a file list: a whole SSH-2 session, key exchange, host key signature
+verified, encryption on, password accepted, a shell opened over the channel
+and a clean disconnect — which is also the only way to reach the parsing this
+release is about, since it sits behind key exchange.
 
 Five places took a size or an offset straight off the wire and used it without
 checking it against the packet that carried it.
@@ -128,8 +134,23 @@ missed the other, which is the reason the second pass exists.
 
 ### The web server answered a too-large request by guessing at it
 
-**Same gap as the entry above:** `httpd` and `httpd_worker` are in no package
-and in no image `/bin` either, so nothing here reaches a machine yet.
+**This one still reaches nobody, and now we know why.** `httpd` is in no
+package and in no `/bin`, and unlike `ssh` it was NOT added in this release —
+because on this system it cannot answer a request at all. Traced: it takes
+the connection, starts the program that is supposed to reply, and that
+program exits a fifth of a millisecond later having read nothing and said
+nothing. Every request gets silence.
+
+The cause is not in either program. The web server hands the reply-writer a
+connection by *number*, and on this system a number is not enough to find the
+connection — it was written for a kernel where it is. Shipping the server
+anyway would put a web server on every machine that answers nothing, forever,
+without ever failing; that is the thing this project refuses to do, and it is
+the same reason `initctl` and `telinit` are not shipped either.
+
+So the fix below is real and correct, and it is not the blocker. When the
+reply-writer can reach the connection, `httpd` ships and this entry stops
+being about a program nobody has.
 
 `httpd` reads a request into an 8 KiB buffer. Headers that did not fit were
 parsed **as though they were the whole request**, with the remainder left

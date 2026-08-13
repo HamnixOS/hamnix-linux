@@ -88,7 +88,69 @@ COREUTILS = """
 # in SYS_CMDS instead, which ships it and keeps it updatable without minting a
 # colliding name or renaming a package installed machines already carry.
 
-NET_CMDS = "ifconfig route ping host curl wget dhcpc ntpd".split()
+# THE SAME SPLIT THE NATIVE LINE ALREADY MADE, and it is copied deliberately
+# rather than re-derived. This file's own header says the two channels carry
+# "the same package NAMES and the same format -- the difference is the binaries
+# and the `channel` field", so a name cannot mean two different sets of
+# programs depending on which kernel you booted. scripts/build_packages.py's
+# _files_net carries ifconfig, ping, route, httpd, curl, wget, ssh, host, ntpd
+# and httpd_worker; its _files_svc_sshd carries sshd plus the service
+# definition, "decoupled from the base because a headless embedded board can
+# opt out of remote login".
+#
+# ssh, httpd and httpd_worker were in NEITHER list here and in no image, so a
+# PRE-AUTHENTICATION bounds fix in sshd and the 431/413 fix in httpd shipped
+# nowhere. That is NORTH_STAR.md's invariant failing, and it failed silently:
+# nothing named the four programs, so nothing could miss them.
+#
+# ssh is a CLIENT, and it is here because it WORKS -- measured, not assumed:
+# the packaged ssh and the packaged sshd complete a whole SSH-2 session
+# against each other (key exchange, host key signature verified, encryption
+# active, password USERAUTH accepted, session channel opened, hamsh spawned
+# and bridged, clean disconnect).
+#
+# httpd AND httpd_worker ARE DELIBERATELY NOT HERE, AND THAT IS A MEASUREMENT
+# RATHER THAN AN OVERSIGHT. On this line httpd cannot serve a single request.
+# Traced, with both programs out of a built channel: the master announces,
+# accepts (`accept(5) = 6`) and spawns `/bin/httpd_worker 3 /www`; the worker
+# attaches THE SAME /srv/net segment as the master and then calls
+# `exit_group(0)` 200 microseconds later, having read nothing, written
+# nothing, and never opened the connection's data file. It did not take its
+# own error path either -- that writes "could not open connection data" and
+# exits 1 -- so it reached serve(), read zero bytes, treated the request as
+# empty and returned. Every request is answered with silence.
+#
+# THE MECHANISM IS STRUCTURAL, not a bug in either program: user/linux-net.c
+# keeps the connection table in shared memory but a record's `fd` is a
+# PER-PROCESS descriptor, so a worker handed a connection NUMBER cannot reach
+# the socket the master accepted. On the native kernel /net is a kernel device
+# and the number is global, which is why the same source works there.
+# user/linux-syscalls.c already records the symptom in its own words -- "why
+# user/httpd.ad could not serve one request here" -- and fixed a different
+# half of it (the spawned worker losing HAM* out of its environment).
+#
+# So packaging them would put a web server on every machine that installs
+# hamnix-base and answers nothing, forever, silently. That is the same call
+# scripts/hamlinux_image.sh already makes about initctl and telinit -- they
+# reach PID 1 through a node this line does not serve, so they are not
+# shipped -- and for the same reason: a command that cannot work is the
+# success-shaped answer this tree exists to avoid.
+#
+# WHAT THIS COSTS, said out loud: the 431/413 fix in user/httpd_worker.ad is
+# in the tree and reaches nobody. It is the right fix and it is not the
+# blocker. The blocker is above; when a worker can reach the accepted
+# connection, both names go in this list and the entry in CHANGELOG.md stops
+# being about a program nobody has.
+NET_CMDS = ("ifconfig route ping host curl wget dhcpc ntpd "
+            "ssh").split()
+
+# sshd is NOT in the list above, and that is the deliberate half. It LISTENS,
+# and it accepts bytes from anyone who can reach the port before any
+# authentication has happened -- the very code path the bounds fix is about.
+# A package that arrives because somebody asked for a desktop must not open a
+# port; `hpm install hamnix-svc-sshd` is a person deciding. Same reasoning as
+# the native line's, and the same package NAME.
+SVC_SSHD_CMDS = ["sshd"]
 
 # The /dev/audio clients. They are thin Plan 9 clients of the device served by
 # user/linux-audio.c and know nothing about ALSA. They are packaged SEPARATELY
@@ -450,8 +512,25 @@ COMPONENTS = {
         [("hamsh", "bin/hamsh")], [], ["hamnix-init>=1"]),
     "hamnix-net": (
         "hamnix-linux networking userland -- ifconfig, route, ping, host, "
-        "curl, wget",
+        "curl, wget and the ssh client",
         [(c, "bin/" + c) for c in NET_CMDS], [], ["hamnix-init>=1"]),
+    "hamnix-svc-sshd": (
+        "the hamnix SSH-2 server (curve25519-sha256 + chacha20-poly1305): "
+        "/bin/sshd and the service definition hamsh's `svc` builtin reads. "
+        "SEPARATE FROM hamnix-base ON PURPOSE -- installing it is how a "
+        "person opens port 22, and nothing starts it for them: after "
+        "`hpm install hamnix-svc-sshd`, `svc start sshd`.",
+        [(c, "bin/" + c) for c in SVC_SSHD_CMDS],
+        # The definition travels WITH the binary it names. Shipping one
+        # without the other gives either a server nothing can start or a
+        # service definition whose exec does not exist -- and the second is
+        # worse, because `svc start sshd` then fails at spawn time with the
+        # machine looking correctly configured.
+        [("etc/svc/sshd.hamsh", "etc/svc/sshd.hamsh")],
+        # hamnix-net, because sshd is the server half of a networking
+        # userland and the client half is where `ssh` lives -- the same
+        # dependency the native line declares.
+        ["hamnix-init>=1", "hamnix-net>=1"]),
     "hpm": (
         "Hamnix package manager (hpm), built for the Linux line",
         [("hpm", "bin/hpm")],

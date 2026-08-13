@@ -84,6 +84,36 @@ APPS=(
     more less
     bc cal
     ifconfig route ping host curl wget hpm
+    # THE SSH CLIENT AND THE SSH SERVER. Both build on this line, both were
+    # in NO image and NO package -- so a PRE-AUTHENTICATION bounds fix in
+    # sshd, landed and gated, reached nobody at all. They are in BOTH lists
+    # for the reason hamappmenu is: this one puts them in /bin,
+    # scripts/hamlinux_packages.py puts them in a package so `hpm update` can
+    # ever fix them, and tests/linux/channel_covers_image.sh only NOTICES a
+    # missing package for a file the image actually ships.
+    #
+    # MEASURED BEFORE BEING LISTED, with the packaged binaries: `ssh` with no
+    # arguments spawns /bin/sshd and drives a whole SSH-2 session against it
+    # -- key exchange, host key signature verified, encryption active,
+    # password USERAUTH accepted, session channel opened, hamsh spawned and
+    # bridged, clean disconnect.
+    #
+    # sshd is here and is NOT started. Nothing in etc/rc.boot.* runs
+    # `svc start sshd`; the service definition ships in its own package
+    # (hamnix-svc-sshd) and a person turns it on. A listening SSH server that
+    # arrives because somebody asked for a desktop is not a default this
+    # project gets to pick for them.
+    #
+    # httpd AND httpd_worker ARE NOT HERE, and the reason is measured rather
+    # than assumed: on this line httpd accepts the connection, spawns the
+    # worker, and the worker exits 0 having read nothing and written nothing,
+    # so every request is answered with silence. A connection record's `fd`
+    # in user/linux-net.c is a PER-PROCESS descriptor, and the worker is
+    # handed only the connection NUMBER. Full trace and the rest of the
+    # reasoning in scripts/hamlinux_packages.py above NET_CMDS. Same call
+    # this list already makes about initctl and telinit, ten lines up, and
+    # for the same reason.
+    ssh sshd
     insmod modprobe lsmod rmmod
     xbridge wsyswl nsrun dhcpc ntpd
     # The clipboard bridge. It is here rather than among the GUI apps because
@@ -308,6 +338,23 @@ for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
          services protocols networks host.conf; do
     [ -f "etc/$f" ] && install -m644 "etc/$f" "$ROOT/etc/$f"
 done
+
+# THE SERVICE DEFINITIONS. /etc/svc/<name>.hamsh is one of the two places
+# hamsh's `svc` builtin looks (svc_def_load: /etc/services.d/<n>.svc first,
+# then here). MEASURED on this line before shipping it, because the image
+# script already refuses initctl and telinit for looking working while being
+# unable to work: in a chroot, `svc start` on a control service reached
+# `state=running` with a live pid, and `svc start sshd` registered, forked and
+# tracked the real /bin/sshd, which then started and generated a host key.
+# So the supervisor works here even though user/linux-runtime.S stubs
+# sys_svc_publish to -1 -- that stub costs `cat /proc/svc/<name>`, not the
+# service. Nothing in etc/rc.boot.* starts any of these.
+if [ -d etc/svc ]; then
+    mkdir -p "$ROOT/etc/svc"
+    for f in etc/svc/*.hamsh; do
+        [ -f "$f" ] && install -m644 "$f" "$ROOT/etc/svc/$(basename "$f")"
+    done
+fi
 
 # THE APPLICATIONS MENU'S DATA. `hamde` used to sit in the loop above, and the
 # loop tests `[ -f "etc/$f" ]` -- FALSE for a directory. So the 26 shipped
