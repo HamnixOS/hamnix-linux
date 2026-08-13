@@ -4861,6 +4861,12 @@ static int srv_rdial(void)
     if (srv_rfd >= 0) return srv_rfd;
     if (!srv_enabled() || srv_is_server || srv_rtried) return -1;
     srv_rtried = 1;
+    /* CLEARED PER ATTEMPT, so it names what THIS dial found and not what an
+     * earlier one did.  srv_route_read fails closed on it, and a stale 1 left
+     * over from a full table would make a later dial that failed because the
+     * server is GONE refuse the read instead of falling back -- which is the
+     * one case that must still fall back. */
+    srv_rd_cap_refused = 0;
     if (!seg_id_known) return -1;
     struct sockaddr_un a;
     socklen_t alen = srd_addr(&a);
@@ -4893,6 +4899,20 @@ static int srv_rdial(void)
         srv_rd_cap_refused = 1;
         srv_conn_refuse_note("rd", &said);
         close(fd);
+        /* THE CEILING IS TRANSIENT AND A VERSION IS NOT, so this one case
+         * gets to try again.  srv_rtried exists because a client gets exactly
+         * one connection for its lifetime, and every other way of failing
+         * this dial is permanent -- a version disagreement will not resolve
+         * itself and retrying it per read would be a syscall storm for
+         * nothing.  A full table empties when a program exits.
+         *
+         * IT MATTERS MORE NOW THAT THE REFUSAL IS HARD.  Before this commit a
+         * refused reader silently read shared memory for ever; now it gets
+         * ECONNREFUSED, so leaving srv_rtried set would make a taskbar that
+         * happened to start during a connection storm BLIND FOR THE REST OF
+         * ITS LIFE -- trading a boundary that lapses under load for a desktop
+         * that never recovers from it, which is not a better failure. */
+        srv_rtried = 0;
         return -1;
     }
     if (rc < 0) {
