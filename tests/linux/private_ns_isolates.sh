@@ -164,7 +164,13 @@ sleep 3
 sleep 4
 
 winctl() { "$BIN/wsys_poke" "/dev/wsys/$1/ctl" 2>/dev/null; }
-vis_of()  { set -- $(winctl "$1"); echo "${8:-x}"; }
+# Field 8 of the ctl line is `visible`. This used to default to x, and that
+# default TRAVELLED: two unreadable ctl lines became "before vis x x" in the
+# log and the consumer below read that as "the witness's panel windows changed
+# across the gate's run -- the gate is still reaching outside itself", an
+# isolation breach invented out of a failed read. It now emits the literal
+# `unread`, which no visible field can ever be, and the consumer says so.
+vis_of()  { set -- $(winctl "$1"); echo "${8:-unread}"; }
 # Find the witness's own two bars exactly as the gate finds its own.
 TOP=""; BOT=""; TOPH=""; BOTH=""; BOTY=0
 for wid in $(seq 2 40); do
@@ -232,11 +238,20 @@ else
     cat "$BASE/isolated.outer.log" 2>/dev/null | tail -20
     done_report; exit 1
 fi
-if [ "$(field 'before vis' isolated)" = "1 1" ] && [ "$(field 'after vis' isolated)" = "1 1" ]; then
-    ok "through a full run of de_panel_conf_replace.sh the witness's panel windows never moved off screen (visible 1 1 -> 1 1)"
-else
-    bad "the witness's panel windows changed across the gate's run ($(field 'before vis' isolated) -> $(field 'after vis' isolated)) -- the gate is still reaching outside itself"
-fi
+ivb="$(field 'before vis' isolated)"; iva="$(field 'after vis' isolated)"
+# `unread` is what the witness emits for a ctl line it could not read at all.
+# A window it never managed to look at is not a window the gate moved, so this
+# says it could not tell rather than reporting a breach it never observed.
+case "$ivb $iva" in
+    *unread*)
+        bad "the witness could not read its OWN panel windows (visible before='$ivb' after='$iva') -- this run cannot tell whether the gate reached outside itself, and nothing here says it did" ;;
+    *)
+        if [ "$ivb" = "1 1" ] && [ "$iva" = "1 1" ]; then
+            ok "through a full run of de_panel_conf_replace.sh the witness's panel windows never moved off screen (visible 1 1 -> 1 1)"
+        else
+            bad "the witness's panel windows changed across the gate's run ($ivb -> $iva) -- the gate is still reaching outside itself"
+        fi ;;
+esac
 bf="$(field 'before botfill' isolated)"; af="$(field 'after botfill' isolated)"
 if [ "${bf:-0}" -ge 60 ] && [ "${af:-0}" -ge 60 ]; then
     ok "and in PIXELS the witness's taskbar is painted before and after (${bf}% -> ${af}% of the bar colour) -- not a flag, the framebuffer"

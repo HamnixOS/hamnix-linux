@@ -145,7 +145,13 @@ sleep 3
 sleep 5
 
 winctl() { "$BIN/wsys_poke" "/dev/wsys/$1/ctl" 2>/dev/null; }
-vis_of() { set -- $(winctl "$1"); echo "${8:-x}"; }
+# Field 8 of the ctl line is `visible`. This used to default to x, and that
+# default TRAVELLED into the log the consumer parses: two ctl lines that could
+# not be read became "before vis x x", and the gate below reported that the
+# witness's panel windows had CHANGED -- a contamination verdict built out of a
+# failed read. It now emits the literal `unread`, which no visible field can
+# ever be, and the consumer says it could not tell.
+vis_of() { set -- $(winctl "$1"); echo "${8:-unread}"; }
 TOP=""; BOT=""; BOTH=""; BOTY=0
 for wid in $(seq 2 40); do
     line="$(winctl "$wid")"; [ -n "$line" ] || continue
@@ -247,11 +253,20 @@ if [ "${bx:-x}" = "${px:-y}" ]; then
 else
     bad "the gate's X server appeared in the witness's /tmp/.X11-unix (${bx} -> peak ${px}) -- on a machine with a real session that is a real display"
 fi
-if [ "$(field 'before vis' isolated)" = "1 1" ] && [ "$(field 'after vis' isolated)" = "1 1" ]; then
-    ok "the witness's panel windows never moved off screen (visible 1 1 -> 1 1)"
-else
-    bad "the witness's panel windows changed ($(field 'before vis' isolated) -> $(field 'after vis' isolated))"
-fi
+ivb="$(field 'before vis' isolated)"; iva="$(field 'after vis' isolated)"
+# `unread` is what the witness emits for a ctl line it could not read at all.
+# A window it never managed to look at is not a window the gate moved, so this
+# says it could not tell rather than reporting contamination it never observed.
+case "$ivb $iva" in
+    *unread*)
+        bad "the witness could not read its OWN panel windows (visible before='$ivb' after='$iva') -- this run cannot tell whether the gate reached them, and nothing here says it did" ;;
+    *)
+        if [ "$ivb" = "1 1" ] && [ "$iva" = "1 1" ]; then
+            ok "the witness's panel windows never moved off screen (visible 1 1 -> 1 1)"
+        else
+            bad "the witness's panel windows changed ($ivb -> $iva)"
+        fi ;;
+esac
 bf="$(field 'before botfill' isolated)"; af="$(field 'after botfill' isolated)"
 if [ "${bf:-0}" -ge 60 ] && [ "${af:-0}" -ge 60 ]; then
     ok "and in PIXELS its taskbar is painted before and after (${bf}% -> ${af}% of the bar colour) -- the framebuffer, not a flag"
