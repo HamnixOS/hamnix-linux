@@ -95,16 +95,40 @@ class Input:
         return t0, t1
 
 
-def read_state(catbin):
-    """wsysd's own published counters. `cat` of a file in /dev/wsys."""
-    try:
-        out = subprocess.run([catbin, '/dev/wsys/wsysd/state'],
-                             capture_output=True, timeout=10).stdout.decode()
-    except Exception:
-        return {}
-    f = out.split()
-    return {f[i]: int(f[i + 1]) for i in range(0, len(f) - 1, 2)
-            if f[i + 1].lstrip('-').isdigit()}
+def read_state(catbin, _tries=12):
+    """wsysd's own published counters. `cat` of a file in /dev/wsys.
+
+    A TORN READ RETURNS NOTHING, AND IT USED TO BECOME A FRAME COUNT.
+    /dev/wsys/wsysd/state is rewritten in place by wsysd every time it
+    publishes, and a reader that lands mid-rewrite gets an EMPTY body with
+    exit status 0 -- measured at 1-in-200 on an idle desktop and 4-in-200 on
+    a routed one, in both arms, so it is a property of the file and not of
+    the mediator. This function used to return {} for that, and every caller
+    then did `s.get('frames', 0)`, which turned one torn read into a frame
+    delta of MINUS THE WHOLE COUNTER (seen: -173 frames in 10 s) or of the
+    whole counter (seen: +212). Both were reported as measurements. One of
+    them failed the instrument's own counting selftest -- which is the only
+    reason it was ever noticed.
+
+    So: retry, and say so out loud if the retries do not get an answer,
+    rather than hand back a dictionary that is missing the key the caller is
+    about to default to zero.
+    """
+    for attempt in range(_tries):
+        try:
+            out = subprocess.run([catbin, '/dev/wsys/wsysd/state'],
+                                 capture_output=True, timeout=10).stdout.decode()
+        except Exception:
+            out = ''
+        f = out.split()
+        d = {f[i]: int(f[i + 1]) for i in range(0, len(f) - 1, 2)
+             if f[i + 1].lstrip('-').isdigit()}
+        if 'frames' in d:
+            return d
+        time.sleep(0.01)
+    print('WARNING: /dev/wsys/wsysd/state gave no frame counter in %d tries -- '
+          'every frame number derived from this sample is unusable' % _tries)
+    return {}
 
 
 def proc_cpu_ticks(pid):

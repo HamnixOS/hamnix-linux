@@ -420,6 +420,61 @@ term_arm() {
     done
 }
 
+# ---- DOES TRAFFIC ACTUALLY CROSS, AND WHOSE? -------------------------------
+# A held connection is not a routed desktop. A client could dial, negotiate a
+# version and then do every mutation in process, and the census above would
+# look exactly the same -- which is the failure mode this whole series keeps
+# running into in other clothes.
+#
+# HAMWSYS_SRV_TRACE=1 makes the server print one line per routed mutation from
+# INSIDE srv_as_caller(), carrying the caller's SO_PEERCRED pid and both
+# permission answers. Counting those lines by pid is therefore the mediator's
+# own account of who drove the desktop, and it is taken from the SERVER, never
+# from the clients. It is a separate boot because the fprintf is per mutation
+# and a drag makes ~800 a second: leaving it on would have been measuring the
+# trace.
+trace_arm() {
+    local A="$WORK/trace"; rm -rf "$A"; mkdir -p "$A/noicd"
+    export HAMWSYS="$A/seg" HAMWSYS_BB="$A/seg.bb" HAMWSYS_IMG="$A/img"
+    export HAMFB_FILE="$A/fb.raw" HAMFB_GEOM="$GEOM"
+    : >"$A/in"; export HAMWSYSD_INPUT="$A/in"
+    export VK_ICD_FILENAMES="$A/noicd/none.json" HAMLINUX_VNC=none
+    export HAMWSYS_SERVER=1 HAMWSYS_SRV_TRACE=1
+    local pids i
+    "$BINDIR/wsysd" </dev/null >"$A/wsysd.log" 2>&1 &
+    pids=$!; reap_add $!
+    for i in $(seq 1 100); do [ -s "$A/fb.raw" ] && break; sleep 0.1; done
+    "$BINDIR/hamdesktop"    </dev/null >"$A/d.log" 2>&1 & reap_add $!; pids="$pids $!"
+    sleep 3
+    "$BINDIR/hampanelscene" </dev/null >"$A/p.log" 2>&1 & reap_add $!; pids="$pids $!"
+    sleep 4
+    "$BINDIR/hamappmenu" -self </dev/null >"$A/m.log" 2>&1 & reap_add $!; pids="$pids $!"
+    sleep 3
+    "$BINDIR/de_dragload" 480 320 120 200 300 8 >"$A/drag.wid" 2>"$A/drag.err" &
+    reap_add $!; pids="$pids $!"
+    sleep 8
+    unset HAMWSYS_SRV_TRACE
+    local n; n="$(grep -ac '^wsrvtrace: caller' "$A/wsysd.log" || true)"
+    info "the mediator's own account of an 8 s drag on this desktop:"
+    grep -a '^wsrvtrace: caller' "$A/wsysd.log" \
+      | sed -n 's/.*caller uid=\([0-9]*\) pid=\([0-9]*\).*hostowner=\([0-9-]*\) owns_wid=\([0-9-]*\) ancestry=\([0-9-]*\).*/\2 uid=\1 hostowner=\3 owns_wid=\4 ancestry=\5/p' \
+      | sort | uniq -c | sort -rn | head -12 \
+      | while read -r c rest; do
+            local pid="${rest%% *}"
+            echo "deboot: INFO     $c mutations from pid $pid (${rest#* })"
+        done
+    if [ "${n:-0}" -gt 0 ]; then
+        ok "the boundary CARRIES the desktop: $n mutations crossed it in 8 s, each one decided by srv_as_caller() with the caller's SO_PEERCRED installed"
+    else
+        bad "not one mutation crossed the boundary -- the clients connected and then wrote the segment in process, which is a routed-LOOKING desktop and an unrouted one"
+    fi
+    grep -aq 'REFUSED' "$A/wsysd.log" \
+        && info "the mediator REFUSED something on this desktop: $(grep -ac REFUSED "$A/wsysd.log") lines -- see $A/wsysd.log" \
+        || info "the mediator refused nothing on this desktop, which is expected: every client here runs as the segment's host owner, so hostowner() answers 1 before any other question is asked. THIS IS THE LIMIT OF AN OFFSCREEN BOOT and is why the identity arms live in wsys_srv_identity.sh and wsys_srv_connown.sh, where a second uid is available."
+    local p; for p in $pids; do kill "$p" 2>/dev/null; done; sleep 1
+    for p in $pids; do kill -9 "$p" 2>/dev/null; done; sleep 1
+}
+
 # ---- run -------------------------------------------------------------------
 : >"$WORK/arms.tsv"
 for rep in $(seq 1 "$REPS"); do
@@ -428,6 +483,9 @@ for rep in $(seq 1 "$REPS"); do
     head2 "rep $rep -- ROUTED (HAMWSYS_SERVER=1 for the compositor and every client)"
     arm routed 1 "$rep" || true
 done
+
+head2 "DOES TRAFFIC ACTUALLY CROSS, AND WHOSE"
+trace_arm || true
 
 head2 "THE TERMINAL"
 term_arm || true
