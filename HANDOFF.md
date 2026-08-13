@@ -76,9 +76,36 @@ under **THE GATE INVENTORY** at the end of this section.
 ### THE WINDOW SYSTEM IS BECOMING A FILE SERVER — where that stands
 
 Seven passes of it are in the tree (design, transport, mutations, caller
-identity, connection ownership, the scene, and now a booted desktop). **All of
-it is inert unless `HAMWSYS_SERVER=1`, and nothing sets that**, so it changes
-nothing for a person yet and has no changelog entry.
+identity, connection ownership, the scene, and now a booted desktop), **plus
+four more that landed after this section was written and are the current
+state**:
+
+* **Four event rings had no owner check at all** (`0f80d3e5`). A stranger at
+  another uid drained a victim's event queue and read the compositor's own
+  message out of it — measured, with the stolen bytes printed. Closed for a
+  client that goes through the file protocol; **not** closed for one that maps
+  the segment.
+* **`wid/wctl` is routed** (`1ba8061c`), so move, resize, focus and version now
+  cross the boundary — four write leaves. `version` had to **block**, because
+  that write's return value *is* every hamui application's protocol decision
+  (`lib/hamui.ad:4135`); fire-and-forget would have set v2 on a refusal.
+* **The attribute reads are routed** (`a9d4bcd5`) — six read leaves. Another
+  uid can no longer read your window's geometry or list the windows that exist.
+  The sweep behind it is worth knowing: **the only reader of a foreign
+  `wid/ctl` in the whole tree is the compositor's own**, so the tight rule cost
+  nothing.
+* **The connection ceiling was a privilege gain** (`1fd21377`). Fill the
+  64-connection table and the refused client fell back to reading shared
+  memory, **which answers everybody in full** — 64 `connect()` calls, no attack
+  code. The read path now fails closed.
+
+**THE ONE THING THAT MATTERS MOST IS STILL OPEN: the mapping.** Every client
+maps the segment directly, so all of the above binds a program that asks
+politely and not one that does not. `open`/existence is still unrouted, and the
+title is still readable by any window owner.
+
+**All of it is inert unless `HAMWSYS_SERVER=1`, and nothing sets that**, so it
+changes nothing for a person yet and has no changelog entry.
 `docs/wsys_server_design.md` is the design and the running record;
 `docs/wsys_server_cost.md` is what it costs. What a fresh session must not
 mis-read:
