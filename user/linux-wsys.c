@@ -3316,6 +3316,11 @@ static uint64_t srv_n_bad, srv_n_bytes;
  * never refuses anything is indistinguishable from no mediator, and a gate
  * cannot tell those apart without a number to read. */
 static uint64_t srv_n_write, srv_n_newwin, srv_n_refused;
+/* Stage 6's two: `scene` counts routed display-list bytes accepted, `frame`
+ * counts frame boundaries.  They are separate because the failure this leaf
+ * can produce is a frame that never starts or never ends, and a byte count
+ * alone cannot tell either of those from a client that simply drew less. */
+static uint64_t srv_n_scene, srv_n_frame;
 
 void hamwsys_srv_claim(void)
 {
@@ -3427,6 +3432,13 @@ static void srv_err(int fd, uint16_t op, int32_t rc)
     srv_reply(fd, 0, WSRV_OP_ERR, &body, (uint32_t)sizeof body);
 }
 
+/* Stage 6's scene handler.  DEFINED BELOW THE DEVICE, not here, because it
+ * touches struct wpix -- the per-window memfd -- which is declared with the
+ * pixel hand-up far below.  The server is written above the device because it
+ * is the thing that decides who may reach the device; this is the one place
+ * that ordering costs a forward declaration. */
+static int64_t srv_scene_write(const struct wsrv_hdr *h, const uint8_t *pay);
+
 static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
                          const uint8_t *pay)
 {
@@ -3478,12 +3490,12 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
     }
     case WSRV_OP_STAT: {
         srv_n_stat++;
-        char b[320];
+        char b[384];
         int n = snprintf(b, sizeof b,
                          "conns %llu live %d msgs %llu nop %llu ping %llu "
                          "stat %llu bad %llu bytes %llu write %llu "
                          "newwin %llu refused %llu claim %llu "
-                         "connrefused %llu\n",
+                         "connrefused %llu scene %llu frame %llu\n",
                          (unsigned long long)srv_n_accept, srv_nconn,
                          (unsigned long long)srv_n_msg,
                          (unsigned long long)srv_n_nop,
@@ -3495,7 +3507,9 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
                          (unsigned long long)srv_n_newwin,
                          (unsigned long long)srv_n_refused,
                          (unsigned long long)srv_n_claim,
-                         (unsigned long long)srv_n_connrefuse);
+                         (unsigned long long)srv_n_connrefuse,
+                         (unsigned long long)srv_n_scene,
+                         (unsigned long long)srv_n_frame);
         if (n < 0) n = 0;
         srv_reply(c->fd, h->tag, n, b, (uint32_t)n);
         return;
@@ -3518,8 +3532,9 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
          * compositor's own next write to /dev/wsys, which it makes every
          * frame. */
         int leaf = (h->flags >> WSRV_LEAF_SHIFT) & 0xff;
-        int kind = (leaf == WSRV_LEAF_WIN_CTL) ? HAMWSYS_WIN_CTL
-                 : (leaf == WSRV_LEAF_CTL)     ? HAMWSYS_CTL
+        int kind = (leaf == WSRV_LEAF_WIN_CTL)   ? HAMWSYS_WIN_CTL
+                 : (leaf == WSRV_LEAF_CTL)       ? HAMWSYS_CTL
+                 : (leaf == WSRV_LEAF_WIN_SCENE) ? HAMWSYS_WIN_SCENE
                  : 0;
         if (!kind) {
             srv_n_bad++;
@@ -3556,7 +3571,9 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
                     kind == HAMWSYS_WIN_CTL ? owns_wid_ancestry(h->wid) : -1);
         }
         int64_t rc = -EPERM;
-        if (kind == HAMWSYS_WIN_CTL && !win_find(h->wid)) {
+        if (kind == HAMWSYS_WIN_SCENE) {
+            rc = srv_scene_write(h, pay);
+        } else if (kind == HAMWSYS_WIN_CTL && !win_find(h->wid)) {
             rc = -ENOENT;
         } else if (kind == HAMWSYS_WIN_CTL
                    && !hostowner() && !owns_wid(h->wid)) {
@@ -4424,11 +4441,18 @@ static void srv_client_tick(void)
 static int srv_route_write(const struct hamwsys_file *f, const uint8_t *buf,
                            uint64_t n)
 {
-    if (srv_fd < 0 || n == 0 || n > WSRV_MAXPAY) return 0;
+    /* A ZERO-LENGTH MESSAGE IS MEANINGFUL FOR EXACTLY ONE LEAF.  Everywhere
+     * else an empty write is nothing to route; on `scene` it is the OPEN --
+     * the frame boundary with no display list behind it yet -- and dropping it
+     * here would mean a client that opens, writes nothing and commits publishes
+     * the PREVIOUS frame instead of an empty one. */
+    if (srv_fd < 0 || n > WSRV_MAXPAY) return 0;
+    if (n == 0 && !(f->leaf == HAMWSYS_WIN_SCENE && f->srv_newframe)) return 0;
     int leaf;
     switch (f->leaf) {
-    case HAMWSYS_CTL:     leaf = WSRV_LEAF_CTL;     break;
-    case HAMWSYS_WIN_CTL: leaf = WSRV_LEAF_WIN_CTL; break;
+    case HAMWSYS_CTL:       leaf = WSRV_LEAF_CTL;       break;
+    case HAMWSYS_WIN_CTL:   leaf = WSRV_LEAF_WIN_CTL;   break;
+    case HAMWSYS_WIN_SCENE: leaf = WSRV_LEAF_WIN_SCENE; break;
     default: return 0;
     }
     /* NEWWINDOW IS NOT ROUTED HERE, and must not be: it returns data, and it
@@ -4438,6 +4462,15 @@ static int srv_route_write(const struct hamwsys_file *f, const uint8_t *buf,
     if (leaf == WSRV_LEAF_CTL && n >= 9 && !memcmp(buf, "newwindow", 9))
         return 0;
     uint16_t flags = (uint16_t)(leaf << WSRV_LEAF_SHIFT);
+    /* THE FRAME BOUNDARY RIDES ON THE FIRST WRITE AFTER THE OPEN, and it is
+     * per-OPEN state, so it lives in the file handle rather than in a global:
+     * a client with two scenes open at once (the compositor is one) would
+     * otherwise start the wrong window's frame.  Cleared as it is spent, so
+     * the second write of a frame appends, which is what `scene` means. */
+    if (leaf == WSRV_LEAF_WIN_SCENE && f->srv_newframe) {
+        flags |= WSRV_F_NEWFRAME;
+        ((struct hamwsys_file *)f)->srv_newframe = 0;
+    }
     if (srv_send(WSRV_OP_WRITE, flags, f->wid, ++srv_tag, buf, (uint32_t)n) < 0)
         return 0;                     /* the socket broke; fall back, loudly */
     return 1;
@@ -4817,6 +4850,65 @@ int hamwsys_srv_mutate_selftest(int victim_wid)
     printf("wsrvmu: the mediator ACCEPTED it (refused %llu -> %llu)\n",
            (unsigned long long)r0, (unsigned long long)r1);
     return fails + 1;
+}
+
+/* STAGE 6: THE SAME ATTACK, ON THE SCENE.  A routed display-list write for a
+ * window this process does not hold, sent PAST the local check exactly as
+ * hamwsys_srv_mutate_selftest sends a ctl write -- because an ordinary
+ * client's scene write to a foreign wid is refused before it reaches a socket,
+ * and a gate driven that way would be green whether or not the mediator checks
+ * anything.  Returns 0 for REFUSED and 1 for ACCEPTED, the contract the ctl
+ * probe already uses: whether a refusal is the RIGHT answer depends on what
+ * the gate arranged, and this process cannot know that. */
+int hamwsys_srv_scene_selftest(int victim_wid)
+{
+    if (!srv_enabled() || srv_fd < 0) {
+        fprintf(stderr, "wsrv: no connection to a server.\n");
+        return 1;
+    }
+    char st[384]; uint32_t got = 0; int64_t rc = 0;
+    if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) < 0) {
+        printf("wsrvsc: FAIL could not read the server's counters\n");
+        return 1;
+    }
+    st[got] = 0;
+    uint64_t r0 = srv_stat_field(st, "refused");
+    uint64_t w0 = srv_stat_field(st, "write");
+    const char line[] = "fill 0 0 400 400 #ff00ff\n";
+    uint16_t flags = (uint16_t)((WSRV_LEAF_WIN_SCENE << WSRV_LEAF_SHIFT)
+                                | WSRV_F_NEWFRAME);
+    srv_send(WSRV_OP_WRITE, flags, victim_wid, ++srv_tag,
+             line, (uint32_t)(sizeof line - 1));
+    if (srv_call(WSRV_OP_STAT, 0, NULL, 0, st, sizeof st - 1, &got, &rc) < 0) {
+        printf("wsrvsc: FAIL could not read the server's counters back\n");
+        return 1;
+    }
+    st[got] = 0;
+    uint64_t r1 = srv_stat_field(st, "refused");
+    uint64_t w1 = srv_stat_field(st, "write");
+    printf("wsrvsc: a window-less process sent a routed SCENE write for "
+           "window %d\n", victim_wid);
+    printf("wsrvsc: server counters: %s", st);
+    if (w1 != w0 + 1) {
+        printf("wsrvsc: FAIL the server did not see the routed scene write at "
+               "all (write %llu -> %llu); a refusal count of zero would mean "
+               "nothing if the message never arrived.\n",
+               (unsigned long long)w0, (unsigned long long)w1);
+        return 1;
+    }
+    printf("wsrvsc: the server received it (write %llu -> %llu)\n",
+           (unsigned long long)w0, (unsigned long long)w1);
+    printf("wsrvsc: caller uid %u pid %ld; segment owner uid %u\n",
+           (unsigned)geteuid(), (long)getpid(),
+           (unsigned)(seg_owner_known ? seg_owner : (uid_t)-1));
+    if (r1 == r0 + 1) {
+        printf("wsrvsc: the mediator REFUSED it (refused %llu -> %llu)\n",
+               (unsigned long long)r0, (unsigned long long)r1);
+        return 0;
+    }
+    printf("wsrvsc: the mediator ACCEPTED it (refused %llu -> %llu)\n",
+           (unsigned long long)r0, (unsigned long long)r1);
+    return 1;
 }
 
 /* THE OTHER HALF OF THE ARGUMENT, AND THE ONLY ARM THAT IS SUPPOSED TO
@@ -6329,6 +6421,62 @@ static struct wpix *pix_get(int32_t wid, int mine)
     return i >= 0 ? pixmap[i].m : NULL;
 }
 
+/* ==================================================================
+ * STAGE 6 — THE SCENE, AND THE FRAME BOUNDARY IS THE WHOLE PROBLEM
+ * ==================================================================
+ * `/dev/wsys/<wid>/scene` is the last mutation a routed client still performed
+ * in process, and it was deferred through four stages for a good reason: 1
+ * write per 12 s of a drag against 9790 for `wid/ctl`, so neither the cost nor
+ * the privilege question turned on it.  What makes it different is PER-OPEN
+ * STATE.  Opening the scene for writing STARTS A NEW FRAME -- `p->stage_len =
+ * 0` -- and every write after that APPENDS.  Getting that wrong does not
+ * produce an error: it produces a window that paints last frame's display list
+ * for ever, or one that accumulates every frame ever drawn until it overflows.
+ * That is the defect that made an empty window look full for the life of a
+ * test file, and it is why the boundary is carried in the message
+ * (WSRV_F_NEWFRAME) instead of being inferred from anything.
+ *
+ * WHERE THE BYTES LAND: the window's HANDED-UP memfd (struct wpix), not the
+ * shared segment -- the same place the in-process path puts them, which is
+ * what makes routing a change of WHO WRITES and not of WHAT IS WRITTEN.  The
+ * compositor maps every handed-up memfd read-WRITE already (see pix_install),
+ * so nothing new is granted here.
+ *
+ * pix_get(wid, 0) AND NOT pix_get(wid, owns_wid(wid)), and the difference
+ * would be a bug that hands the client a different window.  `mine` means
+ * "create one if this process has none" -- in wsysd, for a window whose pixels
+ * have not been handed up yet, that would MAKE A SECOND memfd inside the
+ * compositor and announce it, so the client would keep drawing into its own
+ * and the compositor would paint the empty one it invented.  A window with no
+ * handed-up pixels is EAGAIN, said by name, and the client retries next frame
+ * exactly as the compositor's own read path already does.
+ */
+static int64_t srv_scene_write(const struct wsrv_hdr *h, const uint8_t *pay)
+{
+    struct wwin *v = win_find(h->wid);
+    if (!v) return -ENOENT;
+    /* THE SAME TWO PREDICATES THE IN-PROCESS PATH ASKS, answered about the
+     * caller: since stage 5 owns_wid() is the connection that holds the row,
+     * so a scene write must arrive on that connection just as a ctl write
+     * must.  This is the whole reason the leaf is routed at all. */
+    if (!hostowner() && !owns_wid(h->wid)) return -EPERM;
+    struct wpix *p = pix_get(h->wid, 0);
+    if (!p) return -EAGAIN;
+    if (p->stage_len > WSYS_SCENE_CAP) p->stage_len = WSYS_SCENE_CAP;
+    if (h->flags & WSRV_F_NEWFRAME) {
+        p->stage_len = 0;
+        srv_n_frame++;
+    }
+    if (!h->len) return 0;                     /* the open, and nothing more */
+    uint64_t room = WSYS_SCENE_CAP - p->stage_len;
+    uint64_t k = h->len < room ? h->len : room;
+    if (k == 0) return -ENOSPC;
+    memcpy(p->stage + p->stage_len, pay, (size_t)k);
+    p->stage_len += (uint32_t)k;
+    srv_n_scene++;
+    return (int64_t)k;
+}
+
 /* Find (or claim) a sink, IN THE SEGMENT THE SPLIT PUTS IT IN.
  *
  * The routing is by name and nothing else, so a name can never exist in both
@@ -7035,7 +7183,23 @@ int hamwsys_open(const char *path, int for_write, struct hamwsys_file *f)
                 errno = EPERM;
                 return -1;
             }
-            if (for_write) p->stage_len = 0;
+            if (for_write) {
+                /* ROUTED, THE OPEN IS A MESSAGE AND NOT A STORE.  The reset is
+                 * the frame boundary; performing it here as well as sending it
+                 * would be two frame starts for one open, and a client that
+                 * opened and never wrote would clear a display list the server
+                 * never heard about -- the two halves of the state disagreeing,
+                 * which for this leaf means a window painting the wrong frame.
+                 * srv_route_write() carries WSRV_F_NEWFRAME on the first write;
+                 * a zero-length message is sent HERE so an open with no write
+                 * still starts the frame, exactly as the in-process path does. */
+                if (srv_fd >= 0 && srv_enabled() && !srv_is_server) {
+                    f->srv_newframe = 1;
+                    (void)srv_route_write(f, NULL, 0);
+                } else {
+                    p->stage_len = 0;
+                }
+            }
             else           return snap_set(f, p->scene,
                                            p->scene_len > WSYS_SCENE_CAP
                                            ? WSYS_SCENE_CAP : p->scene_len);
