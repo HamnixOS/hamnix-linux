@@ -98,6 +98,51 @@ Order of work, each with its own gate, all offscreen:
    step, not the first**: until the old path is gone the bump would refuse
    clients for a boundary that is not yet enforced.
 
+## What stage 1 measured, and the one place this plan was wrong
+
+Stage 1 is built: `hamwsys_srv_{claim,listen,service}` in `user/linux-wsys.c`,
+serviced from `wsysd`'s loop, dialled from `hamwsys_open`, all behind
+`HAMWSYS_SERVER=1`. Gate: `tests/linux/wsys_srv_transport.sh`, seen red first.
+
+Two things held, and one did not.
+
+**Fire-and-forget held, and better than costed.** 1.18–1.99 µs per op on the
+send side, under a dragging load, against the 2.3 µs the census saturates at.
+The rule that mutations do not wait is now evidence rather than intuition.
+
+**Pixels do not cross — verified, not assumed.** 12 s of a real dragging
+client: 9899 control writes, **0 backbuffer writes**.
+
+**THE 6.30 µs FIGURE DOES NOT APPLY TO THIS SERVER, and it is structural.**
+`wsys_rtt_probe.c` measured a dedicated server thread whose only job was to
+read the socket. This server is serviced from the compositor's frame loop, so
+a blocking request waits for `wsysd` to come round — and when `wsysd` is
+rasterizing a drag, "come round" means *after this frame*:
+
+| | p50 | p90 | max |
+|---|---|---|---|
+| idle | 46 µs | 47 µs | 74 µs |
+| under a dragging client | 32 µs | 789 µs | **851 µs** |
+
+851 µs is nearly **three times the whole published 0.3 ms input-to-pixel
+budget**, for one operation. The distribution is bimodal, not noisy: requests
+either catch an idle loop (~27 µs) or wait out a frame (~800 µs).
+
+This does not affect stage 2 — mutations do not wait. It is a hard constraint
+on **stage 3**, where reads are routed:
+
+- `newwindow` and `wctl` version negotiation happen once per window. They can
+  afford 851 µs and the user cannot perceive it.
+- A taskbar re-reading `/dev/wsys/windows`, and the enumeration policy that
+  the red gate exists for, **cannot**. Routing that read through the frame
+  loop would put up to a frame of stall on the one operation the boundary was
+  built to mediate.
+
+So stage 3 must service requests off the frame loop — a servicing thread, or
+answering reads from a snapshot the loop publishes — and 851 µs is the number
+it has to beat. That decision was not in this plan; the measurement put it
+there.
+
 ## Budget to hold it to
 
 From the census, at 6.2 µs sequential / 2.2 µs pipelined:

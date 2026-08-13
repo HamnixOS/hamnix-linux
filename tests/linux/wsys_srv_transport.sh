@@ -263,10 +263,49 @@ else
     bad "the probe reported $RC_ON failures with HAMWSYS_SERVER=1"
 fi
 
-# ------- C(iii). The flag-set answer from /dev/wsys is the flag-unset answer.
+# ------- B(ii). WHAT A BLOCKING REQUEST COSTS WHEN THE COMPOSITOR IS BUSY.
+#
+# THE DESIGN'S 6.30 us DOES NOT APPLY TO THIS SERVER, and the difference is
+# structural rather than a matter of tuning. tests/linux/wsys_rtt_probe.c
+# measured a dedicated server thread whose only job was to read the socket.
+# This server is serviced from wsysd's frame loop, so a blocking request waits
+# for wsysd to come round -- and when wsysd is rasterizing a drag, "come round"
+# means "after this frame". Measured idle the round trip is ~46 us; under a
+# dragging client the tail runs to ~850 us, which is nearly three times the
+# whole published 0.3 ms input-to-pixel budget.
+#
+# That is a constraint on STAGE 3, not a defect in stage 1 -- nothing is routed
+# yet -- but it is measured here so that stage 3 cannot discover it by shipping
+# a taskbar that stalls. Fire-and-forget is unaffected and does not wait, which
+# is the design's first rule and is now evidence rather than intuition.
 "$BIN/de_dragload" 300 200 100 100 60 4 >"$W/wid.on" 2>"$W/drag.on.log" &
 DP=$!; reap_add "$DP"
 sleep 2
+HAMWSYS_SERVER=1 "$BIN/wsys_srv_probe" >"$W/probe.load.out" 2>&1
+grep -E 'round trip|every sample|fire-and-forget:' "$W/probe.load.out" \
+    | sed 's/^/srvtr:      /'
+RTT_P50="$(sed -n 's/.*round trip, [0-9]* samples: min [0-9]*  p50 \([0-9]*\).*/\1/p' "$W/probe.load.out" | head -1)"
+RTT_MAX="$(sed -n 's/.*round trip, .*max \([0-9]*\) us/\1/p' "$W/probe.load.out" | head -1)"
+FF_US="$(sed -n 's/.*fire-and-forget: [0-9]* sent in [0-9]* us (\([0-9.]*\) us\/op.*/\1/p' "$W/probe.load.out" | head -1)"
+
+if [ -z "${FF_US:-}" ]; then
+    bad "could not read a fire-and-forget cost out of the probe -- the instrument did not report, so nothing below it can be claimed"
+elif awk -v x="$FF_US" 'BEGIN{exit !(x <= 2.3)}'; then
+    ok "under a dragging load a fire-and-forget op costs $FF_US us, at or under the 2.3 us the census saturates at -- the rule that mutations do not wait is what holds the budget"
+else
+    bad "a fire-and-forget op costs $FF_US us under load, over the 2.3 us saturation figure the budget is built on"
+fi
+
+if [ -z "${RTT_P50:-}" ]; then
+    bad "the probe reported no blocking round-trip distribution"
+elif [ "$RTT_P50" -le 300 ]; then
+    ok "under a dragging load a BLOCKING request is ${RTT_P50} us at p50, within the 0.3 ms input-to-pixel budget"
+else
+    bad "a blocking request is ${RTT_P50} us at p50 under load -- one mediated op would exceed the whole 0.3 ms input-to-pixel budget"
+fi
+note "RECORDED FOR STAGE 3, not asserted: the blocking tail reaches ${RTT_MAX:-?} us under a dragging load, because a request serviced from the frame loop waits for the frame. newwindow and version negotiation happen once per window and can afford it; a taskbar re-reading /dev/wsys/windows cannot. Servicing requests off the frame loop is stage 3's problem and this is the number it has to beat."
+
+# ------- C(iii). The flag-set answer from /dev/wsys is the flag-unset answer.
 "$BIN/cat" /dev/wsys/windows >"$W/windows.on" 2>/dev/null || true
 kill "$DP" 2>/dev/null; wait "$DP" 2>/dev/null
 

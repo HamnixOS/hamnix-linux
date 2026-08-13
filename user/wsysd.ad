@@ -171,6 +171,12 @@ extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
 extern def sys_exit(code: uint64)
 extern def hamwsys_wake_listen() -> int32
 extern def hamwsys_wake_drain()
+# THE MEDIATOR'S TRANSPORT, stage 1 of docs/wsys_server_design.md. All three
+# are inert unless HAMWSYS_SERVER=1. See THE MEDIATOR'S TRANSPORT in
+# user/linux-wsys.h for why claim() is separate from listen().
+extern def hamwsys_srv_claim()
+extern def hamwsys_srv_listen() -> int32
+extern def hamwsys_srv_service() -> int32
 extern def hamfb_frame_us() -> int32
 extern def hamfb_attach_scanout(dmabuf_fd: int32, w: uint32, h: uint32,
                                 pitch: uint32) -> int32
@@ -3191,6 +3197,10 @@ def fd_is_waitable(fd: int32) -> int32:
 
 
 wake_fd: int32 = -1
+# The epoll fd standing for the mediator's listening socket AND every live
+# client connection. One fd, because build_waitset runs once and the set of
+# clients does not. -1 unless HAMWSYS_SERVER=1.
+srv_fd: int32 = -1
 
 # ====================================================================
 # THE PRESENT CAP: do not draw faster than the screen can show
@@ -3268,6 +3278,23 @@ def build_waitset():
     wake_fd = hamwsys_wake_listen()
     if wake_fd >= 0 and n_wait < WAITSET_CAP:
         waitset[n_wait] = wake_fd
+        n_wait = n_wait + 1
+    # THE MEDIATOR, SECOND, AND DELIBERATELY NOT FIRST.
+    #
+    # waitset[0] is the client wake and ONLY the client wake -- the deferred
+    # paint at the bottom of the loop passes waitset[1..] precisely so that a
+    # publish cannot wake a frame that is already owed, while input still can.
+    # A request to the server is NOT in that category: a blocking request
+    # (newwindow, a version negotiation, a read) has a client stopped waiting
+    # for it, and deferring it to the frame boundary would put up to a frame
+    # of latency on every one. So it goes at index 1, inside the slice that is
+    # always polled, and hamwsys_srv_service() runs on every iteration.
+    #
+    # This is inert with HAMWSYS_SERVER unset: listen() returns -1 before it
+    # touches a socket or the segment, and the set is exactly what it was.
+    srv_fd = hamwsys_srv_listen()
+    if srv_fd >= 0 and n_wait < WAITSET_CAP:
+        waitset[n_wait] = srv_fd
         n_wait = n_wait + 1
     d: uint64 = 0
     while d < n_input:
@@ -3747,6 +3774,14 @@ def is_bench_flag(s: Ptr[uint8]) -> int32:
 
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    # FIRST LINE OF main, AND THE ORDER IS FORCED. This process is about to
+    # become a CLIENT of its own device -- announce_screen() below opens
+    # /dev/wsys, and so does every frame after it. The client side of the
+    # transport dials from hamwsys_open, so without this wsysd would connect
+    # to itself on its first open and then block waiting for a reply from the
+    # loop it has not entered yet. This takes no syscall and reads nothing;
+    # it only says "I am the server", so it is safe this early.
+    hamwsys_srv_claim()
     puts(1, "wsysd: scene compositor starting\n")
     # SCANOUT IS DECIDED BEFORE THE GEOMETRY IS READ, and the order is forced.
     # Reading /dev/fb's geometry initialises the framebuffer, which on a real
@@ -3873,6 +3908,19 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         # but scan_windows() below re-reads the segment either way, and the
         # frame_signature() gate decides whether it was worth a repaint.
         hamwsys_wake_drain()
+        # SERVICE THE MEDIATOR ON EVERY WAKE, INCLUDING WAKES IT DID NOT
+        # CAUSE. An unread packet stays readable, so an epoll fd left
+        # unserviced in the wait set turns this park into a spin -- the exact
+        # trap hamwsys_wake_drain() above exists for, and the one that once
+        # measured 100.06% of a core on an idle desktop. It is also why this
+        # is here and not inside a branch on which fd woke us: sys_waitfds
+        # does not tell us, and guessing would be a dropped request.
+        #
+        # Before scan_windows(), like the drain: a request that mutates the
+        # window table (stage 2) must be visible to the scan in the SAME
+        # iteration, or a client's move would be a frame late.
+        # Returns 0 immediately with HAMWSYS_SERVER unset.
+        hamwsys_srv_service()
         scan_windows()
         pick_focus()
         if bench_on != 0:
