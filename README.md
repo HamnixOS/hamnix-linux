@@ -23,7 +23,8 @@ Debian, not a later release of it.
 
 ## Status
 
-**It runs.** 114 applications build and are packaged; a machine installs from
+**It runs.** **364 applications build** and **123 of them are packaged**, in the
+**124 packages** of the `linux` channel; a machine installs from
 `https://255.one/` with `hpm`, boots to an Adder PID 1, and comes up in a
 desktop — panel, taskbar, wallpaper, an applications menu, a file manager, a
 terminal and a web browser that renders pages. The current release is **1.0.22**
@@ -31,6 +32,28 @@ and the changelog names what each one changed for someone using the machine.
 
     hpm refresh https://255.one/
     hpm install hamnix-base
+
+Both numbers are re-takeable by running one command each, and were taken that
+way on 2026-08-12 rather than read off a list:
+
+* **364 build.** `scripts/hamlinux_sweep.sh <outdir>` puts every one of the 368
+  `.ad` files in `user/` through the build lane and prints what it attempted
+  beside what succeeded: 364 applications, 364 linked ELFs, **0 failures**, and
+  4 files that are library modules with no `main` (`http9`, `net9`,
+  `httpdconf`, `hambrowse_tabs`) and never were applications.
+* **123 are packaged.** `scripts/hamlinux_packages.py --out <dir>` builds this
+  line's channel and prints `124 packages -> …`; those tarballs carry 123
+  distinct binaries under `bin/`. It refuses to write an index until it has
+  unpacked them and RUN them, so the count is of a channel that works.
+
+The gap between 364 and 123 is deliberate — `user/` holds test harnesses,
+selftests and demos as well as shipped programs — and it is a gap, not a
+rounding. **The number this file used to carry (114) matched neither, and was
+not obtained from a run of either script.** The other packager in `scripts/`,
+`build_packages.py`, builds the `main` channel for the NATIVE Hamnix line: it
+cannot complete in this repository at all (it needs `build/hamnix-kernel.elf`,
+and hamnix-linux has no `init/` kernel source to build one from), so no figure
+quoted here should come from it.
 
 The Plan 9 syscall surface the userland assumes — `bind`, per-process
 namespaces, `/net` as a file tree, `/dev/wsys` as a window file server — is
