@@ -253,16 +253,26 @@ case "$ivb $iva" in
         fi ;;
 esac
 bf="$(field 'before botfill' isolated)"; af="$(field 'after botfill' isolated)"
-if [ "${bf:-0}" -ge 60 ] && [ "${af:-0}" -ge 60 ]; then
+# The same rule as the visible fields above: a percentage the witness never
+# logged is not a taskbar that lost its pixels. `${bf:-0}` made it one.
+if [ -z "$bf" ] || [ -z "$af" ]; then
+    bad "the witness logged no taskbar fill percentage (before='$bf' after='$af')-- it did not measure its own pixels, so this run cannot say whether they survived"
+elif [ "$bf" -ge 60 ] && [ "$af" -ge 60 ]; then
     ok "and in PIXELS the witness's taskbar is painted before and after (${bf}% -> ${af}% of the bar colour) -- not a flag, the framebuffer"
 else
     bad "the witness's taskbar lost its pixels across the gate's run (${bf}% -> ${af}%)"
 fi
 br="$(field 'before reloads' isolated)"; ar="$(field 'after reloads' isolated)"
-if [ "${br:-x}" = "${ar:-y}" ] && [ "$(field marker isolated)" = intact ]; then
+mk="$(field marker isolated)"
+# `${br:-x}` vs `${ar:-y}` made two MISSING reload counts unequal on purpose,
+# which sent an unlogged pair straight to "this is the incident reproducing"
+# -- the gate's most serious verdict, reached without reading a single count.
+if [ -z "$br" ] || [ -z "$ar" ] || [ -z "$mk" ]; then
+    bad "the witness logged no reload count or no marker (reloads '$br' -> '$ar', marker '$mk') -- whether it saw the gate's edits is not a question this run can answer, and nothing here says it did"
+elif [ "$br" = "$ar" ] && [ "$mk" = intact ]; then
     ok "the witness logged NO further config reload (${br} -> ${ar}) and its own config file still says it owns it -- the gate's four replacements were invisible to it"
 else
-    bad "the witness saw the gate's edits: reloads ${br} -> ${ar}, marker $(field marker isolated) -- this is the incident reproducing"
+    bad "the witness saw the gate's edits: reloads ${br} -> ${ar}, marker $mk -- this is the incident reproducing"
 fi
 
 # ---- 6+7. THE NEGATIVE CONTROL -------------------------------------------
