@@ -299,6 +299,26 @@ def _get_u32(buf: Ptr[uint8], off: uint64) -> uint32:
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
 
+
+# Bounded length-prefixed field read. See the long note on _field_at in
+# user/sshd.ad for why _get_u32 keeps its unchecked signature and the check
+# lives here instead: 19 call sites in this file read from four different
+# buffers, and threading a limit through all of them is a fresh chance to pass
+# the wrong one at each. `limit` is the REAL PAYLOAD LENGTH, never the array
+# size -- the array is the last line of defence, not the correct bound.
+def _field_at(buf: Ptr[uint8], off: uint64, limit: uint64,
+              out_len: Ptr[uint64]) -> int32:
+    if off + 4 > limit:
+        return -1
+    ln: uint64 = cast[uint64](_get_u32(buf, off))
+    if ln > limit:
+        return -1
+    if off + 4 + ln > limit:
+        return -1
+    out_len[0] = ln
+    return 0
+
+
 # === blocking socket I/O over the dialled connection ====================
 
 def _send_all(buf: Ptr[uint8], n: uint64) -> int32:
@@ -1215,12 +1235,22 @@ def _bridge_session(want_status: Ptr[int32]) -> int32:
             did_work = 1
             mt: uint8 = pkt_in[0]
             if mt == SSH_MSG_CHANNEL_DATA:
-                dlen: uint32 = _get_u32(&pkt_in[0], 5)
-                sys_write(1, cast[Ptr[uint8]](&pkt_in[9]),
-                          cast[uint64](dlen))
-                _rtt_feed(cast[Ptr[uint8]](&pkt_in[9]),
-                          cast[uint64](dlen))
-                chan_local_win[0] = chan_local_win[0] - cast[uint64](dlen)
+                # BOUNDED AGAINST THE PACKET. This took the SERVER's uint32
+                # and handed it straight to sys_write, so a hostile or merely
+                # broken server could make this client read up to four
+                # gigabytes from inside an 8192-byte array and print it to the
+                # user's terminal -- the client's own memory, disclosed by the
+                # peer's number. The mirror of the sshd CHANNEL_DATA defect,
+                # pointed the other way.
+                dlen: uint64 = 0
+                if _field_at(&pkt_in[0], cast[uint64](5), pkt_in_len[0],
+                             &dlen) != 0:
+                    _log("[ssh] CHANNEL_DATA length runs past the packet -- dropping\n")
+                    dlen = 0
+                if dlen > 0:
+                    sys_write(1, cast[Ptr[uint8]](&pkt_in[9]), dlen)
+                    _rtt_feed(cast[Ptr[uint8]](&pkt_in[9]), dlen)
+                chan_local_win[0] = chan_local_win[0] - dlen
                 if chan_local_win[0] < 32768:
                     _send_window_adjust(cast[uint32](1048576))
                     chan_local_win[0] = chan_local_win[0] + 1048576

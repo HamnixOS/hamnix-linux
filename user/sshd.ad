@@ -336,6 +336,46 @@ def _get_u32(buf: Ptr[uint8], off: uint64) -> uint32:
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
 
+
+# === bounded field reads over a peer-supplied packet =====================
+#
+# WHY THIS EXISTS AND WHY _get_u32 KEEPS ITS SIGNATURE.
+#
+# _get_u32 above is four raw indexed reads with no bounds check. That is fine
+# where the caller has already established the offset (a fixed header field it
+# just read), and it is a loaded gun where the offset came from the peer. The
+# obvious repair -- give _get_u32 a limit parameter -- was considered and NOT
+# taken: it has 27 call sites in this file and 19 in user/ssh.ad, reading from
+# six different buffers (lb, declen, pkt_in, blob, sig, and a caller-supplied
+# buf), so threading a limit through all 46 is 46 fresh opportunities to pass
+# the WRONG limit -- the same class of mistake, spread wider, and silent when
+# it happens. So the check is added where the danger actually is: every place
+# an offset or length comes from the peer.
+#
+# _field_at is that place. It reads a uint32 length prefix at `off` and proves
+# the whole field -- the 4 length bytes AND the body they describe -- lies
+# inside `limit`, which callers pass as the REAL PAYLOAD LENGTH (pkt_in_len),
+# never as the array size. The array is the last line of defence, not the
+# correct bound: reading 8000 bytes out of a 40-byte packet is wrong even
+# though it stays inside pkt_in.
+#
+# Returns 0 and fills out_len on success; -1 if the field does not fit. The
+# arithmetic is done in uint64 and the addition is checked against `limit`
+# rather than computed and compared afterwards, so a length near 0xFFFFFFFF
+# cannot wrap.
+def _field_at(buf: Ptr[uint8], off: uint64, limit: uint64,
+              out_len: Ptr[uint64]) -> int32:
+    if off + 4 > limit:
+        return -1
+    ln: uint64 = cast[uint64](_get_u32(buf, off))
+    if ln > limit:
+        return -1
+    if off + 4 + ln > limit:
+        return -1
+    out_len[0] = ln
+    return 0
+
+
 # === blocking socket I/O over the accepted connection ===================
 
 def _send_all(buf: Ptr[uint8], n: uint64) -> int32:
@@ -1463,16 +1503,36 @@ def _do_userauth() -> int32:
             _log("[sshd] expected USERAUTH_REQUEST\n")
             return -1
         # Payload: string user || string service || string method ...
+        #
+        # EVERY LENGTH HERE IS THE PEER'S, AND EVERY ONE IS CHECKED. This
+        # chain used to read each uint32 with _get_u32 and advance
+        # `p = p + 4 + len` with nothing comparing `p` to anything: an
+        # attacker setting the first length near 0xFFFFFFFF moved `p` about
+        # four gigabytes past an 8192-byte array, and the NEXT read landed
+        # there -- before authentication, since this is the authentication
+        # exchange. The bound is pkt_in_len[0], the real payload length; the
+        # array size would let an 8000-byte read out of a 40-byte packet pass.
         p: uint64 = 1
-        ulen: uint32 = _get_u32(&pkt_in[0], p)
+        lim: uint64 = pkt_in_len[0]
+        fl: Array[1, uint64]
+        if _field_at(&pkt_in[0], p, lim, &fl[0]) != 0:
+            _log("[sshd] USERAUTH_REQUEST: user field runs past the packet -- refusing\n")
+            return -1
+        ulen: uint64 = fl[0]
         user_p: Ptr[uint8] = cast[Ptr[uint8]](&pkt_in[p + 4])
-        p = p + 4 + cast[uint64](ulen)
-        svclen: uint32 = _get_u32(&pkt_in[0], p)
+        p = p + 4 + ulen
+        if _field_at(&pkt_in[0], p, lim, &fl[0]) != 0:
+            _log("[sshd] USERAUTH_REQUEST: service field runs past the packet -- refusing\n")
+            return -1
+        svclen: uint64 = fl[0]
         svc_p: Ptr[uint8] = cast[Ptr[uint8]](&pkt_in[p + 4])
-        p = p + 4 + cast[uint64](svclen)
-        mlen: uint32 = _get_u32(&pkt_in[0], p)
+        p = p + 4 + svclen
+        if _field_at(&pkt_in[0], p, lim, &fl[0]) != 0:
+            _log("[sshd] USERAUTH_REQUEST: method field runs past the packet -- refusing\n")
+            return -1
+        mlen: uint64 = fl[0]
         meth_p: Ptr[uint8] = cast[Ptr[uint8]](&pkt_in[p + 4])
-        p = p + 4 + cast[uint64](mlen)
+        p = p + 4 + mlen
 
         # --- publickey method (RFC 4252 §7) --------------------------
         is_pk: int32 = 0
@@ -1483,14 +1543,24 @@ def _do_userauth() -> int32:
         if is_pk != 0:
             # boolean has_signature || string pk_algorithm
             #   || string pk_blob || [ string signature ]
+            # The boolean is one byte and it too must be inside the packet.
+            if p + 1 > lim:
+                _log("[sshd] publickey request: truncated before the signature flag -- refusing\n")
+                return -1
             has_sig: uint8 = pkt_in[p]
             p = p + 1
-            alg_len: uint32 = _get_u32(&pkt_in[0], p)
+            if _field_at(&pkt_in[0], p, lim, &fl[0]) != 0:
+                _log("[sshd] publickey request: algorithm field runs past the packet -- refusing\n")
+                return -1
+            alg_len: uint64 = fl[0]
             alg_p: Ptr[uint8] = cast[Ptr[uint8]](&pkt_in[p + 4])
-            p = p + 4 + cast[uint64](alg_len)
-            blob_len: uint32 = _get_u32(&pkt_in[0], p)
+            p = p + 4 + alg_len
+            if _field_at(&pkt_in[0], p, lim, &fl[0]) != 0:
+                _log("[sshd] publickey request: key blob runs past the packet -- refusing\n")
+                return -1
+            blob_len: uint64 = fl[0]
             blob_p: Ptr[uint8] = cast[Ptr[uint8]](&pkt_in[p + 4])
-            p = p + 4 + cast[uint64](blob_len)
+            p = p + 4 + blob_len
             # Only ecdsa-sha2-nistp256 keys are recognised.
             alg_ok: int32 = 0
             if alg_len == 19:
@@ -1500,7 +1570,7 @@ def _do_userauth() -> int32:
             offered_q: Array[65, uint8]
             key_ok: int32 = 0
             if alg_ok != 0:
-                if _parse_ecdsa_keyblob(blob_p, cast[uint64](blob_len),
+                if _parse_ecdsa_keyblob(blob_p, blob_len,
                                         &offered_q[0]) == 0:
                     if _authkey_known(&offered_q[0]) != 0:
                         key_ok = 1
@@ -1514,10 +1584,8 @@ def _do_userauth() -> int32:
                 o: uint64 = 0
                 pkt_out[o] = SSH_MSG_USERAUTH_PK_OK
                 o = o + 1
-                o = _put_string(&pkt_out[0], o, alg_p,
-                                cast[uint64](alg_len))
-                o = _put_string(&pkt_out[0], o, blob_p,
-                                cast[uint64](blob_len))
+                o = _put_string(&pkt_out[0], o, alg_p, alg_len)
+                o = _put_string(&pkt_out[0], o, blob_p, blob_len)
                 if _send_packet(&pkt_out[0], o) != 0:
                     return -1
                 attempts = attempts - 1     # the probe is not an attempt
@@ -1525,13 +1593,16 @@ def _do_userauth() -> int32:
             else:
                 # Signed request: verify the signature over the
                 # session-scoped blob.
-                sig_len: uint32 = _get_u32(&pkt_in[0], p)
+                if _field_at(&pkt_in[0], p, lim, &fl[0]) != 0:
+                    _log("[sshd] publickey request: signature runs past the packet -- refusing\n")
+                    return -1
+                sig_len: uint64 = fl[0]
                 sig_p: Ptr[uint8] = cast[Ptr[uint8]](&pkt_in[p + 4])
                 vrc: int32 = _verify_pk_signature(
-                    &offered_q[0], user_p, cast[uint64](ulen),
-                    svc_p, cast[uint64](svclen),
-                    blob_p, cast[uint64](blob_len),
-                    sig_p, cast[uint64](sig_len))
+                    &offered_q[0], user_p, ulen,
+                    svc_p, svclen,
+                    blob_p, blob_len,
+                    sig_p, sig_len)
                 if vrc == 1:
                     ack: Array[1, uint8]
                     ack[0] = SSH_MSG_USERAUTH_SUCCESS
@@ -1551,11 +1622,17 @@ def _do_userauth() -> int32:
         if is_pw != 0:
             # password method: boolean FALSE || string password.
             # (We do not handle the change-password TRUE form.)
+            if p + 1 > lim:
+                _log("[sshd] password request: truncated before the flag -- refusing\n")
+                return -1
             p = p + 1                       # skip the boolean
-            passlen: uint32 = _get_u32(&pkt_in[0], p)
+            if _field_at(&pkt_in[0], p, lim, &fl[0]) != 0:
+                _log("[sshd] password request: password field runs past the packet -- refusing\n")
+                return -1
+            passlen: uint64 = fl[0]
             pass_p: Ptr[uint8] = cast[Ptr[uint8]](&pkt_in[p + 4])
-            if _check_credential(user_p, cast[uint64](ulen),
-                                 pass_p, cast[uint64](passlen)) != 0:
+            if _check_credential(user_p, ulen,
+                                 pass_p, passlen) != 0:
                 ack: Array[1, uint8]
                 ack[0] = SSH_MSG_USERAUTH_SUCCESS
                 if _send_packet(&ack[0], cast[uint64](1)) != 0:
@@ -1922,13 +1999,25 @@ def _bridge_session() -> int32:
             did_work = 1
             mt: uint8 = pkt_in[0]
             if mt == SSH_MSG_CHANNEL_DATA:
-                dlen: uint32 = _get_u32(&pkt_in[0], 5)
+                # BOUNDED AGAINST THE PACKET, NOT THE ARRAY. This used to
+                # take the peer's uint32 and hand it straight to sys_write,
+                # so a declared length larger than the packet copied adjacent
+                # process memory INTO THE SESSION'S STDIN -- a disclosure
+                # channel, not merely a fault. Post-authentication (this loop
+                # runs under _handle_connection, after _do_userauth), so it
+                # needs a valid login; it is still wrong.
+                dlen: uint64 = 0
+                if _field_at(&pkt_in[0], cast[uint64](5), pkt_in_len[0],
+                             &dlen) != 0:
+                    _log("[sshd] CHANNEL_DATA length runs past the packet -- dropping\n")
+                    dlen = 0
                 # Write the channel data into hamsh's stdin.
                 wptr: Ptr[uint8] = cast[Ptr[uint8]](&pkt_in[9])
-                sys_write(sh_in_fd[0], wptr, cast[uint64](dlen))
+                if dlen > 0:
+                    sys_write(sh_in_fd[0], wptr, dlen)
                 # Replenish the client's send window so it keeps
                 # talking (we consumed dlen of it).
-                chan_local_win[0] = chan_local_win[0] - cast[uint64](dlen)
+                chan_local_win[0] = chan_local_win[0] - dlen
                 if chan_local_win[0] < 32768:
                     _send_window_adjust(cast[uint32](1048576))
                     chan_local_win[0] = chan_local_win[0] + 1048576
@@ -1945,10 +2034,13 @@ def _bridge_session() -> int32:
                     # Dump the disconnect reason string for diagnosis:
                     # payload = byte || uint32 reason || string desc.
                     if pkt_in_len[0] > 9:
-                        dlen: uint32 = _get_u32(&pkt_in[0], 5)
+                        ddl: Array[1, uint64]
+                        if _field_at(&pkt_in[0], cast[uint64](5),
+                                     pkt_in_len[0], &ddl[0]) != 0:
+                            ddl[0] = 0
                         _log("[sshd] client DISCONNECT reason: ")
-                        sys_write(1, cast[Ptr[uint8]](&pkt_in[9]),
-                                  cast[uint64](dlen))
+                        if ddl[0] > 0:
+                            sys_write(1, cast[Ptr[uint8]](&pkt_in[9]), ddl[0])
                         _log("\n")
                 _log("[sshd] client closed the channel\n")
                 break
