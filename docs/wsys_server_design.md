@@ -867,10 +867,13 @@ on `self`, which is not a ring at all.
 
 ## 7.2 What breaks at the bump, and for whom
 
-**124 packages, and every one of them links this file.** `scripts/hamlinux_build.sh`
-compiles `user/linux-wsys.c` into the runtime of every binary unconditionally,
-and `scripts/hamlinux_packages.py` ships one package per program — `hamnix-cat`,
+**124 packages in the channel, of which 92 carry Hamnix programs — and every
+program links this file.** `scripts/hamlinux_build.sh` compiles
+`user/linux-wsys.c` into `RT_SRCS` unconditionally, for every binary, and
+`scripts/hamlinux_packages.py` ships one package per program — `hamnix-cat`,
 `hamnix-ls`, `hamnix-true`. `/bin/true` is a window-system client at a version.
+(The other 32 are firmware, kernel modules and Vulkan libraries and carry no
+Hamnix binary; they are the only packages a wsys bump does not touch.)
 
 `hpm update` upgrades every installed, **non-pinned** package and aborts the
 closure on the first failure. So the mixed system arrives three ways: a pinned
