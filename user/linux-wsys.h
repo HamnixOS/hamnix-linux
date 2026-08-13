@@ -302,6 +302,18 @@ enum {
      * touching the window, so routing it would buy a round trip to reach the
      * same refusal -- or, fire-and-forget, would turn a typo into a success. */
     WSRV_LEAF_WIN_WCTL = 7,        /* /dev/wsys/<wid>/wctl                   */
+    /* STAGE 9 — THE ATTRIBUTE READS, and this one is a leaf the WRITE side
+     * never needed.  /dev/wsys and /dev/wsys/<wid> are DIRECTORIES, and
+     * `cat /dev/wsys` is what walked past stage 4's enumeration policy: the
+     * routed `windows` read correctly answered EMPTY to a window-less caller
+     * while snap_dir() handed the same caller every used row's wid one path
+     * component up, out of shared memory, on the same run.  A policy on one
+     * spelling of "which windows exist" and not on the other is not a policy.
+     *
+     * The wid rides in the header exactly as it does for the per-window
+     * leaves: 0 means /dev/wsys itself, non-zero means /dev/wsys/<wid>, and
+     * the two answers are different sets of names. */
+    WSRV_LEAF_DIR     = 8,         /* /dev/wsys, /dev/wsys/<wid> — directory */
 };
 
 /* THE SERVER SIDE. wsysd calls claim() before it touches /dev/wsys at all --
