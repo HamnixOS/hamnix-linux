@@ -120,9 +120,22 @@ mis-read:
   a hamsh-spawned program** — `_build_envp()` gives a child `PATH` and `HOME`
   and nothing else, and a run that assumes otherwise measures an unrouted
   desktop and believes it is routed. Answer: **four processes, one per
-  window-owning program, and not one more**; the control arm holds zero;
-  **not one client holds a READ connection at all.** 7914 mutations crossed
-  the boundary in 8 s of a drag, from the server's own trace.
+  window-owning program, and not one more**; the control arm holds zero.
+  7914 mutations crossed the boundary in 8 s of a drag, from the server's own
+  trace.
+
+  **ERRATUM — this bullet used to end "not one client holds a READ connection
+  at all", and THAT WAS AN ARTIFACT OF THE CENSUS, not a fact about the
+  desktop.** The `break` sat *inside* the fd loop
+  (`tests/linux/wsys_srv_deboot.sh:190`), so a process holding **both** sockets
+  was counted once — always the lower fd, always the mutation one.
+  `hampanelscene` had been reading `/dev/wsys/windows` over that socket **since
+  stage 4** (209 traced enum calls in one run), and `hamdesktop` holds fd 3 on
+  `/srv` and fd 4 on `/rd` at the same time. The census now reports **3 mutation
+  and 3 read** where it reported 3 and 0. Fixed at `7d24ef3c`. The lesson is the
+  house rule aimed at itself: **a zero from an instrument nobody has shown can
+  produce a non-zero is not a finding** — and this one was quoted in three
+  merge messages and this file before anyone checked it.
 * **WHAT IT COSTS: at load, less than this host's noise. At idle, +15–27% more
   frames.** Two full runs disagree on the *sign* of the frame-rate delta
   (−13.0 fps and +5.5 fps out of ~330), both **NOT ATTRIBUTABLE** at peak
