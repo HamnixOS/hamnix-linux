@@ -51,6 +51,13 @@ done
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
+# THE IDENTITY OF THE ROOT PARTITION, decided once and used three times: in the
+# kernel command line, in the GPT entry sgdisk creates, and in /etc/fstab. It
+# is a partition GUID rather than a device name because a device name is a
+# statement about one machine -- see the long note at the command line below.
+ROOT_PARTUUID="${HAMLINUX_ROOT_PARTUUID:-$(cat /proc/sys/kernel/random/uuid)}"
+BOOT_PARTUUID="${HAMLINUX_BOOT_PARTUUID:-$(cat /proc/sys/kernel/random/uuid)}"
+
 # --- the root filesystem --------------------------------------------------
 # A copy of the staged root, plus the things only a persistent system has.
 ROOTDIR="$STAGE/rootdir"
@@ -60,15 +67,19 @@ mkdir -p "$ROOTDIR"/{home,var/log,var/lib/hpm,mnt,n/distro,srv}
 # fstab. The Hamnix boot does not read it -- namespaces are assembled by the
 # rc scripts -- but it is what a human and any Debian tooling in the distro
 # namespace expect to find, and it records what the partitions ARE.
-cat > "$ROOTDIR/etc/fstab" <<'FSTAB'
+cat > "$ROOTDIR/etc/fstab" <<FSTAB
 # /etc/fstab — what the partitions are.
 #
 # The Hamnix boot does not consult this file: the namespace is assembled by
-# /etc/rc.boot with `bind`, which is the whole point of the design. It is here
+# /etc/rc.boot with \`bind\`, which is the whole point of the design. It is here
 # because it is the truth about the disk, and because Debian tooling running
 # inside the distro namespace looks for it.
-/dev/vda2  /      ext4  defaults           0 1
-/dev/vda1  /boot  vfat  defaults,noatime   0 2
+#
+# BY PARTUUID, not by /dev/vda2. The device node is a statement about QEMU; the
+# partition GUID is the same on every machine this disk is plugged into, and it
+# is the same string the kernel command line uses.
+PARTUUID=$ROOT_PARTUUID  /      ext4  defaults           0 1
+PARTUUID=$BOOT_PARTUUID  /boot  vfat  defaults,noatime   0 2
 FSTAB
 
 # The installed system's boot rc differs from the initramfs one in exactly one
@@ -106,31 +117,55 @@ echo "[disk] root filesystem: $(du -h "$ROOTFS" | cut -f1)"
 # One PE binary carrying the kernel, its command line and the initramfs. The
 # stub is the kernel's own EFI entry point, so no bootloader is installed.
 CMDLINE="$STAGE/cmdline.txt"
-# THE COMMAND LINE IS NOT UNIVERSAL, AND SAYING SO IS THE POINT.
+# THE COMMAND LINE NAMES NO DEVICE, AND THAT IS THE POINT.
 #
-# `root=/dev/vda2` names the VIRTIO disk. That device exists in QEMU and on no
-# physical machine on earth: a USB stick is /dev/sda, an NVMe root is
-# /dev/nvme0n1p2. This image was booted on a real laptop and got as far as the
-# EFI stub and then a blinking cursor, and the comment in user/linuxinit.ad
+# It used to say `root=/dev/vda2`. That is the VIRTIO disk: it exists in QEMU
+# and on no physical machine on earth, where the same install is /dev/sda2 off
+# a USB stick and /dev/nvme0n1p2 on a laptop. The comment in user/linuxinit.ad
 # beside the root switch said "the device comes from the kernel's own command
 # line, so one image boots any machine" -- true of the MECHANISM, false of the
-# STRING this script bakes into it, which is exactly the shape of untrue
-# sentence this tree keeps getting caught by.
+# STRING this script baked into it.
 #
-# `console=tty0` also assumes a framebuffer console comes up. On the laptop it
-# did not, so init's own first line never appeared and a boot that may have got
-# quite far was indistinguishable from one that died in the stub. Nothing here
-# printed before fbcon, so there was nothing to read.
+# So the root is named by its GPT PARTITION GUID, chosen HERE and given to
+# sgdisk below when partition 2 is created. The identifier travels with the
+# partition: the same disk answers to it plugged into any machine, in any slot,
+# behind any driver. user/linux-syscalls.c:sysroot_device resolves it by
+# reading the GPT off every disk /sys/block lists -- no udev, no blkid -- and
+# when it matches nothing it prints the identifier it wanted and every
+# partition it did see, rather than mounting a guess.
 #
-# HAMLINUX_CMDLINE overrides the whole string, which is how a diagnostic image
-# gets built without editing this file. The default keeps the VM's root because
-# `scripts/hamlinux_vm.sh disk` is what runs constantly; real-hardware media
-# should pass its own, and the honest fix -- teaching the root switch to resolve
-# PARTUUID= so one image really does boot any machine -- is its own piece of
-# work, named in HANDOFF.md rather than hidden behind this default.
-DEFAULT_CMDLINE='console=tty0 console=ttyS0,115200 root=/dev/vda2 rw panic=-1 loglevel=4'
+# THE CONSOLE ARRANGEMENT, which is the other half of why a real machine
+# looked dead:
+#   earlycon=efifb   prints straight into the EFI framebuffer the firmware
+#                    handed over, from the first line of the kernel, before
+#                    any driver exists. It is the only thing that prints at
+#                    all on a machine with no serial port and no fbcon yet.
+#   keep_bootcon     keeps it after a "real" console registers. Without this
+#                    the kernel silences earlycon the moment tty0 comes up --
+#                    and tty0 comes up even with NO framebuffer behind it
+#                    (CONFIG_VT's dummy console), so on the laptop the one
+#                    console that could be read was turned off in favour of
+#                    one that displayed nothing.
+#   loglevel=7       the kernel's own boot messages. At loglevel=4 nothing
+#                    below KERN_ERR reaches any console, so a perfect boot
+#                    printed NOTHING between the EFI stub and the desktop.
+#                    That is what the blinking cursor was.
+#   console=ttyS0    stays LAST, because /dev/console follows the last
+#                    console= and every gate in this tree reads the serial
+#                    port. PID 1 mirrors its own lines to /dev/kmsg so they
+#                    reach the screen as well -- see user/linuxinit.ad.
+#
+# HAMLINUX_CMDLINE still overrides the whole string; HAMLINUX_ROOT_PARTUUID
+# pins the GUID (a test that rebuilds the disk and expects the same string).
+DEFAULT_CMDLINE="console=tty0 earlycon=efifb keep_bootcon console=ttyS0,115200 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7"
 printf '%s' "${HAMLINUX_CMDLINE:-$DEFAULT_CMDLINE}" > "$CMDLINE"
 echo "[disk] cmdline: $(cat "$CMDLINE")"
+# WHAT THE IN-SYSTEM INSTALLER READS. user/hlinstall.ad copies this very UKI
+# onto the target's ESP, so the target's root partition must answer to the
+# PARTUUID baked in it. The installer cannot rewrite a PE section, so it does
+# the other half: it reads this file and hands the GUID to sgdisk. Keeping the
+# two in step is why the number is written down rather than re-generated.
+printf '%s\n' "$ROOT_PARTUUID" > "$STAGE/root.partuuid"
 STUB=/usr/lib/systemd/boot/efi/linuxx64.efi.stub
 UKI="$STAGE/BOOTX64.EFI"
 if [ -f "$STUB" ]; then
@@ -173,7 +208,27 @@ else
 fi
 
 # --- the ESP ---------------------------------------------------------------
-ESP_MB=200
+# SIZED FROM WHAT GOES ON IT, not from a number somebody once measured. The
+# three files here are the unified kernel image, the kernel and the initramfs,
+# and they grow: staging the installer's own boot files (HAMLINUX_INSTALLER=1)
+# roughly triples the initramfs, at which point a fixed 200M ESP overflows and
+# mcopy says "Disk full" -- one line, mid-build, easy to read past, and the
+# disk it leaves behind is missing whichever file did not fit.
+ESP_NEED=$(( ( $(stat -Lc%s "$UKI") \
+             + $(stat -Lc%s build/image/vmlinuz) \
+             + $(stat -Lc%s build/image/initramfs.cpio.gz) ) / 1048576 ))
+ESP_MB=$(( ESP_NEED + ESP_NEED / 5 + 32 ))       # 20% slack for FAT overhead
+[ "$ESP_MB" -lt 200 ] && ESP_MB=200
+# And the two partitions have to fit in the disk that will be truncated below.
+# dd would otherwise write the root filesystem past the end of the image and
+# the failure would surface as an unmountable root at boot.
+SIZE_MB=$(numfmt --from=iec "$SIZE")
+SIZE_MB=$(( SIZE_MB / 1048576 ))
+if [ $(( ESP_MB + 2600 + 2 )) -gt "$SIZE_MB" ]; then
+    echo "[disk] ERROR: a ${ESP_MB}M ESP and a 2600M root do not fit in $SIZE." >&2
+    echo "[disk]        Build a bigger disk: scripts/hamlinux_disk.sh $OUT 4G" >&2
+    exit 1
+fi
 mkfs.vfat -F 32 -n HAMBOOT -C "$ESP" $((ESP_MB * 1024)) >/dev/null
 mmd -i "$ESP" ::/EFI ::/EFI/BOOT
 mcopy -i "$ESP" "$UKI" ::/EFI/BOOT/BOOTX64.EFI
@@ -186,10 +241,26 @@ echo "[disk] ESP: ${ESP_MB}M"
 # --- assemble the disk -----------------------------------------------------
 rm -f "$OUT"
 truncate -s "$SIZE" "$OUT"
+# --partition-guid is the whole trick: the partition is CREATED with the GUID
+# the command line already names, so the identifier is not a description of the
+# disk that could drift from it -- it is the same string in both places, by
+# construction, and `sgdisk -i 2` on the result proves it.
 sgdisk --clear \
     --new=1:2048:+${ESP_MB}M --typecode=1:ef00 --change-name=1:HAMBOOT \
+    --partition-guid=1:"$BOOT_PARTUUID" \
     --new=2:0:0              --typecode=2:8300 --change-name=2:hamnix \
+    --partition-guid=2:"$ROOT_PARTUUID" \
     "$OUT" >/dev/null
+# Prove it rather than assume it: a mistyped GUID here produces a disk that
+# boots on this host (where the cmdline and the table were written together)
+# and nowhere else, which is the exact class of fault this file is fixing.
+GOT="$(sgdisk -i 2 "$OUT" | awk -F': ' '/Partition unique GUID/ {print tolower($2)}')"
+if [ "$GOT" != "$(printf '%s' "$ROOT_PARTUUID" | tr 'A-Z' 'a-z')" ]; then
+    echo "[disk] ERROR: partition 2's GUID is $GOT, but the command line says" >&2
+    echo "[disk]        root=PARTUUID=$ROOT_PARTUUID. This disk would not boot." >&2
+    exit 1
+fi
+echo "[disk] root partition GUID: $GOT (matches the command line)"
 # Write the filesystems into their partitions. dd at the byte offsets sgdisk
 # just chose; no loop device, so no root and no host mount.
 ESP_OFF=$((2048 * 512))

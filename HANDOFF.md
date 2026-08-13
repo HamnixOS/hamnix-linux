@@ -286,6 +286,90 @@ TWO THINGS IT FOUND, both of the shape this project exists to beat:
   not. Every Debian kernel release has a `+` in it, so this was every `>>`
   into `/lib/modules/<release>/` on this port.
 
+### The blinking cursor on the laptop, and what was actually behind it
+
+Commit `58c3f506` recorded the one bare-metal attempt this project has: a USB
+image on the owner's laptop printed the EFI stub's line, then a blinking
+cursor, then nothing. Two causes were suspected. **Both were real, one was
+mis-stated, and a third was found that is worse than either.**
+
+* **`root=/dev/vda2` was in the command line.** Confirmed, fixed. The command
+  line now says `root=PARTUUID=<guid>`, and the guid is the one
+  `scripts/hamlinux_disk.sh` hands to `sgdisk --partition-guid` as it creates
+  partition 2 — same script, same variable, read back with `sgdisk -i 2` and
+  the build refuses to finish if the two disagree.
+  `user/linux-syscalls.c:sysroot_device` resolves `PARTUUID=` and `UUID=` by
+  reading the GPT off every disk `/sys/block` lists and the ext4 superblock off
+  every partition. No udev, no blkid, ~80 lines. `/etc/fstab` says the same
+  thing, and `user/hlinstall.ad` gives the partition it creates the GUID that
+  the UKI it is about to copy already names (it reads `/boot/root.partuuid`,
+  written beside the image, because it cannot rewrite a PE section).
+
+* **"`console=tty0` assumes a framebuffer console, and on that laptop it did
+  not come up" — NOT the cause, or not the whole one.** The Debian kernel this
+  image ships has `CONFIG_FB_EFI=y` and `CONFIG_FRAMEBUFFER_CONSOLE=y` built
+  in, so efifb and fbcon do come up on an EFI handover. What silenced the
+  machine was two other things in the same string: **`loglevel=4`** drops every
+  kernel message below KERN_ERR, so a *perfect* boot prints nothing at all
+  between the stub and the desktop; and **PID 1's own output goes to
+  `/dev/console`, which is the LAST `console=`** — `ttyS0`, a serial port the
+  laptop does not have. Reproduced in a VM: at t=2 s the framebuffer of a
+  fully successful boot is a **single colour, 1280x800 of pure black**. The
+  blinking cursor was not a symptom of failure. It is what success looked
+  like.
+
+  Fixed with `earlycon=efifb keep_bootcon` and `loglevel=7`, and by
+  `user/linuxinit.ad` mirroring every line it prints to `/dev/kmsg` — printk
+  reaches every console, `/dev/console` reaches one. `keep_bootcon` is load
+  bearing: without it the kernel silences earlycon the moment `tty0` registers,
+  and `tty0` registers even with CONFIG_VT's dummy driver behind it, i.e.
+  exactly in the case where earlycon is the only thing that can be read. The
+  cost is doubled text early in a boot where fbcon *does* come up, which is
+  visible in the t=3 s screendump and is the right trade.
+
+* **THE THIRD ONE, WHICH NOBODY HAD SUSPECTED: the only block driver loaded at
+  boot was `virtio_blk`.** On the laptop, PID 1 came up with **no disk visible
+  at all** — not the USB stick it had booted from, not the NVMe it would be
+  installed on — so no spelling of `root=` could have resolved. `nvme`, `ahci`,
+  `sd_mod`, `usb-storage`, `uas`, `xhci`, `ehci` and `usbhid` are staged now
+  (56 modules at boot, up from 36). And `user/hlinstall.ad` used to REFUSE any
+  disk whose partitions are named `<disk>pN` — that is `nvme0n1`, the root of
+  nearly every laptop made since 2016 — so the installer declined to install on
+  the machine this whole line of work is for.
+
+Gate: `scripts/test_root_partuuid_boot.sh`, **control first**. It boots the OLD
+command line and requires the framebuffer to be ONE COLOUR before any claim
+about the new one is believed; then the new one (text on screen,
+`root=PARTUUID=` resolved to a device, root mounted); then a PARTUUID nothing
+has, which must print the identifier it wanted, every partition it found with
+both identifiers, and the words "running FROM RAM".
+
+The INSTALLER path was driven end to end in a VM as well: live medium built
+with `HAMLINUX_INSTALLER=1`, a blank 3 GiB target, `install --auto /dev/vdb`,
+and the disk it left behind booted on its own under OVMF through the
+`BOOTX64.EFI` the installer copied — `sysroot: root=PARTUUID=3bb3061b-... is
+/dev/vda2`, `rc.boot: hamnix-linux (installed)`, `rc.boot: up`. The GUID was
+read back off the image on the HOST with `sgdisk`, not taken from the
+installer's own report.
+
+**The known wart, stated rather than found later:** the installed disk and the
+medium it came from carry the SAME partition GUID, because the installer gives
+the target the identity the boot image it copies already names. The resolver
+therefore walks every disk and says so when a second one answers — measured
+with both attached: *"/dev/vda2 answers to the same identifier as /dev/vdb2.
+The FIRST one is being mounted"*. The clean fix is `hlinstall` choosing a fresh
+GUID and overwriting those 36 bytes inside the copied `BOOTX64.EFI` (same
+length, so a byte replacement, not a PE edit).
+
+**NOT PROVEN: any of this on physical hardware.** QEMU's OVMF hands over an EFI
+framebuffer the way a laptop's firmware does, and that is the mechanism under
+test, but the laptop in the story has not been booted again. Nor is there any
+evidence about a real machine's own GPU: the image carries no `i915`,
+`amdgpu` or `nouveau`, so the desktop on a laptop would be relying on efifb
+through `/dev/fb0`, which nothing here has watched happen. What can be said is
+that the three things that would have stopped the boot are gone and that the
+next attempt produces evidence instead of a cursor.
+
 ### The coverage gate looked at `/bin`. 152 files lived one directory over.
 
 `tests/linux/channel_covers_image.sh` enforced the owner's permanent rule --

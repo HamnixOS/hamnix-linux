@@ -218,6 +218,78 @@ def emit_dec(buf: Ptr[uint8], at: uint64, v: int32) -> uint64:
     return i
 
 
+# THE IDENTITY THE TARGET'S ROOT PARTITION MUST HAVE.
+#
+# This installer copies /boot/BOOTX64.EFI onto the target's ESP BYTE FOR BYTE.
+# That file is a unified kernel image: the kernel, the initramfs and the KERNEL
+# COMMAND LINE fused into one PE binary, and the command line says
+# `root=PARTUUID=<something>` -- chosen by scripts/hamlinux_disk.sh when the
+# install medium was built. Rewriting a PE section from here is not something
+# this program can do.
+#
+# So it does the other half. scripts/hamlinux_disk.sh also writes the GUID to
+# /boot/root.partuuid, and the partition created below is given exactly that
+# GUID with `sgdisk --partition-guid`. The booted kernel then finds its root by
+# an identifier that is true on this machine, whatever the disk is called --
+# /dev/sda2 off a USB stick, /dev/nvme0n1p2 on a laptop, /dev/vdb2 in a VM.
+#
+# Before this, the installed disk inherited whatever random GUID sgdisk chose
+# and the copied UKI went looking for the BUILD HOST's partition, which no
+# installed machine has.
+#
+# THE COST OF DOING IT THIS WAY ROUND, said here rather than discovered later:
+# the installed disk and the medium it was installed from now carry the SAME
+# partition GUID, so a machine booted with the USB stick still plugged in has
+# two partitions answering to one name. user/linux-syscalls.c's resolver walks
+# every disk for exactly this reason and says so by name when it finds a
+# second, and it mounts the first. The clean fix is for this program to choose
+# a FRESH guid and rewrite the 36 bytes of it inside the copied BOOTX64.EFI --
+# the string is the same length, so it is a byte replacement rather than a PE
+# edit -- and that is the next piece of work here, not something this one
+# quietly pretends to have done.
+partuuid_buf: Array[64, uint8]
+
+
+def is_hex(c: uint8) -> int32:
+    if c >= 48 and c <= 57:
+        return 1
+    if c >= 97 and c <= 102:
+        return 1
+    if c >= 65 and c <= 70:
+        return 1
+    return 0
+
+
+# 0 if /boot/root.partuuid held a canonical 8-4-4-4-12 UUID, which is now in
+# partuuid_buf. Checked rather than trusted: a truncated or empty file would
+# otherwise be passed to sgdisk, which would reject it AFTER the disk had been
+# erased.
+def read_root_partuuid() -> int32:
+    fd: int32 = sys_open(cast[Ptr[char]]("/boot/root.partuuid"))
+    if fd < 0:
+        return -1
+    n: int64 = sys_read(fd, &partuuid_buf[0], 63)
+    sys_close(fd)
+    if n <= 0:
+        return -1
+    i: uint64 = cast[uint64](n)
+    while i > 0 and partuuid_buf[i - 1] <= 32:
+        i = i - 1
+    partuuid_buf[i] = 0
+    if i != 36:
+        return -1
+    j: uint64 = 0
+    while j < 36:
+        if j == 8 or j == 13 or j == 18 or j == 23:
+            if partuuid_buf[j] != 45:                 # '-'
+                return -1
+        else:
+            if is_hex(partuuid_buf[j]) == 0:
+                return -1
+        j = j + 1
+    return 0
+
+
 def step(msg: Ptr[uint8]):
     puts(1, "\n=== ")
     puts(1, msg)
@@ -587,21 +659,31 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         ai = ai + 1
 
     dn: uint64 = copy_str(&disk[0], target)
-    # <disk>1 and <disk>2. NVMe and mmc name their partitions <disk>p1, and a
-    # wrong guess would format somebody's other partition, so refuse rather
-    # than assume: those disks want an explicit naming rule this does not have
-    # yet, and saying so is better than being confidently wrong.
+    # HOW A PARTITION OF THIS DISK IS NAMED.
+    #
+    # /dev/sda -> /dev/sda1. /dev/nvme0n1 -> /dev/nvme0n1p1, and so does every
+    # mmcblk and every loop device: the rule Linux itself uses is that a name
+    # ENDING IN A DIGIT takes a `p` before the partition number, because
+    # "nvme0n11" would otherwise be unreadable. It is one rule, it is the
+    # kernel's own, and it is not a guess.
+    #
+    # This used to REFUSE such a disk outright -- "that is not handled yet" --
+    # which was honest about the code and fatal in practice: the root of nearly
+    # every laptop made since 2016 is nvme0n1, so the installer declined to
+    # install on the actual target of this whole line of work.
+    sep: uint64 = 0
     if disk[dn - 1] >= 48 and disk[dn - 1] <= 57:
-        puts(2, "hlinstall: this disk names its partitions <disk>pN "
-                "(nvme/mmc); that is not handled yet, and guessing would "
-                "format the wrong thing.\n")
-        return 1
+        sep = 1
     copy_str(&p1[0], &disk[0])
-    p1[dn] = 49                                   # '1'
-    p1[dn + 1] = 0
+    if sep != 0:
+        p1[dn] = 112                              # 'p'
+    p1[dn + sep] = 49                             # '1'
+    p1[dn + sep + 1] = 0
     copy_str(&p2[0], &disk[0])
-    p2[dn] = 50                                   # '2'
-    p2[dn + 1] = 0
+    if sep != 0:
+        p2[dn] = 112                              # 'p'
+    p2[dn + sep] = 50                             # '2'
+    p2[dn + sep + 1] = 0
 
     puts(1, "target disk: ")
     puts(1, &disk[0])
@@ -613,6 +695,23 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         puts(1, "\n  repo: ")
         puts(1, &repo_buf[0])
     puts(1, "\nthis ERASES the disk.\n")
+
+    # BEFORE THE DISK IS TOUCHED. An install that erases the target and only
+    # then discovers it cannot make the root findable has destroyed something
+    # and produced nothing.
+    if read_root_partuuid() != 0:
+        puts(2, "hlinstall: /boot/root.partuuid is missing or is not a UUID.\n")
+        puts(2, "hlinstall: that file carries the PARTUUID baked into "
+                "/boot/BOOTX64.EFI's kernel command line, and the root "
+                "partition must be created with it or the installed disk will "
+                "boot looking for a partition that does not exist here.\n")
+        puts(2, "hlinstall: build the medium with scripts/hamlinux_disk.sh "
+                "first, then scripts/hamlinux_image.sh with "
+                "HAMLINUX_INSTALLER=1.\n")
+        return 1
+    puts(1, "  root PARTUUID: ")
+    puts(1, &partuuid_buf[0])
+    puts(1, "  (from /boot/root.partuuid — what the boot image asks for)\n")
 
     step(cast[Ptr[uint8]]("1/5  partitioning"))
     copy_str(&a1[0], cast[Ptr[uint8]]("--zap-all"))
@@ -637,6 +736,20 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if run_in_distro(cast[Ptr[char]]("/usr/sbin/sgdisk"), 4) != 0:
         puts(2, "hlinstall: creating the root partition failed\n")
         return 1
+    # A SECOND sgdisk call rather than a fifth argument to that one:
+    # run_in_distro carries four. --partition-guid on an existing partition is
+    # exactly the same operation it would have been at creation time.
+    gi: uint64 = copy_str(&a1[0], cast[Ptr[uint8]]("--partition-guid=2:"))
+    copy_str(&a1[gi], &partuuid_buf[0])
+    copy_str(&a2[0], &disk[0])
+    if run_in_distro(cast[Ptr[char]]("/usr/sbin/sgdisk"), 2) != 0:
+        puts(2, "hlinstall: could not give the root partition the PARTUUID "
+                "the boot image names; the installed disk would not find its "
+                "root.\n")
+        return 1
+    puts(1, "  root partition GUID set to ")
+    puts(1, &partuuid_buf[0])
+    puts(1, "\n")
 
     step(cast[Ptr[uint8]]("2/5  filesystems"))
     copy_str(&a1[0], cast[Ptr[uint8]]("-F"))

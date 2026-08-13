@@ -30,6 +30,7 @@
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <dirent.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -3226,21 +3227,242 @@ static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
     return NULL;
 }
 
-/* Which device holds the real root.
+/* ------------------------------------------------------------------ *
+ * WHICH DEVICE HOLDS THE REAL ROOT, on a machine this image has never seen.
  *
- * HAMNIX_ROOT if the operator set it; otherwise the kernel already told us on
- * its own command line, and taking the answer from there is what makes the
- * same image boot on a machine whose disk is not called what this one's is.
- * Only an explicit /dev path is accepted: LABEL= and UUID= need a device
- * enumerator this line does not have, and guessing would mount the wrong
- * filesystem rather than fail. */
+ * `root=/dev/vda2` is a sentence about ONE machine. The virtio disk exists in
+ * QEMU and nowhere else: the same install is /dev/sda2 off a USB stick and
+ * /dev/nvme0n1p2 on a laptop, and which of those a given kernel picks depends
+ * on probe order it does not promise to keep. A distribution image cannot name
+ * a device node and be telling the truth on the next machine.
+ *
+ * So the root is named by something the INSTALLER WROTE ONTO THE DISK and that
+ * travels with the partition: its GPT partition GUID (`root=PARTUUID=...`) or
+ * the filesystem UUID inside its superblock (`root=UUID=...`).
+ * scripts/hamlinux_disk.sh chooses the PARTUUID, passes it to sgdisk when it
+ * creates partition 2, and bakes the SAME string into the unified kernel
+ * image's command line; user/hlinstall.ad reads it off the install media and
+ * gives the partition it creates that identity. Nothing here has to be told
+ * what the disk is called.
+ *
+ * RESOLVING IT IS THIS FILE'S JOB, because on this line userspace mounts the
+ * root -- the kernel's own name_to_dev_t never runs, since the initramfs never
+ * hands the root over to it. The old comment here said LABEL=/UUID= "need a
+ * device enumerator this line does not have". It has one now, and it is 80
+ * lines: /sys/block lists the disks, each disk's subdirectories with a
+ * `partition` file are its partitions, the GPT at LBA 1 of the disk carries
+ * every partition's GUID, and an ext4 superblock at byte 1024 of the partition
+ * carries the filesystem UUID. No udev, no blkid, no libblkid.
+ *
+ * AND WHEN IT FINDS NOTHING IT SAYS WHAT IT LOOKED AT. A boot that cannot find
+ * its root prints the identifier it wanted and then every partition it did
+ * see, with both identifiers of each -- on the console AND on /dev/kmsg, so
+ * the message reaches a physical screen (see bootmsg). The alternative, and
+ * what this used to do, was to fall back to "/" and mount the initramfs onto
+ * itself, which reports "root filesystem online" and boots a system with none.
+ */
+
+/* Boot-time diagnostics that must survive having no serial port.
+ *
+ * PID 1's stderr goes to /dev/console, and /dev/console is the LAST console=
+ * on the command line -- ttyS0 on this image, which a laptop does not display.
+ * /dev/kmsg goes to printk, and printk goes to EVERY registered console:
+ * the serial port, the framebuffer console, and the `earlycon=efifb` boot
+ * console that is the only thing printing before fbcon exists. `level` is the
+ * kmsg priority; 3 (KERN_ERR) is used for faults so they appear even at the
+ * default loglevel=4, which suppresses anything less urgent. */
+__attribute__((format(printf, 2, 3)))
+static void bootmsg(int level, const char *fmt, ...)
+{
+    char buf[640];
+    int pre = snprintf(buf, sizeof buf, "<%d>", level & 7);
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + pre, sizeof buf - pre, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (n > (int)(sizeof buf - pre) - 1) n = (int)(sizeof buf - pre) - 1;
+    ssize_t w = write(2, buf + pre, (size_t)n);      /* no <N> on the console */
+    (void)w;
+    int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        w = write(fd, buf, (size_t)(pre + n));
+        (void)w;
+        close(fd);
+    }
+}
+
+static uint16_t rd16(const unsigned char *p) { return (uint16_t)(p[0] | p[1] << 8); }
+static uint32_t rd32(const unsigned char *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8
+         | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+static uint64_t rd64(const unsigned char *p)
+{
+    return (uint64_t)rd32(p) | (uint64_t)rd32(p + 4) << 32;
+}
+
+static int read_at(const char *path, off_t off, void *buf, size_t n)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t r = pread(fd, buf, n, off);
+    close(fd);
+    return r == (ssize_t)n ? 0 : -1;
+}
+
+/* A GPT partition GUID is stored MIXED-ENDIAN -- the first three fields
+ * little-endian, the last two as written -- and every tool that prints one
+ * (sgdisk, blkid, the kernel's PARTUUID=) prints the byte-swapped form. Get
+ * this wrong and the comparison never matches anything. */
+static void guid_str(const unsigned char *g, char *out)
+{
+    sprintf(out, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-"
+                 "%02x%02x%02x%02x%02x%02x",
+            g[3], g[2], g[1], g[0], g[5], g[4], g[7], g[6], g[8], g[9],
+            g[10], g[11], g[12], g[13], g[14], g[15]);
+}
+
+/* A filesystem UUID is stored in printing order, unlike the above. */
+static void fsuuid_str(const unsigned char *u, char *out)
+{
+    sprintf(out, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-"
+                 "%02x%02x%02x%02x%02x%02x",
+            u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9],
+            u[10], u[11], u[12], u[13], u[14], u[15]);
+}
+
+/* The ext4/ext3/ext2 superblock lives at byte 1024 of the partition; s_magic
+ * (0xEF53) is at +0x38 and s_uuid at +0x68. Reading it needs no mount. */
+static int part_fs_uuid(const char *dev, char *out)
+{
+    unsigned char sb[256];
+    if (read_at(dev, 1024, sb, sizeof sb) < 0) return -1;
+    if (rd16(sb + 0x38) != 0xEF53) return -1;
+    fsuuid_str(sb + 0x68, out);
+    return 0;
+}
+
+static unsigned disk_block_size(const char *disk)
+{
+    char path[256];
+    snprintf(path, sizeof path, "/sys/block/%s/queue/logical_block_size", disk);
+    FILE *f = fopen(path, "r");
+    if (!f) return 512;
+    unsigned v = 0;
+    int got = fscanf(f, "%u", &v);
+    fclose(f);
+    /* 4Kn disks exist, and the GPT's LBA numbers are in the disk's own units;
+     * assuming 512 there would read the partition array from the wrong offset. */
+    return (got == 1 && v >= 512 && v <= 65536) ? v : 512;
+}
+
+/* The GPT partition GUID of partition `partn` of `disk` (e.g. "sda", 2). */
+static int part_gpt_uuid(const char *disk, unsigned partn, char *out)
+{
+    char dev[128];
+    snprintf(dev, sizeof dev, "/dev/%s", disk);
+    unsigned lbs = disk_block_size(disk);
+    unsigned char hdr[96];
+    if (read_at(dev, (off_t)lbs, hdr, sizeof hdr) < 0) return -1;
+    if (memcmp(hdr, "EFI PART", 8) != 0) return -1;       /* MBR, or no table */
+    uint64_t ents = rd64(hdr + 72);
+    uint32_t nents = rd32(hdr + 80), esz = rd32(hdr + 84);
+    if (partn < 1 || partn > nents || esz < 128 || esz > 4096) return -1;
+    unsigned char e[128];
+    if (read_at(dev, (off_t)ents * lbs + (off_t)(partn - 1) * esz, e, sizeof e) < 0)
+        return -1;
+    static const unsigned char zero[16] = { 0 };
+    if (memcmp(e, zero, 16) == 0) return -1;              /* unused entry */
+    guid_str(e + 16, out);
+    return 0;
+}
+
+/* Walk every partition of every disk. `want` is "PARTUUID=x" or "UUID=x"; with
+ * `report` set, each partition is also printed, which is what a failed boot
+ * shows. Returns the number of partitions matched (searching) or seen
+ * (reporting) -- the caller distinguishes "nothing matched" from "there are no
+ * disks at all", which are different faults with different fixes. */
+static int scan_partitions(const char *want_partuuid, const char *want_uuid,
+                           char *out, size_t outn, int report)
+{
+    DIR *d = opendir("/sys/block");
+    if (!d) {
+        if (report)
+            bootmsg(3, "sysroot: /sys/block is not readable (%s) -- is `bind "
+                       "'#sys' /sys` done?\n", strerror(errno));
+        return 0;
+    }
+    /* EVERY disk is walked even after a match, and that is deliberate. An
+     * installed machine and the USB stick it was installed from carry the SAME
+     * partition GUID -- user/hlinstall.ad gives the target the identity the
+     * boot image it copies already names, because it cannot rewrite a PE
+     * section -- so "two partitions answer to this name" is a real, reachable
+     * state, and picking the first one silently is how a machine boots off the
+     * stick still in its side and nobody can tell. */
+    int hit = 0, seen = 0;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char pdir[512];
+        snprintf(pdir, sizeof pdir, "/sys/block/%s", de->d_name);
+        DIR *pd = opendir(pdir);
+        if (!pd) continue;
+        struct dirent *pe;
+        while ((pe = readdir(pd))) {
+            if (pe->d_name[0] == '.') continue;
+            char pnfile[1024];
+            snprintf(pnfile, sizeof pnfile, "%s/%s/partition", pdir, pe->d_name);
+            FILE *f = fopen(pnfile, "r");
+            if (!f) continue;                    /* not a partition of this disk */
+            unsigned pn = 0;
+            int got = fscanf(f, "%u", &pn);
+            fclose(f);
+            if (got != 1) continue;
+            char dev[128];
+            snprintf(dev, sizeof dev, "/dev/%s", pe->d_name);
+            char pu[40] = "", fu[40] = "";
+            int have_pu = part_gpt_uuid(de->d_name, pn, pu) == 0;
+            int have_fu = part_fs_uuid(dev, fu) == 0;
+            seen++;
+            if (report)
+                bootmsg(3, "sysroot:   %-16s PARTUUID=%s UUID=%s\n", dev,
+                        have_pu ? pu : "(no GPT entry)",
+                        have_fu ? fu : "(no ext4 superblock)");
+            int match = (want_partuuid && have_pu
+                         && !strcasecmp(pu, want_partuuid))
+                     || (want_uuid && have_fu && !strcasecmp(fu, want_uuid));
+            if (match) {
+                if (!hit)
+                    snprintf(out, outn, "%s", dev);
+                else
+                    bootmsg(3, "sysroot: WARNING: %s answers to the same "
+                               "identifier as %s. The FIRST one is being "
+                               "mounted; if the wrong system comes up, that is "
+                               "why -- unplug the other disk.\n", dev, out);
+                hit++;
+            }
+        }
+        closedir(pd);
+    }
+    closedir(d);
+    return report ? seen : hit;
+}
+
+/* HAMNIX_ROOT if the operator set it; otherwise whatever the kernel command
+ * line says, resolved. NULL means "the command line asked for a root and it
+ * is not on this machine" -- a fault, and never mounted over with a guess. */
 static const char *sysroot_device(void)
 {
     static char dev[128];
+    static int failed;
     const char *e = getenv("HAMNIX_ROOT");
     if (e && *e) return e;
     if (dev[0]) return dev;
+    if (failed) return NULL;
 
+    char spec[128] = "";
     int fd = open("/proc/cmdline", O_RDONLY);
     if (fd >= 0) {
         char line[1024];
@@ -3253,19 +3475,53 @@ static const char *sysroot_device(void)
                 p += 5;
                 size_t k = 0;
                 while (p[k] && p[k] != ' ' && p[k] != '\n'
-                       && k < sizeof dev - 1) {
-                    dev[k] = p[k];
+                       && k < sizeof spec - 1) {
+                    spec[k] = p[k];
                     k++;
                 }
-                dev[k] = '\0';
-                if (strncmp(dev, "/dev/", 5) != 0)
-                    dev[0] = '\0';      /* LABEL=/UUID= -- see above */
+                spec[k] = '\0';
             }
         }
     }
-    if (!dev[0])
+
+    /* No root= at all is an initramfs-only boot -- every developer boot -- and
+     * "/" is the right answer for `#r`, which asks the same question. */
+    if (!spec[0]) {
         snprintf(dev, sizeof dev, "/");
-    return dev;
+        return dev;
+    }
+    if (!strncmp(spec, "/dev/", 5)) {
+        snprintf(dev, sizeof dev, "%s", spec);
+        return dev;
+    }
+
+    const char *pu = NULL, *fu = NULL;
+    if (!strncasecmp(spec, "PARTUUID=", 9)) pu = spec + 9;
+    else if (!strncasecmp(spec, "UUID=", 5)) fu = spec + 5;
+    if (pu || fu) {
+        if (scan_partitions(pu, fu, dev, sizeof dev, 0)) {
+            bootmsg(6, "sysroot: root=%s is %s\n", spec, dev);
+            return dev;
+        }
+        bootmsg(3, "sysroot: NO PARTITION ON THIS MACHINE MATCHES root=%s.\n",
+                spec);
+        bootmsg(3, "sysroot: every partition this kernel can see:\n");
+        char ignored[128];
+        if (!scan_partitions(NULL, NULL, ignored, sizeof ignored, 1))
+            bootmsg(3, "sysroot:   (none at all -- no disk driver for this "
+                       "machine's controller is loaded, or nothing is "
+                       "attached)\n");
+        /* What this DOES, not what it would be nice to claim: the bind fails.
+         * PID 1 decides what to do about it, and says so in its own words. */
+        bootmsg(3, "sysroot: the root switch fails rather than mounting a "
+                   "guess.\n");
+        failed = 1;
+        return NULL;
+    }
+    bootmsg(3, "sysroot: root=%s names neither a /dev path, a PARTUUID= nor a "
+               "UUID=; nothing here can resolve it.\n", spec);
+    failed = 1;
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ *
@@ -4048,9 +4304,16 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
             errno = ENOENT;
             return -ENOENT;
         }
-    } else if (!strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r"))
+    } else if (!strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r")) {
         root = sysroot_device();
-    else
+        /* sysroot_device has already said which identifier it wanted and what
+         * it saw instead. Failing here is the point: the alternative is
+         * mounting the initramfs onto itself and reporting a root. */
+        if (!root) {
+            errno = ENODEV;
+            return -ENODEV;
+        }
+    } else
         root = d->source;
 
     if ((size_t)snprintf(srcpath, sizeof srcpath, "%s%s", root, sub)

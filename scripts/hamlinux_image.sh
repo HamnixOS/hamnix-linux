@@ -665,7 +665,25 @@ MODPROBE=/usr/sbin/modprobe
 # and the card would enumerate with no PCM device at all. Loading the codec
 # first makes that impossible. virtio_snd rides along so an image booted
 # against `-device virtio-sound-pci` finds a card too.
-WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk ext4 vfat nls_ascii nls_cp437 overlay squashfs loop snd-hda-codec-generic snd-hda-intel virtio_snd}"
+# THE STORAGE DRIVERS A MACHINE THAT IS NOT A VM NEEDS, and why they are not
+# optional. Until this line, the only block driver loaded at boot was
+# virtio_blk. On the owner's laptop that means PID 1 comes up with NO DISK
+# VISIBLE AT ALL: not the USB stick it booted from, not the NVMe it would be
+# installed on. `root=` then cannot be resolved by any spelling -- device node,
+# PARTUUID or UUID -- because there is nothing to resolve it against, and the
+# root switch fails on a machine whose disk is sitting right there.
+#
+#   nvme         the root of nearly every laptop made since 2016
+#   ahci, sd_mod SATA disks and the SCSI disk layer they appear through
+#   usb-storage, uas, xhci_pci, ehci_pci
+#                THE INSTALL MEDIUM. A USB stick is a SCSI disk behind a USB
+#                host controller; without these the installer cannot read the
+#                image it is running from once the initramfs hands over.
+#   usbhid, hid-generic
+#                the keyboard and touchpad of a real machine. virtio_input is
+#                QEMU's; a laptop has neither.
+HW_MODULES="nvme ahci sd_mod usb-storage uas xhci_pci ehci_pci usbhid hid-generic"
+WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk $HW_MODULES ext4 vfat nls_ascii nls_cp437 overlay squashfs loop snd-hda-codec-generic snd-hda-intel virtio_snd}"
 : > "$ROOT/etc/modules"
 if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
     mkdir -p "$ROOT/lib/modules/$KVER"
@@ -942,6 +960,13 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
     mkdir -p "$ROOT/boot"
     [ -f build/image/disk/BOOTX64.EFI ] \
         && cp build/image/disk/BOOTX64.EFI "$ROOT/boot/BOOTX64.EFI"
+    # The PARTUUID baked into that unified kernel image's command line.
+    # user/hlinstall.ad copies the UKI onto the target's ESP unchanged -- it
+    # cannot rewrite a PE section -- so it reads this file and creates the
+    # target's root partition WITH that GUID. Without it the installed disk
+    # boots looking for a partition that only exists on the build host.
+    [ -f build/image/disk/root.partuuid ] \
+        && cp build/image/disk/root.partuuid "$ROOT/boot/root.partuuid"
     cp -L "$(ls -1 /boot/vmlinuz-* | sort -V | tail -1)" "$ROOT/boot/vmlinuz"
     # The initramfs cannot contain the copy of itself we are about to build,
     # so the PREVIOUS one is staged.  Building twice is what makes the staged
@@ -949,7 +974,27 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
     [ -f "$OUT/initramfs.cpio.gz" ] \
         && cp "$OUT/initramfs.cpio.gz" "$ROOT/boot/initramfs.cpio.gz"
     install -m644 etc/rc.boot.installed "$ROOT/etc/rc.boot.installed"
-    echo "[image] staged the installer's boot files into /boot"
+    BOOT_SZ=$(du -sm "$ROOT/boot" | cut -f1)
+    echo "[image] staged the installer's boot files into /boot (${BOOT_SZ}M)"
+    # THE BOOT FILES COMPOUND, and the growth is silent until an ESP or a disk
+    # will not hold them. build/image/disk/BOOTX64.EFI carries the initramfs
+    # that was current when it was built; staging it here puts it INSIDE the
+    # next initramfs, whose copy then goes inside the next UKI. Measured on
+    # this tree: 36M -> 119M -> 285M over two turns of that loop.
+    #
+    # The install medium is meant to be built ONCE from a lean image:
+    #   scripts/hamlinux_image.sh            (no HAMLINUX_INSTALLER)
+    #   scripts/hamlinux_disk.sh             (makes the UKI)
+    #   HAMLINUX_INSTALLER=1 scripts/hamlinux_image.sh
+    # Going round again feeds the output back in.
+    if [ "$BOOT_SZ" -gt 128 ]; then
+        echo "[image] WARNING: /boot is ${BOOT_SZ}M. That is the compounding" >&2
+        echo "[image]          above: build/image/disk/BOOTX64.EFI already" >&2
+        echo "[image]          contains an initramfs that contains a UKI." >&2
+        echo "[image]          Reset it with a lean pass:" >&2
+        echo "[image]            rm -rf build/image/disk build/image/root/boot" >&2
+        echo "[image]            scripts/hamlinux_image.sh && scripts/hamlinux_disk.sh" >&2
+    fi
 fi
 
 # --- packing, and who owns what ------------------------------------------

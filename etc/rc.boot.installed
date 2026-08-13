@@ -58,8 +58,11 @@ echo 'rc.boot: network configured'
 #
 # The media themselves are found by ext4 volume LABEL, which is why this works
 # at all on a machine with more disks than the live boot had: the installed
-# root is /dev/vda2 here and the distribution disks are whatever the firmware
-# enumerated after it. A label travels with the filesystem; /dev/vdN does not.
+# root is whatever this machine calls the partition whose GPT GUID the kernel
+# command line names -- /dev/vda2 in QEMU, /dev/sda2 off a USB stick,
+# /dev/nvme0n1p2 on a laptop -- and the distribution disks are whatever the
+# firmware enumerated around it. A label travels with the filesystem and a
+# partition GUID travels with the partition; a /dev name travels with nothing.
 bind '#distro' /n/distro
 source '/etc/rc.distros'
 linux = ns clean {
