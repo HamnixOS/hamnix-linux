@@ -54,10 +54,83 @@ def write_cstr(fd: int32, s: Ptr[uint8]):
     sys_write(fd, s, n)
 
 
+# WHY EVERY LINE BELOW IS ALSO WRITTEN TO /dev/kmsg.
+#
+# PID 1's stdout is /dev/console, and /dev/console is the LAST `console=` on
+# the kernel command line -- ttyS0 on this image, a serial port that a laptop
+# does not display and mostly does not have. So on a real machine every word
+# this program has ever printed went into a wire that was not there, and a boot
+# that got all the way to hamsh looked exactly like one that died in the EFI
+# stub: a blinking cursor. That is what happened on the owner's laptop, and it
+# was read as "the boot failed" when nothing had yet been shown to fail.
+#
+# /dev/kmsg is the other end of printk, and printk goes to EVERY registered
+# console -- the serial port, the framebuffer console, and the `earlycon=efifb`
+# boot console that is the only thing printing before fbcon exists. So these
+# lines reach a physical screen.
+#
+# ONE write() PER MESSAGE. /dev/kmsg is record-oriented: each write is one log
+# record, and only the FIRST bytes of a record may carry the `<N>` priority. A
+# message assembled with several writes becomes several records, of which all
+# but the first are at the default priority and are therefore invisible at
+# loglevel=4 -- exactly the failure this whole file is here to stop. Hence the
+# buffer and kflush rather than a sequence of write_cstr calls.
+kmsg_fd: int32 = -1
+kbuf:    Array[512, uint8]
+klen:    uint64 = 0
+
+
+def kadd(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0 and klen < 511:
+        kbuf[klen] = s[i]
+        klen = klen + 1
+        i = i + 1
+    kbuf[klen] = 0
+
+
+def kflush():
+    if kmsg_fd >= 0 and klen > 0:
+        sys_write(kmsg_fd, &kbuf[0], klen)
+    klen = 0
+
+
+def open_kmsg():
+    # Called the moment /dev exists. Before that there is nothing to open, and
+    # the lines printed before it are still on the console.
+    kmsg_fd = sys_open_write(cast[Ptr[char]]("/dev/kmsg"))
+
+
 def say(msg: Ptr[uint8]):
+    # kmsg FIRST. Both copies land on the serial console -- printk writes there
+    # too -- and a printk emitted in the middle of this program's own write(2)
+    # cuts the line in half, which is how a gate that greps for a marker stops
+    # finding it. The printk copy is emitted atomically from the write below,
+    # so doing it first leaves the plain line intact behind it.
+    klen = 0
+    # <6> is KERN_INFO: shown at the loglevel=7 this image boots with, and
+    # kept out of the way of anyone who deliberately asked for a quiet boot.
+    kadd("<6>linuxinit: ")
+    kadd(msg)
+    kadd("\n")
+    kflush()
     write_cstr(1, "linuxinit: ")
     write_cstr(1, msg)
     write_cstr(1, "\n")
+
+
+def sayerr(msg: Ptr[uint8]):
+    # A say() that survives a quiet command line. <6> is dropped at the
+    # loglevel=4 an operator may have asked for; <3> is not, and the lines that
+    # go through here are the ones a person MUST see or be misled.
+    klen = 0
+    kadd("<3>linuxinit: ")
+    kadd(msg)
+    kadd("\n")
+    kflush()
+    write_cstr(2, "linuxinit: ")
+    write_cstr(2, msg)
+    write_cstr(2, "\n")
 
 
 def warn(what: Ptr[uint8]):
@@ -65,10 +138,22 @@ def warn(what: Ptr[uint8]):
     # /proc mounted by the initramfs, and /tmp is a convenience. Report the
     # reason and carry on; the rc scripts fail loudly if something they need is
     # genuinely absent.
+    n: int32 = sys_errstr(&errbuf[0], 128)
+    klen = 0
+    # <3> is KERN_ERR: a fault is shown even at the default loglevel=4, which
+    # suppresses everything less urgent. A boot that goes wrong says so on the
+    # screen whatever command line it was built with. kmsg first, for the
+    # interleaving reason given on say().
+    kadd("<3>linuxinit: warning: ")
+    kadd(what)
+    kadd(": ")
+    if n > 0:
+        kadd(&errbuf[0])
+    kadd("\n")
+    kflush()
     write_cstr(2, "linuxinit: warning: ")
     write_cstr(2, what)
     write_cstr(2, ": ")
-    n: int32 = sys_errstr(&errbuf[0], 128)
     if n > 0:
         write_cstr(2, &errbuf[0])
     write_cstr(2, "\n")
@@ -136,9 +221,15 @@ def put_dec(v: uint64):
 cmdline_buf: Array[2048, uint8]
 
 def cmdline_has_root() -> int32:
-    # 1 if the kernel command line carries `root=/dev/...`. Only an explicit
-    # device counts: LABEL= and UUID= need a device enumerator this line does
-    # not have, and guessing would mount the wrong filesystem rather than fail.
+    # 1 if the kernel command line carries a `root=` with anything after it.
+    #
+    # It used to insist on `root=/dev/...`, because nothing here could resolve
+    # anything else -- so an image whose command line said `root=PARTUUID=...`
+    # (the only kind that can be true on a machine this image has never seen)
+    # was read as "no root at all" and booted the initramfs in silence.
+    # user/linux-syscalls.c:sysroot_device resolves PARTUUID= and UUID= now,
+    # and says so by name when it cannot, which is the answer this test used to
+    # avoid needing.
     fd: int32 = sys_open(cast[Ptr[char]]("/proc/cmdline"))
     if fd < 0:
         return 0
@@ -154,10 +245,10 @@ def cmdline_has_root() -> int32:
                 and cmdline_buf[i+2] == 111 and cmdline_buf[i+3] == 116 \
                 and cmdline_buf[i+4] == 61:                  # "root="
             if i == 0 or cmdline_buf[i-1] == 32:
-                if cmdline_buf[i+5] == 47 and cmdline_buf[i+6] == 100 \
-                        and cmdline_buf[i+7] == 101 \
-                        and cmdline_buf[i+8] == 118 \
-                        and cmdline_buf[i+9] == 47:          # "/dev/"
+                # A value, not just the word. `root=` with nothing after it is
+                # not a root.
+                if cmdline_buf[i+5] != 32 and cmdline_buf[i+5] != 10 \
+                        and cmdline_buf[i+5] != 0:
                     return 1
         i = i + 1
     return 0
@@ -267,6 +358,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     bind_or_warn(cast[Ptr[char]]("/proc"),    cast[Ptr[char]]("#p"))
     bind_or_warn(cast[Ptr[char]]("/sys"),     cast[Ptr[char]]("#sys"))
     bind_or_warn(cast[Ptr[char]]("/dev"),     cast[Ptr[char]]("#c"))
+    # /dev exists, so the printk channel does. Everything from here is on the
+    # screen of a machine with no serial port -- including the banner above,
+    # repeated once so that "PID 1 is running" is visible even to someone who
+    # only ever sees the framebuffer.
+    open_kmsg()
+    say("Hamnix on Linux — PID 1 is running")
     bind_or_warn(cast[Ptr[char]]("/dev/pts"), cast[Ptr[char]]("#pts"))
     bind_or_warn(cast[Ptr[char]]("/srv"),     cast[Ptr[char]]("#s"))
     bind_or_warn(cast[Ptr[char]]("/n"),       cast[Ptr[char]]("#/"))
@@ -301,7 +398,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if cmdline_has_root() != 0:
         if sys_bind(cast[Ptr[char]]("/"), cast[Ptr[char]]("#sysroot"), 0) != 0:
             warn(cast[Ptr[uint8]]("bind '#sysroot' /"))
-            say("continuing on the initramfs root")
+            # WHAT IT COSTS, not just what failed. The machine still comes up,
+            # which is deliberate -- a shell that can look at the disks and run
+            # the installer is worth more than a dead screen -- but a system
+            # running out of the initramfs looks exactly like an installed one
+            # until the day it is rebooted and everything since the install is
+            # gone. user/linux-syscalls.c:sysroot_device has just printed the
+            # identifier it wanted and every partition it found instead.
+            sayerr("THE ROOT PARTITION NAMED ON THE COMMAND LINE WAS NOT FOUND.")
+            sayerr("this system is running FROM RAM: nothing you save will survive a reboot.")
         else:
             say("root filesystem online")
 
