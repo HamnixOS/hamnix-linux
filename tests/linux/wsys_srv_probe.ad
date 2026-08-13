@@ -33,6 +33,8 @@ extern def sys_close(fd: int32) -> int32
 extern def sys_wsys_srv_selftest() -> int32
 extern def sys_wsys_srv_sustain(ops_per_sec: int32, secs: int32) -> int32
 extern def sys_wsys_srv_mutate(victim_wid: int32) -> int32
+extern def sys_wsys_srv_attack_local(victim_wid: int32) -> int32
+extern def sys_wsys_alloc(pid: uint64) -> int32
 
 numbuf: Array[24, uint8]
 rbuf:   Array[256, uint8]
@@ -99,6 +101,28 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # checks anything.
     if argc > 2 and cast[Ptr[uint8]](argv[1])[0] == 109:
         return sys_wsys_srv_mutate(arg_int(cast[Ptr[uint8]](argv[2])))
+
+    # `local <wid>` -- THE SAME ATTACK WITH NO SERVER IN IT, which is the arm
+    # that is supposed to SUCCEED. A refusal gate that is green in every
+    # configuration proves nothing about mediation; the pair red-unrouted /
+    # green-routed is the entire case for the boundary. See
+    # hamwsys_srv_attack_local in user/linux-wsys.c.
+    if argc > 2 and cast[Ptr[uint8]](argv[1])[0] == 108:
+        return sys_wsys_srv_attack_local(arg_int(cast[Ptr[uint8]](argv[2])))
+
+    # `alloc <pid>` -- the host-owner-on-behalf path, which stamps a window
+    # against a pid the caller NAMES rather than its own. It exists here for
+    # one reason: owns_wid() is a parent-pid walk, so measuring what it answers
+    # needs a window whose owner is a process that can still fork -- and every
+    # other way of creating one stamps a process that is about to exit. Prints
+    # the wid.
+    if argc > 2 and cast[Ptr[uint8]](argv[1])[0] == 97:
+        w: int32 = sys_wsys_alloc(cast[uint64](arg_int(cast[Ptr[uint8]](argv[2]))))
+        putd(1, w)
+        puts(1, "\n")
+        if w < 2:
+            return 1
+        return 0
 
     if argc > 3 and cast[Ptr[uint8]](argv[1])[0] == 115:
         ops: int32 = arg_int(cast[Ptr[uint8]](argv[2]))

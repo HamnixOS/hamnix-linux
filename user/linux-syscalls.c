@@ -4262,6 +4262,10 @@ int32_t sys_wsys_srv_mutate(int32_t victim_wid)
 { return (int32_t)hamwsys_srv_mutate_selftest((int)victim_wid); }
 int32_t sys_wsys_srv_sustain(int32_t ops_per_sec, int32_t secs)
 { return (int32_t)hamwsys_srv_sustain((int)ops_per_sec, (int)secs); }
+/* The unrouted half of the identity attack: the same mutation with no server
+ * in it, which is the arm that MUST succeed.  See hamwsys_srv_attack_local. */
+int32_t sys_wsys_srv_attack_local(int32_t victim_wid)
+{ return (int32_t)hamwsys_srv_attack_local((int)victim_wid); }
 
 /* GPU presentation of a window frame. Unimplemented on purpose: the scene
  * compositor rasterizes in software (lib/hamui_host.ad's vk2d raster ops), so

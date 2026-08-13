@@ -217,6 +217,7 @@ int      hamwsys_srv_service(void);
 int      hamwsys_srv_selftest(void);
 int      hamwsys_srv_mutate_selftest(int victim_wid);
 int      hamwsys_srv_sustain(int ops_per_sec, int secs);
+int      hamwsys_srv_attack_local(int victim_wid);
 
 /* Did THIS process get turned away by the version refusal in shm_attach?
  * Its own experience, not a file another process wrote -- see

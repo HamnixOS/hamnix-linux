@@ -3043,6 +3043,19 @@ static int srv_enabled(void)
     return srv_flag;
 }
 
+/* HAMWSYS_SRV_TRACE=1 — one stderr line per routed mutation naming the caller
+ * and both permission answers.  Cached for the same reason srv_enabled is. */
+static int srv_trace_flag = -1;
+
+static int srv_trace(void)
+{
+    if (srv_trace_flag < 0) {
+        const char *e = getenv("HAMWSYS_SRV_TRACE");
+        srv_trace_flag = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return srv_trace_flag;
+}
+
 /* The in-process write, which is what a routed mutation ultimately becomes --
  * with the CALLER installed as the identity its permission checks are asked
  * about.  Defined far below; reached from srv_dispatch. */
@@ -3310,6 +3323,25 @@ static void srv_dispatch(struct wsrv_conn *c, const struct wsrv_hdr *h,
         }
         srv_n_write++;
         srv_as_caller(c->uid, c->pid);
+        /* WHAT THE TWO PREDICATES ACTUALLY ANSWER, ON THE SERVER, ABOUT THE
+         * CALLER.  Stage 2 flagged owns_wid()'s ppid walk as the sharp edge and
+         * could not check it: a single-uid gate's "stranger" IS the host owner,
+         * so hostowner() short-circuits and owns_wid() is never even reached.
+         * Reading the answer off the outside of the boundary cannot separate
+         * "owns_wid said no" from "hostowner said yes first", and those are
+         * opposite findings.  So the server says which one decided, from
+         * inside, where the caller identity is installed.  Off unless asked
+         * for: this is one fprintf per routed mutation and a drag makes ~800 a
+         * second. */
+        if (srv_trace()) {
+            struct wwin *tv = (kind == HAMWSYS_WIN_CTL) ? win_find(h->wid)
+                                                        : NULL;
+            fprintf(stderr, "wsrvtrace: caller uid=%u pid=%ld -> wid=%d "
+                            "ownerpid=%d hostowner=%d owns_wid=%d\n",
+                    (unsigned)c->uid, (long)c->pid, (int)h->wid,
+                    tv ? (int)tv->pid : -1, hostowner(),
+                    kind == HAMWSYS_WIN_CTL ? owns_wid(h->wid) : -1);
+        }
         int64_t rc = -EPERM;
         if (kind == HAMWSYS_WIN_CTL && !win_find(h->wid)) {
             rc = -ENOENT;
@@ -3938,6 +3970,97 @@ int hamwsys_srv_mutate_selftest(int victim_wid)
     printf("wsrvmu: the mediator ACCEPTED it (refused %llu -> %llu)\n",
            (unsigned long long)r0, (unsigned long long)r1);
     return fails + 1;
+}
+
+/* THE OTHER HALF OF THE ARGUMENT, AND THE ONLY ARM THAT IS SUPPOSED TO
+ * SUCCEED: the same attack with NO SERVER IN IT.
+ *
+ * hamwsys_srv_mutate_selftest above sends the routed message past the local
+ * check, which is what a hostile client does once it knows the protocol.  On
+ * its own that proves only that the mediator refuses — it does not prove the
+ * mediator is NECESSARY, because a gate that is green in every configuration
+ * says nothing about mediation.  The comparison is what says it, and this is
+ * the arm it compares against.
+ *
+ * So this does the identical mutation the identical way MINUS the boundary: it
+ * calls hamwsys_write_inner directly, in the attacker's own address space,
+ * having first told the check it IS the host owner.
+ *
+ * AND THAT IS ONE ASSIGNMENT, WHICH IS THE WHOLE POINT.  It does not delete a
+ * check, patch a binary, or reach for a debugger.  hostowner() reads
+ * `srv_caller.active ? srv_caller.uid : geteuid()` — a plain global — because
+ * a routed operation has to be able to install the caller it is acting for.
+ * In wsysd that global is written from SO_PEERCRED, which the client cannot
+ * forge.  In the CLIENT it is just a variable in the attacker's own address
+ * space, and so is every other input the in-process check consults.  An
+ * unmediated check does not become weak when it is attacked; it was never
+ * anything but advice, because the identity it asks about is supplied by the
+ * process being asked about.  Deleting the `if (!hostowner() && ...) return
+ * deny();` line would do just as well and takes one more keystroke.
+ *
+ * Routed, the identical assignment buys nothing: srv_dispatch overwrites
+ * srv_caller from the kernel's credentials on the far side of a socket, in a
+ * process the attacker does not run.
+ *
+ * It must SUCCEED (return 0) unrouted, and the routed arm must refuse the same
+ * mutation from the same uid.  Either result alone is unfalsifiable; the pair
+ * is the case for the server's existence.
+ *
+ * Returns 0 if the write landed (attack succeeded), 1 if it did not — so the
+ * gate can tell "the boundary held" from "the instrument was not looking",
+ * which for an attack tool are opposite findings that both print nothing. */
+int hamwsys_srv_attack_local(int victim_wid)
+{
+    if (shm_attach() < 0) {
+        fprintf(stderr, "wsrvlo: FAIL cannot attach the segment.\n");
+        return 1;
+    }
+    struct wwin *v = win_find(victim_wid);
+    if (!v) {
+        printf("wsrvlo: FAIL window %d does not exist -- an attack on nothing "
+               "is not a measurement\n", victim_wid);
+        return 1;
+    }
+    printf("wsrvlo: attacker uid %u pid %ld; window %d owner pid %d; segment "
+           "owner uid %u\n",
+           (unsigned)geteuid(), (long)getpid(), victim_wid, (int)v->pid,
+           (unsigned)(seg_owner_known ? seg_owner : (uid_t)-1));
+    /* The two answers the IN-PROCESS path would have got, printed before they
+     * are ignored.  They are what the routed arm re-asks about the caller, so
+     * seeing them both 0 here is what makes "the local check said no and the
+     * write happened anyway" a statement about enforcement rather than about
+     * a policy difference between the two paths. */
+    printf("wsrvlo: the in-process check says hostowner=%d owns_wid=%d -- i.e. "
+           "REFUSE\n", hostowner(), owns_wid(victim_wid));
+
+    /* ONE ASSIGNMENT.  See the comment above: this is the identity the
+     * in-process check reads, and in a client it is the attacker's own
+     * memory. */
+    srv_as_caller(seg_owner_known ? seg_owner : (uid_t)0, getpid());
+    printf("wsrvlo: after one assignment to the identity the check reads, the "
+           "SAME check says hostowner=%d owns_wid=%d -- i.e. ALLOW\n",
+           hostowner(), owns_wid(victim_wid));
+
+    const char verb[] = "title PWNED-BY-A-STRANGER";
+    struct hamwsys_file f;
+    memset(&f, 0, sizeof f);
+    f.leaf  = HAMWSYS_WIN_CTL;
+    f.wid   = victim_wid;
+    f.write = 1;
+    errno = 0;
+    int64_t rc = hamwsys_write_inner(&f, (const uint8_t *)verb,
+                                     (uint32_t)(sizeof verb - 1));
+    srv_as_self();
+    if (rc < 0) {
+        printf("wsrvlo: the unrouted write was refused (rc %lld) -- which means "
+               "something OTHER than the permission gate stopped it, because the "
+               "gate was skipped\n", (long long)rc);
+        return 1;
+    }
+    if (shm) shm->gen++;
+    printf("wsrvlo: the unrouted write LANDED (rc %lld). No mediator was "
+           "present: the store was the attacker's own.\n", (long long)rc);
+    return 0;
 }
 
 int hamwsys_srv_sustain(int ops_per_sec, int secs)
