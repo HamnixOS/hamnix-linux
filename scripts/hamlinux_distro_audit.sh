@@ -158,7 +158,7 @@ print()
 print("=== WHAT ONE PACKAGE REALLY COSTS ===")
 print("(its own size plus everything installed that nothing else depends on,")
 print(" excluding packages this project asks for by name in hamlinux_distro.sh)")
-for root in ("zenity", "firefox-esr"):
+for root in ("zenity", "yad", "firefox-esr"):
     if root not in by_name:
         continue
     c = attributable(root)
@@ -174,6 +174,11 @@ GROUPS = [
     ("LLVM / clang toolchain",  r"^(libllvm|libclang|llvm|clang|libz3)"),
     ("Firefox",                 r"^firefox"),
     ("Mesa / graphics drivers", r"^(mesa-|libgl|libegl|libgbm|libvulkan|libdrm|libglx)"),
+    # KEPT AFTER THE SWAP, deliberately: this row reads 0.0 MiB on an image
+    # built from the current hamlinux_distro.sh, and a row that says zero is
+    # how a regression announces itself. If a dependency ever drags WebKit
+    # back in, this line goes non-zero instead of hiding inside "everything
+    # else". The dialog is now yad, which is 0.6 MiB and lives under GTK.
     ("zenity's WebKit engine",  r"^(zenity|libwebkit|libjavascriptcore)"),
     ("Media codecs",            r"^(libav|libx26|libcodec2|libmfx|libvpx|libflite|gstreamer)"),
     ("GTK / GNOME stack",       r"^(libgtk|libgdk|adwaita|libpango|libatk|gtk-)"),

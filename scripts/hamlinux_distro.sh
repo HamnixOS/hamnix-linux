@@ -125,6 +125,52 @@
 #                  same boundary, as mkfs.ext4 above.  clang is a Debian binary
 #                  whichever directory it is copied into, so it lives with the
 #                  other Debian binaries rather than being renamed native.
+#
+#                  WHY THERE ARE THREE COPIES OF LLVM IN HERE, 494.6 MiB and
+#                  the largest single thing in the image -- a question that
+#                  went unanswered long enough to look like waste. It is not.
+#                  Each copy has a different reverse-dependency root, read out
+#                  of the image's own /var/lib/dpkg/status:
+#
+#                    libllvm14   104.9 MiB  <- clang -> clang-14. THE COMPILER.
+#                                This is `ac`'s second half. Debian's
+#                                unversioned `clang` metapackage in bookworm
+#                                is 14, so asking for `clang` asks for this.
+#                    libllvm15   111.9 MiB  <- libgl1-mesa-dri:amd64,
+#                                mesa-vulkan-drivers:amd64. MESA'S SHADER
+#                                COMPILER: llvmpipe and radeonsi JIT shaders
+#                                through LLVM, and it is a hard Depends.
+#                                Without it there is no software GL at all,
+#                                which is the path with no GPU.
+#                    libllvm15   122.0 MiB  <- libgl1-mesa-dri:i386,
+#                    (i386)      mesa-vulkan-drivers:i386. THE SAME THING FOR
+#                                32-BIT, which exists because Steam's
+#                                bootstrap is a 32-bit ELF and its games are
+#                                32-bit clients of the 32-bit Mesa.
+#
+#                  So: one compiler and two graphics drivers, and the two 15s
+#                  are different architectures of the same library and cannot
+#                  share a file. Nothing here is a duplicate of anything else,
+#                  and removing any of the three removes a capability the
+#                  image is supposed to have. THE VERSION SKEW IS DEBIAN'S,
+#                  not ours: bookworm's Mesa links LLVM 15 and bookworm's
+#                  default clang is 14.
+#
+#                  THE ONE COLLAPSE THAT EXISTS, priced and NOT taken: asking
+#                  for `clang-15` instead of `clang` would put the compiler on
+#                  the libllvm15 Mesa already installs, retiring libllvm14.
+#                  By bookworm's own Installed-Size fields that removes
+#                  219,518 KiB and adds 178,973 KiB -- a net 39.6 MiB, not the
+#                  104.9 it looks like, because libclang-common-15-dev is
+#                  68 MiB against 14's 20 and drags in libc6-i386 and
+#                  lib32stdc++6 (a 32-bit glibc, for multilib). 39.6 MiB to
+#                  move off Debian's default compiler and onto a version
+#                  nothing else in this project is tested against is a bad
+#                  trade, and it is written down here so it does not have to
+#                  be rediscovered. scripts/ac-link.sh would find clang-15 --
+#                  it probes clang, clang-19, clang-16, clang-15, clang-14 --
+#                  so the blocker is judgement, not plumbing.
+#
 #                  It costs about 300 MB on THIS volume (clang + libclang-cpp +
 #                  libllvm + libc6-dev + binutils), and it is baked in rather
 #                  than left to `apt install` because a machine that needs a
@@ -184,16 +230,21 @@ if [ "$I386" = 1 ]; then
     #           [ -x "$STEAMDIR/$needed" ] || new_installation=yes
     #       if [ -n "$new_installation" ]; then ... "$zenityish" --question ...
     #
-    #   and $zenityish is chosen by that script, not by us:
+    #   and $zenityish is chosen by that script, not by us -- READ OUT OF THE
+    #   IMAGE, because the version in circulation has no third branch at all:
     #
-    #       if [ -x /usr/bin/zenity ]; then zenityish=zenity
-    #       elif [ -x /usr/bin/yad ]; then zenityish=yad
-    #       else echo "Installation cancelled"; exit 1
+    #       if command -v zenity >/dev/null; then zenityish=zenity
+    #       else zenityish=yad; fi
+    #       if ! "$zenityish" --question --title=... ; then
+    #           echo "steam: Installation cancelled" >&2; exit 1
     #
-    #   So yad is a path Valve's packager already supports, and the failure
-    #   mode of installing NEITHER is a person meeting "Installation
-    #   cancelled" with no explanation.  A grep of OUR tree could never have
-    #   found any of this: the caller is a Debian shell script in here.
+    #   So yad is not a fallback the script tests for -- it is what the script
+    #   RUNS when zenity is absent, and if yad is absent too the failed exec
+    #   falls straight into "Installation cancelled".  Installing neither is a
+    #   dead end a person meets once with no explanation.  A grep of OUR tree
+    #   could never have found any of this: the caller is a Debian shell
+    #   script in here, which is why tests/linux/steam_consent_dialog.sh runs
+    #   the real one out of the real image rather than reasoning about it.
     #
     #   WHY IT IS REACHED AT ALL.  /usr/local/bin/hamnix-steam pre-stages
     #   exactly those four paths, so the INTENDED path never sees the dialog.
@@ -202,8 +253,10 @@ if [ "$I386" = 1 ]; then
     #   swap and not a deletion.
     #
     #   WHAT THE SWAP RETURNED, measured with scripts/hamlinux_distro_audit.sh
-    #   before and after a real rebuild: PENDING-MEASUREMENT.
-    #   zenity is 167 KiB and drags
+    #   on two real images built from this script, before and after:
+    #   2254.7 MiB occupied -> 2057.1 MiB, 197.6 MiB less software, 619
+    #   packages -> 565.  The FILE is 12.00 GiB either way and always will be
+    #   (see below).  zenity is 167 KiB and drags
     #   a WEB BROWSER in behind it: libwebkit2gtk-4.1-0 (90.4 MiB),
     #   libjavascriptcoregtk-4.1-0 (31.2), zenity-common (11.2) -- 133 MiB of
     #   core that nothing else installed depended on -- plus WebKit's media
@@ -211,6 +264,14 @@ if [ "$I386" = 1 ]; then
     #   gstreamer plugin sets; hunspell) for 195 MiB of private closure.  yad
     #   is 570 KiB against GTK alone.  libgtk-3-0 is in neither number:
     #   firefox-esr needs it and it stays whatever happens here.
+    #
+    #   AND THE OLD DIALOG WAS NOT WELL: run the gate against the previous
+    #   image and zenity does not draw at all -- it aborts inside GTK trying
+    #   to load the icon it was asked for, and steam prints "Installation
+    #   cancelled".  That was seen in the gate's harness, not in a booted VM,
+    #   so it is reported rather than claimed; yad rendered in the identical
+    #   harness.  It is a reason to prefer the smaller program, not the
+    #   reason: the size is the reason.
     #
     #   IT IS NOT THE BIGGEST THING IN HERE, and the two bigger ones are not
     #   bugs.  LLVM/clang is 494.6 MiB in three copies -- libllvm15:amd64 for
