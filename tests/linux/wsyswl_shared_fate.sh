@@ -347,7 +347,15 @@ else
     bad "THE PROPERTY FAILED: commits stopped at ${COMMITS_BEFORE} once other clients filled the server -- that is the Steam symptom"
 fi
 MAPFAIL=$(st map_alloc_failed); NOMAP=$(st drop_no_mapping)
-if [ "${MAPFAIL:-0}" = 0 ] && [ "${NOMAP:-0}" = 0 ]; then
+# st() seds $STATE with 2>/dev/null, and nothing above ever proved $STATE
+# exists -- the startup guard checks the SOCKET. So both reads come back
+# empty if the compositor has not written its state file yet, or wrote it
+# without these counters, and `${MAPFAIL:-0}` = 0 then took the ok() branch
+# whose text HARD-CODES the two zeroes it never read: "map_alloc_failed 0,
+# drop_no_mapping 0". A pass asserting numbers nobody obtained.
+if [ -z "$MAPFAIL" ] || [ -z "$NOMAP" ]; then
+    bad "UNREADABLE -- the compositor's state file ($STATE) gave no map_alloc_failed / drop_no_mapping (got '$MAPFAIL'/'$NOMAP'), so whether the victim's mapping table was touched is not a question this run can answer either way"
+elif [ "$MAPFAIL" = 0 ] && [ "$NOMAP" = 0 ]; then
     ok "and it did so without the victim's own mapping table being touched by anyone else (map_alloc_failed 0, drop_no_mapping 0)"
 else
     bad "the victim's connection lost mappings while other clients were loading the server (map_alloc_failed ${MAPFAIL}, drop_no_mapping ${NOMAP})"
