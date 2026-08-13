@@ -3361,6 +3361,17 @@ static int srv_send(uint16_t op, uint16_t flags, int32_t wid, uint32_t tag,
  * not the volume, so anything that returns no data does not wait.  A client
  * repaint is 3 ops; at 2.3 us that is 7 us of a 0.3 ms input-to-pixel budget
  * instead of 19 us. */
+/* THE SEND BLOCKS IF THE SERVER FALLS BEHIND, and that is a choice, not an
+ * oversight.  MSG_DONTWAIT here would turn a full socket buffer into a
+ * SILENTLY DISCARDED MUTATION -- a window that does not move, with nothing on
+ * anyone's stderr, which is the failure shape this device fights everywhere
+ * else.  Blocking makes the pressure visible as a stalled client instead.
+ * Measured, the pressure does not arise at any rate this system produces: 256
+ * back-to-back sends drain in 509 us with none lost, and the sustained arm
+ * runs 2050 ops/s -- the worst load ever measured here -- through a default
+ * SO_RCVBUF that holds thousands of these messages.  Stage 2 owns the
+ * question of what to do if that ever stops being true; today it would be a
+ * mechanism guarding against a condition that has not been observed. */
 static int srv_post(uint16_t op, int32_t wid, const void *pay, uint32_t len)
 {
     if (srv_fd < 0) return -1;
@@ -3627,20 +3638,28 @@ int hamwsys_srv_sustain(int ops_per_sec, int secs)
     if (ops_per_sec <= 0 || secs <= 0) return 1;
     /* Paced in 10 ms slices, which is the window the op census measures bursts
      * in: ops clumped inside 10 ms are the ones that would serialise against
-     * each other rather than spreading across a 16 ms frame. */
-    int per_slice = ops_per_sec / 100;
-    if (per_slice < 1) per_slice = 1;
+     * each other rather than spreading across a 16 ms frame.
+     *
+     * THE QUOTA IS CARRIED, NOT ROUNDED, and the first cut got that wrong.
+     * `ops_per_sec / 100` is integer division: 192 ops/s asked became 1 per
+     * slice and 100 ops/s DELIVERED, and the CPU cost of a rate 48% below the
+     * one named was then compared against that rate's budget. The rates in
+     * this design (192, 618, 2050) are none of them multiples of 100, so the
+     * error was present in every arm and largest in the tightest one. */
     uint64_t t0 = srv_now_us(), sent = 0;
     uint64_t end = t0 + (uint64_t)secs * 1000000u;
-    uint64_t slice = 0;
+    uint64_t slice = 0, owed = 0;
     for (;;) {
         uint64_t now = srv_now_us();
         if (now >= end) break;
         uint64_t due = t0 + slice * 10000u;
         if (now < due) { usleep((useconds_t)(due - now)); continue; }
-        for (int i = 0; i < per_slice; i++)
-            if (srv_post(WSRV_OP_NOP, 0, &i, sizeof i) == 0) sent++;
         slice++;
+        owed += (uint64_t)ops_per_sec;         /* per second... */
+        uint64_t n = owed / 100;               /* ...spent 100 slices a second */
+        owed -= n * 100;
+        for (uint64_t i = 0; i < n; i++)
+            if (srv_post(WSRV_OP_NOP, 0, &i, sizeof i) == 0) sent++;
     }
     uint64_t dt = srv_now_us() - t0;
     printf("wsrvsu: %llu ops in %llu us (%.0f ops/s asked, %.0f delivered)\n",

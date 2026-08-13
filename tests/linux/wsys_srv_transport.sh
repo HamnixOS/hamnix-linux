@@ -386,12 +386,37 @@ drive(){ # drive <ops/s> <budget%> <label>
     med="$(median3 "$s1" "$s2" "$s3")"
     d="$(awk -v a="$OMED" -v b="$med" 'BEGIN{printf "%.2f", b-a}')"
     stop_wsysd "$p"
+    grep -h wsrvsu "$W/sustain.$ops.out" | tail -3 | sed 's/^/srvtr:      /'
     note "$label ($ops ops/s): samples $s1% $s2% $s3% -> median $med%, delta over the flag-off idle baseline $d% (budget $budget%)"
     within_budget "$d" "$budget" "$label"
+    DRIVE_DELTA="$d"                          # read by the decomposition below
 }
-drive 192  0.12 "idle-rate traffic"
-drive 618  0.38 "mouse-paced drag"
-drive 2050 1.27 "worst measured load"
+DRIVE_DELTA=0
+drive 192  0.12 "idle-rate traffic";     D192="$DRIVE_DELTA"
+drive 618  0.38 "mouse-paced drag";      D618="$DRIVE_DELTA"
+drive 2050 1.27 "worst measured load";   D2050="$DRIVE_DELTA"
+
+# ==================================================================
+# E(iii). WHERE THE COST ACTUALLY IS -- fixed against marginal.
+# ==================================================================
+# Three rates over a 10x span decompose the cost into a per-message part and a
+# part that does not depend on the rate at all. That decomposition is the
+# whole finding: the design's budget was ops/s times a per-op cost, which has
+# no fixed term in it, so if the fixed term is large the budget is wrong in a
+# way no amount of making messages cheaper can fix.
+#
+# The load generator paces in 10 ms slices, so ALL THREE ARMS WAKE THE
+# COMPOSITOR THE SAME NUMBER OF TIMES -- 100 a second. Anything that scales
+# with the rate is the message; anything that does not is the wake.
+note "cost decomposition, from the three rates:"
+awk -v a="$D192" -v b="$D618" -v c="$D2050" -v q="$QUANT" 'BEGIN{
+    m = (c - a) / (2050 - 192);              # % of a core per op/s
+    fixed = a - m * 192;
+    printf "srvtr: ....   marginal: %.3f us of CPU per message\n", m*10000;
+    printf "srvtr: ....   fixed:    %.2f%% of a core, independent of the rate\n", fixed;
+    printf "srvtr: ....   (samples %.2f%% at 192, %.2f%% at 618, %.2f%% at 2050 ops/s;\n", a, b, c;
+    printf "srvtr: ....    instrument resolution %.3f%%)\n", q;
+}'
 
 echo "srvtr: $pass passed, $fail failed"
 [ "$fail" = 0 ]
