@@ -44,6 +44,15 @@ not a GPU on a machine this system booted. `docs/REAL_HARDWARE.md`,
 `docs/BOOT.md` and `docs/manual/` record real-hardware boots of **Hamnix 1.0's
 own kernel** and were copied wholesale; each now carries a banner saying so.
 
+**BEFORE YOU RUN A SINGLE GATE, BOOTSTRAP THE COMPILER.** A fresh worktree has
+no `adder` submodule and no `build/cutover/host_ac.elf`, and every
+`.ad`-building gate then fails instantly with "no host_ac.elf" — which looks
+like 40 broken gates and is one missing prerequisite. `git submodule update
+--init`, then `. scripts/_adder_cc.sh && adder_cc_bootstrap`; about two
+minutes. The full inventory of `tests/linux/` — which gates need a VM, which
+want the owner's display, and which of them lie in their summary line — is
+under **THE GATE INVENTORY** at the end of this section.
+
 ### THE WINDOW SYSTEM IS BECOMING A FILE SERVER — where that stands
 
 Four passes of it are in the tree (design, transport, mutations, caller
@@ -4423,6 +4432,82 @@ tests/linux/*.sh, tests/linux/*_probe.ad
 Host packages this needs, beyond the original list: `mmdebstrap`,
 `dosfstools`, `e2fsprogs`, `gdisk`, `parted`, `mtools`, `systemd-boot-efi`,
 `ovmf`, `socat`.
+
+### THE GATE INVENTORY — what is in `tests/linux/`, and what it takes to run it
+
+Written down here for the first time. A suite sweep ran 50 gates and produced
+this; none of it existed in the tree. The counts below were re-derived at
+`9e893e58` and the classification is mechanical, so it can be re-taken:
+
+```
+tests/linux/*.sh                                                    128
+  helpers, not gates                                                  4
+  need a VM (invoke qemu-system / hamlinux_image.sh / hamlinux_disk.sh)  41
+  display-blocked (touch /dev/dri/card0, /dev/fb0, DISPLAY=:0, xdotool) 10
+  run offscreen                                                       73
+```
+
+**THE FIRST THING YOU WILL HIT, AND IT IS NOT IN ANY DOCUMENT.** A fresh
+worktree has no checked-out `adder` submodule and no
+`build/cutover/host_ac.elf`, so **every `.ad`-building gate fails instantly
+with "no host_ac.elf"** — which reads like a broken gate and is a missing
+prerequisite. Two minutes fixes it:
+
+```
+git submodule update --init
+. scripts/_adder_cc.sh && adder_cc_bootstrap
+```
+
+**The 4 helpers are not gates and must not be counted as passes or failures:**
+`reap.sh`, `private_ns.sh` and `hamnix_x11session.sh` are *sourced* by other
+gates; `cpuprobe.sh` takes a `<pid>` argument and prints usage without one.
+A runner that globs `*.sh` will "run" all four and learn nothing.
+
+**The 41 VM gates are SLOW, NOT BLOCKED.** KVM is present on this host and
+they do run here: `pipelines.sh` built an image, booted it, and returned
+**13 PASS / 0 FAIL in 355 s**. Budget 10–25 minutes each and do not mistake
+the wait for a failure.
+
+**The 10 display-blocked gates** — these want the owner's real display, and
+the owner's desktop is up, so they are the ones to leave alone:
+`de_fps_gpu`, `de_fps_mate`, `hamnix_xdiag`, `runsweep_jail`,
+`steam_consent_dialog`, `steam_look`, `steam_probe`, `wsyswl_shared_fate`,
+`wsyswl_stall`, `x11_record_trace_selftest`.
+
+Two more, `steam_scroll_why.sh` and `xsnarf_ondevice.sh`, touch the display
+*and* boot a VM; they are counted in the 41 above, not the 10.
+
+**MOST `wsyswl_*` GATES ARE NOT DISPLAY-BLOCKED, despite the name.** They
+start a nested Xwayland on a private display (`:71`–`:74`, `:82`–`:87`), and
+`wsyswl_ceiling`, `wsyswl_conn_ceiling`, `wsyswl_rootless`,
+`wsyswl_two_browsers` and `wsyswl_wheel` all run offscreen. Only
+`wsyswl_shared_fate` and `wsyswl_stall` want the real one. Skipping the whole
+prefix on the strength of the name costs five working gates.
+
+#### Four standing facts about gates — none new, none previously written down
+
+* **`input_probe.sh` prints `ALL PASS` two lines above its own `FAIL`.**
+  Pre-existing, and confirmed unchanged at the control `b87174c3`. Do not
+  read the summary line; read the failures.
+* **`wsyswl_two_browsers.sh` is 12 PASS / 11 FAIL, and it is THE HOST, NOT
+  THE TREE.** `firefox-esr` aborts at startup on a GTK icon assertion,
+  byte-identically at the control. Nothing in this repository will fix it.
+* **`x11_geom_probe.sh` flakes under host load** — Chromium dies with a trace
+  trap. It has **no retry**, and passed 9/0 on a re-run. A single red from it
+  is not evidence.
+* **The `wsys_srv_*` gates used to share their scratch directory** and now
+  default to a per-run `mktemp -d`; `SRV_WORK` still pins it. See the transport
+  section below for why that mattered.
+
+**MEASURE ON A QUIET HOST.** The sweep found a gate failing purely because
+another agent was running an 8-way LLVM build; the same gate gave 7 PASS /
+0 FAIL solo at load 0.65. Gate any timing run on `loadavg < 2.0`.
+
+**AND BEWARE THE RUNNER, NOT ONLY THE GATES.** The sweep's own runner let the
+gates inherit stdin from the list file it was reading, and **they ate 21 of 33
+entries while it reported success** — 0 failures because 0 gates ran. Redirect
+stdin from `/dev/null` for every gate you launch, and check that the number of
+gates that reported is the number you asked for.
 
 ---
 
