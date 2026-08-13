@@ -974,7 +974,27 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
     [ -f "$OUT/initramfs.cpio.gz" ] \
         && cp "$OUT/initramfs.cpio.gz" "$ROOT/boot/initramfs.cpio.gz"
     install -m644 etc/rc.boot.installed "$ROOT/etc/rc.boot.installed"
-    echo "[image] staged the installer's boot files into /boot"
+    BOOT_SZ=$(du -sm "$ROOT/boot" | cut -f1)
+    echo "[image] staged the installer's boot files into /boot (${BOOT_SZ}M)"
+    # THE BOOT FILES COMPOUND, and the growth is silent until an ESP or a disk
+    # will not hold them. build/image/disk/BOOTX64.EFI carries the initramfs
+    # that was current when it was built; staging it here puts it INSIDE the
+    # next initramfs, whose copy then goes inside the next UKI. Measured on
+    # this tree: 36M -> 119M -> 285M over two turns of that loop.
+    #
+    # The install medium is meant to be built ONCE from a lean image:
+    #   scripts/hamlinux_image.sh            (no HAMLINUX_INSTALLER)
+    #   scripts/hamlinux_disk.sh             (makes the UKI)
+    #   HAMLINUX_INSTALLER=1 scripts/hamlinux_image.sh
+    # Going round again feeds the output back in.
+    if [ "$BOOT_SZ" -gt 128 ]; then
+        echo "[image] WARNING: /boot is ${BOOT_SZ}M. That is the compounding" >&2
+        echo "[image]          above: build/image/disk/BOOTX64.EFI already" >&2
+        echo "[image]          contains an initramfs that contains a UKI." >&2
+        echo "[image]          Reset it with a lean pass:" >&2
+        echo "[image]            rm -rf build/image/disk build/image/root/boot" >&2
+        echo "[image]            scripts/hamlinux_image.sh && scripts/hamlinux_disk.sh" >&2
+    fi
 fi
 
 # --- packing, and who owns what ------------------------------------------

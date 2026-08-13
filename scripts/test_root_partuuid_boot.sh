@@ -36,6 +36,14 @@
 # that is the mechanism being tested -- but the machine in the story is still
 # untested, and this gate cannot change that.
 #
+# REGISTRATION. This gate is not in ci_battery_manifest.txt because it needs
+# three things the sharded battery does not have: a writable /dev/kvm, OVMF
+# firmware, and a built 3 GB installed disk image (scripts/hamlinux_disk.sh),
+# which is minutes of work before the first assertion. It is the same category
+# as scripts/test_installer_full.sh and scripts/test_img_uefi_hamui.sh, which
+# are on-demand for the same reasons. Run it by hand after touching the boot
+# path: scripts/hamlinux_image.sh, scripts/hamlinux_disk.sh, then this.
+#
 # The kernel and initramfs are booted DIRECTLY (-kernel/-initrd) under OVMF
 # rather than through the disk's unified kernel image: same EFI handover, same
 # framebuffer, same PID 1, and the command line becomes a parameter of the
@@ -50,7 +58,7 @@ IMG="${HAMLINUX_IMAGE_DIR:-build/image}"
 DISK="${HAMLINUX_DISK:-$IMG/hamnix-linux.img}"
 OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
-WAIT="${WAIT:-12}"          # seconds before the screendump and the verdict
+WAIT="${WAIT:-6}"          # extra seconds after the frames, for the serial log
 export PATH="$PATH:/usr/sbin:/sbin"
 
 for f in "$IMG/vmlinuz" "$IMG/initramfs.cpio.gz" "$DISK" "$OVMF_CODE"; do
@@ -76,8 +84,15 @@ case "$REAL_PARTUUID" in
 esac
 echo "[$TAG] the disk's own root PARTUUID: $REAL_PARTUUID"
 
-# boot <name> <cmdline> — boot, screendump at $WAIT seconds, leave
-# $WORK/<name>.log and $WORK/<name>.ppm behind.
+# boot <name> <cmdline> — boot, screendump once a second through the early
+# boot, and leave $WORK/<name>.log and $WORK/<name>-t<N>.ppm behind.
+#
+# A SEQUENCE OF FRAMES, not one. The window in which the console is the only
+# thing on the screen is about two seconds wide: before it the firmware is
+# still drawing, after it the desktop has painted over everything. A single
+# screendump at a fixed moment would measure whichever of the three the host's
+# load happened to serve up, which is the kind of instrument that reports a
+# different answer on a busy machine.
 boot() {
     local name="$1" append="$2"
     local log="$WORK/$name.log" mon="$WORK/$name.mon" vars="$WORK/$name.vars"
@@ -93,10 +108,18 @@ boot() {
         -append "$append" </dev/null >"$log" 2>&1 &
     local pid=$!
     reap_add "$pid"
+    # EVERY THIRD OF A SECOND for the first four seconds. The window in which
+    # the console is the only thing on the screen closed in under a second on
+    # this host once the initramfs got smaller; a one-second sampler simply
+    # missed it, and reported "the screen was never blank" about a boot whose
+    # screen was blank.
+    local t
+    for t in $(seq 1 12); do
+        python3 -c 'import time; time.sleep(0.33)'
+        printf 'screendump %s\n' "$WORK/$name-t$t.ppm" \
+            | socat - "UNIX-CONNECT:$mon" >/dev/null 2>&1 || true
+    done
     sleep "$WAIT"
-    printf 'screendump %s\n' "$WORK/$name.ppm" \
-        | socat - "UNIX-CONNECT:$mon" >/dev/null 2>&1 || true
-    sleep 2
     kill "$pid" 2>/dev/null
     sleep 1
     kill -9 "$pid" 2>/dev/null
@@ -104,22 +127,52 @@ boot() {
     return 0
 }
 
-# How many distinct colours a screendump holds. 1 == a blank screen.
-colours() {
-    python3 - "$1" <<'PY'
+# classify <name> — read every frame of a boot and print one word per frame:
+#
+#   blank   exactly one colour. The blinking cursor.
+#   text    a mostly-black screen CARRYING A SCREENFUL of pixels in the
+#           console's own foreground colours (#ffffff for the EFI earlycon,
+#           #aaaaaa for fbcon). This is what "the kernel is talking to me"
+#           looks like.
+#   other   anything else: the firmware's own drawing, or the desktop.
+#
+# TWO THINGS THE FIRST TWO DRAFTS OF THIS GOT WRONG, both caught by the control
+# arm rather than by inspection:
+#   * Counting DISTINCT COLOURS alone is not enough: a frame of the desktop
+#     wallpaper mid-paint has three colours in it, and so does a screen of
+#     console text.
+#   * The FIRMWARE also writes white text on black. OVMF's own few lines came
+#     to 7109 white pixels; a screen of kernel log comes to 70000-odd. So the
+#     threshold is a screenful, not a line, and the control arm -- which must
+#     go blank -- is what proves the distinction is being made.
+classify() {
+    python3 - "$WORK" "$1" <<'PY'
 import sys, os
-p = sys.argv[1]
-if not os.path.exists(p) or os.path.getsize(p) == 0:
-    print(-1); raise SystemExit
-d = open(p, 'rb').read()
-i, f = 0, []
-while len(f) < 4:
-    while d[i:i+1].isspace(): i += 1
-    j = i
-    while not d[j:j+1].isspace(): j += 1
-    f.append(d[i:j]); i = j
-px = d[i+1:]
-print(len({px[k:k+3] for k in range(0, len(px), 3)}))
+from collections import Counter
+work, name = sys.argv[1], sys.argv[2]
+out = []
+for t in range(1, 13):
+    p = f"{work}/{name}-t{t}.ppm"
+    if not os.path.exists(p) or os.path.getsize(p) == 0:
+        out.append("none"); continue
+    d = open(p, 'rb').read()
+    i, f = 0, []
+    while len(f) < 4:
+        while d[i:i+1].isspace(): i += 1
+        j = i
+        while not d[j:j+1].isspace(): j += 1
+        f.append(d[i:j]); i = j
+    px = d[i+1:]
+    c = Counter(px[k:k+3] for k in range(0, len(px), 3))
+    total = sum(c.values())
+    ink = c[b'\xff\xff\xff'] + c[b'\xaa\xaa\xaa']
+    if len(c) == 1:
+        out.append("blank")
+    elif c[b"\x00\x00\x00"] > total * 0.5 and ink > 25000:
+        out.append("text")
+    else:
+        out.append("other")
+print(" ".join(out))
 PY
 }
 
@@ -132,26 +185,35 @@ NEW_HEAD="console=tty0 earlycon=efifb keep_bootcon console=ttyS0,115200"
 # --- A. the control: the old command line, and a screen with nothing on it ---
 echo "[$TAG] A. the OLD command line — the screen a person actually saw"
 boot old "$OLD_CMDLINE"
-OLD_COLOURS="$(colours "$WORK/old.ppm")"
-[ "$OLD_COLOURS" -lt 0 ] && verdict_inconclusive "$TAG" \
-    "no screendump from the control boot; the monitor socket or -vga std failed"
-echo "[$TAG]    framebuffer: $OLD_COLOURS distinct colours"
-if [ "$OLD_COLOURS" -ne 1 ]; then
-    verdict_fail "$TAG" \
-        "the CONTROL boot was supposed to leave a blank screen ($OLD_COLOURS colours). Either the old command line is no longer quiet, or this instrument is not measuring the screen -- and until it can show a blank screen, its non-blank answers mean nothing."
-fi
+OLD_FRAMES="$(classify old)"
+echo "[$TAG]    frames every 0.33 s: $OLD_FRAMES"
+case "$OLD_FRAMES" in
+    *none*none*none*) verdict_inconclusive "$TAG" \
+        "no screendumps from the control boot; the monitor socket or -vga std failed" ;;
+esac
 grep -aq "linuxinit:" "$WORK/old.log" || verdict_inconclusive "$TAG" \
-    "the control boot never reached PID 1 at all; the screen being blank says nothing"
-echo "[$TAG]    PASS: blank screen, while the serial port had the whole boot on it."
+    "the control boot never reached PID 1 at all; a blank screen would say nothing"
+case "$OLD_FRAMES" in
+    *blank*) ;;
+    *) verdict_fail "$TAG" \
+        "the CONTROL boot never showed a blank screen ($OLD_FRAMES). Either the old command line is no longer silent, or this instrument is not measuring what a person sees -- and until it has produced a blank frame, its non-blank answers mean nothing." ;;
+esac
+case "$OLD_FRAMES" in
+    *text*) verdict_fail "$TAG" \
+        "the CONTROL boot put console text on the screen ($OLD_FRAMES), so the old command line was not the silent one this whole change is about" ;;
+esac
+echo "[$TAG]    PASS: a blank screen, while the serial port had the entire boot on it."
 
 # --- B. the new command line, same kernel, same moment -----------------------
 echo "[$TAG] B. the NEW command line — earlycon + loglevel=7"
 boot new "$NEW_HEAD root=PARTUUID=$REAL_PARTUUID rw panic=-1 loglevel=7"
-NEW_COLOURS="$(colours "$WORK/new.ppm")"
-[ "$NEW_COLOURS" -lt 0 ] && verdict_inconclusive "$TAG" "no screendump from the second boot"
-echo "[$TAG]    framebuffer: $NEW_COLOURS distinct colours"
-[ "$NEW_COLOURS" -lt 2 ] && verdict_fail "$TAG" \
-    "the framebuffer is still one colour with earlycon=efifb and loglevel=7: nothing reached the screen."
+NEW_FRAMES="$(classify new)"
+echo "[$TAG]    frames every 0.33 s: $NEW_FRAMES"
+case "$NEW_FRAMES" in
+    *text*) ;;
+    *) verdict_fail "$TAG" \
+        "with earlycon=efifb and loglevel=7 the screen never carried console text ($NEW_FRAMES): nothing a person could read reached the framebuffer" ;;
+esac
 
 # --- C. the root, named by nothing that exists only in a VM ------------------
 if ! grep -aq "sysroot: root=PARTUUID=$REAL_PARTUUID is /dev/" "$WORK/new.log"; then
@@ -176,9 +238,13 @@ do
     grep -aq "$want" "$WORK/bogus.log" || verdict_fail "$TAG" \
         "a boot with an unfindable root never said \"$want\"; see $WORK/bogus.log"
 done
-BOGUS_COLOURS="$(colours "$WORK/bogus.ppm")"
-[ "$BOGUS_COLOURS" -ge 2 ] || verdict_fail "$TAG" \
-    "the failure was on the serial port but the screen stayed blank ($BOGUS_COLOURS colours)"
+BOGUS_FRAMES="$(classify bogus)"
+echo "[$TAG]    frames every 0.33 s: $BOGUS_FRAMES"
+case "$BOGUS_FRAMES" in
+    *text*) ;;
+    *) verdict_fail "$TAG" \
+        "the failure was on the serial port but never on the screen ($BOGUS_FRAMES), which is the half of this that matters on a machine with no serial port" ;;
+esac
 echo "[$TAG]    PASS: it named the identifier, listed the real partitions, and said the system is running from RAM."
 
 verdict_pass "$TAG" \
