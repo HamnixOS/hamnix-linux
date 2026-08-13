@@ -4678,6 +4678,61 @@ start a nested Xwayland on a private display (`:71`–`:74`, `:82`–`:87`), and
 `wsyswl_shared_fate` and `wsyswl_stall` want the real one. Skipping the whole
 prefix on the strength of the name costs five working gates.
 
+#### THE THIRD SWEEP — the offscreen gates at `fee1912f`, and two classifier errors
+
+An offscreen-only sweep ran at the tip to cover the five product commits of
+2026-08-13. Logs live under `/home/david/.hamnix-build/regress-tip-af16/`, not
+in this tree. Its classification was re-derived from scratch rather than taken
+from the inventory above, and **the inventory was wrong in both directions**.
+
+**THE `/dev/dri` KEY MISSES THE THREE MOST DANGEROUS GATES.** The inventory
+records that the previous sweep's classifier keyed on `qemu` and missed 39 gates
+reaching a VM through `hamlinux_image.sh`. There is a *second* miss of the same
+shape on the display side, and it is worse: `scanout_desktop.sh`,
+`scanout_try.sh` and `cap_power_ab.sh` name `/dev/dri` **zero times**. They take
+the card through
+
+```
+export HAMNIX_WSYSD_SCANOUT=1 HAMNIX_WSYSD_SCANOUT_SUPERVISED=1
+unset HAMFB_FILE           # a real display, not a file
+```
+
+so a `/dev/dri`-keyed classifier calls all three offscreen — which is how two of
+them got run by accident and one fired a 45-second watchdog. **Classify on
+`HAMNIX_WSYSD_SCANOUT|unset HAMFB_FILE|kms_watchdog\.sh|hangmaster` as well.**
+The grep is known to work: other gates *do* name `/dev/dri` and are found by it.
+Note `scanout_refuse.sh` sets `HAMNIX_WSYSD_SCANOUT=1` **without** the
+supervision flag and keeps `HAMFB_FILE` — it is the negative control, and it is
+safe: its whole assertion is that scanout refuses.
+
+**TWO GATES ARE MARKED VM-NEEDING THAT NEVER BOOT ONE.** `gates_are_private.sh`
+matches only because line 62 *greps for the string* `qemu-system`;
+`channel_covers_image.sh` only does `[ -d "$IMG" ]` and prints a message naming
+`hamlinux_image.sh`. Follow a reference **only from an exec or source position on
+a non-comment line** — the naive closure otherwise reaches 459 files, because
+`scripts/` cross-references itself in prose.
+
+**THERE ARE SIX HELPERS, NOT FOUR.** Besides `reap.sh`, `private_ns.sh`,
+`hamnix_x11session.sh` and `cpuprobe.sh`, two more take arguments and are not
+gates: `kms_watchdog.sh` (`usage: kms_watchdog.sh <seconds> <cmd> [args...]`,
+exits 2) and `runsweep_jail.sh` (`$1: unbound variable` at line 85 — it is *the
+inside of one smoke test*, run by `scripts/hamlinux_runsweep.sh` with four
+positional arguments plus a program). The inventory lists `runsweep_jail` as
+display-blocked; it is not, its `/dev/dri` mentions are comments describing what
+is **absent** inside the jail, and it runs on `HAMFB_FILE`. A runner that globs
+`*.sh` scores both as failures.
+
+**THE TWO CHANNEL GATES ARE A PREREQUISITE, NOT A RESULT.** A fresh worktree has
+no `build/repo/linux`, so `channel_compiles_adder.sh` and
+`channel_runs_desktop.sh` both exit 1 with `no channel at build/repo/linux`
+before asserting anything. These two enforce the owner's standing rule that
+everything built here reaches the package repository, so that red must never be
+left as the answer. `python3 scripts/hamlinux_packages.py --out build/repo
+--channel linux` stages it in one step and builds **no VM** — every
+`hamlinux_image.sh` in that file is a comment or a path it *parses*, and it has
+no `--sign` and no upload. With the channel staged (126 packages) both are green:
+**8/0** and **10/0**.
+
 #### Four standing facts about gates — none new, none previously written down
 
 * **`input_probe.sh` prints `ALL PASS` two lines above its own `FAIL`.**
