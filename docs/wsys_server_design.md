@@ -2016,25 +2016,82 @@ connections stop being one:
   correction in 7.1(5) above, and note that the read socket's fallback is gone
   entirely because it was handing out the window list.
 
-  **The number is now measured, and it is not the binding constraint.** A
+  ~~**The number is now measured, and it is not the binding constraint.** A
   routed desktop boot — `wsysd` + `hamdesktop` + `hampanelscene` +
   `hamappmenu -self` + a continuously dragging decorated window — holds **five
   connections, all on the mutation socket, one per window-owning program, and
-  zero on the read socket**, censused through `ss -xp` for the ESTABLISHED
-  server-side rows and `/proc/<pid>/fd` to resolve each peer inode to a pid
-  (the client end of an AF_UNIX connection has no address, so `/proc` is the
-  only place that association exists). One connection per program, so 64 is
-  reached at about 64 window-owning programs on a boot shaped like this one.
+  zero on the read socket**.~~
 
-  **What that measurement does NOT cover, and it is the half that could halve
-  the ceiling.** This boot does not go through `hamUId`, so it does not spawn
-  anything as `/bin/hamsh /etc/rc.de-user <prog>` — the path every window of an
-  *installed* desktop is created through, where an app costs a connection for
-  `hamsh` **and** one for the program unless the handoff adopts. The gate says
-  so rather than extrapolating. Until an installed-desktop census exists, the
-  honest statement is: **one connection per window-owning program measured, an
-  unmeasured factor of up to two on the installed spawn path, and 64 therefore
-  between ~32 and ~64 programs.**
+  > **THAT PARAGRAPH WAS WRONG IN ITS MOST-QUOTED CLAUSE, AND THE INSTRUMENT IS
+  > WHY. "Zero on the read socket" was a fact about a `break` statement.** The
+  > census resolves each peer socket inode to a pid by walking `/proc/<pid>/fd`,
+  > and it stopped at the FIRST matching descriptor in a process — so a client
+  > holding a mutation connection *and* a read connection was counted once, as
+  > the mutation one (dialled earlier, lower fd). `0965da0b` removed that break
+  > from `wsys_srv_deboot.sh`. The copy extracted into
+  > `tests/linux/wsys_conn_census.py` at `44412d29`, which is the one
+  > `wsys_srv_ceiling.sh` ARM F uses, **kept it for another ten hours** and is
+  > fixed here. Every read-socket number either gate printed before that is an
+  > undercount of exactly the quantity it existed to measure.
+  >
+  > **THE RECOUNT**, `tests/linux/wsys_conn_budget.sh`, on the tree carrying
+  > `7d24ef3c` and `e23ab06c`. Its ARM 0 runs the census in both spellings
+  > against the same instant of the same desktop and requires them to disagree,
+  > so no number below rests on an instrument that has not been shown to be able
+  > to produce it:
+  >
+  > | | mutation (`srv`) | read (`rd`) |
+  > |---|---|---|
+  > | `wsysd` alone | 0 | 0 |
+  > | `+ hamdesktop` | 1 | 1 |
+  > | `+ hampanelscene` (the chrome baseline) | **2** | **2** |
+  > | per application, thereafter | **+1** | **+1** |
+  >
+  > Both chrome components hold **both** sockets — `hamdesktop` fd 3 on `srv`
+  > and fd 4 on `rd`, `hampanelscene` the same — which is precisely the
+  > population the break erased. Read connections are not zero and never were.
+  >
+  > **The installed spawn path costs ONE connection per application, not two,
+  > and the reason is not adoption.** Applications were opened one at a time
+  > through the real shape, `hamsh <etc/rc.de-user.linux> <prog>`, with the rc
+  > byte-for-byte as the image installs it. The slope is 1.00 on each socket
+  > across seven applications, because **`hamsh` opens no window file and
+  > therefore never dials** — its own socket count is 0 at every point.
+  > `srv_adopt_inherited()` does **not** fire here (`HAMWSYS_SRV_FD` is in none
+  > of the spawned environments); `user/hamsh.ad`'s `_spawn_at` records why in
+  > its own words — the handoff was wired there and taken back out, because
+  > `lib/p9.ad`'s `_spawn_flags` calls `p9_closefrom(3)` in the child
+  > immediately before `execve` and closes every descriptor from 3 to 63. So the
+  > feared factor of two is absent for a reason unrelated to the mechanism built
+  > to prevent it, and it would reappear the day `hamsh` grew a `/dev/wsys` open.
+  >
+  > **So: 2 + 1×N, both sockets, and 64 is reached at ~62 concurrent
+  > applications.** That is FAR. The range, and where it moves: **~62 today;
+  > ~31 if `hamsh` ever dials on this path** (a single `/dev/wsys` open
+  > anywhere in the shell or its rc does it); **~20 if the chrome grows a
+  > connection per window** rather than per program. The two sockets run out
+  > *together* rather than one first, because both slopes are 1.00 — so the
+  > "two budgets, not one" framing above is true of the mechanism and, on this
+  > desktop, makes no difference to the arithmetic.
+  >
+  > **AND WHAT HAPPENS AT THE CAP IS NOT WHAT THE CEILING GATE'S FRAMING
+  > IMPLIES.** With the read table full and the mutation table roomy, an extra
+  > application **starts, prints "scene window ready" on its own stdout, and
+  > never appears on screen** — the window count is unchanged, and still
+  > unchanged eight seconds later, while the identical command against an empty
+  > table does get its window. The mechanism is `srv_route_exists()`: `e23ab06c`
+  > routed the WRITE open's existence question through the read server and
+  > `1fd21377` made a ceiling refusal there fail closed, so the per-window write
+  > opens return `ECONNREFUSED`. The `newwindow` mutation succeeded, so nothing
+  > in the application's own view failed. **The read ceiling is therefore not a
+  > degraded-enumeration boundary; it is a silent no-window boundary**, and it
+  > is the one thing here that is a defect rather than a measurement. The
+  > desktop itself survives — `wsysd`, `hamdesktop` and `hampanelscene` all keep
+  > running, the panel keeps painting its taskbar, and connections are reclaimed
+  > when the holders exit. `wsys_conn_budget.sh` ARM 4 is **expected red on that
+  > one arm** until an application refused at the read cap either gets its
+  > window or fails visibly; raising `WSRV_CONN_MAX` changes when it happens and
+  > not what happens, and must not be used to make the arm green.
 
   Raising it, if that is ever wanted, is **a recompile and not a version bump**:
   `WSRV_CONN_MAX` sizes `srv_conn[]`, `srd_conn[]` and two stack `epoll_event`
