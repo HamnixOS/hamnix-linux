@@ -1437,7 +1437,19 @@ then says EPERM" is the same channel with an extra hop; it is unreachable by the
 argument above, and is answered `ENOENT` anyway — a boundary resting on two
 predicates staying equal should not also announce it when they do not.
 
-### The gate — `tests/linux/wsys_srv_wopen.sh`, 68 passed / 0 failed
+**AND IT IS MEASURED ON THE READ PATH, not inferred from the shared function.**
+`wsys_wopen -r` does 200 refused READ opens of `<wid>/scene` in one process
+(`cat` cannot: one fork per open dominates the number): **live 82–83 µs, dead
+83–85 µs, worst |Δ| 2 %**, both arms `-2`.
+
+**THE NEGATIVE CONTROL, RUN.** A green timing arm is worthless until the
+instrument has produced a red one. Restore the two early exits — `if (owner ==
+0) return 0;` and `return 1` on a match, exactly the code this stage replaces —
+and the gate goes 69 / 0 → **67 / 2**, with the write arm at |Δ| 112–121 % and
+the **read** arm at 112–115 %. The read arm firing is the point: it measures a
+channel stage 10b did not introduce.
+
+### The gate — `tests/linux/wsys_srv_wopen.sh`, 69 passed / 0 failed
 
 Every arm is a **pair**, live wid against dead wid, for the reason
 `wsys_srv_open.sh` records: a gate that only asked "is the snooper refused"
@@ -2145,7 +2157,7 @@ still last and is now step 8 of 8.
    code separated a live wid from a dead one without reading a byte. See *What
    stage 10 measured* below for the table.
    **AND THE WRITE OPEN IS DONE TOO — stage 10b,
-   `tests/linux/wsys_srv_wopen.sh`, 68 passed / 0 failed.** Stage 10 recorded
+   `tests/linux/wsys_srv_wopen.sh`, 69 passed / 0 failed.** Stage 10 recorded
    that it could not be routed because the local rule was the CONNECTION
    question and the served answer was ANCESTRY; that was wrong, because
    `owns_wid()` only asks the connection question when `srv_caller.active`, and
