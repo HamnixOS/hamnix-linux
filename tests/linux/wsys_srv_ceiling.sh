@@ -379,10 +379,24 @@ for leaf in srv rd; do
         bad "on '$leaf' 70 dials produced kept=$kept first_refused=$firstr -- that is not a ceiling at $CAP"
     fi
 done
-if [ "$(f armA.rd | sed -n 's/.*kept \([0-9]*\).*/\1/p')" = "$CAP" ]; then
-    ok "the read server's ceiling is exactly WSRV_CONN_MAX=$CAP and it is SEPARATE from the mutation socket's -- a desktop has two budgets, not one"
+# THIS ASSERTION USED TO READ `= $CAP` AND THE ROUTING WORK MADE IT WRONG.
+# It assumed the read table was EMPTY when the fill started -- true when it was
+# written, because nothing but an enumerating client dialled the read server.
+# 7d24ef3c routed EXISTENCE for nine read opens and e23ab06c routed the WRITE
+# open's existence question through the same server, so wsys_hold -- a window
+# holder that never reads a list -- now holds a read connection before ARM A
+# begins, and the fill can only keep 63. The old spelling turned "the ceiling
+# is where it always was, and the desktop's own baseline moved" into "the read
+# server kept 63, not 64", which points at the server instead of at the change.
+# The mutation half of this arm already reasoned correctly ("kept is the cap
+# MINUS whatever the desktop is already holding"); this is that reasoning,
+# applied to the socket the last two merges actually moved.
+RDKEPT="$(f armA.rd | sed -n 's/.*kept \([0-9]*\).*/\1/p')"
+RDFIRST="$(f armA.rd | sed -n 's/.*first_refused \([0-9A-Za-z]*\).*/\1/p')"
+if [ -n "$RDKEPT" ] && [ "$RDFIRST" = "$((RDKEPT + 1))" ] && [ "$RDKEPT" -le "$CAP" ]; then
+    ok "the read server's ceiling is WSRV_CONN_MAX=$CAP and it is SEPARATE from the mutation socket's -- a desktop has two budgets, not one. This fill kept $RDKEPT, so $((CAP - RDKEPT)) read connection(s) were already held when it started; see tests/linux/wsys_conn_budget.sh for whose."
 else
-    bad "the read server kept $(f armA.rd | sed -n 's/.*kept \([0-9]*\).*/\1/p'), not $CAP"
+    bad "the read server kept $RDKEPT and first refused #$RDFIRST, which is not a ceiling at all -- the two should differ by exactly one"
 fi
 
 # ---------- the instrument, before any 'empty' is scored -----------------
@@ -458,7 +472,8 @@ fi
 if [ "${SRVN:-0}" -gt 0 ]; then
     PER="$(awk -v s="$SRVN" -v n="$(f armF.progs | wc -w)" 'BEGIN{if(n)printf "%.2f", s/n; else print "?"}')"
     note "  $PER mutation connections per window-owning program on this boot"
-    note "  AT THAT RATE the cap of $CAP is reached at about $((CAP * 1)) such programs -- and an INSTALLED desktop spawns each app as \`/bin/hamsh /etc/rc.de-user <prog>\`, so an app costs a connection for hamsh AND one for the program unless the handoff adopts. This boot does not go through hamUId and therefore does NOT measure that doubling; it is the one number ARM F cannot supply."
+    note "  THE NUMBERS THIS ARM USED TO EXTRAPOLATE FROM WERE UNDERCOUNTS, and the fix is not in this file. tests/linux/wsys_conn_census.py -- the census this arm calls -- carried the same \`break\` that tests/linux/wsys_srv_deboot.sh had already been fixed for: it stopped at the first matching descriptor in a process, so a client holding BOTH a mutation and a read connection counted once. Every 'armF.rd' this gate printed before that was fixed counted only processes holding a read connection and NO mutation one, which is the wrong half of a desktop."
+    note "  AND THE DOUBLING THIS ARM SAID IT COULD NOT MEASURE HAS BEEN MEASURED, in tests/linux/wsys_conn_budget.sh, through the real \`hamsh <rc.de-user> <prog>\` shape: it does NOT happen. An application costs 1.00 connection on each socket, because hamsh opens no window file and never dials -- not because the handoff adopts, which was measured NOT to fire on this path. Chrome baseline 2+2, slope 1+1, so the cap of $CAP is reached at about 62 concurrent applications."
 fi
 
 echo
