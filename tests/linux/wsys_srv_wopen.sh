@@ -81,6 +81,18 @@
 # line from a read-open crossing, so "the write open was routed" cannot be
 # satisfied by the read open next to it.
 #
+# THE NEGATIVE CONTROL, RUN AND WRITTEN DOWN, because a zero from an instrument
+# nobody has shown can produce a non-zero is not a finding. Restore the two early
+# exits in owns_wid_ancestry() -- `if (owner == 0) return 0;` and `return 1` on a
+# match, which is exactly the code stage 10b replaces -- and this file goes from
+# 69 passed / 0 failed to 67 / 2, with BOTH timing arms firing:
+#
+#   write open   live 82-84 us, dead 37-39 us   |delta| 112-121% over five reps
+#   READ  open   live 84-89 us, dead 39-41 us   |delta| 112-115% over three reps
+#
+# The read arm matters most: it is the one measuring a channel this stage did not
+# introduce. Nine READ opens have answered on this predicate since 7d24ef3c.
+#
 # WHY TWO UIDS: identical to wsys_srv_open.sh. The policy grants the host owner
 # everything, so a single-uid gate's "stranger" IS the host owner.
 #
@@ -285,6 +297,37 @@ if [ "${1:-}" = "--inner" ]; then
         fi
     done
     cp "$W/t.a.1" "$W/t.dead.1"; cp "$W/t.b.1" "$W/t.live.1"
+
+    # THE SAME MEASUREMENT ON THE READ OPEN, because the channel was never the
+    # write open's. owns_wid_ancestry() is the predicate stage 10 put behind the
+    # nine ROUTED READ opens, so the stopwatch worked on `cat` from the day
+    # 7d24ef3c landed -- and "it is fixed for reads too" must be measured rather
+    # than reasoned from the two paths sharing a function. `scene` and not `ctl`:
+    # wid/ctl's READ is stage 9's srv_route_read and does not go through the
+    # existence question at all.
+    RARGS_L=(); RARGS_D=()
+    for _ in $(seq 1 $TN); do
+        RARGS_L+=("/dev/wsys/$VWID/scene"); RARGS_D+=("/dev/wsys/$DWID/scene")
+    done
+    as 1002 env HAMWSYS_SERVER=1 "$BIN/wsys_wopen" -r "${RARGS_L[@]}" \
+        >"$W/tr.warm" 2>/dev/null            # warm-up, discarded
+    for rep in 1 2 3; do
+        if [ $((rep % 2)) = 1 ]; then A=("${RARGS_D[@]}"); B=("${RARGS_L[@]}")
+        else                         A=("${RARGS_L[@]}"); B=("${RARGS_D[@]}"); fi
+        t0=$(date +%s%N)
+        as 1002 env HAMWSYS_SERVER=1 "$BIN/wsys_wopen" -r "${A[@]}" \
+            >"$W/tr.a.$rep" 2>/dev/null
+        t1=$(date +%s%N)
+        as 1002 env HAMWSYS_SERVER=1 "$BIN/wsys_wopen" -r "${B[@]}" \
+            >"$W/tr.b.$rep" 2>/dev/null
+        t2=$(date +%s%N)
+        if [ $((rep % 2)) = 1 ]; then
+            echo "== rtiming$rep n=$TN live_ns=$((t2-t1)) dead_ns=$((t1-t0))"
+        else
+            echo "== rtiming$rep n=$TN live_ns=$((t1-t0)) dead_ns=$((t2-t1))"
+        fi
+    done
+    echo "== rrc live=$(sed -n '1s/^WOPEN \(-\?[0-9]*\) .*/\1/p' "$W/tr.b.1") dead=$(sed -n '1s/^WOPEN \(-\?[0-9]*\) .*/\1/p' "$W/tr.a.1")"
     echo "== timingvals live=$(sort -u "$W/t.live.1" | sed 's/ .*//;s/WOPEN //' \
             | tr '\n' ',') dead=$(sort -u "$W/t.dead.1" | sed 's/ .*//;s/WOPEN //' \
             | tr '\n' ',')"
@@ -496,6 +539,32 @@ if [ "$worst" -le 25 ]; then
     ok "the routed refusal takes the same time for a live window as for a dead one (worst |delta| across five scored reps: ${worst}%, on 200 refused opens each). IT DID NOT BEFORE THIS STAGE, and the reason is worth keeping: owns_wid_ancestry() used to return the moment win_find() came back NULL, so a DEAD wid cost zero /proc/<pid>/stat reads and a LIVE one cost up to eight -- measured at 93 us against 46 us per refused open, a 2x separation on a path whose errno was already identical. That channel was NOT introduced by routing the write open; stage 10 put the same predicate behind the nine READ opens, so the stopwatch worked on \`cat\` from the day it landed. The walk is now unconditional and its length depends on the CALLER's own ancestry, which the caller already knows. WHAT THIS DOES NOT COVER: win_find() itself still scans the table and returns early on a hit, so a live wid's scan is shorter than a dead one's by some tens of nanoseconds of memory compare -- three orders below what this instrument or any of its round trips can see, and in the OPPOSITE direction to the channel just closed."
 else
     bad "the routed refusal is ${worst}% slower for a live window than a dead one -- the errno is closed and the stopwatch is not. NOTE THE BOUND: this is a shell-timed wall clock over 200 opens and it cannot see a difference smaller than run-to-run noise; a FAIL here is real, a PASS bounds the channel rather than eliminating it."
+fi
+
+# ---------- THE SAME STOPWATCH ON THE READ OPEN --------------------------
+RRC="$(f rrc)"
+note "THE READ OPEN, MEASURED THE SAME WAY. The timing channel was in owns_wid_ancestry(), which stage 10 put behind nine ROUTED READ opens -- so it was never the write open's channel and 'it is closed for reads too' must be measured. 200 refused READ opens of <wid>/scene per arm, warm-up discarded, order alternating. Errnos on that path: $RRC"
+rworst=0; rseen=0
+for rep in 1 2 3; do
+    line="$(f "rtiming$rep")"
+    LN="$(printf '%s' "$line" | sed -n 's/.*live_ns=\([0-9]*\).*/\1/p')"
+    DN="$(printf '%s' "$line" | sed -n 's/.*dead_ns=\([0-9]*\).*/\1/p')"
+    if [ -z "$LN" ] || [ -z "$DN" ] || [ "$LN" = 0 ] || [ "$DN" = 0 ]; then
+        bad "read-path timing rep $rep produced no usable numbers ($line)"
+        continue
+    fi
+    rseen=1
+    LU=$((LN / 200000)); DU=$((DN / 200000))
+    d=$((LN - DN)); [ "$d" -lt 0 ] && d=$((-d))
+    small=$LN; [ "$DN" -lt "$small" ] && small=$DN
+    pct=$((d * 100 / small))
+    note "  rep$rep: live ${LU} us/open, dead ${DU} us/open, |delta| ${pct}%"
+    [ "$pct" -gt "$rworst" ] && rworst=$pct
+done
+if [ "$rseen" = 1 ] && [ "$rworst" -le 25 ]; then
+    ok "the ROUTED READ open's refusal also takes the same time for a live window as for a dead one (worst |delta| ${rworst}% over three reps). The fix is in the shared predicate, and this is the arm that says so from outside rather than from the source."
+elif [ "$rseen" = 1 ]; then
+    bad "the routed READ open is ${rworst}% slower for a live window than a dead one -- stage 10's nine read leaves still answer the existence question with a stopwatch"
 fi
 
 # ---------- THE ARMS THAT MAKE "IT WAS ROUTED" VISIBLE FROM OUTSIDE ------
