@@ -14,17 +14,28 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Landed in the tree, NOT yet on an installed machine. This section exists
-because of the invariant above: work that has landed but not shipped is
-exactly the state in which "we fixed that" and "you have that fix" quietly
-stop meaning the same thing, so the gap is written down rather than carried
-in someone's head.
+Nothing yet. Work lands here between releases; if this section is empty, the
+tree and the channel agree.
 
-Everything below this heading and above `## 1.0.22` is in the tree and is
-**not** on `https://255.one/`. The 1.0.22 candidate is the tree at the commit
-that published it; each item here was merged after that commit, checked by
-ancestry rather than by date, because two of them landed the same hour the
-release did and on the other side of the cut.
+## 1.0.23 — 2026-08-13
+
+**PUBLISHED and verified as served**: the live index at `https://255.one/`
+reports 1.0.23 across all 126 packages, its signature verifies against the trust
+root installed machines already carry, and `hamnix-desktop-1.0.23.tar.gz`
+fetched from the site is byte-identical to the gated build. Gated on freshly
+built artifacts — the image root and the channel were rebuilt from this commit
+first, because a day-old pair passes the coverage gate while saying nothing
+about the tree. `channel_covers_image` 8/0, `channel_runs_desktop` 10/0,
+`channel_compiles_adder` 7/0.
+
+**Known issues shipped knowingly** — see the end of this section for the
+window-system boundary, which is inert on this line and could not receive its
+own switch even if something set it.
+
+Everything below this heading and above `## 1.0.22` is **on** the channel now.
+Each item was merged after the 1.0.22 candidate, placed by ancestry rather than
+by date, because two of them landed the same hour that release published and on
+the other side of the cut.
 
 ### `ls` on a plain file printed the file's CONTENTS
 
