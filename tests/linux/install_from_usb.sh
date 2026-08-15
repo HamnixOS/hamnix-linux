@@ -85,6 +85,28 @@
 # at 146649bd, rva=0 size=0 -- so he must turn Secure Boot off, and no VM can
 # tell him that).
 
+# WHERE THIS STANDS, MEASURED (three boots under OVMF, ~20 min): 33 PASSED, 2 FAILED.
+#
+# GREEN, and this is the whole loop the owner asked for, minus one step:
+#   * the live medium boots as usb-storage on xHCI and switches root (not RAM)
+#   * the installer finds sgdisk/mkfs on the MEDIUM with no Debian disk anywhere
+#   * it partitions a blank NVMe, makes both filesystems, copies the system,
+#     writes /EFI/BOOT/BOOTX64.EFI onto the target ESP and prints
+#     "install complete"
+#   * with the USB DETACHED the machine boots its own disk, resolving
+#     root=PARTUUID to /dev/nvme0n1p2
+#   * it reaches 255.one over TLS and AUTHENTICATES the index (126 packages)
+#   * it reboots and phase 1's marker is still on the disk (so the root really
+#     is persistent), and it goes all the way to `rc.boot: up` after the update
+#
+# RED, and both reds are ONE defect: `hpm update` is a NO-OP on a freshly
+# installed machine. The index authenticates and then there is nothing to
+# upgrade, because scripts/hamlinux_image.sh creates /var/lib/hpm as an EMPTY
+# DIRECTORY and no one ever writes installed.json. The second red (no package
+# list to compare after the reboot) is the same hole seen from the other end.
+# See the commit that added this paragraph for why it is not fixed here rather
+# than guessed at.
+
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && cd .. && pwd)"
 cd "$PROJ_ROOT"
