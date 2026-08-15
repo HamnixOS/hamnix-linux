@@ -393,6 +393,37 @@ sudo dd if=build/hamnix-installer.img of=$USB bs=4M conv=fsync status=progress
 sync
 ```
 
+#### After the dd: move the backup GPT to the end of the stick
+
+The image is 4 GiB and a USB stick is not. `dd` copies the image's GPT
+verbatim, so the **backup** GPT header lands 4 GiB in — where the image
+ends — rather than in the last sector of the stick. On the owner's first
+real boot, 2026-08-15, the kernel said so and booted anyway:
+
+```
+GPT: Primary header thinks Alt. header is not at the end of the disk
+GPT:8388607 != 60715007
+```
+
+**This is documented rather than repaired, and the reason is what a repair
+would have to be.** The only place with both the disk and the true size is
+the machine the stick is plugged into, so an automatic fix means the medium
+**writing to the device it booted from, during its own first boot** — a
+write to a removable disk that nobody asked for, on the one medium a person
+is most likely to pull out mid-operation. Nothing in this line does that.
+Nor does the stale backup cost anything at boot: the kernel reads the
+primary header, both partitions are correct, and `/bin/install` repartitions
+the *target* disk from scratch and never consults the medium's table. The
+one thing it costs is a recovery tool that restores from the backup getting
+a 4 GiB layout.
+
+One command on the build host fixes it for good, right after the `dd`:
+
+```sh
+sudo sgdisk -e $USB     # move the backup GPT to the last sector
+sudo partprobe $USB
+```
+
 ### Write the image — other operating systems
 
 **macOS:**

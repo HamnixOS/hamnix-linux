@@ -1034,6 +1034,110 @@ int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
     return rc64(n);
 }
 
+/* THE CONSOLE MIRROR, and why a shipped medium cannot work without it.
+ *
+ * /dev/console is ONE tty: the kernel points it at the LAST `console=` on the
+ * command line and writes to it go there and nowhere else. printk is the only
+ * thing that fans out to every registered console, which is why linuxinit
+ * echoes its own lines to /dev/kmsg (see the long note in user/linuxinit.ad).
+ *
+ * That trick stops at the exec. hamsh, /etc/rc.boot, and every program the rc
+ * runs write to the descriptor they inherited -- /dev/console -- and nothing
+ * copies those bytes anywhere. On the owner's laptop, 2026-08-15, that was the
+ * whole failure: PID 1's lines reached the framebuffer through kmsg, it printed
+ * "namespace ready -- exec /bin/hamsh /etc/rc.boot", and then the screen stopped
+ * changing because /dev/console was ttyS0 and the machine has no serial port.
+ * The boot was fine. It was TALKING INTO A WIRE THAT WAS NOT THERE.
+ *
+ * So the shipped command line now ends `console=ttyS0,115200 console=tty0`:
+ * /dev/console is the SCREEN, which is the only channel a laptop has and the
+ * only one a person can type back into. That alone would have blinded every
+ * gate in this tree, all of which read the serial port -- so this is the other
+ * half. When the console is split like that, a write to fd 1 or 2 that is
+ * really going to /dev/console is copied to the serial port as well.
+ *
+ * WHY THIS AND NOT THE ALTERNATIVES:
+ *   * A gate-only HAMLINUX_CMDLINE override was rejected because the command
+ *     line is baked into a PE section of the UKI, and user/hlinstall.ad copies
+ *     THAT VERY UKI onto the target's ESP. An override would mean no gate ever
+ *     boots the console arrangement that ships, on the medium or on the machine
+ *     installed from it -- the exact class of gap that let this bug reach metal.
+ *   * Mirroring to /dev/kmsg instead of the serial port would reach the gate
+ *     (printk goes to ttyS0) but ALSO to tty0, so every line would be drawn on
+ *     the screen twice. The serial port is the one console the screen is not.
+ *   * Teaching hamsh to mirror was rejected because hamsh is not the writer:
+ *     `cat /proc/partitions`, `ls`, and `install --auto` all write for
+ *     themselves. This is the one choke point every Adder program passes.
+ *
+ * WHAT IT DELIBERATELY DOES NOT TOUCH. The rdev test is the whole discipline:
+ * only fd 5:1, the console device itself, is mirrored. `cmd > file`, a pipe, a
+ * terminal window's pty and a socket all have other rdevs and are left alone,
+ * so a redirect still puts its bytes in exactly one place. And when the last
+ * `console=` IS the serial port -- every `-kernel` developer boot in
+ * tests/linux -- the mirror stays off and nothing changes at all.
+ *
+ * COST when it is on: one fstat per write to fd 1/2. It cannot be cached per
+ * descriptor because hamsh redirects a CHILD's fd 1 after the fork, and a
+ * cached "this is the console" would then copy a redirected file's bytes onto
+ * the serial port. */
+static int consmirror_fd = -2;          /* -2 undecided, -1 off, else the port */
+
+/* RETRIED, NOT LATCHED, WHILE THE ANSWER IS STILL UNKNOWABLE. linuxinit prints
+ * its first lines before it has bound /proc or /dev, so the very first console
+ * write cannot read /proc/cmdline and cannot open a tty. Deciding "off" there
+ * would turn the mirror off for the rest of that process -- and in PID 1 that
+ * is the whole boot. So a missing /proc or a missing device node leaves the
+ * decision open and the next write asks again; only a command line that has
+ * been READ and says no is final. The retry is bounded so a machine with a
+ * serial console named on the command line but no device node for it does not
+ * pay an open(2) on every console write for ever. */
+static int consmirror_tries = 0;
+
+static void consmirror_setup(void)
+{
+    char cmd[4096];
+    if (++consmirror_tries > 32) { consmirror_fd = -1; return; }
+    int f = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+    if (f < 0) return;                          /* no /proc yet: ask again */
+    ssize_t n = read(f, cmd, sizeof cmd - 1);
+    close(f);
+    if (n <= 0) return;
+    cmd[n] = '\0';
+    consmirror_fd = -1;                         /* from here the answer is real */
+
+    /* The LAST console= is what /dev/console follows; the last serial one is
+     * where the gates listen. Both are read in one pass. */
+    char last[64] = "", ser[64] = "";
+    for (char *p = strtok(cmd, " \t\r\n"); p; p = strtok(NULL, " \t\r\n")) {
+        if (strncmp(p, "console=", 8) != 0) continue;
+        snprintf(last, sizeof last, "%s", p + 8);
+        if (strncmp(p + 8, "ttyS", 4) == 0)
+            snprintf(ser, sizeof ser, "%s", p + 8);
+    }
+    if (ser[0] == '\0') return;                 /* no serial console to mirror to */
+    if (strncmp(last, "ttyS", 4) == 0) return;  /* /dev/console already IS it */
+
+    char *comma = strchr(ser, ',');
+    if (comma) *comma = '\0';
+    char path[80];
+    snprintf(path, sizeof path, "/dev/%s", ser);
+    int r = open(path, O_WRONLY | O_NOCTTY | O_CLOEXEC);
+    if (r < 0) { consmirror_fd = -2; return; }  /* no node yet: ask again */
+    consmirror_fd = r;
+}
+
+static void consmirror(int fd, const uint8_t *buf, uint64_t count)
+{
+    if (count == 0) return;
+    if (consmirror_fd == -2) consmirror_setup();
+    if (consmirror_fd < 0) return;
+    struct stat st;
+    if (fstat(fd, &st) != 0) return;
+    if (!S_ISCHR(st.st_mode) || st.st_rdev != makedev(5, 1)) return;
+    ssize_t ignored = write(consmirror_fd, buf, (size_t)count);
+    (void)ignored;
+}
+
 /* extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64 */
 int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 {

@@ -33,14 +33,41 @@ ln -s /dev/console /dev/cons
 # in SHAPE from Hamnix's, and it differs because the initramfs exists at all.
 
 # --- networking ------------------------------------------------------
-# Static, and named here rather than hidden: the kernel's own ip=dhcp runs
-# before the initramfs has loaded virtio_net, and a DHCP client is a program
-# this line does not have yet. On a real machine these are the three lines to
-# change.
-ifconfig eth0 10.0.2.15 netmask 255.255.255.0
-ifconfig gw 10.0.2.2
-ifconfig dns 10.0.2.3
-echo 'rc.boot: network configured'
+# DHCP, BECAUSE THE THREE LINES THAT USED TO BE HERE WERE QEMU'S ADDRESSES.
+#
+# This file pinned eth0 to 10.0.2.15/24 with gateway 10.0.2.2 and DNS 10.0.2.3.
+# Those are not defaults and they are not examples: they are the addresses
+# QEMU's user-mode network hands out, hardcoded into the boot of every machine
+# installed from this tree. On the owner's laptop that configures an address
+# nothing routes and a nameserver that does not exist, so the machine comes up
+# with networking that is CONFIGURED AND DEAD -- and `hpm update` on it cannot
+# reach 255.one, which breaks the standing rule that work published here must
+# be updatable on the machine it was installed on.
+#
+# user/dhcpc.ad is the DHCP client and its own header says exactly this: "A
+# real machine does not know its address; it asks. Until something asks,
+# hamnix-linux can boot on hardware and be deaf." It is staged on every medium
+# (scripts/hamlinux_image.sh:118) and tests/linux/installed_update_live.sh
+# already drives it on an installed disk. etc/rc.boot.full made the same call
+# for the live boot -- "let DHCP win" -- so this brings the installed boot into
+# line with the one that was already right.
+#
+# IT STILL WORKS IN THE HARNESS, and not by luck: QEMU's user-mode network runs
+# a DHCP server that leases 10.0.2.15 with gateway 10.0.2.2 and DNS 10.0.2.3 --
+# the very numbers that were hardcoded. So the VM gets what it always got, by
+# asking for it, and a real machine gets whatever its own network says.
+#
+# To pin a static config on a machine that has no DHCP server, the three lines
+# are still the ones to write, by hand, after boot:
+#   ifconfig eth0 <addr> netmask <mask> / ifconfig gw <gw> / ifconfig dns <dns>
+dhcpc
+if $status > 0 {
+    echo 'rc.boot: DHCP got no lease -- this machine has no network address.'
+    echo 'rc.boot: `hpm update` will not reach the repository until one is set:'
+    echo 'rc.boot:   ifconfig eth0 <addr> netmask <mask>; ifconfig gw <gw>; ifconfig dns <dns>'
+} else {
+    echo 'rc.boot: network configured'
+}
 
 # --- the distribution namespaces -------------------------------------
 # THE PART NOBODY HAD EVER RUN. Every line of the two-namespace work was
@@ -63,8 +90,27 @@ echo 'rc.boot: network configured'
 # /dev/nvme0n1p2 on a laptop -- and the distribution disks are whatever the
 # firmware enumerated around it. A label travels with the filesystem and a
 # partition GUID travels with the partition; a /dev name travels with nothing.
+# A MACHINE WITH NO DISTRIBUTION MEDIUM IS A SUPPORTED MACHINE, and it is the
+# owner's. Every one of these binds fails there -- no attached filesystem
+# carries the label /etc/distros names -- and MEASURED on this tree
+# (2026-08-15, the shippable medium booted as usb-storage with no Debian disk
+# attached at all) hamsh does NOT abort the script on a failed bind: it prints
+# the resolver's refusal, returns nonzero, and carries on. rc.5 runs, the
+# compositor takes /dev/fb0, and the desktop comes up. So the distribution
+# binds are NOT what kept the laptop's screen still; that was the console, and
+# it is fixed elsewhere in this commit.
+#
+# What they DID do is print eight lines of resolver failure into a boot that
+# had gone right, on the one machine where those lines are the only thing the
+# operator can see. So the outcome is stated once, as a fact about the machine,
+# and the two lines that cannot work without a medium are skipped.
 bind '#distro' /n/distro
-source '/etc/rc.distros'
+if $status > 0 {
+    echo 'rc.boot: no distribution medium on this machine -- `enter debian` and'
+    echo 'rc.boot: `enter alpine` are unavailable. Everything else is up.'
+} else {
+    source '/etc/rc.distros'
+}
 linux = ns clean {
     bind '#distro/debian' /
     bind '#c' /dev

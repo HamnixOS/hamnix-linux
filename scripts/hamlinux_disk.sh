@@ -204,14 +204,37 @@ CMDLINE="$STAGE/cmdline.txt"
 #                    below KERN_ERR reaches any console, so a perfect boot
 #                    printed NOTHING between the EFI stub and the desktop.
 #                    That is what the blinking cursor was.
-#   console=ttyS0    stays LAST, because /dev/console follows the last
-#                    console= and every gate in this tree reads the serial
-#                    port. PID 1 mirrors its own lines to /dev/kmsg so they
-#                    reach the screen as well -- see user/linuxinit.ad.
+#   console=tty0     IS NOW LAST, AND THAT IS THE FIX FROM THE FIRST BOOT ON
+#                    METAL. It used to be first and `console=ttyS0` last,
+#                    "because /dev/console follows the last console= and every
+#                    gate in this tree reads the serial port". Both halves of
+#                    that sentence are true and the conclusion was wrong: PID 1
+#                    mirrors ITS OWN lines to /dev/kmsg, so PID 1 was visible --
+#                    and nothing else was. The owner's Lenovo, 2026-08-15,
+#                    printed every linuxinit line and then stopped dead at
+#                    "namespace ready -- exec /bin/hamsh /etc/rc.boot", because
+#                    at that instant the output stops being PID 1's and starts
+#                    being the SHELL's, and the shell writes to /dev/console,
+#                    which was a serial port the machine does not have. The boot
+#                    was fine. It was talking into a wire that was not there.
+#                    It is also the only descriptor a person can TYPE into: with
+#                    ttyS0 last, the interactive shell etc/rc.boot.full hands off
+#                    to reads a keyboard nobody is holding.
+#   console=ttyS0    stays REGISTERED, second-to-last, so printk still reaches
+#                    the serial port and every gate still sees the kernel's boot.
+#                    The shell's own output reaches it too, because
+#                    user/linux-syscalls.c:consmirror copies writes to
+#                    /dev/console onto the serial port whenever the two are
+#                    different devices. That is what lets the SHIPPED string be
+#                    the string the gates boot -- the alternative, a gate-only
+#                    HAMLINUX_CMDLINE, was rejected because this command line is
+#                    baked into a PE section of the UKI and user/hlinstall.ad
+#                    copies that very UKI onto the target's ESP, so an override
+#                    would mean nothing ever tests what ships.
 #
 # HAMLINUX_CMDLINE still overrides the whole string; HAMLINUX_ROOT_PARTUUID
 # pins the GUID (a test that rebuilds the disk and expects the same string).
-DEFAULT_CMDLINE="console=tty0 earlycon=efifb keep_bootcon console=ttyS0,115200 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7"
+DEFAULT_CMDLINE="earlycon=efifb keep_bootcon console=ttyS0,115200 console=tty0 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7"
 printf '%s' "${HAMLINUX_CMDLINE:-$DEFAULT_CMDLINE}" > "$CMDLINE"
 echo "[disk] cmdline: $(cat "$CMDLINE")"
 # WHAT THE IN-SYSTEM INSTALLER READS. user/hlinstall.ad copies this very UKI
