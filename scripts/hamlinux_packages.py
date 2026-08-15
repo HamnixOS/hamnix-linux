@@ -940,6 +940,17 @@ def dep_lines_for_paths(kver, canonicals):
     return out
 
 
+def canonical_ko(kver, ko):
+    """The path a module OCCUPIES once installed, from the host path modprobe
+    named. The image decompresses `foo.ko.xz` to `foo.ko` and so does
+    stage_modules, so both the package and the image name the same file; this
+    is the one place that rule is written down."""
+    rel = ko[len("/lib/modules/%s/" % kver):]
+    if rel.endswith(".xz"):
+        rel = rel[:-3]
+    return "/lib/modules/%s/%s" % (kver, rel)
+
+
 def stage_modules(kver, kos, workdir):
     """Decompress each .ko.xz into `workdir` under its /lib/modules-relative
     path, gzipping the ones too big for hpm's in-RAM unpack.
@@ -950,9 +961,8 @@ def stage_modules(kver, kos, workdir):
     a package and the image name the same file rather than shadowing it."""
     staged = []
     for ko in kos:
-        rel = ko[len("/lib/modules/%s/" % kver):]
-        if rel.endswith(".xz"):
-            rel = rel[:-3]
+        rel = canonical_ko(kver, ko)[len("/lib/modules/%s/" % kver):]
+        if ko.endswith(".xz"):
             body = lzma.open(ko, "rb").read()
         else:
             with open(ko, "rb") as fh:
@@ -1162,6 +1172,48 @@ def image_want_modules():
     return names
 
 
+def builtin_modules(kver):
+    """The modules this kernel has BUILT IN, from /lib/modules/<kver>/
+    modules.builtin, as names with '-' folded to '_' (modprobe treats them as
+    the same character).
+
+    WHY THIS EXISTS, AND IT IS A CORRECTION RATHER THAN A FEATURE. The packager
+    said, of every name modprobe could not resolve:
+
+        "%s: modprobe resolved nothing for %s (the image does not stage them
+         either)"
+
+    which reads as "not a coverage hole" and was said out loud about
+    i2c-designware-platform -- the I2C bus a modern laptop's touchpad hangs
+    off, and one of the nine names 1.0.24 added. THAT SENTENCE HAS BEEN FALSE
+    IN THIS FILE BEFORE: the same reassurance was printed for $HW_MODULES,
+    twenty real .ko files WERE in the image, and a gate went 7/20 naming every
+    one of them. So it is worth knowing WHICH kind of nothing.
+
+    MEASURED on this build host: /boot/config-6.12.85+deb13-amd64 has
+    CONFIG_I2C_DESIGNWARE_PLATFORM=y and modules.builtin lists
+    kernel/drivers/i2c/busses/i2c-designware-platform.ko. There is no .ko to
+    package because the driver is already inside vmlinuz -- which is also why
+    the owner's touchpad bound on metal from a package that "shipped one module
+    short of its name". The package name is right and the module list is right;
+    only the diagnostic was wrong.
+    """
+    path = "/lib/modules/%s/modules.builtin" % kver
+    out = set()
+    if not os.path.exists(path):
+        return out
+    with open(path) as fh:
+        for line in fh:
+            base = os.path.basename(line.strip())
+            for ext in (".ko.xz", ".ko.gz", ".ko.zst", ".ko"):
+                if base.endswith(ext):
+                    base = base[:-len(ext)]
+                    break
+            if base:
+                out.add(base.replace("-", "_"))
+    return out
+
+
 def drm_core_modules(kver):
     """The shared DRM/KMS core: everything the i915 and nouveau chains need
     EXCEPT the hardware driver itself. hamnix-drivers-drm owns these files, so
@@ -1339,47 +1391,153 @@ def build_base_module_package(pkgdir, version, entries, skipped):
         skipped.append("hamnix-drivers-base (no modprobe or /lib/modules "
                        "on this host)")
         return []
-    core = set(drm_core_modules(kver))
-    claimed = set(core)
     built = []
-    for label, names in image_module_groups():
-        pkg = ("hamnix-drivers-base" if label == "base"
-               else "hamnix-drivers-" + label)
+    for label, pkg, mine in image_module_selection(kver, skipped):
         if _build_one_module_package(pkgdir, version, entries, skipped,
-                                     kver, pkg, label, names, claimed):
+                                     kver, pkg, label, mine):
             built.append(pkg)
     return built
 
 
+def image_module_selection(kver, skipped=None):
+    """WHICH .ko FILES EACH hamnix-drivers-* PACKAGE OWNS. Returns
+    [(label, package name, [host .ko paths])].
+
+    ONE DEFINITION, TWO CONSUMERS, AND THAT IS THE POINT. The packager below
+    builds a package per group from this; scripts/hamlinux_image.sh asks
+    group_dep_tables() (which is this, plus dep_lines_for_paths) for the
+    modules.dep.<label> table each of those packages ships, and stages it into
+    the image root. A SECOND COPY OF THIS SELECTION WOULD DRIFT, and the
+    direction it would drift in is a file staged in the image under a name no
+    package owns -- or, worse, a package whose file the image lacks, which is
+    exactly the condition that kept these two packages out of the installed
+    database in the first place.
+
+    `claimed` starts at the DRM core (hamnix-drivers-drm owns those files) and
+    each group extends it, so no two packages in a channel can own one path.
+
+    `skipped`, when given, collects the same human-readable refusals the
+    packager reports; the image-side caller passes None because staging a
+    table is not the place to announce a packaging gap.
+    """
+    claimed = set(drm_core_modules(kver))
+    out = []
+    for label, names in image_module_groups():
+        pkg = ("hamnix-drivers-base" if label == "base"
+               else "hamnix-drivers-" + label)
+        chains, unresolved = [], []
+        for n in names:
+            chain = modprobe_chain(kver, n)
+            if chain:
+                chains.append(chain)
+            else:
+                unresolved.append(n)
+        if unresolved and skipped is not None:
+            # TWO KINDS OF NOTHING, AND THEY ARE NOT THE SAME NEWS. A name the
+            # kernel has BUILT IN has no .ko to package and needs none -- the
+            # driver is in vmlinuz and works. A name that is neither a module
+            # nor builtin is a driver this channel does not have. The old text
+            # said the second thing about both; see builtin_modules().
+            builtin = builtin_modules(kver)
+            inside = [n for n in unresolved if n.replace("-", "_") in builtin]
+            gone = [n for n in unresolved if n.replace("-", "_") not in builtin]
+            if inside:
+                skipped.append(
+                    "%s: %s is BUILT INTO this kernel (modules.builtin), so "
+                    "there is no .ko to package and none is needed -- the "
+                    "driver is in vmlinuz" % (pkg, " ".join(inside)))
+            if gone:
+                skipped.append(
+                    "%s: modprobe resolved nothing for %s and this kernel does "
+                    "NOT have it builtin either -- the channel has no such "
+                    "driver" % (pkg, " ".join(gone)))
+        if not chains:
+            if skipped is not None:
+                skipped.append("%s (modprobe resolved nothing)" % pkg)
+            continue
+        mine = [ko for ko in merge_chains(chains) if ko not in claimed]
+        if not mine:
+            if skipped is not None:
+                skipped.append(
+                    "%s (every module is already in another package)" % pkg)
+            continue
+        claimed.update(mine)
+        out.append((label, pkg, mine))
+    return out
+
+
+def group_dep_tables(kver=None):
+    """The modules.dep.<label> file each hamnix-drivers-* package SHIPS, as
+    [(label, package, absolute installed path, body text)].
+
+    WHY THE IMAGE NEEDS THIS AT ALL, which is the whole point of this change.
+    scripts/hpm_installed_db.py records a package as installed only if the root
+    carries EVERY file the tarball holds -- because hpm upgrades by unlinking
+    the recorded list, and a list naming a file the machine never had is a list
+    that can delete the wrong thing. hamnix-drivers-base and -hw each hold
+    exactly one file the image did not stage: this table. So neither was ever
+    recorded, and what is not recorded is never upgraded: `hpm update` on an
+    installed machine could not replace the modules that mount its root disk or
+    run its touchpad.
+
+    IT IS NOT MACHINE STATE AND IT IS NOT GENERATED AT INSTALL TIME. The
+    install hook only CONSUMES it (`cat modules.dep.<label> modules.dep > new;
+    mv new modules.dep`); the bytes are produced HERE, at package build time,
+    out of the build host's own depmod table, for a module set the image script
+    itself decides. Nothing about it depends on the target machine, so the
+    image can hold the identical file, and it does: the same selection and the
+    same dep_lines_for_paths() call produce it on both sides.
+
+    THE CANONICAL modules.dep IS STILL MACHINE STATE AND IS STILL NOT SHIPPED.
+    That distinction is untouched -- see the note in _build_one_module_package.
+    """
+    if kver is None:
+        kver = kernel_version()
+    if kver is None or not os.path.exists(MODPROBE):
+        return []
+    out = []
+    for label, pkg, mine in image_module_selection(kver):
+        deps = dep_lines_for_paths(kver, [canonical_ko(kver, k) for k in mine])
+        if not deps:
+            # dep_lines() treats an empty table as a refusal to ship the
+            # package at all, so there is no file to stage either.
+            continue
+        out.append((label, pkg,
+                    "/lib/modules/%s/modules.dep.%s" % (kver, label),
+                    "\n".join(deps) + "\n"))
+    return out
+
+
+def stage_dep_tables(root):
+    """Write every group_dep_tables() file into a staged image root. Returns
+    the number written. Loud and non-zero on refusal, because the failure it
+    guards against is silent: without these files the two module packages are
+    left out of the installed database and the machine can never upgrade
+    them."""
+    tables = group_dep_tables()
+    if not tables:
+        raise SystemExit(
+            "hamlinux_packages --stage-dep-tables: this host resolved NO "
+            "module groups (no modprobe, no /lib/modules, or no modules.dep). "
+            "The image would carry no modules.dep.<group>, hamnix-drivers-* "
+            "would be left out of the installed database, and `hpm update` "
+            "could not upgrade the boot kernel modules.")
+    n = 0
+    for label, pkg, path, body in tables:
+        dest = os.path.join(root, path.lstrip("/"))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w") as fh:
+            fh.write(body)
+        print("[image] staged %s (%d bytes, %d lines) -- the table %s ships, "
+              "so the root carries every file that package holds"
+              % (path, len(body), body.count("\n"), pkg))
+        n += 1
+    return n
+
+
 def _build_one_module_package(pkgdir, version, entries, skipped,
-                              kver, pkg, label, names, claimed):
-    """One module package. `claimed` is the set of .ko paths already owned by
-    another package; it is READ and then EXTENDED, so no two packages in a
-    channel can own the same file."""
-    chains, unresolved = [], []
-    for n in names:
-        chain = modprobe_chain(kver, n)
-        if chain:
-            chains.append(chain)
-        else:
-            unresolved.append(n)
-    if unresolved:
-        # The image cannot stage what modprobe cannot resolve either, so this
-        # is not a coverage hole -- but say it out loud rather than shipping a
-        # shorter list than the name of this package implies.
-        skipped.append("%s: modprobe resolved nothing for %s "
-                       "(the image does not stage them either)"
-                       % (pkg, " ".join(unresolved)))
-    if not chains:
-        skipped.append("%s (modprobe resolved nothing)" % pkg)
-        return False
-
-    mine = [ko for ko in merge_chains(chains) if ko not in claimed]
-    if not mine:
-        skipped.append("%s (every module is already in another package)" % pkg)
-        return False
-    claimed.update(mine)
-
+                              kver, pkg, label, mine):
+    """One module package, over the .ko set image_module_selection() gave it."""
     workdir = tempfile.mkdtemp(prefix="hambase-")
     try:
         staged = stage_modules(kver, mine, workdir)
@@ -2244,6 +2402,27 @@ def write_pkg(outdir, name, version, description, files, depends,
     try:
         top = os.path.join(stage, "%s-%s" % (name, version))
         os.makedirs(os.path.join(top, "files"))
+        # AN ENTRY NAME HPM CANNOT HOLD IS A FILE THAT GOES MISSING ON A
+        # MACHINE, AND IT HAS. A tar header has 100 bytes for the name; GNU tar
+        # (which is what tarfile writes here) puts anything longer in a
+        # preceding 'L' entry and truncates the header's own field. hpm read
+        # only that field, so it wrote the body to the TRUNCATED path and
+        # recorded the truncated path -- measured on an installed machine
+        # upgrading hamnix-drivers-base and -hw: 14 of 65 modules replaced by
+        # junk names, "extracted 35 files" printed over the top of it.
+        # user/hpm.ad now reads the 'L' entry (see longname_buf), and its
+        # ceiling is 255 bytes, which is what warn_buf and safe_buf hold. This
+        # refuses at the same number so a package can never again ship a name
+        # the machine's unpacker has to shorten.
+        for host, inside in files:
+            entry = "%s-%s/files/%s" % (name, version, inside)
+            if len(entry.encode("utf-8")) > 255:
+                raise SystemExit(
+                    "hamlinux_packages: %s: the tar entry name is %d bytes, "
+                    "over the 255 user/hpm.ad's LONGNAME_CAP holds:\n  %s\n"
+                    "hpm would refuse the archive on the machine. Shorten the "
+                    "installed path or the package name."
+                    % (name, len(entry.encode("utf-8")), entry))
         for host, inside in files:
             dest = os.path.join(top, "files", inside)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -2387,11 +2566,28 @@ def main():
                     default="build/image/root",
                     help="the staged root --installed-db describes "
                          "(default build/image/root)")
+    # THE IMAGE-SIDE HALF OF THE INSTALLED DATABASE. See group_dep_tables():
+    # hamnix-drivers-base and -hw each hold one file the image did not stage,
+    # so hpm_installed_db left both OUT and `hpm update` could never upgrade
+    # the boot kernel modules. scripts/hamlinux_image.sh calls this after
+    # depmod. It builds no packages and writes no channel -- it exits as soon
+    # as the tables are down, so the image build does not pay for a channel.
+    ap.add_argument("--stage-dep-tables", metavar="ROOT",
+                    help="write each hamnix-drivers-* package's "
+                         "modules.dep.<group> table into a staged image root "
+                         "and exit; builds nothing else")
     ap.add_argument("--no-desktop-gate", action="store_true",
                     help="do NOT run the packaged binaries before writing the "
                          "index (tests/linux/channel_runs_desktop.sh). Writes "
                          "an index on the strength of names and hashes alone.")
     args = ap.parse_args()
+
+    if args.stage_dep_tables:
+        if not os.path.isdir(args.stage_dep_tables):
+            raise SystemExit("hamlinux_packages --stage-dep-tables: not a "
+                             "directory: %s" % args.stage_dep_tables)
+        stage_dep_tables(args.stage_dep_tables)
+        return 0
 
     out = os.path.join(ROOT, args.out, args.channel)
     pkgdir = os.path.join(out, "packages")

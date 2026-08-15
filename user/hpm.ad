@@ -4068,6 +4068,41 @@ pi_have:      int32 = 0
 extract_path_buf: Array[1024, uint8]     # full target path for sys_open_write
 warn_buf:         Array[256, uint8]      # entry name copy for messages
 
+# GNU LONG NAMES, AND THE FILES THAT WENT MISSING WITHOUT THEM.
+#
+# A tar header has exactly 100 bytes for the entry name and no more.
+# GNU tar's answer is a preceding entry with typeflag 'L' and the name
+# "././@LongLink" whose BODY is the real name; the header after it
+# carries the same name TRUNCATED to 100 bytes. Python's tarfile
+# writes that format, so scripts/hamlinux_packages.py does.
+#
+# hpm read hdr[0..100) and nothing else, so it took the truncated
+# name AS the name: it wrote the body to the truncated path and
+# recorded the truncated path in installed.json. MEASURED on an
+# installed machine by tests/linux/install_from_usb.sh, upgrading the
+# two kernel-module packages:
+#
+#   hpm: extracted 35 files          <- it believed all of them
+#   ...kernel/drivers/gpu/drm/virtio/virti          written
+#   ...kernel/drivers/gpu/drm/virtio/virtio-gpu.ko  ABSENT
+#
+# Fourteen of sixty-five: virtio-gpu, snd-hda-intel, snd-hda-codec,
+# usb-storage, i2c-hid-acpi, nvme-auth and the rest -- the module a
+# machine draws with, the one it reads a USB disk with, and one of the
+# touchpad drivers. The upgrade reported success, the file list said
+# 35, and the modules were gone. It was invisible until now for one
+# reason: these two packages have never been installable on a machine,
+# which is the defect the commit before this one fixes. Making them
+# upgradable without this would have been a REGRESSION -- a driver
+# tree quietly replaced by junk on the first update.
+#
+# 255 rather than 100 because that is what warn_buf and safe_buf hold;
+# anything longer is a REFUSAL, not a truncation. Truncating is what
+# caused this.
+LONGNAME_CAP:     uint64 = 255
+longname_buf:     Array[256, uint8]      # the pending 'L' entry's name
+longname_n:       uint64 = 0             # 0 = none pending
+
 # Per-install installed-file record. Each "files/<rel>" entry we
 # write is recorded so install.json's `files` array can list them in
 # install order (`hpm remove` deletes in reverse).
@@ -4832,6 +4867,9 @@ def _stage_extract_files(tar_len: uint64, target_prefix: Ptr[uint8]) -> int32:
     files_pfx: Ptr[uint8] = "files/"
     files_pfx_len: uint64 = 6
 
+    # No 'L' entry can be pending across two archives. See longname_buf.
+    longname_n = 0
+
     off: uint64 = 0
     while off + 512 <= tar_len:
         hdr: Ptr[uint8] = &tar_buf[off]
@@ -4844,7 +4882,42 @@ def _stage_extract_files(tar_len: uint64, target_prefix: Ptr[uint8]) -> int32:
         typeflag: uint8 = hdr[156]
         body_blocks: uint64 = (size + 511) / 512
 
-        nlen: uint64 = _name_copy_nul(&warn_buf[0], &hdr[0], 100)
+        # A GNU LONG NAME ARRIVES ONE ENTRY EARLY. typeflag 'L' (0x4c)
+        # with the name "././@LongLink": its body is the next entry's
+        # real name, and the next header's own 100-byte field holds
+        # that name TRUNCATED. Stash it; the next iteration uses it
+        # instead of hdr[0..100). See longname_buf for what reading
+        # the truncated field cost.
+        if typeflag == 76:
+            ln: uint64 = size
+            # The body is NUL-terminated; the terminator is not part of
+            # the name.
+            if ln > 0 and tar_buf[off + 512 + ln - 1] == 0:
+                ln = ln - 1
+            if ln > LONGNAME_CAP:
+                write_str(2, "hpm: tar entry name over 255 bytes; refusing "
+                             "rather than truncating it\n")
+                return -1
+            lk: uint64 = 0
+            while lk < ln:
+                longname_buf[lk] = tar_buf[off + 512 + lk]
+                lk = lk + 1
+            longname_buf[ln] = 0
+            longname_n = ln
+            off = off + 512 + body_blocks * 512
+            continue
+
+        nlen: uint64 = 0
+        if longname_n > 0:
+            lc: uint64 = 0
+            while lc < longname_n:
+                warn_buf[lc] = longname_buf[lc]
+                lc = lc + 1
+            warn_buf[longname_n] = 0
+            nlen = longname_n
+            longname_n = 0
+        else:
+            nlen = _name_copy_nul(&warn_buf[0], &hdr[0], 100)
 
         # Strip the package prefix; bail out if absent (unexpected
         # entry shape per the spec, treated as a skip).
