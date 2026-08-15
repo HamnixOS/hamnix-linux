@@ -3499,12 +3499,72 @@ static const char *sysroot_device(void)
     if (!strncasecmp(spec, "PARTUUID=", 9)) pu = spec + 9;
     else if (!strncasecmp(spec, "UUID=", 5)) fu = spec + 5;
     if (pu || fu) {
-        if (scan_partitions(pu, fu, dev, sizeof dev, 0)) {
-            bootmsg(6, "sysroot: root=%s is %s\n", spec, dev);
-            return dev;
+        /* NOT THERE YET IS NOT THE SAME AS NOT THERE, and telling them apart
+         * is the difference between booting the owner's USB stick and booting
+         * a copy of it that lives in RAM.
+         *
+         * MEASURED, 2026-08-14, this image under OVMF with the disk attached
+         * as `-device usb-storage` behind a qemu-xhci -- the configuration a
+         * person is in when they boot a laptop off a stick:
+         *
+         *   1.336s  usbcore: registered new interface driver usb-storage
+         *   1.567s  the root switch runs, /sys/block is EMPTY, and this
+         *           function said "NO PARTITION ON THIS MACHINE MATCHES"
+         *   1.900s  usb-storage 2-3:1.0: USB Mass Storage device detected
+         *   2.931s  scsi 0:0:0:0: Direct-Access QEMU QEMU HARDDISK
+         *   2.964s  sda: sda1 sda2      <- the root, 1.4s after we gave up
+         *
+         * init_module(2) RETURNS as soon as the driver has registered itself.
+         * Everything after that -- the USB bus reset, the device descriptor
+         * exchange, SCSI INQUIRY, READ CAPACITY, and only then the partition
+         * scan -- happens on the kernel's workqueues, and on real hardware it
+         * is SLOWER than QEMU, not faster: a USB 2 stick behind a hub, or a
+         * disk that has to spin up, takes seconds. So a scan performed the
+         * instant the modules are loaded asks the question before the machine
+         * can possibly answer it, and gets "no disks at all" on a machine
+         * whose disk is sitting right there.
+         *
+         * NVMe and AHCI enumerate the same way and merely happen to be fast;
+         * they are not synchronous either, and this covers them too.
+         *
+         * So: poll. This is `rootwait`, which every Linux initramfs has had
+         * for twenty years, and it is not a sleep -- a disk that is ready
+         * immediately (virtio, NVMe: measured at the FIRST scan, 0ms waited)
+         * costs nothing at all. Only the boot that would otherwise have failed
+         * pays, and it pays with a message on the screen every two seconds
+         * rather than with a blinking cursor. HAMNIX_ROOTWAIT=<seconds>
+         * overrides the ceiling; 0 restores the old
+         * one-look-and-give-up behaviour. */
+        int deadline_ms = 20000;
+        const char *rw = getenv("HAMNIX_ROOTWAIT");
+        if (rw && *rw) {
+            int v = atoi(rw);
+            if (v >= 0) deadline_ms = v * 1000;
         }
-        bootmsg(3, "sysroot: NO PARTITION ON THIS MACHINE MATCHES root=%s.\n",
-                spec);
+        int waited_ms = 0;
+        for (;;) {
+            if (scan_partitions(pu, fu, dev, sizeof dev, 0)) {
+                if (waited_ms)
+                    bootmsg(6, "sysroot: root=%s appeared after %d.%01ds\n",
+                            spec, waited_ms / 1000, (waited_ms % 1000) / 100);
+                bootmsg(6, "sysroot: root=%s is %s\n", spec, dev);
+                return dev;
+            }
+            if (waited_ms >= deadline_ms) break;
+            if (waited_ms == 0)
+                bootmsg(4, "sysroot: root=%s is not here yet -- waiting up to "
+                           "%ds. USB and SD media enumerate ASYNCHRONOUSLY, "
+                           "seconds after their driver loads.\n",
+                        spec, deadline_ms / 1000);
+            else if (waited_ms % 2000 == 0)
+                bootmsg(4, "sysroot: still waiting for the root disk (%ds of "
+                           "%ds)\n", waited_ms / 1000, deadline_ms / 1000);
+            struct timespec ts = { 0, 100 * 1000 * 1000 };   /* 100 ms */
+            nanosleep(&ts, NULL);
+            waited_ms += 100;
+        }
+        bootmsg(3, "sysroot: NO PARTITION ON THIS MACHINE MATCHES root=%s, "
+                   "after waiting %ds.\n", spec, deadline_ms / 1000);
         bootmsg(3, "sysroot: every partition this kernel can see:\n");
         char ignored[128];
         if (!scan_partitions(NULL, NULL, ignored, sizeof ignored, 1))

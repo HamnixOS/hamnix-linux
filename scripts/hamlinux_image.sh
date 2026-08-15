@@ -729,7 +729,37 @@ MODPROBE=/usr/sbin/modprobe
 #   usbhid, hid-generic
 #                the keyboard and touchpad of a real machine. virtio_input is
 #                QEMU's; a laptop has neither.
-HW_MODULES="nvme ahci sd_mod usb-storage uas xhci_pci ehci_pci usbhid hid-generic"
+#
+# THE POINTER OF A LAPTOP, which the line above claimed and did not deliver.
+# "the keyboard and touchpad of a real machine" was half true: usbhid drives an
+# EXTERNAL USB mouse, and an internal keyboard needs nothing here at all --
+# CONFIG_SERIO_I8042 and CONFIG_KEYBOARD_ATKBD are BUILT IN to the Debian
+# kernel this image ships (checked in /boot/config-*), so the built-in keyboard
+# works with no module. The built-in POINTER is a module in every case, and
+# neither kind was staged, so the desktop -- which is driven by a pointer --
+# had nothing to move the cursor with on a machine with no USB mouse plugged
+# in. Two kinds, because laptops split about evenly between them:
+#
+#   psmouse      the PS/2 touchpad and trackpoint (Synaptics, ALPS, Elantech
+#                and the rest are all built INTO psmouse -- CONFIG_MOUSE_PS2_*
+#                are =y inside it -- so this one module covers them).
+#   i2c-hid-acpi, hid-multitouch
+#                the I2C-HID precision touchpad of a modern machine, and the
+#                HID driver that turns its reports into pointer events.
+#   i2c-designware-platform, intel-lpss-pci, i2c-i801
+#                the BUS that touchpad hangs off. i2c-hid-acpi alone binds
+#                nothing: without a controller driver there is no I2C adapter
+#                for the ACPI-declared device to be on, which is a silence
+#                that looks exactly like an unsupported touchpad.
+#
+# NOT MEASURED ON HARDWARE -- there is no laptop here, and a VM has neither a
+# PS/2 touchpad nor an I2C-HID one, so this is the one change in this pass that
+# the VM cannot confirm. What IS measured is that it costs nothing to carry:
+# the hw package goes 20 -> 29 modules, 1,433,411 -> 1,638,471 bytes gzipped
+# against hpm's 4 MiB TARBALL_CAP and 6,778,880 inflated against its 8 MiB
+# TAR_CAP, so both ceilings that made these packages get split in the first
+# place still have room.
+HW_MODULES="nvme ahci sd_mod usb-storage uas xhci_pci ehci_pci usbhid hid-generic psmouse i2c-i801 intel-lpss-pci i2c-designware-platform i2c-hid-acpi hid-multitouch"
 WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk $HW_MODULES ext4 vfat nls_ascii nls_cp437 overlay squashfs loop snd-hda-codec-generic snd-hda-intel virtio_snd}"
 : > "$ROOT/etc/modules"
 if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
