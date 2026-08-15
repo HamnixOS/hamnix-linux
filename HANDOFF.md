@@ -24,7 +24,15 @@ because that is the version those runs were made against; the numbers stand, the
 version in them is history. **`CHANGELOG.md` is the authority on what a person
 gets, and its `Unreleased` section is the authority on what they do not yet.**
 
-**1.0.23 IS PUBLISHED, and the ten things that were unshipped are now shipped.**
+**1.0.24 IS PUBLISHED — the release the first real-hardware boot produced.**
+Verified as served: 126 packages, signature verifying against the trust root,
+and the desktop tarball fetched from the site byte-identical to the gated build.
+Measured against 1.0.23 rather than assumed: 36 packages byte-identical, 90
+changed, none added or dropped. **`hpm update` still cannot upgrade the boot
+kernel modules**, so the nine new touchpad/HID modules reach a machine only on a
+fresh medium — that is in the release notes, not left to be discovered.
+
+**1.0.23 was published before it, and the ten things unshipped then are shipped.**
 Verified as served rather than assumed: the live index reports 1.0.23 across all
 126 packages, its signature verifies against the trust root installed machines
 carry, and `hamnix-desktop-1.0.23.tar.gz` fetched from the site is byte-identical

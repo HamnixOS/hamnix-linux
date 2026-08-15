@@ -14,9 +14,54 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Landed in the tree, NOT yet on the channel. **All four came out of the first
-attempt to boot this system on a real laptop**, and every one of them is a case
-of something reporting success while doing nothing.
+Nothing yet. Work lands here between releases; if this section is empty, the
+tree and the channel agree.
+
+## 1.0.24 — 2026-08-15
+
+**PUBLISHED and verified as served**: the live index reports 1.0.24 across all
+126 packages, its signature verifies against the trust root installed machines
+already carry, and `hamnix-desktop-1.0.24.tar.gz` fetched from the site is
+byte-identical to the gated build. The site took eleven polls to pick it up —
+pushing and serving are different events.
+
+**Every fix here exists because someone booted this system on a laptop for the
+first time and it did not reach a desktop.** All of them are the same shape:
+something reporting success while doing nothing.
+
+**Measured against the published 1.0.23 rather than assumed** — all 126 of its
+tarballs downloaded, every hash matched, payloads compared: 126 packages before
+and after, none added or dropped, **36 byte-identical and 90 changed**, almost
+all recompiles because every binary links the file the console fix touched.
+
+**Known issues, shipped knowingly.** `hpm update` **still cannot upgrade the
+boot kernel modules**, and that bites harder here than in 1.0.23: the nine new
+touchpad and HID modules are exactly what an installed machine would want and
+cannot receive — they arrive only with a freshly built medium. The driver
+packages are each excluded from the installed database over exactly one
+*generated* file the package owns and no image stages. `hamnix-drivers-hw` also
+ships one module short of its name, because that module does not exist on the
+build host's kernel. And **real hardware has booted this system exactly once and
+did not reach a desktop** — the console fix below is what will finally show why.
+Every other claim here is a VM claim.
+
+### Two more fixes that landed after this list was first written
+
+**The stick keeps its own boot log.** `\HAMNIX.LOG` on the FAT boot partition,
+readable from any computer with nothing installed, preallocated at build time
+and only ever overwritten in place with every write synced — so a power cut
+cannot lose it by mutating filesystem metadata. It captures the kernel *and* the
+shell in one stream. Two defects were found by running it: the kernel's message
+ring is rate-limited by default and **drops records with no error**, which
+produced a log of the right size, with its header and terminator, missing four
+seconds out of its middle; and the program that writes it **shipped in no
+package**, so the one program whose bug could not be reported was the one that
+could not be fixed remotely.
+
+**Nine touchpad and HID modules**, measured working on a real Lenovo — the
+internal keyboard was already built into the kernel, but nothing drove a
+built-in pointer, so the desktop would have come up with no way to move the
+cursor.
 
 ### Booting from a USB stick quietly ran the whole system from RAM
 
