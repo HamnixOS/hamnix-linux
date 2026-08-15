@@ -947,7 +947,17 @@ grep -aq 'rc.boot: up' "$L3" \
 # version that only ever existed in boot 2's RAM cannot appear here.
 AFTER_UPD="$(grep -a -A40 'INSTUSB-P1: hpm list after' "$L2" 2>/dev/null | grep -aE '^[a-z0-9-]+ +[0-9]+\.[0-9]+\.[0-9]+' | sort)"
 REBOOTED="$(grep -a -A40 'INSTUSB-P2: this machine' "$L3" 2>/dev/null | grep -aE '^[a-z0-9-]+ +[0-9]+\.[0-9]+\.[0-9]+' | sort)"
-if [ -n "$REBOOTED" ] && [ "$AFTER_UPD" = "$REBOOTED" ]; then
+if [ "$NO_DB" = 1 ]; then
+    # THE CONTROL'S EXPECTATION IS THE OPPOSITE ONE. With no database there is
+    # no package list to compare, and demanding one here would score the
+    # control's correct behaviour as a failure. What IS asserted is that the
+    # machine says the same nothing on both sides of the reboot.
+    if [ -z "$REBOOTED" ] && [ -z "$AFTER_UPD" ]; then
+        ok "boot 3 (negative control): still no package list after the reboot, on both sides -- the machine's state did not silently acquire one"
+    else
+        bad "boot 3 (negative control): a package list appeared on a machine with no database"
+    fi
+elif [ -n "$REBOOTED" ] && [ "$AFTER_UPD" = "$REBOOTED" ]; then
     ok "boot 3: the package list is byte-identical to the one the update left -- THE UPDATE IS ON THE DISK"
     printf '%s\n' "$REBOOTED" | head -6 | sed 's/^/        /'
 elif [ -z "$REBOOTED" ]; then
