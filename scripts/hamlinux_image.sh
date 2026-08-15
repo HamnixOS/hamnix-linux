@@ -947,6 +947,47 @@ if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
         echo "[image] no depmod on this host — NO modules.dep; modprobe will refuse" >&2
         echo "[image] (install the kmod package). insmod by path still works." >&2
     fi
+
+    # --- modules.dep.<group>: THE FILE THAT MAKES THE DRIVER PACKAGES ------
+    # --- UPGRADABLE ON AN INSTALLED MACHINE -------------------------------
+    # This is NOT the table above and it is not read at boot. Each
+    # hamnix-drivers-<group> package ships one, and its install hook PREPENDS
+    # it to the machine's modules.dep so a refreshed module can still be named
+    # by modprobe. Until now the image did not stage it, and that one absence
+    # cost the whole update path: scripts/hpm_installed_db.py records a package
+    # as installed only when the root carries EVERY file its tarball holds --
+    # because hpm upgrades by unlinking the recorded list, and a list naming a
+    # file the machine never had is a list that can delete the wrong thing --
+    # so hamnix-drivers-base and hamnix-drivers-hw were left OUT of
+    # /var/lib/hpm/installed.json, and what is not recorded is never upgraded.
+    # An installed machine could not receive a fix to the driver that mounts
+    # its root disk, and 1.0.24's nine touchpad and HID modules could reach it
+    # only on a freshly built medium.
+    #
+    # THE BYTES ARE THE PACKAGE'S OWN, not a reconstruction: the same
+    # image_module_selection() and the same dep_lines_for_paths() that
+    # scripts/hamlinux_packages.py uses to build the tarball produce this copy.
+    # There is one definition of which module belongs to which group, so the
+    # image cannot stage a table under a name no package owns
+    # (tests/linux/channel_covers_image.sh would call that a coverage hole) nor
+    # miss one a package holds.
+    #
+    # NOT `|| true`. A silent failure here restores exactly the defect this
+    # exists to close, and it would present as a green image build followed by
+    # a machine that cannot update its drivers -- the failure mode that took a
+    # release to notice.
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$PROJ_ROOT/scripts/hamlinux_packages.py" \
+            --stage-dep-tables "$ROOT" || {
+            echo "[image] FAILED to stage modules.dep.<group>; hamnix-drivers-*" >&2
+            echo "[image] will be left out of the installed database and \`hpm" >&2
+            echo "[image] update\` will not be able to upgrade the kernel modules" >&2
+            exit 1
+        }
+    else
+        echo "[image] no python3 — NO modules.dep.<group> staged; hamnix-drivers-*" >&2
+        echo "[image] cannot be recorded as installed and cannot be updated" >&2
+    fi
 else
     echo "[image] no modprobe or /lib/modules/$KVER — image will have no drivers" >&2
 fi
