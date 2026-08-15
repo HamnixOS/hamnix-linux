@@ -1168,10 +1168,19 @@ else
 import json,sys
 d=json.load(open(sys.argv[1]))
 print(next((p["version"] for p in d["packages"] if p["name"]=="hamnix-man"), "ABSENT"))' "$WORK/after-db.json" 2>/dev/null || echo UNPARSEABLE)"
-            if [ "$AFTER_MAN_VER" = "1.0.23" ]; then
-                ok "boot 3: the package database on the disk now records hamnix-man at 1.0.23 (it shipped recording 1.0.22)"
+            # THE VERSION IS READ OUT OF THE CHANNEL, NOT WRITTEN HERE. It was
+            # the literal "1.0.23" and went red the day 1.0.24 was published --
+            # a gate that has to be edited on every release is a gate that gets
+            # edited without being read.
+            CHAN_MAN_VER="$(python3 -c '
+import json,sys
+i=json.load(open(sys.argv[1]))
+print(next((e["version"] for e in i["packages"] if e["name"]=="hamnix-man"), "ABSENT"))' \
+                "$CHAN/index.json" 2>/dev/null || echo UNKNOWN)"
+            if [ "$AFTER_MAN_VER" = "$CHAN_MAN_VER" ] && [ "$AFTER_MAN_VER" != "1.0.22" ]; then
+                ok "boot 3: the package database on the disk now records hamnix-man at $AFTER_MAN_VER, which is what the channel serves (it shipped recording 1.0.22)"
             else
-                bad "boot 3: the database on the disk records hamnix-man at $AFTER_MAN_VER"
+                bad "boot 3: the database on the disk records hamnix-man at $AFTER_MAN_VER; the channel serves $CHAN_MAN_VER"
             fi
         else
             bad "boot 3: no readable /var/lib/hpm/installed.json on the installed disk after the update"

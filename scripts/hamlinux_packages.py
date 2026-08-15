@@ -2348,6 +2348,27 @@ def write_pkg(outdir, name, version, description, files, depends,
     try:
         top = os.path.join(stage, "%s-%s" % (name, version))
         os.makedirs(os.path.join(top, "files"))
+        # AN ENTRY NAME HPM CANNOT HOLD IS A FILE THAT GOES MISSING ON A
+        # MACHINE, AND IT HAS. A tar header has 100 bytes for the name; GNU tar
+        # (which is what tarfile writes here) puts anything longer in a
+        # preceding 'L' entry and truncates the header's own field. hpm read
+        # only that field, so it wrote the body to the TRUNCATED path and
+        # recorded the truncated path -- measured on an installed machine
+        # upgrading hamnix-drivers-base and -hw: 14 of 65 modules replaced by
+        # junk names, "extracted 35 files" printed over the top of it.
+        # user/hpm.ad now reads the 'L' entry (see longname_buf), and its
+        # ceiling is 255 bytes, which is what warn_buf and safe_buf hold. This
+        # refuses at the same number so a package can never again ship a name
+        # the machine's unpacker has to shorten.
+        for host, inside in files:
+            entry = "%s-%s/files/%s" % (name, version, inside)
+            if len(entry.encode("utf-8")) > 255:
+                raise SystemExit(
+                    "hamlinux_packages: %s: the tar entry name is %d bytes, "
+                    "over the 255 user/hpm.ad's LONGNAME_CAP holds:\n  %s\n"
+                    "hpm would refuse the archive on the machine. Shorten the "
+                    "installed path or the package name."
+                    % (name, len(entry.encode("utf-8")), entry))
         for host, inside in files:
             dest = os.path.join(top, "files", inside)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
