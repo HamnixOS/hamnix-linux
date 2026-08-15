@@ -231,6 +231,14 @@ carve "$LIVE" 2 || { bad "cannot carve the live root partition"; exit 1; }
 for f in /bin/hlinstall /bin/install /bin/haminstallui /etc/hamde/apps/installer.desktop; do
     fs_has "$PART" "$f" && ok "the medium carries $f" || bad "the medium has no $f"
 done
+# THE MARKER THAT MAKES THE INSTALLER REACHABLE BY A PERSON. Without it
+# user/hamdesktop.ad, user/hampanelscene.ad and user/hamappmenu.ad all hide the
+# Install Hamnix launcher (X-Hamnix-LiveOnly=true), so the installer is on the
+# medium and startable from nowhere in the GUI. This is the only assertion here
+# about what he can actually CLICK.
+fs_has "$PART" /etc/installer-medium \
+    && ok "the medium carries /etc/installer-medium, so the desktop, the panel and the Applications menu will offer Install Hamnix" \
+    || bad "no /etc/installer-medium -- the installer is on the medium but HIDDEN in every menu that could start it"
 fs_has "$PART" /boot/BOOTX64.EFI \
     && ok "the medium carries /boot/BOOTX64.EFI for the target's ESP" \
     || bad "no /boot/BOOTX64.EFI -- the installer has nothing to make the target bootable with"
@@ -313,9 +321,24 @@ boot_vm() {  # boot_vm <name> <seconds> <attach_usb:0|1>
             -device usb-storage,bus=xhci.0,drive=usbstick,bootindex=0
         )
     fi
-    timeout "$secs" "$QEMU_BIN" "${args[@]}" >"$d/qemu.out" 2>&1 &
+    # QEMU IS STARTED DIRECTLY, not under `timeout`, so that the pid handed to
+    # reap_add is the pid of the VM. Wrapping it means registering the
+    # WRAPPER: killing that on the way out leaves the emulator orphaned and
+    # running, which is exactly the leak tests/linux/reap.sh was written for
+    # (61 strays found alive one morning, the oldest eight hours old).
+    "$QEMU_BIN" "${args[@]}" >"$d/qemu.out" 2>&1 &
     local vm=$!
     reap_add "$vm"
+    local waited=0
+    while kill -0 "$vm" 2>/dev/null && [ "$waited" -lt "$secs" ]; do
+        sleep 2; waited=$((waited + 2))
+    done
+    if kill -0 "$vm" 2>/dev/null; then
+        info "$name: still running after ${secs}s; stopping it"
+        kill -TERM "$vm" 2>/dev/null
+        sleep 3
+        kill -KILL "$vm" 2>/dev/null
+    fi
     wait "$vm" 2>/dev/null
     # QEMU CAN REFUSE TO START, and then every assertion below reads an empty
     # log and answers FAIL -- a paragraph about a machine that was never
@@ -436,6 +459,18 @@ fi
 # =========================================================================
 # The USB device is not on the command line at all, so there is no tie-break to
 # get wrong and no way for a pass here to be the medium booting again.
+# AND ONLY IF THERE IS SOMETHING TO BOOT. With no partition table the firmware
+# has nothing to run, so this boot sits in the UEFI shell until its timeout --
+# ten minutes per run, three times over, to re-measure a disk the host has
+# already read as empty. Skipping is not softening the verdict: the install
+# has already been marked FAIL above, by name.
+if [ "${NPARTS:-0}" -lt 2 ]; then
+    info "skipping boots 2-4: the installer wrote no partition table, so there is nothing to boot"
+    cleanup_mounts
+    echo "instusb: $pass passed, $fail failed"
+    exit 1
+fi
+
 say "BOOT 2: NVMe alone, the USB device DETACHED"
 boot_vm installed-1 600 0
 L2="$WORK/installed-1/serial.log"
@@ -500,11 +535,21 @@ RCEOF
         grep -aq 'INSTUSB-UPD: asking 255.one' "$L3" \
             && ok "boot 3: the installed machine ran the update rc" \
             || bad "boot 3: the update rc never ran"
-        if grep -aqi 'refresh.*ok\|index.*verified\|packages' "$L3"; then
-            ok "boot 3: hpm got an index from the network"
+        # hpm's OWN success lines, not a loose word match. `hpm: refreshed
+        # index from <url>` is printed only after the index authenticated
+        # against the shipped trust root, and `hpm: update done (upgraded=N`
+        # only after the transaction closed.
+        if grep -aq 'hpm: refreshed index from' "$L3"; then
+            ok "boot 3: hpm refreshed and AUTHENTICATED an index from the network"
+            grep -a 'hpm: refreshed index from' "$L3" | head -1 | sed 's/^/        /'
         else
-            bad "boot 3: hpm did not get an index -- see $L3"
+            bad "boot 3: hpm never printed 'refreshed index from' -- no authenticated index -- see $L3"
             grep -a 'hpm' "$L3" | tail -10 | sed 's/^/        /'
+        fi
+        if grep -aq 'hpm: update done' "$L3"; then
+            ok "boot 3: $(grep -a 'hpm: update done' "$L3" | head -1)"
+        else
+            bad "boot 3: hpm never printed 'update done'"
         fi
         grep -aq 'INSTUSB-UPD-DONE' "$L3" \
             && ok "boot 3: the update rc ran to the end" \

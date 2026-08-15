@@ -1161,6 +1161,40 @@ $(ldd "$p" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}')"
     # a resolvable NAME (distro_table_lookup reads this file at run time) and
     # no boot-time mount and no menu section.
     printf 'insttools %s\n' /usr/lib/instroot >>"$ROOT/etc/distros"
+
+    # --- THE MARKER THAT MAKES THE INSTALLER VISIBLE AT ALL ---------------
+    # WITHOUT THIS FILE THERE IS NO WAY TO START THE INSTALLER FROM THE
+    # DESKTOP. etc/hamde/apps/installer.desktop carries X-Hamnix-LiveOnly=true,
+    # and all THREE surfaces that could offer it check for /etc/installer-medium
+    # before showing it:
+    #
+    #   user/hamdesktop.ad     _desk_is_live()  -- the desktop icon
+    #   user/hampanelscene.ad  _am_is_live()    -- the panel's fallback menu
+    #   user/hamappmenu.ad     _dd_is_live()    -- the Applications menu
+    #
+    # That marker is planted by scripts/build_initramfs.py and
+    # scripts/build_installer_img.sh -- the HAMNIX-KERNEL installer media --
+    # and hamappmenu.ad's own comment says so ("planted in the cpio ONLY by").
+    # This script never wrote it. So on a hamnix-linux live USB the installer
+    # was on the medium, in /bin, with a launcher in /etc/hamde/apps, and
+    # INVISIBLE in every menu that could have started it: boot the stick, get a
+    # desktop, and there is no Install Hamnix anywhere.
+    #
+    # It is written only under HAMLINUX_INSTALLER=1, which is exactly the
+    # condition that makes an image an install medium (it is the same flag that
+    # stages /boot and the tools above), so an ordinary developer image still
+    # correctly reports itself as not-live.
+    {
+        echo "# /etc/installer-medium -- this root is an INSTALL MEDIUM."
+        echo "#"
+        echo "# Written by scripts/hamlinux_image.sh under HAMLINUX_INSTALLER=1."
+        echo "# Its EXISTENCE is the signal; nothing reads the contents. The"
+        echo "# desktop, the panel and the Applications menu each show the"
+        echo "# 'Install Hamnix' launcher only when this file is present, so an"
+        echo "# installed system (which never carries it) does not offer to"
+        echo "# install over itself."
+    } >"$ROOT/etc/installer-medium"
+
     INST_SZ=$(du -sk "$INSTROOT" | cut -f1)
     echo "[image] staged the installer's partitioning tools into" \
          "/usr/lib/instroot (${INST_SZ}K, sgdisk + mkfs.vfat + mkfs.ext4)"
