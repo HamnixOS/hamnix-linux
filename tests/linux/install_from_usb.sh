@@ -85,7 +85,27 @@
 # at 146649bd, rva=0 size=0 -- so he must turn Secure Boot off, and no VM can
 # tell him that).
 
-# WHERE THIS STANDS, MEASURED (three boots under OVMF, ~20 min): 33 PASSED, 2 FAILED.
+# WHERE THIS STANDS, MEASURED (three boots under OVMF): 53 PASSED, 0 FAILED on a
+# full run, 52 with HAMLINUX_INSTUSB_REUSE=1 -- the difference is the one
+# assertion on the seed disk pass, which a reuse run does not make. The negative
+# control, HAMLINUX_INSTUSB_NO_DB=1, is 38 PASSED, 0 FAILED with every database
+# assertion inverted. All three were run on this tree.
+#
+# THE LAST RED IS CLOSED, AND IT WAS THIS: `hpm update` was a NO-OP on a freshly
+# installed machine. The index authenticated over TLS and then nothing upgraded,
+# because /var/lib/hpm was an empty directory -- hpm had no record of what is on
+# the disk, so it compared the index against nothing and exited 0. The medium
+# now carries /var/lib/hpm/installed.json, emitted by scripts/hamlinux_disk.sh
+# from the channel's TARBALLS against the very directory it mkfs's, and
+# hlinstall's copy_top("var") carries it to the target. MEASURED on the
+# installed disk after two power cycles: `update done (upgraded=3)`, a file
+# whose bytes were a marker string is 568 bytes of the real manual page, and the
+# database on the disk records hamnix-man at 1.0.23 where the medium shipped it
+# at 1.0.22. The negative control, same medium and same network with the
+# database withheld, leaves that file stale and makes hpm REFUSE by name.
+#
+# THE PREVIOUS MEASUREMENT, kept because it is what this section was written
+# against: 33 PASSED, 2 FAILED, both reds that one defect.
 #
 # GREEN, and this is the whole loop the owner asked for, minus one step:
 #   * the live medium boots as usb-storage on xHCI and switches root (not RAM)
@@ -99,13 +119,22 @@
 #   * it reboots and phase 1's marker is still on the disk (so the root really
 #     is persistent), and it goes all the way to `rc.boot: up` after the update
 #
-# RED, and both reds are ONE defect: `hpm update` is a NO-OP on a freshly
-# installed machine. The index authenticates and then there is nothing to
-# upgrade, because scripts/hamlinux_image.sh creates /var/lib/hpm as an EMPTY
-# DIRECTORY and no one ever writes installed.json. The second red (no package
-# list to compare after the reboot) is the same hole seen from the other end.
-# See the commit that added this paragraph for why it is not fixed here rather
-# than guessed at.
+# NOW ALSO GREEN, and this is the step that was missing:
+#   * the medium carries a package database whose every file list came out of
+#     the package TARBALLS -- 89 packages, 238 paths, checked one by one against
+#     the tarballs and one by one against the medium's own ext4
+#   * `hpm update` on the installed machine upgrades three packages for real
+#   * a file's CONTENT changes on the installed disk, and is still changed after
+#     a power cycle -- read by the host off the ext4, and read back by the guest
+#
+# STILL NOT COVERED BY ANY OF IT: 37 of the channel's 126 packages are not on
+# the medium and so are not recorded -- the GPU drivers, the Vulkan stack, the
+# 407 nouveau firmware blobs, and six coreutils the image never staged. Those
+# are correctly absent, not missing. But hamnix-drivers-base and
+# hamnix-drivers-hw are excluded for ONE generated file each
+# (modules.dep.<group>, written by their own install hook and not staged by the
+# image), so `hpm update` cannot upgrade the boot kernel modules on an installed
+# machine. That is the next hole, and it is named rather than papered over.
 
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && cd .. && pwd)"
@@ -190,6 +219,31 @@ cleanup_mounts() { rm -f "$PART"; }
 # REUSE=1 skips the three IMAGE passes (build/image is already staged); the
 # medium itself is still rebuilt unless it is also already there, because it is
 # the cheap pass and the one that carries this gate's rc.
+
+# ---- THE CHANNEL, WHICH IS WHERE THE PACKAGE DATABASE COMES FROM --------
+# scripts/hamlinux_disk.sh emits /var/lib/hpm/installed.json from the built
+# channel's TARBALLS, against the very directory it is about to mkfs. No
+# channel, no database, and `hpm update` on the installed machine has nothing
+# to compare the index against -- which is the defect this section was added
+# for, measured red at 7213661a.
+#
+# HAMLINUX_INSTUSB_NO_DB=1 IS THE NEGATIVE CONTROL, and it is the only way to
+# reproduce that red now: the medium is built with the database deleted, and
+# every assertion below flips to demanding hpm REFUSE rather than silently
+# succeed. A gate that can only show green cannot show that the green means
+# anything.
+CHAN="${HAMLINUX_HPM_CHANNEL:-build/repo/linux}"
+NO_DB="${HAMLINUX_INSTUSB_NO_DB:-0}"
+if [ "$NO_DB" = 1 ]; then
+    say "NEGATIVE CONTROL: HAMLINUX_INSTUSB_NO_DB=1 -- the medium will carry NO package database"
+fi
+if [ -f "$CHAN/index.json" ]; then
+    info "channel: $CHAN ($(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["packages"]))' "$CHAN/index.json") packages)"
+else
+    bad "no built channel at $CHAN/index.json -- the disk builder cannot emit a package database and this gate cannot test the update. Run: python3 scripts/hamlinux_packages.py --out build/repo --version <v>"
+    exit 1
+fi
+
 if [ "${HAMLINUX_INSTUSB_REUSE:-0}" = 1 ]; then
     say "reusing the staged build/image (HAMLINUX_INSTUSB_REUSE=1)"
     grep -q 'INCOMPLETE' "$WORK/img2.log" 2>/dev/null && bad "the staged image's instroot is incomplete"
@@ -199,6 +253,9 @@ else
         bad "lean image build"; tail -20 "$WORK/img1.log"; exit 1; }
     scripts/hamlinux_disk.sh "$WORK/seed.img" 3G >"$WORK/disk1.log" 2>&1 || {
         bad "seed disk build"; tail -20 "$WORK/disk1.log"; exit 1; }
+    grep -q '^\[installed-db\]' "$WORK/disk1.log" \
+        && ok "$(grep -m1 '^\[installed-db\] [0-9]' "$WORK/disk1.log" | sed 's/^\[installed-db\] //')" \
+        || bad "scripts/hamlinux_disk.sh emitted no package database -- see $WORK/disk1.log"
     HAMLINUX_INSTALLER=1 scripts/hamlinux_image.sh >"$WORK/img2.log" 2>&1 || {
         bad "installer image build"; tail -20 "$WORK/img2.log"; exit 1; }
     grep -q 'INCOMPLETE' "$WORK/img2.log" && {
@@ -290,13 +347,123 @@ RCEOF
 cat >"$EXTRA/etc/instusb.p2" <<'RCEOF'
 echo 'INSTUSB-P2: this machine has been rebooted since the update'
 hpm list
+echo 'INSTUSB-P2: the file the update rewrote, read back after a power cycle'
+cat /usr/share/man/cat.1.md
+echo 'INSTUSB-P2: and two files no upgrade was entitled to touch'
+cat /etc/rc.boot
+ls /bin/cat
 echo 'INSTUSB-P2-DONE'
 RCEOF
+
+# ---- WHAT MAKES THE UPDATE MEANINGFUL, AND WHY IT IS A FIXTURE ----------
+# 1.0.23 is published and served, and this tree BUILDS 1.0.23, so a machine
+# installed from this medium is already level with the channel and a correct
+# `hpm update` legitimately has nothing to do. "update done (upgraded=0)" would
+# pass a grep and prove nothing: it is the same output the broken machine
+# produced, arrived at honestly. So the medium is given a database that records
+# THREE packages one version behind, which is what a machine that took the
+# medium before the release actually looks like, and the channel then has real
+# work to do. installed_update_wsysver.sh builds its baseline the same way and
+# for the same reason.
+#
+# IT IS DERIVED FROM THE REAL ONE, not written by hand. scripts/hamlinux_disk.sh
+# left build/image/disk/rootdir/var/lib/hpm/installed.json behind on the seed
+# pass above; every file list in it came out of the package tarballs, and the
+# only thing changed here is three version strings. The lists are still checked
+# against the tarballs, on the medium, further down.
+#
+# THE THREE ARE INERT ON PURPOSE. hamnix-man is 21 markdown files, cal is a
+# calendar and bc is a calculator. An upgrade is a remove followed by an
+# install, so a failed download leaves a hole where the old file was -- and a
+# hole in /bin/hamsh or /bin/cat is a machine that does not boot. Nothing in the
+# boot path is put at risk to measure the mechanism. hamnix-vkprobe was the
+# obvious fourth and is deliberately NOT here: it depends on hamnix-vulkan,
+# which this medium does not carry, so upgrading it would pull a 24-file GPU
+# stack down as a side effect and measure that instead.
+#
+# ALL THREE DEPEND ON hamnix-init>=1, AND THAT IS THE POINT OF CHECKING. hpm
+# resolves an upgrade through the normal solver, so a dependency the database
+# does not record is one it INSTALLS -- and hamnix-init owns
+# /etc/rc.boot.installed, which on this medium carries the phase hook driving
+# this gate. It is recorded (see the hamnix-init note in
+# scripts/hamlinux_image.sh), so the solver finds it satisfied and lays nothing
+# down. If that ever regresses, phase 2 stops running and this gate says so.
+DB_SRC="build/image/disk/rootdir/var/lib/hpm/installed.json"
+DOWNGRADE="hamnix-man hamnix-cal hamnix-bc"
+MANGLED_MAN="usr/share/man/cat.1.md"
+MANGLE_MARK="INSTUSB-STALE-CONTENT-THE-UPDATE-MUST-REPLACE-THIS"
+if [ "$NO_DB" = 1 ]; then
+    # THE NEGATIVE CONTROL, and it is produced the way the defect was: the disk
+    # builder is pointed at a channel that is not there, so it emits nothing and
+    # /var/lib/hpm is the empty directory scripts/hamlinux_image.sh created. The
+    # overlay cannot do this -- `cp -a` only adds files -- and deleting from the
+    # finished image afterwards is the debugfs trap this gate already paid for.
+    DISK_CHAN_OVERRIDE="$WORK/no-such-channel"
+    info "negative control: the live medium is built with HAMLINUX_HPM_CHANNEL=$DISK_CHAN_OVERRIDE, so it carries no installed.json at all"
+else
+    # The seed pass above leaves the real database in the staging rootdir. A
+    # REUSE run (or a run following the negative control, whose live pass
+    # deliberately emitted none) may not have it, so it is regenerated from the
+    # same script and the same channel rather than skipped.
+    if [ ! -f "$DB_SRC" ] && [ -d build/image/disk/rootdir ]; then
+        info "no $DB_SRC; regenerating it from $CHAN"
+        python3 scripts/hpm_installed_db.py "$CHAN" build/image/disk/rootdir \
+            "$DB_SRC" >"$WORK/dbregen.log" 2>&1 \
+            || { bad "could not regenerate the package database"; tail -5 "$WORK/dbregen.log"; }
+    fi
+fi
+if [ "$NO_DB" != 1 ] && [ -f "$DB_SRC" ]; then
+    mkdir -p "$EXTRA/var/lib/hpm" "$EXTRA/usr/share/man"
+    python3 - "$DB_SRC" "$EXTRA/var/lib/hpm/installed.json" $DOWNGRADE <<'PYEOF'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+want = set(sys.argv[3:])
+db = json.load(open(src))
+hit = []
+for p in db["packages"]:
+    if p["name"] in want:
+        p["version"] = "1.0.22"
+        hit.append(p["name"])
+missing = sorted(want - set(hit))
+if missing:
+    raise SystemExit("instusb: the disk builder did not record %s as installed, "
+                     "so this fixture cannot downgrade it" % " ".join(missing))
+# hpm's own serialisation shape (user/hpm.ad:_installed_rewrite_with_added), so
+# the file on the medium is indistinguishable from one hpm wrote.
+out = ['{\n  "schema": 1,\n  "packages": [\n']
+out.append(",\n".join(
+    '    {\n      "name": "%s",\n      "version": "%s",\n      "installed_at": "",\n'
+    '      "pinned": false,\n      "target": "%s",\n      "files": [%s]\n    }'
+    % (p["name"], p["version"], p.get("target", "#hamnix-system"),
+       ", ".join('"%s"' % f for f in p["files"])) for p in db["packages"]))
+out.append("\n  ]\n}\n")
+open(dst, "w").write("".join(out))
+print("instusb: fixture records %d packages, %s at 1.0.22"
+      % (len(db["packages"]), " ".join(sorted(hit))))
+PYEOF
+    [ -s "$EXTRA/var/lib/hpm/installed.json" ] || {
+        bad "could not build the downgraded package-database fixture"; exit 1; }
+    # AND A FILE WHOSE CONTENT THE UPDATE MUST CHANGE. `hpm update` exiting 0 is
+    # not evidence that anything moved; a byte on the disk is. This one is owned
+    # by hamnix-man and by nothing else (checked below), so restoring it is hpm
+    # unlinking the recorded path and laying the 1.0.23 tarball's copy down.
+    ok "the medium's package database records $(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["packages"]))' "$EXTRA/var/lib/hpm/installed.json") packages, three of them one version behind the channel"
+elif [ "$NO_DB" != 1 ]; then
+    bad "no $DB_SRC after the seed disk pass -- scripts/hamlinux_disk.sh did not emit a package database"
+fi
+# THE STALE FILE IS STAGED IN BOTH DIRECTIONS, and that is what makes it a
+# control rather than a decoration. On the green run the update must replace it;
+# on the negative control -- same medium, same install, same network, no
+# database -- it must STILL BE THERE afterwards. One assertion, two runs, and
+# the difference between them is the whole claim.
+mkdir -p "$EXTRA/usr/share/man"
+printf '%s\n' "$MANGLE_MARK" >"$EXTRA/$MANGLED_MAN"
 
 if [ "${HAMLINUX_INSTUSB_REUSE:-0}" = 1 ] && [ -f "$LIVE" ]; then
     :
 else
     HAMLINUX_DISK_RC="$WORK/rc.install" HAMLINUX_DISK_EXTRA="$EXTRA" \
+    HAMLINUX_HPM_CHANNEL="${DISK_CHAN_OVERRIDE:-$CHAN}" \
         scripts/hamlinux_disk.sh "$LIVE" 4G >"$WORK/disk2.log" 2>&1 || {
         bad "live medium build"; tail -20 "$WORK/disk2.log"; exit 1; }
 fi
@@ -339,6 +506,142 @@ for t in sgdisk mkfs.vfat mkfs.ext4; do
 done
 # AND THE LIVE rc IS THE ONE THAT LOOKS LIKE AN INSTALLED ONE. Recorded here so
 # the discriminator used after the install is a measurement, not a claim.
+# ---- THE PACKAGE DATABASE, READ OFF THE MEDIUM ITSELF -------------------
+# Everything here is read out of the ext4 filesystem on the medium with
+# debugfs, not out of the staging directory that produced it. The claim being
+# checked is about the disk the owner will hold.
+#
+# AND THE LISTS ARE CHECKED AGAINST THE TARBALLS, EVERY PACKAGE, EVERY FILE.
+# hpm upgrades by REMOVING the recorded files and installing the new version
+# (user/hpm.ad, cmd_remove), so a database whose lists are approximate makes
+# the first update delete the wrong files on a machine he is standing in front
+# of. This is the assertion that says they are not approximate: for each
+# recorded package, open <name>-<version>.tar.gz and compare its regular-file
+# entries under files/ with what the database says, as sets.
+if [ "$NO_DB" = 1 ]; then
+    if fs_has "$PART" /var/lib/hpm/installed.json; then
+        bad "negative control: the medium carries an installed.json and it was not supposed to"
+    else
+        ok "negative control: the medium carries NO /var/lib/hpm/installed.json (this is 7213661a's state, reproduced)"
+    fi
+elif fs_has "$PART" /var/lib/hpm/installed.json; then
+    fs_cat "$PART" /var/lib/hpm/installed.json >"$WORK/medium-installed.json"
+    if [ -s "$WORK/medium-installed.json" ]; then
+        ok "the medium carries /var/lib/hpm/installed.json ($(stat -c%s "$WORK/medium-installed.json") bytes)"
+    else
+        bad "the medium's installed.json is empty"
+    fi
+    python3 - "$WORK/medium-installed.json" "$CHAN" >"$WORK/dbcheck.txt" 2>&1 <<'PYEOF'
+import json, os, sys, tarfile
+db = json.load(open(sys.argv[1]))
+chan = sys.argv[2]
+# The published index says which version's tarball each recorded package would
+# be compared against. The fixture records three at 1.0.22, which this channel
+# does not carry -- their lists came from the 1.0.23 tarball, so that is what
+# they are checked against.
+idx = {e["name"]: e["version"]
+       for e in json.load(open(os.path.join(chan, "index.json")))["packages"]}
+checked = mismatched = 0
+claimed = {}
+lines = []
+for p in db["packages"]:
+    name = p["name"]
+    ver = idx.get(name)
+    if ver is None:
+        lines.append("NOTINCHANNEL %s" % name)
+        continue
+    prefix = "%s-%s/files/" % (name, ver)
+    tarpath = os.path.join(chan, "packages", "%s-%s.tar.gz" % (name, ver))
+    real = set()
+    for ti in tarfile.open(tarpath, "r:gz"):
+        if ti.name.startswith(prefix) and ti.isfile():
+            rel = ti.name[len(prefix):]
+            if rel:
+                real.add(rel)
+    # user/hpm.ad:_is_machine_owned -- hpm neither writes nor CLAIMS this path
+    # when it already exists, and a database that claimed it would have the
+    # first upgrade delete the machine's boot script.
+    real.discard("etc/rc.boot")
+    recorded = set(p["files"])
+    checked += 1
+    if recorded != real:
+        mismatched += 1
+        lines.append("MISMATCH %s extra=%s missing=%s"
+                     % (name, sorted(recorded - real)[:4], sorted(real - recorded)[:4]))
+    for f in recorded:
+        claimed.setdefault(f, []).append(name)
+dupes = sorted(f for f, ns in claimed.items() if len(ns) > 1)
+lines.append("CHECKED %d" % checked)
+lines.append("MISMATCHED %d" % mismatched)
+lines.append("FILES %d" % len(claimed))
+lines.append("DUPES %d" % len(dupes))
+for f in dupes[:10]:
+    lines.append("DUPE %s %s" % (f, " ".join(claimed[f])))
+lines.append("RCBOOT %d" % len([1 for p in db["packages"] if "etc/rc.boot" in p["files"]]))
+print("\n".join(lines))
+PYEOF
+    DB_CHECKED="$(grep -m1 '^CHECKED ' "$WORK/dbcheck.txt" | awk '{print $2}')"
+    DB_MISMATCH="$(grep -m1 '^MISMATCHED ' "$WORK/dbcheck.txt" | awk '{print $2}')"
+    DB_FILES="$(grep -m1 '^FILES ' "$WORK/dbcheck.txt" | awk '{print $2}')"
+    DB_DUPES="$(grep -m1 '^DUPES ' "$WORK/dbcheck.txt" | awk '{print $2}')"
+    DB_RCBOOT="$(grep -m1 '^RCBOOT ' "$WORK/dbcheck.txt" | awk '{print $2}')"
+    if [ "${DB_MISMATCH:-x}" = 0 ] && [ "${DB_CHECKED:-0}" -gt 0 ]; then
+        ok "every one of the $DB_CHECKED recorded packages has the file list its TARBALL actually contains ($DB_FILES distinct paths) -- not one is reconstructed"
+    else
+        bad "the medium's file lists do not match the tarballs (checked=${DB_CHECKED:-?} mismatched=${DB_MISMATCH:-?})"
+        grep '^MISMATCH\|^NOTINCHANNEL' "$WORK/dbcheck.txt" | head -8 | sed 's/^/        /'
+    fi
+    if [ "${DB_DUPES:-x}" = 0 ]; then
+        ok "no path is claimed by more than one package, so no upgrade can delete a file a different package owns"
+    else
+        bad "$DB_DUPES path(s) are claimed by two packages -- upgrading either would delete the other's file"
+        grep '^DUPE ' "$WORK/dbcheck.txt" | head -6 | sed 's/^/        /'
+    fi
+    # hamnix-init IS THE ONE EVERY OTHER PACKAGE DEPENDS ON. If it is not
+    # recorded, the solver treats every upgrade as needing a fresh hamnix-init
+    # install, which lays /etc/rc.boot.installed down again -- and that is the
+    # file a release improves the boot with, so an unrecorded hamnix-init also
+    # means an installed machine no update can ever improve.
+    if grep -q '"hamnix-init"' "$WORK/medium-installed.json"; then
+        ok "hamnix-init is recorded, so an upgrade of anything that depends on it does not drag a fresh copy of the boot scripts in"
+    else
+        bad "hamnix-init is NOT recorded -- every upgrade would reinstall it and overwrite /etc/rc.boot.installed"
+    fi
+    if [ "${DB_RCBOOT:-x}" = 0 ]; then
+        ok "no package claims etc/rc.boot, so an upgrade cannot take the machine's boot script (user/hpm.ad:_is_machine_owned)"
+    else
+        bad "$DB_RCBOOT package(s) claim etc/rc.boot -- the first upgrade would leave the machine with no boot script"
+    fi
+    # AND EVERY RECORDED PATH IS REALLY ON THE MEDIUM. "Installed" has to mean
+    # installed: a record for a package the image never staged would have hpm
+    # remove-then-install something the machine never had. One debugfs run over
+    # a command file, so 200-odd stats cost one open of a 4 GB image.
+    python3 -c '
+import json,sys
+db=json.load(open(sys.argv[1]))
+for p in db["packages"]:
+    for f in p["files"]:
+        print("stat /"+f)' "$WORK/medium-installed.json" >"$WORK/dbstat.cmds"
+    debugfs -f "$WORK/dbstat.cmds" "$PART" >"$WORK/dbstat.out" 2>&1
+    DB_WANT="$(wc -l <"$WORK/dbstat.cmds")"
+    DB_GOT="$(grep -c '^Inode:' "$WORK/dbstat.out" || true)"
+    if [ "$DB_WANT" -gt 0 ] && [ "$DB_GOT" = "$DB_WANT" ]; then
+        ok "all $DB_WANT recorded paths exist on the medium's root filesystem -- every package it calls installed really is"
+    else
+        bad "only $DB_GOT of $DB_WANT recorded paths exist on the medium -- the database claims packages the medium does not carry"
+        grep -B1 'File not found' "$WORK/dbstat.out" | head -8 | sed 's/^/        /'
+    fi
+    # THE INSTRUMENT IS SHOWN ABLE TO SAY NO. A `stat` of a path that is not
+    # there must not be counted as an Inode line, or the check above would pass
+    # on an empty medium.
+    echo "stat /var/lib/hpm/there-is-no-such-file" >"$WORK/dbstat.neg"
+    debugfs -f "$WORK/dbstat.neg" "$PART" 2>&1 | grep -q '^Inode:' \
+        && bad "the debugfs presence check reports an inode for a file that does not exist -- it cannot tell present from absent" \
+        || ok "the presence check answers NO for a path that is not on the medium (so the count above means something)"
+else
+    bad "the medium carries no /var/lib/hpm/installed.json -- \`hpm update\` on the installed machine will have nothing to compare the index against"
+fi
+
 fs_cat "$PART" /etc/rc.boot >"$WORK/live-rc.boot"
 LIVE_RCBOOT_MD5="$(md5sum "$WORK/live-rc.boot" | cut -d' ' -f1)"
 info "the LIVE medium's /etc/rc.boot is md5 $LIVE_RCBOOT_MD5, $(wc -l <"$WORK/live-rc.boot") lines"
@@ -594,8 +897,33 @@ else
     bad "boot 2: hpm never printed 'refreshed index from' -- no authenticated index"
     grep -a 'hpm' "$L2" | tail -10 | sed 's/^/        /'
 fi
-if grep -aq 'hpm: update done' "$L2"; then
+if [ "$NO_DB" = 1 ]; then
+    # THE THIRD REQUIREMENT, MEASURED: when hpm cannot know what is on the
+    # machine it must say so and REFUSE, not treat the machine as empty. That
+    # last is exactly what it did at 7213661a -- "no packages installed;
+    # nothing to update", exit 0, on a machine with a full userland on it.
+    if grep -aq 'this machine.s package state is UNKNOWN' "$L2"; then
+        ok "boot 2 (negative control): with no database hpm REFUSED and named the file -- $(grep -a 'no package database at' "$L2" | head -1 | tr -d '\r')"
+    elif grep -aq 'no packages installed; nothing to update' "$L2"; then
+        bad "boot 2 (negative control): hpm treated a machine with no database as a machine with nothing installed -- this is 7213661a's bug and it is still here"
+    else
+        bad "boot 2 (negative control): hpm said neither of the two things it could say"
+        grep -a 'hpm' "$L2" | tail -8 | sed 's/^/        /'
+    fi
+    grep -aq 'hpm: update done' "$L2" \
+        && bad "boot 2 (negative control): hpm reported a completed update with no package database" \
+        || ok "boot 2 (negative control): hpm did NOT report a completed update"
+elif grep -aq 'hpm: update done' "$L2"; then
     ok "boot 2: $(grep -a 'hpm: update done' "$L2" | head -1 | tr -d '\r')"
+    UPG="$(grep -a 'hpm: update done' "$L2" | head -1 | sed 's/.*upgraded=\([0-9]*\).*/\1/')"
+    if [ "${UPG:-0}" -ge 3 ]; then
+        ok "boot 2: the update actually upgraded $UPG packages -- it is not a no-op that exits 0"
+    else
+        bad "boot 2: the update reported upgraded=${UPG:-?}; the medium recorded three packages a version behind, so a working update has three to do"
+    fi
+    grep -aq 'hpm: upgrading hamnix-man 1.0.22 -> 1.0.23' "$L2" \
+        && ok "boot 2: hpm named the transition it performed (hamnix-man 1.0.22 -> 1.0.23)" \
+        || bad "boot 2: hpm never printed the hamnix-man upgrade line"
 elif grep -aq 'no packages installed; nothing to update' "$L2"; then
     # SAY WHICH KIND OF NOTHING. The index authenticated and 126 packages came
     # down, so the network, the TLS and the shipped trust root are all fine --
@@ -648,7 +976,17 @@ grep -aq 'rc.boot: up' "$L3" \
 # version that only ever existed in boot 2's RAM cannot appear here.
 AFTER_UPD="$(grep -a -A40 'INSTUSB-P1: hpm list after' "$L2" 2>/dev/null | grep -aE '^[a-z0-9-]+ +[0-9]+\.[0-9]+\.[0-9]+' | sort)"
 REBOOTED="$(grep -a -A40 'INSTUSB-P2: this machine' "$L3" 2>/dev/null | grep -aE '^[a-z0-9-]+ +[0-9]+\.[0-9]+\.[0-9]+' | sort)"
-if [ -n "$REBOOTED" ] && [ "$AFTER_UPD" = "$REBOOTED" ]; then
+if [ "$NO_DB" = 1 ]; then
+    # THE CONTROL'S EXPECTATION IS THE OPPOSITE ONE. With no database there is
+    # no package list to compare, and demanding one here would score the
+    # control's correct behaviour as a failure. What IS asserted is that the
+    # machine says the same nothing on both sides of the reboot.
+    if [ -z "$REBOOTED" ] && [ -z "$AFTER_UPD" ]; then
+        ok "boot 3 (negative control): still no package list after the reboot, on both sides -- the machine's state did not silently acquire one"
+    else
+        bad "boot 3 (negative control): a package list appeared on a machine with no database"
+    fi
+elif [ -n "$REBOOTED" ] && [ "$AFTER_UPD" = "$REBOOTED" ]; then
     ok "boot 3: the package list is byte-identical to the one the update left -- THE UPDATE IS ON THE DISK"
     printf '%s\n' "$REBOOTED" | head -6 | sed 's/^/        /'
 elif [ -z "$REBOOTED" ]; then
@@ -656,6 +994,89 @@ elif [ -z "$REBOOTED" ]; then
 else
     bad "boot 3: the package list changed across the reboot"
     diff <(printf '%s\n' "$AFTER_UPD") <(printf '%s\n' "$REBOOTED") | head -10 | sed 's/^/        /'
+fi
+
+# =========================================================================
+# 6. WHAT THE UPDATE LEFT ON THE DISK, READ BY THE HOST AFTER THE POWER CYCLE.
+# =========================================================================
+# `hpm update` exiting 0 is not evidence that anything moved. This reads the
+# INSTALLED NVMe -- after two power cycles, with the guest off and nothing
+# writing -- and asks whether the bytes changed. Anything that existed only in
+# boot 2's page cache cannot be here.
+if [ "$NO_DB" = 1 ]; then
+    say "negative control: nothing should have changed on the disk"
+    if carve "$NVME" 2; then
+        fs_cat "$PART" "/$MANGLED_MAN" >"$WORK/after-man.txt" 2>/dev/null || true
+        grep -q "$MANGLE_MARK" "$WORK/after-man.txt" 2>/dev/null \
+            && ok "negative control: the stale file is STILL stale, because nothing upgraded it" \
+            || bad "negative control: the stale marker is gone, so something upgraded a machine hpm said it knew nothing about"
+    fi
+else
+    say "WHAT THE UPDATE PUT ON THE DISK"
+    if carve "$NVME" 2; then
+        # 6a. THE CONTENT CHANGED. The medium carried a file whose bytes were a
+        # marker string and whose owning package was recorded one version back.
+        # If it still says the marker, the update touched nothing on the disk
+        # however cheerful its exit status was.
+        fs_cat "$PART" "/$MANGLED_MAN" >"$WORK/after-man.txt" 2>/dev/null || true
+        if [ ! -s "$WORK/after-man.txt" ]; then
+            bad "boot 3: /$MANGLED_MAN is missing or empty on the installed disk -- the upgrade removed it and did not put it back"
+        elif grep -q "$MANGLE_MARK" "$WORK/after-man.txt"; then
+            bad "boot 3: /$MANGLED_MAN still holds the stale marker -- \`hpm update\` exited 0 and changed nothing on the disk"
+        else
+            ok "boot 3: /$MANGLED_MAN NO LONGER holds the stale marker and is $(stat -c%s "$WORK/after-man.txt") bytes of real content -- the update rewrote a file on the installed disk and it SURVIVED THE POWER CYCLE"
+            info "boot 3: it now begins: $(head -1 "$WORK/after-man.txt" | tr -d '\r' | cut -c1-70)"
+            if cmp -s "$WORK/after-man.txt" etc/man/cat.1.md; then
+                ok "boot 3: and it is byte-identical to this tree's etc/man/cat.1.md -- the channel delivered the file the source says it should"
+            else
+                info "boot 3: it differs from this tree's etc/man/cat.1.md; 255.one's 1.0.23 was built from an older tree, so this is expected unless that file changed since the release"
+            fi
+        fi
+
+        # 6b. THE DATABASE MOVED WITH IT. A machine whose files changed but
+        # whose record did not would upgrade the same package again forever.
+        fs_cat "$PART" /var/lib/hpm/installed.json >"$WORK/after-db.json" 2>/dev/null || true
+        if [ -s "$WORK/after-db.json" ]; then
+            AFTER_MAN_VER="$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(next((p["version"] for p in d["packages"] if p["name"]=="hamnix-man"), "ABSENT"))' "$WORK/after-db.json" 2>/dev/null || echo UNPARSEABLE)"
+            if [ "$AFTER_MAN_VER" = "1.0.23" ]; then
+                ok "boot 3: the package database on the disk now records hamnix-man at 1.0.23 (it shipped recording 1.0.22)"
+            else
+                bad "boot 3: the database on the disk records hamnix-man at $AFTER_MAN_VER"
+            fi
+        else
+            bad "boot 3: no readable /var/lib/hpm/installed.json on the installed disk after the update"
+        fi
+
+        # 6c. AND NOTHING ELSE WENT. The whole reason the lists are taken from
+        # the tarballs is that an upgrade UNLINKS them, so the files a
+        # NON-upgraded package owns, and the file no package owns, are what a
+        # wrong list would have destroyed.
+        fs_has "$PART" /bin/cat \
+            && ok "boot 3: /bin/cat is still there -- upgrading three packages did not delete a file a fourth one owns" \
+            || bad "boot 3: /bin/cat IS GONE after the update"
+        fs_cat "$PART" /etc/rc.boot >"$WORK/after-rc.boot" 2>/dev/null || true
+        if [ -s "$WORK/after-rc.boot" ] && grep -q "source '/etc/rc.boot.installed'" "$WORK/after-rc.boot"; then
+            ok "boot 3: /etc/rc.boot is still the installer's indirection -- the update did not take the machine's own boot script"
+        else
+            bad "boot 3: /etc/rc.boot is gone or no longer the indirection after the update -- this is the brick shape"
+        fi
+        fs_has "$PART" /bin/hamsh \
+            && ok "boot 3: /bin/hamsh survived the update" \
+            || bad "boot 3: /bin/hamsh IS GONE after the update"
+    else
+        bad "boot 3: cannot carve the installed root to see what the update did"
+    fi
+    # THE GUEST SAW THE SAME THING, after the reboot, with its own eyes.
+    if grep -a -A6 'INSTUSB-P2: the file the update rewrote' "$L3" | grep -q "$MANGLE_MARK"; then
+        bad "boot 3: the REBOOTED machine still reads the stale marker out of $MANGLED_MAN"
+    elif grep -aq 'INSTUSB-P2: the file the update rewrote' "$L3"; then
+        ok "boot 3: the rebooted machine read $MANGLED_MAN back for itself and the stale marker is not in it"
+    else
+        info "boot 3: phase 2 did not reach the file read-back"
+    fi
 fi
 
 cleanup_mounts

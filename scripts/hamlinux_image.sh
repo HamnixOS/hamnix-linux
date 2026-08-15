@@ -333,6 +333,24 @@ fi
 # drives the guest by putting commands IN the rc rather than racing the BIOS
 # for stdin, which is not reproducible.
 install -m644 "${HAMLINUX_RC:-etc/rc.boot.linux}" "$ROOT/etc/rc.boot"
+# AND UNDER THEIR OWN NAMES, because hamnix-init PROMISES them and a package is
+# only installed if the machine really carries every file it holds.
+#
+# etc/rc.boot.linux was on the image only as /etc/rc.boot -- a different path --
+# and etc/rc.boot.machine was not on it at all, so hamnix-init could never be
+# recorded in /var/lib/hpm/installed.json (scripts/hpm_installed_db.py). That is
+# not cosmetic: hamnix-init owns /etc/rc.boot.installed, the file the machine's
+# own one-line rc SOURCES, so an installed machine that cannot record
+# hamnix-init is an installed machine no release can ever improve the boot of --
+# and every other package depends on hamnix-init>=1, so an upgrade of ANY of
+# them would drag an unrecorded hamnix-init in as a fresh install.
+#
+# etc/rc.boot.machine is also what user/hlinstall.ad's write_machine_rc_boot
+# prefers when it is there, so the installed machine's /etc/rc.boot is now the
+# package's own indirection rather than the six-line fallback that function
+# writes when the file is missing. Both are the same three-line contract.
+install -m644 etc/rc.boot.linux "$ROOT/etc/rc.boot.linux"
+install -m644 etc/rc.boot.machine "$ROOT/etc/rc.boot.machine"
 for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
          os-release lsb-release debian_version profile resolv.conf \
          services protocols networks host.conf; do

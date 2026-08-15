@@ -753,6 +753,15 @@ cp "$WORK/rc.phase3" "$EXTRA/etc/rc.phase3"
 # 7. Install a disk.
 # =========================================================================
 say "building the installed disk"
+# NO PACKAGE DATABASE ON THIS DISK. Phase 1 installs a driver package from a
+# private channel at a synthetic version to reproduce "the instant `hpm install
+# hamnix-drivers-gpu-intel` leaves". scripts/hamlinux_disk.sh now records what
+# this tree's channel staged; the driver packages happen not to be among them
+# (the image stages no i915.ko), so this gate might well survive without the
+# opt-out -- but "might well" is not a measurement, and preserving the exact
+# initial condition this gate was written against is. Nothing here is
+# reinterpreted; the disk is the disk it always was.
+HAMLINUX_NO_INSTALLED_DB=1 \
 HAMLINUX_DISK_RC="$WORK/rc.phase1" HAMLINUX_DISK_EXTRA="$EXTRA" \
     nice -n 15 scripts/hamlinux_disk.sh "$DISK" 3G >"$WORK/build.log" 2>&1 || {
     echo "FAIL disk build"; tail -20 "$WORK/build.log"; exit 1; }

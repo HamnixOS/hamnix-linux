@@ -65,6 +65,9 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# scripts/ on the path so `--installed-db` can import hpm_installed_db however
+# this script was invoked (by path, from another directory, or as a module).
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 # The commands that go in the channel, grouped the way the packages are.
 # Anything that builds through the lane can be added; these are the ones the
@@ -2359,6 +2362,22 @@ def main():
     # exists for a channel built on a host with no python3/vulkan to compose an
     # offscreen desktop on -- not for "this is taking a while". Nothing in this
     # tree passes it.
+    # THE INSTALLED-PACKAGE DATABASE, emitted from the tarballs this run just
+    # wrote. The file lists come from the same source of truth that built the
+    # packages rather than from anything reconstructed on the machine
+    # afterwards -- see scripts/hpm_installed_db.py for why an approximate list
+    # is worse than no list at all. The SHIPPING emission is in
+    # scripts/hamlinux_disk.sh, against the directory it is about to mkfs; this
+    # option exists so a channel build can check its own emission (and the
+    # no-path-claimed-twice refusal) against a staged root without building a
+    # disk.
+    ap.add_argument("--installed-db", metavar="PATH",
+                    help="also write an hpm installed.json for --installed-db-"
+                         "root, listing every package this root really carries")
+    ap.add_argument("--installed-db-root", metavar="DIR",
+                    default="build/image/root",
+                    help="the staged root --installed-db describes "
+                         "(default build/image/root)")
     ap.add_argument("--no-desktop-gate", action="store_true",
                     help="do NOT run the packaged binaries before writing the "
                          "index (tests/linux/channel_runs_desktop.sh). Writes "
@@ -2724,6 +2743,22 @@ def main():
     with open(os.path.join(out, "index.json"), "w") as fh:
         json.dump(index, fh, indent=2)
         fh.write("\n")
+
+    if args.installed_db:
+        import hpm_installed_db
+        root = os.path.join(ROOT, args.installed_db_root)
+        if not os.path.isdir(root):
+            raise SystemExit(
+                "hamlinux_packages: --installed-db needs a staged root; %s is "
+                "not a directory. Run scripts/hamlinux_image.sh first."
+                % root)
+        print("\nwriting the installed-package database for %s" % root)
+        text, _inc, _exc = hpm_installed_db.build(out, root)
+        dbpath = os.path.join(ROOT, args.installed_db)
+        os.makedirs(os.path.dirname(dbpath) or ".", exist_ok=True)
+        with open(dbpath, "w") as fh:
+            fh.write(text)
+        print("[installed-db] wrote %s" % dbpath)
 
     print("\n%d packages -> %s" % (len(entries), out))
     if skipped:

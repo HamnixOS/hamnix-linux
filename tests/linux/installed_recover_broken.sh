@@ -533,6 +533,15 @@ RC2_MD5="$(md5sum "$WORK/rc.phase2" | cut -d' ' -f1)"
 # 6. Install a disk.
 # =========================================================================
 say "building the installed disk"
+# NO PACKAGE DATABASE ON THIS DISK. Phase 1 installs the BROKEN hamnix-desktop
+# 1.0.10 from a private channel to give this machine the past the gate is about.
+# scripts/hamlinux_disk.sh now records what this tree's channel staged, and hpm
+# rightly refuses to install a second version of a package it already records
+# ("already installed at a different version"), so the seeding install would
+# fail and boot 2 would measure a healthy desktop. Blank is the state this gate
+# has always started from; the opt-out keeps that initial condition unchanged
+# rather than reinterpreting what the gate is measuring.
+HAMLINUX_NO_INSTALLED_DB=1 \
 HAMLINUX_DISK_RC="$WORK/rc.phase1" HAMLINUX_DISK_EXTRA="$EXTRA" \
     scripts/hamlinux_disk.sh "$DISK" 3G >"$WORK/build.log" 2>&1 || {
     echo "FAIL disk build"; tail -20 "$WORK/build.log"; exit 1; }

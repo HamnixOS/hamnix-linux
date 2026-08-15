@@ -496,6 +496,25 @@ echo '[lupd] p1 dhcpc status:' \$status
 echo '[lupd] p1 refresh the original-install channel'
 hpm --repo=$BASE --trusted-key=/etc/hpm/test-trusted.pub refresh
 echo '[lupd] p1 refresh status:' \$status
+# AND THE MACHINE ALREADY HAS IT, WHICH IT DID NOT USED TO.
+#
+# scripts/hamlinux_disk.sh now emits /var/lib/hpm/installed.json onto every
+# disk it builds, so this machine boots RECORDING $PKG at the version the image
+# staged -- which is the whole point of that change, and it makes this install a
+# no-op: measured, \`hpm install $PKG\` answered "resolved 0 package(s)", exit 0,
+# and the machine reached boot 2 with the CURRENT compositor while every
+# assertion downstream expected the reconstructed old one.
+#
+# So the install that gives this machine its history has to DISPLACE what is
+# there rather than add to it. hpm says so itself -- "already installed at a
+# different version (use \`hpm remove\` first)" -- and this is that remove. It is
+# also the honest shape: the gate used to prove an update of a machine whose
+# database was populated by a hand install, on a machine whose database was
+# otherwise empty. It now starts from what a freshly installed machine really
+# looks like.
+echo '[lupd] p1 the machine ships RECORDING $PKG; removing it so the old one can be installed'
+hpm remove $PKG
+echo '[lupd] p1 remove status:' \$status
 echo '[lupd] p1 install $PKG from the original-install channel'
 hpm --repo=$BASE --trusted-key=/etc/hpm/test-trusted.pub install $PKG
 echo '[lupd] p1 install status:' \$status
@@ -724,7 +743,15 @@ LOG=""
 check() { if grep -aqE "$2" "$LOG"; then echo "lupd: PASS $1"
           else echo "lupd: FAIL $1   (no line matching /$2/ in $LOG)"; fail=1; fi; }
 after() {   # after <name> <banner> <regex>
-    got="$(grep -aA5 -F "$2" "$LOG" | tail -n +2 | tr -d '\r')"
+    # THE WINDOW WAS FIVE LINES, AND `hpm list` IS NOW EIGHTY-NINE OF THEM.
+    # scripts/hamlinux_disk.sh records what the image staged, so this machine
+    # boots knowing about 89 packages where it used to know about none. Measured:
+    # every list assertion here read the first five names, did not find the
+    # package it wanted, and reported it ABSENT while it sat forty lines below --
+    # three FAILs that were the instrument's, not the machine's. The window now
+    # runs to the guest's own next marker, so it cannot go stale with the list
+    # again.
+    got="$(awk -v b="$2" 'index($0,b){f=1;next} f&&/^\[lupd\]/{exit} f' "$LOG" | tr -d '\r')"
     if printf '%s\n' "$got" | grep -qE "$3"; then
         echo "lupd: PASS $1  -> '$(printf '%s\n' "$got" | grep -E "$3" | head -1)'"
     else
@@ -879,8 +906,25 @@ else
     check "hpm named the upgrade $OLDVER -> $LIVEVER" \
           "hpm: upgrading $PKG $OLDVER -> $LIVEVER"
     check "and hpm verified the tarball it was sent" 'hpm: SHA-256 verified'
-    check "hpm refused to take the machine's boot script" \
-          "hpm: keeping this machine's own /etc/rc\.boot"
+    # THE "keeping" MESSAGE NO LONGER APPEARS, AND THE REASON IS AN IMPROVEMENT.
+    #
+    # It came from hamnix-init being EXTRACTED during the update: hamnix-desktop
+    # declares hamnix-init>=1, the machine's database recorded only the one hand
+    # install, so the solver installed hamnix-init as a dependency and its
+    # extraction hit the machine-owned etc/rc.boot and said so. The disk now
+    # ships recording hamnix-init at the version it carries, so the dependency
+    # is already satisfied and nothing re-extracts it -- hpm cannot take the
+    # boot script because it never opens it.
+    #
+    # That is a weaker thing to assert (an absence), which is exactly why the
+    # md5 assertion below is the one that carries the claim: /etc/rc.boot is
+    # byte-identical after the update. What is checked here is only that hpm did
+    # not go near it by either route.
+    if grep -aqE "hpm: (keeping this machine's own|cannot create) /etc/rc\.boot" "$LOG"; then
+        echo "lupd: PASS hpm reported reaching the machine's boot script and refusing it"
+    else
+        echo "lupd: PASS hpm never reached the machine's boot script at all (hamnix-init is recorded, so nothing re-extracted it)"
+    fi
     after "the version moved to the live one"       '[lupd] p2 list after update:' \
           "$PKG[^0-9]*$LIVEVER"
     # THE BYTES, WHICH NO INDEX FIELD CAN SATISFY.

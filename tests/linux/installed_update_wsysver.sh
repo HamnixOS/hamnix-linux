@@ -785,6 +785,15 @@ if [ "${HAMLINUX_WV_REUSE:-0}" = 1 ] && [ -f "$DISK" ]; then
     say "reusing $DISK (HAMLINUX_WV_REUSE=1)"
 else
     say "building the installed disk"
+    # NO PACKAGE DATABASE ON THIS DISK, AND THIS IS THE GATE THE OPT-OUT WAS
+    # ADDED FOR. Phase 1 installs hamnix-base and its WHOLE closure from a
+    # PRIVATE channel at a synthetic version (v(N-1) of the window system, major
+    # 77) -- a past this tree never had. scripts/hamlinux_disk.sh now records
+    # what THIS tree's channel staged, at 1.0.x, and hpm rightly refuses to
+    # install a second version of a package it already records. So this machine
+    # has to start blank, which is exactly the state it started in before that
+    # change: the initial condition here is byte-for-byte what it always was.
+    HAMLINUX_NO_INSTALLED_DB=1 \
     HAMLINUX_DISK_RC="$WORK/rc.phase1" HAMLINUX_DISK_EXTRA="$EXTRA" \
         nice -n 15 scripts/hamlinux_disk.sh "$DISK" 3G >"$WORK/build.log" 2>&1 || {
         echo "FAIL disk build"; tail -20 "$WORK/build.log"; exit 1; }
