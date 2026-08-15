@@ -35,6 +35,14 @@ extern def sys_close(fd: int32) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_init_module(path: Ptr[char], params: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
+# The tree's portable park: nfds == 0 means "wait timeout_ms and nothing
+# else", off the runqueue on both kernels. user/sleep.ad's header explains
+# why it is spelled this way rather than as a spin.
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+# Never dereferenced at nfds == 0; a top-level BSS array because Adder wants
+# one.
+park_fds: Array[1, int32]
 
 RFPROC: int32 = 1
 
@@ -407,6 +415,31 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             # identifier it wanted and every partition it found instead.
             sayerr("THE ROOT PARTITION NAMED ON THE COMMAND LINE WAS NOT FOUND.")
             sayerr("this system is running FROM RAM: nothing you save will survive a reboot.")
+            # AND THEN HOLD THE SCREEN, because the message above was
+            # UNREADABLE until this line existed.
+            #
+            # MEASURED, 2026-08-14, the usb-storage boot of this image: those
+            # two lines reached the framebuffer at t=1.58s and the compositor
+            # took /dev/fb and painted the desktop over them before t=3s. A
+            # screenshot one second later is an ordinary, correct-looking
+            # desktop. So the one boot outcome a person MUST be told about was
+            # on the screen for under a second and a half, and what they were
+            # left looking at was a system that appears to have worked and
+            # will lose everything they do on it at the next reboot -- a
+            # failure wearing the shape of a success, which is worse than the
+            # blinking cursor this whole console arrangement was built to fix.
+            #
+            # There is no shell here to ask, and on the owner's laptop there
+            # is no serial cable either: the screen is the only channel, and
+            # holding it is the only way to use it. Fifteen seconds is long
+            # enough to read four lines and to photograph them, and it is paid
+            # ONLY on the path that has already gone wrong -- a boot that
+            # found its root never reaches this branch.
+            sayerr("the desktop will start in 15 seconds. READ THE LINES ABOVE FIRST:")
+            sayerr("  they are the difference between an installed machine and a live one.")
+            sayerr("  if this is a USB boot, the stick was not seen -- try another port,")
+            sayerr("  preferably a USB-2 one, and prefer a port on the machine to a hub.")
+            sys_waitfds(&park_fds[0], 0, 15000)
         else:
             say("root filesystem online")
 
