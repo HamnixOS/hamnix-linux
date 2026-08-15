@@ -116,9 +116,28 @@ def say(msg: Ptr[uint8]):
     # finding it. The printk copy is emitted atomically from the write below,
     # so doing it first leaves the plain line intact behind it.
     klen = 0
-    # <6> is KERN_INFO: shown at the loglevel=7 this image boots with, and
-    # kept out of the way of anyone who deliberately asked for a quiet boot.
-    kadd("<6>linuxinit: ")
+    # <7>, NOT <6>, AND THE CHANGE IS VISIBLE ON A SCREENDUMP.
+    #
+    # This was KERN_INFO so that the kmsg copy would be PRINTED, because on a
+    # command line ending `console=ttyS0` the printk copy was the only one that
+    # reached a framebuffer. The shipped command line now ends `console=tty0`,
+    # so the plain write below reaches the framebuffer by itself -- and the
+    # kmsg copy reached it TOO. Measured 2026-08-15 by OCR of the guest's
+    # framebuffer: every line of this boot appeared twice, once bare and once
+    # with a printk timestamp in front of it.
+    #
+    # KERN_DEBUG is recorded in the kernel log and NOT printed at
+    # console_loglevel=7 (printk prints level < loglevel), so `dmesg` still has
+    # every one of these lines for a post-mortem while the screen shows each of
+    # them once. The serial port that every gate reads still gets them, by the
+    # other route: user/linux-syscalls.c:consmirror copies this program's
+    # writes to /dev/console onto the serial port whenever the two are
+    # different devices.
+    #
+    # sayerr() and warn() stay at <3>. Those lines are the ones a person MUST
+    # see even on a boot somebody made quiet, and being told twice about a
+    # fault is not a cost worth removing.
+    kadd("<7>linuxinit: ")
     kadd(msg)
     kadd("\n")
     kflush()

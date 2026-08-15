@@ -393,6 +393,37 @@ sudo dd if=build/hamnix-installer.img of=$USB bs=4M conv=fsync status=progress
 sync
 ```
 
+#### After the dd: move the backup GPT to the end of the stick
+
+The image is 4 GiB and a USB stick is not. `dd` copies the image's GPT
+verbatim, so the **backup** GPT header lands 4 GiB in — where the image
+ends — rather than in the last sector of the stick. On the owner's first
+real boot, 2026-08-15, the kernel said so and booted anyway:
+
+```
+GPT: Primary header thinks Alt. header is not at the end of the disk
+GPT:8388607 != 60715007
+```
+
+**This is documented rather than repaired, and the reason is what a repair
+would have to be.** The only place with both the disk and the true size is
+the machine the stick is plugged into, so an automatic fix means the medium
+**writing to the device it booted from, during its own first boot** — a
+write to a removable disk that nobody asked for, on the one medium a person
+is most likely to pull out mid-operation. Nothing in this line does that.
+Nor does the stale backup cost anything at boot: the kernel reads the
+primary header, both partitions are correct, and `/bin/install` repartitions
+the *target* disk from scratch and never consults the medium's table. The
+one thing it costs is a recovery tool that restores from the backup getting
+a 4 GiB layout.
+
+One command on the build host fixes it for good, right after the `dd`:
+
+```sh
+sudo sgdisk -e $USB     # move the backup GPT to the last sector
+sudo partprobe $USB
+```
+
 ### Write the image — other operating systems
 
 **macOS:**
@@ -460,6 +491,61 @@ Common keys by vendor:
 Save + exit. Insert the USB stick. Power on. Watch the serial console
 if connected (115200 8N1, no flow control).
 
+
+## 4b. The console arrangement on a hamnix-linux medium (2026-08-15)
+
+The first real boot of a hamnix-linux USB medium reached
+
+```
+linuxinit: namespace ready -- exec /bin/hamsh /etc/rc.boot
+```
+
+and the screen stopped changing. It had **not** hung — sysrq and REISUB both
+worked. The medium's command line ended `console=ttyS0,115200`, `/dev/console`
+follows the **last** `console=`, and PID 1 mirrors its own lines into
+`/dev/kmsg` (printk reaches every console) while the shell does not. So
+everything up to the exec was on the screen and everything after it went into a
+serial port the laptop does not have.
+
+The medium now boots with
+
+```
+earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=... rw panic=-1 loglevel=7
+```
+
+* **`console=tty0` last** — `/dev/console` is the screen, so the shell is
+  visible *and typeable*. `/etc/rc.boot` ends by handing off to an interactive
+  shell; with a serial port last it was reading a keyboard nobody was holding.
+* **`console=ttyS0` still registered** — printk still reaches the serial port,
+  and `user/linux-syscalls.c:consmirror` copies the shell's and every program's
+  console writes there too, so a serial cable still captures the whole boot and
+  every gate in the tree still reads it. The shipped string is the string the
+  gates boot; there is no test-only override.
+* **`keep_bootcon` is gone.** It was there because `tty0` registers as CONFIG_VT's
+  dummy console (measured here at 0.2296 s) more than a second before efifb
+  probes (1.3651 s). But keeping earlycon alive afterwards leaves two writers in
+  one framebuffer with independent cursors: while everything is a printk they
+  stay in step, and the moment the *shell* writes, fbcon advances and earlycon
+  does not — so the next kernel message is drawn over what the shell wrote.
+  That is the "previous lines are not cleared" corruption. The 1.14 s window
+  costs no text: the VT layer holds what is written to it under dummycon and
+  fbcon redraws that buffer on takeover, which
+  `tests/linux/console_screen.sh` asserts by OCR of the framebuffer.
+* **`loglevel=7` stays.** At `loglevel=4` a perfect boot prints nothing between
+  the EFI stub and the desktop, which is the original blinking cursor. It is
+  affordable now that `earlycon` hands the framebuffer over.
+
+**Boot time, measured in QEMU** (OVMF, `-vga std`, the medium as usb-storage on
+xHCI, blank NVMe beside it, no Debian medium): 7.06 s to `rc.boot: up` before
+these changes, 7.97 s after. The ~0.9 s is the mirror pushing ~12 KB more
+through a 115200 serial port, and it is only paid on a machine that **has** one
+— when the command line names no serial console, or names it last, the mirror
+never opens. On a laptop with a 1920x1080 EFI framebuffer the earlycon handoff
+should more than repay it; a VM's small framebuffer under KVM cannot show that.
+
+`tests/linux/console_screen.sh` is the gate: it boots the medium twice, once as
+it ships and once with `console=ttyS0` forced back last, and reads the *screen*
+with OCR. The shipped arrangement must show the shell; the old one must not.
 
 ## 5. What to expect on the serial console
 

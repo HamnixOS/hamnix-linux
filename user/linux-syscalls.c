@@ -1034,6 +1034,128 @@ int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
     return rc64(n);
 }
 
+/* THE CONSOLE MIRROR, and why a shipped medium cannot work without it.
+ *
+ * /dev/console is ONE tty: the kernel points it at the LAST `console=` on the
+ * command line and writes to it go there and nowhere else. printk is the only
+ * thing that fans out to every registered console, which is why linuxinit
+ * echoes its own lines to /dev/kmsg (see the long note in user/linuxinit.ad).
+ *
+ * That trick stops at the exec. hamsh, /etc/rc.boot, and every program the rc
+ * runs write to the descriptor they inherited -- /dev/console -- and nothing
+ * copies those bytes anywhere. On the owner's laptop, 2026-08-15, that was the
+ * whole failure: PID 1's lines reached the framebuffer through kmsg, it printed
+ * "namespace ready -- exec /bin/hamsh /etc/rc.boot", and then the screen stopped
+ * changing because /dev/console was ttyS0 and the machine has no serial port.
+ * The boot was fine. It was TALKING INTO A WIRE THAT WAS NOT THERE.
+ *
+ * So the shipped command line now ends `console=ttyS0,115200 console=tty0`:
+ * /dev/console is the SCREEN, which is the only channel a laptop has and the
+ * only one a person can type back into. That alone would have blinded every
+ * gate in this tree, all of which read the serial port -- so this is the other
+ * half. When the console is split like that, a write to fd 1 or 2 that is
+ * really going to /dev/console is copied to the serial port as well.
+ *
+ * WHY THIS AND NOT THE ALTERNATIVES:
+ *   * A gate-only HAMLINUX_CMDLINE override was rejected because the command
+ *     line is baked into a PE section of the UKI, and user/hlinstall.ad copies
+ *     THAT VERY UKI onto the target's ESP. An override would mean no gate ever
+ *     boots the console arrangement that ships, on the medium or on the machine
+ *     installed from it -- the exact class of gap that let this bug reach metal.
+ *   * Mirroring to /dev/kmsg instead of the serial port would reach the gate
+ *     (printk goes to ttyS0) but ALSO to tty0, so every line would be drawn on
+ *     the screen twice. The serial port is the one console the screen is not.
+ *   * Teaching hamsh to mirror was rejected because hamsh is not the writer:
+ *     `cat /proc/partitions`, `ls`, and `install --auto` all write for
+ *     themselves. This is the one choke point every Adder program passes.
+ *
+ * WHAT IT DELIBERATELY DOES NOT TOUCH. The rdev test is the whole discipline:
+ * only fd 5:1, the console device itself, is mirrored. `cmd > file`, a pipe, a
+ * terminal window's pty and a socket all have other rdevs and are left alone,
+ * so a redirect still puts its bytes in exactly one place. And when the last
+ * `console=` IS the serial port -- every `-kernel` developer boot in
+ * tests/linux -- the mirror stays off and nothing changes at all.
+ *
+ * COST when it is on: one fstat per write to fd 1/2. It cannot be cached per
+ * descriptor because hamsh redirects a CHILD's fd 1 after the fork, and a
+ * cached "this is the console" would then copy a redirected file's bytes onto
+ * the serial port. */
+static int consmirror_fd = -2;          /* -2 undecided, -1 off, else the port */
+
+/* RETRIED, NOT LATCHED, WHILE THE ANSWER IS STILL UNKNOWABLE. linuxinit prints
+ * its first lines before it has bound /proc or /dev, so the very first console
+ * write cannot read /proc/cmdline and cannot open a tty. Deciding "off" there
+ * would turn the mirror off for the rest of that process -- and in PID 1 that
+ * is the whole boot. So a missing /proc or a missing device node leaves the
+ * decision open and the next write asks again; only a command line that has
+ * been READ and says no is final. The retry is bounded so a machine with a
+ * serial console named on the command line but no device node for it does not
+ * pay an open(2) on every console write for ever. */
+static int consmirror_tries = 0;
+
+static void consmirror_setup(void)
+{
+    char cmd[4096];
+    if (++consmirror_tries > 32) { consmirror_fd = -1; return; }
+    int f = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+    if (f < 0) return;                          /* no /proc yet: ask again */
+    ssize_t n = read(f, cmd, sizeof cmd - 1);
+    close(f);
+    if (n <= 0) return;
+    cmd[n] = '\0';
+    consmirror_fd = -1;                         /* from here the answer is real */
+
+    /* The LAST console= is what /dev/console follows; the last serial one is
+     * where the gates listen. Both are read in one pass. */
+    char last[64] = "", ser[64] = "";
+    for (char *p = strtok(cmd, " \t\r\n"); p; p = strtok(NULL, " \t\r\n")) {
+        if (strncmp(p, "console=", 8) != 0) continue;
+        snprintf(last, sizeof last, "%s", p + 8);
+        if (strncmp(p + 8, "ttyS", 4) == 0)
+            snprintf(ser, sizeof ser, "%s", p + 8);
+    }
+    if (ser[0] == '\0') return;                 /* no serial console to mirror to */
+    if (strncmp(last, "ttyS", 4) == 0) return;  /* /dev/console already IS it */
+
+    char *comma = strchr(ser, ',');
+    if (comma) *comma = '\0';
+    char path[80];
+    snprintf(path, sizeof path, "/dev/%s", ser);
+    int r = open(path, O_WRONLY | O_NOCTTY | O_CLOEXEC);
+    if (r < 0) { consmirror_fd = -2; return; }  /* no node yet: ask again */
+    consmirror_fd = r;
+}
+
+static void consmirror(int fd, const uint8_t *buf, uint64_t count)
+{
+    if (count == 0) return;
+    if (consmirror_fd == -2) consmirror_setup();
+    if (consmirror_fd < 0) return;
+    struct stat st;
+    if (fstat(fd, &st) != 0) return;
+    if (!S_ISCHR(st.st_mode) || st.st_rdev != makedev(5, 1)) return;
+    ssize_t ignored = write(consmirror_fd, buf, (size_t)count);
+    (void)ignored;
+}
+
+/* EVERY DIRECT CONSOLE WRITE IN THIS FILE GOES THROUGH HERE, AND A RED GATE IS
+ * WHY. This file's own diagnostics -- the root scan, the bind failures, the
+ * user-namespace refusals -- call write(2, ...) directly rather than sys_write,
+ * so they never passed the mirror above. That was invisible while /dev/console
+ * WAS the serial port. The moment /dev/console became the screen, every one of
+ * them became screen-only, and tests/linux/install_from_usb.sh went 52/1 on
+ * exactly the assertion that reads one of them off the serial port:
+ * "boot 2: the root was not resolved to the NVMe", which greps for
+ * `is /dev/nvme0n1p2` -- a line the guest had printed, to a place the gate
+ * cannot see. One helper, so the next diagnostic added here cannot repeat it. */
+static void cons_write(const void *buf, size_t n)
+{
+    if (n == 0) return;
+    ssize_t w = write(2, buf, n);
+    if (w > 0)
+        consmirror(2, (const uint8_t *)buf, (uint64_t)w);
+}
+
 /* extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64 */
 int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 {
@@ -1060,7 +1182,13 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
         if (n > 0) v->cursor += (uint64_t)n;
         return n;
     }
-    return rc64(write((int)fd, buf, (size_t)count));
+    ssize_t w = write((int)fd, buf, (size_t)count);
+    /* AFTER the real write, and only the bytes that really went out. The screen
+     * is the channel a person is looking at; it must never wait on a serial
+     * port that may have nothing at the other end of it. */
+    if (w > 0 && (fd == 1 || fd == 2))
+        consmirror((int)fd, buf, (uint64_t)w);
+    return rc64(w);
 }
 
 /* extern def sys_close(fd: int32) -> int32 */
@@ -1501,8 +1629,7 @@ int32_t sys_rfork(int32_t flags)
                 const char *m = "rfork: no private namespace yet "
                                 "(needs CAP_SYS_ADMIN); one is created on the "
                                 "first bind\n";
-                ssize_t ignored = write(2, m, strlen(m));
-                (void)ignored;
+                cons_write(m, strlen(m));
             }
         } else {
             _exit(127);
@@ -3186,8 +3313,7 @@ static const char *distro_resolve(const char *name, char *out, size_t outn)
                 "      $HAMNIX_DISTRO is unset, /etc/distros' `default` names a\n"
                 "      filesystem LABEL that no attached disk carries, and\n"
                 "      nothing is mounted at /n/distro.\n";
-            ssize_t w = write(2, m, strlen(m));
-            (void)w;
+            cons_write(m, strlen(m));
         }
         snprintf(out, outn, "/dev/vda");
         return out;
@@ -3282,7 +3408,16 @@ static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
  * the serial port, the framebuffer console, and the `earlycon=efifb` boot
  * console that is the only thing printing before fbcon exists. `level` is the
  * kmsg priority; 3 (KERN_ERR) is used for faults so they appear even at the
- * default loglevel=4, which suppresses anything less urgent. */
+ * default loglevel=4, which suppresses anything less urgent.
+ *
+ * THE FIRST PARAGRAPH IS NOW HISTORY, AND THE LEVELS FOLLOW. The shipped
+ * command line ends `console=tty0`, so the write to fd 2 reaches the
+ * framebuffer by itself and the kmsg copy is no longer what rescues the
+ * message -- it is a SECOND copy of it, on the same screen. Anything that
+ * merely reports success is therefore emitted at <7>: kept in the kernel log
+ * for a post-mortem, not printed at console_loglevel=7, and still on the
+ * serial port every gate reads because linux-syscalls.c:consmirror copies
+ * console writes there. Faults and warnings keep their printed levels. */
 __attribute__((format(printf, 2, 3)))
 static void bootmsg(int level, const char *fmt, ...)
 {
@@ -3294,12 +3429,11 @@ static void bootmsg(int level, const char *fmt, ...)
     va_end(ap);
     if (n < 0) return;
     if (n > (int)(sizeof buf - pre) - 1) n = (int)(sizeof buf - pre) - 1;
-    ssize_t w = write(2, buf + pre, (size_t)n);      /* no <N> on the console */
-    (void)w;
+    cons_write(buf + pre, (size_t)n);               /* no <N> on the console */
     int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
     if (fd >= 0) {
-        w = write(fd, buf, (size_t)(pre + n));
-        (void)w;
+        ssize_t kw = write(fd, buf, (size_t)(pre + n));
+        (void)kw;
         close(fd);
     }
 }
@@ -3556,10 +3690,16 @@ static const char *sysroot_device(void)
         int waited_ms = 0;
         for (;;) {
             if (scan_partitions(pu, fu, dev, sizeof dev, 0)) {
+                /* <7>, for the reason given on bootmsg: these two say the boot
+                 * WENT RIGHT, the console they need to reach is now the one
+                 * fd 2 already writes to, and at <6> each of them appeared on
+                 * the screen twice. The <4> and <3> lines below stay printed:
+                 * they are the ones a person must see on a boot that is going
+                 * wrong, and one duplicate is cheaper than a missed warning. */
                 if (waited_ms)
-                    bootmsg(6, "sysroot: root=%s appeared after %d.%01ds\n",
+                    bootmsg(7, "sysroot: root=%s appeared after %d.%01ds\n",
                             spec, waited_ms / 1000, (waited_ms % 1000) / 100);
-                bootmsg(6, "sysroot: root=%s is %s\n", spec, dev);
+                bootmsg(7, "sysroot: root=%s is %s\n", spec, dev);
                 return dev;
             }
             if (waited_ms >= deadline_ms) break;
@@ -3820,8 +3960,7 @@ static int ns_privilege(void)
          * name rather than carrying on in a namespace that half-works. */
         const char *m = "bind: user namespace created but uid_map could not be "
                         "written; the namespace would be unusable\n";
-        ssize_t w = write(2, m, strlen(m));
-        (void)w;
+        cons_write(m, strlen(m));
         return 0;
     }
     /* Plan 9's namespace copy is private by construction. */
@@ -3970,8 +4109,7 @@ static void distro_stage_mountpoints(const char *dst)
             "bind: could not create the mount point `%s' (%s); "
             "`enter' as the session user will fail there\n", p,
             strerror(errno));
-        ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-        (void)w;
+        cons_write(m, n > 0 ? (size_t)n : 0);
     }
     /* The same moment, the same argument, the fourth member of the same
      * family: see distro_stage_runtime just below. */
@@ -4051,8 +4189,7 @@ static void distro_stage_note(const char *what, const char *p)
     int n = snprintf(m, sizeof m,
         "bind: could not %s `%s' (%s); the session user's runtime directory "
         "will not be complete\n", what, p, strerror(errno));
-    ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-    (void)w;
+    cons_write(m, n > 0 ? (size_t)n : 0);
 }
 
 static void distro_stage_runtime(const char *dst)
@@ -4143,8 +4280,7 @@ static void bind_stage_failed(const char *src, const char *dst)
     int n = snprintf(m, sizeof m,
         "bind: could not graft `%s' onto `%s': %s\n", src, dst,
         strerror(errno));
-    ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-    (void)w;
+    cons_write(m, n > 0 ? (size_t)n : 0);
 }
 
 /* Say which STEP of the root switch failed, and on which path. Not rate-
@@ -4159,8 +4295,7 @@ static void enter_root_failed(const char *step, const char *path)
         "assembled under /n/.root (root) or $TMPDIR/.hamns-<pid> (a session "
         "user), and the body will NOT be run.\n",
         step, path, strerror(errno));
-    ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-    (void)w;
+    cons_write(m, n > 0 ? (size_t)n : 0);
 }
 
 static int32_t enter_root(const char *mnt, int is_sysroot)
@@ -4209,8 +4344,7 @@ static int32_t enter_root(const char *mnt, int is_sysroot)
                 "but nothing inside it can create a user namespace, so "
                 "bubblewrap/pressure-vessel containers will not start.\n",
                 strerror(errno));
-            ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-            (void)w;
+            cons_write(m, n > 0 ? (size_t)n : 0);
         }
     }
     if (chroot(".") < 0) {
@@ -4371,8 +4505,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
                 "/etc/distros, $HAMNIX_DISTRO_<NAME> unset, no attached "
                 "filesystem carries the label it names, and nothing is mounted "
                 "at /n/%s\n", name, name);
-            ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-            (void)w;
+            cons_write(m, n > 0 ? (size_t)n : 0);
             errno = ENOENT;
             return -ENOENT;
         }
@@ -4432,8 +4565,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
              * the body in the native root. */
             const char *m = "bind: no writable staging directory for the new "
                             "root (tried /n/.root and $TMPDIR)\n";
-            ssize_t w = write(2, m, strlen(m));
-            (void)w;
+            cons_write(m, strlen(m));
             errno = EACCES;
             return -EACCES;
         }
