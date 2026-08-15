@@ -371,7 +371,19 @@ if [ "$NO_DB" = 1 ]; then
     # finished image afterwards is the debugfs trap this gate already paid for.
     DISK_CHAN_OVERRIDE="$WORK/no-such-channel"
     info "negative control: the live medium is built with HAMLINUX_HPM_CHANNEL=$DISK_CHAN_OVERRIDE, so it carries no installed.json at all"
-elif [ -f "$DB_SRC" ]; then
+else
+    # The seed pass above leaves the real database in the staging rootdir. A
+    # REUSE run (or a run following the negative control, whose live pass
+    # deliberately emitted none) may not have it, so it is regenerated from the
+    # same script and the same channel rather than skipped.
+    if [ ! -f "$DB_SRC" ] && [ -d build/image/disk/rootdir ]; then
+        info "no $DB_SRC; regenerating it from $CHAN"
+        python3 scripts/hpm_installed_db.py "$CHAN" build/image/disk/rootdir \
+            "$DB_SRC" >"$WORK/dbregen.log" 2>&1 \
+            || { bad "could not regenerate the package database"; tail -5 "$WORK/dbregen.log"; }
+    fi
+fi
+if [ "$NO_DB" != 1 ] && [ -f "$DB_SRC" ]; then
     mkdir -p "$EXTRA/var/lib/hpm" "$EXTRA/usr/share/man"
     python3 - "$DB_SRC" "$EXTRA/var/lib/hpm/installed.json" $DOWNGRADE <<'PYEOF'
 import json, sys
@@ -406,11 +418,17 @@ PYEOF
     # not evidence that anything moved; a byte on the disk is. This one is owned
     # by hamnix-man and by nothing else (checked below), so restoring it is hpm
     # unlinking the recorded path and laying the 1.0.23 tarball's copy down.
-    printf '%s\n' "$MANGLE_MARK" >"$EXTRA/$MANGLED_MAN"
     ok "the medium's package database records $(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["packages"]))' "$EXTRA/var/lib/hpm/installed.json") packages, three of them one version behind the channel"
-else
+elif [ "$NO_DB" != 1 ]; then
     bad "no $DB_SRC after the seed disk pass -- scripts/hamlinux_disk.sh did not emit a package database"
 fi
+# THE STALE FILE IS STAGED IN BOTH DIRECTIONS, and that is what makes it a
+# control rather than a decoration. On the green run the update must replace it;
+# on the negative control -- same medium, same install, same network, no
+# database -- it must STILL BE THERE afterwards. One assertion, two runs, and
+# the difference between them is the whole claim.
+mkdir -p "$EXTRA/usr/share/man"
+printf '%s\n' "$MANGLE_MARK" >"$EXTRA/$MANGLED_MAN"
 
 if [ "${HAMLINUX_INSTUSB_REUSE:-0}" = 1 ] && [ -f "$LIVE" ]; then
     :
