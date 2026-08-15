@@ -62,7 +62,12 @@ BOOT_PARTUUID="${HAMLINUX_BOOT_PARTUUID:-$(cat /proc/sys/kernel/random/uuid)}"
 # A copy of the staged root, plus the things only a persistent system has.
 ROOTDIR="$STAGE/rootdir"
 cp -a build/image/root "$ROOTDIR"
-mkdir -p "$ROOTDIR"/{home,var/log,var/lib/hpm,mnt,n/distro,srv}
+# /boot is the mount point for the ESP. etc/rc.boot.installed does
+# `bind '#esp' /boot` so that user/bootlogd.ad can write the boot log onto the
+# FAT partition of the stick -- the one filesystem on this medium that opens on
+# any computer the owner might carry it to. hamsh's bind does not create its
+# mount point, so the directory has to be on the root filesystem already.
+mkdir -p "$ROOTDIR"/{home,var/log,var/lib/hpm,mnt,n/distro,srv,boot}
 
 # fstab. The Hamnix boot does not read it -- namespaces are assembled by the
 # rc scripts -- but it is what a human and any Debian tooling in the distro
@@ -256,7 +261,34 @@ CMDLINE="$STAGE/cmdline.txt"
 #
 # HAMLINUX_CMDLINE still overrides the whole string; HAMLINUX_ROOT_PARTUUID
 # pins the GUID (a test that rebuilds the disk and expects the same string).
-DEFAULT_CMDLINE="earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7"
+#   printk.devkmsg=on
+#                    WITHOUT THIS THE BOOT LOG SILENTLY LOSES LINES, AND IT
+#                    LOSES THEM IN THE SHAPE OF A LOG THAT LOOKS FINE.
+#                    /dev/kmsg is how user/linux-syscalls.c:consmirror gets the
+#                    SHELL's output into the kernel ring, which is what
+#                    user/bootlogd.ad persists onto the stick. The kernel's
+#                    default for writes to that node is `ratelimit`: a global
+#                    burst of ten records per five seconds, everything else
+#                    dropped on the floor with no error to the writer.
+#                    MEASURED, this tree, the shipped medium booted as
+#                    usb-storage: the recovered \HAMNIX.LOG ran to 7.917s, then
+#                    stopped for FOUR SECONDS -- swallowing every `[rc.5]` line,
+#                    `rc.boot: up`, and the end-of-boot marker -- and resumed at
+#                    11.905s. Nothing anywhere reported a problem; the file was
+#                    the right size, had its header and its terminator, and was
+#                    missing exactly the part of the boot a person would be
+#                    looking for. That is the worst way for a diagnostic file to
+#                    be wrong, and it is precisely the failure this whole
+#                    arrangement exists to stop.
+#                    It is set HERE rather than by a sysctl write in the rc
+#                    because a boot parameter applies from the FIRST record,
+#                    before any userland has run: a runtime write leaves a
+#                    window in which the kernel's own early output and PID 1's
+#                    opening burst are still being dropped. user/linuxinit.ad
+#                    READS IT BACK and warns if this kernel did not honour it,
+#                    because a setting that is accepted and does not take is
+#                    the success-shaped answer NORTH_STAR.md forbids.
+DEFAULT_CMDLINE="earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7 printk.devkmsg=on"
 printf '%s' "${HAMLINUX_CMDLINE:-$DEFAULT_CMDLINE}" > "$CMDLINE"
 echo "[disk] cmdline: $(cat "$CMDLINE")"
 # WHAT THE IN-SYSTEM INSTALLER READS. user/hlinstall.ad copies this very UKI
@@ -313,9 +345,67 @@ fi
 # roughly triples the initramfs, at which point a fixed 200M ESP overflows and
 # mcopy says "Disk full" -- one line, mid-build, easy to read past, and the
 # disk it leaves behind is missing whichever file did not fit.
+# THE BOOT LOG, PREALLOCATED HERE, AND EVERY WORD OF THAT IS LOAD BEARING.
+#
+# The owner boots this stick on a Lenovo with no serial cable, no shell and no
+# second machine. When a boot goes wrong the only evidence that survives is a
+# photograph of the last forty lines. So the stick keeps its own log, and it
+# keeps it HERE, on the FAT32 ESP, because FAT32 is the one filesystem on this
+# medium that mounts on Windows, on macOS and on Linux with nothing installed
+# -- he can power the machine off, plug the stick into whatever is nearby, and
+# open a file. The ext4 root is fine on his Debian host and is not fine
+# anywhere else. user/bootlogd.ad is the writer and its header argues the rest.
+#
+# PREALLOCATED, TO ITS FULL SIZE, AT BUILD TIME, and that is what makes it
+# survive the power button on a filesystem with no journal. Because the file
+# already exists at full length, every runtime write is an OVERWRITE IN PLACE:
+# no cluster is allocated, the FAT chain is never mutated, the directory
+# entry's size and start cluster never change. The only thing that has to reach
+# the medium is the data blocks -- and bootlogd opens the file O_SYNC, so they
+# have. ext4's journal would not have protected those blocks either;
+# tests/linux/install_from_usb.sh measured exactly that, a power cut inside the
+# 5 s commit window losing a write the journal had kept the filesystem
+# perfectly consistent about.
+#
+# IT IS ALSO WHY THE LOG CANNOT FILL THE FILESYSTEM. The size is this constant,
+# decided here, and there is no code path at runtime that extends the file.
+#
+# AND IT SHIPS WITH TEXT IN IT SAYING IT HAS NOT BEEN WRITTEN YET. An empty
+# file looks identical whether nothing was written or the write went somewhere
+# else, which is the exact bug this effort came out of. So the unwritten state
+# says that it is the unwritten state, in words aimed at the person holding the
+# stick -- and tests/linux/boot_log.sh asserts that this sentinel is present in
+# a freshly built image and GONE from a booted one, which is what makes the
+# readback mean something.
+BOOTLOG_BYTES=$((256 * 1024))     # must match BOOTLOG_CAP in user/bootlogd.ad
+BOOTLOG_SEED="$STAGE/HAMNIX.LOG"
+{
+    cat <<'SEED'
+==== HAMNIX BOOT LOG ====
+
+THIS FILE HAS NOT BEEN WRITTEN BY ANY BOOT YET.
+
+It was created, at this full size, when the medium was built. If you are
+reading this line then this stick has either never been booted, or a boot
+did not get far enough to start /bin/bootlogd, or bootlogd could not write
+here. Any of those is itself the finding -- it is NOT an empty log.
+
+When a boot does write here, this text is replaced by that boot's kernel
+log, including every line the shell and the desktop printed.
+
+SEED
+    # Newlines, not NULs: a partially written log then opens as ordinary text
+    # in any editor rather than as a NUL sea some of them refuse to display.
+    head -c "$BOOTLOG_BYTES" /dev/zero | tr '\0' '\n'
+} | head -c "$BOOTLOG_BYTES" > "$BOOTLOG_SEED"
+[ "$(stat -Lc%s "$BOOTLOG_SEED")" = "$BOOTLOG_BYTES" ] || {
+    echo "[disk] ERROR: the boot-log seed is not $BOOTLOG_BYTES bytes." >&2
+    exit 1; }
+
 ESP_NEED=$(( ( $(stat -Lc%s "$UKI") \
              + $(stat -Lc%s build/image/vmlinuz) \
-             + $(stat -Lc%s build/image/initramfs.cpio.gz) ) / 1048576 ))
+             + $(stat -Lc%s build/image/initramfs.cpio.gz) \
+             + BOOTLOG_BYTES ) / 1048576 ))
 ESP_MB=$(( ESP_NEED + ESP_NEED / 5 + 32 ))       # 20% slack for FAT overhead
 [ "$ESP_MB" -lt 200 ] && ESP_MB=200
 # And the two partitions have to fit in the disk that will be truncated below.
@@ -335,7 +425,11 @@ mcopy -i "$ESP" "$UKI" ::/EFI/BOOT/BOOTX64.EFI
 # installer would replace on an update.
 mcopy -i "$ESP" build/image/vmlinuz ::/vmlinuz
 mcopy -i "$ESP" build/image/initramfs.cpio.gz ::/initramfs.cpio.gz
-echo "[disk] ESP: ${ESP_MB}M"
+# FIRST-LEVEL, 8.3, UPPER CASE: the name is what somebody sees when they plug
+# this stick into a Windows or macOS machine, sitting beside EFI/. Nothing
+# about it needs a long-filename entry to be found.
+mcopy -i "$ESP" "$BOOTLOG_SEED" ::/HAMNIX.LOG
+echo "[disk] ESP: ${ESP_MB}M (including a ${BOOTLOG_BYTES}-byte preallocated \\HAMNIX.LOG boot log)"
 
 # --- assemble the disk -----------------------------------------------------
 rm -f "$OUT"

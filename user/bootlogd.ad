@@ -1,0 +1,329 @@
+# user/bootlogd.ad — KEEP THE BOOT LOG ON THE STICK.
+#
+# THE PROBLEM THIS EXISTS FOR, AND IT IS ABOUT THE HUMAN LOOP RATHER THAN THE
+# CODE.
+#
+# The owner boots a Lenovo from a USB stick this tree builds. He has no serial
+# cable, no shell and no second machine attached. When something goes wrong the
+# ONLY evidence that survives is a PHOTOGRAPH OF THE SCREEN -- and a photograph
+# shows the last forty lines, in whatever state the console left them, with the
+# compositor very likely painted over the top of them.
+#
+# So: the stick keeps its own log. After a bad boot he powers the machine off
+# with the button, plugs the stick into another computer, and opens a file.
+#
+# ---------------------------------------------------------------------------
+# WHERE IT IS WRITTEN, AND WHY THAT FILESYSTEM
+# ---------------------------------------------------------------------------
+# THE ESP. FAT32. `\HAMNIX.LOG` in the root of the boot partition.
+#
+# Not the ext4 root, and the reasoning is not the obvious one:
+#
+#   1. HE HAS TO BE ABLE TO OPEN IT. FAT32 mounts on Windows, on macOS and on
+#      Linux with nothing installed. ext4 is fine on his Debian host and is not
+#      fine on whatever machine he is standing next to. A log he cannot read is
+#      not evidence.
+#
+#   2. THE JOURNAL ARGUMENT RUNS THE OTHER WAY. "ext4 has a journal and FAT
+#      does not" sounds like it settles this, and it settles it backwards. A
+#      journal keeps a filesystem CONSISTENT after a crash; it does not keep
+#      YOUR DATA. tests/linux/install_from_usb.sh has the measurement, in its
+#      own words: SIGKILL to QEMU is a power cut, ext4 commits on a 5 s timer,
+#      "the write was still in the guest's page cache" and the next boot
+#      behaved as though the root were not persistent. The journal did its job
+#      perfectly and the data was gone anyway. So ext4's journal buys this file
+#      nothing, and its cost -- a journal transaction per synchronous write --
+#      is real.
+#
+#   3. WHAT ACTUALLY MAKES IT SURVIVE THE POWER BUTTON IS A DISCIPLINE, NOT A
+#      FILESYSTEM, and the discipline is what makes FAT's missing journal
+#      irrelevant:
+#
+#        * The file is PREALLOCATED TO ITS FULL SIZE AT IMAGE BUILD TIME
+#          (scripts/hamlinux_disk.sh) and is NEVER EXTENDED. Every write is an
+#          overwrite in place, from offset 0. No cluster is ever allocated, the
+#          FAT chain is never mutated, the directory entry's length and start
+#          cluster never change. The only thing that has to reach the medium is
+#          the data blocks -- which is exactly the part a journal would not have
+#          protected either.
+#
+#        * Every write is O_SYNC (user/linux-syscalls.c:sys_open_sync), so
+#          write(2) does not return until those blocks are on the stick. The
+#          window in which a power cut loses anything is one snapshot interval,
+#          not one journal commit.
+#
+#      The same two properties are why this CANNOT FILL THE FILESYSTEM: there
+#      is no code path anywhere that makes the file bigger than it was built,
+#      and the size is a constant in the build script.
+#
+#      This is also, independently, the arrangement Hamnix's own bare-metal
+#      line arrived at -- kernel/printk/esp_log.ad snapshots the printk ring
+#      into a preallocated extent on the ESP. Two lines of this project reached
+#      the same design from opposite ends, which is the best evidence available
+#      that it is the right one.
+#
+# ---------------------------------------------------------------------------
+# WHAT IT CAPTURES
+# ---------------------------------------------------------------------------
+# THE KERNEL'S HALF AND THE SHELL'S HALF, IN ONE ORDERED, TIMESTAMPED STREAM.
+#
+# The kernel's half was never the problem: it is in the printk ring, and dmesg
+# shows it. The interesting half -- the half that was invisible on 2026-08-15,
+# when the laptop reached `exec /bin/hamsh /etc/rc.boot` and the screen stopped
+# changing -- is what rc.boot and the desktop say. That is now in the ring too:
+# user/linux-syscalls.c:consmirror copies every console write, at the one choke
+# point every Adder program's output passes through, into /dev/kmsg at <7>.
+# <7> is recorded and NOT printed at loglevel=7, so it costs nothing on screen;
+# the long note there is the argument.
+#
+# So this program does not have to capture anything itself. It is a SNAPSHOTTER
+# of a buffer the kernel already keeps for us, and that is what makes it cheap,
+# what makes it correct across many writing processes (the ring is one
+# kernel-serialised buffer; a file opened by every process would be a race of
+# independent write offsets), and what makes STARTING IT LATE COST NOTHING --
+# the ring already holds the whole boot, so the first snapshot contains t=0.
+#
+# WHAT IT DOES NOT CAPTURE, said here so nobody has to discover it:
+#   * output from a process that has DROPPED PRIVILEGE. /dev/kmsg is writable
+#     by root; the LIVE image's `setuid 1001` and etc/rc.de-user's desktop
+#     users cannot open it. The INSTALLED boot -- etc/rc.boot.installed, the
+#     one on the owner's stick -- never drops privilege, so its rc, services
+#     and desktop are all captured.
+#   * anything a program writes to a REDIRECT, a pipe or a terminal window.
+#     Only writes to the console device itself (rdev 5:1) are mirrored, which
+#     is deliberate: the alternative pours every `cat` into the kernel ring.
+#   * what the SCREEN looked like. A log records text, not pixels.
+#
+# ---------------------------------------------------------------------------
+# IT MUST NEVER BE A WAY FOR THE BOOT TO FAIL
+# ---------------------------------------------------------------------------
+# Every failure here is reported on the console in one line and then EXITS 0.
+# It is spawned DETACHED from the rc, so nothing waits for it even when it
+# works. If the ESP is missing, unmountable, or the log file is absent or
+# unwritable, the boot continues and says why on the screen. A logging facility
+# that can stop a boot is worse than no logging facility.
+#
+# AND IT IS NEVER SILENT ABOUT BEING UNWRITTEN. The preallocated file ships
+# with text in it saying it has not been written by any boot yet. An empty file
+# looks identical whether nothing was written or the write went somewhere else
+# -- which is the exact bug this whole effort came out of -- so the unwritten
+# state is made to SAY that it is the unwritten state.
+#
+# Usage: bootlogd [-1]        -1 = take one snapshot and exit (the gates)
+# Adder notes: every buffer is a top-level BSS Array; no adjacent string
+# literal concatenation.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+extern def sys_open_sync(path: Ptr[char]) -> int32
+extern def sys_klogread(buf: Ptr[uint8], n: uint64) -> int64
+extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_exit(code: uint64)
+
+SEEK_SET: int32 = 0
+
+# THE FILE, AND ITS SIZE, WHICH IS THE SIZE POLICY.
+#
+# 256 KiB. It must match BOOTLOG_BYTES in scripts/hamlinux_disk.sh, which is
+# what actually creates the file; if the two disagree the smaller one wins
+# harmlessly, because this program never writes past what it was given and
+# never extends anything.
+#
+# 256 KiB is chosen from what a boot produces: a loglevel=7 boot of this image
+# is tens of kilobytes of kernel messages plus a few kilobytes of rc output. It
+# is small enough that the one-time wipe below is a single quick transfer even
+# to a slow USB 2 stick, and large enough that nothing of a normal boot is
+# lost. When the ring holds more than fits, sys_klogread hands back the TAIL --
+# the end of the boot, which is the part that matters after one went wrong.
+#
+# THE PATH IS WRITTEN OUT AT THE ONE CALL SITE rather than held in a top-level
+# `BOOTLOG_PATH: Ptr[char] = "..."`, and that is not a style preference. Adder
+# does not initialise a top-level pointer from a string literal: the variable
+# is emitted, the program compiles and links with no diagnostic of any kind,
+# and open(2) is handed a garbage pointer and fails EFAULT. MEASURED -- the
+# first run of this program printed "could not be opened for writing: Bad
+# address" while sitting in a directory where the honest answer was "No such
+# file". Nothing else in user/*.ad or lib/*.ad uses that form.
+BOOTLOG_CAP:  uint64 = 262144
+
+# The snapshot cadence. THIS IS THE SIZE OF THE WINDOW IN WHICH A POWER CUT
+# LOSES SOMETHING, and it is the only real tuning knob here. Two seconds: short
+# enough that the tail of a boot that died is on the stick, long enough that a
+# whole boot costs on the order of a dozen writes.
+SNAP_MS: int64 = 2000
+
+# Never dereferenced at nfds == 0 -- the tree's portable park, as
+# user/sleep.ad's header explains.
+park_fds: Array[1, int32]
+
+# The ring snapshot. Sized so that the header and the terminator below always
+# fit inside BOOTLOG_CAP with room to spare.
+ring:   Array[245760, uint8]
+# The wipe pattern, written once. Newlines rather than NULs so that a log which
+# is never written, or one whose tail is a previous boot's, opens as ordinary
+# empty text in any editor rather than as a sea of NULs that some of them
+# refuse to display at all.
+wipe:   Array[8192, uint8]
+errbuf: Array[128, uint8]
+numbuf: Array[24, uint8]
+
+logfd:  int32 = -1
+
+
+def cstrlen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def wr(fd: int32, s: Ptr[uint8]):
+    # LENGTH FROM THE STRING, NEVER FROM A NUMBER TYPED BESIDE IT. The first
+    # version of this file passed a hand-counted byte count to each sys_write,
+    # and several of them were short by one -- so the log came back with its
+    # header lines run together, the trailing newline of each swallowed. It
+    # still looked broadly right, which is the worst way for a diagnostic file
+    # to be wrong. Nothing here counts bytes by hand any more.
+    sys_write(fd, s, cstrlen(s))
+
+
+def say(msg: Ptr[uint8]):
+    # To the console, which is the screen on the shipped command line. These
+    # lines are themselves mirrored into the ring by consmirror, so the log
+    # explains its own state -- including, on the failure path, why there is
+    # no log.
+    wr(1, "bootlogd: ")
+    wr(1, msg)
+    wr(1, "\n")
+
+
+def sayerr(msg: Ptr[uint8]):
+    # WITH THE REASON THE KERNEL GAVE. "could not open the log" and "could not
+    # open the log: Read-only file system" are different faults with different
+    # fixes, and the person reading this is standing in front of a laptop with
+    # no shell.
+    n: int32 = sys_errstr(&errbuf[0], 128)
+    wr(2, "bootlogd: ")
+    wr(2, msg)
+    if n > 0:
+        wr(2, ": ")
+        wr(2, &errbuf[0])
+    wr(2, "\n")
+
+
+def put_dec(fd: int32, v: uint64):
+    if v == 0:
+        sys_write(fd, "0", 1)
+        return
+    k: uint64 = 24
+    while v > 0:
+        k = k - 1
+        numbuf[k] = cast[uint8](48 + cast[uint32](v % 10))
+        v = v / 10
+    sys_write(fd, &numbuf[k], 24 - k)
+
+
+def wipe_file() -> int32:
+    # ONCE, AT START, AND THIS IS AN INSTRUMENT PROPERTY RATHER THAN TIDINESS.
+    #
+    # The file is preallocated and overwritten in place, so whatever a PREVIOUS
+    # boot wrote past the end of what THIS boot writes is still sitting there.
+    # Somebody reading the file after a short failed boot would find this
+    # boot's few lines followed, with no seam, by the whole of a boot that went
+    # fine -- and would take the second half for evidence about the first. That
+    # is a worse failure than no log.
+    #
+    # So the whole file is written over once before the first snapshot. It is
+    # ~32 transfers of 8 KiB and it happens in a detached process, so the boot
+    # does not wait for it; the first snapshot follows immediately after.
+    i: uint64 = 0
+    while i < 8192:
+        wipe[i] = 10                                    # '\n'
+        i = i + 1
+    if sys_lseek(logfd, 0, SEEK_SET) < 0:
+        return -1
+    done: uint64 = 0
+    while done < BOOTLOG_CAP:
+        n: uint64 = 8192
+        if BOOTLOG_CAP - done < n:
+            n = BOOTLOG_CAP - done
+        w: int64 = sys_write(logfd, &wipe[0], n)
+        if w <= 0:
+            # The file is shorter than we thought, or the medium went away.
+            # Neither is fatal: whatever we did manage to clear is cleared,
+            # and the snapshot below writes from offset 0 regardless.
+            return 0
+        done = done + cast[uint64](w)
+    return 0
+
+
+def snapshot() -> int32:
+    # ONE PASS: rewind, header, the ring, terminator. Everything through one
+    # O_SYNC descriptor, so when this returns the bytes are on the stick.
+    if sys_lseek(logfd, 0, SEEK_SET) < 0:
+        return -1
+    wr(logfd, "==== HAMNIX BOOT LOG ====\n")
+    wr(logfd, "This is the kernel log ring of the boot that wrote it, including every\n")
+    wr(logfd, "line the shell and the desktop printed (mirrored in as `cons:' lines).\n")
+    wr(logfd, "Rewritten in place every couple of seconds; the tail is the newest.\n")
+    wr(logfd, "-------------------------------------------------------------------\n")
+
+    n: int64 = sys_klogread(&ring[0], 245760)
+    if n < 0:
+        # NAMED, NOT GUESSED AT. EPERM here means dmesg_restrict is set and we
+        # are not root; an empty file with no explanation would be read as "the
+        # boot printed nothing", which is the exact misreading this whole
+        # arrangement exists to prevent.
+        wr(logfd, "*** THE KERNEL LOG COULD NOT BE READ. This file is otherwise empty\n")
+        wr(logfd, "*** for that reason and NOT because the boot printed nothing.\n")
+        wr(logfd, "==== END OF HAMNIX BOOT LOG ====\n")
+        return -1
+    if n > 0:
+        sys_write(logfd, &ring[0], cast[uint64](n))
+    wr(logfd, "\n==== END OF HAMNIX BOOT LOG ====\n")
+    return 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    once: int32 = 0
+    i: int32 = 1
+    while i < argc:
+        a: Ptr[uint8] = cast[Ptr[uint8]](argv[i])
+        if a[0] == 45 and a[1] == 49 and a[2] == 0:     # "-1"
+            once = 1
+        i = i + 1
+
+    logfd = sys_open_sync(cast[Ptr[char]]("/boot/HAMNIX.LOG"))
+    if logfd < 0:
+        # THE FAILURE PATH, AND IT IS A SUPPORTED OUTCOME. Say what is missing,
+        # say what it costs, say what would fix it, and exit 0 so that nothing
+        # anywhere reads this as a boot failure.
+        sayerr("NO BOOT LOG: /boot/HAMNIX.LOG could not be opened for writing")
+        say("the boot continues normally; only the on-stick log is unavailable.")
+        say("expected a preallocated HAMNIX.LOG in the root of the FAT boot")
+        say("partition, and `bind '#esp' /boot` to have mounted it there.")
+        sys_exit(0)
+        return 0
+
+    if once == 0:
+        wipe_file()
+
+    say("logging this boot to HAMNIX.LOG in the root of the FAT boot partition")
+
+    if snapshot() < 0:
+        sayerr("the first snapshot failed; the log may be incomplete")
+    if once != 0:
+        sys_close(logfd)
+        return 0
+
+    # FOREVER, and deliberately not "until the boot is finished". There is no
+    # such moment: the interesting failures are the ones where the desktop
+    # comes up and then something goes wrong, or where it never does and the
+    # machine sits there until he reaches for the power button. Whenever he
+    # reaches for it, the file is at most SNAP_MS behind the truth.
+    while True:
+        sys_waitfds(&park_fds[0], 0, SNAP_MS)
+        snapshot()
+    return 0

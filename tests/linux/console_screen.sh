@@ -85,6 +85,19 @@ say "building the medium under test"
 if [ "${HAMLINUX_CONSGATE_REUSE:-0}" = 1 ] && [ -f "$WORK/medium.img" ]; then
     info "reusing $WORK/medium.img"
 else
+    # THIS GATE BOOTED A THREE-DAY-OLD PID 1 AND REPORTED ON IT AS THOUGH IT
+    # WERE THE TREE UNDER TEST. scripts/hamlinux_disk.sh builds build/image/root
+    # only when it is ABSENT, so once anything has ever built it, every later
+    # run packages whatever was lying there. Run against a tree whose whole
+    # point was a change to the console arrangement in user/linuxinit.ad and
+    # user/linux-syscalls.c, the guest booted the OLD userland and the gate
+    # scored 5/7 with "no root switch -- this boot ran from RAM": a red that
+    # says nothing about the change, on a gate that had reported 12/0 when its
+    # author happened to have a fresh root. tests/linux/boot_log.sh:123 closes
+    # the same hole for the same reason; this is that fix, here.
+    info "rebuilding build/image/root so this gate cannot boot a stale tree"
+    scripts/hamlinux_image.sh >"$WORK/image.log" 2>&1 || {
+        bad "image build"; tail -20 "$WORK/image.log"; exit 1; }
     HAMLINUX_DISK_RC="$WORK/rc.consproof" \
         scripts/hamlinux_disk.sh "$WORK/medium.img" 3G >"$WORK/disk.log" 2>&1 || {
         bad "disk build"; tail -20 "$WORK/disk.log"; exit 1; }

@@ -377,6 +377,51 @@ def set_ptrace_scope():
     write_cstr(2, " after writing 1: the write did not take, and same-uid ptrace is NOT restricted on this boot.\n")
 
 
+def check_devkmsg_unlimited():
+    # IS THE BOOT LOG GOING TO BE COMPLETE? ASK, DO NOT ASSUME.
+    #
+    # user/linux-syscalls.c:consmirror copies the SHELL's console output into
+    # /dev/kmsg so that user/bootlogd.ad can persist it onto the stick -- the
+    # whole reason the owner can hand over a file instead of a photograph. The
+    # kernel's default for writes to that node is `ratelimit`: ten records per
+    # five seconds, globally, everything else dropped with NO ERROR TO THE
+    # WRITER. scripts/hamlinux_disk.sh therefore puts `printk.devkmsg=on` on
+    # the command line, and the header there records the measurement -- four
+    # seconds of the boot missing from the middle of a log that otherwise
+    # looked perfect.
+    #
+    # A BOOT PARAMETER THAT THE KERNEL IGNORED WOULD LEAVE EXACTLY THAT LOG,
+    # and nothing else would ever say so. So it is read back, and a boot whose
+    # log is going to have holes in it says so on the screen rather than
+    # letting somebody trust the file later. This warns and continues: an
+    # incomplete log is still worth having, and refusing to boot over it would
+    # be the logging facility stopping a boot.
+    fd: int32 = sys_open(cast[Ptr[char]]("/proc/sys/kernel/printk_devkmsg"))
+    if fd < 0:
+        write_cstr(2, "linuxinit: WARNING: /proc/sys/kernel/printk_devkmsg does not exist; whether the boot log will be complete cannot be checked on this kernel.\n")
+        return
+    got: int64 = sys_read(fd, &ptbuf[0], 63)
+    sys_close(fd)
+    if got <= 0:
+        write_cstr(2, "linuxinit: WARNING: /proc/sys/kernel/printk_devkmsg read back empty; the boot log may be rate-limited.\n")
+        return
+    ptbuf[got] = 0
+    i: uint64 = 0
+    while i < cast[uint64](got):
+        if ptbuf[i] == 10:
+            ptbuf[i] = 0
+        i = i + 1
+    if ptbuf[0] == 111 and ptbuf[1] == 110:                  # "on"
+        say("printk.devkmsg=on — the boot log records every console line")
+        return
+    write_cstr(2, "linuxinit: WARNING: printk_devkmsg is '")
+    write_cstr(2, &ptbuf[0])
+    write_cstr(2, "', not 'on': writes to /dev/kmsg are RATE LIMITED to ten records\n")
+    write_cstr(2, "linuxinit: WARNING: every five seconds, so HAMNIX.LOG on this stick WILL BE MISSING LINES --\n")
+    write_cstr(2, "linuxinit: WARNING: silently, and in the middle, where they would be looked for. Do not\n")
+    write_cstr(2, "linuxinit: WARNING: trust a gap in that file as evidence that nothing was printed.\n")
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     say("Hamnix on Linux — bringing up the namespace")
 
@@ -400,6 +445,9 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # on the function: everything the window system does about same-uid
     # confidentiality rests on this one line.
     set_ptrace_scope()
+
+    # Same moment, same reason: the earliest instant /proc/sys exists.
+    check_devkmsg_unlimited()
 
     # Drivers come after /sys and /dev exist: the module init paths want both,
     # and devtmpfs is what materialises /dev/dri/card0 once virtio-gpu attaches.
