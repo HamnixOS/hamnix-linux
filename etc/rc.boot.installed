@@ -32,6 +32,61 @@ ln -s /dev/console /dev/cons
 # lives in PID 1 here, not in the rc -- the one place this line's boot differs
 # in SHAPE from Hamnix's, and it differs because the initramfs exists at all.
 
+# --- the boot log ----------------------------------------------------
+# THE STICK KEEPS ITS OWN LOG, AND THIS IS THE ONLY REASON IT CAN.
+#
+# The owner boots this medium on a Lenovo with no serial cable, no shell and no
+# second machine attached. When a boot goes wrong the ONLY evidence that
+# survives is a photograph of the screen -- forty lines, in whatever state the
+# console left them, quite possibly with the compositor painted over the top.
+# On 2026-08-15 that is exactly what happened, and it took a whole investigation
+# to establish that the boot had in fact been fine.
+#
+# So: `bind '#esp' /boot` mounts the FAT32 EFI System Partition OF THE MEDIUM
+# THIS MACHINE BOOTED FROM (user/linux-syscalls.c:esp_device finds it by its
+# UEFI type GUID, on the disk that carries the root, so it can never write to
+# some other disk's ESP -- a laptop's internal drive, with somebody's real
+# operating system on it), and bootlogd snapshots the kernel log ring onto it.
+# The ring has the shell's output in it as well as the kernel's, because
+# consmirror copies every console write into /dev/kmsg at <7>.
+#
+# FAT32 rather than the ext4 root because he has to be able to READ it: FAT32
+# mounts on Windows, macOS and Linux with nothing installed. The file is
+# preallocated at build time and overwritten in place with O_SYNC, which is
+# what makes it survive the power button and what makes it unable to fill the
+# filesystem. All of that is argued in user/bootlogd.ad's header.
+#
+# IT IS BEFORE THE NETWORK AND BEFORE THE DESKTOP because the whole point is to
+# capture what those do -- and because the ring already holds everything that
+# happened before this line, so the first snapshot contains the kernel's boot
+# and PID 1's namespace setup too.
+#
+# DETACHED, so PID 1 never waits on it, and every failure below is a message
+# and a boot that carries on. A logging facility that can stop a boot is worse
+# than no logging facility. try/except for the reason the distro binds below
+# give: it is this tree's idiom for a BUILTIN that can fail, and it reacts only
+# to the LAST command in the block, so the bind is alone in its own try.
+bootlog_esp = 1
+try {
+    bind '#esp' /boot
+} except {
+    bootlog_esp = 0
+}
+if $bootlog_esp > 0 {
+    bootlogns = ns {
+    }
+    bootlogsvc = spawn detached bootlogns {
+        bootlogd
+    }
+    if $status > 0 {
+        echo 'rc.boot: FAILED to start bootlogd -- this boot is NOT being logged to the stick'
+    }
+} else {
+    echo 'rc.boot: NO BOOT LOG: the boot medium has no EFI System Partition this'
+    echo 'rc.boot: machine could mount, so nothing can be written to the stick.'
+    echo 'rc.boot: The boot continues; only the on-medium log is unavailable.'
+}
+
 # --- networking ------------------------------------------------------
 # DHCP, BECAUSE THE THREE LINES THAT USED TO BE HERE WERE QEMU'S ADDRESSES.
 #
@@ -135,3 +190,21 @@ linux = ns clean {
 source '/etc/rc.d/rc.5'
 
 echo 'rc.boot: up'
+
+# WHERE THE LOG IS, SAID ON THE SCREEN, AT THE END, WHERE HE WILL PHOTOGRAPH IT.
+#
+# A log nobody knows about is a log nobody reads. This is the last thing the
+# console says before the desktop takes the screen, so it is in the photograph
+# of a boot that went right AND in the photograph of one that got this far and
+# then went wrong -- which is precisely the case where the file matters and
+# where nothing else would have told him it exists.
+#
+# It is printed unconditionally rather than only when bootlogd started, because
+# the failure branch above has already said, in its own words, that there is no
+# log; these two lines say what to do when there is one, and the two together
+# read correctly in either order on a screen.
+if $bootlog_esp > 0 {
+    echo 'rc.boot: THIS BOOT IS BEING LOGGED TO THE STICK. If anything goes wrong,'
+    echo 'rc.boot: hold the power button, plug this stick into another computer,'
+    echo 'rc.boot: and open HAMNIX.LOG in the top of its FAT boot partition.'
+}

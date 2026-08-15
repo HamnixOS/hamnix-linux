@@ -116,6 +116,15 @@ APPS=(
     ssh sshd
     insmod modprobe lsmod rmmod
     xbridge wsyswl nsrun dhcpc ntpd
+    # THE BOOT LOG WRITER, and it is here rather than in a package because a
+    # machine that will not boot cannot install one. It is what turns a failed
+    # boot on a machine with no serial cable from a photograph of the last
+    # forty lines into a file the owner can carry to another computer:
+    # etc/rc.boot.installed binds the stick's own FAT boot partition and spawns
+    # this, which snapshots the kernel log ring -- shell output included, via
+    # user/linux-syscalls.c:consmirror -- onto it every couple of seconds. Its
+    # header is where the whole arrangement is argued.
+    bootlogd
     # The clipboard bridge. It is here rather than among the GUI apps because
     # it draws nothing: it is an X CLIENT that owns CLIPBOARD and PRIMARY on
     # the Xwayland inside a distribution namespace and mirrors both against

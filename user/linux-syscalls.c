@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <sched.h>
 #include <sys/inotify.h>
+#include <sys/klog.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <netdb.h>
@@ -826,6 +827,65 @@ int32_t sys_open3(const char *path, int32_t flags, uint32_t mode)
     return rc32(open(path, (int)flags, (mode_t)mode));
 }
 
+/* extern def sys_open_sync(path: Ptr[char]) -> int32
+ *
+ * Open an EXISTING file for writing with O_SYNC, and create nothing.
+ *
+ * THE TWO WORDS THAT MATTER ARE `EXISTING` AND `O_SYNC`, and they are the
+ * whole durability argument of the boot log (user/bootlogd.ad):
+ *
+ *   NO O_CREAT AND NO O_TRUNC. The log file is preallocated to its full size
+ *   at image build time (scripts/hamlinux_disk.sh) and is only ever OVERWRITTEN
+ *   IN PLACE. Nothing at runtime ever creates it, extends it or changes its
+ *   length, so no cluster is ever allocated, the FAT chain is never mutated,
+ *   and the directory entry's size and starting cluster never change. That is
+ *   what makes FAT's lack of a journal a non-issue for this file, and it is
+ *   also what makes the log incapable of filling the filesystem: there is no
+ *   code path that can make it bigger than it was built.
+ *
+ *   O_SYNC, because the failure this exists to survive is the power button.
+ *   tests/linux/install_from_usb.sh measured the alternative on ext4: SIGKILL
+ *   to QEMU before the journal's 5 s commit, and the write was still in the
+ *   guest's page cache and simply gone. A journal keeps a filesystem
+ *   CONSISTENT; it does not keep YOUR DATA. O_SYNC means write(2) does not
+ *   return until the bytes are on the medium, which is the only property that
+ *   makes a log worth trusting -- and a log that is lost precisely when the
+ *   boot fails is worse than none, because it will be believed.
+ *
+ * The cost is paid by ONE process on a background loop, never by the boot. */
+int32_t sys_open_sync(const char *path)
+{
+    return rc32(open(path, O_WRONLY | O_SYNC | O_CLOEXEC));
+}
+
+/* extern def sys_klogread(buf: Ptr[uint8], n: uint64) -> int64
+ *
+ * The kernel's log ring, read WITHOUT consuming it: klogctl(2) command 3,
+ * SYSLOG_ACTION_READ_ALL, which is what `dmesg` does.
+ *
+ * READ_ALL rather than a read of /dev/kmsg, for two reasons that are both
+ * about being an instrument rather than a participant:
+ *
+ *   * It is NON-DESTRUCTIVE. /proc/kmsg drains the ring, so a logger reading
+ *     it would take the messages away from every other reader, `dmesg`
+ *     included. Something that makes the evidence disappear as it records it
+ *     is not something to put in a boot.
+ *
+ *   * It is BOUNDED, AND BOUNDED AT THE INTERESTING END. When the ring holds
+ *     more than `n` bytes the kernel returns the LAST `n` -- the tail, which
+ *     is the part a person cares about after a boot went wrong. So the caller's
+ *     buffer size is the whole size policy and there is nothing to truncate by
+ *     hand.
+ *
+ * Negative return is -errno; EPERM when dmesg_restrict is set and the caller
+ * is not root, which the caller reports rather than mistaking for an empty
+ * ring. */
+int64_t sys_klogread(uint8_t *buf, uint64_t n)
+{
+    if (n > 0x7fffffff) n = 0x7fffffff;
+    return rc64(klogctl(3 /* SYSLOG_ACTION_READ_ALL */, (char *)buf, (int)n));
+}
+
 /* extern def sys_open_write(path: Ptr[char]) -> int32
  * Open-or-create for writing, truncating an existing file. */
 int32_t sys_open_write(const char *path)
@@ -1126,16 +1186,116 @@ static void consmirror_setup(void)
     consmirror_fd = r;
 }
 
+/* ------------------------------------------------------------------ *
+ * THE SECOND SINK: THE CONSOLE INTO THE KERNEL LOG, SO IT CAN BE PERSISTED.
+ *
+ * consmirror above copies the console onto a serial port so the GATES can read
+ * it. This copies the same bytes into /dev/kmsg so that something can WRITE
+ * THEM TO THE STICK -- see user/bootlogd.ad, which snapshots the kernel ring
+ * onto the boot medium's FAT partition. The owner has no serial cable; the
+ * serial mirror does nothing for him at all.
+ *
+ * WHY <7> AND WHY THIS DOES NOT PUT EVERY LINE ON THE SCREEN TWICE. This is
+ * the objection recorded in the header of consmirror -- "mirroring to
+ * /dev/kmsg would reach the gate but ALSO tty0, so every line would be drawn
+ * on the screen twice" -- and it is answered by the PRIORITY, which that note
+ * did not consider. printk prints a record only when its level is strictly
+ * LESS THAN console_loglevel, and the shipped command line says `loglevel=7`.
+ * A record emitted at <7> (KERN_DEBUG) is therefore RECORDED IN THE RING AND
+ * NOT PRINTED ON ANY CONSOLE. user/linuxinit.ad:say() already turns on exactly
+ * this fact and says so, and tests/linux/console_screen.sh already asserts the
+ * consequence ("PID 1's lines appear on the screen once, not once bare and
+ * once with a printk timestamp") -- so if this is wrong, that gate goes red
+ * rather than the owner finding out on his laptop.
+ *
+ * ONE RECORD PER LINE, WHICH IS WHY THERE IS A BUFFER. /dev/kmsg is
+ * record-oriented: one write(2) is one log record. The console writes that
+ * pass through here are not lines -- user/linuxinit.ad:write_cstr emits
+ * "linuxinit: ", the message, and "\n" as THREE separate writes -- so writing
+ * each one straight through would produce three timestamped fragments where a
+ * person expects one line. Bytes are accumulated here and a record is emitted
+ * on the newline (or when the buffer is full, so a program that never emits
+ * one cannot lose its output).
+ *
+ * "cons: " ON THE FRONT, so the log distinguishes what a PROGRAM printed from
+ * what the KERNEL printed. It also means linuxinit's lines, which are already
+ * in the ring because say() puts them there, are visibly the same line twice
+ * rather than a mystery: once as `linuxinit: ...` and once as
+ * `cons: linuxinit: ...`.
+ *
+ * WHAT IT CANNOT CAPTURE, stated here rather than discovered later: /dev/kmsg
+ * is writable by root only, so a session that has dropped privilege (the LIVE
+ * image's `setuid 1001`, etc/rc.de-user's desktop users) opens it and fails,
+ * the sink latches off for that process, and its output is on the screen and
+ * the serial port but not in the log. The INSTALLED boot -- the one the owner
+ * runs, etc/rc.boot.installed -- never drops privilege, so its rc, its
+ * services and its desktop are all captured. */
+static int kmsglog_fd = -2;             /* -2 undecided, -1 off, else the fd */
+static int kmsglog_tries = 0;
+static char kmsglog_line[768];
+static size_t kmsglog_n = 0;
+
+static void kmsglog_setup(void)
+{
+    /* Retried, not latched, for the reason consmirror_setup gives: PID 1's
+     * first lines are printed before `bind '#c' /dev` has happened, and
+     * deciding "off" there would turn this off for the whole boot. */
+    if (++kmsglog_tries > 32) { kmsglog_fd = -1; return; }
+    int r = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+    if (r < 0) return;                          /* no node yet: ask again */
+    kmsglog_fd = r;
+}
+
+static void kmsglog_flush(void)
+{
+    if (kmsglog_fd < 0 || kmsglog_n == 0) return;
+    char rec[832];
+    int n = snprintf(rec, sizeof rec, "<7>cons: %.*s",
+                     (int)kmsglog_n, kmsglog_line);
+    if (n > 0) {
+        ssize_t ignored = write(kmsglog_fd, rec, (size_t)n);
+        (void)ignored;
+    }
+    kmsglog_n = 0;
+}
+
+static void kmsglog_emit(const uint8_t *buf, uint64_t count)
+{
+    for (uint64_t i = 0; i < count; i++) {
+        uint8_t c = buf[i];
+        if (c == '\n') { kmsglog_flush(); continue; }
+        /* A NUL or a control byte in a log record is what turns a text file
+         * into something an editor refuses to show; the log is read by a
+         * person on another computer. Tabs survive, everything else below
+         * space becomes a space. */
+        if (c < 0x20 && c != '\t') c = ' ';
+        kmsglog_line[kmsglog_n++] = (char)c;
+        if (kmsglog_n >= sizeof kmsglog_line - 1) kmsglog_flush();
+    }
+}
+
+/* THE ONE PLACE A CONSOLE WRITE IS FANNED OUT, and it is one place on purpose.
+ * The rdev test is the whole discipline and it is now performed ONCE for both
+ * sinks: only fd 5:1, the console device itself, is copied anywhere. A
+ * redirect to a file, a pipe, a terminal window's pty and a socket all have
+ * other rdevs and are left alone, so `cmd > file` still puts its bytes in
+ * exactly one place -- and, just as importantly, does not pour a multi-megabyte
+ * `cat` into the kernel ring. */
 static void consmirror(int fd, const uint8_t *buf, uint64_t count)
 {
     if (count == 0) return;
     if (consmirror_fd == -2) consmirror_setup();
-    if (consmirror_fd < 0) return;
+    if (kmsglog_fd == -2) kmsglog_setup();
+    if (consmirror_fd < 0 && kmsglog_fd < 0) return;
     struct stat st;
     if (fstat(fd, &st) != 0) return;
     if (!S_ISCHR(st.st_mode) || st.st_rdev != makedev(5, 1)) return;
-    ssize_t ignored = write(consmirror_fd, buf, (size_t)count);
-    (void)ignored;
+    if (consmirror_fd >= 0) {
+        ssize_t ignored = write(consmirror_fd, buf, (size_t)count);
+        (void)ignored;
+    }
+    if (kmsglog_fd >= 0)
+        kmsglog_emit(buf, count);
 }
 
 /* EVERY DIRECT CONSOLE WRITE IN THIS FILE GOES THROUGH HERE, AND A RED GATE IS
@@ -3339,6 +3499,11 @@ static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
         { "#d",       NULL,       NULL, 0, NULL },
         { "#r",       NULL,       NULL, 1, NULL },   /* root partition subtree */
         { "#sysroot", NULL,       NULL, 0, NULL },
+        /* `#esp` — the FAT32 EFI System Partition of the medium this machine
+         * booted from, resolved by esp_device(). `bind '#esp' /boot` mounts
+         * it; that is where the boot log goes, because FAT32 is the one
+         * filesystem that opens on any computer he might carry the stick to. */
+        { "#esp",     NULL,       NULL, 0, NULL },
         /* `#distro/<name>` — the distribution namespaces. PREFIXED, because
          * the component after the letter is WHICH ONE: `#distro/debian`,
          * `#distro/alpine`. Bare `#distro` is the default, which is what
@@ -3504,8 +3669,19 @@ static unsigned disk_block_size(const char *disk)
     return (got == 1 && v >= 512 && v <= 65536) ? v : 512;
 }
 
-/* The GPT partition GUID of partition `partn` of `disk` (e.g. "sda", 2). */
-static int part_gpt_uuid(const char *disk, unsigned partn, char *out)
+/* One GPT partition entry of `disk` (e.g. "sda", 2), decoded into its two
+ * GUIDs. `type_out` is the PARTITION TYPE GUID (bytes 0..15 of the entry --
+ * what kind of partition this is: ESP, Linux filesystem, swap); `uniq_out` is
+ * the PARTITION UNIQUE GUID (bytes 16..31 -- the identity of this one
+ * partition, which is what `root=PARTUUID=` names). Either may be NULL.
+ *
+ * The two were never distinguished here because only the unique GUID was ever
+ * wanted. Finding the EFI System Partition wants the other one: the ESP is not
+ * identified by a name anybody chose, it is identified by carrying the type
+ * GUID the UEFI specification reserves for it, which is the same on every disk
+ * ever partitioned by anything. See esp_device(). */
+static int part_gpt_entry(const char *disk, unsigned partn,
+                          char *type_out, char *uniq_out)
 {
     char dev[128];
     snprintf(dev, sizeof dev, "/dev/%s", disk);
@@ -3521,8 +3697,15 @@ static int part_gpt_uuid(const char *disk, unsigned partn, char *out)
         return -1;
     static const unsigned char zero[16] = { 0 };
     if (memcmp(e, zero, 16) == 0) return -1;              /* unused entry */
-    guid_str(e + 16, out);
+    if (type_out) guid_str(e, type_out);
+    if (uniq_out) guid_str(e + 16, uniq_out);
     return 0;
+}
+
+/* The GPT partition GUID of partition `partn` of `disk` (e.g. "sda", 2). */
+static int part_gpt_uuid(const char *disk, unsigned partn, char *out)
+{
+    return part_gpt_entry(disk, partn, NULL, out);
 }
 
 /* Walk every partition of every disk. `want` is "PARTUUID=x" or "UUID=x"; with
@@ -3732,6 +3915,146 @@ static const char *sysroot_device(void)
     }
     bootmsg(3, "sysroot: root=%s names neither a /dev path, a PARTUUID= nor a "
                "UUID=; nothing here can resolve it.\n", spec);
+    failed = 1;
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ *
+ * `#esp` -- THE FAT PARTITION OF THE MEDIUM THIS MACHINE BOOTED FROM.
+ *
+ * WHY THERE IS A LETTER FOR THIS AT ALL. The owner boots a Lenovo off a USB
+ * stick with no serial cable, no shell and no second machine attached. When a
+ * boot goes wrong the only evidence that survives is a photograph of the last
+ * forty lines of the screen. `#esp` is the other half of the answer: a place
+ * on the stick ITSELF that the boot can write a log into, so that after a bad
+ * boot he can power the machine off, plug the stick into any other computer,
+ * and hand over a file instead of a photograph. user/bootlogd.ad is the writer
+ * and its header is where the whole arrangement is argued.
+ *
+ * WHY FAT AND NOT THE ext4 ROOT. The ESP is FAT32, and FAT32 is the one
+ * filesystem that mounts on Windows, on macOS and on Linux without installing
+ * anything. The root partition is ext4, which his Debian host reads perfectly
+ * well and which the machine he happens to be standing next to may not. A log
+ * he cannot open is not evidence.
+ *
+ * IT IS FOUND BY TYPE GUID, ON THE DISK THAT HOLDS THE ROOT, and both halves
+ * of that matter:
+ *
+ *   * BY TYPE GUID, because an ESP is not identified by a name anybody chose.
+ *     C12A7328-F81F-11D2-BA4B-00A0C93EC93B is the partition type GUID the UEFI
+ *     specification reserves for the EFI System Partition, and it is the same
+ *     on every disk ever partitioned by anything. `/dev/sda1` is a sentence
+ *     about one machine, in exactly the way the long note above sysroot_device
+ *     says `root=/dev/vda2` was.
+ *
+ *   * ON THE DISK THAT HOLDS THE ROOT, and this is a SAFETY property, not a
+ *     convenience. The machine may have other disks with other ESPs on them --
+ *     the laptop's internal drive, with its own operating system's bootloader
+ *     on it. Writing a log into THAT would be writing to somebody's else's
+ *     disk, uninvited. The one device this boot is entitled to write to is the
+ *     medium it was booted from, because booting it is what asked for the log;
+ *     so the search is confined to the disk carrying the root partition the
+ *     command line named, and a machine whose root was not resolved gets no
+ *     ESP at all.
+ *
+ * A FAILURE HERE IS NOT A BOOT FAILURE. Every caller treats NULL as "no log on
+ * this machine", says so on the console, and carries on. A logging facility
+ * that can stop a boot is worse than no logging facility. */
+#define ESP_TYPE_GUID "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+/* Which disk in /sys/block carries the partition node `part` (e.g.
+ * "/dev/sda2" -> "sda"). Answered from sysfs rather than by chopping digits
+ * off the name, because "nvme0n1p2" -> "nvme0n1" and "sda2" -> "sda" do not
+ * obey the same rule and "mmcblk0p1" obeys a third. */
+static int disk_holding(const char *part, char *out, size_t outn)
+{
+    const char *leaf = strrchr(part, '/');
+    leaf = leaf ? leaf + 1 : part;
+    DIR *d = opendir("/sys/block");
+    if (!d) return -1;
+    struct dirent *de;
+    int found = -1;
+    while (found < 0 && (de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char pdir[512];
+        snprintf(pdir, sizeof pdir, "/sys/block/%s/%s/partition",
+                 de->d_name, leaf);
+        if (access(pdir, R_OK) == 0) {
+            snprintf(out, outn, "%s", de->d_name);
+            found = 0;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+static const char *esp_device(void)
+{
+    static char dev[128];
+    static int failed;
+    if (dev[0]) return dev;
+    if (failed) return NULL;
+
+    /* HAMNIX_ESP overrides, for the same reason HAMNIX_ROOT does: a harness
+     * that has already decided which device it means. */
+    const char *e = getenv("HAMNIX_ESP");
+    if (e && *e) { snprintf(dev, sizeof dev, "%s", e); return dev; }
+
+    const char *root = sysroot_device();
+    if (!root || !strcmp(root, "/")) {
+        /* An initramfs-only boot (no root=) has no medium of its own that it
+         * is entitled to write to. Say which of the two it is. */
+        bootmsg(4, "esp: this boot has no resolved root partition, so there is "
+                   "no medium it may write a boot log to.\n");
+        failed = 1;
+        return NULL;
+    }
+
+    char disk[64];
+    if (disk_holding(root, disk, sizeof disk) < 0) {
+        bootmsg(4, "esp: %s is not a partition of any disk /sys/block lists, "
+                   "so the disk it lives on cannot be searched for an ESP.\n",
+                root);
+        failed = 1;
+        return NULL;
+    }
+
+    char pdir[256];
+    snprintf(pdir, sizeof pdir, "/sys/block/%s", disk);
+    DIR *pd = opendir(pdir);
+    if (!pd) {
+        failed = 1;
+        return NULL;
+    }
+    struct dirent *pe;
+    int seen = 0;
+    while ((pe = readdir(pd))) {
+        if (pe->d_name[0] == '.') continue;
+        char pnfile[1024];
+        snprintf(pnfile, sizeof pnfile, "%s/%s/partition", pdir, pe->d_name);
+        FILE *f = fopen(pnfile, "r");
+        if (!f) continue;
+        unsigned pn = 0;
+        int got = fscanf(f, "%u", &pn);
+        fclose(f);
+        if (got != 1) continue;
+        seen++;
+        char type[40] = "";
+        if (part_gpt_entry(disk, pn, type, NULL) != 0) continue;
+        if (strcasecmp(type, ESP_TYPE_GUID) != 0) continue;
+        snprintf(dev, sizeof dev, "/dev/%s", pe->d_name);
+        closedir(pd);
+        bootmsg(7, "esp: the boot medium's EFI System Partition is %s (on %s, "
+                   "the disk carrying %s)\n", dev, disk, root);
+        return dev;
+    }
+    closedir(pd);
+    /* WHAT WAS LOOKED AT, not just that it failed -- the same discipline
+     * scan_partitions applies when no root matches. */
+    bootmsg(4, "esp: no EFI System Partition (type %s) among the %d partition(s) "
+               "of %s, the disk carrying the root %s. This machine gets no "
+               "on-medium boot log; everything else is unaffected.\n",
+            ESP_TYPE_GUID, seen, disk, root);
     failed = 1;
     return NULL;
 }
@@ -4508,6 +4831,16 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
             cons_write(m, n > 0 ? (size_t)n : 0);
             errno = ENOENT;
             return -ENOENT;
+        }
+    } else if (!strcmp(d->letter, "#esp")) {
+        /* esp_device() has already said, by name, which disk it searched and
+         * what it found there. Failing is right: the alternative is mounting
+         * some OTHER disk's ESP -- on a laptop, the one with the owner's real
+         * operating system on it -- and reporting success. */
+        root = esp_device();
+        if (!root) {
+            errno = ENODEV;
+            return -ENODEV;
         }
     } else if (!strcmp(d->letter, "#sysroot") || !strcmp(d->letter, "#r")) {
         root = sysroot_device();
