@@ -127,14 +127,31 @@
 #   * a file's CONTENT changes on the installed disk, and is still changed after
 #     a power cycle -- read by the host off the ext4, and read back by the guest
 #
-# STILL NOT COVERED BY ANY OF IT: 37 of the channel's 126 packages are not on
+# AND NOW THE KERNEL MODULES, WHICH WAS THE NEXT HOLE AND IS CLOSED HERE.
+# hamnix-drivers-base and hamnix-drivers-hw used to be excluded from the
+# database for ONE file each -- modules.dep.<group>, which the image did not
+# stage -- so `hpm update` could not upgrade the modules that find the disk or
+# the nine touchpad and HID drivers 1.0.24 added. The image stages that file
+# now (scripts/hamlinux_image.sh, after depmod), both packages are recorded, and
+# this gate downgrades them alongside the three inert ones so the update has
+# real work to do. Three files are the marker string on the medium -- one .ko
+# from each package and hw's dependency table -- and after the update and a
+# power cycle the two modules are ELF again (one of them byte-identical to the
+# channel's copy) and the table is real dependency lines, read both by the host
+# off the ext4 and by the machine with its own cat.
+#
+# THE HOLE THAT IS LEFT, AND IT IS A DIFFERENT ONE. user/linuxinit.ad loads
+# /etc/modules BEFORE the root switch, out of the INITRAMFS, and
+# user/hlinstall.ad copies /boot/BOOTX64.EFI -- kernel and initramfs in one UKI
+# -- onto the target BYTE FOR BYTE and never regenerates it. So an upgraded
+# module lands on the root filesystem, is what `modprobe` resolves from that
+# moment on, and is NOT what the next boot loads. Nothing in this tree
+# regenerates a UKI on an installed machine. Closing that is not this change.
+#
+# STILL NOT COVERED BY ANY OF IT: 36 of the channel's 126 packages are not on
 # the medium and so are not recorded -- the GPU drivers, the Vulkan stack, the
 # 407 nouveau firmware blobs, and six coreutils the image never staged. Those
-# are correctly absent, not missing. But hamnix-drivers-base and
-# hamnix-drivers-hw are excluded for ONE generated file each
-# (modules.dep.<group>, written by their own install hook and not staged by the
-# image), so `hpm update` cannot upgrade the boot kernel modules on an installed
-# machine. That is the next hole, and it is named rather than papered over.
+# are correctly absent, not missing.
 
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && cd .. && pwd)"
@@ -326,6 +343,9 @@ if $status > 0 {
     hpm refresh
     echo 'INSTUSB-P1: hpm list before'
     hpm list
+    echo 'INSTUSB-P1: THE DRIVER TABLE BEFORE THE UPDATE'
+    cat '@DEP_HW@'
+    echo 'INSTUSB-P1: BEFORE-END'
     hpm update
     echo 'INSTUSB-P1: hpm list after'
     hpm list
@@ -352,6 +372,12 @@ cat /usr/share/man/cat.1.md
 echo 'INSTUSB-P2: and two files no upgrade was entitled to touch'
 cat /etc/rc.boot
 ls /bin/cat
+echo 'INSTUSB-P2: THE DRIVER TABLE AFTER THE UPDATE AND A POWER CYCLE'
+cat '@DEP_HW@'
+echo 'INSTUSB-P2: AFTER-END'
+echo 'INSTUSB-P2: and the two mangled modules, read back by the machine itself'
+ls '@KO_BASE@'
+ls '@KO_HW@'
 echo 'INSTUSB-P2-DONE'
 RCEOF
 
@@ -388,10 +414,59 @@ RCEOF
 # this gate. It is recorded (see the hamnix-init note in
 # scripts/hamlinux_image.sh), so the solver finds it satisfied and lays nothing
 # down. If that ever regresses, phase 2 stops running and this gate says so.
+#
+# AND THE TWO THAT ARE NOT INERT, WHICH IS THE POINT OF ADDING THEM.
+# hamnix-drivers-base and hamnix-drivers-hw are the kernel modules the machine
+# boots with -- the driver that finds the disk and, since 1.0.24, the nine
+# touchpad and HID modules measured working on the owner's Lenovo. Until the
+# commit above this one NEITHER COULD EVER BE UPGRADED: the image did not stage
+# their modules.dep.<group>, so scripts/hpm_installed_db.py left them out of the
+# database, and what is not recorded is never upgraded. They are downgraded here
+# for exactly the reason the other three are -- so the channel has real work to
+# do -- and everything that follows about what an upgrade DELETES is aimed at
+# them, because these are the files a wrong list would cost a machine.
+#
+# THEY ARE NOT INERT AND THAT IS SURVIVABLE, MEASURED RATHER THAN HOPED.
+# user/linuxinit.ad calls load_modules() BEFORE the root switch, out of the
+# INITRAMFS, by absolute path -- so every module in either package is already in
+# the kernel before anything on the disk is read. A mangled or missing copy on
+# the ROOT FILESYSTEM cannot stop this machine booting, which is what makes it
+# safe to mangle one from each and still assert the boot. (It is also the
+# separate hole named at the top of this file: the UKI on the ESP carries its
+# own copies and no package updates it.)
 DB_SRC="build/image/disk/rootdir/var/lib/hpm/installed.json"
-DOWNGRADE="hamnix-man hamnix-cal hamnix-bc"
+DOWNGRADE="hamnix-man hamnix-cal hamnix-bc hamnix-drivers-base hamnix-drivers-hw"
 MANGLED_MAN="usr/share/man/cat.1.md"
 MANGLE_MARK="INSTUSB-STALE-CONTENT-THE-UPDATE-MUST-REPLACE-THIS"
+# THE THREE DRIVER PATHS ARE READ OUT OF THE TARBALLS, not written here. A
+# hard-coded kernel-version path would rot the first time the build host's
+# kernel moved, and it would rot SILENTLY -- as a file the update "replaced"
+# that no package ever owned. Refuses by name if a chosen module is not in the
+# package that is supposed to own it.
+python3 - "$CHAN" >"$WORK/mangle.paths" <<'PYEOF' || { echo "cannot resolve the driver paths to mangle"; exit 1; }
+import json, os, sys
+sys.path.insert(0, "scripts")
+import hpm_installed_db as H
+chan = sys.argv[1]
+idx = {e["name"]: e["version"]
+       for e in json.load(open(os.path.join(chan, "index.json")))["packages"]}
+want = [("MANGLED_KO_BASE", "hamnix-drivers-base", "kernel/fs/nls/nls_ascii.ko"),
+        ("MANGLED_KO_HW", "hamnix-drivers-hw", "kernel/drivers/hid/hid-multitouch.ko"),
+        ("MANGLED_DEP_HW", "hamnix-drivers-hw", "modules.dep.hw")]
+for var, pkg, tail in want:
+    files, _ = H.package_files(chan, pkg, idx[pkg])
+    hit = [f for f in files if f.endswith("/" + tail)]
+    if len(hit) != 1:
+        raise SystemExit("instusb: %s owns %d files ending in %s; expected 1"
+                         % (pkg, len(hit), tail))
+    print("%s=%s" % (var, hit[0]))
+print("KVER=%s" % sorted(files)[0].split("/")[2])
+PYEOF
+. "$WORK/mangle.paths"
+[ -n "${MANGLED_KO_BASE:-}" ] && [ -n "${MANGLED_KO_HW:-}" ] && \
+[ -n "${MANGLED_DEP_HW:-}" ] && [ -n "${KVER:-}" ] || {
+    echo "instusb: the driver mangle paths did not resolve"; exit 1; }
+MACHINE_DEP="lib/modules/$KVER/modules.dep"
 if [ "$NO_DB" = 1 ]; then
     # THE NEGATIVE CONTROL, and it is produced the way the defect was: the disk
     # builder is pointed at a channel that is not there, so it emits nothing and
@@ -458,6 +533,34 @@ fi
 # the difference between them is the whole claim.
 mkdir -p "$EXTRA/usr/share/man"
 printf '%s\n' "$MANGLE_MARK" >"$EXTRA/$MANGLED_MAN"
+# AND THE SAME TRICK ON THE DRIVERS, WHICH IS THE ASSERTION THAT MATTERS.
+# "hpm update said upgraded=5" is an exit code. These are bytes: one .ko owned
+# by hamnix-drivers-base, one owned by hamnix-drivers-hw (hid-multitouch, one of
+# the nine 1.0.24 added for the owner's touchpad), and the hw dependency table,
+# each replaced on the medium by the marker string. After the update every one
+# of them must be the package's real content -- ELF for the two modules, the
+# dependency lines for the table -- and after the power cycle it must still be.
+# On the negative control, the same three must STILL SAY THE MARKER.
+mkdir -p "$EXTRA/$(dirname "$MANGLED_KO_BASE")" \
+         "$EXTRA/$(dirname "$MANGLED_KO_HW")" \
+         "$EXTRA/$(dirname "$MANGLED_DEP_HW")"
+printf '%s\n' "$MANGLE_MARK" >"$EXTRA/$MANGLED_KO_BASE"
+printf '%s\n' "$MANGLE_MARK" >"$EXTRA/$MANGLED_KO_HW"
+printf '%s\n' "$MANGLE_MARK" >"$EXTRA/$MANGLED_DEP_HW"
+info "mangled on the medium: $MANGLED_KO_BASE, $MANGLED_KO_HW, $MANGLED_DEP_HW"
+# The two phase scripts were written from QUOTED heredocs above, so these paths
+# are substituted here rather than interpolated there -- an unquoted heredoc
+# would also expand `$status`, which is hamsh's and not the host shell's, and
+# phase 1's two-phase idiom rests on it.
+for f in "$EXTRA/etc/instusb.phase" "$EXTRA/etc/instusb.p2"; do
+    sed -i -e "s|@DEP_HW@|/$MANGLED_DEP_HW|g" \
+           -e "s|@KO_BASE@|/$MANGLED_KO_BASE|g" \
+           -e "s|@KO_HW@|/$MANGLED_KO_HW|g" "$f"
+done
+if grep -q '@DEP_HW@\|@KO_BASE@\|@KO_HW@' "$EXTRA/etc/instusb.phase" \
+        "$EXTRA/etc/instusb.p2"; then
+    bad "a placeholder survived substitution in the phase scripts"; exit 1
+fi
 
 if [ "${HAMLINUX_INSTUSB_REUSE:-0}" = 1 ] && [ -f "$LIVE" ]; then
     :
@@ -916,14 +1019,29 @@ if [ "$NO_DB" = 1 ]; then
 elif grep -aq 'hpm: update done' "$L2"; then
     ok "boot 2: $(grep -a 'hpm: update done' "$L2" | head -1 | tr -d '\r')"
     UPG="$(grep -a 'hpm: update done' "$L2" | head -1 | sed 's/.*upgraded=\([0-9]*\).*/\1/')"
-    if [ "${UPG:-0}" -ge 3 ]; then
+    if [ "${UPG:-0}" -ge 5 ]; then
         ok "boot 2: the update actually upgraded $UPG packages -- it is not a no-op that exits 0"
     else
-        bad "boot 2: the update reported upgraded=${UPG:-?}; the medium recorded three packages a version behind, so a working update has three to do"
+        bad "boot 2: the update reported upgraded=${UPG:-?}; the medium recorded FIVE packages a version behind (three inert ones and the two kernel-module packages), so a working update has five to do"
     fi
-    grep -aq 'hpm: upgrading hamnix-man 1.0.22 -> 1.0.23' "$L2" \
-        && ok "boot 2: hpm named the transition it performed (hamnix-man 1.0.22 -> 1.0.23)" \
+    grep -aq 'hpm: upgrading hamnix-man 1.0.22 ->' "$L2" \
+        && ok "boot 2: hpm named the transition it performed ($(grep -ao 'hpm: upgrading hamnix-man 1.0.22 -> [0-9.]*' "$L2" | head -1))" \
         || bad "boot 2: hpm never printed the hamnix-man upgrade line"
+    # THE TWO THIS COMMIT EXISTS FOR. Before the image staged
+    # modules.dep.<group> these were not in the database at all, so hpm had
+    # nothing to name here however healthy the rest of the update looked.
+    for P in hamnix-drivers-base hamnix-drivers-hw; do
+        grep -aq "hpm: upgrading $P 1.0.22 ->" "$L2" \
+            && ok "boot 2: hpm upgraded $P ($(grep -ao "hpm: upgrading $P 1.0.22 -> [0-9.]*" "$L2" | head -1 | sed 's/hpm: upgrading //'))" \
+            || bad "boot 2: hpm never upgraded $P -- the boot kernel modules are still unreachable by \`hpm update\`"
+    done
+    # AND THE HOOK RAN. hamnix-drivers-*'s install.hamsh is what merges the
+    # shipped table into the machine's modules.dep; a package whose files land
+    # and whose hook did not run leaves modprobe unable to name what it just
+    # installed.
+    grep -aq 'modules.dep' "$L2" \
+        && ok "boot 2: a driver package's install hook spoke about modules.dep -- $(grep -a 'modules.dep' "$L2" | head -1 | tr -d '\r' | cut -c1-90)" \
+        || bad "boot 2: neither driver package's install hook said anything about modules.dep"
 elif grep -aq 'no packages installed; nothing to update' "$L2"; then
     # SAY WHICH KIND OF NOTHING. The index authenticated and 126 packages came
     # down, so the network, the TLS and the shipped trust root are all fine --
@@ -1010,6 +1128,15 @@ if [ "$NO_DB" = 1 ]; then
         grep -q "$MANGLE_MARK" "$WORK/after-man.txt" 2>/dev/null \
             && ok "negative control: the stale file is STILL stale, because nothing upgraded it" \
             || bad "negative control: the stale marker is gone, so something upgraded a machine hpm said it knew nothing about"
+        # The same question of the drivers. This is the half that says the
+        # green run's driver assertions are about the UPDATE and not about
+        # something the install or the image would have done anyway.
+        for f in "$MANGLED_KO_BASE" "$MANGLED_KO_HW" "$MANGLED_DEP_HW"; do
+            fs_cat "$PART" "/$f" >"$WORK/negctl-drv.bin" 2>/dev/null || true
+            grep -q "$MANGLE_MARK" "$WORK/negctl-drv.bin" 2>/dev/null \
+                && ok "negative control: /$f still holds the marker -- with no database the kernel modules are NOT upgraded" \
+                || bad "negative control: /$f no longer holds the marker, so something replaced a driver on a machine hpm knew nothing about"
+        done
     fi
 else
     say "WHAT THE UPDATE PUT ON THE DISK"
@@ -1066,6 +1193,131 @@ print(next((p["version"] for p in d["packages"] if p["name"]=="hamnix-man"), "AB
         fs_has "$PART" /bin/hamsh \
             && ok "boot 3: /bin/hamsh survived the update" \
             || bad "boot 3: /bin/hamsh IS GONE after the update"
+
+        # =================================================================
+        # 6d. THE KERNEL MODULES, WHICH IS WHAT THIS WHOLE THING IS FOR.
+        # =================================================================
+        # Three files were the marker string on the medium: one .ko owned by
+        # hamnix-drivers-base, one owned by hamnix-drivers-hw, and hw's
+        # dependency table. Read off the installed NVMe, after two power
+        # cycles, with the guest off.
+        for f in "$MANGLED_KO_BASE" "$MANGLED_KO_HW"; do
+            fs_cat "$PART" "/$f" >"$WORK/after-drv.bin" 2>/dev/null || true
+            if [ ! -s "$WORK/after-drv.bin" ]; then
+                bad "boot 3: /$f is missing or empty on the installed disk -- the upgrade removed a kernel module and did not put it back"
+            elif grep -q "$MANGLE_MARK" "$WORK/after-drv.bin"; then
+                bad "boot 3: /$f STILL holds the stale marker -- \`hpm update\` did not replace the kernel module"
+            elif [ "$(head -c4 "$WORK/after-drv.bin" | od -An -c | tr -d ' \n')" = '177ELF' ]; then
+                ok "boot 3: /$f is a real ELF kernel module again ($(stat -c%s "$WORK/after-drv.bin") bytes) -- the update REPLACED it and it survived the power cycle"
+            else
+                bad "boot 3: /$f is neither the marker nor an ELF -- $(head -c40 "$WORK/after-drv.bin" | tr -d '\0' | head -1)"
+            fi
+        done
+        # AND IT IS THE CHANNEL'S BYTES, not merely different bytes. Compared
+        # against the tarball this tree built, which is byte-identical member
+        # for member to the one 255.one serves.
+        python3 - "$CHAN" "$WORK/after-drv-hw.expect" "$MANGLED_KO_HW" <<'PYEOF' 2>/dev/null || true
+import json, os, sys, tarfile
+chan, out, rel = sys.argv[1], sys.argv[2], sys.argv[3]
+idx = {e["name"]: e["version"]
+       for e in json.load(open(os.path.join(chan, "index.json")))["packages"]}
+v = idx["hamnix-drivers-hw"]
+tf = tarfile.open(os.path.join(chan, "packages",
+                               "hamnix-drivers-hw-%s.tar.gz" % v), "r:gz")
+want = "hamnix-drivers-hw-%s/files/%s" % (v, rel)
+for ti in tf:
+    if ti.name == want:
+        open(out, "wb").write(tf.extractfile(ti).read())
+        break
+PYEOF
+        fs_cat "$PART" "/$MANGLED_KO_HW" >"$WORK/after-drv-hw.bin" 2>/dev/null || true
+        if [ -s "$WORK/after-drv-hw.expect" ] && cmp -s "$WORK/after-drv-hw.bin" "$WORK/after-drv-hw.expect"; then
+            ok "boot 3: the replaced $(basename "$MANGLED_KO_HW") is BYTE-IDENTICAL to the one in hamnix-drivers-hw's tarball -- the channel delivered the module, not just some bytes"
+        else
+            bad "boot 3: the replaced $(basename "$MANGLED_KO_HW") does not match hamnix-drivers-hw's tarball copy"
+        fi
+        # THE TABLE. Text, so this one is readable and the guest reads it too.
+        fs_cat "$PART" "/$MANGLED_DEP_HW" >"$WORK/after-dep-hw.txt" 2>/dev/null || true
+        if [ ! -s "$WORK/after-dep-hw.txt" ]; then
+            bad "boot 3: /$MANGLED_DEP_HW is missing after the update"
+        elif grep -q "$MANGLE_MARK" "$WORK/after-dep-hw.txt"; then
+            bad "boot 3: /$MANGLED_DEP_HW still holds the stale marker"
+        elif grep -q '\.ko:' "$WORK/after-dep-hw.txt"; then
+            ok "boot 3: /$MANGLED_DEP_HW is $(grep -c . "$WORK/after-dep-hw.txt") real dependency lines again"
+        else
+            bad "boot 3: /$MANGLED_DEP_HW is neither the marker nor a dependency table"
+        fi
+        # THE MACHINE'S OWN modules.dep STILL RESOLVES, AND GREW RATHER THAN
+        # BEING REPLACED. The install hook PREPENDS the shipped table; if it
+        # had overwritten instead, every line a driver package appended -- the
+        # only thing that lets `modprobe i915` name a file -- would be gone.
+        fs_cat "$PART" "/$MACHINE_DEP" >"$WORK/after-machine-dep.txt" 2>/dev/null || true
+        if [ ! -s "$WORK/after-machine-dep.txt" ]; then
+            bad "boot 3: the machine's /$MACHINE_DEP is GONE after the update -- modprobe can no longer resolve any name"
+        else
+            DEPN="$(grep -c . "$WORK/after-machine-dep.txt")"
+            DEPB="$(stat -c%s "$WORK/after-machine-dep.txt")"
+            if grep -q 'ext4\.ko:' "$WORK/after-machine-dep.txt" \
+               && grep -q 'nvme\.ko:' "$WORK/after-machine-dep.txt"; then
+                ok "boot 3: the machine's modules.dep survived the update and still names ext4.ko and nvme.ko ($DEPN lines, $DEPB bytes)"
+            else
+                bad "boot 3: the machine's modules.dep no longer names ext4.ko and nvme.ko -- the root and disk drivers became unresolvable"
+            fi
+            # user/modprobe.ad:DEP_CAP is 262144 and it REFUSES loudly past it.
+            # The hook prepends unconditionally, so the table grows by the two
+            # shipped tables on every update; this is the number that says how
+            # much headroom is left.
+            if [ "$DEPB" -lt 262144 ]; then
+                info "boot 3: modules.dep is $DEPB bytes against modprobe's 262144-byte DEP_CAP; the hooks prepend unconditionally, so it grows by the two shipped tables per update"
+            else
+                bad "boot 3: modules.dep is $DEPB bytes, at or over modprobe's DEP_CAP -- modprobe reads a truncated table"
+            fi
+        fi
+
+        # 6e. NOTHING THE DATABASE CLAIMS WENT MISSING. The upgrade unlinked
+        # every path the five recorded-old versions owned and laid the new ones
+        # down; this stats EVERY path the post-update database records, on the
+        # disk, in one debugfs run. It is the strongest available statement of
+        # "it deleted nothing it should not" -- 280-odd files, not a spot check.
+        if [ -s "$WORK/after-db.json" ]; then
+            python3 -c '
+import json,sys
+db=json.load(open(sys.argv[1]))
+for p in db["packages"]:
+    for f in p["files"]:
+        print("stat /"+f)' "$WORK/after-db.json" >"$WORK/afterstat.cmds" 2>/dev/null || true
+            # AND EVERY PATH THE MEDIUM'S DATABASE RECORDED BEFORE THE UPDATE,
+            # because the shape being guarded against is a file that the OLD
+            # version owned, the remove unlinked, and the new version does not
+            # carry -- which the post-update database would not mention at all.
+            python3 -c '
+import json,sys
+db=json.load(open(sys.argv[1]))
+for p in db["packages"]:
+    for f in p["files"]:
+        print("stat /"+f)' "$WORK/medium-installed.json" >>"$WORK/afterstat.cmds" 2>/dev/null || true
+            sort -u "$WORK/afterstat.cmds" -o "$WORK/afterstat.cmds"
+            debugfs -f "$WORK/afterstat.cmds" "$PART" >"$WORK/afterstat.out" 2>&1
+            AS_WANT="$(wc -l <"$WORK/afterstat.cmds")"
+            AS_GOT="$(grep -c '^Inode:' "$WORK/afterstat.out" || true)"
+            if [ "$AS_WANT" -gt 0 ] && [ "$AS_GOT" = "$AS_WANT" ]; then
+                ok "boot 3: all $AS_WANT paths recorded before OR after the update are still on the disk -- the upgrade of five packages deleted nothing it should not"
+            else
+                bad "boot 3: only $AS_GOT of $AS_WANT recorded paths survive on the disk -- the upgrade DELETED files"
+                grep -B1 'File not found' "$WORK/afterstat.out" | head -10 | sed 's/^/        /'
+            fi
+            AFTER_DRV_VER="$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(" ".join("%s=%s" % (p["name"], p["version"]) for p in d["packages"]
+               if p["name"] in ("hamnix-drivers-base","hamnix-drivers-hw")) or "ABSENT")' \
+                "$WORK/after-db.json" 2>/dev/null || echo UNPARSEABLE)"
+            case "$AFTER_DRV_VER" in
+                *hamnix-drivers-base=1.0.2*hamnix-drivers-hw=1.0.2*)
+                    ok "boot 3: the database on the disk now records $AFTER_DRV_VER (it shipped recording both at 1.0.22)" ;;
+                *) bad "boot 3: the database records the driver packages as: $AFTER_DRV_VER" ;;
+            esac
+        fi
     else
         bad "boot 3: cannot carve the installed root to see what the update did"
     fi
@@ -1076,6 +1328,26 @@ print(next((p["version"] for p in d["packages"] if p["name"]=="hamnix-man"), "AB
         ok "boot 3: the rebooted machine read $MANGLED_MAN back for itself and the stale marker is not in it"
     else
         info "boot 3: phase 2 did not reach the file read-back"
+    fi
+    # THE BEFORE AND THE AFTER, BOTH READ BY THE MACHINE, on opposite sides of
+    # an update and a power cycle. Phase 1 cat'd the hw dependency table before
+    # `hpm update` ran and got the marker; phase 2 cat'd the same path after the
+    # reboot. Two reads by the same program on the same machine is the strongest
+    # form of this the gate can take -- the host's debugfs reads above agree
+    # with it, but they are a different instrument.
+    B1="$(sed -n '/INSTUSB-P1: THE DRIVER TABLE BEFORE/,/INSTUSB-P1: BEFORE-END/p' "$L2" 2>/dev/null | tr -d '\r')"
+    A1="$(sed -n '/INSTUSB-P2: THE DRIVER TABLE AFTER/,/INSTUSB-P2: AFTER-END/p' "$L3" 2>/dev/null | tr -d '\r')"
+    if printf '%s' "$B1" | grep -q "$MANGLE_MARK"; then
+        ok "boot 2: BEFORE the update the machine read the marker out of /$MANGLED_DEP_HW with its own cat"
+        if printf '%s' "$A1" | grep -q "$MANGLE_MARK"; then
+            bad "boot 3: AFTER the update and a power cycle the machine still reads the marker out of /$MANGLED_DEP_HW"
+        elif printf '%s' "$A1" | grep -q '\.ko:'; then
+            ok "boot 3: AFTER the update the same machine reads real dependency lines out of the same path -- $(printf '%s' "$A1" | grep -m1 '\.ko:' | cut -c1-70)"
+        else
+            bad "boot 3: the machine read neither the marker nor a dependency table back from /$MANGLED_DEP_HW"
+        fi
+    else
+        bad "boot 2: phase 1 never read the marker out of /$MANGLED_DEP_HW, so there is no BEFORE to compare against"
     fi
 fi
 
