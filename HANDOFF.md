@@ -34,11 +34,47 @@ gate while saying nothing about the tree. `CHANGELOG.md` § 1.0.23 is what a
 person now has; its `Unreleased` section is empty, which is the state in which
 the tree and the channel agree.
 
-**REAL HARDWARE IS UNTESTED. VM and hybrid development are primary; native
-install is in progress.** Nothing in this file is a bare-metal claim: "on a real
-disk" throughout §0 means a real ext4/UEFI install inside QEMU, and the GPU
-measured on real silicon is the *developer's host* GPU reached in hybrid mode,
-not a GPU on a machine this system booted. `docs/REAL_HARDWARE.md`,
+**REAL HARDWARE HAS NOW BOOTED THIS SYSTEM, ONCE, AND IT DID NOT REACH A
+DESKTOP.** On 2026-08-15 the owner booted a Lenovo 20Y0X50600 (BIOS N32ET93W,
+Secure Boot off) from a dd'd USB stick built at `dbe56404`. It got to
+`linuxinit: namespace ready -- exec /bin/hamsh /etc/rc.boot` and the screen
+stopped changing. **IT WAS NOT HUNG** — sysrq responded and REISUB worked, so
+the kernel was healthy the whole time.
+
+**What worked on metal, and none of it should be regressed:**
+
+* **The root-scan poll earned its keep on the first try.** The stick enumerated
+  at ~33 s; the scan printed `root=PARTUUID=… is not here yet — waiting up to
+  20s`, then `appeared after 1.9s`, then `is /dev/sda2`. Without that fix the
+  machine would have silently run from RAM looking perfect.
+* **The touchpad modules were right** — TrackPoint, SYNA8008 touchpad and
+  WACF2200 touchscreen/stylus all bound. Those had been *reasoned from the
+  kernel config, not measured*; they are measured now.
+* EXT4 mounted rw, the root switched, and the EFI stub found `BOOTX64.EFI` from
+  a removable stick with no NVRAM entry.
+
+**Why the screen stopped, diagnosed from his photographs and confirmed in the
+source:** `scripts/hamlinux_disk.sh:214` puts `console=ttyS0,115200` LAST, and
+`/dev/console` follows the last `console=`. PID 1 mirrors its own lines to
+`/dev/kmsg`, which is exactly why *its* output appears and the shell's does not
+— **`hamsh` was talking to a serial port nobody was reading.** The same line
+explains the other two symptoms: boot took ~37 s because every `loglevel=7`
+printk is pushed through 115200 baud, and the screen corrupted because
+`earlycon=efifb` plus `keep_bootcon` leave two consoles drawing into one
+framebuffer.
+
+**A second cause is suspected and NOT yet measured:** `etc/rc.boot.installed`
+binds `#distro` (the Debian root — `user/ac.ad:50`) and hardcodes QEMU's
+user-mode network (`10.0.2.15`, gw `10.0.2.2`, dns `10.0.2.3`) **before**
+`etc/rc.d/rc.5` starts the compositor. In every VM run the Debian medium is a
+separate drive the harness attaches; on a real stick it is absent. So the
+desktop may never have been reached at all. `install_from_usb.sh` is 53/0 and
+runs *with* those drives, which is very likely what hid this.
+
+Everything else in this file remains a VM claim: "on a real disk" throughout §0
+means a real ext4/UEFI install inside QEMU, and the GPU measured on real silicon
+is the *developer's host* GPU reached in hybrid mode, not a GPU on a machine
+this system booted. `docs/REAL_HARDWARE.md`,
 `docs/BOOT.md` and `docs/manual/` record real-hardware boots of **Hamnix 1.0's
 own kernel** and were copied wholesale; each now carries a banner saying so.
 
