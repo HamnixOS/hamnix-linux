@@ -176,9 +176,57 @@ def run_in_distro(prog: Ptr[char], n_args: int32) -> int32:
     if pid == 0:
         # The Plan 9 invariant: the namespace is private BEFORE anything is
         # bound into it, so this mount cannot be seen by anyone else.
+        #
+        # TWO SOURCES, AND THE SECOND ONE IS WHY AN INSTALL FROM A USB STICK
+        # WORKS AT ALL. `#distro` is the full Debian medium, and on a
+        # DEVELOPMENT HOST it is always there -- scripts/hamlinux_vm.sh hands
+        # QEMU `-drive file=build/image/distro.ext4` on every run, so every
+        # install ever driven in a VM found it. A LAPTOP BOOTED FROM A USB
+        # STICK HAS NO SUCH DISK: /etc/distros resolves `#distro` to
+        # LABEL=hamnix-debian, scripts/hamlinux_disk.sh writes a TWO-partition
+        # medium (ESP + root) and nothing on it carries that label. So this
+        # bind failed, `sgdisk` never ran, and the installer that the
+        # Applications menu offers could not partition anything -- on the one
+        # configuration the whole live image exists for.
+        #
+        # /usr/lib/instroot is the answer, and it is deliberately NOT a copy of
+        # Debian. hlinstall needs exactly three programs -- sgdisk, mkfs.vfat
+        # and mkfs.ext4 -- and their shared-library closure is 7.0 MB measured,
+        # against 2.0 GB for the medium it is standing in for. That fits on the
+        # live image; a Debian rootfs does not.
+        #
+        # `#distro` is tried FIRST so a machine that does have the real medium
+        # keeps using it and this changes nothing about the path every existing
+        # test drives.
         if sys_bind(cast[Ptr[char]]("/"), cast[Ptr[char]]("#distro"), 0) != 0:
-            puts(2, "hlinstall: cannot enter the Debian namespace\n")
-            sys_exit(126)
+            puts(2, "hlinstall: no #distro here; using #distro/insttools\n")
+            # `#distro/insttools`, NOT the bare path /usr/lib/instroot, and the
+            # difference is the whole reason this works. sys_bind's plain-path
+            # branch ends in `ns_mount(src, dst, MS_BIND|MS_REC)` and RETURNS 0;
+            # enter_root -- the chroot that makes the bound tree the process's
+            # root -- is reached only from the device-server branch below it. So
+            # `bind '/usr/lib/instroot' /` bind-mounted something, reported
+            # success, left the root exactly where it was, and the exec died
+            # with "cannot run /usr/sbin/sgdisk: No such file or directory".
+            # Measured under OVMF, on a USB boot, with the tools sitting
+            # correctly on the medium the whole time.
+            #
+            # scripts/hamlinux_image.sh appends `insttools /usr/lib/instroot`
+            # to /etc/distros for exactly this, and a directory source is a
+            # documented one there ("/some/dir, bind-mounted here").
+            if sys_bind(cast[Ptr[char]]("/"),
+                        cast[Ptr[char]]("#distro/insttools"), 0) != 0:
+                # "FAILED" is load bearing: user/haminstallui.ad scans the
+                # installer's output for "FAIL" and turns the wizard red. A
+                # message that did not contain it would leave the wizard
+                # sitting on "installing..." forever, which is the
+                # success-shaped nothing this tree exists to avoid.
+                puts(2, "hlinstall: FAILED -- no partitioning tools.\n")
+                puts(2, "  This medium carries neither a Debian namespace\n")
+                puts(2, "  (#distro) nor /usr/lib/instroot, so sgdisk and\n")
+                puts(2, "  mkfs cannot run and NOTHING HAS BEEN WRITTEN.\n")
+                puts(2, "  Rebuild the medium with HAMLINUX_INSTALLER=1.\n")
+                sys_exit(126)
         argbuf[0] = cast[uint64](prog)
         if n_args > 0:
             argbuf[1] = cast[uint64](&a1[0])
@@ -193,7 +241,14 @@ def run_in_distro(prog: Ptr[char], n_args: int32) -> int32:
         envbuf[1] = 0
         sys_execve_env(prog, cast[Ptr[uint64]](&argbuf[0]),
                        cast[Ptr[uint64]](&envbuf[0]))
-        puts(2, "hlinstall: cannot run the tool\n")
+        # NAME THE PROGRAM AND SAY WHY. "cannot run the tool" was true, useless
+        # and indistinguishable from six different faults: no such file, no
+        # dynamic loader inside the namespace, a library missing from the
+        # closure, or a namespace that was entered but is not the one that has
+        # the tools. Each of those needs a different fix and the operator
+        # cannot tell them apart from a laptop with no shell.
+        puts(2, "hlinstall: cannot run ")
+        why(cast[Ptr[uint8]](prog))
         sys_exit(127)
     st: int64 = sys_waitpid(pid)
     return cast[int32](st)
@@ -842,5 +897,30 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     configure_target()
     install_repo_config()
 
-    puts(1, "\ninstalled. remove the installation media and reboot.\n")
+    # "install complete" IS A PROTOCOL, not a pleasantry, and this line used to
+    # read "installed. remove the installation media and reboot." -- which is
+    # better English and which THE WIZARD CANNOT SEE.
+    #
+    # user/haminstallui.ad decides that an install worked in exactly one place:
+    # _emit_install_line scans the child's output for the literal "install
+    # complete" and only then sets phase 2 ("Install complete - reboot to
+    # disk."). If the child exits without ever printing it, _poll_log's EOF
+    # branch says "installer exited without 'install complete'" and paints
+    # phase 3 -- "Install FAILED - see log above."
+    #
+    # That string was written against user/install.ad, the HAMNIX-KERNEL
+    # installer, which prints "[install] install complete on ...". On this line
+    # /bin/install is a copy of THIS program (scripts/hamlinux_image.sh makes
+    # it one so the wizard's argv keeps working), and nothing compared the two
+    # programs' output. So the wizard reported FAILED after every SUCCESSFUL
+    # install: the disk was partitioned, the filesystems made, the root copied
+    # and the ESP written, and the one person who cannot check any of that --
+    # somebody clicking Install Hamnix on a laptop with no shell -- was told it
+    # had failed.
+    #
+    # It is the mirror image of this tree's defining bug (success reported over
+    # nothing) and it costs the same thing: the screen and the disk disagree,
+    # so the screen cannot be used. Keeping BOTH halves in one line keeps the
+    # wizard honest and still tells a person at a console what to do next.
+    puts(1, "\ninstall complete -- remove the installation media and reboot.\n")
     return 0

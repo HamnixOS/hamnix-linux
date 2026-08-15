@@ -3172,8 +3172,20 @@ static const char *distro_resolve(const char *name, char *out, size_t outn)
         static int said;
         if (!said) {
             said = 1;
-            const char *m = "bind: no `default` in /etc/distros; "
-                            "using /dev/vda for `#distro`\n";
+            /* SAY WHICH OF THE THREE WAYS IT FAILED, because they are not the
+             * same problem and the old text named the one that is almost never
+             * true. It read "no `default` in /etc/distros", and on the live USB
+             * medium there IS a `default` -- LABEL=hamnix-debian, right there
+             * in the file. What actually happened is that no ATTACHED
+             * FILESYSTEM CARRIES THAT LABEL, because the Debian medium is a
+             * separate disk that a development host attaches and a USB stick
+             * does not have. An operator reading the old line goes and looks at
+             * a file that is correct. */
+            const char *m =
+                "bind: `#distro` did not resolve, so /dev/vda is being tried:\n"
+                "      $HAMNIX_DISTRO is unset, /etc/distros' `default` names a\n"
+                "      filesystem LABEL that no attached disk carries, and\n"
+                "      nothing is mounted at /n/distro.\n";
             ssize_t w = write(2, m, strlen(m));
             (void)w;
         }

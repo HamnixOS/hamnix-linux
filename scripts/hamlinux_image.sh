@@ -1076,6 +1076,129 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
         echo "[image]            rm -rf build/image/disk build/image/root/boot" >&2
         echo "[image]            scripts/hamlinux_image.sh && scripts/hamlinux_disk.sh" >&2
     fi
+
+    # --- THE PARTITIONING TOOLS, ON THE MEDIUM ITSELF ---------------------
+    # user/hlinstall.ad shells out to sgdisk, mkfs.vfat and mkfs.ext4, and it
+    # used to be able to reach them in exactly ONE way: `bind '#distro' /`,
+    # the full Debian namespace. On a development host that always works --
+    # scripts/hamlinux_vm.sh appends `-drive file=build/image/distro.ext4` to
+    # every VM it starts -- so every install ever driven here found them, and
+    # HANDOFF.md's end-to-end installer run is true of a VM with two disks.
+    #
+    # A LAPTOP BOOTED FROM A USB STICK HAS NEITHER. /etc/distros resolves
+    # `#distro` to LABEL=hamnix-debian; scripts/hamlinux_disk.sh writes a
+    # TWO-partition medium (ESP + root) and gives neither that label. So on
+    # the owner's actual configuration the bind failed, sgdisk never ran, and
+    # the installer in the Applications menu could not partition a disk.
+    #
+    # The fix is NOT a copy of Debian: the closure of those three programs is
+    # 7.0 MB measured, against 2.0 GB for distro.ext4. It is staged as a
+    # directory here and bound as a namespace root by hlinstall, which is a
+    # source /etc/distros already documents ("/some/dir, bind-mounted here")
+    # and user/linux-syscalls.c already implements (the MS_BIND tail of
+    # sys_bind). The mount points are made HERE because that bind is not a
+    # `#distro` post, so distro_stage_mountpoints does not run for it.
+    INSTROOT="$ROOT/usr/lib/instroot"
+    rm -rf "$INSTROOT"
+    mkdir -p "$INSTROOT"/usr/sbin "$INSTROOT"/etc "$INSTROOT"/dev \
+             "$INSTROOT"/proc "$INSTROOT"/sys "$INSTROOT"/srv \
+             "$INSTROOT"/n "$INSTROOT"/tmp
+    INST_OK=1
+    INST_LIBS=""
+    # /usr/sbin AND /sbin, explicitly. These three tools live in sbin and a
+    # non-root login often has neither on PATH -- which is exactly what
+    # happened the first time this ran: all three lookups missed, the block
+    # staged 44K of nothing, and only the "INCOMPLETE" warning below said so.
+    # scripts/hamlinux_disk.sh has carried the same `export PATH=...:/usr/sbin:/sbin`
+    # since it was written, for the same three programs.
+    for t in sgdisk mkfs.vfat mkfs.ext4; do
+        p="$(PATH="$PATH:/usr/sbin:/sbin" command -v "$t" 2>/dev/null || true)"
+        if [ -z "$p" ]; then
+            echo "[image] ERROR: no $t on this build host; the installer on" >&2
+            echo "[image]        this medium would not be able to partition." >&2
+            INST_OK=0
+            continue
+        fi
+        install -m755 "$(readlink -f "$p")" "$INSTROOT/usr/sbin/$t"
+        # The closure, from ldd rather than from a hand-written list: a list
+        # goes stale the first time a distribution relinks one of these and
+        # the symptom is `sgdisk: error while loading shared libraries`
+        # AFTER the target disk has already been zapped.
+        INST_LIBS="$INST_LIBS
+$(ldd "$p" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}')"
+    done
+    for l in $(printf '%s\n' "$INST_LIBS" | sort -u); do
+        [ -f "$l" ] || continue
+        mkdir -p "$INSTROOT$(dirname "$l")"
+        install -m755 "$(readlink -f "$l")" "$INSTROOT$l"
+    done
+    # mkfs.ext4 reads this for its feature defaults. Without it the filesystem
+    # is still made, so its absence would be a silent difference rather than
+    # an error -- which is the reason to copy it rather than to find out.
+    [ -f /etc/mke2fs.conf ] && install -m644 /etc/mke2fs.conf "$INSTROOT/etc/mke2fs.conf"
+    if [ "$INST_OK" = 1 ]; then
+        # PROVE THE THING RUNS, here, where a build can still fail. A copied
+        # binary with a missing library is indistinguishable from a working
+        # one until the moment it is asked to erase a disk.
+        if ! "$INSTROOT/usr/sbin/sgdisk" --version >/dev/null 2>&1; then
+            echo "[image] ERROR: the staged sgdisk does not run on this host." >&2
+            INST_OK=0
+        fi
+    fi
+    # AND THE NAME THAT REACHES IT. user/hlinstall.ad binds `#distro/insttools`,
+    # and `#distro/<name>` is the ONLY spelling that chroots: sys_bind's
+    # plain-path branch bind-mounts and returns 0 WITHOUT entering the tree
+    # (enter_root is reached only from the device-server branch), so
+    # `bind '/usr/lib/instroot' /` succeeds, changes nothing, and the exec then
+    # fails with ENOENT -- measured, and it is why this line exists rather than
+    # a bare path in the installer.
+    #
+    # APPENDED HERE, which is AFTER /etc/rc.distros was generated from this
+    # same file a few hundred lines up, and that is deliberate: the generator
+    # emits `bind '#distro/<name>' /n/<name>` plus a de-ns-run copy for every
+    # name it sees, and the panel grows an Applications section per /n/<name>.
+    # A partitioning toolbox is not a distribution somebody enters, so it gets
+    # a resolvable NAME (distro_table_lookup reads this file at run time) and
+    # no boot-time mount and no menu section.
+    printf 'insttools %s\n' /usr/lib/instroot >>"$ROOT/etc/distros"
+
+    # --- THE MARKER THAT MAKES THE INSTALLER VISIBLE AT ALL ---------------
+    # WITHOUT THIS FILE THERE IS NO WAY TO START THE INSTALLER FROM THE
+    # DESKTOP. etc/hamde/apps/installer.desktop carries X-Hamnix-LiveOnly=true,
+    # and all THREE surfaces that could offer it check for /etc/installer-medium
+    # before showing it:
+    #
+    #   user/hamdesktop.ad     _desk_is_live()  -- the desktop icon
+    #   user/hampanelscene.ad  _am_is_live()    -- the panel's fallback menu
+    #   user/hamappmenu.ad     _dd_is_live()    -- the Applications menu
+    #
+    # That marker is planted by scripts/build_initramfs.py and
+    # scripts/build_installer_img.sh -- the HAMNIX-KERNEL installer media --
+    # and hamappmenu.ad's own comment says so ("planted in the cpio ONLY by").
+    # This script never wrote it. So on a hamnix-linux live USB the installer
+    # was on the medium, in /bin, with a launcher in /etc/hamde/apps, and
+    # INVISIBLE in every menu that could have started it: boot the stick, get a
+    # desktop, and there is no Install Hamnix anywhere.
+    #
+    # It is written only under HAMLINUX_INSTALLER=1, which is exactly the
+    # condition that makes an image an install medium (it is the same flag that
+    # stages /boot and the tools above), so an ordinary developer image still
+    # correctly reports itself as not-live.
+    {
+        echo "# /etc/installer-medium -- this root is an INSTALL MEDIUM."
+        echo "#"
+        echo "# Written by scripts/hamlinux_image.sh under HAMLINUX_INSTALLER=1."
+        echo "# Its EXISTENCE is the signal; nothing reads the contents. The"
+        echo "# desktop, the panel and the Applications menu each show the"
+        echo "# 'Install Hamnix' launcher only when this file is present, so an"
+        echo "# installed system (which never carries it) does not offer to"
+        echo "# install over itself."
+    } >"$ROOT/etc/installer-medium"
+
+    INST_SZ=$(du -sk "$INSTROOT" | cut -f1)
+    echo "[image] staged the installer's partitioning tools into" \
+         "/usr/lib/instroot (${INST_SZ}K, sgdisk + mkfs.vfat + mkfs.ext4)"
+    [ "$INST_OK" = 1 ] || echo "[image] WARNING: /usr/lib/instroot is INCOMPLETE" >&2
 fi
 
 # --- packing, and who owns what ------------------------------------------
