@@ -85,9 +85,11 @@
 # at 146649bd, rva=0 size=0 -- so he must turn Secure Boot off, and no VM can
 # tell him that).
 
-# WHERE THIS STANDS, MEASURED (three boots under OVMF): 52 PASSED, 0 FAILED --
-# and the negative control below it, HAMLINUX_INSTUSB_NO_DB=1, is 38 PASSED,
-# 0 FAILED with every database assertion inverted. Both were run on this tree.
+# WHERE THIS STANDS, MEASURED (three boots under OVMF): 53 PASSED, 0 FAILED on a
+# full run, 52 with HAMLINUX_INSTUSB_REUSE=1 -- the difference is the one
+# assertion on the seed disk pass, which a reuse run does not make. The negative
+# control, HAMLINUX_INSTUSB_NO_DB=1, is 38 PASSED, 0 FAILED with every database
+# assertion inverted. All three were run on this tree.
 #
 # THE LAST RED IS CLOSED, AND IT WAS THIS: `hpm update` was a NO-OP on a freshly
 # installed machine. The index authenticated over TLS and then nothing upgraded,
