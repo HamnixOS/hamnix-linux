@@ -3432,8 +3432,8 @@ static void bootmsg(int level, const char *fmt, ...)
     cons_write(buf + pre, (size_t)n);               /* no <N> on the console */
     int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
     if (fd >= 0) {
-        w = write(fd, buf, (size_t)(pre + n));
-        (void)w;
+        ssize_t kw = write(fd, buf, (size_t)(pre + n));
+        (void)kw;
         close(fd);
     }
 }

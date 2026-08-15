@@ -492,6 +492,61 @@ Save + exit. Insert the USB stick. Power on. Watch the serial console
 if connected (115200 8N1, no flow control).
 
 
+## 4b. The console arrangement on a hamnix-linux medium (2026-08-15)
+
+The first real boot of a hamnix-linux USB medium reached
+
+```
+linuxinit: namespace ready -- exec /bin/hamsh /etc/rc.boot
+```
+
+and the screen stopped changing. It had **not** hung — sysrq and REISUB both
+worked. The medium's command line ended `console=ttyS0,115200`, `/dev/console`
+follows the **last** `console=`, and PID 1 mirrors its own lines into
+`/dev/kmsg` (printk reaches every console) while the shell does not. So
+everything up to the exec was on the screen and everything after it went into a
+serial port the laptop does not have.
+
+The medium now boots with
+
+```
+earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=... rw panic=-1 loglevel=7
+```
+
+* **`console=tty0` last** — `/dev/console` is the screen, so the shell is
+  visible *and typeable*. `/etc/rc.boot` ends by handing off to an interactive
+  shell; with a serial port last it was reading a keyboard nobody was holding.
+* **`console=ttyS0` still registered** — printk still reaches the serial port,
+  and `user/linux-syscalls.c:consmirror` copies the shell's and every program's
+  console writes there too, so a serial cable still captures the whole boot and
+  every gate in the tree still reads it. The shipped string is the string the
+  gates boot; there is no test-only override.
+* **`keep_bootcon` is gone.** It was there because `tty0` registers as CONFIG_VT's
+  dummy console (measured here at 0.2296 s) more than a second before efifb
+  probes (1.3651 s). But keeping earlycon alive afterwards leaves two writers in
+  one framebuffer with independent cursors: while everything is a printk they
+  stay in step, and the moment the *shell* writes, fbcon advances and earlycon
+  does not — so the next kernel message is drawn over what the shell wrote.
+  That is the "previous lines are not cleared" corruption. The 1.14 s window
+  costs no text: the VT layer holds what is written to it under dummycon and
+  fbcon redraws that buffer on takeover, which
+  `tests/linux/console_screen.sh` asserts by OCR of the framebuffer.
+* **`loglevel=7` stays.** At `loglevel=4` a perfect boot prints nothing between
+  the EFI stub and the desktop, which is the original blinking cursor. It is
+  affordable now that `earlycon` hands the framebuffer over.
+
+**Boot time, measured in QEMU** (OVMF, `-vga std`, the medium as usb-storage on
+xHCI, blank NVMe beside it, no Debian medium): 7.06 s to `rc.boot: up` before
+these changes, 7.97 s after. The ~0.9 s is the mirror pushing ~12 KB more
+through a 115200 serial port, and it is only paid on a machine that **has** one
+— when the command line names no serial console, or names it last, the mirror
+never opens. On a laptop with a 1920x1080 EFI framebuffer the earlycon handoff
+should more than repay it; a VM's small framebuffer under KVM cannot show that.
+
+`tests/linux/console_screen.sh` is the gate: it boots the medium twice, once as
+it ships and once with `console=ttyS0` forced back last, and reads the *screen*
+with OCR. The shipped arrangement must show the shell; the old one must not.
+
 ## 5. What to expect on the serial console
 
 The kernel writes everything to COM1 (16550A, 115200 8N1, no flow
