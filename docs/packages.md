@@ -337,7 +337,39 @@ per-channel base URL when fetching the tarball.
 }
 ```
 
-`files` is what hpm wrote — used for clean removal.
+`files` is what hpm wrote — used for clean removal, and for the remove
+half of an upgrade. That is why a wrong entry is dangerous rather than
+untidy: `hpm update` unlinks every path the record names before laying
+the new version down.
+
+### Where it comes from on a machine nobody installed package by package
+
+An image is *staged*, not installed, so nothing populates this file as a
+side effect — and until it was written, `hpm update` on a freshly
+installed machine authenticated the index and then upgraded nothing,
+exiting 0. `scripts/hpm_installed_db.py` writes it, and
+`scripts/hamlinux_disk.sh` runs that against the exact directory it is
+about to `mkfs.ext4`; `hlinstall` copies `/var` onto the target, so the
+installed machine inherits it.
+
+Three rules make the result usable rather than merely present:
+
+* **The file lists are read out of the package tarballs**, not
+  reconstructed from the staged tree, and they are filtered by hpm's own
+  recording rules — regular files under `files/` only (directory entries
+  are `mkdir`'d and never claimed), minus any machine-owned path
+  (`_is_machine_owned`, today exactly `etc/rc.boot`).
+* **A package is recorded only if the root carries every file it holds.**
+  A channel offers GPU drivers and firmware no image stages; recording
+  those would make the first update remove-then-install something the
+  machine never had.
+* **No path may be claimed twice.** The emitter refuses to write a
+  database in which two packages claim one file, because upgrading either
+  would delete the other's.
+
+**`hpm update` refuses when this file is absent.** "There is no database"
+and "the database says nothing is installed" are different answers, and
+only the second one means it is safe to do nothing.
 
 ## Commands
 

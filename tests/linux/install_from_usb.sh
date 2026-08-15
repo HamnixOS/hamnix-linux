@@ -85,7 +85,25 @@
 # at 146649bd, rva=0 size=0 -- so he must turn Secure Boot off, and no VM can
 # tell him that).
 
-# WHERE THIS STANDS, MEASURED (three boots under OVMF, ~20 min): 33 PASSED, 2 FAILED.
+# WHERE THIS STANDS, MEASURED (three boots under OVMF): 52 PASSED, 0 FAILED --
+# and the negative control below it, HAMLINUX_INSTUSB_NO_DB=1, is 39 PASSED,
+# 0 FAILED with every database assertion inverted. Both were run on this tree.
+#
+# THE LAST RED IS CLOSED, AND IT WAS THIS: `hpm update` was a NO-OP on a freshly
+# installed machine. The index authenticated over TLS and then nothing upgraded,
+# because /var/lib/hpm was an empty directory -- hpm had no record of what is on
+# the disk, so it compared the index against nothing and exited 0. The medium
+# now carries /var/lib/hpm/installed.json, emitted by scripts/hamlinux_disk.sh
+# from the channel's TARBALLS against the very directory it mkfs's, and
+# hlinstall's copy_top("var") carries it to the target. MEASURED on the
+# installed disk after two power cycles: `update done (upgraded=3)`, a file
+# whose bytes were a marker string is 568 bytes of the real manual page, and the
+# database on the disk records hamnix-man at 1.0.23 where the medium shipped it
+# at 1.0.22. The negative control, same medium and same network with the
+# database withheld, leaves that file stale and makes hpm REFUSE by name.
+#
+# THE PREVIOUS MEASUREMENT, kept because it is what this section was written
+# against: 33 PASSED, 2 FAILED, both reds that one defect.
 #
 # GREEN, and this is the whole loop the owner asked for, minus one step:
 #   * the live medium boots as usb-storage on xHCI and switches root (not RAM)
@@ -99,13 +117,22 @@
 #   * it reboots and phase 1's marker is still on the disk (so the root really
 #     is persistent), and it goes all the way to `rc.boot: up` after the update
 #
-# RED, and both reds are ONE defect: `hpm update` is a NO-OP on a freshly
-# installed machine. The index authenticates and then there is nothing to
-# upgrade, because scripts/hamlinux_image.sh creates /var/lib/hpm as an EMPTY
-# DIRECTORY and no one ever writes installed.json. The second red (no package
-# list to compare after the reboot) is the same hole seen from the other end.
-# See the commit that added this paragraph for why it is not fixed here rather
-# than guessed at.
+# NOW ALSO GREEN, and this is the step that was missing:
+#   * the medium carries a package database whose every file list came out of
+#     the package TARBALLS -- 89 packages, 238 paths, checked one by one against
+#     the tarballs and one by one against the medium's own ext4
+#   * `hpm update` on the installed machine upgrades three packages for real
+#   * a file's CONTENT changes on the installed disk, and is still changed after
+#     a power cycle -- read by the host off the ext4, and read back by the guest
+#
+# STILL NOT COVERED BY ANY OF IT: 37 of the channel's 126 packages are not on
+# the medium and so are not recorded -- the GPU drivers, the Vulkan stack, the
+# 407 nouveau firmware blobs, and six coreutils the image never staged. Those
+# are correctly absent, not missing. But hamnix-drivers-base and
+# hamnix-drivers-hw are excluded for ONE generated file each
+# (modules.dep.<group>, written by their own install hook and not staged by the
+# image), so `hpm update` cannot upgrade the boot kernel modules on an installed
+# machine. That is the next hole, and it is named rather than papered over.
 
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && cd .. && pwd)"
