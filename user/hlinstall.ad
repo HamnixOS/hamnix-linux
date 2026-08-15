@@ -199,8 +199,23 @@ def run_in_distro(prog: Ptr[char], n_args: int32) -> int32:
         # keeps using it and this changes nothing about the path every existing
         # test drives.
         if sys_bind(cast[Ptr[char]]("/"), cast[Ptr[char]]("#distro"), 0) != 0:
+            puts(2, "hlinstall: no #distro here; using #distro/insttools\n")
+            # `#distro/insttools`, NOT the bare path /usr/lib/instroot, and the
+            # difference is the whole reason this works. sys_bind's plain-path
+            # branch ends in `ns_mount(src, dst, MS_BIND|MS_REC)` and RETURNS 0;
+            # enter_root -- the chroot that makes the bound tree the process's
+            # root -- is reached only from the device-server branch below it. So
+            # `bind '/usr/lib/instroot' /` bind-mounted something, reported
+            # success, left the root exactly where it was, and the exec died
+            # with "cannot run /usr/sbin/sgdisk: No such file or directory".
+            # Measured under OVMF, on a USB boot, with the tools sitting
+            # correctly on the medium the whole time.
+            #
+            # scripts/hamlinux_image.sh appends `insttools /usr/lib/instroot`
+            # to /etc/distros for exactly this, and a directory source is a
+            # documented one there ("/some/dir, bind-mounted here").
             if sys_bind(cast[Ptr[char]]("/"),
-                        cast[Ptr[char]]("/usr/lib/instroot"), 0) != 0:
+                        cast[Ptr[char]]("#distro/insttools"), 0) != 0:
                 # "FAILED" is load bearing: user/haminstallui.ad scans the
                 # installer's output for "FAIL" and turns the wizard red. A
                 # message that did not contain it would leave the wizard
@@ -226,7 +241,14 @@ def run_in_distro(prog: Ptr[char], n_args: int32) -> int32:
         envbuf[1] = 0
         sys_execve_env(prog, cast[Ptr[uint64]](&argbuf[0]),
                        cast[Ptr[uint64]](&envbuf[0]))
-        puts(2, "hlinstall: cannot run the tool\n")
+        # NAME THE PROGRAM AND SAY WHY. "cannot run the tool" was true, useless
+        # and indistinguishable from six different faults: no such file, no
+        # dynamic loader inside the namespace, a library missing from the
+        # closure, or a namespace that was entered but is not the one that has
+        # the tools. Each of those needs a different fix and the operator
+        # cannot tell them apart from a laptop with no shell.
+        puts(2, "hlinstall: cannot run ")
+        why(cast[Ptr[uint8]](prog))
         sys_exit(127)
     st: int64 = sys_waitpid(pid)
     return cast[int32](st)

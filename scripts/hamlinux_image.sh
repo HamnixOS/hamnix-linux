@@ -1105,8 +1105,14 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
              "$INSTROOT"/n "$INSTROOT"/tmp
     INST_OK=1
     INST_LIBS=""
+    # /usr/sbin AND /sbin, explicitly. These three tools live in sbin and a
+    # non-root login often has neither on PATH -- which is exactly what
+    # happened the first time this ran: all three lookups missed, the block
+    # staged 44K of nothing, and only the "INCOMPLETE" warning below said so.
+    # scripts/hamlinux_disk.sh has carried the same `export PATH=...:/usr/sbin:/sbin`
+    # since it was written, for the same three programs.
     for t in sgdisk mkfs.vfat mkfs.ext4; do
-        p="$(command -v "$t" 2>/dev/null || true)"
+        p="$(PATH="$PATH:/usr/sbin:/sbin" command -v "$t" 2>/dev/null || true)"
         if [ -z "$p" ]; then
             echo "[image] ERROR: no $t on this build host; the installer on" >&2
             echo "[image]        this medium would not be able to partition." >&2
@@ -1139,6 +1145,22 @@ $(ldd "$p" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}')"
             INST_OK=0
         fi
     fi
+    # AND THE NAME THAT REACHES IT. user/hlinstall.ad binds `#distro/insttools`,
+    # and `#distro/<name>` is the ONLY spelling that chroots: sys_bind's
+    # plain-path branch bind-mounts and returns 0 WITHOUT entering the tree
+    # (enter_root is reached only from the device-server branch), so
+    # `bind '/usr/lib/instroot' /` succeeds, changes nothing, and the exec then
+    # fails with ENOENT -- measured, and it is why this line exists rather than
+    # a bare path in the installer.
+    #
+    # APPENDED HERE, which is AFTER /etc/rc.distros was generated from this
+    # same file a few hundred lines up, and that is deliberate: the generator
+    # emits `bind '#distro/<name>' /n/<name>` plus a de-ns-run copy for every
+    # name it sees, and the panel grows an Applications section per /n/<name>.
+    # A partitioning toolbox is not a distribution somebody enters, so it gets
+    # a resolvable NAME (distro_table_lookup reads this file at run time) and
+    # no boot-time mount and no menu section.
+    printf 'insttools %s\n' /usr/lib/instroot >>"$ROOT/etc/distros"
     INST_SZ=$(du -sk "$INSTROOT" | cut -f1)
     echo "[image] staged the installer's partitioning tools into" \
          "/usr/lib/instroot (${INST_SZ}K, sgdisk + mkfs.vfat + mkfs.ext4)"
