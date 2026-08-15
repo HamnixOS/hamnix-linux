@@ -3277,7 +3277,14 @@ def _load_installed() -> int32:
         n: int64 = sys_read(fd, cast[Ptr[uint8]](
             cast[uint64](&inst_buf[0]) + total), room)
         if n < 0:
+            # UNREADABLE IS ITS OWN ANSWER TOO. The file is THERE and this
+            # process cannot read it, which is neither "absent" nor "empty";
+            # every caller turns this -1 into a refusal, and until now every
+            # one of them refused without saying why.
             sys_close(fd)
+            write_str(2, "hpm: cannot read ")
+            write_str(2, _db_path(cast[Ptr[uint8]]("installed.json")))
+            write_str(2, " -- it exists and this process cannot read it\n")
             return -1
         if n == 0:
             break

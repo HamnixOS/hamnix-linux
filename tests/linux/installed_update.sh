@@ -525,6 +525,13 @@ RC
 # 5. Install a disk.
 # =========================================================================
 say "building an installed disk (phase-1 rc, phase-2 staged alongside it)"
+# NO PACKAGE DATABASE ON THIS DISK. This gate points `hpm update` at a PRIVATE
+# channel carrying two packages, and scripts/hamlinux_disk.sh now records the 89
+# the image staged -- every one of which that channel does not carry, so the
+# update would print 89 "installed but not in the repo (skipped)" lines through
+# the middle of the log this gate reads. The measurement is about the two
+# packages; the initial condition is kept exactly as it was.
+HAMLINUX_NO_INSTALLED_DB=1 \
 HAMLINUX_DISK_RC="$WORK/rc.phase1" HAMLINUX_DISK_EXTRA="$EXTRA" \
     scripts/hamlinux_disk.sh "$DISK" 3G >"$WORK/build.log" 2>&1 || {
     echo "FAIL disk build"; tail -20 "$WORK/build.log"; exit 1; }

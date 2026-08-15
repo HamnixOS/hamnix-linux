@@ -118,8 +118,22 @@ install -m644 "${HAMLINUX_DISK_RC:-etc/rc.boot.installed}" "$ROOTDIR/etc/rc.boot
 # NO CHANNEL, NO DATABASE, AND IT SAYS SO. A disk built on a tree with no
 # build/repo cannot know what it is carrying, and a guessed database is the one
 # outcome this must never produce.
+#
+# HAMLINUX_NO_INSTALLED_DB=1 BUILDS A DISK THAT RECORDS NOTHING, and it exists
+# for one situation that is real rather than convenient: a gate that installs a
+# DIFFERENT channel's entire world over this one -- a private channel at a
+# synthetic version, to give the machine a past this tree never had. The
+# database describes THIS tree's channel, and hpm correctly refuses to install
+# a second version of a package it already records ("already installed at a
+# different version"), so such a gate has to start blank. It is loud, it is
+# named at every call site, and NOTHING in the shipping path passes it: a disk
+# built for a person always carries the database, because the failure it closes
+# is one nobody sees until they type `hpm update` on their own machine.
 DBCHAN="${HAMLINUX_HPM_CHANNEL:-build/repo/linux}"
-if [ -f "$DBCHAN/index.json" ]; then
+if [ "${HAMLINUX_NO_INSTALLED_DB:-0}" = 1 ]; then
+    echo "[disk] HAMLINUX_NO_INSTALLED_DB=1: this disk records NO installed"
+    echo "[disk] packages. \`hpm update\` on it will REFUSE. Do not ship it."
+elif [ -f "$DBCHAN/index.json" ]; then
     mkdir -p "$ROOTDIR/var/lib/hpm"
     python3 scripts/hpm_installed_db.py "$DBCHAN" "$ROOTDIR" \
         "$ROOTDIR/var/lib/hpm/installed.json" \
