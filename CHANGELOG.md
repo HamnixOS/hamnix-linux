@@ -14,8 +14,73 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing yet. Work lands here between releases; if this section is empty, the
-tree and the channel agree.
+### `hpm update` can now upgrade the boot kernel modules
+
+1.0.24 shipped knowing it could not, and that it bit hardest exactly where the
+nine new touchpad and HID modules were. It can now, and closing it turned up a
+second defect that had been hiding behind the first.
+
+**The one file that blocked it.** A package is recorded as installed only when
+the root carries *every* file its tarball holds — because `hpm` upgrades by
+unlinking the recorded list, and a list naming a file the machine never had is a
+list that can delete the wrong thing. `hamnix-drivers-base` and
+`hamnix-drivers-hw` each held one file the image did not stage,
+`modules.dep.<group>`, so neither was ever recorded and neither could ever be
+upgraded. The image stages it now. **88 of 126 packages recorded before, 90
+after** — reproduced in both directions by deleting the two staged tables from a
+mirror of the root and re-running the emitter — with both file lists
+set-identical to their tarballs and **0 of 838 paths claimed by two packages**.
+
+That file is *not* machine state and is not generated at install time; the
+install hook only consumes it. The canonical `modules.dep` **is** machine state
+and is still not shipped, so an upgrade still cannot take away the line that
+lets `modprobe i915` name a file.
+
+**And it exposed a bug that would have destroyed a driver tree.** A tar header
+holds 100 bytes of name; GNU tar puts anything longer in a preceding
+`././@LongLink` entry and truncates the header's own field. `hpm` read only that
+field, so it **wrote the file to the truncated path and recorded the truncated
+path** — measured on an installed machine, upgrading these two packages: *"hpm:
+extracted 35 files"*, and **14 of 65 modules missing**, including `virtio-gpu`,
+`snd-hda-intel`, `usb-storage`, `nvme-auth` and `i2c-hid-acpi`. It was invisible
+because these were the only packages with names that long and they had never been
+installable at all. The fix is in `hpm` rather than the packager, so the tarballs
+1.0.24 already serves install correctly; over 255 bytes it now **refuses** rather
+than truncating, and the packager refuses to build such a name in the first
+place.
+
+*A machine already running 1.0.24 is not at risk from this: its database does not
+record these two packages, so nothing upgrades them. It also cannot benefit —
+these fixes arrive with a medium built after them.*
+
+**Measured on a booted machine**, `tests/linux/install_from_usb.sh` **65 passed,
+0 failed** (negative control **42 / 0**): live USB → install to blank NVMe →
+detach → boot → `hpm update` against the real 255.one → reboot. Three files on
+the medium were a marker string — one `.ko` from each package and `hw`'s
+dependency table — and after the update and a power cycle both modules are ELF
+again (`hid-multitouch` byte-identical to the channel's copy), the table is 29
+real dependency lines, **all 304 paths recorded before or after the update are
+still on the disk**, the machine's own `modules.dep` still names `ext4.ko` and
+`nvme.ko`, and the machine reaches `rc.boot: up`. Read both by the host off the
+ext4 and by the machine with its own `cat`. With the database withheld, all three
+files still hold the marker.
+
+### Known issue, and it is a different one
+
+An upgraded module lands on the root filesystem and is what `modprobe` resolves
+from that moment on — but it is **not what the next boot loads**. The PID 1
+reads `/etc/modules` before the root switch, out of the initramfs, and the
+installer copies the UKI onto the target byte for byte and never regenerates it.
+Nothing in the tree regenerates a UKI on an installed machine.
+
+### `hamnix-drivers-hw` is not one module short
+
+`i2c-designware-platform` is `CONFIG_I2C_DESIGNWARE_PLATFORM=y` and listed in
+`modules.builtin`: the driver is inside `vmlinuz`, there is no `.ko` to package
+and none is needed — which is why the touchpad bound on metal anyway. 29 modules
+for 30 names is correct. The packager now says *"BUILT INTO this kernel"* rather
+than *"modprobe resolved nothing"*, a sentence that has been false in that file
+before and cost twenty files when it was.
 
 ## 1.0.24 — 2026-08-15
 

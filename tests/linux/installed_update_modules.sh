@@ -860,10 +860,21 @@ P2KOLS="$(sect p2 KOLS-BEFORE)"
 # satisfied by the failure as well as by the listing -- the first version of
 # this check read `ls: open failed: <path>` as the file being present. Ask for
 # the refusal instead.
-if printf '%s\n' "$P2KOLS" | grep -qi "failed.*$KO\|no such.*$KO"; then
-    ok "$KO is NOT on the disk before the update: $(printf '%s\n' "$P2KOLS" | grep -i "$KO" | head -1)"
+# AND IT IS ASKED BY SHAPE, NOT BY WORDING. This enumerated the words `ls` uses
+# when it cannot open something -- "failed", "no such" -- and user/ls.ad grew a
+# THIRD one on 2026-08-12 ("ls: cannot access:", commit ecebef2a). The gate then
+# read a refusal it did not recognise as a successful listing and reported "the
+# file is still on the disk -- the deletion did not take", quoting the very line
+# that says it is gone. 51 / 1, on a wording change.
+#
+# Every error user/ls.ad prints begins "ls: " and no successful listing does, so
+# that is the discriminator: a line naming the path and NOT starting with "ls:"
+# is the file being there. A new phrasing cannot break it.
+KOHIT="$(printf '%s\n' "$P2KOLS" | grep -F "$KO" | grep -v '^ls:' | head -1)"
+if [ -z "$KOHIT" ]; then
+    ok "$KO is NOT on the disk before the update: $(printf '%s\n' "$P2KOLS" | grep -F "$KO" | head -1)"
 else
-    bad "$KO is still on the disk before the update -- the deletion did not take: $(printf '%s\n' "$P2KOLS" | grep -i "$KO" | head -1)"
+    bad "$KO is still on the disk before the update -- the deletion did not take: $KOHIT"
 fi
 P2MISS="$(sect p2 MISS)"
 if printf '%s\n' "$P2MISS" | grep -q 'miss status: 0'; then
