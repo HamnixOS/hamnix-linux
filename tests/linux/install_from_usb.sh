@@ -86,7 +86,7 @@
 # tell him that).
 
 # WHERE THIS STANDS, MEASURED (three boots under OVMF): 52 PASSED, 0 FAILED --
-# and the negative control below it, HAMLINUX_INSTUSB_NO_DB=1, is 39 PASSED,
+# and the negative control below it, HAMLINUX_INSTUSB_NO_DB=1, is 38 PASSED,
 # 0 FAILED with every database assertion inverted. Both were run on this tree.
 #
 # THE LAST RED IS CLOSED, AND IT WAS THIS: `hpm update` was a NO-OP on a freshly
