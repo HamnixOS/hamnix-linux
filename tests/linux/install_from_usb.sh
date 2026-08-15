@@ -296,8 +296,14 @@ fi
 QEMU_BIN="$(command -v qemu-system-x86_64 || true)"
 [ -n "$QEMU_BIN" ] || { bad "no qemu-system-x86_64"; exit 1; }
 
-boot_vm() {  # boot_vm <name> <seconds> <attach_usb:0|1>
-    local name="$1" secs="$2" usb="$3"
+boot_vm() {  # boot_vm <name> <seconds> <attach_usb:0|1> [done-marker]
+    # THE DONE-MARKER IS NOT A CONVENIENCE. An installed boot ends by starting
+    # the desktop, which never returns, so without it every such boot burns its
+    # full timeout -- ten minutes of wall clock per boot to re-learn something
+    # the guest said at t=8 s. The marker is a string the GUEST prints when it
+    # has finished the thing being measured; the VM is stopped once it appears.
+    # Boots that end in `poweroff` do not need one.
+    local name="$1" secs="$2" usb="$3" marker="${4:-}"
     local d="$WORK/$name"
     rm -rf "$d"; mkdir -p "$d"
     cp /usr/share/OVMF/OVMF_VARS_4M.fd "$d/OVMF_VARS.fd"
@@ -329,12 +335,17 @@ boot_vm() {  # boot_vm <name> <seconds> <attach_usb:0|1>
     "$QEMU_BIN" "${args[@]}" >"$d/qemu.out" 2>&1 &
     local vm=$!
     reap_add "$vm"
-    local waited=0
+    local waited=0 hit=0
     while kill -0 "$vm" 2>/dev/null && [ "$waited" -lt "$secs" ]; do
+        if [ -n "$marker" ] && grep -aq "$marker" "$d/serial.log" 2>/dev/null; then
+            hit=1
+            info "$name: reached '$marker' after ${waited}s; stopping the VM"
+            break
+        fi
         sleep 2; waited=$((waited + 2))
     done
     if kill -0 "$vm" 2>/dev/null; then
-        info "$name: still running after ${secs}s; stopping it"
+        [ "$hit" = 1 ] || info "$name: still running after ${secs}s; stopping it"
         kill -TERM "$vm" 2>/dev/null
         sleep 3
         kill -KILL "$vm" 2>/dev/null
@@ -472,7 +483,7 @@ if [ "${NPARTS:-0}" -lt 2 ]; then
 fi
 
 say "BOOT 2: NVMe alone, the USB device DETACHED"
-boot_vm installed-1 600 0
+boot_vm installed-1 600 0 "rc.boot: up"
 L2="$WORK/installed-1/serial.log"
 
 grep -aq 'rc.boot: hamnix-linux (installed)' "$L2" \
