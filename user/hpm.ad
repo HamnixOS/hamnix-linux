@@ -2449,6 +2449,14 @@ inst_file_len:   Array[8192, uint64]
 inst_file_n:     uint64 = 0
 inst_count:      uint64 = 0
 
+# "THERE IS NO DATABASE" AND "THE DATABASE SAYS NOTHING IS INSTALLED" ARE
+# DIFFERENT ANSWERS, and conflating them is what made `hpm update` a
+# no-op forever on every freshly installed machine. _load_installed
+# returned 1 for both, and cmd_update printed "nothing to update" and
+# exited 0 -- success-shaped silence in front of the one command the
+# owner's invariant depends on. Set by _load_installed on every call.
+inst_db_absent:  int32 = 0
+
 # Parser cursor for inst_buf (parallel to idx_buf's jp/jend).
 ip:   uint64 = 0
 iend: uint64 = 0
@@ -3258,8 +3266,10 @@ def _load_installed() -> int32:
     # 1 on absent file (treated as "no packages installed yet").
     inst_count = 0
     inst_file_n = 0
+    inst_db_absent = 0
     fd: int32 = sys_open(cast[Ptr[char]](_db_path(cast[Ptr[uint8]]("installed.json"))))
     if fd < 0:
+        inst_db_absent = 1
         return 1
     total: uint64 = 0
     while total < INSTALLED_CAP:
@@ -3272,6 +3282,21 @@ def _load_installed() -> int32:
         if n == 0:
             break
         total = total + cast[uint64](n)
+    # A DATABASE BIGGER THAN THE BUFFER IS NOT A DATABASE WE READ. The
+    # loop above stops at INSTALLED_CAP, so a longer file leaves a
+    # TRUNCATED one in inst_buf -- which parses as far as it gets and
+    # then fails with a generic "malformed key". Ask for one more byte
+    # and say the real thing instead: every file the tail described
+    # would be a file this hpm does not know any package owns.
+    if total == INSTALLED_CAP:
+        probe: Array[1, uint8]
+        extra: int64 = sys_read(fd, &probe[0], 1)
+        if extra > 0:
+            sys_close(fd)
+            write_str(2, "hpm: installed.json is larger than the 131072-byte ")
+            write_str(2, "buffer this hpm can read; refusing to act on the ")
+            write_str(2, "part of it that fits\n")
+            return -1
     sys_close(fd)
     inst_len = total
     if total == 0:
@@ -8124,7 +8149,33 @@ def cmd_update() -> int32:
     lrc: int32 = _load_installed()
     if lrc < 0:
         return 1
-    if lrc == 1 or inst_count == 0:
+    # NO DATABASE IS NOT AN EMPTY DATABASE, AND SAYING SO IS THE FIX.
+    #
+    # Until now this arm printed "nothing to update" and exited 0 whether
+    # the machine had genuinely installed nothing or hpm simply had no
+    # idea. On a machine installed from the live medium it was always the
+    # second: the index authenticated over TLS -- 126 packages, signature
+    # checked against the shipped trust root -- and then hpm compared it
+    # against nothing and reported success. `hpm update` was a no-op
+    # FOREVER on exactly the machines the update loop exists for, and it
+    # looked like a working update every single time.
+    #
+    # A package manager that cannot tell you what is installed cannot
+    # safely upgrade it either: the upgrade path is remove-then-install,
+    # and the remove unlinks the recorded file list. Refusing is the only
+    # honest answer, and it is a LOUD one -- exit 1, with the file named
+    # and the two ways out spelled out.
+    if inst_db_absent != 0:
+        write_str(2, "hpm: no package database at ")
+        write_str(2, _db_path(cast[Ptr[uint8]]("installed.json")))
+        write_str(2, "\n")
+        write_str(2, "hpm: this machine's package state is UNKNOWN, so there ")
+        write_str(2, "is nothing to compare the index against and an upgrade ")
+        write_str(2, "would have no file list to work from. REFUSING.\n")
+        write_str(2, "hpm: a disk built by scripts/hamlinux_disk.sh carries ")
+        write_str(2, "one; `hpm install <pkg>` starts one.\n")
+        return 1
+    if inst_count == 0:
         write_str(1, "hpm: no packages installed; nothing to update\n")
         return 0
 

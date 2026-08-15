@@ -95,8 +95,48 @@ FSTAB
 install -m644 etc/rc.boot.installed "$ROOTDIR/etc/rc.boot.installed"
 install -m644 "${HAMLINUX_DISK_RC:-etc/rc.boot.installed}" "$ROOTDIR/etc/rc.boot"
 
+# THE PACKAGE DATABASE, and without it `hpm update` is a NO-OP FOREVER on every
+# machine installed from this disk.
+#
+# Measured at 7213661a by tests/linux/install_from_usb.sh: the installed machine
+# reached 255.one over TLS, authenticated an index of 126 packages against the
+# shipped trust root, and then upgraded NOTHING and exited 0 -- because
+# /var/lib/hpm was an empty directory, so hpm had no record of what is on the
+# disk and nothing to compare the index against. The owner's permanent rule is
+# that work published here must be updatable ON the machine, and it was failing
+# on the one path that makes it true.
+#
+# IT IS EMITTED HERE, against $ROOTDIR, and that placement is the argument. This
+# is the exact directory mkfs.ext4 is about to turn into the root filesystem --
+# after hamlinux_image.sh staged it and after the two rc.boot files above -- so
+# the database describes the tree it ships INSIDE rather than a tree upstream of
+# it. scripts/hpm_installed_db.py reads every file list out of the package
+# TARBALLS (not from anything reconstructed here) and records a package only
+# when this root really carries every file it holds; see its header for why an
+# approximate list is worse than no list at all.
+#
+# NO CHANNEL, NO DATABASE, AND IT SAYS SO. A disk built on a tree with no
+# build/repo cannot know what it is carrying, and a guessed database is the one
+# outcome this must never produce.
+DBCHAN="${HAMLINUX_HPM_CHANNEL:-build/repo/linux}"
+if [ -f "$DBCHAN/index.json" ]; then
+    mkdir -p "$ROOTDIR/var/lib/hpm"
+    python3 scripts/hpm_installed_db.py "$DBCHAN" "$ROOTDIR" \
+        "$ROOTDIR/var/lib/hpm/installed.json" \
+    || { echo "[disk] REFUSING to build a disk with a database this script " \
+              "could not vouch for -- see the refusal above" >&2; exit 1; }
+else
+    echo "[disk] NO PACKAGE DATABASE: $DBCHAN/index.json does not exist, so"
+    echo "[disk] this disk carries no /var/lib/hpm/installed.json and \`hpm"
+    echo "[disk] update\` on it will REFUSE (it cannot know what is installed)."
+    echo "[disk] Build the channel first: scripts/hamlinux_packages.py --out build/repo"
+fi
+
 # HAMLINUX_DISK_EXTRA=<dir> overlays <dir> onto the root partition before it is
-# made. HAMLINUX_DISK_RC covers the one file a test needs MOST, but a test that
+# made -- and it is applied AFTER the database above on purpose, so a gate can
+# substitute a doctored one (an older recorded version, to force a real
+# upgrade) without the shipping path ever emitting anything but the truth.
+# HAMLINUX_DISK_RC covers the one file a test needs MOST, but a test that
 # reboots the machine needs a SECOND rc already on the disk before the first
 # boot -- the disk cannot be rebuilt between the two boots without destroying
 # the persistence the reboot is there to prove. Anything else an installed
