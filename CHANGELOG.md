@@ -14,8 +14,64 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing yet. Work lands here between releases; if this section is empty, the
-tree and the channel agree.
+Landed in the tree, NOT yet on the channel. **All four came out of the first
+attempt to boot this system on a real laptop**, and every one of them is a case
+of something reporting success while doing nothing.
+
+### Booting from a USB stick quietly ran the whole system from RAM
+
+The machine came up with a full desktop, both panels and a working menu — and
+**nothing you did was being saved**. It had given up looking for the disk about
+a second and a half before the disk appeared, and carried on from memory without
+saying so.
+
+USB and SD media do not exist the moment their driver loads: the driver
+registers, and the bus reset, the enquiry and the partition scan all happen
+afterwards. Measured on a real laptop: the stick was ready **33 seconds** into
+the boot. The system now waits up to 20 seconds and says what it is waiting for,
+and a disk that is ready immediately still costs nothing at all.
+
+### The installer could not partition a disk when run from a USB stick
+
+It reached for its partitioning tools on a **second drive that only exists
+inside a test machine**. On a real stick there is no such drive. The tools now
+travel on the medium itself, at a cost of 7 MB rather than the 2 GB the old
+arrangement implied.
+
+Two smaller faults alongside it: the graphical installer announced **"Install
+FAILED" after a completely successful install**, because it was watching for a
+sentence the installer had stopped saying; and there was no way to launch the
+installer from the desktop at all, because the marker file every menu checks for
+was never written.
+
+### `hpm update` did nothing on a freshly installed machine, and said it worked
+
+Install, reboot, run `hpm update`: it fetched the package index, checked its
+signature, reported success, and **upgraded nothing, ever**. The installed
+system carried no record of what was on it, so there was nothing to compare the
+index against.
+
+An installed disk now carries that record, built from the same package files it
+was installed from. And when the record is missing or unreadable, `hpm` now
+**refuses and says so** instead of treating the machine as empty — the old
+behaviour would happily "update" a full system to nothing.
+
+### Everything the system said after start-up went to a port with nothing plugged into it
+
+On a real laptop the boot got as far as starting the shell and the screen
+stopped changing. It was not frozen — it was talking to a serial port. Console
+output follows the *last* console named on the kernel command line, and that was
+the serial port, chosen so automated tests could read it.
+
+The screen is now the console, which also means **it is the one you can type
+into**. Two symptoms of the same cause went with it: the boot was slow because
+every message was being pushed through a 115200-baud port, and the screen
+corrupted because two consoles were drawing into one framebuffer with separate
+cursors.
+
+Also fixed here: an installed machine had **QEMU's own IP addresses baked into
+it** — a network that is configured, looks fine, and cannot reach anything. It
+asks for an address by DHCP now.
 
 ## 1.0.23 — 2026-08-13
 
