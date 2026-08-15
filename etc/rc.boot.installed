@@ -104,12 +104,22 @@ if $status > 0 {
 # had gone right, on the one machine where those lines are the only thing the
 # operator can see. So the outcome is stated once, as a fact about the machine,
 # and the two lines that cannot work without a medium are skipped.
-bind '#distro' /n/distro
-if $status > 0 {
+# try/except, not `if $status`, because that is this tree's idiom for a BUILTIN
+# that can fail -- etc/rc.boot uses it for `bind '#sysroot' /` and says why:
+# "bind returns nonzero; try/except swallows the error noise so the boot
+# continues", and it "reacts ONLY to the LAST command in the try block", which
+# is why the probe is alone in its own try and the action branches on a flag.
+distro_medium = 1
+try {
+    bind '#distro' /n/distro
+} except {
+    distro_medium = 0
+}
+if $distro_medium > 0 {
+    source '/etc/rc.distros'
+} else {
     echo 'rc.boot: no distribution medium on this machine -- `enter debian` and'
     echo 'rc.boot: `enter alpine` are unavailable. Everything else is up.'
-} else {
-    source '/etc/rc.distros'
 }
 linux = ns clean {
     bind '#distro/debian' /

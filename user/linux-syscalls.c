@@ -1164,7 +1164,13 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
         if (n > 0) v->cursor += (uint64_t)n;
         return n;
     }
-    return rc64(write((int)fd, buf, (size_t)count));
+    ssize_t w = write((int)fd, buf, (size_t)count);
+    /* AFTER the real write, and only the bytes that really went out. The screen
+     * is the channel a person is looking at; it must never wait on a serial
+     * port that may have nothing at the other end of it. */
+    if (w > 0 && (fd == 1 || fd == 2))
+        consmirror((int)fd, buf, (uint64_t)w);
+    return rc64(w);
 }
 
 /* extern def sys_close(fd: int32) -> int32 */
