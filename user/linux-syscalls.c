@@ -1138,6 +1138,24 @@ static void consmirror(int fd, const uint8_t *buf, uint64_t count)
     (void)ignored;
 }
 
+/* EVERY DIRECT CONSOLE WRITE IN THIS FILE GOES THROUGH HERE, AND A RED GATE IS
+ * WHY. This file's own diagnostics -- the root scan, the bind failures, the
+ * user-namespace refusals -- call write(2, ...) directly rather than sys_write,
+ * so they never passed the mirror above. That was invisible while /dev/console
+ * WAS the serial port. The moment /dev/console became the screen, every one of
+ * them became screen-only, and tests/linux/install_from_usb.sh went 52/1 on
+ * exactly the assertion that reads one of them off the serial port:
+ * "boot 2: the root was not resolved to the NVMe", which greps for
+ * `is /dev/nvme0n1p2` -- a line the guest had printed, to a place the gate
+ * cannot see. One helper, so the next diagnostic added here cannot repeat it. */
+static void cons_write(const void *buf, size_t n)
+{
+    if (n == 0) return;
+    ssize_t w = write(2, buf, n);
+    if (w > 0)
+        consmirror(2, (const uint8_t *)buf, (uint64_t)w);
+}
+
 /* extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64 */
 int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 {
@@ -1611,8 +1629,7 @@ int32_t sys_rfork(int32_t flags)
                 const char *m = "rfork: no private namespace yet "
                                 "(needs CAP_SYS_ADMIN); one is created on the "
                                 "first bind\n";
-                ssize_t ignored = write(2, m, strlen(m));
-                (void)ignored;
+                cons_write(m, strlen(m));
             }
         } else {
             _exit(127);
@@ -3296,8 +3313,7 @@ static const char *distro_resolve(const char *name, char *out, size_t outn)
                 "      $HAMNIX_DISTRO is unset, /etc/distros' `default` names a\n"
                 "      filesystem LABEL that no attached disk carries, and\n"
                 "      nothing is mounted at /n/distro.\n";
-            ssize_t w = write(2, m, strlen(m));
-            (void)w;
+            cons_write(m, strlen(m));
         }
         snprintf(out, outn, "/dev/vda");
         return out;
@@ -3392,7 +3408,16 @@ static const struct devsrv *devsrv_lookup(const char *src, const char **subpath)
  * the serial port, the framebuffer console, and the `earlycon=efifb` boot
  * console that is the only thing printing before fbcon exists. `level` is the
  * kmsg priority; 3 (KERN_ERR) is used for faults so they appear even at the
- * default loglevel=4, which suppresses anything less urgent. */
+ * default loglevel=4, which suppresses anything less urgent.
+ *
+ * THE FIRST PARAGRAPH IS NOW HISTORY, AND THE LEVELS FOLLOW. The shipped
+ * command line ends `console=tty0`, so the write to fd 2 reaches the
+ * framebuffer by itself and the kmsg copy is no longer what rescues the
+ * message -- it is a SECOND copy of it, on the same screen. Anything that
+ * merely reports success is therefore emitted at <7>: kept in the kernel log
+ * for a post-mortem, not printed at console_loglevel=7, and still on the
+ * serial port every gate reads because linux-syscalls.c:consmirror copies
+ * console writes there. Faults and warnings keep their printed levels. */
 __attribute__((format(printf, 2, 3)))
 static void bootmsg(int level, const char *fmt, ...)
 {
@@ -3404,8 +3429,7 @@ static void bootmsg(int level, const char *fmt, ...)
     va_end(ap);
     if (n < 0) return;
     if (n > (int)(sizeof buf - pre) - 1) n = (int)(sizeof buf - pre) - 1;
-    ssize_t w = write(2, buf + pre, (size_t)n);      /* no <N> on the console */
-    (void)w;
+    cons_write(buf + pre, (size_t)n);               /* no <N> on the console */
     int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
     if (fd >= 0) {
         w = write(fd, buf, (size_t)(pre + n));
@@ -3666,10 +3690,16 @@ static const char *sysroot_device(void)
         int waited_ms = 0;
         for (;;) {
             if (scan_partitions(pu, fu, dev, sizeof dev, 0)) {
+                /* <7>, for the reason given on bootmsg: these two say the boot
+                 * WENT RIGHT, the console they need to reach is now the one
+                 * fd 2 already writes to, and at <6> each of them appeared on
+                 * the screen twice. The <4> and <3> lines below stay printed:
+                 * they are the ones a person must see on a boot that is going
+                 * wrong, and one duplicate is cheaper than a missed warning. */
                 if (waited_ms)
-                    bootmsg(6, "sysroot: root=%s appeared after %d.%01ds\n",
+                    bootmsg(7, "sysroot: root=%s appeared after %d.%01ds\n",
                             spec, waited_ms / 1000, (waited_ms % 1000) / 100);
-                bootmsg(6, "sysroot: root=%s is %s\n", spec, dev);
+                bootmsg(7, "sysroot: root=%s is %s\n", spec, dev);
                 return dev;
             }
             if (waited_ms >= deadline_ms) break;
@@ -3930,8 +3960,7 @@ static int ns_privilege(void)
          * name rather than carrying on in a namespace that half-works. */
         const char *m = "bind: user namespace created but uid_map could not be "
                         "written; the namespace would be unusable\n";
-        ssize_t w = write(2, m, strlen(m));
-        (void)w;
+        cons_write(m, strlen(m));
         return 0;
     }
     /* Plan 9's namespace copy is private by construction. */
@@ -4080,8 +4109,7 @@ static void distro_stage_mountpoints(const char *dst)
             "bind: could not create the mount point `%s' (%s); "
             "`enter' as the session user will fail there\n", p,
             strerror(errno));
-        ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-        (void)w;
+        cons_write(m, n > 0 ? (size_t)n : 0);
     }
     /* The same moment, the same argument, the fourth member of the same
      * family: see distro_stage_runtime just below. */
@@ -4161,8 +4189,7 @@ static void distro_stage_note(const char *what, const char *p)
     int n = snprintf(m, sizeof m,
         "bind: could not %s `%s' (%s); the session user's runtime directory "
         "will not be complete\n", what, p, strerror(errno));
-    ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-    (void)w;
+    cons_write(m, n > 0 ? (size_t)n : 0);
 }
 
 static void distro_stage_runtime(const char *dst)
@@ -4253,8 +4280,7 @@ static void bind_stage_failed(const char *src, const char *dst)
     int n = snprintf(m, sizeof m,
         "bind: could not graft `%s' onto `%s': %s\n", src, dst,
         strerror(errno));
-    ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-    (void)w;
+    cons_write(m, n > 0 ? (size_t)n : 0);
 }
 
 /* Say which STEP of the root switch failed, and on which path. Not rate-
@@ -4269,8 +4295,7 @@ static void enter_root_failed(const char *step, const char *path)
         "assembled under /n/.root (root) or $TMPDIR/.hamns-<pid> (a session "
         "user), and the body will NOT be run.\n",
         step, path, strerror(errno));
-    ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-    (void)w;
+    cons_write(m, n > 0 ? (size_t)n : 0);
 }
 
 static int32_t enter_root(const char *mnt, int is_sysroot)
@@ -4319,8 +4344,7 @@ static int32_t enter_root(const char *mnt, int is_sysroot)
                 "but nothing inside it can create a user namespace, so "
                 "bubblewrap/pressure-vessel containers will not start.\n",
                 strerror(errno));
-            ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-            (void)w;
+            cons_write(m, n > 0 ? (size_t)n : 0);
         }
     }
     if (chroot(".") < 0) {
@@ -4481,8 +4505,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
                 "/etc/distros, $HAMNIX_DISTRO_<NAME> unset, no attached "
                 "filesystem carries the label it names, and nothing is mounted "
                 "at /n/%s\n", name, name);
-            ssize_t w = write(2, m, n > 0 ? (size_t)n : 0);
-            (void)w;
+            cons_write(m, n > 0 ? (size_t)n : 0);
             errno = ENOENT;
             return -ENOENT;
         }
@@ -4542,8 +4565,7 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
              * the body in the native root. */
             const char *m = "bind: no writable staging directory for the new "
                             "root (tried /n/.root and $TMPDIR)\n";
-            ssize_t w = write(2, m, strlen(m));
-            (void)w;
+            cons_write(m, strlen(m));
             errno = EACCES;
             return -EACCES;
         }
