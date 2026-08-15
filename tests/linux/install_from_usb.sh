@@ -252,6 +252,17 @@ if $status > 0 {
     hpm list
     echo "source '/etc/instusb.p2'" > /var/lib/instusb.done
     echo 'INSTUSB-P1-DONE'
+    # SLEEP, THEN POWER OFF, AND BOTH HALVES ARE LOAD BEARING. The first
+    # version of this let the host KILL the VM the moment INSTUSB-P1-DONE
+    # appeared, and the marker file did not survive: ext4 commits its journal
+    # on a timer (5 s by default) and SIGKILL to QEMU is a power cut, so the
+    # write was still in the guest's page cache. The next boot ran phase 1
+    # AGAIN -- which reads exactly like "the installed root is not
+    # persistent", the most alarming failure this tree has, and it was the
+    # harness. Powering off from INSIDE the guest is what a person does and is
+    # the only thing that makes the reboot honest.
+    sleep 8
+    poweroff
 }
 RCEOF
 cat >"$EXTRA/etc/instusb.p2" <<'RCEOF'
@@ -533,7 +544,7 @@ fi
 say "BOOT 2: NVMe alone, the USB device DETACHED -- and the update runs on it"
 # The marker is phase 1's LAST line, so the VM is stopped once the update has
 # finished rather than after the desktop has idled for ten minutes.
-boot_vm installed-1 900 0 "INSTUSB-P1-DONE"
+boot_vm installed-1 900 0
 L2="$WORK/installed-1/serial.log"
 
 grep -aq 'rc.boot: hamnix-linux (installed)' "$L2" \
@@ -563,8 +574,20 @@ else
 fi
 if grep -aq 'hpm: update done' "$L2"; then
     ok "boot 2: $(grep -a 'hpm: update done' "$L2" | head -1 | tr -d '\r')"
+elif grep -aq 'no packages installed; nothing to update' "$L2"; then
+    # SAY WHICH KIND OF NOTHING. The index authenticated and 126 packages came
+    # down, so the network, the TLS and the shipped trust root are all fine --
+    # and `hpm update` STILL did nothing, because the machine has no record of
+    # having anything installed. scripts/hamlinux_image.sh creates
+    # /var/lib/hpm as an EMPTY DIRECTORY and nothing ever writes
+    # installed.json into it, so a freshly installed machine's package
+    # database is empty and `hpm update` is a no-op FOREVER. That is the
+    # owner's permanent rule (work published here must be updatable ON the
+    # machine) failing on the only machine that matters.
+    bad "boot 2: THE UPDATE IS A NO-OP -- the index authenticated (126 packages) but the installed machine has an EMPTY PACKAGE DATABASE, so there is nothing for hpm to upgrade. /var/lib/hpm/installed.json is never written by the image build."
 else
     bad "boot 2: hpm never printed 'update done'"
+    grep -a 'hpm' "$L2" | tail -8 | sed 's/^/        /'
 fi
 grep -aq 'rc.boot: up' "$L2" \
     && ok "boot 2: the installed system reached 'rc.boot: up' (the desktop rc ran after the update)" \
@@ -578,7 +601,12 @@ grep -aq 'rc.boot: up' "$L2" \
 # failure mode 146649bd found, a machine running from RAM and discarding
 # everything at power-off -- phase 2 could not run at all.
 say "BOOT 3: the same disk again, nothing changed by the host"
-boot_vm installed-2 900 0 "INSTUSB-P2-DONE"
+# NO poweroff in phase 2 and a marker instead: this is the LAST boot, nothing
+# has to survive it, so it is allowed to run all the way through the desktop rc
+# and is stopped on `rc.boot: up`. That makes this the one boot in the gate that
+# proves the INSTALLED machine completes a full desktop boot after taking an
+# update.
+boot_vm installed-2 900 0 "rc.boot: up"
 L3="$WORK/installed-2/serial.log"
 
 grep -aq 'INSTUSB-P2: this machine has been rebooted since the update' "$L3" \
@@ -590,6 +618,9 @@ grep -aq 'INSTUSB-P1: first boot' "$L3" \
 grep -aq 'rc.boot: hamnix-linux (installed)' "$L3" \
     && ok "boot 3: the installed system booted again" \
     || bad "boot 3: the machine did not come back after the update"
+grep -aq 'rc.boot: up' "$L3" \
+    && ok "boot 3: it went all the way through the desktop rc to 'rc.boot: up' AFTER the update" \
+    || bad "boot 3: the updated machine did not finish its boot"
 
 # THE COMPARISON THAT MATTERS: the same package list, after a power cycle. A
 # version that only ever existed in boot 2's RAM cannot appear here.
