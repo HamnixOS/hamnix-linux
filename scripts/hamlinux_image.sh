@@ -1076,6 +1076,73 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
         echo "[image]            rm -rf build/image/disk build/image/root/boot" >&2
         echo "[image]            scripts/hamlinux_image.sh && scripts/hamlinux_disk.sh" >&2
     fi
+
+    # --- THE PARTITIONING TOOLS, ON THE MEDIUM ITSELF ---------------------
+    # user/hlinstall.ad shells out to sgdisk, mkfs.vfat and mkfs.ext4, and it
+    # used to be able to reach them in exactly ONE way: `bind '#distro' /`,
+    # the full Debian namespace. On a development host that always works --
+    # scripts/hamlinux_vm.sh appends `-drive file=build/image/distro.ext4` to
+    # every VM it starts -- so every install ever driven here found them, and
+    # HANDOFF.md's end-to-end installer run is true of a VM with two disks.
+    #
+    # A LAPTOP BOOTED FROM A USB STICK HAS NEITHER. /etc/distros resolves
+    # `#distro` to LABEL=hamnix-debian; scripts/hamlinux_disk.sh writes a
+    # TWO-partition medium (ESP + root) and gives neither that label. So on
+    # the owner's actual configuration the bind failed, sgdisk never ran, and
+    # the installer in the Applications menu could not partition a disk.
+    #
+    # The fix is NOT a copy of Debian: the closure of those three programs is
+    # 7.0 MB measured, against 2.0 GB for distro.ext4. It is staged as a
+    # directory here and bound as a namespace root by hlinstall, which is a
+    # source /etc/distros already documents ("/some/dir, bind-mounted here")
+    # and user/linux-syscalls.c already implements (the MS_BIND tail of
+    # sys_bind). The mount points are made HERE because that bind is not a
+    # `#distro` post, so distro_stage_mountpoints does not run for it.
+    INSTROOT="$ROOT/usr/lib/instroot"
+    rm -rf "$INSTROOT"
+    mkdir -p "$INSTROOT"/usr/sbin "$INSTROOT"/etc "$INSTROOT"/dev \
+             "$INSTROOT"/proc "$INSTROOT"/sys "$INSTROOT"/srv \
+             "$INSTROOT"/n "$INSTROOT"/tmp
+    INST_OK=1
+    INST_LIBS=""
+    for t in sgdisk mkfs.vfat mkfs.ext4; do
+        p="$(command -v "$t" 2>/dev/null || true)"
+        if [ -z "$p" ]; then
+            echo "[image] ERROR: no $t on this build host; the installer on" >&2
+            echo "[image]        this medium would not be able to partition." >&2
+            INST_OK=0
+            continue
+        fi
+        install -m755 "$(readlink -f "$p")" "$INSTROOT/usr/sbin/$t"
+        # The closure, from ldd rather than from a hand-written list: a list
+        # goes stale the first time a distribution relinks one of these and
+        # the symptom is `sgdisk: error while loading shared libraries`
+        # AFTER the target disk has already been zapped.
+        INST_LIBS="$INST_LIBS
+$(ldd "$p" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}')"
+    done
+    for l in $(printf '%s\n' "$INST_LIBS" | sort -u); do
+        [ -f "$l" ] || continue
+        mkdir -p "$INSTROOT$(dirname "$l")"
+        install -m755 "$(readlink -f "$l")" "$INSTROOT$l"
+    done
+    # mkfs.ext4 reads this for its feature defaults. Without it the filesystem
+    # is still made, so its absence would be a silent difference rather than
+    # an error -- which is the reason to copy it rather than to find out.
+    [ -f /etc/mke2fs.conf ] && install -m644 /etc/mke2fs.conf "$INSTROOT/etc/mke2fs.conf"
+    if [ "$INST_OK" = 1 ]; then
+        # PROVE THE THING RUNS, here, where a build can still fail. A copied
+        # binary with a missing library is indistinguishable from a working
+        # one until the moment it is asked to erase a disk.
+        if ! "$INSTROOT/usr/sbin/sgdisk" --version >/dev/null 2>&1; then
+            echo "[image] ERROR: the staged sgdisk does not run on this host." >&2
+            INST_OK=0
+        fi
+    fi
+    INST_SZ=$(du -sk "$INSTROOT" | cut -f1)
+    echo "[image] staged the installer's partitioning tools into" \
+         "/usr/lib/instroot (${INST_SZ}K, sgdisk + mkfs.vfat + mkfs.ext4)"
+    [ "$INST_OK" = 1 ] || echo "[image] WARNING: /usr/lib/instroot is INCOMPLETE" >&2
 fi
 
 # --- packing, and who owns what ------------------------------------------
