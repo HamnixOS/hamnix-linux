@@ -97,6 +97,10 @@ case "$SHIPPED_CMDLINE" in
         ok "the shipped command line ends with console=tty0, so /dev/console is the SCREEN" ;;
     *) bad "the shipped command line does not put console=tty0 last: $SHIPPED_CMDLINE" ;;
 esac
+case "$SHIPPED_CMDLINE" in
+    *keep_bootcon*) bad "keep_bootcon is back: earlycon and fbcon will both draw into the EFI framebuffer with independent cursors, and every kernel message after the shell writes will be drawn over what the shell wrote" ;;
+    *) ok "keep_bootcon is not on the shipped command line, so earlycon hands the framebuffer over" ;;
+esac
 
 # THE OLD ARRANGEMENT, rebuilt from the shipped one rather than typed out, so
 # the control differs in exactly the thing under test and nothing else.
@@ -182,6 +186,22 @@ grep -aq "$MARK" "$A/serial.log" \
 grep -aq 'namespace ready' "$A/serial.log" \
     && ok "shipped: PID 1's lines are still on the serial port" \
     || bad "shipped: PID 1's lines are not on the serial port"
+# THE OTHER HALF OF RETIRING keep_bootcon. earlycon is handed off the moment the
+# VT console registers, which this tree's guest log puts at 0.23 s -- over a
+# second before efifb probes. If the VT layer did NOT hold what was written to
+# it while dummycon was the driver, and fbcon did not redraw that buffer on
+# takeover, everything printed in that window would be lost and the screen would
+# start mid-boot. `usb-storage` and the root scan are both in it.
+if grep -aqE 'usb-storage|SCSI disk|Attached' "$A/screen.txt" 2>/dev/null; then
+    ok "shipped: the kernel's own early boot lines are on the screen with earlycon already handed off"
+else
+    bad "shipped: the kernel's early boot lines are NOT on the screen -- dropping keep_bootcon lost them"
+fi
+if grep -aqE '^\[ *[0-9]+\.[0-9]+\] *linuxinit' "$A/screen.txt" 2>/dev/null; then
+    bad "shipped: PID 1's lines are on the screen TWICE (a bare copy and a printk copy) -- the kmsg mirror is being printed as well"
+else
+    ok "shipped: PID 1's lines appear on the screen once, not once bare and once with a printk timestamp"
+fi
 if grep -aq "$MARK" "$A/screen.txt" 2>/dev/null; then
     ok "shipped: THE SHELL'S MARKER IS ON THE SCREEN (OCR of the framebuffer)"
 else

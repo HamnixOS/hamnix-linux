@@ -194,12 +194,34 @@ CMDLINE="$STAGE/cmdline.txt"
 #                    handed over, from the first line of the kernel, before
 #                    any driver exists. It is the only thing that prints at
 #                    all on a machine with no serial port and no fbcon yet.
-#   keep_bootcon     keeps it after a "real" console registers. Without this
-#                    the kernel silences earlycon the moment tty0 comes up --
-#                    and tty0 comes up even with NO framebuffer behind it
-#                    (CONFIG_VT's dummy console), so on the laptop the one
-#                    console that could be read was turned off in favour of
-#                    one that displayed nothing.
+#   keep_bootcon     IS GONE, AND HERE IS THE MEASUREMENT THAT RETIRED IT.
+#                    It was here because "tty0 comes up even with NO
+#                    framebuffer behind it (CONFIG_VT's dummy console)", which
+#                    is TRUE and is visible in this tree's own guest log:
+#                      [0.229599] Console: colour dummy device 80x25
+#                      [1.365101] efifb: probing for efifb
+#                      [1.371319] Console: switching to colour frame buffer
+#                    so for 1.14 s the only console that can draw is earlycon.
+#                    What the note missed is what keeping it costs AFTER that.
+#                    earlycon=efifb and fbcon are two writers into ONE
+#                    framebuffer with independent cursors. While every line is
+#                    a printk they stay in step and draw the same text in the
+#                    same place, which is why this was never noticed. The
+#                    moment anything writes to /dev/console that is NOT a
+#                    printk -- which, now that /dev/console is tty0, is the
+#                    whole shell -- fbcon's cursor advances and earlycon's does
+#                    not, and the next kernel message is drawn OVER the lines
+#                    the shell just wrote. That is the owner's "previous lines
+#                    not being cleared", and putting the shell on the screen
+#                    would have made it worse, not better.
+#                    The 1.14 s window is not paid in lost text: the VT layer
+#                    stores what is written to it even while dummycon is the
+#                    driver, and fbcon REDRAWS that buffer when it takes over,
+#                    so the lines printed during the window appear the instant
+#                    the framebuffer console binds. Proved by screendump, not
+#                    argued -- tests/linux/console_screen.sh asserts that the
+#                    kernel's early lines are on the screen with earlycon
+#                    already handed off.
 #   loglevel=7       the kernel's own boot messages. At loglevel=4 nothing
 #                    below KERN_ERR reaches any console, so a perfect boot
 #                    printed NOTHING between the EFI stub and the desktop.
@@ -234,7 +256,7 @@ CMDLINE="$STAGE/cmdline.txt"
 #
 # HAMLINUX_CMDLINE still overrides the whole string; HAMLINUX_ROOT_PARTUUID
 # pins the GUID (a test that rebuilds the disk and expects the same string).
-DEFAULT_CMDLINE="earlycon=efifb keep_bootcon console=ttyS0,115200 console=tty0 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7"
+DEFAULT_CMDLINE="earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7"
 printf '%s' "${HAMLINUX_CMDLINE:-$DEFAULT_CMDLINE}" > "$CMDLINE"
 echo "[disk] cmdline: $(cat "$CMDLINE")"
 # WHAT THE IN-SYSTEM INSTALLER READS. user/hlinstall.ad copies this very UKI
