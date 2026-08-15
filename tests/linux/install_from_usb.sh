@@ -126,8 +126,10 @@ PART="$WORK/part.img"              # a partition, carved out for inspection
 # -- a gate that never mounts a filesystem cannot be the thing that corrupted
 # it, and no physical device is reachable from here at all.
 #
-# `dd` a partition out, look at it, and (for the update stage) put it back.
-# Measured at 1.6 s for 3.6 GB on this host, which is cheaper than the boots.
+# `dd` a partition out and look at it. Measured at 1.6 s for 3.6 GB on this
+# host, which is cheaper than any of the boots. NOTHING IS EVER WRITTEN BACK:
+# the installed disk is read-only evidence from the moment the installer
+# finishes, so no assertion about it can be an artefact of this gate.
 part_geom() {  # part_geom <img> <partno> -> "<byte offset> <byte size>"
     sfdisk -J "$1" 2>/dev/null | python3 -c '
 import json,sys
@@ -144,12 +146,6 @@ carve() {  # carve <img> <partno> -- extract into $PART
     rm -f "$PART"
     dd if="$1" of="$PART" bs=1M skip=$((off / 1048576)) \
        count=$(( (sz + 1048575) / 1048576 )) status=none
-}
-paste_back() {  # paste_back <img> <partno> -- write $PART back where it came from
-    local g off
-    g="$(part_geom "$1" "$2")" || return 1
-    off="${g% *}"
-    dd if="$PART" of="$1" bs=1M seek=$((off / 1048576)) conv=notrunc status=none
 }
 fs_has()  { debugfs -R "stat $2" "$1" 2>/dev/null | grep -q '^Inode:'; }
 fs_cat()  { debugfs -R "cat $2" "$1" 2>/dev/null; }
@@ -212,10 +208,62 @@ echo 'INSTUSB-LIVE-DONE'
 poweroff
 RCEOF
 
+# ---- THE INSTALLED MACHINE'S rc, DELIVERED BY THE INSTALLER ITSELF ------
+# The update has to run ON the machine the installer wrote, and this gate did
+# not build that disk -- so there has to be a hook. The first attempt wrote one
+# onto the target afterwards with `debugfs -w`, and it DID NOT WORK: debugfs
+# creates the inode but does not update the group descriptor's itable_unused,
+# so the very next e2fsck said "Entry 'rc.boot.installed.orig' in /etc has
+# deleted/unused inode. Clear? yes" and threw both files away. The boot that
+# followed ran the stock rc, the update never happened, and the only reason
+# that was not read as an hpm failure is that the desktop showed up in a log
+# that should have had hpm in it.
+#
+# So the hook is delivered the way everything else on the target is: by BEING
+# ON THE MEDIUM. hlinstall copies the live root onto the target, so a file
+# staged here arrives there. /etc/rc.boot.installed is the right one to use --
+# the installer writes the target's /etc/rc.boot as a three-line INDIRECTION to
+# it, which is the discriminator asserted above, so using it leaves that proof
+# intact. Nothing is written to the installed disk by this gate at any point.
+#
+# TWO PHASES OUT OF ONE FILE, with no `else`: sourcing a file that does not
+# exist returns non-zero (the idiom etc/rc.d/rc.5 already uses for its
+# self-test), so phase 1 runs when the marker is absent and WRITES the marker
+# as a one-line script that sources phase 2. The next boot sources it and runs
+# phase 2 instead.
+EXTRA="$WORK/extra"
+rm -rf "$EXTRA"; mkdir -p "$EXTRA/etc"
+sed "s|^source '/etc/rc.d/rc.5'|source '/etc/instusb.phase'\nsource '/etc/rc.d/rc.5'|" \
+    etc/rc.boot.installed >"$EXTRA/etc/rc.boot.installed"
+grep -q "instusb.phase" "$EXTRA/etc/rc.boot.installed" || {
+    bad "could not splice the phase hook into etc/rc.boot.installed"; exit 1; }
+cat >"$EXTRA/etc/instusb.phase" <<'RCEOF'
+# Staged by tests/linux/install_from_usb.sh onto the LIVE medium, carried onto
+# the installed disk by the installer's copy, and run by the installed
+# machine's own /etc/rc.boot.installed.
+source '/var/lib/instusb.done'
+if $status > 0 {
+    echo 'INSTUSB-P1: first boot of the installed machine'
+    hpm refresh
+    echo 'INSTUSB-P1: hpm list before'
+    hpm list
+    hpm update
+    echo 'INSTUSB-P1: hpm list after'
+    hpm list
+    echo "source '/etc/instusb.p2'" > /var/lib/instusb.done
+    echo 'INSTUSB-P1-DONE'
+}
+RCEOF
+cat >"$EXTRA/etc/instusb.p2" <<'RCEOF'
+echo 'INSTUSB-P2: this machine has been rebooted since the update'
+hpm list
+echo 'INSTUSB-P2-DONE'
+RCEOF
+
 if [ "${HAMLINUX_INSTUSB_REUSE:-0}" = 1 ] && [ -f "$LIVE" ]; then
     :
 else
-    HAMLINUX_DISK_RC="$WORK/rc.install" \
+    HAMLINUX_DISK_RC="$WORK/rc.install" HAMLINUX_DISK_EXTRA="$EXTRA" \
         scripts/hamlinux_disk.sh "$LIVE" 4G >"$WORK/disk2.log" 2>&1 || {
         bad "live medium build"; tail -20 "$WORK/disk2.log"; exit 1; }
 fi
@@ -482,8 +530,10 @@ if [ "${NPARTS:-0}" -lt 2 ]; then
     exit 1
 fi
 
-say "BOOT 2: NVMe alone, the USB device DETACHED"
-boot_vm installed-1 600 0 "rc.boot: up"
+say "BOOT 2: NVMe alone, the USB device DETACHED -- and the update runs on it"
+# The marker is phase 1's LAST line, so the VM is stopped once the update has
+# finished rather than after the desktop has idled for ten minutes.
+boot_vm installed-1 900 0 "INSTUSB-P1-DONE"
 L2="$WORK/installed-1/serial.log"
 
 grep -aq 'rc.boot: hamnix-linux (installed)' "$L2" \
@@ -492,117 +542,67 @@ grep -aq 'rc.boot: hamnix-linux (installed)' "$L2" \
 grep -aq 'handing off to an interactive shell' "$L2" \
     && bad "boot 2: the INITRAMFS rc ran -- the installed root was never mounted" \
     || ok "boot 2: the initramfs rc did not run"
-grep -aqE 'nvme0n1p2|root=PARTUUID' "$L2" \
-    && ok "boot 2: the kernel resolved its root on the NVMe" \
-    || info "boot 2: no explicit root device line in the log"
-grep -aq 'rc.boot: up' "$L2" \
-    && ok "boot 2: the installed system reached 'rc.boot: up'" \
-    || bad "boot 2: the installed system did not finish booting"
+grep -aqE 'is /dev/nvme0n1p2' "$L2" \
+    && ok "boot 2: the kernel resolved root=PARTUUID to /dev/nvme0n1p2 with no USB attached" \
+    || bad "boot 2: the root was not resolved to the NVMe"
+grep -aq 'INSTUSB-P1: first boot of the installed machine' "$L2" \
+    && ok "boot 2: the installed machine ran the phase-1 hook the INSTALLER carried onto it" \
+    || bad "boot 2: the phase hook never ran -- the installer did not copy it, or hamsh could not source it"
 
 # =========================================================================
-# 4. UPDATE IT OVER THE NETWORK, THEN REBOOT AND SEE IF IT STUCK.
+# 4. THE UPDATE, OVER THE REAL NETWORK, ON THE DISK THE INSTALLER WROTE.
 # =========================================================================
-# The installed machine's rc is the installer's own, and it does not run hpm.
-# Its CONTENT has already been asserted above -- that is the proof that this is
-# the installed system -- so replacing it now to drive the update costs nothing
-# that has not already been measured, and it is the only hook there is on a
-# disk this gate did not build.
-if [ "${NPARTS:-0}" -ge 2 ] && [ "${HAMLINUX_INSTUSB_NONET:-0}" != 1 ]; then
-    say "BOOT 3: hpm refresh + hpm update against the real https://255.one/"
-    cat >"$WORK/rc.update" <<'RCEOF'
-source '/etc/rc.boot.installed.orig'
-echo 'INSTUSB-UPD: asking 255.one for an index'
-hpm refresh
-echo 'INSTUSB-UPD: hpm list before'
-hpm list
-hpm update
-echo 'INSTUSB-UPD: hpm list after'
-hpm list
-echo 'INSTUSB-UPD-DONE'
-poweroff
-RCEOF
-    # The stock installed rc ends by starting the desktop, which never returns.
-    # This takes the target's OWN copy, drops that one line, and puts it back
-    # as .orig for the gate's rc to source -- so everything before it (the root
-    # switch, the network, the namespaces) is the installed machine's own text.
-    # RE-CARVED, because boot 2 was a real boot of this disk and may have
-    # written to it. Working from the copy taken before that boot would put
-    # stale blocks back and the corruption would look like an hpm failure.
-    carve "$NVME" 2
-    fs_cat "$PART" /etc/rc.boot.installed >"$WORK/rc.installed.orig"
-    if [ -s "$WORK/rc.installed.orig" ]; then
-        sed -i "s|^source '/etc/rc.d/rc.5'|echo 'INSTUSB-UPD: (desktop not started by this gate)'|" \
-            "$WORK/rc.installed.orig"
-        # debugfs writes into the carved partition; e2fsck then makes sure what
-        # goes back onto the disk is a consistent filesystem rather than
-        # something that merely wrote without error.
-        debugfs -w -R "rm /etc/rc.boot" "$PART" >/dev/null 2>&1
-        debugfs -w -R "write $WORK/rc.update /etc/rc.boot" "$PART" >/dev/null 2>&1
-        debugfs -w -R "write $WORK/rc.installed.orig /etc/rc.boot.installed.orig" "$PART" >/dev/null 2>&1
-        e2fsck -fy "$PART" >"$WORK/fsck-update.log" 2>&1
-        paste_back "$NVME" 2
-        boot_vm installed-update 900 0
-        L3="$WORK/installed-update/serial.log"
-        grep -aq 'INSTUSB-UPD: asking 255.one' "$L3" \
-            && ok "boot 3: the installed machine ran the update rc" \
-            || bad "boot 3: the update rc never ran"
-        # hpm's OWN success lines, not a loose word match. `hpm: refreshed
-        # index from <url>` is printed only after the index authenticated
-        # against the shipped trust root, and `hpm: update done (upgraded=N`
-        # only after the transaction closed.
-        if grep -aq 'hpm: refreshed index from' "$L3"; then
-            ok "boot 3: hpm refreshed and AUTHENTICATED an index from the network"
-            grep -a 'hpm: refreshed index from' "$L3" | head -1 | sed 's/^/        /'
-        else
-            bad "boot 3: hpm never printed 'refreshed index from' -- no authenticated index -- see $L3"
-            grep -a 'hpm' "$L3" | tail -10 | sed 's/^/        /'
-        fi
-        if grep -aq 'hpm: update done' "$L3"; then
-            ok "boot 3: $(grep -a 'hpm: update done' "$L3" | head -1)"
-        else
-            bad "boot 3: hpm never printed 'update done'"
-        fi
-        grep -aq 'INSTUSB-UPD-DONE' "$L3" \
-            && ok "boot 3: the update rc ran to the end" \
-            || bad "boot 3: the update rc did not finish"
-
-        say "BOOT 4: reboot, and see whether the update survived"
-        cat >"$WORK/rc.after" <<'RCEOF'
-source '/etc/rc.boot.installed.orig'
-echo 'INSTUSB-AFTER: hpm list after the reboot'
-hpm list
-echo 'INSTUSB-AFTER-DONE'
-poweroff
-RCEOF
-        if carve "$NVME" 2; then
-            debugfs -w -R "rm /etc/rc.boot" "$PART" >/dev/null 2>&1
-            debugfs -w -R "write $WORK/rc.after /etc/rc.boot" "$PART" >/dev/null 2>&1
-            e2fsck -fy "$PART" >"$WORK/fsck-after.log" 2>&1
-            paste_back "$NVME" 2
-            boot_vm installed-after 600 0
-            L4="$WORK/installed-after/serial.log"
-            grep -aq 'INSTUSB-AFTER-DONE' "$L4" \
-                && ok "boot 4: the installed machine booted again after the update" \
-                || bad "boot 4: the machine did not come back after the update"
-            # THE COMPARISON THAT MATTERS: the same package list, after a power
-            # cycle. A version that only existed in boot 3's RAM fails here.
-            if [ -f "$L3" ] && [ -f "$L4" ]; then
-                B="$(grep -a -A40 'hpm list after' "$L3" | grep -aE '^[a-z0-9-]+ +[0-9]+\.[0-9]+\.[0-9]+' | sort)"
-                A="$(grep -a -A40 'INSTUSB-AFTER: hpm list' "$L4" | grep -aE '^[a-z0-9-]+ +[0-9]+\.[0-9]+\.[0-9]+' | sort)"
-                if [ -n "$A" ] && [ "$A" = "$B" ]; then
-                    ok "boot 4: the package list is identical to the one the update left (the update is ON THE DISK)"
-                elif [ -z "$A" ]; then
-                    bad "boot 4: could not read a package list after the reboot"
-                else
-                    bad "boot 4: the package list changed across the reboot"
-                fi
-            fi
-        fi
-    else
-        bad "cannot write the update rc onto the target"
-    fi
+# hpm's OWN success lines, not a loose word match. `hpm: refreshed index from`
+# is printed only after the index authenticated against the SHIPPED trust root,
+# and `hpm: update done (upgraded=N` only after the transaction closed.
+if grep -aq 'hpm: refreshed index from' "$L2"; then
+    ok "boot 2: $(grep -a 'hpm: refreshed index from' "$L2" | head -1 | tr -d '\r')"
 else
-    info "skipping the network stages"
+    bad "boot 2: hpm never printed 'refreshed index from' -- no authenticated index"
+    grep -a 'hpm' "$L2" | tail -10 | sed 's/^/        /'
+fi
+if grep -aq 'hpm: update done' "$L2"; then
+    ok "boot 2: $(grep -a 'hpm: update done' "$L2" | head -1 | tr -d '\r')"
+else
+    bad "boot 2: hpm never printed 'update done'"
+fi
+grep -aq 'rc.boot: up' "$L2" \
+    && ok "boot 2: the installed system reached 'rc.boot: up' (the desktop rc ran after the update)" \
+    || info "boot 2: stopped at the phase marker before 'rc.boot: up'"
+
+# =========================================================================
+# 5. REBOOT, AND SEE WHETHER THE UPDATE IS STILL THERE.
+# =========================================================================
+# Nothing is written to this disk between the two boots. Phase 1 left a marker
+# ON THE INSTALLED FILESYSTEM, so if the root were not persistent -- the whole
+# failure mode 146649bd found, a machine running from RAM and discarding
+# everything at power-off -- phase 2 could not run at all.
+say "BOOT 3: the same disk again, nothing changed by the host"
+boot_vm installed-2 900 0 "INSTUSB-P2-DONE"
+L3="$WORK/installed-2/serial.log"
+
+grep -aq 'INSTUSB-P2: this machine has been rebooted since the update' "$L3" \
+    && ok "boot 3: phase 2 ran, so phase 1's marker SURVIVED THE POWER CYCLE on the installed root" \
+    || bad "boot 3: phase 2 did not run -- the marker did not persist"
+grep -aq 'INSTUSB-P1: first boot' "$L3" \
+    && bad "boot 3: phase 1 ran AGAIN -- the installed root is not persistent" \
+    || ok "boot 3: phase 1 did not run again"
+grep -aq 'rc.boot: hamnix-linux (installed)' "$L3" \
+    && ok "boot 3: the installed system booted again" \
+    || bad "boot 3: the machine did not come back after the update"
+
+# THE COMPARISON THAT MATTERS: the same package list, after a power cycle. A
+# version that only ever existed in boot 2's RAM cannot appear here.
+AFTER_UPD="$(grep -a -A40 'INSTUSB-P1: hpm list after' "$L2" 2>/dev/null | grep -aE '^[a-z0-9-]+ +[0-9]+\.[0-9]+\.[0-9]+' | sort)"
+REBOOTED="$(grep -a -A40 'INSTUSB-P2: this machine' "$L3" 2>/dev/null | grep -aE '^[a-z0-9-]+ +[0-9]+\.[0-9]+\.[0-9]+' | sort)"
+if [ -n "$REBOOTED" ] && [ "$AFTER_UPD" = "$REBOOTED" ]; then
+    ok "boot 3: the package list is byte-identical to the one the update left -- THE UPDATE IS ON THE DISK"
+    printf '%s\n' "$REBOOTED" | head -6 | sed 's/^/        /'
+elif [ -z "$REBOOTED" ]; then
+    bad "boot 3: could not read a package list after the reboot"
+else
+    bad "boot 3: the package list changed across the reboot"
+    diff <(printf '%s\n' "$AFTER_UPD") <(printf '%s\n' "$REBOOTED") | head -10 | sed 's/^/        /'
 fi
 
 cleanup_mounts
