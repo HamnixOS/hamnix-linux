@@ -1172,6 +1172,48 @@ def image_want_modules():
     return names
 
 
+def builtin_modules(kver):
+    """The modules this kernel has BUILT IN, from /lib/modules/<kver>/
+    modules.builtin, as names with '-' folded to '_' (modprobe treats them as
+    the same character).
+
+    WHY THIS EXISTS, AND IT IS A CORRECTION RATHER THAN A FEATURE. The packager
+    said, of every name modprobe could not resolve:
+
+        "%s: modprobe resolved nothing for %s (the image does not stage them
+         either)"
+
+    which reads as "not a coverage hole" and was said out loud about
+    i2c-designware-platform -- the I2C bus a modern laptop's touchpad hangs
+    off, and one of the nine names 1.0.24 added. THAT SENTENCE HAS BEEN FALSE
+    IN THIS FILE BEFORE: the same reassurance was printed for $HW_MODULES,
+    twenty real .ko files WERE in the image, and a gate went 7/20 naming every
+    one of them. So it is worth knowing WHICH kind of nothing.
+
+    MEASURED on this build host: /boot/config-6.12.85+deb13-amd64 has
+    CONFIG_I2C_DESIGNWARE_PLATFORM=y and modules.builtin lists
+    kernel/drivers/i2c/busses/i2c-designware-platform.ko. There is no .ko to
+    package because the driver is already inside vmlinuz -- which is also why
+    the owner's touchpad bound on metal from a package that "shipped one module
+    short of its name". The package name is right and the module list is right;
+    only the diagnostic was wrong.
+    """
+    path = "/lib/modules/%s/modules.builtin" % kver
+    out = set()
+    if not os.path.exists(path):
+        return out
+    with open(path) as fh:
+        for line in fh:
+            base = os.path.basename(line.strip())
+            for ext in (".ko.xz", ".ko.gz", ".ko.zst", ".ko"):
+                if base.endswith(ext):
+                    base = base[:-len(ext)]
+                    break
+            if base:
+                out.add(base.replace("-", "_"))
+    return out
+
+
 def drm_core_modules(kver):
     """The shared DRM/KMS core: everything the i915 and nouveau chains need
     EXCEPT the hardware driver itself. hamnix-drivers-drm owns these files, so
@@ -1391,12 +1433,24 @@ def image_module_selection(kver, skipped=None):
             else:
                 unresolved.append(n)
         if unresolved and skipped is not None:
-            # The image cannot stage what modprobe cannot resolve either, so
-            # this is not a coverage hole -- but say it out loud rather than
-            # shipping a shorter list than the name of this package implies.
-            skipped.append("%s: modprobe resolved nothing for %s "
-                           "(the image does not stage them either)"
-                           % (pkg, " ".join(unresolved)))
+            # TWO KINDS OF NOTHING, AND THEY ARE NOT THE SAME NEWS. A name the
+            # kernel has BUILT IN has no .ko to package and needs none -- the
+            # driver is in vmlinuz and works. A name that is neither a module
+            # nor builtin is a driver this channel does not have. The old text
+            # said the second thing about both; see builtin_modules().
+            builtin = builtin_modules(kver)
+            inside = [n for n in unresolved if n.replace("-", "_") in builtin]
+            gone = [n for n in unresolved if n.replace("-", "_") not in builtin]
+            if inside:
+                skipped.append(
+                    "%s: %s is BUILT INTO this kernel (modules.builtin), so "
+                    "there is no .ko to package and none is needed -- the "
+                    "driver is in vmlinuz" % (pkg, " ".join(inside)))
+            if gone:
+                skipped.append(
+                    "%s: modprobe resolved nothing for %s and this kernel does "
+                    "NOT have it builtin either -- the channel has no such "
+                    "driver" % (pkg, " ".join(gone)))
         if not chains:
             if skipped is not None:
                 skipped.append("%s (modprobe resolved nothing)" % pkg)

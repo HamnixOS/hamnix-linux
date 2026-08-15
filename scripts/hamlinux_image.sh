@@ -779,6 +779,17 @@ MODPROBE=/usr/sbin/modprobe
 #                for the ACPI-declared device to be on, which is a silence
 #                that looks exactly like an unsupported touchpad.
 #
+#                i2c-designware-platform IS NOT A MODULE ON THIS KERNEL and
+#                the name is kept anyway. CONFIG_I2C_DESIGNWARE_PLATFORM=y in
+#                /boot/config-6.12.85+deb13-amd64 and modules.builtin lists it,
+#                so the driver is inside vmlinuz: modprobe resolves nothing,
+#                the image stages nothing, hamnix-drivers-hw carries 29 modules
+#                where the list names 30, and the touchpad works anyway --
+#                which is what the owner measured on metal. Naming it here is
+#                what makes the packager say "BUILT INTO this kernel" instead
+#                of the old "modprobe resolved nothing", and it is the line
+#                that will start shipping a .ko the day a kernel makes it =m.
+#
 # NOT MEASURED ON HARDWARE -- there is no laptop here, and a VM has neither a
 # PS/2 touchpad nor an I2C-HID one, so this is the one change in this pass that
 # the VM cannot confirm. What IS measured is that it costs nothing to carry:
