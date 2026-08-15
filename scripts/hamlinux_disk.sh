@@ -261,7 +261,34 @@ CMDLINE="$STAGE/cmdline.txt"
 #
 # HAMLINUX_CMDLINE still overrides the whole string; HAMLINUX_ROOT_PARTUUID
 # pins the GUID (a test that rebuilds the disk and expects the same string).
-DEFAULT_CMDLINE="earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7"
+#   printk.devkmsg=on
+#                    WITHOUT THIS THE BOOT LOG SILENTLY LOSES LINES, AND IT
+#                    LOSES THEM IN THE SHAPE OF A LOG THAT LOOKS FINE.
+#                    /dev/kmsg is how user/linux-syscalls.c:consmirror gets the
+#                    SHELL's output into the kernel ring, which is what
+#                    user/bootlogd.ad persists onto the stick. The kernel's
+#                    default for writes to that node is `ratelimit`: a global
+#                    burst of ten records per five seconds, everything else
+#                    dropped on the floor with no error to the writer.
+#                    MEASURED, this tree, the shipped medium booted as
+#                    usb-storage: the recovered \HAMNIX.LOG ran to 7.917s, then
+#                    stopped for FOUR SECONDS -- swallowing every `[rc.5]` line,
+#                    `rc.boot: up`, and the end-of-boot marker -- and resumed at
+#                    11.905s. Nothing anywhere reported a problem; the file was
+#                    the right size, had its header and its terminator, and was
+#                    missing exactly the part of the boot a person would be
+#                    looking for. That is the worst way for a diagnostic file to
+#                    be wrong, and it is precisely the failure this whole
+#                    arrangement exists to stop.
+#                    It is set HERE rather than by a sysctl write in the rc
+#                    because a boot parameter applies from the FIRST record,
+#                    before any userland has run: a runtime write leaves a
+#                    window in which the kernel's own early output and PID 1's
+#                    opening burst are still being dropped. user/linuxinit.ad
+#                    READS IT BACK and warns if this kernel did not honour it,
+#                    because a setting that is accepted and does not take is
+#                    the success-shaped answer NORTH_STAR.md forbids.
+DEFAULT_CMDLINE="earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7 printk.devkmsg=on"
 printf '%s' "${HAMLINUX_CMDLINE:-$DEFAULT_CMDLINE}" > "$CMDLINE"
 echo "[disk] cmdline: $(cat "$CMDLINE")"
 # WHAT THE IN-SYSTEM INSTALLER READS. user/hlinstall.ad copies this very UKI

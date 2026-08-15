@@ -1230,33 +1230,48 @@ static void consmirror_setup(void)
  * the serial port but not in the log. The INSTALLED boot -- the one the owner
  * runs, etc/rc.boot.installed -- never drops privilege, so its rc, its
  * services and its desktop are all captured. */
-static int kmsglog_fd = -2;             /* -2 undecided, -1 off, else the fd */
-static int kmsglog_tries = 0;
+/* THE DESCRIPTOR IS NOT KEPT, AND THAT IS A CORRECTNESS DECISION RATHER THAN A
+ * STYLE ONE. MEASURED, this tree, the shipped medium booted as usb-storage:
+ * with a cached fd, PID 1's console lines were mirrored up to
+ * `rc.boot: hamnix-linux (installed)` and then STOPPED DEAD, while every line
+ * from every CHILD process (dhcpc, wsyswl, hampanelscene) and every bootmsg
+ * kept arriving for the rest of the boot. PID 1 is hamsh, and a shell OWNS its
+ * descriptor table: it dups, it dup2s, and lib/p9.ad's p9_closefrom shuts
+ * everything from 3 to 63 as a matter of contract. A long-lived descriptor
+ * held behind the shell's back does not survive that, and -- far worse than
+ * being closed -- the NUMBER can be handed to something else, at which point
+ * this would be writing kernel log records into whatever file the shell put
+ * there. There is no way to tell those two apart from in here.
+ *
+ * So it is opened, written and closed per record, which is exactly what
+ * bootmsg above does and is the pattern that demonstrably kept working through
+ * the whole of that same boot. Two extra syscalls per LINE of console output
+ * (not per write) is not a cost worth a corruption risk. */
 static char kmsglog_line[768];
 static size_t kmsglog_n = 0;
-
-static void kmsglog_setup(void)
-{
-    /* Retried, not latched, for the reason consmirror_setup gives: PID 1's
-     * first lines are printed before `bind '#c' /dev` has happened, and
-     * deciding "off" there would turn this off for the whole boot. */
-    if (++kmsglog_tries > 32) { kmsglog_fd = -1; return; }
-    int r = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-    if (r < 0) return;                          /* no node yet: ask again */
-    kmsglog_fd = r;
-}
+/* Bounded, so a machine with no /dev/kmsg at all does not pay an open(2) on
+ * every console line for ever. Any success resets it, so the early-boot window
+ * before `bind '#c' /dev` -- when there is legitimately nothing to open --
+ * cannot latch the sink off for the rest of the boot. */
+static int kmsglog_fails = 0;
+#define KMSGLOG_MAX_FAILS 64
 
 static void kmsglog_flush(void)
 {
-    if (kmsglog_fd < 0 || kmsglog_n == 0) return;
+    if (kmsglog_n == 0) return;
+    size_t len = kmsglog_n;
+    kmsglog_n = 0;                       /* drop the line whatever happens */
+    if (kmsglog_fails >= KMSGLOG_MAX_FAILS) return;
+    int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) { kmsglog_fails++; return; }
+    kmsglog_fails = 0;
     char rec[832];
-    int n = snprintf(rec, sizeof rec, "<7>cons: %.*s",
-                     (int)kmsglog_n, kmsglog_line);
+    int n = snprintf(rec, sizeof rec, "<7>cons: %.*s", (int)len, kmsglog_line);
     if (n > 0) {
-        ssize_t ignored = write(kmsglog_fd, rec, (size_t)n);
+        ssize_t ignored = write(fd, rec, (size_t)n);
         (void)ignored;
     }
-    kmsglog_n = 0;
+    close(fd);
 }
 
 static void kmsglog_emit(const uint8_t *buf, uint64_t count)
@@ -1285,8 +1300,7 @@ static void consmirror(int fd, const uint8_t *buf, uint64_t count)
 {
     if (count == 0) return;
     if (consmirror_fd == -2) consmirror_setup();
-    if (kmsglog_fd == -2) kmsglog_setup();
-    if (consmirror_fd < 0 && kmsglog_fd < 0) return;
+    if (consmirror_fd < 0 && kmsglog_fails >= KMSGLOG_MAX_FAILS) return;
     struct stat st;
     if (fstat(fd, &st) != 0) return;
     if (!S_ISCHR(st.st_mode) || st.st_rdev != makedev(5, 1)) return;
@@ -1294,8 +1308,7 @@ static void consmirror(int fd, const uint8_t *buf, uint64_t count)
         ssize_t ignored = write(consmirror_fd, buf, (size_t)count);
         (void)ignored;
     }
-    if (kmsglog_fd >= 0)
-        kmsglog_emit(buf, count);
+    kmsglog_emit(buf, count);
 }
 
 /* EVERY DIRECT CONSOLE WRITE IN THIS FILE GOES THROUGH HERE, AND A RED GATE IS
