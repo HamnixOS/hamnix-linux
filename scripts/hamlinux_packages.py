@@ -184,7 +184,16 @@ MOD_CMDS = "insmod lsmod modprobe rmmod".split()
 # an installed machine could never receive a fix to the two commands that turn
 # it off. Same silent shape as the audio note above: nothing failed at build
 # time, the programs simply were not there to update.
-SYS_CMDS = "hlinstall haminstallui nsrun reboot halt poweroff install".split()
+#
+# bootlogd is here for a reason that is the same shape and sharper. It is the
+# program that writes \HAMNIX.LOG onto the boot medium's FAT partition, which is
+# what turns a failed boot on a machine with no serial cable from a photograph
+# of the last forty lines into a file the owner can carry to another computer.
+# A bug in THAT is the one bug a person cannot report, because the thing that
+# would have reported it is the thing that is broken -- so of everything in the
+# image it is among the most important to be able to fix remotely.
+SYS_CMDS = ("hlinstall haminstallui nsrun reboot halt poweroff install "
+            "bootlogd").split()
 
 # xsnarfd is the X clipboard bridge and hamimgscene is the image viewer. Both
 # ship in the image; neither was in the channel until the coverage gate below
