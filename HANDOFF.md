@@ -111,6 +111,21 @@ its base and the tip; that check is the price of a stale base, and it is
 cheaper to just not have one. A second agent hit the same worktree, ran
 `git log -1`, found it, and rebranched — costing nothing.
 
+**`scripts/build_user.sh` IS A SUBSET, NOT A WHOLE-TREE BUILD.** It ends with
+"all 278 Adder programs compiled OK", which reads like the tree compiles. It
+builds an **explicit list**, and that list does **not** include `wsysd` — the
+compositor — nor `hlinstall`, `bootlogd` or `bootsync`. Those live in
+`scripts/hamlinux_image.sh`'s own `APPS` list and are built only by an image
+build. The two lists are largely disjoint. The same file records what that once
+cost: a program dropped into a "(no source)" list while the script said `done`,
+and **every image built after it shipped a desktop with no compositor**.
+
+To compile one of those by hand use `scripts/hamlinux_build.sh <in.ad>
+<out.elf>` — **not** `scripts/adder_cc_llvm_native64.sh`, which links only
+`runtime.S` and fails on them with an undefined syscall stub. That failure is an
+artefact of the wrong linker and not a defect; I hit it twice on `bootsync`
+before getting it right.
+
 **BEFORE YOU RUN A SINGLE GATE, BOOTSTRAP THE COMPILER.** A fresh worktree has
 no `adder` submodule and no `build/cutover/host_ac.elf`, and every
 `.ad`-building gate then fails instantly with "no host_ac.elf" — which looks
