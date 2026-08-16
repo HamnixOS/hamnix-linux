@@ -192,8 +192,22 @@ MOD_CMDS = "insmod lsmod modprobe rmmod".split()
 # A bug in THAT is the one bug a person cannot report, because the thing that
 # would have reported it is the thing that is broken -- so of everything in the
 # image it is among the most important to be able to fix remotely.
+#
+# bootsync is here for the sharpest version of the same argument. It is the ONLY
+# thing on an installed machine that can change what that machine BOOTS: it
+# writes the current bytes of the boot modules into a reservation inside
+# /boot/EFI/BOOT/BOOTX64.EFI, because user/linuxinit.ad loads /etc/modules
+# before the root switch and everything `hpm update` lands on the ext4 root is
+# therefore invisible to the next boot. A machine whose bootsync is broken
+# cannot receive a fix for it through the one path that would matter -- the boot
+# -- so it must be in the channel, and `hpm update` calls it
+# (user/hpm.ad:_sync_boot_image), which means an upgrade of THIS package
+# replaces the very program the transaction is about to run. That is safe for
+# the reason hamnix-init's hook exists: the running binary is replaced on disk
+# and the CURRENT process keeps its own image, and bootsync is spawned after all
+# the file movement is finished.
 SYS_CMDS = ("hlinstall haminstallui nsrun reboot halt poweroff install "
-            "bootlogd").split()
+            "bootlogd bootsync").split()
 
 # xsnarfd is the X clipboard bridge and hamimgscene is the image viewer. Both
 # ship in the image; neither was in the channel until the coverage gate below

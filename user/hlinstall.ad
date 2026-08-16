@@ -887,6 +887,29 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
               cast[Ptr[char]]("/n/esp/vmlinuz"))
     copy_file(cast[Ptr[char]]("/boot/initramfs.cpio.gz"),
               cast[Ptr[char]]("/n/esp/initramfs.cpio.gz"))
+    # THE FILE THAT DECIDES WHETHER THIS MACHINE CAN EVER BE UPDATED.
+    #
+    # The UKI above is copied byte for byte and cannot be rewritten from here.
+    # That is fine for the kernel and the command line and it is NOT fine for
+    # the initramfs: user/linuxinit.ad loads /etc/modules before the root
+    # switch, so the drivers this machine boots with are the ones sealed in
+    # that PE, and `hpm update` upgrading /lib/modules on the ext4 root changes
+    # nothing about any boot. user/bootsync.ad closes that, by writing an
+    # overlay archive into a reservation scripts/hamlinux_disk.sh left inside
+    # the .initrd section -- and it can only find the reservation if it knows
+    # where the shipped archive ENDS. That length, and the boot module list, are
+    # in /boot/UKI.MAP.
+    #
+    # A FAILURE HERE IS NOT FATAL AND MUST NOT BE. A machine without this file
+    # installs, boots and runs; bootsync refuses by name and says why, which is
+    # the honest outcome. A machine that could not be installed because a
+    # side file was missing is a worse one.
+    if copy_file(cast[Ptr[char]]("/boot/UKI.MAP"),
+                 cast[Ptr[char]]("/n/esp/UKI.MAP")) != 0:
+        puts(1, "hlinstall: NOTE: this medium carries no /boot/UKI.MAP, so the\n")
+        puts(1, "hlinstall:       installed machine's boot modules cannot be\n")
+        puts(1, "hlinstall:       refreshed by `bootsync` after an update.\n")
+        puts(1, "hlinstall:       Everything else about the install is normal.\n")
 
     step(cast[Ptr[uint8]]("5/5  the installed system's boot rc"))
     if write_machine_rc_boot() != 0:

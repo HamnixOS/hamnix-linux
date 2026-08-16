@@ -125,6 +125,14 @@ APPS=(
     # user/linux-syscalls.c:consmirror -- onto it every couple of seconds. Its
     # header is where the whole arrangement is argued.
     bootlogd
+    # THE ONLY THING IN THIS TREE THAT CAN CHANGE WHAT AN INSTALLED MACHINE
+    # BOOTS WITH, and it is here for the same reason bootlogd is: a machine
+    # whose boot image is stale cannot install the program that fixes it from
+    # a driver package, because the driver package is exactly what it cannot
+    # boot. `hpm update` upgrades /lib/modules on the ext4 root; linuxinit
+    # loads modules out of the INITRAMFS before the root switch, so until this
+    # runs the upgrade has no effect on any boot. Its header is the argument.
+    bootsync
     # The clipboard bridge. It is here rather than among the GUI apps because
     # it draws nothing: it is an X CLIENT that owns CLIPBOARD and PRIMARY on
     # the Xwayland inside a distribution namespace and mirrors both against
@@ -1127,6 +1135,14 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
     # boots looking for a partition that only exists on the build host.
     [ -f build/image/disk/root.partuuid ] \
         && cp build/image/disk/root.partuuid "$ROOT/boot/root.partuuid"
+    # THE OTHER SIDE FILE, and without it an installed machine can never change
+    # what it boots with. It names the length of the archive inside that UKI and
+    # the boot module list that archive holds; user/bootsync.ad refuses to touch
+    # the boot image without it, because guessing either number means writing
+    # over the initramfs instead of after it. user/hlinstall.ad copies it onto
+    # the target's ESP beside BOOTX64.EFI.
+    [ -f build/image/disk/UKI.MAP ] \
+        && cp build/image/disk/UKI.MAP "$ROOT/boot/UKI.MAP"
     cp -L "$(ls -1 /boot/vmlinuz-* | sort -V | tail -1)" "$ROOT/boot/vmlinuz"
     # The initramfs cannot contain the copy of itself we are about to build,
     # so the PREVIOUS one is staged.  Building twice is what makes the staged
