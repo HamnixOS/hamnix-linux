@@ -31,8 +31,11 @@ machine booting exactly as it was installed** — which is the same outcome as
 never having run it, and is the only acceptable failure mode for something with
 no shell to fix it from. Measured on an installed disk over eleven UEFI boots:
 the running kernel's module goes from the installed-day one to the updated one,
-and a machine SIGKILLed 4.2 MB into the write boots normally on the old one and
-succeeds on a retry. `tests/linux/bootsync_installed.sh`, 28 PASS / 0 FAIL.
+and a machine SIGKILLed 6.0 MB into the write boots normally on the old one and
+succeeds on a retry. `tests/linux/bootsync_installed.sh`, **33 PASS / 0 FAIL**.
+And the whole loop the way you will actually live it — live USB, install onto a
+blank NVMe, pull the stick, boot, `hpm update`, reboot to the desktop —
+`tests/linux/install_from_usb.sh`, **75 PASS / 0 FAIL**.
 
 **This needs new media.** The reservation is created by
 `scripts/hamlinux_disk.sh`, so a machine installed from a 1.0.25 or earlier

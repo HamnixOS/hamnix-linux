@@ -153,6 +153,31 @@ and before the ext4 root is — exactly the state `hpm update` leaves a machine 
 | retry | `bootsync` commits, and the reboot after it is 77824 |
 | a 1 MiB reservation | refuses by name; the boot image is byte-identical before and after; the machine boots unchanged |
 
+### The whole loop, the way the owner will live it
+
+`tests/linux/install_from_usb.sh` — **75 PASS / 0 FAIL**. Live USB → install
+onto a blank NVMe → detach the stick → boot the installed machine → `hpm update`
+over the network → reboot. Twelve of those assertions are new here, and they are
+the only place `user/hlinstall.ad` runs at all:
+
+* the installer copied `/boot/UKI.MAP` onto the target's ESP — base 30 417 324,
+  65 boot modules — and that base equals the copied PE's `.initrd VirtualSize`,
+  so the map and the image are provably the same build;
+* the installed boot image carries a 25 165 908-byte reservation;
+* `hpm` ran the refresh after upgrading `hamnix-drivers-base` and
+  `hamnix-drivers-hw` 1.0.22 → 1.0.25; `bootsync` read back and committed
+  16 194 480 bytes of overlay;
+* the boot image **on the target**, read with the guest dead, went
+  `VirtualSize 30417324 → 46611804` with `SizeOfRawData` untouched;
+* and boot 3 reached `rc.boot: up` with **no `Initramfs unpacking failed`** and
+  the same 65 boot modules.
+
+What that run does **not** show is a change in the running kernel's module
+*bytes*: the driver packages restore the same files the medium already had, so
+there is nothing there to tell apart. That assertion is
+`bootsync_installed.sh`'s, above, and it needs a module deliberately made
+different.
+
 Two defects were found this way and are recorded where they happened:
 
 * every section offset was written as a **file** offset, putting 16 MB into the

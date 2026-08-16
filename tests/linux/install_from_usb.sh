@@ -91,6 +91,15 @@
 # control, HAMLINUX_INSTUSB_NO_DB=1, is 38 PASSED, 0 FAILED with every database
 # assertion inverted. All three were run on this tree.
 #
+# UPDATED: 75 PASSED, 0 FAILED on a full run against a locally built 1.0.25
+# channel, with the TWELVE boot-image assertions added (the UKI.MAP copy, the
+# reservation in the copied PE, hpm's boot-image refresh, bootsync's commit and
+# read-back, the target's grown VirtualSize with an untouched SizeOfRawData, and
+# boot 3's clean initramfs unpack). The twelve are the delta this file's own
+# header used to name as an open hole; the rest of the difference from 53 is not
+# mine and was not separately re-measured, so treat 63 as arithmetic rather than
+# a number anybody ran.
+#
 # THE LAST RED IS CLOSED, AND IT WAS THIS: `hpm update` was a NO-OP on a freshly
 # installed machine. The index authenticated over TLS and then nothing upgraded,
 # because /var/lib/hpm was an empty directory -- hpm had no record of what is on
