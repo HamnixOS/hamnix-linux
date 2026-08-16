@@ -2,6 +2,7 @@
 # Read the finished medium and prove it carries what it must.
 # Nothing is mounted: sfdisk/dd for geometry, debugfs for ext4, mtools for FAT.
 set -uo pipefail
+PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="${1:?usage: verify_medium.sh <img>}"
 W="$(dirname "$IMG")"
 PART="$W/.verify-part.img"
@@ -187,31 +188,44 @@ done
 say "the installed package database"
 fs_cat "$PART" /var/lib/hpm/installed.json > "$W/.verify-installed.json" 2>/dev/null
 if [ -s "$W/.verify-installed.json" ]; then
-    python3 - "$W/.verify-installed.json" <<'PYEOF'
+    # THE VERDICTS COME BACK TAGGED AND THE SHELL COUNTS THEM. This block used
+    # to print its own "  PASS  "/"  FAIL  " lines from inside python, where
+    # ok()/bad() cannot reach, so eight assertions -- including "the database
+    # does NOT record hpm", the exact thing this section exists to catch --
+    # could fail under a summary that said "0 FAILED". Reading through a
+    # process substitution rather than a pipe keeps the counters in THIS shell.
+    while IFS= read -r line; do
+        case "$line" in
+            "@OK "*)  ok  "${line#@OK }"  ;;
+            "@BAD "*) bad "${line#@BAD }" ;;
+            *)        info "${line#@INFO }" ;;
+        esac
+    done < <(python3 - "$W/.verify-installed.json" <<'PYEOF'
 import json,sys
 d=json.load(open(sys.argv[1]))
 pk=d.get("packages", d)
 if isinstance(pk, dict): items=pk
 else: items={p["name"]:p for p in pk}
-print("        %d packages recorded" % len(items))
+print("@INFO %d packages recorded" % len(items))
 for n in ("hamnix-drivers-base","hamnix-drivers-hw","hpm","hamnix-install","hamnix-init"):
     if n in items:
         v=items[n].get("version","?") if isinstance(items[n],dict) else "?"
         nf=len(items[n].get("files",[])) if isinstance(items[n],dict) else 0
-        print("  PASS  the database records %s at %s (%d files)" % (n,v,nf))
+        print("@OK the database records %s at %s (%d files)" % (n,v,nf))
     else:
-        print("  FAIL  the database does NOT record %s" % n)
+        print("@BAD the database does NOT record %s" % n)
 # bootsync and bootlogd ship inside a package (SYS_CMDS), so what matters is
 # that SOME recorded package owns them -- that is what makes them upgradable.
 for path in ("bin/bootsync","bin/bootlogd","bin/hpm"):
     own=[n for n,p in items.items() if isinstance(p,dict) and path in p.get("files",[])]
     if own:
-        print("  PASS  %s is owned by the recorded package %s -- `hpm update` can replace it" % (path, ",".join(own)))
+        print("@OK %s is owned by the recorded package %s -- `hpm update` can replace it" % (path, ",".join(own)))
     else:
-        print("  FAIL  %s is owned by NO recorded package -- it can never be updated" % path)
+        print("@BAD %s is owned by NO recorded package -- it can never be updated" % path)
 vers = sorted({p.get("version") for p in items.values() if isinstance(p,dict)})
-print("        every recorded version: %s" % ", ".join(vers))
+print("@INFO every recorded version: %s" % ", ".join(vers))
 PYEOF
+    )
 else
     bad "no /var/lib/hpm/installed.json could be read -- hpm update on the installed machine would be a no-op forever"
 fi
@@ -232,35 +246,49 @@ if [ -s "$W/.verify-hpm" ]; then
     # AND IT IS THE CHANNEL'S BYTES, not merely a binary with the right string.
     CT="$(ls build/repo/linux/packages/hpm-*.tar.gz 2>/dev/null | head -1)"
     if [ -n "$CT" ]; then
-        python3 - "$CT" "$W/.verify-hpm" <<'PYEOF'
+        # TWO DEFECTS LIVED HERE AND BOTH ARE FIXED. (1) This block printed its
+        # own "  PASS  "/"  FAIL  " lines and never touched the counters, so a
+        # real FAIL was printed two lines above a summary that said "0 FAILED".
+        # It now prints only evidence and EXITS with a status; the shell calls
+        # ok/bad, so the summary counts it. (2) The path-mangling tag was the
+        # literal worktree name of the agent who wrote it, so on every LATER
+        # build the channel's own symbols no longer matched, the explanation
+        # stopped applying, and the check failed for the one reason it exists
+        # to excuse. The tag is now derived from the tree being built.
+        MANGLE_TAG="$(basename "$PROJ_ROOT" | tr -c 'A-Za-z0-9' '_')"
+        if python3 - "$CT" "$W/.verify-hpm" "$MANGLE_TAG" <<'PYEOF'
 import hashlib, sys, tarfile
 t = tarfile.open(sys.argv[1])
 m = [n for n in t.getnames() if n.endswith("/files/bin/hpm")]
 if not m:
-    print("  FAIL  the channel's hpm tarball has no files/bin/hpm"); raise SystemExit
+    print("        the channel's hpm tarball has no files/bin/hpm")
+    raise SystemExit(1)
 cd = t.extractfile(m[0]).read()
 im = open(sys.argv[2], "rb").read()
 a, b = hashlib.sha256(cd).hexdigest(), hashlib.sha256(im).hexdigest()
 if a == b:
-    print("  PASS  /bin/hpm on the medium is byte-for-byte the channel's hpm (%s)" % a[:16])
-else:
-    # NOT A DEFECT IN THIS MEDIUM, and it is checked rather than asserted.
-    # scripts/hamlinux_packages.py hands hamlinux_build.sh an ABSOLUTE source
-    # path and scripts/hamlinux_image.sh a RELATIVE one, and the Adder front
-    # end mangles symbol names by the path it compiled (that script's own
-    # comment says so). So the channel copy carries the build worktree's path
-    # inside its symbols and the image copy does not. Both must carry the
-    # 1.0.25 long-name fix; that is the thing that matters.
-    tag = b"agent_a33312e0ae9f67177"
-    print("        image %d bytes (%s), channel %d bytes (%s)" % (len(im), b[:16], len(cd), a[:16]))
-    print("        path-mangled symbols: image %d, channel %d" % (im.count(tag), cd.count(tag)))
-    both = (b"tar entry name over 255 bytes" in cd) and (b"tar entry name over 255 bytes" in im)
-    if im.count(tag) == 0 and cd.count(tag) > 0 and both:
-        print("  PASS  the two hpm binaries differ only by the build-path symbol mangling "
-              "(a known, pre-existing property of the two build lanes); BOTH carry the 1.0.25 long-name fix")
-    else:
-        print("  FAIL  /bin/hpm differs from the channel's for a reason the mangling does not explain")
+    print("        byte-for-byte identical (%s)" % a[:16])
+    raise SystemExit(0)
+# NOT A DEFECT IN THIS MEDIUM, and it is checked rather than asserted.
+# scripts/hamlinux_packages.py hands hamlinux_build.sh an ABSOLUTE source
+# path and scripts/hamlinux_image.sh a RELATIVE one, and the Adder front
+# end mangles symbol names by the path it compiled (that script's own
+# comment says so). So the channel copy carries the build worktree's path
+# inside its symbols and the image copy does not. Both must carry the
+# 1.0.25 long-name fix; that is the thing that matters.
+tag = sys.argv[3].encode()
+print("        image %d bytes (%s), channel %d bytes (%s)" % (len(im), b[:16], len(cd), a[:16]))
+print("        path-mangled symbols (%s): image %d, channel %d"
+      % (sys.argv[3], im.count(tag), cd.count(tag)))
+both = (b"tar entry name over 255 bytes" in cd) and (b"tar entry name over 255 bytes" in im)
+print("        both carry the 1.0.25 long-name fix: %s" % ("yes" if both else "NO"))
+raise SystemExit(0 if (im.count(tag) == 0 and cd.count(tag) > 0 and both) else 1)
 PYEOF
+        then
+            ok "/bin/hpm on the medium is the channel's hpm -- identical, or differing ONLY by the build-path symbol mangling of the two build lanes, with BOTH carrying the 1.0.25 long-name fix"
+        else
+            bad "/bin/hpm differs from the channel's for a reason the mangling does not explain"
+        fi
     else
         info "(no built hpm tarball under build/repo/linux/packages to compare against)"
     fi
@@ -269,5 +297,11 @@ else
 fi
 
 echo
-echo "SUMMARY: $PASS PASSED, $FAIL FAILED (plus the database and hpm-bytes lines above)"
+# EVERY PASS/FAIL LINE THIS SCRIPT PRINTS IS COUNTED HERE. It did not used to
+# be: the package-database block and the hpm-bytes comparison printed verdicts
+# from inside python, where the counters are unreachable, and the summary
+# carried a parenthetical asking the reader to also scroll up. A summary that
+# has to be qualified is not a summary, so both blocks now report through
+# ok()/bad() and the parenthetical is gone.
+echo "SUMMARY: $PASS PASSED, $FAIL FAILED (every PASS/FAIL line above is counted here)"
 rm -f "$PART"
