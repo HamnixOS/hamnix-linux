@@ -107,8 +107,21 @@ extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
 
 SEEK_SET: int32 = 0
 
-UKI_PATH:  Ptr[char] = cast[Ptr[char]]("/boot/EFI/BOOT/BOOTX64.EFI")
-MAP_PATH:  Ptr[char] = cast[Ptr[char]]("/boot/UKI.MAP")
+# THE TWO PATHS, AS FUNCTIONS RATHER THAN GLOBALS, AND THAT COST A BOOT TO
+# FIND. They were `UKI_PATH: Ptr[char] = cast[Ptr[char]]("/boot/...")` at module
+# scope, and on a real installed disk every open through them failed with the
+# program's own "cannot read /boot/EFI/BOOT/BOOTX64.EFI" while `cksum
+# </boot/EFI/BOOT/BOOTX64.EFI` typed at the same shell in the same boot read all
+# 67 787 264 bytes of it. A string literal in a GLOBAL INITIALISER does not
+# survive to runtime here; one in an expression does. The failure was
+# indistinguishable from a missing ESP -- which is exactly the kind of
+# success-shaped wrong answer that would have had somebody looking at the mount.
+def uki_path() -> Ptr[char]:
+    return cast[Ptr[char]]("/boot/EFI/BOOT/BOOTX64.EFI")
+
+
+def map_path() -> Ptr[char]:
+    return cast[Ptr[char]]("/boot/UKI.MAP")
 
 # /boot/UKI.MAP: first line the decimal BASE (the length of the archive the
 # image shipped, which is where the overlay goes), then one absolute .ko path
@@ -331,6 +344,50 @@ def set_vsize(wfd: int32, v: uint64) -> int32:
 zeros: Array[4, uint8]
 
 
+# EVERY OFFSET BELOW IS RELATIVE TO THE SECTION, AND pe_rawptr IS ADDED AT THE
+# I/O CALL. It was not, once, and the result is worth writing down because it
+# was the most dangerous shape of wrong answer this whole design exists to keep
+# out. The overlay went to file offset BASE instead of PointerToRawData + BASE,
+# which is 18 MB INTO the live compressed archive, and the machine
+#
+#   * BOOTED,
+#   * loaded all 64 modules,
+#   * ran the boot rc, brought up the network and reached the desktop,
+#
+# with `Initramfs unpacking failed: junk within compressed archive` sitting at
+# t=1.17 s in a kernel log nobody was reading. The kernel had unpacked
+# everything up to the corruption and everything needed happened to be before
+# it. A corrupted boot image that works is worse than one that does not, so
+# tests/linux/bootsync_installed.sh asserts that line is ABSENT from the boot
+# AFTER a sync, and check_archive_start below refuses to write at all unless
+# PointerToRawData really does point at the start of an archive.
+
+
+# Does the .initrd section begin with something that is actually an archive?
+# gzip (1f 8b) is what scripts/hamlinux_disk.sh puts there; a bare "070701" is
+# accepted too, because the loader takes an uncompressed first segment and a
+# future image might ship one. Anything else means the geometry read out of the
+# PE is not what this program thinks it is, and the correct response to that is
+# to write nothing.
+def check_archive_start(rufd: int32) -> int32:
+    m: Array[8, uint8]
+    if read_at(rufd, pe_rawptr, &m[0], 6) != 0:
+        why(cast[Ptr[uint8]]("read the start of .initrd"))
+        return -1
+    if m[0] == 31 and m[1] == 139:                       # 1f 8b -- gzip
+        return 0
+    if m[0] == 48 and m[1] == 55 and m[2] == 48 and m[3] == 55 \
+       and m[4] == 48 and m[5] == 49:                    # "070701" -- newc
+        return 0
+    puts(2, "bootsync: the .initrd section does not begin with an archive.\n")
+    puts(2, "bootsync: PointerToRawData is not where this program thinks it "
+            "is, and\n")
+    puts(2, "bootsync: writing on that assumption would land inside the boot "
+            "image.\n")
+    puts(2, "bootsync: Refusing. Nothing was changed.\n")
+    return -1
+
+
 # Copy one file's bytes into the reservation at `at`, preceded by its cpio
 # header. Returns the new offset, or 0 on failure (0 can never be a valid
 # result: `at` starts at BASE, which is never zero).
@@ -348,7 +405,7 @@ def emit_file(wfd: int32, at: uint64, path: Ptr[uint8], plen: uint64) -> uint64:
     # The cpio name is the path WITHOUT its leading '/': archives are relative
     # to the root they unpack into.
     hn: uint64 = cpio_header(&path[1], plen - 1, fsize, 33188, at)
-    if write_at(wfd, at, &hdrbuf[0], hn) != 0:
+    if write_at(wfd, pe_rawptr + at, &hdrbuf[0], hn) != 0:
         sys_close(rfd)
         why(cast[Ptr[uint8]]("write a cpio header"))
         return 0
@@ -363,7 +420,7 @@ def emit_file(wfd: int32, at: uint64, path: Ptr[uint8], plen: uint64) -> uint64:
             sys_close(rfd)
             why(path)
             return 0
-        if write_at(wfd, p, &iobuf[0], cast[uint64](k)) != 0:
+        if write_at(wfd, pe_rawptr + p, &iobuf[0], cast[uint64](k)) != 0:
             sys_close(rfd)
             why(cast[Ptr[uint8]]("write module bytes"))
             return 0
@@ -372,7 +429,7 @@ def emit_file(wfd: int32, at: uint64, path: Ptr[uint8], plen: uint64) -> uint64:
     sys_close(rfd)
     pad: uint64 = (4 - (p % 4)) % 4
     if pad > 0:
-        if write_at(wfd, p, &zeros[0], pad) != 0:
+        if write_at(wfd, pe_rawptr + p, &zeros[0], pad) != 0:
             why(cast[Ptr[uint8]]("write cpio padding"))
             return 0
         p = p + pad
@@ -396,7 +453,7 @@ def verify_file(rufd: int32, at: uint64, path: Ptr[uint8],
         return 0
     fsize: uint64 = cast[uint64](sz)
     hn: uint64 = cpio_header(&path[1], plen - 1, fsize, 33188, at)
-    if read_at(rufd, at, &vbuf[0], hn) != 0:
+    if read_at(rufd, pe_rawptr + at, &vbuf[0], hn) != 0:
         sys_close(rfd)
         why(cast[Ptr[uint8]]("read back a cpio header"))
         return 0
@@ -419,7 +476,7 @@ def verify_file(rufd: int32, at: uint64, path: Ptr[uint8],
         if k <= 0:
             sys_close(rfd)
             return 0
-        if read_at(rufd, p, &vbuf[0], cast[uint64](k)) != 0:
+        if read_at(rufd, pe_rawptr + p, &vbuf[0], cast[uint64](k)) != 0:
             sys_close(rfd)
             why(cast[Ptr[uint8]]("read back module bytes"))
             return 0
@@ -441,7 +498,7 @@ def verify_file(rufd: int32, at: uint64, path: Ptr[uint8],
 
 # --- /boot/UKI.MAP --------------------------------------------------------
 def read_map() -> int32:
-    fd: int32 = sys_open(MAP_PATH)
+    fd: int32 = sys_open(map_path())
     if fd < 0:
         puts(2, "bootsync: no /boot/UKI.MAP on this machine's ESP.\n")
         puts(2, "bootsync: that file is written by scripts/hamlinux_disk.sh "
@@ -548,7 +605,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             return 2
         ai = ai + 1
 
-    rufd: int32 = sys_open(UKI_PATH)
+    rufd: int32 = sys_open(uki_path())
     if rufd < 0:
         puts(2, "bootsync: cannot read /boot/EFI/BOOT/BOOTX64.EFI.\n")
         puts(2, "bootsync: on an installed machine the ESP is bound at /boot "
@@ -562,6 +619,10 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         show_geometry()
         sys_close(rufd)
         return 0
+
+    if check_archive_start(rufd) != 0:
+        sys_close(rufd)
+        return 1
 
     if read_map() != 0:
         sys_close(rufd)
@@ -655,7 +716,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         sys_close(rufd)
         return 0
 
-    wfd: int32 = sys_open_sync(UKI_PATH)
+    wfd: int32 = sys_open_sync(uki_path())
     if wfd < 0:
         puts(2, "bootsync: cannot open the boot image for writing.\n")
         puts(2, "bootsync: nothing was changed.\n")
@@ -688,7 +749,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             sys_close(rufd)
             return 1
     tn2: uint64 = cpio_header(cast[Ptr[uint8]]("TRAILER!!!"), 10, 0, 0, 0)
-    if write_at(wfd, at, &hdrbuf[0], tn2) != 0:
+    if write_at(wfd, pe_rawptr + at, &hdrbuf[0], tn2) != 0:
         why(cast[Ptr[uint8]]("write the cpio trailer"))
         sys_close(wfd)
         sys_close(rufd)
