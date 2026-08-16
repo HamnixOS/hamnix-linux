@@ -220,6 +220,32 @@ fs_cat()  { debugfs -R "cat $2" "$1" 2>/dev/null; }
 fs_ls()   { debugfs -R "ls $2" "$1" 2>/dev/null; }
 cleanup_mounts() { rm -f "$PART"; }
 
+# uki_initrd_geom <file> -> "<VirtualSize> <SizeOfRawData> <PointerToRawData>"
+# of the .initrd section of a unified kernel image. VirtualSize is the length
+# the EFI stub hands the kernel -- the field user/bootsync.ad moves -- and
+# SizeOfRawData is the ceiling scripts/hamlinux_disk.sh reserved. Read out of
+# the PE, so it is a statement about the file the firmware will run rather than
+# about anything a build log said.
+uki_initrd_geom() {
+    python3 - "$1" 2>/dev/null <<'PYEOF'
+import struct, sys
+b = open(sys.argv[1], "rb").read()
+lfa = struct.unpack_from("<I", b, 0x3C)[0]
+if b[lfa:lfa + 4] != b"PE\0\0":
+    raise SystemExit(1)
+n = struct.unpack_from("<H", b, lfa + 6)[0]
+o = struct.unpack_from("<H", b, lfa + 20)[0]
+for i in range(n):
+    s = lfa + 24 + o + i * 40
+    if b[s:s + 8].rstrip(b"\0") == b".initrd":
+        vs, va, raw, ptr = struct.unpack_from("<IIII", b, s + 8)
+        print(vs, raw, ptr)
+        break
+else:
+    raise SystemExit(1)
+PYEOF
+}
+
 # =========================================================================
 # 0. THE ARTEFACTS.
 # =========================================================================
@@ -928,6 +954,39 @@ if [ "${NPARTS:-0}" -ge 2 ]; then
         head -5 "$WORK/target-esp.txt" | sed 's/^/        /'
     fi
 
+    # AND THE SIDE FILE WITHOUT WHICH THIS MACHINE COULD NEVER CHANGE WHAT IT
+    # BOOTS. The hole named at the top of this file -- the UKI carries its own
+    # copies of the boot modules and no package updates it -- is closed by
+    # user/bootsync.ad, which writes the root's current bytes into a
+    # reservation inside that PE. It can only find the reservation if it knows
+    # where the SHIPPED archive ends, and that length is in /boot/UKI.MAP.
+    # user/hlinstall.ad copies it onto the target beside BOOTX64.EFI, and a
+    # medium that did not carry one installs a machine that boots forever on
+    # the drivers it was installed with. This is the only place that copy is
+    # exercised.
+    if mcopy -n -o -i "$NVME@@$TGT_ESP_OFF" ::/UKI.MAP "$WORK/target-uki.map" 2>/dev/null \
+       && [ -s "$WORK/target-uki.map" ]; then
+        TGT_MAP_BASE="$(head -1 "$WORK/target-uki.map" | tr -d '\r')"
+        TGT_MAP_N="$(grep -c '^/' "$WORK/target-uki.map")"
+        ok "the installer copied /boot/UKI.MAP onto the target's ESP (base $TGT_MAP_BASE, $TGT_MAP_N boot modules)"
+    else
+        bad "the target's ESP has no UKI.MAP -- this machine's boot modules can never be refreshed by an update"
+        TGT_MAP_BASE=""
+    fi
+    # The reservation itself, read out of the copied PE rather than assumed
+    # from the build log: this is the file the FIRMWARE will run.
+    if mcopy -n -o -i "$NVME@@$TGT_ESP_OFF" ::/EFI/BOOT/BOOTX64.EFI "$WORK/target-uki.efi" 2>/dev/null; then
+        read -r TGT_VS0 TGT_RAW0 TGT_PTR0 <<<"$(uki_initrd_geom "$WORK/target-uki.efi")"
+        if [ -n "${TGT_VS0:-}" ] && [ "$((TGT_RAW0 - TGT_VS0))" -gt 0 ]; then
+            ok "the installed boot image has a $((TGT_RAW0 - TGT_VS0))-byte reservation in .initrd for bootsync to write into"
+        else
+            bad "the installed boot image has NO reservation in .initrd -- bootsync will refuse on this machine"
+        fi
+        [ -n "${TGT_MAP_BASE:-}" ] && [ "$TGT_MAP_BASE" = "${TGT_VS0:-}" ] \
+            && ok "UKI.MAP's base matches the copied PE's .initrd VirtualSize ($TGT_VS0) -- the map and the image are the same build" \
+            || bad "UKI.MAP says base=${TGT_MAP_BASE:-none} and the copied PE says ${TGT_VS0:-none}"
+    fi
+
     # THE ROOT, AND THE ONE FILE THAT TELLS AN INSTALLED SYSTEM FROM THE LIVE
     # MEDIUM. See the header: the `(installed)` log line does NOT.
     if carve "$NVME" 2 && debugfs -R "ls /" "$PART" >/dev/null 2>&1; then
@@ -1042,6 +1101,39 @@ elif grep -aq 'hpm: update done' "$L2"; then
     grep -aq 'modules.dep' "$L2" \
         && ok "boot 2: a driver package's install hook spoke about modules.dep -- $(grep -a 'modules.dep' "$L2" | head -1 | tr -d '\r' | cut -c1-90)" \
         || bad "boot 2: neither driver package's install hook said anything about modules.dep"
+    # AND THE HALF THAT IS NOT A PACKAGE AT ALL. Everything above moves files on
+    # the ext4 root. user/linuxinit.ad loads /etc/modules BEFORE the root switch,
+    # so none of it reaches a boot -- the hole this file's own header names, two
+    # sections up, when it says the mangled modules cannot stop the machine
+    # booting. user/hpm.ad:_sync_boot_image runs bootsync once at the end of the
+    # transaction; it is the only thing on this machine that can change what it
+    # boots with.
+    grep -aq 'hpm: refreshing the boot image' "$L2" \
+        && ok "boot 2: hpm ran the boot-image refresh after the transaction" \
+        || bad "boot 2: hpm never refreshed the boot image -- the upgraded drivers reach modprobe and NOT the next boot"
+    if grep -aq 'bootsync: committed' "$L2"; then
+        ok "boot 2: bootsync committed -- $(grep -a 'bootsync: .* boot modules,' "$L2" | head -1 | tr -d '\r')"
+    elif grep -aq 'bootsync:' "$L2"; then
+        bad "boot 2: bootsync did not commit: $(grep -a 'bootsync:' "$L2" | head -2 | tr -d '\r' | tr '\n' ' ')"
+    else
+        bad "boot 2: bootsync said nothing at all"
+    fi
+    grep -aq 'bootsync: .* modules verified in the boot image' "$L2" \
+        && ok "boot 2: it read the overlay back against the files on the root before moving the length field" \
+        || bad "boot 2: bootsync committed without a read-back"
+    # THE MEDIUM, NOT THE LOG. The boot image is pulled off the target's ESP
+    # with the guest dead and its .initrd re-read: the field must have moved,
+    # and it must still be inside the reservation.
+    if [ -n "${TGT_VS0:-}" ] \
+       && mcopy -n -o -i "$NVME@@$TGT_ESP_OFF" ::/EFI/BOOT/BOOTX64.EFI "$WORK/target-uki-after.efi" 2>/dev/null; then
+        read -r TGT_VS1 TGT_RAW1 _ <<<"$(uki_initrd_geom "$WORK/target-uki-after.efi")"
+        [ "${TGT_VS1:-0}" -gt "$TGT_VS0" ] \
+            && ok "the boot image ON THE TARGET grew by $((TGT_VS1 - TGT_VS0)) bytes of overlay (VirtualSize $TGT_VS0 -> $TGT_VS1)" \
+            || bad "the boot image on the target is unchanged: VirtualSize is still ${TGT_VS1:-?}"
+        [ "${TGT_RAW1:-0}" = "$TGT_RAW0" ] \
+            && ok "and SizeOfRawData is untouched -- the file's length never changed, so no FAT cluster was allocated" \
+            || bad "SizeOfRawData moved: $TGT_RAW0 -> ${TGT_RAW1:-?}"
+    fi
 elif grep -aq 'no packages installed; nothing to update' "$L2"; then
     # SAY WHICH KIND OF NOTHING. The index authenticated and 126 packages came
     # down, so the network, the TLS and the shipped trust root are all fine --
@@ -1089,6 +1181,20 @@ grep -aq 'rc.boot: hamnix-linux (installed)' "$L3" \
 grep -aq 'rc.boot: up' "$L3" \
     && ok "boot 3: it went all the way through the desktop rc to 'rc.boot: up' AFTER the update" \
     || bad "boot 3: the updated machine did not finish its boot"
+# THE BOOT THAT RAN THE REWRITTEN IMAGE. A boot image whose archive is damaged
+# does not necessarily fail to boot -- measured: a bootsync that wrote 16 MB
+# into the middle of the live archive produced a machine that came up, loaded
+# every module and reached the desktop, with this line at t=1.17s in a log
+# nobody was reading. It is the difference between a machine that works and one
+# that is one unlucky file away from not working.
+grep -aq 'Initramfs unpacking failed' "$L3" \
+    && bad "boot 3: THE KERNEL COULD NOT UNPACK THE WHOLE INITRAMFS -- the rewritten boot image is damaged, and this boot only LOOKED fine" \
+    || ok "boot 3: no 'Initramfs unpacking failed' -- the rewritten boot image unpacked completely"
+B2_MODS="$(grep -ao 'loaded [0-9]* kernel modules' "$L2" | head -1)"
+B3_MODS="$(grep -ao 'loaded [0-9]* kernel modules' "$L3" | head -1)"
+[ -n "$B3_MODS" ] && [ "$B2_MODS" = "$B3_MODS" ] \
+    && ok "boot 3: the same boot module count as before the refresh ($B3_MODS) -- nothing was lost from the boot set" \
+    || bad "boot 3: the boot module count changed across the refresh: '$B2_MODS' -> '$B3_MODS'"
 
 # THE COMPARISON THAT MATTERS: the same package list, after a power cycle. A
 # version that only ever existed in boot 2's RAM cannot appear here.
