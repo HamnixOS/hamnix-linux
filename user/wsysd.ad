@@ -182,6 +182,9 @@ extern def hamfb_frame_us() -> int32
 extern def hamfb_attach_scanout(dmabuf_fd: int32, w: uint32, h: uint32,
                                 pitch: uint32) -> int32
 extern def hamfb_probe_mode(w: Ptr[uint32], h: Ptr[uint32]) -> int32
+# An absolute axis's own range and the device's own statement of what kind of
+# pointing device it is. See the long note in user/linux-syscalls.c.
+extern def hamin_abs_probe(fd: int32, out: Ptr[int32]) -> int32
 # glibc's own getenv. This lane links glibc dynamically (HANDOFF §7.4), so the
 # environment is right there and needs no syscall of its own; the only two
 # variables read here are the backend overrides.
@@ -497,6 +500,47 @@ MAX_INPUT: uint64 = 12
 in_fd:   Array[12, int32]
 n_input: uint64 = 0
 evbuf:   Array[2400, uint8]            # 100 events per read
+
+# --- ABSOLUTE POINTING DEVICES, one row per open input node ----------
+#
+# A RELATIVE device (a mouse, the ThinkPad TrackPoint) says "two units left";
+# an ABSOLUTE device (a touchscreen, a touchpad) says "the finger is at 4700",
+# and 4700 means nothing at all until you know the axis's range. That range is
+# a property of the DEVICE and is read from it (hamin_abs_probe -> EVIOCGABS).
+#
+# The default below is the range QEMU's virtio-tablet and usb-tablet
+# advertise, treated as a touchscreen, because that is what this compositor
+# assumed for every absolute device before it learned to ask -- so a node that
+# cannot be probed (a file of evdev records, which is what every offscreen
+# gate feeds it) behaves exactly as it did. HAMWSYSD_ABS overrides it; the
+# device overrides both.
+in_abs:    Array[12, int32]            # 1 = usable absolute X/Y axes
+in_minx:   Array[12, int32]
+in_maxx:   Array[12, int32]
+in_miny:   Array[12, int32]
+in_maxy:   Array[12, int32]
+# 1 = INPUT_PROP_DIRECT, a TOUCHSCREEN: the finger is on the pixel, so the
+# cursor JUMPS to where it was touched. 0 = INPUT_PROP_POINTER, a TOUCHPAD:
+# the surface is not the screen, so a drag MOVES the cursor from wherever it
+# already is. Nothing else can tell these apart -- the axis ranges cannot,
+# the device name cannot -- which is what the property bit is for.
+in_direct: Array[12, int32]
+in_ref:    Array[12, int32]            # 1 = in_lastx/in_lasty are a valid reference
+in_lastx:  Array[12, int32]
+in_lasty:  Array[12, int32]
+in_remx:   Array[12, int32]            # scaling remainder, so slow drags are not lost
+in_remy:   Array[12, int32]
+# The frame being accumulated between EV_SYN reports, per device. Evdev
+# delivers a position as SEPARATE X and Y records terminated by a SYN_REPORT,
+# and a touchpad usually sends the same position TWICE in one frame (ABS_X
+# and ABS_MT_POSITION_X). Applying each record as it arrives would double
+# every relative delta; applying the frame once at the SYN is both the
+# protocol's own semantics and the fix for that.
+abs_have:  Array[12, int32]            # bit 0 = X seen, bit 1 = Y seen
+abs_fx:    Array[12, int32]
+abs_fy:    Array[12, int32]
+abs_slot:  Array[12, int32]            # ABS_MT_SLOT; only slot 0 drives the cursor
+absprobe:  Array[8, int32]
 
 ptr_x: int32 = 0
 ptr_y: int32 = 0
@@ -3191,13 +3235,122 @@ def handle_button(code: int32, value: int32):
         ptr_edge = -1
 
 
+# HAMWSYSD_ABS DECLARES what a node that cannot be asked would have answered:
+# five integers per device, in the order the devices were opened --
+#
+#     minx maxx miny maxy direct
+#
+# with `direct` 1 for a touchscreen and 0 for a touchpad. It exists because a
+# FILE of evdev records has no ioctl interface: an offscreen gate can deliver
+# the device's records byte for byte but cannot deliver its EVIOCGABS answer,
+# so without this there is no way to test the scaling arithmetic or the
+# touchpad/touchscreen split at all. It is not a second code path -- it fills
+# in exactly the fields hamin_abs_probe fills in, and everything downstream is
+# the same code. On a real machine the device answers and this is never read.
+def abs_env_apply(idx: uint64) -> int32:
+    ep: Ptr[uint8] = getenv(cast[Ptr[char]]("HAMWSYSD_ABS"))
+    if cast[uint64](ep) == 0 or ep[0] == 0:
+        return 0
+    n: uint64 = 0
+    while ep[n] != 0 and n < 255:
+        n = n + 1
+    pos: Array[1, uint64]
+    pos[0] = 0
+    g: uint64 = 0
+    while g <= idx:
+        a: int32 = take_int(ep, &pos[0], n)
+        b: int32 = take_int(ep, &pos[0], n)
+        c: int32 = take_int(ep, &pos[0], n)
+        e: int32 = take_int(ep, &pos[0], n)
+        f: int32 = take_int(ep, &pos[0], n)
+        if a == NOVAL or b == NOVAL or c == NOVAL or e == NOVAL or f == NOVAL:
+            return 0
+        if g == idx:
+            if b <= a or e <= c:
+                return 0
+            in_minx[idx] = a
+            in_maxx[idx] = b
+            in_miny[idx] = c
+            in_maxy[idx] = e
+            in_direct[idx] = f
+            in_abs[idx] = 1
+            return 1
+        g = g + 1
+    return 0
+
+
 def open_input_path(path: Ptr[char]) -> int32:
     if n_input >= MAX_INPUT:
         return -1
     fd: int32 = sys_open(path)
     if fd < 0:
         return -1
-    in_fd[n_input] = fd
+    idx: uint64 = n_input
+    in_fd[idx] = fd
+    # The default is the old assumption -- a QEMU tablet, 0..32767, absolute.
+    in_abs[idx] = 1
+    in_minx[idx] = 0
+    in_maxx[idx] = 32767
+    in_miny[idx] = 0
+    in_maxy[idx] = 32767
+    in_direct[idx] = 1
+    in_ref[idx] = 0
+    in_lastx[idx] = 0
+    in_lasty[idx] = 0
+    in_remx[idx] = 0
+    in_remy[idx] = 0
+    abs_have[idx] = 0
+    abs_fx[idx] = 0
+    abs_fy[idx] = 0
+    abs_slot[idx] = 0
+    if hamin_abs_probe(fd, &absprobe[0]) == 0:
+        # The node answered. If it has no absolute axes it is a mouse or a
+        # keyboard and sends no EV_ABS at all; leaving in_abs set would be
+        # harmless but saying what was measured is better.
+        if absprobe[0] != 0:
+            in_minx[idx] = absprobe[1]
+            in_maxx[idx] = absprobe[2]
+            in_miny[idx] = absprobe[3]
+            in_maxy[idx] = absprobe[4]
+            # THE DEVICE'S OWN ANSWER, in its own order of authority: DIRECT
+            # wins, then POINTER; a device that claims NEITHER keeps the old
+            # behaviour (absolute), which is what the QEMU tablets get and
+            # what has always worked for them.
+            if absprobe[5] != 0:
+                in_direct[idx] = 1
+            elif absprobe[6] != 0:
+                in_direct[idx] = 0
+        else:
+            in_abs[idx] = 0
+    else:
+        # Not an evdev node (a plain file). Take the declared range if there
+        # is one; otherwise the tablet default above stands.
+        abs_env_apply(idx)
+    # SAY WHAT WAS MEASURED, because this is the one fact no test on this
+    # machine can supply. Every gate here feeds the compositor a FILE and
+    # declares the range; whether his touchpad really reports 0..1300 and
+    # whether it really sets INPUT_PROP_POINTER can only be read off the
+    # machine itself, and this line is where he reads it. If a device turns
+    # out to declare neither property bit it will show up here as
+    # "touchscreen", and HAMWSYSD_ABS overrides it without a rebuild.
+    puts(1, "wsysd: input ")
+    putd(1, cast[int32](idx))
+    puts(1, ": ")
+    if in_abs[idx] == 0:
+        puts(1, "relative only\n")
+    else:
+        puts(1, "abs x ")
+        putd(1, in_minx[idx])
+        puts(1, "..")
+        putd(1, in_maxx[idx])
+        puts(1, " y ")
+        putd(1, in_miny[idx])
+        puts(1, "..")
+        putd(1, in_maxy[idx])
+        if in_direct[idx] != 0:
+            puts(1, " DIRECT (touchscreen: jump)\n")
+        else:
+            puts(1, " POINTER (touchpad: additive)\n")
     n_input = n_input + 1
     return fd
 
@@ -3296,6 +3449,68 @@ def lat_record():
         lat_n = lat_n + 1
 
 
+# A finger left the surface (BTN_TOUCH release, or ABS_MT_TRACKING_ID -1).
+# THE REFERENCE POINT MUST DIE WITH IT: the next touch starts somewhere else
+# entirely, and a delta taken from where the LAST finger ended would throw the
+# cursor across the screen every time a finger is lifted and put down.
+def abs_touch_end(d: uint64):
+    in_ref[d] = 0
+    in_remx[d] = 0
+    in_remy[d] = 0
+    abs_have[d] = 0
+
+
+# One EV_SYN's worth of absolute position, applied once.
+def abs_frame_apply(d: uint64):
+    if in_abs[d] == 0 or abs_have[d] == 0:
+        return
+    fx: int32 = abs_fx[d]
+    fy: int32 = abs_fy[d]
+    # An axis that did not report in this frame has not moved.
+    if (abs_have[d] & 1) == 0:
+        fx = in_lastx[d]
+    if (abs_have[d] & 2) == 0:
+        fy = in_lasty[d]
+    abs_have[d] = 0
+    rx: int32 = in_maxx[d] - in_minx[d]
+    ry: int32 = in_maxy[d] - in_miny[d]
+    if rx <= 0 or ry <= 0:
+        return
+    if in_direct[d] != 0:
+        # TOUCHSCREEN. The finger is on the pixel: go there. The range maps
+        # onto 0..scr-1 rather than onto scr, so the far edge of the device is
+        # the far edge of the screen and not one pixel past it.
+        ptr_x = cast[int32]((cast[int64](fx - in_minx[d])
+                             * cast[int64](scr_w - 1)) / cast[int64](rx))
+        ptr_y = cast[int32]((cast[int64](fy - in_miny[d])
+                             * cast[int64](scr_h - 1)) / cast[int64](ry))
+        ptr_moved = 1
+    elif in_ref[d] != 0:
+        # TOUCHPAD. Additive: move the cursor by the distance the finger
+        # travelled, scaled so that crossing the pad crosses the screen. The
+        # remainder is carried, or a slow drag -- where each frame's delta is
+        # a unit or two -- would truncate to zero every frame and the cursor
+        # would never move at all.
+        tx: int64 = cast[int64](fx - in_lastx[d]) * cast[int64](scr_w) \
+                    + cast[int64](in_remx[d])
+        ty: int64 = cast[int64](fy - in_lasty[d]) * cast[int64](scr_h) \
+                    + cast[int64](in_remy[d])
+        px: int32 = cast[int32](tx / cast[int64](rx))
+        py: int32 = cast[int32](ty / cast[int64](ry))
+        in_remx[d] = cast[int32](tx - cast[int64](px) * cast[int64](rx))
+        in_remy[d] = cast[int32](ty - cast[int64](py) * cast[int64](ry))
+        if px != 0 or py != 0:
+            ptr_x = ptr_x + px
+            ptr_y = ptr_y + py
+            ptr_moved = 1
+    in_lastx[d] = fx
+    in_lasty[d] = fy
+    # The FIRST frame of a touch only establishes the reference; it must not
+    # move the cursor. That is what "it does not reset back to the
+    # Applications button" means at the level of one event.
+    in_ref[d] = 1
+
+
 def pump_input():
     d: uint64 = 0
     while d < n_input:
@@ -3316,8 +3531,27 @@ def pump_input():
             etype: int32 = le16(&evbuf[0], i + 16)
             ecode: int32 = le16(&evbuf[0], i + 18)
             eval_: int32 = le32(&evbuf[0], i + 20)
-            if etype == 1:                               # EV_KEY
-                if ecode >= 272 and ecode <= 274:
+            if etype == 0:                               # EV_SYN
+                if ecode == 0:                           # SYN_REPORT
+                    abs_frame_apply(d)
+            elif etype == 1:                             # EV_KEY
+                if ecode == 330:                         # BTN_TOUCH
+                    # A FINGER, not a button -- except on a touchscreen,
+                    # where the finger IS the button. A touchscreen that can
+                    # move the cursor but can never press anything is not a
+                    # pointing device, and BTN_TOUCH is the only press it
+                    # has. A TOUCHPAD is left alone: it has a real BTN_LEFT
+                    # under the surface, and turning contact into a click
+                    # would make every resting thumb a held mouse button.
+                    if eval_ == 0:
+                        abs_touch_end(d)
+                    else:
+                        in_ref[d] = 0
+                    if in_abs[d] != 0 and in_direct[d] != 0:
+                        if ptr_edge != 0:
+                            deliver_pointer()
+                        handle_button(272, eval_)
+                elif ecode >= 272 and ecode <= 274:
                     # A BUTTON EDGE FLUSHES THE ONE BEFORE IT. This loop
                     # drains every record the node has pending, and the frame
                     # loop only calls deliver_pointer() once afterwards -- so
@@ -3362,17 +3596,52 @@ def pump_input():
                     ptr_moved = 1
                 elif ecode == 8:                         # REL_WHEEL
                     ptr_dz = ptr_dz + eval_
-            elif etype == 3:                             # EV_ABS (tablet)
-                # virtio-tablet and usb-tablet report 0..32767 across the
-                # screen, which is the range QEMU advertises for both.
-                if ecode == 0:
-                    ptr_x = cast[int32]((cast[int64](eval_)
-                                         * cast[int64](scr_w)) / 32768)
-                    ptr_moved = 1
-                elif ecode == 1:
-                    ptr_y = cast[int32]((cast[int64](eval_)
-                                         * cast[int64](scr_h)) / 32768)
-                    ptr_moved = 1
+            elif etype == 3:                             # EV_ABS
+                # ACCUMULATED, NOT APPLIED. The value is in the device's own
+                # units and is only meaningful against the range read from
+                # the device; the frame is turned into a cursor position at
+                # the SYN_REPORT above.
+                #
+                # This used to divide by 32768 unconditionally -- the range
+                # QEMU's tablets advertise -- which is why an i2c-hid touchpad
+                # whose axes are 0..1300 by 0..750 mapped its whole surface
+                # onto a 76 x 27 pixel box in the corner of a 1920x1200 panel,
+                # i.e. onto the Applications button, and why a touchscreen
+                # reaching only a few thousand covered a fraction of the
+                # screen instead of all of it.
+                if ecode == 0:                           # ABS_X
+                    abs_fx[d] = eval_
+                    abs_have[d] = abs_have[d] | 1
+                elif ecode == 1:                         # ABS_Y
+                    abs_fy[d] = eval_
+                    abs_have[d] = abs_have[d] | 2
+                elif ecode == 47:                        # ABS_MT_SLOT
+                    abs_slot[d] = eval_
+                elif ecode == 53:                        # ABS_MT_POSITION_X
+                    # Only the first finger drives the cursor. A second
+                    # contact is a gesture this compositor does not have.
+                    if abs_slot[d] == 0:
+                        abs_fx[d] = eval_
+                        abs_have[d] = abs_have[d] | 1
+                elif ecode == 54:                        # ABS_MT_POSITION_Y
+                    if abs_slot[d] == 0:
+                        abs_fy[d] = eval_
+                        abs_have[d] = abs_have[d] | 2
+                elif ecode == 57:                        # ABS_MT_TRACKING_ID
+                    if abs_slot[d] == 0:
+                        # -1 is the kernel's "this contact ended"; anything
+                        # else is a NEW contact starting somewhere unrelated
+                        # to where the last one stopped. Both invalidate the
+                        # reference point, and only the first may discard a
+                        # half-built frame -- a new contact announces its id
+                        # BEFORE its position, so clearing the frame there
+                        # would throw away the position that follows it.
+                        if eval_ < 0:
+                            abs_touch_end(d)
+                        else:
+                            in_ref[d] = 0
+                            in_remx[d] = 0
+                            in_remy[d] = 0
             i = i + 24
         d = d + 1
     if ptr_x < 0:
