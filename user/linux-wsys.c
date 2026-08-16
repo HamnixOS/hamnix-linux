@@ -510,8 +510,49 @@ static int            chrome_rw;              /* the kernel let us map it W   */
  * that wrong is the difference between this being free and this being
  * impossible, so it is a property of the code below and not a hope. */
 #define BB_SLOTS   WSYS_MAX_WINDOWS
-#define BB_W       1920
-#define BB_H       1080
+
+/* THE LARGEST SURFACE THIS SYSTEM CAN SHOW, AND IT WAS PICKED FROM ONE PANEL.
+ *
+ * This was 1920x1080, and on 2026-08-15 the owner booted a ThinkPad whose panel
+ * is 1920x1200 -- ordinary 16:10, not exotic -- and the desktop did not start.
+ * user/wsysd.ad kept its own copy of this ceiling, found 1200 > 1080, refused to
+ * composite, and therefore never published /dev/wsys/screen; every client then
+ * died on "no screen geometry", which names the symptom and not the cause.
+ *
+ * WHY RAISING IT IS NEARLY FREE, and this is an argument from this file rather
+ * than a hope.  BB_W x BB_H is a CEILING, not an allocation:
+ *
+ *   * The pixels live in a per-window memfd (THE BACKBUFFER MEMFD below) that is
+ *     ftruncate'd to BBPIX_BYTES and is SPARSE.  bb_fit clears w*h*4 and bb_blit
+ *     writes inside w*h*4; nothing in this file ever touches BB_BYTES of a page.
+ *     A 186x110 xterm is 82 KiB resident whether this constant is 1080 or 1600.
+ *   * struct bbshm holds slot HEADERS only -- the pixels left it in the
+ *     pixel-out rewrite -- so BB_FILE_BYTES is BB_HDR_BYTES and does not move.
+ *     sizeof(struct wshm), sizeof(struct wwin) and the /srv/wsys segment layout
+ *     do not mention BB_W or BB_H at all, so this costs NO WSYS_VERSION bump.
+ *   * bbpix_page's mmap length is BB_BYTES: address space in a sparse file,
+ *     which is the same currency BB_SLOTS spends 512 slots of above.
+ *
+ * WHAT IT DOES COST REAL MEMORY, and it is the reason this is 2560x1600 and not
+ * 3840x2160: WSYS_CARRY_CAP below is 18 + BB_BYTES, and carry_reserve() will
+ * realloc a per-descriptor reassembly buffer up to it on behalf of a client that
+ * streams a full-screen blit.  That is a genuine allocation ceiling a peer can
+ * drive, so it should be the largest frame a REAL panel here will send and not
+ * an arbitrary headroom.  1080 -> 1600 takes it from 8.29 MB to 16.4 MB; 2160
+ * would take it to 33.2 MB for a panel this compositor has no scaling story for.
+ *
+ * SO: 2560x1600.  It is the smallest rectangle that covers every panel this
+ * project is actually asked about -- 1920x1080, the owner's 1920x1200, and the
+ * 2560x1440 and 2560x1600 that a laptop bought today has -- and it is a
+ * RECTANGLE rather than a pixel count, because the clamps below are per-axis
+ * and a ceiling that disagrees with its own clamps is how 1920x1200 got here.
+ *
+ * user/wsysd.ad's COMP_W/COMP_H MUST MATCH THESE.  It has its own copy because
+ * it is Adder and cannot include this header; snap_pool publishes `maxsurface
+ * <BB_W>x<BB_H>` on /dev/wsys/pool precisely so that copy can be CHECKED rather
+ * than trusted, and wsysd checks it at startup and says so loudly if it drifts. */
+#define BB_W       2560
+#define BB_H       1600
 #define BB_BYTES   ((size_t)BB_W * BB_H * 4)
 
 /* THE LARGEST DRAW RECORD THIS DEVICE WILL EVER REASSEMBLE, and it is derived
@@ -527,7 +568,7 @@ static int            chrome_rw;              /* the kernel let us map it W   */
  *   'B' blit    18 + (x1-x0)*(y1-y0)*4, and a rect wider than BB_W or taller
  *               than BB_H cannot be shown at all -- bb_blit clips every pixel
  *               outside the window, and no window exceeds BB_W x BB_H.  So the
- *               largest USEFUL blit is 18 + BB_BYTES = 8,294,418 bytes.
+ *               largest USEFUL blit is 18 + BB_BYTES = 16,384,018 bytes.
  *   'I' image   2 + 31 + 9 + WSYS_IMG_MAX_W*WSYS_IMG_MAX_H*4 = 262,186.
  *   'C' cursor  18 + a sprite whose declared size this arm does NOT bound --
  *               it only skips the payload, never reads it, so the cap below
@@ -595,7 +636,7 @@ struct bbshm {
 
 /* PAGE-ALIGNED, AND THE STRIDE IS WHAT HAD TO BE ROUNDED, not just the header.
  *
- * mmap's offset must be a multiple of the page size.  BB_BYTES is
+ * mmap's offset must be a multiple of the page size.  BB_BYTES used to be
  * 1920*1080*4 = 8294400, which is 2025 * 4096 -- fine on a 4 KiB-page kernel
  * and NOT a multiple of 16 KiB or 64 KiB (8294400/65536 = 126.5625).  Rounding
  * only the header up would leave every odd-numbered page offset misaligned on
@@ -603,7 +644,11 @@ struct bbshm {
  * and half the windows are blank with "a blit was thrown away" -- the exact
  * silent failure this rewrite exists to remove, waiting for the first arm64
  * build.  So the per-page STRIDE is rounded to 64 KiB as well.  It costs
- * address space in a sparse file and nothing else. */
+ * address space in a sparse file and nothing else.
+ *
+ * At 2560x1600 the rounding happens to be a no-op -- 16384000 = 250 * 65536
+ * exactly -- and that is LUCK, not a reason to remove it.  The next ceiling
+ * will not be so obliging, and the failure it prevents is silent. */
 #define BB_ALIGN      ((size_t)65536)
 #define BB_HDR_BYTES  ((size_t)((sizeof(struct bbshm) + BB_ALIGN - 1) & ~(BB_ALIGN - 1)))
 #define BB_PAGE_BYTES ((size_t)((BB_BYTES + BB_ALIGN - 1) & ~(BB_ALIGN - 1)))
