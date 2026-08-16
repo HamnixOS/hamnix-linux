@@ -163,6 +163,7 @@ extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_unlink(path: Ptr[char]) -> int32
 extern def sys_close(fd: int32) -> int32
 extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
@@ -298,8 +299,35 @@ def now_us() -> uint64:
     return ts_scratch[0] * 1000000 + ts_scratch[1] / 1000
 
 # --- screen -----------------------------------------------------------
-MAX_PIXELS: uint64 = 2073600           # 1920x1080
-composite:  Array[8294400, uint8]      # MAX_PIXELS * 4, BGRX as /dev/fb wants
+# THE COMPOSITE'S CEILING, AND IT IS A RECTANGLE BECAUSE THE DEVICE'S IS.
+#
+# 2026-08-15: the owner booted a ThinkPad with a 1920x1200 panel -- ordinary
+# 16:10 -- and the desktop did not start. This was 1920x1080, read_screen()
+# refused, and because it refused the compositor never announced, so
+# /dev/wsys/screen never answered and every client died on "no screen
+# geometry": one cause, two messages, and only the second one was visible.
+#
+# COMP_W x COMP_H MUST EQUAL BB_W x BB_H in user/linux-wsys.c. That file argues
+# the number (2560x1600: it covers 1920x1080, 1920x1200, 2560x1440 and
+# 2560x1600, and stops there because WSYS_CARRY_CAP is a real per-descriptor
+# allocation ceiling a client can drive). This is a SECOND COPY of it, kept
+# because Adder cannot include a C header -- and a second copy of a constant is
+# exactly how the 1920x1080 above outlived the panel it was picked for. So it is
+# not trusted: the device publishes `maxsurface <w>x<h>` on /dev/wsys/pool for
+# this purpose and check_maxsurface() below reads it back at startup.
+#
+# THE ARRAY IS A CEILING, NOT A COST. Every read and write of the composite in
+# this file is addressed through scr_w/scr_h -- rasterize clips to them (line
+# ~950), the row address is y*scr_w (line ~900), and present_rows() writes
+# scr_h rows of scr_w*4 bytes. MAX_PIXELS appears in exactly three places and
+# all three are capacity checks. So the tail of this array past the actual
+# screen is never touched, and BSS that is never touched is never resident:
+# raising it from 8.29 MB to 16.38 MB costs address space, and the resident
+# cost stays scr_w*scr_h*4 -- 9.2 MB on his panel.
+COMP_W: int32 = 2560
+COMP_H: int32 = 1600
+MAX_PIXELS: uint64 = 4096000           # COMP_W * COMP_H
+composite:  Array[16384000, uint8]     # MAX_PIXELS * 4, BGRX as /dev/fb wants
 # EVERY read and write of the screen composite goes through this address, and
 # it is the whole of the zero-copy story: it is `composite` normally, and it
 # is the GPU-resident frame returned by vk_linux_frame_alloc() when the vk
@@ -405,6 +433,10 @@ ctlbuf:   Array[256, uint8]
 SCENEBUF_CAP: uint64 = 16385          # WSYS_SCENE_CAP + 1 for slurp's NUL
 scenebuf: Array[16385, uint8]
 numbuf:   Array[24, uint8]
+# The startup-refusal text, composed ONCE and written to both fd 2 and
+# /tmp/hamnix-wsysd.fault so the two cannot drift into telling different
+# stories. See screen_fault().
+faultbuf: Array[1024, uint8]
 inbuf:    Array[256, uint8]
 inpath:   Array[256, uint8]            # HAMWSYSD_INPUT, see open_inputs
 
@@ -611,6 +643,147 @@ def write_path(path: Ptr[char], data: Ptr[uint8]) -> int32:
 # ====================================================================
 # the screen
 # ====================================================================
+# THE STARTUP FAULT, WRITTEN WHERE A PERSON WITH NO SHELL CAN FIND IT
+# --------------------------------------------------------------------
+# On 2026-08-15 the compositor refused to start and printed, in full:
+#
+#     wsysd: screen larger than the composite buffer
+#
+# and the desktop -- the only thing the owner could see -- printed
+#
+#     Fatal: no screen geometry. /dev/wsys/screen never answered
+#
+# Both are true. Neither says a number, neither names the other, and the second
+# one is the only one anybody saw, because the first is printed by a program
+# nothing had run yet. The owner learned the real cause by running `wsysd` by
+# hand; a person with no shell would have been stuck with a black screen.
+#
+# So a refusal to start now lands in THREE places, and the reason is the same
+# text in all three:
+#
+#   1. fd 2. Since user/linux-syscalls.c:consmirror, every console write is
+#      copied into /dev/kmsg at <7>, which user/bootlogd.ad snapshots into
+#      \HAMNIX.LOG on the FAT ESP. That is the file he can unplug and hand us
+#      after a failed boot, and it costs nothing here to reach it: writing to
+#      the console IS writing to the boot log.
+#   2. /tmp/hamnix-wsysd.fault, so a program that starts LATER can quote it.
+#      lib/hamscreen.ad reads exactly this file, which is how "the compositor
+#      has not published a geometry" becomes "and here is why it did not".
+#   3. the return value, so the caller stops.
+def screen_fault(msg: Ptr[uint8], a: int32, b: int32, c: int32, d: int32):
+    i: uint64 = 0
+    k: uint64 = 0
+    p: Ptr[uint8] = "wsysd: FATAL: "
+    while p[k] != 0:
+        faultbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    k = 0
+    while msg[k] != 0:
+        faultbuf[i] = msg[k]
+        i = i + 1
+        k = k + 1
+    # "<a>x<b>" then " ... " then "<c>x<d>": the two rectangles the refusal
+    # knows about. It knows BOTH -- it compared them -- so it says both. The
+    # old line said neither, which is why a photograph of the screen was not
+    # enough and a shell was.
+    p = " -- this screen is "
+    k = 0
+    while p[k] != 0:
+        faultbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&faultbuf[0], i, a)
+    faultbuf[i] = 120
+    i = i + 1
+    i = emit_int(&faultbuf[0], i, b)
+    p = " and the composite buffer holds "
+    k = 0
+    while p[k] != 0:
+        faultbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    i = emit_int(&faultbuf[0], i, c)
+    faultbuf[i] = 120
+    i = i + 1
+    i = emit_int(&faultbuf[0], i, d)
+    p = ". The compositor is NOT starting, so /dev/wsys/screen will never answer and every client will report `no screen geometry` -- that message is this one's symptom. Raise COMP_W/COMP_H in user/wsysd.ad and BB_W/BB_H in user/linux-wsys.c together.\n"
+    k = 0
+    while p[k] != 0:
+        faultbuf[i] = p[k]
+        i = i + 1
+        k = k + 1
+    faultbuf[i] = 0
+    # fd 2 first: it is the one that reaches the boot log, and it must happen
+    # even if /tmp is read-only or absent.
+    sys_write(2, &faultbuf[0], i)
+    write_path(cast[Ptr[char]]("/tmp/hamnix-wsysd.fault"), &faultbuf[0])
+
+
+# --------------------------------------------------------------------
+# THE DEVICE STATES ITS OWN CEILING; THIS READS IT BACK RATHER THAN AGREEING
+# WITH IT BY HAND.
+#
+# COMP_W/COMP_H above are a second copy of BB_W/BB_H in user/linux-wsys.c, and
+# a second copy of a constant is precisely how a 1920x1080 ceiling outlived the
+# panel it was picked for. /dev/wsys/pool publishes `maxsurface <w>x<h>` -- its
+# comment says, in as many words, that it exists because "everybody who needed
+# the number had their own copy of it and one of them was wrong". So: read it.
+#
+# THIS DOES NOT REFUSE TO START. A disagreement means windows are clipped at
+# one number and the screen at another, which is a bug to be told about, not a
+# reason to leave a machine with no desktop -- the whole complaint being fixed
+# here is a compositor that refused to run over a number. It is LOUD instead.
+#
+# ONE SIDE EFFECT, NAMED BECAUSE IT WAS MEASURED RATHER THAN INTENDED: reading
+# /dev/wsys/pool runs snap_pool, which calls bb_attach, so the backbuffer
+# accounting segment is now created at STARTUP instead of when the first v2
+# window appears. It is 65,536 bytes (BB_HDR_BYTES; no pixels have lived there
+# since the pixel-out rewrite) and it is created by the segment's OWNER, which
+# is the process that should own it -- previously whichever client made the
+# first v2 window got there first. Measured green afterwards: install_from_usb
+# 75/0, wsys_srv_deboot 36/0, de_appmenu_brisk 17/0, de_appmenu_band 11/0.
+def check_maxsurface():
+    n: int64 = slurp(cast[Ptr[char]]("/dev/wsys/pool"), &ctlbuf[0], 200)
+    if n <= 0:
+        return
+    # Find "maxsurface " and take "<w>x<h>" after it.
+    i: uint64 = 0
+    lim: uint64 = cast[uint64](n)
+    found: uint64 = 0
+    hit: int32 = 0
+    while i + 11 <= lim:
+        if ctlbuf[i] == 109 and ctlbuf[i+1] == 97 and ctlbuf[i+2] == 120 \
+           and ctlbuf[i+3] == 115 and ctlbuf[i+4] == 117 and ctlbuf[i+5] == 114 \
+           and ctlbuf[i+6] == 102 and ctlbuf[i+7] == 97 and ctlbuf[i+8] == 99 \
+           and ctlbuf[i+9] == 101 and ctlbuf[i+10] == 32:
+            found = i + 11
+            hit = 1
+        i = i + 1
+    if hit == 0:
+        return
+    pos: Array[1, uint64]
+    pos[0] = found
+    dw: int32 = take_int(&ctlbuf[0], &pos[0], lim)
+    # take_int stops on the 'x'; step over it and take the height.
+    if pos[0] < lim and ctlbuf[pos[0]] == 120:
+        pos[0] = pos[0] + 1
+    dh: int32 = take_int(&ctlbuf[0], &pos[0], lim)
+    if dw == COMP_W and dh == COMP_H:
+        return
+    if dw == NOVAL or dh == NOVAL:
+        return
+    puts(2, "wsysd: WARNING: the device says its largest surface is ")
+    putd(2, dw)
+    puts(2, "x")
+    putd(2, dh)
+    puts(2, " but this compositor's composite buffer is ")
+    putd(2, COMP_W)
+    puts(2, "x")
+    putd(2, COMP_H)
+    puts(2, " -- COMP_W/COMP_H in user/wsysd.ad and BB_W/BB_H in user/linux-wsys.c have drifted apart. Windows will be clipped at one number and the screen bounded by the other.\n")
+
+
 def read_screen() -> int32:
     # "/dev/fb" answers "W H PITCH BPP PIXFMT\n" to a read. Opening it FOR
     # WRITING is what suspends the text console (user/linux-fb.c), so the
@@ -627,8 +800,16 @@ def read_screen() -> int32:
     if scr_w <= 0 or scr_h <= 0:
         puts(2, "wsysd: /dev/fb geometry is not sane\n")
         return -1
-    if cast[uint64](scr_w) * cast[uint64](scr_h) > MAX_PIXELS:
-        puts(2, "wsysd: screen larger than the composite buffer\n")
+    # PER AXIS, NOT BY AREA, and the old check was by area. `w*h > MAX_PIXELS`
+    # let a 4096x500 panel through to be silently clipped at BB_W by every
+    # window's backbuffer, and it refused 1920x1200 with a message that named
+    # neither number. The clamps this ceiling exists to agree with
+    # (bb_clamp_w/bb_clamp_h in user/linux-wsys.c) are per axis, so this is too;
+    # w <= COMP_W and h <= COMP_H also implies w*h <= MAX_PIXELS, so the array
+    # bound is still covered by the same test.
+    if scr_w > COMP_W or scr_h > COMP_H:
+        screen_fault("the screen is larger than the composite buffer",
+                     scr_w, scr_h, COMP_W, COMP_H)
         return -1
     return 0
 
@@ -1122,8 +1303,21 @@ def vk_arm_scanout() -> int32:
     h: int32 = cast[int32](probe_wh[1])
     if w <= 0 or h <= 0:
         return 0
-    if cast[uint64](w) * cast[uint64](h) > MAX_PIXELS:
-        puts(2, "wsysd: scanout: the display mode is larger than MAX_PIXELS\n")
+    # Per axis, for read_screen()'s reason. NOT screen_fault(): this returns 0,
+    # which means "do not use scanout", and read_screen() then runs on the
+    # /dev/fb path and produces the fatal, fault-file-writing refusal if the
+    # mode really is too large. Two fault files for one cause would be worse
+    # than one, and a message that says both numbers is what was missing.
+    if w > COMP_W or h > COMP_H:
+        puts(2, "wsysd: scanout: the display mode is ")
+        putd(2, w)
+        puts(2, "x")
+        putd(2, h)
+        puts(2, " and the composite buffer holds ")
+        putd(2, COMP_W)
+        puts(2, "x")
+        putd(2, COMP_H)
+        puts(2, " -- not arming scanout\n")
         return 0
     fd: int32 = vk_linux_frame_scanout_alloc(w, h, 1)
     if fd < 0:
@@ -3841,8 +4035,20 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     putd(1, scr_w)
     puts(1, "x")
     putd(1, scr_h)
-    puts(1, "\n")
+    puts(1, " (composite buffer ")
+    putd(1, COMP_W)
+    puts(1, "x")
+    putd(1, COMP_H)
+    puts(1, ")\n")
+    # A STALE FAULT IS WORSE THAN NO FAULT. screen_fault() leaves a file behind
+    # for lib/hamscreen.ad to quote; a compositor that has just got PAST that
+    # check must remove it, or the next unrelated failure gets explained by
+    # last week's refusal. This is the only place that can know it is stale.
+    sys_unlink(cast[Ptr[char]]("/tmp/hamnix-wsysd.fault"))
     announce_screen()
+    # After announce_screen, because this reads /dev/wsys and the device is
+    # only worth asking once this process is serving it.
+    check_maxsurface()
 
     # Take the text console. /dev/fbctl `suspend` is Hamnix's verb for it; on
     # Linux it is KDSETMODE KD_GRAPHICS (user/linux-fb.c). Without it the
