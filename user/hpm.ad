@@ -8220,6 +8220,97 @@ def cmd_install_solved(spec: Ptr[uint8]) -> int32:
 # `hpm unpin <name>`:
 #   - Mark the existing install as un-pinned.
 
+# THE ONE STEP THAT RUNS AFTER THE WHOLE TRANSACTION, AND WITHOUT IT `hpm
+# update` CANNOT CHANGE WHAT THE MACHINE BOOTS WITH.
+#
+# Everything above this point moves files on the ROOT FILESYSTEM. That is the
+# whole of what a package can do, and for a driver package it is not enough:
+# user/linuxinit.ad loads /etc/modules BEFORE `bind '#sysroot' /`, so the .ko
+# files an installed machine boots with come out of the INITRAMFS -- sealed
+# inside /boot/EFI/BOOT/BOOTX64.EFI when the medium was built and copied onto
+# this machine's ESP byte for byte by user/hlinstall.ad. A new nvme.ko landing
+# on the ext4 root governs `modprobe` from that instant and has no effect
+# whatsoever on the next boot. On the owner's laptop that is nvme, usb-storage,
+# psmouse and i2c-hid: the disk, the stick, and the pointer.
+#
+# IT IS A WHOLE-TRANSACTION STEP RATHER THAN A PACKAGE HOOK, and that is the
+# only shape that works. Hooks are per package and per phase; there is no
+# post-transaction concept in this file. A driver package's hook could not do
+# this job anyway -- it would run once per upgraded package, rewriting 16 MB of
+# boot image each time, and it would run BEFORE the other packages in the same
+# update had landed.
+#
+# A FAILURE HERE IS NOT AN UPDATE FAILURE. bootsync's contract is that it
+# leaves the machine bootable on every path out of itself: it refuses before
+# writing anything when the reservation is too small or /boot/UKI.MAP is
+# absent, and an interruption leaves the image the machine was installed with.
+# So this reports and moves on. An update that rolled back because the boot
+# image could not be refreshed would be a worse machine than one whose packages
+# landed and whose boot modules are a release behind.
+bootsync_argv:    Array[4, uint64]
+bootsync_envp:    Array[4, uint64]
+bootsync_status:  Array[1, int64]
+bootsync_park:    Array[1, int32]
+# 120 s. bootsync writes and then re-reads ~16 MB through an O_SYNC descriptor
+# on a FAT32 partition; measured at about two seconds in a VM, and a USB stick
+# is the case this bound is for.
+BOOTSYNC_TIMEOUT_CS: uint64 = 12000
+
+
+def _sync_boot_image():
+    write_str(1, "hpm: refreshing the boot image so the next boot uses these "
+                 "modules\n")
+    bootsync_argv[0] = cast[uint64](cast[Ptr[uint8]]("/bin/bootsync"))
+    bootsync_argv[1] = 0
+    bootsync_envp[0] = cast[uint64](cast[Ptr[uint8]]("PATH=/bin"))
+    bootsync_envp[1] = 0
+    pid: int32 = spawn(cast[Ptr[char]]("/bin/bootsync"),
+                       &bootsync_argv[0], 0, 1, &bootsync_envp[0])
+    if pid < 0:
+        write_str(2, "hpm: /bin/bootsync would not start. The packages ARE "
+                     "installed;\n")
+        write_str(2, "hpm: the boot image still holds the modules this "
+                     "machine was installed\n")
+        write_str(2, "hpm: with. Run `bootsync` by hand to close that.\n")
+        return
+    start: uint64 = sys_get_jiffies()
+    code: int64 = 0
+    timed_out: int32 = 0
+    while 1 == 1:
+        bootsync_status[0] = 0
+        wr: int64 = sys_waitpid_jc(pid, &bootsync_status[0])
+        if wr < 0:
+            write_str(2, "hpm: cannot wait for bootsync; the boot image's "
+                         "state is UNKNOWN.\n")
+            write_str(2, "hpm: run `bootsync` by hand and read what it says.\n")
+            return
+        if wr > 0 and (bootsync_status[0] & 255) == HOOK_WAIT_EXITED:
+            code = bootsync_status[0] >> 8
+            break
+        if sys_get_jiffies() - start >= BOOTSYNC_TIMEOUT_CS:
+            timed_out = 1
+            break
+        sys_waitfds(&bootsync_park[0], 0, 25)
+    if timed_out != 0:
+        write_str(2, "hpm: bootsync ran longer than ")
+        write_dec_u64(2, BOOTSYNC_TIMEOUT_CS / 100)
+        write_str(2, "s and was KILLED.\n")
+        # It is safe to kill: an interrupted bootsync leaves the boot image
+        # this machine was installed with, which is the state it was in a
+        # moment ago. Its own header argues why.
+        p9_note(pid, cast[Ptr[uint8]]("kill"))
+        return
+    if code != 0:
+        write_str(2, "hpm: bootsync exited ")
+        write_dec_u64(2, cast[uint64](code))
+        write_str(2, ". THE PACKAGES ARE INSTALLED and the boot image was "
+                     "left\n")
+        write_str(2, "hpm: alone, so this machine still boots exactly as it "
+                     "did before.\n")
+        write_str(2, "hpm: The lines above from bootsync say which of its "
+                     "refusals this was.\n")
+
+
 def cmd_update() -> int32:
     # 1. Refresh the index.
     if cmd_refresh() != 0:
@@ -8361,6 +8452,12 @@ def cmd_update() -> int32:
             return 1
         upgraded = upgraded + 1
         j = j + 1
+
+    # Only when something actually moved. A machine that updates to find it is
+    # already current must be left EXACTLY as it was -- no boot image rewritten,
+    # nothing on the ESP touched.
+    if upgraded > 0:
+        _sync_boot_image()
 
     write_str(1, "hpm: update done (upgraded=")
     write_dec_u64(1, upgraded)
