@@ -14,8 +14,36 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing yet. Work lands here between releases; if this section is empty, the
-tree and the channel agree.
+**`hpm update` can finally change what your machine BOOTS with.** Until now it
+could not, and nothing said so. An update lands new kernel drivers on your root
+filesystem, and `modprobe` uses them from that moment — but the drivers your
+machine loads *at boot* come out of the initramfs sealed inside
+`/boot/EFI/BOOT/BOOTX64.EFI`, which the installer copied onto your ESP byte for
+byte on the day you installed and which nothing in this project has ever
+regenerated. So an upgraded `nvme.ko`, `usb-storage`, `psmouse` or `i2c-hid` had
+no effect on any boot, on any machine, ever. Those are the disk, the install
+stick and the touchpad.
+
+`hpm update` now runs `bootsync` after the transaction, which writes the current
+bytes of the boot modules into a reservation inside the boot image and then
+moves ONE FOUR-BYTE FIELD to switch to them. **A failure at any point leaves the
+machine booting exactly as it was installed** — which is the same outcome as
+never having run it, and is the only acceptable failure mode for something with
+no shell to fix it from. Measured on an installed disk over eleven UEFI boots:
+the running kernel's module goes from the installed-day one to the updated one,
+and a machine SIGKILLed 4.2 MB into the write boots normally on the old one and
+succeeds on a retry. `tests/linux/bootsync_installed.sh`, 28 PASS / 0 FAIL.
+
+**This needs new media.** The reservation is created by
+`scripts/hamlinux_disk.sh`, so a machine installed from a 1.0.25 or earlier
+stick has no room to write into and `bootsync` will say so and change nothing.
+Machines installed from media built after this land are the ones it helps.
+
+**Measured and refused:** `bootsync` does NOT change the boot module *list*,
+only the bytes behind the names already in it. Promoting a driver package's
+appended `/etc/modules` lines to boot modules would start loading a GPU driver
+before the root switch on a machine that has never done so; that is a decision
+for the machine's owner, not a side effect of an update.
 
 ## 1.0.25 — 2026-08-15
 
