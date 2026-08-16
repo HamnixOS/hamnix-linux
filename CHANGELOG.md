@@ -14,6 +14,35 @@ because the number is the deliverable.
 
 ## Unreleased
 
+Nothing yet. Work lands here between releases; if this section is empty, the
+tree and the channel agree.
+
+## 1.0.25 — 2026-08-15
+
+**PUBLISHED and verified as served**: the live index reports 1.0.25 across all
+126 packages, its signature verifies against the trust root installed machines
+already carry, and `hpm-1.0.25.tar.gz` fetched from the site is byte-identical
+to the gated build. Eleven polls again between pushing and serving.
+
+**IF YOU INSTALLED FROM 1.0.24 MEDIA, THIS NEEDS ONE MANUAL STEP.** The old
+package manager truncated long filenames *during your original install*, so 14
+of 65 kernel modules are already stubs on your disk. Updating heals the package
+manager itself — its own name is short enough to unpack correctly — but it does
+**not** repair those modules, and a second update does nothing because the
+machine already believes it is current. **The machine never repairs itself.**
+After updating, run:
+
+    hpm remove hamnix-drivers-base && hpm install hamnix-drivers-base
+    hpm remove hamnix-drivers-hw   && hpm install hamnix-drivers-hw
+
+Measured: that gives 35/35 and 30/30 files byte-identical at their full paths,
+with no leftover stubs. Installing from a fresh 1.0.25 medium also works.
+
+**Known issue.** The long-name fix is in one of four places the package manager
+reads tar archives. The others are not reachable by anything shipped today —
+install hooks only touch short paths — but a file conflict on a very long path
+would go unnoticed. Written down rather than left to be found.
+
 ### `hpm update` can now upgrade the boot kernel modules
 
 1.0.24 shipped knowing it could not, and that it bit hardest exactly where the
@@ -49,9 +78,11 @@ installable at all. The fix is in `hpm` rather than the packager, so the tarball
 than truncating, and the packager refuses to build such a name in the first
 place.
 
-*A machine already running 1.0.24 is not at risk from this: its database does not
-record these two packages, so nothing upgrades them. It also cannot benefit —
-these fixes arrive with a medium built after them.*
+***Correction, measured after this was written: that understated it.** A machine
+installed from 1.0.24 media is not merely "at risk" — **it is already damaged**,
+because the truncation happened during its original install, before any update.
+`hpm update` heals `hpm` itself but not the modules; the remedy is at the top of
+this release's notes.*
 
 **Measured on a booted machine**, `tests/linux/install_from_usb.sh` **65 passed,
 0 failed** (negative control **42 / 0**): live USB → install to blank NVMe →

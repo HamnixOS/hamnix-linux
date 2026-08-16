@@ -24,7 +24,19 @@ because that is the version those runs were made against; the numbers stand, the
 version in them is history. **`CHANGELOG.md` is the authority on what a person
 gets, and its `Unreleased` section is the authority on what they do not yet.**
 
-**1.0.24 IS PUBLISHED — the release the first real-hardware boot produced.**
+**1.0.25 IS PUBLISHED and verified as served** — 126 packages, signature
+verifying against the trust root, and `hpm-1.0.25.tar.gz` fetched from the site
+byte-identical to the gated build. It exists because `hpm` **silently truncated
+long filenames**: it wrote files to the truncated path and recorded that path,
+losing 14 of 65 kernel modules on a real install. **A machine installed from
+1.0.24 media is already damaged and does NOT repair itself** — `hpm update`
+heals `hpm` but not the modules, and the remedy (`hpm remove` + `hpm install` of
+the two driver packages) is in CHANGELOG § 1.0.25. Measured against published
+1.0.24: 126 packages, none added or dropped, 94 differing only in the version
+stamp, 32 with real binary changes — and both driver packages in the stamp-only
+group, confirming in bytes that the fix is in `hpm` and not the packaging.
+
+**1.0.24 was the release the first real-hardware boot produced.**
 Verified as served: 126 packages, signature verifying against the trust root,
 and the desktop tarball fetched from the site byte-identical to the gated build.
 Measured against 1.0.23 rather than assumed: 36 packages byte-identical, 90
