@@ -1,0 +1,736 @@
+# user/bootsync.ad — MAKE THE NEXT BOOT USE THE MODULES THAT ARE ON THE DISK.
+#
+# THE HOLE THIS FILLS, STATED FIRST BECAUSE IT IS THE WHOLE POINT
+# ==============================================================
+# `hpm update` upgrades the driver packages on an installed machine: after it
+# runs, /lib/modules/<kver>/kernel/drivers/nvme/host/nvme.ko on the ext4 root
+# really is the new file, byte for byte. AND THE NEXT BOOT DOES NOT USE IT.
+#
+# user/linuxinit.ad:load_modules reads /etc/modules and loads every path in it
+# BEFORE the root switch (`bind '#sysroot' /`), so the files it opens are the
+# INITRAMFS's, not the disk's. The initramfs is a section of the unified kernel
+# image at /boot/EFI/BOOT/BOOTX64.EFI, which user/hlinstall.ad copied onto this
+# machine's ESP byte for byte at install time and which nothing in this tree
+# has ever regenerated. So an upgraded nvme.ko governs `modprobe` from the
+# moment it lands and has NO EFFECT WHATSOEVER on the next boot -- and on the
+# owner's laptop the boot-time set is nvme (to find the disk at all),
+# usb-storage (to read the stick), psmouse and i2c-hid (to have a pointer).
+# Those are exactly the modules that could not be updated.
+#
+# HOW THIS PROGRAM CHANGES THAT WITHOUT BUILDING A UKI
+# ====================================================
+# It does NOT build a boot image. There is no objcopy on this machine, no EFI
+# stub, no cpio writer and (by default) no Debian namespace -- and even the
+# Debian namespace ships neither binutils nor cpio. Building a UKI here is not
+# on the table.
+#
+# It does not have to be. The Linux initramfs loader accepts a CONCATENATION of
+# archives and the LATER one wins: every path in the second archive replaces
+# the file the first one unpacked. That is the same mechanism the microcode
+# initrd has used for a decade. So the whole job is:
+#
+#     append a small, UNCOMPRESSED newc cpio archive carrying the CURRENT bytes
+#     of the boot modules, and tell the EFI stub the initrd is that much longer.
+#
+# Uncompressed, because the loader takes a plain cpio segment as happily as a
+# gzipped one and this machine then needs no compressor in the path that must
+# not fail. MEASURED, not assumed: tests/linux/uki_initrd_slack.sh boots a UKI
+# under OVMF with such an overlay appended and watches linuxinit load the
+# overlay's list instead of the image's.
+#
+# THE SPACE IT WRITES INTO IS RESERVED AT BUILD TIME, AND THAT IS THE SAFETY
+# =========================================================================
+# scripts/hamlinux_disk.sh over-allocates the .initrd section: the section's
+# SizeOfRawData covers the real archive PLUS a reservation, while its
+# VirtualSize -- the length the EFI stub actually hands the kernel -- is set
+# back to the real archive. So the reservation is self-describing
+# (slack = SizeOfRawData - VirtualSize) and, more importantly, the bytes this
+# program writes are OUTSIDE what the current boot reads.
+#
+# THE FILE'S LENGTH NEVER CHANGES. Nothing is created, nothing is extended, no
+# cluster is allocated, the FAT chain is never mutated and the directory entry
+# is never rewritten. That is the identical argument user/bootlogd.ad makes for
+# the preallocated boot log, for the identical reason: FAT32 has no journal, and
+# the failure to survive is the power button. Every write here is O_SYNC.
+#
+# THE COMMIT IS FOUR BYTES
+# ========================
+#   1. VirtualSize is set back to BASE -- the length of the archive the image
+#      shipped with. One 4-byte write. From this instant the machine boots the
+#      PRISTINE image it was installed with. Stale, and bootable.
+#   2. The overlay is written into the reservation. Beyond VirtualSize, so no
+#      boot reads it. Interrupt anywhere in here and step 1 is what survives.
+#   3. The overlay is READ BACK and compared against the very files it came
+#      from. A mismatch stops here, leaving the pristine image.
+#   4. VirtualSize is set to BASE + overlay. One 4-byte write, inside one
+#      512-byte sector, of which in practice two bytes change.
+#
+# There is no state between 1 and 4 that boots something incoherent. The only
+# way to get one is to tear a single 4-byte write inside a single sector.
+#
+# WHAT A FAILURE LOOKS LIKE TO SOMEONE WITH NO SHELL: the machine boots, the
+# desktop comes up, and the modules are the ones it was installed with. That is
+# the SAME outcome as never having run this at all. There is no screen to read
+# and nothing to fix, which is the point -- the alternative designs all have a
+# window in which the answer is a machine that does not boot.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+# ================================
+# IT DOES NOT CHANGE THE BOOT MODULE LIST. The list comes from /boot/UKI.MAP,
+# written when the medium was built, and is the list the shipped initramfs
+# already has. Only the BYTES behind those names are refreshed. The machine's
+# own /etc/modules on the ext4 root grows every time a driver package's install
+# hook appends to it (scripts/hamlinux_packages.py:module_install_hook), and
+# promoting those additions to BOOT modules is a different and much riskier
+# change: it would start loading a GPU driver before the root switch on a
+# machine that has never done so. That is a separate decision for the owner,
+# not something this program should make on his behalf while he is not looking.
+#
+# IT DOES NOT TOUCH /boot/vmlinuz OR /boot/initramfs.cpio.gz. Those are the
+# rescue copies scripts/hamlinux_disk.sh puts on the ESP; nothing boots them.
+#
+# Usage:
+#   bootsync              refresh the boot modules from the root filesystem
+#   bootsync -n           say exactly what it would do; write nothing
+#   bootsync --status     print the .initrd geometry and stop
+# Env: none. Paths are fixed, because a path this program got wrong is a
+#      machine that does not boot.
+
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_sync(path: Ptr[char]) -> int32
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
+extern def sys_fd_size(fd: int32) -> int64
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+
+SEEK_SET: int32 = 0
+
+UKI_PATH:  Ptr[char] = cast[Ptr[char]]("/boot/EFI/BOOT/BOOTX64.EFI")
+MAP_PATH:  Ptr[char] = cast[Ptr[char]]("/boot/UKI.MAP")
+
+# /boot/UKI.MAP: first line the decimal BASE (the length of the archive the
+# image shipped, which is where the overlay goes), then one absolute .ko path
+# per line. 64 KiB is ~250 paths at the length these run to; the image's own
+# list is 65 paths and 4.3 KiB.
+MAP_CAP: uint64 = 65536
+map_buf: Array[65536, uint8]
+map_len: uint64 = 0
+
+# One transfer buffer, used for the copy AND for the read-back comparison.
+IOBUF: uint64 = 65536
+iobuf:  Array[65536, uint8]
+vbuf:   Array[65536, uint8]
+
+# A cpio header is 110 bytes plus the name; PATH_CAP bounds the name.
+PATH_CAP: uint64 = 512
+hdrbuf: Array[1024, uint8]
+path_buf: Array[512, uint8]
+
+# PE geometry, filled by read_pe().
+pe_sec_hdr:  uint64 = 0        # file offset of the .initrd section header
+pe_vsize:    uint64 = 0        # VirtualSize     -- what the stub hands the kernel
+pe_rawsize:  uint64 = 0        # SizeOfRawData   -- the reservation ceiling
+pe_rawptr:   uint64 = 0        # PointerToRawData
+
+errbuf: Array[160, uint8]
+
+
+def strlen_u8(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, strlen_u8(s))
+
+
+def putdec(fd: int32, v: uint64):
+    if v == 0:
+        sys_write(fd, "0", 1)
+        return
+    d: Array[24, uint8]
+    i: uint64 = 0
+    while v > 0:
+        d[i] = cast[uint8]((v % 10) + 48)
+        v = v / 10
+        i = i + 1
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &d[i], 1)
+
+
+def why(what: Ptr[uint8]):
+    n: int32 = sys_errstr(&errbuf[0], 158)
+    puts(2, "bootsync: ")
+    puts(2, what)
+    if n > 0:
+        puts(2, ": ")
+        puts(2, &errbuf[0])
+    puts(2, "\n")
+
+
+# --- little-endian scalars out of a byte buffer ---------------------------
+def rd_u16(b: Ptr[uint8], o: uint64) -> uint64:
+    return cast[uint64](b[o]) + cast[uint64](b[o + 1]) * 256
+
+
+def rd_u32(b: Ptr[uint8], o: uint64) -> uint64:
+    return cast[uint64](b[o]) \
+         + cast[uint64](b[o + 1]) * 256 \
+         + cast[uint64](b[o + 2]) * 65536 \
+         + cast[uint64](b[o + 3]) * 16777216
+
+
+def read_at(fd: int32, off: uint64, buf: Ptr[uint8], n: uint64) -> int32:
+    if sys_lseek(fd, cast[int64](off), SEEK_SET) < 0:
+        return -1
+    got: uint64 = 0
+    while got < n:
+        k: int64 = sys_read(fd, &buf[got], n - got)
+        if k <= 0:
+            return -1
+        got = got + cast[uint64](k)
+    return 0
+
+
+# --- the PE section table -------------------------------------------------
+#
+# Everything this needs is in the first 40 bytes of one section header, and the
+# only reason to walk the file at all is to FIND that header. A UKI built by
+# scripts/hamlinux_disk.sh puts .initrd last, but nothing here depends on that:
+# the table is searched by name.
+def read_pe(fd: int32) -> int32:
+    hdr: Array[8, uint8]
+    if read_at(fd, 60, &hdr[0], 4) != 0:                  # e_lfanew at 0x3C
+        why(cast[Ptr[uint8]]("read the DOS header"))
+        return -1
+    lfa: uint64 = rd_u32(&hdr[0], 0)
+    if lfa < 64 or lfa > 4096:
+        puts(2, "bootsync: e_lfanew is not plausible; this is not the UKI.\n")
+        return -1
+    sig: Array[8, uint8]
+    if read_at(fd, lfa, &sig[0], 4) != 0:
+        why(cast[Ptr[uint8]]("read the PE signature"))
+        return -1
+    if sig[0] != 80 or sig[1] != 69 or sig[2] != 0 or sig[3] != 0:   # "PE\0\0"
+        puts(2, "bootsync: no PE signature at e_lfanew.\n")
+        return -1
+    coff: Array[24, uint8]
+    if read_at(fd, lfa, &coff[0], 24) != 0:
+        why(cast[Ptr[uint8]]("read the COFF header"))
+        return -1
+    nsec: uint64 = rd_u16(&coff[0], 6)
+    optsz: uint64 = rd_u16(&coff[0], 20)
+    if nsec == 0 or nsec > 64:
+        puts(2, "bootsync: implausible section count.\n")
+        return -1
+    tab: uint64 = lfa + 24 + optsz
+    i: uint64 = 0
+    sh: Array[40, uint8]
+    while i < nsec:
+        off: uint64 = tab + i * 40
+        if read_at(fd, off, &sh[0], 40) != 0:
+            why(cast[Ptr[uint8]]("read a section header"))
+            return -1
+        # ".initrd" -- eight bytes, NUL padded.
+        if sh[0] == 46 and sh[1] == 105 and sh[2] == 110 and sh[3] == 105 \
+           and sh[4] == 116 and sh[5] == 114 and sh[6] == 100 and sh[7] == 0:
+            pe_sec_hdr = off
+            pe_vsize   = rd_u32(&sh[0], 8)
+            pe_rawsize = rd_u32(&sh[0], 16)
+            pe_rawptr  = rd_u32(&sh[0], 20)
+            return 0
+        i = i + 1
+    puts(2, "bootsync: this UKI has no .initrd section.\n")
+    return -1
+
+
+# --- newc cpio ------------------------------------------------------------
+#
+# The header is 110 ASCII characters: "070701" then thirteen 8-digit hex
+# fields. Uppercase; the kernel's parser takes either.
+def hexdig(v: uint64) -> uint8:
+    if v < 10:
+        return cast[uint8](48 + v)
+    return cast[uint8](55 + v)                      # 'A' is 65 = 55 + 10
+
+
+def put_hex8(buf: Ptr[uint8], o: uint64, v: uint64):
+    i: uint64 = 0
+    while i < 8:
+        buf[o + 7 - i] = hexdig(v % 16)
+        v = v / 16
+        i = i + 1
+
+
+# Build a newc header for `name` (namelen bytes, NUL not counted) with
+# `fsize` bytes of data, into hdrbuf. Returns the header+name+padding length.
+def cpio_header(name: Ptr[uint8], namelen: uint64, fsize: uint64,
+                mode: uint64, ino: uint64) -> uint64:
+    hdrbuf[0] = 48
+    hdrbuf[1] = 55
+    hdrbuf[2] = 48
+    hdrbuf[3] = 55
+    hdrbuf[4] = 48
+    hdrbuf[5] = 49                                   # "070701"
+    put_hex8(&hdrbuf[0], 6,  ino)                    # c_ino
+    put_hex8(&hdrbuf[0], 14, mode)                   # c_mode
+    put_hex8(&hdrbuf[0], 22, 0)                      # c_uid
+    put_hex8(&hdrbuf[0], 30, 0)                      # c_gid
+    put_hex8(&hdrbuf[0], 38, 1)                      # c_nlink
+    put_hex8(&hdrbuf[0], 46, 0)                      # c_mtime
+    put_hex8(&hdrbuf[0], 54, fsize)                  # c_filesize
+    put_hex8(&hdrbuf[0], 62, 0)                      # c_devmajor
+    put_hex8(&hdrbuf[0], 70, 0)                      # c_devminor
+    put_hex8(&hdrbuf[0], 78, 0)                      # c_rdevmajor
+    put_hex8(&hdrbuf[0], 86, 0)                      # c_rdevminor
+    put_hex8(&hdrbuf[0], 94, namelen + 1)            # c_namesize (with NUL)
+    put_hex8(&hdrbuf[0], 102, 0)                     # c_check (unused by newc)
+    i: uint64 = 0
+    while i < namelen:
+        hdrbuf[110 + i] = name[i]
+        i = i + 1
+    hdrbuf[110 + namelen] = 0
+    n: uint64 = 110 + namelen + 1
+    while (n % 4) != 0:
+        hdrbuf[n] = 0
+        n = n + 1
+    return n
+
+
+# --- the write side -------------------------------------------------------
+#
+# `wfd` is the UKI open O_WRONLY|O_SYNC on an EXISTING file: no O_CREAT, no
+# O_TRUNC, and every seek is absolute. The file's length is never touched.
+def write_at(wfd: int32, off: uint64, buf: Ptr[uint8], n: uint64) -> int32:
+    if sys_lseek(wfd, cast[int64](off), SEEK_SET) < 0:
+        return -1
+    done: uint64 = 0
+    while done < n:
+        k: int64 = sys_write(wfd, &buf[done], n - done)
+        if k <= 0:
+            return -1
+        done = done + cast[uint64](k)
+    return 0
+
+
+# THE COMMIT, and the only four bytes that decide which image boots.
+def set_vsize(wfd: int32, v: uint64) -> int32:
+    b: Array[4, uint8]
+    b[0] = cast[uint8](v % 256)
+    b[1] = cast[uint8]((v / 256) % 256)
+    b[2] = cast[uint8]((v / 65536) % 256)
+    b[3] = cast[uint8]((v / 16777216) % 256)
+    return write_at(wfd, pe_sec_hdr + 8, &b[0], 4)
+
+
+zeros: Array[4, uint8]
+
+
+# Copy one file's bytes into the reservation at `at`, preceded by its cpio
+# header. Returns the new offset, or 0 on failure (0 can never be a valid
+# result: `at` starts at BASE, which is never zero).
+def emit_file(wfd: int32, at: uint64, path: Ptr[uint8], plen: uint64) -> uint64:
+    rfd: int32 = sys_open(cast[Ptr[char]](path))
+    if rfd < 0:
+        why(path)
+        return 0
+    sz: int64 = sys_fd_size(rfd)
+    if sz < 0:
+        sys_close(rfd)
+        why(path)
+        return 0
+    fsize: uint64 = cast[uint64](sz)
+    # The cpio name is the path WITHOUT its leading '/': archives are relative
+    # to the root they unpack into.
+    hn: uint64 = cpio_header(&path[1], plen - 1, fsize, 33188, at)
+    if write_at(wfd, at, &hdrbuf[0], hn) != 0:
+        sys_close(rfd)
+        why(cast[Ptr[uint8]]("write a cpio header"))
+        return 0
+    p: uint64 = at + hn
+    left: uint64 = fsize
+    while left > 0:
+        want: uint64 = IOBUF
+        if want > left:
+            want = left
+        k: int64 = sys_read(rfd, &iobuf[0], want)
+        if k <= 0:
+            sys_close(rfd)
+            why(path)
+            return 0
+        if write_at(wfd, p, &iobuf[0], cast[uint64](k)) != 0:
+            sys_close(rfd)
+            why(cast[Ptr[uint8]]("write module bytes"))
+            return 0
+        p = p + cast[uint64](k)
+        left = left - cast[uint64](k)
+    sys_close(rfd)
+    pad: uint64 = (4 - (p % 4)) % 4
+    if pad > 0:
+        if write_at(wfd, p, &zeros[0], pad) != 0:
+            why(cast[Ptr[uint8]]("write cpio padding"))
+            return 0
+        p = p + pad
+    return p
+
+
+# THE READ-BACK, which is the assertion that makes the commit honest. It
+# compares the bytes now sitting in the boot image against the bytes of the
+# file they were taken from -- not against a length, and not against a log
+# line. If hpm laid down a new nvme.ko, this is what proves the boot image
+# carries THAT nvme.ko.
+def verify_file(rufd: int32, at: uint64, path: Ptr[uint8],
+                plen: uint64) -> uint64:
+    rfd: int32 = sys_open(cast[Ptr[char]](path))
+    if rfd < 0:
+        why(path)
+        return 0
+    sz: int64 = sys_fd_size(rfd)
+    if sz < 0:
+        sys_close(rfd)
+        return 0
+    fsize: uint64 = cast[uint64](sz)
+    hn: uint64 = cpio_header(&path[1], plen - 1, fsize, 33188, at)
+    if read_at(rufd, at, &vbuf[0], hn) != 0:
+        sys_close(rfd)
+        why(cast[Ptr[uint8]]("read back a cpio header"))
+        return 0
+    i: uint64 = 0
+    while i < hn:
+        if vbuf[i] != hdrbuf[i]:
+            sys_close(rfd)
+            puts(2, "bootsync: the cpio header read back WRONG for ")
+            puts(2, path)
+            puts(2, "\n")
+            return 0
+        i = i + 1
+    p: uint64 = at + hn
+    left: uint64 = fsize
+    while left > 0:
+        want: uint64 = IOBUF
+        if want > left:
+            want = left
+        k: int64 = sys_read(rfd, &iobuf[0], want)
+        if k <= 0:
+            sys_close(rfd)
+            return 0
+        if read_at(rufd, p, &vbuf[0], cast[uint64](k)) != 0:
+            sys_close(rfd)
+            why(cast[Ptr[uint8]]("read back module bytes"))
+            return 0
+        j: uint64 = 0
+        while j < cast[uint64](k):
+            if vbuf[j] != iobuf[j]:
+                sys_close(rfd)
+                puts(2, "bootsync: the boot image does NOT match ")
+                puts(2, path)
+                puts(2, "\n")
+                return 0
+            j = j + 1
+        p = p + cast[uint64](k)
+        left = left - cast[uint64](k)
+    sys_close(rfd)
+    p = p + (4 - (p % 4)) % 4
+    return p
+
+
+# --- /boot/UKI.MAP --------------------------------------------------------
+def read_map() -> int32:
+    fd: int32 = sys_open(MAP_PATH)
+    if fd < 0:
+        puts(2, "bootsync: no /boot/UKI.MAP on this machine's ESP.\n")
+        puts(2, "bootsync: that file is written by scripts/hamlinux_disk.sh "
+                "and copied by\n")
+        puts(2, "bootsync: user/hlinstall.ad. Without it the length of the "
+                "shipped\n")
+        puts(2, "bootsync: initramfs is unknown, and GUESSING IT WOULD "
+                "OVERWRITE THE BOOT\n")
+        puts(2, "bootsync: IMAGE. Refusing, and changing nothing.\n")
+        return -1
+    map_len = 0
+    while map_len < MAP_CAP:
+        k: int64 = sys_read(fd, &map_buf[map_len], MAP_CAP - map_len)
+        if k <= 0:
+            break
+        map_len = map_len + cast[uint64](k)
+    sys_close(fd)
+    if map_len >= MAP_CAP:
+        puts(2, "bootsync: /boot/UKI.MAP is at or over the 64 KiB cap; "
+                "refusing to act on a\n")
+        puts(2, "bootsync: list that may have been truncated.\n")
+        return -1
+    if map_len == 0:
+        puts(2, "bootsync: /boot/UKI.MAP is empty.\n")
+        return -1
+    return 0
+
+
+map_pos: uint64 = 0
+
+
+# Pull the next non-blank, non-comment line into path_buf, NUL terminated.
+# Returns its length, or 0 at the end.
+def next_line() -> uint64:
+    while map_pos < map_len:
+        j: uint64 = 0
+        while map_pos < map_len and map_buf[map_pos] != 10:
+            if j < PATH_CAP - 1:
+                path_buf[j] = map_buf[map_pos]
+                j = j + 1
+            map_pos = map_pos + 1
+        map_pos = map_pos + 1
+        while j > 0 and path_buf[j - 1] <= 32:
+            j = j - 1
+        path_buf[j] = 0
+        if j == 0:
+            continue
+        if path_buf[0] == 35:                        # '#'
+            continue
+        return j
+    return 0
+
+
+def parse_dec(s: Ptr[uint8], n: uint64) -> int64:
+    v: uint64 = 0
+    i: uint64 = 0
+    if n == 0:
+        return -1
+    while i < n:
+        if s[i] < 48 or s[i] > 57:
+            return -1
+        v = v * 10 + cast[uint64](s[i]) - 48
+        i = i + 1
+    return cast[int64](v)
+
+
+def show_geometry():
+    puts(1, "bootsync: .initrd section header at file offset ")
+    putdec(1, pe_sec_hdr)
+    puts(1, "\n           raw data at ")
+    putdec(1, pe_rawptr)
+    puts(1, ", reservation (SizeOfRawData) ")
+    putdec(1, pe_rawsize)
+    puts(1, "\n           in use (VirtualSize) ")
+    putdec(1, pe_vsize)
+    puts(1, ", free ")
+    putdec(1, pe_rawsize - pe_vsize)
+    puts(1, "\n")
+
+
+def streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    if a[i] == b[i]:
+        return 1
+    return 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    dry: int32 = 0
+    stat_only: int32 = 0
+    ai: int32 = 1
+    while ai < argc:
+        a: Ptr[uint8] = cast[Ptr[uint8]](argv[cast[uint64](ai)])
+        if streq(a, cast[Ptr[uint8]]("-n")) != 0:
+            dry = 1
+        elif streq(a, cast[Ptr[uint8]]("--status")) != 0:
+            stat_only = 1
+        else:
+            puts(2, "bootsync: usage: bootsync [-n] [--status]\n")
+            return 2
+        ai = ai + 1
+
+    rufd: int32 = sys_open(UKI_PATH)
+    if rufd < 0:
+        puts(2, "bootsync: cannot read /boot/EFI/BOOT/BOOTX64.EFI.\n")
+        puts(2, "bootsync: on an installed machine the ESP is bound at /boot "
+                "by\n")
+        puts(2, "bootsync: etc/rc.boot.installed. Nothing was changed.\n")
+        return 1
+    if read_pe(rufd) != 0:
+        sys_close(rufd)
+        return 1
+    if stat_only != 0:
+        show_geometry()
+        sys_close(rufd)
+        return 0
+
+    if read_map() != 0:
+        sys_close(rufd)
+        return 1
+
+    # The first line is BASE: the length of the archive the image shipped, and
+    # therefore the offset the overlay goes at. It is read rather than derived
+    # because after one successful run VirtualSize is no longer BASE, and a
+    # program that guessed would append to its own last overlay until the
+    # reservation ran out.
+    n0: uint64 = next_line()
+    base_s: int64 = parse_dec(&path_buf[0], n0)
+    if base_s <= 0:
+        puts(2, "bootsync: the first line of /boot/UKI.MAP is not a length.\n")
+        sys_close(rufd)
+        return 1
+    base: uint64 = cast[uint64](base_s)
+    if base > pe_vsize or base > pe_rawsize:
+        puts(2, "bootsync: /boot/UKI.MAP's base does not fit this boot "
+                "image.\n")
+        puts(2, "bootsync: the map and the UKI are not from the same build. "
+                "Refusing.\n")
+        sys_close(rufd)
+        return 1
+    if (base % 4) != 0:
+        puts(2, "bootsync: the base length is not 4-byte aligned; the loader "
+                "would not\n")
+        puts(2, "bootsync: find the overlay's header. Refusing.\n")
+        sys_close(rufd)
+        return 1
+
+    # --- pass one: SIZE IT, touching nothing --------------------------------
+    # A reservation that is too small must be found BEFORE the first byte is
+    # written, because the write itself is what shrinks the running image back
+    # to base.
+    want: uint64 = 0
+    count: uint64 = 0
+    save_pos: uint64 = map_pos
+    while 1 == 1:
+        pl: uint64 = next_line()
+        if pl == 0:
+            break
+        if path_buf[0] != 47:
+            puts(2, "bootsync: /boot/UKI.MAP holds a non-absolute path.\n")
+            sys_close(rufd)
+            return 1
+        fd: int32 = sys_open(cast[Ptr[char]](&path_buf[0]))
+        if fd < 0:
+            puts(2, "bootsync: a boot module named in /boot/UKI.MAP is not on "
+                    "this root:\n           ")
+            puts(2, &path_buf[0])
+            puts(2, "\nbootsync: refusing to build a boot image that is "
+                    "missing a driver.\n")
+            sys_close(rufd)
+            return 1
+        sz: int64 = sys_fd_size(fd)
+        sys_close(fd)
+        if sz < 0:
+            sys_close(rufd)
+            return 1
+        hn: uint64 = cpio_header(&path_buf[1], pl - 1, cast[uint64](sz),
+                                 33188, 1)
+        want = want + hn + cast[uint64](sz)
+        want = want + (4 - (want % 4)) % 4
+        count = count + 1
+    # the TRAILER!!! record closes the archive
+    tn: uint64 = cpio_header(cast[Ptr[uint8]]("TRAILER!!!"), 10, 0, 0, 0)
+    want = want + tn
+
+    puts(1, "bootsync: ")
+    putdec(1, count)
+    puts(1, " boot modules, ")
+    putdec(1, want)
+    puts(1, " bytes of overlay; reservation ")
+    putdec(1, pe_rawsize - base)
+    puts(1, " bytes\n")
+
+    if base + want > pe_rawsize:
+        puts(2, "bootsync: THE OVERLAY DOES NOT FIT THE RESERVATION.\n")
+        puts(2, "bootsync: this medium was built with too little slack in "
+                "the .initrd\n")
+        puts(2, "bootsync: section. Nothing has been written and the machine "
+                "boots exactly\n")
+        puts(2, "bootsync: as it did before. Re-image to get a bigger "
+                "reservation.\n")
+        sys_close(rufd)
+        return 1
+
+    if dry != 0:
+        puts(1, "bootsync: -n given; nothing written.\n")
+        sys_close(rufd)
+        return 0
+
+    wfd: int32 = sys_open_sync(UKI_PATH)
+    if wfd < 0:
+        puts(2, "bootsync: cannot open the boot image for writing.\n")
+        puts(2, "bootsync: nothing was changed.\n")
+        sys_close(rufd)
+        return 1
+
+    # --- STEP 1: fall back to the shipped image -----------------------------
+    if set_vsize(wfd, base) != 0:
+        why(cast[Ptr[uint8]]("shrink .initrd to the shipped length"))
+        sys_close(wfd)
+        sys_close(rufd)
+        return 1
+    puts(1, "bootsync: the boot image is now the one this machine was "
+            "installed with.\n")
+
+    # --- STEP 2: fill the reservation ---------------------------------------
+    map_pos = save_pos
+    at: uint64 = base
+    while 1 == 1:
+        pl: uint64 = next_line()
+        if pl == 0:
+            break
+        at = emit_file(wfd, at, &path_buf[0], pl)
+        if at == 0:
+            puts(2, "bootsync: the overlay was NOT completed. The machine "
+                    "boots the image\n")
+            puts(2, "bootsync: it was installed with -- unchanged and "
+                    "bootable.\n")
+            sys_close(wfd)
+            sys_close(rufd)
+            return 1
+    tn2: uint64 = cpio_header(cast[Ptr[uint8]]("TRAILER!!!"), 10, 0, 0, 0)
+    if write_at(wfd, at, &hdrbuf[0], tn2) != 0:
+        why(cast[Ptr[uint8]]("write the cpio trailer"))
+        sys_close(wfd)
+        sys_close(rufd)
+        return 1
+    total: uint64 = at + tn2 - base
+
+    # --- STEP 3: read it back against the files it came from -----------------
+    map_pos = save_pos
+    vat: uint64 = base
+    while 1 == 1:
+        pl: uint64 = next_line()
+        if pl == 0:
+            break
+        vat = verify_file(rufd, vat, &path_buf[0], pl)
+        if vat == 0:
+            puts(2, "bootsync: VERIFICATION FAILED. The size field was never "
+                    "moved, so the\n")
+            puts(2, "bootsync: machine boots the image it was installed with. "
+                    "Nothing is\n")
+            puts(2, "bootsync: half-applied.\n")
+            sys_close(wfd)
+            sys_close(rufd)
+            return 1
+    if vat != at:
+        puts(2, "bootsync: the read-back ended at a different offset than the "
+                "write.\n")
+        sys_close(wfd)
+        sys_close(rufd)
+        return 1
+    puts(1, "bootsync: ")
+    putdec(1, count)
+    puts(1, " modules verified in the boot image against the files on this "
+           "root\n")
+
+    # --- STEP 4: THE COMMIT --------------------------------------------------
+    if set_vsize(wfd, base + total) != 0:
+        why(cast[Ptr[uint8]]("commit the new initrd length"))
+        puts(2, "bootsync: the machine still boots the shipped image.\n")
+        sys_close(wfd)
+        sys_close(rufd)
+        return 1
+    sys_close(wfd)
+    sys_close(rufd)
+    puts(1, "bootsync: committed. The next boot loads these modules.\n")
+    return 0
