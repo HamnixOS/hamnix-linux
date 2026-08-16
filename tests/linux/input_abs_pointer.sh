@@ -277,6 +277,16 @@ else
     fi
 fi
 
+# AND IT SAYS WHAT IT DECIDED. On his machine that line is the only way to
+# learn what the device actually reports -- this gate can only assert that the
+# line exists and agrees with what it was told.
+if grep -q "abs x 0\.\.$TP_MAXX y 0\.\.$TP_MAXY POINTER" "$WORK/tp_swipe.log"; then
+    ok "wsysd logs the range and the kind it decided on, per device"
+else
+    bad "wsysd logs the range and the kind it decided on, per device"
+    sed 's/^/     /' "$WORK/tp_swipe.log" | head -8
+fi
+
 DOWN="$(run_case tp_down "$WORK/tp_down.bin" "$TP_DECL")"
 echo "     touchpad finger-down only, from (1060,650) -> $DOWN   (expect 1060 650)"
 if near "$DOWN" 1060 650 2; then

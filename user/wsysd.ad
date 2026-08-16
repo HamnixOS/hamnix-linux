@@ -3326,6 +3326,31 @@ def open_input_path(path: Ptr[char]) -> int32:
         # Not an evdev node (a plain file). Take the declared range if there
         # is one; otherwise the tablet default above stands.
         abs_env_apply(idx)
+    # SAY WHAT WAS MEASURED, because this is the one fact no test on this
+    # machine can supply. Every gate here feeds the compositor a FILE and
+    # declares the range; whether his touchpad really reports 0..1300 and
+    # whether it really sets INPUT_PROP_POINTER can only be read off the
+    # machine itself, and this line is where he reads it. If a device turns
+    # out to declare neither property bit it will show up here as
+    # "touchscreen", and HAMWSYSD_ABS overrides it without a rebuild.
+    puts(1, "wsysd: input ")
+    putd(1, cast[int32](idx))
+    puts(1, ": ")
+    if in_abs[idx] == 0:
+        puts(1, "relative only\n")
+    else:
+        puts(1, "abs x ")
+        putd(1, in_minx[idx])
+        puts(1, "..")
+        putd(1, in_maxx[idx])
+        puts(1, " y ")
+        putd(1, in_miny[idx])
+        puts(1, "..")
+        putd(1, in_maxy[idx])
+        if in_direct[idx] != 0:
+            puts(1, " DIRECT (touchscreen: jump)\n")
+        else:
+            puts(1, " POINTER (touchpad: additive)\n")
     n_input = n_input + 1
     return fd
 
