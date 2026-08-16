@@ -530,6 +530,11 @@ static int            chrome_rw;              /* the kernel let us map it W   */
  *     pixel-out rewrite -- so BB_FILE_BYTES is BB_HDR_BYTES and does not move.
  *     sizeof(struct wshm), sizeof(struct wwin) and the /srv/wsys segment layout
  *     do not mention BB_W or BB_H at all, so this costs NO WSYS_VERSION bump.
+ *     MEASURED rather than asserted, because that claim is worth 92 of 124
+ *     packages: shm_attach ftruncates $HAMWSYS to sizeof(struct wshm), so the
+ *     file size IS the number. A wsysd linked against this file at 1920x1080
+ *     and one linked against it at 2560x1600, same geometry, same run:
+ *     37,972,380 bytes BOTH TIMES.
  *   * bbpix_page's mmap length is BB_BYTES: address space in a sparse file,
  *     which is the same currency BB_SLOTS spends 512 slots of above.
  *

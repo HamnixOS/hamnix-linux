@@ -734,6 +734,15 @@ def screen_fault(msg: Ptr[uint8], a: int32, b: int32, c: int32, d: int32):
 # one number and the screen at another, which is a bug to be told about, not a
 # reason to leave a machine with no desktop -- the whole complaint being fixed
 # here is a compositor that refused to run over a number. It is LOUD instead.
+#
+# ONE SIDE EFFECT, NAMED BECAUSE IT WAS MEASURED RATHER THAN INTENDED: reading
+# /dev/wsys/pool runs snap_pool, which calls bb_attach, so the backbuffer
+# accounting segment is now created at STARTUP instead of when the first v2
+# window appears. It is 65,536 bytes (BB_HDR_BYTES; no pixels have lived there
+# since the pixel-out rewrite) and it is created by the segment's OWNER, which
+# is the process that should own it -- previously whichever client made the
+# first v2 window got there first. Measured green afterwards: install_from_usb
+# 75/0, wsys_srv_deboot 36/0, de_appmenu_brisk 17/0, de_appmenu_band 11/0.
 def check_maxsurface():
     n: int64 = slurp(cast[Ptr[char]]("/dev/wsys/pool"), &ctlbuf[0], 200)
     if n <= 0:
