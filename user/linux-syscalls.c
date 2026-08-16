@@ -5154,3 +5154,88 @@ int32_t sys_setexitsem(uint64_t addr)
 { (void)addr; errno = ENOSYS; return -1; }
 int32_t sys_rfork_thread(int32_t flags, uint64_t child_stack, uint64_t tls)
 { (void)flags; (void)child_stack; (void)tls; errno = ENOSYS; return -1; }
+
+/* ====================================================================
+ * evdev ABSOLUTE AXES — the device's own range, read from the device.
+ * ====================================================================
+ *
+ * An absolute axis carries a number in the DEVICE'S OWN UNITS, and the range
+ * of those units is a property of the device that is only discoverable by
+ * asking it. wsysd used to assume every EV_ABS value was 0..32767 -- the
+ * range QEMU's virtio-tablet advertises -- and multiply by the screen size.
+ * That is right for a VM and wrong for every real i2c-hid digitizer, whose
+ * logical maximum is a few thousand: a touch at the far edge landed a few
+ * hundred pixels in, and a touchpad (max ~1300 x ~750) mapped its ENTIRE
+ * surface onto a 76x27 pixel box in the top-left corner of a 1920x1200 panel.
+ *
+ * EVIOCGABS is the answer the kernel already has. So is the device's own
+ * statement of what KIND of pointing device it is: INPUT_PROP_DIRECT means the
+ * user touches the thing the coordinates are in (a touchscreen -- absolute,
+ * jump to the point), INPUT_PROP_POINTER means the surface is somewhere else
+ * (a touchpad -- the motion is relative to wherever the cursor already is).
+ * That property bit exists precisely to tell those two apart, and guessing
+ * from the axis range instead would misclassify the first large touchpad.
+ *
+ * out[] is filled with 8 int32s and MUST have room for them:
+ *   0 = 1 if the node has usable absolute X and Y axes, else 0
+ *   1,2 = ABS_X minimum, maximum
+ *   3,4 = ABS_Y minimum, maximum
+ *   5 = 1 if INPUT_PROP_DIRECT   (touchscreen: absolute)
+ *   6 = 1 if INPUT_PROP_POINTER  (touchpad: relative)
+ *   7 = 1 if the node advertises multitouch (ABS_MT_POSITION_X)
+ *
+ * Returns 0 if the fd is an evdev node that answered, -1 otherwise. -1 is the
+ * ordinary case for a REGULAR FILE, which is what every offscreen gate feeds
+ * the compositor: a file of evdev records is byte-identical to the device's
+ * output but has no ioctl interface, so the caller falls back to a declared
+ * range (HAMWSYSD_ABS). That fallback is the only way an offscreen test can
+ * exercise this arithmetic at all, and it is not a second code path -- it
+ * fills in exactly the same fields this probe does. */
+#include <sys/ioctl.h>
+#include <linux/input.h>
+
+int32_t hamin_abs_probe(int32_t fd, int32_t *out)
+{
+    if (!out) { errno = EINVAL; return -1; }
+    for (int i = 0; i < 8; i++) out[i] = 0;
+    if (fd < 0) { errno = EBADF; return -1; }
+
+    /* EVIOCGBIT(EV_ABS) first: a keyboard has no absolute axes at all and
+     * must not be probed as though it did. */
+    unsigned long absbits[(ABS_CNT + 8 * sizeof(long) - 1) /
+                          (8 * sizeof(long))];
+    memset(absbits, 0, sizeof absbits);
+    if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof absbits), absbits) < 0)
+        return -1;                      /* not an evdev node (a plain file) */
+#define HAMIN_HAS(b) ((absbits[(b) / (8 * sizeof(long))] >> \
+                       ((b) % (8 * sizeof(long)))) & 1ul)
+    if (!HAMIN_HAS(ABS_X) || !HAMIN_HAS(ABS_Y))
+        return 0;                       /* an evdev node, but relative-only */
+    out[7] = HAMIN_HAS(ABS_MT_POSITION_X) ? 1 : 0;
+#undef HAMIN_HAS
+
+    struct input_absinfo ax, ay;
+    memset(&ax, 0, sizeof ax);
+    memset(&ay, 0, sizeof ay);
+    if (ioctl(fd, EVIOCGABS(ABS_X), &ax) < 0) return -1;
+    if (ioctl(fd, EVIOCGABS(ABS_Y), &ay) < 0) return -1;
+    /* A degenerate range would make the scaling a division by zero. Report it
+     * as "no usable absolute axes" rather than inventing a range. */
+    if (ax.maximum > ax.minimum && ay.maximum > ay.minimum) {
+        out[0] = 1;
+        out[1] = ax.minimum; out[2] = ax.maximum;
+        out[3] = ay.minimum; out[4] = ay.maximum;
+    }
+
+    unsigned long props[(INPUT_PROP_CNT + 8 * sizeof(long) - 1) /
+                        (8 * sizeof(long))];
+    memset(props, 0, sizeof props);
+    if (ioctl(fd, EVIOCGPROP(sizeof props), props) >= 0) {
+#define HAMIN_PROP(b) ((props[(b) / (8 * sizeof(long))] >> \
+                        ((b) % (8 * sizeof(long)))) & 1ul)
+        out[5] = HAMIN_PROP(INPUT_PROP_DIRECT)  ? 1 : 0;
+        out[6] = HAMIN_PROP(INPUT_PROP_POINTER) ? 1 : 0;
+#undef HAMIN_PROP
+    }
+    return 0;
+}
