@@ -577,6 +577,14 @@ def _enumerate_disks_sysblock():
             c = sysblk_ls[i]
         if c == 10:
             if nl > 0 and n_disks < MAX_DISKS:
+                # TERMINATE FIRST. _is_virtual_block goes through
+                # _name_has_prefix, which compares for the PREFIX's length and
+                # not the name's, so an unterminated buffer lets bytes left
+                # over from a LONGER previous name decide the match. The
+                # /dev/blk path above has the same latent shape and has never
+                # been bitten because every real device name is longer than
+                # every prefix; that is luck, not a guarantee.
+                nm[nl] = 0
                 skip: int32 = 0
                 if _is_virtual_block(&nm[0]) != 0:
                     skip = 1
