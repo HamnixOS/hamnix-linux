@@ -42,6 +42,46 @@ happened" from "nothing happened."** There is now a heartbeat-coverage floor
 asked *before* the verdict, and `tests/linux/vcpu_time.sh` to tell an idle wedge
 from a spinning one. Evidence in `/home/david/.hamnix-build/soak-evidence/`.
 
+### THE WINDOW SET REACHING 94 — narrowed by reading the compositor, NOT settled
+
+After the arena fix the soak's remaining red is that the window set climbs to 94
+against a baseline of 3, at the same rate the dead runs had (~0.95 per launch) —
+they simply died before it could matter. Eight single-step decreases spread
+evenly across 109 samples, so it is **not** the sweep's `6..64` range wrapping.
+Compositor or harness was left **not established**.
+
+**A source reading that narrows it, and is nothing more than a source reading.**
+`user/linux-wsys.c` has exactly three window-allocating call sites, and every
+one of them records a pid that belongs to a real, live client:
+
+* `:3955` — the routed server path, `win_alloc(c->pid)`, the connection's own
+  client pid.
+* `:8881` — the no-server fallback, `win_alloc(getpid())`, running **in the
+  client process**, so that is the client too.
+* `:9991` — `hamwsys_alloc(pid)`, the privileged on-behalf path, which stamps
+  the pid the DE names for a child it just spawned.
+
+`win_reap_dead()` (`:2321`) clears any row whose owner is gone — `kill(pid, 0)`
+returning `ESRCH` — releasing its keystroke channel, pixmaps, backbuffer and
+images, and it is called before the taskbar is listed (`:7920`) and before the
+screen is painted (`:8163`). **The only rows it can never reclaim are those with
+`pid <= 0`, which it skips outright — and none of the three allocation paths can
+produce one.** `WSYS_MAX_WINDOWS` is 512, so 94 is well under the cap and
+climbing, not stuck at a ceiling.
+
+So the compositor has no *visible-in-source* leak, which makes the harness's
+counting the more likely of the two — **but that is an inference from reading
+code, not a measurement of a running system, and it must not be written down as
+the answer.** The reason the question is open at all is that the census never
+prints the compositor's own table; the sweep **guesses wids**, so a climbing
+number may be counting guesses rather than windows.
+
+**The experiment that settles it**, and it is small: have the census print the
+count of `used` rows straight out of `shm->win[]` — the compositor's own answer —
+beside the swept number. If the compositor's count stays near 3 while the swept
+number climbs to 94, it is the harness. If both climb, it is a real leak and the
+three allocation sites above are where to start, since the reaper is sound.
+
 ### THE INSTALLER DEFECT IN PUBLISHED 1.0.26 — measured, and it is the mild outcome
 
 `hamnix-install-1.0.26.tar.gz` **on 255.one right now** carries BOTH
