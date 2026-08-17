@@ -4056,17 +4056,62 @@ def _h_paint_calendar(id: int32):
 #
 # LIMITS
 # ------
-# Backbuffer dims match the kernel cap (HAMUI_V2_BB_W x HAMUI_V2_BB_H).
-# The existing markup-emitting draw primitives (_h_paint_* etc) are
-# UNCHANGED — v1 clients keep working bit-for-bit. v2 is opt-in.
+# The backbuffer ceiling is the DEVICE'S, read from /dev/wsys/pool, and is
+# not a constant in this file. The existing markup-emitting draw primitives
+# (_h_paint_* etc) are UNCHANGED — v1 clients keep working bit-for-bit. v2
+# is opt-in.
 
-# The maximum window the v2 backbuffer can ever be sized to. This is the
-# CAP, not the per-app allocation: the actual buffer is mmap'd to the
-# window's real width x height at protocol-negotiation time (see
-# _h_v2_alloc). A panel (1280x28) resident-pages ~143 KB; a calculator
-# (180x270) ~194 KB — instead of the old fixed 4 MB static BSS per app.
-HAMUI_V2_BB_MAX_W: uint64 = 1280
-HAMUI_V2_BB_MAX_H: uint64 = 800
+# THIS FILE USED TO CARRY ITS OWN COPY OF THE SCREEN CEILING, AT 1280x800,
+# AND CLAMPED TO IT IN SILENCE.
+#
+#     if w > HAMUI_V2_BB_MAX_W:    w = HAMUI_V2_BB_MAX_W
+#     if h > HAMUI_V2_BB_MAX_H:    h = HAMUI_V2_BB_MAX_H
+#
+# That is the fourth copy of one number found in the Linux lane this week and
+# the third of them to be a SILENT clamp. The first two both reached the
+# owner's screen: user/wsysd.ad's composite buffer was 1920x1080 against his
+# 1920x1200 panel and the desktop would not start (fd0d4f79), and
+# lib/hamui_host.ad's rasterizer ceiling cut his backdrop off at row 1080 and
+# reported perfect coverage while doing it (ae019748, b9f55228). This one is
+# the same shape one layer further out: h_v2_bb_w/h are what EVERY v2 draw
+# primitive clips against, so a client granted a window wider than 1280 or
+# taller than 800 would rasterize and commit only its top-left 1280x800 and
+# leave the rest of its own window the compositor's grey -- and, because the
+# clamp returned 0, believe it had succeeded.
+#
+# NOT MEASURED ON A LIVE CLIENT, and the reason is worth writing down: the one
+# v2 client a person looks at, user/hambrowse.ad, caps its window at 880x600
+# and only ever SHRINKS it to fit a small screen (_read_screen_dims), so it
+# cannot reach this clamp today -- measured, at HAMFB_GEOM=1920x1200 it paints
+# columns 50..929 and rows 26..639 and nothing is cut. So this is a latent
+# defect fixed by reading, on the evidence of the two identical ones that were
+# not latent, not a reproduced failure.
+#
+# THE CEILING IS NOW READ FROM THE DEVICE, which is the mechanism this tree
+# already built for exactly this: user/linux-wsys.c publishes `maxsurface
+# <w>x<h>` on /dev/wsys/pool ("THE DEVICE STATES ITS OWN CEILING, because
+# until it did, everybody who needed the number had their own copy of it and
+# one of them was wrong"), and user/wsysd.ad (check_maxsurface) and
+# user/wsyswl.ad (resolve_maxsurface) both read it rather than hold a copy.
+# hamui is not a pure module -- it opens window files by path already -- so it
+# can do the same, and one fewer number here is worth more than a corrected
+# one. When a window really does exceed the device's ceiling the clamp is now
+# LOUD, because the device would refuse a blit rect that big anyway and a
+# client told nothing would paint nothing for ever.
+#
+# The values below are a LAST-RESORT FALLBACK for a pool that cannot be read,
+# and they are the device's own BB_W x BB_H so that the fallback is not itself
+# a smaller ceiling. This is the per-app CAP, never the per-app allocation:
+# the buffer is demand-zero anon mmap sized to the window's real width x
+# height (see _h_v2_alloc), so a panel (1280x28) resident-pages ~143 KB and a
+# calculator (180x270) ~194 KB whatever this says.
+HAMUI_V2_BB_MAX_W: uint64 = 2560
+HAMUI_V2_BB_MAX_H: uint64 = 1600
+
+# The device's answer, resolved once. 0 = not asked yet.
+h_v2_max_w: uint64 = 0
+h_v2_max_h: uint64 = 0
+h_v2_pool_buf: Array[256, uint8]
 
 HAMUI_V2_FMT_RGBA8888: uint8 = 1
 HAMUI_V2_FMT_BGRA8888: uint8 = 2
@@ -4107,6 +4152,89 @@ def _h_v2_msg() -> Ptr[uint8]:
     return cast[Ptr[uint8]](h_v2_msg_addr)
 
 
+def _h_v2_put_dim(w: uint64, h: uint64):
+    # "<w>x<h>" to stderr, for the two diagnostics below.
+    db: Array[48, uint8]
+    p: uint64 = _h_i32_to_dec(cast[int32](w), &db[0])
+    db[p] = 120                                          # 'x'
+    p = p + 1
+    p = p + _h_i32_to_dec(cast[int32](h), &db[p])
+    sys_write(2, &db[0], p)
+
+
+# HOW BIG MAY A v2 WINDOW BE? The device knows and says so on /dev/wsys/pool;
+# this reads it, once, and caches it in h_v2_max_w/h. Same parse as
+# user/wsyswl.ad's resolve_maxsurface, and the same reasoning: /dev/wsys is
+# served IN THIS PROCESS by user/linux-wsys.c, the same build, so `maxsurface`
+# is not a field that can be missing across a version boundary.
+#
+# It differs from wsyswl's in one way on purpose: wsyswl REFUSES when the pool
+# cannot be read, because it is a server and a guess would be invisible.
+# hamui is linked into 111 programs and is asked this question while a window
+# is already open, so refusing here would turn an unreadable pool into 111
+# programs that do not paint. It falls back to HAMUI_V2_BB_MAX_W/H -- the
+# device's own BB_W x BB_H -- and says so on stderr, so the fallback is
+# reported rather than assumed.
+def _h_v2_resolve_max():
+    if h_v2_max_w != 0 and h_v2_max_h != 0:
+        return
+    # Set the fallback FIRST, so every early return below leaves a usable
+    # ceiling behind and this function is asked exactly once either way.
+    h_v2_max_w = HAMUI_V2_BB_MAX_W
+    h_v2_max_h = HAMUI_V2_BB_MAX_H
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/pool"))
+    if fd < 0:
+        m0: Ptr[uint8] = "[hamui] /dev/wsys/pool cannot be opened -- using this build's own maximum surface instead of the device's\n"
+        sys_write(2, m0, _h_strlen(m0))
+        return
+    n: int64 = sys_read(fd, &h_v2_pool_buf[0], 255)
+    sys_close(fd)
+    if n <= 0:
+        m1: Ptr[uint8] = "[hamui] /dev/wsys/pool is empty -- using this build's own maximum surface instead of the device's\n"
+        sys_write(2, m1, _h_strlen(m1))
+        return
+    ln: uint64 = cast[uint64](n)
+    h_v2_pool_buf[ln] = 0
+    # Find "maxsurface " and take "<w>x<h>" after it.
+    i: uint64 = 0
+    at: int64 = -1
+    while i + 11 <= ln:
+        if h_v2_pool_buf[i] == 109 and h_v2_pool_buf[i + 1] == 97 \
+                and h_v2_pool_buf[i + 2] == 120 and h_v2_pool_buf[i + 3] == 115 \
+                and h_v2_pool_buf[i + 4] == 117 and h_v2_pool_buf[i + 5] == 114 \
+                and h_v2_pool_buf[i + 6] == 102 and h_v2_pool_buf[i + 7] == 97 \
+                and h_v2_pool_buf[i + 8] == 99 and h_v2_pool_buf[i + 9] == 101 \
+                and h_v2_pool_buf[i + 10] == 32:
+            at = cast[int64](i) + 11
+            i = ln
+        else:
+            i = i + 1
+    if at < 0:
+        m2: Ptr[uint8] = "[hamui] /dev/wsys/pool does not state a `maxsurface` -- the device and this build disagree about what they are\n"
+        sys_write(2, m2, _h_strlen(m2))
+        return
+    j: uint64 = cast[uint64](at)
+    dw: uint64 = 0
+    while j < ln and h_v2_pool_buf[j] >= 48 and h_v2_pool_buf[j] <= 57:
+        dw = dw * 10 + cast[uint64](h_v2_pool_buf[j]) - 48
+        j = j + 1
+    if j >= ln or h_v2_pool_buf[j] != 120:               # 'x'
+        m3: Ptr[uint8] = "[hamui] /dev/wsys/pool's `maxsurface` is not <w>x<h>\n"
+        sys_write(2, m3, _h_strlen(m3))
+        return
+    j = j + 1
+    dh: uint64 = 0
+    while j < ln and h_v2_pool_buf[j] >= 48 and h_v2_pool_buf[j] <= 57:
+        dh = dh * 10 + cast[uint64](h_v2_pool_buf[j]) - 48
+        j = j + 1
+    if dw < 1 or dh < 1:
+        m4: Ptr[uint8] = "[hamui] /dev/wsys/pool states a maximum surface that is not a size\n"
+        sys_write(2, m4, _h_strlen(m4))
+        return
+    h_v2_max_w = dw
+    h_v2_max_h = dh
+
+
 def _h_v2_alloc(w: uint64, h: uint64) -> int32:
     # Allocate (or grow to) a w x h RGBA8888 backbuffer plus its commit
     # scratch via demand-zero anon mmap. Idempotent: a second call with
@@ -4116,10 +4244,22 @@ def _h_v2_alloc(w: uint64, h: uint64) -> int32:
     # case, not the steady state). Returns 0 on success, -1 on failure.
     if w == 0 or h == 0:
         return -1
-    if w > HAMUI_V2_BB_MAX_W:
-        w = HAMUI_V2_BB_MAX_W
-    if h > HAMUI_V2_BB_MAX_H:
-        h = HAMUI_V2_BB_MAX_H
+    # THE CLAMP IS THE DEVICE'S AND IT IS LOUD. See HAMUI_V2_BB_MAX_W above
+    # for the four copies of this number and the two that reached a screen.
+    _h_v2_resolve_max()
+    if w > h_v2_max_w or h > h_v2_max_h:
+        cm: Ptr[uint8] = "[hamui] window "
+        sys_write(2, cm, _h_strlen(cm))
+        _h_v2_put_dim(w, h)
+        cm2: Ptr[uint8] = " exceeds the window system's maximum surface "
+        sys_write(2, cm2, _h_strlen(cm2))
+        _h_v2_put_dim(h_v2_max_w, h_v2_max_h)
+        cm3: Ptr[uint8] = " -- the v2 backbuffer is cut to it and the rest of this window will stay the compositor's clear colour\n"
+        sys_write(2, cm3, _h_strlen(cm3))
+        if w > h_v2_max_w:
+            w = h_v2_max_w
+        if h > h_v2_max_h:
+            h = h_v2_max_h
     # Already have a big-enough buffer? Keep it, just re-describe dims so
     # clipping matches the window the client now draws into.
     if h_v2_bb_addr != 0 and w <= h_v2_bb_w and h <= h_v2_bb_h:
@@ -4181,8 +4321,15 @@ def hamui_set_protocol_v2() -> int32:
     # actually touches become resident, but callers that know their
     # window dims should prefer hamui_set_protocol_v2_dims() so the
     # mapping itself is right-sized.
-    return hamui_set_protocol_v2_dims(cast[int32](HAMUI_V2_BB_MAX_W),
-                                      cast[int32](HAMUI_V2_BB_MAX_H))
+    # THE DEVICE'S MAXIMUM, not this file's: with a copy of the ceiling here
+    # this entry point handed out a 1280x800 buffer on a 2560x1600-capable
+    # device, so a caller that took it at its word ("full-size") got a window
+    # it could paint less than half of. No caller in the tree uses this form
+    # today (every one of the 21 call sites uses _dims); it is kept working
+    # rather than kept wrong.
+    _h_v2_resolve_max()
+    return hamui_set_protocol_v2_dims(cast[int32](h_v2_max_w),
+                                      cast[int32](h_v2_max_h))
 
 
 def hamui_v2_is_active() -> int32:
