@@ -147,6 +147,23 @@
 # live processes is the only bounded thing on that path. NOT OBSERVED AT ALL:
 # any wedge from it.
 #
+# A PREDICTION, WRITTEN DOWN BEFORE THE RUN THAT TESTS IT, so it cannot be
+# rationalised afterwards. The 3-hour arm of this gate runs with the close sweep
+# ON, so its WINDOW count stays flat. If the resource were windows, that arm
+# would keep redirecting for the whole three hours.
+#
+# IT WILL NOT, AND HERE IS WHY IN ADVANCE: `close <wid>` on /dev/wsys/ctl
+# (user/linux-wsys.c:8999) sets `v->used = 0`, unbinds the keychan and releases
+# the pixmap and backbuffer -- AND DOES NOT TOUCH THE PROCESS. The application
+# is still running with its window gone. It is the LIVE PROCESS that pins the
+# fdns slot, not the window. So the churn arm should lose redirection at
+# ROUGHLY THE SAME LAUNCH COUNT as the arm that closed nothing -- about 118
+# cycles, near seventeen minutes at this cadence -- with its window count flat
+# the whole way.
+#
+# IF IT KEEPS REDIRECTING FOR THREE HOURS, THIS MECHANISM IS WRONG and the
+# window count was the resource after all.
+#
 # WHAT IT WOULD MEAN ON HIS STICK, and this is reasoning, flagged as reasoning:
 # once redirection fails, rc.5.linux's `wsysd > /var/log/wsysd.log` would put
 # the compositor's stderr ON THE CONSOLE instead -- and consmirror copies the
