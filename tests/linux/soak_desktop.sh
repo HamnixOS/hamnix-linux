@@ -140,6 +140,27 @@
 # configuration at all (see below). The 64 that a desktop actually walks into
 # by opening applications is this one.
 #
+# AND IT IS NOT THE HARNESS TYPING, WHICH HAD TO BE RULED OUT BEFORE ANY OF THE
+# ABOVE COULD BE BELIEVED. The hand's keystrokes can reach PID 1's console
+# prompt as well as wsysd (see the TYPE switch in drive_desktop), and in a later
+# run they derailed the rc outright. So the run this section is written from was
+# checked for that first:
+#
+#     hamsh$ prompts in its serial log:      0
+#     `command not found` lines:             0
+#
+# The console shell was NEVER interactive in that run, so nothing typed reached
+# it. And the leak's own shape says the same thing more directly: the heartbeat
+# kept its one-a-second rhythm THROUGH the failure, with the /etc listing
+# interleaved between consecutive timestamps --
+#
+#     SOAKHB / 2026-08-17 03:31:54 UTC / de-ns-run / group / ... /
+#     SOAKHB / 2026-08-17 03:31:55 UTC / de-ns-run / group / ...
+#
+# -- which is the rc's OWN loop still running and its OWN `ls /etc > /dev/null`
+# no longer redirecting. A shell derailed to a prompt does not keep printing the
+# script's heartbeat.
+#
 # WHAT IS MEASURED AND WHAT IS NOT. MEASURED: the failure, its time, the window
 # count and cycle count at that moment, and that the machine kept running
 # afterwards. NOT MEASURED: that the slot table was the resource that ran out
