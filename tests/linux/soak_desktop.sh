@@ -307,7 +307,35 @@ CLOSEEOF
     # outer pass so the workload is not one program's behaviour generalised.
     local dwell="${HAMLINUX_SOAK_DWELL:-8}"
     local body=""
-    for app in hamcalcscene hamnotesscene hammonscene hamtermscene; do
+    # THE IDLE CONTROL. Same image, same rc structure, same census, same
+    # heartbeat -- and NO LAUNCHES AND NO SWEEP. It is wedge_hunt.sh's
+    # configuration (the desktop up, nobody asking it for anything) reproduced
+    # inside this file so that the driven arm's write rate has something to be
+    # a multiple OF. Without it, "a driven desktop writes 54 KB/s to the stick"
+    # is a number with no denominator.
+    local apps="hamcalcscene hamnotesscene hammonscene hamtermscene"
+    if [ "${HAMLINUX_SOAK_IDLE:-0}" = 1 ]; then
+        apps=""
+        closer=""
+    fi
+    if [ -z "$apps" ]; then
+        body="
+    n = 0
+    while n < $dwell {
+        echo '$HB'
+        date
+        ls /etc > /dev/null
+        sleep 1
+        n = n + 1
+    }
+    echo '$CENSUS cycle'
+    cat '/dev/wsys/wsysd/state'
+    ls -l /var/log
+    cat '/proc/diskstats'
+    ps
+    echo '${CENSUS}END'"
+    else
+    for app in $apps; do
         body="$body
     echo '/bin/$app' > '/dev/wsys/appmenu/launch'
     n = 0
@@ -321,10 +349,12 @@ CLOSEEOF
     echo '$CENSUS cycle'
     cat '/dev/wsys/wsysd/state'
     ls -l /var/log
+    cat '/proc/diskstats'
     ps
     echo '${CENSUS}END'
 $closer"
     done
+    fi
     cat >"$WORK/rc.soak" <<RCEOF
 source '/etc/rc.boot.installed'
 echo '$MARK'
@@ -935,7 +965,9 @@ fi
 # ---------------------------------------------------------------------------
 say "THE SOAK -- ${SECS}s of a DRIVEN desktop on a stick throttled to ${IOPS} write iops / ${BPS} B/s"
 # ---------------------------------------------------------------------------
-run_arm soak "$WORK/medium.img" "$IOPS" "$BPS" 0 1 "$SECS"
+DRIVE=1
+[ "${HAMLINUX_SOAK_IDLE:-0}" = 1 ] && DRIVE=0
+run_arm soak "$WORK/medium.img" "$IOPS" "$BPS" 0 "$DRIVE" "$SECS"
 S_GAP="$ARM_GAP"; S_FRZ="$ARM_FREEZE"; S_HB="$ARM_HB"; S_WEDGED="$ARM_WEDGED"
 S_WRB="$ARM_WRB"; S_WROPS="$ARM_WROPS"; S_WRFL="$ARM_WRFL"
 S_KEYS="$ARM_KEYS"; S_PTR="$ARM_PTR"; S_FRAMES="$ARM_FRAMES"; S_WINS="$ARM_WINS"
@@ -948,7 +980,9 @@ info "cycles completed by the guest churn loop: $(grep -ac "$CENSUS cycle" "$WOR
 # THE WORKLOAD MUST BE SHOWN TO HAVE HAPPENED IN THIS RUN, not merely in the
 # proof arm an hour earlier. A soak whose hand died in minute three is a
 # six-minute soak reported as a four-hour one.
-if [ "$S_KEYS" -gt 0 ] && [ "$S_PTR" -gt 0 ]; then
+if [ "$DRIVE" = 0 ]; then
+    info "IDLE CONTROL ARM: no hand, no launches. This arm exists to be the denominator for the driven arm's write rate, and its keys=$S_KEYS pointer=$S_PTR are meant to be 0."
+elif [ "$S_KEYS" -gt 0 ] && [ "$S_PTR" -gt 0 ]; then
     ok "the desktop was DRIVEN for the whole window: wsysd took $S_KEYS keystrokes and $S_PTR pointer events"
 else
     bad "wsysd took keys=$S_KEYS pointer=$S_PTR over ${SECS}s -- THIS WAS NOT A WORKLOAD and no negative below is one"
