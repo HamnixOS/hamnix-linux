@@ -41,10 +41,10 @@
 #
 #        * The file is PREALLOCATED TO ITS FULL SIZE AT IMAGE BUILD TIME
 #          (scripts/hamlinux_disk.sh) and is NEVER EXTENDED. Every write is an
-#          overwrite in place, from offset 0. No cluster is ever allocated, the
-#          FAT chain is never mutated, the directory entry's length and start
-#          cluster never change. The only thing that has to reach the medium is
-#          the data blocks -- which is exactly the part a journal would not have
+#          overwrite in place. No cluster is ever allocated, the FAT chain is
+#          never mutated, the directory entry's length and start cluster never
+#          change. The only thing that has to reach the medium is the data
+#          blocks -- which is exactly the part a journal would not have
 #          protected either.
 #
 #        * Every write is O_SYNC (user/linux-syscalls.c:sys_open_sync), so
@@ -94,10 +94,119 @@
 #     is deliberate: the alternative pours every `cat` into the kernel ring.
 #   * what the SCREEN looked like. A log records text, not pixels.
 #
+# ===========================================================================
+# IT MUST NEVER BE A WAY FOR THE MACHINE TO STOP WORKING
+# ===========================================================================
+# THE FIRST VERSION OF THIS PROGRAM WAS A STANDING LOAD ON THE BOOT MEDIUM,
+# AND ALMOST ALL OF IT WAS REDUNDANT. That is not a suspicion; it is measured,
+# by tests/linux/wedge_hunt.sh, on the shipped medium booted as usb-storage:
+#
+#     AN IDLE HAMNIX DESKTOP WROTE 45.9 MB TO ITS OWN BOOT MEDIUM IN ROUGHLY
+#     100 SECONDS -- about 460 KB/s, in 1096 write operations and 381 CACHE
+#     FLUSHES -- AND IT HAD NOTHING NEW TO SAY.
+#
+# Every one of those flushes came from here. The old snapshot() rewound to
+# offset 0 and wrote the header, the whole of the kernel ring and a terminator
+# EVERY TWO SECONDS, through an O_SYNC descriptor, WHETHER OR NOT ONE BYTE OF
+# THE RING HAD CHANGED. Seven write(2) calls, so seven trips to the medium, so
+# on a filesystem with no journal to batch them SEVEN SYNCHRONOUS FLUSHES every
+# two seconds for as long as the machine is on.
+#
+# In a VM the ESP is a host file and that is nearly free, which is exactly why
+# it survived review. ON A PHYSICAL USB STICK it is not free at all: the same
+# 256 KiB of logical blocks is rewritten 150 times in five minutes, and a cheap
+# controller's flash translation layer answers a rewrite of a region smaller
+# than its erase block with a read-modify-write of the WHOLE erase block. The
+# root filesystem is on the same device, so every exec, every page faulted back
+# in and every config file opened by the desktop queues behind it.
+#
+# THE FIX IS NOT TO BE QUIETER. It is to STOP WRITING BYTES THAT ARE ALREADY
+# THERE, which is a different thing and costs the log nothing at all.
+#
 # ---------------------------------------------------------------------------
-# IT MUST NEVER BE A WAY FOR THE BOOT TO FAIL
+# 1. THE FILE IS BUILT IN MEMORY AND ONLY THE PART THAT CHANGED IS WRITTEN
 # ---------------------------------------------------------------------------
-# Every failure here is reported on the console in one line and then EXITS 0.
+# `img` holds exactly what this program wants the 256 KiB file to contain --
+# header, ring, terminator, and newline fill to the end. `prev` holds what is
+# already on the medium. A snapshot compares them, finds the first and last
+# byte that differ, and issues ONE lseek and ONE write covering just that span.
+#
+# The consequences, in the order they matter:
+#
+#   * AN IDLE MACHINE WRITES NOTHING. No lseek, no write, no flush, no
+#     transaction with the stick of any kind. If the ring has not changed there
+#     is nothing to persist, and the old code's answer to that was to persist
+#     it again anyway.
+#
+#   * A MACHINE THAT IS SAYING SOMETHING WRITES WHAT IT SAID. Until the ring
+#     wraps, a new log line only appends: the differing span is the new tail
+#     and the terminator, tens of bytes rather than sixty kilobytes. After the
+#     ring wraps the whole buffer shifts and the span is the whole file again --
+#     and that is correct, because at that point the whole file really is
+#     different. §2 is what bounds THAT case.
+#
+#   * SEVEN FLUSHES BECOME ONE. The header and the terminator are part of the
+#     same in-memory image as the ring, so they are not separate writes any
+#     more. On flash the number of flushes matters at least as much as the
+#     number of bytes.
+#
+#   * THE ONE-TIME WIPE DISAPPEARS, and it disappears by construction rather
+#     than by being deleted. `prev` is BSS, so it starts as 256 KiB of NULs;
+#     `img` is text and newline fill and contains no NUL anywhere; so on the
+#     FIRST snapshot every byte differs and the span is the entire file. The
+#     old wipe_file() -- 32 separate 8 KiB O_SYNC writes at startup -- was
+#     doing that job in 32 flushes instead of one, and it existed only so that
+#     a previous boot's tail could not be read as this boot's. It still cannot
+#     be: the fill is part of the image.
+#
+# ---------------------------------------------------------------------------
+# 2. AND IT BACKS OFF WHEN THE MEDIUM IS SLOW, AND SAYS SO IN THE LOG
+# ---------------------------------------------------------------------------
+# §1 removes the load that should never have existed. It does not bound the
+# load on a machine that IS producing log lines fast, and it cannot know in
+# advance how slow the stick in this particular laptop is -- that is precisely
+# the thing that differs between the VM every gate runs in and the hardware the
+# owner holds.
+#
+# So the write is TIMED, and the answer the medium gives decides the cadence.
+# A snapshot whose write took longer than SLOW_MS doubles the interval, up to
+# SNAP_MAX_MS; one comfortably under it halves the interval back down, to
+# SNAP_MS and no further. The logger therefore cannot occupy more than a small
+# and self-limiting share of a slow device, whatever the ring is doing.
+#
+# THE TRANSITION IS ANNOUNCED ON THE CONSOLE, which means consmirror puts it in
+# the ring, which means the NEXT snapshot puts it in the log. So a stick that is
+# too slow to log to says so IN ITS OWN LOG, in one line, and the person reading
+# the file afterwards learns the fact that mattered most.
+#
+# ---------------------------------------------------------------------------
+# 3. WHAT WAS DELIBERATELY *NOT* DONE, AND WHY
+# ---------------------------------------------------------------------------
+# STOP AFTER THE BOOT COMPLETES -- NO. There is no such moment, and the failure
+# this whole investigation is about happened FIVE MINUTES IN, on a desktop that
+# had come up fine. A logger that stops when the boot "finishes" is a logger
+# that is guaranteed to be off for every interesting failure. The forever loop
+# is not an oversight; it is the requirement.
+#
+# REFUSE TO RUN ON REMOVABLE MEDIA AFTER N SNAPSHOTS -- NO. The medium is
+# ALWAYS removable here; that is the whole premise. "After N snapshots" is just
+# "turn the log off shortly after boot" with an extra step, and it fails in the
+# same direction as stopping after the boot.
+#
+# DROP O_SYNC -- NO. It is the single property that makes the file worth
+# trusting after the power button, and dropping it turns a slow log into a log
+# that lies. What was wrong was never that the writes were synchronous; it was
+# that there were writes at all when nothing had changed.
+#
+# JUST MAKE THE INTERVAL LONGER -- NO, and this is the interesting one. It
+# trades the power-cut window -- the one thing the cadence buys -- for a
+# reduction that §1 gets for free, and it would STILL have rewritten sixty
+# kilobytes of identical bytes every time it fired. Lengthening the interval
+# treats the symptom of a program that was writing the wrong thing.
+#
+# ---------------------------------------------------------------------------
+# EVERY FAILURE IS STILL A MESSAGE AND AN EXIT 0
+# ---------------------------------------------------------------------------
 # It is spawned DETACHED from the rc, so nothing waits for it even when it
 # works. If the ESP is missing, unmountable, or the log file is absent or
 # unwritable, the boot continues and says why on the screen. A logging facility
@@ -120,9 +229,11 @@ extern def sys_klogread(buf: Ptr[uint8], n: uint64) -> int64
 extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
 extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_clock_gettime(clockid: int32, tp: Ptr[uint64]) -> int64
 extern def sys_exit(code: uint64)
 
 SEEK_SET: int32 = 0
+CLOCK_MONOTONIC: int32 = 1
 
 # THE FILE, AND ITS SIZE, WHICH IS THE SIZE POLICY.
 #
@@ -132,11 +243,9 @@ SEEK_SET: int32 = 0
 # never extends anything.
 #
 # 256 KiB is chosen from what a boot produces: a loglevel=7 boot of this image
-# is tens of kilobytes of kernel messages plus a few kilobytes of rc output. It
-# is small enough that the one-time wipe below is a single quick transfer even
-# to a slow USB 2 stick, and large enough that nothing of a normal boot is
-# lost. When the ring holds more than fits, sys_klogread hands back the TAIL --
-# the end of the boot, which is the part that matters after one went wrong.
+# is tens of kilobytes of kernel messages plus a few kilobytes of rc output.
+# When the ring holds more than fits, sys_klogread hands back the TAIL -- the
+# end of the boot, which is the part that matters after one went wrong.
 #
 # THE PATH IS WRITTEN OUT AT THE ONE CALL SITE rather than held in a top-level
 # `BOOTLOG_PATH: Ptr[char] = "..."`, and that is not a style preference. Adder
@@ -148,28 +257,52 @@ SEEK_SET: int32 = 0
 # file". Nothing else in user/*.ad or lib/*.ad uses that form.
 BOOTLOG_CAP:  uint64 = 262144
 
-# The snapshot cadence. THIS IS THE SIZE OF THE WINDOW IN WHICH A POWER CUT
-# LOSES SOMETHING, and it is the only real tuning knob here. Two seconds: short
-# enough that the tail of a boot that died is on the stick, long enough that a
-# whole boot costs on the order of a dozen writes.
+# Room kept at the end of the image for the terminator and, on the failure
+# path, the two lines that explain an unreadable ring. Generous on purpose:
+# running the ring into the terminator would truncate the sentence a reader
+# needs to know where this boot's text stops.
+TAIL_RESERVE: uint64 = 512
+
+# THE BASE CADENCE. THIS IS THE SIZE OF THE WINDOW IN WHICH A POWER CUT LOSES
+# SOMETHING. Two seconds: short enough that the tail of a boot that died is on
+# the stick, long enough that a whole boot costs on the order of a dozen
+# writes -- and, now that a snapshot with nothing to say costs NO write at all,
+# short enough to leave at that on any medium fast enough to keep up.
 SNAP_MS: int64 = 2000
+
+# ... AND THE CEILING THE BACKOFF MAY REACH. A minute is a long power-cut
+# window and it is the right trade at the point where it is reached: it is only
+# reached on a medium where each write is taking the better part of a second,
+# and on such a medium the alternative to a long window is a machine so busy
+# writing its log that the log is the only thing it does.
+SNAP_MAX_MS: int64 = 60000
+
+# The write time that means "this medium cannot keep up" and the one that means
+# "it can again". Two different numbers, deliberately, so the cadence does not
+# oscillate around a single threshold.
+SLOW_MS: uint64 = 400
+FAST_MS: uint64 = 100
 
 # Never dereferenced at nfds == 0 -- the tree's portable park, as
 # user/sleep.ad's header explains.
 park_fds: Array[1, int32]
 
-# The ring snapshot. Sized so that the header and the terminator below always
-# fit inside BOOTLOG_CAP with room to spare.
-ring:   Array[245760, uint8]
-# The wipe pattern, written once. Newlines rather than NULs so that a log which
-# is never written, or one whose tail is a previous boot's, opens as ordinary
-# empty text in any editor rather than as a sea of NULs that some of them
-# refuse to display at all.
-wipe:   Array[8192, uint8]
+# WHAT THE FILE SHOULD CONTAIN, AND WHAT IT ALREADY CONTAINS.
+#
+# `prev` is BSS and therefore NUL, and `img` never contains a NUL -- it is
+# header text, kernel log text, terminator text and newline fill. That is what
+# makes the first snapshot a full-file write with no special case, and it is
+# what replaced the old 32-write startup wipe.
+img:    Array[262144, uint8]
+prev:   Array[262144, uint8]
 errbuf: Array[128, uint8]
 numbuf: Array[24, uint8]
+ts:     Array[2, uint64]
 
 logfd:  int32 = -1
+img_n:  uint64 = 0
+interval: int64 = 2000
+backed_off: int32 = 0
 
 
 def cstrlen(s: Ptr[uint8]) -> uint64:
@@ -193,7 +326,8 @@ def say(msg: Ptr[uint8]):
     # To the console, which is the screen on the shipped command line. These
     # lines are themselves mirrored into the ring by consmirror, so the log
     # explains its own state -- including, on the failure path, why there is
-    # no log.
+    # no log, and including the backoff notice, which is the one fact about a
+    # slow stick that the file could otherwise never carry.
     wr(1, "bootlogd: ")
     wr(1, msg)
     wr(1, "\n")
@@ -225,65 +359,129 @@ def put_dec(fd: int32, v: uint64):
     sys_write(fd, &numbuf[k], 24 - k)
 
 
-def wipe_file() -> int32:
-    # ONCE, AT START, AND THIS IS AN INSTRUMENT PROPERTY RATHER THAN TIDINESS.
-    #
-    # The file is preallocated and overwritten in place, so whatever a PREVIOUS
-    # boot wrote past the end of what THIS boot writes is still sitting there.
-    # Somebody reading the file after a short failed boot would find this
-    # boot's few lines followed, with no seam, by the whole of a boot that went
-    # fine -- and would take the second half for evidence about the first. That
-    # is a worse failure than no log.
-    #
-    # So the whole file is written over once before the first snapshot. It is
-    # ~32 transfers of 8 KiB and it happens in a detached process, so the boot
-    # does not wait for it; the first snapshot follows immediately after.
+def now_ms() -> uint64:
+    ts[0] = 0
+    ts[1] = 0
+    if sys_clock_gettime(CLOCK_MONOTONIC, &ts[0]) != 0:
+        return 0
+    return ts[0] * 1000 + ts[1] / 1000000
+
+
+def img_put(s: Ptr[uint8]):
+    # Append a NUL-terminated string to the image, never past the end.
     i: uint64 = 0
-    while i < 8192:
-        wipe[i] = 10                                    # '\n'
+    while s[i] != 0 and img_n < BOOTLOG_CAP:
+        img[img_n] = s[i]
+        img_n = img_n + 1
         i = i + 1
-    if sys_lseek(logfd, 0, SEEK_SET) < 0:
-        return -1
-    done: uint64 = 0
-    while done < BOOTLOG_CAP:
-        n: uint64 = 8192
-        if BOOTLOG_CAP - done < n:
-            n = BOOTLOG_CAP - done
-        w: int64 = sys_write(logfd, &wipe[0], n)
-        if w <= 0:
-            # The file is shorter than we thought, or the medium went away.
-            # Neither is fatal: whatever we did manage to clear is cleared,
-            # and the snapshot below writes from offset 0 regardless.
-            return 0
-        done = done + cast[uint64](w)
-    return 0
 
 
-def snapshot() -> int32:
-    # ONE PASS: rewind, header, the ring, terminator. Everything through one
-    # O_SYNC descriptor, so when this returns the bytes are on the stick.
-    if sys_lseek(logfd, 0, SEEK_SET) < 0:
-        return -1
-    wr(logfd, "==== HAMNIX BOOT LOG ====\n")
-    wr(logfd, "This is the kernel log ring of the boot that wrote it, including every\n")
-    wr(logfd, "line the shell and the desktop printed (mirrored in as `cons:' lines).\n")
-    wr(logfd, "Rewritten in place every couple of seconds; the tail is the newest.\n")
-    wr(logfd, "-------------------------------------------------------------------\n")
+def build_image() -> int32:
+    # WHAT THE 256 KiB FILE SHOULD LOOK LIKE, ENTIRELY IN MEMORY. Nothing here
+    # touches the medium; §1 of the header is why that separation is the whole
+    # design.
+    rc: int32 = 0
+    img_n = 0
+    img_put("==== HAMNIX BOOT LOG ====\n")
+    img_put("This is the kernel log ring of the boot that wrote it, including every\n")
+    img_put("line the shell and the desktop printed (mirrored in as `cons:' lines).\n")
+    img_put("Rewritten in place as the log grows; the tail is the newest.\n")
+    img_put("-------------------------------------------------------------------\n")
 
-    n: int64 = sys_klogread(&ring[0], 245760)
+    room: uint64 = BOOTLOG_CAP - img_n - TAIL_RESERVE
+    n: int64 = sys_klogread(&img[img_n], room)
     if n < 0:
         # NAMED, NOT GUESSED AT. EPERM here means dmesg_restrict is set and we
         # are not root; an empty file with no explanation would be read as "the
         # boot printed nothing", which is the exact misreading this whole
         # arrangement exists to prevent.
-        wr(logfd, "*** THE KERNEL LOG COULD NOT BE READ. This file is otherwise empty\n")
-        wr(logfd, "*** for that reason and NOT because the boot printed nothing.\n")
-        wr(logfd, "==== END OF HAMNIX BOOT LOG ====\n")
+        img_put("*** THE KERNEL LOG COULD NOT BE READ. This file is otherwise empty\n")
+        img_put("*** for that reason and NOT because the boot printed nothing.\n")
+        rc = -1
+    else:
+        img_n = img_n + cast[uint64](n)
+    img_put("\n==== END OF HAMNIX BOOT LOG ====\n")
+
+    # AND THE REST IS NEWLINES, WHICH IS THE WIPE, DONE IN MEMORY.
+    #
+    # It has to be part of the image rather than a one-off pass over the file:
+    # what a PREVIOUS boot wrote past the end of what THIS boot writes is still
+    # sitting on the medium, and somebody reading a short failed boot's log
+    # would find this boot's few lines followed, with no seam, by the whole of
+    # a boot that went fine. That is a worse failure than no log. Newlines
+    # rather than NULs so the unused tail opens as ordinary empty text in any
+    # editor rather than as a sea of NULs some of them refuse to display -- and
+    # so that `img` contains no NUL, which is what makes the all-NUL `prev`
+    # force a full write the first time round.
+    while img_n < BOOTLOG_CAP:
+        img[img_n] = 10                                 # '\n'
+        img_n = img_n + 1
+    return rc
+
+
+def flush_changed() -> int64:
+    # ONE lseek AND ONE write COVERING EXACTLY THE BYTES THAT DIFFER FROM WHAT
+    # IS ON THE MEDIUM. Returns the number of bytes written -- 0 when there was
+    # nothing to do, which on an idle machine is every time -- or -1.
+    lo: uint64 = 0
+    while lo < BOOTLOG_CAP and img[lo] == prev[lo]:
+        lo = lo + 1
+    if lo >= BOOTLOG_CAP:
+        return 0
+    hi: uint64 = BOOTLOG_CAP - 1
+    while hi > lo and img[hi] == prev[hi]:
+        hi = hi - 1
+    if sys_lseek(logfd, cast[int64](lo), SEEK_SET) < 0:
         return -1
-    if n > 0:
-        sys_write(logfd, &ring[0], cast[uint64](n))
-    wr(logfd, "\n==== END OF HAMNIX BOOT LOG ====\n")
-    return 0
+    w: int64 = sys_write(logfd, &img[lo], hi - lo + 1)
+    if w <= 0:
+        # The file is shorter than we thought, or the medium went away.
+        # `prev` is left alone, so whatever did not land is simply still
+        # pending and the next snapshot tries again from the same place.
+        return -1
+    # ONLY WHAT ACTUALLY LANDED IS RECORDED AS LANDED. A short write must not
+    # let the tail it did not reach be treated as already on the stick.
+    i: uint64 = lo
+    e: uint64 = lo + cast[uint64](w)
+    while i < e:
+        prev[i] = img[i]
+        i = i + 1
+    return w
+
+
+def snapshot() -> int32:
+    rc: int32 = build_image()
+    t0: uint64 = now_ms()
+    w: int64 = flush_changed()
+    took: uint64 = now_ms() - t0
+    if w < 0:
+        return -1
+
+    # THE CADENCE FOLLOWS THE MEDIUM. A snapshot that wrote nothing says
+    # nothing about how fast the stick is, so it does not move the interval in
+    # either direction -- otherwise an idle machine would ratchet the cadence
+    # down to SNAP_MS and hold it there on the strength of writes it never did.
+    if w > 0:
+        if took > SLOW_MS and interval < SNAP_MAX_MS:
+            interval = interval * 2
+            if interval > SNAP_MAX_MS:
+                interval = SNAP_MAX_MS
+            if backed_off == 0:
+                backed_off = 1
+                say("this boot medium is slow to write; snapshotting less often")
+                say("so that logging cannot become the thing that stalls the machine.")
+                say("a power cut now loses up to the interval below, in milliseconds:")
+                wr(1, "bootlogd: ")
+                put_dec(1, cast[uint64](interval))
+                wr(1, "\n")
+        elif took < FAST_MS and interval > SNAP_MS:
+            interval = interval / 2
+            if interval <= SNAP_MS:
+                interval = SNAP_MS
+                if backed_off != 0:
+                    backed_off = 0
+                    say("the boot medium is keeping up again; back to the 2 s cadence.")
+    return rc
 
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
@@ -307,11 +505,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         sys_exit(0)
         return 0
 
-    if once == 0:
-        wipe_file()
-
     say("logging this boot to HAMNIX.LOG in the root of the FAT boot partition")
 
+    # THE FIRST SNAPSHOT IS THE FULL FILE, and it is that without a special
+    # case: `prev` is all NULs and `img` contains none, so every byte differs.
+    # That is also the wipe, in ONE write instead of the 32 the old startup
+    # pass took.
     if snapshot() < 0:
         sayerr("the first snapshot failed; the log may be incomplete")
     if once != 0:
@@ -320,10 +519,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
 
     # FOREVER, and deliberately not "until the boot is finished". There is no
     # such moment: the interesting failures are the ones where the desktop
-    # comes up and then something goes wrong, or where it never does and the
-    # machine sits there until he reaches for the power button. Whenever he
-    # reaches for it, the file is at most SNAP_MS behind the truth.
+    # comes up and then something goes wrong -- which is precisely what
+    # happened on 2026-08-16, five minutes into a desktop that had come up
+    # fine -- or where it never does and the machine sits there until he
+    # reaches for the power button. Whenever he reaches for it, the file is at
+    # most one interval behind the truth.
+    #
+    # IT COSTS NOTHING TO LEAVE RUNNING NOW. A pass over a ring that has not
+    # changed is two scans of 256 KiB of memory and no transaction with the
+    # medium at all.
     while True:
-        sys_waitfds(&park_fds[0], 0, SNAP_MS)
+        sys_waitfds(&park_fds[0], 0, interval)
         snapshot()
     return 0

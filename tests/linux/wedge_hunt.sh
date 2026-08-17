@@ -315,9 +315,18 @@ run_arm() {
     # The last word from the block layer, for the arm's totals.
     printf 'info blockstats\n' | timeout 10 socat - "UNIX-CONNECT:$d/mon.sock" \
         >"$d/blockstats.txt" 2>/dev/null
-    ARM_WRB=$(awk -F'wr_bytes=' '/wr_bytes/{split($2,a," ");print a[1];exit}' "$d/blockstats.txt")
-    ARM_WROPS=$(awk -F'wr_operations=' '/wr_operations/{split($2,a," ");print a[1];exit}' "$d/blockstats.txt")
+    # THE `usbstick:` LINE AND NOT THE FIRST ONE THAT MATCHES. `info
+    # blockstats` reports every drive QEMU has, and the two pflash devices come
+    # first with wr_bytes=0 -- so a parse that took the first match reported
+    # that the medium had been written NOTHING, in a run whose whole subject is
+    # how much it was written. That number was printed and believed for one
+    # run; it is the shape of wrong this tree exists to stop.
+    ARM_WRB=$(awk -F'wr_bytes=' '/^usbstick:/{split($2,a," ");print a[1];exit}' "$d/blockstats.txt")
+    ARM_WROPS=$(awk -F'wr_operations=' '/^usbstick:/{split($2,a," ");print a[1];exit}' "$d/blockstats.txt")
+    ARM_WRFL=$(awk -F'flush_operations=' '/^usbstick:/{split($2,a," ");print a[1];exit}' "$d/blockstats.txt")
+    ARM_WRT=$(awk -F'wr_total_time_ns=' '/^usbstick:/{split($2,a," ");print a[1];exit}' "$d/blockstats.txt")
     ARM_WRB="${ARM_WRB:-0}"; ARM_WROPS="${ARM_WROPS:-0}"
+    ARM_WRFL="${ARM_WRFL:-0}"; ARM_WRT="${ARM_WRT:-0}"
 
     kill -KILL "$vm" 2>/dev/null; wait "$vm" 2>/dev/null
 
@@ -330,7 +339,7 @@ run_arm() {
     ARM_GAP="$ARM_GUESTGAP"
     [ "$ARM_MAXGAP" -gt "$ARM_GAP" ] && ARM_GAP="$ARM_MAXGAP"
     info "$name: heartbeats=$ARM_HB  longest gap in the GUEST's clock=${ARM_GUESTGAP}s  (host-observed ${ARM_MAXGAP}s)  longest frozen screen=${ARM_FREEZE}s"
-    info "$name: the stick was written $ARM_WRB bytes in $ARM_WROPS operations"
+    info "$name: the stick was written $ARM_WRB bytes in $ARM_WROPS operations and $ARM_WRFL cache flushes ($(( ARM_WRT / 1000000 )) ms inside write)"
     return 0
 }
 
@@ -388,7 +397,7 @@ say "ARM A -- the medium AS IT SHIPS, on a stick throttled to ${IOPS} write iops
 ARM_HB=0
 run_arm slow_log "$WORK/medium.img" "$IOPS" "$BPS" 0
 A_GAP="$ARM_GAP"; A_FRZ="$ARM_FREEZE"; A_HB="$ARM_HB"
-A_WRB="$ARM_WRB"; A_WROPS="$ARM_WROPS"
+A_WRB="$ARM_WRB"; A_WROPS="$ARM_WROPS"; A_WRFL="$ARM_WRFL"
 
 # ---------------------------------------------------------------------------
 say "ARM B -- THE SAME MEDIUM with \\HAMNIX.LOG deleted, so bootlogd cannot run"
@@ -403,7 +412,7 @@ fi
 ARM_HB=0
 run_arm slow_nolog "$WORK/nolog.img" "$IOPS" "$BPS" 0
 B_GAP="$ARM_GAP"; B_FRZ="$ARM_FREEZE"; B_HB="$ARM_HB"
-B_WRB="$ARM_WRB"; B_WROPS="$ARM_WROPS"
+B_WRB="$ARM_WRB"; B_WROPS="$ARM_WROPS"; B_WRFL="$ARM_WRFL"
 
 grep -aq 'NO BOOT LOG' "$WORK/slow_nolog/serial.log" \
     && ok "arm B's bootlogd said NO BOOT LOG and the boot carried on, so the control is the one intended" \
@@ -412,13 +421,42 @@ grep -aq 'NO BOOT LOG' "$WORK/slow_nolog/serial.log" \
 # ---------------------------------------------------------------------------
 say "WHAT THE STICK WAS ASKED TO WRITE"
 # ---------------------------------------------------------------------------
-info "arm A (bootlogd running):     $A_WRB bytes in $A_WROPS write operations over ${SECS}s"
-info "arm B (bootlogd not running): $B_WRB bytes in $B_WROPS write operations over ${SECS}s"
-if [ "$A_WRB" -gt $(( B_WRB + B_WRB / 2 + 1048576 )) ]; then
-    ok "bootlogd is responsible for the great majority of everything this machine writes to its boot medium at rest"
+info "arm A (bootlogd running):     $A_WRB bytes, $A_WROPS write operations, $A_WRFL flushes over ${SECS}s"
+info "arm B (bootlogd not running): $B_WRB bytes, $B_WROPS write operations, $B_WRFL flushes over ${SECS}s"
+info "bootlogd's share: $(( A_WRB - B_WRB )) bytes, $(( A_WROPS - B_WROPS )) operations, $(( A_WRFL - B_WRFL )) flushes"
+
+# THE BUDGET, AND WHY IT IS EXPRESSED IN FLUSHES.
+#
+# A cache flush is what a USB stick's controller cannot pipeline: it has to
+# commit its flash translation layer before it answers. Bytes it can buffer;
+# flushes it cannot. So the number that decides whether a logger is a burden on
+# a boot medium is how often it makes the device commit, and that is asserted
+# here rather than left as a remark.
+#
+# MEASURED AT THE HEAD THIS GATE WAS WRITTEN AGAINST, 360 s, 60 write iops:
+# arm A 52,568,576 bytes / 2731 ops / 1219 flushes, arm B 37,347,840 / 407 / 76.
+# bootlogd alone was +15.2 MB, +2324 operations and +1143 FLUSHES -- 3.2 device
+# commits a second, for ever, on a machine that had nothing new to say. That is
+# the seven O_SYNC write(2) calls the old snapshot() made every two seconds,
+# and it made them whether or not one byte of the ring had changed.
+#
+# 120 over the window is one flush every three seconds and is deliberately
+# loose: it is a budget, not a fit to the current number. A logger that
+# persists something new is meant to flush.
+BUDGET_FL=120
+if [ $(( A_WRFL - B_WRFL )) -le "$BUDGET_FL" ]; then
+    ok "bootlogd cost $(( A_WRFL - B_WRFL )) cache flushes over ${SECS}s, within the budget of $BUDGET_FL"
 else
-    info "bootlogd's share of the write traffic is not dominant here"
+    bad "BOOTLOGD MADE THE BOOT MEDIUM COMMIT $(( A_WRFL - B_WRFL )) TIMES in ${SECS}s (budget $BUDGET_FL): a diagnostic is a standing load on the stick it is diagnosing"
 fi
+
+# AND THE OTHER WRITER, WHICH THIS GATE FOUND BY ACCIDENT AND WHICH IS NOT
+# BOOTLOGD. Arm B has no logger at all and still wrote 37 MB in six minutes --
+# about 100 KB/s from an idle desktop, in few, large, rarely-flushed
+# operations, which is the signature of ordinary ext4 writeback rather than of
+# anything synchronous. It is recorded here so that the number is watched; it
+# is NOT yet attributed, and this gate does not pretend to know what it is.
+info "arm B is the floor: an idle desktop with NO logger still wrote $B_WRB bytes to its boot medium in ${SECS}s"
 
 # ---------------------------------------------------------------------------
 say "DID ANYTHING WEDGE?"
