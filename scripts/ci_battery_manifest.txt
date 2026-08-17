@@ -5063,3 +5063,30 @@ bash tests/linux/de_browser_paints.sh
 # the fix (8 PASS / 6 FAIL, naming all six). Reads only; no build, no binary,
 # no device; under a second.
 bash tests/linux/packager_sees_its_inputs.sh
+
+# --- tests/linux/ ENTERS THE REGISTRATION GATE (2026-08-17)
+# scripts/test_gate_registration.sh globbed only scripts/test_*.sh until this
+# date. tests/linux/ holds 173 gate scripts -- every release-critical one among
+# them -- and 12 were registered. The gate therefore printed PASS while being
+# structurally unable to see the directory that decides whether a release
+# ships. /etc/hamnix-release went out INSIDE the image and in NO package, and
+# tests/linux/channel_covers_image.sh is the gate that catches exactly that:
+# it existed, and nothing ran it.
+#
+# The entries below were MEASURED on this host before being written here --
+# exit status and wall time, on a tree with the channel and the image built.
+# A gate registered but never run is worse than an unregistered one: it turns a
+# known gap into a false assurance. Anything not measured is annotated
+# on-demand in its own header instead, with the blocker named.
+
+# soak_desktop.sh's window verdict is 900 s of QEMU away, so its READER is
+# tested here instead: this lifts the COMPOSITOR OR HARNESS block out of that
+# gate by marker (never a copy, which would drift) and drives it with synthetic
+# serial logs whose right answer is known. It asserts all four verdicts AND the
+# two "not measured" cases, and it refuses to run at all if the lift comes back
+# empty -- a control that cannot fail is not a control.
+# MEASURED 2026-08-17 on this host: 7 passed, 0 failed, 0.56 s. It found one
+# real defect while being written (an absent ps reading was being reported as
+# "0 -> 0" with an offset that was the window count relabelled) and that
+# assertion is what keeps it fixed. No QEMU, no image, no network, no device.
+bash tests/linux/soak_wincensus_negctl.sh

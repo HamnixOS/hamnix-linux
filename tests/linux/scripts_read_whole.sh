@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it boots a machine through `scripts/hamlinux_vm.sh`.
+#
 # tests/linux/scripts_read_whole.sh — A SCRIPT IS READ WHOLE OR IT IS NOT RUN,
 # AND A FILE THIS SHELL REWRITES IS REWRITTEN FROM WHAT WAS IN IT.
 #

@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it boots a machine under `qemu-system-x86_64`.
+#
 # tests/linux/install_from_usb.sh — BOOT THE LIVE USB, INSTALL ONTO A BLANK
 # DISK, PULL THE USB OUT, BOOT THE INSTALLED MACHINE, UPDATE IT OVER THE
 # NETWORK, AND REBOOT AGAIN.
@@ -102,7 +109,8 @@
 #
 # THE LAST RED IS CLOSED, AND IT WAS THIS: `hpm update` was a NO-OP on a freshly
 # installed machine. The index authenticated over TLS and then nothing upgraded,
-# because /var/lib/hpm was an empty directory -- hpm had no record of what is on
+# because /var/lib/hpm was an empty directory -- hpm had no record of what is
+# on
 # the disk, so it compared the index against nothing and exited 0. The medium
 # now carries /var/lib/hpm/installed.json, emitted by scripts/hamlinux_disk.sh
 # from the channel's TARBALLS against the very directory it mkfs's, and

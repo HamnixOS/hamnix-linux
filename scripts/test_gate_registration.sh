@@ -25,9 +25,27 @@
 # An unregistered gate is WORSE than a missing one. A missing gate is an
 # honest hole. An unregistered gate is a hole that reads as coverage.
 #
+# THE SECOND DIRECTORY, ADDED 2026-08-17, AND WHAT IT COST TO LEAVE IT OUT
+# =======================================================================
+# Until this commit the inventory below globbed `scripts/test_*.sh` and NOTHING
+# ELSE. tests/linux/ holds 173 gate scripts — every release-critical one among
+# them — and exactly 12 were named in the manifest. The gate was therefore
+# STRUCTURALLY BLIND to the directory that decides whether a release is
+# shippable, while printing a PASS that read as "every gate in the tree has a
+# known relationship to CI".
+#
+# That is not a hypothetical either. `/etc/hamnix-release` shipped INSIDE the
+# image and in NO package. tests/linux/channel_covers_image.sh is the gate that
+# catches exactly that, it existed, and nothing ran it — so the defect reached a
+# release candidate. A blind spot in the gate against unregistered gates is the
+# most expensive shape this file can have.
+#
+# The inventory is now scripts/test_*.sh PLUS tests/linux/*.sh. The three
+# escapes are unchanged and apply identically to both directories.
+#
 # THE RULE
 # ========
-# Every scripts/test_*.sh must be exactly one of:
+# Every scripts/test_*.sh and every tests/linux/*.sh must be exactly one of:
 #
 #   (1) REGISTERED  — named in scripts/ci_battery_manifest.txt, or run
 #                     directly by a .github/workflows/*.yml step (literal
@@ -73,7 +91,13 @@ import glob, os, re, sys
 
 manifest_path, baseline_path = sys.argv[1], sys.argv[2]
 
-all_gates = set(glob.glob('scripts/test_*.sh'))
+# TWO DIRECTORIES, ONE INVENTORY. tests/linux/ was invisible here until
+# 2026-08-17; see THE SECOND DIRECTORY in the header for what that cost.
+all_gates = set(glob.glob('scripts/test_*.sh')) | set(glob.glob('tests/linux/*.sh'))
+
+# Matches a gate path in either directory. Anchored on the two literal prefixes
+# so a stray word cannot look like a registration.
+GATEPATH = r'(?:scripts/test_[A-Za-z0-9_.*-]+|tests/linux/[A-Za-z0-9_.*-]+)\.sh'
 
 def uncommented(path):
     out = []
@@ -84,7 +108,7 @@ def uncommented(path):
     return '\n'.join(out)
 
 # (1a) named in the bare-metal battery manifest
-registered = set(re.findall(r'scripts/test_[A-Za-z0-9_.-]+\.sh',
+registered = set(re.findall(GATEPATH.replace('*', ''),
                             uncommented(manifest_path)))
 
 # (1b) run directly by a workflow — literal names AND the ci.yml globs
@@ -96,7 +120,7 @@ registered = set(re.findall(r'scripts/test_[A-Za-z0-9_.-]+\.sh',
 #      tree registered — the exact false-green this gate exists to prevent.
 for wf in sorted(glob.glob('.github/workflows/*.yml')):
     body = uncommented(wf)
-    for pat in re.findall(r'scripts/test_[A-Za-z0-9_.*-]+\.sh', body):
+    for pat in re.findall(GATEPATH, body):
         if '*' in pat:
             registered.update(glob.glob(pat))
         else:

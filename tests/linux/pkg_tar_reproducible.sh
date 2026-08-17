@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it fetches from the live network (255.one), so it fails on a runner
+# with no route out and would report a site outage as a code defect.
+#
 # tests/linux/pkg_tar_reproducible.sh — "THE BYTES I BUILT ARE THE BYTES
 # SERVED" WAS NOT CHECKABLE AT THE TARBALL LEVEL, AND ONE FLAG IS WHY.
 #

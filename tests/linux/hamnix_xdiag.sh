@@ -1,4 +1,18 @@
 #!/bin/sh
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because nobody has measured its host runtime yet, and the battery is 12-way
+# sharded under a 50-minute cap -- registering an unmeasured gate is how a
+# shard goes from green to timed-out. Measure it, then move it into the
+# manifest.
+#
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # hamnix-xdiag — what is actually on the X display inside the namespace.
 # Run from a SECOND `enter debian { }` while the session is up; /tmp/.X11-unix
 # is on the namespace's own filesystem, so :0 resolves from either entry.
