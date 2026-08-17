@@ -11270,7 +11270,7 @@ def _redir_cannot(target: Ptr[uint8], which: Ptr[uint8], rc: int32):
     # could not be opened, and a diagnostic that guessed would be its own kind
     # of wrong answer.
     if rc == -ERRNO_ENOSPC:
-        write_str(2, cast[Ptr[uint8]]("no free /fd channel slot — the slot table is full, and every slot in it is held by a live process. Close some programs, or raise MAX_SLOTS in user/linux-fdns.c"))
+        write_str(2, cast[Ptr[uint8]]("no free /fd channel slot -- the slot table is full, and every slot in it is held by a live process. Close some programs, or raise MAX_SLOTS in user/linux-fdns.c"))
         errstr_set(cast[Ptr[uint8]]("redirect not applied: no free /fd channel slot"))
     else:
         write_str(2, cast[Ptr[uint8]]("the target could not be opened"))
@@ -11287,7 +11287,7 @@ def _redir_cannot_bind(target: Ptr[uint8], which: Ptr[uint8]):
     write_str(2, which)
     write_str(2, cast[Ptr[uint8]](" redirect to '"))
     write_str(2, target)
-    write_str(2, cast[Ptr[uint8]]("': the /fd name could not be bound — the bind table is full, and every record in it is held by a live process. Close some programs, or raise MAX_BINDS in user/linux-fdns.c. The command was NOT run.\n"))
+    write_str(2, cast[Ptr[uint8]]("': the /fd name could not be bound -- the bind table is full, and every record in it is held by a live process. Close some programs, or raise MAX_BINDS in user/linux-fdns.c. The command was NOT run.\n"))
     errstr_set(cast[Ptr[uint8]]("redirect not applied: /fd name could not be bound"))
 
 
