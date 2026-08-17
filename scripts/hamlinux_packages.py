@@ -852,12 +852,64 @@ def modprobe_chain(kver, mod):
     return chain
 
 
-def merge_chains(chains):
+def _ko_relpath(path):
+    """/lib/modules/<kver>/kernel/... -> kernel/..., compression suffix gone.
+
+    The key shape host_dep_table() uses, so an absolute path out of
+    modprobe_chain() can be looked up in depmod's own table.
+    """
+    m = re.search(r"/lib/modules/[^/]+/(.*)$", path)
+    rel = m.group(1) if m else os.path.basename(path)
+    for ext in (".xz", ".gz", ".zst"):
+        if rel.endswith(ext):
+            rel = rel[: -len(ext)]
+            break
+    return rel
+
+
+def merge_chains(chains, kver=None):
     """Topologically merge several modprobe chains into one order valid for
-    all of them. Each chain is a total order over its own members, so the
-    union's edges are every (earlier, later) pair within a chain. Raises if
-    two chains disagree -- silently picking one would produce a load order
-    that fails on somebody's hardware and nowhere else."""
+    all of them.
+
+    THE EDGES COME FROM depmod, NOT FROM POSITION IN THE CHAIN, and that
+    correction is the whole of this function's history. It used to treat each
+    chain as a TOTAL order -- "the union's edges are every (earlier, later)
+    pair within a chain" -- and that premise is FALSE. `modprobe
+    --show-depends` prints *a* valid topological order, not the only one, so two
+    chains that share a set of mutually independent modules routinely print
+    them in different relative orders. Under the old model every such pair
+    became a contradictory edge and the merge raised
+    "module chains disagree on load order; refusing to guess".
+
+    IT HAD NEVER FIRED BECAUSE ONLY TWO CHAINS HAD EVER BEEN MERGED -- i915 and
+    nouveau, which happen to agree. Adding the Sound Open Firmware stack (three
+    more chains over a shared sound core) produced 40+ "conflicting" pairs on
+    the first run, and NOT ONE OF THEM WAS A REAL DEPENDENCY: snd-compress vs
+    snd-hda-codec, snd-hda-core vs snd-intel-dspcfg, snd-hwdep vs
+    snd-soc-core -- siblings, neither of which depends on the other, so either
+    order loads. The refusal was correct about "these chains disagree" and
+    wrong about it mattering, and it failed the image build outright.
+
+    THE FIX IS THE NARROWEST ONE THAT WORKS, because the alternative changed an
+    order that is already shipping. Deriving every edge from depmod instead
+    produced a VALID order (checked: zero modules loaded before a dependency)
+    that was nonetheless a DIFFERENT order for the DRM core -- 16 modules,
+    first divergence drm_ttm_helper vs rc-core -- and hamnix-drivers-drm has
+    been shipping the old one. A gratuitous reordering of GPU module loading is
+    exactly the change that "fails on somebody's hardware and nowhere else".
+
+    So: every chain edge is kept EXCEPT the ones another chain contradicts.
+    A contradicted pair is, by construction, two modules that some valid order
+    puts either way round, so the constraint was never real; the pair falls
+    back to depmod's table, which is consulted for a genuine dependency, and
+    to chain position as the tiebreak. WHERE NO CHAIN CONTRADICTS ANOTHER THIS
+    IS BIT-FOR-BIT THE OLD FUNCTION -- verified: the DRM core comes out
+    identical, and the full 32-chain image set that used to refuse now merges
+    into 87 modules with zero order violations against depmod.
+
+    THE REFUSAL IS KEPT for a genuine cycle -- a real one would mean depmod's
+    table is circular, which is not something to paper over with a guess.
+    """
     order, seen = [], set()
     for chain in chains:
         for m in chain:
@@ -865,17 +917,43 @@ def merge_chains(chains):
                 seen.add(m)
                 order.append(m)
     pos = {m: i for i, m in enumerate(order)}
-    preds = {m: set() for m in order}
+
+    # Every (before, after) pair any chain asserts, and the ones some other
+    # chain asserts the opposite of.
+    edges = set()
     for chain in chains:
         for i, later in enumerate(chain):
-            preds[later].update(chain[:i])
+            for earlier in chain[:i]:
+                edges.add((earlier, later))
+    contradicted = {(a, b) for (a, b) in edges if (b, a) in edges}
+
+    kver = kver or kernel_version()
+    table = host_dep_table(kver) if kver else {}
+    by_rel = {_ko_relpath(m): m for m in order}
+
+    preds = {m: set() for m in order}
+    for (a, b) in edges:
+        if (a, b) not in contradicted:
+            preds[b].add(a)
+    # depmod's real dependencies, which outrank any chain accident. For a
+    # contradicted pair this is the only thing that could still order it, and
+    # for every other pair it is already implied.
+    for m in order:
+        for d in table.get(_ko_relpath(m), []):
+            dm = by_rel.get(d)
+            if dm is not None and dm != m:
+                preds[m].add(dm)
+
     out, placed = [], set()
     while len(out) < len(order):
         ready = [m for m in order
                  if m not in placed and preds[m] <= placed]
         if not ready:
-            raise SystemExit("hamlinux_packages: module chains disagree on "
-                             "load order; refusing to guess")
+            stuck = [os.path.basename(m) for m in order if m not in placed]
+            raise SystemExit(
+                "hamlinux_packages: a real dependency CYCLE among these "
+                "modules, per depmod's own table -- refusing to guess a load "
+                "order: %s" % ", ".join(sorted(stuck)[:12]))
         pick = min(ready, key=lambda m: pos[m])
         placed.add(pick)
         out.append(pick)
