@@ -105,10 +105,59 @@ static inline int32_t rc32(int r)
  * with nothing after the colon. Back it with strerror_r.
  *
  * Returns the number of bytes written, excluding the NUL. */
+/* THE REASON MUST REACH THE PERSON WHO ASKED, NOT THE CONSOLE.
+ *
+ * Ten refusals in this file compose a careful, specific diagnosis and hand it
+ * to cons_write(). On a machine booted to a shell that is the right place. On
+ * a DESKTOP it is not: the owner typed `enter debian {sh}` into a terminal
+ * window, and all he saw was the shell's generic line plus strerror_r's "No
+ * such file or directory", because sys_errstr was nothing BUT strerror_r. The
+ * four-reason message naming /etc/distros, $HAMNIX_DISTRO_<NAME>, filesystem
+ * labels and /n/<name> went to a console nobody was looking at.
+ *
+ * That is this project's oldest failure wearing a new coat -- "a console
+ * reported everything, to nobody". A diagnosis delivered where it cannot be
+ * read is not better than no diagnosis; it is worse, because it makes the
+ * code look like it explained itself.
+ *
+ * So: one buffer holding the reason for the most recent failure, as text.
+ *
+ * IT IS ONE-SHOT, AND THAT IS DELIBERATE. errstr means "the reason for the
+ * MOST RECENT failure". A buffer that persists would eventually be read
+ * against some LATER, unrelated error -- two ENOENTs in a row and the second
+ * one inherits the first one's story, which is a confident wrong answer and
+ * strictly worse than the generic string. Reading it clears it; a second read
+ * falls through to strerror_r. It is also keyed to the errno that was live
+ * when it was set, so a mismatch discards it rather than reporting it. */
+static char errstr_buf[512];
+static int  errstr_errno;
+
+static void errstr_setf(int err, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(errstr_buf, sizeof errstr_buf, fmt, ap);
+    va_end(ap);
+    errstr_errno = err;
+}
+
 int32_t sys_errstr(uint8_t *buf, uint64_t nbuf)
 {
     if (!buf || nbuf == 0)
         return 0;
+    /* The specific reason, if one was recorded for THIS errno. Consumed on
+     * read -- see errstr_buf. */
+    if (errstr_buf[0] && errstr_errno == errno) {
+        size_t sn = strlen(errstr_buf);
+        if (sn > nbuf - 1)
+            sn = nbuf - 1;
+        memcpy(buf, errstr_buf, sn);
+        buf[sn] = '\0';
+        errstr_buf[0] = '\0';
+        return (int32_t)sn;
+    }
+    errstr_buf[0] = '\0';
+
     /* GNU strerror_r may return a pointer to a static string rather than
      * filling the buffer; honour whichever it did. */
     char tmp[256];
@@ -4842,7 +4891,17 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
                 "filesystem carries the label it names, and nothing is mounted "
                 "at /n/%s\n", name, name);
             cons_write(m, n > 0 ? (size_t)n : 0);
+            /* AND to whoever asked. This is the refusal the owner hit by
+             * typing `enter debian {sh}` into a desktop terminal, where the
+             * console above is invisible; without this line hamsh could only
+             * print strerror_r's "No such file or directory" after its own
+             * "first failing bind:" preamble, naming the bind but not one of
+             * the four things that would fix it. */
             errno = ENOENT;
+            errstr_setf(ENOENT,
+                "no distribution namespace named `%s': not in /etc/distros, "
+                "$HAMNIX_DISTRO_%s unset, no attached filesystem carries that "
+                "label, and nothing is mounted at /n/%s", name, name, name);
             return -ENOENT;
         }
     } else if (!strcmp(d->letter, "#esp")) {
