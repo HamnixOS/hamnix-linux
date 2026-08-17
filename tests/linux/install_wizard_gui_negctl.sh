@@ -101,12 +101,25 @@ if mode == "nodisk":
             "    return\n")
     out = src.replace(anchor, anchor + body)
 elif mode == "preselect":
-    anchor = "    if n_disks == 0:\n        _enumerate_disks_sysblock()\n"
-    assert src.count(anchor) == 1, "the _enumerate_disks() fallback tail anchor is not there exactly once"
-    body = ("    # ---- NEGATIVE CONTROL ONLY "
-            "(tests/linux/install_wizard_gui_negctl.sh)\n"
-            "    if n_disks > 0:\n        sel_disk = 0\n")
-    out = src.replace(anchor, anchor + body)
+    # THE DECLARATION, NOT A STATEMENT INSIDE _enumerate_disks.
+    #
+    # The first spelling appended `if n_disks > 0: sel_disk = 0` to the end of
+    # _enumerate_disks. The text went in (the guard below confirmed it) and
+    # the wizard's behaviour DID NOT CHANGE: three Returns still sat on step
+    # 5. Why was never established -- a one-file Adder probe ruled out the
+    # obvious suspect, that assigning a global declared later in the file
+    # makes a local instead (it does not; the probe printed the global's new
+    # value). So that arm proved nothing and said so.
+    #
+    # Changing the INITIALISER cannot be a no-op in the same way: sel_disk is
+    # 0 from the instant the program starts, before anything runs, and
+    # _page_ready's disk-page test is exactly `sel_disk >= 0`.
+    anchor = "sel_disk: int64 = -1"
+    assert src.count(anchor) == 1, "the sel_disk declaration anchor is not there exactly once"
+    out = src.replace(
+        anchor,
+        "sel_disk: int64 = 0   # ---- NEGATIVE CONTROL ONLY "
+        "(tests/linux/install_wizard_gui_negctl.sh)")
 else:
     raise SystemExit("unknown mode %r" % mode)
 assert out != src, "the patch changed nothing"
@@ -153,8 +166,22 @@ fi
 # ---- arm PRESELECT: a disk is offered AND already chosen --------------------
 run_arm PRESELECT preselect "$WORK/preselect" \
     "a disk page that is satisfied before the person touches it must not pass the refusal check"
+# THREE OUTCOMES, NOT TWO, and the difference matters. "The detector is
+# blind" and "the inversion never reached the running program" are different
+# faults with different fixes, and the first spelling of this arm conflated
+# them: it reported the detector blind when in fact the patched wizard had
+# behaved exactly like the unpatched one. A control that cannot tell those
+# apart is a control that can slander a working instrument.
+#
+# The separator is the arm's OWN disk page: with sel_disk preset, the FIRST of
+# the three Returns must leave step 5. If the log still shows the wizard
+# sitting on step 5 for all three, the wizard did not act preselected and the
+# arm is INCONCLUSIVE, whatever the detector said.
 if grep -qE 'MOVED THE WIZARD PAST THE DISK PAGE' "$WORK/preselect/RUN.log"; then
     ok "PRESELECT: the refusal detector flipped -- with sel_disk preset, Returns moved the wizard on, so 'three Returns with NOTHING selected left it on step 5' is a reading"
+elif grep -qE 'after 3 more Returns \(nothing selected\).*Step 5' "$WORK/preselect/RUN.log"; then
+    bad "PRESELECT INCONCLUSIVE, NOT A VERDICT ON THE DETECTOR: the patched wizard still sat on step 5 for all three Returns, i.e. it did not behave preselected at all. The inversion did not reach the running program, so this arm says NOTHING about whether the refusal check can fail. Do not read the real tree's green as proved by it"
+    grep -aE 'after 3 more Returns|Review' "$WORK/preselect/RUN.log" | head -5
 else
     bad "PRESELECT: the refusal detector did not flip on a wizard that advances without a choice -- it cannot tell refused from advanced"
     grep -aE 'after 3 more Returns|Review' "$WORK/preselect/RUN.log" | head -5

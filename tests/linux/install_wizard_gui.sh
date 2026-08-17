@@ -755,10 +755,27 @@ info "after Tab + Return: $(printf '%s' "$ADV" | tr '\n' '|' | cut -c1-200)"
 # The summary page's own strings (haminstallui.ad draws "Review" / "Install").
 # Matched loosely: an 8-px font OCRed at this scale mangles fine detail, and
 # "Step 5" NOT being there is the load-bearing half either way.
-# The summary page's own strings, off the source: the title is "Review &
-# install" (haminstallui.ad:1080) and the body draws "Target disk:" and "will
-# be ERASED" (:1234, :1241).
-if printf '%s' "$ADV" | grep -qiE 'Review|Target disk|ERASED|Host name'; then
+# "STILL ON STEP 5" IS TESTED FIRST, AND THE NEGATIVE CONTROL IS WHY.
+#
+# The first spelling of this check looked for the summary page's strings
+# first: `grep -qiE 'Review|Target disk|ERASED|Host name'`. It passed the
+# NODISK arm of tests/linux/install_wizard_gui_negctl.sh -- a wizard with no
+# disks at all, sitting on step 5, which cannot advance and did not. Why:
+#
+#     "No installable target disk detected."
+#                     ^^^^^^^^^^^
+#
+# `Target disk` matched the NO-DISK MESSAGE, case-insensitively. THE
+# ASSERTION COULD NOT FAIL. It is the same shape this project has paid for
+# before -- a pattern that matches a mention rather than the thing -- and only
+# the control found it.
+#
+# The fix is ordering, not a better token list: the summary page NEVER
+# contains "Step 5", so asking that first is unambiguous whatever the OCR
+# does to the rest. `Target disk` is dropped outright.
+if printf '%s' "$ADV" | grep -qi 'Step 5'; then
+    bad "Tab then Return left the wizard on step 5 -- either the disk page still has no keyboard selection, or no disk was offered to select"
+elif printf '%s' "$ADV" | grep -qiE 'Review|ERASED|installer|installing'; then
     ok "TAB SELECTED A DISK AND RETURN ADVANCED PAST STEP 5 -- the wizard is completable from the keyboard for the first time"
     # AN OBSERVATION THIS GATE CANNOT YET EXPLAIN, RECORDED RATHER THAN
     # SMOOTHED OVER. On the first run after the fix, the frame taken 6 s after
@@ -779,8 +796,6 @@ if printf '%s' "$ADV" | grep -qiE 'Review|Target disk|ERASED|Host name'; then
     if printf '%s' "$ADV" | grep -qiE 'installer|installing|ERASES'; then
         info "NOTE: one Return produced a frame with the INSTALLER ALREADY RUNNING; _goto_next needs two to get there. Unexplained -- see the comment above this line. Section F says nothing was written."
     fi
-elif printf '%s' "$ADV" | grep -qi 'Step 5'; then
-    bad "Tab then Return left the wizard on step 5 -- either the disk page still has no keyboard selection, or no disk was offered to select"
 else
     bad "after Tab + Return the window OCRs to neither step 5 nor a summary page -- read $D/shots/p8_afterselect.png"
 fi
