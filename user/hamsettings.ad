@@ -38,8 +38,26 @@ def _slen(s: Ptr[uint8]) -> uint64:
     return n
 
 
-def _writeall(fd: int32, s: Ptr[uint8]):
-    sys_write(fd, s, _slen(s))
+# Write every byte of `s`, or say so. Returns 0 on success, -1 if the write
+# failed OR came up short.
+#
+# It USED to be void and it did ONE sys_write, so it was neither "write" nor
+# "all": a refusal and a short write both looked exactly like success. That
+# mattered here more than anywhere, because the kernel side was taught to
+# refuse — user/linux-wsys.c ctl_global() returns -1 for a verb it cannot
+# route, added precisely so that "hamctl would print 'wallpaper applied' over
+# a write that went nowhere" could stop happening. It stopped happening on the
+# kernel's side of the pipe. On THIS side nobody looked at the answer, so the
+# refusal arrived and was discarded, and the person still read "applied".
+def _writeall(fd: int32, s: Ptr[uint8]) -> int32:
+    n: uint64 = _slen(s)
+    off: uint64 = 0
+    while off < n:
+        rc: int64 = sys_write(fd, s + off, n - off)
+        if rc <= 0:
+            return -1
+        off = off + cast[uint64](rc)
+    return 0
 
 
 def _u64_to_dec(v: uint64, out: Ptr[uint8]) -> uint64:
@@ -164,20 +182,34 @@ def _write_wallpaper_ppm(r: int32, g: int32, b: int32) -> int32:
     fd: int32 = sys_open_write(cast[Ptr[char]]("/tmp/hamnix-wallpaper.ppm"))
     if fd < 0:
         return 0
-    sys_write(fd, &ppm_buf[0], p)
+    # THE PIXELS ARE THE POINT. Returning 1 after an unchecked write means a
+    # /tmp that is full, read-only or gone still reports a wallpaper written,
+    # and the caller goes on to tell the compositor to load a file that does
+    # not contain what it says.
+    w: int64 = sys_write(fd, &ppm_buf[0], p)
     sys_close(fd)
+    if w != cast[int64](p):
+        return 0
     return 1
 
 
 # Apply a swatch: write the PPM, then set it as wallpaper via /dev/wsys/ctl.
 def _apply_wallpaper(i: uint64):
     if _write_wallpaper_ppm(sw_r[i], sw_g[i], sw_b[i]) == 0:
+        _writeall(2, cast[Ptr[uint8]]("[hamsettings] wallpaper NOT applied: could not write /tmp/hamnix-wallpaper.ppm. The desktop still shows the old background.\n"))
         return
     fd: int32 = sys_open_write(cast[Ptr[char]]("/dev/wsys/ctl"))
     if fd < 0:
+        _writeall(2, cast[Ptr[uint8]]("[hamsettings] wallpaper NOT applied: cannot open /dev/wsys/ctl. The desktop still shows the old background.\n"))
         return
-    _writeall(fd, cast[Ptr[uint8]]("wallpaper /tmp/hamnix-wallpaper.ppm\n"))
+    # The verb's fate, not the open's. ctl_global() refuses a verb it cannot
+    # route -- when the chrome segment is absent or read-only -- and that
+    # refusal is the whole reason it stopped being void.
+    wrc: int32 = _writeall(fd, cast[Ptr[uint8]]("wallpaper /tmp/hamnix-wallpaper.ppm\n"))
     sys_close(fd)
+    if wrc != 0:
+        _writeall(2, cast[Ptr[uint8]]("[hamsettings] wallpaper NOT applied: /dev/wsys/ctl refused the verb. The desktop still shows the old background.\n"))
+        return
     _writeall(1, cast[Ptr[uint8]]("[hamsettings] wallpaper applied\n"))
 
 
