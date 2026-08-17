@@ -294,11 +294,18 @@ fi
 #   cut off from its own repository by the act of installing from it.
 #
 # So: for every /etc file the image stages AND a package carries, compare the
-# BYTES. /etc is the whole scope on purpose -- the binaries are covered by
-# tests/linux/channel_runs_desktop.sh, which RUNS them, and a per-byte compare
-# of an ELF would go red on any legitimate rebuild. A configuration file has
-# no such excuse: if the channel's copy differs from the one the image boots
-# with, one of the two is wrong and nobody knows which.
+# BYTES. /etc is the whole scope of THIS file, and the reason written here
+# used to be that "a per-byte compare of an ELF would go red on any legitimate
+# rebuild". THAT IS NO LONGER TRUE and the sentence was costing a real defect:
+# the Linux lane builds the same source to the same bytes (measured -- two
+# builds of user/cat.ad into separate directories are one sha256), so the ELFs
+# ARE comparable and tests/linux/channel_bytes_match_image.sh compares all 229
+# of them. On its first run it found /bin/install: the image stages hlinstall
+# there, the channel carried a build of user/install.ad -- a different
+# installer -- and this file said `covered` because both sides spell the name
+# `bin/install`. A configuration file has no such excuse either: if the
+# channel's copy differs from the one the image boots with, one of the two is
+# wrong and nobody knows which.
 echo
 : > "$TMP/etcdiff"
 ETCN=0
