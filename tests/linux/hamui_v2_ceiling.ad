@@ -1,0 +1,297 @@
+# tests/linux/hamui_v2_ceiling.ad — the probe behind tests/linux/hamui_v2_ceiling.sh.
+#
+# WHY IT EXISTS, AND WHY IT IS SMALL.
+#
+# Two facts about the v2 blit path had no fast, unconditional test, and both of
+# them have already reached a screen:
+#
+#  1. A v2 BLIT LARGER THAN 1 MiB MUST BE ACCEPTED. An 880x600 window is
+#     880*600*4 + 18 = 2,112,018 bytes, which is the exact size that a 1 MiB
+#     reassembly buffer refused for the whole life of this port -- "no v2
+#     window over about 512x512 had ever painted, the browser included"
+#     (ee62e0fc). The gates that cover it, tests/linux/wsys_chunkblit.sh and
+#     the full-sized arm of tests/linux/wsys_wctl.sh, are in
+#     scripts/ci_battery_manifest.txt now; before this commit
+#     wsys_chunkblit.sh was referenced by NOTHING in the tree, which is why
+#     the first thing to exercise that path on a merge was a PACKAGING RUN.
+#
+#  2. hamui MUST NOT CARRY ITS OWN COPY OF THE CEILING. lib/hamui.ad held
+#     HAMUI_V2_BB_MAX_W/H = 1280x800 and clamped a client's backbuffer to it
+#     in silence, returning success. That is the fourth copy of one number in
+#     the Linux lane and the third silent clamp; two of the others reached the
+#     owner's laptop (fd0d4f79, ae019748). It now reads `maxsurface <w>x<h>`
+#     off /dev/wsys/pool like user/wsysd.ad and user/wsyswl.ad do. THE POINT
+#     OF ASSERTING IT HERE is that a copy re-introduced later would be
+#     invisible to every gate in the tree: the machine's test framebuffer is
+#     1280x800, which is exactly the number the stale copy held, so nothing
+#     would be clipped and nothing would be said.
+#
+# It goes THROUGH lib/hamui.ad rather than writing the protocol itself, which
+# is the whole point -- tests/linux/wsys_uidgate.ad already covers the raw
+# device, and a probe that reimplements the client cannot catch a defect in
+# the client. Every line printed ends in a number that came back from the
+# toolkit or the kernel.
+#
+#   hamui_v2_ceiling <w> <h>
+#       Self-serve a window, resize it to <w>x<h>, bind hamui to it, negotiate
+#       v2 at <w>x<h>, paint the whole backbuffer one colour and commit it in
+#       ONE rect. Prints, on one line each:
+#
+#           pool maxsurface=<w>x<h>            what the DEVICE says (raw read)
+#           v2 active=<0|1> bbw=<n> bbh=<n>    what the TOOLKIT allocated
+#           blit bytes=<n> rc=<n>              the commit: 18 + w*h*4, and 0/-1
+#
+#       bbw/bbh are read back with hamui_v2_bb_w()/_bb_h(), which are the dims
+#       every v2 draw primitive clips against -- so "the toolkit agreed with
+#       the device" is asserted on the number that decides the pixels, not on
+#       the constant.
+
+from lib.hamui import hamui_window_on, hamui_set_protocol_v2_dims, \
+    hamui_v2_is_active, hamui_v2_bb_w, hamui_v2_bb_h, hamui_v2_clear, \
+    hamui_v2_commit_rect
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+
+obuf: Array[512, uint8]
+poolbuf: Array[512, uint8]
+pathbuf: Array[128, uint8]
+geombuf: Array[128, uint8]
+
+
+def _slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def _puts(s: Ptr[uint8]):
+    sys_write(1, s, _slen(s))
+
+
+def _dec(v: int64, out: Ptr[uint8]) -> uint64:
+    # Signed decimal. -1 is a real answer here (a refused blit), so the sign
+    # must survive: a probe that prints 1 for -1 is the failure this file is
+    # about.
+    if v == 0:
+        out[0] = 48
+        return 1
+    p: uint64 = 0
+    n: int64 = v
+    if n < 0:
+        out[0] = 45                                      # '-'
+        p = 1
+        n = 0 - n
+    tmp: Array[24, uint8]
+    t: uint64 = 0
+    while n > 0:
+        tmp[t] = cast[uint8](48 + (n % 10))
+        n = n / 10
+        t = t + 1
+    while t > 0:
+        t = t - 1
+        out[p] = tmp[t]
+        p = p + 1
+    return p
+
+
+def _putd(v: int64):
+    nb: Array[24, uint8]
+    n: uint64 = _dec(v, &nb[0])
+    sys_write(1, &nb[0], n)
+
+
+def _atoi(s: Ptr[char]) -> int64:
+    b: Ptr[uint8] = cast[Ptr[uint8]](s)
+    v: int64 = 0
+    i: uint64 = 0
+    while b[i] >= 48 and b[i] <= 57:
+        v = v * 10 + cast[int64](b[i]) - 48
+        i = i + 1
+    return v
+
+
+# THE DEVICE'S OWN ANSWER, read raw and printed, so the assertion in the .sh
+# compares two numbers that came from two different places. Reading it here
+# rather than trusting lib/hamui.ad's copy of the read is the point: if this
+# probe asked the toolkit for both sides it could not tell agreement from a
+# single shared mistake.
+def _pool_max(out: Ptr[int64]) -> int32:
+    out[0] = 0
+    out[1] = 0
+    fd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/pool"))
+    if fd < 0:
+        return -1
+    n: int64 = sys_read(fd, &poolbuf[0], 500)
+    sys_close(fd)
+    if n <= 0:
+        return -1
+    ln: uint64 = cast[uint64](n)
+    poolbuf[ln] = 0
+    i: uint64 = 0
+    at: int64 = -1
+    while i + 11 <= ln:
+        if poolbuf[i] == 109 and poolbuf[i + 1] == 97 \
+                and poolbuf[i + 2] == 120 and poolbuf[i + 3] == 115 \
+                and poolbuf[i + 4] == 117 and poolbuf[i + 5] == 114 \
+                and poolbuf[i + 6] == 102 and poolbuf[i + 7] == 97 \
+                and poolbuf[i + 8] == 99 and poolbuf[i + 9] == 101 \
+                and poolbuf[i + 10] == 32:
+            at = cast[int64](i) + 11
+            i = ln
+        else:
+            i = i + 1
+    if at < 0:
+        return -1
+    j: uint64 = cast[uint64](at)
+    w: int64 = 0
+    while j < ln and poolbuf[j] >= 48 and poolbuf[j] <= 57:
+        w = w * 10 + cast[int64](poolbuf[j]) - 48
+        j = j + 1
+    if j >= ln or poolbuf[j] != 120:
+        return -1
+    j = j + 1
+    h: int64 = 0
+    while j < ln and poolbuf[j] >= 48 and poolbuf[j] <= 57:
+        h = h * 10 + cast[int64](poolbuf[j]) - 48
+        j = j + 1
+    if w < 1 or h < 1:
+        return -1
+    out[0] = w
+    out[1] = h
+    return 0
+
+
+def _newwindow() -> int32:
+    wfd: int32 = sys_open_write(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if wfd < 0:
+        return -1
+    sys_write(wfd, cast[Ptr[uint8]]("newwindow\n"), 10)
+    sys_close(wfd)
+    rfd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if rfd < 0:
+        return -1
+    rbuf: Array[32, uint8]
+    r: int64 = sys_read(rfd, &rbuf[0], 31)
+    sys_close(rfd)
+    if r <= 0:
+        return -1
+    wid: int32 = 0
+    i: uint64 = 0
+    while i < cast[uint64](r):
+        c: uint8 = rbuf[i]
+        if c >= 48 and c <= 57:
+            wid = wid * 10 + cast[int32](c) - 48
+        i = i + 1
+    return wid
+
+
+def _winctl(wid: int32, s: Ptr[uint8]):
+    p: uint64 = 0
+    pre: Ptr[uint8] = cast[Ptr[uint8]]("/dev/wsys/")
+    j: uint64 = 0
+    while pre[j] != 0:
+        pathbuf[p] = pre[j]
+        p = p + 1
+        j = j + 1
+    p = p + _dec(cast[int64](wid), &pathbuf[p])
+    leaf: Ptr[uint8] = cast[Ptr[uint8]]("/ctl")
+    k: uint64 = 0
+    while leaf[k] != 0:
+        pathbuf[p] = leaf[k]
+        p = p + 1
+        k = k + 1
+    pathbuf[p] = 0
+    fd: int32 = sys_open_write(cast[Ptr[char]](&pathbuf[0]))
+    if fd < 0:
+        return
+    sys_write(fd, s, _slen(s))
+    sys_close(fd)
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 3:
+        _puts("usage: hamui_v2_ceiling <w> <h>\n")
+        return 2
+    w: int64 = _atoi(cast[Ptr[char]](argv[1]))
+    h: int64 = _atoi(cast[Ptr[char]](argv[2]))
+
+    pm: Array[2, int64]
+    if _pool_max(&pm[0]) != 0:
+        _puts("pool maxsurface=UNREADABLE\n")
+    else:
+        _puts("pool maxsurface=")
+        _putd(pm[0])
+        _puts("x")
+        _putd(pm[1])
+        _puts("\n")
+
+    wid: int32 = _newwindow()
+    if wid < 0:
+        _puts("window newwindow=-1\n")
+        return 1
+    _puts("window wid=")
+    _putd(cast[int64](wid))
+    _puts("\n")
+
+    # Give the window the geometry we are about to negotiate for, so the
+    # compositor has somewhere this big to put the pixels.
+    gp: uint64 = 0
+    # `geometry`, not `geom` -- the window ctl parser takes the full word and
+    # ignores what it does not know, so a misspelling here left the window at
+    # the device's 320x240 default while the 880x600 blit was ACCEPTED and then
+    # clipped to it. Measured: 19,200 sampled pixels instead of 132,000.
+    pre: Ptr[uint8] = cast[Ptr[uint8]]("geometry 0 0 ")
+    j: uint64 = 0
+    while pre[j] != 0:
+        geombuf[gp] = pre[j]
+        gp = gp + 1
+        j = j + 1
+    gp = gp + _dec(w, &geombuf[gp])
+    geombuf[gp] = 32
+    gp = gp + 1
+    gp = gp + _dec(h, &geombuf[gp])
+    geombuf[gp] = 10
+    gp = gp + 1
+    geombuf[gp] = 0
+    _winctl(wid, &geombuf[0])
+
+    hamui_window_on(0, wid)
+    rc: int32 = hamui_set_protocol_v2_dims(cast[int32](w), cast[int32](h))
+    _puts("v2 negotiate=")
+    _putd(cast[int64](rc))
+    _puts(" active=")
+    _putd(cast[int64](hamui_v2_is_active()))
+    _puts(" bbw=")
+    _putd(cast[int64](hamui_v2_bb_w()))
+    _puts(" bbh=")
+    _putd(cast[int64](hamui_v2_bb_h()))
+    _puts("\n")
+
+    # PAINT THE WHOLE BACKBUFFER AND SHIP IT IN ONE RECT -- the browser's own
+    # shape, and the one that produces a record over 1 MiB. The colour is
+    # rgb(220,40,40) so the .sh can find it in the framebuffer and is not
+    # reading the compositor's clear.
+    bw: int32 = hamui_v2_bb_w()
+    bh: int32 = hamui_v2_bb_h()
+    hamui_v2_clear(220, 40, 40)
+    crc: int32 = hamui_v2_commit_rect(0, 0, bw, bh)
+    _puts("blit bytes=")
+    _putd(18 + cast[int64](bw) * cast[int64](bh) * 4)
+    _puts(" rc=")
+    _putd(cast[int64](crc))
+    _puts("\n")
+    # HOLD THE WINDOW OPEN so the caller can look at the framebuffer. Without
+    # this the process exits, the window goes away, and the pixel arm measures
+    # an empty screen and blames the blit -- which is precisely the mistake
+    # this file's header is about. `hold` is an argument rather than the
+    # default so the over-the-ceiling run, which only needs the numbers on
+    # stdout, still returns at once.
+    if argc >= 4:
+        sys_waitfds(cast[Ptr[int32]](0), 0, 6000)
+    return 0

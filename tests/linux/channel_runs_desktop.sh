@@ -505,6 +505,15 @@ HTML
       "$BIN/wsysd" </dev/null >"$WORK/bwsysd.log" 2>&1 &
       echo $! >"$WORK/bwsysd.pid"
       for _ in $(seq 1 60); do [ -s "$BROWFB" ] && break; sleep 0.1; done
+      # ASSERTED, NOT MERELY WAITED FOR. This wait had no `||` after it, so a
+      # compositor that had not produced a framebuffer in 6 s was followed by a
+      # browser launched into nothing, and the verdict a person read was "a v2
+      # blit bigger than ~512x512 is being refused by these bytes" -- an
+      # accusation against the blit path on the evidence of a compositor that
+      # had not started. Exit 2 so the arm below can tell the two apart.
+      [ -s "$BROWFB" ] || {
+          echo "NOFB the packaged wsysd produced no framebuffer in 6 s"
+          exit 2; }
       "$BIN/hambrowse" "file://$PAGE" </dev/null >"$WORK/bbrowse.log" 2>&1 &
       echo $! >"$WORK/bbrowse.pid"
       # POLL for the pixels rather than sleeping for them: what is being timed
@@ -543,14 +552,56 @@ PY
     case "$WHITE" in ''|*[!0-9]*) WHITE=0;; esac
     if [ "$BROWRC" = 0 ]; then
         ok "A PACKAGED v2 CLIENT PAINTS: the channel's own hambrowse put $WHITE white pixels of a page on the framebuffer -- so its blit, which its OWN linked copy of the window system accepts, was not refused for being bigger than the staging buffer"
+    elif [ "$BROWRC" = 2 ]; then
+        bad "THE PACKAGED COMPOSITOR DID NOT START: no framebuffer after 6 s, so the browser was never given anything to paint on. THIS SAYS NOTHING ABOUT THE BLIT."
+        tail -15 "$WORK/bwsysd.log" 2>/dev/null | sed 's/^/chanrun:      /'
     else
-        bad "the packaged browser painted nothing ($WHITE white pixels): a v2 blit bigger than ~512x512 is being refused by these bytes, which is every browser window. See tests/linux/wsys_wctl.sh's full-sized blit assertion."
+        # SAY WHAT WAS MEASURED, AND SEPARATELY SAY WHAT THE EVIDENCE SUPPORTS.
+        #
+        # This arm used to conclude "a v2 blit bigger than ~512x512 is being
+        # refused by these bytes" from "few white pixels", which is a cause it
+        # never measured. The refusal it names is LOUD in user/linux-wsys.c --
+        # every one of the three refusals on that path prints, and the write
+        # returns -EMSGSIZE (-90) -- and the two logs that would carry it were
+        # sitting right here and were then deleted by the EXIT trap. An hour of
+        # bisecting eight innocent commits came out of that sentence. So the
+        # evidence is now GREPPED, quoted, and its ABSENCE is stated as
+        # plainly as its presence.
+        bad "THE PACKAGED BROWSER PAINTED NOTHING: only $WHITE white pixels of a page reached the framebuffer in 25 s."
+        BEVID="$(grep -aiE 'EMSGSIZE|-90|refused|reassembly|maximum surface|carry' \
+                    "$WORK/bbrowse.log" "$WORK/bwsysd.log" 2>/dev/null | head -6)"
+        if [ -n "$BEVID" ]; then
+            info "  and the bytes said why -- a size refusal IS in the logs:"
+            printf '%s\n' "$BEVID" | sed 's/^/chanrun:      /'
+            info "  that is the ee62e0fc shape: every v2 window bigger than about 512x512, which is every browser window, paints nothing. tests/linux/hamui_v2_ceiling.sh and tests/linux/wsys_chunkblit.sh isolate it in seconds."
+        else
+            info "  NO SIZE REFUSAL IS IN THE LOGS. Every refusal on the draw/ctl"
+            info "  path prints (user/linux-wsys.c: the overflow, the oversized"
+            info "  partial and the oversized rect) and the write returns -90, so"
+            info "  the absence of all of that is evidence AGAINST the blit being"
+            info "  the cause here. Do not go bisecting the window system on this"
+            info "  line alone -- run tests/linux/hamui_v2_ceiling.sh (seconds) to"
+            info "  settle it, and read the two logs below."
+            tail -12 "$WORK/bbrowse.log" 2>/dev/null | sed 's/^/chanrun:      browse: /'
+            tail -8  "$WORK/bwsysd.log"  2>/dev/null | sed 's/^/chanrun:      wsysd:  /'
+        fi
     fi
 else
     info "no hambrowse in this channel -- the packaged-v2-client arm did not run"
 fi
 
 ok "nothing in this file compiles anything: hamlinux_build.sh is never invoked here, so every assertion above is about the channel's own bytes"
+fi
+
+# AND THE EVIDENCE SURVIVES A RED RUN. $WORK is removed on exit unless
+# CHANRUN_KEEP=1, so the one run that mattered -- the one that REFUSED TO
+# PUBLISH -- was also the one whose de_mouse_chrome log and browser logs were
+# destroyed, which is why "13 PASS / 1 FAIL" could not afterwards be resolved
+# into WHICH arm. A gate that fails and takes its evidence with it costs more
+# than it saves. Green runs still clean up.
+if [ "$FAIL" != 0 ]; then
+    KEEP=1
+    info "KEEPING $WORK because this run FAILED -- its logs are the evidence for what it just accused, and this gate blocks a publish"
 fi
 
 report
