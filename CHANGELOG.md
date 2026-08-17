@@ -14,6 +14,36 @@ because the number is the deliverable.
 
 ## Unreleased
 
+### The machine wrote to your USB stick 42 times more than it needed to
+
+**Found while hunting a freeze on real hardware, and it does not claim to have
+fixed that freeze.** With the desktop up and nobody touching the machine, two
+things were writing to the boot medium continuously.
+
+**Ours:** the boot log rewrote itself completely every two seconds — header,
+whole buffer, terminator, in seven synchronous writes — **whether or not a
+single byte had changed**. That is 1,143 forced flushes to the stick in six
+minutes. It now writes only the part that actually differs, so an idle machine
+performs no transaction with the stick at all, and it slows itself down on a
+slow medium and says so in its own log.
+
+**The kernel's, and it was larger:** a freshly made filesystem leaves most of
+its inode tables uninitialised, and the kernel quietly zeroes them — 42.7 MB of
+them — in the background of the **first** read-write mount. Measured at about
+110 KB/s, that is roughly **seven minutes of continuous writing beginning at the
+first boot of every stick**, which is the only boot most sticks get. The
+filesystem is now built with those tables already initialised, which costs
+nothing at build time and removes the work entirely from the machine.
+
+Together, on an idle desktop over three minutes: **22.9 MB written down to
+0.5 MB**, and time spent waiting inside write calls down from **25.1 seconds out
+of 180 to 0.1**.
+
+**And if it does freeze again, it will say who.** The kernel's hung-task
+detector is now switched on, so a process stuck in the kernel for 30 seconds has
+its name, process id and stack written into the log on the stick — with nobody
+pressing anything.
+
 ### The desktop would not start on a 1920x1200 screen
 
 **Found on real hardware, on the first boot that reached a graphical
