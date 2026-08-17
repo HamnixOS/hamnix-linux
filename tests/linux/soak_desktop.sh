@@ -991,9 +991,18 @@ run_arm() {
     kill -KILL "$vm" 2>/dev/null; wait "$vm" 2>/dev/null
 
     # THE VERDICT NUMBER, AND IT IS THE GUEST'S OWN CLOCK.
+    # AND IT IS THE GUEST'S CLOCK ALONE. This used to be max(guest, host), and
+    # that is how a 30-minute run with a HEALTHY guest reported "USERSPACE WENT
+    # SILENT FOR 111s": once the redirect leak starts, the serial log grows
+    # fast, and the host's own sampling -- `grep -ac` over that file, plus a
+    # screendump and an md5 -- stops keeping up. The host saw no new heartbeat
+    # for 111 s. THE GUEST'S OWN TIMESTAMPS NEVER GAPPED BY MORE THAN 2 s.
+    #
+    # The host number is still taken and still printed, and it still ARMS the
+    # sysrq capture -- a cheap dump taken on a false alarm costs nothing and a
+    # missed one costs the whole run. It just cannot pass a verdict any more.
     ARM_GUESTGAP=$(guest_max_gap "$d/serial.log")
     ARM_GAP="$ARM_GUESTGAP"
-    [ "$ARM_MAXGAP" -gt "$ARM_GAP" ] && ARM_GAP="$ARM_MAXGAP"
     ARM_KEYS=$(wsysd_counter "$d/serial.log" keys)
     ARM_PTR=$(wsysd_counter "$d/serial.log" pointer)
     ARM_FRAMES=$(wsysd_counter "$d/serial.log" frames)
@@ -1188,6 +1197,12 @@ info "cycles completed by the guest churn loop: $(grep -ac "$CENSUS cycle" "$WOR
 # six-minute soak reported as a four-hour one.
 if [ "$DRIVE" = 0 ]; then
     info "IDLE CONTROL ARM: no hand, no launches. This arm exists to be the denominator for the driven arm's write rate, and its keys=$S_KEYS pointer=$S_PTR are meant to be 0."
+elif [ "${HAMLINUX_SOAK_TYPE:-1}" != 1 ]; then
+    if [ "$S_PTR" -gt 0 ]; then
+        ok "the desktop was DRIVEN for the whole window by the pointer alone (keyboard gesture off by request): wsysd took $S_PTR pointer events"
+    else
+        bad "wsysd took pointer=$S_PTR over ${SECS}s -- THIS WAS NOT A WORKLOAD and no negative below is one"
+    fi
 elif [ "$S_KEYS" -gt 0 ] && [ "$S_PTR" -gt 0 ]; then
     ok "the desktop was DRIVEN for the whole window: wsysd took $S_KEYS keystrokes and $S_PTR pointer events"
 else
@@ -1255,8 +1270,23 @@ say "DID REDIRECTION STOP WORKING? (found by this gate; see the header)"
 #     console. `rc.distros-wl` is an /etc entry with a name nothing else emits,
 #     so a bare line equal to it is that redirect having failed. This is how it
 #     was caught the first time and it is kept so an old log can be re-read.
-REDIR_N=$(grep -ac "^${REDIR}\$" "$WORK/soak/serial.log" 2>/dev/null || echo 0)
-LEAK_N=$(grep -ac '^rc\.distros-wl$' "$WORK/soak/serial.log" 2>/dev/null || echo 0)
+# THE GUEST'S CONSOLE ENDS ITS LINES WITH CR, and a `$` anchor after the name
+# therefore matches nothing. A hand-run grep for '^os-release$' said 0 while
+# `cat -A` showed 636 lines of `os-release^M$` -- the leak was there and the
+# check said it was not. `[[:space:]]*$` absorbs it.
+#
+# AND THE COUNT IS ONE VALUE. `$(grep -ac ... || echo 0)` emits "0\n0" when grep
+# exits 1 with no match, and "0\n0" is not "0", so a CLEAN run reported
+# REDIRECTION STOPPED WORKING. A guard that fails toward the alarming answer is
+# as useless as one that fails toward the reassuring one.
+REDIR_N=$(grep -ac "^${REDIR}[[:space:]]*\$" "$WORK/soak/serial.log" 2>/dev/null); REDIR_N=${REDIR_N:-0}
+LEAK_N=$(grep -ac '^rc\.distros-wl[[:space:]]*$' "$WORK/soak/serial.log" 2>/dev/null); LEAK_N=${LEAK_N:-0}
+# A SECOND /etc NAME, because the first one is not always in the sample. The two
+# runs that hit this leaked DIFFERENT top-six filenames -- one showed
+# rc.distros-wl, the other os-release -- and a detector keyed to one of them
+# would have called the other run clean.
+LEAK2_N=$(grep -ac '^os-release[[:space:]]*$' "$WORK/soak/serial.log" 2>/dev/null); LEAK2_N=${LEAK2_N:-0}
+LEAK_N=$(( LEAK_N + LEAK2_N ))
 if [ "${REDIR_N:-0}" = 0 ] && [ "${LEAK_N:-0}" = 0 ]; then
     ok "shell redirection still worked at the end of ${SECS}s: neither the canary nor an /etc listing ever reached the console"
 else
@@ -1276,7 +1306,9 @@ for i, l in enumerate(lines):
         seen_ts = m.group(0)
         if boot is None:
             boot = seen_ts
-    if first is None and (l.strip() == canary or l.strip() == 'rc.distros-wl'):
+    # strip() and not an anchor: the guest console ends its lines with CR.
+    if first is None and (l.strip() == canary or l.strip() == 'rc.distros-wl'
+                          or l.strip() == 'os-release'):
         first, ts = i, seen_ts
 if first is None:
     raise SystemExit
