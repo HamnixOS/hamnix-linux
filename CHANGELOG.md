@@ -14,6 +14,28 @@ because the number is the deliverable.
 
 ## Unreleased
 
+### Correction: we told you your machine could not be fixed without a new stick
+
+The 1.0.26 notes said, as a known issue, that "firmware, the boot module list and
+the kernel command line arrive only on freshly written media — no update delivers
+them." **The firmware half of that is false.** `hpm update` delivers firmware and
+always did: 483 firmware files and 106 kernel modules ride in the package
+channel, and six firmware packages were being served under 1.0.26 itself while
+that sentence sat in its release notes.
+
+What is actually true is narrower. **No package carries anything under `boot/`** —
+not the kernel, not the combined boot image, not the initramfs, not the recorded
+root partition id. Those are written when a stick is made and can only change
+when a new one is. And an update can refresh the bytes of a driver already named
+in the boot list; it cannot **add a name** to that list, so hardware that needs a
+driver the list never mentioned still needs new media.
+
+The error mattered in the direction that costs someone their time: it told a
+person with a sound problem that their machine could not be repaired short of
+rewriting the stick, when an update would have delivered the firmware. It is
+corrected here rather than quietly edited, and the original sentence is left in
+the 1.0.26 notes with this correction beside it.
+
 ### A shell that ran too long killed itself, and it looked exactly like the machine freezing
 
 Leave the desktop working for about five minutes and everything stops. The
@@ -345,6 +367,11 @@ virtual machine has that hardware and the build machine is a different
 generation that never takes that path; what is proven is that the medium carries
 what such a laptop asks for. **Firmware, the boot module list and the kernel
 command line arrive only on freshly written media** — no update delivers them.
+*(**This sentence is wrong and was corrected in 1.0.27.** Firmware IS delivered
+by `hpm update` — 483 firmware files and 106 kernel modules ride in the channel,
+and six firmware packages were served under this very release. What no package
+carries is anything under `boot/`. The correction is left beside the error
+rather than replacing it, because this text was published and people read it.)*
 A desktop **froze about five minutes into a session on real hardware and the
 cause is still unknown**: two standing write loads were found and removed and
 neither was shown to be it. Eleven places in the widget toolkit still size
