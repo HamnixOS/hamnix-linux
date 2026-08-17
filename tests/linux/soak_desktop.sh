@@ -347,6 +347,8 @@ CLOSEEOF
     cat '/dev/wsys/wsysd/state'
     ls -l /var/log
     cat '/proc/diskstats'
+    tail -6 /var/log/wsysd.log
+    tail -6 /var/log/panel.log
     ps
     echo '${CENSUS}END'"
     else
@@ -365,6 +367,8 @@ CLOSEEOF
     cat '/dev/wsys/wsysd/state'
     ls -l /var/log
     cat '/proc/diskstats'
+    tail -6 /var/log/wsysd.log
+    tail -6 /var/log/panel.log
     ps
     echo '${CENSUS}END'
 $closer"
@@ -1030,6 +1034,30 @@ if [ "${HAMLINUX_SOAK_CLOSE:-1}" = 1 ]; then
 else
     info "close sweep DISABLED for this run: the window count is meant to climb, and what happens at 64 is the measurement"
 fi
+
+# AND THE SERVER'S OWN WORD FOR IT, which is not the window count.
+#
+# WSRV_CONN_MAX is a ceiling on CONNECTIONS, and the server says so exactly
+# ONCE per socket when it is reached (user/linux-wsys.c srv_cap_refused: "SAY
+# IT ONCE PER SERVER, NOT ONCE PER REFUSAL"). So the presence or absence of one
+# line is the whole evidence, and it must be looked for by its text.
+#
+# WHERE IT LANDS MATTERS AND IS NOT OBVIOUS. It is written to the CLIENT's
+# stderr, and a client launched off /dev/wsys/appmenu/launch is a child of
+# hampanelscene -- whose stderr rc.5.linux redirects to /var/log/panel.log. It
+# does NOT reach the console by itself. That is why the census tails the log
+# files: without the tail this question could not be answered from a serial
+# log at all, and an absent line would have meant "not looked for" while
+# reading as "did not happen".
+if grep -aq 'the connection limit is reached' "$WORK/soak/serial.log"; then
+    info "THE SERVER REACHED ITS CONNECTION CEILING during this run:"
+    grep -a 'connection limit is reached' "$WORK/soak/serial.log" | head -3 | sed 's/^/  ..    /'
+    info "what matters is the line AFTER it: past the ceiling a client falls back to the UNMEDIATED in-process path -- it is refused, not blocked. Whether the machine then wedged is the verdict below."
+else
+    info "the server never printed its connection-ceiling refusal in this run"
+fi
+CAPREF=$(grep -ao 'capref [0-9]*' "$WORK/soak/serial.log" | tail -1)
+[ -n "$CAPREF" ] && info "the server's own running total: $CAPREF"
 
 say "IS /var/log GROWING? (candidate 3, measured rather than reasoned)"
 log_growth "$WORK/soak/serial.log" | while read -r nm s0 s1 dl rate; do
