@@ -5023,3 +5023,30 @@ bash tests/linux/wsys_chunkblit.sh
 # nothing, which it did on every run, deterministically, about a window putting
 # 468,480 pixels of page on the screen. 2 PASS / 0 FAIL; ~2 min with the build.
 bash tests/linux/de_browser_paints.sh
+
+# --- THE PACKAGER MUST WATCH WHAT CHANGES ITS OUTPUT (2026-08-17)
+# scripts/hamlinux_packages.py reuses build/repo-obj/<cmd>.elf when it is newer
+# than newest_shared_input(). Anything that function does not look at can be
+# changed, rebuild nothing, and PUBLISH THE PREVIOUS BINARY with every name
+# present and every sha256 in index.json matching the bytes served -- the
+# hamnix-desktop 1.0.10 mechanism. Four inputs were unwatched when this was
+# written, measured with build_one's own reuse predicate: user/hambrowse_tabs.ad
+# and user/http9.ad (LIBRARY MODULES with no `def main`, imported by hambrowse
+# and by hpm/curl/wget), scripts/adder_llvm_runtime.c (on the clang line of
+# every binary), and build/cutover/host_ac.elf -- THE COMPILER.
+#
+# The compiler one is why this gate is worth its second: every gate in
+# tests/linux/ builds from source on every run and therefore always holds a
+# binary from the CURRENT compiler, while only the packager reuses. So a
+# re-bootstrap with no source change gives a green tree and a channel built by
+# the previous compiler -- "the tree's program works and the channel's does
+# not", with nothing in the tree able to see it.
+#
+# Asserts on the SET, by name, rather than touching files and reading a boolean
+# back: that probe leaves a source dated an hour in the future if it is killed
+# mid-run. Refuses on a set of under 100 paths, and asserts two paths that must
+# be ABSENT so that a membership test which has stopped discriminating fails
+# instead of passing everything. 14 PASS / 0 FAIL, and proven red by removing
+# the fix (8 PASS / 6 FAIL, naming all six). Reads only; no build, no binary,
+# no device; under a second.
+bash tests/linux/packager_sees_its_inputs.sh
