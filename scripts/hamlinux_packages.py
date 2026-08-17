@@ -2546,6 +2546,42 @@ def synth_test_wav(workdir):
     return path
 
 
+def synth_hamnix_release(workdir, version):
+    """/etc/hamnix-release -- the one line naming the release this machine IS.
+
+    scripts/hamlinux_image.sh writes it into the image root
+    (`printf '%s\\n' "$HAMLINUX_VERSION" > "$ROOT/etc/hamnix-release"`), and
+    from the commit that introduced it until now NO PACKAGE CARRIED IT.
+    tests/linux/channel_covers_image.sh says exactly what that means:
+
+        FAIL: etc/hamnix-release ships in the image and is in NO package --
+              an installed machine can never update it
+
+    So a machine installed from a 1.0.26 stick and then brought fully up to
+    date with `hpm update` kept a file saying 1.0.26 while every binary
+    beside it was 1.0.27. Nothing on the machine reads the file today, which
+    is why it was survivable and why it was easy to miss -- but a version
+    marker that cannot move is a small lie sitting next to honest lines, and
+    the invariant it breaks is the one this project treats as permanent:
+    what is built here must be able to reach an installed machine.
+
+    GENERATED, not copied, and the version comes from the packager's own
+    --version rather than from a file the image left lying about. That is
+    what makes it correct on an installed machine: the marker then says which
+    release the PACKAGES are, which is the thing `hpm update` actually moved.
+    A copy of the image's file would say which release the machine was
+    IMAGED at, which is the bug in a different place.
+
+    Byte-for-byte the same as the image's line (value + "\\n"), so the
+    "every /etc file the channel carries is byte-identical to the image's"
+    assertion in the same gate keeps holding.
+    """
+    path = os.path.join(workdir, "hamnix-release")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("%s\n" % version)
+    return path
+
+
 def pkg_name_for(cmd):
     """docs/packages.md: underscores become hyphens in the PACKAGE name; the
     installed binary keeps its own filename."""
@@ -3037,8 +3073,13 @@ def main():
 
     # The files this script generates rather than copies out of the tree.
     gendir = tempfile.mkdtemp(prefix="hamgen-")
+    # hamnix-init is where the rest of the static /etc lives (os-release,
+    # profile, services, passwd...), so the release marker belongs beside
+    # them rather than in a package of its own.
     generated = {"hamnix-audio": [(synth_test_wav(gendir),
-                                   "usr/share/sounds/test.wav")]}
+                                   "usr/share/sounds/test.wav")],
+                 "hamnix-init": [(synth_hamnix_release(gendir, args.version),
+                                  "etc/hamnix-release")]}
 
     # Components first: they carry the boot files everything else needs.
     missing_extras = []
