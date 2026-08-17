@@ -5791,6 +5791,9 @@ def _stage_tarball(tar_len: uint64) -> int32:
     staging_root_buf[so] = 0
     sys_mkdir(cast[Ptr[char]](&staging_root_buf[0]))
 
+    # No 'L' entry can be pending across two archives. See longname_buf.
+    longname_n = 0
+
     # Walk the tar; write every entry under staging_root.
     off: uint64 = 0
     while off + 512 <= tar_len:
@@ -5803,7 +5806,40 @@ def _stage_tarball(tar_len: uint64) -> int32:
         typeflag: uint8 = hdr[156]
         body_blocks: uint64 = (size + 511) / 512
 
-        nlen: uint64 = _name_copy_nul(&warn_buf[0], &hdr[0], 100)
+        # SAME GNU LONG NAME HANDLING AS _stage_extract_files. This loop
+        # writes the staging tree that hooks read through HPM_PKG_DIR and
+        # that a SOURCE package's `recipe` is compiled out of; without the
+        # 'L' branch it staged the body at the TRUNCATED path, which is the
+        # 1.0.25 defect in a second place. Not fixed with the first one
+        # because only the extract loop was measured.
+        if typeflag == 76:
+            ln: uint64 = size
+            if ln > 0 and tar_buf[off + 512 + ln - 1] == 0:
+                ln = ln - 1
+            if ln > LONGNAME_CAP:
+                write_str(2, "hpm: tar entry name over 255 bytes; refusing "
+                             "rather than truncating it\n")
+                return -1
+            lk: uint64 = 0
+            while lk < ln:
+                longname_buf[lk] = tar_buf[off + 512 + lk]
+                lk = lk + 1
+            longname_buf[ln] = 0
+            longname_n = ln
+            off = off + 512 + body_blocks * 512
+            continue
+
+        nlen: uint64 = 0
+        if longname_n > 0:
+            lc: uint64 = 0
+            while lc < longname_n:
+                warn_buf[lc] = longname_buf[lc]
+                lc = lc + 1
+            warn_buf[longname_n] = 0
+            nlen = longname_n
+            longname_n = 0
+        else:
+            nlen = _name_copy_nul(&warn_buf[0], &hdr[0], 100)
         if nlen <= pkg_prefix_len:
             off = off + 512 + body_blocks * 512
             continue
@@ -7359,6 +7395,9 @@ def _check_file_conflicts(tar_len: uint64,
     files_pfx: Ptr[uint8] = "files/"
     files_pfx_len: uint64 = 6
 
+    # No 'L' entry can be pending across two archives. See longname_buf.
+    longname_n = 0
+
     while off + 512 <= tar_len:
         hdr: Ptr[uint8] = &tar_buf[off]
         if _tar_header_is_zero(hdr) != 0:
@@ -7369,7 +7408,42 @@ def _check_file_conflicts(tar_len: uint64,
         typeflag: uint8 = hdr[156]
         body_blocks: uint64 = (size + 511) / 512
 
-        nlen: uint64 = _name_copy_nul(&warn_buf[0], &hdr[0], 100)
+        # SAME GNU LONG NAME HANDLING AS _stage_extract_files, and here the
+        # consequence of not having it is a check that answers SUCCESS-SHAPED:
+        # this loop compares each incoming file against every installed
+        # package's recorded paths, so a truncated name compares a path the
+        # archive does not contain. A REAL conflict on any path over 100
+        # bytes -- every kernel module path is over 100 -- was silently NOT
+        # reported, and the install proceeded to overwrite another package's
+        # file. A gap must never answer something success-shaped.
+        if typeflag == 76:
+            ln: uint64 = size
+            if ln > 0 and tar_buf[off + 512 + ln - 1] == 0:
+                ln = ln - 1
+            if ln > LONGNAME_CAP:
+                write_str(2, "hpm: tar entry name over 255 bytes; refusing "
+                             "rather than truncating it\n")
+                return -1
+            lk: uint64 = 0
+            while lk < ln:
+                longname_buf[lk] = tar_buf[off + 512 + lk]
+                lk = lk + 1
+            longname_buf[ln] = 0
+            longname_n = ln
+            off = off + 512 + body_blocks * 512
+            continue
+
+        nlen: uint64 = 0
+        if longname_n > 0:
+            lc: uint64 = 0
+            while lc < longname_n:
+                warn_buf[lc] = longname_buf[lc]
+                lc = lc + 1
+            warn_buf[longname_n] = 0
+            nlen = longname_n
+            longname_n = 0
+        else:
+            nlen = _name_copy_nul(&warn_buf[0], &hdr[0], 100)
         if nlen <= pkg_prefix_len:
             off = off + 512 + body_blocks * 512
             continue
