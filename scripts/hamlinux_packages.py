@@ -2638,6 +2638,39 @@ def newest_shared_input():
     return newest
 
 
+# THE SOURCE PATH HANDED TO THE BUILD SCRIPT IS RELATIVE TO ROOT, AND THAT IS
+# NOT A STYLE CHOICE.
+#
+# The Adder front end puts the COMPILED PATH into the symbol names it emits, so
+# `hamlinux_build.sh user/hpm.ad` and `hamlinux_build.sh /abs/…/user/hpm.ad`
+# produce two ELFs that are not byte-identical. This file used to pass the
+# absolute form while scripts/hamlinux_image.sh passes the relative one, so
+# /bin/hpm on an image and the hpm in the channel had different sha256s --
+# 531,680 bytes against 542,600 -- and "the bytes tested are the bytes served"
+# was not literally true of anything this project ships.
+#
+# MEASURED, so that nobody has to re-chase it: building user/hambrowse.ad both
+# ways in one tree, minutes apart, the ONLY section that differs is .strtab
+# (0x1e06e relative, 0x1f4d8 absolute, +5,226 bytes of longer name strings).
+# .symtab is the same size, every allocated section is the same size, and
+# .text and .rodata are BYTE-IDENTICAL by sha256. Both binaries score 2/0 on
+# tests/linux/de_browser_paints.sh. So the split was never a behaviour
+# difference and the absolute path was never the reason a packaged program
+# misbehaved -- but a build that is bit-reproducible across its two callers is
+# worth having for free, and a differing sha256 is a permanent invitation to
+# blame the wrong thing.
+#
+# `cwd=ROOT` below is what makes the relative form resolve, and
+# hamlinux_build.sh cds to its own PROJ_ROOT first thing regardless.
+def _relsrc(path):
+    """`path` as hamlinux_build.sh will be given it: relative to ROOT, the same
+    string scripts/hamlinux_image.sh passes. Falls back to the absolute path if
+    the file is somehow not under ROOT, which cannot happen for anything this
+    file builds but must not become a traceback if it ever does."""
+    rel = os.path.relpath(path, ROOT)
+    return path if rel.startswith(os.pardir) else rel
+
+
 def build_one(cmd, objdir):
     """Build user/<cmd>.ad through the Linux lane. Returns the ELF path or
     None. Reuses an existing artefact only when that artefact is newer than
@@ -2652,7 +2685,7 @@ def build_one(cmd, objdir):
     if os.path.exists(out) and os.path.getmtime(out) > newest_src:
         return out
     rc = subprocess.call(
-        [os.path.join(ROOT, "scripts/hamlinux_build.sh"), src, out],
+        [os.path.join(ROOT, "scripts/hamlinux_build.sh"), _relsrc(src), out],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT)
     return out if rc == 0 else None
 
@@ -2668,8 +2701,8 @@ def build_vkprobe(objdir):
         return None
     out = os.path.join(objdir, "vkprobe.elf")
     rc = subprocess.call(
-        [os.path.join(ROOT, "scripts/hamlinux_build.sh"), src, out, shim,
-         "-ldl"],
+        [os.path.join(ROOT, "scripts/hamlinux_build.sh"), _relsrc(src), out,
+         _relsrc(shim), "-ldl"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT)
     return out if rc == 0 else None
 
