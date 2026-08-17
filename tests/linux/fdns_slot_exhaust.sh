@@ -118,9 +118,16 @@ say "RED ARM 2 -- the allocator before the compare-and-swap claim"
 # that path, wrote, and returned success -- into somebody else's fifo.  It
 # needs only a couple of dozen launches to show up, and it is intermittent, so
 # the arm runs several times and asserts that at least one saw it.
+#
+# HOW MANY ATTEMPTS, AND WHY NOT SIX. A race arm that is itself flaky turns a
+# green gate into a coin toss, which is worse than no arm. Measured hit rate is
+# 2-3 runs in 6 at 24 launches, so six attempts miss about one time in twenty.
+# Ten attempts of forty launches costs a couple of seconds and puts that under
+# a thousandth -- and if it ever DOES come up empty the gate says so and calls
+# everything below it meaningless, rather than passing quietly.
 RACE_SEEN=0
-for attempt in 1 2 3 4 5 6; do
-    if build_and_run "race$attempt" 24 -DFDNS_ALLOC_NO_CAS=1; then
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if build_and_run "race$attempt" 40 -DFDNS_ALLOC_NO_CAS=1; then
         if grep -q 'NOWHERE' "$WORK/race$attempt.log"; then
             RACE_SEEN=$((RACE_SEEN+1))
             RACE_LINE=$(grep -m1 'NOWHERE' "$WORK/race$attempt.log" | sed 's/^ *//')
@@ -128,9 +135,9 @@ for attempt in 1 2 3 4 5 6; do
     fi
 done
 if [ "$RACE_SEEN" -gt 0 ]; then
-    ok "RED: without the CAS claim a redirect's bytes reach neither the file nor the console ($RACE_SEEN of 6 runs): $RACE_LINE"
+    ok "RED: without the CAS claim a redirect's bytes reach neither the file nor the console ($RACE_SEEN of 10 runs): $RACE_LINE"
 else
-    bad "RED: the collision did not reproduce in 6 runs of 24 launches -- this arm is not shown able to go red, so the green one below proves nothing about the claim"
+    bad "RED: the collision did not reproduce in 10 runs of 40 launches -- this arm is not shown able to go red, so the green one below proves nothing about the claim"
 fi
 
 # ---------------------------------------------------------------------------
