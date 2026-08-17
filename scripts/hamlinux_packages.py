@@ -1186,6 +1186,170 @@ def image_want_modules():
     return names
 
 
+def image_want_firmware():
+    """The /lib/firmware GLOBS scripts/hamlinux_image.sh stages, as a list.
+
+    PARSED OUT OF THAT SCRIPT FOR THE SAME REASON image_module_groups() parses
+    WANT_MODULES: there must be exactly one definition of what the medium
+    carries. A second copy of this list in this file would drift the first time
+    somebody added a blob, and it would drift SILENTLY in the direction that
+    leaves firmware in the image and in no package -- which
+    tests/linux/channel_covers_image.sh calls a coverage hole and NORTH_STAR's
+    updatable invariant calls a file that can never be fixed on a machine
+    somebody already installed.
+
+    WHY THIS FUNCTION EXISTS AT ALL: until the commit that added it, the image
+    staged NO firmware, while this file had already grown a firmware_files()
+    collector and shipped hamnix-firmware-i915-dmc, -guc and
+    hamnix-firmware-nouveau. The channel could carry firmware the image could
+    not, so the two halves had never had to agree and there was nothing to
+    keep in step. The owner's audio is what made it matter: Sound Open
+    Firmware is a driver whose working half is a BLOB, and a .ko-only staging
+    path can no more make his speakers work than an empty directory could.
+
+    Refuses rather than guessing, exactly as the module parser does: if the
+    assignment is not where it expects, an empty list here would ship no
+    firmware package while the image staged 31 files, and the coverage gate
+    would name every one of them.
+    """
+    path = os.path.join(ROOT, "scripts/hamlinux_image.sh")
+    with open(path) as fh:
+        text = fh.read()
+    m = re.search(r'^WANT_FIRMWARE="\$\{HAMLINUX_FIRMWARE:-([^}"]*)\}"',
+                  text, re.M)
+    if not m:
+        raise SystemExit(
+            "hamlinux_packages: cannot find WANT_FIRMWARE in %s -- refusing to "
+            "guess which firmware the image stages" % path)
+    return m.group(1).split()
+
+
+# The firmware packages: (package name, [globs it owns], description). EVERY
+# GLOB IN WANT_FIRMWARE MUST APPEAR HERE, checked below to be exhaustive, so a
+# new glob in the image script cannot be staged onto the medium and forgotten
+# by the channel in silence.
+#
+# THE SPLIT IS hpm's CEILING AND NOTHING ELSE (user/hpm.ad unpacks entirely in
+# RAM: TARBALL_CAP 4 MiB gzipped, TAR_CAP 8 MiB inflated), and the first
+# version of this table got it wrong in the direction worth recording. All 18
+# .ri in ONE package MEASURED 3,463,256 gzipped and 7,840,876 inflated -- both
+# under the caps, so it built and reported success at 93 % OF TAR_CAP. That is
+# not headroom, it is a package that the next kernel's firmware bump breaks,
+# and `tar chf -` had made it look far safer than it was (5,447,680) by
+# coalescing the identical blobs that 15 of the 18 names reach through symlinks
+# into intel-signed/ -- a coalescing that shutil.copy2 into the staging tree
+# does NOT do. THE MEASUREMENT THAT MATTERS IS THE ONE TAKEN THROUGH write_pkg,
+# not through tar.
+#
+# So it is split by DSP generation, measured through write_pkg:
+#
+#   hamnix-firmware-sof        13 files  3,966,976 B   47 % of TAR_CAP
+#   hamnix-firmware-sof-older   5 files  1,215,040 B   14 %
+#   hamnix-firmware-sof-tplg   13 files    510,696 B    6 %
+#
+# with ZERO paths in common -- which matters because two packages owning one
+# path means `hpm remove` on either takes the file away from the other.
+#
+# HIS PART IS IN THE FIRST ONE. sof-tgl-h.ri is what the owner's Lenovo
+# 20Y0X50600 loads, so the package a machine most needs is also the one with
+# the most room to grow.
+SOF_FIRMWARE_PACKAGES = [
+    ("hamnix-firmware-sof",
+     ["intel/sof/sof-tgl*.ri", "intel/sof/sof-adl*.ri",
+      "intel/sof/sof-rpl*.ri", "intel/sof/sof-ehl.ri"],
+     "Intel Sound Open Firmware DSP boot images for Tiger Lake, Alder Lake, "
+     "Raptor Lake and Elkhart Lake. WITHOUT THIS THERE IS NO SOUND CARD AT "
+     "ALL on such a machine, not merely no sound: snd_hda_intel consults "
+     "snd-intel-dspcfg, sees a DSP, returns -ENODEV and binds NOTHING, and "
+     "the SOF driver that takes the device over cannot start its DSP without "
+     "this blob -- so no PCM device is ever created and /dev/snd stays empty. "
+     "Needs hamnix-firmware-sof-tplg with it. The kernel loads the one file "
+     "matching the part it found and ignores the rest."),
+    ("hamnix-firmware-sof-older",
+     ["intel/sof/sof-icl.ri", "intel/sof/sof-jsl.ri",
+      "intel/sof/sof-cml.ri", "intel/sof/sof-cnl.ri",
+      "intel/sof/sof-cfl.ri", "intel/sof/sof-apl.ri",
+      "intel/sof/sof-glk.ri", "intel/sof/sof-bdw.ri",
+      "intel/sof/sof-byt.ri", "intel/sof/sof-cht.ri"],
+     "Intel Sound Open Firmware DSP boot images for the older parts -- Ice "
+     "Lake, Jasper Lake, Comet Lake, Cannon Lake, Coffee Lake, Apollo Lake, "
+     "Gemini Lake, Broadwell, Baytrail and Cherrytrail. Split from "
+     "hamnix-firmware-sof only because hpm unpacks in RAM and the two "
+     "together leave no headroom. Same role: without the blob for the part a "
+     "machine actually has, that machine has no sound card at all."),
+    ("hamnix-firmware-sof-tplg",
+     ["intel/sof-tplg/sof-hda-generic*.tplg"],
+     "Intel Sound Open Firmware TOPOLOGIES for generic HDA codecs -- the "
+     "description of the mixers, PCMs and DAI links that the SOF driver turns "
+     "INTO the card's control and PCM devices. A DSP that booted its firmware "
+     "and got no topology has no /dev/snd/pcmC0D0p either, so this is "
+     "REQUIRED alongside the boot-image packages rather than optional. All "
+     "digital-mic counts (1/2/3/4ch) and the idisp (HDMI) variants."),
+]
+
+SOF_FIRMWARE_LICENSE = "license: nonfree (Intel firmware redistributable)"
+SOF_FIRMWARE_HOME = "https://github.com/thesofproject/sof-bin"
+
+
+def build_firmware_packages(pkgdir, version, entries, skipped):
+    """The /lib/firmware packages for the blobs the IMAGE stages.
+
+    Returns the set of package names built, for hamnix-base to depend on. They
+    belong in the flagship package for the same reason the boot modules do:
+    every installed machine already has these files (the image staged them and
+    user/hlinstall.ad copied the live root), and a machine that cannot update
+    the firmware its sound card needs is the gap the invariant exists to close.
+    """
+    built = set()
+    staged = image_want_firmware()
+    owned = {g for _n, gs, _d in SOF_FIRMWARE_PACKAGES for g in gs}
+    unknown = [g for g in staged if g not in owned]
+    if unknown:
+        # A REFUSAL, not a warning. The alternative is an index that ships an
+        # image carrying firmware no package owns -- the exact shape of the
+        # $HW_MODULES defect that put twenty real .ko files in the image and
+        # in no package, and reported nothing.
+        raise SystemExit(
+            "hamlinux_packages: scripts/hamlinux_image.sh stages firmware "
+            "globs this file has no package for: %s\n"
+            "Add them to SOF_FIRMWARE_PACKAGES, or the image will carry "
+            "firmware the channel cannot update."
+            % ", ".join(unknown))
+    # AND THE OTHER DIRECTION, which is the one that ships bytes nobody asked
+    # for: a package glob the image does NOT stage would put firmware in the
+    # channel that no medium carries, so `hpm install` would add files the
+    # coverage gate never checks and no machine needs. Both lists are the same
+    # list or this refuses.
+    extra = [g for g in sorted(owned) if g not in staged]
+    if extra:
+        raise SystemExit(
+            "hamlinux_packages: SOF_FIRMWARE_PACKAGES owns globs the image "
+            "does not stage: %s\n"
+            "Add them to WANT_FIRMWARE in scripts/hamlinux_image.sh, or drop "
+            "them here." % ", ".join(extra))
+    for pname, globs, blurb in SOF_FIRMWARE_PACKAGES:
+        fw = firmware_files(globs)
+        if not fw:
+            # NOT a refusal: a build host without firmware-sof-signed
+            # installed genuinely has nothing to ship, and the image script
+            # prints its own warning for the same absence. Recorded as a skip
+            # so the closure check below drops it from hamnix-base loudly.
+            skipped.append("%s (this build host has none of %s -- apt install "
+                           "firmware-sof-signed)" % (pname, " ".join(globs)))
+            continue
+        total = sum(os.path.getsize(h) for h, _ in fw)
+        entries.append(write_pkg(
+            pkgdir, pname, version,
+            "%s %d files, %.1f MiB installed."
+            % (blurb, len(fw), total / 1048576.0),
+            fw, [],
+            extra_info=[SOF_FIRMWARE_LICENSE,
+                        "homepage: " + SOF_FIRMWARE_HOME]))
+        built.add(pname)
+        print("  %s (%d files, %d bytes)" % (pname, len(fw), total))
+    return built
+
+
 def builtin_modules(kver):
     """The modules this kernel has BUILT IN, from /lib/modules/<kver>/
     modules.builtin, as names with '-' folded to '_' (modprobe treats them as
@@ -2704,6 +2868,19 @@ def main():
     # gap the invariant exists to close.
     module_pkgs = build_base_module_package(pkgdir, args.version, entries,
                                             skipped)
+
+    # The FIRMWARE those modules are useless without. Same argument as the
+    # module packages above and the same place in hamnix-base: the image
+    # stages these blobs, so every installed machine already has them, and a
+    # machine that cannot update the firmware its sound card needs is exactly
+    # the gap the updatable invariant exists to close. A .ko is only half of a
+    # Sound Open Firmware driver; this is the other half.
+    # set(), not |=: build_base_module_package returns a LIST on its early-out
+    # path (no modprobe / no /lib/modules here), and `list |= set` is a
+    # TypeError -- which would turn "this host cannot build driver packages", a
+    # case that is meant to degrade to a skip, into a crashed packager run.
+    module_pkgs = set(module_pkgs) | build_firmware_packages(
+        pkgdir, args.version, entries, skipped)
 
     # vkprobe -- the diagnostic that answers "is the GPU stack real?" from
     # inside the Hamnix root. It is the same program that proved this path

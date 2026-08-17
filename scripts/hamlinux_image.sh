@@ -806,7 +806,69 @@ MODPROBE=/usr/sbin/modprobe
 # TAR_CAP, so both ceilings that made these packages get split in the first
 # place still have room.
 HW_MODULES="nvme ahci sd_mod usb-storage uas xhci_pci ehci_pci usbhid hid-generic psmouse i2c-i801 intel-lpss-pci i2c-designware-platform i2c-hid-acpi hid-multitouch"
-WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk $HW_MODULES ext4 vfat nls_ascii nls_cp437 overlay squashfs loop snd-hda-codec-generic snd-hda-intel virtio_snd}"
+#
+# --- SOUND ON A MODERN INTEL LAPTOP, WHICH snd-hda-intel DOES NOT DRIVE ------
+#
+# THE OWNER'S REPORT WAS "Audio does not seem to work", AND HIS OWN BOOT LOG
+# NAMES THE REASON:
+#
+#   snd_hda_intel 0000:00:1f.3: Digital mics found on Skylake+ platform,
+#                               using SOF driver
+#
+# THAT LINE IS A REFUSAL, NOT A SUCCESS, and reading it as "the driver probed,
+# so the driver is fine" is the trap this list exists to close. The string
+# lives in snd-intel-dspcfg.ko (verified: `xzcat .../sound/hda/
+# snd-intel-dspcfg.ko.xz | strings | grep "Digital mics"` -- it is NOT in
+# snd-hda-intel.ko), which is the arbiter snd_hda_intel's probe consults
+# FIRST. When that arbiter answers SOF, snd_hda_intel returns -ENODEV and
+# BINDS NOTHING. The message is printed with snd_hda_intel's dev prefix
+# because it is called from snd_hda_intel's probe path, which is exactly why
+# it reads like the opposite of what it is.
+#
+# So on his machine the PCI device is claimed by NOBODY: snd-hda-intel steps
+# aside for a Sound Open Firmware stack that WAS NOT IN THIS IMAGE AT ALL.
+# There is no card, therefore no /dev/snd/pcmC0D0p, therefore user/
+# linux-audio.c's open() of it fails and every program above it correctly
+# reports "no audio device". The chain broke at the first link.
+#
+#   snd-sof-pci-intel-tgl       the PCI probe for Tiger Lake, which is what
+#                               his Lenovo 20Y0X50600 (BIOS N32ET93W) is. It
+#                               pulls the whole DSP stack behind it: snd-sof,
+#                               snd-sof-pci, snd-sof-intel-hda-common,
+#                               snd-sof-xtensa-dsp and the rest.
+#   snd-sof-intel-hda-generic   the machine driver that turns a DSP with an
+#                               HDA codec hanging off it into a CARD with PCM
+#                               devices. WITHOUT THIS the DSP boots the
+#                               firmware and no /dev/snd node ever appears --
+#                               a card that exists to the driver and not to
+#                               userland.
+#   snd-soc-hdac-hda            the codec half: the analogue jacks and the
+#                               speaker amp reached THROUGH the DSP.
+#
+# NAMING ONLY -tgl IS DELIBERATE AND IT IS NOT NARROW: the dependency closure
+# drags in snd-sof-pci-intel-cnl as well, and snd-sof-intel-hda-generic binds
+# any Skylake+ part the arbiter hands it. Machines older than Skylake never
+# reach this code -- snd-intel-dspcfg answers LEGACY for them and
+# snd-hda-intel, which is still in the list below, drives them as before.
+# THE TWO DRIVERS DO NOT FIGHT: snd-intel-dspcfg is the single arbiter and
+# exactly one of them binds. That is why this is safe to load unconditionally
+# on every machine, including this build host, which is a Cannon Lake part
+# (8086:a348, subvendor 0x1458) where the arbiter answers LEGACY and
+# snd_hda_intel keeps the device.
+#
+# MEASURED COST, resolved with `modprobe --dry-run --show-depends` against
+# /lib/modules/6.12.85+deb13-amd64 and decompressed: the closure is 31
+# modules, of which 22 are NEW (the other 9 are snd, snd-pcm, snd-timer,
+# snd-hda-core and friends that snd-hda-intel already brought), totalling
+# 4,187,913 bytes. On a 4 GiB medium that is noise; against hpm's 8 MiB
+# TAR_CAP the `sof` package this creates has room.
+#
+# NOT MEASURED ON HIS SILICON, and no VM can measure it: QEMU's intel-hda is
+# a plain HDA controller with no DSP, so the arbiter answers LEGACY there and
+# NONE of these modules bind in any VM on any host. Everything below about
+# SOF is reasoned from the kernel's own metadata and from his boot log.
+SOF_MODULES="snd-sof-pci-intel-tgl snd-sof-intel-hda-generic snd-soc-hdac-hda"
+WANT_MODULES="${HAMLINUX_MODULES:-virtio-gpu virtio_input evdev virtio_net virtio_blk $HW_MODULES ext4 vfat nls_ascii nls_cp437 overlay squashfs loop snd-hda-codec-generic snd-hda-intel virtio_snd $SOF_MODULES}"
 : > "$ROOT/etc/modules"
 if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
     mkdir -p "$ROOT/lib/modules/$KVER"
@@ -1009,6 +1071,130 @@ if [ -x "$MODPROBE" ] && [ -d "/lib/modules/$KVER" ]; then
     fi
 else
     echo "[image] no modprobe or /lib/modules/$KVER — image will have no drivers" >&2
+fi
+
+# --- /lib/firmware: THE HALF OF A DRIVER THAT IS NOT A .ko -----------------
+#
+# UNTIL THIS BLOCK EXISTED THIS IMAGE STAGED NO FIRMWARE OF ANY KIND. Every
+# path above copies `.ko` files and nothing else; `grep -n firmware
+# scripts/hamlinux_image.sh` matched NOTHING before this comment (every
+# `firmware` in scripts/ was OVMF, i.e. the host's UEFI blob for QEMU). So a
+# driver that asks the kernel's firmware loader for a blob got a silent
+# -ENOENT on this medium, and the packager already knew better: it has had a
+# firmware_files() collector and shipped hamnix-firmware-i915-dmc/-guc and
+# hamnix-firmware-nouveau for some time. THE CHANNEL COULD SHIP FIRMWARE THAT
+# THE IMAGE ITSELF COULD NOT CARRY.
+#
+# THAT IS THE SECOND BREAK IN THE OWNER'S AUDIO CHAIN, and it is independent
+# of the first: even with $SOF_MODULES staged above, a Sound Open Firmware DSP
+# does NOTHING until it is handed a signed boot image and a topology. SOF asks
+# for exactly two things at probe time, and the request paths are in the
+# driver binary (`xzcat .../snd-sof-pci-intel-tgl.ko.xz | strings` lists
+# `intel/sof`, `intel/sof-tplg`, `intel/sof-ipc4/tgl-h` and the rest):
+#
+#   intel/sof/sof-tgl-h.ri        the DSP BOOT IMAGE for his Tiger Lake part.
+#                                 Without it the DSP never runs and the probe
+#                                 fails -- no card, no /dev/snd, same symptom
+#                                 as no driver at all.
+#   intel/sof-tplg/sof-hda-*.tplg the TOPOLOGY: the description of the mixers,
+#                                 PCMs and DAI links that BECOMES the card's
+#                                 control and PCM devices. A DSP that booted
+#                                 and got no topology has no PCM device
+#                                 either.
+#
+# WHAT IS STAGED, AND WHY EACH GLOB IS THAT SHAPE:
+#
+#   intel/sof/*.ri                all 18 Intel platform boot images, 7,840,064
+#                                 bytes. His is one of them; the other 17 are
+#                                 what make this fix work on somebody else's
+#                                 Skylake..Raptor Lake laptop instead of only
+#                                 on his. Several are SYMLINKS into
+#                                 intel/sof/intel-signed/ on the build host,
+#                                 so this copies with `-L` and lands real
+#                                 content at the path the kernel asks for --
+#                                 intel-signed/ itself is deliberately NOT
+#                                 staged, which would double the bytes for no
+#                                 new path.
+#   sof-hda-generic*.tplg         13 files, 510,023 bytes: the generic-HDA
+#                                 topologies, which is the family a laptop
+#                                 with an HDA codec and digital mics asks for,
+#                                 across every dmic count (1/2/3/4ch) and the
+#                                 idisp (HDMI) variants. The full sof-tplg
+#                                 directory is 294 files and 9,563,578 bytes,
+#                                 almost all of it topologies for specific
+#                                 I2S codecs that no machine here has.
+#
+# DELIBERATELY NOT STAGED, said out loud rather than quietly omitted:
+#
+#   intel/sof/*.ldc               1,586,332 bytes of firmware LOG DICTIONARIES
+#                                 used only to decode DSP trace output. Sound
+#                                 works without them.
+#   intel/sof-ipc4/**             THE ONE REAL RESIDUAL RISK IN THIS FIX. The
+#                                 6.12 driver can talk IPC3 or IPC4 to a Tiger
+#                                 Lake DSP, and which one it defaults to
+#                                 decides whether it loads intel/sof/
+#                                 sof-tgl-h.ri (staged) or intel/sof-ipc4/
+#                                 tgl-h/sof-tgl-h.ri (not staged, 674,268 B,
+#                                 plus intel/sof-ipc4-tplg at 5,615,674 B).
+#                                 TGL's documented default on this kernel is
+#                                 IPC3, which is what is staged -- BUT THAT IS
+#                                 READ FROM DOCUMENTATION AND FROM THE DRIVER
+#                                 BINARY, NOT MEASURED ON HIS MACHINE, and
+#                                 this build host cannot measure it because it
+#                                 is a Cannon Lake part that never enters the
+#                                 SOF path at all. If his next boot log says
+#                                 the firmware request FAILED for an
+#                                 intel/sof-ipc4/ path, add that glob here and
+#                                 sof-ipc4-tplg with it. His boot log is the
+#                                 instrument; there is no other one.
+#
+# The kernel's firmware loader takes these paths relative to /lib/firmware, so
+# the directory layout under $ROOT/lib/firmware must match the host's exactly.
+# THE GLOBS ARE ENUMERATED PER PART RATHER THAN WRITTEN `intel/sof/*.ri`, and
+# that is hpm's ceiling reaching back into this file: every glob here is owned
+# by exactly one package in scripts/hamlinux_packages.py's
+# SOF_FIRMWARE_PACKAGES, which parses THIS line, and that file refuses to build
+# if the two lists differ in either direction. All 18 blobs in one package
+# measured 93 % of hpm's 8 MiB in-RAM TAR_CAP, so they are split by DSP
+# generation; the split has to be visible here because this is the list the
+# packager reads.
+WANT_FIRMWARE="${HAMLINUX_FIRMWARE:-intel/sof/sof-tgl*.ri intel/sof/sof-adl*.ri intel/sof/sof-rpl*.ri intel/sof/sof-ehl.ri intel/sof/sof-icl.ri intel/sof/sof-jsl.ri intel/sof/sof-cml.ri intel/sof/sof-cnl.ri intel/sof/sof-cfl.ri intel/sof/sof-apl.ri intel/sof/sof-glk.ri intel/sof/sof-bdw.ri intel/sof/sof-byt.ri intel/sof/sof-cht.ri intel/sof-tplg/sof-hda-generic*.tplg}"
+FW_SRC="${HAMLINUX_FIRMWARE_SRC:-/lib/firmware}"
+if [ -d "$FW_SRC" ]; then
+    fw_n=0
+    fw_b=0
+    for pat in $WANT_FIRMWARE; do
+        # Unquoted on purpose: the shell must expand the glob against the
+        # host's tree. A pattern that matches nothing expands to ITSELF, which
+        # the -f test below then rejects -- so a firmware set this host does
+        # not have is skipped rather than creating a file named `*.ri`.
+        for src in $FW_SRC/$pat; do
+            [ -f "$src" ] || continue
+            rel="${src#$FW_SRC/}"
+            dst="$ROOT/lib/firmware/$rel"
+            [ -f "$dst" ] && continue
+            mkdir -p "$(dirname "$dst")"
+            # -L, not -a: several of these are symlinks into intel-signed/ and
+            # the kernel asks for the LINK's path, so the content has to be at
+            # that path on a medium that does not carry the target.
+            cp -L "$src" "$dst" || continue
+            fw_n=$((fw_n + 1))
+            fw_b=$((fw_b + $(stat -Lc %s "$src" 2>/dev/null || echo 0)))
+        done
+    done
+    if [ "$fw_n" -gt 0 ]; then
+        echo "[image] staged $fw_n firmware files ($fw_b bytes) from $FW_SRC"
+    else
+        # LOUD, because this is an absence that presents as "audio does not
+        # work" three weeks later on somebody else's desk.
+        echo "[image] WARNING: staged NO firmware — $FW_SRC has none of:" >&2
+        echo "[image]   $WANT_FIRMWARE" >&2
+        echo "[image]   (Debian: apt install firmware-sof-signed) — SOF audio" >&2
+        echo "[image]   will not work on Skylake+ Intel machines" >&2
+    fi
+else
+    echo "[image] WARNING: no $FW_SRC on this host — NO firmware staged; SOF" >&2
+    echo "[image] audio will not work on Skylake+ Intel machines" >&2
 fi
 
 # --- the Vulkan userspace -------------------------------------------------
