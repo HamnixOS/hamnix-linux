@@ -4979,3 +4979,47 @@ bash tests/linux/net_accept_servers.sh
 # `return -1` turned into `return 0` -> "0xFFFFFFFF was ACCEPTED". 8 PASS / 0
 # FAIL. No QEMU, no network, no namespace; ~1 min cold, seconds warm.
 bash tests/linux/ssh_fieldbound.sh
+
+# --- A v2 BLIT OVER 1 MiB, AND WHOSE CEILING THE TOOLKIT USES (2026-08-17)
+# THESE THREE GATES WERE REGISTERED NOWHERE. tests/linux/wsys_chunkblit.sh was
+# written after ee62e0fc specifically to cover the >1 MiB blit -- "no v2 window
+# over about 512x512 had ever painted, the browser included" -- and a grep of
+# the whole tree found it referenced by NOTHING: no manifest, no runner, no
+# other gate. tests/linux/de_browser_paints.sh, the pixel test on the one v2
+# client a person looks at, was in the same state. So the first thing to
+# exercise that path on a merge was a PACKAGING RUN, and when
+# tests/linux/channel_runs_desktop.sh went red at publish time nobody could
+# tell in less than an hour whether the blit path was broken (it was not:
+# de_mouse_chrome 14/0 and de_browser_paints 463,989 pixels against the very
+# ELFs that run built, and a full packager run on the same commit published
+# 130 packages with chanrun 9/0, four times).
+#
+# hamui_v2_ceiling.sh is the fast one and is new: one compositor, one small
+# client, seconds, no browser and no desktop. It ships an 880x600 window --
+# 880*600*4 + 18 = 2,112,018 bytes, the exact record size the old 1 MiB
+# reassembly buffer refused -- and asserts BOTH that the write is accepted and
+# that the pixels are in the framebuffer, because a commit that returns 0
+# having painted nothing is this path's documented failure mode. It also
+# asserts that lib/hamui.ad takes its backbuffer ceiling from the device's
+# published `maxsurface` rather than from a copy: it held its own 1280x800 and
+# clamped to it in silence, which no pixel test on this machine could see
+# because the test framebuffer is 1280x800. 7 PASS / 0 FAIL, and proven red two
+# ways (the blit-rect check forced to 512: rc=-1 and 0 pixels; the stale copy
+# put back: "cut to 1280, not to the device's 2560" and "the clamp said
+# NOTHING"). No QEMU, no VNC, no DRM; ~1 min cold, seconds warm.
+bash tests/linux/hamui_v2_ceiling.sh
+
+# The SPLIT-record half of the same path: a client may divide one draw record
+# across write(2) calls, and that is the case that still went through the 1 MiB
+# buffer after complete records were routed around it (ee62e0fc). Measured on
+# the unfixed code first: rows=768 refused=513 first_refused_row=255 rc=-90,
+# with every band black including the one that fitted. 6 PASS / 0 FAIL.
+bash tests/linux/wsys_chunkblit.sh
+
+# THE BROWSER PUTS A PAGE ON THE SCREEN, at its real size, driven for real --
+# "a small blit sails through every version of this code; the 512-byte one in
+# wsys_wctl.sh went green while every real window was being refused". Also
+# asserts the compositor does not report a painting v2 window as painting
+# nothing, which it did on every run, deterministically, about a window putting
+# 468,480 pixels of page on the screen. 2 PASS / 0 FAIL; ~2 min with the build.
+bash tests/linux/de_browser_paints.sh
