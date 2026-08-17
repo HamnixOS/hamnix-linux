@@ -37,13 +37,74 @@ the same 338,432-byte `bin/install` — this is shipped, not hypothetical.
 path, which is exactly what the image does, so the two copies are one compile
 and cannot drift apart again.
 
-**Not measured, and named rather than implied:** no machine was booted to
-watch the wrong installer run. What was measured is that the bytes differ,
-which program each one is, and that the channel serving them is the live one.
+**And now a machine has been booted to watch it run.** The line that used to
+stand here said no machine had been. `tests/linux/served_install_binary.sh`
+installs a shipping-shape disk, points `hpm update` at a signed channel that
+carries the tarball 255.one is serving right now, verifies by digest that the
+machine's `/bin/install` really is the served 338,432 bytes, and then runs the
+exact argv the desktop wizard spawns. **It fails loudly.** It gets one step in
+and stops:
+
+    [install] (1/5) partition /dev/blk//dev/vdc (GPT + ESP + ext4 root)
+    [install] FAIL: partitioning returned non-zero
+
+exit status **1**. It does not hang, it never prints `install complete` — the
+string `user/haminstallui.ad` reads to paint its success page — and the word
+`FAIL` in that line is what the wizard reads to paint its FAILURE page. A
+640 MB blank disk attached as the install target came back **byte-identical**
+to the pattern the host seeded it with, with no partition table, so it wrote
+nothing; and `/etc/passwd`, `/etc/shadow`, `/bin/hamsh` and
+`/etc/rc.boot.installed`, digested on the machine immediately before and
+immediately after that one command, are unchanged. **No silent success and no
+damage** — the defect costs a person an installer that refuses, not a disk.
+
+`/dev/blk` is not readable on the booted machine, measured — which is the
+reason: every disk operation in `user/install.ad` goes through it, and
+`user/linux-syscalls.c`'s bind table answers `#b` with "the /dev/blk file
+server is not written yet".
+
+**20 PASSED / 0 FAILED.** The control (`HAMLINUX_SVI_CONTROL=1`) is
+**21 PASSED / 0 FAILED**: it replaces the one command under measurement with
+`enter debian { sgdisk … /dev/vdc }` and requires the host to see the target
+come back written — it does, with **2 partitions** — which is the only thing
+that makes "unchanged, no partition table" in the main run a measurement
+rather than a blind spot.
+
+Two of this gate's own instruments were caught by that control rather than by
+reasoning, and both had failed toward "looks fine":
+
+* **`sfdisk` is in `/sbin`, not on `$PATH`.** `sfdisk -J target.img` answered
+  `command not found`, which the gate read as "no partition table" — the same
+  shape already recorded here for `debugfs` and `dumpe2fs`. It is resolved by
+  absolute path now, and a host without it goes RED instead of quietly
+  agreeing.
+* **hamsh parses the whole rc before running any of it**, so one bad token
+  anywhere means *nothing* runs — and then the target is untouched and the
+  root's files are unchanged for a reason that has nothing to do with any
+  installer. `-n 1:2048:+64M` did it (hamsh lexes `:` as its own token) and so
+  did interpolating a quoted command into `echo '…'`. Two whole boots measured
+  nothing. The gate now fails red on `hamsh: parse error` before it reports
+  anything else.
+
+**Still not measured, and named rather than implied:** the wizard itself was
+never driven. Its `_enumerate_disks` lists `/dev/blk` too, so whether it can
+even reach the spawn on this lane is a separate open question. And
+`user/hlinstall.ad` was measured to REFUSE on an installed machine —
+`/boot/root.partuuid is missing or is not a UUID`, because that file is written
+onto an installer medium — so on this lane *neither* program installs from an
+installed root, and only one of them says so for a reason anybody intended.
 
 ### A gate that compares the bytes, not the names
 
-`tests/linux/channel_bytes_match_image.sh` (**2 PASS**, ~30 s, no VM) compares
+Both sides rebuilt from one tree in one run with `HAMLINUX_VERSION=1.0.26`,
+this gate is **3 PASSED / 0 FAILED**: the release check agrees (image
+`/etc/hamnix-release` 1.0.26, channel tarballs 1.0.26), 238 ELFs are staged,
+**229 pairs compared and all 229 byte-identical**. Negative control
+(`HAMLINUX_ELFCMP_CORRUPT=3`) re-run on the same pair: **2 PASSED / 3 FAILED**,
+naming `/bin/ac`, `/bin/host_ac` and `/bin/ham2048scene` — exactly the three
+broken.
+
+`tests/linux/channel_bytes_match_image.sh` (~30 s, no VM) compares
 every ELF the image stages against the copy a package carries for the same
 path — **229 pairs**. Nothing did this before. The name gate next door saw
 `bin/install` on both sides and said "covered"; its header explained that a
@@ -59,6 +120,46 @@ tree's local build of 1.0.26 (0 differing of 92).
 (`HAMLINUX_ELFCMP_CORRUPT=3`, one byte flipped in three of the gate's own
 extracted copies): **1 PASS / 3 FAIL**, and the three reported are exactly the
 three broken, by name — the gate checks its own control.
+
+### "Are the bytes I built the bytes served?" — asked for all 130, and the answer has two halves
+
+With the gzip wrapper fixed, `tests/linux/pkg_tar_reproducible.sh` reaches its
+scan and passes it: **all 130** channel tarballs carry gzip MTIME 0 and a clear
+FNAME flag, and two builds of one package two seconds apart are byte-identical
+`.tar.gz`. Its section C then compares those 130 against what 255.one serves at
+the same version and reports **130 of 130 differing** — so the gate is
+**5 PASSED / 1 FAILED**, and the failure is real rather than a harness fault.
+
+The interesting part is *why*, and it is not one reason. Every published
+tarball was fetched (109 MB), its sha256 checked against the published index,
+and its difference from the local build separated into the gzip wrapper and the
+tar stream inside it:
+
+* **126 of 130 — the wrapper alone.** The inflated tar streams are
+  **byte-identical**; only the `.tar.gz` differs. Measured, not assumed: the
+  published side carries a nonzero gzip MTIME on **130 of 130** and the FNAME
+  flag on **130 of 130**; the local side carries neither on any of the 130. The
+  published 1.0.26 was written by the previous packager — its gzip stamp reads
+  **2026-08-17 04:47:07**, which is when it was built.
+* **4 of 130 — the content really differs**, one member each, and every one is
+  attributable to a commit landed *after* that 04:47 publication:
+  `hamnix-install`/`bin/install` 274,840 vs 338,432 (the `SYS_ALIASES` fix,
+  50933418 at 06:07); `hpm`/`bin/hpm` (d8ca6018 at 06:35);
+  `hamnix-desktop`/`bin/hamsettings` and `hamnix-app-hamctl`/`bin/hamctl` (both
+  108dd667 at 05:56).
+
+Nothing is left unexplained: 126 wrapper-only + 4 with named causes = 130. The
+honest reading is that **both** explanations are true at once, of disjoint sets
+— so a rebuild of this tree cannot be expected to reproduce 1.0.26's bytes, and
+the reproducibility claim will only be checkable against a release published
+*by the fixed packager*.
+
+Also measured, and worth knowing before it costs somebody an hour: an Adder
+ELF's `.strtab` embeds the **output file name**, so building
+`user/install.ad` to `install_ad.elf` gives 338,440 bytes and a different
+sha256 from building it to `install.elf` (338,432) — every other section is
+identical in size and offset. Built to the name the packager uses, it is
+byte-for-byte the `bin/install` 255.one serves.
 
 ### The install-from-USB loop is green end to end, and the last red is gone
 
