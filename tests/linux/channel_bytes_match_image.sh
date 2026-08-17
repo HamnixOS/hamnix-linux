@@ -105,6 +105,16 @@
 
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
+# THIS GATE STARTS NOTHING -- it reads two trees and runs `cmp`. It is isolated
+# anyway, because tests/linux/gates_are_private.sh's detector reads the FILE
+# (`hamlinux_build.sh` or `$BIN/` plus a compositor name, both of which appear
+# in the prose above) and a gate that argues with the detector in an EXEMPT
+# entry is a gate somebody has to re-argue with later. The namespace costs this
+# file nothing: everything it touches is under $ROOT, and its own temporaries
+# go to a private /tmp, which is strictly better than sharing one.
+. tests/linux/private_ns.sh
+priv_ns_reexec "$@"
 IMG="${1:-$ROOT/build/image/root}"
 CHAN="${2:-$ROOT/build/repo/linux}"
 CORRUPT="${HAMLINUX_ELFCMP_CORRUPT:-0}"
