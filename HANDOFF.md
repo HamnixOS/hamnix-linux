@@ -13,6 +13,42 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### THERE IS NO CI IN THIS REPOSITORY. NONE. Measured, not inferred.
+
+`git ls-files` matches **nothing** for `.github`, `.gitlab-ci`, `Jenkinsfile`,
+`.circleci`, `azure-pipelines`, `.drone`, `woodpecker` or `.builds`. There is no
+continuous integration of any kind here, and there never has been in this
+checkout.
+
+**What that does to the registration gate.** `scripts/test_gate_registration.sh`
+credits a gate as registered by one of three routes, and route (1b) is "run
+directly by a `.github/workflows/*.yml` step". That loop is
+`glob.glob('.github/workflows/*.yml')` over a directory that does not exist, so
+it iterates zero times and **credits exactly nothing**.
+
+**Be precise about which direction this fails, because it is the opposite of the
+usual one.** The gate is *not* producing a false green — an empty glob makes it
+MORE strict, not less, so a gate whose only justification was "ci.yml runs it"
+shows up as **dark**, correctly. The false assurance was never in the gate. It
+was in us: the belief that some workflow somewhere was running these gates. The
+gate has been telling the truth into a room where nobody checked whether the
+thing it names exists.
+
+That is a different failure from the one this tree usually catches, and worth
+naming separately: not *an instrument reporting success it did not measure*, but
+**an instrument reporting honestly about a mechanism that was never built**.
+
+`ci_battery_manifest.txt` is real and the battery does run — by hand, when
+somebody runs it. It had not been run for weeks when it was run on 2026-08-17,
+and that single run found six defects, three of them instruments stating causes
+they had never measured, plus a packaging violation of the owner's permanent
+updatable rule that had reached a release candidate.
+
+**Not fixed, and deliberately left to the owner**: whether this repository should
+have CI at all, and on what host. Wiring a workflow is a decision about how this
+project is built, not a patch. What is recorded here is only the measurement:
+**nothing runs the gates unless a person does.**
+
 ### 1.0.27 IS PUBLISHED AND VERIFIED AS SERVED
 
 130 packages. The signature verifies **against `etc/hpm/trusted.pub`** — the trust
