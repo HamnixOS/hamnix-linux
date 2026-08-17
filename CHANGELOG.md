@@ -14,6 +14,30 @@ because the number is the deliverable.
 
 ## Unreleased
 
+Nothing yet. Work lands here between releases; if this section is empty, the
+tree and the channel agree.
+
+## 1.0.27 — 2026-08-17
+
+**PUBLISHED and verified as served**, because a push is not a publication: the
+live index reports 1.0.27 across all 130 packages; its signature verifies
+against `etc/hpm/trusted.pub`, the trust root installed machines already carry,
+rather than merely against the signing key; and `hamnix-install`, `hamnix-hamsh`
+and `hamnix-init` **fetched from the site** are byte-identical to the gated
+build. Thirteen polls between pushing and serving. **1.0.26 stays fetchable** —
+this is additive. And the installer defect is closed in the bytes: the published
+tarball now carries `bin/install` and `bin/hlinstall` at **279,128 bytes each,
+one program**, where 1.0.26 shipped two different ones under one name.
+
+Gated on freshly built artifacts, image and channel from one tree in one run:
+229 program files compared byte for byte between medium and channel, all
+identical; the package archives reproducible; the install wizard 31 of 31 with
+its negative control flipping both arms; the desktop soak 846 heartbeats over
+900 s with zero arena exhaustions, run *with* the instrument proof rather than
+without it. The full battery ran for the first time in weeks — 448 true passes,
+and the run's largest yield was discovering that **90 of 713 invocations
+asserted nothing at all** while being counted as passes.
+
 ### Correction: we told you your machine could not be fixed without a new stick
 
 The 1.0.26 notes said, as a known issue, that "firmware, the boot module list and
