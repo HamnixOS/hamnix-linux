@@ -112,6 +112,19 @@ from lib.hamscene import hamscene_begin, hamscene_fill, hamscene_rect, \
     HS_ICON_COUNT, \
     hamscene_headerbar, hamscene_vgrad_bar, \
     hamscene_length, hamui_scroll_apply
+# THE TEXT CARET'S PIXEL X IS A MEASUREMENT, NOT A MULTIPLICATION.
+# Until 2026-08-17 this file placed the ENTRY caret at `w_state * 8` and the
+# TEXTVIEW caret at `caret_col * 8`, and mapped clicks back with `(rel + 4)/8`
+# in both -- four copies of an 8x16 monospace cell sitting directly beside
+# proportional glyph drawing. The `text`/`glyphs` scene primitives stopped
+# being monospace in task #303 (they go through lib/font_ttf's DejaVu face at
+# WSYS_UI_PX), so the caret drifted about 1.4 px further right per character:
+# MEASURED offscreen at 1920x1200, 22 px out at 15 characters and 44 px at 30.
+# lib/hamtextbox.ad has owned the correct arithmetic since that task -- it sums
+# the SAME per-glyph advances the compositor lays out with -- and this file
+# simply never called it. It does now, and it keeps no advance of its own:
+# there is ONE place in the tree that knows how wide a glyph is.
+from lib.hamtextbox import htb_caret_x, htb_hit_test
 
 
 # ====================================================================
@@ -1785,10 +1798,15 @@ def _h_paint_textview(id: int32):
     j: int32 = 0
     cr: int32 = 0
     cc: int32 = 0
+    # caret_ls is the byte offset of the START of the caret's own line. The
+    # caret's pixel x is the width of THAT line's first caret_col bytes, so the
+    # measurement needs the line, not just the column.
+    caret_ls: uint64 = 0
     while j < caret:
         if tv_buf[base + cast[uint64](j)] == 10:
             cr = cr + 1
             cc = 0
+            caret_ls = cast[uint64](j) + 1
         else:
             cc = cc + 1
         j = j + 1
@@ -1815,7 +1833,8 @@ def _h_paint_textview(id: int32):
     # Caret.
     if win_focus == id:
         if caret_row >= scroll_line and caret_row < scroll_line + vis_lines:
-            cxp: int32 = x + 4 + caret_col * 8
+            cxp: int32 = htb_caret_x(x + 4, &tv_buf[base + caret_ls], \
+                                     cast[uint64](caret_col))
             cyp: int32 = y + 3 + (caret_row - scroll_line) * 16
             _h_rect(cxp, cyp, 1, 14, "#e8e8e8")
 
@@ -1848,8 +1867,13 @@ def _h_paint_widget(id: int32):
         _h_border(x, y, w, h, bc)
         _h_text_widget(id, x + 4, y + 3, "#f0f0f0")
         # Caret at the caret index (now real, can be mid-string).
+        # The x is the SUM OF THE ADVANCES of the glyphs actually drawn to its
+        # left -- the same sum the compositor pens out -- so it cannot drift
+        # from the text no matter how wide or narrow those glyphs are.
         if win_focus == id:
-            caret_x: int32 = x + 4 + w_state[u] * 8
+            ebase: uint64 = u * HAMUI_LABEL_CAP
+            caret_x: int32 = htb_caret_x(x + 4, &w_text[ebase], \
+                                         cast[uint64](w_state[u]))
             _h_rect(caret_x, y + 3, 1, 16, "#f0f0f0")
     elif k == HAMUI_K_CHECK:
         _h_rect(x, y, 16, 16, "#202020")
@@ -2430,14 +2454,19 @@ def _h_close_popups():
         i = i + 1
 
 
-# Set the caret of an entry to the click x (snap to nearest glyph cell).
+# Set the caret of an entry to the click x. THE EXACT INVERSE of the forward
+# placement above, and it must stay that way: both walk lib/hamtextbox.ad's
+# per-glyph advances, so clicking a pixel puts the caret where that pixel is
+# drawn. The old `(rel + 4) / 8` was a second copy of the monospace cell and
+# missed by the same growing amount in the other direction.
 def _h_entry_caret_from_x(id: int32, px: int32):
     u: uint64 = cast[uint64](id)
-    rel: int32 = px - (w_x[u] + 4)
-    col: int32 = (rel + 4) / 8
+    n: int32 = cast[int32](_h_text_len(id))
+    ebase: uint64 = u * HAMUI_LABEL_CAP
+    col: int32 = cast[int32](htb_hit_test(w_x[u] + 4, &w_text[ebase], \
+                                          cast[uint64](n), px))
     if col < 0:
         col = 0
-    n: int32 = cast[int32](_h_text_len(id))
     if col > n:
         col = n
     w_state[u] = col
@@ -2450,12 +2479,9 @@ def _h_tv_caret_from_click(id: int32, px: int32, py: int32):
         return
     base: uint64 = cast[uint64](tv_slot[u]) * HAMUI_TV_CAP
     rrow: int32 = (py - (w_y[u] + 3)) / 16 + w_scroll[u]
-    rcol: int32 = (px - (w_x[u] + 4) + 4) / 8
     if rrow < 0:
         rrow = 0
-    if rcol < 0:
-        rcol = 0
-    # Walk to the start of row rrow, then advance rcol (clamped to EOL).
+    # Walk to the start of row rrow.
     off: int32 = 0
     line: int32 = 0
     tlen: int32 = tv_len[u]
@@ -2463,11 +2489,20 @@ def _h_tv_caret_from_click(id: int32, px: int32, py: int32):
         if tv_buf[base + cast[uint64](off)] == 10:
             line = line + 1
         off = off + 1
-    cc: int32 = 0
-    while cc < rcol and off < tlen and tv_buf[base + cast[uint64](off)] != 10:
-        off = off + 1
-        cc = cc + 1
-    w_tv_caret_set(id, off)
+    # How long that row is, then WHICH GAP IN IT the pixel fell nearest --
+    # over the same per-glyph advances the row was drawn with. The old
+    # `(px - x + 4) / 8` was the fourth copy of the monospace cell.
+    llen: int32 = 0
+    while off + llen < tlen and tv_buf[base + cast[uint64](off + llen)] != 10:
+        llen = llen + 1
+    rcol: int32 = cast[int32](htb_hit_test(w_x[u] + 4, \
+                                           &tv_buf[base + cast[uint64](off)], \
+                                           cast[uint64](llen), px))
+    if rcol < 0:
+        rcol = 0
+    if rcol > llen:
+        rcol = llen
+    w_tv_caret_set(id, off + rcol)
 
 
 def w_tv_caret_set(id: int32, off: int32):
