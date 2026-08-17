@@ -80,6 +80,33 @@
 # desktop, same throttle; the only difference is whether the two-second O_SYNC
 # snapshot happens. Anything that separates A from B is bootlogd.
 #
+# WHAT IT FOUND, AND WHAT IT DID NOT
+# ===================================
+# IT DID NOT REPRODUCE THE HANG. At 60 write iops and 1 MB/s, over six minutes,
+# neither arm went quiet for as long as two seconds and neither screen stood
+# still for as long as fifteen. What a QEMU throttle CANNOT simulate is what a
+# cheap stick actually does when it is overloaded: a multi-second stall inside
+# one flush, a SCSI command timeout, and the USB mass-storage error handler
+# resetting the device -- during which every I/O to the medium, root filesystem
+# included, is blocked. A throttle delays smoothly and never errors. So this
+# gate bounds the LOAD, and the load is what it found:
+#
+# MEASURED ON THE OWNER'S EXACT CONFIGURATION -- the desktop up, bootlogd
+# running, nobody typing, `sleep 600` as the rc's last line -- 180 s, same
+# throttle, HEAD (d7401b86) against this tree:
+#
+#                             HEAD          fixed
+#     bytes to the medium     22,936,064    548,864     42x
+#     write operations             1,303         70     19x
+#     CACHE FLUSHES                  581         36     16x
+#     time inside write(2)        25.1 s      0.1 s    250x
+#
+# 25.1 seconds of every 180 -- FOURTEEN PERCENT OF WALL TIME -- was the boot
+# medium busy writing, on a machine whose owner was not asking it for anything.
+# Two causes, both fixed, both argued where they live: bootlogd rewriting bytes
+# that were already there (user/bootlogd.ad) and ext4 zeroing 42.7 MB of inode
+# tables in the background of every first boot (scripts/hamlinux_disk.sh).
+#
 # Usage: tests/linux/wedge_hunt.sh
 # Env:   HAMLINUX_WEDGE_WORK    where to build and boot
 #        HAMLINUX_WEDGE_REUSE=1 reuse a medium already built there
