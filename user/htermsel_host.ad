@@ -13,8 +13,8 @@
 # this proof holds regardless of the on-device proportional glyph rendering.
 
 from lib.htermsel import htsel_reset, htsel_begin, htsel_extend, htsel_active, \
-    htsel_cell_selected, htsel_extract, htsel_pix_to_cell, \
-    htsel_anchor_row, htsel_caret_col
+    htsel_cell_selected, htsel_extract, htsel_pix_to_cell, htsel_cell_x, \
+    htsel_anchor_row, htsel_caret_col, HTSEL_Y0, HTSEL_LINE_H
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 
@@ -221,20 +221,46 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     _check_eq(cast[int64](htsel_cell_selected(0, 10)), 0,
               cast[Ptr[uint8]]("cell_other_row_unselected"))
 
-    # --- pixel->cell mapping (8px cells from x=6, 20px rows from y=6) ---------
+    # --- pixel->cell mapping --------------------------------------------------
+    # NO EXPECTED COLUMN IS WRITTEN DOWN HERE ANY MORE. The old version asserted
+    # "x = 6 + 3*8 + 2 = 32 -> col 3", which is a FOURTH copy of the 8px cell:
+    # it agreed with the mapping because both were the same wrong constant, and
+    # it would have gone on agreeing forever. The property that actually has to
+    # hold is that the map and its inverse are inverses -- cell c owns exactly
+    # the pixels [cell_x(c), cell_x(c+1)) -- and that is true whatever the face
+    # measures, so it survives a font change and cannot be satisfied by a
+    # constant.
     pr: int64 = 0
     pc: int64 = 0
-    # x = 6 + 3*8 + 2 = 32 -> col 3; y = 6 + 1*20 + 4 = 30 -> row 1
-    htsel_pix_to_cell(32, 30, cast[int64](ROWS), cast[int64](COLS), &pr, &pc)
-    _check_eq(pr, 1, cast[Ptr[uint8]]("pix_to_cell_row"))
-    _check_eq(pc, 3, cast[Ptr[uint8]]("pix_to_cell_col"))
+    inv: int32 = 1
+    r2: int64 = 0
+    while r2 < cast[int64](ROWS):
+        c2: int64 = 0
+        while c2 < cast[int64](COLS):
+            lo: int64 = htsel_cell_x(&grid[0], &grid_len[0], cast[int64](STRIDE),
+                                     cast[int64](COLS), r2, c2)
+            hi: int64 = htsel_cell_x(&grid[0], &grid_len[0], cast[int64](STRIDE),
+                                     cast[int64](COLS), r2, c2 + 1)
+            if hi <= lo:
+                inv = 0                       # every cell must have real width
+            probe: int64 = lo + (hi - lo) / 2
+            htsel_pix_to_cell(probe, HTSEL_Y0 + r2 * HTSEL_LINE_H + 4,
+                              &grid[0], &grid_len[0], cast[int64](STRIDE),
+                              cast[int64](ROWS), cast[int64](COLS), &pr, &pc)
+            if pr != r2 or pc != c2:
+                inv = 0
+            c2 = c2 + 1
+        r2 = r2 + 1
+    _check(inv, cast[Ptr[uint8]]("pix_to_cell_is_the_inverse_of_cell_x_everywhere"))
     # clamp far-right / far-down to the last cell
-    htsel_pix_to_cell(100000, 100000, cast[int64](ROWS), cast[int64](COLS),
-                      &pr, &pc)
+    htsel_pix_to_cell(100000, 100000, &grid[0], &grid_len[0],
+                      cast[int64](STRIDE), cast[int64](ROWS),
+                      cast[int64](COLS), &pr, &pc)
     _check_eq(pr, cast[int64](ROWS) - 1, cast[Ptr[uint8]]("pix_to_cell_clamp_row"))
     _check_eq(pc, cast[int64](COLS) - 1, cast[Ptr[uint8]]("pix_to_cell_clamp_col"))
     # left/above the grid clamps to (0,0)
-    htsel_pix_to_cell(0, 0, cast[int64](ROWS), cast[int64](COLS), &pr, &pc)
+    htsel_pix_to_cell(0, 0, &grid[0], &grid_len[0], cast[int64](STRIDE),
+                      cast[int64](ROWS), cast[int64](COLS), &pr, &pc)
     _check_eq(pr, 0, cast[Ptr[uint8]]("pix_to_cell_clamp_origin_row"))
     _check_eq(pc, 0, cast[Ptr[uint8]]("pix_to_cell_clamp_origin_col"))
 

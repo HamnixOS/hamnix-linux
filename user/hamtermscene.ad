@@ -73,10 +73,11 @@ from lib.hamcomplete import hc_prefix_match
 # model, the pixel->cell map, the text-flow span test + cell-span->text
 # extraction, and the file-backed clipboard put/get (/dev/snarf[.primary]).
 from lib.htermsel import htsel_reset, htsel_begin, htsel_extend, htsel_active, \
-    htsel_cell_selected, htsel_extract, htsel_pix_to_cell, \
+    htsel_cell_selected, htsel_extract, htsel_pix_to_cell, htsel_cell_x, \
     htsel_clip_put, htsel_clip_get, \
     htsel_anchor_row, htsel_anchor_col, htsel_caret_row, htsel_caret_col, \
     htsel_pointer_step, HTSEL_ACT_COPY, HTSEL_ACT_PASTE
+from lib.hamtextbox import htb_text_width
 # #315: the SHARED middle-button rising-edge detector — the ONE detector every
 # text surface (terminal, editor, Notes) now uses for "middle-click pastes
 # PRIMARY", so the behaviour is uniform and the host gate covers it.
@@ -742,9 +743,19 @@ def _emit_scene(scenepath: Ptr[char]):
         # a selection is active, paint a background band UNDER this row's
         # selected columns BEFORE the glyphs (scene primitives draw in order, so
         # the glyphs land on top of the fill). We coalesce the row's contiguous
-        # selected column run [selc0,selc1] into one fill rect at the 8px cell
-        # model the grid uses (x = 6 + col*8). Selection is grid-row indexed, so
-        # only meaningful when the viewport shows the live grid (voff==0).
+        # selected column run [selc0,selc1] into one fill rect.
+        #
+        # THE BAND IS MEASURED, NOT COUNTED. It used to be laid out at
+        # x = 6 + col*8, the same hardcoded advance htsel_pix_to_cell used --
+        # while the glyphs it is supposed to sit under are drawn by the
+        # compositor's PROPORTIONAL face, 6.81 px per character on the owner's
+        # own prompt line. The band therefore crept 1.19 px right of its text
+        # per character and was 25 px out by column 21. htsel_cell_x walks the
+        # row's real advances through lib/hamtextbox -- the same walk the '_'
+        # caret already gets for free by living inside the glyph run -- so the
+        # band, the hit test and the caret now share one metric.
+        # Selection is grid-row indexed, so only meaningful when the viewport
+        # shows the live grid (voff==0).
         if voff == 0 and htsel_active() != 0:
             selc0: int64 = -1
             selc1: int64 = -1
@@ -756,8 +767,18 @@ def _emit_scene(scenepath: Ptr[char]):
                     selc1 = cast[int64](cc)
                 cc = cc + 1
             if selc0 >= 0:
-                fx: uint64 = 6 + cast[uint64](selc0) * 8
-                fw: uint64 = cast[uint64](selc1 - selc0 + 1) * 8
+                bx0: int64 = htsel_cell_x(&term_rows[0], &term_row_len[0],
+                                          cast[int64](TERM_STRIDE),
+                                          cast[int64](term_cols_n),
+                                          cast[int64](r), selc0)
+                bx1: int64 = htsel_cell_x(&term_rows[0], &term_row_len[0],
+                                          cast[int64](TERM_STRIDE),
+                                          cast[int64](term_cols_n),
+                                          cast[int64](r), selc1 + 1)
+                if bx1 < bx0:
+                    bx1 = bx0
+                fx: uint64 = cast[uint64](bx0)
+                fw: uint64 = cast[uint64](bx1 - bx0)
                 fy: uint64 = 4 + r * 20
                 sf: Ptr[uint8] = cast[Ptr[uint8]]("fill ")
                 fq: uint64 = 0
@@ -2002,6 +2023,8 @@ def _evt_apply_wheel(ls: uint64, le: uint64):
     if term_view_off == 0:
         live_tail = 1
     act: int32 = htsel_pointer_step(x, y, btn, cast[int64](ptr_prev_buttons),
+                                    &term_rows[0], &term_row_len[0],
+                                    cast[int64](TERM_STRIDE),
                                     cast[int64](term_rows_n),
                                     cast[int64](term_cols_n), live_tail)
     if (act & HTSEL_ACT_COPY) != 0:
@@ -2202,6 +2225,83 @@ def _pump_shell_ex(scenepath: Ptr[char], ctlpath: Ptr[char],
     return h
 
 
+# SAY IT OUT LOUD WHEN THE GRID AND THE FONT DISAGREE.
+#
+# TERM_GLYPH_W is no longer allowed to place anything on a row -- the band and
+# the hit test measure the text now -- but it still decides HOW MANY COLUMNS a
+# window of a given width gets, and that is a genuine judgement call for a
+# proportional face: no single number is right for both "iii" and "WWW". What
+# is NOT acceptable is the tree's recurring failure, where a constant quietly
+# stands in for a measured value and NOTHING in the log says so. The compositor
+# now reconciles its rasterizer's ceiling with its own at startup; this is the
+# same move for the terminal's cell width.
+#
+# A representative lowercase run is measured through the SAME lib/hamtextbox
+# advances the compositor draws with, in hundredths of a pixel, and reported
+# beside the assumed cell. When they differ the line says how many columns of
+# the current window the grid is actually claiming versus how many characters
+# of that run would fit -- which is the number a person can act on.
+_CAL_TXT: Array[32, uint8] = "the quick brown fox jumps"
+_CAL_N:   uint64 = 25
+
+
+def _report_cell_advance():
+    w: int32 = htb_text_width(&_CAL_TXT[0], _CAL_N)
+    if w <= 0:
+        _cons_say(cast[Ptr[uint8]]("[hamterm] cell advance UNMEASURABLE -- no DE face; the 8px grid is all there is\n"))
+        return
+    hund: uint64 = (cast[uint64](w) * 100) / _CAL_N
+    msg: Array[256, uint8]
+    p: uint64 = 0
+    pre: Ptr[uint8] = cast[Ptr[uint8]]("[hamterm] cell advance: grid assumes ")
+    k: uint64 = 0
+    while pre[k] != 0:
+        msg[p] = pre[k]
+        p = p + 1
+        k = k + 1
+    p = p + _u64_to_dec(cast[uint64](TERM_GLYPH_W), &msg[p])
+    mid: Ptr[uint8] = cast[Ptr[uint8]](".00 px, measured ")
+    k = 0
+    while mid[k] != 0:
+        msg[p] = mid[k]
+        p = p + 1
+        k = k + 1
+    p = p + _u64_to_dec(hund / 100, &msg[p])
+    msg[p] = 46                                   # '.'
+    p = p + 1
+    if (hund % 100) < 10:
+        msg[p] = 48
+        p = p + 1
+    p = p + _u64_to_dec(hund % 100, &msg[p])
+    mid2: Ptr[uint8] = cast[Ptr[uint8]](" px over a lowercase run; grid claims ")
+    k = 0
+    while mid2[k] != 0:
+        msg[p] = mid2[k]
+        p = p + 1
+        k = k + 1
+    p = p + _u64_to_dec(term_cols_n, &msg[p])
+    mid3: Ptr[uint8] = cast[Ptr[uint8]](" cols, that run would fit ")
+    k = 0
+    while mid3[k] != 0:
+        msg[p] = mid3[k]
+        p = p + 1
+        k = k + 1
+    fits: uint64 = 0
+    if hund > 0:
+        fits = (cast[uint64](term_w - 8) * 100) / hund
+    p = p + _u64_to_dec(fits, &msg[p])
+    tail: Ptr[uint8] = cast[Ptr[uint8]]("\n")
+    if hund != cast[uint64](TERM_GLYPH_W) * 100:
+        tail = cast[Ptr[uint8]](" -- THE GRID AND THE FONT DISAGREE\n")
+    k = 0
+    while tail[k] != 0:
+        msg[p] = tail[k]
+        p = p + 1
+        k = k + 1
+    msg[p] = 0
+    _cons_say(&msg[0])
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # Optional initial command (argv[1]): when the panel launches a
     # Terminal=true app (e.g. the "Linux Process Viewer" .desktop entry,
@@ -2309,6 +2409,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         sys_close(cfd4)
 
     _cons_say(cast[Ptr[uint8]]("[hamterm] scene window ready\n"))
+    _report_cell_advance()
 
     # Open the per-window KEY stream (focused-window keys, ASCII bytes).
     kfd: int32 = sys_open(cast[Ptr[char]](&keysp[0]))
