@@ -249,6 +249,87 @@ on the installed disk records `hamnix-man` at **1.0.26**, the machine printed
 pinned=0)`, and the file it rewrote is byte-identical to this tree's
 `etc/man/cat.1.md`.
 
+### Known issues in this release, in plain words
+
+Everything below was measured on the 1.0.27 candidate, on this host, today. It
+is here because a release note that lists only what was fixed is worth less
+than one that also says what is still wrong.
+
+**Windows pile up while you open and close applications.** Over a 15-minute
+driven desktop soak the window system's own count went from **3 to 92** and
+never came back down; it peaked at 92 and the trend was upward throughout.
+Nothing breaks at 92 — the desktop stayed responsive, the picture never froze,
+and the machine ran the whole window — but the table it fills has 512 rows, so
+a long enough session gets there. **What is NOT known is whose fault it is.**
+Closing a window sends `close <wid>` to the compositor; the test harness
+guesses window ids over a fixed range rather than reading which ones are
+actually open, so "the harness closed the wrong windows" and "the compositor
+did not free the row" both fit the numbers exactly, and this run cannot tell
+them apart. Nobody should write down either one as the cause yet. The
+measurement that would settle it is to print the live window list in the
+census, and it has still not been taken. Note also that the sweep's range
+stops at 64: past that point it cannot reach a window even in principle, which
+is a limit of the test and not of the system.
+
+**The hang the owner saw on his laptop is still not explained.** A wedge with
+the same shape — kernel alive, userspace stopped — was reproduced in a virtual
+machine and traced to the shell running out of value cells, and that bug is
+fixed in this release (a 60,000-iteration loop now completes with the right
+answer, and a 7,238-command session runs with the collector firing 4 times and
+nothing exhausted). **That is not the same as saying it was his bug.** His
+session was not running a thousand-iteration script. The shapes match; the
+identification does not, and it should not be claimed in either direction
+until the machine is booted again.
+
+**Text is measured as if every letter were the same width.** The shared
+interface code sizes labels, buttons and menus by multiplying the number of
+characters by 8 pixels, in **eleven** places, against a font whose letters are
+genuinely different widths — measured on a real terminal row at **6.95 and
+6.78 pixels per character** where the code assumes 8.00. Roughly ten more such
+places exist in the calculator, spreadsheet, mailbox and game code. In
+practice buttons and menus are slightly wider than the words inside them. The
+caret and text selection, which are the places where this was actually
+visible, were fixed and are correct now.
+
+**The terminal's column count still assumes 8-pixel cells.** The terminal says
+so out loud at startup rather than hiding it — "cell advance: grid assumes
+8.00 px, measured N.NN px ... THE GRID AND THE FONT DISAGREE" — and the
+consequence is content-dependent: a line of narrow letters stops short of the
+right edge and a line of wide ones runs past it. 74 columns of 8 pixels is 592
+pixels, while 74 wide letters is nearly 900. Both this and the eleven sites
+above are unfixed for the same stated reason: nothing in the tree measures
+layout in pixels yet, so changing the arithmetic would trade a known
+imprecision for an unknown one.
+
+**The Applications menu's "Recent" section does not appear.** The menu opens
+and works; the block that should list the last few programs you launched is
+not drawn. This is not new in 1.0.27 — it dates from work on 2026-08-12 and is
+in the published 1.0.26 as well. It went unnoticed because the gate that
+catches it is in the battery and the battery had not been run.
+
+**What the USB stick carries that an update can never replace.** `hpm update`
+replaces programs, configuration and — this is worth knowing, because it is
+often assumed otherwise — **firmware and kernel modules too**: the channel
+carries 483 firmware files and 106 modules into the running system. What it
+cannot touch is the boot path. The kernel, the initial ramdisk and the kernel
+command line are welded into **one signed file on the boot partition**, and no
+package contains any of them. Neither does any package contain the boot module
+**list** — an update can refresh the bytes of a module already on that list,
+but it cannot add a name to it or remove one. The same is true of everything
+decided when the disk was made: the partition layout, the partition
+identifiers, the filesystem's size and options. All of that comes from the
+stick and only from the stick, so a machine installed a year ago is still
+booting a year-old kernel with a year-old command line however faithfully it
+has updated. Changing any of it means writing the medium again.
+
+**Two release checks cannot pass until this release is published**, and that is
+arithmetic rather than a defect. Both install a machine and then update it
+from the live site. While the site serves 1.0.26 and the tree builds 1.0.27,
+the machine records what the site gave it (1.0.26) and the check compares that
+against the tree (1.0.27), so they disagree by exactly one release. They agreed
+the day 1.0.26 was published and will agree again the day 1.0.27 is. Nothing
+can be done about it beforehand, and nothing should be.
+
 ## 1.0.26 — 2026-08-17
 
 **PUBLISHED and verified as served**: the live index reports 1.0.26 across all

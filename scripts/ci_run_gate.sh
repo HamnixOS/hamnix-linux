@@ -51,8 +51,41 @@ fi
 gate="$1"; shift
 name="$(basename "$gate" .sh)"
 
-bash "$gate" "$@"
-rc=$?
+# THE OUTPUT IS CAPTURED AS WELL AS STREAMED, and the reason is a wrong
+# sentence this file printed 64 times in one battery run (2026-08-17).
+#
+# The 125 branch used to name a CAUSE it had not measured: "the runner was too
+# starved to observe the assertion ... Re-run, ideally on a KVM runner." It
+# said that for EVERY 125, whatever produced it. Measured on this tree, of 66
+# INCONCLUSIVE verdicts in one run of scripts/ci_battery_manifest.txt, 64
+# carried a cause line in their own output and NOT ONE of them was starvation:
+#
+#     39  Error: can't open mod/kmod_hello.S for reading: No such file...
+#     25  No such file or directory: '<tree>/linux_abi/autostub_und_manifest.json'
+#
+# Those are source paths this repository does not contain at all -- hamnix-linux
+# tracks adder/ compiler/ docs/ etc/ examples/ fonts/ lib/ scripts/ tests/
+# user/ and nothing else, while scripts/ci_battery_manifest.txt is the
+# BARE-METAL line's battery. No amount of CPU or KVM fixes a file that is not
+# in the tree, so the advice was not merely unproven, it was unactionable.
+#
+# This is the same class the project has paid for four times before: a gate's
+# text stating a hypothesis as a finding. The fix is not a better guess, it is
+# to stop guessing -- report the verdict, quote the gate's OWN cause line when
+# it left one, and say plainly when it left none.
+#
+# ${PIPESTATUS[0]} not $? : after a pipe, $? is TEE's status, not the gate's.
+#
+# stderr IS merged into stdout here, deliberately: every cause line quoted
+# above arrives on stderr (an assembler message, a Python traceback), so a
+# capture of stdout alone would see none of them. The shard runner already
+# sends both streams to one log, so nothing downstream can tell the
+# difference; what changes is that this wrapper can now read what the gate
+# said before deciding what to say about it.
+CAP="$(mktemp -t ci_run_gate.XXXXXX)"
+trap 'rm -f "$CAP"' EXIT
+bash "$gate" "$@" 2>&1 | tee "$CAP"
+rc="${PIPESTATUS[0]}"
 
 case "$rc" in
     0)
@@ -61,12 +94,23 @@ case "$rc" in
         ;;
     125)
         # INCONCLUSIVE — surface it loudly but do NOT fail the build.
-        echo "[ci_run_gate] $name: INCONCLUSIVE (verdict 125) — the runner" \
-             "was too starved to observe the assertion; NOT a regression," \
-             "NOT proof of correctness. Re-run, ideally on a KVM runner."
+        echo "[ci_run_gate] $name: INCONCLUSIVE (verdict 125) — the gate did" \
+             "NOT reach its assertion. NOT a regression, NOT proof of" \
+             "correctness."
+        why="$(grep -aoE "can't open [^ ]+ for reading|No such file or directory: '[^']+'|[Nn]o such file or directory|could not be built|missing" "$CAP" 2>/dev/null | head -1)"
+        if [ -n "$why" ]; then
+            echo "[ci_run_gate] $name: the gate's own output gives the cause:" \
+                 "$why"
+            echo "[ci_run_gate] $name: if that names a path this repository" \
+                 "does not contain, re-running changes nothing."
+        else
+            echo "[ci_run_gate] $name: the gate printed no cause line, so WHY" \
+                 "it stopped is NOT established here. Runner starvation is one" \
+                 "possibility and this wrapper has not measured it."
+        fi
         # GitHub annotation so it is visible on the run summary page.
-        echo "::warning title=$name INCONCLUSIVE::gate could not observe its" \
-             "assertion under runner load (verdict 125); treated as non-failing"
+        echo "::warning title=$name INCONCLUSIVE::gate did not reach its" \
+             "assertion (verdict 125); treated as non-failing${why:+ — $why}"
         exit 0
         ;;
     *)
