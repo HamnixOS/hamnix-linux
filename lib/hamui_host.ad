@@ -66,18 +66,76 @@ from lib.vk.vk_2d import (
 # Sized to a generous window; the active WxH is set by hamui_host_begin(). A
 # separate RGB present buffer holds the flattened frame for the PPM writer.
 # ====================================================================
-# 1920x1080. This used to be 1024x768, which was fine while the only client
+# 2560x1600. This used to be 1024x768, which was fine while the only client
 # was a host PPM dump -- but the compositor (user/wsysd.ad) asks this module to
 # rasterize a FULL-SCREEN window, and hamdesktop's backdrop on a 1280x800
 # display came back silently CLAMPED: a 256px black band down the right and a
 # 32px one along the bottom, with every ioctl and every return code fine. The
 # ceiling has to be at least the largest screen we intend to drive.
-HOST_MAX_W: uint64 = 1920
-HOST_MAX_H: uint64 = 1080
-hostfb: Array[8294400, uint8]        # 1920*1080*4 RGBA vk colour image
-hostrgb: Array[6220800, uint8]       # 1920*1080*3 RGB present buffer
+#
+# AND IT HAPPENED AGAIN, THE SAME WAY, AT 1920x1200 -- because that fix raised
+# the number instead of removing the silence.
+#
+# On 2026-08-16 the owner reported "the background screen doesn't cover the
+# entire desktop space; there's a black bar at the bottom, just above the
+# bottom panel." MEASURED offscreen at his 1920x1200: the backdrop's last
+# painted row is 1079 and rows 1080..1173 (94 of them) reach the screen as the
+# compositor's clear colour. At 1920x1300 the band is rows 1080..1273 (194) --
+# it always begins at exactly 1080, which is this constant and nothing else. At
+# 1280x800 there is no band at all. hamdesktop was innocent: its gradient bands
+# are 25 rows (1200/48), so it computed and emitted the full height, and the
+# band the clamp cut through is cut MID-BAND, which no display-list truncation
+# can do.
+#
+# WHAT ACTUALLY HAPPENS: user/wsysd.ad's paint_window calls
+# hamui_host_begin_into(composite, 1920, 1200) for the full-screen backdrop.
+# 1200 > HOST_MAX_H, so begin_into REFUSES (correctly -- a stride mismatch
+# would be worse) and falls back to hamui_host_begin(1920, 1200), which
+# CLAMPED hh to 1080 and said nothing. Everything below then agreed with the
+# clamp, including report_uncovered: it compares the covered rows against
+# hamui_host_height(), which is the CLAMPED height, so a rasterizer that had
+# just dropped 120 rows of screen reported perfect coverage. The instrument
+# built to catch exactly this was blinded by the same constant.
+#
+# So this is now BB_W x BB_H from user/linux-wsys.c (2560x1600), the same
+# rectangle user/wsysd.ad's COMP_W/COMP_H carry -- three copies of one ceiling,
+# which is the drift that caused this both times. The two that CAN talk to each
+# other already do (check_maxsurface). This one is a pure module and cannot
+# read a device, so wsysd checks it at startup against its own COMP_W/COMP_H
+# via hamui_host_max_w()/_h() and says so loudly if they ever part again.
+#
+# COST, and it is address space rather than memory: these are BSS, demand-zero
+# on Linux. MEASURED on user/wsysd.ad rather than asserted, by building it
+# against this file with the ceiling at 1080 and at 1600 and changing nothing
+# else:
+#
+#     ceiling 1920x1080   file 642,600   LOAD filesz 550,493   memsz 43,982,993
+#     ceiling 2560x1600   file 642,600   LOAD filesz 550,493   memsz 58,139,793
+#
+# The ELF ON DISK IS BYTE-FOR-BYTE THE SAME SIZE and so is everything the loader
+# reads from it; p_memsz grows by 14,156,800, which is exactly the two arrays'
+# growth (8,089,600 + 6,067,200) and is zero pages until something writes them.
+# The resident cost stays what it always was -- the rows a rasterize actually
+# touches -- so a 400x300 window costs 480 KB whether this says 1080 or 1600.
+# This is the same argument user/linux-wsys.c makes for BB_W/BB_H, and it is why
+# that file chose 2560x1600 rather than 3840x2160.
+HOST_MAX_W: uint64 = 2560
+HOST_MAX_H: uint64 = 1600
+hostfb: Array[16384000, uint8]       # 2560*1600*4 RGBA vk colour image
+hostrgb: Array[12288000, uint8]      # 2560*1600*3 RGB present buffer
 host_w: int32 = 0
 host_h: int32 = 0
+
+# THE SIZE THAT WAS ASKED FOR, kept beside the size that was taken.
+#
+# host_w/host_h are POST-CLAMP, and every consumer of them -- the ops, the
+# coverage tracker, report_uncovered -- is therefore consistent with a
+# rasterize that silently lost the bottom of the screen. These two record what
+# _host_begin_common was CALLED with, so a caller can ask whether it got what
+# it asked for. This module is pure and cannot print (see the coverage note
+# below): it RECORDS, and user/wsysd.ad reports.
+host_req_w: int32 = 0
+host_req_h: int32 = 0
 
 # Per-glyph coverage scratch (row-major cov_w*cov_h uint8), fed to the vk2d
 # coverage-mask op. 128*128 comfortably holds a 14px cell glyph bitmap.
@@ -125,6 +183,39 @@ def hamui_host_width() -> int32:
 
 def hamui_host_height() -> int32:
     return host_h
+
+
+# THE CEILING THIS MODULE WAS BUILT WITH. A third copy of BB_W/BB_H
+# (user/linux-wsys.c) that cannot read the device to check itself, so the
+# process that CAN -- user/wsysd.ad, which already does exactly this against
+# /dev/wsys/pool in check_maxsurface -- reads it from here at startup and
+# compares. A ceiling smaller than the screen clips windows silently, and it
+# has now done so twice.
+def hamui_host_max_w() -> int32:
+    return cast[int32](HOST_MAX_W)
+
+
+def hamui_host_max_h() -> int32:
+    return cast[int32](HOST_MAX_H)
+
+
+# The w/h the LAST hamui_host_begin/-_into was asked for, before the clamp to
+# the ceiling above. hamui_host_clamped() is 1 when the two differ, i.e. when
+# the rasterize just produced a smaller image than its caller asked for and
+# every return code was fine. Nothing else in this module can tell a caller
+# that; host_w/host_h have already agreed with the clamp.
+def hamui_host_requested_w() -> int32:
+    return host_req_w
+
+
+def hamui_host_requested_h() -> int32:
+    return host_req_h
+
+
+def hamui_host_clamped() -> int32:
+    if host_req_w > host_w or host_req_h > host_h:
+        return 1
+    return 0
 
 
 # Flatten the RGBA colour image into the RGB present buffer (dropping alpha; the
@@ -445,8 +536,8 @@ def _host_blit_image(slot: int32, dx: int32, dy: int32, dw: int32, dh: int32):
 # as the image-miss table above cannot. It RECORDS; the caller reports. The
 # caller is user/wsysd.ad, which already reads hamui_host_image_misses()
 # after every rasterize and names each miss once.
-host_cov_x0: Array[1080, int32]         # HOST_MAX_H; leftmost painted x
-host_cov_x1: Array[1080, int32]         # HOST_MAX_H; rightmost painted x + 1
+host_cov_x0: Array[1600, int32]         # HOST_MAX_H; leftmost painted x
+host_cov_x1: Array[1600, int32]         # HOST_MAX_H; rightmost painted x + 1
 host_cov_on: int32 = 0                  # 1 while a rasterize is being tracked
 
 # Alpha byte of the clear that opens the NEXT rasterize (RGB is always 0).
@@ -902,6 +993,12 @@ def _host_begin_common(w: int32, h: int32):
     browserfonts_load()             # register the embedded DejaVu TTF faces
     ww: int32 = w
     hh: int32 = h
+    # RECORDED BEFORE THE CLAMP, because after it there is nothing left to
+    # compare against: the clamp is the whole defect and it used to be
+    # unobservable from outside this module. user/wsysd.ad reads these back
+    # through hamui_host_clamped() and names both rectangles.
+    host_req_w = w
+    host_req_h = h
     if ww < 1:
         ww = 1
     if hh < 1:
