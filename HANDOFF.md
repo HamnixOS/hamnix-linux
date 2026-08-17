@@ -13,6 +13,78 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### A WEDGE IS REPRODUCIBLE, AND IT IS COUNTED IN LAUNCHES — read this first
+
+The desktop soak wedges: **three runs out of three stopped their workload at
+exactly 352 heartbeats**, about six minutes in, at three different configured
+durations. Kernel alive, userspace dead — the shape the owner reported from a
+Lenovo 20Y0X50600, where sysrq answered and nothing else did.
+
+**The decisive measurement: it is counted in LAUNCHES, not seconds.** DWELL=8
+gives 44 launches / 352 heartbeats; DWELL=4 gives 48 launches / 196 heartbeats.
+Half the wall-clock, the same order of launches. That is a table filling, not a
+timeout. `sysrq-w` named **no tasks**, so it is not an I/O block; PID 1 sat in
+`do_sys_poll`; vCPU time fell from 308 ticks/8s at the trip to 9 twelve minutes
+later — it goes **idle**, it does not spin. Sampling the guest's RIP was tried
+and is **measured useless** (identical running and halted); do not repeat it.
+44–48 is **not** 64, so the obvious slot table is not obviously it.
+
+**NOT ESTABLISHED: that this VM wedge is the owner's laptop hang.** The shape
+matches and the reproduction is solid; the identification is not made.
+
+**And the soak's own verdict called it healthy.** `guest_max_gap` measures the
+largest jump *between two timestamps*, and a run that simply STOPS produces no
+such jump. It printed "userspace never went quiet" about a machine dead since
+t=380s. That is the fourth time in this project a gate's failure text has been a
+hypothesis rather than a finding, and the worst of the four, because this gate
+exists specifically to catch silence. A verdict must distinguish **"nothing bad
+happened" from "nothing happened."** There is now a heartbeat-coverage floor
+asked *before* the verdict, and `tests/linux/vcpu_time.sh` to tell an idle wedge
+from a spinning one. Evidence in `/home/david/.hamnix-build/soak-evidence/`.
+
+### THE INSTALLER DEFECT IN PUBLISHED 1.0.26 — measured, and it is the mild outcome
+
+`hamnix-install-1.0.26.tar.gz` **on 255.one right now** carries BOTH
+`bin/hlinstall` (274,840 B) and `bin/install` (338,432 B) — two different
+programs. The image stages `hlinstall` at `/bin/install`; the channel shipped
+`user/install.ad` there, the native line's installer, which drives a kernel
+`install_file` verb this kernel does not have. Every machine that runs
+`hpm update` gets it.
+
+**Command line: fails loudly, no damage.** `[install] FAIL: partitioning
+returned non-zero`, status 1; a target disk seeded with a known pattern came
+back byte-identical with no partition table; `/etc/passwd`, `/etc/shadow`,
+`/bin/hamsh` and `/etc/rc.boot.installed` unchanged. **Graphical: the spawn is
+never reached** — with a blank NVMe *and* a blank virtio-blk attached the wizard
+stops at step 5 with "No installable target disk detected", and `/bin/install`
+appeared in none of 15 `ps` censuses. So the served binary **cannot be reached
+from the graphical path at all**. The packager is fixed in-tree (`SYS_ALIASES`);
+**the fix is not published**. 1.0.27 is queued, not urgent.
+
+**A second bug found on the way, and it is the more interesting one:**
+`haminstallui.ad`'s `_enumerate_disks` has exactly ONE source — a single
+`p9_listdir("/dev/blk")`, no `/dev` scan, no `/proc/partitions` — and
+`etc/rc.boot.installed` never binds `#b`. So on a booted machine it sees nothing
+while `ls /dev` shows 122 entries including `nvme0n1` and `vda`. Meanwhile
+`hlinstall.ad:33` records why it avoids that grammar: `user/mkfs_ext4.ad` wraps
+the *Hamnix* kernel's `/dev/blk` ctl and "has no kernel to talk to here". **The
+wizard gates on an interface its own installer refuses to use.**
+
+### A QUEUE ENTRY CORRECTED BY READING THE SOURCE
+
+"Terminal column count assumes 8 px, so wide lines run off the window edge" was
+carried in the queue for days. Reading `user/hamtermscene.ad`: the column count
+IS derived from a constant `TERM_GLYPH_W = 8` (:320), while glyphs are drawn
+through `lib/hamtextbox`'s real advances. But the consequence is not simply
+"runs off". With a proportional face and a fixed column count the right edge is
+**content-dependent**: a row of narrow glyphs stops SHORT of the edge, a row of
+wide ones overruns it. The file already reports the disagreement out loud at
+startup — "cell advance: grid assumes 8.00 px, measured N.NN px ... THE GRID AND
+THE FONT DISAGREE" — which is the honest half already done. The fix is not made
+because **nothing measures terminal layout in pixels yet**, the same blocker as
+the eleven `text_len * 8` sites in `lib/hamui.ad`. Changing the derivation
+without that measurement would be trading a known imprecision for an unknown one.
+
 ### THE SHORT VERSION, AS OF 1.0.22 — read this before the table
 
 **The published release is 1.0.22**, and publication was verified as served
