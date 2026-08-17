@@ -179,19 +179,47 @@ say "P -- THE PREMISES, RE-GREPPED: is the tree still the tree this gate argues 
 # Every one of these is a claim the header makes. A gate that asserts things
 # about a subject it never re-read is a gate reporting on its own comment.
 
-# P1 -- /dev/blk is the wizard's ONLY source of disks.
+# P1 -- THE WIZARD HAS A SECOND SOURCE OF DISKS, AND IT IS THE ONE ITS OWN
+# INSTALLER USES.
+#
+# THIS CHECK USED TO ASSERT THE DEFECT. It read:
+#
+#     if grep ... '/proc/partitions' "$UI"; then
+#         bad "haminstallui.ad now has a second disk source -- stale"
+#
+# i.e. it went RED if anybody fixed the enumeration. That is the shape this
+# project has paid for before: a ratchet written to hold a premise in place
+# holds the BUG in place once the premise is the bug. The premise it guarded
+# was true and worth pinning -- /dev/blk was the only source -- but the
+# conclusion drawn from it was "and it must stay that way".
+#
+# What is pinned now is the pair: /dev/blk FIRST (so the HAMNIX-kernel lane is
+# untouched) and /sys/block behind it (the same directory
+# user/hlinstall.ad::list_disks reads, :354).
+#
+# GREP FOR THE CALL, NOT THE MENTION. `grep -c '/sys/block'` would match the
+# comment paragraph that explains this and stay green with the code deleted.
 NBLK=$(grep -c 'p9_listdir(cast\[Ptr\[char\]\]("/dev/blk")' "$UI")
-NLIST=$(grep -c 'p9_listdir' "$UI")
-if [ "$NBLK" = 1 ] && [ "$NLIST" = 2 ]; then
-    # 2 = the `from lib.p9 import` line plus the one call.
-    ok "haminstallui.ad calls p9_listdir exactly once, on /dev/blk -- it has one source of disks"
+NSYS=$(grep -c 'p9_listdir(cast\[Ptr\[char\]\]("/sys/block")' "$UI")
+if [ "$NBLK" = 1 ]; then
+    ok "haminstallui.ad still lists /dev/blk first -- the HAMNIX-kernel lane is unchanged"
 else
-    bad "haminstallui.ad has $NLIST p9_listdir mentions ($NBLK of them on /dev/blk) -- the enumeration this gate reasons about has changed; re-read it before believing anything below"
+    bad "haminstallui.ad has $NBLK /dev/blk listdir calls -- the enumeration this gate reasons about has changed; re-read it before believing anything below"
 fi
-if grep -qE 'listdir.*"/dev"[^/]' "$UI" || grep -q '/proc/partitions' "$UI"; then
-    bad "haminstallui.ad now has a second disk source -- this gate's prediction is stale"
+if [ "$NSYS" = 1 ]; then
+    ok "and it now CALLS p9_listdir on /sys/block as well -- the same source user/hlinstall.ad::list_disks uses"
 else
-    ok "and no /dev scan and no /proc/partitions fallback beside it"
+    bad "haminstallui.ad has $NSYS p9_listdir CALLS on /sys/block -- the fallback this gate measures is not in the tree"
+fi
+if grep -qE '^[[:space:]]*_enumerate_disks_sysblock\(\)' "$UI"; then
+    ok "and _enumerate_disks_sysblock is actually CALLED, not merely defined"
+else
+    bad "_enumerate_disks_sysblock is never called -- the fallback is dead code and every disk result below is about the old path"
+fi
+if grep -qE '^[[:space:]]*_read_root_disk_linux\(\)' "$UI"; then
+    ok "and the root disk is read from /proc/self/mountinfo, so the machine's own root is excluded from the offer"
+else
+    bad "nothing calls _read_root_disk_linux -- the wizard may offer the disk it booted from as an install target"
 fi
 
 # P2 -- the rc that actually boots does not bind '#b'.
@@ -206,11 +234,25 @@ else
     bad "user/linux-syscalls.c no longer refuses '#b' -- the Linux lane may have gained a block server; this gate's premise is stale"
 fi
 
-# P3 -- the installer the wizard spawns avoids the interface the wizard gates on.
+# P3 -- the installer the wizard spawns still reads /sys/block and still takes
+# a /dev/ path. Both halves matter: the first is what makes /sys/block the
+# right fallback rather than a second guess, and the second is why the wizard
+# has to PREFIX "/dev/" onto a bare /sys/block name before spawning
+# (hlinstall.ad:716 copies its argument verbatim into the disk path).
 if grep -q '/dev/blk' user/hlinstall.ad; then
-    ok "user/hlinstall.ad still records avoiding /dev/blk -- the wizard gates on an interface its own installer refuses to use"
+    ok "user/hlinstall.ad still records avoiding /dev/blk -- so /dev/blk alone was never going to be the wizard's answer on this lane"
 else
     bad "user/hlinstall.ad no longer mentions /dev/blk -- re-read the inconsistency this gate reports"
+fi
+if grep -q 'sys_open(cast\[Ptr\[char\]\]("/sys/block"))' user/hlinstall.ad; then
+    ok "and it still enumerates /sys/block itself, which is the source the wizard now shares with it"
+else
+    bad "user/hlinstall.ad no longer opens /sys/block -- the wizard and its installer have diverged again"
+fi
+if grep -qE '^[[:space:]]*if disks_from_sysblock != 0:' "$UI"; then
+    ok "and the wizard prefixes /dev/ onto a /sys/block name before spawning, which is the path shape hlinstall uses verbatim"
+else
+    bad "the wizard no longer distinguishes a /sys/block name from a /dev/blk one -- it would hand hlinstall a bare 'vdb' and hlinstall would open 'vdb1' relative to its cwd"
 fi
 
 # P4 -- Return is Next and Tab switches field, which is what section D drives.
@@ -266,6 +308,10 @@ echo '--- ls /dev/wsys/appmenu'
 ls /dev/wsys/appmenu
 echo '--- cat /proc/partitions'
 cat '/proc/partitions'
+echo '--- ls /sys/block'
+ls /sys/block
+echo '--- cat /proc/self/mountinfo'
+cat '/proc/self/mountinfo'
 echo '${PREM}END'
 sleep 10
 echo '/bin/hamcalcscene' > '/dev/wsys/appmenu/launch'
@@ -626,33 +672,98 @@ printf '%s' "$DISK" | grep -qi 'installab' && SAW_NODISK=1
 printf '%s' "$DISK" | grep -qi 'rescan'    && SAW_NODISK=1
 printf '%s' "$DISK" | grep -qiE 'nvme|vd[ab]|sd[ab]' && SAW_TARGET=1
 
+# THE EXPECTATION IS INVERTED FROM THE RUN THAT WROTE THIS FILE, and the old
+# one is left in words rather than deleted: it required SAW_NODISK, because
+# with `/dev/blk` as the wizard's only source the person was shown "No
+# installable target disk detected. Attach a blank disk, then Rescan." on a
+# machine with two blank disks attached on two buses. That is what the wizard
+# did, it was measured, and it is what the /sys/block fallback fixes.
 if [ "$SAW_TARGET" = 1 ]; then
-    bad "THE WIZARD OFFERED A TARGET DISK. That is not what the source predicted; the spawn is reachable and the graphical path must now be measured with the SERVED /bin/install as well"
+    ok "THE WIZARD OFFERS A TARGET DISK -- with two blank disks attached on two buses, the person is shown one to install to"
 elif [ "$SAW_NODISK" = 1 ]; then
-    ok "the disk page says it has NO INSTALLABLE TARGET and offers Rescan -- with two blank disks attached on two buses. The person is told, in the wizard's own red text, that it cannot continue"
+    bad "the disk page STILL says it has no installable target, with two blank disks attached on two buses. The /sys/block fallback is not reaching the person -- read $D/shots/p5_disk.png and the guest's own premise block in $D/serial.log"
 else
     bad "the disk page shows NEITHER a target disk NOR the no-disk message -- the person may be looking at nothing, which is one of the outcomes this gate exists to rule out; read $D/shots/p5_disk.png"
 fi
+# AND IT MUST NOT OFFER THE MEDIUM IT BOOTED FROM. The live disk in this arm
+# is the one QEMU attaches as the boot medium; a wizard that listed it would
+# be offering to erase the running system. `_is_boot_medium_linux` reads the
+# HAMNIXINST tag out of partition 1's sector 0 (both `sda1` and `nvme0n1p1`
+# spellings) and `_read_root_disk_linux` excludes whatever carries `/`.
+#
+# This is asserted on the GUEST'S OWN premise block rather than on the OCR: an
+# 8-px font OCRed at this scale cannot be trusted to tell two device names
+# apart, and a check that cannot tell them apart is not a check.
+# The guest dumps /proc/self/mountinfo in its premise block; the host derives
+# the whole-disk name of whatever carries `/` from it the same way the wizard
+# does (source field after the lone "-", strip /dev/, strip trailing digits
+# and a trailing 'p'). Derived here rather than trusted from the wizard, so
+# the check does not consult the code it is checking.
+BOOTDEV=$(awk '$5=="/" {for(i=1;i<=NF;i++) if($i=="-"){print $(i+2); exit}}' \
+          "$D/serial.log" 2>/dev/null | head -1 \
+          | sed 's|^/dev/||; s/[0-9]*$//; s/p$//')
+if [ -n "$BOOTDEV" ]; then
+    if printf '%s' "$DISK" | grep -qiF "$BOOTDEV"; then
+        bad "the wizard's target list contains the BOOT MEDIUM ($BOOTDEV) -- it is offering to erase the running system"
+    else
+        ok "and the boot medium ($BOOTDEV) is NOT in the offer"
+    fi
+else
+    info "the guest's premise block did not report a bootdev; the boot-medium exclusion is NOT measured in this run"
+fi
 
 # ---------------------------------------------------------------------------
-say "IS 'NEXT' REFUSED? (and does the wizard sit there, or go somewhere)"
+say "IS 'NEXT' STILL REFUSED WITH NOTHING SELECTED -- AND DOES IT GO WHEN SOMETHING IS?"
 # ---------------------------------------------------------------------------
-# _page_ready() (haminstallui.ad:618) requires sel_disk >= 0 on the disk page, so
-# a wizard with no disks should refuse to advance. Pressed three times: once
-# could be a dropped keystroke, and section D has already shown that Return does
-# reach this window.
+# TWO ASSERTIONS, IN THIS ORDER, AND THE FIRST ONE IS WHY THE SECOND ONE MEANS
+# ANYTHING. _page_ready (haminstallui.ad) requires sel_disk >= 0 on the disk
+# page. A wizard that advanced with no target chosen would be heading for a
+# spawn that erases a disk nobody picked, so:
+#
+#   1. RETURN WITH NOTHING SELECTED MUST STILL BE REFUSED. Pressed three times
+#      -- one could be a dropped keystroke, and section D has already shown
+#      Return reaches this window.
+#   2. THEN Tab SELECTS A DISK AND RETURN ADVANCES. Before this file's
+#      companion change, _hit_test was the ONLY writer of sel_disk, so the disk
+#      page could not be completed from the keyboard at all: the wizard reached
+#      step 5 and stopped there for good, with nothing on screen saying why.
+#
+# Without (1), a green (2) could just be a page that advances unconditionally.
 qi "$D" key ret >/dev/null; sleep 2
 qi "$D" key ret >/dev/null; sleep 2
 qi "$D" key ret >/dev/null; sleep 5
 shot "$D" p6_afternext || true
 AFTER=$(cat "$D/shots/p6_afternext.txt" 2>/dev/null || printf '')
-info "after 3 more Returns: $(printf '%s' "$AFTER" | tr '\n' '|' | cut -c1-200)"
+info "after 3 more Returns (nothing selected): $(printf '%s' "$AFTER" | tr '\n' '|' | cut -c1-200)"
 if printf '%s' "$AFTER" | grep -qiE 'Review|install now|Installing|complete'; then
     bad "THREE MORE RETURNS MOVED THE WIZARD PAST THE DISK PAGE with no disk selected -- it is heading for the spawn without a target"
 elif printf '%s' "$AFTER" | grep -qi 'Step 5'; then
-    ok "three more Returns left the wizard on step 5 -- Next is REFUSED, and section D proved the keystrokes arrive"
+    ok "three Returns with NOTHING selected left the wizard on step 5 -- Next is refused, and section D proved the keystrokes arrive"
 else
     bad "after three Returns the window OCRs to neither step 5 nor any later page -- what the person is looking at is not established"
+fi
+
+# Now select with the keyboard and press Next.
+qi "$D" key tab >/dev/null; sleep 2
+shot "$D" p7_selected || true
+SELSHOT=$(cat "$D/shots/p7_selected.txt" 2>/dev/null || printf '')
+info "after Tab (select): $(printf '%s' "$SELSHOT" | tr '\n' '|' | cut -c1-200)"
+qi "$D" key ret >/dev/null; sleep 6
+shot "$D" p8_afterselect || true
+ADV=$(cat "$D/shots/p8_afterselect.txt" 2>/dev/null || printf '')
+info "after Tab + Return: $(printf '%s' "$ADV" | tr '\n' '|' | cut -c1-200)"
+# The summary page's own strings (haminstallui.ad draws "Review" / "Install").
+# Matched loosely: an 8-px font OCRed at this scale mangles fine detail, and
+# "Step 5" NOT being there is the load-bearing half either way.
+# The summary page's own strings, off the source: the title is "Review &
+# install" (haminstallui.ad:1080) and the body draws "Target disk:" and "will
+# be ERASED" (:1234, :1241).
+if printf '%s' "$ADV" | grep -qiE 'Review|Target disk|ERASED|Host name'; then
+    ok "TAB SELECTED A DISK AND RETURN ADVANCED PAST STEP 5 -- the wizard is completable from the keyboard for the first time"
+elif printf '%s' "$ADV" | grep -qi 'Step 5'; then
+    bad "Tab then Return left the wizard on step 5 -- either the disk page still has no keyboard selection, or no disk was offered to select"
+else
+    bad "after Tab + Return the window OCRs to neither step 5 nor a summary page -- read $D/shots/p8_afterselect.png"
 fi
 
 # ---------------------------------------------------------------------------
