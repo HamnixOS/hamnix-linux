@@ -14,6 +14,52 @@ because the number is the deliverable.
 
 ## Unreleased
 
+### The desktop would not start on a 1920x1200 screen
+
+**Found on real hardware, on the first boot that reached a graphical
+environment.** The compositor keeps a fixed-size buffer to compose the screen
+into, and it was 1920x1080. On a 16:10 panel — ordinary on ThinkPads — it
+refused to start at all. Everything downstream then failed in a way that named
+the symptom instead of the cause: the desktop reported *"no screen geometry,
+/dev/wsys/screen never answered"*, which was true, and useless. The owner only
+learned the real reason by running the compositor by hand.
+
+The ceiling is now 2560x1600, which covers 1920x1080, 1920x1200, 2560x1440 and
+2560x1600. Not 4K: the buffer's size also caps a per-connection reassembly
+buffer that a program can drive, and 4K would take that from 8 MB to 33 MB.
+Raising it costs nothing at rest — the pixels live in sparse memory and the
+untouched part is never resident.
+
+**And the refusal now explains itself.** It prints both numbers, says outright
+that *"screen never answered"* is its own downstream symptom, and leaves the
+reason in a file that every program quotes under its own error — so the next
+person sees the cause without needing a shell. A compositor that starts
+successfully deletes that file, so "it refused" and "it was never started" are
+no longer the same message.
+
+### The touchpad's entire surface was the Applications button
+
+**Also found on real hardware.** The TrackPoint worked perfectly; the touchpad
+was unusable, its cursor pinned to a tiny area at the top-left that always reset
+to the same spot, and touching the bottom-right of the touchscreen reached about
+a sixth of the way across.
+
+One cause. Relative pointing devices report *movement*; touchpads and
+touchscreens report a *position* in their own coordinate range, which has to be
+read from the device and scaled to the screen. Nothing read it. The code carried
+a single hardcoded number — the range a QEMU tablet happens to use — so a
+touchpad reporting roughly 1300x750 had its whole surface mapped onto **76x27
+pixels** in the corner. The Applications button is 56x24 pixels in that corner.
+The touchpad was not *near* the button; its entire coordinate space *was* the
+button.
+
+Absolute devices are now measured rather than assumed, and a touchpad is no
+longer treated as a touchscreen: dragging on the pad moves the cursor from where
+it is, while touching the screen jumps to the point touched. The two are told
+apart by the property the kernel publishes for exactly that purpose, not by
+guessing from the range or the device's name. Multitouch events, which were
+discarded entirely, are now handled.
+
 **`hpm update` can finally change what your machine BOOTS with.** Until now it
 could not, and nothing said so. An update lands new kernel drivers on your root
 filesystem, and `modprobe` uses them from that moment — but the drivers your
