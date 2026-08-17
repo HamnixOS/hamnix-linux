@@ -12639,6 +12639,15 @@ def exec_block(node: int32) -> int32:
             return exf
         if ex != EX_NORMAL:
             return ex
+        # THE ONLY PLACE A COLLECTION CAN HAPPEN MID-EXECUTION. A statement
+        # that completed EX_NORMAL leaves no unwind in flight, so the live
+        # value set is exactly {scopes, eval_retval, raised_val, the pins}.
+        # Without this, a script whose body is one `while` loop never reaches
+        # run_source's depth-1 collector again and dies at VAL_MAX — which is
+        # what stopped tests/linux/soak_desktop.sh's workload three runs out
+        # of three. See gc_collect_minor for the frame audit this rests on.
+        if _minor_due() != 0:
+            gc_collect_minor()
         i = i + 1
     return EX_NORMAL
 
@@ -13232,18 +13241,26 @@ def exec_for(node: int32) -> int32:
     # expression, kids are the target names (>1 = unpack each element).
     if nd_c[nu] != 0:
         iter: int32 = eval_expr(nd_a[nu])
+        # PINNED: `iter` is a value-cell id held across exec_block, and a
+        # minor collection inside the body SLIDES VALUE CELLS. Reading the
+        # stale local back would iterate whatever landed on that id.
+        ipin: uint64 = gc_pin_push(iter)
         n2: uint64 = _iter_count(iter)
         i2: uint64 = 0
         while i2 < n2:
-            _comp_bind(node, _iter_get(iter, i2))
+            _comp_bind(node, _iter_get(gc_pin_get(ipin, iter), i2))
             ex2: int32 = exec_block(nd_b[nu])
             if ex2 == EX_BREAK:
                 break
             if ex2 == EX_RETURN or ex2 == EX_ERROR or ex2 == EX_EXIT:
+                gc_pin_drop(ipin)
                 return ex2
             i2 = i2 + 1
+        gc_pin_drop(ipin)
         return EX_NORMAL
-    var: uint64 = nd_str[nu]
+    # NOT hoisted: `nd_str[nu]` is a STRING-ARENA OFFSET and the minor
+    # collector compacts string bytes, rewriting nd_str in place. A copy
+    # taken before the body ran would name the wrong variable afterwards.
     # §Set: a BARE single-word iterable that names an in-scope set variable
     # iterates the set's ELEMENTS as typed values — `for x in s` (no `$`,
     # no `{…}` literal). This is the shell-word analog of the expression
@@ -13256,16 +13273,21 @@ def exec_for(node: int32) -> int32:
         if nd_kind[cast[uint64](only)] == ND_WORD:
             sv: int32 = scope_get(nd_str[cast[uint64](only)])
             if sv != 0 and val_type[cast[uint64](sv)] == VT_SET:
+                spin: uint64 = gc_pin_push(sv)       # PINNED — see above
                 sn: uint64 = _iter_count(sv)
                 si: uint64 = 0
                 while si < sn:
-                    scope_set(var, _iter_get(sv, si))
+                    scope_set(nd_str[nu],
+                              _iter_get(gc_pin_get(spin, sv), si))
                     exs: int32 = exec_block(nd_b[nu])
                     if exs == EX_BREAK:
+                        gc_pin_drop(spin)
                         return EX_NORMAL
                     if exs == EX_RETURN or exs == EX_ERROR or exs == EX_EXIT:
+                        gc_pin_drop(spin)
                         return exs
                     si = si + 1
+                gc_pin_drop(spin)
                 return EX_NORMAL
     argc: int32 = _argv_build(node)
     # `for f in *` over an oversized glob: iterating a TRUNCATED word list
@@ -13279,16 +13301,19 @@ def exec_for(node: int32) -> int32:
         v_list_push(items, v_str_cstr(cast[Ptr[uint8]](
             argv_ptr[cast[uint64](j)])))
         j = j + 1
+    lpin: uint64 = gc_pin_push(items)                # PINNED — see above
     i: uint64 = 0
     n: uint64 = val_ec[cast[uint64](items)]
     while i < n:
-        scope_set(var, v_list_get(items, i))
+        scope_set(nd_str[nu], v_list_get(gc_pin_get(lpin, items), i))
         ex: int32 = exec_block(nd_b[nu])
         if ex == EX_BREAK:
             break
         if ex == EX_RETURN or ex == EX_ERROR or ex == EX_EXIT:
+            gc_pin_drop(lpin)
             return ex
         i = i + 1
+    gc_pin_drop(lpin)
     return EX_NORMAL
 
 
@@ -13373,7 +13398,12 @@ def exec_try(node: int32) -> int32:
     # `finally` runs unconditionally; its own unwind/error wins.
     if nd_c[nu] != 0:
         raised_save: int32 = raised_val
+        # PINNED: a value-cell id carried ACROSS the finally suite, which can
+        # run a minor collection and slide the cells under it.
+        rpin: uint64 = gc_pin_push(raised_save)
         fex: int32 = exec_block(nd_c[nu])
+        raised_save = gc_pin_get(rpin, raised_save)
+        gc_pin_drop(rpin)
         if fex != EX_NORMAL:
             return fex
         raised_val = raised_save
@@ -15971,6 +16001,11 @@ def _gc_fvl(c: int32) -> int32:
 
 
 def _gc_push_nd(n: int32):
+    # A MINOR collection does not walk or move nodes at all, and must not
+    # leave GC_MARKED behind in gc_fwd_nd for the next full one to trip over.
+    # _gc_mark_values reaches here for every VT_FUNC / VT_NS cell it marks.
+    if gc_minor != 0:
+        return
     if n <= 0:
         return
     u: uint64 = cast[uint64](n)
@@ -16301,6 +16336,253 @@ def gc_collect():
         gc_str_skipped = gc_str_skipped + 1
 
 
+# ===========================================================================
+# THE MINOR COLLECTION — the one that can run WHILE A LOOP IS RUNNING
+# ===========================================================================
+# WHAT WENT WRONG WITHOUT IT, measured, not reasoned about.
+#
+# `_maybe_recycle_arenas` is called from ONE place: run_source, at
+# `_rs_depth == 1` — i.e. BETWEEN complete top-level inputs. A script whose
+# body is one `while 1 == 1 { ... }` never returns there, so the collector
+# NEVER RUNS for the life of that loop and every temporary the body allocates
+# is stranded until v_new hits VAL_MAX and raises.
+#
+# That is what killed the desktop soak. tests/linux/soak_desktop.sh's rc is a
+# single infinite `while`, and in BOTH preserved runs its serial log ends the
+# workload with, immediately after the last census:
+#
+#     hamsh: runtime error: value arena exhausted (VAL_MAX=16384 live cells)
+#     hamsh: uncaught exception: value arena exhausted ...
+#     [hamsh:stage-06] rc-done
+#     [hamsh:stage-07] loop-enter
+#     hamsh$ [hamsh:stage-08] ed-readline-first
+#
+# PID 1 fell out of the rc into its interactive prompt and sat in do_sys_poll
+# — kernel alive, workload dead, sysrq-w naming no blocked task. The gate had
+# called it a WEDGE OF UNKNOWN CAUSE for three runs.
+#
+# And it is COUNTED IN STATEMENTS, which is why the gate measured the stop at
+# a fixed number of app launches rather than a fixed time. Measured on the
+# host build, a two-statement loop body costs 4-6 value cells and 7-11 string
+# bytes PER ITERATION, monotonically, with the collection count pinned at
+# whatever it was when the loop started.
+#
+# WHY THIS IS A SECOND COLLECTOR AND NOT A CALL TO THE FIRST ONE
+# --------------------------------------------------------------
+# gc_collect SLIDES THE NODE ARENA. Mid-execution, every evaluator frame
+# between here and run_source is holding raw node ids in Adder locals that no
+# collector can see or rewrite — exec_block's `st`, exec_while's `nu`,
+# exec_for's `node`. Moving nodes under them rewrites the running program.
+# Worse, the executing program's AST is rooted only from fn_node/VT_FUNC, so
+# a full collection mid-loop would FREE THE LOOP IT IS RUNNING INSIDE.
+#
+# So this one MOVES NOTHING BUT VALUES, ELEMENTS AND STRING BYTES. Node ids,
+# kid-slot ids and nd_count are untouched, so every node id an evaluator frame
+# is holding stays valid by construction. That is sound because nodes DO NOT
+# GROW IN A LOOP — the body's AST is parsed once and re-executed (measured:
+# `nodes=20/16384` flat across every iteration while `vals` climbed by 6 each
+# time). A loop that parses new text every pass (`source` in a loop) still
+# grows nd_count and is still bounded only by the depth-1 collector; that is
+# stated here rather than left to be discovered.
+#
+# WHAT STILL HAS TO BE PINNED, AND THE AUDIT THAT FOUND IT
+# --------------------------------------------------------
+# Values DO move, so any evaluator local holding a value-cell id ACROSS a
+# statement boundary must be reachable to the marker and rewritten by it.
+# Every caller of exec_block / exec_statement was read for that:
+#
+#   exec_for      HOLDS: `iter` (expression-mode iterable), `sv` (set-mode
+#                 iterable), `items` (word-mode interned list). All three
+#                 live across exec_block and are PINNED below.
+#                 It also hoisted `var: uint64 = nd_str[nu]` — a STRING
+#                 offset — out of the loop; string bytes move too, so that
+#                 read is now done inside the loop.
+#   exec_try      HOLDS: `raised_save` across the `finally` suite. PINNED.
+#   call_user_fn / the single-arg call path
+#                 arguments are bound into a SCOPE before the body runs, and
+#                 scopes are roots. `mark` is a scope index, `defnode`/`dnu`
+#                 are node ids, `eval_retval` is a root. Nothing to pin.
+#   exec_while    `cond` is dead before exec_block is entered.
+#   exec_if, ND_AND, ND_OR, exec_block itself
+#                 node ids only.
+#   _exec_with_enter  `yielded` is bound into scope before the body runs.
+#   exec_ns / `enter` bodies
+#                 run in a FORKED CHILD that sys_exit()s; nothing survives.
+#   run_source    `prog` is a node id.
+#
+# If a future frame starts holding a cell id across a block and does not pin
+# it, the symptom is a silently WRONG VALUE, not a crash. That is why
+# scripts/test_hamsh_loop_arena_host.sh drives every one of these constructs
+# ACROSS a forced collection and compares answers byte-for-byte.
+GC_PIN_MAX: uint64 = 128
+gc_pin:     Array[128, int32]
+gc_pin_n:   uint64 = 0
+# Non-zero while some frame could not get a pin slot. The collector REFUSES
+# to run in that state: no collection means nothing moves, which means the
+# unpinned frame's own local is still correct. Failing closed here costs an
+# arena that fills up; failing open would cost a wrong answer.
+gc_pin_over: uint64 = 0
+gc_minor:    int32 = 0      # 1 while a minor collection is marking
+
+
+def gc_pin_push(c: int32) -> uint64:
+    # Returns the slot to read the (possibly relocated) id back from, or
+    # GC_PIN_MAX when the stack is full — in which case gc_pin_over blocks
+    # every collection until the frame unwinds and the caller's own local
+    # stays valid.
+    if gc_pin_n >= GC_PIN_MAX:
+        gc_pin_over = gc_pin_over + 1
+        return GC_PIN_MAX
+    s: uint64 = gc_pin_n
+    gc_pin[s] = c
+    gc_pin_n = s + 1
+    return s
+
+
+def gc_pin_get(s: uint64, fallback: int32) -> int32:
+    # `fallback` is the caller's OWN copy, which is correct exactly when the
+    # push overflowed (because an overflow blocks collection).
+    if s >= GC_PIN_MAX:
+        return fallback
+    return gc_pin[s]
+
+
+def gc_pin_drop(s: uint64):
+    if s >= GC_PIN_MAX:
+        if gc_pin_over > 0:
+            gc_pin_over = gc_pin_over - 1
+        return
+    gc_pin_n = s
+
+
+def gc_collect_minor():
+    # Values + the element pool + the string arena. NODES AND KID SLOTS ARE
+    # NOT TOUCHED (see the header above).
+    gc_runs = gc_runs + 1
+    gc_minor = 1
+    v: uint64 = 0
+    while v < VAL_MAX:
+        gc_fwd_vl[v] = 0
+        v = v + 1
+    gc_stk_vl_n = 0
+    gc_stk_nd_n = 0
+    # --- roots
+    si: uint64 = 0
+    while si < sc_count:
+        _gc_push_vl(sc_val[si])
+        si = si + 1
+    _gc_push_vl(eval_retval)
+    _gc_push_vl(raised_val)
+    pi: uint64 = 0
+    while pi < gc_pin_n:
+        _gc_push_vl(gc_pin[pi])
+        pi = pi + 1
+    _gc_mark_values()
+    gc_minor = 0
+    # --- assign new (sliding, order-preserving) cell ids
+    newv: uint64 = 1                     # cell 0 stays nil
+    c: uint64 = 1
+    while c < val_count:
+        if gc_fwd_vl[c] == GC_MARKED:
+            gc_fwd_vl[c] = cast[int32](newv)
+            newv = newv + 1
+        c = c + 1
+    # --- slide the value cells down. VT_FUNC / VT_NS carry a NODE id in
+    # val_pay and nodes did not move, so it is copied verbatim (the full
+    # collector forwards it; here forwarding would be wrong).
+    c2: uint64 = 1
+    while c2 < val_count:
+        fv: int32 = gc_fwd_vl[c2]
+        if fv > 0:
+            dv: uint64 = cast[uint64](fv)
+            val_type[dv] = val_type[c2]
+            val_pay[dv]  = val_pay[c2]
+            val_f[dv]    = val_f[c2]
+            val_aux[dv]  = val_aux[c2]
+            val_es[dv]   = val_es[c2]
+            val_ec[dv]   = val_ec[c2]
+        c2 = c2 + 1
+    val_count = newv
+    # --- compact the shared element pool (identical to gc_collect step 8)
+    oi: uint64 = 0
+    while oi < LISTELEM_MAX:
+        gc_owner[oi] = 0
+        oi = oi + 1
+    co: uint64 = 1
+    while co < val_count:
+        tc: int32 = val_type[co]
+        if tc == VT_LIST or tc == VT_SET or tc == VT_DICT:
+            if val_ec[co] > 0 and val_es[co] < LISTELEM_MAX:
+                gc_owner[val_es[co]] = cast[int32](co)
+        co = co + 1
+    dst: uint64 = 0
+    p: uint64 = 0
+    while p < val_elem_cursor:
+        ow: int32 = gc_owner[p]
+        if ow == 0:
+            p = p + 1
+            continue
+        ou: uint64 = cast[uint64](ow)
+        ln: uint64 = val_ec[ou]
+        if val_type[ou] == VT_DICT:
+            ln = ln * 2
+        q: uint64 = 0
+        while q < ln and p + q < LISTELEM_MAX:
+            val_elem[dst + q] = _gc_fvl(val_elem[p + q])
+            q = q + 1
+        val_es[ou] = dst
+        dst = dst + ln
+        p = p + ln
+    val_elem_cursor = dst
+    cz: uint64 = 1
+    while cz < val_count:
+        if val_ec[cz] == 0:
+            val_es[cz] = dst
+        cz = cz + 1
+    # --- rewrite every value root, INCLUDING THE PINS
+    si2: uint64 = 0
+    while si2 < sc_count:
+        sc_val[si2] = _gc_fvl(sc_val[si2])
+        si2 = si2 + 1
+    eval_retval = _gc_fvl(eval_retval)
+    raised_val  = _gc_fvl(raised_val)
+    pi2: uint64 = 0
+    while pi2 < gc_pin_n:
+        gc_pin[pi2] = _gc_fvl(gc_pin[pi2])
+        pi2 = pi2 + 1
+    # --- compact the string arena. _gc_str_pass walks nodes 1..nd_count and
+    # values 1..val_count and rewrites the refs IN PLACE; it moves BYTES, not
+    # nodes, so it is safe with the node arena frozen.
+    _gc_str_pass(0)
+    if gc_str_cur <= GC_STR_STAGE_MAX:
+        _gc_str_pass(1)
+        total: uint64 = gc_str_cur
+        str_arena[0] = 0
+        bi: uint64 = 0
+        while bi < total:
+            str_arena[1 + bi] = gc_str_stage[bi]
+            bi = bi + 1
+        str_cursor = 1 + total
+    else:
+        gc_str_skipped = gc_str_skipped + 1
+
+
+def _minor_due() -> int32:
+    # Head-room is 2048 cells / 2048 element slots / 64 KB of string bytes —
+    # deliberately larger than the depth-1 collector's 1024, because this one
+    # fires at a STATEMENT boundary and one statement may allocate a lot
+    # before the next boundary arrives.
+    if gc_pin_over != 0:
+        return 0
+    if val_count >= VAL_MAX - 2048:
+        return 1
+    if val_elem_cursor >= LISTELEM_MAX - 2048:
+        return 1
+    if str_cursor >= STR_ARENA_MAX - 65536:
+        return 1
+    return 0
+
+
 def _builtin_arenas():
     # One line, machine-greppable, stable field order.
     write_cstr1("arenas nodes=")
@@ -16482,12 +16764,27 @@ lex_fatal: int32 = 0
 # prompt / an anonymous buffer; the sourcing paths set it to the file's path
 # and restore the previous value (sourcing nests: rc.boot sources the
 # sysroot's rc.boot).
-lex_src_name: Ptr[uint8] = "-"
+# NOT `lex_src_name: Ptr[uint8] = "-"`. The Python seed's x86 backend rejects
+# a string initializer on a non-Array global outright ("global 'lex_src_name'
+# has a string initializer but is not typed Array[N, uint8]"), and every
+# x86_64-linux HOST gate goes through the seed via scripts/_adder_bin.sh. That
+# one line made `python3 -m compiler.adder compile --target=x86_64-linux
+# user/hamsh.ad` fail from 87da5762 onward, so scripts/test_hamsh_arena_soak_
+# host.sh and its siblings could not build a shell to test at all. The array
+# holds the bytes; the pointer is initialised from it at first use.
+lex_src_name_dflt: Array[2, uint8] = "-"
+lex_src_name: Ptr[uint8] = 0
+
+
+def _lex_src_name() -> Ptr[uint8]:
+    if lex_src_name == cast[Ptr[uint8]](0):
+        return &lex_src_name_dflt[0]
+    return lex_src_name
 
 
 def _report_lex_error():
     write_cstr1("hamsh: ")
-    write_cstr1(lex_src_name)
+    write_cstr1(_lex_src_name())
     write_cstr1(":")
     write_cstr1(render_int(cast[int64](lex_errline)))
     write_cstr1(": lexical error: ")
@@ -16539,7 +16836,7 @@ def _run_source_inner(buf: Ptr[uint8], n: uint64) -> int32:
         # too — "lexical error" alone leaves a reader guessing how much of
         # their script took effect.
         write_cstr1("hamsh: ")
-        write_cstr1(lex_src_name)
+        write_cstr1(_lex_src_name())
         write_cstr1(": NOT RUN -- a script whose text cannot be lexed is not executed at all\n")
         lex_fatal = 1
         eval_status = 1

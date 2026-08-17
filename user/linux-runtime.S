@@ -538,6 +538,21 @@ sys_nsid:
      * CLOCK_MONOTONIC. Reporting a frozen 0 here is why every jiffies
      * deadline loop in the tree (sleep, watch, memhog, nice_*) spins
      * forever. */
+    /* --- sys_getpid() -> int32 -------------------------------------
+     * A REAL answer, not a stub: hamsh branches on `sys_getpid() == 1` to
+     * decide whether it is PID 1 and must never exit. A host build of the
+     * shell had NO definition of this symbol in any lane but the glibc one
+     * (user/linux-syscalls.c:1667), so the link failed outright. */
+#ifndef ADDER_HOSTED
+    .globl sys_getpid
+    .type sys_getpid, @function
+sys_getpid:
+    movq    $SYS_getpid, %rax
+    syscall
+    ret
+    .size sys_getpid, .-sys_getpid
+#endif /* !ADDER_HOSTED */
+
 #ifndef ADDER_HOSTED
     .globl sys_get_jiffies
     .type sys_get_jiffies, @function

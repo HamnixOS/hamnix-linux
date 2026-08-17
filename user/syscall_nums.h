@@ -56,6 +56,11 @@
     .set SYS_getcwd,      79
     .set SYS_chdir,       80
     .set SYS_getuid,      102
+    /* hamsh calls sys_getpid() to decide whether it is PID 1 (87da5762).
+     * The x86_64-linux link had no definition for it at all, so every host
+     * build of user/hamsh.ad failed at `ld` with an undefined reference and
+     * the ~49 host hamsh gates could not compile a shell to test. */
+    .set SYS_getpid,      39
     .set SYS_setpgid,     109
 #endif /* LINUX_ABI */
 
