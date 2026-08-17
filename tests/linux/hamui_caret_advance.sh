@@ -46,6 +46,14 @@
 # ink in the unfocused shot is the last glyph's right edge. Both numbers come
 # out of the framebuffer.
 #
+# WHAT THE FIX COSTS, measured rather than waved away: linking lib/hamtextbox.ad
+# pulls lib/font_ttf.ad and the embedded DejaVu bytes into EVERY hamui client.
+# user/hamui_demo.ad went from 408136 to 504376 bytes -- +96 KB, about +24% --
+# and 111 files in user/ import lib.hamui. That is real image growth, and it
+# buys the only thing that makes the caret correct: the actual glyph advances.
+# The alternative is a second copy of the metric inside hamui, which is the
+# defect this whole line of work keeps removing.
+#
 # Entirely offscreen: HAMFB_FILE, no VM, no display, no DRM master.
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
