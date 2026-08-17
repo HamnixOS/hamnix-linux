@@ -14,6 +14,79 @@ because the number is the deliverable.
 
 ## Unreleased
 
+Nothing yet. Work lands here between releases; if this section is empty, the
+tree and the channel agree.
+
+## 1.0.26 — 2026-08-17
+
+**PUBLISHED and verified as served**: the live index reports 1.0.26 across all
+130 packages, its signature verifies against the trust root installed machines
+already carry, and both `hamnix-drivers-sof-1.0.26.tar.gz` and the firmware
+package fetched from the site are byte-identical to the gated build. Thirteen
+polls between pushing and serving.
+
+**Everything here came from running the desktop on a real laptop.**
+
+**Known issues, shipped knowingly.** This is **not** proof that sound works — no
+virtual machine has that hardware and the build machine is a different
+generation that never takes that path; what is proven is that the medium carries
+what such a laptop asks for. **Firmware, the boot module list and the kernel
+command line arrive only on freshly written media** — no update delivers them.
+A desktop **froze about five minutes into a session on real hardware and the
+cause is still unknown**: two standing write loads were found and removed and
+neither was shown to be it. Eleven places in the widget toolkit still size
+buttons and labels with the same wrong 8-pixel assumption, left alone
+deliberately because nothing measures toolkit layout yet. And a wallpaper image
+reports that it was applied while the desktop never loads it.
+
+### Sound never had a chance: no firmware, and a log line that lied
+
+On a laptop whose audio uses Intel's newer sound engine, **nothing played**. The
+boot log looked reassuring — it named the sound driver and said it was using that
+engine — and it meant the opposite: that message comes from the arbiter the
+driver consults, and it means **the driver declined and bound nothing**.
+
+Underneath it, two things were simply absent. None of the twenty-two modules that
+engine needs were on the medium. And **the image builder had no way to carry
+firmware at all** — it copied kernel modules and nothing else, while the package
+side had been shipping firmware for months. So the engine could never load the
+blob it starts from.
+
+Both are fixed: 22 modules and 31 firmware files, about 12 MB. **Firmware and the
+boot module list can only arrive on freshly written media** — no update can
+deliver them.
+
+**This is not proof that sound works.** No virtual machine has that hardware, and
+the build machine is a different generation that never takes that path. What is
+proven is that the medium now carries what such a laptop asks for.
+
+### The text cursor sat further right the more you typed
+
+In text fields the caret drifted right of the text — 22 pixels after 15
+characters, 44 after 30. The glyphs are proportional, about 6.8 pixels wide on
+average; the caret was placed at **a flat 8 pixels per character**. The two
+disagreed by about 1.2 pixels every character.
+
+The same wrong assumption was in **four** places in the shared widget toolkit —
+both places a caret is drawn, and both places a mouse click is turned back into a
+character position, which were wrong in the other direction, so clicking put the
+cursor on the wrong letter. All four now ask the one component that actually
+measures text. A fifth copy in the terminal made text selection come back short
+by whole words.
+
+The reason this survived: **the toolkit's rendering had never been tested at
+all** — its demo program draws one frame and exits unless asked to stay, so every
+attempt to photograph it caught an empty screen.
+
+### The desktop's background stopped 120 rows short of the bottom
+
+On a 1920x1200 screen a black band sat above the bottom panel, always beginning
+at exactly row 1080 whatever the screen height. A third copy of an old
+1920x1080 limit lived in the component every window is drawn through, and when a
+window did not fit it **quietly shrank it and reported success** — so the part of
+the system whose job is to notice unpainted rows measured them against the
+shortened height and saw nothing wrong.
+
 ### The machine wrote to your USB stick 42 times more than it needed to
 
 **Found while hunting a freeze on real hardware, and it does not claim to have
