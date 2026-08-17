@@ -26,8 +26,8 @@
 # The fix (scripts/hamlinux_packages.py, scripts/build_packages.py) drives the
 # GzipFile explicitly with mtime=0 and filename="".
 #
-# WHAT THIS GATE MEASURES, IN THREE SECTIONS
-# ==========================================
+# WHAT THIS GATE MEASURES, IN FOUR SECTIONS
+# =========================================
 # A. FUNCTIONAL, no network, no build: builds one synthetic package twice
 #    through scripts/build_packages.py's real `_tar_gz`, with the wall clock
 #    stepped between the two builds, and requires the two .tar.gz files to be
@@ -47,6 +47,24 @@
 #    package; that is reported as NOT CHECKED with the two versions named, and
 #    scores nothing. If 255.one cannot be reached the gate FAILS: an
 #    instrument that could not run is red, not silent.
+#
+# D. WHY THEY DIFFER, for whatever section C found differing. C compares one
+#    hash per side and therefore cannot say; D inflates both and separates
+#    "only the gzip wrapper differs" from "the tar inside differs too", naming
+#    the members in the second case. Bounded by HAMLINUX_PKGREPRO_ATTRIB
+#    (default 8, `all` for every one) and a sample is reported AS a sample.
+#    Scores nothing: it explains C's failure, it does not overturn it.
+#
+#    MEASURED on 2026-08-17, ATTRIB=all, a 1.0.26 channel built from this tree
+#    against 255.one's 1.0.26: 130 of 130 differ; 126 differ ONLY in the
+#    wrapper (inflated tars byte-identical) and the published side is
+#    clock-stamped 130 of 130 with FNAME set 130 of 130, so those 126 are the
+#    previous packager's output; 4 differ in content, one member each --
+#    hamnix-install/bin/install, hpm/bin/hpm, hamnix-desktop/bin/hamsettings
+#    and hamnix-app-hamctl/bin/hamctl. Each of those four has a commit in this
+#    tree dated AFTER the published wrapper's own stamp of 04:47 that day.
+#    Both explanations are true at once, of disjoint sets, which is exactly
+#    what a gate that guessed one of them would have got wrong.
 #
 # NEGATIVE CONTROL, RUN RATHER THAN DESCRIBED
 # ===========================================
@@ -321,6 +339,130 @@ PYEOF
             | awk -F'\t' '{printf "        %-28s %s  local/published %s\n", $2, $3, $4}'
     fi
     [ "$NMISS" -gt 0 ] && bad "$NMISS packages are in the local index and not on disk -- they were NOT compared and are not reported as equal"
+fi
+
+# =========================================================================
+# D. WHY THEY DIFFER -- SEPARATED, NOT GUESSED.
+# =========================================================================
+# Section C's failure line says the sha256s differ and DELIBERATELY does not
+# say why, because from one hash per side it cannot. That is correct and it is
+# also not enough: "the channel does not serve what this tree builds" is the
+# kind of sentence somebody reads as a diagnosis, and this file's own header
+# records two gates in two days that named causes they had not measured.
+#
+# There are exactly two things that can make two .tar.gz files differ, and they
+# are DISTINGUISHABLE by inflating both:
+#
+#   THE WRAPPER ONLY  -- the inflated tar streams are byte-identical and only
+#                        the gzip framing differs. If the published side also
+#                        carries a nonzero MTIME and a set FNAME flag, it was
+#                        written by the PRE-FIX packager and this difference is
+#                        a stale release rather than a defect in the tree.
+#   THE CONTENT       -- the inflated tars differ too, and then the differing
+#                        members are NAMED. That is a real difference between
+#                        what is served and what this tree builds, and it is
+#                        the only half worth acting on.
+#
+# This costs a download per package, so it is BOUNDED and the bound is
+# reported: HAMLINUX_PKGREPRO_ATTRIB is how many of section C's differing
+# packages to attribute (default 8, `all` for every one -- about 110 MB at
+# 1.0.26). A SAMPLE IS REPORTED AS A SAMPLE and is never extrapolated to the
+# rest; the unattributed remainder is printed as exactly that.
+#
+# Section D SCORES NOTHING either way. It explains section C's failure; it does
+# not overturn it, and a tree whose channel genuinely differs from what is
+# served is still red above.
+ATTRIB="${HAMLINUX_PKGREPRO_ATTRIB:-8}"
+if [ "${NDIFF:-0}" -gt 0 ] && [ "$ATTRIB" != 0 ]; then
+    say "D. why they differ: the gzip wrapper, or the bytes inside it"
+    N=$NDIFF
+    [ "$ATTRIB" = all ] || N=$ATTRIB
+    [ "$N" -gt "$NDIFF" ] && N=$NDIFF
+    grep '^DIFFER' "$TMP/cmp.txt" | head -"$N" | cut -f2 > "$TMP/attrib.names"
+    info "attributing $N of the $NDIFF differing packages$( [ "$N" -lt "$NDIFF" ] && echo " (a SAMPLE -- set HAMLINUX_PKGREPRO_ATTRIB=all for every one)")"
+    CHAN="$CHAN" PUBI="$TMP/pub.json" NAMES="$TMP/attrib.names" DL="$TMP/dl" \
+    python3 - <<'PYEOF'
+import gzip, hashlib, io, json, os, struct, subprocess, sys, tarfile
+chan, pubi, names, dl = (os.environ[k] for k in ("CHAN", "PUBI", "NAMES", "DL"))
+os.makedirs(dl, exist_ok=True)
+local = {p["name"]: p for p in json.load(open(os.path.join(chan, "index.json")))["packages"]}
+pub = {p["name"]: p for p in json.load(open(pubi))["packages"]}
+base = os.environ.get("HAMLINUX_PKGREPRO_BASE", "https://255.one/linux/")
+
+def hdr(path):
+    b = open(path, "rb").read(10)
+    if len(b) < 10 or b[0] != 0x1F or b[1] != 0x8B:
+        return None, None
+    return struct.unpack_from("<I", b, 4)[0], 1 if (b[3] & 0x08) else 0
+
+def members(raw):
+    d = {}
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r") as tf:
+        for ti in tf.getmembers():
+            body = tf.extractfile(ti).read() if ti.isfile() else b""
+            rel = ti.name.split("/", 1)[1] if "/" in ti.name else ti.name
+            d[rel] = (ti.size, hashlib.sha256(body).hexdigest())
+    return d
+
+wrapper, content, unreadable = [], {}, []
+stamped = named = 0
+for name in [l.strip() for l in open(names) if l.strip()]:
+    lp, pp = local.get(name), pub.get(name)
+    if not lp or not pp:
+        unreadable.append((name, "not in both indexes")); continue
+    lpath = os.path.join(chan, lp["url"])
+    ppath = os.path.join(dl, os.path.basename(pp["url"]))
+    if (not os.path.exists(ppath)
+            or hashlib.sha256(open(ppath, "rb").read()).hexdigest() != pp["sha256"]):
+        rc = subprocess.call(["curl", "-fsS", "--max-time", "600", "-o", ppath,
+                              base + pp["url"]])
+        if rc != 0 or not os.path.exists(ppath):
+            unreadable.append((name, "could not fetch")); continue
+        if hashlib.sha256(open(ppath, "rb").read()).hexdigest() != pp["sha256"]:
+            unreadable.append((name, "fetched bytes are not the index's sha256")); continue
+    pgz, pfn = hdr(ppath)
+    if pgz: stamped += 1
+    if pfn: named += 1
+    try:
+        lraw, praw = gzip.decompress(open(lpath, "rb").read()), gzip.decompress(open(ppath, "rb").read())
+    except Exception as e:
+        unreadable.append((name, "would not inflate: %s" % e)); continue
+    if lraw == praw:
+        wrapper.append(name); continue
+    lm, pm = members(lraw), members(praw)
+    rows = []
+    for k in sorted(set(lm) - set(pm)):
+        rows.append("ONLY LOCAL     %s (%d bytes)" % (k, lm[k][0]))
+    for k in sorted(set(pm) - set(lm)):
+        rows.append("ONLY PUBLISHED %s (%d bytes)" % (k, pm[k][0]))
+    for k in sorted(k for k in set(lm) & set(pm) if lm[k] != pm[k]):
+        rows.append("DIFFERS        %s  local %d/%s...  published %d/%s..."
+                    % (k, lm[k][0], lm[k][1][:12], pm[k][0], pm[k][1][:12]))
+    content[name] = rows
+
+n = len(wrapper) + len(content)
+print("        of %d attributed: %d differ ONLY in the gzip wrapper, %d differ in CONTENT"
+      % (n, len(wrapper), len(content)))
+print("        published side: %d of %d carry a nonzero gzip MTIME, %d set FNAME"
+      % (stamped, n, named))
+if wrapper and stamped == n and named == n:
+    print("        -> for those %d the INFLATED TARS ARE BYTE-IDENTICAL and every"
+          % len(wrapper))
+    print("           published wrapper is clock-stamped: they were written by the")
+    print("           PRE-FIX packager. That is a stale release, not a tree defect.")
+elif wrapper:
+    print("        -> %d have byte-identical inflated tars; the published wrapper is"
+          % len(wrapper))
+    print("           NOT uniformly clock-stamped, so 'the old packager' is NOT the")
+    print("           whole story for them and this gate does not claim it is.")
+for name in sorted(content):
+    print("        %s -- CONTENT DIFFERS:" % name)
+    for r in content[name]:
+        print("            " + r)
+for name, why in unreadable:
+    print("        %s -- NOT ATTRIBUTED (%s); not counted either way" % (name, why))
+PYEOF
+    [ "$N" -lt "$NDIFF" ] && info "the other $((NDIFF - N)) differing packages were NOT attributed and nothing above is claimed about them"
 fi
 
 echo
