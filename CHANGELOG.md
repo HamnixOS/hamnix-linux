@@ -14,6 +14,80 @@ because the number is the deliverable.
 
 ## Unreleased
 
+### A shell that ran too long killed itself, and it looked exactly like the machine freezing
+
+Leave the desktop working for about five minutes and everything stops. The
+pointer does not move, no window redraws, and the machine ignores you — but the
+keyboard's emergency keys still answer, which is the signature of a kernel that
+is alive underneath a userland that is not.
+
+It was the shell running out of memory for values. Every step a script takes
+allocates a few cells to hold its intermediate results, and the only thing that
+ever handed them back ran **between** commands you type — never inside a running
+script. The system's own startup script is one endless loop, so it never reached
+that point. After about two thousand turns of the loop the cells ran out, the
+script stopped with an error, and what was left behind was **a shell sitting at a
+prompt waiting for someone to type**. Nothing was hung. Nothing was crashed. The
+desktop simply had nobody left to run it, and the machine looked frozen because
+in every way that mattered to you it was.
+
+The machine had been printing the reason on its console the whole time. Three
+recorded failures each carried the line `value arena exhausted` one step below
+where the tools stopped looking, and the automated check that watched those runs
+**reported them as healthy** — it looked for the desktop going quiet for too long
+and a run that stops has no "too long", only an ending.
+
+Now the memory is reclaimed while a script is still running. Measured across a
+fifteen-minute session: the desktop completed **109 cycles of work where it used
+to manage 44**, and the longest the picture stood still went from nearly twelve
+minutes to **zero**. An accidentally infinite loop no longer ends your session.
+
+**This is not confirmed to be the freeze seen on real hardware.** It explains
+that shape exactly — a dead desktop over a live kernel — and it was reproducible
+here three times out of three. It has not been caught in the act on the laptop.
+
+### The install wizard could not see any disk you could install on
+
+The graphical installer's disk page said "No installable target disk detected"
+on a machine with two perfectly good empty drives attached. It asked one place
+for the list of disks — a directory that the installed system never sets up — so
+the answer was always empty, while the ordinary listing of devices showed both
+drives under the names it wanted. Its own command-line installer avoids that same
+directory deliberately, and records why. **The wizard was gating on something its
+own installer refuses to use.** It now finds real disks, names their sizes,
+leaves out the drive you booted from, and can be driven from the keyboard.
+
+### Choosing a wallpaper said it worked whether or not it had
+
+The Settings app wrote your chosen colour, told the desktop to use it, printed
+"wallpaper applied", and never once looked at whether either step succeeded. The
+system underneath had been taught to *refuse* that request, specifically so this
+could stop happening — and the refusal arrived and was thrown away unread. Three
+places that wrote the picture file reported success without checking the write,
+and three more gave up in complete silence, so a click could do nothing at all
+with no explanation anywhere. The same unchecked pattern covered **logging out
+and shutting down**: if the request to power off was lost, you would have been
+told nothing, standing in front of a machine that was still running.
+
+### A module list that outgrew its buffer would have taken sound with it
+
+The list of hardware drivers to load at boot was read in one gulp into a fixed
+buffer, and it had grown to within a quarter of filling it — **with the entire
+sound stack on the last lines**. One more family of hardware and sound would have
+vanished from a freshly written stick with nothing anywhere saying why, days
+after a release whose headline was that sound finally had its drivers. The boot
+also announced "loaded 63 drivers" — the same sentence whether the list held 63
+or 65, so it could never show you a loss. It now reads the list however long it
+is, says so loudly if it ever does not fit, and reports **how many it loaded out
+of how many were listed**.
+
+### When the system refused something, it explained itself to nobody
+
+Typing `enter debian {sh}` gave "no distribution namespace" and nothing more. In
+fact the system had composed a careful explanation naming four separate things
+that would fix it — and sent it to the text console, which on a desktop nobody is
+looking at. Reasons now reach the window where you typed the command.
+
 ### The installer in the channel was not the installer on the stick
 
 `/bin/install` is the program the desktop's install wizard spawns and the one
