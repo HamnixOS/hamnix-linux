@@ -721,10 +721,33 @@ drive_desktop() {
         3)  # TYPE. Into whatever has focus -- which is the point: a soak that
             # only ever typed into a known-good window would not exercise
             # route_key's focus path.
-            Q click 640 400 "$SCREEN_W" "$SCREEN_H"
-            sleep 1
-            Q type "hamnix soak $i"
-            Q key ret
+            #
+            # AND IT HAS A SWITCH, WHICH IT EARNED. The virtio keyboard does
+            # not only reach wsysd: the guest's command line carries
+            # `console=tty0` beside `console=ttyS0`, and PID 1's hamsh is
+            # sitting at an interactive prompt on the console once the rc's
+            # last line is running. So typed text ALSO lands on that prompt --
+            # measured, in the serial log of the 3-hour arm, as
+            # `hamsh: command not found: hhhamnix` with the characters echoing
+            # one at a time. In that run it eventually derailed the rc's
+            # workload loop, the heartbeat stopped, and this gate reported a
+            # WEDGE that was nothing of the kind: the sysrq-l NMI backtrace it
+            # fired shows BOTH CPUs in pv_native_safe_halt/default_idle. An
+            # IDLE machine, not a stuck one.
+            #
+            # That is an instrument that can manufacture its own positive, so
+            # HAMLINUX_SOAK_TYPE=0 removes it, and any finding that survives
+            # only with typing on is not a finding.
+            if [ "${HAMLINUX_SOAK_TYPE:-1}" = 1 ]; then
+                Q click 640 400 "$SCREEN_W" "$SCREEN_H"
+                sleep 1
+                Q type "hamnix soak $i"
+                Q key ret
+            else
+                Q click 640 400 "$SCREEN_W" "$SCREEN_H"
+                sleep 1
+                Q move 700 450 "$SCREEN_W" "$SCREEN_H"
+            fi
             ;;
         4)  # SCROLL. The wheel path is a separate decode in pump_input().
             Q move 640 400 "$SCREEN_W" "$SCREEN_H"
@@ -1061,7 +1084,9 @@ run_arm handproof "$WORK/medium.img" 0 0 0 1 150
 H_KEYS=$(wsysd_counter "$WORK/handproof/serial.log" keys)
 H_PTR=$(wsysd_counter "$WORK/handproof/serial.log" pointer)
 info "driven: wsysd counted keys=$H_KEYS pointer=$H_PTR"
-if [ "$H_KEYS" -gt "$IDLE_KEYS" ] && [ "$H_KEYS" -gt 0 ]; then
+if [ "${HAMLINUX_SOAK_TYPE:-1}" != 1 ]; then
+    info "HAMLINUX_SOAK_TYPE=0: the keyboard gesture is off for this run, so keys=$H_KEYS is expected and is not asserted on. The pointer half below still is."
+elif [ "$H_KEYS" -gt "$IDLE_KEYS" ] && [ "$H_KEYS" -gt 0 ]; then
     ok "the hand's KEYSTROKES reached wsysd: keys $IDLE_KEYS undriven -> $H_KEYS driven"
 else
     bad "wsysd counted keys=$H_KEYS driven against $IDLE_KEYS undriven -- THE KEYBOARD HALF OF THE WORKLOAD IS NOT ARRIVING and a soak with it is a soak without it"
