@@ -45,6 +45,39 @@
 # THE EXPECTED RESULT IS FAILURE, in both arms. This script inverts the
 # verdict: it passes when install_wizard_gui.sh FAILS on the patched tree.
 #
+# AS RUN: 7 PASSED, 0 FAILED
+# ==========================
+#   PASS  NODISK: install_wizard_gui.sh went RED, as it must
+#   PASS  NODISK: the disk-page detector SAW the empty page and said so
+#   PASS  NODISK: and the ADVANCE detector went red too
+#   PASS  PRESELECT: install_wizard_gui.sh went RED, as it must
+#   PASS  PRESELECT: the refusal detector flipped
+# Kept at /home/david/.hamnix-build/soak-evidence/wizgui-negctl-RUN.log.
+#
+# THE RUN BEFORE THAT ONE WAS 4 PASSED / 3 FAILED, and both reds were faults
+# in the INSTRUMENT, which is the whole reason this file exists:
+#
+#   * install_wizard_gui.sh's ADVANCE check was
+#     `grep -qiE 'Review|Target disk|ERASED|Host name'`, and the disk page's
+#     own empty-state message is "No installable target DISK detected." So it
+#     matched a wizard that had not advanced at all. THE ASSERTION COULD NOT
+#     FAIL, on its first run, and only this arm found it. Fixed by asking
+#     "still on Step 5?" first, which the summary page can never satisfy.
+#
+#   * the PRESELECT inversion was a NO-OP. It appended
+#     `if n_disks > 0: sel_disk = 0` to the end of _enumerate_disks; the text
+#     went in and the wizard behaved exactly as unpatched. The arm reported
+#     the refusal detector blind -- a claim about the instrument that the run
+#     did not support, since nothing had ever been put to it. It patches the
+#     DECLARATION now, and reports INCONCLUSIVE rather than a verdict if the
+#     patched wizard still sits on step 5.
+#
+#     WHY THE OLD PATCH WAS INERT IS NOT ESTABLISHED. The obvious suspect --
+#     that assigning a module global declared LATER in the file creates a
+#     local instead -- was TESTED AND IS FALSE: a one-file Adder probe whose
+#     function assigns and whose main reads printed the global's new value.
+#     Left as unexplained rather than guessed at.
+#
 # WHAT IS STILL NOT CONTROLLED FOR, said rather than left out: the
 # BOOT-MEDIUM-EXCLUSION check. Inverting it means seeding a fake disk whose
 # name equals the running root's, which is not known until the guest boots, so
