@@ -223,6 +223,29 @@ if [ ! -d "$CHAN" ] || [ -z "$(ls "$CHAN"/packages/*.tar.gz 2>/dev/null)" ]; the
     info "NOT CHECKED: no built channel at $CHAN/packages -- sections B and C did not run and score nothing. Build one with: python3 scripts/hamlinux_packages.py --out build/repo --version <v>"
     NCHAN=0
 else
+    # PROVENANCE BEFORE VERDICT. The scan below reports on tarballs that are
+    # ALREADY on disk, and says nothing about when or by what they were built.
+    # Run in a tree whose build/repo/linux predates the very fix this gate
+    # tests, it printed "130 of 130 channel tarballs carry a nonzero gzip
+    # MTIME" -- true about the bytes, and a stale artefact rather than a
+    # defect. Every one of those tarballs was written by the OLD packager.
+    #
+    # This is the second gate in two days to name a cause it had not measured
+    # (the first said an image and a channel "run different programs under one
+    # version" when they were two different releases). So: if the tarballs are
+    # OLDER than the packager that is supposed to produce them, refuse to draw
+    # a conclusion. Red, not green -- a check that cannot attribute must not
+    # answer something success-shaped, in either direction.
+    PKGR="$PROJ_ROOT/scripts/hamlinux_packages.py"
+    NEWEST_TAR=$(ls -t "$CHAN"/packages/*.tar.gz 2>/dev/null | head -1)
+    if [ -n "$NEWEST_TAR" ] && [ -f "$PKGR" ] && [ "$PKGR" -nt "$NEWEST_TAR" ]; then
+        bad "the channel at $CHAN is OLDER than scripts/hamlinux_packages.py, so its tarballs were written by a previous version of the packager and their gzip headers say nothing about the code in this tree. Rebuild the channel and re-run. NOT reporting this as a defect and NOT reporting it as clean."
+        echo "        newest tarball: $(basename "$NEWEST_TAR") ($(stat -c %y "$NEWEST_TAR" | cut -d. -f1))"
+        echo "        packager      : $(stat -c %y "$PKGR" | cut -d. -f1)"
+        echo
+        echo "pkgrepro: $pass passed, $fail failed"
+        exit 1
+    fi
     NCHAN=0; NSTAMPED=0; NNAMED=0
     : > "$TMP/stamped"
     for f in "$CHAN"/packages/*.tar.gz; do
