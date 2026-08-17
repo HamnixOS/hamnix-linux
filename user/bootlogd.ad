@@ -453,7 +453,16 @@ def snapshot() -> int32:
     rc: int32 = build_image()
     t0: uint64 = now_ms()
     w: int64 = flush_changed()
-    took: uint64 = now_ms() - t0
+    t1: uint64 = now_ms()
+    # NEVER A SUBTRACTION THAT COULD RUN BACKWARDS. now_ms() answers 0 if
+    # clock_gettime fails, and `0 - t0` in unsigned arithmetic is an enormous
+    # number that would read as "this write took four hundred million years"
+    # and back the cadence off to its ceiling for the rest of the boot -- a
+    # logger silenced by a clock, which is the kind of failure that would be
+    # very hard to see in a file that simply had less in it than expected.
+    took: uint64 = 0
+    if t1 > t0:
+        took = t1 - t0
     if w < 0:
         return -1
 
