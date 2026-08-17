@@ -13,6 +13,51 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### 1.0.27 IS PUBLISHED AND VERIFIED AS SERVED
+
+130 packages. The signature verifies **against `etc/hpm/trusted.pub`** — the trust
+root installed machines already carry — and not merely against the signing key.
+`hamnix-install`, `hamnix-hamsh` and `hamnix-init` fetched **from the site** are
+byte-identical to the gated build. 1.0.26 stays fetchable; the channel is
+additive. **The installer defect is closed in the bytes**: the published tarball
+carries `bin/install` and `bin/hlinstall` at 279,128 bytes each — one program —
+where 1.0.26 shipped two different ones under one name.
+
+Headline: **the desktop freeze is fixed.** hamsh ran out of value cells after
+~2048 loop turns, PID 1's rc unwound and fell into interactive readline, and what
+looked like a hung machine was a shell waiting for someone to type. 846
+heartbeats over 900 s against 352 in the dead runs. **It is still NOT established
+that this was the owner's laptop freeze** — reproduced here three of three, never
+caught in the act on his hardware.
+
+### THE PUBLICATION CHECKLIST HAS THREE TRAPS, AND I FELL INTO ALL THREE
+
+Recorded here because the checklist as written does not warn about them, and the
+next person to publish will hit them in the same order.
+
+1. **`etc/hpm/trusted.pub` IS A COMMENTED FILE.** Its own text says "the first
+   bare token is the key". Comparing it to the signing key's public half by
+   stripping whitespace — without dropping `#` lines — concatenates the whole
+   comment block and reports a **false MISMATCH** on a key that matches perfectly.
+   Use `grep -vE '^\s*#'` and compare 64 hex chars to 64 hex chars.
+
+2. **`hpm_sign.py sign` REQUIRES AN OUTPUT PATH.** `sign <index> <secret>` with
+   the signature redirected from stdout raises `IndexError` and writes an EMPTY
+   file, which then verifies **BAD**. The correct form is
+   `sign <index> <secret> <out.sig>`. The failure is loud, but it arrives mixed
+   into a pipeline where it is easy to read past.
+
+3. **NEVER `rm` THE PACKAGES DIRECTORY.** `rm -f linux/packages/*.tar.gz` before
+   copying the new release deleted **2396 historical tarballs** — every previous
+   version. The channel is ADDITIVE and old releases must stay fetchable. It was
+   restored with `git checkout -- linux/packages/` before anything was committed,
+   so nothing left the machine, but a `git commit -a` in between would have
+   published the deletion. **Copy the new tarballs in; delete nothing.**
+
+And the standing rule that catches what these do not: **a push is not a
+publication.** Poll the site, verify the served signature against the trust root,
+and fetch a real tarball to compare against the gated build.
+
 ### A WEDGE IS REPRODUCIBLE, AND IT IS COUNTED IN LAUNCHES — read this first
 
 The desktop soak wedges: **three runs out of three stopped their workload at
