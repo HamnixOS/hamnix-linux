@@ -736,23 +736,45 @@ overflow; none silently truncates:
 | `LINE_MAX` | 2048 B | one logical input line |
 | `TOK_MAX` | 4096 | tokens per logical input |
 | `NODE_MAX` | 16384 | AST nodes (session) |
-| `STR_ARENA_MAX` | 32768 B | interned strings (session) |
+| `STR_ARENA_MAX` | 1048576 B | interned strings (session) |
 | `VAL_MAX` | 16384 | value cells (session) |
 | `LISTELEM_MAX` | 16384 | list/dict element slots |
 | `COMP_MAX` | 4096 | elements per list / `range()` / comprehension |
-| `SCOPE_MAX` | 128 | live variable bindings |
-| `FN_MAX` / `FN_NAME_MAX` | 32 defs / 16 B | user functions |
+| `SCOPE_MAX` | 1024 | live variable bindings |
+| `FN_MAX` / `FN_NAME_MAX` | 512 defs / 64 B | user functions |
+| `ALIAS_MAX` | 512 | aliases |
 | args per call | 16 | `def` parameters and call arguments |
 | `CALL_DEPTH_MAX` | 12 | nested/recursive `def` frames |
-| `ARGV_MAX` / `ENV_MAX` | 64 / 32 | external argv slots / exported vars |
+| `ARGV_MAX` / `ENV_MAX` | 2048 / 32 | external argv slots / exported vars |
 | `source` file | 16 KiB | script read buffer |
 | `HIST_MAX` | 48 | history ring |
 
-Value cells are **session-lifetime with no GC** (they are only recycled when
-no `def` and no variable is live), so a loop of more than a few thousand
-iterations exhausts `VAL_MAX` and raises. Long-running work belongs in Adder,
-not hamsh — this is a deliberate small-interpreter trade, and the error names
-the arena so the cause is never a mystery.
+Every arena is **session-lifetime and append-only**, reclaimed by a
+mark/compact collector (`gc_collect`). It runs in two places:
+
+* **between top-level inputs** (`run_source` at depth 1) — the full
+  collection, which also compacts the AST node arena; and
+* **at a statement boundary inside a block** (`exec_block` →
+  `gc_collect_minor`) — values, list/dict elements and string bytes only.
+  Nodes are deliberately left frozen there, because every evaluator frame
+  above is holding raw node ids that no collector can rewrite.
+
+**This paragraph used to say the opposite,** and the wrong version is left
+here rather than quietly replaced: it said value cells had *no* GC, that "a
+loop of more than a few thousand iterations exhausts `VAL_MAX` and raises",
+and that "long-running work belongs in Adder, not hamsh — this is a
+deliberate small-interpreter trade". It was not a trade; the collector simply
+had no call site reachable from inside a loop. Measured before the fix:
+`while i < 5000 { s = s + i ; i = i + 1 }` — nothing live but two integers —
+died at **iteration 2048** and printed a partial sum. It is what stopped
+`tests/linux/soak_desktop.sh`'s workload three runs out of three, where it
+was reported as a machine wedge. A `while` loop is now bounded by what it
+keeps **live**, not by how many times it goes round; see
+`scripts/test_hamsh_loop_arena_host.sh`.
+
+One limit does still work the old way: a loop that **parses new text every
+pass** (`source` inside the loop) grows the *node* arena, and only the
+depth-1 collector reclaims that.
 
 ### 16c. POSIX parameter expansion
 

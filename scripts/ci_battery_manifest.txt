@@ -312,6 +312,19 @@ bash scripts/test_hamsh_dualsyntax_host.sh
 # identically on both sides of every collection; and a structural ratchet on
 # the nd_c child-vs-flag table the collector depends on.
 bash scripts/test_hamsh_arena_soak_host.sh
+# QEMU-free host gate (~4 min, four compiles) for the OTHER half of the same
+# question, and the half the gate above cannot ask: the arena soak drives
+# thousands of TOP-LEVEL commands, and the collector used to be reachable
+# ONLY between top-level inputs. A script that is one `while` loop never
+# returned there, so nothing was ever collected and the shell died at
+# VAL_MAX — measured, before the fix, at iteration 2048 of a loop over two
+# integers. That is what stopped tests/linux/soak_desktop.sh's workload three
+# runs out of three and was reported as an unexplained WEDGE. This gate runs
+# 60000 iterations, asserts the answer is exact and occupancy bounded, drives
+# every construct that carries a value-cell id across a statement boundary,
+# and RUNS two mutant builds (collector removed; for-loop pins removed) that
+# must both fail.
+bash scripts/test_hamsh_loop_arena_host.sh
 # QEMU-free host gate (~25 s, mostly the two compiles) for the SILENT
 # PARTIAL-ACTION class in hamsh — an operation that does part of its work and
 # reports success. The 2026-07-28 report: `rm *` in a 200-file directory

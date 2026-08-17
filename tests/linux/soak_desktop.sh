@@ -1312,6 +1312,44 @@ else
     bad "the 'command not found' check reported $ALIVE_NF for a clean log -- it matches text that is not there"
 fi
 
+# THE THIRD DETECTOR, AND IT IS THE ONE THAT WOULD HAVE ENDED THE HUNT ON RUN
+# ONE. Both preserved logs of the "wedge" carry, on the line immediately after
+# the last census, the shell saying exactly what happened:
+#
+#     hamsh: runtime error: value arena exhausted (VAL_MAX=16384 live cells)
+#            — split the loop
+#
+# followed by `[hamsh:stage-06] rc-done`, `[hamsh:stage-07] loop-enter` and a
+# `hamsh$` prompt: PID 1 falling out of the rc into interactive readline. The
+# gate had all of that in $WORK/soak/serial.log for three runs and asserted on
+# NONE of it, so the finding it reported was "a wedge of unknown cause". The
+# string was in the evidence the whole time.
+#
+# NOTE THE em-dash: hamsh emits U+2014 in that message, so a pattern spelled
+# with an ASCII hyphen matches nothing. Match only the part that cannot drift.
+ARENA_PAT='arena exhausted\|arena full\|element pool exhausted'
+python3 - "$PF" <<'PY'
+import sys, os
+d = sys.argv[1]
+with open(os.path.join(d, "arena.log"), "w", encoding="utf-8") as f:
+    f.write("SOAKCENSUSEND\n")
+    f.write("hamsh: runtime error: value arena exhausted "
+            "(VAL_MAX=16384 live cells) — split the loop\n")
+    f.write("[hamsh:stage-06] rc-done\n")
+PY
+DEAD_AR=$(grep -ac "$ARENA_PAT" "$PF/arena.log")
+ALIVE_AR=$(grep -ac "$ARENA_PAT" "$PF/alive.log")
+if [ "${DEAD_AR:-0}" -ge 1 ]; then
+    ok "the arena-death check finds hamsh's own exhaustion message when it is there ($DEAD_AR line)"
+else
+    bad "the arena-death check found nothing in a log that contains the exact string -- it cannot name the cause that stopped three runs"
+fi
+if [ "${ALIVE_AR:-0}" = 0 ]; then
+    ok "and reports 0 for a log without it, so a 0 in the real run is a reading"
+else
+    bad "the arena-death check reported $ALIVE_AR for a clean log -- it matches text that is not there"
+fi
+
 # ---------------------------------------------------------------------------
 say "ARM 0e -- proving the sysrq response, on a machine that is not stuck"
 D="$WORK/sysrqproof"
@@ -1605,17 +1643,124 @@ say "DID THE WORKLOAD SURVIVE THE WINDOW? (asked FIRST, because the verdict belo
 # RUNS OUT IS COUNTED IN THINGS OPENED, NOT IN TIME PASSED. The window count at
 # the stop was 42 and 44 in the two configurations.
 #
-# WHAT IS NOT ESTABLISHED, and must not be claimed: that this is the same defect
-# the owner hit on his Lenovo, or WHICH table runs out. 44 is not 64, and the
-# 64-slot fdns table pinned by live processes (user/linux-fdns.c:101) that this
-# file's header already argues about would need ~20 other holders to be full at
-# 44 applications -- which is arithmetic that works, and arithmetic that works
-# is not a measurement. IT HAS NOT BEEN SHOWN TO BE THE ONE.
+# THE RESOURCE IS NAMED, AND IT IS NOT A TABLE IN THE COMPOSITOR
+# ==============================================================
+# It is hamsh's VALUE-CELL ARENA, and the answer was printed on the console of
+# BOTH preserved runs, one line after the last census:
 #
-# THE NEXT EXPERIMENT, written down so it is not re-derived: vary the number of
-# APPLICATIONS per cycle rather than the dwell, and vary whether they are killed
-# rather than left, and see whether the stop tracks live processes, windows, or
-# cumulative launches. Those three are still confounded here.
+#     SOAKCENSUSEND
+#     hamsh: runtime error: value arena exhausted (VAL_MAX=16384 live cells)
+#            — split the loop
+#     hamsh: uncaught exception: value arena exhausted ...
+#     [hamsh:stage-06] rc-done
+#     [hamsh:stage-07] loop-enter
+#     hamsh$ [hamsh:stage-08] ed-readline-first
+#
+# (wedged-typing-off-serial.log:7359 and derailed-serial.log:7362.) PID 1's rc
+# raised, unwound out of the `while 1 == 1` loop, and dropped into its
+# INTERACTIVE PROMPT -- which is why sysrq-t found PID 1 in do_sys_poll, why
+# sysrq-w named no blocked task, and why the vCPU wound down to 9 ticks per 8 s
+# instead of spinning. The kernel was fine. The workload's interpreter had died.
+#
+# WHY: `_maybe_recycle_arenas` was called from ONE place, run_source at
+# `_rs_depth == 1` -- BETWEEN complete top-level inputs. THE RC OF THIS FILE IS
+# ONE INFINITE `while`, so the collector never ran again after the loop was
+# entered and every temporary the body allocated was stranded.
+#
+# MEASURED ON THE HOST BUILD, directly, with the shell's own `arenas` readout
+# sampled once per iteration:
+#
+#     nodes   FLAT at 20/16384      (the body's AST is parsed once, re-used)
+#     vals    +4 to +6 PER ITERATION, monotonically, gc count never moving
+#     str     +7 to +11 bytes per iteration
+#
+# A resource that climbs and never falls. `while i < 5000 { s = s + i ;
+# i = i + 1 }` -- two integers, nothing live but two integers -- died at
+# ITERATION 2048 and printed a partial sum.
+#
+# AND THAT IS WHY THE STOP WAS COUNTED IN LAUNCHES AND NOT IN SECONDS. It was
+# never counted in launches; it was counted in STATEMENTS EXECUTED, and the
+# per-cycle census plus the 58-command close sweep dominate the statement count
+# so heavily that halving the dwell barely moved the number of cycles reached.
+# Statements to the wall on each arm, using the rc this file generates:
+#
+#                cycles reached   statements/cycle   statements to the wall
+#     DWELL=8          11              ~424                  ~4664
+#     DWELL=4          12              ~344                  ~4128
+#
+# Within 13 percent of each other, i.e. a per-statement constant -- which is
+# what "vals climbs 4-6 per iteration" predicts and what "a 64-slot table"
+# does not.
+#
+# THE FIX IS IN THE SHELL: user/hamsh.ad's gc_collect_minor, a values-only
+# collection that exec_block can run at a statement boundary INSIDE a loop
+# (nodes are left frozen, because every evaluator frame above is holding raw
+# node ids). scripts/test_hamsh_loop_arena_host.sh is its gate: 60000
+# iterations, exact answers, two mutant builds that must fail.
+#
+# AND IT WAS RUN AFTERWARDS. 900 s, TYPE=0, SKIPPROOF=1, seed 7742:
+#
+#                              the three dead runs        after the fix
+#     heartbeats                352 (all three)                 848
+#     launch cycles              44 / 48                        109
+#     "arena exhausted"          2 lines                          0
+#     workload-survived floor    dead at t=380 s        848 vs a floor of 450
+#     longest guest-clock gap    (no gap -- it stopped)           2 s
+#     longest frozen picture     700 s                            0 s
+#
+# Verdict 8 PASSED, 1 FAILED. The machine ran the whole window, the screen
+# never stood still for a second, and it went two and a half times past the
+# launch count that killed three runs. Serial log and gate output kept at
+# /home/david/.hamnix-build/soak-evidence/fixed-900s-{serial,RUN}.log.
+#
+# THE ONE RED IS A NEW FINDING THE WEDGE WAS HIDING: WINDOWS ARE NOT RECLAIMED
+# ============================================================================
+#     FAIL  THE WINDOW SET REACHED 94 against a baseline of 3 while apps were
+#           opened and closed
+#
+# This is not a regression from the shell fix and it is not new behaviour --
+# it is the SAME RATE the dead runs had, finally given time to matter. Those
+# runs ended at windows=42 after 44 launches (0.95/launch); this one reached
+# 94 after 109 (0.83/launch). They died before the number could get anywhere.
+#
+# MEASURED, off the census's own `windows` reading, 109 samples:
+#   * it climbs from a baseline of 3 to 94 and the trend is monotonic;
+#   * the close sweep DOES work, occasionally: there are exactly 8 single-step
+#     DECREASES in 109 samples, i.e. it reclaims about one window in twelve;
+#   * those decreases are spread EVENLY across the run -- samples 15, 27, 55,
+#     67, 79, 107. So this is NOT the sweep's fixed `6..64` wid range running
+#     out of reach once the allocator passes 64: the rate is the same on both
+#     sides of that boundary, and the shortfall is there from cycle one.
+#
+# WHAT IS NOT ESTABLISHED, and the next agent should not inherit it as fact:
+# WHETHER THIS IS THE COMPOSITOR OR THE HARNESS. `close <wid>` on
+# /dev/wsys/ctl sets `v->used = 0` (user/linux-wsys.c), and the sweep guesses
+# wids rather than reading them, so "the sweep closes the wrong wids 11 times
+# in 12" and "wsysd does not free the row" are both consistent with these
+# numbers and this run cannot tell them apart. THE EXPERIMENT THAT WOULD:
+# print `cat /dev/wsys/windows` in the census -- the rc currently prints only
+# `/dev/wsys/wsysd/state`, so nobody has ever seen WHICH wids were live at the
+# moment the sweep ran.
+#
+# The ceiling is WSYS_MAX_WINDOWS = 512 (user/linux-wsys.c:282), so at
+# 0.83/launch a three-hour arm reaches it around launch 610 -- well inside the
+# window this gate is meant to cover, and the reason this red matters rather
+# than being a curiosity about a test rc.
+#
+# WHAT IS STILL NOT ESTABLISHED, and must not be claimed:
+#   * THAT THIS IS THE OWNER'S LENOVO FAULT. His session is not running a
+#     thousand-iteration rc loop. This is the defect that stopped THIS GATE.
+#   * THAT THE COMPOSITOR WAS HEALTHY WHEN THE RC DIED. The screen stayed
+#     frozen for 700 s afterwards and the vCPU went nearly idle, which is
+#     consistent with "nothing was asking the desktop for anything" but is not
+#     the same as measuring that wsysd was alive. NOTE for whoever reads the
+#     old logs: every `[panelbeacon]` line in serial.log arrives via the
+#     census's `tail -6 /var/log/panel.log`, NOT live from the panel -- so the
+#     beacons stopping when the census stopped says nothing about the panel.
+#     That trap cost time here.
+#   * THAT 64-SLOT fdns EXHAUSTION IS RETIRED. It is a real second wall this
+#     file's header measured at ~118 launches; MAX_SLOTS is 1024 now, and the
+#     3-hour arm has not been re-run far enough to meet it again.
 #
 # WHAT THE VERDICT SAID ABOUT IT, AND THIS IS THE PART THAT MATTERS. On that
 # run, before the coverage check existed, this file printed:
@@ -1662,6 +1807,18 @@ fi
 # the fallback fires on the success path too and the variable becomes the two
 # characters "0\n0" -- which then printed as `FAIL  0` on its own line with the
 # real message orphaned below it. Measured in this file's own output.
+# AND THE ARENA, ASKED BEFORE ANYTHING ELSE ABOUT THE CAUSE, because for three
+# runs this file printed "a wedge" about a machine whose shell had said in
+# plain words what had happened to it. Proved above (ARM 0f) against a planted
+# log that contains the message and one that does not.
+AREXH=$(grep -ac 'arena exhausted\|arena full\|element pool exhausted' \
+        "$WORK/soak/serial.log" 2>/dev/null)
+AREXH="${AREXH:-0}"
+if [ "${AREXH:-0}" = 0 ]; then
+    ok "hamsh never exhausted an arena during the run -- the rc's own interpreter survived the window"
+else
+    bad "PID 1's SHELL RAN OUT OF ARENA $AREXH times and the rc died with it -- this is NOT a kernel wedge. hamsh's collector used to be reachable only between top-level inputs, so a script that is one \`while\` loop never collected; see scripts/test_hamsh_loop_arena_host.sh. Grep $WORK/soak/serial.log for 'arena' and read the lines after the last SOAKCENSUSEND"
+fi
 NOTFOUND=$(grep -ac 'command not found' "$WORK/soak/serial.log" 2>/dev/null)
 NOTFOUND="${NOTFOUND:-0}"
 if [ "${NOTFOUND:-0}" = 0 ]; then

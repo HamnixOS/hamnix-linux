@@ -1811,6 +1811,18 @@ same failure this project exists to beat.
   hamsh loop self-terminates rather than spinning — which is why the gate's
   "hangs for another reason" fixture blocks in `open(2)` on a fifo instead.
 
+  **THAT IS NO LONGER TRUE, AND ANYTHING RESTING ON IT NEEDS RE-READING.** The
+  collector was reachable only from `run_source` at depth 1 — *between*
+  top-level inputs — so a script that was one `while` loop never collected and
+  died at VAL_MAX. Measured before the fix: `while i < 5000 { s = s + i ; i =
+  i + 1 }`, nothing live but two integers, died at **iteration 2048**. It is
+  what stopped `tests/linux/soak_desktop.sh`'s workload three runs out of
+  three, where it was reported as a machine wedge. `gc_collect_minor` now runs
+  at a statement boundary inside a block, so **an accidentally infinite hamsh
+  loop SPINS FOREVER** instead of self-terminating. A loop is bounded by what
+  it keeps *live*, not by how many times it goes round. See
+  `scripts/test_hamsh_loop_arena_host.sh`.
+
 * **FOUND WHILE FIXING THE ABOVE, NOT FIXED: a hook longer than 16 KiB is
   SILENTLY TRUNCATED, and the cut can land inside a quote.**
 

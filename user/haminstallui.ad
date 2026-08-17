@@ -324,12 +324,310 @@ def _is_ram_backed(name: Ptr[uint8]) -> int32:
     return 0
 
 
+# ====================================================================
+# LINUX-LANE DISK ENUMERATION
+# ====================================================================
+# THE WIZARD GATED ON AN INTERFACE ITS OWN INSTALLER REFUSES TO USE.
+#
+# `_enumerate_disks` had exactly ONE source of disks: p9_listdir("/dev/blk").
+# On a booted hamnix-linux machine there is no /dev/blk at all --
+# etc/rc.boot.installed binds '#esp', '#distro', '#c', '#p', '#s' and '#/'
+# and never binds '#b', and user/linux-syscalls.c answers a '#b' bind with
+# "the /dev/blk file server is not written yet". So the listdir failed,
+# n_disks stayed 0, and the person was shown "No installable target disk
+# detected. Attach a blank disk, then Rescan." on a machine whose `ls /dev`
+# reports 122 entries including nvme0n1 and vda.
+#
+# Meanwhile user/hlinstall.ad -- THE PROGRAM THIS WIZARD SPAWNS -- lists
+# /sys/block (its list_disks, :354), takes /dev/<name>, and says at :33 that
+# it avoids the /dev/blk grammar because user/mkfs_ext4.ad wraps the HAMNIX
+# kernel's ctl and "has no kernel to talk to here". The wizard was gating on
+# an interface its own installer had already refused.
+#
+# So the fallback uses THE SAME SOURCE THE INSTALLER USES. /sys/block lists
+# WHOLE DISKS ONLY -- no partitions, so _is_partition is not consulted on
+# this path -- and /sys/block/<name>/size is in 512-byte sectors, which is
+# exactly what disk_sectors already holds.
+#
+# /dev/blk is still tried FIRST and is completely unchanged, so a lane that
+# does have the block server behaves as before; this runs only when that
+# yields nothing.
+sysblk_path: Array[128, uint8]
+sysblk_num:  Array[32, uint8]
+
+
+def _sb_path(pre: Ptr[uint8], name: Ptr[uint8], nl: uint64,
+             suf: Ptr[uint8]) -> uint64:
+    p: uint64 = 0
+    k: uint64 = 0
+    while pre[k] != 0 and p < 126:
+        sysblk_path[p] = pre[k]
+        p = p + 1
+        k = k + 1
+    k = 0
+    while k < nl and p < 126:
+        sysblk_path[p] = name[k]
+        p = p + 1
+        k = k + 1
+    k = 0
+    while suf[k] != 0 and p < 126:
+        sysblk_path[p] = suf[k]
+        p = p + 1
+        k = k + 1
+    sysblk_path[p] = 0
+    return p
+
+
+def _read_dec_at(pre: Ptr[uint8], name: Ptr[uint8], nl: uint64,
+                 suf: Ptr[uint8]) -> uint64:
+    _sb_path(pre, name, nl, suf)
+    fd: int32 = sys_open(cast[Ptr[char]](&sysblk_path[0]))
+    if fd < 0:
+        return 0
+    n: int64 = sys_read(fd, &sysblk_num[0], 31)
+    sys_close(fd)
+    if n <= 0:
+        return 0
+    v: uint64 = 0
+    i: uint64 = 0
+    while i < cast[uint64](n):
+        c: uint8 = sysblk_num[i]
+        if c < 48 or c > 57:
+            break
+        v = v * 10 + cast[uint64](c) - 48
+        i = i + 1
+    return v
+
+
+def _sector0_has_tag() -> int32:
+    # sysblk_path must already name a partition node.
+    fd: int32 = sys_open(cast[Ptr[char]](&sysblk_path[0]))
+    if fd < 0:
+        return 0
+    n: int64 = sys_read(fd, &bm_sector0[0], 512)
+    sys_close(fd)
+    if n < 512:
+        return 0
+    tag: Ptr[uint8] = cast[Ptr[uint8]]("HAMNIXINST")
+    if _bytes_eq(cast[Ptr[uint8]](cast[uint64](&bm_sector0[0]) + 43),
+                 tag, 10) == 1:
+        return 1
+    if _bytes_eq(cast[Ptr[uint8]](cast[uint64](&bm_sector0[0]) + 71),
+                 tag, 10) == 1:
+        return 1
+    return 0
+
+
+def _is_boot_medium_linux(name: Ptr[uint8], nl: uint64) -> int32:
+    # BOTH Linux partition spellings, because the two buses this runs on
+    # disagree: sda -> sda1, nvme0n1 -> nvme0n1p1. Checking only one would
+    # silently offer the live medium as an install target on the other bus.
+    _sb_path(cast[Ptr[uint8]]("/dev/"), name, nl, cast[Ptr[uint8]]("1"))
+    if _sector0_has_tag() == 1:
+        return 1
+    _sb_path(cast[Ptr[uint8]]("/dev/"), name, nl, cast[Ptr[uint8]]("p1"))
+    if _sector0_has_tag() == 1:
+        return 1
+    return 0
+
+
+# THE DISK THAT CARRIES `/`, read out of /proc/self/mountinfo. The HAMNIXINST
+# check above catches a medium this project made; this is the general answer,
+# so a machine booted from anything else is not offered its own root to erase.
+#
+# mountinfo field order:
+#   id pid maj:min root MOUNTPOINT opts... - fstype SOURCE superopts
+# so: the line whose field 4 (0-based) is exactly "/", then the SECOND field
+# after the lone "-" separator. The separator has to be found by scanning
+# rather than by a fixed index because the optional-fields run before it is
+# variable-length -- that is the whole reason mountinfo has a separator.
+mi_buf:  Array[8192, uint8]
+mi_root: Array[32, uint8]
+mi_root_len: uint64 = 0
+
+
+def _mi_field(ls: uint64, le: uint64, want: uint64,
+              out: Ptr[uint8], cap: uint64) -> uint64:
+    f: uint64 = 0
+    i: uint64 = ls
+    while i < le:
+        while i < le and mi_buf[i] == 32:
+            i = i + 1
+        s: uint64 = i
+        while i < le and mi_buf[i] != 32:
+            i = i + 1
+        if i > s:
+            if f == want:
+                ln: uint64 = i - s
+                if ln >= cap:
+                    ln = cap - 1
+                k: uint64 = 0
+                while k < ln:
+                    out[k] = mi_buf[s + k]
+                    k = k + 1
+                out[ln] = 0
+                return ln
+            f = f + 1
+    return 0
+
+
+mi_fld: Array[128, uint8]
+mi_src: Array[128, uint8]
+def _read_root_disk_linux():
+    mi_root_len = 0
+    fd: int32 = sys_open(cast[Ptr[char]]("/proc/self/mountinfo"))
+    if fd < 0:
+        return
+    total: uint64 = 0
+    while total < 8191:
+        k: int64 = sys_read(fd, &mi_buf[total], 8191 - total)
+        if k <= 0:
+            break
+        total = total + cast[uint64](k)
+    sys_close(fd)
+    mi_buf[total] = 0
+    i: uint64 = 0
+    while i < total:
+        e: uint64 = i
+        while e < total and mi_buf[e] != 10:
+            e = e + 1
+        if _mi_field(i, e, 4, &mi_fld[0], 128) == 1 and mi_fld[0] == 47:
+            f: uint64 = 0
+            j: uint64 = i
+            dash: uint64 = 0
+            found: int32 = 0
+            while j < e:
+                while j < e and mi_buf[j] == 32:
+                    j = j + 1
+                s: uint64 = j
+                while j < e and mi_buf[j] != 32:
+                    j = j + 1
+                if j > s:
+                    if j == s + 1 and mi_buf[s] == 45 and found == 0:
+                        dash = f
+                        found = 1
+                    f = f + 1
+            if found == 1 and _mi_field(i, e, dash + 2, &mi_src[0], 128) > 0:
+                # "/dev/sda2" -> "sda"; "/dev/nvme0n1p3" -> "nvme0n1"
+                if mi_src[0] == 47 and mi_src[1] == 100 and mi_src[2] == 101 \
+                        and mi_src[3] == 118 and mi_src[4] == 47:
+                    ln: uint64 = 0
+                    while mi_src[5 + ln] != 0 and ln < 31:
+                        ln = ln + 1
+                    while ln > 0 and mi_src[5 + ln - 1] >= 48 \
+                            and mi_src[5 + ln - 1] <= 57:
+                        ln = ln - 1
+                    if ln > 0 and mi_src[5 + ln - 1] == 0x70:
+                        ln = ln - 1
+                    if ln > 0:
+                        k2: uint64 = 0
+                        while k2 < ln:
+                            mi_root[k2] = mi_src[5 + k2]
+                            k2 = k2 + 1
+                        mi_root_len = ln
+                        return
+        i = e + 1
+
+
+def _is_virtual_block(name: Ptr[uint8]) -> int32:
+    # /sys/block carries more than spinning/flash media. `dm-` is a mapper
+    # target on top of a real disk, `sr` is optical, `md` is RAID, `zram` and
+    # `ram` are memory. Offering any of them as an install target is offering
+    # to erase something that is not a disk.
+    if _name_has_prefix(name, cast[Ptr[uint8]]("ram")) == 1:
+        return 1
+    if _name_has_prefix(name, cast[Ptr[uint8]]("zram")) == 1:
+        return 1
+    if _name_has_prefix(name, cast[Ptr[uint8]]("loop")) == 1:
+        return 1
+    if _name_has_prefix(name, cast[Ptr[uint8]]("live")) == 1:
+        return 1
+    if _name_has_prefix(name, cast[Ptr[uint8]]("dm-")) == 1:
+        return 1
+    if _name_has_prefix(name, cast[Ptr[uint8]]("md")) == 1:
+        return 1
+    if _name_has_prefix(name, cast[Ptr[uint8]]("sr")) == 1:
+        return 1
+    if _name_has_prefix(name, cast[Ptr[uint8]]("fd")) == 1:
+        return 1
+    return 0
+
+
+# 1 when the offered list came from /sys/block. It decides ONE thing, and it
+# is not cosmetic: user/hlinstall.ad uses its argument VERBATIM as the disk
+# path (`copy_str(&disk[0], target)`, :716) and its own usage line is
+# `hlinstall /dev/<disk>`, so the Linux lane must be handed "/dev/vdb" and not
+# "vdb". The /dev/blk lane's names are left exactly as they were.
+disks_from_sysblock: int32 = 0
+
+sysblk_ls: Array[4096, uint8]
+def _enumerate_disks_sysblock():
+    disks_from_sysblock = 1
+    _read_root_disk_linux()
+    n: int64 = p9_listdir(cast[Ptr[char]]("/sys/block"), &sysblk_ls[0], 4096)
+    if n < 0:
+        return
+    nm: Array[32, uint8]
+    nl: uint64 = 0
+    i: uint64 = 0
+    total: uint64 = cast[uint64](n)
+    while i <= total:
+        c: uint8 = 10
+        if i < total:
+            c = sysblk_ls[i]
+        if c == 10:
+            if nl > 0 and n_disks < MAX_DISKS:
+                # TERMINATE FIRST. _is_virtual_block goes through
+                # _name_has_prefix, which compares for the PREFIX's length and
+                # not the name's, so an unterminated buffer lets bytes left
+                # over from a LONGER previous name decide the match. The
+                # /dev/blk path above has the same latent shape and has never
+                # been bitten because every real device name is longer than
+                # every prefix; that is luck, not a guarantee.
+                nm[nl] = 0
+                skip: int32 = 0
+                if _is_virtual_block(&nm[0]) != 0:
+                    skip = 1
+                if skip == 0 and mi_root_len > 0 and \
+                        _name_eq(&nm[0], nl, &mi_root[0], mi_root_len) != 0:
+                    skip = 1
+                # SIZE FIRST, and a zero is a SKIP, not a disk with no size:
+                # an empty card reader is a /sys/block entry with size 0, and
+                # "0 B" in the target list is an offer to install nowhere.
+                sect: uint64 = 0
+                if skip == 0:
+                    sect = _read_dec_at(cast[Ptr[uint8]]("/sys/block/"),
+                                        &nm[0], nl, cast[Ptr[uint8]]("/size"))
+                    if sect == 0:
+                        skip = 1
+                if skip == 0 and _is_boot_medium_linux(&nm[0], nl) != 0:
+                    skip = 1
+                if skip == 0:
+                    dp: Ptr[uint8] = disk_name_ptr(n_disks)
+                    k: uint64 = 0
+                    while k < nl:
+                        dp[k] = nm[k]
+                        k = k + 1
+                    dp[nl] = 0
+                    disk_namelen[n_disks] = nl
+                    disk_sectors[n_disks] = sect
+                    n_disks = n_disks + 1
+            nl = 0
+        else:
+            if nl < 31:
+                nm[nl] = c
+                nl = nl + 1
+        i = i + 1
+
+
 lsbuf: Array[4096, uint8]
 def _enumerate_disks():
     n_disks = 0
+    disks_from_sysblock = 0
     _read_rootdev()
     n: int64 = p9_listdir(cast[Ptr[char]]("/dev/blk"), &lsbuf[0], 4096)
     if n < 0:
+        _enumerate_disks_sysblock()
         return
     nm: Array[32, uint8]
     nl: uint64 = 0
@@ -369,6 +667,12 @@ def _enumerate_disks():
                 nm[nl] = c
                 nl = nl + 1
         i = i + 1
+    # AND WHEN /dev/blk OPENS BUT OFFERS NOTHING. `n < 0` is not the only way
+    # this comes up empty -- a listing that parses to zero installable disks
+    # leaves the person at the same dead end, so the fallback is keyed on the
+    # RESULT and not on the errno.
+    if n_disks == 0:
+        _enumerate_disks_sysblock()
 
 
 # ====================================================================
@@ -566,7 +870,35 @@ def _apply_key(c: uint8) -> int32:
             else:
                 focus = 0
             return 1
+        # THE DISK PAGE HAD NO KEYBOARD AT ALL. Every other page of this
+        # wizard is keyboard-drivable -- Return is Next, Tab switches field,
+        # typing fills the field -- and then the LAST page before the summary
+        # could only be completed with a pointer: _hit_test (:1580) was the
+        # only writer of sel_disk, and _page_ready refuses Next until
+        # sel_disk >= 0. A person on a machine whose pointer is not working,
+        # or anyone driving this over a serial console, reached step 5 and
+        # could go no further, with no message saying why.
+        #
+        # Tab and Space now cycle the selection: -1 -> 0 -> ... -> n-1 -> -1.
+        # It deliberately does NOT default to a disk. This page's Next is the
+        # last gate before a summary whose button ERASES the disk, and a
+        # target selected by the program rather than the person is exactly the
+        # kind of default nobody reads.
+        if page == PAGE_DISK and n_disks > 0:
+            if sel_disk + 1 >= cast[int64](n_disks):
+                sel_disk = -1
+            else:
+                sel_disk = sel_disk + 1
+            return 1
         return 0
+    if c == 32 and page == PAGE_DISK and n_disks > 0 and part_mode != 1:
+        # Space does the same, and is excluded when the manual-partitioning
+        # field has the keyboard (part_mode 1), where a space is a keystroke.
+        if sel_disk + 1 >= cast[int64](n_disks):
+            sel_disk = -1
+        else:
+            sel_disk = sel_disk + 1
+        return 1
     if page == PAGE_HOST:
         return _field_key(&host_buf[0], &host_len, HOST_CAP, c, CLS_HOST)
     if page == PAGE_USER:
@@ -1004,9 +1336,22 @@ def _begin_install():
     di: uint64 = cast[uint64](sel_disk)
     dp: Ptr[uint8] = disk_name_ptr(di)
     k: uint64 = 0
-    while dp[k] != 0:
-        inst_disk[k] = dp[k]
+    # /sys/block names are BARE ("vdb"), and hlinstall uses its argument
+    # verbatim as the disk path. Handing it "vdb" would have it open "vdb1"
+    # relative to the cwd -- a failure that looks like a missing disk. The
+    # /dev/blk lane's names are passed exactly as before.
+    if disks_from_sysblock != 0:
+        pre: Ptr[uint8] = cast[Ptr[uint8]]("/dev/")
+        j: uint64 = 0
+        while pre[j] != 0:
+            inst_disk[k] = pre[j]
+            k = k + 1
+            j = j + 1
+    j2: uint64 = 0
+    while dp[j2] != 0 and k < 31:
+        inst_disk[k] = dp[j2]
         k = k + 1
+        j2 = j2 + 1
     inst_disk[k] = 0
 
     src: Ptr[uint8] = &LOCAL_REPO_URL[0]

@@ -118,12 +118,46 @@ for i in range(3000) { s = s + i }
 echo RES3000 $s status=$status'
 want "RES3000 4498500 status=0" "case 2e: an in-budget loop is exact and clean"
 
-# The value arena (VAL_MAX) is the other exhaustion wall — also loud now.
-run valarena 'i = 0
+# CASE 2f WAS ASSERTING THE DEFECT ITSELF, and it is worth saying exactly
+# how. It drove `while i < 5000 { s = s + i ; i = i + 1 }` and REQUIRED
+# "value arena exhausted" to come out — i.e. it required a five-thousand-
+# iteration loop over two integers to kill the shell. That is not a live-set
+# overflow; nothing in that loop is live but two ints. It exhausted because
+# hamsh's collector ran only BETWEEN top-level inputs, so a loop body's
+# temporaries were stranded for the life of the loop. This gate then froze
+# that in place as intended behaviour.
+#
+# It cost three runs of tests/linux/soak_desktop.sh, whose rc is one infinite
+# `while`: the desktop soak's workload died at ~2000 loop iterations, PID 1
+# fell back to its interactive prompt, and the gate reported an unexplained
+# WEDGE. Both preserved serial logs end the workload with this exact string.
+#
+# So the assertion is INVERTED here and split in two. The loop must now be
+# EXACT — that is the regression guard for gc_collect_minor — and the
+# fail-closed property the case was really about (an arena that fills RAISES,
+# names itself, sets $status and leaves the session usable) is asserted
+# against a GENUINELY LIVE set instead of a leak.
+run valarena_exact 'i = 0
 s = 0
 while i < 5000 { s = s + i ; i = i + 1 }
 echo RESW $s status=$status'
-want "runtime error: value arena exhausted" "case 2f: value-cell exhaustion raises"
+want "RESW 12497500 status=0" \
+     "case 2f: a 5000-iteration loop is exact (it used to die at ~2048)"
+nowant "value arena exhausted" \
+     "case 2f2: and does not exhaust an arena at all"
+
+# The fail-closed wall, driven by cells that are REACHABLE (every element
+# stays in L) rather than by stranded temporaries. This one the collector
+# cannot and must not reclaim.
+run livearena 'L = []
+j = 0
+while j < 40000 { L = L + [j] ; j = j + 1 }
+echo LIVE ${ len(L) } status=$status
+echo STILLALIVE2 ${ 3 + 4 }'
+want "runtime error: list/dict element pool exhausted" \
+     "case 2g: a genuinely live set still hits a NAMED wall"
+want "status=1" "case 2h: and reports it in \$status"
+want "STILLALIVE2 7" "case 2i: and the session survives it"
 
 # ---------------------------------------------------------------- case 3
 # review §6.3: `f(20)` on a recursive f returned 12 — the CALL_DEPTH_MAX
