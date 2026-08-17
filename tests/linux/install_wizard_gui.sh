@@ -128,6 +128,28 @@
 #   * the pointer. The wizard is driven by keyboard because that is provable
 #     (section D); a missed click is a soak that quietly tested nothing.
 #
+# AS RUN, AFTER THE /sys/block FALLBACK: 31 PASSED, 0 FAILED
+# ==========================================================
+# and the negative control (install_wizard_gui_negctl.sh) is 7 PASSED,
+# 0 FAILED with both arms flipping a detector. What the person sees at step 5:
+#
+#     Install Hamnix
+#     Step 5 of 5: Disk & partitioning
+#     Target drive:
+#     nvmeOn1 4.0 GiB          <- the OCR of "nvme0n1"
+#     vda 4.0 GiB
+#     [x] Guided - use entire disk
+#
+# It used to read "No installable target disk detected. Attach a blank disk,
+# then Rescan." with those same two disks attached. `sda`, the live medium, is
+# correctly absent. Tab selects, Return advances, and the run reaches
+# hlinstall, which refuses BY NAME ("/boot/root.partuuid is missing or is not
+# a UUID") before touching anything -- section F confirms both targets come
+# back byte-identical.
+#
+# Evidence: /home/david/.hamnix-build/soak-evidence/wizgui-fix-RUN.log and
+# wizgui-negctl-RUN.log.
+#
 # Usage: tests/linux/install_wizard_gui.sh
 # Env:   HAMLINUX_WIZGUI_WORK      where to build and boot
 #        HAMLINUX_WIZGUI_REUSE=1   reuse the medium already built there
