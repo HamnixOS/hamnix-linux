@@ -1698,6 +1698,55 @@ say "DID THE WORKLOAD SURVIVE THE WINDOW? (asked FIRST, because the verdict belo
 # node ids). scripts/test_hamsh_loop_arena_host.sh is its gate: 60000
 # iterations, exact answers, two mutant builds that must fail.
 #
+# AND IT WAS RUN AFTERWARDS. 900 s, TYPE=0, SKIPPROOF=1, seed 7742:
+#
+#                              the three dead runs        after the fix
+#     heartbeats                352 (all three)                 848
+#     launch cycles              44 / 48                        109
+#     "arena exhausted"          2 lines                          0
+#     workload-survived floor    dead at t=380 s        848 vs a floor of 450
+#     longest guest-clock gap    (no gap -- it stopped)           2 s
+#     longest frozen picture     700 s                            0 s
+#
+# Verdict 8 PASSED, 1 FAILED. The machine ran the whole window, the screen
+# never stood still for a second, and it went two and a half times past the
+# launch count that killed three runs. Serial log and gate output kept at
+# /home/david/.hamnix-build/soak-evidence/fixed-900s-{serial,RUN}.log.
+#
+# THE ONE RED IS A NEW FINDING THE WEDGE WAS HIDING: WINDOWS ARE NOT RECLAIMED
+# ============================================================================
+#     FAIL  THE WINDOW SET REACHED 94 against a baseline of 3 while apps were
+#           opened and closed
+#
+# This is not a regression from the shell fix and it is not new behaviour --
+# it is the SAME RATE the dead runs had, finally given time to matter. Those
+# runs ended at windows=42 after 44 launches (0.95/launch); this one reached
+# 94 after 109 (0.83/launch). They died before the number could get anywhere.
+#
+# MEASURED, off the census's own `windows` reading, 109 samples:
+#   * it climbs from a baseline of 3 to 94 and the trend is monotonic;
+#   * the close sweep DOES work, occasionally: there are exactly 8 single-step
+#     DECREASES in 109 samples, i.e. it reclaims about one window in twelve;
+#   * those decreases are spread EVENLY across the run -- samples 15, 27, 55,
+#     67, 79, 107. So this is NOT the sweep's fixed `6..64` wid range running
+#     out of reach once the allocator passes 64: the rate is the same on both
+#     sides of that boundary, and the shortfall is there from cycle one.
+#
+# WHAT IS NOT ESTABLISHED, and the next agent should not inherit it as fact:
+# WHETHER THIS IS THE COMPOSITOR OR THE HARNESS. `close <wid>` on
+# /dev/wsys/ctl sets `v->used = 0` (user/linux-wsys.c), and the sweep guesses
+# wids rather than reading them, so "the sweep closes the wrong wids 11 times
+# in 12" and "wsysd does not free the row" are both consistent with these
+# numbers and this run cannot tell them apart. THE EXPERIMENT THAT WOULD:
+# print `cat /dev/wsys/windows` in the census -- the rc currently prints only
+# `/dev/wsys/wsysd/state`, so nobody has ever seen WHICH wids were live at the
+# moment the sweep ran.
+#
+# The ceiling is WSYS_MAX_WINDOWS = 512 (user/linux-wsys.c:282), so at
+# 0.83/launch a three-hour arm reaches it around launch 610 -- well inside the
+# window this gate is meant to cover, and the reason this red matters rather
+# than being a curiosity about a test rc.
+#
 # WHAT IS STILL NOT ESTABLISHED, and must not be claimed:
 #   * THAT THIS IS THE OWNER'S LENOVO FAULT. His session is not running a
 #     thousand-iteration rc loop. This is the defect that stopped THIS GATE.
