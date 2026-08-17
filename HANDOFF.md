@@ -110,12 +110,31 @@ to the taskbar and says so. **`cat /dev/wsys` has not yet been driven in a
 guest** — if it is also empty, the validity rule now makes that say NOT A
 READING instead of inventing an answer.
 
+**`cat /dev/wsys` was then driven, and it settles the last inferred step.** A
+240 s soak on a freshly built image, **24 PASSED / 2 FAILED** (both of them the
+window red, correctly attributed):
+
+    state   (wsysd n_win)          3 -> 24, peak 24
+    dir     (shm->win[].used rows) 3 -> 24, peak 24
+    taskbar (used+visible+decor)   0 -> 21, peak 21
+    live application processes     0 -> 21
+    windows minus live app procs   min 3, max 4 across 28 censuses
+
+`state` and `dir` are **equal at every census**, which is the source reading
+above turned into a measurement: wsysd's `n_win` IS the count of `used` rows in
+`shm->win[]`. The false `HARNESS` verdict and the renderer disagreement are both
+gone.
+
 `tests/linux/soak_desktop.sh` prints the table three ways per census (state
 line, `cat /dev/wsys`, `cat /dev/wsys/windows`) and correlates it against the
 census's own `ps`, and `tests/linux/soak_wincensus_negctl.sh` (**12 PASS / 0
 FAIL, under a second, no QEMU**) drives that reader through every verdict, both
 "not measured" cases, and the unreadable-directory case that was red on the
 real boot.
+
+**What is left is a workload fix, not a compositor fix**: the soak's rc must end
+the programs it launches (or the desktop's close path must), and until it does
+this red is correct and is about the harness.
 
 ### THE ORIGINAL NOTE, kept because its source reading was right and its conclusion was not
 
