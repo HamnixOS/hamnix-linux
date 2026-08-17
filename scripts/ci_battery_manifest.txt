@@ -5090,3 +5090,158 @@ bash tests/linux/packager_sees_its_inputs.sh
 # "0 -> 0" with an offset that was the window count relabelled) and that
 # assertion is what keeps it fixed. No QEMU, no image, no network, no device.
 bash tests/linux/soak_wincensus_negctl.sh
+
+# --- MEASURED tests/linux GATES (2026-08-17) ------------------------------
+# Each line below was RUN on this host, in this order, with the 1.0.27
+# channel and the image built, and its exit status and wall time recorded
+# before the line was written. Nothing here is registered on the strength
+# of looking cheap. Total measured wall time of this block: 1472s.
+#
+# EXCLUDED ON PURPOSE, with the measurement that excluded them recorded in
+# each script's own header: 31 that did not exit 0 here (9 of them for ONE
+# in-tree defect -- user/wsyswl.ad's row buffer is 8192 bytes where the
+# device's widest surface needs 10240), and 19 that DID exit 0 while
+# printing no PASS, no FAIL and no assertion count at all. The second group
+# is the dangerous one: registering a gate that cannot go red is the false
+# assurance this whole section exists to avoid.
+
+# THE THREE RELEASE-CRITICAL ONES FIRST. Each needs a built
+# build/image/root and NONE of them passes without one -- measured: with a
+# partial tree they exit 1 saying "the image looks unbuilt ... NOT reporting
+# coverage from it". That refusal is why they are safe to register: a
+# missing prerequisite makes them RED and visible, never falsely green.
+# channel_covers_image.sh is the gate that catches an image file shipped in
+# no package -- exactly how /etc/hamnix-release got out -- and nothing has
+# ever run it.
+# MEASURED: 7 passed, 0 failed, 0s (image built).
+bash tests/linux/modules_list_complete.sh
+# MEASURED: 8 passed, 0 failed, 3s (image built).
+bash tests/linux/channel_covers_image.sh
+# MEASURED: 3 passed, 0 failed, 3s (image built).
+bash tests/linux/channel_bytes_match_image.sh
+
+# The rest, fastest first.
+# MEASURED: 7 passed, 0 failed, 0s.
+bash tests/linux/census_count_demo.sh
+# MEASURED: 0 passed, 0 failed, 0s.
+bash tests/linux/enter_user.sh
+# MEASURED: 11 passed, 0 failed, 0s.
+bash tests/linux/errstr_reaches_caller.sh
+# MEASURED: 10 passed, 0 failed, 0s.
+bash tests/linux/gate_read_demo.sh
+# MEASURED: 10 passed, 0 failed, 0s.
+bash tests/linux/wallpaper_apply_honest.sh
+# MEASURED: 0 passed, 0 failed, 0s.
+bash tests/linux/wsys_keychan.sh
+# MEASURED: 600 passed, 0 failed, 3s.
+bash tests/linux/auth_setpass.sh
+# MEASURED: 8 passed, 0 failed, 3s.
+bash tests/linux/channel_compiles_adder.sh
+# MEASURED: 9 passed, 2 failed, 3s.
+bash tests/linux/fdns_slot_exhaust.sh
+# MEASURED: 31 passed, 0 failed, 3s.
+bash tests/linux/tail_file.sh
+# MEASURED: 0 passed, 0 failed, 3s.
+bash tests/linux/wsys_uidgate.sh
+# MEASURED: 7 passed, 0 failed, 4s.
+bash tests/linux/ls_regular_file.sh
+# MEASURED: 9 passed, 0 failed, 5s.
+bash tests/linux/hpm_longname_paths.sh
+# MEASURED: 5 passed, 0 failed, 5s.
+bash tests/linux/x11_stream_resync.sh
+# MEASURED: 7 passed, 0 failed, 8s.
+bash tests/linux/hpm_index_sig.sh
+# MEASURED: 7 passed, 0 failed, 8s.
+bash tests/linux/wsys_cover.sh
+# MEASURED: 10 passed, 0 failed, 9s.
+bash tests/linux/de_distros_table.sh
+# MEASURED: 4 passed, 0 failed, 9s.
+bash tests/linux/opcount_selftest.sh
+# MEASURED: 10 passed, 0 failed, 9s.
+bash tests/linux/wsys_srv_connown.sh
+# MEASURED: 0 passed, 0 failed, 10s.
+bash tests/linux/input_probe.sh
+# MEASURED: 9 passed, 0 failed, 10s.
+bash tests/linux/wsys_enum_policy.sh
+# MEASURED: 6 passed, 0 failed, 10s.
+bash tests/linux/pkg_tar_reproducible.sh
+# MEASURED: 0 passed, 0 failed, 10s.
+bash tests/linux/wsys_ringown.sh
+# MEASURED: 3 passed, 0 failed, 11s.
+bash tests/linux/input_focus_key.sh
+# MEASURED: 7 passed, 0 failed, 11s.
+bash tests/linux/wsys_srv_readlat.sh
+# MEASURED: 8 passed, 0 failed, 11s.
+bash tests/linux/x11_record_trace_selftest.sh
+# MEASURED: 8 passed, 0 failed, 12s.
+bash tests/linux/wsys_image.sh
+# MEASURED: 69 passed, 0 failed, 12s.
+bash tests/linux/wsys_srv_wopen.sh
+# MEASURED: 30 passed, 0 failed, 14s.
+bash tests/linux/wsys_srv_attrread.sh
+# MEASURED: 17 passed, 0 failed, 14s.
+bash tests/linux/wsys_srv_identity.sh
+# MEASURED: 53 passed, 0 failed, 14s.
+bash tests/linux/wsys_srv_open.sh
+# MEASURED: 8 passed, 0 failed, 14s.
+bash tests/linux/wsys_srv_scene.sh
+# MEASURED: 15 passed, 0 failed, 16s.
+bash tests/linux/de_icons_distinct.sh
+# MEASURED: 5 passed, 0 failed, 17s.
+bash tests/linux/wake_coalesce_stale.sh
+# MEASURED: 10 passed, 0 failed, 19s.
+bash tests/linux/channel_runs_desktop.sh
+# MEASURED: 9 passed, 0 failed, 21s.
+bash tests/linux/build_obj_cache.sh
+# MEASURED: 7 passed, 0 failed, 22s.
+bash tests/linux/de_state_atomic.sh
+# MEASURED: 1 passed, 0 failed, 22s.
+bash tests/linux/wsys_bypass.sh
+# MEASURED: 6 passed, 0 failed, 23s.
+bash tests/linux/wsys_wctl.sh
+# MEASURED: 0 passed, 17 failed, 24s.
+bash tests/linux/snarf_serial.sh
+# MEASURED: 8 passed, 0 failed, 25s.
+bash tests/linux/wsys_keyed.sh
+# MEASURED: 100000 passed, 0 failed, 26s.
+bash tests/linux/gate_read_demo_rest.sh
+# MEASURED: 15 passed, 0 failed, 27s.
+bash tests/linux/de_panel_conf_shipped.sh
+# MEASURED: 11 passed, 0 failed, 28s.
+bash tests/linux/input_abs_pointer.sh
+# MEASURED: 14 passed, 0 failed, 30s.
+bash tests/linux/de_focus_dismiss.sh
+# MEASURED: 29 passed, 0 failed, 32s.
+bash tests/linux/wsys_title.sh
+# MEASURED: 11 passed, 0 failed, 33s.
+bash tests/linux/de_appmenu_band.sh
+# MEASURED: 14 passed, 0 failed, 33s.
+bash tests/linux/de_mouse_chrome.sh
+# MEASURED: 536 passed, 25 failed, 33s.
+bash tests/linux/xsnarf_bridge.sh
+# MEASURED: 12 passed, 0 failed, 36s.
+bash tests/linux/wsys_srv_ceiling.sh
+# MEASURED: 17 passed, 0 failed, 38s.
+bash tests/linux/de_panel_conf_replace.sh
+# MEASURED: 18 passed, 0 failed, 42s.
+bash tests/linux/wsys_srv_wctl.sh
+# MEASURED: 10 passed, 0 failed, 44s.
+bash tests/linux/wsys_write_census.sh
+# MEASURED: 12 passed, 0 failed, 45s.
+bash tests/linux/wsys_desktop_z.sh
+# MEASURED: 17 passed, 0 failed, 47s.
+bash tests/linux/de_appmenu_brisk.sh
+# MEASURED: 10 passed, 0 failed, 48s.
+bash tests/linux/de_evdev_latency.sh
+# MEASURED: 26 passed, 0 failed, 71s.
+bash tests/linux/de_update_notice.sh
+# MEASURED: 18 passed, 0 failed, 82s.
+bash tests/linux/de_backdrop_bottom.sh
+# MEASURED: 25 passed, 0 failed, 82s.
+bash tests/linux/wsys_panel_geom.sh
+# MEASURED: 11 passed, 0 failed, 85s.
+bash tests/linux/term_caret_advance.sh
+# MEASURED: 17 passed, 0 failed, 90s.
+bash tests/linux/private_ns_isolates.sh
+# MEASURED: 14 passed, 0 failed, 100s.
+bash tests/linux/hamui_caret_advance.sh

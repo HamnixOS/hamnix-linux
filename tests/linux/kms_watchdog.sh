@@ -4,14 +4,8 @@
 # globbed only scripts/test_*.sh, so this directory was invisible to the gate
 # against unregistered gates and every file in it read as coverage without
 # being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
-# because nobody has measured its host runtime yet, and the battery is 12-way
-# sharded under a 50-minute cap -- registering an unmeasured gate is how a
-# shard goes from green to timed-out. Measure it, then move it into the
-# manifest.
+# because it is a HELPER, not a standalone gate: run with no arguments on 2026-08-17 it printed its usage line and exited 2 in 0 s. Other gates invoke it with arguments.
 #
-# Its host runtime and its pass/fail were NOT measured when this line was
-# written. If you make it cheap enough for the battery, add the manifest line
-# and delete this block.
 #
 # kms_watchdog.sh — NOTHING HOLDS DRM MASTER LONGER THAN N SECONDS.
 #

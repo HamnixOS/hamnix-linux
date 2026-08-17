@@ -1745,7 +1745,15 @@ if [ "${HAMLINUX_SOAK_CLOSE:-1}" = 1 ]; then
     if [ "${W_MAX:-0}" -le "$W_CEIL" ]; then
         ok "the window set stayed bounded: baseline $W_FIRST, peak $W_MAX over ${SECS}s of opening an application every ${HAMLINUX_SOAK_DWELL:-8}s -- windows ARE reclaimed"
     else
-        bad "THE WINDOW SET REACHED $W_MAX against a baseline of $W_FIRST while apps were opened and closed -- windows are not being reclaimed and 64 is where the per-socket ceiling is"
+        # THE CAUSE THIS USED TO NAME WAS MEASURED WRONG ON 2026-08-17 and the
+        # sentence is not kept for continuity: it said "windows are not being
+        # reclaimed and 64 is where the per-socket ceiling is". They ARE
+        # reclaimed -- when their owner dies. Across 106 censuses of the 900 s
+        # run and 35 of a 300 s one, the count minus the number of LIVE
+        # application processes is a constant 3-5 with no drift. Nothing here
+        # ever ends a launched program, so nothing is reclaimable. The section
+        # above carries the evidence; this line must not contradict it.
+        bad "THE WINDOW SET REACHED $W_MAX against a baseline of $W_FIRST while apps were opened and closed. See the COMPOSITOR OR HARNESS section above for whose fault that is -- if every row has a live owner it is this workload never ending the programs it launches, and not the window system"
     fi
 else
     info "close sweep DISABLED for this run: the window count is meant to climb, and what happens at 64 is the measurement"

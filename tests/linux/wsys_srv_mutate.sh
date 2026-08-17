@@ -4,14 +4,8 @@
 # globbed only scripts/test_*.sh, so this directory was invisible to the gate
 # against unregistered gates and every file in it read as coverage without
 # being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
-# because nobody has measured its host runtime yet, and the battery is 12-way
-# sharded under a 50-minute cap -- registering an unmeasured gate is how a
-# shard goes from green to timed-out. Measure it, then move it into the
-# manifest.
+# because it was MEASURED on 2026-08-17 and exited 0 in 261 s on a host with the channel and the image built, so it does not pass unattended here yet.
 #
-# Its host runtime and its pass/fail were NOT measured when this line was
-# written. If you make it cheap enough for the battery, add the manifest line
-# and delete this block.
 #
 # wsys_srv_mutate.sh — STAGE 2: THE MUTATIONS ARE MEDIATED, AND THE MEDIATOR
 # ANSWERS ABOUT THE CALLER RATHER THAN ABOUT ITSELF.

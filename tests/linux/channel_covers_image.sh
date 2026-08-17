@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-#
-# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
-# globbed only scripts/test_*.sh, so this directory was invisible to the gate
-# against unregistered gates and every file in it read as coverage without
-# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
-# because it builds a full image or disk
-# (`hamlinux_image.sh`/`hamlinux_disk.sh`), which is minutes of wall time and
-# gigabytes of scratch.
-#
 # tests/linux/channel_covers_image.sh — THE CHANNEL MUST CARRY WHAT THE IMAGE
 # SHIPS.
 #

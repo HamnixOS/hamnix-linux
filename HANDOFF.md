@@ -92,11 +92,30 @@ the wide one return **the same 106 readings**, so that defect did *not* corrupt
 the 94 — measured, not assumed. It is fixed regardless, and both readers now
 run side by side so a future divergence is reported.
 
-`tests/linux/soak_desktop.sh` now prints the table three ways per census (state
-line, raw `ls /dev/wsys`, `cat /dev/wsys/windows`) and correlates it against the
-census's own `ps`, and `tests/linux/soak_wincensus_negctl.sh` (**7 PASS / 0
-FAIL, 0.56 s, no QEMU**) drives that reader through all four verdicts plus both
-"not measured" cases.
+**Confirmed a second time, on a live boot, with a different renderer.** A 300 s
+soak was run with the new census (24 PASSED / 3 FAILED, all three the window
+question). Over its 35 censuses: `windows` 3 → 33, live application processes
+0 → 30, **difference min 3 max 4, no drift** — the same constant chrome offset
+the 900 s log gave. Two runs, two renderers, one answer.
+
+**And the new census's own first version measured nothing and said something.**
+`ls /dev/wsys` in this tree prints the PATH and no entries — it does not expand
+a synthetic directory — so the directory reading was 0 at every census while the
+state line climbed to 33, and the block duly printed `HARNESS`. That verdict was
+false, and it was caught only because the taskbar renderer disagreed (30 against
+0). The guest now reads `cat /dev/wsys`, a section with none of
+`snap_dir_tier`'s five fixed leaf names is **rejected as unreadable rather than
+counted as zero**, and when the directory does not answer the verdict falls back
+to the taskbar and says so. **`cat /dev/wsys` has not yet been driven in a
+guest** — if it is also empty, the validity rule now makes that say NOT A
+READING instead of inventing an answer.
+
+`tests/linux/soak_desktop.sh` prints the table three ways per census (state
+line, `cat /dev/wsys`, `cat /dev/wsys/windows`) and correlates it against the
+census's own `ps`, and `tests/linux/soak_wincensus_negctl.sh` (**12 PASS / 0
+FAIL, under a second, no QEMU**) drives that reader through every verdict, both
+"not measured" cases, and the unreadable-directory case that was red on the
+real boot.
 
 ### THE ORIGINAL NOTE, kept because its source reading was right and its conclusion was not
 
