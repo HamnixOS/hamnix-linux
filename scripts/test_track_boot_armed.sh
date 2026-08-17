@@ -43,7 +43,17 @@ HANDOFF_MARKER="handing off to interactive shell"
 # A missing prerequisite is INCONCLUSIVE (125), never 0. Exiting 0 here made
 # this gate report green on a host with no image built -- the dark-gate class
 # that already let real bugs ship.
-[ -f "$INSTALLER_IMG" ] || { echo "$TAG SKIP-RUNTIME: no $INSTALLER_IMG" >&2; exit 125; }
+#
+# STALE-IMAGE GUARD (2026-08-17): `[ -f "$INSTALLER_IMG" ] || exit 125` only
+# asked whether SOME image exists, so this gate would happily boot an image
+# older than the tracked build inputs and report on the WRONG build -- the
+# exact false-diagnosis class scripts/_installer_img.sh documents, and the
+# reason scripts/test_artifact_freshness.sh PART 2b named this gate as the
+# one boot-the-image gate with no rebuild guard. installer_img_or_verdict
+# rebuilds when the image is missing OR stale and exits 125 (never 0) when
+# it cannot produce one.
+source "$PROJ_ROOT/scripts/_installer_img.sh"
+installer_img_or_verdict "$INSTALLER_IMG" "$TAG"
 
 OVMF_FD="${OVMF_FD:-}"
 if [ -z "$OVMF_FD" ]; then
