@@ -97,6 +97,7 @@ package manifest fragments) becomes preferable.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -224,8 +225,21 @@ def _tar_gz(pkg_root: Path, out_path: Path) -> tuple[str, int]:
         out_path.unlink()
     pkg_dirname = pkg_root.name
     entries: list[Path] = sorted(pkg_root.rglob("*"))
-    with tarfile.open(out_path, mode="w:gz", format=tarfile.GNU_FORMAT,
-                      compresslevel=9) as tar:
+    # "Deterministic" was true of the TAR and false of the .tar.gz.  Every
+    # TarInfo below is normalised, so the uncompressed archive is a pure
+    # function of the inputs -- but `tarfile.open(..., "w:gz")` builds its own
+    # gzip.GzipFile with the default mtime (time.time()) and writes it into the
+    # gzip header's 4-byte MTIME field.  Two builds of identical content
+    # therefore produced two different sha256s, which is what made "the bytes I
+    # built are the bytes served" uncheckable at the tarball level.  Drive the
+    # GzipFile here with mtime=0 and filename="" (suppressing the optional
+    # FNAME field, which otherwise comes from the fileobj's name).
+    # Gate: tests/linux/pkg_tar_reproducible.sh.
+    with open(out_path, "wb") as _raw, \
+            gzip.GzipFile(filename="", mode="wb", compresslevel=9,
+                          fileobj=_raw, mtime=0) as _gzf, \
+            tarfile.open(fileobj=_gzf, mode="w",
+                         format=tarfile.GNU_FORMAT) as tar:
         ti = tarfile.TarInfo(name=pkg_dirname)
         ti.type = tarfile.DIRTYPE
         ti.mode = 0o755

@@ -2899,19 +2899,38 @@ def write_pkg(outdir, name, version, description, files, depends,
         tarpath = os.path.join(outdir, "%s-%s.tar.gz" % (name, version))
         # Deterministic: same inputs -> same bytes -> same sha256, so a
         # rebuilt channel does not churn every package's hash for nothing.
-        with tarfile.open(tarpath, "w:gz", compresslevel=9,
-                          format=tarfile.GNU_FORMAT) as tf:
-            def norm(ti):
-                ti.uid = ti.gid = 0
-                ti.uname = ti.gname = "root"
-                ti.mtime = 0
-                return ti
-            for dirpath, dirnames, filenames in os.walk(top):
-                dirnames.sort()
-                for fn in sorted(filenames):
-                    full = os.path.join(dirpath, fn)
-                    arc = os.path.relpath(full, stage)
-                    tf.add(full, arcname=arc, filter=norm)
+        #
+        # AND THE COMMENT ABOVE WAS HALF FALSE UNTIL THIS LINE. Every TarInfo
+        # is normalised (uid/gid/uname/gname/mtime), so the UNCOMPRESSED tar
+        # was already byte-identical build to build -- MEASURED: the local and
+        # the published 1.0.26 `hpm` tarballs inflate to identical bytes and
+        # their .tar.gz files still differ. `tarfile.open(..., "w:gz")` builds
+        # its own gzip.GzipFile with the DEFAULT mtime, which is time.time(),
+        # and stamps it into the 4-byte MTIME field of the gzip header. So the
+        # sha256 of a package changed on every rebuild for no reason but the
+        # clock, and "the bytes I built are the bytes served" was not checkable
+        # at the tarball level at all -- only after inflating.
+        #
+        # Driving the GzipFile explicitly with mtime=0 AND filename="" (which
+        # suppresses the optional FNAME field, otherwise taken from the
+        # fileobj's name) makes the wrapper a pure function of the tar.
+        # tests/linux/pkg_tar_reproducible.sh is the gate.
+        def norm(ti):
+            ti.uid = ti.gid = 0
+            ti.uname = ti.gname = "root"
+            ti.mtime = 0
+            return ti
+        with open(tarpath, "wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", compresslevel=9,
+                               fileobj=raw, mtime=0) as gzf:
+                with tarfile.open(fileobj=gzf, mode="w",
+                                  format=tarfile.GNU_FORMAT) as tf:
+                    for dirpath, dirnames, filenames in os.walk(top):
+                        dirnames.sort()
+                        for fn in sorted(filenames):
+                            full = os.path.join(dirpath, fn)
+                            arc = os.path.relpath(full, stage)
+                            tf.add(full, arcname=arc, filter=norm)
         with open(tarpath, "rb") as fh:
             data = fh.read()
         # hpm unpacks a package ENTIRELY IN RAM through two fixed arrays
