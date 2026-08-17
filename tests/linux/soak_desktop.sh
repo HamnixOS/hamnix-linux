@@ -106,6 +106,31 @@
 # anything. The gate passed 14/0 and the leak was found by reading the "what
 # repeated on the console" list and not recognising the strings in it.
 #
+# IT REPRODUCED WITH THE KEYBOARD OFF, which is what makes it a finding rather
+# than a story about my own instrument. The hand's typing can reach PID 1's
+# console prompt (see the TYPE switch below), so the whole thing was re-run with
+# HAMLINUX_SOAK_TYPE=0 and nothing else changed:
+#
+#                         keyboard ON      keyboard OFF
+#     first failure       16m 48s          16m 46s
+#     launch cycles            118              119
+#     windows open             108              111
+#
+# Two minutes apart in a thirty-minute run, one cycle apart in a hundred and
+# nineteen. The no-typing log has zero `hamsh$` prompts and zero
+# `command not found`.
+#
+# AND IT IS THE EXTERNAL REDIRECT PATH ONLY. The heartbeat runs two redirects to
+# /dev/null one line apart -- `ls /etc > /dev/null` and the canary. `ls` is an
+# EXTERNAL program and leaked 1,272 lines; the canary was a hamsh BUILTIN and
+# never fired once. hamsh has two implementations: `_wire_redirects`
+# (user/hamsh.ad:11244) spawns, calls sys_openchan, and binds at the child's
+# /fd/N -- and skips the bind on a fail-closed -1; `_wire_redirects_self`
+# (:11401) rebinds the CALLING task's integer fds and restores them afterwards.
+# ONLY THE FIRST BROKE. That is a sharper localisation than the canary would
+# have given if it had worked, and the canary is `/bin/echo` now so a future run
+# is pointed at the half that fails.
+#
 # THE RESOURCE IS `MAX_SLOTS 64` AT user/linux-fdns.c:101, and it is a
 # PROCESS-SHARED table (`shm->slot`), not a per-shell one. `sys_openchan` --
 # which is every `>`, every `<`, every `2>`, and every pipe -- allocates from
@@ -399,6 +424,23 @@ CENSUS="SOAKCENSUS"
 # inference from stray /etc filenames, so the detector cannot be confused by
 # anything else that prints.
 REDIR="SOAKREDIRCANARY"
+# AND IT IS RUN AS `/bin/echo`, NOT `echo`, WHICH IS THE WHOLE POINT.
+#
+# The first version of this canary was the builtin, and IT NEVER FIRED -- in a
+# run where the line one above it, `ls /etc > /dev/null`, leaked 1,272 lines of
+# /etc to the console. Two redirects to the same target in the same loop body,
+# one line apart, and only one of them broke.
+#
+# That accident localised the defect better than the canary would have if it had
+# worked. hamsh has TWO redirect implementations: `_wire_redirects`
+# (user/hamsh.ad:11244) for an EXTERNAL program, which calls sys_openchan and
+# then sys_fdbind on the spawned pid and skips the bind on a fail-closed -1; and
+# `_wire_redirects_self` (:11401) for a BUILTIN, which rebinds the calling task's
+# own integer fds and restores them afterwards. `ls` is external and `echo` is a
+# builtin. ONLY THE EXTERNAL PATH FAILED.
+#
+# So the canary has to be external too, or it is a probe pointed at the half of
+# the mechanism that works.
 
 SCREEN_W=1280
 SCREEN_H=800
@@ -500,7 +542,7 @@ CLOSEEOF
         echo '$HB'
         date
         ls /etc > /dev/null
-        echo '$REDIR' > /dev/null
+        /bin/echo '$REDIR' > /dev/null
         sleep 1
         n = n + 1
     }
@@ -521,7 +563,7 @@ CLOSEEOF
         echo '$HB'
         date
         ls /etc > /dev/null
-        echo '$REDIR' > /dev/null
+        /bin/echo '$REDIR' > /dev/null
         sleep 1
         n = n + 1
     }
