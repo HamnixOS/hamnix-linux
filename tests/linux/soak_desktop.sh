@@ -32,6 +32,39 @@
 #     frozen over a perfectly healthy kernel. That is the prime suspect for an
 #     ACTIVITY-triggered wedge and it is what this file is built to provoke.
 #
+#     AND THERE IS EXACTLY ONE SUCH DIAGNOSTIC, FOUND BY READING FOR IT RATHER
+#     THAN BY WAITING FOR IT. user/wsysd.ad:2292, inside present_rows(), which
+#     runs on EVERY presented frame:
+#
+#         fd: int32 = sys_open_write(cast[Ptr[char]]("/dev/fb"))
+#         if fd < 0:
+#             puts(2, "wsysd: cannot open /dev/fb for writing\n")
+#             return
+#
+#     THERE IS NO GUARD ON IT. Every other diagnostic in this compositor has
+#     one: report_uncovered dedups per wid into a 64-slot table that FAILS
+#     CLOSED when full, report_image_misses into a 16-slot one, and -- twenty
+#     lines below this very line -- fb_flip() carries `fbctl_tried` precisely so
+#     it does not retry a failed open every frame. present_rows() got the retry
+#     without the flag.
+#
+#     THE ARITHMETIC, AND IT IS ARITHMETIC AND NOT A MEASUREMENT: 38 bytes at
+#     60 Hz is 2.3 KB/s and SIXTY BLOCKING write(2) CALLS A SECOND into a file
+#     on the boot medium. At this gate's default throttle -- 60 write iops --
+#     that is the device's ENTIRE write budget, consumed every second, for ever,
+#     by an error message. Everything else userspace wants from the medium
+#     queues behind it, and every wsys client then pays srv_call_on's 5 s
+#     timeout per request. That is "kernel alive, userspace wedged" arrived at
+#     without a single hardware fault.
+#
+#     WHAT IS NOT ESTABLISHED, and it is the load-bearing half: whether that
+#     open can begin failing mid-session on his Lenovo. It cannot be reached
+#     from this gate -- wsysd refuses to start at all without a readable
+#     /dev/fb, so the failure needs a device that works at startup and stops
+#     later (DRM master taken, an fbdev that goes away on a mode change), which
+#     a QEMU -vga std guest does not do. SO THIS IS A MECHANISM WITH A LINE
+#     NUMBER AND NO PROOF THAT IT FIRED, and it is written down as that.
+#
 #     IT IS NOT A HYPOTHETICAL SHAPE. user/wsyswl.ad:796 records the same
 #     mechanism already happening, measured, twice: "WSYSWL_VERBOSE=1 prints a
 #     line per commit into /var/log ... and the guest went silent inside two
