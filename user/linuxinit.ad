@@ -50,7 +50,7 @@ RFPROC: int32 = 1
 init_argv: Array[4, uint64]
 init_envp: Array[8, uint64]
 errbuf:    Array[128, uint8]
-modlist:   Array[8192, uint8]
+modlist:   Array[32768, uint8]
 modpath:   Array[512, uint8]
 ptbuf:     Array[64, uint8]
 
@@ -201,13 +201,40 @@ def load_modules():
     fd: int32 = sys_open(cast[Ptr[char]]("/etc/modules"))
     if fd < 0:
         return                                    # no modules is a valid image
-    n: int64 = sys_read(fd, &modlist[0], 8192)
+    # READ UNTIL THE FILE ENDS, AND SAY SO IF IT DOES NOT FIT.
+    #
+    # This was ONE sys_read of 8192 bytes whose result was taken as the whole
+    # file. Two ways to lose modules silently, and the boot log would still
+    # print "loaded N kernel modules" either way -- a success-shaped answer
+    # over a truncated list:
+    #
+    #   * A SHORT READ. read(2) on a regular file is not obliged to return
+    #     everything in one call, and every byte after the first return was
+    #     simply not there.
+    #   * OVERFLOW. On 2026-08-17 /etc/modules was 6018 bytes of an 8192-byte
+    #     buffer -- 2174 to spare -- WITH THE WHOLE SOF AUDIO STACK ON THE
+    #     LAST LINES. One more driver family and sound would have vanished
+    #     from a freshly written medium with nothing anywhere saying why, days
+    #     after a release whose headline was that sound finally had its
+    #     modules.
+    #
+    # The buffer is now 32 KB and the read loops. If it STILL fills, that is
+    # reported as a FATAL-shaped warning naming the cap, because a truncated
+    # module list is not a thing to discover later from missing hardware.
+    total: uint64 = 0
+    while total < 32768:
+        n: int64 = sys_read(fd, &modlist[total], 32768 - total)
+        if n <= 0:
+            break
+        total = total + cast[uint64](n)
     sys_close(fd)
-    if n <= 0:
+    if total == 0:
         return
-    total: uint64 = cast[uint64](n)
+    if total >= 32768:
+        write_cstr(2, "linuxinit: WARNING: /etc/modules FILLED the 32768-byte buffer -- the list may be TRUNCATED and modules past that point were NEVER LOADED. Hardware will appear missing with no other symptom. Raise modlist in user/linuxinit.ad.\n")
     i: uint64 = 0
     loaded: int32 = 0
+    seen: int32 = 0
     while i < total:
         # Collect one line into modpath.
         j: uint64 = 0
@@ -222,6 +249,7 @@ def load_modules():
             continue
         if modpath[0] == 35:                      # '#'
             continue
+        seen = seen + 1
         if sys_init_module(cast[Ptr[char]](&modpath[0]),
                            cast[Ptr[char]]("")) == 0:
             loaded = loaded + 1
@@ -229,7 +257,17 @@ def load_modules():
             warn(&modpath[0])
     write_cstr(1, "linuxinit: loaded ")
     put_dec(cast[uint64](loaded))
-    write_cstr(1, " kernel modules\n")
+    write_cstr(1, " of ")
+    put_dec(cast[uint64](seen))
+    write_cstr(1, " kernel modules listed\n")
+    # BOTH NUMBERS, ALWAYS. "loaded 63 kernel modules" is the same sentence
+    # whether the list held 63 or 65, so it could never show a loss. Each
+    # failure already warns by name above; this is the line that says how many
+    # there were supposed to be.
+    if loaded != seen:
+        write_cstr(2, "linuxinit: WARNING: ")
+        put_dec(cast[uint64](seen - loaded))
+        write_cstr(2, " of the modules listed in /etc/modules did NOT load (each is named above). Devices they drive will be absent.\n")
 
 
 def put_dec(v: uint64):
