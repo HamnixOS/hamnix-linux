@@ -67,10 +67,18 @@ mklog() {   # mklog <out> <n> <state0> <step> <dir0> <dirstep> <wcen 0|1> [ps 0|
         # A DECOY the whole-console reader used to swallow: a tailed log line
         # with the word `windows` followed by a number that is a BYTE COUNT.
         printf 'wsysd.log: reaped 2 windows 4096 bytes\n' >>"$out"
-        if [ "$wc" = 1 ]; then
+        if [ "$wc" != 0 ]; then
             echo 'SOAKWINCEN dir' >>"$out"
-            printf 'ctl\nself\nwindows\nscreen\npool\n' >>"$out"
-            for ((j = 0; j < d0 + i * ds; j++)); do echo $((j + 2)) >>"$out"; done
+            if [ "$wc" = 1 ]; then
+                printf 'ctl\nself\nwindows\nscreen\npool\n' >>"$out"
+                for ((j = 0; j < d0 + i * ds; j++)); do echo $((j + 2)) >>"$out"; done
+            else
+                # wc=2: THE REAL FAILURE OF 2026-08-17. `ls /dev/wsys` printed
+                # the path and nothing else -- a section that exists, carries no
+                # fixed leaf name, and must be rejected as unreadable rather
+                # than counted as a table with zero rows in it.
+                echo '/dev/wsys' >>"$out"
+            fi
             echo 'SOAKWINCEN taskbar' >>"$out"
             for ((j = 0; j < d0 + i * ds; j++)); do echo "$((j + 2)) a window" >>"$out"; done
             echo 'SOAKWINCEN end' >>"$out"
@@ -118,8 +126,31 @@ mklog "$S/none.log" 12 3 8 3 8 0
 run "no census sections at all"           "$S/none.log" 'PRODUCED NOTHING'
 mklog "$S/proc.log" 12 3 8 3 8 1 1
 run "both climb, ps shows live owners"    "$S/proc.log" 'WINDOWS TRACK THE PROCESSES'
-run "...and the leak is still called"     "$S/proc.log" 'REAL LEAK'
+# and the run must STILL go red -- the cause being the workload rather than the
+# compositor is an explanation, not an excuse. The wording must also NOT accuse
+# win_reap_dead(), which is doing exactly what it is written to do.
+run "...and it is still called red"       "$S/proc.log" 'EVERY ROW HAS A LIVE OWNER'
+run "...naming the workload, not the reaper" "$S/proc.log" 'win_reap_dead() is not at fault'
 run "both climb, no ps lines"             "$S/leak.log" 'NOT MEASURED'
+run "...and then it IS an unexplained leak"  "$S/leak.log" 'REAL LEAK'
+# THE ONE THAT WAS MEASURED RED ON A REAL BOOT. A directory section that exists
+# but did not read the directory must be rejected, not counted as zero -- and
+# it must NOT be allowed to produce the HARNESS verdict out of nothing.
+mklog "$S/baddir.log" 12 3 8 3 8 2 1
+run "dir section unreadable, taskbar fine"  "$S/baddir.log" 'NOT A READING'
+run "...falls back to the taskbar, saying so" "$S/baddir.log" 'TASKBAR listing'
+if bash -c '
+    set -uo pipefail
+    out=$( WORK="'"$S"'" WCEN=SOAKWINCEN SECS=900 \
+           SOAK_APPS="hamcalcscene" HAMLINUX_SOAK_CLOSE=0 \
+           bash -c "say(){ :; }; info(){ echo \$*; }; ok(){ echo \$*; }; bad(){ echo \$*; }; . '"$S"'/block.sh" )
+    ! printf "%s" "$out" | grep -q "^HARNESS:"' ; then
+    echo "wcnc: PASS  an unreadable dir section does NOT manufacture a HARNESS verdict"
+    PASSES=$((PASSES + 1))
+else
+    echo "wcnc: FAIL  an unreadable dir section still produced HARNESS -- an empty instrument stating a finding"
+    FAILURES=$((FAILURES + 1))
+fi
 
 echo "wcnc: $PASSES passed, $FAILURES failed"
 [ "$FAILURES" -eq 0 ] || exit 1

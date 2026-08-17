@@ -480,10 +480,23 @@ CENSUS="SOAKCENSUS"
 #      column -- are those owners still running -- is answerable afterwards.
 #
 # THE TWO NEW READINGS AND WHY EACH ONE IS THERE:
-#   WCEN dir      `ls /dev/wsys` -- snap_dir_tier(), which calls win_reap_dead()
-#                 first and then prints one line per used row. Counting its
-#                 numeric lines is as close to "print shm->win[]'s used count"
-#                 as a shell in this guest can get.
+#   WCEN dir      `cat /dev/wsys` -- snap_dir_tier(), which calls
+#                 win_reap_dead() first and then prints the packed "NAME\n"
+#                 stream: five fixed leaves, then one line per used row.
+#                 Counting its numeric lines is as close to "print shm->win[]'s
+#                 used count" as a shell in this guest can get.
+#
+#                 IT WAS `ls /dev/wsys` FOR ONE RUN AND THAT MEASURED NOTHING.
+#                 Driven 2026-08-17: this tree's `ls` printed the single line
+#                 `/dev/wsys` and no entries -- it does not expand a synthetic
+#                 directory. The reading was 0 at every census while the state
+#                 line climbed to 33, and the verdict below duly announced
+#                 HARNESS: an instrument that produced NOTHING, stating a
+#                 finding. It was caught only because the taskbar reading
+#                 disagreed with it (30 against 0) and this block cross-checks
+#                 the two. Hence the validity rule in the parser: a dir section
+#                 with none of the five fixed leaf names in it is NOT a reading
+#                 of zero, it is NOT A READING, and the verdict must say so.
 #   WCEN taskbar  `cat /dev/wsys/windows` -- snap_windows(), a DIFFERENT
 #                 renderer with its OWN unconditional win_reap_dead() call,
 #                 filtered to visible+decorated rows. A second instrument on
@@ -634,7 +647,7 @@ CLOSEEOF
     echo '$CENSUS cycle'
     cat '/dev/wsys/wsysd/state'
     echo '$WCEN dir'
-    ls '/dev/wsys'
+    cat '/dev/wsys'
     echo '$WCEN taskbar'
     cat '/dev/wsys/windows'
     echo '$WCEN end'
@@ -660,7 +673,7 @@ CLOSEEOF
     echo '$CENSUS cycle'
     cat '/dev/wsys/wsysd/state'
     echo '$WCEN dir'
-    ls '/dev/wsys'
+    cat '/dev/wsys'
     echo '$WCEN taskbar'
     cat '/dev/wsys/windows'
     echo '$WCEN end'
@@ -1532,7 +1545,7 @@ info "wsysd's window count went $W_FIRST -> $W_LAST over ${SECS}s, peaking at $W
 #
 # Three numbers per census, from three different renderers over the SAME table:
 #   state    wsysd.ad's n_win, rebuilt each scan from the /dev/wsys listing
-#   dir      the numeric lines of `ls /dev/wsys` -- one per shm->win[i].used
+#   dir      the numeric lines of `cat /dev/wsys` -- one per shm->win[i].used
 #   taskbar  the lines of `cat /dev/wsys/windows` -- used AND visible AND
 #            decorated, so it is a SUBSET and is expected to be <= dir
 #
@@ -1557,26 +1570,33 @@ apps = [a for a in sys.argv[3].split() if a]
 # taskbar listings up to `<tag> end`. Parsed as a state machine over the
 # console rather than by regex over the whole file, so a listing can never be
 # credited to the wrong census.
+# snap_dir_tier() ALWAYS emits these five before any wid. A dir section that
+# does not carry them did not read the directory at all, whatever else it
+# printed -- see the `ls` failure recorded above. Validity is asserted against
+# a landmark the renderer cannot omit, not against "did we get any lines".
+FIXED = {'ctl', 'self', 'windows', 'screen', 'pool'}
 recs, cur, mode = [], None, None
 for line in log.splitlines():
     line = line.rstrip('\r')
     m = re.search(r'\bwindows (\d+)\b.*\bframes \d+', line)
     if m:
         cur = {'state': int(m.group(1)), 'dir': None, 'task': None,
-               'pids': set()}
+               'fixed': set(), 'pids': set()}
         recs.append(cur)
         mode = None
         continue
     if cur is None:
         continue
     if line.strip() == tag + ' dir':
-        mode = 'dir';  cur['dir'] = 0;  continue
+        mode = 'dir';  cur['dir'] = 0;  cur['fixed'] = set();  continue
     if line.strip() == tag + ' taskbar':
         mode = 'task'; cur['task'] = 0; continue
     if line.strip() == tag + ' end':
         mode = None; continue
     if mode == 'dir' and re.match(r'^\s*\d+\s*$', line):
         cur['dir'] += 1
+    elif mode == 'dir' and line.strip() in FIXED:
+        cur['fixed'].add(line.strip())
     elif mode == 'task' and re.match(r'^\s*\d+\s', line):
         cur['task'] += 1
     # THE THIRD HYPOTHESIS, which nobody had written down: not "the compositor
@@ -1590,19 +1610,29 @@ for line in log.splitlines():
         p = re.match(r'\s*(\d+)\b', line)
         if p:
             cur['pids'].add(int(p.group(1)))
-have = [r for r in recs if r['dir'] is not None]
+# A census counts as HAVING a window-table reading if EITHER renderer produced
+# a valid one. `dir` is valid only when the five fixed leaves appeared.
+for r in recs:
+    if r['dir'] is not None and not (FIXED <= r['fixed']):
+        r['dir'] = None
+        r['dirbad'] = True
+have = [r for r in recs if r['dir'] is not None or r['task'] is not None]
+dirbad = sum(1 for r in recs if r.get('dirbad'))
 print('RECS %d' % len(recs))
 print('HAVE %d' % len(have))
+print('DIRBAD %d' % dirbad)
 if have:
-    print('DIR %d %d %d' % (have[0]['dir'], have[-1]['dir'],
-                            max(r['dir'] for r in have)))
+    d = [r['dir'] for r in have if r['dir'] is not None]
+    if d:
+        print('DIR %d %d %d' % (d[0], d[-1], max(d)))
     t = [r['task'] for r in have if r['task'] is not None]
     if t:
         print('TASK %d %d %d' % (t[0], t[-1], max(t)))
     s = [r['state'] for r in have]
     print('STATE %d %d %d' % (s[0], s[-1], max(s)))
     # Row-for-row agreement between the two renderers of the same table.
-    dis = sum(1 for r in have if r['task'] is not None and r['task'] > r['dir'])
+    dis = sum(1 for r in have if r['task'] is not None and r['dir'] is not None
+              and r['task'] > r['dir'])
     print('TASK_EXCEEDS_DIR %d' % dis)
     # ONLY IF PS ACTUALLY NAMED ONE. A run where no census line mentions a
     # launched app yields zero pids everywhere, and printing that as
@@ -1618,20 +1648,49 @@ PY
 ) || WCEN_OUT=""
 WC_HAVE=$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^HAVE //p')
 if [ -z "${WC_HAVE:-}" ] || [ "${WC_HAVE:-0}" -eq 0 ]; then
-    bad "THE WINDOW-TABLE CENSUS PRODUCED NOTHING: not one '$WCEN dir' section reached the console in ${SECS}s. This run did NOT answer compositor-or-harness -- it failed to ask. Check that the guest rc parsed (hamsh parses a whole rc before running any of it) and that /bin/ls is staged."
+    bad "THE WINDOW-TABLE CENSUS PRODUCED NOTHING: not one usable '$WCEN' section reached the console in ${SECS}s. This run did NOT answer compositor-or-harness -- it failed to ask. Check that the guest rc parsed (hamsh parses a whole rc before running any of it) and that the census's cat/ls are staged."
 else
-    read -r D_FIRST D_LAST D_MAX <<<"$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^DIR //p')"
+    DIRLINE=$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^DIR //p')
     read -r S_FIRST2 S_LAST2 S_MAX2 <<<"$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^STATE //p')"
     TASKLINE=$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^TASK //p')
+    DIRBAD=$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^DIRBAD //p')
     info "censuses with a window-table reading: $WC_HAVE"
     info "  state   (wsysd n_win)          $S_FIRST2 -> $S_LAST2, peak $S_MAX2"
-    info "  dir     (shm->win[].used rows) $D_FIRST -> $D_LAST, peak $D_MAX"
+    if [ -n "$DIRLINE" ]; then
+        read -r D_FIRST D_LAST D_MAX <<<"$DIRLINE"
+        info "  dir     (shm->win[].used rows) $D_FIRST -> $D_LAST, peak $D_MAX"
+    else
+        info "  dir: NOT A READING in any census -- the directory section carried none of the five fixed leaf names, so whatever the guest printed there, it was not the /dev/wsys listing. NOT counted as zero."
+    fi
+    if [ -n "${DIRBAD:-}" ] && [ "${DIRBAD:-0}" -gt 0 ]; then
+        info "  ($DIRBAD directory section(s) were rejected as unreadable rather than counted)"
+    fi
     if [ -n "$TASKLINE" ]; then
         read -r T_FIRST T_LAST T_MAX <<<"$TASKLINE"
         info "  taskbar (used+visible+decor)   $T_FIRST -> $T_LAST, peak $T_MAX"
     else
         info "  taskbar: no /dev/wsys/windows lines were parsed -- that reading is MISSING, not zero"
     fi
+    # THE COMPOSITOR'S OWN COUNT is whichever renderer answered. `dir` is the
+    # better one (every used row); `taskbar` is a strict subset (used AND
+    # visible AND decorated) and is used only when `dir` did not answer, with
+    # the substitution SAID OUT LOUD rather than folded into the verdict.
+    if [ -n "$DIRLINE" ]; then
+        C_FIRST=$D_FIRST; C_MAX=$D_MAX; C_WHICH="the directory listing"
+    elif [ -n "$TASKLINE" ]; then
+        C_FIRST=$T_FIRST; C_MAX=$T_MAX; C_WHICH="the TASKBAR listing (the directory did not answer; this is a subset, so it can only UNDER-count)"
+    else
+        C_FIRST=""; C_MAX=""
+    fi
+    if [ -z "$C_FIRST" ]; then
+        bad "NEITHER RENDERER OF THE WINDOW TABLE ANSWERED in ${SECS}s. The state line climbed $S_FIRST2 -> $S_MAX2 and there is nothing to check it against. compositor-or-harness is NOT ANSWERED by this run."
+        C_FIRST=0; C_MAX=0
+        SKIP_VERDICT=1
+    else
+        SKIP_VERDICT=0
+        info "  the compositor's own count is taken from $C_WHICH"
+    fi
+    D_FIRST=$C_FIRST; D_MAX=$C_MAX
     # THE VERDICT, and it names which of the two hypotheses the numbers pick.
     D_CLIMB=$(( D_MAX - D_FIRST ))
     S_CLIMB=$(( S_MAX2 - S_FIRST2 ))
@@ -1647,18 +1706,27 @@ else
         read -r O_MIN O_MAX <<<"$OFFLINE"
         info "live application processes in the census's own ps: $P_FIRST -> $P_LAST"
         info "windows minus live app processes: min $O_MIN, max $O_MAX across $WC_HAVE censuses"
+        OWNED=0
         if [ "$S_CLIMB" -gt 8 ] && [ $(( O_MAX - O_MIN )) -le 3 ]; then
+            OWNED=1
             info "THE WINDOWS TRACK THE PROCESSES. The offset is the desktop chrome and it does not drift, so each new row has a LIVE owner -- the compositor is not leaking rows, this workload is leaking APPLICATIONS. The close sweep destroys a window record; it does not end the program, and nothing here ever does."
         fi
     else
+        OWNED=0
         info "live-process correlation: NOT MEASURED in this run (no ps lines naming a launched app were parsed)"
     fi
-    if [ "$D_CLIMB" -le 8 ] && [ "$S_CLIMB" -gt 8 ]; then
-        bad "HARNESS: the compositor's own used-row count stayed within 8 of its baseline (+$D_CLIMB) while wsysd's state line climbed +$S_CLIMB. The climbing number is not the window table."
+    if [ "${SKIP_VERDICT:-0}" = 1 ]; then
+        info "no verdict: the compositor's own table was never read, so there is nothing to weigh the state line against"
+    elif [ "$D_CLIMB" -le 8 ] && [ "$S_CLIMB" -gt 8 ]; then
+        bad "HARNESS: the compositor's own count stayed within 8 of its baseline (+$D_CLIMB) while wsysd's state line climbed +$S_CLIMB. The climbing number is not the window table."
+    elif [ "$D_CLIMB" -gt 8 ] && [ "$OWNED" = 1 ]; then
+        # NOT "win_reap_dead is broken". The rows climbed AND every one of them
+        # has a living owner, which is the reaper working exactly as written.
+        bad "THE WINDOW SET CLIMBED $D_FIRST -> $D_MAX (+$D_CLIMB) over ${SECS}s AND EVERY ROW HAS A LIVE OWNER. This is not a compositor leak and win_reap_dead() is not at fault -- kill(pid,0) says those owners are alive. The programs are never ended: a close of a wid destroys a window record, not a process. Fix the workload (or the desktop's close path) before looking at user/linux-wsys.c."
     elif [ "$D_CLIMB" -gt 8 ]; then
-        bad "REAL LEAK: the compositor's OWN table went $D_FIRST -> peak $D_MAX (+$D_CLIMB used rows) over ${SECS}s. win_reap_dead() is not reclaiming these; start at the three win_alloc call sites in user/linux-wsys.c."
+        bad "REAL LEAK: the compositor's OWN table went $D_FIRST -> peak $D_MAX (+$D_CLIMB used rows) over ${SECS}s, and the live-owner correlation did NOT explain it. win_reap_dead() may not be reclaiming these; start at the three win_alloc call sites in user/linux-wsys.c."
     else
-        ok "NEITHER: both readings stayed within 8 of baseline (dir +$D_CLIMB, state +$S_CLIMB) over ${SECS}s -- the window set is bounded and the leak this section exists to catch did not happen in this run"
+        ok "NEITHER: both readings stayed within 8 of baseline (table +$D_CLIMB, state +$S_CLIMB) over ${SECS}s -- the window set is bounded and the leak this section exists to catch did not happen in this run"
     fi
     XS=$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^TASK_EXCEEDS_DIR //p')
     if [ -n "${XS:-}" ] && [ "$XS" -gt 0 ]; then
