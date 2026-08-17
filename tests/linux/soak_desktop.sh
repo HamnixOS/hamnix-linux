@@ -361,6 +361,20 @@
 #       put a non-empty task dump on the console. An empty dump at wedge time
 #       must never be readable as "nothing was blocked" when it might mean "the
 #       key never arrived".
+#   0f  THE WORKLOAD-SURVIVED CHECKS SEE BOTH ANSWERS. The heartbeat-coverage
+#       floor and the "command not found" detector are run against planted logs
+#       -- one from a workload that died at 352 heartbeats and one from a
+#       workload that did not -- because those two checks are what stand
+#       between this file and the failure described under DID THE WORKLOAD
+#       SURVIVE THE WINDOW below, and they are integer comparisons over text,
+#       which is precisely the kind of check that reads "fine" when broken.
+#
+# AND ONE MORE INSTRUMENT, PROVED IN ITS OWN FILE rather than here:
+# tests/linux/vcpu_time.sh answers IS THE MACHINE IDLE OR IS IT SPINNING from
+# the host, off /proc, sharing no channel with the guest. name_the_wedge asks it
+# first at every trip. Its selftest measured RUNNING 800 ticks / STOPPED 0 /
+# RESUMED 799 on a 2-vCPU guest; it also records that sampling the guest's RIP,
+# which is the obvious way to do this, was tried and MEASURED USELESS.
 #
 # Usage: tests/linux/soak_desktop.sh
 # Env:   HAMLINUX_SOAK_WORK     where to build and boot
@@ -369,6 +383,16 @@
 #        HAMLINUX_SOAK_IOPS     write iops the stick is allowed (default 60)
 #        HAMLINUX_SOAK_BPS      write bytes/s the stick is allowed (default 1M)
 #        HAMLINUX_SOAK_SEED     workload seed (default 7742)
+#        HAMLINUX_SOAK_TYPE=0   DO NOT TYPE. The hand's keystrokes reach PID 1's
+#                               interactive console prompt as well as wsysd, so
+#                               a long run at the default leaves `hamsh$`
+#                               prompts and typed text in its own serial log.
+#                               THAT IS NOISE IN THE LOG AND NOT THE THING THAT
+#                               STOPS THE WORKLOAD -- see DID THE WORKLOAD
+#                               SURVIVE THE WINDOW below, where a run with this
+#                               set to 0 stops at the same heartbeat count at
+#                               the same time. Worth setting on a long run so
+#                               the log can be read; it will not save the run.
 #        HAMLINUX_SOAK_SKIPPROOF=1  skip arm 0 (ONLY for iterating on the
 #                               workload; a result from such a run is not one)
 set -uo pipefail
@@ -379,6 +403,11 @@ cd "$PROJ_ROOT"
 . tests/linux/private_ns.sh
 priv_ns_reexec "$@"
 . tests/linux/reap.sh
+# vcpu_tids / vcpu_ticks / vcpu_ticks_each -- the host-side "is it idle or is it
+# spinning" probe, proved by its own selftest (RUNNING 800 ticks / STOPPED 0 /
+# RESUMED 799 on a 2-vCPU guest). See that file for why sampling the guest's RIP
+# instead, which is the obvious idea, was measured useless.
+. tests/linux/vcpu_time.sh
 
 WORK="${HAMLINUX_SOAK_WORK:-$HOME/.hamnix-build/soak-desktop}"
 mkdir -p "$WORK"
@@ -720,6 +749,47 @@ name_the_wedge() {
     hmp "$d" 'screendump '"$d/wedge.ppm" >/dev/null
     hmp "$d" 'info blockstats' >>"$d/wedge.txt"
     hmp "$d" 'info registers' >>"$d/wedge.txt"
+
+    # IS THE MACHINE IDLE OR IS IT SPINNING? Asked FIRST, before the sysrq keys,
+    # because it takes eight seconds and it decides what to look for in the
+    # dumps that follow. tests/linux/vcpu_time.sh reads the HOST kernel's
+    # accounting of the vCPU threads, so it answers for a guest that cannot say
+    # anything at all -- and it shares no channel with the heartbeat, the census
+    # or the sysrq dump, all three of which land on ttyS0.
+    #
+    # THIS IS NOT A SUBSTITUTE FOR THE STACKS. It says WHAT KIND of wedge, and
+    # the sysrq dump says WHOSE. It is here because the first run of the 3-hour
+    # arm fired this response on a machine that turned out to be IDLE, and that
+    # was only discovered by reading an NMI backtrace by hand and recognising
+    # `pv_native_safe_halt`. A number decides it in eight seconds instead.
+    if [ -n "${VCPU_TIDS:-}" ] && [ -n "${VM_PID:-}" ]; then
+        local a b used
+        a=$(vcpu_ticks "$VM_PID" $VCPU_TIDS)
+        sleep 8
+        b=$(vcpu_ticks "$VM_PID" $VCPU_TIDS)
+        used=$(( b - a ))
+        # 800 ticks per 8 s is both vCPUs pinned; 0 is a machine executing
+        # nothing. The bands are wide on purpose -- this is a classification,
+        # not a measurement, and the per-vCPU breakdown is written out beside it
+        # because one core spinning while the other blocks averages to a number
+        # that is neither shape.
+        printf '  !!    vCPU time over the next 8s: %s ticks (800 = both cores pinned, 0 = executing nothing)\n' "$used"
+        printf 'vcpu ticks over 8s at the trip: %s\n' "$used" >>"$d/wedge.txt"
+        vcpu_ticks_each "$VM_PID" $VCPU_TIDS >>"$d/wedge.txt"
+        if [ "$used" -lt 40 ]; then
+            printf '  !!    -> the guest is executing almost NOTHING. Look in the sysrq-w dump for D-state tasks; this is a block, not a spin.\n'
+            printf 'classification: IDLE/BLOCKED\n' >>"$d/wedge.txt"
+        elif [ "$used" -gt 500 ]; then
+            printf '  !!    -> the guest is BURNING CPU. Look in the sysrq-l NMI backtraces for where; this is a spin, not a block.\n'
+            printf 'classification: SPINNING\n' >>"$d/wedge.txt"
+        else
+            printf '  !!    -> neither shape cleanly; the per-vCPU breakdown is in wedge.txt\n'
+            printf 'classification: MIXED\n' >>"$d/wedge.txt"
+        fi
+    else
+        printf '  !!    (no vCPU thread ids: the idle-or-spinning question cannot be answered for this trip)\n'
+        printf 'classification: UNAVAILABLE -- no vcpu thread ids\n' >>"$d/wedge.txt"
+    fi
     for k in w t l; do
         printf '  !!    sendkey alt-sysrq-%s\n' "$k"
         hmp "$d" "sendkey alt-sysrq-$k" >/dev/null
@@ -926,6 +996,17 @@ run_arm() {
         return 1
     fi
     info "$name: the rc completed after ~${w}s; watching for ${secs}s"
+
+    # The vCPU thread ids, from QEMU itself, for name_the_wedge's idle-or-
+    # spinning question. Taken once, here, rather than at the trip: a wedged
+    # machine is a bad moment to discover that QMP has to be spoken to first.
+    VM_PID="$vm"
+    VCPU_TIDS=$(vcpu_tids "$d/qmp.sock")
+    if [ -n "$VCPU_TIDS" ]; then
+        info "$name: vCPU threads $VCPU_TIDS -- the idle-or-spinning probe is armed"
+    else
+        info "$name: QMP named no vCPU threads; a wedge here could not be classified idle-or-spinning"
+    fi
 
     local hand=0
     if [ "$drive" = 1 ]; then
@@ -1172,6 +1253,66 @@ fi
 # -- 0e: DOES THE SYSRQ RESPONSE PRODUCE ANYTHING? An empty task dump at wedge
 # time must never be readable as "nothing was blocked" when it might mean "the
 # key never got there". Proved on a HEALTHY guest, where `t` must name tasks.
+say "ARM 0f -- proving the WORKLOAD-SURVIVED detectors, on planted logs"
+# ---------------------------------------------------------------------------
+# The two checks added at the end of this file are the ones that would have
+# caught the derailed 3-hour run described there, and both are integer
+# comparisons over a text file -- which is exactly the kind of check that quietly
+# reads "fine" when it is broken. So they are exercised in both directions here,
+# on logs planted for the purpose, before any run's numbers are believed.
+#
+# Planted rather than taken from the real derailed log on purpose: the real log
+# lives in a build directory that a fresh checkout does not have, and a proof
+# that only works on this machine is not a proof. The real numbers are in the
+# header; these fixtures reproduce their SHAPE.
+PF="$WORK/survivedproof"
+rm -rf "$PF"; mkdir -p "$PF"
+python3 - "$PF" "$HB" <<'PY'
+import sys, os
+d, hb = sys.argv[1], sys.argv[2]
+# A log from a run that died early: a few heartbeats, then a shell prompt and
+# the shape hamsh answers a stray keystroke with.
+with open(os.path.join(d, "dead.log"), "w") as f:
+    for i in range(352):
+        f.write("%s\n2026-08-17 15:0%d:%02d UTC\n" % (hb, i // 60 % 10, i % 60))
+    f.write("hamsh$ hhhamnix soak 7\n")
+    f.write("hamsh: command not found: hhhamnix\n")
+# ... and one from a run that did not.
+with open(os.path.join(d, "alive.log"), "w") as f:
+    for i in range(4000):
+        f.write("%s\n" % hb)
+PY
+DEAD_HB=$(grep -ac "$HB" "$PF/dead.log")
+ALIVE_HB=$(grep -ac "$HB" "$PF/alive.log")
+DEAD_NF=$(grep -ac 'command not found' "$PF/dead.log")
+ALIVE_NF=$(grep -ac 'command not found' "$PF/alive.log")
+PROOF_FLOOR=$(( 3600 / 2 ))
+# THE POSITIVE HALF: the detector must PASS a log that shows a live workload.
+# Without it, a red result later could be a check that is red for everything.
+if [ "$ALIVE_HB" -ge "$PROOF_FLOOR" ]; then
+    ok "the coverage check passes a planted 4000-heartbeat log against a 3600s floor of $PROOF_FLOOR"
+else
+    bad "the coverage check counted only $ALIVE_HB heartbeats in a log that has 4000 -- it cannot recognise a healthy run and would call every run dead"
+fi
+# THE NEGATIVE HALF, and it is the one the run this was written after needed:
+# 352 heartbeats where a window wants thousands must be RED.
+if [ "$DEAD_HB" -lt "$PROOF_FLOOR" ]; then
+    ok "and FAILS a log with only $DEAD_HB heartbeats -- the shape of the run that died at six minutes into three hours"
+else
+    bad "the coverage check accepted a $DEAD_HB-heartbeat log against a floor of $PROOF_FLOOR -- IT CANNOT SEE A DEAD WORKLOAD and the verdict at the end of this file is worthless"
+fi
+if [ "$DEAD_NF" -ge 1 ]; then
+    ok "the 'command not found' check finds the hand's keystroke reaching a shell prompt when it is there ($DEAD_NF line)"
+else
+    bad "the 'command not found' check found nothing in a log that contains one -- it cannot name the cause of a derailment"
+fi
+if [ "$ALIVE_NF" = 0 ]; then
+    ok "and reports 0 for a log with no prompt in it, so a 0 later is a reading and not a blind spot"
+else
+    bad "the 'command not found' check reported $ALIVE_NF for a clean log -- it matches text that is not there"
+fi
+
+# ---------------------------------------------------------------------------
 say "ARM 0e -- proving the sysrq response, on a machine that is not stuck"
 D="$WORK/sysrqproof"
 rm -rf "$D"; mkdir -p "$D/screens"
@@ -1397,6 +1538,137 @@ repeating_lines "$WORK/soak/serial.log" | sed 's/^/  ..    /'
 say "WHAT THE STICK WAS ASKED TO WRITE, WITH SOMEBODY USING IT"
 info "$S_WRB bytes, $S_WROPS write operations, $S_WRFL cache flushes over ${SECS}s"
 info "that is $(( S_WRB / (SECS > 0 ? SECS : 1) )) B/s and $(awk "BEGIN{printf \"%.2f\", $S_WRFL/($SECS)}") device commits a second"
+
+# ---------------------------------------------------------------------------
+say "DID THE WORKLOAD SURVIVE THE WINDOW? (asked FIRST, because the verdict below cannot ask it)"
+# ---------------------------------------------------------------------------
+# THE HOLE THIS CLOSES, AND IT WAS MEASURED IN THIS FILE'S OWN 3-HOUR ARM.
+#
+# `guest_max_gap` is the verdict, and rightly so -- the host's sampling falls
+# behind a fast-growing serial log and has reported a 111 s "silence" on a
+# perfectly healthy guest. But it measures THE LARGEST JUMP BETWEEN TWO
+# CONSECUTIVE GUEST TIMESTAMPS, and A RUN THAT SIMPLY STOPS HAS NO SUCH JUMP.
+# There is no second timestamp to subtract from. So a workload that dies at six
+# minutes into a three-hour soak leaves a small max-gap behind it and the gate
+# says `userspace never went quiet`.
+#
+# THAT IS NOT HYPOTHETICAL. MEASURED TWICE, ON TWO RUNS THAT DIFFER IN THE ONE
+# SETTING THAT WAS SUPPOSED TO EXPLAIN IT:
+#
+#                                  TYPE=1, 10800s      TYPE=0, 7200s
+#     heartbeats printed                  352                352
+#     the window wants                 ~10000              ~6700
+#     workload stopped at            about t=380s       about t=380s
+#     `command not found` lines             (15 prompts)        0
+#
+# THE SAME NUMBER, 352, WITH THE KEYBOARD OFF. The first run's console did show
+# the hand's `hamnix soak <n>` echoing a character at a time at PID 1's
+# interactive prompt, and that is a real hazard this file's drive_desktop
+# already documents -- but it is NOT what stops the workload, because the run
+# with no typing at all stops at the same heartbeat count at the same time. AN
+# EARLIER VERSION OF THIS COMMENT SAID THE TYPING WAS THE CAUSE; the second run
+# refuted it, and the wrong sentence is recorded here rather than quietly
+# deleted.
+#
+# WHAT THE STOP ACTUALLY LOOKS LIKE, off the second run, all measured:
+#
+#     sysrq-w (Show Blocked State)  NAMED NO TASKS AT ALL -- nothing is in
+#                                   uninterruptible sleep, so it is not an I/O
+#                                   block
+#     sysrq-t                       PID 1 hamsh state:S inside do_sys_poll
+#     the screen                     FROZEN: one identical frame hash for every
+#                                   sample from the stop to the end of the run,
+#                                   over ten minutes
+#     vCPU time (host-side)          308 ticks/8s at the trip, and 9 ticks/8s
+#                                   twelve minutes later -- the machine winds
+#                                   down to executing almost nothing
+#     the last thing the guest did   stopped PART WAY THROUGH a census, after
+#                                   `tail -6 /var/log/wsysd.log` and before
+#                                   the block could close
+#     what was running               40-odd live app processes and several
+#                                   ZOMBIE hamsh, windows=42 -- the close sweep
+#                                   frees WINDOWS and not PROCESSES
+#
+# KERNEL ALIVE, USERSPACE WEDGED, AT ABOUT SIX MINUTES, IN A VM, THREE TIMES --
+# 10800 s / TYPE=1, 7200 s / TYPE=0 and 900 s / TYPE=0 all stopped at EXACTLY
+# 352 heartbeats. That is the shape of the owner's report.
+#
+# AND IT IS COUNTED IN LAUNCHES, NOT IN SECONDS. Halving the dwell halves the
+# time each application is left open without changing how many get opened per
+# cycle, so it separates a clock from a counter. Run:
+#
+#                       app launches at the stop    heartbeats at the stop
+#     DWELL=8 (default)          44                        352
+#     DWELL=4                    48                        196
+#
+# The launch count moved by 9 percent and the heartbeat count by 44. WHATEVER
+# RUNS OUT IS COUNTED IN THINGS OPENED, NOT IN TIME PASSED. The window count at
+# the stop was 42 and 44 in the two configurations.
+#
+# WHAT IS NOT ESTABLISHED, and must not be claimed: that this is the same defect
+# the owner hit on his Lenovo, or WHICH table runs out. 44 is not 64, and the
+# 64-slot fdns table pinned by live processes (user/linux-fdns.c:101) that this
+# file's header already argues about would need ~20 other holders to be full at
+# 44 applications -- which is arithmetic that works, and arithmetic that works
+# is not a measurement. IT HAS NOT BEEN SHOWN TO BE THE ONE.
+#
+# THE NEXT EXPERIMENT, written down so it is not re-derived: vary the number of
+# APPLICATIONS per cycle rather than the dwell, and vary whether they are killed
+# rather than left, and see whether the stop tracks live processes, windows, or
+# cumulative launches. Those three are still confounded here.
+#
+# WHAT THE VERDICT SAID ABOUT IT, AND THIS IS THE PART THAT MATTERS. On that
+# run, before the coverage check existed, this file printed:
+#
+#     PASS  userspace never went quiet for as long as 20s across 7200s of being
+#           used
+#     FAIL  THE SCREEN WAS FROZEN FOR 700s
+#
+# THE NAMED VERDICT -- the guest-clock gap, the number this file calls THE
+# VERDICT NUMBER -- SAID USERSPACE NEVER WENT QUIET, about a machine whose
+# userspace stopped at t=380 s of a 7200 s window. It is not that the number was
+# miscomputed; it is that a run which STOPS has no gap between two timestamps to
+# measure, so the metric is structurally incapable of seeing this failure and
+# answers success-shaped.
+#
+# IT IS FAIR TO SAY THE GATE WAS NOT BLIND: the screen probe caught it
+# independently and the run came out red. But it came out red for the picture
+# and not for the workload, and nothing said the workload had died -- so the
+# obvious reading of that output is "a repaint stall", which is a much smaller
+# claim than the truth. Nothing asserted on the heartbeat count at all; `S_HB`
+# was printed and never checked. THE COVERAGE CHECK BELOW MAKES THE DEATH OF THE
+# WORKLOAD ITS OWN RED LINE instead of leaving it to be inferred from a second
+# probe that happens to agree.
+#
+# A GAP MUST NEVER ANSWER SOMETHING SUCCESS-SHAPED. So the coverage is asserted
+# before the verdict is read, and if the workload did not survive, the wedge
+# verdict below is worth nothing whatever it says.
+#
+# THE FLOOR IS ARITHMETIC AND DELIBERATELY SLACK. The guest loop prints one
+# heartbeat per `sleep 1` plus a census per cycle, which measured 0.93/s on the
+# run above. Half of one per second over the window is a floor no live workload
+# can be under and a dead one cannot reach.
+HB_FLOOR=$(( SECS / 2 ))
+if [ "${S_HB:-0}" -ge "$HB_FLOOR" ]; then
+    ok "the guest printed $S_HB heartbeats over ${SECS}s (floor $HB_FLOOR) -- the workload ran for the whole window, so the verdict below is about the window"
+else
+    bad "THE WORKLOAD DIED INSIDE THE WINDOW: only ${S_HB:-0} heartbeats in ${SECS}s against a floor of $HB_FLOOR. Whatever the gap verdict below says, this gate measured a machine that stopped running its own workload. Read $WORK/soak/wedge.txt for the idle-or-spinning classification and $WORK/soak/serial.log for the sysrq dumps taken at the trip"
+fi
+# AND THE CAUSE, NAMED SEPARATELY, because "the workload died" and "the hand
+# typed into PID 1" are different failures and the fix differs. hamsh answers an
+# unknown word with `command not found`, so one of those lines is a keystroke
+# that reached a shell prompt instead of a window.
+# NO `|| printf 0`. `grep -c` PRINTS 0 AND EXITS 1 when it matches nothing, so
+# the fallback fires on the success path too and the variable becomes the two
+# characters "0\n0" -- which then printed as `FAIL  0` on its own line with the
+# real message orphaned below it. Measured in this file's own output.
+NOTFOUND=$(grep -ac 'command not found' "$WORK/soak/serial.log" 2>/dev/null)
+NOTFOUND="${NOTFOUND:-0}"
+if [ "${NOTFOUND:-0}" = 0 ]; then
+    ok "and no 'command not found' on the console, so nothing the hand typed reached PID 1's shell"
+else
+    bad "$NOTFOUND 'command not found' lines on the console: THE HAND'S TYPING REACHED PID 1'S INTERACTIVE PROMPT. That is noise in this run's own log, and on the evidence so far it is NOT what stops the workload -- a run with HAMLINUX_SOAK_TYPE=0 stopped identically. Re-run with it set to 0 so the log can be read"
+fi
 
 # ---------------------------------------------------------------------------
 say "DID ANYTHING WEDGE?"

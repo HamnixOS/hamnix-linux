@@ -693,9 +693,13 @@ else
 fi
 # And the wizard's own spawn/result strings, which are what it prints when it
 # gets that far (haminstallui.ad:1084 spawn, :1126 'install complete', :1128 FAIL).
+# NO `|| printf 0` ON A `grep -c`. It PRINTS 0 AND EXITS 1 when nothing
+# matches, so the fallback fires on the success path as well and the variable
+# becomes the two characters "0\n0" -- which is exactly how this line printed
+# in the first runs of this gate.
 for s in 'install complete' 'FAIL' 'spawn'; do
-    n=$(grep -ac "$s" "$D/serial.log" 2>/dev/null || printf 0)
-    info "console occurrences of '$s': $n"
+    n=$(grep -ac "$s" "$D/serial.log" 2>/dev/null)
+    info "console occurrences of '$s': ${n:-0}"
 done
 
 # ---------------------------------------------------------------------------
