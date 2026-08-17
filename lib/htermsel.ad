@@ -27,17 +27,32 @@
 # anchor+caret cells over a synthetic grid and assert the extracted text —
 # deterministic, font-independent, no compositor, no flaky mouse injection.
 
+# THE ADVANCES COME FROM THE ONE PLACE THAT MEASURES THEM. The header above
+# used to justify NOT importing lib.hamtextbox: it drags the proportional TTF
+# engine into "the deliberately-minimal terminal binary". That trade was made
+# on a premise the pixels refute -- the terminal's rows are NOT monospace on
+# screen, they are drawn with the same proportional face every other DE surface
+# uses, so a terminal that will not measure them cannot place anything on them.
+# The clipboard FILE protocol below is still reused directly rather than through
+# htb_clip_put, so nothing else changes.
+from lib.hamtextbox import htb_cell_at, htb_cell_x
+
 extern def sys_open(path: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_close(fd: int32) -> int32
 
-# --- terminal cell geometry (must match user/hamtermscene.ad's grid model) ---
-# The scene draws each row as `glyphs 6 <y> "..."`; glyph cells advance 8px from
-# x=6, and rows are pitched 20px from y=6 (TERM_GLYPH_W / TERM_LINE_H there).
+# --- terminal cell geometry --------------------------------------------------
+# The scene draws each row as `glyphs 6 <y> "..."` and rows are pitched 20px
+# from y=6. Those two ARE the scene, so they are constants here.
+#
+# THERE IS NO THIRD CONSTANT. This file used to carry HTSEL_CELL_W = 8 -- "must
+# match user/hamtermscene.ad's grid model" -- a second copy of TERM_GLYPH_W
+# standing in for a glyph advance the compositor computes per character. It is
+# gone: the horizontal mapping now measures the row, through lib/hamtextbox.
+# See htsel_pix_to_cell for what that constant cost in pixels.
 HTSEL_X0:     int64 = 6
-HTSEL_CELL_W: int64 = 8
 HTSEL_Y0:     int64 = 6
 HTSEL_LINE_H: int64 = 20
 
@@ -206,26 +221,85 @@ def htsel_extract(rows: Ptr[uint8], row_len: Ptr[uint64], stride: uint64,
 
 
 # Map a window-content-local pixel (lx,ly) to a grid cell (row,col), clamped to
-# the active grid. The terminal's column model is 8px monospace cells from x=6;
-# on-device `glyphs` render via the proportional TTF face, so the highlight
-# tracks the terminal's OWN cell model (which is what term_col / the caret use)
-# rather than exact glyph advances — round-1 monospace-grid selection.
-def htsel_pix_to_cell(lx: int64, ly: int64, rows_n: int64, cols_n: int64,
+# the active grid.
+#
+# WHAT THIS USED TO DO, AND WHY IT WAS WRONG (the owner's report, 2026-08-16:
+# "the marker is too far to the right compared to where you're actually
+# entering text ... like a mismatch in the font sizes"):
+#
+#     col = (lx - 6) / 8
+#
+# with a comment claiming the 8px cell model is "what term_col / the caret
+# use". IT IS NOT, and the pixels say so. user/hamtermscene.ad draws the '_'
+# text cursor as a BYTE INSIDE the row's own `glyphs` run, so the caret rides
+# the compositor's PROPORTIONAL DejaVu Sans advances -- while every column
+# this function produced, and every highlight band positioned from one, rode a
+# hardcoded 8. Measured offscreen on a real terminal window at 1920x1200: the
+# row "hamsh$ the quick brown fox" is drawn from x=156 and its last glyph ends
+# at x=332, 6.81 px per character against the assumed 8 -- 1.19 px of drift per
+# character, 31 px by the end of a 26-character line. A drag released INSIDE
+# the final 'x' copied "hamsh$ the quick brown": FOUR CHARACTERS SHORT, and the
+# band drawn for those columns sat 25 px right of the glyphs it claimed.
+#
+# THE ROW IS THE ONLY THING THAT KNOWS. A proportional row has no cell width --
+# cell k's left edge is the SUM of the advances of the k glyphs before it -- so
+# the mapping needs the row's BYTES, which is why the grid arrives by pointer
+# here exactly as it already does for htsel_extract. The advances come from
+# lib/hamtextbox, the module that exists to be the ONE place this tree measures
+# DE text, so there is no second copy of the metric to drift: htb_cell_at is
+# the floor-inverse of htb_caret_x over the identical walk.
+#
+# The ROW pitch stays arithmetic on purpose: the terminal really does emit
+# `glyphs 6 <6 + r*20>`, so 20px rows are a fact about the scene, not an
+# assumption about a font.
+def htsel_pix_to_cell(lx: int64, ly: int64, grid: Ptr[uint8],
+                      lens: Ptr[uint64], stride: int64,
+                      rows_n: int64, cols_n: int64,
                       out_row: Ptr[int64], out_col: Ptr[int64]):
-    cx: int64 = lx - HTSEL_X0
-    if cx < 0:
-        cx = 0
-    col: int64 = cx / HTSEL_CELL_W
-    if cols_n > 0 and col > cols_n - 1:
-        col = cols_n - 1
     cy: int64 = ly - HTSEL_Y0
     if cy < 0:
         cy = 0
     row: int64 = cy / HTSEL_LINE_H
     if rows_n > 0 and row > rows_n - 1:
         row = rows_n - 1
+    if row < 0:
+        row = 0
+    cap: uint64 = 0
+    if cols_n > 0:
+        cap = cast[uint64](cols_n)
+    rlen: uint64 = lens[cast[uint64](row)]
+    if rlen > cap:
+        rlen = cap
+    col: int64 = cast[int64](htb_cell_at(cast[int32](HTSEL_X0),
+                                         &grid[cast[uint64](row * stride)],
+                                         rlen, cap, cast[int32](lx)))
+    if cols_n > 0 and col > cols_n - 1:
+        col = cols_n - 1
+    if col < 0:
+        col = 0
     out_row[0] = row
     out_col[0] = col
+
+
+# Pixel X of the LEFT edge of grid cell `col` on row `row` -- the inverse of
+# htsel_pix_to_cell, and the only thing that may position a selection band.
+# Same source of truth (lib/hamtextbox), so the band and the hit test cannot
+# disagree the way the band and the caret did.
+def htsel_cell_x(grid: Ptr[uint8], lens: Ptr[uint64], stride: int64,
+                 cols_n: int64, row: int64, col: int64) -> int64:
+    if row < 0:
+        row = 0
+    cap: uint64 = 0
+    if cols_n > 0:
+        cap = cast[uint64](cols_n)
+    rlen: uint64 = lens[cast[uint64](row)]
+    if rlen > cap:
+        rlen = cap
+    c: uint64 = 0
+    if col > 0:
+        c = cast[uint64](col)
+    return cast[int64](htb_cell_x(cast[int32](HTSEL_X0),
+                                  &grid[cast[uint64](row * stride)], rlen, c))
 
 
 # --- clipboard / primary selection (file-backed, #315 protocol) --------------
@@ -336,6 +410,7 @@ def htsel_mid_edge(btn: int64, prev: int64) -> int32:
 
 
 def htsel_pointer_step(x: int64, y: int64, btn: int64, prev: int64,
+                       grid: Ptr[uint8], lens: Ptr[uint64], stride: int64,
                        rows_n: int64, cols_n: int64,
                        live_tail: int32) -> int32:
     # Advance the selection state machine for ONE pointer event and report what
@@ -356,7 +431,7 @@ def htsel_pointer_step(x: int64, y: int64, btn: int64, prev: int64,
     if live_tail != 0:
         row: int64 = 0
         col: int64 = 0
-        htsel_pix_to_cell(x, y, rows_n, cols_n, &row, &col)
+        htsel_pix_to_cell(x, y, grid, lens, stride, rows_n, cols_n, &row, &col)
         if left_now != 0 and left_prev == 0:
             htsel_begin(row, col)              # press: drop the anchor
         elif left_now != 0 and left_prev != 0:

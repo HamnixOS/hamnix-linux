@@ -36,7 +36,7 @@ from lib.htermsel import htsel_reset, htsel_active, htsel_extract, \
     htsel_pix_to_cell, htsel_evt_parse_m, htsel_mid_edge, htsel_pointer_step, \
     htsel_anchor_row, htsel_anchor_col, htsel_caret_row, htsel_caret_col, \
     HTSEL_ACT_COPY, HTSEL_ACT_PASTE, \
-    HTSEL_X0, HTSEL_CELL_W, HTSEL_Y0, HTSEL_LINE_H
+    htsel_cell_x, HTSEL_X0, HTSEL_Y0, HTSEL_LINE_H
 from lib.hamtextbox import htb_mid_edge
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
@@ -164,6 +164,7 @@ def _feed(x: int64, y: int64, btn: int64, live_tail: int32) -> int32:
     if htsel_evt_parse_m(&wire[0], 0, n, &px, &py, &pb, &pdz) == 0:
         return -1
     act: int32 = htsel_pointer_step(px, py, pb, prev_btn,
+                                    &grid[0], &grid_len[0], cast[int64](STRIDE),
                                     cast[int64](ROWS), cast[int64](COLS),
                                     live_tail)
     prev_btn = pb
@@ -172,8 +173,23 @@ def _feed(x: int64, y: int64, btn: int64, live_tail: int32) -> int32:
 
 # Window-content-local pixel at the centre of grid cell (row,col) — the same
 # geometry lib/htermsel.ad maps back.
+#
+# THIS USED TO BE `HTSEL_X0 + col*8 + 4`, which is how a round-trip test can be
+# green while the mapping is wrong: it was the same 8px constant on both sides
+# of the trip, so it proved only that division undoes multiplication. A
+# proportional row has no cell width, so the centre of cell c is midway between
+# the row's OWN cell edges, and the trip now goes through the real advances in
+# both directions.
+def _cx_on(row: int64, col: int64) -> int64:
+    lo: int64 = htsel_cell_x(&grid[0], &grid_len[0], cast[int64](STRIDE),
+                             cast[int64](COLS), row, col)
+    hi: int64 = htsel_cell_x(&grid[0], &grid_len[0], cast[int64](STRIDE),
+                             cast[int64](COLS), row, col + 1)
+    return lo + (hi - lo) / 2
+
+
 def _cx(col: int64) -> int64:
-    return HTSEL_X0 + col * HTSEL_CELL_W + HTSEL_CELL_W / 2
+    return _cx_on(0, col)
 
 
 def _cy(row: int64) -> int64:
@@ -207,19 +223,19 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     htsel_reset()
     prev_btn = 0
     devsnarf_primary_write(0, cast[Ptr[uint8]](""), 0)
-    a0: int32 = _feed(_cx(0), _cy(1), 0, 1)     # move in, no button
-    a1: int32 = _feed(_cx(0), _cy(1), 1, 1)     # PRESS  -> anchor (1,0)
+    a0: int32 = _feed(_cx_on(1, 0), _cy(1), 0, 1)     # move in, no button
+    a1: int32 = _feed(_cx_on(1, 0), _cy(1), 1, 1)     # PRESS  -> anchor (1,0)
     _check(cast[int32](a1 == 0), cast[Ptr[uint8]]("press_publishes_nothing"))
     _check(cast[int32](htsel_anchor_row() == 1 and htsel_anchor_col() == 0),
            cast[Ptr[uint8]]("press_anchor_is_the_clicked_cell"))
-    a2: int32 = _feed(_cx(10), _cy(1), 1, 1)    # DRAG   -> extend
+    a2: int32 = _feed(_cx_on(1, 10), _cy(1), 1, 1)    # DRAG   -> extend
     _check(cast[int32](htsel_active() != 0),
            cast[Ptr[uint8]]("drag_activates_span"))
     _check(cast[int32](htsel_caret_col() == 10),
            cast[Ptr[uint8]]("drag_caret_tracks_pixels"))
     # The RELEASE carries the final pointer position; the span must reach it
     # (a terminal that ignored it would copy a truncated line).
-    a3: int32 = _feed(_cx(30), _cy(1), 0, 1)    # RELEASE -> extend + copy
+    a3: int32 = _feed(_cx_on(1, 30), _cy(1), 0, 1)    # RELEASE -> extend + copy
     _check(cast[int32]((a3 & HTSEL_ACT_COPY) != 0),
            cast[Ptr[uint8]]("release_over_span_asks_for_a_PRIMARY_copy"))
 
@@ -243,21 +259,21 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # X11 semantics: only a real span replaces the primary selection.
     htsel_reset()
     prev_btn = 0
-    b1: int32 = _feed(_cx(3), _cy(0), 1, 1)
-    b2: int32 = _feed(_cx(3), _cy(0), 0, 1)
+    b1: int32 = _feed(_cx_on(0, 3), _cy(0), 1, 1)
+    b2: int32 = _feed(_cx_on(0, 3), _cy(0), 0, 1)
     _check(cast[int32]((b2 & HTSEL_ACT_COPY) == 0),
            cast[Ptr[uint8]]("bare_click_does_not_publish"))
 
     # --- 4. middle click pastes, once per press ------------------------
     htsel_reset()
     prev_btn = 0
-    m1: int32 = _feed(_cx(2), _cy(2), 4, 1)     # middle DOWN
+    m1: int32 = _feed(_cx_on(2, 2), _cy(2), 4, 1)     # middle DOWN
     _check(cast[int32]((m1 & HTSEL_ACT_PASTE) != 0),
            cast[Ptr[uint8]]("middle_down_asks_for_a_paste"))
-    m2: int32 = _feed(_cx(2), _cy(2), 4, 1)     # still HELD
+    m2: int32 = _feed(_cx_on(2, 2), _cy(2), 4, 1)     # still HELD
     _check(cast[int32]((m2 & HTSEL_ACT_PASTE) == 0),
            cast[Ptr[uint8]]("held_middle_does_not_repeat"))
-    m3: int32 = _feed(_cx(2), _cy(2), 0, 1)     # UP
+    m3: int32 = _feed(_cx_on(2, 2), _cy(2), 0, 1)     # UP
     _check(cast[int32]((m3 & HTSEL_ACT_PASTE) == 0),
            cast[Ptr[uint8]]("middle_up_does_not_paste"))
     # …and what a paste would read is what the drag published.
@@ -274,15 +290,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # Selection is grid-row indexed -> only at the live tail…
     htsel_reset()
     prev_btn = 0
-    v1: int32 = _feed(_cx(0), _cy(1), 1, 0)     # press, scrollback wheeled up
-    v2: int32 = _feed(_cx(9), _cy(1), 1, 0)
+    v1: int32 = _feed(_cx_on(1, 0), _cy(1), 1, 0)     # press, scrollback wheeled up
+    v2: int32 = _feed(_cx_on(1, 9), _cy(1), 1, 0)
     _check(cast[int32](htsel_active() == 0),
            cast[Ptr[uint8]]("scrolled_back_view_starts_no_selection"))
     # …but the PASTE must still fire (the edit line lives at the tail). This is
     # the regression that made middle-click silently do nothing whenever the
     # user had scrolled.
     prev_btn = 0
-    v3: int32 = _feed(_cx(2), _cy(2), 4, 0)
+    v3: int32 = _feed(_cx_on(2, 2), _cy(2), 4, 0)
     _check(cast[int32]((v3 & HTSEL_ACT_PASTE) != 0),
            cast[Ptr[uint8]]("paste_works_while_scrolled_back"))
 
@@ -306,7 +322,8 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         while cc < cast[int64](COLS):
             gr: int64 = 0
             gc: int64 = 0
-            htsel_pix_to_cell(_cx(cc), _cy(rr), cast[int64](ROWS),
+            htsel_pix_to_cell(_cx_on(rr, cc), _cy(rr), &grid[0], &grid_len[0],
+                              cast[int64](STRIDE), cast[int64](ROWS),
                               cast[int64](COLS), &gr, &gc)
             if gr != rr or gc != cc:
                 rt = 0

@@ -102,6 +102,60 @@ def htb_hit_test(x0: int32, buf: Ptr[uint8], n: uint64, click_x: int32) -> uint6
     return n
 
 
+# ---- cell-under-the-pixel (the GRID inverse of htb_caret_x) ---------------
+# htb_hit_test answers "which GAP between glyphs is this click nearest", which
+# is what a text CARET wants. A character GRID -- the DE terminal's rows -- asks
+# a different question: "which GLYPH is this pixel INSIDE". Selecting cell k
+# must mean the pixel landed anywhere within glyph k's own advance, not within
+# half an advance of its left edge, or a drag one pixel past a glyph's midpoint
+# already claims the next cell.
+#
+# Same walk, same advances, FLOOR instead of nearest. Cells at or past `n` (the
+# row's live byte count) are the blank tail the terminal pads with spaces, so
+# they advance by the space glyph -- measured, not assumed, exactly like the
+# rest of the row.
+#
+# Returns 0..cap-1 (or 0..n_cells-1 when the pixel is past the drawn text).
+def htb_cell_at(x0: int32, buf: Ptr[uint8], n: uint64, cap: uint64,
+                px: int32) -> uint64:
+    if px <= x0:
+        return 0
+    ready: int32 = htb_font_ready()
+    spadv: int32 = HTB_FALLBACK_W
+    if ready != 0:
+        spadv = font_ttf_adv_px(FACE_TT_SANS, 32, HTB_UI_PX)
+    if spadv < 1:
+        spadv = 1
+    x: int32 = x0
+    i: uint64 = 0
+    while i < cap:
+        adv: int32 = spadv
+        if i < n and ready != 0:
+            adv = font_ttf_adv_px(FACE_TT_SANS, cast[uint64](buf[i]), HTB_UI_PX)
+        elif i < n:
+            adv = HTB_FALLBACK_W
+        if px < x + adv:
+            return i
+        x = x + adv
+        i = i + 1
+    if cap == 0:
+        return 0
+    return cap - 1
+
+
+# Pixel X of the LEFT edge of grid cell `cidx` on a row whose live bytes are
+# buf[0..n) drawn from `x0`, with cells past `n` advancing by the space glyph.
+# The exact inverse of htb_cell_at, and the ONLY thing that may position a
+# highlight band over a grid row.
+def htb_cell_x(x0: int32, buf: Ptr[uint8], n: uint64, cidx: uint64) -> int32:
+    if cidx <= n:
+        return htb_caret_x(x0, buf, cidx)
+    spadv: int32 = HTB_FALLBACK_W
+    if htb_font_ready() != 0:
+        spadv = font_ttf_adv_px(FACE_TT_SANS, 32, HTB_UI_PX)
+    return htb_caret_x(x0, buf, n) + cast[int32](cidx - n) * spadv
+
+
 # ---- managed single-line boxes -------------------------------------------
 # Instance state as handle-indexed parallel arrays (this codebase has no
 # structs). A handle is 0..HTB_MAX-1; htb_new() hands them out in order.
