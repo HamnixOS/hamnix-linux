@@ -1199,11 +1199,37 @@ grep -aq 'rc.boot: up' "$L3" \
 grep -aq 'Initramfs unpacking failed' "$L3" \
     && bad "boot 3: THE KERNEL COULD NOT UNPACK THE WHOLE INITRAMFS -- the rewritten boot image is damaged, and this boot only LOOKED fine" \
     || ok "boot 3: no 'Initramfs unpacking failed' -- the rewritten boot image unpacked completely"
-B2_MODS="$(grep -ao 'loaded [0-9]* kernel modules' "$L2" | head -1)"
-B3_MODS="$(grep -ao 'loaded [0-9]* kernel modules' "$L3" | head -1)"
-[ -n "$B3_MODS" ] && [ "$B2_MODS" = "$B3_MODS" ] \
-    && ok "boot 3: the same boot module count as before the refresh ($B3_MODS) -- nothing was lost from the boot set" \
-    || bad "boot 3: the boot module count changed across the refresh: '$B2_MODS' -> '$B3_MODS'"
+# THE PATTERN HAD TO GROW A DENOMINATOR, and until it did this check reported
+# a CHANGE IT HAD NOT MEASURED.
+#
+# linuxinit's line used to be `loaded N kernel modules`. 0fd022d4 put the
+# denominator in it so a shortfall is visible, and it now reads
+#
+#     linuxinit: loaded 87 of 87 kernel modules listed
+#
+# against which `loaded [0-9]* kernel modules` cannot match at all -- "of 87 "
+# sits between the number and the words. So BOTH captures came back empty on a
+# perfectly healthy pair of boots, and the old `||` arm printed
+#
+#     FAIL boot 3: the boot module count changed across the refresh: '' -> ''
+#
+# which names a CHANGE between two values that are identical, and blames the
+# boot set for what was actually a grep that stopped matching. Measured on the
+# 1.0.27 candidate, both cuts, boot 2 and boot 3.
+#
+# Both spellings are accepted, because a machine installed from an older
+# medium still prints the old one, and the empty case is now told apart from
+# the changed case and says which side it could not read.
+_modline() { grep -aoE 'loaded [0-9]+( of [0-9]+)? kernel modules( listed)?' "$1" | head -1; }
+B2_MODS="$(_modline "$L2")"
+B3_MODS="$(_modline "$L3")"
+if [ -z "$B2_MODS" ] || [ -z "$B3_MODS" ]; then
+    bad "boot 3: the boot module count was NOT MEASURED -- no 'loaded N [of M] kernel modules' line in $([ -z "$B2_MODS" ] && printf 'boot 2 '; [ -z "$B3_MODS" ] && printf 'boot 3 ')(boot 2: '$B2_MODS', boot 3: '$B3_MODS'). This says nothing about whether the boot set changed; fix the instrument before reading it either way."
+elif [ "$B2_MODS" = "$B3_MODS" ]; then
+    ok "boot 3: the same boot module count as before the refresh ($B3_MODS) -- nothing was lost from the boot set"
+else
+    bad "boot 3: the boot module count changed across the refresh: '$B2_MODS' -> '$B3_MODS'"
+fi
 
 # THE COMPARISON THAT MATTERS: the same package list, after a power cycle. A
 # version that only ever existed in boot 2's RAM cannot appear here.
