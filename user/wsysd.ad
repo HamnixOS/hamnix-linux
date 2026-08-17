@@ -480,6 +480,14 @@ probefd:  Array[1, int32]
 fb_fd: int32 = -1
 fbctl_fd: int32 = -1                   # persistent write fd to /dev/fbctl
 fbctl_tried: int32 = 0                 # ... opened once, failure is permanent
+# Same treatment for the OTHER framebuffer open on the present path. A /dev/fb
+# that cannot be opened for writing cannot be opened on the next frame either,
+# and present_rows() runs per frame: at 60 Hz the unguarded diagnostic below
+# was 60 blocking writes a second to the console -- the whole I/O budget of a
+# slow stick spent saying the same sentence. The neighbouring
+# report_uncovered/report_image_misses already dedup for exactly this reason;
+# fb_flip() twenty lines below carries fbctl_tried for exactly this reason.
+fb_open_failed: int32 = 0              # ... said once, not once per frame
 focus_wid: int32 = 0
 last_sig: uint64 = 0                   # change signature of the last frame
 last_csig: uint64 = 0                  # ... of the cursor position alone
@@ -2289,8 +2297,12 @@ def present_rows(y0: int32, y1: int32):
         return
     fd: int32 = sys_open_write(cast[Ptr[char]]("/dev/fb"))
     if fd < 0:
-        puts(2, "wsysd: cannot open /dev/fb for writing\n")
+        if fb_open_failed == 0:
+            fb_open_failed = 1
+            puts(2, "wsysd: cannot open /dev/fb for writing (said once; this is a per-frame path)\n")
         return
+    # Re-arm: if the device comes back, a LATER failure is news again.
+    fb_open_failed = 0
     rowbytes: uint64 = cast[uint64](scr_w) * 4
     off: uint64 = cast[uint64](a) * rowbytes
     total: uint64 = cast[uint64](b) * rowbytes

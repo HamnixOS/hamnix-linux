@@ -11241,9 +11241,65 @@ def _redir_kind(fslot: int32, file_kind: int32) -> int32:
     return file_kind
 
 
-def _wire_redirects(cmdnode: int32, pid: int32):
+# Linux's ENOSPC, as it comes back through sys_openchan's -errno convention.
+ERRNO_ENOSPC: int32 = 28
+
+
+def _redir_cannot(target: Ptr[uint8], which: Ptr[uint8], rc: int32):
+    # THE SILENCE THIS REPLACES, and it is the sharpest failure shape this
+    # port has: a redirect that cannot be applied used to be a `-1` this
+    # function skipped, so the command RAN ANYWAY with the descriptors it
+    # happened to inherit. In a shell script that means output landing on the
+    # console (tests/linux/soak_desktop.sh watched `ls /etc > /dev/null` print
+    # /etc for 1,272 lines and say nothing). It could as easily mean output
+    # landing in the WRONG FILE — the DE's own rc.5.linux redirects three
+    # programs into /var/log with exactly this construct.
+    #
+    # So it says what could not be done, to WHAT, and why, and the caller
+    # kills the child rather than running it. user/linux-fdns.c's slot_alloc
+    # has already named the resource and its ceiling on the same stream; this
+    # names the command's own target, which is the half the shell knows.
+    write_str(2, cast[Ptr[uint8]]("hamsh: cannot apply the "))
+    write_str(2, which)
+    write_str(2, cast[Ptr[uint8]](" redirect to '"))
+    write_str(2, target)
+    write_str(2, cast[Ptr[uint8]]("': "))
+    # NAME THE RESOURCE WHEN IT IS KNOWN, AND DO NOT NAME IT WHEN IT IS NOT.
+    # sys_openchan returns the raw -errno (user/linux-syscalls.c::rc32), so a
+    # full slot table (-ENOSPC) is distinguishable from a target that simply
+    # could not be opened, and a diagnostic that guessed would be its own kind
+    # of wrong answer.
+    if rc == -ERRNO_ENOSPC:
+        write_str(2, cast[Ptr[uint8]]("no free /fd channel slot -- the slot table is full, and every slot in it is held by a live process. Close some programs, or raise MAX_SLOTS in user/linux-fdns.c"))
+        errstr_set(cast[Ptr[uint8]]("redirect not applied: no free /fd channel slot"))
+    else:
+        write_str(2, cast[Ptr[uint8]]("the target could not be opened"))
+        errstr_set(cast[Ptr[uint8]]("redirect not applied: target could not be opened"))
+    write_str(2, cast[Ptr[uint8]](". The command was NOT run.\n"))
+
+
+def _redir_cannot_bind(target: Ptr[uint8], which: Ptr[uint8]):
+    # The OTHER table. sys_openchan handed back a slot and sys_fdbind could
+    # not give it a NAME, which is the /fd bind table being full -- a
+    # different resource with the same consequence, and worth telling apart
+    # because raising the wrong one would not help.
+    write_str(2, cast[Ptr[uint8]]("hamsh: cannot apply the "))
+    write_str(2, which)
+    write_str(2, cast[Ptr[uint8]](" redirect to '"))
+    write_str(2, target)
+    write_str(2, cast[Ptr[uint8]]("': the /fd name could not be bound -- the bind table is full, and every record in it is held by a live process. Close some programs, or raise MAX_BINDS in user/linux-fdns.c. The command was NOT run.\n"))
+    errstr_set(cast[Ptr[uint8]]("redirect not applied: /fd name could not be bound"))
+
+
+def _wire_redirects(cmdnode: int32, pid: int32) -> int32:
     # Apply a command's redirects (§7) as binds at the SPAWNED child's
     # /fd/N names. Runs after spawn_resolved, before sys_waitpid.
+    #
+    # RETURNS 0 if every redirect this command asked for is in place, and -1
+    # if any of them is not. -1 is not advisory: the caller MUST NOT let the
+    # child run, because a child whose /fd/1 is unbound falls back to the
+    # descriptor it inherited and writes somewhere nobody asked for. See
+    # _redir_cannot.
     nu: uint64 = cast[uint64](cmdnode)
     # `> file` / `>> file` — bind a file channel at the child's /fd/1.
     # nd_c bit 0 distinguishes the two: 0 = OPENCHAN_TRUNC (truncate;
@@ -11257,33 +11313,54 @@ def _wire_redirects(cmdnode: int32, pid: int32):
         if (nd_c[nu] & 1) != 0:
             fslot: int32 = sys_openchan(cast[Ptr[char]](&fp[0]),
                                         OPENCHAN_APPEND)
-            if fslot >= 0:
-                sys_fdbind(pid, 1, _redir_kind(fslot, DEVFD_FILE_APPEND),
-                           fslot)
+            if fslot < 0:
+                _redir_cannot(&fp[0], cast[Ptr[uint8]]("'>>' output"), fslot)
+                return -1
+            if sys_fdbind(pid, 1, _redir_kind(fslot, DEVFD_FILE_APPEND),
+                          fslot) < 0:
+                _redir_cannot_bind(&fp[0], cast[Ptr[uint8]]("'>>' output"))
+                return -1
         else:
             fslot: int32 = sys_openchan(cast[Ptr[char]](&fp[0]),
                                         OPENCHAN_TRUNC)
-            if fslot >= 0:
-                sys_fdbind(pid, 1, _redir_kind(fslot, DEVFD_FILE), fslot)
+            if fslot < 0:
+                _redir_cannot(&fp[0], cast[Ptr[uint8]]("'>' output"), fslot)
+                return -1
+            if sys_fdbind(pid, 1, _redir_kind(fslot, DEVFD_FILE),
+                          fslot) < 0:
+                _redir_cannot_bind(&fp[0], cast[Ptr[uint8]]("'>' output"))
+                return -1
     # `< file` — bind a file channel at the child's /fd/0.
     if nd_b[nu] != 0:
         fp: Array[256, uint8]
         _node_to_path(nd_b[nu], &fp[0], 256)
         fslot: int32 = sys_openchan(cast[Ptr[char]](&fp[0]),
                                     OPENCHAN_READ)
-        if fslot >= 0:
-            sys_fdbind(pid, 0, _redir_kind(fslot, DEVFD_FILE), fslot)
+        if fslot < 0:
+            _redir_cannot(&fp[0], cast[Ptr[uint8]]("'<' input"), fslot)
+            return -1
+        if sys_fdbind(pid, 0, _redir_kind(fslot, DEVFD_FILE), fslot) < 0:
+            _redir_cannot_bind(&fp[0], cast[Ptr[uint8]]("'<' input"))
+            return -1
     # `2> file` — bind a file channel at the child's /fd/2.
     if nd_i[nu] != 0:
         fp: Array[256, uint8]
         _node_to_path(cast[int32](nd_i[nu]), &fp[0], 256)
         fslot: int32 = sys_openchan(cast[Ptr[char]](&fp[0]),
                                     OPENCHAN_TRUNC)
-        if fslot >= 0:
-            sys_fdbind(pid, 2, _redir_kind(fslot, DEVFD_FILE), fslot)
+        if fslot < 0:
+            _redir_cannot(&fp[0], cast[Ptr[uint8]]("'2>' error"), fslot)
+            return -1
+        if sys_fdbind(pid, 2, _redir_kind(fslot, DEVFD_FILE), fslot) < 0:
+            _redir_cannot_bind(&fp[0], cast[Ptr[uint8]]("'2>' error"))
+            return -1
     # `2>&1` — dup-as-bind: whatever Chan is at /fd/1 also at /fd/2.
     if (nd_c[nu] & 2) != 0:
-        sys_fdbind(pid, 2, DEVFD_DUP, 1)
+        if sys_fdbind(pid, 2, DEVFD_DUP, 1) < 0:
+            _redir_cannot_bind(cast[Ptr[uint8]]("/fd/1"),
+                               cast[Ptr[uint8]]("'2>&1' dup"))
+            return -1
+    return 0
 
 
 # ----- in-process redirect for builtins (§7 in-process variant) -----
@@ -11727,7 +11804,19 @@ def run_one_command_x(cmdnode: int32, in_pipe: int32, out_pipe: int32,
     # Redirects are still wired parent-side: their target Chan is opened
     # here (a tmpfs / device slot) and the child must execve before it can
     # write, which is a far wider window than a pipe stage's.
-    _wire_redirects(cmdnode, pid)
+    # A REDIRECT THAT COULD NOT BE APPLIED KILLS THE COMMAND. The child is
+    # already forked here — redirect targets are opened parent-side, after the
+    # spawn, because the child must execve before it can write — so "do not
+    # run it" means note it dead and reap it. That is a narrower window than
+    # letting it run: the child is still between fork and its first write to
+    # the name, and the alternative is a program writing to a destination its
+    # caller did not ask for and nobody being told.
+    if _wire_redirects(cmdnode, pid) < 0:
+        p9_note(pid, cast[Ptr[uint8]]("kill"))
+        sys_waitpid(pid)
+        if do_wait == 0:
+            return -1
+        return 1
     if do_wait == 0:
         # caller manages the pid (pipeline / background)
         return pid
@@ -12345,7 +12434,14 @@ def _run_and_capture(cmdnode: int32) -> uint64:
             pid = spawn_resolved(cmd, cast[Ptr[uint64]](&argv_ptr[0]))
             if pid >= 0:
                 sys_fdbind(pid, 1, DEVFD_PIPE_W, slot)
-                _wire_redirects(cmdnode, pid)
+                if _wire_redirects(cmdnode, pid) < 0:
+                    # Same rule inside a `{ … }` capture: a stage whose
+                    # redirect did not land would write to the console and
+                    # hand back an empty substitution, which is the silent
+                    # wrong answer this whole path exists to prevent.
+                    p9_note(pid, cast[Ptr[uint8]]("kill"))
+                    sys_waitpid(pid)
+                    pid = -1
             else:
                 # Not found INSIDE a `{ … }` capture: the substitution
                 # value is empty (no stdout). Don't stay fully silent —

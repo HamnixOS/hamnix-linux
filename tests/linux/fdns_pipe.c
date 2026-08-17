@@ -333,12 +333,21 @@ static int case_three_stage(void)
     return stages_ok("three-stage", s1, s2, s3);
 }
 
-/* 7. The slot table is 64 entries and nothing ever freed one, so a shell
- *    that is PID 1 got ENOSPC on its 65th pipe OR REDIRECT and never
- *    recovered. Run three tables' worth. */
+/* 7. Nothing ever freed a slot, so a shell that is PID 1 got ENOSPC on the
+ *    first pipe OR REDIRECT past the end of the table and never recovered.
+ *    Run three tables' worth.
+ *
+ *    THE COUNT IS READ FROM THE TABLE, NOT WRITTEN DOWN. It used to be a
+ *    literal 200 against a 64-entry table; when the ceiling was raised that
+ *    stopped exercising reuse AT ALL while still passing under a name saying
+ *    it did -- a gate answering something success-shaped instead of the
+ *    truth. fdns_occupancy reports the ceiling, so this follows it. */
 static int case_slot_reuse(void)
 {
-    for (int i = 0; i < 200; i++) {
+    int32_t cap = 0;
+    fdns_occupancy(NULL, &cap, NULL, NULL);
+    int iters = (int)cap * 3;
+    for (int i = 0; i < iters; i++) {
         int32_t slot = fdns_pipechan();
         if (slot < 0) {
             printf("     ran out of pipe slots after %d\n", i);
@@ -373,7 +382,7 @@ int main(void)
         { case_epipe,      "pipe: the writer sees EPIPE when the reader leaves early" },
         { case_capture,    "pipe: the creator can read its own pipe to EOF ({ cmd })" },
         { case_three_stage,"pipe: a three-stage pipeline ends" },
-        { case_slot_reuse, "pipe: 200 pipes on a 64-slot table" },
+        { case_slot_reuse, "pipe: three tables' worth of pipes, reusing slots" },
     };
     int n = (int)(sizeof cases / sizeof cases[0]);
     for (int i = 0; i < n; i++)

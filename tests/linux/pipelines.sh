@@ -223,7 +223,13 @@ else
 fi
 
 n="$(grep -c '^p[0-9]' "$WORK/boot.txt")"
-[ "$n" = "70" ] && ok "70 pipelines in one boot, on a 64-slot fd table" \
+# The label used to say "on a 64-slot fd table". The table is 1024 now, so 70
+# pipelines fit inside one without the collector ever running, and a PASS line
+# claiming otherwise would be a gate telling a story rather than making a
+# measurement. It now says only what it still asserts. Reuse across a FULL
+# table is tests/linux/fdns_pipe.sh's job, and that case runs three tables'
+# worth of pipes, read from the ceiling rather than written down.
+[ "$n" = "70" ] && ok "70 pipelines in one boot, every one of them answered" \
                 || bad "only $n of 70 pipelines answered (the slot table ran out)"
 
 sm2="$(after 'MARK 9 pipe-after-many' | tr -s ' ' | cut -d' ' -f1)"
