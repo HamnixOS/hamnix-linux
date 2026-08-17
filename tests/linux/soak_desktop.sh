@@ -77,6 +77,88 @@
 #     re-arms. Reading is not running. A soak that really opens and closes
 #     windows for hours is how that reasoning gets tested.
 #
+#     RUN, AND THE ANSWER IS STRONGER THAN "IT FAILS CLOSED": ON THE SHIPPED
+#     CONFIGURATION THE CEILING IS NOT ON THE PATH AT ALL. Every one of those
+#     connections is made by srv_dial, and NOTHING BELOW IT RUNS UNLESS
+#     HAMWSYS_SERVER=1 IS IN THE ENVIRONMENT (user/linux-wsys.c:3435-3449).
+#     That variable is set by GATES. It is set nowhere in etc/, nowhere in
+#     scripts/hamlinux_image.sh, nowhere in scripts/hamlinux_disk.sh and
+#     nowhere in lib/ -- the only mentions in the shipped sources are wsysd's
+#     own four comments saying the mediator is INERT without it. So the
+#     desktop the owner booted makes no connections to that 64-slot table, and
+#     WSRV_CONN_MAX cannot be what stopped his machine.
+#
+#     AND THE RUN AGREES WITH THE READ, which is why both are here. With the
+#     close sweep disabled, 1800 s of launching applications and never closing
+#     them carried wsysd's window count PAST 160 -- two and a half times the
+#     connection ceiling -- with ZERO occurrences of "the connection limit is
+#     reached", no wedge, and /var/log/wsysd.log unchanged at 640 bytes
+#     throughout. Two independent lines of evidence, one static and one
+#     measured, and neither is the other's paraphrase.
+#
+# WHAT IT ACTUALLY FOUND: REDIRECTION DIES, SYSTEM-WIDE, WITH NO DIAGNOSTIC
+# =========================================================================
+# THE MACHINE DID NOT WEDGE. What it did instead, on the run this section was
+# written from -- 1800 s, driven, 60 write iops, applications launched and
+# never closed -- is stop being able to redirect. AT 16 MINUTES 48 SECONDS
+# AFTER BOOT, with 108 windows open and 118 launch cycles done, the heartbeat's
+# `ls /etc > /dev/null` STARTED PRINTING /etc TO THE CONSOLE. Nothing said
+# anything. The gate passed 14/0 and the leak was found by reading the "what
+# repeated on the console" list and not recognising the strings in it.
+#
+# THE RESOURCE IS `MAX_SLOTS 64` AT user/linux-fdns.c:101, and it is a
+# PROCESS-SHARED table (`shm->slot`), not a per-shell one. `sys_openchan` --
+# which is every `>`, every `<`, every `2>`, and every pipe -- allocates from
+# it. slot_alloc() runs the collector once and then returns -1, and its own
+# comment says what that means: "an ENOSPC here is a shell that can no longer
+# pipe or redirect at all."
+#
+# WHAT PINS A SLOT IS A LIVE PROCESS. slot_gc() will not reclaim a slot that
+# `slot_referenced()` finds in the bind table, and bind_gc() only releases
+# binds whose pid is DEAD. So a slot held by an application that is still
+# running is held for as long as that application runs. A desktop that opens
+# programs and leaves them open walks into a 64-entry table on a clock.
+#
+# AND THE FAILURE IS SILENT BY CONSTRUCTION, which is the part that makes it
+# dangerous rather than merely finite. hamsh's _wire_redirects (user/hamsh.ad:
+# 11244) reads:
+#
+#       fslot: int32 = sys_openchan(..., OPENCHAN_TRUNC)
+#       if fslot >= 0:
+#           sys_fdbind(pid, 1, _redir_kind(fslot, DEVFD_FILE), fslot)
+#
+# A fail-closed -1 skips the bind and says NOTHING. user/linux-syscalls.c:3118
+# already names this exact shape -- "THIS IS WHY EVERY REDIRECT SILENTLY DID
+# NOTHING ... `ls > file` ran, exited 0, created nothing and printed to the
+# console" -- and records that the DE session's `wsysd > /var/log/wsysd.log`
+# was how it was noticed last time. That is the same redirect rc.5.linux still
+# uses for all three desktop programs.
+#
+# THE NUMBER IS 64, AND CANDIDATE 2 WAS RIGHT ABOUT THE NUMBER AND WRONG ABOUT
+# THE TABLE. The brief expected "opening applications adds connections toward
+# the 64-per-socket ceiling". WSRV_CONN_MAX is not reachable on this
+# configuration at all (see below). The 64 that a desktop actually walks into
+# by opening applications is this one.
+#
+# WHAT IS MEASURED AND WHAT IS NOT. MEASURED: the failure, its time, the window
+# count and cycle count at that moment, and that the machine kept running
+# afterwards. NOT MEASURED: that the slot table was the resource that ran out
+# at that instant -- that is read off the code, and the 64-slot table pinned by
+# live processes is the only bounded thing on that path. NOT OBSERVED AT ALL:
+# any wedge from it.
+#
+# WHAT IT WOULD MEAN ON HIS STICK, and this is reasoning, flagged as reasoning:
+# once redirection fails, rc.5.linux's `wsysd > /var/log/wsysd.log` would put
+# the compositor's stderr ON THE CONSOLE instead -- and consmirror copies the
+# console into the kernel ring, and bootlogd writes the ring to the boot medium.
+# That is a path from "too many applications open" to "every diagnostic the
+# compositor emits becomes a synchronous write to the stick", which is
+# candidate 3 arriving by a different door. It requires the redirect to be
+# re-established after exhaustion, which a running session does not do, so it
+# is a mechanism for a REBOOT into a degraded session rather than for his
+# five-minute freeze. It is written down because it is checkable, not because
+# it is claimed.
+#
 # WHAT THE WORKLOAD IS
 # ====================
 # Two drivers at once, on purpose, because each covers the other's failure.
@@ -272,6 +354,13 @@ QMP_INPUT="$PROJ_ROOT/tests/linux/qmp_input.py"
 MARK="SOAKDESKTOPUP7742"
 HB="SOAKHB"
 CENSUS="SOAKCENSUS"
+# THE REDIRECT CANARY. `echo <this> > /dev/null` must produce NOTHING on the
+# console. If this string ever appears there, sys_openchan has started failing
+# and EVERY REDIRECT IN THE SYSTEM IS SILENTLY DOING NOTHING -- see the
+# REDIRECTION DIES section in the header. A distinct token rather than an
+# inference from stray /etc filenames, so the detector cannot be confused by
+# anything else that prints.
+REDIR="SOAKREDIRCANARY"
 
 SCREEN_W=1280
 SCREEN_H=800
@@ -373,6 +462,7 @@ CLOSEEOF
         echo '$HB'
         date
         ls /etc > /dev/null
+        echo '$REDIR' > /dev/null
         sleep 1
         n = n + 1
     }
@@ -393,6 +483,7 @@ CLOSEEOF
         echo '$HB'
         date
         ls /etc > /dev/null
+        echo '$REDIR' > /dev/null
         sleep 1
         n = n + 1
     }
@@ -1091,6 +1182,51 @@ else
 fi
 CAPREF=$(grep -ao 'capref [0-9]*' "$WORK/soak/serial.log" | tail -1)
 [ -n "$CAPREF" ] && info "the server's own running total: $CAPREF"
+
+say "DID REDIRECTION STOP WORKING? (found by this gate; see the header)"
+# TWO DETECTORS, because the first run that hit this did not have the second.
+#
+#   * the CANARY: `echo SOAKREDIRCANARY > /dev/null` in the heartbeat. Nothing
+#     may ever print it. If it is on the console, its redirect did not happen.
+#   * the LEAK: the heartbeat's `ls /etc > /dev/null` printing /etc to the
+#     console. `rc.distros-wl` is an /etc entry with a name nothing else emits,
+#     so a bare line equal to it is that redirect having failed. This is how it
+#     was caught the first time and it is kept so an old log can be re-read.
+REDIR_N=$(grep -ac "^${REDIR}\$" "$WORK/soak/serial.log" 2>/dev/null || echo 0)
+LEAK_N=$(grep -ac '^rc\.distros-wl$' "$WORK/soak/serial.log" 2>/dev/null || echo 0)
+if [ "${REDIR_N:-0}" = 0 ] && [ "${LEAK_N:-0}" = 0 ]; then
+    ok "shell redirection still worked at the end of ${SECS}s: neither the canary nor an /etc listing ever reached the console"
+else
+    bad "REDIRECTION STOPPED WORKING DURING THIS RUN (canary on the console ${REDIR_N}x, /etc leak ${LEAK_N}x). sys_openchan is failing, _wire_redirects' \`if fslot >= 0\` is skipping the bind WITH NO DIAGNOSTIC, and every redirect in the system is now silently doing nothing."
+    # WHEN, in the guest's own clock, and what the machine looked like then.
+    # The moment matters more than the fact: it is what tells a launch-count
+    # cause from a wall-clock one.
+    python3 - "$WORK/soak/serial.log" "$REDIR" <<'PY'
+import re, sys
+lines = open(sys.argv[1], 'rb').read().decode('utf-8', 'replace').splitlines()
+canary, first, ts, boot = sys.argv[2], None, None, None
+tspat = re.compile(r'\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC')
+seen_ts = None
+for i, l in enumerate(lines):
+    m = tspat.search(l)
+    if m:
+        seen_ts = m.group(0)
+        if boot is None:
+            boot = seen_ts
+    if first is None and (l.strip() == canary or l.strip() == 'rc.distros-wl'):
+        first, ts = i, seen_ts
+if first is None:
+    raise SystemExit
+win = cyc = None
+for l in lines[:first]:
+    mm = re.search(r'windows (\d+)', l)
+    if mm:
+        win = mm.group(1)
+cyc = sum(1 for l in lines[:first] if l.startswith('SOAKCENSUS cycle'))
+print('  ..    it first failed at %s (the guest booted at %s)' % (ts, boot))
+print('  ..    by then: %s windows open, %d launch cycles completed' % (win, cyc))
+PY
+fi
 
 say "IS /var/log GROWING? (candidate 3, measured rather than reasoned)"
 log_growth "$WORK/soak/serial.log" | while read -r nm s0 s1 dl rate; do
