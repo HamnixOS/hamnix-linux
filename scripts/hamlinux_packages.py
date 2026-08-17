@@ -2567,8 +2567,27 @@ _NEWEST_SHARED_INPUT = None
 
 def newest_shared_input():
     """The mtime of the most recently modified thing EVERY program here links
-    against: lib/*.ad, user/linux-*.c and their headers, and the build script
-    itself. Computed once.
+    against: EVERY .ad under lib/ at ANY depth, user/linux-*.c and their
+    headers, and the build script itself. Computed once.
+
+    IT USED TO GLOB `lib/*.ad` AND `lib/*/*.ad` AND STOP THERE, WHICH LEFT 40
+    OF THE 174 SHARED SOURCES INVISIBLE -- and they are not obscure ones, they
+    are the entire web engine: lib/web/js/interp.ad, lib/web/dom/domtree.ad,
+    lib/web/css/cascade.ad, lib/web/layout/flow.ad and 36 more, three and four
+    directories deep. MEASURED against this function rather than argued, by
+    touching a file and asking build_one's own predicate whether it would reuse
+    the existing artefact:
+
+        after touching lib/web/js/interp.ad    reuse=True   STALE BINARY SHIPS
+        after touching lib/web/dom/domtree.ad  reuse=True   STALE BINARY SHIPS
+        after touching lib/web/layout/flow.ad  reuse=True   STALE BINARY SHIPS
+        after touching lib/hamui.ad            reuse=False  rebuilt (correct)
+
+    So a fix to the JS interpreter, the DOM or the layout engine would have
+    published the PREVIOUS hambrowse, by exactly the mechanism described below
+    that this function was written to close. Every name would be present, every
+    sha256 would match, and the browser on the machine would be last week's.
+    It walks lib/ now instead of guessing its depth.
 
     This exists because the cache below used to stat exactly ONE input,
     user/<cmd>.ad, AND THAT SHIPPED A BROKEN DESKTOP. hamnix-desktop 1.0.10
@@ -2597,12 +2616,18 @@ def newest_shared_input():
     if _NEWEST_SHARED_INPUT is not None:
         return _NEWEST_SHARED_INPUT
     newest = 0.0
-    pats = [os.path.join(ROOT, "lib", "*.ad"),
-            os.path.join(ROOT, "lib", "*", "*.ad"),
-            os.path.join(ROOT, "user", "*.c"),
+    pats = [os.path.join(ROOT, "user", "*.c"),
             os.path.join(ROOT, "user", "*.h"),
             os.path.join(ROOT, "user", "*.S")]
     files = [f for p in pats for f in glob.glob(p)]
+    # EVERY .ad under lib/, at whatever depth it sits. A recursive walk rather
+    # than a list of globs, so a new subdirectory of lib/ is covered the day it
+    # appears instead of the day somebody notices -- lib/web/js/builtins/ is
+    # four deep and nothing was watching it.
+    for dirpath, _dirnames, filenames in os.walk(os.path.join(ROOT, "lib")):
+        for fn in filenames:
+            if fn.endswith(".ad"):
+                files.append(os.path.join(dirpath, fn))
     files.append(os.path.join(ROOT, "scripts/hamlinux_build.sh"))
     for f in files:
         try:
