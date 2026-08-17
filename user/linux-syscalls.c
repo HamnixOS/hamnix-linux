@@ -134,11 +134,22 @@ static int  errstr_errno;
 
 static void errstr_setf(int err, const char *fmt, ...)
 {
+    /* SAVE AND RESTORE ERRNO ACROSS OUR OWN WORK.
+     *
+     * vsnprintf is permitted to set errno, and several callers here pass
+     * strerror(errno) as an argument. If errno moved between the failure and
+     * the caller's return, sys_errstr's `errstr_errno == errno` key would no
+     * longer match and the message would be DISCARDED IN SILENCE -- the
+     * specific reason thrown away by the very mechanism built to deliver it,
+     * leaving the generic string and no sign anything was lost. A recording
+     * function must not disturb the thing it is recording. */
+    int saved = errno;
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(errstr_buf, sizeof errstr_buf, fmt, ap);
     va_end(ap);
     errstr_errno = err;
+    errno = saved;
 }
 
 int32_t sys_errstr(uint8_t *buf, uint64_t nbuf)
@@ -4666,6 +4677,10 @@ static void bind_stage_failed(const char *src, const char *dst)
         "bind: could not graft `%s' onto `%s': %s\n", src, dst,
         strerror(errno));
     cons_write(m, n > 0 ? (size_t)n : 0);
+    /* AND to whoever asked -- see errstr_buf. errno is still the one this
+     * failure set, which is what errstr_setf keys on. */
+    errstr_setf(errno, "could not graft `%s' onto `%s': %s", src, dst,
+                strerror(errno));
 }
 
 /* Say which STEP of the root switch failed, and on which path. Not rate-
@@ -4681,6 +4696,10 @@ static void enter_root_failed(const char *step, const char *path)
         "user), and the body will NOT be run.\n",
         step, path, strerror(errno));
     cons_write(m, n > 0 ? (size_t)n : 0);
+    errstr_setf(errno,
+        "the root switch failed at %s(\"%s\"): %s -- the staged root is "
+        "assembled under /n/.root (root) or $TMPDIR/.hamns-<pid> (a session "
+        "user), and the body was NOT run", step, path, strerror(errno));
 }
 
 static int32_t enter_root(const char *mnt, int is_sysroot)
@@ -4972,6 +4991,8 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
                             "root (tried /n/.root and $TMPDIR)\n";
             cons_write(m, strlen(m));
             errno = EACCES;
+            errstr_setf(EACCES, "no writable staging directory for the new "
+                                "root (tried /n/.root and $TMPDIR)");
             return -EACCES;
         }
     }

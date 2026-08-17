@@ -84,11 +84,54 @@ else
     else
         bad "the distro refusal no longer writes to the console"
     fi
-    if printf '%s' "$WIN" | grep -q 'errstr_setf'; then
+    if printf '%s' "$WIN" | grep -qE '^[[:space:]]*errstr_setf\('; then
         ok "the distro refusal ALSO reaches the caller's errstr — the reason arrives where the person typed the command"
     else
         bad "the distro refusal reaches only the console: on a desktop, an 'enter debian {sh}' still tells the person nothing but the errno. (Backticks are deliberately absent from this string: they are SHELL-EXPANDED inside double quotes, and this gate's own negative control caught it trying to run 'enter' as a command.)"
     fi
+fi
+
+# --- 3b. the setter must not disturb what it records ---------------------
+# vsnprintf may set errno, and callers pass strerror(errno) as an argument. If
+# errno moved between the failure and the caller's return, sys_errstr's errno
+# key would stop matching and the specific reason would be DISCARDED IN
+# SILENCE -- thrown away by the very mechanism built to deliver it. A
+# recording function must not disturb the thing it is recording.
+SETTER=$(sed -n '/^static void errstr_setf(/,/^}/p' "$SRC")
+if [ -z "$SETTER" ]; then
+    bad "cannot find errstr_setf — instrument failed, NOT reporting a pass from it"
+elif printf '%s' "$SETTER" | grep -q 'int saved = errno;' && \
+     printf '%s' "$SETTER" | grep -q 'errno = saved;'; then
+    ok "errstr_setf saves and restores errno, so recording a reason cannot invalidate the key that delivers it"
+else
+    bad "errstr_setf does not preserve errno: vsnprintf may move it, the errno key then fails to match, and the specific reason is discarded in silence leaving only the generic string"
+fi
+
+# --- 3c. the OTHER terminal refusals reach the caller too ----------------
+# Each of these returns an error to the caller, so a console-only message is a
+# reason the caller can never see. Warnings that CONTINUE are deliberately not
+# listed: they are not the caller's failure to report.
+echo "  -- terminal refusals in the bind/enter path:"
+for fn in bind_stage_failed enter_root_failed; do
+    FB=$(sed -n "/^static void $fn(/,/^}/p" "$SRC")
+    if [ -z "$FB" ]; then
+        bad "$fn not found — NOT reporting a pass it did not measure"
+    # A CALL, NOT A MENTION. Requiring the line to BEGIN with errstr_setf(
+    # after whitespace. The first version grepped for the bare identifier and
+    # matched the explanatory COMMENT next to the call -- so when the negative
+    # control deleted the call, the comment kept the assertion green. That is
+    # the second time in this one gate that a check matched prose instead of
+    # code; both were found only because the control was RUN.
+    elif printf '%s' "$FB" | grep -qE '^[[:space:]]*errstr_setf\('; then
+        ok "$fn reaches the caller, not only the console"
+    else
+        bad "$fn writes only to the console, and it reports a failure the caller is about to be handed — on a desktop the person sees the errno and nothing else"
+    fi
+done
+if grep -q 'errstr_setf(EACCES, "no writable staging directory' "$SRC"; then
+    ok "the missing-staging-directory refusal reaches the caller"
+else
+    bad "the missing-staging-directory refusal is console-only: the alternative answer to it is entering NOTHING and running the body in the native root, so the person needs to know it happened"
 fi
 
 # --- 4. it compiles, with the compiler proven able to reject this file ----
