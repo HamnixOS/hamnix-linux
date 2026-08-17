@@ -16423,6 +16423,11 @@ gc_pin_n:   uint64 = 0
 # arena that fills up; failing open would cost a wrong answer.
 gc_pin_over: uint64 = 0
 gc_minor:    int32 = 0      # 1 while a minor collection is marking
+# Occupancy immediately after the last minor collection — the FLOOR. _minor_due
+# refuses to collect again until occupancy has grown past it (see there).
+gc_minor_val_floor:  uint64 = 0
+gc_minor_elem_floor: uint64 = 0
+gc_minor_str_floor:  uint64 = 0
 
 
 def gc_pin_push(c: int32) -> uint64:
@@ -16565,6 +16570,9 @@ def gc_collect_minor():
         str_cursor = 1 + total
     else:
         gc_str_skipped = gc_str_skipped + 1
+    gc_minor_val_floor  = val_count
+    gc_minor_elem_floor = val_elem_cursor
+    gc_minor_str_floor  = str_cursor
 
 
 def _minor_due() -> int32:
@@ -16574,11 +16582,24 @@ def _minor_due() -> int32:
     # before the next boundary arrives.
     if gc_pin_over != 0:
         return 0
-    if val_count >= VAL_MAX - 2048:
+    # THE BACK-OFF, and it is not hypothetical caution. A collection that
+    # frees nothing leaves occupancy exactly where it was, which is still
+    # over the threshold — so the next statement would collect again, and
+    # every statement after it, each one a full sweep of three arenas. Two
+    # ways to get there: a genuinely live set near the cap, and a string
+    # arena whose live bytes exceed GC_STR_STAGE_MAX (64 KB), where
+    # _gc_str_pass BAILS OUT and str_cursor does not move at all. Requiring
+    # 256 cells / 256 slots / 4 KB of GROWTH since the last collection turns
+    # that from per-statement into once-per-50-statements while still
+    # retrying, and costs nothing on the path where collection works
+    # (occupancy lands far below the threshold and this never fires).
+    if val_count >= VAL_MAX - 2048 and val_count >= gc_minor_val_floor + 256:
         return 1
-    if val_elem_cursor >= LISTELEM_MAX - 2048:
+    if val_elem_cursor >= LISTELEM_MAX - 2048 \
+            and val_elem_cursor >= gc_minor_elem_floor + 256:
         return 1
-    if str_cursor >= STR_ARENA_MAX - 65536:
+    if str_cursor >= STR_ARENA_MAX - 65536 \
+            and str_cursor >= gc_minor_str_floor + 4096:
         return 1
     return 0
 
