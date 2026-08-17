@@ -14,8 +14,65 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing yet. Work lands here between releases; if this section is empty, the
-tree and the channel agree.
+### The installer in the channel was not the installer on the stick
+
+`/bin/install` is the program the desktop's install wizard spawns and the one
+a person types at the live prompt. The live medium's copy is `hlinstall` —
+274,840 bytes, the installer every gate in this tree drives and the one that
+partitions an NVMe and writes a bootable machine. **The copy in the package
+channel was a different program**: `scripts/hamlinux_packages.py` listed
+`install` among the system commands, which builds `user/install.ad` — the
+NATIVE line's installer, 338,432 bytes, which installs a base system through
+`hpm --target-dev` and a kernel `install_file` verb this kernel does not have.
+
+So a machine that installed `hamnix-install`, or updated it, replaced its
+working installer with one from the other product line, **under the same
+version number and with nothing saying so**. Verified rather than reasoned
+about: the channel's copy is byte-identical to a fresh build of
+`user/install.ad`, the channel's `bin/hlinstall` is byte-identical to the
+image's, and `hamnix-install-1.0.26.tar.gz` **fetched from 255.one** carries
+the same 338,432-byte `bin/install` — this is shipped, not hypothetical.
+
+`bin/install` is now built from `user/hlinstall.ad` and laid down at that
+path, which is exactly what the image does, so the two copies are one compile
+and cannot drift apart again.
+
+**Not measured, and named rather than implied:** no machine was booted to
+watch the wrong installer run. What was measured is that the bytes differ,
+which program each one is, and that the channel serving them is the live one.
+
+### A gate that compares the bytes, not the names
+
+`tests/linux/channel_bytes_match_image.sh` (**2 PASS**, ~30 s, no VM) compares
+every ELF the image stages against the copy a package carries for the same
+path — **229 pairs**. Nothing did this before. The name gate next door saw
+`bin/install` on both sides and said "covered"; its header explained that a
+per-byte ELF compare "would go red on any legitimate rebuild", which stopped
+being true when the Linux lane became reproducible, and that one stale
+sentence is what let the defect above ship. Measured on the way in: the same
+source built twice into two directories is one sha256, and every file inside
+five packages **fetched from 255.one** at 1.0.26 is byte-identical to this
+tree's local build of 1.0.26 (0 differing of 92).
+
+**On the tree as it stood the gate was 1 PASS / 1 FAIL**, naming
+`/bin/install` with both sizes and both hashes. **Negative control**
+(`HAMLINUX_ELFCMP_CORRUPT=3`, one byte flipped in three of the gate's own
+extracted copies): **1 PASS / 3 FAIL**, and the three reported are exactly the
+three broken, by name — the gate checks its own control.
+
+### The install-from-USB loop is green end to end, and the last red is gone
+
+`tests/linux/install_from_usb.sh` is **75 PASSED / 0 FAILED** on a full run —
+three boots under OVMF, a live USB stick installed onto a blank NVMe, the
+stick pulled out, and the installed machine updated over the network from
+255.one. The one assertion that was red at 1.0.26's publication was red
+because the machine updates from the LIVE site and the gate compares what it
+recorded against the LOCAL candidate, so it could only agree once the
+candidate was served. It is served, and the assertion is green: the database
+on the installed disk records `hamnix-man` at **1.0.26**, the machine printed
+`hpm: upgrading hamnix-man 1.0.22 -> 1.0.26` and `update done (upgraded=5
+pinned=0)`, and the file it rewrote is byte-identical to this tree's
+`etc/man/cat.1.md`.
 
 ## 1.0.26 — 2026-08-17
 

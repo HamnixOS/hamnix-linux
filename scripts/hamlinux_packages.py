@@ -83,13 +83,30 @@ COREUTILS = """
     more less bc cal
     ascii awk cmp column comm diff
 """.split()
-# `install` (install(1), the file-copy-with-modes tool) is NOT in the list
-# above even though it belongs there by nature. pkg_name_for('install') is
-# `hamnix-install`, which is already the name of the INSTALLER component, and
-# two packages with one name overwrite each other's tarball -- see the
-# duplicate-name guard near the end of this file for what that cost. It rides
-# in SYS_CMDS instead, which ships it and keeps it updatable without minting a
-# colliding name or renaming a package installed machines already carry.
+# `install` IS NOT install(1) IN THIS TREE, AND THIS COMMENT USED TO SAY IT
+# WAS. What stood here was:
+#
+#     "`install` (install(1), the file-copy-with-modes tool) is NOT in the
+#      list above even though it belongs there by nature ... It rides in
+#      SYS_CMDS instead"
+#
+# There is no install(1) in this tree. `install` in SYS_CMDS built
+# user/install.ad -- the NATIVE line's system installer, a different program
+# from user/hlinstall.ad -- and shipped it as /bin/install, which is the path
+# the image stages hlinstall at and the path user/haminstallui.ad spawns.
+# MEASURED on the built 1.0.26 channel and on the tarball fetched from
+# 255.one: image /bin/install is 274,840 bytes and byte-identical to
+# /bin/hlinstall; hamnix-install's bin/install was 338,432 bytes and
+# byte-identical to a fresh build of user/install.ad. Two different installers
+# under one path, one on the medium and the other in the channel.
+# tests/linux/channel_bytes_match_image.sh is the gate that found it, on its
+# first run, and it is the only thing in the tree that could have: the name
+# gate next door sees `bin/install` on both sides and says covered.
+#
+# So bin/install is now hlinstall's bytes, by the same aliasing the image uses
+# (`install -m755 $ROOT/bin/hlinstall $ROOT/bin/install`): the (source, path)
+# pair below builds user/hlinstall.ad and lays it down at bin/install, so the
+# two copies cannot drift apart again -- they are one compile.
 
 # THE SAME SPLIT THE NATIVE LINE ALREADY MADE, and it is copied deliberately
 # rather than re-derived. This file's own header says the two channels carry
@@ -206,8 +223,12 @@ MOD_CMDS = "insmod lsmod modprobe rmmod".split()
 # the reason hamnix-init's hook exists: the running binary is replaced on disk
 # and the CURRENT process keeps its own image, and bootsync is spawned after all
 # the file movement is finished.
-SYS_CMDS = ("hlinstall haminstallui nsrun reboot halt poweroff install "
+SYS_CMDS = ("hlinstall haminstallui nsrun reboot halt poweroff "
             "bootlogd bootsync").split()
+# bin/install, built from user/hlinstall.ad. See the block above line 86 for
+# what it was and what that cost; the image does the same thing with `install
+# -m755 $ROOT/bin/hlinstall $ROOT/bin/install`.
+SYS_ALIASES = [("hlinstall", "bin/install")]
 
 # xsnarfd is the X clipboard bridge and hamimgscene is the image viewer. Both
 # ship in the image; neither was in the channel until the coverage gate below
@@ -595,7 +616,7 @@ COMPONENTS = {
         [(c, "bin/" + c) for c in MOD_CMDS], [], ["hamnix-init>=1"]),
     "hamnix-install": (
         "installer and system tools -- hlinstall, haminstallui, nsrun, reboot",
-        [(c, "bin/" + c) for c in SYS_CMDS],
+        [(c, "bin/" + c) for c in SYS_CMDS] + SYS_ALIASES,
         launchers_for("hamnix-install"), ["hamnix-init>=1"]),
     "hamnix-adder": (
         "the Adder toolchain -- `ac foo.ad -o foo` on the box: the driver "

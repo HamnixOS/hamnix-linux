@@ -24,6 +24,26 @@ because that is the version those runs were made against; the numbers stand, the
 version in them is history. **`CHANGELOG.md` is the authority on what a person
 gets, and its `Unreleased` section is the authority on what they do not yet.**
 
+**AFTER 1.0.26, TWO THINGS WERE MEASURED AND ONE OF THEM IS A SHIPPED DEFECT.**
+First, the claim made in these notes — that `install_from_usb.sh`'s single red
+assertion was structurally unpassable before publication and would go green once
+1.0.26 was served — **holds**. Re-run end to end against a freshly built image
+and a freshly built 1.0.26 channel: **75 PASSED, 0 FAILED**, three boots under
+OVMF, and the assertion is green with the installed disk's database recording
+`hamnix-man` at **1.0.26** after the machine upgraded five packages from the live
+site. Nothing was retried and nothing was silenced; the diagnosis was right.
+Second, and this is the defect: **the `/bin/install` in the channel was not the
+`/bin/install` on the stick.** The medium stages `hlinstall` there (274,840
+bytes); `hamnix-install` carried a build of `user/install.ad` — the NATIVE
+line's installer, 338,432 bytes — and **the tarball on 255.one has it too**, so
+it shipped. Found by `tests/linux/channel_bytes_match_image.sh`, written for the
+purpose and the only thing in the tree that could have seen it: the name gate
+next door reads `bin/install` on both sides and says covered, and its header
+carried a reason that had gone stale — *"a per-byte compare of an ELF would go
+red on any legitimate rebuild"* — which is exactly the shape this project keeps
+paying for, **a reason in a table is a claim**. 229 ELF pairs are compared now,
+all identical after the fix; the control is 3 broken files reported by name.
+
 **1.0.26 IS PUBLISHED and verified as served** — 130 packages (up from 126),
 signature verifying **against `etc/hpm/trusted.pub`** rather than merely against
 the signing key, and both `hamnix-drivers-sof-1.0.26.tar.gz` and
