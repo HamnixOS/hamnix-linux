@@ -13,6 +13,13 @@ WORK="$(mktemp -d "$HOME/.hamnix-build/chanarm.XXXXXX")"
 reap_track "$WORK/reaped"
 echo "work=$WORK bin=$BIN"
 
+if [ "${PROBE_LOAD:-0}" != 0 ]; then
+    echo "loading the box with $PROBE_LOAD spinners"
+    for _i in $(seq 1 "$PROBE_LOAD"); do
+        ( while :; do :; done ) & reap_add $!
+    done
+fi
+
 PAGE="$WORK/page.html"
 cat >"$PAGE" <<'HTML'
 <html><body bgcolor="#ffffff"><h1>packaged</h1>

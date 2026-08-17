@@ -2567,8 +2567,11 @@ _NEWEST_SHARED_INPUT = None
 
 def newest_shared_input():
     """The mtime of the most recently modified thing EVERY program here links
-    against: EVERY .ad under lib/ at ANY depth, user/linux-*.c and their
-    headers, and the build script itself. Computed once.
+    against: EVERY .ad under lib/ at ANY depth, EVERY .ad directly under user/
+    (the four that are library modules included), user/linux-*.c and their
+    headers, the build script, scripts/adder_llvm_runtime.c -- which is on the
+    link line of every binary -- and THE COMPILER, build/cutover/host_ac*.elf.
+    Computed once.
 
     IT USED TO GLOB `lib/*.ad` AND `lib/*/*.ad` AND STOP THERE, WHICH LEFT 40
     OF THE 174 SHARED SOURCES INVISIBLE -- and they are not obscure ones, they
@@ -2616,6 +2619,25 @@ def newest_shared_input():
     if _NEWEST_SHARED_INPUT is not None:
         return _NEWEST_SHARED_INPUT
     newest = 0.0
+    for f in shared_inputs():
+        try:
+            newest = max(newest, os.path.getmtime(f))
+        except OSError:
+            pass
+    _NEWEST_SHARED_INPUT = newest
+    return newest
+
+
+def shared_inputs():
+    """The LIST newest_shared_input() takes its maximum over -- every path
+    whose modification must rebuild every program in the channel.
+
+    It is a separate function so that it can be ASSERTED ON rather than
+    inferred from a timestamp. tests/linux/packager_sees_its_inputs.sh asks
+    this for the set and fails by NAME on anything missing; the version of
+    this check that lived only inside the max() was measurable only by
+    touching files in the working tree and reading a boolean back, which is a
+    destructive probe nobody wants in the battery."""
     pats = [os.path.join(ROOT, "user", "*.c"),
             os.path.join(ROOT, "user", "*.h"),
             os.path.join(ROOT, "user", "*.S")]
@@ -2628,14 +2650,59 @@ def newest_shared_input():
         for fn in filenames:
             if fn.endswith(".ad"):
                 files.append(os.path.join(dirpath, fn))
+    # EVERY .ad under user/ TOO, and not only user/<cmd>.ad. Four files in
+    # user/ have no `def main` at all -- scripts/hamlinux_build.sh names them
+    # in its own header and exits 13 on them -- because they are LIBRARY
+    # MODULES that applications import: user/hambrowse_tabs.ad (hambrowse),
+    # user/http9.ad (hpm, curl, wget), user/net9.ad (the /net dialers) and
+    # user/httpdconf.ad (httpd). They were invisible here, exactly as
+    # lib/web/js/interp.ad was before the walk above. MEASURED with this
+    # function and build_one's own reuse predicate, against build/repo-obj:
+    #
+    #     after touching user/hambrowse_tabs.ad      reuse=True   STALE SHIPS
+    #     after touching user/http9.ad               reuse=True   STALE SHIPS
+    #     after touching scripts/adder_llvm_runtime.c reuse=True  STALE SHIPS
+    #     after touching build/cutover/host_ac.elf   reuse=True   STALE SHIPS
+    #     after touching lib/hamui.ad                reuse=False  rebuilt
+    #     after touching lib/web/js/interp.ad        reuse=False  rebuilt
+    #     after touching user/linux-wsys.c           reuse=False  rebuilt
+    #
+    # The last three are the control: the same probe answers both ways, so
+    # `reuse=True` is a finding and not a broken instrument.
+    for fn in glob.glob(os.path.join(ROOT, "user", "*.ad")):
+        files.append(fn)
     files.append(os.path.join(ROOT, "scripts/hamlinux_build.sh"))
-    for f in files:
-        try:
-            newest = max(newest, os.path.getmtime(f))
-        except OSError:
-            pass
-    _NEWEST_SHARED_INPUT = newest
-    return newest
+    # scripts/adder_llvm_runtime.c IS LINKED INTO EVERY BINARY THIS FILE
+    # PACKAGES -- it is on hamlinux_build.sh's clang line beside the runtime
+    # objects -- and nothing here was watching it. A fix to it would have
+    # published every previous program in the channel.
+    files.append(os.path.join(ROOT, "scripts/adder_llvm_runtime.c"))
+    # AND THE COMPILER ITSELF, which is the one input that changes what EVERY
+    # byte of every program is. Keyed by the same selection hamlinux_build.sh
+    # makes (the LLVM host_ac if it is there, else the other), and both are
+    # listed rather than only the winner so that installing the LLVM one
+    # invalidates too.
+    #
+    # This is the mechanism that produces the exact shape reported against
+    # 1.0.25 -- "the tree's browser works, the channel's does not". Every gate
+    # in tests/linux/ builds from source through hamlinux_build.sh on every
+    # run, so a gate ALWAYS has a binary from the current compiler; only this
+    # file reuses. Re-bootstrap the compiler without touching lib/ or user/
+    # and the tree goes green on freshly built bytes while the channel ships
+    # whatever the previous compiler emitted, with every name present and
+    # every sha256 matching the bytes served.
+    #
+    # The compiler's SOURCES (adder/compiler/*.ad) are deliberately NOT here.
+    # Editing them changes nothing about the bytes emitted until host_ac is
+    # re-bootstrapped, and that rewrites host_ac.elf -- so the binary is the
+    # honest key and the sources would invalidate 98 packages on every
+    # submodule checkout for no change in output. Re-measured after this
+    # change, adder/compiler/ssa_llvm.ad is the one candidate that still
+    # answers reuse=True, which is the intended answer and keeps the probe
+    # able to say both things.
+    files.append(os.path.join(ROOT, "build/cutover/host_ac_llvm.elf"))
+    files.append(os.path.join(ROOT, "build/cutover/host_ac.elf"))
+    return files
 
 
 # THE SOURCE PATH HANDED TO THE BUILD SCRIPT IS RELATIVE TO ROOT, AND THAT IS
