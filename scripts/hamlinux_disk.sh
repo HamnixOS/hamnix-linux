@@ -169,7 +169,41 @@ if [ -n "${HAMLINUX_DISK_EXTRA:-}" ]; then
     echo "[disk] overlaid $HAMLINUX_DISK_EXTRA onto the root"
 fi
 
-mkfs.ext4 -q -L hamnix -d "$ROOTDIR" -m 1 "$ROOTFS" 2600M
+# -E lazy_itable_init=0 -- THE BIGGEST WRITER ON THIS MEDIUM WAS THE KERNEL, AND
+# IT WAS WRITING ZEROES.
+#
+# MEASURED, tests/linux/wedge_hunt.sh's method applied to a boot with NO
+# desktop, NO bootlogd, NO dhcpc -- PID 1, a shell, and `sleep 600`:
+#
+#     110.7 KB/s TO THE BOOT MEDIUM, CONTINUOUSLY, FOR AS LONG AS IT WAS
+#     WATCHED. 20.4 MB in 180 s, in ~105 KB writes about once a second. The
+#     guest's own /proc/diskstats agreed to within eight sectors, so it was the
+#     guest really writing and not an artefact of the harness.
+#
+# It is ext4's LAZY INODE TABLE INITIALISATION. mke2fs leaves every block
+# group's inode table UNWRITTEN and marks it `[Inode not init]` -- confirmed on
+# a freshly built image here, 20 of 22 groups -- and the kernel's ext4lazyinit
+# thread zeroes them in the background on the FIRST READ-WRITE MOUNT. This
+# filesystem has 166656 inodes at 256 bytes: 42.7 MB of zeroes to write, which
+# at the rate measured is ABOUT SEVEN MINUTES.
+#
+# THAT IS SEVEN MINUTES STARTING AT THE FIRST BOOT OF EVERY STICK THIS SCRIPT
+# BUILDS -- which is the only boot most sticks get, and the exact window in
+# which the owner's laptop became unusable. On a host file it is invisible. On
+# a USB stick it is a continuous background write competing with every exec,
+# every page fault and every config read the desktop performs, on the one
+# device all of them share.
+#
+# The fix belongs HERE and not at runtime, because the choice mke2fs is making
+# is "do this work later, on the user's machine" -- and the machine that would
+# do it later is a laptop running off a stick, while the machine doing it now
+# is a build host with a file on an SSD. Zeroing 42.7 MB into an image file at
+# build time is under a second and it is paid ONCE, by the build, instead of
+# once by every person who boots the result.
+#
+# It costs image size only in sparseness, and this image is dd'd to a medium at
+# its full length anyway, so the cost is zero where it lands.
+mkfs.ext4 -q -L hamnix -d "$ROOTDIR" -m 1 -E lazy_itable_init=0 "$ROOTFS" 2600M
 echo "[disk] root filesystem: $(du -h "$ROOTFS" | cut -f1)"
 
 # --- the unified kernel image ---------------------------------------------

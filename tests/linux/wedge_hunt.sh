@@ -471,13 +471,33 @@ else
     bad "BOOTLOGD MADE THE BOOT MEDIUM COMMIT $(( A_WRFL - B_WRFL )) TIMES in ${SECS}s (budget $BUDGET_FL): a diagnostic is a standing load on the stick it is diagnosing"
 fi
 
-# AND THE OTHER WRITER, WHICH THIS GATE FOUND BY ACCIDENT AND WHICH IS NOT
-# BOOTLOGD. Arm B has no logger at all and still wrote 37 MB in six minutes --
-# about 100 KB/s from an idle desktop, in few, large, rarely-flushed
-# operations, which is the signature of ordinary ext4 writeback rather than of
-# anything synchronous. It is recorded here so that the number is watched; it
-# is NOT yet attributed, and this gate does not pretend to know what it is.
-info "arm B is the floor: an idle desktop with NO logger still wrote $B_WRB bytes to its boot medium in ${SECS}s"
+# AND THE OTHER WRITER, WHICH THIS GATE FOUND BY ACCIDENT AND WHICH WAS BIGGER
+# THAN THE ONE IT WAS LOOKING FOR.
+#
+# Arm B has no logger at all and still wrote 37-41 MB in six minutes. Chased
+# down by taking everything away -- no desktop, no bootlogd, no dhcpc, a PID 1
+# that exec'd a shell which printed one line and called `sleep 600` -- and the
+# medium was STILL written 110.7 KB/s, 20.4 MB in 180 s, with the guest's own
+# /proc/diskstats agreeing to within eight sectors.
+#
+# It was ext4 LAZY INODE TABLE INITIALISATION: mke2fs leaves the inode tables
+# unwritten and the kernel zeroes all 42.7 MB of them in the background on the
+# first read-write mount, which at that rate is about seven minutes -- starting
+# at the first boot of every stick, which is the only boot most sticks get.
+# scripts/hamlinux_disk.sh now passes `-E lazy_itable_init=0` and the same
+# measurement is 0.3 KB/s: 8 write operations and 2 flushes in 180 s.
+#
+# SO THE FLOOR IS NOW AN ASSERTION. A hamnix-linux desktop sitting still must
+# not write to the medium it booted from, and this is where that is enforced.
+# The ceiling is a ceiling and not a fit: 8 MB over the window is 22 KB/s,
+# several times what the desktop's own /var/log files can account for and two
+# orders below the 41 MB this arm scored before the mkfs change.
+BUDGET_IDLE=$(( 8 * 1024 * 1024 ))
+if [ "$B_WRB" -le "$BUDGET_IDLE" ]; then
+    ok "an idle desktop with no logger wrote $B_WRB bytes to its boot medium in ${SECS}s, under the $BUDGET_IDLE ceiling"
+else
+    bad "AN IDLE DESKTOP WROTE $B_WRB BYTES TO ITS BOOT MEDIUM in ${SECS}s with no logger running (ceiling $BUDGET_IDLE): something is writing to the stick at rest"
+fi
 
 # ---------------------------------------------------------------------------
 say "DID ANYTHING WEDGE?"
