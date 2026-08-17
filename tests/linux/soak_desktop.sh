@@ -260,15 +260,58 @@ NEUTRAL_X=900; NEUTRAL_Y=600      # a click here dismisses the menu
 # state can still be read from.
 # ---------------------------------------------------------------------------
 write_rc() {
-    cat >"$WORK/rc.soak" <<RCEOF
-source '/etc/rc.boot.installed'
-echo '$MARK'
-cycle = 0
-while 1 == 1 {
-    cycle = cycle + 1
-    echo '/bin/hamcalcscene' > '/dev/wsys/appmenu/launch'
+    # THE CLOSE PATH, AND WHY IT IS THIS ONE.
+    #
+    # The obvious `ps | grep <app> | awk '{print $1}' | xargs kill` DOES NOT
+    # WORK ON THIS IMAGE and the first run of this gate proved it by printing
+    # `hamsh: command not found: awk` twenty-one times: neither awk nor xargs is
+    # staged into build/image/root/bin. Nor is a pipeline usable as a value --
+    # hamsh answers `command substitution of a PIPELINE is not wired -- use a
+    # single command`. Both measured, in the guest, not assumed.
+    #
+    # So the window is closed through the compositor instead of the process
+    # through the kernel: `close <wid>` on /dev/wsys/ctl DESTROYS THE WINDOW
+    # RECORD (user/linux-wsys.c:3032, tests/linux/wsys_close_button.sh), which
+    # is what the title-bar close button sends and therefore what a user
+    # closing a window actually does.
+    #
+    # IT IS A SWEEP OVER A FIXED RANGE AND NOT A LOOKUP, because the shell
+    # cannot extract a wid from `cat /dev/wsys/windows` either. Every wid from
+    # 6 up is closed at the end of each cycle -- i.e. the application that has
+    # just been open for the dwell is closed, which is the churn this file is
+    # for. An unknown wid is a closed verb set's -EINVAL and costs nothing, so
+    # sweeping empty space is free.
+    #
+    # SIX IS THE FLOOR AND IT IS NOT ARBITRARY: wsysd, hamdesktop's backdrop
+    # and hampanelscene's two panels hold the low wids (the census's first
+    # `windows` reading is that chrome, and it is 3-5 on this image). Closing
+    # those would be dismantling the desktop rather than using it.
+    #
+    # A TRAILING COUNTER WAS TRIED FIRST AND MEASURED WRONG. `lo` advancing 4 a
+    # cycle OVERTOOK the wid allocator: by cycle 35 it was sweeping wids around
+    # 146 while the live windows were far below it, and the count still climbed
+    # 3 -> 31. The number that proves this one works is the same number: the
+    # census's `windows` reading, which must come back down every cycle.
+    local closer=""
+    if [ "${HAMLINUX_SOAK_CLOSE:-1}" = 1 ]; then
+        closer=$(cat <<'CLOSEEOF'
+    c = 6
+    while c < 64 {
+        echo close $c > '/dev/wsys/ctl'
+        c = c + 1
+    }
+CLOSEEOF
+)
+    fi
+    # One cycle = launch, dwell with heartbeats, census, sweep. Four apps per
+    # outer pass so the workload is not one program's behaviour generalised.
+    local dwell="${HAMLINUX_SOAK_DWELL:-8}"
+    local body=""
+    for app in hamcalcscene hamnotesscene hammonscene hamtermscene; do
+        body="$body
+    echo '/bin/$app' > '/dev/wsys/appmenu/launch'
     n = 0
-    while n < 8 {
+    while n < $dwell {
         echo '$HB'
         date
         ls /etc > /dev/null
@@ -276,43 +319,20 @@ while 1 == 1 {
         n = n + 1
     }
     echo '$CENSUS cycle'
-    echo \$cycle
     cat '/dev/wsys/wsysd/state'
-    cat '/dev/wsys/windows'
     ls -l /var/log
     ps
     echo '${CENSUS}END'
-    ps | grep hamcalcscene | awk '{print \$1}' | xargs kill
-    echo '/bin/hamnotesscene' > '/dev/wsys/appmenu/launch'
-    n = 0
-    while n < 8 {
-        echo '$HB'
-        date
-        ls /etc > /dev/null
-        sleep 1
-        n = n + 1
-    }
-    ps | grep hamnotesscene | awk '{print \$1}' | xargs kill
-    echo '/bin/hammonscene' > '/dev/wsys/appmenu/launch'
-    n = 0
-    while n < 8 {
-        echo '$HB'
-        date
-        ls /etc > /dev/null
-        sleep 1
-        n = n + 1
-    }
-    ps | grep hammonscene | awk '{print \$1}' | xargs kill
-    echo '/bin/hamtermscene' > '/dev/wsys/appmenu/launch'
-    n = 0
-    while n < 8 {
-        echo '$HB'
-        date
-        ls /etc > /dev/null
-        sleep 1
-        n = n + 1
-    }
-    ps | grep hamtermscene | awk '{print \$1}' | xargs kill
+$closer"
+    done
+    cat >"$WORK/rc.soak" <<RCEOF
+source '/etc/rc.boot.installed'
+echo '$MARK'
+cycle = 0
+lo = 6
+while 1 == 1 {
+    cycle = cycle + 1
+$body
 }
 RCEOF
 }
@@ -360,8 +380,15 @@ log_growth() {
 import re, sys, datetime
 data = open(sys.argv[1], 'rb').read().decode('utf-8', 'replace')
 tspat = re.compile(r'(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d) UTC')
-# `ls -l` rows: mode links owner group SIZE ... name
-lspat = re.compile(r'^\S+\s+\S+\s+\S+\s+\S+\s+(\d+)\s+.*?(\S+\.log)\s*$')
+# THIS TREE'S `ls -l`, NOT GNU's. user/ls.ad prints `mode links size<TAB>name`
+# -- three fields and no date column -- so a GNU-shaped regex matched nothing
+# and the first run of this gate reported "the log-growth question was NOT
+# ANSWERED" rather than a rate. That is the failure mode this parser is written
+# against, and it is why arm 0's planted evidence below is in THIS format: a
+# proof in the wrong format would prove a parser nobody runs.
+#
+# Positional from the END so a mode string with or without a trailing dot, and
+# any number of leading columns, still lands on the same two values.
 now = None
 first, last = {}, {}
 for line in data.splitlines():
@@ -370,9 +397,10 @@ for line in data.splitlines():
         y, mo, d, h, mi, s = (int(x) for x in m.groups())
         now = datetime.datetime(y, mo, d, h, mi, s).timestamp()
         continue
-    m = lspat.match(line.strip())
-    if m and now is not None:
-        size, name = int(m.group(1)), m.group(2)
+    tok = line.split()
+    if len(tok) >= 3 and now is not None and tok[-1].endswith('.log') \
+            and tok[-2].isdigit() and tok[0][:1] in '-dlbcps':
+        size, name = int(tok[-2]), tok[-1]
         first.setdefault(name, (now, size))
         last[name] = (now, size)
 for name in sorted(last):
@@ -752,9 +780,17 @@ else
     # only when it is ABSENT, so every run after the first would otherwise
     # package whatever tree happened to be lying there -- the stale-artifact
     # false report tests/linux/boot_log.sh records paying for.
-    info "rebuilding build/image/root so this gate cannot boot a stale tree"
-    HAMLINUX_DISTRO_RO=1 scripts/hamlinux_image.sh >"$WORK/image.log" 2>&1 || {
-        bad "image build"; tail -20 "$WORK/image.log"; exit 1; }
+    if [ "${HAMLINUX_SOAK_IMGREUSE:-0}" = 1 ] && [ -d build/image/root ]; then
+        # ITERATION ONLY, and it is named so it cannot be mistaken for a run.
+        # The rc changes far more often than the tree does while a workload is
+        # being got right, and a full image build per edit is fifteen minutes
+        # of a shared machine. A RESULT IS NEVER TAKEN FROM A RUN WITH THIS SET.
+        info "HAMLINUX_SOAK_IMGREUSE: reusing build/image/root -- ITERATION ONLY, not a result"
+    else
+        info "rebuilding build/image/root so this gate cannot boot a stale tree"
+        HAMLINUX_DISTRO_RO=1 scripts/hamlinux_image.sh >"$WORK/image.log" 2>&1 || {
+            bad "image build"; tail -20 "$WORK/image.log"; exit 1; }
+    fi
     HAMLINUX_DISK_RC="$WORK/rc.soak" \
         scripts/hamlinux_disk.sh "$WORK/medium.img" 3G >"$WORK/disk.log" 2>&1 || {
         bad "disk build"; tail -20 "$WORK/disk.log"; exit 1; }
@@ -790,11 +826,11 @@ SYN2=$(guest_max_gap "$WORK/synthetic2.log")
 # matched a line.
 {
     printf 'SOAKHB\n2026-01-01 00:00:00 UTC\n'
-    printf -- '-rw-r--r-- 1 root root      1000 Jan  1 00:00 wsysd.log\n'
-    printf -- '-rw-r--r-- 1 root root       500 Jan  1 00:00 panel.log\n'
+    printf -- '-rw-r--r-- 0 1000\twsysd.log\n'
+    printf -- '-rw-r--r-- 0 500\tpanel.log\n'
     printf 'SOAKHB\n2026-01-01 00:01:40 UTC\n'
-    printf -- '-rw-r--r-- 1 root root     11000 Jan  1 00:01 wsysd.log\n'
-    printf -- '-rw-r--r-- 1 root root       500 Jan  1 00:01 panel.log\n'
+    printf -- '-rw-r--r-- 0 11000\twsysd.log\n'
+    printf -- '-rw-r--r-- 0 500\tpanel.log\n'
 } >"$WORK/synthetic3.log"
 G=$(log_growth "$WORK/synthetic3.log")
 GW=$(printf '%s\n' "$G" | awk '$1=="wsysd.log"{print $5}')
@@ -916,6 +952,34 @@ if [ "$S_KEYS" -gt 0 ] && [ "$S_PTR" -gt 0 ]; then
     ok "the desktop was DRIVEN for the whole window: wsysd took $S_KEYS keystrokes and $S_PTR pointer events"
 else
     bad "wsysd took keys=$S_KEYS pointer=$S_PTR over ${SECS}s -- THIS WAS NOT A WORKLOAD and no negative below is one"
+fi
+
+say "DID THE WINDOW SET STAY BOUNDED? (candidate 2: the 64-per-socket ceiling)"
+# wedge_hunt ruled the connection ceiling out BY READING THE CODE -- it fails
+# closed and re-arms. Reading is not running, and this is the arm that runs it.
+# The trajectory, not just the last value: a count that climbs linearly and
+# never falls is a desktop leaking a window per launch, and it walks into the
+# ceiling on a clock rather than on a coincidence.
+WINTRAJ=$(grep -ao 'windows [0-9][0-9]*' "$WORK/soak/serial.log" | sed 's/^windows //' | grep -v '^$')
+W_FIRST=$(printf '%s\n' "$WINTRAJ" | head -1)
+W_LAST=$(printf '%s\n' "$WINTRAJ" | tail -1)
+W_MAX=$(printf '%s\n' "$WINTRAJ" | sort -n | tail -1)
+info "wsysd's window count went $W_FIRST -> $W_LAST over ${SECS}s, peaking at $W_MAX"
+if [ "${HAMLINUX_SOAK_CLOSE:-1}" = 1 ]; then
+    # THE TEST IS THE PEAK AGAINST THE BASELINE, NOT THE PEAK AGAINST A ROUND
+    # NUMBER. The chrome (compositor, backdrop, two panels) is whatever the
+    # first census said, and the question is whether the APPLICATIONS on top of
+    # it are reclaimed. A handful of slack over the baseline is a cycle caught
+    # mid-flight; a count that has climbed by ten is a leak, and 64 is where
+    # the per-socket ceiling stops being an abstraction.
+    W_CEIL=$(( ${W_FIRST:-3} + 8 ))
+    if [ "${W_MAX:-0}" -le "$W_CEIL" ]; then
+        ok "the window set stayed bounded: baseline $W_FIRST, peak $W_MAX over ${SECS}s of opening an application every ${HAMLINUX_SOAK_DWELL:-8}s -- windows ARE reclaimed"
+    else
+        bad "THE WINDOW SET REACHED $W_MAX against a baseline of $W_FIRST while apps were opened and closed -- windows are not being reclaimed and 64 is where the per-socket ceiling is"
+    fi
+else
+    info "close sweep DISABLED for this run: the window count is meant to climb, and what happens at 64 is the measurement"
 fi
 
 say "IS /var/log GROWING? (candidate 3, measured rather than reasoned)"
