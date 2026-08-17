@@ -760,6 +760,25 @@ info "after Tab + Return: $(printf '%s' "$ADV" | tr '\n' '|' | cut -c1-200)"
 # be ERASED" (:1234, :1241).
 if printf '%s' "$ADV" | grep -qiE 'Review|Target disk|ERASED|Host name'; then
     ok "TAB SELECTED A DISK AND RETURN ADVANCED PAST STEP 5 -- the wizard is completable from the keyboard for the first time"
+    # AN OBSERVATION THIS GATE CANNOT YET EXPLAIN, RECORDED RATHER THAN
+    # SMOOTHED OVER. On the first run after the fix, the frame taken 6 s after
+    # ONE Return showed not the review page but the PROGRESS PANE, with
+    # hlinstall's output already in it. `_goto_next` (haminstallui.ad:1568)
+    # only calls `_begin_install` when `page == PAGE_SUMMARY`, so getting
+    # there needs TWO Returns, and this section sent one.
+    #
+    # Two candidates, and this run cannot separate them: the wizard's
+    # keys-file read taking more than one press out of one `key ret`, or a
+    # Return queued from earlier in the drive arriving late. It matters
+    # because "one keystroke on the disk page starts an erase" would be a
+    # safety defect introduced by making that page keyboard-completable.
+    #
+    # THE EXPERIMENT: take a shot BETWEEN the Return and the install, and
+    # count `d 10` lines in the window's /keys against Returns sent.
+    # Section F is the backstop meanwhile -- both targets byte-identical.
+    if printf '%s' "$ADV" | grep -qiE 'installer|installing|ERASES'; then
+        info "NOTE: one Return produced a frame with the INSTALLER ALREADY RUNNING; _goto_next needs two to get there. Unexplained -- see the comment above this line. Section F says nothing was written."
+    fi
 elif printf '%s' "$ADV" | grep -qi 'Step 5'; then
     bad "Tab then Return left the wizard on step 5 -- either the disk page still has no keyboard selection, or no disk was offered to select"
 else
@@ -797,10 +816,33 @@ elif [ "$NCALC" -ge 1 ]; then
 else
     bad "the census never found haminstallui -- but it never found the control either, so this says nothing about the wizard"
 fi
-if [ "$NINSTALL" = 0 ]; then
-    ok "/bin/install NEVER APPEARED in any census: the wizard did not reach the spawn, so which bytes sit at /bin/install could not have mattered on this path"
+# THE THIRD STALE EXPECTATION IN THIS FILE, and it went red on the first run
+# after the fix. It read:
+#
+#     if NINSTALL = 0 -> ok "/bin/install NEVER APPEARED ... the wizard did not
+#                            reach the spawn"
+#     else            -> bad "the spawn was reached"
+#
+# i.e. it treated REACHING THE INSTALLER as the failure. That was the right
+# reading when the wizard could not offer a disk at all -- reaching the spawn
+# then would have meant it was heading for one with no target. Now that the
+# disk page works, reaching the spawn is the POINT, and a wizard that still
+# never got there would be the defect.
+#
+# MEASURED on the first run after the fix: NINSTALL=2, and the OCR of the
+# summary page carries hlinstall's own output --
+#     "hamnix-linux installer / boot: /dev/nvme0n1p1 / this ERASES the disk. /
+#      hlinstall: /boot/root.partuuid is missing or is not a UUID."
+# -- which is the installer REFUSING, by name, BEFORE the disk is touched
+# (user/hlinstall.ad checks that first for exactly this reason), and section F
+# confirms both targets came back byte-identical.
+#
+# `/dev/nvme0n1p1` in that line is also the proof that the /dev/ prefix and the
+# nvme `p`-separator rule both did the right thing end to end.
+if [ "$NINSTALL" -ge 1 ]; then
+    ok "/bin/install was reached and RAN ($NINSTALL census lines) -- the graphical path now gets all the way to the installer"
 else
-    bad "/bin/install (or hlinstall) DID appear in the census $NINSTALL times -- the spawn was reached and the served-binary question is live on the graphical path"
+    bad "/bin/install NEVER APPEARED in any census: the wizard advanced past the disk page but never reached the spawn, so nothing downstream of it is exercised"
 fi
 # And the wizard's own spawn/result strings, which are what it prints when it
 # gets that far (haminstallui.ad:1084 spawn, :1126 'install complete', :1128 FAIL).
