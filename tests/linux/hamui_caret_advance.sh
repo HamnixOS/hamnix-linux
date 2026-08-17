@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # tests/linux/hamui_caret_advance.sh — WHERE lib/hamui.ad PUTS THE TEXT CARET.
 #
 # WHAT THIS GATE IS ACTUALLY FOR, AND IT IS NOT THE CARET.

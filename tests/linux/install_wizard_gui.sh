@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it boots a machine under `qemu-system-x86_64`.
+#
 # tests/linux/install_wizard_gui.sh — THE GRAPHICAL INSTALL PATH HAD NEVER BEEN
 # DRIVEN. THIS DRIVES IT, WITH TWO BLANK TARGET DISKS ATTACHED, AND READS THE
 # SCREEN.
@@ -14,7 +21,8 @@
 #
 # The graphical half was left open, and with a specific reason to expect it to
 # be worse. user/haminstallui.ad -- the DE's wizard, reachable from the app menu
-# because hamnix-install ships etc/hamde/apps/installer.desktop -- reads "install
+# because hamnix-install ships etc/hamde/apps/installer.desktop -- reads
+# "install
 # complete" (:1126) and "FAIL" (:1128) off the child's stdout, so IF it reaches
 # the spawn a person sees a failure page. The question is whether it reaches the
 # spawn at all, because `_enumerate_disks` (:328-331) offers the person a target

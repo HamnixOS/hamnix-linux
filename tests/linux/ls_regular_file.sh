@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # tests/linux/ls_regular_file.sh — `ls` GIVEN A REGULAR FILE MUST PRINT ITS
 # NAME, NOT ITS CONTENTS.
 #

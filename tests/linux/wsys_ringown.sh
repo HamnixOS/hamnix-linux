@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # tests/linux/wsys_ringown.sh — the four rings that had no owner check at all.
 #
 # WHAT WAS MEASURED, AND IT IS THE REASON THIS FILE EXISTS.  With the mediator

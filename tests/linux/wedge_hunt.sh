@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it boots a machine under `qemu-system-x86_64`.
+#
 # tests/linux/wedge_hunt.sh — DOES THE MACHINE STOP ANSWERING AFTER A FEW
 # MINUTES ON A SLOW STICK, AND IF IT DOES, IS THE BOOT LOG WHY?
 #

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # tests/linux/wsys_bypass.sh — the gate the KERNEL enforces, measured.
 #
 # WHAT IS UNDER TEST, and how it differs from wsys_uidgate.sh.  That test

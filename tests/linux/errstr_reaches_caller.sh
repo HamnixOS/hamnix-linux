@@ -1,4 +1,8 @@
 #!/bin/bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # errstr_reaches_caller.sh — a refusal's REASON must reach the person who
 # asked, not only a console they cannot see.
 #

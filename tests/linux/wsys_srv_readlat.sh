@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # wsys_srv_readlat.sh — WHAT A ROUTED READ COSTS, MEASURED AGAINST THE THING
 # IT HAD TO BEAT, IN THE SAME RUN.
 #

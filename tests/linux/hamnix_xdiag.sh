@@ -1,4 +1,12 @@
 #!/bin/sh
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because MEASURED 2026-08-17: it exits 0 in 0 s while printing no PASS, no FAIL and no assertion count at all (80594 bytes of output). It is a probe, not a gate -- registering it would add a battery line that cannot go red, which is exactly the false assurance the registration gate exists to prevent.
+#
+#
 # hamnix-xdiag — what is actually on the X display inside the namespace.
 # Run from a SECOND `enter debian { }` while the session is up; /tmp/.X11-unix
 # is on the namespace's own filesystem, so :0 resolves from either entry.

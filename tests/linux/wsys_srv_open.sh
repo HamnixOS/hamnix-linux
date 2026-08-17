@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # wsys_srv_open.sh — STAGE 10: EXISTENCE IS A SERVER ANSWER, OR IT IS NOT.
 #
 # WHAT THIS GATE IS FOR

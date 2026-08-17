@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it is a HELPER, not a standalone gate: run with no arguments on 2026-08-17 it printed its usage line and exited 1 in 0 s. Other gates invoke it with arguments.
+#
+#
 # cpuprobe.sh — CPU of ONE KNOWN PID, and a probe that proves itself first.
 #
 # WHY THIS EXISTS. `pgrep -f "bin/wsysd"` matched the WATCHDOG SHELL, whose

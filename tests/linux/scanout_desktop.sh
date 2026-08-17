@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it was MEASURED on 2026-08-17 and exited 1 in 45 s on a host with the channel and the image built, so it does not pass unattended here yet.
+#
+#
 # scanout_desktop.sh — THE REAL DESKTOP, ON THE DISPLAY, VIA SCANOUT.
 #
 # wsysd takes DP-1 with a GPU dmabuf and composites entirely on the device.

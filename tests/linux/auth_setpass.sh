@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # tests/linux/auth_setpass.sh — /dev/auth's `setpass` verb, and its GATE.
 #
 # `passwd` could not change a password on this port at all: user/linux-auth.c

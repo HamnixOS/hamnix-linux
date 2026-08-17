@@ -1,3 +1,11 @@
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because MEASURED 2026-08-17: it exits 0 in 0 s while printing no PASS, no FAIL and no assertion count at all (0 bytes of output). It is a probe, not a gate -- registering it would add a battery line that cannot go red, which is exactly the false assurance the registration gate exists to prevent.
+#
+#
 # tests/linux/reap.sh -- REAP WHAT YOU START, ON EVERY PATH OUT.
 #
 # THE GAP THIS CLOSES

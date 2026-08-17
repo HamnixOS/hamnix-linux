@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # tests/linux/de_distros_table.sh — /etc/distros IS READ TO THE END, AND A ROW
 # THE PANEL CANNOT READ IS NEVER A ROW IT SILENTLY DROPS.
 #

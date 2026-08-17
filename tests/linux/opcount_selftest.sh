@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # opcount_selftest.sh — PROVE THE OP COUNTER BEFORE ANY NUMBER FROM IT IS USED.
 #
 # The counter exists to answer whether /dev/wsys could become a userland file

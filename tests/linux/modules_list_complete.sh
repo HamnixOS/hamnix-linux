@@ -1,4 +1,5 @@
 #!/bin/bash
+#
 # modules_list_complete.sh — the module list must be read whole, and a list
 # that does not fit must SAY SO.
 #

@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it was MEASURED on 2026-08-17 and did not finish inside the 400 s sweep timeout, which is more than the 12-way-sharded 50-minute battery can spend on one gate.
+#
+#
 # wsys_srv_transport.sh — STAGE 1 OF THE MEDIATOR: THERE IS A BOUNDARY TO
 # TALK ACROSS, AND CROSSING IT CHANGES NOTHING YET.
 #

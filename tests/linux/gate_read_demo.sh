@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # tests/linux/gate_read_demo.sh — SHOW THE DEFECT, THEN SHOW IT GONE.
 #
 # tests/linux/gate_read.sh claims that an empty read used to become a verdict.

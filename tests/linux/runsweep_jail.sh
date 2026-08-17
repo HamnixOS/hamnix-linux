@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it was MEASURED on 2026-08-17 and exited 1 in 0 s on a host with the channel and the image built, so it does not pass unattended here yet.
+#
+#
 # tests/linux/runsweep_jail.sh — the inside of one smoke test.
 #
 # Run by scripts/hamlinux_runsweep.sh as:

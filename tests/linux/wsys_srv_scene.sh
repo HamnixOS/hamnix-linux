@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # tests/linux/wsys_srv_scene.sh — STAGE 6: ROUTING THE LAST UNROUTED MUTATION,
 # AND THE HALF THAT MATTERS IS THE PAINT.
 #

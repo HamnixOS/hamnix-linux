@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Its host runtime and its pass/fail were NOT measured when this line was
+# written. If you make it cheap enough for the battery, add the manifest line
+# and delete this block.
+#
 # tests/linux/x11_stream_resync.sh — DOES ONE OVERSIZED REQUEST DESTROY THE
 # CONNECTION?  And can the server take a connection at all?
 #

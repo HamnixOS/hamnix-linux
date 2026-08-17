@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION, 2026-08-17. Until this date scripts/test_gate_registration.sh
+# globbed only scripts/test_*.sh, so this directory was invisible to the gate
+# against unregistered gates and every file in it read as coverage without
+# being coverage. This gate is ON-DEMAND: not in ci_battery_manifest.txt
+# because it was MEASURED on 2026-08-17 and exited 1 in 157 s on a host with the channel and the image built, so it does not pass unattended here yet.
+#
+#
 # tests/linux/de_fps_latency.sh — HOW FAST IS THE DESKTOP, IN FRAMES AND IN
 # MILLISECONDS, AND WHAT IS IT DOING WHEN NOBODY IS TOUCHING IT.
 #
