@@ -836,6 +836,38 @@ def check_maxsurface():
     puts(2, " -- COMP_W/COMP_H in user/wsysd.ad and BB_W/BB_H in user/linux-wsys.c have drifted apart. Windows will be clipped at one number and the screen bounded by the other.\n")
 
 
+# THE THIRD COPY OF THE CEILING, AND THE ONE THAT CAUSED THE BLACK BAR.
+#
+# check_maxsurface above reconciles COMP_W/COMP_H with the device's BB_W/BB_H.
+# There is a THIRD: lib/hamui_host.ad's HOST_MAX_W/HOST_MAX_H, the size of the
+# BSS colour image this compositor rasterizes every scene window into. It was
+# 1920x1080 while the other two were 2560x1600, and on 2026-08-16 the owner's
+# 1920x1200 panel showed exactly what that costs: hamui_host_begin_into refused
+# the full-screen backdrop for a stride it could not honour, fell back to
+# hamui_host_begin, which clamped 1200 to 1080, and rows 1080..1173 reached the
+# screen as the clear colour -- a black bar just above the bottom panel, with
+# every return code fine and not one line in this log.
+#
+# It is a PURE module: no extern, no syscall, so it cannot read /dev/wsys/pool
+# and cannot print. It can only be ASKED, and this is the asking. Same law as
+# check_maxsurface: LOUD, not fatal. A compositor that refuses to run over a
+# number is the complaint that started all of this.
+def check_rasterceiling():
+    mw: int32 = hamui_host_max_w()
+    mh: int32 = hamui_host_max_h()
+    if mw >= COMP_W and mh >= COMP_H:
+        return
+    puts(2, "wsysd: WARNING: the scene rasterizer (lib/hamui_host.ad) can only render ")
+    putd(2, mw)
+    puts(2, "x")
+    putd(2, mh)
+    puts(2, " but this compositor's composite buffer is ")
+    putd(2, COMP_W)
+    puts(2, "x")
+    putd(2, COMP_H)
+    puts(2, " -- HOST_MAX_W/HOST_MAX_H in lib/hamui_host.ad and COMP_W/COMP_H here have drifted apart. A full-screen window taller or wider than the rasterizer's ceiling will be SILENTLY CLAMPED and the rows past it will reach the screen as the clear colour: a black band at the edge of the desktop.\n")
+
+
 def read_screen() -> int32:
     # "/dev/fb" answers "W H PITCH BPP PIXFMT\n" to a read. Opening it FOR
     # WRITING is what suspends the text console (user/linux-fb.c), so the
@@ -2051,6 +2083,50 @@ covwarn_wid: Array[64, int32]
 covwarn_n:   uint64 = 0
 
 
+# A RASTERIZE THAT CAME BACK SMALLER THAN IT WAS ASKED FOR MUST SAY SO.
+#
+# This is the report the black bar at the bottom of the owner's 1920x1200
+# desktop did not have. lib/hamui_host.ad clamps the rasterize to its BSS
+# ceiling and returns success; every number downstream -- including
+# report_uncovered's, which measures coverage against the CLAMPED height --
+# then agrees with the clamp, so a compositor that had just dropped 120 rows of
+# screen had nothing to say about it. hamui_host_requested_w/_h() are the
+# pre-clamp size, and this is the only place the two are compared.
+#
+# ONCE PER WINDOW, like the two reports beside it: this runs every frame.
+clampwarn_wid: Array[64, int32]
+clampwarn_n:   uint64 = 0
+
+
+def report_clamped(wid: int32):
+    if hamui_host_clamped() == 0:
+        return
+    s: uint64 = 0
+    while s < clampwarn_n:
+        if clampwarn_wid[s] == wid:
+            return
+        s = s + 1
+    if clampwarn_n >= 64:
+        return
+    clampwarn_wid[clampwarn_n] = wid
+    clampwarn_n = clampwarn_n + 1
+    puts(2, "wsysd: window ")
+    putd(2, wid)
+    puts(2, " asked to be rasterized at ")
+    putd(2, hamui_host_requested_w())
+    puts(2, "x")
+    putd(2, hamui_host_requested_h())
+    puts(2, " and the rasterizer produced ")
+    putd(2, hamui_host_width())
+    puts(2, "x")
+    putd(2, hamui_host_height())
+    puts(2, " -- lib/hamui_host.ad's HOST_MAX_W/HOST_MAX_H ceiling is ")
+    putd(2, hamui_host_max_w())
+    puts(2, "x")
+    putd(2, hamui_host_max_h())
+    puts(2, ". The rows and columns past it are NOT PAINTED and reach the screen as the compositor's clear colour -- a black band at the edge of this window. Raise that ceiling to at least the screen size.\n")
+
+
 def report_uncovered(wid: int32, pres: int32):
     if pres != 0:
         return
@@ -2243,6 +2319,12 @@ def paint_window(i: uint64) -> int32:
     if bench_on != 0:
         t_rast = t_rast + (now_us() - tr0)
     report_image_misses(wid)
+    # BEFORE report_uncovered, because a clamp makes that report's numbers
+    # meaningless (it measures against the clamped height) and this one says
+    # why. Not exempt for keyed/blended windows the way coverage is: painting
+    # less than you own can be deliberate, but being rasterized smaller than
+    # you asked for never is.
+    report_clamped(wid)
     # NOT FOR A v2 WINDOW, for the same reason keyed and blended are exempt.
     # report_uncovered measures coverage of the RASTERIZED SCENE, and a v2
     # window's content does not come from its scene: paint_backbuffer()
@@ -4330,6 +4412,9 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # After announce_screen, because this reads /dev/wsys and the device is
     # only worth asking once this process is serving it.
     check_maxsurface()
+    # No device needed for this one -- it asks the linked-in rasterizer for its
+    # own ceiling -- but it belongs beside the other reconciliation.
+    check_rasterceiling()
 
     # Take the text console. /dev/fbctl `suspend` is Hamnix's verb for it; on
     # Linux it is KDSETMODE KD_GRAPHICS (user/linux-fb.c). Without it the
