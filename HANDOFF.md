@@ -24,6 +24,35 @@ because that is the version those runs were made against; the numbers stand, the
 version in them is history. **`CHANGELOG.md` is the authority on what a person
 gets, and its `Unreleased` section is the authority on what they do not yet.**
 
+**1.0.26 IS PUBLISHED and verified as served** — 130 packages (up from 126),
+signature verifying **against `etc/hpm/trusted.pub`** rather than merely against
+the signing key, and both `hamnix-drivers-sof-1.0.26.tar.gz` and
+`hamnix-firmware-i915-dmc-1.0.26.tar.gz` fetched **from the site** byte-identical
+to the gated build. Thirteen polls between pushing and serving. It is the release
+the second and third real-hardware boots produced: **sound had no chance** (the
+driver *declined* and the log line naming it came from the arbiter, not the
+driver; none of the 22 modules it needs were on the medium, and the image builder
+**had no path to carry firmware at all**), **the text caret drifted right** as
+you typed — four copies of a flat 8-pixel cell in the toolkit, two of them
+inverses used to turn a click back into a character — and **the desktop backdrop
+stopped 120 rows short** on a 1920x1200 screen, a third copy of a 1920x1080
+ceiling in the component every window draws through, which **shrank the window
+and reported success**.
+
+Shipped knowingly, and stated in the notes rather than left to be found: **this
+is not proof that sound works** — no VM has that hardware and the build machine
+never takes that path; what is proven is that the medium carries what such a
+laptop asks for. **Firmware, the boot module list and the kernel command line
+arrive only on freshly written media.** The five-minute freeze on real hardware
+is **still unexplained** — two standing write loads were removed and neither was
+shown to be it. Eleven `text_len * 8` widget-sizing sites remain, left alone
+deliberately because nothing measures toolkit layout yet.
+
+One gate assertion was red at publication and **structurally could not be
+green**: `install_from_usb.sh` has the installed guest update from the *live*
+site, then compares what it recorded against the *local* candidate. Those agree
+only once the candidate is served. Diagnosed, not retried, not silenced.
+
 **1.0.25 IS PUBLISHED and verified as served** — 126 packages, signature
 verifying against the trust root, and `hpm-1.0.25.tar.gz` fetched from the site
 byte-identical to the gated build. It exists because `hpm` **silently truncated
