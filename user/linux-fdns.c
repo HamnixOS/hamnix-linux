@@ -95,17 +95,89 @@
 #include "linux-fdns.h"
 
 /* Bumped when struct fdshm's layout changed (the slot grew rever/wever/done/
- * bound, the bind grew seq, and the segment grew next_seq).  A segment left
- * behind by an older binary is re-initialised rather than misread. */
-#define FDNS_MAGIC   0x32534E46u          /* "FNS2" */
-#define MAX_SLOTS    64
-#define MAX_BINDS    512
+ * bound, the bind grew seq, the segment grew next_seq, and then MAX_SLOTS
+ * grew, which moves every byte of bind[] along with it).  A segment left
+ * behind by an older binary is re-initialised rather than misread.
+ *
+ * The magic alone is not enough once MAX_SLOTS is a build-time knob -- a gate
+ * that builds this file with -DMAX_SLOTS=64 has the same magic and a
+ * different layout -- so the segment carries its own cap and is re-initialised
+ * when it disagrees.  Cheap, and it is the difference between a stale segment
+ * being noticed and being read as garbage slot records. */
+#define FDNS_MAGIC   0x33534E46u          /* "FNS3" */
+/* THE TWO CEILINGS, AND WHY THEY ARE THESE NUMBERS.
+ *
+ * Both tables are pinned by LIVE processes and reclaimed only when those
+ * processes die, and a desktop session's whole habit is to accumulate live
+ * programs -- closing a window (`close <wid>` on /dev/wsys/ctl) clears the
+ * window record and leaves the program running. So occupancy tracks "how many
+ * things has this session opened", and NOTHING BOUNDS THAT. These numbers
+ * therefore buy headroom; they do not stop a long enough session.
+ *
+ * MEASURED, with tests/linux/fdns_slot_exhaust.sh modelling the soak's own
+ * 1-in-4 rotation (hamtermscene takes two pipe slots and keeps them):
+ *
+ *          slots  binds   first redirect that could not be applied
+ *   was       64    512    launch 128   (slot table; SILENTLY, to the console)
+ *   slots   1024    512    launch 229   (bind table)
+ *   both    1024   8192    none in 400
+ *
+ * The soak saw it at launch 118 with 29-30 terminals open, which is 58-60
+ * pinned pipe slots plus the three /var/log redirects rc.5.linux holds -- the
+ * same arithmetic, on the real machine.
+ *
+ * WHAT IT COSTS. sizeof(struct fdshm) goes from about 35 KB to about 550 KB
+ * of tmpfs, mapped MAP_SHARED, so it is one copy for the whole system and
+ * only the pages actually touched are resident. Nothing outside this file
+ * knows the size: the segment is created by whoever attaches first and
+ * ftruncate'd to sizeof(struct fdshm), and a segment written by a binary with
+ * different dimensions is re-initialised (see FDNS_MAGIC and cap_slots).
+ * bind_gc costs one kill(pid,0) per LIVE record per fork, which scales with
+ * occupancy and not with the ceiling, so raising the ceiling does not raise
+ * it. The linear scans grow, but they are reads of contiguous memory.
+ */
+#ifndef MAX_SLOTS
+#define MAX_SLOTS    1024
+#endif
+#ifndef MAX_BINDS
+#define MAX_BINDS    8192
+#endif
 #define PATH_CAP     256
+
+/* For putting MAX_SLOTS into the diagnostic that names it. */
+#define FDNS_STR_(x) #x
+#define FDNS_STR(x)  FDNS_STR_(x)
 
 /* A slot is either a PIPE (a fifo) or a REDIRECT TARGET (an ordinary file).
  * Both are addressed the same way -- by number -- because that is what crosses
  * a process boundary. */
 enum { SLOT_FIFO = 0, SLOT_FILE = 1 };
+
+/* slotrec.used, and it is the SAME three-state claim the bind table below
+ * already uses, for the same reason and against a worse consequence.
+ *
+ * THE COLLISION, MEASURED. slot_alloc used to be "scan for a zero, memset it,
+ * return it", with `used` written by the CALLER at the very end -- after
+ * snprintf'ing a path, after mkfifo, after opening the keeper. That is a
+ * window of milliseconds in which the record still reads free, and two
+ * processes DO allocate here at once: hamsh minting a redirect target while a
+ * just-launched hamtermscene mints its two pipes is exactly the desktop's
+ * steady state.
+ *
+ * Both took the same index. The loser's memset erased the winner's path, and
+ * the record ended up with one allocator's KIND and the other's PATH -- a
+ * slot marked SLOT_FILE whose path is a fifo. The redirect then resolved,
+ * opened, wrote, and returned success, and the bytes went INTO SOMEBODY
+ * ELSE'S PIPE. tests/linux/fdns_slot_exhaust.c reproduces it in under twenty
+ * launches and reports it as "the child wrote and the bytes are in neither
+ * place", which is what a wrong destination looks like from outside.
+ *
+ * Claiming with a compare-and-swap and publishing afterwards is what makes
+ * the claim exclusive. A RESERVED slot is invisible to slot_find, to
+ * parent_owns_slots and to the collector: it belongs to a process that is
+ * mid-allocation right now. */
+#define SLOT_RESERVED 2u
+#define SLOT_LIVE     1u
 
 struct slotrec {
     uint32_t used;
@@ -150,6 +222,8 @@ struct bindrec {
 
 struct fdshm {
     uint32_t magic;
+    uint32_t cap_slots;               /* MAX_SLOTS of whoever initialised it */
+    uint32_t cap_binds;               /* MAX_BINDS of whoever initialised it */
     int32_t  next_slot;
     uint64_t next_seq;
     struct slotrec slot[MAX_SLOTS];
@@ -221,9 +295,12 @@ static int attach(void)
     close(fd);
     if (m == MAP_FAILED) { errno = e; return -1; }
     shm = (struct fdshm *)m;
-    if (shm->magic != FDNS_MAGIC) {
+    if (shm->magic != FDNS_MAGIC || shm->cap_slots != (uint32_t)MAX_SLOTS
+        || shm->cap_binds != (uint32_t)MAX_BINDS) {
         memset(shm, 0, sizeof(*shm));
         shm->magic = FDNS_MAGIC;
+        shm->cap_slots = (uint32_t)MAX_SLOTS;
+        shm->cap_binds = (uint32_t)MAX_BINDS;
         shm->next_slot = 1;               /* slot 0 is "no slot" */
     }
     return 0;
@@ -257,7 +334,7 @@ static struct slotrec *slot_find(int32_t slot)
 {
     if (slot <= 0) return NULL;
     for (int i = 0; i < MAX_SLOTS; i++)
-        if (shm->slot[i].used && (int32_t)(i + 1) == slot)
+        if (shm->slot[i].used == SLOT_LIVE && (int32_t)(i + 1) == slot)
             return &shm->slot[i];
     return NULL;
 }
@@ -399,13 +476,25 @@ static void slot_gc(void)
 
     for (int i = 0; i < MAX_SLOTS; i++) {
         struct slotrec *s = &shm->slot[i];
-        if (!s->used) continue;
+        /* A RESERVED slot belongs to a process that is mid-allocation right
+         * now and is nobody's to take -- exactly as for a reserved bind. */
+        if (s->used != SLOT_LIVE) continue;
         if (keeper[i] >= 0) continue;            /* still ours and still live */
+        int owner_gone = !pid_alive(s->owner);
         /* Never take a slot that has been minted but not yet bound: hamsh
          * calls sys_openchan/sys_pipechan and sys_fdbind as two steps, and
-         * collecting in between would hand the same number to two things. */
-        if (!s->bound) continue;
-        int owner_gone = !pid_alive(s->owner);
+         * collecting in between would hand the same number to two things.
+         *
+         * UNLESS ITS OWNER IS DEAD, and that exception closes a real leak.
+         * A slot number is known only to the process that minted it -- every
+         * bind of a slot is made BY its owner, for itself or for a child it
+         * just forked -- so once the owner is gone nobody can ever bind it,
+         * and "not yet bound" has become "never will be". Without this, a
+         * shell killed between sys_openchan and sys_fdbind stranded a slot
+         * for the LIFETIME OF THE SEGMENT: unbound, uncollectable, and
+         * invisible. That is the one part of this table that genuinely
+         * leaked rather than merely filled, and this bounds it. */
+        if (!s->bound && !owner_gone) continue;
         int spent = (s->kind == SLOT_FIFO) ? (s->done != 0) : 1;
         if (!owner_gone && !spent) continue;
         if (slot_referenced((int32_t)(i + 1))) continue;
@@ -420,12 +509,36 @@ static int slot_alloc(void)
 {
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < MAX_SLOTS; i++)
+#ifdef FDNS_ALLOC_NO_CAS
+            /* THE PRE-FIX ALLOCATOR. It exists for one reason: a gate that
+             * asserts the collision is gone has to be able to build the
+             * version that has it, or it is a green arm with nothing behind
+             * it. tests/linux/fdns_slot_exhaust.sh defines this for its race
+             * arm and for nothing else; no shipped binary sets it. */
             if (!shm->slot[i].used) {
                 memset(&shm->slot[i], 0, sizeof shm->slot[i]);
                 return i;
             }
+#else
+            /* CLAIM first, then fill in, then publish -- see SLOT_RESERVED. */
+            if (__sync_bool_compare_and_swap(&shm->slot[i].used,
+                                             0u, SLOT_RESERVED)) {
+                memset(&shm->slot[i], 0, sizeof shm->slot[i]);
+                shm->slot[i].used = SLOT_RESERVED;   /* the claim survives */
+                return i;
+            }
+#endif
         if (pass == 0) slot_gc();
     }
+    /* NAME THE RESOURCE. Everything above this point in the file is about a
+     * /fd name that silently resolves somewhere the caller did not ask for,
+     * and an exhausted slot table is the cheapest way to get one: the caller
+     * gets -1, skips its bind, and its child writes to whatever it inherited.
+     * hamsh cannot say this for us -- by the time it sees the -1 it does not
+     * know which of several things ran out -- so it is said here, once, with
+     * the number that would have to change. */
+    fdns_note("/fd slot table full (" FDNS_STR(MAX_SLOTS) " slots, all held "
+              "by live processes) -- a redirect or a pipe CANNOT be applied");
     return -1;
 }
 
@@ -540,7 +653,7 @@ static int parent_owns_slots(void)
 {
     int32_t par = (int32_t)getppid();
     for (int i = 0; i < MAX_SLOTS; i++)
-        if (shm->slot[i].used && shm->slot[i].owner == par)
+        if (shm->slot[i].used == SLOT_LIVE && shm->slot[i].owner == par)
             return 1;
     return 0;
 }
@@ -709,10 +822,11 @@ int32_t fdns_openchan(const char *path, int32_t mode)
         errno = ENAMETOOLONG;
         return -1;
     }
-    shm->slot[i].used  = 1;
     shm->slot[i].kind  = SLOT_FILE;
     shm->slot[i].mode  = mode;
     shm->slot[i].owner = (int32_t)getpid();
+    __sync_synchronize();
+    shm->slot[i].used  = SLOT_LIVE;   /* last: publishes a complete record */
     return (int32_t)(i + 1);
 }
 
@@ -764,9 +878,10 @@ int32_t fdns_pipechan(void)
             errno = e;
             return -1;
         }
+        __sync_synchronize();
+        shm->slot[i].used = SLOT_LIVE;  /* last: publishes a complete record */
         keeper[i] = k;
         keeper_live++;
-        shm->slot[i].used = 1;
         return slot;
     }
 }
@@ -798,7 +913,9 @@ int32_t fdns_fdbind(int32_t pid, int32_t fdnum, int32_t kind, int32_t slot)
          * every one of those is a silent wrong destination. hamsh does not
          * check this return, so stderr is the only place it can be said. */
         if (!b) {
-            fdns_note("/fd bind table full -- a name will go unbound");
+            fdns_note("/fd bind table full (" FDNS_STR(MAX_BINDS) " names, "
+                      "all held by live processes) -- a /fd name CANNOT be "
+                      "bound");
             errno = ENOSPC;
             return -1;
         }
@@ -827,6 +944,29 @@ int32_t fdns_fdbind(int32_t pid, int32_t fdnum, int32_t kind, int32_t slot)
         if (s) s->bound = 1;
     }
     return 0;
+}
+
+/* Occupancy of both shared tables -- see the header.  Read-only: it must not
+ * collect, because a caller measuring the curve would then be measuring its
+ * own instrument. */
+void fdns_occupancy(int32_t *slots_used, int32_t *cap_slots,
+                    int32_t *binds_used, int32_t *cap_binds)
+{
+    if (cap_slots) *cap_slots = MAX_SLOTS;
+    if (cap_binds) *cap_binds = MAX_BINDS;
+    if (slots_used) *slots_used = 0;
+    if (binds_used) *binds_used = 0;
+    if (attach() < 0) return;
+    if (slots_used) {
+        int n = 0;
+        for (int i = 0; i < MAX_SLOTS; i++) if (shm->slot[i].used) n++;
+        *slots_used = n;
+    }
+    if (binds_used) {
+        int n = 0;
+        for (int i = 0; i < MAX_BINDS; i++) if (shm->bind[i].used) n++;
+        *binds_used = n;
+    }
 }
 
 /* extern def sys_fdslot_kind(pid, fdnum) -> int32 */

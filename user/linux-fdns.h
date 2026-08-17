@@ -25,6 +25,14 @@ int32_t fdns_fdbind(int32_t pid, int32_t fdnum, int32_t kind, int32_t slot);
 int32_t fdns_slot_kind(int32_t pid, int32_t fdnum);
 void    fdns_after_fork_child(void);
 
+/* OCCUPANCY, so that "the table filled up" is a MEASUREMENT and not an
+ * inference.  Both tables are process-shared and both have a hard ceiling;
+ * when a redirect stops applying, the only question worth asking is which of
+ * them ran out and how full it had been getting.  Any pointer may be NULL.
+ * `*cap_*` receive the ceilings so a caller need not know them. */
+void    fdns_occupancy(int32_t *slots_used, int32_t *cap_slots,
+                       int32_t *binds_used, int32_t *cap_binds);
+
 /* Drop the pipe keepers this process still holds, for every slot whose two
  * REAL ends are now open.  Until it runs, the creator of a pipe is itself a
  * writer AND a reader on it, so the reader can never see EOF and the writer
