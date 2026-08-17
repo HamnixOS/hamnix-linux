@@ -42,7 +42,63 @@ happened" from "nothing happened."** There is now a heartbeat-coverage floor
 asked *before* the verdict, and `tests/linux/vcpu_time.sh` to tell an idle wedge
 from a spinning one. Evidence in `/home/david/.hamnix-build/soak-evidence/`.
 
-### THE WINDOW SET REACHING 94 — narrowed by reading the compositor, NOT settled
+### THE WINDOW SET REACHING 94 — SETTLED 2026-08-17, AND BOTH HYPOTHESES WERE WRONG
+
+**It is neither "the compositor leaks rows" nor "the sweep is counting its own
+guesses". The workload leaks PROCESSES, and every window row is legitimately
+held by a live one.** Measured on the archived evidence of the very run that
+produced the 94 — `/home/david/.hamnix-build/soak-evidence/fixed-900s-serial.log`
+— not on a new run and not from source alone:
+
+| census | `windows` | distinct live app pids in the census's own `ps` | difference |
+|---|---|---|---|
+| 0 | 3 | 0 | 3 |
+| 30 | 27 | 24 | 3 |
+| 60 | 54 | 50 | 4 |
+| 90 | 80 | 76 | 4 |
+| 105 | 94 | 89 | 5 |
+
+Over all **106** censuses the difference is **min 3, max 5, mean 3.76** — the
+desktop chrome, with no drift. The window count is not climbing away from
+anything; it is tracking one live application process apiece. `win_reap_dead()`
+is doing exactly what it is written to do: `kill(pid, 0)` says those owners are
+ALIVE, so it keeps their rows, and it is right to.
+
+**The cause is in the harness, but not where the guess put it.** The close sweep
+sends `close <wid>` on `/dev/wsys/ctl`, which destroys the WINDOW RECORD and
+does not end the PROGRAM — and nothing in the rc ever ends the program. So each
+launch cycle leaves another live `hamcalcscene`/`hamnotesscene`/`hammonscene`/
+`hamtermscene` behind, and each of those holds a window. ~118 launches, ~90
+survivors at 900 s.
+
+**And the reason the question stayed open was a wrong premise, which is worth
+more than the answer.** HANDOFF said "the census never prints the compositor's
+own table" and proposed printing the count of `used` rows from `shm->win[]`
+beside it. **The census was already printing exactly that.** `cat
+/dev/wsys/wsysd/state`'s `windows N` is `wsysd.ad`'s `n_win`, and
+`scan_windows()` (user/wsysd.ad:958) sets `n_win = 0` and REBUILDS it from a
+fresh read of the `/dev/wsys` directory on every scan; `snap_dir_tier()`
+(user/linux-wsys.c:8150) emits one line per `shm->win[i].used`. So `windows N`
+was never a running total and never a swept guess — it was the used-row count
+all along. The experiment that was written down could not have distinguished
+anything, because its two arms were the same number.
+
+**One instrument defect was found and fixed anyway**, and it is the shape this
+project keeps paying for: the gate read the trajectory with `grep -ao 'windows
+[0-9]*'` over the WHOLE console, which matches any tailed log line with that
+word before a number — a synthetic `wsysd.log: reaped 2 windows 4096 bytes`
+feeds it `4096`. On the real 900 s log the narrow reader (state lines only) and
+the wide one return **the same 106 readings**, so that defect did *not* corrupt
+the 94 — measured, not assumed. It is fixed regardless, and both readers now
+run side by side so a future divergence is reported.
+
+`tests/linux/soak_desktop.sh` now prints the table three ways per census (state
+line, raw `ls /dev/wsys`, `cat /dev/wsys/windows`) and correlates it against the
+census's own `ps`, and `tests/linux/soak_wincensus_negctl.sh` (**7 PASS / 0
+FAIL, 0.56 s, no QEMU**) drives that reader through all four verdicts plus both
+"not measured" cases.
+
+### THE ORIGINAL NOTE, kept because its source reading was right and its conclusion was not
 
 After the arena fix the soak's remaining red is that the window set climbs to 94
 against a baseline of 3, at the same rate the dead runs had (~0.95 per launch) —
