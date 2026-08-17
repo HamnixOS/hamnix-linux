@@ -169,7 +169,41 @@ if [ -n "${HAMLINUX_DISK_EXTRA:-}" ]; then
     echo "[disk] overlaid $HAMLINUX_DISK_EXTRA onto the root"
 fi
 
-mkfs.ext4 -q -L hamnix -d "$ROOTDIR" -m 1 "$ROOTFS" 2600M
+# -E lazy_itable_init=0 -- THE BIGGEST WRITER ON THIS MEDIUM WAS THE KERNEL, AND
+# IT WAS WRITING ZEROES.
+#
+# MEASURED, tests/linux/wedge_hunt.sh's method applied to a boot with NO
+# desktop, NO bootlogd, NO dhcpc -- PID 1, a shell, and `sleep 600`:
+#
+#     110.7 KB/s TO THE BOOT MEDIUM, CONTINUOUSLY, FOR AS LONG AS IT WAS
+#     WATCHED. 20.4 MB in 180 s, in ~105 KB writes about once a second. The
+#     guest's own /proc/diskstats agreed to within eight sectors, so it was the
+#     guest really writing and not an artefact of the harness.
+#
+# It is ext4's LAZY INODE TABLE INITIALISATION. mke2fs leaves every block
+# group's inode table UNWRITTEN and marks it `[Inode not init]` -- confirmed on
+# a freshly built image here, 20 of 22 groups -- and the kernel's ext4lazyinit
+# thread zeroes them in the background on the FIRST READ-WRITE MOUNT. This
+# filesystem has 166656 inodes at 256 bytes: 42.7 MB of zeroes to write, which
+# at the rate measured is ABOUT SEVEN MINUTES.
+#
+# THAT IS SEVEN MINUTES STARTING AT THE FIRST BOOT OF EVERY STICK THIS SCRIPT
+# BUILDS -- which is the only boot most sticks get, and the exact window in
+# which the owner's laptop became unusable. On a host file it is invisible. On
+# a USB stick it is a continuous background write competing with every exec,
+# every page fault and every config read the desktop performs, on the one
+# device all of them share.
+#
+# The fix belongs HERE and not at runtime, because the choice mke2fs is making
+# is "do this work later, on the user's machine" -- and the machine that would
+# do it later is a laptop running off a stick, while the machine doing it now
+# is a build host with a file on an SSD. Zeroing 42.7 MB into an image file at
+# build time is under a second and it is paid ONCE, by the build, instead of
+# once by every person who boots the result.
+#
+# It costs image size only in sparseness, and this image is dd'd to a medium at
+# its full length anyway, so the cost is zero where it lands.
+mkfs.ext4 -q -L hamnix -d "$ROOTDIR" -m 1 -E lazy_itable_init=0 "$ROOTFS" 2600M
 echo "[disk] root filesystem: $(du -h "$ROOTFS" | cut -f1)"
 
 # --- the unified kernel image ---------------------------------------------
@@ -288,7 +322,48 @@ CMDLINE="$STAGE/cmdline.txt"
 #                    READS IT BACK and warns if this kernel did not honour it,
 #                    because a setting that is accepted and does not take is
 #                    the success-shaped answer NORTH_STAR.md forbids.
-DEFAULT_CMDLINE="earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7 printk.devkmsg=on"
+#   hung_task_timeout_secs=30
+#                    WHAT NAMES THE STUCK PROCESS WHEN THE DESKTOP WEDGES, AND
+#                    IT COSTS ONE WORD.
+#                    On 2026-08-16 the owner's Lenovo booted to the desktop off
+#                    this medium, ran for about five minutes and then WEDGED --
+#                    magic sysrq still answered, so the kernel was alive and
+#                    USERSPACE was stuck. He had sysrq and nothing else: no
+#                    serial cable, no shell, and no way to ask which process
+#                    was stuck or on what.
+#                    The kernel already has the answer and already prints it.
+#                    CONFIG_DETECT_HUNG_TASK is y in the kernel this medium
+#                    ships, so khungtaskd walks the task list and prints
+#                    `INFO: task NAME:PID blocked for more than N seconds`
+#                    WITH ITS STACK for anything in uninterruptible sleep --
+#                    which is exactly the state a process blocked on a stalled
+#                    USB stick is in. It goes into the printk ring, which
+#                    user/bootlogd.ad puts on the stick, so the owner powers the
+#                    machine off, plugs the stick into another computer, and
+#                    reads the name of the process that hung and what it was
+#                    waiting on. NO KEY HAS TO BE PRESSED AND NOTHING HAS TO BE
+#                    NOTICED IN TIME.
+#                    30 rather than the built-in 120 because two minutes is
+#                    longer than a person waits before reaching for the power
+#                    button -- a detector that fires after he has switched the
+#                    machine off has detected nothing. 30 s is far above any
+#                    legitimate D-state wait on a working medium, so it does
+#                    not cry wolf.
+#   sysrq_always_enabled
+#                    AND SO THAT THE KEYS HE ALREADY REACHED FOR ALL WORK.
+#                    This kernel's CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE is 0x1b6,
+#                    which is NOT "everything": SYSRQ_ENABLE_SYNC (0x08) and
+#                    SYSRQ_ENABLE_KEYBOARD (0x01) are both clear, so on the
+#                    shipped medium Alt+SysRq+S does nothing at all. `t` and `w`
+#                    -- show-tasks and show-blocked-tasks, the two that answer
+#                    "what is stuck" -- happen to be inside 0x1b6 today, by an
+#                    accident of a default this tree does not control. A
+#                    diagnostic path that depends on which bits a distribution
+#                    kernel happened to set is not a diagnostic path.
+#                    The cost is that anybody at the keyboard can reboot the
+#                    machine, which is not a boundary worth defending on a
+#                    laptop somebody is holding with a bootable stick in it.
+DEFAULT_CMDLINE="earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=$ROOT_PARTUUID rw panic=-1 loglevel=7 printk.devkmsg=on hung_task_timeout_secs=30 sysrq_always_enabled"
 printf '%s' "${HAMLINUX_CMDLINE:-$DEFAULT_CMDLINE}" > "$CMDLINE"
 echo "[disk] cmdline: $(cat "$CMDLINE")"
 # WHAT THE IN-SYSTEM INSTALLER READS. user/hlinstall.ad copies this very UKI

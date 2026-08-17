@@ -207,4 +207,24 @@ if $bootlog_esp > 0 {
     echo 'rc.boot: THIS BOOT IS BEING LOGGED TO THE STICK. If anything goes wrong,'
     echo 'rc.boot: hold the power button, plug this stick into another computer,'
     echo 'rc.boot: and open HAMNIX.LOG in the top of its FAT boot partition.'
+    # AND WHAT TO DO IF IT FREEZES RATHER THAN FAILING, which is what actually
+    # happened on 2026-08-16: the desktop came up, worked for about five
+    # minutes and then stopped answering, with magic sysrq still alive -- so
+    # the kernel was fine and USERSPACE was stuck, and there was no way to ask
+    # WHICH process was stuck or on what.
+    #
+    # There is now. `hung_task_timeout_secs=30` on the shipped command line
+    # (scripts/hamlinux_disk.sh) makes the kernel print the name, pid and stack
+    # of anything stuck in uninterruptible sleep for half a minute, into the
+    # ring, which bootlogd puts on the stick, with nobody having to press
+    # anything. Alt+SysRq+W asks the same question IMMEDIATELY, and `sysrq_always_enabled`
+    # beside it is what guarantees the key works at all on this kernel.
+    #
+    # THE WAIT IS THE PART THAT IS EASY TO GET WRONG and is therefore the part
+    # that is spelled out: the dump lands in the kernel's ring, and it only
+    # reaches the stick when bootlogd's next snapshot writes it. Reaching for
+    # the power button straight after pressing the key throws away the thing
+    # the key was pressed for.
+    echo 'rc.boot: IF IT FREEZES: hold Alt+SysRq+W, WAIT TEN SECONDS, then power off.'
+    echo 'rc.boot: that puts the stuck process and what it is waiting on into the log.'
 }
