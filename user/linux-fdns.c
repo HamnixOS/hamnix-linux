@@ -126,9 +126,10 @@
  * pinned pipe slots plus the three /var/log redirects rc.5.linux holds -- the
  * same arithmetic, on the real machine.
  *
- * WHAT IT COSTS. sizeof(struct fdshm) goes from about 35 KB to about 550 KB
- * of tmpfs, mapped MAP_SHARED, so it is one copy for the whole system and
- * only the pages actually touched are resident. Nothing outside this file
+ * WHAT IT COSTS, measured with sizeof: the segment goes from 34,832 bytes to
+ * 557,080 -- 34 KB to 544 KB of tmpfs, mapped MAP_SHARED, so it is one copy
+ * for the whole system, it is created sparse by ftruncate, and only the pages
+ * actually touched are ever resident. Nothing outside this file
  * knows the size: the segment is created by whoever attaches first and
  * ftruncate'd to sizeof(struct fdshm), and a segment written by a binary with
  * different dimensions is re-initialised (see FDNS_MAGIC and cap_slots).
