@@ -374,6 +374,32 @@ for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
     [ -f "etc/$f" ] && install -m644 "etc/$f" "$ROOT/etc/$f"
 done
 
+# THE MEDIUM MUST BE ABLE TO SAY WHICH RELEASE IT IS.
+#
+# Until 2026-08-17 it could not. /etc/os-release says VERSION="1.0" and
+# /etc/lsb-release says DISTRIB_RELEASE=1.0 -- the SERIES, not the release --
+# and nothing anywhere in the image root recorded 1.0.23 from 1.0.26. The
+# packager takes its version from `--version` (default 1.0.0) and the image
+# script took none at all, so the two halves of a release had no shared
+# statement of what they were.
+#
+# That is not cosmetic. tests/linux/channel_bytes_match_image.sh compares the
+# image's binaries against the channel's byte for byte and every failure it
+# prints says the two "run different programs under one version" -- a claim
+# about sameness that nothing could check. Run against an image and a channel
+# built four hours apart it printed 31 such lines, all true about the bytes
+# and all wrong about the cause. A gate cannot attribute drift between two
+# trees that will not say which release they are.
+#
+# So: one line, written from the same version the channel is built with.
+# HAMLINUX_VERSION is what the release runner already passes to the packager's
+# --version; when it is unset this says so IN THE FILE rather than inventing a
+# number, because a wrong stamp is worse than an absent one.
+: "${HAMLINUX_VERSION:=unstamped}"
+printf '%s\n' "$HAMLINUX_VERSION" > "$ROOT/etc/hamnix-release"
+chmod 644 "$ROOT/etc/hamnix-release"
+echo "[hamlinux] /etc/hamnix-release = $HAMLINUX_VERSION"
+
 # THE SERVICE DEFINITIONS. /etc/svc/<name>.hamsh is one of the two places
 # hamsh's `svc` builtin looks (svc_def_load: /etc/services.d/<n>.svc first,
 # then here). MEASURED on this line before shipping it, because the image

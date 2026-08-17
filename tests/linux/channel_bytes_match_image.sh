@@ -179,6 +179,70 @@ if [ "$NELF" -lt 100 ] || [ "$NPAIR" -lt 100 ] || [ "$NPAIRBIN" -lt 50 ]; then
     bad "only $NELF ELFs in the image and $NPAIR comparable channel members ($NPAIRBIN in bin/) -- one of the two trees is unbuilt or the tarball layout is not what this gate parses; NOT reporting agreement from it"
     echo; echo "$PASS passed, $FAIL failed"; exit 1
 fi
+# ---------------------------------------------------------------------------
+# 2b. THE TWO TREES MUST BE THE SAME RELEASE, and this gate must say so BEFORE
+#     it accuses anything of drifting.
+#
+#     Every failure line below ends "...run different programs under one
+#     version". On 2026-08-17 I ran this gate in a tree whose build/repo/linux
+#     held 1.0.25 tarballs and whose build/image/root was four hours older than
+#     the 1.0.26 candidate, and it printed 31 of those lines. Every one was
+#     true about the bytes and WRONG ABOUT THE CAUSE: the two sides were not
+#     one version, so of course they differed. A sentence that names a cause it
+#     did not measure is the failure mode this tree has paid an hour for
+#     before -- "a v2 blit bigger than 512x512 is being refused", inferred from
+#     nothing but a low pixel count.
+#
+#     WHAT THIS GUARD STILL CANNOT SEE, stated because a half-guard that is
+#     believed to be whole is worse than none: two trees can carry the SAME
+#     version string and still have been built from different commits. The
+#     version is a label chosen at build time, not a fingerprint of the
+#     sources. Running this gate against a matched pair of labels built hours
+#     apart still produced 31 unattributable failures. A commit stamp on both
+#     sides would close it; the channel tarballs carry no such field today.
+#     Until then: build BOTH sides from one tree, in one run.
+#
+#     So: read the version off the channel's own tarball names, read it off the
+#     image, and REFUSE TO COMPARE when they disagree. A refusal is red, not
+#     green -- an unrunnable check must never answer something success-shaped.
+# ---------------------------------------------------------------------------
+CHANVER=$(ls "$CHAN"/packages/*.tar.gz 2>/dev/null \
+          | sed -n 's/.*-\([0-9][0-9.]*\)\.tar\.gz$/\1/p' | sort -u)
+NCHANVER=$(printf '%s\n' "$CHANVER" | grep -c . || true)
+if [ "$NCHANVER" -ne 1 ]; then
+    bad "the channel at $CHAN carries $NCHANVER different versions ($(printf '%s ' $CHANVER)) -- it is a mix of runs, and any disagreement below would be unattributable. Delete build/repo/linux and rebuild."
+    echo; echo "$PASS passed, $FAIL failed"; exit 1
+fi
+# /etc/hamnix-release, written by scripts/hamlinux_image.sh from the same
+# HAMLINUX_VERSION the packager is given. Before it existed the image root's
+# only version statements were os-release's VERSION="1.0" and lsb-release's
+# DISTRIB_RELEASE=1.0 -- the SERIES, which is identical for every release and
+# therefore useless for telling 1.0.23 from 1.0.26.
+IMGVER=""
+if [ -f "$IMG/etc/hamnix-release" ]; then
+    IMGVER=$(sed -n 's/^[[:space:]]*\([0-9]\+\.[0-9]\+\.[0-9]\+\)[[:space:]]*$/\1/p' \
+             "$IMG/etc/hamnix-release" | head -1)
+fi
+# An explicit assertion, for an image built before the stamp existed or by
+# hand. It is a PROMISE BY THE CALLER, echoed as such, not a measurement --
+# so it is named in the output and never silently assumed.
+if [ -z "$IMGVER" ] && [ -n "${HAMLINUX_ELFCMP_VERSION:-}" ]; then
+    IMGVER="$HAMLINUX_ELFCMP_VERSION"
+    echo "NOTE: the image carries no /etc/hamnix-release; taking $IMGVER on the caller's word via HAMLINUX_ELFCMP_VERSION. This is asserted, NOT measured."
+fi
+if [ -z "$IMGVER" ]; then
+    # NOT a pass. The image does not say what it is, so the "one version"
+    # claim in every failure line below is unverifiable, and this gate will
+    # not make an accusation it cannot support.
+    bad "the image at $IMG has no /etc/hamnix-release, so this gate cannot show the two sides are the same release -- and every failure it prints asserts exactly that. Rebuild the image with HAMLINUX_VERSION set, or pass HAMLINUX_ELFCMP_VERSION=<ver> to assert it. Refusing to compare rather than reporting drift it cannot attribute."
+    echo; echo "$PASS passed, $FAIL failed"; exit 1
+fi
+if [ "$IMGVER" != "$CHANVER" ]; then
+    bad "SKEW, NOT DRIFT: the image is $IMGVER and the channel is $CHANVER. These are different releases and differing bytes between them mean nothing. Rebuild both from one tree -- do NOT read the comparison below as a regression."
+    echo; echo "$PASS passed, $FAIL failed"; exit 1
+fi
+ok "the image and the channel are both $IMGVER, so 'different bytes under one version' is a claim this gate can actually make"
+
 ok "both sides are plausible: $NELF ELFs staged in the image, $NPAIR of them also carried by a package ($NPAIRBIN in bin/) -- the comparison below means something"
 
 # ---------------------------------------------------------------------------
