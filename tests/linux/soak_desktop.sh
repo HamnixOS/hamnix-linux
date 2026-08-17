@@ -131,6 +131,21 @@
 #      /var/log/wsysd.log is growing during the soak, THAT ALONE IS CANDIDATE 3
 #      TURNING REAL, and the rate plus the repeating line are reported.
 #
+# THE CENSUS IS ITSELF A LOAD ON THE MEDIUM, AND THAT IS SAID HERE RATHER THAN
+# LEFT TO INFLATE A NUMBER SILENTLY. `ps` on this guest prints the whole task
+# table -- about two hundred lines, mostly kernel threads -- and it goes to the
+# CONSOLE, which consmirror copies into the kernel ring, which bootlogd persists
+# to \HAMNIX.LOG on the ESP. So every census gives the boot logger something new
+# to write, and the absolute "bytes to the medium" figure this gate reports is
+# THE WORKLOAD PLUS THE INSTRUMENT.
+#
+# That is why HAMLINUX_SOAK_IDLE=1 exists and why it keeps the census
+# BYTE-FOR-BYTE IDENTICAL while removing the launches and the hand. The
+# DIFFERENCE between the two arms is attributable to the workload; the absolute
+# of either is not attributable to the desktop. A gate that reported the
+# absolute as "what using the desktop costs" would be reporting its own
+# instrument as a finding.
+#
 # AND THE RESPONSE, fired from the HOST the instant a probe trips, because a
 # wedged guest cannot ask itself anything:
 #
