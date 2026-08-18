@@ -14,8 +14,38 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing yet. Work lands here between releases; if this section is empty, the
-tree and the channel agree.
+### Anything typed at a text console was going into the desktop window
+
+If you switched to a text console and typed while the desktop was running, your
+keystrokes went **into whichever desktop window had the keyboard** as well. Not
+instead — as well. The window received them, and so did the console.
+
+This is the cause of something reported days ago and left unexplained: a single
+press of Return in the installer sometimes jumped two pages. It did, and here is
+why — the desktop was being handed the same Return twice, once from the keyboard
+and once from the console. Worse, because a text console sends a whole line at
+once, typing `dave` and pressing Return sent five more characters after it. A
+screenshot taken two seconds later shows the word `dave` sitting in the **next
+page's password field**, put there by nobody.
+
+The cause is a single missing redirection. The program that draws the screen is
+started with its output sent to a log file and **its input left attached to the
+console** — the same console the keyboard feeds. It read that input and delivered
+it to the focused window, exactly as designed, having been handed a keyboard
+nobody meant to give it.
+
+It now treats the console as a keyboard only when no real keyboard was found,
+which is the case a headless machine actually needs.
+
+**What this could mean for you.** Anything typed at a text console while the
+desktop was up — including a password typed at a login prompt on that console —
+was being delivered into a desktop window as well. Whether that reached anywhere
+it should not depends on what had focus. We have not measured that, and are not
+going to guess at it in your release notes.
+
+*Not established:* whether a laptop shows this depends on how its console is
+configured, and that was read from the boot files rather than measured on real
+hardware.
 
 ## 1.0.28 — 2026-08-18
 
