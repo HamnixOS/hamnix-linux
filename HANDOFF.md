@@ -52,6 +52,7 @@ bytes above are a function of `c7b805f7` and nothing later.
 | `tests/linux/channel_covers_image.sh` | **8 / 0** | |
 | `tests/linux/pkg_tar_reproducible.sh` | **5 / 0** | section C scored NOTHING and says so: no package is served at 1.0.29 yet |
 | `tests/linux/soak_desktop.sh` | **26 / 0** | 900 s, **arm 0 ARMED**, typing at the default. NOT a `SKIPPROOF` run |
+| `tests/linux/shipped_medium_boots.sh` (new) | **31 / 0** | **THE PUBLISHED ARTIFACT ITSELF, BOOTED.** No rebuild, no injected rc; the copy's sha256 is asserted equal to `1601bc48…` before power-on. Negative control RUN: a copy with 16 MiB of zeros over its ESP does not reach the desktop |
 
 **THE SOAK'S NUMBERS, BESIDE THE CONDITION.** 848 heartbeats over 900 s
 (floor 450) — the same 848 as the recorded baseline. Longest gap in the
@@ -65,6 +66,105 @@ run measured **baseline 4, peak 5**, end-of-run counter **5**, over 106
 censuses. Lower, not higher, so it is not a regression — but it is a different
 number and it is written here rather than rounded to the one that was
 expected.
+
+#### THE BYTES WE SHIP HAVE NOW BEEN BOOTED, AND THE HEADLINE FIX WAS MEASURED ON THEM
+
+**Measured, dev host, 2026-08-18. Evidence, logs, screendumps and OCR under
+`~/.hamnix-build/img-boot-gate-20260818/` (`gate-run1/`, `gate-run2/`, and the
+exploratory `run1/shots/`).**
+
+Until now **nothing booted the artifact a person writes to a stick.**
+`scripts/verify_medium.sh` reads it STATICALLY (39 assertions, never runs it),
+and `install_confirm_keys.sh`, `install_wizard_gui.sh` and `soak_desktop.sh`
+each build *their own* medium with `HAMLINUX_DISK_RC` so they can watch the
+guest. Same sources, same commit -- **not the same bytes**, and the
+`root.partuuid` defect proved that gap is not hypothetical.
+
+**`tests/linux/shipped_medium_boots.sh` closes it. 31 PASSED / 0 FAILED, run
+twice with identical results, about 4 minutes including the negative control.**
+
+`/home/david/.hamnix-build/rel1029/hamnix-linux-1.0.29.img` was copied (QEMU
+must be free to write to the disk it boots) and the copy's sha256 asserted equal
+to the artifact's **before power-on**:
+`1601bc486ca0c50dd6f14cd04556524d6d4aec1ff0c36e0cd279ef422c27339c`. **The
+artifact's digest was re-checked after both boots and is unchanged.**
+
+**THE SEAM QUESTION IS ANSWERED: NO SEAM IS NEEDED.** The guest is driven and
+read entirely from outside -- QMP `input-send-event` on `virtio-keyboard-pci` /
+`virtio-tablet-pci`, HMP `screendump`, and the serial log. The strings waited
+for are the **shipped rc's own** (`[rc.5] compositor started`, `[rc.5] desktop
+up`, `rc.boot: up`), not markers the gate planted; they reach `ttyS0` because
+the shipped command line carries `console=ttyS0,115200` beside `console=tty0`.
+
+**WHAT WAS OBSERVED, NOT INFERRED.** `rc.boot: up` at **10 s**. No panic or
+oops. The frame carries **1592 distinct colours**; a frame against itself
+compares IDENTICAL and a pointer move changes **309 px**, so "it painted" and
+"it is still painting" are both measured. OCR reads `Applications`, a clock and
+**5 of 5** sampled desktop icon labels. **Double-clicking the Text Editor icon
+opened a window** -- no launch queue, no rc.
+
+**THE CONSOLE-KEYSTROKE FIX, ON THE SHIPPED BYTES, FOR THE FIRST TIME.** The
+witness is `hameditscene`'s `Ln n, Col n` status bar -- an exact count, read as
+two integers rather than as a picture of letters. **12 keystrokes advanced the
+column by exactly 12** (the defect gives 24) and **one Return produced exactly
+one new line, caret at column 1** (the defect replays the whole cooked line).
+The editor buffer read `aahamgatetoken` and nothing else.
+
+**AND BOTH CONTROLS RAN.** *Sensitivity*: a burst of **two** presses advances
+the counter by **exactly 2**, so the instrument can report the doubled case.
+*TTY liveness*: the console shell echoed those same characters onto the serial
+log and, on Return, ran the line -- `hamsh: command not found: aahamgatetoken`.
+**That is the assertion that makes the result mean anything**: the keystrokes
+demonstrably passed through the console tty, so "they did not arrive twice" is
+about the fix and not about a machine with a dead console.
+
+**THE NEGATIVE CONTROL IS A SECOND BOOT AND IT RAN.** A copy with 16 MiB of
+zeros over its ESP never reached `rc.boot: up` in 90 s, its panel strip OCR'd to
+nothing, and **the firmware said why in its own words** -- `failed to load
+Boot0001 "UEFI QEMU QEMU USB HARDDRIVE" ... Not Found`, then the EFI shell. So
+the red is the MEDIUM failing, not the harness failing to start a machine.
+
+**NOT VERIFIED, SAID PLAINLY.** The gate does not run the installer (no target
+disk is attached, deliberately). It does not exercise networking, audio, the
+distribution `enter` paths, or `hpm`. And the console-keystroke arm has **no
+defect-restoring negative control on the shipped bytes** -- putting the bug back
+would require modifying the image, which is the substitution this gate exists to
+end. That control lives in `tests/linux/wsys_stdin_keydup.sh`'s RED arm, and it
+was mutation-tested this session (below).
+
+#### THE 41 REGISTERED GATES WERE NEVER MUTATION-TESTED. SIX WERE. **ONE DID NOT GO RED.**
+
+Each gate was run clean, then the thing it claims to check was broken in the
+SUBJECT (never in the gate), then it was run again, then the tree was restored.
+`git status` is clean. Logs: `~/.hamnix-build/img-boot-gate-20260818/mut/`.
+
+| gate | mutation applied to the subject | verdict |
+|---|---|---|
+| `tests/linux/wsys_stdin_keydup.sh` | `user/wsysd.ad` `decide_stdin_keys()` forced to `stdin_keys = 1` | **RED** 6/2 |
+| `scripts/test_package_source_refusal.sh` | `_preflight_sources()` neutered with an early `return` | **RED** |
+| `scripts/test_desktopentry_host.sh` | `lib/desktopentry.ad` `_de_classify()` always returns `DE_CAT_OTHER` | **RED** 7/7 |
+| `scripts/test_compiler_not.sh` | `codegen_x86.py` `UnaryOp.NOT` emits `setnz` instead of `setz` | **RED** |
+| `scripts/test_compiler_walrus.sh` | `codegen_x86.py` walrus `_emit_local_store` deleted | **RED** 12 cases |
+| `scripts/test_opt_cmpstore.sh` | `sel_binop_routable` reverted to `ir_op_scratch_ok` -- **the exact historical defect it names** | **STAYED GREEN** |
+
+**THE ONE THAT DID NOT GO RED, AND WHY IT IS NOT A DEAD GATE.** Its last line
+prints *"sel_binop_routable arith-only fix holds"*. That line was reverted to
+the pre-fix `ir_op_scratch_ok` -- which does admit the six compares, checked in
+the source, so the mutation IS the defect -- and all five cases still passed.
+A second mutation, deleting the unsigned `setcc` family from `rel_setcc`, ALSO
+left it green, so its `cmp_unsigned` case does not discriminate the
+signed/unsigned families either.
+
+**IT IS NOT BLIND, AND THAT WAS PROVED BY A THIRD MUTATION RATHER THAN
+ASSUMED**: making `emit_setcc_al` emit `sete` for every condition turned all
+five cases red. So `adder/compiler/codegen.ad` IS the compiler it exercises and
+the gate CAN fail -- it just does not guard the two things it names. **Whether
+the fix's absence is now covered by a second defence downstream, or whether the
+fixtures simply never reach that path, was NOT established.**
+
+**SO: 6 sampled, 5 went red for the defect they name, 1 did not.** That is a
+sample of six out of forty-one, not a census, and the other thirty-five remain
+unmutated.
 
 **NOT RUN, DELIBERATELY:** `tests/linux/install_from_usb.sh` and
 `tests/linux/served_install_binary.sh`. Both fetch from the live 255.one, which
