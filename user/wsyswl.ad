@@ -548,15 +548,44 @@ out:     Array[8192, uint8]
 out_pos: uint64 = 0
 out_fd:  int32 = -1                    # fd to pass with the next flush, or -1
 
-# ONE ROW OF A BLIT, and its size is a bound that is CHECKED rather than
-# assumed. 8192 bytes holds 2048 columns, comfortably more than the device's
-# BB_W of 1920 -- but "comfortably more" is what the old code believed too,
-# while capping rows at 2048 and sending the device rects it refuses.
-# resolve_maxsurface() now compares this cap against the device's stated
-# maximum surface width at startup and refuses to serve if this is the smaller
-# one, so the two numbers can never drift apart in silence again.
-ROWBUF_CAP: uint64 = 8192              # >= dev_max_w * 4, checked at startup
-rowbuf:  Array[8192, uint8]
+# A CHUNK OF A BLIT ROW -- AND IT IS NO LONGER A CEILING ON ANYTHING.
+#
+# THE FIFTH TIME. This buffer held 8192 bytes and the code around it required
+# a whole row to fit: 2048 columns. That was "comfortably more" than BB_W when
+# BB_W was 1920. BB_W is 2560 now (user/linux-wsys.c), a row is 10240 bytes,
+# and on 2026-08-17 the startup check below did exactly what it was written to
+# do -- it refused to serve, loudly and correctly given the cap -- and took
+# NINE gates down with it: wsyswl_stall, wsyswl_ceiling, wsyswl_rootless,
+# wsyswl_wheel, wsyswl_shared_fate, wsyswl_wide_window, wsyswl_wide_native,
+# wsys_close_button, x11_geom_probe. That is the fifth constant in this tree
+# to stop matching the hardware while the code around it moved on.
+#
+# SO THE ANSWER IS NOT A FIFTH NUMBER. The obvious fix -- 8192 -> 10240 -- is
+# the same bet the previous four lost, and the honest name for it is "correct
+# until the next panel". The derivation the fix wants (`ROWBUF_CAP =
+# DEV_MAX_W * 4`) is not expressible: MEASURED, not assumed -- host_ac rejects
+# a global with a computed initialiser outright, "x86: global 'ROWBUF_CAP'
+# must have an integer initializer (got BinaryExpr)", and no Array[] size
+# anywhere in user/ or lib/ is anything but a literal. A derived constant
+# cannot be written in this language.
+#
+# What CAN be written is a blit that does not need one. The blit loop below
+# sends one 'B' record per horizontal RUN rather than per row, and the device
+# has always accepted a rect with x0 > 0 (user/linux-wsys.c bb_blit: its
+# source index is (y-y0)*(x1-x0)+(x-x0), and the ctl arm's own size check is
+# on x1-x0, not on x1). So a row wider than this buffer is now SPLIT, not
+# refused, and the width of the device is not a fact this file has to hold a
+# copy of. There is no number here that a resolution bump can falsify.
+#
+# The size is therefore a WRITE SIZE, not a limit: 16384 bytes is 4096 columns,
+# so every surface the device can currently carry (2560) still goes out in ONE
+# write per row and the split path costs nothing in normal service. That makes
+# the split path dead code on this hardware, which this tree does not accept,
+# so WSYSWL_ROWCHUNK=<columns> forces it small and tests/linux/wsyswl_rowchunk.sh
+# drives it: same pixels at 4096 columns a write and at 7.
+ROWBUF_CAP:  uint64 = 16384            # bytes; a WRITE SIZE, not a ceiling
+row_chunk:   uint64 = 16384            # bytes per 'B' record; <= ROWBUF_CAP
+rowbuf:  Array[16384, uint8]
 blithdr: Array[32, uint8]
 pathbuf: Array[256, uint8]
 ctlbuf:  Array[256, uint8]
@@ -3524,53 +3553,78 @@ def commit_buffer(c: uint64, surface_id: uint32, buf_id: uint32):
             drop(S_SHORT, "a buffer row past the end of the shm mapping -- window cut short")
             y = rows
         else:
-            i: uint64 = 0
-            while i < rowbytes:
-                rowbuf[i] = src[pos + i]
-                i = i + 1
-            # ALPHA IS FORCED OPAQUE, for both formats. XRGB8888's fourth byte
-            # is undefined and would show as transparent; ARGB8888's is real,
-            # but a client's translucency is measured against ITS idea of what
-            # is behind the window, and here that is the Hamnix desktop, which
-            # it has never seen. An opaque window is the honest rendering of a
-            # surface whose background we cannot reproduce.
-            k: int32 = 0
-            while k < cols:
-                rowbuf[cast[uint64](k) * 4 + 3] = 255
-                k = k + 1
-            blithdr[0] = 66                              # 'B'
-            put_le32(&blithdr[0], 1, 0)
-            put_le32(&blithdr[0], 5, y)
-            put_le32(&blithdr[0], 9, cols)
-            put_le32(&blithdr[0], 13, y + 1)
-            blithdr[17] = FMT_BGRA8888
-            # AND LOOK AT WHAT THE DEVICE SAID. This return value was thrown
-            # away, and that is the half of the defect that made it invisible:
-            # /dev/wsys refuses an over-large blit rect with EMSGSIZE and
-            # prints one line, and this server -- the process that chose the
-            # rect -- carried on writing refused rows for the life of the
-            # client with nothing to show for it. A write this server does not
-            # look at is a frame it cannot know it lost.
-            wh: int64 = sys_write(dfd, &blithdr[0], 18)
-            wr: int64 = 0
-            if wh == 18:
-                wr = sys_write(dfd, &rowbuf[0], rowbytes)
-            if wh != 18 or wr != cast[int64](rowbytes):
-                if said_refused == 0:
-                    said_refused = 1
-                    puts(2, "wsyswl: /dev/wsys refused a blit row of ")
-                    putd(2, cols)
-                    puts(2, " columns for a ")
-                    putd(2, width)
-                    puts(2, "x")
-                    putd(2, height)
-                    puts(2, " surface (header ")
-                    putd(2, cast[int32](wh))
-                    puts(2, ", payload ")
-                    putd(2, cast[int32](wr))
-                    puts(2, " of ")
-                    putd(2, cast[int32](rowbytes))
-                    puts(2, ") -- this window is NOT being drawn\n")
+            # THE ROW GOES OUT IN RUNS, and `row_chunk` is how big a run may
+            # be -- a write size, NOT a limit on the surface. cols is whatever
+            # the device said it can carry; the loop below covers it in
+            # ceil(rowbytes / row_chunk) records, which is ONE for every width
+            # this device can currently reach and would still be correct if
+            # BB_W doubled tomorrow. Nothing in this function compares the
+            # surface against the buffer any more, because it no longer has to.
+            c0: int32 = 0
+            rowbad: int32 = 0
+            while c0 < cols and rowbad == 0:
+                cn: int32 = cols - c0
+                if cast[uint64](cn) * 4 > row_chunk:
+                    cn = cast[int32](row_chunk / 4)
+                cbytes: uint64 = cast[uint64](cn) * 4
+                cpos: uint64 = pos + cast[uint64](c0) * 4
+                i: uint64 = 0
+                while i < cbytes:
+                    rowbuf[i] = src[cpos + i]
+                    i = i + 1
+                # ALPHA IS FORCED OPAQUE, for both formats. XRGB8888's fourth
+                # byte is undefined and would show as transparent; ARGB8888's
+                # is real, but a client's translucency is measured against ITS
+                # idea of what is behind the window, and here that is the
+                # Hamnix desktop, which it has never seen. An opaque window is
+                # the honest rendering of a surface whose background we cannot
+                # reproduce.
+                k: int32 = 0
+                while k < cn:
+                    rowbuf[cast[uint64](k) * 4 + 3] = 255
+                    k = k + 1
+                blithdr[0] = 66                              # 'B'
+                put_le32(&blithdr[0], 1, c0)
+                put_le32(&blithdr[0], 5, y)
+                put_le32(&blithdr[0], 9, c0 + cn)
+                put_le32(&blithdr[0], 13, y + 1)
+                blithdr[17] = FMT_BGRA8888
+                # AND LOOK AT WHAT THE DEVICE SAID. This return value was
+                # thrown away, and that is the half of the defect that made it
+                # invisible: /dev/wsys refuses an over-large blit rect with
+                # EMSGSIZE and prints one line, and this server -- the process
+                # that chose the rect -- carried on writing refused rows for
+                # the life of the client with nothing to show for it. A write
+                # this server does not look at is a frame it cannot know it
+                # lost.
+                wh: int64 = sys_write(dfd, &blithdr[0], 18)
+                wr: int64 = 0
+                if wh == 18:
+                    wr = sys_write(dfd, &rowbuf[0], cbytes)
+                if wh != 18 or wr != cast[int64](cbytes):
+                    if said_refused == 0:
+                        said_refused = 1
+                        puts(2, "wsyswl: /dev/wsys refused a blit run of ")
+                        putd(2, cn)
+                        puts(2, " columns at x ")
+                        putd(2, c0)
+                        puts(2, " of a ")
+                        putd(2, cols)
+                        puts(2, "-column row, for a ")
+                        putd(2, width)
+                        puts(2, "x")
+                        putd(2, height)
+                        puts(2, " surface (header ")
+                        putd(2, cast[int32](wh))
+                        puts(2, ", payload ")
+                        putd(2, cast[int32](wr))
+                        puts(2, " of ")
+                        putd(2, cast[int32](cbytes))
+                        puts(2, ") -- this window is NOT being drawn\n")
+                    rowbad = 1
+                else:
+                    c0 = c0 + cn
+            if rowbad != 0:
                 y = rows
             else:
                 hit(S_ROWS)
@@ -5498,21 +5552,34 @@ def resolve_maxsurface() -> int32:
         putd(2, h)
         puts(2, ", which is not a size\n")
         return 0
-    # AND THE BUFFER HAS TO BE ABLE TO HOLD ONE OF ITS ROWS. This is the check
-    # that would have caught the original defect at startup instead of on a
-    # user's screen: a fixed buffer meeting a peer that outgrew it is a
-    # documented pattern in this tree, and the answer is to compare the two
-    # numbers out loud rather than to clip to the smaller one in silence.
-    if cast[uint64](w) * 4 > ROWBUF_CAP:
+    # AND HOW THE BUFFER MEETS IT -- STATED, NOT ENFORCED.
+    #
+    # This check used to REFUSE TO SERVE when a row did not fit `rowbuf`, and
+    # on 2026-08-17 it did, on every machine: BB_W had gone to 2560 (10240
+    # bytes a row) while the buffer stayed 8192. It was right about the numbers
+    # and it took nine gates down, because the thing it was defending -- "a
+    # whole row must fit in one buffer" -- was a property of THIS FILE'S BLIT
+    # LOOP and not of the device. That loop now sends a row in runs (see
+    # ROWBUF_CAP), so the requirement is gone and so is the refusal.
+    #
+    # What is left says what it COMPARED and what follows from it, which the
+    # old line never did: it named the two numbers but not the decision. A
+    # SPLIT row is not a fault; it is a wider surface than one write carries,
+    # and a reader who sees a slow paint deserves to find that written down
+    # rather than inferred.
+    if cast[uint64](w) * 4 > row_chunk:
         puts(2, "wsyswl: the device's maximum surface is ")
         putd(2, w)
         puts(2, " columns -- ")
         putd(2, w * 4)
-        puts(2, " bytes a row -- and this server's row buffer holds only ")
-        putd(2, cast[int32](ROWBUF_CAP))
-        puts(2, ". Raise rowbuf/ROWBUF_CAP in user/wsyswl.ad to at least "
-                "BB_W*4 from user/linux-wsys.c.\n")
-        return 0
+        puts(2, " bytes a row -- and one blit write carries ")
+        putd(2, cast[int32](row_chunk))
+        puts(2, " bytes (")
+        putd(2, cast[int32](row_chunk / 4))
+        puts(2, " columns), so a full-width row goes out in ")
+        putd(2, cast[int32]((cast[uint64](w) * 4 + row_chunk - 1) / row_chunk))
+        puts(2, " records instead of 1. Not an error: the surface is NOT "
+                "clipped and no pixel is lost.\n")
     dev_max_w = w
     dev_max_h = h
     return 1
@@ -5712,6 +5779,41 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             puts(2, " of ")
             putd(2, cast[int32](MAXMAP))
             puts(2, "\n")
+
+    # WSYSWL_ROWCHUNK=<columns> -- HOW WIDE A RUN ONE BLIT RECORD CARRIES.
+    #
+    # NOT a tuning knob and not shipped in any rc: it exists so the SPLIT path
+    # in the blit loop is reachable on hardware where it would otherwise never
+    # run. rowbuf is 4096 columns wide and the widest surface this device can
+    # carry is 2560, so in normal service every row goes out in one record and
+    # the run loop's second iteration is dead code. Untested code that only
+    # runs on a machine nobody has yet is how the ceiling this replaced was
+    # bought in the first place, so tests/linux/wsyswl_rowchunk.sh sets this to
+    # a handful of columns and requires the SAME PIXELS as the unsplit run.
+    #
+    # Clamped to [1, ROWBUF_CAP/4], and NAMED on stderr when in force -- a
+    # server writing eight times as many records as it need not, and not
+    # saying so, is the silence this file's counters exist to end.
+    rc: int64 = sys_getenv(cast[Ptr[char]]("WSYSWL_ROWCHUNK"), &envbuf[0], 256)
+    if rc > 0:
+        rcw: int32 = parse_int_at(&envbuf[0], 0, cast[uint64](rc))
+        if rcw >= 1 and cast[uint64](rcw) * 4 <= ROWBUF_CAP:
+            row_chunk = cast[uint64](rcw) * 4
+            puts(2, "wsyswl: WSYSWL_ROWCHUNK -- one blit record carries ")
+            putd(2, rcw)
+            puts(2, " columns (")
+            putd(2, cast[int32](row_chunk))
+            puts(2, " bytes) of the ")
+            putd(2, cast[int32](ROWBUF_CAP / 4))
+            puts(2, " the buffer holds; wide rows are SPLIT across records\n")
+        else:
+            puts(2, "wsyswl: WSYSWL_ROWCHUNK=")
+            putd(2, rcw)
+            puts(2, " is not in [1, ")
+            putd(2, cast[int32](ROWBUF_CAP / 4))
+            puts(2, "] -- IGNORED, one record still carries ")
+            putd(2, cast[int32](row_chunk / 4))
+            puts(2, " columns\n")
 
     # BEFORE the socket exists. A client that connects and binds wl_output in
     # the same breath must not be able to catch a zero.
