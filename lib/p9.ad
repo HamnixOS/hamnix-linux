@@ -611,6 +611,32 @@ def p9_note(pid: int32, msg: Ptr[uint8]) -> int32:
     return 0
 
 
+def p9_note_reachable(pid: int32) -> int32:
+    # Can a note be posted to `pid` AT ALL? Opens /proc/<pid>/note and
+    # closes it again without writing. Returns 0 if the target exists and
+    # the caller is permitted to note it, -1 otherwise.
+    #
+    # WHY THIS IS SEPARATE FROM p9_note. A caller that wants to report
+    # whether a kill WORKED cannot use p9_note_tree's return value for it:
+    # that call notes the descendants FIRST and the target LAST, so a
+    # parent that was blocked in wait4 on the child we just killed can be
+    # gone by the time the target's own note is opened — a successful kill
+    # reported as a failure, on a race, in a loop that runs hundreds of
+    # times in a soak. Probing BEFORE anything is signalled has no such
+    # window: at that instant the target is either reachable or it is not.
+    #
+    # The check is real and it is the kernel's: on this lane note_open
+    # (user/linux-syscalls.c) does kill(pid, 0) and fails the OPEN when the
+    # target is gone or not ours, which is why "the open failed" is the
+    # honest answer to "may I signal this".
+    path: Ptr[char] = _p9_build_note_path(pid)
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    sys_close(fd)
+    return 0
+
+
 # --- p9_listdir() — read a directory, the SYS_LISTDIR replacement ---
 
 def p9_listdir(path: Ptr[char], buf: Ptr[uint8], count: uint64) -> int64:
@@ -798,43 +824,90 @@ def p9_ppid(pid: int32) -> int32:
     return v
 
 
+def _p9_kid_check(pid: int32, s: uint64, e: uint64, out: uint64) -> uint64:
+    # If _p9_tree_dir[s..e) is a decimal pid whose ppid is `pid`, append it
+    # to _p9_tree_kids at `out` and return out+1; otherwise return `out`.
+    # Numeric names only — the static well-known /proc files (version,
+    # uptime, tasks, meminfo, ...) are not pids.
+    if e <= s:
+        return out
+    if out >= _P9_TREE_MAX:
+        return out
+    allnum: int32 = 1
+    v: int32 = 0
+    k: uint64 = s
+    while k < e:
+        c: uint8 = _p9_tree_dir[k]
+        if c < 48 or c > 57:
+            allnum = 0
+        else:
+            v = v * 10 + cast[int32](c) - 48
+        k = k + 1
+    if allnum == 0:
+        return out
+    if v <= 1 or v == pid:
+        return out
+    if p9_ppid(v) != pid:
+        return out
+    _p9_tree_kids[out] = v
+    return out + 1
+
+
 def _p9_collect_children(pid: int32, at: uint64) -> uint64:
     # Append every LIVE task whose ppid == pid onto _p9_tree_kids
     # starting at index `at`; return the new count. /proc's root listing
     # is "NAME\n"-packed and carries one decimal entry per live pid.
+    #
+    # IT STREAMS THE LISTING, AND UNTIL 2026-08-17 IT DID NOT. The old body
+    # was one p9_listdir() into the 4096-byte _p9_tree_dir, which STOPS at
+    # the caller's buffer size and returns a length indistinguishable from a
+    # complete read. MEASURED on a workstation with 2130 live pids: the
+    # /proc listing is 16442 bytes, so 12346 of them — three quarters of
+    # every pid on the machine — were never looked at, and p9_note_tree
+    # therefore reported success having noted NOTHING. Reproduced against
+    # user/kill.ad: `sh -c '/bin/sleep 313131; true'` was killed by pid and
+    # its /bin/sleep child SURVIVED, reparented to init, with kill exiting 0.
+    # The guest desktop has ~40 processes and never hit it, which is exactly
+    # why a size limit that fails silently is worth removing rather than
+    # raising: the next machine is always bigger.
+    #
+    # The chunk buffer stays 4096; what changed is that a partial name at a
+    # chunk boundary is CARRIED into the next read instead of being the end
+    # of the walk.
     if at >= _P9_TREE_MAX:
         return at
-    n: int64 = p9_listdir(cast[Ptr[char]]("/proc"), &_p9_tree_dir[0], 4096)
-    if n <= 0:
+    fd: int32 = sys_open(cast[Ptr[char]]("/proc"))
+    if fd < 0:
         return at
-    ln: uint64 = cast[uint64](n)
     out: uint64 = at
-    i: uint64 = 0
-    while i < ln and out < _P9_TREE_MAX:
-        # One name per line.
-        s: uint64 = i
-        while i < ln and _p9_tree_dir[i] != 10:
+    carry: uint64 = 0
+    while out < _P9_TREE_MAX:
+        n: int64 = sys_read(fd,
+                            cast[Ptr[uint8]](cast[uint64](&_p9_tree_dir[0])
+                                             + carry),
+                            4096 - carry)
+        if n <= 0:
+            break
+        ln: uint64 = carry + cast[uint64](n)
+        i: uint64 = 0
+        linestart: uint64 = 0
+        while i < ln and out < _P9_TREE_MAX:
+            if _p9_tree_dir[i] == 10:
+                out = _p9_kid_check(pid, linestart, i, out)
+                linestart = i + 1
             i = i + 1
-        e: uint64 = i
-        if i < ln:
-            i = i + 1                            # step past '\n'
-        # Numeric names only — the static well-known files (version,
-        # uptime, tasks, meminfo, ...) are not pids.
-        if e > s:
-            allnum: int32 = 1
-            v: int32 = 0
-            k: uint64 = s
-            while k < e:
-                c: uint8 = _p9_tree_dir[k]
-                if c < 48 or c > 57:
-                    allnum = 0
-                else:
-                    v = v * 10 + cast[int32](c) - 48
+        # Hold the unterminated tail over for the next read. A single name
+        # longer than the whole buffer cannot be a pid, so dropping it is
+        # correct rather than merely convenient.
+        carry = ln - linestart
+        if carry >= 4096:
+            carry = 0
+        else:
+            k: uint64 = 0
+            while k < carry:
+                _p9_tree_dir[k] = _p9_tree_dir[linestart + k]
                 k = k + 1
-            if allnum != 0 and v > 1 and v != pid:
-                if p9_ppid(v) == pid:
-                    _p9_tree_kids[out] = v
-                    out = out + 1
+    sys_close(fd)
     return out
 
 

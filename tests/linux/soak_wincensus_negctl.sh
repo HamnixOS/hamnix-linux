@@ -87,6 +87,19 @@ mklog() {   # mklog <out> <n> <state0> <step> <dir0> <dirstep> <wcen 0|1> [ps 0|
             for ((j = 0; j < s0 + i * ss - 3; j++)); do
                 echo "$((1000 + j)) hamcalcscene" >>"$out"
             done
+        elif [ "$ps" = 2 ]; then
+            # ALIVE, with the guest's real `ps` columns (PID USER S TIME CMD).
+            # Same owner count as ps=1, but now the state column is READABLE --
+            # which is what makes ps=3 below a control and not a coincidence.
+            for ((j = 0; j < s0 + i * ss - 3; j++)); do
+                printf '%-7d 0            S  0:00     hamcalcscene\n' $((1000 + j)) >>"$out"
+            done
+        elif [ "$ps" = 3 ]; then
+            # DEAD. The 2026-08-17 armed run's actual shape: every owner still
+            # on the process table and every one of them a corpse.
+            for ((j = 0; j < s0 + i * ss - 3; j++)); do
+                printf '%-7d 0            Z  0:00     hamcalcscene\n' $((1000 + j)) >>"$out"
+            done
         fi
     done
 }
@@ -131,6 +144,37 @@ run "both climb, ps shows live owners"    "$S/proc.log" 'WINDOWS TRACK THE PROCE
 # win_reap_dead(), which is doing exactly what it is written to do.
 run "...and it is still called red"       "$S/proc.log" 'EVERY ROW HAS A LIVE OWNER'
 run "...naming the workload, not the reaper" "$S/proc.log" 'win_reap_dead() is not at fault'
+# ALIVE vs DEAD, ADDED 2026-08-17 AFTER AN ARMED RUN MEASURED THE DIFFERENCE.
+# The reader counted every ps line naming an app as a "live application
+# process" with NO state filter, so 86 corpses and 86 running programs read
+# identically -- and the verdict then asserted, in its own words, that
+# "kill(pid,0) says those owners are alive" and that "win_reap_dead() is not at
+# fault". On the run that measured it, 86 of the 89 owners were state Z:
+# win_reap_dead() IS at fault, because kill(2) succeeds on a zombie. These
+# three cases are the control for that split, and the ps=2 case exists so the
+# ps=3 red is a reading of the STATE and not of the column layout.
+mklog "$S/alive.log" 12 3 8 3 8 1 2
+run "owners with a readable LIVE state"    "$S/alive.log" 'WINDOWS TRACK THE PROCESSES'
+run "...and the corpse verdict does NOT fire" "$S/alive.log" 'EVERY ROW HAS A LIVE OWNER'
+mklog "$S/dead.log" 12 3 8 3 8 1 3
+run "the same owners, all state Z"         "$S/dead.log" 'THE OWNERS ARE CORPSES'
+run "...and the red names the reaper"      "$S/dead.log" 'kill(2) SUCCEEDS on a zombie'
+# AND THE OLD, WRONG SENTENCE MUST NOT SURVIVE INTO THE CORPSE CASE. This is
+# the assertion that would have caught the original defect: a run of pure
+# zombies must not be told its owners are alive.
+if bash -c '
+    set -uo pipefail
+    mkdir -p "'"$S"'/soak"; cp "'"$S"'/dead.log" "'"$S"'/soak/serial.log"
+    out=$( WORK="'"$S"'" WCEN=SOAKWINCEN SECS=900 \
+           SOAK_APPS="hamcalcscene" HAMLINUX_SOAK_CLOSE=0 \
+           bash -c "say(){ :; }; info(){ echo \$*; }; ok(){ echo \$*; }; bad(){ echo \$*; }; . '"$S"'/block.sh" )
+    ! printf "%s" "$out" | grep -q "EVERY ROW HAS A LIVE OWNER"' ; then
+    echo "wcnc: PASS  a census of pure corpses is NOT reported as live owners"
+    PASSES=$((PASSES + 1))
+else
+    echo "wcnc: FAIL  a census in which every owner is state Z still said 'EVERY ROW HAS A LIVE OWNER' -- the reader cannot tell a running program from a corpse"
+    FAILURES=$((FAILURES + 1))
+fi
 run "both climb, no ps lines"             "$S/leak.log" 'NOT MEASURED'
 run "...and then it IS an unexplained leak"  "$S/leak.log" 'REAL LEAK'
 # THE ONE THAT WAS MEASURED RED ON A REAL BOOT. A directory section that exists

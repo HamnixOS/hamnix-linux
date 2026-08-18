@@ -1607,7 +1607,7 @@ for line in log.splitlines():
     m = re.search(r'\bwindows (\d+)\b.*\bframes \d+', line)
     if m:
         cur = {'state': int(m.group(1)), 'dir': None, 'task': None,
-               'fixed': set(), 'pids': set()}
+               'fixed': set(), 'pids': set(), 'zpids': set(), 'stated': 0}
         recs.append(cur)
         mode = None
         continue
@@ -1632,10 +1632,30 @@ for line in log.splitlines():
     # a launched app. If windows - live-app-pids is a CONSTANT (the desktop
     # chrome) while both climb, the window table is exactly right and the thing
     # that is not being reclaimed is the application.
+    # AND WHETHER THOSE PROCESSES ARE ALIVE, which this reader did not ask
+    # until 2026-08-17 and which turned out to be the whole answer. The guest's
+    # `ps` prints `PID USER S TIME CMD`, so column 3 is the state letter and
+    # `Z` is a CORPSE -- a process that has exited and has not been reaped.
+    # Counting a corpse as a "live application process" is not a rounding
+    # error here: it is the difference between "the workload never ends the
+    # programs it starts" and "the workload ends them and nothing buries
+    # them", which are different bugs owned by different files. MEASURED on
+    # the 2026-08-17 armed run: 89 processes at the last census, of which 86
+    # were state Z. The old reader called all 89 live.
+    #
+    # A line with no parseable state column still counts toward `pids` with
+    # its state UNKNOWN -- `stated` records whether this census had any state
+    # column at all, so a reader that cannot see states says so instead of
+    # reporting every process as alive.
     if apps and any(a in line for a in apps):
         p = re.match(r'\s*(\d+)\b', line)
         if p:
             cur['pids'].add(int(p.group(1)))
+            st = re.match(r'\s*\d+\s+\S+\s+([A-Za-z])\s', line)
+            if st:
+                cur['stated'] = 1
+                if st.group(1) == 'Z':
+                    cur['zpids'].add(int(p.group(1)))
 # A census counts as HAVING a window-table reading if EITHER renderer produced
 # a valid one. `dir` is valid only when the five fixed leaves appeared.
 for r in recs:
@@ -1670,6 +1690,11 @@ if have:
         off = [r['state'] - len(r['pids']) for r in have]
         print('PIDS %d %d' % (len(have[0]['pids']), len(have[-1]['pids'])))
         print('OFFSET %d %d' % (min(off), max(off)))
+        # ALIVE OR DEAD. Absent entirely when no census carried a state
+        # column, so "0 corpses" is never printed by a reader that could not
+        # have seen one -- the same rule the PIDS/OFFSET lines already follow.
+        if any(r['stated'] for r in have):
+            print('PIDZ %d %d' % (len(have[0]['zpids']), len(have[-1]['zpids'])))
 PY
 ) || WCEN_OUT=""
 WC_HAVE=$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^HAVE //p')
@@ -1727,15 +1752,34 @@ else
     # and win_reap_dead() is right to keep it.
     PIDLINE=$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^PIDS //p')
     OFFLINE=$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^OFFSET //p')
+    PIDZLINE=$(printf '%s\n' "$WCEN_OUT" | sed -n 's/^PIDZ //p')
     if [ -n "$PIDLINE" ] && [ -n "$OFFLINE" ]; then
         read -r P_FIRST P_LAST <<<"$PIDLINE"
         read -r O_MIN O_MAX <<<"$OFFLINE"
-        info "live application processes in the census's own ps: $P_FIRST -> $P_LAST"
-        info "windows minus live app processes: min $O_MIN, max $O_MAX across $WC_HAVE censuses"
+        info "application processes on the census's own ps: $P_FIRST -> $P_LAST"
+        info "windows minus app processes: min $O_MIN, max $O_MAX across $WC_HAVE censuses"
+        # ALIVE OR DEAD, AND IT IS A DIFFERENT BUG EITHER WAY. A row held by a
+        # RUNNING program means the workload never ended it. A row held by a
+        # CORPSE means the workload did end it and nothing reaped it -- and
+        # win_reap_dead() (user/linux-wsys.c:2328) cannot tell, because it asks
+        # kill(pid, 0) and kill(2) SUCCEEDS on a zombie. Absent line = the ps
+        # carried no state column; then this says UNKNOWN rather than "alive".
+        CORPSES=0
+        if [ -n "$PIDZLINE" ]; then
+            read -r Z_FIRST Z_LAST <<<"$PIDZLINE"
+            info "of those, ZOMBIES (state Z, i.e. corpses): $Z_FIRST -> $Z_LAST"
+            [ "${Z_LAST:-0}" -gt 0 ] && [ $(( Z_LAST * 2 )) -gt "${P_LAST:-0}" ] && CORPSES=1
+        else
+            info "alive-or-dead: UNKNOWN -- no census's ps carried a state column, so 'live' below is not a reading"
+        fi
         OWNED=0
         if [ "$S_CLIMB" -gt 8 ] && [ $(( O_MAX - O_MIN )) -le 3 ]; then
             OWNED=1
-            info "THE WINDOWS TRACK THE PROCESSES. The offset is the desktop chrome and it does not drift, so each new row has a LIVE owner -- the compositor is not leaking rows, this workload is leaking APPLICATIONS. The close sweep destroys a window record; it does not end the program, and nothing here ever does."
+            if [ "$CORPSES" = 1 ]; then
+                info "THE OWNERS ARE CORPSES. The offset is flat, so every row still has an owner on the process table -- but $Z_LAST of the $P_LAST owners at the last census are state Z. The programs ARE being ended; nothing REAPS them, and win_reap_dead() keeps their rows because kill(pid,0) succeeds on a zombie (user/linux-wsys.c:2328). This is not the same finding as a workload that never ends anything, and it is not fixed in the same place."
+            else
+                info "THE WINDOWS TRACK THE PROCESSES. The offset is the desktop chrome and it does not drift, so each new row has a LIVE owner -- the compositor is not leaking rows, this workload is leaking APPLICATIONS. The close sweep destroys a window record; it does not end the program, and nothing here ever does."
+            fi
         fi
     else
         OWNED=0
@@ -1745,6 +1789,12 @@ else
         info "no verdict: the compositor's own table was never read, so there is nothing to weigh the state line against"
     elif [ "$D_CLIMB" -le 8 ] && [ "$S_CLIMB" -gt 8 ]; then
         bad "HARNESS: the compositor's own count stayed within 8 of its baseline (+$D_CLIMB) while wsysd's state line climbed +$S_CLIMB. The climbing number is not the window table."
+    elif [ "$D_CLIMB" -gt 8 ] && [ "$OWNED" = 1 ] && [ "${CORPSES:-0}" = 1 ]; then
+        # win_reap_dead IS at fault here, and the old text said it was not.
+        # kill(pid, 0) returns 0 for a ZOMBIE -- a corpse is a task until it is
+        # reaped -- so the one question the reaper asks cannot distinguish a
+        # running owner from a dead one, and it keeps the row either way.
+        bad "THE WINDOW SET CLIMBED $D_FIRST -> $D_MAX (+$D_CLIMB) over ${SECS}s AND THE OWNERS ARE CORPSES: $Z_LAST of the $P_LAST owners at the last census are state Z. The programs ARE ended and NOTHING REAPS THEM, so win_reap_dead() (user/linux-wsys.c:2328) keeps every row -- it asks kill(pid,0), and kill(2) SUCCEEDS on a zombie. Two places to fix, and they are different: whatever should reap the orphan (its parent was killed with it, so it is PID 1's), and the liveness test that cannot see a corpse."
     elif [ "$D_CLIMB" -gt 8 ] && [ "$OWNED" = 1 ]; then
         # NOT "win_reap_dead is broken". The rows climbed AND every one of them
         # has a living owner, which is the reaper working exactly as written.
@@ -2080,6 +2130,85 @@ say "DID THE WORKLOAD SURVIVE THE WINDOW? (asked FIRST, because the verdict belo
 # and the census's ps side by side for one cycle -- and fix whichever of the two
 # defects above that shows to be real. lib/p9.ad:841 already carries
 # p9_note_tree(), which is the shape a fix in the shell would use.
+#
+# BOTH DEFECTS WERE REAL, BOTH ARE FIXED, AND THE RED DID NOT CLEAR -- BECAUSE
+# THE RED WAS NEVER ABOUT WHAT ITS OWN TEXT SAID (2026-08-17, armed)
+# ============================================================================
+# 900 s, TYPE=0, seed 7742, ARM 0 ARMED, on a medium built from a tree carrying
+# the two hamsh fixes (scripts/test_hamsh_kill_status_host.sh 6/0 and
+# scripts/test_hamsh_spawn_kill_host.sh 6/0, both with RUN negative controls).
+# Evidence: /home/david/.hamnix-build/soak-killfix/{soak/serial.log} and the
+# gate output beside it.
+#
+#                                  baseline (armed)     this run (armed)
+#     windows                       4 -> 100             4 -> 92
+#     offset (win - app pids)       min 3 max 4          min 3 max 4
+#     censuses                      104                  105
+#     heartbeats                    839                  842
+#     LIVE scene applications
+#       at the last census          96                   3
+#     ZOMBIE scene applications
+#       at the last census          not measured         86
+#     live / zombie hamsh           20 / 9               4 / 25
+#     "hamsh: kill:" diagnostics
+#       on the console              0 (it could not
+#                                    report a failure)   17
+#
+# THE PROGRAMS ARE NOW ENDED. Live scene applications at the final census went
+# from 96 to THREE. What replaced them is 86 CORPSES. The trajectory is
+# monotonic and it is the whole run, not an end-of-run artefact:
+#
+#     cycle    5   windows  9   scene live 2   scene ZOMBIE  4
+#     cycle   15   windows 18   scene live 2   scene ZOMBIE 14
+#     cycle   30   windows 30   scene live 2   scene ZOMBIE 26
+#     cycle   50   windows 48   scene live 3   scene ZOMBIE 42
+#     cycle   75   windows 67   scene live 3   scene ZOMBIE 62
+#     cycle  104   windows 91   scene live 3   scene ZOMBIE 86
+#
+# THE WINDOW COUNT DID NOT COME DOWN, AND THE REASON IS TWO OTHER THINGS.
+#
+#   1. NOTHING REAPS THE ORPHAN. The application's parent is the wrapper shell,
+#      and the cohort note kills the wrapper in the same sweep -- so the wrapper
+#      never wait4s the child it was waiting on. The corpse is reparented to
+#      PID 1, PID 1 is hamsh, and hamsh has no orphan reaper: jobs_reap_quiet
+#      waits only on tracked job slots and _svc_reap_one only on supervised
+#      services. READ, NOT MEASURED -- no run here has shown that adding one
+#      clears the count.
+#
+#   2. win_reap_dead() CANNOT SEE A CORPSE, and this file's own failure text
+#      said the opposite. user/linux-wsys.c:2328 is
+#
+#          if (kill((pid_t)v->pid, 0) == 0 || errno != ESRCH) continue;
+#
+#      kill(2) SUCCEEDS on a zombie -- a corpse is a task until it is reaped --
+#      so every row whose owner is unreaped is kept for ever. The verdict this
+#      gate printed for weeks said "kill(pid,0) says those owners are alive"
+#      and "win_reap_dead() is not at fault". The first half is a syscall
+#      return being read as a fact about the world; the second is wrong.
+#
+#   3. AND THE READER COULD NOT HAVE TOLD THE DIFFERENCE EITHER WAY. Until this
+#      commit it counted every ps line naming a launched app as a "live
+#      application process" WITH NO STATE FILTER, so 86 corpses and 86 running
+#      programs produced the identical number, the identical flat offset and
+#      the identical sentence. The baseline's "96 live scene apps" was true;
+#      it was true by luck of which run it was taken from. The reader now
+#      splits the two and the verdict names which it is --
+#      tests/linux/soak_wincensus_negctl.sh drives both shapes and is 17 PASS /
+#      0 FAIL, and against the PRE-CHANGE reader the three new assertions go
+#      RED (14 PASS / 3 FAIL), which is how that split is known to be a
+#      measurement and not a relabelling.
+#
+# WHAT THE NEXT PASS SHOULD DO, in this order: give PID 1 an orphan reaper and
+# re-run; if the count still holds, fix the liveness test (a zombie is not an
+# owner). Do NOT change the workload again -- it now ends what it starts, and
+# that is measured.
+#
+# ONE MORE THING FOUND WHILE FIXING THIS AND NOT FIXED: user/linux-syscalls.c's
+# detached_remember(), when its 64-slot table is full, does `detached_n = 0` --
+# it FORGETS ALL 64. Its own comment says "Reap what we can and drop the
+# oldest", which is neither of the two things it does. Whether that is what
+# stranded the 25 zombie wrapper shells in this run is NOT established; it was
+# read, not instrumented.
 #
 # WHAT IS UNCHANGED AND GOOD, in the same run: 839 heartbeats over 900 s against
 # a floor of 450, zero arena exhaustions, redirection still working at the end
