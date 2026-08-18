@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 #
-# NOT REGISTERED, AND IT WAS RUN FIRST -- IT IS SOFT-GREEN. This gate is not
-# in ci_battery_manifest.txt because, RUN on this tree on 2026-08-18, it
-# printed `[livedom] RESULT pass=21 fail=1 @ b4b9f26b` (the failing case is
-# 06_class_style_toggle) AND EXITED 0. A gate whose red cannot reach its exit
-# status is the false-green shape scripts/test_gate_softgreen.sh exists to
-# ban; registering it would wire a permanently green line into the battery
-# over a known failing case. Make the exit status follow the count, then
-# register it.
+# THE SOFT-GREEN IS CLOSED, 2026-08-18, AND THE fail=1 HAS A NAME.
+#
+# This file used to print `[livedom] RESULT pass=21 fail=1` and EXIT 0 — it
+# reported its own red and then handed CI the byte that means "the assertion
+# was observed to hold". Measured again before anything was changed (755f6e19,
+# clean tree, chromium 147.0.7727.137): pass=21 fail=1, exit 0. The one failure
+# is 06_class_style_toggle and it is a real engine gap — `el.style.*` writes
+# never mirror into the `style` content attribute, so el.attributes and
+# getAttribute('style') never see them. It is DECLARED in
+# tests/fixtures/livedom/KNOWNFAIL with the measurement and the consequence,
+# printed loudly on every run, and NOT silenced: see the VERDICT block at the
+# bottom of this file for the four ways this gate now exits 1, and note that a
+# fixture failing in NEITHER BASELINE nor KNOWNFAIL is one of them.
+#
+# The no-chromium path exits 125 (INCONCLUSIVE, scripts/_verdict.sh) rather
+# than 0, for the same reason: a run with no oracle observed nothing.
 # scripts/test_livedom_functional_host.sh — LIVE-DOM FUNCTIONAL harness.
 #
 # WHY THIS EXISTS
@@ -171,8 +179,13 @@ if [ -z "$CHROMIUM" ]; then
     # The oracle IS chromium; without it this gate asserts nothing, and a fake
     # "expected" table baked from memory is exactly the trap this lane exists to
     # avoid. Skip loudly rather than lie.
-    echo "[livedom] SKIP: no chromium on PATH — this harness has no oracle without it"
-    exit 0
+    #
+    # 125, NOT 0. A run with no oracle observed NOTHING; exit 0 is the word for
+    # "the assertion was observed to hold" and this run cannot say that. See
+    # scripts/_verdict.sh — 125 is INCONCLUSIVE, which scripts/ci_run_gate.sh
+    # already turns into a non-failing ::warning:: rather than a silent green.
+    echo "[livedom] INCONCLUSIVE: no chromium on PATH — this harness has no oracle without it"
+    exit 125
 fi
 
 # ---------------------------------------------------------------------------
@@ -308,12 +321,17 @@ ch_dump() {   # <prepared page> -> canonical lines on stdout
 }
 
 BASELINE="$FIXDIR/BASELINE"
+KNOWNFAIL="$FIXDIR/KNOWNFAIL"
 banked() {   # is $1 in the banked-pass list?
     [ -f "$BASELINE" ] || return 1
     grep -qx "$1" "$BASELINE"
 }
+declared_fail() {   # is $1 declared, in the tree, as a known divergence?
+    [ -f "$KNOWNFAIL" ] || return 1
+    grep -qx "$1" "$KNOWNFAIL"
+}
 
-pass=0; fail=0; FAILED=""; REGRESSED=""; NEWPASS=""
+pass=0; fail=0; FAILED=""; REGRESSED=""; NEWPASS=""; UNDECLARED=""; FIXED=""
 for fx in "$FIXDIR"/*.html; do
     [ -e "$fx" ] || { echo "[livedom] FAIL: no fixtures in $FIXDIR"; exit 1; }
     name="$(basename "$fx" .html)"
@@ -338,35 +356,105 @@ for fx in "$FIXDIR"/*.html; do
     if [ -z "$why" ]; then
         echo "[livedom] PASS $name ($(wc -l < "$WORK/$name.ch" | tr -d ' ') nodes, live DOM identical to chromium)"
         pass=$((pass+1))
-        banked "$name" || NEWPASS="$NEWPASS $name"
+        if ! banked "$name"; then
+            NEWPASS="$NEWPASS $name"
+            declared_fail "$name" && FIXED="$FIXED $name"
+        fi
     else
         echo "[livedom] FAIL $name — $why"
         [ -s "$WORK/$name.ch" ] && [ -s "$WORK/$name.hb" ] && \
             diff -u "$WORK/$name.ch" "$WORK/$name.hb" \
                 | sed -e '1,2d' -e 's/^/[livedom]     /' | head -24
         fail=$((fail+1)); FAILED="$FAILED $name"
-        banked "$name" && REGRESSED="$REGRESSED $name"
+        if banked "$name"; then
+            REGRESSED="$REGRESSED $name"
+        elif ! declared_fail "$name"; then
+            UNDECLARED="$UNDECLARED $name"
+        fi
     fi
 done
 
 echo "[livedom] ---------------------------------------------"
 echo "[livedom] RESULT pass=$pass fail=$fail  @ $LD_HEAD${LD_DIRTY:+ (DIRTY TREE — not a property of this commit)}"
 [ -n "$FAILED" ] && echo "[livedom] failing:$FAILED"
-if [ -n "$NEWPASS" ]; then
-    echo "[livedom] NEW PASS (not yet banked):$NEWPASS"
-    echo "[livedom]   bank it: add the name(s) to $BASELINE"
+# ---------------------------------------------------------------------------
+# THE VERDICT.  Until 2026-08-18 everything below the RESULT line could print
+# `fail=1` and then `exit 0` — the gate reported its own red and returned the
+# byte CI reads as "the assertion was observed to hold". That is the shape
+# scripts/test_gate_softgreen.sh exists to ban, and it is worse than an
+# unregistered gate, because CI believes it.
+#
+# The exit status now follows the result. Note what "the result" is: this gate
+# is a RATCHET, not a demand for perfection, so the thing that must be true is
+# not `fail == 0` but `every fixture's outcome is the one the tree DECLARES`.
+# Two declarations, both files in the tree, both readable by the next person:
+#
+#   BASELINE   fixtures that MUST match chromium.   Failing one = REGRESSION.
+#   KNOWNFAIL  fixtures that are KNOWN to diverge, each with the reason written
+#              beside it. A divergence here is reported LOUDLY every run and is
+#              not a failure of the gate — but it is DECLARED, so it cannot
+#              grow silently and it cannot be added without saying why.
+#
+# Anything else is a failure OF THE GATE, and each of the four has bitten some
+# harness in this tree before:
+#   * a fixture failing that is in NEITHER list — a new fixture landing red
+#     while the gate stays green, which is how coverage arrives already broken;
+#   * a fixture in KNOWNFAIL that now PASSES — a win the floor never recorded,
+#     which is how a fix silently rots back out;
+#   * a fixture passing that is in neither list — same rot, one step earlier;
+#   * ZERO fixtures measured — an instrument that produced an empty result is
+#     not evidence, and `pass=0 fail=0` must never read as green.
+# ---------------------------------------------------------------------------
+LD_RC=0
+
+if [ "$((pass + fail))" -eq 0 ]; then
+    echo "[livedom] FAIL: ZERO fixtures were measured — this run observed nothing."
+    echo "[livedom]   An empty result is not a pass. (filter='$FILTER')"
+    LD_RC=1
 fi
 if [ -n "$REGRESSED" ]; then
-    echo "[livedom] REGRESSION — these were banked as matching chromium:$REGRESSED"
-    exit 1
+    echo "[livedom] FAIL: REGRESSION — these were banked as matching chromium:$REGRESSED"
+    LD_RC=1
+fi
+if [ -n "$UNDECLARED" ]; then
+    echo "[livedom] FAIL: UNDECLARED DIVERGENCE — these fixtures fail and appear in"
+    echo "[livedom]   NEITHER $BASELINE nor $KNOWNFAIL:$UNDECLARED"
+    echo "[livedom]   Fix the engine, or declare it in $KNOWNFAIL with the reason."
+    LD_RC=1
+fi
+if [ -n "$FIXED" ]; then
+    echo "[livedom] FAIL: a fixture declared in $KNOWNFAIL now MATCHES chromium:$FIXED"
+    echo "[livedom]   That is good news the floor has not recorded. Move the name(s)"
+    echo "[livedom]   from $KNOWNFAIL to $BASELINE so the win cannot rot back out."
+    LD_RC=1
+fi
+if [ -n "$NEWPASS" ] && [ -z "$FIXED" ]; then
+    echo "[livedom] FAIL: NEW PASS not banked:$NEWPASS"
+    echo "[livedom]   bank it: add the name(s) to $BASELINE"
+    LD_RC=1
 fi
 if [ "${STRICT:-0}" = "1" ] && [ "$fail" -ne 0 ]; then
-    echo "[livedom] STRICT=1: $fail fixture(s) still diverge"
-    exit 1
+    echo "[livedom] FAIL: STRICT=1 — $fail fixture(s) still diverge"
+    LD_RC=1
 fi
+
 # `grep -c` PRINTS 0 and EXITS 1 on no match, so the old `|| echo 0` fallback
 # appended a SECOND zero and this line read "banked passes: 0\n0)".
 LD_BANKED=0
 [ -f "$BASELINE" ] && LD_BANKED="$(grep -cvE '^[[:space:]]*(#|$)' "$BASELINE" 2>/dev/null)"
-echo "[livedom] floor held (banked passes: $LD_BANKED) @ $LD_HEAD ${LD_DIRTY:+[DIRTY TREE]}"
+LD_KNOWN=0
+[ -f "$KNOWNFAIL" ] && LD_KNOWN="$(grep -cvE '^[[:space:]]*(#|$)' "$KNOWNFAIL" 2>/dev/null)"
+
+if [ "$LD_RC" -ne 0 ]; then
+    echo "[livedom] VERDICT: FAIL (exit 1) @ $LD_HEAD ${LD_DIRTY:+[DIRTY TREE]}"
+    exit 1
+fi
+# Say the known divergences OUT LOUD on a green run. A green that quietly
+# carries a red inside it is how `fail=1` went unread for two weeks.
+if [ "$fail" -ne 0 ]; then
+    echo "[livedom] carrying $fail DECLARED divergence(s) — every one of them is a"
+    echo "[livedom]   real engine gap, listed with its reason in $KNOWNFAIL:$FAILED"
+fi
+echo "[livedom] VERDICT: PASS (floor held: $LD_BANKED banked, $LD_KNOWN declared-failing," \
+     "$((pass + fail)) measured) @ $LD_HEAD ${LD_DIRTY:+[DIRTY TREE]}"
 exit 0

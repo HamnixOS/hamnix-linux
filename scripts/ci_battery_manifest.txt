@@ -5347,12 +5347,24 @@ bash tests/linux/hamui_caret_advance.sh
 #     kernel/sched/core.ad, drivers/net/tcp.ad) -- test_max_cpus_lockstep,
 #     test_mm_free_cow_zap_invariant, test_percpu_cpuid_offset0,
 #     test_opt_kernel_saveset, test_ntasks_per_task_tables, test_tcp_checksum;
-#   * scripts/test_hamsh_tok_capacity.sh is RED on a REAL finding in this
-#     tree (_emit_tok's overflow path does not set lex_error, so an over-cap
-#     rc truncates silently);
-#   * scripts/test_livedom_functional_host.sh EXITS 0 while printing
-#     `pass=21 fail=1` -- a soft-green, and registering it would register a
-#     gate whose red cannot reach CI;
+#   * (RESOLVED 2026-08-18) scripts/test_hamsh_tok_capacity.sh was RED, and it
+#     was a FALSE red: its third check awk-hunted for the literal `lex_error =
+#     1` inside `def _emit_tok`, and the fix that landed in 87da5762 routes
+#     through the `_lex_fail()` helper instead, so the string it looked for has
+#     not existed since the day the bug was closed. MEASURED on the tree as it
+#     stood, with a compiled host hamsh: an over-cap script (603 lines, ~6600
+#     tokens, TOK_MAX=4096) prints `lexical error: too many tokens for one
+#     input`, names the file AND the line, prints `NOT RUN`, leaves ZERO marks
+#     (not even its first statement's) and exits 1; the under-cap positive
+#     control runs to its last statement and exits 0. The gate is now a RUN
+#     with that positive control and a negative control that DELETES the guard
+#     and requires the truncate-and-run defect back. It is registered below.
+#   * (RESOLVED 2026-08-18) scripts/test_livedom_functional_host.sh printed
+#     `pass=21 fail=1` and EXITED 0. Its exit status now follows its result,
+#     the fail=1 (06_class_style_toggle -- el.style.* never mirrors into the
+#     `style` content attribute) is DECLARED in tests/fixtures/livedom/KNOWNFAIL
+#     and printed loudly on every run, and a fixture failing in neither that
+#     file nor BASELINE now fails the gate. It is registered below.
 #   * scripts/test_no_hardcoded_task_fd_loops.sh SKIPs both of its targets
 #     (they are not in this repository) and then PASSes over the empty set.
 #
@@ -5451,3 +5463,15 @@ bash scripts/test_hambrowse_reflow.sh
 # the next page's field. Three arms, with the defect reproduced on demand
 # (HAMWSYSD_STDIN_KEYS=1) so the negative is an assertion.
 bash tests/linux/wsys_stdin_keydup.sh
+
+# --- registered 2026-08-18, both previously annotated-not-registered ---------
+# ~2m19s, exit 0, 18 PASSED / 0 FAILED (measured 2026-08-18). Dominated by two
+# hamsh compiles: the shell under test, and the deliberately-defective shell the
+# negative control needs. It is the only gate in the battery that proves an
+# over-cap rc script does not run.
+bash scripts/test_hamsh_tok_capacity.sh
+# ~2m, exit 0, pass=21 fail=1 with the one failure DECLARED in
+# tests/fixtures/livedom/KNOWNFAIL (measured 2026-08-18, chromium
+# 147.0.7727.137). Needs chromium; without it the gate exits 125 (INCONCLUSIVE)
+# rather than 0, so a runner with no browser cannot read as a green.
+bash scripts/test_livedom_functional_host.sh

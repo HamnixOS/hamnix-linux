@@ -214,3 +214,29 @@
 20_activation_behaviour
 21_select_selectedness
 22_script_rawtext
+
+# ---------------------------------------------------------------------------
+# CORRECTION, 2026-08-18, and it is to a claim made in THIS file.
+#
+# The note above says "06 diverges on the style= attribute alone -- the
+# inline-style store is a third instance of this same shape, but closing it
+# also needs CSSOM serialisation to match chromium (declaration order and
+# 'prop: value;' spacing, plus colour normalisation)". RE-MEASURED on 755f6e19,
+# clean tree, chromium 147.0.7727.137, the whole of 06's diff is:
+#
+#     chromium:   ... id=box style=display: block; color: red;]
+#     hambrowse:  ... id=box]
+#
+# The style attribute is ABSENT, not misformatted. `el.style.display = 'block'`
+# writes the CSSOM store and mirrors into the content attribute NOWHERE, so
+# el.attributes and getAttribute('style') never see it at all. There is no
+# serialisation to argue about yet -- that obstacle is real but strictly
+# downstream of a mirror that does not exist. Anyone reading the older note
+# would go looking for a spacing bug and not find one.
+#
+# 06 is now DECLARED in tests/fixtures/livedom/KNOWNFAIL (with that measurement
+# and the consequence), because the gate's exit status stopped being a lie in
+# the same commit: a fixture that fails and is in NEITHER file now fails the
+# gate outright. It is not silenced -- it is printed, with its count, on every
+# green run.
+# ---------------------------------------------------------------------------
