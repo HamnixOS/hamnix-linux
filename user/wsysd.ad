@@ -339,6 +339,13 @@ composite:  Array[16384000, uint8]     # MAX_PIXELS * 4, BGRX as /dev/fb wants
 # buffer the device is also writing, so a routed frame costs no upload and no
 # readback. Set once, in vk_arm(), before the first frame.
 comp_base:  uint64 = 0
+# WHAT THE DEVICE SAYS ITS LARGEST SURFACE IS, filled in by check_maxsurface()
+# at startup from /dev/wsys/pool. 0 until then, and paint_backbuffer() falls
+# back to COMP_W in that case -- which is a copy of BB_W and is the number
+# being checked, so the fallback is named where it is used rather than being
+# quietly equivalent.
+dev_max_w: int32 = 0
+dev_max_h: int32 = 0
 scr_w: int32 = 0
 scr_h: int32 = 0
 scr_pitch: int32 = 0
@@ -821,6 +828,16 @@ def check_maxsurface():
     if pos[0] < lim and ctlbuf[pos[0]] == 120:
         pos[0] = pos[0] + 1
     dh: int32 = take_int(&ctlbuf[0], &pos[0], lim)
+    # KEEP IT, do not just compare it. paint_backbuffer() needs to know how
+    # wide a backbuffer ROW actually is -- the window table's width is the
+    # window's, and bb_fit has already cut the pixels to the device's. Storing
+    # what the device SAID is the whole reason this file reads the field at
+    # all; comparing it and then throwing it away is how COMP_W ended up being
+    # the only number anybody could act on.
+    if dw != NOVAL and dw > 0:
+        dev_max_w = dw
+    if dh != NOVAL and dh > 0:
+        dev_max_h = dh
     if dw == COMP_W and dh == COMP_H:
         return
     if dw == NOVAL or dh == NOVAL:
@@ -1654,8 +1671,31 @@ TITLEBAR_H: int32 = 22
 
 # One row of a window's v2 backbuffer, read straight out of the shared surface
 # as RGBA8888.
-BBROW_CAP: uint64 = 7680                # 1920 * 4
-bbrow: Array[7680, uint8]
+# AND THIS WAS THE SAME DEFECT AGAIN, IN THE COMPOSITOR, FOUND ON 2026-08-17
+# BY THE GATE THAT WENT LOOKING FOR IT IN wsyswl.
+#
+# `BBROW_CAP = 7680  # 1920 * 4` and a matching Array[7680] were correct while
+# BB_W was 1920. BB_W is 2560. The loop below capped every window's row at this
+# buffer and then painted `cols = rowbytes / 4` pixels -- so EVERY WINDOW WIDER
+# THAN 1920 WAS TRUNCATED AT COLUMN 1920 ON THE SCREEN, with no message from
+# anybody, on the owner's 2560-wide panel. tests/linux/wsyswl_wide_window.sh
+# measured it: "the wide window is blank at column 2440 (0%)". The cap was
+# doing exactly what it was written to do; the number had died.
+#
+# SO IT IS NOT A CEILING ANY MORE. Two changes, and the second is the one that
+# matters:
+#
+#   1. The row is truncated at the DEVICE's maximum width (dev_max_w, read
+#      from /dev/wsys/pool by check_maxsurface -- the number the device states
+#      rather than a copy of it), because that is genuinely how wide a
+#      backbuffer row is: bb_fit clamps a window's pixels to BB_W and the
+#      window TABLE does not, so a 2812-wide window has a 2560-wide row.
+#   2. The row is read and painted in RUNS OF THIS BUFFER, so the buffer's
+#      size is a read size and not a limit. 16384 bytes is 4096 columns --
+#      one read per row for every width this device can carry -- and a wider
+#      device tomorrow costs a second read, not a truncated window.
+BBROW_CAP: uint64 = 16384               # bytes per read; a RUN SIZE, not a cap
+bbrow: Array[16384, uint8]
 
 def paint_backbuffer(i: uint64) -> int32:
     wid: int32 = win_id[i]
@@ -1668,40 +1708,64 @@ def paint_backbuffer(i: uint64) -> int32:
     ox: int32 = win_x[i]
     oy: int32 = win_y[i]
     y: int32 = 0
+    done: int32 = 0                              # COMPLETE rows painted
     rowbytes: uint64 = cast[uint64](w) * 4
-    # THE ROW BUFFER IS 1920 PIXELS AND SO IS THE BACKBUFFER, BUT THE WINDOW
-    # TABLE IS NOT. `geometry` accepts any positive width, so a window can be
-    # 2048 wide in the table while user/linux-wsys.c's bb_fit has cut its
-    # pixels to BB_W. This loop used to read `rowbytes` bytes -- correctly
-    # capped -- and then walk x from 0 to the WINDOW's width, indexing
-    # bbrow[x*4] up to 512 bytes PAST THE END of a 7680-byte array and painting
-    # whatever was there over the desktop. An out-of-bounds read that reaches
-    # the screen. `cols` is what was actually read, and the loop stops there;
-    # the window's own limit is announced by the server that chose it
-    # (user/wsyswl.ad), so this does not say it a second time per frame.
-    if rowbytes > BBROW_CAP:
-        rowbytes = BBROW_CAP
-    cols: int32 = cast[int32](rowbytes / 4)
+    # THE BACKBUFFER ROW IS AS WIDE AS THE DEVICE ALLOWS, AND THE WINDOW TABLE
+    # IS NOT. `geometry` accepts any positive width, so a window can be 2812
+    # wide in the table while user/linux-wsys.c's bb_fit has cut its pixels to
+    # BB_W. Reading the window's width would walk off the end of the row and
+    # desynchronise every row after it; the correct number is the DEVICE's,
+    # which check_maxsurface() read out of /dev/wsys/pool at startup.
+    #
+    # This used to be capped at BBROW_CAP instead -- 1920 columns -- and the
+    # loop then painted only what it had read, so a 2560-wide window ended at
+    # column 1920 in silence. See the BBROW_CAP comment: the buffer is a read
+    # size now and the row is covered in runs of it.
+    devw: uint64 = cast[uint64](dev_max_w)
+    if devw == 0:
+        devw = cast[uint64](COMP_W)
+    if rowbytes > devw * 4:
+        rowbytes = devw * 4
     while y < h:
-        got: uint64 = 0
-        while got < rowbytes:
-            k: int64 = sys_read(fd, &bbrow[got], rowbytes - got)
-            if k <= 0:
-                break
-            got = got + cast[uint64](k)
-        if got < rowbytes:
-            break
-        x: int32 = 0
-        while x < cols:
-            o: uint64 = cast[uint64](x) * 4
-            r: uint32 = cast[uint32](bbrow[o])
-            g: uint32 = cast[uint32](bbrow[o + 1])
-            b: uint32 = cast[uint32](bbrow[o + 2])
-            put_px(ox + x, oy + y, (r << 16) | (g << 8) | b)
-            x = x + 1
-        y = y + 1
+        left: uint64 = rowbytes
+        xdone: int32 = 0
+        short: int32 = 0
+        while left > 0 and short == 0:
+            run: uint64 = left
+            if run > BBROW_CAP:
+                run = BBROW_CAP
+            got: uint64 = 0
+            while got < run:
+                k: int64 = sys_read(fd, &bbrow[got], run - got)
+                if k <= 0:
+                    got = run + 1                # sentinel: the read failed
+                else:
+                    got = got + cast[uint64](k)
+            if got != run:
+                short = 1
+            else:
+                x: int32 = 0
+                cn: int32 = cast[int32](run / 4)
+                while x < cn:
+                    o: uint64 = cast[uint64](x) * 4
+                    r: uint32 = cast[uint32](bbrow[o])
+                    g: uint32 = cast[uint32](bbrow[o + 1])
+                    b: uint32 = cast[uint32](bbrow[o + 2])
+                    put_px(ox + xdone + x, oy + y, (r << 16) | (g << 8) | b)
+                    x = x + 1
+                xdone = xdone + cn
+                left = left - run
+        if short != 0:
+            y = h                                # stop: the rest is not there
+        else:
+            done = done + 1
+            y = y + 1
     sys_close(fd)
-    if y == 0:
+    # COMPLETE ROWS, not the loop variable. `y` is now moved to `h` to leave
+    # the loop on a short read, so testing it would report "painted" for a
+    # window whose very first row did not arrive -- the difference between
+    # "nothing bad happened" and "nothing happened".
+    if done == 0:
         return 0
     return 1
 

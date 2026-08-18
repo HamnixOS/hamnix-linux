@@ -4936,6 +4936,25 @@ bash scripts/ci_run_gate.sh scripts/test_track_boot_armed.sh
 # 5 PASS / 5 FAIL. Host-only (no QEMU); ~85 s.
 bash tests/linux/hpm_hook_bounded.sh
 
+# --- a driver package's hook must not append the same lines twice ----------
+# (added 2026-08-17)  module_install_hook() appended to /etc/modules and
+# modules.dep UNCONDITIONALLY on the stated grounds that "this runs once per
+# install" -- false for an UPGRADE, measured at ~5.3 KB of modules.dep per
+# `hpm update`, against an /etc/modules user/linuxinit.ad reads into a fixed
+# 32 KB buffer.  The fix is a conditional inside a PUBLISHED package's install
+# path, which is the most dangerous edit in this tree: hamsh parses a whole
+# script before running any of it and EXITS 0 on a parse error, so a bad token
+# means the hook silently does nothing while hpm reports success.  This gate
+# takes the text out of the real generator and runs it with the real
+# user/hamsh.ad and the real user/grep.ad TWICE, asserts the second install
+# adds ZERO lines, asserts the hook actually printed its own output (a hook
+# that did not parse would otherwise pass with "0 lines added twice"), and
+# carries the negative control: the same hook with the guard stripped, which
+# must duplicate.  Measured 10 PASS / 0 FAIL, control 6 module lines and 4 dep
+# lines for two installs.  Host-only (no QEMU); ~14 s warm, plus the hamsh and
+# grep builds on a cold tree.
+bash tests/linux/hpm_module_hook_idempotent.sh
+
 # --- a lex error is fatal, and PID 1 still gets a shell (added 2026-08-12) --
 # The half the hook gate deliberately left open. A sourced file is ONE logical
 # input to hamsh's lexer, so a runaway quote means NOTHING in the script ran --

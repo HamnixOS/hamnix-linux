@@ -226,6 +226,11 @@ else
     bad "the surface stopped being delivered after churn (${lastbox}% white) -- this is the Steam bug, without Steam"
 fi
 
+# THE SIZE THE PLANTED FAULT IS MEASURED AGAINST, set BEFORE the plant so that
+# nothing after it has to resize -- see the comment on the move below.
+xdotool windowsize "$XT" 800 400
+sleep 2
+
 # ---- THE NEGATIVE CONTROL: plant the fault, and watch it heal --------------
 # This is the bug itself, injected. The v2 backbuffer slot carries its own w/h;
 # the client writes rows at THAT width and user/wsysd.ad re-rows them at the
@@ -233,42 +238,114 @@ fi
 # side by side at half height -- which, for a rootful Xwayland, is a whole X
 # session that painted once and never followed a move again. The next blit must
 # notice and re-fit, or nothing ever does.
-python3 - "$WORK/wsys.bb" <<'PY'
-import struct, sys
-# THE SEGMENT'S HEADER, from user/linux-wsys.c's struct bbshm:
-#   magic, nslots, full_evt, full_wid, full_w, full_h   -- 24 bytes
-# then nslots * struct bbhdr, 28 bytes each.
-# CHECKED, NOT ASSUMED. This script silently planted nothing for a while after
-# the header grew -- it wrote "640x480" over four bytes of the header, reported
-# "planted on wid 0", and the assertion below then failed for a reason that had
-# nothing to do with the compositor. A test that injects a fault must prove it
-# injected one.
-HDR = 24
-MAGIC = 0x42425747
-f = open(sys.argv[1], 'r+b')
-magic, nslots = struct.unpack('<II', f.read(8))
-if magic != MAGIC:
-    sys.exit("wlstall: the backbuffer segment's magic is %#x, not %#x -- this "
-             "script does not know its layout and planted NOTHING" % (magic, MAGIC))
+#
+# WHERE THE FAULT HAS TO GO, AND WHY IT MOVED. MEASURED 2026-08-17.
+#
+# This used to write 640x480 into `$WORK/wsys.bb` -- struct bbshm's
+# `slot[]` array. TWO things were wrong with that and only the first was
+# visible:
+#
+#   1. It hard-coded BBSHM_MAGIC as 0x42425747. The segment says 0x42425753
+#      ("SWBB"), bumped "when the pixels left this file". The magic check did
+#      its job and planted NOTHING, and the gate went red for a reason with
+#      nothing to do with the compositor -- twice in one run, because the
+#      loudness assertion below then failed as a consequence.
+#   2. AND FIXING THE MAGIC DID NOT MAKE THE FAULT REAL. `bb->slot[]` is
+#      ACCOUNTING ONLY: bb_pool_claim WRITES it and /dev/wsys/pool renders it,
+#      and NOTHING reads its w/h to decide anything about pixels. The size
+#      bb_for() compares -- the one whose mismatch is the bug this section is
+#      named for -- lives in `struct bbpix`, in the window's PRIVATE memfd
+#      (bbmap[i].hdr). Planting in wsys.bb wrote bytes nobody consults: the
+#      run printed "planted a stale 640x480 slot on wid 2", the window was
+#      never broken, "a slot whose size disagreed was re-fitted" passed
+#      against a window that had never disagreed with anything, and the
+#      loudness check reported silence about a re-fit that never happened.
+#      Measured: 0 `wsys: BACKBUFFER` lines in either log, before or after.
+#
+# So the fault is planted in the memfd the code actually reads. It is not on
+# the filesystem -- memfd_create(2), named "hamnix-wsys-bb" -- but it is a
+# process's open file, so /proc/<pid>/fd is the way in, and BBPIX_MAGIC
+# identifies the right one rather than a position being trusted.
+BBPIX_MAGIC="$(sed -n 's/^#define BBPIX_MAGIC  *\(0x[0-9a-fA-F]*\)u\?.*/\1/p' \
+               user/linux-wsys.c | head -1)"
+[ -n "$BBPIX_MAGIC" ] || bad "cannot read BBPIX_MAGIC from user/linux-wsys.c -- nothing can be planted"
+python3 - "$WLPID" "${BBPIX_MAGIC:-0}" <<'PY'
+import os, struct, sys
+# struct bbpix, from user/linux-wsys.c:
+#   magic, version, wid, w, h, gen, front, started   -- 8 uint32/int32 = 32 B
+# It is the FIRST object in the window's backbuffer memfd.
+pid  = sys.argv[1]
+WANT = int(sys.argv[2], 0)
+d = "/proc/%s/fd" % pid
+cands = []
+try:
+    names = sorted(os.listdir(d), key=int)
+except OSError as e:
+    sys.exit("wlstall: cannot read %s (%s) -- planted NOTHING" % (d, e))
+for n in names:
+    try:
+        tgt = os.readlink(os.path.join(d, n))
+    except OSError:
+        continue
+    if "hamnix-wsys-bb" not in tgt:
+        continue
+    cands.append(n)
+if not cands:
+    sys.exit("wlstall: no fd in %s is a hamnix-wsys-bb memfd -- this process "
+             "owns no backbuffer and NOTHING was planted" % d)
 planted = False
-for i in range(nslots):
-    off = HDR + i * 28
-    f.seek(off)
-    used, wid, w, h, gen, front, started = struct.unpack('<IiiiIII', f.read(28))
-    if used and wid >= 2 and w > 0 and h > 0:
-        f.seek(off)
-        f.write(struct.pack('<IiiiIII', used, wid, 640, 480, gen, front, 0))
-        print("wlstall: INFO planted a stale 640x480 slot on wid %d (was %dx%d)"
-              % (wid, w, h))
-        planted = True
-        break
-f.close()
+for n in cands:
+    p = os.path.join(d, n)
+    try:
+        f = open(p, "r+b")
+    except OSError as e:
+        print("wlstall: INFO fd %s not writable (%s)" % (n, e))
+        continue
+    hdr = f.read(32)
+    if len(hdr) < 32:
+        f.close(); continue
+    magic, ver, wid, w, h, gen, front, started = struct.unpack("<IIiiiIII", hdr)
+    if magic != WANT:
+        print("wlstall: INFO fd %s magic %#x is not BBPIX_MAGIC %#x -- skipped"
+              % (n, magic, WANT))
+        f.close(); continue
+    if w <= 0 or h <= 0:
+        f.close(); continue
+    f.seek(0)
+    f.write(struct.pack("<IIiiiIII", magic, ver, wid, 640, 480, gen, front, 0))
+    f.flush(); f.close()
+    print("wlstall: INFO planted a stale 640x480 backbuffer on wid %d "
+          "(was %dx%d) via /proc/%s/fd/%s" % (wid, w, h, pid, n))
+    planted = True
+    break
 if not planted:
-    sys.exit("wlstall: no live backbuffer slot to plant a fault in -- nothing "
-             "was injected and the assertion below would be meaningless")
+    sys.exit("wlstall: found %d hamnix-wsys-bb memfd(s) but could not plant in "
+             "any of them -- nothing was injected and the assertions below "
+             "would be meaningless" % len(cands))
 PY
-[ $? = 0 ] || { bad "the fault could not be planted, so nothing below is evidence"; }
-xdotool windowsize "$XT" 800 400
+[ $? = 0 ] || bad "the fault could not be planted, so nothing below is evidence"
+# HOW MANY TIMES THE DEVICE HAD ALREADY SAID IT, BEFORE THE PLANT.
+#
+# `wsys: BACKBUFFER ...` comes out of bb_once(), which is a ONE-SHOT PER
+# PROCESS latch (user/linux-wsys.c: `if (*flag) return;`).  The 40 rounds of
+# resize above are legitimate re-fits and each of them can spend that latch --
+# so "there is a BACKBUFFER line in the log" is NOT evidence that the PLANTED
+# mismatch was announced, and an unqualified grep for it is an assertion that
+# cannot fail once the churn has run.  The count is taken here, before the
+# plant takes effect, so the check below can ask for a NEW line and can say
+# out loud when the latch makes the question unanswerable.
+BB_BEFORE=$(grep -c 'wsys: BACKBUFFER' "$WORK/wsyswl.log" "$WORK/wsysd.log" 2>/dev/null \
+            | awk -F: '{s += $NF} END {print s + 0}')
+info "BACKBUFFER lines before the plant: ${BB_BEFORE:-0}"
+# ONLY A MOVE, AND THE SIZE WAS SET BEFORE THE PLANT.  This used to resize the
+# window here (`xdotool windowsize 800 400`), and a resize REPAIRS THE SLOT BY
+# A DIFFERENT ROUTE: the `geometry` verb calls bb_resize -> bb_fit directly,
+# so the planted mismatch was gone before any blit could notice it, and
+# bb_for's mismatch branch -- the code this section exists to exercise -- was
+# never reached.  The gate then reported "corrected without a word", which was
+# true and was not about the compositor: MEASURED 2026-08-17, zero
+# `wsys: BACKBUFFER` lines in either process's log, before OR after.  A move
+# re-blits at the SAME size, so bb_for is the only way back to consistency.
 xdotool windowmove "$XT" 300 300
 sleep 4
 healed=$(whitebox $((300+OX)) $((300+OY)) 700 350)
@@ -297,11 +374,29 @@ else
 fi
 grep -q 'DROPPING FRAMES' "$WORK/wsyswl.log" && info "wsyswl named its drops on stderr:" \
     && grep 'DROPPING FRAMES' "$WORK/wsyswl.log" | sed 's/^/wlstall:   /'
-if grep -q 'wsys: BACKBUFFER' "$WORK/wsyswl.log"; then
-    info "the wsys backbuffer named its own faults, which is the point:"
-    grep 'wsys: BACKBUFFER' "$WORK/wsyswl.log" | sed 's/^/wlstall:   /'
+#
+# AND IT IS ASKED AGAINST THE COUNT TAKEN BEFORE THE PLANT, not against zero.
+# Until 2026-08-17 this was `grep -q 'wsys: BACKBUFFER' wsyswl.log`, which the
+# 40 rounds of churn above can satisfy all by themselves -- and which looked
+# only in wsyswl.log, though the slot's owner may be either process and only
+# the OWNER prints (bb_for: `bbmap[i].own`).  Both logs are read, and a NEW
+# line is what counts.
+BB_AFTER=$(grep -c 'wsys: BACKBUFFER' "$WORK/wsyswl.log" "$WORK/wsysd.log" 2>/dev/null \
+           | awk -F: '{s += $NF} END {print s + 0}')
+info "BACKBUFFER lines after the plant: ${BB_AFTER:-0} (before: ${BB_BEFORE:-0})"
+if [ "${BB_AFTER:-0}" -gt "${BB_BEFORE:-0}" ]; then
+    ok "the wsys backbuffer named the PLANTED fault -- $(( BB_AFTER - BB_BEFORE )) new line(s)"
+    grep -h 'wsys: BACKBUFFER' "$WORK/wsyswl.log" "$WORK/wsysd.log" 2>/dev/null \
+        | sed 's/^/wlstall:   /'
+elif [ "${BB_BEFORE:-0}" -gt 0 ]; then
+    # NOT A PASS AND NOT A FAIL: the instrument was already spent.
+    info "the one-shot bb_once() latch had ALREADY fired ${BB_BEFORE} time(s) during the churn, so a second re-fit CANNOT produce a line and this run does not distinguish a silent re-fit from an announced one -- the question is not asked, which is different from it passing"
+    grep -h 'wsys: BACKBUFFER' "$WORK/wsyswl.log" "$WORK/wsysd.log" 2>/dev/null \
+        | sed 's/^/wlstall:   /'
 else
-    bad "the planted mismatch was corrected without a word -- silence is the bug"
+    bad "the planted mismatch was corrected without a word -- silence is the bug (no 'wsys: BACKBUFFER' in either wsyswl.log or wsysd.log, before or after)"
+    info "wsyswl.log tail:"; tail -6 "$WORK/wsyswl.log" | sed 's/^/wlstall:   /'
+    info "wsysd.log tail:";  tail -6 "$WORK/wsysd.log"  | sed 's/^/wlstall:   /'
 fi
 
 echo "wlstall: $pass PASS, $fail FAIL"

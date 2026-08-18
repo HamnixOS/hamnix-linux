@@ -1120,43 +1120,108 @@ def module_install_hook(pkg, staged, note, deps=(), kver=None):
         "#      nothing about a module installed afterwards; without this the",
         "#      .ko would be on the disk and modprobe would say 'not found'.",
         "#",
-        "# Appending is unconditional, and THE REASON GIVEN FOR THAT IS FALSE",
-        "# FOR UPGRADES. The rationale used to read: hpm refuses to install a",
-        "# package that is already installed, so this runs once per install.",
-        "# True of a first install. An UPGRADE runs the hook again, and the",
-        "# very next line of this comment has always said that `hpm remove`",
-        "# does NOT take the lines back out. So every `hpm update` that touches",
-        "# a driver package appends the same lines a second time, and a third,",
-        "# measured at roughly 5.3 KB of modules.dep per update.",
+        "# Appending USED TO BE UNCONDITIONAL, and the reason given for that",
+        "# was FALSE FOR UPGRADES. The rationale read: hpm refuses to install",
+        "# a package that is already installed, so this runs once per install.",
+        "# True of a first install. An UPGRADE runs the hook again, and `hpm",
+        "# remove` does NOT take the lines back out -- so every `hpm update`",
+        "# touching a driver package appended the same lines a second time,",
+        "# and a third, measured at roughly 5.3 KB of modules.dep per update.",
         "#",
-        "# The duplicates are harmless to RESOLUTION -- sys_init_module maps",
+        "# The duplicates were harmless to RESOLUTION -- sys_init_module maps",
         "# EEXIST to success and modprobe takes the first matching line -- but",
-        "# they are not harmless to SIZE. /etc/modules is read by",
-        "# user/linuxinit.ad load_modules() into a fixed buffer; that buffer was",
-        "# 8192 bytes with the file at 6018 and the whole SOF audio stack on its",
-        "# last lines, and is now 32768 with an explicit overflow warning. This",
-        "# growth eats exactly that headroom, so the two are one problem: an",
-        "# unbounded append against a bounded read.",
+        "# not to SIZE. /etc/modules is read by user/linuxinit.ad",
+        "# load_modules() into a fixed buffer; that buffer was 8192 bytes with",
+        "# the file at 6018 and the whole SOF audio stack on its last lines,",
+        "# and is now 32768 with an explicit overflow warning. The growth ate",
+        "# exactly that headroom: an unbounded append against a bounded read,",
+        "# one problem and not two.",
         "#",
-        "# NOT FIXED HERE, and the reason is specific rather than an excuse: the",
-        "# obvious fix is to append only when the line is absent, and hamsh",
-        "# parse_if() takes an EXPRESSION, not a command exit status, so",
-        "# `if grep -q ...` is not known to work in a hook. Getting that wrong",
-        "# fails in the worst available way -- hamsh parses a whole script",
-        "# before running any of it, so one bad token means the ENTIRE hook",
-        "# silently does nothing while the install reports success, which is",
-        "# this tree's signature failure inside a released package's install",
-        "# path. It needs a measured answer about hamsh conditionals in hooks,",
-        "# not a plausible one.",
-        "# `hpm remove` does NOT take the lines back out -- see remove.hamsh.",
+        "# WHAT WAS MEASURED BEFORE THIS WAS WRITTEN, because the previous",
+        "# comment here refused to guess and it was right to. Every line below",
+        "# was RUN, against the real user/hamsh.ad and the real user/grep.ad",
+        "# built by scripts/hamlinux_build.sh -- not against bash:",
+        "#",
+        "#   * hamsh parse_if() takes an EXPRESSION, so `if grep -q ...` is",
+        "#     NOT the form. `VAR = $(cmd)` command substitution IS wired, and",
+        "#     `if $VAR == '0':` parses and branches correctly.",
+        "#   * `or` in an if condition is NOT wired: `if $a == '0' or ...`",
+        "#     is `parse error [line N]: expected '{' or ':' to open block`.",
+        "#     So the decision is made by three separate ifs over a variable,",
+        "#     which was measured to give yes/no/yes for '0'/'3'/''.",
+        "#   * grep -cFx prints '1' for a present line and '0' for an absent",
+        "#     one; on a MISSING FILE it prints nothing and the capture is the",
+        "#     EMPTY STRING, which is why '' is handled separately and appends",
+        "#     rather than skipping -- a file that is not there cannot already",
+        "#     contain the line.",
+        "#   * WITH grep ABSENT FROM $PATH the capture is ALSO '0', which is",
+        "#     indistinguishable from 'ran and found nothing'. Named here",
+        "#     because it is a real hole and not a theoretical one: on a",
+        "#     machine with no /bin/grep this hook degrades to exactly the",
+        "#     unconditional append it replaces. That is the OLD behaviour,",
+        "#     never a lost module, which is why the hole is acceptable.",
+        "#     /bin/grep is in hamlinux_image.sh's APPS list and in COREUTILS.",
+        "#   * hamsh parses the WHOLE script before running any of it, and a",
+        "#     parse error makes the shell EXIT 0 -- measured. So a bad token",
+        "#     anywhere here means the entire hook does nothing while hpm",
+        "#     reports success. tests/linux/hpm_module_hook_idempotent.sh",
+        "#     RUNS this generated text twice for that reason; a hook that has",
+        "#     not been seen to run twice is not shippable.",
+        "#",
+        "# THE GUARD IS PER FILE, NOT PER LINE, and that is a decision worth",
+        "# stating: all of a package's /etc/modules lines are appended by this",
+        "# one hook as a single block, so the presence of the FIRST is",
+        "# evidence for the block. One `grep` per file instead of one per line",
+        "# also keeps the cost off a path hpm has already measured (500 quoted",
+        "# appends through hamsh: 0.033 s). The case it does not cover is a",
+        "# hook interrupted mid-block on a previous run, which would leave a",
+        "# partial list this guard then skips -- accepted, and named.",
+        "#",
+        "# `hpm remove` still does NOT take the lines back out -- see",
+        "# remove.hamsh.",
         "",
         "echo '[%s] enabling %s'" % (pkg, note),
     ]
     for _host, _inside, canonical, big in staged:
         if big:
             lines.append("gzip -d '%s.gz'" % canonical)
-    for _host, _inside, canonical, _big in staged:
-        lines.append("echo '%s' >> '/etc/modules'" % canonical)
+
+    def _guarded(sentinel, target, body, present_msg):
+        """The three-if decision measured above, wrapped round `body`.
+
+        `sentinel` is the line whose presence in `target` means the block has
+        already been applied.  Emitted as literal hamsh, four spaces of
+        indent, which is what parse_suite() takes for a colon-suite.
+        """
+        out = [
+            "_have = $(grep -cFx '%s' '%s')" % (sentinel, target),
+            "_do = 'yes'",
+            "if $_have != '0':",
+            "    _do = 'no'",
+            "if $_have == '':",
+            "    _do = 'yes'",
+            "    echo '[%s] %s could not be read to test for a line already "
+            "there -- appending unconditionally'" % (pkg, target),
+            "if $_do == 'yes':",
+        ]
+        out += ["    " + b for b in body]
+        out += [
+            "else:",
+            "    echo '%s'" % present_msg,
+        ]
+        return out
+
+    mod_body = ["echo '%s' >> '/etc/modules'" % canonical
+                for _host, _inside, canonical, _big in staged]
+    mod_body.append(
+        "echo '[%s] %d module%s added to /etc/modules; loaded on the next "
+        "boot'" % (pkg, len(staged), "" if len(staged) == 1 else "s"))
+    if staged:
+        lines += _guarded(
+            staged[0][2], "/etc/modules", mod_body,
+            "[%s] %d module%s already in /etc/modules -- NOT appended again"
+            % (pkg, len(staged), "" if len(staged) == 1 else "s"))
+
     if deps and kver:
         depfile = "/lib/modules/%s/modules.dep" % kver
         # THE REDIRECT TARGET IS QUOTED, and it has to be. hamsh's lexer
@@ -1167,14 +1232,19 @@ def module_install_hook(pkg, staged, note, deps=(), kver=None):
         # user/hamsh.ad now glues redirect targets the way it has always
         # glued arguments, so this is fixed at the source -- but a machine
         # INSTALLED BEFORE that fix still has the old shell and would run
-        # this hook with it, so the quotes stay.
-        for dl in deps:
-            lines.append("echo '%s' >> '%s'" % (dl, depfile))
-        lines.append("echo '[%s] %d modules.dep line%s appended to %s'"
-                     % (pkg, len(deps), "" if len(deps) == 1 else "s", depfile))
+        # this hook with it, so the quotes stay. The SAME rule covers the
+        # grep argument in the guard above: the sentinel and the file it is
+        # looked for in are both single-quoted for the same '+'.
+        dep_body = ["echo '%s' >> '%s'" % (dl, depfile) for dl in deps]
+        dep_body.append(
+            "echo '[%s] %d modules.dep line%s appended to %s'"
+            % (pkg, len(deps), "" if len(deps) == 1 else "s", depfile))
+        lines += _guarded(
+            deps[0], depfile, dep_body,
+            "[%s] %d modules.dep line%s already in %s -- NOT appended again"
+            % (pkg, len(deps), "" if len(deps) == 1 else "s", depfile))
+
     lines += [
-        "echo '[%s] %d module%s added to /etc/modules; loaded on the next "
-        "boot'" % (pkg, len(staged), "" if len(staged) == 1 else "s"),
         "exit 0",
         "",
     ]
