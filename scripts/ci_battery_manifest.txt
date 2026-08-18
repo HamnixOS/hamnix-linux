@@ -5224,6 +5224,12 @@ bash tests/linux/de_distros_table.sh
 bash tests/linux/opcount_selftest.sh
 # MEASURED: 10 passed, 0 failed, 9s.
 bash tests/linux/wsys_srv_connown.sh
+# MEASURED: 38 passed, 0 failed, 9s. No QEMU: compiles one x86_64-linux host
+# binary that runs the REAL lib/hamui.ad layout + paint passes and asserts
+# every text-bearing widget's box against htb_text_width() of the string
+# inside it -- with no pixel constant of its own, and with a RUN negative
+# control (hamui_force_8px_advance) that puts 8 px/char back and must go red.
+bash tests/linux/hamui_widget_advance.sh
 # MEASURED: 0 passed, 0 failed, 10s.
 bash tests/linux/input_probe.sh
 # MEASURED: 9 passed, 0 failed, 10s.

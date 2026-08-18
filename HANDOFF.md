@@ -15,6 +15,63 @@ then this file for where it stands, then `README.md`.
 
 ### READ THIS FIRST — the state, in order
 
+### THE WIDGET GATE IS BUILT AND THE ELEVEN hamUI SIZING SITES ARE MEASURED
+
+**Measured, dev host, 2026-08-17, `tests/linux/hamui_widget_advance.sh`,
+evidence at `~/.hamnix-build/widgadv/`:** **38 PASSED / 0 FAILED**, from
+**19 PASSED / 19 FAILED** on the same gate against the tree as it stood.
+
+Three claims that were standing in this file or in `docs/` are wrong:
+
+1. **`user/hamctl_host.ad` did not exit 2 for any interesting reason.** It
+   wants **nine** PPM paths (`argc < 10`, writes `argv[1..9]`); its own USAGE
+   comment says three. Given nine it exits 0 and writes nine 520×400 P6 files.
+   The comment is stale, not the binary.
+2. **`lib/hamui.ad` LINKS CLEAN for `x86_64-linux`.**
+   `docs/hamui_dual_target.md` says a host driver "must NOT import
+   `lib/hamui.ad`" because the host runtime "only provides
+   read/write/open/close/lseek/exit". `user/linux-runtime.S` now exports 50
+   symbols, including every extern hamui declares. So a host binary runs the
+   REAL layout pass and the REAL paint pass and reads every box back — which
+   is what `user/hamui_advance_host.ad` does.
+3. **The 8 px constant was wrong in BOTH directions**, not merely imprecise.
+   At `WSYS_UI_PX(14)` an `i` advances **3 px** and a `W` advances **12**. The
+   rendered PPM of the red arm shows a wide button's text running out past the
+   right edge of its own face while a narrow button is twice as wide as its
+   text.
+
+The gate uses **no pixel constant of its own**: it builds each site twice with
+two strings of the SAME BYTE COUNT (24 `i` = 72 px, 24 `W` = 288 px) and
+asserts `box(wide) − box(narrow) == text(wide) − text(narrow)`, plus that the
+padding around the text does not depend on the text. Its negative control is
+RUN: `hamui_force_8px_advance(1)` puts the width helpers back on 8 px/char and
+the same binary reproduces the defect. It asserts `FONT_READY 1` first and
+refuses to read any width otherwise, because `htb_text_width()` FALLS BACK to
+8 px/char with no face loaded and every assertion would then agree with the
+bug.
+
+**The gate caught a bad check, which is the point of having one.** The first
+POPDOWN assertion compared two items in the same menu; a popdown is a COLUMN,
+so those two are equal by design and the gate went red on correct code.
+
+**`user/hamtermscene.ad:320` was left alone, and now there are numbers for
+why.** The proposed fix — a better cell constant — was MEASURED and makes the
+worse half worse. Content width is 592 px; a 74-column row measures **222 px
+of `i`**, **518 px of `x`**, **888 px of `W`**. So the grid already
+under-fills by 370 px and overruns by 296 px, and the "measured average" 6.60
+px/char (from `the quick brown fox jumps`, 165 px / 25) would give 89 columns:
+89 `W` = 1068 px, an overrun of 476 px instead of 296. The only constant that
+never overruns is the widest advance, which costs a third of the columns for
+ordinary text. **No single number is right for a proportional face**, the file
+already says so at startup, and nothing here can adjudicate a judgement call.
+
+**Still 8 px/char, NOT changed and NOT gated:** roughly ten sites outside
+`lib/hamui.ad`. Several are FORWARD/INVERSE pairs and fixing only the forward
+half makes clicking worse — `lib/hamslidescore.ad:1805` (`ln * 8`) against
+`:2595` (`(x − textx) / 8`); `lib/hamsheetcore.ad:3401`/`:3468` against
+`:3265`; `user/hampanelscene.ad:2945` against `:3277`. Read, not measured.
+
+
 **This section is written newest-first, and several entries CORRECT the ones
 below them.** Where a claim was wrong it is left standing with the correction
 beside it rather than quietly edited, so read a section together with anything
@@ -40,7 +97,8 @@ corpses**, where it was 4 → 92 with 86.
 either — but it fails toward KEEPING the segment, which is the safe direction
 for memory someone may still be attached to. Read, not measured, left alone.
 
-**Open, and honest about it:** ~20 widget sites still size text at 8 px/char. "One keystroke
+**Open, and honest about it:** ~10 widget sites OUTSIDE `lib/hamui.ad` still
+size text at 8 px/char (the eleven inside it are measured now, and gated). "One keystroke
 starts an erase" was seen once and is unexplained. 95 gates are unregistered.
 **Nothing runs any of the gates unless a person does.**
 
