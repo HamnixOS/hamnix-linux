@@ -5330,3 +5330,124 @@ bash tests/linux/term_caret_advance.sh
 bash tests/linux/private_ns_isolates.sh
 # MEASURED: 14 passed, 0 failed, 100s.
 bash tests/linux/hamui_caret_advance.sh
+
+# ---------------------------------------------------------------------------
+# FORTY DARK GATES, REGISTERED 2026-08-18 AFTER BEING RUN, ONE AT A TIME
+# ---------------------------------------------------------------------------
+# scripts/test_gate_registration.sh reported 95 gate scripts that no CI job
+# runs. These forty are the ones that were RUN on this host first and came
+# back green with a real assertion in the output; the runtime beside each is
+# its own, measured on that run, not an estimate and not a group average.
+# None of them boots QEMU.
+#
+# NINE MORE FROM THE SAME NON-QEMU SET ARE DELIBERATELY *NOT* HERE, and each
+# carries its reason in its own header instead:
+#   * six are RED because they assert about a tree this repository does not
+#     contain at all (arch/x86/kernel/smp.ad, mm/vma.ad, init/main.ad,
+#     kernel/sched/core.ad, drivers/net/tcp.ad) -- test_max_cpus_lockstep,
+#     test_mm_free_cow_zap_invariant, test_percpu_cpuid_offset0,
+#     test_opt_kernel_saveset, test_ntasks_per_task_tables, test_tcp_checksum;
+#   * scripts/test_hamsh_tok_capacity.sh is RED on a REAL finding in this
+#     tree (_emit_tok's overflow path does not set lex_error, so an over-cap
+#     rc truncates silently);
+#   * scripts/test_livedom_functional_host.sh EXITS 0 while printing
+#     `pass=21 fail=1` -- a soft-green, and registering it would register a
+#     gate whose red cannot reach CI;
+#   * scripts/test_no_hardcoded_task_fd_loops.sh SKIPs both of its targets
+#     (they are not in this repository) and then PASSes over the empty set.
+#
+# A FURTHER 43 -- every scripts/test_opt_*.sh that calls opt1_require_lane --
+# were also run and are annotated rather than registered: they exit 0 in under
+# a second having printed only SKIPPED, because the legacy opt1 optimizer lane
+# they assert against was retired in ba2e4bcf. A gate that cannot fail is not
+# coverage.
+# ~0 s, exit 0, 88 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_adder_pin.sh
+# ~0 s, exit 0, 322 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_atomics.sh
+# ~0 s, exit 0, 280 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_augmented_assign.sh
+# ~0 s, exit 0, 300 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_bool_shortcircuit.sh
+# ~0 s, exit 0, 164 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_call_in_expr.sh
+# ~0 s, exit 0, 238 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_match.sh
+# ~0 s, exit 0, 260 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_sext_widen.sh
+# ~0 s, exit 0, 261 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_unreserved_idents.sh
+# ~0 s, exit 0, 242 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_walrus.sh
+# ~0 s, exit 0, 469 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_hamsh_rc_token_budget.sh
+# ~0 s, exit 0, 568 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_opt_cmpstore.sh
+# ~0 s, exit 0, 542 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_opt_methodsave.sh
+# ~0 s, exit 0, 769 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_opt_nested_loops.sh
+# ~0 s, exit 0, 764 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_opt_reglower.sh
+# ~0 s, exit 0, 426 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_opt_scor_storeelim.sh
+# ~0 s, exit 0, 163 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_package_source_refusal.sh
+# ~0 s, exit 0, 376 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_ssa_bailsite_66_split.sh
+# ~0 s, exit 0, 587 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_ssa_cluster_exhaustive.sh
+# ~0 s, exit 0, 353 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_ssa_native_mem.sh
+# ~1 s, exit 0, 580 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_bool_xor.sh
+# ~1 s, exit 0, 515 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_not.sh
+# ~1 s, exit 0, 715 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_compiler_signed_pow2_div.sh
+# ~1 s, exit 0, 499 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_opt_copyprop_blockleak.sh
+# ~1 s, exit 0, 179 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_opt_loopcond_cse.sh
+# ~1 s, exit 0, 232 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_ssa_census_fidelity.sh
+# ~6 s, exit 0, 366 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_signed_shift.sh
+# ~6 s, exit 0, 325 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_subword_access.sh
+# ~7 s, exit 0, 2064 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_desktopentry_host.sh
+# ~8 s, exit 0, 2013 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_vk_linux.sh
+# ~12 s, exit 0, 495 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_local_store_trunc.sh
+# ~12 s, exit 0, 481 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_param_spill_trunc.sh
+# ~20 s, exit 0, 1857 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_de_appmenu_datadriven.sh
+# ~24 s, exit 0, 1122 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_hambrowse_png_interlaced.sh
+# ~24 s, exit 0, 50 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_opt_leamuladd.sh
+# ~53 s, exit 0, 2841 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_hambrowse_google_host.sh
+# ~53 s, exit 0, 90784 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_hambrowse_host.sh
+# ~54 s, exit 0, 681 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_hambrowse_fieldinbox_host.sh
+# ~55 s, exit 0, 2265 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_hambrowse_history.sh
+# ~56 s, exit 0, 1063 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_hambrowse_window.sh
+# ~78 s, exit 0, 1144 bytes of output, no FAIL line (measured 2026-08-18).
+bash scripts/test_hambrowse_reflow.sh
+
+# THE COMPOSITOR MUST NOT TAKE ONE KEYSTROKE TWICE. No QEMU, measured 37 s.
+# One physical Return used to put TWO bytes on the focused window's ring --
+# once decoded from evdev and once read straight off /dev/console, which is
+# the same tty0 the keyboard feeds, because rc.5 leaves wsysd's stdin
+# attached to the console. In the installer that was one Return calling
+# _goto_next() twice, and a whole line of previously typed text replayed into
+# the next page's field. Three arms, with the defect reproduced on demand
+# (HAMWSYSD_STDIN_KEYS=1) so the negative is an assertion.
+bash tests/linux/wsys_stdin_keydup.sh

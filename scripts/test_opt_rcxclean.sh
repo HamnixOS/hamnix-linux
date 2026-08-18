@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+#
+# NOT REGISTERED, AND THE REASON WAS MEASURED HERE ON 2026-08-18. This gate is
+# not in ci_battery_manifest.txt because the legacy opt1 optimizer lane that
+# every one of its assertions targets was RETIRED in ba2e4bcf (2026-07-21).
+# RUN on the tree as it stands it exits 0 in under a second having printed the
+# five SKIPPED lines and NOTHING ELSE: zero PASS lines, zero FAIL lines, ~520
+# bytes of output. scripts/lib_opt1_lane.sh's opt1_require_lane() exits 0
+# before the first check runs. Registering it would put a gate that CANNOT
+# FAIL into the battery, which is strictly worse than the hole it appears to
+# fill -- an assertion that cannot fail is not an assertion. Register it when
+# the SSA optimizer rewrite gives these counters something to move
+# (docs/adder_ssa_optimizer_design.md).
 # scripts/test_opt_rcxclean.sh — focused, host-only correctness + firing guard for
 # the STORE-VALUE ROUND-TRIP ELISION (codegen.ad index_store_addr_rcx_clean).
 # Armed only under --opt; byte-identical to the frozen seed OFF.

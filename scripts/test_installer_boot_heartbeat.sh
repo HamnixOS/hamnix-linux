@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+#
+# NOT REGISTERED, AND IT WAS RUN FIRST -- IT CANNOT RUN IN THIS REPOSITORY.
+# This gate is not in ci_battery_manifest.txt because it needs
+# build/hamnix-installer.img, the NATIVE Hamnix kernel's installer image, and
+# building it here stops at `Error: can't open mod/kmod_hello.S for reading`:
+# scripts/build_modules.sh asks for mod/kmod_hello.S and there is no mod/
+# directory in this repository at all. RUN on 2026-08-18 it exits 1 after
+# 108 s (it builds all 278 userland programs first) and says so itself -- "INCONCLUSIVE: build/hamnix-installer.img could
+# not be built. INCONCLUSIVE is NOT a pass". Registering it would wire a
+# permanently inconclusive line into the battery. It belongs to the kernel
+# repository, whose tree carries both the module sources and the code this
+# gate asserts about.
 # scripts/test_installer_boot_heartbeat.sh - INSTALLER-IMAGE BOOT GATE.
 #
 # PURPOSE (the orchestrator's pre-push gate)

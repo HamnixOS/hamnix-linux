@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+#
+# NOT REGISTERED YET, AND IT WAS RUN FIRST -- IT IS RED ON A REAL FINDING.
+# This gate is not in ci_battery_manifest.txt because, RUN on this tree on
+# 2026-08-18, it exits 1 with:
+#
+#     [test_tok_capacity] PASS: all tok_* arrays >= TOK_MAX
+#     [test_tok_capacity] PASS: TOK_MAX leaves >=1.5x headroom over rc.5
+#     [test_tok_capacity] FAIL: _emit_tok overflow path does not set lex_error
+#                               (would truncate silently)
+#
+# That is the gate working: an over-cap rc would be lexed to a TRUNCATED token
+# stream and run anyway. Registering it now would put a red line in the
+# battery and buy nothing; FIX _emit_tok, then delete this block and add the
+# manifest line in the same commit.
 # scripts/test_hamsh_tok_capacity.sh
 #
 # REGRESSION GATE: hamsh's whole-file source path must be able to tokenize
