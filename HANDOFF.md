@@ -1000,6 +1000,38 @@ multiply-and-compare, a table lookup, or a division by a variable that happens t
 hold 8 would not match. What is established is that **the obvious form is
 absent**, not that no inverse can exist.
 
+### 1.0.29 IS PUSHED AND SIGNED BUT NOT SERVED — the Pages build has been
+### "building" for over an hour
+
+Recorded so nobody re-pushes or re-signs on the assumption something went wrong
+here. **Everything on our side is done and verified:**
+
+* `HamnixOS/packages` remote HEAD is `de13c8b`, the 1.0.29 commit; `main` is in
+  sync with `origin/main`.
+* The repo's `linux/index.json` reads **130 packages, all 1.0.29**.
+* The detached signature verifies **against `etc/hpm/trusted.pub`**.
+* 1.0.28 stays fetchable — 2656 → 2786 tarballs, nothing removed.
+
+**The site is still serving 1.0.28, and that copy's signature verifies OK** — so
+the site is healthy, it simply has not picked up the commit.
+`gh api repos/HamnixOS/packages/pages/builds` shows the latest build with status
+**`building`**, started 13:58:10Z, with no error message; the previous build
+(09:43:10Z) is `built`. **It is queued or stuck on GitHub's side, not failed, and
+not ours.**
+
+**For calibration, since "how long is too long" has no baseline here:** 1.0.26
+and 1.0.27 each served after ~13 polls (roughly four minutes). 1.0.28 took about
+seventeen minutes. This one is past an hour. **A ten-minute poll timeout is not a
+failed publish** — but an hour with `building` on the API is worth checking the
+API for rather than polling harder, which is what finally distinguished "slow"
+from "stuck".
+
+**Until the site serves it, 1.0.29 is NOT published.** A push is not a
+publication. Do not write it up as released, do not cut the CHANGELOG section,
+and do not hand anyone the medium as a published artifact. When it does serve:
+verify the served signature against the trust root and fetch a tarball to compare
+against `/home/david/.hamnix-build/rel1029/repo/linux/packages/`.
+
 ### CORRECTION — "40 of 40 SAMPLED PASS" WAS MINE AND IT WAS WRONG
 
 **43 of those gates SKIP. They do not pass.** I ran `test_opt_constif` myself
