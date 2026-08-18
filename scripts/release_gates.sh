@@ -165,6 +165,11 @@ cat <<'REGISTRY'
 wsys_stdin_keydup|no|0|8||bash tests/linux/wsys_stdin_keydup.sh
 hamsh_eof_exit|no|0|14||bash tests/linux/hamsh_eof_exit.sh
 wsys_zombie_strand|no|0|8||bash tests/linux/wsys_zombie_strand.sh
+# wsys_zombie_owner.sh was in scripts/ci_battery_manifest.txt and NOT here.
+# The driver ran the gate for the 2026-08-18 segment fix and not the gate for
+# the 2026-08-17 window-reaper fix in the same file. Measured 9 / 0 on this
+# host, 2026-08-18, before it was registered.
+wsys_zombie_owner|no|0|9||bash tests/linux/wsys_zombie_owner.sh
 test_hamsh_tok_capacity|no|0|18||bash scripts/test_hamsh_tok_capacity.sh
 test_livedom_functional_host|no|1|22|06_class_style_toggle is declared in the gate's own KNOWNFAIL list|bash scripts/test_livedom_functional_host.sh
 channel_bytes_match_image|no|0|3||bash tests/linux/channel_bytes_match_image.sh
@@ -173,7 +178,13 @@ pkg_tar_reproducible|no|0|5||bash tests/linux/pkg_tar_reproducible.sh
 verify_medium|no|0|39||bash scripts/verify_medium.sh @IMG@
 install_confirm_keys|yes|0|34||bash tests/linux/install_confirm_keys.sh
 install_wizard_gui|yes|0|34||bash tests/linux/install_wizard_gui.sh
-soak_desktop|yes|0|26||bash tests/linux/soak_desktop.sh
+# THE SOAK'S DURATION IS PINNED HERE, not left to an env var typed at the
+# console. tests/linux/soak_desktop.sh defaults to 3600 s; expect_min=26 was
+# measured at 900 s with ARM 0 ARMED (no HAMLINUX_SOAK_SKIPPROOF). A release
+# driver that inherits the duration from whoever invoked it is not a record
+# of what was run. env(1) is used because the runner word-splits this command
+# and a bare VAR=x prefix would be taken as the program name.
+soak_desktop|yes|0|26||env HAMLINUX_SOAK_SECS=900 bash tests/linux/soak_desktop.sh
 shipped_medium_boots|yes|0|31||bash tests/linux/shipped_medium_boots.sh @IMG@
 REGISTRY
 }
@@ -343,7 +354,7 @@ GATE
 HOST_ONLY=0; WANT=""
 for a in "$@"; do
     case "$a" in
-        --list) registry | awk -F'|' '{printf "%-32s qemu=%-3s allow_fail=%s\n", $1, $2, $3}'; exit 0 ;;
+        --list) registry | awk -F'|' '/^[^#]/ && NF {printf "%-32s qemu=%-3s allow_fail=%s\n", $1, $2, $3}'; exit 0 ;;
         --self-test) self_test ;;
         --host-only) HOST_ONLY=1 ;;
         -*) echo "unknown option: $a" >&2; exit 2 ;;
