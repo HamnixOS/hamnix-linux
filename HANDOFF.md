@@ -13,9 +13,69 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### THE WINDOW COUNT CAME DOWN: 92 → 6, AND THERE ARE NO CORPSES LEFT
+
+Both halves below are now built, gated and run on the workload. **Measured, 900 s,
+`HAMLINUX_SOAK_TYPE=0`, seed 7742, ARM 0 ARMED, `tests/linux/soak_desktop.sh`,
+2026-08-17, evidence at `~/.hamnix-build/soak-zreap/`:**
+
+|                              | baseline (armed) | this run (armed) |
+|------------------------------|------------------|------------------|
+| `soak_desktop.sh`            | 2 FAILED         | **25 PASSED / 0 FAILED** |
+| windows                      | 4 → **92**       | 4 → **6** (peak) |
+| climb over the run           | dir +88          | **dir +2, state +2** |
+| ZOMBIE scene apps at the end | **86**           | **0** |
+| LIVE scene apps at the end   | 3                | 3 |
+| live / zombie hamsh          | 4 / 25           | **2 / 0** |
+| heartbeats                   | 842              | 848 |
+| censuses                     | 105              | 106 |
+| offset (win − app pids)      | min 3 max 4      | min 3 max 4 |
+
+**Both reds cleared.** `soak_wincensus_negctl.sh` stays **17 / 0**, so the reader
+that produced these numbers is the same one that produced the baseline's.
+
+Two things were fixed and each has its own gate with a RUN negative control:
+
+1. **`win_reap_dead()` can now see a corpse.** `user/linux-wsys.c`'s
+   `pid_liveness()` reads the state field of `/proc/<pid>/stat` — scanning to
+   the **LAST** `)`, because comm may contain spaces and parentheses — and
+   reclaims a window **only** on a positive reading of death (`Z`, `X`, `x`, or
+   `ENOENT`). Live and *cannot tell* both keep the window, exactly as before.
+   `kill(2)` remains the fallback when `/proc` cannot answer, and its "alive" is
+   now treated as UNKNOWN rather than as live. The sweep is throttled to 5 Hz
+   per process, because the old test was one syscall per window per frame and
+   this one is three; the throttle state starts at zero so a one-shot reader
+   like `cat` always sweeps.
+   Gate: `tests/linux/wsys_zombie_owner.sh` — **9 PASSED / 0 FAILED**, against a
+   host process table of 2,137. Its RED arm is RUN: `HAMWSYS_LIVENESS=kill`
+   restores the old predicate and the same window **survives**.
+
+2. **PID 1 reaps its orphans.** `user/linux-syscalls.c`'s `reap_orphans()` runs
+   in a process that actually adopts (PID 1, or a declared subreaper), and
+   **never waits for a child it created**: the runtime remembers every pid it
+   forks and forgets it the instant a wait path consumes the status, so the set
+   difference is exact and every wait is by number, never `-1`. The cost when
+   there is nothing to do is one `waitid(WNOWAIT)`, which peeks without
+   consuming.
+   Gate: `tests/linux/init_orphan_reap.sh` — **11 PASSED / 0 FAILED**, same
+   process table. **Three** RUN negative controls: `HAMNIX_ORPHAN_REAP=off`
+   leaves the corpse; `HAMNIX_ORPHAN_REAP=greedy` (ignore the own-children
+   table) **loses the own child's exit status**, which is what makes "it did not
+   break job control" an assertion instead of a platitude; and
+   `HAMNIX_DETACHED_FULL=clear` strands 64 of 100.
+
+**What was NOT verified.** That any of this fixes the owner's laptop freeze —
+untouched here. That the throttle is the right number: 200 ms was chosen, not
+measured against a frame budget. That `shm_seg_is_live()`
+(`user/linux-wsys.c:1757`) is safe — it asks `kill(pid, 0)` on the segment
+owner and has **the identical zombie blindness**, so a stale segment whose owner
+is a corpse still counts as live. It fails toward *keep the segment*, which is
+the safe direction there, and **I read that and did not measure it.**
+
 ### `kill(pid, 0)` SUCCEEDS ON A ZOMBIE — and I exonerated the compositor on it
 
-This section corrects the one above it. I wrote that the soak's window rows were
+*(Historical. Both causes named here are now fixed and measured; see the section
+above.)* This section corrects the one above it. I wrote that the soak's window rows were
 "each held by a **live** one" and that `win_reap_dead()` "is not at fault". Both
 claims rest on `user/linux-wsys.c:2328`:
 
@@ -49,13 +109,42 @@ the world.** `kill(pid, 0)` answers "is there a process table entry I may
 signal", which is not "is there a program running". The gate that said otherwise
 was reporting the syscall faithfully.
 
-### `detached_remember()`'s COMMENT DISAGREES WITH ITS CODE
+### `detached_remember()` — THE COMMENT AND THE CODE WERE BOTH WRONG, AND I MEASURED IT
 
-`user/linux-syscalls.c`'s `detached_remember()` says, when its 64-slot table
+`user/linux-syscalls.c`'s `detached_remember()` said, when its 64-slot table
 fills: *"Reap what we can and drop the oldest rather than growing without
-bound"* — and then does `detached_n = 0`, **forgetting all 64**. It neither
-reaps nor drops the oldest. Whether that stranded the 25 zombie wrapper shells
-seen in the soak is **not established**: read, not instrumented.
+bound"* — and then did `detached_n = 0`, **forgetting all 64**. It neither
+reaped nor dropped the oldest.
+
+I then measured it instead of reasoning about it, which changed the answer.
+`tests/linux/init_orphan_reap.sh` arm D, one process, 100 detached children,
+host:
+
+| workload | old code | "reap, then drop the oldest" | growing the table |
+|---|---|---|---|
+| 100 children that exit at once | **0 stranded** | 0 | 0 |
+| 100 children ALIVE at once     | **64 stranded** | 36 | **0** |
+
+**So the HANDOFF inference — that this stranded the soak's 25 zombie wrapper
+shells — was CONDITIONAL, and the condition is concurrency, not volume.** With
+fast-exiting children the `reap_detached()` at the top of every `sys_rfork`
+drains the table faster than the loop fills it and the overflow path is never
+taken at all. It costs nothing until 65 detached children are alive at once.
+
+And the comment's own policy was not good enough either: "drop the oldest" still
+breaks the promise the runtime made when it accepted `RFNOWAIT`, 36 times
+instead of 64. The fear it encodes is misplaced — the bound on this table is not
+the number of detached spawns ever made, it is the number ALIVE AT ONCE, and
+`reap_detached` compacts it at every fork and every idle park. **The table now
+grows**, to a ceiling that exists only so a runaway cannot turn a zombie leak
+into a memory leak, and evictions past that ceiling are COUNTED
+(`sys_detached_dropped()`), because a silent broken promise is how this one
+survived.
+
+**Whether it stranded the soak's wrapper shells specifically is still not
+established** — the soak's own zombie hamsh count went 25 → 0 in the same run
+that changed three other things, so nothing here attributes that to this fix
+alone.
 
 ### INSTRUMENTS THAT HAVE LIED HERE, AND THE FORM THAT WORKS
 
@@ -364,8 +453,10 @@ one of them records a pid that belongs to a real, live client:
 * `:9991` — `hamwsys_alloc(pid)`, the privileged on-behalf path, which stamps
   the pid the DE names for a child it just spawned.
 
-`win_reap_dead()` (`:2321`) clears any row whose owner is gone — `kill(pid, 0)`
-returning `ESRCH` — releasing its keystroke channel, pixmaps, backbuffer and
+`win_reap_dead()` clears any row whose owner is gone — **as of 2026-08-17 that
+is a positive reading of death out of `/proc/<pid>/stat`'s state field, NOT
+`kill(pid, 0)` returning `ESRCH`, because a corpse answers that one "alive"; see
+`pid_liveness()`** — releasing its keystroke channel, pixmaps, backbuffer and
 images, and it is called before the taskbar is listed (`:7920`) and before the
 screen is painted (`:8163`). **The only rows it can never reclaim are those with
 `pid <= 0`, which it skips outright — and none of the three allocation paths can

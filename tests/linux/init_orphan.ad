@@ -1,0 +1,206 @@
+# tests/linux/init_orphan.ad — THE DRIVER FOR THE ORPHAN REAPER GATE.
+#
+# It is run by tests/linux/init_orphan_reap.sh under tests/linux/subreap_exec,
+# so this process ADOPTS its orphaned descendants exactly as PID 1 does, on the
+# host, with the host's whole process table in /proc.
+#
+# It exercises the two things the reaper must do, in the order that makes each
+# one attributable:
+#
+#   ARM B -- AN OWN CHILD'S EXIT STATUS MUST SURVIVE.  Fork a child that exits
+#            with 42, then park (which is where reap_orphans runs) for long
+#            enough that the child is a corpse and the reaper has run over it
+#            many times, and only then wait for it.  If the reaper eats the
+#            status, sys_waitpid returns -1 and the status is gone -- which is
+#            what a blanket `waitpid(-1, ..., WNOHANG)` drain would do to
+#            hamsh's job control, and is a worse bug than the zombies.
+#
+#   ARM G -- AN ADOPTED ORPHAN MUST BE REAPED.  Fork a child A which itself
+#            forks a grandchild G and then exits at once.  G's parent is dead,
+#            so G reparents to this process, and nothing here ever asks for its
+#            status.  That is the exact shape of the 86 corpses a 900 s desktop
+#            soak accumulated: the scene application's parent was the wrapper
+#            shell, and the sweep killed both.
+#
+# Everything it learns it PRINTS, one fact per line, and then it parks for ever
+# so that the shell half can read the process table while the state under test
+# still exists:
+#
+#   SELF <pid>       this process
+#   KIDB <pid>       arm B's child
+#   BSTAT <n>        what sys_waitpid returned for it: 42, or -1 if stolen
+#   KIDA <pid>       arm G's child
+#   GRANDKID <pid>   printed BY A, before A exits -- the adopted orphan
+#   ASTAT <n>        A's status, which is A's own parent's to collect
+#   REAPED <n>       sys_orphans_reaped(), the runtime's own counter
+#   DONE <pid>
+#
+# It never execs. A fork whose child returns into this program is enough to
+# make an orphan, and exec would only add a second failure mode (a missing
+# binary) that looks the same from outside.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_rfork(flags: int32) -> int32
+extern def sys_waitpid(pid: int32) -> int64
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
+extern def sys_getpid() -> int32
+extern def sys_orphans_reaped() -> int64
+extern def sys_detached_dropped() -> int64
+extern def sys_exit(code: uint64)
+
+# RFPROC | RFFDG.  RFNAMEG is deliberately NOT set: it wants CAP_SYS_ADMIN,
+# and its fallback prints a line on the console that would land in the middle
+# of this program's output.
+RF_SPAWN: int32 = 5
+
+# RFPROC | RFFDG | RFNOWAIT — the detached spawn, whose contract is that the
+# RUNTIME waits for the child because the caller has promised not to.
+RF_DETACH: int32 = 261
+
+# More than the 64-slot detached table holds, so the overflow path is taken
+# more than once.
+DETACHED_SPAWN: int32 = 100
+
+outbuf:  Array[128, uint8]
+numbuf:  Array[24, uint8]
+waitset: Array[4, int32]
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def emit_int(buf: Ptr[uint8], at: uint64, v: int64) -> uint64:
+    if v == 0:
+        buf[at] = 48
+        return at + 1
+    x: int64 = v
+    i: uint64 = at
+    if x < 0:
+        buf[i] = 45
+        i = i + 1
+        x = 0 - x
+    n: uint64 = 0
+    while x > 0:
+        numbuf[n] = cast[uint8](48 + x % 10)
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        buf[i] = numbuf[n]
+        i = i + 1
+    return i
+
+
+# ONE write(2) per line.  Two writes would let a child's line land inside a
+# parent's, and this program's whole output is read by a shell that splits on
+# newlines.
+def say(tag: Ptr[uint8], v: int64):
+    i: uint64 = 0
+    k: uint64 = 0
+    while tag[k] != 0:
+        outbuf[i] = tag[k]
+        i = i + 1
+        k = k + 1
+    outbuf[i] = 32
+    i = i + 1
+    i = emit_int(&outbuf[0], i, v)
+    outbuf[i] = 10
+    sys_write(1, &outbuf[0], i + 1)
+
+
+# The idle park.  This is where reap_detached() and reap_orphans() run in the
+# runtime, so it is both the sleep and the thing under test.
+def park(ms: int64):
+    sys_waitfds(&waitset[0], 0, ms)
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    self_: int32 = sys_getpid()
+    say("SELF", cast[int64](self_))
+
+    # ---------------------------------------------------------------- ARM B
+    b: int32 = sys_rfork(RF_SPAWN)
+    if b == 0:
+        park(400)
+        sys_exit(42)
+        return 0
+    say("KIDB", cast[int64](b))
+    i: int32 = 0
+    while i < 12:
+        park(200)
+        i = i + 1
+    bst: int64 = sys_waitpid(b)
+    say("BSTAT", bst)
+
+    # ---------------------------------------------------------------- ARM G
+    a: int32 = sys_rfork(RF_SPAWN)
+    if a == 0:
+        g: int32 = sys_rfork(RF_SPAWN)
+        if g == 0:
+            park(1200)
+            sys_exit(9)
+            return 0
+        say("GRANDKID", cast[int64](g))
+        # EXIT AT ONCE, without waiting for g.  That is what makes g an
+        # orphan, and it is what the soak's sweep did to every wrapper shell.
+        sys_exit(0)
+        return 0
+    say("KIDA", cast[int64](a))
+    ast: int64 = sys_waitpid(a)
+    say("ASTAT", ast)
+
+    # Park long enough that g has exited and the reaper has had many chances.
+    i = 0
+    while i < 30:
+        park(200)
+        i = i + 1
+
+    say("REAPED", sys_orphans_reaped())
+
+    # ---------------------------------------------------------------- ARM D
+    # THE DETACHED TABLE'S OVERFLOW, MEASURED RATHER THAN READ.
+    #
+    # detached_remember()'s comment promised to "reap what we can and drop the
+    # oldest"; its code did `detached_n = 0`, forgetting all 64 pids the
+    # runtime had promised to wait for. Whether that actually stranded corpses
+    # was never established -- so: spawn DETACHED_SPAWN detached children, more
+    # than the 64-slot table holds, let them all exit, park, and let the shell
+    # half COUNT the zombies. Under HAMNIX_DETACHED_FULL=clear this arm is the
+    # old code and the count is the cost of the old code.
+    #
+    # These are this process's OWN children, registered as such, so the orphan
+    # reaper above will not touch them: whatever the shell counts here is the
+    # detached table's doing alone.
+    say("DSPAWN", cast[int64](DETACHED_SPAWN))
+    i = 0
+    while i < DETACHED_SPAWN:
+        d: int32 = sys_rfork(RF_DETACH)
+        if d == 0:
+            # LIVE FOR A WHILE, and this is the whole point of the arm.
+            # A detached child that has already exited by the time the next
+            # one is spawned is drained by the reap_detached() at the top of
+            # sys_rfork, so the table never fills and the overflow path is
+            # never taken -- MEASURED: 100 instant-exit spawns overflow the
+            # table zero times, under the old code and the new one alike.
+            # The case that fills a 64-slot table is 65 children alive AT
+            # ONCE, which is what a desktop launching wrapper shells does.
+            park(4000)
+            sys_exit(0)
+            return 0
+        i = i + 1
+    # Long enough for every one of them to have exited, and for many parks.
+    i = 0
+    while i < 25:
+        park(200)
+        i = i + 1
+    say("DROPPED", sys_detached_dropped())
+    say("DONE", cast[int64](self_))
+
+    # Hold the state still for the shell half.
+    while 1 == 1:
+        park(200)
+    return 0
