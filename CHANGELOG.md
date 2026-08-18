@@ -14,8 +14,47 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing yet. Work lands here between releases; if this section is empty, the
-tree and the channel agree.
+### An installed machine offered to install itself, and had no user accounts
+
+Two defects in `user/hlinstall.ad`, both found on a machine that was installed
+to a blank disk and then **booted and photographed**, not reasoned about.
+
+**It offered to install itself.** `/etc/installer-medium` is the marker four
+programs use to decide whether to show the `Install Hamnix` launcher — the
+desktop, the panel, the Applications menu and the software registry. The file's
+own text said "an installed system (which never carries it) does not offer to
+install over itself". It carried it: the installer copies `/etc`, `/usr`,
+`/boot`, `/bin`, `/lib`, `/lib64`, `/var`, `/root` and `/home` onto the target
+wholesale, and the marker is a file in `/etc`. No package owns it, so no
+`hpm update` could ever take it off a machine that had one.
+
+Measured: an installed machine, booted on its own with no medium attached,
+OCR'd its own desktop icon column as `... Word Processor L Install Ramni`
+(`Install Hamnix`) — byte-identical to what the live medium reads. Clicking it
+starts the wizard; the erase confirmation guards the wizard's **last** page,
+not the offer. The installer now removes `/etc/installer-medium` and
+`/etc/installer-autorun` from the target after the copy, and says so loudly if
+either is still there.
+
+**The machine had no accounts at all.** `append_line` — which the installer
+uses to add the user the wizard asked for to `/etc/passwd`, `/etc/group` and
+`/etc/shadow` — read the existing file into the *same global buffer its caller
+had built the new line in*, and read at most 480 bytes of it. So the "appended
+line" was the file's own first bytes again, and everything past 480 was thrown
+away. On the target all three files came out **exactly 962 bytes** (480 + a
+newline + the same 480 + a newline): the comment header of the shipped file,
+twice, and **no account line of any kind** — not the wizard's user, not `live`
+(which the desktop session runs as), not `hostowner`, and no password hash for
+anybody. The wizard collects two passwords and the machine it produced stored
+neither. `append_line` now uses its own 16 KiB buffer and REFUSES rather than
+truncating.
+
+**The gate**: `tests/linux/installed_offers_install.sh`. It installs to a blank
+6 GiB disk, reads the installed ext4 with `debugfs` (nothing mounted, nothing
+written back), then boots the installed machine and reads its screen. Its
+NEGATIVE CONTROL IS A THIRD BOOT AND IT RUNS: the live medium, same instrument,
+same crops, must read `Install`. Measured: **17 PASSED / 7 FAILED** with the
+fix reverted, **24 PASSED / 0 FAILED** with it in.
 
 ## 1.0.30 — 2026-08-18
 
@@ -28,7 +67,6 @@ site** are byte-identical to the gated build. 1.0.29 stays fetchable; additive.
 Gated by a release driver that is now **in the repository** rather than typed
 fresh each time outside it: 279 assertions across fourteen gates, including the
 shipped disk image booted with its checksum asserted before power-on.
-
 ### A desktop with nothing running on it could tell you to reboot
 
 If the program that owns the screen's shared memory had died badly — leaving a
