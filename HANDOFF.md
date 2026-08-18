@@ -13,6 +13,43 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### "NOTHING MEASURES LAYOUT IN PIXELS" IS WRONG, AND I HAVE BEEN REPEATING IT
+
+I have used that sentence as the standing reason not to touch the ~20 widget
+sites that size text at 8 px/char, and I put it in HANDOFF, in five agent briefs
+and in reports to the owner. I finally checked it. **The machinery exists.**
+
+Measured, on 2026-08-17:
+
+* **77 `user/*_host.ad` renderers** exist — the dual-target twins described in
+  `docs/hamui_dual_target.md`, which render toolkit programs on the DEV HOST.
+* `user/hamctl_host.ad` **compiles clean** for `x86_64-linux` in seconds:
+  `python3 -m compiler.adder compile --target=x86_64-linux user/hamctl_host.ad
+  -o <bin>` exits 0 and produces a 317 KB binary. Its own header documents the
+  invocation `hamctl_host APPEARANCE.ppm DATETIME.ppm ABOUT.ppm`, and
+  `_write_ppm()` is right there in the file.
+* `lib/hamtextbox.ad`'s `htb_text_width()` is **a real measurement**, not a
+  constant: it sums `font_ttf_adv_px()` per glyph. `user/hamtermscene.ad`
+  ALREADY calls it to compute the true cell advance and print "grid assumes 8.00
+  px, measured N.NN px … THE GRID AND THE FONT DISAGREE".
+
+**What I did NOT establish**: I ran the binary and it exited 2 without writing a
+PPM, so I have not seen pixels come out of this path. The correct statement is
+therefore narrower than "it works" and much narrower than my old one: **the
+instrument exists, compiles, and is already used for text advances; what is
+missing is a GATE that renders a widget and checks its box against the measured
+width of the text inside it.**
+
+That is a real difference. "Blocked, nothing can measure this" excuses the work.
+"Unbuilt, and here is the lane it would be built in" schedules it. I have been
+saying the first for days about a tree that contains the second.
+
+**Do not take this as licence to change the 20 sites without the gate.** The
+reason for caution was always that a layout change with nothing checking it
+trades a known imprecision that announces itself for an unknown one that does
+not. That reason survives. What does not survive is the claim that the checking
+was impossible.
+
 ### THERE IS NO CI IN THIS REPOSITORY. NONE. Measured, not inferred.
 
 `git ls-files` matches **nothing** for `.github`, `.gitlab-ci`, `Jenkinsfile`,
