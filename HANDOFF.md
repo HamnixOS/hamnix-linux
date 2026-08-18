@@ -13,6 +13,50 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### `kill(pid, 0)` SUCCEEDS ON A ZOMBIE — and I exonerated the compositor on it
+
+This section corrects the one above it. I wrote that the soak's window rows were
+"each held by a **live** one" and that `win_reap_dead()` "is not at fault". Both
+claims rest on `user/linux-wsys.c:2328`:
+
+```
+if (kill((pid_t)v->pid, 0) == 0 || errno != ESRCH) continue;
+```
+
+**`kill(2)` succeeds on a zombie.** A corpse answers alive, so the reaper cannot
+see a dead window's owner as dead, and my exoneration was a syscall's return
+read as a fact about the world.
+
+Worse, the soak's own reader **counted process lines with no state filter**, so
+86 corpses and 86 running programs produce the identical count, the identical
+offset and the identical sentence. The baseline "96 live scene apps" was true
+only by luck of which run it came from. Once the reader was taught to parse the
+state column, the same workload showed **3 live and 86 zombie** — the programs
+*are* being ended now, monotonically across the run, and the count stays high
+for two different reasons:
+
+1. **Nothing reaps the orphan.** The app's parent is the wrapper shell, killed
+   in the same sweep, so it never `wait4`s; the corpse reparents to PID 1, which
+   is hamsh, which has no orphan reaper. **Read, not measured.**
+2. **The reaper cannot see a corpse**, per the `kill(2)` fact above.
+
+Neither is fixed. **Not verified: that an orphan reaper or a zombie-excluding
+liveness test actually brings the count down** — neither has been built or run.
+
+**The lesson is narrower than "check your instruments" and worth stating on its
+own: a successful syscall is a fact about the KERNEL'S BOOKKEEPING, not about
+the world.** `kill(pid, 0)` answers "is there a process table entry I may
+signal", which is not "is there a program running". The gate that said otherwise
+was reporting the syscall faithfully.
+
+### `detached_remember()`'s COMMENT DISAGREES WITH ITS CODE
+
+`user/linux-syscalls.c`'s `detached_remember()` says, when its 64-slot table
+fills: *"Reap what we can and drop the oldest rather than growing without
+bound"* — and then does `detached_n = 0`, **forgetting all 64**. It neither
+reaps nor drops the oldest. Whether that stranded the 25 zombie wrapper shells
+seen in the soak is **not established**: read, not instrumented.
+
 ### INSTRUMENTS THAT HAVE LIED HERE, AND THE FORM THAT WORKS
 
 Every one of these was found the hard way, and every one failed toward
