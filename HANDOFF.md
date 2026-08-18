@@ -415,6 +415,45 @@ owner and has **the identical zombie blindness**, so a stale segment whose owner
 is a corpse still counts as live. It fails toward *keep the segment*, which is
 the safe direction there, and **I read that and did not measure it.**
 
+### ONE RETURN, TWO PAGE ADVANCES — a HYPOTHESIS, explicitly not a finding
+
+The erase is closed, but *how* one Return produced two `_goto_next()` calls is
+still unexplained (3 boots of 4, not the 4th). Ruled out by the agent:
+keystroke doubling (**measured** — 27 ink per character, one press is one
+character), a second `handle_key` call site, a second Enter keymap entry.
+
+**A candidate I have read but NOT measured**, offered as an experiment rather
+than an answer, because a hypothesis dressed as a finding has cost this project
+five times:
+
+`user/haminstallui.ad:1761` is
+
+```
+if code == 10 or code == 13:                          # Enter / Return = Next
+    _goto_next()
+```
+
+**Two distinct codes drive the same action.** If one physical Return press
+causes the key channel to deliver *two lines* — one carrying 10 and one carrying
+13 — that is one press and two advances, with no doubling of any single
+keystroke and nothing wrong with the keymap. It would also explain the
+intermittency, if the second line sometimes lands in the same read as the first
+and sometimes in the next.
+
+**Why the existing measurement does not exclude it:** the ink test counted
+characters in a *text field*, and a field consumes printable characters. It says
+nothing about whether an action key delivers two lines with different codes.
+"A second Enter keymap entry" was checked — that is a different claim from "the
+channel emits two lines for one press".
+
+**What would settle it, cheaply:** log every line `_key_line()` receives during
+one Return press on the summary page — the raw bytes, not the decoded action. If
+two lines arrive, the codes name the cause. If one arrives, this is dead and the
+mechanism is elsewhere. `_key_line` already filters releases (`s[0] != 100`,
+"'d' press only"), so a press/release pair is **not** the explanation.
+
+**Status: unmeasured.** Do not repeat this as the cause.
+
 ### THE REMAINING LAYOUT SITES ARE FORWARD-ONLY — now measured, not read
 
 The ~20 label-centring sites left outside `lib/hamui.ad`, `lib/hamslidescore.ad`
