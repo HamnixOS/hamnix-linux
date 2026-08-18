@@ -43,6 +43,13 @@ was being delivered into a desktop window as well. Whether that reached anywhere
 it should not depends on what had focus. We have not measured that, and are not
 going to guess at it in your release notes.
 
+**An update fixes this — you do not need a new stick.** The change is entirely
+inside the program that draws the screen, and that program ships in a package, so
+`hpm update` delivers it to an installed machine. Verified in the packaging
+tables rather than assumed. (The startup file that leaves the console attached
+was deliberately *not* changed: doing that would take the keyboard away from a
+genuinely headless machine, which needs it.)
+
 *Not established:* whether a laptop shows this depends on how its console is
 configured, and that was read from the boot files rather than measured on real
 hardware.
