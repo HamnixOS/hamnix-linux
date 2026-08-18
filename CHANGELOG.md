@@ -12,7 +12,25 @@ because the number is the deliverable.
 
 ---
 
-## 1.0.29 — BUILT AND GATED, NOT YET PUBLISHED
+## Unreleased
+
+Nothing yet. Work lands here between releases; if this section is empty, the
+tree and the channel agree.
+
+## 1.0.29 — 2026-08-18
+
+**PUBLISHED and verified as served.** The live index reports 1.0.29 across all
+130 packages; its signature verifies against `etc/hpm/trusted.pub`, the trust
+root installed machines already carry, rather than merely against the signing
+key; and `hamnix-desktop`, `hamnix-hamsh` and `hamnix-install` **fetched from the
+site** are byte-identical to the gated build. 1.0.28 stays fetchable; additive.
+
+**It took hours, not minutes, and the reason is worth recording.** 1.0.26 and
+1.0.27 appeared in about four minutes, 1.0.28 in about seventeen. This one sat
+with the hosting build queued for hours. Polling could not tell "slow" from
+"stuck" from "broken" — asking the build API directly could, and did, in one
+call. When a check keeps returning the same old value, the next move is a
+different instrument, not more patience.
 
 The candidate medium and the 130-package channel for this version were built
 and measured on 2026-08-18. Nothing here has been signed or pushed to the site;
