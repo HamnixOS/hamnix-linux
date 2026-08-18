@@ -698,7 +698,41 @@ multiply-and-compare, a table lookup, or a division by a variable that happens t
 hold 8 would not match. What is established is that **the obvious form is
 absent**, not that no inverse can exist.
 
-### THE "95 DARK GATES" ARE NOT AN INHERITED MESS — 40 of 40 SAMPLED PASS
+### CORRECTION — "40 of 40 SAMPLED PASS" WAS MINE AND IT WAS WRONG
+
+**43 of those gates SKIP. They do not pass.** I ran `test_opt_constif` myself
+after an agent challenged the claim: exit 0, 524 bytes, **five SKIPPED lines,
+zero PASS and zero FAIL**. Every `test_opt_*` calling `opt1_require_lane`
+behaves that way — the legacy opt1 lane was retired in `ba2e4bcf`, and the gates
+that assert its counters can no longer fire.
+
+**I read exit 0 as a pass.** That is the precise failure I have written into five
+agent briefs as *"90 of 713 battery invocations assert nothing — quote the
+true-pass number, not the exit-0 number."* I applied the rule to a battery
+someone else had run and not to forty commands I ran myself.
+
+**And the circumstance matters more than the mistake.** I was using that number
+to overturn a framing I was pleased to overturn — "the dark gates are an
+inherited condition" — which is exactly when a measurement deserves *more*
+scepticism and got less. A result that confirms the story you have just decided
+to tell is the one to re-run.
+
+**Two more framings in the section below are wrong**, both measured by the agent:
+"40 mention no QEMU, 42 involve QEMU" — only **10 of 95** contain the string at
+all and **92 of 95 never launch one**. "82 of the 95 reference only trees this
+repository contains" — **at least nine do not**, naming `arch/x86/kernel/smp.ad`,
+`mm/vma.ad`, `init/main.ad`, `kernel/sched/core.ad` and five more, and there is
+no `mod/` directory here at all.
+
+**What survived:** 40 gates really do assert real things and are now registered
+with measured runtimes. The dark count went **95 → 0** — 40 registered, 43
+annotated as the retired lane, 9 as needing absent trees, 3 individually. Every
+one was run before it was registered or annotated, which is the rule that saved
+this from being 43 lines of false assurance in the manifest.
+
+The original section is left standing below.
+
+### THE "95 DARK GATES" ARE NOT AN INHERITED MESS — 40 of 40 SAMPLED PASS (WRONG, see above)
 
 I have been repeating "95 pre-existing unregistered gates keep the registration
 gate red, none is new" in the hourly brief and in reports, in a tone that treats
