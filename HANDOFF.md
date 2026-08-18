@@ -13,6 +13,38 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### READ THIS FIRST — the state, in order
+
+**This section is written newest-first, and several entries CORRECT the ones
+below them.** Where a claim was wrong it is left standing with the correction
+beside it rather than quietly edited, so read a section together with anything
+above it that names it.
+
+**Shipping:** 1.0.27, published and verified as served — 130 packages, signature
+checked against `etc/hpm/trusted.pub`, tarballs fetched from the site
+byte-identical to the gated build. 1.0.26 stays fetchable; the channel is
+additive.
+
+**Solved and measured:** the desktop freeze (hamsh's value arena exhausted after
+~2048 loop turns, PID 1's rc falling into interactive readline — never a kernel
+wedge); six ceiling constants that had outgrown the hardware, each hiding the
+next, with a seventh looked for and not found; the installer defect, closed in
+the published bytes; hamsh's `kill`, which could not report a failure; the spawn
+handle, which killed the wrapper shell instead of the program; and `p9_listdir`,
+which stopped at its buffer size and returned a length indistinguishable from a
+complete read.
+
+**Open, and honest about it:** the soak's window count still climbs because
+nothing reaps the orphans and the compositor's reaper cannot see a corpse —
+**neither fix has been built or run, so it is NOT established that either brings
+the count down**. ~20 widget sites still size text at 8 px/char. "One keystroke
+starts an erase" was seen once and is unexplained. 95 gates are unregistered.
+**Nothing runs any of the gates unless a person does.**
+
+**Never established, and it matters most:** that the freeze fixed here is the
+freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
+it has never been caught in the act on that machine.
+
 ### `kill(pid, 0)` SUCCEEDS ON A ZOMBIE — and I exonerated the compositor on it
 
 This section corrects the one above it. I wrote that the soak's window rows were
@@ -222,7 +254,13 @@ And the standing rule that catches what these do not: **a push is not a
 publication.** Poll the site, verify the served signature against the trust root,
 and fetch a real tarball to compare against the gated build.
 
-### A WEDGE IS REPRODUCIBLE, AND IT IS COUNTED IN LAUNCHES — read this first
+### SUPERSEDED — the wedge hunt as it stood mid-investigation, kept as the record
+
+**Read the summary at the top of this section first.** Two claims below were
+later corrected: the wedge was **solved** (hamsh's value arena, not a kernel
+wedge), and "counted in LAUNCHES" was **wrong** — it is counted in STATEMENTS
+EXECUTED. The reasoning that got there is kept because the shape of the hunt was
+right even where its numbers were not.
 
 The desktop soak wedges: **three runs out of three stopped their workload at
 exactly 352 heartbeats**, about six minutes in, at three different configured
