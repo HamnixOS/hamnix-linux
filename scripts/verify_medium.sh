@@ -89,6 +89,28 @@ else
     bad "could not pull /EFI/BOOT/BOOTX64.EFI off the ESP"
 fi
 
+# root.partuuid ON THE ESP -- the file the graphical installer refuses without.
+#
+# THIS CHECK EXISTS BECAUSE THE ONE BELOW WAS LOOKING AT THE WRONG PARTITION.
+# Further down, this script asserts /boot/root.partuuid in the ROOT filesystem,
+# and that has always passed. But etc/rc.boot.installed does `bind '#esp' /boot`,
+# so at runtime /boot IS THIS FAT PARTITION and the root filesystem's copy is
+# hidden behind it. user/hlinstall.ad reads "/boot/root.partuuid" and refuses by
+# name when it is absent. So the medium verified 38/0 while its installer could
+# not install -- the assertion measured a file that the running system cannot
+# see. A check of the wrong partition is not a weaker check; it is a check of a
+# different thing that happens to share a path.
+if mdir -i "$M" :: 2>/dev/null | grep -qi 'ROOT.*PARTUUID'; then
+    RPU="$(mtype -i "$M" ::/root.partuuid 2>/dev/null | tr -d ' \r\n')"
+    if [ -n "$RPU" ]; then
+        ok "the ESP carries root.partuuid ($RPU) -- the graphical installer can read it at /boot/root.partuuid once the ESP is bound there"
+    else
+        bad "root.partuuid is on the ESP but empty -- hlinstall will read nothing and refuse"
+    fi
+else
+    bad "NO root.partuuid ON THE ESP. /etc/rc.boot binds the ESP over /boot, so this is the copy hlinstall reads -- without it the graphical installer refuses at its pre-flight check and this medium cannot install, however well it boots."
+fi
+
 # \HAMNIX.LOG, preallocated
 HL="$(mdir -i "$M" :: 2>/dev/null | grep -i 'HAMNIX' )"
 if [ -n "$HL" ]; then

@@ -608,6 +608,26 @@ mcopy -i "$ESP" "$UKI" ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$ESP" build/image/vmlinuz ::/vmlinuz
 mcopy -i "$ESP" build/image/initramfs.cpio.gz ::/initramfs.cpio.gz
 mcopy -i "$ESP" "$UKIMAP" ::/UKI.MAP
+# root.partuuid ON THE ESP, WHICH IS WHERE THE INSTALLER LOOKS FOR IT.
+#
+# It has always been written to $STAGE (the root filesystem's /boot), and the
+# installer has always read "/boot/root.partuuid" -- but etc/rc.boot.installed,
+# which this medium ships as /etc/rc.boot, does `bind '#esp' /boot`. At runtime
+# /boot IS THE FAT ESP, so the copy in the root filesystem is hidden behind it
+# and user/hlinstall.ad's read_root_partuuid() finds nothing. hlinstall has no
+# fallback: it refuses BY NAME, which is correct behaviour and is why this went
+# unnoticed -- the refusal is honest and looks like a configuration problem.
+#
+# MEASURED on the 1.0.28 candidate before this line existed: the ESP held
+# EFI/, vmlinuz, initramfs.cpio.gz, UKI.MAP and HAMNIX.LOG -- five entries, no
+# root.partuuid -- while the ext4 root did carry it. Both QEMU installer gates
+# only ever got past the pre-flight because their own rc writes the file into
+# the guest; install_confirm_keys.sh says exactly that in its premise line, so
+# the gates were honest and the medium was still unable to install.
+#
+# The staged copy stays: an installed machine's /boot is its OWN ESP, and this
+# same file is what the installer writes there for the next generation.
+mcopy -i "$ESP" "$STAGE/root.partuuid" ::/root.partuuid
 # FIRST-LEVEL, 8.3, UPPER CASE: the name is what somebody sees when they plug
 # this stick into a Windows or macOS machine, sitting beside EFI/. Nothing
 # about it needs a long-filename entry to be found.
