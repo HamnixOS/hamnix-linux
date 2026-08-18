@@ -14,8 +14,37 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing yet. Work lands here between releases; if this section is empty, the
-tree and the channel agree.
+### One press of Return could erase your disk
+
+On the installer's last page, with a drive selected, **a single press of the
+Return key wiped it.** Not a confirmation, not a second step — one press, one
+release. Three seconds later the disk's partition table was gone; half a minute
+later a new filesystem was being written over it. Holding Return did the same,
+because a held key repeats and the repeats reach the program.
+
+It was reproduced deliberately, three times out of three, against a 4 GB test
+disk in a virtual machine: the disk's contents genuinely changed each time. This
+is not a report of something that looked alarming — it is a disk that went.
+
+The page did warn you. "The target disk will be ERASED" was printed right there.
+**But that was a sentence, not a question.** Nothing asked you to agree with it,
+so the key you pressed to get to that page was also the key that started the
+erase — and if you had pressed Return twice out of habit, the second press
+landed on a button that was already live.
+
+Now the Install button is **greyed out until you arm it**, and you arm it only
+by pressing Space or clicking a checkbox — **never with Return.** The arming is
+also cleared every time the page changes, so arriving at the final page always
+finds it switched off, no matter how many keys were queued up behind you.
+
+**If you install from a 1.0.27 or earlier stick, this is present.** Be aware
+that on the final page, Return is live.
+
+*Still unexplained, and left open rather than closed:* one Return sometimes
+advanced two pages at once, in three boots out of four. Keys are not delivered
+twice — that was measured — so the cause is still unknown. It no longer matters
+for your disk, since the last page now needs a deliberate action either way, but
+it is not understood and is not being written off.
 
 ## 1.0.27 — 2026-08-17
 
