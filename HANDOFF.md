@@ -415,6 +415,36 @@ owner and has **the identical zombie blindness**, so a stale segment whose owner
 is a corpse still counts as live. It fails toward *keep the segment*, which is
 the safe direction there, and **I read that and did not measure it.**
 
+### A RELEASE CANDIDATE WAS DESTROYED BY WHERE IT WAS BUILT
+
+The 1.0.28 channel was built, gated clean — 130 packages, 130/130 hashes
+matching, 229 ELF pairs byte-identical — and then **deleted**, because it lived
+inside the building agent's git worktree and worktrees are removed when the
+agent finishes. I discovered it in the middle of the publish checklist: key
+matched, existing signature verified, verifier proven able to say BAD, and then
+the integrity step found no `index.json` at all. **No 1.0.28 tarball exists
+anywhere on this machine.**
+
+The medium survived only because it had been written to `~/.hamnix-build/`.
+
+**This was an orchestrator error, not an agent one.** The brief said "artifacts
+under `/home/david/.hamnix-build/<unique>/`" — which the agent honoured for the
+medium — and said nothing about where the *channel* had to live. The packager's
+natural output is `build/repo/linux`, inside the tree, and nothing objected.
+
+**The rule, and it is cheap:** a release artifact must be copied out of the
+worktree the moment it exists, before anything is run against it. Not at the
+end. An artifact that only exists inside a directory whose lifetime is tied to a
+process is an artifact you have already half lost.
+
+**A second-order cost, worth naming because it looked like a defect:** with the
+1.0.28 channel gone, the only channel on disk is 1.0.27, so
+`verify_medium.sh`'s "the shipped `/bin/hpm` matches the channel's" compared
+across versions and went red. That is a **provenance** failure of exactly the
+kind two gates in this tree already guard against — and this one has no guard,
+so it presents as a content defect. It is **not attributed**: cross-version
+comparison is the likely explanation and it was not measured.
+
 ### ONE RETURN, TWO PAGE ADVANCES — a HYPOTHESIS, explicitly not a finding
 
 The erase is closed, but *how* one Return produced two `_goto_next()` calls is
