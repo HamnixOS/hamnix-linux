@@ -83,6 +83,11 @@
 
 #include "linux-wsys.h"
 
+/* user/linux-syscalls.c.  Declared here rather than in a header because the
+ * runtime has no header for its process bookkeeping: see the orphan reaper
+ * there for what registering a child buys. */
+void hamnix_own_child_remember(int32_t p);
+
 /* ------------------------------------------------------------------ *
  * The shared segment
  * ------------------------------------------------------------------ */
@@ -2293,6 +2298,101 @@ static void img_release_wid(int32_t wid)
         }
 }
 
+/* A SUCCESSFUL SYSCALL IS A FACT ABOUT THE KERNEL'S BOOKKEEPING, NOT ABOUT
+ * THE WORLD.  kill(pid, 0) SUCCEEDS ON A ZOMBIE.
+ *
+ * This is the correction to the long note below, which says "kill(pid, 0) is
+ * the question" and was wrong about which question it is.  `kill(pid, 0)`
+ * answers "is there a process table entry I am permitted to signal".  A
+ * corpse -- a process that has exited and whose parent has not yet wait4'd it
+ * -- still HAS that entry, so it answers alive, and the previous reaper could
+ * not see a dead window's owner as dead.  Measured on this tree: a 900 s soak
+ * ended with 3 live application processes, 86 zombies, and 92 windows still
+ * listed.  The reaper was called every frame and reclaimed none of them.
+ *
+ * The state column of /proc/<pid>/stat is the fact about the world.  `Z` is a
+ * corpse; `X`/`x` is a task in the middle of being torn down.  Everything else
+ * (R, S, D, T, t, I, ...) is a program that exists.
+ *
+ * PARSING IT CORRECTLY MATTERS AND IS NOT OBVIOUS.  field 2 is the executable
+ * name IN PARENTHESES and it may contain spaces AND parentheses -- `(a) b (c)`
+ * is a legal comm.  Splitting on whitespace, or on the FIRST ')', misreads
+ * such a process; the only safe scan is to the LAST ')' in the buffer, which
+ * is what strrchr does here.  A program named ")" is enough to break the naive
+ * version, and this reaper's failure mode is destroying a live application's
+ * window.
+ *
+ * IT FAILS CLOSED, in the same direction the old test did and for the same
+ * reason: the ONLY answer that reclaims a window is a positive reading of
+ * death.  /proc not mounted, /proc not the host's, an unreadable stat, a
+ * malformed line, a permission error -- every one of those returns UNKNOWN and
+ * the window is KEPT.  A stale rectangle is cosmetic; tearing down a running
+ * program's window is not.
+ *
+ * Returns 1 = live, 0 = a corpse or gone, -1 = cannot tell. */
+static int pid_liveness(pid_t pid)
+{
+    if (pid <= 0) return -1;
+
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%ld/stat", (long)pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        /* ENOENT here is the strongest statement /proc can make: the kernel
+         * has no such task at all, not even a corpse.  Anything else (ENOSYS,
+         * EACCES, ENOTDIR when /proc is not mounted) is ignorance, and
+         * ignorance falls through to the old kill(2) probe below rather than
+         * to a verdict. */
+        if (errno == ENOENT) return 0;
+    } else {
+        char buf[512];
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        int e = errno;
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            /* LAST ')' -- see the note above about comm. */
+            char *rp = strrchr(buf, ')');
+            if (rp && rp[1] == ' ' && rp[2]) {
+                char st = rp[2];
+                if (st == 'Z' || st == 'X' || st == 'x') return 0;
+                return 1;
+            }
+            /* Malformed: say nothing. */
+        } else if (n == 0) {
+            /* An empty stat is not a corpse, it is a read that told us
+             * nothing.  (void)e keeps the compiler quiet about the errno
+             * capture, which is here for anyone adding a trace. */
+            (void)e;
+        }
+        return -1;
+    }
+
+    /* /proc could not answer.  Fall back to the old probe, which is still
+     * right about one thing: ESRCH means there is no such pid.  It cannot
+     * distinguish a corpse from a program, so its "alive" is UNKNOWN, not
+     * live -- and unknown keeps the window either way. */
+    errno = 0;
+    if (kill(pid, 0) < 0 && errno == ESRCH) return 0;
+    return -1;
+}
+
+/* Set by HAMWSYS_LIVENESS=kill.  IT EXISTS FOR ONE REASON: the negative
+ * control of tests/linux/wsys_zombie_owner.sh, which must be able to show the
+ * gate going red against the exact code that was here before.  An assertion
+ * that cannot fail is not an assertion, and the only honest way to show this
+ * one can fail is to run the broken reaper under it.  Nothing in the tree sets
+ * this variable; the default is the /proc test. */
+static int liveness_kill_only(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *s = getenv("HAMWSYS_LIVENESS");
+        v = (s && !strcmp(s, "kill")) ? 1 : 0;
+    }
+    return v;
+}
+
 /* A WINDOW WHOSE OWNER IS GONE IS NOT A WINDOW.
  *
  * MEASURED, by tests/linux/wsys_desktop_z.sh, which is the gate that found it:
@@ -2306,7 +2406,9 @@ static void img_release_wid(int32_t wid)
  * devwsys does not have this bug and does not need this function: there a
  * window belongs to a FID, and the kernel closes every fid a dying process
  * held, crash or not.  /dev/wsys here is shared memory with no fid table, so
- * the liveness has to be asked for.  kill(pid, 0) is the question.
+ * the liveness has to be asked for.  It used to be asked with kill(pid, 0),
+ * which is the WRONG QUESTION -- see pid_liveness() directly above, and the
+ * 86 corpses that answered it "alive".
  *
  * It FAILS CLOSED in both directions that matter.  A pid whose number has been
  * recycled answers "alive", so the window is KEPT — a stale window is a
@@ -2321,11 +2423,45 @@ static void img_release_wid(int32_t wid)
 static void win_reap_dead(void)
 {
     if (!shm) return;
+
+    /* THE SWEEP IS THROTTLED, AND THE OLD ONE DID NOT NEED TO BE.
+     *
+     * kill(pid, 0) was one syscall per window; reading /proc/<pid>/stat is an
+     * open, a read and a close.  This function is called from EVERY read of
+     * the /dev/wsys directory, which is what the compositor walks every frame,
+     * so at 92 windows and 60 fps the difference is ~16k extra syscalls a
+     * second inside the frame loop -- on a TCG guest that is not a rounding
+     * error, and this tree has already shipped one desktop that looked frozen.
+     *
+     * A dead window reclaimed 200 ms late is invisible; the reclaim exists so
+     * a rectangle does not stay on screen FOR EVER.  So the sweep runs at most
+     * five times a second per process.
+     *
+     * The state is per-process and starts at zero, so the FIRST call in any
+     * process always sweeps -- which is what makes a one-shot reader like
+     * `cat` still correct, and it is why tests/linux/wsys_zombie_owner.sh
+     * measures what it thinks it measures. */
+    {
+        static int64_t last_ms;
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+            int64_t now = (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+            if (last_ms != 0 && now - last_ms < 200) return;
+            last_ms = now;
+        }
+    }
+
     for (int i = 0; i < WSYS_MAX_WINDOWS; i++) {
         struct wwin *v = &shm->win[i];
         if (!v->used || v->pid <= 0) continue;
-        errno = 0;
-        if (kill((pid_t)v->pid, 0) == 0 || errno != ESRCH) continue;
+        if (liveness_kill_only()) {
+            errno = 0;
+            if (kill((pid_t)v->pid, 0) == 0 || errno != ESRCH) continue;
+        } else {
+            /* Reclaim ONLY on a positive reading of death.  1 (live) and -1
+             * (cannot tell) both keep the window. */
+            if (pid_liveness((pid_t)v->pid) != 0) continue;
+        }
         keychan_unbind(v->wid);
         pix_release(v->wid);
         bb_release(v->wid);
@@ -4622,6 +4758,12 @@ static void srd_fork(void)
         return;
     }
     if (p > 0) {
+        /* THIS CHILD IS OURS.  The orphan reaper in user/linux-syscalls.c
+         * reaps corpses this process did not create; a read server that is
+         * never registered would be one of those the moment a compositor ran
+         * as PID 1 or as a subreaper.  Nothing does today, and the cost of
+         * saying so is one call. */
+        hamnix_own_child_remember((int32_t)p);
         /* The parent keeps NEITHER.  Holding the listening socket open in the
          * compositor would leave the read name bound after the child died,
          * with nothing behind it -- clients would connect and hang. */

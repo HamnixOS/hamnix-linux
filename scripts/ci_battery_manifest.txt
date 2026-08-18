@@ -418,6 +418,28 @@ bash scripts/test_primary_paste_chain_host.sh
 # /dev/snarf. Runs in a private mount namespace with a tmpfs over /dev, never
 # the host's. Host-only (no QEMU); seconds. docs/linux_clipboard.md.
 bash tests/linux/snarf_device.sh
+# A ZOMBIE MUST NOT READ AS A LIVE WINDOW OWNER. win_reap_dead() asked
+# kill(pid, 0), and kill(2) SUCCEEDS on a zombie -- a corpse answered "alive",
+# the window was kept, and a 900 s soak ended with 92 windows over 3 live
+# programs and 86 corpses. Makes a real zombie that owns a real window (a
+# parent that deliberately never wait4s), measures the corpse in
+# /proc/<pid>/stat rather than assuming it, and asserts the window is gone. Its
+# RED arm is RUN: HAMWSYS_LIVENESS=kill restores the old predicate and the
+# window must SURVIVE, so the green arm is attributable to the /proc test and
+# nothing else. Host-only (no QEMU), no compositor, no framebuffer; 7 s.
+bash tests/linux/wsys_zombie_owner.sh
+# AN INIT MUST wait4 THE CHILDREN IT ADOPTS -- AND MUST NOT EAT THE ONES
+# SOMEBODY IS WAITING FOR. PID 1 here is hamsh and it had no orphan reaper: 86
+# corpses in fifteen minutes. The obvious fix, a blanket waitpid(-1) drain,
+# silently steals the exit statuses hamsh's job control and sys_waitpid_jc are
+# waiting to read, so BOTH halves are asserted and each has a RUN negative
+# control -- HAMNIX_ORPHAN_REAP=off (the corpse persists),
+# HAMNIX_ORPHAN_REAP=greedy (the own child's 42 is lost), and
+# HAMNIX_DETACHED_FULL=clear (the old detached-table overflow strands 64 of
+# 100). Runs as a PR_SET_CHILD_SUBREAPER process on the HOST rather than PID 1
+# in a pid namespace, deliberately: the scan must be exercised against a
+# process table of thousands, not forty. Host-only (no QEMU); 68 s.
+bash tests/linux/init_orphan_reap.sh
 # DOES A PIPE END? `cat FILE | md5sum` never returned and it cost a boot: the
 # shell's own O_RDWR keeper on the slot's fifo is a WRITER, and nothing closed
 # it, so no reader on any pipe in the system could see EOF and no writer could

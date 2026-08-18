@@ -1760,20 +1760,122 @@ static int ns_privilege(void);
  * hamdesktop fires one chime and may never spawn again, but it parks in
  * sys_waitfds constantly, so that is where its detached child is reclaimed.
  * ------------------------------------------------------------------ */
-#define DETACHED_MAX 64
-static pid_t detached_pid[DETACHED_MAX];
-static int   detached_n;
+#define DETACHED_MAX 64                 /* the table's INITIAL size, now */
+#define DETACHED_CEILING 65536          /* refuse to be a memory bug instead */
+static pid_t  detached_fixed[DETACHED_MAX];
+static pid_t *detached_pid = detached_fixed;
+static int    detached_cap = DETACHED_MAX;
+static int    detached_n;
+
+/* Defined with the orphan reaper below; the detached table and the
+ * own-children table describe the same children from two directions and each
+ * has to tell the other when a status has been consumed. */
+static void own_child_remember(pid_t p);
+static void own_child_forget(pid_t p);
+static void own_child_reset(void);
+void reap_detached(void);
+
+/* THIS FUNCTION'S COMMENT DISAGREED WITH ITS CODE, AND THEN I MEASURED BOTH
+ * AND NEITHER WAS RIGHT.
+ *
+ * The comment said "Reap what we can and drop the oldest rather than growing
+ * without bound"; the code said `detached_n = 0`, which reaps nothing and
+ * drops all 64.  Every pid in the table at that moment became a permanent
+ * zombie: the runtime had taken on the obligation to wait for them (that is
+ * what RFNOWAIT means here) and then forgot the obligation existed.
+ *
+ * WHAT WAS ACTUALLY MEASURED, by tests/linux/init_orphan_reap.sh's arm D, one
+ * process, 100 detached children, host, 2026-08-17:
+ *
+ *   100 children that exit IMMEDIATELY   0 stranded, old code AND new.
+ *                                        The reap_detached() at the top of
+ *                                        every sys_rfork drains the table
+ *                                        faster than the loop fills it, so
+ *                                        the overflow path is never taken.
+ *   100 children ALIVE AT ONCE           old code: 64 stranded corpses.
+ *                                        "reap, then drop the oldest": 36.
+ *                                        growing the table: 0.
+ *
+ * So the inference in HANDOFF -- that this stranded the soak's zombie wrapper
+ * shells -- is CONDITIONAL, and the condition is concurrency, not volume.  A
+ * program that fires and forgets one chime never touches this path however
+ * many times it does it.  A desktop holding 65+ detached children at once
+ * does, on the 65th.
+ *
+ * And the comment's own policy is not good enough either.  "Drop the oldest"
+ * still breaks the promise the runtime made when it accepted RFNOWAIT; it just
+ * breaks it 36 times instead of 64.  The fear the comment encodes -- "growing
+ * without bound" -- is misplaced, because the bound on this table is not the
+ * number of detached spawns ever made, it is the number ALIVE AT ONCE:
+ * reap_detached compacts it every time a child exits and at every fork and
+ * every idle park.  A table that grows to peak concurrency is bounded by the
+ * process's own behaviour.
+ *
+ * So it grows, to a CEILING that exists only so a runaway cannot turn a zombie
+ * leak into a memory leak, and only past that ceiling (or on a failed
+ * allocation) does it evict.  Eviction is counted, and the count is reported
+ * by sys_detached_dropped(), because a silent broken promise is how this one
+ * survived so long.
+ *
+ * "Oldest" is best-effort and worth saying: reap_detached() fills holes by
+ * swapping the last entry down, so the array is not strictly FIFO.  Slot 0 is
+ * the oldest surviving entry far more often than not. */
+static unsigned long detached_dropped;
+
+/* HAMNIX_DETACHED_FULL=clear restores the OLD overflow behaviour verbatim.
+ * It exists for one arm of tests/linux/init_orphan_reap.sh and nothing else:
+ * "the table used to strand its contents" was an inference read off the source
+ * until that arm ran it and counted the corpses. Nothing in the tree sets it. */
+static int detached_full_clears(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *s = getenv("HAMNIX_DETACHED_FULL");
+        v = (s && !strcmp(s, "clear")) ? 1 : 0;
+    }
+    return v;
+}
+
+/* Double the table.  0 on success.  The first growth moves off the static
+ * array, which is why the copy is unconditional. */
+static int detached_grow(void)
+{
+    if (detached_cap >= DETACHED_CEILING) return -1;
+    int ncap = detached_cap * 2;
+    if (ncap > DETACHED_CEILING) ncap = DETACHED_CEILING;
+    pid_t *n = (pid_t *)malloc((size_t)ncap * sizeof *n);
+    if (!n) return -1;
+    memcpy(n, detached_pid, (size_t)detached_n * sizeof *n);
+    if (detached_pid != detached_fixed) free(detached_pid);
+    detached_pid = n;
+    detached_cap = ncap;
+    return 0;
+}
 
 static void detached_remember(pid_t p)
 {
-    if (detached_n < DETACHED_MAX) {
+    if (detached_n >= detached_cap && detached_full_clears()) {
+        detached_n = 0;                         /* the old code, on demand */
         detached_pid[detached_n++] = p;
         return;
     }
-    /* Full. Reap what we can and drop the oldest rather than growing without
-     * bound -- an unreclaimed slot costs one zombie, a leak costs the table. */
-    detached_n = 0;
+    if (detached_n >= detached_cap)
+        reap_detached();                        /* most of them have exited */
+    if (detached_n >= detached_cap)
+        detached_grow();                        /* they really are all alive */
+    if (detached_n >= detached_cap) {
+        /* Ceiling, or out of memory.  Only here is a promise broken, and it
+         * is counted. */
+        detached_dropped++;
+        memmove(&detached_pid[0], &detached_pid[1],
+                (size_t)(detached_cap - 1) * sizeof detached_pid[0]);
+        detached_n = detached_cap - 1;
+    }
+    detached_pid[detached_n++] = p;
 }
+
+/* extern def sys_detached_dropped() -> int64 -- instrumentation only. */
+int64_t sys_detached_dropped(void) { return (int64_t)detached_dropped; }
 
 void reap_detached(void)
 {
@@ -1784,13 +1886,213 @@ void reap_detached(void)
             r = waitpid(detached_pid[i], &st, WNOHANG);
         } while (r < 0 && errno == EINTR);
         if (r == 0) { i++; continue; }          /* still running */
+        own_child_forget(detached_pid[i]);
         detached_pid[i] = detached_pid[--detached_n];   /* gone, or not ours */
     }
+}
+
+/* ------------------------------------------------------------------ *
+ * PID 1 IS hamsh, AND A SHELL IS NOT AN INIT.
+ *
+ * An init adopts every orphan on the machine.  If it never wait4s them their
+ * corpses stay on the process table for ever: MEASURED here, 86 zombies after
+ * fifteen minutes of a desktop soak, all of them scene applications whose
+ * wrapper shell had been killed in the same sweep that killed them, so the
+ * parent that would have waited died first and the child reparented to PID 1.
+ *
+ * THE DANGEROUS FIX IS THE OBVIOUS ONE.  `while (waitpid(-1, &st, WNOHANG) >
+ * 0);` reaps orphans, and it also reaps THIS process's own children, throwing
+ * away the exit status that hamsh's job control, sys_waitpid_jc and the
+ * detached-handle path are each waiting to read.  A shell that reports "job 3
+ * done" with no status, or a `detached` handle that can never learn whether
+ * its program failed, is a worse bug than the zombies -- and it is silent.
+ *
+ * So this reaper never waits for a child it created.  The runtime remembers
+ * every pid it forks (own_child_remember, below) and forgets it the instant
+ * some wait path consumes its status.  An ADOPTED child is by construction one
+ * this process never forked, so the set difference is exact.  Only pids in
+ * that difference are waited for, and each by number -- never -1.
+ *
+ * WHEN IT RUNS.  Only in a process that actually adopts: PID 1, or a process
+ * that has asked to be a child subreaper.  Everywhere else it returns on the
+ * first line, so the ~40 ordinary programs on a running machine pay a
+ * getpid(2).
+ *
+ * The subreaper case is not decoration.  It is what lets the gate run this
+ * code AT HOST SCALE, against a /proc holding hundreds of processes, without a
+ * pid namespace and without pretending to be init.  A gate that only ever runs
+ * where the process table is tiny is a gate that will call a broken scan
+ * green.
+ *
+ * THE COST.  The scan is not free, so it is not paid until waitid(2) says
+ * there is at least one waitable child -- one syscall, WNOWAIT, which peeks
+ * WITHOUT consuming, so the peek itself can never steal a status.  On an idle
+ * machine that is the whole cost.
+ *
+ * FAIL-SAFE, NOT FAIL-OPEN.  If the own-children table ever overflows the
+ * runtime can no longer tell its own children from adopted ones, so it stops
+ * reaping entirely rather than risk eating a status.  Zombies are a leak; a
+ * stolen status is a wrong answer.
+ * ------------------------------------------------------------------ */
+#define OWNCH_MAX 4096
+static pid_t ownch[OWNCH_MAX];
+static int   ownch_n;
+static int   ownch_overflow;
+static unsigned long orphans_reaped;
+
+static void own_child_remember(pid_t p)
+{
+    if (p <= 0) return;
+    if (ownch_n >= OWNCH_MAX) { ownch_overflow = 1; return; }
+    ownch[ownch_n++] = p;
+}
+
+static void own_child_forget(pid_t p)
+{
+    for (int i = 0; i < ownch_n; i++)
+        if (ownch[i] == p) { ownch[i] = ownch[--ownch_n]; return; }
+}
+
+static int own_child_known(pid_t p)
+{
+    for (int i = 0; i < ownch_n; i++)
+        if (ownch[i] == p) return 1;
+    return 0;
+}
+
+/* A fork's child inherits the parent's table, and none of those pids are ITS
+ * children -- they are its siblings and its own ancestors' business.  Leaving
+ * them in place would make a child that later becomes init refuse to reap
+ * exactly the orphans it must. */
+static void own_child_reset(void) { ownch_n = 0; ownch_overflow = 0; }
+
+/* sys_rfork is not the only fork in this runtime -- user/linux-wsys.c forks a
+ * read server and user/linux-audio.c forks an audio pump.  Those callers wait
+ * for their own children, so they must be able to say so. */
+void hamnix_own_child_remember(int32_t p) { own_child_remember((pid_t)p); }
+
+/* extern def sys_orphans_reaped() -> int64 -- instrumentation only. */
+int64_t sys_orphans_reaped(void) { return (int64_t)orphans_reaped; }
+
+/* HAMNIX_ORPHAN_REAP EXISTS FOR THE NEGATIVE CONTROLS OF
+ * tests/linux/init_orphan_reap.sh AND NOTHING ELSE.  Nothing in the tree sets
+ * it; the default is the behaviour described above.
+ *
+ *   off      do not reap at all -- the arm that shows the corpse persisting
+ *            without this code, i.e. that the gate's green is attributable.
+ *   greedy   reap adopted AND own children alike -- the arm that shows the
+ *            "must not steal a status somebody is waiting for" assertion is a
+ *            real assertion, by making it fail on demand.
+ *
+ * The second one matters more than the first.  "It did not break job control"
+ * is the kind of claim that is trivially true of a function that does nothing,
+ * and there is no way to tell those apart except to run the version that does
+ * break it and watch the gate go red. */
+#define ORPHAN_MODE_ON     0
+#define ORPHAN_MODE_OFF    1
+#define ORPHAN_MODE_GREEDY 2
+static int orphan_mode(void)
+{
+    static int m = -1;
+    if (m < 0) {
+        const char *s = getenv("HAMNIX_ORPHAN_REAP");
+        m = ORPHAN_MODE_ON;
+        if (s && !strcmp(s, "off"))    m = ORPHAN_MODE_OFF;
+        if (s && !strcmp(s, "greedy")) m = ORPHAN_MODE_GREEDY;
+    }
+    return m;
+}
+
+/* 1 if this process adopts orphans: init, or a declared subreaper. */
+static int adopts_orphans(void)
+{
+    if (getpid() == 1) return 1;
+#ifdef PR_GET_CHILD_SUBREAPER
+    int v = 0;
+    if (prctl(PR_GET_CHILD_SUBREAPER, &v, 0, 0, 0) == 0 && v) return 1;
+#endif
+    return 0;
+}
+
+/* The state character of /proc/<pid>/stat, or 0 if it cannot be read.
+ *
+ * field 2 is comm IN PARENTHESES and may itself contain spaces and
+ * parentheses, so the scan goes to the LAST ')' in the buffer.  Splitting on
+ * whitespace misreads a process named ") (" -- and here that would mean
+ * waiting on a process that is still running, which BLOCKS PID 1 for ever if
+ * WNOHANG were ever dropped.  It is not dropped, but the parse is still the
+ * part that has to be right. */
+static char proc_state(pid_t pid, pid_t *ppid_out)
+{
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%ld/stat", (long)pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    char buf[512];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    char *rp = strrchr(buf, ')');
+    if (!rp || rp[1] != ' ' || !rp[2]) return 0;
+    char st = rp[2];
+    if (ppid_out) {
+        /* rp+2 is state; the next field is ppid. */
+        char *p = rp + 3;
+        while (*p == ' ') p++;
+        *ppid_out = (pid_t)strtol(p, NULL, 10);
+    }
+    return st;
+}
+
+void reap_orphans(void)
+{
+    if (!adopts_orphans()) return;
+    int mode = orphan_mode();
+    if (mode == ORPHAN_MODE_OFF) return;
+    if (ownch_overflow) return;                 /* cannot tell mine from theirs */
+
+    /* WNOWAIT: peek without consuming.  Nothing waitable, nothing to do. */
+    siginfo_t info;
+    memset(&info, 0, sizeof info);
+    if (waitid(P_ALL, 0, &info, WEXITED | WNOHANG | WNOWAIT) < 0) return;
+    if (info.si_pid == 0) return;
+
+    /* Something is waitable.  It may well be one of ours -- and if it is, it
+     * sits at the head of the queue and would hide every orphan behind it, so
+     * the peek is a TRIGGER and not the answer.  The answer comes from the
+     * process table. */
+    DIR *d = opendir("/proc");
+    if (!d) return;
+    pid_t self = getpid();
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        char *end = NULL;
+        long v = strtol(e->d_name, &end, 10);
+        if (!end || *end || v <= 0) continue;
+        pid_t pid = (pid_t)v;
+        if (pid == self) continue;
+        pid_t ppid = 0;
+        char st = proc_state(pid, &ppid);
+        if (st != 'Z') continue;                /* only corpses are reaped */
+        if (ppid != self) continue;             /* not mine to wait for */
+        if (mode != ORPHAN_MODE_GREEDY && own_child_known(pid))
+            continue;                           /* MINE -- somebody wants it */
+        int status;
+        pid_t r;
+        do {
+            r = waitpid(pid, &status, WNOHANG);
+        } while (r < 0 && errno == EINTR);
+        if (r > 0) { orphans_reaped++; own_child_forget(pid); }
+    }
+    closedir(d);
 }
 
 int32_t sys_rfork(int32_t flags)
 {
     reap_detached();                            /* "run at every fork" */
+    reap_orphans();                             /* and so is an init's */
     if (flags & RFMEM) {
         errno = ENOSYS;     /* that is sys_rfork_thread's job — HANDOFF §7.5 */
         return -ENOSYS;
@@ -1869,6 +2171,10 @@ int32_t sys_rfork(int32_t flags)
         }
     }
     if (pid > 0) {
+        /* REMEMBERED BEFORE ANYTHING ELSE CAN RUN. A pid this process created
+         * is a pid whose status belongs to somebody here; the orphan reaper
+         * reads this table to know what it must not touch. */
+        own_child_remember(pid);
         /* Close the spawn gate: until the parent finishes binding, a child
          * that opens /fd/N must wait rather than fall back to what it
          * inherited. See user/linux-fdns.c. */
@@ -1879,6 +2185,9 @@ int32_t sys_rfork(int32_t flags)
             detached_remember(pid);
     }
     if (pid == 0) {
+        /* The parent's children are not this process's children. */
+        own_child_reset();
+        detached_n = 0;
         /* The child inherits the parent's fifo KEEPER descriptors (see
          * user/linux-fdns.c). Holding them would keep every pipe slot alive
          * for as long as the child lives, so a child that is about to become
@@ -2343,6 +2652,7 @@ int64_t sys_waitpid(int32_t pid)
     } while (r < 0 && errno == EINTR);
     if (r < 0)
         return -1;
+    own_child_forget(r);                /* status consumed; nobody else's now */
     if (WIFEXITED(status))
         return (int64_t)WEXITSTATUS(status);
     if (WIFSIGNALED(status))
@@ -2381,11 +2691,16 @@ int64_t sys_waitpid_jc(int32_t pid, int64_t *status)
         if (status) *status = WAITJC_RUNNING;
         return 0;
     }
+    /* EXITED and SIGNALLED are the two that CONSUME the status. STOPPED and
+     * CONTINUED do not -- the child is still a child and still somebody's to
+     * wait for -- so the table must not be cleared on those. */
     if (WIFEXITED(st)) {
+        own_child_forget(r);
         if (status) *status = ((int64_t)WEXITSTATUS(st) << 8) | WAITJC_EXITED;
         return 1;
     }
     if (WIFSIGNALED(st)) {
+        own_child_forget(r);
         if (status)
             *status = ((int64_t)(128 + WTERMSIG(st)) << 8) | WAITJC_EXITED;
         return 1;
@@ -2429,6 +2744,7 @@ int64_t sys_waitpid_nb_raw(int32_t pid, int64_t flags)
         return -(int64_t)errno;
     if (r == 0)
         return -EAGAIN;                 /* alive, nothing to reap */
+    own_child_forget(r);
     return (int64_t)r;
 }
 
@@ -2946,6 +3262,11 @@ int64_t sys_waitfds(const int32_t *fds, uint64_t nfds, int64_t timeout_ms)
      * fires the boot chime once and may never spawn again, so "reap at every
      * fork" alone would leave that zombie forever. See RFNOWAIT above. */
     reap_detached();
+    /* PID 1's rc parks here between heartbeats and does not fork for seconds
+     * at a time, so "reap at every fork" alone would let an init's adopted
+     * corpses pile up between launches. reap_orphans() costs one waitid(2)
+     * when there is nothing to do. */
+    reap_orphans();
     /* AND IT IS WHERE A WINDOW THAT HAS STOPPED DRAWING OFFERS ITS PIXELS.
      * Same argument, one layer up: an application that paints once and parks
      * makes no wsys call again, so the pixel hand-up driven from those calls
