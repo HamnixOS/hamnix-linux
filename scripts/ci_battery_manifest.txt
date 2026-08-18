@@ -5123,10 +5123,15 @@ bash tests/linux/packager_sees_its_inputs.sh
 # serial logs whose right answer is known. It asserts all four verdicts AND the
 # two "not measured" cases, and it refuses to run at all if the lift comes back
 # empty -- a control that cannot fail is not a control.
-# MEASURED 2026-08-17 on this host: 7 passed, 0 failed, 0.56 s. It found one
-# real defect while being written (an absent ps reading was being reported as
-# "0 -> 0" with an offset that was the window count relabelled) and that
-# assertion is what keeps it fixed. No QEMU, no image, no network, no device.
+# MEASURED 2026-08-17 on this host: 17 passed, 0 failed, under a second (it was
+# 7, then 12, now 17). It found one real defect while being written (an absent
+# ps reading was being reported as "0 -> 0" with an offset that was the window
+# count relabelled) and a second one later the same day: the reader counted
+# ZOMBIES as live application processes, so a workload that kills everything it
+# starts and a workload that kills nothing produced the identical verdict. The
+# three cases added for that split go RED against the pre-change reader
+# (14 passed / 3 failed), which is how the split is known to be a measurement.
+# No QEMU, no image, no network, no device.
 bash tests/linux/soak_wincensus_negctl.sh
 
 # --- MEASURED tests/linux GATES (2026-08-17) ------------------------------
