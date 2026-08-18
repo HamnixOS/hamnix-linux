@@ -14,6 +14,32 @@ because the number is the deliverable.
 
 ## Unreleased
 
+### The installer on the stick could never install
+
+Boot the medium, click **Install Hamnix**, pick your drive, and it stops with a
+complaint about a missing file. Not a crash, not a hang — a clear refusal, which
+is the only reason this was never reported as a broken installer. It read like
+something you had configured wrong.
+
+Nothing was configured wrong. The file it wanted was **written to the wrong one
+of the stick's two partitions.** A number identifying the disk gets recorded when
+the stick is made, and the installer reads it back from `/boot`. But `/boot` on a
+running Hamnix system *is* the stick's small boot partition, and the number was
+being written to the big one — sitting there, real, and invisible to the program
+that needed it.
+
+**This affects every stick made before now, including 1.0.27 and 1.0.26.** If you
+have tried to install from one and been told a file was missing, that was this,
+and it was not something you did.
+
+Fixed by copying the file where the installer actually looks. What makes it worth
+telling you: **the check that was supposed to catch this passed every single
+time.** It looked for the file on the big partition — where it was — so it saw a
+file present and said so, for weeks, while the installer could not find it. The
+check and the installer were looking at the same path on two different
+partitions. There is now a second check that looks where the program looks, and
+it fails on the old media, exactly as it should have all along.
+
 ### One press of Return could erase your disk
 
 On the installer's last page, with a drive selected, **a single press of the
