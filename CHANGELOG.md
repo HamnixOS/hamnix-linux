@@ -32,9 +32,14 @@ one program**, where 1.0.26 shipped two different ones under one name.
 Gated on freshly built artifacts, image and channel from one tree in one run:
 229 program files compared byte for byte between medium and channel, all
 identical; the package archives reproducible; the install wizard 31 of 31 with
-its negative control flipping both arms; the desktop soak 846 heartbeats over
-900 s with zero arena exhaustions, run *with* the instrument proof rather than
-without it. The full battery ran for the first time in weeks — 448 true passes,
+its negative control flipping both arms; the desktop soak with zero arena
+exhaustions. **Correction, 2026-08-17:** the "846 heartbeats over 900 s, run
+*with* the instrument proof" written here was wrong twice over — the tree
+recorded that same run as both 846 and 848, and it was taken with the proof
+DISABLED, which the gate's own text calls "nothing below this line is a result".
+The first genuine measurement came afterwards: **839 heartbeats over 900 s with
+arm 0 armed**, zero arena exhaustions. The arena fix holds; the number quoted
+for it did not. The full battery ran for the first time in weeks — 448 true passes,
 and the run's largest yield was discovering that **90 of 713 invocations
 asserted nothing at all** while being counted as passes.
 
