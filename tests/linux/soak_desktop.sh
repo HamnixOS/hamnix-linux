@@ -2019,6 +2019,75 @@ say "DID THE WORKLOAD SURVIVE THE WINDOW? (asked FIRST, because the verdict belo
 # what "vals climbs 4-6 per iteration" predicts and what "a 64-slot table"
 # does not.
 #
+# THE WORKLOAD FIX OF 2026-08-17 WAS RUN ON 2026-08-17 AND IT DID NOT WORK.
+# =========================================================================
+# 1e6b09dc changed the churn from `echo <prog> > /dev/wsys/appmenu/launch` plus
+# a `close <wid>` sweep to `happ = spawn detached $soakns { /bin/<app> }` plus
+# `kill $happ`, on the reasoning -- correct as far as it goes -- that closing a
+# window record does not end a program. IT WAS COMMITTED WITHOUT BEING RUN, and
+# its own commit message says so.
+#
+# RUN NOW: 900 s, TYPE=0, seed 7742, and WITH ARM 0 -- the first heartbeat
+# figure this file has that is not from a SKIPPROOF=1 run. 23 PASSED / 2 FAILED.
+# Evidence at /home/david/.hamnix-build/soak-evidence/armed-900s-{RUN,serial}.log
+# and the census reader's control, tests/linux/soak_wincensus_negctl.sh, is
+# 12 PASS / 0 FAIL beside it.
+#
+#                              before the change   after it (this run)
+#     windows                   3 -> 92 / 94        4 -> 100
+#     offset (win - live apps)  min 3 max 5         min 3 max 4
+#     censuses                        106                104
+#     cycles                          109                104
+#     heartbeats                      848            839 (arm 0 ARMED)
+#     arena exhaustions                 0                  0
+#
+# THE OFFSET IS STILL FLAT, WHICH IS THE WHOLE ANSWER. min 3 / max 4 over 104
+# censuses means every one of the 100 rows still has a LIVE owner. The count did
+# not come down; it went slightly UP. `kill $happ` is not ending the programs.
+#
+# AND THE CORPSES SAY WHAT IT *IS* ENDING. At the final census the guest's own
+# ps holds 96 live scene applications (hamnotesscene 27, hammonscene 26,
+# hamcalcscene 26, hamtermscene 17), 20 live `hamsh` -- and NINE `hamsh` IN
+# STATE Z. The processes that die are shells. The processes that survive are the
+# applications.
+#
+# THE MECHANISM, READ OFF THE SOURCE AND NOT MEASURED -- it is a hypothesis with
+# line numbers, which is the most this run can support. user/hamsh.ad:12860 is
+# the spawn: the child calls `apply_ns_template` and then `exec_block(nd_b[nu])`.
+# It RUNS THE BLOCK; it does not exec the program in place. So the pid the
+# parent tags into the VT_PROC handle (:12886) is the INTERMEDIATE SHELL that
+# runs the block, and `/bin/<app>` is that shell's own child. `kill $happ` sends
+# the note to the wrapper; the application is orphaned and keeps running. The
+# zombie hamsh processes are the wrappers, and `detached` (RFNOWAIT) was
+# supposed to prevent exactly those, so it is not covering this path either.
+#
+# A SECOND DEFECT, SEPARATE AND ALSO READ RATHER THAN MEASURED, and it is why
+# this run is SILENT about any of it: user/hamsh.ad:15627 does
+#
+#       p9_note(pid, cast[Ptr[uint8]]("kill"))
+#       eval_status = 0
+#
+# -- the return value is DISCARDED. p9_note fails closed (lib/p9.ad:604 returns
+# -1 when the open fails, and on this lane note_open in user/linux-syscalls.c:598
+# fails the OPEN when kill(pid,0) says the target is gone). hamsh's `kill`
+# therefore reports success unconditionally. AN OPERATION THAT CANNOT FAIL IS
+# NOT AN OPERATION, and it is the reason the console carries no `hamsh:` line
+# anywhere in 900 s while a hundred windows piled up.
+#
+# WHAT THE NEXT PASS MUST NOT DO: raise the +8 slack in the verdict below, or
+# change the workload again without running it. What it should do is establish,
+# in the guest, which pid `spawn <ns> { <prog> }` hands back -- print the handle
+# and the census's ps side by side for one cycle -- and fix whichever of the two
+# defects above that shows to be real. lib/p9.ad:841 already carries
+# p9_note_tree(), which is the shape a fix in the shell would use.
+#
+# WHAT IS UNCHANGED AND GOOD, in the same run: 839 heartbeats over 900 s against
+# a floor of 450, zero arena exhaustions, redirection still working at the end
+# (neither the canary nor an /etc listing ever reached the console),
+# /var/log/wsysd.log flat at 640 bytes / 0.0 B/s, longest guest-clock gap 2 s,
+# longest frozen picture 0 s, and 1280 pointer events taken by the compositor.
+# The machine did not wedge. The workload still leaks applications.
+#
 # THE FIX IS IN THE SHELL: user/hamsh.ad's gc_collect_minor, a values-only
 # collection that exec_block can run at a statement boundary INSIDE a loop
 # (nodes are left frozen, because every evaluator frame above is holding raw

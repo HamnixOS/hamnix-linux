@@ -220,6 +220,27 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         return 2
     w: int64 = _atoi(cast[Ptr[char]](argv[1]))
     h: int64 = _atoi(cast[Ptr[char]](argv[2]))
+    # OPTIONAL ORIGIN, added 2026-08-17 for tests/linux/de_wide_2560.sh.
+    #
+    # This probe placed every window at 0,0, which cannot construct the case
+    # that matters on a 2560-wide panel: a window that STRADDLES column 1920 or
+    # column 2048. Both of those were, until 2026-08-17, hard ceilings in this
+    # stack (user/wsysd.ad's BBROW_CAP = 1920*4 and user/wsyswl.ad's
+    # ROWBUF_CAP = 8192 = 2048 columns), and a window at the origin is truncated
+    # at the SAME column whether the truncation is the window's own width or the
+    # screen's -- so the origin case cannot tell a per-window cap from a
+    # per-screen one. A window whose LEFT edge is past neither ceiling and whose
+    # RIGHT edge is past both can.
+    #
+    # Defaults to 0 0 and is read from argv[4]/argv[5], AFTER the existing
+    # `hold` at argv[3], so every caller written before this still means what it
+    # meant. tests/linux/hamui_v2_ceiling.sh passes at most three arguments.
+    px: int64 = 0
+    py: int64 = 0
+    if argc >= 5:
+        px = _atoi(cast[Ptr[char]](argv[4]))
+    if argc >= 6:
+        py = _atoi(cast[Ptr[char]](argv[5]))
 
     pm: Array[2, int64]
     if _pool_max(&pm[0]) != 0:
@@ -246,12 +267,18 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # ignores what it does not know, so a misspelling here left the window at
     # the device's 320x240 default while the 880x600 blit was ACCEPTED and then
     # clipped to it. Measured: 19,200 sampled pixels instead of 132,000.
-    pre: Ptr[uint8] = cast[Ptr[uint8]]("geometry 0 0 ")
+    pre: Ptr[uint8] = cast[Ptr[uint8]]("geometry ")
     j: uint64 = 0
     while pre[j] != 0:
         geombuf[gp] = pre[j]
         gp = gp + 1
         j = j + 1
+    gp = gp + _dec(px, &geombuf[gp])
+    geombuf[gp] = 32
+    gp = gp + 1
+    gp = gp + _dec(py, &geombuf[gp])
+    geombuf[gp] = 32
+    gp = gp + 1
     gp = gp + _dec(w, &geombuf[gp])
     geombuf[gp] = 32
     gp = gp + 1
