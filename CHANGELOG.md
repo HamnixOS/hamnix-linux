@@ -14,6 +14,23 @@ because the number is the deliverable.
 
 ## Unreleased
 
+Nothing yet. Work lands here between releases; if this section is empty, the
+tree and the channel agree.
+
+## 1.0.28 — 2026-08-18
+
+**PUBLISHED and verified as served**: the live index reports 1.0.28 across all
+130 packages, its signature verifies against `etc/hpm/trusted.pub` — the trust
+root installed machines already carry, not merely against the signing key — and
+`hamnix-install`, `hamnix-desktop` and `hamnix-hamsh` **fetched from the site**
+are byte-identical to the gated build. 1.0.27 stays fetchable; additive. It took
+about seventeen minutes to appear, roughly triple the previous two releases.
+
+**Both headline fixes had checks that passed while the defect was live**, and
+that is the thread running through this release: a warning nobody was asked to
+act on, and a file looked for on the partition where it was rather than the one
+the program actually reads.
+
 ### The installer on the stick could never install
 
 Boot the medium, click **Install Hamnix**, pick your drive, and it stops with a
