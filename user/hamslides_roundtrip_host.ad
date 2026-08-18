@@ -1,0 +1,335 @@
+# user/hamslides_roundtrip_host.ad — HOST driver that gates the CLICK ROUND
+# TRIP of a real editable text field (built for x86_64-linux; no QEMU).
+#
+# WHY THIS EXISTS
+# ---------------
+# lib/hamui.ad's eleven SIZING sites were fixed and gated by
+# tests/linux/hamui_widget_advance.sh. That gate asserts a box is as wide as
+# its measured text. It does NOT assert the property a person actually
+# experiences in an editor:
+#
+#     CLICK AT THE PIXEL WHERE CHARACTER N WAS DRAWN, AND GET N BACK.
+#
+# That property is what an "average pixel width" fix silently destroys, and it
+# is why lib/hamslidescore.ad was left at 8 px/char when hamui was fixed: it
+# has an INVERSE (`_place_caret_from_x`) as well as a forward half
+# (`_center_x`, `_draw_edit_caret`). Two wrong-but-agreeing halves round-trip
+# with each other; fixing only the forward half does not.
+#
+# HOW THE ASSERTION AVOIDS A CONSTANT OF ITS OWN
+# ----------------------------------------------
+# The anchor is htb_text_width() -- the SAME per-glyph advances the compositor
+# pens out. For a field whose text begins at TEXTX (read back from the app,
+# and cross-checked against the x the scene dump actually drew the glyphs at):
+#
+#   character N's drawn left edge  =  TEXTX + htb_text_width(buf, N)
+#
+# so the driver clicks EXACTLY there through the app's real public entry point
+# hamslides_hit(), and reports the caret the app landed on. Nothing here knows
+# a pixel constant; if the face changes tomorrow the expected pixels move with
+# it and the assertion still means the same thing.
+#
+# THE PROBE STRING IS DELIBERATELY LUMPY
+# --------------------------------------
+# The face spreads 3 to 12 px per glyph. A gate driven with an AVERAGE-width
+# string would pass against an average-width bug, which is exactly the fix
+# that was already refuted by measurement in this tree. So the probe
+# interleaves the narrowest and widest glyphs available ("iWiWlM..."), and the
+# driver reports the per-glyph advances so the gate can assert the spread is
+# real before it believes anything else.
+#
+# THE INSTRUMENT IS PROVEN BEFORE IT IS BELIEVED
+# ----------------------------------------------
+# htb_text_width() FALLS BACK to 8 px/char with no face loaded. On that
+# fallback a gate testing an 8 px bug agrees with it and passes green on a
+# broken tree. So FONT_READY is printed first and the gate refuses to read a
+# single width unless it is 1.
+#
+# THE NEGATIVE CONTROL IS RUN
+# ---------------------------
+# `... force8` calls hamslides_force_8px_advance(1), putting every metric
+# helper in lib/hamslidescore.ad back on 8 px/char -- forward AND inverse
+# together, which is the tree as it stood. The round trip must BREAK there and
+# name the character it lands on instead. If it does not break, this gate
+# cannot fail and is worthless.
+#
+# WHAT IT PRINTS
+#   FONT_READY <0|1>
+#   MODE <measured|force8>
+#   ADV <byte> <px>            per-glyph advance of each probe glyph
+#   FIELD <tag> TEXTX <x> LEN <n>
+#   RT <tag> <N> <click_x> <caret>     round trip through hamslides_hit()
+#   CARETPX <tag> <N> <want_px>        forward: where the caret SHOULD be drawn
+#   DRAWN <tag> <N> <px>               forward: where the paint pass DREW it
+#   SCENE-BEGIN / SCENE-END
+#
+# USAGE:  hamslides_roundtrip_host OUT.ppm [force8]
+
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+
+from lib.hamscene import hamscene_bufptr, hamscene_length
+from lib.hamui_host import hamui_host_begin, hamui_host_rasterize, \
+    hamui_host_ppm_header, hamui_host_fb_ptr, hamui_host_fb_bytes
+from lib.hamslidescore import hamslides_init, hamslides_build_scene, \
+    hamslides_set_title, hamslides_set_bullet, hamslides_set_notes, \
+    hamslides_hit, hamslides_caret, hamslides_focus_row, hamslides_key, \
+    hamslides_focus_textx, hamslides_focus_text_ptr, \
+    hamslides_focus_text_len, hamslides_force_8px_advance, \
+    hamslides_font_ready, hamslides_set_layout, hamslides_win_w, \
+    hamslides_focus_texty
+from lib.hamtextbox import htb_text_width
+
+
+# ---- stdout ---------------------------------------------------------------
+obuf: Array[8192, uint8]
+obuf_n: uint64 = 0
+
+
+def _o_flush():
+    if obuf_n > 0:
+        sys_write(1, &obuf[0], obuf_n)
+        obuf_n = 0
+
+
+def _o_ch(c: uint8):
+    if obuf_n >= 8000:
+        _o_flush()
+    obuf[obuf_n] = c
+    obuf_n = obuf_n + 1
+
+
+def _o_str(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0:
+        _o_ch(s[i])
+        i = i + 1
+
+
+def _o_dec(v: int64):
+    if v < 0:
+        _o_ch(45)
+        v = 0 - v
+    if v == 0:
+        _o_ch(48)
+        return
+    digs: Array[24, uint8]
+    n: uint64 = 0
+    x: uint64 = cast[uint64](v)
+    while x > 0:
+        digs[n] = cast[uint8](x % 10) + 48
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        _o_ch(digs[n])
+
+
+def _o_sp():
+    _o_ch(32)
+
+
+def _o_nl():
+    _o_ch(10)
+
+
+# The probe string. NARROWEST and WIDEST glyphs the face has, interleaved, so
+# no average can fake it: 'i' and 'l' advance ~3 px, 'W' and 'M' ~11-12.
+def S_PROBE() -> Ptr[uint8]:
+    return "iWlMiWlMiWlM"
+
+
+def _slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+# Report the advance of one byte, straight out of the measurement path, so the
+# gate can SEE that the instrument distinguishes glyphs at all.
+def _report_adv(c: uint8):
+    b: Array[2, uint8]
+    b[0] = c
+    b[1] = 0
+    _o_str(cast[Ptr[uint8]]("ADV "))
+    _o_ch(c)
+    _o_sp()
+    _o_dec(cast[int64](htb_text_width(&b[0], 1)))
+    _o_nl()
+
+
+# Walk focus to the TITLE row (focus_row 0) by pressing Up enough times that
+# it cannot still be on a bullet or on the notes strip. Key navigation only --
+# no pixel is involved in getting there, so the round trip below is not
+# bootstrapped by the arithmetic it is testing.
+def _focus_title():
+    k: uint64 = 0
+    while k < 12:
+        hamslides_key(27)
+        hamslides_key(91)
+        hamslides_key(65)                              # Up
+        k = k + 1
+
+
+# Send Home (ESC [ H), then `n` Right arrows (ESC [ C), so the caret sits at
+# index n by KEY NAVIGATION -- no pixel math involved in getting it there.
+def _caret_to(n: uint64):
+    hamslides_key(27)
+    hamslides_key(91)
+    hamslides_key(72)
+    i: uint64 = 0
+    while i < n:
+        hamslides_key(27)
+        hamslides_key(91)
+        hamslides_key(67)
+        i = i + 1
+
+
+# ---- the round trip --------------------------------------------------------
+# For every caret index N of the focused field: compute where character N was
+# DRAWN (textx + measured width of the first N bytes), click exactly there
+# through the app's real hit-test entry point, and report what came back.
+def _round_trip(tag: Ptr[uint8], clicky: int64):
+    tx: int32 = hamslides_focus_textx()
+    buf: Ptr[uint8] = hamslides_focus_text_ptr()
+    n: uint64 = hamslides_focus_text_len()
+    _o_str(cast[Ptr[uint8]]("FIELD "))
+    _o_str(tag)
+    _o_str(cast[Ptr[uint8]](" TEXTX "))
+    _o_dec(cast[int64](tx))
+    _o_str(cast[Ptr[uint8]](" LEN "))
+    _o_dec(cast[int64](n))
+    _o_nl()
+    i: uint64 = 0
+    while i <= n:
+        # Where the compositor's pen is after drawing i bytes -- MEASURED,
+        # never i * anything.
+        cx: int32 = tx + htb_text_width(buf, i)
+        hamslides_hit(cast[int64](cx), clicky)
+        _o_str(cast[Ptr[uint8]]("RT "))
+        _o_str(tag)
+        _o_sp()
+        _o_dec(cast[int64](i))
+        _o_sp()
+        _o_dec(cast[int64](cx))
+        _o_sp()
+        _o_dec(cast[int64](hamslides_caret()))
+        _o_nl()
+        i = i + 1
+
+
+# ---- the forward half, read off the PAINTED scene --------------------------
+# Put the caret at index N by key navigation, repaint, and report both where
+# the caret SHOULD be (measured) and let the gate find where it was actually
+# DRAWN in the scene display list.
+def _caret_paint(tag: Ptr[uint8], n: uint64):
+    _caret_to(n)
+    tx: int32 = hamslides_focus_textx()
+    buf: Ptr[uint8] = hamslides_focus_text_ptr()
+    _o_str(cast[Ptr[uint8]]("CARETPX "))
+    _o_str(tag)
+    _o_sp()
+    _o_dec(cast[int64](n))
+    _o_sp()
+    _o_dec(cast[int64](tx + htb_text_width(buf, n)))
+    _o_nl()
+    hamslides_build_scene()
+    _o_str(cast[Ptr[uint8]]("SCENE-BEGIN "))
+    _o_str(tag)
+    _o_sp()
+    _o_dec(cast[int64](n))
+    _o_nl()
+    _o_flush()
+    sys_write(1, hamscene_bufptr(), hamscene_length())
+    _o_str(cast[Ptr[uint8]]("SCENE-END\n"))
+    _o_flush()
+
+
+def _write_ppm(path: Ptr[char]) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    hdr: Array[64, uint8]
+    hlen: uint64 = hamui_host_ppm_header(&hdr[0])
+    sys_write(fd, &hdr[0], hlen)
+    sys_write(fd, hamui_host_fb_ptr(), hamui_host_fb_bytes())
+    sys_close(fd)
+    return 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        _o_str(cast[Ptr[uint8]]("usage: hamslides_roundtrip_host OUT.ppm [force8]\n"))
+        _o_flush()
+        return 2
+
+    force8: int32 = 0
+    if argc >= 3:
+        a: Ptr[uint8] = cast[Ptr[uint8]](argv[2])
+        if a[0] == 102 and a[1] == 111:                # "fo"
+            force8 = 1
+
+    hamslides_init()
+    hamslides_force_8px_advance(force8)
+
+    _o_str(cast[Ptr[uint8]]("FONT_READY "))
+    _o_dec(cast[int64](hamslides_font_ready()))
+    _o_nl()
+    _o_str(cast[Ptr[uint8]]("MODE "))
+    if force8 != 0:
+        _o_str(cast[Ptr[uint8]]("force8\n"))
+    else:
+        _o_str(cast[Ptr[uint8]]("measured\n"))
+
+    _report_adv(105)                                   # 'i'
+    _report_adv(108)                                   # 'l'
+    _report_adv(87)                                    # 'W'
+    _report_adv(77)                                    # 'M'
+
+    probe: Ptr[uint8] = S_PROBE()
+    plen: uint64 = _slen(probe)
+    _o_str(cast[Ptr[uint8]]("PROBELEN "))
+    _o_dec(cast[int64](plen))
+    _o_sp()
+    _o_dec(cast[int64](htb_text_width(probe, plen)))
+    _o_nl()
+
+    hamslides_set_title(0, probe)
+    hamslides_set_bullet(0, 0, probe)
+    hamslides_set_notes(0, probe)
+
+    # ---- field 1: the TITLE on the default (CONTENT) layout. Its box left
+    # edge is layout-derived and text-independent, so this arm isolates the
+    # CARET/HIT-TEST pair from the centring site.
+    hamslides_set_layout(0, 0)
+    _focus_title()
+    hamslides_build_scene()
+    _round_trip(cast[Ptr[uint8]]("TITLE.content"),
+                cast[int64](hamslides_focus_texty() + 2))
+
+    # ---- field 2: the TITLE on the TITLE layout, where _center_x decides the
+    # left edge FROM THE TEXT. This arm covers the centring site and its
+    # inverse at once: if _center_x and _place_caret_from_x disagree by even
+    # the centring offset, every index below is off.
+    hamslides_set_layout(0, 1)
+    _focus_title()
+    hamslides_build_scene()
+    _round_trip(cast[Ptr[uint8]]("TITLE.centred"),
+                cast[int64](hamslides_focus_texty() + 2))
+
+    # ---- forward half: the caret's DRAWN pixel, on the centred layout.
+    _caret_paint(cast[Ptr[uint8]]("TITLE.centred"), 0)
+    _caret_paint(cast[Ptr[uint8]]("TITLE.centred"), 6)
+    _caret_paint(cast[Ptr[uint8]]("TITLE.centred"), plen)
+
+    hamui_host_begin(hamslides_win_w(), 480)
+    hamui_host_rasterize()
+    if _write_ppm(cast[Ptr[char]](argv[1])) < 0:
+        _o_str(cast[Ptr[uint8]]("PPM_WRITE_FAILED\n"))
+        _o_flush()
+        return 3
+    _o_str(cast[Ptr[uint8]]("PPM_OK\n"))
+    _o_flush()
+    return 0
