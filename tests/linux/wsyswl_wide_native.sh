@@ -397,12 +397,35 @@ phase() {
     return 0
 }
 
-# WIDTH: 2400x820 is 1,968,000 pixels -- under MAX_PIXELS, and 480 columns
-# wider than BB_W.  The shape of a real 2560x1080 ultrawide.
-# HEIGHT: 1000x2000 is 2,000,000 pixels -- under MAX_PIXELS, and 920 rows
-# taller than BB_H.  A portrait monitor, which is a real thing people own.
-W_GEOM=2400x820;  W_CTL=400x140+20+60;   W_BIG=2100x600+2+210
-H_GEOM=1000x2000; H_CTL=260x700+730+60;  H_BIG=700x1600+10+60
+# THE CASE IS DERIVED FROM BB_W/BB_H, NOT WRITTEN DOWN BESIDE THEM.
+#
+# It was written down: W_GEOM=2400x820 with an over-size client of 2100x600,
+# and H_GEOM=1000x2000 with 700x1600.  Both were chosen when BB_W x BB_H was
+# 1920x1080 and both stopped being cases the day it became 2560x1600 -- 2100 is
+# not over 2560 and 1600 is not over 1600, so on 2026-08-17 this gate reported
+# "the native client is only 2100 on this axis; the case was not constructed",
+# which is the honest message and still a red gate that measured nothing.  The
+# height phase was worse: a 2000-row SCREEN is over user/wsysd.ad's COMP_H, so
+# the compositor refused to start and the phase died at "wsyswl never created
+# its socket" -- a number that had quietly become unusable as a screen.
+#
+# So both axes are computed from the ceiling the file under test actually has:
+#
+#   * THE SCREEN IS AT MOST THE CEILING.  wsysd's composite is COMP_W x COMP_H
+#     and COMP_W x COMP_H must equal BB_W x BB_H (user/wsysd.ad says so in as
+#     many words), so a screen larger than BB_W x BB_H is not a bigger test,
+#     it is a compositor that does not start.
+#   * THE CLIENT IS OVER IT BY A MARGIN.  +140 columns / +100 rows: enough that
+#     section C's clip message must fire, small enough that section B's probe
+#     at (ceiling - 120) is still on the screen.
+#   * SECTION D IS THEREFORE NOT ASKABLE ON THIS HARDWARE and says so rather
+#     than failing: with the screen capped at the ceiling, the strip past the
+#     ceiling is off the screen by construction.  phase()'s `room` check
+#     already prints "no room on the screen to put the control under the
+#     strip; D not asked" -- that INFO is a MEASUREMENT of the geometry, not
+#     an excuse, and it is the reason D is not counted here.
+W_GEOM=${BBW}x820;   W_CTL=400x140+20+60;  W_BIG=$((BBW + 140))x600+2+210
+H_GEOM=1000x${BBH};  H_CTL=260x700+730+60; H_BIG=700x$((BBH + 100))+10+60
 case "$AXIS" in
     width)  phase width  "$W_GEOM" "$W_CTL" "$W_BIG" ;;
     height) phase height "$H_GEOM" "$H_CTL" "$H_BIG" ;;

@@ -94,7 +94,17 @@ mkdir -p "$WORK"
 # 2073600), and that is a PIXEL COUNT, not a width.  2400x820 is 1,968,000
 # pixels: legal for the compositor, and 480 columns wider than BB_W.  This is
 # the shape of a real 2560x1080 ultrawide, which wsysd also accepts.
-GEOM="${HAMFB_GEOM:-2400x820}"
+#
+# AND IT IS NO LONGER 2400x820, because that was a constant chosen against a
+# 1920-wide ceiling.  With BB_W at 2560 the case needs a screen that section
+# B's probe at (BB_W - 120) still lands on, and 2400 does not reach it; the
+# screen is therefore BB_W itself, which is the widest wsysd will start on
+# (COMP_W == BB_W -- user/wsysd.ad).  BB_W x 820 is 2,099,200 pixels, under
+# MAX_PIXELS (4,096,000) with room to spare.
+BBW="$(sed -n 's/^#define BB_W  *\([0-9]*\).*/\1/p' user/linux-wsys.c | head -1)"
+BBH="$(sed -n 's/^#define BB_H  *\([0-9]*\).*/\1/p' user/linux-wsys.c | head -1)"
+[ -n "$BBW" ] && [ -n "$BBH" ] || { echo "cannot read BB_W/BB_H from user/linux-wsys.c" >&2; exit 1; }
+GEOM="${HAMFB_GEOM:-${BBW}x820}"
 KEEP="${WIDE_KEEP:-0}"
 export HAMWSYS="$WORK/wsys.shm"
 export HAMWSYS_BB="$WORK/wsys.bb"
@@ -108,12 +118,7 @@ export HAMLINUX_DISTRO_RO=1
 export XWAYLAND_NO_GLAMOR=1
 FBW="${GEOM%x*}"; FBH="${GEOM#*x}"
 
-# The device's own ceiling, and the only number in this file that is allowed to
-# be a constant: BB_W/BB_H in user/linux-wsys.c.  Read from the source so this
-# gate moves when they move rather than going quietly stale.
-BBW="$(sed -n 's/^#define BB_W  *\([0-9]*\).*/\1/p' user/linux-wsys.c | head -1)"
-BBH="$(sed -n 's/^#define BB_H  *\([0-9]*\).*/\1/p' user/linux-wsys.c | head -1)"
-[ -n "$BBW" ] && [ -n "$BBH" ] || { echo "cannot read BB_W/BB_H from user/linux-wsys.c" >&2; exit 1; }
+# (BBW/BBH are read above, before GEOM, because GEOM is derived from them.)
 
 pass=0; fail=0
 ok()   { echo "wide: PASS $*"; pass=$((pass+1)); }
@@ -251,19 +256,50 @@ ok "wsyswl is serving and manages the X display at $XSOCK"
 COL_N=ff00ff        # the control -- and, later, the window UNDERNEATH
 COL_W=00ff88        # the one that is wider than the backbuffer
 
-xterm -geometry 200x10 -bg "#$COL_N" -fg "#$COL_N" -T narrow -e "sleep 900" \
+CTL_COLS=200
+xterm -geometry ${CTL_COLS}x10 -bg "#$COL_N" -fg "#$COL_N" -T narrow -e "sleep 900" \
       >/dev/null 2>&1 &
 reap_add $!
 sleep 5
-xterm -geometry 340x10 -bg "#$COL_W" -fg "#$COL_W" -T wide -e "sleep 900" \
-      >/dev/null 2>&1 &
-reap_add $!
-sleep 7
 
 # The wsys window table is the truth about what gets painted where: it is what
 # user/wsysd.ad's compositing loop reads.  The X geometry is a different
 # rectangle (the frame sits outside it) and is not used for anything here.
 wid_of()  { poke /dev/wsys/windows | awk -v t="$1" '$2 == t {print $1; exit}'; }
+
+# HOW MANY COLUMNS IS "WIDER THAN THE BACKBUFFER"?  MEASURED, NOT ASSUMED.
+#
+# This was `-geometry 340x10`, and 340 columns is not a width: it is a width
+# ONLY on a host whose xterm cell is what the author's was.  On this host the
+# cell is about 6 px, so 340 columns came out 2048 px -- wider than the 1920
+# BB_W the number was picked against, and NARROWER than 2560, so the gate
+# spent a run reporting "this host's xterm cell is too small to build the
+# case".  The control is already on the screen and its width is already in the
+# window table, so the cell width is a thing this script can MEASURE: it is
+# the control's width over its column count.  The wide client is then asked
+# for however many columns that makes BB_W + 240 px.
+_NWID0="$(wid_of narrow)"
+CELL=0
+if [ -n "$_NWID0" ]; then
+    set -- $(winctl "$_NWID0"); _NW0=$4
+    [ "${_NW0:-0}" -gt 0 ] && CELL=$(( _NW0 / CTL_COLS ))
+fi
+if [ "${CELL:-0}" -lt 1 ]; then
+    # Not a reason to guess quietly: say the instrument failed and fall back to
+    # the smallest cell any of these fonts has, which over-asks rather than
+    # under-asks.
+    info "could not measure the xterm cell from the control (wid='$_NWID0' width='${_NW0:-}') -- assuming 6 px"
+    CELL=6
+else
+    info "the control is ${_NW0}px over $CTL_COLS columns -- an xterm cell of ${CELL}px"
+fi
+WIDE_COLS=$(( (BBW + 240 + CELL - 1) / CELL ))
+info "asking for $WIDE_COLS columns to clear BB_W ($BBW) by 240px"
+xterm -geometry ${WIDE_COLS}x10 -bg "#$COL_W" -fg "#$COL_W" -T wide -e "sleep 900" \
+      >/dev/null 2>&1 &
+reap_add $!
+sleep 7
+
 NWID="$(wid_of narrow)"
 WWID="$(wid_of wide)"
 [ -n "$NWID" ] || bad "the narrow xterm never became a wsys window"
@@ -368,10 +404,25 @@ fi
 # no bytes for it.  If the control's colour survives, nothing was.  If it goes
 # black, user/wsysd.ad walked x to the WINDOW's width and painted bytes from
 # beyond the end of its 7680-byte row buffer over the top of it.
+#
+# AND IT IS NOT ALWAYS ASKABLE.  The strip lives past column BB_W, and the
+# screen can be at most BB_W wide (COMP_W == BB_W, user/wsysd.ad), so on a
+# machine where the two are equal the strip is off the screen BY
+# CONSTRUCTION -- there is nowhere to put the control under it and nothing to
+# photograph.  The old code did not check: it moved the control off the right
+# edge, asked for the colour of a rectangle outside the framebuffer, got 0%
+# and called it "the strip was painted over", which is a hypothesis, not a
+# finding.  wsyswl_wide_native.sh's phase() has had this room check from the
+# start; this is the same one.  When it does not fit, D says so and is not
+# counted, which is different from D passing.
 echo "wide: === D. is anything painted past column $BBW?"
-if [ "$WW" -gt "$((BBW + 60))" ]; then
-    UX=$((WX + BBW + 20))
-    UY=$((WY + 20))
+UX=$((WX + BBW + 20))
+UY=$((WY + 20))
+if [ "$WW" -le "$((BBW + 60))" ]; then
+    info "the wide window is only ${WW} wide; D needs more than $((BBW + 60))"
+elif [ $((UX + NW)) -gt "$FBW" ]; then
+    info "no room on this ${FBW}px screen to put the ${NW}px control at column $UX, under the strip past $BBW -- D not asked"
+else
     poke "/dev/wsys/$NWID/ctl" "geometry $UX $UY $NW $NH"
     sleep 3
     cp "$HAMFB_FILE" "$WORK/under.raw"
@@ -382,8 +433,6 @@ if [ "$WW" -gt "$((BBW + 60))" ]; then
     [ "${UPCT:-0}" -ge 80 ] \
         && ok "nothing is painted past column $BBW -- the window behind shows through" \
         || bad "the strip past column $BBW was painted over (${UPCT}% survived) -- pixels from outside the row buffer"
-else
-    info "the wide window is only ${WW} wide; D needs more than $((BBW + 60))"
 fi
 
 echo "wide: --------------------------------------------------------------"
