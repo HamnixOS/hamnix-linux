@@ -15,6 +15,128 @@ then this file for where it stands, then `README.md`.
 
 ### READ THIS FIRST — the state, in order
 
+### THE CLICK ROUND TRIP IS GATED NOW, AND TWO OF THE THREE "PAIRS" WERE NOT PAIRS
+
+**Measured, dev host, 2026-08-17, evidence at `~/.hamnix-build/srt/` and
+`~/.hamnix-build/sha/`:**
+
+| gate | on this tree | on the defect |
+|------|--------------|---------------|
+| `tests/linux/hamslides_click_roundtrip.sh` | **56 PASSED / 0 FAILED** | **29 / 27** |
+| `tests/linux/hamsheet_text_advance.sh` | **27 PASSED / 0 FAILED** | **21 / 6** |
+
+Both "on the defect" columns were RUN, by pinning each file's shim on so the
+green arm executes the pre-change arithmetic; they are not estimates.
+
+**The round-trip gate asserts the thing a person experiences**, not that a box
+is the right width: it computes where character N was DRAWN
+(`textx + htb_text_width(buf, N)` — the same advances the compositor pens out),
+clicks EXACTLY there through the app's real `hamslides_hit()`, and requires the
+caret to land on N. All 26 indices of a 12-byte probe, in two layouts. It also
+parks the caret at an index by KEY navigation (Home, then N Right arrows — no
+pixel math involved in getting it there), repaints, and reads the caret's
+actual drawn vertical line out of the display list. The probe is
+`iWlMiWlMiWlM`: the gate ASSERTS the advances straddle 8 px (measured **3 px
+for `i` and `l`, 12 for `W`, 11 for `M`**) before believing any width, because
+an average-width probe would pass against an average-width bug.
+
+**The negative control names the character.** With 8 px/char forced back on —
+FORWARD AND INVERSE TOGETHER, the tree exactly as it stood — **24 of 26 clicks
+land on the wrong character**: clicking the left edge of character 7 lands the
+caret on 5, on a `W`.
+
+**THE "6.78-6.95 px per glyph" FIGURE IN THIS FILE IS AN AVERAGE AND IT
+MISLEADS.** The real spread is 3 to 12.
+
+#### Two of the three claimed FORWARD/INVERSE pairs are NOT pairs — checked, not assumed
+
+* `user/hampanelscene.ad:2945` vs `:3277` — **NOT a pair, and here is the
+  mechanism.** `:3277` is `(cur_thick - 9) / 8`, a label CLIP BUDGET derived
+  from the panel's THICKNESS. `_launcher_w`'s output goes into `wx0[]/wx1[]`,
+  and every click path (`:5011`, `:5141`, `:5169-5200`) hit-tests against those
+  SAME arrays — it reads the layout back, it does not re-derive a character
+  count from a pixel. The only division in the panel's click path is the
+  PAGER's `rel / (PAGER_CELL_W + 2)`, a fixed cell, not text. The previous
+  handoff's doubt about this grouping was right.
+* `lib/hamsheetcore.ad:3401`/`:3468` vs `:3265` — **also NOT a pair.** `:3265`
+  is `(w - 6) / 8`, again a CLIP BUDGET. `hamsheet_hit()` resolves a click to a
+  cell by walking the `col_w[]` PIXEL rectangles and never divides a pixel by a
+  character width. Both carets there sit at END of text with no in-cell click
+  positioning, so neither has an inverse.
+* `lib/hamslidescore.ad:1805` vs `:2595` — **a REAL pair, and the only one in
+  the tree.** `_center_x` decides where the text starts FROM the text;
+  `_place_caret_from_x` maps a click back to an index. Fixed together.
+
+**So the blocker described for the remaining sites does not exist for most of
+them.** A forward-only site cannot make clicking worse, because nothing reads a
+character count back out of a pixel.
+
+#### What was CHANGED
+
+* **`lib/hamslidescore.ad`** — the real pair, both halves at once. `_center_x`
+  now takes the buffer and centres on `htb_text_width`; `_draw_clip`'s clip
+  budget, `_draw_edit_caret`, the notes caret, and `_place_caret_from_x` (now
+  `htb_hit_test`) all walk the same advances. Public seams added for the gate:
+  `hamslides_focus_textx/texty/text_ptr/text_len`, `hamslides_font_ready`,
+  `hamslides_force_8px_advance`. Gated by the round-trip gate above.
+* **`lib/hamsheetcore.ad`** — forward-only, six sites: `_draw_cliptext`'s clip
+  budget and its right/centre alignment, the formula-bar caret, the column
+  header centring, the row header right-align, the cell edit caret. Seams:
+  `hamsheet_cell_x/cell_texty`, `hamsheet_font_ready`,
+  `hamsheet_force_8px_advance`. Gated by the sheet gate above. Two BUFFER
+  BOUNDS were tightened in passing: `_draw_cliptext` now clamps `show` to 79
+  BEFORE measuring (the measurement would otherwise read past an 80-byte
+  array), and the formula bar's `src_n` is the count actually COPIED rather
+  than the raw cell length.
+
+#### What was LEFT, and why
+
+* **`user/hampanelscene.ad:2945`, and ~20 label-centring sites** across
+  `hamaudiocore`, `hamclockcore`, `hamcalcore`, `hamcalccore`, `ham2048core`,
+  `hamangrycore`, `hamchesscore`, `hamminescore`, `hammathcore`, `hamsnakecore`,
+  `hamtetriscore`, `hamvideocore`, `hamaudiobookcore`, `user/haminbox.ad`,
+  `user/hamdesktop.ad`. All forward-only (verified for the panel; READ, not
+  measured, for the games). They are safe to fix — but each needs its own host
+  driver and gate, and an ungated fix here is the shape of change this tree has
+  been burned by. **Left deliberately, not overlooked.**
+* **`user/hamtermscene.ad:320` and the `MAXCOLS` constants in `hamlogcore.ad`
+  and `hamnotescore.ad`** — grid column counts, the judgement call the previous
+  agent already MEASURED and declined. Unchanged.
+
+#### A gate that went red on correct code, again, and was caught by running it
+
+The sheet gate's first version looked up a drawn string by its text alone. All
+three probe rows draw the SAME two strings, so it matched row 0 every time and
+reported 6 failures against correct code. It now matches on drawn Y as well and
+REFUSES the lookup if it finds anything other than exactly one run. **The
+failure was found by running the gate, not by reading it.**
+
+#### TASK 3 status
+
+`_h_measure_leaf`'s MENUITEM arm is **already reached** — `user/hamui_advance_host.ad`
+reparents a menu item into the vbox and the widget gate reports MENUITEM.narrow
+/ MENUITEM.wide. The **tooltip bubble is still ungated**, and here is exactly
+what a gate needs, which is two public seams in `lib/hamui.ad` and nothing else:
+a `hamui_hover(x, y)` that sets `cur_x`/`cur_y` WITHOUT clicking (`hamui_click`
+calls `_h_tooltip_hide()`, and `hamui_step()` cannot be used off-device because
+it calls `_h_poll_pointer()` against `/dev/wsys`), and a public wrapper on
+`_h_tooltip_step()` so a driver can advance the dwell `_htt_THRESHOLD` times.
+Then the assertion is the same shape as the widget gate's: two widgets with
+same-byte-count tooltips of different real width, hover each to threshold,
+paint, and require the bubble fill's width delta to equal the measured text
+delta. The site itself (`_h_paint_tooltip`, `hamui_text_px(s) + 10`) is ALREADY
+measured and correct; a gate there buys regression cover, not a fix, which is
+why adding public API to a widely used toolkit for it was not done unasked.
+
+#### NOT verified
+
+No QEMU boot. Every number above is from the dev host. Neither app was run on
+real hardware, and neither gate touches the NATIVE target — both are the
+x86_64-linux host twin. The games' forward-only status is READ, not measured.
+Bold text is assumed to advance identically to regular (`hamscene_glyphs_bold`
+double-strikes at +1 px rather than widening the advance) — that is reasoning,
+not a measurement made here.
+
 ### THE WIDGET GATE IS BUILT AND THE ELEVEN hamUI SIZING SITES ARE MEASURED
 
 **Measured, dev host, 2026-08-17, `tests/linux/hamui_widget_advance.sh`,

@@ -5218,6 +5218,20 @@ bash tests/linux/x11_stream_resync.sh
 bash tests/linux/hpm_index_sig.sh
 # MEASURED: 7 passed, 0 failed, 8s.
 bash tests/linux/wsys_cover.sh
+# MEASURED: 56 passed, 0 failed, 6s. No QEMU: compiles one x86_64-linux host
+# binary that drives the REAL lib/hamslidescore.ad and asserts the CLICK ROUND
+# TRIP -- click the pixel where character N was DRAWN (textx + htb_text_width
+# of the first N bytes) through hamslides_hit(), get caret N back -- plus the
+# caret's actual drawn x in the painted display list. No pixel constant of its
+# own. RUN negative control (hamslides_force_8px_advance) puts 8 px/char back
+# on BOTH the forward and the inverse half and must break the round trip.
+bash tests/linux/hamslides_click_roundtrip.sh
+# MEASURED: 27 passed, 0 failed, 6s. No QEMU: compiles one x86_64-linux host
+# binary that drives the REAL lib/hamsheetcore.ad paint pass and asserts each
+# cell's text placement against htb_text_width() of the string, plus that the
+# text's offset inside its cell MOVES when the string's real width changes at
+# constant byte count. RUN negative control (hamsheet_force_8px_advance).
+bash tests/linux/hamsheet_text_advance.sh
 # MEASURED: 10 passed, 0 failed, 9s.
 bash tests/linux/de_distros_table.sh
 # MEASURED: 4 passed, 0 failed, 9s.

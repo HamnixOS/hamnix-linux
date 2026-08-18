@@ -39,6 +39,7 @@
 
 from lib.hamscene import hamscene_begin, hamscene_fill, hamscene_stroke, \
     hamscene_glyphs, hamscene_glyphs_bold, hamscene_line
+from lib.hamtextbox import htb_text_width, htb_font_ready, htb_hit_test
 
 
 # ---- deck dimensions -------------------------------------------------------
@@ -1778,10 +1779,82 @@ def _ensure_thumb_visible():
         thumb_top = cur - vt + 1
 
 
+# ====================================================================
+# PROPORTIONAL TEXT METRICS -- AND THE ROUND TRIP THAT USES THEM
+# ====================================================================
+# This file used to size, place, clip and HIT-TEST text at 8 px/char. The DE's
+# `glyphs` primitive has gone through the PROPORTIONAL DejaVu face since task
+# #284: at WSYS_UI_PX(14) an 'i' advances 3 px and a 'W' advances 12. So the
+# constant was wrong in both directions.
+#
+# The reason this file was left alone when lib/hamui.ad was fixed is that it
+# has an INVERSE. `_center_x`/`_draw_edit_caret` turn a character index into a
+# pixel; `_place_caret_from_x` turns a click's pixel back into a character
+# index. Fixing only the forward half makes CLICKING WORSE than leaving both
+# wrong, because two wrong-but-agreeing halves at least round-trip with each
+# other. Both halves are changed together here, and
+# tests/linux/hamslides_click_roundtrip.sh gates the round trip itself:
+# click the pixel where character N was DRAWN, get N back.
+#
+# `hamslides_force_8px_advance(1)` puts every helper below back on 8 px/char
+# so that gate's negative control is RUN, not described.
+_hsl_adv8: int32 = 0
+
+
+def hamslides_force_8px_advance(on: int32):
+    _hsl_adv8 = on
+
+
+# 1 = the proportional face is loaded. htb_text_width() FALLS BACK to 8 px/char
+# with no face, and on that fallback every measurement below would silently
+# agree with the bug it replaces -- so a gate must assert this before it
+# believes any width from this file.
+def hamslides_font_ready() -> int32:
+    return htb_font_ready()
+
+
+# Pixel width of src[0..n) in the face the compositor actually draws with.
+def _hsl_px(src: Ptr[uint8], n: uint64) -> int32:
+    if _hsl_adv8 != 0:
+        return cast[int32](n) * 8
+    return htb_text_width(src, n)
+
+
+# INVERSE of _hsl_px: the caret index (0..n) whose caret-X is nearest `px`,
+# for a run of n bytes drawn with its left edge at x0. Exact inverse -- a
+# click landing exactly on character N's drawn left edge returns N.
+def _hsl_hit(x0: int32, src: Ptr[uint8], n: uint64, px: int32) -> uint64:
+    if _hsl_adv8 == 0:
+        return htb_hit_test(x0, src, n, px)
+    if px <= x0:
+        return 0
+    c: int64 = cast[int64](px - x0) / 8
+    if c > cast[int64](n):
+        c = cast[int64](n)
+    return cast[uint64](c)
+
+
+# How many leading bytes of src[0..n) fit inside `maxpix` of drawn width.
+def _hsl_fit(src: Ptr[uint8], n: uint64, maxpix: int32) -> uint64:
+    if maxpix <= 0:
+        return 0
+    if _hsl_adv8 != 0:
+        m: int32 = maxpix / 8
+        if cast[uint64](m) < n:
+            return cast[uint64](m)
+        return n
+    i: uint64 = 0
+    while i < n:
+        if htb_text_width(src, i + 1) > maxpix:
+            return i
+        i = i + 1
+    return n
+
+
 # Draw up to maxpix worth of text from src[0..ln) at (x,y); NUL-terminated copy.
 def _draw_clip(x: int32, y: int32, maxpix: int32, src: Ptr[uint8], ln: uint64,
                color: Ptr[uint8], bold: int32):
-    maxc: int32 = maxpix / 8
+    maxc: int32 = cast[int32](_hsl_fit(src, ln, maxpix))
     if maxc < 0:
         maxc = 0
     show: uint64 = ln
@@ -1800,9 +1873,12 @@ def _draw_clip(x: int32, y: int32, maxpix: int32, src: Ptr[uint8], ln: uint64,
         hamscene_glyphs(x, y, &tmp_draw[0], color)
 
 
-# Left edge that centres `ln` monospace cells inside [x0, x0+w).
-def _center_x(x0: int32, w: int32, ln: uint64) -> int32:
-    px: int32 = cast[int32](ln) * 8
+# Left edge that centres the MEASURED width of src[0..ln) inside [x0, x0+w).
+# This is a FORWARD site: it decides where the text -- and therefore every
+# caret and every click into it -- begins. `_place_caret_from_x` is its
+# inverse and they must be changed together.
+def _center_x(x0: int32, w: int32, src: Ptr[uint8], ln: uint64) -> int32:
+    px: int32 = _hsl_px(src, ln)
     if px > w:
         px = w
     cx: int32 = x0 + (w - px) / 2
@@ -1819,7 +1895,8 @@ def _title_box(xp: Ptr[int32], yp: Ptr[int32], wp: Ptr[int32]):
         w: int32 = CV_W - 64
         wp[0] = w
         yp[0] = CV_Y + 120
-        xp[0] = _center_x(CV_X + 32, w, cast[uint64](title_len[cur]))
+        xp[0] = _center_x(CV_X + 32, w, &title_buf[_title_base(cur)],
+                          cast[uint64](title_len[cur]))
         return
     if l == LAY_BLANK:
         xp[0] = CV_X + 24
@@ -1840,7 +1917,7 @@ def _bul_box(b: uint64, xp: Ptr[int32], yp: Ptr[int32], wp: Ptr[int32]):
         wp[0] = w
         yp[0] = CV_Y + 172 + cast[int32](b) * BULLET_LINE
         bl: uint64 = cast[uint64](bullet_len[_bullet_lidx(cur, b)])
-        xp[0] = _center_x(CV_X + 48, w, bl)
+        xp[0] = _center_x(CV_X + 48, w, &bullet_buf[_bullet_base(cur, b)], bl)
         return
     if l == LAY_TWOCOL:
         nb: uint64 = _nbul(cur)
@@ -1878,7 +1955,7 @@ def _pbul_box(b: uint64, xp: Ptr[int32], yp: Ptr[int32], wp: Ptr[int32]):
         wp[0] = w
         yp[0] = 250 + cast[int32](b) * 34
         bl: uint64 = cast[uint64](bullet_len[_bullet_lidx(cur, b)])
-        xp[0] = _center_x(60, w, bl)
+        xp[0] = _center_x(60, w, &bullet_buf[_bullet_base(cur, b)], bl)
         return
     
     if l == LAY_TWOCOL:
@@ -2380,10 +2457,12 @@ def _draw_edit_caret():
         _title_box(&bx, &by, &bw)
     else:
         _bul_box(focus_row - 1, &bx, &by, &bw)
-    clip: int32 = bw / 8
-    if cx > cast[uint64](clip):
-        cx = cast[uint64](clip)
-    px: int32 = bx + cast[int32](cx) * 8
+    # FORWARD: the caret sits at the pen position the compositor will have
+    # reached after drawing cx bytes -- the same advances, not cx * 8.
+    fitn: uint64 = _hsl_fit(_focus_buf(), ln, bw)
+    if cx > fitn:
+        cx = fitn
+    px: int32 = bx + _hsl_px(_focus_buf(), cx)
     th: int32 = 1
     if focus_row == 0:
         th = 2
@@ -2416,10 +2495,11 @@ def _draw_notes():
         cx: uint64 = caret
         if cx > nl:
             cx = nl
-        maxc: int32 = (bw - 12) / 8
-        if cx > cast[uint64](maxc):
-            cx = cast[uint64](maxc)
-        px: int32 = bx + 6 + cast[int32](cx) * 8
+        np: Ptr[uint8] = &notes_buf[_notes_base(cur)]
+        maxn: uint64 = _hsl_fit(np, nl, bw - 12)
+        if cx > maxn:
+            cx = maxn
+        px: int32 = bx + 6 + _hsl_px(np, cx)
         hamscene_line(px, by + 2, px, by + 19, 2, _th_deep())
 
 
@@ -2495,22 +2575,28 @@ def _build_present():
 
     if l == LAY_TITLE:
         if tl > 0:
-            tx: int32 = _center_x(16, WIN_W - 32, tl)
+            tx: int32 = _center_x(16, WIN_W - 32,
+                                  &title_buf[_title_base(cur)], tl)
             _draw_clip(tx, 172, WIN_W - 32, &title_buf[_title_base(cur)], tl,
                        _th_titleink(), 1)
         else:
-            _draw_clip(_center_x(16, WIN_W - 32, 14), 172, WIN_W - 32,
+            _draw_clip(_center_x(16, WIN_W - 32,
+                                 cast[Ptr[uint8]]("Untitled slide"), 14),
+                       172, WIN_W - 32,
                        cast[Ptr[uint8]]("Untitled slide"), 14, _th_muted(), 1)
         hamscene_fill(WIN_W / 2 - 110, 210, 220, 4, _th_accent())
     elif l != LAY_BLANK:
         hamscene_fill(0, 54, WIN_W, 66, _th_accent())
         hamscene_fill(0, 120, WIN_W, 3, _th_deep())
         if tl > 0:
-            tx2: int32 = _center_x(16, WIN_W - 32, tl)
+            tx2: int32 = _center_x(16, WIN_W - 32,
+                                   &title_buf[_title_base(cur)], tl)
             _draw_clip(tx2, 80, WIN_W - 32, &title_buf[_title_base(cur)], tl,
                        cast[Ptr[uint8]]("#ffffff"), 1)
         else:
-            _draw_clip(_center_x(16, WIN_W - 32, 14), 80, WIN_W - 32,
+            _draw_clip(_center_x(16, WIN_W - 32,
+                                 cast[Ptr[uint8]]("Untitled slide"), 14),
+                       80, WIN_W - 32,
                        cast[Ptr[uint8]]("Untitled slide"), 14,
                        cast[Ptr[uint8]]("#dfe3ff"), 1)
 
@@ -2587,17 +2673,60 @@ def hamslides_build_scene():
 
 
 # ---- pointer hit-testing ---------------------------------------------------
+# INVERSE of the caret placement above: a click at pixel `x`, in a run whose
+# text begins at `textx`, becomes the caret index nearest that pixel. Walking
+# the SAME advances the drawing walked is what makes the round trip hold --
+# `(x - textx) / 8` did not, and clicking mid-string landed the caret many
+# characters away from the glyph under the pointer.
 def _place_caret_from_x(x: int64, textx: int32):
     ln: uint64 = _focus_len()
     if x <= cast[int64](textx):
         caret = 0
         return
-    col: int64 = (x - cast[int64](textx)) / 8
-    if col < 0:
-        col = 0
-    if col > cast[int64](ln):
-        col = cast[int64](ln)
-    caret = cast[uint64](col)
+    caret = _hsl_hit(textx, _focus_buf(), ln, cast[int32](x))
+
+
+# ---- test seam: the FORWARD half, readable ---------------------------------
+# The pixel left edge of the focused field's text, straight out of the SAME
+# _title_box()/_bul_box() placement that hamslides_hit() feeds to
+# _place_caret_from_x(). A round-trip gate needs this to know where character
+# N was drawn; it is not a second copy of the placement, it is a read of it.
+def hamslides_focus_textx() -> int32:
+    if focus_row == FOCUS_NOTES:
+        return 16
+    bx: int32 = 0
+    by: int32 = 0
+    bw: int32 = 0
+    if focus_row == 0:
+        _title_box(&bx, &by, &bw)
+    else:
+        _bul_box(focus_row - 1, &bx, &by, &bw)
+    return bx
+
+
+# The pixel baseline y of the focused field's text, from the SAME placement.
+# A round-trip driver needs it to aim a click at the field it is testing.
+def hamslides_focus_texty() -> int32:
+    if focus_row == FOCUS_NOTES:
+        return NOTES_Y + 24 + 3
+    bx: int32 = 0
+    by: int32 = 0
+    bw: int32 = 0
+    if focus_row == 0:
+        _title_box(&bx, &by, &bw)
+    else:
+        _bul_box(focus_row - 1, &bx, &by, &bw)
+    return by
+
+
+# The focused field's buffer and byte count, so a driver can measure the SAME
+# bytes the paint pass measures.
+def hamslides_focus_text_ptr() -> Ptr[uint8]:
+    return _focus_buf()
+
+
+def hamslides_focus_text_len() -> uint64:
+    return _focus_len()
 
 
 # Returns: 1 save, 2 open, 3 redraw-only, 4 quit, 0 nothing. Structural

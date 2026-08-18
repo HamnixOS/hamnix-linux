@@ -1,0 +1,247 @@
+# user/hamsheet_advance_host.ad — HOST driver that MEASURES where HamSheet
+# places cell text (built for x86_64-linux; runs on the dev host, no QEMU).
+#
+# WHY THIS EXISTS
+# ---------------
+# lib/hamsheetcore.ad clipped, right-aligned, centred and caretted text at
+# 8 px/char against a face that advances 3 to 12 px per glyph.
+#
+# It was previously grouped with lib/hamslidescore.ad as a FORWARD/INVERSE
+# pair too dangerous to half-fix. IT IS NOT A PAIR. `_draw_cliptext`'s
+# `(w - 6) / 8` is a CLIP BUDGET, not a click-to-character map, and
+# `hamsheet_hit()` resolves a click to a cell by walking `col_w[]` PIXEL
+# rectangles -- it never divides a pixel by a character width. So every site
+# here is forward-only and changing it cannot make clicking worse. This driver
+# and tests/linux/hamsheet_text_advance.sh exist to prove the forward half is
+# now measured.
+#
+# THE ASSERTION USES NO PIXEL CONSTANT OF ITS OWN
+# -----------------------------------------------
+# The driver reports the CELL RECTANGLE the paint pass drew into and the
+# MEASURED width of the string it drew, and lets the gate check the placement
+# identity for each alignment:
+#
+#   left    drawn_x == cellx + 3
+#   right   drawn_x == cellx + cellw - 3 - measured_px
+#   centre  drawn_x == cellx + (cellw - measured_px) / 2
+#
+# Under 8 px/char the right and centre arms land somewhere else entirely, and
+# they do NOT move when the string's real width changes, which is the shape of
+# the defect. Nothing here knows a padding constant beyond the ones the
+# identities name, and those come out of the same source line as the code.
+#
+# THE INSTRUMENT IS PROVEN BEFORE IT IS BELIEVED
+# ----------------------------------------------
+# htb_text_width() FALLS BACK to 8 px/char with no face loaded, and on that
+# fallback every number here agrees with the bug. FONT_READY is printed first.
+#
+# THE NEGATIVE CONTROL IS RUN
+# ---------------------------
+# `... force8` calls hamsheet_force_8px_advance(1), which puts every metric
+# helper in lib/hamsheetcore.ad back on 8 px/char. That arm is the defect,
+# running, against the same binary.
+#
+# WHAT IT PRINTS
+#   FONT_READY <0|1> / MODE <measured|force8>
+#   ADV <byte> <px>
+#   CELL <tag> <align> <cellx> <cellw> <textpx> <texty> "<string>"
+#   SCENE-BEGIN / SCENE-END
+#
+# USAGE:  hamsheet_advance_host OUT.ppm [force8]
+
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+
+from lib.hamscene import hamscene_bufptr, hamscene_length
+from lib.hamui_host import hamui_host_begin, hamui_host_rasterize, \
+    hamui_host_ppm_header, hamui_host_fb_ptr, hamui_host_fb_bytes
+from lib.hamsheetcore import hamsheet_init, hamsheet_build_scene, \
+    hamsheet_set_cell, hamsheet_set_fmt, hamsheet_select, \
+    hamsheet_col_width, hamsheet_cell_x, hamsheet_cell_texty, \
+    hamsheet_force_8px_advance, hamsheet_font_ready
+from lib.hamtextbox import htb_text_width
+
+
+obuf: Array[4096, uint8]
+obuf_n: uint64 = 0
+
+
+def _o_flush():
+    if obuf_n > 0:
+        sys_write(1, &obuf[0], obuf_n)
+        obuf_n = 0
+
+
+def _o_ch(c: uint8):
+    if obuf_n >= 4000:
+        _o_flush()
+    obuf[obuf_n] = c
+    obuf_n = obuf_n + 1
+
+
+def _o_str(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0:
+        _o_ch(s[i])
+        i = i + 1
+
+
+def _o_dec(v: int64):
+    if v < 0:
+        _o_ch(45)
+        v = 0 - v
+    if v == 0:
+        _o_ch(48)
+        return
+    digs: Array[24, uint8]
+    n: uint64 = 0
+    x: uint64 = cast[uint64](v)
+    while x > 0:
+        digs[n] = cast[uint8](x % 10) + 48
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        _o_ch(digs[n])
+
+
+def _slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+# Two probe strings, SAME byte count, very different real width. Under the
+# 8 px/char bug every placement built from them is identical, which is exactly
+# what the gate refuses to accept.
+def S_NARROW() -> Ptr[uint8]:
+    return "illi"
+
+
+def S_WIDE() -> Ptr[uint8]:
+    return "WMWM"
+
+
+def _report_adv(c: uint8):
+    b: Array[2, uint8]
+    b[0] = c
+    b[1] = 0
+    _o_str(cast[Ptr[uint8]]("ADV "))
+    _o_ch(c)
+    _o_ch(32)
+    _o_dec(cast[int64](htb_text_width(&b[0], 1)))
+    _o_ch(10)
+
+
+# One record: which cell, which alignment, the box it was drawn into, the
+# MEASURED width of the string, and the string itself so the gate can find the
+# glyphs run the paint pass emitted for it.
+def _cell(tag: Ptr[uint8], align: int32, row: uint64, col: uint64,
+          text: Ptr[uint8]):
+    _o_str(cast[Ptr[uint8]]("CELL "))
+    _o_str(tag)
+    _o_ch(32)
+    _o_dec(cast[int64](align))
+    _o_ch(32)
+    _o_dec(cast[int64](hamsheet_cell_x(col)))
+    _o_ch(32)
+    _o_dec(cast[int64](hamsheet_col_width(col)))
+    _o_ch(32)
+    _o_dec(cast[int64](htb_text_width(text, _slen(text))))
+    _o_ch(32)
+    _o_dec(cast[int64](hamsheet_cell_texty(row)))
+    _o_ch(32)
+    _o_ch(34)
+    _o_str(text)
+    _o_ch(34)
+    _o_ch(10)
+
+
+def _write_ppm(path: Ptr[char]) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    hdr: Array[64, uint8]
+    hlen: uint64 = hamui_host_ppm_header(&hdr[0])
+    sys_write(fd, &hdr[0], hlen)
+    sys_write(fd, hamui_host_fb_ptr(), hamui_host_fb_bytes())
+    sys_close(fd)
+    return 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        _o_str(cast[Ptr[uint8]]("usage: hamsheet_advance_host OUT.ppm [force8]\n"))
+        _o_flush()
+        return 2
+
+    force8: int32 = 0
+    if argc >= 3:
+        a: Ptr[uint8] = cast[Ptr[uint8]](argv[2])
+        if a[0] == 102 and a[1] == 111:
+            force8 = 1
+
+    hamsheet_init()
+    hamsheet_force_8px_advance(force8)
+
+    _o_str(cast[Ptr[uint8]]("FONT_READY "))
+    _o_dec(cast[int64](hamsheet_font_ready()))
+    _o_ch(10)
+    _o_str(cast[Ptr[uint8]]("MODE "))
+    if force8 != 0:
+        _o_str(cast[Ptr[uint8]]("force8\n"))
+    else:
+        _o_str(cast[Ptr[uint8]]("measured\n"))
+
+    _report_adv(105)                                   # 'i'
+    _report_adv(108)                                   # 'l'
+    _report_adv(87)                                    # 'W'
+    _report_adv(77)                                    # 'M'
+
+    # cell_fmt bits 4-5 carry the alignment: 1 left, 2 centre, 3 right (see
+    # _fmt_align). Text cells default to LEFT; RIGHT and CENTRE are explicit.
+    # Both probes are SHORT enough to fit a default 72 px column uncut, so the
+    # gate is measuring placement and not the clip budget.
+    # Row 0: LEFT (default text alignment) -- narrow, then wide.
+    hamsheet_set_cell(0, 0, S_NARROW())
+    hamsheet_set_cell(0, 1, S_WIDE())
+    # Row 1: RIGHT.
+    hamsheet_set_cell(1, 0, S_NARROW())
+    hamsheet_set_cell(1, 1, S_WIDE())
+    hamsheet_set_fmt(1, 0, 48)                         # bits 4-5 = 3 -> RIGHT
+    hamsheet_set_fmt(1, 1, 48)
+    # Row 2: CENTRE.
+    hamsheet_set_cell(2, 0, S_NARROW())
+    hamsheet_set_cell(2, 1, S_WIDE())
+    hamsheet_set_fmt(2, 0, 32)                         # bits 4-5 = 2 -> CENTRE
+    hamsheet_set_fmt(2, 1, 32)
+
+    # Keep the selection off every probe cell: an ACTIVE cell in edit mode
+    # takes a different paint path.
+    hamsheet_select(9, 5, 9, 5)
+
+    _cell(cast[Ptr[uint8]]("LEFT.narrow"), 0, 0, 0, S_NARROW())
+    _cell(cast[Ptr[uint8]]("LEFT.wide"), 0, 0, 1, S_WIDE())
+    _cell(cast[Ptr[uint8]]("RIGHT.narrow"), 1, 1, 0, S_NARROW())
+    _cell(cast[Ptr[uint8]]("RIGHT.wide"), 1, 1, 1, S_WIDE())
+    _cell(cast[Ptr[uint8]]("CENTRE.narrow"), 2, 2, 0, S_NARROW())
+    _cell(cast[Ptr[uint8]]("CENTRE.wide"), 2, 2, 1, S_WIDE())
+
+    hamsheet_build_scene()
+    _o_str(cast[Ptr[uint8]]("SCENE-BEGIN\n"))
+    _o_flush()
+    sys_write(1, hamscene_bufptr(), hamscene_length())
+    _o_str(cast[Ptr[uint8]]("SCENE-END\n"))
+    _o_flush()
+
+    hamui_host_begin(600, 400)
+    hamui_host_rasterize()
+    if _write_ppm(cast[Ptr[char]](argv[1])) < 0:
+        _o_str(cast[Ptr[uint8]]("PPM_WRITE_FAILED\n"))
+        _o_flush()
+        return 3
+    _o_str(cast[Ptr[uint8]]("PPM_OK\n"))
+    _o_flush()
+    return 0

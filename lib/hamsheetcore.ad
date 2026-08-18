@@ -38,6 +38,7 @@
 # All formula arithmetic is integer, so HamSheet computes IDENTICALLY under the
 # seed Python compiler and the self-hosted native compiler.
 
+from lib.hamtextbox import htb_text_width, htb_font_ready
 from lib.hamscene import hamscene_begin, hamscene_fill, hamscene_stroke, \
     hamscene_glyphs, hamscene_glyphs_bold, hamscene_line
 
@@ -3259,26 +3260,89 @@ def _col_x(c: uint64) -> int32:
     return x
 
 
+# ====================================================================
+# PROPORTIONAL TEXT METRICS -- FORWARD ONLY, AND WHY THAT IS SAFE HERE
+# ====================================================================
+# This file used to clip, right-align, centre and caret text at 8 px/char
+# against a face that advances 3 to 12 px per glyph.
+#
+# hamsheetcore was previously grouped with lib/hamslidescore.ad as a
+# FORWARD/INVERSE pair that could not be half-fixed, on the reading that
+# `_draw_cliptext`'s `(w - 6) / 8` was the inverse of the `* 8` placements.
+# IT IS NOT. That divide is a CLIP BUDGET -- how many leading bytes fit in a
+# cell -- not a click-to-character map. The real inverse of a click here is
+# `hamsheet_hit()`, and it resolves a pointer to a cell by walking the
+# `col_w[]` PIXEL rectangles; it never divides a pixel by a character width.
+# The cell edit caret and the formula-bar caret both sit at END of text and
+# there is no in-cell click positioning, so neither has an inverse either.
+#
+# So every site below is forward-only: changing them cannot make clicking
+# worse, which is the failure mode that kept them at 8 px/char. Gated by
+# tests/linux/hamsheet_text_advance.sh.
+#
+# `hamsheet_force_8px_advance(1)` puts them all back for that gate's RUN
+# negative control.
+_hsh_adv8: int32 = 0
+
+
+def hamsheet_force_8px_advance(on: int32):
+    _hsh_adv8 = on
+
+
+# 1 = the proportional face is loaded. htb_text_width() FALLS BACK to 8
+# px/char with no face, and on that fallback every number below silently
+# agrees with the bug it replaces.
+def hamsheet_font_ready() -> int32:
+    return htb_font_ready()
+
+
+# Pixel width of src[0..n) in the face the compositor actually draws with.
+def _hsh_px(src: Ptr[uint8], n: uint64) -> int32:
+    if _hsh_adv8 != 0:
+        return cast[int32](n) * 8
+    return htb_text_width(src, n)
+
+
+# How many leading bytes of src[0..n) fit inside `maxpix` of drawn width.
+def _hsh_fit(src: Ptr[uint8], n: uint64, maxpix: int32) -> uint64:
+    if maxpix <= 0:
+        return 0
+    if _hsh_adv8 != 0:
+        m: int32 = maxpix / 8
+        if cast[uint64](m) < n:
+            return cast[uint64](m)
+        return n
+    i: uint64 = 0
+    while i < n:
+        if htb_text_width(src, i + 1) > maxpix:
+            return i
+        i = i + 1
+    return n
+
+
 # align: 0 left, 1 right, 2 centre
 def _draw_cliptext(x: int32, y: int32, w: int32, s: Ptr[uint8], ln: uint64,
                    color: Ptr[uint8], align: int32, bold: int32):
-    maxc: int32 = (w - 6) / 8
+    show: uint64 = _hsh_fit(s, ln, w - 6)
+    # tmp is 80 bytes and the copy below stops at 79; clamp FIRST so the
+    # measurement below reads the same bytes the copy actually wrote.
+    if show > 79:
+        show = 79
+    maxc: int32 = cast[int32](show)
     if maxc < 0:
         maxc = 0
-    show: uint64 = ln
-    if show > cast[uint64](maxc):
-        show = cast[uint64](maxc)
     tmp: Array[80, uint8]
     i: uint64 = 0
     while i < show and i < 79:
         tmp[i] = s[i]
         i = i + 1
     tmp[i] = 0
+    txpx: int32 = _hsh_px(&tmp[0], show)
     tx: int32 = x + 3
     if align == 1:
-        tx = x + w - 3 - cast[int32](show) * 8
+        tx = x + w - 3 - txpx
     elif align == 2:
-        tx = x + (w - cast[int32](show) * 8) / 2
+        tx = x + (w - txpx) / 2
     if tx < x + 3:
         tx = x + 3
     if bold != 0:
@@ -3344,6 +3408,25 @@ def _build_status() -> uint64:
     return p
 
 
+# ---- test seam: the cell rectangle the paint pass actually drew into -------
+# A gate asserting "this label is centred on its MEASURED width" needs the box
+# it was centred in. This reads the SAME _col_x()/col_w[] the paint pass uses;
+# it is not a second copy of the layout.
+def hamsheet_cell_x(c: uint64) -> int32:
+    if c >= MAXCOLS:
+        return 0
+    return _col_x(c)
+
+
+# The y the paint pass passes to _draw_cliptext for row `r` -- the SAME
+# expression the cell loop uses. Every row draws the same probe strings in a
+# gate, so the y is what tells two rows apart in the display list.
+def hamsheet_cell_texty(r: uint64) -> int32:
+    if r < top_row:
+        return 0
+    return CELLS_Y + cast[int32](r - top_row) * CELL_H + 1
+
+
 def hamsheet_build_scene():
     if flash > 0:
         flash = flash - 1
@@ -3395,10 +3478,10 @@ def hamsheet_build_scene():
             disp_buf[i1] = cell_raw[base + i1]
             i1 = i1 + 1
         disp_buf[i1] = 0
-        src_n = cl
+        src_n = i1
     hamscene_glyphs(80, FB_Y + 6, &disp_buf[0], cast[Ptr[uint8]]("#202020"))
     if editing != 0:                                   # caret
-        cx0: int32 = 80 + cast[int32](src_n) * 8
+        cx0: int32 = 80 + _hsh_px(&disp_buf[0], src_n)
         if cx0 > 400:
             cx0 = 400
         hamscene_fill(cx0, FB_Y + 5, 2, 13, cast[Ptr[uint8]]("#2f7d54"))
@@ -3425,7 +3508,7 @@ def hamsheet_build_scene():
         hamscene_fill(cx, GRID_Y, cw, COLHDR_H, hc)
         hamscene_stroke(cx, GRID_Y, cw, COLHDR_H, 1, cast[Ptr[uint8]]("#b4b8bf"))
         ll: uint64 = hamsheet_col_label(c, &lbl_buf[0])
-        hamscene_glyphs_bold(cx + (cw - cast[int32](ll) * 8) / 2, GRID_Y + 2,
+        hamscene_glyphs_bold(cx + (cw - _hsh_px(&lbl_buf[0], ll)) / 2, GRID_Y + 2,
                              &lbl_buf[0], cast[Ptr[uint8]]("#33383e"))
         c = c + 1
 
@@ -3441,7 +3524,7 @@ def hamsheet_build_scene():
         hamscene_stroke(0, ry, ROWHDR_W, CELL_H, 1, cast[Ptr[uint8]]("#b4b8bf"))
         rnl: uint64 = _hs_udec(row + 1, &lbl_buf[0])
         lbl_buf[rnl] = 0
-        hamscene_glyphs(ROWHDR_W - 4 - cast[int32](rnl) * 8, ry + 1,
+        hamscene_glyphs(ROWHDR_W - 4 - _hsh_px(&lbl_buf[0], rnl), ry + 1,
                         &lbl_buf[0], cast[Ptr[uint8]]("#33383e"))
         cc: uint64 = left_col
         while cc < left_col + vc and cc < MAXCOLS:
@@ -3465,7 +3548,7 @@ def hamsheet_build_scene():
                 edit_buf[edit_len] = 0
                 _draw_cliptext(cx2, ry + 1, cw2, &edit_buf[0], edit_len,
                                cast[Ptr[uint8]]("#202020"), 0, 0)
-                ecx: int32 = cx2 + 3 + cast[int32](edit_len) * 8
+                ecx: int32 = cx2 + 3 + _hsh_px(&edit_buf[0], edit_len)
                 if ecx > cx2 + cw2 - 3:
                     ecx = cx2 + cw2 - 3
                 hamscene_fill(ecx, ry + 2, 2, CELL_H - 4,
