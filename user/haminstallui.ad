@@ -775,6 +775,36 @@ sel_disk: int64 = -1        # selected disk index, or -1
 part_mode: int32 = 0        # 0 = guided (whole disk), 1 = manual
 use_online: int32 = 0       # 1 = prefer the online repo when up
 
+# THE CONFIRMATION, AND WHY IT IS A SEPARATE PIECE OF STATE.
+#
+# MEASURED, tests/linux/install_confirm_keys.sh, 2026-08-17, on a medium
+# built with HAMLINUX_INSTALLER=1 so the installer really erases: with this
+# flag absent, ONE Return on the summary page changed a 4 GiB target image's
+# sha256. `_page_ready()` returned 1 unconditionally for PAGE_SUMMARY and
+# `_goto_next()` called `_begin_install()` straight out of it, so the whole
+# distance between "a person is reading a page" and "a disk is being wiped"
+# was one keystroke.
+#
+# A keystroke can arrive without a decision behind it. user/wsysd.ad's
+# handle_key treats an evdev autorepeat (value 2) exactly like a press, so a
+# finger resting on Return delivers many; and this window's loop reads up to
+# 255 bytes of /keys AT ONCE, calls _key_line on EVERY line in that read, and
+# calls emit_scene ONCE at the bottom -- so several page transitions can
+# happen with no frame painted between them. The person can cross a page they
+# never saw.
+#
+# The red "The target disk will be ERASED." line that was already on that
+# page is a LABEL. Nobody has to do anything to it, so it cannot tell a
+# person who has decided from a key that repeated.
+#
+# confirm_armed is the distinct second action. It is armed ONLY by Space or
+# by a click on its checkbox -- NEVER by Return, which is the key that
+# advances; if Return could also arm it, two Returns would do, and two
+# Returns is what one held finger produces. It is cleared on every page
+# change, so the summary page is always arrived at disarmed, however you got
+# there and however many keys were queued.
+confirm_armed: int32 = 0
+
 mask_buf: Array[64, uint8]
 
 
@@ -891,6 +921,17 @@ def _apply_key(c: uint8) -> int32:
                 sel_disk = sel_disk + 1
             return 1
         return 0
+    if c == 32 and page == PAGE_SUMMARY:
+        # THE ARMING KEY. Space, and deliberately not Return: Return is Next
+        # on every page of this wizard, so a Return that could also arm would
+        # make the confirmation a formality that an autorepeat satisfies.
+        # Space is already this wizard's selection key on the disk page, so
+        # it is not a new idiom.
+        if confirm_armed != 0:
+            confirm_armed = 0
+        else:
+            confirm_armed = 1
+        return 1
     if c == 32 and page == PAGE_DISK and n_disks > 0 and part_mode != 1:
         # Space does the same, and is excluded when the manual-partitioning
         # field has the keyboard (part_mode 1), where a space is a keystroke.
@@ -951,7 +992,12 @@ def _page_ready() -> int32:
             return 1
         return 0
     if page == PAGE_SUMMARY:
-        return 1
+        # NOT `return 1`, which is what this was. See confirm_armed above:
+        # the button on this page ERASES A DISK, and Next must not be live
+        # until the person has said so with an action of their own.
+        if confirm_armed != 0:
+            return 1
+        return 0
     return 0
 
 
@@ -1059,6 +1105,13 @@ def _draw_button(x: int32, y: int32, w: int32, label: Ptr[uint8],
     hamscene_fill(x, y, w, FOOTER_H, face)
     hamscene_stroke(x, y, w, FOOTER_H, 1, cast[Ptr[uint8]]("#606060"))
     hamscene_glyphs(x + 16, y + 9, label, col)
+
+
+def _confirm_y() -> int32:
+    # ONE definition, read by the painter and by the hit test. A checkbox
+    # drawn at one y and hit-tested at another is a control that cannot be
+    # clicked, which is the same defect as having no control at all.
+    return 276
 
 
 def _draw_radio(x: int32, y: int32, on: int32, label: Ptr[uint8]):
@@ -1254,6 +1307,25 @@ def emit_scene(wid: int32):
             hamscene_glyphs(CONTENT_X, 254,
                     cast[Ptr[uint8]]("Install to begin."),
                     cast[Ptr[uint8]]("#a02020"))
+            # THE CONFIRMATION THE PERSON HAS TO GIVE. The two lines above it
+            # are a warning; this is an action. Install stays greyed
+            # (_page_ready) until the box is ticked.
+            scb: int32 = _confirm_y()
+            hamscene_fill(CONTENT_X, scb, 14, 14, cast[Ptr[uint8]]("#ffffff"))
+            hamscene_stroke(CONTENT_X, scb, 14, 14, 1,
+                            cast[Ptr[uint8]]("#a02020"))
+            if confirm_armed != 0:
+                hamscene_fill(CONTENT_X + 3, scb + 3, 8, 8,
+                              cast[Ptr[uint8]]("#a02020"))
+            hamscene_glyphs(CONTENT_X + 22, scb + 3,
+                    cast[Ptr[uint8]]("Yes - erase this disk and install."),
+                    cast[Ptr[uint8]]("#202020"))
+            hamscene_glyphs(CONTENT_X, scb + 24,
+                    cast[Ptr[uint8]]("Press Space or click the box. Install"),
+                    cast[Ptr[uint8]]("#606060"))
+            hamscene_glyphs(CONTENT_X, scb + 38,
+                    cast[Ptr[uint8]]("stays off until you do."),
+                    cast[Ptr[uint8]]("#606060"))
         else:
             # Progress pane. Reserve a STATUS_BAND strip between the pane and
             # the footer so the phase-2/3 status line ("Install complete ...")
@@ -1573,6 +1645,10 @@ def _goto_next():
         return
     page = page + 1
     focus = 0
+    # DISARMED ON ARRIVAL, always. This is the half that makes a queue of
+    # Returns safe: the first one lands the person on the summary page, and
+    # every one after it finds _page_ready() == 0.
+    confirm_armed = 0
     # Refresh the disk list + net state when we land on the disk page.
     if page == PAGE_DISK:
         _enumerate_disks()
@@ -1583,6 +1659,7 @@ def _goto_back():
     if page > 0:
         page = page - 1
         focus = 0
+        confirm_armed = 0
 
 
 btn_down: int32 = 0
@@ -1642,6 +1719,17 @@ def _handle_click(x: int64, y: int64) -> int32:
                 else:
                     use_online = 1
                 return 1
+        return 0
+    # The summary page's confirmation checkbox -- the pointer half of the
+    # same action Space performs.
+    if page == PAGE_SUMMARY:
+        cy: int32 = _confirm_y()
+        if _in_rect(x, y, CONTENT_X, cy, FIELD_W, 16) != 0:
+            if confirm_armed != 0:
+                confirm_armed = 0
+            else:
+                confirm_armed = 1
+            return 1
         return 0
     return 0
 

@@ -831,6 +831,59 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+say "THE SUMMARY PAGE ASKS FOR A CONFIRMATION, AND ONE RETURN MUST NOT BE IT"
+# ---------------------------------------------------------------------------
+# ADDED 2026-08-17, and the NOTE a few lines above is exactly why. That note
+# recorded, without explanation, a frame taken 6 s after ONE Return in which
+# the INSTALLER WAS ALREADY RUNNING. tests/linux/install_confirm_keys.sh went
+# and measured it on a medium where the installer can really erase: with no
+# confirmation on the summary page, ONE Return changed a 4 GiB target image's
+# sha256. user/haminstallui.ad now requires a distinct arming action --
+# Space, or a click on the summary page's checkbox -- before Install is live.
+#
+# THIS GATE CANNOT MEASURE AN ERASE. Its medium is built WITHOUT
+# HAMLINUX_INSTALLER=1, so /boot/root.partuuid is absent and hlinstall refuses
+# by name before touching anything (section F says so every run). So it
+# asserts the half it CAN see -- did the wizard reach the spawn -- and leaves
+# the erase itself to install_confirm_keys.sh.
+#
+# The order matters and is the same lesson as the "STILL ON STEP 5" check
+# above: the REFUSAL is asserted first, because a green "the confirmation
+# worked" against a page that advances unconditionally would say nothing.
+qi "$D" key ret >/dev/null; sleep 6
+shot "$D" p9_one_ret || true
+ONERET=$(cat "$D/shots/p9_one_ret.txt" 2>/dev/null || printf '')
+info "after ONE Return on the summary page: $(printf '%s' "$ONERET" | tr '\n' '|' | cut -c1-200)"
+CENS_BEFORE=$(sed -n "/${CENSUS}BEGIN/,/${CENSUS}END/p" "$D/serial.log" | tr -d '\r' \
+              | grep -cE '(^| |/)(install|hlinstall)( |$)')
+if [ "${CENS_BEFORE:-0}" -ge 1 ]; then
+    bad "ONE Return on the summary page reached the spawn: the guest's own ps shows /bin/install running after a single keystroke, with no confirmation given"
+else
+    ok "ONE Return on the summary page did NOT reach the spawn -- the guest's ps has not seen /bin/install"
+fi
+if printf '%s' "$ONERET" | grep -qiE 'Installing|hlinstall'; then
+    bad "and the frame after that single Return shows the installer running"
+else
+    ok "and the frame after that single Return does not show a running installer"
+fi
+
+# NOW GIVE THE CONFIRMATION. Space arms; Return is still Next.
+qi "$D" key spc >/dev/null; sleep 3
+shot "$D" p10_armed || true
+info "after the arming key: $(cat "$D/shots/p10_armed.txt" 2>/dev/null | tr '\n' '|' | cut -c1-200)"
+qi "$D" key ret >/dev/null; sleep 12
+shot "$D" p11_confirmed || true
+CONF=$(cat "$D/shots/p11_confirmed.txt" 2>/dev/null || printf '')
+info "after Space + Return: $(printf '%s' "$CONF" | tr '\n' '|' | cut -c1-260)"
+CENS_AFTER=$(sed -n "/${CENSUS}BEGIN/,/${CENSUS}END/p" "$D/serial.log" | tr -d '\r' \
+             | grep -cE '(^| |/)(install|hlinstall)( |$)')
+if [ "${CENS_AFTER:-0}" -ge 1 ]; then
+    ok "AND THE CONFIRMED PATH STILL COMPLETES: Space then Return reached the spawn ($CENS_AFTER census lines). An installer nobody can finish would not be a fix, and this is the control that says this one can be finished"
+else
+    bad "Space then Return did NOT reach the spawn either -- the wizard may no longer be completable from the keyboard at all; read $D/shots/p11_confirmed.png"
+fi
+
+# ---------------------------------------------------------------------------
 say "E -- DID /bin/install EVER RUN?"
 # ---------------------------------------------------------------------------
 # The guest's own `ps`, over the whole run. THE POSITIVE CONTROL IS IN THE SAME

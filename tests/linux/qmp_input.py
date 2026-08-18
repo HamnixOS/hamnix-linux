@@ -20,6 +20,8 @@ Usage:
   qmp_input.py <sock> click <x> <y> <screen_w> <screen_h>
   qmp_input.py <sock> type <text>          # ASCII letters/digits/space
   qmp_input.py <sock> key <qcode> [qcode...]
+  qmp_input.py <sock> hold <qcode> [secs]     # ONE press, held down
+  qmp_input.py <sock> burst <qcode> [n]       # n presses, no delay between
   qmp_input.py <sock> raw '<json>'
 """
 import json
@@ -167,6 +169,33 @@ def main():
             q.send([key_ev(c, True), key_ev(c, False)])
             time.sleep(0.12)
         print('keys %s' % ' '.join(sys.argv[3:]))
+    elif op == 'hold':
+        # ONE PHYSICAL PRESS, HELD. `key` above is press-then-release inside a
+        # single input-send-event pair, which is the one thing a held key is
+        # NOT. This puts the key DOWN, leaves it down for <secs>, and lifts it
+        # -- so whatever the guest's own input core does with a key that stays
+        # down (Linux generates EV_KEY value=2 autorepeat for a device that
+        # advertises EV_REP, which QEMU's virtio-keyboard does) is what the
+        # application sees. WHETHER THAT AUTOREPEAT ARRIVES IS NOT ASSUMED
+        # HERE: it is a property of the guest, and the gate that uses this has
+        # to prove it arrived before reading anything into a result.
+        c = sys.argv[3]
+        secs = float(sys.argv[4]) if len(sys.argv) > 4 else 2.0
+        q.send([key_ev(c, True)])
+        time.sleep(secs)
+        q.send([key_ev(c, False)])
+        print('held %s for %.2fs' % (c, secs))
+    elif op == 'burst':
+        # N COMPLETE PRESSES AS FAST AS THE MONITOR WILL TAKE THEM, with no
+        # sleep between. This is NOT one keypress and is never asserted as
+        # one: it is the QUEUE shape -- several key lines landing in a single
+        # read of a client's /keys, which is how one loop pass can act on more
+        # than one of them without painting a frame in between.
+        c = sys.argv[3]
+        n = int(sys.argv[4]) if len(sys.argv) > 4 else 5
+        for _ in range(n):
+            q.send([key_ev(c, True), key_ev(c, False)])
+        print('burst %s x%d' % (c, n))
     elif op == 'raw':
         print(json.dumps(q.cmd(*json.loads(sys.argv[3]))))
     elif op == 'quit':
