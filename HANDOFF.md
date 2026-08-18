@@ -415,6 +415,44 @@ owner and has **the identical zombie blindness**, so a stale segment whose owner
 is a corpse still counts as live. It fails toward *keep the segment*, which is
 the safe direction there, and **I read that and did not measure it.**
 
+### "AROUND 36 PLACES" IS A SEARCH-DEPENDENT NUMBER, AND I PUBLISHED IT
+
+The 1.0.28 release notes say "around 36 places still size text at eight pixels a
+character". I took that from an agent's count — 36 sites across 17 files — and
+put it in front of readers without reproducing it.
+
+I have now tried. A different search, over the same tree, excluding the three
+already-fixed files: **14 matching lines across 8 files.** And my own result is
+visibly contaminated — it includes `lib/bigint/bigint.ad`, where `* 8` is bit
+arithmetic and has nothing to do with layout.
+
+**Neither number is wrong. They are answers to different questions.** The agent
+counted "a text length multiplied by 8 in a drawing or x-position expression",
+including nine sites multiplying a literal character count; mine required a
+variable-looking name adjacent to the multiply. Change the definition and the
+count moves by a factor of two and a half.
+
+**What is actually solid, and it is the part that matters:**
+
+* Every remaining site is **forward-only** — separately established by searching
+  for the *inverse* shape (a click coordinate divided by 8), which returns one
+  hit, inside a comment quoting replaced code.
+* So **none of them makes a click land on the wrong character.** They shift
+  labels off-centre and size buttons loosely. That is a cosmetic class, and it
+  is why they are safe to leave ungated.
+
+**The lesson is about the shape of the claim, not the arithmetic.** "Around 36
+places" reads as a census. It is a grep result, and a grep is an instrument —
+this tree keeps a catalogue of instruments that have lied, and a search whose
+definition nobody wrote down belongs in it. A count published without a stated
+predicate cannot be checked by the person reading it, and could not be checked
+by me an hour later.
+
+**If a number goes in front of a reader, the search that produced it goes in the
+commit.** Recorded here rather than corrected in the notes, because "around 36"
+is not false — it is unreproducible, which is a different defect and one a
+correction would hide.
+
 ### A RELEASE CANDIDATE WAS DESTROYED BY WHERE IT WAS BUILT
 
 The 1.0.28 channel was built, gated clean — 130 packages, 130/130 hashes
