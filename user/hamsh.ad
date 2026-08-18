@@ -38,7 +38,7 @@ extern def sys_read_nb(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 # userland wrapper from lib/p9.ad — exact same signature so call sites
 # keep their integer-fd / SPAWN_STDIO_NS sentinels (-2 / -1 / 0..15).
 from lib.p9 import (
-    spawn, p9_note, p9_listdir, p9_is_dir,
+    spawn, p9_note, p9_note_tree, p9_note_reachable, p9_listdir, p9_is_dir,
     spawn_pipeline_stage, p9_pipe_pins_release,
     P9_PIPE_PIN_W, P9_PIPE_PIN_R, P9_PIPE_PIN_RA, P9_PIPE_PIN_RB,
 )
@@ -15624,7 +15624,51 @@ def _builtin_kill(node: int32, argc: int32):
         return
     if pid > 0:
         # #450 F6: SIGKILL → Plan-9 note "kill" written to /proc/<pid>/note.
-        p9_note(pid, cast[Ptr[uint8]]("kill"))
+        #
+        # TWO DEFECTS WERE FIXED HERE ON 2026-08-17, BOTH MEASURED FIRST.
+        #
+        # (1) `kill` COULD NOT FAIL. The body was
+        #         p9_note(pid, cast[Ptr[uint8]]("kill"))
+        #         eval_status = 0
+        #     -- the return DISCARDED and the status set to success
+        #     unconditionally. Measured on the Linux lane with hamsh built by
+        #     scripts/hamlinux_build.sh: `kill 999999` set $status=0 and left
+        #     $errstr empty. That is why 900 s of tests/linux/soak_desktop.sh
+        #     killing the wrong process printed no diagnostic at all: the
+        #     shell said it worked, every time, without looking.
+        #
+        # (2) IT KILLED THE WRAPPER, NOT THE PROGRAM. `spawn NS { prog }`
+        #     forks a child that RUNS THE BLOCK (exec_spawn below); `prog` is
+        #     that child's own child, so the VT_PROC handle names an
+        #     intermediate shell. Measured, same seam: the handle was pid
+        #     3763489 and `ps` showed `/bin/sleep 987654` at pid 3763491 with
+        #     PPID 3763489; after `kill $h` the shell reported success and
+        #     the sleep was STILL RUNNING, reparented to init. So the note
+        #     goes out through p9_note_tree, which posts to the target's
+        #     ATTACHED descendants first and then to the target -- the same
+        #     call user/kill.ad has used since the 2026-07-25 lifetime-cohort
+        #     fix, so the builtin and the program of the same name finally
+        #     agree. `spawn detached` severs only the SHELL's link to the
+        #     wrapper; the wrapper's own child is attached and is reached.
+        #
+        # WHY THE STATUS COMES FROM A PROBE AND NOT FROM p9_note_tree's
+        # RETURN: the tree call notes descendants FIRST, so a wrapper blocked
+        # in wait4 on the child it just lost can exit before its own note is
+        # opened, and a kill that worked would report failure on a race --
+        # hundreds of times in a soak. p9_note_reachable asks the question
+        # BEFORE anything is signalled, when the answer cannot change under
+        # us. What it cannot catch is the target dying in the microseconds
+        # between the probe and the note, which is a kill that succeeded by
+        # other means; that is stated rather than papered over.
+        if p9_note_reachable(pid) < 0:
+            write_str(2, "hamsh: kill: pid ")
+            sys_write(2, render_int(cast[int64](pid)),
+                      cstr_len(render_int(cast[int64](pid))))
+            write_str(2, ": no such process, or not permitted to signal it -- NOTHING WAS KILLED\n")
+            errstr_set("kill: no such process, or not permitted to signal it")
+            eval_status = 1
+            return
+        p9_note_tree(pid, cast[Ptr[uint8]]("kill"))
         eval_status = 0
     else:
         errstr_set("kill: bad handle")
