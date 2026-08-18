@@ -14,6 +14,32 @@ because the number is the deliverable.
 
 ## Unreleased
 
+### If you already installed from an earlier stick, here is what to do
+
+The two fixes below apply to **new** installations. A machine installed by an
+earlier version keeps what that installer left behind, and nothing in an update
+reaches it. Two things are worth knowing.
+
+**The "Install Hamnix" offer on your desktop.** It is there because a single
+marker file was copied onto your disk that was only ever meant to exist on the
+stick. Every place that decides whether to show the offer does nothing more than
+check whether that file exists — verified in all four. So on an already-installed
+machine you can remove it:
+
+```
+rm /etc/installer-medium
+```
+
+That is the whole remedy. Nothing else reads it, and on a machine that is already
+installed it should never have been there.
+
+**Your accounts.** If you installed before this release, your `/etc/passwd`,
+`/etc/group` and `/etc/shadow` are almost certainly 962 bytes each and contain
+no account lines at all — the shipped header, twice. That is not something you
+can repair by deleting a file, and we are not going to hand you a shell
+incantation that edits your password database. It needs a proper repair path, and
+that is the next piece of work rather than a note in a changelog.
+
 ### An installed machine offered to install itself, and had no user accounts
 
 Two defects in `user/hlinstall.ad`, both found on a machine that was installed
