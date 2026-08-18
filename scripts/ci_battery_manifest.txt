@@ -292,6 +292,25 @@ bash scripts/test_hamsh_pygame_host.sh
 # ($status=1 + $errstr + a stderr line) while the in-budget cases still
 # compute exact answers. Recompiles the NATIVE shell too. Milliseconds.
 bash scripts/test_hamsh_nosilentwrong_host.sh
+# QEMU-free host gate that hamsh's `kill` builtin CAN FAIL. It discarded
+# p9_note's return and set $status = 0 unconditionally, which is why 900 s of
+# tests/linux/soak_desktop.sh killing the wrong process printed no diagnostic
+# at all. Drives the SHIPPED Linux-lane hamsh (scripts/hamlinux_build.sh) as a
+# host process — real rfork, real execve, /proc/<pid>/note translated to
+# kill(2) — because the adder_bin host build's spawn is inert and cannot start
+# a process to kill. Negative control RUN: a mutant with the reachability
+# probe short-circuited, on which three of the four assertions go red.
+# MEASURED: 6 passed, 0 failed, 20 s warm (~90 s from a cold object cache).
+bash scripts/test_hamsh_kill_status_host.sh
+# QEMU-free host gate that `kill $h` ends the PROGRAM `spawn NS { prog }`
+# started and not the wrapper shell running the block. Two runs of the same
+# shell: one that does not kill (so the ps census is shown able to FIND the
+# program, and its PPID is measured to be the handle) and one that does (the
+# program must be gone by name, and so must the wrapper). Negative control
+# RUN: a mutant with the cohort note put back to a single-process p9_note, on
+# which the program survives.
+# MEASURED: 6 passed, 0 failed, 25 s warm (~90 s from a cold object cache).
+bash scripts/test_hamsh_spawn_kill_host.sh
 # QEMU-free host gate proving hamsh's indent and brace block forms are
 # interchangeable PER BLOCK and mix freely (HAMSH_SPEC §5): 8 cases through
 # the REPL/stdin seam, including both mixing directions and a clean
