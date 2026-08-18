@@ -15,6 +15,118 @@ then this file for where it stands, then `README.md`.
 
 ### READ THIS FIRST — the state, in order
 
+### ONE KEYPRESS ERASED A 4 GiB DISK. IT WAS MEASURED, IT IS CLOSED, AND THE GATE THAT SAYS SO WENT RED ON THE OLD CODE
+
+**Measured, dev host, 2026-08-17/18, `tests/linux/install_confirm_keys.sh`,
+evidence at `~/.hamnix-build/instconfirm/` and the four run logs
+`~/.hamnix-build/ick-NEGCTL{,2,3}.log` and `~/.hamnix-build/ick-FIXED.log`:**
+
+| gate | on the tree as it stood | after the fix |
+|------|-------------------------|---------------|
+| `tests/linux/install_confirm_keys.sh` | **30 PASSED / 5 FAILED** | **34 PASSED / 0 FAILED** |
+| `tests/linux/install_wizard_gui.sh` | 31 / 0 | **34 PASSED / 0 FAILED** |
+| `tests/linux/install_wizard_gui_negctl.sh` | 7 / 0 | see below |
+
+**THE HEADLINE, AND IT IS A DIGEST AND NOT A SCREENSHOT.** On the wizard's
+disk page, with a target selected and the person looking at "Step 5 of 5", a
+SINGLE Return — one `input-send-event` press and one release — took the
+nvme target image's sha256 from
+`8479e439…fcddca` to `93804b76…7f4a1f`. Three seconds after that keystroke the
+progress pane read **"GPT data structures destroyed!"**; twenty-eight seconds
+after it, `mkfs` was laying down 1,031,931 4k blocks. The unexplained
+observation in `install_wizard_gui.sh`'s header — "one Return produced a frame
+with the INSTALLER ALREADY RUNNING" — **REPRODUCES, 3 boots out of 3**, and it
+is worse than it read: it is not a display artefact, a disk really goes.
+
+**A HELD Return did the same.** One physical press, held for 3 s.
+
+#### What was in the way, and what "one keypress" is
+
+* `_page_ready()` returned **1 unconditionally** for `PAGE_SUMMARY` and
+  `_goto_next()` called `_begin_install()` straight out of it. There was
+  nothing between the summary page and the erase.
+* The red line on that page — "The target disk will be ERASED." — **is a
+  label**. Nobody has to do anything to it, so it cannot tell a person who has
+  decided from a key that repeated.
+* **AUTOREPEAT REACHES THE APPLICATION, and it is not small.** Measured by ink
+  in the host-name field (empty 14, one press 41, five presses 149 → **27 ink
+  per character**): **ONE PRESS IS ONE CHARACTER** — keystrokes are NOT being
+  delivered twice on this path — and **ONE PRESS HELD FOR 3 s PUT ~30
+  CHARACTERS IN THE FIELD**. `user/wsysd.ad`'s `handle_key` returns early only
+  on `value == 0`, so an evdev autorepeat (`value == 2`) is a press.
+* `user/haminstallui.ad` reads up to 255 bytes of its `/keys` in ONE read,
+  calls `_key_line` on EVERY line in it, and calls `emit_scene` ONCE at the
+  bottom — so several page transitions can happen with **no frame painted
+  between them**.
+
+#### STILL UNEXPLAINED, and said plainly
+
+**How ONE Return produced TWO `_goto_next()` calls is not established.** Ruled
+out by measurement or by reading: keystrokes are not delivered twice (section
+0 above); `user/wsysd.ad` has ONE `handle_key` call site, ONE `kset(28,10,10)`
+for Enter, and no second Enter mapping. The same drive ALSO jumped Step 1 →
+Step 3 on a single Return in three of four boots, and did not in the fourth,
+so it is intermittent. **The report stays open.** It does not need to be
+closed for the fix to be right: from the summary page, one Return calling
+`_begin_install()` was a one-keypress erase by construction.
+
+#### What was CHANGED
+
+`user/haminstallui.ad` — a `confirm_armed` flag, and it is a **distinct second
+action, not a label**:
+* `_page_ready()` returns 0 for `PAGE_SUMMARY` unless armed, so the **Install
+  button is greyed** until the person acts.
+* Armed ONLY by **Space** or by a **click on a new checkbox** ("Yes - erase
+  this disk and install."). **Never by Return**, which is the key that
+  advances — if Return could arm it, two Returns would do, and two Returns is
+  what one held finger produces.
+* **Cleared on every page change** (`_goto_next`, `_goto_back`), so the
+  summary page is always arrived at disarmed, however many keys were queued.
+  That is the half that makes the burst safe.
+
+#### The gate, and the three times it caught ITSELF
+
+`tests/linux/install_confirm_keys.sh` boots twice under QEMU with two blank
+4 GiB virtual targets, and its detector is the target image's own sha256 —
+proved negatively every run (a planted byte in a 4 GiB image must change the
+digest) and **positively in the same run** (section 3 completes the install
+deliberately and REQUIRES the digest to change). Three earlier versions of it
+were wrong, and the positive control is what said so:
+
+1. It built the medium with `HAMLINUX_INSTALLER=1` believing that puts
+   `/boot/root.partuuid` where hlinstall reads it. **It does not** — that
+   stages the file into the ext4 root's `/boot`, and `bind '#esp' /boot` then
+   hides it behind the FAT ESP, which `scripts/hamlinux_disk.sh` never mcopies
+   it onto. hlinstall refused by name and NOTHING could be erased.
+2. With that fixed, hlinstall stopped at `1/5 partitioning`: no
+   `/usr/lib/instroot`, so `sgdisk` could not run. **Both** are needed —
+   `HAMLINUX_INSTALLER=1` for the tools AND an rc line for the partuuid — and
+   the guest is now asked about both before any "the disk did not change" is
+   believed.
+3. Its autorepeat probe asked **tesseract** whether a held key had filled a
+   text field. tesseract does not read inside this build's input boxes; it
+   reported "no repeat" while the PNG it had just written showed the field
+   FULL. **An OCR that cannot see the field is not evidence about the field.**
+   It counts dark pixels now and calibrates against a known 1- and 5-character
+   fill, so it reports a NUMBER.
+
+Each of those three would have been reported as a green "one keypress is safe"
+by a gate without a positive control.
+
+#### NOT verified, and deliberately
+
+* **The wording "The target disk will be ERASED. Click Install to begin." was
+  left as it was**, and it is now slightly stale — Install is greyed until the
+  box is ticked, and the hint line under the checkbox says so. Changing it
+  would have invalidated all four QEMU runs above for a sentence.
+* The **pointer** path to the checkbox is implemented (`_handle_click` on
+  `PAGE_SUMMARY`, geometry from a single `_confirm_y()`) but is **not driven
+  by any gate** — every action under test is a key.
+* No real hardware. No Hamnix-native boot.
+* Section 2b's "ten queued Returns" passed on the OLD code too, but only
+  because section 2 had already started the install on that arm; on the fixed
+  tree it is a real assertion.
+
 ### THE CLICK ROUND TRIP IS GATED NOW, AND TWO OF THE THREE "PAIRS" WERE NOT PAIRS
 
 **Measured, dev host, 2026-08-17, evidence at `~/.hamnix-build/srt/` and
@@ -219,9 +331,26 @@ corpses**, where it was 4 → 92 with 86.
 either — but it fails toward KEEPING the segment, which is the safe direction
 for memory someone may still be attached to. Read, not measured, left alone.
 
+> **REFINED 2026-08-18, by READING and not by measuring.** It is now the ONLY
+> `kill()`-based liveness test left in that file. The window reaper beside it
+> (`reap_dead_windows`, `pid_liveness`, `user/linux-wsys.c:~2300-2470`) reads
+> `/proc/<pid>/stat` and treats state `Z` as DEAD, and it has a gate with a
+> RUN negative control (`tests/linux/wsys_zombie_owner.sh`, plus the
+> `HAMWSYS_LIVENESS=kill` escape that exists only to make that control able to
+> go red). So a zombie owner's row is cleared by the reaper — and
+> `shm_seg_is_live` skips rows whose `used` is 0 — which is the argument that
+> a zombie cannot in practice strand a segment while any compositor is
+> running. THAT ARGUMENT IS READ, NOT MEASURED: nothing was run for it, the
+> QEMU budget went to the erase gate. The consistency fix is one call
+> (`pid_liveness` instead of `kill`, needing a forward declaration since it is
+> defined later in the file) and is deliberately NOT applied unmeasured and
+> ungated.
+
 **Open, and honest about it:** ~10 widget sites OUTSIDE `lib/hamui.ad` still
 size text at 8 px/char (the eleven inside it are measured now, and gated). "One keystroke
-starts an erase" was seen once and is unexplained. 95 gates are unregistered.
+starts an erase" was MEASURED, reproduced 3 boots of 3, and closed — see the
+top of this section; what remains unexplained is the MECHANISM by which one
+Return produced two `_goto_next()` calls. 95 gates are unregistered.
 **Nothing runs any of the gates unless a person does.**
 
 **Never established, and it matters most:** that the freeze fixed here is the
