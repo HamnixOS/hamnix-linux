@@ -286,6 +286,40 @@ owner and has **the identical zombie blindness**, so a stale segment whose owner
 is a corpse still counts as live. It fails toward *keep the segment*, which is
 the safe direction there, and **I read that and did not measure it.**
 
+### THE "95 DARK GATES" ARE NOT AN INHERITED MESS — 40 of 40 SAMPLED PASS
+
+I have been repeating "95 pre-existing unregistered gates keep the registration
+gate red, none is new" in the hourly brief and in reports, in a tone that treats
+them as an inherited condition rather than a task. **Measured on 2026-08-17, and
+it does not hold up.**
+
+* The gate names **95** unregistered `scripts/test_*.sh`.
+* **82 of the 95 reference only trees this repository actually contains** — the
+  "they are all the bare-metal line's gates" explanation covers at most 13.
+* Of those 82, **40 mention no QEMU at all**. I ran all 40, serially, with a
+  100–120 s timeout each: **40 PASSED, 0 failed, 0 timed out**, nearly all in
+  seconds — compiler gates (`bool_xor`, `call_in_expr`, `augmented_assign`,
+  `match`), optimiser gates (`constif`, `imulimm`, `methodsave`,
+  `storethrough`), `desktopentry_host`, `local_store_trunc` and more.
+
+**So a large part of that red is cheap, passing, host-only coverage that nobody
+runs, and the fix is a manifest line each.** The registration gate's own text
+says it: *"A gate nothing runs is not coverage — it is a hole shaped like
+coverage."*
+
+**What I got wrong was not a fact but a frame.** Every individual statement I
+made about those 95 was true — they are pre-existing, none is new, they do keep
+the gate red. Together they implied "not our problem, not actionable", and I
+never tested that implication. It took twelve minutes to find out otherwise.
+
+**Not done, and it is the next step rather than a conclusion:** registering them.
+The manifest convention is to carry a measured runtime per line, and I timed
+these only against a timeout, not precisely. The remaining 42 of the 82 do
+mention QEMU and were **not** run — they may be slow, may need a built image, or
+may be genuinely on-demand. **Do not register a gate you have not run**: a gate
+registered but not runnable converts a known gap into false assurance, which is
+worse than the gap.
+
 ### `kill(pid, 0)` SUCCEEDS ON A ZOMBIE — and I exonerated the compositor on it
 
 *(Historical. Both causes named here are now fixed and measured; see the section
