@@ -3838,9 +3838,70 @@ def pump_input():
         ptr_y = scr_h - 1
 
 
+# IS STDIN A KEYBOARD? MEASURED, AND THE ANSWER IS USUALLY NO.
+#
+# ONE PHYSICAL RETURN USED TO PUT TWO KEYS ON THE FOCUSED WINDOW'S RING, and
+# this line is why. `etc/rc.d/rc.5.linux` starts this compositor as
+# `/bin/wsysd > /var/log/wsysd.log &` -- stdout redirected, STDIN NOT -- so fd
+# 0 is /dev/console, and the shipped kernel command line ends `console=tty0`,
+# the SAME virtual terminal the evdev keyboard feeds. Every keystroke
+# therefore reached this process TWICE: once as an evdev record decoded by
+# handle_key, and once as a cooked byte out of the VT's line discipline, read
+# by pump_keyboard below and routed as if somebody had typed it.
+#
+# MEASURED IN A GUEST, 2026-08-18 (evidence:
+# ~/.hamnix-build/keyraw-evidence-prefix/serial-prefix.log). One Return on the
+# installer's first page routed, in order:
+#
+#     routekey src=evdev  code=10
+#     routekey src=stdin  code=10
+#
+# and one Return after typing `dave` into a field routed SIX bytes -- the
+# evdev 10, then 100 97 118 101 10, the WHOLE LINE the tty had been holding in
+# its canonical buffer, flushed by the newline. On screen that put the four
+# characters `dave` into the NEXT page's password field and tried to advance
+# the wizard a second time. That is the unexplained "one Return, two
+# _goto_next() calls" in HANDOFF.md, and it is neither a doubled keystroke nor
+# a second keymap entry: it is a SECOND INPUT SOURCE that only fires on a
+# newline, which is exactly why the ink measurement in a text field (one press
+# = one character, no Return pressed) could not see it.
+#
+# THE RULE. stdin is a keyboard ONLY when no evdev node could be opened --
+# which is the headless serial boot this path was written for and nothing
+# else. HAMWSYSD_STDIN_KEYS=1 forces it back on (it is what the gate's red arm
+# uses); =0 forces it off.
+stdin_keys: int32 = 0
+
+
+def decide_stdin_keys():
+    e: Ptr[uint8] = getenv(cast[Ptr[char]]("HAMWSYSD_STDIN_KEYS"))
+    if cast[uint64](e) != 0 and e[0] != 0:
+        if e[0] == 48:
+            stdin_keys = 0
+        else:
+            stdin_keys = 1
+        puts(1, "wsysd: stdin keyboard forced ")
+        putd(1, stdin_keys)
+        puts(1, " by HAMWSYSD_STDIN_KEYS\n")
+        return
+    if n_input == 0:
+        stdin_keys = 1
+    else:
+        stdin_keys = 0
+    puts(1, "wsysd: stdin as a keyboard: ")
+    putd(1, stdin_keys)
+    puts(1, " (evdev nodes open: ")
+    putd(1, cast[int32](n_input))
+    puts(1, ")\n")
+
+
 def pump_keyboard():
     # Keys can also arrive on stdin -- a serial console has no evdev node at
-    # all, and that is the only keyboard a headless boot has.
+    # all, and that is the only keyboard a headless boot has. When there IS an
+    # evdev node, fd 0 is a DUPLICATE of it (see decide_stdin_keys above) and
+    # reading it doubles every key.
+    if stdin_keys == 0:
+        return
     n: int64 = sys_read_nb(0, &inbuf[0], 256)
     # A NEGATIVE return is an error (EAGAIN on a non-blocking tty with nothing
     # typed, EIO on a hung-up console), and it MUST be filtered before the
@@ -3998,8 +4059,10 @@ def build_waitset():
         d = d + 1
     # stdin last: a serial console has no evdev node at all and is the only
     # keyboard a headless boot has (pump_keyboard). Under `</dev/null` the
-    # probe above rejects it, which is the common case for the gates.
-    if n_wait < WAITSET_CAP and fd_is_waitable(0) != 0:
+    # probe above rejects it, which is the common case for the gates. AND IT
+    # GOES IN ONLY IF IT IS A KEY SOURCE AT ALL -- an fd nothing reads has no
+    # business waking this loop.
+    if stdin_keys != 0 and n_wait < WAITSET_CAP and fd_is_waitable(0) != 0:
         waitset[n_wait] = 0
         n_wait = n_wait + 1
     else:
@@ -4593,6 +4656,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         puts(1, " input devices (named)\n")
     else:
         open_inputs()
+    decide_stdin_keys()
     ptr_x = scr_w / 2
     ptr_y = scr_h / 2
     # THE WINDOW TABLE MUST EXIST BEFORE ANYTHING DRAINS INPUT, AND

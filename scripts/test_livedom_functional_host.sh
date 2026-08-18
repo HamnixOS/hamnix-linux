@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+#
+# NOT REGISTERED, AND IT WAS RUN FIRST -- IT IS SOFT-GREEN. This gate is not
+# in ci_battery_manifest.txt because, RUN on this tree on 2026-08-18, it
+# printed `[livedom] RESULT pass=21 fail=1 @ b4b9f26b` (the failing case is
+# 06_class_style_toggle) AND EXITED 0. A gate whose red cannot reach its exit
+# status is the false-green shape scripts/test_gate_softgreen.sh exists to
+# ban; registering it would wire a permanently green line into the battery
+# over a known failing case. Make the exit status follow the count, then
+# register it.
 # scripts/test_livedom_functional_host.sh — LIVE-DOM FUNCTIONAL harness.
 #
 # WHY THIS EXISTS

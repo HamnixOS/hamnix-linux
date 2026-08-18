@@ -15,6 +15,153 @@ then this file for where it stands, then `README.md`.
 
 ### READ THIS FIRST — the state, in order
 
+### THE SECOND RETURN CAME OFF THE SERIAL CONSOLE, AND IT WAS NEVER A SECOND KEYSTROKE
+
+**Measured, QEMU guest on the dev host, 2026-08-18, evidence at
+`~/.hamnix-build/keyraw-evidence-prefix/` (two boots: `serial-prefix.log` plus
+`after1ret.ppm`/`after2ret.ppm`, and `boot2/serial.log` + `boot2/probe.log`).**
+
+`user/haminstallui.ad` was temporarily made to print the RAW BYTES of every
+read of its `/keys` and of every line it hands to `_key_line`; `user/wsysd.ad`
+was temporarily made to print every byte it ROUTES and the source that
+produced it. **ONE Return on the wizard's summary page produced ONE read of
+TEN bytes:**
+
+```
+[keyraw] READ nbytes=10
+[keyraw] READ bytes: 100 32 49 48 10 100 32 49 48 10        ("d 10\nd 10\n")
+[keyraw] LINE bytes: 100 32 49 48   ->  GOTO_NEXT called on page=4
+[keyraw] LINE bytes: 100 32 49 48   ->  GOTO_NEXT called on page=4
+```
+
+**TWO LINES, IN ONE READ, AND BOTH CARRY CODE 10.** The standing hypothesis in
+this file — that one line carries 10 and the other 13, since `haminstallui`
+treats both as Next — **IS DEAD.** Both are 10. The *structure* of that guess
+was right (one press, two lines, two advances, no doubled keystroke) and the
+*mechanism* it named was not.
+
+**WHERE THE SECOND ONE CAME FROM.** The compositor, on the same press:
+
+```
+wsysd: routekey src=evdev code=10 wid=5
+wsysd: routekey src=stdin code=10 wid=5
+```
+
+`etc/rc.d/rc.5.linux` starts it as `/bin/wsysd > /var/log/wsysd.log &` —
+**stdout redirected, STDIN NOT** — so fd 0 is `/dev/console`, and the shipped
+kernel command line ends `console=tty0`, **the same virtual terminal the evdev
+keyboard feeds**. `pump_keyboard()` read that tty and routed every byte to the
+focused window as a keystroke. Every key reached the window twice: once decoded
+from evdev by `handle_key`, once cooked by the VT's line discipline.
+
+**AND IT IS WORSE THAN A DOUBLED RETURN, because the tty is CANONICAL.** It
+holds a line until a newline and then releases the WHOLE LINE. Measured in the
+same guest: one Return after typing `dave` into a field routed **SIX** bytes —
+`10`, then `100 97 118 101 10` — and the screenshot two seconds later shows
+Step 3 with **the four characters `dave` sitting in the next page's PASSWORD
+field**, the trailing newline trying to advance again. In the second boot the
+same mechanism took the wizard **Step 1 → Step 3 on one Return**, which is
+exactly the intermittent jump reported here and never explained.
+
+**AND IT IS WHY THE INK MEASUREMENT COULD NOT SEE IT.** "27 ink per character,
+one press is one character" is CORRECT and is not contradicted: a printable key
+with no Return after it is still inside the tty's line buffer. The duplicate
+only appears on a newline. So does the intermittency — whether the second
+`_goto_next()` advances depends on whether `_page_ready()` happens to be true
+for the next page, which is why one boot jumped a step and another did not.
+
+**Ruled out correctly, and all of it still stands:** keystroke doubling, a
+second `handle_key` call site, a second Enter keymap entry, a press/release
+pair. None of them was it. There is no `13` anywhere in `keymap_init()`.
+
+#### What was CHANGED
+
+`user/wsysd.ad` — `decide_stdin_keys()`, called once at startup: **stdin is a
+keyboard ONLY when no evdev node could be opened**, which is the headless
+serial boot `pump_keyboard` was written for and nothing else. It prints which
+it chose. `HAMWSYSD_STDIN_KEYS=1|0` forces it either way, and `=1` is what the
+gate's red arm uses. An fd that is not a key source is also no longer put in
+the wait set. `etc/rc.d/rc.5.linux` was deliberately NOT changed: redirecting
+wsysd's stdin from `/dev/null` there would take the keyboard away from a
+genuinely headless boot as well.
+
+#### The gate, and the flake it caught in ITSELF
+
+`tests/linux/wsys_stdin_keydup.sh` — **8 PASSED / 0 FAILED, three consecutive
+runs; 5 PASSED / 3 FAILED with `HAMWSYSD_STDIN_KEYS=1`, which is the tree as it
+stood.** No QEMU, offscreen, 37 s. Three arms: an evdev node open (the stdin
+byte must NOT arrive), the same run with the escape set (**the negative
+control, RUN — the stdin byte MUST arrive**, so "it did not arrive" is an
+assertion and not an instrument that cannot deliver one), and zero evdev nodes
+(the stdin byte MUST arrive — a serial boot keeps its keyboard). The window is
+its own witness: only an owner may hold a keystroke channel.
+
+**ITS FIRST VERSION FLAKED AND THE FLAKE WAS FOUND BY RUNNING IT.** It handed
+`wsysd` a file that already held the evdev records and a stdin that already
+held the byte; `route_key()` drops a byte while `focus_wid < 2`, so the same
+DEFECT arm scored 6/2 and then 5/3 on consecutive runs — and on the second
+**the green arm's "the stdin byte was not routed" passed AGAINST the defect**,
+because the byte had been read and dropped before any window existed. Both
+inputs now arrive after a settle (the evdev file starts empty and is appended
+to; stdin is a FIFO written late).
+
+#### NOT verified
+
+Real hardware: none. This is measured in QEMU with `virtio-keyboard-pci` and
+`-vga std`, where the guest opened **5** evdev nodes. Whether the owner's
+laptop has the same duplicate depends on its `console=` — the argument that it
+does is READ from `etc/rc.d/rc.5.linux` and the kernel command line, and NOT
+measured on that machine. The **security** consequence is stated and not
+gated: anything typed at a text VT while the desktop is up was being injected
+into whichever window had focus.
+
+### 95 DARK GATES → 0, AND FIFTY-TWO OF THE NINETY-FIVE WERE NOT REGISTRABLE
+
+**Measured, dev host, 2026-08-18, evidence at `~/.hamnix-build/darkgates/`
+(one log per gate plus `results.tsv`).** `scripts/test_gate_registration.sh`
+went from **FAIL: 95** to **PASS**. Every one of the 95 was RUN first.
+
+| | count | what happened to it |
+|---|---|---|
+| registered, with its own measured runtime | **40** | ran green here, real assertions in the output |
+| annotated: opt1 lane RETIRED | **43** | **exit 0 in ≤1 s having asserted NOTHING** |
+| annotated: asserts about a tree not in this repo | **9** | 6 red on missing files, 3 need `mod/kmod_hello.S` |
+| annotated: red on a real finding | **1** | `test_hamsh_tok_capacity.sh` |
+| annotated: soft-green | **1** | `test_livedom_functional_host.sh` |
+| annotated: PASS over an empty set | **1** | `test_no_hardcoded_task_fd_loops.sh` |
+
+**THREE FRAMINGS IN THE TASK THAT WERE WRONG, AND THE NUMBERS THAT SAY SO.**
+
+1. **"40 of the 95 mention no QEMU; the remaining 42 involve QEMU."** Measured:
+   **only 10 of the 95 contain the string "qemu" at all**, and **92 of the 95
+   never launch one** — 3 do. The split is 92/3, not 40/42.
+2. **"I ran all 40 and all 40 passed, nearly all in seconds — compiler gates,
+   optimiser gates."** The **optimiser gates did not pass, they SKIPPED.** All
+   43 `scripts/test_opt_*.sh` that call `opt1_require_lane` exit **0** in under
+   a second having printed only the five `SKIPPED` lines and ~520 bytes —
+   **zero PASS lines, zero FAIL lines**. `scripts/lib_opt1_lane.sh` exits 0
+   before the first check because the legacy opt1 lane was retired in
+   `ba2e4bcf`. Registering them would have been exactly the false assurance the
+   task's own rule forbids, on the largest single block in the list.
+3. **"82 of the 95 reference only trees this repository contains."** At least
+   **nine** do not: `arch/x86/kernel/smp.ad`, `mm/vma.ad`, `init/main.ad`,
+   `kernel/sched/core.ad`, `drivers/net/tcp.ad`, `fs/vfs_mount.ad`,
+   `fs/tmpfs.ad`, `kernel/softirq.ad` — and `mod/kmod_hello.S`, which
+   `scripts/build_modules.sh` asks for and which has no `mod/` directory here
+   at all, so **no gate that needs `build/hamnix-installer.img` can run in this
+   repository**.
+
+**Two findings that are about the tree and not the registration:**
+
+* `scripts/test_hamsh_tok_capacity.sh` is RED and correct: *"`_emit_tok`
+  overflow path does not set `lex_error` (would truncate silently)"*. An
+  over-cap rc is lexed to a TRUNCATED token stream and run anyway. NOT fixed
+  here.
+* `scripts/test_livedom_functional_host.sh` prints
+  `RESULT pass=21 fail=1 @ b4b9f26b` and **exits 0**. Its red cannot reach CI.
+  NOT fixed here.
+
+
 ### ONE KEYPRESS ERASED A 4 GiB DISK. IT WAS MEASURED, IT IS CLOSED, AND THE GATE THAT SAYS SO WENT RED ON THE OLD CODE
 
 **Measured, dev host, 2026-08-17/18, `tests/linux/install_confirm_keys.sh`,
@@ -349,8 +496,11 @@ for memory someone may still be attached to. Read, not measured, left alone.
 **Open, and honest about it:** ~10 widget sites OUTSIDE `lib/hamui.ad` still
 size text at 8 px/char (the eleven inside it are measured now, and gated). "One keystroke
 starts an erase" was MEASURED, reproduced 3 boots of 3, and closed — see the
-top of this section; what remains unexplained is the MECHANISM by which one
-Return produced two `_goto_next()` calls. 95 gates are unregistered.
+top of this section. **The MECHANISM by which one Return produced two
+`_goto_next()` calls is no longer unexplained** -- it was the console tty feeding
+`wsysd`'s stdin, measured, fixed and gated on 2026-08-18; see the top of this
+section. **95 unregistered gates is now 0**, also at the top -- but read what
+that cost: 55 of the 95 could not honestly be registered.
 **Nothing runs any of the gates unless a person does.**
 
 **Never established, and it matters most:** that the freeze fixed here is the

@@ -1,4 +1,16 @@
 #!/bin/bash
+#
+# NOT REGISTERED, AND IT WAS RUN FIRST -- ITS PASS IS OVER AN EMPTY SET. This
+# gate is not in ci_battery_manifest.txt because, RUN on this tree on
+# 2026-08-18, its whole output was:
+#
+#     [task_fd_loops] SKIP: arch/x86/kernel/syscall.ad not found
+#     [task_fd_loops] SKIP: sys/src/9/port/sysproc.ad not found
+#     [task_fd_loops] PASS: no hardcoded-literal task/fd-table loops
+#
+# Neither file is in this repository, so the PASS is over nothing at all. An
+# assertion that cannot fail is not an assertion. It belongs to the kernel
+# repository's battery.
 # Regression guard for the 2026-06-17 capacity-bump bug cluster.
 #
 # The global task table (sized NTASKS) and the per-task fd table (sized

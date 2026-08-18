@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+#
+# NOT REGISTERED, AND IT WAS RUN FIRST. This gate is not in
+# ci_battery_manifest.txt because it asserts about mm/vma.ad, which
+# THIS REPOSITORY DOES NOT CONTAIN -- hamnix-linux is the Plan 9-shaped
+# userland on a stock Linux kernel, and the native Hamnix kernel tree lives
+# elsewhere. RUN here on 2026-08-18 it exits 2 and every failure line it
+# prints is a `No such file or directory` from its own grep. Registering it
+# would put a permanently red gate in the battery, and its red would say
+# nothing about this tree. It belongs to the kernel repository's battery.
 # scripts/test_mm_free_cow_zap_invariant.sh
 #
 # Regression guard for the ET_DYN/COW <-> buddy-pool aliasing #PF.
