@@ -13,6 +13,53 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### INSTRUMENTS THAT HAVE LIED HERE, AND THE FORM THAT WORKS
+
+Every one of these was found the hard way, and every one failed toward
+"looks fine" or toward a confident wrong number. Read this before writing a
+check.
+
+**`pgrep -f` has now given a wrong answer EIGHT times.** It matches the
+searcher's own command line. Written as `until ! pgrep -f '<name>'; do sleep 10;
+done`, the loop contains `<name>`, so it matches itself and its siblings and
+**can never exit** — five such loops span ~59 minutes past the work they were
+watching. The same bug made `pgrep -c -f qemu-system` return **2 with no QEMU
+running at all**: both hits were bash wrappers carrying the string.
+**Use `ps -eo pid,cmd | grep '[q]emu-system'`** — the bracket keeps the grep out
+of its own result.
+
+**`ps -e` SILENTLY OVERRIDES `--ppid`.** `ps -eo pid,cmd --ppid 2374` scans the
+WHOLE process table while looking exactly like a listing of one process's
+children. A cleanup sweep ran against every process on the box believing it was
+looking at four.
+
+**`EXIT=$?` after a pipe is the LAST command's status.** Reading a gate's exit
+code through `| tail` reports `tail`'s success. I misread a gate as exit 0 this
+way.
+
+**`ps pcpu` is a LIFETIME average**, not a current reading — a process that
+spun for a minute and then idled for an hour looks idle.
+
+**`debugfs`, `dumpe2fs` and `sfdisk` live in `/sbin`, NOT on `$PATH`.**
+"command not found" was read as "no partition table". `dumpe2fs` prints
+`ITABLE_ZEROED`, not "Inode not init". `zcat` does not read `.xz`.
+
+**`ls /dev/wsys` prints the path and no entries** in this tree; `cat /dev/wsys`
+is what lists the windows. A census used `ls`, read 0 every time, and printed a
+confident false verdict that survived only because a second renderer disagreed.
+
+**hamsh EXITS 0 ON A PARSE ERROR**, and parses a whole script before running any
+of it. A script that never ran looks exactly like one that ran clean — one bad
+token made two entire boots measure nothing while looking clean.
+
+**Backticks are shell-expanded inside double quotes** — in commit messages and
+in gate failure strings alike. This has bitten the orchestrator and two agents;
+one gate printed "enter: command not found" while trying to report a failure.
+Heredoc with a QUOTED delimiter.
+
+**The rule underneath all of them:** an empty or zero result is not a finding
+until the instrument has been shown able to produce a non-empty one.
+
 ### "NOTHING MEASURES LAYOUT IN PIXELS" IS WRONG, AND I HAVE BEEN REPEATING IT
 
 I have used that sentence as the standing reason not to touch the ~20 widget
