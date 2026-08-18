@@ -15,6 +15,151 @@ then this file for where it stands, then `README.md`.
 
 ### READ THIS FIRST — the state, in order
 
+### THE OVER-CAP rc GATE WAS RED ABOUT A BUG THAT WAS FIXED SEVEN WEEKS AGO — AND THE SOFT-GREEN GATE'S fail=1 IS A REAL ENGINE GAP
+
+**Measured, dev host, 2026-08-18, evidence at
+`~/.hamnix-build/tok-livedom-rerun-20260818/` (`tokgate3.log`,
+`overcap-measure.log`, `livedom-clean.log`, `livedom-fixed.log`,
+`run41.tsv` + one log per gate under `run41/`, `ick-run.log`,
+`wiz-run.log`).**
+
+#### 1. `scripts/test_hamsh_tok_capacity.sh` was a FALSE RED, and the claim it made was wrong
+
+The previous handoff and the manifest both said: *"`_emit_tok` overflow path
+does not set `lex_error` — an over-cap rc is lexed to a TRUNCATED token stream
+and run anyway."* **That is not true of this tree and has not been true since
+`87da5762`.** The gate's third check awk-hunted for the literal text
+`lex_error = 1` inside `def _emit_tok`; the fix routes through the
+`_lex_fail(LEXERR_TOKMAX, _lex_line_no)` helper, so the string it looked for
+has not existed since the day the bug was closed. It was red about its own
+grep.
+
+**MEASURED with a compiled host hamsh, on the tree as it stood, before
+anything was changed.** A 603-line script (~6600 lexer tokens against
+`TOK_MAX=4096`, ~12 KiB so the token cap is the only cap in play), run through
+the real `hamsh <file>` path — the same `_run_rc_path` that sources
+`/etc/rc.boot`:
+
+```
+hamsh: .../over.hs:373: lexical error: too many tokens for one input (token limit exceeded)
+hamsh: .../over.hs: NOT RUN -- a script whose text cannot be lexed is not executed at all
+EXIT=1        marks left behind: NONE -- not even the FIRST statement's
+```
+
+and the **positive control**, the same script at 103 lines, ran to its last
+statement (both marks written) and exited 0. So: loud, names the file and the
+line, says NOT RUN in words, runs nothing at all, and **exits non-zero** —
+which matters because `hamsh` exits 0 on a *parse* error, and once exited 0 on
+a lexical one too.
+
+**What the gate is now.** PART 3 is a RUN, not a grep: it compiles hamsh,
+drives the over-cap script and the under-cap positive control, and asserts the
+report, the file:line, the NOT RUN, the zero marks and the non-zero status.
+PART 4 is the **negative control, RUN**: it compiles a SECOND hamsh from a copy
+of `user/hamsh.ad` with exactly the `_lex_fail(LEXERR_TOKMAX` line deleted —
+the historical defect and nothing else — and requires the defect back. It
+reproduces: **the first statement's mark appears, the last one's does not, and
+it says nothing at all about the overflow.** **18 PASSED / 0 FAILED, 2m19s**,
+registered. (Two of the eighteen are source RATCHETS and are labelled as such
+in the output — the runlevel wiring in item 2 below has no host seam.)
+
+#### 2. A REAL gap the gate's false red was hiding: a runlevel rc that fails to lex was reported as SOURCED
+
+`source` (the builtin) returns 1 for it. `_run_rc_path` returns 3 and `main`
+exits non-zero (or, at PID 1, drops to a rescue shell and says so). But
+**`_svc_source_path` — the path `/etc/rc.d/rc.0`, `rc.3`, `rc.5` and `rc.6` go
+through — cleared `lex_fatal` and `return 0` on every path.** A runlevel rc
+with a runaway quote or over `TOK_MAX` was reported to `svc_enter_runlevel` as
+sourced; the runlevel then proceeded to its built-in action and the machine
+came up looking entirely ordinary with **none** of the operator's script run —
+for `rc.5` that is the whole graphical stack, for `rc.0`/`rc.6` the
+flush-before-halt hook. It now returns **-2** for "read whole, did not run",
+and `svc_enter_runlevel` prints a five-line `[init] RUNLEVEL N: ITS rc DID NOT
+RUN` block naming the file. **NOT measured in a guest** — the change compiles
+for both `x86_64-linux` and `x86_64-adder-user`, and the runlevel path is not
+reachable from the host build.
+
+#### 3. FOUND WHILE MEASURING, NOT FIXED: hamsh's REPL BUSY-SPINS AT 100% CPU ON STDIN EOF
+
+When `hamsh <script>` finishes a script that does not call `exit`, it falls
+into the interactive REPL. With stdin already at EOF (`< /dev/null`) it does
+**not** leave — it spins at **99.9% of one core**, measured at **12 minutes 42
+seconds** before it was killed by PID. It is why the tok gate's negative
+control exits 124 rather than 0. Worth noting that `user/hamsh.ad`'s own
+comments already record one idle-CPU hang in this area (the >4096-token line
+that pegged a core under an endless re-parse); this is a different one, and it
+is open.
+
+#### 4. `scripts/test_livedom_functional_host.sh` — the exit status is fixed, and the `fail=1` has a name
+
+Measured first, unchanged, clean tree: **`RESULT pass=21 fail=1 @ 755f6e19`,
+EXIT 0**. The failing fixture is `06_class_style_toggle` and its entire diff is
+one attribute:
+
+```
+chromium:   2 E div [class=open data-state=open id=box style=display: block; color: red;]
+hambrowse:  2 E div [class=open data-state=open id=box]
+```
+
+**The `style` attribute is ABSENT, not misformatted.** `el.style.display =
+'block'` takes the CSSOM store and mirrors into the content attribute nowhere,
+so `el.attributes` and `getAttribute('style')` never see it — the ninth
+instance of this lane's one-state-two-writers shape. **This corrects a claim in
+`tests/fixtures/livedom/BASELINE`**, which said 06 "diverges on the style=
+attribute alone ... closing it also needs CSSOM serialisation to match chromium
+(declaration order and 'prop: value;' spacing)". The serialisation obstacle is
+real but strictly *downstream*: there is nothing to serialise while the mirror
+does not exist. A reader of the old note would go hunting for a spacing bug and
+not find one. The correction is written into BASELINE and the measurement into
+the new `tests/fixtures/livedom/KNOWNFAIL`.
+
+**The exit status now follows the result, and 06 is DECLARED, not silenced.**
+The gate is a ratchet, so the thing that must hold is not `fail == 0` but
+"every fixture's outcome is the one the tree declares". It exits 1 on: a
+BASELINE fixture failing; a fixture failing that is in **neither** file; a
+KNOWNFAIL fixture that starts **passing**; an unbanked pass; and **zero
+fixtures measured**. The no-chromium path exits **125 (INCONCLUSIVE)** instead
+of 0. Re-measured after the change: **VERDICT: PASS, 21 banked, 1
+declared-failing, 22 measured.** Registered.
+
+#### 5. THE OTHER 40 REGISTERED GATES: CHECKED, AND NONE HAS THE SAME SHAPE
+
+The task that produced this section said livedom "was registered this cycle
+among the 40". **It was not** — `scripts/ci_battery_manifest.txt` named it
+explicitly as one of the gates deliberately left out *because* of the
+soft-green. It is registered now, with the exit status fixed first.
+
+All 41 lines added to the manifest in `30bb3d29` (40 `scripts/test_*.sh` plus
+`tests/linux/wsys_stdin_keydup.sh`) were **run**, exit status recorded beside
+output: **41 run, 41 exit 0, ZERO printed FAIL lines** (`run41.tsv`). Every
+failure path in all 41 was then **read**: each routes to `exit 1`, either
+through a `fail()` helper that exits, a counter tested before a non-zero exit,
+or a `set -euo pipefail` script whose last command is the assertion binary.
+**Zero instances of the livedom shape.**
+
+**What that does NOT establish, said plainly:** none of the 41 was
+mutation-tested. "Currently prints no failure" is not "would report a failure
+if one occurred"; the only gate here proven able to fail is
+`test_hamsh_tok_capacity.sh`, whose negative control was run. A latent
+soft-green in a gate that happens to be green today would not appear in these
+numbers.
+
+#### 6. THE KEYBOARD FIX'S TWO GATES, RE-RUN
+
+`user/wsysd.ad`'s `decide_stdin_keys()` landed without either wizard gate being
+re-run against it. Both were run here, on the fix:
+
+| gate | result |
+|------|--------|
+| `tests/linux/install_confirm_keys.sh` | **34 PASSED / 0 FAILED**, exit 0 |
+| `tests/linux/install_wizard_gui.sh`   | **34 PASSED / 0 FAILED**, exit 0 |
+
+Both match the figures recorded before the change; 34 `PASS` lines counted in
+each log independently of the summary line, and zero `FAIL` lines in either.
+**No regression from the stdin-keys change on the path that changed.** Not
+verified: real hardware — both are QEMU, as before.
+
+
 ### THE SECOND RETURN CAME OFF THE SERIAL CONSOLE, AND IT WAS NEVER A SECOND KEYSTROKE
 
 **Measured, QEMU guest on the dev host, 2026-08-18, evidence at
@@ -126,8 +271,8 @@ went from **FAIL: 95** to **PASS**. Every one of the 95 was RUN first.
 | registered, with its own measured runtime | **40** | ran green here, real assertions in the output |
 | annotated: opt1 lane RETIRED | **43** | **exit 0 in ≤1 s having asserted NOTHING** |
 | annotated: asserts about a tree not in this repo | **9** | 6 red on missing files, 3 need `mod/kmod_hello.S` |
-| annotated: red on a real finding | **1** | `test_hamsh_tok_capacity.sh` |
-| annotated: soft-green | **1** | `test_livedom_functional_host.sh` |
+| annotated: red on a real finding | **1** | `test_hamsh_tok_capacity.sh` — **wrong, see top: the red was in the GATE, not the tree; registered 2026-08-18** |
+| annotated: soft-green | **1** | `test_livedom_functional_host.sh` — **closed and registered 2026-08-18** |
 | annotated: PASS over an empty set | **1** | `test_no_hardcoded_task_fd_loops.sh` |
 
 **THREE FRAMINGS IN THE TASK THAT WERE WRONG, AND THE NUMBERS THAT SAY SO.**
@@ -153,13 +298,17 @@ went from **FAIL: 95** to **PASS**. Every one of the 95 was RUN first.
 
 **Two findings that are about the tree and not the registration:**
 
-* `scripts/test_hamsh_tok_capacity.sh` is RED and correct: *"`_emit_tok`
-  overflow path does not set `lex_error` (would truncate silently)"*. An
-  over-cap rc is lexed to a TRUNCATED token stream and run anyway. NOT fixed
-  here.
+* `scripts/test_hamsh_tok_capacity.sh` is RED. **SUPERSEDED 2026-08-18 — it
+  was a FALSE red and this bullet's claim is WRONG.** The overflow path DOES
+  raise a lexical error (through `_lex_fail(LEXERR_TOKMAX, ...)`, since
+  `87da5762`); the gate was awk-hunting for a literal `lex_error = 1` that the
+  fix never wrote. An over-cap rc is NOT run — measured. See the section at the
+  top of this file.
 * `scripts/test_livedom_functional_host.sh` prints
   `RESULT pass=21 fail=1 @ b4b9f26b` and **exits 0**. Its red cannot reach CI.
-  NOT fixed here.
+  **FIXED 2026-08-18** — the exit status follows the result, and the `fail=1`
+  is `06_class_style_toggle`: `el.style.*` never mirrors into the `style`
+  content attribute. See the section at the top of this file.
 
 
 ### ONE KEYPRESS ERASED A 4 GiB DISK. IT WAS MEASURED, IT IS CLOSED, AND THE GATE THAT SAYS SO WENT RED ON THE OLD CODE

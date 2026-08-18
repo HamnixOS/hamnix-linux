@@ -14739,21 +14739,37 @@ def _svc_source_path(path: Ptr[char]) -> int32:
     # Read `path` WHOLE and run it as hamsh statements in THIS process.
     # Returns 0 if sourced, -1 if the file was absent or could not be held
     # entire — a runlevel script that half-fits is not run at all, and says
-    # so, because half a runlevel is not a runlevel.
+    # so, because half a runlevel is not a runlevel — and -2 if the file WAS
+    # read whole and then FAILED TO LEX, in which case none of it ran either.
+    #
+    # THE -2 IS NOT DECORATION. This function used to clear lex_fatal and
+    # `return 0` on every path, so a runlevel rc with a runaway quote or more
+    # than TOK_MAX tokens was reported to svc_enter_runlevel as SOURCED. The
+    # runlevel then continued to its built-in action and the machine came up
+    # looking fine, having run NONE of the operator's rc — which for rc.5 is
+    # the whole graphical stack and for rc.0/rc.6 is the flush-before-halt
+    # hook. `source` (the builtin) and _run_rc_path (the boot rc) had both
+    # been taught to say so; this path, the one the RUNLEVELS use, had not.
     buf: Ptr[uint8] = _script_load(path, 1)
     if cast[uint64](buf) == 0:
         if sl_err == 2:
+            # buf is NULL here — nothing was staged, so nothing to release.
             _script_too_big(path, sl_len)
+            return -2
         return -1
     total: uint64 = sl_len
+    fatal: int32 = 0
     if total > 0:
         prev_name: Ptr[uint8] = lex_src_name
         lex_src_name = cast[Ptr[uint8]](path)
         lex_fatal = 0
         run_source(buf, total)
+        fatal = lex_fatal
         lex_fatal = 0
         lex_src_name = prev_name
     _script_release(buf, 1)
+    if fatal != 0:
+        return -2
     return 0
 
 
@@ -14848,7 +14864,22 @@ def svc_enter_runlevel(level: int32):
     #    FIRST so a runlevel 0/6 hook (flush, sync, notify) fires before
     #    the irreversible poweroff/reboot below.
     _svc_rl_path_build(level)
-    _svc_source_path(cast[Ptr[char]](&svc_rl_path[0]))
+    rlrc: int32 = _svc_source_path(cast[Ptr[char]](&svc_rl_path[0]))
+    # A runlevel rc that was READ and then did not run is the silent-truncation
+    # shape in the most dangerous place there is: the machine still enters the
+    # runlevel, the built-in action below still fires, and the console shows a
+    # perfectly ordinary boot with the operator's whole rc missing. Name it.
+    # (rlrc == -1 is the ordinary "there is no rc.<N>", which is not an error.)
+    if rlrc == -2:
+        write_cstr1("[init] RUNLEVEL ")
+        write_cstr1(render_int(cast[int64](level)))
+        write_cstr1(": ITS rc DID NOT RUN. ")
+        write_cstr1(cast[Ptr[uint8]](&svc_rl_path[0]))
+        write_cstr1("\n")
+        write_cstr1("[init]   could not be lexed or could not be read whole, so NONE of it\n")
+        write_cstr1("[init]   took effect -- not the first line of it. The line is named above.\n")
+        write_cstr1("[init]   This runlevel is proceeding to its BUILT-IN action WITHOUT the\n")
+        write_cstr1("[init]   operator's script. Do not read the rest of this boot as normal.\n")
     # 2. Built-in action for the level.
     if level == 0:
         svc_runlevel_halt()

@@ -1,0 +1,48 @@
+# tests/fixtures/livedom/KNOWNFAIL — fixtures whose live DOM is KNOWN to
+# diverge from `chromium --headless`, each with the reason beside it.
+#
+# THIS IS A DECLARATION, NOT AN AMNESTY, AND IT IS NOT A SILENCER.
+# scripts/test_livedom_functional_host.sh prints every name here, LOUDLY, on
+# every green run, together with the count. What the file buys is that the set
+# cannot GROW without someone writing down why: a fixture that fails and is in
+# neither this file nor BASELINE fails the gate outright. And a name here that
+# starts PASSING also fails the gate, so a fix cannot land unrecorded — move it
+# to BASELINE in the same commit.
+#
+# Format: one fixture name per line, no extension. Reasons go in comments
+# immediately above the name.
+
+# 06_class_style_toggle
+# ---------------------
+# MEASURED 2026-08-18 on 755f6e19, clean tree, chromium 147.0.7727.137
+# (evidence: ~/.hamnix-build/tok-livedom-rerun-20260818/livedom-clean.log).
+# The whole diff is ONE line, and it is ONE attribute:
+#
+#     chromium:   2 E div [class=open data-state=open id=box style=display: block; color: red;]
+#     hambrowse:  2 E div [class=open data-state=open id=box]
+#
+# THE style ATTRIBUTE IS ABSENT, NOT MISFORMATTED. The fixture sets
+# `box.style.display = 'block'` and `box.style.color = 'red'`; the CSSOM
+# property store takes the write and NOTHING mirrors it into the `style`
+# content attribute, so el.attributes / getAttribute('style') never see it.
+# This is the SAME two-writers-one-reader shape as D1, D2b, D3, D4, D6 and the
+# handler-attribute gap — the ninth instance in this lane — and NOT what
+# BASELINE's note claimed. That note said 06 "diverges on the style= attribute
+# alone ... closing it also needs CSSOM serialisation to match chromium
+# (declaration order and 'prop: value;' spacing, plus colour normalisation)".
+# The serialisation half is a real second obstacle and it is still true, but it
+# is DOWNSTREAM: there is no serialisation to argue about while the mirror does
+# not exist at all. Anyone picking this up should expect to write the mirror
+# first and only then discover whether the spacing matches.
+#
+# WHY IT IS NOT CLOSED HERE: mirroring the CSSOM store into the content
+# attribute changes what `style=` reads back for every element on every page,
+# and scripts/test_hambrowse_style_host.sh banks an expectation over that same
+# store. That is a second gate to re-measure, not a line to add, and it was out
+# of scope for the commit that made this gate's exit status honest.
+#
+# The consequence on a real site, stated plainly: any page that sets an inline
+# style from script and then READS it back through getAttribute('style') — the
+# ordinary "is this element already shown" check, and what a framework's
+# reconciler diffs against — gets nothing back, forever.
+06_class_style_toggle
