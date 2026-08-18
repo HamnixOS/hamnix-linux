@@ -286,6 +286,32 @@ owner and has **the identical zombie blindness**, so a stale segment whose owner
 is a corpse still counts as live. It fails toward *keep the segment*, which is
 the safe direction there, and **I read that and did not measure it.**
 
+### THE REMAINING LAYOUT SITES ARE FORWARD-ONLY — now measured, not read
+
+The ~20 label-centring sites left outside `lib/hamui.ad`, `lib/hamslidescore.ad`
+and `lib/hamsheetcore.ad` were recorded as "forward-only, all safe" with the
+caveat **read, not measured**. Measured on 2026-08-17:
+
+* **19 forward sites** remain — a text length multiplied by 8 — across the games
+  and apps.
+* **Zero live inverses.** Searching for the dangerous shape (a click or x
+  coordinate divided by 8) across `user/` and `lib/`, outside the three fixed
+  files, returns exactly one hit: `lib/htermsel.ad:230`. And that line is
+  **inside a comment**, quoting the code as it used to be, in the block that
+  explains why it was replaced — the terminal-selection fix from the owner's
+  "the marker is too far to the right" report. It is a tombstone, not a site.
+
+So the danger that justified leaving them — fixing a forward site without its
+inverse makes clicking worse, which this tree has already done once — **does not
+apply to any of them.** They are safe to fix; what they still need is a driver
+and a gate each, which is the same reason as before but a much smaller one.
+
+**The limits of this measurement, stated because a search is an instrument:** it
+looks for one syntactic shape (`(… x …) / 8`). An inverse written as a
+multiply-and-compare, a table lookup, or a division by a variable that happens to
+hold 8 would not match. What is established is that **the obvious form is
+absent**, not that no inverse can exist.
+
 ### THE "95 DARK GATES" ARE NOT AN INHERITED MESS — 40 of 40 SAMPLED PASS
 
 I have been repeating "95 pre-existing unregistered gates keep the registration
