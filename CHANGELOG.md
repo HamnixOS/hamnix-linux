@@ -14,8 +14,25 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing here changes the running system. Two things about how this project
-CHECKS itself changed, and both produced a number that was not what we had
+### A desktop with nothing running on it could tell you to reboot
+
+If the program that owns the screen's shared memory had died badly — leaving a
+dead entry rather than a clean exit — the next desktop start **refused**, saying
+a window-system session was already live. There wasn't one. The check asked the
+system "may I signal this process?", and the answer is *yes* for a process that
+has exited but not yet been cleared away. A corpse answered for the living.
+
+Measured, not reasoned about: a session whose only owner was in that state was
+refused with "it is a LIVE window-system session". Both controls were run — a
+genuinely running owner is still refused, as it must be, and a session with no
+owner attaches normally.
+
+This is the same wrong question fixed elsewhere a day earlier, in the part that
+reclaims windows from programs that have quit. This was the last place in that
+file still asking it.
+
+**Everything else below is about how this project checks itself** — no change to
+the running system — and both items produced a number that was not what we had
 written down.
 
 **The release driver is in the tree** as `scripts/release_gates.sh`. The script
