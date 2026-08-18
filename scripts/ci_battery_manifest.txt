@@ -428,6 +428,23 @@ bash tests/linux/snarf_device.sh
 # window must SURVIVE, so the green arm is attributable to the /proc test and
 # nothing else. Host-only (no QEMU), no compositor, no framebuffer; 7 s.
 bash tests/linux/wsys_zombie_owner.sh
+# A CORPSE MUST NOT HOLD A WHOLE SEGMENT HOSTAGE. shm_seg_is_live() was the
+# LAST kill(pid, 0) liveness test in user/linux-wsys.c. It runs at ATTACH,
+# before the mapping and before anything sweeps the table, and its answer
+# decides whether a binary whose WSYS_VERSION differs from the segment's
+# REFUSES to attach. It failed toward KEEPING, which is the safe direction, so
+# the question was whether it cost anything -- and it was MEASURED before it was
+# changed (2026-08-18): a segment whose ONLY used row was owned by a process in
+# state Z, header forced to version 7 against this binary's 8, was REFUSED with
+# "it is a LIVE window-system session", rc 1. A desktop with nothing running on
+# it told the user to reboot. It is now the /proc state test, failing closed in
+# the same direction. FOUR ARMS, all run: GREEN the corpse-owned segment
+# ATTACHES; RED (HAMWSYS_LIVENESS=kill, the exact old predicate) the identical
+# setup is REFUSED; POSITIVE CONTROL a RUNNING owner is still REFUSED; NEGATIVE
+# CONTROL the same version mismatch with NO used row attaches. Host-only (no
+# QEMU), no compositor, no framebuffer. 8 PASSED / 0 FAILED, ~9 s including
+# building zparent + cat + wsys_hold from scratch (measured 2026-08-18).
+bash tests/linux/wsys_zombie_strand.sh
 # AN INIT MUST wait4 THE CHILDREN IT ADOPTS -- AND MUST NOT EAT THE ONES
 # SOMEBODY IS WAITING FOR. PID 1 here is hamsh and it had no orphan reaper: 86
 # corpses in fifteen minutes. The obvious fix, a blanket waitpid(-1) drain,
@@ -5373,6 +5390,87 @@ bash tests/linux/hamui_caret_advance.sh
 # a second having printed only SKIPPED, because the legacy opt1 optimizer lane
 # they assert against was retired in ba2e4bcf. A gate that cannot fail is not
 # coverage.
+# THE EIGHT GATES THAT COULD NOT FAIL ARE RE-AIMED, NOT RETIRED (2026-08-18)
+# ==========================================================================
+# The 41-of-41 mutation census found 33 red and EIGHT not, and all eight were
+# scripts/test_opt_*.sh: cmpstore, reglower, leamuladd, methodsave,
+# nested_loops, scor_storeelim, copyprop_blockleak, loopcond_cse. The census's
+# diagnosis of WHY was right and its conclusion was too strong, and the
+# difference was measured rather than argued.
+#
+# RIGHT: every one of them names a subject that is dead code. `isel_enable()`
+# and `ir_emit_enable()` have ZERO call sites in this tree and `ra_enable()` is
+# called only in the `--dump-regalloc` ANALYSIS lane, so `try_lea_muladd_tile`,
+# `sel_binop_routable`, `store_to_named`'s peephole, `ra_pool_used` and
+# `opt.ad cp_block`/`cse_stmt_expr_roots` (the last two do not exist at all)
+# cannot be exercised by anything. Breaking them changes nothing.
+#
+# TOO STRONG: "so those gates assert things about a path the compiler never
+# takes". They do not. All eight compile their fixtures through the LIVE
+# `--opt` lane -- ssa_enable() -> ssa_emit_program, the SSA pipeline and its own
+# linear-scan allocator in ssa_emit.ad -- and compare the RESULT against
+# HAND-COMPUTED CONSTANTS or a PYTHON reference. What was dead was the SUBJECT
+# NAMED IN THEIR HEADERS. So they are RE-AIMED: each header now names the lane
+# it really guards, with the measurement that reds it, and each carries a
+# NEGATIVE CONTROL THAT RUNS ON EVERY INVOCATION (tests/fuzz/opt_negctl.py).
+#
+# THE DECIDING EVIDENCE, MEASURED 2026-08-18, logs under
+# ~/.hamnix-build/gate8-20260818/logs/. Each gate was run clean, a real defect
+# was introduced on the lane it now names, and it was run again:
+#   cmpstore            ssa_emit.ad SVO_ICMP `emit_setcc_al(sv_c[v])` ->
+#                       `emit_setcc_al(0x94)`  ................ RED 5/5, exit 1
+#   reglower            ssa_emit.ad `sra_allocate` forced all-memory (the
+#                       allocator never places a value) ....... RED part E, exit 1
+#   leamuladd           ssa_opt.ad instcombine `x+0 -> x` made `x+0 -> 0`
+#                       ....................................... RED 138 FAILs, exit 1
+#   methodsave          ssa_emit.ad se_emit_callee_saves/epilogue push+pop
+#                       sra_pool[0] instead of sra_pool[p] ..... RED 6/6 SAVE-SET
+#                       VIOLATIONs, exit 1 -- with every VALUE still correct,
+#                       which is what the structural check is for
+#   nested_loops        ADDER_RA_BREAK=2 (two OVERLAPPING live intervals forced
+#                       to share a register, safety revert off) RED 7/8, exit 1
+#   scor_storeelim      the same setcc mutation ................ RED 3/5, exit 1
+#   copyprop_blockleak  ADDER_RA_BREAK=2 ...................... RED 2/4, exit 1
+#   loopcond_cse        the same setcc mutation (--opt returned 0 against
+#                       --no-opt's 13) ......................... RED, exit 1
+#
+# AND THE CONTROLS ARE THEMSELVES LOAD-BEARING, WHICH WAS ALSO MEASURED.
+# Neutering the lever the controls use -- `sra_force_overlap()`'s loop made
+# `while a < 0` so ADDER_RA_BREAK=2 does nothing -- turns SEVEN of them RED with
+# `FAIL(negative-control)`: cmpstore, methodsave, scor_storeelim,
+# copyprop_blockleak, loopcond_cse, leamuladd, nested_loops. Making
+# ADDER_RA_OFF=1 a no-op (`sra_disable = 1` -> `= 0`) turns reglower RED with
+# `FAIL(negative-control)`. So none of the eight can go green while blind, and
+# it no longer takes a census to find that out.
+#
+# NOT VERIFIED, SAID PLAINLY: one mutation per gate, not one per assertion.
+# nested_loops' two PRINT_CASES (sieve/mandel) are pinned to strings READ OFF
+# THIS COMPILER on 2026-08-18 -- a ratchet against later drift, not an
+# independent oracle, and the gate says so on every line it prints. And no gate
+# in this tree reproduces the nested-block copy-leak SHAPE against the SSA
+# copy propagation that replaced opt.ad's cp_block.
+#
+# TWO MORE HAD A BLIND AXIS AND IT IS CLOSED (2026-08-18)
+# ======================================================
+# scripts/test_signed_shift.sh went GREEN when EVERY `>>` in the backend was
+# made logical, because its oracle `arith_ref()` is compiled by the backend
+# under test and degraded with it -- agreement, not correctness. The fixture
+# now also carries `const_table_check()`: 44 comparisons against literal
+# constants computed in PYTHON. MEASURED, both lanes, one at a time:
+# `codegen.ad shr_use_signed` always-false -> RED (`codegen.ad default ok 2`,
+# "UNIFORM: the python-computed CONSTANT TABLE mismatched"), and ssa_emit.ad's
+# `emit_sar_cl_rax()` -> `emit_shr_cl_rax()` -> RED on the `--opt` arm. Exit 1
+# both times; both were green before.
+#
+# scripts/test_param_spill_trunc.sh went GREEN when the >6-argument STACK spill
+# its own header names was forced to a blind 8-byte store: the behavioural check
+# survived because g()'s stack args (64, 72) have clean upper bytes, and the
+# emission check survived because it asserted only the LOAD. It now also pins
+# the SIZED STORE that must follow each stack-arg load -- `89 /r` for a uint32
+# param, `88 /r` for a uint8 one, read off the System V ABI and not off this
+# compiler. MEASURED with the same mutation: RED, both args report `got 4889`
+# (REX.W movq), exit 1.
+#
 # ~0 s, exit 0, 88 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_adder_pin.sh
 # ~0 s, exit 0, 322 bytes of output, no FAIL line (measured 2026-08-18).
@@ -5393,15 +5491,24 @@ bash scripts/test_compiler_unreserved_idents.sh
 bash scripts/test_compiler_walrus.sh
 # ~0 s, exit 0, 469 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_hamsh_rc_token_budget.sh
-# ~0 s, exit 0, 568 bytes of output, no FAIL line (measured 2026-08-18).
+# ~6 s, exit 0, 1012 bytes of output, no FAIL line, NEGATIVE CONTROL RAN
+# (4/5 re-run cases diverged under ADDER_RA_BREAK=2) (measured 2026-08-18).
 bash scripts/test_opt_cmpstore.sh
-# ~0 s, exit 0, 542 bytes of output, no FAIL line (measured 2026-08-18).
+# ~1 s, exit 0, 866 bytes of output, no FAIL line, NEGATIVE CONTROL RAN
+# (measured 2026-08-18).
 bash scripts/test_opt_methodsave.sh
-# ~0 s, exit 0, 769 bytes of output, no FAIL line (measured 2026-08-18).
+# ~20 s, exit 0, 1222 bytes of output, no FAIL line, NEGATIVE CONTROL RAN.
+# The 20 s is the control: ADDER_RA_BREAK=2 makes the first case CRASH and the
+# harness waits out its run timeout. It stops at the first divergence, which is
+# the whole claim (measured 2026-08-18).
 bash scripts/test_opt_nested_loops.sh
-# ~0 s, exit 0, 764 bytes of output, no FAIL line (measured 2026-08-18).
+# ~1 s, exit 0, 1141 bytes of output, no FAIL line + 2 declared XFAIL/KNOWN-BUG
+# lines (the SSA operand-evaluation-order bug), NEGATIVE CONTROL RAN
+# (ADDER_RA_OFF=1 drops pool-register residency 7/5 -> 0/0) (measured
+# 2026-08-18).
 bash scripts/test_opt_reglower.sh
-# ~0 s, exit 0, 426 bytes of output, no FAIL line (measured 2026-08-18).
+# ~1 s, exit 0, 765 bytes of output, no FAIL line, NEGATIVE CONTROL RAN
+# (measured 2026-08-18).
 bash scripts/test_opt_scor_storeelim.sh
 # ~0 s, exit 0, 163 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_package_source_refusal.sh
@@ -5417,13 +5524,17 @@ bash scripts/test_compiler_bool_xor.sh
 bash scripts/test_compiler_not.sh
 # ~1 s, exit 0, 715 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_compiler_signed_pow2_div.sh
-# ~1 s, exit 0, 499 bytes of output, no FAIL line (measured 2026-08-18).
+# ~1 s, exit 0, 831 bytes of output, no FAIL line, NEGATIVE CONTROL RAN
+# (measured 2026-08-18).
 bash scripts/test_opt_copyprop_blockleak.sh
-# ~1 s, exit 0, 179 bytes of output, no FAIL line (measured 2026-08-18).
+# ~1 s, exit 0, 487 bytes of output, no FAIL line, NEGATIVE CONTROL RAN
+# (ADDER_RA_BREAK=2 makes the --opt build return -11 instead of 13)
+# (measured 2026-08-18).
 bash scripts/test_opt_loopcond_cse.sh
 # ~1 s, exit 0, 232 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_ssa_census_fidelity.sh
-# ~6 s, exit 0, 366 bytes of output, no FAIL line (measured 2026-08-18).
+# ~6 s, exit 0, 366 bytes of output, no FAIL line. Now carries the PYTHON
+# CONSTANT TABLE that a uniform shr-for-sar defect trips (measured 2026-08-18).
 bash scripts/test_signed_shift.sh
 # ~6 s, exit 0, 325 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_subword_access.sh
@@ -5433,13 +5544,15 @@ bash scripts/test_desktopentry_host.sh
 bash scripts/test_vk_linux.sh
 # ~12 s, exit 0, 495 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_local_store_trunc.sh
-# ~12 s, exit 0, 481 bytes of output, no FAIL line (measured 2026-08-18).
+# ~12 s, exit 0, 481 bytes of output, no FAIL line. Now pins the SIZED STORE
+# after each >6-argument stack-arg load (measured 2026-08-18).
 bash scripts/test_param_spill_trunc.sh
 # ~20 s, exit 0, 1857 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_de_appmenu_datadriven.sh
 # ~24 s, exit 0, 1122 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_hambrowse_png_interlaced.sh
-# ~24 s, exit 0, 50 bytes of output, no FAIL line (measured 2026-08-18).
+# ~25 s, exit 0, 347 bytes of output, no FAIL line, 1560 cases checked,
+# NEGATIVE CONTROL RAN (measured 2026-08-18).
 bash scripts/test_opt_leamuladd.sh
 # ~53 s, exit 0, 2841 bytes of output, no FAIL line (measured 2026-08-18).
 bash scripts/test_hambrowse_google_host.sh

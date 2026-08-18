@@ -26,6 +26,30 @@
 # then moved to the home) — the exact byte-for-byte-with-the-seed path. Div/mod/
 # shift were already excluded and stay so.
 #
+# RE-AIMED 2026-08-18 — READ THIS BEFORE THE HISTORY ABOVE.
+#   `sel_binop_routable` and `try_sel_assign_name` are DEAD CODE in this tree:
+#   they sit behind `ir_emit_is_enabled()`, and `ir_emit_enable()` has ZERO call
+#   sites (so does `isel_enable()`; `ra_enable()` is called only in the
+#   `--dump-regalloc` ANALYSIS lane). The 2026-08-18 mutation census reverted
+#   `sel_binop_routable` to the pre-fix `ir_op_scratch_ok` — the exact historical
+#   defect named above — and this gate stayed GREEN, because the mutated line is
+#   never executed.
+#
+#   THE GATE IS NOT DEAD, THE SUBJECT IN ITS OLD HEADER WAS. What it actually
+#   exercises is the LIVE `--opt` lane: `ssa_enable()` -> `ssa_emit_program` ->
+#   the SSA linear-scan allocator and SVO_ICMP lowering in ssa_emit.ad. Its
+#   oracle is five HAND-COMPUTED CONSTANTS (1, 3, 2, 5, 10), not anything the
+#   compiler under test produces, so it measures correctness and not agreement.
+#   MEASURED the same day, logs under ~/.hamnix-build/gate8-20260818/logs/:
+#     * ssa_emit.ad `emit_setcc_al(sv_c[v])` -> `emit_setcc_al(0x94)` (every
+#       compare lowered as `sete`, the live-lane analogue of the defect above):
+#       **RED, 5 of 5 cases FAIL, exit 1**.
+#     * ADDER_RA_BREAK=2 (SSA allocator forced to overlap two live intervals,
+#       safety revert off): **RED, 4 of 5 cases FAIL, exit 1**.
+#   The second of those is now a NEGATIVE CONTROL that RUNS on every invocation
+#   (see the end of the python block) — this gate proves it can fail from its
+#   own output rather than waiting for the next census.
+#
 # WHAT THIS PROVES (no QEMU): each compare-into-local shape (1) COMPILES under
 # --opt (no cg_fail), and (2) produces the SAME observable result as WITHOUT
 # --opt and as the hand-computed reference.
@@ -132,10 +156,29 @@ for name, src, expected in CASES:
           f"off_exit={getattr(r_off,'exit',None)} expected={expected} "
           f"kind_on={r_on.kind} kind_off={r_off.kind}")
 
+# ---------------------------------------------------------------------------
+# NEGATIVE CONTROL, RUN ON EVERY INVOCATION. Re-run every case with the SSA
+# allocator's deliberate live-range overlap armed (ADDER_RA_BREAK=2, safety
+# revert OFF) — a real miscompile on the live --opt lane. If NOT ONE case
+# diverges from its expected constant, this gate cannot see a defect where it
+# looks, and its green above means nothing: that is a FAIL.
+# ---------------------------------------------------------------------------
+import opt_negctl as NC
+nc_div = 0
+with NC.ra_break():
+    for name, csrc, expected in CASES:
+        rb = h.run_through_codegen_ad("nc_" + name, csrc, WD, opt=True)
+        if not (rb.kind == "ok" and rb.exit == expected):
+            nc_div += 1
+            break          # one observed miscompile is the whole claim; stop
+fails += NC.report("opt_cmpstore", nc_div, len(CASES))
+
 print("=" * 56)
 if fails == 0:
     print("[opt_cmpstore] PASS — comparison-into-register-home compiles and "
-          "runs correctly under --opt (sel_binop_routable arith-only fix holds)")
+          "runs correctly under --opt (SSA SVO_ICMP lowering + linear-scan "
+          "allocator), against five hand-computed constants, and the "
+          "negative control RAN")
     sys.exit(0)
 else:
     print(f"[opt_cmpstore] FAIL — {fails} compare-store case(s) diverged/aborted "

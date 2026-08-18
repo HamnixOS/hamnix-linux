@@ -28,6 +28,30 @@ import ad_codegen_host as h
 import adder_fuzzer as F
 from pathlib import Path
 
+# RE-AIMED 2026-08-18 — READ THIS BEFORE THE HISTORY ABOVE.
+#   `codegen.ad try_lea_muladd_tile` is DEAD CODE: its only caller is
+#   `gen_expr_ir`, which is never called — `ir_emit_enable()` has zero call sites
+#   in this tree (nor does `isel_enable()`; `ra_enable()` is called only in the
+#   `--dump-regalloc` ANALYSIS lane). The 2026-08-18 census put a `cg_fail` at
+#   `gen_expr_ir`'s first line and this gate stayed GREEN, which is how we know
+#   the tile never fires and reverting it changes nothing.
+#
+#   THE GATE IS NOT DEAD, THE SUBJECT IN ITS OLD HEADER WAS. It is a 1560-case
+#   `x*m ± d` correctness sweep across 6 multipliers, 6 displacements and 20 x
+#   values including INT64_MIN/MAX, run through BOTH the `--opt` (SSA) lane and
+#   the `--opt`-off lane, and every expected value is computed IN PYTHON — an
+#   oracle the compiler under test does not produce. MEASURED the same day, logs
+#   under ~/.hamnix-build/gate8-20260818/logs/:
+#     * ssa_opt.ad instcombine `x + 0 -> x` changed to `x + 0 -> 0`:
+#       **RED, 138 FAIL lines, exit 1, 31 s**.
+#     * ADDER_RA_BREAK=2 on a 5-case sample: **5 of 5 diverged**.
+#   The second is now a NEGATIVE CONTROL that RUNS on every invocation, on a
+#   handful of cases rather than all 1560.
+#
+#   A NOTE ON MUTATION COST, because it cost a wasted hour: a compiler mutation
+#   that breaks SUBTRACTION also breaks this prelude's `print_u64` digit loop, so
+#   every one of the 1560 cases hangs to its 20 s harness timeout. Mutate
+#   something the oracle path does not use, or cap the run.
 WD = Path("build/opt_leamuladd"); WD.mkdir(parents=True, exist_ok=True)
 PRELUDE = F.PRELUDE
 
@@ -118,6 +142,34 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         run_case(srcM, u64(xl * m), f"mulL m={m} x={xl}")
 
 print(f"[leamuladd] checked={checked} fails={fails}")
+
+# ---------------------------------------------------------------------------
+# NEGATIVE CONTROL, RUN ON EVERY INVOCATION (see tests/fuzz/opt_negctl.py).
+# A five-case sample, not all 1560 — one observed miscompile is the whole claim.
+# ---------------------------------------------------------------------------
+import opt_negctl as NC
+NC_CASES = [(3, 7, -123456789), (9, 255, 123456789), (5, 1000000, -(1 << 40)),
+            (2, 0, (1 << 62)), (7, 2147483647, -100)]
+nc_div = 0
+with NC.ra_break():
+    for i, (m, d, x) in enumerate(NC_CASES):
+        s = PRELUDE + f"""
+def f(x: int64) -> int64:
+    a: int64 = x
+    a = a * {m} + {d}
+    return a
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    print_u64(cast[uint64](f({litsrc(x)})))
+    return cast[int32](0)
+"""
+        rb = h.run_through_codegen_ad(f"nc_lma_{i}", s, WD, opt=True)
+        got = u64(int(rb.stdout.strip() or "0")) if rb.kind == "ok" else None
+        if got != u64(x * m + d):
+            nc_div += 1
+            break
+fails += NC.report("leamuladd", nc_div, len(NC_CASES))
+
 sys.exit(1 if fails else 0)
 PY
 rc=$?

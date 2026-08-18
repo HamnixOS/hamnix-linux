@@ -77,7 +77,144 @@ def check() -> uint64:
     return bad
 
 
+
+
+# ---------------------------------------------------------------------------
+# CONSTANT-ORACLE TABLE — added 2026-08-18. THIS IS THE PART THAT SURVIVES A
+# UNIFORM DEFECT.
+#
+# check() above compares the fragile operand forms against arith_ref(), which is
+# COMPILED BY THE SAME BACKEND. That makes it a test of AGREEMENT, not of
+# correctness: the 2026-08-18 mutation census made EVERY `>>` in the backend
+# logical and check() stayed green, because the reference degraded identically.
+# It caught the FORM-SPECIFIC defect (one operand form losing its signedness)
+# and only that.
+#
+# The expected values below were computed in PYTHON — whose `>>` on a negative
+# int is arithmetic by definition and has nothing to do with this compiler — and
+# written in as literal constants. The compiler must MATERIALISE them; it never
+# computes them. A backend that lowers every `>>` as `shr` produces a large
+# positive number for each of these and mismatches every line.
+#
+# Regenerate with:  BASE = -6023456789012345678 ; expected = BASE >> n
+# ---------------------------------------------------------------------------
+def const_table_check() -> uint64:
+    bad: uint64 = cast[uint64](0)
+    base: int64 = cast[int64](0) - cast[int64](6023456789012345678)
+    garr[3] = base
+    zero: int64 = cast[int64](0)
+    # base >> 1
+    if (base >> cast[int64](1)) != (cast[int64](0) - cast[int64](3011728394506172839)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](1)) != (cast[int64](0) - cast[int64](3011728394506172839)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](1)) != (cast[int64](0) - cast[int64](3011728394506172839)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](1)) != (cast[int64](0) - cast[int64](3011728394506172839)):
+        bad = cast[uint64](2)
+    # base >> 2
+    if (base >> cast[int64](2)) != (cast[int64](0) - cast[int64](1505864197253086420)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](2)) != (cast[int64](0) - cast[int64](1505864197253086420)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](2)) != (cast[int64](0) - cast[int64](1505864197253086420)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](2)) != (cast[int64](0) - cast[int64](1505864197253086420)):
+        bad = cast[uint64](2)
+    # base >> 3
+    if (base >> cast[int64](3)) != (cast[int64](0) - cast[int64](752932098626543210)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](3)) != (cast[int64](0) - cast[int64](752932098626543210)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](3)) != (cast[int64](0) - cast[int64](752932098626543210)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](3)) != (cast[int64](0) - cast[int64](752932098626543210)):
+        bad = cast[uint64](2)
+    # base >> 7
+    if (base >> cast[int64](7)) != (cast[int64](0) - cast[int64](47058256164158951)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](7)) != (cast[int64](0) - cast[int64](47058256164158951)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](7)) != (cast[int64](0) - cast[int64](47058256164158951)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](7)) != (cast[int64](0) - cast[int64](47058256164158951)):
+        bad = cast[uint64](2)
+    # base >> 15
+    if (base >> cast[int64](15)) != (cast[int64](0) - cast[int64](183821313141246)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](15)) != (cast[int64](0) - cast[int64](183821313141246)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](15)) != (cast[int64](0) - cast[int64](183821313141246)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](15)) != (cast[int64](0) - cast[int64](183821313141246)):
+        bad = cast[uint64](2)
+    # base >> 31
+    if (base >> cast[int64](31)) != (cast[int64](0) - cast[int64](2804890643)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](31)) != (cast[int64](0) - cast[int64](2804890643)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](31)) != (cast[int64](0) - cast[int64](2804890643)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](31)) != (cast[int64](0) - cast[int64](2804890643)):
+        bad = cast[uint64](2)
+    # base >> 32
+    if (base >> cast[int64](32)) != (cast[int64](0) - cast[int64](1402445322)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](32)) != (cast[int64](0) - cast[int64](1402445322)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](32)) != (cast[int64](0) - cast[int64](1402445322)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](32)) != (cast[int64](0) - cast[int64](1402445322)):
+        bad = cast[uint64](2)
+    # base >> 33
+    if (base >> cast[int64](33)) != (cast[int64](0) - cast[int64](701222661)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](33)) != (cast[int64](0) - cast[int64](701222661)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](33)) != (cast[int64](0) - cast[int64](701222661)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](33)) != (cast[int64](0) - cast[int64](701222661)):
+        bad = cast[uint64](2)
+    # base >> 47
+    if (base >> cast[int64](47)) != (cast[int64](0) - cast[int64](42800)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](47)) != (cast[int64](0) - cast[int64](42800)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](47)) != (cast[int64](0) - cast[int64](42800)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](47)) != (cast[int64](0) - cast[int64](42800)):
+        bad = cast[uint64](2)
+    # base >> 62
+    if (base >> cast[int64](62)) != (cast[int64](0) - cast[int64](2)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](62)) != (cast[int64](0) - cast[int64](2)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](62)) != (cast[int64](0) - cast[int64](2)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](62)) != (cast[int64](0) - cast[int64](2)):
+        bad = cast[uint64](2)
+    # base >> 63
+    if (base >> cast[int64](63)) != (cast[int64](0) - cast[int64](1)):
+        bad = cast[uint64](2)
+    if (garr[3] >> cast[uint64](63)) != (cast[int64](0) - cast[int64](1)):
+        bad = cast[uint64](2)
+    if ((base - zero) >> cast[uint64](63)) != (cast[int64](0) - cast[int64](1)):
+        bad = cast[uint64](2)
+    if shr_param_ucount(base, cast[uint64](63)) != (cast[int64](0) - cast[int64](1)):
+        bad = cast[uint64](2)
+    return bad
+
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
-    # 0 == every signed-operand form sign-extended (fix present);
-    # 1 == some form zero-filled (the bug is back).
-    return cast[int32](check())
+    # 0 == every signed-operand form sign-extended AND every shift equals its
+    #      python-computed constant;
+    # 1 == some FORM zero-filled while the reference degraded with it — the
+    #      AGREEMENT check, check(), which is what caught the historical bug;
+    # 2 == a shift disagreed with the CONSTANT table — the uniform-defect axis
+    #      check() structurally cannot see, because its oracle is compiled by
+    #      the backend under test.
+    r: uint64 = check()
+    if r != cast[uint64](0):
+        return cast[int32](1)
+    return cast[int32](const_table_check())

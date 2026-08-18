@@ -34,6 +34,26 @@
 # yields the SAME exit as --opt OFF AND the known answer. The both-false `or`
 # cases are the miscompile repro (stale register instead of 0).
 #
+# RE-AIMED 2026-08-18 — READ THIS BEFORE THE HISTORY ABOVE.
+#   `store_to_named`'s store-elimination peephole lives inside a `wenc != RA_NONE`
+#   arm, and `cg_reg_for_name` returns RA_NONE unless `ra_enable()` was called —
+#   which happens in exactly one place in this tree, the `--dump-regalloc`
+#   ANALYSIS lane, never under `--opt`. The 2026-08-18 census put a `cg_fail` on
+#   the ra-off branch and this gate went **RED 0/1**, proving the peephole named
+#   above is never reached. Reverting the fix therefore changes nothing, which is
+#   why the census recorded this gate as staying green.
+#
+#   THE GATE IS NOT DEAD, THE SUBJECT IN ITS OLD HEADER WAS. `--opt` routes
+#   through `ssa_enable()` -> `ssa_emit_program`, and these five programs still
+#   exercise short-circuit `or`/`and` value lowering end to end there against
+#   FIVE HAND-WRITTEN CONSTANTS (0,1,1,1,0) — an oracle the compiler under test
+#   does not produce. MEASURED the same day, logs under
+#   ~/.hamnix-build/gate8-20260818/logs/:
+#     * ssa_emit.ad SVO_ICMP `emit_setcc_al(sv_c[v])` -> `emit_setcc_al(0x94)`:
+#       **RED, 3 of 5 cases, exit 1**.
+#     * ADDER_RA_BREAK=2: **RED, 1 of 5 cases (and_both_true), exit 1**.
+#   The second is now a NEGATIVE CONTROL that RUNS on every invocation.
+#
 # HOST-ONLY: python3 + the tests/fuzz ad_codegen_host harness. NO QEMU.
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -116,8 +136,23 @@ for name, src, exp in CASES:
     if not ok:
         fails += 1
 
+# ---------------------------------------------------------------------------
+# NEGATIVE CONTROL, RUN ON EVERY INVOCATION (see tests/fuzz/opt_negctl.py).
+# ---------------------------------------------------------------------------
+import opt_negctl as NC
+nc_div = 0
+with NC.ra_break():
+    for name, src, exp in CASES:
+        rb = h.run_through_codegen_ad("nc_" + name, src, WD, opt=True)
+        if not (rb.kind == "ok" and rb.exit == exp):
+            nc_div += 1
+            break          # one observed miscompile is the whole claim; stop
+fails += NC.report("scor_storeelim", nc_div, len(CASES))
+
 if fails:
-    print(f"[scor_storeelim] FAIL: {fails} case(s) — short-circuit-or store-elim clobber is back")
+    print(f"[scor_storeelim] FAIL: {fails} problem(s) — short-circuit-or/and "
+          "value lowering on the --opt (SSA) lane, or the negative control")
     sys.exit(1)
-print("[scor_storeelim] PASS: all short-circuit-or/and store-elim cases correct")
+print("[scor_storeelim] PASS: all short-circuit-or/and cases match their "
+      "constants under --opt; negative control RAN")
 PY

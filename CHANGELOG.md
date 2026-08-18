@@ -57,6 +57,54 @@ Each green was explained by a probe, not assumed: a deliberate `cg_fail` on the
 `ra_is_enabled()==0` branch turns three of them red, so the lane really is off.
 Nothing was re-armed and no gate was deleted; the condition is written down.
 
+**The eight were RE-AIMED, and the sentence above them is half wrong.** Every
+one of those eight names a dead subject — that part holds, and it was
+re-measured. But "so they assert things about a path the compiler never takes"
+does not: all eight compile their fixtures through the LIVE `--opt` lane (the
+SSA pipeline and its own linear-scan allocator) and compare the RESULT against
+hand-computed constants or a Python reference. What was dead was the SUBJECT
+NAMED IN THEIR HEADERS. So each header now names the lane it really guards,
+with the mutation that reds it, and **each carries a NEGATIVE CONTROL THAT RUNS
+ON EVERY INVOCATION**: the gate re-runs a case with the SSA allocator forced to
+alias two overlapping live intervals (or, for `test_opt_reglower`, with the
+allocator disabled) and FAILS if its own oracle cannot see the difference. A
+gate that stops being able to fail now says so itself instead of waiting for
+the next census. Eight measured reds, one per gate; and neutering the lever the
+controls use turns all eight red with `FAIL(negative-control)`, so the controls
+are load-bearing too.
+
+**Two gates had a blind axis, and both are closed.** `test_signed_shift` stayed
+green when EVERY `>>` in the backend was made logical, because its reference is
+compiled by the backend under test and degraded with it — that measures
+agreement, not correctness. Its fixture now also compares 44 shifts against
+literal constants computed in Python; the same uniform mutation now reds it, in
+both the default and the `--opt` lane, one at a time.
+`test_param_spill_trunc` missed the >6-argument stack spill its own header
+names: the fixture's stack args have clean upper bytes, so a blind 8-byte store
+still summed correctly, and the emission check looked only for the LOAD. It now
+pins the SIZED STORE that must follow — `89 /r` for a uint32 param, `88 /r` for
+a uint8 — read off the System V ABI rather than off this compiler. The same
+mutation now reds it, reporting `got 4889` (a REX.W movq) for both args.
+
+### A dead session could refuse a live one an upgrade
+
+`shm_seg_is_live()` in `user/linux-wsys.c` was the last `kill(pid, 0)` liveness
+test in that file, and `kill(2)` succeeds on a zombie. It runs at ATTACH, before
+the mapping and before anything sweeps the window table, and its answer decides
+whether a program whose window-system version differs from the segment's
+refuses to attach. It failed toward KEEPING the segment, which is the safe
+direction — so the question was whether it cost anything, and that was
+**measured before anything was changed**: a segment whose only window was owned
+by a process in state `Z`, met by a binary one version newer, was REFUSED with
+*"it is a LIVE window-system session"*. A desktop with nothing running on it
+told the person to reboot. It is now the `/proc` state test, still failing
+closed in the same direction (live, or cannot tell, both keep the segment). New
+gate `tests/linux/wsys_zombie_strand.sh`, **8 PASSED / 0 FAILED in about nine
+seconds**, with its RED arm run (`HAMWSYS_LIVENESS=kill` restores the exact old
+predicate and the refusal comes back), a positive control (a RUNNING owner is
+still protected) and a negative control (the same version mismatch with no
+window attaches fine).
+
 ## 1.0.29 — 2026-08-18
 
 **PUBLISHED and verified as served.** The live index reports 1.0.29 across all

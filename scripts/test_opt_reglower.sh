@@ -35,6 +35,34 @@
 #      a call mid-expression (a non-call-free tree) is correctly handled (the
 #      caller-saved gate refuses it and falls back) — bit-exact.
 #
+# RE-AIMED 2026-08-18 — READ THIS BEFORE THE HISTORY ABOVE.
+#   The register lowering this gate was written against lives behind
+#   `ir_emit_is_enabled()` / `ra_is_enabled()`, and neither is ever armed on the
+#   emission path: `ir_emit_enable()` and `isel_enable()` have ZERO call sites in
+#   the tree and `ra_enable()` is called only in the `--dump-regalloc` ANALYSIS
+#   lane. The 2026-08-18 census put a `cg_fail` on the ir-emit-off branch and
+#   this gate went **RED 0/3**, proving the branch is taken.
+#
+#   THIS ONE WAS THE STUBBORN MEMBER OF THE EIGHT, AND THE MEASUREMENTS ARE
+#   RECORDED RATHER THAN ROUNDED. Logs under
+#   ~/.hamnix-build/gate8-20260818/logs/. THREE separate real defects on the live
+#   `--opt` (SSA) lane left it GREEN:
+#     * ADDER_RA_BREAK=2 (allocator forced to alias two overlapping live
+#       intervals, safety revert off) — green;
+#     * ADDER_RA_OFF=1 (allocator disabled entirely) — green, and it still
+#       printed "stack round-trips reduced under --opt";
+#     * ssa_emit.ad `se_binop_direct`'s non-commutative SUB path emitting
+#       `rb - ra` instead of `ra - rb` — green.
+#   The value oracle IS independent (ref_reglower() in python) and the shapes are
+#   real, but the deep tree's arithmetic happens not to depend on any of the
+#   three, and the push/pop comparison in B is satisfied by the SSA lane whether
+#   or not one value wins a register.
+#
+#   SO A NEW PART E WAS ADDED — a pool-register residency A/B with the allocator
+#   armed and disabled — and it is the part that can fail: with ADDER_RA_OFF=1
+#   the armed counts (7 pool reg-reg ALU ops, 5 pool pushes) both fall to 0 and
+#   part E goes RED. See its own comment block for the numbers.
+#
 # HOST-ONLY: python3 + as/ld + objdump, x86_64. NO QEMU. The cached dump driver
 # auto-invalidates on .ad change (#479) — no manual rm -rf needed.
 set -uo pipefail
@@ -165,6 +193,76 @@ else:
         print(f"WARN(disasm) reglower push/pop check skipped: {ex}")
 
 # ---------------------------------------------------------------------------
+# E. REGISTER-RESIDENCY A/B — added 2026-08-18, and it is the assertion that
+# makes this gate load-bearing at all.
+#
+# THE HOLE IT CLOSES, measured: the push+pop comparison in B is NOT about
+# register allocation. With ADDER_RA_OFF=1 (the SSA allocator forced to the
+# all-memory lowering) the same program emits FEWER push/pop than with the
+# allocator armed — 42 against 52, both far below the 102 of the --opt-off
+# build — so `pp_on < pp_off` holds whether or not a single value won a
+# register. B therefore could not tell "the allocator ran" from "it did not".
+#
+# THIS check reads the actual encoding: a reg-reg ALU op whose BOTH operands are
+# callee-saved pool registers (rbx/r12..r15) can only be emitted by
+# ssa_emit.ad's se_binop_direct on values the linear scan gave pool registers,
+# and a `push` of a pool register can only come from se_emit_callee_saves. It
+# then re-compiles the SAME program with the allocator disabled and requires
+# BOTH counts to fall to zero. That second half is the NEGATIVE CONTROL: it
+# proves the first half is discriminating rather than trivially true.
+# Baseline measured 2026-08-18: armed 7 pool reg-reg ALU ops / 5 pool pushes;
+# disabled 0 / 0; --opt off 0 / 0. Values identical in all three.
+# ---------------------------------------------------------------------------
+import opt_negctl as NC
+POOL = r"(?:rbx|r12|r13|r14|r15)"
+POOL_ALU = re.compile(r"\b(?:add|sub|imul|and|or|xor)\s+" + POOL + "," + POOL + r"\b")
+PUSH_POOL = re.compile(r"\bpush\s+" + POOL + r"\b")
+try:
+    dis_armed = disasm_code(WD / "ad_reglower.elf")
+    alu_armed = len(POOL_ALU.findall(dis_armed))
+    push_armed = len(PUSH_POOL.findall(dis_armed))
+    with NC.ra_off():
+        r_ab = h.run_through_codegen_ad("reglower_raoff", REGLOWER, WD,
+                                        opt=True, keep=True)
+    if r_ab.kind != "ok":
+        print(f"FAIL(residency) reglower: --opt with {NC.RA_OFF_WHAT} did not "
+              f"compile/run: {r_ab.kind} {r_ab.detail}")
+        fails += 1
+    else:
+        dis_ab = disasm_code(WD / "ad_reglower_raoff.elf")
+        alu_ab = len(POOL_ALU.findall(dis_ab))
+        push_ab = len(PUSH_POOL.findall(dis_ab))
+        got_ab = u64(int(r_ab.stdout.strip() or "0"))
+        print(f"[reglower] pool-register residency: ARMED alu={alu_armed} "
+              f"push={push_armed} | ADDER_RA_OFF=1 alu={alu_ab} push={push_ab}")
+        if alu_armed < 1 or push_armed < 1:
+            print(f"FAIL(residency) reglower: --opt emitted {alu_armed} "
+                  f"pool-register reg-reg ALU op(s) and {push_armed} pool "
+                  f"push(es); the SSA linear-scan allocator did not place a "
+                  f"single value in a callee-saved register, so nothing below "
+                  f"this line is testing register lowering")
+            fails += 1
+        elif alu_ab != 0 or push_ab != 0:
+            print(f"FAIL(negative-control) reglower: with {NC.RA_OFF_WHAT} the "
+                  f"build STILL shows alu={alu_ab} push={push_ab} pool-register "
+                  f"uses, so the residency count above does not distinguish an "
+                  f"armed allocator from a disabled one and cannot fail")
+            fails += 1
+        elif got_ab != ref:
+            print(f"FAIL(residency) reglower: disabling the allocator changed "
+                  f"the VALUE (ref={ref} got={got_ab}); ADDER_RA_OFF is a "
+                  f"disable, not a defect, so the result must not move")
+            fails += 1
+        else:
+            print("[reglower] NEGATIVE CONTROL RAN: disabling the SSA "
+                  "linear-scan allocator drops pool-register residency to 0/0 "
+                  "with the value unchanged — the residency assertion above is "
+                  "load-bearing")
+except Exception as ex:
+    print(f"FAIL(residency) reglower: residency A/B errored: {ex}")
+    fails += 1
+
+# ---------------------------------------------------------------------------
 # D. EVAL-ORDER / CLOBBER soundness. `sc_o(L,lval) OP sc_o(R,rval)`: the seed
 # evaluates the RIGHT operand FIRST. Each call appends its id to g_seq
 # (g_seq = g_seq*10 + id). The register lowering must preserve that order, and a
@@ -233,8 +331,10 @@ else:
 print("=" * 64)
 if fails == 0:
     print("[opt_reglower] PASS — register-to-register binop lowering (incl. "
-          "caller-saved IR scratch) is bit-exact vs seed+reference and reduces "
-          "stack round-trips (see any XFAIL line above for known open bugs)")
+          "caller-saved IR scratch) is bit-exact vs seed+reference, reduces "
+          "stack round-trips, and PUTS VALUES IN POOL REGISTERS with the "
+          "allocator-disabled A/B proving that count discriminating (part E) "
+          "(see any XFAIL line above for known open bugs)")
     sys.exit(0)
 print(f"[opt_reglower] FAIL — {fails} problem(s)")
 sys.exit(1)
