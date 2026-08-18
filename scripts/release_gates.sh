@@ -164,6 +164,7 @@ registry() {
 cat <<'REGISTRY'
 wsys_stdin_keydup|no|0|8||bash tests/linux/wsys_stdin_keydup.sh
 hamsh_eof_exit|no|0|14||bash tests/linux/hamsh_eof_exit.sh
+wsys_zombie_strand|no|0|8||bash tests/linux/wsys_zombie_strand.sh
 test_hamsh_tok_capacity|no|0|18||bash scripts/test_hamsh_tok_capacity.sh
 test_livedom_functional_host|no|1|22|06_class_style_toggle is declared in the gate's own KNOWNFAIL list|bash scripts/test_livedom_functional_host.sh
 channel_bytes_match_image|no|0|3||bash tests/linux/channel_bytes_match_image.sh

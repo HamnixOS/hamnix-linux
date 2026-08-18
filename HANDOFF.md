@@ -254,6 +254,116 @@ every defect in its subject. The eight greens are explained by a measured
 condition in each case, but nothing here re-arms the retired lanes or decides
 whether they should be deleted, re-armed, or the gates retired with them.
 
+#### ANSWERED 2026-08-18: THE EIGHT ARE RE-AIMED, AND HALF THE DIAGNOSIS ABOVE WAS WRONG
+
+**Measured, dev host, 2026-08-18. Every clean/mutant log pair is under
+`~/.hamnix-build/gate8-20260818/logs/`. `git status` is clean; each mutated
+subject was restored from a byte-copy taken before the edit and `cmp`-verified.**
+
+**WHAT HOLDS.** `isel_enable()` and `ir_emit_enable()` have zero call sites and
+`ra_enable()` is called only in the `--dump-regalloc` analysis lane. Every one
+of the eight names a subject that is dead code, and breaking those subjects
+changes nothing. That was re-checked, not taken on trust.
+
+**WHAT DOES NOT HOLD: "so those gates assert things about a path the compiler
+never takes."** They do not. All eight compile their fixtures through the LIVE
+`--opt` lane — `ssa_enable()` -> `ssa_emit_program`, the SSA pipeline plus its
+OWN linear-scan allocator in `ssa_emit.ad` — and compare the RESULT against
+HAND-COMPUTED CONSTANTS or a python reference. What was dead was the SUBJECT
+NAMED IN THEIR HEADERS, not the gate. Retiring them the way the 43
+`opt1_require_lane` siblings were retired would have thrown away eight working
+end-to-end correctness gates for the optimizer that IS armed.
+
+**SO THEY ARE RE-AIMED. Each header now names the live lane, and each carries a
+NEGATIVE CONTROL THAT RUNS ON EVERY INVOCATION** (`tests/fuzz/opt_negctl.py`).
+The levers are compiler-side and need no source edit: `ADDER_RA_BREAK=2` forces
+two values with OVERLAPPING live intervals to share a register and skips the
+safety revert (a real miscompile); `ADDER_RA_OFF=1` disables the allocator.
+
+| gate | the mutation that reds it, on the lane it now names | result |
+|---|---|---|
+| `test_opt_cmpstore` | `ssa_emit.ad` SVO_ICMP `emit_setcc_al(sv_c[v])` -> `emit_setcc_al(0x94)` | **RED 5/5, exit 1** |
+| `test_opt_reglower` | `sra_allocate` forced all-memory (no value wins a register) | **RED, new part E, exit 1** |
+| `test_opt_leamuladd` | `ssa_opt.ad` instcombine `x+0 -> x` made `x+0 -> 0` | **RED, 138 FAIL lines, exit 1** |
+| `test_opt_methodsave` | `se_emit_callee_saves`/epilogue push+pop `sra_pool[0]` not `sra_pool[p]` | **RED 6/6 SAVE-SET VIOLATIONs, exit 1 — every VALUE still correct** |
+| `test_opt_nested_loops` | `ADDER_RA_BREAK=2` — the live-range aliasing it is named after | **RED 7/8, exit 1** |
+| `test_opt_scor_storeelim` | the same setcc mutation | **RED 3/5, exit 1** |
+| `test_opt_copyprop_blockleak` | `ADDER_RA_BREAK=2` | **RED 2/4, exit 1** |
+| `test_opt_loopcond_cse` | the same setcc mutation (`--opt` 0 vs `--no-opt` 13) | **RED, exit 1** |
+
+**AND THE CONTROLS ARE THEMSELVES LOAD-BEARING, MEASURED THE SAME WAY.**
+Neutering `sra_force_overlap()` (its loop made `while a < 0`, so
+`ADDER_RA_BREAK=2` does nothing) turns SEVEN of them RED with
+`FAIL(negative-control)`; making `ADDER_RA_OFF=1` a no-op turns `reglower` RED
+the same way. So none of the eight can be green while blind.
+
+**THE STUBBORN ONE, RECORDED RATHER THAN ROUNDED.** `test_opt_reglower` survived
+THREE real defects on the live lane — `ADDER_RA_BREAK=2`, `ADDER_RA_OFF=1`, and
+`se_binop_direct`'s non-commutative SUB emitting `rb - ra`. Its push/pop
+assertion is the reason: with the allocator DISABLED the same program emits
+FEWER push/pop (42) than with it armed (52), both far under the `--opt`-off 102,
+so `pp_on < pp_off` held either way and could not tell the allocator from
+nothing. A new **part E** counts callee-saved-pool reg-reg ALU ops and pool
+pushes (armed **7 / 5**, disabled **0 / 0**, `--opt` off **0 / 0**, value
+identical in all three) and requires the disabled build to fall to zero.
+
+**ONE CLAIM OF THE CENSUS CORRECTED.** `copyprop_blockleak`'s "its fixture never
+reaches the SSA optimizer" is too strong: the fixtures do go through SSA
+construction, allocation and emission — `ADDER_RA_BREAK=2` reds the gate 2/4.
+What they do not do is give the SSA optimizer PASSES anything to bite on.
+
+**NOT VERIFIED, SAID PLAINLY.** Still one mutation per gate, not one per
+assertion. `nested_loops`' two PRINT_CASES (sieve/mandel) are now pinned to
+strings READ OFF THIS COMPILER — a ratchet, not an independent oracle, and every
+line they print says so. And no gate in this tree reproduces the nested-block
+copy-leak SHAPE against the SSA copy propagation that replaced `opt.ad`'s
+`cp_block`.
+
+#### THE TWO BLIND AXES ARE CLOSED, AND THE UNIFORM MUTATION REDS BOTH
+
+* **`scripts/test_signed_shift.sh`.** Its fixture now carries
+  `const_table_check()`: 44 comparisons of `base >> n` in four operand forms
+  against LITERAL CONSTANTS computed in python. Exit 1 = the old FORM-specific
+  agreement check; exit 2 = the constant table. MEASURED, one lane at a time:
+  `codegen.ad shr_use_signed` forced always-false -> **RED, `default ok 2`**;
+  `ssa_emit.ad emit_sar_cl_rax()` -> `emit_shr_cl_rax()` -> **RED, `opt ok 2`**.
+  Both were GREEN before.
+* **`scripts/test_param_spill_trunc.sh`.** Its emission check now pins the SIZED
+  STORE after each >6-argument stack-arg load — `89 /r` for a uint32 param,
+  `88 /r` for a uint8 — read off the System V ABI, not off this compiler. The
+  same blind-8-byte-store mutation that left it green now turns it **RED, both
+  args reporting `got 4889` (REX.W movq), exit 1**.
+
+#### TASK 3 ANSWERED: A ZOMBIE OWNER **DOES** STRAND A SEGMENT, AND IT IS FIXED
+
+**MEASURED FIRST, on this host, 2026-08-18, before a line was changed.**
+`shm_seg_is_live()` runs at ATTACH, before the mapping and before anything
+sweeps the window table — `win_reap_dead()` runs inside a process that has
+already attached — so the FIRST program to attach after a version bump meets the
+rows exactly as a dead owner left them, `used=1` and all.
+
+A segment whose ONLY used row was owned by a process in state `Z`, header forced
+to version 7 against the binary's 8, was **REFUSED, rc 1**, with *"it is a LIVE
+window-system session ... nothing has been changed"*. Both controls ran: a
+RUNNING owner was refused too (the refusal path works), and the same version
+mismatch with NO used row attached cleanly at rc 0 (the refusal is about the
+owner, not the version). So "fails toward keeping" was costing a real upgrade.
+
+It is now `pid_liveness()`, the /proc state test already used by
+`win_reap_dead()`, still failing closed in the same direction: only a POSITIVE
+reading of death lets a row be ignored. New gate
+**`tests/linux/wsys_zombie_strand.sh` — 8 PASSED / 0 FAILED, ~9 s, no QEMU**,
+registered in `ci_battery_manifest.txt` AND in `scripts/release_gates.sh`
+(`expect_min=8`). Its RED arm is RUN: `HAMWSYS_LIVENESS=kill` restores the exact
+old predicate and the refusal comes back. `tests/linux/wsys_zombie_owner.sh` was
+re-run after the change and is still **9 PASSED / 0 FAILED**.
+
+**A HARNESS BUG THIS FOUND IN ITSELF, worth carrying forward.** The first version
+of the new gate closed the trigger FIFO at the end of setup. `zparent` reads EOF
+as "kill the holder", so the RUNNING-owner control was quietly a second zombie
+arm and passed or failed on a race — it FAILED, and the failure is what exposed
+it. The fd is now held open for the whole arm and closed in `stop_arm`.
+
 #### THE 41 REGISTERED GATES WERE NEVER MUTATION-TESTED. SIX WERE. **ONE DID NOT GO RED.** (SUPERSEDED — the census above is the complete answer)
 
 Each gate was run clean, then the thing it claims to check was broken in the

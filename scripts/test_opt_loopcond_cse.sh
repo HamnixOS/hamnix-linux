@@ -19,6 +19,27 @@
 # TERMINATES (no spin), and both return the SAME correct value (13). A regression
 # re-hoists the loop-variant index and the --opt build hangs -> timeout -> FAIL.
 #
+# RE-AIMED 2026-08-18 — READ THIS BEFORE THE HISTORY ABOVE.
+#   `adder/compiler/opt.ad` AND ITS `cse_stmt_expr_roots` DO NOT EXIST IN THIS
+#   TREE: opt.ad was deleted in ba2e4bcf (2026-07-21) and `--opt` now arms the
+#   SSA pipeline. The specific defect named above cannot be restored, so the
+#   2026-08-18 mutation census could not red this gate through its own subject.
+#
+#   IT IS NOT BLIND, AND THAT WAS MEASURED, NOT ASSUMED. Logs under
+#   ~/.hamnix-build/gate8-20260818/logs/:
+#     * ssa_emit.ad SVO_ICMP `emit_setcc_al(sv_c[v])` -> `emit_setcc_al(0x94)`:
+#       **RED — `--opt` returned 0, `--no-opt` 13, exit 1**.
+#     * ADDER_RA_BREAK=2 (SSA linear-scan allocator forced to overlap two live
+#       intervals, safety revert off): **RED — `--opt` returned -11 (SIGSEGV),
+#       exit 1**.
+#   WHAT IT GUARDS NOW is the property, not the pass: a loop condition's
+#   subexpression must be re-evaluated every iteration on whatever optimizer
+#   `--opt` arms, and the fixture must TERMINATE and return 13. The 13 is a
+#   hand-computed constant, not compiler output. Hoisting a loop-variant index
+#   out of a loop is a bug the SSA LICM pass can make just as easily as opt.ad's
+#   local CSE could, so the fixture keeps its value. The second lever above is
+#   now a NEGATIVE CONTROL that RUNS on every invocation.
+#
 # HOST-ONLY: python3 + as/ld (x86_64), via the fuzz dump-driver + ELF wrapper. NO
 # QEMU.
 set -uo pipefail
@@ -78,6 +99,23 @@ if opt != noopt:
     print(f"[opt_loopcond_cse] FAIL: --opt {opt} != --no-opt {noopt}",
           file=sys.stderr)
     sys.exit(1)
+# ---------------------------------------------------------------------------
+# NEGATIVE CONTROL, RUN ON EVERY INVOCATION (see tests/fuzz/opt_negctl.py).
+# ADDER_RA_BREAK=2 makes the SSA linear-scan allocator emit a real live-range
+# aliasing miscompile; if this fixture STILL returns 13 under it, this gate
+# cannot observe a defect on the lane it tests and its green means nothing.
+# ---------------------------------------------------------------------------
+import opt_negctl as NC
+with NC.ra_break():
+    nc = run(True)
+if nc == 13:
+    NC.report("opt_loopcond_cse", 0, 1)
+    sys.exit(1)
+print(f"[opt_loopcond_cse] NEGATIVE CONTROL RAN: with {NC.RA_BREAK_WHAT} the "
+      f"--opt build returned {nc!r} instead of 13 — this gate CAN see a "
+      f"miscompile on the lane it tests.")
+
 print("[opt_loopcond_cse] PASS — loop-condition subexpression is not hoisted "
-      "out of the loop; --opt terminates and matches --no-opt (13)")
+      "out of the loop; --opt terminates and matches --no-opt (13); negative "
+      "control RAN")
 PY

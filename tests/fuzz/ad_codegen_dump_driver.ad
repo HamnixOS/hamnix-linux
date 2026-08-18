@@ -121,13 +121,27 @@ from compiler.codegen import (
 # pipeline (ssa_enable, below), identical to ADDER_OPT2. opt.ad and its
 # per-pass AST levers no longer exist, so nothing is imported from compiler.opt.
 
-# Phase-5 IR-CONSUMING emit path. ir_emit_enable() is called ONLY under --opt, so
-# codegen emits pure signedness-invariant arithmetic subtrees by walking the IR
-# tree (with on-the-IR const folding) instead of the AST. The driver reports how
-# many subtrees went through the IR emitter (vs the AST fallback) and how many
-# constant subtrees the IR emitter folded, so the fuzzer can assert the IR path
-# actually fires. OFF by default -> codegen output byte-identical to the pre-IR
-# path.
+# Phase-5 IR-CONSUMING emit path.
+#
+# CORRECTED 2026-08-18. This comment used to say "ir_emit_enable() is called
+# ONLY under --opt", and that was FALSE and had been since ba2e4bcf (2026-07-21)
+# retired the legacy opt1 lane. `ir_emit_enable()` HAS NO CALL SITE ANYWHERE IN
+# THIS TREE -- not here, not in compiler/, lib/, user/ or tests/ -- so
+# `ir_emit_is_enabled()` is 0 in every lane and the IR emit path below is dead
+# code. `isel_enable()` (imported above) is in the same state. The names are
+# still imported so the counters can be reported as the zeroes they are, and so
+# that re-arming the lane is one call rather than a re-import.
+#
+# EIGHT REGISTERED GATES DOCUMENTED FIXES INSIDE THIS DEAD PATH, and this line
+# is one of the reasons it took a mutation census to notice. If you arm it, the
+# gates in scripts/test_opt_*.sh that name it (cmpstore, leamuladd, reglower)
+# start testing what their headers say again -- read those headers first, they
+# record what each measures TODAY.
+#
+# When it was live: codegen emitted pure signedness-invariant arithmetic
+# subtrees by walking the IR tree (with on-the-IR const folding) instead of the
+# AST, and the driver reported how many subtrees took the IR emitter vs the AST
+# fallback so the fuzzer could assert the path actually fired.
 from compiler.ir import (
     ir_emit_enable,
     ir_emit_reset_stats,
@@ -188,9 +202,18 @@ from compiler.cfg import (
     CFGV_OK,
 )
 
-# Phase-4 linear-scan register allocator. ra_enable() is called ONLY under --opt
-# (so codegen reads/writes promoted values through callee-saved registers). The
-# --dump-regalloc lane runs the allocator over every function and reports
+# Phase-4 linear-scan register allocator.
+#
+# CORRECTED 2026-08-18. This used to say "ra_enable() is called ONLY under
+# --opt". The truth is the other way round: the ONLY ra_enable() call in this
+# file is in the `--dump-regalloc` ANALYSIS lane below, which emits no code, and
+# `--opt` never calls it. So `ra_is_enabled()` is 0 during emission and every
+# codegen lever gated on it is inert. --opt arms the SSA pipeline instead
+# (ssa_enable, below), which has its OWN linear-scan allocator in
+# compiler/ssa_emit.ad -- a different allocator, with its own ADDER_RA_OFF /
+# ADDER_RA_BREAK levers, and the one the test_opt_* gates now measure.
+#
+# The --dump-regalloc lane runs THIS allocator over every function and reports
 # allocation stats WITHOUT emitting code (pure analysis), like --dump-cfg.
 # Phase-1 SSA optimizer (LLVM-shaped rewrite). Gated behind ADDER_OPT2 / the
 # --dump-ssa lane. NATIVE-ONLY, ANALYSIS-ONLY in Ph1: builds + verifies SSA per

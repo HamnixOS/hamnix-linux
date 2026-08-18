@@ -23,6 +23,24 @@
 #       spills (movb 88, movw 66 89, movl 89, with r8d/r9d REX as needed),
 #       and a >6-param function loads its stack args from +rbp offsets.
 #
+# THE BLIND AXIS, MEASURED AND NOW CLOSED (2026-08-18).
+#   The header above names the >6-argument STACK spill by name, and until today
+#   NEITHER check could see it go wrong. The 2026-08-18 mutation census forced
+#   that spill to a blind 8-byte store and this gate stayed GREEN:
+#     * check (1) stayed green because g()'s stack args are 64 and 72, which
+#       arrive with clean upper bytes, so a blind movq of the caller's 8-byte
+#       slot still sums to 214. That is a property of the INPUTS, not of the
+#       backend, and no value expressible in the fixture changes it — the
+#       caller is the one that truncates.
+#     * check (2) stayed green because it asserted only that the stack arg was
+#       LOADED (`48 8b 45 10`), which a blind store still does.
+#   Check (2) now also pins the SIZED STORE that must follow each load — `89 /r`
+#   for a uint32 arg, `88 /r` for a uint8 one — a constant table read off the
+#   System V ABI and the declared widths rather than off this compiler.
+#   RE-MEASURED with the same mutation: **RED, both stack args report
+#   `got 4889` (REX.W movq, the blind store) against the expected `8945`/`8845`,
+#   exit 1**. Logs under ~/.hamnix-build/gate8-20260818/logs/m_blind_stackarg/.
+#
 # Usage:  bash scripts/test_param_spill_trunc.sh
 
 set -uo pipefail
@@ -112,6 +130,35 @@ hx8 = d8.code.hex()
 # movq +0x10(%rbp),%rax = 488b4510 ; movq +0x18(%rbp),%rax = 488b4518
 if "488b4510" not in hx8: missing.append("stackarg6_load")
 if "488b4518" not in hx8: missing.append("stackarg7_load")
+
+# THE SIZED STORE THAT FOLLOWS EACH STACK-ARG LOAD — added 2026-08-18, and this
+# is the half the header always claimed and the gate never checked.
+#
+# THE BLIND AXIS, MEASURED: the 2026-08-18 mutation census forced the >6-argument
+# STACK spill to a blind 8-byte store and this gate stayed GREEN. Both of its
+# checks survived that. The behavioural check survived because g()'s stack args
+# (64 and 72) arrive with clean upper bytes, so a blind movq of the caller's
+# 8-byte slot happens to produce the right sum — an input property, not a
+# property of the backend. The emission check survived because it only looked
+# for the LOAD, which a blind store still performs.
+#
+# The expected bytes below are a CONSTANT TABLE read off the System V ABI and
+# the declared parameter widths, not off this compiler's output: a uint32 stack
+# arg must be stored back with the 32-bit form `89 /r` (mov DWORD PTR
+# [rbp-disp8],eax) and a uint8 one with the 8-bit form `88 /r` (mov BYTE PTR
+# [rbp-disp8],al). A blind 8-byte spill emits `48 89 /r` (REX.W) for both and
+# mismatches here regardless of what values happen to be passed. The frame
+# displacement byte is deliberately NOT pinned — it moves with the frame layout
+# and is not what this asserts.
+for tag, load, want_store, form in (
+        ("stackarg6", "488b4510", "8945", "movl eax (32-bit, uint32 param)"),
+        ("stackarg7", "488b4518", "8845", "movb al  (8-bit,  uint8 param)")):
+    i = hx8.find(load)
+    if i < 0:
+        continue                      # already reported as a missing load above
+    got = hx8[i + len(load):i + len(load) + 4]
+    if got != want_store:
+        missing.append(f"{tag}_sized_store(want {want_store} {form}, got {got})")
 
 print("OK" if not missing else "MISSING " + ",".join(missing))
 PY

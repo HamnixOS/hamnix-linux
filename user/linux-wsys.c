@@ -1744,6 +1744,39 @@ static int seg_rows_in(off_t size)
     return (int)rows;
 }
 
+/* Defined further down, next to win_reap_dead(), which asks the same question
+ * about the same pids.  Declared here because THIS is the earlier caller and
+ * because it was the LAST kill(2)-only liveness test in this file. */
+static int pid_liveness(pid_t pid);
+static int liveness_kill_only(void);
+
+/* A CORPSE OWNING A ROW USED TO STRAND THE WHOLE SEGMENT, AND IT WAS MEASURED
+ * BEFORE IT WAS CHANGED.
+ * ---------------------------------------------------------------------------
+ * This runs at ATTACH, before the mapping, and its answer decides whether a
+ * binary whose WSYS_VERSION differs from the segment's REFUSES to attach.  It
+ * used to ask `kill(pid, 0) == 0 || errno == EPERM`, which is the same wrong
+ * question win_reap_dead() was fixed for on 2026-08-17: kill(2) SUCCEEDS ON A
+ * ZOMBIE, because a corpse still has a process table entry.
+ *
+ * It fails toward KEEPING the segment, which is the safe direction, so the
+ * question was whether it costs anything.  MEASURED 2026-08-18 on this host
+ * with tests/linux/wsys_zombie_strand.sh, whose three arms are:
+ *   * a segment whose ONLY used row is owned by a process in state Z, header
+ *     forced to version 7 against this binary's 8 -> the attach was REFUSED,
+ *     rc 1, with the "it is a LIVE window-system session" message.  A desktop
+ *     with nothing running on it told the user to reboot;
+ *   * POSITIVE CONTROL: a RUNNING owner is refused too, so the refusal path
+ *     works and the arm above is not measuring a broken harness;
+ *   * NEGATIVE CONTROL: the same version mismatch with NO used row attaches
+ *     cleanly (rc 0), so the refusal is about the owner and not the version.
+ * So it did cost something, and it is now the /proc state test.
+ *
+ * IT STILL FAILS CLOSED, and in the same direction: only a POSITIVE reading of
+ * death (state Z/X/x, or no /proc entry at all) lets a row be ignored.  1 and
+ * -1 -- live, or cannot tell -- both keep the segment.  HAMWSYS_LIVENESS=kill
+ * restores the exact predicate that was here, which is how the gate's red arm
+ * shows this green one is attributable. */
 static int shm_seg_is_live(int fd, off_t size)
 {
     int rows = seg_rows_in(size);
@@ -1754,7 +1787,12 @@ static int shm_seg_is_live(int fd, off_t size)
                  + (off_t)i * (off_t)sizeof(struct wwin);
         if (pread(fd, row, sizeof row, at) != (ssize_t)sizeof row) return 0;
         if (!row[0] || row[2] <= 0) continue;
-        if (kill((pid_t)row[2], 0) == 0 || errno == EPERM) return 1;
+        if (liveness_kill_only()) {
+            errno = 0;
+            if (kill((pid_t)row[2], 0) == 0 || errno == EPERM) return 1;
+        } else if (pid_liveness((pid_t)row[2]) != 0) {
+            return 1;                          /* live, or cannot tell */
+        }
     }
     return 0;
 }

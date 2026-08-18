@@ -17,6 +17,32 @@
 #   2. The three bench-kernel SHAPES (sieve/collatz/mandel reset-and-read,
 #      shrunk to host-fast sizes) check out byte-for-byte under --opt.
 #
+# RE-AIMED 2026-08-18 — READ THIS BEFORE THE HISTORY ABOVE.
+#   "regalloc + opt + IR-emit armed" (point 1) was FALSE. `ra_enable()` is called
+#   only in the `--dump-regalloc` ANALYSIS lane and `ir_emit_enable()` has zero
+#   call sites anywhere in the tree, so the Phase-4 allocator named in the bug
+#   story above is not what `--opt` runs. The 2026-08-18 census proved it by
+#   putting a `cg_fail` on the `ra_is_enabled()==0` branch: this gate went RED
+#   0/9, i.e. the branch IS taken.
+#
+#   WHAT `--opt` ACTUALLY RUNS is `ssa_enable()` -> `ssa_emit_program`, which has
+#   its OWN linear-scan allocator (`ssa_emit.ad sra_allocate`) with its own
+#   live-interval computation — the same defect class, a different file. The
+#   exit-code cases below are pinned to HAND-COMPUTED CONSTANTS, so they measure
+#   correctness rather than on-vs-off agreement. MEASURED the same day (logs
+#   under ~/.hamnix-build/gate8-20260818/logs/): ADDER_RA_BREAK=2 — which forces
+#   two values with OVERLAPPING live intervals to share a register and skips the
+#   safety revert, i.e. EXACTLY the live-range aliasing this gate is named after,
+#   on the allocator that is actually armed — turns it **RED, 7 of 8 cases, exit
+#   1**. That lever is now a NEGATIVE CONTROL that RUNS on every invocation.
+#
+#   NOT FIXED, SAID PLAINLY: the two PRINT_CASES (sieve/mandel) compare --opt
+#   against --opt-off only. Their oracle is the compiler under test, so they
+#   measure AGREEMENT, not correctness, and a uniform defect is invisible to
+#   them. The expected strings are now pinned as constants as well (a ratchet),
+#   but those constants were read off this compiler, so they are weaker evidence
+#   than the CASES constants above and are labelled as such.
+#
 # Complements the hardened differential fuzzer (scripts/fuzz_adder_diff.sh with
 # ADDER_OPT=1), which now GENERATES this nested-loop class; here we pin a handful
 # of minimal shapes to exact known answers so a regression is unambiguous.
@@ -246,21 +272,50 @@ for name, src, expected in CASES:
           f"off_exit={getattr(r_off,'exit',None)} expected={expected} "
           f"kind_on={r_on.kind} kind_off={r_off.kind}")
 
+# RATCHET, not an independent oracle — say so where it is used. These two
+# strings were READ OFF THIS COMPILER on 2026-08-18, so a defect present in both
+# the --opt and the --opt-off lane on the day they were recorded would have been
+# baked in. They still catch any later drift in either lane, which the previous
+# on == off comparison alone did not.
+PRINT_EXPECT = {"sieve_shape": "1212", "mandel_shape": "20693"}
+
 for name, src in PRINT_CASES:
     r_on = h.run_through_codegen_ad(name, src, WD, opt=True)
     r_off = h.run_through_codegen_ad(name, src, WD, opt=False)
+    want = PRINT_EXPECT[name]
     ok = (r_on.kind == "ok" and r_off.kind == "ok"
-          and r_on.stdout == r_off.stdout and r_on.stdout != "")
+          and r_on.stdout == r_off.stdout and r_on.stdout == want)
     status = "OK" if ok else "FAIL"
     if not ok:
         fails += 1
     print(f"[{name}] {status}  on={r_on.stdout!r} off={r_off.stdout!r} "
+          f"pinned={want!r} (ratchet, recorded from this compiler 2026-08-18) "
           f"kind_on={r_on.kind} kind_off={r_off.kind}")
+
+# ---------------------------------------------------------------------------
+# NEGATIVE CONTROL, RUN ON EVERY INVOCATION (see tests/fuzz/opt_negctl.py).
+# ADDER_RA_BREAK=2 is the live-range aliasing defect this gate is named after,
+# on the allocator `--opt` actually arms.
+# ---------------------------------------------------------------------------
+import opt_negctl as NC
+nc_div = 0
+nc_total = 0
+with NC.ra_break():
+    for name, src, expected in CASES:
+        if expected is None and name == "collatz_shape":
+            expected = collatz_ref()
+        nc_total += 1
+        rb = h.run_through_codegen_ad("nc_" + name, src, WD, opt=True)
+        if not (rb.kind == "ok" and rb.exit == expected):
+            nc_div += 1
+            break          # one observed miscompile is the whole claim; stop
+fails += NC.report("opt_nested_loops", nc_div, nc_total)
 
 print("=" * 56)
 if fails == 0:
     print("[opt_nested_loops] PASS — nested reset-and-read loops compile "
-          "correctly under --opt (regalloc live-range fix holds)")
+          "correctly under --opt (SSA linear-scan live ranges); negative "
+          "control RAN")
     sys.exit(0)
 else:
     print(f"[opt_nested_loops] FAIL — {fails} nested-loop case(s) diverged "

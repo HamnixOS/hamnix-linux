@@ -29,6 +29,29 @@
 #      whether a given input happens to surface a wrong value. This is the permanent
 #      invariant lock: any future save-set desync trips it on the affected function.
 #
+# RE-AIMED 2026-08-18 — READ THIS BEFORE THE HISTORY ABOVE.
+#   `regalloc.ad ra_pool_used` and everything else behind `ra_is_enabled()` is
+#   DEAD CODE on the emission path: `ra_enable()` is called in exactly one place
+#   in this tree, the `--dump-regalloc` ANALYSIS lane, never under `--opt`. The
+#   2026-08-18 mutation census put a `cg_fail` on the `ra_is_enabled()==0` branch
+#   and this gate turned RED 0/7, which is how we know the branch is taken and
+#   the lane named above is OFF.
+#
+#   THE GATE IS NOT DEAD, THE SUBJECT IN ITS OLD HEADER WAS. `--opt` routes
+#   through `ssa_enable()` -> `ssa_emit_program`, whose prologue save-set is
+#   emitted by `ssa_emit.ad se_emit_callee_saves()` from `sra_used_mask` — the
+#   SAME invariant, one file over. Check A's oracle is a python function
+#   (`oracle()`), check B's is the SysV ABI itself read off objdump; neither is
+#   produced by the compiler under test. MEASURED the same day, logs under
+#   ~/.hamnix-build/gate8-20260818/logs/:
+#     * ssa_emit.ad `se_emit_callee_saves` / `se_emit_epilogue` push+pop
+#       `sra_pool[0]` instead of `sra_pool[p]` — a save-set desync that keeps the
+#       stack balanced: **RED, check B reports a SAVE-SET VIOLATION on 6 of 6
+#       programs, exit 1 — and every VALUE was still correct**, which is the
+#       whole point of having the structural check.
+#     * ADDER_RA_BREAK=2: **RED, check A, 3 of 6 values wrong, exit 1**.
+#   The second is now a NEGATIVE CONTROL that RUNS on every invocation.
+#
 # HOST-ONLY: python3 + as/ld + objdump, x86_64. NO QEMU.
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -232,10 +255,25 @@ for name, body, ref in PROGRAMS:
             print(f"[{name}]   SAVE-SET VIOLATION: {p}")
     print(f"[{name}] {status}  value={got_on} (ref {ref})  funcs-checked-clean={not probs}")
 
+# ---------------------------------------------------------------------------
+# NEGATIVE CONTROL, RUN ON EVERY INVOCATION (see tests/fuzz/opt_negctl.py).
+# ---------------------------------------------------------------------------
+import opt_negctl as NC
+nc_div = 0
+with NC.ra_break():
+    for name, body, ref in PROGRAMS:
+        rb = h.run_through_codegen_ad("nc_" + name, body, WD, opt=True)
+        got = u64(int(rb.stdout.strip() or "0")) if rb.kind == "ok" else None
+        if got != ref:
+            nc_div += 1
+            break          # one observed miscompile is the whole claim; stop
+fails += NC.report("opt_methodsave", nc_div, len(PROGRAMS))
+
 print("=" * 56)
 if fails == 0:
     print("[opt_methodsave] PASS — callee-saved value survives method call; "
-          "every prologue save-set ⊇ body callee-saved writes")
+          "every prologue save-set ⊇ body callee-saved writes; negative "
+          "control RAN")
     sys.exit(0)
 else:
     print(f"[opt_methodsave] FAIL — {fails} problem(s)")

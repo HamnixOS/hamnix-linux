@@ -20,6 +20,28 @@
 # SIGN-EXTENDING RUNTIME behaviour (NOT merely seed==native — both shared the
 # bug): revert either backend's fix and its exit flips to 1 and this gate fails.
 #
+# THE BLIND AXIS, MEASURED AND NOW CLOSED (2026-08-18).
+#   The paragraph above says this gate "does NOT rely on seed==native ... it
+#   pins the actual sign-extending RUNTIME behaviour". That was HALF TRUE and the
+#   mutation census proved which half. `arith_ref()` is COMPILED BY THE SAME
+#   BACKEND UNDER TEST, so it is a reference only for defects that hit some
+#   operand forms and not others. Making EVERY `>>` in the backend logical left
+#   this gate GREEN: the reference degraded identically and every comparison
+#   still agreed. A test whose oracle shares the defect measures AGREEMENT, not
+#   correctness.
+#
+#   The fixture now also carries `const_table_check()` — 44 comparisons of
+#   `base >> n` (n in {1,2,3,7,15,31,32,33,47,62,63}, in four operand forms)
+#   against LITERAL CONSTANTS computed in PYTHON, whose `>>` on a negative int is
+#   arithmetic by definition and is not this compiler. The backend has to
+#   materialise those constants; it never computes them. A uniform shr-for-sar
+#   defect mismatches every line and the fixture exits 2.
+#   Exit codes: 0 = both checks pass; 1 = the FORM-specific agreement check
+#   failed (the historical bug); 2 = the CONSTANT table failed (the uniform
+#   defect the old gate could not see).
+#   MEASURED 2026-08-18, logs under ~/.hamnix-build/gate8-20260818/logs/ — see
+#   the run recorded in scripts/ci_battery_manifest.txt for the mutation result.
+#
 # Usage:  bash scripts/test_signed_shift.sh
 
 set -uo pipefail
@@ -42,8 +64,12 @@ python3 -m compiler.adder compile --target=x86_64-linux "$FIX" \
     || { cat "$WORK/seed.cerr"; fail "seed failed to compile the fixture"; }
 "$WORK/fixture_seed"; SEED_EXIT=$?
 echo "[signed-shift]   seed exit = $SEED_EXIT (expect 0)"
-[ "$SEED_EXIT" -eq 0 ] \
-    || fail "seed emitted a LOGICAL shr for a signed operand (array/subexpr/param/uint64-count) — negative values zero-filled instead of sign-extending"
+case "$SEED_EXIT" in
+  0) : ;;
+  1) fail "seed emitted a LOGICAL shr for SOME signed-operand form (array/subexpr/param/uint64-count) — negative values zero-filled instead of sign-extending (agreement check, exit 1)" ;;
+  2) fail "seed disagreed with the PYTHON-COMPUTED CONSTANT TABLE — a UNIFORM shr-for-sar defect: every form shifted the same wrong way, so the in-fixture reference agreed with them (exit 2)" ;;
+  *) fail "seed exited $SEED_EXIT, which is neither 0, 1 nor 2 — the fixture did not run to its return" ;;
+esac
 
 echo "[signed-shift] (2/2) codegen.ad must sign-extend too (default AND --opt paths)"
 AD_OUT="$(python3 - "$FIX" <<'PY'
@@ -59,6 +85,12 @@ for opt in (False, True):
     print(f"{tag} {r.kind} {r.exit}")
     if not (r.kind == "ok" and r.exit == 0):
         bad = 1
+        if r.exit == 1:
+            print(f"{tag} FORM-SPECIFIC: some operand form zero-filled while "
+                  f"the in-fixture reference agreed with it")
+        elif r.exit == 2:
+            print(f"{tag} UNIFORM: the python-computed CONSTANT TABLE "
+                  f"mismatched — every `>>` lowered the same wrong way")
 sys.exit(bad)
 PY
 )"; AD_RC=$?

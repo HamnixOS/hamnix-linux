@@ -29,6 +29,30 @@
 # answer. The zero-iteration cases are the miscompile repro: the buggy leak returned
 # the stale nested-block variable instead of the parent's live value.
 #
+# RE-AIMED 2026-08-18 — READ THIS BEFORE THE HISTORY ABOVE.
+#   `opt.ad cp_block` DOES NOT EXIST IN THIS TREE. opt.ad was deleted in ba2e4bcf
+#   (2026-07-21) and `--opt` now arms the SSA pipeline instead, so the defect
+#   this gate is named after cannot be restored and the census correctly found
+#   that reverting things in the old copy-propagator changed nothing.
+#
+#   THE CENSUS ALSO SAID "its fixture never reaches the SSA optimizer", and THAT
+#   IS TOO STRONG — RE-MEASURED 2026-08-18, logs under
+#   ~/.hamnix-build/gate8-20260818/logs/. The fixtures do go through the live
+#   `--opt` lane's SSA construction, linear-scan allocation and emission; what
+#   they evidently do not do is give the SSA *optimizer passes* (instcombine,
+#   DCE) anything to bite on. With ADDER_RA_BREAK=2 — the SSA allocator forced to
+#   give two values with OVERLAPPING live intervals the same register, safety
+#   revert off — this gate goes **RED, 2 of 4 cases (while_tail_copy_zero_iters
+#   and if_tail_copy_skipped), exit 1**. Its four expected values are HAND-
+#   COMPUTED CONSTANTS (100, 7, 55, 42), not compiler output, so it measures
+#   correctness and not agreement. That lever is now a NEGATIVE CONTROL that
+#   RUNS on every invocation.
+#
+#   WHAT IS STILL NOT COVERED, SAID PLAINLY: no gate in this tree reproduces the
+#   nested-block copy-leak SHAPE against the SSA copy propagation that replaced
+#   cp_block. This gate proves the SHAPE still compiles correctly; it does not
+#   prove the replacement pass has the same bug locked out.
+#
 # HOST-ONLY: python3 + the tests/fuzz ad_codegen_host harness. NO QEMU.
 set -uo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -127,9 +151,23 @@ for name, src, expected in CASES:
           f"off_exit={getattr(r_off,'exit',None)} expected={expected} "
           f"opt_kind={r_opt.kind} off_kind={r_off.kind}")
 
+# ---------------------------------------------------------------------------
+# NEGATIVE CONTROL, RUN ON EVERY INVOCATION (see tests/fuzz/opt_negctl.py).
+# ---------------------------------------------------------------------------
+import opt_negctl as NC
+nc_div = 0
+with NC.ra_break():
+    for name, src, expected in CASES:
+        rb = h.run_through_codegen_ad("nc_" + name, src, WD, opt=True)
+        if not (rb.kind == "ok" and rb.exit == expected):
+            nc_div += 1
+            break          # one observed miscompile is the whole claim; stop
+fails += NC.report("opt_copyprop_blockleak", nc_div, len(CASES))
+
 print("=" * 50)
 if fails == 0:
-    print("[opt_copyprop_blockleak] PASS — no nested-block copy leaks into the parent run")
+    print("[opt_copyprop_blockleak] PASS — no nested-block copy leaks into the "
+          "parent run; negative control RAN")
     sys.exit(0)
 print(f"[opt_copyprop_blockleak] FAIL — {fails} case(s) miscompiled (copy leak regression)")
 sys.exit(1)
