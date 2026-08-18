@@ -5483,3 +5483,14 @@ bash scripts/test_hamsh_tok_capacity.sh
 # 147.0.7727.137). Needs chromium; without it the gate exits 125 (INCONCLUSIVE)
 # rather than 0, so a runner with no browser cannot read as a green.
 bash scripts/test_livedom_functional_host.sh
+
+# THE RELEASE DRIVER'S OWN NEGATIVE CONTROL. scripts/release_gates.sh decides
+# whether a release ships; until 2026-08-18 it lived outside the repository as
+# ~/.hamnix-build/rel<NNNN>/gates.sh and scored gates by counting the word
+# "PASS", which recorded "PASS-lines: 0, FAIL-lines: 0" for a gate that really
+# scored 8 / 0. --self-test feeds the driver four synthetic gates -- eight
+# assertions in the lowercase ok/failed dialect, one that asserts nothing, one
+# whose summary contradicts its own FAIL lines, and one that silently lost five
+# assertions -- and fails unless the driver tells all four apart. QEMU-free,
+# ~1 s, 5 PASSED / 0 FAILED (measured 2026-08-18).
+bash scripts/release_gates.sh --self-test
