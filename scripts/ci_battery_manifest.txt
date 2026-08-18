@@ -5463,6 +5463,14 @@ bash scripts/test_hambrowse_reflow.sh
 # the next page's field. Three arms, with the defect reproduced on demand
 # (HAMWSYSD_STDIN_KEYS=1) so the negative is an assertion.
 bash tests/linux/wsys_stdin_keydup.sh
+# ~37 s, no QEMU. hamsh must LEAVE when its stdin is over. Before 2026-08-18
+# the freestanding x86_64-linux sys_read_nb reported read(2)'s EOF 0 as
+# "nothing ready yet", so `hamsh script < /dev/null` fell into the REPL and
+# span at 100% of one core (measured as an INTERVAL, not a `ps pcpu` lifetime
+# average; the longest recorded observation is 12 min 42 s at 99.9%). PART 5
+# is a RUN negative control: a second hamsh built against a runtime with only
+# the EOF mapping deleted must bring the spin back, >= 80% of a core.
+bash tests/linux/hamsh_eof_exit.sh
 
 # --- registered 2026-08-18, both previously annotated-not-registered ---------
 # ~2m19s, exit 0, 18 PASSED / 0 FAILED (measured 2026-08-18). Dominated by two

@@ -460,7 +460,40 @@ sys_munmap:
      * Under ADDER_HOSTED this is in user/linux-syscalls.c instead, because a
      * raw read here would bypass the synthetic-device table -- and hamui
      * polls /dev/wsys/<wid>/{keys,pointer} with EXACTLY this call, so a raw
-     * read would return 0 for ever and no GUI app would see input. */
+     * read would return 0 for ever and no GUI app would see input.
+     *
+     * TRUE END OF INPUT IS -1 HERE, NOT 0, AND THAT IS THE WHOLE POINT OF
+     * THIS SHIM'S CONTRACT.
+     * -------------------------------------------------------------------
+     * read(2) spells "would block" as -EAGAIN and "end of file" as 0. This
+     * call's contract -- stated three lines up, and implemented that way in
+     * user/linux-syscalls.c since the hosted lane was written -- is the other
+     * way round: 0 means "nothing ready YET, poll me again", a negative means
+     * the input is over. Returning read(2)'s 0 verbatim COLLIDED THE TWO
+     * STATES, and every caller that polls read the end of its input as
+     * "nothing yet, try again", for ever.
+     *
+     * MEASURED, this host, on the tree before this change: `hamsh script`
+     * with stdin at EOF (`< /dev/null`) finishes the script, falls into the
+     * interactive REPL, and ed_readline's `if n == 0: ... continue` spins.
+     * A FIVE-SECOND INTERVAL sample of /proc/<pid>/stat utime+stime read 500
+     * ticks -- 100% of one core -- and strace counted ~108,000 read(2) plus
+     * ~108,000 fcntl(2) in three seconds with no sleeping syscall between
+     * them. It never leaves: the previously recorded observation is 12 min
+     * 42 s at 99.9% until killed by pid. (`ps pcpu` is a LIFETIME average
+     * and would understate this; the number above is an interval.)
+     *
+     * sh_park_stdin() does not save it either: this lane's sys_waitfds is a
+     * fail-closed `-1` stub, so the "park" between polls costs nothing and
+     * waits for nothing. That is a second reason the loop is hot, and it is
+     * NOT the defect -- a shell that has correctly learned its input is over
+     * must leave, not park more cheaply.
+     *
+     * So a genuine 0 from read(2) is reported as -1. Callers pass count > 0
+     * (a count of 0 would be indistinguishable, and nothing in this tree asks
+     * for zero bytes), and the hosted lane has answered exactly this since
+     * it was written -- so this makes the two lanes agree rather than
+     * inventing a third behaviour. */
 #ifndef ADDER_HOSTED
     .globl sys_read_nb
     .type sys_read_nb, @function
@@ -478,8 +511,13 @@ sys_read_nb:
     movq    $SYS_read, %rax
     syscall
     cmpq    $-11, %rax             /* -EAGAIN -> report 0 (no data yet) */
-    jne     .L_read_nb_done
+    jne     .L_read_nb_noteagain
     xorq    %rax, %rax
+    ret
+.L_read_nb_noteagain:
+    testq   %rax, %rax             /* read(2) 0 == TRUE EOF -> report -1 */
+    jne     .L_read_nb_done
+    movq    $-1, %rax
 .L_read_nb_done:
     ret
     .size sys_read_nb, .-sys_read_nb
