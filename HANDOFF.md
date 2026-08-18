@@ -37,6 +37,57 @@ built at commit `c7b805f7`. Every commit after it in this branch changes only
 `CHANGELOG.md` and this file, neither of which is staged into an image — so the
 bytes above are a function of `c7b805f7` and nothing later.
 
+#### THE RELEASE DRIVER WAS BLIND IN TWO WAYS, AND IT IS NOW IN THE TREE
+
+**`scripts/release_gates.sh` replaces `~/.hamnix-build/rel<NNNN>/gates.sh`**, a
+file that was typed fresh each release, lived outside the repository, was
+reviewed by nobody and regressed by nothing. Both of its defects were measured,
+not inferred:
+
+1. **IT COUNTED THE WORD `PASS`.** Its scorer was
+   `grep -cE '(^|[[:space:]])PASS([[:space:]]|:)'`.
+   `tests/linux/wsys_stdin_keydup.sh` says `ok   <text>` per assertion and
+   `8 passed, 0 failed` as its summary — lowercase, no bare `PASS` token. So
+   `rel1029/GATES_SUMMARY.txt` records, verbatim, **`PASS-lines: 0,
+   FAIL-lines: 0` for a gate that scored 8 / 0.** A gate that asserted eight
+   things and a gate that asserted nothing scored identically.
+2. **`scripts/verify_medium.sh` WAS NOT IN IT.** Zero occurrences in
+   `rel1029/gates.sh`. Its 39 / 0 came from a hand-typed invocation. The one
+   gate that inspects the medium was never run by the driver that gates the
+   medium. `tests/linux/shipped_medium_boots.sh` was likewise outside it.
+
+**WHAT THE NEW DRIVER DOES DIFFERENTLY.** It scores a gate by what it ASSERTED,
+in any of five summary dialects; the exit status is recorded and cross-checked
+but is never the pass criterion. **A gate whose output it cannot parse is
+UNSCORABLE and turns the release red** — never recorded as a zero. A gate that
+scored 0 / 0 asserted nothing and is red. A summary claiming zero failures over
+a body containing FAIL lines is red. Every known failure must be DECLARED in the
+registry with its reason. And each row carries `expect_min`, so a gate that
+silently stops asserting things is red even when nothing it did assert failed.
+
+**THE NEGATIVE CONTROL RUNS**: `bash scripts/release_gates.sh --self-test`
+feeds it four synthetic gates — eight assertions in the `ok` / lowercase dialect
+the old driver scored zero, one that asserts nothing, one whose summary
+contradicts its own FAIL lines, and one that silently lost five assertions —
+and fails unless all four are told apart. **5 PASSED / 0 FAILED**, QEMU-free,
+about a second, and it is registered in `ci_battery_manifest.txt`.
+
+**MEASURED AGAINST THE 1.0.29 ARTIFACT, 2026-08-18** (logs under
+`~/.hamnix-build/relgates-20260818/`): six gates, **131 assertions actually
+scored**, all green — `wsys_stdin_keydup` **8 / 0** (the number the old driver
+could not see), `hamsh_eof_exit` 14 / 0, `test_hamsh_tok_capacity` 18 / 0,
+`test_livedom_functional_host` 21 / 1 with the one failure declared,
+`verify_medium` **38 / 0**, `shipped_medium_boots` **31 / 0** — the shipped
+bytes booted by the driver that gates them, for the first time.
+
+**AND `expect_min` IMMEDIATELY CAUGHT SOMETHING REAL.** `verify_medium.sh`
+scored **39 / 0** for the release and **38 / 0** from a clean worktree: it
+drops its `/bin/hpm on the medium is the channel's hpm` assertion, silently and
+with no FAIL line, when `build/repo/linux/packages` is absent. With
+`expect_min=39` registered the driver now says so in words instead of reading
+38 green as a pass. That is why the registry pins 39: at release time the
+channel exists, and a run without it is not a release run.
+
 #### THE GATES, WITH WHAT EACH ASSERTED
 
 | gate | result | condition |
@@ -132,7 +183,78 @@ would require modifying the image, which is the substitution this gate exists to
 end. That control lives in `tests/linux/wsys_stdin_keydup.sh`'s RED arm, and it
 was mutation-tested this session (below).
 
-#### THE 41 REGISTERED GATES WERE NEVER MUTATION-TESTED. SIX WERE. **ONE DID NOT GO RED.**
+#### THE MUTATION CENSUS IS COMPLETE: 41 of 41. **33 WENT RED. EIGHT DID NOT — AND ALL EIGHT ARE `scripts/test_opt_*.sh`.**
+
+**Measured, dev host, 2026-08-18. Every clean/mutant log pair, every probe and
+the census TSV are under `~/.hamnix-build/relgates-20260818/mut/` and
+`mutation_census_FINAL.tsv`. `git status` is clean; each subject was restored
+from a byte-copy taken before the edit and `cmp`-verified.**
+
+The rule was the same each time: run the gate clean, break the thing the gate
+CLAIMS to check in the SUBJECT (never in the gate), run it again, restore.
+
+**THE COUNT THAT MATTERS: EIGHT DID NOT GO RED.**
+
+| gate | why it stayed green — the condition, measured |
+|---|---|
+| `scripts/test_opt_cmpstore.sh` | `sel_binop_routable` is **never called**. `try_sel_assign_name` IS entered but returns at its first line: `ir_emit_is_enabled()` is 0 |
+| `scripts/test_opt_reglower.sh` | same lane. A `cg_fail` on the `ir_emit_is_enabled()==0` branch turns it **RED 0/3**, so the lane it names is provably OFF |
+| `scripts/test_opt_leamuladd.sh` | `gen_expr_ir` — the tile's only caller — is **never called**: a `cg_fail` at its first line leaves the gate green |
+| `scripts/test_opt_methodsave.sh` | `ra_is_enabled()` is 0. A `cg_fail` on that branch turns it **RED 0/7** |
+| `scripts/test_opt_nested_loops.sh` | same. **RED 0/9** on the ra-off probe |
+| `scripts/test_opt_scor_storeelim.sh` | same. **RED 0/1** on the ra-off probe (the peephole lives inside `wenc != RA_NONE`) |
+| `scripts/test_opt_copyprop_blockleak.sh` | its fixture never reaches the SSA optimizer: **two independent proven-live levers** (instcombine folding `x+y`→`y`; DCE dropping every `SVO_STORE`) both leave it green, and the second turned `test_compiler_call_in_expr` **RED 0/3** |
+| `scripts/test_opt_loopcond_cse.sh` | the subject it names (`opt.ad cse_stmt_expr_roots`) **does not exist in this tree**. It is NOT blind — the instcombine sabotage turns it **RED 0/1** — but the defect it is named after cannot be restored |
+
+**ONE ROOT CAUSE, NAMED.** `isel_enable()` and `ir_emit_enable()` have **zero
+call sites in the entire tree** — only comments mention them, including
+`ad_codegen_dump_driver.ad:124`'s "ir_emit_enable() is called ONLY under --opt",
+which is false. `ra_enable()` is called in exactly one place: the
+`--dump-regalloc` ANALYSIS lane, never in the code-emitting `--opt` path, whose
+whole body is now `ssa_enable()` ("opt1 RETIRED: --opt routes through the SSA
+pipeline"). So the Phase-4 linear-scan allocator, the Phase-5 IR-emit path and
+the instruction selector are dead code in every lane, and eight registered gates
+document fixes inside them. `scripts/ci_battery_manifest.txt` already annotates
+43 OTHER `scripts/test_opt_*.sh` as un-registerable for exactly this reason
+(`ba2e4bcf`); **these eight were registered anyway and are in the same state.**
+
+**AND TWO GATES ARE NOT BLIND BUT CANNOT SEE A UNIFORM REGRESSION.** Both went
+red only on a SECOND, sharper mutation, and the first result is recorded because
+it is a real limit:
+
+* `scripts/test_signed_shift.sh` — making **every** `>>` logical left it
+  **green**: its oracle `arith_ref()` is compiled by the same backend, so the
+  reference degrades identically. A FORM-SPECIFIC defect (a computed
+  sub-expression losing its signedness — the historical bug) turns it **RED**.
+* `scripts/test_param_spill_trunc.sh` — forcing the **>6-argument STACK** spill
+  to a blind 8-byte store left it **green**, though its header names that case
+  by name. Forcing the **register-arg** spill blind turns it **RED**.
+
+Two more needed a stronger mutation for a reason that is about the mutation, not
+the gate: `test_hambrowse_history.sh` (its fixture's forward stack is exactly
+one deep, so `ni+1 == hist_count` and the first edit was a no-op) and
+`test_hambrowse_window.sh` (forcing every blend opaque still cleared its
+500-grey-pixel floor; making `_blend_px` a no-op turns it **RED 8/2**).
+
+**THE OTHER 33 WENT RED FOR THE DEFECT THEY NAME.** A representative sample,
+with the mutation and the score: `test_compiler_atomics` (drop the `lock` prefix
+from `atomic_add64`) 0/1; `test_compiler_sext_widen` (`_emit_cast_widen`
+zero-extends a signed source) 0/12; `test_compiler_match` (arm chain reversed —
+first-match-wins broken) 0/11; `test_compiler_unreserved_idents` (`bytes` and
+`field` put back in the keyword table) exit 1; `test_hambrowse_host`
+(`CELL_PADX` 6→0) 190/22; `test_vk_linux` (the Vulkan `fill_rect` off by one
+row) 1/23; `test_de_appmenu_datadriven` (one shipped `.desktop` pointed at a
+program that is not built) 24/2; `test_hamsh_rc_token_budget` (`TOK_MAX`
+4096→64) 0/4; `test_hambrowse_png_interlaced` (`lib/png.ad` rejects Adam7
+again) 2/6.
+
+**NOT VERIFIED, SAID PLAINLY.** One mutation per gate, not a mutation per
+assertion — a gate that went red proved it can fail for THAT defect, not for
+every defect in its subject. The eight greens are explained by a measured
+condition in each case, but nothing here re-arms the retired lanes or decides
+whether they should be deleted, re-armed, or the gates retired with them.
+
+#### THE 41 REGISTERED GATES WERE NEVER MUTATION-TESTED. SIX WERE. **ONE DID NOT GO RED.** (SUPERSEDED — the census above is the complete answer)
 
 Each gate was run clean, then the thing it claims to check was broken in the
 SUBJECT (never in the gate), then it was run again, then the tree was restored.

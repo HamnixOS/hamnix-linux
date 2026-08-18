@@ -14,8 +14,48 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing yet. Work lands here between releases; if this section is empty, the
-tree and the channel agree.
+Nothing here changes the running system. Two things about how this project
+CHECKS itself changed, and both produced a number that was not what we had
+written down.
+
+**The release driver is in the tree** as `scripts/release_gates.sh`. The script
+that decided whether a release shipped used to be typed fresh each time into
+`~/.hamnix-build/rel<NNNN>/gates.sh` — outside the repository, reviewed by
+nobody, regressed by nothing — and it scored gates by counting the word `PASS`.
+`tests/linux/wsys_stdin_keydup.sh` prints `ok` and summarises `8 passed, 0
+failed`, so the 1.0.29 run recorded **`PASS-lines: 0, FAIL-lines: 0` for a gate
+that scored 8 / 0**: a gate that asserted eight things and one that asserted
+nothing looked the same. The medium gates were not in it at all —
+`scripts/verify_medium.sh` appears zero times, and its 39 / 0 came from a
+hand-typed command. The new driver reports what a gate ASSERTED in any of five
+summary dialects, REFUSES to score output it cannot parse (unscorable is red,
+never zero), reds a 0 / 0, reds a summary that contradicts its own FAIL lines,
+requires every known failure to be declared with a reason, and reds a gate that
+quietly starts asserting FEWER things than it is registered for. Its own
+negative control runs — `bash scripts/release_gates.sh --self-test`, 5 PASSED /
+0 FAILED, QEMU-free, registered in CI. Run against the 1.0.29 artifact it
+scored **131 assertions across six gates**, including the shipped medium being
+booted by the driver that gates it for the first time.
+
+**Measured and refused / found while measuring:** `verify_medium.sh` scores
+39 / 0 for a release and 38 / 0 from a clean worktree — it silently drops its
+`/bin/hpm on the medium is the channel's hpm` assertion, with no FAIL line, when
+no channel has been built. Nothing was reading that difference until now.
+
+**The mutation census of the 41 registered gates is complete: 33 went red, and
+EIGHT DID NOT — every one of them a `scripts/test_opt_*.sh`.** Each gate was run
+clean, the thing it claims to check was broken in the SUBJECT, and it was run
+again. The eight are `test_opt_cmpstore`, `test_opt_reglower`,
+`test_opt_leamuladd`, `test_opt_methodsave`, `test_opt_nested_loops`,
+`test_opt_scor_storeelim`, `test_opt_copyprop_blockleak` and
+`test_opt_loopcond_cse`, and there is one root cause: **`isel_enable()` and
+`ir_emit_enable()` have no call site anywhere in the tree, and `ra_enable()` is
+called only in an analysis lane that emits no code.** The Phase-4 register
+allocator, the Phase-5 IR-emit path and the instruction selector are dead in
+every build, so those eight gates document fixes inside machinery nothing arms.
+Each green was explained by a probe, not assumed: a deliberate `cg_fail` on the
+`ra_is_enabled()==0` branch turns three of them red, so the lane really is off.
+Nothing was re-armed and no gate was deleted; the condition is written down.
 
 ## 1.0.29 — 2026-08-18
 
