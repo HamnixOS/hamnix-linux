@@ -1472,12 +1472,21 @@ $(ldd "$p" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}')"
     # --- THE MARKER THAT MAKES THE INSTALLER VISIBLE AT ALL ---------------
     # WITHOUT THIS FILE THERE IS NO WAY TO START THE INSTALLER FROM THE
     # DESKTOP. etc/hamde/apps/installer.desktop carries X-Hamnix-LiveOnly=true,
-    # and all THREE surfaces that could offer it check for /etc/installer-medium
+    # and all FOUR surfaces that could offer it check for /etc/installer-medium
     # before showing it:
     #
     #   user/hamdesktop.ad     _desk_is_live()  -- the desktop icon
     #   user/hampanelscene.ad  _am_is_live()    -- the panel's fallback menu
     #   user/hamappmenu.ad     _dd_is_live()    -- the Applications menu
+    #   user/hamsoftware.ad    _reg_is_live()   -- the software registry
+    #
+    # (It said THREE until 2026-08-18; hamsoftware.ad is the fourth. And the
+    # sentence written into the file below -- "an installed system (which never
+    # carries it)" -- was FALSE until the same date: user/hlinstall.ad copies
+    # /etc onto the target wholesale, so every installed machine carried this
+    # marker and offered to install over itself. Measured by booting one and
+    # reading its screen; see tests/linux/installed_offers_install.sh and the
+    # removal block in user/hlinstall.ad that makes the sentence true.)
     #
     # That marker is planted by scripts/build_initramfs.py and
     # scripts/build_installer_img.sh -- the HAMNIX-KERNEL installer media --

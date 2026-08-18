@@ -20,6 +20,110 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### AN INSTALLED MACHINE OFFERED TO INSTALL ITSELF, AND HAD NO ACCOUNTS — BOTH BOOTED, BOTH FIXED, BOTH GATED
+
+**Measured, dev host, 2026-08-18. Evidence under `~/.hamnix-build/instoffer/`
+(the fixed run), `~/.hamnix-build/instoffer-red/` (the same gate with the fix
+reverted) and `~/.hamnix-build/mark-probe/` (the filesystem readings).**
+
+**THE HYPOTHESIS WAS RIGHT, AND IT IS NOW AN OBSERVATION.** The previous cycle
+found `/etc/installer-medium` present on an installed disk with a filesystem
+reader and named three probe sites that use it. That was a mechanism, not a
+cause. It is a cause: a machine installed to a blank 6 GiB disk, booted on its
+own **with no medium attached**, OCR'd its own desktop icon column as
+`... Word Processor L Install Ramni` — the same `Install Hamnix` string the
+live medium reads through the identical crop.
+
+**THERE ARE FOUR PROBE SITES, NOT THREE.** `user/hamdesktop.ad`,
+`user/hampanelscene.ad`, `user/hamappmenu.ad` **and `user/hamsoftware.ad`**
+(`_reg_is_live`) all open that path and read "it opened" as "I am running from
+installation media".
+
+**AND A SECOND, WORSE ONE FELL OUT OF THE SAME DISK.**
+`user/hlinstall.ad:append_line` read the file it was appending to into the
+**same global `line_buf` its caller had built the new line in**, and read at
+most **480** bytes of it. On every installed machine `/etc/passwd`,
+`/etc/group` and `/etc/shadow` came out **exactly 962 bytes** — 480 + newline +
+the same 480 + newline — holding the shipped file's comment header twice and
+**no account line at all**: not the wizard's user, not `live` (the uid the DE
+session runs as), not `hostowner`, and no password hash for anybody. Confirmed
+on a fresh install at tip AND on the disk `install_from_usb.sh` left the day
+before. `480 + 1 + 480 + 1 = 962` — the arithmetic is exact, so the mechanism
+and the measurement are the same number.
+
+**THE FIXES.** `hlinstall` now unlinks `/n/target/etc/installer-medium` and
+`/n/target/etc/installer-autorun` after the copy (and warns loudly if either
+survives), and `append_line` uses a private 16 KiB buffer and **refuses**
+rather than truncating.
+
+**THE GATE, AND ITS NUMBERS BESIDE THE CONDITION.**
+`tests/linux/installed_offers_install.sh` — on-demand, one medium build, one
+install boot, two GUI boots.
+
+| condition | result |
+|---|---|
+| the tree with `hlinstall.ad` reverted | **17 PASSED / 7 FAILED** |
+| the tree with the fix | **24 PASSED / 0 FAILED** |
+
+**THE NEGATIVE CONTROL IS A THIRD BOOT AND IT RAN in both**: the live medium,
+same instrument, same crops, reads `Install`. So the silence on the installed
+machine is a machine and not a lens cap. The instrument controls run too — the
+ext4 reader is shown finding a file that is there and one that is not, and the
+account reader is shown that the medium carries `live` and does NOT carry the
+name the wizard was told to create.
+
+**WHAT THE GATE DOES NOT DO, said rather than left to be assumed:** the opened
+Applications menu renders its six CATEGORY rows and not their contents, so the
+menu arm proves a menu opened and reads what is on it — it does not walk into
+`System`, where the launcher sits. The discriminating crop is the desktop icon
+column.
+
+### WHAT RIDES ONTO AN INSTALLED MACHINE THAT NO PACKAGE OWNS — 62 FILES, AND THE GATE THAT SHOULD SEE THEM IS POINTED THE OTHER WAY
+
+**Measured on the installed disk (446 files and symlinks) against every install
+path in all 130 channel tarballs: 384 are carried by some package, 62 by
+none.** By class: `/usr/lib/instroot/**` (15 — sgdisk, mkfs.vfat, mkfs.ext4 and
+their Debian libraries), `/boot/**` (5 — `BOOTX64.EFI` 73 MB, `vmlinuz`,
+`initramfs.cpio.gz`, `UKI.MAP`, `root.partuuid`), `/home/live/**` (20),
+`/lib/x86_64-linux-gnu/**` + `/lib64/ld-linux-x86-64.so.2` (7, the build host's
+glibc), and singles: `/init`, `/bin/audiolife`, `/etc/modules`,
+`/etc/distros`, `/etc/rc.distros`, `/etc/rc.distros-wl`, `/etc/rc.de-ns/*`,
+`/etc/hpm/trusted.pub`, `/etc/hpm/local-trusted.pub`, `/etc/shadow`,
+`/etc/fstab`, `/etc/resolv.conf`, `/lib/modules/*/modules.dep`,
+`/var/lib/hpm/installed.json`.
+
+**`tests/linux/channel_covers_image.sh` ALREADY KNOWS HOW TO NAME MOST OF
+THIS, AND HAS NEVER BEEN POINTED AT THE MEDIUM THAT SHIPS.** Measured, same
+channel, two roots:
+
+| root | result |
+|---|---|
+| the LEAN image root (424 files) | **7 PASSED / 1 FAILED** |
+| the INSTALLER image root (446 files) | **6 PASSED / 22 FAILED** |
+
+The 21 extra failures are exactly the installer overlay — `boot/` (5),
+`etc/installer-medium` (1) and `usr/lib/instroot/` (15) — each reported as
+"ships in the image and is in NO package -- an installed machine can never
+update it". The gate is right; nothing runs it against that root. (The 1
+failure common to both is `/etc/hamnix-release`: the locally built channel says
+`1.0.31` and the dev image says `unstamped`. That is a property of this run,
+not a release defect.)
+
+**AND THE DESKTOP SESSION IS THE LIVE USER'S ON EVERY INSTALLED MACHINE.**
+`etc/rc.de-user.linux` does `setuid 1001` and `HOME='/home/live'`, and
+`hamdesktop`'s directory resolver falls back through /etc/passwd BY UID to
+`/home/live` — so `--user <name>` gets `/home/<name>` created **empty** and
+never a graphical session. That is why `/home/live/**` (including
+`installer.desktop`) rides across and matters. `etc/rc.de-user` IS
+package-owned, so a release CAN fix it; `/home/live` is excluded from
+`channel_covers_image` by name, with a reason written for the live image.
+
+**AND `hpm update` WILL DELETE THE INSTALLER'S USER.** `hpm`'s
+`_is_machine_owned` matches exactly one path — `etc/rc.boot`. `etc/passwd` and
+`etc/group` ARE in `hamnix-init`'s tarball, so an update rewrites them from the
+package. `etc/shadow` is not in any package, so the hashes stay and the names
+they belong to do not. Not fixed here; measured and written down.
+
 **Shipping now: 1.0.29, published and verified as served** — 130 packages,
 signature checked against `etc/hpm/trusted.pub`, three tarballs fetched from the
 site byte-identical to the gated build, 1.0.28 still fetchable. **1.0.30 is

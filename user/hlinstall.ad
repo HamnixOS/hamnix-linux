@@ -68,6 +68,7 @@ extern def sys_pipe(fds: Ptr[int32]) -> int32
 extern def sys_dup2(old: int32, new_: int32) -> int32
 extern def sys_exit(code: uint64)
 extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+extern def sys_unlink(path: Ptr[char]) -> int32
 
 RFPROC:  int32 = 0x001
 RFFDG:   int32 = 0x004
@@ -96,6 +97,13 @@ a3:      Array[128, uint8]
 a4:      Array[128, uint8]
 listbuf: Array[2048, uint8]
 errbuf:  Array[128, uint8]
+# append_line's OWN buffer. It must not be line_buf: every caller builds the
+# line it wants appended in line_buf and passes a pointer into it, so reading
+# the file into line_buf destroys the line before it is written. 16384 is
+# comfortably over the largest file appended to here (etc/passwd, 1484 bytes),
+# and append_line REFUSES rather than truncating if a file ever fills it.
+APPEND_CAP: uint64 = 16384
+append_buf: Array[16384, uint8]
 
 
 def slen(s: Ptr[uint8]) -> uint64:
@@ -506,21 +514,51 @@ def append_line(path: Ptr[char], line: Ptr[uint8]) -> int32:
     # Read what is there, write it back with the line appended. The tree has
     # no O_APPEND open, and a system file is small enough that this is the
     # simplest correct thing.
+    #
+    # IT READ THE FILE INTO ITS CALLER'S BUFFER, AND IT READ 480 BYTES OF IT.
+    # Both halves were wrong and both were measured, on a fresh install at tip
+    # and on the installed disk tests/linux/install_from_usb.sh left the day
+    # before:
+    #
+    #   * every caller builds its new line in the GLOBAL `line_buf` and then
+    #     passes `&line_buf[0]` here. This function then read the existing file
+    #     into that same `line_buf`, destroying the line before writing it --
+    #     so the "appended line" was the file's own first bytes, again.
+    #   * the read stopped at 480 bytes, and etc/passwd is 1484. Everything
+    #     past 480 was thrown away.
+    #
+    # The result on the target was /etc/passwd, /etc/group and /etc/shadow all
+    # EXACTLY 962 bytes -- 480 + newline + the same 480 + newline -- holding
+    # the comment header of the shipped file twice and NO ACCOUNT LINE AT ALL.
+    # Not the account the wizard asked for, not `live` (which the DE session
+    # runs as), not `hostowner`, and no password hash for anyone. The wizard
+    # collects two passwords and the machine it produced stored neither.
+    #
+    # So: a PRIVATE buffer, large enough for the real files, and a REFUSAL
+    # rather than a truncation if one is ever bigger than it.
     fd: int32 = sys_open(path)
     total: uint64 = 0
     if fd >= 0:
-        while total < 480:
-            k: int64 = sys_read(fd, &line_buf[total], 480 - total)
+        while total < APPEND_CAP:
+            k: int64 = sys_read(fd, &append_buf[total], APPEND_CAP - total)
             if k <= 0:
                 break
             total = total + cast[uint64](k)
         sys_close(fd)
+    if total >= APPEND_CAP:
+        # A silent truncation here is the defect above. Say so and change
+        # nothing on disk.
+        puts(2, "hlinstall: ")
+        puts(2, cast[Ptr[uint8]](path))
+        puts(2, " is larger than the installer's append buffer; refusing to "
+                "rewrite it rather than truncating it.\n")
+        return -1
     out: int32 = sys_open_write(path)
     if out < 0:
         return -1
     if total > 0:
-        sys_write(out, &line_buf[0], total)
-        if line_buf[total - 1] != 10:
+        sys_write(out, &append_buf[0], total)
+        if append_buf[total - 1] != 10:
             sys_write(out, cast[Ptr[uint8]]("\n"), 1)
     sys_write(out, line, slen(line))
     sys_write(out, cast[Ptr[uint8]]("\n"), 1)
@@ -852,6 +890,46 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     copy_top(cast[Ptr[uint8]]("root"))
     copy_top(cast[Ptr[uint8]]("home"))
     copy_top(cast[Ptr[uint8]]("boot"))
+
+    # ------------------------------------------------------------------
+    # THE LIVE-MEDIUM MARKERS MUST NOT SURVIVE THE COPY.
+    # ------------------------------------------------------------------
+    # MEASURED, 2026-08-18, off an installed disk with debugfs and then on the
+    # booted machine itself: /etc/installer-medium was PRESENT on every
+    # installed root, because /etc is one of the directories copied wholesale
+    # a few lines above. Its own text said "an installed system (which never
+    # carries it)". It carried it.
+    #
+    # Four programs -- user/hamdesktop.ad, user/hampanelscene.ad,
+    # user/hamappmenu.ad and user/hamsoftware.ad -- open that path and read
+    # "it opened" as "I am running from installation media", and surface the
+    # Install Hamnix launcher when they do. So the machine a person just
+    # installed offered to install itself, on the desktop and in the
+    # Applications menu, and the wizard's erase confirmation guards its LAST
+    # page rather than the offer.
+    #
+    # No package owns the marker (it is in no package's file list), so no
+    # `hpm update` could ever take it off a machine that has one. The removal
+    # has to happen here, at the moment the target root stops being a copy of
+    # a stick and becomes a machine.
+    #
+    # /etc/installer-autorun is removed for the same reason and by the same
+    # argument. It is planted only into unattended media (the keyboard-less
+    # appliance build and the CI install regressions), and it is the marker
+    # that makes a boot install itself without asking. A machine that came
+    # from such a stick must not carry the thing that means "wipe the first
+    # blank disk you see".
+    sys_unlink(cast[Ptr[char]]("/n/target/etc/installer-medium"))
+    sys_unlink(cast[Ptr[char]]("/n/target/etc/installer-autorun"))
+    # SAY SO IF IT IS STILL THERE. An unlink that failed silently would leave
+    # exactly the defect this block exists for, and the installer is the only
+    # program in a position to notice.
+    mfd: int32 = sys_open(cast[Ptr[char]]("/n/target/etc/installer-medium"))
+    if mfd >= 0:
+        sys_close(mfd)
+        puts(2, "hlinstall: WARNING: /etc/installer-medium is STILL on the "
+                "target after the copy. This machine will believe it is "
+                "installation media and will offer to install over itself.\n")
 
     # /init is a file, not a directory, and it is what the kernel executes.
     if copy_file(cast[Ptr[char]]("/init"),
