@@ -14,6 +14,21 @@ because the number is the deliverable.
 
 ## Unreleased
 
+Nothing yet. Work lands here between releases; if this section is empty, the
+tree and the channel agree.
+
+## 1.0.30 — 2026-08-18
+
+**PUBLISHED and verified as served.** The live index reports 1.0.30 across all
+130 packages; its signature verifies against `etc/hpm/trusted.pub`, the trust
+root installed machines already carry, rather than merely against the signing
+key; and `hamnix-desktop`, `hamnix-install` and `hamnix-hamsh` **fetched from the
+site** are byte-identical to the gated build. 1.0.29 stays fetchable; additive.
+
+Gated by a release driver that is now **in the repository** rather than typed
+fresh each time outside it: 279 assertions across fourteen gates, including the
+shipped disk image booted with its checksum asserted before power-on.
+
 ### A desktop with nothing running on it could tell you to reboot
 
 If the program that owns the screen's shared memory had died badly — leaving a
