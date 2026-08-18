@@ -47,11 +47,24 @@ shows what a native boot would.
 ### Why a core lib is required
 
 The Adder compiler links **every transitively-imported module in full** (no
-tree-shaking). `lib/hamui.ad` declares Hamnix-only externs (`sys_mmap`,
-`sys_yield`, `sys_open_write`, …) that the host runtime (`user/linux-runtime.S`,
-which only provides read/write/open/close/lseek/exit) cannot resolve. So the
-host driver must NOT import `lib/hamui.ad`. The app's pure logic therefore
-lives in an **extern-free core** that imports only `lib/hamscene.ad`.
+tree-shaking), so a host driver can only import what the host runtime can
+resolve. The app's pure logic therefore lives in an **extern-free core** that
+imports only `lib/hamscene.ad`, and that stays the right shape for an app:
+the core is what the two drivers share.
+
+**CORRECTION, measured 2026-08-17.** This section used to end "So the host
+driver must NOT import `lib/hamui.ad`", on the grounds that the host runtime
+"only provides read/write/open/close/lseek/exit". That is no longer true.
+`user/linux-runtime.S` exports 50 symbols, including every extern
+`lib/hamui.ad` declares (`sys_mmap`, `sys_yield`, `sys_waitfds`, `sys_read_nb`,
+…), and **`lib/hamui.ad` compiles and links clean for `x86_64-linux`** —
+verified by `user/hamui_advance_host.ad`, which imports it, runs the real
+layout and paint passes on the host and rasterizes the result. The Hamnix-only
+calls inside it (`/dev/wsys` opens, `hamscene_commit`) simply FAIL at runtime
+off-device and are reported on stderr; nothing crashes and the scene buffer is
+built either way. Importing the toolkit is now the shortest path to testing
+the TOOLKIT itself; the core split remains the right pattern for testing an
+APP.
 
 ## Recipe: make an app `foo` dual-target
 

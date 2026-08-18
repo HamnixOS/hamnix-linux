@@ -124,7 +124,8 @@ from lib.hamscene import hamscene_begin, hamscene_fill, hamscene_rect, \
 # the SAME per-glyph advances the compositor lays out with -- and this file
 # simply never called it. It does now, and it keeps no advance of its own:
 # there is ONE place in the tree that knows how wide a glyph is.
-from lib.hamtextbox import htb_caret_x, htb_hit_test
+from lib.hamtextbox import htb_caret_x, htb_hit_test, htb_text_width, \
+    htb_font_ready
 
 
 # ====================================================================
@@ -485,6 +486,84 @@ def _h_text_len(id: int32) -> uint64:
     while w_text[base + n] != 0:
         n = n + 1
     return n
+
+
+# ====================================================================
+# WIDGET TEXT WIDTH IS A MEASUREMENT, NOT A MULTIPLICATION.
+#
+# The caret fix (see the header note) replaced four copies of `index * 8`.
+# The SIZING sites were the other half of the same bug: _h_measure_leaf and
+# friends sized a label/button/check/radio/statusbar/menuitem box at
+# `text_len * 8 + pad` against a face whose glyphs advance 6.78-6.95 px at
+# WSYS_UI_PX, so every box was ~15% too wide for lowercase text and too
+# NARROW for capitals and wide punctuation (`W` advances 11.4 px). Both of
+# these route through lib/hamtextbox's htb_text_width(), which sums the same
+# per-glyph advances the compositor lays out with. There is ONE place in the
+# tree that knows how wide a glyph is, and this is not it.
+#
+# _h_adv8 is a TEST HOOK and nothing in the shipping paths sets it: with it
+# on, these two helpers go back to 8 px/char, which is what makes
+# tests/linux/hamui_widget_advance.sh's negative control a thing that RUNS
+# rather than a thing that is asserted about. It is off unless
+# hamui_force_8px_advance(1) is called.
+# ====================================================================
+_h_adv8: int32 = 0
+
+
+def hamui_force_8px_advance(on: int32):
+    _h_adv8 = on
+
+
+# Measured pixel width of an arbitrary NUL-terminated string.
+def hamui_text_px(s: Ptr[uint8]) -> int32:
+    n: uint64 = _h_strlen(s)
+    if _h_adv8 != 0:
+        return cast[int32](n) * 8
+    return htb_text_width(s, n)
+
+
+# Measured pixel width of widget `id`'s own label text.
+def _h_text_px(id: int32) -> int32:
+    base: uint64 = cast[uint64](id) * HAMUI_LABEL_CAP
+    n: uint64 = _h_text_len(id)
+    if _h_adv8 != 0:
+        return cast[int32](n) * 8
+    return htb_text_width(&w_text[base], n)
+
+
+# ---- geometry read-out (laid-out box of a widget) ------------------------
+# Public because the layout pass is otherwise unobservable from outside this
+# module, and a gate that cannot read a box cannot check one.
+def hamui_widget_x(id: int32) -> int32:
+    if id < 0 or cast[uint64](id) >= w_count:
+        return -1
+    return w_x[cast[uint64](id)]
+
+
+def hamui_widget_y(id: int32) -> int32:
+    if id < 0 or cast[uint64](id) >= w_count:
+        return -1
+    return w_y[cast[uint64](id)]
+
+
+def hamui_widget_w(id: int32) -> int32:
+    if id < 0 or cast[uint64](id) >= w_count:
+        return -1
+    return w_w[cast[uint64](id)]
+
+
+def hamui_widget_h(id: int32) -> int32:
+    if id < 0 or cast[uint64](id) >= w_count:
+        return -1
+    return w_h[cast[uint64](id)]
+
+
+# Is the proportional face actually loaded? htb_text_width() FALLS BACK to
+# 8 px/char when it is not, which would make every assertion below a
+# tautology against the very constant they exist to catch. A gate must
+# assert this is 1 before believing any width it reads.
+def hamui_font_ready() -> int32:
+    return htb_font_ready()
 
 
 def hamui_init():
@@ -1157,18 +1236,21 @@ def hamui_signalled(id: int32) -> int32:
 def _h_measure_leaf(id: int32, out_w: Ptr[int32], out_h: Ptr[int32]):
     u: uint64 = cast[uint64](id)
     k: int32 = w_kind[u]
-    tl: int32 = cast[int32](_h_text_len(id))
+    # The text's width is MEASURED (sum of the per-glyph advances the
+    # compositor pens out), not text_len * 8. The paddings below are real
+    # paddings and stay constants; only the glyph run is measured.
+    tpx: int32 = _h_text_px(id)
     if k == HAMUI_K_LABEL:
-        out_w[0] = tl * 8 + 2
+        out_w[0] = tpx + 2
         out_h[0] = 16
     elif k == HAMUI_K_BUTTON:
-        out_w[0] = tl * 8 + 16
+        out_w[0] = tpx + 16
         out_h[0] = 24
     elif k == HAMUI_K_ENTRY:
         out_w[0] = 160
         out_h[0] = 22
     elif k == HAMUI_K_CHECK:
-        out_w[0] = tl * 8 + 22                        # box + gap + label
+        out_w[0] = tpx + 22                           # box + gap + label
         out_h[0] = 18
     elif k == HAMUI_K_LIST:
         out_w[0] = 180
@@ -1176,7 +1258,7 @@ def _h_measure_leaf(id: int32, out_w: Ptr[int32], out_h: Ptr[int32]):
         if out_h[0] < 22:
             out_h[0] = 22
     elif k == HAMUI_K_RADIO:
-        out_w[0] = tl * 8 + 22
+        out_w[0] = tpx + 22
         out_h[0] = 18
     elif k == HAMUI_K_SEP:
         if w_state[u] != 0:                           # vertical
@@ -1201,10 +1283,10 @@ def _h_measure_leaf(id: int32, out_w: Ptr[int32], out_h: Ptr[int32]):
         out_w[0] = 32
         out_h[0] = 32
     elif k == HAMUI_K_STATUSBAR:
-        out_w[0] = tl * 8 + 8
+        out_w[0] = tpx + 8
         out_h[0] = 20
     elif k == HAMUI_K_MENUITEM:
-        out_w[0] = tl * 8 + 16
+        out_w[0] = tpx + 16
         out_h[0] = 20
     elif k == HAMUI_K_TREEVIEW:
         out_w[0] = 280
@@ -1250,7 +1332,7 @@ def _h_is_hstrip(k: int32) -> int32:
 # A MENU inside a menubar contributes only its title text to the bar's
 # flow; its MENUITEM children are a popdown (measured separately at paint).
 def _h_menu_title_w(id: int32) -> int32:
-    return cast[int32](_h_text_len(id)) * 8 + 16
+    return _h_text_px(id) + 16
 
 
 # Measure widget `id` into w_w/w_h. Recurses into children first. Also
@@ -1995,7 +2077,7 @@ def _h_paint_widget(id: int32):
             maxw: int32 = 80
             while mi < w_count:
                 if w_parent[mi] == id and w_kind[mi] == HAMUI_K_MENUITEM:
-                    iw: int32 = cast[int32](_h_text_len(cast[int32](mi))) * 8 + 16
+                    iw: int32 = _h_text_px(cast[int32](mi)) + 16
                     if iw > maxw:
                         maxw = iw
                 mi = mi + 1
@@ -2023,7 +2105,7 @@ def _h_paint_widget(id: int32):
         tp: uint64 = 0
         while tp < w_count:
             if w_parent[tp] == id and w_kind[tp] == HAMUI_K_TABPAGE:
-                tw: int32 = cast[int32](_h_text_len(cast[int32](tp))) * 8 + 16
+                tw: int32 = _h_text_px(cast[int32](tp)) + 16
                 tcol: Ptr[uint8] = "#333333"
                 if idx2 == active2:
                     tcol = "#262626"
@@ -2162,8 +2244,8 @@ def _h_paint_tooltip():
     n: int32 = cast[int32](_h_strlen(s))
     if n <= 0:
         return
-    # 8x16 mono glyphs; pad 5px each side, 16px tall text -> 22px box.
-    bw: int32 = n * 8 + 10
+    # MEASURED glyph run; pad 5px each side, 16px tall text -> 22px box.
+    bw: int32 = hamui_text_px(s) + 10
     bh: int32 = 22
     bx: int32 = cur_x + 12
     by: int32 = cur_y + 18
@@ -2664,6 +2746,16 @@ def _h_route_click(px: int32, py: int32):
     # 5. Fall through to the normal leaf hit-test.
     _h_close_popups()
     _h_dispatch_click(_h_hit_test(px, py))
+
+
+# Inject a click at window coordinates, exactly as a pointer packet from
+# /dev/wsys/<wid>/event would. Public so a HOST driver
+# (user/*_host.ad, docs/hamui_dual_target.md) can script an interaction
+# without a compositor — the same routing the native poll loop uses.
+def hamui_click(px: int32, py: int32):
+    cur_x = px
+    cur_y = py
+    _h_route_click(px, py)
 
 
 # ---- ENTRY editing (real: insert at caret, backspace/delete, nav) ----
@@ -3989,7 +4081,7 @@ def _h_paint_calendar(id: int32):
     tp = _h_putc(&_hcal_title[0], tp, 32)            # ' '
     tp = tp + _h_u32_to_dec(cast[uint32](fy), &_hcal_title[tp])
     _hcal_title[tp] = 0
-    tx: int32 = x + (w - cast[int32](tp) * 8) / 2
+    tx: int32 = x + (w - hamui_text_px(&_hcal_title[0])) / 2
     _h_text_lit(&_hcal_title[0], tx, y + 2, "#ffffff")
     # Weekday header row (Sunday-first).
     c: int32 = 0

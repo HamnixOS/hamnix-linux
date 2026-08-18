@@ -1,0 +1,309 @@
+# user/hamui_advance_host.ad — HOST driver that MEASURES hamUI widget boxes
+# against the real per-glyph advances of the face the compositor draws with
+# (built for x86_64-linux; runs on the dev host, no QEMU).
+#
+# WHY THIS EXISTS
+# ---------------
+# ~20 sites in this tree size text at 8 px/char. The DE's `text`/`glyphs`
+# primitives have gone through the proportional DejaVu face since task #284:
+# a lowercase glyph advances 6.78-6.95 px at WSYS_UI_PX(14) and a 'W'
+# advances 11.4. The caret bug fixed on 2026-08-17 was four copies of that
+# assumption; the SIZING sites are the rest of it.
+#
+# HANDOFF said for days that this was blocked because "nothing measures
+# layout in pixels". It is not. lib/hamui.ad links clean for x86_64-linux
+# (every extern it declares is provided by user/linux-runtime.S), so a host
+# binary can build a real widget tree, run the REAL layout pass, run the REAL
+# paint pass into the scene display list, and read every box back.
+#
+# WHAT IT PRINTS (one record per line, for tests/linux/hamui_widget_advance.sh)
+#   FONT_READY <0|1>      1 = the proportional face is loaded. If this is 0,
+#                         htb_text_width() falls back to 8 px/char and EVERY
+#                         width below is a tautology — the gate must refuse.
+#   MODE <measured|force8>
+#   ADV <byte> <px>       measured advance of a probe glyph
+#   W <tag> <box_w> <text_px>
+#                         tag names the site; box_w is what the layout/paint
+#                         pass produced; text_px is htb_text_width() of the
+#                         SAME string. The gate never compares either to a
+#                         constant: it compares a NARROW-text widget with a
+#                         WIDE-text widget of the SAME BYTE COUNT, where the
+#                         8 px/char bug makes the two boxes identical and a
+#                         real measurement makes them differ by exactly the
+#                         difference of the measured text widths.
+#   TITLEX <x> <box_x> <box_w> <text_px>
+#                         calendar centred-title site.
+#   SCENE-BEGIN / SCENE-END around the raw display list.
+#
+# USAGE:  hamui_advance_host OUT.ppm [force8]
+
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+
+from lib.hamscene import hamscene_bufptr, hamscene_length
+from lib.hamui_host import hamui_host_begin, hamui_host_rasterize, \
+    hamui_host_ppm_header, hamui_host_fb_ptr, hamui_host_fb_bytes
+from lib.hamui import hamui_init, hamui_vbox, hamui_label, hamui_button, \
+    hamui_checkbox, hamui_radio, hamui_statusbar, hamui_menubar, hamui_menu, \
+    hamui_menu_add, hamui_notebook, hamui_notebook_page, hamui_add, \
+    hamui_window_on, hamui_layout, hamui_paint, hamui_click, \
+    hamui_widget_x, hamui_widget_y, hamui_widget_w, hamui_widget_h, \
+    hamui_text_px, hamui_font_ready, hamui_force_8px_advance, \
+    hamui_calendar
+from lib.hamtextbox import htb_text_width
+
+
+# ---- stdout ---------------------------------------------------------------
+obuf: Array[4096, uint8]
+obuf_n: uint64 = 0
+
+
+def _o_flush():
+    if obuf_n > 0:
+        sys_write(1, &obuf[0], obuf_n)
+        obuf_n = 0
+
+
+def _o_ch(c: uint8):
+    if obuf_n >= 4000:
+        _o_flush()
+    obuf[obuf_n] = c
+    obuf_n = obuf_n + 1
+
+
+def _o_str(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0:
+        _o_ch(s[i])
+        i = i + 1
+
+
+def _o_dec(v: int64):
+    if v < 0:
+        _o_ch(45)
+        v = 0 - v
+    if v == 0:
+        _o_ch(48)
+        return
+    digs: Array[24, uint8]
+    n: uint64 = 0
+    x: uint64 = cast[uint64](v)
+    while x > 0:
+        digs[n] = cast[uint8](x % 10) + 48
+        x = x / 10
+        n = n + 1
+    while n > 0:
+        n = n - 1
+        _o_ch(digs[n])
+
+
+def _slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+# One measured record: tag, the laid-out box width, and the measured pixel
+# width of the string that is inside it.
+def _w(tag: Ptr[uint8], id: int32, text: Ptr[uint8]):
+    _o_str(cast[Ptr[uint8]]("W "))
+    _o_str(tag)
+    _o_ch(32)
+    _o_dec(cast[int64](hamui_widget_w(id)))
+    _o_ch(32)
+    _o_dec(cast[int64](hamui_text_px(text)))
+    _o_ch(10)
+
+
+# The two probe strings. SAME byte count (24), VERY different real width:
+# under the 8 px/char bug every box built from them is identical, which is
+# exactly what the gate refuses to accept. 24 bytes, not 12, because the menu
+# popdown clamps its width up to a floor of 80 px and a 12-'i' item lands
+# under it -- the floor would then be what the gate was measuring.
+def S_NARROW() -> Ptr[uint8]:
+    return "iiiiiiiiiiiiiiiiiiiiiiii"
+
+
+def S_WIDE() -> Ptr[uint8]:
+    return "WWWWWWWWWWWWWWWWWWWWWWWW"
+
+
+def _dump_scene():
+    _o_str(cast[Ptr[uint8]]("SCENE-BEGIN\n"))
+    _o_flush()
+    sys_write(1, hamscene_bufptr(), hamscene_length())
+    _o_str(cast[Ptr[uint8]]("SCENE-END\n"))
+    _o_flush()
+
+
+def _write_ppm(path: Ptr[char]) -> int32:
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    hdr: Array[64, uint8]
+    hlen: uint64 = hamui_host_ppm_header(&hdr[0])
+    sys_write(fd, &hdr[0], hlen)
+    sys_write(fd, hamui_host_fb_ptr(), hamui_host_fb_bytes())
+    sys_close(fd)
+    return 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    if argc < 2:
+        _o_str(cast[Ptr[uint8]]("usage: hamui_advance_host OUT.ppm [force8]\n"))
+        _o_flush()
+        return 2
+
+    force8: int32 = 0
+    if argc >= 3:
+        a: Ptr[uint8] = cast[Ptr[uint8]](argv[2])
+        if a[0] == 102 and a[1] == 111:            # "fo"
+            force8 = 1
+
+    hamui_init()
+    hamui_force_8px_advance(force8)
+
+    _o_str(cast[Ptr[uint8]]("FONT_READY "))
+    _o_dec(cast[int64](hamui_font_ready()))
+    _o_ch(10)
+    _o_str(cast[Ptr[uint8]]("MODE "))
+    if force8 != 0:
+        _o_str(cast[Ptr[uint8]]("force8\n"))
+    else:
+        _o_str(cast[Ptr[uint8]]("measured\n"))
+    # Advance of one 'i' and one 'W', straight out of the measurement path,
+    # so the gate can SEE that the instrument distinguishes glyphs at all.
+    ib: Array[2, uint8]
+    ib[0] = 105
+    ib[1] = 0
+    wb: Array[2, uint8]
+    wb[0] = 87
+    wb[1] = 0
+    _o_str(cast[Ptr[uint8]]("ADV i "))
+    _o_dec(cast[int64](htb_text_width(&ib[0], 1)))
+    _o_ch(10)
+    _o_str(cast[Ptr[uint8]]("ADV W "))
+    _o_dec(cast[int64](htb_text_width(&wb[0], 1)))
+    _o_ch(10)
+
+    root: int32 = hamui_vbox()
+
+    lab_n: int32 = hamui_label(S_NARROW())
+    lab_w: int32 = hamui_label(S_WIDE())
+    btn_n: int32 = hamui_button(S_NARROW())
+    btn_w: int32 = hamui_button(S_WIDE())
+    chk_n: int32 = hamui_checkbox(S_NARROW())
+    chk_w: int32 = hamui_checkbox(S_WIDE())
+    rad_n: int32 = hamui_radio(S_NARROW(), 1)
+    rad_w: int32 = hamui_radio(S_WIDE(), 1)
+    sts_n: int32 = hamui_statusbar(S_NARROW())
+    sts_w: int32 = hamui_statusbar(S_WIDE())
+
+    hamui_add(root, lab_n)
+    hamui_add(root, lab_w)
+    hamui_add(root, btn_n)
+    hamui_add(root, btn_w)
+    hamui_add(root, chk_n)
+    hamui_add(root, chk_w)
+    hamui_add(root, rad_n)
+    hamui_add(root, rad_w)
+    hamui_add(root, sts_n)
+    hamui_add(root, sts_w)
+
+    # MENUITEM leaf measure: a menu item reparented into the vbox is measured
+    # by _h_measure_leaf's MENUITEM arm, which the menubar path never reaches
+    # (a menu contributes only its TITLE to the bar's flow).
+    scratch_menu: int32 = hamui_menu(cast[Ptr[uint8]]("scratch"))
+    mi_n: int32 = hamui_menu_add(scratch_menu, S_NARROW())
+    mi_w: int32 = hamui_menu_add(scratch_menu, S_WIDE())
+    hamui_add(root, mi_n)
+    hamui_add(root, mi_w)
+
+    # MENU TITLE width: two menus on a real menubar.
+    bar: int32 = hamui_menubar()
+    men_n: int32 = hamui_menu(S_NARROW())
+    men_w: int32 = hamui_menu(S_WIDE())
+    hamui_add(bar, men_n)
+    hamui_add(bar, men_w)
+    hamui_add(root, bar)
+    # POPDOWN width is a COLUMN width: every item in one menu gets the width
+    # of the WIDEST item, so two items in the SAME menu can never differ and
+    # comparing them proves nothing. (The first version of this gate did
+    # exactly that and reported a red that was the gate's fault, not the
+    # code's.) So the probe is two SEPARATE menus: one whose widest item is
+    # the narrow string, one whose widest item is the wide string.
+    pop_n: int32 = hamui_menu_add(men_n, S_NARROW())
+    pop_w: int32 = hamui_menu_add(men_w, S_WIDE())
+
+    # NOTEBOOK tab cells: width stashed on the TABPAGE by the paint pass.
+    nb: int32 = hamui_notebook()
+    tab_n: int32 = hamui_notebook_page(nb, S_NARROW())
+    tab_w: int32 = hamui_notebook_page(nb, S_WIDE())
+    hamui_add(root, nb)
+
+    # CALENDAR: its month title is CENTRED, which is the same arithmetic in
+    # its other inverse-prone form (x + (w - textw)/2).
+    cal: int32 = hamui_calendar()
+    hamui_add(root, cal)
+
+    hamui_window_on(root, 2)
+    hamui_layout()
+
+    # Leaf/intrinsic boxes come straight out of the layout pass.
+    _w(cast[Ptr[uint8]]("LABEL.narrow"), lab_n, S_NARROW())
+    _w(cast[Ptr[uint8]]("LABEL.wide"), lab_w, S_WIDE())
+    _w(cast[Ptr[uint8]]("BUTTON.narrow"), btn_n, S_NARROW())
+    _w(cast[Ptr[uint8]]("BUTTON.wide"), btn_w, S_WIDE())
+    _w(cast[Ptr[uint8]]("CHECK.narrow"), chk_n, S_NARROW())
+    _w(cast[Ptr[uint8]]("CHECK.wide"), chk_w, S_WIDE())
+    _w(cast[Ptr[uint8]]("RADIO.narrow"), rad_n, S_NARROW())
+    _w(cast[Ptr[uint8]]("RADIO.wide"), rad_w, S_WIDE())
+    _w(cast[Ptr[uint8]]("STATUSBAR.narrow"), sts_n, S_NARROW())
+    _w(cast[Ptr[uint8]]("STATUSBAR.wide"), sts_w, S_WIDE())
+    _w(cast[Ptr[uint8]]("MENUITEM.narrow"), mi_n, S_NARROW())
+    _w(cast[Ptr[uint8]]("MENUITEM.wide"), mi_w, S_WIDE())
+    _w(cast[Ptr[uint8]]("MENUTITLE.narrow"), men_n, S_NARROW())
+    _w(cast[Ptr[uint8]]("MENUTITLE.wide"), men_w, S_WIDE())
+
+    # Open the NARROW menu by CLICKING its bar title, then paint. Only the
+    # OPEN menu paints a popdown, and the paint pass is what stashes the
+    # column width on each item, so each menu needs its own click + paint.
+    hamui_click(hamui_widget_x(men_n) + 2, hamui_widget_y(men_n) + 2)
+    hamui_paint()
+    _w(cast[Ptr[uint8]]("POPDOWN.narrow"), pop_n, S_NARROW())
+
+    # Now the WIDE menu; this paint also produces the notebook tab cells.
+    hamui_click(hamui_widget_x(men_w) + 2, hamui_widget_y(men_w) + 2)
+    hamui_paint()
+    _w(cast[Ptr[uint8]]("POPDOWN.wide"), pop_w, S_WIDE())
+    _w(cast[Ptr[uint8]]("TAB.narrow"), tab_n, S_NARROW())
+    _w(cast[Ptr[uint8]]("TAB.wide"), tab_w, S_WIDE())
+
+    # Calendar centred title: report the calendar box and let the gate find
+    # the title's drawn X in the scene dump (the only #ffffff glyphs run).
+    _o_str(cast[Ptr[uint8]]("CALBOX "))
+    _o_dec(cast[int64](hamui_widget_x(cal)))
+    _o_ch(32)
+    _o_dec(cast[int64](hamui_widget_w(cal)))
+    _o_ch(10)
+    # The calendar seeds to January 1970 with no clock, so the title string
+    # is deterministic; the gate finds its drawn X in the scene dump and
+    # checks the centring against this measured width.
+    _o_str(cast[Ptr[uint8]]("CALTITLEPX "))
+    _o_dec(cast[int64](hamui_text_px(cast[Ptr[uint8]]("January 1970"))))
+    _o_ch(10)
+
+    _dump_scene()
+
+    # A PPM a human can LOOK at, same lane as every other *_host renderer.
+    hamui_host_begin(640, 480)
+    hamui_host_rasterize()
+    if _write_ppm(cast[Ptr[char]](argv[1])) < 0:
+        _o_str(cast[Ptr[uint8]]("PPM_WRITE_FAILED\n"))
+        _o_flush()
+        return 3
+    _o_str(cast[Ptr[uint8]]("PPM_OK\n"))
+    _o_flush()
+    return 0
