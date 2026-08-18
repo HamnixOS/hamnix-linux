@@ -660,7 +660,7 @@ CLOSEEOF
     else
     for app in $apps; do
         body="$body
-    echo '/bin/$app' > '/dev/wsys/appmenu/launch'
+    happ = spawn detached \$soakns { /bin/$app }
     n = 0
     while n < $dwell {
         echo '$HB'
@@ -683,6 +683,7 @@ CLOSEEOF
     tail -6 /var/log/panel.log
     ps
     echo '${CENSUS}END'
+    kill \$happ
 $closer"
     done
     fi
@@ -691,6 +692,31 @@ source '/etc/rc.boot.installed'
 echo '$MARK'
 cycle = 0
 lo = 6
+# THE WORKLOAD ENDS WHAT IT STARTS, AND UNTIL 2026-08-17 IT DID NOT.
+#
+# The cycle used to launch through the desktop's own queue --
+#   echo '/bin/<app>' > '/dev/wsys/appmenu/launch'
+# -- and "close" the result with \`close <wid>\` on /dev/wsys/ctl. Those are
+# not the same act. \`close <wid>\` DESTROYS A WINDOW RECORD; it does not end
+# a program, and nothing anywhere in this rc ever did. MEASURED over 106
+# censuses of a 900 s run: windows minus DISTINCT LIVE application pids was
+# min 3, max 5, mean 3.76 -- a flat offset, meaning every one of the 92 rows
+# at the end had a LIVE OWNER -- and one census caught FIFTEEN live
+# hamcalcscene processes. The window count climbing 3 -> 92 was this file
+# leaking processes, not the compositor leaking rows.
+#
+# So the launch is a \`spawn\`, which hands back a process handle, and the
+# handle is killed at the end of the cycle it belongs to. WHAT THIS COSTS,
+# stated because it is a real change to what is exercised: the appmenu launch
+# QUEUE is no longer driven by this workload. The queue has its own coverage
+# (tests/linux/de_appmenu_*.sh); an unbounded workload does not, and a soak
+# whose process count is a function of its runtime cannot answer any question
+# about a machine's steady state.
+#
+# \`detached\` is RFNOWAIT: this shell never waits, so without it every killed
+# app would stay a zombie and the ps census would count corpses as programs --
+# which is the same measurement error in a new place.
+soakns = ns { }
 while 1 == 1 {
     cycle = cycle + 1
 $body
