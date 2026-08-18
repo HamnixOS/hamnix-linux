@@ -124,7 +124,8 @@ from lib.hamscene import hamscene_begin, hamscene_fill, hamscene_rect, \
 # the SAME per-glyph advances the compositor lays out with -- and this file
 # simply never called it. It does now, and it keeps no advance of its own:
 # there is ONE place in the tree that knows how wide a glyph is.
-from lib.hamtextbox import htb_caret_x, htb_hit_test
+from lib.hamtextbox import htb_caret_x, htb_hit_test, htb_text_width, \
+    htb_font_ready
 
 
 # ====================================================================
@@ -485,6 +486,84 @@ def _h_text_len(id: int32) -> uint64:
     while w_text[base + n] != 0:
         n = n + 1
     return n
+
+
+# ====================================================================
+# WIDGET TEXT WIDTH IS A MEASUREMENT, NOT A MULTIPLICATION.
+#
+# The caret fix (see the header note) replaced four copies of `index * 8`.
+# The SIZING sites were the other half of the same bug: _h_measure_leaf and
+# friends sized a label/button/check/radio/statusbar/menuitem box at
+# `text_len * 8 + pad` against a face whose glyphs advance 6.78-6.95 px at
+# WSYS_UI_PX, so every box was ~15% too wide for lowercase text and too
+# NARROW for capitals and wide punctuation (`W` advances 11.4 px). Both of
+# these route through lib/hamtextbox's htb_text_width(), which sums the same
+# per-glyph advances the compositor lays out with. There is ONE place in the
+# tree that knows how wide a glyph is, and this is not it.
+#
+# _h_adv8 is a TEST HOOK and nothing in the shipping paths sets it: with it
+# on, these two helpers go back to 8 px/char, which is what makes
+# tests/linux/hamui_widget_advance.sh's negative control a thing that RUNS
+# rather than a thing that is asserted about. It is off unless
+# hamui_force_8px_advance(1) is called.
+# ====================================================================
+_h_adv8: int32 = 0
+
+
+def hamui_force_8px_advance(on: int32):
+    _h_adv8 = on
+
+
+# Measured pixel width of an arbitrary NUL-terminated string.
+def hamui_text_px(s: Ptr[uint8]) -> int32:
+    n: uint64 = _h_strlen(s)
+    if _h_adv8 != 0:
+        return cast[int32](n) * 8
+    return htb_text_width(s, n)
+
+
+# Measured pixel width of widget `id`'s own label text.
+def _h_text_px(id: int32) -> int32:
+    base: uint64 = cast[uint64](id) * HAMUI_LABEL_CAP
+    n: uint64 = _h_text_len(id)
+    if _h_adv8 != 0:
+        return cast[int32](n) * 8
+    return htb_text_width(&w_text[base], n)
+
+
+# ---- geometry read-out (laid-out box of a widget) ------------------------
+# Public because the layout pass is otherwise unobservable from outside this
+# module, and a gate that cannot read a box cannot check one.
+def hamui_widget_x(id: int32) -> int32:
+    if id < 0 or cast[uint64](id) >= w_count:
+        return -1
+    return w_x[cast[uint64](id)]
+
+
+def hamui_widget_y(id: int32) -> int32:
+    if id < 0 or cast[uint64](id) >= w_count:
+        return -1
+    return w_y[cast[uint64](id)]
+
+
+def hamui_widget_w(id: int32) -> int32:
+    if id < 0 or cast[uint64](id) >= w_count:
+        return -1
+    return w_w[cast[uint64](id)]
+
+
+def hamui_widget_h(id: int32) -> int32:
+    if id < 0 or cast[uint64](id) >= w_count:
+        return -1
+    return w_h[cast[uint64](id)]
+
+
+# Is the proportional face actually loaded? htb_text_width() FALLS BACK to
+# 8 px/char when it is not, which would make every assertion below a
+# tautology against the very constant they exist to catch. A gate must
+# assert this is 1 before believing any width it reads.
+def hamui_font_ready() -> int32:
+    return htb_font_ready()
 
 
 def hamui_init():
@@ -2664,6 +2743,16 @@ def _h_route_click(px: int32, py: int32):
     # 5. Fall through to the normal leaf hit-test.
     _h_close_popups()
     _h_dispatch_click(_h_hit_test(px, py))
+
+
+# Inject a click at window coordinates, exactly as a pointer packet from
+# /dev/wsys/<wid>/event would. Public so a HOST driver
+# (user/*_host.ad, docs/hamui_dual_target.md) can script an interaction
+# without a compositor — the same routing the native poll loop uses.
+def hamui_click(px: int32, py: int32):
+    cur_x = px
+    cur_y = py
+    _h_route_click(px, py)
 
 
 # ---- ENTRY editing (real: insert at caret, backspace/delete, nav) ----
