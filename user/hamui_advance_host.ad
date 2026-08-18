@@ -117,15 +117,17 @@ def _w(tag: Ptr[uint8], id: int32, text: Ptr[uint8]):
     _o_ch(10)
 
 
-# The two probe strings. SAME byte count, VERY different real width: under
-# the 8 px/char bug every box built from them is identical, which is exactly
-# what the gate refuses to accept.
+# The two probe strings. SAME byte count (24), VERY different real width:
+# under the 8 px/char bug every box built from them is identical, which is
+# exactly what the gate refuses to accept. 24 bytes, not 12, because the menu
+# popdown clamps its width up to a floor of 80 px and a 12-'i' item lands
+# under it -- the floor would then be what the gate was measuring.
 def S_NARROW() -> Ptr[uint8]:
-    return "iiiiiiiiiiii"
+    return "iiiiiiiiiiiiiiiiiiiiiiii"
 
 
 def S_WIDE() -> Ptr[uint8]:
-    return "WWWWWWWWWWWW"
+    return "WWWWWWWWWWWWWWWWWWWWWWWW"
 
 
 def _dump_scene():
@@ -226,9 +228,13 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     hamui_add(bar, men_n)
     hamui_add(bar, men_w)
     hamui_add(root, bar)
-    # Popdown items under the WIDE menu; the popdown width comes from the
-    # widest item and is stashed on the item by the paint pass.
-    pop_n: int32 = hamui_menu_add(men_w, S_NARROW())
+    # POPDOWN width is a COLUMN width: every item in one menu gets the width
+    # of the WIDEST item, so two items in the SAME menu can never differ and
+    # comparing them proves nothing. (The first version of this gate did
+    # exactly that and reported a red that was the gate's fault, not the
+    # code's.) So the probe is two SEPARATE menus: one whose widest item is
+    # the narrow string, one whose widest item is the wide string.
+    pop_n: int32 = hamui_menu_add(men_n, S_NARROW())
     pop_w: int32 = hamui_menu_add(men_w, S_WIDE())
 
     # NOTEBOOK tab cells: width stashed on the TABPAGE by the paint pass.
@@ -261,12 +267,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     _w(cast[Ptr[uint8]]("MENUTITLE.narrow"), men_n, S_NARROW())
     _w(cast[Ptr[uint8]]("MENUTITLE.wide"), men_w, S_WIDE())
 
-    # Open the WIDE menu by CLICKING its bar title, then paint: the popdown
-    # width and the notebook tab cells are produced by the paint pass.
+    # Open the NARROW menu by CLICKING its bar title, then paint. Only the
+    # OPEN menu paints a popdown, and the paint pass is what stashes the
+    # column width on each item, so each menu needs its own click + paint.
+    hamui_click(hamui_widget_x(men_n) + 2, hamui_widget_y(men_n) + 2)
+    hamui_paint()
+    _w(cast[Ptr[uint8]]("POPDOWN.narrow"), pop_n, S_NARROW())
+
+    # Now the WIDE menu; this paint also produces the notebook tab cells.
     hamui_click(hamui_widget_x(men_w) + 2, hamui_widget_y(men_w) + 2)
     hamui_paint()
-
-    _w(cast[Ptr[uint8]]("POPDOWN.narrow"), pop_n, S_NARROW())
     _w(cast[Ptr[uint8]]("POPDOWN.wide"), pop_w, S_WIDE())
     _w(cast[Ptr[uint8]]("TAB.narrow"), tab_n, S_NARROW())
     _w(cast[Ptr[uint8]]("TAB.wide"), tab_w, S_WIDE())

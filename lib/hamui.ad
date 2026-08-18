@@ -1236,18 +1236,21 @@ def hamui_signalled(id: int32) -> int32:
 def _h_measure_leaf(id: int32, out_w: Ptr[int32], out_h: Ptr[int32]):
     u: uint64 = cast[uint64](id)
     k: int32 = w_kind[u]
-    tl: int32 = cast[int32](_h_text_len(id))
+    # The text's width is MEASURED (sum of the per-glyph advances the
+    # compositor pens out), not text_len * 8. The paddings below are real
+    # paddings and stay constants; only the glyph run is measured.
+    tpx: int32 = _h_text_px(id)
     if k == HAMUI_K_LABEL:
-        out_w[0] = tl * 8 + 2
+        out_w[0] = tpx + 2
         out_h[0] = 16
     elif k == HAMUI_K_BUTTON:
-        out_w[0] = tl * 8 + 16
+        out_w[0] = tpx + 16
         out_h[0] = 24
     elif k == HAMUI_K_ENTRY:
         out_w[0] = 160
         out_h[0] = 22
     elif k == HAMUI_K_CHECK:
-        out_w[0] = tl * 8 + 22                        # box + gap + label
+        out_w[0] = tpx + 22                           # box + gap + label
         out_h[0] = 18
     elif k == HAMUI_K_LIST:
         out_w[0] = 180
@@ -1255,7 +1258,7 @@ def _h_measure_leaf(id: int32, out_w: Ptr[int32], out_h: Ptr[int32]):
         if out_h[0] < 22:
             out_h[0] = 22
     elif k == HAMUI_K_RADIO:
-        out_w[0] = tl * 8 + 22
+        out_w[0] = tpx + 22
         out_h[0] = 18
     elif k == HAMUI_K_SEP:
         if w_state[u] != 0:                           # vertical
@@ -1280,10 +1283,10 @@ def _h_measure_leaf(id: int32, out_w: Ptr[int32], out_h: Ptr[int32]):
         out_w[0] = 32
         out_h[0] = 32
     elif k == HAMUI_K_STATUSBAR:
-        out_w[0] = tl * 8 + 8
+        out_w[0] = tpx + 8
         out_h[0] = 20
     elif k == HAMUI_K_MENUITEM:
-        out_w[0] = tl * 8 + 16
+        out_w[0] = tpx + 16
         out_h[0] = 20
     elif k == HAMUI_K_TREEVIEW:
         out_w[0] = 280
@@ -1329,7 +1332,7 @@ def _h_is_hstrip(k: int32) -> int32:
 # A MENU inside a menubar contributes only its title text to the bar's
 # flow; its MENUITEM children are a popdown (measured separately at paint).
 def _h_menu_title_w(id: int32) -> int32:
-    return cast[int32](_h_text_len(id)) * 8 + 16
+    return _h_text_px(id) + 16
 
 
 # Measure widget `id` into w_w/w_h. Recurses into children first. Also
@@ -2074,7 +2077,7 @@ def _h_paint_widget(id: int32):
             maxw: int32 = 80
             while mi < w_count:
                 if w_parent[mi] == id and w_kind[mi] == HAMUI_K_MENUITEM:
-                    iw: int32 = cast[int32](_h_text_len(cast[int32](mi))) * 8 + 16
+                    iw: int32 = _h_text_px(cast[int32](mi)) + 16
                     if iw > maxw:
                         maxw = iw
                 mi = mi + 1
@@ -2102,7 +2105,7 @@ def _h_paint_widget(id: int32):
         tp: uint64 = 0
         while tp < w_count:
             if w_parent[tp] == id and w_kind[tp] == HAMUI_K_TABPAGE:
-                tw: int32 = cast[int32](_h_text_len(cast[int32](tp))) * 8 + 16
+                tw: int32 = _h_text_px(cast[int32](tp)) + 16
                 tcol: Ptr[uint8] = "#333333"
                 if idx2 == active2:
                     tcol = "#262626"
@@ -2241,8 +2244,8 @@ def _h_paint_tooltip():
     n: int32 = cast[int32](_h_strlen(s))
     if n <= 0:
         return
-    # 8x16 mono glyphs; pad 5px each side, 16px tall text -> 22px box.
-    bw: int32 = n * 8 + 10
+    # MEASURED glyph run; pad 5px each side, 16px tall text -> 22px box.
+    bw: int32 = hamui_text_px(s) + 10
     bh: int32 = 22
     bx: int32 = cur_x + 12
     by: int32 = cur_y + 18
@@ -4078,7 +4081,7 @@ def _h_paint_calendar(id: int32):
     tp = _h_putc(&_hcal_title[0], tp, 32)            # ' '
     tp = tp + _h_u32_to_dec(cast[uint32](fy), &_hcal_title[tp])
     _hcal_title[tp] = 0
-    tx: int32 = x + (w - cast[int32](tp) * 8) / 2
+    tx: int32 = x + (w - hamui_text_px(&_hcal_title[0])) / 2
     _h_text_lit(&_hcal_title[0], tx, y + 2, "#ffffff")
     # Weekday header row (Sunday-first).
     c: int32 = 0
