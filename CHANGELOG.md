@@ -12,7 +12,12 @@ because the number is the deliverable.
 
 ---
 
-## Unreleased
+## 1.0.29 — BUILT AND GATED, NOT YET PUBLISHED
+
+The candidate medium and the 130-package channel for this version were built
+and measured on 2026-08-18. Nothing here has been signed or pushed to the site;
+that is a separate, deliberate step. Read the known-issues list at the end of
+this section before you install it.
 
 ### Anything typed at a text console was going into the desktop window
 
@@ -53,6 +58,99 @@ genuinely headless machine, which needs it.)
 *Not established:* whether a laptop shows this depends on how its console is
 configured, and that was read from the boot files rather than measured on real
 hardware.
+
+### A startup script that could not be read was reported as having run
+
+When the machine changes runlevel — which is how it gets to a desktop — it runs
+your script for that runlevel first, then does its own built-in work. If your
+script could not be read at all (an unclosed quote, or simply too long for the
+shell's limit), the machine was told the script had run fine. It then carried on
+to the built-in part and came up **looking completely ordinary with none of your
+script's lines executed.**
+
+For runlevel 5 that is the entire graphical stack. For shutdown and reboot it is
+the flush-that-happens-before-the-power-goes-off.
+
+It now says so, in five lines, naming the file:
+`RUNLEVEL 5: ITS rc DID NOT RUN`.
+
+*Not established:* this was found and fixed by reading and by compiling; the
+runlevel path cannot be driven from a development machine, so **it has not been
+watched happening in a running system.** What was measured is the layer below
+it: a script over the shell's token limit is reported by file and line, says
+`NOT RUN` in words, executes nothing at all — not even its first statement —
+and exits non-zero.
+
+### The shell would not stop, and burned a whole processor core doing it
+
+If you ran a script with `hamsh` and the script did not end with `exit`, the
+shell went on to wait for you to type. When there was nobody to type — a script
+run from another program, or with its input already finished — it did not
+notice, and it did not stop. It sat there **using 100% of one processor core**.
+The longest we watched it do this was 12 minutes 42 seconds, and it only stopped
+because we killed it. On a laptop that is a flat battery and a fan that never
+switches off, for a shell with nothing left to read.
+
+Underneath it was one confusion: the part of the system that reads input has two
+different ways of saying "no more" — *nothing has arrived yet, ask again* and
+*this is finished, stop asking* — and one of the two places that implement it
+gave the first answer for both. The shell dutifully asked again, for ever.
+
+*Scope, stated plainly, because it is narrower than it sounds:* the affected
+copy is the one this project's own tests build, **not the one on the installed
+disk** — the shipped shell has always had the correct answer, and we checked
+that rather than assuming it. So this fixes the tooling and closes a real trap;
+it is not a bug anyone would have hit on an installed machine.
+
+---
+
+### Known issues in 1.0.29, in plain words
+
+**None of this has been run on real hardware.** Every measurement in this
+release — every boot, every keystroke, every screenshot — was taken in a virtual
+machine on a development computer. The owner's laptop has not been switched on
+against this build.
+
+**No test boots the disk image we are actually shipping.** This is the one worth
+understanding. The install is proved by building a *second* medium from the very
+same source code, differing only in an extra start-up script that watches and
+reports what happens, and booting that. The two are built the same way, minute
+apart, from the same commit — but they are not the same file, and the file that
+goes on your USB stick is the one nothing has switched on.
+
+**Some parts of some windows still lay out text as though every letter were the
+same width.** Buttons, labels and a few text grids assume 8 pixels per character
+while the font actually drawn is proportional, so labels sit slightly
+off-centre, some buttons are sized loosely, and in a couple of places clicking
+in the middle of a line puts the cursor in the wrong place. It is cosmetic
+except for the click, and it is not new.
+
+*And here is the search that produced that, because a count you cannot re-run is
+not a count:*
+
+    grep -rnE '(\*[[:space:]]*8|/[[:space:]]*8)\b' --include='*.ad' lib user \
+      | grep -E 'hamscene_glyphs|hamscene_text|_slen|MAXCOLS|cols_n|text_w|textx'
+
+On this commit that prints **27 lines in 16 files** — 26 of them code and one a
+comment. It is a **lower bound and not a census**: it does not catch
+`user/hampanelscene.ad:2945` and `:3277`, which are the same defect written
+without any of those words in the line. Anyone quoting a different number should
+say which search they ran.
+
+**Two of this project's own checks are expected to be red on this release and
+were deliberately not re-run.** They compare a machine updated from the live
+website (still on 1.0.28) against this source tree (1.0.29) and require the two
+to agree. They cannot agree until this release is published. That is arithmetic,
+not a fault in the product.
+
+**One page-layout difference from Chrome is known and declared.** In the web
+engine, setting a style on an element from a script does not show up when the
+same script asks for that element's `style` attribute back. One test carries
+this as a declared, listed failure rather than a silent one.
+
+**The desktop soak test types into the machine while it runs**, and those
+keystrokes also reach the text console's shell prompt. That is noise in the log
+and not a fault, but it is why the soak log has stray prompts in it.
 
 ## 1.0.28 — 2026-08-18
 

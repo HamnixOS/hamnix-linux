@@ -15,6 +15,159 @@ then this file for where it stands, then `README.md`.
 
 ### READ THIS FIRST — the state, in order
 
+### 1.0.29 IS BUILT AND GATED AND NOT PUBLISHED — AND THE SHELL THAT WOULD NOT STOP IS CLOSED
+
+**Measured, dev host, 2026-08-18. Every artifact and every log is under
+`~/.hamnix-build/rel1029/`, OUTSIDE any worktree, copied there the moment it
+existed — the channel before a single gate was run against it.**
+
+#### THE ARTIFACTS
+
+| | |
+|---|---|
+| medium | `/home/david/.hamnix-build/rel1029/hamnix-linux-1.0.29.img` |
+| size | **4,294,967,296 bytes** (4 GiB provisioned, 3.0 G written) |
+| sha256 | `1601bc486ca0c50dd6f14cd04556524d6d4aec1ff0c36e0cd279ef422c27339c` |
+| channel | `/home/david/.hamnix-build/rel1029/repo/linux` |
+| packages | **130**, all at 1.0.29 |
+| index integrity | **130 of 130** index entries have a present tarball whose sha256 matches; 0 missing, 0 mismatched, 0 unclaimed tarballs. The checker's **negative control RUNS**: one entry re-checked against a one-nibble-altered digest reports MISMATCH, so the 130 is a measurement (`index_sha_check.log`, `index_check.py`) |
+
+**PROVENANCE, said exactly.** The image, the channel and the medium were all
+built at commit `c7b805f7`. Every commit after it in this branch changes only
+`CHANGELOG.md` and this file, neither of which is staged into an image — so the
+bytes above are a function of `c7b805f7` and nothing later.
+
+#### THE GATES, WITH WHAT EACH ASSERTED
+
+| gate | result | condition |
+|---|---|---|
+| `tests/linux/wsys_stdin_keydup.sh` | **8 / 0** | three arms; the RED arm (`HAMWSYSD_STDIN_KEYS=1`) is a negative control and it RAN |
+| `tests/linux/hamsh_eof_exit.sh` (new) | **14 / 0** | negative control RAN; see below |
+| `scripts/test_hamsh_tok_capacity.sh` | **18 / 0** | negative control RAN; two of the eighteen are source ratchets and say so |
+| `scripts/test_livedom_functional_host.sh` | **pass=21 fail=1**, VERDICT PASS | the one failure is `06_class_style_toggle`, DECLARED in `KNOWNFAIL`; 22 fixtures measured |
+| `tests/linux/install_confirm_keys.sh` | **34 / 0** | two QEMU boots, two blank 4 GiB targets; 13 of the 34 are source ratchets |
+| `tests/linux/install_wizard_gui.sh` | **34 / 0** | QEMU; 6 of the 34 are source ratchets |
+| `scripts/verify_medium.sh` | **39 / 0** | including `the ESP carries root.partuuid (24688130-…)` |
+| `tests/linux/channel_bytes_match_image.sh` | **3 / 0** | **229 ELF pairs** across 130 tarballs, byte-identical |
+| `tests/linux/channel_covers_image.sh` | **8 / 0** | |
+| `tests/linux/pkg_tar_reproducible.sh` | **5 / 0** | section C scored NOTHING and says so: no package is served at 1.0.29 yet |
+| `tests/linux/soak_desktop.sh` | **26 / 0** | 900 s, **arm 0 ARMED**, typing at the default. NOT a `SKIPPROOF` run |
+
+**THE SOAK'S NUMBERS, BESIDE THE CONDITION.** 848 heartbeats over 900 s
+(floor 450) — the same 848 as the recorded baseline. Longest gap in the
+guest's own clock **2 s**, longest frozen picture **0 s**, zombies **0 → 0**.
+`wsysd` counters at the end: keys 351, pointer 1212, frames 4456,
+**windows 5**.
+
+**AND ONE NUMBER DOES NOT MATCH THE BASELINE IN THE BRIEF, WHICH SAID
+"windows 4 → 6 (end-of-run counter; the bounded check reports peak 7)".** This
+run measured **baseline 4, peak 5**, end-of-run counter **5**, over 106
+censuses. Lower, not higher, so it is not a regression — but it is a different
+number and it is written here rather than rounded to the one that was
+expected.
+
+**NOT RUN, DELIBERATELY:** `tests/linux/install_from_usb.sh` and
+`tests/linux/served_install_binary.sh`. Both fetch from the live 255.one, which
+serves 1.0.28, and compare it against a 1.0.29 tree. They are red by
+arithmetic until this release is published, and spending two QEMU runs to
+watch that happen would prove nothing.
+
+#### THE SHELL THAT WOULD NOT STOP — `sys_read_nb` SPELLED "FINISHED" AS "NOT YET"
+
+`hamsh <script>` with stdin at EOF span at **100% of one core**, measured as a
+**five-second interval** off `/proc/<pid>/stat` (500 ticks) and not as a
+`ps pcpu` lifetime average. `strace` counted ~108,000 `read(2)` plus ~108,000
+`fcntl(2)` in three seconds with **no sleeping syscall between them**.
+
+`user/linux-runtime.S`'s `sys_read_nb` mapped `-EAGAIN` to 0 — correct — and
+then returned `read(2)`'s **0 verbatim**, which is EOF. Its own header three
+lines above says "0 == no byte ready yet, a negative == true EOF/error", so
+the shim documented the contract and then broke it. `ed_readline`'s
+`if n == 0: continue` polled a finished input for ever.
+
+**THIS IS THE TWO LANES DISAGREEING.** `user/linux-syscalls.c` — the
+**ADDER_HOSTED** lane, which is what `scripts/hamlinux_build.sh` links and
+therefore what the shipped `/bin/hamsh` is — has answered `-1` for a genuine 0
+since it was written, in a comment that names this exact hamsh failure. So the
+**shipped shell was never affected** and the **gate-lane shell was**. That is
+checked, not assumed, and it makes the defect smaller than it first reads.
+
+`sh_park_stdin()` does not rescue it either: this lane's `sys_waitfds` is a
+fail-closed `-1` stub, so the park between polls waits for nothing. Second
+reason the loop is hot; **not** the defect.
+
+**THE GATE — `tests/linux/hamsh_eof_exit.sh`, 14 / 0, 37 s, no QEMU,
+registered.** PART 2 asserts it exits, in 2 s, status 0, having run its
+script. PART 3 is the POSITIVE CONTROL — an OPEN but silent stdin (a fifo whose
+writer is held) must NOT read as EOF, and a line written late must still run —
+because "it exited" is not evidence about EOF unless a shell that exits at
+everything would fail. PART 4 measures the piped path both ways: **124 under
+`timeout` before, 0 after**. PART 5 is the **NEGATIVE CONTROL, RUN**: a second
+hamsh built through a copy farm from a runtime with exactly the EOF mapping
+deleted brings the spin back at **100% of one core over a five-second
+interval**.
+
+Two instrument choices are inside it deliberately: **`pgrep -f` is not used**
+(the pid is `$!`), and liveness reads `/proc/<pid>/stat`'s state letter rather
+than `kill -0`, **which answers yes to a zombie**.
+
+**A SIDE EFFECT WORTH KNOWING:** `test_hamsh_tok_capacity.sh`'s negative
+control used to exit **124** because of this spin, and its own header says so.
+It now reads a genuine **0** from the truncated run, which is what that
+assertion was always trying to observe.
+
+#### THE REGRESSION SWEEP FOR THAT CHANGE, AND WHAT IT FOUND
+
+Sixteen host-lane hamsh gates were run (`regress.tsv`, one log each under
+`regress/`), because a change to how the runtime reports end-of-input touches
+every gate that feeds a script to hamsh over fd 0.
+
+* **11 green with real assertions**, including `test_hamsh_lang_host`,
+  `nosilentwrong`, `kill_status` (6/0, its own negative control red where it
+  must be), `spawn_kill` (6/0, same), `loop_arena` (15/0), `parser2`, `set`,
+  `dualsyntax`, `complete`, `percmd_floor`, `rc_token_budget`.
+* **4 could not run at all** — `lineedit`, `papercuts`, `heartbeat`,
+  `redirect` — because they need `fs/initramfs_blob.S.bin`,
+  `linux_abi/autostub_und_manifest.json` and `mod/kmod_hello.S`, which this
+  repository does not contain. That is the class already annotated in this
+  file. `papercuts` says **INCONCLUSIVE is NOT a pass** in its own output,
+  which is the right shape.
+* **1 red, and it is NOT this change**: `test_hamsh_argvcap_host` fails case 7c
+  — the dict-overflow message must name `16384` and names `LISTELEM_MAX`
+  instead. **Proven pre-existing by a before/after RUN**: `user/linux-runtime.S`
+  was checked out at `f897af1d`, the gate re-run, and it fails **identically**
+  (`regress/argvcap_PREFIX.log`). Attributed by measurement, not by argument.
+
+#### A CLAIM IN THIS FILE THAT IS NOW WRONG
+
+Further down, under *"Still 8 px/char, NOT changed and NOT gated"*, this file
+names `lib/hamslidescore.ad:1805` against `:2595` and
+`lib/hamsheetcore.ad:3401`/`:3468` against `:3265` as unfixed forward/inverse
+pairs. **They are fixed.** Both files now carry a `_hsl_px`/`_hsh_px` pair that
+calls `htb_text_width()` and a `hamslides_force_8px_advance` /
+`hamsheet_force_8px_advance` escape whose only purpose is to let a gate's
+negative control put the defect back — the same shape `lib/hamui.ad` uses. The
+`* 8` still visible at those line numbers is **inside the forced-8px control
+branch**. `user/hampanelscene.ad:2945` against `:3277` is still genuinely
+8 px/char.
+
+**AND THE COUNT COMES WITH ITS SEARCH, because "around 36" was published here
+once and could not be reproduced an hour later:**
+
+```
+grep -rnE '(\*[[:space:]]*8|/[[:space:]]*8)\b' --include='*.ad' lib user \
+  | grep -E 'hamscene_glyphs|hamscene_text|_slen|MAXCOLS|cols_n|text_w|textx'
+```
+
+prints **27 lines in 16 files** at `c7b805f7` (26 code, 1 comment). It is a
+**LOWER BOUND, NOT A CENSUS** — it misses `user/hampanelscene.ad:2945` and
+`:3277`, whose lines contain none of those words. A broader predicate
+(`… | grep -iE 'text|char|glyph|advance|col|caret|cursor|label|str'`) prints
+**50**, and that one is an **UPPER** bound: it sweeps in byte-packing
+(`user/distrofs.ad`), a chessboard's squares and a gradient stride. Neither
+number is the answer; both are stated so a reader can re-run either.
+
+
 ### THE OVER-CAP rc GATE WAS RED ABOUT A BUG THAT WAS FIXED SEVEN WEEKS AGO — AND THE SOFT-GREEN GATE'S fail=1 IS A REAL ENGINE GAP
 
 **Measured, dev host, 2026-08-18, evidence at
