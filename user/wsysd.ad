@@ -1694,6 +1694,32 @@ TITLEBAR_H: int32 = 22
 #      size is a read size and not a limit. 16384 bytes is 4096 columns --
 #      one read per row for every width this device can carry -- and a wider
 #      device tomorrow costs a second read, not a truncated window.
+# AND WHAT IT COSTS PER FRAME IS MEASURED NOW. baacdc64 shipped this saying
+# "NOT MEASURED: on-device frame timing", which was honest and is no longer
+# necessary. Measured 2026-08-17 with HAMNIX_WSYSD_BENCH_LIVE (the live phase
+# breakdown below), offscreen, software rasterizer, host loadavg 4.5-5.0, a
+# full-screen v2 client blitting continuously over the shipped desktop, 28
+# dumps of 12 full frames each, median microseconds per FULL FRAME in the
+# `backbuf` phase -- which is this function and nothing else:
+#
+#     2560x1600 screen, 2560x1200 v2 window
+#       this code, painting all 2560 columns          11579 us
+#       BBROW_CAP clamping again, painting 1920        8604 us
+#     1280x800 screen, 1280x700 v2 window
+#       this code                                      3715 us
+#
+# +2975 us, +35%. THAT IS NOT A SLOWDOWN, IT IS THE WORK THE OLD CODE WAS
+# SKIPPING: 2560/1920 is 1.333 and 11579/8604 is 1.346, so the cost PER COLUMN
+# is 4.52 ns against 4.48 -- within one percent. The run loop is free; the
+# columns are not. Same arithmetic across geometries: 3.43x the pixels for 3.12x
+# the time.
+#
+# THE NUMBER WORTH KNOWING FOR HIS PANEL, and nothing in the tree had it: at
+# 2560x1600 the whole frame is clear 0 + scene 391 + rast 8334 + copy 169 +
+# backbuf 11579 + present 1800 = about 22 ms, so a full-screen v2 application --
+# a browser -- tops out near 45 fps there, and THIS FUNCTION IS THE BIGGEST LINE
+# ITEM IN IT, larger than the rasterizer. If the desktop needs to be faster at
+# 2560, this is where to look; the per-column constant is what to attack.
 BBROW_CAP: uint64 = 16384               # bytes per read; a RUN SIZE, not a cap
 bbrow: Array[16384, uint8]
 
