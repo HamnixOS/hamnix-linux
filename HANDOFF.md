@@ -27,6 +27,58 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE ARCHITECTURAL DIRECTION IS SETTLED: A MINIMAL GLOBAL ROOT, AND `cd /` MUST NOT BE THE MACHINE'S ROOT
+
+**2026-08-19, David, and this resolves the open question from earlier the same
+day.** His words:
+
+> "the global root should be min as possable, with apps and things living on
+> fileserver very plan 9 shaped. Drivers can live on the real global root, but
+> that should be an underpinning not the thing the user in userland gets to be
+> running cd /"
+
+**THE TARGET:** a userland session's `/` is a CONSTRUCTED namespace of file
+servers. The machine's real root keeps the drivers and the plumbing, but it is an
+underpinning — reachable from below, not the thing a person lands in.
+
+**THE GOOD NEWS, and it is better than I expected: every primitive already
+exists.** Source reading only, nothing booted:
+
+  * `sys_rfork(RFNAMEG)` clones a namespace — `user/hamsh.ad:12696`, used at
+    `:10545` and `:11670`.
+  * `bind` is `mount(2)`, Plan 9-shaped, already used throughout the rc files.
+  * The session rc (`etc/rc.de-user.linux:40-43`) already binds `#c` → `/dev`,
+    `#p` → `/proc`, `#s` → `/srv`, and **`#/` → `/n`** — the real global root is
+    ALREADY placed at `/n`, which is exactly the Plan 9 convention for "roots
+    that are not yours".
+  * **AND `enter <distro>` ALREADY REPLACES THE ROOT WHOLESALE FOR A SESSION**:
+    `bind '#distro/debian' /` at `etc/rc.de-user.linux:61` and
+    `etc/rc.boot.installed:180`.
+
+**So the mechanism David is asking for is already built, exercised, and shipping
+— it is just aimed at Debian.** The same move pointed at a Hamnix app-server root
+gives the minimal `/` he described.
+
+**WHAT IS ACTUALLY MISSING is the DEFAULT, not the machinery.** A session still
+inherits the machine's real root as `/` unless it enters a distro. Nothing
+constructs a minimal `/` for an ordinary desktop session, so `cd /` today shows
+the machine — the exact thing he does not want.
+
+**WHAT THIS MEANS FOR WHAT JUST SHIPPED.** The `user <path>` launch verb, uid 1001
+sessions and file ownership are a POSIX-shaped answer. They are not wrong — a
+person's file should belong to the person — but they are **not the destination**,
+and they must not harden into one by default. Where a namespace answer exists,
+prefer it, and say which way a change leans.
+
+**ONE HARD CONSTRAINT that does not go away:** a stock Linux kernel HAS a global
+root. The goal on this lane is to make it INVISIBLE to userland, not to remove
+it. Full duplication of the native model is not available here.
+
+**NOT ESTABLISHED:** none of this was booted. I read rc files and grepped for the
+primitives. Whether a constructed session root actually works — what breaks when
+`/` is not the machine's root, whether the window system, the launcher and `hpm`
+survive it — is unmeasured, and it is the first thing a gate should answer.
+
 ### DAVID SPOKE, 2026-08-19: THREE DIRECTIONS AND ONE MEASUREMENT FROM THE OWNER'S OWN MACHINE
 
 **These are HIS words, not an inference from the tree. They change what is
