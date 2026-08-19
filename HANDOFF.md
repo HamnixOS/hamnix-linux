@@ -137,6 +137,38 @@ r1, where nothing was exec'd at all.
   arm ran as uid 0.
 * **THE `$HAMNIX_DISTRO_<NAME>` DEFECT IS STILL NOT FIXED.**
 
+**THE REGRESSION CHECK, RUN AS AN A/B RATHER THAN ASSERTED.** `enter_root` is
+on the path of every boot, so `tests/linux/boot_log.sh` -- which builds the
+DEFAULT image (no `HAMLINUX_RC` override) and therefore exercises the real
+`etc/rc.boot.linux`, its `bind '#/' /n`, and the generated distro templates --
+was run TWICE: once with this fix, and once with `user/linux-syscalls.c`
+checked out at `c7695c15` and everything else identical.
+
+    with the fix   26 PASSED / 1 FAILED
+    base runtime   26 PASSED / 1 FAILED   (the SAME single assertion)
+
+    FAIL  the shell's marker is NOT in the recovered log: the log captures
+          the kernel only, which is the half that was never missing
+
+**That FAIL is PRE-EXISTING and is not about this work** -- it is bootlogd not
+capturing one shell marker, and it was not recorded anywhere before, which is
+why it was measured rather than assumed. Logs:
+`~/.hamnix-build/nroot/BOOT_LOG_REGRESSION.log` and `BOOT_LOG_BASELINE.log`.
+Within that gate, `PASS the root switch happened, so the rc under test is the
+DISK's` and `PASS the boot reached the end of the rc` are the two lines that
+matter here: the `is_sysroot` switch and a full `rc.boot.linux` both still run
+to completion.
+
+**AND ONE THING COULD NOT BE MEASURED.** `tests/linux/enter_user_run.sh` -- THE
+acceptance test for the root switch, and the only gate that exercises it as
+uid 1001 through `ns_privilege()`'s user namespace -- exits immediately with
+`no distro image; run scripts/hamlinux_distro.sh`. There is no Debian distro
+image on this host and building one was out of scope. **So the unprivileged
+path through the new `ns_mount("/", <mnt>/n, MS_BIND|MS_REC)` is UNMEASURED.**
+It is written to degrade rather than fail -- if that bind is refused, the
+switch still proceeds and the console says the session's `/n` will not be the
+machine -- but "it should degrade" is not a measurement.
+
 
 ### A CONSTRUCTED SESSION ROOT WORKS, AND EXACTLY THREE THINGS BREAK -- 16 PASSED / 4 FAILED, THE FIRST BOOTED MEASUREMENT OF THE OWNER'S DIRECTION
 
