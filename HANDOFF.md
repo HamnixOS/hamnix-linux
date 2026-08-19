@@ -27,6 +27,105 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE PRIVILEGE DROP IS LANDED, AND A SAVED DOCUMENT IS THE PERSON'S -- 66/0, WITH BOTH GATES THAT CAUGHT THE FIRST ATTEMPT UNMOVED
+
+**Measured on booted machines, dev host, 2026-08-19. Evidence
+`~/.hamnix-build/uidlaunch-evidence/`.**
+
+    install_confirm_keys    34 PASSED / 0 FAILED   (33/1 when this was reverted)
+    installed_documents     48 PASSED / 0 FAILED
+    installed_launch_uid    66 PASSED / 0 FAILED   (new, registered at 66)
+
+**A document saved from the desktop word processor is now owned by uid 1001, in
+the person's own home**, read off the unmounted ext4 with `debugfs` after the
+machine powered itself off: `/home/hamuiduser/Documents/untitled.hdoc`, 43
+bytes, carrying the marker the drive typed. Same for Presentation (41 bytes).
+
+**THE DESIGN THAT MADE IT SAFE, and it is the one this file specified.** The
+launch queue got an explicit leading verb:
+
+    <serial> user <path> [args...]   drop to the session user before exec
+    <serial> wl:<path>               Linux-ns Wayland client (unchanged)
+    <serial> <path> [args...]        EXACTLY WHAT IT HAS ALWAYS MEANT
+
+**A bare path keeps today's meaning**, so an unconverted writer cannot be
+demoted by omission -- which is why `install_confirm_keys`, whose rc starts the
+wizard with a literal `echo '/bin/haminstallui' > '/dev/wsys/appmenu/launch'`,
+is untouched at 34/0 including the positive control that went red before.
+
+**THE BRIEF'S VERSION OF THE DESIGN WOULD STILL HAVE BROKEN THE INSTALLER, and
+no gate would have caught it.** "hamappmenu launches only from `.desktop`
+entries, i.e. the person's applications" is not true of this catalogue:
+`etc/hamde/apps` and `etc/skel/Desktop` both ship `installer.desktop`,
+`packagemanager.desktop` and `control-center.desktop`. A person clicking
+Applications -> Install Hamnix on the live medium would have been demoted, and
+**both gates that launch the wizard write the queue directly and never open the
+menu** (`install_confirm_keys.sh:243`, `install_wizard_gui.sh`), while the three
+gates that DO drive `hamappmenu` never name `haminstallui` at all. So the answer
+became a property of the ENTRY: `X-Hamnix-SystemChrome=true`, folded with
+`X-Hamnix-LiveOnly` by `lib/desktopentry.ad`'s new `desktop_chrome()`. **The
+default is "the person's"**, so a forgotten mark demotes a launch and fails
+LOUDLY rather than quietly handing a file to root.
+
+**THE NEGATIVE CONTROL IS AN ARM, NOT A SECOND RUN.** `installed_launch_uid`
+queues `user /bin/hamwrite` (uid 1001), a BARE `/bin/hamsheet` (uid 0) and
+`user /bin/hamslides` (uid 1001) in three boots on one installed disk -- same
+binary, same queue, same drain, five bytes of difference. Two different
+applications on the `user` side means the split follows THE PAYLOAD and cannot
+follow WHICH PROGRAM. Both instruments per arm are files on the ext4 (`ps`
+redirected by the rc, and the document itself), never a serial line, because on
+this machine the panel spawns with `SPAWN_STDIO_NS` and rc.5 redirects the panel
+to `/var/log/panel.log` -- which is where `[panel] launched /bin/<app>` and
+`[<app>] scene window ready` both landed.
+
+**`installed_documents` STILL READS uid 0 ON ALL THREE DOCUMENTS AND THAT IS
+CORRECT.** Its rc spawns `/bin/<app>` itself, as root; it executes no line of
+any launcher and nothing in this change can move it. Its 48 is a control on the
+rest of the tree, not on this fix. Anyone reading that number as a failure of
+the fix has the wrong gate.
+
+**WHAT IS NOT ESTABLISHED.** No gate clicks an icon or a menu row -- the step
+from `hamappmenu` painting a row to `_emit_launch_path` writing `user <path>`
+is static assertions plus a native compile. `user/hamdesktop.ad`'s icon column
+is changed and exercised by no boot here. **`user/hamUId.ad` is not started on
+any medium this tree builds** -- `rc.5.linux` starts `wsysd`, `hamdesktop` and
+`hampanelscene`, and `etc/services.d/` (which carries `hamuid.svc`) is never
+staged -- so its verb STRIPPING (it already drops via `rc.de-user`'s hardcoded
+`setuid 1001`) is read, not measured. And nobody has clicked Applications ->
+Install Hamnix on a live medium and watched a disk get partitioned; that gate
+should point at the LIVE medium and does not exist.
+
+
+### `test_gate_registration.sh` WAS RED ON THIS TREE, AND THE ENTRY BELOW SAYING IT PASSES IS OUT OF DATE
+
+**Measured 2026-08-19 on `61590f23` with a clean worktree.** It fails PART 1
+with two dark gates, one of them `tests/linux/installed_uid_console.sh`, added
+by `d2a7639c` and dark from the moment it landed. The entry further down
+("STRUCK ... It PASSES") was true when it was run and the gate that breaks it
+did not exist yet -- the same provenance error that entry is itself about.
+
+**The trap, because "it IS registered" is the natural reply:** it is, at
+`scripts/release_gates.sh:301`. **The checker does not read that file.** A gate
+counts as covered only if a GitHub workflow or `ci_battery_manifest.txt` names
+it, or if its own header carries the phrase `not in ci_battery_manifest.txt
+because` in its **first 80 lines**. Both gates now carry it; PASS, with 1789
+seen / 829 registered / 218 annotated / 743 baselined.
+
+
+### A `user` PAYLOAD WITH NO PERSON TO RUN IT AS WAS STILL LAUNCHING, AS ROOT, WHILE PRINTING "launched"
+
+Found by re-reading the change rather than by a gate, and worth keeping because
+of its shape. `hd_session_uid()` returns 0 when there is no regular account, and
+0 means DO NOT DROP -- so both launchers took the do-not-drop path, exec'd as
+root, and reported a successful launch. **A gap answering something
+success-shaped, and the gap was the defect itself.** Both now refuse and say so
+on a channel that reaches a disk. A bare payload is untouched, so the machine's
+own programs still start on a medium with no accounts. **Not reachable on either
+medium this tree builds** (the live image has `live` at 1001; an installed
+machine has the wizard's account), so this closes a hole rather than fixing an
+observed symptom, and no gate demonstrates the refusal firing.
+
+
 **Shipping now: 1.0.32, published and verified as served** (2026-08-19) â€” 130 packages,
 signature verified against `etc/hpm/trusted.pub` on the bytes the SITE returns,
 with the same verifier shown to say BAD on one appended byte; a tarball fetched
@@ -291,7 +390,12 @@ this whole entry turns on: **`hamwrite`, launched as uid 1001, printed
 a booted machine, which only `linuxinit` sets, plus the in-boot pair); it does
 not save a document as uid 1001; and it does not click an icon.
 
-**AND THE PRIVILEGE DROP IS STILL NOT RE-LANDED.** This removes the reason
+**SUPERSEDED 2026-08-19 -- see "THE PRIVILEGE DROP IS LANDED" at the top of
+this section: it was built, it is 66/0, and both protected gates held. The
+design sketched below is the one that shipped, with ONE correction -- "hamappmenu
+launches only the person's applications" is FALSE of this catalogue, which also
+carries the installer, the package manager and the control centre. AND THE
+PRIVILEGE DROP IS STILL NOT RE-LANDED.** This removes the reason
 `416248df` gave for abandoning it. It does NOT answer the second reason:
 `/dev/wsys/appmenu/launch` carries the MACHINE's programs as well as the
 person's, and its payload is a bare path with no category, so a drain that
@@ -308,6 +412,12 @@ then reads the resulting process's uid out of `ps`. NOT BUILT HERE.
 
 **2026-08-19, orchestrator-side, read-only. No code changed.** These are two
 claims I had been carrying forward hour after hour without measuring either.
+
+**SUPERSEDED 2026-08-19 -- the gate is RED on `61590f23`; see
+"`test_gate_registration.sh` WAS RED ON THIS TREE" at the top of this section.
+The reading below was correct when taken and predates the gate that broke it.
+Note also that the struck claim was RIGHT about one thing: the checker really
+does NOT read `release_gates.sh`.**
 
 **STRUCK: "`test_gate_registration.sh` produces FALSE REDS because the checker
 does not know `release_gates.sh` is a registrar."** I ran it on the merged tree.
