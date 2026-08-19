@@ -27,6 +27,173 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### A CONSTRUCTED SESSION ROOT WORKS, AND EXACTLY THREE THINGS BREAK -- 16 PASSED / 4 FAILED, THE FIRST BOOTED MEASUREMENT OF THE OWNER'S DIRECTION
+
+**Measured on a booted machine, dev host, 2026-08-19, base `bb420836`.
+Evidence `~/.hamnix-build/minroot-FINAL-16-4/GATE.log` and `boot.log`; the
+first, discarded ladder is beside it under `minroot-run1-ladder-missing-lib64`.**
+
+    session_min_root   16 PASSED / 4 FAILED   (new; four candidate roots, one boot)
+
+**THE ANSWER IS "IT MOSTLY WORKS, AND HERE IS WHAT BREAKS".** The section
+"THE ARCHITECTURAL DIRECTION IS SETTLED" below ends with "Whether a
+constructed session root actually works ... is unmeasured, and it is the first
+thing a gate should answer." This answers it.
+
+**WHAT IS FAKED, AND IT BOUNDS EVERYTHING HERE.** There is no Hamnix app
+server. Each candidate root is a DIRECTORY with the machine's own directories
+bound into it. That answers "which absolute paths does a session assume",
+because resolution against the session's root is the same either way. It says
+NOTHING about 9P latency, about a server that can REFUSE a name, or about a
+root whose contents are not already on this disk.
+
+**THE TRAP, AND IT WOULD HAVE PRODUCED A CONFIDENT WRONG ANSWER.**
+`user/linux-syscalls.c:sys_bind` has two branches. Only the `#`-device one
+reaches `enter_root` (`mount(new,"/",MS_MOVE)` then `chroot(".")`). A
+PLAIN-DIRECTORY `bind /some/dir /` takes the other branch --
+`ns_mount(src,"/",MS_BIND|MS_REC)` -- and **that call RETURNS 0 AND THE
+PROCESS'S ROOT DOES NOT CHANGE**, because mounting over the "/" mount point
+does not move the process's own root. Measured on the host with the same
+primitive. So the obvious way to fake an app server is a gap that answers
+success-shaped. Every arm instead POSTS the root at a name (`bind /rN /n/rN`)
+and enters it with `bind '#distro/rN' /`, which is the same two-step
+`etc/rc.boot.linux` already uses for Alpine and Debian.
+
+**WHAT WORKS, MEASURED.** With `/bin`, `/lib` and `/lib64` bound in:
+
+* **`cd /` IS NOT THE MACHINE.** `ls /` answers `n sys proc dev lib64 lib bin
+  tmp srv` plus the arm's own marker -- **ten entries against the machine's
+  nineteen** -- and the machine's own root marker is not among them. The arm's
+  marker, a file that exists on no other root, resolves and prints.
+* **PROGRAMS RUN.** `/bin/id` answers `uid=0 gid=0 groups=0`, `/bin/hpm list`
+  runs, `/bin/hamappmenu` (the launcher) is present and resolves.
+* **THE WINDOW SYSTEM'S NAME SURVIVES.** `/dev/wsys/wsysd/state` opens, because
+  `enter_root`'s `always[]` carries /dev across.
+* Adding `/etc`, `/var` and `/usr` (arm r4) changed NOTHING that these probes
+  can see. The minimum set for this much is `/bin /lib /lib64`.
+
+**WHAT BREAKS. THREE THINGS, AND THE FIRST IS THE ONE THAT MATTERS.**
+
+1. **THE MACHINE'S REAL ROOT IS NOT REACHABLE AT `/n`.** In BOTH working arms,
+   `cat /n/MINROOT-REALROOT-MARKER` answers `No such file or directory`, even
+   though the template runs `bind '#/' /n` verbatim as `etc/rc.de-user.linux`
+   does for `enter debian`. `/n` exists (enter_root's `always[]` makes it) and
+   is not the machine. **The Plan 9 convention this whole direction rests on --
+   drivers on the real global root as an UNDERPINNING, reachable from below --
+   does not survive the root switch.** This is the thing to fix next.
+2. **WITHOUT `/lib64` EVERY EXEC DIES WITH A BARE 127 AND NO DIAGNOSTIC.** Arm
+   r2 -- `/bin` and nothing else, the literal reading of "apps live on a file
+   server" -- produced eight silent 127s. The shipped programs are dynamic ELF
+   built by clang against `-lssl -lcrypto -lcrypt`; their interpreter is
+   `/lib64/ld-linux-x86-64.so.2`, and `/lib` and `/lib64` are separate
+   top-level directories (`hamlinux_image.sh:34`). The silence is
+   `user/hamsh.ad`'s own documented shape: `spawn_resolved` probes candidates
+   with `sys_open` and prints "command not found" only when NONE opens; when
+   one opens it forks and execs and a failed execve says nothing.
+3. **AN `enter` BODY DOES NOT DISPATCH HAMSH BUILTINS.** Arm r1 answered
+   `hamsh: command not found: cat` and `... ls` -- both are builtins. A
+   constructed root with no `/bin` can run NOTHING, not even the shell's own
+   commands.
+
+**A FOURTH DEFECT, FOUND BY THE FIRST ATTEMPT FAILING.** The gate first used
+`$HAMNIX_DISTRO_<NAME>`, which `distro_resolve` documents as the most specific
+of three ways to name a distro namespace. Every arm failed 126 with
+`$HAMNIX_DISTRO_r1 unset`. **hamsh's `export` writes hamsh's OWN environment
+table** (`env_set`, materialised into an envp only by `_build_envp` at spawn
+time) **and hamsh never calls `setenv(3)`**, while `bind` is a hamsh BUILTIN --
+so `distro_resolve`'s `getenv()` runs in that same process and sees nothing.
+The override is unreachable from a `bind` typed at a shell. NOT FIXED.
+
+**WHAT IS NOT ESTABLISHED, and none of it should be read as done.**
+* **hpm IS NOT CLEARED.** It answered `hpm: no packages installed` with status
+  0 in both arms -- but this is the LIVE initramfs, which legitimately carries
+  no package database (the DISK builder emits `installed.json`, not the image
+  builder), so this boot **cannot distinguish "hpm works" from "hpm is blind in
+  a constructed root"**. It needs the same arms on an installed machine.
+* **NOTHING DREW A WINDOW.** Only the window server's NAME was shown to
+  resolve. Whether a scene client can map and commit a window from a
+  constructed root is unmeasured.
+* **NO SESSION ACTUALLY GETS THIS ROOT.** Every arm is an `enter` typed by
+  root in an rc. `etc/users/default.ns` is still SUBTRACTIVE and a real login
+  still lands in the machine's root.
+* **THIS WAS ALL ROOT.** The arms ran as uid 0. An unprivileged session has to
+  reach `enter_root` through `ns_privilege()`'s user namespace, and that is not
+  measured here.
+
+### A MACHINE THE INSTALLER JUST BUILT ASKS WHO YOU ARE -- 31 PASSED / 0 FAILED. AND THE FALLBACK rc WAS INSTALLING A MACHINE WITH NO LOGIN AT ALL
+
+**Measured on a booted machine, dev host, 2026-08-19, base `bb420836`.
+Evidence `~/.hamnix-build/instfreshlogin/GATE.log`.**
+
+    installed_fresh_login   31 PASSED / 0 FAILED   (new; three installs in one
+                                                    medium boot, then two boots
+                                                    of the resulting disk)
+
+**THE ENTRY ABOVE PROVED THE GUARD ON A DISK WHOSE `/etc/rc.boot` THE GATE
+WROTE.** It says so itself under "THE INSTALLER PATH IS UNMEASURED". This
+closes that: the disk booted here is the one `hlinstall` produced, byte for
+byte, with nothing written into it by the gate.
+
+**THE ANSWER: YES.** A fresh install presents `login: ` on its console (3
+prompts, anchored -- `rc.login: getty started on /dev/ttyS0` CONTAINS the
+substring `login:`), refuses junk credentials AND the real account's wrong
+password (2 x `Login incorrect`), and admits on the right one as
+`uid=1001(hamfreshusr)` -- the uid read off the disk's own `/etc/passwd`, not
+assumed. Before any credential was offered, `id` produced no root identity and
+a typed redirect created nothing. The first `login: ` is at serial line 615
+and the first shell prompt at 635, so **no shell was offered before the
+question**.
+
+**AND THE DEFECT THE PREVIOUS ENTRY FLAGGED WAS REAL.**
+`user/hlinstall.ad:write_machine_rc_boot` copies `/etc/rc.boot.machine` to the
+target. Its FALLBACK -- reached when the medium does not carry that file --
+wrote **one line, `source '/etc/rc.boot.installed'`, and returned 0**. No
+`/etc/rc.login`, no `supervise`: a machine with no login program on any
+terminal and a PID 1 that runs off the end of its script into its own
+unauthenticated uid 0 prompt, **produced by an installer that then printed
+"install complete"**. A gap answering something success-shaped, which is this
+tree's oldest failure.
+
+**THE FIX, AND WHAT IT DELIBERATELY DOES NOT DO.** The fallback now writes the
+same three-line contract `etc/rc.boot.machine` carries, and then REFUSES THE
+INSTALL if `/etc/rc.login` is not on the target -- because `source` of a
+missing file is a no-op, and an rc that sources nothing and then supervises is
+a machine nobody can log into. **The COPY path is not second-guessed.**
+`etc/rc.boot.machine`'s own header records that a gate replacing that file is
+opting out of the guard visibly, and `installed_accounts.sh` (registered,
+61/0) does exactly that; checking the copied bytes for `supervise` would have
+turned that gate's install red.
+
+**THE THREE ARMS ARE THREE INSTALLS IN ONE MEDIUM BOOT, and the only variable
+is what the medium carried.** The medium's rc deletes a file between them;
+same installer binary, same arguments, same geometry.
+
+* **A `shipped`** -- the medium intact. Target rc: `source
+  '/etc/rc.boot.installed'` / `source '/etc/rc.login'` / `supervise`, 2916
+  bytes. Installer exit 0.
+* **B `nomachine`** -- `/etc/rc.boot.machine` deleted, so the FALLBACK ran (and
+  said so on the wire). Target rc: **the same three lines**, 888 bytes.
+  Installer exit 0. **Before the fix this disk would have booted to a root
+  prompt.**
+* **C `noguard`** -- `/etc/rc.login` deleted too, so no guard is producible.
+  **The installer exited 1**, printed `refusing to report a successful install
+  of an unguarded machine`, and **never printed "install complete"** -- so
+  `user/haminstallui.ad` would paint FAILED. Arm A DID print it, so that
+  absence is a real difference and not a grep that never matches.
+
+**THE BOOT CONTROL RUNS, and it is the same disk differing by two words.** A
+copy of arm A's disk with `-a hostowner` on the console getty. `login -f` does
+not setuid, so it keeps PID 1's root: that arm answered **`uid=0 gid=0`** (no
+parentheses -- the disk has no uid 0 entry, which is why the detector is
+`uid=0([^0-9]|$)` and not `uid=0(`) and presented no `login: ` prompt at all.
+Without it, the fresh arm's silence would prove nothing.
+
+**WHAT IS STILL NOT ESTABLISHED.** The virtual terminals (`/dev/tty2`,
+`/dev/tty3`) are started and unmeasured -- once wsysd presents it owns the
+framebuffer and nothing on this machine reads tty2 back. The live medium is
+unchanged and still gives an unauthenticated root console, deliberately. The
+graphical login is still not built.
+
 ### THE INSTALLED MACHINE ASKS WHO YOU ARE, AND THERE IS NO LONGER A ROOT SHELL BEHIND THE QUESTION -- 27 PASSED / 0 FAILED
 
 **Measured on booted machines, dev host, 2026-08-19, base `b283c9ea`. Evidence
