@@ -171,6 +171,28 @@ Both are older and larger than the uid bug, and neither is fixed here.
    power-down after it, on a run whose document WAS written. This is the same
    fact as the `poweroff` hang recorded above.
 
+#### AND THE GATE THAT CAUSED THE REVERT WAS RE-RUN ON THE FIXED TREE: **48 PASSED / 0 FAILED**
+
+`tests/linux/installed_documents.sh`, measured on `3751deca`, dev host,
+2026-08-19. Evidence `~/.hamnix-build/instdoc-rerun-0819/`. That is the same
+number as the 2026-08-18 run and exactly its registered `expect_min` of 48 in
+`scripts/release_gates.sh:264` -- **so the console fix did not change this
+gate's verdict, and the honest reading is that it never could have: this gate's
+subject runs as ROOT** (the machine's own rc launches `/bin/<app>` inside
+`ns { }`, which is what an icon does), and its oracle is `debugfs` on the ext4
+plus OCR of the screen. It is class (a). All three documents landed in
+`/home/hamdocusr/Documents`, 43 / 41 / 41 bytes, each carrying the typed
+marker, and `/home/live/Documents` has no document in it.
+
+**AND IT RE-MEASURED THE THING TASK 3 IS ABOUT, THREE TIMES:** the saved
+document is owned by **uid 0** in all three arms. The person's documents are
+root's, inside a directory that is theirs.
+
+The run also reproduced, for all three applications, the silence described
+above: `hamwrite`/`hamsheet`/`hamslides`: *"no completed-write line reached the
+serial ... the console stops reaching it once the compositor presents"*. That
+is now a routine, printed observation of a defect that is still open.
+
 #### ONE THING THE AUDIT FIXES ON THE SPOT
 
 `tests/linux/installed_documents.sh`'s header claimed, of
