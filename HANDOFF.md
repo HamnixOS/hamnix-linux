@@ -27,6 +27,74 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+### DAVID SPOKE, 2026-08-19: THREE DIRECTIONS AND ONE MEASUREMENT FROM THE OWNER'S OWN MACHINE
+
+**These are HIS words, not an inference from the tree. They change what is
+allowed and what is worth building.**
+
+**1. THE KERNEL A/B WORK IS UNBLOCKED. "Kernel updates should be safe to test in
+a VM, we don't have any real users or any installed OSes in the wild."** I had
+declined to build A/B kernel updates on my own authority, reasoning that a
+half-safe version makes unbootable machines. **There are no machines to brick.**
+The only installed machines are the ones gates create, plus his own stick, which
+he writes himself. **BUILD IT AND LET A GATE FIND THE UNBOOTABLE CASES.** The
+cautions that remain are about REAL HARDWARE and HIS DISK, not about the concept
+of a risky change.
+
+**2. `init 0` WORKS. `poweroff` HUNG. THIS IS THE BEST HANDLE WE HAVE EVER HAD ON
+THAT BUG.** Every attempt to locate the power-down hang has failed in QEMU — the
+banner-restored control powered a presenting desktop off in 21 s and 18 s across
+two display paths. **The owner reports that `init 0` powered his machine down
+just fine.** That is a DISCRIMINATOR, and it is worth more than another blind
+control run, because the two paths differ in ways that are enumerable:
+
+  * `init 0` is a **hamsh BUILTIN**. It runs inside PID 1. It never `execve`s,
+    so it keeps the console mirror descriptor the shell opened while root.
+  * `poweroff` is a **separate exec'd binary**. Its mirror is opened after
+    `execve`, and its fd 1 is `/dev/console`, which follows the last `console=`
+    and is therefore the SCREEN the compositor covers.
+
+Whoever picks this up should stop trying to reproduce the hang blind and instead
+**run both paths on ONE booted machine and diff them.** A within-boot A/B is
+exactly the shape that made the launch-uid result trustworthy.
+
+**CAUTION ON THIS DATUM, stated because I have burned this project before by
+attaching a measurement to the wrong artifact:** it is not established that his
+`init 0` and his hanging `poweroff` were the same machine in the same state, or
+that either was on the release we now ship. Ask before treating it as a
+controlled pair. **It is still the strongest lead on this bug.** And note the
+tree currently says `init 0`/`init 6` "carry the same shape and are NOT fixed" —
+that sentence is about the SOURCE, and the owner's machine disagrees with the
+prediction it invites.
+
+**3. HE WANTS A GETTY AND A GRAPHICAL LOGIN.** "A getty like program for multi
+ttys/login prompts would be nice, and a gdm like login interface for the GUI
+would be good too."
+
+This is the answer to the unauthenticated uid 0 console, and it revises a
+position I have been repeating: I wrote that the freeze and the root console are
+one architectural fact (PID 1 *is* `hamsh`) and that **"a greeter bolted beside
+it does not close it."** That remains true as stated — but it argues for the
+right fix rather than against a greeter. **The fix is that PID 1's rc must not
+fall through to an interactive prompt at all; it must spawn login programs on
+the ttys.** A getty per tty plus a display manager IS the standard answer, and it
+closes the hole properly rather than beside it.
+
+**4. THE SECURITY MODEL IS AN OPEN QUESTION AND HE HAS NOT SETTLED IT.** "The OG
+hamnix did not really use POSIX at all. the namespaces were the security
+boundarys, not sure how much of that we can duplicate or even want to. The
+native kernel also has no global root."
+
+**This is a live caveat on work already merged.** The `user <path>` launch verb,
+uid 1001 sessions and file ownership are a POSIX-shaped answer grafted onto a
+system whose original security boundary was the namespace. That work is not
+wrong — a person's file should belong to the person — but **it should not be
+read as a decision that this system is POSIX-shaped.** Do not quietly
+standardise on uids as though it were settled, and do not go build a namespace
+security model on spec either. When a change leans one way, say which way and
+why. One hard constraint: a stock Linux kernel HAS a global root, so full
+duplication of the native model may be impossible regardless of preference.
+
 ### THE OWNERSHIP FIX MAKES THE HARDCODED SAVE-AS DEFAULT NEWLY REACHABLE, AND THE NEW GATE ALREADY STATES THE PREMISE
 
 **2026-08-19, orchestrator-side, read-only. Nothing booted, nothing changed.
