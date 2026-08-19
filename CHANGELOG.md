@@ -14,6 +14,16 @@ because the number is the deliverable.
 
 ## Unreleased
 
+Nothing yet. Work lands here between releases; if this section is empty, the
+tree and the channel agree.
+
+## 1.0.31 — 2026-08-19
+
+**PUBLISHED and verified as served.** 130 packages at 1.0.31; the signature
+verifies against `etc/hpm/trusted.pub`, the trust root installed machines already
+carry; and `hamnix-install`, `hamnix-init` and `hamnix-desktop` **fetched from
+the site** are byte-identical to the gated build. 1.0.30 stays fetchable.
+
 ### Your password works. Nothing ever asks you for it.
 
 This release makes the password you type into the installer real: it is stored
