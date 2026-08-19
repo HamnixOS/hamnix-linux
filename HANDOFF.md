@@ -27,6 +27,80 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### A MACHINE THE INSTALLER JUST BUILT ASKS WHO YOU ARE -- 31 PASSED / 0 FAILED. AND THE FALLBACK rc WAS INSTALLING A MACHINE WITH NO LOGIN AT ALL
+
+**Measured on a booted machine, dev host, 2026-08-19, base `bb420836`.
+Evidence `~/.hamnix-build/instfreshlogin/GATE.log`.**
+
+    installed_fresh_login   31 PASSED / 0 FAILED   (new; three installs in one
+                                                    medium boot, then two boots
+                                                    of the resulting disk)
+
+**THE ENTRY ABOVE PROVED THE GUARD ON A DISK WHOSE `/etc/rc.boot` THE GATE
+WROTE.** It says so itself under "THE INSTALLER PATH IS UNMEASURED". This
+closes that: the disk booted here is the one `hlinstall` produced, byte for
+byte, with nothing written into it by the gate.
+
+**THE ANSWER: YES.** A fresh install presents `login: ` on its console (3
+prompts, anchored -- `rc.login: getty started on /dev/ttyS0` CONTAINS the
+substring `login:`), refuses junk credentials AND the real account's wrong
+password (2 x `Login incorrect`), and admits on the right one as
+`uid=1001(hamfreshusr)` -- the uid read off the disk's own `/etc/passwd`, not
+assumed. Before any credential was offered, `id` produced no root identity and
+a typed redirect created nothing. The first `login: ` is at serial line 615
+and the first shell prompt at 635, so **no shell was offered before the
+question**.
+
+**AND THE DEFECT THE PREVIOUS ENTRY FLAGGED WAS REAL.**
+`user/hlinstall.ad:write_machine_rc_boot` copies `/etc/rc.boot.machine` to the
+target. Its FALLBACK -- reached when the medium does not carry that file --
+wrote **one line, `source '/etc/rc.boot.installed'`, and returned 0**. No
+`/etc/rc.login`, no `supervise`: a machine with no login program on any
+terminal and a PID 1 that runs off the end of its script into its own
+unauthenticated uid 0 prompt, **produced by an installer that then printed
+"install complete"**. A gap answering something success-shaped, which is this
+tree's oldest failure.
+
+**THE FIX, AND WHAT IT DELIBERATELY DOES NOT DO.** The fallback now writes the
+same three-line contract `etc/rc.boot.machine` carries, and then REFUSES THE
+INSTALL if `/etc/rc.login` is not on the target -- because `source` of a
+missing file is a no-op, and an rc that sources nothing and then supervises is
+a machine nobody can log into. **The COPY path is not second-guessed.**
+`etc/rc.boot.machine`'s own header records that a gate replacing that file is
+opting out of the guard visibly, and `installed_accounts.sh` (registered,
+61/0) does exactly that; checking the copied bytes for `supervise` would have
+turned that gate's install red.
+
+**THE THREE ARMS ARE THREE INSTALLS IN ONE MEDIUM BOOT, and the only variable
+is what the medium carried.** The medium's rc deletes a file between them;
+same installer binary, same arguments, same geometry.
+
+* **A `shipped`** -- the medium intact. Target rc: `source
+  '/etc/rc.boot.installed'` / `source '/etc/rc.login'` / `supervise`, 2916
+  bytes. Installer exit 0.
+* **B `nomachine`** -- `/etc/rc.boot.machine` deleted, so the FALLBACK ran (and
+  said so on the wire). Target rc: **the same three lines**, 888 bytes.
+  Installer exit 0. **Before the fix this disk would have booted to a root
+  prompt.**
+* **C `noguard`** -- `/etc/rc.login` deleted too, so no guard is producible.
+  **The installer exited 1**, printed `refusing to report a successful install
+  of an unguarded machine`, and **never printed "install complete"** -- so
+  `user/haminstallui.ad` would paint FAILED. Arm A DID print it, so that
+  absence is a real difference and not a grep that never matches.
+
+**THE BOOT CONTROL RUNS, and it is the same disk differing by two words.** A
+copy of arm A's disk with `-a hostowner` on the console getty. `login -f` does
+not setuid, so it keeps PID 1's root: that arm answered **`uid=0 gid=0`** (no
+parentheses -- the disk has no uid 0 entry, which is why the detector is
+`uid=0([^0-9]|$)` and not `uid=0(`) and presented no `login: ` prompt at all.
+Without it, the fresh arm's silence would prove nothing.
+
+**WHAT IS STILL NOT ESTABLISHED.** The virtual terminals (`/dev/tty2`,
+`/dev/tty3`) are started and unmeasured -- once wsysd presents it owns the
+framebuffer and nothing on this machine reads tty2 back. The live medium is
+unchanged and still gives an unauthenticated root console, deliberately. The
+graphical login is still not built.
+
 ### THE INSTALLED MACHINE ASKS WHO YOU ARE, AND THERE IS NO LONGER A ROOT SHELL BEHIND THE QUESTION -- 27 PASSED / 0 FAILED
 
 **Measured on booted machines, dev host, 2026-08-19, base `b283c9ea`. Evidence

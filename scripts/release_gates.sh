@@ -354,6 +354,33 @@ installed_uid_console|yes|0|23||bash tests/linux/installed_uid_console.sh
 # REACH a root shell for the guarded arm's silence to mean anything. If the
 # control stops firing this gate goes red on the control, not on the product.
 installed_boot_login|yes|0|27||bash tests/linux/installed_boot_login.sh
+
+# DOES A MACHINE THE INSTALLER JUST BUILT ASK WHO YOU ARE? installed_boot_login
+# above proved the guard works; it did so on a disk whose /etc/rc.boot THE GATE
+# WROTE. Nobody had ever run the installer against the change, and its fallback
+# branch -- reached when the medium carries no /etc/rc.boot.machine -- wrote a
+# one-line rc with NO login program and NO `supervise`, then returned 0. That is
+# an installer printing "install complete" over a machine that boots straight to
+# an unauthenticated root prompt. 31/0 measured on this host, 2026-08-19, in the
+# run that registered it: one medium build, THREE installs in one boot, and two
+# boots of the resulting disk.
+#
+# THE COUNT INCLUDES TWO CONTROLS THAT RUN. Arm C deletes /etc/rc.login as well,
+# so the installer CANNOT produce a machine that asks, and must fail loudly --
+# it exited 1 and never printed "install complete", while arm A did print it, so
+# the absence is a difference and not a grep that never matches. And the boot
+# control is the same installed disk with `-a hostowner` on the console getty,
+# which MUST reach a root shell with no password; it answered `uid=0 gid=0`. If
+# either control stops firing this gate goes red on the control, not the product.
+installed_fresh_login|yes|0|31||bash tests/linux/installed_fresh_login.sh
+
+# WHAT BREAKS WHEN `/` IS NOT THE MACHINE'S ROOT -- the first booted measurement
+# of the owner's "the global root should be min as possable" direction. REGISTERED
+# RED ON PURPOSE, and the header says so: its reds are the finding, not a
+# regression. See the commit that added it and HANDOFF.md. expect_fail=1 records
+# that a NON-red run is the thing to look at, because it would mean a constructed
+# session root started working and this line needs re-measuring.
+session_min_root|yes|1|9||bash tests/linux/session_min_root.sh
 REGISTRY
 }
 
