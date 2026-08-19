@@ -153,6 +153,42 @@ freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
 it has never been caught in the act on that machine.
 
 
+### I CHECKED THE AUDIT'S ONE UNMEASURED FINDING AT THE SOURCE LEVEL, AND ITS CLASSIFICATION IS EXACT
+
+**2026-08-19, orchestrator-side, read-only. Nothing booted, nothing changed.**
+
+The muted-oracle audit flagged three assertions in `tests/linux/installed_update.sh`
+as class (b) — a RED caused by muting — and labelled that finding **PREDICTED,
+NOT MEASURED**, because the gate's last run predates the console flip and nobody
+has spent the boot since. I cannot run it (it boots machines and an agent is
+using the harness), but the *classification* is checkable by reading, so I read it.
+
+**It is exactly right, and the split is cleaner than the report claimed.** In the
+uid-1001 block, the assertions divide precisely along the builtin/exec line:
+
+  * **Muted (read another PROGRAM's output, so `consmirror` had to open
+    `/dev/ttyS0` after `execve`):** the `hpm list` output, the `cat` of the
+    stamp, and `hpm`'s own refusal string `package installation requires
+    hostowner`. Three. Those are the three the audit named.
+  * **Audible (match a `status: N` line the SHELL echoes, a builtin whose mirror
+    fd opened while still root and survived `setuid`):** the other four.
+
+So under muting this gate would have gone red on exactly three assertions while
+four beside them kept passing — which is the audit's account, confirmed
+independently.
+
+**AND I CHECKED THE ONE THING THAT COULD HAVE MADE IT CLASS (c).** This gate has a
+scored ABSENCE assertion — `nocheck`, which PASSES when its regex is *not* found,
+and is used for "nothing landed in /bin from it". A muted absence assertion is
+the dangerous shape: it cannot fail. **It is safe here**, because its regex
+matches a `status: 0` line the shell echoes, not a program's own output — audible
+in the muted arm. The audit's "no scored green was caused by muting" survives a
+second look at the one gate most likely to break it.
+
+**WHAT THIS STILL DOES NOT ESTABLISH:** the gate has not been run. Everything above
+is a reading of what it *would* score, and the audit was right to label its own
+finding predicted. The boot is still owed.
+
 ### THE AUDIT OF EVERY GATE THAT READ SILENCE: **TWO** WERE AFFECTED, NOT MANY -- AND THE DANGEROUS CLASS IS EMPTY
 
 **Static audit, dev host, 2026-08-19, on `port/tier1-syscalls` at `3751deca`
@@ -413,11 +449,25 @@ then reads the resulting process's uid out of `ps`. NOT BUILT HERE.
 **2026-08-19, orchestrator-side, read-only. No code changed.** These are two
 claims I had been carrying forward hour after hour without measuring either.
 
-**SUPERSEDED 2026-08-19 -- the gate is RED on `61590f23`; see
-"`test_gate_registration.sh` WAS RED ON THIS TREE" at the top of this section.
-The reading below was correct when taken and predates the gate that broke it.
-Note also that the struck claim was RIGHT about one thing: the checker really
-does NOT read `release_gates.sh`.**
+> **THIS ENTRY WAS WRONG WITHIN THE HOUR, AND THE ERROR WAS MINE. Corrected
+> 2026-08-19, left standing per this file's convention.** I measured the green at
+> `945afa25`. `tests/linux/installed_uid_console.sh` DID NOT EXIST at that commit
+> — I verified with `git cat-file` — and it arrived in the console merge I made
+> myself immediately afterwards, entering the checker's dark set. So the gate was
+> red again the moment I published that it passed. **I made the exact "WHICH TREE"
+> mistake I had written into the agent brief one commit earlier**, and an agent
+> caught it, not me. A green is a fact about a commit, and mine expired on the
+> next one. The registration has since been repaired.
+>
+> **AND THE STRUCK CLAIM BELOW WAS RIGHT ABOUT ONE THING, which is worth keeping
+> because it is the part that will bite the next person:** the checker really
+> does NOT read `scripts/release_gates.sh`. `installed_uid_console` WAS
+> registered there, at line 301, the whole time. A gate counts as covered only
+> if a GitHub workflow or `ci_battery_manifest.txt` names it, or if its own
+> header carries the phrase `not in ci_battery_manifest.txt because` **in its
+> first 80 lines**. Registering a gate in `release_gates.sh` and expecting this
+> checker to notice will not work. Both affected gates now carry the phrase;
+> PASS, with 1789 seen / 829 registered / 218 annotated / 743 baselined.
 
 **STRUCK: "`test_gate_registration.sh` produces FALSE REDS because the checker
 does not know `release_gates.sh` is a registrar."** I ran it on the merged tree.
