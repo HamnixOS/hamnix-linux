@@ -1244,10 +1244,30 @@ def _report_icon_source(n: uint64):
 
 # STARTUP load: scan the desktop dir, fall back to the built-in default set
 # if it yields nothing, then re-apply any persisted drag positions.
+#
+# AND THEN PUBLISH THE TABLE AGAIN, WHICH IS NOT REDUNDANT.
+# _load_icons_from_dir() publishes it (via _report_icon_source) as part of
+# building the model -- i.e. BEFORE _load_positions() has moved anything. So on
+# the startup path the file said where the DEFAULT COLUMN FLOW would have put
+# each icon, while the desktop was drawing any pinned icon somewhere else
+# entirely. _report_icon_source's own comment is that it exists so "a gate that
+# wants to click a named icon otherwise has to re-derive the column flow ...
+# and a guess that misses clicks some OTHER app and reports a false failure" --
+# and a table that disagrees with the screen is worse than no table, because it
+# is believed. _rebuild_after_refresh() already had the order right; only this
+# path did not.
+#
+# MEASURED, not reasoned: tests/linux/pointer_launch_uid.sh pinned two icons to
+# (600,300) and (600,420) through ~/Desktop/.hamdesktop.pos, clicked at those
+# points, and BOTH clicks launched the pinned icons' programs with the two
+# different identities their .desktop files call for -- while the published
+# table still listed the whole set in the default flow at x=18 and x=102. The
+# pins had taken; the file was stale.
 def _reload_icons():
     if _load_icons_from_dir() == 0:
         _load_defaults()
     _load_positions()
+    _report_icon_source(n_icons)
 
 
 # Refresh rebuild-vs-keep decision. A periodic desktop re-scan must NEVER wipe
