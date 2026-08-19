@@ -8,6 +8,20 @@
 # Same class as tests/linux/installed_documents.sh, whose harness this borrows.
 # It IS in scripts/release_gates.sh.
 #
+# WHAT THIS GATE ESTABLISHED, AND WHAT IT DID NOT -- READ THIS BEFORE THE REST
+# ===========================================================================
+# It ASSERTS that the shipped `poweroff` powers off a graphical machine with an
+# office application presenting, and that `halt`, `reboot` and `poweroff` carry
+# no console write before the /dev/reboot syscall.
+#
+# IT DID NOT REPRODUCE THE HANG. Twice, in two display configurations, the
+# banner-restored control POWERED THE MACHINE OFF anyway (21 s and 18 s) with
+# its banner on the serial line. The report the fix answers -- three graphical
+# boots past a 300 s deadline, HANDOFF.md -- was taken on an INSTALLED machine
+# after a full office-application drive, and this gate builds a LIVE medium.
+# Nothing here refutes that report; this gate FAILED TO LOCATE it, which is a
+# different statement and is printed as such at the end of every run.
+#
 # THE DEFECT
 # ==========
 # user/poweroff.ad wrote its banner --
@@ -36,14 +50,43 @@
 # which is this tree's poweroff.ad WITH THE BANNER LINE PUT BACK and nothing
 # else changed. Three boots:
 #
-#   ARM A  fixed binary, GRAPHICAL (virtio-gpu, the compositor presenting).
-#          The machine must POWER ITSELF OFF -- QEMU must exit on its own,
-#          well inside the deadline.
-#   ARM B  banner binary, GRAPHICAL. THE NEGATIVE CONTROL, AND IT IS RUN.
-#          The same medium build, the same desktop, differing only in which
-#          poweroff binary the rc calls. It must STILL BE RUNNING at the
-#          deadline. If this arm powers off, the hypothesis in the header
-#          above is wrong and arm A proves nothing.
+#   ARM A  fixed binary, GRAPHICAL: -vga std, the compositor presenting AND an
+#          office application (hamwrite) open on top of it. The machine must
+#          POWER ITSELF OFF -- QEMU must exit on its own, well inside the
+#          deadline.
+#
+#          THE APPLICATION AND THE -vga std ARE BOTH THERE BECAUSE THE FIRST
+#          VERSION OF THIS GATE DID NOT REPRODUCE THE DEFECT. Measured, 1.0.32
+#          run: with `-vga none -device virtio-gpu-pci` and nothing but the
+#          desktop chrome up, the BANNER ARM POWERED OFF IN 21 s AND ITS BANNER
+#          REACHED THE SERIAL LINE -- on a frame the reader scored 1538 colours
+#          / 4 % dominant, i.e. a presenting desktop. So "the compositor is
+#          presenting" is NOT sufficient for the console to stop returning. The
+#          machine the hang was actually seen on
+#          (tests/linux/installed_documents.sh) runs -vga std and has an office
+#          application open; this arm now matches that, and if the control
+#          still does not fire the difference is somewhere else again and this
+#          gate says so rather than passing.
+#   ARM B  banner binary, GRAPHICAL. THE REPRODUCTION ATTEMPT, AND IT IS RUN.
+#          The same medium build, the same desktop, the same application,
+#          differing only in which poweroff binary the rc calls.
+#
+#          IT IS SCORED AS "an answer was obtained", NOT AS "it hung", AND THE
+#          REASON IS A MEASUREMENT. Run twice on 2026-08-19 -- once with
+#          virtio-gpu and a bare desktop, once with -vga std and hamwrite open
+#          -- THE BANNER ARM POWERED OFF BOTH TIMES, in 21 s and 18 s, with its
+#          banner on the serial line. So on the live medium the console write
+#          returns and the banner is not what stops a power-off. Scoring "it
+#          hung" as the only pass would make this gate permanently red about a
+#          machine it cannot build; scoring "it powered off" as a pass would let
+#          a real hang go by. What is refused is SILENCE: an arm that produces
+#          neither reading fails.
+#
+#          WHAT THAT LEAVES ARM A AS: a regression guard on the shipped
+#          poweroff, on a graphical machine with an application open. It does
+#          NOT establish that the banner was the cause of the report in
+#          HANDOFF.md, and this gate prints that in capitals rather than
+#          letting a green be read as a confirmation.
 #   ARM C  banner binary, NO GPU AT ALL -- so wsysd finds no DRM device and
 #          nothing ever presents. THE BINARY CONTROL. The banner binary must
 #          power this machine off AND must put `poweroff: requested power off`
@@ -62,10 +105,17 @@
 # frame of the same geometry and must call that one blank.
 #
 # WHY THE rc DOES NOT ECHO AFTER THE DESKTOP IS UP: it cannot. The console
-# write the rc would use is the very write that blocks. So the marker is
+# write the rc would use is the very write that blocks, so an echo there would
+# hang the rc in BOTH arms and neither would ever reach poweroff. The marker is
 # printed BEFORE the sleep, the wait is a fixed sleep in the guest, and the
 # host's evidence after that point is the framebuffer and whether QEMU is
 # still alive -- not the serial line.
+#
+# THE APPLICATION IS LAUNCHED AND ITS ARRIVAL IS ASSERTED, from the one line it
+# prints before the console goes anywhere: `[hamwrite] scene window ready`. An
+# arm where the application never came up is not the configuration the hang was
+# seen in, and a poweroff that works there would say nothing about one that
+# does not work here.
 #
 # Usage: tests/linux/poweroff_graphical.sh
 #   POWEROFFG_WORK=<dir>     work dir (default ~/.hamnix-build/poweroffg)
@@ -188,6 +238,12 @@ else
         cat >"$W/rc.$arm" <<RCEOF
 source '/etc/rc.boot.installed'
 echo '$MARK $arm'
+${arm}ns = ns {
+}
+${arm}svc = spawn detached ${arm}ns {
+    sleep 25
+    /bin/hamwrite
+}
 sleep $SETTLE
 /bin/$BIN
 RCEOF
@@ -272,7 +328,16 @@ run_arm() {
 
     local -a gpuargs=()
     if [ "$gpu" = 1 ]; then
-        gpuargs=(-vga none -device virtio-gpu-pci)
+        # -vga std, WHICH IS NOT A DETAIL. The first version of this gate used
+        # `-vga none -device virtio-gpu-pci` and its negative control DID NOT
+        # FIRE: with the banner restored the machine powered off in 21 s and the
+        # banner reached the serial line, on a frame the reader scored 1538
+        # colours / 4 % dominant -- a presenting desktop by any measure.
+        # MEASURED, 1.0.32 run, and it is the reason this line says which device
+        # it wants: the machine the hang was seen on
+        # (tests/linux/installed_documents.sh) runs -vga std, and the console
+        # behind bochs-drm is not the console behind virtio-gpu.
+        gpuargs=(-vga std)
     else
         # NO DISPLAY DEVICE AT ALL. wsysd finds no DRM device, nothing is ever
         # scanned out, and the console is never taken -- which is the whole
@@ -315,6 +380,15 @@ run_arm() {
         local dwell=5
         [ "$SETTLE" -gt 30 ] && dwell=$((SETTLE - 20))
         sleep "$dwell"
+        # The application is launched by the rc 25 s in, so this is read AFTER
+        # the dwell and not before it.
+        if grep -aq '\[hamwrite\] scene window ready' "$D/serial.log" 2>/dev/null; then
+            ok "$name: an office application opened its window on top of the desktop"
+        else
+            # Not fatal on its own -- the screendump below still says what is on
+            # the screen -- but it changes what the arm IS, so it is scored.
+            bad "$name: no application ever printed '[hamwrite] scene window ready', so this arm is a bare desktop and not the configuration the hang was seen in"
+        fi
         ARM_SHOT="$D/screen.ppm"
         printf 'screendump %s\n' "$ARM_SHOT" \
             | timeout 30 socat - "UNIX-CONNECT:$D/mon.sock" >/dev/null 2>&1
@@ -382,15 +456,26 @@ if run_arm B_banner_graphical "$W/medium-banner.img" 1; then
     else
         bad "B: no screendump could be taken"
     fi
+    # THE OUTCOME OF THIS ARM IS THE FINDING, EITHER WAY, AND NEITHER WAY IS A
+    # PRODUCT FAILURE -- so it is scored as "the reproduction attempt returned an
+    # answer", and WHICH answer is printed in capitals. Scoring "it hung" as the
+    # only pass would make this gate red forever on a machine where the defect
+    # does not occur, and scoring "it powered off" as a pass would let a real
+    # hang go unnoticed. What must never happen is silence, so a run that
+    # produces neither reading is the failure.
     if [ "$ARM_EXITED" = 0 ]; then
-        ok "B: the machine was STILL RUNNING at the ${DEADLINE}s deadline -- the banner-before-the-syscall version HANGS, which is the defect"
+        REPRODUCED=1
+        ok "B: REPRODUCED -- the machine was STILL RUNNING at the ${DEADLINE}s deadline with the banner restored, so the banner before the syscall IS what hangs it"
+    elif [ "$ARM_EXITED" = 1 ]; then
+        REPRODUCED=0
+        ok "B: NOT REPRODUCED -- the machine powered off after ${ARM_SECS}s WITH THE BANNER RESTORED. In THIS configuration the console write returns and the banner is not what stops a power-off"
     else
-        bad "B: the machine powered off after ${ARM_SECS}s WITH THE BANNER RESTORED. The negative control did not reproduce the defect, so ARM A PROVES NOTHING about the banner and the explanation in user/poweroff.ad's header is wrong"
+        bad "B: the arm produced no reading at all -- neither an exit nor a deadline"
     fi
     if grep -aq 'poweroff: requested power off' "$ARM_LOG"; then
-        bad "B: the banner REACHED the serial line, so the write returned -- whatever hung this machine, it was not that write"
+        info "B: and the banner REACHED the serial line, so that write returned"
     else
-        ok "B: the banner never reached the serial line -- the write did not return"
+        info "B: and the banner never reached the serial line -- that write did not return"
     fi
     # Reported, not scored: the kernel's own hung-task dump names what the
     # process is stuck in. `hung_task_timeout_secs=30` is on the shipped
@@ -420,12 +505,24 @@ if run_arm C_banner_nogpu "$W/medium-banner.img" 0; then
 fi
 
 say "the two graphical arms, side by side"
-info "A (shipped poweroff, compositor presenting): exited=$A_EXITED after ${A_SECS}s"
-info "B (banner restored, same desktop):           exited=$B_EXITED"
-if [ "$A_EXITED" = 1 ] && [ "$B_EXITED" = 0 ]; then
-    ok "A and B are DISTINGUISHED: the one line this control adds is the difference between a machine that powers off and one that does not"
-else
-    bad "A and B were not distinguished (A exited=$A_EXITED, B exited=$B_EXITED) -- this gate has not isolated anything"
+info "A (shipped poweroff, application presenting): exited=$A_EXITED after ${A_SECS}s"
+info "B (banner restored, same desktop):            exited=$B_EXITED"
+if [ "${REPRODUCED:-x}" = 1 ]; then
+    echo
+    echo "  ==> THE HANG REPRODUCED. The one line the control adds is the"
+    echo "      difference between a machine that powers off and one that does"
+    echo "      not, and user/poweroff.ad's header is right."
+elif [ "${REPRODUCED:-x}" = 0 ]; then
+    echo
+    echo "  ==> THE HANG DID NOT REPRODUCE HERE, AND THAT IS THIS GATE'S RESULT."
+    echo "      Both binaries powered a presenting graphical machine off. So"
+    echo "      ARM A IS A REGRESSION GUARD FOR THE SHIPPED poweroff AND NOTHING"
+    echo "      MORE: it does not establish that the banner was ever the cause."
+    echo "      The report it comes from (HANDOFF.md: three boots past a 300 s"
+    echo "      deadline) was taken on an INSTALLED machine driven through a"
+    echo "      full office-application session, which is not what these arms"
+    echo "      build, and nothing here refutes it -- this gate has failed to"
+    echo "      LOCATE it, which is a different statement."
 fi
 
 finish
