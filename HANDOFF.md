@@ -13,6 +13,47 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+### I COULD NOT REPRODUCE THE "962 BYTES" FIGURE, AND I PUBLISHED IT
+
+The account defect is real and its mechanism is verified in the source:
+`user/hlinstall.ad`'s `append_line()` reads into `&line_buf[total]` capped at
+480, and `line_buf` is a **512-byte global — the same buffer its caller built the
+new line in.** That much I checked myself and it stands.
+
+**The 962-byte figure I put in HANDOFF, the hourly brief and a report to the
+owner is a different matter.** I went to verify it on installed disks and could
+not reproduce it on any of the three available:
+
+| disk | `/etc/passwd` | `/etc/shadow` |
+|---|---|---|
+| `instacct-red/target-nvme.img` | 1484 | 954 |
+| `instacct/target-nvme.img` | 1410 | 857 |
+| `instoffer/target-nvme.img` | 1410 | 857 |
+
+**The instrument was checked first and works** — `debugfs` reads `/etc/rc.boot`
+off each filesystem at 1016 and 1264 bytes. So these are measurements, not empty
+results.
+
+**This does NOT refute the original measurement, and I am not claiming it does.**
+All three disks post-date the fix work; the one named `-red` should be the
+reverted arm and yet carries account lines, which I cannot explain. Provenance is
+unknown to me, and a disk whose history I cannot establish is not evidence about
+a defect's shape.
+
+**What is honestly supported right now:** the mechanism, verified in source. The
+960-odd byte figure and "not one account line" are **carried on one agent's
+measurement that I have not been able to reproduce** — which is exactly the
+status I should have given them when I wrote them down as flat fact.
+
+**Whoever picks this up:** install from a medium built at a commit BEFORE the
+fix, on a disk you created, and measure. That is the experiment. Until then the
+number is a report, not a finding, and the release note that quotes it should say
+so.
+
+**And I filled the disk doing this** — three carved partition images at ~5.9 GB
+each. Cleaned up. Carve to a scratch path you delete in the same command, or
+read the filesystem out of the image with an offset instead of copying it.
+
 ### READ THIS FIRST — the state, in order
 
 **This section is newest-first, and later entries CORRECT earlier ones.** Where a
