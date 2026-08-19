@@ -1663,6 +1663,20 @@ int32_t sys_chmod(const char *path, uint32_t mode)
     return rc32(chmod(path, (mode_t)mode));
 }
 
+/* extern def sys_chown(path: Ptr[char], uid: uint32, gid: uint32) -> int32
+ *
+ * The counterpart to sys_chmod, and it exists for the same reason: a copy
+ * that does not carry the OWNER across is not a copy of a home directory.
+ * MEASURED with debugfs on a freshly installed disk, before this existed:
+ * every file under /home -- including /home/live, which IS the desktop of an
+ * installed machine -- was uid 0 gid 0, because user/hlinstall.ad copies the
+ * live root onto the target with the tree's own `cp` while running as root.
+ * The session user (uid 1001) could read its home and could not write it. */
+int32_t sys_chown(const char *path, uint32_t uid, uint32_t gid)
+{
+    return rc32(chown(path, (uid_t)uid, (gid_t)gid));
+}
+
 /* extern def sys_getpid() -> int32 */
 int32_t sys_getpid(void) { return (int32_t)getpid(); }
 

@@ -4837,16 +4837,61 @@ def _has_entry_in_tar(tar_len: uint64, tail: Ptr[uint8]) -> int32:
 # contents of; a path that merely "looks like config" does not
 # qualify, or `hpm install` would stop being able to update anything
 # under /etc.
-def _is_machine_owned(rel: Ptr[uint8], rel_len: uint64) -> int32:
-    want: Ptr[uint8] = "etc/rc.boot"
-    if rel_len != 11:
+#
+# THE LIST IS NO LONGER ONE PATH, AND THE THREE THAT JOINED IT ARE THE
+# MACHINE'S IDENTITY.
+#
+# MEASURED on a real installed disk (~/.hamnix-build/instoffer/target-nvme.img,
+# read with debugfs, nothing mounted): the installer writes the account the
+# wizard was told to create into /etc/passwd, /etc/group and /etc/shadow, and
+# hamnix-init SHIPS etc/passwd and etc/group. So the first `hpm update` on that
+# machine rewrote both from the package -- while /etc/shadow, which is in NO
+# package, kept the hashes. A machine that gained accounts at install lost
+# their NAMES at first update and kept their PASSWORDS: names without hashes
+# and hashes without names, which is worse than either.
+#
+# THE RULE THAT DECIDES WHAT BELONGS HERE, unchanged: a file some IMAGE or
+# INSTALLER writes, whose right contents no package can know. /etc/passwd,
+# /etc/group and /etc/hostname are exactly that -- the machine's accounts and
+# the machine's name -- and /etc/shadow is already outside every package for
+# the same reason, which is the consistency being restored: after this, ALL
+# FOUR account/identity files are the machine's, and no update touches any of
+# them.
+#
+# WHAT THIS COSTS, said rather than discovered later: an installed machine no
+# longer receives changes a release makes to the SHIPPED accounts (a new system
+# uid, a corrected shell). That is the same trade etc/rc.boot already makes and
+# the same one dpkg makes for a conffile, and the alternative -- a package
+# manager that rewrites /etc/passwd -- is a machine that loses its users. A
+# release that must add a system account has to do it from an install hook,
+# which is where such a change belongs.
+#
+# THE PACKAGES STILL SHIP THEM, deliberately. `hpm` writes a machine-owned path
+# when it is ABSENT, so a machine that somehow has no /etc/passwd is REPAIRED
+# by an update rather than left broken -- and a live image, which has no
+# installer-written copy at all, is unaffected.
+def _mo_eq(rel: Ptr[uint8], rel_len: uint64, want: Ptr[uint8]) -> int32:
+    want_len: uint64 = strlen_u8(want)
+    if rel_len != want_len:
         return 0
     i: uint64 = 0
-    while i < 11:
+    while i < want_len:
         if rel[i] != want[i]:
             return 0
         i = i + 1
     return 1
+
+
+def _is_machine_owned(rel: Ptr[uint8], rel_len: uint64) -> int32:
+    if _mo_eq(rel, rel_len, cast[Ptr[uint8]]("etc/rc.boot")) != 0:
+        return 1
+    if _mo_eq(rel, rel_len, cast[Ptr[uint8]]("etc/passwd")) != 0:
+        return 1
+    if _mo_eq(rel, rel_len, cast[Ptr[uint8]]("etc/group")) != 0:
+        return 1
+    if _mo_eq(rel, rel_len, cast[Ptr[uint8]]("etc/hostname")) != 0:
+        return 1
+    return 0
 
 
 def _path_exists_u8(path: Ptr[uint8]) -> int32:

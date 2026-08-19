@@ -199,7 +199,27 @@ echo 'rc.de-user: namespace ready'
 # a shared table that anyone may read is a keylogger no matter who may write it.
 # THE SPLIT records that boundary field by field, and what an attacker can
 # still do after it.
-echo 'rc.de-user: dropping the session to regular user live (uid 1001)'
+# THE FALLBACK IS SET AND EXPORTED FIRST, AND THE DROP RESOLVES THE REAL ONE.
+# `setuid` re-reads /etc/passwd for the new uid and rewrites HOME in the
+# ENVIRONMENT (user/hamsh.ad:builtin_setuid), which is what the exec'd DE
+# program below actually reads. That is the fix for an INSTALLED machine: uid
+# 1001 is the account the install wizard created, with home /home/<that name>,
+# and this file used to hand every DE program /home/live regardless -- so the
+# desktop, the file manager and every app saved into the live medium's home
+# instead of the person's. On the live image uid 1001 IS `live` and nothing
+# changes.
+#
+# ORDER IS LOAD BEARING. `export NAME` publishes the SHELL variable over the
+# environment, so exporting after the drop would put this fallback back on top
+# of the resolved value. It is here as a fallback for the case passwd cannot
+# answer (a machine with no /etc/passwd, which is the live image's own
+# minimal-boot case), and the drop overwrites it when it can.
+HOME='/home/live'
+export HOME
+# `setuid` prints `uid <n> home <path>` -- the uid it reached and the HOME it
+# resolved for it out of /etc/passwd. That line in a boot log is the readout of
+# WHOSE session this is.
+echo 'rc.de-user: dropping the session to the regular session user (uid 1001)'
 setuid 1001
 
 # $HOME follows the identity. For the interactive-REPL case hamsh main()
@@ -213,8 +233,8 @@ setuid 1001
 # of this rc, so the DE program below would never be started at all. The
 # value MUST be quoted too: an assignment RHS is parsed as an expression, so
 # a bare /home/live is read as arithmetic ('/' = divide) and yields empty.
-HOME='/home/live'
-export HOME
+#
+# (Both statements moved ABOVE the drop; see the note there.)
 
 # hamUId / hamtermscene plant HAMNIX_DE_PROG before exec'ing us. Set means
 # "run that program in this window"; unset means "be an interactive shell",

@@ -10797,8 +10797,35 @@ def builtin_setuid(argc: int32) -> int32:
     if rs < 0:
         errstr_set("setuid: permission denied (only hostowner may change uid)")
         return 1
+    # $HOME FOLLOWS THE IDENTITY, because the identity is what a home belongs
+    # to. The interactive path already did this -- main() runs
+    # _set_home_from_passwd() after the boot rc -- but the DE path never
+    # reaches it: /etc/rc.de-user drops to the session uid and then EXECS the
+    # program hamUId asked for, exiting through the HAMNIX_DE_PROG branch long
+    # before main()'s hook. So that file carried a hard-wired
+    # HOME='/home/live', and on an INSTALLED machine, whose session user is
+    # the account the installer wizard created, every DE program was handed
+    # the live medium's home. Resolving it HERE fixes both rc.de-user and the
+    # generated /etc/rc.de-ns/* launchers with no per-file edit, and cannot
+    # regress the live image, where uid 1001 IS `live` with home /home/live.
+    #
+    # On any failure (no /etc/passwd, uid not in the table) the previous value
+    # is left alone -- so a script that sets a fallback before dropping keeps
+    # it. It sets the ENVIRONMENT, which is what an exec'd program reads; a
+    # later `export HOME` of the shell variable would overwrite it, so scripts
+    # export their fallback BEFORE the drop.
+    _set_home_from_passwd()
     write_cstr1("uid ")
     write_cstr1(render_int(cast[int64](cast[uint64](sys_getuid()))))
+    # AND THE HOME IT RESOLVED, on the same line. This is the one readout of
+    # the drop that a serial log carries: `echo $HOME` after this would print
+    # the SHELL variable, which the hook above does not touch, so it would say
+    # the fallback no matter what the environment now holds.
+    hh: Ptr[uint8] = env_get(cast[Ptr[uint8]]("HOME"))
+    if hh != cast[Ptr[uint8]](0):
+        if hh[0] != 0:
+            write_cstr1(" home ")
+            write_cstr1(hh)
     write_cstr1("\n")
     return 0
 

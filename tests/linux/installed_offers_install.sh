@@ -283,10 +283,22 @@ if grep -q "^$USERNAME:" "$W/target-passwd" 2>/dev/null; then
 else
     bad "the installed /etc/passwd has NO $USERNAME line -- the installer was given --user $USERNAME and the machine it produced has no such account"
 fi
-if grep -q '^live:' "$W/target-passwd" 2>/dev/null; then
-    ok "and it still carries the shipped accounts (live), which the desktop session runs as"
+# AND IT IS THE SESSION ACCOUNT, WHICH THIS USED TO ASSERT THE OTHER WAY
+# ROUND. Until 2026-08-18 this line required the installed /etc/passwd to still
+# carry `live`, on the reasoning that uid 1001 -- the uid etc/rc.de-user.linux
+# drops the desktop session to -- would otherwise resolve to nothing. It was
+# the right question and the wrong answer: the installer appended its user at
+# uid 1000 (a DUPLICATE of the shipped `dave` fixture, and the second one), so
+# `live` stayed the session user on a machine belonging to somebody else, with
+# /home/live as the desktop and /home/<name> created empty. The installer now
+# puts the wizard's account AT uid 1001 in place of `live`, so the same
+# question -- "does the DE session's uid resolve to a real account?" -- is
+# asked of the account that machine actually has. tests/linux/installed_accounts.sh
+# is where this is measured in full, including across an `hpm update`.
+if grep -q "^$USERNAME:x:1001:1001::/home/$USERNAME:" "$W/target-passwd" 2>/dev/null; then
+    ok "and that account is at uid 1001 with home /home/$USERNAME -- the uid the DE session drops to resolves to the machine's own user"
 else
-    bad "the installed /etc/passwd has lost the shipped accounts too -- there is no 'live' line, and the DE session's uid 1001 resolves to nothing"
+    bad "the installed /etc/passwd has no '$USERNAME:x:1001:1001::/home/$USERNAME' line -- the DE session's uid 1001 does not resolve to the account the wizard created: $(grep -v '^#' "$W/target-passwd" 2>/dev/null | tr '\n' ' ' | cut -c1-160)"
 fi
 
 # And the same reader on the MEDIUM, where the marker MUST be there. This is

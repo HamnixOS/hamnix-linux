@@ -2126,8 +2126,29 @@ def _desk_try(home: Ptr[uint8], hl: uint64) -> int32:
 #      a user who then drops a file in sees it on the next ~1s re-scan; the
 #      old code degraded to the built-in three-icon fallback instead.
 #   5. absolute last resort: /home/live/Desktop.
+#
+# AND IT SAYS WHICH ONE IT PICKED, ONCE, IN /var/log/hamdesktop.log. Nothing
+# used to. The 2026-07 report was "the GUI desktop is not my ~/Desktop" and the
+# only way to find out which directory it really watched was to reason about
+# this chain; on an installed machine the answer was somebody else's home and
+# the screen looked perfectly normal. One line in the log turns that into a
+# reading -- tests/linux/installed_accounts.sh takes it off the disk after the
+# boot.
 DESK_REG_MAX: uint64 = 8
+desk_dir_logged: int32 = 0
+
+
 def _desk_dir() -> Ptr[uint8]:
+    d: Ptr[uint8] = _desk_dir_resolve()
+    if desk_dir_logged == 0:
+        desk_dir_logged = 1
+        _writeall(1, cast[Ptr[uint8]]("hamdesktop: desktop directory "))
+        _writeall(1, d)
+        _writeall(1, cast[Ptr[uint8]]("\n"))
+    return d
+
+
+def _desk_dir_resolve() -> Ptr[uint8]:
     if DESK_DIR[0] == 47:                        # cached + still absolute
         return &DESK_DIR[0]
     hbuf: Array[128, uint8]
