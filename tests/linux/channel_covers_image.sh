@@ -76,6 +76,65 @@
 # nobody noticed. A listed exclusion that is no longer in the image is
 # reported too, so the table cannot quietly go stale.
 #
+# WHICH ROOT YOU POINT IT AT IS PART OF THE ANSWER, and for a long time
+# nobody said so. There are three, and they are different files:
+#
+#   * the LEAN image root         scripts/hamlinux_image.sh
+#   * the INSTALLER image root    HAMLINUX_INSTALLER=1 scripts/hamlinux_image.sh
+#                                 -- the one the SHIPPED MEDIUM is packed from
+#   * the INSTALLED-DISK root     the ext4 partition scripts/hamlinux_disk.sh
+#                                 writes, which is what a person actually runs
+#
+# MEASURED 2026-08-19 against the published 1.0.31 channel, before the
+# exclusions below covered the installer overlay:
+#
+#   lean image root (424 files)          8 passed,  0 failed
+#   installer image root                 7 passed, 26 failed
+#   installed-disk root (453 files)      7 passed, 28 failed
+#
+# The 26 were boot/ (5), etc/installer-medium (1) and usr/lib/instroot/ (20).
+# The disk root's two extra are etc/fstab and var/lib/hpm/installed.json, which
+# exist only on a written partition. 1.0.31 SHIPPED with this row RED --
+# `~/.hamnix-build/rel1031/GATES_SUMMARY.txt` records "channel_covers_image
+# RED 7/26 <-- against the INSTALLER root". Each of those files now has a line
+# in the table below with a reason, so the red is a written decision instead of
+# a number a release stepped over.
+#
+# AND WHAT THAT COSTS AN INSTALLED MACHINE, WRITTEN AT THE TOP SO A GREEN RUN
+# CANNOT BE MISREAD AS MORE THAN IT IS:
+#
+#   THE KERNEL AN INSTALLED MACHINE BOOTS IS NOT UPDATABLE, AND NOTHING FAILS
+#   TO SAY SO. It is sealed in the unified kernel image on that machine's ESP,
+#   copied there byte for byte on install day. No package carries it, `hpm
+#   update` does not touch it, and the machine boots it forever. That is a
+#   real limit of this distribution, not an oversight of this gate, and the
+#   boot/ exclusion below argues why a package FILE cannot be the fix.
+#
+#   WHAT *IS* UPDATABLE ACROSS THE BOOT is the boot-time MODULE BYTES:
+#   /bin/bootsync rewrites them inside the ESP's own image and user/hpm.ad runs
+#   it after every update transaction. Four assertions below read that out of
+#   the built tarballs. Whether the refresh reaches a BOOTED kernel is measured
+#   by tests/linux/bootsync_installed.sh, on a machine; nothing in this file
+#   boots anything.
+#
+# THE NEGATIVE CONTROL, RUN 2026-08-19, evidence in
+# `~/.hamnix-build/covergap-a847/negctl.log` (the driver is negctl.sh beside
+# it). Each arm breaks ONE thing in a COPY of the 1.0.31 channel, or in a copy
+# of this file, against the installed-disk root:
+#
+#   arm 0  nothing broken                                 12 / 0
+#   arm 1  hamnix-init made to carry boot/vmlinuz          11 / 1
+#   arm 2  bin/bootsync deleted from hamnix-install        10 / 2
+#   arm 3  shipped rc.boot.installed stops binding '#esp'  10 / 2
+#   arm 4  the hpm ELF replaced by one with no bootsync    11 / 1
+#   arm 5  the boot/ EXCLUSION deleted from this file      11 / 5
+#
+# Arms 2 and 3 score two failures because each breaks a second thing this file
+# already checked (bin/bootsync stops being covered at all; the shipped
+# rc.boot.installed stops matching the image's bytes). Arm 5 is the one that
+# says the five boot files are excused BY THE TABLE and not by a hole in the
+# matcher.
+#
 # Usage: tests/linux/channel_covers_image.sh [image-root] [channel-dir]
 #   defaults: build/image/root  build/repo/linux
 # Requires both to have been built already; it builds nothing itself, because
@@ -119,6 +178,11 @@ version	the image BUILD STAMP -- one line naming the kernel and the git commit t
 lib64/ld-linux-x86-64.so.2	the BUILD HOST's dynamic loader, copied in beside the glibc-linked binaries. It is not a change made here, and hpm writes files in place: replacing the loader every running process is executing through -- including hpm's own -- is not an update, it is a machine that stops between two syscalls. It travels with the medium.
 lib/x86_64-linux-gnu/	the BUILD HOST's shared libraries (libc, libcrypt, libcrypto, libssl, libz, libzstd), copied in by scripts/hamlinux_image.sh's copy_libs. Same reason as the loader above, and the same fact: they are Debian's files, not this project's changes. The Mesa/Vulkan libraries this project DOES ship live under /usr/lib and ARE packaged.
 home/live/	the live session's HOME, a copy of /etc/skel made by the image so a live boot can save a file. /etc/skel is the copy that ships (hamnix-desktop); an installed machine's /home belongs to its users, and a package that wrote into it would overwrite their documents.
+boot/	THE INSTALLER'S PAYLOAD, and on an installed machine this path is not this directory. Staged ONLY under HAMLINUX_INSTALLER=1 (scripts/hamlinux_image.sh) so user/hlinstall.ad has bytes to write onto a TARGET disk's ESP: BOOTX64.EFI (the unified kernel image, 73 MB), vmlinuz, initramfs.cpio.gz, UKI.MAP and root.partuuid. Every one of them describes THE MEDIUM and not the machine: root.partuuid is the partition GUID the build host sealed into the UKI's kernel command line, and UKI.MAP's first line is the BYTE LENGTH of THIS image's initramfs archive, which user/bootsync.ad uses as the offset it appends its overlay at -- another medium's number there is a machine that does not boot. And a package could not deliver them anyway: etc/rc.boot.installed does `bind '#esp' /boot` on every installed boot, so /boot on a RUNNING installed machine IS the FAT32 EFI System Partition, not this ext4 directory. Measured on the 1.0.31 medium: the ESP holds EFI/BOOT/BOOTX64.EFI, vmlinuz, initramfs.cpio.gz and UKI.MAP -- NOT boot/BOOTX64.EFI -- so a package file at this path would be written into the ESP BESIDE the boot image, changing nothing about the boot. WHAT THAT COSTS, SAID PLAINLY SO THE GREEN BELOW IS NOT READ AS MORE THAN IT IS: the KERNEL BINARY and the INITRAMFS USERLAND sealed in the UKI ARE NOT UPDATABLE. An installed machine boots the kernel it was installed with, and `hpm update` neither replaces it nor fails. The BOOT-TIME MODULE BYTES ARE updatable -- /bin/bootsync rewrites them inside the ESP's own UKI and user/hpm.ad runs it after every update transaction -- and that claim is MEASURED below rather than asserted here.
+usr/lib/instroot/	THE INSTALLER'S PARTITIONING TOOLS: Debian's sgdisk, mkfs.vfat, mkfs.ext4 and openssl with the build host's glibc, libext2fs, libblkid, libuuid, libssl, libstdc++ and the loader they run through, staged ONLY under HAMLINUX_INSTALLER=1 (scripts/hamlinux_image.sh). Same fact as lib/x86_64-linux-gnu above -- Debian's files, not this project's changes, and hpm writes in place -- plus one this file has to say for itself: they exist to partition a TARGET disk, which is a thing only installation media does. An installed machine is not installation media (that confusion is the defect fixed at 13755222, where an installed machine offered to install itself), so shipping them to one would be shipping the tools for a job it must not offer.
+etc/installer-medium	THE MARKER THAT SAYS `THIS ROOT IS INSTALLATION MEDIA`. Four programs -- user/hamdesktop.ad, user/hampanelscene.ad, user/hamappmenu.ad and user/hamsoftware.ad's _reg_is_live -- read `it opened` as `I am running from a medium` and put the Install icon on the desktop on that alone. user/hlinstall.ad UNLINKS it from the target at install time for exactly that reason. A package that carried this file would put the installer back on every machine it updated: the 13755222 defect, delivered by the channel instead of by the installer.
+etc/fstab	THIS machine's partitions, by PARTUUID, written by scripts/hamlinux_disk.sh with the two GUIDs it had just given THIS disk. A package copy would name the build host's partitions on somebody else's machine. It is on the ROOT PARTITION only -- the initramfs root does not carry it -- which is one of the two files that make a disk root's file count differ from an image root's.
+var/lib/hpm/installed.json	THE MACHINE'S PACKAGE DATABASE: what hpm believes is installed here, with each package's file list, rewritten by hpm on every transaction. A package that carried it would overwrite the record of this machine's installs with the build host's -- including the record of the update in progress -- and the machine would then never upgrade whatever the shipped copy failed to mention. It is seeded once per disk by scripts/hamlinux_disk.sh. Root partition only, like etc/fstab.
 EOF
 )
 
@@ -275,6 +339,81 @@ if [ "$DEPBASE" -ge 1 ]; then
     fi
 else
     bad "modules.dep is excluded on the grounds that modules.dep.base ships instead, and NO package carries modules.dep.base"
+fi
+
+# --- THE boot/ EXCLUSION IS FOUR CLAIMS, AND HERE THEY ARE MEASURED --------
+# The boot/ line in the table above is the longest reason in this file and the
+# easiest one to be wrong about, so none of it is left as prose. What it claims,
+# and what is read out of the BUILT CHANNEL to check it:
+#
+#   1. No package carries any path under boot/. This is the SAFETY half rather
+#      than the coverage half, and it is the one that matters most: on an
+#      installed machine etc/rc.boot.installed binds the ESP over /boot, so a
+#      package file at boot/anything would be written into a FAT32 partition
+#      with no journal, beside the boot image, by an hpm that knows about
+#      neither. If somebody ever "fixes" this gate's boot/ failures by
+#      packaging the files, this assertion goes red and says why.
+#   2. /boot on an installed machine IS the ESP -- the mechanism claim the whole
+#      reason rests on. Checked in the bytes hamnix-init would DELIVER, not in
+#      the worktree, because the worktree is not what an update installs.
+#   3. The channel carries bin/bootsync, the only program that can change what
+#      an installed machine boots with.
+#   4. The SHIPPED hpm binary really runs it. hpm's source says it spawns
+#      /bin/bootsync after the whole transaction; the thing an installed machine
+#      receives is the ELF in the tarball, so the ELF is what is read.
+#
+# WHAT NONE OF THIS ESTABLISHES, spelled out here as well as in the table: that
+# the KERNEL is updatable. IT IS NOT. These four say the boot MODULE BYTES can
+# be refreshed and that the machinery to do it ships and is itself updatable.
+# Whether a refresh actually reaches a booted kernel is a different question on
+# a booted machine -- tests/linux/bootsync_installed.sh -- and no line here
+# stands in for it. Nothing in this file boots anything.
+echo
+BOOTUNPACK="$TMP/bootunpack"; mkdir -p "$BOOTUNPACK"
+grep '^boot/' "$TMP/chan" > "$TMP/chanboot" 2>/dev/null || : > "$TMP/chanboot"
+if [ -s "$TMP/chanboot" ]; then
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        bad "a package carries $b, and on an installed machine /boot IS the FAT32 ESP (etc/rc.boot.installed binds it there) -- hpm would write into the boot partition"
+    done < "$TMP/chanboot"
+else
+    ok "no package carries any path under boot/ -- nothing in this channel writes into an installed machine's ESP"
+fi
+
+for t in "$CHAN"/packages/hamnix-init-*.tar.gz; do
+    [ -e "$t" ] || continue
+    tar xzf "$t" -C "$BOOTUNPACK" --wildcards '*/files/etc/rc.boot.installed' 2>/dev/null || true
+done
+RCINST="$(find "$BOOTUNPACK" -path '*/files/etc/rc.boot.installed' -type f 2>/dev/null | head -1)"
+if [ -n "$RCINST" ] && grep -qF "bind '#esp' /boot" "$RCINST"; then
+    ok "the boot/ exclusion's mechanism holds in the bytes a machine would RECEIVE: the shipped etc/rc.boot.installed binds the ESP over /boot"
+elif [ -n "$RCINST" ]; then
+    bad "the shipped etc/rc.boot.installed does NOT bind the ESP over /boot -- the boot/ exclusion's reason is no longer true, and /boot on an installed machine is an ordinary ext4 directory a package could own"
+else
+    bad "no etc/rc.boot.installed in the channel -- an installed machine's boot script is unupdatable and the boot/ exclusion's reason cannot be checked"
+fi
+
+if grep -qx 'bin/bootsync' "$TMP/chan"; then
+    ok "the channel carries bin/bootsync -- the one program that can change what an installed machine boots with is itself updatable"
+else
+    bad "NO package carries bin/bootsync. The boot/ exclusion stands on bootsync refreshing the boot image, and a machine whose bootsync is a release behind could never be given a fixed one"
+fi
+
+HPMPKG=$(ls "$CHAN"/packages/hpm-*.tar.gz 2>/dev/null | head -1)
+if [ -n "$HPMPKG" ]; then
+    tar xzOf "$HPMPKG" --wildcards '*/files/bin/hpm' > "$TMP/hpmbin" 2>/dev/null
+    if [ -s "$TMP/hpmbin" ]; then
+        if grep -qa '/bin/bootsync' "$TMP/hpmbin" \
+           && grep -qa 'refreshing the boot image' "$TMP/hpmbin"; then
+            ok "the hpm BINARY the channel ships carries the /bin/bootsync spawn path and its message -- an update on a machine really does reach for the boot image"
+        else
+            bad "the shipped bin/hpm does not name /bin/bootsync -- the boot/ exclusion claims hpm runs bootsync after every update transaction, and the binary an installed machine would receive does not contain it"
+        fi
+    else
+        bad "the hpm package carries no files/bin/hpm -- cannot check whether the shipped updater runs bootsync"
+    fi
+else
+    bad "no hpm package in the channel -- the updater itself is unupdatable"
 fi
 
 # --- THE RIGHT NAME IS NOT THE RIGHT BYTES ---------------------------------
