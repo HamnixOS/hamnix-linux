@@ -96,6 +96,33 @@ _de_terminal: int32 = 0
 # the entry on an installed boot. Stored here; the display filter itself is
 # applied by the caller (the parser has no filesystem view).
 _de_liveonly: int32 = 0
+# X-Hamnix-SystemChrome=true — a Hamnix extension key marking an entry that is
+# THE MACHINE'S OWN PROGRAM rather than the person's, and must therefore be
+# launched with the DESKTOP CHROME's identity instead of being dropped to the
+# session user.
+#
+# WHY THIS KEY EXISTS. The desktop chrome (user/hamdesktop.ad's icon column,
+# user/hampanelscene.ad's menu, user/hamappmenu.ad) runs as root, so until
+# 2026-08-19 EVERY program it started was root's and every document they saved
+# came out owned by uid 0 in the person's own directory -- measured, three
+# applications, three arms. The fix is for the chrome to drop privilege at the
+# launch. But the same catalogue also holds programs that CANNOT work
+# unprivileged: the install wizard partitions a disk, the package manager
+# writes /var/lib/hpm and /bin, the control centre writes /etc. A launcher that
+# drops for all of them turns working buttons into broken ones -- which is
+# exactly what happened when the first attempt at this dropped
+# unconditionally (tests/linux/install_confirm_keys.sh, 33 PASSED / 1 FAILED).
+#
+# SO THE ENTRY DECLARES IT, ONCE, IN ITS OWN FILE. That is a denylist-in-code
+# replaced by a property of the thing itself: adding a new admin tool means
+# adding a line to its .desktop, and forgetting it produces a launch that FAILS
+# LOUDLY (the tool cannot write what it needs) rather than a document silently
+# owned by root, which is the direction this whole line of work chose.
+#
+# X-Hamnix-LiveOnly=true IMPLIES IT -- see desktop_chrome(). An entry that
+# exists only on the installer medium is, by construction, that medium's own
+# machinery.
+_de_chrome: int32 = 0
 
 
 def _de_reset():
@@ -114,6 +141,7 @@ def _de_reset():
     _de_catcode = DE_CAT_OTHER
     _de_terminal = 0
     _de_liveonly = 0
+    _de_chrome = 0
 
 
 def _is_space(c: uint8) -> int32:
@@ -258,6 +286,9 @@ def desktop_parse(buf: Ptr[uint8], n: uint64) -> int32:
                     elif _de_key_eq(buf, ls, ke, "X-Hamnix-LiveOnly") != 0:
                         if _de_key_eq(buf, vs, le, "true") != 0:
                             _de_liveonly = 1
+                    elif _de_key_eq(buf, ls, ke, "X-Hamnix-SystemChrome") != 0:
+                        if _de_key_eq(buf, vs, le, "true") != 0:
+                            _de_chrome = 1
                     elif _de_key_eq(buf, ls, ke, "Type") != 0:
                         if _de_key_eq(buf, vs, le, "Application") == 0:
                             _de_type_ok = 0
@@ -305,6 +336,20 @@ def desktop_terminal() -> int32:
     return _de_terminal
 
 def desktop_liveonly() -> int32:
+    return _de_liveonly
+
+
+# 1 when this entry is the MACHINE'S OWN program (see _de_chrome).
+#
+# LiveOnly implies chrome and is NOT a separate question a caller has to
+# remember to ask: an entry that only ever appears on the installer medium is
+# that medium's machinery by construction, and the one such entry that exists
+# today -- installer.desktop -- is the exact case whose demotion broke a gate.
+# Folding it in here means a launcher asks ONE question and cannot get half of
+# the answer.
+def desktop_chrome() -> int32:
+    if _de_chrome != 0:
+        return 1
     return _de_liveonly
 
 def desktop_catcode() -> int32:

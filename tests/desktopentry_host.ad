@@ -11,7 +11,8 @@ extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 
 from lib.desktopentry import desktop_parse, desktop_name_ptr, \
     desktop_prog_ptr, desktop_catcode, desktop_category_name, \
-    desktop_nodisplay, desktop_terminal, desktop_name_is_entry
+    desktop_nodisplay, desktop_terminal, desktop_name_is_entry, \
+    desktop_liveonly, desktop_chrome
 
 
 # ---- stdout helpers ------------------------------------------------------
@@ -91,6 +92,37 @@ def _run(tag: Ptr[uint8], src: Ptr[uint8]):
     _report(tag)
 
 
+# WHOSE PROGRAM IS IT? Printed on its own line rather than added to PARSE so
+# the nine existing PARSE assertions keep matching byte-for-byte.
+#
+# This is the bit the desktop chrome reads to decide whether to launch an entry
+# AS THE PERSON or with its own root identity, so getting it wrong in either
+# direction is a shipped defect: a false 0 saves a person's documents as root,
+# a false 1 hands the install wizard to uid 1001 and it exits without
+# installing. Both have happened.
+def _report_chrome(tag: Ptr[uint8]):
+    ok: int32 = desktop_parse(&fixbuf[0], _load_len)
+    _o_str(cast[Ptr[uint8]]("CHROME "))
+    _o_str(tag)
+    _o_str(cast[Ptr[uint8]](" ok="))
+    _o_dec(cast[int64](ok))
+    _o_str(cast[Ptr[uint8]](" chrome="))
+    _o_dec(cast[int64](desktop_chrome()))
+    _o_str(cast[Ptr[uint8]](" liveonly="))
+    _o_dec(cast[int64](desktop_liveonly()))
+    _o_str(cast[Ptr[uint8]](" name="))
+    _o_str(desktop_name_ptr())
+    _o_str(cast[Ptr[uint8]](" prog="))
+    _o_str(desktop_prog_ptr())
+    _o_ch(10)
+    _o_flush()
+
+
+def _run_chrome(tag: Ptr[uint8], src: Ptr[uint8]):
+    _load_len = _load(src)
+    _report_chrome(tag)
+
+
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # A well-formed game entry with a field code + extra whitespace.
     _run(cast[Ptr[uint8]]("game"),
@@ -131,6 +163,37 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # the Terminal flag is surfaced (terminal=1) so the launcher can route it.
     _run(cast[Ptr[uint8]]("cli"),
          "[Desktop Entry]\nType=Application\nName=htop\nComment=Process viewer\nExec=htop\nTerminal=true\nCategories=System;Monitor;\nKeywords=process;top;\n")
+
+    # ---- WHOSE PROGRAM IS IT: X-Hamnix-SystemChrome ----------------------
+    # THE FIXTURES BELOW ARE THE SHAPE THIS TREE ACTUALLY SHIPS, and the shape
+    # is the point. etc/hamde/apps/control-center.desktop and
+    # etc/skel/Desktop/packagemanager.desktop carry the key AFTER A BLOCK OF
+    # '#' COMMENT LINES appended to the end of the file -- and until that edit
+    # NO SHIPPED .desktop FILE IN THIS TREE CONTAINED A '#' AT ALL. The parser
+    # skips '#' per line, so it does not care where the comment sits; the one
+    # existing comment fixture ("net") only ever exercised a LEADING comment,
+    # before [Desktop Entry]. A trailing block between keys is a different
+    # position through the same branch, and nothing had run it.
+    #
+    # A regression here is silent in the worst way: the file still parses, the
+    # menu row still draws, and only the IDENTITY of the launched process
+    # changes.
+    _run_chrome(cast[Ptr[uint8]]("chromed"),
+         "[Desktop Entry]\nType=Application\nName=Control Center\nExec=/bin/hamctl\nIcon=preferences-system\nCategories=Settings;System;\n# a trailing comment block, exactly as the shipped files carry it\n# second line\nX-Hamnix-SystemChrome=true\n")
+    # An ordinary application: chrome MUST be 0, or every document it saves
+    # comes out owned by root. This is the direction that was the defect.
+    _run_chrome(cast[Ptr[uint8]]("plain"),
+         "[Desktop Entry]\nType=Application\nName=Word Processor\nExec=/bin/hamwrite\nCategories=Office;\n")
+    # LiveOnly IMPLIES chrome without the key being present: an entry that
+    # exists only on the installer medium is that medium's own machinery.
+    # installer.desktop is the entry whose demotion took install_confirm_keys
+    # to 33/1.
+    _run_chrome(cast[Ptr[uint8]]("liveonly"),
+         "[Desktop Entry]\nType=Application\nName=Install Hamnix\nExec=/bin/haminstallui\nCategories=System;\nX-Hamnix-LiveOnly=true\n")
+    # X-Hamnix-SystemChrome=false is NOT true, and must not be read as the key
+    # merely being present.
+    _run_chrome(cast[Ptr[uint8]]("explicitfalse"),
+         "[Desktop Entry]\nType=Application\nName=Notes\nExec=/bin/hamnotesscene\nCategories=Office;\nX-Hamnix-SystemChrome=false\n")
 
     # Suffix helper.
     _o_str(cast[Ptr[uint8]]("SUFFIX yes="))

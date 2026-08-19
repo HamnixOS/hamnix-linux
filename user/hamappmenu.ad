@@ -47,10 +47,11 @@ from lib.homedir import hd_resolve_home
 from lib.desktopentry import (
     desktop_parse, desktop_name_ptr, desktop_name_len,
     desktop_prog_ptr, desktop_cats_ptr, desktop_name_is_entry,
-    desktop_liveonly,
+    desktop_liveonly, desktop_chrome,
 )
 from lib.appmenucore import (
     amc_reset, amc_add, amc_mark_launch, amc_layout,
+    amc_mark_last_chrome, amc_app_chrome, amc_row_chrome,
     amc_row_count, amc_row_kind, amc_row_cat, amc_row_y,
     amc_row_label, amc_row_glyph, amc_row_prog, amc_row_prog_len,
     amc_cat_rgb, amc_hit, amc_content_h, amc_box_w, amc_app_count,
@@ -243,6 +244,20 @@ def _dd_scan() -> int32:
                             else:
                                 amc_add(np, desktop_prog_ptr(),
                                         desktop_cats_ptr(), _dd_glyph(np))
+                                # AND WHOSE PROGRAM IS IT? A LiveOnly entry is
+                                # the MEDIUM's own chrome -- today exactly the
+                                # install wizard, which partitions a disk and
+                                # therefore needs the identity this menu was
+                                # started with. Everything else in this
+                                # catalogue is A PERSON'S PROGRAM and is
+                                # launched as the person (see
+                                # _emit_launch_path). The SAME desktop_liveonly()
+                                # bit two lines up decides whether the row is
+                                # shown at all, so one line in a .desktop file
+                                # settles both questions and they cannot drift
+                                # apart.
+                                if desktop_chrome() != 0:
+                                    amc_mark_last_chrome()
                                 added = added + 1
         i = e + 1
     return added
@@ -609,14 +624,74 @@ def _am_close(code: int32):
 # ====================================================================
 # Launch emit
 # ====================================================================
-def _emit_launch_path(buf: Ptr[uint8], plen: uint64) -> int32:
+# chrome -> as_user. One line, but written once instead of three times: the
+# three click paths below (fly-out, main box, Enter-on-first-match) must not be
+# able to disagree about which way the flag points.
+def _am_as_user(chrome: int32) -> int32:
+    if chrome != 0:
+        return 0
+    return 1
+
+
+# WHOSE IDENTITY DOES THE LAUNCHED PROGRAM RUN WITH? THE QUEUE NOW SAYS SO.
+#
+# /dev/wsys/appmenu/launch used to carry a BARE PATH and nothing else, and its
+# drainer (user/hampanelscene.ad, and user/hamUId.ad on the Hamnix-kernel line)
+# is SYSTEM CHROME running as root. So a person clicking Word Processor got a
+# ROOT child of the panel, and every document it saved came out OWNED BY UID 0
+# inside the person's own directory -- measured on a real installed machine by
+# tests/linux/installed_documents.sh, three arms, three documents, uid 0 in all
+# of them. Their own desktop terminal (uid 1001, because /etc/rc.de-user drops
+# it) cannot save over those files, and NOTHING PRINTS AN ERROR on either side.
+#
+# THE FIRST ATTEMPT AT THIS TAUGHT THE DRAINER TO DROP FOR EVERYTHING AND WAS
+# REVERTED (416248df) BECAUSE THE QUEUE IS NOT ONLY THE PERSON'S. The machine's
+# own programs ride it too -- tests/linux/install_confirm_keys.sh starts the
+# GUI install wizard with a literal
+#
+#     echo '/bin/haminstallui' > '/dev/wsys/appmenu/launch'
+#
+# and a drainer that drops for every payload demoted the wizard: 33 PASSED /
+# 1 FAILED, `haminstallui` running as `live` and `/bin/install` a zombie.
+#
+# THE GRAMMAR THAT FIXES IT, and the property that matters is the LAST line:
+#
+#     <serial> user <path> [args...]   drop to the session user before exec
+#     <serial> wl:<path>               Linux-ns Wayland client (unchanged)
+#     <serial> <path> [args...]        EXACTLY WHAT IT HAS ALWAYS MEANT
+#
+# A BARE PATH KEEPS TODAY'S MEANING. Nothing silently changes identity; a
+# writer that has not been converted -- a gate, an rc line, a shell one-liner,
+# the install wizard's own launch -- behaves precisely as it does today, so the
+# installer CANNOT BE DEMOTED BY OMISSION. That is the whole reason the verb is
+# opt-IN rather than an opt-out denylist, and it is the failure mode the revert
+# message named. There is precedent for a leading sentinel here already: `wl:`.
+#
+# `as_user` is 0 for a row this menu has marked as the MACHINE's chrome (the
+# LiveOnly install wizard -- see _dd_scan) and 1 for everything else, which is
+# a .desktop entry in the applications catalogue, i.e. a person's program.
+def _emit_launch_path(buf: Ptr[uint8], plen: uint64, as_user: int32) -> int32:
     fd: int32 = sys_open_write(cast[Ptr[char]]("/dev/wsys/appmenu/launch"))
     if fd < 0:
         return -1
     j: uint64 = 0
-    while j < plen and j < 127:
-        _am_launch_buf[j] = buf[j]
+    if as_user != 0:
+        # "user " -- bytes 117,115,101,114,32. Spelled out rather than copied
+        # from a global Ptr[uint8] literal on purpose: a module-global
+        # Ptr[uint8] initialised with a string compiles cleanly on this backend
+        # and is NULL at run time, and that is how an installer once segfaulted
+        # after writing every file correctly.
+        _am_launch_buf[0] = 117
+        _am_launch_buf[1] = 115
+        _am_launch_buf[2] = 101
+        _am_launch_buf[3] = 114
+        _am_launch_buf[4] = 32
+        j = 5
+    k: uint64 = 0
+    while k < plen and j < 127:
+        _am_launch_buf[j] = buf[k]
         j = j + 1
+        k = k + 1
     _am_launch_buf[j] = 10
     j = j + 1
     sys_write(fd, &_am_launch_buf[0], j)
@@ -1274,13 +1349,15 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             aidx: uint64 = cast[uint64](rc - 100000)
             amc_mark_launch(amc_app_prog(aidx))
             _fav_save()
-            _emit_launch_path(amc_app_prog(aidx), amc_app_prog_len(aidx))
+            _emit_launch_path(amc_app_prog(aidx), amc_app_prog_len(aidx),
+                              _am_as_user(amc_app_chrome(aidx)))
             _am_close(0)
         elif rc >= 0:
             urc: uint64 = cast[uint64](rc)
             amc_mark_launch(amc_row_prog(urc))
             _fav_save()
-            _emit_launch_path(amc_row_prog(urc), amc_row_prog_len(urc))
+            _emit_launch_path(amc_row_prog(urc), amc_row_prog_len(urc),
+                              _am_as_user(amc_row_chrome(urc)))
             _am_close(0)
         elif rc == -2:
             _am_close(0)
@@ -1293,7 +1370,8 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 ur2: uint64 = cast[uint64](arow)
                 amc_mark_launch(amc_row_prog(ur2))
                 _fav_save()
-                _emit_launch_path(amc_row_prog(ur2), amc_row_prog_len(ur2))
+                _emit_launch_path(amc_row_prog(ur2), amc_row_prog_len(ur2),
+                                  _am_as_user(amc_row_chrome(ur2)))
                 _am_close(0)
         elif krc == 1:
             _paint_menu()

@@ -94,6 +94,29 @@ _amc_prog:     Array[48, Array[96, uint8]]
 _amc_prog_len: Array[48, uint64]
 _amc_cat:      Array[48, int32]
 _amc_glyph:    Array[48, uint8]
+# IS THIS ROW THE MACHINE'S OWN PROGRAM RATHER THAN THE PERSON'S?
+#
+# 1 marks an entry that must keep the CHROME's identity when it is launched:
+# today that is exactly the LIVE-medium installer launcher
+# (etc/hamde/apps/installer.desktop, X-Hamnix-LiveOnly=true), which needs root
+# to partition a disk and write a root filesystem. Everything else in this
+# model came out of a .desktop file in the applications catalogue and is A
+# PERSON'S PROGRAM, which must be launched AS the person or every document it
+# saves comes out owned by uid 0 (measured -- see lib/p9.ad
+# spawn_detached_as).
+#
+# WHY A FLAG AND NOT A DENYLIST OF PROGRAM NAMES. A denylist cannot be gated
+# comprehensively and anything left off it fails SILENTLY, which is the trade
+# 416248df's revert message rejected by name. This flag is set from the same
+# desktop_liveonly() bit the menu ALREADY reads to decide whether to show the
+# row at all, so a new machine-chrome entry declares itself in its .desktop
+# file exactly once and both decisions follow from it.
+#
+# DEFAULT 0 = "the person's program". A caller that forgets to mark a chrome
+# entry gets a DEMOTED launch, which fails loudly (the installer cannot open
+# the disk) rather than quietly handing a person's file to root. That
+# direction is chosen deliberately.
+_amc_chrome:   Array[48, uint8]
 
 # ---- recent (most-recently-launched prog paths, front == newest) ---------
 _amc_recent_count: uint64 = 0
@@ -537,7 +560,22 @@ def amc_add(name: Ptr[uint8], prog: Ptr[uint8], cats: Ptr[uint8],
     _amc_prog_len[i] = pl
     _amc_cat[i] = amc_classify(cats)
     _amc_glyph[i] = glyph
+    # Every app is the PERSON'S until a caller says otherwise -- see
+    # _amc_chrome's header for why that is the safe default direction.
+    _amc_chrome[i] = 0
     _amc_count = _amc_count + 1
+
+
+# Mark the app added by the LAST amc_add() as the MACHINE's own chrome, so a
+# launcher keeps its own identity for it instead of dropping to the session
+# user. Separate from amc_add() rather than an extra parameter because
+# user/appmenuscene_host.ad and hamappmenu's in-code fallback list call
+# amc_add() 25 times between them and none of them is chrome; a parameter
+# would have added 25 zeroes and one place to get it wrong.
+def amc_mark_last_chrome():
+    if _amc_count == 0:
+        return
+    _amc_chrome[_amc_count - 1] = 1
 
 
 def amc_app_count() -> uint64:
@@ -769,6 +807,11 @@ def amc_app_cat(a: uint64) -> int32:
     return _amc_cat[a]
 
 
+# 1 when app `a` is the machine's own chrome (see _amc_chrome).
+def amc_app_chrome(a: uint64) -> int32:
+    return cast[int32](_amc_chrome[a])
+
+
 # Compute + cache the fly-out box geometry, aligned to the open category's
 # parent CATBTN row and clamped inside the (grown) menu window [0..scr]. The
 # menu content is anchored at (bx,by). Mirrors hampanelscene._compute_sub_box:
@@ -958,6 +1001,17 @@ def amc_row_prog_len(i: uint64) -> uint64:
     if _amc_row_kind[i] != AMC_ROW_APP:
         return 0
     return _amc_prog_len[cast[uint64](_amc_row_app[i])]
+
+
+# 1 when app row `i` launches the machine's own chrome (see _amc_chrome). A
+# NON-app row answers 1, not 0: a category header launches nothing, and if a
+# caller ever asks it anyway the conservative answer is "do not change
+# identity", which leaves today's behaviour rather than dropping a launch
+# nobody meant to make.
+def amc_row_chrome(i: uint64) -> int32:
+    if _amc_row_kind[i] != AMC_ROW_APP:
+        return 1
+    return cast[int32](_amc_chrome[cast[uint64](_amc_row_app[i])])
 
 
 # ====================================================================

@@ -6,3 +6,9 @@ Exec=/bin/haminstallui
 Icon=system-installer
 Categories=System;
 X-Hamnix-LiveOnly=true
+# THE MACHINE'S OWN PROGRAM, not the person's: it writes outside the
+# person's home and cannot work as the session user. The desktop chrome
+# launches it with the chrome's identity instead of dropping privilege.
+# See lib/desktopentry.ad:_de_chrome for why this is a key in this file
+# rather than a list of program names in the launcher.
+X-Hamnix-SystemChrome=true

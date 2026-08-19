@@ -22,7 +22,7 @@
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 
 from lib.homedir import hd_parse_passwd_home, hd_parse_regular_home, \
-    hd_home_join
+    hd_home_join, hd_parse_regular_uid, hd_session_uid
 
 
 # ---- stdout helpers ------------------------------------------------------
@@ -172,6 +172,30 @@ def _ipw_line(s: Ptr[uint8]):
     ipw_n = ipw_n + 1
 
 
+# THE UID THAT GOES WITH THAT HOME. lib/homedir.ad's hd_session_uid() is what
+# the system chrome drops to before it execs a person's program, and the whole
+# point is that the uid and the home come from ONE account: a launcher that ran
+# as one person and wrote into another's directory would be a new bug wearing
+# the old one's clothes. So this prints the uid and the home for the SAME index
+# and the gate asserts they agree.
+def _regu(label: Ptr[uint8], buf: Ptr[uint8], blen: uint64, idx: uint64):
+    out[0] = 0
+    n: uint64 = hd_parse_regular_home(buf, blen, 1000, idx, &out[0], 128)
+    u: uint64 = hd_parse_regular_uid(buf, blen, 1000, idx)
+    _o_str(label)
+    _o_str(cast[Ptr[uint8]](" idx="))
+    _o_dec(idx)
+    _o_str(cast[Ptr[uint8]](" uid="))
+    _o_dec(u)
+    _o_str(cast[Ptr[uint8]](" home="))
+    if n > 0:
+        _o_str(&out[0])
+    else:
+        _o_str(cast[Ptr[uint8]]("<none>"))
+    _o_ch(10)
+    _o_flush()
+
+
 def main() -> int32:
     _build_pw()
     # The live image's user — the ONLY case the old hardcode got right.
@@ -227,6 +251,22 @@ def main() -> int32:
     # truncated path is a valid-looking path that saves into the wrong file.
     _join_case(cast[Ptr[uint8]]("JOINTINY"),
                cast[Ptr[uint8]]("Documents/untitled.hdoc"), 8)
+    # ---- the uid half of the session identity, RUN ----------------------
+    _regu(cast[Ptr[uint8]]("REGU0"), &pw[0], pw_n, 0)
+    _regu(cast[Ptr[uint8]]("REGU1"), &pw[0], pw_n, 1)
+    _regu(cast[Ptr[uint8]]("REGU2"), &pw[0], pw_n, 2)
+    _regu(cast[Ptr[uint8]]("REGU4"), &pw[0], pw_n, 4)
+    _regu(cast[Ptr[uint8]]("IREGU0"), &ipw[0], ipw_n, 0)
+    # hd_session_uid() itself, against THIS host's /etc/passwd and this
+    # process's own uid. The harness runs unprivileged, so it takes step 1 --
+    # "the running uid is already a regular account, there is nothing to drop"
+    # -- and the gate asserts it equals `id -u`. That is the branch a
+    # single-uid host run and an offscreen harness take, and getting it wrong
+    # would make every launcher refuse to start anything.
+    _o_str(cast[Ptr[uint8]]("SESSUID uid="))
+    _o_dec(cast[uint64](hd_session_uid()))
+    _o_ch(10)
+    _o_flush()
     _o_str(cast[Ptr[uint8]]("HOMEDIR_HOST_DONE\n"))
     _o_flush()
     return 0

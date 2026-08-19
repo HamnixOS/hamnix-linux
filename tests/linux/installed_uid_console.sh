@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+#
+# REGISTRATION. ON-DEMAND. Not in ci_battery_manifest.txt because it builds a
+# medium, installs a machine onto a blank 6 GiB disk and boots it under OVMF --
+# one image build and two QEMU boots, far past the battery's per-shard budget.
+# It IS registered in scripts/release_gates.sh (`installed_uid_console|yes|0|23`).
+#
+# THIS ANNOTATION IS A REPAIR, NOT DECORATION. scripts/test_gate_registration.sh
+# does not read scripts/release_gates.sh at all -- it counts a gate as covered
+# only if a workflow or ci_battery_manifest.txt names it, or if its own header
+# carries this rationale in the first 80 lines. Without it this file was in the
+# checker's DARK set from the commit that added it, and that checker was
+# therefore RED on port/tier1-syscalls at 61590f23. HANDOFF.md records the
+# opposite ("STRUCK ... It PASSES"), measured before this gate existed.
 # tests/linux/installed_uid_console.sh — A PROGRAM STARTED AS THE PERSON COULD
 # NOT BE HEARD, AND THE RELEASE DREW A CONCLUSION FROM THE SILENCE.
 #

@@ -58,6 +58,22 @@ assert_grep '^PARSE net ok=1 name=Web Browser prog=/bin/hambrowse cat=Internet' 
 # Utility -> Accessories.
 assert_grep '^PARSE util ok=1 name=Calculator prog=/bin/hamcalcscene cat=Accessories' \
     "Utility entry classified Accessories"
+
+# ---- WHOSE PROGRAM IS IT: X-Hamnix-SystemChrome ---------------------------
+# The bit the desktop chrome reads to decide whether to launch an entry AS THE
+# PERSON or with its own root identity. Wrong in one direction, a person's
+# documents come out owned by uid 0 in their own home and their terminal cannot
+# save over them (measured, installed_documents.sh). Wrong in the other, the
+# install wizard is handed to uid 1001 and exits without installing (measured,
+# install_confirm_keys.sh 33/1). Both are silent: the row still draws either way.
+assert_grep '^CHROME chromed ok=1 chrome=1 liveonly=0 name=Control Center prog=/bin/hamctl' \
+    "an entry marked X-Hamnix-SystemChrome=true is CHROME -- and it still parses with the key sitting AFTER a trailing '#' comment block, which is exactly how the shipped files carry it and a position no fixture had run before"
+assert_grep '^CHROME plain ok=1 chrome=0 liveonly=0 name=Word Processor prog=/bin/hamwrite' \
+    "an ordinary application is NOT chrome -- the default is 'the person's', so a forgotten mark demotes a launch loudly instead of saving a document as root"
+assert_grep '^CHROME liveonly ok=1 chrome=1 liveonly=1 name=Install Hamnix prog=/bin/haminstallui' \
+    "X-Hamnix-LiveOnly IMPLIES chrome with no second key -- the installer keeps the launcher's identity"
+assert_grep '^CHROME explicitfalse ok=1 chrome=0 liveonly=0 name=Notes prog=/bin/hamnotesscene' \
+    "X-Hamnix-SystemChrome=false is not true -- the VALUE is read, not merely the key's presence"
 # Priority: Settings beats System.
 assert_grep '^PARSE settings ok=1 name=Settings prog=/bin/hamsettings cat=Settings' \
     "Settings;System; classified Settings (priority order)"
