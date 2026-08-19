@@ -27,6 +27,52 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+### hamsh's `export` DOES NOT REACH `getenv(3)`, AND NINE C-LAYER SWITCHES READ `getenv` -- INCLUDING THE ONE THE NEW `/n` FIX SHIPS WITH
+
+**2026-08-19, orchestrator-side, read-only. Nothing booted, nothing changed.**
+
+I had repeated the claim "hamsh's `export` writes hamsh's own table and never
+calls `setenv(3)`" twice without checking it. **Checked. It is true, and it is
+stronger than stated: `user/hamsh.ad` declares NO `setenv` or `putenv` extern at
+all.** `builtin_export` exists; nothing in the file can reach libc's environment.
+hamsh keeps its own table (`env_set`/`env_get` — e.g. `HAMNIX_NEWSHELL_USER` at
+`:10573`, read back at `:18830`).
+
+**Why that matters beyond the distro bug.** `user/linux-syscalls.c` reads **nine**
+`HAMNIX_*` switches through `getenv(3)`:
+
+`HAMNIX_DETACHED_FULL`, `HAMNIX_DISTRO`, `HAMNIX_ESP`, `HAMNIX_NO_USERNS`,
+`HAMNIX_ORPHAN_REAP`, **`HAMNIX_REAL_ROOT`**, `HAMNIX_REBOOT_INHIBIT`,
+`HAMNIX_ROOT`, `HAMNIX_ROOTWAIT`.
+
+**A hamsh BUILTIN runs in hamsh's own process.** So when a builtin calls into the
+C layer, that `getenv` reads the PROCESS environment — which `export` never
+touched. `bind` is a builtin. That is exactly why `distro_resolve` could not see
+`$HAMNIX_DISTRO_<NAME>`: not a lookup bug, **a layering gap between two
+environments that share a syntax.**
+
+**AND IT LANDS ON THE `/n` FIX MERGED THIS HOUR.** That fix remembers the real
+root in a C static (`ns_real_root`), set by `enter_root` — **that primary path
+does not depend on the environment and is not affected.** But it also accepts
+`HAMNIX_REAL_ROOT` as an override for "programs that inherit an environment", and
+**that override is unreachable from a hamsh `export`.** The agent said as much in
+its own comment (a separately exec'd program that binds `#/` itself is not
+measured); this pins down why, and that it is not fixable by spelling the
+variable differently.
+
+**NOT ESTABLISHED:** nothing was booted. I did not test whether a *child* process
+spawned by hamsh receives the table as its `environ` — it evidently does for
+`HAMNIX_NEWSHELL_USER`, which is how the session user reaches `login`'s callee, so
+the gap is specifically **same-process builtins**, not spawning. Somebody should
+measure that boundary rather than infer it from one working case.
+
+**The fix, whenever it is taken, is one of:** give hamsh a real `setenv` extern so
+`export` writes both; or have the C layer consult hamsh's table; or stop reading
+policy from the environment in code a builtin can reach. **The first is smallest
+and the third is most in keeping with the direction** — nine environment switches
+in a syscall layer is a lot of hidden policy for a system whose owner wants the
+boundaries to be namespaces.
+
 ### THE UNDERPINNING IS REACHABLE AT `/n` NOW -- 31 PASSED / 2 FAILED, AND THE NEGATIVE CONTROL RAN IN THE SAME BOOT
 
 **Measured on a booted machine, dev host, base `c7695c15` (checked with
