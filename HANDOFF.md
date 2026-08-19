@@ -254,6 +254,47 @@ reported them GREEN -- so the check that catches a gate claiming 0 FAILED over a
 body full of failures was OFF for them. The bracketed tag is optional in the
 pattern now; every older dialect counts exactly as it did.
 
+### THE FREEZE AND THE ROOT CONSOLE ARE THE SAME ARCHITECTURAL FACT
+
+I published that an installed machine's text console is "an unauthenticated
+administrator shell". It is, and I verified the mechanism rather than resting on
+the one measurement behind it — an agent ran `id` **inside the boot rc**, which
+shows the script's identity, not that a prompt is ever presented.
+
+The proof is already in this tree, in `user/hamsh.ad`'s own comment at the arena
+fix:
+
+```
+[hamsh:stage-06] rc-done
+[hamsh:stage-07] loop-enter
+hamsh$ [hamsh:stage-08] ed-readline-first
+```
+
+**PID 1 is hamsh. When its rc finishes, it falls into an interactive prompt.**
+`etc/rc.boot.installed` ends by sourcing `rc.5`, `rc.5` ends with
+`[rc.5] desktop up`, and then PID 1 — running as **uid 0**, because init does —
+presents `hamsh$` on the console. Nothing authenticates that.
+
+**So these are one fact, not two:**
+
+* **The freeze** (fixed): PID 1's rc *raised* out of its loop and fell to that
+  same prompt. The desktop was dead because nothing was left running it, and the
+  machine looked hung because the prompt was waiting for a person who was not
+  there.
+* **The root console** (open): PID 1's rc *completes normally* and falls to that
+  same prompt, as root, with no password ever asked for.
+
+**Why this matters for the fix, and it is the reason to write it down:** adding a
+getty or a greeter does **not** close it. The prompt is not a login program that
+could ask for a password — **it is init itself, having run out of script.** Any
+remedy has to change what PID 1 does when its rc ends: park, respawn, hand the
+console to something that authenticates, or refuse to read from it at all. A
+login screen bolted on beside that prompt leaves the prompt.
+
+**Not measured by me:** whether a physical keyboard on real hardware reaches that
+prompt. The existing evidence is QEMU's serial line, and the release notes say
+so.
+
 ### RESOLVED — I was measuring POST-FIX disks. The 962 figure stands unrefuted.
 
 I reported an hour ago that I could not reproduce the "962 bytes, not one account
