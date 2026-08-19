@@ -20,6 +20,7 @@ Usage:
   qmp_input.py <sock> click <x> <y> <screen_w> <screen_h>
   qmp_input.py <sock> type <text>          # ASCII letters/digits/space
   qmp_input.py <sock> key <qcode> [qcode...]
+  qmp_input.py <sock> combo <mod>... <qcode>   # ctrl-s: `combo ctrl s`
   qmp_input.py <sock> hold <qcode> [secs]     # ONE press, held down
   qmp_input.py <sock> burst <qcode> [n]       # n presses, no delay between
   qmp_input.py <sock> raw '<json>'
@@ -169,6 +170,22 @@ def main():
             q.send([key_ev(c, True), key_ev(c, False)])
             time.sleep(0.12)
         print('keys %s' % ' '.join(sys.argv[3:]))
+    elif op == 'combo':
+        # A MODIFIED KEYSTROKE: one or more modifiers held DOWN across a
+        # complete press/release of the final key, in one input-send-event so
+        # the guest cannot interleave anything between them. This is the only
+        # way to put a Ctrl-S on the guest's real keyboard from outside, and
+        # `key ctrl s` is NOT it -- that releases ctrl before s is pressed, so
+        # wsysd's ctrl_down is 0 when the letter arrives and the client
+        # receives a plain 's'. (user/wsysd.ad:handle_key subtracts 96 from a
+        # letter only while ctrl_down is set.)
+        #   qmp_input.py <sock> combo ctrl s
+        mods, k = sys.argv[3:-1], sys.argv[-1]
+        ev = [key_ev(m, True) for m in mods]
+        ev += [key_ev(k, True), key_ev(k, False)]
+        ev += [key_ev(m, False) for m in reversed(mods)]
+        q.send(ev)
+        print('combo %s+%s' % ('+'.join(mods), k))
     elif op == 'hold':
         # ONE PHYSICAL PRESS, HELD. `key` above is press-then-release inside a
         # single input-send-event pair, which is the one thing a held key is

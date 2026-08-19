@@ -1,0 +1,92 @@
+# lib/instnames.ad — THE NAMES AN INSTALL MUST REFUSE, IN ONE PLACE.
+#
+# WHY THIS IS A LIBRARY AND NOT TWO COPIES OF A LIST. There are two ways to
+# name the account an install creates -- `install --auto <disk> --user <name>`
+# on the console (user/hlinstall.ad) and the wizard's "Your user name" page
+# (user/haminstallui.ad) -- and a rule that only one of them enforces is not a
+# rule. This tree has been bitten by exactly that shape before: the five
+# distribution-namespace lines were written out once per distribution in three
+# rc files that had to be kept in step by hand, and were not (the installed one
+# had none of them), which is why /etc/rc.distros is generated now. One list,
+# two callers.
+#
+# THE DEFECT, MEASURED IN THE SOURCE OF THE ACCOUNT REWRITE. user/hlinstall.ad
+# rewrites /etc/passwd, /etc/group and /etc/shadow rather than appending to
+# them, and the name it is given goes onto its DROP list -- so any existing
+# line for that name is removed -- before the new line is written at
+# **uid 1001** with home /home/<name> and shell /bin/hamsh. Give it
+# `hostowner` and the machine's administrator (uid 1) is deleted and re-created
+# as an ordinary user: /etc/rc.de-hostowner has no identity to run as,
+# `newshell hostowner` has nothing to switch to, and every uid-1 lookup on that
+# machine resolves to nothing. `sshd`, `hamsh-svc` and `nobody` are reachable
+# by the same route -- and `nobody` is the one nothing ever complains about
+# until something looks up 65534, which is how this tree already shipped a
+# machine with no `nobody` line at all.
+#
+# `root` is on the list although this tree's /etc/passwd has no such account.
+# It is the first name a person coming from another Unix will try, and
+# accepting it would create a uid-1001 account called root -- a name that
+# means administrator everywhere else, on an account that is not one. That is
+# a trap, not a feature.
+#
+# NO GLOBAL Ptr[uint8] STRING CONSTANTS ARE DECLARED HERE, deliberately: on
+# this backend a global initialised with a string literal compiles cleanly and
+# is NULL at run time (measured -- it segfaulted the installer AFTER it had
+# written every account file correctly, so the install reported success). All
+# the literals below are function locals.
+
+
+# Byte-for-byte equality of two NUL-terminated strings. 1 = equal.
+def in_streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while True:
+        if a[i] != b[i]:
+            return 0
+        if a[i] == 0:
+            return 1
+        i = i + 1
+    return 0
+
+
+def in_slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+# 1 if `n` is a name no install may create a regular account under.
+def in_name_is_reserved(n: Ptr[uint8]) -> int32:
+    if in_streq(n, cast[Ptr[uint8]]("hostowner")) != 0:
+        return 1
+    if in_streq(n, cast[Ptr[uint8]]("sshd")) != 0:
+        return 1
+    if in_streq(n, cast[Ptr[uint8]]("hamsh-svc")) != 0:
+        return 1
+    if in_streq(n, cast[Ptr[uint8]]("nobody")) != 0:
+        return 1
+    if in_streq(n, cast[Ptr[uint8]]("root")) != 0:
+        return 1
+    return 0
+
+
+# The longest account or host name an installer may carry. The console
+# installer's `user_buf` and `hostname_buf` are Array[64, uint8], so 63 bytes
+# plus a NUL is the whole of what fits; the wizard's field is capped far
+# shorter (NAME_CAP) and can never reach this. It is expressed here so the two
+# front ends cannot disagree about it.
+IN_NAME_MAX: uint64 = 63
+
+
+# 1 if `n` is a name an install may carry at all: non-empty, short enough, and
+# not reserved. This is the WHOLE rule, so a caller that asks this question
+# cannot accidentally ask half of it.
+def in_name_ok(n: Ptr[uint8]) -> int32:
+    ln: uint64 = in_slen(n)
+    if ln == 0:
+        return 0
+    if ln > IN_NAME_MAX:
+        return 0
+    if in_name_is_reserved(n) != 0:
+        return 0
+    return 1

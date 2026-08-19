@@ -57,6 +57,14 @@ extern def sys_waitpid(pid: int32) -> int64
 extern def sys_pipechan() -> int32
 extern def sys_fdbind(pid: int32, fdnum: int32, kind: int32, slot: int32) -> int32
 
+# THE NAMES THIS WIZARD MUST REFUSE. The SAME rule the console installer
+# enforces (user/hlinstall.ad's --user), out of one file, because a rule only
+# one front end applies is not a rule: this page's only condition used to be
+# "the field is not empty", so a person could type `hostowner` into it and the
+# install would delete the machine's administrator and re-create it as an
+# ordinary user at uid 1001. lib/instnames.ad's header has the mechanism.
+from lib.instnames import in_name_is_reserved
+
 from lib.p9 import spawn, p9_listdir
 from lib.hamsceneloop import hamscene_park, HAMSCENE_IDLE_MS
 
@@ -976,7 +984,10 @@ def _page_ready() -> int32:
             return 1
         return 0
     if page == PAGE_USER:
-        if user_len > 0:
+        # NOT `user_len > 0`, which is what this was. A name that is going to
+        # destroy a system account must not be advanceable past; the page says
+        # why, below, rather than making Next mysteriously dead.
+        if user_len > 0 and in_name_is_reserved(&user_buf[0]) == 0:
             return 1
         return 0
     if page == PAGE_UPASS:
@@ -1164,15 +1175,29 @@ def emit_scene(wid: int32):
                 cast[Ptr[uint8]]("Names the installed machine (/etc/hostname)."),
                 cast[Ptr[uint8]]("#606060"))
     elif page == PAGE_USER:
+        # uid 1001, not 1000: the installer writes the account at the uid the
+        # desktop session actually runs as (etc/rc.de-user.linux). The label
+        # said 1000 and had done since before that was settled.
         _draw_input(CONTENT_X, 92, FIELD_W,
-                    cast[Ptr[uint8]]("Your username (regular user, uid 1000):"),
+                    cast[Ptr[uint8]]("Your username (regular user, uid 1001):"),
                     &user_buf[0], user_len, 0, 1)
-        hamscene_glyphs(CONTENT_X, 140,
-                cast[Ptr[uint8]]("Letters, digits, '-' and '_'. This is your"),
-                cast[Ptr[uint8]]("#606060"))
-        hamscene_glyphs(CONTENT_X, 154,
-                cast[Ptr[uint8]]("everyday login on the installed system."),
-                cast[Ptr[uint8]]("#606060"))
+        if user_len > 0 and in_name_is_reserved(&user_buf[0]) != 0:
+            hamscene_glyphs(CONTENT_X, 140,
+                    cast[Ptr[uint8]]("That name belongs to the system. Installing"),
+                    cast[Ptr[uint8]]("#a02020"))
+            hamscene_glyphs(CONTENT_X, 154,
+                    cast[Ptr[uint8]]("under it would delete this machine's"),
+                    cast[Ptr[uint8]]("#a02020"))
+            hamscene_glyphs(CONTENT_X, 168,
+                    cast[Ptr[uint8]]("administrator. Please choose another."),
+                    cast[Ptr[uint8]]("#a02020"))
+        else:
+            hamscene_glyphs(CONTENT_X, 140,
+                    cast[Ptr[uint8]]("Letters, digits, '-' and '_'. This is your"),
+                    cast[Ptr[uint8]]("#606060"))
+            hamscene_glyphs(CONTENT_X, 154,
+                    cast[Ptr[uint8]]("everyday login on the installed system."),
+                    cast[Ptr[uint8]]("#606060"))
     elif page == PAGE_UPASS:
         af0: int32 = 0
         af1: int32 = 0

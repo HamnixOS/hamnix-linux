@@ -235,3 +235,117 @@ def hd_fallback_home(out: Ptr[uint8], cap: uint64) -> uint64:
         return 0
     out[k] = 0
     return k
+
+
+# Does this path open? Used only as an EXISTS test for a directory.
+def hd_dir_exists(p: Ptr[uint8]) -> int32:
+    fd: int32 = sys_open(cast[Ptr[char]](p))
+    if fd < 0:
+        return 0
+    sys_close(fd)
+    return 1
+
+
+# THE SESSION USER'S HOME — NOT THE RUNNING UID'S, WHICH IS A DIFFERENT
+# QUESTION AND WAS THE WRONG ANSWER.
+#
+# MEASURED, on a real installed machine, 2026-08-18: the desktop icon column
+# spawns a launcher with lib/p9.ad's spawn_detached() straight out of
+# user/hamdesktop.ad (`_run_action`) -- so a double-clicked Word Processor is a
+# CHILD OF THE SYSTEM CHROME and runs as ROOT, with the chrome's ambient
+# environment, NOT through /etc/rc.de-user and NOT as uid 1001. hd_resolve_home()
+# asks sys_getuid() and would get 0, find no uid-0 line in /etc/passwd, and fall
+# straight through to /home/live -- the very hardcode it exists to remove, just
+# reached by a different road. user/hamdesktop.ad's own _desk_dir_resolve()
+# already had to solve this and its comment says so ("the running uid is NOT
+# it"); this is that chain, in the library, so the office applications get it
+# without copying it.
+#
+#   1. $HOME, when the ambient env carries a real one (not the "/" placeholder).
+#   2. this uid's passwd home, ONLY when the uid is a REGULAR account
+#      (>= HD_REGULAR_MIN_UID) and the directory is really there. Root's and
+#      hostowner's homes are not the session's, however the program was
+#      started.
+#   3. each REGULAR account in /etc/passwd, in file order, first one whose home
+#      directory exists. On the live medium that is `live`; on an installed
+#      machine the installer leaves exactly one regular account and it is the
+#      person's.
+#   4. the first regular account's home even if it does not exist yet (the
+#      caller creates what it needs).
+#   5. /home/live, the live medium's user, as the absolute last resort.
+#
+# THE EXISTS TEST IS LOAD-BEARING AT STEP 3 and is not belt-and-braces: the
+# LIVE image's /etc/passwd carries `dave` at uid 1000 BEFORE `live` at 1001, and
+# only /home/live is created in the image. Taking the first regular account
+# without checking would point every office application on the live medium at
+# /home/dave, which does not exist -- turning a fix for installed machines into
+# a regression on the medium.
+HD_REG_MAX: uint64 = 8
+
+
+def hd_session_home(out: Ptr[uint8], cap: uint64) -> uint64:
+    hl: uint64 = hd_env_home(out, cap)
+    if hl > 1 and out[0] == 47 and hd_dir_exists(out) != 0:
+        return hl
+    uid: uint64 = cast[uint64](sys_getuid())
+    if uid >= HD_REGULAR_MIN_UID:
+        hl = hd_home_from_passwd(out, cap)
+        if hl > 1 and hd_dir_exists(out) != 0:
+            return hl
+    r: uint64 = 0
+    while r < HD_REG_MAX:
+        hl = hd_regular_home(r, out, cap)
+        if hl == 0:
+            break
+        if hd_dir_exists(out) != 0:
+            return hl
+        r = r + 1
+    hl = hd_regular_home(0, out, cap)
+    if hl > 1:
+        return hl
+    return hd_fallback_home(out, cap)
+
+
+# THE SESSION'S HOME, WITH A SUBPATH UNDER IT: "<home>/<sub>" into `out`.
+#
+# WHY THIS IS HERE AND NOT SPELLED OUT IN EACH APP. hd_resolve_home() answers
+# "where is home"; every caller that wants a FILE then has to concatenate, and
+# the three office apps that did not have this helper did not call the
+# resolver either -- they carried a literal "/home/live/Documents/" instead.
+# On an installed machine that directory belongs to uid 0 and the session is
+# uid 1001, so a Save went to a path the person cannot write and the document
+# was silently lost (the save path has no error report). One helper, so the
+# concatenation is written once and the resolver is impossible to skip.
+#
+# IT RESOLVES THROUGH hd_session_home(), NOT hd_resolve_home(): a launcher
+# double-clicked on the desktop is spawned by the ROOT system chrome, so the
+# running uid is not the session user's and asking sys_getuid() lands on
+# /home/live again. See hd_session_home's header for the measurement.
+#
+# `sub` has NO leading slash ("Documents/untitled.hdoc"); the separator is
+# inserted here, and never doubled if the home already ends in one.
+# Returns the length written, 0 if it does not fit (out is then untouched
+# beyond a NUL at 0) -- a caller that gets 0 must not write anything.
+def hd_home_join(sub: Ptr[uint8], out: Ptr[uint8], cap: uint64) -> uint64:
+    if cap < 2:
+        return 0
+    p: uint64 = hd_session_home(out, cap)
+    if p == 0:
+        return 0
+    if p > 1 and out[p - 1] == 47:                     # never "//"
+        p = p - 1
+    if p + 1 >= cap:
+        out[0] = 0
+        return 0
+    out[p] = 47
+    p = p + 1
+    k: uint64 = 0
+    while sub[k] != 0:
+        if p + 1 >= cap:
+            out[0] = 0
+            return 0
+        out[p] = sub[k]
+        p = p + 1
+        k = k + 1
+    out[p] = 0
+    return p

@@ -21,7 +21,8 @@
 
 extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 
-from lib.homedir import hd_parse_passwd_home, hd_parse_regular_home
+from lib.homedir import hd_parse_passwd_home, hd_parse_regular_home, \
+    hd_home_join
 
 
 # ---- stdout helpers ------------------------------------------------------
@@ -85,6 +86,37 @@ def _build_pw():
     _pw_line(cast[Ptr[uint8]]("bobby:x:1002:1002::/home/bobby:/bin/hamsh"))
     _pw_line(cast[Ptr[uint8]]("nobody:x:65534:65534::/nonexistent:/bin/false"))
 
+
+
+# ---- hd_home_join: THE JOIN THE OFFICE APPS NOW USE ----------------------
+# hd_home_join() is what user/hamwrite.ad, user/hamsheet.ad and
+# user/hamslides.ad call instead of the literal "/home/live/Documents/".
+# Unlike the pure parsers above it does I/O (it goes through
+# hd_resolve_home), so the ANSWER here depends on the machine this runs on
+# and the assertions are about its SHAPE, not its value: absolute, one
+# separator, the subpath on the end, and a REFUSAL rather than a truncation
+# when the buffer is too small.
+#
+# It is also the run-time proof that the string literals inside it are not
+# NULL. On this backend a GLOBAL initialised with a string literal compiles
+# cleanly and is null at run time; these are function locals, and a null one
+# would fault here rather than on an installed machine.
+join_out: Array[128, uint8]
+
+
+def _join_case(tag: Ptr[uint8], sub: Ptr[uint8], cap: uint64):
+    join_out[0] = 0
+    n: uint64 = hd_home_join(sub, &join_out[0], cap)
+    _o_str(tag)
+    _o_str(cast[Ptr[uint8]](" len="))
+    _o_dec(n)
+    _o_str(cast[Ptr[uint8]](" path="))
+    if n > 0:
+        _o_str(&join_out[0])
+    else:
+        _o_str(cast[Ptr[uint8]]("<none>"))
+    _o_ch(10)
+    _o_flush()
 
 out: Array[128, uint8]
 
@@ -187,6 +219,14 @@ def main() -> int32:
         _o_str(cast[Ptr[uint8]]("<none>"))
     _o_ch(10)
     _o_flush()
+    _join_case(cast[Ptr[uint8]]("JOINDOC"),
+               cast[Ptr[uint8]]("Documents/untitled.hdoc"), 128)
+    _join_case(cast[Ptr[uint8]]("JOINSHEET"),
+               cast[Ptr[uint8]]("Documents/untitled.hsheet"), 128)
+    # A buffer too small for the answer must REFUSE, not truncate: a
+    # truncated path is a valid-looking path that saves into the wrong file.
+    _join_case(cast[Ptr[uint8]]("JOINTINY"),
+               cast[Ptr[uint8]]("Documents/untitled.hdoc"), 8)
     _o_str(cast[Ptr[uint8]]("HOMEDIR_HOST_DONE\n"))
     _o_flush()
     return 0
