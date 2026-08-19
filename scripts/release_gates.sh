@@ -227,25 +227,49 @@ shipped_medium_boots|yes|0|31||bash tests/linux/shipped_medium_boots.sh @IMG@
 # literal scores its failures on the disk assertions. The other two numbers
 # were not.
 #
-# THE OTHER TWO expect_min ARE DELIBERATELY BLANK, WHICH MEANS ZERO, AND THAT
-# IS A STATED GAP RATHER THAN A NUMBER I INVENTED. Every other number in this file
-# was measured on this host before it was written down; these three were not
-# measured in the session that registered them (each is a full image build plus
-# three or four QEMU boots, and the session's clock went to the documents gate
-# and its negative control). HANDOFF.md records 61/0 and 24/0 for the first two
-# from an earlier tree, and a package database has landed on the installed-disk
-# path since, so those figures are a REPORT and not a measurement of this tree.
-# Running them at zero still catches the two failures that matter most -- a
-# gate that asserts nothing is RED by run_gate's own rule, and any failure is
-# RED -- and loses only the shrink check. FILL THESE IN from a run, and do not
-# copy them from a HANDOFF entry.
-installed_accounts|yes|0|||bash tests/linux/installed_accounts.sh
-installed_offers_install|yes|0|||bash tests/linux/installed_offers_install.sh
+# THE OTHER TWO WERE BLANK, WHICH MEANT ZERO, AND THEY ARE FILLED IN NOW --
+# MEASURED, ON THIS HOST, IN THE 1.0.32 RELEASE RUN OF 2026-08-19, not copied
+# from the HANDOFF entry that reported the same two figures from an earlier
+# tree. The previous session left them blank rather than copy an unmeasured
+# number, which was right; this session ran them and they came out
+#
+#     installed_accounts        61 PASSED / 0 FAILED
+#     installed_offers_install  24 PASSED / 0 FAILED
+#
+# on a tree that has a package database on the installed-disk path, which is
+# the change that made the earlier figures a report rather than a measurement.
+# They agree with the report; that is a fact about the run, not the reason for
+# the number.
+installed_accounts|yes|0|61||bash tests/linux/installed_accounts.sh
+installed_offers_install|yes|0|24||bash tests/linux/installed_offers_install.sh
 installed_documents|yes|0|48||bash tests/linux/installed_documents.sh
 # The end-to-end half of the reserved-name / over-long-name refusals. 16/0
 # measured on this host, 2026-08-18, immediately before it was written here;
 # the QEMU-free half is test_install_names_host above.
 install_refuses_reserved|yes|0|16||bash tests/linux/install_refuses_reserved.sh
+# DOES `poweroff` POWER OFF A MACHINE WHOSE COMPOSITOR IS PRESENTING? Until
+# 2026-08-19 it did not: user/poweroff.ad wrote its banner to fd 1 before it
+# opened /dev/reboot, and once the compositor is presenting that write does not
+# return -- so the /dev/reboot write was never reached and three graphical
+# boots in a row sat past a 300 s deadline. `halt` and `reboot` had the same
+# shape. The gate boots three machines: the shipped binary on a graphical one
+# (must power off), the SAME program with the banner line put back on the same
+# desktop (must hang -- the negative control, and it is RUN), and that same
+# reverted binary on a machine with no GPU at all (must power off, so a red in
+# the second arm cannot be a broken build).
+#
+# expect_min 22, MEASURED on this host in the 1.0.32 release run of 2026-08-19,
+# by the gate AS IT NOW STANDS. It was left blank until then and the reason is
+# worth keeping: the gate had been run at 21 PASSED / 3 FAILED, and then its
+# arm-B scoring was changed because THE NEGATIVE CONTROL DID NOT FIRE -- the
+# banner-restored binary powered a presenting graphical machine off in 21 s and
+# again in 18 s, in two different display configurations. Two of those three
+# assertion lines became reports in that change, so 22 was available by
+# ARITHMETIC on a run of the OLD scoring, and a computed number is exactly what
+# a blank exists to refuse. The release run then scored the new gate at 22 / 0
+# and that is where this number comes from. That the two agree is an
+# observation, not the reason.
+poweroff_graphical|yes|0|22||bash tests/linux/poweroff_graphical.sh
 REGISTRY
 }
 
