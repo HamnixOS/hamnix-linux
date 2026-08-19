@@ -189,37 +189,35 @@ linux = ns clean {
 # empty on every image ever built.
 source '/etc/rc.d/rc.5'
 
-# --- WHO IS SITTING HERE ---------------------------------------------
-# EVERYTHING ABOVE THIS LINE USED TO BE THE WHOLE FILE, and that is exactly
-# the defect. The rc ended, and PID 1 -- which IS hamsh -- fell through into
-# its interactive prompt. That prompt is an UNAUTHENTICATED uid 0 SHELL on
-# the console of a machine that has just finished booting: nothing asked who
-# was there, and everything typed ran as root. It is produced by the rc
-# COMPLETING NORMALLY, which is why it was never noticed as a failure.
-#
-# It is the same architectural fact as the desktop freeze that was fixed
-# earlier -- an rc that RAISES lands in that same prompt. One fact, two
-# symptoms. So a greeter started BESIDE the prompt closes neither of them:
-# the prompt is still there, behind the greeter, on the console.
-#
-# The fix is the two lines below, in this order, and neither works alone:
-#
-#   `source /etc/rc.login` starts a login program on each terminal. Each one
-#   prompts, authenticates against /dev/auth (the real /etc/shadow, the same
-#   device `su` uses), and on success becomes that user and execs their
-#   shell. On failure it says so and prompts again.
-#
-#   `supervise` is what stops the fallthrough. It is a hamsh builtin that
-#   NEVER RETURNS: it reaps children and drains the init/service control
-#   mailbox (so `init 0`, `init 6` and `service` still work) and parks, and
-#   it never reads the console. Because it does not return, main() never
-#   reaches its interactive REPL, and there is no root prompt to fall into.
-#
-#   `exit` here would NOT do: main()'s exit path returns out of main, and for
-#   PID 1 that is process death, which the kernel calls a panic. PID 1 has to
-#   stay alive and keep doing its job -- it just must not read the console.
-source '/etc/rc.login'
 
-# NOTHING AFTER `supervise` EVER RUNS. It is the last statement in the boot
-# of this machine, deliberately, and anything appended below it is dead code.
-supervise
+# --- WHO IS SITTING HERE, AND WHY THIS FILE DELIBERATELY DOES NOT ASK ------
+#
+# THE INSTALLED MACHINE NOW ASKS. Its /etc/rc.boot is etc/rc.boot.machine,
+# which ends `source '/etc/rc.login'` then `supervise` -- a login program on
+# every terminal, and a PID 1 that never falls through to an interactive
+# prompt. That closes the unauthenticated uid 0 console, and
+# tests/linux/installed_boot_login.sh measures it on a booted machine.
+#
+# THIS FILE IS NOT THAT FILE. It is the LIVE / developer image's rc, staged
+# into an initramfs root the next boot throws away, and it still ends by
+# falling through to PID 1's interactive root prompt. That is a DECISION, not
+# an oversight, and it is recorded here because the absence of these two lines
+# is otherwise indistinguishable from having forgotten them:
+#
+#   * A LIVE MEDIUM'S WHOLE JOB IS TO INSTALL THE MACHINE. It carries no
+#     secrets and it has no accounts a person chose -- the passwords in its
+#     /etc/shadow are the ones committed to this git repository. A password
+#     prompt on it would be a lock whose key is published, protecting nothing
+#     and locking out anyone who had not read the source. Every mainstream
+#     distribution autologins its live image for exactly this reason and asks
+#     only once a machine has been installed.
+#   * IT IS ALSO THE DEVELOPER BOOT. Gates under scripts/ drive PID 1's serial
+#     prompt directly; a login prompt here would break them, and none of them
+#     has been re-measured against one.
+#
+# WHAT IS THEREFORE STILL TRUE AND SHOULD NOT BE MISREAD AS FIXED: booting the
+# live medium gives an unauthenticated root console. If that is to change, the
+# shape to copy is etc/rc.boot.full's, which starts gettys with `-a live` --
+# AUTOLOGIN, so a person still types nothing, but PID 1 stops being the thing
+# reading the console. That is a real improvement and it is NOT MEASURED by
+# any gate in this tree, which is why it is described rather than done.

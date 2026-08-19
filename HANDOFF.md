@@ -27,6 +27,150 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE INSTALLED MACHINE ASKS WHO YOU ARE, AND THERE IS NO LONGER A ROOT SHELL BEHIND THE QUESTION -- 27 PASSED / 0 FAILED
+
+**Measured on booted machines, dev host, 2026-08-19, base `b283c9ea`. Evidence
+`~/.hamnix-build/instbootlogin/GATE.log`.**
+
+    installed_boot_login   27 PASSED / 0 FAILED   (new; two arms of one invocation)
+
+**THE HOLE.** `/etc/rc.boot` is what hamsh runs AS PID 1. When it ENDED, PID 1
+fell through into its own interactive prompt -- an unauthenticated uid 0 shell
+on the console of a machine that had just finished booting. It was the rc
+COMPLETING NORMALLY that produced it, which is why it never read as a failure.
+`installed_login.sh` had already proved the passwords WORK; nothing ever
+demanded one.
+
+**THE BRIEF I WAS GIVEN WAS WRONG ABOUT THE TREE, AND THE CORRECTION IS THE
+USEFUL PART.** It said "there is no getty on any tty". In fact
+`user/getty.ad` AND `user/login.ad` both existed and both were COMPLETE:
+login prompts, writes `user`/`pass` to /dev/auth, reads "ok", calls
+`sys_setuid_auth` on the VERIFIED fd, stamps `HAMNIX_NEWSHELL_USER`, chdirs
+home and execs the shell; a wrong password prints "Login incorrect" and
+reprompts. `login` was already staged in the image and `/dev/auth` is fully
+served on this lane by `user/linux-auth.c` against the real `/etc/shadow`.
+**Not one line of login.ad needed changing.** Three things were missing:
+
+* **`getty` WAS IN NO SHIP VEHICLE** -- not in `scripts/hamlinux_image.sh`'s
+  APPS, so `/bin/getty` existed on no hamnix-linux machine. And it could not
+  just be added: it took a NATIVE VT NUMBER and opened `/dev/vt/N`, **a device
+  this kernel does not have** (`user/linux-syscalls.c` has no `/dev/vt` arm).
+  It now also takes a device PATH, so it is pointed at the stock kernel's own
+  terminals. The VT-number mode is untouched for the native lane.
+* **PID 1's rc HAD NO WAY TO NOT RETURN.** New hamsh builtin **`supervise`**:
+  it never returns, so `main()` never reaches its REPL. It still does PID 1's
+  job -- drains the init/service mailbox so `init 0`/`init 6` keep working,
+  reaps children -- and parks on NO fds. It deliberately does NOT park on
+  stdin, or PID 1 would race the getty for keystrokes. `exit` would not do
+  (returns out of main = a panic for PID 1); a `while` loop in rc SOURCE would
+  not either (never returns to the depth-1 collector -- that is what exhausted
+  the value arena in the desktop soak, and it FAILED by raising into the very
+  prompt this closes).
+* **NOTHING SOURCED A LOGIN RC.** New `etc/rc.login.linux`.
+
+**WHERE `supervise` IS, AND IT IS LOAD-BEARING.** In `etc/rc.boot.machine` --
+the installed machine's own `/etc/rc.boot`. It is deliberately NOT in
+`etc/rc.boot.installed`, **because that file is SOURCED, not run**: every gate
+in `tests/linux/` writes its own `/etc/rc.boot` that begins `source
+'/etc/rc.boot.installed'` and then measures and powers off. A `supervise`
+inside the sourced file would never return to any of them -- every one of
+those gates would hang having measured nothing.
+
+**WHAT THE GATE MEASURED, on a booted installed machine:** the console
+presents `login: ` (3 prompts); a junk credential and the real account's wrong
+password are both REFUSED (`Login incorrect` x2); the right password ADMITS
+and the session answers `id` with `uid=1001(hamacctusr)` and writes a file its
+own home keeps; the first shell prompt is at serial line 647 and the first
+login prompt at 626, so **no shell was offered before the question**; and
+before authentication NO root identity answered and NO typed redirect created
+a file.
+
+**THE NEGATIVE CONTROL IS AN ARM OF THE SAME RUN AND DIFFERS BY TWO WORDS.**
+`guarded` runs `/bin/getty /dev/ttyS0`; `autologin` runs `/bin/getty
+/dev/ttyS0 -a hostowner`. Everything else -- disk, `/bin/hamsh`,
+`/bin/getty`, `/etc/rc.login`, `supervise`, driver, patterns, port -- is
+identical. `login -f` deliberately does NOT setuid, so it keeps PID 1's root,
+and that arm MUST reach a root shell with no password. It did: `uid=0 gid=0
+groups=0`, and it created the file. **This is not a straw man: `-a` is the
+shape this tree SHIPS on the live medium today** (`etc/rc.boot.full`: `getty 2
+-a live`).
+
+**TWO INSTRUMENT BUGS THAT WOULD EACH HAVE PRODUCED A CONFIDENT WRONG ANSWER.**
+* **THE ROOT DETECTOR GREPPED `uid=0(`.** `user/id.ad` prints
+  `uid=<n>(<name>)` only when it can resolve the number in `/etc/passwd` and
+  bare `uid=<n>` when it cannot -- and **this disk has no uid 0 entry at all**
+  (its administrative account is `hostowner`, at uid 1). A real root shell here
+  answers `uid=0 gid=0` with **no parentheses**. The detector would have
+  reported "no root shell" IN THE ARM BUILT TO CONTAIN ONE, the control would
+  have gone red, and had the control been skipped the guarded arm would have
+  "proved" absence with an instrument that could not see presence. Caught by
+  reading the disk's `/etc/passwd` before the run, not by an assertion.
+* **THE PROMPT GREP MATCHED THE GATE'S OWN OUTPUT.** `rc.login: getty started
+  on /dev/ttyS0` CONTAINS the substring `login:`. An unanchored grep would have
+  gone green on the rc merely SAYING it started a getty. It is `^login: `.
+
+**AN ARM THAT WAS TRIED, FAILED, AND IS WORTH RECORDING.** The first control
+was the LITERAL old rc (source `rc.boot.installed` and stop). PID 1 does fall
+through -- that log carries `[hamsh:stage-07] loop-enter` and a `hamsh$ `
+prompt with no login prompt anywhere -- **but the prompt could not be DRIVEN
+over the serial socket**: typed lines were echoed and never executed, so it
+answered neither probe and scored 0/2 on a machine that genuinely had a root
+shell. **PID 1's own fd 0/1/2 are `/dev/console`, which follows the LAST
+`console=` and is therefore tty0, THE SCREEN** -- while its line-editor echo
+still reaches the serial through the Adder runtime's console mirror. So the
+pre-existing root shell was on the SCREEN, not on the serial line.
+
+**WHAT IS NOT ESTABLISHED, and none of it should be read as done.**
+* **THE LIVE MEDIUM IS UNCHANGED AND STILL GIVES AN UNAUTHENTICATED ROOT
+  CONSOLE.** `etc/rc.boot.linux` was deliberately left alone: a live medium
+  carries no secrets (the passwords in its `/etc/shadow` are committed to this
+  repository), its job is to install the machine, and it is also the developer
+  boot that gates under `scripts/` drive over serial. The shape to copy when
+  it does change is `etc/rc.boot.full`'s `-a live` autologin.
+* **THE VIRTUAL TERMINALS ARE STARTED, NOT MEASURED.** `/etc/rc.login` starts
+  getty on `/dev/tty2` and `/dev/tty3` and the rc says so on the console; that
+  a person can log in on one is unmeasured, because once wsysd presents it owns
+  the framebuffer and nothing on this machine reads tty2 back.
+* **THE INSTALLER PATH IS UNMEASURED.** The gate wrote its own `/etc/rc.boot`.
+  `user/hlinstall.ad:write_machine_rc_boot` copies `/etc/rc.boot.machine` to
+  the target, so a fresh install SHOULD get the gated rc -- but no gate has
+  installed a machine and then checked that it asks. **Note its fallback
+  branch writes only `source '/etc/rc.boot.installed'`**, i.e. an image that
+  does not carry `rc.boot.machine` installs an UNGATED machine.
+* **THE GRAPHICAL LOGIN IS NOT BUILT.** rc.5 still starts the desktop without
+  asking. See the next section.
+* **A CONSTRUCTED ROOT IS NOT BUILT.** The authenticated session still gets the
+  machine's real root, so `cd /` shows the machine.
+
+### THE GRAPHICAL LOGIN IS NOT BUILT, AND THE REASON IS A SHIP-VEHICLE GAP WORTH KNOWING
+
+**2026-08-19, source reading, NOTHING BOOTED.** The owner asked for "a gdm like
+login interface for the GUI". It is not done. What was found:
+
+**`user/hamlock.ad` IS ALREADY MOST OF A GREETER.** It is a self-contained
+full-screen scene client that owns its window, draws a masked password field,
+and **makes the unlock decision itself by authenticating against `/dev/auth`**
+-- the same device `login` and `su` use. It needs no compositor daemon.
+
+**AND IT IS IN NO SHIP VEHICLE ON THIS LANE.** Neither `hamlock` nor
+`hamsessui` is in `scripts/hamlinux_image.sh`'s `GUI_APPS`, so neither exists
+on any hamnix-linux machine. That is NORTH_STAR.md's worst bug shape -- a
+program in the tree and in no ship vehicle -- and it is the same shape the
+`getty` half of this work just closed.
+
+**THE SHAPE THE FIX WANTS.** `etc/rc.d/rc.5.linux` today starts `wsysd`, then
+`hamdesktop` and `hampanelscene` unconditionally. gdm-shaped means: start
+`wsysd`, run a greeter that BLOCKS until it authenticates, and only then start
+the session clients -- so nothing of the session exists until the password is
+right, rather than a curtain laid over a session that already started.
+
+**THE TWO THINGS THAT ARE NOT FREE.** (1) `hamlock` resolves the account from
+the CURRENT uid (`passwd_lookup_by_uid`); a greeter runs as root at rc.5 time,
+and on this disk **there is no uid 0 entry in `/etc/passwd`**, so it must be
+taught to take a typed USERNAME the way `login` does. (2) Measuring it needs an
+image rebuild plus an install boot, and the only instrument that can read a
+compositor-covered screen is screendump+OCR.
+
 ### THE POINTER IS GATED. A CLICK ON A ROW, A CLICK ON AN ICON, AND A CLICK ON "INSTALL HAMNIX" ON A LIVE MEDIUM THAT PARTITIONS A DISK
 
 **Measured on booted machines, dev host, 2026-08-19, base `1c2a00e7`. Evidence
