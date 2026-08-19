@@ -262,6 +262,26 @@ shipped_medium_boots|yes|0|31||bash tests/linux/shipped_medium_boots.sh @IMG@
 installed_accounts|yes|0|61||bash tests/linux/installed_accounts.sh
 installed_offers_install|yes|0|24||bash tests/linux/installed_offers_install.sh
 installed_documents|yes|0|48||bash tests/linux/installed_documents.sh
+
+# WHOSE FILE IS IT, WHEN THE DESKTOP STARTS THE PROGRAM THAT WROTE IT? 66/0
+# measured on this host, 2026-08-19, in the run that registered it -- one medium
+# build, one install onto a blank disk, three boots.
+#
+# THIS IS THE GATE installed_documents CANNOT BE. That one REPRODUCES the launch
+# from the machine's rc (`spawn detached ns { /bin/<app> }`) and says so in its
+# own header; it executes no line of hampanelscene, hamappmenu or hamdesktop, so
+# its 48/0 is unmoved by any change to a launcher -- and it still reads uid 0 on
+# every document, correctly, because the rc it drives is not the desktop. THIS
+# one writes a payload to /dev/wsys/appmenu/launch and lets the shipped panel's
+# own _drain_one_launch_queue() do the spawning.
+#
+# ITS NEGATIVE CONTROL IS AN ARM, NOT A SECOND RUN: hamsheet is queued as a BARE
+# path in the same boot sequence, through the same binary and the same drain
+# function, and must come out uid 0 -- which is what keeps
+# install_confirm_keys's `echo '/bin/haminstallui' > '/dev/wsys/appmenu/launch'`
+# working. A third arm (hamslides, `user`) exists so the split cannot line up
+# with WHICH PROGRAM instead of WHICH PAYLOAD.
+installed_launch_uid|yes|0|66||bash tests/linux/installed_launch_uid.sh
 # The end-to-end half of the reserved-name / over-long-name refusals. 16/0
 # measured on this host, 2026-08-18, immediately before it was written here;
 # the QEMU-free half is test_install_names_host above.
