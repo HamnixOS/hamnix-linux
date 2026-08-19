@@ -302,9 +302,12 @@ pointer_launch_uid|yes|0|0||bash tests/linux/pointer_launch_uid.sh
 # so the control that the same instrument CAN see one after authentication is
 # an ARM OF THE SAME BOOT and is scored before any absence is believed. A
 # SECOND boot of the same disk proves last boot's session recipe does not
-# authorise this one. The expected count is left at 0 until a clean full run
-# is recorded here.
-graphical_login|yes|0|0||bash tests/linux/graphical_login.sh
+# authorise this one. 78/0 measured on this host, 2026-08-19, and the RED ARM
+# ran: the same gate against a tree with rc.5's session-start lines moved
+# BEFORE the greeter -- the curtain ordering -- scores 68/10, and every one of
+# the ten is an ordering or census assertion. EVERY OCR ASSERTION STAYS GREEN
+# IN THAT ARM, which is why this gate does not rest on screendumps.
+graphical_login|yes|0|78||bash tests/linux/graphical_login.sh
 # A PERSON CLICKS APPLICATIONS -> INSTALL HAMNIX ON A LIVE MEDIUM AND A DISK
 # GETS PARTITIONED. 19/0 measured 2026-08-19. Both other wizard gates start
 # haminstallui by writing the launch queue; this one starts it with a pointer
