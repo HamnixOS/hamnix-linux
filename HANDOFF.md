@@ -74,6 +74,39 @@ so.
 each. Cleaned up. Carve to a scratch path you delete in the same command, or
 read the filesystem out of the image with an offset instead of copying it.
 
+### `channel_covers_image`'s LAST FAILURE IS A DEV-TREE ARTIFACT — and that is a
+### problem, because it trains the reader to normalise a red
+
+Measured, both halves:
+
+* **`/etc/hamnix-release` IS packaged** — `scripts/hamlinux_packages.py:2673` generates
+  it, and the guard above it exists because that file once shipped in the image
+  and in no package, violating the owner's updatable rule.
+* **`scripts/hamlinux_image.sh:398` writes the literal `unstamped`** when
+  `HAMLINUX_VERSION` is unset.
+
+So in a **dev tree** the image says `unstamped` while the channel says a real
+version, the contents differ, and the gate reds. In a **release build** the
+variable is set and they agree. The failure is correct behaviour reported in a
+misleading way: it is indistinguishable, in the gate's output, from a genuine
+content mismatch.
+
+**Why that is worth fixing rather than explaining each time:** every report for
+three days has carried "7/1 on the lean root, the one failure being the version
+stamp" as an aside. A red that is always there and always explained away is a red
+nobody reads — and the next real mismatch on that file arrives wearing the same
+clothes. This tree already has two provenance guards that refuse and say why
+rather than failing generically; this is a third instance of the same need.
+
+**The fix**: recognise `unstamped` and refuse that assertion with a named reason
+— *"this image was built without HAMLINUX_VERSION, so its release stamp cannot be
+compared; build with the variable set or accept that this one is unmeasured"* —
+rather than reporting a content difference. **Unscorable, not failed, and not
+silently passed.**
+
+**Not done here, deliberately**: a release run was using that gate at the time,
+and this tree's own rule is never to edit a script while a run is executing it.
+
 ### READ THIS FIRST — the state, in order
 
 **This section is newest-first, and later entries CORRECT earlier ones.** Where a
