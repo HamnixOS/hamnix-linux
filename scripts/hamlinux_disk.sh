@@ -588,6 +588,17 @@ ESP_NEED=$(( ( $(stat -Lc%s "$UKI") \
              + $(stat -Lc%s build/image/vmlinuz) \
              + $(stat -Lc%s build/image/initramfs.cpio.gz) \
              + BOOTLOG_BYTES ) / 1048576 ))
+# A/B: THE SECOND SLOT IS RESERVED IN THE PARTITION, NOT DISCOVERED LATER.
+#
+# An update that has to GROW the ESP is an update that can fail on a partition
+# table, which is the one failure this whole design exists to avoid. So when
+# HAMLINUX_AB_SLOTS=1 the partition is sized for two whole UKIs from the start
+# and the second one is simply not written until something updates the kernel.
+# MEASURED (~/.hamnix-build/abkernel): a slot is the size of the UKI, and the
+# bootloader + loader.conf together are under 128 KB.
+if [ "${HAMLINUX_AB_SLOTS:-0}" = 1 ]; then
+    ESP_NEED=$(( ESP_NEED + $(stat -Lc%s "$UKI") / 1048576 + 1 ))
+fi
 ESP_MB=$(( ESP_NEED + ESP_NEED / 5 + 32 ))       # 20% slack for FAT overhead
 [ "$ESP_MB" -lt 200 ] && ESP_MB=200
 # And the two partitions have to fit in the disk that will be truncated below.
@@ -602,7 +613,72 @@ if [ $(( ESP_MB + 2600 + 2 )) -gt "$SIZE_MB" ]; then
 fi
 mkfs.vfat -F 32 -n HAMBOOT -C "$ESP" $((ESP_MB * 1024)) >/dev/null
 mmd -i "$ESP" ::/EFI ::/EFI/BOOT
-mcopy -i "$ESP" "$UKI" ::/EFI/BOOT/BOOTX64.EFI
+if [ "${HAMLINUX_AB_SLOTS:-0}" = 1 ]; then
+    # ==================================================================
+    # THE A/B LAYOUT. WHY THERE IS A BOOTLOADER HERE AT ALL.
+    # ==================================================================
+    # Firmware executes exactly ONE file on the removable-media path,
+    # \EFI\BOOT\BOOTX64.EFI. Making the kernel replaceable therefore means
+    # replacing THAT file -- and FAT32 has no journal and no atomic
+    # rename, so a 176 MB rewrite of it has a window, minutes long, in
+    # which the power button produces a machine that cannot boot. There
+    # is no partial version of that which is safe.
+    #
+    # So the file firmware runs stops being the kernel image and becomes
+    # systemd-boot, which is WRITTEN ONCE AT BUILD TIME AND NEVER
+    # REWRITTEN AGAIN. The kernel images live beside it as two entries,
+    # and the only thing an update ever rewrites is loader.conf --
+    # PREALLOCATED AT A FIXED 512 BYTES, so the write allocates no
+    # cluster, extends nothing, and never touches the FAT chain. That is
+    # the identical argument user/bootlogd.ad makes for the preallocated
+    # boot log and user/bootsync.ad makes for its four-byte commit, for
+    # the identical reason.
+    #
+    # THE ORDER IS THE SAFETY, AND IT IS MEASURED, NOT ASSERTED
+    # (~/.hamnix-build/abkernel/GATE.log, arms 1 and 2):
+    #   - a HALF-WRITTEN INACTIVE SLOT with loader.conf still naming the
+    #     old one: the machine boots, on the old kernel.  MEASURED.
+    #   - loader.conf flipped to a slot that is NOT yet fully written:
+    #     THE MACHINE DOES NOT BOOT.  ALSO MEASURED -- which is why the
+    #     flip is last and follows a read-back, and why that ordering is
+    #     a fact here rather than a preference.
+    #   - loader.conf zeroed, or deleted outright -- the worst a torn
+    #     512-byte write can leave: the machine still boots, because
+    #     sd-boot falls back to discovering the entries. MEASURED.
+    #
+    # SLOT B IS NOT WRITTEN HERE. A freshly built medium has one kernel;
+    # the second slot is empty space that the first kernel update fills.
+    # Writing a duplicate would only double the build's I/O to ship two
+    # copies of one identical image.
+    SDBOOT="${HAMLINUX_SDBOOT:-/usr/lib/systemd/boot/efi/systemd-bootx64.efi}"
+    [ -f "$SDBOOT" ] || {
+        echo "[disk] ERROR: HAMLINUX_AB_SLOTS=1 needs systemd-boot at $SDBOOT" >&2
+        exit 1; }
+    mmd -i "$ESP" ::/EFI/Linux ::/loader
+    mcopy -i "$ESP" "$SDBOOT" ::/EFI/BOOT/BOOTX64.EFI
+    mcopy -i "$ESP" "$UKI" ::/EFI/Linux/hamnix-a.efi
+    # loader.conf at EXACTLY LOADER_CONF_BYTES, padded with comment lines.
+    # The length is a contract: whatever flips the slot rewrites this file
+    # at the same length and must never change it.
+    LOADER_CONF_BYTES=512
+    LCONF="$STAGE/loader.conf"
+    printf 'timeout 0\ndefault hamnix-a.efi\neditor no\n' > "$LCONF.head"
+    {
+        cat "$LCONF.head"
+        head -c $(( LOADER_CONF_BYTES - $(stat -Lc%s "$LCONF.head") - 1 )) \
+            /dev/zero | tr '\0' '#'
+        printf '\n'
+    } > "$LCONF"
+    rm -f "$LCONF.head"
+    [ "$(stat -Lc%s "$LCONF")" = "$LOADER_CONF_BYTES" ] || {
+        echo "[disk] ERROR: loader.conf is $(stat -Lc%s "$LCONF") bytes, not $LOADER_CONF_BYTES." >&2
+        exit 1; }
+    mcopy -i "$ESP" "$LCONF" ::/loader/loader.conf
+    echo "[disk] A/B: sd-boot at EFI/BOOT/BOOTX64.EFI, slot A at" \
+         "EFI/Linux/hamnix-a.efi, slot B reserved, loader.conf ${LOADER_CONF_BYTES}B"
+else
+    mcopy -i "$ESP" "$UKI" ::/EFI/BOOT/BOOTX64.EFI
+fi
 # The plain kernel and initramfs go on too: a rescue boot, and what an
 # installer would replace on an update.
 mcopy -i "$ESP" build/image/vmlinuz ::/vmlinuz
