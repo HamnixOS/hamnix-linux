@@ -21,6 +21,50 @@
 #
 # No app window is auto-opened. A fresh boot is a clean desktop, the same
 # decision Hamnix's rc.5 records: a terminal is one double-click away.
+#
+#
+# THE GRAPHICAL LOGIN, AND WHY THE SHAPE OF THIS FILE CHANGED
+# ===========================================================
+# The owner asked for "a gdm like login interface for the GUI". This file is
+# where that is either real or cosmetic, so the ordering below is the whole
+# design and not a detail.
+#
+# THIS FILE USED TO START wsysd, hamdesktop AND hampanelscene UNCONDITIONALLY.
+# A machine that had just booted therefore had a person's desktop on the
+# screen before anybody had said who they were. A greeter laid on TOP of that
+# would be a curtain over a session that already exists -- which is
+# user/hamlock.ad, and is a different thing.
+#
+# So the order is now: compositor, THEN THE GREETER IN THE FOREGROUND, then
+# the session. PID 1's rc BLOCKS in /bin/hamgreet. Nothing of the session --
+# not the backdrop, not the panel, not the per-distribution Wayland servers,
+# not the /etc/rc.de-user pre-warm -- is started until the greeter has
+# authenticated somebody against /dev/auth.
+#
+# AND IT IS NOT A BARE FALL-THROUGH. `/bin/hamgreet` followed by the session
+# start would be this project's worst bug shape: any way the greeter can fail
+# -- no screen geometry, no compositor, a failed newwindow, a missing dynamic
+# interpreter -- would end with an unauthenticated desktop, and the failure
+# would look exactly like success. Instead the greeter WRITES THE SESSION
+# RECIPE, /var/lib/hamsession.rc, and that file is the only thing that can set
+#
+#     hamsession_ok = 1
+#
+# which is set to 0 here first and tested below. A greeter that never
+# authenticated anybody cannot produce a session however it died. The greeter
+# unlinks the recipe on entry, so last boot's answer cannot authorise this
+# one.
+#
+# WHAT A MACHINE LOOKS LIKE WHEN THE GREETER FAILS: a compositor, a blank
+# screen, a named reason on the console, and the tty logins /etc/rc.login
+# started still working. That is a machine an operator can get into and fix.
+# It is deliberately NOT a fallback desktop.
+#
+# THE LIVE MEDIUM IS UNCHANGED. hamgreet detects /etc/installer-medium (the
+# tree's own live probe, which user/hlinstall.ad removes from the target and
+# then verifies is gone) and returns immediately with a recipe naming `live`,
+# saying so on the console. An installer nobody has an account on must not ask
+# for a password.
 
 echo '[rc.5] hamnix-linux graphical runlevel'
 
@@ -38,6 +82,35 @@ echo '[rc.5] compositor started'
 # clients ask for it. A client that starts first still works — it just sizes
 # itself to the default until the next frame.
 sleep 1
+
+# =====================================================================
+# THE GRAPHICAL LOGIN. NOTHING OF THE SESSION EXISTS ABOVE THIS POINT.
+# =====================================================================
+# Set FIRST, so that every way this can go wrong lands on the else branch
+# below rather than on a desktop. hamgreet is the only thing on the machine
+# that can raise it, and it does so by writing /var/lib/hamsession.rc, which
+# it unlinks on entry and rewrites only after /dev/auth has answered "ok".
+hamsession_ok = 0
+hamsession_user='nobody'
+
+# FOREGROUND. This is the line that makes it a display manager: PID 1's rc
+# does not continue until somebody has authenticated. See the header.
+echo '[rc.5] the graphical login is starting -- no session program exists yet'
+/bin/hamgreet
+
+# try/except because a `source` of a file that is not there must not abort the
+# rest of this rc -- if it did, a failed greeter would take the tty logins and
+# the rest of the boot down with it. This is the tree's own idiom for a
+# builtin that can fail (etc/rc.boot.installed says why it uses it for bind).
+try {
+    source '/var/lib/hamsession.rc'
+} except {
+    hamsession_ok = 0
+}
+
+if $hamsession_ok > 0 {
+
+echo '[rc.5] authenticated -- starting the session'
 
 /bin/hamdesktop > /var/log/hamdesktop.log &
 echo '[rc.5] desktop backdrop started'
@@ -72,7 +145,36 @@ source '/etc/rc.distros-wl'
 # resolved for that uid out of /etc/passwd. On an installed machine that line
 # names the account the install wizard created; on the live medium it names
 # `live`. tests/linux/installed_accounts.sh reads it.
+#
+# AND IT IS NOW RUN INSIDE THE AUTHENTICATED BRANCH, WITH THE GREETER'S
+# ANSWER IN THE ENVIRONMENT. The recipe sourced above exported
+# HAMNIX_NEWSHELL_USER=<the account the person typed>, which is the SAME seam
+# `login` stamps on a tty session: the hamsh started here sources
+# /etc/users/<user>.ns (falling back to default.ns) in the session's own
+# namespace. Today default.ns is subtractive and the session still inherits
+# the machine's root -- that is not hardcoded here, and when default.ns starts
+# binding an app-server root instead, the graphical session gets it through
+# this line without this line changing. etc/rc.login.linux's THE SEAM note
+# argues the whole of it for the tty path and applies verbatim here.
 echo '[rc.5] checking the desktop session recipe'
 /bin/hamsh /etc/rc.de-user /bin/true
 
 echo '[rc.5] desktop up'
+
+} else {
+
+# NOT A FALLBACK DESKTOP. If we are here, /var/lib/hamsession.rc did not come
+# back with hamsession_ok -- so no password was ever accepted on this boot,
+# whatever the reason. Starting the session anyway is precisely the gap that
+# answers success-shaped, and it is the one thing this branch must not do.
+#
+# What the machine still has: the compositor, the console, and the login
+# programs /etc/rc.login started on /dev/ttyS0 and the VTs. An operator can
+# log in on a terminal and read /var/lib/hamgreet.trace, which is where
+# hamgreet says what stopped it.
+echo '[rc.5] NO SESSION. The graphical login authenticated nobody, so no'
+echo '[rc.5] session program has been started. This is not a failure of the'
+echo '[rc.5] desktop -- it is the machine refusing to hand one out.'
+echo '[rc.5] Why: /var/lib/hamgreet.trace. Log in on a terminal to read it.'
+
+}

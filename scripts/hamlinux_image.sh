@@ -206,6 +206,19 @@ GUI_APPS=(
     # closed by BOTH this line and DESKTOP_CMDS in scripts/hamlinux_packages.py
     # -- tests/linux/channel_covers_image.sh fails if either is missing.
     hamappmenu
+    # THE GRAPHICAL LOGIN. /etc/rc.d/rc.5 runs it IN THE FOREGROUND between
+    # the compositor and the session, so on a machine where this line is
+    # missing rc.5's `hamsession_ok` never goes positive and the machine comes
+    # up with a compositor and NO SESSION AT ALL -- loudly, on the console.
+    # That is deliberate: the alternative shape (start the desktop when the
+    # greeter is not there) is an unauthenticated desktop, which is the bug
+    # the greeter exists to close.
+    #
+    # It is named here AND in DESKTOP_CMDS in scripts/hamlinux_packages.py.
+    # BOTH are needed and tests/linux/channel_covers_image.sh fails if either
+    # is missing -- see the hamappmenu note above for what one-sided staging
+    # cost the Applications menu.
+    hamgreet
     # The demo for the scene IMAGE tier (the draw/ctl 'I' verb).  It is here
     # because for the whole of the port before the verb was ported it would
     # have been the ONLY thing on the box that could tell you the tier was

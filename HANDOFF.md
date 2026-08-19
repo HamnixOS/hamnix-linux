@@ -27,6 +27,160 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE GRAPHICAL LOGIN EXISTS AND RUNS BEFORE THE SESSION DOES -- 78 / 0, AND THE RED ARM IS 68 / 10 WITH EVERY OCR ASSERTION STILL GREEN
+
+**Measured on booted installed machines, dev host, 2026-08-19, base `b18e8418`
+(checked with `git merge-base --is-ancestor b18e8418 HEAD`, not by reading
+`git log` -- and the worktree I was handed was 52 commits behind it, the TENTH
+consecutive one). Evidence `~/.hamnix-build/graphlogin/` (green:
+`GATE.log` / `GATE-78-0.log`, `boot1/`, `boot2/`, `census-*.txt`) and
+`~/.hamnix-build/graphlogin-red/` (red: `GATE-68-10-RED.log`).**
+
+    graphical_login          78 PASSED /  0 FAILED   (new)
+    the same gate, red arm   68 PASSED / 10 FAILED
+
+**THE OWNER'S SECOND HALF IS BUILT.** "A getty like program for multi
+ttys/login prompts would be nice, and a gdm like login interface for the GUI
+would be good too." The tty half landed earlier (`installed_boot_login` 27/0,
+`installed_fresh_login` 31/0). `user/hamgreet.ad` is the other half.
+
+**AND IT IS A DISPLAY MANAGER, NOT A CURTAIN, WHICH IS THE ONLY PART THAT WAS
+EVER IN DOUBT.** `/etc/rc.d/rc.5` used to start `wsysd`, `hamdesktop` and
+`hampanelscene` unconditionally, so a machine that had just booted put a
+desktop on the screen before anybody said who they were. The order is now
+compositor -> **greeter in the FOREGROUND** -> session. PID 1's rc blocks in
+`/bin/hamgreet`.
+
+#### THE RED ARM IS THE ENTRY. READ IT BEFORE THE GREEN ONE
+
+The red arm is the SAME gate against a tree whose only difference is that
+rc.5's four session-start lines sit BEFORE `/bin/hamgreet` instead of after --
+i.e. the greeter as a curtain, which is what `user/hamlock.ad` is. Its ten
+FAILs are exactly the assertions that separate the two:
+
+    FAIL  boot 1: the desktop backdrop was ALREADY started when the greeter came up
+    FAIL  boot 1: the panel was ALREADY started when the greeter came up
+    FAIL  boot 1 / ARM B: a session program started after TWO REFUSED passwords
+    FAIL  THE 'pre'    CENSUS NAMES hamdesktop      (and hampanelscene)
+    FAIL  THE 'denied' CENSUS NAMES hamdesktop      (and hampanelscene)
+    FAIL  THE 'ok'     CENSUS NAMES hamdesktop      (and hampanelscene)
+    FAIL  boot 2: the session started on a boot where nobody typed a password
+
+**AND HERE IS THE THING WORTH CARRYING FORWARD: EVERY SINGLE OCR ASSERTION
+STAYED GREEN IN THE RED ARM.** The curtain build's screen OCR'd
+`HAMNIX LOGIN`, then `Login incorrect` twice, then the greeter vanishing --
+byte-for-byte the same readings as the correct build. **A screendump cannot
+tell a display manager from a lock screen**, because the difference is
+processes that have no window yet. Anyone measuring this kind of claim with
+OCR alone will get a confident green on the defect. The instrument that
+answers it is the process census.
+
+#### THE ABSENCE, AND ITS CONTROL, ARE ONE INSTRUMENT AND ONE BOOT
+
+Four readings of `/proc`, taken by one lister. Three are written by hamgreet
+at the instant it reaches a state -- no clock between the state and the
+reading -- and the fourth is `hamgreet -census <path>` run as a one-shot from
+the machine's rc once the session is up, so the reading that must FIND the
+session programs is **byte-identical code** to the three that must not:
+
+    pre      73 rows   wsysd YES  hamgreet YES  hamdesktop NO   hampanelscene NO
+    denied   72 rows   wsysd YES  hamgreet YES  hamdesktop NO   hampanelscene NO
+    ok       72 rows   wsysd YES  hamgreet YES  hamdesktop NO   hampanelscene NO
+    after    76 rows                            hamdesktop YES  hampanelscene YES
+
+The control is scored FIRST and the gate stops if it fails. Each pre-auth
+reading must also name `wsysd` and `hamgreet`, so an empty file cannot pass as
+an absence.
+
+**THE CENSUS HAD A REAL DEFECT OF EXACTLY THAT SHAPE AND THE FIRST HOST RUN
+FOUND IT.** With a 16 KiB buffer it truncated a 933-process listing AT 16,383
+BYTES MID-LINE and returned success. For an instrument whose job is to prove
+"hamdesktop is NOT here", a dropped tail is indistinguishable from the absence
+it is meant to establish. It is 256 KiB now, an overflow writes
+`CENSUS-TRUNCATED` into the file, and the gate fails on that string.
+
+#### THE SHAPE OF THE FIX, AND THE ONE DECISION THAT MATTERS
+
+**rc.5 does NOT do `/bin/hamgreet` then start the session.** That is this
+project's worst bug shape: every way the greeter can fail would end in an
+unauthenticated desktop and look like success. The greeter WRITES
+`/var/lib/hamsession.rc`, and that file is the only thing that can set
+
+    hamsession_ok = 1
+
+which rc.5 sets to 0 before and tests after. A greeter that crashed leaves a
+compositor, a blank screen, a named reason and the working tty logins --
+deliberately not a fallback desktop.
+
+**`/var/lib` SURVIVES A REBOOT**, so hamgreet unlinks the recipe on entry
+before it draws anything. Boot 2 of the same disk is the arm for that: section
+4 read a valid recipe OFF THE EXT4, and boot 2 still presented `HAMNIX LOGIN`,
+rc.5 did not return, and no session program started. In the red arm that arm
+fails.
+
+**IT TAKES A TYPED USERNAME, AND THAT IS FORCED.** `user/hamlock.ad` resolves
+the account by CURRENT UID; a greeter started from rc.5 is uid 0 and **this
+tree's `/etc/passwd` has no uid 0 line** (`etc/passwd`'s own header: "uid 0
+doesn't exist in Hamnix ... uid 1 is the SINGLE hostowner"), so that lookup
+fails outright rather than picking wrong.
+
+**IT INVENTS NO SECOND PASSWORD CHECK.** `user `/`pass ` to `/dev/auth` as two
+whole lines, then `sys_setuid_auth` on the VERIFIED fd -- `login`'s path verb
+for verb. `_try_auth` returns -1 when the device will not open, and -1 is a
+denial.
+
+#### WHOSE SESSION IT IS, READ OFF THE DISK
+
+`debugfs` on the carved root partition after the machine powered itself off:
+`/home/hamgrtuser/.hamsession`, **uid 1001**, contents "graphical session
+opened by hamgrtuser". hamgreet writes it AFTER `sys_setuid_auth`, so the
+owner is the uid the verified fd resolved to. Never asked of the running
+system.
+
+**THE SEAM IS LEFT WHERE `etc/rc.login.linux` LEFT IT.** The recipe stamps
+`HAMNIX_NEWSHELL_USER='<the account that was TYPED>'` and rc.5 runs
+`/etc/rc.de-user` inside the authenticated branch with it in the environment --
+the same per-session namespace seam `login` stamps on a tty. **THE SESSION'S
+`/` IS STILL THE MACHINE'S ROOT**, because `etc/users/default.ns` is still
+subtractive. What is established is only that the graphical path is not
+hardcoded past that seam.
+
+#### THE LIVE MEDIUM IS UNCHANGED, DELIBERATELY, AND SAYS SO
+
+`/etc/installer-medium` is the tree's own live probe (staged by
+`scripts/hamlinux_image.sh`, removed from the target by `user/hlinstall.ad`,
+which then verifies it is gone). hamgreet takes that branch, writes a recipe
+naming `live`, and returns immediately with a console line saying no password
+was asked for. An installer nobody has an account on must not present a login
+box. **The gate asserts on the DISK that the file is absent from the installed
+root**, so the greeter it photographs is the real one.
+
+#### WHAT IS NOT ESTABLISHED, AND NONE OF IT SHOULD BE READ AS DONE
+
+* **THIS GATE SAYS NOTHING ABOUT WHETHER A ROOT SHELL IS REACHABLE.** Its
+  machine rc does not `source '/etc/rc.login'` and does not run `supervise` --
+  PID 1 has to return from rc.5 for the after-census and the poweroff.
+  `etc/rc.boot.machine`'s header says a gate replacing that file is opting out
+  "deliberately and visibly"; this one is. The tty gates own that question.
+* **hamdesktop AND hampanelscene ARE STILL ROOT**, by the decision
+  `etc/rc.de-user.linux` argues at length. What was measured is the GREETER's
+  own drop, not the chrome's. "The session belongs to the authenticated user"
+  is true of the greeter's marker and NOT yet true of the session's chrome.
+* **THE LIVE MEDIUM'S OWN GREETER BRANCH WAS NOT CONFIRMED ON A BOOT.** The
+  install boot's console did not carry hamgreet's live-medium line (the
+  installer finished before rc.5 got there). That assertion is an info line in
+  the gate, not a PASS. It is the one branch of hamgreet no boot has exercised.
+* **`user/hamlock.ad` AND `user/hamsessui.ad` ARE STILL IN NO SHIP VEHICLE.**
+  hamsessui is the only thing that spawns hamlock, and neither is in `GUI_APPS`
+  or `DESKTOP_CMDS`, so the panel's "Lock Screen" row still reaches nothing.
+  hamgreet was deliberately NOT made to fix that: shipping an unmeasured
+  full-screen curtain into a live session is a worse risk than a dead menu row.
+  **Locking a running session remains unimplemented on this lane.**
+* No tty was driven; once the compositor presents it owns the framebuffer.
+* Nothing here touches the `$HAMNIX_DISTRO_<NAME>` defect or the A/B kernel
+  work.
+
+
 ### hamsh's `export` DOES NOT REACH `getenv(3)`, AND NINE C-LAYER SWITCHES READ `getenv` -- INCLUDING THE ONE THE NEW `/n` FIX SHIPS WITH
 
 **2026-08-19, orchestrator-side, read-only. Nothing booted, nothing changed.**

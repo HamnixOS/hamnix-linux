@@ -1,0 +1,855 @@
+# user/hamgreet.ad
+#
+# hamgreet -- THE GRAPHICAL LOGIN. A gdm-shaped greeter for the Linux lane.
+#
+# WHAT IT IS FOR
+# ==============
+# The owner asked for "a getty like program for multi ttys/login prompts ...
+# and a gdm like login interface for the GUI too". The tty half landed first
+# (etc/rc.login + /bin/getty + /bin/login + `supervise`). This is the other
+# half.
+#
+# THE PROPERTY THAT MAKES IT A DISPLAY MANAGER AND NOT A LOCK SCREEN
+# ==================================================================
+# **It runs BEFORE the session exists.** /etc/rc.d/rc.5 starts the compositor,
+# and then runs this program IN THE FOREGROUND. PID 1's rc blocks here. Not
+# one program of the desktop session -- not hamdesktop, not hampanelscene, not
+# a per-distribution Wayland server, not the /etc/rc.de-user pre-warm -- is
+# started until this program has authenticated somebody and written the
+# session recipe.
+#
+# That distinction is the same architectural point that made the tty work
+# real. user/hamlock.ad is a CURTAIN: it is laid over a session that already
+# started, and everything behind it is already running as somebody. This is
+# not that. If you kill the compositor while this is up there is nothing
+# behind it, because nothing behind it has been started.
+#
+# HOW IT DECIDES -- AND IT DOES NOT INVENT A SECOND WAY TO CHECK A PASSWORD
+# ========================================================================
+# Exactly login(1)'s path, verb for verb:
+#
+#   1. write "user <name>\n" then "pass <secret>\n" to /dev/auth as TWO whole
+#      lines (the device parses one command per write; splitting a line across
+#      writes yields malformed commands and denial).
+#   2. read the answer. Anything but "ok" is a denial and the field clears.
+#   3. on "ok", hand the VERIFIED fd to sys_setuid_auth. The fd is the
+#      capability. This program never sees a password hash.
+#
+# There is no second checker here, no /etc/shadow read, and no fallback that
+# lets somebody in when /dev/auth cannot be opened. `_try_auth` returns -1 if
+# the device is not there and -1 is a denial.
+#
+# WHY IT TAKES A TYPED USERNAME rather than resolving one
+# =======================================================
+# user/hamlock.ad -- which is most of a greeter already, and which this file
+# borrows its window and /dev/auth wiring from -- resolves the account from
+# the CURRENT uid via passwd_lookup_by_uid. That cannot work here for two
+# separate reasons, and both are properties of this tree rather than opinions:
+#
+#   * A greeter started from rc.5 is PID 1's child and runs as uid 0, and THIS
+#     TREE'S /etc/passwd HAS NO uid 0 LINE AT ALL (`hostowner` is uid 1). So
+#     the lookup does not merely pick the wrong account, it fails outright.
+#   * A display manager on a multi-user machine has to be able to ask WHICH
+#     account. Deriving it would make the answer a property of the machine
+#     rather than of the person sitting at it.
+#
+# THE SEAM: A LOGIN PROGRAM CONSTRUCTS THE NAMESPACE THE SESSION GETS
+# ===================================================================
+# etc/rc.login.linux's THE SEAM note states the rule for the tty path, and the
+# same rule holds here:
+#
+#     "the global root should be min as possable, with apps and things living
+#      on fileserver very plan 9 shaped. Drivers can live on the real global
+#      root, but that should be an underpinning not the thing the user in
+#      userland gets to be running cd /"
+#
+# So this program does not merely say yes. It WRITES THE SESSION RECIPE --
+# /var/lib/hamsession.rc, a hamsh fragment naming the authenticated account --
+# and rc.5 sources it and starts the session from it. Today that recipe stamps
+# HAMNIX_NEWSHELL_USER, which is the SAME seam login uses: a hamsh started
+# with it sources /etc/users/<user>.ns (falling back to default.ns) in the
+# session's own namespace. When default.ns stops being subtractive and starts
+# binding an app-server root, the graphical session gets it through this file
+# without this file changing. The machine's root is NOT hardcoded here as what
+# a graphical session inherits -- it is simply what the recipe resolves to
+# today, and the recipe is the thing to change.
+#
+# THE RECIPE IS ALSO THE GATE ON THE SESSION, AND THAT IS DELIBERATE
+# ==================================================================
+# NORTH_STAR.md's worst failure shape is a gap that answers something
+# success-shaped. The obvious way to write rc.5 is
+#
+#     /bin/hamgreet
+#     <start the session>
+#
+# and that is EXACTLY the shape that has burned this project: if the greeter
+# dies for any reason -- no screen geometry, no compositor, a failed
+# newwindow, a bad exec -- the rc falls through and the session starts with
+# nobody authenticated. So the session start is guarded on a VARIABLE that
+# only this program can set, in a file only this program writes:
+#
+#     hamsession_ok = 1
+#
+# rc.5 sets `hamsession_ok = 0` before running us, sources the recipe after
+# us, and starts nothing unless the variable came back positive. A greeter
+# that crashes leaves a machine with a compositor and no session, which is a
+# visible failure, rather than a machine with an unauthenticated desktop.
+#
+# AND THE RECIPE IS UNLINKED ON ENTRY. /var/lib is on the ROOT PARTITION and
+# survives a reboot. Without the unlink below, a machine that authenticated
+# once would carry a valid recipe forever and the SECOND boot would start a
+# session from LAST boot's answer without asking anybody. That is the whole
+# hole, reintroduced by persistence. It is removed first, before the window
+# is drawn, so there is no window in which a stale file is live.
+#
+# THE LIVE MEDIUM DOES NOT GET A GREETER, AND IT SAYS SO
+# ======================================================
+# The installer medium autologins as `live`; putting a password prompt in
+# front of an installer nobody has an account on would make the medium
+# unusable. /etc/installer-medium is the tree's own live probe (planted by
+# scripts/hamlinux_image.sh, and REMOVED from the target by user/hlinstall.ad,
+# which then verifies it is gone). When it is present this program writes the
+# recipe naming `live` and returns immediately, loudly. That is an exception
+# to "never answer success-shaped", taken deliberately and named on the
+# console, and the gate for this work asserts the file is ABSENT on the
+# installed machine it measures -- so the greeter it sees is the real one.
+#
+# THE PROCESS CENSUS, AND WHY THIS PROGRAM TAKES IT
+# =================================================
+# The claim that matters is an ABSENCE: no program of the session exists
+# before somebody authenticates. An absence is the dangerous kind of
+# assertion, so it is measured by an instrument that can be shown to see the
+# thing when it IS there, and it is taken at the exact moments that matter
+# rather than on a clock:
+#
+#   /var/lib/hamgreet-ps.pre      the instant the greeter's window is up
+#   /var/lib/hamgreet-ps.denied   immediately after a REFUSED password
+#   /var/lib/hamgreet-ps.ok       immediately after "ok", before the recipe
+#
+# and `hamgreet -census <path>` runs the SAME lister as a one-shot, so an rc
+# can take the after-the-session-started census with byte-identical code. The
+# control is then exact: one instrument, four readings, and the last one must
+# name the session programs the first three must not.
+#
+# WHAT THIS DOES NOT DO
+# =====================
+#   * It does not offer a session chooser, a user list, an on-screen keyboard,
+#     accessibility, or "switch user". gdm has all of those; this has a
+#     username, a password and a refusal.
+#   * It does not survive its own session. It exits after authenticating, the
+#     way `login` execs and is gone. Locking a running session is
+#     user/hamlock.ad's job and is a different program on purpose.
+#   * It does not start the session itself. rc.5 does, from the recipe.
+
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+extern def sys_unlink(path: Ptr[char]) -> int32
+extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
+extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> int32
+extern def sys_setuid_auth(authfd: int32) -> int32
+extern def sys_exit(code: uint64)
+
+from lib.hamui import hamscene_begin, hamscene_fill, hamscene_glyphs, \
+    hamscene_stroke, hamscene_commit
+from lib.hamscreen import hamscreen_dims_or_fail
+from lib.hamsceneloop import hamscene_park
+from lib.p9 import p9_listdir
+from lib.passwd.passwd import passwd_parse, passwd_lookup_by_name, \
+    passwd_entry_home
+
+
+# --- tiny helpers ---------------------------------------------------
+def _slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def _writeall(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, _slen(s))
+
+
+def _u64_to_dec(v: uint64, out: Ptr[uint8]) -> uint64:
+    if v == 0:
+        out[0] = 48
+        return 1
+    digs: Array[24, uint8]
+    n: uint64 = 0
+    x: uint64 = v
+    while x > 0:
+        digs[n] = cast[uint8](x % 10) + 48
+        x = x / 10
+        n = n + 1
+    i: uint64 = 0
+    while n > 0:
+        n = n - 1
+        out[i] = digs[n]
+        i = i + 1
+    return i
+
+
+# --- THE TRACE ------------------------------------------------------
+# A diagnostic written by a program rc.5 started can go nowhere. PID 1's fd 1
+# is /dev/console, which follows the LAST `console=` and is therefore the
+# SCREEN the compositor is about to cover; and a spawn child's fd 2 is a
+# /fd/2 name opened O_RDONLY, so a message sent there disappears outright
+# (user/linux-syscalls.c's sys_bind comment records this, and the fix for the
+# bare-127 exec diagnostic is to write /dev/console BY NAME for the same
+# reason).
+#
+# So the trace this program keeps is A FILE ON THE ROOT PARTITION, which an
+# instrument can read with debugfs after the machine is off, with nothing
+# mounted and nothing to ask the running system. There is no append open on
+# this lane, so the whole trace is held in memory and rewritten each time --
+# it is a few hundred bytes.
+trace_buf: Array[4096, uint8]
+trace_len: uint64 = 0
+
+def _trace(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0 and trace_len + 2 < 4096:
+        trace_buf[trace_len] = s[i]
+        trace_len = trace_len + 1
+        i = i + 1
+    trace_buf[trace_len] = 10
+    trace_len = trace_len + 1
+    trace_buf[trace_len] = 0
+    fd: int32 = sys_open_write(cast[Ptr[char]]("/var/lib/hamgreet.trace"))
+    if fd >= 0:
+        sys_write(fd, &trace_buf[0], trace_len)
+        sys_close(fd)
+    # AND to fd 1 as well, which on an installed machine reaches the console
+    # mirror. Two destinations because neither one alone has been reliable.
+    sys_write(1, s, _slen(s))
+    sys_write(1, cast[Ptr[uint8]]("\n"), 1)
+
+
+# --- THE PROCESS CENSUS ---------------------------------------------
+# /proc, one directory per pid, comm out of <pid>/stat between the parens --
+# the same shape user/ps.ad reads, and it is read here rather than by shelling
+# out to ps so that the pre-authentication readings happen at the exact moment
+# the greeter reaches a state, with no clock between the state and the
+# reading.
+# THE BUFFER SIZES ARE NOT ARBITRARY AND A SMALL ONE IS A FALSE ABSENCE.
+# The first version of this used a 16 KiB output buffer. On the dev host it
+# silently truncated a 933-process listing at 16,383 bytes MID-LINE, and every
+# process after the cut was missing from a census that reported success. For
+# an instrument whose whole job is to say "hamdesktop is NOT here", a
+# truncation that drops the tail is indistinguishable from the absence it is
+# supposed to prove. So the buffer is large enough for a listing no machine
+# this ships on will exceed, AND an overflow is RECORDED IN THE FILE as
+# `CENSUS-TRUNCATED`, which the gate fails on rather than reading as absence.
+cens_dir:  Array[262144, uint8]
+cens_stat: Array[1024, uint8]
+cens_path: Array[64, uint8]
+cens_out:  Array[262144, uint8]
+cens_len:  uint64 = 0
+cens_cut:  int32 = 0
+
+def _cens_put(s: Ptr[uint8], n: uint64):
+    i: uint64 = 0
+    while i < n:
+        if cens_len + 32 >= 262144:
+            cens_cut = 1
+            return
+        cens_out[cens_len] = s[i]
+        cens_len = cens_len + 1
+        i = i + 1
+
+
+def _census(outpath: Ptr[char]) -> int32:
+    cens_len = 0
+    cens_cut = 0
+    n: int64 = p9_listdir(cast[Ptr[char]]("/proc"), &cens_dir[0], 262143)
+    if n <= 0:
+        return 0
+    total: uint64 = cast[uint64](n)
+    ls: uint64 = 0
+    i: uint64 = 0
+    rows: int32 = 0
+    while i <= total:
+        atend: int32 = 0
+        if i == total:
+            atend = 1
+        if atend == 1 or cens_dir[i] == 10:
+            if i > ls:
+                # numeric names only -- a pid directory
+                if cens_dir[ls] >= 48 and cens_dir[ls] <= 57:
+                    p: uint64 = 0
+                    pre: Ptr[uint8] = "/proc/"
+                    k: uint64 = 0
+                    while pre[k] != 0:
+                        cens_path[p] = pre[k]
+                        p = p + 1
+                        k = k + 1
+                    j: uint64 = ls
+                    while j < i and p + 8 < 64:
+                        cens_path[p] = cens_dir[j]
+                        p = p + 1
+                        j = j + 1
+                    suf: Ptr[uint8] = "/stat"
+                    k = 0
+                    while suf[k] != 0:
+                        cens_path[p] = suf[k]
+                        p = p + 1
+                        k = k + 1
+                    cens_path[p] = 0
+                    sfd: int32 = sys_open(cast[Ptr[char]](&cens_path[0]))
+                    if sfd >= 0:
+                        sn: int64 = sys_read(sfd, &cens_stat[0], 1023)
+                        sys_close(sfd)
+                        if sn > 0:
+                            # the pid, then the comm between the parens
+                            _cens_put(&cens_dir[ls], i - ls)
+                            _cens_put(cast[Ptr[uint8]](" "), 1)
+                            a: uint64 = 0
+                            lim: uint64 = cast[uint64](sn)
+                            while a < lim and cens_stat[a] != 40:
+                                a = a + 1
+                            a = a + 1
+                            b: uint64 = a
+                            while b < lim and cens_stat[b] != 41:
+                                b = b + 1
+                            if b > a:
+                                _cens_put(&cens_stat[a], b - a)
+                            _cens_put(cast[Ptr[uint8]]("\n"), 1)
+                            rows = rows + 1
+            ls = i + 1
+        i = i + 1
+    ofd: int32 = sys_open_write(outpath)
+    if ofd < 0:
+        return 0
+    sys_write(ofd, &cens_out[0], cens_len)
+    if cens_cut != 0:
+        _writeall(ofd, cast[Ptr[uint8]]("CENSUS-TRUNCATED\n"))
+    sys_close(ofd)
+    if cens_cut != 0:
+        return 0
+    return rows
+
+
+# --- model ----------------------------------------------------------
+SCR_W: int64 = 1024
+SCR_H: int64 = 768
+GLYPH_W: int64 = 8
+
+USER_CAP: uint64 = 64
+PW_CAP:   uint64 = 128
+user_buf: Array[64, uint8]
+user_len: uint64 = 0
+pw_buf:   Array[128, uint8]
+pw_len:   uint64 = 0
+mask_buf: Array[136, uint8]
+field:    int32 = 0                # 0 = username, 1 = password
+fails:    int32 = 0
+
+_pw_file: Array[8192, uint8]
+home_buf: Array[128, uint8]
+line_buf: Array[512, uint8]
+resp_buf: Array[64, uint8]
+
+
+def _rebuild_mask():
+    i: uint64 = 0
+    while i < pw_len and i < 128:
+        mask_buf[i] = 42                                   # '*'
+        i = i + 1
+    mask_buf[i] = 0
+
+
+# The username is rendered as typed. It is not a secret and a person has to be
+# able to see they typed it right; the password is masked and is never
+# rendered, only counted.
+def _uname_cstr() -> Ptr[uint8]:
+    user_buf[user_len] = 0
+    return &user_buf[0]
+
+
+# --- render ---------------------------------------------------------
+# EVERY STRING HERE IS AN INSTRUMENT AS WELL AS A LABEL. The only way to read
+# this screen back is OCR of a screendump, so the words are chosen to be
+# unambiguous at 8 px and to be different from each other: a gate that
+# confuses "Password" with "Login incorrect" is measuring nothing.
+def _paint(wid: int32):
+    bw: int64 = 420
+    bh: int64 = 220
+    bx: int64 = SCR_W / 2 - bw / 2
+    by: int64 = SCR_H / 2 - bh / 2
+
+    hamscene_begin()
+    hamscene_fill(0, 0, cast[int32](SCR_W), cast[int32](SCR_H),
+                  cast[Ptr[uint8]]("#0e1018"))
+    hamscene_fill(cast[int32](bx), cast[int32](by),
+                  cast[int32](bw), cast[int32](bh),
+                  cast[Ptr[uint8]]("#20242e"))
+    hamscene_stroke(cast[int32](bx), cast[int32](by),
+                    cast[int32](bw), cast[int32](bh), 1,
+                    cast[Ptr[uint8]]("#3a4256"))
+
+    title: Ptr[uint8] = "HAMNIX LOGIN"
+    tw: int64 = cast[int64](_slen(title)) * GLYPH_W
+    hamscene_glyphs(cast[int32](SCR_W / 2 - tw / 2),
+                    cast[int32](by + 20), title,
+                    cast[Ptr[uint8]]("#dce4f5"))
+
+    fx: int64 = bx + 24
+    fw: int64 = bw - 48
+
+    # --- username -------------------------------------------------
+    hamscene_glyphs(cast[int32](fx), cast[int32](by + 52),
+                    cast[Ptr[uint8]]("Username"),
+                    cast[Ptr[uint8]]("#9aa6c0"))
+    uy: int64 = by + 68
+    hamscene_fill(cast[int32](fx), cast[int32](uy),
+                  cast[int32](fw), 26, cast[Ptr[uint8]]("#12151d"))
+    ucol: Ptr[uint8] = "#4a5468"
+    if field == 0:
+        ucol = "#7fa8ff"
+    hamscene_stroke(cast[int32](fx), cast[int32](uy),
+                    cast[int32](fw), 26, 1, ucol)
+    hamscene_glyphs(cast[int32](fx + 6), cast[int32](uy + 9),
+                    _uname_cstr(), cast[Ptr[uint8]]("#c8d7f5"))
+
+    # --- password -------------------------------------------------
+    hamscene_glyphs(cast[int32](fx), cast[int32](by + 110),
+                    cast[Ptr[uint8]]("Password"),
+                    cast[Ptr[uint8]]("#9aa6c0"))
+    py: int64 = by + 126
+    hamscene_fill(cast[int32](fx), cast[int32](py),
+                  cast[int32](fw), 26, cast[Ptr[uint8]]("#12151d"))
+    pcol: Ptr[uint8] = "#4a5468"
+    if field == 1:
+        pcol = "#7fa8ff"
+    hamscene_stroke(cast[int32](fx), cast[int32](py),
+                    cast[int32](fw), 26, 1, pcol)
+    _rebuild_mask()
+    hamscene_glyphs(cast[int32](fx + 6), cast[int32](py + 9),
+                    &mask_buf[0], cast[Ptr[uint8]]("#c8d7f5"))
+
+    # --- the status line ------------------------------------------
+    sy: int64 = by + 178
+    if fails > 0:
+        hamscene_glyphs(cast[int32](fx), cast[int32](sy),
+                        cast[Ptr[uint8]]("Login incorrect"),
+                        cast[Ptr[uint8]]("#e07070"))
+    else:
+        hamscene_glyphs(cast[int32](fx), cast[int32](sy),
+                        cast[Ptr[uint8]]("Type your name and password"),
+                        cast[Ptr[uint8]]("#6b7690"))
+    hamscene_commit(wid)
+
+
+# --- /dev/auth ------------------------------------------------------
+# Framing matters: the device parses ONE command per write, so a line split
+# across two writes is a malformed command and a denial. login.ad frames it
+# the same way and says so.
+def _auth_line(fd: int32, prefix: Ptr[uint8], payload: Ptr[uint8],
+               paylen: uint64):
+    p: uint64 = 0
+    while prefix[p] != 0 and p + 2 < 512:
+        line_buf[p] = prefix[p]
+        p = p + 1
+    j: uint64 = 0
+    while j < paylen and p + 2 < 512:
+        line_buf[p] = payload[j]
+        p = p + 1
+        j = j + 1
+    line_buf[p] = 10
+    p = p + 1
+    sys_write(fd, &line_buf[0], p)
+
+
+# Returns the VERIFIED /dev/auth fd on success, or -1. The fd is the
+# capability sys_setuid_auth consumes; it is deliberately NOT closed here.
+def _try_auth() -> int32:
+    afd: int32 = sys_open(cast[Ptr[char]]("/dev/auth"))
+    if afd < 0:
+        # A greeter that cannot reach the checker must REFUSE, not admit.
+        _trace(cast[Ptr[uint8]]("hamgreet: /dev/auth did not open -- refusing"))
+        return -1
+    _auth_line(afd, cast[Ptr[uint8]]("user "), _uname_cstr(), user_len)
+    _auth_line(afd, cast[Ptr[uint8]]("pass "), &pw_buf[0], pw_len)
+    rn: int64 = sys_read(afd, &resp_buf[0], 63)
+    if rn >= 2 and resp_buf[0] == 111 and resp_buf[1] == 107:      # "ok"
+        return afd
+    sys_close(afd)
+    return -1
+
+
+# --- the session recipe ---------------------------------------------
+# A hamsh fragment. Two statements per variable, never `export NAME=VALUE` --
+# hamsh's tokenizer splits on '=' and the stray '=' is a parse error that
+# would abort the rest of rc.5, so the session would never start at all. The
+# value is single-quoted because an unquoted assignment RHS is parsed as an
+# expression (a bare /home/x reads '/' as divide). Both traps are recorded in
+# etc/rc.de-user.linux and both are load-bearing here.
+recipe_buf: Array[1024, uint8]
+recipe_len: uint64 = 0
+
+def _rec_put(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0 and recipe_len + 1 < 1024:
+        recipe_buf[recipe_len] = s[i]
+        recipe_len = recipe_len + 1
+        i = i + 1
+
+
+def _write_recipe(name: Ptr[uint8]) -> int32:
+    recipe_len = 0
+    _rec_put(cast[Ptr[uint8]]("# /var/lib/hamsession.rc -- WRITTEN BY /bin/hamgreet.\n"))
+    _rec_put(cast[Ptr[uint8]]("# This file is the ONLY thing that authorises a graphical session on\n"))
+    _rec_put(cast[Ptr[uint8]]("# this machine. /etc/rc.d/rc.5 sets hamsession_ok = 0, runs the greeter,\n"))
+    _rec_put(cast[Ptr[uint8]]("# sources this, and starts nothing unless hamsession_ok came back > 0.\n"))
+    _rec_put(cast[Ptr[uint8]]("# hamgreet unlinks it on entry, so it never outlives the boot that\n"))
+    _rec_put(cast[Ptr[uint8]]("# earned it.\n"))
+    _rec_put(cast[Ptr[uint8]]("hamsession_ok = 1\n"))
+    _rec_put(cast[Ptr[uint8]]("hamsession_user='"))
+    _rec_put(name)
+    _rec_put(cast[Ptr[uint8]]("'\n"))
+    # THE SEAM. hamsh sources /etc/users/<user>.ns for a session stamped with
+    # this, exactly as `login` arranges for a tty session. When that file
+    # stops subtracting from the machine's root and starts binding an app
+    # server, the graphical session gets it here without this file changing.
+    _rec_put(cast[Ptr[uint8]]("HAMNIX_NEWSHELL_USER='"))
+    _rec_put(name)
+    _rec_put(cast[Ptr[uint8]]("'\n"))
+    _rec_put(cast[Ptr[uint8]]("export HAMNIX_NEWSHELL_USER\n"))
+    fd: int32 = sys_open_write(cast[Ptr[char]]("/var/lib/hamsession.rc"))
+    if fd < 0:
+        return 0
+    sys_write(fd, &recipe_buf[0], recipe_len)
+    sys_close(fd)
+    sys_chmod(cast[Ptr[char]]("/var/lib/hamsession.rc"), 384)      # 0600
+    return 1
+
+
+def _load_passwd():
+    fd: int32 = sys_open(cast[Ptr[char]]("/etc/passwd"))
+    if fd < 0:
+        return
+    total: uint64 = 0
+    while total < 8192:
+        n: int64 = sys_read(fd, &_pw_file[total], 8192 - total)
+        if n <= 0:
+            break
+        total = total + cast[uint64](n)
+    sys_close(fd)
+    passwd_parse(&_pw_file[0], total)
+
+
+# --- THE SESSION MARKER ---------------------------------------------
+# Written AFTER sys_setuid_auth, in the authenticated account's own home, so
+# its owner on the ext4 IS the uid the verified fd resolved to. Read back with
+# debugfs on an unmounted partition, that is the answer to "whose session is
+# this?" taken from the disk rather than from the machine's own opinion of
+# itself. If the drop had silently not happened the file would be root-owned;
+# if the fd had named the wrong account it would be in the wrong home.
+def _write_session_marker() -> int32:
+    p: uint64 = 0
+    i: uint64 = 0
+    while home_buf[i] != 0 and p + 24 < 128:
+        line_buf[p] = home_buf[i]
+        p = p + 1
+        i = i + 1
+    suf: Ptr[uint8] = "/.hamsession"
+    k: uint64 = 0
+    while suf[k] != 0:
+        line_buf[p] = suf[k]
+        p = p + 1
+        k = k + 1
+    line_buf[p] = 0
+    fd: int32 = sys_open_write(cast[Ptr[char]](&line_buf[0]))
+    if fd < 0:
+        return 0
+    _writeall(fd, cast[Ptr[uint8]]("graphical session opened by "))
+    _writeall(fd, _uname_cstr())
+    _writeall(fd, cast[Ptr[uint8]]("\n"))
+    sys_close(fd)
+    return 1
+
+
+def _is_live_medium() -> int32:
+    fd: int32 = sys_open(cast[Ptr[char]]("/etc/installer-medium"))
+    if fd < 0:
+        return 0
+    sys_close(fd)
+    return 1
+
+
+def _streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    if a[i] == b[i]:
+        return 1
+    return 0
+
+
+def _winpath(out: Ptr[uint8], wid: int32, leaf: Ptr[uint8]):
+    p: uint64 = 0
+    pre: Ptr[uint8] = cast[Ptr[uint8]]("/dev/wsys/")
+    j: uint64 = 0
+    while pre[j] != 0:
+        out[p] = pre[j]
+        p = p + 1
+        j = j + 1
+    p = p + _u64_to_dec(cast[uint64](wid), &out[p])
+    k: uint64 = 0
+    while leaf[k] != 0:
+        out[p] = leaf[k]
+        p = p + 1
+        k = k + 1
+    out[p] = 0
+
+
+def _newwindow() -> int32:
+    wfd: int32 = sys_open_write(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if wfd < 0:
+        return -1
+    sys_write(wfd, cast[Ptr[uint8]]("newwindow\n"), 10)
+    sys_close(wfd)
+    rfd: int32 = sys_open(cast[Ptr[char]]("/dev/wsys/ctl"))
+    if rfd < 0:
+        return -1
+    rbuf: Array[32, uint8]
+    r: int64 = sys_read(rfd, &rbuf[0], 31)
+    sys_close(rfd)
+    if r <= 0:
+        return -1
+    wid: int32 = 0
+    i: uint64 = 0
+    while i < cast[uint64](r):
+        c: uint8 = rbuf[i]
+        if c >= 48 and c <= 57:
+            wid = wid * 10 + cast[int32](c) - 48
+        i = i + 1
+    return wid
+
+
+def _ctl(path: Ptr[uint8], verb: Ptr[uint8]):
+    fd: int32 = sys_open_write(cast[Ptr[char]](path))
+    if fd >= 0:
+        _writeall(fd, verb)
+        sys_close(fd)
+
+
+# --- authentication, and everything that follows it -----------------
+# Returns 1 when a session has been authorised (and the caller exits), 0 on a
+# denial (and the caller keeps the greeter up).
+def _attempt(wid: int32, ctlp: Ptr[uint8]) -> int32:
+    afd: int32 = _try_auth()
+    if afd < 0:
+        fails = fails + 1
+        # BOTH fields clear and the caret goes back to the name, which is what
+        # `login` does (it reprompts from "login: ", not from "Password: ")
+        # and what gdm does (it returns to the user list). It also means a
+        # denial leaves NO typed state behind for the next person at the
+        # machine, and that the retry path is the same keystroke sequence as
+        # the first attempt -- which is what lets one drive exercise a junk
+        # account, a wrong password and the right one without ever having to
+        # count backspaces.
+        pw_len = 0
+        user_len = 0
+        user_buf[0] = 0
+        field = 0
+        _census(cast[Ptr[char]]("/var/lib/hamgreet-ps.denied"))
+        _trace(cast[Ptr[uint8]]("hamgreet: DENIED"))
+        return 0
+    _census(cast[Ptr[char]]("/var/lib/hamgreet-ps.ok"))
+    _trace(cast[Ptr[uint8]]("hamgreet: authenticated"))
+
+    # Resolve the account BEFORE dropping: /etc/passwd is world-readable, but
+    # doing it in one order every time is one less thing to reason about.
+    _load_passwd()
+    idx: int32 = passwd_lookup_by_name(_uname_cstr())
+    home_buf[0] = 0
+    if idx >= 0:
+        h: Ptr[uint8] = passwd_entry_home(idx)
+        i: uint64 = 0
+        while h[i] != 0 and i + 1 < 128:
+            home_buf[i] = h[i]
+            i = i + 1
+        home_buf[i] = 0
+
+    # The recipe is written while still root: /var/lib is 0755 root-owned and
+    # the session it authorises is not the writer's to grant afterwards.
+    if _write_recipe(_uname_cstr()) == 0:
+        _trace(cast[Ptr[uint8]]("hamgreet: FAILED to write the session recipe -- no session will start"))
+
+    # Take the curtain down before dropping, so a failure below cannot leave a
+    # full-screen window over a session nobody can reach.
+    _ctl(ctlp, cast[Ptr[uint8]]("close\n"))
+
+    su: int32 = sys_setuid_auth(afd)
+    sys_close(afd)
+    if su < 0:
+        _trace(cast[Ptr[uint8]]("hamgreet: identity change FAILED after ok"))
+        return 1
+    if home_buf[0] != 0:
+        _write_session_marker()
+    return 1
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    # `hamgreet -census <path>` -- the one-shot lister. This exists so that the
+    # AFTER-the-session census is taken by byte-identical code to the three
+    # before it: a control on the instrument is only a control if it is the
+    # same instrument.
+    if argc >= 3:
+        flag: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
+        if _streq(flag, "-census") == 1:
+            r: int32 = _census(cast[Ptr[char]](cast[Ptr[uint8]](argv[2])))
+            if r <= 0:
+                _writeall(2, cast[Ptr[uint8]]("hamgreet: census wrote nothing\n"))
+                return 1
+            return 0
+
+    sys_bind(cast[Ptr[char]]("/dev"), cast[Ptr[char]]("#c"), 0)
+
+    # FIRST, before anything can go wrong and before a window exists: a recipe
+    # from a previous boot must not authorise this one. See the header.
+    sys_unlink(cast[Ptr[char]]("/var/lib/hamsession.rc"))
+
+    if _is_live_medium() != 0:
+        _trace(cast[Ptr[uint8]]("hamgreet: /etc/installer-medium is present -- this is the INSTALL MEDIUM, which autologins as live. NO PASSWORD IS ASKED FOR ON THIS BOOT."))
+        _write_recipe(cast[Ptr[uint8]]("live"))
+        return 0
+
+    wdim: Array[1, int64]
+    hdim: Array[1, int64]
+    # Refusing to present is the safe direction: rc.5's guard means no recipe
+    # is written, so no session starts, and the machine says why on the
+    # console rather than handing out a desktop.
+    if hamscreen_dims_or_fail(&wdim[0], &hdim[0],
+                              cast[Ptr[uint8]]("[hamgreet]")) == 0:
+        _trace(cast[Ptr[uint8]]("hamgreet: no screen geometry -- NO SESSION WILL BE STARTED"))
+        return 1
+    SCR_W = wdim[0]
+    SCR_H = hdim[0]
+
+    wid: int32 = _newwindow()
+    if wid < 0:
+        _trace(cast[Ptr[uint8]]("hamgreet: newwindow FAILED -- NO SESSION WILL BE STARTED"))
+        return 1
+
+    ctlp:  Array[64, uint8]
+    keysp: Array[64, uint8]
+    _winpath(&ctlp[0], wid, cast[Ptr[uint8]]("/ctl"))
+    _winpath(&keysp[0], wid, cast[Ptr[uint8]]("/keys"))
+
+    gbuf: Array[64, uint8]
+    gp: uint64 = 0
+    pre: Ptr[uint8] = "geometry 0 0 "
+    kk: uint64 = 0
+    while pre[kk] != 0:
+        gbuf[gp] = pre[kk]
+        gp = gp + 1
+        kk = kk + 1
+    gp = gp + _u64_to_dec(cast[uint64](SCR_W), &gbuf[gp])
+    gbuf[gp] = 32
+    gp = gp + 1
+    gp = gp + _u64_to_dec(cast[uint64](SCR_H), &gbuf[gp])
+    gbuf[gp] = 10
+    gp = gp + 1
+    cfd: int32 = sys_open_write(cast[Ptr[char]](&ctlp[0]))
+    if cfd >= 0:
+        sys_write(cfd, &gbuf[0], gp)
+        sys_close(cfd)
+    _ctl(&ctlp[0], cast[Ptr[uint8]]("decorate 0\n"))
+    _ctl(&ctlp[0], cast[Ptr[uint8]]("z 300\n"))
+    _paint(wid)
+    # Re-assert z AFTER the first commit's raise+focus. There is nothing else
+    # on the screen yet -- that is the whole point of this program -- but the
+    # compositor's own chrome and any later client must stay under it.
+    _ctl(&ctlp[0], cast[Ptr[uint8]]("z 300\n"))
+
+    _trace(cast[Ptr[uint8]]("hamgreet: the graphical login is presenting"))
+    _census(cast[Ptr[char]]("/var/lib/hamgreet-ps.pre"))
+
+    kfd: int32 = sys_open(cast[Ptr[char]](&keysp[0]))
+    if kfd < 0:
+        _trace(cast[Ptr[uint8]]("hamgreet: cannot open the key ring -- NO SESSION WILL BE STARTED"))
+        return 1
+
+    kbuf: Array[256, uint8]
+    while True:
+        r: int64 = sys_read(kfd, &kbuf[0], 255)
+        if r <= 0:
+            # /keys is waitfds-wake-wired, so the first character wakes this
+            # immediately; the 200 ms cap is the backstop for a kernel that
+            # delivered without notifying. NOT a yield spin -- user/hamlock.ad
+            # records what that cost (14.4 s of cpu in a 15.8 s run).
+            hamscene_park(kfd, 200)
+            continue
+        changed: int32 = 0
+        i: uint64 = 0
+        while i < cast[uint64](r):
+            if kbuf[i] == 100:                             # 'd', a press
+                kj: uint64 = i + 1
+                while kj < cast[uint64](r) and kbuf[kj] == 32:
+                    kj = kj + 1
+                code: int32 = 0
+                got: int32 = 0
+                while kj < cast[uint64](r) and kbuf[kj] >= 48 \
+                      and kbuf[kj] <= 57:
+                    code = code * 10 + cast[int32](kbuf[kj]) - 48
+                    kj = kj + 1
+                    got = 1
+                if got != 0:
+                    if code == 9:                          # Tab: switch field
+                        if field == 0:
+                            field = 1
+                        else:
+                            field = 0
+                        changed = 1
+                    elif code == 10 or code == 13:         # Enter
+                        if field == 0:
+                            # Enter on the name moves to the password, the way
+                            # every login prompt in the world does. It is also
+                            # what lets a drive reach the password field
+                            # without depending on Tab.
+                            field = 1
+                            changed = 1
+                        elif user_len > 0:
+                            if _attempt(wid, &ctlp[0]) != 0:
+                                sys_exit(0)
+                            changed = 1
+                        else:
+                            field = 0
+                            changed = 1
+                    elif code == 8 or code == 127:         # Backspace
+                        if field == 0:
+                            if user_len > 0:
+                                user_len = user_len - 1
+                                changed = 1
+                        else:
+                            if pw_len > 0:
+                                pw_len = pw_len - 1
+                                changed = 1
+                    elif code == 27:
+                        # Escape is IGNORED. There is nothing behind this
+                        # window to be dismissed to.
+                        changed = 0
+                    elif code >= 32 and code < 127:
+                        if field == 0:
+                            if user_len < USER_CAP - 1:
+                                user_buf[user_len] = cast[uint8](code)
+                                user_len = user_len + 1
+                                changed = 1
+                        else:
+                            if pw_len < PW_CAP - 1:
+                                pw_buf[pw_len] = cast[uint8](code)
+                                pw_len = pw_len + 1
+                                changed = 1
+                i = kj
+            else:
+                i = i + 1
+        if changed != 0:
+            _paint(wid)
+    return 0
