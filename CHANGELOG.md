@@ -14,6 +14,35 @@ because the number is the deliverable.
 
 ## Unreleased
 
+### Your password works. Nothing ever asks you for it.
+
+This release makes the password you type into the installer real: it is stored
+properly, it survives an update, and **it lets you in** — measured by actually
+authenticating with it, and by confirming a wrong one is refused. The
+administrator password you set is real too: the placeholder hash that ships in
+our source no longer opens anything.
+
+**And you should know what that does and does not buy you, because the honest
+answer is uncomfortable.** An installed machine **never asks anyone for a
+password**. It powers on and reaches a working desktop in about eight seconds,
+logged in as you, with no prompt at any point. There is no login screen, no
+screen lock, and the text console is an **unauthenticated administrator shell**.
+
+So the password protects `su` and `login` — the moments you deliberately ask to
+become somebody else — and nothing else. **Anyone who can switch the machine on
+is already inside it.** If you set a password expecting it to keep other people
+out of your desktop, it does not, and we would rather say so than let a true
+sentence — "your password now works" — leave you with a false impression.
+
+This is not a regression. No release has ever had a login screen on this line.
+It is being written down because this is the first release where the password is
+real enough for the absence to matter.
+
+*Measured:* the machine's own boot script reports `uid=0` on the console; the
+desktop session runs as you; nothing on the boot path starts a getty, and the
+screen-locking program is not shipped. *Not measured:* whether a physical
+keyboard on a laptop reaches that console — the test drove a serial line.
+
 ### An installed machine keeps its accounts across `hpm update`, and the wizard's user gets a session
 
 Three defects, each measured on a real installed disk (read with `debugfs`,
