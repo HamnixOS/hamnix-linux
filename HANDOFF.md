@@ -27,6 +27,108 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE POINTER IS GATED. A CLICK ON A ROW, A CLICK ON AN ICON, AND A CLICK ON "INSTALL HAMNIX" ON A LIVE MEDIUM THAT PARTITIONS A DISK
+
+**Measured on booted machines, dev host, 2026-08-19, base `1c2a00e7`. Evidence
+`~/.hamnix-build/ptr-evidence/`.**
+
+    pointer_launch_uid    75 PASSED /  4 FAILED   (new; all four reds were the gate's own instrument, both causes fixed)
+    live_pointer_install  19 PASSED /  0 FAILED   (new)
+    test_gate_registration            PASS        (1791 seen / 829 registered / 220 annotated / 743 baselined)
+
+**Every launch in both files is caused by a QMP `input-send-event` on
+`virtio-tablet-pci`, and by nothing else.** Neither gate, nor the rc either
+one stages, writes `/dev/wsys/appmenu/launch`; each CHECKS that rather than
+asserting it, with the path assembled from two literals so the check cannot
+match its own source.
+
+**WHAT A CLICK PRODUCES, read off the UNMOUNTED ext4 with `debugfs`:**
+
+    arm          route  clicked                census row                        document
+    menuperson   menu   "Word Processor"       181 hamptruser S 0:00 hamwrite     untitled.hdoc 43B uid 1001
+    menuchrome   menu   "Qwrite Copy"          182 0          S 0:00 hamwrite     --
+    menushipped  menu   "Control Center"       182 0          S 0:00 hamctl       --
+    iconperson   icon   "Presentation"         179 hamptruser S 0:00 hamslides    untitled.hamslides 41B uid 1001
+    iconchrome   icon   "Qslides Copy"         181 0          S 0:00 hamslides    --
+
+**THE NEGATIVE CONTROL IS AN ARM OF THE SAME RUN AND ISOLATES ONE KEY.**
+`menuperson` and `menuchrome` launch **the same program** from **the same
+menu** with **the same pointer** through **the same `_emit_launch_path`**; the
+only difference in the whole run is one line, `X-Hamnix-SystemChrome=true`, in
+one `.desktop` file the rc writes. The identity flips 1001 -> 0. Same for the
+two icon arms on `/bin/hamslides`. `menushipped` shows it on a file this tree
+SHIPS, not only on a copy the gate writes.
+
+**THIS CLOSES THE HOLE THIS FILE NAMED.** The wizard gates wrote the queue and
+never opened a menu; the menu gates never named a chrome program; so a change
+demoting a chrome program FROM THE MENU would have shipped green. It now goes
+red.
+
+**`user/hamdesktop.ad`'s ICON COLUMN IS BOOTED FOR THE FIRST TIME.** Its
+`_run_action` never touches the launch queue -- `/var/log/hamdesktop.log` says
+`[hamdesktop] launched /bin/hamslides` -- so the drop there is
+`spawn_detached_as`'s, measured on a real double-click.
+
+**AND SOMEBODY CLICKED APPLICATIONS -> INSTALL HAMNIX ON A LIVE MEDIUM.** The
+wizard started as **root** (`213 0 S 0:00 haminstallui`), was driven through
+its own five pages, and on the SECOND arm-and-confirm a target's sha256 moved
+and `sfdisk` read a GPT off it that was not there before: `HAMBOOT:131072`,
+`hamnix:8255455`. One round is not enough and that is SCORED -- reaching an
+erase in one would be the single-keypress defect `install_confirm_keys`
+exists to prevent.
+
+**A DEFECT IN THE TREE, FOUND BY THE GATE AND FIXED.**
+`user/hamdesktop.ad`'s `_reload_icons()` published its icon table
+(`/tmp/.hamdesktop.src`) BEFORE `_load_positions()` applied pinned positions,
+so the file listed the default column flow while the desktop drew pinned icons
+somewhere else. The published table exists precisely so a gate need not guess
+where an icon is; one that disagrees with the screen is worse than none,
+because it is believed. It now re-publishes after `_load_positions()`, which is
+the order `_rebuild_after_refresh()` already used.
+
+**THREE INSTRUMENT BUGS, ALL MINE, ALL WORTH THE SHAPE THEY HAVE.**
+* THE PHASE MARKER WAS WRITTEN LAST, so when the tail of a phase did not
+  return the marker was never written, the machine never powered off, and
+  **the next boot re-ran the same phase under the next arm's name** -- five
+  arms would have reported one. Caught by reading the second boot's serial
+  log, not by an assertion. The marker is written FIRST now, so a phase cannot
+  repeat however the tail behaves.
+* **AND THE EXPLANATION I THEN GAVE FOR THE STALL WAS WRONG, WHICH IS THE
+  MORE USEFUL HALF.** I localised it to `cat /tmp/.hamdesktop.src` -- it fit
+  two runs (in run 2 the three arms whose boot HAD that file powered off
+  cleanly; the two whose boot did not, hung), and `cat` with nothing it can
+  open reads stdin, which for PID 1 never ends. **Two single-variable tests
+  refuted it**: taking the input by redirection changed nothing, and REMOVING
+  THE STATEMENT ENTIRELY changed nothing. The correlation was a coincidence of
+  which boots happened to have the file. **The machine still does not power
+  itself off and the cause is UNLOCATED**; the remaining candidates are
+  `ps > file` and the `echo` after it, which `installed_launch_uid` runs in the
+  same order without the symptom -- the structural difference being that this
+  rc writes into `/etc` and `~/Desktop` BEFORE sourcing `/etc/rc.boot.installed`.
+  It costs one FAIL and 300 s per arm and costs no arm's result: `ps` and every
+  document reach the ext4, which commits on its own timer.
+* A queue-write self-check grepped `$0` for a literal and **matched its own
+  source**. A gate's red about its own grep, caught before it ran.
+* `grep haminstallui census.txt | tail -1` landed on a panel-log line inside
+  the census block and read the word "scene" as an owner, **failing a gate
+  about a wizard whose real `ps` row said 0**. Only numeric-PID rows now.
+
+**WHAT IS STILL NOT ESTABLISHED.** No gate drags an icon and checks the pin
+persists; the chrome arms carry the `ps` census only and are not driven to
+save (a root-owned document in the account's Documents would poison the next
+arm's precondition); and `user/hamUId.ad` is still started on no medium this
+tree builds.
+
+**AND THE BRIEF THAT ASKED FOR THIS WAS WRONG ABOUT ONE THING.** It said the
+step from `hamappmenu` painting a row to `_emit_launch_path` "rests on static
+assertions and a native compile" and is "unmeasured by any boot".
+`tests/linux/de_appmenu_realboot.sh` has been clicking the Applications button
+AND a filtered app row with a real pointer on a real installed boot since
+2026-08-13, and launching Files from it. What had never been measured is the
+UID a click yields, and the chrome branch. The icon half of the claim was
+correct.
+
+
 ### THE ARCHITECTURAL DIRECTION IS SETTLED: A MINIMAL GLOBAL ROOT, AND `cd /` MUST NOT BE THE MACHINE'S ROOT
 
 **2026-08-19, David, and this resolves the open question from earlier the same
