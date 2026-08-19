@@ -2257,6 +2257,10 @@ def cmd_refresh() -> int32:
         return 1
 
     # Build the merged envelope into idx_buf. Reset the parser/db.
+    # THE KERNEL ENTRY IS RESET TOO. A refresh that fetched a channel which no
+    # longer offers a kernel must not leave the PREVIOUS refresh's kernel
+    # sitting in these globals for _sync_kernel_slot to act on.
+    _kern_reset()
     idx_len = 0
     pkg_count = 0
     dep_entry_n = 0
@@ -2310,6 +2314,18 @@ def cmd_refresh() -> int32:
             sys_write(2, &channel_names_buf[channel_names_off[ci]],
                       channel_names_len[ci])
             write_str(2, "\n")
+        # THE KERNEL ENTRY IS READ HERE, AND THE PLACEMENT IS THE ARGUMENT.
+        #
+        # This line is AFTER the Ed25519 check above and BEFORE the splice
+        # below, so it reads out of ch_fetch_buf -- the exact bytes the
+        # signature was verified over -- and not out of the merged envelope
+        # the splicer synthesises (which keeps only "packages" and would drop
+        # a top-level "kernel" on the floor). The kernel's digest is therefore
+        # covered by the identical signature as every package's hash, checked
+        # by the identical verifier against the identical trust root. Moving
+        # this call after the splice would silently downgrade the kernel to
+        # the one artifact on the machine with no signature behind it.
+        _capture_kernel_entry(ci, cast[uint64](n))
         # Splice into idx_buf. Need a leading ',' separator if any
         # previous channel already contributed packages.
         if total_pkgs > 0:
@@ -8196,6 +8212,415 @@ def _sync_boot_image():
                      "refusals this was.\n")
 
 
+# ======================================================================
+# THE KERNEL, WHICH ARRIVES AS A CHANNEL ARTIFACT AND NOT AS A PACKAGE
+# ======================================================================
+#
+# WHY NOT A PACKAGE, WHICH IS THE FIRST THING ANYBODY WOULD TRY.
+# "No package carries any boot/ path" is enforced by
+# tests/linux/channel_covers_image.sh, and it is a genuine SAFETY property
+# rather than a tidiness rule: a package file under boot/ would be laid down
+# on the ESP by the ordinary extract path, and the ESP is the one filesystem
+# on the machine where a bad write costs the machine. hpm's extractor knows
+# nothing about A/B slots, about which slot is live, about reading a write
+# back before trusting it, or about flipping a pointer last. Handing it the
+# kernel would be handing the most dangerous write in the system to the code
+# path with the least idea what it is doing.
+#
+# SO THE KERNEL IS AN ENTRY IN THE INDEX, NOT A ROW IN THE PACKAGE ARRAY:
+#
+#     { "schema": 1, "channel": "linux", "packages": [ ... ],
+#       "kernel": { "version": "1.0.33",
+#                   "url":     "kernel/hamnix-1.0.33.efi",
+#                   "sha256":  "<64 hex>",
+#                   "size":    74146304 } }
+#
+# AND IT IS UNDER THE SAME SIGNATURE, WHICH IS THE WHOLE POINT. The index is
+# Ed25519-signed and cmd_refresh verifies that signature over the RAW fetched
+# bytes BEFORE trusting any hash inside it. `_capture_kernel_entry` below is
+# called from exactly that place, AFTER the check, and it reads out of
+# ch_fetch_buf -- the verified buffer -- rather than out of anything
+# re-serialised afterwards. So the kernel's digest is covered by the identical
+# signature, checked by the identical verifier, against the identical trust
+# root as every package's. The kernel is the most security-critical artifact
+# on the machine; it must not arrive on a weaker footing than a package, and
+# this is the cheapest way to be sure it does not arrive on a DIFFERENT one.
+#
+# AND THE IMAGE IS NEVER IN THIS PROCESS. hpm's whole fetch layer is
+# buffer-based (TARBALL_CAP is 4 MiB, tar_buf is 8 MiB); a kernel image is an
+# order of magnitude past that and could not be fetched into a buffer without
+# a vast BSS array in a program that runs on every machine. So hpm never holds
+# the artifact: it RESOLVES it to a path and hands the path and the digest to
+# /bin/hkslot, which streams it 256 KiB at a time and hashes it with the SAME
+# lib/sha256.ad hpm verifies packages with.
+#
+# WHICH MEANS, TODAY, file:// REPOS ONLY, AND THAT IS SAID OUT LOUD RATHER
+# THAN SILENTLY SKIPPED. A local mirror -- the live medium's own
+# file:///iso-packages/, a USB stick, an on-site cache -- resolves to a path
+# and works. An http/https channel does NOT: there is no streaming fetch in
+# user/http9.ad, only http_get into a caller buffer. Rather than fetch into a
+# buffer that cannot hold it and report something success-shaped, the refusal
+# below names the missing piece. THIS IS THE LIMIT OF THIS WORK AND IT IS A
+# REAL ONE: the owner's repo at https://255.one/ cannot ship a kernel until
+# user/http9.ad can stream a response body to a file descriptor.
+
+kern_have: int32 = 0
+kern_ci:   uint64 = 0
+kern_ver:  Array[64, uint8]
+kern_url:  Array[512, uint8]
+kern_sha:  Array[80, uint8]
+kern_path: Array[1536, uint8]
+
+
+def _kern_reset():
+    kern_have = 0
+    kern_ver[0] = 0
+    kern_url[0] = 0
+    kern_sha[0] = 0
+
+
+# Find `needle` in ch_fetch_buf[from_..to_). Returns the index or -1.
+def _ch_find(from_: uint64, to_: uint64, needle: Ptr[uint8],
+             nlen: uint64) -> int64:
+    if nlen == 0 or to_ < nlen:
+        return -1
+    i: uint64 = from_
+    while i + nlen <= to_:
+        j: uint64 = 0
+        hit: int32 = 1
+        while j < nlen:
+            if ch_fetch_buf[i + j] != needle[j]:
+                hit = 0
+                break
+            j = j + 1
+        if hit != 0:
+            return cast[int64](i)
+        i = i + 1
+    return -1
+
+
+# ch_fetch_buf[pos] is the byte after a key's closing quote. Skip blanks and
+# a ':', then copy the string literal that follows into out. Returns 0 on
+# success. No escape handling: these fields are a version, a relative URL and
+# 64 hex characters, all written by scripts/hamlinux_packages.py, and a value
+# that needed escaping would be one this program should not silently accept.
+def _ch_capture_string(pos: uint64, to_: uint64, out: Ptr[uint8],
+                       cap: uint64) -> int32:
+    i: uint64 = pos
+    while i < to_ and (ch_fetch_buf[i] == 32 or ch_fetch_buf[i] == 9
+                       or ch_fetch_buf[i] == 10 or ch_fetch_buf[i] == 13):
+        i = i + 1
+    if i >= to_ or ch_fetch_buf[i] != 58:                 # ':'
+        return -1
+    i = i + 1
+    while i < to_ and (ch_fetch_buf[i] == 32 or ch_fetch_buf[i] == 9
+                       or ch_fetch_buf[i] == 10 or ch_fetch_buf[i] == 13):
+        i = i + 1
+    if i >= to_ or ch_fetch_buf[i] != 34:                 # '"'
+        return -1
+    i = i + 1
+    o: uint64 = 0
+    while i < to_ and ch_fetch_buf[i] != 34:
+        if ch_fetch_buf[i] == 92:                         # '\'
+            return -1
+        if o + 1 >= cap:
+            return -1
+        out[o] = ch_fetch_buf[i]
+        o = o + 1
+        i = i + 1
+    if i >= to_:
+        return -1
+    out[o] = 0
+    return 0
+
+
+# Called from cmd_refresh, AFTER the Ed25519 check, over the verified bytes.
+# A channel with no "kernel" object is the normal case and is not an error.
+def _capture_kernel_entry(ci: uint64, n: uint64) -> int32:
+    k: int64 = _ch_find(0, n, cast[Ptr[uint8]]("\"kernel\""), 8)
+    if k < 0:
+        return 0
+    p: uint64 = cast[uint64](k) + 8
+    while p < n and (ch_fetch_buf[p] == 32 or ch_fetch_buf[p] == 9
+                     or ch_fetch_buf[p] == 10 or ch_fetch_buf[p] == 13):
+        p = p + 1
+    if p >= n or ch_fetch_buf[p] != 58:
+        return 0
+    p = p + 1
+    while p < n and (ch_fetch_buf[p] == 32 or ch_fetch_buf[p] == 9
+                     or ch_fetch_buf[p] == 10 or ch_fetch_buf[p] == 13):
+        p = p + 1
+    if p >= n or ch_fetch_buf[p] != 123:                  # '{'
+        return 0
+    # Walk to the matching '}', string-aware, so a value containing a brace
+    # cannot end the object early.
+    depth: uint64 = 0
+    instr: int32 = 0
+    e: uint64 = p
+    while e < n:
+        c: uint8 = ch_fetch_buf[e]
+        if instr != 0:
+            if c == 92:
+                e = e + 1
+            elif c == 34:
+                instr = 0
+        elif c == 34:
+            instr = 1
+        elif c == 123:
+            depth = depth + 1
+        elif c == 125:
+            depth = depth - 1
+            if depth == 0:
+                break
+        e = e + 1
+    if e >= n:
+        return 0
+    # Every field is REQUIRED. A kernel entry missing its digest must not be
+    # treated as "a kernel with no digest to check"; it is a malformed index.
+    kv: int64 = _ch_find(p, e, cast[Ptr[uint8]]("\"version\""), 9)
+    ku: int64 = _ch_find(p, e, cast[Ptr[uint8]]("\"url\""), 5)
+    ks: int64 = _ch_find(p, e, cast[Ptr[uint8]]("\"sha256\""), 8)
+    if kv < 0 or ku < 0 or ks < 0:
+        write_str(2, "hpm: this channel's index has a kernel entry that is "
+                     "missing version, url or sha256. IGNORING it -- a kernel "
+                     "with no digest is one this machine will not write.\n")
+        return -1
+    if _ch_capture_string(cast[uint64](kv) + 9, e, &kern_ver[0], 64) != 0:
+        return -1
+    if _ch_capture_string(cast[uint64](ku) + 5, e, &kern_url[0], 512) != 0:
+        return -1
+    if _ch_capture_string(cast[uint64](ks) + 8, e, &kern_sha[0], 80) != 0:
+        return -1
+    if strlen_u8(&kern_sha[0]) != 64:
+        write_str(2, "hpm: the kernel entry's sha256 is not 64 hex "
+                     "characters. IGNORING it.\n")
+        _kern_reset()
+        return -1
+    kern_have = 1
+    kern_ci = ci
+    return 0
+
+
+# WHAT THIS MACHINE'S KERNEL IS, RECORDED WHERE THE PACKAGE STATE IS.
+#
+# NOT read off the running kernel's version string, and that is deliberate.
+# The question is not "what am I running", it is "what is in the slot the next
+# boot will use" -- and after `hkslot` commits, those two are DIFFERENT until
+# the reboot. A machine that answered from the running banner would offer the
+# same update again on every run between the flip and the reboot, and would
+# write the OTHER slot the second time, undoing the first.
+def _kern_version_path() -> Ptr[uint8]:
+    return _db_path(cast[Ptr[uint8]]("kernel.version"))
+
+
+def _kern_installed_version(out: Ptr[uint8], cap: uint64) -> int32:
+    out[0] = 0
+    # PROBED FIRST, because _file_read_path prints "hpm: cannot open <path>"
+    # on a missing file. A machine that has never taken a kernel update is the
+    # NORMAL case, not an error, and printing an error for it is how a real
+    # error becomes invisible among the ones that are not.
+    pfd: int32 = sys_open(cast[Ptr[char]](_kern_version_path()))
+    if pfd < 0:
+        return -1
+    sys_close(pfd)
+    n: int64 = _file_read_path(cast[Ptr[char]](_kern_version_path()),
+                               out, cap - 1)
+    if n <= 0:
+        return -1
+    i: uint64 = cast[uint64](n)
+    while i > 0 and out[i - 1] <= 32:
+        i = i - 1
+    out[i] = 0
+    if i == 0:
+        return -1
+    return 0
+
+
+def _kern_record_version() -> int32:
+    fd: int32 = sys_open_write(cast[Ptr[char]](_kern_version_path()))
+    if fd < 0:
+        return -1
+    ln: uint64 = strlen_u8(&kern_ver[0])
+    if _write_full(fd, &kern_ver[0], ln) < 0:
+        sys_close(fd)
+        return -1
+    _write_full(fd, cast[Ptr[uint8]]("\n"), 1)
+    sys_close(fd)
+    return 0
+
+
+hkslot_argv:   Array[6, uint64]
+hkslot_envp:   Array[4, uint64]
+hkslot_status: Array[1, int64]
+hkslot_park:   Array[1, int32]
+# 600 s. hkslot streams a whole kernel image into the ESP through an O_SYNC
+# descriptor and then READS ALL OF IT BACK to hash it, so the bound is two
+# passes over a large file on FAT32 -- and on a USB stick, which is the case
+# this number is for. bootsync's 120 s is for 16 MB.
+HKSLOT_TIMEOUT_CS: uint64 = 60000
+
+
+# Returns 0 when the kernel is current or was updated, 1 when something went
+# wrong. A 1 is LOUD: `hpm update` exits non-zero on it, because a kernel
+# update that quietly did not happen is exactly the failure this whole line of
+# work exists to remove -- the machine boots perfectly either way.
+def _sync_kernel_slot() -> int32:
+    if kern_have == 0:
+        return 0
+    have: Array[64, uint8]
+    if _kern_installed_version(&have[0], 64) == 0:
+        if _streq(&have[0], &kern_ver[0]) != 0:
+            write_str(1, "hpm: kernel ")
+            write_str(1, &kern_ver[0])
+            write_str(1, " is already the one the next boot will use\n")
+            return 0
+        write_str(1, "hpm: kernel ")
+        write_str(1, &have[0])
+        write_str(1, " -> ")
+        write_str(1, &kern_ver[0])
+        write_str(1, "\n")
+    else:
+        # NO RECORD IS NOT "UP TO DATE". A machine whose kernel.version is
+        # absent has never taken a kernel update; the index's kernel is the
+        # one to write. Saying so out loud, because the alternative reading of
+        # a missing file is the no-op that made `hpm update` a lie on every
+        # installed machine until 2026-08-15 (see cmd_update's note on
+        # inst_db_absent).
+        write_str(1, "hpm: this machine has no record of a kernel update; the "
+                     "channel offers ")
+        write_str(1, &kern_ver[0])
+        write_str(1, "\n")
+
+    if _set_channel_url(kern_ci) != 0:
+        write_str(2, "hpm: cannot rebuild the URL of the channel carrying the "
+                     "kernel.\n")
+        return 1
+    if url_scheme != 2:
+        write_str(2, "hpm: THE KERNEL IN THIS CHANNEL CANNOT BE FETCHED FROM "
+                     "HERE.\n")
+        write_str(2, "hpm: it is ")
+        write_str(2, &kern_ver[0])
+        write_str(2, " at ")
+        write_str(2, &kern_url[0])
+        write_str(2, ", and the channel is http(s).\n")
+        write_str(2, "hpm: a kernel image is far past this program's 8 MiB "
+                     "buffers and there is no\n")
+        write_str(2, "hpm: streaming fetch in user/http9.ad, so it CANNOT be "
+                     "downloaded here. Point\n")
+        write_str(2, "hpm: this machine at a file:// mirror of the channel to "
+                     "take the kernel.\n")
+        write_str(2, "hpm: NOTHING WAS WRITTEN. This machine boots exactly as "
+                     "it did before.\n")
+        return 1
+    if _build_file_path(&kern_path[0], 1536, &kern_url[0]) != 0:
+        write_str(2, "hpm: the kernel artifact's path is too long.\n")
+        return 1
+
+    write_str(1, "hpm: handing ")
+    write_str(1, &kern_path[0])
+    write_str(1, " to /bin/hkslot\n")
+    write_str(1, "hpm: (it writes the INACTIVE slot, reads it back off the "
+                 "medium, and flips\n")
+    write_str(1, "hpm:  loader.conf LAST -- so an interruption anywhere "
+                 "leaves this machine\n")
+    write_str(1, "hpm:  booting the kernel it has now.)\n")
+    hkslot_argv[0] = cast[uint64](cast[Ptr[uint8]]("/bin/hkslot"))
+    hkslot_argv[1] = cast[uint64](&kern_path[0])
+    hkslot_argv[2] = cast[uint64](&kern_sha[0])
+    hkslot_argv[3] = 0
+    hkslot_envp[0] = cast[uint64](cast[Ptr[uint8]]("PATH=/bin"))
+    hkslot_envp[1] = 0
+    pid: int32 = spawn(cast[Ptr[char]]("/bin/hkslot"),
+                       &hkslot_argv[0], 0, 3, &hkslot_envp[0])
+    if pid < 0:
+        write_str(2, "hpm: /bin/hkslot would not start, so the kernel was NOT "
+                     "updated.\n")
+        write_str(2, "hpm: nothing on the ESP was touched.\n")
+        return 1
+    start: uint64 = sys_get_jiffies()
+    code: int64 = 0
+    timed_out: int32 = 0
+    while 1 == 1:
+        hkslot_status[0] = 0
+        wr: int64 = sys_waitpid_jc(pid, &hkslot_status[0])
+        if wr < 0:
+            write_str(2, "hpm: cannot wait for hkslot; the kernel slot's "
+                         "state is UNKNOWN.\n")
+            write_str(2, "hpm: run `hkslot --status` and read what it says.\n")
+            return 1
+        if wr > 0 and (hkslot_status[0] & 255) == HOOK_WAIT_EXITED:
+            code = hkslot_status[0] >> 8
+            break
+        if sys_get_jiffies() - start >= HKSLOT_TIMEOUT_CS:
+            timed_out = 1
+            break
+        sys_waitfds(&hkslot_park[0], 0, 25)
+    if timed_out != 0:
+        write_str(2, "hpm: hkslot ran longer than ")
+        write_dec_u64(2, HKSLOT_TIMEOUT_CS / 100)
+        write_str(2, "s and was KILLED.\n")
+        # Safe to kill for the same reason bootsync is: hkslot writes only the
+        # INACTIVE slot and flips loader.conf last, so a killed hkslot leaves
+        # a torn slot nothing points at. tests/linux/ab_kernel_slots.sh arm I
+        # measured that state booting.
+        p9_note(pid, cast[Ptr[uint8]]("kill"))
+        write_str(2, "hpm: the inactive slot may be half written; loader.conf "
+                     "was not flipped, so\n")
+        write_str(2, "hpm: this machine boots the kernel it has now.\n")
+        return 1
+    if code != 0:
+        write_str(2, "hpm: hkslot exited ")
+        write_dec_u64(2, cast[uint64](code))
+        write_str(2, ". THE KERNEL WAS NOT REPLACED. The lines above from "
+                     "hkslot say\n")
+        write_str(2, "hpm: which of its refusals this was; every one of them "
+                     "returns before the\n")
+        write_str(2, "hpm: flip, so this machine boots exactly as it did.\n")
+        return 1
+    if _kern_record_version() != 0:
+        # The slot IS flipped at this point. Failing to record it would make
+        # the next `hpm update` offer the same kernel again and write it into
+        # the OTHER slot, undoing this one -- so this is loud rather than
+        # ignored.
+        write_str(2, "hpm: THE KERNEL WAS UPDATED but ")
+        write_str(2, _kern_version_path())
+        write_str(2, " could not be written.\n")
+        write_str(2, "hpm: the next boot IS the new kernel; a later `hpm "
+                     "update` will offer it\n")
+        write_str(2, "hpm: again and flip back. Fix the write permission on "
+                     "that path.\n")
+        return 1
+    write_str(1, "hpm: the kernel is now ")
+    write_str(1, &kern_ver[0])
+    write_str(1, "; REBOOT to run it.\n")
+    return 0
+
+
+def cmd_kernel() -> int32:
+    # `hpm kernel` -- what the machine records and what the channel offers.
+    # A diagnostic, and the probe a gate can read without rebooting anything.
+    have: Array[64, uint8]
+    write_str(1, "hpm: recorded kernel: ")
+    if _kern_installed_version(&have[0], 64) == 0:
+        write_str(1, &have[0])
+    else:
+        write_str(1, "(none -- this machine has never taken a kernel update)")
+    write_str(1, "\n")
+    if cmd_refresh() != 0:
+        return 1
+    if kern_have == 0:
+        write_str(1, "hpm: no enabled channel offers a kernel.\n")
+        return 0
+    write_str(1, "hpm: channel offers: ")
+    write_str(1, &kern_ver[0])
+    write_str(1, "  sha256 ")
+    write_str(1, &kern_sha[0])
+    write_str(1, "\nhpm:          at url: ")
+    write_str(1, &kern_url[0])
+    write_str(1, "\n")
+    return 0
+
+
 def cmd_update() -> int32:
     # 1. Refresh the index.
     if cmd_refresh() != 0:
@@ -8233,7 +8658,12 @@ def cmd_update() -> int32:
         return 1
     if inst_count == 0:
         write_str(1, "hpm: no packages installed; nothing to update\n")
-        return 0
+        # AND THE KERNEL IS STILL CHECKED. It is not a package and it is not
+        # in installed.json; a machine with an empty package list can still
+        # have a kernel a release behind, and returning 0 here without asking
+        # would be the same shape of silent no-op that made `hpm update`
+        # meaningless on installed machines for months.
+        return _sync_kernel_slot()
 
     upgraded: uint64 = 0
     skipped:  uint64 = 0
@@ -8344,11 +8774,38 @@ def cmd_update() -> int32:
     if upgraded > 0:
         _sync_boot_image()
 
+    # THE KERNEL, AND IT IS NOT GATED ON `upgraded`.
+    #
+    # bootsync above only matters when packages moved -- it folds the ROOT's
+    # module bytes into the boot image, and if no package changed there is
+    # nothing to fold. The kernel is the opposite: it is not a package, its
+    # version does not move when packages do, and a channel can publish a new
+    # kernel with no package changes at all. Gating it on `upgraded` would
+    # make a security fix in the kernel arrive only by coincidence.
+    #
+    # IT RUNS AFTER THE PACKAGES, so a machine that took a partial update
+    # still gets the kernel, and so the new slot's boot modules are the ones
+    # bootsync just wrote for the OLD slot -- which is the honest state and is
+    # named in user/hkslot.ad's header: after a flip, run bootsync again.
+    krc: int32 = _sync_kernel_slot()
+
     write_str(1, "hpm: update done (upgraded=")
     write_dec_u64(1, upgraded)
     write_str(1, " pinned=")
     write_dec_u64(1, skipped)
     write_str(1, ")\n")
+    # A NON-ZERO EXIT WHEN THE KERNEL DID NOT LAND, and that is deliberate
+    # where the bootsync failure above deliberately does NOT fail the update.
+    # The difference: bootsync leaving stale modules gives a machine that
+    # boots and works, one release behind on drivers. A kernel that silently
+    # did not update gives a machine that boots and works and is missing the
+    # security fix somebody shipped a kernel for -- and it looks IDENTICAL to
+    # one that took it. The whole trap this line of work exists inside is that
+    # a machine which booted proves nothing about which kernel it booted.
+    if krc != 0:
+        write_str(2, "hpm: THE PACKAGES LANDED AND THE KERNEL DID NOT. The "
+                     "lines above say why.\n")
+        return 1
     return 0
 
 
@@ -9115,6 +9572,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             write_str(2, "hpm: package update requires hostowner. Try `newshell hostowner`.\n")
             return 1
         return cmd_update()
+    # `hpm kernel` -- READ ONLY. It says what this machine records and what
+    # the channel offers, and writes nothing, so it needs no hostowner check:
+    # both numbers are already readable by anyone who can read the index.
+    if _streq(cmd, cast[Ptr[uint8]]("kernel")) != 0:
+        return cmd_kernel()
     if _streq(cmd, cast[Ptr[uint8]]("pin")) != 0:
         if _not_hostowner() != 0:
             write_str(2, "hpm: package pinning requires hostowner. Try `newshell hostowner`.\n")

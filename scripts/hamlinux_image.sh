@@ -145,6 +145,18 @@ APPS=(
     # loads modules out of the INITRAMFS before the root switch, so until this
     # runs the upgrade has no effect on any boot. Its header is the argument.
     bootsync
+    # THE OTHER HALF OF THAT, AND IT IS HERE FOR THE SAME REASON. bootsync
+    # refreshes the MODULES inside whichever kernel image this machine is set
+    # to boot; it cannot change the kernel itself, and its own header says why
+    # mixing the two into one program is how a module refresh ends up able to
+    # make a machine unbootable. hkslot is the one that changes the kernel: it
+    # writes the INACTIVE A/B slot, reads it back off the medium, and flips the
+    # preallocated 512-byte loader.conf last. A machine whose kernel cannot be
+    # replaced cannot take a security fix in the kernel, and it cannot install
+    # the program that would fix that from a package -- packages are forbidden
+    # to carry any boot/ path (tests/linux/channel_covers_image.sh), because
+    # such a file would land in the ESP.
+    hkslot
     # The clipboard bridge. It is here rather than among the GUI apps because
     # it draws nothing: it is an X CLIENT that owns CLIPBOARD and PRIMARY on
     # the Xwayland inside a distribution namespace and mirrors both against
