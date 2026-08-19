@@ -13382,6 +13382,40 @@ def appmenu_drain_launch(scr_w: int64, scr_h: int64):
         daemon_launch_wayland_ns(
             cast[Ptr[char]](&appmenu_launch_buf[ps + 3]))
         return
+    # THE `user ` VERB -- bytes 117,115,101,114,32. STRIPPED HERE, NOT ACTED
+    # ON, AND THE DIFFERENCE IS THE WHOLE POINT OF THIS COMMENT.
+    #
+    # user/hamappmenu.ad now writes `<serial> user <path>` for a PERSON'S
+    # program and a bare `<serial> <path>` for the MACHINE's own (the LiveOnly
+    # install wizard). On the Linux line user/hampanelscene.ad drains this
+    # queue and the verb is what makes it drop privilege, because there the
+    # spawn is a direct spawn_detached() from a root panel.
+    #
+    # HERE IT IS ALREADY DROPPED. daemon_spawn_window_prog() below does not
+    # exec `prog`; it execs `/bin/hamsh /etc/rc.de-user <prog>`, and
+    # etc/rc.de-user ends with `setuid 1001` before it runs HAMNIX_DE_PROG. So
+    # EVERY window this daemon opens is already the session user's, verb or no
+    # verb, and adding a second drop here would change nothing except the
+    # number of ways it can fail.
+    #
+    # WHAT WOULD BREAK IF THIS BLOCK WERE ABSENT is why it exists at all: the
+    # payload `user /bin/hamwrite` would be handed to daemon_spawn_window_prog
+    # AS A PATH -- a program literally named `user /bin/hamwrite` -- and the
+    # spawn would fail. A menu converted to the new grammar would stop
+    # launching anything at all on this line. Stripping keeps the two drains
+    # reading ONE language.
+    #
+    # AND THE BARE FORM IS UNCHANGED, which on this line means the install
+    # wizard is dropped to 1001 here exactly as it always has been. That is a
+    # pre-existing property of routing through rc.de-user and this change does
+    # not touch it; it is recorded rather than fixed.
+    if pe > ps + 5 \
+            and appmenu_launch_buf[ps] == 117 \
+            and appmenu_launch_buf[ps + 1] == 115 \
+            and appmenu_launch_buf[ps + 2] == 101 \
+            and appmenu_launch_buf[ps + 3] == 114 \
+            and appmenu_launch_buf[ps + 4] == 32:
+        ps = ps + 5
     # Anchor the new window at a fixed centre-screen rect; the
     # compositor's snap/place logic handles re-layout.
     rx: int64 = scr_w / 4

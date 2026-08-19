@@ -71,7 +71,7 @@ extern def sys_mmap(addr: uint64, len: uint64, prot: int32, flags: int32,
                     fd: int32, off: uint64) -> int64
 extern def sys_munmap(addr: uint64, len: uint64) -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
-from lib.p9 import spawn, spawn_detached
+from lib.p9 import spawn, spawn_detached, spawn_detached_as
 from lib.dropplace import dp_desktop_entry
 from lib.hamui import hamscene_begin, hamscene_fill, hamscene_rect, \
     hamscene_glyphs, hamscene_glyphs_bold, hamscene_line, \
@@ -85,9 +85,10 @@ from lib.hamfmcore import fmc_set_cur_path, fmc_mkdir, \
     fmc_full_path_ptr
 from lib.desktopentry import desktop_parse, desktop_name_ptr, \
     desktop_name_len, desktop_prog_ptr, desktop_prog_len, \
-    desktop_liveonly, desktop_name_is_entry, desktop_icon_ptr
+    desktop_liveonly, desktop_chrome, desktop_name_is_entry, \
+    desktop_icon_ptr
 from lib.homedir import hd_env_home, hd_home_from_passwd, hd_regular_home, \
-    hd_fallback_home, hd_resolve_home
+    hd_fallback_home, hd_resolve_home, hd_session_uid
 from lib.hamscene import hamscene_length, hamscene_bufptr, hamscene_image
 from lib.hamscreen import hamscreen_dims_or_fail
 
@@ -917,6 +918,22 @@ ACTION_CAP: uint64 = 128             # bytes stored per action path
 ic_label: Array[768, uint8]          # MAX_ICONS * LABEL_CAP
 ic_label_len: Array[32, uint64]
 ic_is_folder: Array[32, int32]
+# 1 = THE MACHINE'S OWN PROGRAM. A double-click launches it with the desktop's
+# own identity; 0 launches it as the session user (see _run_action).
+#
+# The desktop is system chrome and runs as root, so until 2026-08-19 a
+# double-clicked Word Processor was a ROOT child of it and every document it
+# saved came out owned by uid 0 inside the person's own directory -- measured
+# on a real installed machine. But etc/skel/Desktop also ships the install
+# wizard, the package manager and the control centre, which write outside any
+# home and cannot work as the session user. Each says so in its own .desktop
+# file (X-Hamnix-SystemChrome / X-Hamnix-LiveOnly, folded together by
+# lib/desktopentry.ad's desktop_chrome()), and this array carries that answer
+# from the scan to the click.
+#
+# DEFAULT 0 -- a forgotten mark demotes a launch, which fails LOUDLY, rather
+# than quietly handing a person's file to root. See lib/desktopentry.ad.
+ic_chrome:    Array[64, int32]
 ic_icon_code: Array[32, int32]       # hamscene HS_ICON_* glyph code per icon
 ic_action: Array[4096, uint8]        # MAX_ICONS * ACTION_CAP
 # Per-icon free position (top-left of the icon CELL in window coords). A
@@ -965,7 +982,20 @@ def _add_icon(label: Ptr[uint8], llen: uint64, folder: int32,
         da[k] = action[k]
         k = k + 1
     da[al] = 0
+    # Every icon is THE PERSON'S program until a caller says otherwise --
+    # see ic_chrome.
+    ic_chrome[n_icons] = 0
     n_icons = n_icons + 1
+
+
+# Mark the icon added by the LAST _add_icon() as the MACHINE'S OWN program, so
+# a double-click launches it with THIS process's identity instead of dropping
+# to the session user. Separate from _add_icon() rather than a ninth parameter
+# because eight call sites add icons and exactly one of them is chrome.
+def _mark_last_icon_chrome():
+    if n_icons == 0:
+        return
+    ic_chrome[n_icons - 1] = 1
 
 
 # Built-in default icon set (used when the desktop directory is
@@ -1128,6 +1158,8 @@ def _build_icons_from_fmc() -> uint64:
                                       0, desktop_prog_ptr(), desktop_prog_len(),
                                       -1, -1,
                                       hamscene_icon_code(desktop_icon_ptr()))
+                            if desktop_chrome() != 0:
+                                _mark_last_icon_chrome()
                         handled = 1
             if handled == 0:
                 # Unparseable .desktop -> show it as a plain file instead.
@@ -1605,7 +1637,35 @@ def _run_action(i: uint64):
         launch_argv[1] = 0
         # DETACHED: the desktop never wait4s — a plain spawn leaks each
         # launched app as an un-reapable zombie (see spawn_detached).
-        pid: int32 = spawn_detached(cast[Ptr[char]](&launch_path[0]),
+        #
+        # AND AS THE PERSON, NOT AS ROOT. hamdesktop is system chrome and runs
+        # as root, so until 2026-08-19 a double-clicked Word Processor was a
+        # ROOT child of the chrome and every document it saved came out OWNED
+        # BY UID 0 -- measured on a real installed machine by
+        # tests/linux/installed_documents.sh. The person's own files, in the
+        # person's own directory, that the same application opened from a
+        # DESKTOP TERMINAL (uid 1001, because /etc/rc.de-user drops it) cannot
+        # be saved over. spawn_detached_as() drops in the child, before exec,
+        # and REFUSES TO EXEC if the drop fails -- see its header for why a
+        # failed drop must not fall back to a launch.
+        #
+        # THIS BRANCH ONLY. The chrome's own parts -- the terminal, hamctl,
+        # the lock screen -- go through _spawn_bin() and stay privileged;
+        # a dropped terminal could not run /etc/rc.de-user's binds at all.
+        #
+        # AND NOT FOR THE MACHINE'S OWN PROGRAMS. etc/skel/Desktop also ships
+        # Install Hamnix, Software and Control Center, which write outside any
+        # home; demoted, they fail. Each declares itself in its .desktop file
+        # and ic_chrome carries that from the scan to here. A denylist of
+        # program names was rejected: anything left off it fails silently,
+        # which is the trade 416248df's revert message named.
+        pid: int32 = 0
+        if ic_chrome[i] != 0:
+            pid = spawn_detached(cast[Ptr[char]](&launch_path[0]),
+                           &launch_argv[0], -2, -2, cast[Ptr[uint64]](0))
+        else:
+            pid = spawn_detached_as(hd_session_uid(),
+                           cast[Ptr[char]](&launch_path[0]),
                            &launch_argv[0], -2, -2, cast[Ptr[uint64]](0))
         if pid >= 0:
             _writeall(1, cast[Ptr[uint8]]("[hamdesktop] launched "))

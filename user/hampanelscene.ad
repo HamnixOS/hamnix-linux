@@ -88,13 +88,14 @@ extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> in
 extern def sys_fd_size(fd: int32) -> int64
 extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
 extern def sys_getenv(name: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64
-from lib.p9 import spawn, spawn_detached, p9_listdir, p9_note
-from lib.homedir import hd_resolve_home
+from lib.p9 import spawn, spawn_detached, spawn_detached_as, p9_listdir, p9_note
+from lib.homedir import hd_resolve_home, hd_session_uid
 from lib.dropplace import dp_panel_insert_index, dp_panel_insert_boundary
 from lib.desktopentry import (
     desktop_parse, desktop_name_ptr, desktop_name_len,
     desktop_prog_ptr, desktop_prog_len, desktop_catcode,
-    desktop_name_is_entry, desktop_liveonly, desktop_terminal, DE_CAT_LINUX,
+    desktop_name_is_entry, desktop_liveonly, desktop_chrome,
+    desktop_terminal, DE_CAT_LINUX,
 )
 from lib.hamui import (
     hamscene_begin, hamscene_fill, hamscene_rect, hamscene_stroke,
@@ -1964,6 +1965,13 @@ am_cat:      Array[64, int32]
 # hosted in a rendered terminal emulator (hamtermscene) rather than launched
 # headless — otherwise clicking it opens nothing. 1 = needs a terminal host.
 am_term:     Array[64, uint8]
+# 1 = THE MACHINE'S OWN PROGRAM, launched with the chrome's identity; 0 = the
+# person's, launched as the person. Today the only 1 in this model is the
+# LiveOnly install wizard, which partitions a disk. Set from the SAME
+# desktop_liveonly() bit that decides whether the row is drawn at all, so a
+# .desktop file settles both questions once. See lib/appmenucore.ad's
+# _amc_chrome for the full argument, including why the default is 0.
+am_chrome:   Array[64, uint8]
 
 # Scan scratch: the directory listing + one file's contents.
 _am_listbuf: Array[4096, uint8]
@@ -2028,7 +2036,7 @@ def _am_cmp(i: uint64, cat: int32, name: Ptr[uint8], nlen: uint64) -> int32:
 # Insert (name, prog, cat) into the menu model, keeping it sorted by
 # (category, Name). Silently drops overflow past AM_MAX.
 def _am_add(name: Ptr[uint8], nlen: uint64, prog: Ptr[uint8],
-            plen: uint64, cat: int32, term: int32):
+            plen: uint64, cat: int32, term: int32, chrome: int32):
     if am_count >= AM_MAX:
         return
     nl: uint64 = nlen
@@ -2056,6 +2064,7 @@ def _am_add(name: Ptr[uint8], nlen: uint64, prog: Ptr[uint8],
         am_prog_len[j] = am_prog_len[j - 1]
         am_cat[j] = am_cat[j - 1]
         am_term[j] = am_term[j - 1]
+        am_chrome[j] = am_chrome[j - 1]
         j = j - 1
     # Write the new slot.
     k2: uint64 = 0
@@ -2072,6 +2081,7 @@ def _am_add(name: Ptr[uint8], nlen: uint64, prog: Ptr[uint8],
     am_prog_len[pos] = pl
     am_cat[pos] = cat
     am_term[pos] = cast[uint8](term)
+    am_chrome[pos] = cast[uint8](chrome)
     am_count = am_count + 1
 
 
@@ -2079,7 +2089,13 @@ def _am_add(name: Ptr[uint8], nlen: uint64, prog: Ptr[uint8],
 # apps the scene DE ships so the menu is never blank. (cat codes match
 # lib/desktopentry: 0 Accessories 1 Internet 2 Games 3 System 4 Settings)
 def _seed_one(name: Ptr[uint8], prog: Ptr[uint8], cat: int32):
-    _am_add(name, _slen(name), prog, _slen(prog), cat, 0)
+    _am_add(name, _slen(name), prog, _slen(prog), cat, 0, 0)
+
+
+# The same, for a row that is the MACHINE's own program and must keep the
+# chrome's identity when clicked.
+def _seed_one_chrome(name: Ptr[uint8], prog: Ptr[uint8], cat: int32):
+    _am_add(name, _slen(name), prog, _slen(prog), cat, 0, 1)
 
 
 # Live-medium probe: /etc/installer-medium is planted in the cpio ONLY by
@@ -2181,7 +2197,11 @@ def _seed_fallback():
     # The installer launcher is a LIVE-medium-only entry — never on an
     # installed system (matches installer.desktop's X-Hamnix-LiveOnly=true).
     if _am_is_live() != 0:
-        _seed_one(cast[Ptr[uint8]]("Install Hamnix"), cast[Ptr[uint8]]("/bin/haminstallui"), 3)
+        # CHROME, and this line is load-bearing. The install wizard partitions
+        # a disk and writes a root filesystem; launched as the session user it
+        # exits without completing (measured: install_confirm_keys 33/1 when a
+        # launcher dropped for everything). It keeps the panel's identity.
+        _seed_one_chrome(cast[Ptr[uint8]]("Install Hamnix"), cast[Ptr[uint8]]("/bin/haminstallui"), 3)
 
 
 # Build "<dir>/<name>" into _am_path (NUL-terminated).
@@ -2473,7 +2493,8 @@ def _scan_apps_dir(dir: Ptr[uint8], force_cat: int32) -> uint64:
                             # launch still routes by cat (DE_CAT_LINUX).
                             _am_add(desktop_name_ptr(), desktop_name_len(),
                                     desktop_prog_ptr(), desktop_prog_len(),
-                                    cat, desktop_terminal())
+                                    cat, desktop_terminal(),
+                                    desktop_chrome())
                         else:
                             # NATIVE entry: the Exec names a program in THIS
                             # root, so it can be checked, and must be -- see
@@ -2486,7 +2507,8 @@ def _scan_apps_dir(dir: Ptr[uint8], force_cat: int32) -> uint64:
                             else:
                                 _am_add(desktop_name_ptr(), desktop_name_len(),
                                         desktop_prog_ptr(), desktop_prog_len(),
-                                        cat, desktop_terminal())
+                                        cat, desktop_terminal(),
+                                        desktop_chrome())
         i = e + 1
     added = am_count - start
     return added
@@ -3910,7 +3932,26 @@ launch_argv: Array[6, uint64]
 # pid of the most recent _launch() spawn (or <0 on failure). Read straight
 # after a _launch call to associate the spawned app with a tracked slot.
 last_launched_pid: int32 = 0
-def _launch(prog: Ptr[char]):
+# _launch_as(prog, uid) -- launch `prog`, and if `uid` is non-zero drop to it
+# in the child before exec.
+#
+# WHY THE UID IS A PARAMETER AND NOT A PROPERTY OF THIS FUNCTION. The panel
+# uses this one launcher for TWO different things and they need different
+# identities. Its OWN parts -- hamsessui (which writes /dev/reboot), hamctl,
+# hamabout, haminbox, hammonscene -- are system chrome and must keep the
+# chrome's privilege. A PERSON'S PROGRAM, started from the Applications menu or
+# queued on /dev/wsys/appmenu/launch, must not: until 2026-08-19 it ran as root
+# and every document it saved came out OWNED BY UID 0, in the person's own
+# directory, unwritable from a desktop terminal (which is uid 1001, because
+# /etc/rc.de-user drops it). Measured on a real installed machine by
+# tests/linux/installed_documents.sh.
+#
+# uid 0 means "do not drop", never "drop to root" -- lib/homedir.ad's
+# hd_session_uid() returns 0 when it cannot find a regular account, and
+# lib/p9.ad's spawn_detached_as() refuses to exec on a FAILED drop rather than
+# launching a program that is still root. A launch that silently keeps
+# privilege is the success-shaped answer this whole line of work removes.
+def _launch_as(prog: Ptr[char], uid: uint32):
     launch_argv[0] = cast[uint64](prog)
     launch_argv[1] = 0
     # THE SECOND HALF OF THE MISSING-PROGRAM ANSWER. The scan above keeps a
@@ -3930,13 +3971,23 @@ def _launch(prog: Ptr[char]):
     # would leak each one as an un-reapable zombie (a still-live parent makes
     # reap_orphan_zombies skip it) — the app menu eventually hit fork-EAGAIN
     # and stopped launching. RFNOWAIT lets the kernel reclaim them at exit.
-    pid: int32 = spawn_detached(prog, &launch_argv[0], -2, -2,
+    pid: int32 = 0
+    if uid != 0:
+        pid = spawn_detached_as(uid, prog, &launch_argv[0], -2, -2,
                                 cast[Ptr[uint64]](0))
+    else:
+        pid = spawn_detached(prog, &launch_argv[0], -2, -2,
+                             cast[Ptr[uint64]](0))
     last_launched_pid = pid
     if pid >= 0:
         _writeall(1, cast[Ptr[uint8]]("[panel] launched "))
         _writeall(1, cast[Ptr[uint8]](prog))
         _writeall(1, cast[Ptr[uint8]]("\n"))
+
+
+# The chrome's own parts keep the chrome's identity.
+def _launch(prog: Ptr[char]):
+    _launch_as(prog, 0)
 
 
 # Spawn a queued launch line that carries ARGUMENTS: "/bin/prog a1 a2 ...".
@@ -3952,7 +4003,7 @@ def _launch(prog: Ptr[char]):
 # DE may issue are refused there. Splitting here means an automated check can
 # exercise the app exactly as a click would.
 LAUNCH_MAX_ARGS: uint64 = 6
-def _launch_line(line: Ptr[uint8]):
+def _launch_line_as(line: Ptr[uint8], uid: uint32):
     n: uint64 = 0
     launch_argv[0] = cast[uint64](line)
     n = 1
@@ -3971,7 +4022,7 @@ def _launch_line(line: Ptr[uint8]):
             i = i + 1
     launch_argv[n] = 0
     if n == 1:
-        _launch(cast[Ptr[char]](line))                   # no args: unchanged
+        _launch_as(cast[Ptr[char]](line), uid)           # no args: unchanged
         return
     # Same probe as _launch(): a bad path here would spawn a child that dies in
     # execve and still report "launched".
@@ -3981,8 +4032,13 @@ def _launch_line(line: Ptr[uint8]):
         _writeall(1, line)
         _writeall(1, cast[Ptr[uint8]](": not installed\n"))
         return
-    pid: int32 = spawn_detached(cast[Ptr[char]](line), &launch_argv[0], -2, -2,
-                                cast[Ptr[uint64]](0))
+    pid: int32 = 0
+    if uid != 0:
+        pid = spawn_detached_as(uid, cast[Ptr[char]](line), &launch_argv[0],
+                                -2, -2, cast[Ptr[uint64]](0))
+    else:
+        pid = spawn_detached(cast[Ptr[char]](line), &launch_argv[0], -2, -2,
+                             cast[Ptr[uint64]](0))
     last_launched_pid = pid
     if pid >= 0:
         _writeall(1, cast[Ptr[uint8]]("[panel] launched "))
@@ -4011,6 +4067,12 @@ _statbuf: Array[64, uint8]
 # additionally consult /proc/<pid>/stat, whose field 3 is the Linux state
 # letter ('Z' for a zombie/exited task), and treat 'Z' as dead. Returns 1 iff
 # the task is a zombie; a missing/unreadable stat conservatively returns 0.
+# The same, for a queue payload that may carry arguments. uid 0 = "do not
+# drop" = today's behaviour, which is what a BARE path on the launch queue has
+# always meant and must go on meaning.
+def _launch_line(line: Ptr[uint8]):
+    _launch_line_as(line, 0)
+
 def _proc_is_zombie(pid: int32) -> int32:
     if pid <= 0:
         return 0
@@ -4596,9 +4658,45 @@ def _drain_one_launch_queue(path: Ptr[char], last_serial: uint64) -> uint64:
             and _launch_q_buf[ps + 1] == 108 \
             and _launch_q_buf[ps + 2] == 58:
         _launch_linux(cast[Ptr[char]](&_launch_q_buf[ps + 3]))
+    elif pe > ps + 5 and _launch_q_buf[ps] == 117 \
+            and _launch_q_buf[ps + 1] == 115 \
+            and _launch_q_buf[ps + 2] == 101 \
+            and _launch_q_buf[ps + 3] == 114 \
+            and _launch_q_buf[ps + 4] == 32:
+        # `user ` VERB — bytes 117,115,101,114,32. THE WRITER IS SAYING THIS
+        # IS A PERSON'S PROGRAM, so drop to the session user before exec.
+        #
+        # THE COMMENT THAT USED TO STAND HERE SAID "neither queue carries the
+        # chrome's own parts" AND IT WAS WRONG. tests/linux/install_confirm_keys.sh
+        # starts the GUI install wizard with a literal
+        # `echo '/bin/haminstallui' > '/dev/wsys/appmenu/launch'`, and the
+        # version of this drain that dropped for EVERY payload demoted it:
+        # 33 PASSED / 1 FAILED, wizard exited without reporting completion.
+        # That is why the identity is now something the WRITER says and not
+        # something this function assumes. See the grammar in
+        # user/hamappmenu.ad:_emit_launch_path.
+        #
+        # `user wl:<x>` IS NOT A COMBINATION. The `wl:` test above runs FIRST
+        # and matches only at the very start of the payload, so a payload
+        # spelled `user wl:foo` arrives here, has its verb stripped, and is
+        # handed to _launch_line_as as the path `wl:foo` -- which
+        # _prog_installed refuses BY NAME with `wl:foo: not installed` on the
+        # panel's log. It fails LOUDLY. It deliberately does not fall through
+        # to the undropped Wayland launcher, because that would be a payload
+        # that asked for the person's identity and silently kept root's.
+        #
+        # hd_session_uid() RETURNS 0 WHEN IT CANNOT FIND A REGULAR ACCOUNT,
+        # and 0 means DO NOT DROP, never "drop to root" -- lib/p9.ad's
+        # spawn_detached_as() refuses to exec on a FAILED drop rather than
+        # launching a program that is still root.
+        _launch_line_as(&_launch_q_buf[ps + 5], hd_session_uid())
     else:
         # "/bin/prog [args...]" — _launch_line splits on spaces (a bare path
         # takes the identical no-args path it always did).
+        #
+        # A BARE PATH KEEPS TODAY'S MEANING: the chrome's identity. This is
+        # the compatibility property the whole design rests on -- an
+        # unconverted writer cannot be demoted by omission.
         _launch_line(&_launch_q_buf[ps])
     return serial
 
@@ -5100,8 +5198,19 @@ def _handle_click(x: int64, y: int64, bar: int64) -> int32:
                 and y >= menu_box_y and y < menu_box_y + menu_main_h:
             row: int64 = (y - menu_box_y - 2) / MENU_ROW_H
             if row >= 0 and cast[uint64](row) < nc:
-                # a native app row.
-                _launch(cast[Ptr[char]](&am_prog[cast[uint64](row)][0]))
+                # A native app row. THE IDENTITY DEPENDS ON WHOSE PROGRAM IT
+                # IS, and this dropdown carries BOTH: on a live medium it has
+                # an "Install Hamnix" row (see _seed_fallback and the
+                # desktop_liveonly() test in the catalogue scan), and the
+                # wizard demoted to the session user exits without completing.
+                # am_chrome says which -- 1 keeps the panel's identity,
+                # 0 launches as the person (see _launch_as, and am_chrome's
+                # header for why 0 is the safe default).
+                if am_chrome[cast[uint64](row)] != 0:
+                    _launch(cast[Ptr[char]](&am_prog[cast[uint64](row)][0]))
+                else:
+                    _launch_as(cast[Ptr[char]](&am_prog[cast[uint64](row)][0]),
+                               hd_session_uid())
                 menu_open = 0
                 sub_open = 0
                 return 1

@@ -160,6 +160,57 @@ for app in hamwrite hamsheet hamslides; do
     fi
 done
 
+# ---- THE UID HALF OF THE SESSION IDENTITY --------------------------------
+# lib/homedir.ad's hd_session_uid() is the number the SYSTEM CHROME drops to
+# before it execs a person's program (lib/p9.ad:spawn_detached_as, called from
+# user/hamdesktop.ad:_run_action and user/hampanelscene.ad's launch-queue
+# drain). Until 2026-08-19 the chrome did not drop at all and a document saved
+# from a desktop icon came out OWNED BY UID 0 -- in the person's own directory,
+# unwritable from a desktop terminal, which IS uid 1001.
+#
+# THE INVARIANT THAT MATTERS IS THAT THE UID AND THE HOME COME FROM ONE
+# ACCOUNT. A launcher that ran as one person and wrote into another's directory
+# would be a new defect wearing the old one's clothes, and it would look like a
+# fix. So each REGU line carries both, taken at the same index, and they are
+# asserted together.
+assert_grep '^REGU0 idx=0 uid=1000 home=/home/dave$' \
+    "the regular-account enumeration's uid and home agree at idx 0 (dave, 1000)"
+assert_grep '^REGU1 idx=1 uid=1001 home=/home/live$' \
+    "…and at idx 1 (live, 1001)"
+assert_grep '^REGU2 idx=2 uid=1002 home=/home/bobby$' \
+    "…and at idx 2, the installed-style account (bobby, 1002)"
+assert_grep '^REGU4 idx=4 uid=0 home=<none>$' \
+    "…and past the end it answers uid 0, which callers must read as DO NOT DROP"
+assert_grep '^IREGU0 idx=0 uid=1000 home=/home/gizmo$' \
+    "KEYSTONE: on an INSTALLED passwd the session identity is the wizard's account, uid and home together"
+# hd_session_uid() RUN, not read. On an unprivileged host it takes step 1 --
+# the running uid is already a regular account -- so the answer must be this
+# process's own uid. That branch is what a host harness and a single-uid
+# offscreen run take; getting it wrong would make every launcher refuse.
+MYUID=$(id -u)
+assert_grep "^SESSUID uid=${MYUID}\$" \
+    "hd_session_uid() RAN and returned this process's own uid ($MYUID) -- the no-drop-needed branch"
+
+# The two launchers must actually CALL it. Static, and said to be static:
+# where the bytes land is measured by tests/linux/installed_documents.sh.
+for f in user/hamdesktop.ad user/hampanelscene.ad; do
+    if grep -q 'hd_session_uid' "$f" && grep -q 'spawn_detached_as' "$f"; then
+        pass "$f launches a person's program through spawn_detached_as(hd_session_uid())"
+    else
+        bad "$f still launches a person's program with the chrome's own identity"
+    fi
+done
+# And spawn_detached_as must REFUSE on a failed drop rather than exec'ing a
+# still-root program. That is the success-shaped failure this tree keeps
+# finding, so it is checked rather than assumed.
+if awk '/^def spawn_detached_as/ { inb = 1; next }
+        inb && /^def / { inb = 0 }
+        inb' lib/p9.ad | grep -q 'sys_exit(126)'; then
+    pass "spawn_detached_as REFUSES to exec when the drop fails (exit 126), instead of launching as root"
+else
+    bad "spawn_detached_as does not refuse on a failed drop -- a failed drop would launch a root program that looks like a success"
+fi
+
 assert_grep '^HOMEDIR_HOST_DONE$' "the harness ran to completion"
 
 # --- 3. no stray /home/live hardcode left in the desktop's resolution -----
