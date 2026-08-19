@@ -585,9 +585,17 @@ $n = ns clean {
 }
 # The program is the person's, so it runs as the person. Everything above
 # needed CAP_SYS_ADMIN; nothing below may have it.
-setuid 1001
+#
+# HOME IS SET AND EXPORTED BEFORE THE DROP, AND THE DROP RESOLVES THE REAL ONE.
+# \`setuid\` re-reads /etc/passwd for the new uid and rewrites HOME in the
+# environment (user/hamsh.ad:builtin_setuid), so on an INSTALLED machine this
+# launcher hands the distribution's program the home of the account the install
+# wizard created rather than the live medium's /home/live. Exporting AFTER the
+# drop would publish this fallback over the resolved value -- \`export NAME\`
+# copies the SHELL variable, which the drop does not touch.
 HOME='/home/live'
 export HOME
+setuid 1001
 # THE RUNTIME DIRECTORY IS THE SESSION'S OWN, NOT THE DISTRIBUTION'S /run.
 # This used to say /run, which is 40755 uid 0 on both media: the session could
 # read everything wsyswl publishes there and create nothing --
@@ -1439,6 +1447,40 @@ $(ldd "$p" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}')"
         mkdir -p "$INSTROOT$(dirname "$l")"
         install -m755 "$(readlink -f "$l")" "$INSTROOT$l"
     done
+    # --- AND openssl, WHICH IS WHAT TURNS A TYPED PASSWORD INTO AN ACCOUNT.
+    # user/hlinstall.ad::hash_password runs `openssl passwd -6 <plain>` inside
+    # this same namespace and puts the result in the target's /etc/shadow. On a
+    # DEVELOPMENT HOST that call found openssl because `#distro` is the whole
+    # Debian medium. A USB STICK HAS NO SUCH DISK, and this toolbox carried
+    # three programs, none of them openssl -- so the hash failed and the
+    # account was written with `*`, i.e. LOCKED. MEASURED on a stick-shaped
+    # install: "WARNING: could not hash the password", and the installed
+    # /etc/shadow line was `hamgateusr:*:20000:...`. The wizard collects a
+    # password on its own page and produced a machine nobody could log into.
+    #
+    # /usr/bin, not /usr/sbin: that is the path hlinstall execs.
+    OSSL="$(PATH="$PATH:/usr/bin" command -v openssl 2>/dev/null || true)"
+    if [ -z "$OSSL" ]; then
+        echo "[image] ERROR: no openssl on this build host; the installer on" >&2
+        echo "[image]        this medium could not hash the account password" >&2
+        echo "[image]        and would create every account LOCKED." >&2
+        INST_OK=0
+    else
+        mkdir -p "$INSTROOT/usr/bin"
+        install -m755 "$(readlink -f "$OSSL")" "$INSTROOT/usr/bin/openssl"
+        for l in $(ldd "$OSSL" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}' | sort -u); do
+            [ -f "$l" ] || continue
+            mkdir -p "$INSTROOT$(dirname "$l")"
+            install -m755 "$(readlink -f "$l")" "$INSTROOT$l"
+        done
+        # PROVE IT HASHES, here. A copied openssl with a missing provider is
+        # indistinguishable from a working one until an install is half done.
+        if ! "$INSTROOT/usr/bin/openssl" passwd -6 hamnix 2>/dev/null | grep -q '^\$6\$'; then
+            echo "[image] ERROR: the staged openssl does not produce a \$6\$ hash." >&2
+            INST_OK=0
+        fi
+    fi
+
     # mkfs.ext4 reads this for its feature defaults. Without it the filesystem
     # is still made, so its absence would be a silent difference rather than
     # an error -- which is the reason to copy it rather than to find out.
@@ -1513,7 +1555,7 @@ $(ldd "$p" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^\//) print $i}')"
 
     INST_SZ=$(du -sk "$INSTROOT" | cut -f1)
     echo "[image] staged the installer's partitioning tools into" \
-         "/usr/lib/instroot (${INST_SZ}K, sgdisk + mkfs.vfat + mkfs.ext4)"
+         "/usr/lib/instroot (${INST_SZ}K, sgdisk + mkfs.vfat + mkfs.ext4 + openssl)"
     [ "$INST_OK" = 1 ] || echo "[image] WARNING: /usr/lib/instroot is INCOMPLETE" >&2
 fi
 

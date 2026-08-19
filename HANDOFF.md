@@ -13,7 +13,27 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
-### I COULD NOT REPRODUCE THE "962 BYTES" FIGURE, AND I PUBLISHED IT
+### RESOLVED — I was measuring POST-FIX disks. The 962 figure stands unrefuted.
+
+I reported an hour ago that I could not reproduce the "962 bytes, not one account
+line" figure on three installed disks. **I checked the timeline instead of
+guessing, and the answer is that all three post-date the fix.** The
+`append_line()` repair landed at **15:13**; the disk I leaned on hardest was
+written at **18:22** — three hours later. Their healthy account tables are the
+fix working, not the defect failing to appear.
+
+**So the 962 figure is not refuted and never was.** What was wrong was my
+reproduction attempt: I compared against artifacts whose provenance I had not
+established, which is the exact failure two provenance guards already exist in
+this tree to prevent — one for a channel older than its packager, one for an
+image and channel at different releases. I built a third instance of it by hand.
+
+The section below is kept because its conclusion about **my** conduct still
+holds: I published a number I had not measured. That remains true and is the
+reason the correction was worth writing. Only the "cannot reproduce" part is
+withdrawn.
+
+### SUPERSEDED — the failed reproduction, kept for what it says about publishing numbers
 
 The account defect is real and its mechanism is verified in the source:
 `user/hlinstall.ad`'s `append_line()` reads into `&line_buf[total]` capped at
@@ -60,6 +80,102 @@ read the filesystem out of the image with an offset instead of copying it.
 claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
+
+### AN INSTALLED MACHINE LOST ITS USER AT THE FIRST `hpm update`, AND THE NAMED USER HAD NO SESSION -- BOTH MEASURED, BOTH FIXED, BOTH GATED
+
+**Measured, dev host, 2026-08-18. Evidence under `~/.hamnix-build/instacct/`
+(the fixed run), `~/.hamnix-build/instacct-red/` (the same gate with every fix
+reverted) and `~/.hamnix-build/instacct-run1-segv/` (the run that caught a
+NULL global).**
+
+**THE PREVIOUS CYCLE'S TWO OPEN ITEMS WERE BOTH TRUE, AND THE MACHINE SAYS SO
+NOW RATHER THAN THE SOURCE.** With every fix reverted, a machine installed to
+a blank disk carried `hamacctusr:x:1000:1000::/home/hamacctusr:/bin/hamsh` in
+`/etc/passwd` and its group in `/etc/group`; after **one** `hpm update` both
+were gone and `/etc/shadow` still held `hamacctusr:*`. The gate reports that
+state in its own words: *"/etc/shadow holds a hash for a name /etc/passwd does
+not have"*. The same update also replaced `/etc/hostname` -- the machine the
+operator had called `hamlaptop` came back up as `hamnix`.
+
+**AND TWO MORE FELL OUT OF THE SAME DISK, BOTH SUCCESS-SHAPED.**
+
+* **THE WIZARD'S ACCOUNT WAS A DUPLICATE UID AND THE SECOND ONE.** The shipped
+  `/etc/passwd` already carries `dave:x:1000` (an auth fixture, with a hash
+  published in `etc/shadow` in git) and `live:x:1001`. The installer APPENDED
+  the wizard's user at uid 1000, so `getpwuid(1000)` on that machine resolved
+  to `dave`, and the desktop session -- uid 1001 -- stayed `live` out of
+  `/home/live`. `/home/<name>` was created and left empty.
+* **THE PASSWORD WAS `*`.** `hlinstall` hashes with `openssl passwd -6` inside
+  `#distro`. A USB stick has no Debian medium; the partitioning tools already
+  fall back to `/usr/lib/instroot` and the hash call did not. Its own serial
+  log said `WARNING: could not hash the password` and the account was written
+  LOCKED. `--root-pass` was parsed and **read by nothing at all**, so the
+  machine kept the tree's published `hostowner` password.
+
+**THE FIXES.** `hpm`'s `_is_machine_owned` now names `etc/passwd`, `etc/group`
+and `etc/hostname` beside `etc/rc.boot`, which makes all four identity files
+consistent with `/etc/shadow` (already in no package). The installer REWRITES
+the account table instead of appending to it: every shipped regular account is
+dropped and the wizard's user is written at **uid 1001**, the session uid; its
+home is a `cp -r -o 1001` copy of `/home/live` (the new `-o` flag -- before
+it, every file under `/home` on an installed disk was uid 0, so the session
+could not write its own home); `/etc/users/<name>.ns` is written so the shell
+does not fall back to a recipe that fails EPERM line by line; and the
+administrator password is set from what the operator typed. `setuid`
+re-resolves `$HOME` from `/etc/passwd` and prints `uid <n> home <path>`,
+`/etc/rc.d/rc.5` runs the session recipe once per graphical boot so that line
+is in every boot log, and `hamdesktop` records the directory it resolved.
+
+**THE GATE, AND ITS NUMBERS BESIDE THE CONDITION.**
+`tests/linux/installed_accounts.sh` -- on-demand; one medium build, an install,
+an update boot against a signed local channel, and a desktop boot. Every
+account assertion runs TWICE against the same disk, before and after the
+update, in identical words.
+
+| condition | result |
+|---|---|
+| the tree with every fix reverted | **34 PASSED / 25 FAILED** |
+| the tree with the fixes | **61 PASSED / 0 FAILED** |
+
+**THE CONTROLS RUN.** The update must report `upgraded=1` and name
+`hamnix-init` (so "the accounts survived" cannot mean "nothing happened"); the
+package's own `/etc/rc.boot.installed` must be shown to have been REPLACED by
+that upgrade (so hpm was writing on that machine and skipped the account files
+deliberately); the ext4 reader is shown finding a file that is there; and the
+medium's own `/etc/passwd` must carry `live` and must NOT carry the wizard's
+name, so that name on the target can only have come from the install.
+
+**AND A THIRD FAULT, WHICH THE GATE DID NOT ASK ABOUT UNTIL A MACHINE CAME OUT
+WITHOUT AN ACCOUNT.** The rule for "a regular account the image ships" was
+first written `uid >= 1000` -- which also matches `nobody:x:65534`. The machine
+that produced scored **53 / 0** and had NO `nobody` line at all; nothing on it
+complained, because nothing looks up 65534 until something does. It was caught
+by reading the final table by hand, not by the gate. The rule is
+`1000 <= uid < 60000` now and the gate asserts all four system accounts
+(hostowner, sshd, hamsh-svc, nobody) survive, before and after the update.
+
+**AN INSTRUMENT BUG AND A COMPILER TRAP, BOTH CAUGHT BY THE GATE PRINTING WHAT
+IT READ.** The first run scored **41 / 12**, and two of those failures were
+not the product: `grep "^user:\$6\$"` reads its trailing `$` as the
+end-of-line anchor, so it demanded a line ending after the `6` and reported
+"no hash" beside a printed hash (the gate uses `awk` now, and its own control
+shows it rejecting a `*`). The other ten came from ONE fault: a global
+`SESSION_UID: Ptr[uint8] = "1001"` **compiles cleanly and is NULL at run
+time** on this backend -- string-literal initialisers are honoured for
+function locals, not globals. The installer SEGFAULTED on the first
+dereference, AFTER writing every account file correctly, so the install
+reported success and the only symptom was two missing files. It is spelled
+inline now, with the measurement written beside it.
+
+**WHAT THIS DOES NOT COVER, said rather than left to be found.**
+`user/hampaint.ad`, `user/hamnotesscene.ad` and `user/hamshot.ad` still
+hard-code `/home/live/Pictures` and `/home/live/Notes` and `sys_mkdir` their
+way there. On an installed machine there is no `live` account any more and
+`/home` is root-owned, so those three save into a directory that is not the
+user's -- or fail. The fix is `lib/homedir.ad`'s `hd_resolve_home()`, the same
+chain `hamdesktop` and `hamfm` already use, and it is now correct for
+DE-spawned programs because `$HOME` follows the identity. It is NOT done here
+and NOT measured by any gate.
 
 ### AN INSTALLED MACHINE OFFERED TO INSTALL ITSELF, AND HAD NO ACCOUNTS — BOTH BOOTED, BOTH FIXED, BOTH GATED
 

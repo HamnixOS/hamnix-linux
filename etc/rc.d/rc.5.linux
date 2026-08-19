@@ -58,4 +58,21 @@ echo '[rc.5] panel started'
 # and dies, which is a launcher that does nothing while reporting a launch.
 source '/etc/rc.distros-wl'
 
+# --- THE SESSION RECIPE, EXERCISED AND REPORTED ON EVERY GRAPHICAL BOOT ---
+# /etc/rc.de-user is the file that plants a desktop shell's namespace and
+# drops it to the session user. Until now nothing ran it until somebody opened
+# a terminal, so a machine whose session recipe was broken looked perfectly
+# healthy at boot and failed in the first window a person opened -- and the
+# only place that would ever have said so was that window.
+#
+# Hamnix's own rc.5 has always pre-warmed it (HAMNIX_DE_PROG=/bin/ls);
+# etc/rc.de-user's closing note says so. This line is that, on this kernel.
+# It costs one short-lived shell, and it puts the answer to "whose session is
+# this?" in the boot log: `setuid` prints the uid it reached AND the home it
+# resolved for that uid out of /etc/passwd. On an installed machine that line
+# names the account the install wizard created; on the live medium it names
+# `live`. tests/linux/installed_accounts.sh reads it.
+echo '[rc.5] checking the desktop session recipe'
+/bin/hamsh /etc/rc.de-user /bin/true
+
 echo '[rc.5] desktop up'

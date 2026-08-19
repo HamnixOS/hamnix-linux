@@ -95,6 +95,7 @@ a1:      Array[128, uint8]
 a2:      Array[128, uint8]
 a3:      Array[128, uint8]
 a4:      Array[128, uint8]
+a5:      Array[160, uint8]
 listbuf: Array[2048, uint8]
 errbuf:  Array[128, uint8]
 # append_line's OWN buffer. It must not be line_buf: every caller builds the
@@ -152,6 +153,8 @@ def run_local(prog: Ptr[char], n_args: int32) -> int32:
             argbuf[3] = cast[uint64](&a3[0])
         if n_args > 3:
             argbuf[4] = cast[uint64](&a4[0])
+        if n_args > 4:
+            argbuf[5] = cast[uint64](&a5[0])
         argbuf[cast[uint64](n_args) + 1] = 0
         envbuf[0] = cast[uint64](cast[Ptr[char]]("PATH=/bin"))
         envbuf[1] = 0
@@ -476,8 +479,23 @@ def hash_password(plain: Ptr[uint8]) -> int32:
         sys_close(pipefd[0])
         sys_dup2(pipefd[1], 1)
         sys_close(pipefd[1])
+        # TWO SOURCES, AND THE SECOND ONE IS THE ONLY ONE A USB STICK HAS.
+        # This bound `#distro` and gave up, exactly as run_in_distro used to --
+        # and run_in_distro grew the /usr/lib/instroot fallback because a
+        # laptop booted from a stick has no Debian medium. MEASURED on such an
+        # install (~/.hamnix-build/instoffer/install/serial.log): "no #distro
+        # here; using #distro/insttools" six times for the partitioning tools,
+        # and then "WARNING: could not hash the password" -- the account was
+        # created with `*` for a hash, i.e. LOCKED, on the one configuration
+        # the live image exists for. The wizard asked for a password and the
+        # machine it produced could not be logged into.
+        #
+        # scripts/hamlinux_image.sh now stages openssl into the instroot for
+        # this call, with its library closure, and this is where it is reached.
         if sys_bind(cast[Ptr[char]]("/"), cast[Ptr[char]]("#distro"), 0) != 0:
-            sys_exit(126)
+            if sys_bind(cast[Ptr[char]]("/"),
+                        cast[Ptr[char]]("#distro/insttools"), 0) != 0:
+                sys_exit(126)
         copy_str(&a1[0], cast[Ptr[uint8]]("passwd"))
         copy_str(&a2[0], cast[Ptr[uint8]]("-6"))
         copy_str(&a3[0], plain)
@@ -510,59 +528,225 @@ def hash_password(plain: Ptr[uint8]) -> int32:
     return 0
 
 
-def append_line(path: Ptr[char], line: Ptr[uint8]) -> int32:
-    # Read what is there, write it back with the line appended. The tree has
-    # no O_APPEND open, and a system file is small enough that this is the
-    # simplest correct thing.
-    #
-    # IT READ THE FILE INTO ITS CALLER'S BUFFER, AND IT READ 480 BYTES OF IT.
-    # Both halves were wrong and both were measured, on a fresh install at tip
-    # and on the installed disk tests/linux/install_from_usb.sh left the day
-    # before:
-    #
-    #   * every caller builds its new line in the GLOBAL `line_buf` and then
-    #     passes `&line_buf[0]` here. This function then read the existing file
-    #     into that same `line_buf`, destroying the line before writing it --
-    #     so the "appended line" was the file's own first bytes, again.
-    #   * the read stopped at 480 bytes, and etc/passwd is 1484. Everything
-    #     past 480 was thrown away.
-    #
-    # The result on the target was /etc/passwd, /etc/group and /etc/shadow all
-    # EXACTLY 962 bytes -- 480 + newline + the same 480 + newline -- holding
-    # the comment header of the shipped file twice and NO ACCOUNT LINE AT ALL.
-    # Not the account the wizard asked for, not `live` (which the DE session
-    # runs as), not `hostowner`, and no password hash for anyone. The wizard
-    # collects two passwords and the machine it produced stored neither.
-    #
-    # So: a PRIVATE buffer, large enough for the real files, and a REFUSAL
-    # rather than a truncation if one is ever bigger than it.
+# ==========================================================================
+# THE ACCOUNT FILES ARE REWRITTEN, NOT APPENDED TO
+# ==========================================================================
+#
+# WHAT APPENDING COST, MEASURED TWICE.
+#
+#   1. `append_line` READ THE FILE INTO ITS CALLER'S BUFFER, AND READ 480 BYTES
+#      OF IT. Every caller built its new line in the GLOBAL `line_buf` and
+#      passed `&line_buf[0]`; this function then read the existing file into
+#      that same buffer, destroying the line before writing it, and stopped at
+#      480 bytes of a 1484-byte /etc/passwd. The target's /etc/passwd,
+#      /etc/group and /etc/shadow all came out EXACTLY 962 bytes -- 480 + \n +
+#      the same 480 + \n -- the shipped comment header twice and no account
+#      line at all. 480 + 1 + 480 + 1 = 962, so the mechanism and the
+#      measurement are the same number.
+#
+#   2. AND WITH THAT FIXED, APPENDING WAS STILL WRONG, measured on the disk it
+#      produced (~/.hamnix-build/instoffer/target-nvme.img, read with debugfs):
+#
+#         dave:x:1000:1000::/home/dave:/bin/hamsh        <- shipped fixture
+#         live:x:1001:1001::/home/live:/bin/hamsh        <- the live account
+#         hamgateusr:x:1000:1000::/home/hamgateusr:...   <- the wizard's user
+#
+#      The wizard's account was a DUPLICATE of uid 1000 and the SECOND one, so
+#      every getpwuid(1000) on that machine resolves to `dave` -- a fixture
+#      account out of the source tree -- and the person who installed the
+#      machine is a name nothing looks up. `live` (uid 1001) is the uid the
+#      desktop session actually runs as, so the session was still the live
+#      medium's user, with /home/live as its home, and /home/<name> sat empty.
+#      /etc/shadow carried the tree's PUBLISHED hashes for hostowner, dave and
+#      live verbatim -- three accounts whose passwords are in git, on somebody's
+#      installed machine.
+#
+# SO THE INSTALLER OWNS THE WHOLE TABLE. It reads the three files, DROPS every
+# regular account the image shipped (uid >= 1000: `dave` and `live`) along with
+# any earlier line for the name being created, and writes the wizard's user in
+# their place -- AT UID 1001, which is the session uid every one of these files
+# already agrees on (etc/rc.de-user.linux drops the session to 1001,
+# /run/user/1001 is staged for it, the generated /etc/rc.de-ns/* launchers use
+# it). The machine ends with exactly one regular account, it is the operator's,
+# and it is the one the desktop session runs as.
+#
+# The buffer is PRIVATE and large, and a file that fills it is REFUSED rather
+# than truncated: silent truncation is defect 1 above.
+ACCT_CAP: uint64 = 16384
+acct_buf:  Array[16384, uint8]
+out_buf:   Array[16384, uint8]
+# Up to 8 names to remove from the account files, packed 32 bytes each.
+DROP_MAX:  uint64 = 8
+drop_buf:  Array[256, uint8]
+drop_n:    uint64 = 0
+rhash_buf: Array[256, uint8]
+
+
+def read_whole(path: Ptr[char]) -> int64:
+    # Returns the byte count in acct_buf, or -1 if the file does not fit (a
+    # truncation here is the 962-byte defect) or cannot be read.
     fd: int32 = sys_open(path)
+    if fd < 0:
+        return -1
     total: uint64 = 0
-    if fd >= 0:
-        while total < APPEND_CAP:
-            k: int64 = sys_read(fd, &append_buf[total], APPEND_CAP - total)
-            if k <= 0:
-                break
-            total = total + cast[uint64](k)
-        sys_close(fd)
-    if total >= APPEND_CAP:
-        # A silent truncation here is the defect above. Say so and change
-        # nothing on disk.
+    k: int64 = 0
+    while total < ACCT_CAP:
+        k = sys_read(fd, &acct_buf[total], ACCT_CAP - total)
+        if k <= 0:
+            break
+        total = total + cast[uint64](k)
+    sys_close(fd)
+    if total >= ACCT_CAP:
         puts(2, "hlinstall: ")
         puts(2, cast[Ptr[uint8]](path))
-        puts(2, " is larger than the installer's append buffer; refusing to "
-                "rewrite it rather than truncating it.\n")
+        puts(2, " is larger than the installer's buffer; refusing to rewrite "
+                "it rather than truncating it.\n")
         return -1
-    out: int32 = sys_open_write(path)
-    if out < 0:
+    return cast[int64](total)
+
+
+def drop_clear():
+    drop_n = 0
+
+
+def drop_add(name: Ptr[uint8], name_len: uint64) -> int32:
+    if drop_n >= DROP_MAX:
         return -1
-    if total > 0:
-        sys_write(out, &append_buf[0], total)
-        if append_buf[total - 1] != 10:
-            sys_write(out, cast[Ptr[uint8]]("\n"), 1)
-    sys_write(out, line, slen(line))
-    sys_write(out, cast[Ptr[uint8]]("\n"), 1)
-    sys_close(out)
+    if name_len > 31:
+        return -1
+    base: uint64 = drop_n * 32
+    i: uint64 = 0
+    while i < name_len:
+        drop_buf[base + i] = name[i]
+        i = i + 1
+    drop_buf[base + i] = 0
+    drop_n = drop_n + 1
+    return 0
+
+
+# Is the line at acct_buf[off..off+len) an entry for one of the dropped names?
+# The name is field 0, i.e. everything before the first ':'. A comment or a
+# blank line has no ':' and is never dropped.
+def line_is_dropped(off: uint64, len_: uint64) -> int32:
+    nl: uint64 = 0
+    d: uint64 = 0
+    base: uint64 = 0
+    wl: uint64 = 0
+    i: uint64 = 0
+    same: int32 = 0
+    if len_ == 0:
+        return 0
+    if acct_buf[off] == 35:                           # '#'
+        return 0
+    while nl < len_ and acct_buf[off + nl] != 58:     # ':'
+        nl = nl + 1
+    if nl == len_:
+        return 0
+    while d < drop_n:
+        base = d * 32
+        wl = 0
+        while drop_buf[base + wl] != 0:
+            wl = wl + 1
+        if wl == nl:
+            i = 0
+            same = 1
+            while i < nl:
+                if acct_buf[off + i] != drop_buf[base + i]:
+                    same = 0
+                i = i + 1
+            if same != 0:
+                return 1
+        d = d + 1
+    return 0
+
+
+# Rewrite `path` without the dropped names, with `line` appended (pass an empty
+# string to only drop). Returns 0 on success.
+def account_rewrite(path: Ptr[char], line: Ptr[uint8]) -> int32:
+    n: int64 = read_whole(path)
+    if n < 0:
+        return -1
+    total: uint64 = cast[uint64](n)
+    o: uint64 = 0
+    i: uint64 = 0
+    j: uint64 = 0
+    k: uint64 = 0
+    while i < total:
+        j = i
+        while j < total and acct_buf[j] != 10:
+            j = j + 1
+        if line_is_dropped(i, j - i) == 0:
+            k = i
+            while k < j:
+                out_buf[o] = acct_buf[k]
+                o = o + 1
+                k = k + 1
+            out_buf[o] = 10
+            o = o + 1
+        i = j + 1
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    if o > 0:
+        sys_write(fd, &out_buf[0], o)
+    if line[0] != 0:
+        sys_write(fd, line, slen(line))
+        sys_write(fd, cast[Ptr[uint8]]("\n"), 1)
+    sys_close(fd)
+    return 0
+
+
+# Every regular account the IMAGE shipped, by name, so they can be removed from
+# the machine being created. "Regular" is uid >= 1000, read out of the target's
+# own /etc/passwd rather than assumed: the names are `dave` and `live` today
+# and this must not need editing when that changes.
+def collect_shipped_regulars() -> int32:
+    n: int64 = read_whole(cast[Ptr[char]]("/n/target/etc/passwd"))
+    if n < 0:
+        return -1
+    total: uint64 = cast[uint64](n)
+    i: uint64 = 0
+    j: uint64 = 0
+    c1: uint64 = 0
+    c2: uint64 = 0
+    k: uint64 = 0
+    uid: uint64 = 0
+    digits: int32 = 0
+    while i < total:
+        j = i
+        while j < total and acct_buf[j] != 10:
+            j = j + 1
+        if j > i and acct_buf[i] != 35:
+            # field 0 = name, field 2 = uid
+            c1 = i
+            while c1 < j and acct_buf[c1] != 58:
+                c1 = c1 + 1
+            if c1 < j:
+                c2 = c1 + 1
+                while c2 < j and acct_buf[c2] != 58:
+                    c2 = c2 + 1
+                if c2 < j:
+                    uid = 0
+                    k = c2 + 1
+                    digits = 0
+                    while k < j and acct_buf[k] >= 48 and acct_buf[k] <= 57:
+                        uid = uid * 10 + cast[uint64](acct_buf[k]) - 48
+                        digits = digits + 1
+                        k = k + 1
+                    # 1000 <= uid < 60000, AND THE UPPER BOUND IS NOT
+                    # DECORATION. `uid >= 1000` alone also matches
+                    # nobody:x:65534, and MEASURED on the first machine built
+                    # this way: /etc/passwd came out with hostowner, sshd,
+                    # hamsh-svc and the operator -- and NO nobody. Nothing on
+                    # the machine complained, because nothing looks up 65534
+                    # until something does (user/install.ad and
+                    # user/useradd.ad both treat that line as a fixture of the
+                    # table). A system account that happens to sort above 1000
+                    # is not a REGULAR account, and dropping it is not this
+                    # function's job.
+                    if digits > 0 and uid >= 1000 and uid < 60000:
+                        drop_add(&acct_buf[i], c1 - i)
+        i = j + 1
     return 0
 
 
@@ -632,8 +816,38 @@ def install_repo_config() -> int32:
     return 0
 
 
-# The target's identity: its name, and the person who will use it.
+# THE SESSION UID IS 1001 ON EVERY HAMNIX MACHINE, AND THE NAME IS THE
+# MACHINE'S OWN.
+#
+# etc/rc.de-user.linux drops the desktop session to uid 1001; the generated
+# /etc/rc.de-ns/<distro> launchers do the same and point XDG_RUNTIME_DIR at
+# /run/user/1001, which user/linux-syscalls.c stages 0700 owned by 1001 at
+# boot. On the live medium that uid is `live`. On an installed machine it is
+# the account the wizard was told to create -- which is what makes the wizard's
+# name a SESSION rather than an empty directory nobody looks at.
+#
+# Giving the wizard's user uid 1000 instead (what this did) put them beside the
+# live account rather than in its place: measured, the machine ended with THREE
+# regular accounts, two of them from the source tree, the wizard's one a
+# duplicate uid, and the desktop still running as `live` out of /home/live.
+#
+# AND IT IS SPELLED INLINE BELOW RATHER THAN HELD IN A GLOBAL, WHICH IS NOT A
+# STYLE CHOICE. A global `SESSION_UID: Ptr[uint8] = "1001"` COMPILES CLEANLY
+# and is NULL at run time on this backend: a string-literal initialiser is
+# honoured for a function local and not for a global. MEASURED -- the
+# installer SEGFAULTED on the first dereference of it, three lines into the
+# home copy, AFTER writing every account file correctly. The install reported
+# success, the machine had its accounts, and /home/<name> was empty and
+# /etc/users/<name>.ns absent because the process was already dead. A fault
+# whose only symptom was two missing files.
+
+
+# The target's identity: its name, and the people who will use it.
 def configure_target() -> int32:
+    i: uint64 = 0
+    ph: Ptr[uint8] = cast[Ptr[uint8]]("*")
+    have_rhash: int32 = 0
+
     if have_host != 0:
         copy_str(&line_buf[0], &hostname_buf[0])
         write_file(cast[Ptr[char]]("/n/target/etc/hostname"), &line_buf[0])
@@ -641,42 +855,120 @@ def configure_target() -> int32:
         puts(1, &hostname_buf[0])
         puts(1, "\n")
 
+    # THE ADMINISTRATOR PASSWORD THE WIZARD COLLECTED WAS BEING THROWN AWAY.
+    # `--root-pass` was parsed into rpass_buf and read by nothing: measured on
+    # an installed disk, /etc/shadow's hostowner line was the SOURCE TREE's,
+    # character for character -- so every machine ever installed from this
+    # medium had the same administrator password, and it is published in
+    # etc/shadow in git. The wizard asked for it on its own page and stored
+    # nothing.
+    if rpass_buf[0] != 0:
+        if hash_password(&rpass_buf[0]) == 0:
+            copy_str(&rhash_buf[0], &hash_buf[0])
+            have_rhash = 1
+        else:
+            puts(2, "  WARNING: could not hash the administrator password. "
+                    "This machine keeps the medium's hostowner password, "
+                    "which is PUBLISHED IN THE SOURCE TREE. Change it with "
+                    "`passwd hostowner` before this machine is on a network.\n")
+
+    if have_user == 0 and have_rhash == 0:
+        return 0
+
+    # WHO IS REMOVED, AND WHY IT IS NOT A LIST OF NAMES. Every regular account
+    # the image ships (uid >= 1000: `live`, and the `dave` auth fixture) is
+    # dropped from the machine being created, because each one carries a
+    # password hash that is in the source tree -- measured on an installed
+    # disk, /etc/shadow held all three of the tree's published hashes
+    # verbatim. The names are read off the target's own passwd, so a change to
+    # the shipped table does not need a change here. This happens ONLY when
+    # there is a replacement account to put in their place: a machine with no
+    # regular account at all has no session to log into.
+    if have_user != 0:
+        drop_clear()
+        collect_shipped_regulars()
+        drop_add(&user_buf[0], slen(&user_buf[0]))
+
+        if upass_buf[0] != 0:
+            if hash_password(&upass_buf[0]) == 0:
+                ph = &hash_buf[0]
+            else:
+                puts(2, "  WARNING: could not hash the password; the account "
+                        "is created LOCKED rather than open.\n")
+
+        i = copy_str(&line_buf[0], &user_buf[0])
+        i = i + copy_str(&line_buf[i], cast[Ptr[uint8]](":x:1001:1001::/home/"))
+        i = i + copy_str(&line_buf[i], &user_buf[0])
+        copy_str(&line_buf[i], cast[Ptr[uint8]](":/bin/hamsh"))
+        account_rewrite(cast[Ptr[char]]("/n/target/etc/passwd"), &line_buf[0])
+
+        i = copy_str(&line_buf[0], &user_buf[0])
+        copy_str(&line_buf[i], cast[Ptr[uint8]](":x:1001:"))
+        account_rewrite(cast[Ptr[char]]("/n/target/etc/group"), &line_buf[0])
+
+        i = copy_str(&line_buf[0], &user_buf[0])
+        line_buf[i] = 58                                  # ':'
+        i = i + 1
+        i = i + copy_str(&line_buf[i], ph)
+        copy_str(&line_buf[i], cast[Ptr[uint8]](":20000:0:99999:7:::"))
+        account_rewrite(cast[Ptr[char]]("/n/target/etc/shadow"), &line_buf[0])
+
+    # THE ADMINISTRATOR'S OWN LINE, replaced in a second pass over the same
+    # file so that neither half depends on the other having run.
+    if have_rhash != 0:
+        drop_clear()
+        drop_add(cast[Ptr[uint8]]("hostowner"), 9)
+        i = copy_str(&line_buf[0], cast[Ptr[uint8]]("hostowner:"))
+        i = i + copy_str(&line_buf[i], &rhash_buf[0])
+        copy_str(&line_buf[i], cast[Ptr[uint8]](":20000:0:99999:7:::"))
+        account_rewrite(cast[Ptr[char]]("/n/target/etc/shadow"), &line_buf[0])
+        puts(1, "  administrator password set\n")
+
     if have_user == 0:
         return 0
 
-    # uid 1000, the first regular account, with its own group.
-    ph: Ptr[uint8] = cast[Ptr[uint8]]("*")
-    if upass_buf[0] != 0:
-        if hash_password(&upass_buf[0]) == 0:
-            ph = &hash_buf[0]
-        else:
-            puts(2, "  WARNING: could not hash the password; the account is "
-                    "created LOCKED rather than open.\n")
+    # THE HOME IS A REAL HOME, NOT AN EMPTY DIRECTORY.
+    #
+    # /home/live is the desktop of every machine this medium makes: 20 files,
+    # ~/Desktop/*.desktop among them, owned by no package (they are staged into
+    # the initramfs from etc/skel) and carried onto the target by the copy
+    # above. The desktop's directory resolver (lib/homedir.ad, used by
+    # user/hamdesktop.ad and user/hamfmscene.ad) walks the REGULAR accounts in
+    # /etc/passwd and takes the first whose ~/Desktop EXISTS -- so an empty
+    # /home/<name> loses to /home/live every time, which is exactly what was
+    # measured on the installed disk.
+    #
+    # `cp -r -o 1001` -- the owner flag exists for this: the copy runs as root
+    # and a home the session cannot write is not a home. Measured before it
+    # existed: every file under /home/live on an installed disk was uid 0.
+    copy_str(&a1[0], cast[Ptr[uint8]]("-r"))
+    copy_str(&a2[0], cast[Ptr[uint8]]("-o"))
+    copy_str(&a3[0], cast[Ptr[uint8]]("1001"))
+    copy_str(&a4[0], cast[Ptr[uint8]]("/home/live"))
+    i = copy_str(&a5[0], cast[Ptr[uint8]]("/n/target/home/"))
+    copy_str(&a5[i], &user_buf[0])
+    if run_local(cast[Ptr[char]]("/bin/cp"), 5) != 0:
+        puts(2, "  WARNING: could not populate /home/")
+        puts(2, &user_buf[0])
+        puts(2, " from the medium's desktop; the account will have an empty "
+                "home and the desktop will fall back to another one.\n")
 
-    i: uint64 = copy_str(&line_buf[0], &user_buf[0])
-    i = i + copy_str(&line_buf[i], cast[Ptr[uint8]](":x:1000:1000::/home/"))
+    # THE PER-USER NAMESPACE RECIPE. hamsh sources /etc/users/<name>.ns for a
+    # regular-user shell and falls back to /etc/users/default.ns when there is
+    # none -- and default.ns is Hamnix's recipe, which unmounts things this
+    # kernel needs CAP_SYS_ADMIN to unmount: on this line every line of it
+    # fails EPERM and prints an error into the user's terminal at every login
+    # (etc/users/live.ns.linux says so in its own header, which is why `live`
+    # has a file at all). A named user needs the same one.
+    i = copy_str(&line_buf[0], cast[Ptr[uint8]]("/n/target/etc/users/"))
     i = i + copy_str(&line_buf[i], &user_buf[0])
-    copy_str(&line_buf[i], cast[Ptr[uint8]](":/bin/hamsh"))
-    append_line(cast[Ptr[char]]("/n/target/etc/passwd"), &line_buf[0])
-
-    i = copy_str(&line_buf[0], &user_buf[0])
-    i = i + copy_str(&line_buf[i], cast[Ptr[uint8]](":x:1000:"))
-    append_line(cast[Ptr[char]]("/n/target/etc/group"), &line_buf[0])
-
-    i = copy_str(&line_buf[0], &user_buf[0])
-    line_buf[i] = 58                                  # ':'
-    i = i + 1
-    i = i + copy_str(&line_buf[i], ph)
-    copy_str(&line_buf[i], cast[Ptr[uint8]](":20000:0:99999:7:::"))
-    append_line(cast[Ptr[char]]("/n/target/etc/shadow"), &line_buf[0])
-
-    i = copy_str(&line_buf[0], cast[Ptr[uint8]]("/n/target/home/"))
-    copy_str(&line_buf[i], &user_buf[0])
-    sys_mkdir(cast[Ptr[char]](&line_buf[0]))
+    copy_str(&line_buf[i], cast[Ptr[uint8]](".ns"))
+    copy_file(cast[Ptr[char]]("/etc/users/live.ns"),
+              cast[Ptr[char]](&line_buf[0]))
 
     puts(1, "  user ")
     puts(1, &user_buf[0])
-    puts(1, " (uid 1000)\n")
+    puts(1, " (uid 1001, the session user)\n")
     return 0
 
 

@@ -14,6 +14,87 @@ because the number is the deliverable.
 
 ## Unreleased
 
+### An installed machine keeps its accounts across `hpm update`, and the wizard's user gets a session
+
+Three defects, each measured on a real installed disk (read with `debugfs`,
+nothing mounted, nothing written back) and on the machine booted from it.
+
+**`hpm update` deleted the installer's user.** `hpm`'s `_is_machine_owned` --
+the list of paths a package manager must never overwrite and never delete --
+named exactly one path, `etc/rc.boot`, and `hamnix-init` SHIPS `etc/passwd`
+and `etc/group`. Measured on the machine, with the fix reverted: after the
+install its `/etc/passwd` line 31 read
+`hamacctusr:x:1000:1000::/home/hamacctusr:/bin/hamsh` and `/etc/group` had its
+group; after ONE `hpm update` both were gone and `/etc/shadow` still held
+`hamacctusr:*` -- a hash belonging to a name the machine no longer has. The
+same update also put the hostname back to `hamnix` on a machine the operator
+had named `hamlaptop`. `etc/passwd`, `etc/group` and `etc/hostname` are now
+machine-owned, which makes all four identity files consistent (`/etc/shadow`
+was already outside every package for the same reason). The packages still
+ship them, so a machine that somehow has none is REPAIRED rather than left
+broken, and a live image is unaffected.
+
+**The account the wizard created was never the session user.** The installer
+APPENDED `<name>:x:1000:1000` to a table that already carried `dave:x:1000`
+(an auth fixture out of the source tree) and `live:x:1001`. So the wizard's
+account was a duplicate of uid 1000 and the second one -- every
+`getpwuid(1000)` resolved to `dave` -- while the desktop session, which runs
+as uid 1001, stayed `live` with `/home/live` as its home and `/home/<name>`
+was created empty. That machine's `/etc/shadow` also carried the tree's
+PUBLISHED hashes for `hostowner`, `dave` and `live`, verbatim.
+
+The installer now owns the whole table: it drops every regular account the
+image ships and writes the wizard's user AT UID 1001 -- the session uid every
+other file already agrees on -- copies `/home/live` into `/home/<name>` with
+`cp -r -o 1001` (a new flag; before it, every file under `/home` on an
+installed disk was uid 0, so the session could not write its own home), and
+writes `/etc/users/<name>.ns` so the shell does not fall back to a namespace
+recipe whose every line fails EPERM on this kernel. `$HOME` follows the
+identity now: `setuid` re-resolves it from `/etc/passwd` and prints the uid
+and the home it resolved, so `/etc/rc.de-user` and the generated distribution
+launchers stop handing every desktop program `/home/live`. `/etc/rc.d/rc.5`
+runs the session recipe once on every graphical boot, which puts the answer to
+"whose session is this?" in the boot log instead of in the first terminal
+somebody opens; and `hamdesktop` records which directory it resolved.
+
+**And the password was never stored on the configuration that matters.**
+`hlinstall` hashes with `openssl passwd -6` inside the `#distro` namespace. A
+USB stick has no Debian medium -- the partitioning tools already fall back to
+`/usr/lib/instroot` for exactly that reason -- and the hash call did not.
+Measured in the install's own serial log: `WARNING: could not hash the
+password`, and the account written `<name>:*`, i.e. LOCKED, on the one
+configuration the live image exists for. openssl is now staged into the
+installer toolbox with its closure (the build proves it produces a `$6$` hash)
+and the hash call takes the same fallback. The administrator password the
+wizard collects was read by NOTHING at all -- `--root-pass` was parsed and
+never used -- so every machine installed from this medium kept the source
+tree's published `hostowner` password; it is now set from what was typed.
+
+One fault this found in its own fix, worth writing down: "a regular account
+the image ships" was first spelled `uid >= 1000`, which also matches
+`nobody:x:65534`. The machine that produced scored 53 / 0 and had no `nobody`
+line; nothing complained, because nothing looks up 65534 until something does.
+The rule is `1000 <= uid < 60000` now and the gate asserts every system account
+survives.
+
+**The gate**: `tests/linux/installed_accounts.sh` -- one medium build, an
+install onto a blank 6 GiB disk, a boot that runs `hpm update` against a
+signed local channel it is one version behind on, and a third boot to the
+desktop. Every account assertion is made TWICE against the same disk, in
+identical words, before and after the update; the update is required to report
+that it really upgraded `hamnix-init`, so "the account survived" cannot mean
+"nothing happened".
+
+| condition | result |
+|---|---|
+| the tree with every fix reverted | **34 PASSED / 25 FAILED** |
+| the tree with the fixes | **61 PASSED / 0 FAILED** |
+
+`tests/linux/installed_offers_install.sh` re-run on the same tree: **24 PASSED
+/ 0 FAILED** (its `live` assertion is now the uid-1001 one, and its header
+says why).
+
+
 ### If you already installed from an earlier stick, here is what to do
 
 The two fixes below apply to **new** installations. A machine installed by an
