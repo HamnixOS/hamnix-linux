@@ -30,6 +30,7 @@
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <dirent.h>
+#include <elf.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1721,6 +1722,143 @@ int32_t sys_getpid(void) { return (int32_t)getpid(); }
 /* extern def sys_getgid() -> uint32 */
 uint32_t sys_getgid(void) { return (uint32_t)getgid(); }
 
+/* WHY A FAILED execve MUST NOT BE SILENT, and what it now says.
+ *
+ * MEASURED, tests/linux/session_min_root.sh arm r2 ("apps live on a file
+ * server", in its most literal form: a constructed root with the machine's
+ * /bin bound in and nothing else): EIGHT probes in a row exited 127 having
+ * printed NOTHING. Not one of them was "command not found" -- hamsh's
+ * spawn_resolved (user/hamsh.ad) probes each PATH candidate with sys_open and
+ * prints that line only when NONE opens. Here one DID open, so hamsh forked,
+ * exec'd, and the exec failed in the child with nobody to say so. A person
+ * reading that output has been told the command ran and produced no output.
+ *
+ * THE ACTUAL CAUSE, and it is invisible from the errno alone: the shipped
+ * programs are dynamic ELF and their PT_INTERP is /lib64/ld-linux-x86-64.so.2.
+ * /lib and /lib64 are separate top-level directories in the image root
+ * (scripts/hamlinux_image.sh:34). With /bin bound in and /lib64 not, execve(2)
+ * answers ENOENT -- FOR THE INTERPRETER, not for the file named. The path in
+ * the error is the one that exists; the one that is missing is never
+ * mentioned. That ambiguity is the whole defect.
+ *
+ * So: on ENOENT for a file that IS there, read the ELF's PT_INTERP and name
+ * it, plus the directory that would have to be bound in. This is the first
+ * thing anyone constructing a namespace by hand will hit. */
+static int elf_interp(const char *path, char *out, size_t outsz)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    Elf64_Ehdr eh;
+    if (read(fd, &eh, sizeof eh) != (ssize_t)sizeof eh ||
+        memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
+        eh.e_ident[EI_CLASS] != ELFCLASS64 ||
+        eh.e_phentsize != sizeof(Elf64_Phdr) || eh.e_phnum == 0) {
+        close(fd);
+        return -1;
+    }
+    for (unsigned i = 0; i < eh.e_phnum; i++) {
+        Elf64_Phdr ph;
+        off_t at = (off_t)eh.e_phoff + (off_t)i * (off_t)sizeof ph;
+        if (pread(fd, &ph, sizeof ph, at) != (ssize_t)sizeof ph)
+            break;
+        if (ph.p_type != PT_INTERP)
+            continue;
+        if (ph.p_filesz == 0 || ph.p_filesz >= outsz)
+            break;
+        if (pread(fd, out, ph.p_filesz, (off_t)ph.p_offset)
+                != (ssize_t)ph.p_filesz)
+            break;
+        out[ph.p_filesz - 1] = '\0';   /* the entry includes its own NUL */
+        out[outsz - 1] = '\0';
+        close(fd);
+        return 0;
+    }
+    close(fd);
+    return -1;
+}
+
+/* Called with errno as execve(2) left it. Says which of the several very
+ * different faults 127 has always meant this one is. */
+static void exec_failed(const char *path)
+{
+    int e = errno;
+    char m[768];
+    int n;
+    struct stat sb;
+    int here = (stat(path, &sb) == 0);
+
+    if (e == ENOENT && here) {
+        char interp[256];
+        if (elf_interp(path, interp, sizeof interp) == 0) {
+            /* Name the DIRECTORY too: that is the thing a person binds. */
+            char dir[256];
+            snprintf(dir, sizeof dir, "%s", interp);
+            char *slash = strrchr(dir, '/');
+            if (slash && slash != dir) *slash = '\0';
+            else strcpy(dir, "/");
+            if (access(interp, F_OK) != 0)
+                n = snprintf(m, sizeof m,
+                    "exec: `%s' is present but cannot run: its dynamic "
+                    "interpreter `%s' does not resolve in this namespace. "
+                    "execve(2) answered ENOENT for the INTERPRETER, not for "
+                    "the program. Bind `%s' into this root.\n",
+                    path, interp, dir);
+            else
+                n = snprintf(m, sizeof m,
+                    "exec: `%s' is present, its interpreter `%s' is present, "
+                    "and execve(2) still answered ENOENT -- something the "
+                    "interpreter itself needs is missing from this "
+                    "namespace.\n", path, interp);
+        } else {
+            n = snprintf(m, sizeof m,
+                "exec: `%s' is present and execve(2) answered ENOENT, and it "
+                "has no PT_INTERP this runtime could read -- a #! script whose "
+                "interpreter is missing looks exactly like this.\n", path);
+        }
+    } else if (e == ENOENT) {
+        n = snprintf(m, sizeof m,
+            "exec: `%s' does not exist in this namespace.\n", path);
+    } else if (e == EACCES && here) {
+        n = snprintf(m, sizeof m,
+            "exec: `%s' exists (mode %04o) but execve(2) answered EACCES -- "
+            "no execute bit for this uid, or the filesystem it is on is "
+            "mounted noexec.\n", path, (unsigned)(sb.st_mode & 07777));
+    } else if (e == ENOEXEC) {
+        n = snprintf(m, sizeof m,
+            "exec: `%s' is not a format this kernel can execute (ENOEXEC).\n",
+            path);
+    } else {
+        n = snprintf(m, sizeof m, "exec: `%s': %s\n", path, strerror(e));
+    }
+    /* NOT cons_write ALONE, and this is the whole reason the diagnostic is
+     * worth anything. cons_write writes to fd 2 and only mirrors to the serial
+     * port when fd 2 IS /dev/console (consmirror checks st_rdev == makedev(5,1)).
+     * By the time this runs we are inside a spawn child whose fd 2 was routed
+     * through the /fd/2 NAME by lib/p9.ad:_spawn_flags -- and sys_bind's own
+     * comment records that a materialised /fd/N is opened O_RDONLY, so a write
+     * to it can return -EBADF and vanish. A diagnostic about a silent failure
+     * that is itself silent is worse than none, so /dev/console is opened by
+     * name and written to directly. /dev survives the root switch
+     * (enter_root's always[]), so this reaches the console from inside a
+     * constructed root too. */
+    cons_write(m, n > 0 ? (size_t)n : 0);
+    if (n > 0) {
+        int c = open("/dev/console", O_WRONLY | O_NOCTTY | O_CLOEXEC);
+        if (c >= 0) {
+            ssize_t w = write(c, m, (size_t)n);
+            if (w > 0)
+                consmirror(c, (const uint8_t *)m, (uint64_t)w);
+            close(c);
+        }
+    }
+    /* AND to whoever asked, so a caller that never sees the console still has
+     * it. The trailing newline is not part of an errstr. */
+    if (n > 0 && m[n - 1] == '\n') m[n - 1] = '\0';
+    errstr_setf(e, "%s", m + (strncmp(m, "exec: ", 6) == 0 ? 6 : 0));
+    errno = e;
+}
+
 /* extern def sys_execve(path: Ptr[char], argv: Ptr[uint64]) -> int32
  *
  * Two args, not three: the Hamnix form inherits the environment rather than
@@ -1729,6 +1867,9 @@ uint32_t sys_getgid(void) { return (uint32_t)getgid(); }
 int32_t sys_execve(const char *path, char *const argv[])
 {
     execv(path, argv);
+    /* Only reached when the exec FAILED. Silence here is what made arm r2 of
+     * session_min_root.sh produce eight bare 127s; see exec_failed. */
+    exec_failed(path);
     return -1;
 }
 
@@ -2281,6 +2422,7 @@ int32_t sys_execve_env(const char *path, char *const argv[],
      * spot that hid the accept defect. */
     extern char **environ;
     execve(path, argv, envp ? envp : environ);
+    exec_failed(path);
     return -(int32_t)errno;
 }
 
@@ -5075,6 +5217,73 @@ static void enter_root_failed(const char *step, const char *path)
         "user), and the body was NOT run", step, path, strerror(errno));
 }
 
+/* WHERE THE MACHINE'S REAL GLOBAL ROOT IS REACHABLE FROM THIS PROCESS, and
+ * why a variable is needed at all.
+ *
+ * MEASURED ON THE HOST with the exact call sequence below (an unshare -m -r
+ * reproduction of enter_root followed by `bind '#/' /n`; evidence under
+ * ~/.hamnix-build/nroot/):
+ *
+ *     CALL mount(".", "/", MS_MOVE)                  rc=0
+ *     CALL chroot(".")                               rc=0
+ *     AFTER-SWITCH /  -> n sys proc dev MARKER-r3 tmp srv
+ *     AFTER-SWITCH /n -> r3
+ *     --- bind '#/' /n   (source resolved to "/") ---
+ *     CALL mount("/", "/n", BIND|REC)                rc=0
+ *     FINAL /  -> n sys proc dev MARKER-r3 tmp srv
+ *     FINAL /n -> n sys proc dev MARKER-r3 tmp srv
+ *
+ * TWO SEPARATE FACTS, AND BOTH HAD TO BE FIXED.
+ *
+ * (1) `#/`'s devsrv row carries the literal source "/" -- and after the
+ *     chroot, "/" NAMES THE CONSTRUCTED ROOT. So `bind '#/' /n` bound the new
+ *     root onto its own /n: FINAL / and FINAL /n are the same listing, and the
+ *     machine's marker is on neither. The call RETURNED 0. That is this
+ *     project's oldest failure shape -- a gap answering success-shaped -- and
+ *     it is in every shipping template: etc/rc.de-user.linux and
+ *     etc/rc.boot.linux both write `bind '#distro/debian' /` and then
+ *     `bind '#/' /n`, in that order.
+ *
+ * (2) enter_root's always[] carried the OLD /n across, not the old ROOT. The
+ *     old /n is a directory ON the machine's root, so even before (1) clobbers
+ *     it, /n after a switch is the machine's mount-point PARENT and not the
+ *     machine. AFTER-SWITCH /n above shows exactly that: `r3`, and nothing
+ *     else.
+ *
+ * And the moment matters: mount(".","/",MS_MOVE) SUCCEEDS, so the root a
+ * process came from is not renamed, it is gone -- there is no name for it
+ * anywhere in the namespace afterwards. The underpinning can therefore only
+ * be handed across BEFORE the switch, by the switch itself. That is what
+ * enter_root now does, and it is also the Plan 9 answer: you cannot reach
+ * outside your namespace unless something put it there before you entered.
+ *
+ * NESTED SWITCHES WORK BY CONSTRUCTION because of WHAT gets carried: a
+ * session already inside a constructed root has the machine at /n, so
+ * entering a second root carries /n -- still the machine -- to the new /n.
+ *
+ * THE RESIDUAL GAP, SAID PLAINLY: this is a per-process variable. fork(2)
+ * inherits it; execve(2) does not, so it is also published as
+ * $HAMNIX_REAL_ROOT for programs that inherit an environment. hamsh builds a
+ * child's envp from its OWN table (user/hamsh.ad:_build_envp) rather than from
+ * environ, so a program hamsh spawns after a switch may still see the default.
+ * Every `bind` in every rc template is a hamsh BUILTIN running in the process
+ * that did the switch, which is the case that matters and the case that is
+ * measured; a separately exec'd program that binds `#/` itself is NOT
+ * covered. */
+static char ns_real_root[256] = "/";
+
+static const char *ns_real_root_path(void)
+{
+    static int inited;
+    if (!inited) {
+        inited = 1;
+        const char *e = getenv("HAMNIX_REAL_ROOT");
+        if (e && e[0] == '/' && strlen(e) < sizeof ns_real_root)
+            snprintf(ns_real_root, sizeof ns_real_root, "%s", e);
+    }
+    return ns_real_root;
+}
+
 static int32_t enter_root(const char *mnt, int is_sysroot)
 {
     /* /n comes across too: it is the conventional mount-point parent, and a
@@ -5082,7 +5291,44 @@ static int32_t enter_root(const char *mnt, int is_sysroot)
     static const char *always[] = { "/dev", "/proc", "/sys", "/n" };
     static const char *sysroot_only[] = { "/srv", "/tmp" };
     char dest[256];
+
+    /* THE UNDERPINNING GOES ACROSS FIRST, AT /n, AND ONLY FOR A SESSION-SHAPED
+     * SWITCH. The block above ns_real_root has the measurement.
+     *
+     * NOT for is_sysroot: that switch is the initramfs handing off to the disk
+     * at boot, and the machine's real global root is then the DISK -- the
+     * initramfs is not an underpinning anybody wants at /n, and the boot's own
+     * /n has to travel intact. ns_real_root correctly stays "/" across that
+     * switch, because after it "/" IS the machine. */
+    const char *carried = NULL;
+    if (!is_sysroot) {
+        snprintf(dest, sizeof dest, "%s/n", mnt);
+        mkdir(dest, 0755);
+        if (ns_mount(ns_real_root_path(), dest, NULL, MS_BIND | MS_REC, NULL)
+                == 0) {
+            carried = "/n";
+        } else {
+            /* Say it. A constructed root whose /n is not the machine is an
+             * island, and the alternative to this line is discovering that
+             * from `cat: /n/anything: No such file or directory` three layers
+             * up. The switch still proceeds: a root you cannot see out of is
+             * worse than one you can, but it is not worse than no root. */
+            char m[384];
+            int n = snprintf(m, sizeof m,
+                "enter: could not carry the machine's real root (`%s') across "
+                "to `%s': %s -- this session's /n will NOT be the machine, and "
+                "nothing inside it can reach the underpinning\n",
+                ns_real_root_path(), dest, strerror(errno));
+            cons_write(m, n > 0 ? (size_t)n : 0);
+        }
+    }
+
     for (size_t i = 0; i < sizeof always / sizeof always[0]; i++) {
+        /* /n is already the machine, which is strictly more than the old /n
+         * was: the old /n is a directory ON the machine's root and so is still
+         * reachable, at /n/n. */
+        if (carried && !strcmp(always[i], "/n"))
+            continue;
         snprintf(dest, sizeof dest, "%s%s", mnt, always[i]);
         mkdir(dest, 0755);
         if (is_sysroot) {
@@ -5131,6 +5377,13 @@ static int32_t enter_root(const char *mnt, int is_sysroot)
     if (chdir("/") < 0) {
         enter_root_failed("chdir-after-chroot", "/");
         return -(int32_t)errno;
+    }
+    /* The switch is done, so the name the machine now answers to has changed.
+     * Recorded only on the success path: a switch that failed left this
+     * process where it was, and "/" is still the machine for it. */
+    if (carried) {
+        snprintf(ns_real_root, sizeof ns_real_root, "%s", carried);
+        setenv("HAMNIX_REAL_ROOT", ns_real_root, 1);
     }
     return 0;
 }
@@ -5315,6 +5568,13 @@ int32_t sys_bind(const char *dst, const char *src, int32_t flag)
             errno = ENODEV;
             return -ENODEV;
         }
+    } else if (!strcmp(d->letter, "#/")) {
+        /* NOT d->source ("/"). Inside a constructed root "/" is that root, so
+         * the literal made `bind '#/' /n` bind the session's own root onto its
+         * own /n -- returning 0, and leaving the machine unreachable. See the
+         * measurement above ns_real_root. On a machine that has not switched,
+         * ns_real_root IS "/" and this is unchanged. */
+        root = ns_real_root_path();
     } else
         root = d->source;
 

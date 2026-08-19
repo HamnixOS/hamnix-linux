@@ -27,6 +27,149 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE UNDERPINNING IS REACHABLE AT `/n` NOW -- 31 PASSED / 2 FAILED, AND THE NEGATIVE CONTROL RAN IN THE SAME BOOT
+
+**Measured on a booted machine, dev host, base `c7695c15` (checked with
+`git merge-base --is-ancestor c7695c15 HEAD`, not by reading `git log`).
+Evidence `~/.hamnix-build/nroot/GATE.log`, `boot.log`, `arm-*.txt`, and the
+host-side reproduction `nprobe.c`/`nprobe.log` beside them.**
+
+    session_min_root   31 PASSED / 2 FAILED   (was 16 PASSED / 4 FAILED)
+
+**THE ENTRY BELOW SAYS "THE MACHINE'S REAL ROOT IS NOT REACHABLE AT `/n` ...
+THIS IS THE THING TO FIX NEXT". THIS FIXES IT.** Both `/n` FAILs are gone,
+five new `/n` assertions are green, and the two remaining FAILs are the r1 and
+r2 guard failures that entry already describes.
+
+**THE MECHANISM WAS TWO SEPARATE FACTS AND FIXING EITHER ALONE STILL LEFT `/n`
+WRONG.** Measured on the host first, with an `unshare -m -r` program that
+performs `enter_root`'s exact call sequence and then the exact `bind '#/' /n`
+the templates use, in three modes:
+
+    CALL mount(".", "/", MS_MOVE)                  rc=0
+    CALL chroot(".")                               rc=0
+    AFTER-SWITCH /  -> n sys proc dev MARKER-r3 tmp srv
+    AFTER-SWITCH /n -> r3
+    --- bind '#/' /n   (source resolved to "/") ---
+    CALL mount("/", "/n", BIND|REC)                rc=0
+    FINAL /  -> n sys proc dev MARKER-r3 tmp srv
+    FINAL /n -> n sys proc dev MARKER-r3 tmp srv
+
+1. **`#/` RESOLVED TO THE LITERAL `"/"`** -- its devsrv row
+   (`user/linux-syscalls.c`, the `{ "#/", NULL, "/", 0, NULL }` line). After
+   `chroot(".")`, `"/"` names the CONSTRUCTED root, so `bind '#/' /n` bound a
+   session's own root onto its own `/n`. **FINAL `/` and FINAL `/n` are the
+   same listing**, and `/n/MARKER-r3` was readable. **The call returned 0.**
+   Another gap answering success-shaped, and it is in the SHIPPING templates:
+   `etc/rc.de-user.linux` and `etc/rc.boot.linux` both write
+   `bind '#distro/debian' /` and then `bind '#/' /n`, in that order. So
+   `enter debian` had no route back to the machine either -- this was never
+   only a gate artefact.
+2. **`enter_root`'s `always[]` CARRIED THE OLD `/n`, NOT THE OLD ROOT.** The
+   old `/n` is a directory ON the machine's root, so even before (1) clobbered
+   it, `/n` after a switch was the machine's mount-point PARENT and not the
+   machine. `AFTER-SWITCH /n -> r3` above is exactly that.
+
+**AND THE MOMENT MATTERS, WHICH IS WHY THE FIX IS WHERE IT IS.**
+`mount(".", "/", MS_MOVE)` **SUCCEEDS** -- so the root a process came from is
+not renamed, it is GONE; no name for it survives anywhere in the namespace.
+The underpinning can therefore only be handed across BEFORE the switch, by the
+switch itself. That is also the Plan 9 answer: you cannot reach outside your
+namespace unless something put it there before you entered.
+
+**WHAT CHANGED.** `enter_root` binds the pre-switch root at `<mnt>/n` first,
+and `#/` resolves to a remembered real root instead of the literal `"/"`.
+Nested switches work by construction (a session already inside a constructed
+root has the machine at `/n`, so entering a second root carries `/n` across).
+`is_sysroot` is deliberately untouched: after the initramfs-to-disk switch the
+disk IS the machine, and the remembered path correctly stays `"/"`.
+
+**THE NEGATIVE CONTROL IS AN ARM OF THE SAME RUN, NOT A SECOND INVOCATION.**
+Arm `n0` has r3's contents exactly; its template's last line is `bind / /n` --
+the plain-path branch binding the constructed root onto its own `/n`, which is
+byte-for-byte the effect `bind '#/' /n` had before the fix. Every `/n`
+assertion is inverted for it and it is scored in the same pass over the same
+boot log. It came out:
+
+    PASS  [n0] NEGATIVE CONTROL: ... the machine's real root is NOT reachable
+          at /n (status 1). The assertion above CAN go red
+    PASS  [n0] ...and /n IS this arm's own root
+
+**AND `/n` IS USED, NOT MERELY PRESENT.** `ls /n/r4` -- a mount the MACHINE
+made -- answers 0 from inside r3 and r4, and 1 from inside n0.
+
+**THE UNSWITCHED CASE IS UNCHANGED**, asserted last so it perturbs no arm: on
+the machine's own root `bind '#/' /n2` still resolves to the machine. If it
+did not, every `rc.boot` in the tree would have broken.
+
+**AND THE BARE 127 NOW SAYS WHAT IS MISSING.** Verbatim, from arm r2 (`/bin`
+bound in, `/lib64` not):
+
+    exec: `/bin/cat' is present but cannot run: its dynamic interpreter
+    `/lib64/ld-linux-x86-64.so.2' does not resolve in this namespace.
+    execve(2) answered ENOENT for the INTERPRETER, not for the program.
+    Bind `/lib64' into this root.
+
+`lib/p9.ad:_p9_exec_failed` was loud for E2BIG and ENOMEM and `sys_exit(127)`
+in silence for everything else. `sys_execve`/`sys_execve_env` now read the
+ELF's `PT_INTERP` and name the interpreter and the directory to bind, and tell
+ENOENT / EACCES / ENOEXEC apart. **It writes to `/dev/console` BY NAME, not to
+fd 2** -- a spawn child's fd 2 is a `/fd/2` name opened `O_RDONLY`
+(`sys_bind`'s own comment records this), so a diagnostic sent there would
+itself have vanished. Section 7 also asserts the line does NOT appear in arm
+r1, where nothing was exec'd at all.
+
+**WHAT IS STILL NOT FIXED, and none of it should be read as done.**
+* **THE REMEMBERED REAL ROOT IS PER-PROCESS.** `fork(2)` carries it,
+  `execve(2)` does not. It is published as `$HAMNIX_REAL_ROOT`, but hamsh
+  builds a child's envp from its OWN table (`_build_envp`) rather than from
+  `environ`, so a program hamsh SPAWNS and which then binds `#/` itself is NOT
+  covered. Every `bind` in every rc template is a hamsh BUILTIN in the
+  switching process, which is the covered case and the measured one.
+* **r1 AND r2 STILL FAIL THEIR GUARD, and that is the right answer**: r1 has
+  no `/bin` and r2 has no `/lib64`, so neither can run `cat` to show its
+  marker. r2 now SAYS so instead of exiting 127 in silence, but a diagnostic
+  is not proof that the switch happened and the gate deliberately does not
+  promote it to one.
+* Everything the entry below lists as unestablished is still unestablished:
+  hpm on an INSTALLED machine, nothing drew a window, no real session gets a
+  constructed root (`etc/users/default.ns` is still subtractive), and every
+  arm ran as uid 0.
+* **THE `$HAMNIX_DISTRO_<NAME>` DEFECT IS STILL NOT FIXED.**
+
+**THE REGRESSION CHECK, RUN AS AN A/B RATHER THAN ASSERTED.** `enter_root` is
+on the path of every boot, so `tests/linux/boot_log.sh` -- which builds the
+DEFAULT image (no `HAMLINUX_RC` override) and therefore exercises the real
+`etc/rc.boot.linux`, its `bind '#/' /n`, and the generated distro templates --
+was run TWICE: once with this fix, and once with `user/linux-syscalls.c`
+checked out at `c7695c15` and everything else identical.
+
+    with the fix   26 PASSED / 1 FAILED
+    base runtime   26 PASSED / 1 FAILED   (the SAME single assertion)
+
+    FAIL  the shell's marker is NOT in the recovered log: the log captures
+          the kernel only, which is the half that was never missing
+
+**That FAIL is PRE-EXISTING and is not about this work** -- it is bootlogd not
+capturing one shell marker, and it was not recorded anywhere before, which is
+why it was measured rather than assumed. Logs:
+`~/.hamnix-build/nroot/BOOT_LOG_REGRESSION.log` and `BOOT_LOG_BASELINE.log`.
+Within that gate, `PASS the root switch happened, so the rc under test is the
+DISK's` and `PASS the boot reached the end of the rc` are the two lines that
+matter here: the `is_sysroot` switch and a full `rc.boot.linux` both still run
+to completion.
+
+**AND ONE THING COULD NOT BE MEASURED.** `tests/linux/enter_user_run.sh` -- THE
+acceptance test for the root switch, and the only gate that exercises it as
+uid 1001 through `ns_privilege()`'s user namespace -- exits immediately with
+`no distro image; run scripts/hamlinux_distro.sh`. There is no Debian distro
+image on this host and building one was out of scope. **So the unprivileged
+path through the new `ns_mount("/", <mnt>/n, MS_BIND|MS_REC)` is UNMEASURED.**
+It is written to degrade rather than fail -- if that bind is refused, the
+switch still proceeds and the console says the session's `/n` will not be the
+machine -- but "it should degrade" is not a measurement.
+
+
 ### A CONSTRUCTED SESSION ROOT WORKS, AND EXACTLY THREE THINGS BREAK -- 16 PASSED / 4 FAILED, THE FIRST BOOTED MEASUREMENT OF THE OWNER'S DIRECTION
 
 **Measured on a booted machine, dev host, 2026-08-19, base `bb420836`.
