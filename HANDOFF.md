@@ -107,6 +107,51 @@ silently passed.**
 **Not done here, deliberately**: a release run was using that gate at the time,
 and this tree's own rule is never to edit a script while a run is executing it.
 
+### "THREE APPS HARD-CODE /home/live" IS AN UNDERCOUNT — it is nine programs
+### and three libraries, and it includes the ones that save your documents
+
+I have carried "`hampaint`, `hamnotesscene` and `hamshot` still hard-code
+`/home/live`" in the queue and in reports. Those three are real — 3, 2 and 3
+literal occurrences. **They are not the set.** Counted with
+`grep -c '"/home/live'` over `user/` and `lib/`, excluding `*_host.ad` test
+drivers, at this commit:
+
+| shipped program | literals |
+|---|---|
+| `user/hamwrite.ad` | 3 |
+| `user/hampaint.ad` | 3 |
+| `user/hamshot.ad` | 3 |
+| `user/hamfmscene.ad` | 2 |
+| `user/hamnotesscene.ad` | 2 |
+| `user/hamslides.ad` | 1 |
+| `user/hamsheet.ad` | 1 |
+| `user/hamdesktop.ad` | 1 |
+| `user/hlinstall.ad` | 1 |
+| `lib/filepick.ad` | 1 |
+| `lib/hamnotescore.ad` | 1 |
+| `lib/homedir.ad` | 1 |
+
+**Why this matters more than the number:** the three I kept naming are a
+paint program, a notes app and a screenshot tool. The list actually contains
+**`hamwrite`, `hamsheet` and `hamslides` — the word processor, the spreadsheet
+and the presentation editor.** On a machine whose user is now `uid 1001` with
+`/home/<name>`, a document saved by those goes to a directory that does not
+exist for that person. **That is somebody's work, not a screenshot.**
+
+**Not all twelve are necessarily defects.** `lib/homedir.ad`'s occurrence is
+plausibly the documented fallback, and `hlinstall`'s is the copy source. **I have
+not classified them** — this is a count with its search stated, not a verdict on
+each site. Do not fix from this table; read each one.
+
+**The search, so the next person can reproduce or dispute it:**
+`grep -rln '/home/live' --include='*.ad' user/ lib/ | grep -v '_host.ad'`, then
+`grep -c '"/home/live'` per file. Host drivers are excluded deliberately — a test
+fixture naming a fixed path is not a defect.
+
+**Still true, and the reason nothing was shipped:** no gate measures where these
+programs actually write. That remains the blocker, and it is now a blocker on a
+bigger surface than the queue admitted.
+
 ### READ THIS FIRST — the state, in order
 
 **This section is newest-first, and later entries CORRECT earlier ones.** Where a
