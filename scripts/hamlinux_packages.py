@@ -241,7 +241,7 @@ SYS_ALIASES = [("hlinstall", "bin/install")]
 # /bin, this one puts it in a package so `hpm update` can ever fix it.
 DESKTOP_CMDS = ("wsysd wsyswl xbridge hamdesktop hampanelscene hamtermscene "
                 "hameditscene hamsettings hamfm hamUI hamUId xsnarfd "
-                "hamimgscene hamappmenu").split()
+                "hamimgscene hamappmenu hamgreet").split()
 
 
 # --------------------------------------------------------------------------

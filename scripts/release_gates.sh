@@ -293,6 +293,18 @@ installed_launch_uid|yes|0|66||bash tests/linux/installed_launch_uid.sh
 # file scored 75/4 with all four reds in the gate's own instrument, both since
 # fixed (see the commit).
 pointer_launch_uid|yes|0|0||bash tests/linux/pointer_launch_uid.sh
+# THE GRAPHICAL LOGIN. The gdm-shaped half of the owner's "getty ... and a gdm
+# like login interface for the GUI too". installed_boot_login and
+# installed_fresh_login measure the TTY half on a serial line; this one
+# measures the graphical half with OCR of a screendump and a process census
+# read off an unmounted ext4 with debugfs. The claim it exists for is an
+# ABSENCE -- that no session program exists before somebody authenticates --
+# so the control that the same instrument CAN see one after authentication is
+# an ARM OF THE SAME BOOT and is scored before any absence is believed. A
+# SECOND boot of the same disk proves last boot's session recipe does not
+# authorise this one. The expected count is left at 0 until a clean full run
+# is recorded here.
+graphical_login|yes|0|0||bash tests/linux/graphical_login.sh
 # A PERSON CLICKS APPLICATIONS -> INSTALL HAMNIX ON A LIVE MEDIUM AND A DISK
 # GETS PARTITIONED. 19/0 measured 2026-08-19. Both other wizard gates start
 # haminstallui by writing the launch queue; this one starts it with a pointer
