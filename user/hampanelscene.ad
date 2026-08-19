@@ -88,8 +88,8 @@ extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> in
 extern def sys_fd_size(fd: int32) -> int64
 extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
 extern def sys_getenv(name: Ptr[char], buf: Ptr[uint8], cap: uint64) -> int64
-from lib.p9 import spawn, spawn_detached, spawn_detached_as, p9_listdir, p9_note
-from lib.homedir import hd_resolve_home, hd_session_uid
+from lib.p9 import spawn, spawn_detached, p9_listdir, p9_note
+from lib.homedir import hd_resolve_home
 from lib.dropplace import dp_panel_insert_index, dp_panel_insert_boundary
 from lib.desktopentry import (
     desktop_parse, desktop_name_ptr, desktop_name_len,
@@ -3910,26 +3910,7 @@ launch_argv: Array[6, uint64]
 # pid of the most recent _launch() spawn (or <0 on failure). Read straight
 # after a _launch call to associate the spawned app with a tracked slot.
 last_launched_pid: int32 = 0
-# _launch_as(prog, uid) -- launch `prog`, and if `uid` is non-zero drop to it
-# in the child before exec.
-#
-# WHY THE UID IS A PARAMETER AND NOT A PROPERTY OF THIS FUNCTION. The panel
-# uses this one launcher for TWO different things and they need different
-# identities. Its OWN parts -- hamsessui (which writes /dev/reboot), hamctl,
-# hamabout, haminbox, hammonscene -- are system chrome and must keep the
-# chrome's privilege. A PERSON'S PROGRAM, started from the Applications menu or
-# queued on /dev/wsys/appmenu/launch, must not: until 2026-08-19 it ran as root
-# and every document it saved came out OWNED BY UID 0, in the person's own
-# directory, unwritable from a desktop terminal (which is uid 1001, because
-# /etc/rc.de-user drops it). Measured on a real installed machine by
-# tests/linux/installed_documents.sh.
-#
-# uid 0 means "do not drop", never "drop to root" -- lib/homedir.ad's
-# hd_session_uid() returns 0 when it cannot find a regular account, and
-# lib/p9.ad's spawn_detached_as() refuses to exec on a FAILED drop rather than
-# launching a program that is still root. A launch that silently keeps
-# privilege is the success-shaped answer this whole line of work removes.
-def _launch_as(prog: Ptr[char], uid: uint32):
+def _launch(prog: Ptr[char]):
     launch_argv[0] = cast[uint64](prog)
     launch_argv[1] = 0
     # THE SECOND HALF OF THE MISSING-PROGRAM ANSWER. The scan above keeps a
@@ -3949,23 +3930,13 @@ def _launch_as(prog: Ptr[char], uid: uint32):
     # would leak each one as an un-reapable zombie (a still-live parent makes
     # reap_orphan_zombies skip it) — the app menu eventually hit fork-EAGAIN
     # and stopped launching. RFNOWAIT lets the kernel reclaim them at exit.
-    pid: int32 = 0
-    if uid != 0:
-        pid = spawn_detached_as(uid, prog, &launch_argv[0], -2, -2,
+    pid: int32 = spawn_detached(prog, &launch_argv[0], -2, -2,
                                 cast[Ptr[uint64]](0))
-    else:
-        pid = spawn_detached(prog, &launch_argv[0], -2, -2,
-                             cast[Ptr[uint64]](0))
     last_launched_pid = pid
     if pid >= 0:
         _writeall(1, cast[Ptr[uint8]]("[panel] launched "))
         _writeall(1, cast[Ptr[uint8]](prog))
         _writeall(1, cast[Ptr[uint8]]("\n"))
-
-
-# The chrome's own parts keep the chrome's identity.
-def _launch(prog: Ptr[char]):
-    _launch_as(prog, 0)
 
 
 # Spawn a queued launch line that carries ARGUMENTS: "/bin/prog a1 a2 ...".
@@ -3981,7 +3952,7 @@ def _launch(prog: Ptr[char]):
 # DE may issue are refused there. Splitting here means an automated check can
 # exercise the app exactly as a click would.
 LAUNCH_MAX_ARGS: uint64 = 6
-def _launch_line_as(line: Ptr[uint8], uid: uint32):
+def _launch_line(line: Ptr[uint8]):
     n: uint64 = 0
     launch_argv[0] = cast[uint64](line)
     n = 1
@@ -4000,7 +3971,7 @@ def _launch_line_as(line: Ptr[uint8], uid: uint32):
             i = i + 1
     launch_argv[n] = 0
     if n == 1:
-        _launch_as(cast[Ptr[char]](line), uid)           # no args: unchanged
+        _launch(cast[Ptr[char]](line))                   # no args: unchanged
         return
     # Same probe as _launch(): a bad path here would spawn a child that dies in
     # execve and still report "launched".
@@ -4010,13 +3981,8 @@ def _launch_line_as(line: Ptr[uint8], uid: uint32):
         _writeall(1, line)
         _writeall(1, cast[Ptr[uint8]](": not installed\n"))
         return
-    pid: int32 = 0
-    if uid != 0:
-        pid = spawn_detached_as(uid, cast[Ptr[char]](line), &launch_argv[0],
-                                -2, -2, cast[Ptr[uint64]](0))
-    else:
-        pid = spawn_detached(cast[Ptr[char]](line), &launch_argv[0], -2, -2,
-                             cast[Ptr[uint64]](0))
+    pid: int32 = spawn_detached(cast[Ptr[char]](line), &launch_argv[0], -2, -2,
+                                cast[Ptr[uint64]](0))
     last_launched_pid = pid
     if pid >= 0:
         _writeall(1, cast[Ptr[uint8]]("[panel] launched "))
@@ -4633,10 +4599,7 @@ def _drain_one_launch_queue(path: Ptr[char], last_serial: uint64) -> uint64:
     else:
         # "/bin/prog [args...]" — _launch_line splits on spaces (a bare path
         # takes the identical no-args path it always did).
-        # A PERSON'S PROGRAM, so it is launched AS THE PERSON. Both DE
-        # launch queues carry what the Applications menu and a scripted
-        # launch put on them; neither carries the chrome's own parts.
-        _launch_line_as(&_launch_q_buf[ps], hd_session_uid())
+        _launch_line(&_launch_q_buf[ps])
     return serial
 
 
@@ -5137,10 +5100,8 @@ def _handle_click(x: int64, y: int64, bar: int64) -> int32:
                 and y >= menu_box_y and y < menu_box_y + menu_main_h:
             row: int64 = (y - menu_box_y - 2) / MENU_ROW_H
             if row >= 0 and cast[uint64](row) < nc:
-                # a native app row -- a person's program, launched AS the
-                # person (see _launch_as).
-                _launch_as(cast[Ptr[char]](&am_prog[cast[uint64](row)][0]),
-                           hd_session_uid())
+                # a native app row.
+                _launch(cast[Ptr[char]](&am_prog[cast[uint64](row)][0]))
                 menu_open = 0
                 sub_open = 0
                 return 1

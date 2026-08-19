@@ -195,7 +195,7 @@ test_livedom_functional_host|no|1|22|06_class_style_toggle is declared in the ga
 # every file correctly. Where those programs ACTUALLY WRITE is measured by
 # tests/linux/installed_documents.sh, which boots an installed machine; that
 # gate is on-demand and is not registered here.
-test_de_home_resolve_host|no|0|35||bash scripts/test_de_home_resolve_host.sh
+test_de_home_resolve_host|no|0|26||bash scripts/test_de_home_resolve_host.sh
 test_install_names_host|no|0|23||bash scripts/test_install_names_host.sh
 channel_bytes_match_image|no|0|3||bash tests/linux/channel_bytes_match_image.sh
 channel_covers_image|no|0|8||bash tests/linux/channel_covers_image.sh
