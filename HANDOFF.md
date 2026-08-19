@@ -54,6 +54,42 @@ freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
 it has never been caught in the act on that machine.
 
 
+### I CHECKED THE AUDIT'S ONE UNMEASURED FINDING AT THE SOURCE LEVEL, AND ITS CLASSIFICATION IS EXACT
+
+**2026-08-19, orchestrator-side, read-only. Nothing booted, nothing changed.**
+
+The muted-oracle audit flagged three assertions in `tests/linux/installed_update.sh`
+as class (b) — a RED caused by muting — and labelled that finding **PREDICTED,
+NOT MEASURED**, because the gate's last run predates the console flip and nobody
+has spent the boot since. I cannot run it (it boots machines and an agent is
+using the harness), but the *classification* is checkable by reading, so I read it.
+
+**It is exactly right, and the split is cleaner than the report claimed.** In the
+uid-1001 block, the assertions divide precisely along the builtin/exec line:
+
+  * **Muted (read another PROGRAM's output, so `consmirror` had to open
+    `/dev/ttyS0` after `execve`):** the `hpm list` output, the `cat` of the
+    stamp, and `hpm`'s own refusal string `package installation requires
+    hostowner`. Three. Those are the three the audit named.
+  * **Audible (match a `status: N` line the SHELL echoes, a builtin whose mirror
+    fd opened while still root and survived `setuid`):** the other four.
+
+So under muting this gate would have gone red on exactly three assertions while
+four beside them kept passing — which is the audit's account, confirmed
+independently.
+
+**AND I CHECKED THE ONE THING THAT COULD HAVE MADE IT CLASS (c).** This gate has a
+scored ABSENCE assertion — `nocheck`, which PASSES when its regex is *not* found,
+and is used for "nothing landed in /bin from it". A muted absence assertion is
+the dangerous shape: it cannot fail. **It is safe here**, because its regex
+matches a `status: 0` line the shell echoes, not a program's own output — audible
+in the muted arm. The audit's "no scored green was caused by muting" survives a
+second look at the one gate most likely to break it.
+
+**WHAT THIS STILL DOES NOT ESTABLISH:** the gate has not been run. Everything above
+is a reading of what it *would* score, and the audit was right to label its own
+finding predicted. The boot is still owed.
+
 ### THE AUDIT OF EVERY GATE THAT READ SILENCE: **TWO** WERE AFFECTED, NOT MANY -- AND THE DANGEROUS CLASS IS EMPTY
 
 **Static audit, dev host, 2026-08-19, on `port/tier1-syscalls` at `3751deca`
