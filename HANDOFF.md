@@ -27,6 +27,29 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+**Shipping now: 1.0.31, published and verified as served** — 130 packages,
+signature checked against `etc/hpm/trusted.pub`, three tarballs fetched from the
+site byte-identical to the gated build, 1.0.30 still fetchable.
+
+**The medium**: `/home/david/.hamnix-build/rel1031/hamnix-linux-1.0.31.img`,
+4,294,967,296 bytes APPARENT (sparse — 3.0 G on disk; say which you mean),
+sha256 `6b3a6b1459df59584812ef99161fd8be0c2716642664526bbb7b0c993d5bb1b4`.
+**Its exact bytes are booted by a gate** — hash asserted before power-on, unchanged
+after, no seam needed.
+
+**The instruments got audited harder than the code this week, and that is the
+story.** The mutation census ran 41 of 41: **33 red, 8 not**. The release driver
+was scoring by counting the word `PASS` and recorded **0 for a gate that scored
+8/0**; it is now in the tree. `verify_medium.sh` silently drops an assertion from
+39 to 38 with no failure line. Two gates had an oracle compiled by the backend
+they test. **A test whose oracle shares the defect measures agreement, not
+correctness.**
+
+**Never established, and it matters most:** that the freeze fixed here is the
+freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
+it has never been caught in the act on that machine.
+
+
 ### RESOLVED — I was measuring POST-FIX disks. The 962 figure stands unrefuted.
 
 I reported an hour ago that I could not reproduce the "962 bytes, not one account
@@ -405,29 +428,6 @@ package-owned, so a release CAN fix it; `/home/live` is excluded from
 `etc/group` ARE in `hamnix-init`'s tarball, so an update rewrites them from the
 package. `etc/shadow` is not in any package, so the hashes stay and the names
 they belong to do not. Not fixed here; measured and written down.
-
-**Shipping now: 1.0.31, published and verified as served** — 130 packages,
-signature checked against `etc/hpm/trusted.pub`, three tarballs fetched from the
-site byte-identical to the gated build, 1.0.28 still fetchable. **1.0.30 is
-building**, for a desktop that could refuse to start on a dead session.
-
-**The medium**: `/home/david/.hamnix-build/rel1029/hamnix-linux-1.0.29.img`,
-4,294,967,296 bytes, sha256
-`1601bc486ca0c50dd6f14cd04556524d6d4aec1ff0c36e0cd279ef422c27339c`. **The first
-whose exact bytes have been booted** — hash asserted before power-on, unchanged
-after, no seam needed.
-
-**The instruments got audited harder than the code this week, and that is the
-story.** The mutation census ran 41 of 41: **33 red, 8 not**. The release driver
-was scoring by counting the word `PASS` and recorded **0 for a gate that scored
-8/0**; it is now in the tree. `verify_medium.sh` silently drops an assertion from
-39 to 38 with no failure line. Two gates had an oracle compiled by the backend
-they test. **A test whose oracle shares the defect measures agreement, not
-correctness.**
-
-**Never established, and it matters most:** that the freeze fixed here is the
-freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
-it has never been caught in the act on that machine.
 
 ### SUPERSEDED — 1.0.29 was built and gated here; it is published now — AND THE SHELL THAT WOULD NOT STOP IS CLOSED
 
