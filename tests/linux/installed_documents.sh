@@ -93,9 +93,19 @@
 #          leaves on the screen -- so the failed write is OBSERVED on the
 #          screen as well as on the disk;
 #        * `[<app>] SAVE FAILED <path>` on the serial, which the save path
-#          prints when the open fails. Its ABSENCE is asserted here; its
-#          PRESENCE in the reverted arm is the failed write in the program's
-#          own words.
+#          prints when the open fails. IT IS A REPORT AND NOT A SCORE, and
+#          this line used to claim the opposite -- "its ABSENCE is asserted
+#          here" -- which the code at the `info` calls below has never done.
+#          The correction matters more than the wording: once the compositor
+#          is presenting, this application's console output STOPS REACHING
+#          THE SERIAL LINE (the serial log of a green run ends at `scene
+#          window ready`, and `sys_write` mirrors only AFTER the real write
+#          to /dev/console returns). An assertion that SAVE FAILED is absent
+#          would therefore be an assertion that could not fail -- a green for
+#          the wrong reason, over a channel that goes quiet at exactly the
+#          moment being asserted about. Its PRESENCE in the reverted arm is
+#          still the failed write in the program's own words, when it is
+#          printed early enough to be heard.
 #        * and the OCR must NOT report a string that is certainly not on the
 #          screen.
 #

@@ -54,6 +54,156 @@ freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
 it has never been caught in the act on that machine.
 
 
+### THE AUDIT OF EVERY GATE THAT READ SILENCE: **TWO** WERE AFFECTED, NOT MANY -- AND THE DANGEROUS CLASS IS EMPTY
+
+**Static audit, dev host, 2026-08-19, on `port/tier1-syscalls` at `3751deca`
+(the commit that carries the fix). The first thing I did was check WHICH TREE
+I was on: the worktree I was handed was 17 commits behind and did not contain
+the fix at all. Everything below is read off the tree that does.**
+
+The brief asked me to sweep `tests/linux/` and `scripts/` for gates whose
+oracle is "a non-root process printed something to the serial console" and to
+report the counts honestly, including if the answer is "one". **The answer is
+two, and one of those two is the gate that was written to catch the bug.**
+
+#### THE BOUND FIRST, BECAUSE IT IS WHAT MAKES THE COUNT CHECKABLE
+
+The mute needs a boot whose kernel command line ends in a NON-serial
+`console=`. `user/linux-syscalls.c:consmirror_setup()` says so in code:
+
+```c
+if (strncmp(last, "ttyS", 4) == 0) return;  /* /dev/console already IS it */
+```
+
+On a one-console boot the mirror is deliberately OFF and `/dev/console` **is**
+the serial port -- so every process is heard at every uid, mirror or no mirror,
+Adder or not. **In this tree exactly one thing produces a two-console command
+line**: `scripts/hamlinux_disk.sh:366`,
+`earlycon=efifb console=ttyS0,115200 console=tty0 ...`, baked into the UKI.
+Every other QEMU boot here puts `console=ttyS0` last -- `scripts/hamlinux_vm.sh`,
+`tests/linux/de_probe.sh`, `scripts/run_x86_module.sh`,
+`scripts/test_root_partuuid_boot.sh`.
+
+So the whole affected population is the files that boot a disk or a medium
+built by `hamlinux_disk.sh`: **27 of the 193 gates in `tests/linux/`, and 6 of
+the 1704 shell files in `scripts/`** (of those 6, four are builders or drivers
+-- `hamlinux_image.sh`, `hamlinux_vm.sh`, `release_gates.sh`, `verify_medium.sh`
+-- and `test_root_partuuid_boot.sh` overrides with its own `-kernel` command
+line ending `console=ttyS0`). The other 166 gates in `tests/linux/` and every
+`scripts/test_*.sh` are class (a) BY CONSTRUCTION, not by inspection.
+
+#### (b) ITS RED WAS CAUSED BY MUTING -- TWO
+
+* **`tests/linux/installed_update.sh`**, the boot-2 uid-1001 block. It boots
+  the installed disk, drops to 1001 and reads `hpm list`, `cat
+  /etc/hamnix-update-stamp` and `hpm`'s own refusal line off the serial. Those
+  are three EXEC'd Adder programs at uid 1001, which is precisely the muted
+  case; **three scored assertions rest on them -- lines 700, 703 and 706**. **Its last recorded run is
+  `~/.hamnix-build/iupd-full.log`, 2026-08-11 12:45, all green -- FOUR DAYS
+  BEFORE the command line was flipped on 2026-08-15 (`9623f2a4`).** It has not
+  been run since. So this is a red that WOULD have happened and did not get
+  the chance to; I am recording it as class (b) and as **PREDICTED, NOT
+  MEASURED**, because nobody has spent the boot.
+  The four assertions in the same block that read `echo ... $status` (701,
+  704, 705, 707) are
+  hamsh BUILTINS -- the shell opened its mirror while still root and that fd
+  survives `setuid(2)` -- so they were audible throughout and would have gone
+  on passing beside the four failures. A gate half-lit is worse than a dark
+  one.
+* **`tests/linux/installed_uid_console.sh`** -- the gate written for the bug.
+  23/0.
+
+That is the list. **No third gate in this tree ever pointed its oracle at a
+non-root process on a two-console boot.** The reason is structural rather than
+lucky: on the Linux target only `/etc/rc.de-user.linux` drops privilege
+(`etc/rc.boot.linux:79-99` says at length why PID 1 does not), and almost
+nothing in `tests/linux/` drives a machine through a desktop terminal.
+
+#### (c) ITS GREEN WAS CAUSED BY MUTING -- **NONE THAT ARE SCORED**
+
+This is the class I was told to hunt hardest, and I want to say plainly that I
+did not find one, rather than manufacture one.
+
+* Only three gates have an absence helper at all: `nocheck()` in
+  `installed_update.sh:589`, `reboot_device.sh:260` and
+  `hpm_signed_refresh.sh:169`. `hpm_signed_refresh` and `reboot_device`'s
+  uid-1001 arm both run on ONE-console `-kernel` boots, where nothing is muted.
+  `installed_update.sh`'s single `nocheck` looks for
+  `[iupd] u1001 /bin/awk status: 0` -- an `echo` builtin line, audible in the
+  muted arm -- so it could still have failed.
+* `install_confirm_keys.sh:569` awards a PASS for a census NOT finding
+  `/bin/install`, and it is the pattern done right: lines 716-719 fail the
+  whole gate unless the same census demonstrably found `wsysd`. The census is
+  run by the root PID-1 shell.
+* `installed_login.sh` is the near miss, and worth writing down. It boots an
+  installed NVMe and its whole oracle is `su`'s serial output, INCLUDING two
+  absence assertions ("no authentication failure was printed for it", "su did
+  not change identity on a wrong password"). `su` reaches uid 1001. It was
+  audible only because `user/su.ad:187` writes `"Password: "` to fd 1 BEFORE
+  the `sys_setuid_auth()` at line 211 -- so the mirror is opened while still
+  root and the fd survives. **That gate was green on an ordering accident.**
+  The 0622 chmod is what makes it green on purpose.
+
+#### TWO SILENCES THE uid FIX DOES NOT CLOSE, FOUND WHILE LOOKING FOR THE FIRST
+
+Both are older and larger than the uid bug, and neither is fixed here.
+
+1. **ON A TWO-CONSOLE BOOT, A NON-ADDER PROGRAM IS INAUDIBLE AT ANY uid.**
+   `consmirror` lives in the Adder runtime's `sys_write`. A Debian or Alpine
+   binary run inside `enter debian { ... }` writes to fd 1 -- `/dev/console`,
+   the screen -- and passes no mirror at all. This is not a new claim: it is
+   what `9623f2a4` describes and what took `install_from_usb.sh` to 52/1.
+   **`tests/linux/installed_distros.sh` rests entirely on it**: five of its
+   twelve assertions are `after` matches on `/bin/cat` output from inside the
+   distribution roots, in BOTH the uid-0 and the uid-1001 arms. Its recorded
+   **12/0 predates 2026-08-15**. **PREDICTED RED, NOT MEASURED** -- and it
+   cannot be measured on this host, because `build/image/alpine.ext4` does not
+   exist and the gate exits before booting without it. Whoever restores an
+   Alpine medium should run it first and expect the reason to be the console,
+   not the namespaces.
+2. **THE REAL CONSOLE WRITE HAPPENS BEFORE THE MIRROR.** `sys_write` does
+   `write(fd, ...)` and only mirrors `if (w > 0 ...)`. Once the compositor is
+   presenting, a program's line can stop at the screen and never reach the
+   serial port -- and the process does not come back. The evidence is already
+   in the tree:
+   `~/.hamnix-build/instdoc-green-evidence/boot-hamwrite/serial.log` **ends at
+   `[hamwrite] scene window ready`, line 610 of 612**, with only the ACPI
+   power-down after it, on a run whose document WAS written. This is the same
+   fact as the `poweroff` hang recorded above.
+
+#### AND THE GATE THAT CAUSED THE REVERT WAS RE-RUN ON THE FIXED TREE: **48 PASSED / 0 FAILED**
+
+`tests/linux/installed_documents.sh`, measured on `3751deca`, dev host,
+2026-08-19. Evidence `~/.hamnix-build/instdoc-rerun-0819/`. That is the same
+number as the 2026-08-18 run and exactly its registered `expect_min` of 48 in
+`scripts/release_gates.sh:264` -- **so the console fix did not change this
+gate's verdict, and the honest reading is that it never could have: this gate's
+subject runs as ROOT** (the machine's own rc launches `/bin/<app>` inside
+`ns { }`, which is what an icon does), and its oracle is `debugfs` on the ext4
+plus OCR of the screen. It is class (a). All three documents landed in
+`/home/hamdocusr/Documents`, 43 / 41 / 41 bytes, each carrying the typed
+marker, and `/home/live/Documents` has no document in it.
+
+**AND IT RE-MEASURED THE THING TASK 3 IS ABOUT, THREE TIMES:** the saved
+document is owned by **uid 0** in all three arms. The person's documents are
+root's, inside a directory that is theirs.
+
+The run also reproduced, for all three applications, the silence described
+above: `hamwrite`/`hamsheet`/`hamslides`: *"no completed-write line reached the
+serial ... the console stops reaching it once the compositor presents"*. That
+is now a routine, printed observation of a defect that is still open.
+
+#### ONE THING THE AUDIT FIXES ON THE SPOT
+
+`tests/linux/installed_documents.sh`'s header claimed, of
+`[<app>] SAVE FAILED <path>`, that **"Its ABSENCE is asserted here"**. It is
+not: the code at lines 575-580 prints it with `info`, a REPORT, and the
+comment at 558-562 says why. Had the header been true it would have been the
+class (c) this audit went looking for -- an assertion of absence over a
+channel that goes quiet at exactly the moment being asserted about. The header
+now says what the code does.
+
+
 ### THE APPLICATION DOES OPEN A WINDOW AS uid 1001. IT COULD NOT BE HEARD -- AND A RELEASE CONCLUSION WAS DRAWN FROM THE SILENCE
 
 **Measured, dev host, 2026-08-19, on the installed disk left by the 2026-08-18
