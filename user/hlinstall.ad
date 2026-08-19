@@ -733,7 +733,18 @@ def collect_shipped_regulars() -> int32:
                         uid = uid * 10 + cast[uint64](acct_buf[k]) - 48
                         digits = digits + 1
                         k = k + 1
-                    if digits > 0 and uid >= 1000:
+                    # 1000 <= uid < 60000, AND THE UPPER BOUND IS NOT
+                    # DECORATION. `uid >= 1000` alone also matches
+                    # nobody:x:65534, and MEASURED on the first machine built
+                    # this way: /etc/passwd came out with hostowner, sshd,
+                    # hamsh-svc and the operator -- and NO nobody. Nothing on
+                    # the machine complained, because nothing looks up 65534
+                    # until something does (user/install.ad and
+                    # user/useradd.ad both treat that line as a fixture of the
+                    # table). A system account that happens to sort above 1000
+                    # is not a REGULAR account, and dropping it is not this
+                    # function's job.
+                    if digits > 0 and uid >= 1000 and uid < 60000:
                         drop_add(&acct_buf[i], c1 - i)
         i = j + 1
     return 0

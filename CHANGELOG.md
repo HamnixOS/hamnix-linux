@@ -70,6 +70,13 @@ wizard collects was read by NOTHING at all -- `--root-pass` was parsed and
 never used -- so every machine installed from this medium kept the source
 tree's published `hostowner` password; it is now set from what was typed.
 
+One fault this found in its own fix, worth writing down: "a regular account
+the image ships" was first spelled `uid >= 1000`, which also matches
+`nobody:x:65534`. The machine that produced scored 53 / 0 and had no `nobody`
+line; nothing complained, because nothing looks up 65534 until something does.
+The rule is `1000 <= uid < 60000` now and the gate asserts every system account
+survives.
+
 **The gate**: `tests/linux/installed_accounts.sh` -- one medium build, an
 install onto a blank 6 GiB disk, a boot that runs `hpm update` against a
 signed local channel it is one version behind on, and a third boot to the
@@ -80,8 +87,8 @@ that it really upgraded `hamnix-init`, so "the account survived" cannot mean
 
 | condition | result |
 |---|---|
-| the tree with every fix reverted | **26 PASSED / 25 FAILED** |
-| the tree with the fixes | **53 PASSED / 0 FAILED** |
+| the tree with every fix reverted | **34 PASSED / 25 FAILED** |
+| the tree with the fixes | **61 PASSED / 0 FAILED** |
 
 `tests/linux/installed_offers_install.sh` re-run on the same tree: **24 PASSED
 / 0 FAILED** (its `live` assertion is now the uid-1001 one, and its header

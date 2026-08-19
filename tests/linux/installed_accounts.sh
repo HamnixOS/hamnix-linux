@@ -433,6 +433,19 @@ print(sorted(names(sys.argv[2]) - names(sys.argv[1])))' "$W/$tag-passwd" "$W/$ta
         bad "$tag: there is no hostowner line in /etc/shadow at all"
     fi
 
+    # AND THE SYSTEM ACCOUNTS MUST SURVIVE, which this gate did NOT ask until
+    # a machine came out without one. The installer drops the shipped REGULAR
+    # accounts; the first version of that rule was `uid >= 1000`, which also
+    # matches nobody:x:65534, and the machine it produced had no `nobody` line
+    # at all. Nothing on it complained -- nothing looks up 65534 until
+    # something does -- so the only thing that would ever have caught it is an
+    # assertion here.
+    for sysacct in hostowner sshd hamsh-svc nobody; do
+        grep -q "^$sysacct:" "$W/$tag-passwd" \
+            && ok "$tag: the system account '$sysacct' is still in /etc/passwd" \
+            || bad "$tag: the system account '$sysacct' is GONE from /etc/passwd -- the installer removed an account that was not a regular user's"
+    done
+
     # THE HOME, WHICH IS WHAT MAKES THE NAME A SESSION.
     if fs_has "$PART" "/home/$USERNAME/Desktop/terminal.desktop"; then
         ok "$tag: /home/$USERNAME/Desktop carries the desktop launchers -- the account has a real home, not an empty directory"

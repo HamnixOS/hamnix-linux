@@ -73,8 +73,8 @@ update, in identical words.
 
 | condition | result |
 |---|---|
-| the tree with every fix reverted | **26 PASSED / 25 FAILED** |
-| the tree with the fixes | **53 PASSED / 0 FAILED** |
+| the tree with every fix reverted | **34 PASSED / 25 FAILED** |
+| the tree with the fixes | **61 PASSED / 0 FAILED** |
 
 **THE CONTROLS RUN.** The update must report `upgraded=1` and name
 `hamnix-init` (so "the accounts survived" cannot mean "nothing happened"); the
@@ -83,6 +83,15 @@ that upgrade (so hpm was writing on that machine and skipped the account files
 deliberately); the ext4 reader is shown finding a file that is there; and the
 medium's own `/etc/passwd` must carry `live` and must NOT carry the wizard's
 name, so that name on the target can only have come from the install.
+
+**AND A THIRD FAULT, WHICH THE GATE DID NOT ASK ABOUT UNTIL A MACHINE CAME OUT
+WITHOUT AN ACCOUNT.** The rule for "a regular account the image ships" was
+first written `uid >= 1000` -- which also matches `nobody:x:65534`. The machine
+that produced scored **53 / 0** and had NO `nobody` line at all; nothing on it
+complained, because nothing looks up 65534 until something does. It was caught
+by reading the final table by hand, not by the gate. The rule is
+`1000 <= uid < 60000` now and the gate asserts all four system accounts
+(hostowner, sshd, hamsh-svc, nobody) survive, before and after the update.
 
 **AN INSTRUMENT BUG AND A COMPILER TRAP, BOTH CAUGHT BY THE GATE PRINTING WHAT
 IT READ.** The first run scored **41 / 12**, and two of those failures were
