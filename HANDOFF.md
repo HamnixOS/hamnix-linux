@@ -152,6 +152,46 @@ fixture naming a fixed path is not a defect.
 programs actually write. That remains the blocker, and it is now a blocker on a
 bigger surface than the queue admitted.
 
+### THE `/home/live` LIST, THIRD ATTEMPT — and each earlier one failed a
+### DIFFERENT way
+
+I have now got this wrong three times, and the interesting part is that no two
+mistakes were the same mistake.
+
+1. **"three apps"** — named `hampaint`, `hamnotesscene`, `hamshot`. Too few, and
+   two of them do not ship.
+2. **"nine programs and three libraries"** — a `grep` over `user/` and `lib/`.
+   Fixed the count, kept the method: **source files are not shipped programs.**
+3. **Cross-referencing against `hamlinux_image.sh`'s app list** — which marks
+   `lib/homedir.ad`, `lib/filepick.ad` and `lib/hamnotescore.ad` as "not
+   shipped". **They are libraries.** They are not in an app list because they are
+   linked into programs, not staged as programs, and their code ships inside
+   every program that links them.
+
+**The correct decomposition, at this commit**, literal `"/home/live` occurrences,
+`*_host.ad` test drivers excluded:
+
+**Shipped programs (7)** — `hamwrite` 3, `hamfmscene` 2, `hamnotesscene` 2,
+`hlinstall` 1, `hamslides` 1, `hamsheet` 1, `hamdesktop` 1.
+
+**Not staged into the image (2)** — `hampaint` 3, `hamshot` 3.
+
+**Libraries, which ship inside whatever links them (3)** — `lib/homedir.ad` 1,
+`lib/filepick.ad` 1, `lib/hamnotescore.ad` 1.
+
+**Still not a verdict.** `homedir`'s occurrence is plausibly the documented
+fallback and `hlinstall`'s is a copy source. A literal is not a defect. **Read
+each site.** The three that are known to matter — `hamwrite`, `hamsheet`,
+`hamslides` — are known because somebody measured an installed disk, not because
+they appeared in a grep.
+
+**The lesson, which is the reason this section exists rather than a corrected
+number:** each time I fixed the *answer* and re-used a *method* that had a new
+blind spot — source-vs-shipped, then program-vs-library. **A count is only as
+good as the question behind it, and I kept changing the count without
+interrogating the question.** If the next person needs this number, the honest
+move is to ask what they need it FOR, and measure that instead.
+
 ### READ THIS FIRST — the state, in order
 
 **This section is newest-first, and later entries CORRECT earlier ones.** Where a
