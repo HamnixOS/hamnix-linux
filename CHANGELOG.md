@@ -154,11 +154,21 @@ That is the whole remedy. Nothing else reads it, and on a machine that is alread
 installed it should never have been there.
 
 **Your accounts.** If you installed before this release, your `/etc/passwd`,
-`/etc/group` and `/etc/shadow` are almost certainly 962 bytes each and contain
-no account lines at all — the shipped header, twice. That is not something you
-can repair by deleting a file, and we are not going to hand you a shell
-incantation that edits your password database. It needs a proper repair path, and
-that is the next piece of work rather than a note in a changelog.
+`/etc/group` and `/etc/shadow` will be missing their account lines — carrying the
+shipped comment header and nothing else. **You can check without changing
+anything:** `cat /etc/passwd`. If the only lines you see start with `#`, that is
+this.
+
+*Why we are not quoting you a byte count here:* on the machine we measured, all
+three files came out at exactly 962 bytes, and that number is in the entry below
+as a description of **that** run. Yours depends on what your headers happen to
+be, and we have not measured your machine. Looking at the file tells you more
+than matching a number would.
+
+That is not something you can repair by deleting a file, and we are not going to
+hand you a shell incantation that edits your password database — a half-right one
+produces a machine nobody can log into. It needs a proper repair path, and that
+is the next piece of work rather than a note in a changelog.
 
 ### An installed machine offered to install itself, and had no user accounts
 
