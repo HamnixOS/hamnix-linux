@@ -54,10 +54,20 @@
 # SO THE OBVIOUS WAY TO FAKE AN APP SERVER -- point `bind` at a directory --
 # IS A GAP THAT ANSWERS SUCCESS-SHAPED, which is this project's oldest and
 # most expensive failure mode. Every arm below therefore goes through the
-# DEVICE branch, using the `$HAMNIX_DISTRO_<NAME>` override
-# (user/linux-syscalls.c:distro_resolve) to point a named distro namespace at
-# a plain directory -- which distro_source_spec passes through verbatim, so
-# the directory reaches enter_root and the switch is real.
+# DEVICE branch: each constructed root is POSTED AT A NAME by the boot
+# (`bind /rN /n/rN`, which is what makes /n/rN a real mount point) and then
+# entered with `bind '#distro/rN' /`, which distro_resolve answers out of
+# distro_mountpoint. That is the same two-step the tree already uses for
+# Alpine and Debian, and it is the only one of distro_resolve's three routes
+# an unprivileged session can use.
+#
+# THE OTHER ROUTE, `$HAMNIX_DISTRO_<NAME>`, DOES NOT WORK FROM A SHELL AND
+# THAT IS A DEFECT THIS GATE FOUND BY TRYING IT: hamsh's `export` writes
+# hamsh's own environment table and hamsh never calls setenv(3), while `bind`
+# is a hamsh BUILTIN -- so distro_resolve's getenv() runs in the same process
+# and sees nothing. Section 6 asserts this rather than leaving it as a
+# comment. It fails loudly ("$HAMNIX_DISTRO_r1 unset"), which is the one good
+# thing about it.
 #
 # AND EVERY ARM PROVES THE SWITCH HAPPENED BEFORE IT MEASURES ANYTHING ELSE:
 # each candidate root holds a marker file that exists NOWHERE on the machine's
@@ -69,10 +79,11 @@
 # ================================================================
 # THE FOUR CANDIDATE ROOTS
 # ================================================================
-#   r1  BARE      nothing but the mount points enter_root makes itself.
-#   r2  +bin      the machine's /bin bound in. "Apps live on a file server."
-#   r3  +bin+etc  and the machine's /etc.
-#   r4  +bin+etc+var+usr+lib   everything the suspects are known to want.
+#   r1  BARE   nothing but the mount points enter_root makes itself.
+#   r2  +bin   the machine's /bin. "Apps live on a file server", literally.
+#   r3  +lib +lib64   and the dynamic loader, because the shipped programs are
+#              dynamic ELF and their interpreter is /lib64/ld-linux-x86-64.so.2.
+#   r4  +etc +var +usr   and the three directories the suspects read.
 #
 # Reading DOWN that list tells you the minimum set of names an app server
 # would have to serve, which is the actionable form of "what breaks".
@@ -250,30 +261,75 @@ mkdir /r3/tmp
 mkdir /r4/srv
 mkdir /r4/tmp
 
-# r2 = r1 + the machine's /bin.
+# THE LADDER. Each rung adds exactly one idea, so the rung at which something
+# starts working NAMES what an app server would have to serve.
+#
+# r2 = r1 + the machine's /bin, AND NOTHING ELSE. "Apps live on a file server"
+# in its most literal form. The FIRST RUN OF THIS GATE STOPPED HERE and the
+# result is why r3 exists: every probe returned 127 with NO diagnostic, which
+# is not "the program failed" -- it is user/hamsh.ad's own documented silent
+# shape. spawn_resolved probes each PATH candidate with sys_open
+# (_path_execable) and only prints "command not found" when NONE opens; when
+# one DOES open it forks and execs, and a failed execve leaves a bare 127 with
+# nothing said. r1, which has no /bin at all, printed the diagnostic; r2 did
+# not. So in r2 the binary was FOUND and could not be RUN.
 bind /bin /r2/bin
-# r3 = r2 + /etc.
+# r3 = r2 + the dynamic loader's two directories. /bin/cat, /bin/ls, /bin/id
+# and /bin/hpm are real shipped binaries (scripts/hamlinux_image.sh's APPS),
+# built by clang against -lssl -lcrypto -lcrypt, so they are DYNAMIC and their
+# ELF interpreter is /lib64/ld-linux-x86-64.so.2. /lib and /lib64 are separate
+# top-level directories in the image root (hamlinux_image.sh:34) and binding
+# /lib alone does not bring the interpreter across.
 bind /bin /r3/bin
-bind /etc /r3/etc
-# r4 = r3 + /var /usr /lib.
+bind /lib /r3/lib
+bind /lib64 /r3/lib64
+# r4 = r3 + the three directories the suspects read: /etc (passwd, hpm/repo),
+# /var (lib/hpm), /usr.
 bind /bin /r4/bin
+bind /lib /r4/lib
+bind /lib64 /r4/lib64
 bind /etc /r4/etc
 bind /var /r4/var
 bind /usr /r4/usr
-bind /lib /r4/lib
 
-# THE DEVICE BRANCH, REACHED WITH THE ENV OVERRIDE. distro_resolve() reads
-# $HAMNIX_DISTRO_<UPPERNAME> first and distro_source_spec() passes anything
-# that is not LABEL= through verbatim, so a plain directory reaches
-# enter_root -- which is the REAL root switch (MS_MOVE + chroot).
-HAMNIX_DISTRO_R1='/r1'
-export HAMNIX_DISTRO_R1
-HAMNIX_DISTRO_R2='/r2'
-export HAMNIX_DISTRO_R2
-HAMNIX_DISTRO_R3='/r3'
-export HAMNIX_DISTRO_R3
-HAMNIX_DISTRO_R4='/r4'
-export HAMNIX_DISTRO_R4
+# POST EACH CONSTRUCTED ROOT AT A NAME. This is the shipping mechanism and
+# not a trick: user/linux-syscalls.c:distro_mountpoint's own comment says so
+# --- "THE SERVER IS ALREADY POSTED AT ITS NAME... etc/rc.boot.linux runs
+# `bind '#distro/alpine' /n/alpine` while it is still root. A session that
+# later says `bind '#distro/alpine' /` is not asking to find a disk, it is
+# asking for the server at that name" --- and it is the ONLY one of
+# distro_resolve's three routes that an unprivileged session can use, because
+# the other two need to read a volume label off a block device.
+#
+# It is also exactly the shape a real Hamnix app server would take: something
+# privileged posts a root at a name at boot, and a session binds that name
+# onto its own "/". What is faked here is only WHAT is behind the name.
+#
+# Only a REAL MOUNT POINT counts (distro_mountpoint calls path_is_mountpoint,
+# deliberately: "an empty directory called /n/alpine would otherwise be
+# entered as a namespace whose root has nothing in it"). A plain-path bind
+# makes one.
+#
+# THE FIRST VERSION OF THIS GATE USED $HAMNIX_DISTRO_<NAME> INSTEAD AND EVERY
+# ARM FAILED 126. That run is why the block below exists, and the reason is a
+# defect worth keeping: `export` in hamsh writes hamsh's OWN environment table
+# (user/hamsh.ad:env_set, materialised into an envp only by _build_envp at
+# spawn time) and hamsh NEVER calls setenv(3). `bind` is a hamsh BUILTIN, so
+# distro_resolve's getenv() runs in that same process and cannot see it. The
+# documented per-name environment override is therefore unreachable from a
+# `bind` typed at a shell -- it can only affect a bind performed by a program
+# hamsh exec'd. The machine said so in as many words
+# ("$HAMNIX_DISTRO_r1 unset"), which is the honest failure, not a silent one.
+mkdir /n/r1
+mkdir /n/r2
+mkdir /n/r3
+mkdir /n/r4
+bind /r1 /n/r1
+bind /r2 /n/r2
+bind /r3 /n/r3
+bind /r4 /n/r4
+echo 'MINROOT-POSTED'
+ls /n
 
 # The templates. Deliberately the SAME four bind lines etc/rc.de-user.linux
 # carries for `enter debian`, so an arm differs from a shipping session root
@@ -359,6 +415,23 @@ else
     bad "the real root's marker was not created -- the /n check in every arm is void"
 fi
 
+# THE POSTING STEP. If the four roots were not posted at their names, every
+# arm below fails for that reason and not for anything about constructed
+# roots, so it is checked before any arm is read.
+if grep -q 'MINROOT-POSTED' "$B"; then
+    ok "the rc reached the posting step (\`bind /rN /n/rN\`)"
+else
+    bad "the rc never reached the posting step -- no arm below can have entered anything"
+    finish
+fi
+POSTFAIL=$(grep -c 'bind: .*/n/r[1-4]' "$B" 2>/dev/null || true)
+if [ "${POSTFAIL:-0}" = 0 ]; then
+    ok "and no posting bind reported an error"
+else
+    bad "$POSTFAIL posting bind(s) reported an error -- see $B"
+    grep 'bind: .*/n/r[1-4]' "$B" | head -4 | sed 's/^/        /'
+fi
+
 # =========================================================================
 # Score one arm. `arm_slice` is everything between this arm's BEGIN and END,
 # so no assertion can accidentally read another arm's output.
@@ -432,8 +505,8 @@ score_arm() {
 rm -f "$W/matrix.txt"
 score_arm r1 "BARE: nothing but the mount points enter_root makes itself"
 score_arm r2 "+bin: the machine's /bin bound in"
-score_arm r3 "+bin +etc"
-score_arm r4 "+bin +etc +var +usr +lib"
+score_arm r3 "+bin +lib +lib64: the dynamic loader, and nothing else"
+score_arm r4 "+bin +lib +lib64 +etc +var +usr"
 
 # =========================================================================
 say "4 -- did every arm run?"
