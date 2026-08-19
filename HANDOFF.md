@@ -254,6 +254,29 @@ reported them GREEN -- so the check that catches a gate claiming 0 FAILED over a
 body full of failures was OFF for them. The bracketed tag is optional in the
 pattern now; every older dialect counts exactly as it did.
 
+### THE NVMe NAMING BUG DOES NOT GENERALISE — checked, one site, already fixed
+
+An agent found that attaching two NVMe controllers and addressing them as
+`nvme0n1`/`nvme1n1` **is not stable** — its gate ran twice and the two disks
+swapped identities, because Linux names namespaces by controller instance as
+probes complete. It warned that "any gate on this line doing that has the same
+bug", which reads as an open sweep.
+
+**Checked, so nobody sweeps it again.** Four gates under `tests/linux/` attach
+more than one NVMe device argument — `installed_accounts.sh` (3),
+`installed_documents.sh`, `installed_offers_install.sh` and
+`install_refuses_reserved.sh` (2 each). **Only one ever referenced `nvme1n1`,
+and its single remaining occurrence is inside the comment that documents the
+fix.** That gate now boots twice with one namespace each.
+
+So: real bug, real fix, **one site**, and the warning does not generalise as
+stated. The other three attach multiple devices without depending on the second
+name.
+
+**What this does not establish:** that the other three are correct for some other
+reason — I checked only that they do not use the unstable name. A gate could
+depend on device ordering in a different way and this search would not see it.
+
 ### THE FREEZE AND THE ROOT CONSOLE ARE THE SAME ARCHITECTURAL FACT
 
 I published that an installed machine's text console is "an unauthenticated
