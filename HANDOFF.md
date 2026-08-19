@@ -27,6 +27,48 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE OWNERSHIP FIX MAKES THE HARDCODED SAVE-AS DEFAULT NEWLY REACHABLE, AND THE NEW GATE ALREADY STATES THE PREMISE
+
+**2026-08-19, orchestrator-side, read-only. Nothing booted, nothing changed.
+NOT MEASURED — this is a source reading plus an assertion the launch-uid gate
+already makes, and the failure below has NOT been observed.**
+
+Yesterday's fix means the person's applications now run as **uid 1001** instead of
+root. That is correct and measured. But it changes what an old defect DOES.
+
+`lib/filepick.ad:129` — given no start directory, Save-As sets its path to the
+literal **`/home/live/Documents`**. And `tests/linux/installed_launch_uid.sh`
+asserts, in its own words, on a real installed disk:
+
+> `/home/live/Documents is present on this installed machine, uid 0 mode 755`
+> `/home/live/Documents is owned by uid 0 and NOT by the session's 1001 -- a save aimed there cannot succeed`
+
+**The fix inverts the failure rather than removing it.** Before: the application ran
+as root, so a save aimed at that directory **SUCCEEDED**, and the person met a file
+that saved and could not be found. After: the application runs as the person, so
+the same save **CANNOT SUCCEED**. Both are bad; they are bad in opposite ways, and
+only the second is honest.
+
+**AND THE PICKER'S SAFETY CLIMB DOES NOT CATCH IT.** Lines 131-138 climb to `/home`
+and then `/` — but only `if fmc_num_entries() == 0 and fmc_has_up_entry() == 0`.
+That directory is **mode 755**, so a uid-1001 process can list it perfectly well
+and it has an up-entry. **The climb fires on an UNLISTABLE directory, not an
+UNWRITABLE one**, and this one is listable. So the picker would show it, the person
+would accept the default, and the write is what fails.
+
+**WHAT IS NOT ESTABLISHED, and it is most of this:** nobody has opened a Save-As
+dialog on an installed machine. The measured saves in that gate went to
+`/home/<user>/Documents` correctly, which means the flow those applications took
+supplied a start directory and never reached line 129. **Which flows reach the
+no-start-dir path is unknown**, and it may be none of them. This is a hazard
+identified by reading, and the last two times this project reasoned about where a
+file goes without booting, only a real save showed the truth.
+
+Whoever takes queue item 3 should therefore do two things, not one: point the
+three hardcoded sites at `hd_home_join`, **and** make the picker's climb consider
+WRITABILITY, not just listability — otherwise the same class of failure returns
+the next time a default points somewhere the person cannot write.
+
 ### THE PRIVILEGE DROP IS LANDED, AND A SAVED DOCUMENT IS THE PERSON'S -- 66/0, WITH BOTH GATES THAT CAUGHT THE FIRST ATTEMPT UNMOVED
 
 **Measured on booted machines, dev host, 2026-08-19. Evidence
