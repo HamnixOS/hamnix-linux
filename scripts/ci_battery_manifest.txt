@@ -5197,7 +5197,15 @@ bash tests/linux/soak_wincensus_negctl.sh
 # ever run it.
 # MEASURED: 7 passed, 0 failed, 0s (image built).
 bash tests/linux/modules_list_complete.sh
-# MEASURED: 8 passed, 0 failed, 3s (image built).
+# MEASURED 2026-08-19 against the 1.0.31 channel, and the number depends on
+# WHICH ROOT is built, so all three are written here rather than one:
+#     lean image root                 11 passed, 0 failed
+#     installer image root            11 passed, 0 failed
+#     installed-disk root             12 passed, 0 failed
+# (the disk root exercises two more exclusions -- etc/fstab and
+#  var/lib/hpm/installed.json -- which only a written partition carries).
+# It was 8 before the installer overlay was classified; the previous line
+# said "8 passed, 0 failed" and was measured against the LEAN root only.
 bash tests/linux/channel_covers_image.sh
 # MEASURED: 3 passed, 0 failed, 3s (image built).
 bash tests/linux/channel_bytes_match_image.sh

@@ -198,7 +198,26 @@ test_livedom_functional_host|no|1|22|06_class_style_toggle is declared in the ga
 test_de_home_resolve_host|no|0|26||bash scripts/test_de_home_resolve_host.sh
 test_install_names_host|no|0|23||bash scripts/test_install_names_host.sh
 channel_bytes_match_image|no|0|3||bash tests/linux/channel_bytes_match_image.sh
-channel_covers_image|no|0|8||bash tests/linux/channel_covers_image.sh
+# WHICH ROOT THIS RUNS AGAINST, because the number means nothing without it.
+# The driver runs after the build has rebuilt build/image/root with
+# HAMLINUX_INSTALLER=1, so this row measures the INSTALLER root -- the one
+# the shipped medium is packed from. At 1.0.31 that root scored 7 / 26 and
+# the release shipped RED on this row: the 26 were the installer overlay
+# (boot/ 5, etc/installer-medium 1, usr/lib/instroot/ 20), which no package
+# owns and none of which was in the gate's exclusion table. They are in it
+# now, each with a reason, and the gate grew four assertions that MEASURE the
+# boot/ reason instead of asserting it.
+#
+# expect_min is 11 and not 12 deliberately. MEASURED on this host, 2026-08-19,
+# against the 1.0.31 channel:
+#     lean image root (424 files)          11 / 0
+#     installer image root                 11 / 0
+#     installed-disk root (453 files)      12 / 0
+# The disk root scores one more because etc/fstab and var/lib/hpm/installed.json
+# exist only on a partition scripts/hamlinux_disk.sh wrote, so on an image root
+# those two exclusions match nothing and the 'no exclusion is folklore' PASS
+# becomes a note. 11 is the floor every root clears.
+channel_covers_image|no|0|11||bash tests/linux/channel_covers_image.sh
 pkg_tar_reproducible|no|0|5||bash tests/linux/pkg_tar_reproducible.sh
 verify_medium|no|0|39||bash scripts/verify_medium.sh @IMG@
 install_confirm_keys|yes|0|34||bash tests/linux/install_confirm_keys.sh
