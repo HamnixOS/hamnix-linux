@@ -71,7 +71,7 @@ extern def sys_mmap(addr: uint64, len: uint64, prot: int32, flags: int32,
                     fd: int32, off: uint64) -> int64
 extern def sys_munmap(addr: uint64, len: uint64) -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
-from lib.p9 import spawn, spawn_detached
+from lib.p9 import spawn, spawn_detached, spawn_detached_as
 from lib.dropplace import dp_desktop_entry
 from lib.hamui import hamscene_begin, hamscene_fill, hamscene_rect, \
     hamscene_glyphs, hamscene_glyphs_bold, hamscene_line, \
@@ -87,7 +87,7 @@ from lib.desktopentry import desktop_parse, desktop_name_ptr, \
     desktop_name_len, desktop_prog_ptr, desktop_prog_len, \
     desktop_liveonly, desktop_name_is_entry, desktop_icon_ptr
 from lib.homedir import hd_env_home, hd_home_from_passwd, hd_regular_home, \
-    hd_fallback_home, hd_resolve_home
+    hd_fallback_home, hd_resolve_home, hd_session_uid
 from lib.hamscene import hamscene_length, hamscene_bufptr, hamscene_image
 from lib.hamscreen import hamscreen_dims_or_fail
 
@@ -1605,7 +1605,23 @@ def _run_action(i: uint64):
         launch_argv[1] = 0
         # DETACHED: the desktop never wait4s — a plain spawn leaks each
         # launched app as an un-reapable zombie (see spawn_detached).
-        pid: int32 = spawn_detached(cast[Ptr[char]](&launch_path[0]),
+        #
+        # AND AS THE PERSON, NOT AS ROOT. hamdesktop is system chrome and runs
+        # as root, so until 2026-08-19 a double-clicked Word Processor was a
+        # ROOT child of the chrome and every document it saved came out OWNED
+        # BY UID 0 -- measured on a real installed machine by
+        # tests/linux/installed_documents.sh. The person's own files, in the
+        # person's own directory, that the same application opened from a
+        # DESKTOP TERMINAL (uid 1001, because /etc/rc.de-user drops it) cannot
+        # be saved over. spawn_detached_as() drops in the child, before exec,
+        # and REFUSES TO EXEC if the drop fails -- see its header for why a
+        # failed drop must not fall back to a launch.
+        #
+        # THIS BRANCH ONLY. The chrome's own parts -- the terminal, hamctl,
+        # the lock screen -- go through _spawn_bin() and stay privileged;
+        # a dropped terminal could not run /etc/rc.de-user's binds at all.
+        pid: int32 = spawn_detached_as(hd_session_uid(),
+                           cast[Ptr[char]](&launch_path[0]),
                            &launch_argv[0], -2, -2, cast[Ptr[uint64]](0))
         if pid >= 0:
             _writeall(1, cast[Ptr[uint8]]("[hamdesktop] launched "))

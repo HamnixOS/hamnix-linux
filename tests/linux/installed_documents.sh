@@ -99,6 +99,41 @@
 #        * and the OCR must NOT report a string that is certainly not on the
 #          screen.
 #
+# THE LAUNCH DROPS PRIVILEGE NOW, AND SO DOES THE CHROME (2026-08-19)
+# ===================================================================
+# The rc below runs `setuid 1001` before `/bin/<app>`, and the document's owner
+# is asserted to be 1001. That is a CHANGE OF WHAT THIS GATE MEASURES and the
+# reason is a defect this gate itself found: on the old launch the save
+# succeeded and the file came out OWNED BY UID 0, so the person's own desktop
+# terminal -- uid 1001, because /etc/rc.de-user drops it -- could not save over
+# their own document, with no error anywhere.
+#
+# The fix is in the chrome: lib/p9.ad's spawn_detached_as() drops in the child
+# before exec and REFUSES TO EXEC if the drop fails, and it is called from
+# user/hamdesktop.ad's _run_action() (the icon column) and
+# user/hampanelscene.ad's launch-queue drain and Applications-menu row (the
+# menu). The uid comes from lib/homedir.ad's hd_session_uid(), which walks the
+# SAME account chain as hd_session_home() so the identity and the home can
+# never come from two different accounts.
+#
+# WHAT THIS GATE DOES NOT EXECUTE, said plainly rather than left to be assumed:
+# hamdesktop's and hampanelscene's own launch code. The rc reproduces the
+# LAUNCH -- fork, drop to the session uid, exec, in the chrome's namespace --
+# and measures where the bytes land and who owns them, on a real installed
+# machine. It does not click an icon and it does not run the chrome's
+# launcher. Two other things cover that gap and neither is this measurement:
+# scripts/test_de_home_resolve_host.sh RUNS hd_session_uid() and asserts the
+# uid and the home agree per account, and it statically asserts that both
+# launchers call spawn_detached_as(hd_session_uid()) and that
+# spawn_detached_as refuses on a failed drop.
+#
+# WHY THE APPMENU LAUNCH QUEUE WAS NOT USED INSTEAD, which WOULD have run the
+# chrome's real code: the panel launches with DETACHED stdio (-2/-2), so the
+# application's own `[<app>] scene window ready` and `[<app>] document <path>`
+# lines never reach the serial line -- and those two are how this gate knows a
+# window opened at all and what path the program resolved. Swapping the launch
+# would have traded a measured save for an unobservable one.
+#
 # THE NEGATIVE CONTROL IS A SECOND RUN OF THIS FILE ON A REVERTED TREE.
 # WHAT "REVERTED" MEANS HERE, EXACTLY, because it decides what the red proves:
 # the three _default_docpath() functions are put back to the literal
@@ -287,6 +322,7 @@ else
 "    }" \
 "    ${a}svc = spawn detached ${a}ns {" \
 "        sleep 20" \
+"        setuid 1001" \
 "        /bin/$a" \
 "    }" \
 "    echo '# done' > /var/lib/instdoc.$a" \
@@ -623,29 +659,27 @@ check_app_file() {
     else
         bad "$a: the file is there but empty or unreadable"
     fi
-    # WHO OWNS IT, REPORTED AND NOT ASSERTED AGAINST 1001, because 1001 is not
-    # what a correct machine produces on this launch path and asserting it
-    # would be asserting a wish. MEASURED here: the document comes out owned by
-    # UID 0. That is not this fix failing -- it is what launching from the
-    # desktop icon means. user/hamdesktop.ad is SYSTEM CHROME and runs as root
-    # (etc/rc.de-user.linux says so, at length, and says why), and its
-    # _run_action() spawn_detached()s the launcher directly, so every
-    # application started from the icon column is a root child of the chrome
-    # and everything it writes is root's.
+    # WHO OWNS IT, AND THIS IS NOW ASSERTED. It was not, until 2026-08-19, and
+    # the note that stood here said why: the document came out OWNED BY UID 0,
+    # because the launch ran as root, and asserting 1001 would have been
+    # asserting a wish. The launch is a drop now (see the rc above and
+    # lib/p9.ad:spawn_detached_as), so 1001 is what a correct machine produces
+    # and anything else is a failure.
     #
-    # THE CONSEQUENCE, so it is on the record rather than left to be found: the
-    # person's documents are owned by uid 0 inside a directory owned by uid
-    # 1001. Anything launched from an icon can still rewrite them (it is root
-    # too), but the same document opened from a DESKTOP TERMINAL -- which /is/
-    # uid 1001, because /etc/rc.de-user drops it -- cannot be saved over. That
-    # is a separate defect from this one, it needs the chrome to drop privilege
-    # when it launches, and it is NOT fixed here.
+    # WHY IT MATTERS, since a root-owned file in the right directory looks
+    # fine: anything launched from an icon could still rewrite it, because that
+    # is root too -- but the SAME document opened from a DESKTOP TERMINAL,
+    # which IS uid 1001 because /etc/rc.de-user drops it, COULD NOT BE SAVED
+    # OVER. A person's own document, unwritable by their own session, with no
+    # error anywhere. That is what this assertion is for.
     u="$(fs_uid "$PART" "$f")"
-    info "$a: the document is owned by uid ${u:-?} (the chrome launches applications as root; see the note in this gate)"
-    if [ -n "${u:-}" ]; then
-        ok "$a: the document's owner could be read off the filesystem (uid ${u})"
-    else
+    info "$a: the document is owned by uid ${u:-?}"
+    if [ "${u:-}" = 1001 ]; then
+        ok "$a: the document is owned by uid 1001 -- the session user, who can therefore open and re-save it from a desktop terminal"
+    elif [ -z "${u:-}" ]; then
         bad "$a: the document's owner could not be read at all"
+    else
+        bad "$a: the document is owned by uid ${u}, not the session's 1001. It is the person's file in the person's directory belonging to somebody else, and their own terminal cannot save over it"
     fi
     if fs_has "$PART" "/home/live/Documents/untitled.$e"; then
         bad "$a: a document was ALSO written to /home/live/Documents/untitled.$e -- the live medium's leftover directory, which belongs to no account on this machine"
