@@ -1659,12 +1659,26 @@ def _run_action(i: uint64):
         # and ic_chrome carries that from the scan to here. A denylist of
         # program names was rejected: anything left off it fails silently,
         # which is the trade 416248df's revert message named.
+        #
+        # AND A PERSON'S PROGRAM WITH NO PERSON TO RUN IT AS IS NOT LAUNCHED.
+        # hd_session_uid() answers 0 when it finds no regular account;
+        # spawn_detached_as() treats 0 as "nothing to drop" and would exec as
+        # ROOT while this function went on to print `[hamdesktop] launched`.
+        # That is a gap answering something success-shaped, and it is the
+        # defect itself. Say it instead.
         pid: int32 = 0
+        suid: uint32 = 0
         if ic_chrome[i] != 0:
             pid = spawn_detached(cast[Ptr[char]](&launch_path[0]),
                            &launch_argv[0], -2, -2, cast[Ptr[uint64]](0))
         else:
-            pid = spawn_detached_as(hd_session_uid(),
+            suid = hd_session_uid()
+            if suid == 0:
+                _writeall(1, cast[Ptr[uint8]]("[hamdesktop] REFUSING to launch "))
+                _writeall(1, &launch_path[0])
+                _writeall(1, cast[Ptr[uint8]](" as the session user: no regular account was found, and starting it as root would silently make every file it saves root's\n"))
+                return
+            pid = spawn_detached_as(suid,
                            cast[Ptr[char]](&launch_path[0]),
                            &launch_argv[0], -2, -2, cast[Ptr[uint64]](0))
         if pid >= 0:

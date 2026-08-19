@@ -4689,7 +4689,25 @@ def _drain_one_launch_queue(path: Ptr[char], last_serial: uint64) -> uint64:
         # and 0 means DO NOT DROP, never "drop to root" -- lib/p9.ad's
         # spawn_detached_as() refuses to exec on a FAILED drop rather than
         # launching a program that is still root.
-        _launch_line_as(&_launch_q_buf[ps + 5], hd_session_uid())
+        #
+        # AND IF THERE IS NO PERSON, THE LAUNCH DOES NOT HAPPEN. hd_session_uid()
+        # returns 0 when it can find no regular account at all. Handing that 0
+        # to _launch_line_as would take the DO-NOT-DROP path and start the
+        # program as ROOT while still printing `[panel] launched <path>` -- a
+        # gap answering something success-shaped, which is the single failure
+        # mode this whole line of work exists to remove, and the exact shape of
+        # the defect being fixed. The payload ASKED for the person's identity;
+        # if there is no person, saying so is the only honest answer. A BARE
+        # payload is untouched by this, so the machine's own programs -- the
+        # install wizard included -- still start on a medium that has no
+        # accounts yet.
+        _uid: uint32 = hd_session_uid()
+        if _uid == 0:
+            _writeall(1, cast[Ptr[uint8]]("[panel] REFUSING to launch "))
+            _writeall(1, &_launch_q_buf[ps + 5])
+            _writeall(1, cast[Ptr[uint8]](" as the session user: no regular account was found, and starting it as root would silently make every file it saves root's\n"))
+        else:
+            _launch_line_as(&_launch_q_buf[ps + 5], _uid)
     else:
         # "/bin/prog [args...]" — _launch_line splits on spaces (a bare path
         # takes the identical no-args path it always did).
