@@ -188,3 +188,36 @@ linux = ns clean {
 # no sections. It used to be first, and the menu's distribution section was
 # empty on every image ever built.
 source '/etc/rc.d/rc.5'
+
+
+# --- WHO IS SITTING HERE, AND WHY THIS FILE DELIBERATELY DOES NOT ASK ------
+#
+# THE INSTALLED MACHINE NOW ASKS. Its /etc/rc.boot is etc/rc.boot.machine,
+# which ends `source '/etc/rc.login'` then `supervise` -- a login program on
+# every terminal, and a PID 1 that never falls through to an interactive
+# prompt. That closes the unauthenticated uid 0 console, and
+# tests/linux/installed_boot_login.sh measures it on a booted machine.
+#
+# THIS FILE IS NOT THAT FILE. It is the LIVE / developer image's rc, staged
+# into an initramfs root the next boot throws away, and it still ends by
+# falling through to PID 1's interactive root prompt. That is a DECISION, not
+# an oversight, and it is recorded here because the absence of these two lines
+# is otherwise indistinguishable from having forgotten them:
+#
+#   * A LIVE MEDIUM'S WHOLE JOB IS TO INSTALL THE MACHINE. It carries no
+#     secrets and it has no accounts a person chose -- the passwords in its
+#     /etc/shadow are the ones committed to this git repository. A password
+#     prompt on it would be a lock whose key is published, protecting nothing
+#     and locking out anyone who had not read the source. Every mainstream
+#     distribution autologins its live image for exactly this reason and asks
+#     only once a machine has been installed.
+#   * IT IS ALSO THE DEVELOPER BOOT. Gates under scripts/ drive PID 1's serial
+#     prompt directly; a login prompt here would break them, and none of them
+#     has been re-measured against one.
+#
+# WHAT IS THEREFORE STILL TRUE AND SHOULD NOT BE MISREAD AS FIXED: booting the
+# live medium gives an unauthenticated root console. If that is to change, the
+# shape to copy is etc/rc.boot.full's, which starts gettys with `-a live` --
+# AUTOLOGIN, so a person still types nothing, but PID 1 stops being the thing
+# reading the console. That is a real improvement and it is NOT MEASURED by
+# any gate in this tree, which is why it is described rather than done.

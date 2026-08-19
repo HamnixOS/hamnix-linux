@@ -22,3 +22,31 @@
 # package deleting it.
 
 source '/etc/rc.boot.installed'
+
+# WHO IS SITTING HERE. These two lines are why this file is no longer one
+# line, and they are here rather than in /etc/rc.boot.installed on purpose.
+#
+# WHAT THEY DO: `/etc/rc.login` starts a login program on every terminal, and
+# `supervise` is a hamsh builtin that NEVER RETURNS. Without the second one
+# the first one changes nothing: /etc/rc.boot is what hamsh runs AS PID 1, and
+# when it ends PID 1 falls through into its own interactive prompt -- an
+# unauthenticated uid 0 shell on the console of a machine that just booted.
+# `supervise` keeps PID 1 alive and working (it reaps children and drains the
+# init/service mailbox, so `init 0` and `init 6` still work) while never
+# reading the console, so main() never reaches that prompt.
+#
+# WHY NOT IN /etc/rc.boot.installed, which is where improvable things go:
+# BECAUSE THAT FILE IS SOURCED, NOT RUN. Every gate in tests/linux/ that
+# measures an installed machine writes its own /etc/rc.boot which begins
+# `source '/etc/rc.boot.installed'` and then does its work and powers off. A
+# `supervise` inside the sourced file would never return to any of them --
+# every one of those gates would hang at the source line, having measured
+# nothing, and the machine would never power off. The verb belongs to the
+# top-level rc, which is this file, and a gate that replaces this file is
+# opting out of it deliberately and visibly.
+#
+# THAT IS ALSO THE NEGATIVE CONTROL for the login work: an rc without these
+# two lines still falls through to a root prompt, which is how the gate proves
+# its instrument can SEE a root shell before it is trusted to report none.
+source '/etc/rc.login'
+supervise

@@ -78,6 +78,18 @@ APPS=(
     # shape buys: the password checker lives behind a device and the programs
     # that use it never see a hash.
     login su passwd
+    # getty. It was NOT in this list, and that absence was the whole of the
+    # "multi ttys" gap: `login` shipped and worked, and nothing ever started
+    # one. getty is what starts one PER TERMINAL -- it opens the terminal,
+    # wires it to fd 0/1/2 and execs /bin/login, so every terminal gets its
+    # own `login:` prompt instead of sharing PID 1's console.
+    #
+    # It needed one change to be shippable here and the reason is worth
+    # recording: getty took a NATIVE VT NUMBER and opened /dev/vt/N, a device
+    # this kernel does not have. It now also takes a device PATH, so on this
+    # lane it is pointed at the stock kernel's own terminals (/dev/tty1..N,
+    # /dev/ttyS0..). See the header of user/getty.ad.
+    getty
     ac
     ps kill
     tar gzip base64 cksum md5sum
@@ -367,6 +379,13 @@ install -m644 "${HAMLINUX_RC:-etc/rc.boot.linux}" "$ROOT/etc/rc.boot"
 # package's own indirection rather than the six-line fallback that function
 # writes when the file is missing. Both are the same three-line contract.
 install -m644 etc/rc.boot.linux "$ROOT/etc/rc.boot.linux"
+# /etc/rc.login -- the login programs, one per terminal. Sourced by
+# /etc/rc.boot (and by /etc/rc.boot.installed) immediately before `supervise`.
+# It is a SEPARATE file rather than lines inside rc.boot because both the
+# developer boot and the installed machine need exactly the same terminals,
+# and because it carries the namespace-construction seam, which is the thing
+# most likely to be edited next.
+install -m644 etc/rc.login.linux "$ROOT/etc/rc.login"
 install -m644 etc/rc.boot.machine "$ROOT/etc/rc.boot.machine"
 for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
          os-release lsb-release debian_version profile resolv.conf \

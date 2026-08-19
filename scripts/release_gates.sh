@@ -339,6 +339,21 @@ poweroff_graphical|yes|0|22||bash tests/linux/poweroff_graphical.sh
 # read that as "it never ran" -- which is exactly what installed_documents.sh
 # did, and a fix was reverted over it (416248df).
 installed_uid_console|yes|0|23||bash tests/linux/installed_uid_console.sh
+
+# DOES THE MACHINE ASK WHO YOU ARE BEFORE IT GIVES YOU A SHELL? Until
+# 2026-08-19 it did not: /etc/rc.boot ended, and PID 1 -- which IS hamsh --
+# fell through into its own interactive prompt, an unauthenticated uid 0 shell
+# on the console of a machine that had just booted. installed_login.sh proved
+# the passwords WORK; nothing demanded one. 27/0 measured on this host in the
+# run that registered it, two arms of one invocation.
+#
+# THE COUNT INCLUDES ITS OWN NEGATIVE CONTROL, which is why it is worth 27 and
+# not 13: the guarded arm's central claim is an ASSERTION OF ABSENCE ("no root
+# shell before authentication"), and the autologin arm -- the same rc, the same
+# getty, the same port, differing by the two words `-a hostowner` -- must
+# REACH a root shell for the guarded arm's silence to mean anything. If the
+# control stops firing this gate goes red on the control, not on the product.
+installed_boot_login|yes|0|27||bash tests/linux/installed_boot_login.sh
 REGISTRY
 }
 
