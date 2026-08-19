@@ -258,16 +258,18 @@ install_refuses_reserved|yes|0|16||bash tests/linux/install_refuses_reserved.sh
 # reverted binary on a machine with no GPU at all (must power off, so a red in
 # the second arm cannot be a broken build).
 #
-# expect_min IS BLANK ON PURPOSE AND THIS IS THE STATED REASON: the gate WAS run
-# on this host (21 PASSED / 3 FAILED), and then its arm-B scoring was changed
-# because THE NEGATIVE CONTROL DID NOT FIRE -- the banner-restored binary
-# powered a presenting graphical machine off in 21 s and again in 18 s. Two of
-# those three assertion lines became reports in that change, so the count this
-# file would carry is 22 by ARITHMETIC on a run of the old scoring, not a
-# measurement of the new. A computed number is exactly what the blank exists to
-# refuse. Blank means zero, which still makes "asserted nothing" and any
-# failure red; fill it from the first run of the gate AS IT NOW STANDS.
-poweroff_graphical|yes|0|||bash tests/linux/poweroff_graphical.sh
+# expect_min 22, MEASURED on this host in the 1.0.32 release run of 2026-08-19,
+# by the gate AS IT NOW STANDS. It was left blank until then and the reason is
+# worth keeping: the gate had been run at 21 PASSED / 3 FAILED, and then its
+# arm-B scoring was changed because THE NEGATIVE CONTROL DID NOT FIRE -- the
+# banner-restored binary powered a presenting graphical machine off in 21 s and
+# again in 18 s, in two different display configurations. Two of those three
+# assertion lines became reports in that change, so 22 was available by
+# ARITHMETIC on a run of the OLD scoring, and a computed number is exactly what
+# a blank exists to refuse. The release run then scored the new gate at 22 / 0
+# and that is where this number comes from. That the two agree is an
+# observation, not the reason.
+poweroff_graphical|yes|0|22||bash tests/linux/poweroff_graphical.sh
 REGISTRY
 }
 

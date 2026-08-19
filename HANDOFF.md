@@ -50,6 +50,145 @@ freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
 it has never been caught in the act on that machine.
 
 
+### 1.0.32 IS BUILT AND GATED -- 20 GREEN / 1 RED -- AND THE TWO THINGS I WAS ASKED TO FIX BOTH TAUGHT ME SOMETHING THE BRIEF DID NOT CONTAIN
+
+**2026-08-19. Artifacts under `~/.hamnix-build/rel1032/`, outside every
+worktree. `GATES_SUMMARY.txt` there is the full record. NOT SIGNED, NOT
+PUBLISHED.**
+
+**The medium**: `~/.hamnix-build/rel1032/hamnix-linux-1.0.32.img`,
+**4,294,967,296 bytes APPARENT** -- the file is SPARSE, 3.0 G on disk -- sha256
+`e71e2c9908ccbe95c3f1abb1beaf6663e4d9f6592bf3c76b4d3595a79765fbe2`, re-read
+unchanged after the whole gate run. **The channel**:
+`~/.hamnix-build/rel1032/repo/linux`, **130 packages**, every index entry has a
+present tarball whose sha256 matches, nothing on disk unclaimed, and the
+checker's own one-nibble negative control RUNS and reports MISMATCH.
+
+`scripts/release_gates.sh`: **GREEN 20 / RED 1, 504 assertions scored**. The one
+red is `channel_covers_image` at 7/26, which is the **same dev-tree artifact as
+1.0.31 and for the same reason**: the driver runs it after the
+`HAMLINUX_INSTALLER=1` rebuild, so it scores the INSTALLER root. Against the
+lean root this release actually packages it is **8 passed, 0 failed**.
+
+#### THE TWO BLANK `expect_min` ARE FILLED, AND THEY WERE MEASURED TWICE
+
+`installed_accounts` **61/0** and `installed_offers_install` **24/0**, in two
+independent full runs on this host. They agree with the figures this file
+reported from an older tree. **That agreement is an observation about the runs;
+it is not why the numbers are in the registry.** `poweroff_graphical` got 22,
+measured, and the registry says in the file why it was blank first.
+
+#### THE POWEROFF FIX IS IN, AND ITS NEGATIVE CONTROL DID NOT FIRE -- TWICE
+
+`user/poweroff.ad`, `user/halt.ad` and `user/reboot.ad` no longer write a banner
+to fd 1 before opening `/dev/reboot`. `tests/linux/poweroff_graphical.sh` builds
+one image, two media differing in one file, and boots three machines.
+
+| arm | what it is | result |
+|---|---|---|
+| A | shipped binary, compositor + hamwrite presenting | powered off, 21 s |
+| B | **the same program with the banner line put back**, same desktop | **POWERED OFF, 21 s and 18 s** |
+| C | the banner binary, no GPU at all | powered off, banner on the serial line |
+
+**I could not reproduce the hang.** Two display configurations were tried --
+`virtio-gpu-pci` with a bare desktop (frame: 1538 colours, 4 % dominant) and
+`-vga std` with hamwrite open (1555 colours, 27 % dominant, and the guest
+printed `[hamwrite] scene window ready`) -- and in both the banner-restored
+control powered the machine off with its banner ON THE SERIAL LINE. So "the
+compositor is presenting" is **not sufficient** for a console write to stop
+returning, and neither is "an application is presenting on top of it".
+
+**That is not a refutation of the report in this file** -- three graphical boots
+past a 300 s deadline, seen on an INSTALLED machine after a full
+office-application drive with QMP keystrokes. This gate builds a LIVE medium and
+drives nothing. **It failed to LOCATE the hang, which is a different statement**,
+and the gate prints exactly that in capitals at the end of every run rather than
+letting arm A's green read as a confirmation. Arm B is scored as "the
+reproduction attempt produced a reading", with which reading printed; what is
+refused is silence.
+
+The fix stays. It removes a console write from the path to the power syscall,
+keeps every diagnostic on the failure paths -- reached exactly when the machine
+is NOT going down -- and the only thing it can cost is one line of log on a
+power-off that succeeded.
+
+**STILL CARRIES THE SHAPE, NOT FIXED:** `user/hamsh.ad`'s `svc_runlevel_halt()`
+and `svc_runlevel_reboot()` (`init 0` / `init 6`) print two console lines AND
+stop every supervised service before they open `/dev/reboot`. That cannot be
+fixed by reordering. `user/hamctl.ad:_act_power` and `user/hamsessui.ad:_power`
+-- the desktop's own Shut Down button, the path a person uses -- already opened
+the device first and were untouched.
+
+#### THE DOCUMENT-OWNERSHIP FIX WAS BUILT, MEASURED, AND REVERTED. BOTH REASONS ARE MEASUREMENTS
+
+The defect is unchanged: a document saved from an application the desktop
+started is **owned by uid 0**, and the person's own desktop terminal (uid 1001)
+cannot save over it. The obvious fix -- the chrome drops privilege at the launch
+-- was implemented (`lib/p9.ad:spawn_detached_as`, `lib/homedir.ad:hd_session_uid`,
+both launchers), built into a real medium, and gated. **It failed twice, in one
+run, for two independent reasons.**
+
+**1. THE APPLICATION NEVER OPENS A WINDOW AS uid 1001.**
+`tests/linux/installed_documents.sh` went **18 PASSED / 6 FAILED** against 48/0.
+All three office applications failed the same assertion -- *"the application
+never printed `[<app>] scene window ready` in 116 s"*. The guest's serial log for
+the hamwrite boot is this and nothing else:
+
+```
+INSTDOC-PHASE-LAUNCHED hamwrite
+uid 1001 home /home/hamdocusr
+rfork: no private namespace yet (needs CAP_SYS_ADMIN)
+[  114.445157] ACPI: PM: Preparing to enter system sleep state S5
+```
+
+The application printed **nothing at all** -- not a startup line, not an error.
+
+**AND THIS CORRECTS THE EXPLANATION STANDING IN THIS FILE.** The section below
+records the same "no window" outcome from the earlier attempt and blames
+`/etc/rc.de-user` -- its binds, its namespace, its being a terminal's launch
+rather than an icon's. **That attribution is refuted.** This run reached it with
+a bare `setuid 1001` in the launch, no `rc.de-user` anywhere in the phase, and
+got the identical result. **It is the IDENTITY that stops the window, not the
+rc.** And `rfork: no private namespace yet` is a WARNING the code carries on
+from -- `user/linux-syscalls.c` says so in its own comment, at length, because
+making it fatal once made the whole userland unrunnable outside root. **It is
+not the cause and should stop being cited as one.**
+
+**2. AND THE DROP DEMOTED THE INSTALLER.** `tests/linux/install_confirm_keys.sh`
+went **33 PASSED / 1 FAILED**, and the one failure is that gate's own POSITIVE
+control: `installer exited without 'install complete'`. Its rc starts the wizard
+with `echo '/bin/haminstallui' > '/dev/wsys/appmenu/launch'` -- the launch queue
+the change taught to drop -- and the guest's own ps census shows `haminstallui`
+running as `live` and `/bin/install` a zombie at 0:00 CPU.
+`tests/linux/install_wizard_gui.sh` stayed **34/0** in the same run because it
+does not go through that queue, which localises the cause instead of leaving it
+inferred. **The Applications menu and the desktop icon column carry the
+machine's own programs as well as the person's** -- Install Hamnix, Control
+Center, Terminal (whose shell runs `rc.de-user`'s binds, which are `mount(2)`)
+-- and a launcher that drops for all of them breaks every one.
+
+Reverted in `416248df`. **Both gates came back to 34/0 and 48/0 in the rebuilt
+run**, which is what makes those two numbers a localisation rather than a
+coincidence.
+
+**WHAT A REAL FIX HAS TO DO, so the next attempt does not start where this one
+did:** (a) make a uid-1001 client able to open a window when it is a child of
+the root chrome -- **that is a window-system question, not a launcher one**, and
+nothing here established WHY it cannot; and (b) distinguish the person's
+programs from the machine's AT THE LAUNCH, which the queue cannot do today
+because its payload is a bare path with no category. A denylist was considered
+and rejected: it cannot be gated comprehensively in one session, and any program
+left off it fails silently.
+
+#### AND `scripts/test_gate_registration.sh` WAS RED BEFORE ANY OF THIS
+
+Two gates neither the battery nor its annotations knew about:
+`scripts/test_install_names_host.sh` (now a manifest line; MEASURED 0.5 s on
+this host) and `tests/linux/install_refuses_reserved.sh` (whose header said
+ON-DEMAND without the verbatim phrase the checker looks for). Both are run by
+`scripts/release_gates.sh`, **which that checker does not know is a registrar** --
+worth fixing properly, because it will keep producing this false red.
+
 ### WHERE THE WORD PROCESSOR PUTS YOUR DOCUMENT IS A MEASUREMENT NOW, NOT A GREP -- AND ON THE PATH A PERSON USES, THE SAVE SUCCEEDED INTO SOMEBODY ELSE'S DIRECTORY
 
 **Measured, dev host, 2026-08-18. Evidence under
