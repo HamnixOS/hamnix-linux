@@ -27,6 +27,58 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE ESP AS SHIPPED CANNOT HOLD AN A/B PAIR -- MEASURED, AND THE 73 MB FIGURE IN THIS FILE IS WRONG
+
+**2026-08-19, orchestrator-side. Measured off the shipped 1.0.32 medium with
+`sfdisk` and `mdir` — no machine booted, nothing mounted, the image not modified.**
+
+The A/B kernel update is authorised (David: there are no installed machines to
+brick). Before an agent starts, the first question is whether a second slot
+physically fits. **It does not, as things stand.**
+
+| | |
+|---|---|
+| ESP partition | **424.7 MB** (829,440 sectors), label `HAMBOOT` |
+| `EFI/BOOT/BOOTX64.EFI` — the file firmware executes | **175.9 MB** |
+| loose in the ESP root | `vmlinuz` 12.1 MB + `initramfs.cpio.gz` 138.5 MB + `UKI.MAP` 6 KB + `root.partuuid` 37 B + `HAMNIX.LOG` 256 KB = **150.9 MB** |
+| **free** | **97.0 MB** |
+
+**A second slot needs another ~176 MB and there are 97 MB.** So an A/B design
+must do one of: grow the ESP (the medium is 4 GiB with a 3.6 G root, so there is
+room in the layout to take from), shrink the UKI, or share components between
+slots rather than duplicating whole images.
+
+**AND THE THING THAT JUMPS OUT: THE KERNEL AND INITRAMFS ARE ALREADY STORED
+TWICE.** The UKI is a single PE image that EMBEDS a kernel and an initramfs — and
+`vmlinuz` and `initramfs.cpio.gz` also sit loose in the ESP root, 150.9 MB of
+them. That is very nearly the 176 MB a second slot needs.
+
+**DO NOT ASSUME THEY ARE REMOVABLE — I DID NOT ESTABLISH THAT, AND THERE IS A
+REASON TO THINK THEY ARE NOT.** `UKI.MAP`'s first line is documented elsewhere in
+this file as the byte length of that initramfs, used by `/bin/bootsync` as an
+APPEND OFFSET when it rewrites the boot modules in place. The loose copies may be
+bootsync's source material, in which case removing them breaks the one part of
+the boot image that ALREADY updates. **Whoever takes this must read `bootsync`
+first and find out what those files are for.** If they are genuinely redundant,
+reclaiming them is most of an A/B slot for free.
+
+**CORRECTION TO THIS FILE.** An earlier entry recorded "the one file firmware
+executes is 73 MB on a journal-less filesystem", and used that number in the
+argument for why A/B was not attempted. **It is 175.9 MB** — the argument is
+unchanged in direction and stronger in degree, but the number was wrong and is
+corrected here rather than quietly edited.
+
+**INCIDENTAL, AND USEFUL TO THE OWNER:** `HAMNIX.LOG` is present in the ESP root
+at exactly **262,144 bytes** (256 KB, evidently a fixed-size ring). That is the
+file to pull off the stick's FAT partition for the freeze question. Note the
+caveat already recorded: `/dev/kmsg` is still root-only, so a dropped session's
+lines do not reach it.
+
+**NOT ESTABLISHED:** nothing was booted; this is the layout of a freshly built
+medium, not of a machine that has been installed and updated. An installed
+machine's ESP is the same partition (`bind '#esp' /boot`), but its contents after
+an update have not been measured.
+
 ### THE POINTER IS GATED. A CLICK ON A ROW, A CLICK ON AN ICON, AND A CLICK ON "INSTALL HAMNIX" ON A LIVE MEDIUM THAT PARTITIONS A DISK
 
 **Measured on booted machines, dev host, 2026-08-19, base `1c2a00e7`. Evidence
