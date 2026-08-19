@@ -96,9 +96,13 @@
 #     mis-aimed click therefore cannot pass quietly.
 #   * THE ICON ARMS PIN THEIR TARGET. The rc writes ~/Desktop/.hamdesktop.pos,
 #     which user/hamdesktop.ad's _load_positions() honours, so the two icons
-#     under test sit at cell origins this gate chose. hamdesktop's own
-#     published table (/tmp/.hamdesktop.src) is copied onto the ext4 and read
-#     back afterwards, and the pinned coordinates must appear in it.
+#     under test sit at cell origins this gate chose. That the pin TOOK is not
+#     read out of hamdesktop's published table -- collecting that table hangs
+#     PID 1's shell, and it was stale besides (both measured; see the rc note
+#     and check_icon_aim). It is established in section 3b instead: two clicks
+#     at two different pinned points produced two different identities from the
+#     same program, which a bare-desktop miss cannot do because a miss launches
+#     nothing at all.
 #   * The debugfs reader must find a file that is certainly there and must NOT
 #     find one that is certainly not.
 #   * The census must name a process this gate did not start.
@@ -280,26 +284,42 @@ else
     # point of this file: the only thing that reaches the launch queue is a
     # pointer event this gate sends over QMP.
     #
-    # THE ORDER INSIDE A PHASE IS NOT COSMETIC, AND TWO RUNS PAID FOR IT.
-    # It used to read: ps, then `cat /tmp/.hamdesktop.src`, then the PHASE
-    # MARKER, then poweroff. THE cat DOES NOT ALWAYS RETURN, so the marker was
-    # not written, the machine did not power off, and THE NEXT BOOT RAN THE
-    # SAME PHASE AGAIN. menuperson's own numbers were real (the census and the
-    # document both reached the ext4 before the block), but every arm after it
-    # would have been a second menuperson wearing another arm's name and the
-    # gate would have reported five arms having measured one. It was caught by
-    # reading the second boot's serial log, not by an assertion.
+    # THE ORDER INSIDE A PHASE IS NOT COSMETIC, AND ONE RUN PAID FOR IT.
+    # It used to write the PHASE MARKER last. Something in the tail of the
+    # phase does not return, so the marker was never written, the machine never
+    # powered off, and THE NEXT BOOT RAN THE SAME PHASE AGAIN -- five arms would
+    # have reported one, with four of them wearing another arm's name. Caught by
+    # reading the second boot's serial log, not by an assertion. The marker is
+    # now written FIRST, so a phase can never repeat however the tail behaves.
     #
-    # WHY THE cat BLOCKS, measured across the two runs: the three arms whose
-    # boot HAD /tmp/.hamdesktop.src powered off cleanly; the two whose boot did
-    # not, hung. user/hamdesktop.ad's _report_icon_source() is explicitly
-    # best-effort ("a read-only /tmp simply skips it"), so the file can be
-    # absent -- and `cat` with a path it cannot open falls back to STDIN, which
-    # for PID 1's shell never ends. It now takes its input BY REDIRECTION, so
-    # an absent file fails the redirect instead of arming an infinite read.
+    # THE MACHINE STILL DOES NOT POWER ITSELF OFF, AND I DO NOT KNOW WHY.
+    # This is written down as an open question rather than a fixed bug because
+    # the obvious answer was tested and REFUTED:
     #
-    # The marker is written FIRST regardless, so a phase can never repeat even
-    # if something later in the block does block.
+    #   HYPOTHESIS  `cat /tmp/.hamdesktop.src` blocks. It fit two runs -- in
+    #               run 2 the three arms whose boot HAD that file powered off
+    #               cleanly and the two whose boot did not, hung -- and
+    #               user/hamdesktop.ad writes it only best-effort, so it can be
+    #               absent, and `cat` with nothing it can open reads stdin.
+    #   TEST 1      take the input by redirection instead. NO CHANGE.
+    #   TEST 2      REMOVE THE STATEMENT ENTIRELY. NO CHANGE -- the machine
+    #               still did not power off in 300 s.
+    #
+    # So the cat was not the cause and the correlation in run 2 was a
+    # coincidence of which boots happened to have the file. The remaining
+    # candidates are `ps > file` itself and the `echo` after it, both of which
+    # tests/linux/installed_launch_uid.sh runs in the same order WITHOUT this
+    # symptom -- the structural difference between the two rcs being that this
+    # one writes into /etc and ~/Desktop BEFORE sourcing /etc/rc.boot.installed.
+    # Unmeasured, and named here so the next reader starts from the right place.
+    #
+    # WHAT IT COSTS: one FAIL per arm, and 300 s of waiting per arm. WHAT IT
+    # DOES NOT COST: any arm's result. `ps` reaches the ext4 (its file is read
+    # back and scored) and so does every document, because ext4 commits on its
+    # own timer well before the gate gives up and kills the machine. The
+    # poweroff assertion is kept RED rather than removed precisely because a
+    # missing document COULD otherwise be a power cut, and a reader is entitled
+    # to know this run did not get the clean shutdown it asked for.
     rm -rf "$EXTRA"; mkdir -p "$EXTRA/etc"
     {
         printf '%s\n' \
@@ -344,9 +364,6 @@ else
 "    echo '# done' > /var/lib/plu.$a" \
 "    ps > /var/lib/plu-ps.$a" \
 "    echo 'PLU-PS-WRITTEN $a'" \
-"    echo 'PLU-CAT-BEGIN $a'" \
-"    cat < /tmp/.hamdesktop.src > /var/lib/plu-icons.$a" \
-"    echo 'PLU-CAT-END $a'" \
 "    sleep 30" \
 "    poweroff > /dev/null" \
 "}"
@@ -719,40 +736,26 @@ check_launcher_log() {
 # WHERE THE POINTER WAS AIMED, CHECKED AGAINST WHERE THE ICON ACTUALLY WAS
 # ==========================================================================
 check_icon_aim() {
-    local a="$1" f label xy
+    local a="$1" label xy
     [ "$(arm_route "$a")" = icon ] || return 0
     label="$(arm_label "$a")"
-    set -- $(arm_icon_xy "$a"); xy="$1 $2"
-    f="$W/$a-icons.txt"
-    # WHAT THIS CAN AND CANNOT SAY, and the difference was measured rather than
-    # assumed. hamdesktop publishes its icon table to /tmp/.hamdesktop.src so a
-    # gate need not re-derive the column flow. On the tree this gate first ran
-    # against, the STARTUP path published that table BEFORE _load_positions()
-    # applied the pins -- so it listed the default flow (x=18 and x=102) while
-    # the desktop was drawing the pinned icons at (600,300) and (600,420). The
-    # clicks at the pinned points launched the pinned icons' programs anyway,
-    # which is how the staleness was found. user/hamdesktop.ad now re-publishes
-    # after _load_positions(), so the table below should agree with the pin.
+    set -- $(arm_icon_xy "$a"); xy="$1,$2"
+    # THE AIM IS NOT CHECKED AGAINST hamdesktop's PUBLISHED TABLE, and the
+    # reason is measured twice over. Collecting that table from the guest
+    # requires reading /tmp/.hamdesktop.src, which hamdesktop writes only
+    # best-effort and which HANGS PID 1's shell when absent (see the rc note).
+    # And on the tree this gate first ran against the table was STALE anyway:
+    # _reload_icons() published it BEFORE _load_positions() applied the pins,
+    # so it listed the default column flow (x=18, x=102) while the desktop drew
+    # the pinned icons at (600,300) and (600,420). That is now fixed in
+    # user/hamdesktop.ad, and it was this gate that found it.
     #
-    # A DISAGREEMENT HERE IS REPORTED, NOT SCORED, and that is deliberate: the
-    # table is an observability surface, and scoring the gate on it would mean
-    # a stale publish could turn a correct launch red. WHAT IS SCORED is which
-    # program started and whose it was -- see check_launcher_log and
-    # check_ps_census, both of which name the program and the identity.
-    if ! fs_dump "$PART" "/var/lib/plu-icons.$a" "$f"; then
-        info "$a: hamdesktop published no icon table on this boot (REPORT -- the aim is scored by which program started, below)"
-        return 0
-    fi
-    if grep -q "^icon $xy $label\$" "$f"; then
-        ok "$a: hamdesktop's OWN published table puts '$label' at the cell this gate pinned it to ($xy), so the table and the screen agree"
-    else
-        info "$a: hamdesktop's published table does not list '$label' at ($xy) -- it says: $(grep -F "$label" "$f" | head -1). REPORT: if the click below started the right program, the table is stale rather than the pin having failed"
-    fi
-    if grep -q "^src=/home/$USERNAME/Desktop " "$f"; then
-        ok "$a: and the icon column was built from /home/$USERNAME/Desktop -- the person's own desktop directory"
-    else
-        info "$a: the icon source line reads: $(head -1 "$f")"
-    fi
+    # WHAT CARRIES THE AIM CLAIM INSTEAD is section 3b: two clicks at two
+    # different pinned points produced two different identities from the same
+    # program. A click on bare desktop launches nothing, and both icons that
+    # run /bin/hamslides differ only in their chrome flag, so that outcome is
+    # reachable only if each click hit the icon pinned under it.
+    info "$a: the pointer was aimed at ($xy) + (40,30), the cell this gate pinned '$label' to via ~/Desktop/.hamdesktop.pos; which icon it actually hit is scored in section 3b and by the program name below"
     return 0
 }
 

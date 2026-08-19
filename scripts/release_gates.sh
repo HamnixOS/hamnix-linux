@@ -282,6 +282,26 @@ installed_documents|yes|0|48||bash tests/linux/installed_documents.sh
 # working. A third arm (hamslides, `user`) exists so the split cannot line up
 # with WHICH PROGRAM instead of WHICH PAYLOAD.
 installed_launch_uid|yes|0|66||bash tests/linux/installed_launch_uid.sh
+# THE POINTER HALF OF THE SAME QUESTION, and the half no gate could see before
+# it. installed_launch_uid says in its own header "IT DOES NOT CLICK AN ICON OR
+# A MENU ROW"; this one does both, on five boots of one installed disk, with a
+# real pointer over QMP and nothing writing the launch queue. Its negative
+# control is an ARM of the same run: menuperson and menuchrome launch the SAME
+# /bin/hamwrite from the SAME menu and differ only by X-Hamnix-SystemChrome in
+# one .desktop file, and the identity flips 1001 -> 0. The expected count is
+# left at 0 until a clean full run is recorded here; the run that landed this
+# file scored 75/4 with all four reds in the gate's own instrument, both since
+# fixed (see the commit).
+pointer_launch_uid|yes|0|0||bash tests/linux/pointer_launch_uid.sh
+# A PERSON CLICKS APPLICATIONS -> INSTALL HAMNIX ON A LIVE MEDIUM AND A DISK
+# GETS PARTITIONED. 19/0 measured 2026-08-19. Both other wizard gates start
+# haminstallui by writing the launch queue; this one starts it with a pointer
+# on a menu row, requires it to be ROOT (installer.desktop is chrome-marked),
+# and then requires a target's sha256 to move and sfdisk to read a GPT off it
+# that was not there before. Two arm-and-confirm rounds were needed and that is
+# scored: one would be the single-keypress-erase defect install_confirm_keys
+# exists to prevent.
+live_pointer_install|yes|0|19||bash tests/linux/live_pointer_install.sh
 # The end-to-end half of the reserved-name / over-long-name refusals. 16/0
 # measured on this host, 2026-08-18, immediately before it was written here;
 # the QEMU-free half is test_install_names_host above.
