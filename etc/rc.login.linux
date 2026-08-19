@@ -1,0 +1,107 @@
+# /etc/rc.login — start a login program on every terminal of this machine.
+#
+# Sourced by /etc/rc.boot as the SECOND-TO-LAST thing it does, immediately
+# before `supervise`. Those two lines together are what replaced PID 1's
+# fallthrough into an unauthenticated root shell; see the comment above the
+# `source` in etc/rc.boot.linux for why neither works without the other.
+#
+# WHAT A LOGIN PROGRAM DOES HERE, and it is more than `setuid`:
+#
+#   getty <terminal>  opens the terminal, wires it to fd 0/1/2, execs login.
+#   login             prompts, writes `user`/`pass` to /dev/auth, and on "ok"
+#                     calls sys_setuid_auth on the VERIFIED fd -- the fd is
+#                     the capability, and login never sees a password hash.
+#                     Then it stamps HAMNIX_NEWSHELL_USER=<user> and execs
+#                     the login shell, which sources that user's NAMESPACE
+#                     RECIPE (see THE SEAM below) before its first prompt.
+#                     A wrong password prints "Login incorrect" and reprompts.
+#
+# WHICH TERMINALS EXIST HERE. This is the Linux lane, so they are the stock
+# kernel's: /dev/ttyS0 (the 8250 serial console named on the command line)
+# and /dev/tty1../dev/tty4 (CONFIG_VT). They are NOT /dev/vt/N -- that is a
+# native-Hamnix device and this kernel has no such file. getty takes a path
+# for exactly this reason.
+#
+# THE SERIAL CONSOLE IS DELIBERATELY FIRST, and it is the one a gate can
+# measure. Once the compositor presents, it owns the framebuffer, so a login
+# prompt on tty1 is behind the desktop and no instrument on this machine can
+# read it back. The serial line is the terminal that stays readable.
+#
+#
+# THE SEAM — WHERE A SESSION'S `/` GETS CONSTRUCTED
+# =================================================
+# The owner's constraint on this system is that a userland session must NOT
+# land in the machine's real root:
+#
+#     "the global root should be min as possable, with apps and things
+#      living on fileserver very plan 9 shaped. Drivers can live on the real
+#      global root, but that should be an underpinning not the thing the
+#      user in userland gets to be running cd /"
+#
+# A login program in a Plan 9-shaped system authenticates AND THEN BUILDS THE
+# NAMESPACE THE SESSION GETS. Today it only does the first half: an
+# authenticated session inherits the machine's real root, so `cd /` shows the
+# machine. That default is NOT baked in here, and this comment is the seam so
+# it is a change in ONE PLACE rather than a rewrite.
+#
+# THE SEAM ALREADY EXISTS AND IS ALREADY ON THE PATH. `login` stamps
+# HAMNIX_NEWSHELL_USER=<user>, and the hamsh it execs sources that user's
+# recipe -- /etc/users/<user>.ns, falling back to /etc/users/default.ns --
+# in the session's OWN namespace, immediately before its first prompt. Those
+# files are plain hamsh: `bind` adds, `unmount` removes. So the per-session
+# namespace is constructed by a file, per user, on every login, already.
+#
+# WHAT WOULD CHANGE THERE, and it is one line. default.ns is SUBTRACTIVE
+# today -- it inherits the machine's root and unmounts the dangerous parts of
+# it (/var/lib/hpm, '#by-id', /dev/blk). The constructed-root move is to make
+# it REPLACE instead of subtract, the way `enter debian` already replaces a
+# root wholesale for a session:
+#
+#     bind '#<appserver>' /        # in place of the unmount lines
+#
+# The mechanism for that is built, exercised and shipping -- etc/rc.boot.linux
+# captures `linux = ns clean { bind '#distro/debian' / ... }` a few lines
+# above, and `enter debian` uses it. It is simply aimed at Debian rather than
+# at a Hamnix app server, and there is no Hamnix app server to aim it at yet.
+#
+# WHAT IS NOT ESTABLISHED, said here because the next person will want it:
+# nothing has measured what BREAKS when `/` is a constructed root. The window
+# system, the launcher and hpm are the suspects -- each resolves absolute
+# paths that today happen to be the machine's. No gate answers this.
+
+# --- the serial console ----------------------------------------------
+# `getty /dev/ttyS0`, not a bare `login`: getty OPENS the terminal and dup2's
+# it onto fd 0/1/2 itself, so the session does not depend on inheriting
+# whatever PID 1 happened to have. PID 1's own fd 1 is /dev/console, which
+# follows the LAST `console=` on the command line and is therefore the SCREEN
+# the compositor covers -- naming the port explicitly is the difference
+# between a prompt someone can reach and a prompt behind the desktop.
+#
+# THERE IS EXACTLY ONE READER OF THIS PORT, which is what makes it safe: PID 1
+# runs `supervise` immediately after sourcing this file, and `supervise` parks
+# on NO file descriptors and never reads the console. Two readers on one 8250
+# would race for each keystroke and each would get a random half of the
+# password.
+#
+# Each is a background job of PID 1 (`&`), the same idiom /etc/rc.d/rc.5 uses
+# for the compositor and the panel. NOT foreground: PID 1 would block in
+# waitpid until the session ended, and while blocked it would not drain the
+# init/service control mailbox -- `init 0` and `poweroff` would stop working.
+/bin/getty /dev/ttyS0 &
+echo 'rc.login: getty started on /dev/ttyS0 (the console)'
+
+# --- the virtual terminals -------------------------------------------
+# Alt+F1..F4 on a machine with a keyboard. Each is a separate terminal with
+# its own prompt, which is what "multi ttys" means; each authenticates
+# independently, so two people at two terminals get two identities.
+#
+# NOT MEASURED, and said plainly: the gate for this work drives /dev/ttyS0,
+# because once wsysd presents it owns the framebuffer and nothing on this
+# machine can read back what is on tty2. That these two start is asserted;
+# that a person can log in on them is not.
+/bin/getty /dev/tty2 &
+echo 'rc.login: getty started on /dev/tty2'
+/bin/getty /dev/tty3 &
+echo 'rc.login: getty started on /dev/tty3'
+
+echo 'rc.login: every terminal on this machine now asks who you are'

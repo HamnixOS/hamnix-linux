@@ -11,12 +11,29 @@
 # per-user-namespace -> exec-shell flow.
 #
 #   getty <N>            interactive login on VT N (login: prompt)
-#   getty <N> -a <user>  AUTOLOGIN: exec `login -f <user>` so the VT
+#   getty /dev/tty2      interactive login on a DEVICE PATH (login: prompt)
+#   getty <N|path> -a <user>
+#                        AUTOLOGIN: exec `login -f <user>` so the terminal
 #                        comes straight up as <user> with no password.
 #                        login does NOT setuid in this mode — it keeps
 #                        the identity getty inherited (the live image's
 #                        hostowner `live`), preserving today's effective
 #                        behavior while routing through the session path.
+#
+# WHY THERE ARE TWO WAYS TO NAME A TERMINAL, and it is not a convenience:
+# THE TWO LANES DO NOT HAVE THE SAME TERMINALS. `/dev/vt/N` is a device the
+# NATIVE Hamnix kernel serves, and it does not exist on the Linux lane --
+# user/linux-syscalls.c's device table has no `/dev/vt` arm at all, so
+# `getty 2` there opens nothing and every VT it was asked for is a terminal
+# that is not present. What the Linux lane HAS is the stock kernel's own
+# terminals: /dev/tty1..N from CONFIG_VT and /dev/ttyS0.. from the 8250
+# driver, both real files under devtmpfs. So a terminal is named by PATH
+# when the caller knows the path, and by VT NUMBER when it wants the native
+# device -- the same program, the same `exec /bin/login` contract, and no
+# guessing about which kernel is underneath.
+#
+# A path is recognised by a leading '/'. That is the whole test: a VT number
+# is decimal digits, a device is absolute, and nothing else is accepted.
 #
 # With NO arguments (legacy mode), getty execs /bin/login without
 # touching fds; the single console (FD_STDIN_MARK / FD_STDOUT_MARK)
@@ -93,12 +110,18 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     vt_num: int32 = 0   # 0 = legacy mode (no VT wiring)
     autouser: Ptr[uint8] = cast[Ptr[uint8]](0)   # NULL = interactive login
 
+    # A device PATH (leading '/') is used as-is; anything else is parsed as
+    # a native VT number. dev_path stays NULL in VT mode.
+    dev_path: Ptr[uint8] = cast[Ptr[uint8]](0)
     if argc >= 2:
         vt_str: Ptr[uint8] = cast[Ptr[uint8]](argv[1])
-        vt_num = parse_int(vt_str)
-        if vt_num < 1 or vt_num > 4:
-            write_str(2, "getty: VT number must be 1..4\n")
-            vt_num = 0
+        if vt_str[0] == 47:          # '/' -- a device path
+            dev_path = vt_str
+        else:
+            vt_num = parse_int(vt_str)
+            if vt_num < 1 or vt_num > 4:
+                write_str(2, "getty: VT number must be 1..4\n")
+                vt_num = 0
 
     # Optional autologin: `getty <N> -a <user>`.
     if argc >= 4:
@@ -106,18 +129,24 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         if streq(opt, "-a") == 1:
             autouser = cast[Ptr[uint8]](argv[3])
 
-    if vt_num > 0:
-        # --- VT mode: wire /dev/vt/N to fd 0/1/2 ---------------------
-        _build_vt_path(vt_num)
+    if vt_num > 0 or dev_path != cast[Ptr[uint8]](0):
+        # --- terminal mode: wire the terminal to fd 0/1/2 ------------
+        # `open_path` is either the caller's device path or the /dev/vt/N
+        # built from the VT number. From here down the two are identical:
+        # open twice (read + write), dup2 onto 0/1/2, exec login.
+        open_path: Ptr[uint8] = dev_path
+        if dev_path == cast[Ptr[uint8]](0):
+            _build_vt_path(vt_num)
+            open_path = &vt_path[0]
 
         # Open for reading (stdin). sys_open opens RDONLY.
-        vt_rfd: int32 = sys_open(cast[Ptr[char]](&vt_path[0]))
+        vt_rfd: int32 = sys_open(cast[Ptr[char]](open_path))
         if vt_rfd < 0:
             write_str(2, "getty: cannot open vt for reading\n")
             # Fall back to legacy mode.
         else:
             # Open for writing (stdout/stderr). sys_open_write opens WRONLY.
-            vt_wfd: int32 = sys_open_write(cast[Ptr[char]](&vt_path[0]))
+            vt_wfd: int32 = sys_open_write(cast[Ptr[char]](open_path))
             if vt_wfd < 0:
                 sys_close(vt_rfd)
                 write_str(2, "getty: cannot open vt for writing\n")
@@ -131,7 +160,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                     sys_close(vt_rfd)
                 if vt_wfd > 2:
                     sys_close(vt_wfd)
-                write_str(1, "getty: VT ready\n")
+                # Named on the terminal itself, so a person looking at tty2
+                # can tell it apart from tty1, and a gate reading a serial
+                # log can tell WHICH terminal answered.
+                write_str(1, "getty: terminal ready: ")
+                write_str(1, open_path)
+                write_str(1, "\n")
 
     # Exec /bin/login (replaces this task, inheriting the wired fds).
     # Autologin -> `login -f <user>`; otherwise the interactive prompt.

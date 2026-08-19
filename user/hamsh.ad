@@ -10888,6 +10888,8 @@ def _builtin_dispatch(cmd: Ptr[uint8], argc: int32) -> int32:
         return builtin_init(argc)
     if cstr_eq(cmd, "telinit") != 0:
         return builtin_init(argc)
+    if cstr_eq(cmd, "supervise") != 0:
+        return builtin_supervise(argc)
     # docs/security.md Phase 8.
     if cstr_eq(cmd, "read") != 0:
         return builtin_read(argc)
@@ -10941,6 +10943,8 @@ def _builtin_dispatch_kind_check(cmd: Ptr[uint8]) -> int32:
     if cstr_eq(cmd, "init") != 0:
         return 1
     if cstr_eq(cmd, "telinit") != 0:
+        return 1
+    if cstr_eq(cmd, "supervise") != 0:
         return 1
     if cstr_eq(cmd, "read") != 0:
         return 1
@@ -15640,6 +15644,68 @@ def builtin_init(argc: int32) -> int32:
         errstr_set("init: runlevel must be 0..9")
         return 1
     svc_enter_runlevel(lvl)
+    return 0
+
+
+def builtin_supervise(argc: int32) -> int32:
+    # `supervise` — THE TAIL OF PID 1's BOOT RC. IT NEVER RETURNS.
+    #
+    # WHAT IT IS FOR, and this is the whole point of the verb:
+    #
+    # hamsh IS PID 1 (/init is a two-line shim that execs
+    # `/bin/hamsh /etc/rc.boot`). main() sources the boot rc and then FALLS
+    # THROUGH to the interactive REPL. On a machine that booted correctly
+    # that fallthrough is an UNAUTHENTICATED uid 0 SHELL ON THE CONSOLE:
+    # nothing asked who was sitting there, and everything it types runs as
+    # root. The rc completing NORMALLY is what produces it — this is not an
+    # error path, which is exactly why it survived so long.
+    #
+    # It is also the same architectural fact as the desktop freeze that was
+    # fixed earlier: an rc that RAISES lands in that same prompt. One fact,
+    # two symptoms. A greeter spawned BESIDE the prompt closes neither,
+    # because the prompt is still there behind it.
+    #
+    # So the fix is not to add a login program next to the fallthrough. It is
+    # for PID 1's rc TO STOP FALLING THROUGH AT ALL. An rc that ends in
+    # `supervise` never reaches main()'s REPL, because this loop never
+    # returns to it. The login programs the rc spawned on the VTs are then
+    # the ONLY way in, and they authenticate.
+    #
+    # WHY NOT `exit` AT THE END OF THE RC: main()'s `rcrc == 2` arm returns
+    # out of main. For PID 1 that is process death, which the kernel reports
+    # as a panic and an unbootable machine. PID 1 must STAY ALIVE and keep
+    # doing its job; it just must not read the console.
+    #
+    # WHY NOT `while 1 == 1 { }` IN THE RC SCRIPT: an infinite loop written
+    # in hamsh source never returns to run_source at _rs_depth == 1, so the
+    # depth-1 collector never runs and every temporary the body allocates is
+    # stranded. That is precisely what exhausted the value arena and killed
+    # the desktop soak (see THE MINOR COLLECTION above), and the way it
+    # FAILED was by raising into the interactive prompt — i.e. straight back
+    # into the hole this verb exists to close. A native loop allocates no
+    # value cells, no nodes and no string bytes, so it cannot end that way.
+    #
+    # WHAT IT STILL DOES, because PID 1 has a job besides not-prompting:
+    #   * svc_supervisor_tick() — drains the init/service control mailbox
+    #     (so `init 0`, `init 6` and `service ... start` from any other
+    #     process are still honoured), reaps exited supervised children and
+    #     fires scheduled restarts with backoff.
+    #   * jobs_reap_quiet() — reaps detached `spawn`ed children (the gettys)
+    #     so a getty that exits does not become a zombie.
+    #   * sh_park() — waits on NO fds for SH_POLL_MS. It PARKS rather than
+    #     spinning: the same line that stopped PID 1 burning a whole core
+    #     through `sleep 45` in the boot rc. Critically it does NOT park on
+    #     fd 0 (sh_park_stdin does that) — PID 1 must never consume console
+    #     input, or it would race the getty on VT1 for keystrokes.
+    #
+    # argc is accepted and ignored: the verb takes no arguments, and
+    # rejecting extras would be a boot failure for a typo in a file whose
+    # only job at this point is to not return.
+    while True:
+        svc_supervisor_tick()
+        jobs_reap_quiet()
+        sh_park()
+    # Not reached. Adder wants a return on the path anyway.
     return 0
 
 

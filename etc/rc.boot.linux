@@ -188,3 +188,38 @@ linux = ns clean {
 # no sections. It used to be first, and the menu's distribution section was
 # empty on every image ever built.
 source '/etc/rc.d/rc.5'
+
+# --- WHO IS SITTING HERE ---------------------------------------------
+# EVERYTHING ABOVE THIS LINE USED TO BE THE WHOLE FILE, and that is exactly
+# the defect. The rc ended, and PID 1 -- which IS hamsh -- fell through into
+# its interactive prompt. That prompt is an UNAUTHENTICATED uid 0 SHELL on
+# the console of a machine that has just finished booting: nothing asked who
+# was there, and everything typed ran as root. It is produced by the rc
+# COMPLETING NORMALLY, which is why it was never noticed as a failure.
+#
+# It is the same architectural fact as the desktop freeze that was fixed
+# earlier -- an rc that RAISES lands in that same prompt. One fact, two
+# symptoms. So a greeter started BESIDE the prompt closes neither of them:
+# the prompt is still there, behind the greeter, on the console.
+#
+# The fix is the two lines below, in this order, and neither works alone:
+#
+#   `source /etc/rc.login` starts a login program on each terminal. Each one
+#   prompts, authenticates against /dev/auth (the real /etc/shadow, the same
+#   device `su` uses), and on success becomes that user and execs their
+#   shell. On failure it says so and prompts again.
+#
+#   `supervise` is what stops the fallthrough. It is a hamsh builtin that
+#   NEVER RETURNS: it reaps children and drains the init/service control
+#   mailbox (so `init 0`, `init 6` and `service` still work) and parks, and
+#   it never reads the console. Because it does not return, main() never
+#   reaches its interactive REPL, and there is no root prompt to fall into.
+#
+#   `exit` here would NOT do: main()'s exit path returns out of main, and for
+#   PID 1 that is process death, which the kernel calls a panic. PID 1 has to
+#   stay alive and keep doing its job -- it just must not read the console.
+source '/etc/rc.login'
+
+# NOTHING AFTER `supervise` EVER RUNS. It is the last statement in the boot
+# of this machine, deliberately, and anything appended below it is dead code.
+supervise
