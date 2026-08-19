@@ -14,6 +14,47 @@ because the number is the deliverable.
 
 ## Unreleased
 
+### The rest of the machine is still there when a program runs in its own root
+
+This line of work is building toward a machine where what you see at `cd /` is
+a small root put together for your session, and the real machine -- the disks,
+the drivers, the hardware -- sits underneath it. Plan 9's convention, which
+this project follows, is that the underneath is reachable at `/n`.
+
+**It was not.** A session that switched into its own root got a `/n` that was
+its OWN root over again, and the machine it was running on had no name at all
+from inside. Nothing reported an error: the call that was supposed to make the
+machine visible returned success and did the opposite. The same two lines are
+in the scripts that run `enter debian`, so that had no way back either.
+
+Both are fixed, and a booted measurement now checks it from inside four
+different constructed roots, with a fifth arm in the same boot deliberately
+reproducing the old behaviour so the check is known to be capable of failing.
+
+### A program that cannot start now tells you why
+
+A program that exists but cannot run used to exit with the number 127 and say
+nothing whatsoever -- the same thing you get for a command that does not
+exist. The commonest cause is that the program needs a shared loader that
+isn't reachable from where it was started, and the error the kernel gives back
+names the file that IS there rather than the one that is missing.
+
+Now it says which loader it wanted, and which directory to make available:
+
+    exec: `/bin/cat' is present but cannot run: its dynamic interpreter
+    `/lib64/ld-linux-x86-64.so.2' does not resolve in this namespace.
+    execve(2) answered ENOENT for the INTERPRETER, not for the program.
+    Bind `/lib64' into this root.
+
+It also tells apart the other reasons a start can fail: the file is not there
+at all, the execute bit is off, or it is not a runnable format. This reaches
+you through the machine's console rather than the program's own error
+stream, because the error stream is exactly the thing that may not be working
+in this situation.
+
+Both changes are in the runtime that every shipped program is built against,
+so an installed machine receives them the ordinary way, with `hpm update`.
+
 ### A program the desktop starts for you can be heard again
 
 Until now, anything running as **you** rather than as the machine printed its

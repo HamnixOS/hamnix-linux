@@ -191,11 +191,27 @@ echo 'MINROOT-$a-lsroot-status' \$status
 enter $a { cat /MINROOT-NO-SUCH-FILE-ANYWHERE }
 echo 'MINROOT-$a-absent-status' \$status
 # --- the machine's own root, still reachable from below at /n -----
-# rc.de-user.linux binds '#/' -> /n and enter_root carries /n across;
-# if this fails the Plan 9 "roots that are not yours" convention does
-# not survive a constructed root, which is worth knowing on its own.
+# rc.de-user.linux binds '#/' -> /n and enter_root carries the real root
+# across; if this fails the Plan 9 "roots that are not yours" convention
+# does not survive a constructed root, which is the whole direction.
 enter $a { cat /n/MINROOT-REALROOT-MARKER }
 echo 'MINROOT-$a-nmarker-status' \$status
+# --- AND /n MUST NOT BE THIS ARM'S OWN ROOT ------------------------
+# This is the exact defect the fix is for, asked as its own question.
+# Before the fix \`bind '#/' /n\` bound the constructed root onto its own
+# (backticks ESCAPED: PEOF is an UNQUOTED heredoc, so an unescaped pair
+# runs as command substitution -- and bash HAS a bind builtin, which is
+# exactly what happened: five "readline: /n: no key sequence terminator"
+# warnings on the first run of this section.)
+# /n, so /n/MINROOT-MARKER-<arm> RESOLVED. A fixed arm must answer
+# non-zero here; the negative-control arm n0 must answer 0.
+enter $a { cat /n/MINROOT-MARKER-$a }
+echo 'MINROOT-$a-nself-status' \$status
+# --- and the machine's OTHER posted roots, visible from below ------
+# /n/r4 is a mount the machine made. Reaching it from inside an arm is
+# the underpinning being USED, not merely present.
+enter $a { ls /n/r4 }
+echo 'MINROOT-$a-nposted-status' \$status
 # --- CAN ANYTHING BE EXEC'D AT ALL from this root? ----------------
 enter $a { /bin/id }
 echo 'MINROOT-$a-binid-status' \$status
@@ -238,10 +254,20 @@ mkdir /r1
 mkdir /r2
 mkdir /r3
 mkdir /r4
+# n0 IS THE NEGATIVE CONTROL AND IT RUNS IN THIS BOOT, NOT A SECOND ONE.
+# Its contents are r3's exactly; the ONLY difference is the last line of its
+# template, which is `bind / /n` -- the plain-path branch binding the
+# constructed root onto its own /n. That is not an approximation of the defect
+# this gate is about, it IS it: before the fix, `bind '#/' /n` resolved its
+# source to the literal "/", which after the chroot names the constructed
+# root, so the two calls were the same call. If n0 comes out green on the /n
+# assertions then the assertions are not measuring anything.
+mkdir /n0
 echo 'r1' > /r1/MINROOT-MARKER-r1
 echo 'r2' > /r2/MINROOT-MARKER-r2
 echo 'r3' > /r3/MINROOT-MARKER-r3
 echo 'r4' > /r4/MINROOT-MARKER-r4
+echo 'n0' > /n0/MINROOT-MARKER-n0
 
 # THE MOUNT POINTS, MADE BY HAND, AND THIS IS ITSELF A FINDING.
 # enter_root() mkdir's /dev /proc /sys /n inside the new root (its `always[]`)
@@ -260,6 +286,8 @@ mkdir /r3/srv
 mkdir /r3/tmp
 mkdir /r4/srv
 mkdir /r4/tmp
+mkdir /n0/srv
+mkdir /n0/tmp
 
 # THE LADDER. Each rung adds exactly one idea, so the rung at which something
 # starts working NAMES what an app server would have to serve.
@@ -291,6 +319,10 @@ bind /lib64 /r4/lib64
 bind /etc /r4/etc
 bind /var /r4/var
 bind /usr /r4/usr
+# n0 = r3's contents exactly. Only its template differs.
+bind /bin /n0/bin
+bind /lib /n0/lib
+bind /lib64 /n0/lib64
 
 # POST EACH CONSTRUCTED ROOT AT A NAME. This is the shipping mechanism and
 # not a trick: user/linux-syscalls.c:distro_mountpoint's own comment says so
@@ -324,10 +356,12 @@ mkdir /n/r1
 mkdir /n/r2
 mkdir /n/r3
 mkdir /n/r4
+mkdir /n/n0
 bind /r1 /n/r1
 bind /r2 /n/r2
 bind /r3 /n/r3
 bind /r4 /n/r4
+bind /n0 /n/n0
 echo 'MINROOT-POSTED'
 ls /n
 
@@ -362,12 +396,37 @@ r4 = ns clean {
     bind '#s' /srv
     bind '#/' /n
 }
+# THE NEGATIVE CONTROL. Identical to r3 except for the last line: `bind / /n`
+# takes sys_bind's PLAIN-PATH branch with the source "/" -- which, after the
+# root switch on the first line, is this arm's own constructed root. That is
+# byte-for-byte the effect `bind '#/' /n` had before the fix, because `#/`'s
+# devsrv row resolved to the literal "/" too. Every /n assertion below is
+# inverted for this arm and it is scored in the same pass over the same boot
+# log as the four positive arms.
+n0 = ns clean {
+    bind '#distro/n0' /
+    bind '#c' /dev
+    bind '#p' /proc
+    bind '#s' /srv
+    bind / /n
+}
 RCHEAD
 emit_probes r1
 emit_probes r2
 emit_probes r3
 emit_probes r4
+emit_probes n0
 cat <<'RCTAIL'
+# THE UNSWITCHED CONTROL, LAST so it cannot perturb any arm. On the MACHINE's
+# own root `bind '#/' /n` must still mean the machine -- the fix changes what
+# `#/` resolves to only for a process that has actually switched roots, and if
+# it changed the unswitched case too it would have broken every rc.boot in the
+# tree. A fresh name (/n2) is used so /n itself is left exactly as the arms
+# found it.
+mkdir /n2
+bind '#/' /n2
+cat /n2/MINROOT-REALROOT-MARKER
+echo 'MINROOT-MACHINEN-status' $status
 echo 'MINROOT: ALL-ARMS-DONE'
 RCTAIL
 } > "$W/rc.boot"
@@ -457,6 +516,15 @@ score_arm() {
     else
         bad "[$a] the marker did NOT resolve, so this arm never left the machine's root and NOTHING else it reports is a measurement of a constructed root"
         info "[$a] marker probe status: '$(pstat "$a" marker)'"
+        # An arm can fail this guard for TWO different reasons and they are
+        # not the same finding: it never switched, or it switched into a root
+        # that cannot exec `cat`. The second is r2's whole point. Say which,
+        # but do NOT turn either into a pass -- an arm that cannot show its
+        # marker has not proved it switched, and reading the proof out of a
+        # diagnostic string would be an oracle sharing the defect.
+        if grep -q 'dynamic interpreter\|command not found' "$W/arm-$a.txt"; then
+            info "[$a] ...and the arm SAID why: $(grep -m1 'dynamic interpreter\|command not found' "$W/arm-$a.txt")"
+        fi
         return
     fi
 
@@ -480,12 +548,39 @@ score_arm() {
     fi
 
     # ---- the machine, still reachable from below ------------------------
-    local NST; NST="$(pstat "$a" nmarker)"
-    if [ "$NST" = 0 ]; then
-        ok "[$a] and the machine's real root IS still reachable at /n (the Plan 9 place for roots that are not yours)"
+    # THE NEGATIVE-CONTROL ARM INVERTS ALL THREE OF THESE. It is scored here,
+    # in the same function, over the same boot log, rather than in a second
+    # invocation of this script -- so "the assertion can go red" is a fact
+    # about THIS run and not about a run somebody remembers.
+    local NST NSELF NPOST
+    NST="$(pstat "$a" nmarker)"
+    NSELF="$(pstat "$a" nself)"
+    NPOST="$(pstat "$a" nposted)"
+    if [ "$a" = n0 ]; then
+        if [ -n "$NST" ] && [ "$NST" != 0 ]; then
+            ok "[n0] NEGATIVE CONTROL: with \`bind / /n\` -- the pre-fix behaviour exactly -- the machine's real root is NOT reachable at /n (status $NST). The assertion above CAN go red"
+        else
+            bad "[n0] NEGATIVE CONTROL FAILED TO FAIL: the machine's marker was readable at /n (status '$NST') even though this arm bound its own root over /n -- the /n assertion in every other arm proves nothing"
+        fi
+        if [ "$NSELF" = 0 ]; then
+            ok "[n0] ...and /n IS this arm's own root (\`cat /n/MINROOT-MARKER-n0\` succeeded) -- the root bound onto itself, which is what the defect looked like"
+        else
+            bad "[n0] the negative control's /n is neither the machine nor itself (status '$NSELF') -- it is not reproducing the defect, so it is not a control for it"
+        fi
     else
-        bad "[$a] the machine's real root is NOT reachable at /n (status '$NST') -- a constructed root that cannot see the underpinning"
+        if [ "$NST" = 0 ]; then
+            ok "[$a] the machine's real root IS reachable at /n (the Plan 9 place for roots that are not yours)"
+        else
+            bad "[$a] the machine's real root is NOT reachable at /n (status '$NST') -- a constructed root that cannot see the underpinning"
+        fi
+        if [ -n "$NSELF" ] && [ "$NSELF" != 0 ]; then
+            ok "[$a] ...and /n is NOT this arm's own root (status $NSELF) -- \`bind '#/' /n\` is no longer the root bound onto itself"
+        else
+            bad "[$a] /n IS this arm's own root (\`cat /n/MINROOT-MARKER-$a\` status '$NSELF') -- \`bind '#/' /n\` bound the constructed root onto itself, which is the original defect"
+        fi
     fi
+    info "[$a] ls /n/r4 (a mount the MACHINE made) -> status '${NPOST:-<no line>}'"
+    printf '%s %s %s %s\n' "$a" "${NST:-x}" "${NSELF:-x}" "${NPOST:-x}" >>"$W/nmatrix.txt"
 
     # ---- the three suspects, REPORTED not required ----------------------
     # These are the MEASUREMENT. An arm in which hpm fails is not a failing
@@ -502,11 +597,12 @@ score_arm() {
     printf '%s %s %s %s %s\n' "$a" "${EX:-x}" "${HP:-x}" "${WS:-x}" "${LA:-x}" >>"$W/matrix.txt"
 }
 
-rm -f "$W/matrix.txt"
+rm -f "$W/matrix.txt" "$W/nmatrix.txt"
 score_arm r1 "BARE: nothing but the mount points enter_root makes itself"
 score_arm r2 "+bin: the machine's /bin bound in"
 score_arm r3 "+bin +lib +lib64: the dynamic loader, and nothing else"
 score_arm r4 "+bin +lib +lib64 +etc +var +usr"
+score_arm n0 "NEGATIVE CONTROL: r3's contents, but the template ends \`bind / /n\` -- the pre-fix behaviour"
 
 # =========================================================================
 say "4 -- did every arm run?"
@@ -560,6 +656,71 @@ if got r4; then
         ok "[r4] the maximal constructed root runs programs -- a session CAN be given a root that is not the machine's and still work"
     else
         bad "[r4] even /bin+/etc+/var+/usr+/lib bound into a constructed root could not run /bin/id (status $(val r4 2)) -- something outside those five names is assumed"
+    fi
+fi
+
+# =========================================================================
+say "6 -- the underpinning, reachable from below and USED"
+# (d) The headline. A constructed root that cannot see the machine is an
+#     island, and the owner's sentence is explicit that the real global root
+#     is an UNDERPINNING, not something that disappears.
+NP_R3="$(awk '$1=="r3"{print $4}' "$W/nmatrix.txt" 2>/dev/null)"
+NP_R4="$(awk '$1=="r4"{print $4}' "$W/nmatrix.txt" 2>/dev/null)"
+if [ "$NP_R3" = 0 ] && [ "$NP_R4" = 0 ]; then
+    ok "[r3,r4] a mount the MACHINE made (/n/r4) is listable from inside a constructed root -- /n is not just present, it resolves through to the machine's own mounts"
+else
+    bad "[r3,r4] /n/r4 could not be listed from inside a constructed root (r3 '$NP_R3', r4 '$NP_R4') -- /n is present but does not carry the machine's mounts across"
+fi
+
+# (e) THE UNSWITCHED CASE MUST NOT HAVE CHANGED. The fix makes `#/` resolve to
+#     a remembered real root; on a process that never switched, that is "/"
+#     and every rc.boot in the tree must behave exactly as before.
+MN="$(sed -n 's/^MINROOT-MACHINEN-status //p' "$B" | head -1)"
+if [ "$MN" = 0 ]; then
+    ok "on the machine's own root, \`bind '#/' /n2\` still resolves to the machine (status 0) -- the unswitched case is unchanged"
+elif [ -z "$MN" ]; then
+    bad "the unswitched control never ran -- no MINROOT-MACHINEN-status line in the boot log"
+else
+    bad "on the machine's own root, \`bind '#/' /n2\` NO LONGER resolves to the machine (status '$MN') -- the fix broke every rc.boot in the tree"
+fi
+
+# =========================================================================
+say "7 -- A MISSING DYNAMIC INTERPRETER MUST NOT BE ANSWERED BY A BARE 127"
+# Arm r2 is /bin and nothing else. The binaries are dynamic ELF whose
+# PT_INTERP is /lib64/ld-linux-x86-64.so.2, so execve(2) answers ENOENT --
+# FOR THE INTERPRETER, while naming the file that exists. That produced eight
+# silent 127s and is this project's oldest failure shape in a new place.
+R2="$W/arm-r2.txt"
+if [ -s "$R2" ]; then
+    if grep -q 'dynamic interpreter' "$R2"; then
+        ok "[r2] a failed exec now SAYS what is missing rather than exiting 127 in silence"
+        info "[r2] $(grep -m1 'dynamic interpreter' "$R2")"
+    else
+        bad "[r2] eight execs failed and not one of them named a cause -- grep 'dynamic interpreter' found nothing in $R2"
+        grep -c . "$R2" | sed 's/^/        arm r2 lines: /'
+    fi
+    if grep -q 'ld-linux-x86-64.so.2' "$R2"; then
+        ok "[r2] ...and it names the interpreter BY PATH, which is the thing a person has to bind in"
+    else
+        bad "[r2] the diagnostic does not name /lib64/ld-linux-x86-64.so.2, so it does not say what to do"
+    fi
+    if grep -q 'Bind .*/lib64' "$R2"; then
+        ok "[r2] ...and names the DIRECTORY to bind (/lib64)"
+    else
+        bad "[r2] the diagnostic does not name the directory to bind"
+    fi
+else
+    bad "arm r2 produced no output, so the exec diagnostic is unmeasured"
+fi
+# SPECIFICITY, so section 7 is not just "some string is somewhere in the log":
+# r1 has NO /bin at all, so hamsh resolves nothing and never execs. The
+# interpreter diagnostic must NOT appear there.
+R1="$W/arm-r1.txt"
+if [ -s "$R1" ]; then
+    if grep -q 'dynamic interpreter' "$R1"; then
+        bad "[r1] the interpreter diagnostic appeared in an arm with no /bin, where nothing can have been exec'd -- it is not reporting what it claims to"
+    else
+        ok "[r1] and it does NOT appear in the arm with no /bin, where nothing was exec'd at all -- the diagnostic is specific to a real failed exec"
     fi
 fi
 
