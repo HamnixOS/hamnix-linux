@@ -3,9 +3,9 @@
 # tests/linux/graphical_login.sh — DOES THE MACHINE ASK WHO YOU ARE BEFORE IT
 # DRAWS A DESKTOP, AND IS THERE ANYTHING BEHIND THE QUESTION?
 #
-# REGISTRATION. ON-DEMAND. Not in ci_battery_manifest.txt: it builds a medium,
-# installs a machine onto a blank disk and boots that machine twice under
-# OVMF, which is far past the battery's per-shard budget. It is registered in
+# REGISTRATION. ON-DEMAND. Not in ci_battery_manifest.txt because it builds a
+# medium, installs a machine onto a blank disk and boots that machine twice
+# under OVMF, which is far past the battery's per-shard budget. It is registered in
 # scripts/release_gates.sh beside tests/linux/pointer_launch_uid.sh, whose
 # medium build, install step and debugfs reader this borrows almost unchanged.
 #
