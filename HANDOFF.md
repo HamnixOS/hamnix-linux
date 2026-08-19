@@ -13,6 +13,20 @@ then this file for where it stands, then `README.md`.
 > where that has happened it is marked in place. Read this first and treat the
 > rest as history plus reference.
 
+> **AND A STANDING RULE FOR THIS FILE, because it has been broken three
+> times:** new entries go BELOW the READ THIS FIRST block that follows,
+> never above it. Twice the block was pushed out of the opening by
+> prepending, and once a superseded section ended up above its own
+> correction. If you are adding a section, add it after this block.
+
+### READ THIS FIRST — the state, in order
+
+**This section is newest-first, and later entries CORRECT earlier ones.** Where a
+claim was wrong it is left standing with the correction beside it rather than
+quietly edited. Read any section together with anything above it that names it —
+several headings below are superseded by entries higher up, and say so.
+
+
 ### RESOLVED — I was measuring POST-FIX disks. The 962 figure stands unrefuted.
 
 I reported an hour ago that I could not reproduce the "962 bytes, not one account
@@ -107,8 +121,8 @@ silently passed.**
 **Not done here, deliberately**: a release run was using that gate at the time,
 and this tree's own rule is never to edit a script while a run is executing it.
 
-### "THREE APPS HARD-CODE /home/live" IS AN UNDERCOUNT — it is nine programs
-### and three libraries, and it includes the ones that save your documents
+### SUPERSEDED — the second of three /home/live counts; see "THIRD ATTEMPT" below
+### (this one calls libraries "programs" and counts source, not what ships)
 
 I have carried "`hampaint`, `hamnotesscene` and `hamshot` still hard-code
 `/home/live`" in the queue and in reports. Those three are real — 3, 2 and 3
@@ -191,13 +205,6 @@ blind spot — source-vs-shipped, then program-vs-library. **A count is only as
 good as the question behind it, and I kept changing the count without
 interrogating the question.** If the next person needs this number, the honest
 move is to ask what they need it FOR, and measure that instead.
-
-### READ THIS FIRST — the state, in order
-
-**This section is newest-first, and later entries CORRECT earlier ones.** Where a
-claim was wrong it is left standing with the correction beside it rather than
-quietly edited. Read any section together with anything above it that names it —
-several headings below are superseded by entries higher up, and say so.
 
 ### AN INSTALLED MACHINE LOST ITS USER AT THE FIRST `hpm update`, AND THE NAMED USER HAD NO SESSION -- BOTH MEASURED, BOTH FIXED, BOTH GATED
 
@@ -399,7 +406,7 @@ package-owned, so a release CAN fix it; `/home/live` is excluded from
 package. `etc/shadow` is not in any package, so the hashes stay and the names
 they belong to do not. Not fixed here; measured and written down.
 
-**Shipping now: 1.0.29, published and verified as served** — 130 packages,
+**Shipping now: 1.0.31, published and verified as served** — 130 packages,
 signature checked against `etc/hpm/trusted.pub`, three tarballs fetched from the
 site byte-identical to the gated build, 1.0.28 still fetchable. **1.0.30 is
 building**, for a desktop that could refuse to start on a dead session.
