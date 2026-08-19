@@ -345,6 +345,16 @@ then reads the resulting process's uid out of `ps`. NOT BUILT HERE.
 **2026-08-19, orchestrator-side, read-only. No code changed.** These are two
 claims I had been carrying forward hour after hour without measuring either.
 
+> **THIS ENTRY WAS WRONG WITHIN THE HOUR, AND THE ERROR WAS MINE. Corrected
+> 2026-08-19, left standing per this file's convention.** I measured the green at
+> `945afa25`. `tests/linux/installed_uid_console.sh` DID NOT EXIST at that commit
+> — I verified with `git cat-file` — and it arrived in the console merge I made
+> myself immediately afterwards, entering the checker's dark set. So the gate was
+> red again the moment I published that it passed. **I made the exact "WHICH TREE"
+> mistake I had written into the agent brief one commit earlier**, and an agent
+> caught it, not me. A green is a fact about a commit, and mine expired on the
+> next one. The registration has since been repaired.
+
 **STRUCK: "`test_gate_registration.sh` produces FALSE REDS because the checker
 does not know `release_gates.sh` is a registrar."** I ran it on the merged tree.
 **It PASSES**, and not vacuously -- all three parts report, with real counts:
