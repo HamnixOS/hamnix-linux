@@ -50,6 +50,103 @@ freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
 it has never been caught in the act on that machine.
 
 
+### THE KERNEL AN INSTALLED MACHINE BOOTS IS NOT UPDATABLE, AND NOTHING FAILS TO SAY SO -- BUT ITS BOOT MODULES ARE, AND 28 UNOWNED FILES ARE NOW WRITTEN DECISIONS RATHER THAN A RED A RELEASE STEPPED OVER
+
+**Measured, dev host, 2026-08-19, against the PUBLISHED 1.0.31 channel
+(`~/.hamnix-build/rel1031/repo/linux`, 130 tarballs). Evidence under
+`~/.hamnix-build/covergap-a847/` — `negctl.log`, `negctl.sh`, and the medium's
+own root filesystem carved out of `hamnix-linux-1.0.31.img` and dumped with
+`debugfs`, nothing mounted.**
+
+**THREE ROOTS, THREE ANSWERS, AND THE THIRD IS NEW.**
+`tests/linux/channel_covers_image.sh`, run before anything was changed:
+
+| root | result |
+|---|---|
+| lean image root (`rel1031/leanroot`, 424 files) | **8 passed, 0 failed** |
+| installer image root (446 files, from `rel1031/GATES_SUMMARY.txt`) | **7 passed, 26 failed** |
+| **installed-DISK root** (the medium's p2 ext4, 453 files) | **7 passed, 28 failed** |
+
+The disk root had never been measured. Its two extra files over the release's
+own 26 are **`etc/fstab`** and **`var/lib/hpm/installed.json`**, which
+`scripts/hamlinux_disk.sh` writes onto the PARTITION and which no image root
+carries. 5 + 1 + 20 + 2 = 28.
+
+**THE LEAN NUMBER IN THE BRIEF WAS RIGHT AND THE `/etc/hamnix-release` FAILURE
+IS GONE**: the earlier 7/1 was a locally built channel at 1.0.31 against a dev
+image stamped `unstamped`. Measured channel-against-its-own-root, it is 8/0.
+
+**NOTHING WAS IN CATEGORY "SHOULD BE PACKAGED".** No package was added. All 28
+are files a package must not carry, and the five reasons are now in the gate's
+exclusion table.
+
+#### THE /boot ANSWER
+
+**WHAT THE GATE COMPARES IS NOT WHAT AN INSTALLED MACHINE HAS.**
+`etc/rc.boot.installed` does `bind '#esp' /boot` on every installed boot, so
+**/boot on a running installed machine IS the FAT32 EFI System Partition**, not
+the ext4 directory. Measured on the 1.0.31 medium: the ESP holds
+`EFI/BOOT/BOOTX64.EFI`, `vmlinuz`, `initramfs.cpio.gz`, `UKI.MAP` — **none of
+them at the path `boot/BOOTX64.EFI`** a package would write. The five staged
+files are the **INSTALLER'S PAYLOAD** (`HAMLINUX_INSTALLER=1` only) and every
+one describes THE MEDIUM: `root.partuuid` is the GUID sealed into that UKI's
+kernel command line, and `UKI.MAP`'s first line is the byte length of THAT
+initramfs, which `user/bootsync.ad` uses as an append offset.
+
+**WHAT `hpm update` DOES TODAY: THE KERNEL SILENTLY STAYS.** No package carries
+any `boot/` path — checked in the tarballs, not inferred — so nothing is
+written and nothing fails. An installed machine boots the kernel it was
+installed with, forever. That is now the first thing the gate's header says.
+
+**THE HALF THE BRIEF DID NOT HAVE: the boot-time MODULE BYTES ARE updatable.**
+`/bin/bootsync` rewrites them inside the ESP's own UKI, and `user/hpm.ad`'s
+`_sync_boot_image` runs it **after every update transaction**. Read out of the
+shipped artifacts rather than the source: `hamnix-install` carries
+`bin/bootsync`, and the `hpm` ELF inside `hpm-1.0.31.tar.gz` contains both
+`/bin/bootsync` and `hpm: refreshing the boot image so the next boot uses these
+modules`.
+
+**WHAT WAS DELIBERATELY NOT DONE: making the kernel updatable.** Doing it
+safely needs an A/B slot on the ESP and an atomic switch of which
+`BOOTX64.EFI` the firmware runs. There is no second slot, no bootloader to
+point at one, and the single file firmware executes is 73 MB on a journal-less
+filesystem. A partial version of that is an unbootable laptop, so there is no
+partial version in the tree.
+
+#### THE GATE, AND SIX RED ARMS THAT ALL FIRED
+
+Four NEW assertions measure the `boot/` reason instead of asserting it: **no
+package carries any `boot/` path** (the safety half — such a file would be
+written INTO the ESP by an `hpm` that knows about neither), the shipped
+`etc/rc.boot.installed` really binds `'#esp'` over `/boot`, the channel carries
+`bin/bootsync`, and the shipped `hpm` BINARY names it.
+
+| arm | result |
+|---|---|
+| 0 — nothing broken | **12 / 0** |
+| 1 — `hamnix-init` made to carry `boot/vmlinuz` | 11 / 1 |
+| 2 — `bin/bootsync` deleted from `hamnix-install` | 10 / 2 |
+| 3 — shipped `rc.boot.installed` stops binding `'#esp'` | 10 / 2 |
+| 4 — the `hpm` ELF replaced by one with no bootsync | 11 / 1 |
+| 5 — the `boot/` EXCLUSION deleted from the gate | 11 / 5 |
+
+Arm 5 is the one that says the five boot files are excused BY THE TABLE and not
+by a hole in the matcher.
+
+**AFTER: lean 11/0, installer image root 11/0, installed-disk root 12/0.**
+`scripts/release_gates.sh` `expect_min` 8 → **11**, the floor every root clears;
+the disk root's twelfth is the "no exclusion is folklore" check, which an image
+root cannot exercise because it has no `etc/fstab`.
+
+**NOT ESTABLISHED, and not by that file:** that any of it reaches a booted
+machine. Nothing in `channel_covers_image.sh` boots anything.
+`tests/linux/bootsync_installed.sh` is the gate that does, and it was **not
+re-run** in this session.
+
+**PRE-EXISTING AND UNRELATED:** `scripts/test_gate_registration.sh` is RED on
+`scripts/test_install_names_host.sh` and
+`tests/linux/install_refuses_reserved.sh`.
+
 ### WHERE THE WORD PROCESSOR PUTS YOUR DOCUMENT IS A MEASUREMENT NOW, NOT A GREP -- AND ON THE PATH A PERSON USES, THE SAVE SUCCEEDED INTO SOMEBODY ELSE'S DIRECTORY
 
 **Measured, dev host, 2026-08-18. Evidence under
