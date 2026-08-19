@@ -27,6 +27,138 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE KERNEL IS REPLACEABLE NOW -- 30 / 0, THE RED ARM IS 15 / 15, AND THE PROMPT'S SPACE ARGUMENT IS ABOUT THE WRONG PARTITION
+
+**Measured on booted machines, dev host, 2026-08-19, base `ee1461d0` (checked
+with `git merge-base --is-ancestor ee1461d0 HEAD`, NOT by reading `git log` --
+and the worktree I was handed was 58 commits behind it, the ELEVENTH
+consecutive one; its own `gitStatus` block named `dbe56404`, which is neither
+the tip nor on my branch). Evidence `~/.hamnix-build/abkernel/`: `GATE.log`,
+`GATE-30-0-GREEN.log`, `GATE-15-15-RED.log`, `probe1.sh`, `probe2.sh`, and the
+serial logs of every boot. Branch `work/ab-kernel-slots`, tag
+`ab-kernel-slots-v1`.**
+
+    tests/linux/ab_kernel_slots.sh           30 PASSED /  0 FAILED   (new)
+    the same gate, RED ARM (A/B layout off)  15 PASSED / 15 FAILED
+
+**A HAMNIX MACHINE BOOTED, TOOK AN UPDATE CARRYING A DIFFERENT KERNEL, AND
+BOOTED THE NEW ONE**, with the old slot still bootable -- and was then put back
+on the old one by rewriting 512 bytes. Boot 1 and boot 2 are the SAME DISK
+differing only in `loader.conf`, and what is read is the kernel's own banner,
+printed before any userland exists:
+
+    boot 1:  Linux version 6.12.85+deb13-amd64 ... (2026-04-30)
+    boot 2:  Linux version 6.12.43+deb13-amd64 ... (2025-08-27)
+             Command line: ... rw ... hamnix.abslot=B
+
+#### THE DESIGN, AND WHY THE OBVIOUS ONE IS THE UNSAFE ONE
+
+Firmware executes exactly ONE file on the removable-media path,
+`\EFI\BOOT\BOOTX64.EFI`. Replacing the kernel by rewriting THAT file leaves a
+minutes-long window on journal-less FAT32 in which the power button produces a
+machine that cannot boot. So the file firmware runs **stops being the kernel
+image and becomes systemd-boot, written once at build time and never rewritten
+again.** The kernel images sit beside it as `\EFI\Linux\hamnix-{a,b}.efi`, and
+the only thing an update ever rewrites is `\loader\loader.conf`, **preallocated
+at a fixed 512 bytes** -- no cluster allocated, nothing extended, the FAT chain
+never mutated. That is the identical argument `user/bootlogd.ad` makes for the
+preallocated boot log and `user/bootsync.ad` makes for its four-byte commit.
+
+#### THE ORDER IS THE SAFETY, AND ARM II IS WHY ARM I MEANS ANYTHING
+
+    ARM I   slot B HALF WRITTEN, loader.conf still naming A
+            -> THE MACHINE BOOTS, on the old kernel.
+    ARM II  the SAME torn slot B, loader.conf ALREADY FLIPPED to it
+            -> THE MACHINE DOES NOT BOOT.
+
+Without arm II, arm I is equally consistent with firmware that tolerates a torn
+image, and "write the slot, verify it, **flip last**" would be untested
+folklore. It is not. A `loader.conf` **zeroed outright** -- the worst a torn
+512-byte write can leave -- still boots, because sd-boot falls back to
+discovering the entries.
+
+**HONEST LIMIT: arm I is a MODEL of losing power mid-write, not a killed
+guest.** The torn on-disk state is written from the host, because killing QEMU
+mid-write needs an on-machine writer and there isn't one yet.
+
+#### THE TRAP, WHICH IS THE SAME ONE THE OCR ARMS FELL INTO
+
+**A machine that boots looks IDENTICAL whether it booted the new kernel or
+silently fell back to the old one.** Every assertion here would go green
+against a mechanism that does nothing. So the slots were made distinguishable
+BEFORE anything was measured, two independent ways -- **different kernel
+BINARIES and different baked-in COMMAND LINES** -- and assertion 0 proves the
+distinguisher and stops the gate if the two slots are the same bytes. The red
+arm's decisive FAIL, verbatim, is the one that separates the two states:
+
+    FAIL  boot 2 ran 'A', not slot B -- the update did not take
+
+In that arm the machine comes up perfectly. **Arms 5 and 6 PASS in the red arm
+and are not discriminating on their own** -- if no update happened, of course
+the machine still boots. Arm 4 and arm 7 are the ones that carry the claim.
+
+#### THE ESP ENTRY ABOVE IS RIGHT ABOUT THE MEDIUM AND WRONG ABOUT THE MACHINE
+
+"THE ESP AS SHIPPED CANNOT HOLD AN A/B PAIR" measured the **medium's** ESP --
+405.0 MiB, 97,034,240 bytes free -- and that is correct and re-measured here.
+It is not the partition that matters. **An INSTALLED machine's ESP is created
+by `user/hlinstall.ad`, whose `esp_mb` is 512**, and hlinstall writes only
+`BOOTX64.EFI`, `vmlinuz`, `initramfs.cpio.gz` and `UKI.MAP` onto it (NOT
+`root.partuuid`, NOT `HAMNIX.LOG`): 326,473,868 bytes into 536,870,912, leaving
+about 210 MB. **A second 175,863,296-byte slot already fits, with nothing grown
+and nothing deleted.**
+
+#### THE LOOSE COPIES ARE NOT bootsync's SOURCE MATERIAL -- ESTABLISHED
+
+Every `sys_open` in `user/bootsync.ad` was read: it opens `/boot/UKI.MAP`, the
+UKI, and the `.ko` paths UKI.MAP names, and **never** `/boot/vmlinuz` or
+`/boot/initramfs.cpio.gz`. A tree-wide grep finds exactly two readers of those
+paths, `user/hlinstall.ad` and `etc/install.hamsh.linux` -- **both installers,
+reading the LIVE medium's staged `/boot` to write a TARGET disk.** Nothing on a
+booted installed machine reads either. `UKI.MAP`'s first line on the 1.0.32
+medium is `138490520`, which IS the loose initramfs's size -- but that is
+shared provenance, one build artifact copied to two places, not a dependency.
+So on an installed ESP the pair is 150.6 MB of rescue copy nothing boots.
+**Reclaiming it was NOT done, because the slot already fits without it.**
+
+#### TWO SOURCE FILES CITE A GATE THAT DOES NOT EXIST
+
+`user/bootsync.ad:37` and `scripts/hamlinux_disk.sh:402` both say
+`tests/linux/uki_initrd_slack.sh` boots UKIs under OVMF and measures the
+reservation -- one of them under the words "MEASURED, not assumed". **There is
+no such file anywhere in the tree.** Left standing and reported rather than
+quietly deleted, because what it claims may have been measured by something
+later renamed.
+
+#### WHAT IS NOT BUILT -- `hpm update` STILL DOES NOT REPLACE THE KERNEL
+
+The layout and the switch are built and measured; nothing drives them on a
+running machine.
+
+1. **No on-machine slot writer.** Something must read `loader.conf` for the
+   INACTIVE slot, stream the new UKI there with `O_SYNC`, read it back and
+   compare, and only then rewrite the 512 bytes. That is a small program
+   modelled on `bootsync`. The gate does those steps from the host instead.
+2. **A package cannot carry the new kernel, and that is a SAFETY property.**
+   "No package carries any `boot/` path" is enforced by
+   `channel_covers_image.sh`, because such a file would land in the ESP. A
+   kernel update needs a channel artifact fetched and placed by the slot
+   writer -- a design decision for the owner, not one to make unasked.
+3. **`user/hlinstall.ad` still writes the OLD layout**, so an A/B medium would
+   install a single-file machine: working, not A/B.
+4. **All of it is behind `HAMLINUX_AB_SLOTS=1`**, so `bootsync_installed.sh`,
+   `channel_covers_image.sh` and the install gates still measure what they were
+   written to measure. Flipping the default needs those re-run.
+
+**`user/bootsync.ad` now RESOLVES THE ACTIVE SLOT -- COMPILE-CHECKED ONLY.** On
+the A/B layout the old path is systemd-boot, which has no `.initrd`, so
+bootsync refuses by name rather than corrupting anything -- but refusing is not
+working, and boot-module refresh is the one part of the boot image that already
+updates today. It now reads `loader.conf`'s `default` and falls back to the old
+path when there is none. **It has not been run on a booted machine, and
+`tests/linux/bootsync_installed.sh` was NOT re-run this session.**
+
+
 ### THE GRAPHICAL LOGIN EXISTS AND RUNS BEFORE THE SESSION DOES -- 78 / 0, AND THE RED ARM IS 68 / 10 WITH EVERY OCR ASSERTION STILL GREEN
 
 **Measured on booted installed machines, dev host, 2026-08-19, base `b18e8418`

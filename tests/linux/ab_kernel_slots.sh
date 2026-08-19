@@ -3,8 +3,10 @@
 # tests/linux/ab_kernel_slots.sh — CAN THE KERNEL AN INSTALLED MACHINE BOOTS BE
 # REPLACED, AND DOES THE MACHINE SURVIVE LOSING POWER WHILE IT IS BEING?
 #
-# REGISTRATION: ON-DEMAND. Not in ci_battery_manifest.txt, because it builds two
-# media and boots five machines under `qemu-system-x86_64`.
+# Not in ci_battery_manifest.txt because it builds two 4 GiB media and boots six
+# machines under `qemu-system-x86_64`, which is tens of minutes and no part of a
+# 50-minute sharded battery. ON-DEMAND, the same way
+# tests/linux/bootsync_installed.sh is.
 #
 # THE QUESTION
 # ============
@@ -207,9 +209,20 @@ else
     [ -f build/image/vmlinuz ] || { bad "no build/image/vmlinuz after the image build"; exit 1; }
     cp build/image/vmlinuz "$WORK/vmlinuz.image"
 
+    # THE RED ARM, AS AN ARM OF THIS SAME GATE RATHER THAN A SEPARATE SCRIPT.
+    #
+    # HAMLINUX_AB_REDARM=1 builds the media with the A/B layout OFF -- i.e. the
+    # tree exactly as it was before this work -- and scores them with the
+    # identical assertions. It exists because every number above is
+    # success-shaped: a machine that boots looks the same either way, and a
+    # gate that has never been seen to fail is a comment. The red arm is what
+    # says these assertions are about the mechanism and not about QEMU.
+    AB="${HAMLINUX_AB_REDARM:+0}"; AB="${AB:-1}"
+    [ "$AB" = 1 ] || info "HAMLINUX_AB_REDARM=1: building WITHOUT the A/B layout; this arm is EXPECTED TO FAIL"
+
     # SLOT A -- the medium exactly as it would ship, with the A/B layout on.
     cp -L "$KERN_A" build/image/vmlinuz
-    HAMLINUX_DISTRO_RO=1 HAMLINUX_AB_SLOTS=1 HAMLINUX_ROOT_PARTUUID="$PU" \
+    HAMLINUX_DISTRO_RO=1 HAMLINUX_AB_SLOTS="$AB" HAMLINUX_ROOT_PARTUUID="$PU" \
         scripts/hamlinux_disk.sh "$WORK/pristine.img" 4G >"$WORK/diskA.log" 2>&1 \
         || { bad "the slot-A medium would not build -- see $WORK/diskA.log"; exit 1; }
     cp build/image/disk/BOOTX64.EFI "$WORK/uki_a.efi"
@@ -221,7 +234,7 @@ else
     # is a UKI this tree really produces, reservation and all.
     cp -L "$KERN_B" build/image/vmlinuz
     CMDLINE_B="earlycon=efifb console=ttyS0,115200 console=tty0 root=PARTUUID=$PU rw panic=-1 loglevel=7 printk.devkmsg=on hung_task_timeout_secs=30 sysrq_always_enabled $SLOTMARK"
-    HAMLINUX_DISTRO_RO=1 HAMLINUX_AB_SLOTS=1 HAMLINUX_ROOT_PARTUUID="$PU" \
+    HAMLINUX_DISTRO_RO=1 HAMLINUX_AB_SLOTS="$AB" HAMLINUX_ROOT_PARTUUID="$PU" \
         HAMLINUX_CMDLINE="$CMDLINE_B" \
         scripts/hamlinux_disk.sh "$WORK/slotb.img" 4G >"$WORK/diskB.log" 2>&1 \
         || { bad "the slot-B medium would not build -- see $WORK/diskB.log"; exit 1; }

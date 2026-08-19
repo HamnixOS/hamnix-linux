@@ -726,9 +726,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             return 2
         ai = ai + 1
 
-    rufd: int32 = sys_open(uki_path())
+    # THE PATH IS PRINTED, NOT SPELLED OUT, and that is not cosmetic: since the
+    # A/B layout this may be either \EFI\BOOT\BOOTX64.EFI or the slot
+    # \loader\loader.conf names, and a refusal that names the wrong file sends
+    # whoever reads it to look at the wrong thing.
+    upath: Ptr[char] = uki_path()
+    rufd: int32 = sys_open(upath)
     if rufd < 0:
-        puts(2, "bootsync: cannot read /boot/EFI/BOOT/BOOTX64.EFI.\n")
+        puts(2, "bootsync: cannot read ")
+        puts(2, cast[Ptr[uint8]](upath))
+        puts(2, ".\n")
         puts(2, "bootsync: on an installed machine the ESP is bound at /boot "
                 "by\n")
         puts(2, "bootsync: etc/rc.boot.installed. Nothing was changed.\n")
