@@ -1242,7 +1242,45 @@ static void consmirror_setup(void)
     char path[80];
     snprintf(path, sizeof path, "/dev/%s", ser);
     int r = open(path, O_WRONLY | O_NOCTTY | O_CLOEXEC);
-    if (r < 0) { consmirror_fd = -2; return; }  /* no node yet: ask again */
+    if (r < 0) {
+        /* EACCES IS A FINAL ANSWER, AND IT USED TO BE A SILENT ONE.
+         *
+         * MEASURED on a real installed machine, 2026-08-19: as uid 1001 this
+         * open returns EACCES (the node is mode 0600 root), the mirror never
+         * comes up, and every console write from that process goes to
+         * /dev/console -- which on the shipped command line is the SCREEN,
+         * behind the compositor -- and to nowhere else.  write(2) went on
+         * returning the full byte count throughout.  A whole release
+         * conclusion was drawn from that silence: commit 416248df reverted the
+         * chrome's privilege drop because "the application never opens a
+         * window as uid 1001", and it does -- it just could not be heard.
+         *
+         * user/linuxinit.ad now chmods this node 0622 at boot so the case does
+         * not arise on a Hamnix boot.  This branch is for every other way of
+         * arriving here: a machine booted by something else, a node whose mode
+         * was changed, a container.  It says so ONCE, on the console this
+         * process CAN still reach, and latches off -- a permission is not
+         * going to appear on the next write, so retrying 32 times would only
+         * cost opens.  Written with write(2) and not cons_write, because
+         * cons_write comes back through here. */
+        if (errno == EACCES) {
+            static int said;
+            consmirror_fd = -1;                 /* before writing: no recursion */
+            if (!said) {
+                said = 1;
+                char m[320];
+                int n = snprintf(m, sizeof m,
+                    "cons: this process (uid %ld) may not open %s, so nothing "
+                    "it prints will reach the serial console -- only the "
+                    "screen, which the compositor covers. Its writes will "
+                    "still report success.\n", (long)geteuid(), path);
+                ssize_t ignored = write(2, m, (size_t)(n < 0 ? 0 : n));
+                (void)ignored;
+            }
+            return;
+        }
+        consmirror_fd = -2; return;             /* no node yet: ask again */
+    }
     consmirror_fd = r;
 }
 

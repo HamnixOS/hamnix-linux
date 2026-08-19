@@ -35,6 +35,7 @@ extern def sys_close(fd: int32) -> int32
 extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
 extern def sys_init_module(path: Ptr[char], params: Ptr[char]) -> int32
 extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
 # The tree's portable park: nfds == 0 means "wait timeout_ms and nothing
 # else", off the runqueue on both kernels. user/sleep.ad's header explains
 # why it is spelled this way rather than as a spin.
@@ -284,6 +285,93 @@ def put_dec(v: uint64):
 
 
 cmdline_buf: Array[2048, uint8]
+serial_path: Array[64, uint8]
+
+
+def open_serial_console_to_the_session():
+    # A PROGRAM STARTED AS THE PERSON COULD NOT BE HEARD, AND NOTHING SAID SO.
+    #
+    # MEASURED, on a real installed machine, 2026-08-19
+    # (tests/linux/installed_uid_console.sh):
+    #
+    #     as uid 0     `write(1, ..., 26)` -> 26, and the line is on the serial
+    #                  line the whole world reads.
+    #     as uid 1001  `write(1, ..., 26)` -> 26, and the line is NOWHERE.
+    #
+    # The shipped command line is `console=ttyS0,115200 console=tty0`, and
+    # /dev/console follows the LAST one -- so fd 1 is THE SCREEN, and once the
+    # compositor is presenting nobody is looking at it. The only thing that
+    # puts a program's output on the serial line is
+    # user/linux-syscalls.c:consmirror, which OPENS /dev/ttyS0 itself. That
+    # node is mode 0600 root, so an unprivileged process is refused EACCES --
+    # and the refusal was silent, while write(2) went on returning the full
+    # count. A successful syscall is a fact about the kernel's bookkeeping and
+    # not about the world.
+    #
+    # WHAT IT COST, and it is why this is not cosmetic: commit 416248df
+    # reverted the chrome's privilege drop on the strength of "the application
+    # never opens a window as uid 1001". It does. It opened one, printed
+    # `scene window ready`, and took a row in /dev/wsys -- measured, same
+    # machine, output redirected to a FILE instead of the console. What never
+    # happened was the gate HEARING it.
+    #
+    # 0622, NOT 0666. Any program may be HEARD; only root may LISTEN. The
+    # serial port is an input channel too, and this tree spends a great deal of
+    # effort keeping one uid's keystrokes away from another's.
+    #
+    # THE kmsg HALF IS NOT FIXED HERE and is deliberately left alone:
+    # /dev/kmsg is the kernel's log ring, unprivileged writes to it are a
+    # denial-of-service surface, and the consequence -- that a dropped
+    # session's lines are missing from HAMNIX.LOG on the stick -- is already
+    # written down at user/linux-syscalls.c's kmsg sink.
+    fd: int32 = sys_open(cast[Ptr[char]]("/proc/cmdline"))
+    if fd < 0:
+        write_cstr(2, "linuxinit: WARNING: /proc/cmdline unreadable; a program started as the session user may not be able to reach the serial console.\n")
+        return
+    n: int64 = sys_read(fd, &cmdline_buf[0], 2047)
+    sys_close(fd)
+    if n <= 0:
+        return
+    cmdline_buf[n] = 0
+    i: uint64 = 0
+    while i + 12 < cast[uint64](n):
+        # `console=ttyS...`, at a token boundary.
+        if cmdline_buf[i] == 99 and cmdline_buf[i+1] == 111 \
+                and cmdline_buf[i+2] == 110 and cmdline_buf[i+3] == 115 \
+                and cmdline_buf[i+4] == 111 and cmdline_buf[i+5] == 108 \
+                and cmdline_buf[i+6] == 101 and cmdline_buf[i+7] == 61:
+            if i == 0 or cmdline_buf[i-1] == 32:
+                if cmdline_buf[i+8] == 116 and cmdline_buf[i+9] == 116 \
+                        and cmdline_buf[i+10] == 121 and cmdline_buf[i+11] == 83:
+                    serial_path[0] = 47                 # /dev/
+                    serial_path[1] = 100
+                    serial_path[2] = 101
+                    serial_path[3] = 118
+                    serial_path[4] = 47
+                    k: uint64 = 5
+                    j: uint64 = i + 8
+                    while j < cast[uint64](n) and k < 60:
+                        c: uint8 = cmdline_buf[j]
+                        # the device name ends at the token, or at the
+                        # `,115200` that names the speed
+                        if c == 32 or c == 10 or c == 44 or c == 0:
+                            j = cast[uint64](n)
+                        else:
+                            serial_path[k] = c
+                            k = k + 1
+                            j = j + 1
+                    serial_path[k] = 0
+                    rc: int32 = sys_chmod(cast[Ptr[char]](&serial_path[0]), 0o622)
+                    if rc == 0:
+                        write_cstr(1, "linuxinit: ")
+                        write_cstr(1, &serial_path[0])
+                        write_cstr(1, " is mode 0622 — a program running as the session user can be HEARD on the serial console (it still cannot read it)\n")
+                    else:
+                        write_cstr(2, "linuxinit: WARNING: could not chmod ")
+                        write_cstr(2, &serial_path[0])
+                        write_cstr(2, ": a program started as the session user will write to the screen and NOWHERE ELSE, and will not be told.\n")
+        i = i + 1
+
 
 def cmdline_has_root() -> int32:
     # 1 if the kernel command line carries a `root=` with anything after it.
@@ -474,6 +562,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # only ever sees the framebuffer.
     open_kmsg()
     say("Hamnix on Linux — PID 1 is running")
+    # Before anything drops privilege -- and everything that ever will is
+    # started from here downwards. See the function: without this a program
+    # the desktop starts as the person writes 26 bytes, is told 26, and is
+    # heard by nobody.
+    open_serial_console_to_the_session()
     bind_or_warn(cast[Ptr[char]]("/dev/pts"), cast[Ptr[char]]("#pts"))
     bind_or_warn(cast[Ptr[char]]("/srv"),     cast[Ptr[char]]("#s"))
     bind_or_warn(cast[Ptr[char]]("/n"),       cast[Ptr[char]]("#/"))

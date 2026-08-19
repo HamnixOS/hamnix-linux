@@ -54,6 +54,106 @@ freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
 it has never been caught in the act on that machine.
 
 
+### THE APPLICATION DOES OPEN A WINDOW AS uid 1001. IT COULD NOT BE HEARD -- AND A RELEASE CONCLUSION WAS DRAWN FROM THE SILENCE
+
+**Measured, dev host, 2026-08-19, on the installed disk left by the 2026-08-18
+green run of `installed_documents.sh`
+(`~/.hamnix-build/instdoc-green-evidence/target-nvme.img`, booted from a copy
+with its `/etc/rc.boot` replaced through `debugfs`). Evidence under
+`~/.hamnix-build/uidwin/`.**
+
+**THIS CORRECTS TWO STANDING CLAIMS IN THIS FILE AND IN `416248df`.** The
+section below ("I GOT THE LAUNCH PATH WRONG FIRST") records that a uid-1001
+launch left the application with **no window**, and blames `rc.de-user`. The
+revert commit `416248df` records the same outcome from a bare `setuid 1001`
+and blames **the identity**. Both are wrong. With the application's stdout
+redirected to a **file on the ext4** instead of the console, the same launch on
+the same machine produced:
+
+```
+[hamwrite] document /home/hamdocusr/Documents/untitled.hdoc
+[hamwrite] scene window ready
+```
+
+read off the disk with `debugfs`, nothing mounted; a **new row in `/dev/wsys`**
+(5 rows before the launch, 6 after); and the machine's own `ps` showing
+`190  hamdocusr  S  hamwrite`. **It opens a window.** What it cannot do is be
+heard, and the gate's oracle was a line on the serial console.
+
+**THE MECHANISM.** `/dev/ttyS0` was mode **0600 root**, and it is the only
+route a program's output has to the serial line.
+
+* The shipped command line is `console=ttyS0,115200 console=tty0`. Linux's
+  `/dev/console` follows the **last** `console=`, so fd 1 of every program on
+  this machine is **the screen** -- which the compositor covers.
+* The only thing that copies a program's console writes onto the serial line is
+  `user/linux-syscalls.c:consmirror`, which **opens `/dev/ttyS0` itself**, once
+  per process, **after `execve`**.
+* As uid 1001 that open is **EACCES**. Measured by a probe that reports what it
+  cannot say: `ttyS0mode=384 (0600) openttyS0=-13 openkmsg=-13`, against
+  `openttyS0=4` for the same binary as uid 0 in the same shell seconds earlier.
+* **And `write(2)` went on returning the full count**: `w1=26 w2=26` in both
+  arms, with fd 1 the *same object* in both (`mnt_id 1 ino 131 flags 02`, and
+  `pos 0` after the write, so a character device). A successful syscall is a
+  fact about the kernel's bookkeeping and not about the world -- this one cost
+  a reverted fix.
+* **A hamsh BUILTIN in the dropped shell is still heard**, which is what made
+  this look like a property of the application: the shell opened its mirror
+  while it was still root and that descriptor survives `setuid(2)`. `execve`
+  does not -- the fd is `O_CLOEXEC` -- so every **exec'd** child after a drop
+  starts mute. That is exactly the shape of the reverted run's serial log:
+  `uid 1001 home ...` and the `rfork:` warning (both pre-exec) and then nothing.
+
+**THE CAUSAL PROOF IS A PAIR IN ONE BOOT.** `chmod 0622 /dev/ttyS0` from the rc
+between two otherwise identical uid-1001 launches: silent before, all three
+lines on the serial log after; `ttyS0mode` 384 -> 402 and `openttyS0` -13 -> 4
+in the probe's own report on the disk.
+
+**THE FIX.** `user/linuxinit.ad` reads the kernel command line, finds every
+`console=ttyS*` on it and chmods that node to **0622** at boot, before anything
+can drop privilege: **any program may be HEARD, only root may LISTEN** -- a
+serial console is an input channel too. `consmirror_setup` now treats EACCES as
+a final answer and **says so once**, on the console it can still reach, instead
+of latching off in silence.
+
+**NOT FIXED:** `/dev/kmsg` stays root-only, so a dropped session's lines are
+still missing from `HAMNIX.LOG` on the stick. Unprivileged writes to the kernel
+log ring are a denial-of-service surface and that trade was not made.
+
+**AND THE CONSEQUENCE FOR EVERY OTHER GATE:** any gate whose oracle is a serial
+line printed by a program running as the session user was blind on this machine
+before this change, and would have read "it never ran".
+
+**THE GATE.** `tests/linux/installed_uid_console.sh` -- **23 PASSED / 0 FAILED**,
+measured on this host on 2026-08-19 and registered in `scripts/release_gates.sh`
+with that number. One medium build, one install onto a blank 6 GiB disk, one
+boot; evidence under `~/.hamnix-build/uidcons/` (`GATE.log`, `boot/serial.log`).
+Its **negative control runs inside the same boot**: the node is chmodded back to
+0600 and the SAME program at the SAME uid goes mute -- while its report file
+still lands on the ext4, so "mute" is told apart from "did not run" -- and then
+0622 again and it is heard. Mute, heard, mute, heard. It also scores the number
+this whole entry turns on: **`hamwrite`, launched as uid 1001, printed
+`[hamwrite] scene window ready` ON THE SERIAL LINE**, with the machine's own
+`ps` showing `194 uidconsusr S hamwrite`.
+
+**WHAT IT DOES NOT ESTABLISH:** it does not rebuild the medium with the
+`linuxinit` change removed (the red arm for the fix itself is the MODE read off
+a booted machine, which only `linuxinit` sets, plus the in-boot pair); it does
+not save a document as uid 1001; and it does not click an icon.
+
+**AND THE PRIVILEGE DROP IS STILL NOT RE-LANDED.** This removes the reason
+`416248df` gave for abandoning it. It does NOT answer the second reason:
+`/dev/wsys/appmenu/launch` carries the MACHINE's programs as well as the
+person's, and its payload is a bare path with no category, so a drain that
+drops for everything demotes the installer (`install_confirm_keys` 33/1).
+A design that a gate can check: give the queue an explicit leading verb --
+`user <path>` drops, a **bare path keeps today's meaning** -- and have
+`hamappmenu`, which launches only from `.desktop` entries, write the `user`
+form. Nothing silently changes identity, an unconverted writer behaves exactly
+as it does today, and both forms can be written into the queue by a gate that
+then reads the resulting process's uid out of `ps`. NOT BUILT HERE.
+
+
 ### TWO QUEUE ITEMS CHECKED AGAINST THE TREE RATHER THAN RESTATED: ONE IS GREEN AND SHOULD BE STRUCK, THE OTHER IS REAL AND HAS MORE SITES THAN THE QUEUE LISTED
 
 **2026-08-19, orchestrator-side, read-only. No code changed.** These are two

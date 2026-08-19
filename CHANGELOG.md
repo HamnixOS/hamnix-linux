@@ -14,8 +14,30 @@ because the number is the deliverable.
 
 ## Unreleased
 
-Nothing yet. Work lands here between releases; if this section is empty, the
-tree and the channel agree.
+### A program the desktop starts for you can be heard again
+
+Until now, anything running as **you** rather than as the machine printed its
+messages into nothing: they went to the text console behind the desktop and no
+further, because the serial console device was readable and writable by the
+administrator only. The program was told the writing had succeeded. Nothing
+anywhere said otherwise.
+
+**What changes for you, honestly: almost nothing you can see.** If your
+computer has no serial port -- and a laptop does not -- you were not reading
+that channel anyway. What changes is that the machine can now be asked what one
+of your programs said when something goes wrong, and that the people working on
+this can no longer mistake a program that was not heard for a program that
+never ran. That mistake had already cost one fix: a change that made your
+documents belong to **you** instead of to the administrator was reverted on
+2026-08-19 on the evidence that the word processor "never opened a window" when
+started as you. It opened one every time. It just could not say so.
+
+**Measured and refused:** the boot log this machine writes onto its own
+installation medium (`HAMNIX.LOG`) still does **not** carry the lines your
+programs print. That channel is the kernel's own log ring, writing to it from
+an ordinary program is a way to flood it, and that trade was not made. Your
+documents belonging to you is also still **not** fixed -- this only removes the
+reason the last attempt was abandoned.
 
 ## 1.0.31 — 2026-08-19
 

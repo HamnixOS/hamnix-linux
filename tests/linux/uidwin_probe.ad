@@ -1,0 +1,174 @@
+# tests/linux/uidwin_probe.ad — WHAT IS AN EXEC'D CHILD'S fd 1, AT WHICH UID?
+#
+# WHY THIS EXISTS.  On an installed machine a program the shell EXECs after
+# `setuid 1001` prints nothing on the console, while a builtin in the same
+# shell prints normally (measured, tests/linux/installed_uid_console.sh).  A
+# silent program cannot say why it is silent -- that is the whole difficulty --
+# so this probe writes its evidence TWICE: once to fd 1 and fd 2, which is the
+# channel under suspicion, and once to a FILE named on the command line, which
+# is not.  The file is the measurement; the console line is the subject.
+#
+# It reports, for its own process:
+#   uid       getuid()
+#   w1/w2     what write(2) returned for fd 1 and fd 2 (negative is -errno)
+#   fdopen    what sys_open("/fd/1") returned -- the object lib/p9.ad's
+#             _p9_route_stdio_through_fdname dup2s onto stdout in every
+#             spawned child
+#   wfd       what a write to that object returned
+#
+# It asserts NOTHING.  It is an instrument.
+
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_write(path: Ptr[char]) -> int32
+extern def sys_close(fd: int32) -> int32
+extern def sys_getuid() -> uint32
+extern def sys_getpid() -> int32
+extern def sys_stat_mode(path: Ptr[char]) -> int32
+extern def sys_chmod(path: Ptr[char], mode: uint32) -> int32
+
+outbuf: Array[2048, uint8]
+outlen: uint64 = 0
+
+
+def slen(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def put(s: Ptr[uint8]):
+    n: uint64 = 0
+    while s[n] != 0 and outlen < 2000:
+        outbuf[outlen] = s[n]
+        outlen = outlen + 1
+        n = n + 1
+
+
+def putnum(v: int64):
+    if v < 0:
+        put("-")
+        v = 0 - v
+    tmp: Array[24, uint8]
+    k: uint64 = 0
+    if v == 0:
+        put("0")
+        return
+    while v > 0:
+        tmp[k] = cast[uint8](48 + (v % 10))
+        v = v / 10
+        k = k + 1
+    while k > 0:
+        k = k - 1
+        if outlen < 2000:
+            outbuf[outlen] = tmp[k]
+            outlen = outlen + 1
+
+
+fibuf: Array[256, uint8]
+
+
+def dump_fdinfo(path: Ptr[uint8], tag: Ptr[uint8]):
+    # /proc/self/fdinfo/<n> carries `ino:` and `mnt_id:`, which is how two
+    # processes' fd 1 are told apart when neither can readlink(2).
+    put(tag)
+    f: int32 = sys_open(cast[Ptr[char]](path))
+    if f < 0:
+        put(" <unopenable>\n")
+        return
+    n: int64 = sys_read(f, &fibuf[0], 250)
+    sys_close(f)
+    i: int64 = 0
+    while i < n:
+        c: uint8 = fibuf[cast[uint64](i)]
+        if c == 10 or c == 9:
+            c = 32
+        if outlen < 2000:
+            outbuf[outlen] = c
+            outlen = outlen + 1
+        i = i + 1
+    put("\n")
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    line: Ptr[uint8] = "UIDWIN-PROBE-CONSOLE-LINE\n"
+    w1: int64 = sys_write(1, line, slen(line))
+    w2: int64 = sys_write(2, line, slen(line))
+    fdopen: int32 = sys_open(cast[Ptr[char]]("/fd/1"))
+    wfd: int64 = -999
+    if fdopen >= 0:
+        wfd = sys_write(fdopen, line, slen(line))
+        sys_close(fdopen)
+
+    put("uid=")
+    putnum(cast[int64](sys_getuid()))
+    put(" w1=")
+    putnum(w1)
+    put(" w2=")
+    putnum(w2)
+    put(" fdopen=")
+    putnum(cast[int64](fdopen))
+    put(" wfd=")
+    putnum(wfd)
+    put(" pid=")
+    putnum(cast[int64](sys_getpid()))
+    put("\n")
+    dump_fdinfo("/proc/self/fdinfo/0", "fd0:")
+    dump_fdinfo("/proc/self/fdinfo/1", "fd1:")
+    dump_fdinfo("/proc/self/fdinfo/2", "fd2:")
+    # pid comm state ppid pgrp session tty_nr tpgid ... -- a write to a tty
+    # from a process outside its foreground group is the one way a successful
+    # write(2) reaches nobody, so the numbers that decide it are recorded.
+    dump_fdinfo("/proc/self/stat", "stat:")
+    # THE SERIAL MIRROR ITSELF.  user/linux-syscalls.c's consmirror_setup
+    # opens /dev/<the ttyS named on the kernel command line> and copies every
+    # console write onto it, because the LAST console= on this machine is tty0
+    # -- so /dev/console is the SCREEN and this open is the only thing that
+    # puts a program's output on the serial line a gate reads.
+    put("ttyS0mode=")
+    putnum(cast[int64](sys_stat_mode(cast[Ptr[char]]("/dev/ttyS0"))))
+    put(" consolemode=")
+    putnum(cast[int64](sys_stat_mode(cast[Ptr[char]]("/dev/console"))))
+    ts: int32 = sys_open_write(cast[Ptr[char]]("/dev/ttyS0"))
+    put(" openttyS0=")
+    putnum(cast[int64](ts))
+    if ts >= 0:
+        sys_write(ts, "UIDWIN-PROBE-DIRECT-TO-TTYS0\n", 29)
+        sys_close(ts)
+    km: int32 = sys_open_write(cast[Ptr[char]]("/dev/kmsg"))
+    put(" openkmsg=")
+    putnum(cast[int64](km))
+    if km >= 0:
+        sys_close(km)
+    put("\n")
+
+    # uidwin_probe <report> [<node> [<octal mode>]] -- with a second argument,
+    # chmod that node (default 0622). It is how the gate SHUTS the serial
+    # console again inside one boot and re-opens it, which is the pair that
+    # shows the mode is what decides whether an unprivileged program can be
+    # heard. Octal because that is how a mode is written everywhere else in
+    # this tree; a decimal 402 in an rc script would be a number nobody could
+    # check by eye.
+    if argc >= 3 and argv != cast[Ptr[uint64]](0):
+        m: uint32 = 0o622
+        if argc >= 4:
+            s: Ptr[uint8] = cast[Ptr[uint8]](argv[3])
+            m = 0
+            q: uint64 = 0
+            while s[q] >= 48 and s[q] <= 55:
+                m = m * 8 + cast[uint32](s[q] - 48)
+                q = q + 1
+        put("chmod=")
+        putnum(cast[int64](m))
+        put(" rc=")
+        putnum(cast[int64](sys_chmod(cast[Ptr[char]](argv[2]), m)))
+        put("\n")
+
+    if argc >= 2 and argv != cast[Ptr[uint64]](0):
+        f: int32 = sys_open_write(cast[Ptr[char]](argv[1]))
+        if f >= 0:
+            sys_write(f, &outbuf[0], outlen)
+            sys_close(f)
+    return 0

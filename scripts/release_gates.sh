@@ -289,6 +289,16 @@ install_refuses_reserved|yes|0|16||bash tests/linux/install_refuses_reserved.sh
 # and that is where this number comes from. That the two agree is an
 # observation, not the reason.
 poweroff_graphical|yes|0|22||bash tests/linux/poweroff_graphical.sh
+
+# CAN A PROGRAM RUNNING AS THE PERSON BE HEARD AT ALL? 23/0 measured on this
+# host, 2026-08-19, in the run that registered it -- one medium build, one
+# install, one boot. It matters to every OTHER gate in this list: until
+# 2026-08-19 /dev/ttyS0 was mode 0600 root, so anything a uid-1001 process
+# printed reached the screen and nothing else, while write(2) reported the full
+# byte count. A gate whose oracle is a serial line printed by a dropped session
+# read that as "it never ran" -- which is exactly what installed_documents.sh
+# did, and a fix was reverted over it (416248df).
+installed_uid_console|yes|0|23||bash tests/linux/installed_uid_console.sh
 REGISTRY
 }
 
