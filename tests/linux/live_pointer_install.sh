@@ -326,7 +326,15 @@ if [ "$NCENSUS" -ge 2 ] && grep -q 'wsysd' "$D/census.txt"; then
 else
     bad "the guest's ps produced $NCENSUS blocks and did not name wsysd -- IT CANNOT SEE A RUNNING PROCESS and its answer about the wizard means nothing"
 fi
-IROW="$(grep 'haminstallui' "$D/census.txt" | tail -1)"
+# ONLY ps-SHAPED ROWS. $D/census.txt holds the guest's `ps` output AND the
+# tail of /var/log/panel.log, because the rc prints both inside one census
+# block. A plain `grep haminstallui | tail -1` therefore lands on
+# "[haminstallui] scene window ready" and awk '{print $2}' reads the word
+# "scene" as an owner -- which is exactly what the first run of this file
+# reported, as a FAIL, about a wizard whose real ps row said 0. A gate's red
+# about its own grep. A ps row starts with a numeric PID; nothing else here
+# does.
+IROW="$(awk '$1 ~ /^[0-9]+$/ && /haminstallui/ {r=$0} END{print r}' "$D/census.txt")"
 if [ -n "$IROW" ]; then
     ok "the census names haminstallui -- the clicked row produced a process"
     info "the census row: $(printf '%s' "$IROW" | cut -c1-100)"
@@ -385,14 +393,47 @@ say "5 -- the confirmation, and a disk"
 raw_shot before_confirm || true
 ocr_crop before_confirm "$WIN_W" "$WIN_H" "$WIN_X" "$WIN_Y" 6 || true
 info "the page before the confirmation: $(shot_txt before_confirm | cut -c1-240)"
-qi key spc
-sleep 3
-qi key ret
-sleep 90
+# THE WIZARD DOES NOT ERASE ON ONE ARM-AND-CONFIRM, AND THE FIRST RUN OF THIS
+# FILE MEASURED THAT RATHER THAN ASSUMING IT. One `spc` + `ret` on the disk
+# page advances to a REVIEW page which says, in its own words, "The target disk
+# will be ERASED. Click Install to begin", with its own Yes box still unticked.
+# That is the property tests/linux/install_confirm_keys.sh exists to defend --
+# a single keypress must never begin an irreversible erase -- so a drive that
+# reached the erase in one step would have been evidence of a DEFECT, not of a
+# working gate. The loop below therefore arms and confirms up to ARM_ROUNDS
+# times, photographs every page it passes, and STOPS THE MOMENT A DISK CHANGES,
+# reporting how many rounds it took. It is bounded so that "it never erases" is
+# still reachable as a result.
+ARM_ROUNDS=4
+ROUNDS_USED=0
+NVME_2="$NVME_1"; VBLK_2="$VBLK_1"
+r=0
+while [ "$r" -lt "$ARM_ROUNDS" ]; do
+    r=$((r+1))
+    qi key spc
+    sleep 2
+    qi key ret
+    sleep 45
+    shot_win "confirm$r" || true
+    info "round $r, after arming + Return: $(shot_txt "confirm$r" | cut -c1-220)"
+    NVME_2=$(digest "$NVME"); VBLK_2=$(digest "$VBLK")
+    ROUNDS_USED=$r
+    if [ "$NVME_2" != "$NVME_1" ] || [ "$VBLK_2" != "$VBLK_1" ]; then
+        info "a target changed on round $r -- stopping the drive"
+        break
+    fi
+done
+# Let a partitioning that has just started actually write its table.
+sleep 45
 shot_win installing || true
-info "after arming + Return: $(shot_txt installing | cut -c1-260)"
-
+info "after the drive: $(shot_txt installing | cut -c1-260)"
 NVME_2=$(digest "$NVME"); VBLK_2=$(digest "$VBLK")
+info "the confirmation took $ROUNDS_USED arm-and-confirm round(s) of at most $ARM_ROUNDS"
+if [ "$ROUNDS_USED" -ge 2 ]; then
+    ok "MORE THAN ONE arm-and-confirm was needed before anything was written -- one keypress on the disk page does not begin an irreversible erase, which is the property tests/linux/install_confirm_keys.sh defends, seen here from the pointer side"
+else
+    bad "a SINGLE arm-and-confirm round wrote to a disk -- one keypress on the disk page began an irreversible erase"
+fi
 CHANGED=""
 [ "$NVME_2" != "$NVME_1" ] && CHANGED="$CHANGED nvme"
 [ "$VBLK_2" != "$VBLK_1" ] && CHANGED="$CHANGED vblk"
