@@ -116,8 +116,129 @@ SEEK_SET: int32 = 0
 # survive to runtime here; one in an expression does. The failure was
 # indistinguishable from a missing ESP -- which is exactly the kind of
 # success-shaped wrong answer that would have had somebody looking at the mount.
+# THE IMAGE THIS PROGRAM REWRITES IS NO LONGER ALWAYS THE ONE FIRMWARE RUNS.
+#
+# On the original layout \EFI\BOOT\BOOTX64.EFI IS the unified kernel image, and
+# that is still what this resolves to. On the A/B layout
+# (scripts/hamlinux_disk.sh, HAMLINUX_AB_SLOTS=1) that file is systemd-boot --
+# a bootloader with no kernel and no .initrd in it -- and the kernel images sit
+# beside it as \EFI\Linux\hamnix-a.efi and \EFI\Linux\hamnix-b.efi, with
+# \loader\loader.conf naming which one boots.
+#
+# WHY THIS IS NOT OPTIONAL. Pointed at the old path on an A/B machine, this
+# program does not corrupt anything -- read_pe finds no .initrd section and it
+# refuses by name, which is the honest outcome. But refusing is not working:
+# the boot MODULE bytes are the one part of the boot image that already updates
+# today, and an A/B machine whose bootsync always refuses has silently lost
+# that. So the active slot is RESOLVED, and the old path is the fallback rather
+# than the assumption.
+#
+# WHAT IS DELIBERATELY NOT DONE HERE: this never writes loader.conf and never
+# chooses a slot. It refreshes the modules inside WHICHEVER image this machine
+# is currently set to boot. Changing that setting is a different operation with
+# a different failure mode, and mixing the two into one program is how a
+# module refresh ends up able to make a machine unbootable.
+UKI_CAP: uint64 = 256
+uki_buf: Array[256, uint8]
+uki_resolved: int32 = 0
+lconf_buf: Array[1024, uint8]
+
+
+def uki_store(s: Ptr[uint8]):
+    i: uint64 = 0
+    while s[i] != 0 and i + 1 < UKI_CAP:
+        uki_buf[i] = s[i]
+        i = i + 1
+    uki_buf[i] = 0
+
+
+def uki_append(s: Ptr[uint8]):
+    n: uint64 = 0
+    while uki_buf[n] != 0:
+        n = n + 1
+    i: uint64 = 0
+    while s[i] != 0 and n + 1 < UKI_CAP:
+        uki_buf[n] = s[i]
+        n = n + 1
+        i = i + 1
+    uki_buf[n] = 0
+
+
+# Read \loader\loader.conf and, if it names a default entry that really opens
+# under /boot/EFI/Linux, leave that path in uki_buf and return 1.
+#
+# EVERY FAILURE HERE FALLS BACK rather than stopping: a machine on the original
+# layout has no loader.conf at all, and that is not an error, it is the other
+# layout.
+def resolve_from_loader_conf() -> int32:
+    fd: int32 = sys_open(cast[Ptr[char]]("/boot/loader/loader.conf"))
+    if fd < 0:
+        return 0
+    n: int64 = sys_read(fd, &lconf_buf[0], 1023)
+    sys_close(fd)
+    if n <= 0:
+        return 0
+    ln: uint64 = cast[uint64](n)
+    lconf_buf[ln] = 0
+    # Scan lines for one beginning "default" followed by blanks and a name.
+    i: uint64 = 0
+    while i < ln:
+        # start of a line
+        s: uint64 = i
+        while i < ln and lconf_buf[i] != 10:
+            i = i + 1
+        e: uint64 = i
+        i = i + 1
+        while s < e and (lconf_buf[s] == 32 or lconf_buf[s] == 9):
+            s = s + 1
+        if e - s < 8:
+            continue
+        if lconf_buf[s] != 100 or lconf_buf[s+1] != 101 or lconf_buf[s+2] != 102 \
+           or lconf_buf[s+3] != 97 or lconf_buf[s+4] != 117 or lconf_buf[s+5] != 108 \
+           or lconf_buf[s+6] != 116:
+            continue
+        p: uint64 = s + 7
+        if lconf_buf[p] != 32 and lconf_buf[p] != 9:
+            continue
+        while p < e and (lconf_buf[p] == 32 or lconf_buf[p] == 9):
+            p = p + 1
+        q: uint64 = e
+        while q > p and lconf_buf[q - 1] <= 32:
+            q = q - 1
+        if q <= p:
+            continue
+        # A '/' or '\' in the entry name would let a loader.conf reach outside
+        # the entry directory. This program opens no such path.
+        j: uint64 = p
+        while j < q:
+            if lconf_buf[j] == 47 or lconf_buf[j] == 92:
+                return 0
+            j = j + 1
+        lconf_buf[q] = 0
+        uki_store(cast[Ptr[uint8]]("/boot/EFI/Linux/"))
+        uki_append(&lconf_buf[p])
+        t: int32 = sys_open(cast[Ptr[char]](&uki_buf[0]))
+        if t < 0:
+            return 0
+        sys_close(t)
+        return 1
+    return 0
+
+
 def uki_path() -> Ptr[char]:
-    return cast[Ptr[char]]("/boot/EFI/BOOT/BOOTX64.EFI")
+    if uki_resolved == 0:
+        uki_resolved = 1
+        if resolve_from_loader_conf() == 0:
+            # THE ORIGINAL LAYOUT, and the comment that cost a boot to write:
+            # a string literal in a GLOBAL INITIALISER does not survive to
+            # runtime here; one in an expression does. On a real installed disk
+            # every open through a global failed with this program's own
+            # "cannot read /boot/EFI/BOOT/BOOTX64.EFI" while `cksum
+            # </boot/EFI/BOOT/BOOTX64.EFI` at the same shell in the same boot
+            # read all 67 787 264 bytes of it -- a failure indistinguishable
+            # from a missing ESP.
+            uki_store(cast[Ptr[uint8]]("/boot/EFI/BOOT/BOOTX64.EFI"))
+    return cast[Ptr[char]](&uki_buf[0])
 
 
 def map_path() -> Ptr[char]:
@@ -605,9 +726,16 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             return 2
         ai = ai + 1
 
-    rufd: int32 = sys_open(uki_path())
+    # THE PATH IS PRINTED, NOT SPELLED OUT, and that is not cosmetic: since the
+    # A/B layout this may be either \EFI\BOOT\BOOTX64.EFI or the slot
+    # \loader\loader.conf names, and a refusal that names the wrong file sends
+    # whoever reads it to look at the wrong thing.
+    upath: Ptr[char] = uki_path()
+    rufd: int32 = sys_open(upath)
     if rufd < 0:
-        puts(2, "bootsync: cannot read /boot/EFI/BOOT/BOOTX64.EFI.\n")
+        puts(2, "bootsync: cannot read ")
+        puts(2, cast[Ptr[uint8]](upath))
+        puts(2, ".\n")
         puts(2, "bootsync: on an installed machine the ESP is bound at /boot "
                 "by\n")
         puts(2, "bootsync: etc/rc.boot.installed. Nothing was changed.\n")
