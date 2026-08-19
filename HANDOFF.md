@@ -54,6 +54,54 @@ freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
 it has never been caught in the act on that machine.
 
 
+### TWO QUEUE ITEMS CHECKED AGAINST THE TREE RATHER THAN RESTATED: ONE IS GREEN AND SHOULD BE STRUCK, THE OTHER IS REAL AND HAS MORE SITES THAN THE QUEUE LISTED
+
+**2026-08-19, orchestrator-side, read-only. No code changed.** These are two
+claims I had been carrying forward hour after hour without measuring either.
+
+**STRUCK: "`test_gate_registration.sh` produces FALSE REDS because the checker
+does not know `release_gates.sh` is a registrar."** I ran it on the merged tree.
+**It PASSES**, and not vacuously -- all three parts report, with real counts:
+1787 scripts seen, 829 registered, 216 annotated, 743 baselined, no unaccounted
+scripts, the on-demand baseline intact as a ratchet, no new baseline entries.
+
+The last agent reported it red on `test_install_names_host.sh` and
+`install_refuses_reserved.sh`, and that report was HONEST AND CORRECT — its
+worktree branched at `52e59f16`, BEFORE the merge that fixed exactly those two
+gates. **The claim was true where it was measured and false on the tree.** That
+is the same provenance error I made with the 962-byte account files, arriving
+from the opposite direction: an agent measuring an older artifact than the one
+the conclusion gets attached to. When a red is reported, check WHICH TREE.
+
+**CONFIRMED, AND WIDER: the hardcoded live-user home.** `lib/filepick.ad:129` is
+real -- given no start directory, Save-As sets its path to the literal
+`/home/live/Documents`. On an installed machine that is the LIVE IMAGE's user,
+not the person's.
+
+But the queue named one site and there are **three**:
+
+  * `lib/filepick.ad:129` — `/home/live/Documents`, the Save-As default.
+  * `lib/hamnotescore.ad:336` — `_default_root()` returns `/home/live/Notes`.
+    **Not on a fallback path: it is the DEFAULT**, and the queue never mentioned it.
+  * `user/filepick_host.ad:202` — passes the same literal as a start dir.
+
+**AND THE FIX ALREADY EXISTS IN THE TREE, UNUSED BY THESE CALLERS.**
+`lib/homedir.ad` is a resolver written specifically to delete this hardcode; its
+own header says so, and the comment at `lib/homedir.ad:314` records that these
+callers "carried a literal `/home/live/Documents/` instead". Its public entry
+points include **`hd_home_join(sub, out, cap)`** — which is precisely the call
+these three sites want (`hd_home_join("Documents", ...)`), plus `hd_session_home`,
+`hd_resolve_home` and `hd_fallback_home` behind it, chaining
+`$HOME` → `/etc/passwd` by uid → first regular account → `/home/live` last.
+
+So this is not a design problem, it is three call sites that predate the
+resolver. **WHAT IS NOT ESTABLISHED:** nothing was run. I did not boot a machine,
+did not open a Save-As dialog, and did not verify that `hd_home_join` returns
+what these callers need on an installed disk. This is a source reading. Whoever
+fixes it should measure the dialog's actual starting directory on a booted
+installed machine, because the last two times this project reasoned about where
+a file goes without booting, it was wrong in a way that only a real save showed.
+
 ### THE KERNEL AN INSTALLED MACHINE BOOTS IS NOT UPDATABLE, AND NOTHING FAILS TO SAY SO -- BUT ITS BOOT MODULES ARE, AND 28 UNOWNED FILES ARE NOW WRITTEN DECISIONS RATHER THAN A RED A RELEASE STEPPED OVER
 
 **Measured, dev host, 2026-08-19, against the PUBLISHED 1.0.31 channel
