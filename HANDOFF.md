@@ -27,9 +27,13 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
-**Shipping now: 1.0.31, published and verified as served** — 130 packages,
-signature checked against `etc/hpm/trusted.pub`, three tarballs fetched from the
-site byte-identical to the gated build, 1.0.30 still fetchable.
+**Shipping now: 1.0.32, published and verified as served** (2026-08-19) — 130 packages,
+signature verified against `etc/hpm/trusted.pub` on the bytes the SITE returns,
+with the same verifier shown to say BAD on one appended byte; a tarball fetched
+from the site byte-identical to the gated build; 1.0.31, 1.0.30 and 1.0.26 still
+fetchable, so the channel stayed additive. Channel commit `4b0d632`, Pages
+reported built for that exact commit. **1.0.31 was published and served-verified
+the same way the day before.**
 
 **The medium**: `/home/david/.hamnix-build/rel1031/hamnix-linux-1.0.31.img`,
 4,294,967,296 bytes APPARENT (sparse — 3.0 G on disk; say which you mean),
@@ -50,11 +54,94 @@ freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
 it has never been caught in the act on that machine.
 
 
+### 1.0.32 IS PUBLISHED -- AND THE DEFECT I NAMED AS ITS HEADLINE DID NOT REPRODUCE
+
+**2026-08-19.** Channel commit `HamnixOS/packages@4b0d632`. Pages reported built
+for that exact commit through the builds API, not inferred from a wait.
+
+**Verified as SERVED, not as pushed.** The index the site returns carries 130
+entries, all 1.0.32; its detached signature verifies against `etc/hpm/trusted.pub`
+-- the same key compiled into the shipped `hpm` -- and ONE APPENDED BYTE to the
+served bytes makes that same verifier say BAD, so the GOOD is a measurement and
+not a hopeful exit code. `hamnix-init-1.0.32.tar.gz` fetched from the site is
+byte-identical to the gated build (`48005114...0a81c6c`). **Additive, confirmed by
+fetching rather than by intent:** 1.0.31, 1.0.30 and 1.0.26 still return 200 at
+their original sizes; 3046 tarballs became 3176 with zero deletions in the commit.
+
+**THE POWEROFF HANG DID NOT REPRODUCE, AND I AM THE ONE WHO CLAIMED IT.** The
+brief said `poweroff.ad` writing its banner to fd 1 before opening `/dev/reboot`
+hangs a graphical machine, past a 300 s deadline, three boots. The controls:
+
+| arm | result |
+|---|---|
+| shipped binary, compositor presenting | powered off, 21 s |
+| **banner RESTORED, same desktop** | **powered off, 21 s and 18 s** |
+| banner binary, no GPU | powered off, banner on serial |
+
+Two display paths (`virtio-gpu-pci` with a bare desktop, `-vga std` with hamwrite
+open and the guest printing that its window was ready). The banner reached the
+serial line **both** times. So **a presenting compositor is not sufficient to block
+a console write** -- the mechanism in the brief is not the mechanism.
+
+This is a FAILURE TO LOCATE, not a refutation of the symptom. The owner's
+observation was on an INSTALLED machine after a full application drive, and
+neither arm reproduced that state. `tests/linux/poweroff_graphical.sh` (22/0,
+negative control RUN, control source DERIVED from `user/poweroff.ad` at run time
+and asserted to differ in exactly one line) prints this in capitals so its green
+cannot be read as confirming a fix.
+
+The reordering shipped anyway, on a narrow argument: `poweroff`, `halt` and
+`reboot` now open `/dev/reboot` first, everything left on fd 1/2 is on a failure
+path reached only when the machine is NOT going down, and the change cannot cost
+more than one log line. **It is not evidence the hang is closed.** The write was
+deliberately NOT made non-blocking: a process already inside `write(2)` on
+`/dev/console` cannot rescue itself, and `O_NONBLOCK` is not a promise a program
+can make about that device. **`hamsh`'s `init 0` and `init 6` carry the same shape
+and are NOT fixed** -- their writes bracket `_svc_stop_all()` and cannot be
+reordered.
+
+**DOCUMENTS OWNED BY UID 0: BUILT, GATED, FAILED TWICE, REVERTED (`416248df`).**
+
+1. **As uid 1001 the applications never open a window at all.**
+   `installed_documents` fell 48/0 to 18/6; all three apps silent for 116 s with
+   nothing on the serial line.
+2. **It demoted the installer.** `install_confirm_keys` 33/1, the wizard exited
+   without reporting completion, because the launch queue taught to drop
+   privilege (`/dev/wsys/appmenu/launch`) also carries the MACHINE's programs.
+   `install_wizard_gui` stayed 34/0 only because it does not use that queue.
+
+**THIS CORRECTS AN ATTRIBUTION THIS FILE CARRIED:** the previous attempt blamed
+`rc.de-user`. The identical result came from a bare `setuid 1001` with no
+`rc.de-user` anywhere. **It is the IDENTITY, not the rc.** The
+`rfork: no private namespace yet` warning is carried on from, is not the cause,
+and should stop being cited as one.
+
+A real fix needs (a) a window-system answer for why a uid-1001 child of the root
+chrome gets no window, and (b) a way to tell the person's programs from the
+machine's at launch -- the queue payload is a bare path with no category. A
+denylist was considered and rejected: ungateable in one session, silent when
+wrong.
+
+**Also corrected:** the release-note claim that a reader's account files are
+"almost certainly 962 bytes" was one VM extrapolated to everyone's disk; replaced
+with something runnable (`cat /etc/passwd`). And `test_gate_registration.sh` was
+RED before this work started, on two gates unrelated to it.
+
+**WHAT NONE OF THIS TOUCHED: real hardware.** Every measurement behind 1.0.32 is a
+virtual machine. And whether the arena fix is the owner's laptop freeze is still
+unestablished -- `\HAMNIX.LOG` off the stick's FAT partition remains the only
+thing that would settle it.
+
 ### 1.0.32 IS BUILT AND GATED -- 20 GREEN / 1 RED -- AND THE TWO THINGS I WAS ASKED TO FIX BOTH TAUGHT ME SOMETHING THE BRIEF DID NOT CONTAIN
 
 **2026-08-19. Artifacts under `~/.hamnix-build/rel1032/`, outside every
 worktree. `GATES_SUMMARY.txt` there is the full record. NOT SIGNED, NOT
 PUBLISHED.**
+
+> **CORRECTED 2026-08-19, later the same day: it WAS signed and published**, as
+> channel commit `4b0d632`, and verified as served rather than as pushed. The
+> sentence above was true when written and is left standing. See the section
+> added below this block.
 
 **The medium**: `~/.hamnix-build/rel1032/hamnix-linux-1.0.32.img`,
 **4,294,967,296 bytes APPARENT** -- the file is SPARSE, 3.0 G on disk -- sha256
