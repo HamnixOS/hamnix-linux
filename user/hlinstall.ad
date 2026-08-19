@@ -468,16 +468,60 @@ def copy_file(src: Ptr[char], dst: Ptr[char]) -> int32:
 def write_machine_rc_boot() -> int32:
     if copy_file(cast[Ptr[char]]("/etc/rc.boot.machine"),
                  cast[Ptr[char]]("/n/target/etc/rc.boot")) == 0:
+        # THE MEDIUM CARRIED THE FILE. Whatever it says is what this machine
+        # boots, deliberately: etc/rc.boot.machine's own header records that a
+        # gate which replaces that file is opting out of the guard visibly, and
+        # several registered gates do exactly that. Not second-guessed here.
         return 0
+    # THE FALLBACK. Reached only when the medium has no /etc/rc.boot.machine.
+    #
+    # IT USED TO WRITE ONE LINE -- `source '/etc/rc.boot.installed'` -- and
+    # nothing else, which is a machine with no login program on any terminal
+    # and a PID 1 that falls off the end of its script into an unauthenticated
+    # root prompt. A MISSING GUARD MUST NEVER BE ANSWERED BY SOMETHING
+    # SUCCESS-SHAPED, and an install that reports success while producing that
+    # machine is the oldest failure shape in this tree.
+    #
+    # So the fallback now writes the SAME three-line contract etc/rc.boot.machine
+    # carries, and then REFUSES THE INSTALL if the target cannot honour it.
+    puts(2, "hlinstall: WARNING: no /etc/rc.boot.machine on this medium; writing the guarded fallback rc\n")
     fd: int32 = sys_open_write(cast[Ptr[char]]("/n/target/etc/rc.boot"))
     if fd < 0:
         return -1
     sys_write(fd, "# /etc/rc.boot -- the boot script of THIS MACHINE.\n", 51)
     sys_write(fd, "# Written by the installer; owned by no package.\n", 49)
     sys_write(fd, "# The rc a release can improve is the one it sources.\n", 54)
+    sys_write(fd, "#\n", 2)
+    sys_write(fd, "# THE MEDIUM CARRIED NO /etc/rc.boot.machine, so these lines are the\n", 69)
+    sys_write(fd, "# installer's own copy of that file's contract. The last two are THE GUARD:\n", 76)
+    sys_write(fd, "# /etc/rc.login starts a login program on every terminal, and `supervise`\n", 74)
+    sys_write(fd, "# is a hamsh builtin that NEVER RETURNS -- without it PID 1 reaches the end\n", 76)
+    sys_write(fd, "# of this script and falls through into its own interactive prompt, an\n", 71)
+    sys_write(fd, "# unauthenticated uid 0 shell on the console of a machine that just booted.\n", 76)
+    sys_write(fd, "#\n", 2)
+    sys_write(fd, "# An earlier version of this fallback wrote ONLY the source line, so an\n", 72)
+    sys_write(fd, "# image lacking /etc/rc.boot.machine installed a machine with NO LOGIN AT\n", 74)
+    sys_write(fd, "# ALL -- a missing guard answered by a machine that boots straight to root.\n", 76)
     sys_write(fd, "\n", 1)
     sys_write(fd, "source '/etc/rc.boot.installed'\n", 32)
+    sys_write(fd, "source '/etc/rc.login'\n", 23)
+    sys_write(fd, "supervise\n", 10)
     sys_close(fd)
+    # AND THE GUARD MUST BE REACHABLE, not merely named. `source` of a file
+    # that is not there is a no-op in hamsh, so an rc that sources a missing
+    # /etc/rc.login and then supervises is a machine with no login prompt --
+    # fail-CLOSED rather than a root shell, but still not a machine anyone can
+    # use, and still not something to report as a successful install.
+    #
+    # This is checked on the TARGET, after the root copy, so it is a statement
+    # about the disk that was just written and not about the medium.
+    lfd: int32 = sys_open(cast[Ptr[char]]("/n/target/etc/rc.login"))
+    if lfd < 0:
+        puts(2, "hlinstall: FATAL: this medium carries neither /etc/rc.boot.machine nor /etc/rc.login,\n")
+        puts(2, "hlinstall: FATAL: so the installed machine would have NO login program on any terminal.\n")
+        puts(2, "hlinstall: FATAL: refusing to report a successful install of an unguarded machine.\n")
+        return -1
+    sys_close(lfd)
     return 0
 
 
