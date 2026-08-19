@@ -3,10 +3,13 @@
 # tests/linux/installed_launch_uid.sh — WHOSE FILE IS IT, WHEN THE DESKTOP
 # STARTS THE PROGRAM THAT WROTE IT?
 #
-# REGISTRATION. ON-DEMAND: it builds a medium, installs a machine and boots
-# that machine once per arm under OVMF. Same class as
-# tests/linux/installed_documents.sh, whose structure and whose debugfs
-# reader this borrows almost unchanged.
+# REGISTRATION. ON-DEMAND. Not in ci_battery_manifest.txt because it builds a
+# medium, installs a machine onto a blank disk and then boots that machine once
+# per arm under OVMF -- four QEMU boots and a full image build, far past the
+# battery's per-shard budget (12-way sharded, 50-minute cap). Same class as
+# tests/linux/installed_documents.sh, whose structure and whose debugfs reader
+# this borrows almost unchanged, and it is registered in
+# scripts/release_gates.sh beside it.
 #
 # THE DEFECT
 # ==========
