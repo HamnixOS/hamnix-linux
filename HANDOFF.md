@@ -27,6 +27,99 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### A CONSTRUCTED SESSION ROOT WORKS, AND EXACTLY THREE THINGS BREAK -- 16 PASSED / 4 FAILED, THE FIRST BOOTED MEASUREMENT OF THE OWNER'S DIRECTION
+
+**Measured on a booted machine, dev host, 2026-08-19, base `bb420836`.
+Evidence `~/.hamnix-build/minroot-FINAL-16-4/GATE.log` and `boot.log`; the
+first, discarded ladder is beside it under `minroot-run1-ladder-missing-lib64`.**
+
+    session_min_root   16 PASSED / 4 FAILED   (new; four candidate roots, one boot)
+
+**THE ANSWER IS "IT MOSTLY WORKS, AND HERE IS WHAT BREAKS".** The section
+"THE ARCHITECTURAL DIRECTION IS SETTLED" below ends with "Whether a
+constructed session root actually works ... is unmeasured, and it is the first
+thing a gate should answer." This answers it.
+
+**WHAT IS FAKED, AND IT BOUNDS EVERYTHING HERE.** There is no Hamnix app
+server. Each candidate root is a DIRECTORY with the machine's own directories
+bound into it. That answers "which absolute paths does a session assume",
+because resolution against the session's root is the same either way. It says
+NOTHING about 9P latency, about a server that can REFUSE a name, or about a
+root whose contents are not already on this disk.
+
+**THE TRAP, AND IT WOULD HAVE PRODUCED A CONFIDENT WRONG ANSWER.**
+`user/linux-syscalls.c:sys_bind` has two branches. Only the `#`-device one
+reaches `enter_root` (`mount(new,"/",MS_MOVE)` then `chroot(".")`). A
+PLAIN-DIRECTORY `bind /some/dir /` takes the other branch --
+`ns_mount(src,"/",MS_BIND|MS_REC)` -- and **that call RETURNS 0 AND THE
+PROCESS'S ROOT DOES NOT CHANGE**, because mounting over the "/" mount point
+does not move the process's own root. Measured on the host with the same
+primitive. So the obvious way to fake an app server is a gap that answers
+success-shaped. Every arm instead POSTS the root at a name (`bind /rN /n/rN`)
+and enters it with `bind '#distro/rN' /`, which is the same two-step
+`etc/rc.boot.linux` already uses for Alpine and Debian.
+
+**WHAT WORKS, MEASURED.** With `/bin`, `/lib` and `/lib64` bound in:
+
+* **`cd /` IS NOT THE MACHINE.** `ls /` answers `n sys proc dev lib64 lib bin
+  tmp srv` plus the arm's own marker -- **ten entries against the machine's
+  nineteen** -- and the machine's own root marker is not among them. The arm's
+  marker, a file that exists on no other root, resolves and prints.
+* **PROGRAMS RUN.** `/bin/id` answers `uid=0 gid=0 groups=0`, `/bin/hpm list`
+  runs, `/bin/hamappmenu` (the launcher) is present and resolves.
+* **THE WINDOW SYSTEM'S NAME SURVIVES.** `/dev/wsys/wsysd/state` opens, because
+  `enter_root`'s `always[]` carries /dev across.
+* Adding `/etc`, `/var` and `/usr` (arm r4) changed NOTHING that these probes
+  can see. The minimum set for this much is `/bin /lib /lib64`.
+
+**WHAT BREAKS. THREE THINGS, AND THE FIRST IS THE ONE THAT MATTERS.**
+
+1. **THE MACHINE'S REAL ROOT IS NOT REACHABLE AT `/n`.** In BOTH working arms,
+   `cat /n/MINROOT-REALROOT-MARKER` answers `No such file or directory`, even
+   though the template runs `bind '#/' /n` verbatim as `etc/rc.de-user.linux`
+   does for `enter debian`. `/n` exists (enter_root's `always[]` makes it) and
+   is not the machine. **The Plan 9 convention this whole direction rests on --
+   drivers on the real global root as an UNDERPINNING, reachable from below --
+   does not survive the root switch.** This is the thing to fix next.
+2. **WITHOUT `/lib64` EVERY EXEC DIES WITH A BARE 127 AND NO DIAGNOSTIC.** Arm
+   r2 -- `/bin` and nothing else, the literal reading of "apps live on a file
+   server" -- produced eight silent 127s. The shipped programs are dynamic ELF
+   built by clang against `-lssl -lcrypto -lcrypt`; their interpreter is
+   `/lib64/ld-linux-x86-64.so.2`, and `/lib` and `/lib64` are separate
+   top-level directories (`hamlinux_image.sh:34`). The silence is
+   `user/hamsh.ad`'s own documented shape: `spawn_resolved` probes candidates
+   with `sys_open` and prints "command not found" only when NONE opens; when
+   one opens it forks and execs and a failed execve says nothing.
+3. **AN `enter` BODY DOES NOT DISPATCH HAMSH BUILTINS.** Arm r1 answered
+   `hamsh: command not found: cat` and `... ls` -- both are builtins. A
+   constructed root with no `/bin` can run NOTHING, not even the shell's own
+   commands.
+
+**A FOURTH DEFECT, FOUND BY THE FIRST ATTEMPT FAILING.** The gate first used
+`$HAMNIX_DISTRO_<NAME>`, which `distro_resolve` documents as the most specific
+of three ways to name a distro namespace. Every arm failed 126 with
+`$HAMNIX_DISTRO_r1 unset`. **hamsh's `export` writes hamsh's OWN environment
+table** (`env_set`, materialised into an envp only by `_build_envp` at spawn
+time) **and hamsh never calls `setenv(3)`**, while `bind` is a hamsh BUILTIN --
+so `distro_resolve`'s `getenv()` runs in that same process and sees nothing.
+The override is unreachable from a `bind` typed at a shell. NOT FIXED.
+
+**WHAT IS NOT ESTABLISHED, and none of it should be read as done.**
+* **hpm IS NOT CLEARED.** It answered `hpm: no packages installed` with status
+  0 in both arms -- but this is the LIVE initramfs, which legitimately carries
+  no package database (the DISK builder emits `installed.json`, not the image
+  builder), so this boot **cannot distinguish "hpm works" from "hpm is blind in
+  a constructed root"**. It needs the same arms on an installed machine.
+* **NOTHING DREW A WINDOW.** Only the window server's NAME was shown to
+  resolve. Whether a scene client can map and commit a window from a
+  constructed root is unmeasured.
+* **NO SESSION ACTUALLY GETS THIS ROOT.** Every arm is an `enter` typed by
+  root in an rc. `etc/users/default.ns` is still SUBTRACTIVE and a real login
+  still lands in the machine's root.
+* **THIS WAS ALL ROOT.** The arms ran as uid 0. An unprivileged session has to
+  reach `enter_root` through `ns_privilege()`'s user namespace, and that is not
+  measured here.
+
 ### A MACHINE THE INSTALLER JUST BUILT ASKS WHO YOU ARE -- 31 PASSED / 0 FAILED. AND THE FALLBACK rc WAS INSTALLING A MACHINE WITH NO LOGIN AT ALL
 
 **Measured on a booted machine, dev host, 2026-08-19, base `bb420836`.

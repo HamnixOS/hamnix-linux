@@ -375,12 +375,29 @@ installed_boot_login|yes|0|27||bash tests/linux/installed_boot_login.sh
 installed_fresh_login|yes|0|31||bash tests/linux/installed_fresh_login.sh
 
 # WHAT BREAKS WHEN `/` IS NOT THE MACHINE'S ROOT -- the first booted measurement
-# of the owner's "the global root should be min as possable" direction. REGISTERED
-# RED ON PURPOSE, and the header says so: its reds are the finding, not a
-# regression. See the commit that added it and HANDOFF.md. expect_fail=1 records
-# that a NON-red run is the thing to look at, because it would mean a constructed
-# session root started working and this line needs re-measuring.
-session_min_root|yes|1|9||bash tests/linux/session_min_root.sh
+# of the owner's "the global root should be min as possable" direction. 16 PASSED
+# / 4 FAILED on this host, 2026-08-19, in the run that registered it.
+#
+# THE FOUR FAILURES ARE DECLARED, AND THEY ARE NOT ONE KIND. Do not raise this
+# number to make a new red go away; if the count moves, read which arm moved.
+#
+#   TWO ARE THE LADDER'S LOWER RUNGS, and they are the measurement, not a bug.
+#   r1 (no /bin) and r2 (/bin but no dynamic loader) cannot run a program at
+#   all, so the gate refuses to report anything else from them. r1 says
+#   `command not found` (cat and ls are hamsh BUILTINS and an `enter` body does
+#   not dispatch builtins); r2 says NOTHING and exits 127, which is
+#   user/hamsh.ad's own documented silent shape. If r2 ever goes green the
+#   loader stopped being needed and this comment is stale.
+#
+#   TWO ARE A REAL DEFECT AND SHOULD GO GREEN WHEN IT IS FIXED. In r3 and r4 --
+#   which DO work: `cd /` shows ten entries instead of the machine's nineteen,
+#   and /bin/id, /bin/hpm and the launcher all run -- `cat
+#   /n/MINROOT-REALROOT-MARKER` answers "No such file or directory". The
+#   template runs `bind '#/' /n` exactly as etc/rc.de-user.linux does, and THE
+#   MACHINE'S REAL ROOT IS STILL NOT REACHABLE AT /n. That is the Plan 9
+#   underpinning the owner's whole direction rests on, and it does not survive
+#   the root switch. When it does, this line becomes |2| and then |0|.
+session_min_root|yes|4|16||bash tests/linux/session_min_root.sh
 REGISTRY
 }
 
