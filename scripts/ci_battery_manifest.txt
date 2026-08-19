@@ -4422,6 +4422,11 @@ bash scripts/test_wpt_reftest_concurrency_host.sh
 # through /etc/passwd BY UID; this proves it for a uid that is not the live
 # image's 1001, with no install and no QEMU. REGISTERED 2026-07-29.
 bash scripts/test_de_home_resolve_host.sh
+# AND THE ACCOUNT-NAME RULE, same shape and same cost: `install --user hostowner`
+# converted the machine's administrator into an ordinary account, and a 65-character
+# --user overran the 64-byte global next door. This runs lib/instnames.ad against
+# real strings with no QEMU. MEASURED 0.5 s on the dev host, 2026-08-19.
+bash scripts/test_install_names_host.sh
 # (b) The on-device EFFECT gate for all three: a file created in ~/Desktop must
 # appear in the rendered icon grid (and vanish when deleted), and a REAL
 # pointer drag out of the Applications menu must pin a launcher on the panel

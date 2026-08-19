@@ -4,8 +4,9 @@
 # WOULD DESTROY THE MACHINE'S ADMINISTRATOR, AND REFUSES ONE TOO LONG FOR ITS
 # OWN BUFFER — MEASURED ON A REAL DISK, NOT IN THE SOURCE.
 #
-# REGISTRATION. ON-DEMAND: it builds a medium and boots it under OVMF, past the
-# battery's per-shard budget. The QEMU-free half of the same rule is
+# REGISTRATION. ON-DEMAND: not in ci_battery_manifest.txt because it builds a
+# medium and boots it under OVMF, past the battery's per-shard budget. It IS in
+# scripts/release_gates.sh. The QEMU-free half of the same rule is
 # scripts/test_install_names_host.sh, which runs lib/instnames.ad against real
 # strings in milliseconds and IS cheap enough to register.
 #

@@ -246,6 +246,17 @@ installed_documents|yes|0|48||bash tests/linux/installed_documents.sh
 # measured on this host, 2026-08-18, immediately before it was written here;
 # the QEMU-free half is test_install_names_host above.
 install_refuses_reserved|yes|0|16||bash tests/linux/install_refuses_reserved.sh
+# DOES `poweroff` POWER OFF A MACHINE WHOSE COMPOSITOR IS PRESENTING? Until
+# 2026-08-19 it did not: user/poweroff.ad wrote its banner to fd 1 before it
+# opened /dev/reboot, and once the compositor is presenting that write does not
+# return -- so the /dev/reboot write was never reached and three graphical
+# boots in a row sat past a 300 s deadline. `halt` and `reboot` had the same
+# shape. The gate boots three machines: the shipped binary on a graphical one
+# (must power off), the SAME program with the banner line put back on the same
+# desktop (must hang -- the negative control, and it is RUN), and that same
+# reverted binary on a machine with no GPU at all (must power off, so a red in
+# the second arm cannot be a broken build). expect_min MEASURED on this host.
+poweroff_graphical|yes|0|||bash tests/linux/poweroff_graphical.sh
 REGISTRY
 }
 
