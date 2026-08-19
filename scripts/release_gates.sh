@@ -141,10 +141,20 @@ score_log() {
 # vocabulary this tree uses (`ok  `, `  PASS  `, `  FAIL  `, `FAIL `, `not ok`)
 # so that a summary line claiming zero failures over a body full of FAILs can
 # be caught. verify_medium.sh's own header records that exact escape happening.
+#
+# THE `[tag] PASS` DIALECT WAS NOT COUNTED, AND THAT IS THE SAME BLINDNESS THIS
+# FILE EXISTS FOR. scripts/test_de_home_resolve_host.sh and
+# scripts/test_install_names_host.sh print `[homedir] PASS ...` /
+# `[instnames] FAIL ...`, and both scored "0 ok-ish, 0 fail-ish" here -- meaning
+# the body-versus-summary cross-check, the one that catches a gate claiming
+# 0 FAILED over a body full of failures, was OFF for them while the driver
+# reported them GREEN. Measured 2026-08-18, the day they were registered. The
+# bracketed tag is OPTIONAL in the pattern, so every older dialect counts
+# exactly as it did.
 tally_log() {
     awk '
-        /^[ \t]*(ok|PASS)[ \t]/   { o++ }
-        /^[ \t]*(FAIL|not ok)[ \t]/ { f++ }
+        /^[ \t]*(\[[A-Za-z0-9_.-]+\][ \t]+)?(ok|PASS)[ \t]/   { o++ }
+        /^[ \t]*(\[[A-Za-z0-9_.-]+\][ \t]+)?(FAIL|not ok)[ \t]/ { f++ }
         END { printf "%d %d\n", o+0, f+0 }
     ' "$1"
 }
@@ -172,6 +182,21 @@ wsys_zombie_strand|no|0|8||bash tests/linux/wsys_zombie_strand.sh
 wsys_zombie_owner|no|0|9||bash tests/linux/wsys_zombie_owner.sh
 test_hamsh_tok_capacity|no|0|18||bash scripts/test_hamsh_tok_capacity.sh
 test_livedom_functional_host|no|1|22|06_class_style_toggle is declared in the gate's own KNOWNFAIL list|bash scripts/test_livedom_functional_host.sh
+# THE TWO HOST GATES FOR THE OFFICE-DOCUMENT AND ACCOUNT-NAME FIXES. Both are
+# QEMU-free and run in seconds, so there is no excuse for a release not to run
+# them. Both numbers were MEASURED on this host, 2026-08-18, immediately before
+# they were written here.
+#
+# test_de_home_resolve_host also RUNS hd_home_join() -- the join
+# hamwrite/hamsheet/hamslides now use instead of the literal
+# "/home/live/Documents/" -- so its 26 includes run-time evidence that those
+# string literals are not NULL at run time, which on this backend is a real
+# hazard for globals and the reason the installer once segfaulted after writing
+# every file correctly. Where those programs ACTUALLY WRITE is measured by
+# tests/linux/installed_documents.sh, which boots an installed machine; that
+# gate is on-demand and is not registered here.
+test_de_home_resolve_host|no|0|26||bash scripts/test_de_home_resolve_host.sh
+test_install_names_host|no|0|23||bash scripts/test_install_names_host.sh
 channel_bytes_match_image|no|0|3||bash tests/linux/channel_bytes_match_image.sh
 channel_covers_image|no|0|8||bash tests/linux/channel_covers_image.sh
 pkg_tar_reproducible|no|0|5||bash tests/linux/pkg_tar_reproducible.sh
@@ -186,6 +211,41 @@ install_wizard_gui|yes|0|34||bash tests/linux/install_wizard_gui.sh
 # and a bare VAR=x prefix would be taken as the program name.
 soak_desktop|yes|0|26||env HAMLINUX_SOAK_SECS=900 bash tests/linux/soak_desktop.sh
 shipped_medium_boots|yes|0|31||bash tests/linux/shipped_medium_boots.sh @IMG@
+# THE THREE GATES THAT INSPECT AN INSTALLED MACHINE, AND WERE IN NO REGISTRY
+# AT ALL. installed_accounts.sh and installed_offers_install.sh carry the whole
+# of the account, password and self-offering-installer work -- the fixes this
+# line shipped in 1.0.30 and 1.0.31 -- and NOTHING RAN THEM. That is precisely
+# the defect this file was written to eliminate ("the one gate that inspects
+# the shipped medium was never run by the driver that gates it"), reproduced on
+# the gates that matter most. installed_documents.sh is the new one: it drives
+# a Save in the word processor on a booted installed machine and reads the
+# disk.
+#
+# installed_documents's 48 WAS measured, twice, on this host on 2026-08-18: the
+# tree as committed scores 48/0, and the same file on a tree whose three
+# _default_docpath() functions are reverted to the "/home/live/Documents/..."
+# literal scores its failures on the disk assertions. The other two numbers
+# were not.
+#
+# THE OTHER TWO expect_min ARE DELIBERATELY BLANK, WHICH MEANS ZERO, AND THAT
+# IS A STATED GAP RATHER THAN A NUMBER I INVENTED. Every other number in this file
+# was measured on this host before it was written down; these three were not
+# measured in the session that registered them (each is a full image build plus
+# three or four QEMU boots, and the session's clock went to the documents gate
+# and its negative control). HANDOFF.md records 61/0 and 24/0 for the first two
+# from an earlier tree, and a package database has landed on the installed-disk
+# path since, so those figures are a REPORT and not a measurement of this tree.
+# Running them at zero still catches the two failures that matter most -- a
+# gate that asserts nothing is RED by run_gate's own rule, and any failure is
+# RED -- and loses only the shrink check. FILL THESE IN from a run, and do not
+# copy them from a HANDOFF entry.
+installed_accounts|yes|0|||bash tests/linux/installed_accounts.sh
+installed_offers_install|yes|0|||bash tests/linux/installed_offers_install.sh
+installed_documents|yes|0|48||bash tests/linux/installed_documents.sh
+# The end-to-end half of the reserved-name / over-long-name refusals. 16/0
+# measured on this host, 2026-08-18, immediately before it was written here;
+# the QEMU-free half is test_install_names_host above.
+install_refuses_reserved|yes|0|16||bash tests/linux/install_refuses_reserved.sh
 REGISTRY
 }
 

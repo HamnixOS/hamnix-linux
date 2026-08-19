@@ -30,8 +30,13 @@ OUT="build/host"
 BIN="$OUT/homedir_host"
 mkdir -p "$OUT"
 fail=0
-pass() { echo "[homedir] PASS $*"; }
-bad()  { echo "[homedir] FAIL $*" >&2; fail=1; }
+# THE COUNTERS EXIST SO A RELEASE DRIVER CAN SCORE THIS GATE. Without a summary
+# line in a dialect scripts/release_gates.sh knows, run_gate reports it
+# UNSCORABLE -- which is neither a pass nor a zero, and is exactly the state
+# that let a gate scoring 8/0 be recorded as 0.
+NPASS=0; NFAIL=0
+pass() { NPASS=$((NPASS+1)); echo "[homedir] PASS $*"; }
+bad()  { NFAIL=$((NFAIL+1)); echo "[homedir] FAIL $*" >&2; fail=1; }
 
 # --- 1. the resolver is wired into the desktop ----------------------------
 # A green parser that nothing calls is not a fix. hamdesktop MUST resolve its
@@ -105,6 +110,56 @@ assert_grep '^REG4 idx=4 len=0 home=<none>$' \
 assert_grep '^INSTALLED_REG0 len=11 home=/home/gizmo$' \
     "KEYSTONE: on an INSTALLED passwd the first regular account is the wizard's user"
 
+# ---- hd_home_join, RUN rather than read -----------------------------------
+# The three office apps (hamwrite / hamsheet / hamslides) used to carry the
+# literal "/home/live/Documents/..." and now call hd_home_join(). This is the
+# run-time evidence that the join works and that its string literals are not
+# NULL at run time -- a real hazard on this backend, where a GLOBAL
+# initialised with a string literal compiles cleanly and is null when it runs.
+# The VALUE is the host's own home, so only the SHAPE is asserted.
+assert_grep '^JOINDOC len=[0-9]+ path=/[^ ]*/Documents/untitled\.hdoc$' \
+    "hd_home_join returns an absolute <home>/Documents/untitled.hdoc"
+assert_grep '^JOINSHEET len=[0-9]+ path=/[^ ]*/Documents/untitled\.hsheet$' \
+    "…and the spreadsheet's extension the same way"
+if grep -Eq '^JOINDOC len=0 ' "$DUMP"; then
+    bad "hd_home_join returned NOTHING on this host -- it resolved no home at all"
+else
+    pass "hd_home_join resolved a non-empty path (its literals are not null at run time)"
+fi
+# A buffer too small must REFUSE. A truncated path is a valid-looking path
+# that writes the document into the wrong file.
+assert_grep '^JOINTINY len=0 path=<none>$' \
+    "hd_home_join REFUSES a buffer too small instead of truncating the path"
+
+# ---- the three office apps really call it ---------------------------------
+# Static, and said to be static: this is a wiring check, not a measurement of
+# where the programs write. That measurement is
+# tests/linux/installed_documents.sh, which drives a Save on a booted
+# installed machine and reads the disk.
+for app in hamwrite hamsheet hamslides; do
+    if grep -q 'from lib.homedir import' "user/$app.ad" \
+            && grep -q 'hd_home_join' "user/$app.ad"; then
+        pass "user/$app.ad resolves its document directory through lib/homedir.ad"
+    else
+        bad "user/$app.ad does not use the shared home resolver -- it still builds its own document path"
+    fi
+    # The literal may survive ONLY as the last-resort fallback INSIDE a
+    # _default_* function -- the branch taken when the resolver cannot answer
+    # at all. Anywhere else it is the defect. Comment lines are excluded;
+    # a paragraph explaining the old path is not the old path.
+    stray=$(awk '
+        /^def /      { fn = $2; sub(/\(.*/, "", fn) }
+        /^[ \t]*#/   { next }
+        /"\/home\/live\/Documents/ {
+            if (fn !~ /^_default_/) printf "%s:%d ", fn, FNR
+        }' "user/$app.ad")
+    if [ -z "$stray" ]; then
+        pass "user/$app.ad reaches the /home/live/Documents literal only from its _default_* fallback"
+    else
+        bad "user/$app.ad builds a /home/live/Documents path outside the fallback: $stray"
+    fi
+done
+
 assert_grep '^HOMEDIR_HOST_DONE$' "the harness ran to completion"
 
 # --- 3. no stray /home/live hardcode left in the desktop's resolution -----
@@ -122,6 +177,7 @@ else
     bad "hd_resolve_home does not consult /etc/passwd BEFORE the /home/live fallback"
 fi
 
+printf '\n%d PASSED, %d FAILED\n' "$NPASS" "$NFAIL"
 if [ "$fail" -eq 0 ]; then
     echo "[homedir] RESULT: PASS"
     exit 0

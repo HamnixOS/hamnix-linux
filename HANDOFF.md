@@ -50,6 +50,210 @@ freeze the owner saw on his laptop. It reproduces, it explains the symptoms, and
 it has never been caught in the act on that machine.
 
 
+### WHERE THE WORD PROCESSOR PUTS YOUR DOCUMENT IS A MEASUREMENT NOW, NOT A GREP -- AND ON THE PATH A PERSON USES, THE SAVE SUCCEEDED INTO SOMEBODY ELSE'S DIRECTORY
+
+**Measured, dev host, 2026-08-18. Evidence under
+`~/.hamnix-build/instdoc-green-evidence/` (the fixed run) and
+`~/.hamnix-build/instdoc-red/` (the same gate with the three
+`_default_docpath()` functions reverted to the literal).**
+
+**THE BLOCKER IS GONE.** `tests/linux/installed_documents.sh` builds a medium,
+installs a machine onto a blank 6 GiB disk, then boots that machine ONCE PER
+OFFICE APPLICATION, launches the application the way the desktop icon column
+does, clicks into its document, TYPES A MARKER STRING and presses **Ctrl-S** on
+QEMU's own keyboard -- and then reads the ext4 with `debugfs`, nothing mounted.
+
+| condition | result |
+|---|---|
+| the tree with the fix | **48 PASSED / 0 FAILED** |
+| the three `_default_docpath()` reverted to `"/home/live/Documents/..."` | **30 PASSED / 6 FAILED** |
+
+**THE OWNER'S DESCRIPTION OF THE PRECONDITION IS EXACTLY RIGHT**, read off the
+installed disk before anything was typed: `/home/live/Documents` **is** there,
+**uid 0, mode 0755**, and `/home/<user>/Documents` is there at **uid 1001**.
+
+**AND THE DEFECT IS WORSE THAN "the save fails", WHICH IS WHAT I EXPECTED TO
+MEASURE.** On the reverted tree the save **SUCCEEDED**: the gate found
+`/home/live/Documents/untitled.hdoc` on the disk and named it in its failure
+line. A complete document, written, in a directory that belongs to **no account
+on that machine**. It succeeded because a launcher started from the icon column
+runs as **root** (below). The EACCES-and-silence version is real too -- it is
+what happens when the same program is started as uid 1001, and the first
+version of this gate measured exactly that: "the bytes went NOWHERE". Both are
+the same hardcode; the first is the one a person meets.
+
+**WITH THE FIX**, all three documents land in `/home/<user>/Documents`, 43 / 41
+bytes, each carrying the marker string the drive typed, and `/home/live/Documents`
+has no document in it at all.
+
+#### I GOT THE LAUNCH PATH WRONG FIRST, AND THE MACHINE SAID SO
+
+The obvious launch is `/bin/hamsh /etc/rc.de-user /bin/hamwrite`:
+`user/linux-wsys.c` says in four places that "every DE window is
+`/bin/hamsh /etc/rc.de-user <prog>`". **That is a TERMINAL's launch, not an
+ICON's.** `user/hamdesktop.ad`'s `_run_action()` calls `spawn_detached()` on the
+`/bin` path straight out of the `.desktop` file, and **hamdesktop is system
+chrome running as root**, so a double-clicked Word Processor is a ROOT CHILD OF
+THE CHROME and never goes near `rc.de-user` or `setuid 1001`.
+
+The first run measured that for me instead of my reading it: the session shell
+dropped to uid 1001, printed `uid 1001 home /home/<user>` -- identity resolution
+is fine -- then `rfork: no private namespace yet (needs CAP_SYS_ADMIN)`, and
+**the application never opened a window**. 24 PASSED / 3 FAILED, all three
+"the bytes went NOWHERE", and every one of them would have read as the product
+failing.
+
+**THAT CHANGED THE FIX, NOT ONLY THE GATE.** `hd_resolve_home()` asks
+`sys_getuid()`; for a root child of the chrome that is 0, `/etc/passwd` has no
+uid-0 line, and it falls straight through to `/home/live` -- the very hardcode
+it exists to remove, reached by a different road. `lib/homedir.ad` grew
+**`hd_session_home()`**, the chain `user/hamdesktop.ad`'s `_desk_dir_resolve()`
+already had to invent for the same reason: `$HOME` -> this uid's passwd home
+**only when the uid is a regular account** -> the first REGULAR account whose
+home directory **exists** -> `/home/live`. The exists-test at step 3 is
+load-bearing: the live image's `/etc/passwd` carries `dave` at uid 1000 BEFORE
+`live` at 1001 and only `/home/live` is created, so taking the first regular
+account blindly would point every office application on the live medium at a
+directory that is not there -- turning a fix for installed machines into a
+regression on the medium.
+
+#### TWO THINGS THIS GATE CANNOT SEE, MEASURED AND WRITTEN DOWN RATHER THAN LEFT TO BE FOUND
+
+* **ONCE THE COMPOSITOR IS PRESENTING, A PROGRAM'S CONSOLE OUTPUT STOPS REACHING
+  THE SERIAL LINE.** A run whose document WAS written -- 43 bytes with the
+  marker, read off the ext4 -- never printed its own `[hamwrite] saved <path>`
+  line, and PID 1 never printed `poweroff: requested power off` either. The
+  serial log stops dead at the application's `scene window ready`.
+* **AND `poweroff` HANGS ON SUCH A MACHINE.** `user/poweroff.ad` writes
+  `poweroff: requested power off` to fd 1 **before** it opens `/dev/reboot`.
+  With the console blocked that write never returns and the machine never powers
+  off: measured, three boots in a row sat past a 300 s deadline. The gate works
+  around it with `poweroff > /dev/null`, which powers the machine off cleanly
+  every time -- but **the shipped `poweroff` still has the banner before the
+  syscall**, and any script that powers a graphical machine off from its own
+  console will hang on it. NOT FIXED HERE.
+
+So the gate scores the **before**-picture (the title bar reads `* modified`, so
+the typing reached the application -- the drive control, and it runs in BOTH
+arms) and the **bytes on the disk**. The after-picture and the program's own
+`saved` / `SAVE FAILED` lines are printed as REPORTS. Scoring them would score
+the compositor's frame timing, not the save.
+
+#### AND A THIRD DEFECT FELL OUT OF THE SAME DISK, SUCCESS-SHAPED
+
+**THE DOCUMENT IS OWNED BY UID 0.** Not this fix failing -- this is what
+launching from the icon column means, and it is on the record now rather than
+waiting to be found. The person's documents are root's, inside a directory that
+is theirs. Anything launched from an icon can still rewrite them (it is root
+too); the same document opened from a **desktop terminal**, which IS uid 1001
+because `/etc/rc.de-user` drops it, **cannot be saved over**. The fix is for the
+chrome to drop privilege when it launches -- and the measurement above says that
+is not a one-line change, because the obvious way to do it produces an
+application that never opens a window on this kernel. NOT FIXED HERE.
+
+#### WHAT STILL CARRIES THE LITERAL
+
+`lib/filepick.ad:129` starts the shared Save-As/Open dialog at
+`/home/live/Documents` **when its caller passes no start directory**. All three
+office applications pass their own document's directory, which is now resolved,
+so they never reach it -- but it is still a hardcode in a shared dialog and
+nothing measures it.
+
+### `--user hostowner` TURNED THE ADMINISTRATOR INTO AN ORDINARY ACCOUNT, AND `--user <65 chars>` OVERRAN THE GLOBAL NEXT DOOR
+
+Both were reachable from a shipped command line and neither was checked.
+
+* **THE RESERVED NAMES.** `user/hlinstall.ad` rewrites the account table rather
+  than appending to it: the requested name goes on its DROP list and is then
+  written at **uid 1001** with home `/home/<name>`. Give it `hostowner` and the
+  uid-1 administrator line is deleted and re-created as a regular user --
+  `/etc/rc.de-hostowner` has no identity to run as, `newshell hostowner` has
+  nothing to switch to, every uid-1 lookup resolves to nothing. `sshd`,
+  `hamsh-svc` and `nobody` go the same way, and the GUI wizard's only rule was
+  "the field is not empty".
+* **THE OVERRUN.** `copy_str()` stopped at **120 SOURCE bytes** however big the
+  destination was, and `user_buf`, `hostname_buf` and `disk` are
+  `Array[64, uint8]` GLOBALS. `install --auto ... --user <65+ chars>` wrote past
+  the end of one of them -- on that command line, into the password buffers.
+  CLI only: the GUI field caps at 30.
+
+**THE FIX IS ONE LIST IN ONE PLACE.** `lib/instnames.ad` holds the reserved
+names and the length limit; `user/hlinstall.ad` refuses at the parse site (with
+the reason, the way `--repo` already refuses an over-long URL) and
+`user/haminstallui.ad`'s `_page_ready()` will not advance past a reserved name
+and **says on the page why**. A rule only one of the two front ends applies is
+not a rule -- this tree has been bitten by that shape before, which is why
+`/etc/rc.distros` is generated. `copy_str_cap()` takes the destination's size
+and is used for all three 64-byte buffers.
+
+**THE GATES.** `scripts/test_install_names_host.sh` RUNS the rule against real
+strings, QEMU-free, in under a second: **23 PASSED / 0 FAILED**, including the
+control that ordinary names are still accepted (a rule that refuses everything
+refuses nothing in particular) and that the match is EXACT, so `hostowners` and
+`myroot` are fine. `tests/linux/install_refuses_reserved.sh` is the end-to-end
+one:
+
+| condition | result |
+|---|---|
+| the tree with the refusals | **16 PASSED / 0 FAILED** |
+| the two refusals removed from the `--user` parse | **9 PASSED / 8 FAILED** |
+
+**AND THE NEGATIVE CONTROL NAMES THE DEFECT RATHER THAN MERELY GOING RED.** With
+the refusals gone, the disk that six installs were supposed to leave untouched
+comes back partitioned, and the `/etc/passwd` on it reads:
+
+```
+sshd:x:2:2::/var/empty:/bin/false
+hamsh-svc:x:3:3::/var/empty:/bin/false
+nobody:x:65534:65534::/nonexistent:/bin/false
+hostowner:x:1001:1001::/home/hostowner:/bin/hamsh
+```
+
+**There is no uid-1 line at all.** The administrator was deleted and rewritten
+as an ordinary user, on a real installed disk, read with `debugfs` with nothing
+mounted. That was a source-level claim this morning and is a measurement now.
+
+**AND THE FIRST SHAPE OF THAT GATE WAS WRONG IN A WAY WORTH RECORDING.** It
+attached BOTH disks at once and aimed the refusals at `/dev/nvme1n1` and the
+control install at `/dev/nvme0n1`. It ran twice and **the two disks swapped
+identities between the runs** -- same QEMU command line, same medium. Linux
+names NVMe namespaces by controller INSTANCE and instances are handed out as
+probes COMPLETE, so with two controllers that mapping is a race. The second run
+"found" the control account on the refusal disk and `hostowner` on the control
+disk, and every conclusion drawn from it would have been about a disk other than
+the one named. It is TWO BOOTS with ONE namespace each now. **Any gate on this
+line that attaches two NVMe controllers and addresses them by name has the same
+bug.**
+
+### THREE GATES THAT INSPECT AN INSTALLED MACHINE ARE IN `release_gates.sh` NOW, AND TWO OF THEM CARRY NO NUMBER
+
+`installed_accounts.sh` and `installed_offers_install.sh` carry the whole of the
+account, password and self-offering-installer work -- the fixes 1.0.30 and
+1.0.31 shipped -- and **were in no registry at all**. They are registered now,
+with `installed_documents.sh` (48) and `install_refuses_reserved.sh` (16)
+beside them, and the two QEMU-free host gates
+`test_de_home_resolve_host.sh` (26) and `test_install_names_host.sh` (23) too --
+**49 assertions the release driver now scores that it did not score before, all
+four numbers measured on this host before they were written down.**
+
+**Their `expect_min` is deliberately BLANK, which means zero, and that is a
+stated gap rather than a number I invented.** Every other number in that file
+was measured on the host before it was written down; these two were not
+measured in the session that registered them (each is a full image build plus
+three or four QEMU boots, and the clock went to the documents gate and its
+negative control). HANDOFF records 61/0 and 24/0 from an earlier tree, and a
+package database has landed on the installed-disk path since, so those figures
+are a REPORT. Running them at zero still catches everything except a SHRINK.
+**Fill them in from a run. Do not copy them from here.**
+
+**AND THE DRIVER'S BODY-VERSUS-SUMMARY CROSS-CHECK WAS BLIND TO A DIALECT THIS
+TREE USES.** `scripts/test_de_home_resolve_host.sh` and
+`test_install_names_host.sh` print `[homedir] PASS ...` / `[instnames] FAIL ...`,
+and `tally_log()` counted **0 ok-ish, 0 fail-ish** for both while `run_gate`
+reported them GREEN -- so the check that catches a gate claiming 0 FAILED over a
+body full of failures was OFF for them. The bracketed tag is optional in the
+pattern now; every older dialect counts exactly as it did.
+
 ### RESOLVED — I was measuring POST-FIX disks. The 962 figure stands unrefuted.
 
 I reported an hour ago that I could not reproduce the "962 bytes, not one account

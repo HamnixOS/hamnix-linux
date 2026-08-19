@@ -26,8 +26,10 @@ extern def sys_close(fd: int32) -> int32
 extern def sys_yield() -> int32
 extern def sys_waitfds(fds: Ptr[int32], nfds: uint64, timeout_ms: int64) -> int64
 extern def sys_bind(new_path: Ptr[char], old_path: Ptr[char], flag: int32) -> int32
+extern def sys_mkdir(path: Ptr[char]) -> int32
 
 from lib.hamui import hamscene_commit
+from lib.homedir import hd_home_join
 from lib.hamtextbox import htb_evt_parse_m
 from lib.filepick import filepick_open, filepick_active, filepick_emit_panel, \
     filepick_handle_code, filepick_click, filepick_take_result, \
@@ -139,16 +141,83 @@ def _sync_fname():
     hamslides_set_fname(&doc_path[base])
 
 
+# ---- WHERE THIS SESSION'S DOCUMENTS LIVE ---------------------------------
+# THE DEFECT THIS REPLACES. The default document path used to be the literal
+# "/home/live/Documents/untitled.hamslides". `live` is the LIVE MEDIUM's account
+# and an installed machine has no such account in /etc/passwd at all.
+#
+# WHAT THE DEFECT ACTUALLY DID, MEASURED BOTH WAYS ON A BOOTED INSTALLED
+# MACHINE (tests/linux/installed_documents.sh, 2026-08-18) rather than reasoned
+# about:
+#
+#   * LAUNCHED FROM THE DESKTOP ICON -- which is how a person starts it, and
+#     which runs the program as ROOT because user/hamdesktop.ad is system
+#     chrome and spawn_detached()s the launcher directly -- the save SUCCEEDED,
+#     into /home/live/Documents/untitled.<ext>. Not an error: a file, written,
+#     complete, in a directory that belongs to NO ACCOUNT on that machine. The
+#     person's work was on the disk and nowhere they would ever look for it.
+#   * LAUNCHED AS THE SESSION USER (uid 1001) the same Ctrl-S produced NOTHING
+#     AT ALL: /home/live is left behind by the install owned by uid 0 mode
+#     0755, the open(2) fails, and _save_doc() RETURNS ON A FAILED OPEN
+#     WITHOUT SAYING ANYTHING -- the title bar goes on reading "* modified".
+#
+# Both are the same hardcode. The first is the one a person meets.
+#
+# hd_home_join() resolves through hd_session_home(), the same chain
+# user/hamdesktop.ad uses. NO GLOBAL Ptr[uint8] STRING CONSTANT is
+# introduced: on this backend a global initialised with a string literal
+# compiles cleanly and is NULL at run time (measured -- it segfaulted the
+# installer after it had written every file correctly).
+docdir_buf: Array[192, uint8]
+
+
+def _default_docpath():
+    n: uint64 = hd_home_join(cast[Ptr[uint8]]("Documents/untitled.hamslides"),
+                             &doc_path[0], DOC_PATH_CAP)
+    if n == 0:
+        _set_docpath(cast[Ptr[uint8]]("/home/live/Documents/untitled.hamslides"))
+        return
+    doc_path_len = n
+
+
+# CREATE the directory the document is about to be written into: a home whose
+# skeleton has no Documents/ is otherwise the same silent save failure.
+def _ensure_docdir():
+    cut: uint64 = 0
+    k: uint64 = 0
+    while k < doc_path_len:
+        if doc_path[k] == 47:
+            cut = k
+        k = k + 1
+    if cut == 0:
+        return
+    i: uint64 = 0
+    while i < cut and i + 1 < 192:
+        docdir_buf[i] = doc_path[i]
+        i = i + 1
+    docdir_buf[i] = 0
+    sys_mkdir(cast[Ptr[char]](&docdir_buf[0]))
+
+
 def _save_doc():
     if doc_path_len == 0:
         return
+    _ensure_docdir()
     fd: int32 = sys_open_write(cast[Ptr[char]](&doc_path[0]))
     if fd < 0:
+        # SAY SO. A save that fails in silence is how a document goes missing
+        # without anybody learning that it did.
+        _writeall(1, cast[Ptr[uint8]]("[hamslides] SAVE FAILED "))
+        _writeall(1, &doc_path[0])
+        _writeall(1, cast[Ptr[uint8]]("\n"))
         return
     n: uint64 = hamslides_serialize(&ser_buf[0])
     sys_write(fd, &ser_buf[0], n)
     sys_close(fd)
     hamslides_mark_saved()
+    _writeall(1, cast[Ptr[uint8]]("[hamslides] saved "))
+    _writeall(1, &doc_path[0])
+    _writeall(1, cast[Ptr[uint8]]("\n"))
 
 
 def _load_doc():
@@ -433,8 +502,13 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         _set_docpath(cast[Ptr[uint8]](argv[1]))
         _load_doc()
     else:
-        _set_docpath(cast[Ptr[uint8]]("/home/live/Documents/untitled.hamslides"))
+        _default_docpath()
     _sync_fname()
+    # The path this session resolved, in the boot log. A DIAGNOSTIC, not the
+    # measurement: the measurement is the bytes on the disk afterwards.
+    _writeall(1, cast[Ptr[uint8]]("[hamslides] document "))
+    _writeall(1, &doc_path[0])
+    _writeall(1, cast[Ptr[uint8]]("\n"))
 
     _repaint(wid)
     _writeall(1, cast[Ptr[uint8]]("[hamslides] scene window ready\n"))

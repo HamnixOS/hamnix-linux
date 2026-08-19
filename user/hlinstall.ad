@@ -70,6 +70,13 @@ extern def sys_exit(code: uint64)
 extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
 extern def sys_unlink(path: Ptr[char]) -> int32
 
+# THE NAMES AN INSTALL MUST REFUSE live in lib/instnames.ad, not here: the GUI
+# wizard (user/haminstallui.ad) has to enforce the identical rule, and a rule
+# written out twice is a rule that will be kept in step by hand and will not
+# be. See that file's header for what `--user hostowner` used to do to a
+# machine.
+from lib.instnames import in_name_is_reserved, IN_NAME_MAX
+
 RFPROC:  int32 = 0x001
 RFFDG:   int32 = 0x004
 RFNAMEG: int32 = 0x008
@@ -125,6 +132,35 @@ def copy_str(dst: Ptr[uint8], src: Ptr[uint8]) -> uint64:
         i = i + 1
     dst[i] = 0
     return i
+
+
+# THE 120 ABOVE IS NOT A BOUND ON ANY DESTINATION, AND THREE OF THEM ARE 64.
+#
+# MEASURED, and the arithmetic is exact: `hostname_buf`, `user_buf` and `disk`
+# are Array[64, uint8] GLOBALS, and copy_str stops at 120 SOURCE bytes however
+# big the destination is. So `install --auto /dev/nvme0n1 --user <65+ chars>`
+# wrote up to 121 bytes into a 64-byte object and ran into whatever global the
+# linker put next to it -- on that command line, the password buffers. It is
+# the CLI path only: the GUI wizard's field caps at NAME_CAP (30).
+#
+# copy_str stays as it is for the destinations that are 128 bytes or larger
+# (a1..a5, line_buf, repo_buf, the password buffers), where 120 IS a bound.
+# The three that are 64 use this one, which takes the size of the array it is
+# writing into and can never write past it. And because a truncated hostname
+# or user name is a wrong machine rather than a refused one, the CLI also
+# REFUSES an over-long --user/--hostname/target at the parse site, the way
+# --repo already refuses an over-long URL.
+def copy_str_cap(dst: Ptr[uint8], src: Ptr[uint8], cap: uint64) -> uint64:
+    if cap == 0:
+        return 0
+    i: uint64 = 0
+    while src[i] != 0 and i + 1 < cap:
+        dst[i] = src[i]
+        i = i + 1
+    dst[i] = 0
+    return i
+
+
 
 
 def why(what: Ptr[uint8]):
@@ -988,14 +1024,37 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             ai = ai + 2
             continue
         if streq(f, cast[Ptr[uint8]]("--hostname")) != 0 and ai + 1 < argc:
-            copy_str(&hostname_buf[0],
-                     cast[Ptr[uint8]](argv[cast[uint64](ai) + 1]))
+            hn: Ptr[uint8] = cast[Ptr[uint8]](argv[cast[uint64](ai) + 1])
+            if slen(hn) > IN_NAME_MAX:
+                puts(2, "hlinstall: --hostname is longer than 63 bytes, which "
+                        "is more than this installer can carry. Refusing "
+                        "rather than installing a machine under a truncated "
+                        "name.\n")
+                return 1
+            copy_str_cap(&hostname_buf[0], hn, 64)
             have_host = 1
             ai = ai + 2
             continue
         if streq(f, cast[Ptr[uint8]]("--user")) != 0 and ai + 1 < argc:
-            copy_str(&user_buf[0],
-                     cast[Ptr[uint8]](argv[cast[uint64](ai) + 1]))
+            un: Ptr[uint8] = cast[Ptr[uint8]](argv[cast[uint64](ai) + 1])
+            if slen(un) > IN_NAME_MAX:
+                puts(2, "hlinstall: --user is longer than 63 bytes, which is "
+                        "more than this installer can carry. Refusing rather "
+                        "than creating an account under a truncated name.\n")
+                return 1
+            # THE ACCOUNT REWRITE WOULD DELETE AND RE-CREATE A SYSTEM ACCOUNT
+            # AS A REGULAR USER. Refuse the name instead of producing a
+            # machine with no administrator.
+            if in_name_is_reserved(un) != 0:
+                puts(2, "hlinstall: --user ")
+                puts(2, un)
+                puts(2, " is a RESERVED system account on this system. "
+                        "Installing under that name would delete the account "
+                        "and re-create it as an ordinary user at uid 1001, "
+                        "and the machine would have no administrator. "
+                        "Choose another name.\n")
+                return 1
+            copy_str_cap(&user_buf[0], un, 64)
             have_user = 1
             ai = ai + 2
             continue
@@ -1043,7 +1102,12 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             continue
         ai = ai + 1
 
-    dn: uint64 = copy_str(&disk[0], target)
+    if slen(target) > IN_NAME_MAX:
+        puts(2, "hlinstall: the target device name is longer than 63 bytes, "
+                "which is more than this installer can carry. Refusing rather "
+                "than partitioning a device whose name it truncated.\n")
+        return 1
+    dn: uint64 = copy_str_cap(&disk[0], target, 64)
     # HOW A PARTITION OF THIS DISK IS NAMED.
     #
     # /dev/sda -> /dev/sda1. /dev/nvme0n1 -> /dev/nvme0n1p1, and so does every
