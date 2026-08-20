@@ -26,6 +26,55 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### THE BATTERY HAS HIDDEN ORDER-DEPENDENT COUPLING -- 49 GATES DEFAULT INTO SHARED WORK DIRECTORIES
+
+**2026-08-20, found by the 1.0.33 battery, confirmed by me in the sources.**
+
+Two gates went red in a way worth reading carefully:
+
+    installed_boot_login   3 / 1   (floor 27)
+    greeter_fail_terminal  8 / 1   (floor 27)
+
+**Both stopped on their own instrument check rather than scoring**, verbatim:
+*"the ext4 reader could not read /etc/passwd — the instrument is not working and
+nothing below would mean anything"*, and *"no hamacctusr line in the disk's
+/etc/passwd — this gate cannot say what a successful login should answer"*.
+**They refused to answer something success-shaped.** That is the behaviour this
+tree has been trying to install for a week, working.
+
+**THE CAUSE IS SHARED STATE BETWEEN GATES, AND I CONFIRMED THE COUPLING:**
+
+  * `installed_accounts.sh:86` **builds** `$HOME/.hamnix-build/instacct/target-nvme.img`
+  * `installed_boot_login.sh:141` **defaults to reading that exact path**
+  * `greeter_fail_terminal.sh:93` **defaults to reading that exact path**
+
+The disk they read has mtime **11:51:11** — the moment `installed_accounts`
+finished in this same battery. They read the disk a previous gate left behind.
+The working hypothesis, with a probe running against a **copy** (never the
+source), is that it is left with a dirty journal and `debugfs` does not replay
+journals — the same cause as `installed_accounts`' own single red.
+
+**AND IT IS NOT THREE GATES. I COUNTED: FORTY-NINE gates default into a shared
+work directory under `~/.hamnix-build/`.** Nobody has ever checked whether the
+battery's results depend on the order it runs in, or on what a previous run left
+on disk.
+
+**WHY THIS MATTERS MORE THAN TWO REDS.** A battery whose gates share mutable
+state is a **weaker instrument than its green count suggests**, and the weakness
+is invisible: an order-dependent GREEN looks exactly like an earned one. We have
+spent the week hardening individual assertions while the harness underneath
+carried a coupling nobody measured.
+
+**This is evidence FOR the direction David set** — stop treating the 36-gate
+battery as a release wall. It is not that the gates are wrong; it is that the
+battery is not the instrument its table implies, and making it into one would be
+another week of instrument work on a project whose binding constraint is that a
+live boot does not survive on his laptop.
+
+**NOT ESTABLISHED:** the dirty-journal hypothesis is unconfirmed at the time of
+writing, and **no green has been shown to be order-dependent** — only that the
+coupling exists and nobody has looked. Do not upgrade "could be" to "is".
+
 ### THE `allow_fail` FIX I MERGED BROKE A GATE -- AND ITS SELF-TEST ENCODES THE BREAK AS THE RIGHT ANSWER
 
 **2026-08-20, found by the agent running the 1.0.33 battery, verified by me in
