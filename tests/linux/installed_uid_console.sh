@@ -112,6 +112,10 @@ export TMPDIR="$W/tmp"; mkdir -p "$TMPDIR"
 LIVE="$W/live-usb.img"
 NVME="$W/target-nvme.img"
 PART="$W/part.img"
+# The way past the graphical login. See the note at the boot of section 2 for
+# why this gate must authenticate rather than opt out of runlevel 5.
+_GREET_QMP_INPUT="$PROJ_ROOT/tests/linux/qmp_input.py"
+. "$PROJ_ROOT/tests/linux/_greet_auth.sh"
 USERNAME=uidconsusr
 HOSTNAME_=uidconsbox
 UPASS=uidconspw
@@ -328,12 +332,33 @@ qemu-system-x86_64 \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
     -display none -vga std \
     -serial "file:$D/serial.log" -enable-kvm -cpu host \
+    -qmp "unix:$D/qmp.sock,server,nowait" \
     -device virtio-keyboard-pci -device virtio-tablet-pci \
     -drive "file=$RUN,if=none,format=raw,id=nvme0" \
     -device nvme,drive=nvme0,serial=UIDCONSTGT \
     >"$D/qemu.out" 2>&1 &
 QPID=$!
 reap_add "$QPID"
+
+# AUTHENTICATE PAST THE GRAPHICAL LOGIN, AND THE OPT-OUT WOULD BE WRONG HERE.
+# etc/rc.boot.installed ends by sourcing /etc/rc.d/rc.5, which runs hamgreet in
+# the FOREGROUND, so nothing after the source line in the rc above runs until
+# somebody has authenticated. In the 1.0.33 release run this gate scored 4/2
+# with its serial log ending at the greeter and UIDCONS-START never printed.
+#
+# THE RUNLEVEL-3 OPT-OUT IS NOT AVAILABLE TO THIS GATE. Every phase of the rc
+# spawns /bin/uidwin_probe, which OPENS /dev/wsys -- and /dev/wsys is published
+# by /bin/wsysd, which rc.5 starts. At runlevel 3 rc.5 is skipped entirely, so
+# there would be no compositor and the probe would be measuring its own
+# absence. (wsysd does start BEFORE the greeter, so the compositor exists while
+# the greeter is still asking -- but that does not help, because the rc's own
+# lines are the thing that has not run.) See tests/linux/_greet_auth.sh.
+if greet_authenticate "$D/qmp.sock" "$D/serial.log" "$USERNAME" "$UPASS"; then
+    ok "the graphical login ADMITTED $USERNAME, so rc.5 returned and the phases below actually ran"
+else
+    bad "could not get past the graphical login as $USERNAME -- see the [greet] lines above; nothing below is a statement about the console"
+fi
+
 i=0
 while kill -0 "$QPID" 2>/dev/null && [ "$i" -lt 300 ]; do sleep 5; i=$((i+5)); done
 kill -TERM "$QPID" 2>/dev/null; sleep 2; kill -KILL "$QPID" 2>/dev/null

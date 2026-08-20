@@ -228,6 +228,42 @@ else
     EXTRA="$W/extra"; rm -rf "$EXTRA"; mkdir -p "$EXTRA/bin"
     install -m755 "$BANNER_ELF" "$EXTRA/bin/poweroff.banner"
 
+    # ---- THE MEDIUM SAYS IT IS A MEDIUM, AND THAT IS WHAT LETS THE BOOT
+    # ---- REACH THE rc AT ALL.
+    #
+    # etc/rc.boot.installed ends by sourcing /etc/rc.d/rc.5, which since
+    # ee1461d0 runs /bin/hamgreet IN THE FOREGROUND. So PID 1's rc BLOCKS
+    # there, and every line this gate appends after `source
+    # '/etc/rc.boot.installed'` is dead code. MEASURED in the 1.0.33 release
+    # run: this gate's two GRAPHICAL arms 'never reached the rc',
+    # so /bin/poweroff and /bin/poweroff.banner -- the two binaries this gate
+    # exists to compare -- were never called on either of them.
+    #
+    # user/hamgreet.ad's FIRST branch (_is_live_medium, user/hamgreet.ad:576)
+    # tests for /etc/installer-medium and, when it is there, writes the session
+    # recipe naming `live` and returns IMMEDIATELY, saying so on the console --
+    # because an installer nobody has an account on must not ask for a
+    # password. That is the shipped behaviour of the shipped greeter on the
+    # shipped medium.
+    #
+    # THIS GATE BOOTS A MEDIUM AND HAD NO SUCH FILE, and that was an accident
+    # of how the medium is built, not a decision: scripts/hamlinux_image.sh
+    # writes /etc/installer-medium only under HAMLINUX_INSTALLER=1, and this
+    # gate does not set it (it does not want the rest of what that flag builds).
+    # So the medium was a medium in every respect except the one the greeter
+    # looks at. Planting the file does not get PAST the greeter -- it makes the
+    # greeter take the branch it takes on the real thing.
+    #
+    # WHY NOT THE OTHER TWO TREATMENTS. The runlevel-3 opt-out would remove the
+    # compositor, and arms A and B assert that the compositor WAS
+    # presenting with an application open on top of it. Authenticating would need an
+    # account, and this medium has no account on it. Whereas
+    # `live` is uid 1001 in this tree's etc/passwd (etc/passwd:29), which is the
+    # uid the session drops to either way.
+    mkdir -p "$EXTRA/etc"
+    printf '# planted by tests/linux/poweroff_graphical.sh: this root IS an install medium.\n' \
+        > "$EXTRA/etc/installer-medium"
+
     # The two rcs. `source '/etc/rc.boot.installed'` is the shipped boot,
     # verbatim, so the desktop that comes up is the one that ships.
     for arm in fixed banner; do
