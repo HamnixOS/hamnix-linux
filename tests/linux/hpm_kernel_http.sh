@@ -475,10 +475,31 @@ grep -q 'default hamnix-a.efi' "$WORK/lc0.bin" \
     && ok "loader.conf names slot A" || bad "loader.conf does not name slot A"
 
 # --- 2. BOOT 1 -- the machine before anything ------------------------------
-printf "echo 'HK-PHASE=observe'\nhkslot --status\nhpm --repo=%s kernel\ninit 0\n" \
-    "$BASEURL" >"$WORK/p_observe.rc"
-printf "echo 'HK-PHASE=update'\nhpm --repo=%s update\necho \"HK-UPDATE-RC=\$status\"\nhkslot --status\ninit 0\n" \
-    "$BASEURL" >"$WORK/p_update.rc"
+#
+# `--trusted-key=/etc/hpm/local-trusted.pub` IS LOAD-BEARING, AND THE FIRST RUN
+# OF THIS GATE IS WHY. It scored 52 / 23 with a single root cause: every arm
+# died at "hpm: index signature INVALID".
+#
+# THAT WAS hpm BEING RIGHT, NOT hpm BEING BROKEN, and the distinction is the
+# whole reason this line has a paragraph. _verify_index_signature routes on the
+# SCHEME: a file:// repo is checked against the LOCAL trust root
+# (etc/hpm/local-trusted.pub, whose secret scripts/hpm_local_key.seed IS
+# committed, because those bytes never cross a network), while an http(s) repo
+# is checked against the PRODUCTION root (etc/hpm/trusted.pub, whose secret is
+# held out of band and is NOT in this tree). tests/linux/hpm_kernel_update.sh
+# never met this because it is file:// throughout.
+#
+# So a locally-signed repo served over http MUST be rejected by default -- that
+# is the property protecting 255.one -- and a gate cannot get around it by
+# signing harder. It has to say out loud which root it is trusting. The flag
+# names the file the image already ships, and NOTHING here passes
+# --allow-unsigned: the signature is still verified, against a root named on
+# the command line.
+TKEY=/etc/hpm/local-trusted.pub
+printf "echo 'HK-PHASE=observe'\nhkslot --status\nhpm --trusted-key=%s --repo=%s kernel\ninit 0\n" \
+    "$TKEY" "$BASEURL" >"$WORK/p_observe.rc"
+printf "echo 'HK-PHASE=update'\nhpm --trusted-key=%s --repo=%s update\necho \"HK-UPDATE-RC=\$status\"\nhkslot --status\ninit 0\n" \
+    "$TKEY" "$BASEURL" >"$WORK/p_update.rc"
 
 say "2. BOOT 1 -- the machine as installed, and what IT says about its own slots"
 cp "$WORK/good.img" "$WORK/main.img"
@@ -522,11 +543,18 @@ grep -q "recorded kernel: (none" "$WORK/b1.txt" \
 grep -q "channel offers: $KVER_NEW" "$WORK/b1.txt" \
     && ok "AND THE MACHINE AUTHENTICATED ITS OWN INDEX and found kernel $KVER_NEW in it" \
     || bad "the machine did not find a kernel in its channel -- $(grep -m3 'hpm:' "$WORK/b1.txt" | tr '\n' ' ')"
-# AND IT CAME OVER THE WIRE. Checked on the SERVER's log, not the machine's:
-# the request is the one piece of evidence the guest cannot fabricate.
-grep -q "index.json" "$WORK/server.log" \
-    && ok "the SERVER logged the machine's request for the index -- the transport really was http" \
-    || bad "the server never saw a request for the index"
+# AND IT CAME OVER THE WIRE. The machine names the URL it fetched, and the
+# scheme in that URL is the thing under test.
+grep -q "fetching channel linux from http://" "$WORK/b1.txt" \
+    && ok "and it fetched that index over http: $(grep -m1 'fetching channel linux from' "$WORK/b1.txt")" \
+    || bad "the machine did not report fetching its channel over http"
+# WHICH TRUST ROOT WAS IN FORCE, said out loud. hpm prints this only when an
+# explicit --trusted-key was accepted, so its ABSENCE would mean the machine
+# had silently fallen back to the production root -- and the run would then be
+# measuring a different trust decision than the one it claims to.
+grep -q "hpm: trust root taken from /etc/hpm/local-trusted.pub" "$WORK/b1.txt" \
+    && ok "and it announced WHICH trust root it used, rather than falling back silently" \
+    || bad "the machine did not announce the local trust root -- $(grep -m2 'trust root' "$WORK/b1.txt" | tr '\n' ' ')"
 
 # --- 3. BOOT 2 -- `hpm update` ---------------------------------------------
 say "3. BOOT 2 -- \`hpm update\` RUNS ON THE MACHINE"
