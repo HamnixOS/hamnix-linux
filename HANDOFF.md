@@ -26,6 +26,122 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### THE SHIPPED INSTALL PATH WAS NEVER BROKEN. 1.0.33 WAS REFUSED ON A GATE THAT READ THE WRONG DISK -- and the hole it was blamed for was real, untested, and is now closed
+
+**2026-08-20. Base `4674986f`, checked with `git merge-base --is-ancestor
+4674986f HEAD` — which FAILED on the worktree I was handed: it was 90 commits
+behind and its own `gitStatus` block named `dbe56404` on `port/tier1-syscalls`.
+THE SEVENTEENTH CONSECUTIVE ONE. Branch `work/install-login-guard`, tag
+`install-login-guard-v1`. Evidence `~/.hamnix-build/loginguard/GATE.log`.
+NOTHING WAS SIGNED, PUSHED, OR WRITTEN INTO `rel1032/` OR `rel1033/`.**
+
+#### 1. WHAT ACTUALLY HAPPENED IN `installed_fresh_login` ARM [a]
+
+Not inferred from the source — **instrumented, off the 1.0.33 candidate's own
+artefacts**, and the answer contradicts the brief I was given.
+
+  * The installer's output ON THE WIRE puts the FALLBACK branch in arms B and C
+    only (`install/serial.txt` lines 766 and 865). **Arm A printed no fallback
+    warning**, so arm A took the SHIPPED branch and the copy of
+    `/etc/rc.boot.machine` SUCCEEDED.
+  * But the disk the gate scored as arm A carries an **888-byte** `/etc/rc.boot`
+    — byte-for-byte the FALLBACK text (the `sys_write` lengths sum to exactly
+    888). Both cannot be about the same disk.
+  * Identified by `/etc/hostname`, which each arm writes with its own name:
+    `target-a.img` = `hamnix` (never set), `target-b.img` = `hamfresh-a`,
+    `target-c.img` = `hamfresh-b`. **qemu attached them as slots 1/2/3 and the
+    guest's `nvme0n1`/`nvme1n1`/`nvme2n1` were slots 2/3/1.** The enumeration is
+    ROTATED and nothing had ever checked it.
+  * **So "[a] shipped" was ARM C'S DISK — the arm that deletes `/etc/rc.login`
+    and MUST refuse.** Every symptom reported is true of a refused install and
+    of nothing else: no `rc.login` (arm C deleted it), `/etc/passwd` still at
+    the medium's 1484 bytes so nothing to log in as (`configure_target` is
+    downstream of the refusal), and a fallback rc written moments before it.
+  * **ARM A'S REAL DISK IS CORRECT**: `rc.boot` = the copied `rc.boot.machine`
+    with all three lines, `/etc/rc.login` PRESENT, `passwd` carrying
+    `hamfreshusr:x:1001:1001`, hostname `hamfresh-a`. Its `/etc` holds every
+    name the medium's does except `/etc/installer-medium`, which `hlinstall.ad`
+    unlinks on purpose.
+  * **NEGATIVE CONTROL FOR THE COPY**, so "the copy is fine" is not merely
+    inferred: `user/cp.ad` built for the hosted lane and run against a `debugfs
+    rdump` of the medium's real `/etc` — **39 in, 39 out, exit 0**.
+
+**A SECOND, INDEPENDENT MEASUREMENT OF THE SAME THING**, from the rewritten
+gate's own run on this host: four disks, four distinct `--esp-mb` stamps, and
+the mapping came out **A -> slot2, D -> slot1, B -> slot4, C -> slot3**. The
+gate printed `THE GUEST DID NOT ENUMERATE THE NAMESPACES IN qemu -device
+ORDER`, and the ESP stamp and `/etc/hostname` agreed for arm A.
+
+#### 2. THE HOLE THE BRIEF DESCRIBED WAS REAL, HAD NEVER BEEN RUN, AND IS CLOSED
+
+`write_machine_rc_boot`'s shipped branch really did `return 0` without checking
+that the `/etc/rc.login` its copied rc names was on the target; the guard lived
+only on the fallback. **Nothing had ever run the configuration that separates
+the two branches** — `rc.boot.machine` present, `rc.login` absent.
+
+`user/hlinstall.ad` now routes BOTH branches through `guard_installed_login()`,
+which checks the TARGET. The gate grew **arm D**, which is that configuration,
+and MEASURED on this host:
+
+    5/5 the installed system's boot rc
+    hlinstall: FATAL: /etc/rc.login is not on the disk this install just wrote,
+    hlinstall: FATAL: refusing to report a successful install of an unguarded machine.
+    FRESHLOGIN-D-status 1
+
+with **no fallback warning above it**, so that is the shipped branch refusing.
+**ITS CONTROL RAN**: arm A, same boot, same medium, one `rm` apart, exited 0 and
+printed `install complete`.
+
+#### 3. `allow_fail` WAS UNUSABLE FOR EVERY GATE IN THIS TREE
+
+`release_gates.sh`'s cross-check was `rc != 0 && f <= allow -> RED`. Every gate
+here ends `[ "$FAIL" = 0 ] && exit 0 || exit 1`, so ANY failure means exit 1 —
+including declared ones. `session_min_root` (registered `|4|`, scored 31/2, both
+inside the declaration) went red on it and **nothing was wrong with the gate**.
+**I fixed the driver, not the gate**, because teaching one gate to exit 0 over
+its own failures would make it the only gate whose exit status is not a
+statement about its failures. MEASURED: `--self-test` **7 PASSED / 0 FAILED**
+with new arms E (declared failures, exit 1 -> GREEN) and F (same body, exit 0 ->
+RED). **The negative control fired**: the same self-test against a copy with the
+old condition restored scores `FAIL E: expected 'PASS 6/2', got 'RED 6/2'`.
+
+#### 4. THE DRIVER NOW RUNS THE UPDATE PATH — six rows, all `expect_min` 0 ON PURPOSE
+
+`installed_update`, `bootsync_installed`, `installed_update_live`,
+`hpm_kernel_http`, `hpm_kernel_update`, `ab_kernel_slots` were in no registry.
+HANDOFF reports 44/0, 33/0, 69/0, 60/0 and 32/0 for five of them; **those are
+not written in as floors** — they were measured on other trees by other
+sessions, and a floor copied out of a handoff is exactly the arithmetic-filled
+blank this registry refuses. A row at 0 still RUNS and is still red for
+asserting nothing, for a body contradicting its summary, and for any undeclared
+failure. **I did not run any of the six**; registering them makes the driver run
+them, it does not make their numbers mine.
+
+#### 5. THE GREETER, AND A PRODUCT FINDING NOBODY HAS WRITTEN DOWN
+
+`/etc/rc.login` is sourced by `/etc/rc.boot` **after** `rc.boot.installed`, and
+`rc.boot.installed` ends by sourcing `rc.d/rc.5`, which runs `hamgreet` in the
+FOREGROUND. **So on a shipped installed machine at runlevel 5, `/etc/rc.login`
+NEVER RUNS and `supervise` is never reached** — there is no login program on any
+terminal until somebody has authenticated GRAPHICALLY. MEASURED: arm A's disk,
+booted untouched by the rewritten gate, ends at `hamgreet: the graphical login
+is presenting` with no `login: ` anywhere on `/dev/ttyS0`.
+
+`etc/rc.d/rc.5.linux`'s own no-session branch tells the operator *"Log in on a
+terminal to read it"* — **advice that cannot be followed**, because the gettys
+it names have not been started. I did NOT reorder the boot: that is a change to
+every installed machine and to every gate, and I could not verify it broadly.
+**It is the first thing the next session should decide.**
+
+**WHAT I DID NOT DO.** Eight of the twelve 1.0.33 reds are still there and I did
+not treat them one by one. I looked, and **the runlevel-3 opt-out is WRONG for
+at least two of them**: `installed_uid_console` spawns `/bin/hamwrite` and reads
+`/dev/wsys`, and `installed_accounts` reads `/var/log/hamdesktop.log` — both
+need a COMPOSITOR, which runlevel 3 does not have. I did not classify the rest
+statically, deliberately: the last agent's static classifier misplaced the one
+case that had already been measured, and it wrote that up as a failed attempt
+rather than a result. Same refusal here.
+
 
 ### 1.0.33 IS BUILT AND GATED AND IS **NOT FIT TO PUBLISH** -- the shipped install path ships a machine with no login and says "install complete"
 
