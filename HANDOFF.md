@@ -26,6 +26,40 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### DAVID ANSWERED: A GREETER FAILURE MUST LEAVE A TERMINAL TO DEBUG ON, "JUST LIKE LINUX" -- the boot reorder is AUTHORISED
+
+**2026-08-20. His words:** *"the greeter failure should leave a terminal for you
+to debug. just like Linux."*
+
+**This settles the question raised by the recovery-path finding below** and
+**authorises reordering the boot**, which I had explicitly refused to do on my own
+authority because it touches every machine and every gate.
+
+**The target shape is the Linux one:** gettys run on the terminals independently
+of the graphical login, and the display manager is a supervised service rather
+than something init blocks on. Kill the greeter and you still have a console.
+
+**THE CONSTRAINT THAT MUST NOT BE LOST, and it is the whole reason the current
+shape exists:** `hamgreet` runs in the FOREGROUND **on purpose**. That is what
+stops a desktop session existing before anybody authenticates, and
+`tests/linux/graphical_login.sh` measures precisely that at **78/0** — with a red
+arm at **68/10** where a session started first, and a process census, not OCR, as
+the oracle (every OCR assertion **including its own control** stayed green in that
+red arm, because a screendump cannot tell a display manager from a lock screen).
+
+**SO: BACKGROUNDING THE GREETER NAIVELY REINTRODUCES THE DEFECT THE GREETER WAS
+BUILT TO FIX.** The property is enforceable another way — `rc.5` clears
+`hamsession_ok` before and tests it after, and only the recipe file the greeter
+writes can set it — but that must be preserved **deliberately and re-measured**,
+not assumed. **Whoever does this reorder must re-run `graphical_login` and show
+its red arm still goes red.**
+
+**Sequencing note:** an agent is currently measuring ten greeter-blocked gates.
+The reorder does **not** dissolve that work — the greeter still runs at runlevel
+5, so a gate's appended lines still will not run until it returns. The reorder
+fixes **recovery**, not the harness idiom. Let the measurement finish first;
+changing the boot underneath it would invalidate every number in flight.
+
 ### WHEN THE GREETER FAILS, THE MACHINE TELLS THE OPERATOR TO DO SOMETHING THAT IS NOT POSSIBLE
 
 **2026-08-20. Verified by me in the source, not inferred.** An agent surfaced this
