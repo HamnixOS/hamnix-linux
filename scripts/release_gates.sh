@@ -228,6 +228,22 @@ install_wizard_gui|yes|0|34||bash tests/linux/install_wizard_gui.sh
 # driver that inherits the duration from whoever invoked it is not a record
 # of what was run. env(1) is used because the runner word-splits this command
 # and a bare VAR=x prefix would be taken as the program name.
+# ALSO INTERMITTENT, MEASURED TWICE ON 2026-08-20: 22 PASSED / 5 FAILED, then
+# 26 PASSED / 0 FAILED. In the red run EVERY instrument arm passed (the wedge
+# finder saw a planted 77 s hole, the heartbeat probe saw a real 60 s monitor
+# `stop`, the hand moved wsysd's counters 0 -> 114, alt-sysrq-t put 82 task
+# lines on a healthy console) and THE SOAK ARM ITSELF NEVER BOOTED: its qemu
+# exited inside two seconds having written 0 bytes to qemu.out and never having
+# created serial.log at all.
+#
+# AND THE GATE THEN PRINTED TWO PASSES OUT OF AN INSTRUMENT THAT READ NOTHING --
+# "userspace never went quiet for as long as 20s across 900s of being used" and
+# "the picture never stood still for as long as 60s" -- over a run with 0
+# heartbeats, 0 frames, no serial log and three Python tracebacks saying the
+# file does not exist. THAT IS A GAP ANSWERING SOMETHING SUCCESS-SHAPED, in the
+# gate written to hunt exactly that. Its five FAILs do carry the verdict, so the
+# RED is right; two of its PASSes are not readings. Left as it stands and
+# reported rather than patched.
 soak_desktop|yes|0|26||env HAMLINUX_SOAK_SECS=900 bash tests/linux/soak_desktop.sh
 shipped_medium_boots|yes|0|31||bash tests/linux/shipped_medium_boots.sh @IMG@
 # THE THREE GATES THAT INSPECT AN INSTALLED MACHINE, AND WERE IN NO REGISTRY
@@ -259,9 +275,24 @@ shipped_medium_boots|yes|0|31||bash tests/linux/shipped_medium_boots.sh @IMG@
 # the change that made the earlier figures a report rather than a measurement.
 # They agree with the report; that is a fact about the run, not the reason for
 # the number.
+# EXPECT_MIN RAISED 2026-08-20 BY THE RUN THAT FIRST MEASURED THESE GATES WITH
+# THE GREETER TREATMENTS IN PLACE (base 3eaa826b, branch work/greet-ten,
+# evidence ~/.hamnix-build/greetten/). Each new number is the assertion count
+# THIS HOST SCORED IN A GREEN RUN, not arithmetic on the old one:
+#     installed_offers_install  24 -> 25   (25 / 0)
+#     installed_documents       48 -> 51   (51 / 0)
+#     installed_launch_uid      66 -> 69   (69 / 0)
+#     installed_uid_console     23 -> 24   (24 / 0)
+# Each grew by the assertion its treatment added -- the gate now says out loud
+# whether it got past the graphical login -- plus, for two of them, assertions
+# that were unreachable while hamgreet held rc.5.
+#
+# installed_accounts IS DELIBERATELY LEFT AT 61 THOUGH IT SCORED 64 ASSERTIONS.
+# It scored 63 / 1: a floor is not raised off a run the gate failed. It moves
+# when the gate is green.
 installed_accounts|yes|0|61||bash tests/linux/installed_accounts.sh
-installed_offers_install|yes|0|24||bash tests/linux/installed_offers_install.sh
-installed_documents|yes|0|48||bash tests/linux/installed_documents.sh
+installed_offers_install|yes|0|25||bash tests/linux/installed_offers_install.sh
+installed_documents|yes|0|51||bash tests/linux/installed_documents.sh
 
 # WHOSE FILE IS IT, WHEN THE DESKTOP STARTS THE PROGRAM THAT WROTE IT? 66/0
 # measured on this host, 2026-08-19, in the run that registered it -- one medium
@@ -281,7 +312,7 @@ installed_documents|yes|0|48||bash tests/linux/installed_documents.sh
 # install_confirm_keys's `echo '/bin/haminstallui' > '/dev/wsys/appmenu/launch'`
 # working. A third arm (hamslides, `user`) exists so the split cannot line up
 # with WHICH PROGRAM instead of WHICH PAYLOAD.
-installed_launch_uid|yes|0|66||bash tests/linux/installed_launch_uid.sh
+installed_launch_uid|yes|0|69||bash tests/linux/installed_launch_uid.sh
 # THE POINTER HALF OF THE SAME QUESTION, and the half no gate could see before
 # it. installed_launch_uid says in its own header "IT DOES NOT CLICK AN ICON OR
 # A MENU ROW"; this one does both, on five boots of one installed disk, with a
@@ -353,7 +384,7 @@ poweroff_graphical|yes|0|22||bash tests/linux/poweroff_graphical.sh
 # byte count. A gate whose oracle is a serial line printed by a dropped session
 # read that as "it never ran" -- which is exactly what installed_documents.sh
 # did, and a fix was reverted over it (416248df).
-installed_uid_console|yes|0|23||bash tests/linux/installed_uid_console.sh
+installed_uid_console|yes|0|24||bash tests/linux/installed_uid_console.sh
 
 # DOES THE MACHINE ASK WHO YOU ARE BEFORE IT GIVES YOU A SHELL? Until
 # 2026-08-19 it did not: /etc/rc.boot ended, and PID 1 -- which IS hamsh --
@@ -368,6 +399,31 @@ installed_uid_console|yes|0|23||bash tests/linux/installed_uid_console.sh
 # getty, the same port, differing by the two words `-a hostowner` -- must
 # REACH a root shell for the guarded arm's silence to mean anything. If the
 # control stops firing this gate goes red on the control, not on the product.
+# THIS GATE IS INTERMITTENT ON THIS HOST AND THE NUMBER IS NOT THE PROBLEM.
+# MEASURED 2026-08-20, TWICE, ON THE SAME TREE AND THE SAME INSTALLED DISK
+# (~/.hamnix-build/instacct/target-nvme.img as installed_accounts had just built
+# it): 22 PASSED / 5 FAILED, then 27 PASSED / 0 FAILED. 27 assertions both
+# times, so nothing is lost -- five of them MOVE.
+#
+# THE CAUSE IS MEASURED, NOT INFERRED. The guarded arm's getty prints `login: `
+# exactly once, and in the red run it landed welded to the tail of PID 1's own
+# line with no newline in front of it:
+#     [hamsh] init: sourcing boot rc /etc/rc.autopowerofflogin:
+# so `grep -c '^login: '` was 0 and tests/linux/serial_drive.py's expect pattern
+# /\r?\nlogin: / never matched -- which is why `Login incorrect` was seen 0
+# times and the three assertions downstream of a successful login could not be
+# made either. In the green run the same prompt appears at the start of a line
+# three times. What collides with it is user/hamsh.ad's ELEVEN
+# TEMP_DEBUG_HAMSH_BRINGUP markers ([hamsh:_start hit], [hamsh:stage-01] ...
+# [hamsh:stage-05]), each an unconditional sys_write(2, ...) on any console that
+# is not a bridged session, landed 2026-05-22 (8cd48159, c7993acf) and in main.
+# Two processes write one console and which side of the newline the prompt lands
+# on is timing.
+#
+# NOTHING WAS ADJUSTED TO MAKE IT PASS. Loosening the gate's anchored pattern
+# would make it green against a console an operator cannot read either, and
+# removing the markers changes the shell every machine boots. expect_min stays
+# at 27 because the gate still asserts 27 things; 22 is not a floor.
 installed_boot_login|yes|0|27||bash tests/linux/installed_boot_login.sh
 
 # DOES A MACHINE THE INSTALLER JUST BUILT ASK WHO YOU ARE? installed_boot_login
