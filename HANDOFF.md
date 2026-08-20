@@ -26,6 +26,74 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### 1.0.33 IS PUBLISHED AND VERIFIED AS SERVED -- AND THIS PROJECT IS NOW IN WIND-DOWN
+
+**2026-08-20. Channel commit `HamnixOS/packages@903cb71`. Pages reported built for
+that exact commit after ~320 s, checked through the builds API rather than a
+hopeful wait.**
+
+**Verified as SERVED, not as pushed:** the index the site returns carries 130
+entries, all 1.0.33; its detached signature verifies against `etc/hpm/trusted.pub`
+— the key compiled into the shipped `hpm` — and **one appended byte makes that
+same verifier say BAD**, so the GOOD is a measurement. `hamnix-init-1.0.33.tar.gz`
+fetched from the site is byte-identical to the gated build
+(`31a0e8bd…e98c`). Before signing I derived the public half **from the secret**
+(not the `.pub` file) and matched it to the trust root, and confirmed the live
+1.0.32 signature still verified with its own tamper control.
+
+**THE IMAGE FOR HARDWARE:**
+`~/.hamnix-build/rel1033-recut/hamnix-linux-1.0.33.img`
+**4,294,967,296 bytes APPARENT / 3,156,258,816 on disk (sparse)**,
+sha256 **`05fbd50dacfdcf6e4a5dd13960667d931c30cc44b77329c8d905f9a684f2af48`** —
+hashed by me, and byte-identical after the whole battery ran against it.
+
+**NOT PRUNED, AND OWED.** David replaced the additive rule: the repo should carry
+the newest version only. 3,046 of the 3,306 tarballs are already unreferenced by
+any index. I did **not** prune inside this publish — it is a separate
+irreversible-shaped action that gains nothing for the thing he needs next, which
+is a bootable stick. Recorded as owed, not forgotten.
+
+**I PUBLISHED AGAINST A "NOT FIT" VERDICT, DELIBERATELY.** The candidate agent
+called it not fit, and **that was correct under the old rule** — all 36 gates
+green. David changed the rule: the battery stops being a release wall, keeping
+three cheap guards. All three were green — `shipped_medium_boots` 31/0, channel
+integrity which I verified myself, and signing plus served-verification. **The
+numbers did not change; the standard did**, and saying so is the point.
+
+**WHAT THIS RELEASE HAS NOT DONE, AND IT IS THE ONLY THING THAT MATTERS NEXT:**
+nothing has ever been **installed** on real hardware, and no version ever has.
+The only fact metal has produced is **a live boot that froze on his laptop**. The
+arena fix carried since 1.0.31 is our best candidate for that freeze and **has
+never been tied to his machine**. This image exists so he can find out.
+
+**STILL BROKEN AT WIND-DOWN, all instruments unless noted:**
+* **My release-driver regression** — reds a gate whose failures are declared and
+  which honestly exits 0, and **`--self-test` arm F encodes the defect as the
+  expected answer**. Fix arm F first and watch it fail against the current driver.
+* **49 gates default into shared work directories.** Three reds this run came from
+  one unreplayed journal on a disk another gate had just written. **No green has
+  been shown to be order-dependent — only that nobody has looked.**
+* **Two update gates cannot run in a release battery** for want of a distro image
+  the release build does not produce.
+* **A leaked QEMU** survived its gate by 1h14m with 49 s of CPU — gates do not
+  always tear down their VMs.
+* **My own monitoring was blind all session**: `pgrep -c qemu-system-x86_64` can
+  never match, because the kernel truncates `comm` to 15 chars. I reported
+  "0 QEMU" repeatedly while three were running.
+* Product-side: `sshd` leaks a zombie shell per session; publickey auth untested;
+  `enter linux` unexercised at uid 2.
+
+**WIND-DOWN, per David: "Once the vm testing is working, and the OS debugged and
+an image for me to test is created, spin down and turn off the wakeup."** The
+hourly alarm is being deleted and agents stopped. **Do not restart the alarm.**
+
+**IF SOMEONE RESUMES THIS:** the highest-value next step is not a gate. It is
+`\HAMNIX.LOG` from the ESP root of his stick (262,144 bytes, fixed-size ring)
+after a real boot — the only hardware evidence that would exist. Caveat:
+`/dev/kmsg` is root-only, so a dropped session's lines never reach it. Second is
+the warm dev loop (`docs/dev-loop.md`): ~1 s to push a change into a running
+guest against 211 s cold, with SSH working.
+
 ### 1.0.33 RE-CUT AND GATED: 36 GATES, 1066 ASSERTIONS, 29 GREEN / 7 RED -- AND **NOT ONE OF THE SEVEN IS A DEFECT IN THE PRODUCT**. REFUSED ANYWAY, BECAUSE **THE DRIVER MIS-SCORES A GATE IN A WAY ITS OWN `--self-test` RATIFIES**, AND TWO UPDATE GATES COULD NOT BE SCORED AT ALL
 
 **2026-08-20. Base `8e8d8b16`, checked with `git merge-base --is-ancestor 8e8d8b16
