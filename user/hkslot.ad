@@ -620,8 +620,13 @@ def fetch_to_ram(url: Ptr[uint8], cap: uint64) -> int32:
 
 # --- hashing ---------------------------------------------------------------
 #
-# Streaming, 256 KiB at a time. A UKI is around 176 MB and this program runs on
-# every machine; a one-shot hash would have meant a 176 MB BSS array.
+# Streaming, 256 KiB at a time, and this program runs on every machine; a
+# one-shot hash would have meant a BSS array the size of a kernel image.
+#
+# THE 176 MB THIS COMMENT USED TO QUOTE WAS STALE. It came from the shipped
+# 1.0.32 medium. The UKI this tree builds today, measured during
+# tests/linux/hpm_kernel_http.sh, is 74 284 544 bytes, into a slot
+# preallocated at 74 299 904.
 def hash_fd(fd: int32, n: uint64) -> int32:
     if sys_lseek(fd, 0, SEEK_SET) < 0:
         return -1

@@ -8264,19 +8264,33 @@ def _sync_boot_image():
 # buffer-based (TARBALL_CAP is 4 MiB, tar_buf is 8 MiB); a kernel image is an
 # order of magnitude past that and could not be fetched into a buffer without
 # a vast BSS array in a program that runs on every machine. So hpm never holds
-# the artifact: it RESOLVES it to a path and hands the path and the digest to
-# /bin/hkslot, which streams it 256 KiB at a time and hashes it with the SAME
-# lib/sha256.ad hpm verifies packages with.
+# the artifact: it RESOLVES it -- to a PATH for a file:// channel, or to an
+# absolute URL for an http(s) one -- and hands that and the digest to
+# /bin/hkslot, which hashes it with the SAME lib/sha256.ad hpm verifies
+# packages with.
 #
-# WHICH MEANS, TODAY, file:// REPOS ONLY, AND THAT IS SAID OUT LOUD RATHER
-# THAN SILENTLY SKIPPED. A local mirror -- the live medium's own
-# file:///iso-packages/, a USB stick, an on-site cache -- resolves to a path
-# and works. An http/https channel does NOT: there is no streaming fetch in
-# user/http9.ad, only http_get into a caller buffer. Rather than fetch into a
-# buffer that cannot hold it and report something success-shaped, the refusal
-# below names the missing piece. THIS IS THE LIMIT OF THIS WORK AND IT IS A
-# REAL ONE: the owner's repo at https://255.one/ cannot ship a kernel until
-# user/http9.ad can stream a response body to a file descriptor.
+# THIS USED TO SAY "file:// REPOS ONLY", AND IT WAS WRONG ABOUT WHY.
+#
+# The old text here, and HANDOFF section 0 with it, said an http(s) channel
+# was impossible "until user/http9.ad can stream a response body to a file
+# descriptor", and that https://255.one/ could not ship a kernel until then.
+# http9 never needed a streaming fetch: http_get ALREADY takes a
+# CALLER-SUPPLIED buffer and a CALLER-CHOSEN capacity. Nothing was missing from
+# the transport. No caller had ever handed it a buffer big enough, and the
+# absence of a caller got written down as the absence of a feature.
+#
+# What hkslot does with an http(s) URL is the owner's call and it is better
+# than the streaming fetch this was waiting for: it sys_mmaps a buffer sized
+# from the INACTIVE SLOT'S OWN LENGTH, downloads the whole artifact into RAM,
+# hashes THAT, and only opens the ESP once the digest matches -- so a bad
+# artifact never reaches the one filesystem where a bad write costs the
+# machine. The buffer is released before the program exits, so a machine that
+# never updates its kernel never pays a page for it. See user/hkslot.ad.
+#
+# MEASURED: tests/linux/hpm_kernel_http.sh, 69 PASSED / 0 FAILED over ten
+# booted machines, including a server that hangs up part-way through the
+# kernel and one that flips a byte. The trust root, the verifier and the
+# digest are identical on both arms; only the transport differs.
 
 kern_have: int32 = 0
 kern_ci:   uint64 = 0
