@@ -454,8 +454,35 @@ run_gate() {   # run_gate <name> <allow_fail> <expect_min> <reason> <cmd...>
         verdict="RED"; why="$f failed, $allow declared acceptable"
     elif [ "$tf" -gt 0 ] && [ "$f" -eq 0 ]; then
         verdict="RED"; why="the gate printed $tf FAIL line(s) under a summary claiming 0 failures -- the body is believed, not the summary"
-    elif [ "$rc" -ne 0 ] && [ "$f" -le "$allow" ]; then
-        verdict="RED"; why="exit status $rc contradicts a summary with no unexpected failures -- one of the two is wrong and neither may be ignored"
+    # THE EXIT-STATUS CROSS-CHECK, AND WHY IT IS NOT `rc != 0 && f <= allow`.
+    #
+    # It used to be exactly that, and it made `allow_fail` UNUSABLE FOR EVERY
+    # GATE IN THIS TREE. Every gate here ends `[ "$FAIL" = 0 ] && exit 0 ||
+    # exit 1`, so a gate with even ONE failure exits 1 -- including the ones it
+    # is DECLARED to be allowed. session_min_root is registered |4| with four
+    # rungs the registry names as acceptable; it scored 31 / 2, both of them
+    # inside that declaration, and the driver still turned it RED on "exit
+    # status 1 contradicts a summary with no unexpected failures". Nothing was
+    # wrong with the gate. A registry feature that cannot be exercised by any
+    # gate that uses the tree's own exit idiom is not a feature.
+    #
+    # THE DRIVER IS WHAT WAS FIXED, NOT THE GATE, because the alternative --
+    # teaching one gate to exit 0 on its declared failures -- would have made
+    # THAT gate the only one whose exit status is not a statement about its
+    # failures, and would have left allow_fail broken for every future row.
+    #
+    # The contradiction being tested for is unchanged; only its shape is
+    # corrected. A gate that fails things and exits non-zero AGREES with
+    # itself, whether or not those failures are declared. The two disagreements
+    # that are real:
+    #   * non-zero exit with NO failures asserted -- it died for a reason it
+    #     never put in its body, which is the unscorable-adjacent case;
+    #   * exit 0 while its own summary reports failures -- exit 0 read as a
+    #     pass, from the other direction.
+    elif [ "$rc" -ne 0 ] && [ "$f" -eq 0 ]; then
+        verdict="RED"; why="exit status $rc with a summary reporting NO failures at all -- the gate died for a reason it never asserted, and neither may be ignored"
+    elif [ "$rc" -eq 0 ] && [ "$f" -gt 0 ]; then
+        verdict="RED"; why="the gate exited 0 while its own summary reports $f failure(s) -- exit 0 is not a pass"
     elif [ "$((p + f))" -lt "$expect" ]; then
         verdict="RED"; why="the gate scored $((p + f)) assertions where $expect are registered -- it ASSERTED LESS THAN IT USED TO and printed no failure saying so"
     fi
@@ -523,20 +550,51 @@ for i in 1 2 3; do ok "synthetic assertion $i"; done
 echo "$PASS passed, 0 failed"
 GATE
 
+    # (E) A gate with DECLARED failures that exits non-zero because of them --
+    #     the tree's universal `[ "$FAIL" = 0 ] && exit 0 || exit 1` idiom.
+    #     Registered allow_fail=2, scores 6 / 2, exits 1. THE DRIVER MUST PASS
+    #     IT. Until 2026-08-20 it did not: `rc != 0 && f <= allow` turned every
+    #     such gate RED on "exit status contradicts a summary with no
+    #     unexpected failures", which made allow_fail unusable for any gate in
+    #     this tree. session_min_root shipped RED in the 1.0.33 candidate on
+    #     exactly this and nothing was wrong with it.
+    cat >"$d/declared.sh" <<'GATE'
+#!/usr/bin/env bash
+PASS=0; FAIL=0
+ok()  { PASS=$((PASS+1)); echo "  PASS  $1"; }
+bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
+for i in 1 2 3 4 5 6; do ok "synthetic assertion $i"; done
+bad "a rung the registry declares acceptable"
+bad "a second such rung"
+echo "$PASS PASSED, $FAIL FAILED"
+[ "$FAIL" = 0 ] && exit 0 || exit 1
+GATE
+
+    # (F) THE OTHER HALF OF THE SAME CHECK, so E cannot pass by the driver
+    #     simply having stopped looking at exit status. Same body, same
+    #     declared allowance -- and it exits 0 over its own two failures. That
+    #     is exit 0 read as a pass, and it MUST be red.
+    sed 's/\[ "\$FAIL" = 0 \] && exit 0 || exit 1/exit 0/' \
+        "$d/declared.sh" >"$d/declared_lies.sh"
+
     echo "=== scripts/release_gates.sh --self-test"
-    echo "=== THE NEGATIVE CONTROL. Three synthetic gates; the driver must tell"
+    echo "=== THE NEGATIVE CONTROL. Six synthetic gates; the driver must tell"
     echo "=== them apart. If A and B score the same, this driver is blind."
     echo
     run_gate ctrl_A_eight_in_ok_vocabulary   0 8 "" bash "$d/eight.sh"
     run_gate ctrl_B_asserts_nothing          0 0 "" bash "$d/nothing.sh"
     run_gate ctrl_C_summary_contradicts_body 0 0 "" bash "$d/liar.sh"
     run_gate ctrl_D_lost_an_assertion        0 8 "" bash "$d/shrunk.sh"
+    run_gate ctrl_E_declared_fails_exit_1    2 8 "two declared rungs" bash "$d/declared.sh"
+    run_gate ctrl_F_declared_fails_exit_0    2 8 "two declared rungs" bash "$d/declared_lies.sh"
 
-    local vA vB vC vD
+    local vA vB vC vD vE vF
     vA="$(printf "$VERDICTS" | awk '$1=="ctrl_A_eight_in_ok_vocabulary"{print $2" "$3}')"
     vB="$(printf "$VERDICTS" | awk '$1=="ctrl_B_asserts_nothing"{print $2}')"
     vC="$(printf "$VERDICTS" | awk '$1=="ctrl_C_summary_contradicts_body"{print $2}')"
     vD="$(printf "$VERDICTS" | awk '$1=="ctrl_D_lost_an_assertion"{print $2}')"
+    vE="$(printf "$VERDICTS" | awk '$1=="ctrl_E_declared_fails_exit_1"{print $2" "$3}')"
+    vF="$(printf "$VERDICTS" | awk '$1=="ctrl_F_declared_fails_exit_0"{print $2}')"
 
     local bad=0
     echo "---- SELF-TEST ASSERTIONS"
@@ -561,6 +619,19 @@ GATE
     else
         echo "  FAIL  D: expected RED, got '$vD'"; bad=1
     fi
+    if [ "$vE" = "PASS 6/2" ]; then
+        echo "  PASS  E: a gate whose 2 failures are DECLARED, exiting 1 because of them, is GREEN"
+        echo "        (before 2026-08-20 this same input was RED on 'exit status contradicts"
+        echo "         a summary with no unexpected failures', which is what allow_fail is for)"
+    else
+        echo "  FAIL  E: expected 'PASS 6/2', got '$vE' -- allow_fail is still unusable"; bad=1
+    fi
+    if [ "$vF" = "RED" ]; then
+        echo "  PASS  F: the SAME body exiting 0 over its own two failures is RED -- E did not"
+        echo "        pass by the driver having stopped reading exit status at all"
+    else
+        echo "  FAIL  F: expected RED, got '$vF' -- exit 0 over asserted failures is being taken as a pass"; bad=1
+    fi
     if [ "$vA" != "$vB" ]; then
         echo "  PASS  A and B are DISTINGUISHED ('$vA' vs '$vB') -- which is the whole point"
     else
@@ -568,7 +639,7 @@ GATE
     fi
     echo
     if [ "$bad" = 0 ]; then
-        echo "[release_gates --self-test] RESULT: 5 PASSED / 0 FAILED"
+        echo "[release_gates --self-test] RESULT: 7 PASSED / 0 FAILED"
         rm -rf "$d"; exit 0
     fi
     echo "[release_gates --self-test] RESULT: 0 PASSED / 1 FAILED"
