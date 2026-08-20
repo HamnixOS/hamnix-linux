@@ -994,9 +994,38 @@ int32_t sys_open_write(const char *path)
          * user exits. So a self-update works and nothing running is disturbed
          * -- which is the property "update without breaking the system"
          * actually rests on. */
-        if (unlink(path) == 0)
+        /* AND IT MUST COME BACK WITH THE MODE IT HAD. unlink-then-create
+         * makes a NEW inode, so the mode argument above applies -- 0666
+         * masked by the umask, which is 0644, WITH NO EXECUTE BIT. Every
+         * replacement of a RUNNING program therefore left that program
+         * unrunnable, silently, while every call in the chain returned
+         * success.
+         *
+         * MEASURED, 2026-08-20, in a dev VM: scripts/devvm_push.sh replaced
+         * /bin/sshd while sshd was running, wget and mv both succeeded, the
+         * push script printed "done -- /bin/sshd is the build just made",
+         * and the guest then answered
+         *
+         *   exec: `/bin/sshd' exists (mode 0644) but execve(2) answered
+         *   EACCES -- no execute bit for this uid
+         *
+         * The comment above names /bin/hamsh -- PID 1 -- as the first
+         * binary this path exists for. A self-update that leaves /bin/hamsh
+         * mode 0644 leaves a machine that cannot exec its own init on the
+         * next boot, from a `hpm install` that reported success. So the old
+         * mode is captured BEFORE the unlink and restored on the new fd,
+         * and fchmod is used rather than chmod so it lands on the inode we
+         * just made and not on whatever the name may have come to mean. */
+        struct stat oldst;
+        int had_mode = (stat(path, &oldst) == 0);
+        if (unlink(path) == 0) {
             fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-        else
+            if (fd >= 0 && had_mode) {
+                int e2 = errno;
+                fchmod(fd, oldst.st_mode & 07777);
+                errno = e2;
+            }
+        } else
             errno = ETXTBSY;
     }
     return rc32(fd);
