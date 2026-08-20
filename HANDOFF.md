@@ -26,6 +26,169 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### 1.0.33 RE-CUT AND GATED: 36 GATES, 1066 ASSERTIONS, 29 GREEN / 7 RED -- AND **NOT ONE OF THE SEVEN IS A DEFECT IN THE PRODUCT**. REFUSED ANYWAY, BECAUSE **THE DRIVER MIS-SCORES A GATE IN A WAY ITS OWN `--self-test` RATIFIES**, AND TWO UPDATE GATES COULD NOT BE SCORED AT ALL
+
+**2026-08-20. Base `8e8d8b16`, checked with `git merge-base --is-ancestor 8e8d8b16
+HEAD` -- which FAILED on the worktree I was handed. It was **115 commits BEHIND**,
+at `52e59f16` on a branch called `worktree-agent-aad8ae1fc7dcdbb44`, while its own
+`gitStatus` block named `dbe56404` on `port/tier1-syscalls`. THE TWENTY-FIRST
+CONSECUTIVE ONE, and the block was wrong about the commit AND the branch again.**
+Branch `work/rel1033-recut`, tag `rel1033-recut-v1`. Evidence
+`~/.hamnix-build/rel1033-recut/` (`GATE.log`, `build_driver.log`,
+`gates_driver.pass1.log`, `gates_driver.pass2.log`, `gates/`, `channel_check.log`,
+`journal_probe.log`). **NOTHING WAS SIGNED OR PUSHED**, and nothing was written
+into `rel1032/`, `rel1033/`, `loginguard/`, `greeteight/`, `greetten/` or
+`bringup-reorder/`.
+
+**THE MEDIUM.** `hamnix-linux-1.0.33.img`, **APPARENT 4,294,967,296 bytes /
+ON-DISK 3,156,258,816** (it is sparse), sha256
+`05fbd50dacfdcf6e4a5dd13960667d931c30cc44b77329c8d905f9a684f2af48` -- **re-read
+after the battery and byte-identical**, so every verdict below is about those
+bytes. **THE CHANNEL:** 130 packages, 130 index entries, 130 tarballs, **130
+hash-matching, 0 missing, 0 mismatched, 0 unclaimed**, versions `['1.0.33']`.
+Those zeroes are readings: the checker's negative control bends a nibble of
+`hamnix-init`'s digest and returns MISMATCH.
+
+#### THE DRIVER IS WRONG AND ITS NEGATIVE CONTROL SAYS IT IS RIGHT
+
+`scripts/release_gates.sh:695` reds any gate that exits 0 while reporting
+failures. **That branch never consults `allow_fail`, and it CANNOT BE REACHED
+UNLESS THE FAILURES ARE DECLARED** -- `f > allow` is caught four lines above. So
+the check written to catch "exit 0 read as a pass" can only ever fire on a gate
+that is *not* doing that. Its stated premise, in the comment directly above it,
+is *"Every gate here ends `[ "$FAIL" = 0 ] && exit 0 || exit 1`"*, and that is
+**false for `scripts/test_livedom_functional_host.sh`**, which has a KNOWNFAIL
+mechanism and exits 0 (line 460) when every failure is declared. It is the one
+gate with that shape and the one gate the 2026-08-20 `allow_fail` fix broke:
+under the OLD condition it was green. **It scored 21/1 and its own last line is
+`VERDICT: PASS (floor held: 21 banked, 1 declared-failing, 22 measured)`.**
+
+**AND `--self-test` CANNOT SEE IT, BECAUSE ARM F ENCODES THE DEFECT AS THE
+EXPECTED ANSWER.** `ctrl_F_declared_fails_exit_0` is `allow=2`, fails 2, exits 0,
+and the self-test asserts it must be RED -- bit-for-bit `test_livedom`'s
+situation. I ran `--self-test` first and it returned **7 PASSED / 0 FAILED**; that
+7/0 is against the wrong rule. **AN ORACLE THAT CANNOT FAIL, IN THE RELEASE
+DRIVER, BLESSED BY ITS OWN CONTROL.**
+
+#### ONE UNREPLAYED JOURNAL, THREE REDS, AND TWO GATES THAT NEVER REACHED THE WIRE
+
+`installed_boot_login` scored **3/1 (4 assertions where 27 are registered)** and
+`greeter_fail_terminal` **8/1 (9 of 27)**. The brief said to count the markers on
+the wire if the first reddened; **it never reached the wire** -- both died in
+section 1, before booting anything.
+
+**All three gates share one disk**, measured in the sources:
+`installed_accounts.sh:86,91` **writes** `~/.hamnix-build/instacct/target-nvme.img`;
+`installed_boot_login.sh:141` and `greeter_fail_terminal.sh:93` **read** it.
+Proven on a carved COPY, never the source (`journal_probe.log`), with the same
+`dd` the gate itself does:
+
+    BEFORE: part.img: Inode bitmap checksum does not match bitmap ...
+            dump: Filesystem not open        /etc/passwd = 0 bytes
+    HEADER: Filesystem state:    clean          <-- the success-shaped field
+            Filesystem features: ... needs_recovery ... orphan_present ...
+    AFTER `e2fsck -fy` ON THE COPY:
+            hamnix: recovering journal       /etc/passwd = 1456 bytes
+            hamacctusr:x:1001:1001::/home/hamacctusr:/bin/hamsh
+
+**The account is on the disk and correct.** `installed_accounts`'s final desktop
+boot leaves the shared disk with `needs_recovery` set and **debugfs does not
+replay journals -- it refuses to open the filesystem at all**. That is ONE cause
+behind THREE reds (`installed_accounts` 63/1 on `/var/log`, and these two). The
+first was declared; **the other two are NEW, and new because of the order this
+battery runs in** -- both were previously green (5/5 at 27/0, and 27/0) on a disk
+not freshly dirtied moments earlier. **The corroboration is in the same table:
+`installed_uid_console` PASSED 24/0, and it is the one gate of the family that
+already REQUIRES an `e2fsck` step.**
+
+#### THE SIX UPDATE ROWS, ON THEIR FIRST EVER RUN BY THIS BATTERY
+
+    installed_update        UNSCORABLE   132 bytes: "no distro image; run scripts/hamlinux_distro.sh"
+    installed_update_live   UNSCORABLE    48 bytes: the same line
+    bootsync_installed      33 / 0
+    hpm_kernel_http         76 / 0
+    hpm_kernel_update       60 / 0
+    ab_kernel_slots         32 / 0
+
+**Four of six are green and they are not ceremonial.** `bootsync_installed`
+measured the bug first (`the ext4 root really carries the NEW module` /
+`and the RUNNING kernel has the OLD one (coresize 12288) -- the bug, measured`)
+then the fix (`THE RUNNING KERNEL HAS THE NEW MODULE: 12288 + 65536 = 77824`),
+and its power-cut arm really cut: `3797576 bytes of overlay were already on the
+medium: the kill really landed mid-write`, `THE INTERRUPTED MACHINE BOOTS`.
+`ab_kernel_slots`: `THE MACHINE BOOTED, on the old kernel 6.12.85, with a
+half-written slot B beside it`.
+
+**TWO OF SIX CANNOT RUN IN A RELEASE BATTERY AS THE BATTERY BUILDS ITS
+ARTIFACTS** -- they want a distro image the release build does not produce. That
+is what registering them at 0 bought: running them made it visible. **Nothing was
+manufactured to get past it.**
+
+**AND THE WARNING ON THREE OF THOSE GREENS STANDS: the shipped medium is built
+WITHOUT `HAMLINUX_AB_SLOTS=1`**, so a machine installed from this image cannot
+take a kernel update by that path. Those greens are about the mechanism.
+
+#### WHAT WENT RIGHT, AND IT IS MOST OF IT
+
+**`installed_fresh_login` -- the gate 1.0.33 was REFUSED on -- scored 49 / 0, two
+above its floor, with its control firing**: the same instrument, port and detector
+that reported *no* root identity in the guarded arm **did** answer `uid=0 gid=0`
+in the autologin arm. `graphical_login` **78/0**. `shipped_medium_boots`
+**31/0** on this medium's own sha. `verify_medium` **39/0** -- the full 39, so it
+did not silently drop its channel-dependent assertion. `soak_desktop` came back
+**26/0** (still one of its two known outcomes; it flipped 22/5 -> 26/0 the same
+day on the same tree, and one green does not settle it). **A machine boots,
+installs from this medium four times in one boot, and the machines it installs
+ask who you are.**
+
+#### THE VERDICT: NOT FIT TO PUBLISH, AND NOT ONE REASON IS THE PRODUCT
+
+1. **Two update gates are UNSCORABLE.** "We could not ask" is not "the answer was
+   yes", and silence must never be spendable as a green.
+2. **The scorer is wrong in a way its own control ratifies** (line 695 / arm F).
+3. **The battery did not measure the TTY login on two of its three paths** --
+   4-of-27 and 9-of-27 asserted, for a harness reason, not a product one.
+
+**WHAT WOULD MAKE IT A YES:** a distro image so the two update gates run; line
+695 corrected to consult `allow_fail` (and arm F corrected with it, or the rule
+deliberately reaffirmed); and the two journal-coupled gates given the `e2fsck`
+their sibling already has. **None of that is a change to the product and I made
+none of it.**
+
+#### WHAT I DID NOT CHANGE, DELIBERATELY
+
+**NOT ONE `expect_min` was raised, lowered or filled** -- not `pointer_launch_uid`
+(still 0; it scored 80/2, which is not a clean full run), and not the six update
+rows, **though four of them scored 33, 76, 60 and 32 on this host in this run**.
+A floor is a reviewable act and this run contains a known-wrong scorer; numbers
+banked by such a battery are not floors. They are all written down in `GATE.log`
+for whoever raises them deliberately. **No gate script was edited.
+`scripts/release_gates.sh` was not edited -- and specifically not while it was
+executing it**; the line-695 defect was found mid-run and left alone.
+
+**ALSO, FOR THE RECORD: pass 1 of the battery was KILLED FROM OUTSIDE** at
+~11:35 mid-`installed_accounts` (not by me, and not by an edit). Verified dead by
+inspection -- no `release_gates.sh`, no `gates.sh`, no QEMU; nothing was
+`pkill`ed and no bare pattern was matched. **The 16 gates that had finished kept
+their numbers; `installed_accounts` was DISCARDED and re-run from the start**,
+because half a gate is not a measurement. Pass 2 ran the remaining 20 detached
+under `setsid` so the task lifecycle could not reap it again.
+
+#### TWO THINGS IN MY BRIEF THAT THE TREE CONTRADICTED
+
+1. **"`pointer_launch_uid`'s `expect_min` is BLANK on purpose" -- IT IS THE DIGIT
+   `0`.** Line 326 is `pointer_launch_uid|yes|0|0||bash tests/linux/pointer_launch_uid.sh`,
+   identical in form to the six update rows; the empty field on that row is the
+   fifth, `reason-for-allowance`. The intent is real and is in the comment above
+   it, and blank and 0 mean the same thing to this driver -- no floor -- so the
+   instruction was unaffected. But there is no blank to find.
+2. **"The six update rows have NEVER BEEN RUN by anyone here" is too strong**, and
+   this file says so at `release_gates.sh:573-578`: HANDOFF reports 33/0, 44/0,
+   69/0, 60/0 and 32/0 for five of them, and 30/0 for `installed_update_live`,
+   measured on this host by earlier sessions on other trees. The true and
+   load-bearing claim is the one the registry makes -- they appeared **zero times
+   in that file**; THE RELEASE BATTERY had never run them.
+
 ### THE BATTERY HAS HIDDEN ORDER-DEPENDENT COUPLING -- 49 GATES DEFAULT INTO SHARED WORK DIRECTORIES
 
 **2026-08-20, found by the 1.0.33 battery, confirmed by me in the sources.**
