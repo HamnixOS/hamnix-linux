@@ -26,6 +26,61 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### WHEN THE GREETER FAILS, THE MACHINE TELLS THE OPERATOR TO DO SOMETHING THAT IS NOT POSSIBLE
+
+**2026-08-20. Verified by me in the source, not inferred.** An agent surfaced this
+while treating the greeter reds; the sharpened form is its wording, and I checked
+every line.
+
+`etc/rc.d/rc.5.linux` has a no-session branch for when `hamgreet` fails, and it
+says, at **line 178**:
+
+> `[rc.5] Why: /var/lib/hamgreet.trace. Log in on a terminal to read it.`
+
+**There is no terminal to log in on.** `/etc/rc.login` — the file that starts the
+gettys — is sourced by `/etc/rc.boot` **AFTER** `rc.boot.installed`, and
+`rc.boot.installed` ends by entering runlevel 5, where `hamgreet` runs **in the
+foreground**. So when `rc.5` reaches line 178, `/etc/rc.login` **has never run**,
+no getty exists on any tty, and `supervise` is never reached either.
+
+**THE DOCUMENTED RECOVERY PATH DOES NOT EXIST.** A machine whose graphical login
+fails prints an instruction that cannot be followed, on a console that is the
+screen, and then has nothing left to offer. This is the project's signature
+failure shape wearing its politest clothes: **not a gap answering
+success-shaped, but a REMEDY that is not there.**
+
+**Two corrections to my own briefing, both measured:**
+
+1. **I said EIGHT greeter reds. It is NINE, plus a tenth of the same family.**
+   `rel1033/GATES_SUMMARY.txt` counts hamgreet stalls per gate:
+   `install_wizard_gui 1, soak_desktop 1, installed_accounts 2,
+   installed_offers_install 1, installed_documents 3, installed_launch_uid 3,
+   pointer_launch_uid 5, installed_uid_console 1, installed_boot_login 2`.
+   **`installed_fresh_login` is NOT in that list** — I confirmed its absence — so
+   fixing it never consumed one of the nine. `poweroff_graphical` is the tenth,
+   which the summary itself calls "the same family without the string".
+2. **My stated REASON for `installed_uid_console` needing authentication was
+   wrong**, though the conclusion held. I said it needs a compositor, so opting
+   out of runlevel 5 would remove what it measures. But `rc.5.linux` starts
+   `/bin/wsysd` at **line 78** and `hamgreet` at **line 99** — I checked — so
+   `/dev/wsys` exists while the greeter is still asking. **The operative reason is
+   simply that a gate's appended lines do not run at all until `rc.5` returns**,
+   which is true of all ten whatever they ask.
+
+**A THIRD TREATMENT EXISTS THAT I DID NOT KNOW ABOUT:** `user/hamgreet.ad:576`
+tests `/etc/installer-medium` and returns immediately with a live recipe. Three of
+the ten boot a medium and lacked that file — an accident of the build, which
+writes it only under `HAMLINUX_INSTALLER=1`. Planting it does not get *past* the
+greeter; it makes the greeter take the branch it takes on the shipped medium.
+`user/hlinstall.ad` `sys_unlink`s that exact file from every target, which is what
+makes the distinction real rather than convenient.
+
+**AWAITING DAVID:** whether he wants terminal logins alongside the graphical one.
+**The boot has NOT been reordered** — that touches every machine and every gate,
+and it is his call, not mine. But note this entry raises the stakes on that
+question: it is no longer only about convenience, it is about whether a machine
+whose greeter fails has any way back in at all.
+
 ### THE SHIPPED INSTALL PATH WAS NEVER BROKEN. 1.0.33 WAS REFUSED ON A GATE THAT READ THE WRONG DISK -- and the hole it was blamed for was real, untested, and is now closed
 
 **2026-08-20. Base `4674986f`, checked with `git merge-base --is-ancestor
