@@ -27,6 +27,60 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE CHANNEL IS NO LONGER ADDITIVE -- DAVID REPLACED THE RULE, AND 99.6% OF THE REPO'S BYTES ARE ALREADY UNREACHABLE
+
+**2026-08-19. THIS SUPERSEDES "the channel is ADDITIVE -- delete nothing", which
+I had been enforcing on every release.** His words, lightly de-garbled from
+dictation, and I stated this reading back to him for correction:
+
+> "I don't think additive is actually necessary. As long as a package can replace
+> its predecessor it's safe to replace. Like you don't have to stage-upgrade the
+> kernel, you can just upgrade the kernel -- so all the old kernel packages are
+> essentially useless. Same goes for software. **The new rule should be: if a
+> staged upgrade is required, then the required intermediate stages stay in the
+> repo. If they are not required, they don't.**"
+
+**THE RULE: keep an old version ONLY when it is a required intermediate step of a
+staged upgrade. Everything else may be replaced in place.** The reasoning is that
+most upgrades are direct -- a machine goes from whatever it has to the newest
+thing, traversing nothing in between -- so the intermediates are dead weight.
+This is what makes ~74 MB kernel artifacts affordable at all.
+
+**MEASURED, AND IT SUPPORTS HIM HARD.** Off the live channel checkout:
+
+| | |
+|---|---|
+| index entries | **130, all at a single version** |
+| tarballs on disk | **3,176** |
+| referenced by the index | **130** |
+| **UNREFERENCED â€” unreachable via the index** | **3,046** |
+| **unreferenced bytes** | **2.59 GB of the 2.6 GB tree** |
+
+**99.6% of what we serve is already unreachable weight.** The index has only ever
+carried the newest version; the old tarballs sit there because I would not delete
+them, not because anything can find them.
+
+**BUT DO NOT DELETE ANYTHING YET -- THERE IS AN OPEN QUESTION AND IT IS
+LOAD-BEARING.** `hpm` has **`rollback`** and **`pin <name>@<version>`** (the `@`
+parse is at `user/hpm.ad:8850`), there is **NO local package cache**, and
+rollback's own comment says it runs *"the same repo-resolution / fetch / verify /
+extract path"* -- **i.e. it RE-FETCHES from the channel.** So exactly one of these
+is true and nobody has established which:
+
+  * **Rollback resolves through the INDEX** -- in which case it can already only
+    see the newest version, **rollback-to-an-older-version is ALREADY BROKEN**,
+    and that is a separate defect worth its own fix.
+  * **Rollback resolves through a URL it recorded in its own transaction log** --
+    in which case those 3,046 tarballs ARE reachable after all, and deleting them
+    breaks `rollback` and `pin` on every installed machine.
+
+**Establish which BEFORE removing bytes.** Deletion from a published channel is
+irreversible in the way that matters: a machine that needed the file finds a 404.
+
+**WHAT DOES NOT CHANGE:** the other half of his standing rule -- everything built
+here must REACH the repo -- still stands, and is currently being violated, since
+nothing has been published since 1.0.32.
+
 ### A MACHINE FETCHED ITS KERNEL OVER http, VERIFIED IT IN RAM, AND BOOTED IT -- 69 / 0
 
 **Measured on booted machines, dev host, 2026-08-19, base `83da51e9` (checked
