@@ -26,6 +26,242 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### THE TEN GREETER-TREATED GATES, MEASURED ON THIS TREE — AND `installed_boot_login` IS **INTERMITTENT**: 22 / 5, THEN 27 / 0, ON THE SAME TREE AND THE SAME DISK
+
+**2026-08-20. Base `3eaa826b`, checked with `git merge-base --is-ancestor 3eaa826b
+HEAD` — which FAILED on the worktree I was handed. It was **105 commits BEHIND**,
+and its own `gitStatus` block named `dbe56404` on `port/tier1-syscalls` while the
+checkout was in fact `52e59f16` on a third branch again. THE NINETEENTH
+CONSECUTIVE ONE.** Branch `work/greet-ten`, tag `greet-ten-v1`. Evidence
+`~/.hamnix-build/greetten/GATE.log`, `logs-pass1/` and `logs/`. NOTHING WAS
+SIGNED, PUSHED, OR WRITTEN INTO `rel1032/`, `rel1033/`, `loginguard/` OR
+`greeteight/`.
+
+Every number below was scored by `scripts/release_gates.sh`, whose `--self-test`
+I RAN FIRST and which came back **7 PASSED / 0 FAILED** — so the instrument that
+scored these gates was shown able to refuse a gate that asserts nothing, a gate
+whose summary contradicts its body, and a gate that lost assertions, BEFORE any
+of its verdicts were believed. The gates ran **serially**, one invocation each,
+because they share `build/image/root`.
+
+**PASS 1, in the order run. `reg` is the registered `expect_min`.**
+
+| gate | treatment | measured | reg | verdict |
+| --- | --- | --- | --- | --- |
+| `installed_accounts` | runlevel-3 opt-out (update boot) + authenticate (desktop boot) | **63 / 1** | 61 | RED |
+| `installed_boot_login` | runlevel-3 opt-out | **22 / 5** | 27 | RED |
+| `installed_offers_install` | authenticate | *no channel; see pass 2* | 24 | UNSCORABLE |
+| `installed_uid_console` | authenticate | **24 / 0** | 23 | PASS |
+| `installed_documents` | authenticate | **51 / 0** | 48 | PASS |
+| `installed_launch_uid` | authenticate | **69 / 0** | 66 | PASS |
+| `pointer_launch_uid` | authenticate | **80 / 2** | 0 (blank) | RED |
+| `install_wizard_gui` | plant `/etc/installer-medium` | **34 / 0** | 34 | PASS |
+| `poweroff_graphical` | plant `/etc/installer-medium` | **22 / 0** | 22 | PASS |
+| `soak_desktop` | plant `/etc/installer-medium` | **22 / 5** | 26 | RED |
+
+**THE TREATMENTS THEMSELVES ALL WORK, AND THAT IS SEPARABLE FROM THE VERDICTS.**
+Not one gate's log ends at `hamgreet: the graphical login is presenting` any more.
+Every gate given the authenticate treatment printed `[greet] admitted after 2s --
+rc.5 has returned`, including all **five** boots of `pointer_launch_uid`;
+`install_wizard_gui`'s medium answered on the wire with `hamgreet:
+/etc/installer-medium is present -- this is the INSTALL MEDIUM ... NO PASSWORD IS
+ASKED FOR ON THIS BOOT`; `installed_boot_login`'s machine printed `rc.boot:
+RUNLEVEL 5 SKIPPED`. **Six of the nine gates that ran are now GREEN and four of
+those six score ABOVE their registered floor.** The reds that remain are what the
+treatments UNCOVERED — questions no gate could reach while the greeter held rc.5.
+
+#### `installed_boot_login` SCORED 22 / 5 ON A DISK THIS TREE BUILDS — AND THEN 27 / 0 ON THE SAME ONE
+
+**READ THIS SUBSECTION WITH PASS 2 BELOW, WHICH CORRECTS IT.** The 22 / 5
+described here is real and its cause is measured; a second run of the same gate
+on the same disk came back 27 / 0. **The gate is intermittent. 22 / 5 is not its
+number and neither is 27 / 0.**
+
+The previous session's own commit caveated its 27 / 0: the disk it borrowed was
+left by the 1.0.33 session at `3ede288d`. I re-ran it on
+`~/.hamnix-build/instacct/target-nvme.img` as **this** run of
+`installed_accounts` had just built it, and it scores **22 PASSED / 5 FAILED** —
+27 assertions, so nothing was lost; five of them moved.
+
+**THE NEGATIVE CONTROL FIRED, WHICH IS WHY THE FIVE ARE READABLE.** The autologin
+arm answered `id` with `uid=0 gid=0` (no parentheses — this tree's `/etc/passwd`
+has no uid 0 line), created `/var/log/bootlogin-pwned.txt`, and showed no
+`login: ` prompt. So the instrument can see a root shell on this disk, on this
+port, with this driver.
+
+**ALL FIVE REDS ARE ONE THING, AND I MEASURED IT RATHER THAN INFERRING IT.** The
+guarded arm's getty DOES print its prompt — exactly once, and it is on the wire:
+
+    [hamsh] init: sourcing boot rc /etc/rc.autopowerofflogin:
+
+That is `login: ` with **no newline in front of it**, welded to the tail of PID
+1's own line. `grep -c '^login: '` over that serial log is **0**; the gate asserts
+a prompt "at the start of any console line", and `tests/linux/serial_drive.py`'s
+expect pattern is `/\r?\nlogin: /`, so the driver timed out after 60 s having
+typed nothing — which is why `Login incorrect` was seen **0** times and the three
+assertions downstream of a successful login could not be made either.
+
+**WHAT IS WRITING OVER THE PROMPT IS DEBUG CODE THAT IS STILL IN THE SHIPPED
+SHELL.** `user/hamsh.ad` carries **11** `TEMP_DEBUG_HAMSH_BRINGUP` markers
+(`[hamsh:_start hit]`, `[hamsh:stage-01] main-enter` … `[hamsh:stage-05]
+rc-open`), each an unconditional `sys_write(2, …)` gated only on the fd not being
+a bridged session — so a real serial or framebuffer console gets all of them,
+every time any `hamsh` starts. They landed 2026-05-22 (`8cd48159`, `c7993acf`)
+and are in `main`. **This is a RACE, not a regression:** the markers and getty's
+prompt go to the same console from different processes, and which side of the
+newline the prompt lands on is timing. That is why one session sees 27 / 0 and
+the next sees 22 / 5 with the same code.
+
+**AND THE SECOND RUN PROVED IT IS A RACE:** same tree, same disk, `grep -c
+'^login: '` went from **0** to **3** and the gate from 22 / 5 to 27 / 0.
+
+**I LEFT IT ALONE AND CHANGED NOTHING.** Loosening the gate's pattern to accept a
+prompt mid-line would make it green against a console an operator cannot read
+either, and removing the markers is a change to the shell every machine boots —
+David's call, not mine. `expect_min` stays at **27**: the gate still asserts 27
+things, and 22 is not a floor.
+
+#### `installed_accounts` 63 / 1 — THE DESKTOP CAME UP, AND ITS LOG IS EMPTY ON THE DISK
+
+The treated desktop boot did everything it was supposed to: `[rc.5] authenticated
+-- starting the session`, `uid 1001 home /home/hamacctusr`, the panel OCR'd as
+`Applications`, five of five launcher labels read back. The one red is section 3b,
+`could not read /var/log/hamdesktop.log off the disk`. **Measured, on the gate's
+own disk image, two facts and not one:**
+
+  1. `debugfs` reads that filesystem **without replaying its journal**, and the
+     gate has no `e2fsck` step (`installed_uid_console` requires one; this one
+     does not). Before a replay `/var/log` lists as **empty**. After
+     `e2fsck -fy` on a copy, `hamdesktop.log`, `wsysd.log`, `panel.log` and four
+     more appear.
+  2. **And every one of them is 0 bytes.** So the red stands even with the
+     journal replayed: `rc.5` line 115 creates the file with `>` and nothing
+     hamdesktop wrote reached the disk before the gate `quit`s the monitor and
+     `SIGKILL`s QEMU two seconds later.
+
+Left red. Fixing (1) alone would be the worse outcome — a journal replay that
+turns "the file is empty" into a green is not available, but it would hide which
+of the two questions was being answered.
+
+#### `pointer_launch_uid` 80 / 2, AND ITS `expect_min` STAYS BLANK
+
+All five boots authenticated. Both reds are the same sentence on two of the five
+arms — `menuperson`/`iconperson`: *the machine did not power itself off in 300s
+-- a MISSING file below could be a power cut rather than a failed save*, which is
+the gate refusing to score a save it cannot distinguish from a power cut. That is
+the gate being honest, not a clean run. **80 / 2 is not a clean full run, so the
+registry row stays at 0.**
+
+#### `soak_desktop` 22 / 5 — EVERY INSTRUMENT ARM PASSED AND THE SOAK ITSELF NEVER BOOTED (and a second run scored 26 / 0)
+
+Arms 0, 0f and 0e all pass: the wedge finder sees a planted 77 s hole, the
+heartbeat probe sees a real 60 s `stop`, the hand's keystrokes move wsysd's
+counters 0 → 114, `alt-sysrq-t` puts 82 task lines on a healthy console. Then the
+soak arm itself: `soak: the boot never reached the end of the rc in 2s`. Its
+QEMU exited within two seconds having written **0 bytes** to `qemu.out` and
+having never created `serial.log` at all.
+
+**AND THE GATE THEN PRINTED TWO PASSES OUT OF AN INSTRUMENT THAT READ NOTHING:**
+*"userspace never went quiet for as long as 20s across 900s of being used"* and
+*"the picture never stood still for as long as 60s"* — over a run with 0
+heartbeats, 0 frames, no serial log, and three Python tracebacks saying the file
+does not exist. **This is the tree's signature defect, in the gate written to
+hunt it: a gap answering something success-shaped.** The gate's own header
+records the same escape happening once before. Its five FAILs do carry the run,
+so the verdict is right; two of its PASSes are not readings.
+
+#### PASS 2: THE TENTH GATE, THE NEGATIVE CONTROL, AND TWO GATES THAT ARE INTERMITTENT
+
+**`installed_offers_install` did not run in pass 1** because it needs a channel at
+`build/repo/linux/index.json` and there was none — it printed `INCONCLUSIVE` and
+exited 2, and the driver correctly called that **UNSCORABLE**, which is not a
+zero and is not a pass. I built the channel
+(`python3 scripts/hamlinux_packages.py --out build/repo --version 1.0.99
+--channel linux`, after `rm -rf build/repo`) and ran it: **25 PASSED / 0 FAILED**,
+with `[greet] admitted after 2s` and `the graphical login ADMITTED hamgateusr`.
+
+**THE TWO REDS I RE-RAN BOTH CAME BACK GREEN, ON THE SAME TREE AND THE SAME DISK.**
+
+    installed_boot_login   22 / 5   then   27 / 0
+    soak_desktop           22 / 5   then   26 / 0
+
+**So both are INTERMITTENT, and neither number alone is the answer.** For
+`installed_boot_login` the assertion count is 27 both times, so nothing is lost —
+five assertions move, and the mechanism is the `TEMP_DEBUG_HAMSH_BRINGUP` race
+described above: in the green run `grep -c '^login: '` over the same serial log
+is **3**, in the red run it is **0** while the prompt is still on the wire. For
+`soak_desktop` the difference is whether the soak arm's QEMU survives its first
+two seconds. **I have written both pairs into `scripts/release_gates.sh` beside
+their rows, because a release driver that has only ever seen the green half of a
+flaky gate is a driver that will ship on a coin toss.**
+
+#### THE WHOLE-TREATMENT NEGATIVE CONTROL WAS RUN, AND IT FIRED
+
+`GREET_NEGCTL=1` on `installed_uid_console`, `UIDCONS_REUSE=1` against a **copy of
+the green run's own work dir** — `sha256(target-nvme.img)` identical on both
+sides, `c239739b…8cc5a6`, printed into `GATE.log` before the run so the claim is
+checkable. Same account, same keystrokes, same waits; the switch corrupts the
+password and nothing else.
+
+    clean   24 PASSED / 0 FAILED
+    NEGCTL   4 PASSED / 3 FAILED
+
+    [greet] GREET_NEGCTL=1: TYPING A DELIBERATELY WRONG PASSWORD.
+    [greet] rc.5 never came back in 240s after the password was typed
+      FAIL  could not get past the graphical login as uidconsusr
+            [rc.5] the graphical login is starting -- no session program exists yet
+            hamgreet: the graphical login is presenting
+
+**The four survivors are all UPSTREAM of the login** (the install boot, the
+installer's `install complete`, the probe building, the probe reaching the disk);
+**every assertion downstream of the greet assertion went red with it**, and the
+machine was left at the exact two lines every stalled guest log in the 1.0.33 run
+ended on. **The greens ARE about a login.** Until this had been run they were not
+earned; they are now.
+
+**IT TOOK THREE ATTEMPTS AND THE FIRST TWO ARE WORTH KNOWING.** Attempt 1 copied
+only the two disk images, and the gate went red on the INSTALL BOOT's serial log
+it had not been given — **a red about my copy, not about the login, and I did not
+count it.** Attempt 2 used `rsync`, which is not installed on this host. A
+control that goes red for the wrong reason looks exactly like a control that
+fired.
+
+#### WHAT I CHANGED IN `scripts/release_gates.sh`, AND WHAT I REFUSED TO
+
+Raised, each to an assertion count **this host scored in a green run** and to
+nothing else: `installed_offers_install` 24 → **25**, `installed_documents`
+48 → **51**, `installed_launch_uid` 66 → **69**, `installed_uid_console`
+23 → **24**.
+
+Left alone: `installed_boot_login` **27** and `soak_desktop` **26** (both already
+match their green runs); `install_wizard_gui` **34** and `poweroff_graphical`
+**22** (measured exactly at their floors); **`pointer_launch_uid` stays BLANK**,
+because 80 / 2 is not a clean full run; and **`installed_accounts` stays at 61
+although it asserted 64** — a floor is not raised off a run the gate failed.
+
+#### IS THE TREE FIT TO CUT? MY ANSWER IS NO, AND THE CALL IS DAVID'S
+
+Three things, in the order I would weigh them.
+
+1. **Two release gates are intermittent and neither is understood well enough to
+   declare.** A battery where `installed_boot_login` and `soak_desktop` each flip
+   between red and green on identical inputs cannot tell a release from a coin
+   toss, and both of them guard things that matter: whether a machine asks who
+   you are, and whether a desktop survives being used.
+2. **`user/hamsh.ad` still carries eleven `TEMP_DEBUG_HAMSH_BRINGUP` markers**
+   that write to every non-bridged console on every shell start. They are three
+   months old, they are in `main`, and they are demonstrably capable of
+   overwriting the login prompt on the console of a booting machine. Whatever
+   else is true, a release should not ship a shell whose bring-up tracing is on.
+3. **The documented recovery path still does not exist** (`rc.5.linux:178` tells
+   an operator to log in on a terminal that `rc.login` never started). I did not
+   touch the boot order; that is the question already waiting on David.
+
+Against that: **all ten gates now RUN and ask their real questions**, seven of
+the ten have a green on this tree, five of those score above their old floor, and
+the treatment they all depend on has a control that fires. That is a real
+improvement and it is not a release.
+
 ### DAVID ANSWERED: A GREETER FAILURE MUST LEAVE A TERMINAL TO DEBUG ON, "JUST LIKE LINUX" -- the boot reorder is AUTHORISED
 
 **2026-08-20. His words:** *"the greeter failure should leave a terminal for you
