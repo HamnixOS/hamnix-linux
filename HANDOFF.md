@@ -117,6 +117,29 @@ asserting nothing, for a body contradicting its summary, and for any undeclared
 failure. **I did not run any of the six**; registering them makes the driver run
 them, it does not make their numbers mine.
 
+#### 4b. THE REWRITTEN GATE SCORES **47 PASSED / 0 FAILED**
+
+MEASURED on this host, 2026-08-20, on the tree as committed here — one medium
+build, FOUR installs in one boot, two boots of the resulting disk. Registered at
+47 (it was 31; **that is not arithmetic on 31 — it is a different gate**).
+
+  * Arm A (shipped, both guard files) exit **0**, `install complete` printed,
+    disk carries the copied `rc.boot.machine`, `/etc/rc.login`, and
+    `hamfreshusr:x:1001`.
+  * **Arm D (shipped branch, `rc.login` deleted) exit 1**, no `install
+    complete`, and the console reads `hlinstall: FATAL: /etc/rc.login is not on
+    the disk this install just wrote` **with no fallback warning above it**, so
+    that is the shipped branch refusing.
+  * Arm B (fallback) exit 0. Arm C (neither) exit 1.
+  * **A FRESH INSTALL PRESENTS `login: ` ON ITS CONSOLE** — 3 prompts, junk
+    refused, a real account's wrong password refused, the right one admitting a
+    session that answers `uid=1001(hamfreshusr)`, and no root identity anywhere
+    before authentication. **This had never been measured.**
+  * **THE CONTROL FIRED**: the same disk with `-a hostowner` on the console
+    getty answered **`uid=0 gid=0`** — no parentheses, because this tree's
+    `/etc/passwd` has no uid 0 line — so the instrument CAN see a root shell and
+    arm 'fresh''s silence means something.
+
 #### 5. THE GREETER, AND A PRODUCT FINDING NOBODY HAS WRITTEN DOWN
 
 `/etc/rc.login` is sourced by `/etc/rc.boot` **after** `rc.boot.installed`, and

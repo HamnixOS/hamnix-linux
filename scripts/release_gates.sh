@@ -387,7 +387,28 @@ installed_boot_login|yes|0|27||bash tests/linux/installed_boot_login.sh
 # control is the same installed disk with `-a hostowner` on the console getty,
 # which MUST reach a root shell with no password; it answered `uid=0 gid=0`. If
 # either control stops firing this gate goes red on the control, not the product.
-installed_fresh_login|yes|0|31||bash tests/linux/installed_fresh_login.sh
+# 31 -> 47, MEASURED ON THIS HOST 2026-08-20 by the run that rewrote this gate:
+# 47 PASSED / 0 FAILED, one medium build, FOUR installs in one boot, two boots
+# of the resulting disk. NOT arithmetic on the old 31 -- the gate is a different
+# gate. What changed:
+#   * it no longer identifies guest disks by qemu -device position. It DID, and
+#     the guest does not enumerate NVMe namespaces in that order: measured
+#     A -> slot2, D -> slot1, B -> slot4, C -> slot3. The 1.0.33 candidate's
+#     20/2 was this gate reading arm C's correctly-REFUSED disk and reporting
+#     it as arm A's shipped install, which is why 1.0.33 was refused. Each arm
+#     now stamps its disk with its own --esp-mb at partitioning time and the
+#     host asserts a bijection before scoring anything.
+#   * new arm D -- rc.boot.machine present, rc.login absent -- runs the
+#     configuration that separates write_machine_rc_boot's two branches, which
+#     nothing had ever run, and requires a loud refusal.
+#   * sections 2 and 3 take the runlevel-3 opt-out, because at runlevel 5 the
+#     installed rc's own last two lines never run (hamgreet holds rc.5) and
+#     there is no terminal login to measure. One file is added to a copy of the
+#     disk and /etc/rc.boot is asserted byte-identical to the installer's.
+# THE CONTROLS FIRED IN THAT RUN: arm A succeeded and printed 'install
+# complete' (so C's and D's refusals are differences, not greps that never
+# match), and the autologin control answered `uid=0 gid=0`.
+installed_fresh_login|yes|0|47||bash tests/linux/installed_fresh_login.sh
 
 # WHAT BREAKS WHEN `/` IS NOT THE MACHINE'S ROOT -- the first booted measurement
 # of the owner's "the global root should be min as possable" direction. 16 PASSED
