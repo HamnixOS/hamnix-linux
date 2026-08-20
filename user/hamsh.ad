@@ -17492,15 +17492,15 @@ def ed_readline() -> int64:
     # shell is being scheduled on a box whose keyboard is broken. Remove
     # this poll-and-yield (and the heartbeat hook) once real-hardware
     # keyboard input works.
-    # TEMP_DEBUG_HAMSH_BRINGUP — first ed_readline call. The very next
-    # observable signal will be the [hamsh-alive] heartbeat (cadence
-    # ~3s); if stage-08 prints but no heartbeat ever follows, the bug
-    # is in the sys_read_nb / sys_yield loop on real silicon.
+    # THE REPL-READY MARKER, SECOND HALF — first ed_readline call, i.e. the
+    # editor is actually armed for a keystroke. Unconditional for the same
+    # reason as stage-07 above: test_hamfm.sh, test_hamfm_open_dispatch.sh,
+    # test_hamsh_revsearch.sh, test_hamsh_histpersist.sh and test_alx_ko.sh
+    # wait on this exact string. NOT covered by the /etc/hamsh-bringup opt-out.
     if ed_first_entry != 0:
         ed_first_entry = 0
-        # Dev-only bringup marker — kernel console only; suppress on a
-        # bridged session (SSH / DE terminal) so it doesn't leak onto the
-        # user's interactive stdout.
+        # Kernel console only; suppress on a bridged session (SSH / DE
+        # terminal) so it doesn't leak onto the user's interactive stdout.
         if _diag_fd2_is_bridged() == 0:
             sys_write(2, cast[Ptr[uint8]]("[hamsh:stage-08] ed-readline-first\n"),
                       cstr_len(cast[Ptr[uint8]]("[hamsh:stage-08] ed-readline-first\n")))
@@ -18449,19 +18449,95 @@ def _setup_fd_namespace():
 #
 # Remove together with the runtime.S `_start` marker once the bring-up
 # bug is debugged.
+#
+# 2026-08-20 — THE BRING-UP TRACING IS NOW OFF BY DEFAULT, AND THIS IS WHY.
+# ========================================================================
+# These markers were unconditional on any console that is not a bridged
+# session pipe, which means a real serial or framebuffer console got all of
+# them from EVERY hamsh that starts — PID 1, every getty's login shell, every
+# `hamsh <script>` the rc spawns. On an installed machine that is several
+# bursts of console writes arriving while getty is printing its `login: `
+# prompt to the SAME console from a DIFFERENT process, and which side of the
+# newline the prompt lands on is timing.
+#
+# MEASURED, not reasoned about, in the GREEN run's own serial log
+# (~/.hamnix-build/instbootlogin/boot-guarded/serial.log, line 585):
+#
+#     login: [hamsh:stage-04] fd-ns-ready
+#
+# The prompt kept the start of the line that time, so `grep -c '^login: '` was
+# 3 and tests/linux/installed_boot_login.sh scored 27 / 0. In the run before it
+# the collision fell the other way — the prompt welded to the TAIL of PID 1's
+# line, `grep -c '^login: '` was 0, serial_drive.py's /\r?\nlogin: / never
+# matched, the driver typed nothing for 60 s and the gate scored 22 / 5. Same
+# tree, same disk, 27 assertions both times. That is the whole of the
+# intermittency.
+#
+# WHY CONDITIONAL AND NOT DELETED, which is the question worth answering.
+# `[hamsh:stage-07] loop-enter` and `[hamsh:stage-08] ed-readline-first` are
+# NOT tracing any more whatever their comments say: roughly FIFTY scripts in
+# scripts/ and tests/ wait on those two exact strings as the "the rc has
+# finished and the REPL will accept a keystroke" marker, because the 16550 has
+# no software RX buffer and a byte sent before the REPL opens is dropped.
+# `[hamsh] M16.35 shell ready` cannot replace them — it is printed BEFORE the
+# boot rc runs, so waiting on it reintroduces exactly the dropped-byte race it
+# was added to fix. Those two are a load-bearing product signal and they stay
+# unconditional; they are emitted through _repl_marker below, which says so.
+#
+# The other NINE emissions — `[hamsh:_start hit]` and stage-01..stage-06 — have
+# ZERO consumers anywhere in the tree (checked: nothing greps them but this
+# file, HANDOFF.md and docs), and they are exactly the ones inside the window
+# where getty prints its prompt. 17 of the 19 marker writes in that boot log
+# are these. They are now armed only by the /etc/hamsh-bringup marker file,
+# mirroring the /etc/hamsh-heartbeat opt-in main() already uses for the
+# [hamsh-alive] tick — same mechanism, same reason, same default of OFF.
+# ENABLE_HAMSH_BRINGUP=1 on scripts/build_initramfs.py plants it.
+#
+# Probed in main() before the first marker; absent on every shipped boot.
+dbg_bringup_on: int32 = 0
+
+
+def _repl_marker(msg: Ptr[uint8]):
+    # NOT bring-up tracing — the REPL-ready contract. See the block above:
+    # ~50 test scripts synchronise their first keystroke on this. Suppressed
+    # only on a bridged session pipe (SSH / DE terminal), where it would spam
+    # the user's own stdout; a real console always gets it.
+    if _diag_fd2_is_bridged() != 0:
+        return
+    sys_write(2, msg, cstr_len(msg))
+
+
 def _dbg_stage(msg: Ptr[uint8]):
-    # Dev-only bringup marker. Route to the kernel console only: when /fd/2
-    # is a bridged session pipe (SSH / DE terminal) suppress it so the
-    # [hamsh:stage-NN] markers don't leak onto the user's interactive
-    # stdout. A real serial / framebuffer console — or fd 2 not yet bound
-    # at very early boot — still gets it, which is where test_hamsh_heartbeat
-    # and the stage-07 gate tests read these.
+    # Dev-only bringup marker, OFF unless /etc/hamsh-bringup is present.
+    # Route to the kernel console only: when /fd/2 is a bridged session pipe
+    # (SSH / DE terminal) suppress it so the [hamsh:stage-NN] markers don't
+    # leak onto the user's interactive stdout. A real serial / framebuffer
+    # console — or fd 2 not yet bound at very early boot — still gets it when
+    # the marker file has armed them.
+    if dbg_bringup_on == 0:
+        return
     if _diag_fd2_is_bridged() != 0:
         return
     sys_write(2, msg, cstr_len(msg))
 
 
 def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    # ARM THE BRING-UP MARKERS, OR LEAVE THEM OFF. This must be the very first
+    # thing main() does, because the next statement is itself a marker.
+    #
+    # _path_execable is a bare sys_open + sys_close on a .rodata literal — no
+    # string arena, no cstr_len, nothing that str_arena_init has to have run
+    # for — so it is safe here, ahead of every initialiser. Same probe main()
+    # already does a few lines below for /etc/hamsh-heartbeat, and for the same
+    # reason: it reads the CPIO /etc, before rc.boot rebinds '/'.
+    #
+    # ABSENT ON EVERY SHIPPED BOOT — build_initramfs.py plants it only under
+    # ENABLE_HAMSH_BRINGUP=1 — so an installed machine's console carries none
+    # of stage-01..06 and no `[hamsh:_start hit]`, and getty's `login: ` prompt
+    # has nothing to collide with. See the block above _dbg_stage for the
+    # measurement that produced this.
+    if _path_execable(cast[Ptr[uint8]]("/etc/hamsh-bringup")) != 0:
+        dbg_bringup_on = 1
     # TEMP_DEBUG_HAMSH_BRINGUP — VERY FIRST instruction of main(). This
     # mirrors the hand-rolled marker in user/runtime.S's _start: a
     # single sys_write(2, ...) with a LITERAL byte-count, NOT going
@@ -18479,10 +18555,11 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # sys_fdslot_kind syscall + int compares — so a bridged interactive
     # session (SSH / DE terminal) doesn't see this dev marker, while a
     # real serial / framebuffer console still does exactly as before.
-    if _diag_fd2_is_bridged() == 0:
-        sys_write(2,
-                  cast[Ptr[uint8]]("[hamsh:_start hit]\n"),
-                  cast[uint64](19))
+    if dbg_bringup_on != 0:
+        if _diag_fd2_is_bridged() == 0:
+            sys_write(2,
+                      cast[Ptr[uint8]]("[hamsh:_start hit]\n"),
+                      cast[uint64](19))
     # TEMP_DEBUG_HAMSH_BRINGUP — first line hamsh main() runs. If we
     # see this but not the next marker, the bug is inside str_arena_init
     # or one of its peers; if we don't see this, control never reached
@@ -18665,9 +18742,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     # / Ctrl-R recall spans previous sessions. Done AFTER _set_home_from_
     # passwd so the per-user path resolves; a missing file is a no-op.
     hist_load_file()
-    # TEMP_DEBUG_HAMSH_BRINGUP — entering the interactive read-eval
-    # loop. Next marker fires once per ed_readline call.
-    _dbg_stage(cast[Ptr[uint8]]("[hamsh:stage-07] loop-enter\n"))
+    # THE REPL-READY MARKER. Kept unconditional on purpose — it is the
+    # synchronisation point roughly fifty scripts in scripts/ and tests/ wait
+    # on before sending their first byte, because the boot rc has finished by
+    # here and the 16550 has no software RX buffer. `[hamsh] M16.35 shell
+    # ready` is NOT a substitute: it prints before the rc runs. Emitted through
+    # _repl_marker, not _dbg_stage, so the /etc/hamsh-bringup opt-out cannot
+    # silently take the whole test suite's ready signal with it.
+    _repl_marker(cast[Ptr[uint8]]("[hamsh:stage-07] loop-enter\n"))
 
     # Interactive read-eval loop. Each logical line is built up from one
     # or more physical lines (a `{ }` block continues across lines). Each

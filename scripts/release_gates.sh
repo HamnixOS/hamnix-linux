@@ -424,7 +424,72 @@ installed_uid_console|yes|0|24||bash tests/linux/installed_uid_console.sh
 # would make it green against a console an operator cannot read either, and
 # removing the markers changes the shell every machine boots. expect_min stays
 # at 27 because the gate still asserts 27 things; 22 is not a floor.
+#
+# ---------------------------------------------------------------------------
+# 2026-08-20, LATER THE SAME DAY: THE COLLIDING WRITER WAS TAKEN OUT OF THE
+# SHIPPED SHELL, AND THE GATE THEN RAN FIVE TIMES WITHOUT FALLING ONCE.
+#
+# The paragraph above is correct about the cause and I left it standing. What
+# changed is user/hamsh.ad: `[hamsh:_start hit]` and stage-01..stage-06 are now
+# armed only by /etc/hamsh-bringup and are absent on every shipped boot.
+# stage-07 and stage-08 stayed unconditional -- roughly fifty scripts wait on
+# those two strings as the REPL-ready marker -- but they fire after the rc has
+# finished, not in the window where getty prints its prompt.
+#
+# MEASURED ON THIS HOST, base eb20b7c2 + the change, on the same source disk
+# (~/.hamnix-build/instacct/target-nvme.img), FIVE CONSECUTIVE RUNS, serially,
+# nothing else running:
+#
+#     run 1  27 PASSED / 0 FAILED    bring-up markers on the wire: 0   `^login: ` x3
+#     run 2  27 PASSED / 0 FAILED    bring-up markers on the wire: 0   `^login: ` x3
+#     run 3  27 PASSED / 0 FAILED    bring-up markers on the wire: 0   `^login: ` x3
+#     run 4  27 PASSED / 0 FAILED    bring-up markers on the wire: 0   `^login: ` x3
+#     run 5  27 PASSED / 0 FAILED    bring-up markers on the wire: 0   `^login: ` x3
+#
+# Evidence ~/.hamnix-build/bringup-reorder/GATE.log and blogin-run1..5/.
+#
+# WHAT THAT IS AND IS NOT. It is five for five where the two runs before the
+# change were one red and one green, and the marker count -- 19 on the wire in
+# the last green log, 0 in all five of these -- says the mechanism named above
+# is gone rather than merely quiet. IT IS NOT A PROOF THAT THE GATE CANNOT
+# FLAP. The console is still shared by more than one process and this tree can
+# still weld two lines together: run 1's own log carries
+#     rc.login: every terminal on this machine now asks who you aregetty: terminal ready:
+# which is rc.login and getty colliding -- a different pair of writers, on a
+# line no assertion here reads. FIVE IS THE NUMBER I RAN. Do not read it as
+# infinity, and if this gate goes red again, count the markers FIRST.
+# expect_min stays at 27; it was already the green count and nothing earned a
+# raise.
 installed_boot_login|yes|0|27||bash tests/linux/installed_boot_login.sh
+
+# WHEN THE GRAPHICAL LOGIN NEVER ANSWERS, IS THERE A TERMINAL TO LOG IN ON?
+# etc/rc.d/rc.5.linux:178 tells an operator whose greeter failed to "Log in on a
+# terminal to read it", and until 2026-08-20 there was none: etc/rc.boot.machine
+# sourced /etc/rc.login AFTER /etc/rc.boot.installed, which enters runlevel 5,
+# where hamgreet blocks PID 1's rc in the foreground. Nothing below that line
+# ran on a graphical machine -- no getty, and no `supervise` either.
+#
+# THE FAILURE THIS REPRODUCES IS THE ONE THAT HAPPENED. Not a deleted greeter:
+# a greeter that fails FAST does not distinguish the two orders at all, because
+# rc.5 returns and the OLD order reaches the gettys a second later. The failure
+# behind all nine greeter stalls in the 1.0.33 run is a greeter that PRESENTS
+# AND IS NEVER ANSWERED. So the gate boots the real greeter at runlevel 5, types
+# NOTHING at the screen, and asks the serial console whether anybody is home.
+#
+# ITS CONTROL IS GENERATED FROM ITS SUBJECT: the gate finds the two `source`
+# lines in the shipped etc/rc.boot.machine by number and swaps them, and FAILS
+# if the result is identical to the subject or is not a sorted-identical
+# PERMUTATION of it. Same disk, same binaries, same drive script, same greeter;
+# line order is the only variable.
+#
+# expect_min 27, MEASURED on this host 2026-08-20 in ONE clean full run --
+# 27 PASSED / 0 FAILED, evidence
+# ~/.hamnix-build/bringup-reorder/greeter_fail_terminal.log. THE CONTROL FIRED
+# IN THAT RUN: the old-order arm presented NO `login: ` prompt at all while the
+# new-order arm presented one, refused a wrong password and admitted uid 1001.
+# It is 27 by coincidence and not by kinship with installed_boot_login above;
+# they are different assertions and the numbers are not comparable.
+greeter_fail_terminal|yes|0|27||bash tests/linux/greeter_fail_terminal.sh
 
 # DOES A MACHINE THE INSTALLER JUST BUILT ASK WHO YOU ARE? installed_boot_login
 # above proved the guard works; it did so on a disk whose /etc/rc.boot THE GATE

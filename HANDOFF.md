@@ -26,7 +26,166 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### THE BRING-UP TRACING IS OUT OF THE SHIPPED SHELL AND THE GETTYS NO LONGER WAIT ON THE GREETER — `installed_boot_login` **5 / 5 GREEN AT 27 / 0**, `graphical_login` **78 / 0** WITH ITS RED ARM STILL **68 / 10**
+
+**2026-08-20. Base `eb20b7c2`, checked with `git merge-base --is-ancestor eb20b7c2
+HEAD` — which FAILED on the worktree I was handed. It was **109 commits BEHIND**,
+at `52e59f16` on a branch called `worktree-agent-ab17d1eabfb83aa3f`, while its
+own `gitStatus` block named `dbe56404` on `port/tier1-syscalls`. THE TWENTIETH
+CONSECUTIVE ONE, and the block was wrong about the commit AND the branch again.**
+Branch `work/bringup-quiet-reorder`, tag `bringup-quiet-reorder-v1`. Evidence
+`~/.hamnix-build/bringup-reorder/` (`GATE.log`, `GATE2.log`, `blogin-run1..5/`,
+`greeter_fail_terminal.log`, `graphical_login_green.log`,
+`graphical_login_red.log`). NOTHING WAS SIGNED OR PUSHED, and nothing was
+written into `rel1032/`, `rel1033/`, `loginguard/`, `greeteight/` or `greetten/`.
+
+**THIS SUPERSEDES THE INTERMITTENCY FINDING BELOW.** That section is correct
+about the cause and is left standing; what changed is the shell.
+
+#### 1. THE ELEVEN MARKERS: NINE ARE OFF BY DEFAULT, TWO ARE NOT TRACING AT ALL
+
+`user/hamsh.ad` carried eleven `TEMP_DEBUG_HAMSH_BRINGUP` emissions. **They are
+not eleven of a kind, and that is the whole of the decision.**
+
+  * **`[hamsh:_start hit]` and `stage-01`..`stage-06` — NINE — have ZERO
+    consumers anywhere in this tree.** Nothing greps them but this file, the
+    source and `docs/`. They are now armed only by `/etc/hamsh-bringup`, which
+    `scripts/build_initramfs.py` plants under `ENABLE_HAMSH_BRINGUP=1` —
+    the same opt-in shape `main()` already used for `/etc/hamsh-heartbeat`.
+    Absent on every shipped boot.
+  * **`stage-07 loop-enter` and `stage-08 ed-readline-first` are a PRODUCT
+    SIGNAL and they stay unconditional.** ROUGHLY FIFTY scripts under
+    `scripts/` and `tests/` wait on those two exact strings before sending
+    their first byte. `[hamsh] M16.35 shell ready` cannot replace them: it
+    prints BEFORE the boot rc runs, so waiting on it reintroduces the
+    dropped-byte race on a 16550 with no software RX buffer. They now go
+    through `_repl_marker`, which says so, so the opt-out cannot silently take
+    the whole suite's ready signal with it.
+
+**THE COLLISION IS MEASURED IN THE PREVIOUS SESSION'S OWN GREEN LOG**, at
+`~/.hamnix-build/instbootlogin/boot-guarded/serial.log:585`:
+
+    login: [hamsh:stage-04] fd-ns-ready
+
+**That is the GREEN run.** The prompt kept the start of its line, so
+`grep -c '^login: '` was 3 and the gate scored 27 / 0 — while a marker was
+welded to the prompt's tail anyway. In the run before it the collision fell the
+other way and the count was 0. Nineteen marker writes in that log; seventeen of
+them are the nine now suppressed.
+
+#### 2. FIVE CONSECUTIVE RUNS, AND FIVE IS THE NUMBER I RAN
+
+Same source disk (`~/.hamnix-build/instacct/target-nvme.img`), serially, nothing
+else on the host:
+
+    run 1   27 PASSED / 0 FAILED    markers on the wire: 0   `^login: ` x3
+    run 2   27 PASSED / 0 FAILED    markers on the wire: 0   `^login: ` x3
+    run 3   27 PASSED / 0 FAILED    markers on the wire: 0   `^login: ` x3
+    run 4   27 PASSED / 0 FAILED    markers on the wire: 0   `^login: ` x3
+    run 5   27 PASSED / 0 FAILED    markers on the wire: 0   `^login: ` x3
+
+**The marker count is what makes this a reading rather than a lucky streak** —
+19 before, 0 in all five — and `stage-07` is on the wire in every one, so the
+suite still has its ready marker. **I HAVE NOT PROVED THE GATE CANNOT FLAP.**
+Run 1's own log still welds two lines:
+
+    rc.login: every terminal on this machine now asks who you aregetty: terminal ready:
+
+which is `rc.login` and `getty` — a different pair of writers, on a line no
+assertion reads. **The console is still shared. If this gate goes red again,
+COUNT THE MARKERS FIRST.** `expect_min` stays at **27**; nothing earned a raise.
+
+#### 3. THE REORDER IS ONE LINE, AND IT IS IN `etc/rc.boot.machine` FOR A REASON
+
+`source '/etc/rc.login'` now sits ABOVE `source '/etc/rc.boot.installed'`;
+`supervise` is still last. `user/hlinstall.ad`'s fallback rc is reordered to
+match, so the installer cannot write the old shape.
+
+**THE GREETER IS NOT BACKGROUNDED AND `rc.5` IS NOT RESTRUCTURED.** It still
+blocks PID 1's rc, still clears `hamsession_ok` before and tests it after, and
+`/var/lib/hamsession.rc` is still the only thing that can raise it. The
+recovery terminal was buyable without touching any of that, so it was bought
+without touching any of that.
+
+**WHY NOT `etc/rc.boot.installed`, WHICH IS THE PACKAGE-OWNED FILE: BECAUSE
+THIRTY-TWO GATES SOURCE IT, AND A GETTY ON `/dev/ttyS0` IS A READER OF THE
+SERIAL PORT.** Putting the getty start there would hand every one of those
+gates a second reader competing for the keystrokes their driver sends — the
+exact race `etc/rc.login.linux` warns about. **THE COST, STATED RATHER THAN
+HIDDEN: `/etc/rc.boot` is machine-owned, so a box installed before this change
+keeps the old order until its rc is replaced or removed.** New installs get it,
+`hpm` writes the file when it is ABSENT, and `hamnix-init` ships
+`etc/rc.boot.machine` as `/etc/rc.boot`, so the change does reach the repo.
+
+#### 4. A NEW GATE, AND ITS CONTROL IS GENERATED FROM ITS SUBJECT
+
+`tests/linux/greeter_fail_terminal.sh` — **27 PASSED / 0 FAILED**, registered at
+27.
+
+**THE FAILURE IT REPRODUCES IS THE ONE THAT HAPPENED.** Not a deleted greeter: a
+greeter that fails FAST does not distinguish the two orders at all, because
+`rc.5` returns and the OLD order reaches the gettys a second later. **A gate that
+cannot fail is worse than no gate.** The failure behind all nine greeter stalls
+is a greeter that PRESENTS AND IS NEVER ANSWERED, so this gate boots the real
+greeter at runlevel 5, **types nothing at the screen**, and asks the serial
+console whether anybody is home.
+
+    [reordered] the console presents 'login: ' at the start of a line (2 time(s))
+                WHILE THE GREETER IS STILL PARKED
+    [reordered] the wrong password was REFUSED
+    [reordered] the account logged in and the session answered `id` with uid=1001
+    [oldorder]  THE CONTROL FIRED: with the two source lines in the old order the
+                same machine, same greeter, same binaries presents NO 'login: '
+                prompt at all
+    [oldorder]  /etc/rc.login never ran
+
+The control is **generated from the subject** by swapping the two `source` lines
+by line number, and the gate FAILS if the result is identical to the subject or
+is not a sorted-identical PERMUTATION of it. It also refuses to score a boot
+that is not in the failure state, and it deletes `/etc/rc.runlevel` from the
+disk and asserts its absence — **a leftover runlevel-3 opt-out would give BOTH
+arms a prompt and a green that measured nothing.**
+
+#### 5. `graphical_login` 78 / 0, AND THE RED ARM IS STILL 68 / 10
+
+    graphical_login, this tree      78 PASSED /  0 FAILED   (its registered floor)
+    the same gate, RED ARM          68 PASSED / 10 FAILED
+
+The red arm is `etc/rc.d/rc.5.linux` with its four session-start lines moved
+ABOVE `/bin/hamgreet` — the greeter as a curtain. All ten FAILs are the census
+ones, and **EVERY OCR ASSERTION STAYED GREEN AGAIN**, including the OCR's own
+control and including this, on a machine with a desktop running behind the
+greeter:
+
+    PASS  boot 1: THE MACHINE IS ASKING WHO YOU ARE -- the greeter's title is on
+          the screen before any session program has been started
+
+The mutation was applied and reverted by a script that refuses to double-apply;
+`git status` on `etc/rc.d/rc.5.linux` is clean.
+
+#### 6. WHAT I DID NOT DO
+
+  * **NEITHER `installed_boot_login` NOR `graphical_login` ACTUALLY EXERCISES
+    THE REORDER.** Both write their own `/etc/rc.boot` and never use
+    `etc/rc.boot.machine`, so my re-runs of them measure the SHELL change, not
+    the boot change. `greeter_fail_terminal` is the only thing that measures
+    the reorder. Anyone reading "78 / 0, so the reorder is safe" should read
+    that as "the reorder cannot reach this gate", which is a weaker and truer
+    claim.
+  * **NO PRE-CHANGE BASELINE OF MY OWN.** The 22/5 and 27/0 either side of the
+    change are the previous session's two runs, not five of mine. I did not
+    re-run the unpatched shell five times.
+  * `soak_desktop`, the other intermittent gate, was not touched or re-run.
+  * `user/runtime.S`'s `[runtime:hamsh] _start` marker is a TWELFTH
+    unconditional bring-up write, but it is in the NATIVE lane's runtime only.
+    `scripts/hamlinux_build.sh` links `user/linux-runtime.S`, which has no such
+    marker, and `grep -c 'runtime:'` over an installed machine's serial log is
+    **0**. Out of scope for hamnix-linux, and recorded so nobody re-derives it.
+
 ### THE TEN GREETER-TREATED GATES, MEASURED ON THIS TREE — AND `installed_boot_login` IS **INTERMITTENT**: 22 / 5, THEN 27 / 0, ON THE SAME TREE AND THE SAME DISK
+
+**SUPERSEDED IN PART by the entry above: the cause named here is right, and the
+shell no longer carries it.**
 
 **2026-08-20. Base `3eaa826b`, checked with `git merge-base --is-ancestor 3eaa826b
 HEAD` — which FAILED on the worktree I was handed. It was **105 commits BEHIND**,

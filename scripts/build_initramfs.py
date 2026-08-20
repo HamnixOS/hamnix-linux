@@ -295,6 +295,23 @@ if os.environ.get("ENABLE_TLS_SMOKE") == "1":
 if os.environ.get("ENABLE_HAMSH_HEARTBEAT") == "1":
     FILES.append(("/etc/hamsh-heartbeat", b"1\n"))
 
+# ENABLE_HAMSH_BRINGUP=1 plants /etc/hamsh-bringup. hamsh's main() probes for
+# it as its VERY FIRST statement and only then emits the bring-up trace
+# `[hamsh:_start hit]` + `[hamsh:stage-01]`..`[hamsh:stage-06]`. Those nine
+# writes went to every non-bridged console on every hamsh start from
+# 2026-05-22 until 2026-08-20, and they are what made
+# tests/linux/installed_boot_login.sh intermittent: they land on the same
+# console as getty's `login: ` prompt, from a different process, and whether
+# the prompt keeps the start of its line is timing. See the block above
+# _dbg_stage in user/hamsh.ad for the two serial logs that measure it.
+#
+# NOT covered by this switch, deliberately: `[hamsh:stage-07] loop-enter` and
+# `[hamsh:stage-08] ed-readline-first` stay unconditional. They are the
+# REPL-ready contract that ~50 scripts synchronise their first keystroke on,
+# not tracing.
+if os.environ.get("ENABLE_HAMSH_BRINGUP") == "1":
+    FILES.append(("/etc/hamsh-bringup", b"1\n"))
+
 # ENABLE_SMAP_TEST=1 plants /etc/smap-test. init/main.ad gates
 # smap_enforced_test() on this marker — a positive SMAP-active proof that
 # does an un-stac'd CPL=0 read of a US=1 user page and asserts it #PF's
