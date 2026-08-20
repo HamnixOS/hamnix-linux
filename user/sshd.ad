@@ -95,12 +95,46 @@ extern def sys_fdbind(pid: int32, fdnum: int32, kind: int32, slot: int32) -> int
 # sys_open the scratch /fd/N names it wires the session pipes through.
 extern def sys_bind(newp: Ptr[char], oldp: Ptr[char], flag: int32) -> int32
 extern def sys_get_jiffies() -> uint64
+# The tree's portable park (user/sleep.ad, lib/hamscreen.ad, user/dhcpc.ad):
+# with nfds == 0 it is a pure timed sleep that takes the task OFF the
+# runqueue. `fds` is never dereferenced at nfds == 0.
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64,
+                       timeout_ms: int64) -> int64
 extern def sys_getpid() -> int32
 extern def sys_yield() -> int32
 
 
 # Guest port the daemon listens on. SSH's well-known port.
 SSHD_PORT: uint64 = 22
+
+# THE UID sshd SERVES AT, and the two calls it takes to get there.
+#
+# docs/security.md Phase 11 chose uid 2 so that compromising sshd is not
+# compromising the host owner. /etc/svc/sshd.hamsh said `uid: 2` and the
+# supervisor duly dropped BEFORE exec -- at which point port 22 could not
+# be bound (it is privileged), net_announce() failed, restart-on-failure
+# respawned it, and the console filled with the same four lines for ever.
+# scripts/devvm_image.sh works around that by starting /bin/sshd directly
+# as root, which throws Phase 11's property away entirely.
+#
+# So sshd does the standard thing itself: BIND WHILE PRIVILEGED, DROP
+# BEFORE SERVING. Everything that needs privilege -- writing the persisted
+# host key under /var/lib/ssh, creating that directory, binding 22 --
+# happens first and is finished; then main() drops to SSHD_UID and only
+# then accepts its first connection. A compromise of the session-serving
+# code is still not the host owner, which is exactly what Phase 11 asked
+# for, and the listen now succeeds, which is what it could not have.
+#
+# The supervisor cannot express this on its own: user/hamsh.ad's
+# builtin_svc rforks and calls sys_setuid BEFORE spawn(), so anything it
+# can say happens strictly before the program's first instruction. That
+# is the right shape for a service that never needs privilege and the
+# wrong one for a service that needs it exactly once, at startup. The
+# knowledge of WHEN it is safe to drop belongs to the program.
+SSHD_UID: uint32 = 2
+extern def sys_setuid(uid: uint32) -> int32
+extern def sys_getuid() -> uint32
+extern def sys_mkdir(path: Ptr[char]) -> int32
 
 # spawn() stdio mode + fd-bind channel kinds (match lib/p9 + syscall.ad).
 # SPAWN_STDIO_NS routes the child's integer fd 0/1/2 through its /fd/0,1,2
@@ -2086,11 +2120,16 @@ def _bridge_session() -> int32:
             idle_loops = 0
         else:
             idle_loops = idle_loops + 1
-            # Idle: a brief jiffy-based sleep so we don't busy-spin.
+            # Idle: park briefly so we don't busy-spin.
             _short_sleep()
             # Bound the total idle time so a wedged session can't pin
-            # the daemon forever (~10 min of pure idle).
-            if idle_loops > 60000:
+            # the daemon for ever. DERIVED from the park above rather
+            # than written as a bare count: the previous bare 60000 was
+            # commented "~10 min" and was measured at well under one
+            # second, because the "sleep" it counted did not sleep.
+            # 30 minutes of a person not typing is not a wedged session.
+            if idle_loops > cast[uint32]((30 * 60 * 1000) /
+                                         BRIDGE_IDLE_MS):
                 break
 
     # Close every pipe fd this bridge still owns, regardless of which
@@ -2165,25 +2204,42 @@ def _await_peer_close():
             waited = waited + 1
 
 
+# Milliseconds the bridge parks for on an idle poll. The idle BOUND below
+# is expressed in these units, so the two cannot drift apart again.
+BRIDGE_IDLE_MS: int64 = 10
+
+
 def _short_sleep():
-    # Idle-poll throttle for the bridge loop. Hamnix multitasks
-    # COOPERATIVELY — there is no working timer preemption, so a task
-    # only ever loses the CPU inside a blocking syscall or an explicit
-    # SYS_YIELD. The bridge is a non-blocking poll loop (SYS_READ_NB on
-    # both the socket and the pipe), so without an explicit yield here
-    # sshd would monopolise the CPU and the very shell it is bridging
-    # to — hamsh, plus every command hamsh spawns — would be STATE_READY
-    # but never scheduled, and no command output would ever come back.
+    # Idle-poll throttle for the bridge loop: a REAL park, not a spin.
     #
-    # sys_yield() drops the CPU to any other ready task; when nobody
-    # else wants it the kernel does an sti/hlt/cli so UART RX and the
-    # virtio-net IRQ still make progress. We call it a few times so a
-    # multi-stage hamsh pipeline (hamsh -> cmd -> ...) gets several
-    # scheduling turns per idle bridge iteration before we poll again.
-    i: uint64 = 0
-    while i < 4:
-        sys_yield()
-        i = i + 1
+    # WHAT THIS USED TO BE AND WHY IT WAS WRONG. It was four sys_yield()
+    # calls, justified by "Hamnix multitasks COOPERATIVELY — there is no
+    # working timer preemption". On the Linux lane that premise does not
+    # hold: sys_yield is sched_yield(2) (user/linux-runtime.S), and on an
+    # otherwise idle CPU it returns immediately. So an idle bridge
+    # iteration cost microseconds, not the milliseconds the loop's own
+    # bound assumed -- and that bound is `idle_loops > 60000`, commented
+    # "~10 min of pure idle".
+    #
+    # MEASURED, in a dev VM, 2026-08-20: a real OpenSSH client logged in,
+    # got hamsh's banner and prompt, typed nothing, and sshd tore the
+    # session down and closed the TCP connection in UNDER ONE SECOND --
+    # the guest logged the idle bound being reached with the client still
+    # sitting at the prompt. A session that ends the moment you stop
+    # typing is not a session.
+    #
+    # sys_waitfds with nfds == 0 is this tree's portable sleep (see
+    # user/sleep.ad's header, which killed the same busy-wait in `sleep`
+    # and measured a vCPU at 95.2% before it). It parks the task off the
+    # runqueue, so this is also strictly cheaper than the yield spin it
+    # replaces: an idle SSH session now costs a wakeup every
+    # BRIDGE_IDLE_MS instead of a core.
+    sys_waitfds(&bridge_park_fds[0], cast[uint64](0), BRIDGE_IDLE_MS)
+
+
+# Top-level BSS, not a frame local: adder requires it, and sys_waitfds
+# never dereferences it at nfds == 0.
+bridge_park_fds: Array[1, int32]
 
 
 # An encrypted-packet reader that honours an already-peeked socket
@@ -2293,6 +2349,15 @@ def main() -> int32:
     # HAMSH §7: ensure /fd resolves so we can wire each session's hamsh
     # stdio through scratch /fd/N names (see _spawn_shell). MREPL flag = 0.
     sys_bind(cast[Ptr[char]]("/fd"), cast[Ptr[char]]("#d"), 0)
+    # /var/lib/ssh IS CREATED BY NOTHING ELSE. There is no mkdir for it in
+    # any rc, and scripts/hamlinux_image.sh stages /var/lib/hpm but did not
+    # stage this one -- so the very first start generated a host key it
+    # could not write and logged "could not persist host key", handing every
+    # reconnecting client a different host identity. The image stages the
+    # directory now; this call is the belt to that braces, and it is where
+    # the knowledge belongs, because sshd is what needs it. An existing
+    # directory answers EEXIST, which is a no-op and not an error here.
+    sys_mkdir(cast[Ptr[char]]("/var/lib/ssh"))
     if _init_host_key() != 0:
         _log("[sshd] FATAL: no host key available\n")
         return 1
@@ -2309,6 +2374,28 @@ def main() -> int32:
         _log("[sshd] net_announce() failed\n")
         return 1
     _log("[sshd] listening on port 22\n")
+
+    # PRIVILEGE IS DONE WITH. The host key is written, the directory
+    # exists, and the privileged port is bound and will stay bound across
+    # the drop -- a listening socket is not re-checked. Everything from
+    # here on is peer-controlled input, so it runs as SSHD_UID.
+    #
+    # Reported either way, and the failure is FATAL rather than a warning.
+    # A daemon that announced it was dropping privilege and then did not
+    # would be worse than one that never claimed to: the log would say the
+    # Phase 11 property held while it did not.
+    if sys_getuid() != SSHD_UID:
+        if sys_setuid(SSHD_UID) != 0:
+            _log("[sshd] FATAL: could not drop privilege before serving\n")
+            sys_close(lfd)
+            return 1
+        if sys_getuid() != SSHD_UID:
+            _log("[sshd] FATAL: privilege drop did not take effect\n")
+            sys_close(lfd)
+            return 1
+        _log("[sshd] dropped privilege to uid 2 before serving\n")
+    else:
+        _log("[sshd] already at uid 2; serving\n")
 
     # Serve connections one at a time. V1 is single-session; after a
     # client disconnects we loop back and accept the next one. The cap

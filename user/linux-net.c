@@ -617,6 +617,26 @@ int hamnet_open(const char *path, int for_write, struct hamnet_file *f)
     }
 }
 
+/* 1 if a zero-length read of this file means TRUE END OF INPUT rather than
+ * "nothing ready yet".
+ *
+ * It matters because sys_read_nb's contract (user/linux-runtime.S) is "0 ==
+ * no byte ready, negative == true EOF/error", and the /net branch used to
+ * return read(2)'s 0 verbatim -- collapsing the two states for sockets, the
+ * exact bug the ordinary-fd branch of sys_read_nb has a long comment about
+ * having fixed. A non-blocking poller of a TCP connection therefore could not
+ * tell a peer that had HUNG UP from a peer that was merely quiet, and sshd's
+ * bridge could not notice a client leaving.
+ *
+ * A stream connection only. On a datagram socket a zero-length read is a real
+ * zero-length datagram and means nothing of the sort. */
+int hamnet_stream_eof_is_real(struct hamnet_file *f)
+{
+    if (f->leaf != HAMNET_DATA) return 0;
+    struct connrec *c = conn_at(f->conn);
+    return (c && !c->dgram) ? 1 : 0;
+}
+
 int hamnet_sockfd(struct hamnet_file *f)
 {
     if (f->leaf != HAMNET_DATA) return -1;

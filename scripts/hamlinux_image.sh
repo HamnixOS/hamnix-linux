@@ -31,7 +31,16 @@ rm -rf "$ROOT"
 # MISSING, and the first honest error was `no host_ac.elf` several hundred
 # lines later.
 mkdir -p "$OUT/obj"
-mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,home,mnt,boot,lib,lib64,var/log,var/lib/hpm,var/cache,usr/bin,usr/share/adder}
+# /var/lib/ssh IS ON THIS LINE DELIBERATELY. sshd keeps both its persisted
+# host key and its authorized_keys there, and until now NOTHING created it:
+# no mkdir in any rc, and this line staged /var/lib/hpm but not it. The
+# first start therefore generated a host key it could not write and logged
+# "could not persist host key (volatile this boot)" -- so every reboot
+# handed returning clients a DIFFERENT host identity, which is the warning
+# an ssh client is built to shout about. user/sshd.ad also mkdir's it now;
+# both, because a machine installed by some other path should not depend on
+# this script having run.
+mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,home,mnt,boot,lib,lib64,var/log,var/lib/hpm,var/lib/ssh,var/cache,usr/bin,usr/share/adder}
 
 # The applications that go in /bin. Kept to things that build AND run today
 # (measured -- see HANDOFF.md §5); the point of the image is to boot, not to be
@@ -58,6 +67,14 @@ mkdir -p "$ROOT"/{bin,etc,proc,sys,dev,srv,n,tmp,root,home,mnt,boot,lib,lib64,va
 APPS=(
     hamsh
     ls cat echo cp mv rm mkdir ln touch pwd
+    # chmod. Its absence was recorded in docs/dev-loop.md as a quirk
+    # ("there is no chmod on the image") next to the false consolation
+    # that a push works anyway because "mv preserves the mode wget
+    # wrote". wget writes through sys_open_write -- open(..., 0666) --
+    # so a fetched file lands 0644 with NO execute bit, and a pushed
+    # binary could not be run at all. A system that can fetch a program
+    # but cannot make it executable is missing a tool, not a nicety.
+    chmod
     grep sed sort uniq head tail wc cut tr
     find du df stat tree
     date sleep true false yes seq basename dirname
@@ -412,6 +429,16 @@ install -m644 etc/rc.boot.linux "$ROOT/etc/rc.boot.linux"
 # most likely to be edited next.
 install -m644 etc/rc.login.linux "$ROOT/etc/rc.login"
 install -m644 etc/rc.boot.machine "$ROOT/etc/rc.boot.machine"
+
+# /etc/rc.ssh -- the script user/sshd.ad hands to the hamsh it spawns for
+# each SSH session (see _spawn_shell's shell_argv[1]). It was never staged,
+# so every SSH session's shell opened with
+#     [hamsh] init: boot rc /etc/rc.ssh not found
+# and without the ns templates the file exists to capture -- `enter linux`
+# was a silent no-op over SSH while it worked on the serial console, which
+# is the commit a8ea2456 was written to fix and could not, because the file
+# it added was not on any image.
+install -m644 etc/rc.ssh "$ROOT/etc/rc.ssh"
 for f in hostname hosts passwd group issue motd panel.conf desktop.icons \
          os-release lsb-release debian_version profile resolv.conf \
          services protocols networks host.conf; do
