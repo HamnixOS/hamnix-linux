@@ -75,8 +75,12 @@ never been tied to his machine**. This image exists so he can find out.
   been shown to be order-dependent — only that nobody has looked.**
 * **Two update gates cannot run in a release battery** for want of a distro image
   the release build does not produce.
-* **A leaked QEMU** survived its gate by 1h14m with 49 s of CPU — gates do not
-  always tear down their VMs.
+* ~~A leaked QEMU survived its gate~~ — **WRONG, AND I CHECKED ONLY AFTER
+  WRITING IT.** Both long-lived QEMUs are the DELIBERATE dev VMs: pid 3777183
+  holds `hostfwd 34661` (the warm loop) and pid 3861875 holds `44773` (the SSH
+  VM). Parent 1 and low CPU are what an intentionally `setsid`-detached idle VM
+  looks like — I read those two facts as a leak without asking what the process
+  was. **No VM leaked.**
 * **My own monitoring was blind all session**: `pgrep -c qemu-system-x86_64` can
   never match, because the kernel truncates `comm` to 15 chars. I reported
   "0 QEMU" repeatedly while three were running.
