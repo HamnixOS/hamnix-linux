@@ -686,6 +686,20 @@ def fetch_to_buf(tail: Ptr[uint8], dst: Ptr[uint8],
             write_str(2, "https -> http downgrade redirect rejected\n")
         elif rc == -10:
             write_str(2, "response headers exceed http9's header buffer\n")
+        elif rc == -11:
+            # The number printed is the one measured -- how many bytes
+            # arrived. http9 knows the DECLARED length too, but this wrapper
+            # does not have it, so it is not printed: a wrong "of N" here
+            # would be worse than no N at all.
+            write_str(2, "the connection ended early, after ")
+            write_dec_u64(2, body_len)
+            write_str(2, " bytes, with the\n")
+            write_str(2, "hpm: server's declared Content-Length NOT reached. "
+                         "THE TRANSFER WAS CUT\n")
+            write_str(2, "hpm: SHORT: what arrived is a PREFIX of the "
+                         "resource, not the resource.\n")
+            write_str(2, "hpm: Nothing was installed and nothing was "
+                         "written.\n")
         else:
             write_str(2, "transport error ")
             write_dec_u64(2, cast[uint64](0 - rc))
@@ -8495,26 +8509,36 @@ def _sync_kernel_slot() -> int32:
         write_str(2, "hpm: cannot rebuild the URL of the channel carrying the "
                      "kernel.\n")
         return 1
-    if url_scheme != 2:
-        write_str(2, "hpm: THE KERNEL IN THIS CHANNEL CANNOT BE FETCHED FROM "
-                     "HERE.\n")
-        write_str(2, "hpm: it is ")
-        write_str(2, &kern_ver[0])
-        write_str(2, " at ")
-        write_str(2, &kern_url[0])
-        write_str(2, ", and the channel is http(s).\n")
-        write_str(2, "hpm: a kernel image is far past this program's 8 MiB "
-                     "buffers and there is no\n")
-        write_str(2, "hpm: streaming fetch in user/http9.ad, so it CANNOT be "
-                     "downloaded here. Point\n")
-        write_str(2, "hpm: this machine at a file:// mirror of the channel to "
-                     "take the kernel.\n")
-        write_str(2, "hpm: NOTHING WAS WRITTEN. This machine boots exactly as "
-                     "it did before.\n")
-        return 1
-    if _build_file_path(&kern_path[0], 1536, &kern_url[0]) != 0:
-        write_str(2, "hpm: the kernel artifact's path is too long.\n")
-        return 1
+    # AN http(s) CHANNEL IS NO LONGER A REFUSAL.
+    #
+    # It used to be. hpm's own fetch layer is buffer-based -- TARBALL_CAP is 4
+    # MiB, tar_buf is 8 MiB -- and a kernel is an order of magnitude past
+    # that, so hpm said so out loud and stopped. That was honest, and it also
+    # meant the owner's repo at https://255.one/ could not ship a kernel at
+    # all.
+    #
+    # WHAT CHANGED IS WHERE THE BYTES GO, NOT WHAT IS TRUSTED. hpm still does
+    # not hold the artifact: it composes the ABSOLUTE URL and hands the URL
+    # and the digest to /bin/hkslot, exactly as it hands over a path for a
+    # file:// channel. hkslot downloads it into a sys_mmap'd buffer sized from
+    # the inactive slot, hashes THAT buffer, and only writes the ESP if the
+    # digest from this signed index matches. The trust root, the verifier and
+    # the digest are the same on both arms; only the transport differs.
+    if url_scheme == 2:
+        if _build_file_path(&kern_path[0], 1536, &kern_url[0]) != 0:
+            write_str(2, "hpm: the kernel artifact's path is too long.\n")
+            return 1
+    else:
+        _build_url_path(&kern_url[0])
+        _build_full_url()
+        ui: uint64 = 0
+        while fetch_url_buf[ui] != 0 and ui + 1 < 1536:
+            kern_path[ui] = fetch_url_buf[ui]
+            ui = ui + 1
+        kern_path[ui] = 0
+        if fetch_url_buf[ui] != 0:
+            write_str(2, "hpm: the kernel artifact's URL is too long.\n")
+            return 1
 
     write_str(1, "hpm: handing ")
     write_str(1, &kern_path[0])

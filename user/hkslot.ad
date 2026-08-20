@@ -101,10 +101,18 @@ extern def sys_close(fd: int32) -> int32
 extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
 extern def sys_fd_size(fd: int32) -> int64
 extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+extern def sys_mmap(addr: uint64, len: uint64, prot: int32, flags: int32,
+                    fd: int32, off: uint64) -> int64
+extern def sys_munmap(addr: uint64, len: uint64) -> int32
 
 from lib.sha256 import (
     sha256_reset, sha256_update, sha256_final, sha256_hex,
 )
+from user.http9 import http_get
+
+PROT_RW:   int32  = 0x3           # PROT_READ | PROT_WRITE
+MAP_PANON: int32  = 0x22          # MAP_PRIVATE | MAP_ANONYMOUS
+PAGE_SIZE: uint64 = 4096
 
 SEEK_SET: int32 = 0
 
@@ -154,6 +162,145 @@ src_hex:  Array[80, uint8]
 
 # 0 = A is active (target B), 1 = B is active (target A).
 active_b: int32 = 0
+
+
+# --- THE SOURCE: A FILE ON THE MEDIUM, OR A BUFFER IN RAM ------------------
+#
+# Until 2026-08-19 the only source was a path: hpm resolved a file:// channel
+# to a file and handed it over, and an http(s) channel took a loud refusal
+# because hpm's fetch layer is buffer-based (TARBALL_CAP 4 MiB) and a kernel
+# is an order of magnitude past it. That refusal was honest but it meant
+# https://255.one/ COULD NOT SHIP A KERNEL AT ALL.
+#
+# THE OWNER'S CALL, AND IT IS NOT A COMPROMISE: buffer the whole artifact in
+# RAM, verify it there, and only then write the slot. Two reasons it is
+# better than the streaming fetch this was waiting for:
+#
+#   1. RAM IS NOT SCARCE HERE. This machine already loads a ~138 MB initramfs
+#      into RAM to boot at all. A ~74 MB buffer is small beside what booting
+#      has already spent, and it is transient -- see the munmap below.
+#
+#   2. IT VERIFIES BEFORE THE ESP IS TOUCHED. Note that the file:// path
+#      ALREADY did this (hash_fd + the digest compare run before the first
+#      byte is written), so this is not a new safety property for hkslot --
+#      it is the property being PRESERVED for a source that arrives over a
+#      network instead of off a disk. Nothing reaches the one filesystem
+#      where a bad write costs the machine until the digest matches.
+#
+# AND IT IS NOT A STATIC ARRAY. A 74 MB BSS array would be paid for by every
+# machine on every boot of every program that links this, whether or not a
+# kernel update is pending. The buffer is sys_mmap'd when an http(s) artifact
+# is actually being fetched and sys_munmap'd before this program exits, so a
+# machine that never updates its kernel never pays a page for it.
+SRC_FILE: int32 = 0
+SRC_RAM:  int32 = 1
+
+src_kind: int32  = 0
+src_fd:   int32  = -1
+src_base: uint64 = 0        # mmap'd base when src_kind == SRC_RAM
+src_map:  uint64 = 0        # bytes actually mapped, for the munmap
+src_n:    uint64 = 0        # bytes of artifact actually present
+src_pos:  uint64 = 0        # sequential cursor for the RAM source
+
+
+def src_release():
+    if src_base != 0 and src_map != 0:
+        sys_munmap(src_base, src_map)
+    src_base = 0
+    src_map = 0
+
+
+# Let go of the source: close the fd if there is one, and hand the download
+# buffer back to the OS. Called on every exit path out of main after the
+# source is acquired, including the successful one -- the buffer is released
+# BEFORE the read-back hashes the slot, so the peak is the download, not the
+# download plus the verify.
+def src_close():
+    if src_fd >= 0:
+        sys_close(src_fd)
+        src_fd = -1
+    src_release()
+
+
+# Random access into the source, used by the PE sniff. Bounds-checked against
+# what actually arrived, not against what was asked for: a truncated body must
+# not read off the end of the mapping.
+def src_read_at(off: uint64, buf: Ptr[uint8], n: uint64) -> int32:
+    if src_kind == SRC_RAM:
+        if off > src_n or n > src_n - off:
+            return -1
+        q: Ptr[uint8] = cast[Ptr[uint8]](src_base + off)
+        i: uint64 = 0
+        while i < n:
+            buf[i] = q[i]
+            i = i + 1
+        return 0
+    # The fd arm is read_at() inlined. It is inlined rather than called
+    # because read_at is defined further down this file and nothing else here
+    # relies on a forward reference; a build that resolves them is not a
+    # property worth discovering during a kernel-update change.
+    if sys_lseek(src_fd, cast[int64](off), SEEK_SET) < 0:
+        return -1
+    got: uint64 = 0
+    while got < n:
+        k: int64 = sys_read(src_fd, &buf[got], n - got)
+        if k <= 0:
+            return -1
+        got = got + cast[uint64](k)
+    return 0
+
+
+# Rewind the sequential cursor.
+def src_seq_reset() -> int32:
+    src_pos = 0
+    if src_kind == SRC_RAM:
+        return 0
+    if sys_lseek(src_fd, 0, SEEK_SET) < 0:
+        return -1
+    return 0
+
+
+# A drop-in for sys_read(sfd, ...). The RAM arm copies through the SAME
+# 256 KiB iobuf the file arm uses rather than writing straight out of the
+# mapping: it costs one memcpy of a buffer already in RAM, and it keeps the
+# write loop -- its progress line, and the SIGKILL window the interrupt arm
+# of tests/linux/hpm_kernel_update.sh lands in -- byte-for-byte the loop that
+# was measured 60 / 0, instead of a second copy of it that could drift.
+def src_seq_read(buf: Ptr[uint8], want: uint64) -> int64:
+    if src_kind == SRC_RAM:
+        n: uint64 = want
+        if src_pos >= src_n:
+            return 0
+        if n > src_n - src_pos:
+            n = src_n - src_pos
+        q: Ptr[uint8] = cast[Ptr[uint8]](src_base + src_pos)
+        i: uint64 = 0
+        while i < n:
+            buf[i] = q[i]
+            i = i + 1
+        src_pos = src_pos + n
+        return cast[int64](n)
+    return sys_read(src_fd, buf, want)
+
+
+def src_is_http(u: Ptr[uint8]) -> int32:
+    h: Ptr[uint8] = "http://"
+    i: uint64 = 0
+    hit: int32 = 1
+    while h[i] != 0:
+        if u[i] != h[i]:
+            hit = 0
+            break
+        i = i + 1
+    if hit != 0:
+        return 1
+    g: Ptr[uint8] = "https://"
+    j: uint64 = 0
+    while g[j] != 0:
+        if u[j] != g[j]:
+            return 0
+        j = j + 1
+    return 1
 
 
 def strlen_u8(s: Ptr[uint8]) -> uint64:
@@ -328,15 +475,18 @@ def read_at(fd: int32, off: uint64, buf: Ptr[uint8], n: uint64) -> int32:
     return 0
 
 
-def has_linux_section(fd: int32) -> int32:
+# Reads through the SOURCE layer, so the PE sniff is the same test whether
+# the artifact came off the medium or out of the download buffer. A truncated
+# download fails it rather than reading past what arrived.
+def has_linux_section() -> int32:
     hdr: Array[8, uint8]
-    if read_at(fd, 60, &hdr[0], 4) != 0:
+    if src_read_at(60, &hdr[0], 4) != 0:
         return 0
     lfa: uint64 = rd_u32(&hdr[0], 0)
     if lfa < 64 or lfa > 4096:
         return 0
     coff: Array[24, uint8]
-    if read_at(fd, lfa, &coff[0], 24) != 0:
+    if src_read_at(lfa, &coff[0], 24) != 0:
         return 0
     if coff[0] != 80 or coff[1] != 69 or coff[2] != 0 or coff[3] != 0:
         return 0
@@ -348,13 +498,123 @@ def has_linux_section(fd: int32) -> int32:
     i: uint64 = 0
     sh: Array[40, uint8]
     while i < nsec:
-        if read_at(fd, tab + i * 40, &sh[0], 40) != 0:
+        if src_read_at(tab + i * 40, &sh[0], 40) != 0:
             return 0
         # ".linux" -- eight bytes, NUL padded.
         if sh[0] == 46 and sh[1] == 108 and sh[2] == 105 and sh[3] == 110 \
            and sh[4] == 117 and sh[5] == 120 and sh[6] == 0:
             return 1
         i = i + 1
+    return 0
+
+
+# --- fetching the artifact into RAM ----------------------------------------
+#
+# HOW THE BUFFER IS SIZED, AND IT IS NOT A MAGIC NUMBER.
+#
+# The cap is the INACTIVE SLOT'S OWN LENGTH. That is the honest bound and it
+# is measured off this machine's medium every run, not compiled in: an
+# artifact larger than the slot could never be written here anyway -- hkslot
+# already refuses to extend a preallocated slot on a journal-less FAT32 -- so
+# a byte past that length is a byte there is no point holding. It also means
+# the buffer tracks the medium: re-image with bigger slots and the download
+# cap grows with them, with nothing to keep in step by hand.
+#
+# WHAT HAPPENS WHEN THE ARTIFACT IS BIGGER: http9 returns -6, which it
+# establishes by reading ONE byte past the full buffer -- so "exactly fills
+# the slot" is a complete download and not an overflow. -6 is a NAMED REFUSAL
+# here. It is never a short write: nothing is written at all, because this
+# runs before the slot is opened for writing.
+#
+# WHAT HAPPENS WHEN THE CONNECTION DROPS: http9 returns -11, added the same
+# day as this function. Before it existed, an EOF arriving before the
+# server's declared Content-Length fell through to `return 0` with a SHORT
+# buffer -- a success-shaped answer to a truncated download, which is exactly
+# the failure mode this tree has been burned by. The digest compare below
+# would still have caught it, but "caught by the hash" and "the transport
+# said it succeeded" must not be the same event: a caller with no digest had
+# no way to tell. -11 is a NAMED REFUSAL here too.
+def fetch_to_ram(url: Ptr[uint8], cap: uint64) -> int32:
+    pages: uint64 = ((cap + PAGE_SIZE) - 1) / PAGE_SIZE
+    want: uint64 = pages * PAGE_SIZE
+    got: int64 = sys_mmap(0, want, PROT_RW, MAP_PANON, -1, 0)
+    if got <= 0:
+        puts(2, "hkslot: cannot allocate ")
+        putdec(2, want)
+        puts(2, " bytes of RAM to download the kernel into.\n")
+        puts(2, "hkslot: REFUSING. Nothing was written and this machine boots "
+                "exactly as it\n")
+        puts(2, "hkslot: did before.\n")
+        return 1
+    src_base = cast[uint64](got)
+    src_map = want
+
+    puts(1, "hkslot: downloading ")
+    puts(1, url)
+    puts(1, "\n")
+    puts(1, "hkslot: into ")
+    putdec(1, want)
+    puts(1, " bytes of RAM (the inactive slot is ")
+    putdec(1, cap)
+    puts(1, " bytes).\n")
+    puts(1, "hkslot: NOTHING IS WRITTEN TO THE ESP until this is complete and "
+            "its digest\n")
+    puts(1, "hkslot: matches the signed index.\n")
+
+    st: Array[1, int64]
+    bl: Array[1, uint64]
+    st[0] = 0
+    bl[0] = 0
+    rc: int64 = http_get(url, cast[Ptr[uint8]](src_base), cap, &st[0], &bl[0])
+    if rc != 0:
+        puts(2, "hkslot: THE KERNEL WAS NOT DOWNLOADED.\n")
+        if rc == -6:
+            puts(2, "hkslot:   the artifact is LARGER than the ")
+            putdec(2, cap)
+            puts(2, "-byte slot it would have\n")
+            puts(2, "hkslot:   to be written into, so it could not be "
+                    "written here even if it\n")
+            puts(2, "hkslot:   were downloaded. This medium needs re-imaging "
+                    "with bigger slots.\n")
+        elif rc == -11:
+            puts(2, "hkslot:   the connection ended after ")
+            putdec(2, bl[0])
+            puts(2, " bytes, BEFORE the\n")
+            puts(2, "hkslot:   server's declared length. What arrived is a "
+                    "PREFIX of the kernel,\n")
+            puts(2, "hkslot:   not the kernel.\n")
+        elif rc == -2:
+            puts(2, "hkslot:   could not connect to the server.\n")
+        elif rc == -4:
+            puts(2, "hkslot:   read error on the response.\n")
+        elif rc == -1:
+            puts(2, "hkslot:   the URL is malformed.\n")
+        else:
+            puts(2, "hkslot:   http9 transport error ")
+            putdec(2, cast[uint64](0 - rc))
+            puts(2, ".\n")
+        puts(2, "hkslot: NOTHING WAS WRITTEN. The ESP was never opened; this "
+                "machine boots\n")
+        puts(2, "hkslot: exactly as it did before.\n")
+        src_release()
+        return 1
+    if st[0] != 200:
+        puts(2, "hkslot: the server answered HTTP ")
+        putdec(2, cast[uint64](st[0]))
+        puts(2, ", not 200. NOTHING WAS WRITTEN.\n")
+        src_release()
+        return 1
+    if bl[0] == 0:
+        puts(2, "hkslot: the server returned an EMPTY body. NOTHING WAS "
+                "WRITTEN.\n")
+        src_release()
+        return 1
+    src_kind = SRC_RAM
+    src_n = bl[0]
+    src_pos = 0
+    puts(1, "hkslot: downloaded ")
+    putdec(1, src_n)
+    puts(1, " bytes into RAM.\n")
     return 0
 
 
@@ -378,6 +638,25 @@ def hash_fd(fd: int32, n: uint64) -> int32:
         got = got + cast[uint64](k)
     sha256_final()
     return 0
+
+
+# Hash the SOURCE, wherever it lives. The RAM arm feeds sha256_update out of
+# the mapping in the same 256 KiB steps the file arm reads in -- same
+# lib/sha256.ad, same chunking, so the two arms cannot produce different
+# digests for the same bytes.
+def hash_src() -> int32:
+    if src_kind == SRC_RAM:
+        sha256_reset()
+        got: uint64 = 0
+        while got < src_n:
+            want: uint64 = src_n - got
+            if want > IOBUF:
+                want = IOBUF
+            sha256_update(cast[Ptr[uint8]](src_base + got), want)
+            got = got + want
+        sha256_final()
+        return 0
+    return hash_fd(src_fd, src_n)
 
 
 def copy_hex(dst: Ptr[uint8]):
@@ -524,22 +803,52 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if read_active() != 0:
         return 1
 
-    # --- the source ---------------------------------------------------------
-    sfd: int32 = sys_open(cast[Ptr[char]](src))
-    if sfd < 0:
-        puts(2, "hkslot: cannot read ")
-        puts(2, src)
-        puts(2, "\nhkslot: nothing was changed.\n")
-        return 1
-    ssz: int64 = sys_fd_size(sfd)
-    if ssz <= 0:
-        puts(2, "hkslot: ")
-        puts(2, src)
-        puts(2, " is empty. Refusing.\n")
-        sys_close(sfd)
-        return 1
-    nsrc: uint64 = cast[uint64](ssz)
-    if has_linux_section(sfd) == 0:
+    # --- the source: a path on the medium, or a URL to download -------------
+    #
+    # An http(s) argument is fetched into RAM FIRST, and the cap for that
+    # download is the inactive slot's own length -- so the slot is measured
+    # before anything is fetched. The file:// arm below is untouched and in
+    # the order it was measured 60 / 0.
+    sfd: int32 = -1
+    if src_is_http(src) != 0:
+        pfd: int32 = sys_open(target_path())
+        if pfd < 0:
+            puts(2, "hkslot: the inactive slot ")
+            puts(2, target_name())
+            puts(2, " does not exist on this ESP, so\n")
+            puts(2, "hkslot: there is nothing to size a download against. "
+                    "REFUSING before any\n")
+            puts(2, "hkslot: network traffic. Nothing was changed.\n")
+            return 1
+        psz: int64 = sys_fd_size(pfd)
+        sys_close(pfd)
+        if psz <= 0:
+            puts(2, "hkslot: the inactive slot is zero bytes long, so there "
+                    "is nothing to size\n")
+            puts(2, "hkslot: a download against. REFUSING. Nothing was "
+                    "changed.\n")
+            return 1
+        if fetch_to_ram(src, cast[uint64](psz)) != 0:
+            return 1
+    else:
+        sfd = sys_open(cast[Ptr[char]](src))
+        if sfd < 0:
+            puts(2, "hkslot: cannot read ")
+            puts(2, src)
+            puts(2, "\nhkslot: nothing was changed.\n")
+            return 1
+        ssz: int64 = sys_fd_size(sfd)
+        if ssz <= 0:
+            puts(2, "hkslot: ")
+            puts(2, src)
+            puts(2, " is empty. Refusing.\n")
+            sys_close(sfd)
+            return 1
+        src_kind = SRC_FILE
+        src_fd = sfd
+        src_n = cast[uint64](ssz)
+    nsrc: uint64 = src_n
+    if has_linux_section() == 0:
         puts(2, "hkslot: ")
         puts(2, src)
         puts(2, " has no PE `.linux' section, so it is NOT a\n")
@@ -547,7 +856,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 "would cost the boot\n")
         puts(2, "hkslot: (tests/linux/ab_kernel_slots.sh arm II measured "
                 "exactly that).\n")
-        sys_close(sfd)
+        src_close()
         return 1
 
     # --- the target slot, which must ALREADY EXIST at full length -----------
@@ -564,13 +873,13 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 "preallocated at build\n")
         puts(2, "hkslot: time by scripts/hamlinux_disk.sh; this medium "
                 "predates that.\n")
-        sys_close(sfd)
+        src_close()
         return 1
     tsz: int64 = sys_fd_size(tfd_r)
     if tsz <= 0:
         puts(2, "hkslot: the inactive slot is zero bytes long. Refusing.\n")
         sys_close(tfd_r)
-        sys_close(sfd)
+        src_close()
         return 1
     ntgt: uint64 = cast[uint64](tsz)
     if nsrc > ntgt:
@@ -586,14 +895,14 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
                 "re-imaging from\n")
         puts(2, "hkslot: a medium whose slots are big enough.\n")
         sys_close(tfd_r)
-        sys_close(sfd)
+        src_close()
         return 1
 
     # --- the digest, checked BEFORE a single byte is written ----------------
-    if hash_fd(sfd, nsrc) != 0:
+    if hash_src() != 0:
         why(cast[Ptr[uint8]]("hash the new kernel"))
         sys_close(tfd_r)
-        sys_close(sfd)
+        src_close()
         return 1
     copy_hex(&src_hex[0])
     if hexarg != 0:
@@ -606,7 +915,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             puts(2, "\nhkslot: REFUSING. Nothing was written; this machine "
                     "boots exactly as it did.\n")
             sys_close(tfd_r)
-            sys_close(sfd)
+            src_close()
             return 1
         puts(1, "hkslot: the new kernel matches the digest from the signed "
                 "index.\n")
@@ -631,7 +940,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
     if dry != 0:
         puts(1, "hkslot: -n given; nothing written, loader.conf untouched.\n")
         sys_close(tfd_r)
-        sys_close(sfd)
+        src_close()
         return 0
 
     # --- STEP 1: WRITE THE INACTIVE SLOT ------------------------------------
@@ -645,19 +954,19 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         why(cast[Ptr[uint8]]("open the inactive slot for writing"))
         puts(2, "hkslot: nothing was changed.\n")
         sys_close(tfd_r)
-        sys_close(sfd)
+        src_close()
         return 1
-    if sys_lseek(sfd, 0, SEEK_SET) < 0:
+    if src_seq_reset() != 0:
         why(cast[Ptr[uint8]]("rewind the new kernel"))
         sys_close(wfd)
         sys_close(tfd_r)
-        sys_close(sfd)
+        src_close()
         return 1
     if sys_lseek(wfd, 0, SEEK_SET) < 0:
         why(cast[Ptr[uint8]]("rewind the inactive slot"))
         sys_close(wfd)
         sys_close(tfd_r)
-        sys_close(sfd)
+        src_close()
         return 1
     done: uint64 = 0
     next_mark: uint64 = PROGRESS_EVERY
@@ -670,7 +979,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         want: uint64 = nsrc - done
         if want > IOBUF:
             want = IOBUF
-        k: int64 = sys_read(sfd, &iobuf[0], want)
+        k: int64 = src_seq_read(&iobuf[0], want)
         if k <= 0:
             puts(2, "hkslot: the new kernel ended early at ")
             putdec(2, done)
@@ -681,7 +990,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             puts(2, ".\n")
             sys_close(wfd)
             sys_close(tfd_r)
-            sys_close(sfd)
+            src_close()
             return 1
         if write_full(wfd, &iobuf[0], cast[uint64](k)) != 0:
             why(cast[Ptr[uint8]]("write the inactive slot"))
@@ -691,7 +1000,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             puts(2, ".\n")
             sys_close(wfd)
             sys_close(tfd_r)
-            sys_close(sfd)
+            src_close()
             return 1
         done = done + cast[uint64](k)
         # PROGRESS, AND IT IS NOT COSMETIC.
@@ -713,7 +1022,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
             puts(1, "\n")
             next_mark = next_mark + PROGRESS_EVERY
     sys_close(wfd)
-    sys_close(sfd)
+    src_close()
     puts(1, "hkslot: WROTE ")
     putdec(1, done)
     puts(1, " bytes; reading them back off the medium\n")

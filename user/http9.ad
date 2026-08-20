@@ -1043,15 +1043,35 @@ def _h9_fetch_once(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
             break
         blen = blen + cast[uint64](rn)
     sys_close(fd)
-    if clen >= 0 and blen > cast[uint64](clen):
-        blen = cast[uint64](clen)
 
+    # A BODY THAT ENDED EARLY IS NOT A BODY. The drain loop above leaves on
+    # EOF (`rn == 0`), and until 2026-08-19 that fell straight through to
+    # `return 0` with a SHORT body in dst -- a server that died mid-response,
+    # a proxy that dropped the connection, or a cable pulled at 60% of a
+    # 74 MB kernel all reported a COMPLETE fetch with a truncated buffer.
+    # That is this project's named failure mode -- a short read that reports
+    # success -- sitting on the transport every download rides. The digest
+    # check downstream would reject the artifact, but only a caller that
+    # HAS a digest; `curl` and every other caller had no way to know. The
+    # server declared how long the body is, so a body shorter than that is a
+    # transport failure and gets its own rc rather than being clamped away.
+    # -6 IS TESTED FIRST, AND THE ORDER IS NOT COSMETIC. An oversized body
+    # also ends with blen < clen -- dst filled up and the rest was never
+    # read -- so putting the -11 test above this one reported "the connection
+    # dropped" for a resource that was simply bigger than the buffer, which
+    # is a different fault with a different fix. The gate caught exactly that
+    # inversion when this check was first written the other way round.
     if over != 0:
         # The truncated prefix is handed back rather than thrown away, so
         # a caller can show what it got; the rc says it is not the whole
         # resource and out_status says what the server answered.
         out_body_len[0] = blen
         return -6
+    if clen >= 0 and blen < cast[uint64](clen):
+        out_body_len[0] = blen
+        return -11
+    if clen >= 0 and blen > cast[uint64](clen):
+        blen = cast[uint64](clen)
 
     # Chunked body: DECODE it in place (dst -> dst). http_dechunk is
     # bounds-safe on attacker-controlled sizes; a malformed frame is a
@@ -1096,6 +1116,11 @@ def _h9_fetch_once(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
 #   -9  https -> http downgrade redirect rejected (TLS downgrade)
 #  -10  the response HEAD exceeds http9's 16 KiB header buffer. A server
 #       fault, named as one, and NOT chargeable to the caller's dst_cap.
+#  -11  the connection ended BEFORE the declared Content-Length was
+#       delivered -- a dropped/truncated transfer. *out_body_len holds the
+#       short prefix that did arrive. This is DISTINCT from -6: -6 is "the
+#       resource is bigger than your buffer", -11 is "the server stopped
+#       talking". Both are refusals; neither is ever reported as 0.
 # (http->https and https->https redirects ARE followed transparently; the
 #  per-hop dial re-runs the TLS handshake when the target is https://.)
 
