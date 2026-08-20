@@ -1,5 +1,11 @@
 #!/bin/bash
 # ===========================================================================
+# REGISTRATION.
+# Not in ci_battery_manifest.txt because it stands up a real TCP server and
+# runs hkslot against a preallocated A/B ESP layout inside a private mount
+# namespace via tests/linux/_hkslot_sandbox.sh, which needs `unshare -r` --
+# not something the sharded battery runners can be assumed to have.
+#
 # hkslot: DOWNLOAD A KERNEL OVER http INTO RAM, VERIFY IT THERE, WRITE THE
 # INACTIVE SLOT.
 #
