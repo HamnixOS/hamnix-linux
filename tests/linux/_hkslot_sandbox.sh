@@ -1,4 +1,9 @@
 #!/bin/bash
+# REGISTRATION: this file is not a gate. It is the sandbox helper
+# tests/linux/hkslot_http_fetch.sh execs, and it asserts nothing of its own.
+# Not in ci_battery_manifest.txt because it is a helper invoked by another
+# gate and has no summary line for any runner to score.
+#
 # Run hkslot with /boot bound to a SANDBOX directory, inside a private mount
 # namespace. THE GUARD IS NOT OPTIONAL: hkslot writes to /boot by absolute
 # path and this host has a real one. If the bind did not take, the sentinel is

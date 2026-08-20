@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 #
-# REGISTRATION: this gate is ON-DEMAND. It builds a 4 GiB medium and boots
+# REGISTRATION: this gate is ON-DEMAND, and it is in scripts/release_gates.sh.
+# Not in ci_battery_manifest.txt because it builds a 4 GiB medium and boots
+# several machines under qemu, which is far outside the battery's 50-minute
+# 12-way-sharded cap.
+#
+# THAT SENTENCE IS WANTED VERBATIM by scripts/test_gate_registration.sh, and
+# the note below has always said the same thing in different words -- so this
+# gate has read as "a gate nothing runs" to the checker for its whole life,
+# alongside tests/linux/hkslot_http_fetch.sh and tests/linux/_hkslot_sandbox.sh.
+#
+# It builds a 4 GiB medium and boots
 # several machines under `qemu-system-x86_64`, the same reason
 # tests/linux/hpm_kernel_update.sh and tests/linux/ab_kernel_slots.sh are not
 # in ci_battery_manifest.txt.

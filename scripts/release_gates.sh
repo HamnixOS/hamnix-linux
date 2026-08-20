@@ -387,7 +387,28 @@ installed_boot_login|yes|0|27||bash tests/linux/installed_boot_login.sh
 # control is the same installed disk with `-a hostowner` on the console getty,
 # which MUST reach a root shell with no password; it answered `uid=0 gid=0`. If
 # either control stops firing this gate goes red on the control, not the product.
-installed_fresh_login|yes|0|31||bash tests/linux/installed_fresh_login.sh
+# 31 -> 47, MEASURED ON THIS HOST 2026-08-20 by the run that rewrote this gate:
+# 47 PASSED / 0 FAILED, one medium build, FOUR installs in one boot, two boots
+# of the resulting disk. NOT arithmetic on the old 31 -- the gate is a different
+# gate. What changed:
+#   * it no longer identifies guest disks by qemu -device position. It DID, and
+#     the guest does not enumerate NVMe namespaces in that order: measured
+#     A -> slot2, D -> slot1, B -> slot4, C -> slot3. The 1.0.33 candidate's
+#     20/2 was this gate reading arm C's correctly-REFUSED disk and reporting
+#     it as arm A's shipped install, which is why 1.0.33 was refused. Each arm
+#     now stamps its disk with its own --esp-mb at partitioning time and the
+#     host asserts a bijection before scoring anything.
+#   * new arm D -- rc.boot.machine present, rc.login absent -- runs the
+#     configuration that separates write_machine_rc_boot's two branches, which
+#     nothing had ever run, and requires a loud refusal.
+#   * sections 2 and 3 take the runlevel-3 opt-out, because at runlevel 5 the
+#     installed rc's own last two lines never run (hamgreet holds rc.5) and
+#     there is no terminal login to measure. One file is added to a copy of the
+#     disk and /etc/rc.boot is asserted byte-identical to the installer's.
+# THE CONTROLS FIRED IN THAT RUN: arm A succeeded and printed 'install
+# complete' (so C's and D's refusals are differences, not greps that never
+# match), and the autologin control answered `uid=0 gid=0`.
+installed_fresh_login|yes|0|47||bash tests/linux/installed_fresh_login.sh
 
 # WHAT BREAKS WHEN `/` IS NOT THE MACHINE'S ROOT -- the first booted measurement
 # of the owner's "the global root should be min as possable" direction. 16 PASSED
@@ -413,6 +434,72 @@ installed_fresh_login|yes|0|31||bash tests/linux/installed_fresh_login.sh
 #   underpinning the owner's whole direction rests on, and it does not survive
 #   the root switch. When it does, this line becomes |2| and then |0|.
 session_min_root|yes|4|16||bash tests/linux/session_min_root.sh
+
+# =============================================================================
+# THE UPDATE PATH, WHICH THIS DRIVER GATED NOT AT ALL
+# =============================================================================
+# CHECKED 2026-08-19 AND AGAIN 2026-08-20: `installed_update`,
+# `installed_update_live`, `hpm_kernel_http`, `hpm_kernel_update`,
+# `ab_kernel_slots` and `bootsync_installed` appeared ZERO times in this file.
+# 1.0.33's headline feature is that an installed machine can update itself, and
+# the driver that decides whether 1.0.33 ships ran NOT ONE gate that exercises
+# it. That is the same hole this file was written to close ("the one gate that
+# inspects the shipped medium was never run by the driver that gates the
+# shipped medium"), reproduced on the release's own headline.
+#
+# ON expect_min, AND WHY SOME OF THESE ARE 0.
+#
+# Every non-zero number in this registry is a number somebody measured on this
+# host in the run that wrote it down. HANDOFF.md reports 33/0 for
+# bootsync_installed, 44/0 for installed_update, 69/0 for hpm_kernel_http,
+# 60/0 for hpm_kernel_update and 32/0 for ab_kernel_slots. THOSE ARE NOT
+# WRITTEN HERE AS FLOORS, because they were measured on other trees by other
+# sessions, and a floor copied out of a handoff is the arithmetic-filled blank
+# this registry exists to refuse. A row registered at 0 still RUNS, and the
+# driver still turns it red for asserting nothing, for a body that contradicts
+# its summary, and for any undeclared failure -- everything except the
+# lost-assertion floor. Registered-and-running with an honest 0 is strictly
+# more gate than not registered at all; a floor typed from memory is strictly
+# less honest than none. Each 0 below is replaced the first time a release run
+# scores the gate on this host.
+#
+# WHAT THIS COSTS. All six boot QEMU and four of them build a medium first, so
+# they roughly double the wall time of a full release battery. That is the
+# price of gating the update path at all, and it is `--host-only`-skippable
+# like every other QEMU row.
+#
+# WHAT IS NOT REGISTERED, AND WHY. `installed_update_modules` and
+# `installed_update_wsysver` are deliberately left out for now: they are
+# narrower re-cuts of installed_update's question against one module and one
+# version string, and until installed_update itself has a measured floor here
+# the marginal gate they add is not worth another two medium builds per
+# release. Say so out loud rather than register six rows and skip four.
+
+# AN INSTALLED MACHINE UPDATES ITSELF -- the headline. Two boots of one
+# installed disk with a local channel in between; phase 2 is the update and the
+# reboot is what proves it persisted. It carries the runlevel-3 opt-out
+# already (see its own header and etc/rc.boot.installed): nothing it asks is
+# about a desktop, so the greeter is not in its way.
+installed_update|yes|0|0||bash tests/linux/installed_update.sh
+
+# AFTER AN UPDATE AND A REBOOT, DOES THE RUNNING KERNEL HAVE THE NEW MODULE OR
+# ONLY THE DISK? The one gate that can tell a file that was written from a
+# machine that is running it. Also already carries the runlevel-3 opt-out.
+bootsync_installed|yes|0|0||bash tests/linux/bootsync_installed.sh
+
+# THE LIVE MEDIUM'S HALF OF THE SAME QUESTION.
+installed_update_live|yes|0|0||bash tests/linux/installed_update_live.sh
+
+# THE KERNEL-OVER-HTTP PATH, AND A WARNING THAT BELONGS WITH IT: A/B SLOTS
+# SHIP OFF. `hkslot` refuses outright without /boot/loader/loader.conf, and the
+# shipped medium is built without HAMLINUX_AB_SLOTS=1, so a machine installed
+# from the release medium CANNOT take a kernel update by this path. These three
+# rows gate the mechanism, not the shipped configuration, and that distinction
+# must stay visible: a green here is not a statement that a released machine
+# can replace its kernel.
+hpm_kernel_http|yes|0|0||bash tests/linux/hpm_kernel_http.sh
+hpm_kernel_update|yes|0|0||bash tests/linux/hpm_kernel_update.sh
+ab_kernel_slots|yes|0|0||bash tests/linux/ab_kernel_slots.sh
 REGISTRY
 }
 
@@ -454,8 +541,35 @@ run_gate() {   # run_gate <name> <allow_fail> <expect_min> <reason> <cmd...>
         verdict="RED"; why="$f failed, $allow declared acceptable"
     elif [ "$tf" -gt 0 ] && [ "$f" -eq 0 ]; then
         verdict="RED"; why="the gate printed $tf FAIL line(s) under a summary claiming 0 failures -- the body is believed, not the summary"
-    elif [ "$rc" -ne 0 ] && [ "$f" -le "$allow" ]; then
-        verdict="RED"; why="exit status $rc contradicts a summary with no unexpected failures -- one of the two is wrong and neither may be ignored"
+    # THE EXIT-STATUS CROSS-CHECK, AND WHY IT IS NOT `rc != 0 && f <= allow`.
+    #
+    # It used to be exactly that, and it made `allow_fail` UNUSABLE FOR EVERY
+    # GATE IN THIS TREE. Every gate here ends `[ "$FAIL" = 0 ] && exit 0 ||
+    # exit 1`, so a gate with even ONE failure exits 1 -- including the ones it
+    # is DECLARED to be allowed. session_min_root is registered |4| with four
+    # rungs the registry names as acceptable; it scored 31 / 2, both of them
+    # inside that declaration, and the driver still turned it RED on "exit
+    # status 1 contradicts a summary with no unexpected failures". Nothing was
+    # wrong with the gate. A registry feature that cannot be exercised by any
+    # gate that uses the tree's own exit idiom is not a feature.
+    #
+    # THE DRIVER IS WHAT WAS FIXED, NOT THE GATE, because the alternative --
+    # teaching one gate to exit 0 on its declared failures -- would have made
+    # THAT gate the only one whose exit status is not a statement about its
+    # failures, and would have left allow_fail broken for every future row.
+    #
+    # The contradiction being tested for is unchanged; only its shape is
+    # corrected. A gate that fails things and exits non-zero AGREES with
+    # itself, whether or not those failures are declared. The two disagreements
+    # that are real:
+    #   * non-zero exit with NO failures asserted -- it died for a reason it
+    #     never put in its body, which is the unscorable-adjacent case;
+    #   * exit 0 while its own summary reports failures -- exit 0 read as a
+    #     pass, from the other direction.
+    elif [ "$rc" -ne 0 ] && [ "$f" -eq 0 ]; then
+        verdict="RED"; why="exit status $rc with a summary reporting NO failures at all -- the gate died for a reason it never asserted, and neither may be ignored"
+    elif [ "$rc" -eq 0 ] && [ "$f" -gt 0 ]; then
+        verdict="RED"; why="the gate exited 0 while its own summary reports $f failure(s) -- exit 0 is not a pass"
     elif [ "$((p + f))" -lt "$expect" ]; then
         verdict="RED"; why="the gate scored $((p + f)) assertions where $expect are registered -- it ASSERTED LESS THAN IT USED TO and printed no failure saying so"
     fi
@@ -523,20 +637,51 @@ for i in 1 2 3; do ok "synthetic assertion $i"; done
 echo "$PASS passed, 0 failed"
 GATE
 
+    # (E) A gate with DECLARED failures that exits non-zero because of them --
+    #     the tree's universal `[ "$FAIL" = 0 ] && exit 0 || exit 1` idiom.
+    #     Registered allow_fail=2, scores 6 / 2, exits 1. THE DRIVER MUST PASS
+    #     IT. Until 2026-08-20 it did not: `rc != 0 && f <= allow` turned every
+    #     such gate RED on "exit status contradicts a summary with no
+    #     unexpected failures", which made allow_fail unusable for any gate in
+    #     this tree. session_min_root shipped RED in the 1.0.33 candidate on
+    #     exactly this and nothing was wrong with it.
+    cat >"$d/declared.sh" <<'GATE'
+#!/usr/bin/env bash
+PASS=0; FAIL=0
+ok()  { PASS=$((PASS+1)); echo "  PASS  $1"; }
+bad() { FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
+for i in 1 2 3 4 5 6; do ok "synthetic assertion $i"; done
+bad "a rung the registry declares acceptable"
+bad "a second such rung"
+echo "$PASS PASSED, $FAIL FAILED"
+[ "$FAIL" = 0 ] && exit 0 || exit 1
+GATE
+
+    # (F) THE OTHER HALF OF THE SAME CHECK, so E cannot pass by the driver
+    #     simply having stopped looking at exit status. Same body, same
+    #     declared allowance -- and it exits 0 over its own two failures. That
+    #     is exit 0 read as a pass, and it MUST be red.
+    sed 's/\[ "\$FAIL" = 0 \] && exit 0 || exit 1/exit 0/' \
+        "$d/declared.sh" >"$d/declared_lies.sh"
+
     echo "=== scripts/release_gates.sh --self-test"
-    echo "=== THE NEGATIVE CONTROL. Three synthetic gates; the driver must tell"
+    echo "=== THE NEGATIVE CONTROL. Six synthetic gates; the driver must tell"
     echo "=== them apart. If A and B score the same, this driver is blind."
     echo
     run_gate ctrl_A_eight_in_ok_vocabulary   0 8 "" bash "$d/eight.sh"
     run_gate ctrl_B_asserts_nothing          0 0 "" bash "$d/nothing.sh"
     run_gate ctrl_C_summary_contradicts_body 0 0 "" bash "$d/liar.sh"
     run_gate ctrl_D_lost_an_assertion        0 8 "" bash "$d/shrunk.sh"
+    run_gate ctrl_E_declared_fails_exit_1    2 8 "two declared rungs" bash "$d/declared.sh"
+    run_gate ctrl_F_declared_fails_exit_0    2 8 "two declared rungs" bash "$d/declared_lies.sh"
 
-    local vA vB vC vD
+    local vA vB vC vD vE vF
     vA="$(printf "$VERDICTS" | awk '$1=="ctrl_A_eight_in_ok_vocabulary"{print $2" "$3}')"
     vB="$(printf "$VERDICTS" | awk '$1=="ctrl_B_asserts_nothing"{print $2}')"
     vC="$(printf "$VERDICTS" | awk '$1=="ctrl_C_summary_contradicts_body"{print $2}')"
     vD="$(printf "$VERDICTS" | awk '$1=="ctrl_D_lost_an_assertion"{print $2}')"
+    vE="$(printf "$VERDICTS" | awk '$1=="ctrl_E_declared_fails_exit_1"{print $2" "$3}')"
+    vF="$(printf "$VERDICTS" | awk '$1=="ctrl_F_declared_fails_exit_0"{print $2}')"
 
     local bad=0
     echo "---- SELF-TEST ASSERTIONS"
@@ -561,6 +706,19 @@ GATE
     else
         echo "  FAIL  D: expected RED, got '$vD'"; bad=1
     fi
+    if [ "$vE" = "PASS 6/2" ]; then
+        echo "  PASS  E: a gate whose 2 failures are DECLARED, exiting 1 because of them, is GREEN"
+        echo "        (before 2026-08-20 this same input was RED on 'exit status contradicts"
+        echo "         a summary with no unexpected failures', which is what allow_fail is for)"
+    else
+        echo "  FAIL  E: expected 'PASS 6/2', got '$vE' -- allow_fail is still unusable"; bad=1
+    fi
+    if [ "$vF" = "RED" ]; then
+        echo "  PASS  F: the SAME body exiting 0 over its own two failures is RED -- E did not"
+        echo "        pass by the driver having stopped reading exit status at all"
+    else
+        echo "  FAIL  F: expected RED, got '$vF' -- exit 0 over asserted failures is being taken as a pass"; bad=1
+    fi
     if [ "$vA" != "$vB" ]; then
         echo "  PASS  A and B are DISTINGUISHED ('$vA' vs '$vB') -- which is the whole point"
     else
@@ -568,7 +726,7 @@ GATE
     fi
     echo
     if [ "$bad" = 0 ]; then
-        echo "[release_gates --self-test] RESULT: 5 PASSED / 0 FAILED"
+        echo "[release_gates --self-test] RESULT: 7 PASSED / 0 FAILED"
         rm -rf "$d"; exit 0
     fi
     echo "[release_gates --self-test] RESULT: 0 PASSED / 1 FAILED"

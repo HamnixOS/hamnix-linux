@@ -33,14 +33,37 @@
 # ================================================================
 # WHAT THIS GATE MEASURES, IN ORDER, AND WHAT IS A CONTROL
 # ================================================================
-# ONE medium boot performs THREE installs onto THREE blank disks, so the only
+# ONE medium boot performs FOUR installs onto FOUR blank disks, so the only
 # variable between them is what the medium carried at the moment of the
-# install. The medium's rc deletes a file between installs; nothing else
-# differs -- same installer binary, same arguments, same disk geometry.
+# install. The medium's rc deletes (and, once, restores) a guard file between
+# installs; nothing else differs -- same installer binary, same arguments,
+# same disk geometry apart from the per-arm --esp-mb stamp described below.
 #
-#   A 'shipped'    the medium carries /etc/rc.boot.machine, as it does today.
-#                  The target's /etc/rc.boot must carry BOTH guard lines.
-#   B 'nomachine'  /etc/rc.boot.machine deleted first, so the FALLBACK BRANCH
+# WHICH DISK IS WHICH IS MEASURED, NOT ASSUMED, and section 0b is the whole
+# reason this gate was rewritten on 2026-08-20. It used to hand qemu three
+# images in arm order and read them back in arm order, which silently assumes
+# the guest enumerates NVMe namespaces in qemu -device order. It did not. The
+# gate scored arm C's correctly-REFUSED disk as arm A's shipped install,
+# reported the shipped install path as broken, and a release was refused on
+# that reading. Each arm now stamps its disk with a distinct ESP size at
+# partitioning time -- step 1 of 5, so the stamp survives a refusal -- and the
+# host maps stamp -> arm and asserts the mapping is a bijection before it
+# scores anything.
+#
+#   A 'shipped'    the medium carries /etc/rc.boot.machine AND /etc/rc.login,
+#                  as it does today. The target's /etc/rc.boot must carry both
+#                  guard lines and /etc/rc.login must be on the disk. This is
+#                  also the CONTROL for arms C and D: it must SUCCEED and must
+#                  print "install complete", or their refusals prove nothing.
+#   D 'nologin'    /etc/rc.login deleted but rc.boot.machine KEPT, so the
+#                  SHIPPED branch runs and the rc it copies names a file the
+#                  target cannot get. Until 2026-08-20 that branch returned 0
+#                  without looking and this install SUCCEEDED, producing a
+#                  machine with no login program on any terminal. It must now
+#                  FAIL LOUDLY. Nothing had ever run this configuration --
+#                  the guard lived only on the fallback branch below, which is
+#                  the branch almost nobody takes.
+#   B 'nomachine'  /etc/rc.login restored, /etc/rc.boot.machine deleted, so the FALLBACK BRANCH
 #                  runs. The target's /etc/rc.boot must STILL carry both guard
 #                  lines. This is the arm the fix exists for; before the fix
 #                  this disk would boot straight to a root prompt.
@@ -50,8 +73,11 @@
 #                  A missing guard must never be answered by a successful
 #                  install.
 #
-# Then the disk from arm A -- BYTE FOR BYTE AS THE INSTALLER LEFT IT, with
-# nothing written into it by this gate -- is booted and driven over serial:
+# Then the disk from arm A is booted and driven over serial. ITS /etc/rc.boot
+# IS THE INSTALLER'S OWN BYTES, asserted by comparison, and EXACTLY ONE file is
+# added to a copy of the disk before it boots: /etc/rc.runlevel, asking for
+# runlevel 3. Section 2 says at length why -- in short, at runlevel 5 the boot
+# rc's own last two lines never run, so there is no terminal login to measure:
 #
 #   * the console must present `login: ` (anchored: `rc.login: getty started
 #     on /dev/ttyS0` CONTAINS the substring `login:` and an unanchored grep
@@ -100,6 +126,16 @@ UPASS=hamfreshpw
 WRONGPASS=hamfreshNOPE
 RPASS=hamfreshadmin
 
+# THE ARM STAMP. Each arm asks the installer for a DIFFERENT ESP size, and
+# nothing else about the four installs differs in geometry. The host reads the
+# ESP size straight out of each image's partition table afterwards and that is
+# how it knows which disk an arm wrote -- see "0b". They must stay distinct
+# and >= 64 (hlinstall clamps below that).
+ESP_A=512
+ESP_D=520
+ESP_B=528
+ESP_C=536
+
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  PASS  $*"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL  $*"; }
@@ -143,30 +179,59 @@ carve() {   # carve <disk> <partno> <out>
 }
 
 # =========================================================================
-say "0 -- the medium, and ONE boot that performs THREE installs"
+say "0 -- the medium, and ONE boot that performs FOUR installs"
 
-# THE MEDIUM'S OWN rc. THE ONLY THING THAT DIFFERS BETWEEN THE THREE INSTALLS
-# IS THE `rm` LINES BETWEEN THEM. Order matters and is deliberate: the
-# shipped arm runs while the medium is intact, then rc.boot.machine goes, then
-# rc.login goes.
+# THE MEDIUM'S OWN rc. THE ONLY THING THAT DIFFERS BETWEEN THE FOUR INSTALLS
+# IS WHICH OF THE TWO GUARD FILES IS ON THE MEDIUM AT THE TIME. Order matters
+# and is deliberate; /etc/rc.login is stashed OUTSIDE /etc first so arm B can
+# have it back after arm D has taken it away (a stash under /etc would be
+# copied onto every target and pollute what this gate then reads).
+#
+# EACH ARM GETS ITS OWN --esp-mb, AND THAT IS NOT COSMETIC. It is how the host
+# tells the four disks apart afterwards; see "0b" below for the defect that
+# cost this project a refused release.
 cat >"$W/rc.install" <<RCEOF
 ln -s /dev/console /dev/cons
 echo 'FRESHLOGIN-LIVE: the medium booted'
+cp /etc/rc.login /tmp/rc.login.stash
+ls /tmp/rc.login.stash
+echo 'FRESHLOGIN-stash-status' \$status
 
 # --- ARM A: the medium exactly as it ships ---------------------------
 ls /etc/rc.boot.machine
 echo 'FRESHLOGIN-A-machine-present-status' \$status
+ls /etc/rc.login
+echo 'FRESHLOGIN-A-login-present-status' \$status
 echo 'FRESHLOGIN-A-BEGIN'
-install --auto /dev/nvme0n1 --hostname $HOSTNAME_-a --user $USERNAME --user-pass $UPASS --root-pass $RPASS
+install --auto /dev/nvme0n1 --esp-mb $ESP_A --hostname $HOSTNAME_-a --user $USERNAME --user-pass $UPASS --root-pass $RPASS
 echo 'FRESHLOGIN-A-status' \$status
 echo 'FRESHLOGIN-A-END'
 
-# --- ARM B: the fallback branch. Only rc.boot.machine is gone. -------
+# --- ARM D: THE SHIPPED BRANCH WITH NO LOGIN TO SHIP -----------------
+# /etc/rc.boot.machine is still here, so write_machine_rc_boot takes the
+# branch every real install takes -- and /etc/rc.login is gone, so the file
+# that rc.boot.machine names cannot reach the target. Until 2026-08-20 that
+# branch returned 0 without looking, and this install would have SUCCEEDED
+# while producing a machine with no login program on any terminal.
+rm /etc/rc.login
+ls /etc/rc.boot.machine
+echo 'FRESHLOGIN-D-machine-present-status' \$status
+ls /etc/rc.login
+echo 'FRESHLOGIN-D-login-present-status' \$status
+echo 'FRESHLOGIN-D-BEGIN'
+install --auto /dev/nvme1n1 --esp-mb $ESP_D --hostname $HOSTNAME_-d --user $USERNAME --user-pass $UPASS --root-pass $RPASS
+echo 'FRESHLOGIN-D-status' \$status
+echo 'FRESHLOGIN-D-END'
+
+# --- ARM B: the fallback branch. rc.login is back; rc.boot.machine goes.
+cp /tmp/rc.login.stash /etc/rc.login
 rm /etc/rc.boot.machine
 ls /etc/rc.boot.machine
 echo 'FRESHLOGIN-B-machine-present-status' \$status
+ls /etc/rc.login
+echo 'FRESHLOGIN-B-login-present-status' \$status
 echo 'FRESHLOGIN-B-BEGIN'
-install --auto /dev/nvme1n1 --hostname $HOSTNAME_-b --user $USERNAME --user-pass $UPASS --root-pass $RPASS
+install --auto /dev/nvme2n1 --esp-mb $ESP_B --hostname $HOSTNAME_-b --user $USERNAME --user-pass $UPASS --root-pass $RPASS
 echo 'FRESHLOGIN-B-status' \$status
 echo 'FRESHLOGIN-B-END'
 
@@ -175,7 +240,7 @@ rm /etc/rc.login
 ls /etc/rc.login
 echo 'FRESHLOGIN-C-login-present-status' \$status
 echo 'FRESHLOGIN-C-BEGIN'
-install --auto /dev/nvme2n1 --hostname $HOSTNAME_-c --user $USERNAME --user-pass $UPASS --root-pass $RPASS
+install --auto /dev/nvme3n1 --esp-mb $ESP_C --hostname $HOSTNAME_-c --user $USERNAME --user-pass $UPASS --root-pass $RPASS
 echo 'FRESHLOGIN-C-status' \$status
 echo 'FRESHLOGIN-C-END'
 
@@ -184,10 +249,18 @@ sleep 8
 poweroff
 RCEOF
 
-TGT_A="$W/target-a.img"; TGT_B="$W/target-b.img"; TGT_C="$W/target-c.img"
+# THE HOST IMAGE FILES ARE NAMED BY THEIR qemu SLOT, NOT BY AN ARM, and that
+# is the whole point. The previous names -- target-a/-b/-c -- ASSERTED a
+# mapping from qemu -device order to the guest's /dev/nvmeNn1 enumeration that
+# nothing had ever checked, and on this host it is not the mapping: measured
+# 2026-08-20, the guest's nvme0n1/nvme1n1/nvme2n1 were qemu's slots 2, 3 and 1.
+# Section 0b resolves slot -> arm from what is written ON each disk.
+SLOT1="$W/slot1.img"; SLOT2="$W/slot2.img"
+SLOT3="$W/slot3.img"; SLOT4="$W/slot4.img"
+SLOTS="$SLOT1 $SLOT2 $SLOT3 $SLOT4"
 
-if [ "${FRESHLOGIN_REUSE:-0}" = 1 ] && [ -s "$LIVE" ] && [ -s "$TGT_A" ]; then
-    info "reusing $LIVE and the three targets (FRESHLOGIN_REUSE=1)"
+if [ "${FRESHLOGIN_REUSE:-0}" = 1 ] && [ -s "$LIVE" ] && [ -s "$SLOT1" ]; then
+    info "reusing $LIVE and the four targets (FRESHLOGIN_REUSE=1)"
 else
     info "building the medium (this is the slow part)"
     scripts/hamlinux_image.sh >"$W/img1.log" 2>&1 || {
@@ -202,11 +275,15 @@ else
         scripts/hamlinux_disk.sh "$LIVE" 4G >"$W/disk2.log" 2>&1 || {
         bad "live medium build -- see $W/disk2.log"; finish; }
 
-    for f in "$TGT_A" "$TGT_B" "$TGT_C"; do
+    for f in $SLOTS; do
         rm -f "$f"; truncate -s 6G "$f"
     done
-    if [ "$(head -c 1048576 "$TGT_A" | tr -d '\0' | wc -c)" = 0 ]; then
-        ok "the three targets are all zeroes before the install"
+    blank=1
+    for f in $SLOTS; do
+        [ "$(head -c 1048576 "$f" | tr -d '\0' | wc -c)" = 0 ] || blank=0
+    done
+    if [ "$blank" = 1 ]; then
+        ok "all four targets are all zeroes before the install"
     else
         bad "a target is not blank"
     fi
@@ -235,12 +312,14 @@ if [ "${FRESHLOGIN_REUSE:-0}" != 1 ] || [ ! -s "$W/install/serial.log" ]; then
         -display none -vga none -device virtio-gpu-pci \
         -serial "file:$d/serial.log" -enable-kvm -cpu host \
         -device qemu-xhci,id=xhci -device usb-kbd -device usb-tablet \
-        -drive "file=$TGT_A,if=none,format=raw,id=nvme0" \
-        -device nvme,drive=nvme0,serial=FRESHA \
-        -drive "file=$TGT_B,if=none,format=raw,id=nvme1" \
-        -device nvme,drive=nvme1,serial=FRESHB \
-        -drive "file=$TGT_C,if=none,format=raw,id=nvme2" \
-        -device nvme,drive=nvme2,serial=FRESHC \
+        -drive "file=$SLOT1,if=none,format=raw,id=nvme0" \
+        -device nvme,drive=nvme0,serial=FRESHSLOT1 \
+        -drive "file=$SLOT2,if=none,format=raw,id=nvme1" \
+        -device nvme,drive=nvme1,serial=FRESHSLOT2 \
+        -drive "file=$SLOT3,if=none,format=raw,id=nvme2" \
+        -device nvme,drive=nvme2,serial=FRESHSLOT3 \
+        -drive "file=$SLOT4,if=none,format=raw,id=nvme3" \
+        -device nvme,drive=nvme3,serial=FRESHSLOT4 \
         -drive "file=$LIVE,if=none,format=raw,id=usbstick" \
         -device usb-storage,bus=xhci.0,drive=usbstick,bootindex=0 \
         >"$d/qemu.out" 2>&1 &
@@ -255,7 +334,7 @@ ILOG="$W/install/serial.log"
 tr -d '\r' <"$ILOG" >"$W/install/serial.txt" 2>/dev/null
 IS="$W/install/serial.txt"
 if grep -aq 'FRESHLOGIN-LIVE-DONE' "$IS"; then
-    ok "the medium booted and ran all three installs to completion"
+    ok "the medium booted and ran all four installs to completion"
 else
     bad "the install boot never printed FRESHLOGIN-LIVE-DONE -- nothing below is a statement about an installed machine"
     tail -30 "$IS" 2>/dev/null | sed 's/^/        /'
@@ -263,6 +342,119 @@ else
 fi
 
 istat() { sed -n "s/^FRESHLOGIN-$1-status //p" "$IS" | head -1; }
+
+# =========================================================================
+say "0b -- WHICH HOST IMAGE DID EACH ARM ACTUALLY INSTALL ONTO?"
+
+# THE DEFECT THIS SECTION EXISTS TO CLOSE, AND IT COST A RELEASE.
+#
+# This gate used to name its three images target-a/-b/-c, hand them to qemu in
+# that order, and then read them back as though the guest's /dev/nvme0n1 were
+# qemu's first -device. NOTHING EVER CHECKED THAT. On the 1.0.33 candidate run
+# it was false: the guest enumerated the namespaces rotated, so the disk the
+# gate scored as "[a] shipped" was the disk arm C -- THE ARM THAT DELETES
+# /etc/rc.login AND MUST REFUSE -- had installed onto. Every symptom the gate
+# then reported was true of a correctly refused install and of nothing else:
+# no /etc/rc.login, an /etc/passwd still at the medium's byte count so no user
+# to log in as, and an 888-byte fallback rc written moments before the refusal.
+# The release was refused on that reading. THE SHIPPED INSTALL PATH WAS FINE.
+#
+# So the mapping is now MEASURED, off each disk, from something the installer
+# wrote there: the ESP SIZE each arm asked for with --esp-mb. Partitioning is
+# step 1/5, so the stamp is present even on a disk whose install later refused
+# -- which /etc/hostname is not, because a refusal happens before
+# configure_target ever sets it.
+esp_mb_of() {   # esp_mb_of <image> -> ESP size in MiB, or "" if unreadable
+    /sbin/sfdisk -J "$1" 2>/dev/null | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)["partitiontable"]
+except Exception:
+    sys.exit(0)
+ss=d.get("sectorsize",512)
+ps=d.get("partitions") or []
+if not ps: sys.exit(0)
+print((ps[0]["size"]*ss)//1048576)'
+}
+hostname_of() { # hostname_of <root-partition-image> -> contents of /etc/hostname
+    local t="$W/.hn.$$"
+    rm -f "$t"
+    /sbin/debugfs -R "dump /etc/hostname $t" "$1" >/dev/null 2>&1
+    tr -d '\r\n' <"$t" 2>/dev/null
+    rm -f "$t"
+}
+
+DISK_A=""; DISK_D=""; DISK_B=""; DISK_C=""
+STAMPS=""
+for f in $SLOTS; do
+    m="$(esp_mb_of "$f")"
+    info "  $(basename "$f"): ESP $([ -n "$m" ] && echo "$m MiB" || echo '(no readable partition table)')"
+    STAMPS="$STAMPS $m"
+    case "$m" in
+        "$ESP_A") [ -z "$DISK_A" ] && DISK_A="$f" || DISK_A="AMBIGUOUS" ;;
+        "$ESP_D") [ -z "$DISK_D" ] && DISK_D="$f" || DISK_D="AMBIGUOUS" ;;
+        "$ESP_B") [ -z "$DISK_B" ] && DISK_B="$f" || DISK_B="AMBIGUOUS" ;;
+        "$ESP_C") [ -z "$DISK_C" ] && DISK_C="$f" || DISK_C="AMBIGUOUS" ;;
+    esac
+done
+
+# A BIJECTION OR NOTHING. If any arm's disk is missing or claimed twice, this
+# gate cannot say which disk it is looking at, and a gate that cannot say that
+# must not score anything -- that is exactly the mistake being fixed.
+map_ok=1
+for pair in "A:$DISK_A" "D:$DISK_D" "B:$DISK_B" "C:$DISK_C"; do
+    a="${pair%%:*}"; v="${pair#*:}"
+    if [ -z "$v" ]; then
+        bad "[$a] no host image carries arm $a's ESP stamp -- the arm/disk mapping is broken"
+        map_ok=0
+    elif [ "$v" = AMBIGUOUS ]; then
+        bad "[$a] more than one host image carries arm $a's ESP stamp -- the stamp is not unique"
+        map_ok=0
+    fi
+done
+if [ "$map_ok" = 1 ]; then
+    ok "each of the four arms is identified with exactly one host image by its ESP stamp (a bijection)"
+    info "  A -> $(basename "$DISK_A")   D -> $(basename "$DISK_D")   B -> $(basename "$DISK_B")   C -> $(basename "$DISK_C")"
+else
+    info "  stamps read:$STAMPS ; wanted $ESP_A/$ESP_D/$ESP_B/$ESP_C"
+    finish
+fi
+
+# THE STAMP'S OWN CONTROL, and it is the one that would have caught the
+# original defect: the stamp must actually DISCRIMINATE. If the four disks all
+# reported the same ESP size the loop above would have said AMBIGUOUS, but a
+# stamp that is unique and yet not positional is the interesting case -- so
+# say out loud whether the guest enumerated the slots in qemu's order.
+if [ "$DISK_A" = "$SLOT1" ] && [ "$DISK_D" = "$SLOT2" ] && \
+   [ "$DISK_B" = "$SLOT3" ] && [ "$DISK_C" = "$SLOT4" ]; then
+    info "  the guest DID enumerate the namespaces in qemu -device order this time"
+    info "  (that is a fact about this run, not a property -- it was false on 2026-08-20)"
+else
+    info "  THE GUEST DID NOT ENUMERATE THE NAMESPACES IN qemu -device ORDER."
+    info "  Reading these disks by position would have scored the wrong arms."
+fi
+
+# SECOND, INDEPENDENT IDENTIFIER, for the two arms that get far enough to have
+# one. /etc/hostname is written by configure_target, which only runs on an
+# install that did not refuse; the ESP stamp and the hostname are produced by
+# different steps of the installer, so agreeing is worth something.
+for pair in "A:$DISK_A:$HOSTNAME_-a" "B:$DISK_B:$HOSTNAME_-b"; do
+    a="$(echo "$pair" | cut -d: -f1)"; v="$(echo "$pair" | cut -d: -f2)"
+    want="$(echo "$pair" | cut -d: -f3)"
+    if carve "$v" 2 "$W/.idpart.img" 2>/dev/null; then
+        got="$(hostname_of "$W/.idpart.img")"
+        if [ "$got" = "$want" ]; then
+            ok "[$a] and the disk the ESP stamp picked carries /etc/hostname '$got' -- two independent identifiers agree"
+        else
+            bad "[$a] the ESP stamp and /etc/hostname disagree about this disk (hostname '$got', expected '$want')"
+        fi
+    else
+        bad "[$a] cannot carve the root partition of the disk the ESP stamp picked"
+    fi
+done
+rm -f "$W/.idpart.img"
+
+TGT_A="$DISK_A"; TGT_D="$DISK_D"; TGT_B="$DISK_B"; TGT_C="$DISK_C"
 
 # =========================================================================
 say "1 -- WHAT EACH INSTALL WROTE AS THE MACHINE'S /etc/rc.boot"
@@ -337,17 +529,107 @@ score_rc() {
     fi
 }
 
+# WHAT A REFUSED INSTALL IS ALLOWED TO LEAVE BEHIND.
+#
+# A refusal happens at step 5 of 6, so the disk has already been partitioned,
+# formatted and copied. This does NOT assert an untouched disk -- that would be
+# asserting something the installer has never claimed and does not do. It
+# asserts the thing that matters: whatever rc.boot is on that half-built disk,
+# booting it must not drop anybody into an unauthenticated root prompt. Either
+# there is no rc.boot at all, or the one that is there ends in `supervise`.
+score_refused() {
+    local arm="$1" img="$2" label="$3"
+    local p="$W/part-$arm.img" f="$W/rcboot-$arm.txt"
+    if ! carve "$img" 2 "$p" 2>/dev/null; then
+        ok "[$arm] $label: the refused install left no readable root partition behind"
+        return
+    fi
+    rm -f "$f"
+    /sbin/debugfs -R "dump /etc/rc.boot $f" "$p" >/dev/null 2>&1
+    if [ ! -s "$f" ]; then
+        ok "[$arm] $label: the refused install left no /etc/rc.boot behind, so there is nothing to boot"
+        return
+    fi
+    info "[$arm] the refused install left a $(wc -c <"$f")-byte /etc/rc.boot (steps 1-4 had already run)"
+    if grep -q "^supervise" "$f"; then
+        ok "[$arm] $label: and that rc still ends in \`supervise\`, so booting the half-built disk cannot fall through to an unauthenticated root prompt"
+    else
+        bad "[$arm] $label: the rc left behind does NOT end in \`supervise\` -- booting this refused install would present a root shell"
+    fi
+    if /sbin/debugfs -R "stat /etc/rc.login" "$p" 2>/dev/null | grep -q '^Inode:'; then
+        bad "[$arm] $label: /etc/rc.login IS on this disk -- then the installer refused an install it could have guarded"
+    else
+        ok "[$arm] $label: and /etc/rc.login is genuinely absent, which is why the refusal was correct"
+    fi
+}
+
 info "arm A installer exit status on the wire: '$(istat A)'"
+info "arm D installer exit status on the wire: '$(istat D)'"
 info "arm B installer exit status on the wire: '$(istat B)'"
 info "arm C installer exit status on the wire: '$(istat C)'"
 
-say "1a -- arm A 'shipped': the medium carried /etc/rc.boot.machine"
+if [ "$(sed -n 's/^FRESHLOGIN-stash-status //p' "$IS" | head -1)" = 0 ]; then
+    ok "the medium stashed /etc/rc.login outside /etc, so arm B can be given it back after arm D takes it away"
+else
+    bad "the rc.login stash failed -- arm B cannot be the fallback-WITH-a-login arm it claims to be"
+fi
+
+say "1a -- arm A 'shipped': the medium carried BOTH guard files"
 if [ "$(sed -n 's/^FRESHLOGIN-A-machine-present-status //p' "$IS" | head -1)" = 0 ]; then
     ok "[A] the medium really did carry /etc/rc.boot.machine at the moment of this install"
 else
     bad "[A] /etc/rc.boot.machine was NOT on the medium during arm A -- arm A is not the shipped configuration and arm B is a contrast with nothing"
 fi
+if [ "$(sed -n 's/^FRESHLOGIN-A-login-present-status //p' "$IS" | head -1)" = 0 ]; then
+    ok "[A] and it carried /etc/rc.login too, so arm A is the fully-equipped shipped configuration"
+else
+    bad "[A] /etc/rc.login was NOT on the medium during arm A -- arm A is not the shipped configuration"
+fi
 score_rc a "$TGT_A" guarded "shipped"
+
+# =========================================================================
+say "1d -- arm D: THE SHIPPED BRANCH WITH NO LOGIN TO SHIP. IT MUST REFUSE."
+
+# THE ARM THAT DID NOT EXIST, AND THE HOLE IT COVERS.
+#
+# write_machine_rc_boot's shipped branch copies /etc/rc.boot.machine and used
+# to `return 0` on success -- with no check that the /etc/rc.login that file
+# names is on the target. The guard existed ONLY on the fallback branch, which
+# is the branch almost nobody takes. Nothing had ever run the configuration
+# that separates the two: rc.boot.machine present, rc.login absent.
+#
+# This is that configuration. Before the 2026-08-20 fix the installer would
+# have exited 0 here and printed "install complete" over a machine with no
+# login program on any terminal. THE CONTROL FOR IT IS ARM A, in the same
+# boot, off the same medium, differing by one `rm`: arm A must SUCCEED and
+# must print "install complete". Without that this arm's refusal would be
+# indistinguishable from an installer that refuses everything.
+if [ "$(sed -n 's/^FRESHLOGIN-D-machine-present-status //p' "$IS" | head -1)" = 0 ]; then
+    ok "[D] /etc/rc.boot.machine was STILL on the medium, so the SHIPPED branch is the branch that ran"
+else
+    bad "[D] /etc/rc.boot.machine was gone -- this arm ran the fallback and measures the wrong branch"
+fi
+if [ "$(sed -n 's/^FRESHLOGIN-D-login-present-status //p' "$IS" | head -1)" != 0 ]; then
+    ok "[D] and /etc/rc.login was gone, so the rc it copies names a file the target cannot get"
+else
+    bad "[D] /etc/rc.login was still on the medium -- this arm is not the case it claims to be"
+fi
+if [ -n "$(istat D)" ] && [ "$(istat D)" != 0 ]; then
+    ok "[D] THE INSTALLER FAILED, with status $(istat D) -- the shipped branch no longer answers a missing guard with success"
+else
+    bad "[D] the installer reported status '$(istat D)' for a machine that would have had NO login program on any terminal"
+fi
+if [ "$(sed -n '/FRESHLOGIN-D-BEGIN/,/FRESHLOGIN-D-END/p' "$IS" | grep -ac 'install complete')" != 0 ]; then
+    bad "[D] 'install complete' was printed inside arm D -- the wizard would paint success over a login-less machine"
+else
+    ok "[D] 'install complete' was NOT printed in arm D"
+fi
+if [ "$(sed -n '/FRESHLOGIN-D-BEGIN/,/FRESHLOGIN-D-END/p' "$IS" | grep -ac 'refusing to report a successful install of an unguarded machine')" != 0 ]; then
+    ok "[D] and it said why, in as many words, on the console"
+else
+    bad "[D] the installer produced no refusal message naming the reason"
+fi
+score_refused d "$TGT_D" "shipped-without-a-login"
 
 say "1b -- arm B 'nomachine': THE FALLBACK BRANCH, which is what this fix is for"
 if [ "$(sed -n 's/^FRESHLOGIN-B-machine-present-status //p' "$IS" | head -1)" != 0 ]; then
@@ -390,13 +672,95 @@ if [ "$(sed -n '/FRESHLOGIN-A-BEGIN/,/FRESHLOGIN-A-END/p' "$IS" | grep -ac 'inst
 else
     bad "[A] 'install complete' was not printed even in the shipped arm -- the arm C absence check is void"
 fi
+score_refused c "$TGT_C" "noguard"
 
 # =========================================================================
-say "2 -- BOOT THE FRESH INSTALL FROM ARM A, UNTOUCHED, AND TRY TO LOG IN"
+say "2 -- BOOT THE FRESH INSTALL FROM ARM A AND TRY TO LOG IN ON A TERMINAL"
 
 G="$(part_geom "$TGT_A" 2)"; [ -n "$G" ] || { bad "cannot read arm A's partition table"; finish; }
 OFF="${G% *}"; SZ="${G#* }"
 [ $((OFF % 1048576)) = 0 ] || { bad "arm A's root partition does not start on a MiB boundary ($OFF)"; finish; }
+
+# =========================================================================
+# EXACTLY ONE FILE IS ADDED TO THE DISK BEFORE IT IS BOOTED, AND IT IS NOT
+# /etc/rc.boot. THIS SECTION USED TO SAY "UNTOUCHED" AND IT CANNOT ANY MORE.
+#
+# MEASURED on this host, 2026-08-20, on the disk arm A really installed:
+# booted with nothing added at all, the serial log's LAST LINE is
+#
+#     hamgreet: the graphical login is presenting
+#
+# and no `login: ` ever appears on /dev/ttyS0. That is not a fault in this
+# gate. /etc/rc.boot is `source '/etc/rc.boot.installed'` then `source
+# '/etc/rc.login'` then `supervise`, and rc.boot.installed ENDS by sourcing
+# /etc/rc.d/rc.5, which runs /bin/hamgreet IN THE FOREGROUND. So on a machine
+# that reaches runlevel 5, THE LAST TWO LINES OF ITS OWN BOOT RC NEVER RUN:
+# no login program is started on any terminal and `supervise` is never
+# reached, until somebody has authenticated GRAPHICALLY.
+#
+# The same shape is visible in the 1.0.33 candidate's
+# gates/installed_boot_login.log, where BOTH arms -- including that gate's own
+# autologin CONTROL -- never reach their READY marker and both logs end on the
+# same hamgreet line.
+#
+# THAT IS A PRODUCT QUESTION AND IT IS NOT THIS GATE'S TO ANSWER: whether an
+# installed machine should start its terminal logins BEFORE the graphical one
+# is a change to every installed machine, and etc/rc.d/rc.5.linux's own
+# no-session branch already tells the operator to "Log in on a terminal" to
+# read /var/lib/hamgreet.trace -- advice that cannot be followed today. It is
+# written up in HANDOFF.md for the owner.
+#
+# What this gate measures is the TTY half, so it takes the documented way to
+# stop short of runlevel 5 (etc/rc.boot.installed's own header: "It is for the
+# gates that only ever wanted a booted machine to ask questions of"). One
+# file, /etc/rc.runlevel, is written onto a COPY of arm A's disk. The rc under
+# test is NOT touched, and that is asserted below by comparing it byte for
+# byte with what the installer wrote.
+printf 'hamnix_runlevel = 3\n' >"$W/rc.runlevel"
+
+plant_runlevel3() {   # plant_runlevel3 <whole-disk-image> <label>
+    # NOT one `local` with three assignments: bash expands every word of a
+    # `local` command BEFORE it assigns any of them, so `p="$W/plant-$label.img"
+    # ` on the same line reads $label while it is still unset and dies under
+    # `set -u`. Measured here, 2026-08-20: "line 722: label: unbound variable".
+    local img="$1"
+    local label="$2"
+    local p="$W/plant-$label.img"
+    carve "$img" 2 "$p" || { bad "[$label] cannot carve the disk to plant /etc/rc.runlevel"; return 1; }
+    /sbin/e2fsck -fy "$p" >"$W/plant-$label-fsck1.log" 2>&1
+    cat >"$W/plant-$label.dbg" <<DBEOF
+cd /etc
+write $W/rc.runlevel rc.runlevel
+quit
+DBEOF
+    /sbin/debugfs -w -f "$W/plant-$label.dbg" "$p" >"$W/plant-$label-debugfs.log" 2>&1
+    /sbin/e2fsck -fy "$p" >"$W/plant-$label-fsck2.log" 2>&1
+    rm -f "$W/plant-$label-rb.txt"
+    /sbin/debugfs -R "dump /etc/rc.runlevel $W/plant-$label-rb.txt" "$p" >/dev/null 2>&1
+    if cmp -s "$W/rc.runlevel" "$W/plant-$label-rb.txt"; then
+        ok "[$label] /etc/rc.runlevel landed byte-identical on the disk"
+    else
+        bad "[$label] /etc/rc.runlevel did not land -- see $W/plant-$label-debugfs.log"
+        return 1
+    fi
+    dd if="$p" of="$img" bs=1M seek=$((OFF / 1048576)) conv=notrunc status=none \
+        || { bad "[$label] cannot write the partition back"; return 1; }
+    return 0
+}
+
+FRESHDISK="$W/target-fresh-r3.img"
+cp --reflink=auto "$TGT_A" "$FRESHDISK" || { bad "cannot copy arm A's disk"; finish; }
+plant_runlevel3 "$FRESHDISK" fresh || finish
+# AND THE RC UNDER TEST IS UNCHANGED. Without this the section above could be
+# hiding a rewritten boot rc behind the word "one file".
+rm -f "$W/fresh-rcboot.txt"
+/sbin/debugfs -R "dump /etc/rc.boot $W/fresh-rcboot.txt" "$W/plant-fresh.img" >/dev/null 2>&1
+if cmp -s "$W/rcboot-a.txt" "$W/fresh-rcboot.txt"; then
+    ok "and /etc/rc.boot on the disk about to be booted is BYTE-IDENTICAL to what the installer wrote"
+else
+    bad "the /etc/rc.boot about to be booted is not the one the installer wrote -- this arm tests a rc this gate made up"
+    finish
+fi
 
 # The uid to expect is READ OFF THE DISK, not assumed: asserting a constant
 # would be asserting this gate's memory of the installer's default.
@@ -486,9 +850,22 @@ boot_arm() {   # boot_arm <name> <disk> <drivescript>
     return 0
 }
 
-boot_arm fresh "$TGT_A" "$W/drive.fresh" || finish
+boot_arm fresh "$FRESHDISK" "$W/drive.fresh" || finish
 FS="$W/boot-fresh/serial.txt"
 info "fresh boot log: $FS ($(wc -c <"$FS" 2>/dev/null || echo 0) bytes)"
+
+# THE OPT-OUT'S OWN ASSERTION, and it can fail. If the runlevel file did not
+# take, the machine goes to runlevel 5, blocks in hamgreet and every login
+# assertion below becomes a statement about a machine that never got there --
+# which is exactly the empty-reason red this treatment exists to remove. So it
+# is scored, and it is scored FIRST.
+if grep -aq 'RUNLEVEL 5 SKIPPED' "$FS"; then
+    ok "[fresh] the machine read /etc/rc.runlevel and stopped at runlevel 3, so the graphical login is not in the way of the terminal one"
+else
+    bad "[fresh] the machine did NOT report skipping runlevel 5 -- the opt-out did not take, and nothing below is a measurement of the tty login"
+    tail -20 "$FS" 2>/dev/null | sed 's/^/        /'
+    finish
+fi
 
 if grep -aq 'rc.login: getty started on /dev/ttyS0' "$FS"; then
     ok "[fresh] the installed machine's own rc reached /etc/rc.login and started a getty on the console"
@@ -539,8 +916,13 @@ say "3 -- THE CONTROL, AND IT RUNS: the same disk with \`-a hostowner\`"
 # hostowner`. `login -f` does not setuid, so it keeps PID 1's root. This arm
 # MUST reach a root shell with no password, and if it does not then arm
 # 'fresh''s silence proves nothing at all.
+# AND IT IS COPIED FROM THE ARM-'fresh' DISK, NOT FROM $TGT_A, so it carries
+# the SAME /etc/rc.runlevel. A control that went to runlevel 5 while the arm it
+# controls stopped at 3 would differ in two things at once, and would stall in
+# hamgreet exactly as installed_boot_login's own control did in the 1.0.33
+# candidate -- a control that cannot fire is worse than none.
 CTLDISK="$W/target-control.img"
-cp --reflink=auto "$TGT_A" "$CTLDISK" || { bad "cannot copy arm A's disk for the control"; finish; }
+cp --reflink=auto "$FRESHDISK" "$CTLDISK" || { bad "cannot copy arm A's disk for the control"; finish; }
 CTLPART="$W/part-control.img"
 carve "$CTLDISK" 2 "$CTLPART" || { bad "cannot carve the control disk"; finish; }
 /sbin/e2fsck -fy "$CTLPART" >"$W/ctl-fsck1.log" 2>&1
@@ -576,6 +958,11 @@ boot_arm control "$CTLDISK" "$W/drive.control" || finish
 CS="$W/boot-control/serial.txt"
 info "control boot log: $CS ($(wc -c <"$CS" 2>/dev/null || echo 0) bytes)"
 
+if grep -aq 'RUNLEVEL 5 SKIPPED' "$CS"; then
+    ok "[control] the control stopped at runlevel 3 too, so it differs from arm 'fresh' by the getty flag and nothing else"
+else
+    bad "[control] the control did NOT skip runlevel 5 -- it differs from arm 'fresh' in two things at once and is not a control"
+fi
 if has_root_identity "$CS"; then
     ok "[control] the console answered \`id\` with a ROOT identity -- A ROOT SHELL IS VISIBLE TO THIS INSTRUMENT, on this port, with this driver, with this detector"
     info "  $(root_identity_lines "$CS" | head -1)"

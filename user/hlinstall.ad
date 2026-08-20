@@ -602,14 +602,56 @@ def write_ab_layout():
 # The live image's own /etc/rc.boot.machine is preferred when it is there, so
 # the installed file is the same bytes the package would lay down; the
 # written fallback keeps an image that does not carry it installable.
+# THE GUARD, AND IT IS CHECKED ON EVERY PATH OUT OF write_machine_rc_boot.
+#
+# `source` of a file that is not there is a no-op in hamsh, so an rc that
+# sources a missing /etc/rc.login and then supervises is a machine with no
+# login prompt on any terminal -- fail-CLOSED rather than a root shell, but
+# still not a machine anyone can use, and still not something to report as a
+# successful install.
+#
+# It is checked on the TARGET, after the root copy, so it is a statement about
+# THE DISK THAT WAS JUST WRITTEN and not about the medium. That distinction is
+# load-bearing: the medium having the file proves nothing about whether the
+# copy carried it.
+def guard_installed_login() -> int32:
+    lfd: int32 = sys_open(cast[Ptr[char]]("/n/target/etc/rc.login"))
+    if lfd < 0:
+        puts(2, "hlinstall: FATAL: /etc/rc.login is not on the disk this install just wrote,\n")
+        puts(2, "hlinstall: FATAL: so the installed machine would have NO login program on any terminal.\n")
+        puts(2, "hlinstall: FATAL: refusing to report a successful install of an unguarded machine.\n")
+        return -1
+    sys_close(lfd)
+    return 0
+
+
 def write_machine_rc_boot() -> int32:
     if copy_file(cast[Ptr[char]]("/etc/rc.boot.machine"),
                  cast[Ptr[char]]("/n/target/etc/rc.boot")) == 0:
-        # THE MEDIUM CARRIED THE FILE. Whatever it says is what this machine
+        # THE MEDIUM CARRIED THE FILE. Whatever it SAYS is what this machine
         # boots, deliberately: etc/rc.boot.machine's own header records that a
         # gate which replaces that file is opting out of the guard visibly, and
-        # several registered gates do exactly that. Not second-guessed here.
-        return 0
+        # several registered gates do exactly that. The CONTENTS are not
+        # second-guessed here.
+        #
+        # But the machine still has to be able to ask who you are, and until
+        # 2026-08-20 THIS BRANCH -- the one every real install takes -- did not
+        # check that. It copied a file naming /etc/rc.login and returned 0
+        # without ever looking for /etc/rc.login on the disk it had just
+        # written. The check existed only on the fallback below, i.e. only on
+        # the branch almost nobody takes. A medium carrying rc.boot.machine and
+        # NOT carrying rc.login would therefore have installed a machine with no
+        # login program on any terminal and printed "install complete" over it.
+        #
+        # MEASURED, and this is the honest scope of the claim: that
+        # configuration had never been run. The red that sent me looking
+        # (installed_fresh_login arm [a], 1.0.33 candidate) was NOT this defect
+        # -- the gate had mis-identified which host image the guest installed
+        # onto and scored a correctly-refused install as a successful one. The
+        # shipped path was doing the right thing. The hole in it was real
+        # anyway, and it is closed below by falling through to the same guard
+        # the fallback uses instead of returning here.
+        return guard_installed_login()
     # THE FALLBACK. Reached only when the medium has no /etc/rc.boot.machine.
     #
     # IT USED TO WRITE ONE LINE -- `source '/etc/rc.boot.installed'` -- and
@@ -644,22 +686,7 @@ def write_machine_rc_boot() -> int32:
     sys_write(fd, "source '/etc/rc.login'\n", 23)
     sys_write(fd, "supervise\n", 10)
     sys_close(fd)
-    # AND THE GUARD MUST BE REACHABLE, not merely named. `source` of a file
-    # that is not there is a no-op in hamsh, so an rc that sources a missing
-    # /etc/rc.login and then supervises is a machine with no login prompt --
-    # fail-CLOSED rather than a root shell, but still not a machine anyone can
-    # use, and still not something to report as a successful install.
-    #
-    # This is checked on the TARGET, after the root copy, so it is a statement
-    # about the disk that was just written and not about the medium.
-    lfd: int32 = sys_open(cast[Ptr[char]]("/n/target/etc/rc.login"))
-    if lfd < 0:
-        puts(2, "hlinstall: FATAL: this medium carries neither /etc/rc.boot.machine nor /etc/rc.login,\n")
-        puts(2, "hlinstall: FATAL: so the installed machine would have NO login program on any terminal.\n")
-        puts(2, "hlinstall: FATAL: refusing to report a successful install of an unguarded machine.\n")
-        return -1
-    sys_close(lfd)
-    return 0
+    return guard_installed_login()
 
 
 def streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
