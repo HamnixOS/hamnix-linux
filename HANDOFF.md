@@ -61,6 +61,19 @@ same shape as declining the A/B kernel work for fear of bricking machines that d
 not exist -- twice now I have applied shipping-distro caution to a project with no
 users, and both times he corrected it.
 
+**AND DELETION IS NOT IRREVERSIBLE.** I called it that; David: *"it's not
+irreversible, we have all of the source code to rebuild any particular version we
+want."* Correct — this repo is the source of truth and any version can be rebuilt
+from its commit. **That is the THIRD time in one day I applied shipping-distro
+caution to a project with no users** (the others: declining A/B kernel work for
+fear of bricking machines that do not exist, and warning that deletion would break
+rollback on installed machines). One honest caveat, recorded as a caveat and NOT
+as an objection: **bit-for-bit reproducibility is unverified here**, so a rebuilt
+1.0.20 may not carry the original's sha256. That affects nothing today — the
+index only ever names the newest version, and rollback is becoming on-device — but
+"we can rebuild it" and "we can rebuild it byte-identically" are different claims
+and only the first is established.
+
 **NOTE ON WHAT DELETION ACTUALLY BUYS:** removing the 3,046 unreferenced tarballs
 shrinks the **SERVED SITE** from 2.6 GB to roughly the current release. It does
 NOT shrink the 2.8 GB `.git` -- history keeps every blob regardless, and the only
