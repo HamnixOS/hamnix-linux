@@ -21,9 +21,7 @@
 # produced this shape -- a package taking the running system's rc, and a
 # package deleting it.
 
-source '/etc/rc.boot.installed'
-
-# WHO IS SITTING HERE. These two lines are why this file is no longer one
+# WHO IS SITTING HERE. These three lines are why this file is no longer one
 # line, and they are here rather than in /etc/rc.boot.installed on purpose.
 #
 # WHAT THEY DO: `/etc/rc.login` starts a login program on every terminal, and
@@ -46,7 +44,61 @@ source '/etc/rc.boot.installed'
 # opting out of it deliberately and visibly.
 #
 # THAT IS ALSO THE NEGATIVE CONTROL for the login work: an rc without these
-# two lines still falls through to a root prompt, which is how the gate proves
+# lines still falls through to a root prompt, which is how the gate proves
 # its instrument can SEE a root shell before it is trusted to report none.
+#
+#
+# THE GETTYS NOW START BEFORE RUNLEVEL 5, AND THAT IS THE WHOLE CHANGE
+# ===================================================================
+# David, 2026-08-20: "the greeter failure should leave a terminal for you to
+# debug. just like Linux."
+#
+# `source '/etc/rc.login'` USED TO BE BELOW `source '/etc/rc.boot.installed'`,
+# and that made the machine's own documented recovery path a lie.
+# /etc/rc.boot.installed ends by entering runlevel 5, and /etc/rc.d/rc.5 runs
+# /bin/hamgreet IN THE FOREGROUND -- PID 1's rc does not continue until
+# somebody authenticates on the screen. So on a graphical machine NOTHING
+# below that source line had ever run: no getty on any terminal, and no
+# `supervise` either. Meanwhile rc.5.linux's own failure branch printed, at
+# line 178:
+#
+#     [rc.5] Why: /var/lib/hamgreet.trace. Log in on a terminal to read it.
+#
+# There was no terminal to log in on. rc.5.linux's header had asserted the
+# opposite in prose -- "the tty logins /etc/rc.login started still working" --
+# since the day it was written; moving this one line up is what makes that
+# sentence true rather than aspirational.
+#
+# THE LINUX SHAPE, WHICH IS WHAT WAS ASKED FOR: gettys own the terminals and
+# come up early; the display manager owns the screen and comes up after. Kill
+# the greeter and the serial console and the VTs are still there.
+#
+# WHAT WAS DELIBERATELY *NOT* DONE, because it would have reintroduced the
+# defect the greeter exists to fix. hamgreet is NOT backgrounded and rc.5 is
+# NOT restructured. It still blocks PID 1's rc, it still clears
+# `hamsession_ok = 0` before and tests it after, and /var/lib/hamsession.rc --
+# which only an authenticated greeter writes, and which it unlinks on entry --
+# is still the only thing that can raise it. tests/linux/graphical_login.sh
+# measures that no session process exists before authentication with a PROCESS
+# CENSUS, not with OCR (a screendump cannot tell a display manager from a lock
+# screen), and its red arm goes red by starting a session first. Backgrounding
+# the greeter would make that arm green while the machine handed out an
+# unauthenticated desktop. The recovery terminal was buyable without touching
+# it, so it was bought without touching it.
+#
+# WHY THIS FILE AND NOT /etc/rc.boot.installed, given that this one is
+# MACHINE-OWNED and hpm will not overwrite it on an existing box: because
+# /etc/rc.boot.installed is SOURCED BY 32 GATES, and a getty on /dev/ttyS0 is
+# a READER OF THE SERIAL PORT. Putting the getty start there would hand every
+# one of those gates a second reader competing for the keystrokes their driver
+# sends -- the exact race etc/rc.login.linux warns about ("Two readers on one
+# 8250 would race for each keystroke and each would get a random half of the
+# password"). The cost of keeping it here is stated plainly rather than hidden:
+# a machine installed BEFORE this change keeps the old order until its
+# /etc/rc.boot is replaced or removed, because that is what machine-owned
+# means. New installs get it, and hpm writes this file when it is ABSENT.
 source '/etc/rc.login'
+
+source '/etc/rc.boot.installed'
+
 supervise
