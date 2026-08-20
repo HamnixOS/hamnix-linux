@@ -1,0 +1,821 @@
+# user/hkslot.ad — REPLACE THE KERNEL AN INSTALLED MACHINE BOOTS, FROM THE
+# MACHINE, WITHOUT EVER LEAVING IT UNBOOTABLE.
+#
+# THE HOLE THIS FILLS, STATED FIRST
+# =================================
+# scripts/hamlinux_disk.sh's A/B layout (HAMLINUX_AB_SLOTS=1) made the kernel
+# REPLACEABLE: the file firmware executes is systemd-boot, written once at
+# build time and never rewritten, the kernel images sit beside it as
+# \EFI\Linux\hamnix-a.efi and \EFI\Linux\hamnix-b.efi, and the only thing an
+# update ever rewrites is a preallocated 512-byte \loader\loader.conf.
+# tests/linux/ab_kernel_slots.sh measured that a machine really does boot the
+# other slot afterwards, and that the ordering rule holds.
+#
+# AND NOTHING ON THE MACHINE COULD DO IT. That gate wrote the slot and flipped
+# the pointer FROM THE HOST, with mcopy, against an image file. An installed
+# machine had no program that could do either. This is that program.
+#
+# WHAT IT DOES, IN THE ORDER THE MEASUREMENT SAYS IT MUST
+# ======================================================
+#   1. Read \loader\loader.conf and find which slot is ACTIVE. The other one
+#      is the target. Nothing is ever written to the slot this machine is
+#      currently set to boot, so at every instant from here to the end there
+#      is a whole, untouched, bootable kernel on the ESP.
+#   2. Refuse unless the target slot ALREADY EXISTS at its full length. See
+#      "NOTHING IS CREATED AND NOTHING IS EXTENDED" below.
+#   3. Hash the source and compare it to the digest the caller was given out
+#      of the SIGNED index. A kernel that does not match its digest is never
+#      written anywhere.
+#   4. Check the source is a PE image with a `.linux` section -- i.e. that it
+#      is a kernel at all, and not, say, systemd-boot or a truncated download.
+#   5. Write it into the inactive slot through an O_SYNC descriptor.
+#   6. READ THE SLOT BACK OFF THE MEDIUM and hash what is actually there. It
+#      must equal the same digest from step 3. Not the source's bytes in
+#      memory -- the bytes on the disk.
+#   7. ONLY THEN rewrite loader.conf, at exactly the length it already is.
+#   8. Read loader.conf back and confirm it names the new slot.
+#
+# THE ORDER IS NOT A PREFERENCE, IT IS A MEASUREMENT. From
+# tests/linux/ab_kernel_slots.sh, arms 6 and 7, on booted machines:
+#
+#   a HALF-WRITTEN INACTIVE SLOT with loader.conf still naming the old one
+#       -> THE MACHINE BOOTS, on the old kernel.
+#   the SAME torn slot with loader.conf ALREADY FLIPPED to it
+#       -> THE MACHINE DOES NOT BOOT.
+#
+# Without the second of those the first proves nothing: it would be equally
+# consistent with firmware that tolerates a torn image. It is not. So the flip
+# is last, it follows a read-back, and every failure path in this program
+# returns BEFORE the flip -- which is the state the first arm measured.
+#
+# NOTHING IS CREATED AND NOTHING IS EXTENDED, AND THAT IS THE SAFETY
+# =================================================================
+# Both slots are written at BUILD time, at full length. This program only ever
+# OVERWRITES IN PLACE, through sys_open_sync -- which is O_WRONLY|O_SYNC with
+# no O_CREAT and no O_TRUNC, and cannot create or truncate anything. So no
+# cluster is ever allocated at update time, the FAT chain is never mutated,
+# and no directory entry's length or starting cluster ever changes. FAT32 has
+# no journal; the only reason that is survivable here is that the update path
+# contains no metadata write at all. That is the identical argument
+# user/bootlogd.ad makes for the preallocated boot log and user/bootsync.ad
+# makes for its four-byte commit.
+#
+# It also means the refusal in step 2 is load bearing rather than pedantic. A
+# medium built before the second slot was preallocated has an ESP with room
+# for it and no file in it; creating one here would be a multi-hundred-megabyte
+# FAT allocation on a filesystem with no journal, which is exactly the window
+# this whole design exists to remove. So this refuses BY NAME and says the
+# medium is too old, rather than doing the dangerous thing quietly.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+# ================================
+# IT DOES NOT FETCH ANYTHING. It is handed a path and a digest. user/hpm.ad
+# resolves the artifact out of the Ed25519-signed channel index -- the same
+# trust path, the same signature check, the same verifier (lib/sha256.ad is
+# now shared between the two for exactly this reason) that every package
+# already goes through -- and then runs this. A program that both fetched and
+# wrote the boot partition would be one program with the network in it and the
+# ESP under it.
+#
+# IT DOES NOT TOUCH THE ACTIVE SLOT, EVER, on any path, including failure.
+#
+# IT DOES NOT REFRESH THE BOOT MODULES. That is user/bootsync.ad, and it is a
+# different operation with a different failure mode; bootsync's own header
+# says why mixing the two is how a module refresh ends up able to make a
+# machine unbootable. After a slot flip the new slot's modules are whatever
+# the new image shipped -- run bootsync afterwards to fold in the root's.
+#
+# Usage:
+#   hkslot --status                   which slot is active, and the geometry
+#   hkslot -n <uki> [<sha256hex>]     say what it would do; write nothing
+#   hkslot <uki> [<sha256hex>]        write the inactive slot, verify, flip
+#
+# Exit: 0 committed (or -n / --status), 1 refused or failed. A non-zero exit
+# from this program ALWAYS means loader.conf was not touched.
+
+extern def sys_open(path: Ptr[char]) -> int32
+extern def sys_open_sync(path: Ptr[char]) -> int32
+extern def sys_read(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_write(fd: int32, buf: Ptr[uint8], count: uint64) -> int64
+extern def sys_close(fd: int32) -> int32
+extern def sys_lseek(fd: int32, offset: int64, whence: int32) -> int64
+extern def sys_fd_size(fd: int32) -> int64
+extern def sys_errstr(buf: Ptr[uint8], nbuf: uint64) -> int32
+
+from lib.sha256 import (
+    sha256_reset, sha256_update, sha256_final, sha256_hex,
+)
+
+SEEK_SET: int32 = 0
+
+# THE PATHS ARE FIXED AND THEY ARE FUNCTIONS, NOT GLOBALS. Both halves matter.
+#
+# Fixed, because a path this program got wrong is a machine that does not
+# boot, and there is no shell on it to find out from.
+#
+# Functions, because user/bootsync.ad paid a whole boot to learn that a string
+# literal in a GLOBAL INITIALISER does not survive to runtime here while one in
+# an expression does. Its failure was a program reporting "cannot read
+# /boot/EFI/BOOT/BOOTX64.EFI" about a file `cksum` read 67 MB of at the same
+# shell in the same boot -- indistinguishable from a missing ESP.
+def lconf_path() -> Ptr[char]:
+    return cast[Ptr[char]]("/boot/loader/loader.conf")
+
+
+def slot_a_path() -> Ptr[char]:
+    return cast[Ptr[char]]("/boot/EFI/Linux/hamnix-a.efi")
+
+
+def slot_b_path() -> Ptr[char]:
+    return cast[Ptr[char]]("/boot/EFI/Linux/hamnix-b.efi")
+
+
+# loader.conf's length is a CONTRACT with scripts/hamlinux_disk.sh: it is
+# preallocated at this length and every rewrite is exactly this many bytes. A
+# rewrite of a different length would allocate or free a cluster and mutate
+# the FAT chain, which is the one thing this design must never do -- so the
+# length is checked against the file before anything is written, and the
+# program refuses rather than adapting to it.
+LOADER_CONF_BYTES: uint64 = 512
+
+# How often the write loop says where it is. Small enough that a 74 MB slot
+# produces tens of lines -- on a machine with no shell that is the difference
+# between "working" and "hung", and for a harness it is the only place a
+# SIGKILL can land INSIDE the write rather than after it.
+PROGRESS_EVERY: uint64 = 2097152
+
+IOBUF: uint64 = 262144
+iobuf: Array[262144, uint8]
+lbuf:  Array[1024, uint8]
+cbuf:  Array[512, uint8]
+errbuf: Array[160, uint8]
+want_hex: Array[80, uint8]
+src_hex:  Array[80, uint8]
+
+# 0 = A is active (target B), 1 = B is active (target A).
+active_b: int32 = 0
+
+
+def strlen_u8(s: Ptr[uint8]) -> uint64:
+    n: uint64 = 0
+    while s[n] != 0:
+        n = n + 1
+    return n
+
+
+def puts(fd: int32, s: Ptr[uint8]):
+    sys_write(fd, s, strlen_u8(s))
+
+
+def putdec(fd: int32, v: uint64):
+    if v == 0:
+        sys_write(fd, "0", 1)
+        return
+    d: Array[24, uint8]
+    i: uint64 = 0
+    while v > 0:
+        d[i] = cast[uint8]((v % 10) + 48)
+        v = v / 10
+        i = i + 1
+    while i > 0:
+        i = i - 1
+        sys_write(fd, &d[i], 1)
+
+
+def why(what: Ptr[uint8]):
+    n: int32 = sys_errstr(&errbuf[0], 158)
+    puts(2, "hkslot: ")
+    puts(2, what)
+    if n > 0:
+        puts(2, ": ")
+        puts(2, &errbuf[0])
+    puts(2, "\n")
+
+
+def streq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return 0
+        i = i + 1
+    if a[i] == b[i]:
+        return 1
+    return 0
+
+
+def target_path() -> Ptr[char]:
+    if active_b != 0:
+        return slot_a_path()
+    return slot_b_path()
+
+
+def target_name() -> Ptr[uint8]:
+    if active_b != 0:
+        return cast[Ptr[uint8]]("hamnix-a.efi")
+    return cast[Ptr[uint8]]("hamnix-b.efi")
+
+
+def active_name() -> Ptr[uint8]:
+    if active_b != 0:
+        return cast[Ptr[uint8]]("hamnix-b.efi")
+    return cast[Ptr[uint8]]("hamnix-a.efi")
+
+
+# --- reading loader.conf ---------------------------------------------------
+#
+# Returns 0 and sets active_b when the file names one of the two slots, -1
+# otherwise. A loader.conf that names something else is NOT quietly treated as
+# slot A: this program would then write over the kernel the machine is
+# actually booting. Refusing is the only safe answer to "I do not know which
+# one is live".
+def read_active() -> int32:
+    fd: int32 = sys_open(lconf_path())
+    if fd < 0:
+        puts(2, "hkslot: cannot read /boot/loader/loader.conf.\n")
+        puts(2, "hkslot: this machine is NOT on the A/B kernel layout -- either "
+                "the ESP is\n")
+        puts(2, "hkslot: not bound at /boot (etc/rc.boot.installed does `bind "
+                "'#esp' /boot`),\n")
+        puts(2, "hkslot: or it was installed from a medium built without "
+                "HAMLINUX_AB_SLOTS=1.\n")
+        puts(2, "hkslot: Nothing was changed.\n")
+        return -1
+    n: int64 = sys_read(fd, &lbuf[0], 1023)
+    sys_close(fd)
+    if n <= 0:
+        puts(2, "hkslot: /boot/loader/loader.conf is empty. Refusing: this "
+                "program cannot\n")
+        puts(2, "hkslot: tell which slot is live, and guessing would overwrite "
+                "the running one.\n")
+        return -1
+    ln: uint64 = cast[uint64](n)
+    lbuf[ln] = 0
+    i: uint64 = 0
+    while i < ln:
+        s: uint64 = i
+        while i < ln and lbuf[i] != 10:
+            i = i + 1
+        e: uint64 = i
+        i = i + 1
+        while s < e and (lbuf[s] == 32 or lbuf[s] == 9):
+            s = s + 1
+        if e - s < 8:
+            continue
+        if lbuf[s] != 100 or lbuf[s+1] != 101 or lbuf[s+2] != 102 \
+           or lbuf[s+3] != 97 or lbuf[s+4] != 117 or lbuf[s+5] != 108 \
+           or lbuf[s+6] != 116:
+            continue
+        p: uint64 = s + 7
+        if lbuf[p] != 32 and lbuf[p] != 9:
+            continue
+        while p < e and (lbuf[p] == 32 or lbuf[p] == 9):
+            p = p + 1
+        q: uint64 = e
+        while q > p and lbuf[q - 1] <= 32:
+            q = q - 1
+        if q <= p:
+            continue
+        lbuf[q] = 0
+        if streq(&lbuf[p], cast[Ptr[uint8]]("hamnix-a.efi")) != 0:
+            active_b = 0
+            return 0
+        if streq(&lbuf[p], cast[Ptr[uint8]]("hamnix-b.efi")) != 0:
+            active_b = 1
+            return 0
+        puts(2, "hkslot: loader.conf's default is `")
+        puts(2, &lbuf[p])
+        puts(2, "', which is neither\n")
+        puts(2, "hkslot: hamnix-a.efi nor hamnix-b.efi. REFUSING -- this "
+                "program cannot tell\n")
+        puts(2, "hkslot: which slot is live, and the wrong guess overwrites "
+                "the running kernel.\n")
+        return -1
+    puts(2, "hkslot: /boot/loader/loader.conf has no `default' line. REFUSING "
+            "for the\n")
+    puts(2, "hkslot: same reason: sd-boot would DISCOVER an entry, and this "
+            "program cannot\n")
+    puts(2, "hkslot: predict which one it picks.\n")
+    return -1
+
+
+# --- the PE check ----------------------------------------------------------
+#
+# NOT a full validation -- it answers exactly one question: does this file
+# contain a Linux kernel? A UKI has a `.linux` section; systemd-boot does not,
+# and neither does a truncated download or an HTML error page a fetch wrote
+# into a file. Pointing firmware at any of those costs the boot, and
+# tests/linux/ab_kernel_slots.sh measured that it really does.
+def rd_u16(b: Ptr[uint8], o: uint64) -> uint64:
+    return cast[uint64](b[o]) + cast[uint64](b[o + 1]) * 256
+
+
+def rd_u32(b: Ptr[uint8], o: uint64) -> uint64:
+    return cast[uint64](b[o]) \
+         + cast[uint64](b[o + 1]) * 256 \
+         + cast[uint64](b[o + 2]) * 65536 \
+         + cast[uint64](b[o + 3]) * 16777216
+
+
+def read_at(fd: int32, off: uint64, buf: Ptr[uint8], n: uint64) -> int32:
+    if sys_lseek(fd, cast[int64](off), SEEK_SET) < 0:
+        return -1
+    got: uint64 = 0
+    while got < n:
+        k: int64 = sys_read(fd, &buf[got], n - got)
+        if k <= 0:
+            return -1
+        got = got + cast[uint64](k)
+    return 0
+
+
+def has_linux_section(fd: int32) -> int32:
+    hdr: Array[8, uint8]
+    if read_at(fd, 60, &hdr[0], 4) != 0:
+        return 0
+    lfa: uint64 = rd_u32(&hdr[0], 0)
+    if lfa < 64 or lfa > 4096:
+        return 0
+    coff: Array[24, uint8]
+    if read_at(fd, lfa, &coff[0], 24) != 0:
+        return 0
+    if coff[0] != 80 or coff[1] != 69 or coff[2] != 0 or coff[3] != 0:
+        return 0
+    nsec: uint64 = rd_u16(&coff[0], 6)
+    optsz: uint64 = rd_u16(&coff[0], 20)
+    if nsec == 0 or nsec > 64:
+        return 0
+    tab: uint64 = lfa + 24 + optsz
+    i: uint64 = 0
+    sh: Array[40, uint8]
+    while i < nsec:
+        if read_at(fd, tab + i * 40, &sh[0], 40) != 0:
+            return 0
+        # ".linux" -- eight bytes, NUL padded.
+        if sh[0] == 46 and sh[1] == 108 and sh[2] == 105 and sh[3] == 110 \
+           and sh[4] == 117 and sh[5] == 120 and sh[6] == 0:
+            return 1
+        i = i + 1
+    return 0
+
+
+# --- hashing ---------------------------------------------------------------
+#
+# Streaming, 256 KiB at a time. A UKI is around 176 MB and this program runs on
+# every machine; a one-shot hash would have meant a 176 MB BSS array.
+def hash_fd(fd: int32, n: uint64) -> int32:
+    if sys_lseek(fd, 0, SEEK_SET) < 0:
+        return -1
+    sha256_reset()
+    got: uint64 = 0
+    while got < n:
+        want: uint64 = n - got
+        if want > IOBUF:
+            want = IOBUF
+        k: int64 = sys_read(fd, &iobuf[0], want)
+        if k <= 0:
+            return -1
+        sha256_update(&iobuf[0], cast[uint64](k))
+        got = got + cast[uint64](k)
+    sha256_final()
+    return 0
+
+
+def copy_hex(dst: Ptr[uint8]):
+    i: uint64 = 0
+    while i < 64:
+        dst[i] = sha256_hex[i]
+        i = i + 1
+    dst[64] = 0
+
+
+def lower_hex_eq(a: Ptr[uint8], b: Ptr[uint8]) -> int32:
+    i: uint64 = 0
+    while i < 64:
+        ca: uint8 = a[i]
+        cb: uint8 = b[i]
+        if ca >= 65 and ca <= 70:
+            ca = ca + 32
+        if cb >= 65 and cb <= 70:
+            cb = cb + 32
+        if ca != cb:
+            return 0
+        i = i + 1
+    return 1
+
+
+# --- the flip --------------------------------------------------------------
+#
+# EXACTLY LOADER_CONF_BYTES BYTES, at offset 0, through an O_SYNC descriptor
+# that cannot create and cannot truncate. The padding is '#' comment bytes,
+# byte-for-byte the shape scripts/hamlinux_disk.sh wrote at build time, so the
+# length never changes and neither does anything FAT records about the file.
+def build_conf(name: Ptr[uint8]) -> int32:
+    lead: Ptr[uint8] = "timeout 0\ndefault "
+    o: uint64 = 0
+    i: uint64 = 0
+    while lead[i] != 0:
+        cbuf[o] = lead[i]
+        o = o + 1
+        i = i + 1
+    i = 0
+    while name[i] != 0:
+        cbuf[o] = name[i]
+        o = o + 1
+        i = i + 1
+    tail: Ptr[uint8] = "\neditor no\n"
+    i = 0
+    while tail[i] != 0:
+        cbuf[o] = tail[i]
+        o = o + 1
+        i = i + 1
+    if o + 1 > LOADER_CONF_BYTES:
+        return -1
+    while o < LOADER_CONF_BYTES - 1:
+        cbuf[o] = 35                                     # '#'
+        o = o + 1
+    cbuf[LOADER_CONF_BYTES - 1] = 10                     # '\n'
+    return 0
+
+
+def write_full(fd: int32, buf: Ptr[uint8], n: uint64) -> int32:
+    done: uint64 = 0
+    while done < n:
+        k: int64 = sys_write(fd, &buf[done], n - done)
+        if k <= 0:
+            return -1
+        done = done + cast[uint64](k)
+    return 0
+
+
+def show_status() -> int32:
+    if read_active() != 0:
+        return 1
+    puts(1, "hkslot: active slot   ")
+    puts(1, active_name())
+    puts(1, "\nhkslot: target slot   ")
+    puts(1, target_name())
+    puts(1, "\n")
+    afd: int32 = sys_open(slot_a_path())
+    if afd >= 0:
+        puts(1, "hkslot: hamnix-a.efi  ")
+        putdec(1, cast[uint64](sys_fd_size(afd)))
+        puts(1, " bytes\n")
+        sys_close(afd)
+    else:
+        puts(1, "hkslot: hamnix-a.efi  ABSENT\n")
+    bfd: int32 = sys_open(slot_b_path())
+    if bfd >= 0:
+        puts(1, "hkslot: hamnix-b.efi  ")
+        putdec(1, cast[uint64](sys_fd_size(bfd)))
+        puts(1, " bytes\n")
+        sys_close(bfd)
+    else:
+        puts(1, "hkslot: hamnix-b.efi  ABSENT -- this medium predates the "
+                "preallocated second slot; hkslot will refuse to update it\n")
+    lfd: int32 = sys_open(lconf_path())
+    if lfd >= 0:
+        puts(1, "hkslot: loader.conf   ")
+        putdec(1, cast[uint64](sys_fd_size(lfd)))
+        puts(1, " bytes (contract: ")
+        putdec(1, LOADER_CONF_BYTES)
+        puts(1, ")\n")
+        sys_close(lfd)
+    return 0
+
+
+def main(argc: int32, argv: Ptr[uint64]) -> int32:
+    dry: int32 = 0
+    src: Ptr[uint8] = 0
+    hexarg: Ptr[uint8] = 0
+    ai: int32 = 1
+    while ai < argc:
+        a: Ptr[uint8] = cast[Ptr[uint8]](argv[cast[uint64](ai)])
+        if streq(a, cast[Ptr[uint8]]("-n")) != 0:
+            dry = 1
+        elif streq(a, cast[Ptr[uint8]]("--status")) != 0:
+            return show_status()
+        elif src == 0:
+            src = a
+        elif hexarg == 0:
+            hexarg = a
+        else:
+            puts(2, "hkslot: usage: hkslot [-n] <uki> [<sha256hex>] | "
+                    "hkslot --status\n")
+            return 2
+        ai = ai + 1
+    if src == 0:
+        puts(2, "hkslot: usage: hkslot [-n] <uki> [<sha256hex>] | "
+                "hkslot --status\n")
+        return 2
+
+    if hexarg != 0:
+        if strlen_u8(hexarg) != 64:
+            puts(2, "hkslot: the expected digest is not 64 hex characters. "
+                    "REFUSING -- a\n")
+            puts(2, "hkslot: malformed digest must not be treated as `no "
+                    "digest given'.\n")
+            return 1
+        hi: uint64 = 0
+        while hi < 64:
+            want_hex[hi] = hexarg[hi]
+            hi = hi + 1
+        want_hex[64] = 0
+
+    if read_active() != 0:
+        return 1
+
+    # --- the source ---------------------------------------------------------
+    sfd: int32 = sys_open(cast[Ptr[char]](src))
+    if sfd < 0:
+        puts(2, "hkslot: cannot read ")
+        puts(2, src)
+        puts(2, "\nhkslot: nothing was changed.\n")
+        return 1
+    ssz: int64 = sys_fd_size(sfd)
+    if ssz <= 0:
+        puts(2, "hkslot: ")
+        puts(2, src)
+        puts(2, " is empty. Refusing.\n")
+        sys_close(sfd)
+        return 1
+    nsrc: uint64 = cast[uint64](ssz)
+    if has_linux_section(sfd) == 0:
+        puts(2, "hkslot: ")
+        puts(2, src)
+        puts(2, " has no PE `.linux' section, so it is NOT a\n")
+        puts(2, "hkslot: kernel image. REFUSING. Pointing firmware at this "
+                "would cost the boot\n")
+        puts(2, "hkslot: (tests/linux/ab_kernel_slots.sh arm II measured "
+                "exactly that).\n")
+        sys_close(sfd)
+        return 1
+
+    # --- the target slot, which must ALREADY EXIST at full length -----------
+    tfd_r: int32 = sys_open(target_path())
+    if tfd_r < 0:
+        puts(2, "hkslot: the inactive slot ")
+        puts(2, target_name())
+        puts(2, " does not exist on this ESP.\n")
+        puts(2, "hkslot: REFUSING. Creating it here would be a "
+                "several-hundred-megabyte FAT\n")
+        puts(2, "hkslot: allocation on a filesystem with no journal, which is "
+                "the exact window\n")
+        puts(2, "hkslot: the A/B layout exists to remove. Both slots are "
+                "preallocated at build\n")
+        puts(2, "hkslot: time by scripts/hamlinux_disk.sh; this medium "
+                "predates that.\n")
+        sys_close(sfd)
+        return 1
+    tsz: int64 = sys_fd_size(tfd_r)
+    if tsz <= 0:
+        puts(2, "hkslot: the inactive slot is zero bytes long. Refusing.\n")
+        sys_close(tfd_r)
+        sys_close(sfd)
+        return 1
+    ntgt: uint64 = cast[uint64](tsz)
+    if nsrc > ntgt:
+        puts(2, "hkslot: the new kernel is ")
+        putdec(2, nsrc)
+        puts(2, " bytes and the slot preallocated for it\n")
+        puts(2, "hkslot: is ")
+        putdec(2, ntgt)
+        puts(2, " bytes. Writing it would EXTEND the file and allocate\n")
+        puts(2, "hkslot: clusters on a journal-less FAT32. REFUSING. Nothing "
+                "was changed and\n")
+        puts(2, "hkslot: this machine boots exactly as it did before; it needs "
+                "re-imaging from\n")
+        puts(2, "hkslot: a medium whose slots are big enough.\n")
+        sys_close(tfd_r)
+        sys_close(sfd)
+        return 1
+
+    # --- the digest, checked BEFORE a single byte is written ----------------
+    if hash_fd(sfd, nsrc) != 0:
+        why(cast[Ptr[uint8]]("hash the new kernel"))
+        sys_close(tfd_r)
+        sys_close(sfd)
+        return 1
+    copy_hex(&src_hex[0])
+    if hexarg != 0:
+        if lower_hex_eq(&src_hex[0], &want_hex[0]) == 0:
+            puts(2, "hkslot: THE NEW KERNEL DOES NOT MATCH ITS DIGEST.\n")
+            puts(2, "hkslot:   signed index says ")
+            puts(2, &want_hex[0])
+            puts(2, "\nhkslot:   the file is      ")
+            puts(2, &src_hex[0])
+            puts(2, "\nhkslot: REFUSING. Nothing was written; this machine "
+                    "boots exactly as it did.\n")
+            sys_close(tfd_r)
+            sys_close(sfd)
+            return 1
+        puts(1, "hkslot: the new kernel matches the digest from the signed "
+                "index.\n")
+    else:
+        puts(2, "hkslot: WARNING: no expected digest given. The read-back "
+                "below still proves\n")
+        puts(2, "hkslot: what LANDED equals what was READ, but nothing here "
+                "proves the source\n")
+        puts(2, "hkslot: is what the repository signed. `hpm` always passes "
+                "one.\n")
+
+    puts(1, "hkslot: active ")
+    puts(1, active_name())
+    puts(1, ", writing ")
+    putdec(1, nsrc)
+    puts(1, " bytes into ")
+    puts(1, target_name())
+    puts(1, " (")
+    putdec(1, ntgt)
+    puts(1, " bytes preallocated)\n")
+
+    if dry != 0:
+        puts(1, "hkslot: -n given; nothing written, loader.conf untouched.\n")
+        sys_close(tfd_r)
+        sys_close(sfd)
+        return 0
+
+    # --- STEP 1: WRITE THE INACTIVE SLOT ------------------------------------
+    #
+    # sys_open_sync is O_WRONLY|O_SYNC and CANNOT create or truncate. If the
+    # power goes here, what survives is a torn INACTIVE slot with loader.conf
+    # still naming the live one -- the state arm I of
+    # tests/linux/ab_kernel_slots.sh boots.
+    wfd: int32 = sys_open_sync(target_path())
+    if wfd < 0:
+        why(cast[Ptr[uint8]]("open the inactive slot for writing"))
+        puts(2, "hkslot: nothing was changed.\n")
+        sys_close(tfd_r)
+        sys_close(sfd)
+        return 1
+    if sys_lseek(sfd, 0, SEEK_SET) < 0:
+        why(cast[Ptr[uint8]]("rewind the new kernel"))
+        sys_close(wfd)
+        sys_close(tfd_r)
+        sys_close(sfd)
+        return 1
+    if sys_lseek(wfd, 0, SEEK_SET) < 0:
+        why(cast[Ptr[uint8]]("rewind the inactive slot"))
+        sys_close(wfd)
+        sys_close(tfd_r)
+        sys_close(sfd)
+        return 1
+    done: uint64 = 0
+    next_mark: uint64 = PROGRESS_EVERY
+    # The guest prints this BEFORE the first byte of the slot and after
+    # nothing else has been written, so a harness that wants to pull the power
+    # in the middle of the copy has a marker that does not move with how long
+    # the boot took. tests/linux/bootsync_installed.sh uses the same trick.
+    puts(1, "hkslot: WRITING\n")
+    while done < nsrc:
+        want: uint64 = nsrc - done
+        if want > IOBUF:
+            want = IOBUF
+        k: int64 = sys_read(sfd, &iobuf[0], want)
+        if k <= 0:
+            puts(2, "hkslot: the new kernel ended early at ")
+            putdec(2, done)
+            puts(2, " bytes.\n")
+            puts(2, "hkslot: THE FLIP WAS NOT DONE, so this machine still "
+                    "boots ")
+            puts(2, active_name())
+            puts(2, ".\n")
+            sys_close(wfd)
+            sys_close(tfd_r)
+            sys_close(sfd)
+            return 1
+        if write_full(wfd, &iobuf[0], cast[uint64](k)) != 0:
+            why(cast[Ptr[uint8]]("write the inactive slot"))
+            puts(2, "hkslot: THE FLIP WAS NOT DONE, so this machine still "
+                    "boots ")
+            puts(2, active_name())
+            puts(2, ".\n")
+            sys_close(wfd)
+            sys_close(tfd_r)
+            sys_close(sfd)
+            return 1
+        done = done + cast[uint64](k)
+        # PROGRESS, AND IT IS NOT COSMETIC.
+        #
+        # On a USB stick this loop runs for minutes with nothing on the
+        # console, which is indistinguishable from a hang to the one person
+        # who most needs to know the difference: somebody watching a laptop
+        # with no shell. And a line printed from INSIDE the loop is the only
+        # marker a harness can use to pull the power in the MIDDLE of the
+        # write rather than after it -- tests/linux/hpm_kernel_update.sh's
+        # first interrupt arm killed the guest two seconds after
+        # "hkslot: WRITING" and the whole 74 MB had already landed, so the arm
+        # measured a machine that was never at risk and said so.
+        if done >= next_mark:
+            puts(1, "hkslot: at ")
+            putdec(1, done)
+            puts(1, " of ")
+            putdec(1, nsrc)
+            puts(1, "\n")
+            next_mark = next_mark + PROGRESS_EVERY
+    sys_close(wfd)
+    sys_close(sfd)
+    puts(1, "hkslot: WROTE ")
+    putdec(1, done)
+    puts(1, " bytes; reading them back off the medium\n")
+
+    # --- STEP 2: READ IT BACK OFF THE DISK ----------------------------------
+    #
+    # Off the MEDIUM, not out of the buffer that was just written. A write
+    # that reported success and landed wrong has happened in this tree before
+    # -- user/bootsync.ad's header records one that printed "committed" while
+    # writing 16 MB into the middle of a live compressed archive.
+    sys_close(tfd_r)
+    vfd: int32 = sys_open(target_path())
+    if vfd < 0:
+        why(cast[Ptr[uint8]]("reopen the slot to verify it"))
+        puts(2, "hkslot: THE FLIP WAS NOT DONE.\n")
+        return 1
+    if hash_fd(vfd, nsrc) != 0:
+        why(cast[Ptr[uint8]]("read the slot back"))
+        sys_close(vfd)
+        puts(2, "hkslot: THE FLIP WAS NOT DONE.\n")
+        return 1
+    sys_close(vfd)
+    if lower_hex_eq(&sha256_hex[0], &src_hex[0]) == 0:
+        puts(2, "hkslot: VERIFICATION FAILED -- what landed in ")
+        puts(2, target_name())
+        puts(2, " is not what\n")
+        puts(2, "hkslot: was written.  wrote ")
+        puts(2, &src_hex[0])
+        puts(2, "\nhkslot:                     read  ")
+        puts(2, &sha256_hex[0])
+        puts(2, "\nhkslot: loader.conf was NOT touched, so this machine boots ")
+        puts(2, active_name())
+        puts(2, " exactly\n")
+        puts(2, "hkslot: as it did a moment ago. Nothing is half-applied.\n")
+        return 1
+    puts(1, "hkslot: the slot reads back at ")
+    puts(1, &src_hex[0])
+    puts(1, "\n")
+
+    # --- STEP 3: THE FLIP, AND IT IS LAST -----------------------------------
+    lfd_r: int32 = sys_open(lconf_path())
+    if lfd_r < 0:
+        why(cast[Ptr[uint8]]("reopen loader.conf"))
+        return 1
+    lsz: int64 = sys_fd_size(lfd_r)
+    sys_close(lfd_r)
+    if cast[uint64](lsz) != LOADER_CONF_BYTES:
+        puts(2, "hkslot: loader.conf is ")
+        putdec(2, cast[uint64](lsz))
+        puts(2, " bytes, not ")
+        putdec(2, LOADER_CONF_BYTES)
+        puts(2, ".\n")
+        puts(2, "hkslot: REFUSING to rewrite it: a write of a different length "
+                "would allocate\n")
+        puts(2, "hkslot: or free a cluster and mutate the FAT chain. The new "
+                "kernel is in the\n")
+        puts(2, "hkslot: inactive slot and this machine still boots ")
+        puts(2, active_name())
+        puts(2, ".\n")
+        return 1
+    if build_conf(target_name()) != 0:
+        puts(2, "hkslot: the new loader.conf does not fit in ")
+        putdec(2, LOADER_CONF_BYTES)
+        puts(2, " bytes.\n")
+        return 1
+    cfd: int32 = sys_open_sync(lconf_path())
+    if cfd < 0:
+        why(cast[Ptr[uint8]]("open loader.conf for writing"))
+        puts(2, "hkslot: THE FLIP WAS NOT DONE; this machine boots ")
+        puts(2, active_name())
+        puts(2, ".\n")
+        return 1
+    if sys_lseek(cfd, 0, SEEK_SET) < 0 \
+       or write_full(cfd, &cbuf[0], LOADER_CONF_BYTES) != 0:
+        why(cast[Ptr[uint8]]("write loader.conf"))
+        sys_close(cfd)
+        # A torn 512-byte write is the worst this can leave, and
+        # tests/linux/ab_kernel_slots.sh arm 8 measured the worst case of the
+        # worst case: a loader.conf zeroed OUTRIGHT still boots, because
+        # sd-boot falls back to discovering the entries.
+        puts(2, "hkslot: loader.conf may be partially written. Both slots hold "
+                "a whole\n")
+        puts(2, "hkslot: kernel, and a damaged loader.conf makes sd-boot "
+                "discover the entries\n")
+        puts(2, "hkslot: rather than fail -- but run `hkslot --status` and "
+                "check.\n")
+        return 1
+    sys_close(cfd)
+
+    # --- STEP 4: read the flip back -----------------------------------------
+    was_b: int32 = active_b
+    if read_active() != 0:
+        puts(2, "hkslot: loader.conf no longer parses after the flip.\n")
+        return 1
+    if active_b == was_b:
+        puts(2, "hkslot: loader.conf STILL names ")
+        puts(2, active_name())
+        puts(2, " after the rewrite. The flip did\n")
+        puts(2, "hkslot: not take. The next boot is the OLD kernel.\n")
+        return 1
+    puts(1, "hkslot: committed. loader.conf now names ")
+    puts(1, active_name())
+    puts(1, "; the next boot runs the new kernel.\n")
+    puts(1, "hkslot: the previous kernel is still whole in the other slot.\n")
+    return 0

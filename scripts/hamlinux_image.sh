@@ -145,6 +145,18 @@ APPS=(
     # loads modules out of the INITRAMFS before the root switch, so until this
     # runs the upgrade has no effect on any boot. Its header is the argument.
     bootsync
+    # THE OTHER HALF OF THAT, AND IT IS HERE FOR THE SAME REASON. bootsync
+    # refreshes the MODULES inside whichever kernel image this machine is set
+    # to boot; it cannot change the kernel itself, and its own header says why
+    # mixing the two into one program is how a module refresh ends up able to
+    # make a machine unbootable. hkslot is the one that changes the kernel: it
+    # writes the INACTIVE A/B slot, reads it back off the medium, and flips the
+    # preallocated 512-byte loader.conf last. A machine whose kernel cannot be
+    # replaced cannot take a security fix in the kernel, and it cannot install
+    # the program that would fix that from a package -- packages are forbidden
+    # to carry any boot/ path (tests/linux/channel_covers_image.sh), because
+    # such a file would land in the ESP.
+    hkslot
     # The clipboard bridge. It is here rather than among the GUI apps because
     # it draws nothing: it is an X CLIENT that owns CLIPBOARD and PRIMARY on
     # the Xwayland inside a distribution namespace and mirrors both against
@@ -795,9 +807,38 @@ echo "[image] staged /usr/share/sounds/test.wav ($(du -h "$ROOT/usr/share/sounds
 # modprobe is available, and write it to /etc/modules as absolute paths; the
 # Adder PID 1 just walks that list. Modules are decompressed because the guest
 # kernel's in-kernel decompressor is not guaranteed to be built in.
-KVER="$(basename "${KERNEL:-}" 2>/dev/null | sed 's/^vmlinuz-//')"
-KERNEL="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
-KVER="$(basename "$KERNEL" | sed 's/^vmlinuz-//')"
+# HAMLINUX_KVER PICKS THE KERNEL, AND IT EXISTS FOR ONE MEASURED REASON.
+#
+# The default is the newest kernel under the host's /boot, and that is right
+# for every build a person makes. It is wrong for a gate that has to produce
+# TWO images from TWO kernels and tell them apart: swapping build/image/vmlinuz
+# afterwards -- what tests/linux/ab_kernel_slots.sh does -- leaves the modules
+# staged for the OTHER kernel, in both the root and the initramfs. The result
+# boots (banner and cmdline both prove the intended kernel ran) and then says
+# `virtio_blk: disagrees about version of symbol` three thousand times, finds
+# no root disk, and drops into the initramfs shell. That is a machine that
+# looks like a broken update and is not one.
+#
+# So the version is a variable. It must name a kernel this host actually has:
+# an unknown one is refused here rather than silently falling back to the
+# default, because falling back is how a two-kernel gate ends up measuring one
+# kernel twice and passing.
+if [ -n "${HAMLINUX_KVER:-}" ]; then
+    KERNEL="/boot/vmlinuz-${HAMLINUX_KVER}"
+    [ -f "$KERNEL" ] || {
+        echo "[image] ERROR: HAMLINUX_KVER=${HAMLINUX_KVER} but $KERNEL does not exist." >&2
+        echo "[image]        This host has: $(ls -1 /boot/vmlinuz-* 2>/dev/null | tr '\n' ' ')" >&2
+        exit 1; }
+    [ -d "/lib/modules/${HAMLINUX_KVER}" ] || {
+        echo "[image] ERROR: HAMLINUX_KVER=${HAMLINUX_KVER} has no /lib/modules/${HAMLINUX_KVER}," >&2
+        echo "[image]        so the image would carry NO modules for the kernel it ships." >&2
+        exit 1; }
+    KVER="${HAMLINUX_KVER}"
+    echo "[image] HAMLINUX_KVER=${KVER}: building against $KERNEL, not the newest"
+else
+    KERNEL="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
+    KVER="$(basename "$KERNEL" | sed 's/^vmlinuz-//')"
+fi
 MODPROBE=/usr/sbin/modprobe
 # vfat is here because the INSTALLER needs it: an ESP is FAT32, and without
 # the driver `bind /dev/sdb1 /n/esp` fails with ENODEV -- which reads like a
@@ -1395,6 +1436,35 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
     # the target's ESP beside BOOTX64.EFI.
     [ -f build/image/disk/UKI.MAP ] \
         && cp build/image/disk/UKI.MAP "$ROOT/boot/UKI.MAP"
+    # THE BOOTLOADER, AND ITS PRESENCE IS WHAT DECIDES THE INSTALLED MACHINE'S
+    # LAYOUT. user/hlinstall.ad:write_ab_layout tests for exactly this file: if
+    # it is here the target gets the A/B kernel layout (sd-boot at the path
+    # firmware runs, two preallocated slots beside it, a 512-byte loader.conf)
+    # and its kernel can be replaced by `hpm update`; if it is not, the target
+    # gets the single-image layout the installer has always written and its
+    # kernel is fixed for the life of the machine.
+    #
+    # IT IS STAGED ONLY WHEN THE MEDIUM ITSELF IS A/B, so there is no third
+    # state: an A/B medium installs an A/B machine, an older medium installs
+    # what it always installed, and no person has to pass a flag to get the
+    # matching pair. HAMLINUX_SDBOOT overrides the path for the same reason
+    # scripts/hamlinux_disk.sh has it.
+    if [ "${HAMLINUX_AB_SLOTS:-0}" = 1 ]; then
+        _SDBOOT="${HAMLINUX_SDBOOT:-/usr/lib/systemd/boot/efi/systemd-bootx64.efi}"
+        if [ -f "$_SDBOOT" ]; then
+            cp "$_SDBOOT" "$ROOT/boot/systemd-bootx64.efi"
+            echo "[image] staged systemd-boot into /boot -- installs from this medium get the A/B kernel layout"
+        else
+            # LOUD. HAMLINUX_AB_SLOTS=1 was asked for and cannot be delivered;
+            # a medium that silently produced non-A/B installs would be
+            # indistinguishable from one that worked until the day somebody
+            # tried to update the kernel.
+            echo "[image] ERROR: HAMLINUX_AB_SLOTS=1 but no systemd-boot at $_SDBOOT." >&2
+            echo "[image]        Installs from this medium would silently produce machines" >&2
+            echo "[image]        whose kernel can never be replaced. Refusing." >&2
+            exit 1
+        fi
+    fi
     cp -L "$(ls -1 /boot/vmlinuz-* | sort -V | tail -1)" "$ROOT/boot/vmlinuz"
     # The initramfs cannot contain the copy of itself we are about to build,
     # so the PREVIOUS one is staged.  Building twice is what makes the staged

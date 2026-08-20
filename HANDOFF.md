@@ -27,6 +27,154 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### `hpm update` REPLACES THE KERNEL ON A RUNNING MACHINE -- 60 / 0, AND THE GUEST WAS KILLED MID-WRITE
+
+**Measured on booted machines, dev host, 2026-08-19, base `befa33c5` (checked
+with `git merge-base --is-ancestor befa33c5 HEAD` -- and the worktree I was
+handed was 61 commits behind it, the TWELFTH consecutive one; its own
+`gitStatus` block named `dbe56404`, which is neither the tip nor on my
+branch). Evidence `~/.hamnix-build/hpmkernel/`: `GATE-60-0-GREEN.log`,
+`CHAIN-HOST.log`, `gate/b1.txt` .. `gate/b8.txt` (the serial log of every
+boot), and the two earlier runs kept because their FAILURES are the point.
+Branch `work/ab-slot-writer`, tag `ab-slot-writer-v1`.**
+
+    tests/linux/hpm_kernel_update.sh          60 PASSED /  0 FAILED   (new)
+    the same gate, run 2 (two harness defects) 50 PASSED /  6 FAILED
+    tests/linux/ab_kernel_slots.sh            32 PASSED /  0 FAILED
+        (it was 30/0; I changed the layout it measures AND inverted one of
+         its assertions, so I re-ran it. The two extra assertions are the
+         slot-length check and the new preallocation check. Its RED arm --
+         HAMLINUX_AB_REDARM=1, previously 15/15 -- was NOT re-run.)
+
+**A MACHINE BOOTED, RAN `hpm update`, AND THE NEXT BOOT WAS A DIFFERENT
+KERNEL, WITH THE OLD ONE STILL WHOLE.** Every write was done ON THE MACHINE.
+
+    boot 1  reads its own ESP: "hkslot: active slot   hamnix-a.efi",
+            authenticates its own Ed25519-signed index, finds kernel 1.0.33
+    boot 2  hpm verifies the artifact against the digest IN THAT INDEX,
+            writes 74 263 040 bytes into the INACTIVE slot, reads them back
+            OFF THE MEDIUM, hashes them, then rewrites loader.conf -- still
+            exactly 512 bytes
+    boot 3  Linux version 6.12.43 ... hamnix.kupdate=NEW
+    boot 4  flipped back by hand: Linux version 6.12.85 -- slot A survived
+
+#### THE DESIGN DECISION, AS THE OWNER MADE IT, AND WHERE IT LANDED
+
+The kernel is a **CHANNEL ARTIFACT**, a top-level `"kernel"` object in the
+index beside `"packages"`, NOT a package tarball. `hpm` reads it in
+`cmd_refresh` **after** the Ed25519 check and **before** the splice, out of
+`ch_fetch_buf` -- the buffer the signature was verified over. The splice keeps
+only `"packages"` and would drop it, so moving that call one line later would
+silently make the kernel the one artifact on the machine with nothing behind
+it. Same signature, same verifier, same trust root as every package's hash.
+
+`lib/sha256.ad` is new: hpm's inline SHA-256, moved out verbatim, so hkslot
+verifies the kernel with the **same** implementation that verifies packages
+rather than a second copy that can drift. It is also streaming, which is what
+lets hkslot hash a 74 MB image it never holds in memory.
+
+#### THE ONE THING THAT DOES NOT WORK, AND IT IS NAMED RATHER THAN SKIPPED
+
+**file:// CHANNELS ONLY.** hpm's fetch layer is buffer-based (TARBALL_CAP 4
+MiB, tar_buf 8 MiB) and `user/http9.ad` has no streaming fetch -- `http_get`
+writes into a caller buffer. A kernel image is an order of magnitude past
+that. An http(s) channel therefore takes a LOUD refusal naming the missing
+piece; nothing is written and nothing reports success. **255.one CANNOT SHIP A
+KERNEL until http9 can stream a response body to a file descriptor.** That is
+the next piece of work and it is a real blocker on the owner's own repo.
+
+#### THE POWER BUTTON, ON A REAL KILLED GUEST THIS TIME
+
+`ab_kernel_slots.sh`'s interruption arm was a MODEL -- the torn slot was
+written from the host, because no on-machine writer existed. hkslot now
+reports progress every 2 MiB, so the harness SIGKILLs QEMU on
+`hkslot: at 2097152 of 74263040`. **The guest died at 6 291 456 of
+74 263 040.** And the tear is CHECKED, not assumed: slot B on the medium is
+neither the old image nor the complete new one, loader.conf still names
+`hamnix-a.efi`, and the machine BOOTS on 6.12.85 with the half-written slot
+beside it.
+
+#### THE NEGATIVE CONTROL IS AN ARM OF THE SAME RUN
+
+A second medium, identical except that **one byte of the artifact is flipped**
+while the still-validly-signed index records the ORIGINAL digest. The machine
+caught it, wrote nothing, `hpm update` exited 1, loader.conf was untouched,
+and the reboot ran the old kernel with no marker on its command line.
+
+#### TWO EARLIER RUNS ARE KEPT BECAUSE EACH FOUND A REAL DEFECT IN THE GATE
+
+**RUN 1: the machine's rc never reached the phase script.**
+`bootsync_installed.sh`'s idiom -- `source '/etc/rc.boot.installed'` and then
+ask your questions -- STOPPED WORKING when `rc.boot.installed` started ending
+in runlevel 5, where `rc.5` BLOCKS in `/bin/hamgreet`. Four assertions failed
+with an EMPTY quoted reason about a machine that had never been asked.
+**`tests/linux/bootsync_installed.sh` HAS THE SAME PATTERN AND WAS NOT
+RE-RUN.** Anybody touching it should expect it to be broken the same way.
+
+**RUN 2 (50 / 6): two defects, both the shape this project keeps paying for.**
+(a) The interrupt arm killed 2 s after `hkslot: WRITING` and all 74 MB had
+already landed -- the arm's own tear check caught it and scored FAILs rather
+than reporting a survived power cut. (b) Boot 3 booted the new kernel and then
+could not find its root: `virtio_blk: disagrees about version of symbol` 3013
+times. `hamlinux_image.sh` stages ONE kernel's modules into both the root and
+the initramfs, so swapping only `build/image/vmlinuz` -- **which is what
+`tests/linux/ab_kernel_slots.sh` does** -- builds a UKI carrying kernel
+6.12.43 and 6.12.85's modules. A HARNESS defect that reads exactly like a
+broken update: the machine came up on the new kernel and was unusable.
+`HAMLINUX_KVER` now selects the kernel and REFUSES an unknown version.
+
+#### WHAT I CHANGED THAT WAS ALREADY GREEN, AND WHY
+
+**`scripts/hamlinux_disk.sh` now PREALLOCATES BOTH SLOTS**, reversing its own
+comment ("writing a duplicate would only double the build's I/O"). That
+reasoned about the BUILD's cost; the cost that matters is the UPDATE's. An
+empty slot means the first update CREATES a ~74 MB file -- thousands of FAT
+clusters, no journal, power button live -- which is the window this layout
+exists to remove, renamed rather than closed. With it preallocated, hkslot
+opens `O_WRONLY|O_SYNC` with **no `O_CREAT`** and overwrites in place: the
+update path contains no metadata write at all.
+
+**So `ab_kernel_slots.sh`'s "slot B is not written on a fresh medium"
+assertion is INVERTED**, deliberately, with the old text left above it. **IT
+WAS RE-RUN: 32 PASSED / 0 FAILED** (evidence
+`~/.hamnix-build/abkernel/GATE-rerun.log`), and its arm II still measures that
+a loader.conf pointed at an incomplete slot COSTS THE BOOT -- which is what
+makes "flip last" a fact rather than a preference. **Its RED arm
+(`HAMLINUX_AB_REDARM=1`, previously 15/15) was NOT re-run.**
+
+`tests/linux/channel_covers_image.sh`'s `boot/` table entry used to end "the
+KERNEL BINARY and the INITRAMFS USERLAND sealed in the UKI ARE NOT UPDATABLE.
+An installed machine boots the kernel it was installed with, and `hpm update`
+neither replaces it nor fails." That is no longer true and the sentence is
+corrected in place with the old wording quoted. **THAT GATE WAS NOT RE-RUN
+EITHER** -- the change is inside a prose field, but a prose field this gate
+parses out of a tab-separated table.
+
+#### WHAT IS STILL NOT DONE
+
+1. **`user/hlinstall.ad`'s A/B path is COMPILE-CHECKED ONLY.** It now writes
+   sd-boot, two preallocated slots and a 512-byte loader.conf onto the target
+   when the medium carries `/boot/systemd-bootx64.efi` (staged only for
+   `HAMLINUX_AB_SLOTS=1` media, so an A/B medium installs an A/B machine and
+   nothing is opt-in for a person). sd-boot goes on LAST and a failure repairs
+   BOOTX64.EFI back to the kernel image. **Nothing has run it.**
+   `tests/linux/install_from_usb.sh` is the gate that would answer it.
+2. **`hpm update` still REFUSES OUTRIGHT when there is no package database**,
+   before it reaches the kernel at all. That refusal is loud and deliberate
+   and predates this work, but it means a machine with no `installed.json`
+   cannot take a kernel update either. Whether the kernel should be checked
+   before that refusal is a decision I did not make on the owner's behalf.
+3. **`HAMLINUX_AB_SLOTS` IS STILL A FLAG, AND I THINK IT SHOULD STOP BEING
+   ONE -- but not on this commit.** The argument for flipping it: a machine
+   built without it cannot ever change its kernel, and that is not a default
+   anybody would choose. The argument for not flipping it TODAY: the default
+   controls `bootsync_installed.sh`, `channel_covers_image.sh` and every
+   install gate, none of which were re-run here, and `verify_medium.sh` still
+   asserts the single-image shape. Flipping the default is a one-line change
+   whose cost is re-running those; doing it in the same commit as the
+   mechanism would have made a red in any of them unattributable.
+
+
 ### THE KERNEL IS REPLACEABLE NOW -- 30 / 0, THE RED ARM IS 15 / 15, AND THE PROMPT'S SPACE ARGUMENT IS ABOUT THE WRONG PARTITION
 
 **Measured on booted machines, dev host, 2026-08-19, base `ee1461d0` (checked

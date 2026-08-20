@@ -442,6 +442,143 @@ def copy_file(src: Ptr[char], dst: Ptr[char]) -> int32:
     return rc
 
 
+# --- THE A/B KERNEL LAYOUT, WHEN THIS MEDIUM CARRIES ONE -------------------
+#
+# THE INSTALLED MACHINE INHERITS THE MEDIUM'S LAYOUT. IT IS NOT A FLAG.
+#
+# Until this function an A/B medium installed a NON-A/B machine. The copy in
+# the caller writes /boot/BOOTX64.EFI -- the unified kernel image, staged into
+# the live root by scripts/hamlinux_image.sh's HAMLINUX_INSTALLER=1 arm --
+# onto the target's \EFI\BOOT\BOOTX64.EFI, and nothing else. That machine
+# boots and works, and its kernel can NEVER BE REPLACED: user/hkslot.ad
+# refuses on a target with no \loader\loader.conf, which is the honest outcome
+# and is also a machine that cannot take a kernel security fix for the rest of
+# its life.
+#
+# Whether the target gets A/B is decided by ONE FACT ABOUT THE MEDIUM: does it
+# carry /boot/systemd-bootx64.efi? scripts/hamlinux_image.sh stages that file
+# only when the medium was itself built with HAMLINUX_AB_SLOTS=1. So there is
+# no third state to reason about and no flag for a person to get wrong. An A/B
+# medium installs an A/B machine; an older medium installs exactly what it
+# installs today, by the code that has always run.
+#
+# WHAT IS WRITTEN:
+#   \EFI\BOOT\BOOTX64.EFI    systemd-boot -- OVERWRITING the kernel image the
+#                            caller just put there. Written once, here, and
+#                            never again by anything on the machine.
+#   \EFI\Linux\hamnix-a.efi  the kernel image.
+#   \EFI\Linux\hamnix-b.efi  THE SAME BYTES AGAIN. Both slots are preallocated
+#                            at full length so hkslot only ever OVERWRITES IN
+#                            PLACE (O_WRONLY|O_SYNC, no O_CREAT): no cluster
+#                            is allocated at update time and the FAT chain is
+#                            never mutated. scripts/hamlinux_disk.sh makes the
+#                            identical argument at build time.
+#   \loader\loader.conf      512 bytes naming hamnix-a.efi, padded with '#'.
+#                            The LENGTH is a contract: hkslot rewrites this
+#                            file at exactly this length and refuses if it is
+#                            not this length.
+#
+# AND IT IS ALL-OR-NOTHING. A target with systemd-boot at BOOTX64.EFI and no
+# entries beside it is a machine that DOES NOT BOOT -- strictly worse than the
+# old layout. So the slots and loader.conf are written FIRST and sd-boot goes
+# in LAST, and any failure before that point restores the kernel image to
+# BOOTX64.EFI and leaves the machine with the layout it would have had before
+# this function existed. That fallback is loud.
+#
+# NOT MEASURED ON A BOOTED MACHINE. tests/linux/hpm_kernel_update.sh boots
+# media built by scripts/hamlinux_disk.sh, not machines installed by this
+# program; driving an install end to end is tests/linux/install_from_usb.sh,
+# which was not re-run for this. What IS measured is that the layout this
+# writes is the layout hkslot and sd-boot were measured against, because the
+# byte-level shape below is the same one hamlinux_disk.sh writes.
+AB_LOADER_CONF_BYTES: uint64 = 512
+ab_conf: Array[512, uint8]
+
+
+def ab_write_loader_conf(path: Ptr[char]) -> int32:
+    lead: Ptr[uint8] = "timeout 0\ndefault hamnix-a.efi\neditor no\n"
+    o: uint64 = 0
+    while lead[o] != 0:
+        ab_conf[o] = lead[o]
+        o = o + 1
+    while o < AB_LOADER_CONF_BYTES - 1:
+        ab_conf[o] = 35                                  # '#'
+        o = o + 1
+    ab_conf[AB_LOADER_CONF_BYTES - 1] = 10               # '\n'
+    fd: int32 = sys_open_write(path)
+    if fd < 0:
+        return -1
+    if sys_write(fd, &ab_conf[0], AB_LOADER_CONF_BYTES) \
+       != cast[int64](AB_LOADER_CONF_BYTES):
+        sys_close(fd)
+        return -1
+    sys_close(fd)
+    return 0
+
+
+def write_ab_layout():
+    probe: int32 = sys_open(cast[Ptr[char]]("/boot/systemd-bootx64.efi"))
+    if probe < 0:
+        # THE ORDINARY CASE ON AN OLDER MEDIUM, AND IT IS SAID OUT LOUD.
+        # A note, not a warning: nothing about this install is wrong. But the
+        # machine that comes out of it cannot change its kernel, and the
+        # person doing the installing is the only one who can decide whether
+        # that matters to them.
+        puts(1, "hlinstall: NOTE: this medium carries no bootloader, so the "
+                "installed machine\n")
+        puts(1, "hlinstall:       gets the single-image boot layout: one "
+                "kernel at\n")
+        puts(1, "hlinstall:       \\EFI\\BOOT\\BOOTX64.EFI, and `hkslot` will "
+                "refuse to update it.\n")
+        puts(1, "hlinstall:       Build the medium with HAMLINUX_AB_SLOTS=1 "
+                "for a machine\n")
+        puts(1, "hlinstall:       whose kernel `hpm update` can replace.\n")
+        return
+    sys_close(probe)
+    sys_mkdir(cast[Ptr[char]]("/n/esp/EFI/Linux"))
+    sys_mkdir(cast[Ptr[char]]("/n/esp/loader"))
+    ok: int32 = 1
+    if copy_file(cast[Ptr[char]]("/boot/BOOTX64.EFI"),
+                 cast[Ptr[char]]("/n/esp/EFI/Linux/hamnix-a.efi")) != 0:
+        ok = 0
+    if ok != 0 and copy_file(cast[Ptr[char]]("/boot/BOOTX64.EFI"),
+                             cast[Ptr[char]]("/n/esp/EFI/Linux/hamnix-b.efi")) != 0:
+        ok = 0
+    if ok != 0 and ab_write_loader_conf(
+            cast[Ptr[char]]("/n/esp/loader/loader.conf")) != 0:
+        ok = 0
+    # SD-BOOT IS LAST. Until this line the target's BOOTX64.EFI is still the
+    # kernel image the caller copied, so every failure above leaves a machine
+    # that boots exactly as it would have without this function -- with two
+    # unused files beside it, which cost space and nothing else.
+    if ok != 0 and copy_file(cast[Ptr[char]]("/boot/systemd-bootx64.efi"),
+                             cast[Ptr[char]]("/n/esp/EFI/BOOT/BOOTX64.EFI")) != 0:
+        # THE ONE FAILURE THAT CAN LEAVE A HALF-STATE, so it is repaired
+        # rather than reported. A partially written sd-boot at the path
+        # firmware executes is the machine that does not boot.
+        copy_file(cast[Ptr[char]]("/boot/BOOTX64.EFI"),
+                  cast[Ptr[char]]("/n/esp/EFI/BOOT/BOOTX64.EFI"))
+        ok = 0
+    if ok == 0:
+        puts(2, "hlinstall: WARNING: the A/B kernel layout could NOT be "
+                "written onto this\n")
+        puts(2, "hlinstall:          target. The machine has the "
+                "single-image layout instead:\n")
+        puts(2, "hlinstall:          it boots and works, and its kernel "
+                "cannot be replaced.\n")
+        puts(2, "hlinstall:          The most likely cause is an ESP too "
+                "small for two copies\n")
+        puts(2, "hlinstall:          of the kernel image -- try `install "
+                "--esp-mb 1024`.\n")
+        return
+    puts(1, "hlinstall: A/B kernel layout written: sd-boot at "
+            "\\EFI\\BOOT\\BOOTX64.EFI, both\n")
+    puts(1, "hlinstall:   slots preallocated at \\EFI\\Linux\\hamnix-{a,b}.efi, "
+            "loader.conf at\n")
+    puts(1, "hlinstall:   512 bytes naming slot A. `hpm update` can replace "
+            "this machine's kernel.\n")
+
+
 # THE INSTALLED MACHINE'S /etc/rc.boot IS AN INDIRECTION, NOT A COPY.
 #
 # It used to be a byte-for-byte copy of /etc/rc.boot.installed, and that made
@@ -1361,6 +1498,7 @@ def main(argc: int32, argv: Ptr[uint64]) -> int32:
         puts(2, "hlinstall: this live image was not built with the boot "
                 "files (HAMLINUX_INSTALLER=1).\n")
         return 1
+    write_ab_layout()
     copy_file(cast[Ptr[char]]("/boot/vmlinuz"),
               cast[Ptr[char]]("/n/esp/vmlinuz"))
     copy_file(cast[Ptr[char]]("/boot/initramfs.cpio.gz"),

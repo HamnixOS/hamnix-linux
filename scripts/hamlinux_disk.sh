@@ -646,10 +646,40 @@ if [ "${HAMLINUX_AB_SLOTS:-0}" = 1 ]; then
     #     512-byte write can leave: the machine still boots, because
     #     sd-boot falls back to discovering the entries. MEASURED.
     #
-    # SLOT B IS NOT WRITTEN HERE. A freshly built medium has one kernel;
-    # the second slot is empty space that the first kernel update fills.
-    # Writing a duplicate would only double the build's I/O to ship two
-    # copies of one identical image.
+    # BOTH SLOTS ARE WRITTEN HERE, AND THAT IS A CORRECTION OF THIS FILE.
+    #
+    # It used to say: "SLOT B IS NOT WRITTEN HERE. A freshly built medium
+    # has one kernel; the second slot is empty space that the first kernel
+    # update fills. Writing a duplicate would only double the build's I/O
+    # to ship two copies of one identical image."
+    #
+    # That was reasoning about the BUILD's cost, and the cost that matters
+    # is the UPDATE's. An empty slot means the first kernel update has to
+    # CREATE a ~176 MB file, which on journal-less FAT32 means allocating
+    # several thousand clusters and mutating the FAT chain -- with the
+    # power button live the entire time. That is the identical window this
+    # whole layout exists to remove; moving it from BOOTX64.EFI to
+    # hamnix-b.efi does not close it, it only renames it.
+    #
+    # With the slot preallocated, user/hkslot.ad opens it with
+    # sys_open_sync -- O_WRONLY|O_SYNC, no O_CREAT, no O_TRUNC -- and
+    # OVERWRITES IN PLACE. No cluster is allocated at update time, the FAT
+    # chain is never mutated, and no directory entry's length or starting
+    # cluster ever changes. The update path then contains no metadata
+    # write at all, which is the only reason FAT's lack of a journal is a
+    # non-issue. Same argument as the preallocated boot log
+    # (user/bootlogd.ad) and the preallocated loader.conf below.
+    #
+    # IT IS A COPY OF SLOT A RATHER THAN ZEROS, and that is deliberate:
+    # a machine off a fresh medium then has TWO whole bootable kernels
+    # from the first second, so `hkslot` can be run, interrupted, and run
+    # again without there ever being a slot that is not a kernel. A
+    # zero-filled placeholder would be a file sd-boot could enumerate and
+    # fail on.
+    #
+    # THE COST IS PAID IN ESP SPACE AND IT WAS ALREADY BUDGETED: ESP_NEED
+    # above already adds a whole UKI when HAMLINUX_AB_SLOTS=1, because the
+    # partition was always sized for two slots. Only the bytes are new.
     SDBOOT="${HAMLINUX_SDBOOT:-/usr/lib/systemd/boot/efi/systemd-bootx64.efi}"
     [ -f "$SDBOOT" ] || {
         echo "[disk] ERROR: HAMLINUX_AB_SLOTS=1 needs systemd-boot at $SDBOOT" >&2
@@ -657,6 +687,19 @@ if [ "${HAMLINUX_AB_SLOTS:-0}" = 1 ]; then
     mmd -i "$ESP" ::/EFI/Linux ::/loader
     mcopy -i "$ESP" "$SDBOOT" ::/EFI/BOOT/BOOTX64.EFI
     mcopy -i "$ESP" "$UKI" ::/EFI/Linux/hamnix-a.efi
+    mcopy -i "$ESP" "$UKI" ::/EFI/Linux/hamnix-b.efi
+    # Both slots must be the SAME LENGTH, or the update that lands in the
+    # shorter one refuses (user/hkslot.ad will not extend a file). mcopy
+    # reporting success is not the same as the bytes being there, and a
+    # short slot B would only surface on the day of the first kernel
+    # update -- on a machine, with no shell.
+    AB_ASZ=$(mdir -/ -i "$ESP" ::/EFI/Linux/hamnix-a.efi | awk '/^hamnix-a/ {print $3}' | tail -1)
+    AB_BSZ=$(mdir -/ -i "$ESP" ::/EFI/Linux/hamnix-b.efi | awk '/^hamnix-b/ {print $3}' | tail -1)
+    [ -n "$AB_ASZ" ] && [ "$AB_ASZ" = "$AB_BSZ" ] || {
+        echo "[disk] ERROR: the two kernel slots are $AB_ASZ and $AB_BSZ bytes on the ESP." >&2
+        echo "[disk]        They must be identical: hkslot overwrites in place and" >&2
+        echo "[disk]        REFUSES to extend a slot. The ESP is probably too small." >&2
+        exit 1; }
     # loader.conf at EXACTLY LOADER_CONF_BYTES, padded with comment lines.
     # The length is a contract: whatever flips the slot rewrites this file
     # at the same length and must never change it.
@@ -674,8 +717,8 @@ if [ "${HAMLINUX_AB_SLOTS:-0}" = 1 ]; then
         echo "[disk] ERROR: loader.conf is $(stat -Lc%s "$LCONF") bytes, not $LOADER_CONF_BYTES." >&2
         exit 1; }
     mcopy -i "$ESP" "$LCONF" ::/loader/loader.conf
-    echo "[disk] A/B: sd-boot at EFI/BOOT/BOOTX64.EFI, slot A at" \
-         "EFI/Linux/hamnix-a.efi, slot B reserved, loader.conf ${LOADER_CONF_BYTES}B"
+    echo "[disk] A/B: sd-boot at EFI/BOOT/BOOTX64.EFI, slots A and B both" \
+         "PREALLOCATED at $AB_ASZ bytes, loader.conf ${LOADER_CONF_BYTES}B"
 else
     mcopy -i "$ESP" "$UKI" ::/EFI/BOOT/BOOTX64.EFI
 fi

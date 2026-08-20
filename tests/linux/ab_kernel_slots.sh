@@ -296,19 +296,41 @@ LCLEN=$(stat -Lc%s "$WORK/lc.bin" 2>/dev/null || echo 0)
     || bad "loader.conf is $LCLEN bytes, not $LOADER_CONF_BYTES -- a flip would mutate the FAT chain"
 grep -q 'default hamnix-a.efi' "$WORK/lc.bin" \
     && ok "loader.conf names slot A" || bad "loader.conf does not name slot A"
-if esp_get "$WORK/pristine.img" /EFI/Linux/hamnix-b.efi "$WORK/should_not_exist.bin"; then
-    bad "slot B is ALREADY written on a fresh medium -- it should be empty space"
-else
-    ok "slot B is not written on a fresh medium; it is the room the first update fills"
-fi
-# The room has to actually be there, or the first update fails on a full ESP.
+# THIS ASSERTION WAS INVERTED ON 2026-08-19 AND THE OLD TEXT IS LEFT HERE.
+#
+# It used to be:
+#
+#   if esp_get ... /EFI/Linux/hamnix-b.efi ...; then
+#       bad "slot B is ALREADY written on a fresh medium -- it should be empty space"
+#   else
+#       ok "slot B is not written on a fresh medium; it is the room the first update fills"
+#   fi
+#
+# and it passed, against a build that deliberately left slot B unwritten. What
+# changed is not the measurement but the design: "the room the first update
+# fills" means the first update CREATES a ~74 MB file, which on journal-less
+# FAT32 allocates thousands of clusters and mutates the FAT chain with the
+# power button live -- the identical window this layout exists to remove,
+# moved rather than closed. scripts/hamlinux_disk.sh now preallocates both
+# slots, and user/hkslot.ad opens the inactive one with O_WRONLY|O_SYNC and NO
+# O_CREAT, so it CANNOT create or extend anything.
+esp_get "$WORK/pristine.img" /EFI/Linux/hamnix-b.efi "$WORK/slot_b_onesp.bin" \
+    && ok "slot B is PREALLOCATED on a fresh medium -- an update overwrites it in place and allocates no cluster" \
+    || bad "slot B is absent on a fresh medium; hkslot would refuse to create it"
+SZA=$(stat -Lc%s "$WORK/slot_a_onesp.bin" 2>/dev/null || echo 0)
+SZB=$(stat -Lc%s "$WORK/slot_b_onesp.bin" 2>/dev/null || echo 0)
+info "slot A is $SZA bytes, slot B is $SZB bytes"
+[ "$SZA" != 0 ] && [ "$SZA" = "$SZB" ] \
+    && ok "the two slots are the SAME LENGTH, so an update into either one never extends a file" \
+    || bad "the slots are $SZA and $SZB bytes -- an update into the shorter one would extend it"
+# The room for BOTH has to actually be there, or the medium is a lie.
 FREE=$(mdir -i "$WORK/pristine.img@@$(esp_off "$WORK/pristine.img")" :: 2>/dev/null \
        | grep -oE '[0-9 ]+ bytes free' | tr -d ' a-z')
 NEED=$(stat -Lc%s "$WORK/uki_b.efi")
-info "ESP free: $FREE bytes; a second slot needs $NEED bytes"
-[ -n "$FREE" ] && [ "$FREE" -ge "$NEED" ] \
-    && ok "the ESP has room for the second slot WITHOUT growing the partition" \
-    || bad "the ESP does not have room for a second slot (free=$FREE need=$NEED)"
+info "ESP free after BOTH slots: $FREE bytes; one slot is $NEED bytes"
+[ -n "$FREE" ] && [ "$FREE" -ge 0 ] \
+    && ok "the ESP held both slots WITHOUT growing the partition (free=$FREE)" \
+    || bad "could not read the ESP's free space"
 
 # --- 2. BOOT 1 --------------------------------------------------------------
 say "2. BOOT 1 -- the machine as built, before any update"
