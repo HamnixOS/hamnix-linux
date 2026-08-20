@@ -312,6 +312,22 @@ say "local channel served at $BASE (pid $HTTPD)"
 # boots without destroying the persistence the reboot exists to prove.
 mkdir -p "$EXTRA/etc"
 
+# AND BOTH STOP AT RUNLEVEL 3, WHICH IS NEW AND IS NOT A CONVENIENCE.
+# rc.boot.installed ends by sourcing /etc/rc.d/rc.5, which since ee1461d0 runs
+# /bin/hamgreet IN THE FOREGROUND. MEASURED here on 2026-08-19 at 12dfb71b:
+# 7 PASSED / 36 FAILED, boot 1 timing out after 900 s with its serial log
+# ending at `hamgreet: the graphical login is presenting' -- nothing after the
+# source above had run, and most of the 36 reasons read `got: ' with NOTHING
+# after them. A red that reads as an instrument fault.
+#
+# Nothing in this gate is about a desktop: every question it asks is `hpm', a
+# binary, a checksum or a uid. So the medium carries /etc/rc.runlevel and the
+# greeter never runs. It is staged HERE rather than written by rc.phase1 so
+# that the reboot into rc.phase2 gets it too, and so that no boot depends on a
+# write to /etc having succeeded. See etc/rc.boot.installed for the mechanism
+# and for what it deliberately is not.
+printf 'hamnix_runlevel = 3\n' > "$EXTRA/etc/rc.runlevel"
+
 cat > "$WORK/rc.phase1" <<RC
 source '/etc/rc.boot.installed'
 
