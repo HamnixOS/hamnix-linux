@@ -27,6 +27,63 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE GREETER I MERGED MAY HAVE BROKEN A TESTING IDIOM 29 FILES USE -- MEASURED WHERE I COULD, AND EXPLICITLY BOUNDED WHERE I COULD NOT
+
+**2026-08-19, orchestrator-side, read-only. Nothing booted.** This is a
+regression risk introduced by work I merged, found by an agent that tripped over
+it and reported it rather than working around it silently.
+
+**THE MECHANISM.** `etc/rc.boot.installed:190` ends with `source '/etc/rc.d/rc.5'`,
+and `rc.5` now runs **`hamgreet` in the FOREGROUND** — that is the whole point of
+the graphical login, and it is correct. But the tree's standard gate idiom is:
+
+> write a machine rc that **sources `/etc/rc.boot.installed`** and then **asks its
+> own questions afterwards**
+
+Anything appended after that source now sits behind a login prompt that never
+returns unless somebody authenticates. **When the previous agent hit this, four
+assertions failed with an EMPTY QUOTED REASON** — the worst possible shape,
+because an empty reason reads as an instrument fault rather than a real red.
+
+**HOW WIDE: 29 files under `tests/linux/` plus two scripts reference the idiom.
+I DID NOT CONCLUDE 29 GATES ARE BROKEN, and the reason is a mistake I have
+already made once** — I previously briefed that "eight gates assert about a dead
+path", and retiring them would have destroyed eight working gates. Referencing
+the idiom is not the same as being broken by it.
+
+**WHAT DECIDES IT is whether a gate appends work AFTER the source.** Spot-checked
+five, verbatim from the line following:
+
+| gate | first line after the source | verdict |
+|---|---|---|
+| `bootsync_installed.sh` | `echo 'A23E-BEGIN'` | **at risk** (and the agent hit exactly this) |
+| `installed_update.sh` | `echo '[iupd] ===== PHASE 1: ...'` | **at risk** |
+| `installed_documents.sh` | a `for a in $APPS` loop | **at risk** |
+| `hpm_kernel_update.sh` | (nothing follows) | fine |
+| `graphical_login.sh` | `echo 'HGT-RC5-RETURNED'` + a phase test | fine — **written for the new world** |
+
+**WHAT IS NOT ESTABLISHED, and it is most of the population:** I checked five of
+thirty-one. The other twenty-six are **UNKNOWN**, not "fine". And none of the
+three at-risk gates above has been RE-RUN since the greeter landed at `ee1461d0`
+— `installed_documents`' last green (48/0) was measured on `3751deca`, which is
+before it. **A green measured before a merge is a fact about the old tree**, which
+is the same provenance error I made with `test_gate_registration`.
+
+**WHY THIS IS URGENT RATHER THAN INTERESTING:** these are registered gates. The
+next release run will execute them, and a gate that blocks in a login prompt does
+not fail cleanly — it times out, and it may report an empty reason. **A release
+driver cannot tell "the subject regressed" from "the harness is waiting at a
+password prompt".**
+
+**THE FIX IS NOT TO REVERT THE GREETER.** `graphical_login.sh` already
+demonstrates the shape that works: source it, then test whether `rc.5` returned,
+and branch. Either the gate rc opts out of runlevel 5 (as `installed_fresh_login`
+and the greeter's own gate do), or it authenticates, or `rc.boot.installed` grows
+a documented way to stop short of `rc.5`. **Whoever takes this should run the
+three at-risk gates FIRST and find out whether they are actually red**, because
+this whole entry is a source reading and the tree has refuted my source readings
+before.
+
 ### `hpm update` REPLACES THE KERNEL ON A RUNNING MACHINE -- 60 / 0, AND THE GUEST WAS KILLED MID-WRITE
 
 **Measured on booted machines, dev host, 2026-08-19, base `befa33c5` (checked
