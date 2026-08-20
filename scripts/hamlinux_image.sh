@@ -807,9 +807,38 @@ echo "[image] staged /usr/share/sounds/test.wav ($(du -h "$ROOT/usr/share/sounds
 # modprobe is available, and write it to /etc/modules as absolute paths; the
 # Adder PID 1 just walks that list. Modules are decompressed because the guest
 # kernel's in-kernel decompressor is not guaranteed to be built in.
-KVER="$(basename "${KERNEL:-}" 2>/dev/null | sed 's/^vmlinuz-//')"
-KERNEL="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
-KVER="$(basename "$KERNEL" | sed 's/^vmlinuz-//')"
+# HAMLINUX_KVER PICKS THE KERNEL, AND IT EXISTS FOR ONE MEASURED REASON.
+#
+# The default is the newest kernel under the host's /boot, and that is right
+# for every build a person makes. It is wrong for a gate that has to produce
+# TWO images from TWO kernels and tell them apart: swapping build/image/vmlinuz
+# afterwards -- what tests/linux/ab_kernel_slots.sh does -- leaves the modules
+# staged for the OTHER kernel, in both the root and the initramfs. The result
+# boots (banner and cmdline both prove the intended kernel ran) and then says
+# `virtio_blk: disagrees about version of symbol` three thousand times, finds
+# no root disk, and drops into the initramfs shell. That is a machine that
+# looks like a broken update and is not one.
+#
+# So the version is a variable. It must name a kernel this host actually has:
+# an unknown one is refused here rather than silently falling back to the
+# default, because falling back is how a two-kernel gate ends up measuring one
+# kernel twice and passing.
+if [ -n "${HAMLINUX_KVER:-}" ]; then
+    KERNEL="/boot/vmlinuz-${HAMLINUX_KVER}"
+    [ -f "$KERNEL" ] || {
+        echo "[image] ERROR: HAMLINUX_KVER=${HAMLINUX_KVER} but $KERNEL does not exist." >&2
+        echo "[image]        This host has: $(ls -1 /boot/vmlinuz-* 2>/dev/null | tr '\n' ' ')" >&2
+        exit 1; }
+    [ -d "/lib/modules/${HAMLINUX_KVER}" ] || {
+        echo "[image] ERROR: HAMLINUX_KVER=${HAMLINUX_KVER} has no /lib/modules/${HAMLINUX_KVER}," >&2
+        echo "[image]        so the image would carry NO modules for the kernel it ships." >&2
+        exit 1; }
+    KVER="${HAMLINUX_KVER}"
+    echo "[image] HAMLINUX_KVER=${KVER}: building against $KERNEL, not the newest"
+else
+    KERNEL="$(ls -1 /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"
+    KVER="$(basename "$KERNEL" | sed 's/^vmlinuz-//')"
+fi
 MODPROBE=/usr/sbin/modprobe
 # vfat is here because the INSTALLER needs it: an ESP is FAT32, and without
 # the driver `bind /dev/sdb1 /n/esp` fails with ENODEV -- which reads like a
