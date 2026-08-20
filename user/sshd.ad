@@ -95,6 +95,11 @@ extern def sys_fdbind(pid: int32, fdnum: int32, kind: int32, slot: int32) -> int
 # sys_open the scratch /fd/N names it wires the session pipes through.
 extern def sys_bind(newp: Ptr[char], oldp: Ptr[char], flag: int32) -> int32
 extern def sys_get_jiffies() -> uint64
+# The tree's portable park (user/sleep.ad, lib/hamscreen.ad, user/dhcpc.ad):
+# with nfds == 0 it is a pure timed sleep that takes the task OFF the
+# runqueue. `fds` is never dereferenced at nfds == 0.
+extern def sys_waitfds(fds: Ptr[int32], nfds: uint64,
+                       timeout_ms: int64) -> int64
 extern def sys_getpid() -> int32
 extern def sys_yield() -> int32
 
@@ -2086,11 +2091,16 @@ def _bridge_session() -> int32:
             idle_loops = 0
         else:
             idle_loops = idle_loops + 1
-            # Idle: a brief jiffy-based sleep so we don't busy-spin.
+            # Idle: park briefly so we don't busy-spin.
             _short_sleep()
             # Bound the total idle time so a wedged session can't pin
-            # the daemon forever (~10 min of pure idle).
-            if idle_loops > 60000:
+            # the daemon for ever. DERIVED from the park above rather
+            # than written as a bare count: the previous bare 60000 was
+            # commented "~10 min" and was measured at well under one
+            # second, because the "sleep" it counted did not sleep.
+            # 30 minutes of a person not typing is not a wedged session.
+            if idle_loops > cast[uint32]((30 * 60 * 1000) /
+                                         BRIDGE_IDLE_MS):
                 break
 
     # Close every pipe fd this bridge still owns, regardless of which
@@ -2165,25 +2175,42 @@ def _await_peer_close():
             waited = waited + 1
 
 
+# Milliseconds the bridge parks for on an idle poll. The idle BOUND below
+# is expressed in these units, so the two cannot drift apart again.
+BRIDGE_IDLE_MS: int64 = 10
+
+
 def _short_sleep():
-    # Idle-poll throttle for the bridge loop. Hamnix multitasks
-    # COOPERATIVELY — there is no working timer preemption, so a task
-    # only ever loses the CPU inside a blocking syscall or an explicit
-    # SYS_YIELD. The bridge is a non-blocking poll loop (SYS_READ_NB on
-    # both the socket and the pipe), so without an explicit yield here
-    # sshd would monopolise the CPU and the very shell it is bridging
-    # to — hamsh, plus every command hamsh spawns — would be STATE_READY
-    # but never scheduled, and no command output would ever come back.
+    # Idle-poll throttle for the bridge loop: a REAL park, not a spin.
     #
-    # sys_yield() drops the CPU to any other ready task; when nobody
-    # else wants it the kernel does an sti/hlt/cli so UART RX and the
-    # virtio-net IRQ still make progress. We call it a few times so a
-    # multi-stage hamsh pipeline (hamsh -> cmd -> ...) gets several
-    # scheduling turns per idle bridge iteration before we poll again.
-    i: uint64 = 0
-    while i < 4:
-        sys_yield()
-        i = i + 1
+    # WHAT THIS USED TO BE AND WHY IT WAS WRONG. It was four sys_yield()
+    # calls, justified by "Hamnix multitasks COOPERATIVELY — there is no
+    # working timer preemption". On the Linux lane that premise does not
+    # hold: sys_yield is sched_yield(2) (user/linux-runtime.S), and on an
+    # otherwise idle CPU it returns immediately. So an idle bridge
+    # iteration cost microseconds, not the milliseconds the loop's own
+    # bound assumed -- and that bound is `idle_loops > 60000`, commented
+    # "~10 min of pure idle".
+    #
+    # MEASURED, in a dev VM, 2026-08-20: a real OpenSSH client logged in,
+    # got hamsh's banner and prompt, typed nothing, and sshd tore the
+    # session down and closed the TCP connection in UNDER ONE SECOND --
+    # the guest logged the idle bound being reached with the client still
+    # sitting at the prompt. A session that ends the moment you stop
+    # typing is not a session.
+    #
+    # sys_waitfds with nfds == 0 is this tree's portable sleep (see
+    # user/sleep.ad's header, which killed the same busy-wait in `sleep`
+    # and measured a vCPU at 95.2% before it). It parks the task off the
+    # runqueue, so this is also strictly cheaper than the yield spin it
+    # replaces: an idle SSH session now costs a wakeup every
+    # BRIDGE_IDLE_MS instead of a core.
+    sys_waitfds(&bridge_park_fds[0], cast[uint64](0), BRIDGE_IDLE_MS)
+
+
+# Top-level BSS, not a frame local: adder requires it, and sys_waitfds
+# never dereferences it at nfds == 0.
+bridge_park_fds: Array[1, int32]
 
 
 # An encrypted-packet reader that honours an already-peeked socket

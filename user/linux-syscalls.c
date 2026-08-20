@@ -416,6 +416,8 @@ struct devfile {
     int      isreboot;  /* 1 => /dev/reboot.  Carries NO per-open state at
                          * all: the device is one write of one verb, so
                          * devtab_clone's struct copy is trivially correct. */
+    pid_t    owner;     /* THE PROCESS THAT OPENED THIS DEVICE, and the only
+                         * one allowed to tear it down.  See sys_close. */
 };
 static struct devfile devtab[DEVTAB_MAX];
 
@@ -557,6 +559,7 @@ static int devtab_open(const char *path, int for_write)
     }
     slot->used = 1; slot->fd = fd; slot->kind = kind;
     slot->write = for_write; slot->cursor = 0;
+    slot->owner = getpid();
     devtab_index(slot);
     return fd;
 }
@@ -1107,6 +1110,20 @@ int64_t sys_read_nb(int32_t fd, uint8_t *buf, uint64_t count)
             errno = e;
             if (r < 0 && (e == EAGAIN || e == EWOULDBLOCK))
                 return 0;
+            /* A ZERO-LENGTH READ OF A STREAM IS THE PEER HANGING UP, and
+             * this call's contract says a negative -- never 0, which here
+             * means "nothing ready yet". Returning read(2)'s 0 verbatim
+             * collapsed the two states for every socket, exactly as the
+             * ordinary-fd branch below documents having stopped doing for
+             * files and pipes. sshd's bridge poll could then never see a
+             * client leave; it only ever "noticed" one by way of the
+             * ENOTCONN that a different bug was producing (see sys_close).
+             * With that bug fixed, a departing client left the session
+             * parked until the idle bound. */
+            if (r == 0 && count > 0 && hamnet_stream_eof_is_real(&v->nf)) {
+                errno = 0;
+                return -1;
+            }
             return r;
         }
         return sys_read(fd, buf, count);
@@ -1464,15 +1481,48 @@ int64_t sys_write(int32_t fd, const uint8_t *buf, uint64_t count)
 }
 
 /* extern def sys_close(fd: int32) -> int32 */
+/* CLOSING AN INHERITED DEVICE MUST NOT DESTROY THE PARENT'S, and this is not
+ * a hypothetical -- it is the bug that made every SSH session mute.
+ *
+ * MEASURED, in a dev VM, 2026-08-20.  sshd accepts a connection on the /net
+ * file tree (conn_fd = 4), authenticates, and rforks hamsh through
+ * lib/p9.ad:spawn_stdio_pipes.  That child ends with `p9_closefrom(3)` -- the
+ * CLEAN-FD sweep, whose whole job is "do not leak the launcher's descriptors
+ * across the exec" -- which calls sys_close on fds 3..63, and so on the
+ * PARENT'S accepted connection and on the parent's two pipe ends.
+ *
+ * The device teardown below then ran IN THE CHILD.  hamnet_close() on a /net
+ * data file calls conn_free(), and `struct connrec` lives in a SHARED memory
+ * segment (user/linux-net.c) -- so the child marked the parent's connection
+ * record free.  The TCP connection itself stayed up, because close(2) in the
+ * child only drops the child's copy of the descriptor.  From the next poll
+ * onwards the parent's every read of its own live socket answered
+ * -ENOTCONN (107), sshd's bridge read that as "client disconnected" and
+ * stopped, and the client -- still connected -- got NOT ONE BYTE, for as long
+ * as it cared to wait.  The same sweep closed the parent's ends of hamsh's
+ * stdio pipes, which is why hamsh exited instantly without printing even its
+ * banner.  Every symptom of "the SSH channel bridge is broken" was this line.
+ *
+ * A descriptor is process-local; the object behind a synthetic device is not.
+ * So the teardown belongs to the process that OPENED the device, and any other
+ * process closing an inherited copy gets what close(2) means -- its own
+ * descriptor goes away and nothing else does.  Slot state is still cleared,
+ * because the slot is this process's own memory.
+ *
+ * This is general, not an sshd special case: before it, any rfork'd child that
+ * swept its descriptors would silently destroy its parent's /net connections,
+ * wsys windows, audio streams and clipboard handles. */
 int32_t sys_close(int32_t fd)
 {
     fdns_gate_release();
     struct devfile *v = devtab_find((int)fd);
     if (v) {
-        if (v->isw)   hamwsys_close(&v->w);
-        if (v->isnet) hamnet_close(&v->nf);
-        if (v->isau)  hamaudio_close(&v->au);
-        if (v->issn)  hamsnarf_close(&v->sn);
+        if (v->owner == getpid()) {
+            if (v->isw)   hamwsys_close(&v->w);
+            if (v->isnet) hamnet_close(&v->nf);
+            if (v->isau)  hamaudio_close(&v->au);
+            if (v->issn)  hamsnarf_close(&v->sn);
+        }
         if (v->isauth) explicit_bzero(&v->af, sizeof v->af);
         v->used = 0; v->isw = 0; v->isnet = 0; v->isauth = 0; v->isau = 0;
         v->issn = 0; v->isreboot = 0;
