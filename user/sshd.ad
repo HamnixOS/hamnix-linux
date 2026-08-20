@@ -107,6 +107,35 @@ extern def sys_yield() -> int32
 # Guest port the daemon listens on. SSH's well-known port.
 SSHD_PORT: uint64 = 22
 
+# THE UID sshd SERVES AT, and the two calls it takes to get there.
+#
+# docs/security.md Phase 11 chose uid 2 so that compromising sshd is not
+# compromising the host owner. /etc/svc/sshd.hamsh said `uid: 2` and the
+# supervisor duly dropped BEFORE exec -- at which point port 22 could not
+# be bound (it is privileged), net_announce() failed, restart-on-failure
+# respawned it, and the console filled with the same four lines for ever.
+# scripts/devvm_image.sh works around that by starting /bin/sshd directly
+# as root, which throws Phase 11's property away entirely.
+#
+# So sshd does the standard thing itself: BIND WHILE PRIVILEGED, DROP
+# BEFORE SERVING. Everything that needs privilege -- writing the persisted
+# host key under /var/lib/ssh, creating that directory, binding 22 --
+# happens first and is finished; then main() drops to SSHD_UID and only
+# then accepts its first connection. A compromise of the session-serving
+# code is still not the host owner, which is exactly what Phase 11 asked
+# for, and the listen now succeeds, which is what it could not have.
+#
+# The supervisor cannot express this on its own: user/hamsh.ad's
+# builtin_svc rforks and calls sys_setuid BEFORE spawn(), so anything it
+# can say happens strictly before the program's first instruction. That
+# is the right shape for a service that never needs privilege and the
+# wrong one for a service that needs it exactly once, at startup. The
+# knowledge of WHEN it is safe to drop belongs to the program.
+SSHD_UID: uint32 = 2
+extern def sys_setuid(uid: uint32) -> int32
+extern def sys_getuid() -> uint32
+extern def sys_mkdir(path: Ptr[char]) -> int32
+
 # spawn() stdio mode + fd-bind channel kinds (match lib/p9 + syscall.ad).
 # SPAWN_STDIO_NS routes the child's integer fd 0/1/2 through its /fd/0,1,2
 # NAMES so a parent sys_fdbind on the child's pid steers them.
@@ -2320,6 +2349,15 @@ def main() -> int32:
     # HAMSH §7: ensure /fd resolves so we can wire each session's hamsh
     # stdio through scratch /fd/N names (see _spawn_shell). MREPL flag = 0.
     sys_bind(cast[Ptr[char]]("/fd"), cast[Ptr[char]]("#d"), 0)
+    # /var/lib/ssh IS CREATED BY NOTHING ELSE. There is no mkdir for it in
+    # any rc, and scripts/hamlinux_image.sh stages /var/lib/hpm but did not
+    # stage this one -- so the very first start generated a host key it
+    # could not write and logged "could not persist host key", handing every
+    # reconnecting client a different host identity. The image stages the
+    # directory now; this call is the belt to that braces, and it is where
+    # the knowledge belongs, because sshd is what needs it. An existing
+    # directory answers EEXIST, which is a no-op and not an error here.
+    sys_mkdir(cast[Ptr[char]]("/var/lib/ssh"))
     if _init_host_key() != 0:
         _log("[sshd] FATAL: no host key available\n")
         return 1
@@ -2336,6 +2374,28 @@ def main() -> int32:
         _log("[sshd] net_announce() failed\n")
         return 1
     _log("[sshd] listening on port 22\n")
+
+    # PRIVILEGE IS DONE WITH. The host key is written, the directory
+    # exists, and the privileged port is bound and will stay bound across
+    # the drop -- a listening socket is not re-checked. Everything from
+    # here on is peer-controlled input, so it runs as SSHD_UID.
+    #
+    # Reported either way, and the failure is FATAL rather than a warning.
+    # A daemon that announced it was dropping privilege and then did not
+    # would be worse than one that never claimed to: the log would say the
+    # Phase 11 property held while it did not.
+    if sys_getuid() != SSHD_UID:
+        if sys_setuid(SSHD_UID) != 0:
+            _log("[sshd] FATAL: could not drop privilege before serving\n")
+            sys_close(lfd)
+            return 1
+        if sys_getuid() != SSHD_UID:
+            _log("[sshd] FATAL: privilege drop did not take effect\n")
+            sys_close(lfd)
+            return 1
+        _log("[sshd] dropped privilege to uid 2 before serving\n")
+    else:
+        _log("[sshd] already at uid 2; serving\n")
 
     # Serve connections one at a time. V1 is single-session; after a
     # client disconnects we loop back and accept the next one. The cap

@@ -11,12 +11,48 @@
 
 name: sshd
 ns: init
-# docs/security.md Phase 11: run sshd at system uid 2. Compromise of
-# sshd then doesn't grant hostowner authority (the post-auth code path
-# that hands a real shell still needs to elevate to the authenticated
-# user's identity — which happens via the same Plan-9 newshell path
-# eventually; for now the supervisor side simply downgrades from 1).
-uid: 2
+#
+# THERE IS DELIBERATELY NO `uid:` LINE HERE, AND THIS IS NOT A RELAXATION
+# OF docs/security.md PHASE 11. IT IS HOW PHASE 11 FINALLY HOLDS.
+#
+# This file used to say `uid: 2`, and the intent was right: a compromise
+# of sshd must not be a compromise of the host owner. What it produced was
+# a service that never ran. The supervisor rforks and calls sys_setuid
+# BEFORE spawn() (user/hamsh.ad, builtin_svc), so uid 2 was in force
+# before sshd's first instruction -- and port 22 is privileged, so
+# net_announce() failed, restart-on-failure respawned it on a backoff, and
+# the console filled with the same four lines for ever:
+#
+#     [sshd] Hamnix SSH-2.0 server starting
+#     [sshd] WARN: could not persist host key (volatile this boot)
+#     [sshd] host key ready (ecdsa-sha2-nistp256)
+#     [sshd] net_announce() failed
+#
+# The same uid is why it could not write its host key, so even had it
+# listened it would have offered a new host identity every boot.
+#
+# A uid the supervisor sets is necessarily set BEFORE the program starts.
+# That is the right shape for a service that never needs privilege and the
+# wrong one for a service that needs it exactly once, at startup, and then
+# never again. The knowledge of WHEN it is safe to drop belongs to the
+# program, so sshd does the standard thing: it creates /var/lib/ssh,
+# persists its host key, binds port 22 -- all while privileged -- and then
+# calls sys_setuid(2) and only afterwards accepts its first connection. It
+# logs `dropped privilege to uid 2 before serving`, and treats a failure
+# to drop as FATAL rather than a warning, because a daemon that says it
+# dropped and did not is worse than one that never claimed to.
+#
+# So every byte of peer-controlled input is still handled at uid 2, which
+# is what Phase 11 asked for, and the listen succeeds, which under `uid: 2`
+# it could not. See the SSHD_UID block at the top of user/sshd.ad.
+#
+# WHAT IT COSTS, stated because it is a real cost and not a footnote: a
+# session at uid 2 has no CAP_SYS_ADMIN, so it cannot create a private
+# namespace. `enter linux { ... }` over SSH reports
+# `rfork: no private namespace yet (needs CAP_SYS_ADMIN)`. Ordinary
+# commands, pipelines and the shell itself are unaffected -- measured
+# against a running guest. That is the price Phase 11 chose to pay, and
+# raising the uid to buy it back is a product decision, not a bug fix.
 exec: /bin/sshd
 restart: on-failure
 backoff_ms: 1000

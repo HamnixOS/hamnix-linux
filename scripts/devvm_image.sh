@@ -47,27 +47,24 @@ grep -q "^source '/etc/rc.d/rc.5'" "$SRC" || {
     exit 1; }
 
 # --- 2. start sshd in its place ------------------------------------------
-# `/bin/sshd &` AND NOT `svc start sshd`, WHICH IS MEASURED AND NOT A STYLE
-# CHOICE. /etc/svc/sshd.hamsh sets `uid: 2`. Port 22 is privileged, so from
-# uid 2 net_announce() fails and sshd never listens; the supervisor's
-# restart-on-failure policy then respawns it on a backoff and the console
-# fills with the same four lines forever:
+# `svc start sshd`, THE SHIPPED PATH. This script used to spell it
+# `/bin/sshd &` and the comment below explained why. That reason is now GONE:
+# sshd binds port 22 while privileged and drops to uid 2 itself before it
+# accepts anything, so the supervisor no longer has to choose between a
+# service that can listen and a service that is not root. What follows is
+# kept because it is the measurement that made the case:
 #
 #   [sshd] Hamnix SSH-2.0 server starting
 #   [sshd] WARN: could not persist host key (volatile this boot)
 #   [sshd] host key ready (ecdsa-sha2-nistp256)
 #   [sshd] net_announce() failed
 #
-# Started from this rc it inherits PID 1's uid 0, announces, and logs
-# `[sshd] listening on port 22`. (The same uid: 2 is why it could not write
-# its host key.) That is a real defect in the shipped service definition and
-# it is written up in docs/dev-loop.md rather than fixed here, because
-# lowering sshd's privilege was a deliberate decision in docs/security.md
-# Phase 11 and the fix is a product decision, not a dev-loop one.
-#
-# COST OF NOT USING THE SUPERVISOR: user/sshd.ad's main() serves a BOUNDED
-# number of connections and then exits, so a long-lived dev VM will
-# eventually stop accepting SSH. Restart it from the console when it does.
+# It was fixed in user/sshd.ad rather than by raising the uid, because
+# lowering sshd's privilege was a deliberate decision (docs/security.md
+# Phase 11) and the standard answer to a privileged port is to bind while
+# privileged and drop before serving. The guest now logs
+# `[sshd] listening on port 22` followed by
+# `[sshd] dropped privilege to uid 2 before serving`.
 python3 - "$SRC" "$RC" <<'PY'
 import sys
 src, dst = sys.argv[1], sys.argv[2]
@@ -82,13 +79,19 @@ new = (
     "\n"
     "echo 'rc.boot: devvm text-only boot -- no graphical runlevel'\n"
     "\n"
-    "# sshd keeps BOTH its persisted host key and authorized_keys under\n"
-    "# /var/lib/ssh, and it does NOT create that directory itself (there is no\n"
-    "# mkdir anywhere in user/sshd.ad -- checked). hamlinux_image.sh stages\n"
-    "# /var/lib/hpm but not /var/lib/ssh, so without this line the first start\n"
-    "# generates a host key it cannot write. /var/lib exists already.\n"
-    "mkdir /var/lib/ssh\n"
-    "/bin/sshd &\n"
+    "# sshd through the SUPERVISOR, which is the shipped path, and it now\n"
+    "# works. It did not before: /etc/svc/sshd.hamsh said `uid: 2`, the\n"
+    "# supervisor drops uid BEFORE exec, port 22 is privileged, and sshd\n"
+    "# respawned on a backoff for ever without ever listening. sshd now binds\n"
+    "# while privileged and drops to uid 2 itself before serving, so the\n"
+    "# service definition no longer needs a uid line at all -- see the long\n"
+    "# note in /etc/svc/sshd.hamsh. Going through `svc` rather than around it\n"
+    "# also buys the dev VM restart-on-failure: user/sshd.ad's main() serves a\n"
+    "# bounded number of connections and exits, and with `/bin/sshd &` nothing\n"
+    "# brought it back, so a long-lived dev VM used to stop accepting SSH.\n"
+    "# /var/lib/ssh needs no mkdir here either: hamlinux_image.sh stages it and\n"
+    "# sshd creates it as well.\n"
+    "svc start sshd\n"
     "echo 'rc.boot: devvm started sshd'\n"
 )
 assert text.count(old) == 1, "expected exactly one rc.5 source line, found %d" % text.count(old)

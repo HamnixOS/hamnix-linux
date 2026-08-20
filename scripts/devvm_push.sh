@@ -76,15 +76,35 @@ echo "devvm_push: serving $NAME ($(stat -c%s "$BIN") bytes, sha256:$SUM)"
 # Fetch to a temp path and move into place: overwriting a running binary's
 # path directly is how you get a half-written file executed.
 #
-# THERE IS NO `chmod` ON THIS IMAGE. An earlier version of this line ended
-# `&& chmod 755 $DEST && echo PUSH_OK`, hamsh answered "command not found:
-# chmod", the && chain stopped there -- so PUSH_OK never printed -- and this
-# script still reported "done", because devvm_console.py's `run` only proves
-# the SHELL EXECUTED SOMETHING, never that the something succeeded. The push
-# happened to work anyway (mv preserves the mode wget wrote), which is the
-# worst case: a broken check hiding behind a correct result.
-# So: no chmod, and the marker is now ASSERTED rather than merely requested.
-CMD="wget -O /tmp/$NAME.new http://10.0.2.2:${DEVVM_HTTP_PORT}/$NAME && mv /tmp/$NAME.new $DEST && echo PUSH_OK && cksum $DEST"
+# THE MODE, WHICH THIS SCRIPT USED TO GET WRONG IN BOTH DIRECTIONS.
+#
+# The note that stood here said there is no `chmod` on the image, and
+# consoled itself that "the push happened to work anyway (mv preserves the
+# mode wget wrote)". Both halves were wrong, and the second one is the
+# expensive one. user/wget.ad writes its output through sys_open_write,
+# which is open(O_WRONLY|O_CREAT|O_TRUNC, 0666) -- so under the default
+# umask the fetched file lands 0644, WITH NO EXECUTE BIT AT ALL. What
+# rescued the earlier pushes was not wget's mode, it was mv: user/mv.ad
+# opens an EXISTING destination and truncates it, which leaves that
+# destination's own 0755 alone. So a push over a binary already on the
+# image worked, and everything else silently did not.
+#
+# MEASURED, 2026-08-20: `devvm_push.sh user/sshd.ad` while sshd was
+# RUNNING. sys_open_write's ETXTBSY fallback unlinks the busy file and
+# creates a new one -- with the mode argument, 0644 -- so /bin/sshd came
+# out non-executable and the guest answered
+#
+#   exec: `/bin/sshd' exists (mode 0644) but execve(2) answered EACCES
+#
+# while this script had already printed "done -- /bin/sshd is the build
+# just made". That is the failure shape this tree keeps getting burned by:
+# success-shaped, and pointing at the wrong thing.
+#
+# So there IS a chmod now (user/chmod.ad, staged by hamlinux_image.sh), the
+# push uses it, and the MODE IS ASSERTED rather than assumed -- `ls -l` of
+# the destination is echoed back and checked below, because a chmod that
+# silently did nothing would look exactly like one that worked.
+CMD="wget -O /tmp/$NAME.new http://10.0.2.2:${DEVVM_HTTP_PORT}/$NAME && mv /tmp/$NAME.new $DEST && chmod 755 $DEST && echo PUSH_OK && ls -l $DEST && cksum $DEST"
 OUT=$(python3 scripts/devvm_console.py run "$DEVVM_DIR" "$CMD" 60)
 RC=$?
 printf '%s\n' "$OUT"
@@ -96,6 +116,17 @@ case "$OUT" in
     *PUSH_OK*) ;;
     *) echo "devvm_push: FAILED — the guest ran the fetch but PUSH_OK never" >&2
        echo "devvm_push: printed, so $DEST is NOT the binary just built." >&2
+       exit 1 ;;
+esac
+# AND IT MUST BE EXECUTABLE. PUSH_OK only says the chain reached the echo;
+# it does not say chmod changed anything. A pushed program that cannot be
+# run is the exact failure this assertion was added for -- see the long
+# note above the fetch.
+case "$OUT" in
+    *-rwx*) ;;
+    *) echo "devvm_push: FAILED — $DEST is not executable in the guest." >&2
+       echo "devvm_push: the fetch landed but the mode did not; the guest" >&2
+       echo "devvm_push: will answer EACCES if anything tries to run it." >&2
        exit 1 ;;
 esac
 
