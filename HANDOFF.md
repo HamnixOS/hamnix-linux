@@ -26,6 +26,58 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### THE `allow_fail` FIX I MERGED BROKE A GATE -- AND ITS SELF-TEST ENCODES THE BREAK AS THE RIGHT ANSWER
+
+**2026-08-20, found by the agent running the 1.0.33 battery, verified by me in
+the source. NOTHING WAS EDITED — the driver is executing the battery right now,
+and editing a script mid-run is how six previous runs were lost.**
+
+`test_livedom_functional_host` scored **21 / 1** against a floor of 22 and the
+driver called it **RED**. The gate's own final line is
+`VERDICT: PASS (floor held: 21 banked, 1 declared-failing, 22 measured)`. Its one
+failure is named in the registry as acceptable and `allow_fail` is 1. **The gate
+and the registry agree; the driver disagrees with both.**
+
+**The mechanism, confirmed in `scripts/release_gates.sh`:**
+
+    elif [ "$rc" -eq 0 ] && [ "$f" -gt 0 ]; then
+        verdict="RED"; why="the gate exited 0 while its own summary reports $f failure(s) -- exit 0 is not a pass"
+
+**That branch never consults `$allow`** — and it is unreachable unless the
+failures are *declared*, because `f > allow` is caught four lines above. So the
+check written to catch "exit 0 read as a pass" **can only ever fire on a gate
+whose failures are all declared and which is honestly reporting itself green.**
+
+**ITS PREMISE IS STATED IN THE COMMENT ABOVE IT AND IT IS FALSE:** *"Every gate
+here ends `[ "$FAIL" = 0 ] && exit 0 || exit 1`."* I confirmed
+`scripts/test_livedom_functional_host.sh` carries a `KNOWNFAIL` mechanism and
+**`exit 0` at line 460** when every failure is declared. It is the one gate with
+that shape and the one gate the change broke. **Under the old condition it was
+green.**
+
+**AND THE SELF-TEST CANNOT CATCH IT, BECAUSE ARM F ENCODES THE DEFECT AS THE
+EXPECTED ANSWER.** `ctrl_F_declared_fails_exit_0` is registered at line 797 with
+`allow=2`, fails 2, exits 0 — **bit-for-bit `test_livedom`'s situation** — and the
+self-test asserts it must be RED. **So the `7 / 0` I have been quoting as proof
+the scorer is sound is measuring the wrong rule as right: an oracle that cannot
+fail, inside the release driver, blessed by its own negative control.**
+
+**THIS IS MINE.** I merged that `allow_fail` change on 2026-08-20 with the words
+*"DRIVER FIXED, NOT THE GATE: `allow_fail` was unusable for EVERY gate here, since
+they all exit 1 on any failure"* — **repeating the false premise in my own merge
+message**, and citing the 7/0 self-test as evidence. The fix was real (the old
+condition genuinely broke `session_min_root`); the new condition over-corrected,
+and the arm added to prove it froze the over-correction in place.
+
+**WHAT TO DO, AFTER THE BATTERY FINISHES:** make the `rc == 0 && f > 0` branch
+consult `$allow` — red only when the failures are UNDECLARED — and **fix arm F
+first, then watch it fail against the current driver before changing the driver.**
+A control that agrees with the defect is worth less than no control at all,
+because it is believed.
+
+**THE RED STANDS IN THE 1.0.33 TABLE AS SCORED**, recorded as a false red about
+the instrument rather than quietly excused. Nothing was tuned to make it green.
+
 ### TWO THINGS I HAVE BEEN REPEATING ABOUT THE REGISTRY ARE WRONG -- checked in the file, not inferred
 
 **2026-08-20, orchestrator-side, read-only.** An agent challenged both while its
