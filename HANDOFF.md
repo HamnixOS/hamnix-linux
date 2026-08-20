@@ -27,6 +27,48 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+### I TRIED TO CLASSIFY THE 22 UNKNOWN GATES STATICALLY AND THE CLASSIFIER IS WRONG -- RECORDED AS A FAILED ATTEMPT, NOT A RESULT
+
+**2026-08-19, orchestrator-side, read-only. NOTHING WAS RESOLVED BY THIS.**
+
+The open question: which gates does the greeter break, now that
+`rc.boot.installed` reaches `rc.5` and blocks in `hamgreet`? Three were RUN and
+found genuinely red. The rest were classified by reading only. I tried to narrow
+that by machine.
+
+**Pass 1 — "does the gate append work after the source?"** Of 32 files that source
+`/etc/rc.boot.installed`, **28 append something, 3 end their heredoc immediately,
+1 handles it** (`graphical_login`, which tests whether `rc.5` returned). But
+appending is only meaningful if the source line is inside a MACHINE rc at all —
+several matches are host-side shell that merely mentions the path
+(`channel_covers_image`'s next line is `ETC_BYTE_SKIP=...`, plainly host-side).
+
+**Pass 2 — "is the source line inside a `cat > … <<` heredoc within 60 lines?"**
+This produced 18 "machine rc" and 14 "host-side". **IT IS WRONG, and two known
+cases prove it:**
+
+  * **`installed_documents.sh` was classified "host-side"** — and it is a machine
+    rc that has been MEASURED RED by this exact defect (18 P / 6 F).
+  * **`hamlinux_disk.sh` was classified "machine rc"** — it is the disk builder,
+    which `install -m644`s the file rather than sourcing it on a machine.
+
+A heuristic that misplaces the one case we have already measured cannot be
+trusted for the cases we have not. **So the numbers from pass 2 are NOT recorded
+as a finding, and the unknown set is NOT narrowed.**
+
+**WHY I AM WRITING UP A FAILURE:** because the alternative was to publish "18 at
+risk, 14 fine", which would have looked like progress and been believed. That is
+the same shape as the OCR oracle that could not fail and the census that
+truncated and returned success — **an instrument that produces a confident answer
+it has not earned.** I have already once briefed that "eight gates assert about a
+dead path" when retiring them would have destroyed eight working gates.
+
+**WHAT WOULD ACTUALLY SETTLE IT:** run them. The three that were run were all red,
+so the base rate is not reassuring. Failing that, a reader has to distinguish
+"sources it inside a machine rc **and** expects execution to continue" from "names
+the path for some other reason", and that distinction did not survive automation
+at either of the two granularities I tried.
+
 ### THE PACKAGER HAD REFUSED TO PUBLISH FOR 28 COMMITS, AND THE CAUSE WAS A "FIX" THAT NOTHING HAD RUN -- plus the greeter really did break the gate idiom, MEASURED on three gates
 
 **Measured on this host, 2026-08-19, base `6a46b4f6` (checked with
