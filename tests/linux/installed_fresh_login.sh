@@ -719,7 +719,13 @@ OFF="${G% *}"; SZ="${G#* }"
 printf 'hamnix_runlevel = 3\n' >"$W/rc.runlevel"
 
 plant_runlevel3() {   # plant_runlevel3 <whole-disk-image> <label>
-    local img="$1" label="$2" p="$W/plant-$label.img"
+    # NOT one `local` with three assignments: bash expands every word of a
+    # `local` command BEFORE it assigns any of them, so `p="$W/plant-$label.img"
+    # ` on the same line reads $label while it is still unset and dies under
+    # `set -u`. Measured here, 2026-08-20: "line 722: label: unbound variable".
+    local img="$1"
+    local label="$2"
+    local p="$W/plant-$label.img"
     carve "$img" 2 "$p" || { bad "[$label] cannot carve the disk to plant /etc/rc.runlevel"; return 1; }
     /sbin/e2fsck -fy "$p" >"$W/plant-$label-fsck1.log" 2>&1
     cat >"$W/plant-$label.dbg" <<DBEOF
