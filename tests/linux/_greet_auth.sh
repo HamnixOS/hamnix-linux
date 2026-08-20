@@ -165,6 +165,20 @@ greet_authenticate() {
     python3 "$_GREET_QMP_INPUT" "$sock" click $((w / 2)) $((h / 2)) "$w" "$h" >/dev/null 2>&1
     sleep 2
 
+    # THE NEGATIVE CONTROL, AND IT IS A SWITCH RATHER THAN A SEPARATE PROGRAM
+    # ON PURPOSE. Every assertion a treated gate makes downstream of this
+    # function rests on the claim that authenticating is what got the machine
+    # moving. That claim is only worth something if the SAME code path, in the
+    # SAME gate, on the SAME disk, can be made to fail. GREET_NEGCTL=1 corrupts
+    # the password and nothing else -- same account, same keystrokes, same
+    # waits -- so a gate run with it set MUST go red on its own greet
+    # assertion, and every assertion below that one must go red with it. If a
+    # gate stays green under GREET_NEGCTL=1, its greens are not about a login.
+    if [ "${GREET_NEGCTL:-0}" = 1 ]; then
+        pass="${pass}-NEGCTL-WRONG"
+        echo "[greet] GREET_NEGCTL=1: TYPING A DELIBERATELY WRONG PASSWORD. This run is a control and its result is not a product measurement." >&2
+    fi
+
     echo "[greet] typing the account name and password" >&2
     python3 "$_GREET_QMP_INPUT" "$sock" type "$user" >/dev/null 2>&1; sleep 1
     python3 "$_GREET_QMP_INPUT" "$sock" key ret            >/dev/null 2>&1; sleep 1
