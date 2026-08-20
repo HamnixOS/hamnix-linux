@@ -141,6 +141,11 @@ EXTRA="$W/extra"
 SCREEN_W=1280
 SCREEN_H=800
 QMP_INPUT="$PROJ_ROOT/tests/linux/qmp_input.py"
+# The way past the graphical login. See the note at the installed machine's
+# boot below for why this gate must authenticate rather than opt out of
+# runlevel 5.
+_GREET_QMP_INPUT="$QMP_INPUT"
+. "$PROJ_ROOT/tests/linux/_greet_auth.sh"
 
 USERNAME=hamdocusr
 HOSTNAME_=hamdocbox
@@ -486,6 +491,23 @@ drive_app() {
     QPID=$!
     reap_add "$QPID"
     info "qemu pid $QPID, serial $D/serial.log"
+    # AUTHENTICATE PAST THE GRAPHICAL LOGIN, BECAUSE THIS GATE WANTS THE SESSION.
+    # etc/rc.boot.installed ends by sourcing /etc/rc.d/rc.5, which runs
+    # /bin/hamgreet in the FOREGROUND, so every line the rc above appends after
+    # its source -- including the launch of the application whose window this
+    # gate types into -- is dead code until somebody has authenticated. In the
+    # 1.0.33 release run this gate scored 18/6 with THREE hamgreet stalls, one
+    # per arm, and its reds all read 'never printed ... scene window ready'.
+    #
+    # THE RUNLEVEL-3 OPT-OUT IS NOT AVAILABLE HERE. What this gate measures is
+    # where an application launched FROM A DESKTOP SESSION saves a document, and
+    # a machine at runlevel 3 has no session to launch it from. It is the whole
+    # subject, not scaffolding around it. See tests/linux/_greet_auth.sh.
+    if greet_authenticate "$QMP" "$D/serial.log" "$USERNAME" "$UPASS"; then
+        ok "the graphical login ADMITTED $USERNAME, so rc.5 returned and the rest of this machine's rc ran"
+    else
+        bad "could not get past the graphical login as $USERNAME -- see the [greet] lines above; nothing below is a statement about a session"
+    fi
 
     # WAIT FOR THE APPLICATION ITSELF, not for the desktop: the window is what
     # the keystrokes are aimed at.

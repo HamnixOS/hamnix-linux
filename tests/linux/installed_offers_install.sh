@@ -92,6 +92,26 @@ PART="$W/part.img"
 SCREEN_W=1280
 SCREEN_H=800
 QMP_INPUT="$PROJ_ROOT/tests/linux/qmp_input.py"
+# GETTING PAST THE GRAPHICAL LOGIN. Section 2 boots an INSTALLED disk, whose
+# /etc/installer-medium user/hlinstall.ad removed -- so hamgreet does NOT take
+# its live-medium branch there and rc.5 BLOCKS in the greeter. That is why this
+# gate scored 18/1 in the 1.0.33 run with its serial log ending at
+# `hamgreet: the graphical login is presenting': `rc.boot: up' is printed by
+# etc/rc.boot.installed AFTER rc.5 returns, so wait_for_desktop was waiting for
+# a line the machine could not reach. Section 3's live medium is unaffected --
+# it HAS /etc/installer-medium and the greeter lets it straight through, which
+# is why that arm was the one that worked.
+#
+# THIS GATE CANNOT USE THE RUNLEVEL-3 OPT-OUT. Every question it asks is about
+# a DESKTOP -- the panel's Applications menu, the backdrop's icon labels, and
+# whether either offers `Install' -- and none of those programs is started
+# until somebody has authenticated. So it authenticates, with the account the
+# install on line 159 created. See tests/linux/_greet_auth.sh.
+_GREET_QMP_INPUT="$QMP_INPUT"
+. "$PROJ_ROOT/tests/linux/_greet_auth.sh"
+# The credentials are the ones the unattended install above was given. They are
+# named here ONCE so that the install line and the login cannot drift apart.
+UPASS=hamgatepw
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  PASS  $*"; }
@@ -508,6 +528,25 @@ $LOOK_MENU"
 
 say "2 -- THE INSTALLED MACHINE, BOOTED ON ITS OWN, READ AS A PICTURE"
 boot_gui "$W/boot-installed" installed "$NVME"
+
+# AUTHENTICATE, BECAUSE AN INSTALLED MACHINE ASKS. Nothing of the session --
+# not the backdrop this gate reads icon labels off, not the panel it clicks
+# `Applications' on -- is started until the greeter has been satisfied, and
+# `rc.boot: up' is not printed until rc.5 returns. The account is the one the
+# unattended install created; the disk was separately asserted above to carry
+# it at uid 1001.
+#
+# THE ASSERTION IS NOT CEREMONY AND IT CAN GO RED. A wrong password takes
+# rc.5's no-session branch and greet_authenticate returns 4; a machine that
+# never reached rc.5 returns 1. Either way this is the line that says so,
+# instead of eleven downstream OCR failures all reading "the panel does not
+# read Applications" about a machine nobody ever let in.
+if greet_authenticate "$D/qmp.sock" "$D/serial.log" "$USERNAME" "$UPASS"; then
+    ok "the graphical login ADMITTED $USERNAME, so rc.5 returned and this machine has a session to photograph"
+else
+    bad "could not get past the graphical login as $USERNAME -- see the [greet] lines above; nothing below is about a desktop"
+fi
+
 if wait_for_desktop 240; then
     ok "the installed machine reached 'rc.boot: up' after ${BOOT_SECS}s"
     look_at installed hidden

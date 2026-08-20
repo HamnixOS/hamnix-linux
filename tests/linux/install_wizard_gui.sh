@@ -372,7 +372,44 @@ else
         HAMLINUX_DISTRO_RO=1 scripts/hamlinux_image.sh >"$WORK/image.log" 2>&1 || {
             bad "image build"; tail -20 "$WORK/image.log"; exit 1; }
     fi
-    HAMLINUX_DISK_RC="$WORK/rc.wizgui" \
+    # ---- THE MEDIUM SAYS IT IS A MEDIUM, AND THAT IS WHAT LETS THE BOOT
+    # ---- REACH THE rc AT ALL.
+    #
+    # etc/rc.boot.installed ends by sourcing /etc/rc.d/rc.5, which since
+    # ee1461d0 runs /bin/hamgreet IN THE FOREGROUND. So PID 1's rc BLOCKS
+    # there, and every line this gate appends after `source
+    # '/etc/rc.boot.installed'` is dead code. MEASURED in the 1.0.33 release
+    # run: this gate scored 12/1 against 34 registered, with its
+    # guest log ending at 'hamgreet: the graphical login is presenting' and the
+    # run then hard-exiting on 'the boot never reached the end of the rc'.
+    #
+    # user/hamgreet.ad's FIRST branch (_is_live_medium, user/hamgreet.ad:576)
+    # tests for /etc/installer-medium and, when it is there, writes the session
+    # recipe naming `live` and returns IMMEDIATELY, saying so on the console --
+    # because an installer nobody has an account on must not ask for a
+    # password. That is the shipped behaviour of the shipped greeter on the
+    # shipped medium.
+    #
+    # THIS GATE BOOTS A MEDIUM AND HAD NO SUCH FILE, and that was an accident
+    # of how the medium is built, not a decision: scripts/hamlinux_image.sh
+    # writes /etc/installer-medium only under HAMLINUX_INSTALLER=1, and this
+    # gate does not set it (it does not want the rest of what that flag builds).
+    # So the medium was a medium in every respect except the one the greeter
+    # looks at. Planting the file does not get PAST the greeter -- it makes the
+    # greeter take the branch it takes on the real thing.
+    #
+    # WHY NOT THE OTHER TWO TREATMENTS. The runlevel-3 opt-out would remove the
+    # compositor, the panel and the app-menu launch queue this gate
+    # writes to at /dev/wsys/appmenu/launch. Authenticating would need an
+    # account, and this medium has none: it is the machine that RUNS the
+    # install wizard, not one the wizard has installed. Whereas
+    # `live` is uid 1001 in this tree's etc/passwd (etc/passwd:29), which is the
+    # uid the session drops to either way.
+    WGEXTRA="$WORK/extra"; rm -rf "$WGEXTRA"; mkdir -p "$WGEXTRA/etc"
+    printf '# planted by tests/linux/install_wizard_gui.sh: this root IS an install medium.\n' \
+        > "$WGEXTRA/etc/installer-medium"
+
+    HAMLINUX_DISK_RC="$WORK/rc.wizgui" HAMLINUX_DISK_EXTRA="$WGEXTRA" \
         scripts/hamlinux_disk.sh "$WORK/medium.img" 3G >"$WORK/disk.log" 2>&1 || {
         bad "disk build"; tail -20 "$WORK/disk.log"; exit 1; }
 fi

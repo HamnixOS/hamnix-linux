@@ -1051,6 +1051,27 @@ PY
 run_arm() {
     local name="$1" src="$2" aiops="$3" abps="$4" stopsecs="$5" drive="$6" secs="$7"
     local d="$WORK/$name"
+
+    # EVERY ARM_* RESULT IS CLEARED HERE, BEFORE ANY EARLY RETURN, AND THAT IS
+    # A BUG FIX WITH A MEASURED CAUSE. This function has several `return 1`
+    # paths above the point where these used to be set -- the boot-marker
+    # timeout at the end of the wait loop below is one -- and its callers read
+    # $ARM_MAXGAP and $ARM_FREEZE on the very next line WITHOUT a default,
+    # under `set -u`. In the 1.0.33 release run the greeter blocked the boot,
+    # the marker never appeared, run_arm returned early, and the script died
+    # with `line 1319: ARM_MAXGAP: unbound variable` HAVING PRINTED NO SUMMARY
+    # IN ANY DIALECT. scripts/release_gates.sh correctly refused to score that
+    # as 0/0 and recorded UNSCORABLE -- silence is not spendable as a green --
+    # so the gate produced no number at all.
+    #
+    # A GATE WHOSE ARM FAILED MUST GO RED, NOT SILENT. Clearing them here means
+    # a stalled arm reports zero heartbeats and zero gap, the caller's own
+    # assertions fail on those zeros and SAY WHY, and the summary still prints.
+    # These are deliberately NOT `local`: the callers read them.
+    ARM_MAXGAP=0; ARM_FREEZE=0; ARM_HB=0; ARM_WEDGED=0
+    ARM_GAP=0; ARM_GUESTGAP=0; ARM_KEYS=0; ARM_PTR=0
+    ARM_FRAMES=0; ARM_WINS=0; ARM_WRB=0; ARM_WROPS=0
+
     rm -rf "$d"; mkdir -p "$d/screens"
     cp "$src" "$d/medium.img"
     cp /usr/share/OVMF/OVMF_VARS_4M.fd "$d/OVMF_VARS.fd"
@@ -1124,6 +1145,9 @@ run_arm() {
     : >"$d/hb.tsv"; : >"$d/frames.tsv"; : >"$d/blk.tsv"
     local t0 now el last_hb hb prev_md5="" i=0 stopped=0 STOP_AT=0
     t0=$(date +%s); last_hb=$t0
+    # (already cleared at the top of run_arm, before the early returns; kept
+    # here so the measuring loop below starts from a known state whatever ran
+    # above it)
     ARM_MAXGAP=0; ARM_FREEZE=0; ARM_HB=0; ARM_WEDGED=0
     local freeze_start=0 named=0
     while :; do
@@ -1262,7 +1286,43 @@ else
         HAMLINUX_DISTRO_RO=1 scripts/hamlinux_image.sh >"$WORK/image.log" 2>&1 || {
             bad "image build"; tail -20 "$WORK/image.log"; exit 1; }
     fi
-    HAMLINUX_DISK_RC="$WORK/rc.soak" \
+    # ---- THE MEDIUM SAYS IT IS A MEDIUM, AND THAT IS WHAT LETS THE BOOT
+    # ---- REACH THE rc AT ALL.
+    #
+    # etc/rc.boot.installed ends by sourcing /etc/rc.d/rc.5, which since
+    # ee1461d0 runs /bin/hamgreet IN THE FOREGROUND. So PID 1's rc BLOCKS
+    # there, and every line this gate appends after `source
+    # '/etc/rc.boot.installed'` is dead code. MEASURED in the 1.0.33 release
+    # run: this gate was scored UNSCORABLE. Its serial log ended at
+    # the greeter, the marker its rc prints on the line AFTER the source never
+    # appeared, run_arm returned early, and the script then died on an unbound
+    # ARM_MAXGAP having printed no summary in any dialect.
+    #
+    # user/hamgreet.ad's FIRST branch (_is_live_medium, user/hamgreet.ad:576)
+    # tests for /etc/installer-medium and, when it is there, writes the session
+    # recipe naming `live` and returns IMMEDIATELY, saying so on the console --
+    # because an installer nobody has an account on must not ask for a
+    # password. That is the shipped behaviour of the shipped greeter on the
+    # shipped medium.
+    #
+    # THIS GATE BOOTS A MEDIUM AND HAD NO SUCH FILE, and that was an accident
+    # of how the medium is built, not a decision: scripts/hamlinux_image.sh
+    # writes /etc/installer-medium only under HAMLINUX_INSTALLER=1, and this
+    # gate does not set it (it does not want the rest of what that flag builds).
+    # So the medium was a medium in every respect except the one the greeter
+    # looks at. Planting the file does not get PAST the greeter -- it makes the
+    # greeter take the branch it takes on the real thing.
+    #
+    # WHY NOT THE OTHER TWO TREATMENTS. The runlevel-3 opt-out would remove the
+    # compositor and the whole desktop this gate exists to soak. Authenticating would need an
+    # account, and this medium has no account on it. Whereas
+    # `live` is uid 1001 in this tree's etc/passwd (etc/passwd:29), which is the
+    # uid the session drops to either way.
+    SKEXTRA="$WORK/extra"; rm -rf "$SKEXTRA"; mkdir -p "$SKEXTRA/etc"
+    printf '# planted by tests/linux/soak_desktop.sh: this root IS an install medium.\n' \
+        > "$SKEXTRA/etc/installer-medium"
+
+    HAMLINUX_DISK_RC="$WORK/rc.soak" HAMLINUX_DISK_EXTRA="$SKEXTRA" \
         scripts/hamlinux_disk.sh "$WORK/medium.img" 3G >"$WORK/disk.log" 2>&1 || {
         bad "disk build"; tail -20 "$WORK/disk.log"; exit 1; }
 fi

@@ -141,6 +141,11 @@ EXTRA="$W/extra"
 SCREEN_W=1280
 SCREEN_H=800
 QMP_INPUT="$PROJ_ROOT/tests/linux/qmp_input.py"
+# The way past the graphical login. See the note at the installed machine's
+# boot below for why this gate must authenticate rather than opt out of
+# runlevel 5.
+_GREET_QMP_INPUT="$QMP_INPUT"
+. "$PROJ_ROOT/tests/linux/_greet_auth.sh"
 
 USERNAME=hamptruser
 HOSTNAME_=hamptrbox
@@ -574,6 +579,23 @@ drive_arm() {
     QPID=$!
     reap_add "$QPID"
     info "qemu pid $QPID, serial $D/serial.log"
+    # AUTHENTICATE PAST THE GRAPHICAL LOGIN, BECAUSE THIS GATE WANTS THE SESSION.
+    # etc/rc.boot.installed ends by sourcing /etc/rc.d/rc.5, which runs
+    # /bin/hamgreet in the FOREGROUND, so nothing the rc above appends after its
+    # source runs until somebody has authenticated. In the 1.0.33 release run
+    # this gate scored 16/12 with FIVE hamgreet stalls -- more than any other
+    # gate in the registry.
+    #
+    # THE RUNLEVEL-3 OPT-OUT IS NOT AVAILABLE HERE. This gate DOUBLE-CLICKS AN
+    # ICON ON THE BACKDROP: the icons are drawn by /bin/hamdesktop, which rc.5
+    # starts only on the authenticated branch. Without a session there is no
+    # icon to click and no pointer path to measure. See
+    # tests/linux/_greet_auth.sh.
+    if greet_authenticate "$QMP" "$D/serial.log" "$USERNAME" "$UPASS"; then
+        ok "the graphical login ADMITTED $USERNAME, so rc.5 returned and the rest of this machine's rc ran"
+    else
+        bad "could not get past the graphical login as $USERNAME -- see the [greet] lines above; nothing below is a statement about a session"
+    fi
 
     # WAIT FOR PLU-READY: the rc's own echo, a hamsh builtin in the ROOT PID-1
     # shell, whose console descriptor was opened while privileged and survives

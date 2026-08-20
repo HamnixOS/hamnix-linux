@@ -98,6 +98,11 @@ SCREEN_H=800
 QMP_INPUT="$PROJ_ROOT/tests/linux/qmp_input.py"
 
 # The machine this gate installs.
+# The way past the graphical login, for the boot in section 3. See the note
+# above the medium's /etc/rc.runlevel for why the two machine boots in this
+# gate are owed different treatments.
+_GREET_QMP_INPUT="$QMP_INPUT"
+. "$PROJ_ROOT/tests/linux/_greet_auth.sh"
 USERNAME=hamacctusr
 HOSTNAME_=hamlaptop
 UPASS=hamacctpw
@@ -219,6 +224,31 @@ else
     # TWO PHASES OUT OF ONE FILE, with no `else`: sourcing a file that does
     # not exist returns non-zero, so phase 1 runs while the marker is absent
     # and writes it.
+    # ---- THE UPDATE BOOT STOPS AT RUNLEVEL 3, AND THE DESKTOP BOOT DOES NOT.
+    # etc/rc.boot.installed ends by sourcing /etc/rc.d/rc.5, which runs
+    # /bin/hamgreet in the FOREGROUND. In the 1.0.33 release run this gate
+    # scored 50/8 with two hamgreet stalls: BOTH machine boots ended at
+    # 'hamgreet: the graphical login is presenting' and nothing the rc below
+    # appends after the source had run.
+    #
+    # THE TWO BOOTS ARE OWED DIFFERENT TREATMENTS AND GET DIFFERENT ONES.
+    #
+    #   The UPDATE boot (section 2) asks nothing whatever about a desktop --
+    #   it is hpm, a package database, a version number and an account table.
+    #   It also runs with -vga none. So it opts out of runlevel 5, exactly as
+    #   tests/linux/installed_update.sh and tests/linux/bootsync_installed.sh
+    #   do. Staged HERE, on the medium, rather than written by the rc: it has
+    #   to be in place BEFORE the first line of the boot it governs, and a
+    #   file the rc wrote could only take effect one boot late.
+    #
+    #   The DESKTOP boot (section 3) is the opposite case: it reads
+    #   /var/log/hamdesktop.log and rc.5's own 'uid 1001 home ...' line, and
+    #   NEITHER of those programs is started until somebody has authenticated.
+    #   Opting that boot out of runlevel 5 would delete the very thing it
+    #   measures. So phase 1 REMOVES this file before it powers off, and
+    #   section 3 authenticates at the greeter. See tests/linux/_greet_auth.sh.
+    printf 'hamnix_runlevel = 3\n' > "$EXTRA/etc/rc.runlevel"
+
     cat >"$EXTRA/etc/rc.boot.machine" <<RCEOF
 # /etc/rc.boot -- the boot script of THIS MACHINE.
 # Staged onto the medium by tests/linux/installed_accounts.sh and copied here
@@ -235,6 +265,12 @@ if \$status > 0 {
     hpm list
     echo "# phase 2: boot normally" > /var/lib/instacct.done
     echo 'INSTACCT-P1-DONE'
+    # HAND THE DESKTOP BACK. This boot was told to stop at runlevel 3 by the
+    # /etc/rc.runlevel the medium carried; the next boot is the one section 3
+    # photographs and it must reach a compositor and a greeter. Removing the
+    # file here, on the machine, is what makes the two boots differ.
+    rm /etc/rc.runlevel
+    echo 'INSTACCT-P1-RUNLEVEL-HANDED-BACK'
     # SLEEP, THEN POWER OFF FROM INSIDE. ext4 commits its journal on a timer
     # and killing QEMU is a power cut: the marker (and everything the update
     # wrote) has to be flushed by a real shutdown or the next boot repeats
@@ -537,6 +573,22 @@ else
     bad "the installed machine never printed INSTACCT-P1-DONE -- no update was measured"
     tail -25 "$d/serial.log" 2>/dev/null | sed 's/^/        /'
 fi
+
+# THE OPT-OUT REALLY TOOK, AND IT REALLY WAS HANDED BACK. Both are asserted
+# rather than assumed: etc/rc.boot.installed prints its skip on the console
+# precisely so that a machine which silently has no desktop is not the hardest
+# kind to debug, and a run where the medium's /etc/rc.runlevel had not reached
+# the target would look identical to the greeter stall this treats.
+if grep -aq 'RUNLEVEL 5 SKIPPED' "$d/serial.log" 2>/dev/null; then
+    ok "the update boot read /etc/rc.runlevel and stopped at runlevel 3, so the graphical login was never in the way of the update"
+else
+    bad "the update boot printed no 'RUNLEVEL 5 SKIPPED' line -- the medium's /etc/rc.runlevel did not reach the target, and this boot was not the one this gate intended"
+fi
+if grep -aq 'INSTACCT-P1-RUNLEVEL-HANDED-BACK' "$d/serial.log" 2>/dev/null; then
+    ok "and phase 1 removed /etc/rc.runlevel again, so the boot section 3 photographs is a GRAPHICAL one"
+else
+    bad "phase 1 did not report removing /etc/rc.runlevel -- section 3's boot would stop at runlevel 3 and have no desktop to read"
+fi
 UPG="$(grep -a 'hpm: update done' "$d/serial.log" | head -1 | sed 's/.*upgraded=\([0-9]*\).*/\1/')"
 if [ "${UPG:-0}" -ge 1 ] 2>/dev/null; then
     ok "the update really upgraded ${UPG} package(s) -- it is not a no-op that exits 0"
@@ -608,6 +660,19 @@ qemu-system-x86_64 \
 QPID=$!
 reap_add "$QPID"
 info "qemu pid $QPID, serial $D/serial.log"
+
+# AUTHENTICATE. This boot is the one this gate reads as a picture and as a log,
+# and BOTH of the things it reads are started by rc.5 only on the authenticated
+# branch: /bin/hamdesktop (which writes /var/log/hamdesktop.log, read in 3b) and
+# the /etc/rc.de-user pre-warm (which prints the 'uid 1001 home ...' line read
+# just below). The runlevel-3 opt-out phase 1 used would delete both, so this
+# boot gets the other treatment. The account is the one the install wizard
+# created and whose uid section 1 read off the disk.
+if greet_authenticate "$D/qmp.sock" "$D/serial.log" "$USERNAME" "$UPASS"; then
+    ok "the graphical login ADMITTED $USERNAME on the updated machine, so a session exists to photograph"
+else
+    bad "could not get past the graphical login as $USERNAME -- see the [greet] lines above; nothing below is about a desktop"
+fi
 
 BOOT_SECS=0
 i=0
