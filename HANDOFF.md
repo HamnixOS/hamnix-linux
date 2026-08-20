@@ -26,6 +26,47 @@ claim was wrong it is left standing with the correction beside it rather than
 quietly edited. Read any section together with anything above it that names it —
 several headings below are superseded by entries higher up, and say so.
 
+### TWO THINGS I HAVE BEEN REPEATING ABOUT THE REGISTRY ARE WRONG -- checked in the file, not inferred
+
+**2026-08-20, orchestrator-side, read-only.** An agent challenged both while its
+build ran; I verified both in `scripts/release_gates.sh`.
+
+**1. `pointer_launch_uid`'s `expect_min` is NOT BLANK. It is the digit `0`.**
+Line 326 reads:
+
+    pointer_launch_uid|yes|0|0||bash tests/linux/pointer_launch_uid.sh
+
+The empty field on that row is the **fifth** one — the reason-for-allowance —
+not the floor. I have told at least three agents "its `expect_min` is blank on
+purpose, leave it blank", and anyone who went looking for a blank floor would not
+have found one.
+
+**The INTENT survives and still stands:** the comment above the row records that
+the number must not be filled from a contaminated run, and **to this driver `0`
+and blank mean the same thing — no floor.** So no behaviour was wrong; my
+DESCRIPTION was. That distinction matters here, because an instruction phrased
+against a field that does not look the way I said is an instruction an agent
+cannot check.
+
+**2. "The six update-path rows have NEVER BEEN RUN by anyone here" is TOO
+STRONG**, and the registry itself says so in the comment at lines 570-578:
+HANDOFF reports **33/0** for `bootsync_installed`, **44/0** for
+`installed_update`, **69/0** for `hpm_kernel_http`, **60/0** for
+`hpm_kernel_update` and **32/0** for `ab_kernel_slots` — measured **on this host,
+by earlier sessions, on other trees** — and the registry flags them as *not*
+facts about this tree, which is exactly why they carry no floor.
+
+**The true and load-bearing half is narrower: they had appeared ZERO times in
+`release_gates.sh`, so THE RELEASE BATTERY has never run them.** That is what
+makes this candidate's driver run the first time the release gate set exercises
+the update path at all, and it is why new reds there are information rather than
+regressions.
+
+**WHY I AM WRITING THIS DOWN RATHER THAN QUIETLY FIXING MY PHRASING:** both errors
+are the same shape — **a claim about the instrument stated more strongly than the
+instrument supports.** That is the thing this project keeps paying for, and I have
+now done it about the registry twice while telling agents to check me.
+
 ### THE BRING-UP TRACING IS OUT OF THE SHIPPED SHELL AND THE GETTYS NO LONGER WAIT ON THE GREETER — `installed_boot_login` **5 / 5 GREEN AT 27 / 0**, `graphical_login` **78 / 0** WITH ITS RED ARM STILL **68 / 10**
 
 **2026-08-20. Base `eb20b7c2`, checked with `git merge-base --is-ancestor eb20b7c2
