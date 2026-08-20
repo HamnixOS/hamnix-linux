@@ -413,6 +413,72 @@ installed_fresh_login|yes|0|31||bash tests/linux/installed_fresh_login.sh
 #   underpinning the owner's whole direction rests on, and it does not survive
 #   the root switch. When it does, this line becomes |2| and then |0|.
 session_min_root|yes|4|16||bash tests/linux/session_min_root.sh
+
+# =============================================================================
+# THE UPDATE PATH, WHICH THIS DRIVER GATED NOT AT ALL
+# =============================================================================
+# CHECKED 2026-08-19 AND AGAIN 2026-08-20: `installed_update`,
+# `installed_update_live`, `hpm_kernel_http`, `hpm_kernel_update`,
+# `ab_kernel_slots` and `bootsync_installed` appeared ZERO times in this file.
+# 1.0.33's headline feature is that an installed machine can update itself, and
+# the driver that decides whether 1.0.33 ships ran NOT ONE gate that exercises
+# it. That is the same hole this file was written to close ("the one gate that
+# inspects the shipped medium was never run by the driver that gates the
+# shipped medium"), reproduced on the release's own headline.
+#
+# ON expect_min, AND WHY SOME OF THESE ARE 0.
+#
+# Every non-zero number in this registry is a number somebody measured on this
+# host in the run that wrote it down. HANDOFF.md reports 33/0 for
+# bootsync_installed, 44/0 for installed_update, 69/0 for hpm_kernel_http,
+# 60/0 for hpm_kernel_update and 32/0 for ab_kernel_slots. THOSE ARE NOT
+# WRITTEN HERE AS FLOORS, because they were measured on other trees by other
+# sessions, and a floor copied out of a handoff is the arithmetic-filled blank
+# this registry exists to refuse. A row registered at 0 still RUNS, and the
+# driver still turns it red for asserting nothing, for a body that contradicts
+# its summary, and for any undeclared failure -- everything except the
+# lost-assertion floor. Registered-and-running with an honest 0 is strictly
+# more gate than not registered at all; a floor typed from memory is strictly
+# less honest than none. Each 0 below is replaced the first time a release run
+# scores the gate on this host.
+#
+# WHAT THIS COSTS. All six boot QEMU and four of them build a medium first, so
+# they roughly double the wall time of a full release battery. That is the
+# price of gating the update path at all, and it is `--host-only`-skippable
+# like every other QEMU row.
+#
+# WHAT IS NOT REGISTERED, AND WHY. `installed_update_modules` and
+# `installed_update_wsysver` are deliberately left out for now: they are
+# narrower re-cuts of installed_update's question against one module and one
+# version string, and until installed_update itself has a measured floor here
+# the marginal gate they add is not worth another two medium builds per
+# release. Say so out loud rather than register six rows and skip four.
+
+# AN INSTALLED MACHINE UPDATES ITSELF -- the headline. Two boots of one
+# installed disk with a local channel in between; phase 2 is the update and the
+# reboot is what proves it persisted. It carries the runlevel-3 opt-out
+# already (see its own header and etc/rc.boot.installed): nothing it asks is
+# about a desktop, so the greeter is not in its way.
+installed_update|yes|0|0||bash tests/linux/installed_update.sh
+
+# AFTER AN UPDATE AND A REBOOT, DOES THE RUNNING KERNEL HAVE THE NEW MODULE OR
+# ONLY THE DISK? The one gate that can tell a file that was written from a
+# machine that is running it. Also already carries the runlevel-3 opt-out.
+bootsync_installed|yes|0|0||bash tests/linux/bootsync_installed.sh
+
+# THE LIVE MEDIUM'S HALF OF THE SAME QUESTION.
+installed_update_live|yes|0|0||bash tests/linux/installed_update_live.sh
+
+# THE KERNEL-OVER-HTTP PATH, AND A WARNING THAT BELONGS WITH IT: A/B SLOTS
+# SHIP OFF. `hkslot` refuses outright without /boot/loader/loader.conf, and the
+# shipped medium is built without HAMLINUX_AB_SLOTS=1, so a machine installed
+# from the release medium CANNOT take a kernel update by this path. These three
+# rows gate the mechanism, not the shipped configuration, and that distinction
+# must stay visible: a green here is not a statement that a released machine
+# can replace its kernel.
+hpm_kernel_http|yes|0|0||bash tests/linux/hpm_kernel_http.sh
+hpm_kernel_update|yes|0|0||bash tests/linux/hpm_kernel_update.sh
+ab_kernel_slots|yes|0|0||bash tests/linux/ab_kernel_slots.sh
 REGISTRY
 }
 
