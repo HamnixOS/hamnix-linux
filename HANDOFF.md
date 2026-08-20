@@ -27,6 +27,106 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### A MACHINE FETCHED ITS KERNEL OVER http, VERIFIED IT IN RAM, AND BOOTED IT -- 69 / 0
+
+**Measured on booted machines, dev host, 2026-08-19, base `83da51e9` (checked
+with `git merge-base --is-ancestor 83da51e9 HEAD` -- and the worktree I was
+handed was 68 commits behind it, the THIRTEENTH consecutive one; its own
+`gitStatus` block named `dbe56404`, a commit 295 behind the tip). Evidence
+`~/.hamnix-build/hpmkernelhttp/`: `GATE-69-0-GREEN.log`, `SERVER.log`,
+`gate/b1.txt` .. `gate/b10.txt`, and `RUN2-52-23-index-sig.log` kept because
+its failure is the point. Branch `work/kernel-over-http`, tag
+`kernel-over-http-v1`.**
+
+    tests/linux/hpm_kernel_http.sh     69 PASSED / 0 FAILED   (new, ten boots)
+    tests/linux/hkslot_http_fetch.sh   41 PASSED / 0 FAILED   (new, host-level)
+        its inverted arm, HKHTTP_REDARM=1:  0 PASSED / 41 FAILED
+
+**`255.one` CAN NOW SHIP A KERNEL.** The entry below headed "THE ONE THING THAT
+DOES NOT WORK" -- `file://` channels only -- **is superseded**, and it was wrong
+about the reason as well as the fact.
+
+#### THE BLOCKER WAS A MISREADING, NOT A MISSING FEATURE
+
+That entry, and `user/hpm.ad`'s own header, said an http kernel was impossible
+"until `user/http9.ad` can stream a response body to a file descriptor". **http9
+never needed a streaming fetch.** `http_get` already takes a CALLER-SUPPLIED
+buffer and a CALLER-CHOSEN capacity. Nothing was absent from the transport; no
+caller had ever handed it a big enough buffer, and the absence of a caller got
+written down as the absence of a feature. Both comments are now corrected in
+place rather than deleted.
+
+#### WHAT THE MACHINE DID, off its own serial console (`gate/b2.txt`)
+
+    hpm: trust root taken from /etc/hpm/local-trusted.pub (1054 bytes, 17 lines)
+    hpm: fetching channel linux from http://10.0.2.2:35409/linux/
+    hkslot: downloading http://10.0.2.2:35409/linux/kernel/hamnix-1.0.33.efi
+    hkslot: into 74301440 bytes of RAM (the inactive slot is 74299904 bytes).
+    hkslot: downloaded 74284544 bytes into RAM.
+    hkslot: the new kernel matches the digest from the signed index.
+    hkslot: WROTE 74284544 bytes; reading them back off the medium
+    boot 3: Linux version 6.12.43 ... hamnix.kupdate=NEW
+
+**MEASURED SIZES, NOT INHERITED ONES.** The UKI this tree builds today is
+**74 284 544** bytes; the slot is preallocated at **74 299 904**; the mmap'd
+buffer is **74 301 440** (the slot, page-rounded). The entry below says
+74 263 040 and I was handed 74 276 864 -- neither is what this tree produces.
+
+#### THE BUFFER, AND WHY IT IS NOT A STATIC ARRAY
+
+`sys_mmap` when an http artifact is actually being fetched, `sys_munmap` before
+the program exits, so a machine that never updates its kernel never pays a page.
+**Its cap is THE INACTIVE SLOT'S OWN LENGTH**, read off the medium every run: an
+artifact bigger than the slot could never be written here anyway, and re-imaging
+with bigger slots grows the cap with them, with nothing to keep in step by hand.
+An artifact that exceeds it is http9 `-6` -- established by reading ONE byte past
+the full buffer, so "exactly fills the slot" stays a complete download -- and it
+is a named refusal that writes nothing.
+
+#### A DEFECT IN http9 THAT EVERY DOWNLOAD IN THIS TREE RODE ON
+
+`_h9_fetch_once` left its drain loop on EOF and fell straight through to
+`return 0` **with a SHORT body**. A server that died mid-response, or a cable
+pulled at 60% of a 74 MB kernel, reported a COMPLETE fetch with a truncated
+buffer. **A SHORT READ THAT REPORTS SUCCESS**, sitting on the transport. It is
+now rc `-11`, distinct from `-6`, and every http9 caller inherits the fix.
+A truncated *redirect* body is still followed, for the same reason an oversized
+one already was.
+
+#### THE DROPPED CONNECTION IS CROSS-CHECKED FROM BOTH ENDS
+
+The server cut the body at 45% and hung up. The machine said "the connection
+ended after **33428044** bytes, BEFORE the server's declared length"; the
+server's own log says "CUT ... at **33428044** of 74284544, then CLOSE" -- the
+same number, arrived at independently. Slot B byte-identical to a fresh
+medium's, `loader.conf` untouched, `hpm update` exit 1, boot 8 on 6.12.85.
+
+#### hpm WAS RIGHT AND THE GATE WAS WRONG, ON ITS FIRST RUN: 52 / 23
+
+Twenty-three failures, one cause: `hpm: index signature INVALID`.
+`_verify_index_signature` **routes on the SCHEME** -- a `file://` repo is checked
+against the LOCAL trust root (`etc/hpm/local-trusted.pub`, whose secret IS
+committed, because those bytes never cross a network), an http(s) repo against
+the PRODUCTION root (`etc/hpm/trusted.pub`, secret held out of band).
+`hpm_kernel_update.sh` never met this because it is `file://` throughout. **The
+moment the transport became http, the trust boundary became the real one.** The
+gate now passes `--trusted-key=/etc/hpm/local-trusted.pub` and asserts hpm
+PRINTED which root it took; `--allow-unsigned` is never passed.
+
+**AND A GREEN THAT MEANT NOTHING, recorded because it is this project's
+signature failure:** in that run the cut arm scored PASS on "`hpm update` exited
+NON-ZERO". It did -- because the INDEX was rejected, not because the transfer
+was cut. Its sibling assertions caught it.
+
+#### WHAT IS NOT CLAIMED
+
+**No https.** http only; TLS is untested on this path. The cut is a clean FIN
+from a cooperating server, not a severed cable. Nothing was fetched from or
+pushed to the real 255.one. And `tests/linux/hpm_kernel_update.sh` -- the
+`file://` gate -- was **NOT re-run** against these changes, though
+`hkslot_http_fetch.sh` arm 5 covers the plain-path source at host level.
+
+
 ### THE GREETER I MERGED MAY HAVE BROKEN A TESTING IDIOM 29 FILES USE -- MEASURED WHERE I COULD, AND EXPLICITLY BOUNDED WHERE I COULD NOT
 
 **2026-08-19, orchestrator-side, read-only. Nothing booted.** This is a
