@@ -1436,6 +1436,35 @@ if [ -n "${HAMLINUX_INSTALLER:-}" ]; then
     # the target's ESP beside BOOTX64.EFI.
     [ -f build/image/disk/UKI.MAP ] \
         && cp build/image/disk/UKI.MAP "$ROOT/boot/UKI.MAP"
+    # THE BOOTLOADER, AND ITS PRESENCE IS WHAT DECIDES THE INSTALLED MACHINE'S
+    # LAYOUT. user/hlinstall.ad:write_ab_layout tests for exactly this file: if
+    # it is here the target gets the A/B kernel layout (sd-boot at the path
+    # firmware runs, two preallocated slots beside it, a 512-byte loader.conf)
+    # and its kernel can be replaced by `hpm update`; if it is not, the target
+    # gets the single-image layout the installer has always written and its
+    # kernel is fixed for the life of the machine.
+    #
+    # IT IS STAGED ONLY WHEN THE MEDIUM ITSELF IS A/B, so there is no third
+    # state: an A/B medium installs an A/B machine, an older medium installs
+    # what it always installed, and no person has to pass a flag to get the
+    # matching pair. HAMLINUX_SDBOOT overrides the path for the same reason
+    # scripts/hamlinux_disk.sh has it.
+    if [ "${HAMLINUX_AB_SLOTS:-0}" = 1 ]; then
+        _SDBOOT="${HAMLINUX_SDBOOT:-/usr/lib/systemd/boot/efi/systemd-bootx64.efi}"
+        if [ -f "$_SDBOOT" ]; then
+            cp "$_SDBOOT" "$ROOT/boot/systemd-bootx64.efi"
+            echo "[image] staged systemd-boot into /boot -- installs from this medium get the A/B kernel layout"
+        else
+            # LOUD. HAMLINUX_AB_SLOTS=1 was asked for and cannot be delivered;
+            # a medium that silently produced non-A/B installs would be
+            # indistinguishable from one that worked until the day somebody
+            # tried to update the kernel.
+            echo "[image] ERROR: HAMLINUX_AB_SLOTS=1 but no systemd-boot at $_SDBOOT." >&2
+            echo "[image]        Installs from this medium would silently produce machines" >&2
+            echo "[image]        whose kernel can never be replaced. Refusing." >&2
+            exit 1
+        fi
+    fi
     cp -L "$(ls -1 /boot/vmlinuz-* | sort -V | tail -1)" "$ROOT/boot/vmlinuz"
     # The initramfs cannot contain the copy of itself we are about to build,
     # so the PREVIOUS one is staged.  Building twice is what makes the staged
