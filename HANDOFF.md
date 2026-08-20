@@ -27,6 +27,58 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### ROLLBACK BECOMES ON-DEVICE, ONE PREDECESSOR DEEP -- AND THE OBJECTION I RAISED DOES NOT EXIST
+
+**2026-08-19, David, correcting me twice in one message.** This completes the
+retention rule recorded below.
+
+> "There are no installed machines. This is yet to reach real metal or our user
+> base... rollback should be an on-device thing where it keeps the predecessor.
+> But only one predecessor, so you can roll back a new update. But on the
+> subsequent update that old package gets deleted from the local disk -- not on
+> the repository."
+
+**THE DESIGN:**
+* **The repository carries the newest version only.** Old versions stay only if a
+  staged upgrade genuinely requires them as an intermediate step.
+* **The device keeps exactly ONE predecessor**, so a bad update can be rolled back
+  **without re-fetching anything**.
+* On the **next** update that predecessor is deleted **from the local disk**, and
+  the version just replaced becomes the new predecessor.
+
+**THIS DISSOLVES THE BLOCKER I RAISED.** I said deleting old tarballs might break
+`hpm rollback`, because rollback RE-FETCHES ("the same repo-resolution / fetch /
+verify / extract path") and there is no local cache. Under this design rollback
+stops being a channel concern at all -- it becomes a local restore. **The question
+of whether rollback resolves through the index or through its transaction log
+stops being load-bearing for retention**, though it is still worth knowing before
+rollback is rewritten.
+
+**AND THE OTHER HALF OF MY CAUTION WAS SIMPLY WRONG: THERE ARE NO INSTALLED
+MACHINES.** I warned that deletion would leave installed machines fetching 404s.
+Nothing has reached real metal or any user. **Do not re-raise this.** It is the
+same shape as declining the A/B kernel work for fear of bricking machines that do
+not exist -- twice now I have applied shipping-distro caution to a project with no
+users, and both times he corrected it.
+
+**NOTE ON WHAT DELETION ACTUALLY BUYS:** removing the 3,046 unreferenced tarballs
+shrinks the **SERVED SITE** from 2.6 GB to roughly the current release. It does
+NOT shrink the 2.8 GB `.git` -- history keeps every blob regardless, and the only
+way to change that is a history rewrite, which is a force-push and is forbidden.
+So the win is Pages size and clone-of-the-site size, not repository size.
+
+**STILL TO BUILD, and it is now a real queue item:** `hpm rollback` must restore
+from a local predecessor rather than re-fetch, and something must keep exactly one
+and drop it on the following update. **This is the same shape as the A/B kernel
+slots already built** -- keep one predecessor on the device, run the other -- so
+the design has a working precedent in this tree.
+
+**UNRESOLVED, and I am flagging rather than guessing:** one clause of his message,
+"and you should just not update a package", did not survive dictation cleanly. I
+have NOT acted on it. My best reading is that a package should not be mutated in
+place on the device -- install the new one, keep the old as the predecessor -- but
+that is a guess and it is written here as one.
+
 ### THE CHANNEL IS NO LONGER ADDITIVE -- DAVID REPLACED THE RULE, AND 99.6% OF THE REPO'S BYTES ARE ALREADY UNREACHABLE
 
 **2026-08-19. THIS SUPERSEDES "the channel is ADDITIVE -- delete nothing", which
