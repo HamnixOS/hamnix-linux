@@ -40,7 +40,11 @@ Branch `work/ab-slot-writer`, tag `ab-slot-writer-v1`.**
 
     tests/linux/hpm_kernel_update.sh          60 PASSED /  0 FAILED   (new)
     the same gate, run 2 (two harness defects) 50 PASSED /  6 FAILED
-    tests/linux/ab_kernel_slots.sh            NOT RE-RUN -- see below
+    tests/linux/ab_kernel_slots.sh            32 PASSED /  0 FAILED
+        (it was 30/0; I changed the layout it measures AND inverted one of
+         its assertions, so I re-ran it. The two extra assertions are the
+         slot-length check and the new preallocation check. Its RED arm --
+         HAMLINUX_AB_REDARM=1, previously 15/15 -- was NOT re-run.)
 
 **A MACHINE BOOTED, RAN `hpm update`, AND THE NEXT BOOT WAS A DIFFERENT
 KERNEL, WITH THE OLD ONE STILL WHOLE.** Every write was done ON THE MACHINE.
@@ -131,10 +135,20 @@ opens `O_WRONLY|O_SYNC` with **no `O_CREAT`** and overwrites in place: the
 update path contains no metadata write at all.
 
 **So `ab_kernel_slots.sh`'s "slot B is not written on a fresh medium"
-assertion is INVERTED**, deliberately, with the old text left above it.
-**THAT GATE WAS NOT RE-RUN.** It was 30/0; I changed both the layout it
-measures and one of its assertions, so its number is now UNKNOWN, not 30/0.
-Re-running it is the first thing the next person should do.
+assertion is INVERTED**, deliberately, with the old text left above it. **IT
+WAS RE-RUN: 32 PASSED / 0 FAILED** (evidence
+`~/.hamnix-build/abkernel/GATE-rerun.log`), and its arm II still measures that
+a loader.conf pointed at an incomplete slot COSTS THE BOOT -- which is what
+makes "flip last" a fact rather than a preference. **Its RED arm
+(`HAMLINUX_AB_REDARM=1`, previously 15/15) was NOT re-run.**
+
+`tests/linux/channel_covers_image.sh`'s `boot/` table entry used to end "the
+KERNEL BINARY and the INITRAMFS USERLAND sealed in the UKI ARE NOT UPDATABLE.
+An installed machine boots the kernel it was installed with, and `hpm update`
+neither replaces it nor fails." That is no longer true and the sentence is
+corrected in place with the old wording quoted. **THAT GATE WAS NOT RE-RUN
+EITHER** -- the change is inside a prose field, but a prose field this gate
+parses out of a tab-separated table.
 
 #### WHAT IS STILL NOT DONE
 
