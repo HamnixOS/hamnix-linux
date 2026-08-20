@@ -1166,7 +1166,15 @@ def _h9_run(url: Ptr[uint8], dst: Ptr[uint8], dst_cap: uint64,
         # -6 is "the head is in hand, the BODY did not fit". A 3xx whose
         # body happens to be enormous is still a redirect, and the hop is
         # decided entirely by the head, so it must not die here.
-        if rc < 0 and rc != -6:
+        #
+        # -11 ("the body ended before its declared length") is here for the
+        # IDENTICAL reason, and was added when -11 was: a 3xx whose little
+        # explanatory body got cut off is still a redirect, and following it
+        # is still the right thing. Both codes still propagate for the FINAL
+        # response -- the `if is_redirect == 0: return rc` below is what
+        # returns them -- so a truncated PAGE is refused while a truncated
+        # redirect NOTE is ignored, which is the distinction that matters.
+        if rc < 0 and rc != -6 and rc != -11:
             return rc
 
         status: int64 = out_status[0]
