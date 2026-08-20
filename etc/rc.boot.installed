@@ -187,7 +187,64 @@ linux = ns clean {
 # --- the desktop -----------------------------------------------------
 # After the binds, not before: the panel scans /n/<name> at startup, so a
 # desktop brought up first has no distribution sections in its menu.
-source '/etc/rc.d/rc.5'
+#
+# A DOCUMENTED WAY TO STOP SHORT OF RUNLEVEL 5, AND IT EXISTS BECAUSE THE
+# GRAPHICAL LOGIN TURNED A WHOLE CLASS OF GATE RED WITH AN EMPTY REASON.
+#
+# /etc/rc.d/rc.5 (which is etc/rc.d/rc.5.linux on this line -- see
+# scripts/hamlinux_image.sh:737) now runs `/bin/hamgreet` IN THE FOREGROUND,
+# which is the entire point of a login that precedes the session. PID 1's rc
+# does not continue until somebody has authenticated.
+#
+# But the tree's standard gate idiom is to write an /etc/rc.boot that
+# `source '/etc/rc.boot.installed'` -- this file, verbatim, so the gate is
+# testing the shipped boot and not a copy of it -- and THEN ask its own
+# questions. Every one of those questions now sits behind a password prompt
+# that never returns. MEASURED, 2026-08-19, on this tree at 12dfb71b:
+#
+#   tests/linux/bootsync_installed.sh     9 PASSED /  1 FAILED
+#       boot 1's serial log ends at `hamgreet: the graphical login is
+#       presenting'; `A23E-BEGIN', the first line after the source, never
+#       printed, and the scored FAIL reads "no coresize from boot 1 -- the
+#       instrument is not reading".
+#   tests/linux/installed_update.sh       7 PASSED / 36 FAILED
+#       boot 1 timed out at 900 s in the same place; most of the 36 read
+#       `got: ' with NOTHING after it.
+#   tests/linux/installed_documents.sh   18 PASSED /  6 FAILED
+#       (registered expectation 48) -- same line, same place.
+#
+# That empty reason is the worst shape this project produces: it reads as an
+# instrument fault rather than as a real red, and a release driver cannot tell
+# "the subject regressed" from "the harness is waiting at a password prompt".
+#
+# SO A MACHINE CAN BE TOLD, BY A FILE ON ITSELF, TO STOP AT RUNLEVEL 3. The
+# file is SOURCED, so it is hamsh and not a format; it is under try/except so
+# that its ABSENCE is the normal case and costs nothing; and the skip SAYS SO
+# ON THE CONSOLE, because a machine that silently has no desktop is the
+# hardest kind to debug.
+#
+#     echo 'hamnix_runlevel = 3' > /etc/rc.runlevel
+#
+# WHAT THIS IS NOT. It is not a way to test the desktop -- a gate that needs a
+# session must AUTHENTICATE, as tests/linux/graphical_login.sh does by typing
+# the account's password over the QEMU monitor. It is for the gates that only
+# ever wanted a booted machine to ask questions of. Using it in a gate that
+# then asserts about a desktop would be this project's own worst shape: a
+# machine that cannot possibly have one, measured as though it might.
+hamnix_runlevel = 5
+try {
+    source '/etc/rc.runlevel'
+} except {
+    hamnix_runlevel = 5
+}
+if $hamnix_runlevel > 4 {
+    source '/etc/rc.d/rc.5'
+} else {
+    echo 'rc.boot: RUNLEVEL 5 SKIPPED -- /etc/rc.runlevel asked for runlevel'
+    echo 'rc.boot: 3, so there is NO compositor, NO graphical login and NO'
+    echo 'rc.boot: session on this boot. Remove /etc/rc.runlevel and reboot'
+    echo 'rc.boot: to get a desktop.'
+}
 
 echo 'rc.boot: up'
 

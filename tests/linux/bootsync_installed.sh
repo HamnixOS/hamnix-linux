@@ -201,7 +201,18 @@ else
     # The rc under test SOURCES THE SHIPPED ONE VERBATIM and then reports.
     # \PHASE.RC comes off the FAT boot partition, so the host can change what
     # each boot does between boots without touching the ext4 root.
+    #
+    # AND IT STOPS AT RUNLEVEL 3, WHICH IS NEW AND IS NOT A CONVENIENCE.
+    # etc/rc.boot.installed ends by sourcing /etc/rc.d/rc.5, which since
+    # ee1461d0 runs /bin/hamgreet IN THE FOREGROUND. MEASURED here on
+    # 2026-08-19 at 12dfb71b: 9 PASSED / 1 FAILED, boot 1's serial log ending
+    # at `hamgreet: the graphical login is presenting' with A23E-BEGIN never
+    # printed and the FAIL reading "the instrument is not reading" -- a red
+    # about a machine that had never been asked anything. Nothing in this gate
+    # is about a desktop: it measures kernel modules on the ESP, so it asks
+    # for runlevel 3 and the greeter never runs. See etc/rc.boot.installed.
     cat >"$WORK/rc.proof" <<RCEOF
+echo 'hamnix_runlevel = 3' > /etc/rc.runlevel
 source '/etc/rc.boot.installed'
 echo 'A23E-BEGIN'
 echo 'A23E-CORESIZE'
@@ -363,8 +374,15 @@ info "coresize=$B3_CORE (was $B1_CORE_N, the module grew by $GROW)"
 grep -q "Initramfs unpacking failed" "$WORK/b3.log" \
     && bad "the kernel reported 'Initramfs unpacking failed' -- the archive is CORRUPT and the boot only looked fine" \
     || ok "no 'Initramfs unpacking failed': the whole archive unpacked"
-B1_MODS=$(tr -d '\r' <"$WORK/b1.log" | grep -o "loaded [0-9]* kernel modules" | head -1)
-B3_MODS=$(tr -d '\r' <"$WORK/b3.log" | grep -o "loaded [0-9]* kernel modules" | head -1)
+# THE PATTERN, AND WHY IT HAS AN OPTIONAL `of N'. user/linuxinit.ad prints
+# `linuxinit: loaded 86 of 87 kernel modules listed' on this tree -- MEASURED
+# in ~/.hamnix-build/bootsync-installed/b1.log:503 on 2026-08-19. The old
+# pattern here was `loaded [0-9]* kernel modules', which matches NEITHER form
+# of that line, so both sides came back empty and this assertion scored
+# `module count changed: '' -> '''. A gate's red about its own grep, and an
+# empty one at that: it survived a run in which the sync worked perfectly.
+B1_MODS=$(tr -d '\r' <"$WORK/b1.log" | grep -oE "loaded [0-9]+( of [0-9]+)? kernel modules" | head -1)
+B3_MODS=$(tr -d '\r' <"$WORK/b3.log" | grep -oE "loaded [0-9]+( of [0-9]+)? kernel modules" | head -1)
 [ -n "$B3_MODS" ] && [ "$B1_MODS" = "$B3_MODS" ] \
     && ok "the same module count as before the sync ($B3_MODS): nothing was lost" \
     || bad "module count changed: '$B1_MODS' -> '$B3_MODS'"
