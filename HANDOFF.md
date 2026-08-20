@@ -27,6 +27,42 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+### ROLLBACK TO AN OLDER VERSION IS ALREADY BROKEN -- WHICH ANSWERS THE RETENTION QUESTION AND ARGUES FOR DAVID'S ON-DEVICE DESIGN
+
+**2026-08-19, orchestrator-side, read-only. Nothing run — this is a source
+reading and is labelled one.**
+
+I had left an open question: does `hpm rollback` resolve an old version **through
+the index** (in which case old tarballs are already unreachable) or **through a
+URL in its own transaction log** (in which case deleting them breaks rollback)?
+
+**It is the first, and rollback to an older version therefore cannot work today.**
+
+`_reverse_txn` (`user/hpm.ad:9090`) reads the package name and version out of its
+own transaction history (`hist_buf`), builds a `pkg@ver` spec, and — for a txn
+whose `prior` is `present` — **RE-INSTALLS that spec through the normal path**.
+The index lookup takes a wanted version (`want_ver` / `want_ver_len`,
+`user/hpm.ad:6715`). **And the served index carries only the newest version** —
+measured: 130 entries, all one version, against 3,176 tarballs on disk.
+
+So a rollback that needs `pkg@<older>` asks the index for a version the index does
+not name. **That is a pre-existing defect, entirely separate from retention**, and
+it means deleting the 3,046 unreferenced tarballs breaks nothing that works today.
+
+**WHY THIS MATTERS BEYOND HOUSEKEEPING: it independently argues for David's
+design.** He said rollback should be on-device, keeping exactly one predecessor,
+deleted from local disk on the next update. The measurement says the channel
+**cannot** serve a predecessor even now — so a local predecessor is not merely
+tidier, it is the only thing that can make rollback work at all. The A/B kernel
+slots are the same shape and already work.
+
+**NOT ESTABLISHED, and I want it measured before rollback is rewritten:** I did
+not RUN a rollback. I read the reversal path and the lookup signature. It is
+possible some path I did not follow supplies an older version another way. The
+person who rewrites rollback should first **run `hpm rollback` on a machine and
+watch it fail**, so the redesign starts from an observed failure rather than my
+reading — this tree has refuted my source readings before.
+
 ### ROLLBACK BECOMES ON-DEVICE, ONE PREDECESSOR DEEP -- AND THE OBJECTION I RAISED DOES NOT EXIST
 
 **2026-08-19, David, correcting me twice in one message.** This completes the
