@@ -74,6 +74,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 # image already ships and therefore the ones known to RUN, not merely link.
 COREUTILS = """
     ls cat echo cp mv rm mkdir ln touch pwd
+    chmod
     grep sed sort uniq head tail wc cut tr
     find du df stat tree
     date sleep true false yes seq basename dirname
@@ -546,6 +547,15 @@ COMPONENTS = {
          # the same shape as rc.5.linux -> rc.5 two lines up.
          ("etc/rc.login.linux", "etc/rc.login"),
          ("etc/rc.de-user.linux", "etc/rc.de-user"),
+         # etc/rc.ssh is the script user/sshd.ad hands to the hamsh it spawns
+         # for each SSH session (_spawn_shell's shell_argv[1]). Until now it
+         # was in the tree, in no image and in no package -- so commit
+         # a8ea2456, which added the file to make `enter linux { ... }` work
+         # over SSH, could never have taken effect anywhere. It is staged on
+         # the image now, and it is here for the same reason etc/rc.login is
+         # two lines up: the file half of a working SSH session must be
+         # fixable on an installed machine, not only the program half.
+         ("etc/rc.ssh", "etc/rc.ssh"),
          ("etc/passwd", "etc/passwd"),
          ("etc/group", "etc/group"),
          ("etc/hostname", "etc/hostname"),
