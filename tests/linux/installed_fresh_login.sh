@@ -73,8 +73,11 @@
 #                  A missing guard must never be answered by a successful
 #                  install.
 #
-# Then the disk from arm A -- BYTE FOR BYTE AS THE INSTALLER LEFT IT, with
-# nothing written into it by this gate -- is booted and driven over serial:
+# Then the disk from arm A is booted and driven over serial. ITS /etc/rc.boot
+# IS THE INSTALLER'S OWN BYTES, asserted by comparison, and EXACTLY ONE file is
+# added to a copy of the disk before it boots: /etc/rc.runlevel, asking for
+# runlevel 3. Section 2 says at length why -- in short, at runlevel 5 the boot
+# rc's own last two lines never run, so there is no terminal login to measure:
 #
 #   * the console must present `login: ` (anchored: `rc.login: getty started
 #     on /dev/ttyS0` CONTAINS the substring `login:` and an unanchored grep
@@ -672,11 +675,86 @@ fi
 score_refused c "$TGT_C" "noguard"
 
 # =========================================================================
-say "2 -- BOOT THE FRESH INSTALL FROM ARM A, UNTOUCHED, AND TRY TO LOG IN"
+say "2 -- BOOT THE FRESH INSTALL FROM ARM A AND TRY TO LOG IN ON A TERMINAL"
 
 G="$(part_geom "$TGT_A" 2)"; [ -n "$G" ] || { bad "cannot read arm A's partition table"; finish; }
 OFF="${G% *}"; SZ="${G#* }"
 [ $((OFF % 1048576)) = 0 ] || { bad "arm A's root partition does not start on a MiB boundary ($OFF)"; finish; }
+
+# =========================================================================
+# EXACTLY ONE FILE IS ADDED TO THE DISK BEFORE IT IS BOOTED, AND IT IS NOT
+# /etc/rc.boot. THIS SECTION USED TO SAY "UNTOUCHED" AND IT CANNOT ANY MORE.
+#
+# MEASURED on this host, 2026-08-20, on the disk arm A really installed:
+# booted with nothing added at all, the serial log's LAST LINE is
+#
+#     hamgreet: the graphical login is presenting
+#
+# and no `login: ` ever appears on /dev/ttyS0. That is not a fault in this
+# gate. /etc/rc.boot is `source '/etc/rc.boot.installed'` then `source
+# '/etc/rc.login'` then `supervise`, and rc.boot.installed ENDS by sourcing
+# /etc/rc.d/rc.5, which runs /bin/hamgreet IN THE FOREGROUND. So on a machine
+# that reaches runlevel 5, THE LAST TWO LINES OF ITS OWN BOOT RC NEVER RUN:
+# no login program is started on any terminal and `supervise` is never
+# reached, until somebody has authenticated GRAPHICALLY.
+#
+# The same shape is visible in the 1.0.33 candidate's
+# gates/installed_boot_login.log, where BOTH arms -- including that gate's own
+# autologin CONTROL -- never reach their READY marker and both logs end on the
+# same hamgreet line.
+#
+# THAT IS A PRODUCT QUESTION AND IT IS NOT THIS GATE'S TO ANSWER: whether an
+# installed machine should start its terminal logins BEFORE the graphical one
+# is a change to every installed machine, and etc/rc.d/rc.5.linux's own
+# no-session branch already tells the operator to "Log in on a terminal" to
+# read /var/lib/hamgreet.trace -- advice that cannot be followed today. It is
+# written up in HANDOFF.md for the owner.
+#
+# What this gate measures is the TTY half, so it takes the documented way to
+# stop short of runlevel 5 (etc/rc.boot.installed's own header: "It is for the
+# gates that only ever wanted a booted machine to ask questions of"). One
+# file, /etc/rc.runlevel, is written onto a COPY of arm A's disk. The rc under
+# test is NOT touched, and that is asserted below by comparing it byte for
+# byte with what the installer wrote.
+printf 'hamnix_runlevel = 3\n' >"$W/rc.runlevel"
+
+plant_runlevel3() {   # plant_runlevel3 <whole-disk-image> <label>
+    local img="$1" label="$2" p="$W/plant-$label.img"
+    carve "$img" 2 "$p" || { bad "[$label] cannot carve the disk to plant /etc/rc.runlevel"; return 1; }
+    /sbin/e2fsck -fy "$p" >"$W/plant-$label-fsck1.log" 2>&1
+    cat >"$W/plant-$label.dbg" <<DBEOF
+cd /etc
+write $W/rc.runlevel rc.runlevel
+quit
+DBEOF
+    /sbin/debugfs -w -f "$W/plant-$label.dbg" "$p" >"$W/plant-$label-debugfs.log" 2>&1
+    /sbin/e2fsck -fy "$p" >"$W/plant-$label-fsck2.log" 2>&1
+    rm -f "$W/plant-$label-rb.txt"
+    /sbin/debugfs -R "dump /etc/rc.runlevel $W/plant-$label-rb.txt" "$p" >/dev/null 2>&1
+    if cmp -s "$W/rc.runlevel" "$W/plant-$label-rb.txt"; then
+        ok "[$label] /etc/rc.runlevel landed byte-identical on the disk"
+    else
+        bad "[$label] /etc/rc.runlevel did not land -- see $W/plant-$label-debugfs.log"
+        return 1
+    fi
+    dd if="$p" of="$img" bs=1M seek=$((OFF / 1048576)) conv=notrunc status=none \
+        || { bad "[$label] cannot write the partition back"; return 1; }
+    return 0
+}
+
+FRESHDISK="$W/target-fresh-r3.img"
+cp --reflink=auto "$TGT_A" "$FRESHDISK" || { bad "cannot copy arm A's disk"; finish; }
+plant_runlevel3 "$FRESHDISK" fresh || finish
+# AND THE RC UNDER TEST IS UNCHANGED. Without this the section above could be
+# hiding a rewritten boot rc behind the word "one file".
+rm -f "$W/fresh-rcboot.txt"
+/sbin/debugfs -R "dump /etc/rc.boot $W/fresh-rcboot.txt" "$W/plant-fresh.img" >/dev/null 2>&1
+if cmp -s "$W/rcboot-a.txt" "$W/fresh-rcboot.txt"; then
+    ok "and /etc/rc.boot on the disk about to be booted is BYTE-IDENTICAL to what the installer wrote"
+else
+    bad "the /etc/rc.boot about to be booted is not the one the installer wrote -- this arm tests a rc this gate made up"
+    finish
+fi
 
 # The uid to expect is READ OFF THE DISK, not assumed: asserting a constant
 # would be asserting this gate's memory of the installer's default.
@@ -766,9 +844,22 @@ boot_arm() {   # boot_arm <name> <disk> <drivescript>
     return 0
 }
 
-boot_arm fresh "$TGT_A" "$W/drive.fresh" || finish
+boot_arm fresh "$FRESHDISK" "$W/drive.fresh" || finish
 FS="$W/boot-fresh/serial.txt"
 info "fresh boot log: $FS ($(wc -c <"$FS" 2>/dev/null || echo 0) bytes)"
+
+# THE OPT-OUT'S OWN ASSERTION, and it can fail. If the runlevel file did not
+# take, the machine goes to runlevel 5, blocks in hamgreet and every login
+# assertion below becomes a statement about a machine that never got there --
+# which is exactly the empty-reason red this treatment exists to remove. So it
+# is scored, and it is scored FIRST.
+if grep -aq 'RUNLEVEL 5 SKIPPED' "$FS"; then
+    ok "[fresh] the machine read /etc/rc.runlevel and stopped at runlevel 3, so the graphical login is not in the way of the terminal one"
+else
+    bad "[fresh] the machine did NOT report skipping runlevel 5 -- the opt-out did not take, and nothing below is a measurement of the tty login"
+    tail -20 "$FS" 2>/dev/null | sed 's/^/        /'
+    finish
+fi
 
 if grep -aq 'rc.login: getty started on /dev/ttyS0' "$FS"; then
     ok "[fresh] the installed machine's own rc reached /etc/rc.login and started a getty on the console"
@@ -819,8 +910,13 @@ say "3 -- THE CONTROL, AND IT RUNS: the same disk with \`-a hostowner\`"
 # hostowner`. `login -f` does not setuid, so it keeps PID 1's root. This arm
 # MUST reach a root shell with no password, and if it does not then arm
 # 'fresh''s silence proves nothing at all.
+# AND IT IS COPIED FROM THE ARM-'fresh' DISK, NOT FROM $TGT_A, so it carries
+# the SAME /etc/rc.runlevel. A control that went to runlevel 5 while the arm it
+# controls stopped at 3 would differ in two things at once, and would stall in
+# hamgreet exactly as installed_boot_login's own control did in the 1.0.33
+# candidate -- a control that cannot fire is worse than none.
 CTLDISK="$W/target-control.img"
-cp --reflink=auto "$TGT_A" "$CTLDISK" || { bad "cannot copy arm A's disk for the control"; finish; }
+cp --reflink=auto "$FRESHDISK" "$CTLDISK" || { bad "cannot copy arm A's disk for the control"; finish; }
 CTLPART="$W/part-control.img"
 carve "$CTLDISK" 2 "$CTLPART" || { bad "cannot carve the control disk"; finish; }
 /sbin/e2fsck -fy "$CTLPART" >"$W/ctl-fsck1.log" 2>&1
@@ -856,6 +952,11 @@ boot_arm control "$CTLDISK" "$W/drive.control" || finish
 CS="$W/boot-control/serial.txt"
 info "control boot log: $CS ($(wc -c <"$CS" 2>/dev/null || echo 0) bytes)"
 
+if grep -aq 'RUNLEVEL 5 SKIPPED' "$CS"; then
+    ok "[control] the control stopped at runlevel 3 too, so it differs from arm 'fresh' by the getty flag and nothing else"
+else
+    bad "[control] the control did NOT skip runlevel 5 -- it differs from arm 'fresh' in two things at once and is not a control"
+fi
 if has_root_identity "$CS"; then
     ok "[control] the console answered \`id\` with a ROOT identity -- A ROOT SHELL IS VISIBLE TO THIS INSTRUMENT, on this port, with this driver, with this detector"
     info "  $(root_identity_lines "$CS" | head -1)"
