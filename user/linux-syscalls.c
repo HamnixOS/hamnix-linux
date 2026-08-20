@@ -5250,6 +5250,17 @@ static void enter_root_failed(const char *step, const char *path)
  *     machine. AFTER-SWITCH /n above shows exactly that: `r3`, and nothing
  *     else.
  *
+ *     **(2) WAS FIXED THE WRONG WAY AND IS CORRECTED BELOW.** The first fix
+ *     put the machine AT <mnt>/n and STOPPED carrying the old /n, which is
+ *     the one place a Plan 9 program publishes things for the far side of a
+ *     root switch. It broke `ac` -- and therefore the whole publish path --
+ *     for 28 commits. The machine now goes to <mnt>/.machine, the old /n is
+ *     carried by name as it always was, and `#/` resolves to "/.machine".
+ *     The measurement is in enter_root itself. NOTE THAT (2) WAS NEVER THE
+ *     LOAD-BEARING HALF: every shipping template and every arm of
+ *     tests/linux/session_min_root.sh writes `bind '#/' /n` explicitly, so
+ *     (1) alone is what puts the machine at /n.
+ *
  * And the moment matters: mount(".","/",MS_MOVE) SUCCEEDS, so the root a
  * process came from is not renamed, it is gone -- there is no name for it
  * anywhere in the namespace afterwards. The underpinning can therefore only
@@ -5258,8 +5269,9 @@ static void enter_root_failed(const char *step, const char *path)
  * outside your namespace unless something put it there before you entered.
  *
  * NESTED SWITCHES WORK BY CONSTRUCTION because of WHAT gets carried: a
- * session already inside a constructed root has the machine at /n, so
- * entering a second root carries /n -- still the machine -- to the new /n.
+ * session already inside a constructed root has the machine at /.machine, so
+ * entering a second root carries /.machine -- still the machine -- to the new
+ * /.machine, and ns_real_root is "/.machine" either way.
  *
  * THE RESIDUAL GAP, SAID PLAINLY: this is a per-process variable. fork(2)
  * inherits it; execve(2) does not, so it is also published as
@@ -5292,23 +5304,48 @@ static int32_t enter_root(const char *mnt, int is_sysroot)
     static const char *sysroot_only[] = { "/srv", "/tmp" };
     char dest[256];
 
-    /* THE UNDERPINNING GOES ACROSS FIRST, AT /n, AND ONLY FOR A SESSION-SHAPED
+    /* THE UNDERPINNING GOES ACROSS FIRST, AND ONLY FOR A SESSION-SHAPED
      * SWITCH. The block above ns_real_root has the measurement.
+     *
+     * IT GOES TO <mnt>/.machine, NOT TO <mnt>/n, AND THAT IS A CORRECTION.
+     * The first version of this carry put the machine AT /n and dropped the
+     * pre-switch /n on the floor -- and /n is the ONE place a Plan 9 program
+     * publishes things it needs on the far side of a root switch. MEASURED,
+     * on the packager's own publish gate: `user/ac.ad` binds /usr/share/adder
+     * onto /n/adder, /tmp/ac.<pid> onto /n/ac and /var/cache/adder onto
+     * /n/acrt and THEN does `bind '#distro' /`, exactly as its header says;
+     * with the machine at /n those three names were gone and the link step
+     * died with `/bin/sh: 0: cannot open /n/adder/ac-link.sh`.
+     * tests/linux/channel_compiles_adder.sh went 7 PASS / 0 FAIL at
+     * c7695c15 and 3 PASS / 2 FAIL at 36b86a38, the commit that introduced
+     * the carry, so scripts/hamlinux_packages.py refused to write an index at
+     * all -- nothing could be published from this tree.
+     *
+     * BOTH FACTS THE MEASUREMENT BEHIND 36b86a38 ESTABLISHED STILL HOLD:
+     * the old root has no name after mount(".","/",MS_MOVE), so it can only
+     * be handed across BEFORE the switch (this block), and `#/` still
+     * resolves to a REMEMBERED path rather than the literal "/" -- it is now
+     * "/.machine" rather than "/n". Every shipping template and
+     * tests/linux/session_min_root.sh's four arms say `bind '#/' /n`
+     * EXPLICITLY after entering, so "/n IS THE MACHINE" is still true where
+     * it was asserted; it is now true because the session asked for it, not
+     * because the switch silently overwrote a directory somebody else had
+     * published into.
      *
      * NOT for is_sysroot: that switch is the initramfs handing off to the disk
      * at boot, and the machine's real global root is then the DISK -- the
-     * initramfs is not an underpinning anybody wants at /n, and the boot's own
-     * /n has to travel intact. ns_real_root correctly stays "/" across that
+     * initramfs is not an underpinning anybody wants, and the boot's own /n
+     * has to travel intact. ns_real_root correctly stays "/" across that
      * switch, because after it "/" IS the machine. */
     const char *carried = NULL;
     if (!is_sysroot) {
-        snprintf(dest, sizeof dest, "%s/n", mnt);
+        snprintf(dest, sizeof dest, "%s/.machine", mnt);
         mkdir(dest, 0755);
         if (ns_mount(ns_real_root_path(), dest, NULL, MS_BIND | MS_REC, NULL)
                 == 0) {
-            carried = "/n";
+            carried = "/.machine";
         } else {
-            /* Say it. A constructed root whose /n is not the machine is an
+            /* Say it. A constructed root that cannot reach the machine is an
              * island, and the alternative to this line is discovering that
              * from `cat: /n/anything: No such file or directory` three layers
              * up. The switch still proceeds: a root you cannot see out of is
@@ -5316,19 +5353,20 @@ static int32_t enter_root(const char *mnt, int is_sysroot)
             char m[384];
             int n = snprintf(m, sizeof m,
                 "enter: could not carry the machine's real root (`%s') across "
-                "to `%s': %s -- this session's /n will NOT be the machine, and "
-                "nothing inside it can reach the underpinning\n",
+                "to `%s': %s -- `bind '#/' /n' inside this session will NOT be "
+                "the machine, and nothing inside it can reach the "
+                "underpinning\n",
                 ns_real_root_path(), dest, strerror(errno));
             cons_write(m, n > 0 ? (size_t)n : 0);
         }
     }
 
     for (size_t i = 0; i < sizeof always / sizeof always[0]; i++) {
-        /* /n is already the machine, which is strictly more than the old /n
-         * was: the old /n is a directory ON the machine's root and so is still
-         * reachable, at /n/n. */
-        if (carried && !strcmp(always[i], "/n"))
-            continue;
+        /* /n IS CARRIED BY NAME, always. It is the mount-point parent, and a
+         * program that published something under it before the switch names
+         * it by that path afterwards (user/ac.ad's /n/ac, /n/adder, /n/acrt).
+         * The machine is NOT here -- it is at <mnt>/.machine above, which is
+         * what `#/` resolves to. */
         snprintf(dest, sizeof dest, "%s%s", mnt, always[i]);
         mkdir(dest, 0755);
         if (is_sysroot) {

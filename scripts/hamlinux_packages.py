@@ -187,7 +187,17 @@ AUDIO_CMDS = "playtone aplay arecord".split()
 # who you are, and none of them ever sees a password hash. Packaged together
 # because a machine that can log in but cannot change a password is not a
 # system you can administer.
-AUTH_CMDS = "login su passwd whoami".split()
+#
+# getty JOINED THIS LIST LATE AND THAT IS THE FINDING, NOT THE FIX. It is the
+# program /etc/rc.login starts on every terminal -- the thing that puts the
+# `login: ' prompt on a console at all -- and it shipped in the IMAGE and in no
+# package, so an installed machine could never receive a fix to the one program
+# standing between a stranger and a root shell. MEASURED by
+# tests/linux/channel_covers_image.sh: `bin/getty ships in the image and is in
+# NO package -- an installed machine can never update it'. Exactly the shape
+# `halt`/`poweroff` and `hamappmenu` had before it, and this time on the
+# security boundary.
+AUTH_CMDS = "login su passwd whoami getty".split()
 
 # Kernel modules. On a stock Debian kernel every graphics, filesystem and
 # network driver is a module, so on real hardware these are the difference
@@ -223,8 +233,18 @@ MOD_CMDS = "insmod lsmod modprobe rmmod".split()
 # the reason hamnix-init's hook exists: the running binary is replaced on disk
 # and the CURRENT process keeps its own image, and bootsync is spawned after all
 # the file movement is finished.
+#
+# hkslot is bootsync's argument taken all the way. bootsync can change the
+# MODULES an installed machine boots with; hkslot writes the KERNEL itself into
+# the inactive A/B slot and then flips loader.conf, and `hpm update` calls it
+# (user/hpm.ad). It shipped in the image and in no package -- MEASURED by
+# tests/linux/channel_covers_image.sh: `bin/hkslot ships in the image and is in
+# NO package -- an installed machine can never update it'. A machine whose
+# hkslot is broken cannot be given a working one through the only path that
+# could deliver a kernel, which is the same self-defeating loop bootlogd is in
+# this list to avoid.
 SYS_CMDS = ("hlinstall haminstallui nsrun reboot halt poweroff "
-            "bootlogd bootsync").split()
+            "bootlogd bootsync hkslot").split()
 # bin/install, built from user/hlinstall.ad. See the block above line 86 for
 # what it was and what that cost; the image does the same thing with `install
 # -m755 $ROOT/bin/hlinstall $ROOT/bin/install`.
@@ -513,6 +533,18 @@ COMPONENTS = {
          ("etc/rc.boot.linux", "etc/rc.boot.linux"),
          ("etc/rc.boot.installed", "etc/rc.boot.installed"),
          ("etc/rc.d/rc.5.linux", "etc/rc.d/rc.5"),
+         # etc/rc.login is what starts a login program on every terminal. It
+         # shipped in the image and in no package -- MEASURED by
+         # tests/linux/channel_covers_image.sh -- which meant the FILE half of
+         # the login could never be fixed on an installed machine even though
+         # the PROGRAM half (getty, login) now can. An installer that wrote a
+         # machine with no login on any terminal is the failure this file was
+         # added to close; leaving it unupdatable leaves that failure one bad
+         # edit away with no way back.
+         # The source is etc/rc.login.linux and the machine path is
+         # etc/rc.login, exactly as scripts/hamlinux_image.sh:413 stages it --
+         # the same shape as rc.5.linux -> rc.5 two lines up.
+         ("etc/rc.login.linux", "etc/rc.login"),
          ("etc/rc.de-user.linux", "etc/rc.de-user"),
          ("etc/passwd", "etc/passwd"),
          ("etc/group", "etc/group"),
