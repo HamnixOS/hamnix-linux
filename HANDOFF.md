@@ -80,10 +80,56 @@ where it is asserted -- now because the session asked for it.
 **9 passed, 0 failed**; `channel_compiles_adder.sh` **7 passed, 0 failed**;
 packager **exit 0, 130 packages, `index.json` written (71851 bytes)**.
 
-**NOT RE-RUN, and it is the gate that would answer this change:**
-`tests/linux/session_min_root.sh` (registered 16). Nothing has been booted
-against the `/.machine` change. That is the first thing the next person should
-do.
+**AND THE GATE THAT COULD NOT RUN BECAUSE OF IT FOUND THREE REAL HOLES.**
+`tests/linux/channel_covers_image.sh` is the owner's standing rule in
+executable form, and the packager's refusal had kept it from running for 28
+commits. The moment the packager published, it named:
+
+    FAIL: bin/getty ships in the image and is in NO package
+    FAIL: bin/hkslot ships in the image and is in NO package
+    FAIL: etc/rc.login ships in the image and is in NO package
+
+All three are from work that landed in those same weeks -- the terminal login
+and the A/B kernel updater. An installed machine could not be given a fix to
+the program guarding its console, to the file that starts it, or to the one
+program that can deliver a kernel. Now `getty` -> `AUTH_CMDS`, `hkslot` ->
+`SYS_CMDS`, `etc/rc.login.linux` -> `etc/rc.login`, and the gate is
+**11 passed, 0 failed**.
+
+**A FOURTH FAIL IN THAT RUN WAS MINE**, and it is recorded because it looked
+exactly like a real one: `/etc/hamnix-release in the channel is NOT the bytes
+the image boots with`, `1.0.33` against `unstamped`.
+`scripts/hamlinux_image.sh` defaults `HAMLINUX_VERSION` to `unstamped` and I
+had built the root without it. A harness fact. The green above was taken with
+`HAMLINUX_VERSION=1.0.33` on the image build.
+
+**NOT MEASURED:** no machine has been booted from a medium built with those
+three in their packages, and nothing has been installed or updated from this
+channel. The gate compares the image root against the tarballs; it does not
+run them.
+
+**IT WAS RUN.** `tests/linux/session_min_root.sh` -- the gate that asserts on
+`/n` directly -- scores **31 PASSED / 2 FAILED** against the `/.machine`
+change, which is the same number commit `0c28fc45` recorded for it before this
+branch existed. The assertions that are specifically about what `36b86a38` set
+out to fix are **green**:
+
+    PASS  [r3,r4] a mount the MACHINE made (/n/r4) is listable from inside a
+          constructed root -- /n is not just present, it resolves through to
+          the machine's own mounts
+    PASS  on the machine's own root, `bind '#/' /n2` still resolves to the
+          machine (status 0) -- the unswitched case is unchanged
+
+**WHAT I DID NOT PROVE:** that the two FAILs are the SAME two `0c28fc45` had.
+They are on arms `r1` and `r2`, the deliberately minimal roots, and both read
+"the marker did NOT resolve"; I did not re-run the gate on a base commit to
+compare them. The totals match and that is all I measured.
+
+`tests/linux/installed_update.sh`'s **44 PASSED / 0 FAILED** is a second,
+independent measurement of the same change: every binary on both of its
+machines was rebuilt against the new `user/linux-syscalls.c`, and two machines
+booted, took a signed update, rebooted onto it and ran `hpm` as uid 1001 inside
+a namespace.
 
 #### 2. THE GREETER: THREE AT-RISK GATES RUN, ALL THREE RED, ONE CAUSE
 
@@ -107,6 +153,7 @@ ever wanted a booted machine writes `echo 'hamnix_runlevel = 3' >
 /etc/rc.runlevel`, or stages the file onto the medium.
 
     bootsync_installed.sh:  9/1  ->  32/1  ->  33 PASSED / 0 FAILED
+    installed_update.sh:    7/36              ->  44 PASSED / 0 FAILED
 
 **THE LAST FAIL WAS THE GATE'S OWN GREP, and it is recorded separately because
 it survived a run in which the thing under test worked perfectly:**
