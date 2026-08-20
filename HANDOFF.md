@@ -27,6 +27,139 @@ quietly edited. Read any section together with anything above it that names it â
 several headings below are superseded by entries higher up, and say so.
 
 
+### THE PACKAGER HAD REFUSED TO PUBLISH FOR 28 COMMITS, AND THE CAUSE WAS A "FIX" THAT NOTHING HAD RUN -- plus the greeter really did break the gate idiom, MEASURED on three gates
+
+**Measured on this host, 2026-08-19, base `6a46b4f6` (checked with
+`git merge-base --is-ancestor 6a46b4f6 HEAD` -- which FAILED on the worktree I
+was handed: it was 77 commits behind and its own `gitStatus` block named
+`dbe56404`, which is 304 behind the tip. The FIFTEENTH consecutive one).
+Evidence `~/.hamnix-build/pkgadder/` and `~/.hamnix-build/idiom/`. Branch
+`work/packager-and-idiom`, tag `packager-and-idiom-v1`.**
+
+#### 1. THE RELEASE BLOCKER, AND IT WAS NEITHER PRE-EXISTING NOR THE LAST AGENT'S
+
+`scripts/hamlinux_packages.py` refused with
+`ac exited 2 -- a machine built from this channel cannot compile an Adder
+program`. **THE REFUSAL IS NOT IN THE PACKAGER**; it comes from
+`tests/linux/channel_compiles_adder.sh`, which the packager runs before it
+writes `index.json`. The line under it is the one that matters:
+
+    /bin/sh: 0: cannot open /n/adder/ac-link.sh: No such file
+
+**Three real packager runs, each from a clean `build/` and a fresh
+`adder_cc_bootstrap`, NOT reasoned from any diff:**
+
+    c7695c15  (36b86a38^)   7 PASSED / 0 FAILED   exit 0, 130 packages, index written
+    36b86a38                3 PASSED / 2 FAILED   REFUSING TO PUBLISH
+    6a46b4f6  (the tip)     3 PASSED / 2 FAILED   REFUSING TO PUBLISH, same text
+
+So it is **pre-existing relative to the last agent's work and NOT pre-existing
+in the tree**: `36b86a38` introduced it, 28 commits before the tip, and that
+commit's own last line says *"NOT MEASURED IN THIS COMMIT: nothing has been
+booted. The gate is next."*
+
+**THE MECHANISM.** `36b86a38` fixed two things and one of the two fixes was
+wrong. `enter_root`'s `always[]` used to carry the pre-switch `/n` into the new
+root; it was changed to bind the MACHINE'S ROOT at `<mnt>/n` and to stop
+carrying `/n` at all. But `/n` is the one place a Plan 9 program publishes
+things it will need on the far side of a root switch, and `user/ac.ad`'s header
+says exactly that: it binds `/tmp/ac.<pid>` -> `/n/ac`, `/usr/share/adder` ->
+`/n/adder`, `/var/cache/adder` -> `/n/acrt`, and THEN `bind '#distro' /`. After
+the change those names were the machine's root instead. **The old mounts were
+still there -- at `/n/n` -- so nothing errored**, and the failure surfaced three
+layers up as a shell that could not open a script.
+
+**THE FIX.** The machine goes to `<mnt>/.machine`, `#/` resolves to
+`"/.machine"`, and `/n` is carried by name again. Both facts `36b86a38`
+measured still hold. **And (2) was never the load-bearing half:** every shipping
+template and all four arms of `tests/linux/session_min_root.sh` write
+`bind '#/' /n` EXPLICITLY after entering, so "/n IS THE MACHINE" is still true
+where it is asserted -- now because the session asked for it.
+
+**WITH THE FIX, the same command on the tip:** `channel_runs_desktop.sh`
+**9 passed, 0 failed**; `channel_compiles_adder.sh` **7 passed, 0 failed**;
+packager **exit 0, 130 packages, `index.json` written (71851 bytes)**.
+
+**NOT RE-RUN, and it is the gate that would answer this change:**
+`tests/linux/session_min_root.sh` (registered 16). Nothing has been booted
+against the `/.machine` change. That is the first thing the next person should
+do.
+
+#### 2. THE GREETER: THREE AT-RISK GATES RUN, ALL THREE RED, ONE CAUSE
+
+The entry below headed "THE GREETER I MERGED MAY HAVE BROKEN A TESTING IDIOM"
+asked for exactly this and it was right to. **RUN, not read:**
+
+    tests/linux/bootsync_installed.sh     9 PASSED /  1 FAILED
+    tests/linux/installed_update.sh       7 PASSED / 36 FAILED
+    tests/linux/installed_documents.sh   18 PASSED /  6 FAILED   (registered: 48)
+
+Each machine's own serial log ends at the same two lines and nothing after them
+ever ran:
+
+    [rc.5] the graphical login is starting -- no session program exists yet
+    hamgreet: the graphical login is presenting
+
+**THE FIX, and the greeter is untouched.** `etc/rc.boot.installed` now sources
+`/etc/rc.runlevel` under try/except and skips `rc.5` when it sets
+`hamnix_runlevel` below 5, **saying so loudly on the console**. A gate that only
+ever wanted a booted machine writes `echo 'hamnix_runlevel = 3' >
+/etc/rc.runlevel`, or stages the file onto the medium.
+
+    bootsync_installed.sh:  9/1  ->  32/1  ->  33 PASSED / 0 FAILED
+
+**THE LAST FAIL WAS THE GATE'S OWN GREP, and it is recorded separately because
+it survived a run in which the thing under test worked perfectly:**
+`module count changed: '' -> ''` -- both sides empty. `user/linuxinit.ad`
+prints `loaded 86 of 87 kernel modules listed`; the pattern was
+`loaded [0-9]* kernel modules`, which matches neither form.
+
+**WHAT IS NOT FIXED, and it is most of the population.** `installed_documents`
+NEEDS the session -- it launches `hamwrite` in the desktop -- so the opt-out is
+the WRONG answer for it; it wants the authenticating shape
+(`graphical_login.sh` types the password over the QEMU monitor, which is how it
+gets past the greeter -- the `HGT-RC5-RETURNED` echo is its ASSERTION, not its
+mechanism). **And I classified the rest BY READING and ran none of them.**
+
+**33 files mention `rc.boot.installed`. 25 write a machine rc that sources it
+and appends work; 2 are fixed and RE-RUN, 1 is measured red and unfixed, 22 are
+UNKNOWN.** Reference-only (no rc): `channel_covers_image.sh`,
+`hpm_kernel_http.sh`, `hpm_kernel_update.sh` (all three only COMMENT on it --
+the last two deliberately do not source it), `install_from_usb.sh` (greps it),
+`scripts/hamlinux_disk.sh`, `scripts/hamlinux_image.sh`,
+`scripts/verify_medium.sh`. Handles it by authenticating: `graphical_login.sh`.
+
+**UNKNOWN (22), by reading, split by whether they look like they need a
+session:** probably fine with the opt-out -- `boot_log`,
+`install_confirm_keys`, `installed_accounts`, `installed_boot_login`,
+`installed_distros`, `installed_fresh_login`, `installed_login`,
+`installed_update_modules`, `reboot_device`, `served_install_binary`,
+`wedge_hunt`; probably need to AUTHENTICATE -- `de_appmenu_realboot`,
+`installed_launch_uid`, `installed_uid_console`, `installed_recover_broken`,
+`installed_update_live`, `installed_update_wsysver`, `install_wizard_gui`,
+`live_pointer_install`, `pointer_launch_uid`, `poweroff_graphical`,
+`soak_desktop`. **That split is a source reading and this tree has refuted my
+source readings; treat every number in it as absent.**
+
+#### THINGS THE BRIEF I WAS GIVEN GOT WRONG
+
+* `installed_fresh_login.sh` **does not opt out of runlevel 5**. There was no
+  opt-out anywhere in the tree until this commit. Its control arm sources
+  `rc.boot.installed` and then appends `getty` + `supervise`, so it is at risk
+  like the rest.
+* The refusal text is not `scripts/hamlinux_packages.py`'s; it is
+  `tests/linux/channel_compiles_adder.sh:282`'s.
+* `etc/rc.boot.installed:190` is the `source '/etc/rc.d/rc.5'` line but it does
+  **not end the file** -- ~35 lines follow it, and they are part of what never
+  runs. And the file that blocks is `etc/rc.d/rc.5.linux`; the tree's
+  `etc/rc.d/rc.5` runs no greeter at all. `scripts/hamlinux_image.sh:737`
+  installs the former as the latter.
+* `hpm_kernel_update.sh` is fine because it **deliberately does not source**
+  `rc.boot.installed`, not because "nothing follows".
+* "31 files reference the idiom" -- 33 mention the file; 31 contain the string
+  `source ... rc.boot.installed`, several only in comments.
+
+
 ### A MACHINE FETCHED ITS KERNEL OVER http, VERIFIED IT IN RAM, AND BOOTED IT -- 69 / 0
 
 **Measured on booted machines, dev host, 2026-08-19, base `83da51e9` (checked
