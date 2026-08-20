@@ -27,6 +27,88 @@ quietly edited. Read any section together with anything above it that names it �
 several headings below are superseded by entries higher up, and say so.
 
 
+### 1.0.33 IS BUILT AND GATED AND IS **NOT FIT TO PUBLISH** -- the shipped install path ships a machine with no login and says "install complete"
+
+**2026-08-20. Candidate at `~/.hamnix-build/rel1033/`, measured entirely on
+`3ede288d` with a clean tree — no local edits, so every number is a fact about
+that commit alone. NOTHING WAS SIGNED OR PUSHED.**
+
+**The medium:** `hamnix-linux-1.0.33.img`, **4,294,967,296 bytes APPARENT, sparse
+— 3.0 G on disk**, sha256 `e28e8b1c…c90b`, read three times and identical.
+**The channel:** 130 packages, 1.0.33 only; 130 entries, 130 tarballs, **130
+hash-matching, 0 missing, 0 mismatched, 0 unclaimed**, with the checker's
+one-nibble control firing MISMATCH.
+
+**GATES: GREEN 17 / RED 12 / 1 UNSCORABLE, 632 assertions.** The driver
+self-tested 5/0 against four synthetic gates producing four different verdicts
+before it scored anything.
+
+**THE VERDICT IS NOT ABOUT THE GREETER.** It is
+`installed_fresh_login` arm [a] — **the shipped install path**. The installed disk
+gets an `/etc/rc.boot` that correctly sources `/etc/rc.login` and ends in
+`supervise`, **but `/etc/rc.login` IS NOT ON THE DISK**, and the installer
+**printed "install complete" over it.**
+
+I verified the cause myself in `user/hlinstall.ad::write_machine_rc_boot()`:
+
+  * The **shipped** branch copies `/etc/rc.boot.machine` and, on success,
+    **`return 0` — with no check that the guard it references actually exists.**
+  * The **fallback** branch (reached only when the medium lacks that file)
+    **verifies the guard on the target and refuses if it is absent.**
+
+**THE GUARD EXISTS ONLY ON THE BRANCH ALMOST NOBODY TAKES.** This is the same
+failure shape as the fallback defect fixed two days ago — a gap answering
+something success-shaped — and the fix moved the check onto the rare path while
+leaving the common one trusting a copy it never inspects. The medium is NOT at
+fault: `debugfs` on the artifact shows `/etc/rc.login` at inode 212, 5990 bytes,
+with both controls firing. **NOT ESTABLISHED: why the copy omitted it in that
+arm.** Source asymmetry read, disk measured, the copy itself not instrumented.
+
+**NINE OF THE TWELVE REDS ARE THE GREETER, MEASURED NOT INFERRED** — every guest
+log ends at `hamgreet: the graphical login is presenting`. **The control is green
+in the same run: `graphical_login` 78/0**, the only registry gate that
+authenticates past it. The greeter works; the harness idiom does not. **No
+registry gate carries the runlevel opt-out** — the two gates fixed earlier are not
+in the registry. `soak_desktop` was correctly refused as UNSCORABLE (died on an
+unbound variable, no summary) rather than scored as zero.
+
+**`session_min_root` 31/2 is a DRIVER artefact**: its two failures are the rungs
+the registry declares acceptable, but it went red on "exit status 1 contradicts a
+summary with no unexpected failures". **`allow_fail` is unusable for any gate that
+exits non-zero on any failure.**
+
+**GOOD NEWS THAT IS REAL:** a machine booted from the exact shipped bytes
+(`shipped_medium_boots` 31/0, sha verified, desktop painted, window opened,
+keystroke-sensitivity control fired). **`channel_covers_image` is 11/0 on the
+INSTALLER root — the owner's updatable rule green on the release root for the
+first time**, against 7/26 red in both 1.0.31 and 1.0.32. `verify_medium` scored
+the full **39/0**, not the degraded 38.
+
+**FOUR CORRECTIONS TO ME, TWO OF THEM SERIOUS:**
+
+1. **"No https/TLS anywhere" was WRONG and I have repeated it for two days.**
+   `user/http9.ad` imports `net_dial_tls` and parses `https://` URLs — I confirmed
+   both. The true, narrower claim is that the **kernel-fetch gates** use a local
+   plaintext server.
+2. **`release_gates.sh` GATES NONE OF THE UPDATE PATH.** I checked all six:
+   `installed_update`, `installed_update_live`, `hpm_kernel_http`,
+   `hpm_kernel_update`, `ab_kernel_slots`, `bootsync_installed` — **not one is in
+   the registry.** The release driver runs **zero** gates exercising 1.0.33's
+   headline feature. That is precisely the hole the driver was written to close.
+3. **"22 gates UNKNOWN"** — exactly **11** are in the release registry and all 11
+   ran, halving it.
+4. Base was **88 commits behind**, and the `gitStatus` block was wrong about both
+   branch and HEAD. Sixteenth consecutive.
+
+**A/B SLOTS SHIP OFF**, as every `expect_min` was measured. **But that is not
+free: `hkslot` refuses outright without `/boot/loader/loader.conf`, so 1.0.33's
+headline kernel-over-http path is INERT BY CONSTRUCTION on machines installed from
+this medium.**
+
+**AND IT REFUSED TO FILL A BLANK `expect_min`** (`pointer_launch_uid`) because that
+run was greeter-contaminated — by arithmetic or otherwise. Correct: a blank exists
+to refuse a computed number.
+
 ### I TRIED TO CLASSIFY THE 22 UNKNOWN GATES STATICALLY AND THE CLASSIFIER IS WRONG -- RECORDED AS A FAILED ATTEMPT, NOT A RESULT
 
 **2026-08-19, orchestrator-side, read-only. NOTHING WAS RESOLVED BY THIS.**
