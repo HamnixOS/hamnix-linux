@@ -13,8 +13,12 @@
 #            accelerated Vulkan device. See the long note at the mode itself.
 #   script   headless, non-interactive: feed a command to the guest shell and
 #            exit. Used by the boot smoke test.
+#   dev      headless and PERSISTENT: console and QMP on unix sockets in
+#            HAMLINUX_RUNDIR, plus a pidfile, so the guest outlives whatever
+#            started it. This is the one you iterate against; see
+#            scripts/devvm_up.sh and docs/dev-loop.md.
 #
-# Usage: scripts/hamlinux_vm.sh [serial|gpu|venus|script] [--timeout N]
+# Usage: scripts/hamlinux_vm.sh [serial|dev|gpu|venus|script] [--timeout N]
 #                               [-- qemu args]
 set -euo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -60,7 +64,16 @@ COMMON=(
     # guest on 10.0.2.0/24 with the gateway at .2 and a DNS forwarder at .3 --
     # which is why etc/rc.boot.linux configures exactly those addresses. On
     # real hardware the same three ifconfig lines take the machine's own.
-    -netdev user,id=n0
+    #
+    # HAMLINUX_HOSTFWD appends SLIRP forwarding clauses to this netdev, e.g.
+    # HAMLINUX_HOSTFWD=",hostfwd=tcp::2222-:22". It is EMPTY by default, so
+    # every existing caller builds the identical command line it always did --
+    # the guest is unreachable from the host unless somebody asks for it.
+    # This is the hook scripts/devvm_up.sh uses to get an SSH port in; the
+    # `-netdev user` line was previously the ONE thing in this file that no
+    # environment variable could influence, which is why iterating on a
+    # running guest meant rebooting it.
+    -netdev "user,id=n0${HAMLINUX_HOSTFWD:-}"
     -device virtio-net-pci,netdev=n0
 )
 
@@ -157,6 +170,44 @@ case "$MODE" in
   serial)
     exec qemu-system-x86_64 "${COMMON[@]}" -display none -serial mon:stdio \
         -append "$APPEND" "$@"
+    ;;
+  dev)
+    # THE PERSISTENT DEVELOPMENT VM. Every other mode in this file is
+    # one-shot: it owns a terminal, and when the thing driving it goes away
+    # so does the guest. That is correct for a release gate and it is the
+    # reason a one-line change to a program has been costing a whole
+    # build -> install -> boot -> power-off cycle.
+    #
+    # `dev` differs in exactly three ways, and each one exists so the guest
+    # can OUTLIVE the process that started it:
+    #   * the console is a UNIX SOCKET, not stdio, so nothing is holding a
+    #     terminal open and a reader can attach and detach at will.
+    #     scripts/devvm_console.py is that reader.
+    #   * QMP is on a socket too, so tests/linux/qmp_input.py can drive the
+    #     guest's real keyboard/tablet and take screendumps of a VM that is
+    #     already up.
+    #   * a pidfile, so devvm_down.sh can stop THIS guest by pid rather than
+    #     pattern-matching `qemu` on a box that is routinely running a dozen
+    #     of them for other agents. Never pkill by bare pattern here.
+    #
+    # HAMLINUX_RUNDIR is where those three land. It is required rather than
+    # defaulted: two dev VMs sharing a rundir would silently fight over the
+    # sockets, and the second one's failure would look like a broken guest.
+    RUN="${HAMLINUX_RUNDIR:?HAMLINUX_RUNDIR must name a private directory}"
+    mkdir -p "$RUN"
+    # Stale sockets from a previous guest make QEMU refuse to bind. They are
+    # ours by construction (the rundir is private), so removing them is safe
+    # -- but only AFTER devvm_up.sh has checked the pidfile, which is why
+    # this does not also remove qemu.pid.
+    rm -f "$RUN/console.sock" "$RUN/qmp.sock"
+    CMD=(qemu-system-x86_64 "${COMMON[@]}"
+         -display none
+         -chardev "socket,id=con0,path=$RUN/console.sock,server=on,wait=off"
+         -serial chardev:con0
+         -qmp "unix:$RUN/qmp.sock,server=on,wait=off"
+         -pidfile "$RUN/qemu.pid"
+         -append "$APPEND" "$@")
+    if [ -n "$TIMEOUT" ]; then exec timeout "$TIMEOUT" "${CMD[@]}"; else exec "${CMD[@]}"; fi
     ;;
   script)
     # Non-interactive: the guest shell reads stdin, so a heredoc on our stdin
@@ -300,5 +351,5 @@ case "$MODE" in
     if [ -n "$TIMEOUT" ]; then exec timeout "$TIMEOUT" "${CMD[@]}"; else exec "${CMD[@]}"; fi
     ;;
   *)
-    echo "usage: hamlinux_vm.sh [serial|gpu|venus|script|disk|disk-gpu]" >&2; exit 2 ;;
+    echo "usage: hamlinux_vm.sh [serial|dev|gpu|venus|script|disk|disk-gpu]" >&2; exit 2 ;;
 esac
